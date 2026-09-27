@@ -1,11 +1,12 @@
 # VNX Orchestration System - Complete Architecture
 
 **Status**: Active
-**Last Updated**: 2026-09-04
+**Last Updated**: 2026-09-27
 **Owner**: T-MANAGER
 **Purpose**: Single source of truth for VNX system architecture, components, and data flow.
 
-**Version**: 1.0.0
+This document does not stamp a product version. The running version is `VERSION`
+(repo root); a number copied here would drift the day the repo cuts a release.
 
 ---
 
@@ -33,14 +34,14 @@ VNX is a file-based orchestration system enabling parallel development across mu
 ### Core Principles
 - **File-Based Communication**: NDJSON receipts + Markdown dispatches
 - **Deliverable-Based Governance**: T0 is sole authority for declaring work done; workers attach evidence, receipt processor tracks but does not close
-- **Native Skill Architecture**: V8 uses Claude Code native skills (87% token reduction)
-- **Multi-Provider Dispatch**: Claude Code + Codex CLI + Gemini CLI with provider-specific skill invocation
+- **Native Skill Architecture**: skills invoke natively (`/skill-name` in Claude Code, `$skill-name` in Codex, `@skill-name` in Gemini) instead of a compiled prompt template
+- **Multi-Provider Dispatch**: every provider runs as a CLI subprocess, never an imported SDK (`no-anthropic-sdk` in `scripts/lib/providers/provider_constraints.yaml`); full lane map in `docs/core/PROVIDER_LANES.md`
 - **Project-Scoped Process Isolation**: `VNX_KILL_SCOPE` prevents cross-project process interference
 - **Singleton Process Enforcement**: Bulletproof duplicate prevention
 - **Progressive Intelligence**: Token-efficient context aggregation
 - **Quality Advisory Pipeline**: Automatic file size/complexity warnings on every completion
-- **Track-Agnostic Workers**: T1-T3 handle any task type; T0 dispatches to the next available worker
-- **Multi-Model Coordination**: Opus (T0, T3) + Sonnet (T1, T2), Codex CLI (T1 alternative)
+- **Track-Agnostic Workers**: T1-T3 are role labels on ephemeral, headless build-worker dispatches, not persistent terminals; T0 dispatches the next role to the lane the door selects
+- **Multi-Model Coordination**: T0 runs Opus 5.5 (`t0-opus-only`, a floor); T1-T3 build-workers default to Sonnet (`workers-kimi-pinned`, advisory — a dispatch spec's own model wins)
 - **Git Worktree Isolation**: One worktree per feature plan; all agents share it, auto-commit per task, provenance in every receipt
 
 ### Worktree Model
@@ -61,19 +62,19 @@ VNX uses **one feature worktree per feature/fix** as the standard development mo
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    VNX ORCHESTRATION SYSTEM V1.0                │
+│                    VNX ORCHESTRATION SYSTEM                     │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                  │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐         │
-│  │  T0 (BRAIN)  │  │  T1 (Worker) │  │  T2 (Worker) │         │
-│  │ Claude Opus  │  │Claude/Codex  │  │Claude Sonnet │         │
+│  │  T0 (BRAIN)  │  │ T1 (worker)  │  │ T2 (worker)  │         │
+│  │ Claude Opus  │  │Sonnet(default│  │Sonnet(default│         │
 │  │ Read-Only    │  │  Full R/W    │  │  Full R/W    │         │
 │  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘         │
 │         │                  │                  │                  │
 │         │   ┌──────────────┴──────────────────┘                │
 │         │   │          ┌──────────────┐                         │
-│         │   │          │  T3 (Worker) │                         │
-│         │   │          │ Claude Opus  │                         │
+│         │   │          │ T3 (worker)  │                         │
+│         │   │          │Sonnet(default│                         │
 │         │   │          │ Any Task     │                         │
 │         │   │          └──────┬───────┘                         │
 │         │   │                  │                                 │
@@ -89,9 +90,8 @@ VNX uses **one feature worktree per feature/fix** as the standard development mo
 │         ▼                                                        │
 │  ┌──────────────────────────────────────┐                       │
 │  │     ORCHESTRATION PROCESSES          │                       │
-│  │  • Smart Tap (JSON/MD detection)     │                       │
-│  │  • Dispatcher V8 (Native skills)     │                       │
-│  │  • Receipt Processor V4 (Delivery)   │                       │
+│  │  • Single-entry dispatch door        │                       │
+│  │  • Receipt Processor (delivery)      │                       │
 │  │  • T0 Brief Generator (Snapshot)     │                       │
 │  │  • Quality Advisory (File analysis)  │                       │
 │  │  • Supervisor (Health monitoring)    │                       │
@@ -103,20 +103,35 @@ VNX uses **one feature worktree per feature/fix** as the standard development mo
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+T1-T3 are role labels, not persistent panes: each build-worker dispatch is an
+ephemeral `claude -p` run in its own isolated worktree (see *Terminal
+Architecture* below), routed through the single-entry dispatch door. The
+legacy Dispatcher/Smart Tap process pair still exists for the older PR-queue
+path (Core Components §1) but is not the primary route.
+
 ---
 
 ## Terminal Architecture
 
 ### Terminal Specifications
 
-| Terminal | Role | Provider | Model | Permissions | Purpose |
-|----------|------|----------|-------|-------------|---------|
-| **T0** | Orchestrator | Claude Code | Opus | Read-Only | Manager blocks, coordination, intelligence |
-| **T1** | Worker | Claude/Codex | Sonnet | Full R/W | Any task dispatched by T0 (provider configurable) |
-| **T2** | Worker | Claude Code | Sonnet | Full R/W | Any task dispatched by T0 |
-| **T3** | Worker | Claude Code | Opus | Full R/W | Any task dispatched by T0 (Opus for complex work) |
+T0 is the one persistent terminal: an interactive orchestration session that plans
+work and reviews receipts, never writes code itself. T1-T3 are **role labels on
+dispatches, not persistent panes** — a build-worker dispatch is an ephemeral
+`claude -p` run in its own isolated worktree (`dispatch_envelope.run_envelope_headless_plan`),
+torn down when the dispatch completes. There is no standing T1/T2/T3 process to
+inspect between dispatches.
 
-**Multi-Provider Support**: T1 can run Codex CLI instead of Claude Code (configured via `config.env` or `vnx start --t1-provider codex`). Gemini CLI is also supported. Skills are synced to `~/.claude/skills/`, `~/.codex/skills/`, and `.gemini/skills/` during `vnx init`.
+| Role | Nature | Model | Permissions | Purpose |
+|------|--------|-------|-------------|---------|
+| **T0** | Persistent, interactive | Opus 5.5 (`t0-opus-only`, a floor) | Read-only | Plans dispatches, reviews receipts, advances gates — never writes code |
+| **T1 / T2 / T3** | Ephemeral, headless, one per dispatch | Sonnet by default (`workers-kimi-pinned`, advisory — a dispatch spec's own model wins) | Scoped R/W per role (`docs/operations/WORKER_PERMISSIONS.md`) | Any task dispatched by T0, routed through the lane the door selects |
+
+**Multi-Provider Support**: a dispatch's `provider` field, not a per-terminal flag,
+selects the CLI: `claude` (the only Claude lane, `claude-headless`), `codex`,
+`gemini`, `kimi`, `glm-harness`, or `deepseek-harness`. Full routing rules:
+`docs/core/PROVIDER_LANES.md`. Skills are synced to `~/.claude/skills/`,
+`~/.codex/skills/`, and `.gemini/skills/` during `vnx init`.
 
 ### Terminal Status Detection
 
@@ -166,40 +181,33 @@ The dashboard "Jump" button calls `POST /api/jump/{terminal}` which executes `vn
 
 ## Core Components
 
-### 1. Dispatcher V8 (`dispatcher_minimal.sh`)
+### 1. Dispatcher (`dispatcher_minimal.sh`) — the PR-queue path only
 
-**Purpose**: Native skill activation and instruction routing (Dispatcher component V8.2, shipped in VNX 1.0.0)
+**Purpose**: Native skill activation and instruction routing for the older
+PR-queue path (`FEATURE_PLAN.md` → `staging/` → `queue/` → `pending/*.md`,
+see *Staging Workflow* below). The single-entry dispatch door
+(`scripts/lib/dispatch_cli.py`) is the primary, canonical path for every other
+dispatch; this daemon only scans the markdown files the PR-queue path
+produces. Check current liveness before relying on it — it is a supervised
+daemon (`scripts/vnx_supervisor_simple.sh`) but is commonly absent between
+runs (`docs/core/DAEMON_LIVENESS.md` is the generated, re-checkable source,
+not this doc).
 
 **Functionality**:
 - Maps dispatch roles to native Claude Code skills
-- Hybrid dispatch: skill via `send-keys` (triggers slash-command detection) + instruction via `paste-buffer` (~200 tokens)
+- Hybrid dispatch: skill via `send-keys` (triggers slash-command detection) + instruction via `paste-buffer`
 - No template compilation needed (skills load via `/skill-name args` invocation)
-- Track-based routing (A, B, C)
-- Mode control (normal, thinking, planning)
 - Multi-provider skill invocation: `/skill-name` (Claude), `$skill-name` (Codex), `@skill-name` (Gemini)
 - PR-ID included in dispatch prompt for receipt correlation
 - Rich footer with "Expected Outputs" guidelines and report metadata template
 
-**Key Features**:
-- 87% token reduction vs V7 (200 vs 1500 tokens)
-- Guaranteed skill activation via send-keys (same mechanism as `/clear` and `/model`)
-- Model switching support (opus/sonnet/haiku)
-- Context clearing control
-- Intelligence integration maintained
-- Provider-aware dispatch (detects Claude/Codex/Gemini per terminal)
-
-**Receipt Footer** (Dispatcher V8.2):
+**Receipt Footer**:
 - Task Completion Guidelines section
 - Report Metadata block (parsed by receipt processor)
 - Expected Outputs section (implementation summary, files modified, testing evidence, open items)
-- Report write path: `.vnx-data/unified_reports/`
+- Report write path: `$VNX_DATA_DIR/unified_reports/`
 
-**Legacy V7** (`dispatcher_v7_compilation.sh` - Reference only):
-- Template compilation from agent library
-- Full prompt generation (1500+ tokens)
-- See `docs/_archive/core/technical/DISPATCHER_SYSTEM.md` for V7.3 reference (archived)
-
-### 3. Heartbeat ACK Monitor (`heartbeat_ack_monitor.py`)
+### 2. Heartbeat ACK Monitor (`heartbeat_ack_monitor.py`)
 
 **Purpose**: Acknowledgment receipt processing and timeout management
 
@@ -209,54 +217,52 @@ The dashboard "Jump" button calls `POST /api/jump/{terminal}` which executes `vn
 - Manages timeout detection
 - Updates dispatch status
 
-### 4. Receipt Processor V4 (`receipt_processor.sh`) - Primary
+### 3. Receipt Processor (`receipt_processor.sh`) — Primary
 
-**Purpose**: Parse new markdown reports into receipts, attach evidence to open items, append to `t0_receipts.ndjson`, and deliver the receipt into the T0 pane reliably.
+**Purpose**: Parse new markdown reports into receipts, attach evidence to open items, and append to `t0_receipts.ndjson`.
 
 **Functionality**:
-- Monitors `.claude/vnx-system/unified_reports/*.md` (monitor mode with time filtering)
+- Monitors `$VNX_DATA_DIR/unified_reports/*.md` (monitor mode with time filtering)
 - Uses `report_parser.py` to generate a compact JSON receipt
 - Attaches evidence to tracked open items via PR-ID (does NOT close items or complete PRs)
 - Appends receipts to `state/t0_receipts.ndjson` (production receipt log)
-- Delivers receipts to T0 via tmux (buffer paste + double Enter)
+- Delivery to T0 defaults to pull, not push: `VNX_RECEIPT_T0_PUSH=0` is the
+  default (ADR-035 §5.3), so T0 reads new receipts via `scripts/receipt_query.py pull`
+  rather than having them pasted into its pane. Setting the flag restores the
+  tmux buffer-paste push.
 - Includes flood protection + singleton enforcement
 
 **Governance**: Receipt processor is evidence-only. T0 reviews evidence, closes satisfied open items, and completes PRs when all blockers/warnings are resolved.
 
-### 5. Receipt Notifier (`receipt_notifier.sh`) — Deprecated
-
-**Purpose**: Legacy receipt delivery. Replaced by Receipt Processor V4 which handles parsing, appending, and delivery in one process.
-
-**Note**: Kept in codebase as reference. Not started by supervisor.
-
-### 6. Report Parser (`report_parser.py`)
+### 4. Report Parser (`report_parser.py`)
 
 **Purpose**: Extract a structured receipt from a worker markdown report
 
 **Functionality**:
-- Parses `.claude/vnx-system/unified_reports/*.md`
+- Parses `$VNX_DATA_DIR/unified_reports/*.md`
 - Normalizes metadata, tags, metrics, recommendations
 - Produces compact JSON for `t0_receipts.ndjson`
 
 **Note**: `report_watcher.sh` exists but production receipt ingestion is handled by `receipt_processor.sh`.
 
-### 7. Context Rotation Hooks (Stop/PostToolUse/SessionStart) - v2.4
+### 5. Context Rotation Hooks
 
 **Purpose**: Optional context-rotation automation for long-running sessions.
 
-**Hooks**:
-- **Stop hook** (`vnx_context_monitor.sh`): observes `context_window.json` and emits block/warn guidance.
-- **PostToolUse hook** (`vnx_handover_detector.sh`): detects handover docs, acquires lock, appends receipt, triggers rotator.
-- **SessionStart hook** (`vnx_rotation_recovery.sh`): injects last handover into new session context.
-
-**Activation**:
-- Experimental / opt-in via `VNX_CONTEXT_ROTATION_ENABLED=1`.
-- Default no-op (backward-compatible).
+**Hooks actually wired** (see the generated *Hooks Wired* table further down,
+which is the checkable source): `t0_context_guard.py` (PreToolUse/Stop/UserPromptSubmit),
+`session_stop_rotation.py` (Stop). T0's own rotation flow — the mechanism
+that actually ships — is `docs/operations/T0_CONTEXT_ROTATION.md`
+(`scripts/hooks/t0_context_guard.py`, `scripts/t0_rotate_spawn.sh`). A separate
+worker-side rotation design (`vnx_context_monitor.sh` / `vnx_handover_detector.sh`
+/ `vnx_rotate.sh`) is documented in the archived
+`docs/_archive/core/technical/CONTEXT_ROTATION_SYSTEM.md` — those hook scripts
+are not present in the tree and are not wired into `.claude/settings.json`.
 
 **Receipts**:
 - `context_rotation` receipts are **informational only**. T0 does not need to act on these receipts unless paired with a human decision or explicit dispatch.
 
-### 8. T0 Intelligence Aggregator (`t0_intelligence_aggregator.py`)
+### 6. T0 Intelligence Aggregator (`t0_intelligence_aggregator.py`)
 
 **Purpose**: Progressive context management for T0 orchestration
 
@@ -266,11 +272,10 @@ The dashboard "Jump" button calls `POST /api/jump/{terminal}` which executes `vn
 - Receipt correlation and warnings
 - Terminal insights and patterns
 - Tag-based report lookup
-- 80-95% token savings
 
 **Output**: `state/t0_intelligence.ndjson` (rolling window, last 1000 events)
 
-### 9. VNX Supervisor (`vnx_supervisor_simple.sh`)
+### 7. VNX Supervisor (`vnx_supervisor_simple.sh`)
 
 **Purpose**: Process health monitoring and auto-restart
 
@@ -280,9 +285,7 @@ The dashboard "Jump" button calls `POST /api/jump/{terminal}` which executes `vn
 - PID tracking in `state/pids/`
 - Health checks every 10 seconds
 
-### 11. Dashboard Generator (`generate_valid_dashboard.sh`)
-
-### 11. Dashboard Generator (`generate_valid_dashboard.sh`)
+### 8. Dashboard Generator (`generate_valid_dashboard.sh`)
 
 **Purpose**: Real-time system metrics visualization
 
@@ -303,26 +306,25 @@ The dashboard "Jump" button calls `POST /api/jump/{terminal}` which executes `vn
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                  ORCHESTRATION LOOP (VNX 1.0.0)                 │
+│                       ORCHESTRATION LOOP                         │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                  │
 │  1. T0 Creates Dispatch                                         │
-│     └─► Writes dispatch to dispatches/pending/                  │
+│     └─► Stages a bundle in dispatches/pending/<id>/              │
 │                                                                  │
 │  2. Human Promotes Dispatch                                      │
-│     ├─► Operator reviews pending dispatch                       │
-│     └─► Moves to dispatches/active/ (approval gate)             │
+│     ├─► Operator reviews the staged bundle                      │
+│     └─► `vnx dispatch <id>` fires it (approval gate)             │
 │                                                                  │
-│  3. Dispatcher V8 Routes to Terminal                            │
-│     ├─► Maps role to native skill (@skill_name)               │
-│     ├─► Gathers intelligence patterns (maintained)             │
-│     ├─► Extracts instruction content                           │
-│     ├─► Sends: skill activation + instruction + receipt        │
-│     ├─► ~200 tokens total (87% reduction from V7)              │
-│     └─► Routes via tmux or subprocess adapter                   │
+│  3. The Single-Entry Door Routes the Lane                       │
+│     ├─► validate → compile_plan → permit → execute               │
+│     ├─► Assembles: skill body + intelligence + instruction        │
+│     │    + report-contract footer                                │
+│     ├─► claude → claude-headless lane (ephemeral worktree)        │
+│     └─► kimi/glm/deepseek → provider_dispatch.py lane             │
 │                                                                  │
-│  5. Worker Terminal Receives Task                               │
-│     ├─► Loads compiled prompt                                   │
+│  5. Worker Receives Task                                        │
+│     ├─► Loads the assembled prompt                               │
 │     ├─► Sends ACK receipt (task_ack)                           │
 │     └─► Begins execution                                        │
 │                                                                  │
@@ -337,18 +339,17 @@ The dashboard "Jump" button calls `POST /api/jump/{terminal}` which executes `vn
 │     ├─► Creates markdown report                                │
 │     └─► Writes completion receipt (task_complete)              │
 │                                                                  │
-│  8. Receipt Processor V4 Handles Report                         │
+│  8. Receipt Processor Handles Report                            │
 │     ├─► Detects new report in unified_reports/                 │
 │     ├─► Parses structured data via report_parser.py            │
 │     ├─► Attaches evidence to open items (does NOT close)       │
 │     ├─► Appends to t0_receipts.ndjson                          │
-│     └─► Delivers receipt to T0 via tmux paste                  │
+│     └─► T0 pulls it (`receipt_query.py pull`, push is opt-in)   │
 │                                                                  │
 │  10. Intelligence Aggregator Updates Context                    │
 │      ├─► Consolidates all system state                         │
 │      ├─► Generates progressive context layers                  │
-│      ├─► Updates t0_intelligence.ndjson                        │
-│      └─► Enables 80-95% token savings                          │
+│      └─► Updates t0_intelligence.ndjson                         │
 │                                                                  │
 │  11. T0 Reviews Feedback                                        │
 │      ├─► Reads progressive intelligence                        │
@@ -373,7 +374,7 @@ The dashboard "Jump" button calls `POST /api/jump/{terminal}` which executes `vn
   "metadata": {
     "track": "C",
     "role": "architect",
-    "workflow": "[[@.claude/terminals/library/templates/agents/architect.md]]",
+    "workflow": "[[@.claude/skills/architect/SKILL.md]]",
     "gate": "validation",
     "priority": "P0",
     "cognition": "deep"
@@ -381,8 +382,8 @@ The dashboard "Jump" button calls `POST /api/jump/{terminal}` which executes `vn
   "title": "Investigate terminal status detection logic",
   "instructions": "Detailed task instructions...",
   "context_files": [
-    "@.claude/vnx-system/scripts/generate_valid_dashboard.sh",
-    "@.claude/vnx-system/state/terminal_status.ndjson"
+    "@scripts/generate_valid_dashboard.sh",
+    "@state/terminal_status.ndjson"
   ],
   "constraints": [
     "Read-only investigation",
@@ -404,8 +405,8 @@ The dashboard "Jump" button calls `POST /api/jump/{terminal}` which executes `vn
 Detailed task instructions...
 
 ## Context Files
-- @.claude/vnx-system/scripts/generate_valid_dashboard.sh
-- @.claude/vnx-system/state/terminal_status.ndjson
+- @scripts/generate_valid_dashboard.sh
+- @state/terminal_status.ndjson
 
 ## Constraints
 - Read-only investigation
@@ -530,7 +531,7 @@ Terminal status is determined by receipt-based activity detection.
 **Solution**: `VNX_KILL_SCOPE` environment variable scopes process kills to the current project:
 ```bash
 # When set, adds project-path filter before fingerprint grep
-export VNX_KILL_SCOPE="$scripts_dir"  # e.g. /path/to/project/.claude/vnx-system/scripts
+export VNX_KILL_SCOPE="$scripts_dir"  # e.g. /path/to/project/scripts
 
 # Scoped kill: only kills processes containing BOTH the project path AND the fingerprint
 ps -axo pid=,command= | grep -F "$VNX_KILL_SCOPE" | grep -F "$fingerprint" | ...
@@ -580,212 +581,95 @@ On `vnx start`, the system:
 
 ## Intelligence Systems
 
-### Pattern Matching Engine
+Full technical reference (schema, tuning, testing): `docs/core/technical/INTELLIGENCE_SYSTEM.md`.
+This section stays short to avoid drifting out of sync with that doc; it lists
+what ships and where the evidence for "it actually runs" lives.
 
-**Verify liveness**: `sqlite3 "$VNX_STATE_DIR/quality_intelligence.db" "SELECT COUNT(*) FROM pattern_usage; SELECT COUNT(*) FROM tag_combinations;"` --
-a bare checkmark claiming this was fully operational used to sit here with no
-way to re-check it; measured 2026-09-04 the tables hold 352 and 11 rows
-respectively, and `scripts/gather_intelligence.py` (`record_pattern_offer`,
-`record_adoption_from_receipt`) is the code that writes them.
-
-**Pattern Database**:
-- Patterns stored in `quality_intelligence.db` (`pattern_usage` table)
-- FTS5 full-text search for rapid querying
-- Tag-based pairwise/triple combination matching (`tag_combinations` table)
-- Usage tracking with `used_count`, `ignored_count`, confidence scores
-
-**Intelligence Flow** (with adoption tracking):
-1. Dispatcher calls `gather_intelligence.py` for every dispatch
-2. Extracts task description and technical keywords
-3. Queries top relevant patterns from database
-4. Calls `record_pattern_offer(pattern_id, terminal, dispatch_id)` → appends to `intelligence_usage.ndjson` (G-L7 audit)
-5. Patterns injected into terminal via intelligence hook
-6. On receipt processing: `record_adoption_from_receipt()` correlates receipt file changes with offered patterns → increments `pattern_usage.used_count`
-7. `ignored_count` increments when dispatch lifecycle closes without adoption
-
-**Adoption Tracking Files**:
-- `state/intelligence_usage.ndjson` — append-only audit log of offer/adoption events
-
-**Quality Context Structure**:
-```json
-{
-  "intelligence_version": "2.0.0",
-  "agent_validated": true,
-  "patterns_available": true,
-  "pattern_count": 5,
-  "offered_pattern_hashes": ["a1b2c3...", "d4e5f6..."],
-  "tags_analyzed": true,
-  "reports_mined": false
-}
-```
-
-### Worker Intelligence Injection (`userpromptsubmit_worker_intelligence_inject.sh`)
-
-**Purpose**: Deliver task-relevant intelligence to T1-T3 workers on every prompt (PR-2).
-
-**Behavior**:
-- Reads the terminal's active dispatch to extract tags/scope
-- Queries `gather_intelligence.py` for relevant patterns (max 3) and prevention rules
-- Injects into prompt context via `UserPromptSubmit` hook
-- Strict token budget: <400 tokens per prompt
-- Degrades gracefully if no dispatch or empty intelligence (A-5)
-- Logs each injection event to `intelligence_usage.ndjson` with timestamp, terminal, dispatch_id, pattern_ids (G-L7)
-
-**Contrast with T0**: T0 injection (`userpromptsubmit_intelligence_inject.sh`) focuses on recommendations and quality hotspots, not terminal status noise.
-
-### Quality Digest V3 (`build_t0_quality_digest.py`)
-
-**Format**: 3 structured sections, append-only NDJSON output to `state/` (G-L6).
-
-| Section | Content |
-|---------|---------|
-| Operational Defects | Top 5 actionable items with receipt/dispatch evidence |
-| Prompt/Config Tuning | Pattern adoption signals, CLAUDE.md patch suggestions |
-| Governance Health | Pending recommendation count, G-L1–G-L8 compliance |
-
-Each recommendation includes `evidence_ids` (receipt IDs, dispatch IDs, file paths) per G-L2.
-
-### Nightly Intelligence Pipeline (`nightly_intelligence_pipeline.sh`)
-
-Consolidates the former two overlapping schedules (18:00 hygiene + 02:00 analysis) into a single ordered pipeline:
-
-```
-02:00 — conversation_analyzer.py     (session analytics)
-     → tag_intelligence.py           (pairwise/triple tag combinations)
-     → build_t0_quality_digest.py    (3-section digest → state/ NDJSON)
-     → generate_t0_recommendations.py (structured recommendations, cap 5)
-```
-
-Each phase has health checks; failure in one phase is recorded without suppressing later phases.
-
-### T0 Intelligence Aggregator
-
-**Progressive Context Architecture**:
-```
-Level 1 (Quick): 1K tokens
-  └─► Last 10 events, basic status
-
-Level 2 (Standard): 3K tokens
-  └─► Last 25 events, recent patterns
-
-Level 3 (Detailed): 5K tokens
-  └─► Last 50 events, terminal insights
-
-Level 4 (Full context): 10K tokens
-  └─► Last 100 events, warnings, correlations
-
-Level 5 (Full): 20K+ tokens
-  └─► Last 200 events, complete context, tag queries
-```
-
-**Token Savings**: 80-95% reduction vs. raw file reading
-
-**Features**:
-- Receipt correlation (ACK → completion matching)
-- Warning detection (missing receipts, timeouts)
-- Terminal insights (activity patterns, availability)
-- Tag-based report lookup
-- Rolling window (last 1000 events max)
-
-### State Manager Integration
-
-**Unified State Consolidation**:
-- Updates every 5 seconds
-- Sources: Dispatches + Receipts + Terminal Status
-- Output: `state/unified_state.ndjson`
-- Feeds: Intelligence Aggregator
-
-### Governance Measurement System (v8.1.0)
-
-**Verify liveness**: `sqlite3 "$VNX_STATE_DIR/quality_intelligence.db" "SELECT COUNT(*), MAX(computed_at) FROM governance_metrics;"` --
-a recent `MAX(computed_at)` means the nightly aggregation (`scripts/governance_aggregator.py`)
-is still running. This line used to be a hand-typed "OPERATIONAL (2026-03-07)"
-stamp that nobody re-checked for six months; measured 2026-09-04 the table
-holds 810 rows, latest `computed_at` 2026-09-04 00:00:11 -- current, but a
-dated stamp is exactly the wrong way to say so, since it goes stale the day
-after it is written.
-
-Replaces self-reported status with objective quality scoring using SPC (Statistical Process Control).
-
-**3-Layer Architecture**:
-```
-Layer 1: CQS Calculator     -> Per dispatch, real-time, 0-100 composite score
-Layer 2: Nightly Aggregation -> FPY, rework rate, SPC control charts
-Layer 3: Weekly Report       -> Controlled model/role analysis, actionable items
-```
-
-**Key Metrics**:
-- **Composite Quality Score (CQS)**: Weighted score from status normalization (30%), completion signals (25%), effort efficiency (20%), error density (15%), rework detection (10%)
-- **First-Pass Yield (FPY)**: % of unique tasks succeeded on first attempt (Toyota/Six Sigma standard)
-- **SPC Anomaly Detection**: Western Electric rules (out-of-control, trend, shift, run)
-
-**Database**: `governance_metrics`, `spc_control_limits`, `spc_alerts` tables in quality_intelligence.db
-(schema: `schemas/quality_intelligence.sql`)
-
-**Implementation**: `scripts/lib/cqs_calculator.py` (Layer 1, per-dispatch CQS),
-`scripts/governance_aggregator.py` (Layer 2, nightly FPY/rework/SPC).
-The standalone "docs/intelligence/GOVERNANCE_MEASUREMENT.md" reference doc this
-line used to point at was retired in #193 (2026-04-08, moved out of the public
-repo) and never replaced -- the citation pointed at a dead file for five months.
-
-### Deterministic Gates
-
-VNX implements a three-tier verification pipeline:
-
-1. **Contract blocks** -- dispatches include machine-checkable success criteria
-2. **Lightweight verification** (`verify_claims.py`) -- runs after receipt processing; checks file changes, existence, patterns
-3. **Pre-merge gate** (`vnx gate-check --pr <PR-ID>`) -- heavy checks: pytest, AST, artifact verification, shell syntax
-
-Gate results are stored in `.vnx-data/state/gate_results/<PR-ID>.json` with per-check GO/HOLD verdicts.
+- **Pattern Matching Engine** — `quality_intelligence.db` (SQLite, FTS5),
+  `pattern_usage` + `tag_combinations` tables, offer/adoption tracking appended
+  to `state/intelligence_usage.ndjson` (G-L7 audit). Written by
+  `scripts/gather_intelligence.py` (`record_pattern_offer`,
+  `record_adoption_from_receipt`). Verify liveness directly rather than trust a
+  checkmark here: `sqlite3 "$VNX_STATE_DIR/quality_intelligence.db" "SELECT COUNT(*) FROM pattern_usage; SELECT COUNT(*) FROM tag_combinations;"`.
+- **Worker Intelligence Injection** (`userpromptsubmit_worker_intelligence_inject.sh`) —
+  delivers up to 3 relevant patterns + prevention rules per prompt, budget
+  <400 tokens, degrades gracefully with no dispatch or empty intelligence.
+- **Quality Digest** (`build_t0_quality_digest.py`) — 3-section append-only
+  NDJSON to `state/` (G-L6): Operational Defects, Prompt/Config Tuning,
+  Governance Health, each recommendation carrying `evidence_ids` (G-L2).
+- **Nightly Intelligence Pipeline** (`nightly_intelligence_pipeline.sh`, 02:00) —
+  ordered run: `conversation_analyzer.py` → `tag_intelligence.py` →
+  `build_t0_quality_digest.py` → `generate_t0_recommendations.py`. Each phase
+  has its own health check; one phase failing does not suppress the rest.
+- **T0 Intelligence Aggregator** — progressive context read in 5 levels (1K to
+  20K+ tokens, last 10 to last 200 events), rolling window capped at 1000
+  events. Receipt correlation, warning detection, terminal insights, tag-based
+  report lookup.
+- **State Manager Integration** — `state/unified_state.ndjson`, 5-second
+  consolidation cycle over dispatches + receipts + terminal status, feeding the
+  aggregator above.
+- **Governance Measurement System** — SPC-based quality scoring
+  (`scripts/lib/cqs_calculator.py` per-dispatch CQS; `scripts/governance_aggregator.py`
+  nightly FPY/rework/SPC), tables `governance_metrics` / `spc_control_limits` /
+  `spc_alerts` in `quality_intelligence.db` (schema: `schemas/quality_intelligence.sql`).
+  Verify liveness rather than trust a date stamp:
+  `sqlite3 "$VNX_STATE_DIR/quality_intelligence.db" "SELECT COUNT(*), MAX(computed_at) FROM governance_metrics;"`.
+  First-Pass Yield and rework rate as a published percentage are not
+  measurement-ready yet — see the technical reference before citing either as a fact.
+- **Deterministic Gates** — three-tier verification: contract blocks (machine-checkable
+  success criteria in the dispatch) → lightweight verification (`verify_claims.py`,
+  post-receipt) → pre-merge gate (`vnx gate-check --pr <PR-ID>`, pytest/AST/artifact/shell-syntax).
+  Results in `.vnx-data/state/gate_results/<PR-ID>.json`, per-check GO/HOLD.
 
 ---
 
 ## File System Layout
 
 ```
-project-root/
-├── .claude/vnx-system/              # VNX system code (git-tracked)
-│   ├── bin/vnx                      # CLI entry point
-│   ├── scripts/                     # Active orchestration scripts
-│   │   ├── dispatcher_minimal.sh    # V8 native skills dispatcher
-│   │   ├── receipt_processor.sh     # Receipt processing + T0 delivery
-│   │   ├── report_parser.py
-│   │   ├── append_receipt.py           # Receipt + quality sidecar writer
-│   │   ├── generate_t0_recommendations.py
-│   │   ├── vnx_supervisor_simple.sh
-│   │   ├── pr_queue_manager.py         # PR queue + staging workflow
-│   │   ├── gather_intelligence.py      # Intelligence aggregation
-│   │   ├── learning_loop.py            # Adoption signals, pending_rules queue
-│   │   ├── tag_intelligence.py         # Pairwise/triple tag subsets
-│   │   ├── build_t0_quality_digest.py  # 3-section NDJSON digest
-│   │   ├── check_intelligence_health.py # Intelligence health check
-│   │   ├── gate_runner.py              # Deterministic gate execution
-│   │   ├── review_gate_manager.py      # Review-gate policy execution
-│   │   ├── commands/                   # Extracted CLI command files
-│   │   │   ├── jump.sh                 # vnx jump <terminal> | --attention
-│   │   │   ├── start.sh
-│   │   │   ├── stop.sh
-│   │   │   ├── doctor.sh
-│   │   │   ├── new_worktree.sh
-│   │   │   ├── merge_preflight.sh
-│   │   │   ├── finish_worktree.sh
-│   │   │   ├── recover.sh
-│   │   │   └── headless.sh
-│   │   └── lib/                        # Shared libraries
-│   │       ├── vnx_paths.sh            # Path resolver (cross-project guard)
-│   │       ├── process_lifecycle.sh    # PID-safe process control
-│   │       ├── runtime_core.py         # Runtime state machine core
-│   │       ├── dispatch_router.py      # Dispatch routing logic
-│   │       ├── subprocess_adapter.py   # Headless subprocess delivery
-│   │       └── subprocess_dispatch.py  # Subprocess dispatch orchestration
-│   │
-│   ├── skills/                      # 18 native skills
-│   │   ├── skills.yaml              # Skill registry
-│   │   └── {skill-name}/SKILL.md    # Per-skill docs + references
-│   │
-│   ├── templates/terminals/         # T0-T3 agent templates
-│   ├── schemas/                     # Quality intelligence SQL schema
-│   └── docs/                        # This documentation tree
+project-root/                        # this repo's own layout — no .claude/vnx-system/ prefix
+├── bin/vnx                          # operator + automation CLI entry point
+├── scripts/                         # Active orchestration scripts
+│   ├── lib/dispatch_cli.py          # the single-entry dispatch door
+│   ├── dispatcher_minimal.sh        # legacy PR-queue-path dispatcher (see Core Components §1)
+│   ├── receipt_processor.sh         # Receipt processing, evidence-only
+│   ├── report_parser.py
+│   ├── append_receipt.py            # Receipt + quality sidecar writer
+│   ├── generate_t0_recommendations.py
+│   ├── vnx_supervisor_simple.sh
+│   ├── pr_queue_manager.py          # PR queue + staging workflow
+│   ├── gather_intelligence.py       # Intelligence aggregation
+│   ├── learning_loop.py             # Adoption signals, pending_rules queue
+│   ├── tag_intelligence.py          # Pairwise/triple tag subsets
+│   ├── build_t0_quality_digest.py   # 3-section NDJSON digest
+│   ├── check_intelligence_health.py # Intelligence health check
+│   ├── gate_runner.py               # Deterministic gate execution
+│   ├── review_gate_manager.py       # Review-gate policy execution
+│   ├── commands/                    # Extracted CLI command files
+│   │   ├── jump.sh                  # vnx jump <terminal> | --attention
+│   │   ├── start.sh
+│   │   ├── stop.sh
+│   │   ├── doctor.sh
+│   │   ├── new_worktree.sh
+│   │   ├── merge_preflight.sh
+│   │   ├── finish_worktree.sh
+│   │   ├── recover.sh
+│   │   └── headless.sh
+│   └── lib/                         # Shared libraries
+│       ├── vnx_paths.sh             # Path resolver (cross-project guard)
+│       ├── process_lifecycle.sh     # PID-safe process control
+│       ├── runtime_core.py          # Runtime state machine core
+│       ├── dispatch_router.py       # Dispatch routing logic
+│       ├── subprocess_adapter.py    # Headless subprocess delivery
+│       └── subprocess_dispatch.py   # Subprocess dispatch orchestration
+│
+├── skills/                          # Canonical native skills
+│   ├── skills.yaml                  # Skill registry
+│   └── {skill-name}/SKILL.md        # Per-skill docs + references
+│                                     # (synced into .claude/skills/, ~/.codex/skills/, .gemini/skills/ by `vnx init`)
+│
+├── templates/terminals/             # T0-T3 agent templates
+├── schemas/                         # Quality intelligence SQL schema
+├── docs/                            # This documentation tree
 │
 ├── .vnx-data/                       # Runtime data (gitignored)
 │   ├── state/                       # State files
@@ -830,18 +714,7 @@ project-root/
 
 ---
 
-## Key Performance Metrics
-
-- **JSON Translation**: 25ms average (Smart Tap)
-- **Template Compilation**: <100ms (Dispatcher)
-- **Receipt Delivery**: <500ms (Receipt Notifier)
-- **Intelligence Update**: 5-second cycle (State Manager)
-- **Dashboard Refresh**: 2-second cycle
-- **Token Savings**: 80-95% (Intelligence Aggregator)
-
----
-
-## Current System Status (VNX 1.0.0)
+## Current System Status
 
 ### Supervised Components (generated — do not hand-edit; regenerate with `python3 scripts/generate_architecture_doc.py --write`)
 
@@ -911,16 +784,20 @@ disappear from this document:
   supervisor-managed.
 
 ### Deprecated Components (not started by supervisor)
-- ACK Dispatcher V2 (`ack_dispatcher_v2.sh`) — replaced by `heartbeat_ack_monitor.py`
-- Report Watcher (`report_watcher.sh`) — replaced by Receipt Processor V4
-- Receipt Notifier (`receipt_notifier.sh`) — replaced by Receipt Processor V4
+- ACK Dispatcher V2 — replaced by `heartbeat_ack_monitor.py`; the old script is
+  not tracked in the repo, superseded rather than archived
+- Report Watcher (`report_watcher.sh`) — replaced by Receipt Processor; the
+  file is still tracked but production receipt ingestion runs through
+  `receipt_processor.sh`
+- Receipt Notifier — replaced by Receipt Processor, which handles parsing,
+  appending, and delivery in one process; the old script is not tracked in
+  the repo, superseded rather than archived
 - Dispatcher V7 — reference only (see `docs/_archive/core/technical/DISPATCHER_SYSTEM.md`, archived)
 
-### Terminal Status
-- **T0 (Claude Opus)**: Orchestrator brain, read-only
-- **T1 (Claude Sonnet / Codex CLI)**: Worker (provider configurable)
-- **T2 (Claude Sonnet)**: Worker
-- **T3 (Claude Opus)**: Worker (Opus for complex tasks)
+### Terminal / Role Status
+- **T0**: Opus 5.5, persistent orchestrator, read-only
+- **T1 / T2 / T3**: role labels on ephemeral headless build-worker dispatches,
+  Sonnet by default (see *Terminal Architecture* above)
 
 ---
 
@@ -1188,54 +1065,6 @@ STAGING_READY recommendation (new file in staging/)
 
 ---
 
-## Intelligence Features Summary
-
-### 1. Recommendation Engine (v1.2.0)
-- **Sources**: Receipts, PR queue, open items, staging
-- **Output**: `state/t0_recommendations.json`
-- **Types**: Gate progression, dependencies, conflicts, staging, blockers
-- **Cycle**: 30-second update interval
-
-### 2. T0 Brief Generator
-- **Purpose**: <2KB decision snapshot
-- **Includes**: Terminal status, queue counts, open items, PR progress
-- **Format**: JSON + Markdown views
-- **Token Efficiency**: 95% reduction vs raw state
-
-### 3. Cached Intelligence
-- **Progressive Aggregation**: 5 levels of context depth
-- **Files**: `state/cached_intelligence_*.ndjson`
-- **Token Savings**: 80-95% reduction
-- **Update Cycle**: 5 seconds
-
-### 4. Quality Intelligence
-- **Database**: `state/quality_intelligence.db`
-- **Metrics**: Task success rates, error patterns, performance trends
-- **Learning**: Pattern extraction from receipts and reports
-- **Tables**: `pattern_usage`, `session_analytics`, `prevention_rules`, `tag_combinations`
-
-### 5. Adoption Tracking
-- **Offer log**: `record_pattern_offer()` → `intelligence_usage.ndjson`
-- **Adoption detection**: `record_adoption_from_receipt()` correlates receipt file changes with offered patterns
-- **Confidence updates**: `used_count`/`ignored_count` drive per-pattern confidence scores
-- **Governance**: No auto-activation — all generated rules go to `pending_rules.json` (G-L1)
-
-### 6. Worker Intelligence Injection (T1-T3)
-- **Hook**: `userpromptsubmit_worker_intelligence_inject.sh` (registered via `vnx regen-settings --merge`)
-- **Content**: max 3 patterns + relevant prevention rules relevant to active dispatch tags
-- **Budget**: <400 tokens per prompt
-- **Audit**: Every injection logged to `intelligence_usage.ndjson` (G-L7)
-
-### 7. Nightly Intelligence Pipeline
-- **Script**: `nightly_intelligence_pipeline.sh`
-- **Schedule**: 02:00 daily (replaces two overlapping schedules)
-- **Phases**: session analysis → tag intelligence → quality digest → recommendations
-- **Output**: Append-only NDJSON to `state/` (G-L6)
-
----
-
----
-
 ## Multi-Provider Dispatch
 
 ### Dispatch lanes and provider routing
@@ -1271,14 +1100,13 @@ is the absolute per-terminal rollback). The door normalizes GLM to the harness
 lane, applies the single-source routing predicate, and runs a phantom-guard that
 rejects evidence-free GATE-GREEN receipts — all on `main`.
 
-### Provider Capability Matrix
+### Provider lane map
 
-| Provider | Skill Format | Model Control | Context Clear | Status |
-|----------|-------------|---------------|---------------|--------|
-| **Claude Code** | `/skill-name` | `/model opus` | `/clear` | Primary |
-| **Codex CLI** | `$skill-name` | N/A | `/new` | T1 alternative |
-| **Gemini CLI** | `@skill-name` | N/A | `/clear` | Experimental |
-| **Kimi** | CLI OAuth | N/A | N/A | Production (CLI lane, 6/6 skill-injection verified) |
+The per-lane table (auth, transport, primary use, maturity) lives in one place
+now: `docs/core/PROVIDER_LANES.md`. It replaces a capability matrix that used
+to live here and drifted (naming Gemini a review-capable "Experimental"
+provider after it was retired as a reviewer, and omitting kimi/glm-harness/
+deepseek-harness entirely).
 
 ### Skill Sync
 
@@ -1400,19 +1228,22 @@ Extracted commands: `start`, `stop`, `doctor`, `regen-settings`, `new-worktree`,
 
 Commands: `vnx regen-settings --merge` (update VNX keys) | `--full` (first-time init) | `--validate` (check structure).
 
-**`config.env`** (`.vnx-data/config.env`): Auto-sourced by `vnx start`:
+**`config.env`** (project-level, sourced by `vnx start`):
 ```bash
-VNX_PROVIDER=claude           # Primary provider (claude/codex/gemini)
-VNX_MODEL=opus                # Default model
-VNX_T1_PROVIDER=codex         # T1 can use different provider
+VNX_PROVIDER=claude_code       # T0 provider (claude_code/codex_cli/gemini_cli)
+VNX_MODEL=sonnet               # Default build-worker model — provider_constraints.yaml pins the actual floor/default
+VNX_T1_PROVIDER=codex_cli      # T1 role can use a different provider
 ```
 
-**`config.yml`** (`.vnx/config.yml`): Project metadata:
+**`config.yml`** (`.vnx/config.yml`, gitignored): written by `vnx init`, real keys only:
 ```yaml
-project_name: my-project
-vnx_version: 1.0.0
-created_at: 2026-02-18
+project_root: "/path/to/project"
+project_id: "my-project"
+vnx_data_dir: "/path/to/resolved/data/root"
 ```
+The installed VNX version is a separate one-line file, `.vnx-version`, not a
+key in `config.yml` — `vnx init --set-version <ver>` is the only thing allowed
+to rewrite it once it exists.
 
 ### Demo Setup (retired)
 
@@ -1443,11 +1274,8 @@ described it as a current component; nothing since has regenerated it.
 
 ---
 
-**Document Status**: Active (VNX 1.0.0, released 2026-07-02 — Dashboard Attention Model + intelligence injection). The consolidation/self-learning loop ships but is opt-in and currently dormant: existing patterns inject into dispatch context, but the pool does not grow on its own yet.
-**Last Major Update**: 2026-06-22 (dispatch lanes + single-entry door section; June-15 billing-default correction). Prior: 2026-03-28 (Attention model, jump command, worker intelligence injection, adoption tracking, nightly pipeline, 3-section quality digest)
-**Dispatcher Version**: V8.2 Minimal (Native Skills + Multi-Provider + Expected Outputs; VNX 1.0.0)
-**Token Reduction**: 87% (200 vs 1500 tokens per dispatch)
-**Intelligence Version**: v2.0.0 (Adoption tracking, worker injection, pairwise tag matching, 3-section digest)
+**Document Status**: Active. The consolidation/self-learning loop ships but is opt-in and currently dormant: existing patterns inject into dispatch context, but the pool does not grow on its own yet.
+**Last Major Update**: 2026-09-27 (docs-refresh sweep to current `main`: single-entry door as the primary dispatch path, ephemeral headless workers instead of a fixed T0-T3 terminal grid, receipt pull instead of tmux push, removed hardcoded version/token-reduction claims). Prior: 2026-06-22 (dispatch lanes + single-entry door section; June-15 billing-default correction); 2026-03-28 (Attention model, jump command, worker intelligence injection, adoption tracking, nightly pipeline, 3-section quality digest).
 **Dashboard**: Vanilla HTML/JS + Python HTTP server (port 4173, read-only, attention model)
 **Governance Model**: Deliverable-based (T0 sole authority, evidence tracking, no auto-completion, G-L1–G-L8 enforced)
 **Maintainer**: T-MANAGER (VNX Orchestration Expert)
