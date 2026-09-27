@@ -1,6 +1,6 @@
 # Permission Settings for VNX Terminals
 **Status**: Active
-**Last Updated**: 2026-02-05
+**Last Updated**: 2026-09-24
 **Owner**: T-MANAGER
 **Purpose**: Documentation for Permission Settings for VNX Terminals.
 

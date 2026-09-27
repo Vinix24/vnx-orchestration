@@ -15,7 +15,7 @@ terminal startup and session management.
 Related contracts:
 - [140_DASHBOARD_READ_MODEL_CONTRACT](../core/140_DASHBOARD_READ_MODEL_CONTRACT.md) — safe actions A1-A6, read-model surfaces
 - [OPEN_ITEMS_GATE_TOGGLE_CONTRACT](OPEN_ITEMS_GATE_TOGGLE_CONTRACT.md) — safe action A7
-- [130_RUNTIME_STATE_MACHINE_CONTRACT](../core/130_RUNTIME_STATE_MACHINE_CONTRACT.md) — worker states, heartbeat, stall detection
+- [131_RUNTIME_STATE_MACHINE_CONTRACT](../core/131_RUNTIME_STATE_MACHINE_CONTRACT.md) — worker states, heartbeat, stall detection
 - [80_TERMINAL_EXCLUSIVITY_CONTRACT](../core/80_TERMINAL_EXCLUSIVITY_CONTRACT.md) — dispatch safety and lease exclusivity
 
 ---

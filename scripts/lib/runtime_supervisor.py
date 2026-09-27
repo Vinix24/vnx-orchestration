@@ -3,7 +3,7 @@
 VNX Runtime Supervisor — Stall detection, exit classification, and anomaly escalation.
 
 Implements the supervision layer from the Runtime State Machine Contract
-(docs/core/130_RUNTIME_STATE_MACHINE_CONTRACT.md):
+(docs/core/131_RUNTIME_STATE_MACHINE_CONTRACT.md):
 
   - No-output stall detection per §5.2
   - Anomaly classification matrix per §7.1

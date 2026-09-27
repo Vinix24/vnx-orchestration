@@ -57,25 +57,16 @@ GET /api/operator/gate/config?project=<path>
 {
   "project": "/path/to/project",
   "gates": {
-    "kimi_gate": {
-      "enabled": true,
-      "env_var": "VNX_KIMI_GATE_ENABLED",
-      "description": "Kimi headless code review"
-    },
-    "codex_gate": {
-      "enabled": true,
-      "env_var": "VNX_CODEX_GATE_ENABLED",
-      "description": "Codex final quality gate"
-    },
-    "claude_github": {
-      "enabled": false,
-      "env_var": "VNX_CLAUDE_GITHUB_GATE_ENABLED",
-      "description": "Claude GitHub PR review (optional)"
-    }
+    "kimi_gate": { "enabled": true },
+    "codex_gate": { "enabled": true },
+    "claude_github_optional": { "enabled": false }
   },
-  "queried_at": "ISO8601"
+  "queried_at": "ISO8601",
+  "config_path": "<repo>/.vnx/configs/governance_gates.yaml"
 }
 ```
+
+Gate entries carry only `enabled`; there is no per-gate env-var toggle (`_operator_get_gate_config`, `dashboard/api_operator.py`).
 
 ### 3.2 POST /api/operator/gate/toggle
 
@@ -122,14 +113,14 @@ Gate state is per-project, per-gate:
   "<project_path>": {
     "kimi_gate": { "enabled": true },
     "codex_gate": { "enabled": true },
-    "claude_github": { "enabled": false }
+    "claude_github_optional": { "enabled": false }
   }
 }
 ```
 
-**Storage**: `$VNX_STATE_DIR/gate_config.json` (per project). Created with defaults on first query.
+**Storage**: `.vnx/configs/governance_gates.yaml` (repo-relative, keyed per project path; `GATE_CONFIG_PATH` in `dashboard/api_operator.py`). Missing or invalid file reads back as an empty gates dict rather than raising.
 
-**Defaults**: All gates enabled except `claude_github` (matches current behavior — Kimi and Codex default-enabled, Claude GitHub optional).
+**Defaults**: The standard review stack is `codex_gate,kimi_gate` (`scripts/lib/config_registry.py`); `claude_github_optional` is off unless a project's config explicitly enables it.
 
 ### 3.4 Gate Toggle Invariants
 

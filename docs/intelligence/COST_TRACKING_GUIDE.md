@@ -1,6 +1,6 @@
 # VNX Cost Tracking Guide
 
-**Last Updated**: 2026-02-15
+**Last Updated**: 2026-09-27
 **Status**: Active (Phase 2 Complete)
 **Owner**: T-MANAGER
 
@@ -54,14 +54,15 @@ Worker Report → Receipt Processor → Receipt (with session metadata)
 
 ```bash
 # Generate cost report from default receipts file
-python3 .claude/vnx-system/scripts/cost_tracker.py
+python3 scripts/cost_tracker.py
+# or: ./bin/vnx cost-report
 
 # Specify custom receipts file
-python3 .claude/vnx-system/scripts/cost_tracker.py \
+python3 scripts/cost_tracker.py \
     --receipts $VNX_STATE_DIR/t0_receipts.ndjson
 
 # Save metrics to custom output file
-python3 .claude/vnx-system/scripts/cost_tracker.py \
+python3 scripts/cost_tracker.py \
     --output /tmp/my_metrics.json
 ```
 

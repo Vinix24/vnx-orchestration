@@ -236,6 +236,16 @@ Every non-successful run MUST be classified into exactly one failure class. Thes
 | `prompt_error` | `PROMPT_ERR` | Exit code != 0, stderr indicates prompt/input issue | No (needs prompt fix) | Fix prompt or dispatch bundle |
 | `unknown` | `UNKNOWN` | None of the above patterns match | Manual review | Inspect logs, classify manually |
 
+The `Code` column above is `scripts/lib/exit_classifier.py`'s live `FC_*` taxonomy
+(`FC_SUCCESS`/`FC_TIMEOUT`/`FC_TOOL_FAIL`/`FC_INFRA_FAIL`/`FC_NO_OUTPUT`/`FC_INTERRUPTED`/
+`FC_PROMPT_ERR`/`FC_UNKNOWN`) — it classifies a single headless CLI run
+(`headless_adapter.py`, `headless_run_registry.FAILURE_CLASSES`). The receipt a dispatch
+actually gets stamped with uses a second, separate, lowercase taxonomy:
+`scripts/lib/failure_classification.FAILURE_CLASSES` (`auth_rejected`, `empty_completion`,
+`timeout`, `model_error`, `credit_exhausted`, `completion_without_execution`, `no_verdict`,
+`tool_missing`, `unknown`). The two vocabularies never meet — see that module's docstring
+and `tests/test_smart_router_quality_tier.py`'s vocabulary-separation test.
+
 ### 4.2 Classification Rules
 
 Classification is applied in order (first match wins):

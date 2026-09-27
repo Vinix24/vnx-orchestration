@@ -6,6 +6,8 @@
 **Date**: 2026-03-29
 **Authority**: This contract anchors all subsequent PRs in the adoption/packaging/Pythonization feature. Implementation PRs (PR-1 through PR-8) must conform to the mode definitions, command surface goals, migration priorities, and success criteria defined here.
 
+**Namesake in the archive**: `docs/_archive/contracts/PRODUCTIZATION_CONTRACT.md` is an earlier, superseded draft of this same contract (a three-mode design that included a demo mode). It is not a duplicate to merge back in — this file is the one that shipped.
+
 ---
 
 ## 1. Product Identity
@@ -62,12 +64,12 @@ VNX supports two user modes. All modes share the same canonical runtime model �
 
 ### 2.2 Operator Mode
 
-**Purpose**: Full multi-agent orchestration with tmux grid, multiple providers, and all governance controls.
+**Purpose**: Full multi-agent orchestration with multiple providers and all governance controls.
 
 | Property | Value |
 |----------|-------|
-| **tmux required** | Yes |
-| **Terminals** | T0-T3 (4-terminal grid) |
+| **tmux required** | For T0 (interactive orchestrator) and any interactive non-Claude CLI panes; Claude build workers run headless (`claude_headless`, no tmux pane) |
+| **Terminals** | T0-T3 (T0 orchestrates; T1-T3 dispatch as headless workers) |
 | **Providers** | Multiple (profile-selectable) |
 | **Dispatch model** | Parallel multi-track (A/B/C) |
 | **Governance** | Full: receipts, provenance, gates, preflight |
@@ -132,7 +134,7 @@ All 47 commands are available in operator mode. The public command surface must 
 #### Tier 3: Operator Only
 | Command | Description |
 |---------|-------------|
-| `vnx start` | Launch tmux session with grid |
+| `vnx start` | Launch the T0 orchestration session |
 | `vnx stop` | Stop tmux session |
 | `vnx restart` | Restart session |
 | `vnx jump` | Navigate to terminal |
@@ -157,61 +159,21 @@ Run 'vnx init --operator' to upgrade, or 'vnx help' for available commands.
 
 ---
 
-## 4. Bash-to-Python Prioritization Matrix
+## 4. Public Adoption Success Criteria
 
-Scripts ranked by fragility score (methodology: weighted composite of path sensitivity, branching complexity, state management, error recovery, and testability). Higher score = migrate first.
-
-### 4.1 Migration Priority Table
-
-| Priority | Script | Lines | Fragility | Key Failure Modes | Migration Target |
-|----------|--------|-------|-----------|-------------------|-----------------|
-| **P1** | `start.sh` | 757 | 8.9 | Pane ID stability, race conditions in state writes, silent intelligence failures, no atomic JSON writes, broad pkill patterns | `scripts/lib/vnx_start.py` |
-| **P2** | `recover.sh` | 350 | 8.6 | Lock age races, embedded Python one-liners, concurrent recovery corruption, no rollback | `scripts/lib/vnx_recover_legacy.py` (complement to existing `vnx_recover_runtime.py`) |
-| **P3** | `new_worktree.sh` | 300 | 8.4 | Env variable save/restore bugs, orphaned worktrees on partial failure, no name validation, non-atomic bootstrap | `scripts/lib/vnx_worktree.py` |
-| **P4** | `finish_worktree.sh` | 272 | 8.2 | Intelligence merged before removal confirmed, force mode discards without confirmation, no transaction | `scripts/lib/vnx_worktree.py` (same module) |
-| **P5** | `merge_preflight.sh` | 318 | 8.0 | Silent JSON parsing failures, stale gate results accepted, incomplete blocker detection | `scripts/lib/vnx_preflight.py` |
-| **P6** | `doctor.sh` | 340 | 7.8 | Fragile date parsing, external script validation gaps, worktree check incompleteness | `scripts/lib/vnx_doctor.py` |
-| **P7** | `bin/vnx` (dispatcher) | 1800 | 7.5 | Path resolution order, env variable races, silent command load failures | `scripts/lib/vnx_cli.py` (Python CLI with thin shell entry) |
-| **P8** | `jump.sh` | 170 | 7.2 | Stale pane IDs, reheal side effects, silent fallback to wrong terminal | `scripts/lib/vnx_jump.py` |
-| **P9** | `regen_settings.sh` | 104 | 6.5 | Already delegates to Python; thin wrapper sufficient | Keep as shell wrapper |
-| **P10** | `registry.sh` | 164 | 6.2 | Path resolution loose, no dedup | `scripts/lib/vnx_registry.py` |
-| **P11** | `install_git_hooks.sh` | 103 | 5.8 | Symlink validation weak | Keep as shell wrapper |
-| **P12** | `stop.sh` | 28 | 5.1 | Trivial | Keep as shell wrapper |
-
-### 4.2 Migration Phases (maps to PRs)
-
-| Phase | PRs | Scripts | Rationale |
-|-------|-----|---------|-----------|
-| **Phase 1** | PR-1 | `doctor.sh`, bootstrap/init logic from `bin/vnx` | Unify init/bootstrap/doctor under Python; immediate onboarding reliability |
-| **Phase 2** | PR-3 | `start.sh`, `recover.sh`, worktree logic | Session lifecycle — highest fragility, most state management |
-| **Phase 3** | PR-4 | `bin/vnx` dispatcher (partial), CLI entrypoints | Packaging and install surface |
-| **Phase 4** | Future | `jump.sh`, `merge_preflight.sh`, remaining | Lower urgency; can follow adoption feature |
-
-### 4.3 Migration Rules
-
-1. **Shell wrapper pattern**: Every migrated command retains a thin bash wrapper that calls the Python entrypoint. Command names do not change.
-2. **No big-bang rewrite**: Each script migrates independently. Mixed bash/Python is acceptable during transition.
-3. **Test-before-migrate**: Each migration must include regression tests for the Python replacement before the shell version is demoted.
-4. **Shared library**: Common utilities (path resolution, JSON state I/O, mode detection) go in `scripts/lib/vnx_common.py`.
-5. **Atomic state writes**: All Python replacements must use temp-file-then-rename for JSON state files.
-
----
-
-## 5. Public Adoption Success Criteria
-
-### 5.1 Onboarding Metrics (measurable)
+### 4.1 Onboarding Metrics (measurable)
 
 | Criterion | Target | Measurement |
 |-----------|--------|-------------|
 | **Time to first working state** (starter mode) | < 5 minutes | From `git clone` to `vnx status` showing healthy state |
 | **Time to first dispatch** (starter mode) | < 10 minutes | From init to first dispatch created and executed |
-| **Time to operator mode** (from starter) | < 15 minutes | From `vnx init --operator` to running tmux grid |
+| **Time to operator mode** (from starter) | < 15 minutes | From `vnx init --operator` to a running operator-mode session |
 | **Install commands required** | ≤ 3 | Clone, init, start (or clone, init for starter) |
 | **Manual path edits required** | 0 | No user editing of PATH, config files, or env vars |
 | **Doctor pass rate on clean install** | 100% | `vnx doctor` exits 0 on supported platforms |
 | **README-to-working-state fidelity** | 100% | Every quickstart command in README works as documented |
 
-### 5.2 Documentation Criteria
+### 4.2 Documentation Criteria
 
 | Criterion | Target |
 |-----------|--------|
@@ -221,7 +183,7 @@ Scripts ranked by fragility score (methodology: weighted composite of path sensi
 | Example flows cover coding + non-coding | At least 3 example flows |
 | All public commands documented | `vnx help` output matches docs |
 
-### 5.3 Packaging Criteria
+### 4.3 Packaging Criteria
 
 | Criterion | Target |
 |-----------|--------|
@@ -231,7 +193,7 @@ Scripts ranked by fragility score (methodology: weighted composite of path sensi
 | CI validates install flow | Smoke test in CI |
 | Version reporting | `vnx --version` returns meaningful version |
 
-### 5.4 Governance Preservation Criteria
+### 4.4 Governance Preservation Criteria
 
 | Criterion | Target |
 |-----------|--------|
@@ -242,11 +204,11 @@ Scripts ranked by fragility score (methodology: weighted composite of path sensi
 
 ---
 
-## 6. Path Resolution Contract
+## 5. Path Resolution Contract
 
 Path resolution is the single most fragile surface in VNX. This contract locks the rules.
 
-### 6.1 Resolution Rules
+### 5.1 Resolution Rules
 
 1. **Script location is ground truth**: `PROJECT_ROOT` derives from `bin/vnx` location, never from environment.
 2. **Worktree override**: If CWD is a git worktree of the same project, `PROJECT_ROOT` overrides to CWD and all data paths re-derive.
@@ -254,7 +216,7 @@ Path resolution is the single most fragile surface in VNX. This contract locks t
 4. **No relative paths**: All VNX paths are absolute after resolution.
 5. **No inherited env**: `PROJECT_ROOT`, `VNX_HOME`, `VNX_DATA_DIR` are unset and recomputed on every CLI invocation.
 
-### 6.2 Path Variables
+### 5.2 Path Variables
 
 | Variable | Derivation | Override allowed |
 |----------|-----------|-----------------|
@@ -265,13 +227,13 @@ Path resolution is the single most fragile surface in VNX. This contract locks t
 | `VNX_DISPATCH_DIR` | `$VNX_DATA_DIR/dispatches` | No |
 | `VNX_INTELLIGENCE_DIR` | `$PROJECT_ROOT/.vnx-intelligence` | No |
 
-### 6.3 Migration Impact
+### 5.3 Migration Impact
 
 When path resolution moves to Python (`vnx_common.py`), these rules become enforced by a `VNXPaths` dataclass with validation. Shell wrappers call Python to resolve paths rather than reimplementing resolution.
 
 ---
 
-## 7. Runtime Model Invariants
+## 6. Runtime Model Invariants
 
 These invariants hold across all modes. No PR in this feature may violate them.
 
@@ -285,7 +247,7 @@ These invariants hold across all modes. No PR in this feature may violate them.
 
 ---
 
-## 8. Risk Register
+## 7. Risk Register
 
 | Risk | Severity | Mitigation |
 |------|----------|------------|
@@ -297,7 +259,7 @@ These invariants hold across all modes. No PR in this feature may violate them.
 
 ---
 
-## 9. Contract Boundary
+## 8. Contract Boundary
 
 This contract covers the productization, mode, command surface, and migration design. It does NOT cover:
 - Specific Python implementation details (PR-1, PR-3, PR-4)
