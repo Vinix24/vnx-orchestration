@@ -1,7 +1,7 @@
 #!/bin/bash
 # Input-Mode Guard Library
 # PR-1: Dispatcher Input-Mode Detection And Recovery
-# Contract: docs/core/110_INPUT_READY_TERMINAL_CONTRACT.md
+# Contract: docs/_archive/core/110_INPUT_READY_TERMINAL_CONTRACT.md
 #
 # Implements IMR-1 (dispatcher MUST NOT send-keys to pane_in_mode=1) and
 # IMR-2 (fail-closed when recovery cannot prove input-readiness).

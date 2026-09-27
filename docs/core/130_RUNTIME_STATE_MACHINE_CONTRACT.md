@@ -11,7 +11,7 @@ This document is the single source of truth for the canonical worker/session lif
 
 Related contracts:
 - [80_TERMINAL_EXCLUSIVITY_CONTRACT](80_TERMINAL_EXCLUSIVITY_CONTRACT.md) — dispatch safety and lease acquisition
-- [90_DELIVERY_FAILURE_LEASE_CONTRACT](90_DELIVERY_FAILURE_LEASE_CONTRACT.md) — lease cleanup on failed delivery
+- [90_DELIVERY_FAILURE_LEASE_CONTRACT](../_archive/core/90_DELIVERY_FAILURE_LEASE_CONTRACT.md) — lease cleanup on failed delivery (archived 2026-09-27: governed `dispatcher_minimal.sh`, which is `absent` per `docs/core/DAEMON_LIVENESS.md`)
 - [120_PROJECTION_CONSISTENCY_CONTRACT](120_PROJECTION_CONSISTENCY_CONTRACT.md) — queue/runtime projection alignment
 
 ---

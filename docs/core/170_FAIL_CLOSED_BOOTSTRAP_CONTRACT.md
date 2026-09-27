@@ -392,10 +392,10 @@ The only acceptable fallback is `VNX_RUNTIME_PRIMARY=0`, which explicitly disabl
 | Contract | Relationship |
 |----------|-------------|
 | Terminal Exclusivity (80) | Lease state model is unchanged. This contract defines cleanup at chain boundaries and registration ordering. |
-| Delivery Failure Lease (90) | Lease cleanup sequence (DFL-1 through DFL-5) is unchanged. Registration ordering (BOOT-6) affects Phase 0 (before cleanup is relevant). |
+| Delivery Failure Lease (90, [archived](../_archive/core/90_DELIVERY_FAILURE_LEASE_CONTRACT.md) 2026-09-27) | Lease cleanup sequence (DFL-1 through DFL-5) is unchanged. Registration ordering (BOOT-6) affects Phase 0 (before cleanup is relevant). |
 | Queue Truth (70) | Dispatch file disposition is unchanged. Registration failure leaves dispatch in `pending/` (no marker). |
-| Requeue And Classification (140) | Registration failure is a new requeueable condition — no marker, stays in pending, auto-retry. |
-| Delivery Failure Logging (160) | Registration failure maps to a new failure code if Contract 160 is extended (out of scope here). |
+| Requeue And Classification (140, [archived](../_archive/core/140_REQUEUE_AND_CLASSIFICATION_ACCURACY_CONTRACT.md) 2026-09-27) | Registration failure is a new requeueable condition — no marker, stays in pending, auto-retry. |
+| Delivery Failure Logging (160, [archived](../_archive/core/160_DELIVERY_FAILURE_LOGGING_CONTRACT.md) 2026-09-27) | Registration failure maps to a new failure code if Contract 160 is extended (out of scope here). |
 
 ## Appendix C: Current Code Gaps (For PR-1 Implementers)
 
