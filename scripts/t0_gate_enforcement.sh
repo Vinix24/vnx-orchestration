@@ -22,7 +22,19 @@ fi
 
 # Verify artifacts exist
 PR_NUM=$(echo "$@" | sed -nE 's/.*--pr ([0-9]+).*/\1/p')
-for gate_type in codex_gate; do
+# Verify every seat of the stack that was requested: the --review-stack
+# argument when given, otherwise the stack review_gate_manager resolves from
+# VNX_DEFAULT_REVIEW_STACK. A hardcoded list here drifts from that config and
+# lets a required seat pass unverified.
+REVIEW_STACK=$(echo "$@" | sed -nE 's/.*--review-stack[ =]([^ ]+).*/\1/p')
+if [ -z "$REVIEW_STACK" ]; then
+    REVIEW_STACK=$(cd scripts && python3 -c "import review_gate_manager as m; print(','.join(m.DEFAULT_REVIEW_STACK))")
+fi
+if [ -z "$REVIEW_STACK" ]; then
+    echo "GATE_ENFORCEMENT_FAILED: review stack resolved empty; nothing to verify" >&2
+    exit 1
+fi
+for gate_type in ${REVIEW_STACK//,/ }; do
     REQUEST_FILE="$VNX_STATE_DIR/review_gates/requests/pr-${PR_NUM}-${gate_type}.json"
     RESULT_FILE="$VNX_STATE_DIR/review_gates/results/pr-${PR_NUM}-${gate_type}.json"
 
