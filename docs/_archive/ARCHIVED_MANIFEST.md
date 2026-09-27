@@ -91,10 +91,11 @@ rewritten — only moved, per the ADR-style rule that archived docs keep their c
 | `contracts/f36-r12/rpc-schemas/*.json` (14 files) | `docs/contracts/f36-r12-rpc-schemas/*.json` | JSON-RPC schema design artifacts for the F36 R12 track. Zero references from code, tests, or any active doc (only a historical `claudedocs/` triage note mentions one filename) |
 | `contracts/f36-r12/structured-index.sql` | `docs/contracts/f36-r12-structured-index.sql` | SQL index design paired with the schemas above; same zero-reference status |
 
-Not archived by operator decision (open item): `docs/operations/TRANSCRIPT_BACKUP_ARCHIVE.md` documents a
-workstation-level (Mac Mini) backup mechanism outside VNX's runtime scope, a candidate for removal from
-this repo entirely rather than archival — left in place pending that decision. `docs/operations/TMUX_SPAWN_LANE.md`
-also stays: it is the tombstone every removed-lane reference above points to.
+Removed from the repo entirely (not archived) on 2026-09-27 by operator decision:
+`docs/operations/TRANSCRIPT_BACKUP_ARCHIVE.md` documented the operator's workstation-level
+(Mac Mini, launchd) backup setup, not VNX runtime, so it never belonged in this repo. The
+operator keeps their own local copy. `docs/operations/TMUX_SPAWN_LANE.md` stays: it is the
+tombstone every removed-lane reference above points to.
 
 ## Docs-verversing sweep (archived 2026-09-27, PR-3) — 5 files, operator directive
 
