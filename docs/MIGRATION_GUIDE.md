@@ -2,11 +2,10 @@
 
 This guide covers migration paths from legacy VNX patterns to the upgraded system. Each section describes what changed, why, and how to migrate.
 
-Plain `vnx` means the pip-installed Python CLI and is intentionally limited to
-`init`, `migrate`, `doctor`, `status`, `dispatch-agent`, `track`, `pool`,
-`dream`, `version`, and `update`.
-Operator commands in this guide run through the repo-local bash entrypoint
-`./bin/vnx` from the repository root.
+Plain `vnx` means the pip-installed Python CLI. Operator commands in this guide
+run through the repo-local bash entrypoint `./bin/vnx` from the repository
+root. The full command list for both binaries is one canonical source:
+[Onboarding Guide, Appendix A](onboarding/ONBOARDING_GUIDE.md#appendix-a-two-binaries-and-the-full-pip-cli-surface).
 
 ---
 
@@ -25,7 +24,7 @@ Operator commands in this guide run through the repo-local bash entrypoint
 
 1. **New features**: Use `./bin/vnx new-worktree <name>` for all new work. All terminals share one worktree per feature.
 2. **Existing per-terminal worktrees**: Continue working in them until the current feature is complete.
-3. **Legacy compatibility**: Set `VNX_WORKTREES=true` if you still need per-terminal worktrees during migration. This is deprecated and will be removed.
+3. **`VNX_WORKTREES=true` is a no-op**: `./bin/vnx start` is T0-only and no longer creates fixed per-terminal worker worktrees at all (`scripts/commands/start.sh`). Setting the flag only logs "Ignoring VNX_WORKTREES=true"; it does not restore the legacy behavior.
 
 ### New Workflow
 
@@ -116,7 +115,9 @@ VNX keys are defined in `templates/settings_vnx_keys.json.tmpl`. Do not edit thi
 
 ### Phase Rollout
 
-- **Phase 2a** (current): Contracts optional. Verification runs only when present.
+- **Phase 2a** (as of 2026-09-27): Contracts optional. Verification runs only when present. This
+  is the phase in effect today. Whether 2b or 2c ever shipped has not been verified against the
+  code for this refresh; treat contracts as optional unless a dispatch says otherwise.
 - **Phase 2b**: Required for high-risk/implementation dispatches.
 - **Phase 2c**: Default for all dispatches. Opt-out requires explicit reason.
 
@@ -335,8 +336,7 @@ python3 scripts/ledger_health.py --data-dir "$VNX_DATA_DIR" --state-dir "$VNX_ST
 
 ## Appendix A: Two binaries
 
-VNX ships TWO `vnx` entry-points with different scopes:
-- **`vnx`** (pip-installed Python CLI at `vnx_cli/main.py`): user-facing essentials (`init`, `doctor`, `status`, `dispatch-agent`, `pool`, `version`, `update`).
-- **`./bin/vnx`** (bash CLI in the repo): operator + automation surface (`gate-check`, `new-worktree`, `finish-worktree`, `merge-preflight`, `demo`, `start`, `recover`, `cost-report`). Run from the repo root.
-
-This split is intentional: the pip surface is stable + minimal; the bash surface is rich + repo-local.
+See [Onboarding Guide, Appendix A](onboarding/ONBOARDING_GUIDE.md#appendix-a-two-binaries-and-the-full-pip-cli-surface)
+for the canonical two-binary split and the full command list for both. (The
+bash CLI's `demo` command was removed in #193 and is not part of the current
+surface.)

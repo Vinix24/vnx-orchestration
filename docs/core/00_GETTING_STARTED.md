@@ -1,11 +1,19 @@
 # Getting Started (VNX)
 
 **Status**: Active
-**Last Updated**: 2026-06-22
+**Last Updated**: 2026-09-27
 **Owner**: T-MANAGER
 **Purpose**: Quick orientation and links to the current VNX "source of truth" docs.
 
 ---
+
+## Start Here
+
+New to VNX? Follow [`docs/onboarding/ONBOARDING_GUIDE.md`](../onboarding/ONBOARDING_GUIDE.md)
+end to end: pip install, first dispatch, then the repo-local operator path
+(`./bin/vnx`), feature worktrees, and troubleshooting.
+
+For a five-minute version of the pip-only path, see [`docs/QUICKSTART.md`](../QUICKSTART.md).
 
 ## Current System Snapshot
 
@@ -23,11 +31,6 @@ For full navigation, start at `../DOCS_INDEX.md`.
 
 ## VNX CLI Quick Reference
 
-Plain `vnx` is the pip-installed Python CLI. It exposes the stable essentials:
-`init`, `migrate`, `doctor`, `status`, `dispatch-agent`, `track`, `pool`,
-`dream`, `version`, and `update`. Operator commands run through `./bin/vnx`
-from the repository root.
-
 ```bash
 # Initialize VNX in a new project with the pip CLI
 vnx init
@@ -37,13 +40,10 @@ vnx doctor
 
 # Project status
 vnx status
-
-# Update the pip-installed CLI
-vnx update --dry-run
 ```
 
 ```bash
-# Launch orchestration (tmux session with T0-T3) from a repo checkout
+# Launch the T0 orchestrator in a tmux session, from a repo checkout
 ./bin/vnx start
 
 # Stop all processes
@@ -56,6 +56,15 @@ vnx update --dry-run
 ./bin/vnx recover
 ```
 
+`./bin/vnx start` opens a tmux session with a single T0 orchestrator pane, not
+a fixed T1-T3 grid. T1/T2/T3 workers run as ephemeral per-dispatch processes
+through the single-entry door (`./bin/vnx dispatch`) unless a terminal opts
+into a terminal-pinned worker with `VNX_ADAPTER_T{n}=subprocess`; see
+`DISPATCH_RULES.md` §8.
+
+The full pip-vs-bash command list and the two-binary split live in one place:
+[Onboarding Guide, Appendix A](../onboarding/ONBOARDING_GUIDE.md#appendix-a-two-binaries-and-the-full-pip-cli-surface).
+
 ### Key Bindings (in tmux)
 - `Ctrl+G` — Open dispatch queue popup
 - `Ctrl+B D` — Detach (keeps running)
@@ -65,53 +74,8 @@ vnx update --dry-run
 
 ## Feature Development Workflow
 
-The primary workflow for new features uses feature worktrees:
-
-### 1. Create a Feature Worktree
-
-```bash
-./bin/vnx new-worktree my-feature --branch feature/my-feature --base main
-```
-
-This creates a git worktree, initializes isolated `.vnx-data`, bootstraps skills/terminals/hooks, merges settings, and validates with `./bin/vnx doctor`.
-
-### 2. Work in the Worktree
-
-```bash
-cd ../your-project-wt-my-feature
-./bin/vnx start
-```
-
-### 3. Monitor Session State
-
-```bash
-./bin/vnx status    # Session overview: terminals, queue, open items
-./bin/vnx ps        # Process health with PID metadata
-```
-
-### 4. Pre-Merge Check
-
-```bash
-./bin/vnx merge-preflight my-feature
-```
-
-Returns GO or NO-GO based on: git cleanliness, open items, PR queue status, active processes, and gate-check results.
-
-### 5. Close the Worktree
-
-```bash
-./bin/vnx finish-worktree my-feature --delete-branch
-```
-
-Runs merge-preflight, stops worktree processes, merges intelligence back to main, removes worktree.
-
-### Settings Management
-
-VNX settings are patch-managed -- VNX updates only its owned keys:
-
-```bash
-./bin/vnx regen-settings --merge   # Update VNX keys, preserve project config
-```
+Feature worktrees, the gate workflow, and daily operator commands are covered
+in [Onboarding Guide, Part 2](../onboarding/ONBOARDING_GUIDE.md#part-2-operator-path-repo-local-bash-cli).
 
 ### Shell Helper
 
@@ -121,16 +85,7 @@ For global `vnx` access from any project directory:
 ./bin/vnx install-shell-helper   # Adds vnx() to ~/.zshrc or ~/.bashrc
 ```
 
-The helper walks up from CWD to find the project-local `.vnx/bin/vnx` or `.claude/vnx-system/bin/vnx`.
-
-> **Deprecated**: Per-terminal worktrees are deprecated. Use `./bin/vnx new-worktree` for all new development.
-
-## Appendix A: Two binaries
-
-VNX ships TWO `vnx` entry-points with different scopes:
-- **`vnx`** (pip-installed Python CLI at `vnx_cli/main.py`): user-facing essentials (`init`, `migrate`, `doctor`, `status`, `dispatch-agent`, `track`, `pool`, `dream`, `version`, `update`).
-- **`./bin/vnx`** (bash CLI in the repo): operator + automation surface (`gate-check`, `new-worktree`, `finish-worktree`, `merge-preflight`, `demo`, `start`, `recover`, `cost-report`). Run from the repo root.
-
-This split is intentional: the pip surface is stable + minimal; the bash surface is rich + repo-local.
+The helper walks up from CWD to find the project-local `.vnx/bin/vnx` or
+`.claude/vnx-system/bin/vnx` (legacy layout).
 
 ---

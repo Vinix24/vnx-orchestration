@@ -4,18 +4,21 @@
 
 This walkthrough shows VNX coordinating three AI agents on a real coding task: implementing JWT authentication with login endpoints, test coverage, and a security review — all running simultaneously.
 
-> **Note:** this example uses the opt-in terminal-grid mode (`vnx start`, a fixed T0–T3
-> layout on the subprocess lane). The default dispatch model since 1.0 is ephemeral
-> per-dispatch workers through the single-entry door (`vnx dispatch`); see the
-> [README architecture section](../../README.md#architecture). The grid remains supported
-> for operators who want four visible, terminal-pinned agents.
+> **Note:** `./bin/vnx start` opens a tmux session with a single T0 orchestrator
+> pane, not a fixed T1-T3 grid. The default dispatch model is ephemeral
+> per-dispatch workers through the single-entry door (`./bin/vnx dispatch`);
+> see the [README architecture section](../../README.md#architecture). A
+> terminal can still opt into a terminal-pinned worker with
+> `VNX_ADAPTER_T{n}=subprocess` (`docs/core/DISPATCH_RULES.md` §8). This
+> walkthrough describes that pinned-worker shape for Tracks A/B/C, whether the
+> work lands on ephemeral or pinned workers underneath.
 
 ---
 
 ## Prerequisites
 
-- VNX installed and initialized in operator mode (`vnx init --operator`)
-- `vnx doctor` passes cleanly
+- VNX installed and initialized in operator mode (`./bin/vnx init --operator`)
+- `./bin/vnx doctor` passes cleanly
 - At least one AI CLI installed (Claude Code, Codex CLI, or Gemini CLI)
 
 ---
@@ -25,25 +28,26 @@ This walkthrough shows VNX coordinating three AI agents on a real coding task: i
 Isolate the work from `main` so all agents work in the same feature branch:
 
 ```bash
-vnx worktree create auth-feature --ref main
+./bin/vnx new-worktree auth-feature --base main
 cd ../your-project-wt-auth-feature/
 ```
 
-VNX creates an isolated `.vnx-data/` directory, bootstraps skills and terminal configs, and runs `vnx doctor` automatically.
+VNX creates an isolated `.vnx-data/` directory, bootstraps skills and terminal configs, and runs `./bin/vnx doctor` automatically.
 
-## 2. Launch the Terminal Grid
+## 2. Launch T0 and Dispatch the Tracks
 
 ```bash
-vnx start                    # Default: Claude Code on all terminals
-# or
-vnx start claude-codex       # T1: Codex CLI, T2: Claude Code
+./bin/vnx start
 ```
 
-You now have four terminals:
-- **T0** (top-left): Orchestrator — plans work, reviews receipts, never writes code
-- **T1** (top-right): Worker Track A — implementation
-- **T2** (bottom-left): Worker Track B — tests and integration
-- **T3** (bottom-right): Worker Track C — review and security analysis
+This opens T0 in a tmux session. T0 plans the work and stages dispatches for
+each track; you promote them and they execute, by default as ephemeral
+per-dispatch workers, or on a terminal explicitly pinned via
+`VNX_ADAPTER_T{n}=subprocess`:
+- **T0**: Orchestrator, plans work, reviews receipts, never writes code
+- **Track A** (T1): Worker, implementation
+- **Track B** (T2): Worker, tests and integration
+- **Track C** (T3): Worker, review and security analysis
 
 ## 3. Describe the Feature to T0
 
@@ -79,7 +83,7 @@ Scope: Token storage, expiry, refresh rotation, common JWT pitfalls
 T0 stages dispatches for each PR. You review and promote:
 
 ```bash
-vnx staging-list              # See what's queued
+./bin/vnx staging-list        # See what's queued
 ```
 
 Press `Ctrl+G` to open the dispatch queue popup. Each dispatch shows:
@@ -109,8 +113,8 @@ T3 (Track C): Waiting for PR-1 to complete (dependency)
 While agents work, you monitor from T0:
 
 ```bash
-vnx status                    # Terminal states, queue depth, open items
-vnx cost-report               # API spend per agent
+./bin/vnx status              # Terminal states, queue depth, open items
+./bin/vnx cost-report         # API spend per agent
 ```
 
 ## 6. Receipt Processing
@@ -138,7 +142,7 @@ T0 sees:
 Before dispatching dependent work, T0 runs the gate:
 
 ```bash
-vnx gate-check --pr PR-1
+./bin/vnx gate-check --pr PR-1
 ```
 
 The gate evaluates deterministically (no LLM judgment):
@@ -169,7 +173,7 @@ The receipt chain links rotation steps. No work is lost.
 After all tracks complete:
 
 ```bash
-vnx merge-preflight auth-feature
+./bin/vnx merge-preflight auth-feature
 ```
 
 Returns GO or NO-GO based on:
@@ -181,7 +185,7 @@ Returns GO or NO-GO based on:
 On GO:
 
 ```bash
-vnx finish-worktree auth-feature --delete-branch
+./bin/vnx finish-worktree auth-feature --delete-branch
 ```
 
 This merges intelligence data back to the main repo, removes the worktree, and cleans up.
@@ -195,10 +199,10 @@ After the session, the receipt ledger contains a complete audit trail:
 cat .vnx-data/state/t0_receipts.ndjson | jq '.event'
 
 # Cost per task
-vnx cost-report
+./bin/vnx cost-report
 
 # Session patterns
-vnx analyze-sessions
+./bin/vnx analyze-sessions
 ```
 
 Each code change traces back to: a dispatch (what was requested), a human approval (who authorized it), an agent execution (what was produced), and a quality gate verdict (whether it passed).
@@ -223,10 +227,10 @@ Each code change traces back to: a dispatch (what was requested), a human approv
 Don't have tmux or want to start simpler? The same feature can be built in starter mode — just sequentially:
 
 ```bash
-vnx init --starter
+./bin/vnx init --starter
 # T0 dispatches one task at a time
 # Same receipts, same provenance, same audit trail
 # Just one agent instead of three
 ```
 
-When you're ready for parallel execution: `vnx init --operator`.
+When you're ready for parallel execution: `./bin/vnx init --operator`.

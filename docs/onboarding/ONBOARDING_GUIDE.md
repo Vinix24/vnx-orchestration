@@ -81,8 +81,7 @@ vnx pool --help
 vnx update --dry-run
 ```
 
-The pip CLI command set is intentionally small: `init`, `doctor`, `status`,
-`dispatch-agent`, `pool`, `version`, and `update`.
+The full pip command set is listed once, in [Appendix A](#appendix-a-two-binaries-and-the-full-pip-cli-surface) below.
 
 ---
 
@@ -106,13 +105,18 @@ brew install jq tmux fswatch
 ./bin/vnx doctor
 ```
 
-### Step 3: Launch the Grid
+### Step 3: Launch T0
 
 ```bash
 ./bin/vnx start
 ```
 
-This opens the 2x2 T0-T3 tmux grid used by the operator workflow.
+This opens a tmux session with a single T0 orchestrator pane, not a fixed T1-T3
+grid. T1/T2/T3 workers are dispatched as ephemeral per-dispatch processes
+through the single-entry door (`./bin/vnx dispatch`, the `claude_headless` lane
+for claude/Opus/Sonnet), not as pre-opened panes. A terminal can opt into a
+terminal-pinned worker instead with `VNX_ADAPTER_T{n}=subprocess`. See
+`docs/core/DISPATCH_RULES.md` §8 for the lane mechanics.
 
 ### Step 4: Queue and Gate Workflow
 
@@ -200,10 +204,29 @@ Doctor output is actionable. Common fixes:
 - **Limitations**: [docs/manifesto/LIMITATIONS.md](../manifesto/LIMITATIONS.md)
 - **Comparisons**: [VNX vs Claude Code](../comparisons/vnx_vs_claude_code.md) | [VNX vs Frameworks](../comparisons/vnx_vs_frameworks.md)
 
-## Appendix A: Two binaries
+## Appendix A: Two binaries and the full pip CLI surface
 
-VNX ships TWO `vnx` entry-points with different scopes:
-- **`vnx`** (pip-installed Python CLI at `vnx_cli/main.py`): user-facing essentials (`init`, `doctor`, `status`, `dispatch-agent`, `pool`, `version`, `update`).
-- **`./bin/vnx`** (bash CLI in the repo): operator + automation surface (`gate-check`, `new-worktree`, `finish-worktree`, `merge-preflight`, `start`, `recover`, `cost-report`). Run from the repo root.
+VNX ships TWO `vnx` entry-points with different scopes. This is the single
+source for the pip surface; other docs link here instead of repeating the
+list.
+
+- **`vnx`** (the pip-installed Python CLI, `vnx_cli/main.py`). Full command
+  set: `init`, `doctor`, `fabric-audit`, `status`, `subsystems`,
+  `dispatch-agent`, `track`, `pool`, `role`, `update`, `release`, `migrate`,
+  `attest`, `horizon` (alias `objective`), `deliverable`, `handoff`,
+  `learning`, `dream`, `gate-check`, `pr-ready`, `worktree-release`, `version`.
+  Run `vnx --help` for the authoritative, versioned list.
+- **`./bin/vnx`** (the bash CLI in a cloned repo checkout). Operator +
+  automation surface: `start`, `stop`, `new-worktree`, `finish-worktree`,
+  `merge-preflight`, `staging-list`, `promote`, `gate-check`, `pr-ready`,
+  `cost-report`, `recover`, `ps`, `analyze-sessions`, `regen-settings`,
+  `install-shell-helper`, and more. Run from the repo root; `./bin/vnx --help`
+  lists the full set.
+
+`gate-check`, `pr-ready`, and `worktree-release` exist on **both** binaries:
+same underlying machinery (`scripts/pre_merge_gate.py`, `scripts/pr_ready.py`,
+`scripts/lib/worktree_release.py`), exposed on the pip CLI too (OI-1135,
+OI-1389) so a consumer repo without a `bin/` directory (Mission Control,
+SEOcrawler_v2, sales-copilot) can still gate and release.
 
 This split is intentional: the pip surface is stable + minimal; the bash surface is rich + repo-local.

@@ -104,21 +104,21 @@ Separately, maintainer review uses adversarial LLM review gates (a codex/kimi di
 
 ```bash
 # Create a worktree for your branch
-vnx new-worktree my-feature --branch feature/my-feature
+./bin/vnx new-worktree my-feature --branch feature/my-feature
 cd ../your-project-wt-my-feature
 
 # Start VNX session
-vnx start
+./bin/vnx start
 
 # All changes go through dispatches
 # T0 creates dispatches, workers execute scoped tasks
 
 # Pre-merge validation
-vnx merge-preflight my-feature
-vnx gate-check --pr PR-X
+./bin/vnx merge-preflight my-feature
+./bin/vnx gate-check --pr PR-X
 
 # Close worktree when done
-vnx finish-worktree my-feature --delete-branch
+./bin/vnx finish-worktree my-feature --delete-branch
 ```
 
 All shell changes must pass `bash -n`. PRs should be 150-300 lines of diff.
