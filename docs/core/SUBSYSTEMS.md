@@ -16,7 +16,7 @@ This document is the single source of truth for which VNX subsystems are live, p
 | migration-mechanisms | Schema-evolution surfaces (42 SQL files + 6 appliers). Consolidation PARKed pending inventory-lock. | `VNX_MIGRATION_SYSTEM` | PARK-with-trigger | degraded — 42 SQL files + 6 appliers; consolidation PARKed pending inventory-lock (`scripts/lib/migration_inventory.py`, PR-8) |
 | within-db-tenancy | Composite (project_id, id) keys inside per-project DBs. Removal PARKed pending per-table central-DB safety proof. | — | PARK-with-trigger | degraded — keys present; drop deferred (central-store/dual-write/ADR-026 interaction) |
 | docs-bloat | Comparisons, stale archive, marketing docs inflating docs/ count. | — | CUT | degraded — ~288 markdown files, large `_archive/` |
-| governance-enforcement-stack | Receipt hash-chain + signed attestation + evidence-bound merge gate. SURFACED here; enforcement wiring deferred. | `VNX_GOVERNANCE_ENFORCED` | PARK-with-trigger | produces-crap — 15,577 receipts, 0 `prev_hash` |
+| governance-enforcement-stack | Receipt hash-chain + signed attestation + evidence-bound merge gate. SURFACED here; enforcement wiring deferred. | `VNX_DEEPSEEK_GATE_MAX_DIFF_CHARS` | LIVE | produces-crap — 15,577 receipts, 0 `prev_hash` |
 | receipt-hash-chain | Tamper-evident NDJSON hash-chain (ADR-029). | `VNX_HASH_CHAIN_REQUIRED` | PARK-with-trigger | produces-crap — unchained receipts |
 | signed-attestation | SSH-signed PR attestation manifests (ADR-027). | `VNX_ATTESTATION_REQUIRED` | PARK-with-trigger | produces-crap — 0 signed attestations in active use |
 | evidence-bound-gate | D3 evidence-bound merge gate. | `VNX_EVIDENCE_BOUND_GATE` | PARK-with-trigger | produces-crap — advisory only, enforces nothing |

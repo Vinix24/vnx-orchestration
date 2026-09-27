@@ -10,8 +10,11 @@ object, so ``is`` fails and the copy can no longer go unnoticed.
 """
 from __future__ import annotations
 
+import sqlite3
 import sys
 from pathlib import Path
+
+import pytest
 
 VNX_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = VNX_ROOT / "scripts"
@@ -19,11 +22,15 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 
 import codex_parser
+import config_registry
+import config_runtime
+import config_store_db
 import gate_lane_contract
 import gate_recorder
 import gate_runner
 import glm_gate
 import kimi_gate
+import vnx_paths
 from providers import provider_registry
 
 
@@ -111,6 +118,61 @@ class TestMaxDiffChars:
     different gate's default -- and an unknown gate name gets the
     conservative 50000.
     """
+
+    @pytest.fixture(autouse=True)
+    def _isolate_config_runtime(self, monkeypatch):
+        """kimi_gate finding (round 2): ``max_diff_chars`` reads through
+        ``config_runtime.get``, whose ``autowire()`` binds
+        ``config_registry``'s DB resolver to whatever project this process's
+        environment / ``vnx_paths.resolve_paths()`` finds -- on this repo's
+        own dev machine that is a real, already-populated ``project_config``.
+        ``config_registry.get``'s precedence puts that DB layer ABOVE env
+        vars (see ``config_registry.py``'s ``get()``), so deleting the env
+        vars alone (as the tests below do) does not stop a stored operator
+        value from winning. Mirror ``tests/test_config_runtime.py``'s own
+        isolation: block the canonical resolver so autowire can never find a
+        real store, and reset the DB layer around each test.
+        """
+        for key, _default in gate_lane_contract.DIFF_CHAR_CONFIG.values():
+            monkeypatch.delenv(key, raising=False)
+            monkeypatch.delenv(f"VNX_OVERRIDE_{config_registry._bare(key)}", raising=False)
+        monkeypatch.delenv("VNX_STATE_DIR", raising=False)
+        monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
+        monkeypatch.setattr(vnx_paths, "resolve_paths", lambda: {})
+        config_runtime._wired_for.clear()
+        config_registry.set_db_resolver(None)
+        config_registry.set_default_project_id(None)
+        yield
+        config_runtime._wired_for.clear()
+        config_registry.set_db_resolver(None)
+        config_registry.set_default_project_id(None)
+
+    def test_stored_project_config_value_overrides_but_other_gates_keep_defaults(
+        self, tmp_path, monkeypatch
+    ):
+        """Proves the isolation fixture above is real, not just deleting env
+        vars that a stored value never needed. Wire a real temp DB carrying a
+        stored ``VNX_KIMI_GATE_MAX_DIFF_CHARS`` value -- the exact shape an
+        operator sets via the dashboard -- and confirm it takes effect once
+        wired, while glm_gate/deepseek_gate, which carry no stored value,
+        still resolve to their OWN hardcoded defaults: never the kimi_gate
+        override, and never each other's."""
+        sd = tmp_path / "state"
+        sd.mkdir()
+        conn = sqlite3.connect(sd / "runtime_coordination.db")
+        entry = config_registry.CONFIG_REGISTRY["VNX_KIMI_GATE_MAX_DIFF_CHARS"]
+        config_store_db.set_config(
+            conn, "some-project", "VNX_KIMI_GATE_MAX_DIFF_CHARS", "999",
+            actor="op",
+            approval_id="test-approval" if entry.requires_approval else None,
+        )
+        conn.close()
+        monkeypatch.setattr(vnx_paths, "resolve_paths", lambda: {"VNX_STATE_DIR": str(sd)})
+        monkeypatch.setattr(vnx_paths, "project_id_from_state_dir", lambda _sd: "some-project")
+
+        assert gate_lane_contract.max_diff_chars("kimi_gate") == 999
+        assert gate_lane_contract.max_diff_chars("glm_gate") == 50000
+        assert gate_lane_contract.max_diff_chars("deepseek_gate") == 50000
 
     def test_defaults_differ_by_gate(self, monkeypatch):
         for key in (
