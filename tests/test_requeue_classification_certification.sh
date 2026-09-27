@@ -2,7 +2,7 @@
 # PR-3 Certification: Dispatch Requeue And Classification Accuracy
 #
 # Gate: gate_pr3_requeue_classification_certification
-# Contract: docs/core/140_REQUEUE_AND_CLASSIFICATION_ACCURACY_CONTRACT.md
+# Contract: docs/_archive/core/140_REQUEUE_AND_CLASSIFICATION_ACCURACY_CONTRACT.md
 #
 # Certifies RC-1 through RC-6 rules by exercising realistic dispatch flows:
 #   CERT-1: Requeueable dispatch defers to pending (RC-3)
@@ -314,7 +314,7 @@ echo ""
 echo "--- CERT-6: Intelligence blocking semantics ---"
 
 # Verify contract text describes correct semantics
-contract_file="$PROJECT_ROOT/docs/core/140_REQUEUE_AND_CLASSIFICATION_ACCURACY_CONTRACT.md"
+contract_file="$PROJECT_ROOT/docs/_archive/core/140_REQUEUE_AND_CLASSIFICATION_ACCURACY_CONTRACT.md"
 if [ -f "$contract_file" ]; then
     assert_contains "$(cat "$contract_file")" "Command execution failure" "CERT-6a: contract defines command failure blocking"
     assert_contains "$(cat "$contract_file")" "Does NOT block dispatch" "CERT-6b: contract defines parse failure as non-blocking"

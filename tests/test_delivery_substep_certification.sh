@@ -2,7 +2,7 @@
 # PR-2 Certification: Delivery Substep Observability
 #
 # Gate: gate_pr2_delivery_substep_certification
-# Contract: docs/core/150_DELIVERY_SUBSTEP_OBSERVABILITY_CONTRACT.md
+# Contract: docs/_archive/core/150_DELIVERY_SUBSTEP_OBSERVABILITY_CONTRACT.md
 #
 # Certifies DS-1 through DS-3 rules:
 #   CERT-1: Each substep failure produces correct annotation (all 7 substep IDs)

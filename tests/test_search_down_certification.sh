@@ -2,7 +2,7 @@
 # PR-2 Certification: Real tmux reproduction of search-down dispatch corruption
 #
 # Gate: gate_pr2_search_down_certification
-# Contract: docs/core/110_INPUT_READY_TERMINAL_CONTRACT.md
+# Contract: docs/_archive/core/110_INPUT_READY_TERMINAL_CONTRACT.md
 #
 # This test uses REAL tmux panes (not mocks) to reproduce the exact failure mode:
 #   1. Pane enters copy-mode (mouse scroll / Prefix+[)
