@@ -1,6 +1,6 @@
 # ADR-025 — Raw-file Dispatch Deprecation
 
-**Status:** Accepted
+**Status:** Accepted — Implemented 2026-09-27 in v1.6.7-dev (item B)
 **Date:** 2026-06-24
 **Decided by:** Operator (Vincent van Deth)
 **Resolves:** The deprecation half of the door-flip (item B). Companion to ADR-024 (single-entry door as default dispatch lane).
@@ -58,3 +58,16 @@ Concrete rules:
 - ADR-010 — Subprocess adapter as canonical Claude routing (superseded-in-part by ADR-024 on the canonical-lane question)
 - `scripts/commands/dispatch.sh` — `cmd_dispatch`, `_d_is_staged_form`, `_d_valid_dispatch_id`
 - Memory: `dispatch-structure-not-consolidated-friction` — the daemon tmux-send-keys path, a separate structural-consolidation follow-up
+
+## Amendment (2026-09-27)
+
+Implemented 2026-09-27 in v1.6.7-dev: raw form refused when the door is the default; still
+available under the rollback flag. Measured before the change: zero DEPRECATED warnings had
+ever shown up in `~/.vnx-data/*/logs`, and production callers were already staged
+(`deliver_via_door`, `<pending-id>`) — the warn-then-remove window observed no raw-form
+traffic worth protecting, so item B (removal) proceeded. `cmd_dispatch` now refuses a raw
+`vnx dispatch <file.md>` with a non-zero exit and a stderr message pointing at
+`vnx dispatch stage ...` / `dispatch_bridge.py stage ...` + `vnx dispatch <pending-id>`,
+citing this ADR. `VNX_DISPATCH_LEGACY=1` (or `VNX_SINGLE_ENTRY_DISPATCH=0`) still reaches the
+unchanged legacy lane byte-identically — the rollback hatch for when the door itself is
+broken is not removed by this amendment.

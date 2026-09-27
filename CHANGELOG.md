@@ -6,6 +6,15 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 
 ## [Unreleased]
 
+### Removed
+
+- **Raw-file `vnx dispatch <file.md>` refused under the door default (ADR-025).** The
+  form that used to fall through to the legacy delivery lane with a one-time DEPRECATED
+  stderr warning now exits non-zero and tells the caller to stage first
+  (`vnx dispatch stage --instruction <file.md> ...` / `dispatch_bridge.py stage ...`) and run
+  `vnx dispatch <pending-id>`. `VNX_DISPATCH_LEGACY=1` (or `VNX_SINGLE_ENTRY_DISPATCH=0`)
+  still reaches the unchanged legacy lane, byte-identical, for when the door itself is broken.
+
 ## [1.6.6] - 2026-09-27
 
 Feature release (16 commits since v1.6.5). The default review stack is
