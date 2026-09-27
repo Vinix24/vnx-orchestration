@@ -46,7 +46,7 @@ Your report MUST contain these exact headings (aliases accepted):
 
 ## Dispatch lanes
 
-Two claude lanes ship on main; T0 picks per task (`claude_headless` is the only claude lane, see the rule below). A third lane, `provider_dispatch.py`, routes the non-claude providers (kimi/glm/deepseek), covered further down. Full decision rule, provider strings, concurrency, and failure modes live in **`docs/core/DISPATCH_RULES.md`** (the tmux-spawn lane was removed on 2026-09-18: `docs/operations/TMUX_SPAWN_LANE.md`).
+The single-entry door always resolves a `claude` dispatch to `claude_headless`: `resolve_claude_lane` in `scripts/lib/dispatch_plan.py` returns that lane unconditionally, so it is the only claude lane the door itself picks. `scripts/lib/subprocess_dispatch.py` also starts `claude`, but outside the door's lane decision: it is a separate, terminal-pinned path opted into per terminal (see below). A third lane, `provider_dispatch.py`, routes the non-claude providers (kimi/glm/deepseek), covered further down. Full decision rule, provider strings, concurrency, and failure modes live in **`docs/core/DISPATCH_RULES.md`** (the tmux-spawn lane was removed on 2026-09-18: `docs/operations/TMUX_SPAWN_LANE.md`).
 
 - **`dispatch_envelope.run_envelope_headless_plan`** (`claude_headless`, default for `claude`) — `claude -p` via envelope, isolated worktree per dispatch, subscription-preserving. No live pane.
 - **`scripts/lib/subprocess_dispatch.py`** — terminal-pinned (Wave 5 smart-context, lease, triple-gate). Opt in per terminal with `VNX_ADAPTER_T{n}=subprocess`. Use for single-worker PRs that benefit from prior-round findings, or work expected to run >30 min. **No Anthropic SDK** — only `subprocess.Popen(["claude", ...])`.

@@ -1,7 +1,7 @@
 # VNX Documentation
 
 **Status**: Active
-**Last Updated**: 2026-04-08
+**Last Updated**: 2026-09-27
 **Owner**: VNX Maintainer
 **Purpose**: Describe how VNX documentation is organized and where to find the current source of truth.
 
@@ -31,7 +31,11 @@ Use `DOCS_INDEX.md` for the canonical "one place to look" navigation.
 | `manifesto/` | Public narrative docs: architecture story, roadmap, limitations, open method |
 | `onboarding/` | New-user orientation and first-run setup guidance |
 | `examples/` | Example orchestration flows for coding, research, and content work |
-| `comparisons/` | Positioning docs that compare VNX to direct CLI use and frameworks |
+| `applications/` | Domain mappings for the governance mechanism (coding agents, finance) |
+| `gates/` | Reference docs for individual review/quality gates (e.g. the wiring gate) |
+| `guides/` | How-to guides for extending VNX (e.g. creating a new agent role) |
+| `governance/` | ADRs (`decisions/`) and governance mechanism docs (attestation, key provisioning) |
+| `compliance/` | Third-party audit and compliance evidence |
 | `_archive/` | Historical or superseded docs kept for reference only |
 
 ## Documentation Rules (Source of Truth)
