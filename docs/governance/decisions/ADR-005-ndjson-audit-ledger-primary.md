@@ -13,7 +13,7 @@
 - **Out of scope.** Derived caches and snapshots: a reachability JSON, a pending or latch marker that refreshes a timestamp, a digest. They stay outside this ADR provided that (a) they can be re-derived from a ledger or a fresh measurement, and (b) the decision they drive is itself logged in a canonical ledger.
 - **Reviewer test, one sentence.** "Does this write drive a decision that is recorded in no canonical ledger?" If yes: `severity: warning`. If no: no finding.
 - **Rejected alternatives.** Option A, every literal state write must appear as a ledger event: rejected, because caches and timestamp refreshes would bury the decisions the ledger exists to show. Option B, every state write goes to a ledger first: rejected, because a re-derivable cache gains no recoverability from a preceding ledger line.
-- **Corrections to the ledger list in the Decision** (facts checked against the code on this date, no change of rule). `dispatch_register.ndjson` lives in `.vnx-data/state/`, not in the data root (the transactional path in `scripts/lib/dispatch_register.py` writes `.vnx-data/events/dispatch_register.ndjson`). `incident_log` is a table in `runtime_coordination.db` and no NDJSON writer of that name exists.
+- **Corrections to the ledger list in the Decision** (facts checked against the code on this date, no change of rule). `dispatch_register.ndjson` lives in `.vnx-data/state/`, not in the data root (the transactional path in `scripts/lib/dispatch_register.py` writes `.vnx-data/events/dispatch_register.ndjson`). The `incident_log.ndjson` line is struck from the ledger list: `incident_log` is a table in `runtime_coordination.db` and no NDJSON writer of that name exists. Whether incident transitions need an NDJSON ledger of their own stays open as OI-1873.
 
 **2026-06-13 — Hash-chain pointer (ADR-023, 1.0.1).** An experimental opt-in hash-chain (ADR-023, 1.0.1) adds tamper-evidence on the append_receipt path.
 
@@ -44,7 +44,6 @@ Concrete rules:
   - `.vnx-data/state/dispatch_register.ndjson` — dispatch lifecycle (created → promoted → active → closed)
   - `.vnx-data/events/T{n}.ndjson` — per-terminal subprocess events (ring buffer; durable archive at `.vnx-data/events/archive/{terminal}/{dispatch_id}.ndjson`)
   - `.vnx-data/state/review_gates/results/*.json` — one file per review-gate result
-  - `.vnx-data/state/incident_log.ndjson` — incident transitions (where applicable; as of 2026-09-26 no writer of this file exists and incident state lives in the `incident_log` table of `runtime_coordination.db`, see Amendments)
 - SQLite tables that mirror ledger content (e.g. `dispatch_tracker`, `runtime_coordination` projections of leases/heartbeats) are **derived state**. They may be rebuilt from the ledger on disk; the ledger may not be rebuilt from them.
 - If a system crash leaves the SQLite mirror inconsistent with the ledger, the ledger wins. Recovery procedures replay the ledger forward; they do not back-port from SQLite.
 - New observability adapters (OTel CloudEvents export per industry-research Topic 14, Datadog/Honeycomb/Grafana ingest) are **parallel exporters** off the ledger writer — they do not replace the canonical NDJSON files. Per the strategic-replan §5 A6.
