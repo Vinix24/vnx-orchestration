@@ -36,8 +36,8 @@ Supported values:
 
 | Mode | VNX_ADAPTER_T0 | VNX_ADAPTER_T1/T2/T3 | Launch command |
 |------|----------------|----------------------|----------------|
-| 1. All interactive | tmux (unset) | tmux | `vnx start` |
-| 2. Interactive T0 + headless workers | tmux (unset) | subprocess | `VNX_ADAPTER_T1=subprocess VNX_ADAPTER_T2=subprocess VNX_ADAPTER_T3=subprocess vnx start` |
+| 1. All interactive | tmux (unset) | tmux (explicit opt-out) | `VNX_ADAPTER_T1=tmux VNX_ADAPTER_T2=tmux VNX_ADAPTER_T3=tmux vnx start` |
+| 2. Interactive T0 + headless workers | tmux (unset) | subprocess (unset, this is the default) | `vnx start` |
 | 3. All headless | subprocess | subprocess | `VNX_ADAPTER_T0=subprocess VNX_ADAPTER_T1=subprocess VNX_ADAPTER_T2=subprocess VNX_ADAPTER_T3=subprocess python3 scripts/headless_orchestrator.py` |
 | 4. Headless T0 + interactive workers | subprocess | tmux | `VNX_ADAPTER_T0=subprocess vnx start` |
 

@@ -46,7 +46,7 @@ events_path = .vnx-data/events/archive/{terminal}/{dispatch_id}.ndjson
 
 For multi-provider dispatches, the GOVERN step archives the live stream and records its path on the receipt. The receipt → stream linkage is an explicit data pointer, not a filename convention you have to reconstruct from the `dispatch_id`.
 
-The value is `null` for lanes that produce no per-terminal stream (tmux, claude subprocess) or when the archive step was skipped. Tmux worker-authored completion receipts (written by the worker via the completion command) omit `events_path` entirely — the key is absent, not null. For receipts without a stream, the receipt itself, the unified report, and the dispatch register carry the trail.
+The value is `null` for lanes that produce no per-terminal stream (the tmux adapter, claude headless, claude subprocess) or when the archive step was skipped. Historical: the removed tmux-spawn worker lane's worker-authored completion receipts (written by the worker via the completion command) used to omit `events_path` entirely, the key absent rather than null. Today only the terminal-pinned tmux adapter (T0, unless `VNX_ADAPTER_T0=subprocess`) is left in that no-stream category. For receipts without a stream, the receipt itself, the unified report, and the dispatch register carry the trail.
 
 To walk from a receipt to its events: read `events_path` from the receipt line and open that archive file. To walk the other way, the archive filename already encodes `{terminal}` and `{dispatch_id}`, which match the receipt's `terminal_id` and `dispatch_id`. See `docs/core/11_RECEIPT_FORMAT.md` for the field and ADR-005 for why the linkage is explicit.
 

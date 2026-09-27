@@ -246,7 +246,7 @@ The receipt object written by `emit_dispatch_receipt` (the governed path) before
 |---|---|---|
 | `dispatch_id` | string | Dispatch identifier, format `YYYYMMDD-HHMMSS-<slug>`. |
 | `terminal_id` | string | Terminal that ran the work (`T0`–`T3`). |
-| `provider` | string | Routing provider. Validated against a fixed pattern: `claude`, `codex`, `gemini`, `kimi`, `deepseek-harness`, `litellm[:model[:tag]]`, `local-gemma`. A non-matching provider raises `ValueError` at emit time. |
+| `provider` | string | Routing provider. Validated against a fixed pattern: `claude`, `codex`, `gemini`, `kimi`, `deepseek-harness`, `glm-harness`, `litellm[:model[:tag]]`, `local-gemma`. A non-matching provider raises `ValueError` at emit time. |
 | `model` | string | Concrete model name (e.g. `claude-sonnet-4.6`, `gpt-5-codex`). |
 | `status` | string | Dispatch outcome (`success`, `failed`, and lane-specific states). Reflects actual outcome — not hardcoded; see "Status truth" below. |
 | `completion_pct` | integer | 100 on success, 0 otherwise (governed path). |
