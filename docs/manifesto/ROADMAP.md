@@ -82,6 +82,8 @@ Key deliverables: `pool_manager.py`, `vnx_workers.yaml`, ADR-018.
 
 Five providers in production: Claude, Codex CLI, Gemini CLI, Kimi CLI (OAuth), LiteLLM bridge (DeepSeek V4-Pro/V4-Flash, GLM-5.2 via OpenRouter). Uniform receipt + report shape across all 5 providers. Intelligence injection, token + cost tracking, and quality gates equal first-class for every provider. Reproducible benchmark suite: 9 models × 7 tasks with routing recommendations.
 
+This is the historical shipped-state at the time of Wave 7. It has since moved: Gemini CLI is a worker lane only, no longer a review gate (`RETIRED_GATE_NAMES`, operator decision 2026-09-26); the GLM allowlist is `glm-5.2`/`glm-5.3`/`glm-5.3-flash` (`glm-5.2` still the default).
+
 Key deliverables: `litellm_spawn.py`, `provider_governance.py`, `vnx.env`, `routing_recommendations.yaml`, ADR-015.
 
 ### Wave 8 — Smart Router + Schema Enforcement
@@ -227,7 +229,7 @@ Success criteria: T0 makes correct dispatch/complete/wait decisions autonomously
 
 ## 4-Gate Enforcement Framework
 **Status**: `Next`
-**Why**: Research complete in `claudedocs/4-gate-research-deep-dive-2026-05-18.md` + shift-left QA addendum. Triple gate (codex + gemini + CI) is validated; extending to a 4th deterministic gate with shift-left enforcement.
+**Why**: The review-gate stack that this item builds on has since changed: the default is `codex_gate,kimi_gate` (both subscription reviewers), with `glm_gate`/`deepseek_gate` as API-credit fallback only; Gemini is no longer a review gate. Extending to a 4th deterministic gate with shift-left enforcement remains open.
 
 **Goals**
 - Specify and implement the 4th gate (shift-left pre-dispatch quality signal)
@@ -244,7 +246,7 @@ Success criteria: T0 makes correct dispatch/complete/wait decisions autonomously
 
 ## Wave 9 — VNX-Dispatcher MVP
 **Status**: `Next`
-**Why**: Research complete in `claudedocs/vnx-dispatcher-strategic-research.md`. Next architectural milestone after centralization — standalone dispatcher replacing the shell-script dispatch loop.
+**Why**: Next architectural milestone after centralization — standalone dispatcher replacing the shell-script dispatch loop.
 
 **Goals**
 - VNX-Dispatcher as a deployable standalone service
@@ -313,13 +315,10 @@ Success criteria: T0 makes correct dispatch/complete/wait decisions autonomously
 ---
 
 ## 8) Schema Versioning for Dispatch/Receipt Contracts
-**Status**: `Next`  
-**Why**: Contract evolution needs explicit compatibility guarantees.
+**Status**: `Completed` — receipt v2 (ADR-035, Accepted 2026-07-22)
+**Why**: Contract evolution needed explicit compatibility guarantees.
 
-**Goals**
-- Add versioned schemas for dispatch and receipt formats.
-- Enforce compatibility checks in CI.
-- Publish migration notes for breaking changes.
+Receipts carry `schema_version: 2` with `verdict{}`, `verification{}`, and `warnings[]` with an enforced destination rule; a pull-model query interface (`receipt_query.py`) replaced push delivery. See ADR-035 for the full field surface and its known follow-ups.
 
 ---
 
@@ -333,19 +332,10 @@ Success criteria: T0 makes correct dispatch/complete/wait decisions autonomously
 - Keep CLI behavior stable while improving maintainability.
 
 ## 10) Terminal Input-Ready Mode Guard
-**Status**: `Next`
+**Status**: `Completed`
 **Why**: Mouse-enabled tmux environments can leave a pane in copy/search mode, and slash-prefixed dispatches can then be swallowed by tmux itself.
 
-**Goals**
-- Detect `pane_in_mode` before dispatch.
-- Recover safely when a pane can be returned to normal input mode.
-- Fail closed when input readiness cannot be proven.
-- Add certification that reproduces the real `search down` dispatch-corruption path.
-
-**Success Criteria**
-- Slash-prefixed dispatches are never sent blindly into a non-normal tmux mode.
-- Recovery vs blocked delivery is explicit and auditable.
-- The `search down` failure mode has a permanent regression test.
+`scripts/lib/input_mode_guard.sh` detects `pane_in_mode` before dispatch and fails closed when input readiness cannot be proven. Contract: `docs/core/110_INPUT_READY_TERMINAL_CONTRACT.md` (Status: Canonical).
 
 ---
 
@@ -353,7 +343,7 @@ Success criteria: T0 makes correct dispatch/complete/wait decisions autonomously
 
 ### Gate Locks v2
 **Status**: `Next`
-**Why**: Gate locks currently cover codex/gemini review gates. Extend to CI green status, business compliance gates, and PR approval state.
+**Why**: A gate-locks primitive exists (`scripts/f39/gate_locks.py`, part of the F39 benchmark harness) but has no production caller — it does not cover any live review gate today. Building a locking layer that does cover CI green status, business compliance gates, and PR approval state is still open.
 
 **Goals**
 - Lock source: pull gate status from GitHub API / CI webhook, not manual file writes.
@@ -472,9 +462,7 @@ Success criteria: T0 makes correct dispatch/complete/wait decisions autonomously
 
 The active feature roadmap is the tracks database, operated through the `vnx objective` CLI (tracks, horizons, plan gates, deliverables). The repo-root `ROADMAP.yaml` is a generic example of the machine-readable roadmap format; `FEATURE_PLAN.md` and `PR_QUEUE.md` are views generated from it by `scripts/build_feature_plan.py` / `scripts/build_pr_queue.py`. The document you are reading captures the architecture principles and wave history; the public per-release summary is [`ROADMAP.md`](../../ROADMAP.md).
 
-**1.0.1 focus:** operational hardening and provider reliability. Key items include Kimi content-block regression suite, log-rotation bounds for the event-stream ring buffer, tmux submit reliability hardening, and completion of the unified dispatch envelope for the Claude subprocess lane. (Per-append hash-chain enforcement shipped in #840; self-learning loop reactivation shipped in #850.)
-
-**1.1 focus:** architectural extensibility. Key items include the full unified dispatch envelope across all lanes (`VNX_UNIFIED_ENVELOPE`), full role-to-capability binding (MCP allowlist, per-role permission mode), and OpenRouter as a provider lane.
+The per-milestone forward plan (what ships in the next point release) lives in the tracks database, not in this document — it moves too often to keep in sync here. Check `vnx objective` for the current state.
 
 ## Roadmap Guardrails
 
