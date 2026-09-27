@@ -10,7 +10,7 @@
 This document is the single source of truth for the dashboard's data contract, operator questions, safe actions, read-model boundaries, and degraded-state handling. All downstream PRs (PR-1 through PR-4) implement against this contract.
 
 Related contracts:
-- [130_RUNTIME_STATE_MACHINE_CONTRACT](130_RUNTIME_STATE_MACHINE_CONTRACT.md) — worker states, heartbeat, stall detection
+- [131_RUNTIME_STATE_MACHINE_CONTRACT](131_RUNTIME_STATE_MACHINE_CONTRACT.md) — worker states, heartbeat, stall detection
 - [120_PROJECTION_CONSISTENCY_CONTRACT](120_PROJECTION_CONSISTENCY_CONTRACT.md) — canonical vs projected surface truth
 - [80_TERMINAL_EXCLUSIVITY_CONTRACT](80_TERMINAL_EXCLUSIVITY_CONTRACT.md) — dispatch safety and lease exclusivity
 

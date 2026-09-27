@@ -67,7 +67,7 @@ whole body in `try/except Exception` — "best-effort — NEVER raises" per its 
 
 | Flag | Default | Resolution | Code |
 |------|---------|------------|------|
-| `VNX_SCOUT_PREPASS` | `"0"` (off), category `intelligence` | `scout_prepass_enabled()` reads it through `config_runtime.get_bool()` — honours an operator dashboard/DB toggle, falls back to env, falls back to the registry default | `scripts/lib/config_registry.py:51-53`, `scripts/lib/scout_prepass.py:268-272` |
+| `VNX_SCOUT_PREPASS` | `"0"` (off), category `intelligence` | `scout_prepass_enabled()` reads it through `config_runtime.get_bool()` — honours an operator dashboard/DB toggle, falls back to env, falls back to the registry default | `scripts/lib/config_registry.py:84-85`, `scripts/lib/scout_prepass.py:287-291` |
 
 **Current state for `vnx-dev`**: the registry default stays `"0"` — a per-project operator decision,
 not a code default change. The operator has flipped this flag ON for `vnx-dev` through the config
@@ -85,27 +85,29 @@ a quick local trial).
 
 ## Scope/lane gate — `_scout_gate_ok()`
 
-`scripts/lib/scout_prepass.py:285-304`. Even with the flag on, the scout skips:
+`scripts/lib/scout_prepass.py:307-323` (`_scout_gate_ok()`). Even with the flag on, the scout skips:
 
-- Dispatches touching fewer than `VNX_SCOUT_MIN_PATHS` paths (env, default `2` — `_DEFAULT_MIN_PATHS`, `scout_prepass.py:255`).
-- Instructions shorter than 40 characters (`_MIN_INSTRUCTION_CHARS`, `scout_prepass.py:256`).
-- `task_class` in `{docs_synthesis, channel_response, ops_watchdog}` — `_SKIP_TASK_CLASSES` (`scout_prepass.py:258`): no source to rank.
-- `lane == "claude_headless"` — `_SKIP_LANES` (`scout_prepass.py:261`): the rare API-metered opt-in path; the scout never spends a call there.
+- Instructions shorter than the applicable minimum: 40 characters when the dispatch has paths
+  (`_MIN_INSTRUCTION_CHARS`, `scout_prepass.py:275`), 80 characters when it does not
+  (`_MIN_INSTRUCTION_CHARS_PATHLESS`, `scout_prepass.py:265`) — a pathless dispatch is scouted via
+  instruction-driven discovery (git-grep over the repo for salient terms), so it needs a richer
+  instruction to discover from. There is no longer a minimum-paths check — an earlier
+  `VNX_SCOUT_MIN_PATHS` / `_DEFAULT_MIN_PATHS` gate has been removed from the code.
+- `task_class` in `{docs_synthesis, channel_response, ops_watchdog}` — `_SKIP_TASK_CLASSES` (`scout_prepass.py:277`): no source to rank.
+- `lane == "claude_headless"` — `_SKIP_LANES` (`scout_prepass.py:280`): `claude_headless` is the only claude lane and runs on the subscription (not API-metered); it is skipped so the scout never spends a call on a subscription-lane dispatch, not because that lane is rare or API-billed. The code comment at that line still calls it "the rare API-metered opt-in path" — that wording is stale and should be corrected in the code (filed as a separate open item, not a docs fix).
 
-**Note**: `VNX_SCOUT_PROVIDER` (`_scout_provider_name`, `scout_prepass.py:275-282`) and
-`VNX_SCOUT_MIN_PATHS` (`scout_prepass.py:293`) are read via plain `os.environ.get`, **not** through
-`config_runtime` — only the top-level enable flag is dashboard-flippable today. Flipping the
-dashboard toggle does not change the provider or the path threshold; those still require an env
-var. This split is intentional (infra-level tuning vs. an operator feature switch) but is worth
-knowing if a dashboard flip doesn't change behavior the way you expect.
+**Note**: `VNX_SCOUT_PROVIDER` (`_scout_provider_name`, `scout_prepass.py:294-303`) is now also read
+through `config_runtime.get()`, the same as the top-level enable flag — an operator's dashboard
+toggle for the provider is honoured, absent a UI value it falls back to env/default. The former
+`VNX_SCOUT_MIN_PATHS` env var no longer exists in the code (see above).
 
 ## Provider allowlist — never a subscription lane
 
 `_ALLOWED_SCOUT_PROVIDERS = frozenset({"deepseek", "ollama", "gemini", "codex"})`
-(`scout_prepass.py:265`). `_scout_provider_name()` default-denies anything outside this set
+(`scout_prepass.py:284`). `_scout_provider_name()` default-denies anything outside this set
 (including `haiku`, a subscription lane) and falls back to `deepseek`. This mirrors a hard
 constraint stated directly in the module comments: the scout must NEVER run on a claude/subscription
-lane, only a cheap key-auth classifier lane (`scout_prepass.py:248-253, 259-265`).
+lane, only a cheap key-auth classifier lane (`scout_prepass.py:262-284`).
 
 ## Anti-hallucination: snap-to-candidates
 

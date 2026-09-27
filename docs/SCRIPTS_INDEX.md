@@ -1,7 +1,7 @@
 # VNX Scripts Index
 
 **Status**: Active  
-**Last Updated**: 2026-04-10  
+**Last Updated**: 2026-09-27  
 **Owner**: VNX Maintainer  
 **Purpose**: High-level map of the active script surface in this repository.
 
@@ -12,7 +12,6 @@
 - `scripts/commands/` contains shell entrypoints used by `bin/vnx`.
 - `scripts/` contains operational scripts, daemons, utilities, and helpers.
 - `scripts/lib/` contains the reusable implementation modules that power the CLI and runtime.
-- `scripts/_archive/` — retired scripts directory (not present on disk; retired scripts are deleted, not archived).
 
 This index is intentionally concise. It points you to the canonical areas instead of trying to document every internal helper inline.
 
@@ -35,9 +34,10 @@ These files implement the main `bin/vnx` command surface:
 
 Core dispatch/runtime orchestration:
 
-- `scripts/dispatcher_minimal.sh` — main dispatch delivery entrypoint
+- `scripts/commands/dispatch.sh` + `scripts/lib/dispatch_cli.py` — the single-entry dispatch door (`vnx dispatch`); decides the lane (`claude_headless`, `kimi`/`glm-harness`/`deepseek-harness` via `scripts/lib/provider_dispatch.py`) and stages/fires the dispatch
 - `scripts/pr_queue_manager.py` — queue and promotion management
 - `scripts/open_items_manager.py` — open-item creation, digestion, and rescan flow
+- `scripts/pr_merge.py` — the only sanctioned merge path (writes the `pr_merged` receipt; a bare `gh pr merge` does not)
 - `scripts/runtime_core_cli.py` — runtime-core operator tooling
 - `scripts/runtime_cutover_check.py` — runtime-core certification/validation checks
 - `scripts/rollback_runtime_core.py` — runtime-core rollback helper
@@ -48,6 +48,8 @@ Key implementation modules:
 - `scripts/lib/runtime_state_machine.py`
 - `scripts/lib/dispatch_router.py`
 - `scripts/lib/dispatch_broker.py`
+- `scripts/lib/dispatch_envelope.py` — headless envelope lane (`claude_headless`), isolated worktree per dispatch
+- `scripts/lib/gate_lane_contract.py` — per-gate lane/diff-size contract (e.g. `max_diff_chars`)
 - `scripts/lib/lease_manager.py`
 - `scripts/lib/runtime_reconciler.py`
 - `scripts/lib/tmux_adapter.py`
@@ -60,8 +62,7 @@ These scripts process worker outputs into auditable receipts:
 
 - `scripts/append_receipt.py` — canonical receipt append helper
 - `scripts/report_parser.py` — parse report markdown into structured receipt fields
-- `scripts/report_watcher.sh` — watch reports and trigger receipt processing
-- `scripts/receipt_processor.sh` — receipt processing and T0 delivery pipeline
+- `scripts/receipt_processor.sh` — receipt processing and T0 delivery pipeline (`scripts/report_watcher.sh` is a deprecated `exit 0` stub kept only as a historical marker; it is replaced by this script)
 - `scripts/heartbeat_ack_monitor.py` — receipt/ACK confirmation monitoring
 
 Related docs:

@@ -1,36 +1,34 @@
 # VNX Intelligence System - Technical Reference
-**Last Updated**: 2026-03-28
+**Last Updated**: 2026-09-27
 **Owner**: T-MANAGER
 **Purpose**: Documentation for VNX Intelligence System - Technical Reference.
 
 **Version**: 5.0.0
-**Date**: 2026-03-28
+**Date**: 2026-09-27
 **Status**: Active
 **Maintainer**: T-MANAGER
 
 ## Table of Contents
 1. [Overview](#overview)
 2. [System Architecture](#system-architecture)
-3. [Agent Validation](#agent-validation)
-4. [Pattern Matching Engine](#pattern-matching-engine)
-5. [Documentation Ingestion](#documentation-ingestion)
-6. [Prevention Rules](#prevention-rules)
-7. [Tag Intelligence](#tag-intelligence)
-8. [Learning Loop](#learning-loop)
-9. [Governance Measurement](#governance-measurement)
-10. [Performance & Caching](#performance--caching)
-11. [Integration](#integration)
-12. [Operations](#operations)
-13. [Testing](#testing)
+3. [Pattern Matching Engine](#pattern-matching-engine)
+4. [Documentation Ingestion](#documentation-ingestion)
+5. [Prevention Rules](#prevention-rules)
+6. [Tag Intelligence](#tag-intelligence)
+7. [Learning Loop](#learning-loop)
+8. [Governance Measurement](#governance-measurement)
+9. [Performance & Caching](#performance--caching)
+10. [Integration](#integration)
+11. [Operations](#operations)
+12. [Testing](#testing)
 
 ---
 
 ## Overview
 
-The VNX Intelligence System provides automated intelligence gathering and validation for the VNX orchestration system. It enriches dispatches with relevant code patterns, prevention rules, and agent validation to improve task execution quality across T1/T2/T3 terminals.
+The VNX Intelligence System provides automated intelligence gathering for the VNX orchestration system. It enriches dispatches with relevant code patterns and prevention rules to improve task execution quality across T1/T2/T3 terminals.
 
 ### Key Capabilities
-- **Agent Validation**: Validates agent names before dispatch (100% prevention of invalid agents)
 - **Pattern Matching**: Queries code patterns + doc sections with relevance scoring (60-80% relevance)
 - **Documentation Ingestion**: Indexes markdown documentation into FTS5 alongside code patterns
 - **Language-Aware Filtering**: Routes doc tasks to markdown sections, code tasks to Python snippets
@@ -117,87 +115,6 @@ The VNX Intelligence System provides automated intelligence gathering and valida
 │  • Prevention warnings                                  │
 │  • Validated agent configurations                       │
 └─────────────────────────────────────────────────────────┘
-```
-
----
-
-## Agent Validation
-
-### Purpose
-Prevents invalid agent dispatches that would fail at terminal execution by validating agent names against the official agent directory.
-
-### Implementation
-
-**Version**: 1.0.0 (PR #1)
-**File**: `scripts/gather_intelligence.py` (lines 139-167)
-**Validation Source**: `.claude/terminals/library/templates/agents/agent_template_directory.yaml`
-
-### Valid Agents (as of v8.0)
-- `orchestrator-t0` - T0 orchestrator
-- `analyst` - Investigation specialist
-- `debugging-specialist` - Bug resolution
-- `architect` - System design
-- `developer` - General development
-- `senior-developer` - Advanced development
-- `performance-engineer` - Optimization
-- `quality-engineer` - Testing & validation
-- `security-engineer` - Security analysis
-- `refactoring-expert` - Code quality
-- `integration-specialist` - System integration
-- `junior-developer` - Learning tasks
-
-### Validation Process
-
-```python
-def validate_agent(agent_name: str) -> Dict[str, Any]:
-    """
-    Validates agent name against directory.
-    Returns: {
-        "valid": bool,
-        "agent": str,
-        "suggestion": str (if invalid)
-    }
-    """
-    # Load agent directory
-    agents = load_agent_directory()
-
-    # Check exact match
-    if agent_name in agents:
-        return {"valid": True, "agent": agent_name}
-
-    # Find closest match (Levenshtein distance)
-    suggestion = find_closest_match(agent_name, agents)
-
-    return {
-        "valid": False,
-        "agent": agent_name,
-        "suggestion": suggestion
-    }
-```
-
-### Error Handling
-
-When validation fails:
-1. Dispatcher logs error with suggested agent
-2. Dispatch moved to `dispatches/rejected/` with error annotation
-3. T0 can see rejection in logs: `tail -f .claude/vnx-system/logs/dispatcher.log`
-4. Suggested agent provided for correction
-
-### Testing
-
-```bash
-# List valid agents
-python3 .claude/vnx-system/scripts/gather_intelligence.py list-agents
-
-# Validate specific agent
-python3 .claude/vnx-system/scripts/gather_intelligence.py validate developer
-
-# Expected output for valid agent:
-# ✅ Agent 'developer' is valid
-
-# Expected output for invalid agent:
-# ❌ Agent 'devloper' is invalid
-# 💡 Did you mean: 'developer'?
 ```
 
 ---
@@ -488,7 +405,6 @@ The daemon calls `doc_section_extractor.py` after `code_snippet_extractor.py` du
 ### Testing
 
 ```bash
-cd .claude/vnx-system
 python3 -m pytest tests/test_doc_section_extractor.py -v
 # 13 tests: frontmatter, splitting, scoring, categorization, tags, env config, E2E pipeline
 ```
@@ -1074,8 +990,7 @@ Replaces self-reported terminal status with objective, calculated quality scores
 
 **Version**: 1.1 (2026-03-07)
 **Schema**: 8.2.0-cqs-advisory-oi
-**Files**: `cqs_calculator.py`, `governance_aggregator.py`, `open_items_manager.py`
-**Full Reference**: `docs/intelligence/GOVERNANCE_MEASUREMENT.md`
+**Files**: `scripts/lib/cqs_calculator.py`, `scripts/governance_aggregator.py`, `scripts/open_items_manager.py`
 
 ### Why This Exists
 
@@ -1293,11 +1208,14 @@ python3 cached_intelligence.py stats
 
 ### Dispatcher Integration (V7.4)
 
-The dispatcher calls `gather_intelligence.py` for **every dispatch**:
+The dispatcher calls `gather_intelligence.py` for **every dispatch**. The current callers are
+`scripts/dispatcher_minimal.sh`, `scripts/receipt_processor.sh`, and
+`scripts/userpromptsubmit_worker_intelligence_inject.sh`; the read-path injection itself goes
+through `scripts/lib/intelligence_selector.py`'s `IntelligenceSelector.select()`
+(see `docs/core/DISPATCH_AND_INTELLIGENCE_ARCHITECTURE.md` §7). The shape below is illustrative
+of the JSON contract, not a literal shell excerpt from a shipped file:
 
 ```bash
-# dispatcher_v7_compilation.sh (line 485-512)
-
 # Gather intelligence for dispatch
 INTEL_JSON=$(python3 "$VNX_DIR/scripts/gather_intelligence.py" gather \
   "$TASK_DESCRIPTION" "$TRACK" "$AGENT_ROLE" 2>/dev/null)
@@ -1363,7 +1281,7 @@ Terminals can query intelligence directly:
 
 ```bash
 # From T1/T2/T3 terminal
-python3 ../.claude/vnx-system/scripts/gather_intelligence.py patterns \
+python3 scripts/gather_intelligence.py patterns \
   "implement SSE cleanup"
 
 # Returns pattern JSON
@@ -1397,7 +1315,7 @@ def run_learning_cycle():
 #### Check Intelligence Health
 ```bash
 # View dashboard status
-cat .claude/vnx-system/state/dashboard_status.json | jq '.intelligence'
+cat $VNX_STATE_DIR/dashboard_status.json | jq '.intelligence'
 
 # Expected output:
 # {
@@ -1412,7 +1330,7 @@ cat .claude/vnx-system/state/dashboard_status.json | jq '.intelligence'
 #### Monitor Dispatcher Integration
 ```bash
 # Check dispatcher logs for intelligence calls
-tail -f .claude/vnx-system/logs/dispatcher.log | grep "Intelligence"
+tail -f $VNX_LOGS_DIR/dispatcher.log | grep "Intelligence"
 
 # Expected output:
 # [2026-01-26 12:30:00] Intelligence: Gathered 5 patterns for task
@@ -1423,7 +1341,7 @@ tail -f .claude/vnx-system/logs/dispatcher.log | grep "Intelligence"
 #### Check Pattern Usage
 ```bash
 # View pattern usage statistics
-sqlite3 .claude/vnx-system/state/quality_intelligence.db \
+sqlite3 $VNX_STATE_DIR/quality_intelligence.db \
   "SELECT pattern_id, used_count, confidence
    FROM pattern_usage
    ORDER BY used_count DESC LIMIT 10"
@@ -1444,7 +1362,7 @@ python3 scripts/gather_intelligence.py patterns "test task"
 # Check database connectivity
 python3 -c "
 import sqlite3
-conn = sqlite3.connect('.claude/vnx-system/state/quality_intelligence.db')
+conn = sqlite3.connect('$VNX_STATE_DIR/quality_intelligence.db')
 cursor = conn.cursor()
 cursor.execute('SELECT COUNT(*) FROM code_snippets')
 print(f'Patterns in DB: {cursor.fetchone()[0]}')
@@ -1461,7 +1379,7 @@ print(f'Patterns in DB: {cursor.fetchone()[0]}')
 **Symptoms**:
 ```bash
 # Dispatcher rejecting all agents
-ls .claude/vnx-system/dispatches/rejected/
+ls $VNX_DATA_DIR/dispatches/rejected/
 ```
 
 **Diagnosis**:
@@ -1474,7 +1392,7 @@ python3 scripts/gather_intelligence.py validate "problem-agent"
 ```
 
 **Solutions**:
-1. Verify agent directory exists: `.claude/terminals/library/templates/agents/agent_template_directory.yaml`
+1. Verify `skills/skills.yaml` exists and lists the expected skill names (`load_agent_directory()` in `scripts/lib/agent_directory_loader.py` reads it first; a legacy `.claude/terminals/library/templates/agents/agent_template_directory.yaml` is only consulted as a fallback and is not present in this repo)
 2. Check agent name spelling (case-sensitive)
 3. Use suggested agent from validation output
 
@@ -1509,7 +1427,7 @@ print(f'TTL: {cache.pattern_cache_ttl} seconds')
 ### Test Suite Structure
 
 ```
-.claude/vnx-system/tests/
+tests/
 ├── test_pattern_matching.py          # Pattern engine tests
 ├── test_agent_validation.py          # Agent validation tests
 ├── test_doc_section_extractor.py     # Doc ingestion tests (13 tests)
@@ -1523,7 +1441,6 @@ print(f'TTL: {cache.pattern_cache_ttl} seconds')
 
 ```bash
 # Run all intelligence tests
-cd .claude/vnx-system
 python3 -m pytest tests/test_*intelligence*.py -v
 
 # Run specific test suite
@@ -1546,19 +1463,8 @@ Current coverage:
 ### Integration Testing
 
 ```bash
-# End-to-end intelligence flow test
-python3 tests/test_intelligence_integration.py
-
-# Expected output:
-# ✅ Agent validation working
-# ✅ Pattern matching returning 5 patterns
-# ✅ Prevention rules generated (3 rules)
-# ✅ Tags extracted (7 tags)
-# ✅ Quality context populated
-# ✅ Cache working (hit rate: 87%)
-# ✅ Learning loop adjusting confidence
-#
-# All integration tests passed!
+# End-to-end intelligence flow tests
+python3 -m pytest tests/test_intelligence_pipeline_e2e.py tests/integration/test_intelligence_loop_e2e.py -v
 ```
 
 ---
@@ -1568,12 +1474,12 @@ python3 tests/test_intelligence_integration.py
 ### Files Reference
 
 #### Core Scripts
-- `.claude/vnx-system/scripts/gather_intelligence.py` - Main intelligence engine with language-aware filtering
-- `.claude/vnx-system/scripts/code_snippet_extractor.py` - Python code pattern extraction
-- `.claude/vnx-system/scripts/doc_section_extractor.py` - Markdown documentation section extraction
-- `.claude/vnx-system/scripts/learning_loop.py` - Learning & confidence adjustment
-- `.claude/vnx-system/scripts/cached_intelligence.py` - Performance caching layer
-- `.claude/vnx-system/scripts/intelligence_daemon.py` - Daemon integration (orchestrates all extractors)
+- `scripts/gather_intelligence.py` - Main intelligence engine with language-aware filtering
+- `scripts/code_snippet_extractor.py` - Python code pattern extraction
+- `scripts/doc_section_extractor.py` - Markdown documentation section extraction
+- `scripts/learning_loop.py` - Learning & confidence adjustment
+- `scripts/cached_intelligence.py` - Performance caching layer
+- `scripts/intelligence_daemon.py` - Daemon integration (orchestrates all extractors)
 
 #### Database
 - `$VNX_STATE_DIR/quality_intelligence.db` - SQLite database
@@ -1583,13 +1489,13 @@ python3 tests/test_intelligence_integration.py
   - FTS5 full-text search indexes
 
 #### Configuration
-- `.claude/terminals/library/templates/agents/agent_template_directory.yaml` - Valid agents
-- `.claude/vnx-system/state/dashboard_status.json` - System health metrics
+- `skills/skills.yaml` - Valid agent/skill names (primary source; `agent_template_directory.yaml` fallback path is not present in this repo)
+- `$VNX_STATE_DIR/dashboard_status.json` - System health metrics
 
 #### Logs & Reports
-- `.claude/vnx-system/logs/dispatcher.log` - Dispatcher intelligence calls
-- `.claude/vnx-system/state/learning_report_*.json` - Daily learning reports
-- `.claude/vnx-system/state/archive/patterns/` - Archived patterns
+- `$VNX_LOGS_DIR/dispatcher.log` - Dispatcher intelligence calls
+- `$VNX_STATE_DIR/learning_report_*.json` - Daily learning reports
+- `$VNX_STATE_DIR/archive/patterns/` - Archived patterns
 
 ### Performance Benchmarks
 

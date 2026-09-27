@@ -284,38 +284,14 @@ Based on the capability matrix, each provider is classified into a **visibility 
 
 ### 5.6 Provider Capability Declaration
 
-Each provider type must declare its capabilities at registration:
-
-```python
-PROVIDER_CAPABILITIES = {
-    "headless_claude_cli": {
-        "visibility_level": "L2",  # L3 when --output-format json
-        "tool_call_visibility": False,  # True with json output
-        "structured_progress": False,
-        "output_streaming": True,
-        "exit_code_semantic": True,
-        "stderr_diagnostic": True,
-    },
-    "headless_codex_cli": {
-        "visibility_level": "L1",
-        "tool_call_visibility": False,
-        "structured_progress": False,
-        "output_streaming": False,  # May buffer
-        "exit_code_semantic": True,
-        "stderr_diagnostic": True,
-    },
-    "headless_gemini_cli": {
-        "visibility_level": "L2",
-        "tool_call_visibility": False,
-        "structured_progress": False,
-        "output_streaming": True,
-        "exit_code_semantic": True,
-        "stderr_diagnostic": False,  # Partial
-    },
-}
-```
-
-Unknown providers default to `L0` (Opaque) until explicitly registered.
+This section is the original PR-0 design. What shipped is `scripts/lib/provider_observability.py`:
+a `PROVIDER_REGISTRY` dict keyed by `claude_code` / `gemini` / `codex_cli` / `output_only` (no
+`headless_*_cli` keys), each a `ProviderCapabilities` dataclass with four flags
+(`tool_call_visibility`, `structured_progress_events`, `output_only_fallback`, `can_attach`).
+`observability_quality()` derives a three-way `ObservabilityQuality` (`rich` / `structured` /
+`output_only`) rather than the four-level `L0`-`L3` scheme in §5.4-§5.5 above; `progress_confidence()`
+maps that to `"high"` / `"medium"` / `"low"` (no `"none"` level — unknown providers fall back to
+`output_only` via `UNKNOWN_PROVIDER_CAPABILITIES`, not to a separate opaque tier).
 
 ### 5.7 Tool-Call Visibility (L3) Detail
 

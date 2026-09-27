@@ -9,6 +9,15 @@
 
 This document is the single source of truth for provider and model routing in VNX dispatches. All downstream PRs (PR-1 through PR-4) implement against this contract. Any component that selects a provider, switches a model, or records runtime identity must conform to the rules defined here.
 
+**Scope note**: this contract governs the `Requires-Provider` / `Requires-Model` text-header path.
+That path is still read by `scripts/pr_queue_manager.py`, `scripts/roadmap_manager.py`,
+`scripts/lib/review_contract.py`, `scripts/generate_t0_recommendations.py`, and the tmux-path
+scripts (`dispatch_metadata.sh`, `provider_routing.sh`). It is not consulted by the current
+single-entry dispatch door (`vnx dispatch` / `dispatch_cli.py` / `dispatch_plan.py`), which routes
+on provider strings (`claude`, `codex`, `kimi`, `glm-harness`, `deepseek-harness`, `litellm:*`) —
+see `docs/core/DISPATCH_RULES.md`. The `claude_code`/`codex_cli`/`gemini_cli` provider vocabulary
+below belongs to the legacy header path, not the door.
+
 ---
 
 ## 1. Why This Exists

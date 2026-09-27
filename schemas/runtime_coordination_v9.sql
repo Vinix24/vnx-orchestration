@@ -1,6 +1,6 @@
 -- VNX Runtime Coordination Schema — Migration v9 (Feature 12, PR-1)
 -- Purpose: Add worker_states table for canonical worker lifecycle tracking.
--- Contract: docs/core/130_RUNTIME_STATE_MACHINE_CONTRACT.md §8.1
+-- Contract: docs/core/131_RUNTIME_STATE_MACHINE_CONTRACT.md §8.1
 -- Applies on top of: v8 (Headless Observability PR-1) — headless run registry
 --
 -- Design:

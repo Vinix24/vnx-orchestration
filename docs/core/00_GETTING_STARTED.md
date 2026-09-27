@@ -85,7 +85,6 @@ For global `vnx` access from any project directory:
 ./bin/vnx install-shell-helper   # Adds vnx() to ~/.zshrc or ~/.bashrc
 ```
 
-The helper walks up from CWD to find the project-local `.vnx/bin/vnx` or
-`.claude/vnx-system/bin/vnx` (legacy layout).
+The helper walks up from CWD to find the project-local `.vnx/bin/vnx` (primary, created by `vnx_install.py` in a consumer project) or `.claude/vnx-system/bin/vnx` (legacy layout). Neither exists in the vnx-orchestration repo itself — its own entrypoint is `./bin/vnx` at the repo root; this helper is for projects where VNX has been installed as a consumer.
 
 ---

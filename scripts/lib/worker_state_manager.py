@@ -3,7 +3,7 @@
 VNX Worker State Manager — Canonical worker lifecycle state machine.
 
 Implements the worker layer from the Runtime State Machine Contract
-(docs/core/130_RUNTIME_STATE_MACHINE_CONTRACT.md):
+(docs/core/131_RUNTIME_STATE_MACHINE_CONTRACT.md):
 
   - Canonical worker states with deterministic transitions (§3)
   - Heartbeat freshness classification (§4)
