@@ -364,7 +364,7 @@ The shadow command is read-only and never writes to the DB or sets the flag.
 
 ## Signal Starvation Warning
 
-The loop runs against whatever is in `t0_receipts.ndjson`. While autonomous dispatching is paused, new receipts arrive only from manual dispatches. The historical trail (13,000+ receipts in the governed audit trail as of 2026-07-04) provides a useful baseline — run with `--from-history` on the first cycle.
+The loop runs against whatever is in `t0_receipts.ndjson`. As of 2026-07-04, autonomous dispatching was paused and new receipts arrived only from manual dispatches; that has since resumed, but a project that has gone quiet again hits the same starvation case. The historical trail provides a useful baseline in either case — run with `--from-history` on the first cycle.
 
 Value grows as governed builds resume. The proposal tier is not a no-op even against history: it finds recurring failure patterns and unused patterns regardless of whether new dispatches are running.
 

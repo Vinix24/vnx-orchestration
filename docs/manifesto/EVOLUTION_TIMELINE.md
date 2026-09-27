@@ -141,16 +141,16 @@ This timeline is a concise reconstruction of the technical evolution, without pr
 
 ---
 
-## Language Evolution: Why ~60% Bash / ~40% Python
+## Language Evolution: Why Python Now Dominates
 
-VNX started as tmux `send-keys` scripts — the most direct way to control terminal panes programmatically. This means the codebase grew organically from bash, not as a planned language choice.
+VNX started as tmux `send-keys` scripts — the most direct way to control terminal panes programmatically. This means the codebase grew organically from bash, not as a planned language choice. It has since shifted heavily toward Python: a line count under `scripts/` (`.py`) against `scripts/`+`bin/` (`.sh`) puts the split at roughly 93%/7% Python/Bash, not the ~60/40 Bash/Python this section originally claimed.
 
-**Why bash persists:**
+**Why bash persists in its remaining 7%:**
 - Tmux orchestration (`send-keys`, pane management, session control) is inherently shell-native.
 - File-bus operations (watch, move, append) are one-liners in bash but verbose in Python.
 - Supervisor, dispatcher, and smart-tap were written first and work reliably.
 
-**Why Python is growing:**
+**Why Python dominates:**
 - Intelligence pipeline (FTS5 queries, pattern scoring, learning loop) needs structured data handling.
 - Receipt processing moved from bash to Python for JSON parsing reliability.
 - CI testing is pytest-based — Python scripts are directly testable, bash scripts require wrapper tests.
@@ -416,7 +416,7 @@ The operator can answer questions that previously required guesswork: "Did this 
 - Headless worker execution via SubprocessAdapter (T1/T2 fully headless)
 - Auto-report pipeline: stop hook → extraction → haiku classification → markdown
 - Unified T0 state builder: 0.2s startup, single source of truth
-- Gate locks: deterministic, LLM-bypass-proof governance enforcement
+- Merge-time fail-closed gates (`scripts/pr_merge.py`): CI, review-gate result, contract-validity, and branch-protection checks all run in code before a merge is allowed (the file-lock-based gate design in `scripts/f39/gate_locks.py` remains unwired — see `GOVERNANCE_ARCHITECTURE.md` §3)
 - T0 decision framework benchmarked at 73–100% accuracy by scenario tier
 - Dashboard with unified domain visibility and reports browser
 - Multi-model operation with model-agnostic orchestration core

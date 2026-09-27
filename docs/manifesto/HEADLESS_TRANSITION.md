@@ -4,7 +4,7 @@
 **Scope**: The shift from interactive tmux-based execution to headless subprocess workers  
 **Status**: Retrospective — written after the transition completed
 
-> **Update (post-June-15 2026):** Anthropic's June-15 billing change moved headless `claude -p` onto paid API credits while interactive Claude Code stayed on the subscription. That reversed the end-state for the **Claude** worker: the default Claude lane is now the interactive **tmux-spawn** lane (subscription-preserving), and headless `claude -p` is opt-in and blocked by default. "Headless" below still describes the non-Claude provider lanes (`provider_dispatch`: kimi/glm/deepseek/codex) and the opt-in burst lane — not the default for the Claude worker. Read this doc as the evolution story, with that correction applied.
+> **Correction (2026-09-27):** The "June-15 billing change" premise below never happened — Anthropic never moved headless `claude -p` onto metered API credits, and the headless lane has run on the Max subscription throughout. What did change: an interactive **tmux-spawn** lane existed for a period as an alternative Claude worker path, and it was removed entirely on 2026-09-18 (#1868). `claude_headless` (`claude -p` via envelope) is now the only Claude lane, for T0 and workers alike, and it is subscription-preserving. Tmux today is only an injection path into interactive kimi/codex/gemini terminals — never a Claude worker lane. Read the rest of this doc as the evolution story, with that correction applied.
 
 ---
 
@@ -57,7 +57,8 @@ VNX_ADAPTER_T0=subprocess     # headless T0
 VNX_ADAPTER_T1=subprocess     # headless T1
 VNX_ADAPTER_T2=subprocess     # headless T2
 VNX_ADAPTER_T3=subprocess     # headless T3
-# Default (unset): tmux for all
+# Default (unset): tmux for all — historical. The tmux-spawn lane was removed
+# 2026-09-18; subprocess (via the headless envelope) is now the only default.
 ```
 
 **Mode 2 (recommended for solo dev):**
@@ -74,7 +75,7 @@ VNX_ADAPTER_T0=subprocess VNX_ADAPTER_T1=subprocess VNX_ADAPTER_T2=subprocess VN
 ### What stays identical across modes
 
 - Receipt schema (append-only NDJSON)
-- Quality gate enforcement (codex + gemini + CI)
+- Quality gate enforcement (codex + gemini + CI at the time; `gemini_review` was later retired from the review stack — the current default is `codex_gate,kimi_gate`)
 - Provenance chain (instruction_sha256 → manifest → receipt → audit)
 - Open items lifecycle
 - Pattern intelligence DB
@@ -135,7 +136,7 @@ Workers wrote to per-terminal NDJSON ring buffers (`.vnx-data/events/T{n}.ndjson
 
 Codex and Gemini review gates moved from manual operator review to headless subprocess execution. The operator no longer read gate output and made a pass/fail judgment — the gate runner did it autonomously, wrote a result JSON, and the closure verifier acted on it.
 
-Triple-gate enforcement: codex pass + gemini pass + CI green = merge. All three conditions enforced in code, not memory.
+Triple-gate enforcement: codex pass + gemini pass + CI green = merge. All three conditions enforced in code, not memory. (Historical for F39/April 2026 — `gemini_review` has since been retired from the review stack; the current default is `codex_gate,kimi_gate`, enforced the same way.)
 
 **What improved**: Chains of 10+ PRs could land without the operator making 30+ individual gate decisions. The operator's role shifted from decision-maker to exception handler.
 
@@ -194,6 +195,8 @@ Daemons became self-healing:
               │  → merge or block   │
               └─────────────────────┘
 ```
+
+(This diagram reflects the F39-era review stack, codex + gemini. `gemini_review` has since been retired; the current default review stack is `codex_gate` + `kimi_gate`.)
 
 The operator today:
 1. Reviews the dispatch draft (still human-authored or T0-drafted)

@@ -28,13 +28,13 @@ _Completion is evidence-based: warnings are surfaced and tracked before closure.
 
 - Governance gates exist between proposal and execution (`staging -> queue` + human confirmation).
 - Receipts form an auditable event trail (`dispatch`, `ack`, `completion`, `quality advisory`).
-- Multi-terminal orchestration is explicit (`T0/T1/T2/T3` with readable status and role boundaries).
+- Every dispatch funnels through one entry point (`vnx dispatch`), spawning an ephemeral per-dispatch worker rather than a fixed terminal grid — the old fixed T0/T1/T2/T3 layout is opt-in (`VNX_ADAPTER_T{n}=subprocess`), not the default.
 - Quality checks run as async advisories and can force structured follow-up work.
 - Provider coupling is reduced through watcher-based observation.
 
 ## Who This Is For
 
-- Engineers running Claude/Codex/Gemini in parallel terminals.
+- Engineers running Claude/Codex/Kimi across ephemeral dispatch workers.
 - Builders who need governance and traceability, not just “agent swarms”.
 - Teams experimenting with local-first, file-based orchestration patterns.
 
@@ -50,11 +50,9 @@ If this is your first read, use this order:
 
 ## Clone
 
-Use the repo URL where you publish VNX:
-
 ```bash
-git clone <YOUR_VNX_REPO_URL>
-cd <YOUR_VNX_REPO_DIR>/docs/manifesto
+git clone https://github.com/Vinix24/vnx-orchestration.git
+cd vnx-orchestration/docs/manifesto
 ```
 
 ## Visual Proof Pack
@@ -88,11 +86,11 @@ For implementation detail, see the main repository scripts and docs outside this
 
 ## Implementation Lives Here
 
-- Runtime scripts and orchestration logic: `.claude/vnx-system/scripts/`
-- Main CLI entrypoint: `.claude/vnx-system/bin/vnx`
+- Runtime scripts and orchestration logic: `scripts/`
+- Main CLI entrypoint: `bin/vnx`
 - Terminal and skills configuration: `.claude/terminals/` and `.claude/skills/`
 - Local runtime state (queues, receipts, snapshots, logs): `.vnx-data/`
-- Dashboard assets and serving logic: `.claude/vnx-system/dashboard/`
+- Dashboard assets and serving logic: `dashboard/`
 
 ## Contributing / Collaboration
 

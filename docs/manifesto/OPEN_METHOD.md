@@ -31,9 +31,11 @@ I treat agents as Junior Developers. I write the spec, they write the implementa
 ### 5. Tooling: Claude Code as the Primary Interface
 About 80% of the workflow runs through **Claude Code**. It serves as both the development environment and the enforcement mechanism — T0's write restrictions are implemented through Claude Code hooks that prevent the orchestrator from modifying files directly. This isn't just tooling preference; it's a governance property. The orchestrator coordinates and dispatches, but all file modifications happen in worker terminals under the governance layer's oversight.
 
-I started with Claude Opus as T0 and the hook-based write isolation kept it that way. Other models (Codex 5.3, Gemini 3.0) might work as orchestrator, but T0-as-Opus is the only tested configuration.
+I started with Claude Opus as T0 and the hook-based write isolation kept it that way. Other models might work as orchestrator, but T0-as-Opus is the only tested configuration (as of this writing, T0 is pinned to Opus 5.5).
 
 ## Current State & The Road Ahead
+
+*(Written February 2026 — describes the terminal-grid state at that point; the current default lane runs ephemeral per-dispatch workers instead, see `HEADLESS_TRANSITION.md`.)*
 
 The current implementation runs in my daily workflow, orchestrating 3-4 terminals (Claude Code + Codex) with graceful recovery from crashes via ledger replay. It's not a "zero-downtime production" system; it's a working prototype that I trust enough to build real software with.
 
