@@ -130,4 +130,4 @@ Without a report there is no receipt, and without a receipt the work is invisibl
 - Receipt shape: `11_RECEIPT_FORMAT.md`
 - Intelligence internals: `docs/core/technical/INTELLIGENCE_SYSTEM.md`, `docs/internal/intelligence/INTELLIGENCE_INJECTION_V1.1.md`
 - Tenant isolation: `docs/governance/decisions/ADR-007-multitenant-project-id-stamping.md`
-- System boundaries (what stays local): `VNX_SYSTEM_BOUNDARIES.md`
+- System boundaries (what stays local, archived): `docs/_archive/core/VNX_SYSTEM_BOUNDARIES.md`. Superseded by ADR-026 (per-project store) and ADR-032 (fabric artifacts in consumers).

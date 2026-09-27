@@ -2,7 +2,7 @@
 """migration_inventory.py — read-only inventory lock over the VNX migration surface (PR-8).
 
 Evidence artifact for the parked `migration-consolidation-and-tenancy-cut` track
-(docs/core/framework-status-audit-and-cockpit_PRD.md §PR-8). This module DELETES
+(docs/_archive/core/framework-status-audit-and-cockpit_PRD.md §PR-8, archived). This module DELETES
 or DEPRECATES nothing — it only enumerates the six migration surfaces (SQL files,
 Python appliers, the manifest reconciler, the schema-migration helpers, the ADR-007
 tenancy stamper, and the CLI entrypoint), classifies every touched table as

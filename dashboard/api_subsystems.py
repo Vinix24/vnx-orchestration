@@ -20,7 +20,7 @@ is read directly from ``.vnx/governance_enforcement.yaml`` (via
 subsystem is governed by multi-level YAML checks, and the flag that used to be canonical here had
 zero production read-sites (see its ``read_site_wired`` entry in config_registry.py); showing its
 static default read as "parked" while the YAML ran hard-mandatory checks
-(``docs/core/framework-status-audit-and-cockpit_PRD.md:89``).
+(``docs/_archive/core/framework-status-audit-and-cockpit_PRD.md:89``, archived).
 
 HEALTH is read-only from ``health_beacon.all_beacons(data_dir)`` — the beacon root is
 ``VNX_DATA_DIR`` (health_beacon writes/reads under ``VNX_DATA_DIR/health``), NOT ``VNX_STATE_DIR``.
@@ -83,8 +83,8 @@ def _canonical_flags(cr) -> Dict[str, str]:
 # .vnx/governance_enforcement.yaml, not a single on/off flag, and the flag that used to win
 # canonical selection here has zero production read-sites (config_registry.py:
 # read_site_wired=False). Showing its static default -- '0' -- read as "enforcement is parked"
-# while the yaml ran hard-mandatory checks (framework-status-audit-and-cockpit_PRD.md:89
-# predicted exactly this drift).
+# while the yaml ran hard-mandatory checks (docs/_archive/core/framework-status-audit-and-cockpit_PRD.md:89,
+# archived, predicted exactly this drift).
 _YAML_SOURCED_SUBSYSTEMS = frozenset({"governance-enforcement-stack"})
 
 

@@ -197,7 +197,7 @@ The dashboard "Jump" button calls `POST /api/jump/{terminal}` which executes `vn
 **Legacy V7** (`dispatcher_v7_compilation.sh` - Reference only):
 - Template compilation from agent library
 - Full prompt generation (1500+ tokens)
-- See `docs/core/technical/DISPATCHER_SYSTEM.md` for V7.3 reference
+- See `docs/_archive/core/technical/DISPATCHER_SYSTEM.md` for V7.3 reference (archived)
 
 ### 3. Heartbeat ACK Monitor (`heartbeat_ack_monitor.py`)
 
@@ -914,7 +914,7 @@ disappear from this document:
 - ACK Dispatcher V2 (`ack_dispatcher_v2.sh`) — replaced by `heartbeat_ack_monitor.py`
 - Report Watcher (`report_watcher.sh`) — replaced by Receipt Processor V4
 - Receipt Notifier (`receipt_notifier.sh`) — replaced by Receipt Processor V4
-- Dispatcher V7 — reference only (see `docs/core/technical/DISPATCHER_SYSTEM.md`)
+- Dispatcher V7 — reference only (see `docs/_archive/core/technical/DISPATCHER_SYSTEM.md`, archived)
 
 ### Terminal Status
 - **T0 (Claude Opus)**: Orchestrator brain, read-only

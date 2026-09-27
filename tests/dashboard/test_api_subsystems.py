@@ -133,7 +133,7 @@ def test_governance_enforcement_effective_value_off_mode(tmp_path):
 
 
 def test_governance_enforcement_effective_value_missing_file_is_unknown_not_zero(tmp_path):
-    # PRD requirement (framework-status-audit-and-cockpit_PRD.md:89): an unreadable source must
+    # PRD requirement (docs/_archive/core/framework-status-audit-and-cockpit_PRD.md:89, archived): an unreadable source must
     # never silently read as "off" -- that is the exact drift class this dispatch fixes.
     missing = tmp_path / "does-not-exist.yaml"
     assert api_sub.governance_enforcement_effective_value(missing) == "unknown"

@@ -40,7 +40,7 @@ DISPATCHER = SCRIPT_DIR / "dispatcher_minimal.sh"
 DISPATCH_LOGGING = SCRIPT_DIR / "lib" / "dispatch_logging.sh"
 DISPATCH_CREATE = SCRIPT_DIR / "lib" / "dispatch_create.sh"
 DISPATCH_LIFECYCLE = SCRIPT_DIR / "lib" / "dispatch_lifecycle.sh"
-CONTRACT = PROJECT_ROOT / "docs" / "core" / "190_RESIDUAL_BUGFIX_SWEEP_CONTRACT.md"
+CONTRACT = PROJECT_ROOT / "docs" / "_archive" / "core" / "190_RESIDUAL_BUGFIX_SWEEP_CONTRACT.md"
 
 
 def _extract_classify_function() -> str:

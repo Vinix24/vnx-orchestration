@@ -296,7 +296,7 @@ class GovernanceEnforcer:
         Used by the cockpit (dashboard/api_subsystems.py, OI-1385) to report the REAL
         governance-enforcement-stack afdwingniveau read from this loaded config, instead of a
         static registry bool that has no read-site of its own
-        (docs/core/framework-status-audit-and-cockpit_PRD.md:89). ``max_level`` is 0 when no
+        (docs/_archive/core/framework-status-audit-and-cockpit_PRD.md:89, archived). ``max_level`` is 0 when no
         checks are configured (an empty/degenerate config) so callers never see None.
         """
         max_level = max((c.level for c in self._checks.values()), default=0)
