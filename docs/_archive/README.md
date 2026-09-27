@@ -44,3 +44,15 @@ Moved during the post-release docs sweep (1.0.0 published to PyPI 2026-07-02).
 Moved during the docs-governance sweep for the D1-D5 signed-attestation pipeline (PRs #1004-#1012).
 
 - `governance/week_2026_W15.md` — a single weekly governance report from 2026-04-10, every field marked "Geen data" (no data). No other week reports were ever produced; the practice never continued past this one file. Kept only because it is referenced from old history — do not use as a template for a reporting cadence that does not exist.
+
+## Docs-verversing sweep (archived 2026-09-27, PR-4)
+
+Moved on operator directive to refresh all VNX documentation to the `main` state (v1.6.6). Full
+per-file provenance and reasons: `ARCHIVED_MANIFEST.md`.
+
+- `operations/AUTONOMOUS_PRODUCTION_GUIDE.md`, `operations/SUPERVISOR_CUTOVER_PER_PROJECT.md` — completed or one-off operational plans for cutovers already merged.
+- `operations/GEMINI_VERTEX_ROUTING.md` — self-retired runbook for a reviewer gate that no longer exists.
+- `operations/RECEIPT_PROCESSING_FLOW.md` — self-marked historical, duplicate of the active `RECEIPT_PIPELINE.md`.
+- `operations/RUNTIME_LIVENESS.md`, `lane-conformity-matrix.md` — point-in-time measurements whose lane rows describe the tmux-spawn lane removed 2026-09-18.
+- `operations/MULTI_MODEL_GUIDE.md` — a content-free pointer stub citing paths that do not exist.
+- `contracts/f36-r12/` (14 JSON schemas + 1 SQL index) — design artifacts for the F36 R12 track with zero references from code, tests, or any active doc.

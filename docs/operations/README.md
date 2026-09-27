@@ -11,11 +11,8 @@
 
 - Event streams: `EVENT_STREAMS.md`
 - Receipt pipeline: `RECEIPT_PIPELINE.md`
-- Receipt processing flow: `RECEIPT_PROCESSING_FLOW.md` *(historical — `report_watcher.sh` deprecated)*
 - Runtime rollback: `RUNTIME_CORE_ROLLBACK.md`
 - Subprocess adapter flag: `SUBPROCESS_ADAPTER_FEATURE_FLAG.md`
-- Multi-model guide: `MULTI_MODEL_GUIDE.md`
-- Autonomous production guide: `AUTONOMOUS_PRODUCTION_GUIDE.md`
 - Transcript backup & archive: `TRANSCRIPT_BACKUP_ARCHIVE.md`
 - T0 context rotation (default OFF): `CONTEXT_ROTATION.md`
 - T0 context rotation enforced at 500K (guard hook, spawner, handoff contract): `T0_CONTEXT_ROTATION.md`
@@ -23,6 +20,8 @@
 
 > **Note**: `MONITORING_GUIDE.md` was retired. Runtime monitoring is now available
 > via the dashboard server (`dashboard/serve_dashboard.py`) at `/api/health`.
+> `MULTI_MODEL_GUIDE.md`, `AUTONOMOUS_PRODUCTION_GUIDE.md`, and `RECEIPT_PROCESSING_FLOW.md`
+> were archived 2026-09-27 (docs-verversing sweep) — see `../_archive/ARCHIVED_MANIFEST.md`.
 
 ## Public Operations Scope
 

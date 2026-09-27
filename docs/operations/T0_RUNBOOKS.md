@@ -148,7 +148,7 @@ bash skills/t0-orchestrator/scripts/dispatch_guard.sh
    non-Claude constraints in mind (mode/model differences).
 
 Liveness and known worktree-topology caveats of `dispatch_guard.sh`:
-`docs/operations/RUNTIME_LIVENESS.md` §5.
+`docs/_archive/operations/RUNTIME_LIVENESS.md` §5 (archived 2026-09-27 — the worktree-path defect it recorded was fixed by OI-859, per that section's own update).
 
 ### 4.1 Pre-Dispatch Pane Verification
 
