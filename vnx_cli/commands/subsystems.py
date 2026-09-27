@@ -128,7 +128,6 @@ _ROW_ORDER: List[str] = [
     "zero-llm-injection",
     "dispatch-plan",
     "test-suite",
-    "harness-lane-review-gates",
     # PARK-with-trigger / CUT
     "migration-mechanisms",
     "within-db-tenancy",
@@ -155,6 +154,11 @@ _ROW_ORDER: List[str] = [
     "claude-tmux-serialization",
     "central-install-cutover",
     "t0-context-rotation",
+    # OI-1874 r4: real, currently-enforcing mechanism with no effectiveness
+    # probe registered yet -- same shape as t0-context-rotation/
+    # central-install-cutover just above, not the D6b six's "claimed LIVE
+    # with no probe" correction.
+    "harness-lane-review-gates",
     # SCOPE
     "plan-gate-panel",
     "plan-gate-task-class-scope",

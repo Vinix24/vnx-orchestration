@@ -379,7 +379,7 @@ class GateRunner:
             prompt = self._build_gemini_prompt(request_payload)
         elif not prompt and gate == "codex_gate":
             prompt = self._build_codex_prompt(request_payload)
-        elif not prompt and gate in ("glm_gate", "kimi_gate"):
+        elif not prompt and gate in ("glm_gate", "kimi_gate", "deepseek_gate"):
             prompt = self._build_harness_lane_prompt(gate, request_payload)
         if (
             using_vertex
