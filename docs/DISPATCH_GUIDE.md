@@ -135,23 +135,29 @@ This prevents the classic multi-agent problem: two agents editing the same files
 
 ## 3b. Claude Workers: Concurrency and Permissions
 
-Every Claude worker in the tmux-spawn lane runs in its own fresh, isolated
-worktree — `git worktree add` gives each dispatch its own checked-out files and
-branch while sharing the repository's object database (not a full clone, and not
-a shared working tree). Two consequences follow from that isolation:
+Every Claude worker runs in its own fresh, isolated worktree: `git worktree
+add` gives each dispatch its own checked-out files and branch while sharing
+the repository's object database (not a full clone, and not a shared working
+tree). The tmux-spawn lane was removed on 2026-09-18; `claude_headless`
+(`claude -p` via envelope) is the only claude lane, and it runs on the Claude
+subscription, not metered API credits. Two consequences follow from the
+worktree isolation:
 
-**Concurrency defaults to one Claude worker at a time.** Claude subscription
+**Concurrency defaults to 10 concurrent Claude workers.** Claude subscription
 sessions share a concurrency cap across everything on the account, so VNX
-serializes tmux-spawn dispatches by default. If you want more than one running
-in parallel, set `VNX_TMUX_MAX_CONCURRENT=<N>` — an explicit choice, not
+serializes claude-lane dispatches through an account-level slot lock. The
+default is 10 slots (`VNX_TMUX_MAX_CONCURRENT`, historically named for the
+retired tmux lane but still the knob for `claude_headless`). Dial it down
+(e.g. `=1` for fully serial) or up as an explicit, informed choice, not
 something the system escalates to on its own. Provider workers (Codex, Kimi,
 GLM, DeepSeek) don't share this cap and always run in parallel.
 
-**Workers get full tool access by default, scoped only on request.** Because
-each worker is already sandboxed to its own worktree, VNX skips permission
-prompts (`--dangerously-skip-permissions`) rather than making an isolated
-worker stop and ask. If you need a tighter, role-based tool allow-list for a
-specific dispatch instead, set `VNX_WORKER_SCOPED=1` for that dispatch.
+**Workers get a scoped, role-based tool allow-list by default.** Since
+2026-08-14, headless workers spawn with capabilities scoped to their role
+rather than the old blanket `--dangerously-skip-permissions` posture. Worktree
+isolation bounds the filesystem, not the network, and a blanket-skip worker
+still reaches ambient MCP servers outside the checkout. To opt back into the
+blanket posture for a specific dispatch, set `VNX_WORKER_BLANKET_SKIP=1`.
 
 ---
 

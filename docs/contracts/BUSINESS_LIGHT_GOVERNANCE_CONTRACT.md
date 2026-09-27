@@ -41,8 +41,8 @@ The contract exists so that:
 | Policy mutation | Blocked | Blocked |
 | Evidence retention | 30 days | 14 days |
 | Audit trail | Full coordination events | Reduced (lifecycle events only) |
-| Runtime adapter | tmux (primary) | headless (primary) |
-| Worker model | Interactive (tmux panes) | Headless-by-default |
+| Runtime adapter | claude_headless (primary; tmux-spawn lane removed 2026-09-18) | headless (primary) |
+| Worker model | Headless per-dispatch worktree (`claude -p`); tmux stays for T0's own pane only | Headless-by-default |
 
 ### 2.2 Review-By-Exception Policy
 

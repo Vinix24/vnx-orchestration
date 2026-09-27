@@ -79,7 +79,7 @@ Invariant C-3 is relaxed: multiple tracks MAY be `active` simultaneously **if an
 | Primitive | Implementation | Notes |
 |-----------|---------------|-------|
 | Atomic dispatch claim | `claim_next_queued_dispatch` (BEGIN IMMEDIATE, project_id-scoped) | No two workers grab the same dispatch under concurrency |
-| N-worker lanes | subprocess (terminal-pinned), elastic pool (ADR-018), tmux spawns | Backend fan-out should use the elastic pool (role-scoped `backend-developer` members) |
+| N-worker lanes | subprocess (terminal-pinned), elastic pool (ADR-018), `claude_headless` (envelope) | Backend fan-out should use the elastic pool (role-scoped `backend-developer` members); the tmux-spawn lane was removed 2026-09-18 |
 | Per-dispatch worktree isolation | `scripts/lib/dispatch_worktree_isolation.py` | `VNX_ISOLATED_WORKTREE=1` flag |
 
 The elastic pool (ADR-018, `bin/vnx pool {status,scale,config,reap}`) is the preferred fan-out mechanism. Terminal-pinning (T1/T2/T3) blocks cross-role dispatch and is a legacy usage pattern.
@@ -121,7 +121,7 @@ These invariants replace the four chain-contract invariants (C-1..C-4) from `MUL
 - ADR-007 composite PK/FK scoping over `project_id`
 - Worktree isolation (`scripts/lib/dispatch_worktree_isolation.py`, `VNX_ISOLATED_WORKTREE=1`)
 - Atomic dispatch claim (`claim_next_queued_dispatch`)
-- N-worker lanes (elastic pool ADR-018, subprocess adapter, tmux)
+- N-worker lanes (elastic pool ADR-018, subprocess adapter, `claude_headless`)
 - Autopilot-tick (`RA-6`, ships dark, gated by `VNX_ROADMAP_AUTOPILOT=1`)
 - Human-gate primitive (RA-4)
 

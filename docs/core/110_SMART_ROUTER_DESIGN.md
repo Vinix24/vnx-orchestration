@@ -124,7 +124,7 @@ Cost accounting is decided by the dispatch door's D2 rule (`dispatch_plan.py`), 
 
 | Lane | `billing` label | Why |
 |---|---|---|
-| `claude` (tmux or headless) | auth-derived | `api_metered` with an own `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL`; `subscription` otherwise |
+| `claude` (`claude_headless`, the only claude lane since the tmux-spawn lane was removed 2026-09-18) | auth-derived | `api_metered` with an own `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL`; `subscription` otherwise |
 | `kimi` | `subscription` | CLI OAuth lane (`kimi-via-cli-only`), flat — never metered per call |
 | `local-gemma` | `local` | On-device inference, zero API cost |
 | everything else (`glm-harness`, `deepseek-harness`, `litellm:*`, `codex`, `gemini`) | `provider_metered` | Real per-token API billing |
@@ -164,7 +164,7 @@ A model must clear all three to actually get recommended and dispatched: it must
 
 ### 4.4 Current models (as of this refresh)
 
-The registry's current, non-deprecated model set: `claude-opus-4-8` (T0-tier), `claude-sonnet-5` (worker-tier), `glm-5.2`/`glm-5.3`/`glm-5.3-flash` (the three GLM versions admitted by the deprecated-glm-models constraint; `glm-5.2` remains default, `glm-5.1` and base `glm-5` stay blocked — see `provider_constraints.yaml` for the current allowlist), `kimi-k2-7` (via `kimi_cli`, OAuth), `deepseek-v4-pro` (and `deepseek-v4-flash`, cheaper/faster). `provider_constraints.yaml` is the authority on which of these are actually pinned for T0/worker roles — this document describes routing *recommendations*, not the pin policy itself.
+The registry's current, non-deprecated model set: `opus-5-5` (T0-tier), `claude-sonnet-5` (worker-tier), `glm-5.2`/`glm-5.3`/`glm-5.3-flash` (the three GLM versions admitted by the deprecated-glm-models constraint; `glm-5.2` remains default, `glm-5.1` and base `glm-5` stay blocked — see `provider_constraints.yaml` for the current allowlist), `kimi-k3` (via `kimi_cli`, OAuth, the CLI's own `default_model`), `deepseek-v4-pro` (and `deepseek-v4-flash`, cheaper/faster). `provider_constraints.yaml` is the authority on which of these are actually pinned for T0/worker roles — this document describes routing *recommendations*, not the pin policy itself.
 
 ---
 

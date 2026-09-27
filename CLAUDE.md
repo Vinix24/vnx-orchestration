@@ -46,7 +46,7 @@ Your report MUST contain these exact headings (aliases accepted):
 
 ## Dispatch lanes
 
-Two lanes ship on main; T0 picks per task (`claude_headless` is the only claude lane, see the rule below). Full decision rule, provider strings, concurrency, and failure modes live in **`docs/core/DISPATCH_RULES.md`** (the tmux-spawn lane was removed on 2026-09-18: `docs/operations/TMUX_SPAWN_LANE.md`).
+Two claude lanes ship on main; T0 picks per task (`claude_headless` is the only claude lane, see the rule below). A third lane, `provider_dispatch.py`, routes the non-claude providers (kimi/glm/deepseek), covered further down. Full decision rule, provider strings, concurrency, and failure modes live in **`docs/core/DISPATCH_RULES.md`** (the tmux-spawn lane was removed on 2026-09-18: `docs/operations/TMUX_SPAWN_LANE.md`).
 
 - **`dispatch_envelope.run_envelope_headless_plan`** (`claude_headless`, default for `claude`) — `claude -p` via envelope, isolated worktree per dispatch, subscription-preserving. No live pane.
 - **`scripts/lib/subprocess_dispatch.py`** — terminal-pinned (Wave 5 smart-context, lease, triple-gate). Opt in per terminal with `VNX_ADAPTER_T{n}=subprocess`. Use for single-worker PRs that benefit from prior-round findings, or work expected to run >30 min. **No Anthropic SDK** — only `subprocess.Popen(["claude", ...])`.
@@ -62,7 +62,7 @@ T0 must cite this explicitly in review-gate prompts.
 </important>
 
 <important if="working on review-gates or codex/kimi review providers">
-Per CC-COMMUNITY-SYNTHESIS-2026-05-29.md: codex for strict diff-mode, kimi for synthesis/operational angle.
+Cross-vendor review split (operator decision, 2026-05-29): codex for strict diff-mode, kimi for synthesis/operational angle.
 Parallel review pattern proven 3x. Raw vs gate-routed dispatch = different audit trail — audit concern applies.
 </important>
 

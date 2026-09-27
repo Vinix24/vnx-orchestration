@@ -1,6 +1,6 @@
 # Dispatch & Intelligence Architecture (current)
 
-**Status:** current as of 2026-07-05 (post single-entry-door flip PR #896; permissions-default flip #1016; N-slot concurrency #1017; Sonnet-5 worker pin #1013).
+**Status:** current as of 2026-09-27 (post single-entry-door flip PR #896; N-slot concurrency #1017; scoped-permissions-default flip 2026-08-14; tmux-spawn lane removed 2026-09-18 #1868; `sonnet` build-worker default reaffirmed PR #1890, 2026-09-23).
 **Scope:** how a dispatch flows from T0's intent to a governed receipt, and how intelligence is injected and learned. This is the end-to-end picture; the enforced ruleset T0 follows is `DISPATCH_RULES.md`, the lane detail is `PROVIDER_LANES.md`, the receipt shape is `11_RECEIPT_FORMAT.md`.
 
 ---
@@ -65,7 +65,7 @@ A dispatch is not "paste text into a worker." It is: **stage an intent → route
 |---|---|---|---|
 | `claude` (Opus/Sonnet) | **claude headless** (`dispatch_envelope.run_envelope_headless_plan`) | `claude -p` in an ephemeral isolated worktree; leaseless | subscription |
 | `claude` (terminal-pinned, opt-in) | **subprocess** (`subprocess_dispatch.py`) | `claude -p` headless, lease + Wave-5 smart-context + triple-gate | subscription |
-| `kimi` / `glm`(harness) / `deepseek`(harness) | **provider envelope** (`dispatch_envelope.py`) | provider CLI / harness spawn | provider-metered |
+| `kimi` / `glm`(harness) / `deepseek`(harness) | **provider dispatch** (`scripts/lib/provider_dispatch.py`) | provider CLI / harness spawn | provider-metered |
 
 Hard rules: **claude workers route via the headless lane, never `provider_dispatch`.** `glm` always via the claude-CLI harness (`:4141` litellm→OpenRouter proxy), never plain `litellm:zai`. Everything dispatches through the single door (`vnx dispatch`); calling a lane script directly is a side door (the `dispatch_sidedoor_audit.py` gate enforces this).
 
@@ -81,18 +81,28 @@ Assembly runs in the lane **before** delivery (`_assemble_context` → `dispatch
 
 **Consequence:** a hand-delivered raw instruction (bypassing the lane) skips assembly entirely → no intelligence, no report-contract → the worker may write no report → no receipt → the work is invisible to governance, and the phantom-guard has nothing to check. Delivery problems must be fixed in the lane, never worked around by raw delivery.
 
-## 5. Delivery reliability — the tmux-signal hook contract
+## 5. Delivery reliability: history (removed lane)
 
-**Removed lane.** The tmux-spawn lane that produced these signals was removed on 2026-09-18, and nothing exports `VNX_TMUX_SIGNAL_DIR` any more, so the hooks below are inert. They stay in the tree as session management. The text is kept as the record of the contract.
+The tmux-spawn lane (removed 2026-09-18, #1868) used to rely on two hook
+sentinels (SessionStart and UserPromptSubmit), guarded by
+`VNX_TMUX_SIGNAL_DIR` to detect that a paste actually landed in the worker's
+input box, falling back to TUI-marker heuristics (which mis-fired across
+Claude Code TUI revisions) when a project hadn't wired them. Nothing exports
+`VNX_TMUX_SIGNAL_DIR` any more, so those hooks are inert; the full contract is
+preserved as history in `docs/operations/TMUX_SPAWN_LANE.md`.
 
-The claude tmux-spawn lane's readiness and submit detection rode on two hook sentinels, dropped by hooks the worker's project must wire and guarded by `VNX_TMUX_SIGNAL_DIR` + `VNX_DISPATCH_ID` (which the lane exported into the worker env):
+That lane also launched detached workers with blanket
+`--dangerously-skip-permissions` by default. Worker permissions today are the
+opposite: since 2026-08-14, headless workers spawn with a scoped, role-based
+tool allow-list by default (worktree isolation bounds the filesystem, not the
+network, and a blanket-skip worker still reaches ambient MCP servers). The
+opt-out is `VNX_WORKER_BLANKET_SKIP=1` per dispatch. Detail:
+`docs/operations/WORKER_PERMISSIONS.md`.
 
-- **SessionStart** → `scripts/hooks/tmux_signal_session_ready.sh` writes `<signal_dir>/session_ready` → the lane knows the worker's input box is ready before it pastes.
-- **UserPromptSubmit** → `scripts/hooks/tmux_signal_prompt_received.sh` writes `<signal_dir>/prompt_received` → the lane knows the paste was actually submitted.
-
-When these hooks are wired, the lane uses the sentinels (reliable). When they are missing, it falls back to TUI-marker heuristics — which mis-fire across Claude Code TUI revisions (e.g. under 2.1.186 the lane can paste before the input is ready → the body never stages → the worker idles → reaped on `interactive_no_progress`). **Wiring these two hooks is a hard prerequisite for the claude tmux-spawn lane in any project.** The hook scripts also exist under `.vnx/scripts/hooks/` for vendored installs; they are no-ops without `VNX_TMUX_SIGNAL_DIR`, so they are safe to register globally.
-
-Other invariants: **Enter is ALWAYS a separate tmux keystroke** (a combined send-keys misses delivery); since #1016 the detached worker launches with blanket `--dangerously-skip-permissions` by default (the spawn runs in an isolated per-dispatch worktree, so a scoped allow-list only stalls autonomous builds without adding real blast-radius protection) — the previously-default scoped posture (`--permission-mode acceptEdits` + empty ambient MCP + role allow-list) is now opt-in via `VNX_WORKER_SCOPED=1`. Detail: `docs/operations/WORKER_PERMISSIONS.md`.
+Invariant that outlived the lane: **Enter is ALWAYS a separate tmux
+keystroke** (a combined send-keys misses delivery). This still applies to T0's
+own tmux pane and any interactive non-claude CLI (codex, kimi, gemini)
+terminal.
 
 ## 6. Govern + the phantom-guard
 
@@ -128,6 +138,6 @@ Without a report there is no receipt, and without a receipt the work is invisibl
 - Enforced ruleset (T0 SSOT): `DISPATCH_RULES.md`
 - Lane detail + billing: `PROVIDER_LANES.md`, `docs/operations/TMUX_SPAWN_LANE.md`
 - Receipt shape: `11_RECEIPT_FORMAT.md`
-- Intelligence internals: `docs/core/technical/INTELLIGENCE_SYSTEM.md`, `docs/internal/intelligence/INTELLIGENCE_INJECTION_V1.1.md`
+- Intelligence internals: `docs/core/technical/INTELLIGENCE_SYSTEM.md`
 - Tenant isolation: `docs/governance/decisions/ADR-007-multitenant-project-id-stamping.md`
 - System boundaries (what stays local): `VNX_SYSTEM_BOUNDARIES.md`

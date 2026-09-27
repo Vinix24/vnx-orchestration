@@ -28,6 +28,7 @@ do not yet behave identically.
 | gemini | gemini CLI | Google CLI auth | analysis / non-review work (not a reviewer) | `scripts/lib/provider_dispatch.py` (`_dispatch_gemini`) |
 | kimi | Kimi CLI (`kimi login` OAuth) | Kimi CLI OAuth | synthesis / operational review | `scripts/lib/provider_dispatch.py` (`_dispatch_kimi`) |
 | deepseek-harness | `claude` CLI pointed at DeepSeek's Anthropic-compatible endpoint | own `DEEPSEEK_API_KEY`, key-auth | analysis / implementation on a non-Claude model | `scripts/lib/provider_dispatch.py` (`_dispatch_deepseek_harness`) |
+| glm-harness | `claude` CLI pointed at a local litellm proxy (`:4141`) fronting OpenRouter | own OpenRouter key, key-auth (`zai-via-openrouter-only`, `glm-via-harness-only`) | review takeover fallback (glm_gate, standing seat unavailable) | `scripts/lib/provider_dispatch.py` (`_dispatch_glm_harness`) |
 | ollama | local Ollama resolver | none (local) | privacy-sensitive work, resolver layer | routed via litellm `ollama` sub-provider |
 
 ### claude-headless

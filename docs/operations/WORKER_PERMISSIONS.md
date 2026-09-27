@@ -80,8 +80,13 @@ drops to empty with it. Repeatable measurement:
 
 As with the empty `--mcp-config`, the `mcp__*` deny is skipped when
 `requires_mcp=True`, so a dispatch that declares it needs MCP keeps its `mcp__`
-tools. The tmux-lane import-fault fallback in `tmux_interactive_dispatch.py`
-carries the same deny so an import failure never silently reopens the namespace.
+tools. Historical note: the removed tmux-spawn lane's import-fault fallback in
+`tmux_interactive_dispatch.py` (module deleted 2026-09-18, `docs/operations/TMUX_SPAWN_LANE.md`)
+used to carry the same deny so an import failure never silently reopened the
+namespace. The surviving subprocess lane's own import-fault fallback
+(`subprocess_adapter.py`'s `_FALLBACK_SCOPE_ARGS`) is scoped (empty MCP +
+`acceptEdits` + a functional tool allow-list) but does not include the
+`mcp__*` namespace deny.
 
 ## `.vnx/worker_permissions.yaml` — role profiles
 
@@ -116,7 +121,16 @@ stops mattering for a dispatch that opts back into blanket skip.
 
 ## OI-1196 — `dispatch_paths` narrows `file_write_scope`, per dispatch
 
-A dispatch's own `--dispatch-paths` (tmux lane; plain strings, optionally
+**This mechanism's wiring is currently dead.** It was built for the tmux-spawn
+lane (removed 2026-09-18, `docs/operations/TMUX_SPAWN_LANE.md`); nothing exports
+`VNX_DISPATCH_PATHS` any more (the only remaining reference is the hook's own
+reader, `pretooluse_worker_scope_enforce.py`), so `resolve_dispatch_write_scope()`
+always resolves `None` today and the per-dispatch narrowing below never
+applies: only the role's `file_write_scope` binds. The matcher logic
+(`match_file_write_scope()`) is unchanged and still described accurately below
+in case a live lane wires `dispatch_paths` again.
+
+A dispatch's own `--dispatch-paths` (plain strings, optionally
 suffixed `:access` where `access` is a `PathAccess` value — `read` / `write`
 / `read_write` / `create`, default `read_write`) can narrow a role's
 `file_write_scope` further, down to just the paths that dispatch declared.
@@ -128,14 +142,17 @@ excluded: this mechanism enforces WRITE scope only, so `read` honestly means
 "not a write grant", not an additional read-side restriction the fabric does
 not otherwise have).
 
-Wiring: `TmuxInteractiveDispatch._spawn_session()` JSON-encodes
-`dispatch_paths` into the worker's pane as `VNX_DISPATCH_PATHS` (alongside
-the existing `VNX_WORKER_ROLE`); `pretooluse_worker_scope_enforce.py` reads
-it via `resolve_dispatch_write_scope()` and passes the result into
-`match_file_write_scope()`. No `dispatch_paths` declared → `None` → identical
-to pre-OI-1196 behavior (role scope alone). `dispatch_paths` declared but
-every entry is `access=read` → an empty (not `None`) write-scope list → every
-write is blocked, correctly reflecting "this dispatch does no writing".
+Wiring (historical, the exporting lane is removed): the tmux-spawn lane's
+`TmuxInteractiveDispatch._spawn_session()` used to JSON-encode `dispatch_paths`
+into the worker's pane as `VNX_DISPATCH_PATHS` (alongside `VNX_WORKER_ROLE`);
+`pretooluse_worker_scope_enforce.py` still reads it via
+`resolve_dispatch_write_scope()` and passes the result into
+`match_file_write_scope()`, but with no exporter the read always comes back
+empty. No `dispatch_paths` declared → `None` → identical to pre-OI-1196
+behavior (role scope alone). `dispatch_paths` declared but every entry is
+`access=read` → an empty (not `None`) write-scope list → every write is
+blocked, correctly reflecting "this dispatch does no writing". This branch
+is currently unreachable in production.
 
 Fail-open, deliberately and narrowly: a missing or malformed
 `VNX_DISPATCH_PATHS` degrades to `None` (no per-dispatch narrowing) rather
@@ -172,12 +189,13 @@ part of the single-entry dispatch door) has its own, independent `access`
 field on each `DispatchPath`. `dispatch_spec.write_paths()` is the first code
 that actually reads it (OI-1196) — it filters to the write-granting subset,
 mirroring the CLI-string logic above via the shared
-`WRITE_GRANTING_PATH_ACCESS` constant. It is not yet wired to the tmux lane's
-`--dispatch-paths` (that bridge is `dispatch_cli.py`/`dispatch_bridge.py`,
-outside this change) — today the two `dispatch_paths` concepts (typed
-`DispatchPath` tuples in the door's spec, and the plain path-string CLI list
-in the tmux/hook enforcement path above) are parsed independently rather than
-sharing one object.
+`WRITE_GRANTING_PATH_ACCESS` constant. It is not wired to the hook-enforcement
+path above (that bridge would be in `dispatch_cli.py`/`dispatch_bridge.py`).
+Today the two `dispatch_paths` concepts (typed `DispatchPath` tuples in the
+door's spec, and the plain path-string CLI list the hook reads via
+`VNX_DISPATCH_PATHS`, itself unexported since the tmux-spawn lane's removal)
+are parsed independently rather than sharing one object, and neither reaches
+a live worker spawn today.
 
 ## Enforcement defaulted OFF since 15-08 (this change)
 
@@ -245,48 +263,29 @@ outside-rate is re-run with directory matching repaired (split into real
 violations versus matcher artifacts), the default can flip back ON without
 blocking legitimate build-worker writes.
 
-## The fail-closed exception: `working_tree_only`
+## The fail-closed exception: `working_tree_only` (currently unwired)
 
-One dispatch class must never be allowed to reach `git commit`/`git push`
-regardless of the permissions default: a `working_tree_only` dispatch (plan
-review/plan write — no commit, no push). The commit/push deny
+One dispatch class was designed to never be allowed to reach `git commit`/`git
+push` regardless of the permissions default: a `working_tree_only` dispatch
+(plan review/plan write — no commit, no push). The commit/push deny
 (`Bash(git commit)`, `Bash(git commit:*)`, `Bash(git push)`,
-`Bash(git push:*)`) is only appended by `build_claude_scope_args(...,
-working_tree_only=True)` — a function that only runs in scoped mode. Scoped is
-the default (the launch posture — `worker_scoped_enabled()` — defaults ON; the
-fine-grained enforcement predicate defaults OFF), so a `working_tree_only`
-dispatch gets the deny automatically; it only loses it if the operator opts
-out of BOTH layers.
+`Bash(git push:*)`) is appended by `build_claude_scope_args(...,
+working_tree_only=True)`. The parameter exists on the function
+(`scripts/lib/worker_permissions.py`) and the deny logic works when it fires.
 
-`tmux_interactive_dispatch.py` closes that gap by refusing to run the opt-out
-paths, rather than silently downgrading protection:
-
-```python
-if working_tree_only and not (
-    skip_permissions
-    and (worker_scoped_enabled() or worker_permission_enforcement_enabled())
-):
-    return InteractiveDispatchResult(
-        success=False,
-        ...
-        failure_reason=(
-            "working_tree_only requires a scoped detached spawn "
-            "(the commit/push deny binds only when either the scoped "
-            "posture or ADR-012 enforcement is active; refusing the full "
-            "opt-out path — VNX_WORKER_BLANKET_SKIP=1 / "
-            "falsy VNX_WORKER_SCOPED AND VNX_WORKER_ENFORCEMENT_SKIP=1 / "
-            "falsy VNX_ENFORCE_WORKER_PERMISSIONS — where the deny would "
-            "not bind)"
-        ),
-    )
-```
-
-In practice: a `working_tree_only` dispatch runs scoped by default. It must
-**not** opt out of BOTH layers — `VNX_WORKER_BLANKET_SKIP=1` (or falsy
-`VNX_WORKER_SCOPED`) AND `VNX_WORKER_ENFORCEMENT_SKIP=1` (or falsy
-`VNX_ENFORCE_WORKER_PERMISSIONS`) — or it fails closed before any worker
-spawns. Either layer alone still forces the scoped spawn (the two predicates
-are OR-ed in the precondition), so the deny still binds.
+**No live call site passes `working_tree_only=True` today.** The tmux-spawn
+lane that used to set it, and that refused to spawn at all when the operator
+had opted out of both the scoped-launch posture and the hook-enforcement
+predicate, was removed on 2026-09-18
+(`docs/operations/TMUX_SPAWN_LANE.md`). Its refusal check lived in the
+now-deleted `tmux_interactive_dispatch.py` module. The surviving lane
+(`subprocess_adapter.py`'s `_build_worker_scope_args`) calls
+`build_claude_scope_args(...)` without `working_tree_only`, so a
+working-tree-only dispatch on that lane gets the normal scoped posture but not
+the commit/push deny, and there is no fail-closed refusal equivalent to the
+removed one. This is a real functional gap, not just a doc staleness issue.
+It is flagged here as an open item rather than silently fixed, since closing
+it is a code change outside this docs dispatch's scope.
 
 ## The unbypassable exception: Claude Code's own dangerous-rm gate (OI-104)
 
