@@ -273,7 +273,7 @@ class TestTimeoutKill:
 
     def test_timeout_kills_subprocess_and_records_failure(self, gate_env, monkeypatch):
         monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
-        monkeypatch.setenv("VNX_GEMINI_GATE_TIMEOUT", "1")
+        monkeypatch.setenv("VNX_CODEX_GATE_TIMEOUT", "1")
 
         runner = GateRunner(
             state_dir=gate_env["state_dir"],
@@ -281,7 +281,7 @@ class TestTimeoutKill:
         )
 
         report_path = str(gate_env["reports_dir"] / "timeout-report.md")
-        payload = _make_request_payload(report_path=report_path)
+        payload = _make_request_payload(gate="codex_gate", report_path=report_path)
 
         mock_proc = MagicMock()
         mock_proc.stdin = MagicMock()
@@ -312,14 +312,16 @@ class TestTimeoutKill:
              patch("gate_runner.os.getpgid", return_value=12345), \
              patch("gate_runner.os.killpg", mock_killpg):
             result = runner.run(
-                gate="gemini_review",
+                gate="codex_gate",
                 request_payload=payload,
                 pr_number=1,
             )
 
         assert result["status"] == "unavailable"
-        assert result["reason"] in ("timeout", "stall")
-        assert result["required_reruns"] == ["gemini_review"]
+        # codex_gate's stall threshold defaults to 300s, so only the 1s
+        # VNX_CODEX_GATE_TIMEOUT above can have ended this run.
+        assert result["reason"] == "timeout"
+        assert result["required_reruns"] == ["codex_gate"]
         assert mock_killpg.called or mock_proc.kill.called
 
 
@@ -328,8 +330,8 @@ class TestStallDetection:
 
     def test_stall_kills_subprocess(self, gate_env, monkeypatch):
         monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
-        monkeypatch.setenv("VNX_GEMINI_GATE_TIMEOUT", "300")
-        monkeypatch.setenv("VNX_GEMINI_STALL_THRESHOLD", "2")
+        monkeypatch.setenv("VNX_CODEX_GATE_TIMEOUT", "300")
+        monkeypatch.setenv("VNX_CODEX_STALL_THRESHOLD", "2")
 
         runner = GateRunner(
             state_dir=gate_env["state_dir"],
@@ -337,7 +339,7 @@ class TestStallDetection:
         )
 
         report_path = str(gate_env["reports_dir"] / "stall-report.md")
-        payload = _make_request_payload(report_path=report_path)
+        payload = _make_request_payload(gate="codex_gate", report_path=report_path)
 
         mock_proc = MagicMock()
         mock_proc.stdin = MagicMock()
@@ -367,7 +369,7 @@ class TestStallDetection:
              patch("gate_runner.os.getpgid", return_value=54321), \
              patch("gate_runner.os.killpg", mock_killpg):
             result = runner.run(
-                gate="gemini_review",
+                gate="codex_gate",
                 request_payload=payload,
                 pr_number=1,
             )

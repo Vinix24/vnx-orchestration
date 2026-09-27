@@ -74,6 +74,7 @@ def evaluate_auto_merge_policy(
     merge_policy: str,
     changed_files: Sequence[str],
     codex_gate_passed: bool,
+    kimi_gate_passed: bool,
     required_checks_passed: bool,
     closure_verifier_passed: bool,
 ) -> AutoMergeDecision:
@@ -89,6 +90,8 @@ def evaluate_auto_merge_policy(
         blockers.append("high_risk_change_scope")
     if not codex_gate_passed:
         blockers.append("codex_gate_not_passed")
+    if not kimi_gate_passed:
+        blockers.append("kimi_gate_not_passed")
     if not required_checks_passed:
         blockers.append("required_checks_not_passed")
     if not closure_verifier_passed:

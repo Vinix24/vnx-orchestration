@@ -38,9 +38,13 @@ _g_required_gates() {
   [ -f "$config" ] || config="${PROJECT_ROOT}/.vnx/governance_enforcement.yaml"
   [ -f "$config" ] || config="${VNX_HOME}/governance_enforcement.yaml"
 
+  # The default review stack: the two standing subscription seats
+  # (config_registry VNX_DEFAULT_REVIEW_STACK; test_gate_required_gates pins the
+  # two equal). Used when no config is found or it names no required gate.
+  local default_stack='codex_gate,kimi_gate'
+
   if [ ! -f "$config" ]; then
-    # Fallback to default stack when no config found
-    printf 'codex_gate'
+    printf '%s' "$default_stack"
     return
   fi
 
@@ -92,7 +96,7 @@ for g in gates:
     if mapped:
         result.append(mapped)
 
-print(','.join(result) if result else 'codex_gate')
+print(','.join(result) if result else '$default_stack')
 "
 }
 

@@ -29,7 +29,13 @@ _FILE_REF_RE = re.compile(
     r'\b([\w./][\w./]*\.(?:py|md|sql|sh|yaml|yml|ts|js|tsx|jsx)):(\d+)(?:-(\d+))?\b'
 )
 
-_KNOWN_GATES = ("codex_gate",)
+# Every model-backed review gate that can hold a seat in a review round: the two
+# subscription seats of the default stack (codex_gate, kimi_gate) and the
+# API-credit readers the takeover chain falls to (glm_gate, deepseek_gate). A
+# seat's blocking findings reach the next round only if its gate is named here.
+# gate_recorder.GATE_BILLING classifies the same set; test_prior_round_injector
+# pins this tuple against it, so a gate added to the registry cannot go unread.
+_KNOWN_GATES = ("codex_gate", "kimi_gate", "glm_gate", "deepseek_gate")
 
 
 @dataclass(frozen=True)

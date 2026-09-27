@@ -17,12 +17,16 @@ manager knows (ci_gate), never the orphan name (ci).
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 GATE_SH = REPO_ROOT / "scripts" / "commands" / "gate.sh"
+
+sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+from config_registry import CONFIG_REGISTRY
 
 
 @pytest.fixture
@@ -93,3 +97,30 @@ def test_codex_required_still_maps_to_codex_gate(env):
     assert result.returncode == 0, result.stderr
     gates = [g for g in result.stdout.strip().split(",") if g]
     assert "codex_gate" in gates, result.stdout
+
+
+def _default_review_stack() -> list[str]:
+    raw = CONFIG_REGISTRY["VNX_DEFAULT_REVIEW_STACK"].default
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def test_no_config_falls_back_to_the_default_review_stack(env):
+    """Without an enforcement config both standing seats run, not codex alone."""
+    result = _run_required_gates(env)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().split(",") == _default_review_stack()
+
+
+def test_config_naming_no_required_gate_falls_back_to_the_default_review_stack(env):
+    _write_enforcement_config(
+        env,
+        "version: 1\nmode: standard\nchecks:\n  max_pr_lines:\n    level: 1\n",
+    )
+    result = _run_required_gates(env)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().split(",") == _default_review_stack()
+
+
+def test_fallback_stack_holds_no_retired_gate(env):
+    result = _run_required_gates(env)
+    assert "gemini_review" not in result.stdout

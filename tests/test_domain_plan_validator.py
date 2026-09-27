@@ -22,6 +22,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts" / "lib"))
 
+from dispatch_spec import REGISTERED_GATE_NAMES
 from domain_plan_validator import (
     KNOWN_GOVERNANCE_PROFILES,
     KNOWN_DOMAINS,
@@ -216,6 +217,47 @@ class TestPrematureRollout:
         result = validate_domain_plan(FULL_BUSINESS_PLAN)
         v7 = [f for f in result.findings if f.rule == "V-7"]
         assert len(v7) == 0
+
+
+# ---------------------------------------------------------------------------
+# 9. Gate type validation (V-8)
+# ---------------------------------------------------------------------------
+
+def _plan_naming_gates(gate_types: str) -> str:
+    return FULL_BUSINESS_PLAN.replace(
+        "| `gate_types` | (none required) | Light |",
+        f"| `gate_types` | {gate_types} | Review |",
+    )
+
+
+class TestGateTypes:
+
+    def test_none_required_is_not_flagged(self) -> None:
+        result = validate_domain_plan(FULL_BUSINESS_PLAN)
+        assert [f for f in result.findings if f.rule == "V-8"] == []
+
+    @pytest.mark.parametrize("gate", sorted(REGISTERED_GATE_NAMES))
+    def test_every_registered_gate_is_accepted(self, gate: str) -> None:
+        result = validate_domain_plan(_plan_naming_gates(gate))
+        assert [f for f in result.findings if f.rule == "V-8"] == []
+
+    def test_the_default_review_stack_is_accepted(self) -> None:
+        """codex_gate,kimi_gate is the operator's default stack (2026-09-26)."""
+        result = validate_domain_plan(_plan_naming_gates("codex_gate, kimi_gate"))
+        assert [f for f in result.findings if f.rule == "V-8"] == []
+
+    def test_a_retired_gate_is_flagged(self) -> None:
+        result = validate_domain_plan(_plan_naming_gates("codex_gate, gemini_review"))
+        v8 = [f for f in result.findings if f.rule == "V-8"]
+        assert len(v8) == 1
+        assert "gemini_review" in v8[0].message
+        assert v8[0].severity == "warn"
+
+    def test_an_unknown_gate_is_flagged(self) -> None:
+        result = validate_domain_plan(_plan_naming_gates("totally_unknown_gate"))
+        v8 = [f for f in result.findings if f.rule == "V-8"]
+        assert len(v8) == 1
+        assert "totally_unknown_gate" in v8[0].message
 
 
 # ---------------------------------------------------------------------------

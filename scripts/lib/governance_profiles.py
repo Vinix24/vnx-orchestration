@@ -15,7 +15,7 @@ Config file (.vnx/governance_profiles.yaml):
   profiles:
     default:
       review_mode: full
-      required_gates: [codex_gate, ci]
+      required_gates: [codex_gate, kimi_gate, ci]
       max_pr_lines: 300
       auto_merge: false
     light:
@@ -55,7 +55,7 @@ class GovernanceProfile:
     Attributes:
         name:                   Profile name (e.g. "default", "light", "minimal").
         review_mode:            "full" | "exception_only" | "none".
-        required_gates:         Ordered list of gates that must pass (e.g. ["codex_gate", "ci"]).
+        required_gates:         Ordered list of gates that must pass (e.g. ["codex_gate", "kimi_gate", "ci"]).
         max_pr_lines:           Maximum allowed PR line count for this profile.
         auto_merge:             Whether the PR may be auto-merged when gates pass.
         min_observability_tier: Minimum adapter observability tier required for dispatches.
@@ -92,7 +92,7 @@ DEFAULT_PROFILES: dict[str, GovernanceProfile] = {
     "default": GovernanceProfile(
         name="default",
         review_mode="full",
-        required_gates=["codex_gate", "ci"],
+        required_gates=["codex_gate", "kimi_gate", "ci"],
         max_pr_lines=300,
         auto_merge=False,
         min_observability_tier=1,
@@ -100,7 +100,7 @@ DEFAULT_PROFILES: dict[str, GovernanceProfile] = {
     "coding-strict": GovernanceProfile(
         name="coding-strict",
         review_mode="full",
-        required_gates=["codex_gate", "ci"],
+        required_gates=["codex_gate", "kimi_gate", "ci"],
         max_pr_lines=300,
         auto_merge=False,
         min_observability_tier=1,

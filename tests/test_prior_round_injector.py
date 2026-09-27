@@ -4,6 +4,8 @@
 Coverage:
   - Graceful empty when no gate results exist
   - Fetches codex_gate blocking findings
+  - Fetches blocking findings from every other gate that can hold a review seat
+    (kimi_gate, glm_gate, deepseek_gate), so a seat's findings reach the next round
   - Ignores a retired gate (gemini_review) as a prior-round source
   - Blocking before advisory in priority order
   - Scope filter prioritizes dispatch_paths overlap
@@ -25,11 +27,15 @@ import unittest
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent / "scripts"
+sys.path.insert(0, str(SCRIPT_DIR))
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
+from dispatch_spec import REGISTERED_GATE_NAMES
+from gate_recorder import GATE_BILLING, GATE_BILLING_NONE
 from prior_round_injector import (
     MAX_INJECTION_CHARS,
     PriorFinding,
+    _KNOWN_GATES,
     _extract_file_paths,
     _fetch_cached,
     fetch_prior_findings,
@@ -108,6 +114,59 @@ class TestPriorRoundInjector(unittest.TestCase):
             self.assertEqual(findings[0].gate, "codex_gate")
             self.assertEqual(findings[0].severity, "blocking")
             self.assertIn("Missing migration", findings[0].message)
+
+    def test_fetches_kimi_gate_blocking_findings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp)
+            results_dir = _make_results_dir(state_dir)
+            _write_gate_file(
+                results_dir, "43", "kimi_gate",
+                blocking=["Seat dropped in scripts/lib/governance_profiles.py:95."],
+            )
+            findings = fetch_prior_findings("43", state_dir=state_dir)
+            self.assertEqual(len(findings), 1)
+            self.assertEqual(findings[0].gate, "kimi_gate")
+            self.assertEqual(findings[0].severity, "blocking")
+            self.assertIn("Seat dropped", findings[0].message)
+            self.assertEqual(findings[0].file_paths, ("scripts/lib/governance_profiles.py",))
+
+    def test_fetches_findings_from_every_gate_that_can_hold_a_review_seat(self):
+        for gate in ("codex_gate", "kimi_gate", "glm_gate", "deepseek_gate"):
+            with self.subTest(gate=gate), tempfile.TemporaryDirectory() as tmp:
+                _fetch_cached.cache_clear()
+                state_dir = Path(tmp)
+                results_dir = _make_results_dir(state_dir)
+                _write_gate_file(results_dir, "48", gate, blocking=[f"Finding from {gate}."])
+                findings = fetch_prior_findings("48", state_dir=state_dir)
+                self.assertEqual([(f.gate, f.severity) for f in findings], [(gate, "blocking")])
+
+    def test_most_recent_round_first_when_multiple_gates_recorded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp)
+            results_dir = _make_results_dir(state_dir)
+            _write_gate_file(
+                results_dir, "46", "codex_gate",
+                blocking=["Codex older finding."],
+                recorded_at="2026-04-09T08:00:00Z",
+            )
+            _write_gate_file(
+                results_dir, "46", "kimi_gate",
+                blocking=["Kimi recent finding."],
+                recorded_at="2026-04-10T12:00:00Z",
+            )
+            findings = fetch_prior_findings("46", state_dir=state_dir)
+            self.assertEqual([f.gate for f in findings], ["kimi_gate", "codex_gate"])
+
+    def test_known_gates_are_the_model_backed_gates_of_the_registry(self):
+        """The tuple is a copy of a fact the registry owns: which registered gates
+        put a model behind a review seat. A gate added to the registry without a
+        place here would carry its findings into no next round."""
+        model_backed = {
+            gate for gate in REGISTERED_GATE_NAMES
+            if GATE_BILLING[gate] != GATE_BILLING_NONE
+        }
+        self.assertEqual(set(_KNOWN_GATES), model_backed)
+        self.assertEqual(len(_KNOWN_GATES), len(set(_KNOWN_GATES)))
 
     def test_ignores_a_retired_gate_as_a_prior_round_source(self):
         with tempfile.TemporaryDirectory() as tmp:

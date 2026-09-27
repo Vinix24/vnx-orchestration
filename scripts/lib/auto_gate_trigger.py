@@ -27,8 +27,11 @@ logger = logging.getLogger(__name__)
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# Required gate names from governance_enforcement.yaml (soft/hard mandatory checks)
-_DEFAULT_GATE_STACK = ["codex_gate"]
+# Required gate names from governance_enforcement.yaml (soft/hard mandatory checks).
+# The fallback, used when that file names none, is the default review stack: the
+# two standing subscription seats (config_registry VNX_DEFAULT_REVIEW_STACK; a
+# test pins the two equal).
+_DEFAULT_GATE_STACK = ["codex_gate", "kimi_gate"]
 
 
 # ---------------------------------------------------------------------------
