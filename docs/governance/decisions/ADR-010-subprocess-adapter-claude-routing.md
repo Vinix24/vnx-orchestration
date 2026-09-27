@@ -1,6 +1,6 @@
 # ADR-010 — Subprocess Adapter (`claude -p`) as Canonical Claude Routing
 
-**Status:** Accepted
+**Status:** Accepted, superseded-in-part by ADR-024 (see ADR-024 amendment 2026-09-18)
 **Date:** 2026-05-09
 **Decided by:** Operator (Vincent van Deth)
 **Resolves:** Canonical Claude invocation path; SDK-ban implementation; ADR-003 codification
