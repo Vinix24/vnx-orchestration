@@ -3,19 +3,32 @@
 > **Note on the model below (2026-07):** the fixed T0 + Track A/B/C + T-MANAGER terminal layout described in this "Tested" section is the **opt-in subprocess lane** (`VNX_ADAPTER_T{n}=subprocess`). The **default** since the door-flip is the single-entry dispatch door with **ephemeral per-dispatch workers** (spawned per task, leaving receipts + worktree state behind), not fixed terminals. See the README and `docs/core/DISPATCH_RULES.md` for the current lanes; live per-feature status lives in `ROADMAP.yaml`.
 
 ## Tested
+
+**Current default lane** (single-entry dispatch door, ephemeral per-dispatch workers):
+- The dispatch door (`vnx dispatch`) as the single entry point for every dispatch (ADR-024)
+- `claude_headless` (`claude -p` via envelope) as the only Claude worker lane, subscription-preserving
+- Default review stack `codex_gate,kimi_gate`, with `codex,kimi,glm,deepseek` as the takeover chain (glm/deepseek are fallback only)
+- Horizon (`vnx horizon`) as the roadmap → tracks → deliverables planning layer, with the plan-first gate
+- Receipt-based cost observability (git provenance per receipt)
+- Graceful crash recovery via ledger replay
+
+**Opt-in subprocess lane** (`VNX_ADAPTER_T{n}=subprocess`, terminal-pinned, the historical default layout):
 - 5 terminals: T0 (orchestrator) + Track A / Track B / Track C (workers) + T-MANAGER (system maintenance)
 - Claude Code + Codex CLI + Gemini CLI + Kimi CLI (provider auto-detection via session_resolver)
 - Single-repository workflows (one VNX instance per project)
 - Deployed across 4 independent projects (SaaS SEO tool, marketing website, Mission Control, VNX itself)
-- Receipt-based cost observability (V4 — receipt_processor with git provenance per receipt)
-- Graceful crash recovery via ledger replay
 - T0 orchestrator: Claude Opus via Claude Code
 - T0 write restrictions enforced via Claude Code hooks (T0 cannot write files directly)
-- Dispatcher V8 with track-based routing (Track A/B/C) and MCP-aware dispatch
+- Terminal-pinned dispatch with track-based routing (Track A/B/C) and MCP-aware dispatch
 - Per-terminal MCP profiling (workers: github + sequential-thinking only; Track C: full 10-server stack)
 - Remote distribution via `vnx update` (clone → install.sh → origin persistence)
 
 ## Multi-Model Dispatch Status
+
+The section below describes CLI-level capability per provider on the opt-in subprocess
+lane. On the current default lane, provider choice is a pinned default rather than a
+capability question: T0 runs Opus 5.5, build-workers default to Sonnet, and `codex`/`kimi`
+are the subscription review gates, with `glm`/`deepseek` as API-credit fallback only.
 
 VNX was built and battle-tested with Claude Code as the primary provider. As Codex CLI
 results have become increasingly clear, multi-model dispatch support has been added:
@@ -44,7 +57,7 @@ results have become increasingly clear, multi-model dispatch support has been ad
 ## By Design
 - **File-based**: Uses the filesystem as a message bus. Not designed for distributed networks.
 - **Local-first**: No cloud dependency for orchestration state.
-- **Bash/Python prototype (~60/40 ratio)**: The codebase is approximately 60% bash and 40% Python. This ratio reflects origin, not design preference — VNX started as tmux `send-keys` scripts and grew organically. Bash handles tmux orchestration, file-bus operations, and process supervision; Python handles intelligence, receipt processing, and anything requiring structured data or testability. New components are written in Python by default; existing bash is migrated when it needs significant changes. See [EVOLUTION_TIMELINE.md — Language Evolution](EVOLUTION_TIMELINE.md#language-evolution-why-60-bash--40-python) for full context.
+- **Bash/Python prototype (~7/93 ratio)**: The codebase is approximately 7% bash and 93% Python (measured by line count under `scripts/`+`bin/`). This ratio reflects origin, not design preference — VNX started as tmux `send-keys` scripts and grew organically. Bash handles tmux orchestration, file-bus operations, and process supervision; Python handles intelligence, receipt processing, and anything requiring structured data or testability. New components are written in Python by default; existing bash is migrated when it needs significant changes. See [EVOLUTION_TIMELINE.md — Language Evolution](EVOLUTION_TIMELINE.md#language-evolution-why-python-now-dominates) for full context.
 - **Tmux Dependency**: Orchestration currently relies on tmux pane naming conventions.
 - **Hook-agnostic**: Quality intelligence and usage tracking do not require provider hooks; hooks are optional enrichments.
 - **T0 write isolation**: The orchestrator cannot write files directly; write restrictions are enforced through Claude Code hooks. This ensures T0 stays a coordinator, not an executor.

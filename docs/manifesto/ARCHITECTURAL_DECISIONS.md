@@ -27,9 +27,10 @@
 ---
 
 ## 4) `tmux send-keys` for Dispatch Delivery
+**Status**: Superseded for Claude dispatches (2026-09-18).
 **Context**: REPL terminals do not provide stable IPC or reliable polling signals.  
 **Decision**: Deliver dispatches via `tmux send-keys` and paste-buffer flow.  
-**Tradeoff**: Brittle in theory, but currently the most reliable method in practice.
+**Tradeoff**: Brittle in theory. It was superseded for Claude workers: the tmux-spawn lane was removed on 2026-09-18, and `claude_headless` (`claude -p` via envelope) is now the only Claude dispatch lane. `tmux send-keys` remains the injection path for interactive codex/kimi/gemini terminals.
 
 ---
 

@@ -66,47 +66,50 @@ The LLM receives a constrained prompt with 5 structured rules and is required to
 
 ## 3. Gate Locks
 
-Gate locks are file-based hard constraints that prevent `COMPLETE` until specific conditions are externally verified. This mechanism governs **dispatch-level** review gates (codex, kimi, CI) — it is one of two independent gate mechanisms in the system, not the only one.
+**Correction (2026-09-27): this section describes a design that was never wired in.** `scripts/f39/gate_locks.py` implements `create_lock`/`release_lock`/`get_pending_locks`/`has_pending_locks` exactly as below, but nothing in the codebase calls it — there is no T0 pre-filter step that checks `.vnx-data/state/gate_locks/` before deciding `WAIT` vs `COMPLETE`. Sections 1 and 4 of this document describe "gate lock present → WAIT" as a hard, code-enforced pre-filter check; that check does not exist at runtime. Treat the mechanism below as designed, not shipped, until a caller is added.
 
-**A second, unrelated mechanism gates PR merges directly: the D1-D5 signed-attestation pipeline.**
-Where a gate lock is a file whose mere presence blocks T0 from outputting `COMPLETE`, the
+What actually blocks a merge today is `scripts/pr_merge.py`: a fail-closed sequence of preflight checks run at merge time (not at T0's decision point) — a CI gate (`merge_preflight_ci_check.check_ci_run_for_head`), a review gate (`closure_verifier.check_review_gate_for_merge`, requiring a passing, fully-evidenced review-gate result for the PR), a `contract_invalid` gate on the latest DELIVERABLE-OUTCOME receipt, and a branch-protection gate. Any of these returning NO-GO refuses the merge; `pr_merge.py --dispatch-id` is the only path that writes a `pr_merged` receipt (see [[merge-alleen-via-de-deur]]). This is a third, independent mechanism from both the (unwired) gate-lock design below and the D1-D5 attestation pipeline described next.
+
+Gate locks are file-based hard constraints that, if wired in, would prevent `COMPLETE` until specific conditions are externally verified. This mechanism, as designed, governs **dispatch-level** review gates (codex, kimi, CI) — it is one of several gate mechanisms in the system, not the only one.
+
+**A separate, unrelated mechanism gates PR merges directly: the D1-D5 signed-attestation pipeline.**
+Where a gate lock (if wired) would be a file whose mere presence blocks T0 from outputting `COMPLETE`, the
 attestation gate (`docs/governance/ATTESTATION_ENFORCEMENT.md`) is a GitHub Actions required check
 that cryptographically verifies an SSH-signed manifest before a feature-code PR can merge — no
-lock file is written or read, and T0's pre-filter is not involved at all. The two mechanisms serve
-different moments: gate locks answer "has this dispatch's review gate passed" (pre-merge,
-dispatch-scoped); the attestation gate answers "does this merge carry a verifiable signature back
-to a governed dispatch" (at-merge, PR-scoped). Both can apply to the same PR. As of 2026-07-05 the
-attestation gate ships in staged-advisory mode (reports, never blocks) — see
-`docs/governance/ATTESTATION_ENFORCEMENT.md` for the flip criterion.
+lock file is written or read, and T0's pre-filter is not involved at all. Gate locks (as designed)
+would answer "has this dispatch's review gate passed" (pre-merge, dispatch-scoped); the attestation
+gate answers "does this merge carry a verifiable signature back to a governed dispatch" (at-merge,
+PR-scoped). As of 2026-07-05 the attestation gate ships in staged-advisory mode (reports, never
+blocks) — see `docs/governance/ATTESTATION_ENFORCEMENT.md` for the flip criterion.
 
-### How they work
+### How they would work, if wired in
 
-1. When a review gate is required (e.g., `codex_gate`, `kimi_gate`, `ci_gate`), a lock file is written:
+1. When a review gate is required (e.g., `codex_gate`, `kimi_gate`, `ci_gate`), a lock file would be written:
    ```
    .vnx-data/state/gate_locks/<gate-id>.lock
    ```
-2. The pre-filter checks for the presence of any `.lock` file before routing to LLM.
-3. If any lock file exists, the pre-filter returns `WAIT` immediately.
-4. The LLM is not invoked — it cannot see, reason about, or override the lock.
-5. When the gate passes (headless execution completes, result recorded), the lock file is deleted.
-6. Next T0 cycle finds no locks → routes to LLM → `COMPLETE` is now a valid output.
+2. The pre-filter would check for the presence of any `.lock` file before routing to LLM.
+3. If any lock file exists, the pre-filter would return `WAIT` immediately.
+4. The LLM would not be invoked — it could not see, reason about, or override the lock.
+5. When the gate passes (headless execution completes, result recorded), the lock file would be deleted.
+6. Next T0 cycle finds no locks → routes to LLM → `COMPLETE` becomes a valid output.
 
 ### Why file-based
 
 - No database dependency. Locks survive crashes and restarts.
 - Atomic: file exists or it does not. No partial states.
-- Observable: `ls .vnx-data/state/gate_locks/` shows all pending gates instantly.
-- Deleteable by operator: human override is always possible without code changes.
+- Observable: `ls .vnx-data/state/gate_locks/` would show all pending gates instantly.
+- Deleteable by operator: human override would be possible without code changes.
 
 ### Domain-agnostic design
 
-Gate locks are intentionally domain-agnostic. The same mechanism works for:
+Gate locks are intentionally domain-agnostic in their design. The same mechanism would work for:
 - Code quality gates (`codex_gate.lock`, `kimi_gate.lock`)
 - CI status (`ci_gate.lock`)
 - Business compliance gates (`legal_review.lock`, `gdpr_check.lock`)
 - Any future gate type — no code changes required to add a new gate domain.
 
-The lock file name is the gate identity. The pre-filter does not care about content.
+The lock file name would be the gate identity. The pre-filter would not care about content.
 
 ---
 
@@ -219,21 +222,21 @@ For subprocess-adapter terminals, the skill content is inlined directly into the
 
 ## 7. Review Gate Lifecycle
 
-Review gates follow a strict lifecycle. Every gate must complete all stages before the lock is released. This lifecycle applies to **headless review gates** (codex, kimi, wiring) that block a dispatch via a lock file (§3). The D3 attestation gate follows a **completely different lifecycle** — no request file, no lock file, no result-record stage. It runs as a GitHub Action on `pull_request`, classifies the diff, resolves a trust anchor from the base branch, and returns a pass/fail signal as the check's exit code (`0` = PASS, EXEMPT, or a validly-signed OVERRIDE; `1` = FAIL; `2` = CONFIG ERROR). A recorded override therefore exits `0` just like a PASS — the PASS-vs-OVERRIDE distinction is carried in the textual verdict message, not the exit code. See `docs/governance/ATTESTATION_ENFORCEMENT.md` for that flow.
+**Correction (2026-09-27): the "lock release" stage below is unwired** — see §3. Steps 1-4 (request, execute, report, result record) describe real mechanisms (`scripts/gate_request_handler.py`, `scripts/gate_executor.py`, `scripts/lib/gate_report_generator.py`, `scripts/lib/gate_recorder.py`). Step 5 ("lock release") and the "pre-filter finds no locks" framing of step 6 do not happen in the running system, because nothing calls `scripts/f39/gate_locks.py`. What actually gates completion is `scripts/pr_merge.py` reading the review-gate result record directly at merge time (`closure_verifier.check_review_gate_for_merge`) — a merge-time check, not a T0-decision-time lock. This lifecycle applies to **headless review gates** (codex, kimi). The D3 attestation gate follows a **completely different lifecycle** — no request file, no lock file, no result-record stage. It runs as a GitHub Action on `pull_request`, classifies the diff, resolves a trust anchor from the base branch, and returns a pass/fail signal as the check's exit code (`0` = PASS, EXEMPT, or a validly-signed OVERRIDE; `1` = FAIL; `2` = CONFIG ERROR). A recorded override therefore exits `0` just like a PASS — the PASS-vs-OVERRIDE distinction is carried in the textual verdict message, not the exit code. See `docs/governance/ATTESTATION_ENFORCEMENT.md` for that flow.
 
 ```
-request → execute → report → result record → lock release → completion
+request → execute → report → result record → (lock release, as designed) → merge-time check
 ```
 
 ### Stage detail
 
-1. **Request**: T0 creates a gate request file and writes the corresponding lock file.
+1. **Request**: A gate request file is created.
    ```
    .vnx-data/state/review_gates/pending/<gate-id>.json
-   .vnx-data/state/gate_locks/<gate-id>.lock
    ```
+   (The corresponding lock file under `.vnx-data/state/gate_locks/<gate-id>.lock` would also be written here if the gate-lock mechanism were wired in — see §3.)
 
-2. **Execute**: A headless subprocess runs the review tool (codex CLI, kimi subprocess, CI pipeline). Execution is non-blocking — T0 continues making WAIT decisions until completion.
+2. **Execute**: A headless subprocess runs the review tool (codex CLI, kimi subprocess, CI pipeline). Execution is non-blocking.
 
 3. **Report**: The review tool writes a normalized markdown report:
    ```
@@ -246,13 +249,11 @@ request → execute → report → result record → lock release → completion
    ```
    Contains: verdict (`pass`/`fail`/`warn`), findings, score, tool version.
 
-5. **Lock release**: Only after both the report AND the result record exist is the lock file deleted. Missing either file = lock stays.
-
-6. **Completion**: Pre-filter finds no locks on next T0 cycle. If all gates pass, `COMPLETE` becomes available.
+5. **Merge-time check**: `scripts/pr_merge.py` reads this result record directly when the merge is attempted (`closure_verifier.check_review_gate_for_merge`). A missing, stale, or failing result blocks the merge. There is no separate "lock release" step in the running system.
 
 ### Why both report and result record are required
 
-The report is human-readable evidence. The result record is machine-parseable for automated decisions. A gate is not complete until T0 can both inspect the findings and act on the structured verdict. Partial completion (report without result, or result without report) leaves the lock in place.
+The report is human-readable evidence. The result record is machine-parseable for automated decisions. A gate is not complete until an operator (or `pr_merge.py`) can both inspect the findings and act on the structured verdict.
 
 ---
 
@@ -278,10 +279,9 @@ T0 makes autonomous decisions within bounded authority. Beyond those bounds, it 
 ### Human override paths
 
 An operator can always:
-- Delete a lock file manually to release a gate
+- Edit or delete a gate result record to correct a bad gate verdict before `pr_merge.py` reads it (see §3, §7 — there is no separate lock file to delete in the running system)
 - Promote a dispatch to bypass staging
 - Write a forced-COMPLETE signal to override T0 WAIT
-- Edit the result record to correct a bad gate verdict
 
 None of these require code changes. The governance layer is transparent and operator-controllable at every stage.
 

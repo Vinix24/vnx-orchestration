@@ -13,8 +13,8 @@ Every primitive in the framework has a direct finance equivalent.
 | Receipt per dispatch | Journal entry per transaction |
 | Append-only NDJSON ledger | Immutable general ledger — you append, you never overwrite |
 | Human gate / review gate | Four-eyes principle / segregation of duties |
-| First-Pass Yield + rework rate | Statistical process control on the process itself |
-| Hash-chained receipts | Tamper-evidence — a changed record breaks the chain |
+| First-Pass Yield + rework rate (designed, not yet a published metric) | Statistical process control on the process itself |
+| Hash-chained receipts (opt-in, off by default) | Tamper-evidence — a changed record breaks the chain, when enabled |
 | Dispatch → review → human merge | Authorization flow with recorded approval |
 | Instruction ↔ output ↔ change, linked | Source document ↔ posted entry ↔ reported figure — full two-way traceability |
 | Per-project state | Entity/ledger separation |
@@ -26,13 +26,13 @@ This is not an analogy stretched to fit. The append-only receipt *is* a journal 
 Take any finance process you would consider handing partly to an AI agent — invoice processing, reconciliation, drafting journal entries, expense checks, first-line control testing. Instead of letting the model act and hoping, you run it inside the same four controls the framework already enforces:
 
 1. **Every action becomes a journal entry.** The agent reads an invoice, proposes a booking, flags an exception — each step writes a receipt: what it did, on what input, with what confidence, when, and under whose authority. Nothing the agent does is off the record.
-2. **The ledger is append-only and tamper-evident.** Corrections are new entries, never edits. The receipts are hash-chained, so any attempt to rewrite history breaks the chain and is detectable. This is the audit-trail integrity an external auditor asks for.
+2. **The ledger is append-only, and can be made tamper-evident.** Corrections are new entries, never edits. A hash-chain variant exists so that any attempt to rewrite history breaks the chain and is detectable — but it is opt-in per project and off by default fleet-wide, so an auditor asking for cryptographic tamper-evidence needs it turned on explicitly, not assumed.
 3. **A human authorizes the last set.** The agent proposes; a person approves the entry that actually posts. Four-eyes is built in, not bolted on — and the approval itself is recorded as part of the trail.
-4. **You measure the process, not just the output.** First-Pass Yield tells you how often the agent's work is right the first time; rework rate tells you how often it comes back. You are running SPC on an AI-driven finance process, exactly as you would on any controlled process.
+4. **You are designed to measure the process, not just the output.** First-Pass Yield is meant to tell you how often the agent's work is right the first time; rework rate, how often it comes back. The receipt trail carries what those metrics need; the same SPC discipline you'd run on any controlled process is the goal here, not yet a number this framework publishes.
 
 And because the instruction is linked to its output and to the resulting entry, the process is **replayable, not just inspectable.** You can take any reported figure and walk it all the way back — to the posting, to the agent's action, to the exact instruction and the input it ran on — and walk it forward again. That two-way reconstruction is precisely what an audit walkthrough is: not a sample of details, but the whole picture, re-derivable on demand.
 
-The result is an AI-assisted finance workflow that an auditor can read end to end: every decision, every approval, every correction, in an immutable ledger — mapping naturally onto ISAE 3402 / internal-control language.
+The result is an AI-assisted finance workflow that an auditor can read end to end: every decision, every approval, every correction, in an append-only ledger (cryptographically immutable if the hash-chain option is turned on) — mapping naturally onto ISAE 3402 / internal-control language.
 
 ## Why it matters
 

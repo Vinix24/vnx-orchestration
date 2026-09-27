@@ -2,8 +2,8 @@
 
 **Author**: Vincent van Deth
 **Date**: February 2026
-**Status**: Reference Architecture — 1.0.0, released to PyPI 2026-07-02 (`pip install vnx-orchestration`)
-**Usage**: 6+ months daily use on a local system · 14,000+ governed receipts in the audit trail · ephemeral per-dispatch workers (the old fixed 4-terminal model is now opt-in)
+**Status**: Reference Architecture — released to PyPI 2026-07-02 (`pip install vnx-orchestration`)
+**Usage**: extended daily use on a local system · governed receipts accumulate in the audit trail · ephemeral per-dispatch workers (the old fixed 4-terminal model is now opt-in)
 
 ---
 
@@ -11,7 +11,7 @@
 
 The multi-agent AI space is obsessed with orchestration — how to make agents work together. But orchestration without governance is just coordinated chaos.
 
-After running multi-agent workflows daily for six months (Claude Code, Codex CLI, 3-4 parallel terminals), I kept hitting the same wall: **I couldn't audit what my agents actually did.** In the early months, the system ran with auto-accept enabled — dispatches flowed without manual confirmation. That autonomy taught me the hard way that orchestration without governance is just coordinated chaos. I switched to mandatory human confirmation for every dispatch (and have used that ever since), but even with manual approval, chat logs are unstructured, session transcripts are opaque, and git history shows *what* changed but not *why* an agent decided to change it at that specific moment, or *which* agent was responsible.
+After running multi-agent workflows daily (Claude Code, Codex CLI, 3-4 parallel terminals), I kept hitting the same wall: **I couldn't audit what my agents actually did.** In the early months, the system ran with auto-accept enabled — dispatches flowed without manual confirmation. That autonomy taught me the hard way that orchestration without governance is just coordinated chaos. I switched to mandatory human confirmation for every dispatch (and have used that ever since), but even with manual approval, chat logs are unstructured, session transcripts are opaque, and git history shows *what* changed but not *why* an agent decided to change it at that specific moment, or *which* agent was responsible.
 
 The industry treats the chat window as the system's state. This is a fundamental engineering mistake:
 
@@ -166,7 +166,7 @@ For the precise rule, the lifecycle diagram, and the loop, see
 ## What This Is (and What It Isn't)
 
 **This is:**
-- A reference architecture validated by 6 months of daily use on a local 4-terminal system
+- A reference architecture validated by extended daily use on a local system (the fixed 4-terminal model described above is now opt-in, not the default)
 - A working Python/Bash prototype used to build real software
 - An opinionated stance: governance belongs in the architecture, not as an afterthought
 - MIT-licensed and open for inspection
@@ -178,10 +178,10 @@ For the precise rule, the lifecycle diagram, and the loop, see
 
 ### Known Limitations
 
-- The interactive tmux worker lane is available and subscription-preserving; full PREPARE/GOVERN envelope parity across all lanes is targeted for 1.x (see Tier 1/2 framing in the README).
-- Gemini integration documented and validated; Kimi K2.6 is in production via CLI OAuth lane, 6/6 skill-injection verified.
-- **T0 orchestrator tested with Claude Opus** (via Claude Code, which powers ~80% of the workflow). Other models may work as T0, but this is less tested.
-- Per-worker git worktree isolation is available via `VNX_ISOLATED_WORKTREE=1` and off by default; isolation guarantees vary by lane. Parallel multi-track execution is Tier 3 — designed, not shipped (see README Tier framing).
+- The interactive tmux-spawn worker lane was removed on 2026-09-18; `claude_headless` (`claude -p` via envelope) is now the only Claude worker lane, and it runs on the Max subscription, not API credits. Tmux remains in use only as an injection path for interactive kimi/codex/gemini terminals, not for Claude workers.
+- Gemini is a worker-provider lane, not a review gate: `gemini_review` was retired from the review stack. Kimi runs as a first-class production worker lane via its CLI OAuth path, with `kimi-k3` as the default model (`kimi-k2-6` is disabled).
+- **T0 orchestrator runs on Claude Opus** (via Claude Code). Other models may work as T0, but this is less tested.
+- Per-dispatch git worktree isolation is unconditional in the headless envelope lane (`claude_headless`, the only Claude worker lane); the older subprocess-adapter lane still gates it behind `VNX_ISOLATED_WORKTREE=1`. Parallel multi-track execution is Tier 3 — designed, not shipped (ADR-020).
 - File-based, local-first — not designed for distributed networks
 - Tmux dependency for terminal management
 - Python/Bash prototype — a production deployment would benefit from Rust/Go
