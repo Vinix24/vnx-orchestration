@@ -90,9 +90,69 @@ def test_model_timeout_and_diff_cap_are_one_source():
     assert glm_gate.DEFAULT_TIMEOUT == gate_lane_contract.TIMEOUT_SECONDS
     assert kimi_gate.DEFAULT_TIMEOUT == gate_lane_contract.TIMEOUT_SECONDS
     assert gate_runner._HARNESS_LANE_TIMEOUT_SECONDS == gate_lane_contract.TIMEOUT_SECONDS
-    assert glm_gate.MAX_DIFF_CHARS == gate_lane_contract.MAX_DIFF_CHARS
-    assert kimi_gate.MAX_DIFF_CHARS == gate_lane_contract.MAX_DIFF_CHARS
-    assert gate_runner._HARNESS_LANE_MAX_DIFF_CHARS == gate_lane_contract.MAX_DIFF_CHARS
+    # OI-1874: the diff cap is no longer one shared constant -- glm_gate,
+    # kimi_gate and gate_runner's harness-lane path all resolve it through the
+    # SAME function (gate_lane_contract.max_diff_chars), keyed per gate, so a
+    # drift between the three readers is structurally impossible even though
+    # the resolved VALUE now differs by gate.
+    assert glm_gate.max_diff_chars is gate_lane_contract.max_diff_chars
+    assert kimi_gate.max_diff_chars is gate_lane_contract.max_diff_chars
+    assert gate_runner._harness_lane_max_diff_chars is gate_lane_contract.max_diff_chars
+
+
+class TestMaxDiffChars:
+    """OI-1874: the per-gate diff-char cap resolver.
+
+    kimi_gate runs on the kimi CLI OAuth subscription and kimi-k3 carries a
+    1M-token context (wave7_models.yaml), so its default is 400000 -- far
+    above glm_gate's and deepseek_gate's 50000, both API-credit fallback
+    seats billed per token. A missing/invalid/non-positive config value falls
+    back to that SAME gate's own default -- never to unlimited, never to a
+    different gate's default -- and an unknown gate name gets the
+    conservative 50000.
+    """
+
+    def test_defaults_differ_by_gate(self, monkeypatch):
+        for key in (
+            "VNX_KIMI_GATE_MAX_DIFF_CHARS", "VNX_GLM_GATE_MAX_DIFF_CHARS",
+            "VNX_DEEPSEEK_GATE_MAX_DIFF_CHARS",
+        ):
+            monkeypatch.delenv(key, raising=False)
+        assert gate_lane_contract.max_diff_chars("kimi_gate") == 400000
+        assert gate_lane_contract.max_diff_chars("glm_gate") == 50000
+        assert gate_lane_contract.max_diff_chars("deepseek_gate") == 50000
+
+    def test_config_override_is_honored_per_gate(self, monkeypatch):
+        monkeypatch.setenv("VNX_KIMI_GATE_MAX_DIFF_CHARS", "12345")
+        monkeypatch.delenv("VNX_GLM_GATE_MAX_DIFF_CHARS", raising=False)
+        assert gate_lane_contract.max_diff_chars("kimi_gate") == 12345
+        # An override on one gate must never leak onto another's resolution.
+        assert gate_lane_contract.max_diff_chars("glm_gate") == 50000
+
+    def test_invalid_value_falls_back_to_that_gates_own_default(self, monkeypatch):
+        monkeypatch.setenv("VNX_KIMI_GATE_MAX_DIFF_CHARS", "not-a-number")
+        assert gate_lane_contract.max_diff_chars("kimi_gate") == 400000
+
+    def test_non_positive_value_falls_back_to_that_gates_own_default(self, monkeypatch):
+        monkeypatch.setenv("VNX_GLM_GATE_MAX_DIFF_CHARS", "0")
+        assert gate_lane_contract.max_diff_chars("glm_gate") == 50000
+        monkeypatch.setenv("VNX_GLM_GATE_MAX_DIFF_CHARS", "-100")
+        assert gate_lane_contract.max_diff_chars("glm_gate") == 50000
+
+    def test_unknown_gate_gets_the_conservative_default(self):
+        assert gate_lane_contract.max_diff_chars("some_future_gate") == 50000
+
+    def test_config_registry_carries_the_same_defaults(self):
+        # gate_lane_contract.DIFF_CHAR_CONFIG and config_registry.CONFIG_REGISTRY
+        # carry the SAME default per gate in two places (a config key needs a
+        # registered entry for the dashboard/UI; the resolver needs its own
+        # fallback) -- this pins them from drifting apart.
+        import config_registry
+
+        for gate, (key, default) in gate_lane_contract.DIFF_CHAR_CONFIG.items():
+            entry = config_registry.CONFIG_REGISTRY.get(key)
+            assert entry is not None, f"{key} (for {gate}) is missing from CONFIG_REGISTRY"
+            assert int(entry.default) == default, f"{key} default drifted from DIFF_CHAR_CONFIG"
 
 
 def test_model_env_var_names_come_from_the_shared_map():

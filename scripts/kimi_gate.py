@@ -118,11 +118,11 @@ from gate_recorder import (
 import gate_depth  # OI-1618: a verdict without investigation is no verdict, on every lane
 from gate_artifacts import _compute_contract_hash  # canonical hash source — never a second hasher
 from gate_lane_contract import (  # C6 step 3: one source, three readers
-    MAX_DIFF_CHARS,
     MODEL_DEFAULTS,
     TIMEOUT_SECONDS,
     VALID_VERDICTS,
     VERDICT_CONTRACT,
+    max_diff_chars,
 )
 from gate_prompt import (  # OI-1442: the diff is data, not instruction
     build_review_prompt,
@@ -183,7 +183,7 @@ def _build_prompt(diff_text: str, pr: str) -> str:
         pr=pr,
         diff_text=diff_text,
         verdict_contract=_VERDICT_CONTRACT,
-        max_chars=MAX_DIFF_CHARS,
+        max_chars=max_diff_chars("kimi_gate"),
     )
 
 
@@ -542,9 +542,10 @@ def main(argv: "list[str] | None" = None) -> int:
         # OI-1618: the diff IS the investigation for a single-shot lane — no
         # agentic tool loop to measure. diff_chars is the post-strip length
         # (the single-shot degeneracy floor), diff_truncated mirrors the same
-        # MAX_DIFF_CHARS cap gate_prompt.wrap_untrusted_diff applies to the
-        # raw (pre-strip) text. OI-1851: plus the cap and the cut files.
-        coverage = gate_depth.diff_coverage(diff, MAX_DIFF_CHARS)
+        # per-gate cap (OI-1874: gate_lane_contract.max_diff_chars) gate_prompt.
+        # wrap_untrusted_diff applies to the raw (pre-strip) text. OI-1851: plus
+        # the cap and the cut files.
+        coverage = gate_depth.diff_coverage(diff, max_diff_chars("kimi_gate"))
         execution_depth = gate_depth.single_shot_depth(
             coverage["diff_chars"], coverage["diff_truncated"],
             diff_limit=coverage["diff_limit"],

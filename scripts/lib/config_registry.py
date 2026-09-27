@@ -343,6 +343,35 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "until the rotate flow ran. Finishing work in flight stays allowed.",
         approval=True,
         subsystem="t0-context-rotation", status="ACTIVATE", cockpit_canonical=True),
+
+    # OI-1874: per-gate diff-char cap for the harness-lane review gates, read at
+    # runtime by gate_lane_contract.max_diff_chars(). One fixed cap shared by all
+    # three (MAX_DIFF_CHARS=50000, consolidated in #1846) was never chosen per
+    # model -- kimi-k3 carries a 1M-token context (wave7_models.yaml) and runs on
+    # the kimi CLI OAuth subscription, so a much larger cap costs nothing there;
+    # glm_gate (OpenRouter) and deepseek_gate (deepseek-harness) bill per token as
+    # API-credit fallback seats and stay at the original conservative default.
+    "VNX_KIMI_GATE_MAX_DIFF_CHARS": _e(
+        "VNX_KIMI_GATE_MAX_DIFF_CHARS", "string", "400000", "gate",
+        "Diff-char cap for the prompt kimi_gate builds from a PR diff. kimi-k3's "
+        "1M-token context and subscription billing make a much larger cap free; a "
+        "project may raise or lower it.",
+        approval=True,
+        subsystem="governance-enforcement-stack", status="LIVE"),
+    "VNX_GLM_GATE_MAX_DIFF_CHARS": _e(
+        "VNX_GLM_GATE_MAX_DIFF_CHARS", "string", "50000", "gate",
+        "Diff-char cap for the prompt glm_gate builds from a PR diff. glm_gate is an "
+        "OpenRouter API-credit fallback seat, billed per token, so the default stays "
+        "conservative; a project may raise or lower it.",
+        approval=True,
+        subsystem="governance-enforcement-stack", status="LIVE"),
+    "VNX_DEEPSEEK_GATE_MAX_DIFF_CHARS": _e(
+        "VNX_DEEPSEEK_GATE_MAX_DIFF_CHARS", "string", "50000", "gate",
+        "Diff-char cap for the prompt deepseek_gate builds from a PR diff. "
+        "deepseek_gate is an API-credit fallback seat, billed per token, so the "
+        "default stays conservative; a project may raise or lower it.",
+        approval=True,
+        subsystem="governance-enforcement-stack", status="LIVE"),
 }
 
 # Flag-LESS subsystems from the cockpit ledger (docs/core/SUBSYSTEMS.md) — kernel/meta subsystems
