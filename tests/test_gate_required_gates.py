@@ -17,12 +17,16 @@ manager knows (ci_gate), never the orphan name (ci).
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 GATE_SH = REPO_ROOT / "scripts" / "commands" / "gate.sh"
+
+sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+from config_registry import CONFIG_REGISTRY
 
 
 @pytest.fixture
@@ -93,3 +97,73 @@ def test_codex_required_still_maps_to_codex_gate(env):
     assert result.returncode == 0, result.stderr
     gates = [g for g in result.stdout.strip().split(",") if g]
     assert "codex_gate" in gates, result.stdout
+
+
+def _default_review_stack() -> list[str]:
+    raw = CONFIG_REGISTRY["VNX_DEFAULT_REVIEW_STACK"].default
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def test_no_config_falls_back_to_the_default_review_stack(env):
+    """Without an enforcement config both standing seats run, not codex alone."""
+    result = _run_required_gates(env)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().split(",") == _default_review_stack()
+
+
+def test_config_naming_no_required_gate_falls_back_to_the_default_review_stack(env):
+    _write_enforcement_config(
+        env,
+        "version: 1\nmode: standard\nchecks:\n  max_pr_lines:\n    level: 1\n",
+    )
+    result = _run_required_gates(env)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().split(",") == _default_review_stack()
+
+
+def test_fallback_stack_holds_no_retired_gate(env):
+    result = _run_required_gates(env)
+    assert "gemini_review" not in result.stdout
+
+
+CONFIG_CODEX_AND_KIMI = """\
+version: 1
+mode: standard
+checks:
+  codex_gate_required:
+    level: 2
+  kimi_gate_required:
+    level: 2
+"""
+
+
+def test_kimi_gate_required_level_2_requests_both_seats(env):
+    """kimi_gate_required is a peer of codex_gate_required: at level >= 2 both
+    seats are requested (operator decision 2026-09-27)."""
+    _write_enforcement_config(env, CONFIG_CODEX_AND_KIMI)
+    result = _run_required_gates(env)
+    assert result.returncode == 0, result.stderr
+    gates = [g for g in result.stdout.strip().split(",") if g]
+    assert set(gates) == {"codex_gate", "kimi_gate"}
+
+
+CONFIG_KIMI_OFF = """\
+version: 1
+mode: standard
+checks:
+  codex_gate_required:
+    level: 2
+  kimi_gate_required:
+    level: 0
+"""
+
+
+def test_kimi_gate_required_at_level_0_requests_codex_only(env):
+    """A project that dials kimi_gate_required off (level 0) keeps codex_gate
+    as the sole required seat, not the default stack (which would re-add
+    kimi)."""
+    _write_enforcement_config(env, CONFIG_KIMI_OFF)
+    result = _run_required_gates(env)
+    assert result.returncode == 0, result.stderr
+    gates = [g for g in result.stdout.strip().split(",") if g]
+    assert gates == ["codex_gate"]

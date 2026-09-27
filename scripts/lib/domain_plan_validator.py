@@ -35,8 +35,16 @@ KNOWN_DOMAINS = frozenset({
     "coding", "business", "regulated", "research",
 })
 
+# The gates a plan may name are the gates that exist: every name in
+# dispatch_spec.REGISTERED_GATE_NAMES. It is a literal here because this is a
+# substrate module (contract B-4: stdlib imports only, pinned by
+# test_agent_os_certification), so it cannot read that registry. A hand-kept
+# list drifted from it once (a plan naming the default kimi_gate was refused as
+# unimplemented), so test_gate_name_registry pins the two equal: a gate added to
+# the registry fails that test until it is added here.
 IMPLEMENTED_GATES = frozenset({
-    "codex_gate", "gemini_review", "claude_github_optional",
+    "ci_gate", "claude_github_optional", "codex_gate", "deepseek_gate",
+    "glm_gate", "kimi_gate", "wiring_gate",
 })
 
 REQUIRED_CAPABILITY_FIELDS = frozenset({
@@ -223,7 +231,10 @@ def _validate_no_premature_rollout(content: str, result: ValidationResult) -> No
 
 def _validate_gate_types(content: str, result: ValidationResult) -> None:
     """V-8: gate_types must reference only implemented gates."""
-    gate_match = re.search(r"gate_types.*?\|.*?\|(.*?)\|", content)
+    # The value cell of the ``| `gate_types` | <value> | <why> |`` row. The pattern
+    # used to skip one cell too many and read the justification column, so a plan's
+    # gate names were never checked at all.
+    gate_match = re.search(r"gate_types.*?\|(.*?)\|", content)
     if not gate_match:
         return
     gate_text = gate_match.group(1).strip()

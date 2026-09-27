@@ -420,8 +420,8 @@ class HeadlessOrchestrator:
         """When a gate event arrives, check if all gates ACTUALLY REQUESTED for
         this PR have passed — provider-agnostic (dispatch 20260823-beta2-e,
         OI-1435). The required set is read from review_gates/requests/, not a
-        hardcoded {codex_gate, gemini_review}: whatever stack was requested
-        (codex+gemini, kimi_gate+glm_gate, or any future gate) unblocks the
+        hardcoded {codex_gate, kimi_gate}: whatever stack was requested
+        (codex+kimi, glm_gate+deepseek_gate, or any future gate) unblocks the
         feature the same way once its gates pass. A required gate that never
         got requested therefore can never silently sit unmet — it is simply
         not in the set being checked.
@@ -467,7 +467,7 @@ class HeadlessOrchestrator:
         # own has_required_failure rule); any other requested gate can opt out
         # via an explicit required=false in its own request payload (e.g.
         # codex_gate when the diff doesn't force it) — default True when the
-        # field is absent, since kimi_gate/glm_gate/gemini_review/ci_gate/
+        # field is absent, since kimi_gate/glm_gate/ci_gate/
         # wiring_gate requests never carry that field and are required by
         # default.
         required_gates: List[str] = []

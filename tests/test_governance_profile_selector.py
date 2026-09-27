@@ -517,13 +517,21 @@ class TestAuditability:
 _REPO_ROOT = Path(__file__).parent.parent
 
 
+def _standing_review_seats() -> list[str]:
+    """The review seats of the default review stack, from the config registry
+    (operator decision 2026-09-26: codex_gate,kimi_gate)."""
+    from config_registry import CONFIG_REGISTRY
+    raw = CONFIG_REGISTRY["VNX_DEFAULT_REVIEW_STACK"].default
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
 class TestProfileGateResolver:
     """Tests for scripts/lib/profile_gate_resolver.resolve_gate_stack().
 
     Covers:
       - flag off → None (caller uses DEFAULT_REVIEW_STACK unchanged)
       - agents/* → light → [ci_gate]
-      - scripts/ → default → [codex_gate, gemini_review, ci_gate]
+      - scripts/ → default → [codex_gate, ci_gate]
       - mixed files (agents + scripts) → most-restrictive (default) wins
       - empty changed_files → None
     """
@@ -569,8 +577,11 @@ class TestProfileGateResolver:
         )
         assert result is not None
         assert "codex_gate" in result
-        assert "gemini_review" in result
+        assert "gemini_review" not in result
         assert "ci_gate" in result
+        # Protected paths keep BOTH standing seats: dropping gemini_review must
+        # not leave a PR completing on codex_gate + ci alone.
+        assert result == [*_standing_review_seats(), "ci_gate"]
 
     def test_dashboard_path_resolves_to_default_gates(self, monkeypatch) -> None:
         """dashboard/ maps to 'default' profile — code paths stay protected."""
@@ -581,7 +592,8 @@ class TestProfileGateResolver:
         )
         assert result is not None
         assert "codex_gate" in result
-        assert "gemini_review" in result
+        assert "gemini_review" not in result
+        assert result == [*_standing_review_seats(), "ci_gate"]
 
     def test_mixed_files_most_restrictive_wins(self, monkeypatch) -> None:
         """When agents/ (light) + scripts/ (default) are mixed, default wins."""
@@ -594,8 +606,9 @@ class TestProfileGateResolver:
         assert result is not None
         # default profile has more gates than light → it should win
         assert "codex_gate" in result
-        assert "gemini_review" in result
+        assert "gemini_review" not in result
         assert "ci_gate" in result
+        assert result == [*_standing_review_seats(), "ci_gate"]
 
     def test_flag_on_returns_list_not_none(self, monkeypatch) -> None:
         monkeypatch.setenv("VNX_PROFILE_SELECTOR", "1")
@@ -615,3 +628,36 @@ class TestProfileGateResolver:
         assert result is not None
         assert "ci" not in result   # raw alias must not appear
         assert "ci_gate" in result  # normalized name must appear
+
+
+class TestProfilesHoldTheStandingSeats:
+    """Every profile that requires review holds both standing review seats.
+
+    gemini_review was a review seat of the default profiles. When it was removed
+    the seat had to go to kimi_gate (the second seat of VNX_DEFAULT_REVIEW_STACK),
+    not to nothing: with VNX_PROFILE_SELECTOR=1 the profile IS the effective
+    review stack for protected paths.
+    """
+
+    def test_builtin_default_and_coding_strict_hold_the_seats(self) -> None:
+        from governance_profiles import DEFAULT_PROFILES
+        for name in ("default", "coding-strict"):
+            gates = DEFAULT_PROFILES[name].required_gates
+            assert gates == [*_standing_review_seats(), "ci"], name
+            assert "gemini_review" not in gates, name
+
+    def test_yaml_default_profile_holds_the_seats(self) -> None:
+        from governance_profiles import load_profiles
+        profiles = load_profiles(_REPO_ROOT)
+        assert profiles["default"].required_gates == [*_standing_review_seats(), "ci"]
+
+    def test_yaml_default_agrees_with_the_builtin_default(self) -> None:
+        from governance_profiles import DEFAULT_PROFILES, load_profiles
+        profiles = load_profiles(_REPO_ROOT)
+        assert profiles["default"].required_gates == DEFAULT_PROFILES["default"].required_gates
+
+    def test_review_free_profiles_stay_review_free(self) -> None:
+        from governance_profiles import DEFAULT_PROFILES
+        for name in ("business-light", "light"):
+            assert DEFAULT_PROFILES[name].required_gates == ["ci"], name
+        assert DEFAULT_PROFILES["minimal"].required_gates == []

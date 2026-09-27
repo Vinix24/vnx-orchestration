@@ -193,27 +193,6 @@ class TestRequestHandlerDispatchId:
         from review_gate_manager import ReviewGateManager
         return ReviewGateManager()
 
-    def test_request_reviews_propagates_dispatch_id_to_gemini(self, manager_env, monkeypatch):
-        monkeypatch.chdir(manager_env["project_root"])
-        manager = self._make_manager()
-        dispatch_id = "20260423-180000-manager-test-A"
-
-        with patch("governance_receipts.emit_governance_receipt"):
-            manager.request_reviews(
-                pr_number=5,
-                branch="fix/test",
-                review_stack=["gemini_review"],
-                risk_class="low",
-                changed_files=["scripts/foo.py"],
-                mode="per_pr",
-                dispatch_id=dispatch_id,
-            )
-
-        req_file = manager_env["requests_dir"] / "pr-5-gemini_review.json"
-        assert req_file.exists()
-        payload = json.loads(req_file.read_text())
-        assert payload["dispatch_id"] == dispatch_id
-
     def test_request_reviews_propagates_dispatch_id_to_codex(self, manager_env, monkeypatch):
         monkeypatch.chdir(manager_env["project_root"])
         manager = self._make_manager()
@@ -243,13 +222,13 @@ class TestRequestHandlerDispatchId:
             manager.request_reviews(
                 pr_number=7,
                 branch="fix/test",
-                review_stack=["gemini_review"],
+                review_stack=["codex_gate"],
                 risk_class="low",
                 changed_files=["scripts/foo.py"],
                 mode="per_pr",
             )
 
-        req_file = manager_env["requests_dir"] / "pr-7-gemini_review.json"
+        req_file = manager_env["requests_dir"] / "pr-7-codex_gate.json"
         assert req_file.exists()
         payload = json.loads(req_file.read_text())
         assert "dispatch_id" not in payload
@@ -321,13 +300,13 @@ class TestCLIDispatchIdArg:
                 "request",
                 "--pr", "20",
                 "--branch", "fix/test-cli",
-                "--review-stack", "gemini_review",
+                "--review-stack", "codex_gate",
                 "--changed-files", "scripts/x.py",
                 "--dispatch-id", "20260423-200000-cli-dispatch-D",
             ])
 
         assert rc == 0
-        req_file = state_dir / "review_gates" / "requests" / "pr-20-gemini_review.json"
+        req_file = state_dir / "review_gates" / "requests" / "pr-20-codex_gate.json"
         assert req_file.exists()
         payload = json.loads(req_file.read_text())
         assert payload["dispatch_id"] == "20260423-200000-cli-dispatch-D"
@@ -369,12 +348,12 @@ class TestCLIDispatchIdArg:
                 "request",
                 "--pr", "21",
                 "--branch", "fix/test-cli",
-                "--review-stack", "gemini_review",
+                "--review-stack", "codex_gate",
                 "--changed-files", "scripts/x.py",
             ])
 
         assert rc == 0
-        req_file = state_dir / "review_gates" / "requests" / "pr-21-gemini_review.json"
+        req_file = state_dir / "review_gates" / "requests" / "pr-21-codex_gate.json"
         assert req_file.exists()
         payload = json.loads(req_file.read_text())
         assert "dispatch_id" not in payload

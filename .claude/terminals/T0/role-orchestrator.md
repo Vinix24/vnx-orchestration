@@ -84,8 +84,9 @@ DELIVERABLE = a proposed dispatch created with `vnx deliverable add --objective 
   - So `allow_headless=False` in a staged spec means "no opt-in stated", not "not headless". On 17/18-09 such specs were taken for tmux dispatches. They ran on the same lane as every other claude dispatch.
   - The `claude-headless` constraint warn on every headless dispatch, flagged or not, blocks none of them. `audit_severity` is `warn` in `provider_constraints.yaml`: the dispatch proceeds and the lane stays visible in the audit trail.
   - To see the lane and the plan warnings before firing: `bin/vnx dispatch <dispatch-id> --dry-run`.
-- Build-worker provider and model are a **free per-dispatch choice**: what the dispatch spec says wins (`workers-kimi-pinned`, pin_semantics=default). kimi-k3 is only the default when the spec carries no explicit model — no override env needed. T0 stays Opus as a governance floor (`t0-opus-only`, pin_semantics=floor).
+- Build-worker provider and model are a **free per-dispatch choice**: what the dispatch spec says wins (`workers-kimi-pinned`, pin_semantics=default). sonnet is the default when the spec carries no explicit model (operator decision 2026-09-23). kimi-k3 is an explicit choice, not the default. No override env needed. T0 stays Opus as a governance floor (`t0-opus-only`, pin_semantics=floor).
 - `provider=claude` for a build-worker still routes through a separate gate: `VNX_OVERRIDE_WORKER_CLAUDE=1` with an audit reason in `VNX_OVERRIDE_WORKER_CLAUDE_REASON` (the symbols are `dispatch_cli.WORKER_CLAUDE_OVERRIDE_ENV` and `dispatch_cli.WORKER_CLAUDE_OVERRIDE_REASON_ENV`). Track `worker-provider-free-choice` aims to eventually remove this remaining lock.
+- Default reviewers are `codex_gate` + `kimi_gate`, both on a subscription. `glm_gate` and `deepseek_gate` run on API credit: they are a fallback inside the takeover chain only, never a project default. Do not add an API gate to a review stack, or run one by hand, unless codex and kimi are both unavailable. The mechanism lives in `docs/core/DISPATCH_RULES.md`.
 - No Claude Code subagents (Task tool). Full decision rule: `docs/core/DISPATCH_RULES.md`.
 
 **Role selection (hard):**
@@ -178,7 +179,7 @@ for acceptance and queue advancement.
 4. Architectural change OR new dependency OR policy violation → ESCALATE.
 5. All gates passed AND no blockers AND no pending work → COMPLETE.
 6. Never guess state; verify via CLI and state files.
-7. If the review stack requires Gemini or Codex evidence, do not complete until both a gate result and a normalized headless report exist.
+7. If the review stack requires Codex or Kimi evidence, do not complete until both a gate result and a normalized headless report exist.
 8. `queued` review-gate state is only request state, not completion evidence.
 9. A required gate with empty `contract_hash` or empty `report_path` is incomplete evidence and blocks closure.
 
@@ -287,8 +288,8 @@ python3 scripts/runtime_core_cli.py release-on-failure --terminal <T> --dispatch
 
 T1 is a headless backend-developer. This is the **dominant dispatch path** — not a special case.
 Dispatch via the single-entry door (`vnx dispatch`), which selects the lane from the staged
-spec's `provider` field (D1). Since worker-provider-kimi-flip (2026-07-23) the default `provider`
-for T1/T2/T3 is `kimi` (`workers-kimi-pinned`), so the door routes to the **provider lane**
+spec's `provider` field (D1). The default model for T1/T2/T3 is sonnet (`workers-kimi-pinned`,
+operator decision 2026-09-23). A spec with `provider=kimi` (an explicit choice) routes to the **provider lane**
 (`run_envelope_plan` → `provider_dispatch`/`kimi_spawn.py`), NOT the claude subprocess lane —
 `VNX_ADAPTER_T1=subprocess` and `scripts/lib/subprocess_dispatch.py` only apply when a dispatch
 explicitly overrides `provider="claude"` for T1 (`--terminal-id T1 --dispatch-id <id> --model sonnet`;
@@ -365,7 +366,7 @@ Cite the policy code (A1, B2, etc) when invoking.
 
 ### Codex availability
 - **A1**: Codex CLI rate-limited → wait for reset (default 5h+, max 5d acceptable). NEVER fall back unless explicitly authorized this session as Option B.
-- **A2 (Option B fallback, opt-in only)**: When operator explicitly says "Option B" or "gemini-only OK": merge with gemini PASS + CI green; file codex re-audit OI per merge. Use template:
+- **A2 (Option B fallback, opt-in only)**: When operator explicitly says "Option B" or "kimi-only OK": merge with kimi PASS + CI green; file codex re-audit OI per merge. Use template:
   ```
   python3 scripts/open_items_manager.py add \
     --title "Codex re-audit pending PR #N (merged with codex unavailable)" \
@@ -374,7 +375,6 @@ Cite the policy code (A1, B2, etc) when invoking.
   ```
 
 ### Gate findings handling
-- **B1 (gemini stall)**: Gemini stall ≥180s with 0 partial output → merge anyway (infra issue, not finding). Operator-approved pattern.
 - **B2 (pre-existing main bug)**: Codex blocking that's about lines NOT in this PR's diff → file OI, push merge.
 - **B3 (PR-introduced finding)**: Fix in same PR, retry gates ONCE. After 1 retry still dirty → defer with OI. Don't iterate.
 - **B4 (CI red after fix)**: 1 retry, then skip+OI.
@@ -420,7 +420,7 @@ Every dispatch instruction MUST include the following footer (codified — don't
 - DO NOT suppress with `# noqa:` — the Lint Patterns gate rejects it. Use a PLAIN marker comment on the line: `# vnx-silent-except: <reason>` (silent except) / `# vnx-atomic-write: <reason>` (non-atomic state write)
 
 ## Codex unavailable note
-Codex CLI rate-limited until <date>. Gemini-only review after fix.
+Codex CLI rate-limited until <date>. Kimi-only review after fix.
 Codex re-audit OI will be filed per the codex-unavailable template.
 ```
 

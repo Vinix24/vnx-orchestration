@@ -91,7 +91,7 @@ class ExecutionDepth:
     and zeros that mean "not measured" must never be read as zeros that mean
     "did nothing" — that is the difference between an unmeasured gate and a
     degenerate one, and collapsing it would fail every gate whose lane emits
-    no event stream. Only codex_gate/gemini_review emit one today.
+    no event stream. Only codex_gate emits one today.
 
     ``mode`` distinguishes the TWO shapes this dataclass now carries (OI-1618):
     ``"agentic"`` (the tool-call stream above, measured by
@@ -301,8 +301,9 @@ def single_shot_depth(
     not the raw byte count — :func:`is_degenerate` trusts this value directly
     rather than re-deriving it, so the "0 chars after strip" rule lives in one
     place (the caller that already has the raw text) instead of two.
-    ``diff_truncated`` records whether the gate's own ``MAX_DIFF_CHARS`` cap
-    fired; it is never treated as degenerate on its own (see
+    ``diff_truncated`` records whether the gate's own configured diff-char cap
+    (OI-1874: ``gate_lane_contract.max_diff_chars``, per gate) fired; it is
+    never treated as degenerate on its own (see
     :func:`is_degenerate`), but a truncated single-shot run can never close
     its own :func:`coverage_gap` (OI-1851).
     """
@@ -356,8 +357,8 @@ def is_degenerate(depth: ExecutionDepth) -> bool:
     Single-shot mode (OI-1618) asks a different question than agentic mode:
     there are no tool calls to count, so degeneracy is EXCLUSIVELY an empty
     diff (0 characters after strip). Truncation is a fact about size, never
-    about content, and is never degenerate on its own — a diff capped at
-    ``MAX_DIFF_CHARS`` still handed the model real material to review.
+    about content, and is never degenerate on its own — a diff capped at the
+    gate's own configured limit still handed the model real material to review.
     """
     if not depth.parsed:
         return False

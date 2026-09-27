@@ -49,6 +49,7 @@ from dispatch_spec import (  # noqa: E402
     LEGACY_GATE_SENTINELS,
     Provider,
     REGISTERED_GATE_NAMES,
+    retired_gate_hint,
 )
 
 # Legacy provider/mode strings → the closed Provider enum value. dispatch_deliver.sh
@@ -129,7 +130,8 @@ def _canonical_gate(raw: Optional[str]) -> str:
     if key not in REGISTERED_GATE_NAMES:
         valid = ", ".join(sorted(REGISTERED_GATE_NAMES))
         raise ValueError(
-            f"gate {key!r} is not a recognized gate name; valid gates are: {valid}"
+            f"gate {key!r} is not a recognized gate name{retired_gate_hint(key)}; "
+            f"valid gates are: {valid}"
         )
     return key
 

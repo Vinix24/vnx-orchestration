@@ -76,7 +76,7 @@ app:
 
 Dit blok is bewust **geen** onderdeel van `checks[]` of `pending_checks:`. Het beschrijft WIE publiceert, niet wat `main` vereist: `forge_protection_drift.py` behandelt `app` als een expliciet toegestane maar genegeerde top-level sleutel (`_OPTIONAL_TOP_LEVEL_FIELDS = frozenset({"app"})`) — nooit onderdeel van `ProtectionConfig`, nooit van `to_normalized_dict`, dus een wijziging hier kan nooit als drift of als verzwakking geregistreerd worden. Elke andere onbekende top-level sleutel wordt nog steeds geweigerd; dit is een allowlist van precies één sleutel, geen opening van het schema.
 
-Het invullen gaat via een kleine PR door de normale deur (glm-gate tekent). Zolang `app_id` `null` is weigert de client expliciet en luid in plaats van te gokken (`load_app_config`'s eigen foutmelding verwijst naar dit runbook).
+Het invullen gaat via een kleine PR door de normale deur (codex-gate tekent). Zolang `app_id` `null` is weigert de client expliciet en luid in plaats van te gokken (`load_app_config`'s eigen foutmelding verwijst naar dit runbook).
 
 Dit blok zegt alleen wie *publiceert*. Wat `main` vereist, staat in `required_status_checks.checks` — daar staat `vnx-gate/review` sinds OP-B3 in, met dit getal eraan gebonden. Zie §5.
 
@@ -188,7 +188,7 @@ Herken dus `vnx-gate/review` in een `SKIPPED_UNVERIFIED`-regel als "publiceer he
 
 ## 6. Werkgevolg voor iedereen, na OP-B3
 
-Elke push naar een PR-branch **na** een poortrun maakt de PR onmergebaar totdat de poort opnieuw draait — ook een triviale docs-fixup na een groene poort. De volgorde wordt: `request` → `execute` → `glm_gate.py` (of de opvolger in de overnameketen) → publicatie → merge. Wat vóór OP-B3 nog kon (een groene poort, dan nog een klein commit, dan mergen) kan daarna niet meer zonder de poort opnieuw te draaien.
+Elke push naar een PR-branch **na** een poortrun maakt de PR onmergebaar totdat de poort opnieuw draait — ook een triviale docs-fixup na een groene poort. De volgorde wordt: `request` → `execute` → de standaardpoort `codex_gate` (of de opvolger in de overnameketen) → publicatie → merge. Wat vóór OP-B3 nog kon (een groene poort, dan nog een klein commit, dan mergen) kan daarna niet meer zonder de poort opnieuw te draaien.
 
 ### Wie publiceert wat, en wanneer
 

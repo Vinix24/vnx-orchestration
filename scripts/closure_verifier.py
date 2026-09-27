@@ -38,7 +38,7 @@ from gate_status import (
     is_terminal as gate_is_terminal,
     is_test_run_record as _is_test_run_record,
 )
-from dispatch_spec import Gate
+from dispatch_spec import RETIRED_GATE_NAMES, Gate
 from gate_obligations import (
     REASON_FULFILLED_BY_TAKEOVER,
     STATUS_FULFILLED,
@@ -73,11 +73,15 @@ class CheckResult:
 # preserves OI-1093 (#1422): records for gates NOT in _KNOWN_GATES must carry a
 # producer identity (dispatch_id). Pulling wiring_gate in would drop that
 # requirement. When in doubt, the side with more verification wins.
+#
+# RETIRED_GATE_NAMES stay interpretable so a record written before the retirement
+# does not read as a config gap. Outside the Gate enum, they are never selectable
+# and, absent from _REVIEW_PEER_GATES below, never a peer signer.
 _GATES_NOT_IMPLEMENTED_BY_CLOSURE = frozenset({"wiring_gate"})
 _KNOWN_GATES = frozenset(
     g.value for g in Gate
     if g.value not in _GATES_NOT_IMPLEMENTED_BY_CLOSURE
-)
+) | RETIRED_GATE_NAMES
 
 
 # OI-1645: which gates may stand in as a PEER SIGNER when the declared gate is

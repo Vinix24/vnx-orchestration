@@ -81,32 +81,6 @@ class TestCommitShaInPayloads:
         )
         return proc.stdout.strip() if proc.returncode == 0 else ""
 
-    def test_gemini_request_payload_includes_commit_sha(self, manager_env, monkeypatch):
-        monkeypatch.chdir(manager_env["project_root"])
-        monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "0")
-        manager = _make_manager()
-
-        with patch("governance_receipts.emit_governance_receipt"):
-            manager.request_reviews(
-                pr_number=1,
-                branch="fix/test",
-                review_stack=["gemini_review"],
-                risk_class="low",
-                changed_files=["scripts/foo.py"],
-                mode="per_pr",
-                dispatch_id="test-sha-gemini",
-            )
-
-        req_file = manager_env["requests_dir"] / "pr-1-gemini_review.json"
-        assert req_file.exists()
-        payload = json.loads(req_file.read_text())
-        assert "commit_sha" in payload, "gemini_review payload must contain commit_sha"
-        # commit_sha is either a valid 40-char hex or empty string (git unavailable)
-        sha = payload["commit_sha"]
-        assert isinstance(sha, str), "commit_sha must be a string"
-        if sha:
-            assert len(sha) == 40, f"commit_sha must be 40-char hex, got: {sha!r}"
-
     def test_codex_request_payload_includes_commit_sha(self, manager_env, monkeypatch):
         monkeypatch.chdir(manager_env["project_root"])
         monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "0")
@@ -193,14 +167,14 @@ class TestCommitShaInPayloads:
             manager.request_reviews(
                 pr_number=5,
                 branch="fix/sha-verify",
-                review_stack=["gemini_review"],
+                review_stack=["codex_gate"],
                 risk_class="low",
                 changed_files=["scripts/foo.py"],
                 mode="per_pr",
                 dispatch_id="test-sha-match",
             )
 
-        req_file = manager_env["requests_dir"] / "pr-5-gemini_review.json"
+        req_file = manager_env["requests_dir"] / "pr-5-codex_gate.json"
         assert req_file.exists()
         payload = json.loads(req_file.read_text())
         assert payload["commit_sha"] == fake_head_oid, (
@@ -269,32 +243,6 @@ class TestCommitShaInPayloads:
 class TestMarkGateUnavailableDispatchId:
     """OI-1128: _mark_gate_unavailable must forward dispatch_id to the result record."""
 
-    def test_not_executable_result_includes_dispatch_id(self, manager_env, monkeypatch):
-        """When gemini gate is unavailable, the result record must include dispatch_id."""
-        monkeypatch.chdir(manager_env["project_root"])
-        monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "0")
-        manager = _make_manager()
-        dispatch_id = "20260501-oi1128-test-A"
-
-        with patch("governance_receipts.emit_governance_receipt"):
-            manager.request_reviews(
-                pr_number=20,
-                branch="fix/unavail-test",
-                review_stack=["gemini_review"],
-                risk_class="low",
-                changed_files=["scripts/foo.py"],
-                mode="per_pr",
-                dispatch_id=dispatch_id,
-            )
-
-        result_file = manager_env["results_dir"] / "pr-20-gemini_review.json"
-        assert result_file.exists(), "not_executable result file must be written"
-        result = json.loads(result_file.read_text())
-        assert result["status"] == "not_executable"
-        assert result.get("dispatch_id") == dispatch_id, (
-            f"result record must include dispatch_id={dispatch_id!r}, got: {result.get('dispatch_id')!r}"
-        )
-
     def test_not_executable_result_includes_dispatch_id_for_codex(self, manager_env, monkeypatch):
         """codex_gate unavailable: result record must include dispatch_id."""
         monkeypatch.chdir(manager_env["project_root"])
@@ -328,13 +276,13 @@ class TestMarkGateUnavailableDispatchId:
             manager.request_reviews(
                 pr_number=22,
                 branch="fix/no-dispatch-id",
-                review_stack=["gemini_review"],
+                review_stack=["codex_gate"],
                 risk_class="low",
                 changed_files=["scripts/foo.py"],
                 mode="per_pr",
             )
 
-        result_file = manager_env["results_dir"] / "pr-22-gemini_review.json"
+        result_file = manager_env["results_dir"] / "pr-22-codex_gate.json"
         assert result_file.exists()
         result = json.loads(result_file.read_text())
         assert result["status"] == "not_executable"
@@ -349,20 +297,20 @@ class TestMarkGateUnavailableDispatchId:
         dispatch_id = "20260501-oi1128-direct"
 
         payload: Dict[str, Any] = {
-            "gate": "gemini_review",
+            "gate": "codex_gate",
             "status": "not_executable",
             "requested_at": "2026-05-01T00:00:00Z",
         }
 
         manager._mark_gate_unavailable(
             payload,
-            gate="gemini_review",
+            gate="codex_gate",
             pr_number=30,
             pr_id="",
             dispatch_id=dispatch_id,
         )
 
-        result_file = manager_env["results_dir"] / "pr-30-gemini_review.json"
+        result_file = manager_env["results_dir"] / "pr-30-codex_gate.json"
         assert result_file.exists()
         result = json.loads(result_file.read_text())
         assert result.get("dispatch_id") == dispatch_id

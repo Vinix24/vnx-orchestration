@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import re
 import secrets
 import shutil
@@ -23,12 +24,16 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
 from vnx_paths import ensure_env
+from dispatch_spec import RETIRED_GATE_NAMES
 from governance_receipts import emit_governance_receipt, utc_now_iso
 
 from gate_executor import GateExecutorMixin
 from gate_request_handler import GateRequestHandlerMixin
 from gate_result_parser import GateResultParserMixin
 from gate_report_generator import GateReportGeneratorMixin
+
+
+logger = logging.getLogger(__name__)
 
 
 def _build_default_review_stack() -> List[str]:
@@ -41,10 +46,22 @@ def _build_default_review_stack() -> List[str]:
     source an operator edits to route the stack at any registered gate —
     e.g. kimi_gate,glm_gate — without touching this function. ci_gate stays
     a separate append gated by VNX_CI_GATE_REQUIRED, matching prior behavior.
+
+    A retired gate (``dispatch_spec.RETIRED_GATE_NAMES``) named by an older
+    project config is dropped with a warning, the same way
+    ``smart_router._primary_review_gate`` ignores names outside the registry:
+    the obligation the door declares and the seats requested here stay one set.
     """
     import config_runtime
     raw = config_runtime.get("VNX_DEFAULT_REVIEW_STACK") or ""
     stack = [item.strip() for item in raw.split(",") if item.strip()]
+    retired = [gate for gate in stack if gate in RETIRED_GATE_NAMES]
+    if retired:
+        logger.warning(
+            "VNX_DEFAULT_REVIEW_STACK names retired gate(s) %s; dropped from the "
+            "review stack. Remove them from the project's config.", ", ".join(retired),
+        )
+        stack = [gate for gate in stack if gate not in RETIRED_GATE_NAMES]
     if config_runtime.get_bool("VNX_CI_GATE_REQUIRED"):
         stack.append("ci_gate")
     return stack

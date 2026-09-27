@@ -30,16 +30,17 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 
 import closure_verifier as cv
-from dispatch_spec import Gate
+from dispatch_spec import RETIRED_GATE_NAMES, Gate
 
 
 class TestKnownGatesDerivedFromEnum:
-    def test_known_gates_is_a_subset_of_enum_members(self):
-        """Every implemented gate must be a declared Gate enum value."""
-        enum_values = {g.value for g in Gate}
-        assert cv._KNOWN_GATES.issubset(enum_values), (
+    def test_known_gates_is_a_subset_of_enum_members_and_retired_names(self):
+        """Every implemented gate is a declared Gate enum value, or a retired
+        name kept readable for history."""
+        legal = {g.value for g in Gate} | RETIRED_GATE_NAMES
+        assert cv._KNOWN_GATES.issubset(legal), (
             f"_KNOWN_GATES has values not in the Gate enum: "
-            f"{sorted(cv._KNOWN_GATES - enum_values)}"
+            f"{sorted(cv._KNOWN_GATES - legal)}"
         )
 
     def test_excluded_gates_is_a_subset_of_enum_members(self):

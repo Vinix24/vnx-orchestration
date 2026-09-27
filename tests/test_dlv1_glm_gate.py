@@ -51,6 +51,7 @@ sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 
 import closure_verifier
 import gate_artifacts
+import gate_lane_contract
 from gate_status import has_complete_evidence, is_terminal
 
 
@@ -319,7 +320,8 @@ def test_contract_hash_byte_equal_for_same_contract_and_different_for_another(gl
     # via the SAME function the existing (codex_gate) route calls — gate name
     # only affects the fallback branch (no "prompt" key), so a different gate
     # name here still proves it is the same hash for the same contract.
-    prompt = glm_gate._build_prompt(_FAKE_DIFF, pr)
+    cap = gate_lane_contract.max_diff_chars("glm_gate")
+    prompt = glm_gate._build_prompt(_FAKE_DIFF, pr, cap)
     existing_route_hash = gate_artifacts._compute_contract_hash({"prompt": prompt}, "codex_gate")
     assert record["contract_hash"] != ""
     assert record["contract_hash"] == existing_route_hash
@@ -327,7 +329,7 @@ def test_contract_hash_byte_equal_for_same_contract_and_different_for_another(gl
     # A DIFFERENT contract must hash differently — a hasher that always
     # returns the same value would also satisfy the equality assertion
     # above, proving nothing on its own.
-    different_prompt = glm_gate._build_prompt("diff --git a/y b/y\n+different\n", pr)
+    different_prompt = glm_gate._build_prompt("diff --git a/y b/y\n+different\n", pr, cap)
     different_hash = gate_artifacts._compute_contract_hash({"prompt": different_prompt}, "codex_gate")
     assert different_hash != existing_route_hash
 
@@ -583,12 +585,13 @@ def test_pass_verdict_on_whitespace_only_diff_becomes_unavailable_degenerate(
 
 
 def test_pass_verdict_on_truncated_diff_is_partial_review_not_unavailable(glm_gate, tmp_path, monkeypatch):
-    """A ~60000-character diff capped at MAX_DIFF_CHARS (50000) still handed
-    the model real content to review — truncation must never flip a real pass
-    into unavailable. Since OI-1851 it is not a pass either: the model saw
-    only part of the diff, so the record says partial_review."""
+    """A ~60000-character diff capped at glm_gate's own resolved diff-char cap
+    (OI-1874: gate_lane_contract.max_diff_chars, 50000 by default) still
+    handed the model real content to review — truncation must never flip a
+    real pass into unavailable. Since OI-1851 it is not a pass either: the
+    model saw only part of the diff, so the record says partial_review."""
     big_diff = "diff --git a/x b/x\n" + ("+ok\n" * 15000)
-    assert len(big_diff) > glm_gate.MAX_DIFF_CHARS
+    assert len(big_diff) > gate_lane_contract.max_diff_chars("glm_gate")
     diff_file = tmp_path / "x.diff"
     diff_file.write_text(big_diff, encoding="utf-8")
     data_dir = tmp_path / "data"

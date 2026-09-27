@@ -18,8 +18,8 @@ const ATTENTION_CONFIG = {
 };
 
 const GATE_DEFS: { key: string; label: string }[] = [
-  { key: 'gemini_review', label: 'Gemini Review' },
-  { key: 'codex_gate',    label: 'Codex Gate'    },
+  { key: 'kimi_gate',  label: 'Kimi Gate'  },
+  { key: 'codex_gate', label: 'Codex Gate' },
 ];
 
 function getGateEnabled(gates: Record<string, Record<string, GateEntry> | GateEntry> | undefined, gateName: string): boolean {

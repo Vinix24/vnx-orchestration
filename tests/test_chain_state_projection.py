@@ -251,7 +251,7 @@ class TestAdvancementTruth:
         )
         assert result["can_advance"] is False
         assert result["certification_status"]["codex_gate"] == "absent"
-        assert result["certification_status"]["gemini_review"] == "absent"
+        assert result["certification_status"]["glm_gate"] == "absent"
         assert any("no valid signer" in b for b in result["blockers"])
 
     def test_cannot_advance_when_gate_not_certified(self, state_dir: Path) -> None:
@@ -270,7 +270,7 @@ class TestAdvancementTruth:
 
     def test_cannot_advance_with_blocker_open_item(self, state_dir: Path) -> None:
         pr_queue = {"prs": [{"id": "PR-1", "status": "completed", "dependencies": []}]}
-        _write_gate_result(state_dir, 1, "gemini_review", status="approve")
+        _write_gate_result(state_dir, 1, "glm_gate", status="approve")
         _write_gate_result(state_dir, 1, "codex_gate", status="approve")
         blocker = {"id": "OI-999", "severity": "blocker", "status": "open", "title": "Critical bug"}
         result = compute_advancement_truth(
@@ -282,14 +282,14 @@ class TestAdvancementTruth:
     def test_can_advance_when_all_conditions_met(self, state_dir: Path) -> None:
         """Advancement truth is true only when PR merged AND gates certified AND no blockers."""
         pr_queue = {"prs": [{"id": "PR-1", "status": "completed", "dependencies": []}]}
-        _write_gate_result(state_dir, 1, "gemini_review", status="approve")
+        _write_gate_result(state_dir, 1, "glm_gate", status="approve")
         _write_gate_result(state_dir, 1, "codex_gate", status="approve")
         result = compute_advancement_truth(
             pr_queue=pr_queue, open_items=[], state_dir=state_dir, current_feature_id="PR-1"
         )
         assert result["can_advance"] is True
         assert result["blockers"] == []
-        assert result["certification_status"]["gemini_review"] == "certified"
+        assert result["certification_status"]["glm_gate"] == "certified"
         assert result["certification_status"]["codex_gate"] == "certified"
 
     def test_advancement_does_not_rely_on_operator_memory(self, state_dir: Path) -> None:
@@ -309,7 +309,7 @@ class TestAdvancementTruth:
 
     def test_done_open_item_does_not_block_advancement(self, state_dir: Path) -> None:
         pr_queue = {"prs": [{"id": "PR-1", "status": "completed", "dependencies": []}]}
-        _write_gate_result(state_dir, 1, "gemini_review", status="approve")
+        _write_gate_result(state_dir, 1, "glm_gate", status="approve")
         _write_gate_result(state_dir, 1, "codex_gate", status="approve")
         done_item = {"id": "OI-001", "severity": "blocker", "status": "done", "title": "Resolved"}
         result = compute_advancement_truth(
@@ -467,12 +467,11 @@ class TestAtLeastOneSigner:
 
     def test_required_signer_gates_reads_the_configured_takeover_chain(self) -> None:
         """No second, independently-drifting gate list: the candidate set
-        is sourced from gate_request_handler's own configured chain, plus
-        the always-eligible gemini_review carve-out (05-09 operator
-        decision)."""
+        is sourced from gate_request_handler's own configured chain, and
+        gemini_review (retired 2026-09-26) is not a signer."""
         gates = required_signer_gates()
-        assert "gemini_review" in gates
-        assert set(gates) >= {"codex_gate", "kimi_gate", "glm_gate", "deepseek_gate"}
+        assert "gemini_review" not in gates
+        assert set(gates) == {"codex_gate", "kimi_gate", "glm_gate", "deepseek_gate"}
 
 
 # ---------------------------------------------------------------------------

@@ -89,7 +89,7 @@ class TestHeavy:
         "project_root", "vnx_paths", "central store", "vnx_data_dir",
         # review-gate
         "review-gate", "review_gate", "review_floor", "review-floor",
-        "evidence_bound_gate", "codex_gate", "gemini_review", "verify_pr",
+        "evidence_bound_gate", "codex_gate", "verify_pr",
         "merge gate", "merge-gate", "plan_gate_evidence", "phantom_guard",
         # central-DB schema (ADR-007)
         "adr-007", "central-db", "central_db", "track_open_items",

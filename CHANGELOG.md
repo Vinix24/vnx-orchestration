@@ -37,13 +37,25 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
   `glm_gate,codex_gate` declares `codex_gate`. A stack with a single full-diff
   gate (mission-control: `glm_gate,claude_github_optional`) resolves as before.
   A project that set its own stack or chain keeps it; `vnx gate --only kimi`
-  (and `glm`, `deepseek`) now resolve to the gate names. The PR readiness hint
-  for a PR with no review obligation lists codex_gate and kimi_gate first and
-  names glm_gate last, as the fallback. It used to offer glm_gate ahead of
-  codex_gate.
+  (and `glm`, `deepseek`) now resolve to the gate names. kimi_gate has run
+  through `gate_runner`'s harness lane since v1.6.2 (#1837), so it no longer
+  books `not_executable` / `gate_not_subprocess_routable`. The records of that
+  kind that remain in the stores were written by an engine older than that
+  version. Tests now pin the path from `vnx gate --only kimi_gate` to a booked
+  pass, and the merge door's acceptance of it. The PR readiness hint for a PR
+  with no review obligation lists codex_gate and kimi_gate first and names
+  glm_gate last, as the fallback. It used to offer glm_gate ahead of codex_gate.
 
 ### Fixed
 
+- **A takeover no longer requests the same reader twice.** With the stack
+  `codex_gate,kimi_gate` and codex at its limit, the codex seat is taken over by
+  kimi and the second seat names kimi as well. `request_reviews` requested it
+  again, which rewrote the request record without the takeover path and made the
+  executor run the same reader twice. It also ran glm twice when codex and kimi
+  were both exhausted. A seat that resolves to a gate an earlier seat of the same
+  round already requested now requests nothing, and the first request keeps its
+  takeover path.
 - **`vnx objective close --attest --pr` no longer replaces `pr_ref`
   (OI-1872).** On track `absence-is-loud` a close with `--pr 1922 --pr 1924`
   cut `pr_ref` from 17 refs to `#1922,#1924`, and the 17 earlier refs were gone

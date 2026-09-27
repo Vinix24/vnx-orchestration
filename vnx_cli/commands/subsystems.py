@@ -68,6 +68,11 @@ SUBSYSTEM_DESCRIPTIONS: Dict[str, str] = {
         "Receipt hash-chain + signed attestation + evidence-bound merge gate. "
         "SURFACED here; enforcement wiring deferred."
     ),
+    "harness-lane-review-gates": (
+        "Per-gate diff-char cap for the harness-lane review gates "
+        "(glm_gate/kimi_gate/deepseek_gate), read at runtime by "
+        "gate_lane_contract.max_diff_chars() (OI-1874)."
+    ),
     "receipt-hash-chain": "Tamper-evident NDJSON hash-chain (ADR-029).",
     "signed-attestation": "SSH-signed PR attestation manifests (ADR-027).",
     "evidence-bound-gate": "D3 evidence-bound merge gate.",
@@ -149,6 +154,11 @@ _ROW_ORDER: List[str] = [
     "claude-tmux-serialization",
     "central-install-cutover",
     "t0-context-rotation",
+    # OI-1874 r4: real, currently-enforcing mechanism with no effectiveness
+    # probe registered yet -- same shape as t0-context-rotation/
+    # central-install-cutover just above, not the D6b six's "claimed LIVE
+    # with no probe" correction.
+    "harness-lane-review-gates",
     # SCOPE
     "plan-gate-panel",
     "plan-gate-task-class-scope",

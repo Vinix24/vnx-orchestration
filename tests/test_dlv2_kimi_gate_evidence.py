@@ -43,6 +43,7 @@ sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 import kimi_gate
 import closure_verifier
 import gate_artifacts
+import gate_lane_contract
 from gate_status import has_complete_evidence, is_terminal
 
 
@@ -228,7 +229,7 @@ def test_contract_hash_byte_equal_to_existing_route_for_same_contract(tmp_path, 
     # via the SAME function the existing (codex_gate) route calls — gate name
     # only affects the fallback branch (no "prompt" key), so a different gate
     # name here still proves it is the same hash for the same contract.
-    prompt = kimi_gate._build_prompt(_FAKE_DIFF, pr)
+    prompt = kimi_gate._build_prompt(_FAKE_DIFF, pr, gate_lane_contract.max_diff_chars("kimi_gate"))
     existing_route_hash = gate_artifacts._compute_contract_hash({"prompt": prompt}, "codex_gate")
 
     assert record["contract_hash"] != ""
@@ -349,12 +350,17 @@ def test_pass_verdict_on_whitespace_only_diff_becomes_unavailable_degenerate(tmp
 
 
 def test_pass_verdict_on_truncated_diff_is_partial_review_not_unavailable(tmp_path, monkeypatch):
-    """A ~60000-character diff capped at MAX_DIFF_CHARS (50000) still handed
-    the model real content to review — truncation must never flip a real pass
-    into unavailable. Since OI-1851 it is not a pass either: the model saw
-    only part of the diff, so the record says partial_review."""
-    big_diff = "diff --git a/x b/x\n" + ("+ok\n" * 15000)
-    assert len(big_diff) > kimi_gate.MAX_DIFF_CHARS
+    """A diff over kimi_gate's own resolved diff-char cap (OI-1874:
+    gate_lane_contract.max_diff_chars, 400000 by default -- raised from the
+    old shared 50000 since kimi-k3 carries a 1M-token context and runs on the
+    subscription lane) still handed the model real content to review --
+    truncation must never flip a real pass into unavailable. Since OI-1851 it
+    is not a pass either: the model saw only part of the diff, so the record
+    says partial_review."""
+    kimi_cap = gate_lane_contract.max_diff_chars("kimi_gate")
+    lines_needed = (kimi_cap // len("+ok\n")) + 200
+    big_diff = "diff --git a/x b/x\n" + ("+ok\n" * lines_needed)
+    assert len(big_diff) > kimi_cap
     diff_file = tmp_path / "x.diff"
     diff_file.write_text(big_diff, encoding="utf-8")
     data_dir = tmp_path / "data"

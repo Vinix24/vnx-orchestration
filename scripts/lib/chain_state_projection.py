@@ -58,15 +58,6 @@ RECOVERY_NEEDED_STATES = frozenset({"RECOVERY_PENDING", "CHAIN_HALTED"})
 # Maximum requeue attempts before escalation (contract rule R-2/R-3)
 MAX_REQUEUE_ATTEMPTS = 3
 
-# gemini_review was removed from the mandatory set by the 05-09 operator
-# decision (gemini-cli stays available but is never required) but stays a
-# LEGAL signer whenever it actually runs and produces evidence -- dropping
-# it from consideration entirely would silently discard a real PASS a
-# gemini run had already earned. Appended unconditionally by
-# required_signer_gates(); never part of the takeover-chain config itself.
-_OPTIONAL_LEGACY_SIGNER = "gemini_review"
-
-
 def required_signer_gates() -> Tuple[str, ...]:
     """Gate names eligible to certify chain-advancement (F2-4, 06-09).
 
@@ -89,10 +80,8 @@ def required_signer_gates() -> Tuple[str, ...]:
     applies, so an operator's config edit takes effect on the very next
     check instead of needing a process restart.
 
-    ``gemini_review`` is ALWAYS appended (see ``_OPTIONAL_LEGACY_SIGNER``)
-    even though it is absent from the takeover chain's default string and
-    from the mandatory set: the 05-09 operator decision keeps it a legal,
-    optional signer.
+    ``gemini_review`` is not a signer: it was a legal optional one until it
+    was retired as a reviewer (2026-09-26, ``dispatch_spec.RETIRED_GATE_NAMES``).
 
     Malformed operator config (an unknown gate name, or a name repeated --
     a cycle) raises ``gate_request_handler.ReviewGateTakeoverConfigError``,
@@ -100,15 +89,15 @@ def required_signer_gates() -> Tuple[str, ...]:
     silent fallback to a stale default.
 
     An explicit ``VNX_REVIEW_GATE_TAKEOVER_CHAIN=""`` (operator disabled
-    automated takeover entirely) leaves exactly one eligible signer:
-    ``gemini_review``. Known, narrow edge -- left as an Open Item rather
+    automated takeover entirely) leaves NO eligible signer, so advancement
+    stays blocked (fail-closed). Known, narrow edge -- left as an Open Item rather
     than papered over with a second "gates eligible to sign" knob separate
     from "gates eligible for takeover", which is exactly the second
     configuration layer this deliverable was told not to invent.
 
     When ``config_runtime``/``gate_request_handler`` cannot be imported at
     all (e.g. a bare script invocation whose sys.path lacks scripts/lib's
-    sibling modules), degrades to the same single-signer fallback -- logged
+    sibling modules), degrades to the same empty signer set -- logged
     as a WARNING, never silent, mirroring ``config_runtime``'s own
     fail-soft-but-loud philosophy. It deliberately does NOT fall back to a
     hardcoded copy of the chain's default string: duplicating that literal
@@ -125,8 +114,8 @@ def required_signer_gates() -> Tuple[str, ...]:
         logger.warning(
             "chain_state_projection: kon config_runtime/gate_request_handler niet "
             "importeren (%s) -- geen enkele geconfigureerde ondertekenaar "
-            "beschikbaar; alleen %s blijft geldig",
-            exc, _OPTIONAL_LEGACY_SIGNER,
+            "beschikbaar",
+            exc,
         )
         names: List[str] = []
     else:
@@ -136,8 +125,6 @@ def required_signer_gates() -> Tuple[str, ...]:
         _parse_review_gate_takeover_chain(raw)  # fail-loud: unknown name / cycle
         names = [item.strip() for item in raw.split(",") if item.strip()]
 
-    if _OPTIONAL_LEGACY_SIGNER not in names:
-        names.append(_OPTIONAL_LEGACY_SIGNER)
     return tuple(names)
 
 

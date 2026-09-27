@@ -107,11 +107,11 @@ from gate_recorder import (
 import gate_depth  # OI-1618: a verdict without investigation is no verdict, on every lane
 from gate_artifacts import _compute_contract_hash  # canonical hash source — never a second hasher
 from gate_lane_contract import (  # C6 step 3: one source, three readers
-    MAX_DIFF_CHARS,
     MODEL_DEFAULTS,
     TIMEOUT_SECONDS,
     VALID_VERDICTS,
     VERDICT_CONTRACT,
+    max_diff_chars,
 )
 from gate_prompt import (  # OI-1442: the diff is data, not instruction
     build_review_prompt,
@@ -188,7 +188,7 @@ def _validate_model(model: str) -> "str | None":
     return None
 
 
-def _build_prompt(diff_text: str, pr: str) -> str:
+def _build_prompt(diff_text: str, pr: str, max_chars: int) -> str:
     """Build the review prompt with the diff as delimited, untrusted DATA.
 
     OI-1442: this used to end with ``"DIFF:\\n" + diff_text`` — the PR
@@ -199,13 +199,20 @@ def _build_prompt(diff_text: str, pr: str) -> str:
     (C6 step 3), identical by design for glm_gate, kimi_gate and gate_runner's
     harness-lane path; gate_runner's ``_REVIEWER_VERDICT_TEMPLATE``
     (codex/gemini) is a different, richer shape and is not this contract.
+
+    ``max_chars`` is resolved ONCE by the caller (``main()``) and passed in —
+    not re-resolved here — so the truncation this prompt applies and the
+    ``diff_truncated``/``diff_limit`` recorded alongside it (from the same
+    caller's own ``gate_depth.diff_coverage`` call) can never disagree because
+    ``gate_lane_contract.max_diff_chars`` read mutable project config
+    differently between two calls in the same run (OI-1874 r3).
     """
     return build_review_prompt(
         gate_name="glm_gate",
         pr=pr,
         diff_text=diff_text,
         verdict_contract=_VERDICT_CONTRACT,
-        max_chars=MAX_DIFF_CHARS,
+        max_chars=max_chars,
     )
 
 
@@ -590,9 +597,16 @@ def main(argv: "list[str] | None" = None) -> int:
         # OI-1618: the diff IS the investigation for a single-shot lane — no
         # agentic tool loop to measure. diff_chars is the post-strip length
         # (the single-shot degeneracy floor), diff_truncated mirrors the same
-        # MAX_DIFF_CHARS cap gate_prompt.wrap_untrusted_diff applies to the
-        # raw (pre-strip) text. OI-1851: plus the cap and the cut files.
-        coverage = gate_depth.diff_coverage(diff, MAX_DIFF_CHARS)
+        # per-gate cap (OI-1874: gate_lane_contract.max_diff_chars) gate_prompt.
+        # wrap_untrusted_diff applies to the raw (pre-strip) text. OI-1851: plus
+        # the cap and the cut files.
+        # OI-1874 r3: resolved ONCE here — `diff_cap` is the single source
+        # passed to both `gate_depth.diff_coverage` (below) and `_build_prompt`
+        # (below it), so a mutable-config change between the two calls this
+        # gate used to make can no longer make the recorded `diff_truncated`
+        # disagree with what the prompt actually truncated.
+        diff_cap = max_diff_chars("glm_gate")
+        coverage = gate_depth.diff_coverage(diff, diff_cap)
         execution_depth = gate_depth.single_shot_depth(
             coverage["diff_chars"], coverage["diff_truncated"],
             diff_limit=coverage["diff_limit"],
@@ -619,7 +633,7 @@ def main(argv: "list[str] | None" = None) -> int:
         # and vocabulary this role change removes) untouched — a role-level
         # split, not a dispatch_id string check.
         dispatcher = _make_default_dispatcher(str(base_data_dir), args.timeout, role="review-gate")
-        prompt = _build_prompt(diff, args.pr)
+        prompt = _build_prompt(diff, args.pr, diff_cap)
         # OI-1442: the deterministic half. The prompt tells the model to report
         # instruction-shaped text in the diff as a finding; this scan does not
         # depend on it having done so. The two are joined at the record below.

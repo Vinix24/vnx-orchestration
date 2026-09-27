@@ -38,9 +38,13 @@ _g_required_gates() {
   [ -f "$config" ] || config="${PROJECT_ROOT}/.vnx/governance_enforcement.yaml"
   [ -f "$config" ] || config="${VNX_HOME}/governance_enforcement.yaml"
 
+  # The default review stack: the two standing subscription seats
+  # (config_registry VNX_DEFAULT_REVIEW_STACK; test_gate_required_gates pins the
+  # two equal). Used when no config is found or it names no required gate.
+  local default_stack='codex_gate,kimi_gate'
+
   if [ ! -f "$config" ]; then
-    # Fallback to default stack when no config found
-    printf 'codex_gate,gemini_review'
+    printf '%s' "$default_stack"
     return
   fi
 
@@ -84,7 +88,7 @@ except Exception as e:
 # enforces (OI-1265).
 gate_map = {
     'codex_gate_required': 'codex_gate',
-    'gemini_review_required': 'gemini_review',
+    'kimi_gate_required': 'kimi_gate',
     'ci_green_required': 'ci_gate',
 }
 result = []
@@ -93,7 +97,7 @@ for g in gates:
     if mapped:
         result.append(mapped)
 
-print(','.join(result) if result else 'codex_gate,gemini_review')
+print(','.join(result) if result else '$default_stack')
 "
 }
 
@@ -205,7 +209,7 @@ Arguments:
   pr-number             GitHub PR number to gate
 
 Options:
-  --only <gate>         Run a specific gate only (e.g. codex, kimi, gemini)
+  --only <gate>         Run a specific gate only (e.g. codex, kimi, ci)
   --status              Show current gate results without running
   --mode <mode>         Gate mode: per_pr or final (default: final)
   --risk-class <class>  Risk class: low, medium, high (default: medium)
@@ -214,7 +218,6 @@ Options:
 Gate names:
   codex_gate            Codex static analysis gate (subscription)
   kimi_gate             Kimi review gate (subscription)
-  gemini_review         Gemini code review gate
   glm_gate              GLM review gate (API credit, fallback when codex and kimi are unavailable)
   deepseek_gate         DeepSeek review gate (API credit, fallback when codex and kimi are unavailable)
   ci_gate               CI green check
@@ -223,7 +226,6 @@ Examples:
   vnx gate 221
   vnx gate 221 --only codex
   vnx gate 221 --only kimi
-  vnx gate 221 --only gemini
   vnx gate 221 --status
 HELP
         return 0 ;;
@@ -295,12 +297,11 @@ HELP
 
   if [ -n "$only_gate" ]; then
     # Run a specific gate
-    # Normalize short names: codex -> codex_gate, gemini -> gemini_review,
-    # ci -> ci_gate (the name review_gate_manager knows; OI-1265), and the
+    # Normalize short names: codex -> codex_gate, ci -> ci_gate
+    # (the name review_gate_manager knows; OI-1265), and the
     # kimi/glm/deepseek reviewers by the same rule.
     case "$only_gate" in
       codex)    only_gate="codex_gate" ;;
-      gemini)   only_gate="gemini_review" ;;
       ci)       only_gate="ci_gate" ;;
       kimi)     only_gate="kimi_gate" ;;
       glm)      only_gate="glm_gate" ;;

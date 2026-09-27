@@ -225,10 +225,11 @@ class TestGateEnumMembership:
 
     def test_gate_enum_stays_a_closed_set(self):
         """OI-845 discipline: the enum grew by exactly two, everything else
-        that was legal stays legal, nothing else was silently added."""
+        that was legal stays legal, nothing else was silently added. The one
+        removal is gemini_review, retired 2026-09-26 (dispatch_spec.RETIRED_GATE_NAMES)."""
         values = {g.value for g in Gate}
         assert values == {
-            "gemini_review", "codex_gate", "claude_github_optional",
+            "codex_gate", "claude_github_optional",
             "ci_gate", "wiring_gate", "kimi_gate", "glm_gate",
         }
 

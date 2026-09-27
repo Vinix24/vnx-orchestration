@@ -1,9 +1,15 @@
 """OI-1851: a gate may not pass a diff it only partly saw, and the record must show it.
 
-PR #1915: a 176.860-char diff against MAX_DIFF_CHARS = 50.000; glm_gate booked
-`completed` with `diff_chars: 0, diff_truncated: false` and the merge door read
-it as passing. Real code throughout; only the provider call, the diff fetch and
-the gh identity lookups are stubbed.
+PR #1915: a 176.860-char diff against the (then-shared) MAX_DIFF_CHARS = 50.000;
+glm_gate booked `completed` with `diff_chars: 0, diff_truncated: false` and the
+merge door read it as passing. Real code throughout; only the provider call,
+the diff fetch and the gh identity lookups are stubbed.
+
+OI-1874 made the cap per-gate (``gate_lane_contract.max_diff_chars``): glm_gate
+and deepseek_gate stayed at 50000, kimi_gate rose to 400000. Diffs below are
+sized against each gate's OWN resolved cap rather than a shared literal, so this
+suite still proves the OI-1851 contract (a truncated diff can never book a
+silent pass) for every gate at ITS actual cap, not at the old constant.
 """
 from __future__ import annotations
 
@@ -19,10 +25,21 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 
 import closure_verifier
+import gate_lane_contract
 import gate_runner
-from gate_lane_contract import MAX_DIFF_CHARS
 from gate_runner import GateRunner
 from gate_status import has_complete_evidence, is_pass
+
+TESTS_DIR = Path(__file__).resolve().parent
+if str(TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR))
+
+# OI-1874 r3: reuse test_gate_lane_contract's config_runtime isolation fixture
+# for the two cross-gate tests below instead of copying it — env-var deletion
+# alone does not stop a real, already-populated project_config DB from
+# overriding the resolved cap on this repo's own dev machine (see that
+# fixture's own docstring).
+from test_gate_lane_contract import isolate_config_runtime  # noqa: E402,F401
 
 BRANCH = "feature/oi1851"
 HEAD_SHA = "cafedeadbeef"
@@ -44,16 +61,30 @@ FAIL_REPORT = (
 SMALL_DIFF = "diff --git a/small.py b/small.py\n+ok = True\n"
 
 
-def _big_diff() -> str:
+def _diff_over(chars: int) -> str:
+    """Build a synthetic multi-file diff whose stripped length exceeds *chars*.
+
+    The tail file is the one that gets cut when a cap fires, distinguishable
+    from the head file so a test can assert exactly which file's tail was lost.
+    """
     head = "diff --git a/scripts/head.py b/scripts/head.py\n" + "+x = 1\n" * 100
-    tail = "diff --git a/scripts/tail.py b/scripts/tail.py\n" + "+y = 2\n" * 12000
+    tail_line = "+y = 2\n"
+    lines_needed = (chars // len(tail_line)) + 200  # generous margin past the cap
+    tail = "diff --git a/scripts/tail.py b/scripts/tail.py\n" + tail_line * lines_needed
     diff = head + tail
-    assert len(diff) > MAX_DIFF_CHARS
-    assert len(head) < MAX_DIFF_CHARS
+    assert len(diff) > chars
+    assert len(head) < chars
     return diff
 
 
-BIG_DIFF = _big_diff()
+GLM_CAP = gate_lane_contract.DIFF_CHAR_CONFIG["glm_gate"][1]
+KIMI_CAP = gate_lane_contract.DIFF_CHAR_CONFIG["kimi_gate"][1]
+
+# Over glm_gate's cap (50000), under kimi_gate's cap (400000) — the exact shape
+# of PR #1936 (OI-1874): a diff too big for the API-credit fallback but well
+# inside the subscription-billed kimi lane's 1M-token context.
+BIG_DIFF = _diff_over(GLM_CAP)
+assert len(BIG_DIFF) < KIMI_CAP, "BIG_DIFF must sit strictly between the two caps"
 
 
 def _merge_door(results_dir: Path, pr: str, gate: str, *, branch=BRANCH, head_sha=HEAD_SHA):
@@ -90,6 +121,8 @@ def _run_standalone(module, gate: str, tmp_path, monkeypatch, *, diff: str, repo
 def standalone_gate(request, monkeypatch):
     monkeypatch.delenv("VNX_GLM_GATE_MODEL", raising=False)
     monkeypatch.delenv("VNX_KIMI_GATE_MODEL", raising=False)
+    monkeypatch.delenv("VNX_GLM_GATE_MAX_DIFF_CHARS", raising=False)
+    monkeypatch.delenv("VNX_KIMI_GATE_MAX_DIFF_CHARS", raising=False)
     module = __import__(request.param)
     return module, request.param
 
@@ -98,12 +131,16 @@ def test_single_shot_pass_on_a_truncated_diff_is_partial_review_and_no_go(
     standalone_gate, tmp_path, monkeypatch,
 ):
     module, gate = standalone_gate
+    # OI-1874: each gate's own resolved cap, not a shared literal — glm_gate and
+    # kimi_gate no longer truncate at the same size.
+    cap = gate_lane_contract.max_diff_chars(gate)
+    diff = _diff_over(cap)
     rc, record, results_dir = _run_standalone(
-        module, gate, tmp_path, monkeypatch, diff=BIG_DIFF, report=PASS_REPORT, pr="1915",
+        module, gate, tmp_path, monkeypatch, diff=diff, report=PASS_REPORT, pr="1915",
     )
     depth = record["execution_depth"]
     assert (depth["mode"], depth["diff_chars"], depth["diff_truncated"], depth["diff_limit"]) == (
-        "single_shot", len(BIG_DIFF.strip()), True, MAX_DIFF_CHARS)
+        "single_shot", len(diff.strip()), True, cap)
     assert depth["truncated_files"] == ["scripts/tail.py"]
     assert (record["status"], record["reason"]) == ("partial_review", "diff_truncated")
     assert rc != 0
@@ -112,19 +149,77 @@ def test_single_shot_pass_on_a_truncated_diff_is_partial_review_and_no_go(
 
     verdict = _merge_door(results_dir, "1915", gate)
     assert verdict["verdict"] == "NO-GO"
-    assert str(len(BIG_DIFF.strip())) in verdict["message"]
-    assert str(MAX_DIFF_CHARS) in verdict["message"]
+    assert str(len(diff.strip())) in verdict["message"]
+    assert str(cap) in verdict["message"]
     assert "scripts/tail.py" in verdict["message"]
     assert "codex_gate" in verdict["message"]  # the way out is named
 
 
 def test_single_shot_fail_on_a_truncated_diff_stays_a_fail(standalone_gate, tmp_path, monkeypatch):
     module, gate = standalone_gate
+    cap = gate_lane_contract.max_diff_chars(gate)
+    diff = _diff_over(cap)
     rc, record, _ = _run_standalone(
-        module, gate, tmp_path, monkeypatch, diff=BIG_DIFF, report=FAIL_REPORT, pr="1916",
+        module, gate, tmp_path, monkeypatch, diff=diff, report=FAIL_REPORT, pr="1916",
     )
     assert record["status"] == "fail"
     assert rc == 2
+
+
+def test_glm_gate_truncates_kimi_gate_does_not_on_the_same_diff(
+    tmp_path, monkeypatch, isolate_config_runtime,
+):
+    """OI-1874, the exact PR #1936 shape: one diff, two harness-lane gates.
+
+    On the OLD code (one shared MAX_DIFF_CHARS=50000) kimi_gate would have
+    truncated this diff exactly like glm_gate, both reporting
+    diff_truncated=True. On the new per-gate cap, glm_gate (still 50000)
+    truncates it and books a partial_review; kimi_gate (raised to 400000)
+    reports diff_truncated=False and books a real pass over the whole diff.
+    """
+    monkeypatch.delenv("VNX_GLM_GATE_MODEL", raising=False)
+    monkeypatch.delenv("VNX_KIMI_GATE_MODEL", raising=False)
+    import glm_gate
+    import kimi_gate
+
+    shared_diff = BIG_DIFF  # over GLM_CAP, under KIMI_CAP (asserted at module load)
+
+    _rc, glm_record, _ = _run_standalone(
+        glm_gate, "glm_gate", tmp_path, monkeypatch, diff=shared_diff, report=PASS_REPORT, pr="1936",
+    )
+    assert glm_record["execution_depth"]["diff_truncated"] is True
+    assert glm_record["execution_depth"]["diff_limit"] == GLM_CAP
+    assert glm_record["status"] == "partial_review"
+
+    _rc, kimi_record, _ = _run_standalone(
+        kimi_gate, "kimi_gate", tmp_path, monkeypatch, diff=shared_diff, report=PASS_REPORT, pr="1936",
+    )
+    assert kimi_record["execution_depth"]["diff_truncated"] is False
+    assert kimi_record["execution_depth"]["diff_limit"] == KIMI_CAP
+    assert kimi_record["execution_depth"]["diff_chars"] == len(shared_diff.strip())
+    assert kimi_record["status"] == "pass"
+
+
+def test_kimi_gate_prompt_carries_the_full_diff_glm_gate_truncates_it(
+    monkeypatch, isolate_config_runtime,
+):
+    """Same scenario as above, checked at the prompt level: the diff that
+    actually reaches the model, not just the recorded coverage numbers.
+    """
+    monkeypatch.delenv("VNX_GLM_GATE_MODEL", raising=False)
+    monkeypatch.delenv("VNX_KIMI_GATE_MODEL", raising=False)
+    import glm_gate
+    import kimi_gate
+    from gate_prompt import TRUNCATION_NOTICE
+
+    kimi_prompt = kimi_gate._build_prompt(BIG_DIFF, "1936", KIMI_CAP)
+    glm_prompt = glm_gate._build_prompt(BIG_DIFF, "1936", GLM_CAP)
+
+    assert TRUNCATION_NOTICE not in kimi_prompt
+    assert BIG_DIFF in kimi_prompt  # the whole diff made it into kimi's prompt
+
+    assert TRUNCATION_NOTICE in glm_prompt
+    assert BIG_DIFF not in glm_prompt  # glm's prompt only ever saw the first GLM_CAP chars
 
 
 def test_single_shot_pass_under_the_cap_is_unchanged(standalone_gate, tmp_path, monkeypatch):
@@ -144,6 +239,8 @@ def test_full_peer_pass_is_the_way_out_of_a_partial_review(tmp_path, monkeypatch
     """A full review by a peer on the same head is the way out."""
     monkeypatch.delenv("VNX_GLM_GATE_MODEL", raising=False)
     monkeypatch.delenv("VNX_KIMI_GATE_MODEL", raising=False)
+    monkeypatch.delenv("VNX_GLM_GATE_MAX_DIFF_CHARS", raising=False)
+    monkeypatch.delenv("VNX_KIMI_GATE_MAX_DIFF_CHARS", raising=False)
     import glm_gate
     import kimi_gate
 
@@ -178,6 +275,7 @@ def runner_env(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
     monkeypatch.setenv("VNX_REPORTS_DIR", str(reports_dir))
     monkeypatch.delenv("VNX_GLM_GATE_MODEL", raising=False)
+    monkeypatch.delenv("VNX_GLM_GATE_MAX_DIFF_CHARS", raising=False)
     monkeypatch.setattr(
         gate_runner.subprocess, "Popen",
         lambda *a, **kw: (_ for _ in ()).throw(AssertionError("harness lane must not spawn")),
@@ -240,7 +338,7 @@ def test_completed_record_with_unread_truncation_is_not_complete_evidence(tmp_pa
         "branch": BRANCH, "commit_sha": HEAD_SHA,
         "execution_depth": {
             "parsed": False, "mode": "agentic", "files_read": 0,
-            "diff_chars": 176860, "diff_truncated": True, "diff_limit": MAX_DIFF_CHARS,
+            "diff_chars": 176860, "diff_truncated": True, "diff_limit": GLM_CAP,
             "truncated_files": ["scripts/pr_merge.py"],
         },
     }
@@ -261,7 +359,7 @@ def test_completed_record_with_unread_truncation_is_not_complete_evidence(tmp_pa
 def test_coverage_gap_closes_only_on_a_measured_read_of_every_cut_file():
     import gate_depth
 
-    coverage = gate_depth.diff_coverage(BIG_DIFF, MAX_DIFF_CHARS)
+    coverage = gate_depth.diff_coverage(BIG_DIFF, GLM_CAP)
     unmeasured = gate_depth.with_diff_coverage(gate_depth.ExecutionDepth(), coverage)
     assert gate_depth.coverage_gap(unmeasured)  # parsed: false never closes it
     assert gate_depth.from_dict(json.loads(json.dumps(unmeasured.to_dict()))) == unmeasured

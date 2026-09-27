@@ -273,7 +273,7 @@ class TestTimeoutKill:
 
     def test_timeout_kills_subprocess_and_records_failure(self, gate_env, monkeypatch):
         monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
-        monkeypatch.setenv("VNX_GEMINI_GATE_TIMEOUT", "1")
+        monkeypatch.setenv("VNX_CODEX_GATE_TIMEOUT", "1")
 
         runner = GateRunner(
             state_dir=gate_env["state_dir"],
@@ -281,7 +281,7 @@ class TestTimeoutKill:
         )
 
         report_path = str(gate_env["reports_dir"] / "timeout-report.md")
-        payload = _make_request_payload(report_path=report_path)
+        payload = _make_request_payload(gate="codex_gate", report_path=report_path)
 
         mock_proc = MagicMock()
         mock_proc.stdin = MagicMock()
@@ -312,14 +312,16 @@ class TestTimeoutKill:
              patch("gate_runner.os.getpgid", return_value=12345), \
              patch("gate_runner.os.killpg", mock_killpg):
             result = runner.run(
-                gate="gemini_review",
+                gate="codex_gate",
                 request_payload=payload,
                 pr_number=1,
             )
 
         assert result["status"] == "unavailable"
-        assert result["reason"] in ("timeout", "stall")
-        assert result["required_reruns"] == ["gemini_review"]
+        # codex_gate's stall threshold defaults to 300s, so only the 1s
+        # VNX_CODEX_GATE_TIMEOUT above can have ended this run.
+        assert result["reason"] == "timeout"
+        assert result["required_reruns"] == ["codex_gate"]
         assert mock_killpg.called or mock_proc.kill.called
 
 
@@ -328,8 +330,8 @@ class TestStallDetection:
 
     def test_stall_kills_subprocess(self, gate_env, monkeypatch):
         monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
-        monkeypatch.setenv("VNX_GEMINI_GATE_TIMEOUT", "300")
-        monkeypatch.setenv("VNX_GEMINI_STALL_THRESHOLD", "2")
+        monkeypatch.setenv("VNX_CODEX_GATE_TIMEOUT", "300")
+        monkeypatch.setenv("VNX_CODEX_STALL_THRESHOLD", "2")
 
         runner = GateRunner(
             state_dir=gate_env["state_dir"],
@@ -337,7 +339,7 @@ class TestStallDetection:
         )
 
         report_path = str(gate_env["reports_dir"] / "stall-report.md")
-        payload = _make_request_payload(report_path=report_path)
+        payload = _make_request_payload(gate="codex_gate", report_path=report_path)
 
         mock_proc = MagicMock()
         mock_proc.stdin = MagicMock()
@@ -367,7 +369,7 @@ class TestStallDetection:
              patch("gate_runner.os.getpgid", return_value=54321), \
              patch("gate_runner.os.killpg", mock_killpg):
             result = runner.run(
-                gate="gemini_review",
+                gate="codex_gate",
                 request_payload=payload,
                 pr_number=1,
             )
@@ -747,17 +749,17 @@ class TestStaleContractHash:
 class TestRequestNormalization:
     """GATE-2: queued normalized to requested in review_gate_manager."""
 
-    def test_gemini_request_uses_requested_status(self, gate_env, monkeypatch):
+    def test_codex_request_uses_requested_status(self, gate_env, monkeypatch):
         import review_gate_manager as rgm
         monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *a, **kw: None)
-        monkeypatch.setattr(rgm.shutil, "which", lambda tool: "/usr/bin/fake" if tool == "gemini" else None)
-        monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "1")
+        monkeypatch.setattr(rgm.shutil, "which", lambda tool: "/usr/bin/fake" if tool == "codex" else None)
+        monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "1")
 
         manager = rgm.ReviewGateManager()
         result = manager.request_reviews(
             pr_number=100,
             branch="feature/test",
-            review_stack=["gemini_review"],
+            review_stack=["codex_gate"],
             risk_class="medium",
             changed_files=["test.py"],
             mode="per_pr",
@@ -981,37 +983,45 @@ class TestCodexGateExecution:
 class TestGateTimeoutConfig:
     """Verify gate-specific timeout and stall threshold configuration."""
 
-    def test_default_gemini_timeout(self):
-        from headless_adapter import gate_timeout
-        assert gate_timeout("gemini_review") == 300
-
     def test_default_codex_timeout(self):
         from headless_adapter import gate_timeout
         assert gate_timeout("codex_gate") == 600
 
+    def test_default_kimi_timeout(self):
+        from headless_adapter import gate_timeout
+        # kimi_gate is a standing seat (VNX_DEFAULT_REVIEW_STACK); it must not
+        # fall through to the generic DEFAULT_TIMEOUT lookup.
+        assert gate_timeout("kimi_gate") == 600
+
     def test_env_override_timeout(self, monkeypatch):
         from headless_adapter import gate_timeout
-        monkeypatch.setenv("VNX_GEMINI_GATE_TIMEOUT", "120")
-        assert gate_timeout("gemini_review") == 120
+        monkeypatch.setenv("VNX_CODEX_GATE_TIMEOUT", "120")
+        assert gate_timeout("codex_gate") == 120
+
+    def test_env_override_kimi_timeout(self, monkeypatch):
+        from headless_adapter import gate_timeout
+        monkeypatch.setenv("VNX_KIMI_GATE_TIMEOUT", "120")
+        assert gate_timeout("kimi_gate") == 120
 
     def test_default_stall_threshold(self):
         from headless_adapter import gate_stall_threshold
         # Literals, not GATE_STALL_DEFAULTS lookups: comparing the function's
         # output to the dict it reads from would pass no matter what the dict
-        # said. gemini_review's 180s (not the 60s in
-        # 180_GATE_EXECUTION_LIFECYCLE_CONTRACT.md §4.2, which was never
-        # reconciled against the code) has shipped since the gate runner's
-        # introduction (c0957d22) and every OI-105 triage since treats it as
-        # the accepted value (Gemini CLI's stdout-flush stalls, OI-048).
-        assert gate_stall_threshold("gemini_review") == 180
+        # said.
         assert gate_stall_threshold("codex_gate") == 300
+        assert gate_stall_threshold("kimi_gate") == 300
         assert gate_stall_threshold("claude_github_optional") == 60
         assert gate_stall_threshold("ci_gate") == 30
 
     def test_env_override_stall_threshold(self, monkeypatch):
         from headless_adapter import gate_stall_threshold
-        monkeypatch.setenv("VNX_GEMINI_STALL_THRESHOLD", "30")
-        assert gate_stall_threshold("gemini_review") == 30
+        monkeypatch.setenv("VNX_CODEX_STALL_THRESHOLD", "30")
+        assert gate_stall_threshold("codex_gate") == 30
+
+    def test_env_override_kimi_stall_threshold(self, monkeypatch):
+        from headless_adapter import gate_stall_threshold
+        monkeypatch.setenv("VNX_KIMI_STALL_THRESHOLD", "30")
+        assert gate_stall_threshold("kimi_gate") == 30
 
     def test_unknown_gate_uses_defaults(self):
         from headless_adapter import gate_timeout, gate_stall_threshold
@@ -1384,6 +1394,85 @@ class TestHarnessLaneDelegation:
         assert "BEGIN PR DIFF: UNTRUSTED DATA" in instruction
         assert "-old" in instruction and "+new" in instruction
         assert '"verdict": "pass|fail|blocked"' in instruction
+
+    def test_deepseek_gate_builds_the_diff_prompt_capped_at_its_own_limit(
+        self, gate_env, monkeypatch,
+    ):
+        """OI-1874 r4: ``_resolve_prompt`` used to build a harness-lane prompt
+        only for glm_gate/kimi_gate — deepseek_gate is registered as the same
+        GATE_PROVIDER_HARNESS_LANE kind (gate_recorder.GATE_PROVIDERS) and
+        reaches this same runner path, but with no ``elif`` branch naming it
+        the prompt stayed whatever external_prompt was (empty in production),
+        so the diff (and its per-gate cap, gate_lane_contract.max_diff_chars)
+        never reached the model at all.
+
+        Proves both halves: a prompt IS built for deepseek_gate now, and it is
+        capped at deepseek_gate's OWN limit (50000), not kimi_gate's (400000) —
+        a diff sized strictly between the two truncates here exactly like it
+        does for glm_gate in test_oi1851_truncated_gate_not_a_pass.py.
+        """
+        import gate_lane_contract
+        from gate_prompt import TRUNCATION_NOTICE
+
+        deepseek_cap = gate_lane_contract.max_diff_chars("deepseek_gate")
+        kimi_cap = gate_lane_contract.max_diff_chars("kimi_gate")
+        assert deepseek_cap < kimi_cap
+
+        head = "diff --git a/scripts/head.py b/scripts/head.py\n" + "+x = 1\n" * 100
+        tail_line = "+y = 2\n"
+        tail = "diff --git a/scripts/tail.py b/scripts/tail.py\n" + tail_line * (
+            (deepseek_cap // len(tail_line)) + 200
+        )
+        big_diff = head + tail
+        assert deepseek_cap < len(big_diff.strip()) < kimi_cap
+
+        report_text = (
+            "Reviewed the diff.\nRan the tests.\nNo blocking findings.\n\n"
+            "```json\n"
+            '{"verdict": "pass", "findings": [], "residual_risk": null}\n'
+            "```\n"
+        )
+        factory, calls = self._fake_dispatcher(report_text)
+
+        monkeypatch.setattr("plan_gate_panel._make_default_dispatcher", factory)
+        monkeypatch.delenv("VNX_DEEPSEEK_GATE_MODEL", raising=False)
+        monkeypatch.delenv("VNX_DEEPSEEK_GATE_MAX_DIFF_CHARS", raising=False)
+        monkeypatch.setattr(
+            GateRunner, "_fetch_gh_pr_diff", staticmethod(lambda pr: big_diff),
+        )
+
+        report_path = str(gate_env["reports_dir"] / "deepseek-gate-pr3.md")
+        dispatch_id = "deepseek-gate-pr3-1788815300"
+        payload = _make_request_payload(
+            gate="deepseek_gate", report_path=report_path, dispatch_id=dispatch_id,
+        )
+        payload.pop("prompt")  # production request payloads carry no prompt key
+
+        runner = GateRunner(
+            state_dir=gate_env["state_dir"],
+            reports_dir=gate_env["reports_dir"],
+        )
+        result = runner.run(gate="deepseek_gate", request_payload=payload, pr_number=3)
+
+        # The cap fired: this books partial_review, never a silent completed
+        # pass over a diff the model only partly saw (OI-1851).
+        assert result["status"] == "partial_review", result.get("reason_detail")
+
+        assert len(calls) == 1
+        assert calls[0]["provider"] == "deepseek-harness"
+        assert calls[0]["model"] == "deepseek-v4-pro"
+        instruction = calls[0]["instruction"]
+        assert "BEGIN PR DIFF: UNTRUSTED DATA" in instruction
+        assert TRUNCATION_NOTICE in instruction
+        assert big_diff not in instruction  # cut at deepseek's own, smaller cap
+        assert '"verdict": "pass|fail|blocked"' in instruction
+
+        result_file = gate_env["results_dir"] / "pr-3-deepseek_gate.json"
+        saved = json.loads(result_file.read_text(encoding="utf-8"))
+        depth = saved["execution_depth"]
+        assert depth["diff_truncated"] is True
+        assert depth["diff_limit"] == deepseek_cap
+        assert depth["diff_chars"] == len(big_diff.strip())
 
     def test_harness_lane_spawn_failure_report_is_not_booked_completed(
         self, gate_env, monkeypatch,
