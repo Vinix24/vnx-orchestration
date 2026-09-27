@@ -1,6 +1,6 @@
 # ADR-008 — Dual-LLM Adversarial Review (`codex_gate` + `gemini_review`) with `contract_hash` Binding
 
-**Status:** Accepted
+**Status:** Accepted, amended 2026-09-26 (second reviewer: kimi_gate)
 **Date:** 2026-05-09
 **Decided by:** Operator (Vincent van Deth)
 **Resolves:** Mandatory triple-gate policy (codex + gemini + CI green); review-gate evidence model

@@ -73,6 +73,12 @@ VNX permanently supports **both** interactive (tmux) and headless (subprocess) e
 - The dispatcher reads `VNX_ADAPTER_T{n}` per terminal and routes accordingly. Both paths share the same dispatch envelope, the same lease arbitration in `runtime_coordination.db`, and the same receipt format in `t0_receipts.ndjson` (with `source` field distinguishing them: `subprocess` vs implicit-tmux).
 - New OIs that propose deleting tmux paths, retiring interactive mode, or sunsetting `tmux_adapter.py` are auto-rejected with a link to this ADR.
 
+## Amendment (2026-09-27): the default routing changed; the hybrid principle did not
+
+The Decision and Implementation note above describe the headless default as `subprocess_dispatch.py`-routed via `VNX_ADAPTER_T{n}=subprocess`. That default no longer holds: claude workers now route through `claude_headless` (`dispatch_envelope.run_envelope_headless_plan`) by default, and `subprocess_dispatch.py`-based routing is opt-in per terminal (project root `CLAUDE.md`, "Dispatch lanes").
+
+The tmux-spawn lane that existed between these two states was removed on 2026-09-18 (`docs/operations/TMUX_SPAWN_LANE.md`). That removal is a lane cleanup, not the "retire-interactive" wave this ADR rejects: `tmux_adapter.py`, `popup_editor.sh`, and `queue_popup_watcher.sh` are untouched, and tmux remains the first-class path for operator-driven and interactive-terminal work this ADR describes.
+
 ## See also
 
 - `project_hybrid_interactive_headless` memory (2026-04-23) — origin policy

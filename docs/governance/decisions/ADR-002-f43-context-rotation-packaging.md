@@ -1,6 +1,6 @@
 # ADR-002 — F43 Context Rotation: Revive + Package as Standalone Module
 
-**Status:** Accepted — pending implementation
+**Status:** Accepted — Phase A implemented (`scripts/lib/headless_context_tracker.py`, `scripts/lib/context_rotation.py`), Phase B (standalone PyPI module) open
 **Date:** 2026-05-01
 **Decided by:** Operator (Vincent van Deth)
 **Resolves:** OI-1164 — F43 context-rotation feature revival (closed branches)

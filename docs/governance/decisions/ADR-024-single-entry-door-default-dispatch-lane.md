@@ -1,6 +1,6 @@
 # ADR-024 — Single-entry Door as the Default Dispatch Lane
 
-**Status:** Accepted
+**Status:** Accepted; the "Reconciliation with ADR-010" section below is superseded as of 2026-09-18 (see amendment)
 **Date:** 2026-06-24
 **Decided by:** Operator (Vincent van Deth)
 **Resolves:** The door-flip (item E). Companion to ADR-025 (raw-file dispatch deprecation, item B).
@@ -98,6 +98,10 @@ ADR-010's SDK/LiteLLM ban remains binding. Per clause:
   stream-json event surface; the tmux-spawn lane has its own receipt/event capture.
 - ADR-010 *"The Anthropic Python SDK is never imported"* + the LiteLLM-Claude ban → **UNCHANGED /
   BINDING**: both lanes run the claude CLI, never the SDK or LiteLLM.
+
+## Amendment (2026-09-27): the reconciliation above no longer holds
+
+The "Reconciliation with ADR-010" section claims the tmux-spawn lane is canonical for claude post-June-15, on the premise that headless `claude -p` billed API credits after that cutover. Both premises are gone: the tmux-spawn lane was removed 2026-09-18 (`docs/operations/TMUX_SPAWN_LANE.md`), and the billing cutover it assumed never happened — headless `claude -p` runs on the Max subscription, not API credits (measured 2026-08-11 via auth state; project root `CLAUDE.md`, "Provider→lane rule"). `claude_headless` (`dispatch_envelope.run_envelope_headless_plan`) is now the only claude lane. The door-flip itself (§Decision) is unaffected — only the reconciliation clause's routing claim is superseded.
 
 ## See also
 
