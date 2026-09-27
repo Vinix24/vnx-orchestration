@@ -1,21 +1,17 @@
-# PR Queue - Feature: Dependency Chain Test
+<!-- AUTO-GENERATED — DO NOT EDIT — see scripts/build_pr_queue.py -->
+
+# PR Queue (DERIVED VIEW — generated example)
+
+> Generated from the repo-root `ROADMAP.yaml` (`launch_state` + `features[].pr_queue`),
+> which is a generic example of the roadmap format — the live roadmap is the
+> maintainer's tracks database (`vnx objective`). Live PR state: `gh pr list`.
+> Do not hand-edit this file.
 
 ## Progress Overview
-Total: 3 PRs | Complete: 2 | Active: 0 | Queued: 1 | Blocked: 0
-Progress: ██████░░░░ 66%
+Launch status: **example** (version 1.0.0)
+Last verified: 2026-01-01 against example
+Merged launch PRs: 0 | Queued: 0
 
 ## Status
 
-### ✅ Completed PRs
-- PR-1: Base
-- PR-2: Middle
-
-### ⏳ Queued PRs
-- PR-3: Top (dependencies: PR-2) [risk=unknown, merge=human, review=none]
-
-## Dependency Flow
-```
-PR-1 (no dependencies)
-PR-1 → PR-2
-PR-2 → PR-3
-```
+_No PRs in queue._

@@ -18,7 +18,7 @@ Use `DOCS_INDEX.md` for the canonical "one place to look" navigation.
 - Dispatch workflow: `DISPATCH_GUIDE.md`
 - Monitoring: `operations/README.md`
 - Product modes: `contracts/PRODUCTIZATION_CONTRACT.md`
-- Roadmap: `manifesto/ROADMAP.md`
+- Roadmap: `../ROADMAP.md` (current state); architecture principles and wave history: `manifesto/ROADMAP.md`
 
 ## Directory Overview
 

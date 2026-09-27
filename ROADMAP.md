@@ -1,72 +1,48 @@
 # VNX Orchestration Roadmap
 
-> Public roadmap. Detailed designs live in `docs/manifesto/ROADMAP.md`.
+Current release: `v1.6.6` (see [CHANGELOG.md](./CHANGELOG.md) for the full release history).
 
-## Current: 1.0.0 (released 2026-07-02)
+This file is a short pointer. The architecture principles and full wave history live in
+[docs/manifesto/ROADMAP.md](docs/manifesto/ROADMAP.md). The live, per-feature plan is not a
+markdown file at all — it is the maintainer's tracks database (`vnx horizon`, alias
+`vnx objective`). The repo-root [`ROADMAP.yaml`](./ROADMAP.yaml) is a generic example of the
+machine-readable roadmap format, not the live plan; [`PR_QUEUE.md`](./PR_QUEUE.md) is a view
+generated from it by `scripts/build_pr_queue.py`.
 
-`VERSION` is `1.0.0`, **published to PyPI on 2026-07-02** (`pip install vnx-orchestration`), tagged `v1.0.0` with a GitHub release. Production-validated on the author's own work (a multi-month receipt trail). Built across many waves since the first Wave 5 delivery in mid-May. Capability summary below.
+## What ships today
 
-### Always-on (default active)
+- **Dispatch lanes**: `claude_headless` (`claude -p` via envelope) is the only claude lane —
+  the tmux-spawn lane was removed 2026-09-18. It runs on the Max subscription, not
+  API credits. Codex CLI, Kimi CLI (OAuth), and a LiteLLM bridge (DeepSeek, GLM) round out
+  the provider set. Gemini CLI remains a worker lane; it is no longer a review gate.
+- **Governance receipts**: append-only NDJSON audit trail, uniform receipt + unified-report
+  shape across all providers. A per-append hash-chain is available but off by default.
+- **Default review stack**: `codex_gate,kimi_gate` — both subscription reviewers. `glm_gate`
+  and `deepseek_gate` are fallback-only, not default.
+- **Models**: T0 runs Opus 5.5; build workers (T1/T2/T3) default to Sonnet, with a per-gate
+  diff-size ceiling (`gate_lane_contract.max_diff_chars`).
+  Scoped worker permissions are the default; `VNX_WORKER_BLANKET_SKIP=1` is the explicit opt-out.
+- **Worktree isolation**: the envelope/headless lane creates a per-dispatch git worktree by
+  default. `VNX_ISOLATED_WORKTREE=1` only affects the separate `subprocess_dispatch` path.
+- **Elastic worker pool**: `vnx pool` CLI, queue-aware + cost-aware scaling, per-worker
+  worktree isolation.
+- **Install**: `pip install vnx-orchestration` (PyPI) or from a checkout (`pip install -e .`
+  / `./bin/vnx`), `vnx init`, `vnx doctor --strict`.
 
-- **5-provider dispatch**: Claude (subscription tmux lane + subprocess burst), Codex CLI, Gemini CLI, Kimi CLI (OAuth), LiteLLM bridge (DeepSeek V4-Pro/V4-Flash, GLM-5.2 via OpenRouter)
-- **Governance receipts**: append-only NDJSON audit trail, uniform receipt + unified-report shape across all providers
-- **Intelligence injection**: context bundles, ADR injection, repo-map enrichment for all providers (#712), kimi intelligence wiring (#701)
-- **GOV-1 PreToolUse hook**: blocks raw worker spawns, enforces subprocess_dispatch path (#656)
-- **Elastic worker pool**: `vnx pool` CLI, queue-aware + cost-aware scaling, per-worker worktree isolation
-- **Central install**: `pip install vnx-orchestration` (PyPI, since 2026-07-02) or from a checkout (`pip install -e .` / `./bin/vnx`), `vnx init`, `vnx doctor --strict`.
-- **Track layer**: schema + DAL + CLI + ADR-007 composite PK (FUT-1 + FUT-2, both done)
-- **ADR intelligence**: FTS5 ADR index + injection in dispatch context (INT-1, INT-2)
-- **Cost tracking**: universal cost tracking across all 5 providers (#684)
+## Guardrails
 
-### Shipped opt-in (env-gated, not default)
+- Append-only receipt path stays the canonical audit foundation.
+- Human approval gates stay default behavior.
+- Provider hooks stay optional, never mandatory for core orchestration.
+- Explicit contracts and deterministic recovery are preferred over hidden automation.
 
-- **Smart routing** (`VNX_AUTO_ROUTE=1`): cost-aware auto-route with constraint enforcement across all providers. Fully wired; default off because production routing mix still burns in.
-- **Pool task consumer** (`VNX_POOL_TASK_CONSUMER=1`): N-1/2/3 foundation — atomic dispatch claim, pool_worker_runner, consumer wiring. Default off; single-worker path remains default.
-- **Worktree isolation per dispatch** (`VNX_ISOLATED_WORKTREE=1`): per-dispatch git worktree with full provider isolation. Default off.
+## Out of scope (for now)
 
-### Shipped dark (runnable, not user-facing)
-
-- **Autopilot tick** (`RA-6`): `autopilot_tick` + scheduler wired; ships dark. Human-gate, step driver, and gate enforcement (RA-1..5, RA-3b) are active. Auto-advance requires explicit opt-in not yet exposed.
-- **Auto-dream self-learning loop**: consolidator core (ADR-019), CLI, scheduler, and T0 review-gate all runnable. Nightly cron trigger and central-path unification are pending before routine activation.
-
-## Wave History
-
-All waves shipped and stable.
-
-- **Wave 5** (2026-05-16): Control Centre, multi-project state aggregator, per-project T0 lifecycle
-- **Wave 6** (2026-05-16): Elastic worker pool, `vnx pool` CLI, ADR-018
-- **Wave 7** (2026-05-17): 5-provider production, benchmark suite, routing recommendations
-- **Wave 8** (2026-05-17): Smart router, constraint enforcer, report schema guardrails, pipx wheel
-- **Wave 4/central** (2026-05-17–25): Central install, `install-central.sh`, schema migrations 0017–0024, `vnx doctor --strict`
-- **1.0 sprint** (2026-05-29): RA-1..6 (roadmap autopilot gate hardening), N-1/2/3 pool-task-consumer foundation, auto-dream runnable, vulture dead-code sweep, FUT-1+2 (track layer), GOV-1 hook, kimi+repo-map enrichment, packaging hardening
-
-## Strategic Decisions (D-series, current)
-
-- **D1** Hybrid-explicit positioning — tool-first, platform-availability. Wave 5/6 code is foundation for future scale; not in critical hot-path for current solopreneur workflow.
-- **D2** Incremental centralization with per-project burn-in — complete.
-- **D6** Retain own routing (no DSPy/smolagents/LangGraph swap) — ADR-003 + governance differentiator.
-- **D11** Opus 4.7 on T0, Sonnet 4.6 on workers — measured on production data.
-- **DeepSeek via Claude harness**: measured 30% more effective than bare DeepSeek API call (tool-use loops, smart-context, structured diff). Allowed with own DeepSeek API key + hardening (`ANTHROPIC_BASE_URL`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, MCP off). Never on production OAuth subscription.
-
-## Near-Term Open Items
-
-- Nightly cron trigger for auto-dream self-learning loop
-- Central-path unification for dream receipt writes
-- `VNX_AUTO_ROUTE` and `VNX_POOL_TASK_CONSUMER` burn-in and default-on graduation
-- `VNX_ISOLATED_WORKTREE` default-on graduation
-- RA-6 autopilot-tick user-facing exposure
-
-## Future Horizons (post-1.0, non-binding)
-
-- Business task benchmarks (B01-B08 orchestration tasks)
-- Multi-operator federation (post-1.5)
-- Performance optimisation for 100+ concurrent dispatches
-- Domain expansion beyond coding (lead intake, blog, CRM)
+- Hosted SaaS control plane
+- Enterprise RBAC/compliance suite
+- Fully distributed orchestration across remote machines
+- Rewriting core runtime in Rust/Go before current governance objectives are complete
 
 ---
 
 Contributions welcome. See [CONTRIBUTING.md](./CONTRIBUTING.md).
-
-For release history: see [CHANGELOG.md](./CHANGELOG.md).
-
-For architecture and milestone detail: see [docs/manifesto/ROADMAP.md](docs/manifesto/ROADMAP.md).
