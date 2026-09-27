@@ -61,6 +61,7 @@ concurrent readers never see a partial write.
 
 ## References
 
-- ADR-017: Wave 5 Control Centre architecture
-- `claudedocs/wave5-control-centre-architecture.md`: design details
+- ADR-017: Wave 5 Control Centre architecture (the Wave 5 design note,
+  `claudedocs/wave5-control-centre-architecture.md`, is a private planning
+  document: `claudedocs/` is gitignored and it never shipped in the repo)
 - ADR-005: NDJSON audit trail invariant

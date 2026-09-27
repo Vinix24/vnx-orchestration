@@ -105,11 +105,11 @@ After installing a new version, each project needs a switchover. This is a three
 # Verify the new version is installed
 ls ~/.vnx-system/versions/
 
-# Confirm install-mode marker is present (rc5+ only)
-cat ~/.vnx-system/versions/v1.0.0-rc5/.vnx-install-mode  # must print "central"
+# Confirm install-mode marker is present
+cat ~/.vnx-system/versions/<version>/.vnx-install-mode  # must print "central"
 
 # Confirm no .vnx-data contamination in the new version dir
-ls ~/.vnx-system/versions/v1.0.0-rc5/.vnx-data 2>/dev/null && echo "FAIL: contaminated" || echo "clean"
+ls ~/.vnx-system/versions/<version>/.vnx-data 2>/dev/null && echo "FAIL: contaminated" || echo "clean"
 ```
 
 ### Step 2: Update project pin
@@ -118,7 +118,7 @@ ls ~/.vnx-system/versions/v1.0.0-rc5/.vnx-data 2>/dev/null && echo "FAIL: contam
 cd /path/to/your-project
 
 # Pin to new version
-echo 'v1.0.0-rc5' > .vnx-version
+echo '<version>' > .vnx-version
 
 # Verify shim picks up the new version
 vnx --version
@@ -170,17 +170,17 @@ Verify that runtime data goes to the project, not to VNX_HOME:
 ```bash
 # After running any vnx command:
 ls /path/to/your-project/.vnx-data/   # should exist
-ls ~/.vnx-system/versions/v1.0.0-rc5/.vnx-data/ 2>/dev/null && echo "FAIL: leaked" || echo "ok"
+ls ~/.vnx-system/versions/<version>/.vnx-data/ 2>/dev/null && echo "FAIL: leaked" || echo "ok"
 ```
 
 ## Upgrading
 
 ```bash
 # Install new version (keeps old versions)
-bash install-central.sh --version v1.0.1
+bash install-central.sh --version <version>
 
 # Update project pin
-echo 'v1.0.1' > /path/to/project/.vnx-version
+echo '<version>' > /path/to/project/.vnx-version
 ```
 
 The `current` symlink points to the newly installed version after each successful run.
@@ -196,13 +196,13 @@ Re-point the `current` symlink to a previous version:
 ls ~/.vnx-system/versions/
 
 # Re-point current to a previous version
-ln -sfn ~/.vnx-system/versions/v1.0.0-rc3 ~/.vnx-system/current
+ln -sfn ~/.vnx-system/versions/<previous-version> ~/.vnx-system/current
 ```
 
 Or re-run the installer with the previous version:
 
 ```bash
-bash install-central.sh --version v1.0.0-rc3
+bash install-central.sh --version <previous-version>
 ```
 
 Projects without a `.vnx-version` pin will automatically use the rolled-back `current`.
@@ -215,7 +215,7 @@ If only one project has issues after cutover, roll back its pin without touching
 cd /path/to/your-project
 
 # Revert to previous version pin
-echo 'v1.0.0-rc4' > .vnx-version
+echo '<previous-version>' > .vnx-version
 
 # Verify doctor passes on the old version
 vnx doctor
@@ -229,17 +229,22 @@ If you need to unblock a project immediately and can't wait for a code fix:
 
 ```bash
 # Manually write the install-mode marker (triggers central detection)
-echo "central" > ~/.vnx-system/versions/v1.0.0-rc4/.vnx-install-mode
+echo "central" > ~/.vnx-system/versions/<version>/.vnx-install-mode
 
 # Then run doctor from project dir — should detect project root correctly
 cd /path/to/your-project && vnx doctor
 ```
 
-This works on rc4 installs that predate the automatic marker write in `clone_version()`.
+This is a historical workaround for installs that predate the automatic marker
+write in `clone_version()` (pre-1.0.0-rc5); every version currently installable
+writes the marker automatically.
 
 ## Pre-fix contamination cleanup
 
-If you ran `vnx init` before rc5 (before the path resolver fix), runtime data may have been written to `~/.vnx-system/versions/rc4/.vnx-data/` instead of your project.
+Historical: applies only to installs from before the path resolver fix
+(pre-1.0.0-rc5). If you ran `vnx init` on one of those, runtime data may have
+been written to `~/.vnx-system/versions/<version>/.vnx-data/` instead of your
+project.
 
 **Check:**
 
@@ -251,7 +256,7 @@ ls ~/.vnx-system/versions/*/'.vnx-data/' 2>/dev/null
 
 ```bash
 # Back up contaminated data (receipts, DB snapshots) before removing
-VERSION_DIR=~/.vnx-system/versions/v1.0.0-rc4  # adjust to your version
+VERSION_DIR=~/.vnx-system/versions/<version>  # adjust to your version
 
 cp -r "$VERSION_DIR/.vnx-data" /tmp/central-vnx-data-backup-$(date +%Y%m%d)
 
@@ -273,9 +278,9 @@ After cleanup, run `vnx init` from each project directory to initialize clean ru
 **Symptom:**
 
 ```
-[FAIL] path: Runtime root missing: /Users/you/.vnx-system/versions/v1.0.0-rc4
-[FAIL] dir: Missing: VNX config (/Users/you/.vnx-system/versions/v1.0.0-rc4/.vnx)
-[FAIL] file: Missing config: /Users/you/.vnx-system/versions/v1.0.0-rc4/.vnx/config.yml
+[FAIL] path: Runtime root missing: /Users/you/.vnx-system/versions/<version>
+[FAIL] dir: Missing: VNX config (/Users/you/.vnx-system/versions/<version>/.vnx)
+[FAIL] file: Missing config: /Users/you/.vnx-system/versions/<version>/.vnx/config.yml
         Fix: Run: vnx init
 ```
 
@@ -285,10 +290,10 @@ After cleanup, run `vnx init` from each project directory to initialize clean ru
 
 ```bash
 # Check the marker
-cat ~/.vnx-system/versions/v1.0.0-rc5/.vnx-install-mode  # must print "central"
+cat ~/.vnx-system/versions/<version>/.vnx-install-mode  # must print "central"
 
-# If missing: write it manually (rc4 compatibility)
-echo "central" > ~/.vnx-system/versions/v1.0.0-rc4/.vnx-install-mode
+# If missing: write it manually
+echo "central" > ~/.vnx-system/versions/<version>/.vnx-install-mode
 
 # Then run from your project dir
 cd /path/to/your-project && vnx doctor
@@ -297,7 +302,7 @@ cd /path/to/your-project && vnx doctor
 If the marker is present but doctor still fails, re-run `install-central.sh` to reinstall the shim (which exports `VNX_PROJECT_ROOT`):
 
 ```bash
-bash install-central.sh --version v1.0.0-rc5
+bash install-central.sh --version <version>
 ```
 
 ### Doctor FAIL: Missing .claude/settings.json
@@ -317,10 +322,10 @@ bash install-central.sh --version v1.0.0-rc5
 cd /path/to/your-project
 
 # Check if settings landed in wrong place
-ls ~/.vnx-system/versions/v1.0.0-rc4/.claude/settings.json 2>/dev/null && echo "CONTAMINATION"
+ls ~/.vnx-system/versions/<version>/.claude/settings.json 2>/dev/null && echo "CONTAMINATION"
 
 # Clean up contamination if found
-rm -rf ~/.vnx-system/versions/v1.0.0-rc4/.claude
+rm -rf ~/.vnx-system/versions/<version>/.claude
 
 # Generate settings in correct location
 vnx regen-settings --full

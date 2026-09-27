@@ -16,8 +16,9 @@
 > shipped default-off 2026-07-12) never gained a production caller — the
 > live rotation path shared none of its code. It was removed 2026-08-11
 > rather than left as a mechanism that reads as if it runs. The design
-> record lives in `claudedocs/plans/t0-context-rotation-revival.md` and
-> `docs/governance/decisions/ADR-002-f43-context-rotation-packaging.md`.
+> record lives in `docs/governance/decisions/ADR-002-f43-context-rotation-packaging.md`.
+> A companion planning note (`claudedocs/plans/t0-context-rotation-revival.md`)
+> is private and never shipped in the repo (`claudedocs/` is gitignored).
 > `tests/test_context_rotation.py::TestDeadRotationApiRemoved` keeps the
 > dead API from being quietly reintroduced.
 

@@ -186,7 +186,7 @@ The persistent substrate is:
 
 Per-project isolation is enforced via composite lease keys (`project_id` + `terminal_id`) introduced in schema v12 (PR-5.3). Two projects can both have a T1 lease without collision.
 
-References: ADR-013 (Workers=N configuration), ADR-017 (Control Centre product-shape), `claudedocs/wave5-control-centre-architecture.md`.
+References: ADR-013 (Workers=N configuration), ADR-017 (Control Centre product-shape). The Wave 5 design document (`claudedocs/wave5-control-centre-architecture.md`) is a private planning note: `claudedocs/` is gitignored and it never shipped in the repo.
 
 ---
 
@@ -269,7 +269,6 @@ The `intel` command uses the global facet populated by `aggregate`. Patterns fro
 - `ADR-017` — Control Centre as agent role
 - `scripts/control_centre_projects.yaml.example` — registry template
 - `vnx.env.example` — provider key configuration
-- `claudedocs/wave5-control-centre-architecture.md` — full design document
 - `docs/operations/UNIFIED_SUPERVISOR.md` — supervisor mode guide
 - `scripts/control_centre/dispatch_lifecycle_tracker.py` — dispatch status state machine
 - `scripts/control_centre/receipt_tail.py` — receipt stream watcher

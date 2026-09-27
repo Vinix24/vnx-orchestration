@@ -209,7 +209,8 @@ sqlite3 .vnx-data/state/runtime_coordination.db \
 
 ## Reference
 
-- ADR-018: Elastic Worker Pool design
-- Wave 6 architecture: `claudedocs/wave6-workers-n-architecture.md`
+- ADR-018: Elastic Worker Pool design (the Wave 6 design note,
+  `claudedocs/wave6-workers-n-architecture.md`, is a private planning
+  document: `claudedocs/` is gitignored and it never shipped in the repo)
 - Pool event log: `.vnx-data/events/pool_events.ndjson`
 - Schema: `schemas/migrations/0020_elastic_worker_pool.sql`

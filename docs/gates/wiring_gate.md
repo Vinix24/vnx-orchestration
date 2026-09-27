@@ -4,8 +4,9 @@ Dead-code detection gate that catches unwired public definitions added in a PR.
 
 ## Problem
 
-26 dead symbols shipped across 92 PRs in the last week. Public functions and classes
-get defined but never called from production code, inflating maintenance surface.
+26 dead symbols shipped across 92 PRs in the week before this gate was built
+(measured 2026-05-17). Public functions and classes get defined but never
+called from production code, inflating maintenance surface.
 
 ## How it works
 
@@ -30,7 +31,9 @@ python3 scripts/review_gate_manager.py request-and-execute \
 |----------|---------|--------|
 | `VNX_WIRING_GATE_REQUIRED` | `0` | `0` = shadow mode (advisory), `1` = hard-fail (blocking) |
 
-Week 1 runs in shadow mode to calibrate false positives. Set to `1` for enforcement.
+Ships default-off (shadow mode) since 2026-05-17 to calibrate false positives.
+Still `0` as of 2026-09-27: enforcement has not been switched on. Set to `1`
+for enforcement.
 
 ## Skip list
 
