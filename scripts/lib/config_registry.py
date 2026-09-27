@@ -127,7 +127,10 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "(never configured) were dropped and glm_gate was added as a second standing seat "
         "(#1852); 20260926 replaced glm_gate by kimi_gate. claude_github_optional and "
         "gemini_review remain legal gate_recorder.GATE_PROVIDERS entries, so their "
-        "historical records still read as what they were. "
+        "historical records still read as what they were. gemini_review went further on "
+        "2026-09-26 (operator decision: Gemini is no longer a reviewer): it is a retired "
+        "gate (dispatch_spec.RETIRED_GATE_NAMES), not a registered one; a stack that still "
+        "names it is dropped with a warning by review_gate_manager. "
         "Lets an operator route review gates to any registered gate name without editing "
         "review_gate_manager.py. ci_gate is appended separately when VNX_CI_GATE_REQUIRED "
         "is on; do not include it here.", approval=True,

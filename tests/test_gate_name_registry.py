@@ -42,6 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib
 import dispatch_bridge
 import dispatch_cli
 import dispatch_spec
+import domain_plan_validator
 import gate_recorder
 import smart_router
 from dispatch_spec import (
@@ -146,6 +147,13 @@ def test_every_weighted_gate_is_a_registered_gate() -> None:
     """
     unregistered = set(smart_router._GATE_WEIGHT) - REGISTERED_GATE_NAMES
     assert not unregistered, f"_GATE_WEIGHT weighs unregistered gates: {sorted(unregistered)}"
+
+
+def test_domain_plan_validator_implemented_gates_are_the_registry() -> None:
+    """The one reader that cannot import the registry keeps a literal, so it is
+    pinned here instead: a substrate module (contract B-4) is stdlib-only, and
+    its hand-kept list once refused the default kimi_gate as unimplemented."""
+    assert domain_plan_validator.IMPLEMENTED_GATES == REGISTERED_GATE_NAMES
 
 
 def test_the_config_error_is_one_class_for_the_door_and_the_router() -> None:

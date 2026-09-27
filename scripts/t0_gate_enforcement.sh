@@ -9,7 +9,6 @@ vnx_resolve_data_dir
 vnx_resolve_state_dir
 vnx_resolve_dispatch_dir
 export VNX_CODEX_HEADLESS_ENABLED=1
-export VNX_GEMINI_REVIEW_ENABLED=1
 
 RC=0
 RESULT=$(python3 scripts/review_gate_manager.py request-and-execute "$@" 2>&1) || RC=$?
@@ -21,27 +20,11 @@ if [ $RC -ne 0 ]; then
     exit 1
 fi
 
-# Verify artifacts exist
-PR_NUM=$(echo "$@" | sed -nE 's/.*--pr ([0-9]+).*/\1/p')
-for gate_type in gemini_review codex_gate; do
-    REQUEST_FILE="$VNX_STATE_DIR/review_gates/requests/pr-${PR_NUM}-${gate_type}.json"
-    RESULT_FILE="$VNX_STATE_DIR/review_gates/results/pr-${PR_NUM}-${gate_type}.json"
-
-    if [ ! -f "$REQUEST_FILE" ]; then
-        echo "MISSING_ARTIFACT: $REQUEST_FILE" >&2
-        exit 1
-    fi
-    if [ ! -f "$RESULT_FILE" ]; then
-        echo "MISSING_ARTIFACT: $RESULT_FILE" >&2
-        exit 1
-    fi
-
-    # Check result status
-    STATUS=$(python3 -c "import json; print(json.load(open('$RESULT_FILE')).get('status','unknown'))")
-    if [ "$STATUS" != "completed" ] && [ "$STATUS" != "passed" ]; then
-        echo "GATE_NOT_COMPLETED: $gate_type status=$STATUS" >&2
-        # Don't exit — report but let T0 decide
-    fi
-done
-
-echo "GATE_ENFORCEMENT_COMPLETE: all artifacts verified"
+# Verify artifacts exist for the gates that actually ran. The requested stack
+# names seats, and review_gate_manager may fill a seat with another gate (a
+# takeover down VNX_REVIEW_GATE_TAKEOVER_CHAIN) or request a shared reader once,
+# so the gates verified are the ones request-and-execute reported, not the raw
+# --review-stack. A requested seat that no reported gate ran, took over or
+# recorded as chain-exhausted is still MISSING_ARTIFACT (fail-closed).
+printf '%s\n' "$RESULT" | python3 "$(dirname "${BASH_SOURCE[0]}")/lib/gate_enforcement_verify.py" \
+    --state-dir "$VNX_STATE_DIR" -- "$@" || exit 1

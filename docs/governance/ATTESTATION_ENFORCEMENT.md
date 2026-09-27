@@ -216,10 +216,15 @@ like "codex gate must have run" or "no blocking open items." Four enforcement le
 | 2 | `soft_mandatory` | blocks unless `VNX_OVERRIDE_<CHECK_NAME>` is set |
 | 3 | `hard_mandatory` | always blocks; cannot be overridden |
 
-Eleven checks are defined today, e.g. `ci_green_required` (level 3), `codex_gate_required` (level 2,
-scoped to `scripts/`, `dashboard/`, `.github/`), `max_pr_lines` (level 1, threshold 300)
-(`.vnx/governance_enforcement.yaml:11-56`). Four presets (`strict`, `standard`, `relaxed`, `off`)
-let an operator dial the whole set up or down at once (`:58-98`); the active mode is set via
+Eleven checks are defined today, e.g. `ci_green_required` (level 3), `codex_gate_required` and its
+peer `kimi_gate_required` (level 2 each, scoped to `scripts/`, `dashboard/`, `.github/`), `max_pr_lines`
+(level 1, threshold 300) (`.vnx/governance_enforcement.yaml:11-58`). `kimi_gate_required` is a per-project
+dial, same mechanism as `codex_gate_required`: set its level to 0 to turn the kimi seat off entirely, or
+to 1 to make it advisory-only. A kimi seat read by a successor in the takeover chain
+(`VNX_REVIEW_GATE_TAKEOVER_CHAIN`, e.g. glm_gate/deepseek_gate standing in when kimi is unavailable)
+satisfies the check the same way `t0_gate_enforcement`'s `gate_enforcement_verify.py` resolves a
+takeover seat. Four presets (`strict`, `standard`, `relaxed`, `off`)
+let an operator dial the whole set up or down at once (`:60-101`); the active mode is set via
 `mode:` at the top of the file (currently `standard`).
 
 `.vnx/governance_profiles.yaml` layers folder-scoped profiles on top (default / light / minimal),

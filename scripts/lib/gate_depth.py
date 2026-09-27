@@ -91,7 +91,7 @@ class ExecutionDepth:
     and zeros that mean "not measured" must never be read as zeros that mean
     "did nothing" — that is the difference between an unmeasured gate and a
     degenerate one, and collapsing it would fail every gate whose lane emits
-    no event stream. Only codex_gate/gemini_review emit one today.
+    no event stream. Only codex_gate emits one today.
 
     ``mode`` distinguishes the TWO shapes this dataclass now carries (OI-1618):
     ``"agentic"`` (the tool-call stream above, measured by

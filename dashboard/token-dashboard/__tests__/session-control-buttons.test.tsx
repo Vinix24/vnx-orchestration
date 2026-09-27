@@ -81,7 +81,7 @@ beforeEach(() => {
       project: '/projects/test-project',
       config_path: '/projects/test-project/.vnx/gate_config.json',
       queried_at: '2026-04-04T06:00:00Z',
-      gates: { gemini_review: { enabled: true }, codex_gate: { enabled: true } },
+      gates: { kimi_gate: { enabled: true }, codex_gate: { enabled: true } },
     },
     isLoading: false,
     error: undefined,

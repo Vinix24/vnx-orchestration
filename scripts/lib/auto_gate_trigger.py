@@ -27,8 +27,11 @@ logger = logging.getLogger(__name__)
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# Required gate names from governance_enforcement.yaml (soft/hard mandatory checks)
-_DEFAULT_GATE_STACK = ["codex_gate", "gemini_review"]
+# Required gate names from governance_enforcement.yaml (soft/hard mandatory checks).
+# The fallback, used when that file names none, is the default review stack: the
+# two standing subscription seats (config_registry VNX_DEFAULT_REVIEW_STACK; a
+# test pins the two equal).
+_DEFAULT_GATE_STACK = ["codex_gate", "kimi_gate"]
 
 
 # ---------------------------------------------------------------------------
@@ -50,11 +53,13 @@ def _load_required_gates() -> List[str]:
         with open(config_path, encoding="utf-8") as fh:
             cfg = yaml.safe_load(fh) or {}
         checks = cfg.get("checks", {})
-        # Collect gate-style checks at level >= 2 (soft/hard mandatory)
+        # Collect gate-style checks at level >= 2 (soft/hard mandatory). Both
+        # standing subscription seats are recognised here — codex_gate_required
+        # and kimi_gate_required — each independently dialled per project.
         gates = []
         for name, spec in checks.items():
             level = int(spec.get("level", 0))
-            if level >= 2 and name in {"codex_gate_required", "gemini_review_required"}:
+            if level >= 2 and name in ("codex_gate_required", "kimi_gate_required"):
                 # Map check name → gate stack name
                 gates.append(name.replace("_required", ""))
         return gates if gates else _DEFAULT_GATE_STACK

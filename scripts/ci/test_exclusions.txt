@@ -135,7 +135,7 @@ tests/test_error_contracts.py  # OI-1227: red solo — '|| true' suppression sti
 tests/test_future_state_reconciliation.py  # OI-1227: red solo — health-beacon lambda unexpected kwarg on writes-fail path (2 failed, 37 passed)
 tests/test_gate_dispatch_id.py  # OI-1227: red solo — dispatch-id propagation to claude-github assert False (1 failed, 11 passed)
 tests/test_gate_evidence_accuracy.py  # OI-1227: red solo — verdict='fail' with non-terminal status must still enforce report_path (4 failed, 16 passed)
-tests/test_gate_execution_certification.py  # OI-1227: red solo — MagicMock vs int comparison in evidence-chain lifecycle (10 failed, 3 passed)
+tests/test_gate_execution_certification.py  # OI-1227: red solo — MagicMock vs int comparison in evidence-chain lifecycle (7 failed, 6 passed)
 tests/test_gate_status_schema.py  # OI-1227: red solo — status=completed not accepted as pass (1 failed, 25 passed)
 tests/test_gemini_prompt_no_duplicate.py  # OI-1227: red solo — FILE: markers appear >once in inlined prompt (3 failed, 1 passed)
 tests/test_governance_blockers_fix.py  # OI-1227: red solo — recorded_ts not assigned from now_ts (2 failed, 28 passed)

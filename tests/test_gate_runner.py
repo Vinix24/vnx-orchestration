@@ -273,7 +273,7 @@ class TestTimeoutKill:
 
     def test_timeout_kills_subprocess_and_records_failure(self, gate_env, monkeypatch):
         monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
-        monkeypatch.setenv("VNX_GEMINI_GATE_TIMEOUT", "1")
+        monkeypatch.setenv("VNX_CODEX_GATE_TIMEOUT", "1")
 
         runner = GateRunner(
             state_dir=gate_env["state_dir"],
@@ -281,7 +281,7 @@ class TestTimeoutKill:
         )
 
         report_path = str(gate_env["reports_dir"] / "timeout-report.md")
-        payload = _make_request_payload(report_path=report_path)
+        payload = _make_request_payload(gate="codex_gate", report_path=report_path)
 
         mock_proc = MagicMock()
         mock_proc.stdin = MagicMock()
@@ -312,14 +312,16 @@ class TestTimeoutKill:
              patch("gate_runner.os.getpgid", return_value=12345), \
              patch("gate_runner.os.killpg", mock_killpg):
             result = runner.run(
-                gate="gemini_review",
+                gate="codex_gate",
                 request_payload=payload,
                 pr_number=1,
             )
 
         assert result["status"] == "unavailable"
-        assert result["reason"] in ("timeout", "stall")
-        assert result["required_reruns"] == ["gemini_review"]
+        # codex_gate's stall threshold defaults to 300s, so only the 1s
+        # VNX_CODEX_GATE_TIMEOUT above can have ended this run.
+        assert result["reason"] == "timeout"
+        assert result["required_reruns"] == ["codex_gate"]
         assert mock_killpg.called or mock_proc.kill.called
 
 
@@ -328,8 +330,8 @@ class TestStallDetection:
 
     def test_stall_kills_subprocess(self, gate_env, monkeypatch):
         monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
-        monkeypatch.setenv("VNX_GEMINI_GATE_TIMEOUT", "300")
-        monkeypatch.setenv("VNX_GEMINI_STALL_THRESHOLD", "2")
+        monkeypatch.setenv("VNX_CODEX_GATE_TIMEOUT", "300")
+        monkeypatch.setenv("VNX_CODEX_STALL_THRESHOLD", "2")
 
         runner = GateRunner(
             state_dir=gate_env["state_dir"],
@@ -337,7 +339,7 @@ class TestStallDetection:
         )
 
         report_path = str(gate_env["reports_dir"] / "stall-report.md")
-        payload = _make_request_payload(report_path=report_path)
+        payload = _make_request_payload(gate="codex_gate", report_path=report_path)
 
         mock_proc = MagicMock()
         mock_proc.stdin = MagicMock()
@@ -367,7 +369,7 @@ class TestStallDetection:
              patch("gate_runner.os.getpgid", return_value=54321), \
              patch("gate_runner.os.killpg", mock_killpg):
             result = runner.run(
-                gate="gemini_review",
+                gate="codex_gate",
                 request_payload=payload,
                 pr_number=1,
             )
@@ -981,37 +983,45 @@ class TestCodexGateExecution:
 class TestGateTimeoutConfig:
     """Verify gate-specific timeout and stall threshold configuration."""
 
-    def test_default_gemini_timeout(self):
-        from headless_adapter import gate_timeout
-        assert gate_timeout("gemini_review") == 300
-
     def test_default_codex_timeout(self):
         from headless_adapter import gate_timeout
         assert gate_timeout("codex_gate") == 600
 
+    def test_default_kimi_timeout(self):
+        from headless_adapter import gate_timeout
+        # kimi_gate is a standing seat (VNX_DEFAULT_REVIEW_STACK); it must not
+        # fall through to the generic DEFAULT_TIMEOUT lookup.
+        assert gate_timeout("kimi_gate") == 600
+
     def test_env_override_timeout(self, monkeypatch):
         from headless_adapter import gate_timeout
-        monkeypatch.setenv("VNX_GEMINI_GATE_TIMEOUT", "120")
-        assert gate_timeout("gemini_review") == 120
+        monkeypatch.setenv("VNX_CODEX_GATE_TIMEOUT", "120")
+        assert gate_timeout("codex_gate") == 120
+
+    def test_env_override_kimi_timeout(self, monkeypatch):
+        from headless_adapter import gate_timeout
+        monkeypatch.setenv("VNX_KIMI_GATE_TIMEOUT", "120")
+        assert gate_timeout("kimi_gate") == 120
 
     def test_default_stall_threshold(self):
         from headless_adapter import gate_stall_threshold
         # Literals, not GATE_STALL_DEFAULTS lookups: comparing the function's
         # output to the dict it reads from would pass no matter what the dict
-        # said. gemini_review's 180s (not the 60s in
-        # 180_GATE_EXECUTION_LIFECYCLE_CONTRACT.md §4.2, which was never
-        # reconciled against the code) has shipped since the gate runner's
-        # introduction (c0957d22) and every OI-105 triage since treats it as
-        # the accepted value (Gemini CLI's stdout-flush stalls, OI-048).
-        assert gate_stall_threshold("gemini_review") == 180
+        # said.
         assert gate_stall_threshold("codex_gate") == 300
+        assert gate_stall_threshold("kimi_gate") == 300
         assert gate_stall_threshold("claude_github_optional") == 60
         assert gate_stall_threshold("ci_gate") == 30
 
     def test_env_override_stall_threshold(self, monkeypatch):
         from headless_adapter import gate_stall_threshold
-        monkeypatch.setenv("VNX_GEMINI_STALL_THRESHOLD", "30")
-        assert gate_stall_threshold("gemini_review") == 30
+        monkeypatch.setenv("VNX_CODEX_STALL_THRESHOLD", "30")
+        assert gate_stall_threshold("codex_gate") == 30
+
+    def test_env_override_kimi_stall_threshold(self, monkeypatch):
+        from headless_adapter import gate_stall_threshold
+        monkeypatch.setenv("VNX_KIMI_STALL_THRESHOLD", "30")
+        assert gate_stall_threshold("kimi_gate") == 30
 
     def test_unknown_gate_uses_defaults(self):
         from headless_adapter import gate_timeout, gate_stall_threshold

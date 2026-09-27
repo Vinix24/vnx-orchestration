@@ -248,8 +248,8 @@ class TestTimeoutStallStructuredFailure:
     def test_timeout_failure_has_all_required_fields(self, cert_env, monkeypatch):
         """Timeout failure record must have all fields needed for T0 reasoning."""
         monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
-        monkeypatch.setenv("VNX_GEMINI_GATE_TIMEOUT", "1")
-        monkeypatch.setenv("VNX_GEMINI_STALL_THRESHOLD", "300")
+        monkeypatch.setenv("VNX_CODEX_GATE_TIMEOUT", "1")
+        monkeypatch.setenv("VNX_CODEX_STALL_THRESHOLD", "300")
 
         runner = GateRunner(
             state_dir=cert_env["state_dir"],
@@ -257,12 +257,14 @@ class TestTimeoutStallStructuredFailure:
         )
 
         report_path = str(cert_env["reports_dir"] / "timeout-cert.md")
-        payload, _ = _make_request(report_path=report_path)
+        payload, _ = _make_request(gate="codex_gate", report_path=report_path)
 
         mock_proc = MagicMock()
         mock_proc.stdin = MagicMock()
         mock_proc.stdout = MagicMock()
         mock_proc.stderr = MagicMock()
+        mock_proc.stdout.fileno.return_value = 10
+        mock_proc.stderr.fileno.return_value = 11
         mock_proc.poll.return_value = None
         mock_proc.pid = 12345
         mock_proc.kill = MagicMock()
@@ -279,28 +281,28 @@ class TestTimeoutStallStructuredFailure:
         with patch("gate_runner.subprocess.Popen", return_value=mock_proc), \
              patch("gate_runner.select.select", return_value=([], [], [])), \
              patch("gate_runner.time.monotonic", side_effect=fake_mono):
-            result = runner.run(gate="gemini_review", request_payload=payload, pr_number=1)
+            result = runner.run(gate="codex_gate", request_payload=payload, pr_number=1)
 
         assert result["status"] == "unavailable"
-        assert result["reason"] in ("timeout", "stall")
+        assert result["reason"] == "timeout"
 
         # Structured failure fields for T0
         assert "reason_detail" in result
         assert "duration_seconds" in result
         assert "runner_pid" in result
         assert "required_reruns" in result
-        assert result["required_reruns"] == ["gemini_review"]
+        assert result["required_reruns"] == ["codex_gate"]
         assert "residual_risk" in result
         assert result["report_path"] == ""  # No report on failure
 
         # Result file written to disk
-        result_file = cert_env["results_dir"] / "pr-1-gemini_review.json"
+        result_file = cert_env["results_dir"] / "pr-1-codex_gate.json"
         assert result_file.exists()
         saved = json.loads(result_file.read_text(encoding="utf-8"))
         assert saved["status"] == "unavailable"
 
         # Request updated to unavailable
-        req_file = cert_env["requests_dir"] / "pr-1-gemini_review.json"
+        req_file = cert_env["requests_dir"] / "pr-1-codex_gate.json"
         assert req_file.exists()
         req = json.loads(req_file.read_text(encoding="utf-8"))
         assert req["status"] == "unavailable"
@@ -308,8 +310,8 @@ class TestTimeoutStallStructuredFailure:
     def test_stall_failure_distinct_from_timeout(self, cert_env, monkeypatch):
         """Stall failure must be distinguishable from timeout in the result."""
         monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
-        monkeypatch.setenv("VNX_GEMINI_GATE_TIMEOUT", "300")
-        monkeypatch.setenv("VNX_GEMINI_STALL_THRESHOLD", "1")
+        monkeypatch.setenv("VNX_CODEX_GATE_TIMEOUT", "300")
+        monkeypatch.setenv("VNX_CODEX_STALL_THRESHOLD", "1")
 
         runner = GateRunner(
             state_dir=cert_env["state_dir"],
@@ -317,12 +319,14 @@ class TestTimeoutStallStructuredFailure:
         )
 
         report_path = str(cert_env["reports_dir"] / "stall-cert.md")
-        payload, _ = _make_request(report_path=report_path, pr_number=2)
+        payload, _ = _make_request(gate="codex_gate", report_path=report_path, pr_number=2)
 
         mock_proc = MagicMock()
         mock_proc.stdin = MagicMock()
         mock_proc.stdout = MagicMock()
         mock_proc.stderr = MagicMock()
+        mock_proc.stdout.fileno.return_value = 10
+        mock_proc.stderr.fileno.return_value = 11
         mock_proc.poll.return_value = None
         mock_proc.pid = 54321
         mock_proc.kill = MagicMock()
@@ -339,7 +343,7 @@ class TestTimeoutStallStructuredFailure:
         with patch("gate_runner.subprocess.Popen", return_value=mock_proc), \
              patch("gate_runner.select.select", return_value=([], [], [])), \
              patch("gate_runner.time.monotonic", side_effect=fake_mono):
-            result = runner.run(gate="gemini_review", request_payload=payload, pr_number=2)
+            result = runner.run(gate="codex_gate", request_payload=payload, pr_number=2)
 
         assert result["status"] == "unavailable"
         assert result["reason"] == "stall"
@@ -517,8 +521,8 @@ class TestArtifactStability:
     def test_failed_execution_has_no_orphan_report(self, cert_env, monkeypatch):
         """Failed gate must not leave an orphan report without a completed result."""
         monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
-        monkeypatch.setenv("VNX_GEMINI_GATE_TIMEOUT", "1")
-        monkeypatch.setenv("VNX_GEMINI_STALL_THRESHOLD", "300")
+        monkeypatch.setenv("VNX_CODEX_GATE_TIMEOUT", "1")
+        monkeypatch.setenv("VNX_CODEX_STALL_THRESHOLD", "300")
 
         runner = GateRunner(
             state_dir=cert_env["state_dir"],
@@ -526,12 +530,14 @@ class TestArtifactStability:
         )
 
         report_path = str(cert_env["reports_dir"] / "orphan-test-report.md")
-        payload, _ = _make_request(report_path=report_path, pr_number=31)
+        payload, _ = _make_request(gate="codex_gate", report_path=report_path, pr_number=31)
 
         mock_proc = MagicMock()
         mock_proc.stdin = MagicMock()
         mock_proc.stdout = MagicMock()
         mock_proc.stderr = MagicMock()
+        mock_proc.stdout.fileno.return_value = 10
+        mock_proc.stderr.fileno.return_value = 11
         mock_proc.poll.return_value = None
         mock_proc.pid = 88888
         mock_proc.kill = MagicMock()
@@ -548,13 +554,13 @@ class TestArtifactStability:
         with patch("gate_runner.subprocess.Popen", return_value=mock_proc), \
              patch("gate_runner.select.select", return_value=([], [], [])), \
              patch("gate_runner.time.monotonic", side_effect=fake_mono):
-            result = runner.run(gate="gemini_review", request_payload=payload, pr_number=31)
+            result = runner.run(gate="codex_gate", request_payload=payload, pr_number=31)
 
         assert result["status"] == "unavailable"
         # No report should exist for a timeout failure
         assert not Path(report_path).exists()
         # Result file exists but status is unavailable
-        result_file = cert_env["results_dir"] / "pr-31-gemini_review.json"
+        result_file = cert_env["results_dir"] / "pr-31-codex_gate.json"
         assert result_file.exists()
         saved = json.loads(result_file.read_text(encoding="utf-8"))
         assert saved["status"] == "unavailable"
