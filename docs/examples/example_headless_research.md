@@ -8,7 +8,7 @@ This walkthrough shows VNX coordinating a structured research task — a securit
 
 ## Prerequisites
 
-- VNX installed (`vnx init --starter` or `--operator`)
+- VNX installed (`./bin/vnx init --starter` or `--operator`)
 - `vnx doctor` passes cleanly
 - At least one AI CLI installed
 
@@ -80,12 +80,12 @@ Do NOT modify any files — read-only analysis only.
 
 ### In Operator Mode
 
-All three agents run simultaneously in T1, T2, T3:
+All three tracks run simultaneously:
 
 ```bash
-vnx start
+./bin/vnx start
 # Promote dispatches via Ctrl+G
-# All three terminals analyze in parallel
+# All three tracks analyze in parallel
 ```
 
 ### In Starter Mode
@@ -93,8 +93,8 @@ vnx start
 Dispatches execute sequentially in one terminal:
 
 ```bash
-vnx staging-list
-vnx promote <dispatch-id>    # One at a time
+./bin/vnx staging-list
+./bin/vnx promote <dispatch-id>    # One at a time
 ```
 
 Same receipts, same report structure — just sequential instead of parallel.
@@ -157,7 +157,7 @@ The receipt processor converts each report into a structured NDJSON entry:
 After all three reports arrive, T0 has a complete picture:
 
 ```bash
-vnx status    # Shows all three tracks completed
+./bin/vnx status    # Shows all three tracks completed
 ```
 
 T0 can now:

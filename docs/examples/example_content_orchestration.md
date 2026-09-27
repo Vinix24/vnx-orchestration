@@ -8,7 +8,7 @@ This walkthrough shows VNX orchestrating non-coding work: documentation updates,
 
 ## Prerequisites
 
-- VNX installed (`vnx init --starter` or `--operator`)
+- VNX installed (`./bin/vnx init --starter` or `--operator`)
 - `vnx doctor` passes cleanly
 - At least one AI CLI installed
 
@@ -60,20 +60,20 @@ PR-3 depends on PR-1 and PR-2 because the changelog should reflect the final doc
 ### Operator Mode (Parallel)
 
 ```bash
-vnx start
+./bin/vnx start
 # Approve PR-1 and PR-2 dispatches via Ctrl+G
-# T1 and T2 work simultaneously
+# Both tracks work simultaneously
 # PR-3 dispatches after both complete
 ```
 
 ### Starter Mode (Sequential)
 
 ```bash
-vnx promote <pr1-dispatch-id>    # API reference first
+./bin/vnx promote <pr1-dispatch-id>    # API reference first
 # Wait for completion
-vnx promote <pr2-dispatch-id>    # Migration guide second
+./bin/vnx promote <pr2-dispatch-id>    # Migration guide second
 # Wait for completion
-vnx promote <pr3-dispatch-id>    # Changelog last (has context from both)
+./bin/vnx promote <pr3-dispatch-id>    # Changelog last (has context from both)
 ```
 
 ## 3. Scoped Dispatches
@@ -113,7 +113,7 @@ Quality gates work for documentation too. The gate checks:
 - **No open blockers**: Did the agent flag unresolved issues?
 
 ```bash
-vnx gate-check --pr PR-1
+./bin/vnx gate-check --pr PR-1
 # Verdict: APPROVE — file changed, contract assertions pass, no blockers
 ```
 
