@@ -6,7 +6,7 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 from .models import (
     SessionMetrics, SessionFlags,
@@ -90,6 +90,14 @@ class DeepAnalyzer:
         # or server) — a config gap, not a failed attempt. Kept separate from
         # ``deep_attempts``/``deep_failures`` so it never fail-closes the run.
         self.deep_config_skips = 0
+        # OI-1258: why the failures happened, keyed by LLMOutcome status
+        # (``cli_failed``, ``timeout``, ``empty``, ``unparseable`` ...). A bare
+        # count says something broke; the reason says what to fix.
+        self.deep_failure_reasons: Dict[str, int] = {}
+
+    def _record_failure(self, reason: str) -> None:
+        self.deep_failures += 1
+        self.deep_failure_reasons[reason] = self.deep_failure_reasons.get(reason, 0) + 1
 
     SYSTEM_PROMPT = """You are a VNX orchestration system analyst. Analyze this Claude Code session summary and extract actionable improvement suggestions.
 
@@ -142,6 +150,9 @@ Respond with valid JSON:
         # DEEPSEEK_API_KEY, no usable Ollama model/server) refuses before any
         # subprocess starts, so it must never flip this to True (fix1585-r2).
         any_attempted = False
+        # Status of the last candidate that actually fired: the reason a
+        # session ends up without a usable result (OI-1258).
+        last_attempted_status = "error"
 
         # deepseek-harness: own-key auth via the claude CLI driving DeepSeek's
         # Anthropic-compatible endpoint.  Fails closed when DEEPSEEK_API_KEY is
@@ -150,6 +161,8 @@ Respond with valid JSON:
         if LLM_STRATEGY == "deepseek-harness":
             outcome = self._try_deepseek_harness(prompt)
             any_attempted = any_attempted or outcome.attempted
+            if outcome.attempted:
+                last_attempted_status = outcome.status
             result_text = outcome.text if outcome.status == "ok" else None
         # Billing guard: in "auto" mode, refuse the claude path when the
         # session backlog exceeds the threshold. "claude-only" bypasses
@@ -157,11 +170,15 @@ Respond with valid JSON:
         elif LLM_STRATEGY == "claude-only":
             outcome = self._try_claude_max(prompt)
             any_attempted = any_attempted or outcome.attempted
+            if outcome.attempted:
+                last_attempted_status = outcome.status
             result_text = outcome.text if outcome.status == "ok" else None
         elif LLM_STRATEGY == "auto":
             if self._session_backlog <= AUTO_CLAUSE_MAX_SESSIONS:
                 outcome = self._try_claude_max(prompt)
                 any_attempted = any_attempted or outcome.attempted
+                if outcome.attempted:
+                    last_attempted_status = outcome.status
                 result_text = outcome.text if outcome.status == "ok" else None
             else:
                 if self._session_backlog > 0:
@@ -174,6 +191,8 @@ Respond with valid JSON:
         if result_text is None and LLM_STRATEGY in ("auto", "ollama-only"):
             outcome = self._try_ollama(prompt)
             any_attempted = any_attempted or outcome.attempted
+            if outcome.attempted:
+                last_attempted_status = outcome.status
             result_text = outcome.text if outcome.status == "ok" else None
 
         if any_attempted:
@@ -186,8 +205,8 @@ Respond with valid JSON:
 
         if result_text is None:
             if any_attempted:
-                self.deep_failures += 1
-                log("WARNING", "No LLM available for deep analysis")
+                self._record_failure(last_attempted_status)
+                log("WARNING", f"Deep analysis failed: {last_attempted_status}")
             return None
 
         parsed = self._parse_response(result_text)
@@ -195,7 +214,7 @@ Respond with valid JSON:
             # The LLM answered but nothing parseable — or no "suggestions"
             # key — came back: an attempt that produced no usable result,
             # distinct from a hard failure but still not success.
-            self.deep_failures += 1
+            self._record_failure("unparseable")
             return None
         return parsed
 

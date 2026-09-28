@@ -53,6 +53,12 @@ _PROBE_HEALTH_RUNNABLE: frozenset[str] = frozenset(
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 import vnx_paths as _vnx_paths
 
+# Character budget for the serialized pattern JSON inside one kimi prompt. Input
+# that does not fit is split over several prompts, never cut off (OI-1821).
+_PROMPT_PAYLOAD_BUDGET: int = 50_000
+
+_TRUNCATION_MARKER: str = "...[truncated]"
+
 # Sort column per table — each table uses a different timestamp column name.
 _TABLE_SORT_COL: dict[str, str] = {
     "success_patterns": "first_seen",
@@ -212,13 +218,73 @@ def _parse_kimi_response(output: str) -> dict:
         raise ValueError(f"Invalid JSON in kimi output: {exc}") from exc
 
 
-def _build_consolidation_prompt(patterns: dict[str, list], project_id: str) -> str:
+def _compact_json(obj: Any) -> str:
+    """Serialize without indent/whitespace and without empty values' padding."""
+    return json.dumps(obj, default=str, separators=(",", ":"), ensure_ascii=False)
+
+
+def _shrink_row_to_fit(row: dict, table: str, budget: int) -> dict:
+    """Halve the longest string field of ``row`` until its payload fits ``budget``.
+
+    Only reached for a single row that is larger than the whole budget. The row
+    stays valid JSON and keeps every key; only the text of its longest field is
+    shortened and marked, so the consolidator still sees the id and the table.
+    """
+    shrunk = dict(row)
+    while len(_compact_json({table: [shrunk]})) > budget:
+        strings = {k: v for k, v in shrunk.items() if isinstance(v, str) and len(v) > len(_TRUNCATION_MARKER) * 2}
+        if not strings:
+            break
+        key = max(strings, key=lambda k: len(strings[k]))
+        value = strings[key]
+        shrunk[key] = value[: len(value) // 2] + _TRUNCATION_MARKER
+    return shrunk
+
+
+def _split_patterns(
+    patterns: dict[str, list], budget: int = _PROMPT_PAYLOAD_BUDGET
+) -> tuple[list[dict[str, list]], int]:
+    """Split ``patterns`` into batches whose compact JSON each fits ``budget``.
+
+    Every row lands in exactly one batch, in the input order, so nothing is
+    dropped: ``sum(len(rows))`` over the batches equals the input. Returns the
+    batches and the number of rows that had to be shrunk to fit on their own.
+    """
+    batches: list[dict[str, list]] = []
+    current: dict[str, list] = {}
+    shrunk_rows = 0
+    for table, rows in patterns.items():
+        for row in rows:
+            candidate = {**current, table: [*current.get(table, []), row]}
+            if len(_compact_json(candidate)) <= budget:
+                current = candidate
+                continue
+            if current:
+                batches.append(current)
+                current = {}
+            if len(_compact_json({table: [row]})) > budget:
+                row = _shrink_row_to_fit(row, table, budget)
+                shrunk_rows += 1
+            current = {table: [row]}
+    if current:
+        batches.append(current)
+    return batches or [dict.fromkeys(patterns, [])], shrunk_rows
+
+
+def _build_consolidation_prompt(
+    patterns: dict[str, list], project_id: str, batch: tuple[int, int] = (1, 1)
+) -> str:
     total = sum(len(v) for v in patterns.values())
-    payload = json.dumps(patterns, default=str, indent=2)[:50_000]
+    payload = _compact_json(patterns)
+    batch_note = (
+        f"\nBatch {batch[0]} of {batch[1]}: decide only on the patterns below; other batches are judged separately."
+        if batch[1] > 1
+        else ""
+    )
     return f"""You are a memory-consolidation agent (auto-dream pattern, ADR-019).
 
 Project: {project_id}
-Input: {total} patterns from recent dispatch cycles.
+Input: {total} patterns from recent dispatch cycles.{batch_note}
 
 For each pattern, decide:
 - KEEP: high-signal, recent, not superseded
@@ -255,15 +321,26 @@ def _dispatch_kimi_consolidation(
     """
     from kimi_wrapper import kimi_exec  # noqa: PLC0415
 
-    prompt = _build_consolidation_prompt(patterns_input, project_id)
-    stdout = kimi_exec(
-        prompt,
-        dispatch_id=f"dream-{project_id}",
-        project_id=project_id,
-        timeout=timeout,
-    )
-    text = _extract_kimi_text(stdout) or stdout
-    return _parse_kimi_response(text)
+    batches, shrunk_rows = _split_patterns(patterns_input)
+    merged: dict[str, Any] = {"merged": [], "dropped": [], "archived": [], "flagged": []}
+    summaries: list[str] = []
+    for index, batch in enumerate(batches, start=1):
+        prompt = _build_consolidation_prompt(batch, project_id, (index, len(batches)))
+        stdout = kimi_exec(
+            prompt,
+            dispatch_id=f"dream-{project_id}",
+            project_id=project_id,
+            timeout=timeout,
+        )
+        result = _parse_kimi_response(_extract_kimi_text(stdout) or stdout)
+        for key in merged:
+            merged[key].extend(result.get(key) or [])
+        if result.get("summary"):
+            summaries.append(str(result["summary"]))
+    merged["summary"] = " ".join(summaries)
+    merged["input_batches"] = len(batches)
+    merged["rows_shrunk_to_fit"] = shrunk_rows
+    return merged
 
 
 def run_dream_cycle(

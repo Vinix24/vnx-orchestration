@@ -1219,3 +1219,126 @@ class TestDegradedProbeProposalMode:
             assert conn.execute("SELECT COUNT(*) FROM dream_cycles").fetchone()[0] == 0
         finally:
             conn.close()
+
+
+# ---------------------------------------------------------------------------
+# OI-1821: the prompt always carries valid JSON, and every pattern is in it
+# ---------------------------------------------------------------------------
+
+_PAYLOAD_MARKER = "Patterns to consolidate:\n"
+
+
+def _representative_patterns(rows_per_table: int = 150) -> dict[str, list[dict]]:
+    """Rows shaped like the real vnx-dev store (measured 23-09: 224,098 chars
+    indented for 3 tables at the 200-row fetch limit)."""
+    tables = {
+        "success_patterns": "first_seen",
+        "antipatterns": "first_seen",
+        "intelligence_injections": "injected_at",
+    }
+    patterns: dict[str, list[dict]] = {}
+    for table, ts_col in tables.items():
+        patterns[table] = [
+            {
+                "id": i,
+                "project_id": "vnx-dev",
+                "pattern_type": "approach",
+                "title": f"{table} pattern {i}",
+                "description": f"Pattern {i} observed while dispatching work: " + "context " * 40,
+                "usage_count": i % 7,
+                "confidence_score": 0.5,
+                ts_col: "2026-09-01T10:00:00+00:00",
+                "notes": None,
+            }
+            for i in range(1, rows_per_table + 1)
+        ]
+    return patterns
+
+
+def _prompt_payloads(monkeypatch, patterns, project_id="vnx-dev"):
+    """Run the real dispatch with kimi patched; return the parsed payload of each prompt."""
+    import kimi_wrapper
+
+    prompts: list[str] = []
+
+    def fake_kimi_exec(prompt, **kwargs):
+        prompts.append(prompt)
+        return json.dumps({"type": "ContentPart", "content": json.dumps(
+            {"merged": [], "dropped": [], "archived": [], "flagged": [], "summary": "ok"}
+        )})
+
+    monkeypatch.setattr(kimi_wrapper, "kimi_exec", fake_kimi_exec)
+    result = consolidator._dispatch_kimi_consolidation(patterns, project_id)
+    payloads = []
+    for prompt in prompts:
+        raw = prompt.split(_PAYLOAD_MARKER, 1)[1].strip()
+        try:
+            payloads.append(json.loads(raw))
+        except json.JSONDecodeError:
+            payloads.append(None)
+    return payloads, result, prompts
+
+
+class TestPromptCarriesAllInputAsValidJson:
+    def test_oversized_input_yields_parseable_payloads(self, monkeypatch):
+        patterns = _representative_patterns()
+        assert len(json.dumps(patterns, default=str, indent=2)) > 50_000
+
+        payloads, _result, _prompts = _prompt_payloads(monkeypatch, patterns)
+
+        assert payloads, "no prompt was sent"
+        assert all(p is not None for p in payloads), "a prompt carried unparseable JSON"
+
+    def test_every_pattern_is_in_exactly_one_prompt(self, monkeypatch):
+        patterns = _representative_patterns()
+
+        payloads, _result, _prompts = _prompt_payloads(monkeypatch, patterns)
+
+        assert all(p is not None for p in payloads)
+        for table, rows in patterns.items():
+            sent = [row["id"] for p in payloads for row in p.get(table, [])]
+            assert sorted(sent) == sorted(r["id"] for r in rows), table
+
+    def test_each_payload_fits_the_budget(self, monkeypatch):
+        payloads, _result, prompts = _prompt_payloads(monkeypatch, _representative_patterns())
+
+        for prompt in prompts:
+            assert len(prompt.split(_PAYLOAD_MARKER, 1)[1].strip()) <= 50_000
+
+    def test_result_reports_batches_and_nothing_omitted(self, monkeypatch):
+        payloads, result, _prompts = _prompt_payloads(monkeypatch, _representative_patterns())
+
+        assert result.get("input_batches") == len(payloads)
+        assert len(payloads) > 1
+        assert result.get("rows_shrunk_to_fit") == 0
+
+    def test_single_row_larger_than_budget_stays_valid_and_is_counted(self, monkeypatch):
+        patterns = {"success_patterns": [
+            {"id": 1, "project_id": "vnx-dev", "title": "huge", "description": "x" * 120_000},
+            {"id": 2, "project_id": "vnx-dev", "title": "small", "description": "y"},
+        ]}
+
+        payloads, result, _prompts = _prompt_payloads(monkeypatch, patterns)
+
+        assert all(p is not None for p in payloads)
+        sent = [row["id"] for p in payloads for row in p.get("success_patterns", [])]
+        assert sorted(sent) == [1, 2]
+        assert result.get("rows_shrunk_to_fit") == 1
+
+    def test_small_input_is_one_prompt(self, monkeypatch):
+        patterns = _representative_patterns(rows_per_table=2)
+
+        payloads, result, prompts = _prompt_payloads(monkeypatch, patterns)
+
+        assert len(payloads) == 1
+        assert "Batch " not in prompts[0]
+        assert result.get("input_batches") == 1
+
+    def test_compact_serialization_is_smaller_than_indented(self):
+        patterns = _representative_patterns()
+        indented = len(json.dumps(patterns, default=str, indent=2))
+        compact = len(json.dumps(patterns, default=str, separators=(",", ":"), ensure_ascii=False))
+        # Measured on this fixture: indent=2 -> compact saves the whitespace but the
+        # text-heavy rows dominate, so batching (not compaction) carries the fit.
+        assert compact < indented
+        assert compact > 50_000

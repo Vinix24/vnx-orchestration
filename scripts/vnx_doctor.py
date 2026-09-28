@@ -893,7 +893,49 @@ def check_dream_cycle(paths: Dict[str, str]) -> List[CheckResult]:
             f"{detail or latest.get('error') or reason} (cycle {cycle_id}{age})",
             f"Inspect {events_dir} for details.",
         )]
+    if event_type == "dream_cycle_completed":
+        degraded = _dream_completed_degradation(latest, Path(paths["VNX_DATA_DIR"]))
+        if degraded:
+            return [CheckResult(
+                "dream", WARN,
+                f"Latest dream cycle completed DEGRADED: {degraded} (cycle {cycle_id}{age})",
+                "A degraded cycle only proposes: it changes no patterns until the operator "
+                "approves the review. Fix the injection-effectiveness probe, then run a "
+                "normal cycle.",
+            )]
     return [CheckResult("dream", PASS, f"Latest dream event: {event_type} ({cycle_id}{age})")]
+
+
+def _dream_completed_degradation(event: dict, data_root: Path) -> str:
+    """Reason a completed dream cycle was degraded, or "" when it ran healthy.
+
+    The truth is in the consolidator's review JSON (``probe_health`` and
+    ``mode``): a degraded cycle emits ``dream_cycle_completed`` like a healthy
+    one, so the event type alone cannot tell them apart. The event's own
+    ``probe_health`` is the fallback when the review file is gone or unreadable.
+    """
+    review: dict = {}
+    cycle_id = str(event.get("cycle_id") or "")
+    candidates = [Path(str(event["review_path"]))] if event.get("review_path") else []
+    if cycle_id:
+        candidates.append(data_root / "state" / "dream" / f"{cycle_id}-pending-review.json")
+    for review_path in candidates:
+        try:
+            loaded = json.loads(review_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(loaded, dict):
+            review = loaded
+            break
+
+    probe_health = str(review.get("probe_health") or event.get("probe_health") or "")
+    mode = str(review.get("mode") or "")
+    reasons = []
+    if probe_health == "degraded":
+        reasons.append("probe_health=degraded")
+    if mode == "proposal_only":
+        reasons.append("mode=proposal_only")
+    return ", ".join(reasons)
 
 
 # ---------------------------------------------------------------------------
