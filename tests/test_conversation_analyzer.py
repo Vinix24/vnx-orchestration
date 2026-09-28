@@ -1925,3 +1925,57 @@ class TestFailClosedExitCode:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestDeepFailureIsDegradedNotEmpty:
+    """OI-1258: a deep analysis that fails must read differently in the digest
+    from one that ran and found nothing, and must say why."""
+
+    @staticmethod
+    def _digest(stats):
+        return DigestGenerator().generate("2026-09-28", stats, [], Path("/nonexistent/qi.db"))
+
+    def test_failed_analysis_digest_differs_from_empty_analysis(self):
+        empty = RunStats(sessions_analyzed=3, deep_attempts=2, deep_failures=0)
+        failed = RunStats(sessions_analyzed=3, deep_attempts=2, deep_failures=2)
+        failed.deep_failure_reasons = {"cli_failed": 2}
+
+        assert self._digest(empty) != self._digest(failed)
+        assert "DEGRADED" in self._digest(failed)
+        assert "cli_failed" in self._digest(failed)
+
+    def test_empty_analysis_is_a_plain_zero(self):
+        empty = RunStats(sessions_analyzed=3, deep_attempts=2, deep_failures=0)
+        assert "DEGRADED" not in self._digest(empty)
+
+    def test_analyzer_records_the_reason_per_failed_session(self):
+        from conversation_analyzer.deep_analyzer import LLMOutcome
+        analyzer, result = TestDeepAnalyzerCounter._analyze_with_claude(LLMOutcome("timeout"))
+        assert result is None
+        assert getattr(analyzer, "deep_failure_reasons", {}) == {"timeout": 1}
+
+    def test_unparseable_answer_is_a_failure_with_its_own_reason(self):
+        from conversation_analyzer.deep_analyzer import LLMOutcome
+        analyzer, result = TestDeepAnalyzerCounter._analyze_with_claude(
+            LLMOutcome("ok", text="no json here"))
+        assert result is None
+        assert getattr(analyzer, "deep_failure_reasons", {}) == {"unparseable": 1}
+
+    def test_config_skip_records_no_failure_reason(self):
+        from conversation_analyzer.deep_analyzer import LLMOutcome
+        analyzer, _ = TestDeepAnalyzerCounter._analyze_with_claude(LLMOutcome("config_skip"))
+        assert getattr(analyzer, "deep_failure_reasons", {}) == {}
+
+    def test_runner_copies_reasons_into_run_stats(self):
+        analyzer = ConversationAnalyzer.__new__(ConversationAnalyzer)
+        analyzer.deep = DeepAnalyzer()
+        analyzer.deep.deep_failures = 1
+        analyzer.deep.deep_attempts = 1
+        if hasattr(analyzer.deep, "deep_failure_reasons"):
+            analyzer.deep.deep_failure_reasons = {"empty": 1}
+        analyzer.find_unanalyzed_sessions = lambda *a, **k: [Path("/x.jsonl")]
+        analyzer._process_one_session = lambda *a, **k: 0
+        analyzer._finalize_run = lambda *a, **k: None
+        analyzer._print_summary = lambda *a, **k: None
+        stats = analyzer.run(dry_run=False)
+        assert getattr(stats, "deep_failure_reasons", {}) == {"empty": 1}

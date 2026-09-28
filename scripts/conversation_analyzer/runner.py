@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from .models import (
+    format_failure_reasons,
     SessionMetrics, SessionFlags, RunStats,
     ANALYZER_VERSION, VNX_BASE, Colors,
     log,
@@ -322,6 +323,7 @@ class ConversationAnalyzer:
         # attempts/failures alongside the success-only ``sessions_deep``.
         stats.deep_attempts = self.deep.deep_attempts
         stats.deep_failures = self.deep.deep_failures
+        stats.deep_failure_reasons = dict(self.deep.deep_failure_reasons)
         stats.deep_config_skips = self.deep.deep_config_skips
 
         if not dry_run:
@@ -373,6 +375,8 @@ class ConversationAnalyzer:
         print(f"Deep Analyzed:     {stats.sessions_deep}")
         print(f"Deep Attempts:     {stats.deep_attempts}")
         print(f"Deep Failures:     {stats.deep_failures}")
+        if stats.deep_failures:
+            print(f"DEGRADED:          deep analysis failed ({format_failure_reasons(stats.deep_failure_reasons)})")
         print(f"Deep Config Skips: {stats.deep_config_skips}")
         print(f"Suggestions:       {len(stats.suggestions)}")
         print(f"Total Tokens:      {stats.total_tokens:,}")

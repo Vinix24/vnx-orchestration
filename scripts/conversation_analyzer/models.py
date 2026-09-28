@@ -136,11 +136,20 @@ class RunStats:
     sessions_deep: int = 0
     deep_attempts: int = 0
     deep_failures: int = 0
+    deep_failure_reasons: Dict[str, int] = field(default_factory=dict)
     deep_config_skips: int = 0
     total_tokens: int = 0
     errors: int = 0
     skipped: int = 0
     suggestions: List[dict] = field(default_factory=list)
+
+
+def format_failure_reasons(reasons: Dict[str, int]) -> str:
+    """Render ``{"timeout": 2, "empty": 1}`` as ``timeout x2, empty x1`` (most frequent first)."""
+    if not reasons:
+        return "reden onbekend"
+    ordered = sorted(reasons.items(), key=lambda kv: (-kv[1], kv[0]))
+    return ", ".join(f"{reason} x{count}" for reason, count in ordered)
 
 
 def fail_closed_exit_code(stats: "RunStats | None") -> int:

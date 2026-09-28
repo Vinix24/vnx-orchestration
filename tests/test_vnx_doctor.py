@@ -403,6 +403,74 @@ class TestDreamCycleCheck:
         assert results[0].status == PASS
 
 
+class TestDreamCycleDegradedIsNotPass:
+    """OI-1822: a degraded cycle emits ``dream_cycle_completed`` like a healthy
+    one; the truth is ``probe_health`` / ``mode`` in the review JSON."""
+
+    @staticmethod
+    def _completed(vnx_env, review, cycle_id="dream-degraded", event_extra=None):
+        review_dir = Path(vnx_env["VNX_DATA_DIR"]) / "state" / "dream"
+        review_dir.mkdir(parents=True, exist_ok=True)
+        review_path = review_dir / f"{cycle_id}-pending-review.json"
+        review_path.write_text(json.dumps(review), encoding="utf-8")
+        event = {
+            "event_type": "dream_cycle_completed",
+            "cycle_id": cycle_id,
+            "timestamp": "2026-08-08T01:00:05+00:00",
+            "review_path": str(review_path),
+        }
+        event.update(event_extra or {})
+        _write_dream_events(vnx_env, [event])
+
+    def test_degraded_probe_in_review_warns_with_reason(self, vnx_env):
+        self._completed(vnx_env, {"probe_health": "degraded", "mode": "proposal_only"})
+        results = check_dream_cycle(vnx_env)
+        assert results[0].status == WARN
+        assert "probe_health=degraded" in results[0].message
+        assert "mode=proposal_only" in results[0].message
+
+    def test_proposal_only_mode_alone_warns(self, vnx_env):
+        self._completed(vnx_env, {"probe_health": "ok", "mode": "proposal_only"})
+        results = check_dream_cycle(vnx_env)
+        assert results[0].status == WARN
+        assert "mode=proposal_only" in results[0].message
+
+    def test_healthy_cycle_stays_pass(self, vnx_env):
+        self._completed(vnx_env, {"probe_health": "ok"}, cycle_id="dream-healthy")
+        results = check_dream_cycle(vnx_env)
+        assert results[0].status == PASS
+
+    def test_review_found_by_cycle_id_when_event_has_no_path(self, vnx_env):
+        self._completed(
+            vnx_env, {"probe_health": "degraded"}, cycle_id="dream-nopath",
+            event_extra={"review_path": ""},
+        )
+        results = check_dream_cycle(vnx_env)
+        assert results[0].status == WARN
+
+    def test_missing_review_falls_back_to_event_probe_health(self, vnx_env):
+        _write_dream_events(vnx_env, [{
+            "event_type": "dream_cycle_completed",
+            "cycle_id": "dream-gone",
+            "probe_health": "degraded",
+            "review_path": "/nonexistent/dream-gone-pending-review.json",
+            "timestamp": "2026-08-08T01:00:05+00:00",
+        }])
+        results = check_dream_cycle(vnx_env)
+        assert results[0].status == WARN
+
+    def test_corrupt_review_without_event_signal_stays_pass(self, vnx_env):
+        review_dir = Path(vnx_env["VNX_DATA_DIR"]) / "state" / "dream"
+        review_dir.mkdir(parents=True, exist_ok=True)
+        (review_dir / "dream-bad-pending-review.json").write_text("{broken", encoding="utf-8")
+        _write_dream_events(vnx_env, [{
+            "event_type": "dream_cycle_completed",
+            "cycle_id": "dream-bad",
+            "timestamp": "2026-08-08T01:00:05+00:00",
+        }])
+        assert check_dream_cycle(vnx_env)[0].status == PASS
+
+
 # ---------------------------------------------------------------------------
 # Full doctor flow
 # ---------------------------------------------------------------------------
