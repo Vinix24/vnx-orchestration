@@ -39,6 +39,17 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
   lane_exhausted): PASS`), and never a PASS for an unavailable seat with no
   successor (`Gate 'kimi_gate': UNAVAILABLE (<reason>)`, non-zero exit). A
   truncated diff is marked on the line (`(diff truncated)`).
+- **`codex_gate_required`/`kimi_gate_required` now bind to the PR's current head
+  (OI-1884).** `governance_enforcer.py`'s `_check_review_gate_required` used to accept
+  any `pr-<N>-<gate>.json` result (direct or takeover-successor) that carried a
+  non-empty `contract_hash`, without comparing the result's `commit_sha` to the PR's
+  actual head. After a fix-forward push, a PASS recorded against the OLD commit kept
+  satisfying the check forever — the new code on the head was never reviewed. The
+  check now resolves the PR's head once per invocation (context-supplied
+  `head_sha`/`commit_sha`/`headRefOid`, else `gh pr view --json headRefOid`), refuses
+  when the head cannot be determined, and only counts a record whose own `commit_sha`
+  equals that head. A record with no `commit_sha` at all is treated as stale evidence,
+  never a wildcard.
 
 ### Removed
 

@@ -172,8 +172,11 @@ def test_check_unknown_name(config_file: Path):
 
 
 # ---------------------------------------------------------------------------
-# Check: codex_gate_required
+# Check: codex_gate_required (OI-1884: a PASS only counts on the CURRENT head)
 # ---------------------------------------------------------------------------
+
+_HEAD_SHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+_STALE_SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 
 def test_codex_gate_required_no_pr_number(config_file: Path, gate_results_dir: Path):
@@ -189,36 +192,85 @@ def test_codex_gate_required_file_missing(config_file: Path, gate_results_dir: P
     enforcer = GovernanceEnforcer()
     enforcer.load_config(config_file)
     with patch("governance_enforcer.GATE_RESULTS_DIR", gate_results_dir):
-        result = enforcer.check("codex_gate_required", {"pr_number": 999})
+        result = enforcer.check("codex_gate_required", {"pr_number": 999, "head_sha": _HEAD_SHA})
     assert result.passed is False
     assert "not found" in result.message
 
 
-def test_codex_gate_required_file_present_with_hash(config_file: Path, gate_results_dir: Path):
+def test_codex_gate_required_pass_on_current_head_succeeds(config_file: Path, gate_results_dir: Path):
+    gate_results_dir.joinpath("pr-42-codex_gate.json").write_text(
+        json.dumps({"contract_hash": "abc123xyz", "commit_sha": _HEAD_SHA})
+    )
+    enforcer = GovernanceEnforcer()
+    enforcer.load_config(config_file)
+    with patch("governance_enforcer.GATE_RESULTS_DIR", gate_results_dir):
+        result = enforcer.check("codex_gate_required", {"pr_number": 42, "head_sha": _HEAD_SHA})
+    assert result.passed is True
+
+
+def test_codex_gate_required_pass_on_stale_commit_is_refused(config_file: Path, gate_results_dir: Path):
+    """OI-1884: a PASS recorded against an OLDER commit than the PR's current
+    head must never satisfy the check — after a fix-forward push the code on
+    the head was never reviewed."""
+    gate_results_dir.joinpath("pr-42-codex_gate.json").write_text(
+        json.dumps({"contract_hash": "abc123xyz", "commit_sha": _STALE_SHA})
+    )
+    enforcer = GovernanceEnforcer()
+    enforcer.load_config(config_file)
+    with patch("governance_enforcer.GATE_RESULTS_DIR", gate_results_dir):
+        result = enforcer.check("codex_gate_required", {"pr_number": 42, "head_sha": _HEAD_SHA})
+    assert result.passed is False
+    assert "oudere commit" in result.message
+    assert _STALE_SHA[:8] in result.message
+    assert _HEAD_SHA[:8] in result.message
+
+
+def test_codex_gate_required_empty_hash(config_file: Path, gate_results_dir: Path):
+    gate_results_dir.joinpath("pr-42-codex_gate.json").write_text(
+        json.dumps({"contract_hash": "", "commit_sha": _HEAD_SHA})
+    )
+    enforcer = GovernanceEnforcer()
+    enforcer.load_config(config_file)
+    with patch("governance_enforcer.GATE_RESULTS_DIR", gate_results_dir):
+        result = enforcer.check("codex_gate_required", {"pr_number": 42, "head_sha": _HEAD_SHA})
+    assert result.passed is False
+    assert "empty contract_hash" in result.message
+
+
+def test_codex_gate_required_missing_commit_sha_is_refused(config_file: Path, gate_results_dir: Path):
+    """OI-1884: a record with no commit_sha at all (predates the field) is
+    stale evidence, never a wildcard that matches any head."""
     gate_results_dir.joinpath("pr-42-codex_gate.json").write_text(
         json.dumps({"contract_hash": "abc123xyz"})
     )
     enforcer = GovernanceEnforcer()
     enforcer.load_config(config_file)
     with patch("governance_enforcer.GATE_RESULTS_DIR", gate_results_dir):
-        result = enforcer.check("codex_gate_required", {"pr_number": 42})
-    assert result.passed is True
+        result = enforcer.check("codex_gate_required", {"pr_number": 42, "head_sha": _HEAD_SHA})
+    assert result.passed is False
+    assert "geen commit_sha" in result.message
 
 
-def test_codex_gate_required_empty_hash(config_file: Path, gate_results_dir: Path):
+def test_codex_gate_required_unresolvable_head_fails(config_file: Path, gate_results_dir: Path):
+    """OI-1884: when the PR head cannot be determined at all, the check must
+    fail closed rather than silently accept whatever PASS sits on disk."""
     gate_results_dir.joinpath("pr-42-codex_gate.json").write_text(
-        json.dumps({"contract_hash": ""})
+        json.dumps({"contract_hash": "abc123xyz", "commit_sha": _HEAD_SHA})
     )
     enforcer = GovernanceEnforcer()
     enforcer.load_config(config_file)
-    with patch("governance_enforcer.GATE_RESULTS_DIR", gate_results_dir):
+    with patch("governance_enforcer.GATE_RESULTS_DIR", gate_results_dir), \
+         patch("subprocess.run") as mock_run:
+        mock_run.return_value.returncode = 1
+        mock_run.return_value.stdout = ""
+        mock_run.return_value.stderr = "gh: no such pr"
         result = enforcer.check("codex_gate_required", {"pr_number": 42})
     assert result.passed is False
-    assert "empty contract_hash" in result.message
+    assert "niet bepalen" in result.message
 
 
 # ---------------------------------------------------------------------------
-# Check: kimi_gate_required
+# Check: kimi_gate_required (OI-1884: a PASS only counts on the CURRENT head)
 # ---------------------------------------------------------------------------
 
 
@@ -235,52 +287,118 @@ def test_kimi_gate_required_file_missing(config_file: Path, gate_results_dir: Pa
     enforcer = GovernanceEnforcer()
     enforcer.load_config(config_file)
     with patch("governance_enforcer.GATE_RESULTS_DIR", gate_results_dir):
-        result = enforcer.check("kimi_gate_required", {"pr_number": 999})
+        result = enforcer.check("kimi_gate_required", {"pr_number": 999, "head_sha": _HEAD_SHA})
     assert result.passed is False
     assert "not found" in result.message
 
 
-def test_kimi_gate_required_file_present_with_hash(config_file: Path, gate_results_dir: Path):
+def test_kimi_gate_required_pass_on_current_head_succeeds(config_file: Path, gate_results_dir: Path):
+    gate_results_dir.joinpath("pr-42-kimi_gate.json").write_text(
+        json.dumps({"contract_hash": "abc123xyz", "commit_sha": _HEAD_SHA})
+    )
+    enforcer = GovernanceEnforcer()
+    enforcer.load_config(config_file)
+    with patch("governance_enforcer.GATE_RESULTS_DIR", gate_results_dir):
+        result = enforcer.check("kimi_gate_required", {"pr_number": 42, "head_sha": _HEAD_SHA})
+    assert result.passed is True
+
+
+def test_kimi_gate_required_pass_on_stale_commit_is_refused(config_file: Path, gate_results_dir: Path):
+    gate_results_dir.joinpath("pr-42-kimi_gate.json").write_text(
+        json.dumps({"contract_hash": "abc123xyz", "commit_sha": _STALE_SHA})
+    )
+    enforcer = GovernanceEnforcer()
+    enforcer.load_config(config_file)
+    with patch("governance_enforcer.GATE_RESULTS_DIR", gate_results_dir):
+        result = enforcer.check("kimi_gate_required", {"pr_number": 42, "head_sha": _HEAD_SHA})
+    assert result.passed is False
+    assert "oudere commit" in result.message
+
+
+def test_kimi_gate_required_empty_hash_no_takeover(config_file: Path, gate_results_dir: Path):
+    gate_results_dir.joinpath("pr-42-kimi_gate.json").write_text(
+        json.dumps({"contract_hash": "", "commit_sha": _HEAD_SHA})
+    )
+    enforcer = GovernanceEnforcer()
+    enforcer.load_config(config_file)
+    with patch("governance_enforcer.GATE_RESULTS_DIR", gate_results_dir):
+        result = enforcer.check("kimi_gate_required", {"pr_number": 42, "head_sha": _HEAD_SHA})
+    assert result.passed is False
+    assert "empty contract_hash" in result.message
+
+
+def test_kimi_gate_required_missing_commit_sha_is_refused(config_file: Path, gate_results_dir: Path):
     gate_results_dir.joinpath("pr-42-kimi_gate.json").write_text(
         json.dumps({"contract_hash": "abc123xyz"})
     )
     enforcer = GovernanceEnforcer()
     enforcer.load_config(config_file)
     with patch("governance_enforcer.GATE_RESULTS_DIR", gate_results_dir):
-        result = enforcer.check("kimi_gate_required", {"pr_number": 42})
-    assert result.passed is True
+        result = enforcer.check("kimi_gate_required", {"pr_number": 42, "head_sha": _HEAD_SHA})
+    assert result.passed is False
+    assert "geen commit_sha" in result.message
 
 
-def test_kimi_gate_required_empty_hash_no_takeover(config_file: Path, gate_results_dir: Path):
+def test_kimi_gate_required_unresolvable_head_fails(config_file: Path, gate_results_dir: Path):
     gate_results_dir.joinpath("pr-42-kimi_gate.json").write_text(
-        json.dumps({"contract_hash": ""})
+        json.dumps({"contract_hash": "abc123xyz", "commit_sha": _HEAD_SHA})
     )
     enforcer = GovernanceEnforcer()
     enforcer.load_config(config_file)
-    with patch("governance_enforcer.GATE_RESULTS_DIR", gate_results_dir):
+    with patch("governance_enforcer.GATE_RESULTS_DIR", gate_results_dir), \
+         patch("subprocess.run") as mock_run:
+        mock_run.return_value.returncode = 1
+        mock_run.return_value.stdout = ""
+        mock_run.return_value.stderr = "gh: no such pr"
         result = enforcer.check("kimi_gate_required", {"pr_number": 42})
     assert result.passed is False
-    assert "empty contract_hash" in result.message
+    assert "niet bepalen" in result.message
 
 
-def test_kimi_gate_required_satisfied_by_takeover_successor(config_file: Path, gate_results_dir: Path):
+def test_kimi_gate_required_satisfied_by_takeover_successor_on_current_head(
+    config_file: Path, gate_results_dir: Path
+):
     """A kimi seat read by glm_gate through VNX_REVIEW_GATE_TAKEOVER_CHAIN
     satisfies the check the same way gate_enforcement_verify.py resolves a
     takeover seat: via the takeover_path hop recorded on the successor's own
-    result, not a second takeover interpretation."""
+    result, not a second takeover interpretation — but ONLY when the
+    successor's own record carries the current head (OI-1884)."""
     gate_results_dir.joinpath("pr-42-glm_gate.json").write_text(
         json.dumps({
             "gate": "glm_gate",
             "contract_hash": "deadbeef1234",
+            "commit_sha": _HEAD_SHA,
             "takeover_path": [{"gate": "kimi_gate", "reason": "unavailable", "status": "unavailable"}],
         })
     )
     enforcer = GovernanceEnforcer()
     enforcer.load_config(config_file)
     with patch("governance_enforcer.GATE_RESULTS_DIR", gate_results_dir):
-        result = enforcer.check("kimi_gate_required", {"pr_number": 42})
+        result = enforcer.check("kimi_gate_required", {"pr_number": 42, "head_sha": _HEAD_SHA})
     assert result.passed is True
     assert "taken over" in result.message
+
+
+def test_kimi_gate_required_takeover_successor_on_stale_commit_is_refused(
+    config_file: Path, gate_results_dir: Path
+):
+    """OI-1884: a takeover successor's PASS on an OLDER commit than the
+    current head is refused exactly like a direct PASS would be — it, too,
+    never reviewed the code on the head."""
+    gate_results_dir.joinpath("pr-42-glm_gate.json").write_text(
+        json.dumps({
+            "gate": "glm_gate",
+            "contract_hash": "deadbeef1234",
+            "commit_sha": _STALE_SHA,
+            "takeover_path": [{"gate": "kimi_gate", "reason": "unavailable", "status": "unavailable"}],
+        })
+    )
+    enforcer = GovernanceEnforcer()
+    enforcer.load_config(config_file)
+    with patch("governance_enforcer.GATE_RESULTS_DIR", gate_results_dir):
+        result = enforcer.check("kimi_gate_required", {"pr_number": 42, "head_sha": _HEAD_SHA})
+    assert result.passed is False
+    assert "not found" in result.message
 
 
 def test_kimi_gate_required_fails_without_result_or_takeover(config_file: Path, gate_results_dir: Path):
@@ -290,13 +408,14 @@ def test_kimi_gate_required_fails_without_result_or_takeover(config_file: Path, 
         json.dumps({
             "gate": "glm_gate",
             "contract_hash": "deadbeef1234",
+            "commit_sha": _HEAD_SHA,
             "takeover_path": [{"gate": "codex_gate", "reason": "unavailable", "status": "unavailable"}],
         })
     )
     enforcer = GovernanceEnforcer()
     enforcer.load_config(config_file)
     with patch("governance_enforcer.GATE_RESULTS_DIR", gate_results_dir):
-        result = enforcer.check("kimi_gate_required", {"pr_number": 42})
+        result = enforcer.check("kimi_gate_required", {"pr_number": 42, "head_sha": _HEAD_SHA})
     assert result.passed is False
     assert "not found" in result.message
 
@@ -387,7 +506,7 @@ def test_soft_mandatory_override_accepted(config_file: Path, gate_results_dir: P
     with patch("governance_enforcer.GATE_RESULTS_DIR", gate_results_dir), \
          patch("governance_enforcer.AUDIT_LOG", audit), \
          patch.dict(os.environ, env, clear=False):
-        result = enforcer.check("codex_gate_required", {"pr_number": 999})
+        result = enforcer.check("codex_gate_required", {"pr_number": 999, "head_sha": _HEAD_SHA})
 
     assert result.passed is True
     assert result.overridden_by == "manual-verification-done"
