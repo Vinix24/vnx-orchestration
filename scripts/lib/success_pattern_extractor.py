@@ -20,11 +20,13 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 try:
-    from pattern_dedup import _is_governance_event, _column_exists
+    from pattern_dedup import _is_governance_event
+    from pattern_upsert import upsert_success_pattern
 except ImportError:  # pragma: no cover
     import sys as _sys
     _sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from pattern_dedup import _is_governance_event, _column_exists
+    from pattern_dedup import _is_governance_event
+    from pattern_upsert import upsert_success_pattern
 
 
 def insert_filtered_success_pattern(
@@ -40,9 +42,14 @@ def insert_filtered_success_pattern(
     project_id: Optional[str] = None,
     now: Optional[str] = None,
 ) -> int:
-    """Insert a success_pattern row only when title passes the governance filter.
+    """Write a success_pattern only when title passes the governance filter.
 
-    Returns 1 if inserted, 0 if filtered out.
+    The write goes through ``pattern_upsert`` under the natural key
+    ``(project_id, pattern_type, title)``: a second write of the same pattern
+    folds into the existing row. A NULL/empty ``project_id`` or ``title``
+    raises ValueError.
+
+    Returns 1 if written (inserted or merged), 0 if filtered out.
     """
     if _is_governance_event(title):
         return 0
@@ -50,32 +57,18 @@ def insert_filtered_success_pattern(
     if now is None:
         now = datetime.now(timezone.utc).isoformat()
 
-    has_project = _column_exists(conn, "success_patterns", "project_id")
-
-    if has_project and project_id is not None:
-        conn.execute(
-            "INSERT INTO success_patterns "
-            "(pattern_type, category, title, description, pattern_data, "
-            " confidence_score, usage_count, source_dispatch_ids, "
-            " first_seen, last_used, project_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                pattern_type, category, title, description[:500],
-                json.dumps({"source": "governance_signal"}),
-                confidence_score, usage_count, source_dispatch_ids,
-                now, now, project_id,
-            ),
-        )
-    else:
-        conn.execute(
-            "INSERT INTO success_patterns "
-            "(pattern_type, category, title, description, pattern_data, "
-            " confidence_score, usage_count, source_dispatch_ids, first_seen, last_used) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                pattern_type, category, title, description[:500],
-                json.dumps({"source": "governance_signal"}),
-                confidence_score, usage_count, source_dispatch_ids, now, now,
-            ),
-        )
+    upsert_success_pattern(
+        conn,
+        project_id=project_id,
+        pattern_type=pattern_type,
+        title=title,
+        category=category,
+        description=description[:500],
+        pattern_data=json.dumps({"source": "governance_signal"}),
+        confidence_score=confidence_score,
+        usage_count=usage_count,
+        source_dispatch_ids=source_dispatch_ids,
+        first_seen=now,
+        last_used=now,
+    )
     return 1

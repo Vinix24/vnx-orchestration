@@ -41,7 +41,8 @@ def _make_db(state_dir: Path) -> Path:
             success_rate REAL, usage_count INTEGER DEFAULT 0,
             avg_completion_time INTEGER, confidence_score REAL DEFAULT 0.5,
             source_dispatch_ids TEXT, source_receipts TEXT,
-            first_seen DATETIME, last_used DATETIME
+            first_seen DATETIME, last_used DATETIME,
+            project_id TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS antipatterns (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -49,7 +50,8 @@ def _make_db(state_dir: Path) -> Path:
             pattern_data TEXT, problem_example TEXT, why_problematic TEXT,
             better_alternative TEXT, occurrence_count INTEGER DEFAULT 1,
             avg_resolution_time INTEGER, severity TEXT DEFAULT 'medium',
-            source_dispatch_ids TEXT, first_seen DATETIME, last_seen DATETIME
+            source_dispatch_ids TEXT, first_seen DATETIME, last_seen DATETIME,
+            project_id TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS dispatch_metadata (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -140,8 +142,11 @@ def _make_receipts(state_dir: Path, records: list) -> Path:
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 @pytest.fixture()
-def env_and_consolidator(tmp_path):
+def env_and_consolidator(tmp_path, monkeypatch):
     """Return (env_dict, MemoryConsolidator instance) with mocked paths."""
+    # Pattern writes stamp project_id fail-closed (ADR-007); the tmp DB path
+    # carries no tenant, so the env var is the one source.
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
     env = _mock_ensure_env(tmp_path)
     db_path = _make_db(Path(env["VNX_STATE_DIR"]))
     _seed_dispatch_metadata(db_path)
@@ -223,10 +228,11 @@ class TestPatternDeduplication:
         conn.execute(
             "INSERT INTO success_patterns "
             "(pattern_type, category, title, description, pattern_data, "
-            " confidence_score, usage_count, source_dispatch_ids, first_seen, last_used) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " confidence_score, usage_count, source_dispatch_ids, first_seen, last_used, "
+            " project_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             ("approach", "memory_consolidation", "T1 dispatches: 85% success rate",
-             "Existing description", "{}", 0.5, 5, "[]", now, now),
+             "Existing description", "{}", 0.5, 5, "[]", now, now, "vnx-dev"),
         )
         conn.commit()
         conn.close()
@@ -269,10 +275,11 @@ class TestPatternDeduplication:
         conn.execute(
             "INSERT INTO success_patterns "
             "(pattern_type, category, title, description, pattern_data, "
-            " confidence_score, usage_count, source_dispatch_ids, first_seen, last_used) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " confidence_score, usage_count, source_dispatch_ids, first_seen, last_used, "
+            " project_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             ("approach", "memory_consolidation", title_a,
-             "Existing", "{}", 0.5, 8, "[]", now, now),
+             "Existing", "{}", 0.5, 8, "[]", now, now, "vnx-dev"),
         )
         conn.commit()
         conn.close()

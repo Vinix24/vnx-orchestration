@@ -23,6 +23,10 @@ class TestIntelligencePersist:
     def _create_test_db(self, db_path: Path) -> None:
         conn = sqlite3.connect(str(db_path))
         conn.executescript((REPO_ROOT / "schemas" / "quality_intelligence.sql").read_text())
+        # The tenant-stamping migration (quality_db_init) adds project_id to the
+        # pattern tables; the base schema file alone does not carry it.
+        for _tbl in ("success_patterns", "antipatterns"):
+            conn.execute(f"ALTER TABLE {_tbl} ADD COLUMN project_id TEXT")
         conn.close()
 
     def _make_signal(self, signal_type, content, severity="info", dispatch_id="", defect_family=""):

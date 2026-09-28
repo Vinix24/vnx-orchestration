@@ -44,7 +44,8 @@ def _make_db() -> sqlite3.Connection:
             first_seen TEXT,
             last_used TEXT,
             valid_until TEXT DEFAULT NULL,
-            invalidation_reason TEXT DEFAULT NULL
+            invalidation_reason TEXT DEFAULT NULL,
+            project_id TEXT
         )
     """)
     conn.execute("""
@@ -62,7 +63,8 @@ def _make_db() -> sqlite3.Connection:
             first_seen TEXT,
             last_seen TEXT,
             valid_until TEXT DEFAULT NULL,
-            invalidation_reason TEXT DEFAULT NULL
+            invalidation_reason TEXT DEFAULT NULL,
+            project_id TEXT
         )
     """)
     conn.execute("""
@@ -169,6 +171,7 @@ class TestInsertFilteredSuccessPattern:
             conn,
             title="Use atomic writes for shared files",
             description="Write to .tmp then os.replace() for atomicity",
+            project_id="vnx-dev",
         )
         assert result == 1
         count = conn.execute("SELECT COUNT(*) FROM success_patterns").fetchone()[0]
@@ -229,6 +232,7 @@ class TestInsertFilteredAntipattern:
             title="Skipping gates before merge",
             description="Gate skipping leads to regressions",
             category="governance",
+            project_id="vnx-dev",
         )
         assert result == 1
         count = conn.execute("SELECT COUNT(*) FROM antipatterns").fetchone()[0]

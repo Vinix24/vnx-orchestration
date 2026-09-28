@@ -32,6 +32,8 @@ import sqlite3
 from pathlib import Path
 from typing import Dict, Iterable, Optional
 
+import pattern_natural_key
+import pattern_upsert
 import schema_migration
 from coordination_db import _migrate_v11_composite_keys
 
@@ -419,6 +421,15 @@ def run_quality_intelligence_migration(
         results = apply_project_id_migration(
             conn, QUALITY_INTELLIGENCE_TABLES, default_project_id=default_project_id
         )
+        # A fresh store gets project_id on the pattern tables only here, after
+        # quality_db_init's v33 already ran and found no project_id column. Add
+        # the natural key now. Only where there is nothing to merge: a store
+        # with duplicates is left as-is (collapsing it is an operator decision,
+        # scripts/migrate_pattern_natural_key.py).
+        natural_key = {
+            spec.table: pattern_natural_key.create_index_if_clean(conn, spec)
+            for spec in pattern_upsert.SPECS
+        }
         # schema_version table may not exist on a fresh DB; create idempotently.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS schema_version ("
@@ -440,4 +451,5 @@ def run_quality_intelligence_migration(
         "db_path": str(path),
         "schema_version": QI_SCHEMA_VERSION,
         "results": results,
+        "natural_key": natural_key,
     }

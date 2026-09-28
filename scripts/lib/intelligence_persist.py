@@ -19,16 +19,18 @@ import logging
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 _LOG = logging.getLogger(__name__)
 
 try:
     from project_scope import current_project_id
+    from pattern_upsert import upsert_antipattern, upsert_success_pattern
 except ImportError:  # pragma: no cover - lib path bootstrap
     import sys as _sys
     _sys.path.insert(0, str(Path(__file__).resolve().parent))
     from project_scope import current_project_id
+    from pattern_upsert import upsert_antipattern, upsert_success_pattern
 
 
 def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
@@ -216,59 +218,34 @@ def _upsert_success_pattern(
     dispatch_id: str,
     now: str,
 ) -> int:
-    """Insert or update a success_pattern from a gate_success signal."""
+    """Insert or update a success_pattern from a gate_success signal.
+
+    Written under the natural key ``(project_id, pattern_type, title)`` via
+    ``pattern_upsert``. The confidence keeps this writer's own curve,
+    ``0.5 + 0.05 * usage_count`` capped at 1.0, over the merged count.
+    """
     title = content[:120] if content else "Gate passed"
-    category = "governance"
-    project_id = current_project_id()
-    has_project = _has_column(conn, "success_patterns", "project_id")
-
-    if has_project:
-        existing = conn.execute(
-            "SELECT id, usage_count, source_dispatch_ids FROM success_patterns "
-            "WHERE title = ? AND category = ? AND project_id = ?",
-            (title, category, project_id),
-        ).fetchone()
-    else:
-        existing = conn.execute(
-            "SELECT id, usage_count, source_dispatch_ids FROM success_patterns "
-            "WHERE title = ? AND category = ?",
-            (title, category),
-        ).fetchone()
-
-    if existing:
-        row = dict(existing)
-        usage_count = (row.get("usage_count") or 0) + 1
-        source_ids = _append_to_json_list(row.get("source_dispatch_ids"), dispatch_id)
-        confidence = min(1.0, 0.5 + (usage_count * 0.05))
-        conn.execute(
-            "UPDATE success_patterns SET usage_count = ?, confidence_score = ?, "
-            "source_dispatch_ids = ?, last_used = ? WHERE id = ?",
-            (usage_count, confidence, source_ids, now, row["id"]),
-        )
-    else:
-        source_ids = json.dumps([dispatch_id]) if dispatch_id else "[]"
-        if has_project:
-            conn.execute(
-                "INSERT INTO success_patterns "
-                "(pattern_type, category, title, description, pattern_data, "
-                " confidence_score, usage_count, source_dispatch_ids, "
-                " first_seen, last_used, project_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                ("approach", category, title, content[:500],
-                 json.dumps({"source": "governance_signal"}),
-                 0.55, 1, source_ids, now, now, project_id),
-            )
-        else:
-            conn.execute(
-                "INSERT INTO success_patterns "
-                "(pattern_type, category, title, description, pattern_data, "
-                " confidence_score, usage_count, source_dispatch_ids, first_seen, last_used) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                ("approach", category, title, content[:500],
-                 json.dumps({"source": "governance_signal"}),
-                 0.55, 1, source_ids, now, now),
-            )
-
+    result = upsert_success_pattern(
+        conn,
+        project_id=current_project_id(),
+        pattern_type="approach",
+        title=title,
+        category="governance",
+        description=content[:500],
+        pattern_data=json.dumps({"source": "governance_signal"}),
+        confidence_score=0.55,
+        usage_count=1,
+        source_dispatch_ids=[dispatch_id] if dispatch_id else [],
+        first_seen=now,
+        last_used=now,
+    )
+    usage_count = conn.execute(
+        "SELECT usage_count FROM success_patterns WHERE id = ?", (result.id,)
+    ).fetchone()[0]
+    conn.execute(
+        "UPDATE success_patterns SET confidence_score = ? WHERE id = ?",
+        (min(1.0, 0.5 + (int(usage_count or 0) * 0.05)), result.id),
+    )
     return 1
 
 
@@ -281,64 +258,30 @@ def _upsert_antipattern(
     defect_family: str,
     now: str,
 ) -> int:
-    """Insert or update an antipattern from a gate_failure or queue_anomaly signal."""
+    """Insert or update an antipattern from a gate_failure or queue_anomaly signal.
+
+    Written under the natural key ``(project_id, pattern_type, title)`` via
+    ``pattern_upsert``.
+    """
     title = content[:120] if content else f"{sig_type} detected"
-    category = "governance"
-    project_id = current_project_id()
-    has_project = _has_column(conn, "antipatterns", "project_id")
-
-    if has_project:
-        existing = conn.execute(
-            "SELECT id, occurrence_count, source_dispatch_ids FROM antipatterns "
-            "WHERE title = ? AND category = ? AND project_id = ?",
-            (title, category, project_id),
-        ).fetchone()
-    else:
-        existing = conn.execute(
-            "SELECT id, occurrence_count, source_dispatch_ids FROM antipatterns "
-            "WHERE title = ? AND category = ?",
-            (title, category),
-        ).fetchone()
-
-    if existing:
-        row = dict(existing)
-        occurrence_count = (row.get("occurrence_count") or 0) + 1
-        source_ids = _append_to_json_list(row.get("source_dispatch_ids"), dispatch_id)
-        conn.execute(
-            "UPDATE antipatterns SET occurrence_count = ?, "
-            "source_dispatch_ids = ?, last_seen = ? WHERE id = ?",
-            (occurrence_count, source_ids, now, row["id"]),
-        )
-    else:
-        source_ids = json.dumps([dispatch_id]) if dispatch_id else "[]"
-        db_severity = "high" if severity == "blocker" else severity
-        if db_severity not in ("critical", "high", "medium", "low"):
-            db_severity = "medium"
-        if has_project:
-            conn.execute(
-                "INSERT INTO antipatterns "
-                "(pattern_type, category, title, description, pattern_data, "
-                " why_problematic, severity, occurrence_count, "
-                " source_dispatch_ids, first_seen, last_seen, project_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                ("approach", category, title, content[:500],
-                 json.dumps({"source": "governance_signal", "defect_family": defect_family}),
-                 content[:500], db_severity, 1,
-                 source_ids, now, now, project_id),
-            )
-        else:
-            conn.execute(
-                "INSERT INTO antipatterns "
-                "(pattern_type, category, title, description, pattern_data, "
-                " why_problematic, severity, occurrence_count, "
-                " source_dispatch_ids, first_seen, last_seen) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                ("approach", category, title, content[:500],
-                 json.dumps({"source": "governance_signal", "defect_family": defect_family}),
-                 content[:500], db_severity, 1,
-                 source_ids, now, now),
-            )
-
+    db_severity = "high" if severity == "blocker" else severity
+    if db_severity not in ("critical", "high", "medium", "low"):
+        db_severity = "medium"
+    upsert_antipattern(
+        conn,
+        project_id=current_project_id(),
+        pattern_type="approach",
+        title=title,
+        category="governance",
+        description=content[:500],
+        pattern_data=json.dumps({"source": "governance_signal", "defect_family": defect_family}),
+        why_problematic=content[:500],
+        severity=db_severity,
+        occurrence_count=1,
+        source_dispatch_ids=[dispatch_id] if dispatch_id else [],
+        first_seen=now,
+        last_seen=now,
+    )
     return 1
 
 
@@ -551,23 +494,6 @@ def update_confidence_from_outcome(
 def _sha1(text: str) -> str:
     import hashlib
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
-
-
-def _append_to_json_list(existing_json: Optional[str], new_item: str) -> str:
-    """Append new_item to a JSON array string, deduplicating."""
-    items: list = []
-    if existing_json:
-        try:
-            items = json.loads(existing_json)
-            if not isinstance(items, list):
-                # Audit C5: a valid-but-non-list JSON value (e.g. {} or "x") would otherwise crash
-                # items.append() and abort the whole persist batch. Treat it as empty.
-                items = []
-        except (json.JSONDecodeError, TypeError):
-            items = []
-    if new_item and new_item not in items:
-        items.append(new_item)
-    return json.dumps(items[-20:])  # keep last 20
 
 
 # ---------------------------------------------------------------------------

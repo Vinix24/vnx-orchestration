@@ -30,6 +30,8 @@ try:
 except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
 from contract_invalid_window import is_stale_contract_invalid
+from pattern_upsert import upsert_antipattern, upsert_success_pattern
+from project_scope import resolve_stamp_project_id
 
 
 # Failure statuses sampled from the governed receipt stream when mining for
@@ -652,39 +654,33 @@ class LearningLoop:
         antipatterns_written = 0
 
         try:
-            # Write high-confidence used patterns to success_patterns
+            # Tenant for every row below, fail-closed (ADR-007): no guessed default.
+            project_id = resolve_stamp_project_id(db_path=str(self.db_path))
+
+            # Write high-confidence used patterns to success_patterns.
+            # counter="max": metric.used_count is the cumulative pattern_usage
+            # counter, so a rerun must not add it again; the loop's confidence
+            # is the fresher value and replaces the stored one.
             for pattern_id, metric in self.pattern_metrics.items():
                 if metric.used_count > 0 and metric.confidence >= 0.6:
                     title = metric.pattern_title[:120]
                     # Use empty string category so intelligence_selector scope
                     # matching treats these as universal (empty scope = matches all)
-                    category = ""
-
-                    existing = self.conn.execute(
-                        "SELECT id, usage_count FROM success_patterns "
-                        "WHERE title = ? AND pattern_data LIKE '%learning_loop%'",
-                        (title,),
-                    ).fetchone()
-
-                    if existing:
-                        row = dict(existing)
-                        self.conn.execute(
-                            "UPDATE success_patterns SET usage_count = ?, "
-                            "confidence_score = ?, last_used = ? WHERE id = ?",
-                            (metric.used_count, min(metric.confidence, 1.0), now, row["id"]),
-                        )
-                    else:
-                        self.conn.execute(
-                            "INSERT INTO success_patterns "
-                            "(pattern_type, category, title, description, pattern_data, "
-                            " confidence_score, usage_count, source_dispatch_ids, first_seen, last_used, valid_from) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                            ("approach", category, title,
-                             f"Learning loop pattern: {metric.pattern_title}",
-                             json.dumps({"source": "learning_loop", "pattern_id": pattern_id}),
-                             min(metric.confidence, 1.0), metric.used_count,
-                             "[]", now, now, now),
-                        )
+                    upsert_success_pattern(
+                        self.conn,
+                        project_id=project_id,
+                        pattern_type="approach",
+                        title=title,
+                        category="",
+                        description=f"Learning loop pattern: {metric.pattern_title}",
+                        pattern_data=json.dumps({"source": "learning_loop", "pattern_id": pattern_id}),
+                        confidence_score=min(metric.confidence, 1.0),
+                        usage_count=metric.used_count,
+                        first_seen=now,
+                        last_used=now,
+                        valid_from=now,
+                        counter="max",
+                    )
                     patterns_written += 1
 
             # Write failure patterns with occurrence >= 2 to antipatterns
@@ -698,36 +694,25 @@ class LearningLoop:
                 if len(failures) < 2:
                     continue
                 title = f"Recurring failure: {error_key}"[:120]
-                category = ""
-
-                existing = self.conn.execute(
-                    "SELECT id, occurrence_count FROM antipatterns "
-                    "WHERE title = ? AND pattern_data LIKE '%learning_loop%'",
-                    (title,),
-                ).fetchone()
-
                 severity = "high" if len(failures) >= 5 else "medium"
-
-                if existing:
-                    row = dict(existing)
-                    self.conn.execute(
-                        "UPDATE antipatterns SET occurrence_count = ?, "
-                        "severity = ?, last_seen = ? WHERE id = ?",
-                        (len(failures), severity, now, row["id"]),
-                    )
-                else:
-                    self.conn.execute(
-                        "INSERT INTO antipatterns "
-                        "(pattern_type, category, title, description, pattern_data, "
-                        " why_problematic, severity, occurrence_count, "
-                        " source_dispatch_ids, first_seen, last_seen, valid_from) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        ("approach", category, title,
-                         f"Error seen {len(failures)} times: {error_key}",
-                         json.dumps({"source": "learning_loop", "terminals": list({f['terminal'] for f in failures})}),
-                         error_key, severity, len(failures),
-                         "[]", now, now, now),
-                    )
+                # len(failures) is recounted over all receipts on every run.
+                upsert_antipattern(
+                    self.conn,
+                    project_id=project_id,
+                    pattern_type="approach",
+                    title=title,
+                    category="",
+                    description=f"Error seen {len(failures)} times: {error_key}",
+                    pattern_data=json.dumps({"source": "learning_loop", "terminals": list({f['terminal'] for f in failures})}),
+                    why_problematic=error_key,
+                    severity=severity,
+                    occurrence_count=len(failures),
+                    first_seen=now,
+                    last_seen=now,
+                    valid_from=now,
+                    counter="max",
+                    always_update=("severity",),
+                )
                 antipatterns_written += 1
 
             self.conn.commit()

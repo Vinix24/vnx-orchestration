@@ -25,6 +25,14 @@ from itertools import combinations
 from pathlib import Path
 from typing import Any
 
+try:
+    from pattern_upsert import upsert_success_pattern
+    from project_scope import resolve_stamp_project_id
+except ImportError:  # pragma: no cover - lib path bootstrap
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from pattern_upsert import upsert_success_pattern
+    from project_scope import resolve_stamp_project_id
+
 
 # ---------------------------------------------------------------------------
 # DB helpers
@@ -77,7 +85,8 @@ def _open_db(db_path: Path) -> sqlite3.Connection:
             source_dispatch_ids TEXT,
             source_receipts TEXT,
             first_seen TEXT,
-            last_used TEXT
+            last_used TEXT,
+            project_id TEXT NOT NULL
         )
     """)
 
@@ -201,81 +210,86 @@ def _common_errors(behaviors: list[dict]) -> list[dict]:
 # DB persistence
 # ---------------------------------------------------------------------------
 
-def _upsert_affinity_patterns(con: sqlite3.Connection, affinities: list[dict],
-                               dispatch_ids: list[str]) -> int:
-    """Write file-affinity patterns to success_patterns. Returns inserted count."""
-    now = datetime.now(timezone.utc).isoformat()
-    source_ids = json.dumps(dispatch_ids[:20])
-    inserted = 0
+def _write_snapshot(con: sqlite3.Connection, project_id: str, title_prefix: str,
+                    rows: list[dict]) -> int:
+    """Replace this project's behaviour-analysis rows that share ``title_prefix``.
 
-    # Clear old behavior_analysis affinity patterns before re-inserting
+    Each row is written through ``pattern_upsert`` with ``counter="replace"``:
+    the extractor recomputes its counts from the full behaviours file, so the
+    new snapshot replaces the stored values and the row keeps its id (and with
+    it every ``intel_sp_<id>`` reference). Only rows of ``project_id`` that are
+    absent from the new snapshot are deleted.
+    """
+    keep: list[int] = []
+    for row in rows:
+        keep.append(upsert_success_pattern(
+            con, project_id=project_id, pattern_type="behavioral",
+            category="behavior_analysis", counter="replace", **row,
+        ).id)
+    marks = ",".join("?" * len(keep))
+    stale_filter = f" AND id NOT IN ({marks})" if keep else ""
     con.execute(
-        "DELETE FROM success_patterns WHERE category='behavior_analysis' AND title LIKE 'Files co-occur:%'"
+        "DELETE FROM success_patterns WHERE category='behavior_analysis' "
+        f"AND title LIKE ? AND project_id = ?{stale_filter}",
+        (f"{title_prefix}%", project_id, *keep),
     )
+    return len(rows)
 
+
+def _resolve_project_id(project_id: str | None) -> str:
+    return resolve_stamp_project_id(explicit=project_id)
+
+
+def _upsert_affinity_patterns(con: sqlite3.Connection, affinities: list[dict],
+                               dispatch_ids: list[str], project_id: str | None = None) -> int:
+    """Write file-affinity patterns to success_patterns. Returns written count."""
+    now = datetime.now(timezone.utc).isoformat()
+    rows = []
     for aff in affinities:
         files = aff["files"]
-        title = f"Files co-occur: {files[0]} + {files[1]}"
-        description = (
-            f"These files appear in the same dispatch {aff['count']} times "
-            f"(co-occurrence rate: {aff['co_occurrence']:.1%})."
-        )
-        pattern_data = json.dumps(aff)
-        con.execute(
-            """
-            INSERT INTO success_patterns
-                (pattern_type, category, title, description, pattern_data,
-                 confidence_score, usage_count, source_dispatch_ids, first_seen, last_used)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                "behavioral", "behavior_analysis", title, description, pattern_data,
-                aff["co_occurrence"], aff["count"], source_ids, now, now,
+        rows.append({
+            "title": f"Files co-occur: {files[0]} + {files[1]}",
+            "description": (
+                f"These files appear in the same dispatch {aff['count']} times "
+                f"(co-occurrence rate: {aff['co_occurrence']:.1%})."
             ),
-        )
-        inserted += 1
-
+            "pattern_data": json.dumps(aff),
+            "confidence_score": aff["co_occurrence"],
+            "usage_count": aff["count"],
+            "source_dispatch_ids": dispatch_ids[:20],
+            "first_seen": now,
+            "last_used": now,
+        })
+    written = _write_snapshot(con, _resolve_project_id(project_id), "Files co-occur:", rows)
     con.commit()
-    return inserted
+    return written
 
 
 def _upsert_duration_patterns(con: sqlite3.Connection, baselines: list[dict],
-                               dispatch_ids: list[str]) -> int:
-    """Write duration-baseline patterns to success_patterns. Returns inserted count."""
+                               dispatch_ids: list[str], project_id: str | None = None) -> int:
+    """Write duration-baseline patterns to success_patterns. Returns written count."""
     now = datetime.now(timezone.utc).isoformat()
-    source_ids = json.dumps(dispatch_ids[:20])
-    inserted = 0
-
-    con.execute(
-        "DELETE FROM success_patterns WHERE category='behavior_analysis' AND title LIKE 'Expected duration:%'"
-    )
-
+    rows = []
     for baseline in baselines:
         role = baseline["role"]
         avg_min = round(baseline["avg_seconds"] / 60, 1)
-        title = f"Expected duration: {role}"
-        description = (
-            f"Based on {baseline['count']} dispatches, {role} tasks average "
-            f"{avg_min} minutes (range: {round(baseline['min_seconds']/60,1)}–"
-            f"{round(baseline['max_seconds']/60,1)} min)."
-        )
-        pattern_data = json.dumps(baseline)
-        con.execute(
-            """
-            INSERT INTO success_patterns
-                (pattern_type, category, title, description, pattern_data,
-                 confidence_score, usage_count, source_dispatch_ids, first_seen, last_used)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                "behavioral", "behavior_analysis", title, description, pattern_data,
-                0.8, baseline["count"], source_ids, now, now,
+        rows.append({
+            "title": f"Expected duration: {role}",
+            "description": (
+                f"Based on {baseline['count']} dispatches, {role} tasks average "
+                f"{avg_min} minutes (range: {round(baseline['min_seconds']/60,1)}–"
+                f"{round(baseline['max_seconds']/60,1)} min)."
             ),
-        )
-        inserted += 1
-
+            "pattern_data": json.dumps(baseline),
+            "confidence_score": 0.8,
+            "usage_count": baseline["count"],
+            "source_dispatch_ids": dispatch_ids[:20],
+            "first_seen": now,
+            "last_used": now,
+        })
+    written = _write_snapshot(con, _resolve_project_id(project_id), "Expected duration:", rows)
     con.commit()
-    return inserted
+    return written
 
 
 def _upsert_prevention_rules(con: sqlite3.Connection, errors: list[dict]) -> int:
@@ -343,10 +357,11 @@ def extract_patterns(input_path: Path, db_path: Path) -> dict:
     sys.stderr.write(f"[info] Found: {len(affinities)} affinity pairs, "
                      f"{len(baselines)} role baselines, {len(errors)} common errors\n")
 
+    project_id = resolve_stamp_project_id(db_path=str(db_path))
     con = _open_db(db_path)
     try:
-        n_aff = _upsert_affinity_patterns(con, affinities, dispatch_ids)
-        n_base = _upsert_duration_patterns(con, baselines, dispatch_ids)
+        n_aff = _upsert_affinity_patterns(con, affinities, dispatch_ids, project_id)
+        n_base = _upsert_duration_patterns(con, baselines, dispatch_ids, project_id)
         n_rules = _upsert_prevention_rules(con, errors)
     finally:
         con.close()

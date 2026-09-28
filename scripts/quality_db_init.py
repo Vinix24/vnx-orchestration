@@ -24,12 +24,14 @@ try:
 except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
 
+import pattern_natural_key
+import pattern_upsert
 import schema_migration
 from db_backup_rotation import parse_backup_keep, rotate_backups_safe
 
 # Highest PRAGMA user_version stamped by bootstrap_qi_db.
 # Increment this constant whenever a new migration block is added.
-HIGHEST_QI_VERSION = 32
+HIGHEST_QI_VERSION = 33
 
 # VNX Base Configuration
 PATHS = ensure_env()
@@ -1669,6 +1671,30 @@ def _migrate_v32(conn: sqlite3.Connection) -> None:
         log('INFO', "Migrated: added ab_arm column to dispatch_pattern_offered (v32)")
 
 
+def _migrate_v33(conn: sqlite3.Connection) -> None:
+    """V33: natural key UNIQUE(project_id, pattern_type, title) on the pattern tables.
+
+    The ADR-007 index ``ux_<table>_pid`` covers ``(project_id, id)``; ``id`` is an
+    autoincrement, so it never stopped a project from holding one pattern twice.
+    Every writer now goes through ``pattern_upsert``, keyed on the natural key.
+
+    This bootstrap step only creates the index where there is nothing to merge
+    (a fresh DB, or one without duplicates). It never merges, remaps or deletes:
+    a DB that holds duplicates is left untouched, because collapsing rows in the
+    live store is an operator decision. That DB is collapsed by
+    ``scripts/migrate_pattern_natural_key.py --apply --db <path>``, which creates
+    the same index at the end. The writers work in both states.
+    """
+    for spec in pattern_upsert.SPECS:
+        state = pattern_natural_key.create_index_if_clean(conn, spec)
+        if state == "created":
+            log('INFO', f"Migrated: {spec.index_name} on {spec.table}(project_id, pattern_type, title) (v33)")
+        elif state == "blocked":
+            log('WARNING', f"{spec.table} holds duplicate patterns; natural-key index not created. "
+                           "Run scripts/migrate_pattern_natural_key.py --db <path> (dry run) and, "
+                           "after operator approval, --apply (v33)")
+
+
 # Registry mapping version → migration function.
 # bootstrap_qi_db iterates this in sorted key order after V1.
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
@@ -1703,6 +1729,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     30: _migrate_v30,
     31: _migrate_v31,
     32: _migrate_v32,
+    33: _migrate_v33,
 }
 
 

@@ -28,6 +28,8 @@ try:
     from vnx_paths import ensure_env
 except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
+from pattern_upsert import upsert_antipattern, upsert_success_pattern
+from project_scope import resolve_stamp_project_id
 
 CATEGORY = "memory_consolidation"
 
@@ -58,6 +60,14 @@ class ConsolidationResult:
     patterns_merged: int = 0
     dry_run: bool = False
     patterns: List[ExtractedPattern] = field(default_factory=list)
+
+
+def _merge_action(existing: Optional[sqlite3.Row], title: str) -> str:
+    """Name a write that folded into a stored row. ``existing`` is None when the
+    natural key matched a row outside this consolidator's category."""
+    if existing is None or existing["title"] != title:
+        return "merged"
+    return "updated"
 
 
 # ── Similarity helpers ─────────────────────────────────────────────────────────
@@ -426,108 +436,95 @@ class MemoryConsolidator:
 
     # ── Deduplication ──────────────────────────────────────────────────────────
 
+    def _project_id(self) -> str:
+        """Tenant for every write, fail-closed on the DB path (ADR-007)."""
+        if getattr(self, "_resolved_project_id", None) is None:
+            self._resolved_project_id = resolve_stamp_project_id(db_path=str(self.db_path))
+        return self._resolved_project_id
+
     def _find_existing(
         self, conn: sqlite3.Connection, table: str, title: str
     ) -> Optional[sqlite3.Row]:
-        """Return existing row from table that matches title (exact or similar)."""
+        """Return this project's row from table that matches title (exact or similar)."""
+        project_id = self._project_id()
         exact = conn.execute(
-            f"SELECT * FROM {table} WHERE title = ? AND category = ?",
-            (title, CATEGORY),
+            f"SELECT * FROM {table} WHERE title = ? AND category = ? AND project_id = ? "
+            "ORDER BY id LIMIT 1",
+            (title, CATEGORY, project_id),
         ).fetchone()
         if exact:
             return exact
 
-        # Check similarity against all memory_consolidation rows
+        # Check similarity against this project's memory_consolidation rows
         candidates = conn.execute(
-            f"SELECT * FROM {table} WHERE category = ?",
-            (CATEGORY,),
+            f"SELECT * FROM {table} WHERE category = ? AND project_id = ? ORDER BY id",
+            (CATEGORY, project_id),
         ).fetchall()
         for row in candidates:
             if _title_overlap(title, row["title"]) > 0.8:
                 return row
         return None
 
-    def _append_ids(self, existing_json: Optional[str], new_ids: List[str]) -> str:
-        items: list = []
-        if existing_json:
-            try:
-                items = json.loads(existing_json)
-            except (json.JSONDecodeError, TypeError):
-                items = []
-        for nid in new_ids:
-            if nid and nid not in items:
-                items.append(nid)
-        return json.dumps(items[-20:])
-
     # ── Persistence ────────────────────────────────────────────────────────────
+    # Both writers go through pattern_upsert. A similar-title hit is written
+    # under the matched row's natural key, so it folds into that row instead
+    # of starting a second one.
 
     def _upsert_success_pattern(
         self, conn: sqlite3.Connection, p: ExtractedPattern, now: str
     ) -> Tuple[str, int]:
         """Returns ('inserted'|'updated'|'merged', 1)."""
         existing = self._find_existing(conn, "success_patterns", p.title)
-        source_ids = self._append_ids(
-            existing["source_dispatch_ids"] if existing else None,
-            p.source_dispatch_ids,
+        result = upsert_success_pattern(
+            conn,
+            project_id=self._project_id(),
+            pattern_type=existing["pattern_type"] if existing else "approach",
+            title=existing["title"] if existing else p.title[:120],
+            category=CATEGORY,
+            description=p.description[:500],
+            pattern_data=json.dumps({"source": "memory_consolidation", "subtype": p.pattern_subtype}),
+            confidence_score=p.confidence,
+            usage_count=p.evidence_count,
+            source_dispatch_ids=p.source_dispatch_ids,
+            first_seen=now,
+            last_used=now,
+            always_update=("description",),
         )
-        if existing:
-            # Merge evidence counts and recompute confidence
-            existing_usage = (existing["usage_count"] or 0)
-            new_usage = existing_usage + p.evidence_count
-            new_confidence = min(new_usage * 0.1 + p.base_confidence, 1.0)
-            action = "merged" if existing["title"] != p.title else "updated"
-            conn.execute(
-                "UPDATE success_patterns SET usage_count = ?, confidence_score = ?, "
-                "last_used = ?, source_dispatch_ids = ?, description = ? WHERE id = ?",
-                (new_usage, new_confidence, now, source_ids, p.description, existing["id"]),
-            )
-            return action, 1
-
+        if result.inserted:
+            return "inserted", 1
+        # Recompute confidence over the merged evidence, as before the upsert.
+        usage = conn.execute(
+            "SELECT usage_count FROM success_patterns WHERE id = ?", (result.id,)
+        ).fetchone()[0]
         conn.execute(
-            "INSERT INTO success_patterns "
-            "(pattern_type, category, title, description, pattern_data, "
-            " confidence_score, usage_count, source_dispatch_ids, first_seen, last_used) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                "approach", CATEGORY, p.title[:120], p.description[:500],
-                json.dumps({"source": "memory_consolidation", "subtype": p.pattern_subtype}),
-                p.confidence, p.evidence_count, source_ids, now, now,
-            ),
+            "UPDATE success_patterns SET confidence_score = ? WHERE id = ?",
+            (min(int(usage or 0) * 0.1 + p.base_confidence, 1.0), result.id),
         )
-        return "inserted", 1
+        return _merge_action(existing, p.title), 1
 
     def _upsert_antipattern(
         self, conn: sqlite3.Connection, p: ExtractedPattern, now: str
     ) -> Tuple[str, int]:
         existing = self._find_existing(conn, "antipatterns", p.title)
-        source_ids = self._append_ids(
-            existing["source_dispatch_ids"] if existing else None,
-            p.source_dispatch_ids,
+        result = upsert_antipattern(
+            conn,
+            project_id=self._project_id(),
+            pattern_type=existing["pattern_type"] if existing else "approach",
+            title=existing["title"] if existing else p.title[:120],
+            category=CATEGORY,
+            description=p.description[:500],
+            pattern_data=json.dumps({"source": "memory_consolidation", "subtype": p.pattern_subtype}),
+            why_problematic=p.description[:500],
+            severity=p.severity,
+            occurrence_count=p.evidence_count,
+            source_dispatch_ids=p.source_dispatch_ids,
+            first_seen=now,
+            last_seen=now,
+            always_update=("description",),
         )
-        if existing:
-            new_count = (existing["occurrence_count"] or 0) + p.evidence_count
-            action = "merged" if existing["title"] != p.title else "updated"
-            conn.execute(
-                "UPDATE antipatterns SET occurrence_count = ?, last_seen = ?, "
-                "source_dispatch_ids = ?, description = ? WHERE id = ?",
-                (new_count, now, source_ids, p.description, existing["id"]),
-            )
-            return action, 1
-
-        conn.execute(
-            "INSERT INTO antipatterns "
-            "(pattern_type, category, title, description, pattern_data, "
-            " why_problematic, severity, occurrence_count, source_dispatch_ids, "
-            " first_seen, last_seen) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                "approach", CATEGORY, p.title[:120], p.description[:500],
-                json.dumps({"source": "memory_consolidation", "subtype": p.pattern_subtype}),
-                p.description[:500], p.severity, p.evidence_count,
-                source_ids, now, now,
-            ),
-        )
-        return "inserted", 1
+        if result.inserted:
+            return "inserted", 1
+        return _merge_action(existing, p.title), 1
 
     # ── Main pipeline ──────────────────────────────────────────────────────────
 

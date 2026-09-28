@@ -166,7 +166,9 @@ class ConversationAnalyzer:
 
     def bridge_session_to_intelligence(self, metrics: SessionMetrics,
                                        flags: SessionFlags):
-        intelligence_bridge.bridge_session_to_intelligence(self.conn, metrics, flags)
+        intelligence_bridge.bridge_session_to_intelligence(
+            self.conn, metrics, flags, project_id=self._resolve_project_id()
+        )
 
     def _store_session(self, metrics: SessionMetrics, flags: SessionFlags,
                        deep_result: Optional[dict]):
