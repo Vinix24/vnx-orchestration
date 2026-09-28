@@ -204,14 +204,26 @@ def _enrich_cli_instruction(instruction: str, role: str) -> str:
     if _bench_equal_context_enabled():
         return instruction
 
-    try:
-        from dispatch_enricher import apply_repo_map_layer as _apply_repo_map  # noqa: PLC0415
-        instruction = _apply_repo_map(instruction, {"role": role})
-    except Exception as _repo_map_exc:
+    from reviewer_roles import enrichment_allowed  # noqa: PLC0415
+
+    # D1 (OI-1444): review-gate / plan-reviewer never get a repo map here either —
+    # this direct-CLI path applies its own repo-map layer BEFORE deliver_with_recovery
+    # reaches the shared _inject_skill_context guard, so it needs the same check.
+    if enrichment_allowed(role):
+        try:
+            from dispatch_enricher import apply_repo_map_layer as _apply_repo_map  # noqa: PLC0415
+            instruction = _apply_repo_map(instruction, {"role": role})
+        except Exception as _repo_map_exc:
+            import logging as _log_mod
+            _log_mod.getLogger(__name__).warning(
+                "subprocess_dispatch: repo map enrichment failed (%s) — proceeding without",
+                _repo_map_exc,
+            )
+    else:
         import logging as _log_mod
-        _log_mod.getLogger(__name__).warning(
-            "subprocess_dispatch: repo map enrichment failed (%s) — proceeding without",
-            _repo_map_exc,
+        _log_mod.getLogger(__name__).info(
+            "subprocess_dispatch: role=%s is a reviewer role — repo map enrichment suppressed (D1)",
+            role,
         )
 
     try:

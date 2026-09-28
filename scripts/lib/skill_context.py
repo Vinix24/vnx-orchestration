@@ -163,6 +163,20 @@ def _inject_skill_context(
 
     Returns the full pipe_input string ready for `claude -p`.
     """
+    from reviewer_roles import enrichment_allowed
+    if not enrichment_allowed(role):
+        # D1 (OI-1444): review-gate / plan-reviewer get NO repo-map, NO skill/role
+        # CLAUDE.md, NO intelligence/patterns — an enriched reviewer is not
+        # independent, and it contaminates any later measurement of injection's
+        # effect. The raw instruction (the gate's own review instruction, diff/plan,
+        # and verdict contract) and the report-body-contract directive are the only
+        # things a reviewer prompt carries.
+        logger.info(
+            "_inject_skill_context: role=%s is a reviewer role — enrichment suppressed (D1)",
+            role,
+        )
+        return _with_report_directive(instruction, dispatch_metadata)
+
     # Gather intelligence before assembling prompt (best-effort).  Looked up via
     # subprocess_dispatch namespace so test patches at the facade are honoured.
     import subprocess_dispatch as _sd
