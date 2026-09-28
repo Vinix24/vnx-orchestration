@@ -33,6 +33,10 @@ OLLAMA_MODEL = os.environ.get("VNX_OLLAMA_MODEL", "qwen2.5-coder:14b")
 DEEPSEEK_HARNESS_MODEL = os.environ.get("VNX_ANALYZER_DEEPSEEK_MODEL", "deepseek-flash")
 # A run below this DeepSeek balance (USD) is skipped loudly before any session is sent.
 DEEPSEEK_MIN_BALANCE_USD = float(os.environ.get("VNX_ANALYZER_DEEPSEEK_MIN_BALANCE", "0.50"))
+# /user/balance may list only a CNY row while is_available is true. The minimum then
+# applies per currency: 3.50 CNY is 0.50 USD at roughly 7.1 CNY/USD, rounded down so the
+# CNY gate is never stricter than the USD one.
+DEEPSEEK_MIN_BALANCE_CNY = float(os.environ.get("VNX_ANALYZER_DEEPSEEK_MIN_BALANCE_CNY", "3.50"))
 
 # When LLM_STRATEGY="auto", refuse the claude path when the unanalyzed session
 # backlog exceeds this threshold. Protects against metered-spend landmines on

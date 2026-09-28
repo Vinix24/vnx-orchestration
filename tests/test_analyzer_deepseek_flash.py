@@ -202,8 +202,10 @@ def test_balance_probe_hits_user_balance_and_never_v1_models():
 
 @pytest.mark.parametrize("body,status", [
     (_balance_body(total="0.10"), "balance_low"),
-    (_balance_body(available=False), "balance_unavailable"),
-    (_balance_body(currency="CNY"), "balance_unavailable"),
+    (_balance_body(available=False), "balance_low"),
+    (_balance_body(total="1.00", currency="CNY"), "balance_low"),
+    (_balance_body(total="9.00", currency="EUR"), "balance_unavailable"),
+    ({"is_available": True, "balance_infos": []}, "balance_unavailable"),
     ({"is_available": True, "balance_infos": [{"currency": "USD", "total_balance": "n/a"}]},
      "balance_unavailable"),
 ])
@@ -219,6 +221,26 @@ def test_balance_that_cannot_pay_skips_loudly_without_starting_claude(body, stat
     logged = capsys.readouterr().out
     assert "[ERROR]" in logged
     assert SECRET not in logged
+
+
+def test_cny_only_account_that_is_available_runs_on_the_cny_minimum():
+    body = _balance_body(total="110.00", currency="CNY")
+    with patch.dict(os.environ, {"DEEPSEEK_API_KEY": SECRET}), \
+         patch.object(DeepAnalyzer, "_fetch_deepseek_balance", return_value=body, create=True), \
+         patch("subprocess.run", return_value=_ok_completion()):
+        outcome = DeepAnalyzer._try_deepseek_harness("prompt")
+
+    assert outcome.status == "ok"
+
+
+def test_usd_balance_at_the_threshold_boundary_is_unchanged():
+    body = _balance_body(total="0.50")
+    with patch.dict(os.environ, {"DEEPSEEK_API_KEY": SECRET}), \
+         patch.object(DeepAnalyzer, "_fetch_deepseek_balance", return_value=body, create=True), \
+         patch("subprocess.run", return_value=_ok_completion()):
+        outcome = DeepAnalyzer._try_deepseek_harness("prompt")
+
+    assert outcome.status == "ok"
 
 
 def test_balance_endpoint_failure_skips_loudly(capsys):

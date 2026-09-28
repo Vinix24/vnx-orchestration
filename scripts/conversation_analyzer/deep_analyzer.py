@@ -11,6 +11,7 @@ from typing import Dict, Optional
 from .models import (
     SessionMetrics, SessionFlags,
     LLM_STRATEGY, OLLAMA_MODEL, DEEPSEEK_HARNESS_MODEL, DEEPSEEK_MIN_BALANCE_USD,
+    DEEPSEEK_MIN_BALANCE_CNY,
     AUTO_CLAUSE_MAX_SESSIONS,
     DEEP_THRESHOLD_TOKENS, DEEP_THRESHOLD_TOOLS,
     log,
@@ -423,32 +424,39 @@ Respond with valid JSON:
             log("ERROR", msg)
             return LLMOutcome("balance_unavailable", stderr=msg)
 
-        usd = next((info for info in (body.get("balance_infos") or [])
-                    if (info or {}).get("currency") == "USD"), None)
-        if not body.get("is_available") or usd is None:
-            msg = (f"DeepSeek account not available for calls (is_available="
-                   f"{body.get('is_available')}, currencies="
-                   f"{[(i or {}).get('currency') for i in (body.get('balance_infos') or [])]}); "
+        infos = [info for info in (body.get("balance_infos") or []) if info]
+        if not body.get("is_available"):
+            msg = (f"DeepSeek account reports is_available={body.get('is_available')}; "
+                   f"deep analysis is skipped for this run (top up the account)")
+            log("ERROR", msg)
+            return LLMOutcome("balance_low", stderr=msg)
+
+        minimums = {"USD": DEEPSEEK_MIN_BALANCE_USD, "CNY": DEEPSEEK_MIN_BALANCE_CNY}
+        row = next((i for cur in minimums for i in infos if i.get("currency") == cur), None)
+        if row is None:
+            msg = (f"DeepSeek balance response has no USD or CNY row (currencies="
+                   f"{[i.get('currency') for i in infos]}); "
                    f"deep analysis is skipped for this run")
             log("ERROR", msg)
             return LLMOutcome("balance_unavailable", stderr=msg)
 
+        currency = row["currency"]
         try:
-            balance = float(usd.get("total_balance"))
+            balance = float(row.get("total_balance"))
         except (TypeError, ValueError):
-            msg = ("DeepSeek balance response has no readable USD total_balance; "
-                   "deep analysis is skipped for this run")
+            msg = (f"DeepSeek balance response has no readable {currency} total_balance; "
+                   f"deep analysis is skipped for this run")
             log("ERROR", msg)
             return LLMOutcome("balance_unavailable", stderr=msg)
 
-        if balance < DEEPSEEK_MIN_BALANCE_USD:
-            msg = (f"DeepSeek balance {balance:.2f} USD is below the minimum "
-                   f"{DEEPSEEK_MIN_BALANCE_USD:.2f} USD; deep analysis is skipped "
+        if balance < minimums[currency]:
+            msg = (f"DeepSeek balance {balance:.2f} {currency} is below the minimum "
+                   f"{minimums[currency]:.2f} {currency}; deep analysis is skipped "
                    f"for this run (top up the account)")
             log("ERROR", msg)
             return LLMOutcome("balance_low", stderr=msg)
 
-        log("INFO", f"DeepSeek balance OK: {balance:.2f} USD")
+        log("INFO", f"DeepSeek balance OK: {balance:.2f} {currency}")
         return LLMOutcome("ok")
 
     @classmethod
