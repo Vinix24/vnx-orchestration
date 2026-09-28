@@ -56,6 +56,12 @@ def gate_dirs(tmp_path, monkeypatch):
     reports = tmp_path / "unified_reports"
     reports.mkdir()
     monkeypatch.setenv("VNX_STATE_DIR", str(state))
+    # OI-1887: the harness-lane path now fetches origin/<branch> BEFORE
+    # dispatching. This file's payloads name "feature/test", a branch that
+    # does not exist on any real remote — fake it so these tests stay
+    # hermetic, exactly like `_fake_gate_worktree` does for the (unrelated)
+    # OI-708 codex/gemini worktree checkout in test_gate_runner.py.
+    monkeypatch.setattr(gate_runner, "fetch_branch", lambda *a, **kw: None)
     return {"state": state, "reports": reports}
 
 
@@ -88,12 +94,13 @@ def _run_harness(gate_dirs, monkeypatch, gate: str, report_text: str, pr_number:
     """
     calls = []
 
-    def fake_factory(data_dir, timeout_seconds, *, role="plan-reviewer"):
+    def fake_factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None):
         def _dispatch(provider, model, instruction, dispatch_id):
             calls.append({
                 "data_dir": data_dir,
                 "timeout_seconds": timeout_seconds,
                 "role": role,
+                "base_ref": base_ref,
                 "provider": provider,
                 "model": model,
                 "instruction": instruction,

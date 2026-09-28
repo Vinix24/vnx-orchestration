@@ -123,6 +123,46 @@ def _worktree_lock(root: Path):
             fcntl.flock(lf, fcntl.LOCK_UN)
 
 
+def fetch_branch(
+    branch: str,
+    *,
+    gate: str,
+    identifier: str,
+    project_root: Optional[Path] = None,
+) -> Path:
+    """Validate *branch* and ``git fetch origin <branch>``. Returns the resolved project root.
+
+    Extracted from ``create_gate_worktree`` (OI-1887) so a caller that only
+    needs to confirm a PR branch is fetchable — the harness-lane pre-flight in
+    ``gate_runner._run_harness_lane_path``, which isolates via
+    ``provider_dispatch --base-ref`` rather than a ``create_gate_worktree``
+    checkout — does not have to create a worktree just to find that out, and
+    never duplicates the validate-then-fetch sequence.
+
+    Raises GateWorktreeError when branch is empty, unsafe, or the fetch fails
+    — callers must book an execution failure rather than silently falling
+    back to another ref (e.g. main).
+    """
+    if not branch:
+        raise GateWorktreeError(
+            f"fetch_branch requires a non-empty branch (gate={gate!r}, identifier={identifier!r})"
+        )
+    _validate_branch(branch, gate=gate, identifier=identifier)
+
+    root = _resolve_project_root(project_root)
+    try:
+        subprocess.run(
+            ["git", "fetch", "origin", branch],
+            cwd=str(root), check=True, capture_output=True, text=True, timeout=30,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        detail = getattr(exc, "stderr", "") or str(exc)
+        raise GateWorktreeError(
+            f"fetch_branch: git fetch origin {branch!r} failed: {detail}"
+        ) from exc
+    return root
+
+
 def create_gate_worktree(
     *,
     branch: str,
@@ -133,34 +173,16 @@ def create_gate_worktree(
     """Fetch origin/<branch> and check it out into an isolated detached worktree.
 
     Steps:
-      1. git fetch origin <branch>
+      1. git fetch origin <branch>  (via fetch_branch — validates + fetches)
       2. git worktree add --detach <path> origin/<branch>
 
     Raises GateWorktreeError when branch is empty or either git step fails —
     callers must fail the gate rather than silently falling back to the
     orchestrator's (possibly stale) checkout.
     """
-    if not branch:
-        raise GateWorktreeError(
-            "create_gate_worktree requires a non-empty branch "
-            f"(gate={gate!r}, identifier={identifier!r})"
-        )
-    _validate_branch(branch, gate=gate, identifier=identifier)
-
-    root = _resolve_project_root(project_root)
+    root = fetch_branch(branch, gate=gate, identifier=identifier, project_root=project_root)
     wt_path = _worktree_dir(root, gate, identifier)
     wt_path.parent.mkdir(parents=True, exist_ok=True)
-
-    try:
-        subprocess.run(
-            ["git", "fetch", "origin", branch],
-            cwd=str(root), check=True, capture_output=True, text=True, timeout=30,
-        )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-        detail = getattr(exc, "stderr", "") or str(exc)
-        raise GateWorktreeError(
-            f"create_gate_worktree: git fetch origin {branch!r} failed: {detail}"
-        ) from exc
 
     try:
         with _worktree_lock(root):

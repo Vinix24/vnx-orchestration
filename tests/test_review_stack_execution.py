@@ -125,6 +125,11 @@ def _no_provider_process(monkeypatch):
         return real_popen(args, *a, **kw)
 
     monkeypatch.setattr(gate_runner.subprocess, "Popen", guarded_popen)
+    # OI-1887: the harness-lane path now fetches origin/<branch> BEFORE
+    # dispatching — fake it so this file's synthetic BRANCH/PR never need a
+    # real git remote, exactly like the Popen guard above fakes the process
+    # boundary.
+    monkeypatch.setattr(gate_runner, "fetch_branch", lambda *a, **kw: None)
 
 
 @pytest.fixture
@@ -135,9 +140,12 @@ def lane(env, monkeypatch):
 
     calls: list = []
 
-    def factory(data_dir, timeout_seconds, *, role="plan-reviewer"):
+    def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None):
         def dispatch(provider, model, instruction, dispatch_id):
-            calls.append({"provider": provider, "model": model, "dispatch_id": dispatch_id, "role": role})
+            calls.append({
+                "provider": provider, "model": model, "dispatch_id": dispatch_id,
+                "role": role, "base_ref": base_ref,
+            })
             return _PASS_REPORT
         return dispatch
 

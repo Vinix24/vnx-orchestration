@@ -49,10 +49,16 @@ def _fake_gate_worktree(tmp_path, monkeypatch):
     Tests that specifically exercise the worktree-checkout mechanism override
     these via their own ``with patch(...)`` block, which nests correctly over
     this default for the duration of that test.
+
+    Also fakes ``fetch_branch`` (OI-1887's harness-lane pre-flight) to a no-op
+    for the same reason: without this, every harness-lane ``runner.run(...)``
+    call below would try a REAL ``git fetch origin <branch>`` against
+    whatever ``branch`` the test payload names.
     """
     fake_path = tmp_path / "_fake_gate_worktree"
     monkeypatch.setattr(gate_runner, "create_gate_worktree", lambda **kw: fake_path)
     monkeypatch.setattr(gate_runner, "remove_gate_worktree", lambda *a, **kw: None)
+    monkeypatch.setattr(gate_runner, "fetch_branch", lambda *a, **kw: None)
     return fake_path
 
 
@@ -1238,12 +1244,13 @@ class TestHarnessLaneDelegation:
     def _fake_dispatcher(report_text):
         calls = []
 
-        def factory(data_dir, timeout_seconds, *, role="plan-reviewer"):
+        def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None):
             def dispatch(provider, model, instruction, dispatch_id):
                 calls.append({
                     "data_dir": data_dir,
                     "timeout_seconds": timeout_seconds,
                     "role": role,
+                    "base_ref": base_ref,
                     "provider": provider,
                     "model": model,
                     "instruction": instruction,
@@ -1280,12 +1287,23 @@ class TestHarnessLaneDelegation:
 
         monkeypatch.setattr("plan_gate_panel._make_default_dispatcher", factory)
         monkeypatch.delenv("VNX_KIMI_GATE_MODEL", raising=False)
-        monkeypatch.setattr(
-            gate_runner.subprocess, "Popen",
-            lambda *a, **kw: (_ for _ in ()).throw(
-                AssertionError("harness-lane must delegate, not start a process")
-            ),
-        )
+
+        real_popen = gate_runner.subprocess.Popen
+
+        def _fail_unless_git(*a, **kw):
+            # OI-1887: the main-checkout vangnet's own read-only `git` calls
+            # (via subprocess.run, which calls Popen internally) are not the
+            # thing this guard exists to catch — only a direct spawn of the
+            # review agent's own binary is. Real subprocess.run(["git", ...])
+            # already fails hermetically-but-safely against whatever repo
+            # happens to be the test process's cwd; that is fine here since
+            # this test asserts on delegation, not on git's own output.
+            argv = a[0] if a else kw.get("args")
+            if isinstance(argv, (list, tuple)) and argv and argv[0] == "git":
+                return real_popen(*a, **kw)
+            raise AssertionError("harness-lane must delegate, not start a process")
+
+        monkeypatch.setattr(gate_runner.subprocess, "Popen", _fail_unless_git)
 
         # (a) A builder report sits on disk for the SAME dispatch the bug
         # would have routed the gate through. The gate must not pick it up.
@@ -1350,6 +1368,8 @@ class TestHarnessLaneDelegation:
         assert calls[0]["model"] == "kimi-k3"
         assert calls[0]["dispatch_id"] == gate_dispatch_id
         assert calls[0]["instruction"] == "Review this diff for correctness and security"
+        # OI-1887: isolated on the PR's own branch, never the default origin/main.
+        assert calls[0]["base_ref"] == f"origin/{payload['branch']}"
 
     def test_harness_lane_builds_the_diff_prompt_when_none_is_supplied(
         self, gate_env, monkeypatch,

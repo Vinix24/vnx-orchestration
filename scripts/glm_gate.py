@@ -632,7 +632,18 @@ def main(argv: "list[str] | None" = None) -> int:
         # plan-reviewer panelists (which DO need the file-authoring, fence,
         # and vocabulary this role change removes) untouched — a role-level
         # split, not a dispatch_id string check.
-        dispatcher = _make_default_dispatcher(str(base_data_dir), args.timeout, role="review-gate")
+        # OI-1887: isolate the governed dispatch on the PR's own branch instead
+        # of the default origin/main — measured 27-09 on PR #1950 via
+        # gate_runner's harness-lane path (same _make_default_dispatcher call,
+        # same missing base_ref): with no PR branch of its own to isolate on,
+        # the agent fetched/checked out the branch itself, in the
+        # orchestrator's own checkout. `branch` is already resolved above
+        # (get_pr_head_branch, empty only for an offline --diff-file run,
+        # which has no real branch to isolate on either).
+        dispatcher = _make_default_dispatcher(
+            str(base_data_dir), args.timeout, role="review-gate",
+            base_ref=(f"origin/{branch}" if branch else None),
+        )
         prompt = _build_prompt(diff, args.pr, diff_cap)
         # OI-1442: the deterministic half. The prompt tells the model to report
         # instruction-shaped text in the diff as a finding; this scan does not

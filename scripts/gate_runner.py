@@ -10,6 +10,7 @@ Entry point: GateRunner.run() — called from ReviewGateManager.execute_gate().
 from __future__ import annotations
 
 import json
+import logging
 import os
 import select
 import shutil
@@ -30,8 +31,16 @@ from unified_report_schema import SchemaViolation, extract_frontmatter, parse_fr
 import gate_recorder as _rec
 import gate_artifacts as _art
 import vertex_ai_runner as _vtx
-from gate_worktree import create_gate_worktree, remove_gate_worktree, GateWorktreeError
-from gate_prompt import build_review_prompt  # OI-1442: the diff is data, not instruction
+from gate_worktree import (
+    create_gate_worktree,
+    remove_gate_worktree,
+    fetch_branch,
+    GateWorktreeError,
+)
+from gate_prompt import (  # OI-1442: the diff is data, not instruction
+    build_review_prompt,
+    default_review_instruction,
+)
 import gate_depth  # OI-1851: record what part of the diff each prompt carries
 from prompt_assembler import PromptAssembler, format_for_provider
 from gate_lane_contract import (  # C6 step 3: one source, three readers
@@ -40,6 +49,8 @@ from gate_lane_contract import (  # C6 step 3: one source, three readers
     VERDICT_CONTRACT as _HARNESS_LANE_VERDICT_CONTRACT,
     max_diff_chars as _harness_lane_max_diff_chars,
 )
+
+log = logging.getLogger(__name__)
 
 _REVIEWER_VERDICT_TEMPLATE = (
     "Respond with a structured JSON verdict only:\n"
@@ -79,6 +90,22 @@ GATE_CLI_ARGS: Dict[str, List[str]] = {
 # this must stay bounded — but never zero (OI-1293: a discarded tail hides the
 # actual failure reason, e.g. a quota-reset time, behind a bare exit code).
 _REASON_DETAIL_TAIL_CHARS = 4000
+
+# OI-1887: appended to the harness-lane instruction so the dispatched model is
+# told, in its own prompt, that it is already sitting in an isolated checkout
+# of the PR head (the provider's own worktree, isolated via `--base-ref`) and
+# must stay there — measured 27-09 on PR #1950, where the agent had no such
+# instruction and fetched/checked out the PR branch in the orchestrator's own
+# checkout instead. This is the FIRST layer only: it does not by itself stop a
+# model that ignores it, which is what the deterministic before/after snapshot
+# in ``GateRunner._run_harness_lane_path`` (see ``_capture_main_checkout_state``)
+# is for.
+_HARNESS_LANE_ISOLATION_NOTICE = (
+    "Your working directory is already an isolated checkout of this PR's head "
+    "commit — stay in it. Do not `cd` to another path, and do not run "
+    "`git fetch`, `git checkout`, `git switch`, or `git branch` against any "
+    "other checkout."
+)
 
 # Harness-lane gates (glm_gate/kimi_gate) delegate to the governed dispatcher
 # (C6 step 1). The _HARNESS_LANE_* aliases imported at the top are the SAME
@@ -195,6 +222,112 @@ def _lifted_harness_lane_exit_code(report_text: str) -> Optional[int]:
         return None
     exit_code = frontmatter.get("exit_code")
     return exit_code if isinstance(exit_code, int) else None
+
+
+def _git_capture(args: List[str], cwd: str) -> str:
+    """Run a read-only ``git`` command and return its stdout, stripped.
+
+    Never raises: a failure (unresolvable HEAD, not a repo, timeout) is
+    reported as a distinct, non-empty marker string rather than raising or
+    returning an empty string that would read the same as "clean" — the
+    vangnet this feeds (``_main_checkout_state_diff``) must be able to tell
+    "measured, unchanged" apart from "could not measure".
+    """
+    try:
+        result = subprocess.run(
+            ["git"] + args, cwd=cwd, capture_output=True, text=True, timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return f"<git {' '.join(args)} error: {exc}>"
+    if result.returncode != 0:
+        return f"<git {' '.join(args)} failed (exit {result.returncode}): {result.stderr.strip()}>"
+    return result.stdout.strip()
+
+
+def _capture_branch_heads(cwd: str) -> str:
+    """Return a stable, comparable snapshot of local branch heads, excluding ``dispatch/*``.
+
+    ``dispatch/<id>`` is not evidence of a touched main checkout: the fabric
+    mints one for every dispatch, and ``refs/heads`` is shared across every
+    worktree of a repo — so it moves for reasons that have nothing to do
+    with THIS checkout being touched. Two sources of that churn are normal
+    even on a clean harness-lane run:
+
+      1. The gate's own dispatch: ``_prepare_provider_workdir`` ->
+         ``create_dispatch_worktree`` runs ``git worktree add <path> -b
+         dispatch/<safe_id>`` for the provider's isolated worktree, and that
+         branch is left behind after teardown (measured: dozens of stale
+         ``dispatch/glm-gate-pr...`` branches accumulate over time).
+      2. Any OTHER dispatch running concurrently in a sibling worktree of
+         the same repo mints its own ``dispatch/<id>`` at the same time.
+
+    Filtering those out by name is deliberately narrow — it is not "ignore
+    all branch churn", it is "ignore the one prefix the fabric itself owns
+    and creates as a side effect of dispatching, per worktree". Every OTHER
+    branch appearing, disappearing, or being reset to a different commit is
+    still exactly what this vangnet exists to catch (PR #1950's stray
+    ``pr1950``, still reproduced in
+    ``TestAgentTouchingMainCheckoutIsCaught``). Compared by name AND sha via
+    ``git for-each-ref``, not by name alone, so a branch reset to a
+    different commit under an unchanged name is still caught too.
+    """
+    raw = _git_capture(
+        ["for-each-ref", "--format=%(refname:short) %(objectname)", "refs/heads"], cwd,
+    )
+    if raw.startswith("<git "):
+        return raw
+    lines = [
+        line for line in raw.splitlines()
+        if line.strip() and not line.split(" ", 1)[0].startswith("dispatch/")
+    ]
+    return "\n".join(sorted(lines))
+
+
+def _capture_main_checkout_state(project_root: Optional[Path]) -> Dict[str, str]:
+    """Snapshot the orchestrator's OWN checkout: HEAD ref/sha, branch heads, working-tree status.
+
+    OI-1887 vangnet: the harness-lane isolation this file builds (PR-branch
+    worktree via ``--base-ref``, an explicit "stay in your worktree" line in
+    the prompt) is the intended fix, but the dispatched model can still know
+    the orchestrator's absolute checkout path and `cd` into it regardless of
+    what it was told — exactly what happened on PR #1950. This snapshot is
+    the deterministic fallback: taken before the dispatch and compared after
+    (see ``_main_checkout_state_diff``), it catches a touched main checkout
+    even when the model ignored every instruction meant to prevent it.
+
+    HEAD is the symbolic ref (branch name) when on a branch, falling back to
+    the raw sha in detached HEAD — either way, a value that changes the
+    instant something runs `git checkout`/`git switch` in this checkout.
+    Branch heads exclude ``dispatch/*`` — see ``_capture_branch_heads``.
+    """
+    cwd = str(project_root) if project_root else "."
+    head = _git_capture(["symbolic-ref", "-q", "HEAD"], cwd)
+    if head.startswith("<git "):
+        head = _git_capture(["rev-parse", "HEAD"], cwd)
+    return {
+        "head": head,
+        "branches": _capture_branch_heads(cwd),
+        "status": _git_capture(["status", "--porcelain"], cwd),
+    }
+
+
+def _main_checkout_state_diff(
+    before: Dict[str, str], after: Dict[str, str],
+) -> Optional[str]:
+    """Return a human-readable diff between two ``_capture_main_checkout_state`` snapshots.
+
+    None when every field matches — the common case, and the only case that
+    must not book a failure. A non-None return names every field that moved,
+    not just the first, so ``reason_detail`` on the resulting
+    ``harness_lane_touched_main_checkout`` record tells a human exactly what
+    changed without them having to re-run the comparison themselves.
+    """
+    diffs = [
+        f"{key}: {before.get(key)!r} -> {after.get(key)!r}"
+        for key in ("head", "branches", "status")
+        if before.get(key) != after.get(key)
+    ]
+    return "; ".join(diffs) if diffs else None
 
 
 def _build_reason_detail(base_detail: str, stdout: str, stderr: str) -> str:
@@ -522,10 +655,47 @@ class GateRunner:
         exactly like codex/gemini stdout. A provider-outage/dispatch failure is
         an execution failure (``unavailable``), never ``failed`` — the same
         OI-1142 separation the standalone gates enforce.
+
+        OI-1887: measured 27-09 on PR #1950, the glm-harness agent had no PR
+        branch of its own to isolate on — ``_prepare_provider_workdir`` isolated
+        it on ``origin/main`` — so it fetched and checked out the PR branch
+        itself, 96 times, IN THE ORCHESTRATOR'S OWN CHECKOUT (the absolute path
+        was literally in its own cwd prefix). Two independent layers close
+        this, neither trusting the other alone:
+          1. ``branch`` is validated and fetched up front (``fetch_branch``,
+             reused from ``gate_worktree`` — the same validate-then-fetch
+             sequence ``create_gate_worktree`` uses) and threaded into the
+             dispatcher as ``origin/<branch>``, so the provider's OWN isolated
+             worktree already has the PR branch and the agent has no reason to
+             fetch anything itself. A missing/unfetchable branch fails loud
+             here, before any dispatch, under its own reason — never a silent
+             fallback to main.
+          2. Deterministic vangnet: the orchestrator's own checkout state is
+             snapshotted before the dispatch and compared after (see
+             ``_capture_main_checkout_state``) — because the model can still
+             know the absolute path and `cd` there regardless of instruction
+             (1) and the isolated worktree from (1). A touched main checkout
+             OVERRIDES whatever the dispatch itself returned, including a
+             PASS: a verdict produced while the orchestrator's own checkout
+             was mutated is not trustworthy evidence.
         """
         # Lazy import: plan_gate_panel pulls in the whole governed dispatch
         # graph, and only the harness-lane path needs it.
         from plan_gate_panel import _make_default_dispatcher
+
+        branch = request_payload.get("branch", "")
+        identifier = pr_id if pr_id else (str(pr_number) if pr_number is not None else "unknown")
+        try:
+            fetch_branch(branch, gate=gate, identifier=identifier, project_root=self._project_root)
+        except GateWorktreeError as exc:
+            return _rec.record_failure_simple(
+                gate=gate, pr_number=pr_number, pr_id=pr_id,
+                reason="harness_lane_branch_unavailable",
+                reason_detail=str(exc),
+                request_payload=request_payload,
+                requests_dir=self._requests_dir, results_dir=self._results_dir,
+            )
+        base_ref = f"origin/{branch}"
 
         # reports_dir is <data_dir>/unified_reports, so its parent is the data
         # dir the dispatcher resolves and the lane writes its report into.
@@ -541,18 +711,58 @@ class GateRunner:
         request_payload["provider"] = provider
         request_payload["model"] = model
 
+        main_checkout_before = _capture_main_checkout_state(self._project_root)
+
         _start = time.monotonic()
+        dispatch_exc: Optional[Exception] = None
+        report_text = ""
         try:
             dispatcher = _make_default_dispatcher(
                 str(data_dir), _HARNESS_LANE_TIMEOUT_SECONDS, role="review-gate",
+                base_ref=base_ref,
             )
             report_text = dispatcher(provider, model, prompt, dispatch_id)
         except Exception as exc:  # noqa: BLE001 — governed dispatch/report-read failure
+            dispatch_exc = exc
+
+        # OI-1887 vangnet, checked BEFORE any result is written (never after):
+        # once materialize_artifacts/record_failure below writes a TERMINAL
+        # record (e.g. a decided `completed` PASS), gate_recorder's own
+        # never-downgrade-a-decided-verdict guard (OI-1469/OI-1470) refuses a
+        # second write that tries to replace it with `unavailable` — exactly
+        # the transition this vangnet needs to make. So this must be the
+        # FIRST and ONLY write for a touched checkout, short-circuiting every
+        # branch below (a raised exception included) rather than wrapping
+        # each one's own write after the fact.
+        main_checkout_drift = _main_checkout_state_diff(
+            main_checkout_before, _capture_main_checkout_state(self._project_root),
+        )
+        if main_checkout_drift:
+            log.error(
+                "OI-1887: harness-lane gate=%s pr=%s touched the orchestrator's own "
+                "checkout during dispatch: %s",
+                gate, pr_id or pr_number, main_checkout_drift,
+            )
+            return _rec.record_failure(
+                gate=gate, pr_number=pr_number, pr_id=pr_id,
+                result={
+                    "reason": "harness_lane_touched_main_checkout",
+                    "reason_detail": main_checkout_drift,
+                    "duration_seconds": time.monotonic() - _start,
+                    "partial_output_lines": len(report_text.splitlines()) if report_text else 0,
+                    "runner_pid": os.getpid(),
+                },
+                request_payload=request_payload,
+                requests_dir=self._requests_dir,
+                results_dir=self._results_dir,
+            )
+
+        if dispatch_exc is not None:
             return _rec.record_failure(
                 gate=gate, pr_number=pr_number, pr_id=pr_id,
                 result={
                     "reason": "harness_lane_dispatch_error",
-                    "reason_detail": str(exc),
+                    "reason_detail": str(dispatch_exc),
                     "duration_seconds": time.monotonic() - _start,
                     "partial_output_lines": 0,
                     "runner_pid": os.getpid(),
@@ -810,12 +1020,17 @@ class GateRunner:
         diff_cap = _harness_lane_max_diff_chars(gate)
         # OI-1851: the one place that knows what the lane was handed.
         request_payload["diff_coverage"] = gate_depth.diff_coverage(diff_content, diff_cap)
+        instruction = (
+            f"{default_review_instruction(gate, str(pr_number))}\n\n"
+            f"{_HARNESS_LANE_ISOLATION_NOTICE}"
+        )
         return build_review_prompt(
             gate_name=gate,
             pr=str(pr_number),
             diff_text=diff_content,
             verdict_contract=_HARNESS_LANE_VERDICT_CONTRACT,
             max_chars=diff_cap,
+            instruction=instruction,
         )
 
     # Subprocess execution — stays here so tests can patch gate_runner.subprocess.Popen,

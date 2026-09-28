@@ -1297,7 +1297,7 @@ def _run_claude_headless_seat(
 
 def _make_default_dispatcher(
     data_dir: Optional[str], timeout_seconds: int,
-    *, role: str = "plan-reviewer",
+    *, role: str = "plan-reviewer", base_ref: Optional[str] = None,
 ) -> DispatcherFn:
     """Real dispatcher: run a panelist through its governed lane, return the report text.
 
@@ -1317,6 +1317,15 @@ def _make_default_dispatcher(
     with a different role gets the generic (non-plan-framed) file-ref instruction on the
     claude seat, and that role is stamped on both lanes so govern() and the phantom-guard
     evaluate it correctly instead of being told it is a plan review.
+
+    ``base_ref``: OI-1887 — threaded straight into ``provider_dispatch.py --base-ref``
+    (which already threads it into ``create_dispatch_worktree``, see that module) so a
+    review-gate caller reviewing a PR can isolate the provider's worktree on
+    ``origin/<pr-branch>`` instead of the default ``origin/main``. None (the default)
+    leaves the plan-gate and deliberation-panel callers unchanged: neither reviews a PR
+    branch, so both keep isolating on main. Never applies to the claude branch below —
+    that lane isolates via ``dispatch_worktree_isolation`` on its own dispatch_id and has
+    no PR branch to isolate on either.
     """
     base = _resolve_data_dir(data_dir)
 
@@ -1414,6 +1423,8 @@ def _make_default_dispatcher(
                 "--instruction", instruction,
                 "--no-auto-commit",
             ]
+            if base_ref:
+                cmd += ["--base-ref", base_ref]
             proc = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=timeout_seconds,
                 check=False, env=env,
