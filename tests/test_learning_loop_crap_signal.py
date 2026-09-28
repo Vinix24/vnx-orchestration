@@ -109,3 +109,9 @@ def test_produces_crap_does_not_reach_downstream_pipeline(loop_env):
 
     mock_persist.assert_not_called()
     mock_archive.assert_not_called()
+
+
+@pytest.fixture(autouse=True)
+def _persist_mode(monkeypatch):
+    """These tests cover what the loop persists; shadow mode (the default) persists nothing."""
+    monkeypatch.setenv("VNX_LEARNING_LOOP_PERSIST", "1")

@@ -939,6 +939,80 @@ def _dream_completed_degradation(event: dict, data_root: Path) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Check: nightly learning-loop beacon
+# ---------------------------------------------------------------------------
+
+def check_learning_loop_beacon(paths: Dict[str, str]) -> List[CheckResult]:
+    """The nightly learning-loop phase must leave a fresh beacon.
+
+    The phase hangs on the 02:00 conversation-analyzer job. That job is
+    expected here when its log exists in this project's state dir. FAIL when the
+    beacon is missing or older than 36 hours; WARN when the last run failed
+    (or the loop was degraded). A beacon stamped for another project is treated
+    as absent (ADR-007): it says nothing about this one.
+    """
+    from learning_loop_beacon import (
+        MAX_BEACON_AGE_HOURS,
+        STATUS_FAILED,
+        beacon_age_hours,
+        beacon_path,
+        read_beacon,
+    )
+    from vnx_paths import resolve_project_id
+
+    state_dir = Path(paths["VNX_STATE_DIR"])
+    job_expected = (state_dir / "conversation_analyzer.log").exists()
+    beacon = read_beacon(state_dir)
+    if beacon is not None:
+        own_id = resolve_project_id()
+        beacon_id = beacon.get("project_id")
+        if own_id and beacon_id and beacon_id != own_id:
+            beacon = None
+
+    remediation = (
+        "Run scripts/conversation_analyzer_nightly.sh once and read "
+        f"{state_dir / 'conversation_analyzer.log'} (Phase 2.6)."
+    )
+    if beacon is None:
+        if not job_expected:
+            return [CheckResult("learning_loop", PASS,
+                                "Nightly job has not run in this project; no beacon expected")]
+        return [CheckResult(
+            "learning_loop", FAIL,
+            f"No learning-loop beacon ({beacon_path(state_dir)}) although the nightly job runs here",
+            remediation,
+        )]
+
+    age_h = beacon_age_hours(beacon)
+    if age_h is None or age_h > MAX_BEACON_AGE_HOURS:
+        age = "unreadable timestamp" if age_h is None else f"{age_h:.1f}h old"
+        return [CheckResult(
+            "learning_loop", FAIL,
+            f"Learning-loop beacon is stale ({age}, limit {MAX_BEACON_AGE_HOURS}h)",
+            remediation,
+        )]
+
+    status = str(beacon.get("status") or "unknown")
+    mode = beacon.get("mode") or "unknown"
+    if status == STATUS_FAILED:
+        return [CheckResult(
+            "learning_loop", WARN,
+            f"Last learning-loop run FAILED ({mode}, {age_h:.1f}h ago): {beacon.get('error')}",
+            remediation,
+        )]
+    if status not in ("ok", "dormant"):
+        return [CheckResult(
+            "learning_loop", WARN,
+            f"Learning-loop status is {status!r} ({mode}, {age_h:.1f}h ago)",
+            remediation,
+        )]
+    return [CheckResult(
+        "learning_loop", PASS,
+        f"Learning-loop beacon fresh ({mode}, {age_h:.1f}h ago, status={status})",
+    )]
+
+
+# ---------------------------------------------------------------------------
 # Check: t0_state.json freshness + SessionStart refresh hook (OI-1058)
 # ---------------------------------------------------------------------------
 
@@ -1141,6 +1215,7 @@ def run_doctor(paths: Dict[str, str], *,
     results.extend(check_contamination(paths))
     results.extend(check_state_root_location(paths))
     results.extend(check_dream_cycle(paths))
+    results.extend(check_learning_loop_beacon(paths))
     results.extend(check_t0_state_freshness(paths))
     results.extend(check_branch_protection_drift(paths))
 

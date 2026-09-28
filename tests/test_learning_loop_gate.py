@@ -171,3 +171,9 @@ class TestEvaluateActivationGateDirect:
 
         assert gate["action"] == "run"
         assert gate["probe_health"] == "ok"
+
+
+@pytest.fixture(autouse=True)
+def _persist_mode(monkeypatch):
+    """These tests cover what the loop persists; shadow mode (the default) persists nothing."""
+    monkeypatch.setenv("VNX_LEARNING_LOOP_PERSIST", "1")

@@ -82,3 +82,9 @@ def test_unknown_probe_no_db_file_also_gates(tmp_path, monkeypatch):
 
     assert gate["action"] == "degraded"
     assert gate["probe_health"] == "unknown"
+
+
+@pytest.fixture(autouse=True)
+def _persist_mode(monkeypatch):
+    """These tests cover what the loop persists; shadow mode (the default) persists nothing."""
+    monkeypatch.setenv("VNX_LEARNING_LOOP_PERSIST", "1")

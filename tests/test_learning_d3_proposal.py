@@ -423,3 +423,9 @@ def test_real_history_produces_at_least_one_proposal():
     assert all(r.get("occurrence_count", 0) >= 2 for r in rules), (
         "All proposals must have occurrence_count >= 2 (recurrence threshold)"
     )
+
+
+@pytest.fixture(autouse=True)
+def _persist_mode(monkeypatch):
+    """These tests cover what the loop persists; shadow mode (the default) persists nothing."""
+    monkeypatch.setenv("VNX_LEARNING_LOOP_PERSIST", "1")

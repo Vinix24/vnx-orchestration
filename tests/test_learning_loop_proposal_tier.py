@@ -236,3 +236,9 @@ def test_missing_receipts_file_is_safe(loop_env):
     # No t0_receipts.ndjson written.
     assert not (state_dir / "t0_receipts.ndjson").exists()
     assert loop.extract_failure_patterns() == []
+
+
+@pytest.fixture(autouse=True)
+def _persist_mode(monkeypatch):
+    """These tests cover what the loop persists; shadow mode (the default) persists nothing."""
+    monkeypatch.setenv("VNX_LEARNING_LOOP_PERSIST", "1")

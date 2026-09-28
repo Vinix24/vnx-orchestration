@@ -106,6 +106,11 @@ def _make_loop_with_db(db_path: Path):
         loop.conn = sqlite3.connect(str(db_path))
         loop.conn.row_factory = sqlite3.Row
         loop.pattern_metrics = {}
+        loop.persist = True
+        loop.cutoff = ll.resolve_receipt_cutoff()
+        loop.receipt_stats = {"read": 0, "after_cutoff": 0, "before_cutoff": 0}
+        loop.shadow = {"proposals": [], "archival_candidates": [], "supersede_candidates": 0,
+                       "persist_preview": {}, "steps_not_run": []}
         loop.learning_stats = {
             "patterns_tracked": 0,
             "patterns_used": 0,
@@ -155,3 +160,9 @@ def test_corrupt_state_logs_warning(tmp_path, caplog):
     assert any("failed" in m.lower() or "query" in m.lower() for m in debug_msgs), (
         f"Expected a debug log from OperationalError, got: {debug_msgs}"
     )
+
+
+@pytest.fixture(autouse=True)
+def _persist_mode(monkeypatch):
+    """These tests cover what the loop persists; shadow mode (the default) persists nothing."""
+    monkeypatch.setenv("VNX_LEARNING_LOOP_PERSIST", "1")
