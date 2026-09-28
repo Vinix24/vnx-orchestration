@@ -29,7 +29,10 @@ try:
     from vnx_paths import ensure_env, refuse_real_central_store_write_under_test_runner
 except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
-from contract_invalid_window import is_stale_contract_invalid
+from contract_invalid_window import (
+    contract_invalid_effective_timestamp,
+    is_stale_contract_invalid,
+)
 from pattern_upsert import upsert_antipattern, upsert_success_pattern
 from project_scope import resolve_stamp_project_id
 
@@ -225,6 +228,53 @@ class PatternUsageMetric:
 
 class LearningLoop:
     """Learning loop for pattern optimization and confidence adjustment"""
+
+    # Run-state read outside __init__ resolves lazily, so an instance built
+    # via ``__new__`` behaves like a fresh one (env-derived, never AttributeError).
+    _persist: Optional[bool] = None
+    _cutoff: Optional[datetime] = None
+
+    @property
+    def persist(self) -> bool:
+        return persist_enabled() if self._persist is None else self._persist
+
+    @persist.setter
+    def persist(self, value: bool) -> None:
+        self._persist = value
+
+    @property
+    def cutoff(self) -> datetime:
+        if self._cutoff is None:
+            self._cutoff = resolve_receipt_cutoff()
+        return self._cutoff
+
+    @cutoff.setter
+    def cutoff(self, value: datetime) -> None:
+        self._cutoff = value
+
+    @property
+    def receipt_stats(self) -> Dict[str, int]:
+        return self.__dict__.setdefault(
+            "_receipt_stats", {"read": 0, "after_cutoff": 0, "before_cutoff": 0}
+        )
+
+    @receipt_stats.setter
+    def receipt_stats(self, value: Dict[str, int]) -> None:
+        self.__dict__["_receipt_stats"] = value
+
+    @property
+    def shadow(self) -> Dict[str, Any]:
+        return self.__dict__.setdefault("_shadow", {
+            "proposals": [],
+            "archival_candidates": [],
+            "supersede_candidates": 0,
+            "persist_preview": {},
+            "steps_not_run": [],
+        })
+
+    @shadow.setter
+    def shadow(self, value: Dict[str, Any]) -> None:
+        self.__dict__["_shadow"] = value
 
     def __init__(self, persist: Optional[bool] = None):
         """Initialize learning loop with database connections.
@@ -526,21 +576,30 @@ class LearningLoop:
                         continue
 
                     total_scanned += 1
-                    # Fixed cutoff: a receipt from before it (or one whose time
-                    # cannot be shown to be after it) never counts, whatever
-                    # the window, --from-history included.
-                    receipt_ts = _parse_receipt_timestamp(receipt.get("timestamp"))
-                    if receipt_ts is None or receipt_ts < self.cutoff:
-                        before_cutoff += 1
-                        continue
                     status = str(receipt.get("status", "")).lower()
-                    if status not in _FAILURE_STATUSES:
-                        continue
-
                     event_type = str(receipt.get("event_type") or receipt.get("event") or "").lower()
                     is_contract_invalid = (
                         status == "contract_invalid" or event_type == "report_contract_invalid"
                     )
+                    # Fixed cutoff: a receipt from before it (or one whose time
+                    # cannot be shown to be after it) never counts, whatever
+                    # the window, --from-history included. contract_invalid
+                    # records date on the same effective time as the window
+                    # (ingested_at first) and stay fail-open when it is unparseable.
+                    if is_contract_invalid:
+                        receipt_ts = _parse_receipt_timestamp(
+                            contract_invalid_effective_timestamp(receipt)
+                        )
+                        before = receipt_ts is not None and receipt_ts < self.cutoff
+                    else:
+                        receipt_ts = _parse_receipt_timestamp(receipt.get("timestamp"))
+                        before = receipt_ts is None or receipt_ts < self.cutoff
+                    if before:
+                        before_cutoff += 1
+                        continue
+                    if status not in _FAILURE_STATUSES:
+                        continue
+
                     ts_raw = receipt.get("timestamp")
 
                     # contract_invalid / report_contract_invalid records window

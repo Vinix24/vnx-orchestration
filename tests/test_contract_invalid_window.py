@@ -505,6 +505,22 @@ class TestLearningLoopFailOpenOnUnparseableTime:
         patterns = loop.extract_failure_patterns(start_time=start_time)
         assert len(patterns) == 1, "lexicographically-old prefix must not hide contract_invalid"
 
+    def test_cutoff_prefers_fresh_ingested_at_over_old_timestamp(self, tmp_path: Path) -> None:
+        receipts_path = tmp_path / "t0_receipts.ndjson"
+        fresh = datetime.now(timezone.utc) - timedelta(hours=1)
+        record = {
+            "status": "contract_invalid",
+            "timestamp": "2020-01-01T00:00:00+00:00",
+            "ingested_at": _iso(fresh),
+            "provider": "claude",
+        }
+        _write_receipts(receipts_path, [record])
+
+        loop = _build_learning_loop(receipts_path)
+        start_time = datetime.now(timezone.utc) - timedelta(days=7)
+        assert len(loop.extract_failure_patterns(start_time=start_time)) == 1
+        assert loop.receipt_stats["before_cutoff"] == 0
+
     def test_old_parseable_still_excluded(self, tmp_path: Path) -> None:
         receipts_path = tmp_path / "t0_receipts.ndjson"
         record = {
