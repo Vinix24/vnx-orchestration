@@ -94,6 +94,15 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
   is any branch outside that prefix (the exact `pr1950` shape from PR
   #1950).
 
+### Documentation
+
+- **`kimi_gate` and the harness-lane fallback documented in the gate execution and evidence
+  contracts (OI-1885).** Doc 180's NG-1, timeout table, and stall table, and Doc 130's verdict
+  table and GE-7, now name `kimi_gate`/`glm_gate`/`deepseek_gate` and record that they carry no
+  per-gate subprocess timeout override, no stall detection, and a `status` field
+  (`completed`/`partial_review`) that GE-7's literal `status or verdict` check cannot alone turn
+  into a pass/fail verdict — `gate_status.is_pass()` also needs `blocking_findings`.
+
 ## [1.6.6] - 2026-09-27
 
 Feature release (16 commits since v1.6.5). The default review stack is

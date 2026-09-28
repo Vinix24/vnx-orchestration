@@ -173,6 +173,11 @@ The current `blocked` status is ambiguous — it could mean "temporarily blocked
 |-----------|----------------|--------------|-----------|
 | `codex_gate` | 600s (10 min) | `VNX_CODEX_GATE_TIMEOUT` | Codex analysis may be slow on large diffs |
 | `claude_github_optional` | 300s (5 min) | `VNX_CLAUDE_GITHUB_GATE_TIMEOUT` | GitHub API-bound, should be fast |
+| `kimi_gate` | 900s (15 min) | none — single constant shared by all three harness-lane gates, not a per-gate override | Governed dispatch through `plan_gate_panel._make_default_dispatcher`, not a monitored subprocess; `TIMEOUT_SECONDS` in `scripts/lib/gate_lane_contract.py:49`, consumed as `_HARNESS_LANE_TIMEOUT_SECONDS` at `scripts/gate_runner.py:547` |
+| `glm_gate` | 900s (15 min) | none (same constant as `kimi_gate`) | Same harness-lane path as `kimi_gate` |
+| `deepseek_gate` | 900s (15 min) | none (same constant as `kimi_gate`) | Same harness-lane path as `kimi_gate` |
+
+**Added 2026-09-28**: `headless_adapter.gate_timeout()` (`scripts/lib/headless_adapter.py:74-89,109-119`) does carry a `kimi_gate` entry (600s default, `VNX_KIMI_GATE_TIMEOUT` override), but it is dead code for `kimi_gate` — `gate_runner.run()` resolves `kimi_gate`/`glm_gate`/`deepseek_gate` as `GATE_PROVIDER_HARNESS_LANE` (`scripts/lib/gate_recorder.py:78-85`) and routes them to `_run_harness_lane_path` (`scripts/gate_runner.py:353-357`), which never calls `gate_timeout()`. That function is only reached via `_run_subprocess_path` (`scripts/gate_runner.py:359-362,444-450`), which is the path for `codex_gate`, `claude_github_optional`, `ci_gate`, `wiring_gate`, and `gemini_review` (the PATH-binary and script-runner gates, `scripts/lib/gate_recorder.py:72-77`).
 
 **GATE-6 (Timeout Rule)**: Every gate execution MUST have a bounded timeout. The runner MUST kill the subprocess if it exceeds the timeout. The gate transitions to `failed` with `reason: timeout`.
 
@@ -186,6 +191,11 @@ A stall is when the subprocess is alive but producing no output. This is distinc
 |-----------|----------------|--------------|
 | `codex_gate` | 120s | `VNX_CODEX_STALL_THRESHOLD` |
 | `claude_github_optional` | 60s | `VNX_CLAUDE_GITHUB_STALL_THRESHOLD` |
+| `kimi_gate` | No stall detection | n/a |
+| `glm_gate` | No stall detection | n/a |
+| `deepseek_gate` | No stall detection | n/a |
+
+**Added 2026-09-28**: `kimi_gate`/`glm_gate`/`deepseek_gate` run through `_run_harness_lane_path` (`scripts/gate_runner.py:505-549`), a governed dispatch call (`plan_gate_panel._make_default_dispatcher`) bounded only by the harness-lane timeout above — it is not a locally spawned, polled subprocess, so there is no output stream for this runner to watch and no stall threshold to apply. Stall detection (`_run_with_stall_detection` / `_poll_io`, `scripts/gate_runner.py:864-926`) only runs inside `_run_subprocess_path` (`scripts/gate_runner.py:410-453`), which harness-lane gates never reach. `headless_adapter.gate_stall_threshold()` (`scripts/lib/headless_adapter.py:91-106,122-132`) does carry a `kimi_gate` entry (300s default, `VNX_KIMI_STALL_THRESHOLD` override) for the same reason the timeout entry above is dead: it is only consulted by `_run_subprocess_path`.
 
 ### 4.3 Timeout/Stall Failure Record
 
@@ -344,7 +354,7 @@ A result record is stale if:
 
 | # | Non-Goal | Rationale |
 |---|----------|-----------|
-| NG-1 | Adding new gate types beyond codex_gate, claude_github_optional | FEATURE_PLAN scopes this out explicitly |
+| NG-1 | Adding new gate types beyond codex_gate, claude_github_optional (amended 2026-09-28: the gates registered today are codex_gate, claude_github_optional, and the harness-lane trio kimi_gate/glm_gate/deepseek_gate — `gate_recorder.GATE_PROVIDERS`, `scripts/lib/gate_recorder.py:72-86`. The standing default review stack is `codex_gate,kimi_gate`; `glm_gate`/`deepseek_gate` are takeover-only fallback via `VNX_REVIEW_GATE_TAKEOVER_CHAIN`, default `codex_gate,kimi_gate,glm_gate,deepseek_gate` — `scripts/lib/gate_request_handler.py:78`) | FEATURE_PLAN scopes this out explicitly |
 | NG-2 | Changing the review contract or evidence verification rules | Doc 45 and Doc 130 govern evidence rules; this contract governs execution lifecycle |
 | NG-3 | Modifying PR completion criteria | Those remain per existing contracts |
 | NG-4 | Automatic retry of failed gates | Failed gates require explicit re-request. Automatic retry is a future concern. |
