@@ -76,6 +76,15 @@ def _failure(task: str, ts: str) -> dict:
     }
 
 
+def _live_learning_loop():
+    """The learning_loop module the nightly phase imports at call time.
+
+    Another test file may reload it in sys.modules, so patching the module
+    object bound at collection time would miss the one run_phase resolves.
+    """
+    return sys.modules["learning_loop"]
+
+
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     """Tmp state dir with a seeded DB and receipts, ensure_env patched onto it."""
@@ -120,7 +129,9 @@ def env(tmp_path, monkeypatch):
     (state_dir / "t0_receipts.ndjson").write_text(
         "".join(json.dumps(r) + "\n" for r in receipts), encoding="utf-8"
     )
-    with patch.object(ll, "ensure_env", return_value=paths):
+    with patch.object(ll, "ensure_env", return_value=paths), patch.object(
+        _live_learning_loop(), "ensure_env", return_value=paths
+    ):
         yield state_dir, paths
 
 
@@ -201,7 +212,7 @@ def _run_phase(state_dir: Path) -> int:
     import learning_loop_nightly
 
     with patch.object(
-        ll, "evaluate_activation_gate",
+        _live_learning_loop(), "evaluate_activation_gate",
         return_value={"action": "run", "probe_health": "ok", "detail": "test"},
     ), patch.object(learning_loop_nightly, "resolve_project_id", return_value="vnx-dev"):
         return learning_loop_nightly.run_phase(state_dir)
@@ -227,7 +238,7 @@ def test_phase_writes_ok_beacon_and_shadow_report(env):
 
 def test_phase_writes_failed_beacon_on_exception(env):
     state_dir, _ = env
-    with patch.object(ll.LearningLoop, "daily_learning_cycle", side_effect=RuntimeError("kapot")):
+    with patch.object(_live_learning_loop().LearningLoop, "daily_learning_cycle", side_effect=RuntimeError("kapot")):
         assert _run_phase(state_dir) == 1
     beacon = json.loads((state_dir / BEACON).read_text())
     assert beacon["status"] == "failed"
