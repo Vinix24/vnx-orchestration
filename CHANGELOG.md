@@ -6,9 +6,23 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 
 ## [Unreleased]
 
+## [1.6.7] - 2026-09-28
+
+Closes the "poorten en workers in hun hok" goal. Harness-lane review gates
+(`glm_gate`/`kimi_gate`/`deepseek_gate`) now review in isolation on the PR
+branch, with a vangnet on the orchestrator's own checkout if one still tries
+to touch it. `VNX_DISPATCH_PATHS` is set again, so
+`VNX_ENFORCE_WORKER_PERMISSIONS=1` actually narrows a dispatch's worker to
+its declared paths. A gate PASS only counts on the PR's current head — an
+older head's PASS no longer satisfies the check after a fix-forward push.
+`vnx gate`'s slot-line names whoever actually read the seat, including a
+takeover. `kimi_gate` is now named in the gate execution and evidence
+contracts. And `vnx dispatch <file.md>` is refused under the door default
+(rollback: `VNX_DISPATCH_LEGACY=1`).
+
 ### Fixed
 
-- **`VNX_DISPATCH_PATHS` regains a setter (OI-1886).** The only reader
+- **`VNX_DISPATCH_PATHS` regains a setter (OI-1886, #1958).** The only reader
   (`pretooluse_worker_scope_enforce.py`'s worker-scope hook) had its one setter,
   `TmuxInteractiveDispatch._spawn_session`, removed along with the tmux lane itself
   (#1868). A dispatch declaring `dispatch_paths` was silently no longer narrowed on
@@ -21,7 +35,7 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
   `worker_permissions.dispatch_paths_env_value`. `VNX_ENFORCE_WORKER_PERMISSIONS`
   stays default OFF (operator decision, unchanged) — this only makes the narrowing
   work once enforcement is turned on.
-- **`vnx gate`'s slot-line names whoever actually read the seat (OI-1888).**
+- **`vnx gate`'s slot-line names whoever actually read the seat (OI-1888, #1957).**
   `scripts/commands/gate.sh` printed `Gate '<seat>': PASS` from the literal
   `--only`/required-gates argument and `request-and-execute`'s exit code
   alone. When a seat's own reader is unavailable and the takeover chain hands
@@ -40,7 +54,7 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
   successor (`Gate 'kimi_gate': UNAVAILABLE (<reason>)`, non-zero exit). A
   truncated diff is marked on the line (`(diff truncated)`).
 - **`codex_gate_required`/`kimi_gate_required` now bind to the PR's current head
-  (OI-1884).** `governance_enforcer.py`'s `_check_review_gate_required` used to accept
+  (OI-1884, #1956).** `governance_enforcer.py`'s `_check_review_gate_required` used to accept
   any `pr-<N>-<gate>.json` result (direct or takeover-successor) that carried a
   non-empty `contract_hash`, without comparing the result's `commit_sha` to the PR's
   actual head. After a fix-forward push, a PASS recorded against the OLD commit kept
@@ -53,7 +67,7 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 
 ### Removed
 
-- **Raw-file `vnx dispatch <file.md>` refused under the door default (ADR-025).** The
+- **Raw-file `vnx dispatch <file.md>` refused under the door default (ADR-025, #1954).** The
   form that used to fall through to the legacy delivery lane with a one-time DEPRECATED
   stderr warning now exits non-zero and tells the caller to stage first
   (`vnx dispatch stage --instruction <file.md> ...` / `dispatch_bridge.py stage ...`) and run
@@ -63,7 +77,7 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 ### Fixed
 
 - **Harness-lane review gates (`glm_gate`/`kimi_gate`/`deepseek_gate`) no longer isolate
-  on `origin/main` when reviewing a PR (OI-1887).** Measured 27-09 on PR #1950: the
+  on `origin/main` when reviewing a PR (OI-1887, #1959).** Measured 27-09 on PR #1950: the
   provider worktree `_prepare_provider_workdir` created had no PR content of its own, so
   the dispatched agent fetched and checked out the PR branch itself — 96 times, IN THE
   ORCHESTRATOR'S OWN CHECKOUT (a stray branch appeared in the operator's repo). The
@@ -81,7 +95,7 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
   the harness-lane path above) carried the identical missing-`base_ref` pattern at their
   own `_make_default_dispatcher` call sites and are fixed the same way.
 - **The OI-1887 vangnet no longer trips on the fabric's own dispatch-branch
-  churn.** `refs/heads` is shared across every worktree of a repo, and a
+  churn (#1959).** `refs/heads` is shared across every worktree of a repo, and a
   correct harness-lane run mints `dispatch/<id>` branches as a side effect
   — the gate's own provider worktree (`git worktree add ... -b
   dispatch/<safe_id>`, left behind after teardown) and any sibling dispatch
@@ -97,11 +111,24 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 ### Documentation
 
 - **`kimi_gate` and the harness-lane fallback documented in the gate execution and evidence
-  contracts (OI-1885).** Doc 180's NG-1, timeout table, and stall table, and Doc 130's verdict
+  contracts (OI-1885, #1955).** Doc 180's NG-1, timeout table, and stall table, and Doc 130's verdict
   table and GE-7, now name `kimi_gate`/`glm_gate`/`deepseek_gate` and record that they carry no
   per-gate subprocess timeout override, no stall detection, and a `status` field
   (`completed`/`partial_review`) that GE-7's literal `status or verdict` check cannot alone turn
   into a pass/fail verdict — `gate_status.is_pass()` also needs `blocking_findings`.
+- **Docs refreshed to v1.6.6 reality across the board (#1939, #1940, #1941, #1942, #1943,
+  #1944, #1945, #1946, #1947, #1948, #1949, #1950, #1951, #1952).** Fourteen PRs: archived
+  completed/dead docs and the tmux-pane delivery contract in `docs/core`, `docs/operations`,
+  and `docs/investigations`; refreshed ADR status lines, the public manifesto, lane/permission
+  truth in active reference docs, operations runbooks, `00_VNX_ARCHITECTURE.md`, contracts,
+  intelligence and scripts-index, and the onboarding entry points (merged, pip/bash CLI drift
+  fixed); merged roadmaps and regenerated `PR_QUEUE`; rebuilt `DOCS_INDEX`/README/operations-README;
+  aligned the top-level README.
+- **Operator's transcript-backup workstation doc removed from the repo (#1953).**
+  `docs/operations/TRANSCRIPT_BACKUP_ARCHIVE.md` described the operator's own Mac
+  Mini/launchd backup setup, not VNX runtime, and the operator holds a local copy — dropped
+  entirely rather than archived, with the link in `docs/operations/README.md` and the
+  `docs/_archive/ARCHIVED_MANIFEST.md` entry updated to match.
 
 ## [1.6.6] - 2026-09-27
 
