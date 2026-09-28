@@ -101,6 +101,21 @@ print(','.join(result) if result else '$default_stack')
 "
 }
 
+_g_print_seat_lines() {
+  # Read "TAG<TAB>line" pairs (gate_seat_line.py's stdout) and print each with
+  # log()/err() styling, keyed off the tag rather than re-parsing the line
+  # text for "PASS" (OI-1888).
+  local tag rest
+  while IFS=$'\t' read -r tag rest; do
+    [ -n "$tag" ] || continue
+    if [ "$tag" = "PASS" ]; then
+      log "[gate] $rest"
+    else
+      err "[gate] $rest"
+    fi
+  done
+}
+
 _g_show_results() {
   local pr="$1"
   local gate_dir="${VNX_STATE_DIR}/review_gates/results"
@@ -310,20 +325,31 @@ HELP
 
     log "[gate] Running gate '$only_gate' for PR $pr_number (branch: $branch)"
 
-    PYTHONPATH="$pythonpath" python3 "$gate_script" \
+    local exit_code=0
+    local result
+    result=$(PYTHONPATH="$pythonpath" python3 "$gate_script" \
       request-and-execute \
       --pr "$pr_number" \
       --branch "$branch" \
       --review-stack "$only_gate" \
       --risk-class "$risk_class" \
       --mode "$mode" \
-      --dispatch-id "$dispatch_id"
-    local exit_code=$?
+      --dispatch-id "$dispatch_id" 2>&1) || exit_code=$?
 
-    if [ "$exit_code" -eq 0 ]; then
-      log "[gate] Gate '$only_gate': PASS"
-    else
-      err "[gate] Gate '$only_gate': did not PASS (exit $exit_code)"
+    printf '%s\n' "$result"
+
+    # The requested-and-execute exit code reflects the SUCCESSOR's verdict
+    # correctly when a takeover happened, but the seat name it's reported
+    # under does not — resolve and print who actually read (OI-1888).
+    local seat_exit=0
+    local seat_output
+    seat_output=$(printf '%s\n' "$result" | PYTHONPATH="$pythonpath" python3 \
+      "$VNX_HOME/scripts/lib/gate_seat_line.py" \
+      --pr "$pr_number" --state-dir "$VNX_STATE_DIR" --seats "$only_gate") || seat_exit=$?
+    printf '%s\n' "$seat_output" | _g_print_seat_lines
+
+    if [ "$exit_code" -ne 0 ] || [ "$seat_exit" -ne 0 ]; then
+      exit_code=1
     fi
     return "$exit_code"
 
@@ -335,19 +361,37 @@ HELP
     log "[gate] Required gates: $required_gates"
     log "[gate] Running all required gates for PR $pr_number (branch: $branch)"
 
-    PYTHONPATH="$pythonpath" python3 "$gate_script" \
+    local exit_code=0
+    local result
+    result=$(PYTHONPATH="$pythonpath" python3 "$gate_script" \
       request-and-execute \
       --pr "$pr_number" \
       --branch "$branch" \
       --review-stack "$required_gates" \
       --risk-class "$risk_class" \
       --mode "$mode" \
-      --dispatch-id "$dispatch_id"
-    local exit_code=$?
+      --dispatch-id "$dispatch_id" 2>&1) || exit_code=$?
+
+    printf '%s\n' "$result"
 
     printf '\n'
     log "[gate] Results for PR $pr_number:"
     _g_show_results "$pr_number"
+
+    # One line per requested seat, naming whoever actually read it — a
+    # takeover successor's exit code is correct, but $required_gates alone
+    # would still print the seat it replaced as if it had read (OI-1888).
+    printf '\n'
+    local seat_exit=0
+    local seat_output
+    seat_output=$(printf '%s\n' "$result" | PYTHONPATH="$pythonpath" python3 \
+      "$VNX_HOME/scripts/lib/gate_seat_line.py" \
+      --pr "$pr_number" --state-dir "$VNX_STATE_DIR" --seats "$required_gates") || seat_exit=$?
+    printf '%s\n' "$seat_output" | _g_print_seat_lines
+
+    if [ "$exit_code" -ne 0 ] || [ "$seat_exit" -ne 0 ]; then
+      exit_code=1
+    fi
 
     if [ "$exit_code" -eq 0 ]; then
       log "[gate] All gates PASS for PR $pr_number"
