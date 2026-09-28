@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -27,14 +26,11 @@ from typing import Any, Dict
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-GATE_SH = REPO_ROOT / "scripts" / "commands" / "gate.sh"
-LIB_MODULES = ("gate_enforcement_verify.py", "gate_status.py", "gate_depth.py", "gate_seat_line.py")
-
 TESTS_DIR = Path(__file__).resolve().parent
 if str(TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(TESTS_DIR))
 
+from _gate_harness import GATE_SH, install_gate_lib_modules  # noqa: E402
 from test_t0_gate_enforcement import _entry, _report  # noqa: E402
 
 
@@ -84,9 +80,7 @@ def harness(tmp_path: Path):
     """A fake VNX_HOME carrying the real gate_seat_line.py + its deps and a
     stub review_gate_manager.py, plus a stub `gh` on PATH."""
     vnx_home = tmp_path / "vnx-home"
-    (vnx_home / "scripts" / "lib").mkdir(parents=True)
-    for name in LIB_MODULES:
-        shutil.copy2(REPO_ROOT / "scripts" / "lib" / name, vnx_home / "scripts" / "lib" / name)
+    install_gate_lib_modules(vnx_home / "scripts" / "lib")
     (vnx_home / "scripts" / "review_gate_manager.py").write_text(STUB_MANAGER, encoding="utf-8")
 
     project = tmp_path / "project"

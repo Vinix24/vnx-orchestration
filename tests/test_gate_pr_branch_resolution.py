@@ -23,12 +23,16 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-GATE_SH = REPO_ROOT / "scripts" / "commands" / "gate.sh"
+TESTS_DIR = Path(__file__).resolve().parent
+if str(TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR))
+
+from _gate_harness import GATE_SH, install_gate_lib_modules  # noqa: E402
 
 PR_HEAD = "dispatch/20260801-oi898c-sidedoor-detector-exclusion"
 
@@ -43,14 +47,18 @@ def _write_script(path: Path, content: str) -> Path:
 @pytest.fixture
 def env(tmp_path):
     """Build a self-contained harness: fake `gh`, a capturing fake
-    review_gate_manager.py, a real git repo (for the local-branch fallback),
-    and a bash driver that sources gate.sh and calls cmd_gate."""
+    review_gate_manager.py (reporting every requested seat as PASS), the real
+    gate_seat_line.py + its deps (see _gate_harness), a real git repo (for the
+    local-branch fallback), and a bash driver that sources gate.sh and calls
+    cmd_gate."""
     harness = tmp_path / "harness"
     fake_bin = harness / "bin"
     fake_home = harness / "vnx-home"
     (fake_home / "scripts").mkdir(parents=True)
+    install_gate_lib_modules(fake_home / "scripts" / "lib")
     fake_state = harness / "state"
     (fake_state / "review_gates" / "results").mkdir(parents=True)
+    (fake_state / "review_gates" / "requests").mkdir(parents=True)
     project = harness / "project"
 
     # A real git repo on main, so the local-branch fallback is deterministic.
@@ -84,14 +92,63 @@ exit 1
 """,
     )
 
-    # Capturing fake review_gate_manager.py: persist argv, exit 0.
+    # Capturing fake review_gate_manager.py: persist argv, then report every
+    # requested seat as a straight PASS (no takeover) — a completed result
+    # record on disk plus a matching "gates" entry on stdout, exactly what
+    # the real manager leaves behind for gate_seat_line.py to resolve. These
+    # tests exercise branch resolution, not gate verdicts, so PASS is the
+    # neutral outcome that lets `cmd_gate` finish with exit 0.
     capture = harness / "captured_args.json"
     _write_script(
         fake_home / "scripts" / "review_gate_manager.py",
         f"""#!/usr/bin/env python3
-import json, sys
-json.dump(sys.argv[1:], open({str(capture)!r}, "w"))
-print(json.dumps({{"has_required_failure": False, "gates": []}}))
+import json, os, sys
+from pathlib import Path
+
+argv = sys.argv[1:]
+json.dump(argv, open({str(capture)!r}, "w"))
+
+
+def _opt(flag):
+    if flag in argv:
+        return argv[argv.index(flag) + 1]
+    return None
+
+
+pr = _opt("--pr")
+seats = [s.strip() for s in (_opt("--review-stack") or "").split(",") if s.strip()]
+
+state_dir = Path(os.environ["VNX_STATE_DIR"])
+results_dir = state_dir / "review_gates" / "results"
+requests_dir = state_dir / "review_gates" / "requests"
+results_dir.mkdir(parents=True, exist_ok=True)
+requests_dir.mkdir(parents=True, exist_ok=True)
+
+gates = []
+for seat in seats:
+    (requests_dir / f"pr-{{pr}}-{{seat}}.json").write_text(
+        json.dumps({{"gate": seat, "pr_number": pr}}), encoding="utf-8"
+    )
+    (results_dir / f"pr-{{pr}}-{{seat}}.json").write_text(
+        json.dumps({{
+            "gate": seat,
+            "pr_number": pr,
+            "status": "completed",
+            "recorded_at": "2026-01-01T00:00:00Z",
+            "blocking_findings": [],
+            "summary": "stub pass",
+        }}),
+        encoding="utf-8",
+    )
+    gates.append({{
+        "gate": seat,
+        "passed": True,
+        "execution_status": "completed",
+        "request_status": "completed",
+        "detail": {{"gate": seat}},
+    }})
+
+print(json.dumps({{"has_required_failure": False, "gates": gates}}))
 """,
     )
 
