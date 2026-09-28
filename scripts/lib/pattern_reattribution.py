@@ -55,7 +55,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 from ledger_schema_version import iter_receipts
-from pattern_dedup import _merge_source_dispatch_ids, _column_exists, _table_exists
+from pattern_dedup import _merge_source_dispatch_ids, _table_exists
 
 # ---------------------------------------------------------------------------
 # Status vocabulary
@@ -271,35 +271,58 @@ def scan_database(
 def _reattribute_dispatch_pattern_offered(
     conn: sqlite3.Connection, pattern_id: str, old_pid: str, new_pid: str,
 ) -> None:
+    """Move every ``dispatch_pattern_offered`` row for ``pattern_id``/``old_pid``.
+
+    Per-row UPDATE, never INSERT-then-DELETE: a store whose real PRIMARY KEY
+    predates ADR-007 (``(dispatch_id, pattern_id)`` — v17's original
+    ``_migrate_v17``, no ``project_id``) allows only one row per
+    ``(dispatch_id, pattern_id)`` in the first place, so an ``INSERT OR
+    IGNORE`` of the "new" row collides with the very row it is meant to
+    replace, is silently ignored, and the DELETE that follows then erases
+    the only copy — the offer vanishes. Checking for a same-dispatch target
+    row under ``new_pid`` first and UPDATEing in place is correct on that
+    schema (there can never be a same-key sibling to collide with) and on a
+    fresh bootstrap whose PRIMARY KEY does include ``project_id``
+    (``intelligence_sources/_recording.py``), where a genuine collision is
+    possible and is merged (keep the later ``offered_at``) instead of
+    silently dropped.
+    """
     if not _table_exists(conn, "dispatch_pattern_offered"):
         return
-    has_ab_arm = _column_exists(conn, "dispatch_pattern_offered", "ab_arm")
-    if has_ab_arm:
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO dispatch_pattern_offered
-                (dispatch_id, pattern_id, pattern_title, offered_at, project_id, ab_arm)
-            SELECT dispatch_id, pattern_id, pattern_title, offered_at, ?, ab_arm
-            FROM   dispatch_pattern_offered
-            WHERE  pattern_id = ? AND project_id = ?
-            """,
-            (new_pid, pattern_id, old_pid),
-        )
-    else:
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO dispatch_pattern_offered
-                (dispatch_id, pattern_id, pattern_title, offered_at, project_id)
-            SELECT dispatch_id, pattern_id, pattern_title, offered_at, ?
-            FROM   dispatch_pattern_offered
-            WHERE  pattern_id = ? AND project_id = ?
-            """,
-            (new_pid, pattern_id, old_pid),
-        )
-    conn.execute(
-        "DELETE FROM dispatch_pattern_offered WHERE pattern_id = ? AND project_id = ?",
+    old_rows = conn.execute(
+        "SELECT dispatch_id, offered_at FROM dispatch_pattern_offered "
+        "WHERE pattern_id = ? AND project_id = ?",
         (pattern_id, old_pid),
-    )
+    ).fetchall()
+    for row in old_rows:
+        dispatch_id = row["dispatch_id"]
+        target = conn.execute(
+            "SELECT offered_at FROM dispatch_pattern_offered "
+            "WHERE dispatch_id = ? AND pattern_id = ? AND project_id = ?",
+            (dispatch_id, pattern_id, new_pid),
+        ).fetchone()
+        if target is None:
+            conn.execute(
+                "UPDATE dispatch_pattern_offered SET project_id = ? "
+                "WHERE dispatch_id = ? AND pattern_id = ? AND project_id = ?",
+                (new_pid, dispatch_id, pattern_id, old_pid),
+            )
+            continue
+        # Genuine collision (only reachable on a PRIMARY KEY that includes
+        # project_id): both projects already recorded an offer for this
+        # exact (dispatch_id, pattern_id). Merge — keep the later
+        # offered_at — instead of silently dropping the old row.
+        if row["offered_at"] > target["offered_at"]:
+            conn.execute(
+                "UPDATE dispatch_pattern_offered SET offered_at = ? "
+                "WHERE dispatch_id = ? AND pattern_id = ? AND project_id = ?",
+                (row["offered_at"], dispatch_id, pattern_id, new_pid),
+            )
+        conn.execute(
+            "DELETE FROM dispatch_pattern_offered "
+            "WHERE dispatch_id = ? AND pattern_id = ? AND project_id = ?",
+            (dispatch_id, pattern_id, old_pid),
+        )
 
 
 def _reattribute_pattern_usage(
@@ -361,39 +384,56 @@ def _reattribute_pattern_usage(
 def _reattribute_pattern_injection_outcome(
     conn: sqlite3.Connection, pattern_id: str, old_pid: str, new_pid: str,
 ) -> None:
+    """Move every ``pattern_injection_outcome`` row for ``pattern_id``/``old_pid``.
+
+    Same per-row UPDATE-or-merge shape as
+    :func:`_reattribute_dispatch_pattern_offered`, for the same reason: an
+    ``INSERT OR IGNORE`` of the "new" row can collide with a UNIQUE/PRIMARY
+    KEY that does not include ``project_id`` and be silently ignored, after
+    which the DELETE erases the only copy. Targeting by the table's real
+    ``id`` PRIMARY KEY (present on every known schema variant — v28's
+    ``_migrate_v28`` and every test fixture) keeps the UPDATE/DELETE
+    unambiguous regardless of what the table's UNIQUE constraint covers.
+    """
     if not _table_exists(conn, "pattern_injection_outcome"):
         return
-    has_ab_arm = _column_exists(conn, "pattern_injection_outcome", "ab_arm")
-    if has_ab_arm:
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO pattern_injection_outcome
-                (dispatch_id, pattern_id, pattern_hash, used, reason, evidence,
-                 project_id, created_at, ab_arm)
-            SELECT dispatch_id, pattern_id, pattern_hash, used, reason, evidence,
-                   ?, created_at, ab_arm
-            FROM   pattern_injection_outcome
-            WHERE  pattern_id = ? AND project_id = ?
-            """,
-            (new_pid, pattern_id, old_pid),
-        )
-    else:
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO pattern_injection_outcome
-                (dispatch_id, pattern_id, pattern_hash, used, reason, evidence,
-                 project_id, created_at)
-            SELECT dispatch_id, pattern_id, pattern_hash, used, reason, evidence,
-                   ?, created_at
-            FROM   pattern_injection_outcome
-            WHERE  pattern_id = ? AND project_id = ?
-            """,
-            (new_pid, pattern_id, old_pid),
-        )
-    conn.execute(
-        "DELETE FROM pattern_injection_outcome WHERE pattern_id = ? AND project_id = ?",
+    old_rows = conn.execute(
+        "SELECT id, dispatch_id, created_at FROM pattern_injection_outcome "
+        "WHERE pattern_id = ? AND project_id = ?",
         (pattern_id, old_pid),
-    )
+    ).fetchall()
+    for row in old_rows:
+        dispatch_id = row["dispatch_id"]
+        target = conn.execute(
+            "SELECT id, created_at FROM pattern_injection_outcome "
+            "WHERE dispatch_id = ? AND pattern_id = ? AND project_id = ?",
+            (dispatch_id, pattern_id, new_pid),
+        ).fetchone()
+        if target is None:
+            conn.execute(
+                "UPDATE pattern_injection_outcome SET project_id = ? WHERE id = ?",
+                (new_pid, row["id"]),
+            )
+            continue
+        # Genuine collision (only reachable when the UNIQUE constraint does
+        # not span project_id): both projects already recorded an outcome
+        # for this exact (dispatch_id, pattern_id). Keep the row with the
+        # later created_at, drop the other — never a silent, unconditional
+        # drop of the old side.
+        if row["created_at"] > target["created_at"]:
+            conn.execute(
+                "DELETE FROM pattern_injection_outcome WHERE id = ?",
+                (target["id"],),
+            )
+            conn.execute(
+                "UPDATE pattern_injection_outcome SET project_id = ? WHERE id = ?",
+                (new_pid, row["id"]),
+            )
+        else:
+            conn.execute(
+                "DELETE FROM pattern_injection_outcome WHERE id = ?",
+                (row["id"],),
+            )
 
 
 def _reattribute_junction_rows(
@@ -441,7 +481,38 @@ def apply_decisions(
         raise
     finally:
         conn.close()
+    _emit_reattribution_receipts(db_path, to_move)
     return {"rows_moved": len(to_move)}
+
+
+def _emit_reattribution_receipts(
+    db_path: Path, moved: List[ReattributionDecision],
+) -> None:
+    """Append one ``state_mutation`` receipt per moved row (ADR-005, best-effort).
+
+    A reattribution changes the ``project_id`` that drives injection
+    selection with no other canonical record of the transition. Reuses the
+    existing ``state_mutation`` receipt mechanism
+    (:func:`state_mutation.emit_state_mutation`, already used by
+    ``build_t0_state.py`` for state-file rewrites) rather than inventing a
+    second audit path. Never raises: ``emit_state_mutation`` itself already
+    swallows errors, and the DB write above has already committed by the
+    time this runs, so a receipt failure must not be mistaken for the move
+    having failed.
+    """
+    try:
+        from state_mutation import emit_state_mutation
+    except Exception:
+        return
+    for d in moved:
+        try:
+            emit_state_mutation(
+                db_path.name,
+                trigger="pattern_reattribution",
+                section=f"{d.table}:{d.row_id}:{d.old_project_id}->{d.new_project_id}",
+            )
+        except Exception:
+            continue
 
 
 # ---------------------------------------------------------------------------
