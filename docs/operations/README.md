@@ -36,7 +36,6 @@
 - Central install runbook (multi-project shared system install): `install-central-runbook.md`
 - Package build (local dev builds, editable installs, packaging smoke tests): `PACKAGE_BUILD.md`
 - Migration rollback runbook (Wave 2a rollback chain, migrations 0010+): `migration-rollback-runbook.md`
-- Transcript backup & archive: `TRANSCRIPT_BACKUP_ARCHIVE.md`
 
 > **Note**: `MONITORING_GUIDE.md` was retired. Runtime monitoring is now available
 > via the dashboard server (`dashboard/serve_dashboard.py`) at `/api/health`.
