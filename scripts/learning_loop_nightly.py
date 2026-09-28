@@ -50,6 +50,8 @@ def _counts(report: Dict[str, Any]) -> Dict[str, int]:
             + int(shadow.get("supersede_candidates", 0))
         ),
         "skipped": int(stats.get("receipts_skipped", 0)),
+        "open_items_read": int(stats.get("open_items_read", 0)),
+        "open_item_signals": int(stats.get("open_item_signals", 0)),
     }
 
 

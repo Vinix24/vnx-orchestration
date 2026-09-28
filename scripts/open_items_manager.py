@@ -130,6 +130,20 @@ def _with_items_lock():
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
 
 
+def read_items(state_dir: Path) -> dict:
+    """Read-only load of the open-items store under an explicit state dir.
+
+    No lock, no write, no directory creation: a reader of another project's
+    store (the learning loop) must not depend on the cwd-derived STATE_DIR.
+    """
+    source = Path(state_dir) / "open_items.json"
+    if not source.exists():
+        return {"schema_version": "1.0", "items": [], "next_id": 1}
+
+    with open(source, 'r') as f:
+        return json.load(f)
+
+
 def load_items() -> dict:
     """Load open items database"""
     source = OPEN_ITEMS_FILE

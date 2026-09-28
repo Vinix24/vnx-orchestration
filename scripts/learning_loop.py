@@ -59,6 +59,17 @@ CUTOFF_ENV = "VNX_LEARNING_LOOP_CUTOFF"
 # computes and reports, it changes no database row, no state file, no metric.
 PERSIST_ENV = "VNX_LEARNING_LOOP_PERSIST"
 
+# Open items as the second signal source (D5). A class of open items is one
+# normalized title. It counts as recurring when it spans this many DISTINCT
+# origin dispatches: measured on the vnx-dev store (447 open, 2026-09-29), one
+# dispatch files up to 11 different findings, so item count alone would turn a
+# single review into a "pattern"; a threshold of 2 admits a class of two read-only
+# research dispatches (a one-off decision), 3 keeps the two classes that are a
+# real repeated struggle (codex re-audit pending: 10 items / 9 dispatches; a
+# skipped stop condition: 3 / 3).
+OPEN_ITEM_RECURRENCE_THRESHOLD = 3
+_TITLE_WORDS = 6
+
 # Sentinel values a provider/model field carries when the emitter had no real
 # identity to stamp (empty string, or an explicit none/null/unknown literal).
 _NONE_SENTINELS = frozenset({"", "none", "null", "unknown"})
@@ -93,6 +104,13 @@ def _is_unusable_provenance_receipt(receipt: Dict[str, Any]) -> bool:
     if receipt.get("report_path"):
         return False
     return True
+
+
+def normalize_open_item_title(title: Any) -> str:
+    """Class key of an open item: lowercase letters only (digits, ids, PR numbers
+    and punctuation dropped), first ``_TITLE_WORDS`` words."""
+    text = re.sub(r"[\W\d_]+", " ", str(title or "").lower())
+    return " ".join(text.split()[:_TITLE_WORDS])
 
 
 def _to_aware_utc(dt: Optional[datetime]) -> Optional[datetime]:
@@ -658,6 +676,84 @@ class LearningLoop:
         )
         return failure_patterns
 
+    def extract_open_item_signals(self) -> List[Dict[str, Any]]:
+        """Group this project's unresolved open items into recurring classes.
+
+        Reads through ``open_items_manager.read_items`` (read-only, explicit state
+        dir). Only ``status == "open"`` counts: closed, done, deferred and wontfix
+        items are decided. An item that carries a ``project_id`` of another project
+        is skipped (ADR-007); the store itself is per project, so items without
+        the field belong to the store's project. A class is returned when it spans
+        ``OPEN_ITEM_RECURRENCE_THRESHOLD`` distinct origin dispatches.
+        """
+        from open_items_manager import read_items
+
+        state_dir = self.db_path.parent
+        self.open_item_stats = {"read": 0, "open": 0, "foreign_project": 0, "classes": 0}
+        try:
+            own_project = resolve_stamp_project_id(db_path=str(self.db_path))
+            items = read_items(state_dir).get("items") or []
+        except Exception as exc:
+            self.shadow["steps_not_run"].append(f"open_items_signal: {type(exc).__name__}: {exc}")
+            print(f"⚠️ Open-items signal skipped: {type(exc).__name__}: {exc}")
+            return []
+
+        classes: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        stats = self.open_item_stats
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            stats["read"] += 1
+            if str(item.get("status") or "").lower() != "open":
+                continue
+            item_project = item.get("project_id")
+            if item_project and item_project != own_project:
+                stats["foreign_project"] += 1
+                continue
+            stats["open"] += 1
+            key = normalize_open_item_title(item.get("title"))
+            if key:
+                classes[key].append(item)
+
+        signals = []
+        for key, members in classes.items():
+            dispatches = {str(m.get("origin_dispatch_id") or m.get("id")) for m in members}
+            if len(dispatches) < OPEN_ITEM_RECURRENCE_THRESHOLD:
+                continue
+            signals.append({
+                "class_key": key,
+                "example_title": str(members[0].get("title") or "")[:200],
+                "oi_ids": sorted(str(m.get("id")) for m in members),
+                "dispatch_count": len(dispatches),
+            })
+        signals.sort(key=lambda s: (-len(s["oi_ids"]), s["class_key"]))
+        stats["classes"] = len(signals)
+        print(
+            f"  Open items: {stats['read']} read, {stats['open']} open in this project "
+            f"({stats['foreign_project']} foreign), {len(signals)} recurring classes"
+        )
+        return signals
+
+    def generate_open_item_rules(self, signals: List[Dict[str, Any]]) -> List[Dict]:
+        """One proposal per recurring open-item class, same shape as the receipt
+        proposals plus ``signal`` and the OI ids as ``source_oi_ids``."""
+        return [
+            {
+                "pattern": f"Recurring open item: {sig['class_key']}",
+                "terminal_constraint": "any",
+                "agent_constraint": None,
+                "prevention": (
+                    f"Open items keep recurring across {sig['dispatch_count']} dispatches "
+                    f"(e.g. {sig['example_title']!r}): fix the cause instead of filing again"
+                ),
+                "confidence": min(len(sig["oi_ids"]) * 0.2, 0.9),
+                "occurrence_count": len(sig["oi_ids"]),
+                "signal": "open_items",
+                "source_oi_ids": sig["oi_ids"],
+            }
+            for sig in signals
+        ]
+
     def _failure_error_message(self, receipt: Dict) -> str:
         """Derive a stable error string from a failure receipt.
 
@@ -786,6 +882,7 @@ class LearningLoop:
                     "prevention": rule["prevention"],
                     "confidence": rule["confidence"],
                     "occurrence_count": rule.get("occurrence_count", 1),
+                    **{k: rule[k] for k in ("signal", "source_oi_ids") if k in rule},
                 }
                 for rule in new_rules
             )
@@ -818,6 +915,7 @@ class LearningLoop:
                     "confidence": rule["confidence"],
                     "occurrence_count": rule.get("occurrence_count", 1),
                     "status": "pending",
+                    **{k: rule[k] for k in ("signal", "source_oi_ids") if k in rule},
                 }
                 # Deduplicate by id
                 if not any(e.get("id") == queued["id"] for e in existing):
@@ -1341,6 +1439,10 @@ class LearningLoop:
         receipt_stats = dict(self.receipt_stats)
         self.learning_stats["failure_patterns"] = len(failure_patterns)
         new_rules = self.generate_prevention_rules(failure_patterns)
+        oi_rules = self.generate_open_item_rules(self.extract_open_item_signals())
+        new_rules = new_rules + oi_rules
+        self.learning_stats["open_items_read"] = self.open_item_stats["read"]
+        self.learning_stats["open_item_signals"] = len(oi_rules)
 
         if new_rules:
             print(f"  ✓ Generated {len(new_rules)} new prevention rules")
