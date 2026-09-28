@@ -41,13 +41,24 @@ def _prepare(spec: EnvelopeSpec) -> str:
     """
     instruction = spec.instruction
 
-    try:
-        from dispatch_enricher import apply_repo_map_layer  # noqa: PLC0415
+    from reviewer_roles import enrichment_allowed  # noqa: PLC0415
 
-        instruction = apply_repo_map_layer(instruction, {"role": spec.role})
-    except Exception as exc:
-        logger.warning(
-            "envelope._prepare: repo map layer failed (%s) — skipping", exc
+    # D1 (OI-1444): review-gate / plan-reviewer never get a repo map — see
+    # reviewer_roles.enrichment_allowed. _inject_skill_context below applies the
+    # same guard for role/skill CLAUDE.md and intelligence.
+    if enrichment_allowed(spec.role):
+        try:
+            from dispatch_enricher import apply_repo_map_layer  # noqa: PLC0415
+
+            instruction = apply_repo_map_layer(instruction, {"role": spec.role})
+        except Exception as exc:
+            logger.warning(
+                "envelope._prepare: repo map layer failed (%s) — skipping", exc
+            )
+    else:
+        logger.info(
+            "envelope._prepare: role=%s is a reviewer role — repo map layer suppressed (D1)",
+            spec.role,
         )
 
     try:

@@ -1,6 +1,20 @@
 {
   "couplings": [
     {
+      "file": "tests/test_d1_reviewer_no_injection.py",
+      "line": 41,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_d1_reviewer_no_injection.py",
+      "line": 275,
+      "mechanism": "direct-call",
+      "module_target": "envelope_prepare",
+      "symbol": "_prepare"
+    },
+    {
       "file": "tests/test_dispatch_cli.py",
       "line": 751,
       "mechanism": "direct-call",
@@ -1283,7 +1297,7 @@
     },
     {
       "file": "tests/test_oi1886_dispatch_paths_zetter.py",
-      "line": 221,
+      "line": 232,
       "mechanism": "direct-call",
       "module_target": "envelope_adapters_provider",
       "symbol": "ProviderAdapter"

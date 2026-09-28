@@ -291,16 +291,26 @@ def _enrich_instruction(args: argparse.Namespace) -> str:
 
     role = getattr(args, "role", None)
 
+    from reviewer_roles import enrichment_allowed
+
     # Layer 1: repo map (on the raw instruction — mirrors dispatch_prepare.prepare).
+    # D1 (OI-1444): review-gate / plan-reviewer never get a repo map — see
+    # reviewer_roles.enrichment_allowed.
     enriched = args.instruction
-    try:
-        from dispatch_enricher import apply_repo_map_layer  # noqa: PLC0415
-        enriched = apply_repo_map_layer(
-            enriched,
-            {"role": role},
+    if enrichment_allowed(role):
+        try:
+            from dispatch_enricher import apply_repo_map_layer  # noqa: PLC0415
+            enriched = apply_repo_map_layer(
+                enriched,
+                {"role": role},
+            )
+        except Exception as exc:
+            logger.warning("_enrich_instruction: repo map layer failed (%s) — skipping", exc)
+    else:
+        logger.info(
+            "_enrich_instruction: role=%s is a reviewer role — repo map layer suppressed (D1)",
+            role,
         )
-    except Exception as exc:
-        logger.warning("_enrich_instruction: repo map layer failed (%s) — skipping", exc)
 
     # Layer 2: role context + intelligence + full assembly via the shared injector.
     try:

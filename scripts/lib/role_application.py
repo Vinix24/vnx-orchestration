@@ -41,6 +41,12 @@ is absent from the prompt, the verdict is False even if a lower-priority
 source's content happens to be present (round-3 gate fix: terminal fallback
 content used to stamp role_applied=True while agents/<role>/CLAUDE.md was
 absent). When no source exists at all it reports ``tier="none"`` with why.
+
+D1 (OI-1444): ``review-gate``/``plan-reviewer`` are a fifth, short-circuited case —
+``tier="suppressed_reviewer"`` with ``role_applied=True`` and ``reason=None``. Those
+roles are DELIBERATELY given no role source (reviewer_roles.enrichment_allowed), so
+the ordinary containment check never runs for them; role_applied there means "the
+D1 no-enrichment policy was correctly applied", not "content reached the prompt".
 """
 
 from __future__ import annotations
@@ -56,6 +62,8 @@ _LIB_DIR = Path(__file__).resolve().parent
 if str(_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_LIB_DIR))
 
+from reviewer_roles import enrichment_allowed  # noqa: E402
+
 logger = logging.getLogger(__name__)
 
 _WS_RE = re.compile(r"\s+")
@@ -66,6 +74,13 @@ TIER_AGENTS = "agents"
 TIER_SKILLS = "skills"
 TIER_TERMINAL = "terminal"
 TIER_NONE = "none"
+# D1 (OI-1444): stamped when role is review-gate/plan-reviewer — those roles are
+# DELIBERATELY given no role source (reviewer_roles.enrichment_allowed), so the
+# ordinary content-containment check does not apply. role_applied=True here means
+# "the intended (non-)enrichment policy was correctly applied", not "content
+# reached the prompt" — the ordinary False+reason shape would misread D1's
+# intentional policy as a wiring bug in any later receipt analysis.
+TIER_SUPPRESSED_REVIEWER = "suppressed_reviewer"
 
 # Longest-line fallback threshold: a candidate "stable marker" line must be at
 # least this many characters or it is too generic to prove anything.
@@ -214,6 +229,15 @@ def verify_role_applied(
         if project_root is None:
             project_root = resolve_project_root()
         role_slug = (role or "").strip()
+
+        if not enrichment_allowed(role_slug):
+            return RoleApplicationVerdict(
+                role_applied=True,
+                tier=TIER_SUPPRESSED_REVIEWER,
+                reason=None,
+                source_path=None,
+            )
+
         candidates = list(_candidate_sources(terminal_id, role_slug, project_root))
 
         # Resolve the source the injector would actually use: the FIRST existing
