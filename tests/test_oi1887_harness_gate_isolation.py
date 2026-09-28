@@ -25,6 +25,24 @@ starting a real provider or claude process:
   (d) a PR branch that does not exist on the remote books ``unavailable``
       before any dispatch — the dispatcher is never even called, so there is
       no run against main or anything else.
+
+Fix-forward (OI-1887 round 2): the initial vangnet compared the FULL output
+of ``git branch --list``, which is shared across every worktree of the repo
+and changes on every real run — the gate's own provider worktree
+(``git worktree add <path> -b dispatch/<safe_id> ...``) leaves its branch
+behind, and any sibling dispatch running concurrently mints its own. That
+made every real kimi/glm/deepseek review book
+``unavailable``/``harness_lane_touched_main_checkout``. The fix excludes the
+``dispatch/`` prefix from the comparison (by name AND sha, not name alone),
+covered by:
+
+  (e) a fake dispatcher that runs the REAL ``git worktree add ... -b
+      dispatch/<id>`` command and leaves the branch behind still books
+      ``completed``;
+  (f) a sibling ``dispatch/other`` branch appearing mid-run (a different,
+      concurrent dispatch) still books ``completed``;
+  (g) the exclusion is narrow — a bare ``git branch pr1950`` (no checkout
+      needed) OUTSIDE the ``dispatch/`` prefix still books ``unavailable``.
 """
 
 from __future__ import annotations
@@ -224,6 +242,108 @@ class TestAgentTouchingMainCheckoutIsCaught:
         saved = json.loads(result_file.read_text(encoding="utf-8"))
         assert saved["status"] == "unavailable"
         assert saved["reason"] == "harness_lane_touched_main_checkout"
+
+
+class TestDispatchBranchChurnIsExcludedFromTheVangnet:
+    """OI-1887 fix-forward: ``refs/heads`` is shared across every worktree of
+    the repo, and a real, correct harness-lane run creates ``dispatch/<id>``
+    branches as a side effect (its own provider worktree, or a sibling
+    dispatch running concurrently) — those must never trip the vangnet.
+    Anything outside the ``dispatch/`` prefix still must."""
+
+    def test_real_worktree_add_dispatch_branch_left_behind_does_not_trip_vangnet(
+        self, orchestrator_repo, monkeypatch, tmp_path,
+    ):
+        """Reproduces the actual mechanism, not a stand-in for it: the fake
+        dispatcher runs the SAME command the provider lane runs
+        (``dispatch_worktree_isolation.create_dispatch_worktree`` ->
+        ``git worktree add <path> -b dispatch/<safe_id> origin/<branch>``),
+        and leaves the branch behind exactly as teardown does in production
+        (branch removal is not part of worktree teardown). This must stay
+        ``completed`` — the branch is under ``dispatch/`` and its existence
+        is expected fabric churn, not evidence of a touched checkout.
+        """
+        checkout = orchestrator_repo["checkout"]
+        env = _gate_env(tmp_path)
+        provider_worktree = tmp_path / "provider-worktree"
+
+        def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None):
+            def dispatch(provider, model, instruction, dispatch_id):
+                _run_git(
+                    ["worktree", "add", str(provider_worktree), "-b",
+                     "dispatch/kimi-gate-pr1950", base_ref],
+                    checkout,
+                )
+                return _pass_report_text()
+            return dispatch
+
+        monkeypatch.setattr("plan_gate_panel._make_default_dispatcher", factory)
+        monkeypatch.delenv("VNX_KIMI_GATE_MODEL", raising=False)
+
+        runner = _make_runner(env, checkout)
+        payload = _payload("feature/pr-1950", env["reports_dir"] / "kimi-gate-pr1950.md")
+        result = runner.run(gate="kimi_gate", request_payload=payload, pr_number=1950)
+
+        assert result["status"] == "completed", result.get("reason_detail")
+        assert "dispatch/kimi-gate-pr1950" in _run_git(["branch", "--list"], checkout)
+
+    def test_concurrent_sibling_dispatch_branch_does_not_trip_vangnet(
+        self, orchestrator_repo, monkeypatch, tmp_path,
+    ):
+        """A DIFFERENT dispatch (a sibling worker, running in parallel in its
+        own worktree of the same repo) creates ``dispatch/other`` mid-run.
+        ``refs/heads`` is shared, so this shows up in the after-snapshot too
+        — and must not be mistaken for the gate's own dispatch touching the
+        checkout."""
+        checkout = orchestrator_repo["checkout"]
+        env = _gate_env(tmp_path)
+
+        def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None):
+            def dispatch(provider, model, instruction, dispatch_id):
+                # Simulates a sibling dispatch's worktree branch appearing
+                # in the shared refs/heads while THIS gate run is in flight.
+                _run_git(["branch", "dispatch/other-sibling-dispatch"], checkout)
+                return _pass_report_text()
+            return dispatch
+
+        monkeypatch.setattr("plan_gate_panel._make_default_dispatcher", factory)
+        monkeypatch.delenv("VNX_KIMI_GATE_MODEL", raising=False)
+
+        runner = _make_runner(env, checkout)
+        payload = _payload("feature/pr-1950", env["reports_dir"] / "kimi-gate-pr1950.md")
+        result = runner.run(gate="kimi_gate", request_payload=payload, pr_number=1950)
+
+        assert result["status"] == "completed", result.get("reason_detail")
+
+    def test_agent_creates_non_dispatch_branch_in_main_repo_still_caught(
+        self, orchestrator_repo, monkeypatch, tmp_path,
+    ):
+        """The exclusion is narrow: a branch OUTSIDE the ``dispatch/`` prefix
+        (e.g. the exact ``pr1950`` shape from the 27-09 incident, created
+        here with a bare ``git branch`` — no checkout involved) must still
+        trip the vangnet."""
+        checkout = orchestrator_repo["checkout"]
+        env = _gate_env(tmp_path)
+        calls = []
+
+        def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None):
+            def dispatch(provider, model, instruction, dispatch_id):
+                calls.append(1)
+                _run_git(["branch", "pr1950"], checkout)
+                return _pass_report_text()
+            return dispatch
+
+        monkeypatch.setattr("plan_gate_panel._make_default_dispatcher", factory)
+        monkeypatch.delenv("VNX_KIMI_GATE_MODEL", raising=False)
+
+        runner = _make_runner(env, checkout)
+        payload = _payload("feature/pr-1950", env["reports_dir"] / "kimi-gate-pr1950.md")
+        result = runner.run(gate="kimi_gate", request_payload=payload, pr_number=1950)
+
+        assert len(calls) == 1
+        assert result["status"] == "unavailable", result
+        assert result["reason"] == "harness_lane_touched_main_checkout"
+        assert "pr1950" in result["reason_detail"]
 
 
 class TestMissingBranchNeverDispatches:

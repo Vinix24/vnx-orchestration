@@ -35,6 +35,19 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
   `scripts/glm_gate.py`/`scripts/kimi_gate.py` CLIs (deepseek has no standalone CLI, only
   the harness-lane path above) carried the identical missing-`base_ref` pattern at their
   own `_make_default_dispatcher` call sites and are fixed the same way.
+- **The OI-1887 vangnet no longer trips on the fabric's own dispatch-branch
+  churn.** `refs/heads` is shared across every worktree of a repo, and a
+  correct harness-lane run mints `dispatch/<id>` branches as a side effect
+  — the gate's own provider worktree (`git worktree add ... -b
+  dispatch/<safe_id>`, left behind after teardown) and any sibling dispatch
+  running concurrently. The first vangnet compared the full `git branch
+  --list` output, so every real run booked
+  `unavailable`/`harness_lane_touched_main_checkout`. The comparison now
+  excludes the `dispatch/` prefix and compares every other branch by name
+  AND commit sha (`git for-each-ref`, not `git branch --list`), so a branch
+  reset to a different commit under an unchanged name is still caught — as
+  is any branch outside that prefix (the exact `pr1950` shape from PR
+  #1950).
 
 ## [1.6.6] - 2026-09-27
 

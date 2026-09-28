@@ -244,8 +244,47 @@ def _git_capture(args: List[str], cwd: str) -> str:
     return result.stdout.strip()
 
 
+def _capture_branch_heads(cwd: str) -> str:
+    """Return a stable, comparable snapshot of local branch heads, excluding ``dispatch/*``.
+
+    ``dispatch/<id>`` is not evidence of a touched main checkout: the fabric
+    mints one for every dispatch, and ``refs/heads`` is shared across every
+    worktree of a repo — so it moves for reasons that have nothing to do
+    with THIS checkout being touched. Two sources of that churn are normal
+    even on a clean harness-lane run:
+
+      1. The gate's own dispatch: ``_prepare_provider_workdir`` ->
+         ``create_dispatch_worktree`` runs ``git worktree add <path> -b
+         dispatch/<safe_id>`` for the provider's isolated worktree, and that
+         branch is left behind after teardown (measured: dozens of stale
+         ``dispatch/glm-gate-pr...`` branches accumulate over time).
+      2. Any OTHER dispatch running concurrently in a sibling worktree of
+         the same repo mints its own ``dispatch/<id>`` at the same time.
+
+    Filtering those out by name is deliberately narrow — it is not "ignore
+    all branch churn", it is "ignore the one prefix the fabric itself owns
+    and creates as a side effect of dispatching, per worktree". Every OTHER
+    branch appearing, disappearing, or being reset to a different commit is
+    still exactly what this vangnet exists to catch (PR #1950's stray
+    ``pr1950``, still reproduced in
+    ``TestAgentTouchingMainCheckoutIsCaught``). Compared by name AND sha via
+    ``git for-each-ref``, not by name alone, so a branch reset to a
+    different commit under an unchanged name is still caught too.
+    """
+    raw = _git_capture(
+        ["for-each-ref", "--format=%(refname:short) %(objectname)", "refs/heads"], cwd,
+    )
+    if raw.startswith("<git "):
+        return raw
+    lines = [
+        line for line in raw.splitlines()
+        if line.strip() and not line.split(" ", 1)[0].startswith("dispatch/")
+    ]
+    return "\n".join(sorted(lines))
+
+
 def _capture_main_checkout_state(project_root: Optional[Path]) -> Dict[str, str]:
-    """Snapshot the orchestrator's OWN checkout: HEAD ref/sha, branch list, working-tree status.
+    """Snapshot the orchestrator's OWN checkout: HEAD ref/sha, branch heads, working-tree status.
 
     OI-1887 vangnet: the harness-lane isolation this file builds (PR-branch
     worktree via ``--base-ref``, an explicit "stay in your worktree" line in
@@ -259,6 +298,7 @@ def _capture_main_checkout_state(project_root: Optional[Path]) -> Dict[str, str]
     HEAD is the symbolic ref (branch name) when on a branch, falling back to
     the raw sha in detached HEAD — either way, a value that changes the
     instant something runs `git checkout`/`git switch` in this checkout.
+    Branch heads exclude ``dispatch/*`` — see ``_capture_branch_heads``.
     """
     cwd = str(project_root) if project_root else "."
     head = _git_capture(["symbolic-ref", "-q", "HEAD"], cwd)
@@ -266,7 +306,7 @@ def _capture_main_checkout_state(project_root: Optional[Path]) -> Dict[str, str]
         head = _git_capture(["rev-parse", "HEAD"], cwd)
     return {
         "head": head,
-        "branches": _git_capture(["branch", "--list"], cwd),
+        "branches": _capture_branch_heads(cwd),
         "status": _git_capture(["status", "--porcelain"], cwd),
     }
 
