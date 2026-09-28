@@ -21,6 +21,24 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
   `worker_permissions.dispatch_paths_env_value`. `VNX_ENFORCE_WORKER_PERMISSIONS`
   stays default OFF (operator decision, unchanged) — this only makes the narrowing
   work once enforcement is turned on.
+- **`vnx gate`'s slot-line names whoever actually read the seat (OI-1888).**
+  `scripts/commands/gate.sh` printed `Gate '<seat>': PASS` from the literal
+  `--only`/required-gates argument and `request-and-execute`'s exit code
+  alone. When a seat's own reader is unavailable and the takeover chain hands
+  it to a different gate (`kimi_gate` unavailable -> `glm_gate` reads
+  instead), the exit code already reflected the successor's real verdict, but
+  the line kept naming the original seat as if it had read — PR #1952 merged
+  on 2026-09-27 on exactly that misreading. A new helper,
+  `scripts/lib/gate_seat_line.py`, resolves each requested seat against the
+  `request-and-execute` report — reusing
+  `gate_enforcement_verify.resolve_seat_entries`, the same takeover
+  interpretation `scripts/t0_gate_enforcement.sh` already relies on, instead
+  of a second one — and gate.sh now prints one line per seat in that shape:
+  unchanged (`Gate 'kimi_gate': PASS`) when the seat answered itself, with the
+  successor named on a takeover (`Gate 'kimi_gate' -> glm_gate (takeover,
+  lane_exhausted): PASS`), and never a PASS for an unavailable seat with no
+  successor (`Gate 'kimi_gate': UNAVAILABLE (<reason>)`, non-zero exit). A
+  truncated diff is marked on the line (`(diff truncated)`).
 
 ### Removed
 

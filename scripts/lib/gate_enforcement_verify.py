@@ -122,16 +122,33 @@ def _hop_gates(path: Any) -> List[str]:
     return [str(hop["gate"]) for hop in path if isinstance(hop, dict) and hop.get("gate")]
 
 
+def _raw_takeover_path(entry: Dict[str, Any], request_file: Path) -> List[Dict[str, Any]]:
+    """The full takeover-path hop list for ``entry``: from the report's own
+    ``detail``, else from the on-disk request record (a guarded result write
+    can leave the result without the annotation the request holds).
+
+    Each hop is the raw dict (``gate``/``reason``/``detail``/``status``), not
+    just the gate name — :func:`_takeover_hops` narrows this to names for the
+    artifact-verification walk, while a display line (``gate_seat_line.py``)
+    needs the hop's own ``reason`` too. One extraction, two views, so the
+    display line and the verification walk can never read one takeover two
+    different ways.
+    """
+    detail = entry.get("detail")
+    path = detail.get("takeover_path") if isinstance(detail, dict) else None
+    hops = [hop for hop in path if isinstance(hop, dict) and hop.get("gate")] if isinstance(path, list) else []
+    if hops:
+        return hops
+    request = _load_json(request_file)
+    path = request.get("takeover_path") if request else None
+    return [hop for hop in path if isinstance(hop, dict) and hop.get("gate")] if isinstance(path, list) else []
+
+
 def _takeover_hops(entry: Dict[str, Any], request_file: Path) -> List[str]:
     """The seats ``entry``'s gate read in place of: the takeover path the report
     carries, else the one on the request record (a guarded result write can leave
     the result without the annotation the request holds)."""
-    detail = entry.get("detail")
-    hops = _hop_gates(detail.get("takeover_path") if isinstance(detail, dict) else None)
-    if hops:
-        return hops
-    request = _load_json(request_file)
-    return _hop_gates(request.get("takeover_path") if request else None)
+    return [str(hop["gate"]) for hop in _raw_takeover_path(entry, request_file)]
 
 
 def verify_report(
@@ -191,6 +208,51 @@ def verify_report(
                 f"took it over or recorded its takeover chain as exhausted"
             )
     return outcome
+
+
+def resolve_seat_entries(
+    report: Dict[str, Any],
+    *,
+    pr_number: int,
+    state_dir: Path,
+) -> Dict[str, Dict[str, Any]]:
+    """Map every seat named in ``report`` -- requested directly, or passed
+    over via a takeover -- to the ``gates`` entry that accounts for it.
+
+    Shared seat/takeover resolution for two readers that must never disagree:
+    this module's own :func:`verify_report` (artifact enforcement) and
+    ``gate_seat_line.py`` (the ``vnx gate`` slot-line, OI-1888). Both need the
+    same answer to "which entry speaks for seat X" -- one entry itself when
+    there was no takeover, or the entry of whichever gate took the seat over,
+    including every intermediate hop of a multi-step chain.
+
+    A seat with no entry in the returned mapping was neither answered,
+    taken over, nor recorded as chain-exhausted -- exactly the
+    ``MISSING_ARTIFACT`` condition :func:`verify_report` raises on. The first
+    entry (in report order) to claim a seat wins, matching the order the
+    manager dispatched in.
+    """
+    requests_dir = state_dir / "review_gates" / "requests"
+    answered_by: Dict[str, Dict[str, Any]] = {}
+
+    for entry in report.get("gates", []):
+        if not (isinstance(entry, dict) and entry.get("gate")):
+            continue
+        gate = _check_gate_name(str(entry["gate"]))
+
+        if entry.get("request_status") == _CHAIN_EXHAUSTED:
+            chain_detail = entry.get("detail")
+            hops = _hop_gates(
+                chain_detail.get("takeover_path") if isinstance(chain_detail, dict) else None
+            )
+        else:
+            request_file = requests_dir / f"pr-{pr_number}-{gate}.json"
+            hops = _takeover_hops(entry, request_file)
+
+        for seat in [gate, *hops]:
+            answered_by.setdefault(seat, entry)
+
+    return answered_by
 
 
 def _default_stack() -> Sequence[str]:
