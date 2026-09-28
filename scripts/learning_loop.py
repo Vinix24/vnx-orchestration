@@ -43,6 +43,41 @@ _FAILURE_STATUSES = frozenset(
     {"failed", "failure", "error", "blocked", "timeout", "contract_invalid"}
 )
 
+# Sentinel values a provider/model field carries when the emitter had no real
+# identity to stamp (empty string, or an explicit none/null/unknown literal).
+_NONE_SENTINELS = frozenset({"", "none", "null", "unknown"})
+
+
+def _is_unusable_provenance_receipt(receipt: Dict[str, Any]) -> bool:
+    """True when a no-provider failure receipt is unusable historical noise,
+    False when it is a real governed failure that merely lacks a provider field.
+
+    D3a (dlv-ceba1526c5a1): the D3 filter this replaces skipped every failure
+    receipt with a sentinel ``provider`` field, on the assumption that meant
+    "one of the historical unknown:unknown receipts". Measured 2026-09-28
+    across 38,489 receipts in 7 project ledgers: of the 931 failure-status
+    receipts with a sentinel provider, 895 carry usable governance provenance
+    despite the missing provider —
+      - 163 carry a REAL ``model`` value (e.g. "sonnet", "deepseek-v4-pro",
+        "opus", "glm-5.2", "deepseek-v4-flash", "gpt-5.5"): a real worker ran,
+        only the provider field itself is unpopulated (a ``subprocess_completion``
+        writer gap, tracked separately — see extract_failure_patterns' Open
+        Items note, not fixed here).
+      - 732 carry a converter-stamped ``report_path`` (report_to_receipt_converter's
+        ``report_contract_invalid``/``task_failed`` writers: real contract
+        violations and fail-closed rejections, with ``model`` left empty).
+    Only 36 are double-sentinel: ``model`` is ALSO a none-sentinel (or absent)
+    AND there is no ``report_path`` — these are the historical unknown:unknown
+    noise the original filter targeted, and stay excluded.
+    """
+    model_raw = receipt.get("model")
+    model_sentinel = model_raw is None or str(model_raw).strip().lower() in _NONE_SENTINELS
+    if not model_sentinel:
+        return False
+    if receipt.get("report_path"):
+        return False
+    return True
+
 
 def _to_aware_utc(dt: Optional[datetime]) -> Optional[datetime]:
     """Normalize a datetime to timezone-aware UTC, handling naive datetimes gracefully."""
@@ -391,10 +426,14 @@ class LearningLoop:
         ``generate_prevention_rules`` / ``persist_to_intelligence_db``
         (keys: task / terminal / agent / error / timestamp).
 
-        Filter: receipts with a missing/empty provider AND a failure status are
-        skipped — these are the 9,052+ unknown:unknown receipts that carry no
-        usable provenance and would poison pattern proposals (D3 data-quality
-        guard). The post-filter corpus size is logged.
+        Filter (D3a): a failure receipt with a sentinel provider is skipped
+        ONLY when it also has no other usable governance provenance (see
+        ``_is_unusable_provenance_receipt`` for the measured criteria) — the
+        historical unknown:unknown noise this guard targets. A sentinel
+        provider alone no longer skips a receipt: a real failure the converter
+        booked with an unresolved provider (a real ``model`` value, or a
+        converter-stamped ``report_path``) now reaches pattern detection. The
+        post-filter corpus size and both counters are logged.
         """
         if not start_time:
             start_time = datetime.now(timezone.utc) - timedelta(hours=24)
@@ -408,6 +447,7 @@ class LearningLoop:
 
         total_scanned = 0
         no_provider_skipped = 0
+        no_provider_passed = 0
 
         try:
             with open(self.receipts_path, "r", encoding="utf-8", errors="replace") as f:
@@ -440,18 +480,18 @@ class LearningLoop:
                         if is_stale_contract_invalid(receipt):
                             continue
 
-                    # D3 data-quality filter: skip no-provider failure receipts.
-                    # Targets receipts where 'provider' is explicitly set to a
-                    # none-sentinel ("none", "unknown", "null", ""), e.g. the 9,052+
-                    # unknown:unknown receipts. Receipts where the field is absent
-                    # entirely (e.g. contract_invalid from the receipt processor)
-                    # pass through — they carry usable governance provenance.
+                    # D3a data-quality filter: a sentinel provider alone is no
+                    # longer enough to skip a receipt. Only double-sentinel
+                    # receipts with no other governance provenance (see
+                    # _is_unusable_provenance_receipt) are historical noise.
+                    # Receipts where 'provider' is absent entirely (e.g. some
+                    # contract_invalid records) always pass through unchanged.
                     raw_provider = receipt.get("provider")
-                    if raw_provider is not None and str(raw_provider).strip().lower() in (
-                        "", "none", "null", "unknown"
-                    ):
-                        no_provider_skipped += 1
-                        continue
+                    if raw_provider is not None and str(raw_provider).strip().lower() in _NONE_SENTINELS:
+                        if _is_unusable_provenance_receipt(receipt):
+                            no_provider_skipped += 1
+                            continue
+                        no_provider_passed += 1
 
                     # Generic window filter for all other failure statuses.
                     if not is_contract_invalid:
@@ -473,7 +513,9 @@ class LearningLoop:
         post_filter = total_scanned - no_provider_skipped
         print(
             f"  Receipt corpus: {total_scanned} scanned, "
-            f"{no_provider_skipped} no-provider filtered → {post_filter} effective; "
+            f"{no_provider_skipped} no-provider filtered "
+            f"({no_provider_passed} no-provider passed on governance provenance) "
+            f"→ {post_filter} effective; "
             f"{len(failure_patterns)} failures in window"
         )
         return failure_patterns
