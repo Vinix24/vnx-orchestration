@@ -4,9 +4,10 @@ These exercise the REAL bash via subprocess (no reimplementation):
 
   * _d_valid_dispatch_id   — the centralized id-safety guard
   * _d_is_staged_form      — staged (door) vs raw (legacy) classifier
-  * cmd_dispatch routing   — door-ON staged -> dispatch_cli (door); door-ON raw -> legacy
-                             tmux/subprocess delivery (NOT the bridge) + a deprecation warning;
-                             rollback/off -> legacy, no warning, staged-bundle hint on not-found
+  * cmd_dispatch routing   — door-ON staged -> dispatch_cli (door); door-ON raw -> REFUSED
+                             per ADR-025 (neither the door, the bridge, nor legacy delivery is
+                             invoked); rollback/off -> legacy delivery, byte-identical, no
+                             refusal, staged-bundle hint on not-found
   * dispatch_deliver.sh    — provider propagation to the door bridge (G1) + default-OFF regression
   * dispatch_bridge.py     — claude_code domain string canonicalizes to the claude lane (O1)
 
@@ -231,34 +232,37 @@ def test_door_on_staged_pending_id_hits_door(tmp_path):
     assert not e["bridge_marker"].exists()
 
 
-def test_door_on_raw_md_goes_legacy_not_bridge(tmp_path):
-    # No --adapter: the raw form needs no flag. The tmux-spawn lane that used to be its default
-    # was removed on 2026-09-18, so the default is now the subprocess lane.
+def test_door_on_raw_md_refused(tmp_path):
+    # ADR-025 implemented: door-ON + a raw .md is REFUSED outright (exit != 0) instead of
+    # falling through to the legacy lane. Neither the door, the bridge, nor the legacy
+    # delivery lane is invoked.
     e = _make_home(tmp_path)
     raw = _write_raw(e)
     r = _run_cmd(e, str(raw), flag="1")
-    assert r.returncode == 0, r.stderr
-    # POSITIVE: the legacy delivery lane IS invoked; the door AND the bridge are NOT.
-    assert e["lane_marker"].exists(), "legacy delivery lane not invoked for raw .md under door-ON"
-    assert json.loads(e["lane_marker"].read_text())["lane"] == "subprocess"
+    assert r.returncode != 0, "raw .md must be refused under the door default"
     assert not e["door_marker"].exists(), "door wrongly invoked for raw .md"
     assert not e["bridge_marker"].exists(), "bridge wrongly invoked for raw .md (Option X1 violated)"
-    assert "DEPRECATED" in r.stderr, "deprecation warning not emitted under door-ON + raw"
+    assert not e["lane_marker"].exists(), "legacy delivery lane wrongly invoked for raw .md under door-ON"
+    assert "ADR-025" in r.stderr, "refusal message must cite ADR-025"
+    assert "stage" in r.stderr.lower(), "refusal message must tell the caller how to stage"
 
 
-def test_door_on_raw_md_adapter_subprocess_honored(tmp_path):
+def test_door_on_raw_md_refused_even_with_adapter_flag(tmp_path):
+    # Lane-precedence flags no longer rescue the raw form under the door default: refusal
+    # happens before any adapter/lane resolution, regardless of --adapter.
     e = _make_home(tmp_path)
     raw = _write_raw(e)
     r = _run_cmd(e, str(raw), "--adapter", "subprocess", flag="1")
-    assert r.returncode == 0, r.stderr
-    # Lane precedence preserved on the raw form: --adapter subprocess -> subprocess lane.
-    assert json.loads(e["lane_marker"].read_text())["lane"] == "subprocess"
+    assert r.returncode != 0, "raw .md with --adapter must still be refused under the door default"
+    assert not e["lane_marker"].exists()
+    assert not e["door_marker"].exists()
     assert not e["bridge_marker"].exists()
 
 
-def test_rollback_raw_md_legacy_no_warning(tmp_path):
+def test_rollback_raw_md_legacy_byte_identical(tmp_path):
     # Door off via explicit rollback (post-flip the default is ON, so we opt out explicitly):
-    # raw .md -> legacy, and NO deprecation warning (the raw form is the sanctioned path here).
+    # raw .md still works, byte-identical, on the legacy lane — the rollback hatch for when
+    # the door itself is broken. No refusal message either (the raw form is sanctioned here).
     e = _make_home(tmp_path)
     raw = _write_raw(e)
     r = _run_cmd(e, str(raw), flag=None, legacy="1")
@@ -266,21 +270,22 @@ def test_rollback_raw_md_legacy_no_warning(tmp_path):
     assert e["lane_marker"].exists()
     assert json.loads(e["lane_marker"].read_text())["lane"] == "subprocess"
     assert "DEPRECATED" not in r.stderr, "deprecation warning must not fire when the door is off"
+    assert "refused" not in r.stderr.lower(), "raw form must not be refused under rollback"
     assert not e["door_marker"].exists()
 
 
-def test_default_on_raw_md_legacy_with_warning(tmp_path):
-    # Post-flip: unset VNX_SINGLE_ENTRY_DISPATCH resolves to the door (default ON). A raw .md still
-    # falls through to legacy delivery, now WITH the deprecation warning.
+def test_default_on_raw_md_refused(tmp_path):
+    # Post-flip (ADR-025 implemented): unset VNX_SINGLE_ENTRY_DISPATCH resolves to the door
+    # (default ON). A raw .md is now REFUSED per ADR-025 instead of falling through to legacy
+    # delivery with a deprecation warning — the warn-then-remove window has closed.
     e = _make_home(tmp_path)
     raw = _write_raw(e)
     r = _run_cmd(e, str(raw), flag=None)  # unset -> default ON (post-flip)
-    assert r.returncode == 0, r.stderr
-    assert e["lane_marker"].exists()
-    assert json.loads(e["lane_marker"].read_text())["lane"] == "subprocess"
+    assert r.returncode != 0, "raw .md must be refused under the door default"
+    assert not e["lane_marker"].exists()
     assert not e["door_marker"].exists()
     assert not e["bridge_marker"].exists()
-    assert "DEPRECATED" in r.stderr, "deprecation warning must fire under the door default + raw"
+    assert "ADR-025" in r.stderr
 
 
 def test_rollback_staged_pending_id_legacy_with_hint(tmp_path):
@@ -313,7 +318,8 @@ def test_door_on_help_renders_without_command_substitution(tmp_path):
     assert r.returncode == 0, r.stderr
     out = r.stdout + r.stderr
     assert "Single-entry gate" in out
-    assert "DEPRECATED" in out
+    assert "REFUSED" in out
+    assert "ADR-025" in out
     for bad in ("command not found", "syntax error", "No such file"):
         assert bad not in out.lower(), f"help triggered shell evaluation: {bad!r} in output"
 

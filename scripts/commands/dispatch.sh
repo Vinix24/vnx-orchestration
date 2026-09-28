@@ -3,15 +3,18 @@
 # Sourced by bin/vnx — delivers a dispatch .md file to a VNX worker.
 #
 # The single-entry door (dispatch_cli.py) is the default lane for STAGED forms.
-# The raw-file form (`vnx dispatch <file.md>`, DEPRECATED per ADR-025) has ONE lane:
-# the headless SubprocessAdapter (scripts/lib/subprocess_dispatch.py — `claude -p`).
-# It is also the default, so the raw form needs no flag:
+# The raw-file form (`vnx dispatch <file.md>`) is REFUSED per ADR-025 whenever the door is
+# the default lane — stage it (vnx dispatch stage ...) and run vnx dispatch <pending-id>
+# instead. It still has ONE lane when reached: the headless SubprocessAdapter
+# (scripts/lib/subprocess_dispatch.py — `claude -p`), and is still the default there, so the
+# raw form needs no flag once it IS reached:
 #     --adapter subprocess  (CLI flag)  >  Adapter: subprocess  (file header)
 #       >  VNX_ADAPTER=subprocess  (env)  >  default: subprocess
 # The tmux-spawn lane that used to be the raw form's default was removed on 2026-09-18.
 # Naming it (`--adapter tmux`, `Adapter: tmux`, `VNX_ADAPTER=tmux`) is refused. Naming no
 # lane is not: the raw form is the rollback hatch (VNX_DISPATCH_LEGACY=1) and has to work
-# without a flag when the door itself is broken.
+# without a flag when the door itself is broken — that rollback is the ONLY way to reach
+# this lane now; without it, cmd_dispatch refuses the raw form before it gets here.
 #
 # All variables from bin/vnx (VNX_HOME, VNX_DATA_DIR, VNX_STATE_DIR,
 # VNX_DISPATCH_DIR, VNX_PYTHON, log, err) are available when this runs.
@@ -213,8 +216,8 @@ Single-entry gate (the default lane). Staged forms route through the door:
   --spec-file <abs>            Absolute path to dispatch-spec.json
   <pending-id>                 Dispatch ID resolved to dispatches/pending/<id>/dispatch-spec.json
   --dry-run                    Print plan + fingerprint; spawn nothing
-  (The raw 'vnx dispatch <file.md>' form still works on the legacy lane but is DEPRECATED —
-   removed in 1.x per ADR-025. Stage it to a pending-id.)
+  (The raw 'vnx dispatch <file.md>' form is REFUSED per ADR-025 while the door is the
+   default lane. Stage it to a pending-id, or set VNX_DISPATCH_LEGACY=1 to fall back.)
   --force-release-lock [CLASS] Release stale serial lock for CLASS (default: claude-tmux).
                                Prints prior holder pid+dispatch_id; removes lock file.
                                Does NOT kill the holder — use the printed pid if needed.
@@ -338,29 +341,32 @@ cmd_dispatch() {
   fi
 
   # Routing (flag contract — also documented in --help). The door owns STAGED forms only;
-  # raw `vnx dispatch <file.md>` stays on the legacy lane (deprecated, removed in 1.x per ADR-025):
+  # raw `vnx dispatch <file.md>` is REFUSED when the door is the default, per ADR-025:
   #   door enabled  + staged form (--spec-file / <pending-id> with a bundle / --force-release-lock)
   #       -> DOOR (_d_single_entry_dispatch)
   #   door enabled  + raw form (a path, *.md, or a bare slug without a bundle)
-  #       -> LEGACY lane + a one-time DEPRECATED warning (stderr)
+  #       -> REFUSED (exit 1, stderr tells the caller to stage first)
   #   door disabled (rollback VNX_DISPATCH_LEGACY=1, or explicit VNX_SINGLE_ENTRY_DISPATCH=0)
-  #       -> LEGACY lane, byte-identical, no warning
+  #       -> LEGACY lane, byte-identical, the rollback hatch for when the door itself is broken
   # POST-FLIP (door-flip D2, ADR-024): the door is the DEFAULT — unset VNX_SINGLE_ENTRY_DISPATCH
   # now resolves to the door. Pre-flip the default was the legacy lane.
   # The rollback hatch (VNX_DISPATCH_LEGACY=1) always wins (single-source helper).
-  # _door_on is captured ONCE here (not re-evaluated) so the warning fires iff the door is the
-  # reason we fell through to legacy (door on + raw), never under explicit legacy/rollback.
+  # _door_on is captured ONCE here (not re-evaluated) so the refusal fires iff the door is the
+  # reason a raw form was rejected, never under explicit legacy/rollback.
   local _door_on=0
   vnx_single_entry_enabled && _door_on=1
   if [ "$_door_on" = 1 ] && _d_is_staged_form "$@"; then
     _d_single_entry_dispatch "$@"
     return $?
   fi
-  # Past here = the legacy raw-file lane. When the door is the default yet we got a raw form,
-  # warn once (stderr, no ERROR: prefix) — seeds the ADR-025 removal. Fires BEFORE file
-  # resolution so it shows regardless of a later not-found / --dry-run outcome.
+  # Past here = the raw-file form. When the door is the default, ADR-025 refuses it outright —
+  # the warn-then-remove window has closed. Fires BEFORE file resolution so it refuses
+  # regardless of a later not-found / --dry-run outcome. Under explicit rollback
+  # (VNX_DISPATCH_LEGACY=1 / VNX_SINGLE_ENTRY_DISPATCH=0) _door_on is 0 and the raw form still
+  # reaches the unchanged legacy lane below — the rollback hatch for when the door itself is broken.
   if [ "$_door_on" = 1 ]; then
-    printf '%s\n' "[dispatch] DEPRECATED: raw-file dispatch (vnx dispatch <file.md>) — stage to a pending-id (vnx dispatch <pending-id>) instead. The raw form is scheduled for removal per ADR-025." >&2
+    err "[dispatch] raw-file dispatch (vnx dispatch <file.md>) is refused: the single-entry door is the default lane (ADR-025). Stage it first — vnx dispatch stage --instruction <file.md> --dispatch-id <id> --role <role> --slot <TX> (or python3 scripts/lib/dispatch_bridge.py stage --instruction <file.md> --dispatch-id <id> --role <role> --slot <TX>) — then run vnx dispatch <pending-id>. Rollback (door broken): VNX_DISPATCH_LEGACY=1 vnx dispatch <file.md> still uses the legacy lane."
+    return 1
   fi
 
   local file=""
@@ -408,7 +414,9 @@ File search order:
 Canonical (single-entry door):
   vnx dispatch <pending-id>                         # a promoted dispatch bundle
 
-Raw-file form (DEPRECATED — removed in 1.x per ADR-025; the file must come FIRST):
+Raw-file form (REFUSED per ADR-025 while the door is the default; this help is reached
+because the door is off here — VNX_DISPATCH_LEGACY=1 or VNX_SINGLE_ENTRY_DISPATCH=0 —
+the file must come FIRST):
   vnx dispatch .vnx-data/dispatches/pending/my-dispatch.md
   vnx dispatch my-dispatch.md --terminal T2
   vnx dispatch my-dispatch.md --model opus --dry-run
@@ -469,7 +477,9 @@ File search order:
 Canonical (single-entry door):
   vnx dispatch <pending-id>                         # a promoted dispatch bundle
 
-Raw-file form (DEPRECATED — removed in 1.x per ADR-025; the file must come FIRST):
+Raw-file form (REFUSED per ADR-025 while the door is the default; this help is reached
+because the door is off here — VNX_DISPATCH_LEGACY=1 or VNX_SINGLE_ENTRY_DISPATCH=0 —
+the file must come FIRST):
   vnx dispatch .vnx-data/dispatches/pending/my-dispatch.md
   vnx dispatch my-dispatch.md --terminal T2
   vnx dispatch my-dispatch.md --model opus --dry-run

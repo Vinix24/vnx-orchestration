@@ -442,9 +442,10 @@ def test_reject_on_unpromoted_staging(mock_snapshot, tmp_path):
 # test_flag_off_legacy_unchanged
 # ---------------------------------------------------------------------------
 
-def test_raw_md_legacy_under_default_on(tmp_path):
-    """Post-flip (ADR-024): VNX_SINGLE_ENTRY_DISPATCH unset resolves to the door (default ON), but a
-    raw .md still falls through to the legacy dry-run path (Option X1) — NOT the single-entry gate."""
+def test_raw_md_refused_under_default_on(tmp_path):
+    """ADR-025 implemented: VNX_SINGLE_ENTRY_DISPATCH unset resolves to the door (default ON),
+    and a raw .md is REFUSED outright (exit != 0) — neither the legacy dry-run path nor the
+    single-entry gate runs."""
     dispatch_md = tmp_path / "test-dispatch.md"
     dispatch_md.write_text(
         "[[TARGET:T1]]\nRole: backend-developer\nGate: codex_gate\n\nTest dispatch.\n",
@@ -469,13 +470,14 @@ cmd_dispatch '{dispatch_md}' --dry-run
 """
     result = subprocess.run(["bash", "-c", bash_cmd], capture_output=True, text=True)
 
-    assert result.returncode == 0, (
-        f"Expected legacy dry-run to succeed; rc={result.returncode}\n"
+    combined = result.stdout + result.stderr
+    assert result.returncode != 0, (
+        f"Expected the raw form to be refused under the door default; rc={result.returncode}\n"
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
-    combined = result.stdout + result.stderr
-    assert "DRY RUN" in combined
-    # Confirms NOT the single-entry gate path
+    assert "ADR-025" in combined
+    assert "DRY RUN" not in combined
+    # Confirms NOT the single-entry gate path either — refusal happens before both lanes.
     assert "single-entry gate" not in combined.lower()
 
 

@@ -12,6 +12,12 @@ The tmux-spawn lane that used to be the default was removed on 2026-09-18. The r
 the rollback hatch (VNX_DISPATCH_LEGACY=1), so a raw file that names no lane must still run,
 on the subprocess lane. A raw file that names the removed lane is refused loud and runs NO
 delivery script. No tmux stub is created on purpose: nothing may try to run it.
+
+Per ADR-025, the raw form is now REFUSED outright when the single-entry door is the default
+lane (no rollback set) — these tests are about the legacy lane's own internal precedence
+logic (adapter/header/env, requires-mcp, dry-run), which is only reachable once the rollback
+hatch is engaged. `_run()` therefore always sets VNX_DISPATCH_LEGACY=1 so every test in this
+file exercises the legacy lane directly, exactly as it did before ADR-025 was enforced.
 """
 
 from __future__ import annotations
@@ -90,7 +96,9 @@ export VNX_TEST_MARKER='{env_paths["marker"]}'
 source '{DISPATCH_SH}'
 cmd_dispatch {args}
 """
-    run_env = {"PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"}
+    # Per ADR-025 the raw form is refused unless the rollback hatch is engaged (see module
+    # docstring) — every test here targets the legacy lane's own logic, so opt in by default.
+    run_env = {"PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin", "VNX_DISPATCH_LEGACY": "1"}
     if vnx_adapter is not None:
         run_env["VNX_ADAPTER"] = vnx_adapter
     if extra_env:
