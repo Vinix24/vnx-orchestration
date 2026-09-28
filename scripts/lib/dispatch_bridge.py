@@ -31,10 +31,13 @@ owns lane selection (claude→headless). No Anthropic SDK import.
 from __future__ import annotations
 
 import hashlib
+import logging
 import shutil
 import sys
 from pathlib import Path, PurePosixPath
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 _LIB_DIR = str(Path(__file__).resolve().parent)
 if _LIB_DIR not in sys.path:
@@ -153,6 +156,76 @@ def _project_id() -> str:
     return _resolve_project_id()
 
 
+# Ref prefixes a work_ref may carry (mirrors phantom_guard._normalize_branch_name
+# and dispatch_spec.validate Rule 15 — the same three-prefix strip, so all three
+# readers agree on what "the branch name" is).
+_WORK_REF_PREFIXES = ("refs/heads/", "refs/remotes/origin/", "origin/")
+
+
+def resolve_parent_dispatch(
+    dispatch_id: str,
+    work_ref: Optional[str],
+    parent_dispatch: Optional[str],
+) -> Optional[str]:
+    """Derive ``parent_dispatch`` from ``work_ref`` when the caller left it unset.
+
+    The measured gap (D2, dlv-e5bdf6c502cf): only 2.7% of receipts since 21-09
+    carried ``parent_dispatch``, even though a fix-forward/rebase dispatch already
+    declares its lineage via ``work_ref="dispatch/<X>"`` (the branch of the
+    dispatch it continues) — nothing folded that into ``parent_dispatch``, so
+    rework and first-pass yield stayed unmeasurable.
+
+    Rule (the distinction comes from the BRANCH, never from whether ``pr_id`` is
+    set):
+      * ``work_ref`` names a DIFFERENT dispatch's branch (``dispatch/<X>`` with
+        ``X != dispatch_id``, after stripping a leading ref/remote prefix): this is
+        a continuation of X.
+          - no explicit ``parent_dispatch``: derive it as X (logged).
+          - explicit ``parent_dispatch == X``: pass through unchanged.
+          - explicit ``parent_dispatch`` set to anything else: refused — two
+            different lineages for one bundle is always a caller bug, never a
+            legitimate override.
+      * no ``work_ref``, or ``work_ref`` names this dispatch's OWN branch, or
+        ``work_ref`` doesn't have the ``dispatch/<id>`` shape at all: first
+        dispatch, no lineage to enforce — whatever ``parent_dispatch`` the caller
+        passed (including ``None``) is returned unchanged. This also covers the
+        escalation route (``stage_escalation_bundle``), which sets
+        ``parent_dispatch`` explicitly and never sets ``work_ref``.
+    """
+    ref = (work_ref or "").strip()
+    for _prefix in _WORK_REF_PREFIXES:
+        if ref.startswith(_prefix):
+            ref = ref[len(_prefix):]
+            break
+    explicit = (parent_dispatch or "").strip() or None
+
+    predecessor: Optional[str] = None
+    if ref.startswith("dispatch/"):
+        candidate = ref[len("dispatch/"):]
+        if candidate and candidate != dispatch_id:
+            predecessor = candidate
+
+    if predecessor is None:
+        return explicit
+
+    if explicit is None:
+        logger.info(
+            "resolve_parent_dispatch: derived parent_dispatch=%s from work_ref=%s "
+            "for dispatch_id=%s",
+            predecessor, ref, dispatch_id,
+        )
+        return predecessor
+
+    if explicit != predecessor:
+        raise ValueError(
+            f"parent_dispatch {explicit!r} conflicts with the predecessor "
+            f"{predecessor!r} derived from work_ref {work_ref!r} for dispatch_id "
+            f"{dispatch_id!r} — refusing to stage a bundle with two different lineages"
+        )
+
+    return explicit
+
+
 def stage_spec_bundle(
     *,
     instruction_text: str,
@@ -221,6 +294,12 @@ def stage_spec_bundle(
             f"deadline_seconds must be in [{DEADLINE_SECONDS_MIN}, {DEADLINE_SECONDS_MAX}], "
             f"got {deadline_seconds}"
         )
+
+    # 1a-bis. resolve the lineage BEFORE any write (D2, dlv-e5bdf6c502cf): a
+    # fix-forward's work_ref already names the dispatch it continues, so derive
+    # parent_dispatch from it when the caller didn't supply one, and refuse a
+    # conflicting explicit value loud here rather than staging two lineages.
+    parent_dispatch = resolve_parent_dispatch(dispatch_id, work_ref, parent_dispatch)
 
     # 1b. resolve the effective tenant ONCE, up front, so the physical staging store and
     # the spec's declared project_id are the SAME. Staging into the ambient _data_dir()
