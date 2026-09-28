@@ -6,15 +6,16 @@ one. ``vnx_doctor`` reads it: a missing or stale beacon is the only way a
 silently dead nightly phase becomes visible.
 
 Both files live directly under the project's state dir. Writes are atomic
-(tmp + ``os.replace``).
+(per-writer temp file + ``os.replace`` via ``atomic_io``).
 """
 from __future__ import annotations
 
 import json
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+from atomic_io import atomic_write_json
 
 BEACON_FILENAME = "learning_loop_nightly_beacon.json"
 SHADOW_REPORT_FILENAME = "learning_loop_shadow_report.json"
@@ -36,13 +37,6 @@ def shadow_report_path(state_dir: Path) -> Path:
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp, path)
 
 
 def write_beacon(state_dir: Path, payload: Dict[str, Any]) -> Path:
