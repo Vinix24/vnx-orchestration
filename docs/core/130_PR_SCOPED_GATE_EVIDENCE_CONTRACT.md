@@ -158,8 +158,13 @@ Gate results use two different fields for their verdict depending on the provide
 | Codex | `verdict` | `approve`, `reject`, `pass`, `fail` |
 | Claude GitHub | `status` | `pass`, `fail`, `not_configured` |
 | Gemini (historical, retired 2026-09-26 — ADR-008 amendment) | `status` | `pass`, `fail` |
+| Harness-lane (`kimi_gate`, `glm_gate`, `deepseek_gate`) (added 2026-09-28) | `status` | `completed`, `partial_review`, `failed`, `unavailable`, `not_executable` — never `pass`/`fail`/`approve`/`reject` |
+
+**Added 2026-09-28**: the harness-lane gates share one write path, `gate_artifacts.materialize_artifacts` (`scripts/lib/gate_artifacts.py:537-556`), which stamps `status` to `"completed"` (or `"partial_review"` on a truncated-diff coverage gap) regardless of whether the run found a blocking issue — a pass and a blocking-finding fail both write `status: "completed"`; only the separate `blocking_findings` list (same record) tells them apart. A verified example: `~/.vnx-data/vnx-dev/state/review_gates/results/pr-1954-kimi_gate.json` carries `"status": "completed"` with a non-blocking `advisory_findings` entry and empty `blocking_findings`. On an execution/infra failure (dispatch error, quota refusal, no parseable verdict block) the same gates instead write `status: "unavailable"` or `status: "failed"` via `gate_recorder.record_failure` (`scripts/lib/gate_recorder.py:1968-2019`). `gate_recorder.GATE_PROVIDERS` (`scripts/lib/gate_recorder.py:78-85`) classifies all three as `GATE_PROVIDER_HARNESS_LANE`.
 
 **GE-7 (Gate Evidence Rule 7)**: Verdict resolution MUST check both `status` and `verdict` fields. The effective verdict is: `result.get("status") or result.get("verdict")`. This ensures Codex results (which use `verdict`) are subject to the same report_path enforcement as results that use `status`.
+
+**Amendment 2026-09-28**: for the harness-lane gates, GE-7's `status or verdict` resolution alone does NOT distinguish pass from fail — `"completed"` is not itself a terminal verdict in the `pass`/`fail`/`approve`/`reject` sense used by §4.4 below, and both a clean run and a run with blocking findings write it. The actual, currently-implemented resolution lives in `scripts/lib/gate_status.py`: `is_pass()` (`gate_status.py:74-110`) additionally requires `blocking_findings` to be empty, treating `status in {"approve", "completed", "pass", "passed"}` (`PASS_STATES`, `gate_status.py:20`) as necessary but not sufficient. Any reader that implements GE-7 literally — checking only `status`/`verdict` without also inspecting `blocking_findings` — will misread a harness-lane gate that found a real blocking issue as a pass. Closure code should call `gate_status.is_pass()` rather than re-deriving GE-7 by hand.
 
 ### 4.4 Terminal Verdicts
 
