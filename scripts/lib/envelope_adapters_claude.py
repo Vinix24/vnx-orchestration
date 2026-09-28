@@ -137,6 +137,22 @@ class ClaudeSubprocessAdapter:
             "VNX_REPORT_PATH": str(_report_path),
         }
 
+        # OI-1886: the tmux lane's VNX_WORKER_ROLE / VNX_DISPATCH_PATHS export
+        # (TmuxInteractiveDispatch._spawn_session) was removed with the tmux lane
+        # itself (#1868) and never replaced here, so a headless dispatch declaring
+        # dispatch_paths was never actually narrowed by the PreToolUse worker-scope
+        # hook — only the role's coarse file_write_scope applied. Mirrors
+        # provider_dispatch._worker_role_env via the same shared setters.
+        from dispatch_identity import normalize_role  # noqa: PLC0415
+        from worker_permissions import dispatch_paths_env_value  # noqa: PLC0415
+
+        _resolved_role = normalize_role(spec.role)
+        if _resolved_role:
+            extra_env["VNX_WORKER_ROLE"] = _resolved_role
+        _dp_env = dispatch_paths_env_value(spec.dispatch_paths)
+        if _dp_env is not None:
+            extra_env["VNX_DISPATCH_PATHS"] = _dp_env
+
         try:
             result = spawn_claude(
                 prompt=spec.instruction,

@@ -868,6 +868,13 @@ def run_envelope_headless_plan(
             ),
         )
 
+    from dispatch_spec import dispatch_paths_raw  # noqa: PLC0415
+
+    # OI-1886: convert the plan's typed DispatchPath tuple to raw wire strings
+    # once, threaded through both EnvelopeSpec constructions below so
+    # ClaudeSubprocessAdapter.run can export VNX_DISPATCH_PATHS.
+    _dispatch_paths_raw = tuple(dispatch_paths_raw(plan.dispatch_paths))
+
     spec = EnvelopeSpec(
         dispatch_id=plan.dispatch_id,
         terminal_id=plan.target_id,
@@ -886,6 +893,7 @@ def run_envelope_headless_plan(
         tier_from=plan.tier_from,
         tier_to=plan.tier_to,
         work_ref=plan.work_ref,
+        dispatch_paths=_dispatch_paths_raw,
     )
 
     # A-bis-2: _prepare() (via _inject_skill_context -> PromptAssembler.assemble())
@@ -926,6 +934,7 @@ def run_envelope_headless_plan(
         tier_from=spec.tier_from,
         tier_to=spec.tier_to,
         work_ref=spec.work_ref,
+        dispatch_paths=spec.dispatch_paths,
     )
 
     # INTEGRITY — persist the enriched final prompt + verify reconstruction

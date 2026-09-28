@@ -2,28 +2,28 @@
   "couplings": [
     {
       "file": "tests/test_dispatch_cli.py",
-      "line": 748,
+      "line": 751,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "run_envelope_headless_plan"
     },
     {
       "file": "tests/test_dispatch_cli.py",
-      "line": 751,
+      "line": 754,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "ClaudeSubprocessAdapter.run"
     },
     {
       "file": "tests/test_dispatch_cli.py",
-      "line": 761,
+      "line": 764,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "run_envelope_plan"
     },
     {
       "file": "tests/test_dispatch_cli.py",
-      "line": 764,
+      "line": 767,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "ProviderAdapter.run"
@@ -1266,6 +1266,27 @@
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "_enforce_push_pr"
+    },
+    {
+      "file": "tests/test_oi1886_dispatch_paths_zetter.py",
+      "line": 43,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_claude",
+      "symbol": "ClaudeSubprocessAdapter"
+    },
+    {
+      "file": "tests/test_oi1886_dispatch_paths_zetter.py",
+      "line": 44,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_oi1886_dispatch_paths_zetter.py",
+      "line": 221,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_provider",
+      "symbol": "ProviderAdapter"
     },
     {
       "file": "tests/test_phantom_guard_branch_fallback.py",

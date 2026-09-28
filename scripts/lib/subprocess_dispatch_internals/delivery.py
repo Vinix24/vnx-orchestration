@@ -333,6 +333,23 @@ def deliver_via_subprocess(
     worker_state_dir = resolve_worker_state_dir(terminal_id)
     extra_env["VNX_WORKER_STATE_DIR"] = str(worker_state_dir)
 
+    # OI-1886: the tmux lane's VNX_WORKER_ROLE / VNX_DISPATCH_PATHS export
+    # (TmuxInteractiveDispatch._spawn_session) never had an equivalent here —
+    # this lane's docstring claimed to mirror it but never did. Re-derive both
+    # from this call's own role/dispatch_paths params via the shared setters
+    # (dispatch_identity.normalize_role, worker_permissions.dispatch_paths_env_value)
+    # so the PreToolUse worker-scope hook resolves the real role and, when this
+    # dispatch declared paths, narrows write scope to them.
+    from dispatch_identity import normalize_role
+    from worker_permissions import dispatch_paths_env_value
+
+    _resolved_role = normalize_role(role)
+    if _resolved_role:
+        extra_env["VNX_WORKER_ROLE"] = _resolved_role
+    _dp_env = dispatch_paths_env_value(dispatch_paths)
+    if _dp_env is not None:
+        extra_env["VNX_DISPATCH_PATHS"] = _dp_env
+
     # Mutable cell so the silence heartbeat thread can access the adapter
     # reference after spawn_claude() has started the subprocess.
     process_cell: list = [None]

@@ -21,6 +21,7 @@ from dispatch_spec import (  # noqa: E402
     Provider,
     Reject,
     ValidatedSpec,
+    dispatch_paths_raw,
     validate,
     write_paths,
 )
@@ -407,6 +408,38 @@ class TestWritePaths:
         unrestricted convention used elsewhere for role file_write_scope)."""
         paths = (DispatchPath(PurePosixPath("a.py"), PathAccess.READ),)
         assert write_paths(paths) == []
+
+
+# ---------------------------------------------------------------------------
+# OI-1886: dispatch_paths_raw() — ExecutionPlan.dispatch_paths -> VNX_DISPATCH_PATHS
+# wire form, unlike write_paths() this keeps every access (incl. read) since
+# filtering is worker_permissions.resolve_dispatch_write_scope's job alone.
+# ---------------------------------------------------------------------------
+
+class TestDispatchPathsRaw:
+    def test_empty_tuple_yields_empty_list(self):
+        assert dispatch_paths_raw(()) == []
+
+    def test_default_access_serialized_explicitly(self):
+        paths = (DispatchPath(PurePosixPath("a.py")),)  # default is READ_WRITE
+        assert dispatch_paths_raw(paths) == ["a.py:read_write"]
+
+    def test_read_access_kept_not_filtered(self):
+        paths = (
+            DispatchPath(PurePosixPath("a.py"), PathAccess.READ),
+            DispatchPath(PurePosixPath("b.py"), PathAccess.WRITE),
+        )
+        assert dispatch_paths_raw(paths) == ["a.py:read", "b.py:write"]
+
+    def test_round_trips_through_resolve_dispatch_write_scope(self):
+        from worker_permissions import resolve_dispatch_write_scope  # noqa: PLC0415
+
+        paths = (
+            DispatchPath(PurePosixPath("scripts/lib/foo.py"), PathAccess.READ_WRITE),
+            DispatchPath(PurePosixPath("docs/README.md"), PathAccess.READ),
+        )
+        raw = dispatch_paths_raw(paths)
+        assert resolve_dispatch_write_scope(raw) == ["scripts/lib/foo.py"]
 
 
 # ---------------------------------------------------------------------------

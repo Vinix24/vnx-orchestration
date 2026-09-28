@@ -196,6 +196,27 @@ def write_paths(paths: "tuple[DispatchPath, ...]") -> list[str]:
     return [str(dp.path) for dp in paths if dp.access in WRITE_GRANTING_PATH_ACCESS]
 
 
+def dispatch_paths_raw(paths: "tuple[DispatchPath, ...]") -> list[str]:
+    """Serialize every declared ``DispatchPath`` into its raw ``path:access`` wire form.
+
+    OI-1886: this is the ``ExecutionPlan.dispatch_paths`` -> ``VNX_DISPATCH_PATHS``
+    bridge for the envelope lanes (headless claude + provider), which carry
+    paths as typed ``DispatchPath`` objects rather than the CLI's raw
+    comma-separated strings. Feed the result to
+    ``worker_permissions.dispatch_paths_env_value`` for the actual env-var
+    JSON encoding — never re-encode here.
+
+    Unlike :func:`write_paths`, no access filtering happens here: every entry
+    (including ``read``) is kept, because that decision belongs solely to
+    ``worker_permissions.resolve_dispatch_write_scope`` (the one place
+    ``WRITE_GRANTING_PATH_ACCESS`` is consulted for enforcement). Each path
+    carries its access explicitly rather than relying on the bare-path default
+    (``_parse_dispatch_path_entry`` defaults to ``READ_WRITE``), so a declared
+    ``read`` entry is never silently upgraded.
+    """
+    return [f"{dp.path}:{dp.access.value}" for dp in paths]
+
+
 # ---------------------------------------------------------------------------
 # Core spec
 # ---------------------------------------------------------------------------

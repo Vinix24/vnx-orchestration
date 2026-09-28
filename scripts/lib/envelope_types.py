@@ -44,6 +44,12 @@ class EnvelopeSpec:
     # so the phantom-guard can weigh the pushed branch diff when the own worktree
     # reads empty. Optional; None for a normal dispatch.
     work_ref: Optional[str] = None
+    # OI-1886: raw dispatch_paths entries ("path" or "path:access", see
+    # dispatch_spec.dispatch_paths_raw), threaded from the plan so
+    # ClaudeSubprocessAdapter can export VNX_DISPATCH_PATHS into the worker env.
+    # Empty tuple (the default) means the dispatch declared no per-path scope —
+    # the same "no narrowing" default the hook already applies to a missing var.
+    dispatch_paths: tuple = ()
 
 
 @dataclass

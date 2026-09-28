@@ -23,6 +23,7 @@ from worker_permissions import (
     build_claude_scope_args,
     classify_permission_posture,
     default_code_worker_profile,
+    dispatch_paths_env_value,
     generate_claude_settings,
     generate_permission_preamble,
     load_permissions,
@@ -334,6 +335,34 @@ class TestResolveDispatchWriteScope:
             "tests/**",
             "docs/README.md",
         ]
+
+
+class TestDispatchPathsEnvValue:
+    """dispatch_paths_env_value: the single VNX_DISPATCH_PATHS wire-format setter (OI-1886)."""
+
+    def test_none_when_no_paths_declared(self) -> None:
+        assert dispatch_paths_env_value(None) is None
+        assert dispatch_paths_env_value([]) is None
+        assert dispatch_paths_env_value(()) is None
+
+    def test_json_list_round_trips_through_resolve_dispatch_write_scope(self) -> None:
+        raw = ["scripts/lib/foo.py", "tests/**:read_write", "docs/README.md:read"]
+        value = dispatch_paths_env_value(raw)
+        assert value == json.dumps(raw)
+        # The setter's output must be exactly what the hook-side reader parses:
+        # json.loads() then resolve_dispatch_write_scope() (see
+        # pretooluse_worker_scope_enforce._resolve_dispatch_write_scope_from_env).
+        assert resolve_dispatch_write_scope(json.loads(value)) == resolve_dispatch_write_scope(raw)
+
+    def test_read_access_entry_is_not_filtered_here(self) -> None:
+        # No access filtering at this layer — that decision belongs solely to
+        # resolve_dispatch_write_scope on the reader side.
+        value = dispatch_paths_env_value(["docs/README.md:read"])
+        assert json.loads(value) == ["docs/README.md:read"]
+
+    def test_accepts_tuple_input(self) -> None:
+        value = dispatch_paths_env_value(("a.py", "b.py"))
+        assert json.loads(value) == ["a.py", "b.py"]
 
 
 class TestMatchFileWriteScopeDispatchNarrowing:

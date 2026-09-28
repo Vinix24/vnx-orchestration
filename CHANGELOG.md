@@ -6,6 +6,22 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 
 ## [Unreleased]
 
+### Fixed
+
+- **`VNX_DISPATCH_PATHS` regains a setter (OI-1886).** The only reader
+  (`pretooluse_worker_scope_enforce.py`'s worker-scope hook) had its one setter,
+  `TmuxInteractiveDispatch._spawn_session`, removed along with the tmux lane itself
+  (#1868). A dispatch declaring `dispatch_paths` was silently no longer narrowed on
+  ANY lane — only the coarse role scope still applied when enforcement was on. The
+  headless lane (`ClaudeSubprocessAdapter`), the terminal-pinned subprocess lane
+  (`deliver_via_subprocess`), and the provider lanes (kimi/glm/deepseek/codex/gemini,
+  both via `provider_dispatch`'s own CLI dispatch functions and via
+  `envelope_adapters_provider.ProviderAdapter`) now all export `VNX_DISPATCH_PATHS`
+  (and `VNX_WORKER_ROLE`, same gap) through one shared encoder,
+  `worker_permissions.dispatch_paths_env_value`. `VNX_ENFORCE_WORKER_PERMISSIONS`
+  stays default OFF (operator decision, unchanged) — this only makes the narrowing
+  work once enforcement is turned on.
+
 ### Removed
 
 - **Raw-file `vnx dispatch <file.md>` refused under the door default (ADR-025).** The

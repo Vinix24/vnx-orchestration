@@ -11,11 +11,24 @@ matching logic.
 
 OI-1196: the file_write_scope check additionally narrows to this dispatch's
 own declared paths, when any were declared. ``VNX_DISPATCH_PATHS`` (a JSON
-list, exported by ``TmuxInteractiveDispatch._spawn_session`` from the
-dispatch's ``--dispatch-paths``) is resolved via
-``worker_permissions.resolve_dispatch_write_scope`` and passed to
-``match_file_write_scope`` as an additional, ANDed constraint — a dispatch
-can only narrow the role's scope, never widen it.
+list) is resolved via ``worker_permissions.resolve_dispatch_write_scope`` and
+passed to ``match_file_write_scope`` as an additional, ANDed constraint — a
+dispatch can only narrow the role's scope, never widen it.
+
+OI-1886: the original setter, ``TmuxInteractiveDispatch._spawn_session``, was
+removed with the tmux lane itself (#1868, 2026-09-18), which silently dropped
+this var on every lane until it was re-added. The current setters, all
+encoding through the single ``worker_permissions.dispatch_paths_env_value``:
+  - ``envelope_adapters_claude.ClaudeSubprocessAdapter.run`` (headless lane,
+    the ``claude_headless`` default) — from ``EnvelopeSpec.dispatch_paths``,
+    itself threaded from ``ExecutionPlan.dispatch_paths`` via
+    ``dispatch_spec.dispatch_paths_raw`` in ``dispatch_envelope.run_envelope_headless_plan``.
+  - ``subprocess_dispatch_internals.delivery.deliver_via_subprocess``
+    (terminal-pinned subprocess lane) — from its own ``dispatch_paths`` param.
+  - ``provider_dispatch._worker_role_env`` (kimi/glm/deepseek/codex/gemini
+    provider lanes, called both from ``provider_dispatch``'s own CLI dispatch
+    functions and from ``envelope_adapters_provider.ProviderAdapter``) —
+    from ``args.dispatch_paths`` / ``ExecutionPlan.dispatch_paths``.
 
 Feasibility proven by docs/_archive/investigations/spike-worker-scope-hook-feasibility.md
 (E1-E4): PreToolUse hooks fire under --dangerously-skip-permissions, worktree-
@@ -46,9 +59,11 @@ branch below returns ("allow", None) before any matcher runs. This mirrors the
 flag that already gates the coarse launch-time posture — this hook is the
 fine-grained (per-command, per-path glob) layer on top of it.
 
-Role resolution: VNX_WORKER_ROLE env var, exported into the worker's tmux pane
-by TmuxInteractiveDispatch._spawn_session() (E3 gap, closed in the same
-dispatch). When unset, resolve_worker_profile(None) falls back to the
+Role resolution: VNX_WORKER_ROLE env var, exported into the worker's process
+by the same lane-specific setters listed above (OI-1886) — originally by
+TmuxInteractiveDispatch._spawn_session() into the worker's tmux pane (E3 gap,
+closed in the same dispatch), a setter removed along with the tmux lane
+itself. When unset, resolve_worker_profile(None) falls back to the
 role-agnostic default_code_worker_profile(), which carries no bash_deny_patterns
 or file_write_scope — i.e. the hook never invents restrictions the SSOT does
 not declare for the resolved profile.
