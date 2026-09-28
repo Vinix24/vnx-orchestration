@@ -45,6 +45,17 @@ _FAILURE_STATUSES = frozenset(
     {"failed", "failure", "error", "blocked", "timeout", "contract_invalid"}
 )
 
+# Receipts older than this instant never feed the loop. It is the merge of #1965
+# (natural key on the pattern tables, after the pattern tables were cleaned): a
+# receipt from before it describes a store that no longer exists. Overridable
+# with VNX_LEARNING_LOOP_CUTOFF (ISO-8601), and it applies to --from-history too.
+DEFAULT_RECEIPT_CUTOFF = "2026-09-28T16:41:11Z"
+CUTOFF_ENV = "VNX_LEARNING_LOOP_CUTOFF"
+
+# Persisting is opt-in. Anything but "1" leaves the loop in shadow mode: it
+# computes and reports, it changes no database row, no state file, no metric.
+PERSIST_ENV = "VNX_LEARNING_LOOP_PERSIST"
+
 # Sentinel values a provider/model field carries when the emitter had no real
 # identity to stamp (empty string, or an explicit none/null/unknown literal).
 _NONE_SENTINELS = frozenset({"", "none", "null", "unknown"})
@@ -109,6 +120,40 @@ def _parse_receipt_timestamp(value) -> Optional[datetime]:
         return _to_aware_utc(datetime.fromisoformat(raw))
     except ValueError:
         return None
+
+
+def persist_enabled() -> bool:
+    """True only when the operator set VNX_LEARNING_LOOP_PERSIST=1."""
+    return os.environ.get(PERSIST_ENV, "0") == "1"
+
+
+def resolve_receipt_cutoff() -> datetime:
+    """The instant before which receipts are ignored (env override, else default).
+
+    Raises ValueError on an unparseable override: a silent fallback would make
+    the loop read receipts the operator meant to exclude.
+    """
+    raw = os.environ.get(CUTOFF_ENV) or DEFAULT_RECEIPT_CUTOFF
+    cutoff = _parse_receipt_timestamp(raw)
+    if cutoff is None:
+        raise ValueError(f"{CUTOFF_ENV}={raw!r} is not an ISO-8601 timestamp")
+    return cutoff
+
+
+def _open_shadow_connection(db_path: Path) -> sqlite3.Connection:
+    """In-memory copy of the pattern DB, opened read-only from disk.
+
+    Every step of the cycle can then run its real code path against the copy
+    while the file on disk is never opened for writing (and never created).
+    """
+    shadow = sqlite3.connect(":memory:")
+    if db_path.exists():
+        source = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            source.backup(shadow)
+        finally:
+            source.close()
+    return shadow
 
 
 class LearningLoopMisconfigured(RuntimeError):
@@ -181,8 +226,22 @@ class PatternUsageMetric:
 class LearningLoop:
     """Learning loop for pattern optimization and confidence adjustment"""
 
-    def __init__(self):
-        """Initialize learning loop with database connections"""
+    def __init__(self, persist: Optional[bool] = None):
+        """Initialize learning loop with database connections.
+
+        ``persist`` None reads VNX_LEARNING_LOOP_PERSIST. False (the default) is
+        shadow mode: the DB is an in-memory copy, nothing is written to disk.
+        """
+        self.persist = persist_enabled() if persist is None else persist
+        self.cutoff = resolve_receipt_cutoff()
+        self.receipt_stats = {"read": 0, "after_cutoff": 0, "before_cutoff": 0}
+        self.shadow: Dict[str, Any] = {
+            "proposals": [],
+            "archival_candidates": [],
+            "supersede_candidates": 0,
+            "persist_preview": {},
+            "steps_not_run": [],
+        }
         paths = ensure_env()
         self.vnx_path = Path(paths["VNX_HOME"])
         state_dir = Path(paths["VNX_STATE_DIR"]).expanduser().resolve()
@@ -194,11 +253,12 @@ class LearningLoop:
         self.receipts_path = state_dir / "t0_receipts.ndjson"
         self.archive_path = state_dir / "archive" / "patterns"
 
-        # Create archive directory if it doesn't exist
-        self.archive_path.mkdir(parents=True, exist_ok=True)
-
-        # Initialize database connection
-        self.conn = sqlite3.connect(self.db_path)
+        if self.persist:
+            # Create archive directory if it doesn't exist
+            self.archive_path.mkdir(parents=True, exist_ok=True)
+            self.conn = sqlite3.connect(self.db_path)
+        else:
+            self.conn = _open_shadow_connection(self.db_path)
         self.conn.row_factory = sqlite3.Row
 
         # Initialize pattern tracking
@@ -338,6 +398,8 @@ class LearningLoop:
     def _log_confidence_change(self, pattern_id: str, source: str,
                                old_confidence: float, new_confidence: float) -> None:
         """Append confidence change event to intelligence_usage.ndjson (G-L7)."""
+        if not self.persist:
+            return
         try:
             paths = ensure_env()
             state_dir = Path(paths["VNX_STATE_DIR"]).expanduser().resolve()
@@ -448,6 +510,7 @@ class LearningLoop:
             return failure_patterns
 
         total_scanned = 0
+        before_cutoff = 0
         no_provider_skipped = 0
         no_provider_passed = 0
 
@@ -463,6 +526,13 @@ class LearningLoop:
                         continue
 
                     total_scanned += 1
+                    # Fixed cutoff: a receipt from before it (or one whose time
+                    # cannot be shown to be after it) never counts, whatever
+                    # the window, --from-history included.
+                    receipt_ts = _parse_receipt_timestamp(receipt.get("timestamp"))
+                    if receipt_ts is None or receipt_ts < self.cutoff:
+                        before_cutoff += 1
+                        continue
                     status = str(receipt.get("status", "")).lower()
                     if status not in _FAILURE_STATUSES:
                         continue
@@ -512,9 +582,16 @@ class LearningLoop:
         except OSError as e:
             print(f"⚠️ Error reading receipt stream {self.receipts_path}: {e}")
 
+        self.receipt_stats = {
+            "read": total_scanned,
+            "after_cutoff": total_scanned - before_cutoff,
+            "before_cutoff": before_cutoff,
+            "no_provider_filtered": no_provider_skipped,
+        }
         post_filter = total_scanned - no_provider_skipped
         print(
             f"  Receipt corpus: {total_scanned} scanned, "
+            f"{before_cutoff} before cutoff {self.cutoff.isoformat()}, "
             f"{no_provider_skipped} no-provider filtered "
             f"({no_provider_passed} no-provider passed on governance provenance) "
             f"→ {post_filter} effective; "
@@ -641,6 +718,20 @@ class LearningLoop:
         """
         if not new_rules:
             return
+        if not self.persist:
+            self.shadow["proposals"].extend(
+                {
+                    "rule_type": "failure_prevention",
+                    "pattern": rule["pattern"],
+                    "terminal_constraint": rule.get("terminal_constraint", "any"),
+                    "prevention": rule["prevention"],
+                    "confidence": rule["confidence"],
+                    "occurrence_count": rule.get("occurrence_count", 1),
+                }
+                for rule in new_rules
+            )
+            print(f"👥 Shadow: {len(new_rules)} prevention rules computed, not queued")
+            return
         try:
             paths = ensure_env()
             state_dir = Path(paths["VNX_STATE_DIR"]).expanduser().resolve()
@@ -758,7 +849,14 @@ class LearningLoop:
                 antipatterns_written += 1
 
             self.conn.commit()
-            print(f"💾 Persisted to intelligence DB: {patterns_written} success patterns, {antipatterns_written} antipatterns")
+            if self.persist:
+                print(f"💾 Persisted to intelligence DB: {patterns_written} success patterns, {antipatterns_written} antipatterns")
+            else:
+                print(f"👥 Shadow: would persist {patterns_written} success patterns, {antipatterns_written} antipatterns (in-memory copy only)")
+            self.shadow["persist_preview"] = {
+                "success_patterns": patterns_written,
+                "antipatterns": antipatterns_written,
+            }
 
         except Exception as e:
             print(f"❌ Error persisting to intelligence DB: {e}")
@@ -773,6 +871,9 @@ class LearningLoop:
         Respects G-L1: only rules with status == "approved" are inserted.
         After ingestion, status is updated to "ingested" in the JSON file.
         """
+        if not self.persist:
+            self.shadow["steps_not_run"].append("ingest_approved_rules")
+            return
         try:
             paths = ensure_env()
             state_dir = Path(paths["VNX_STATE_DIR"]).expanduser().resolve()
@@ -848,6 +949,19 @@ class LearningLoop:
                     candidates.append(pattern_id)
 
         if not candidates:
+            return
+
+        if not self.persist:
+            self.shadow["archival_candidates"].extend(
+                {
+                    "pattern_id": pattern_id,
+                    "title": self.pattern_metrics[pattern_id].pattern_title,
+                    "confidence": round(self.pattern_metrics[pattern_id].confidence, 4),
+                    "reason": f"Unused for {threshold_days}+ days with confidence < 0.3",
+                }
+                for pattern_id in candidates
+            )
+            print(f"👥 Shadow: {len(candidates)} archival candidates computed, not queued")
             return
 
         try:
@@ -937,6 +1051,9 @@ class LearningLoop:
                 'last_used': pattern.last_used.isoformat() if pattern.last_used else None
             })
 
+        if not self.persist:
+            return report
+
         # Save report to state directory (via VNX_STATE_DIR)
         paths = ensure_env()
         state_dir = Path(paths["VNX_STATE_DIR"]).expanduser().resolve()
@@ -949,6 +1066,9 @@ class LearningLoop:
 
     def save_pattern_metrics(self):
         """Save pattern metrics back to database"""
+        if not self.persist:
+            self.shadow["steps_not_run"].append("save_pattern_metrics")
+            return
         for pattern_id, metric in self.pattern_metrics.items():
             self.conn.execute('''
                 INSERT OR REPLACE INTO pattern_usage
@@ -1067,7 +1187,10 @@ class LearningLoop:
                 log.debug("prevention_rules supersede query failed: %s", e)
 
             total = added
-            if added:
+            if added and not self.persist:
+                self.shadow["supersede_candidates"] = added
+                print(f"  Shadow: {added} supersede candidates computed, not queued")
+            elif added:
                 pending_path.write_text(
                     json.dumps({"pending_archival": existing}, indent=2, ensure_ascii=False),
                     encoding="utf-8",
@@ -1090,7 +1213,12 @@ class LearningLoop:
                 instead of the default 24-hour window. Use for the first run against
                 a historical trail (``vnx learning run --from-history``).
         """
-        gate = evaluate_activation_gate(state_dir=self.db_path.parent)
+        if self.persist:
+            gate = evaluate_activation_gate(state_dir=self.db_path.parent)
+        else:
+            # Shadow mode changes nothing, so it needs no arm-switch: running it
+            # is exactly how the operator sees what the loop WOULD do.
+            gate = {"action": "run", "probe_health": None, "detail": "shadow mode: gate not consulted"}
 
         if gate["action"] == "dormant":
             print("💤 Learning loop dormant (VNX_LEARNING_LOOP_ENABLED=0) — no-op, no beacon")
@@ -1123,6 +1251,7 @@ class LearningLoop:
             }
 
         mode = "FULL HISTORY" if from_history else "DAILY (24h)"
+        mode += " / PERSIST" if self.persist else " / SHADOW"
         print(f"\n🔄 Starting Learning Cycle [{mode}] at {datetime.now().isoformat()}")
         print("=" * 60)
 
@@ -1150,6 +1279,8 @@ class LearningLoop:
             else datetime.now(timezone.utc) - timedelta(hours=24)
         )
         failure_patterns = self.extract_failure_patterns(start_time=failure_window)
+        receipt_stats = dict(self.receipt_stats)
+        self.learning_stats["failure_patterns"] = len(failure_patterns)
         new_rules = self.generate_prevention_rules(failure_patterns)
 
         if new_rules:
@@ -1167,7 +1298,10 @@ class LearningLoop:
         # 5.5 Persist high-confidence patterns and failures to intelligence DB
         # Off-switch: VNX_LEARN_PERSIST=0 skips the auto-persist of observations.
         print("\n🔗 Step 5.5: Bridging patterns to intelligence DB...")
-        if os.environ.get("VNX_LEARN_PERSIST", "1") != "0":
+        if not self.persist:
+            # persist_to_intelligence_db runs against the in-memory copy here.
+            self.persist_to_intelligence_db()
+        elif os.environ.get("VNX_LEARN_PERSIST", "1") != "0":
             self.persist_to_intelligence_db()
         else:
             print("  VNX_LEARN_PERSIST=0 — pattern persist skipped")
@@ -1184,12 +1318,16 @@ class LearningLoop:
         # success_patterns.confidence_score so intelligence_selector reads
         # the current learning state rather than the static initial value.
         print("\n🔁 Step 5.7: Reconciling confidence scores...")
-        try:
-            from confidence_reconcile import reconcile_pattern_confidence
-            reconciled = reconcile_pattern_confidence(self.db_path)
-            print(f"  ✓ Reconciled {reconciled} success_patterns rows")
-        except Exception as e:
-            print(f"❌ Error reconciling confidence: {e}")
+        if not self.persist:
+            self.shadow["steps_not_run"].append("reconcile_pattern_confidence")
+            print("  Shadow mode — reconcile skipped")
+        else:
+            try:
+                from confidence_reconcile import reconcile_pattern_confidence
+                reconciled = reconcile_pattern_confidence(self.db_path)
+                print(f"  ✓ Reconciled {reconciled} success_patterns rows")
+            except Exception as e:
+                print(f"❌ Error reconciling confidence: {e}")
 
         # 5.8 Reason-aware injection-effectiveness evaluator (injection-effectiveness-eval-loop
         # PR-B): measure-only tuning proposals from the pattern_injection_outcome reason
@@ -1199,18 +1337,22 @@ class LearningLoop:
         # (G-L1) — proposals land in pending_injection_tuning.json for operator review only.
         print("\n🔬 Step 5.8: Reason-aware injection tuning proposals...")
         reason_result = {"ran": False, "proposals_written": 0, "proposals_generated": 0}
-        try:
-            from injection_effectiveness_probe import run_reason_evaluator_and_propose
-            reason_result = run_reason_evaluator_and_propose(state_dir=self.db_path.parent)
-            if reason_result["ran"]:
-                print(
-                    f"  ✓ {reason_result['proposals_written']} new tuning proposal(s) queued "
-                    f"({reason_result['proposals_generated']} generated this run)"
-                )
-            else:
-                print("  Injection-tuning flags off — reason evaluator skipped")
-        except Exception as e:
-            print(f"❌ Error running reason evaluator: {e}")
+        if not self.persist:
+            self.shadow["steps_not_run"].append("run_reason_evaluator_and_propose")
+            print("  Shadow mode — reason evaluator skipped")
+        else:
+            try:
+                from injection_effectiveness_probe import run_reason_evaluator_and_propose
+                reason_result = run_reason_evaluator_and_propose(state_dir=self.db_path.parent)
+                if reason_result["ran"]:
+                    print(
+                        f"  ✓ {reason_result['proposals_written']} new tuning proposal(s) queued "
+                        f"({reason_result['proposals_generated']} generated this run)"
+                    )
+                else:
+                    print("  Injection-tuning flags off — reason evaluator skipped")
+            except Exception as e:
+                print(f"❌ Error running reason evaluator: {e}")
 
         # 6. Generate report
         print("\n📈 Step 6: Generating learning report...")
@@ -1219,6 +1361,16 @@ class LearningLoop:
         proposal_count = len(new_rules)
         self.learning_stats["proposal_count"] = proposal_count
         self.learning_stats["injection_tuning_proposals"] = reason_result.get("proposals_written", 0)
+        self.learning_stats["receipts_read"] = receipt_stats["read"]
+        self.learning_stats["receipts_after_cutoff"] = receipt_stats["after_cutoff"]
+        self.learning_stats["receipts_skipped"] = (
+            receipt_stats["before_cutoff"] + receipt_stats.get("no_provider_filtered", 0)
+        )
+        report["mode"] = "persist" if self.persist else "shadow"
+        report["cutoff"] = self.cutoff.isoformat()
+        report["statistics"] = self.learning_stats
+        if not self.persist:
+            report["shadow"] = self.shadow
 
         elapsed = time.time() - start_time
         print(f"\n✅ Learning cycle completed in {elapsed:.2f} seconds")
@@ -1228,26 +1380,27 @@ class LearningLoop:
         print(f"  • Patterns archived: {self.learning_stats['patterns_archived']}")
         print("=" * 60)
 
-        try:
-            from health_beacon import HealthBeacon
-            from vnx_paths import ensure_env as _hb_ensure_env
-            _hb_paths = _hb_ensure_env()
-            HealthBeacon(
-                Path(_hb_paths["VNX_DATA_DIR"]),
-                "learning_loop",
-                expected_interval_seconds=86400,
-            ).heartbeat(
-                status="ok",
-                details={
-                    "elapsed_seconds": round(elapsed, 2),
-                    "patterns_tracked": len(self.pattern_metrics),
-                    "confidence_adjustments": self.learning_stats.get("confidence_adjustments", 0),
-                    "new_prevention_rules": len(new_rules),
-                    "patterns_archived": self.learning_stats.get("patterns_archived", 0),
-                },
-            )
-        except (ImportError, OSError, KeyError) as e:
-            log.debug("HealthBeacon heartbeat skipped: %s", e)
+        if self.persist:
+            try:
+                from health_beacon import HealthBeacon
+                from vnx_paths import ensure_env as _hb_ensure_env
+                _hb_paths = _hb_ensure_env()
+                HealthBeacon(
+                    Path(_hb_paths["VNX_DATA_DIR"]),
+                    "learning_loop",
+                    expected_interval_seconds=86400,
+                ).heartbeat(
+                    status="ok",
+                    details={
+                        "elapsed_seconds": round(elapsed, 2),
+                        "patterns_tracked": len(self.pattern_metrics),
+                        "confidence_adjustments": self.learning_stats.get("confidence_adjustments", 0),
+                        "new_prevention_rules": len(new_rules),
+                        "patterns_archived": self.learning_stats.get("patterns_archived", 0),
+                    },
+                )
+            except (ImportError, OSError, KeyError) as e:
+                log.debug("HealthBeacon heartbeat skipped: %s", e)
 
         return report
 

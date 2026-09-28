@@ -135,3 +135,9 @@ def test_only_ok_activates_not_degraded(loop_env):
     assert ok_report.get("status") not in ("dormant", "degraded")
     mock_update_ok.assert_called()
     assert mock_beacon.heartbeat.call_args.kwargs["status"] == "ok"
+
+
+@pytest.fixture(autouse=True)
+def _persist_mode(monkeypatch):
+    """These tests cover what the loop persists; shadow mode (the default) persists nothing."""
+    monkeypatch.setenv("VNX_LEARNING_LOOP_PERSIST", "1")

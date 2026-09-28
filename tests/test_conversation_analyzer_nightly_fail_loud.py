@@ -30,6 +30,7 @@ _PHASES = (
     "link_sessions_dispatches",
     "generate_t0_session_brief",
     "governance_aggregator",
+    "learning_loop_nightly",
     "generate_suggested_edits",
     "send_digest_email",
 )

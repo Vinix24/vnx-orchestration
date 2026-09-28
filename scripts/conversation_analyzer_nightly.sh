@@ -154,6 +154,18 @@ else
     log_msg "Phase 2.5 WARNING: governance aggregation failed (non-fatal)"
 fi
 
+# Phase 2.6: Learning loop. Shadow mode unless VNX_LEARNING_LOOP_PERSIST=1 is
+# exported for this job: it then computes patterns and proposals, writes one
+# report and persists nothing. Every run writes a beacon
+# (learning_loop_nightly_beacon.json) that vnx_doctor reads; a failed run
+# writes status=failed.
+log_msg "Phase 2.6: Running learning loop (persist=${VNX_LEARNING_LOOP_PERSIST:+SET})..."
+if "$VNX_PYTHON" "$SCRIPT_DIR/learning_loop_nightly.py" 2>&1 | tee -a "$LOG_FILE"; then
+    log_msg "Phase 2.6 complete: learning loop beacon written"
+else
+    log_msg "Phase 2.6 WARNING: learning loop FAILED, beacon status=failed (non-fatal)"
+fi
+
 # Phase 3: Generate suggested edits (human-in-the-loop, pending review)
 log_msg "Phase 3: Generating suggested edits..."
 if "$VNX_PYTHON" "$SCRIPT_DIR/generate_suggested_edits.py" 2>&1 | tee -a "$LOG_FILE"; then
