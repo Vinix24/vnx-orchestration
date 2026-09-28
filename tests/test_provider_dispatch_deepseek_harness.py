@@ -41,8 +41,10 @@ class TestRegistration:
     def test_deepseek_harness_is_implemented(self):
         assert "deepseek-harness" in pd._IMPLEMENTED_PROVIDERS
 
-    def test_registry_key_maps_to_deepseek_pricing(self):
-        assert pd._PROVIDER_TO_REGISTRY_KEY.get("deepseek-harness") == "deepseek"
+    def test_registry_key_maps_to_deepseek_harness_pricing(self):
+        # The harness lane bills from its own registry section, where the
+        # cache-read price of deepseek-flash lives (D4e).
+        assert pd._PROVIDER_TO_REGISTRY_KEY.get("deepseek-harness") == "deepseek_harness"
 
 
 class TestRouting:

@@ -10,17 +10,19 @@ from typing import Dict, Optional
 
 from .models import (
     SessionMetrics, SessionFlags,
-    LLM_STRATEGY, OLLAMA_MODEL, DEEPSEEK_HARNESS_MODEL,
+    LLM_STRATEGY, OLLAMA_MODEL, DEEPSEEK_HARNESS_MODEL, DEEPSEEK_MIN_BALANCE_USD,
     AUTO_CLAUSE_MAX_SESSIONS,
     DEEP_THRESHOLD_TOKENS, DEEP_THRESHOLD_TOOLS,
     log,
 )
 from .detector import HeuristicDetector
 from provider_spawns.deepseek_harness_spawn import (
-    build_harness_env,
+    build_harness_child_env,
     build_harness_cli_args,
     DEEPSEEK_API_KEY_ENV,
 )
+
+DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
 
 
 @dataclass(frozen=True)
@@ -34,9 +36,15 @@ class LLMOutcome:
       - ``cli_failed``   — claude exited non-zero (``returncode`` + ``stderr``)
       - ``timeout``      — call exceeded its deadline
       - ``error``        — any other unexpected exception
-      - ``config_skip``  — no invocation was ever made: a config gap (missing
-                           API key, unreachable/unconfigured Ollama) refused
-                           the attempt before any subprocess started
+      - ``config_skip``  — no invocation was ever made: a config gap
+                           (unreachable/unconfigured Ollama) refused the
+                           attempt before any subprocess started
+      - ``key_missing``  — deepseek-harness was chosen but no own
+                           ``DEEPSEEK_API_KEY`` reached the job: the operator
+                           asked for this lane, so it is a failure, not a skip
+      - ``balance_low`` / ``balance_unavailable`` — the DeepSeek ``/user/balance``
+                           check said the account cannot pay, or could not be
+                           read; same reasoning, a failure the digest shows
 
     ``text`` carries the assistant output for ``ok`` (and the raw stdout for
     ``empty``, kept for diagnostics). A caller can tell every mode apart
@@ -44,10 +52,13 @@ class LLMOutcome:
     where a missing CLI, a crashed CLI, and a successful-but-empty run all
     collapsed to ``None`` (OI-1258).
 
-    ``attempted`` is derived from ``status``: every status reflects a real
-    invocation that fired except ``config_skip``, which by definition never
-    started one. This is what distinguishes a failed attempt from a skipped
-    one (fix1585-r2): a config gap must not count as "tried and failed".
+    ``attempted`` is derived from ``status``: every status counts as an
+    attempt except ``config_skip``, which by definition never started one.
+    This is what distinguishes a failed attempt from a skipped one
+    (fix1585-r2): an Ollama config gap must not count as "tried and failed".
+    The deepseek-harness pre-flight statuses (``key_missing``, ``balance_*``)
+    start no subprocess either but do count, because that lane was explicitly
+    selected and a night that cannot use it must read as failed.
     """
 
     status: str
@@ -70,6 +81,10 @@ class DeepAnalyzer:
     # Ollama availability probe: probed once per process, cached for the
     # lifetime of the class. None = not probed yet, True/False = result.
     _ollama_probed: Optional[bool] = None
+
+    # DeepSeek pre-flight verdict (key + balance): computed once per process.
+    # None = not run yet.
+    _deepseek_preflight_cache: Optional[LLMOutcome] = None
 
     # Claude-auto guard: set by the runner before processing sessions to
     # inform the billing guard of the backlog size.
@@ -206,7 +221,7 @@ Respond with valid JSON:
         if result_text is None:
             if any_attempted:
                 self._record_failure(last_attempted_status)
-                log("WARNING", f"Deep analysis failed: {last_attempted_status}")
+                log("ERROR", f"Deep analysis failed: {last_attempted_status}")
             return None
 
         parsed = self._parse_response(result_text)
@@ -360,36 +375,110 @@ Respond with valid JSON:
         return LLMOutcome("ok", text=text)
 
     @staticmethod
-    def _try_deepseek_harness(prompt: str) -> LLMOutcome:
+    def _fetch_deepseek_balance(api_key: str) -> dict:
+        """GET DeepSeek's ``/user/balance`` and return the parsed JSON body.
+
+        This is the pre-flight probe. ``/v1/models`` is deliberately not used:
+        it answers OK for an account that cannot pay (on 2026-09-14 the door
+        reported ``API OK`` and the run failed 11 seconds later on 402).
+        """
+        import urllib.request
+        req = urllib.request.Request(
+            DEEPSEEK_BALANCE_URL,
+            headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    @classmethod
+    def _deepseek_preflight(cls, api_key: str) -> LLMOutcome:
+        """Check own key and balance once per process; cache the verdict.
+
+        Returns ``ok`` or a failure outcome (``key_missing``, ``balance_low``,
+        ``balance_unavailable``). Every failure is logged at ERROR, once, with
+        the reason. The key value is never logged.
+        """
+        if cls._deepseek_preflight_cache is not None:
+            return cls._deepseek_preflight_cache
+
+        outcome = cls._run_deepseek_preflight(api_key)
+        cls._deepseek_preflight_cache = outcome
+        return outcome
+
+    @classmethod
+    def _run_deepseek_preflight(cls, api_key: str) -> LLMOutcome:
+        if not (api_key or "").strip():
+            msg = (f"{DEEPSEEK_API_KEY_ENV} not set: deepseek-harness needs the own "
+                   f"DeepSeek key (the lane must never ride the OAuth subscription); "
+                   f"deep analysis is skipped for this run")
+            log("ERROR", msg)
+            return LLMOutcome("key_missing", stderr=msg)
+
+        try:
+            body = cls._fetch_deepseek_balance(api_key)
+        except Exception as e:
+            msg = (f"DeepSeek balance check failed ({type(e).__name__}: {e}); "
+                   f"deep analysis is skipped for this run")
+            log("ERROR", msg)
+            return LLMOutcome("balance_unavailable", stderr=msg)
+
+        usd = next((info for info in (body.get("balance_infos") or [])
+                    if (info or {}).get("currency") == "USD"), None)
+        if not body.get("is_available") or usd is None:
+            msg = (f"DeepSeek account not available for calls (is_available="
+                   f"{body.get('is_available')}, currencies="
+                   f"{[(i or {}).get('currency') for i in (body.get('balance_infos') or [])]}); "
+                   f"deep analysis is skipped for this run")
+            log("ERROR", msg)
+            return LLMOutcome("balance_unavailable", stderr=msg)
+
+        try:
+            balance = float(usd.get("total_balance"))
+        except (TypeError, ValueError):
+            msg = ("DeepSeek balance response has no readable USD total_balance; "
+                   "deep analysis is skipped for this run")
+            log("ERROR", msg)
+            return LLMOutcome("balance_unavailable", stderr=msg)
+
+        if balance < DEEPSEEK_MIN_BALANCE_USD:
+            msg = (f"DeepSeek balance {balance:.2f} USD is below the minimum "
+                   f"{DEEPSEEK_MIN_BALANCE_USD:.2f} USD; deep analysis is skipped "
+                   f"for this run (top up the account)")
+            log("ERROR", msg)
+            return LLMOutcome("balance_low", stderr=msg)
+
+        log("INFO", f"DeepSeek balance OK: {balance:.2f} USD")
+        return LLMOutcome("ok")
+
+    @classmethod
+    def _try_deepseek_harness(cls, prompt: str) -> LLMOutcome:
         """Run deep analysis via the claude CLI driving DeepSeek's Anthropic-compatible endpoint.
 
         Uses the measured-safe key-auth recipe from
         ``provider_spawns.deepseek_harness_spawn``: own ``DEEPSEEK_API_KEY``,
-        ``ANTHROPIC_AUTH_TOKEN`` bearer, telemetry suppressed.  Fails closed
-        when no own key is available — never falls back to the OAuth
-        subscription (constraint deepseek-harness-subscription-blocked). A
-        missing key is a ``config_skip``, not an attempt: no subprocess is
-        ever started (fix1585-r2).
+        ``ANTHROPIC_AUTH_TOKEN`` bearer, telemetry suppressed, MCP off, and the
+        Anthropic credentials scrubbed from the child environment. Fails closed
+        when no own key is available: never falls back to the OAuth
+        subscription (constraint deepseek-harness-subscription-blocked).
 
-        Model is ``VNX_ANALYZER_DEEPSEEK_MODEL`` (default ``deepseek-v4-flash``).
+        Before the first call the own key and the ``/user/balance`` are checked
+        (``_deepseek_preflight``); a failure there is a loud, counted failure
+        (``key_missing``, ``balance_low``, ``balance_unavailable``) and no
+        subprocess is started.
+
+        Model is ``VNX_ANALYZER_DEEPSEEK_MODEL`` (default ``deepseek-flash``).
         """
         api_key = os.environ.get(DEEPSEEK_API_KEY_ENV, "")
-        if not (api_key or "").strip():
-            log("WARNING",
-                f"{DEEPSEEK_API_KEY_ENV} not set; "
-                f"deepseek-harness requires own API key (account safety — "
-                f"the lane must never ride the OAuth subscription)")
-            return LLMOutcome("config_skip")
+        preflight = cls._deepseek_preflight(api_key)
+        if preflight.status != "ok":
+            return preflight
 
-        harness_env = build_harness_env(api_key)
-        # Override model to the analyzer-specific default (flash, not pro).
-        harness_env["CLAUDE_CODE_MODEL"] = DEEPSEEK_HARNESS_MODEL
-
-        cli_args = ["claude", "-p", "--output-format", "json", "--max-turns", "1"]
+        cli_args = ["claude", "-p", "--output-format", "json", "--max-turns", "1",
+                    "--model", DEEPSEEK_HARNESS_MODEL]
         cli_args.extend(build_harness_cli_args())
 
-        child_env = dict(os.environ)
-        child_env.update(harness_env)
+        child_env = build_harness_child_env(api_key)
 
         try:
             result = subprocess.run(
@@ -402,7 +491,7 @@ Respond with valid JSON:
             )
             if result.returncode != 0:
                 snippet = (result.stderr or "").strip()[:200]
-                log("WARNING", f"DeepSeek harness failed (rc={result.returncode}): "
+                log("ERROR", f"DeepSeek harness failed (rc={result.returncode}): "
                                f"{snippet}")
                 return LLMOutcome("cli_failed",
                                   returncode=result.returncode, stderr=snippet)
@@ -415,13 +504,13 @@ Respond with valid JSON:
                 return LLMOutcome("empty", text=result.stdout)
             return LLMOutcome("ok", text=text)
         except FileNotFoundError:
-            log("INFO", "Claude CLI not found for deepseek-harness")
+            log("ERROR", "Claude CLI not found for deepseek-harness")
             return LLMOutcome("missing_cli")
         except subprocess.TimeoutExpired:
-            log("WARNING", "DeepSeek harness timed out (120s)")
+            log("ERROR", "DeepSeek harness timed out (120s)")
             return LLMOutcome("timeout")
         except Exception as e:
-            log("WARNING", f"DeepSeek harness error: {e}")
+            log("ERROR", f"DeepSeek harness error: {e}")
             return LLMOutcome("error", stderr=str(e))
 
     @classmethod

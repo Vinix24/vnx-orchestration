@@ -30,7 +30,9 @@ ANALYZER_VERSION = "1.1.0"
 
 LLM_STRATEGY = os.environ.get("VNX_ANALYZER_LLM", "ollama-only")
 OLLAMA_MODEL = os.environ.get("VNX_OLLAMA_MODEL", "qwen2.5-coder:14b")
-DEEPSEEK_HARNESS_MODEL = os.environ.get("VNX_ANALYZER_DEEPSEEK_MODEL", "deepseek-v4-flash")
+DEEPSEEK_HARNESS_MODEL = os.environ.get("VNX_ANALYZER_DEEPSEEK_MODEL", "deepseek-flash")
+# A run below this DeepSeek balance (USD) is skipped loudly before any session is sent.
+DEEPSEEK_MIN_BALANCE_USD = float(os.environ.get("VNX_ANALYZER_DEEPSEEK_MIN_BALANCE", "0.50"))
 
 # When LLM_STRATEGY="auto", refuse the claude path when the unanalyzed session
 # backlog exceeds this threshold. Protects against metered-spend landmines on

@@ -68,6 +68,17 @@ log_msg() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
 }
 
+# The deepseek-harness deep analysis needs the operator's own DeepSeek key. The rc
+# loader above keeps only `export VNX_` lines, so this one variable is read from the
+# provider env file by a parser that never sources it and never prints the value.
+# Missing key = loud line here; the analyzer then records the failure in the digest.
+source "$SCRIPT_DIR/lib/load_deepseek_key.sh"
+if [ "${VNX_ANALYZER_LLM:-}" = "deepseek-harness" ]; then
+    if ! vnx_load_deepseek_key; then
+        log_msg "ERROR: VNX_ANALYZER_LLM=deepseek-harness but DEEPSEEK_API_KEY was not found in ${VNX_PROVIDER_ENV_FILE:-$HOME/.config/vnx/provider-usage.env}; deep analysis will be recorded as failed"
+    fi
+fi
+
 # Singleton enforcement
 if [ -f "$LOCK_FILE" ]; then
     pid=$(cat "$LOCK_FILE" 2>/dev/null || echo "")
