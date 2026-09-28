@@ -5,7 +5,7 @@ review prompt. A reviewer fed patterns/antipatterns from past dispatches, a
 repo-map, or a role's own CLAUDE.md is no longer independent — and any later
 measurement of injection's effect on quality is contaminated by an injected
 gate. review-gate (glm_gate.py/kimi_gate.py/gate_runner.py harness lane) and
-plan-reviewer (plan_gate_tiebreaker.py, plan_gate_panel._make_default_dispatcher
+plan-reviewer (scripts/lib/plan_gate_tiebreaker.py, plan_gate_panel._make_default_dispatcher
 default) both review a self-contained diff/plan handed to them inline; nothing
 from the intelligence DB or the repo tree may reach that prompt.
 
