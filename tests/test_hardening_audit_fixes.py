@@ -279,6 +279,10 @@ def _create_qi_db(db_path: Path) -> None:
     schema = (REPO_ROOT / "schemas" / "quality_intelligence.sql").read_text()
     conn = sqlite3.connect(str(db_path))
     conn.executescript(schema)
+    # The tenant-stamping migration (quality_db_init) adds project_id to the
+    # pattern tables; the base schema file alone does not carry it.
+    for _tbl in ("success_patterns", "antipatterns"):
+        conn.execute(f"ALTER TABLE {_tbl} ADD COLUMN project_id TEXT")
     conn.close()
 
 

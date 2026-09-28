@@ -1379,7 +1379,8 @@ def _create_intelligence_schema(conn: sqlite3.Connection):
             usage_count INTEGER DEFAULT 0,
             source_dispatch_ids TEXT DEFAULT '[]',
             first_seen DATETIME,
-            last_used DATETIME
+            last_used DATETIME,
+            project_id TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS antipatterns (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1394,7 +1395,8 @@ def _create_intelligence_schema(conn: sqlite3.Connection):
             better_alternative TEXT,
             source_dispatch_ids TEXT DEFAULT '[]',
             first_seen DATETIME,
-            last_seen DATETIME
+            last_seen DATETIME,
+            project_id TEXT NOT NULL
         );
     """)
 
@@ -1418,6 +1420,12 @@ def _make_analyzer_with_intel_db() -> ConversationAnalyzer:
 
 class TestBridgeSessionToIntelligence:
     """Tests for ConversationAnalyzer.bridge_session_to_intelligence()."""
+
+    @pytest.fixture(autouse=True)
+    def _tenant(self, monkeypatch):
+        # The bridge stamps project_id fail-closed (ADR-007); the tmp DB path
+        # carries no tenant, so the env var is the one source.
+        monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
 
     def test_test_cycle_writes_success_pattern(self):
         """has_test_cycle=True must insert a row into success_patterns."""
@@ -1590,6 +1598,12 @@ class TestBridgeSessionToIntelligence:
 
 class TestAtomicWrites:
     """session_analytics and intelligence writes must be atomic."""
+
+    @pytest.fixture(autouse=True)
+    def _tenant(self, monkeypatch):
+        # The bridge stamps project_id fail-closed (ADR-007); the tmp DB path
+        # carries no tenant, so the env var is the one source.
+        monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
 
     def test_session_stored_before_bridge(self):
         """_store_session is called before bridge_session_to_intelligence.

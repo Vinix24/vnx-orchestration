@@ -24,11 +24,11 @@ logger = logging.getLogger(__name__)
 _META_STAT_RE = re.compile(r"dispatches:.*success rate", re.IGNORECASE)
 
 try:
-    from pattern_dedup import _column_exists
+    from pattern_upsert import upsert_antipattern
 except ImportError:  # pragma: no cover
     import sys as _sys
     _sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from pattern_dedup import _column_exists
+    from pattern_upsert import upsert_antipattern
 
 
 def _is_meta_consolidation(category: Optional[str], title: Optional[str]) -> bool:
@@ -54,9 +54,14 @@ def insert_filtered_antipattern(
     project_id: Optional[str] = None,
     now: Optional[str] = None,
 ) -> int:
-    """Insert an antipattern row only when category/title pass the consolidation filter.
+    """Write an antipattern only when category/title pass the consolidation filter.
 
-    Returns 1 if inserted, 0 if filtered out.
+    The write goes through ``pattern_upsert`` under the natural key
+    ``(project_id, pattern_type, title)``: a second write of the same pattern
+    folds into the existing row. A NULL/empty ``project_id`` or ``title``
+    raises ValueError.
+
+    Returns 1 if written (inserted or merged), 0 if filtered out.
     """
     if _is_meta_consolidation(category, title):
         logger.info(
@@ -69,34 +74,19 @@ def insert_filtered_antipattern(
     if now is None:
         now = datetime.now(timezone.utc).isoformat()
 
-    has_project = _column_exists(conn, "antipatterns", "project_id")
-
-    if has_project and project_id is not None:
-        conn.execute(
-            "INSERT INTO antipatterns "
-            "(pattern_type, category, title, description, pattern_data, "
-            " why_problematic, severity, occurrence_count, "
-            " source_dispatch_ids, first_seen, last_seen, project_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                pattern_type, category, title, description[:500],
-                json.dumps({"source": "governance_signal"}),
-                (why_problematic or description)[:500], severity, occurrence_count,
-                source_dispatch_ids, now, now, project_id,
-            ),
-        )
-    else:
-        conn.execute(
-            "INSERT INTO antipatterns "
-            "(pattern_type, category, title, description, pattern_data, "
-            " why_problematic, severity, occurrence_count, "
-            " source_dispatch_ids, first_seen, last_seen) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                pattern_type, category, title, description[:500],
-                json.dumps({"source": "governance_signal"}),
-                (why_problematic or description)[:500], severity, occurrence_count,
-                source_dispatch_ids, now, now,
-            ),
-        )
+    upsert_antipattern(
+        conn,
+        project_id=project_id,
+        pattern_type=pattern_type,
+        title=title,
+        category=category,
+        description=description[:500],
+        pattern_data=json.dumps({"source": "governance_signal"}),
+        why_problematic=(why_problematic or description)[:500],
+        severity=severity,
+        occurrence_count=occurrence_count,
+        source_dispatch_ids=source_dispatch_ids,
+        first_seen=now,
+        last_seen=now,
+    )
     return 1

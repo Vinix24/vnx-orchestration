@@ -9,73 +9,65 @@ learning_loop.py:persist_to_intelligence_db).
 import json
 import sqlite3
 from datetime import datetime
-from typing import Any
+from typing import Any, Optional
 
+# .models puts scripts/lib on sys.path, so it is imported first.
 from .models import SessionMetrics, SessionFlags, log
+from pattern_upsert import upsert_antipattern, upsert_success_pattern
 
 
 def _upsert_pattern(conn: Any, title: str, description: str,
-                    pattern_data_json: str, now: str) -> bool:
-    existing = conn.execute(
-        "SELECT id, usage_count FROM success_patterns "
-        "WHERE title = ? AND pattern_data LIKE '%session_analysis%'",
-        (title,),
-    ).fetchone()
-    if existing:
-        row = dict(existing)
-        conn.execute(
-            "UPDATE success_patterns SET usage_count = ?, last_used = ? WHERE id = ?",
-            (row["usage_count"] + 1, now, row["id"]),
-        )
-        return False
-    conn.execute(
-        "INSERT INTO success_patterns "
-        "(pattern_type, category, title, description, pattern_data, "
-        " confidence_score, usage_count, source_dispatch_ids, first_seen, last_used) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        ("approach", "", title, description, pattern_data_json, 0.7, 1, "[]", now, now),
-    )
-    return True
+                    pattern_data_json: str, now: str, project_id: str) -> bool:
+    return upsert_success_pattern(
+        conn,
+        project_id=project_id,
+        pattern_type="approach",
+        title=title,
+        category="",
+        description=description,
+        pattern_data=pattern_data_json,
+        confidence_score=0.7,
+        usage_count=1,
+        first_seen=now,
+        last_used=now,
+    ).inserted
 
 
 def _upsert_antipattern(conn: Any, title: str, description: str,
                         why: str, severity: str,
-                        pattern_data_json: str, now: str) -> bool:
-    existing = conn.execute(
-        "SELECT id, occurrence_count FROM antipatterns "
-        "WHERE title = ? AND pattern_data LIKE '%session_analysis%'",
-        (title,),
-    ).fetchone()
-    if existing:
-        row = dict(existing)
-        conn.execute(
-            "UPDATE antipatterns SET occurrence_count = ?, last_seen = ? WHERE id = ?",
-            (row["occurrence_count"] + 1, now, row["id"]),
-        )
-        return False
-    conn.execute(
-        "INSERT INTO antipatterns "
-        "(pattern_type, category, title, description, pattern_data, "
-        " why_problematic, severity, occurrence_count, "
-        " source_dispatch_ids, first_seen, last_seen) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        ("approach", "", title, description, pattern_data_json,
-         why, severity, 1, "[]", now, now),
-    )
-    return True
+                        pattern_data_json: str, now: str, project_id: str,
+                        pattern_type: str = "approach",
+                        always_update: tuple = ()) -> bool:
+    return upsert_antipattern(
+        conn,
+        project_id=project_id,
+        pattern_type=pattern_type,
+        title=title,
+        category="",
+        description=description,
+        pattern_data=pattern_data_json,
+        why_problematic=why,
+        severity=severity,
+        occurrence_count=1,
+        first_seen=now,
+        last_seen=now,
+        always_update=always_update,
+    ).inserted
 
 
-def _write_test_cycle_pattern(conn: Any, now: str):
+def _write_test_cycle_pattern(conn: Any, now: str, project_id: str):
     _upsert_pattern(
         conn,
         title="Test-driven workflow detected",
         description="Session contained test-run/edit cycles indicating test-driven workflow",
         pattern_data_json=json.dumps({"source": "session_analysis"}),
         now=now,
+        project_id=project_id,
     )
 
 
-def _write_debugging_antipattern(conn: Any, metrics: SessionMetrics, now: str):
+def _write_debugging_antipattern(conn: Any, metrics: SessionMetrics, now: str,
+                                 project_id: str):
     _upsert_antipattern(
         conn,
         title="Extended debugging session",
@@ -84,10 +76,11 @@ def _write_debugging_antipattern(conn: Any, metrics: SessionMetrics, now: str):
         severity="medium",
         pattern_data_json=json.dumps({"source": "session_analysis"}),
         now=now,
+        project_id=project_id,
     )
 
 
-def _write_error_recovery_antipattern(conn: Any, now: str):
+def _write_error_recovery_antipattern(conn: Any, now: str, project_id: str):
     _upsert_antipattern(
         conn,
         title="Error recovery required",
@@ -96,10 +89,11 @@ def _write_error_recovery_antipattern(conn: Any, now: str):
         severity="low",
         pattern_data_json=json.dumps({"source": "session_analysis"}),
         now=now,
+        project_id=project_id,
     )
 
 
-def _bridge_improvement_suggestions(conn: Any, now: str) -> int:
+def _bridge_improvement_suggestions(conn: Any, now: str, project_id: str) -> int:
     _priority_to_severity = {"critical": "critical", "high": "high"}
     suggestion_rows = conn.execute(
         "SELECT id, category, component, suggested_improvement, priority "
@@ -117,55 +111,54 @@ def _bridge_improvement_suggestions(conn: Any, now: str) -> int:
         severity = _priority_to_severity.get(sg["priority"], "high")
         pattern_data_json = json.dumps({"source": "session_analysis",
                                         "suggestion_id": sg["id"]})
-
-        existing = conn.execute(
-            "SELECT id, occurrence_count FROM antipatterns "
-            "WHERE title = ? AND pattern_data LIKE '%session_analysis%'",
-            (title,),
-        ).fetchone()
-        if existing:
-            ex = dict(existing)
-            conn.execute(
-                "UPDATE antipatterns SET occurrence_count = ?, severity = ?, "
-                "last_seen = ? WHERE id = ?",
-                (ex["occurrence_count"] + 1, severity, now, ex["id"]),
-            )
-        else:
-            conn.execute(
-                "INSERT INTO antipatterns "
-                "(pattern_type, category, title, description, pattern_data, "
-                " why_problematic, severity, occurrence_count, "
-                " source_dispatch_ids, first_seen, last_seen) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                ("suggestion", "", title, improvement, pattern_data_json,
-                 f"Priority {sg['priority']} improvement suggestion",
-                 severity, 1, "[]", now, now),
-            )
+        # The latest priority always sets the severity, as before.
+        _upsert_antipattern(
+            conn,
+            title=title,
+            description=improvement,
+            why=f"Priority {sg['priority']} improvement suggestion",
+            severity=severity,
+            pattern_data_json=pattern_data_json,
+            now=now,
+            project_id=project_id,
+            pattern_type="suggestion",
+            always_update=("severity",),
+        )
         count += 1
     return count
 
 
 def bridge_session_to_intelligence(conn: Any, metrics: SessionMetrics,
-                                   flags: SessionFlags):
-    """Orchestrate bridge of Phase 2 findings into intelligence DB."""
+                                   flags: SessionFlags,
+                                   project_id: Optional[str] = None):
+    """Orchestrate bridge of Phase 2 findings into intelligence DB.
+
+    ``project_id`` is the tenant the rows are stamped with. The runner passes
+    its fail-closed ``_resolve_project_id()``; without it the id comes from
+    ``resolve_stamp_project_id()`` (``VNX_PROJECT_ID``), which refuses to guess.
+    """
     now = datetime.now().isoformat()
     patterns_written = 0
     antipatterns_written = 0
 
     try:
+        if not project_id:
+            from project_scope import resolve_stamp_project_id
+            project_id = resolve_stamp_project_id()
+
         if flags.has_test_cycle:
-            _write_test_cycle_pattern(conn, now)
+            _write_test_cycle_pattern(conn, now, project_id)
             patterns_written += 1
 
         if flags.primary_activity == "debugging" and metrics.duration_minutes > 30:
-            _write_debugging_antipattern(conn, metrics, now)
+            _write_debugging_antipattern(conn, metrics, now, project_id)
             antipatterns_written += 1
 
         if flags.has_error_recovery:
-            _write_error_recovery_antipattern(conn, now)
+            _write_error_recovery_antipattern(conn, now, project_id)
             antipatterns_written += 1
 
-        antipatterns_written += _bridge_improvement_suggestions(conn, now)
+        antipatterns_written += _bridge_improvement_suggestions(conn, now, project_id)
 
         log("INFO", f"  Bridge→intelligence: {patterns_written} success_patterns, "
                     f"{antipatterns_written} antipatterns")
