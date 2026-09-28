@@ -107,6 +107,23 @@ def build_harness_env(api_key: str) -> Dict[str, str]:
     }
 
 
+def build_harness_child_env(api_key: str, base_env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """Full child environment for a direct ``claude`` call against DeepSeek.
+
+    Starts from ``base_env`` (default: the process environment), removes the
+    Anthropic credentials in ``_HARNESS_SCRUB_KEYS`` and overlays the key-auth
+    harness env. For callers that run ``subprocess.run(["claude", ...])`` themselves
+    instead of going through ``spawn_deepseek_harness``: without the scrub, an
+    ``ANTHROPIC_API_KEY`` or ``CLAUDE_CODE_OAUTH_TOKEN`` inherited from the shell
+    would sit next to the redirect (constraint deepseek-harness-subscription-blocked).
+    """
+    env = dict(os.environ if base_env is None else base_env)
+    for key in _HARNESS_SCRUB_KEYS:
+        env.pop(key, None)
+    env.update(build_harness_env(api_key))
+    return env
+
+
 def build_harness_cli_args() -> List[str]:
     """Return the claude CLI flags that force MCP fully off for this lane.
 

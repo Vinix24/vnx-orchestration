@@ -459,7 +459,7 @@ _PROVIDER_TO_REGISTRY_KEY: Dict[str, str] = {
     "codex": "openai",
     "gemini": "google",
     "kimi": "kimi",
-    "deepseek-harness": "deepseek",
+    "deepseek-harness": "deepseek_harness",
     "glm-harness": "zai",
     "local-gemma": "local_gemma",
 }
@@ -560,10 +560,14 @@ def _load_pricing_from_registry(provider: str, model: str) -> Optional[Dict[str,
                 provider, model, registry_key, len(cfg.models),
             )
             return None
-        return {
+        pricing = {
             "input": float(entry.cost_input_per_mtok),
             "output": float(entry.cost_output_per_mtok),
         }
+        cache_read_price = getattr(entry, "cost_cache_read_per_mtok", None)
+        if isinstance(cache_read_price, (int, float)):
+            pricing["cache_read"] = float(cache_read_price)
+        return pricing
     except Exception as exc:
         logger.debug("_load_pricing_from_registry: failed for provider=%s model=%s: %s", provider, model, exc)
         return None
@@ -696,7 +700,11 @@ def _compute_cost(provider: str, model: str, token_usage: Dict[str, Any]) -> Opt
     if pricing:
         cost_in = (token_usage.get("input", 0) / 1_000_000) * pricing["input"]
         cost_out = (token_usage.get("output", 0) / 1_000_000) * pricing["output"]
-        return round(cost_in + cost_out, 8)
+        # Cache-read tokens are reported separately from "input" (the claude result
+        # event's input_tokens excludes them), so they add to the bill at their own
+        # price. Only models whose registry entry carries that price bill them.
+        cost_cache = (token_usage.get("cache_hit", 0) / 1_000_000) * pricing.get("cache_read", 0.0)
+        return round(cost_in + cost_cache + cost_out, 8)
     # Registry miss — fall back to the provider_costs rate table so API lanes
     # (litellm:deepseek/zai, codex-API, gemini) still resolve to real dollars
     # rather than silently landing at 0. The rate table returns None for

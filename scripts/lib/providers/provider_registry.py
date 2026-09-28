@@ -35,6 +35,10 @@ class ProviderModel:
     task_classes: List[str] = field(default_factory=list)
     cli_model_arg: Optional[str] = None
     dispatch_allowed: bool = True
+    # Price per Mtok of prompt tokens served from the provider's cache. None means
+    # the registry carries no cache-read price: cache-read tokens are then not billed
+    # by the cost calculation (unchanged behaviour for every model without it).
+    cost_cache_read_per_mtok: Optional[float] = None
 
 
 @dataclass
@@ -125,6 +129,7 @@ def _parse_model(data: dict, model_key: Optional[str] = None) -> ProviderModel:
     dispatch_allowed_raw = data.get("dispatch_allowed")
     price_source_raw = data.get("price_source")
     price_checked_at_raw = data.get("price_checked_at")
+    cache_read_raw = data.get("cost_cache_read_per_mtok")
     price_checked_at = str(price_checked_at_raw) if price_checked_at_raw is not None else ""
     if price_checked_at:
         _validate_price_checked_at(
@@ -144,6 +149,7 @@ def _parse_model(data: dict, model_key: Optional[str] = None) -> ProviderModel:
         task_classes=list(data.get("task_classes") or []),
         cli_model_arg=str(cli_model_arg_raw) if cli_model_arg_raw is not None else None,
         dispatch_allowed=bool(dispatch_allowed_raw) if dispatch_allowed_raw is not None else True,
+        cost_cache_read_per_mtok=float(cache_read_raw) if cache_read_raw is not None else None,
     )
 
 

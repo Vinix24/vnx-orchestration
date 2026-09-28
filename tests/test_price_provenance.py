@@ -255,6 +255,9 @@ _PINNED_PRICES: dict[tuple[str, str], tuple[float, float]] = {
     ("deepseek_harness", "deepseek-v4-pro"): (0.435, 0.87),
     ("deepseek_harness", "deepseek-v4-flash"): (0.14, 0.28),
     ("deepseek_harness", "deepseek-v4-pro-default"): (0.435, 0.87),
+    # 2026-09-28: V4.1-Flash under its real name, peak tariff from
+    # https://api-docs.deepseek.com/quick_start/pricing (cache-miss input 0.30).
+    ("deepseek_harness", "deepseek-flash"): (0.30, 1.20),
     ("moonshot", "kimi-k2-0905-default"): (0.6, 2.5),
     ("moonshot", "kimi-k2-6"): (0.95, 4.0),
     ("zai", "glm-5.2"): (0.683, 2.147),
@@ -301,6 +304,7 @@ _VERIFIED: set[tuple[str, str]] = {
     ("zai", "glm-5.2"),
     ("zai", "glm-5.3"),
     ("zai", "glm-5.3-flash"),
+    ("deepseek_harness", "deepseek-flash"),
 }
 
 

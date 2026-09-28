@@ -293,6 +293,25 @@ providers:
         price_checked_at: "2026-07-31"
         task_classes: ["coding-premium", "review", "analysis"]
         dispatch_allowed: true
+      # V4.1-Flash under its real name. `deepseek-v4-flash` above is a phased-out
+      # alias that DeepSeek serves with V4.1-Flash at the Flash tariff; it stays
+      # for the gates. Peak prices; off-peak (dal) is half, and the peak windows
+      # are 01:00-04:00 and 06:00-10:00 UTC on weekdays. The registry books the
+      # peak tariff: an upper bound, never an under-report.
+      deepseek-flash:
+        litellm_name: ""
+        cli_model_arg: "deepseek-flash"
+        cost_input_per_mtok: 0.30
+        cost_cache_read_per_mtok: 0.006
+        cost_output_per_mtok: 1.20
+        max_tokens: 384000
+        context_window: 1000000
+        supports_streaming: true
+        supports_tool_calls: true
+        price_source: "https://api-docs.deepseek.com/quick_start/pricing"
+        price_checked_at: "2026-09-28"
+        task_classes: ["coding", "review", "analysis"]
+        dispatch_allowed: true
   moonshot:
     enabled: true
     api_key_env: MOONSHOT_API_KEY
