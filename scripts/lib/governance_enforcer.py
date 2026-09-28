@@ -137,6 +137,49 @@ def _append_audit(entry: Dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# PR head resolution (OI-1884)
+# ---------------------------------------------------------------------------
+
+
+def _resolve_pr_head_sha(pr_number: Any, ctx: Dict[str, Any]) -> Optional[str]:
+    """The current head commit of ``pr_number``, resolved once per check.
+
+    A gate-result record must be judged against the commit it was actually
+    produced for, not against "some PASS exists on disk somewhere" — after a
+    fix-forward push, an old PASS sitting under ``pr-<N>-<gate>.json`` never
+    reviewed the new code. Prefers a head sha the caller already resolved
+    (``head_sha``/``commit_sha``/``headRefOid`` in context — e.g. ``pr_merge.py``
+    already has this from its own ``gh pr view`` call and should not pay for a
+    second one), and falls back to ``gh pr view`` only when the caller did not
+    supply one. Returns ``None`` when the head cannot be determined at all —
+    callers must refuse rather than silently accept an unscoped result.
+    """
+    for key in ("head_sha", "commit_sha", "headRefOid"):
+        val = ctx.get(key)
+        if val:
+            return str(val)
+    try:
+        proc = subprocess.run(
+            ["gh", "pr", "view", str(pr_number), "--json", "headRefOid"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return None
+    sha = data.get("headRefOid")
+    return str(sha) if sha else None
+
+
+def _short_sha(sha: str) -> str:
+    return sha[:8] if sha else "<geen>"
+
+
+# ---------------------------------------------------------------------------
 # Enforcement Engine
 # ---------------------------------------------------------------------------
 
@@ -343,7 +386,16 @@ class GovernanceEnforcer:
     def _check_review_gate_required(
         self, cfg: CheckConfig, ctx: Dict[str, Any], gate_name: str,
     ) -> EnforcementResult:
-        """``<gate_name>`` gate result must exist with non-empty contract_hash.
+        """``<gate_name>`` gate result must exist with non-empty contract_hash
+        AND a ``commit_sha`` equal to the PR's CURRENT head (OI-1884).
+
+        A PASS recorded against an older commit never reviewed the code that
+        sits on the head now — after a fix-forward push, an unbound
+        contract_hash check kept counting that stale PASS forever. The head is
+        resolved once per check (:func:`_resolve_pr_head_sha`) and every
+        candidate record, direct or takeover, must carry that exact
+        ``commit_sha`` to count. A record with no ``commit_sha`` at all (an old
+        record predating this field) never counts — it is not a wildcard.
 
         A seat also counts as satisfied when a successor in the takeover chain
         (``VNX_REVIEW_GATE_TAKEOVER_CHAIN``, e.g. glm_gate/deepseek_gate reading
@@ -359,6 +411,18 @@ class GovernanceEnforcer:
                 message="No pr_number in context — check skipped",
                 override_key=f"VNX_OVERRIDE_{cfg.name.upper()}",
             )
+
+        head_sha = _resolve_pr_head_sha(pr_number, ctx)
+        if not head_sha:
+            return EnforcementResult(
+                check_name=cfg.name, level=cfg.level, passed=False,
+                message=(
+                    f"Kon de huidige PR-kop niet bepalen voor #{pr_number}: "
+                    f"{gate_name}-check niet toetsbaar"
+                ),
+                override_key=f"VNX_OVERRIDE_{cfg.name.upper()}",
+            )
+
         result_path = GATE_RESULTS_DIR / f"pr-{pr_number}-{gate_name}.json"
         direct_data: Optional[Dict[str, Any]] = None
         if result_path.exists():
@@ -371,10 +435,14 @@ class GovernanceEnforcer:
                     override_key=f"VNX_OVERRIDE_{cfg.name.upper()}",
                 )
             contract_hash = direct_data.get("contract_hash", "")
-            if contract_hash:
+            commit_sha = direct_data.get("commit_sha", "")
+            if contract_hash and commit_sha and commit_sha == head_sha:
                 return EnforcementResult(
                     check_name=cfg.name, level=cfg.level, passed=True,
-                    message=f"{gate_name} passed — contract_hash: {contract_hash[:12]}...",
+                    message=(
+                        f"{gate_name} passed on head {_short_sha(head_sha)} — "
+                        f"contract_hash: {contract_hash[:12]}..."
+                    ),
                     override_key=f"VNX_OVERRIDE_{cfg.name.upper()}",
                 )
 
@@ -389,26 +457,45 @@ class GovernanceEnforcer:
                 if gate_name not in _takeover_hop_gates(data.get("takeover_path")):
                     continue
                 contract_hash = data.get("contract_hash", "")
-                if contract_hash:
+                commit_sha = data.get("commit_sha", "")
+                if contract_hash and commit_sha and commit_sha == head_sha:
                     successor = data.get("gate") or candidate.stem
                     return EnforcementResult(
                         check_name=cfg.name, level=cfg.level, passed=True,
                         message=(
-                            f"{gate_name} seat taken over by {successor} — "
-                            f"contract_hash: {contract_hash[:12]}..."
+                            f"{gate_name} seat taken over by {successor} on head "
+                            f"{_short_sha(head_sha)} — contract_hash: {contract_hash[:12]}..."
                         ),
                         override_key=f"VNX_OVERRIDE_{cfg.name.upper()}",
                     )
 
         if direct_data is not None:
+            stale_commit = direct_data.get("commit_sha", "")
+            if not stale_commit:
+                message = (
+                    f"{gate_name} result heeft geen commit_sha (oud record): telt niet mee "
+                    f"— huidige PR-kop is {_short_sha(head_sha)}"
+                )
+            elif stale_commit != head_sha:
+                message = (
+                    f"{gate_name} PASS staat op een oudere commit ({_short_sha(stale_commit)}) "
+                    f"dan de huidige PR-kop ({_short_sha(head_sha)}): opnieuw reviewen vereist"
+                )
+            else:
+                message = (
+                    f"{gate_name} result has empty contract_hash and no takeover successor found"
+                )
             return EnforcementResult(
                 check_name=cfg.name, level=cfg.level, passed=False,
-                message=f"{gate_name} result has empty contract_hash and no takeover successor found",
+                message=message,
                 override_key=f"VNX_OVERRIDE_{cfg.name.upper()}",
             )
         return EnforcementResult(
             check_name=cfg.name, level=cfg.level, passed=False,
-            message=f"{gate_name} result not found: {result_path} (no takeover successor found)",
+            message=(
+                f"{gate_name} result not found: {result_path} (no takeover successor found "
+                f"on head {_short_sha(head_sha)})"
+            ),
             override_key=f"VNX_OVERRIDE_{cfg.name.upper()}",
         )
 
