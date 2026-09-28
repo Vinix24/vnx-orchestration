@@ -1679,8 +1679,11 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _worker_role_env(role: Optional[str]) -> Optional[Dict[str, str]]:
-    """Build the env overlay for a provider-lane worker: role + VNX_DATA_DIR.
+def _worker_role_env(
+    role: Optional[str],
+    dispatch_paths: "list[str] | None" = None,
+) -> Optional[Dict[str, str]]:
+    """Build the env overlay for a provider-lane worker: role + VNX_DATA_DIR + path scope.
 
     Role half — mirrors ``TmuxInteractiveDispatch._spawn_session`` (the
     claude/tmux lane): a genuinely-set role in the dispatch spec is exported as
@@ -1691,6 +1694,14 @@ def _worker_role_env(role: Optional[str]) -> Optional[Dict[str, str]]:
     which is the existing, desired behavior. ``normalize_role`` strips the empty
     sentinel and ``identity_unresolved`` so neither leaks into the worker env as
     a fabricated role.
+
+    Path-scope half (OI-1886): *dispatch_paths* (raw entries, ``"path"`` or
+    ``"path:access"`` — the same wire form the ``--dispatch-paths`` CLI flag and
+    ``dispatch_spec.dispatch_paths_raw`` produce) is exported as
+    ``VNX_DISPATCH_PATHS`` via the single JSON-encoding
+    ``worker_permissions.dispatch_paths_env_value``, so the hook narrows this
+    dispatch's write scope to its declared paths. A dispatch that declared none
+    leaves the var unset, same no-narrowing default as before this change.
 
     Data-dir half (OI-1635): every provider-lane spawn (kimi/codex/deepseek-
     harness/glm-harness/gemini/litellm) tells its worker, in the dispatch
@@ -1729,6 +1740,18 @@ def _worker_role_env(role: Optional[str]) -> Optional[Dict[str, str]]:
     resolved_role = normalize_role(role)
     if resolved_role:
         env["VNX_WORKER_ROLE"] = resolved_role
+
+    try:
+        from worker_permissions import dispatch_paths_env_value
+        _dp_env = dispatch_paths_env_value(dispatch_paths)
+        if _dp_env is not None:
+            env["VNX_DISPATCH_PATHS"] = _dp_env
+    except Exception as exc:  # noqa: BLE001 — env overlay must never break a spawn
+        logger.warning(
+            "_worker_role_env: dispatch_paths_env_value failed (VNX_DISPATCH_PATHS "
+            "left unset, worker gets no dispatch-level narrowing): %s",
+            exc,
+        )
 
     try:
         env["VNX_DATA_DIR"] = str(_resolve_data_dir())
@@ -2141,7 +2164,10 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
             event_writer=event_store.append if event_store is not None else None,
             cwd=worker_cwd,
             total_deadline=float(getattr(args, "deadline_seconds", 900)),
-            extra_env=_worker_role_env(getattr(args, "role", None)),
+            extra_env=_worker_role_env(
+                getattr(args, "role", None),
+                dispatch_paths=_resolve_dispatch_paths(getattr(args, "dispatch_paths", "") or ""),
+            ),
         )
         end_time = datetime.now(timezone.utc)
 
@@ -2611,7 +2637,10 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
                 event_writer=event_store.append if event_store is not None else None,
                 cwd=worker_cwd,
                 total_deadline=float(getattr(args, "deadline_seconds", 900)),
-                extra_env=_worker_role_env(getattr(args, "role", None)),
+                extra_env=_worker_role_env(
+                    getattr(args, "role", None),
+                    dispatch_paths=_resolve_dispatch_paths(getattr(args, "dispatch_paths", "") or ""),
+                ),
             )
         else:
             result = spawn_litellm(
@@ -2625,7 +2654,10 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
                 event_writer=event_store.append if event_store is not None else None,
                 cwd=worker_cwd,
                 total_deadline=float(getattr(args, "deadline_seconds", 900)),
-                extra_env=_worker_role_env(getattr(args, "role", None)),
+                extra_env=_worker_role_env(
+                    getattr(args, "role", None),
+                    dispatch_paths=_resolve_dispatch_paths(getattr(args, "dispatch_paths", "") or ""),
+                ),
             )
         end_time = datetime.now(timezone.utc)
 
@@ -2750,7 +2782,10 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
                 or (os.environ.get("VNX_TASK_CLASS", "") or "").strip()
             ) or None,
             total_deadline=float(getattr(args, "deadline_seconds", 900)),
-            extra_env=_worker_role_env(getattr(args, "role", None)),
+            extra_env=_worker_role_env(
+                getattr(args, "role", None),
+                dispatch_paths=_resolve_dispatch_paths(getattr(args, "dispatch_paths", "") or ""),
+            ),
         )
         end_time = datetime.now(timezone.utc)
 
@@ -2888,7 +2923,10 @@ def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
             terminal_id=args.terminal_id,
             cwd=worker_cwd,
             total_deadline=float(args.deadline_seconds),
-            extra_env=_worker_role_env(getattr(args, "role", None)),
+            extra_env=_worker_role_env(
+                getattr(args, "role", None),
+                dispatch_paths=_resolve_dispatch_paths(getattr(args, "dispatch_paths", "") or ""),
+            ),
         )
         end_time = datetime.now(timezone.utc)
         model_used = result.model or model
@@ -2974,7 +3012,10 @@ def _dispatch_glm_harness(args: argparse.Namespace) -> int:
             cwd=worker_cwd,
             event_writer=event_store.append if event_store is not None else None,
             total_deadline=float(args.deadline_seconds),
-            extra_env=_worker_role_env(getattr(args, "role", None)),
+            extra_env=_worker_role_env(
+                getattr(args, "role", None),
+                dispatch_paths=_resolve_dispatch_paths(getattr(args, "dispatch_paths", "") or ""),
+            ),
         )
         end_time = datetime.now(timezone.utc)
         model_used = result.model or model
@@ -3066,7 +3107,10 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
             event_writer=event_store.append,
             cwd=worker_cwd,
             total_deadline=float(getattr(args, "deadline_seconds", 900)),
-            extra_env=_worker_role_env(getattr(args, "role", None)),
+            extra_env=_worker_role_env(
+                getattr(args, "role", None),
+                dispatch_paths=_resolve_dispatch_paths(getattr(args, "dispatch_paths", "") or ""),
+            ),
         )
         end_time = datetime.now(timezone.utc)
 

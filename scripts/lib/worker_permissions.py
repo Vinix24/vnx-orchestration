@@ -964,6 +964,34 @@ def resolve_dispatch_write_scope(dispatch_paths: "list[str] | None") -> "list[st
     return out
 
 
+def dispatch_paths_env_value(dispatch_paths: "list[str] | tuple[str, ...] | None") -> "str | None":
+    """Serialize declared dispatch paths into the ``VNX_DISPATCH_PATHS`` env value (OI-1886).
+
+    Single source of truth for the wire format: every setter (the headless
+    lane's ``ClaudeSubprocessAdapter``, the terminal-pinned subprocess lane's
+    ``deliver_via_subprocess``, and the provider lanes' ``_worker_role_env``)
+    calls this instead of hand-rolling its own ``json.dumps`` — one format,
+    parsed back in exactly one place (:func:`_resolve_dispatch_write_scope_from_env`
+    in ``pretooluse_worker_scope_enforce.py`` via ``json.loads`` +
+    :func:`resolve_dispatch_write_scope`).
+
+    Returns ``None`` when *dispatch_paths* is empty/falsy — callers MUST NOT
+    set the env var in that case. An absent/empty ``VNX_DISPATCH_PATHS`` means
+    "this dispatch declared no per-path scope" (no additional narrowing),
+    which is the existing default the hook already falls back to.
+
+    Returns a JSON-encoded list of the raw path strings otherwise. Each entry
+    is a bare path or a ``"path:access"`` pair — see
+    :func:`_parse_dispatch_path_entry`. No access filtering happens here: that
+    decision belongs solely to :func:`resolve_dispatch_write_scope` (the one
+    place ``WRITE_GRANTING_ACCESS`` is consulted), so a READ entry still
+    travels through this function unchanged.
+    """
+    if not dispatch_paths:
+        return None
+    return json.dumps(list(dispatch_paths))
+
+
 def match_file_write_scope(
     file_path: str,
     profile: PermissionProfile,

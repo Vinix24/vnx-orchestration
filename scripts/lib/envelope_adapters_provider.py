@@ -162,7 +162,7 @@ class ProviderAdapter:
         cwd: Optional[Path] = None,
         role: Optional[str] = None,
     ) -> _AdapterResult:
-        from dispatch_spec import Provider  # noqa: PLC0415
+        from dispatch_spec import Provider, dispatch_paths_raw  # noqa: PLC0415
         from provider_dispatch import (  # noqa: PLC0415
             _MLX_MODEL_MAP,
             _build_lane_key,
@@ -189,7 +189,15 @@ class ProviderAdapter:
         # run_envelope_plan) wins; plan.role stays the backward-compatible source
         # when the caller did not pass one.
         effective_role = role if role is not None else plan.role
-        role_env = _worker_role_env(effective_role)
+        # OI-1886: same reasoning as the role overlay above — this adapter calls
+        # spawn_* directly, so plan.dispatch_paths (typed DispatchPath tuple) must be
+        # converted to the raw wire form and threaded into VNX_DISPATCH_PATHS here too.
+        # getattr with a () default: some callers (tests, older plan-shaped stand-ins)
+        # construct a plan without this field — absent means "no paths declared",
+        # never a crash.
+        role_env = _worker_role_env(
+            effective_role, dispatch_paths=dispatch_paths_raw(getattr(plan, "dispatch_paths", ()))
+        )
 
         # ---- codex ----
         if pv == Provider.CODEX:
@@ -489,7 +497,7 @@ class ProviderAdapter:
 
         Pure extraction — behavior identical to the former inline kimi branch.
         """
-        from dispatch_spec import Provider  # noqa: PLC0415
+        from dispatch_spec import Provider, dispatch_paths_raw  # noqa: PLC0415
         from provider_spawns.kimi_spawn import spawn_kimi  # noqa: PLC0415
         from provider_dispatch import (  # noqa: PLC0415
             KimiModelResolutionError,
@@ -516,7 +524,9 @@ class ProviderAdapter:
                 dispatch_id=plan.dispatch_id,
                 terminal_id=plan.target_id,
                 event_writer=event_writer,
-                extra_env=_worker_role_env(role),
+                extra_env=_worker_role_env(
+                    role, dispatch_paths=dispatch_paths_raw(getattr(plan, "dispatch_paths", ()))
+                ),
                 cwd=cwd,
                 # worker-provider-kimi-flip (20260723): honor the spec's staged deadline
                 # instead of spawn_kimi's own hardcoded 900s default — a caller staging a
