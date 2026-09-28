@@ -575,7 +575,14 @@ def main(argv: "list[str] | None" = None) -> int:
         # report FILE vs an inline response). agents/review-gate/CLAUDE.md is
         # this gate's OWN role: none of the three conflicts. A role-level
         # split, not a dispatch_id string check.
-        dispatcher = _make_default_dispatcher(str(base_data_dir), args.timeout, role="review-gate")
+        # OI-1887: isolate on the PR's own branch instead of origin/main — see
+        # glm_gate's identical call site for the measured incident (PR #1950,
+        # via gate_runner's harness-lane path). `branch` is already resolved
+        # above (get_pr_head_branch, empty only for an offline --diff-file run).
+        dispatcher = _make_default_dispatcher(
+            str(base_data_dir), args.timeout, role="review-gate",
+            base_ref=(f"origin/{branch}" if branch else None),
+        )
         prompt = _build_prompt(diff, args.pr, diff_cap)
         # OI-1442: the deterministic half — see glm_gate's identical call site.
         # The prompt asks the model to report instruction-shaped text in the

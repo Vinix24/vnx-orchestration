@@ -365,6 +365,26 @@ EXECUTION_FAILURE_REASONS: frozenset = frozenset({
     # `unavailable` exactly like its sibling — never `failed` and never a
     # completed verdict.
     "harness_lane_exit_nonzero",
+    # OI-1887 pre-flight: the harness-lane runner validates and fetches
+    # origin/<branch> BEFORE dispatching (gate_worktree.fetch_branch), so the
+    # provider worktree can isolate on the PR branch instead of origin/main.
+    # An empty/unsafe branch, or a fetch that fails (deleted branch, network),
+    # is caught here rather than surfacing deep inside provider_dispatch as a
+    # generic harness_lane_dispatch_error — the PR was never reviewed, so this
+    # books `unavailable`, never `failed`, and the dispatcher is never called
+    # (no run against any ref, main included).
+    "harness_lane_branch_unavailable",
+    # OI-1887 vangnet: the orchestrator's OWN checkout (HEAD, branch list, or
+    # working-tree status) changed during a harness-lane dispatch — the exact
+    # shape of the 27-09 incident, where the agent `cd`ed into the main
+    # checkout and ran `git fetch`/`git checkout` there instead of staying in
+    # its isolated provider worktree. Detected deterministically by comparing
+    # a before/after snapshot (see gate_runner._capture_main_checkout_state),
+    # regardless of what the dispatch itself returned — a PASS booked while
+    # the main checkout was touched is worse than no verdict at all, so this
+    # OVERRIDES whatever outcome the dispatch produced. Never auto-repaired:
+    # a human decides what to do with the main checkout's new state.
+    "harness_lane_touched_main_checkout",
     # The provider refused the run because its quota/credit is spent — a
     # billing state, not a defect in the gate or the PR. Booked `unavailable`
     # like every other non-execution: the PR was never reviewed. See

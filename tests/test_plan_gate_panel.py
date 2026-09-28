@@ -1810,6 +1810,58 @@ def test_provider_lane_dispatcher_carries_read_only_task_class(tmp_path):
     )
 
 
+def test_provider_lane_dispatcher_omits_base_ref_by_default(tmp_path):
+    """OI-1887: the plan-gate/deliberation callers pass no base_ref, and the
+    provider-lane cmd must carry no --base-ref flag at all in that case — a
+    default-off change here would silently redirect every existing panel seat
+    away from provider_dispatch's own origin/main default."""
+    import unittest.mock as mock
+
+    seen_cmds = []
+
+    def _mock_subprocess_run(cmd, **kwargs):
+        seen_cmds.append(cmd)
+        import subprocess as _sp
+        return _sp.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+    dispatcher = pgp._make_default_dispatcher(str(tmp_path), 60, role="deliberation-panelist")
+
+    with mock.patch.object(pgp.subprocess, "run", side_effect=_mock_subprocess_run):
+        with mock.patch.object(pgp, "_read_report", return_value="panel seat analysis"):
+            dispatcher("kimi", "kimi-k3", "some panel prompt", "panel-sweep-diverge-3-oi1887")
+
+    assert len(seen_cmds) == 1
+    assert "--base-ref" not in seen_cmds[0]
+
+
+def test_provider_lane_dispatcher_threads_base_ref_into_provider_dispatch_cmd(tmp_path):
+    """OI-1887: a caller (gate_runner's harness-lane path, glm_gate.py, kimi_gate.py)
+    that DOES pass base_ref gets it threaded straight into the provider_dispatch
+    cmd as --base-ref, which provider_dispatch.py already threads into
+    create_dispatch_worktree — so the provider's own isolated worktree is based
+    on the PR branch instead of the default origin/main."""
+    import unittest.mock as mock
+
+    seen_cmds = []
+
+    def _mock_subprocess_run(cmd, **kwargs):
+        seen_cmds.append(cmd)
+        import subprocess as _sp
+        return _sp.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+    dispatcher = pgp._make_default_dispatcher(
+        str(tmp_path), 60, role="review-gate", base_ref="origin/feature/oi-1887",
+    )
+
+    with mock.patch.object(pgp.subprocess, "run", side_effect=_mock_subprocess_run):
+        with mock.patch.object(pgp, "_read_report", return_value="gate verdict"):
+            dispatcher("kimi", "kimi-k3", "some review prompt", "kimi-gate-pr1950-oi1887")
+
+    assert len(seen_cmds) == 1
+    cmd = seen_cmds[0]
+    assert cmd[cmd.index("--base-ref") + 1] == "origin/feature/oi-1887"
+
+
 def test_provider_lane_task_class_disarms_kimi_fabrication_guard_on_clean_worktree(tmp_path):
     """End-to-end proof (PASS criterion): the EXACT task_class value
     _make_default_dispatcher's provider-lane cmd carries, fed into the real

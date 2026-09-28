@@ -15,6 +15,27 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
   `vnx dispatch <pending-id>`. `VNX_DISPATCH_LEGACY=1` (or `VNX_SINGLE_ENTRY_DISPATCH=0`)
   still reaches the unchanged legacy lane, byte-identical, for when the door itself is broken.
 
+### Fixed
+
+- **Harness-lane review gates (`glm_gate`/`kimi_gate`/`deepseek_gate`) no longer isolate
+  on `origin/main` when reviewing a PR (OI-1887).** Measured 27-09 on PR #1950: the
+  provider worktree `_prepare_provider_workdir` created had no PR content of its own, so
+  the dispatched agent fetched and checked out the PR branch itself — 96 times, IN THE
+  ORCHESTRATOR'S OWN CHECKOUT (a stray branch appeared in the operator's repo). The
+  harness-lane runner (`gate_runner._run_harness_lane_path`) now validates and fetches
+  `origin/<branch>` up front (`gate_worktree.fetch_branch`, extracted from
+  `create_gate_worktree`) and threads it into the governed dispatcher
+  (`plan_gate_panel._make_default_dispatcher`'s new `base_ref` parameter, `provider_dispatch.py
+  --base-ref`) so the provider's own isolated worktree already has the PR branch. An
+  unfetchable branch books `unavailable`/`harness_lane_branch_unavailable` before any
+  dispatch — never a silent fallback to main. A deterministic vangnet snapshots the
+  orchestrator's own checkout (HEAD, branch list, working-tree status) before and after
+  the dispatch; a mismatch books `unavailable`/`harness_lane_touched_main_checkout` and
+  overrides whatever the dispatch itself returned, including a PASS. The standalone
+  `scripts/glm_gate.py`/`scripts/kimi_gate.py` CLIs (deepseek has no standalone CLI, only
+  the harness-lane path above) carried the identical missing-`base_ref` pattern at their
+  own `_make_default_dispatcher` call sites and are fixed the same way.
+
 ## [1.6.6] - 2026-09-27
 
 Feature release (16 commits since v1.6.5). The default review stack is

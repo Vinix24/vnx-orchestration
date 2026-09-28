@@ -21,7 +21,7 @@ VNX_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_LIB = VNX_ROOT / "scripts" / "lib"
 sys.path.insert(0, str(SCRIPTS_LIB))
 
-from gate_worktree import GateWorktreeError, create_gate_worktree, remove_gate_worktree
+from gate_worktree import GateWorktreeError, create_gate_worktree, fetch_branch, remove_gate_worktree
 
 
 def _run_git(args, cwd):
@@ -144,6 +144,57 @@ class TestRemoveGateWorktree:
 
     def test_remove_nonexistent_path_is_a_noop(self, tmp_path):
         remove_gate_worktree(tmp_path / "never-existed")  # must not raise
+
+
+class TestFetchBranch:
+    """OI-1887: fetch_branch is create_gate_worktree's validate-then-fetch half,
+    extracted so a caller (gate_runner's harness-lane pre-flight) can confirm a
+    PR branch is fetchable without creating a worktree at all."""
+
+    def test_fetches_branch_not_previously_known_locally(self, origin_and_local):
+        local = origin_and_local["local"]
+        root = fetch_branch(
+            "feature/oi-708", gate="kimi_gate", identifier="1", project_root=local,
+        )
+        assert root == local.resolve()
+        # FETCH_HEAD now names the branch that was fetched.
+        fetch_head = _run_git(["log", "-1", "--format=%H", "FETCH_HEAD"], local).strip()
+        origin_head = _run_git(
+            ["log", "-1", "--format=%H", "feature/oi-708"], origin_and_local["origin"],
+        ).strip()
+        assert fetch_head == origin_head
+        # The local checkout itself is untouched — fetch_branch never checks
+        # anything out, it only updates the remote-tracking ref.
+        assert (local / "marker.txt").read_text() == "BASE\n"
+        local_branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], local).strip()
+        assert local_branch == "main"
+
+    def test_empty_branch_raises_without_touching_git(self, origin_and_local):
+        local = origin_and_local["local"]
+        with pytest.raises(GateWorktreeError, match="non-empty branch"):
+            fetch_branch("", gate="kimi_gate", identifier="1", project_root=local)
+
+    def test_nonexistent_branch_raises_gate_worktree_error(self, origin_and_local):
+        local = origin_and_local["local"]
+        with pytest.raises(GateWorktreeError):
+            fetch_branch(
+                "does/not/exist", gate="kimi_gate", identifier="1", project_root=local,
+            )
+
+    def test_create_gate_worktree_still_works_after_the_fetch_branch_extraction(
+        self, origin_and_local,
+    ):
+        """Regression guard for the refactor: create_gate_worktree now calls
+        fetch_branch internally instead of duplicating the validate+fetch
+        sequence — this must not change its own observable behaviour."""
+        local = origin_and_local["local"]
+        wt_path = create_gate_worktree(
+            branch="feature/oi-708", gate="codex_gate", identifier="42", project_root=local,
+        )
+        try:
+            assert (wt_path / "marker.txt").read_text() == "FRESH_FROM_PR_BRANCH\n"
+        finally:
+            remove_gate_worktree(wt_path, project_root=local)
 
 
 class TestBranchInjectionRejected:

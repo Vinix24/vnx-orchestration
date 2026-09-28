@@ -276,16 +276,28 @@ def runner_env(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_REPORTS_DIR", str(reports_dir))
     monkeypatch.delenv("VNX_GLM_GATE_MODEL", raising=False)
     monkeypatch.delenv("VNX_GLM_GATE_MAX_DIFF_CHARS", raising=False)
-    monkeypatch.setattr(
-        gate_runner.subprocess, "Popen",
-        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("harness lane must not spawn")),
-    )
+    real_popen = gate_runner.subprocess.Popen
+
+    def _fail_unless_git(*a, **kw):
+        # OI-1887: the main-checkout vangnet's own read-only `git` calls (via
+        # subprocess.run, which calls Popen internally) are not what this
+        # guard exists to catch — only a direct spawn of the review agent's
+        # own binary is. See the identical guard in test_gate_runner.py.
+        argv = a[0] if a else kw.get("args")
+        if isinstance(argv, (list, tuple)) and argv and argv[0] == "git":
+            return real_popen(*a, **kw)
+        raise AssertionError("harness lane must not spawn")
+
+    monkeypatch.setattr(gate_runner.subprocess, "Popen", _fail_unless_git)
+    # OI-1887: the harness-lane path now fetches origin/<branch> BEFORE
+    # dispatching; BRANCH here names no real remote, so fake it.
+    monkeypatch.setattr(gate_runner, "fetch_branch", lambda *a, **kw: None)
     return {"state_dir": state_dir, "reports_dir": reports_dir,
             "results_dir": state_dir / "review_gates" / "results"}
 
 
 def _run_harness_lane(runner_env, monkeypatch, *, diff: str, report: str, pr: int):
-    def factory(data_dir, timeout_seconds, *, role="plan-reviewer"):
+    def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None):
         def dispatch(provider, model, instruction, dispatch_id):
             return report
         return dispatch
