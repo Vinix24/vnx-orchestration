@@ -30,7 +30,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/vnx_paths.sh"
-ensure_env
+# vnx_paths.sh snapshots the caller's shell options inside $(...), where bash
+# clears errexit, and restores that snapshot on exit: the `set -e` above is gone
+# after the source. Re-assert it so a failing command fails the job. The source
+# already exports the VNX_* environment; there is no separate ensure_env in bash
+# (that name only exists in scripts/lib/vnx_paths.py).
+set -euo pipefail
 
 # ── Interpreter resolution (measured 2026-07-30) ──────────────────────────
 # This script runs under launchd (com.vnx.conversation-analyzer), a pure
@@ -84,7 +89,10 @@ log_msg "=== Nightly conversation analysis starting ==="
 
 # Phase 0: Ensure DB schema is up to date (runs migrations if needed)
 log_msg "Phase 0: Running DB schema migrations..."
-"$VNX_PYTHON" "$SCRIPT_DIR/quality_db_init.py" 2>&1 | tee -a "$LOG_FILE"
+if ! "$VNX_PYTHON" "$SCRIPT_DIR/quality_db_init.py" 2>&1 | tee -a "$LOG_FILE"; then
+    log_msg "Phase 0 FAILED: DB schema migrations failed, aborting"
+    exit 1
+fi
 log_msg "Phase 0 complete"
 
 # Optionally start Ollama if not running and available
@@ -110,13 +118,17 @@ fi
 
 # Phase 1: Run the analyzer (session parsing + heuristics + deep analysis)
 log_msg "Phase 1: Running conversation analyzer..."
+ANALYZER_EXIT=0
 "$VNX_PYTHON" "$SCRIPT_DIR/conversation_analyzer.py" \
     --max-sessions 50 \
     --deep-budget 20 \
-    2>&1 | tee -a "$LOG_FILE"
+    2>&1 | tee -a "$LOG_FILE" || ANALYZER_EXIT=$?
 
-ANALYZER_EXIT=${PIPESTATUS[0]}
-log_msg "Phase 1 complete (exit=$ANALYZER_EXIT)"
+if [ "$ANALYZER_EXIT" -eq 0 ]; then
+    log_msg "Phase 1 complete (exit=$ANALYZER_EXIT)"
+else
+    log_msg "Phase 1 FAILED (exit=$ANALYZER_EXIT)"
+fi
 
 # Phase 1.5: Cross-reference sessions, dispatches, and receipts
 log_msg "Phase 1.5: Running session-dispatch linkage..."
@@ -165,5 +177,8 @@ else
     log_msg "Phase 4: Skipped — VNX_DIGEST_EMAIL not set"
 fi
 
+if [ "$ANALYZER_EXIT" -ne 0 ]; then
+    log_msg "=== Nightly analysis pipeline FAILED (analyzer_exit=$ANALYZER_EXIT) ==="
+    exit "$ANALYZER_EXIT"
+fi
 log_msg "=== Nightly analysis pipeline complete (analyzer_exit=$ANALYZER_EXIT) ==="
-exit "$ANALYZER_EXIT"
