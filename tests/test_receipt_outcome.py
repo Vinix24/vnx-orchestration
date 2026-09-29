@@ -296,3 +296,65 @@ def test_pr_owner_is_the_first_work_dispatch_that_names_the_pr():
     assert [e["dispatch_id"] for e in _outcome(result, "d1")["evidence"]] == [
         "kimi-gate-pr42-1790000000", ""]
     assert _outcome(result, "d1-ff")["evidence"] == []
+
+
+def test_governed_success_literal_ok_accepts_and_neutral_timeout_investigates():
+    assert _run(_a("d1", "ok"), _b("d1"))["verdict_counts"]["accept"] == 1
+    neutral = _run(_a("d1", "timeout"), _b("d1"))["verdict_counts"]
+    assert (neutral["investigate"], neutral["reject"], neutral["accept"]) == (1, 0, 0)
+
+
+def test_merge_runner_evidence_and_blocking_follow_the_pr_to_the_work_dispatch():
+    refused = {"event_type": "pr_merge_refused", "dispatch_id": "merge-runner-9",
+               "pr_number": 42, "status": "blocked", "timestamp": TS}
+    merged = {"event_type": "pr_merged", "dispatch_id": "merge-runner-9",
+              "pr_number": 42, "status": "success", "timestamp": TS}
+    work = [_a("d1", "success", pr_id="42"), _b("d1")]
+    blocked = _run(*work, refused)
+    assert [o["dispatch_id"] for o in blocked["outcomes"]] == ["d1"]
+    assert blocked["verdict_counts"]["investigate"] == 1
+    resolved = _run(*work, refused, merged)
+    assert [o["dispatch_id"] for o in resolved["outcomes"]] == ["d1"]
+    assert resolved["verdict_counts"]["accept"] == 1
+
+
+def test_a_dispatch_keeps_its_own_evidence_when_another_dispatch_owns_the_pr():
+    result = _run(
+        _a("d0", "success", pr_id="42"), _b("d0"),
+        _a("d1", "success"), _b("d1"),
+        {"event_type": "pr_merge_refused", "dispatch_id": "d1", "pr_number": 42,
+         "status": "blocked", "timestamp": TS},
+    )
+    assert _outcome(result, "d1")["decision"] == "investigate"
+    assert _outcome(result, "d0")["decision"] == "accept"
+
+
+def test_blocking_event_from_a_gate_runner_id_still_blocks():
+    result = _run(
+        _a("d1", "success", pr_id="42"), _b("d1"),
+        {"event_type": "pr_merge_refused", "dispatch_id": "kimi-gate-pr42-123",
+         "pr_number": 42, "status": "blocked", "timestamp": TS},
+    )
+    assert result["verdict_counts"]["investigate"] == 1
+    assert _outcome(result, "d1")["blocking"][0]["event_type"] == "pr_merge_refused"
+
+
+def test_writer_b_failure_literal_rejects_an_a_success():
+    for literal in ("failure", "failed", "contract_invalid"):
+        result = _run(_a("d1", "success"), _b("d1", literal))
+        assert _outcome(result, "d1")["decision"] == "reject", literal
+
+
+def test_retry_without_new_b_is_not_accepted_on_the_previous_attempts_evidence():
+    result = _run(_a("d1", "failure"), _b("d1"), _a("d1", "success"))
+    assert _outcome(result, "d1")["decision"] == "investigate"
+    full = _run(_a("d1", "failure"), _b("d1"), _a("d1", "success"), _b("d1"))
+    assert _outcome(full, "d1")["decision"] == "accept"
+
+
+def test_b_before_the_first_a_still_counts_as_its_verification():
+    assert _run(_b("d1"), _a("d1", "success"))["verdict_counts"]["accept"] == 1
+
+
+def test_reader_epoch_is_part_of_the_summary():
+    assert _run()["outcome_reader_epoch"] == ro.OUTCOME_READER_EPOCH

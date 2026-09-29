@@ -18,6 +18,9 @@ lines into one outcome (fabric-state-herstel D3):
    ``task_timeout`` are writer-A lines too; ``classify_event_outcome`` decides
    what their status means, and a pending ``task_timeout`` is no outcome.
 4. Verification: the last writer-B receipt; ``compute_verdict`` on the merge.
+   A writer-B receipt that precedes a later retry's writer-A belongs to the
+   earlier attempt and is dropped: a retry is judged on its own evidence. A
+   writer-B receipt whose own status is a governed failure rejects.
 5. Evidence only: ``review_gate_result``, ``pr_merged`` and gate-runner
    dispatches (``kimi-gate-pr<N>-<ts>``), grouped on PR and linked to the work
    dispatch that carries that PR: the first non-gate dispatch in file order
@@ -46,10 +49,11 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from event_outcome_semantics import classify_event_outcome
-from receipt_verdict import compute_verdict
+from receipt_verdict import HARD_FAILURE_STATUSES, compute_verdict
 
 # When the per-dispatch reading replaced the per-line stamp count: the auditable
 # reason for a delta between digests before and after. The ledger is untouched.
+# ``receipt_query digest`` stamps it into its output.
 OUTCOME_READER_EPOCH = "2026-09-29T00:00:00+00:00"
 
 BOOKKEEPING_EVENT_TYPES = frozenset({
@@ -127,12 +131,21 @@ def _is_writer_a(receipt: Dict[str, Any]) -> bool:
 
 
 def _verdict_status(receipt: Dict[str, Any]) -> Any:
-    """The status compute_verdict judges: a governed failure reads as ``failure``
-    whatever literal the line carries (task_failed, terminal task_timeout)."""
+    """The status compute_verdict judges, read through event_outcome_semantics:
+    a governed failure reads as ``failure`` whatever literal the line carries
+    (task_failed, terminal task_timeout) and a governed success as ``success``
+    (``ok``). A neutral literal that compute_verdict would count as a hard
+    failure (``timeout``) reads as ``unknown``: no outcome signal, so investigate."""
     status = receipt.get("status")
-    if classify_event_outcome(receipt.get("event_type"), status) == "failure":
-        return "failure"
-    return status
+    category = classify_event_outcome(receipt.get("event_type"), status)
+    if category is not None:
+        return category
+    return "unknown" if status in HARD_FAILURE_STATUSES else status
+
+
+def _is_evidence_or_blocking(receipt: Dict[str, Any]) -> bool:
+    event_type = receipt.get("event_type")
+    return event_type in EVIDENCE_EVENT_TYPES or event_type in BLOCKING_EVENT_TYPES
 
 
 def _is_writer_b(receipt: Dict[str, Any]) -> bool:
@@ -197,12 +210,15 @@ def _decide(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return {"decision": "reject", "status": ci.get("status") or "contract_invalid",
                 "reason": f"{ci.get('event_type')} after the last lane status"}
     merged = dict(a if a is not None else b)
+    status = _verdict_status(merged)
     if b is not None:
         merged["verification"] = b.get("verification") or {}
         merged["warnings"] = list((a or {}).get("warnings") or []) + list(b.get("warnings") or [])
         if not merged.get("provenance"):
             merged["provenance"] = b.get("provenance")
-    verdict = compute_verdict(dict(merged, status=_verdict_status(a if a is not None else b)))
+        if _verdict_status(b) == "failure":
+            status, merged["status"] = "failure", b.get("status")
+    verdict = compute_verdict(dict(merged, status=status))
     decision, reason = verdict["decision"], verdict["reason"]
     if decision == "accept":
         open_blocks = [blk for blk in record["blocking"]
@@ -229,12 +245,14 @@ class _Window:
 
 def _partition(receipts: Iterable[Dict[str, Any]], project_id: str, in_window: _Window,
                noise: Counter, bookkeeping: Counter,
-               ) -> Tuple[List[Tuple[int, Dict[str, Any]]], Dict[str, str]]:
-    """Split off noise and bookkeeping; return kept lines with their file position
-    and the work dispatch that owns each PR: the first non-gate dispatch that
-    names it, so a later merge or fix-forward dispatch does not take it over."""
+               ) -> Tuple[List[Tuple[int, Dict[str, Any]]], Dict[str, str], set]:
+    """Split off noise and bookkeeping; return kept lines with their file position,
+    the work dispatch that owns each PR (the first non-gate dispatch with a
+    non-evidence line that names it, so a later merge or fix-forward dispatch
+    does not take it over) and the ids that carry an outcome line of their own."""
     kept: List[Tuple[int, Dict[str, Any]]] = []
     pr_owner: Dict[str, str] = {}
+    outcome_ids: set = set()
     for pos, receipt in enumerate(r for r in receipts if isinstance(r, dict)):
         reason = noise_reason(receipt, project_id)
         if reason is None and receipt.get("event_type") in BOOKKEEPING_EVENT_TYPES:
@@ -244,22 +262,33 @@ def _partition(receipts: Iterable[Dict[str, Any]], project_id: str, in_window: _
         else:
             kept.append((pos, receipt))
             did, pr = _dispatch_id(receipt), _pr_of(receipt)
-            if pr and did.lower() not in INVALID_DISPATCH_IDS and not GATE_DISPATCH_RE.match(did):
+            if _is_evidence_or_blocking(receipt) or did.lower() in INVALID_DISPATCH_IDS:
+                continue
+            if _is_writer_a(receipt) or _is_writer_b(receipt):
+                outcome_ids.add(did)
+            if pr and not GATE_DISPATCH_RE.match(did):
                 pr_owner.setdefault(pr, did)
-    return kept, pr_owner
+    return kept, pr_owner, outcome_ids
 
 
-def _attribute(receipt: Dict[str, Any], pr_owner: Dict[str, str]) -> Tuple[Optional[str], str]:
-    """The dispatch a line belongs to, or (None, why) when it cannot be attributed."""
-    did, event_type = _dispatch_id(receipt), receipt.get("event_type")
+def _attribute(receipt: Dict[str, Any], pr_owner: Dict[str, str],
+               outcome_ids: set) -> Tuple[Optional[str], str]:
+    """The dispatch a line belongs to, or (None, why) when it cannot be attributed.
+
+    Evidence and blocking lines follow their PR to the work dispatch that owns it
+    unless their own id carries an outcome (then they are that dispatch's own
+    lines), so a merge or gate runner's ``pr_merged`` / ``pr_merge_refused``
+    resolves or blocks the work dispatch instead of becoming an outcome of its own."""
+    did = _dispatch_id(receipt)
     gate_match = GATE_DISPATCH_RE.match(did)
     missing_id = did.lower() in INVALID_DISPATCH_IDS
-    linkable = event_type in EVIDENCE_EVENT_TYPES or event_type in BLOCKING_EVENT_TYPES
-    if gate_match or (missing_id and linkable):
+    linkable = _is_evidence_or_blocking(receipt)
+    if gate_match or (linkable and not (did in outcome_ids)):
         owner = pr_owner.get(_pr_of(receipt) or _gate_pr(gate_match) or "")
-        if owner is None:
+        if owner is not None:
+            return owner, ""
+        if gate_match or missing_id:
             return None, "missing_dispatch_id" if missing_id else "unlinked_gate"
-        return owner, ""
     if missing_id:
         return None, "missing_dispatch_id"
     return did, ""
@@ -269,15 +298,17 @@ def _fold(record: Dict[str, Any], receipt: Dict[str, Any], pos: int, did: str) -
     """Fold one attributed line into its dispatch record."""
     event_type = receipt.get("event_type")
     gate_match = GATE_DISPATCH_RE.match(_dispatch_id(receipt))
-    if gate_match or event_type in EVIDENCE_EVENT_TYPES:
-        record["evidence"].append(_evidence_entry(receipt, pos))
-    elif event_type in BLOCKING_EVENT_TYPES:
+    if event_type in BLOCKING_EVENT_TYPES:
         record["blocking"].append(_evidence_entry(receipt, pos))
+    elif gate_match or event_type in EVIDENCE_EVENT_TYPES:
+        record["evidence"].append(_evidence_entry(receipt, pos))
     elif event_type in CONTRACT_INVALID_EVENT_TYPES:
         record["contract_invalid"], record["contract_invalid_pos"] = receipt, pos
     elif _is_writer_b(receipt):
         record["b"], record["b_pos"] = receipt, pos
     elif _is_writer_a(receipt):
+        if record["a"] is not None and record["b_pos"] > record["a_pos"]:
+            record["b"], record["b_pos"] = None, -1  # B of the previous attempt
         record["a"], record["a_pos"] = receipt, pos
     if gate_match:
         return
@@ -316,12 +347,12 @@ def summarize(
     in_window = _Window(cutoff)
     noise: Counter = Counter()
     bookkeeping: Counter = Counter()
-    kept, pr_owner = _partition(receipts, project_id, in_window, noise, bookkeeping)
+    kept, pr_owner, outcome_ids = _partition(receipts, project_id, in_window, noise, bookkeeping)
 
     records: Dict[str, Dict[str, Any]] = {}
     unlinked_gate_evidence = 0
     for pos, receipt in kept:
-        did, why = _attribute(receipt, pr_owner)
+        did, why = _attribute(receipt, pr_owner, outcome_ids)
         if did is None:
             if why == "missing_dispatch_id":
                 noise[why] += in_window(receipt)
@@ -343,6 +374,7 @@ def summarize(
     for outcome in outcomes:
         counts[outcome["decision"]] += 1
     return {
+        "outcome_reader_epoch": OUTCOME_READER_EPOCH,
         "verdict_counts": counts,
         "outcomes": outcomes,
         "bookkeeping_counts": {k: v for k, v in bookkeeping.items() if v},
