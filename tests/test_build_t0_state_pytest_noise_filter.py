@@ -7,7 +7,7 @@ state-reader that folds them into recent-activity or a derived success rate
 is reading a polluted number.
 
 Covers:
-- ``_is_pytest_noise_receipt`` — the shared predicate.
+- ``receipt_outcome.noise_reason`` — the shared predicate.
 - ``_build_recent_receipts`` excludes pytest-source receipts.
 - A before/after count on a constructed ledger: the delta must equal exactly
   the number of pytest-source receipts injected (OI D2's own "test your
@@ -27,6 +27,8 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SCRIPTS_DIR = _REPO_ROOT / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
+if str(_SCRIPTS_DIR / "lib") not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR / "lib"))
 
 
 def _make_ndjson(state_dir: Path, entries: list[dict]) -> Path:
@@ -60,22 +62,24 @@ def _pytest_receipt(dispatch_id: str, timestamp: str) -> dict:
     }
 
 
-class TestIsPytestNoiseReceipt:
+class TestPytestSourceIsNoise:
+    """The shared predicate now lives in ``receipt_outcome.noise_reason``."""
+
+    def _reason(self, receipt: dict) -> object:
+        from receipt_outcome import noise_reason
+        return noise_reason(receipt, "vnx-dev")
+
     def test_source_pytest_is_noise(self) -> None:
-        from build_t0_state import _is_pytest_noise_receipt
-        assert _is_pytest_noise_receipt({"source": "pytest"}) is True
+        assert self._reason({"source": "pytest"}) == "pytest"
 
     def test_source_pytest_case_insensitive(self) -> None:
-        from build_t0_state import _is_pytest_noise_receipt
-        assert _is_pytest_noise_receipt({"source": "PyTest"}) is True
+        assert self._reason({"source": "PyTest"}) == "pytest"
 
     def test_real_source_is_not_noise(self) -> None:
-        from build_t0_state import _is_pytest_noise_receipt
-        assert _is_pytest_noise_receipt({"source": "subprocess"}) is False
+        assert self._reason({"source": "subprocess"}) is None
 
     def test_missing_source_is_not_noise(self) -> None:
-        from build_t0_state import _is_pytest_noise_receipt
-        assert _is_pytest_noise_receipt({}) is False
+        assert self._reason({}) is None
 
 
 class TestBuildRecentReceiptsExcludesPytestNoise:

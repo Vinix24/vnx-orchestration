@@ -95,6 +95,13 @@ from health_status import worst_status  # noqa: E402
 from qi_db_health import is_empty_schema as _qi_db_is_empty_schema  # noqa: E402
 from vnx_paths import ensure_env, project_id_from_state_dir  # noqa: E402
 from contract_invalid_ledger import build_contract_invalid_summary as _build_contract_invalid_summary_counts  # noqa: E402
+from receipt_outcome import (  # noqa: E402
+    BOOKKEEPING_EVENT_TYPES,
+    INVALID_DISPATCH_IDS,
+    OUTCOME_READER_EPOCH,
+    noise_reason,
+    summarize as _summarize_outcomes,
+)
 try:
     from vnx_paths import resolve_central_data_dir  # noqa: E402
 except ImportError:
@@ -1720,39 +1727,17 @@ def _build_active_work(
 # Recent receipts (last N lines from t0_receipts.ndjson)
 # ---------------------------------------------------------------------------
 
-# D2 (OI, measured 2026-09-04): t0_receipts.ndjson carries pytest-fixture
-# noise (source == "pytest") — test runs that append onto the live ledger
-# instead of an isolated tmp_path. Measured on
-# ~/.vnx-data/vnx-dev/state/t0_receipts.ndjson: 28,944 lines total, 7,738
-# (27%) carrying source == "pytest". These are synthetic test entries
-# (dispatch_id like "DISP-007"/"TASK-021"), not real dispatch work, and any
-# state-reader that folds them into a success/completion count is reading a
-# polluted number. PYTEST_NOISE_FILTER_EPOCH is the explicit marker for when
-# this filter was introduced (mirrors ADR-029's chain_epoch_start
-# convention): a reader comparing an old cached count to a new one has an
-# auditable reason for the delta. The ledger itself is untouched — it is
-# append-only (ADR-005) — only the reader's interpretation changes from this
-# point forward.
-PYTEST_NOISE_FILTER_EPOCH = "2026-09-04T00:00:00+00:00"
+# The ledger carries test noise (pytest fixtures, temp-dir report paths,
+# MagicMock leaks) and two outcome receipts per dispatch. Which lines are noise
+# and what a dispatch's outcome is now belongs to ``receipt_outcome`` (fabric-
+# state-herstel D3/D4a); this reader only lays the outcome out as a T0 view.
+# OUTCOME_READER_EPOCH dates that switch: the ledger is append-only (ADR-005),
+# only the reader's interpretation changed, so a delta against an older cached
+# view has an auditable reason.
+RECENT_RECEIPTS_OUTCOME_EPOCH = OUTCOME_READER_EPOCH
 
 
-def _is_pytest_noise_receipt(entry: Dict[str, Any]) -> bool:
-    """True when a receipt entry is pytest-fixture noise, not real work.
-
-    D2: any receipt with ``source == "pytest"`` was written by a test run,
-    never by a real dispatch. State-readers must exclude these from recent-
-    activity views and from any derived success/completion metric.
-    """
-    return str(entry.get("source") or "").strip().lower() == "pytest"
-
-
-_STATUS_PRIORITY: Dict[str, int] = {
-    "done": 0, "success": 0, "completed": 0, "pass": 0,
-    "failed": 1, "failure": 1, "timeout": 1, "blocked": 1,
-    "running": 2, "queued": 2, "requested": 2,
-    "not_configured": 3, "not_executable": 3,
-    "unknown": 9, "": 9, None: 9,  # type: ignore[misc]
-}
+_UNSCOPED_PROJECT = "\x00unscoped"
 
 
 def _infer_next_action(r: Dict[str, Any]) -> str:
@@ -1788,9 +1773,7 @@ def _build_recent_receipts(
     except OSError:
         return []
 
-    best_by_dispatch: Dict[str, Dict[str, Any]] = {}
-    no_dispatch_recs: List[Dict[str, Any]] = []
-
+    receipts: List[Dict[str, Any]] = []
     for line in lines[-2000:]:
         line = line.strip()
         if not line:
@@ -1799,46 +1782,33 @@ def _build_recent_receipts(
             r = json.loads(line)
         except Exception:
             continue
-        # D2: pytest-fixture noise never represents real dispatch work.
-        if _is_pytest_noise_receipt(r):
-            continue
-        # Skip internal bookkeeping events — T0 wants worker completion signals
-        if r.get("event_type") == "state_mutation":
-            continue
-        # Project-id filter: accept matching project OR no project_id (backward compat)
-        pid = (r.get("project_id") or "").strip()
-        if project_id and pid and pid != project_id:
-            continue
-        view: Dict[str, Any] = {
-            "timestamp": r.get("timestamp"),
-            "dispatch_id": r.get("dispatch_id"),
-            "event_type": r.get("event_type") or r.get("event"),
-            "status": r.get("status"),
-            "terminal": r.get("terminal"),
-            "commit_hash": r.get("commit_hash") or r.get("commit"),
-            "pr_id": r.get("pr_id") or r.get("pr"),
-            "report_evidence_path": r.get("report_path") or r.get("evidence"),
-            "next_action": _infer_next_action(r),
-        }
-        did = (view.get("dispatch_id") or "").strip()
-        if not did or did in ("?", "unknown"):
-            no_dispatch_recs.append(view)
-            continue
-        cur_best = best_by_dispatch.get(did)
-        if cur_best is None:
-            best_by_dispatch[did] = view
-            continue
-        new_prio = _STATUS_PRIORITY.get(view.get("status"), 9)
-        cur_prio = _STATUS_PRIORITY.get(cur_best.get("status"), 9)
-        if new_prio < cur_prio:
-            best_by_dispatch[did] = view
-        elif new_prio == cur_prio:
-            new_terminal_known = bool(view.get("terminal") and view.get("terminal") != "unknown")
-            cur_terminal_known = bool(cur_best.get("terminal") and cur_best.get("terminal") != "unknown")
-            if new_terminal_known and not cur_terminal_known:
-                best_by_dispatch[did] = view
+        if isinstance(r, dict):
+            receipts.append(r)
 
-    recs = list(best_by_dispatch.values()) + no_dispatch_recs
+    if not project_id:
+        # No project given: read the ledger unscoped, as before. The outcome
+        # fold keys its foreign-project filter on a concrete id.
+        receipts = [{k: v for k, v in r.items() if k != "project_id"} for r in receipts]
+        project_id = _UNSCOPED_PROJECT
+
+    outcomes = _summarize_outcomes(receipts, project_id=project_id)["outcomes"]
+
+    lines_by_dispatch: Dict[str, List[Dict[str, Any]]] = {}
+    for r in receipts:
+        did = str(r.get("dispatch_id") or "").strip()
+        if (did.lower() in INVALID_DISPATCH_IDS
+                or r.get("event_type") in BOOKKEEPING_EVENT_TYPES
+                or noise_reason(r, project_id) is not None):
+            continue
+        lines_by_dispatch.setdefault(did, []).append(r)
+
+    recs: List[Dict[str, Any]] = []
+    for outcome in outcomes:
+        own = lines_by_dispatch.get(outcome["dispatch_id"])
+        if not own:
+            continue
+        view = _outcome_view(outcome, own)
+        recs.append(view)
     return sorted(
         recs,
         key=lambda x: (
@@ -1847,6 +1817,31 @@ def _build_recent_receipts(
         ),
         reverse=True,
     )[:limit]
+
+
+def _outcome_view(outcome: Dict[str, Any], own: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """One T0 row for a dispatch: the outcome's status, plus the newest known
+    terminal, commit, PR and report path from the dispatch's own lines."""
+    def newest(*keys: str) -> Any:
+        for r in reversed(own):
+            for key in keys:
+                value = r.get(key)
+                if value not in (None, "", "unknown"):
+                    return value
+        return None
+
+    last = own[-1]
+    return {
+        "timestamp": last.get("timestamp"),
+        "dispatch_id": outcome["dispatch_id"],
+        "event_type": last.get("event_type") or last.get("event"),
+        "status": outcome["status"],
+        "terminal": newest("terminal"),
+        "commit_hash": newest("commit_hash", "commit"),
+        "pr_id": newest("pr_id", "pr"),
+        "report_evidence_path": newest("report_path", "evidence"),
+        "next_action": _infer_next_action({"status": outcome["status"], "pr_id": newest("pr_id", "pr")}),
+    }
 
 
 # ---------------------------------------------------------------------------

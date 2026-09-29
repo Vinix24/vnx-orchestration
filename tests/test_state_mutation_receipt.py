@@ -202,7 +202,8 @@ def test_state_mutation_excluded_from_recency_summary(tmp_path: Path) -> None:
     returned_types = [r.get("event_type") for r in result]
     assert "state_mutation" not in returned_types, f"state_mutation leaked into recency summary: {result}"
     assert "task_complete" in returned_types
-    assert "review_gate_request" in returned_types
+    # review_gate_request is bookkeeping too: neither outcome nor evidence.
+    assert "review_gate_request" not in returned_types
 
 
 def test_idempotency_key_differs_for_different_files() -> None:
