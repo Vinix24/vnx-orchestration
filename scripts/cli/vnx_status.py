@@ -147,8 +147,15 @@ def _state_freshness(t0: dict, state_dir: Path) -> dict:
 
     try:
         session_started_at = datetime.fromtimestamp(panes_path.stat().st_mtime, tz=timezone.utc)
-    except OSError:
-        return {"applicable": False, "stale": False}
+    except OSError as exc:
+        # panes.json is there but its mtime cannot be read: freshness is
+        # unmeasured, not fresh. _build_json_output degrades on it.
+        return {
+            "applicable": True,
+            "stale": None,
+            "unmeasured_reason": f"{type(exc).__name__}: {exc}",
+            "generated_at": generated_at,
+        }
 
     stale = gen_dt < session_started_at
     return {
@@ -253,6 +260,13 @@ def _build_json_output(cs: dict, t0: dict, state_dir: Path) -> dict:
         # corruption) -- state built before this session started is a real,
         # measured problem, not an unmeasured one.
         system_health["status"] = worst_status(system_health.get("status", "healthy"), "fail")
+    elif freshness.get("unmeasured_reason"):
+        # Freshness that could not be measured must not read as fresh: the
+        # guard's Check 1 turns this into WAIT.
+        system_health["status"] = worst_status(system_health.get("status", "healthy"), "fail")
+        system_health["degraded_reasons"] = list(system_health.get("degraded_reasons") or []) + [
+            f"state_freshness unmeasured: {freshness['unmeasured_reason']}"
+        ]
 
     return {
         "schema": "vnx_status/1.0",

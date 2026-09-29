@@ -53,7 +53,10 @@ Schema 2.2 change (D5 fabric-state-herstel, live work):
     reason and degrades system_health (``degraded_reasons``).
   - ``queues.pending_count`` counts staged spec bundles
     (``pending/<id>/dispatch-spec.json``) and ``pending/<id>.md`` files, one
-    per id; ``queues.active_count`` is gone.
+    per id; ``queues.active_count`` is gone. A ``pending/`` or
+    ``conflicts/`` directory that exists but cannot be listed is not zero:
+    its count is ``null`` with a ``*_unmeasured_reason`` and it degrades
+    system_health, so the dispatch guard reads WAIT, never GO.
   - t0_index.json (schema ``t0_index/1.1``) drops ``terminals``,
     ``queue.active`` and ``active_dispatches`` for a compact ``live_work``.
     ``terminals`` stays in t0_state.json while headless_dispatch_daemon and
@@ -91,7 +94,7 @@ import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 log = logging.getLogger(__name__)
 
@@ -252,12 +255,14 @@ def _shadow_log(cmp: Any, project_id: str, read_site: str) -> None:
 
 
 def _count_md(directory: Path) -> int:
+    """``.md`` files in ``directory``; 0 when it does not exist.
+
+    Raises OSError when the directory exists but cannot be listed: not
+    measurable is not zero (see _measure_queue_count).
+    """
     if not directory.is_dir():
         return 0
-    try:
-        return sum(1 for f in directory.iterdir() if f.is_file() and f.suffix == ".md")
-    except Exception:
-        return 0
+    return sum(1 for f in directory.iterdir() if f.is_file() and f.suffix == ".md")
 
 
 def _count_pending_dispatches(directory: Path) -> int:
@@ -268,19 +273,47 @@ def _count_pending_dispatches(directory: Path) -> int:
       (provider_dispatch) is not a staged dispatch and does not count.
     - ``pending/<id>.md``: what queue_auto_accept.sh (started by
       vnx_supervisor_simple.sh) moves over from ``queue/``.
+
+    A missing directory is 0: nothing is demonstrably staged there. Raises
+    OSError when the directory exists but cannot be listed.
     """
     if not directory.is_dir():
         return 0
-    try:
-        ids = {
-            entry.stem if entry.is_file() else entry.name
-            for entry in directory.iterdir()
-            if (entry.is_file() and entry.suffix == ".md")
-            or (entry.is_dir() and (entry / "dispatch-spec.json").is_file())
-        }
-    except OSError:
-        return 0
+    ids = {
+        entry.stem if entry.is_file() else entry.name
+        for entry in directory.iterdir()
+        if (entry.is_file() and entry.suffix == ".md")
+        or (entry.is_dir() and (entry / "dispatch-spec.json").is_file())
+    }
     return len(ids)
+
+
+def _measure_queue_count(
+    counter: Callable[[Path], int], directory: Path
+) -> Tuple[Optional[int], Optional[str]]:
+    """``(count, None)``, or ``(None, reason)`` when the directory is unreadable.
+
+    The count feeds dispatch_guard.sh (queues.pending_count /
+    queues.conflict_count). Folding a read error to 0 would read as GO while
+    work may be staged, so an unreadable directory yields no number at all.
+    """
+    try:
+        return counter(directory), None
+    except OSError as exc:
+        log.warning("queue directory %s unreadable: %s", directory, exc)
+        return None, f"{type(exc).__name__}: {exc}"
+
+
+def _queue_degraded_reasons(queues: Dict[str, Any]) -> List[str]:
+    """One system_health reason per queue count that could not be measured."""
+    return [
+        f"queues.{field} unmeasured: {queues[reason_key]}"
+        for field, reason_key in (
+            ("pending_count", "pending_unmeasured_reason"),
+            ("conflict_count", "conflict_unmeasured_reason"),
+        )
+        if queues.get(reason_key)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -544,8 +577,10 @@ def _build_terminals(state_dir: Path) -> Dict[str, Any]:
 def _build_queues(dispatch_dir: Path, state_dir: Path) -> Dict[str, Any]:
     # D5: what is active comes from live_work (DB + occupancy flock), not
     # from a directory the headless door never writes.
-    pending = _count_pending_dispatches(dispatch_dir / "pending")
-    conflict = _count_md(dispatch_dir / "conflicts")
+    pending, pending_reason = _measure_queue_count(
+        _count_pending_dispatches, dispatch_dir / "pending"
+    )
+    conflict, conflict_reason = _measure_queue_count(_count_md, dispatch_dir / "conflicts")
 
     completed_last_hour = 0
     # Phase 6 P3: prefer central receipts when available (derived from state_dir)
@@ -590,11 +625,16 @@ def _build_queues(dispatch_dir: Path, state_dir: Path) -> Dict[str, Any]:
         except OSError as e:
             log.debug("Could not read receipts file %s: %s", receipts_path, e)
 
-    return {
+    queues: Dict[str, Any] = {
         "pending_count": pending,
         "completed_last_hour": completed_last_hour,
         "conflict_count": conflict,
     }
+    if pending_reason:
+        queues["pending_unmeasured_reason"] = pending_reason
+    if conflict_reason:
+        queues["conflict_unmeasured_reason"] = conflict_reason
+    return queues
 
 
 # ---------------------------------------------------------------------------
@@ -3153,8 +3193,9 @@ def build_t0_state(
         state_dir, db_ok, db_health=db_health,
         db_reason=db_reason,
         degraded_reasons=(
-            [f"live_work unavailable: {live_work.get('reason')}"]
-            if live_work.get("read_error") else []
+            ([f"live_work unavailable: {live_work.get('reason')}"]
+             if live_work.get("read_error") else [])
+            + _queue_degraded_reasons(queues)
         ),
     )
 

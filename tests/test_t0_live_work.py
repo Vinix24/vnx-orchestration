@@ -516,3 +516,98 @@ def test_status_sh_active_line_says_why_live_work_is_unavailable(tmp_path):
     })
 
     assert "Active:           unavailable: degraded: database is locked" in out
+
+
+# ---------------------------------------------------------------------------
+# ff5: an unreadable queue directory is not zero (the guard reads these counts)
+# ---------------------------------------------------------------------------
+
+
+def _unreadable(monkeypatch: pytest.MonkeyPatch, target: Path) -> None:
+    """``target`` exists, but listing it raises PermissionError."""
+    real_iterdir = Path.iterdir
+
+    def _iterdir(self: Path):
+        if self == target:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", _iterdir)
+
+
+def _second_project_with_staged(tmp_path: Path, dispatch_id: str) -> tuple[Path, Path]:
+    """Project B: its own store and a readable pending/ holding ``dispatch_id``."""
+    root = tmp_path / "project-b"
+    state_dir = root / "state"
+    state_dir.mkdir(parents=True)
+    dispatch_dir = root / "dispatches"
+    for sub in ("pending", "active", "conflicts"):
+        (dispatch_dir / sub).mkdir(parents=True)
+    bundle = dispatch_dir / "pending" / dispatch_id
+    bundle.mkdir()
+    (bundle / "dispatch-spec.json").write_text("{}", encoding="utf-8")
+    return state_dir, dispatch_dir
+
+
+def test_unreadable_pending_dir_is_not_zero_and_degrades_health(tmp_path, monkeypatch):
+    state_dir, dispatch_dir = _env(tmp_path, monkeypatch)
+    staged = dispatch_dir / "pending" / "20260929-shared"
+    staged.mkdir()
+    (staged / "dispatch-spec.json").write_text("{}", encoding="utf-8")
+    b_state, b_dispatch = _second_project_with_staged(tmp_path, "20260929-shared")
+    monkeypatch.setattr(bts, "_init_and_check_db", lambda _sd: True)
+    monkeypatch.setattr(bts, "_build_terminals", lambda _sd: {})
+    _unreadable(monkeypatch, dispatch_dir / "pending")
+
+    state = bts.build_t0_state(state_dir, dispatch_dir)
+
+    queues = state["queues"]
+    assert queues["pending_count"] != 0, "an unreadable pending/ must not read as empty"
+    assert queues["pending_count"] is None
+    assert "PermissionError" in queues["pending_unmeasured_reason"]
+    assert state["system_health"]["status"] in ("degraded", "failed")
+    assert any(
+        r.startswith("queues.pending_count unmeasured")
+        for r in state["system_health"].get("degraded_reasons", [])
+    )
+    # Project B (colliding id, readable dir) keeps its own measured count.
+    monkeypatch.setenv("VNX_PROJECT_ID", PROJECT_B)
+    queues_b = bts._build_queues(b_dispatch, b_state)
+    assert queues_b["pending_count"] == 1
+    assert "pending_unmeasured_reason" not in queues_b
+
+
+def test_missing_pending_dir_stays_zero(tmp_path, monkeypatch):
+    state_dir, dispatch_dir = _env(tmp_path, monkeypatch)
+    (dispatch_dir / "pending").rmdir()
+    b_state, b_dispatch = _second_project_with_staged(tmp_path, "20260929-shared")
+
+    queues = bts._build_queues(dispatch_dir, state_dir)
+
+    assert queues["pending_count"] == 0
+    assert "pending_unmeasured_reason" not in queues
+    assert bts._build_queues(b_dispatch, b_state)["pending_count"] == 1
+
+
+def test_unreadable_conflicts_dir_is_not_zero_and_degrades_health(tmp_path, monkeypatch):
+    state_dir, dispatch_dir = _env(tmp_path, monkeypatch)
+    (dispatch_dir / "conflicts" / "20260929-shared.md").write_text("x", encoding="utf-8")
+    b_state, b_dispatch = _second_project_with_staged(tmp_path, "20260929-shared")
+    monkeypatch.setattr(bts, "_init_and_check_db", lambda _sd: True)
+    monkeypatch.setattr(bts, "_build_terminals", lambda _sd: {})
+    _unreadable(monkeypatch, dispatch_dir / "conflicts")
+
+    state = bts.build_t0_state(state_dir, dispatch_dir)
+
+    queues = state["queues"]
+    assert queues["conflict_count"] != 0, "an unreadable conflicts/ must not read as empty"
+    assert queues["conflict_count"] is None
+    assert "PermissionError" in queues["conflict_unmeasured_reason"]
+    assert state["system_health"]["status"] in ("degraded", "failed")
+    assert any(
+        r.startswith("queues.conflict_count unmeasured")
+        for r in state["system_health"].get("degraded_reasons", [])
+    )
+    queues_b = bts._build_queues(b_dispatch, b_state)
+    assert queues_b["conflict_count"] == 0
+    assert "conflict_unmeasured_reason" not in queues_b

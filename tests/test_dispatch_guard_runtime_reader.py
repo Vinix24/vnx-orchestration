@@ -232,3 +232,108 @@ class TestGuardReadsRuntimeState:
 
     def test_both_skill_copies_are_identical(self):
         assert CLAUDE_GUARD.read_text(encoding="utf-8") == GUARD.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# ff5: a queue directory that cannot be listed must never produce GO.
+# The state is built by the real build_t0_state and read by the real guard.
+# ---------------------------------------------------------------------------
+
+import sqlite3  # noqa: E402
+import sys  # noqa: E402
+
+for _p in (str(ROOT / "scripts"), str(ROOT / "scripts" / "lib"), str(ROOT / "tests")):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+import build_t0_state as bts  # noqa: E402
+from fixtures.dispatches_schema_fixture import dispatches_ddl  # noqa: E402
+
+_PROJECT_A = "fshff5-alpha"
+_PROJECT_B = "fshff5-bravo"
+
+
+def _built_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, project_id: str,
+                 unreadable: str | None = None, missing: str | None = None) -> dict:
+    """build_t0_state for an idle, otherwise healthy store of ``project_id``.
+
+    Each project gets its own store under ``tmp_path/<project_id>`` with the
+    multi-tenant dispatches schema; ``unreadable`` names the dispatches/ subdirectory
+    whose listing raises PermissionError, ``missing`` one that is removed.
+    """
+    root = tmp_path / project_id
+    state_dir = root / "state"
+    state_dir.mkdir(parents=True)
+    (state_dir / "t0_receipts.ndjson").write_text("", encoding="utf-8")
+    dispatch_dir = root / "dispatches"
+    for sub in ("pending", "active", "conflicts"):
+        (dispatch_dir / sub).mkdir(parents=True)
+    if missing:
+        (dispatch_dir / missing).rmdir()
+    with sqlite3.connect(str(state_dir / "runtime_coordination.db")) as conn:
+        conn.execute(dispatches_ddl())
+        conn.execute("ALTER TABLE dispatches ADD COLUMN claimed_at TEXT")
+    monkeypatch.setenv("VNX_PROJECT_ID", project_id)
+    monkeypatch.setattr(bts, "_build_pr_queue_section", lambda _sd: {"open_prs": []})
+    monkeypatch.setattr(bts, "_init_and_check_db", lambda _sd: True)
+    monkeypatch.setattr(bts, "_build_terminals", lambda _sd: {})
+
+    real_health = bts._build_system_health
+
+    def _isolated_health(sd, db_initialized, **kwargs):
+        # Real process/launchd/beacon state of this machine is not under test.
+        kwargs["daemon_liveness"] = {"overall": "ok"}
+        kwargs["launchd_liveness"] = {"overall": "ok", "jobs": {}}
+        kwargs["expected_beacon_components"] = ()
+        return real_health(sd, db_initialized, **kwargs)
+
+    monkeypatch.setattr(bts, "_build_system_health", _isolated_health)
+
+    target = dispatch_dir / unreadable if unreadable else None
+    real_iterdir = Path.iterdir
+
+    def _iterdir(self: Path):
+        if target is not None and self == target:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", _iterdir)
+    try:
+        return bts.build_t0_state(state_dir, dispatch_dir)
+    finally:
+        monkeypatch.setattr(Path, "iterdir", real_iterdir)
+
+
+class TestGuardOnUnreadableQueueDirs:
+    def test_readable_empty_queues_are_go(self, tmp_path, monkeypatch):
+        state = _built_state(tmp_path, monkeypatch, _PROJECT_A)
+        result = _run_guard(tmp_path / "guard", state)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "GO: safe to dispatch" in result.stdout
+
+    def test_unreadable_pending_dir_is_never_go(self, tmp_path, monkeypatch):
+        state = _built_state(tmp_path, monkeypatch, _PROJECT_A, unreadable="pending")
+        result = _run_guard(tmp_path / "guard", state, "json")
+        assert result.returncode != 0, f"unreadable pending/ gave GO: {result.stdout}"
+        payload = json.loads(result.stdout)
+        assert payload["decision"] == "WAIT"
+        assert payload["queues"]["pending_count"] is None
+        # Project B, same staged id, readable: its own count is untouched.
+        state_b = _built_state(tmp_path, monkeypatch, _PROJECT_B)
+        assert state_b["queues"]["pending_count"] == 0
+        assert "degraded_reasons" not in state_b["system_health"]
+
+    def test_unreadable_conflicts_dir_is_never_go(self, tmp_path, monkeypatch):
+        state = _built_state(tmp_path, monkeypatch, _PROJECT_A, unreadable="conflicts")
+        result = _run_guard(tmp_path / "guard", state, "json")
+        assert result.returncode != 0, f"unreadable conflicts/ gave GO: {result.stdout}"
+        assert json.loads(result.stdout)["decision"] == "WAIT"
+        state_b = _built_state(tmp_path, monkeypatch, _PROJECT_B)
+        assert state_b["queues"]["conflict_count"] == 0
+
+    def test_missing_pending_dir_stays_zero_and_go(self, tmp_path, monkeypatch):
+        state = _built_state(tmp_path, monkeypatch, _PROJECT_A, missing="pending")
+        assert state["queues"]["pending_count"] == 0
+        assert "pending_unmeasured_reason" not in state["queues"]
+        result = _run_guard(tmp_path / "guard", state)
+        assert result.returncode == 0, result.stdout + result.stderr
