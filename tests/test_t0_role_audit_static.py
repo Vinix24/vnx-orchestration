@@ -660,7 +660,7 @@ main() {
     dispatch)
       echo dispatch ;;
     objective)
-      echo objective ;;
+      "$VNX_PYTHON" "$VNX_HOME/scripts/planning_cli.py" objective "$@" ;;
   esac
 }
 """
@@ -825,6 +825,125 @@ class TestStateSources:
         r = _run_static(root)
         assert r.returncode != 0
         assert "MANIFEST-BAD-LINE" in r.stdout
+
+
+class TestSourcesAuditNeverSilent:
+    """An audit that could not measure is red, not clean (codex ff1, point 1)."""
+
+    def test_auditor_exiting_nonzero_without_output_is_a_finding(self, tmp_path):
+        root = _make_fabric(tmp_path)
+        assert _run_static(root).returncode == 0
+        (root / "scripts" / "lib" / "t0_role_sources_audit.py").write_text("import sys\nsys.exit(3)\n")
+        r = _run_static(root)
+        assert r.returncode != 0, r.stdout
+        assert "SOURCES-AUDIT-FAILED: exit 3" in r.stdout
+
+    def test_auditor_crashing_with_traceback_is_a_finding(self, tmp_path):
+        root = _make_fabric(tmp_path)
+        (root / "scripts" / "lib" / "t0_role_sources_audit.py").write_text("raise RuntimeError('boom')\n")
+        r = _run_static(root)
+        assert r.returncode != 0
+        assert "SOURCES-AUDIT-FAILED: exit 1" in r.stdout
+
+    def test_missing_auditor_script_is_a_finding(self, tmp_path):
+        root = _make_fabric(tmp_path)
+        (root / "scripts" / "lib" / "t0_role_sources_audit.py").unlink()
+        r = _run_static(root)
+        assert r.returncode != 0
+        assert "SOURCES-AUDIT-FAILED" in r.stdout and "does not exist" in r.stdout
+
+    def test_normal_findings_do_not_add_a_failure_line(self, tmp_path):
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\nThen `vnx teleport`.\n")
+        r = _run_static(root)
+        assert r.returncode != 0
+        assert "SOURCES-AUDIT-FAILED" not in r.stdout
+
+
+class TestSubcommandScopedPerGroup:
+    """`vnx <group> <sub>` is checked against the file that handles the group."""
+
+    def test_word_defined_by_another_command_file_does_not_satisfy_the_group(self, tmp_path):
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\nThen `vnx objective vaporize`.\n")
+        (root / "scripts" / "commands").mkdir()
+        (root / "scripts" / "commands" / "other.sh").write_text('case "$1" in vaporize) echo x ;; esac\n')
+        (root / "scripts" / "elsewhere_cli.py").write_text('sub.add_parser("vaporize")\n')
+        # A second project whose command file also defines it must not leak in.
+        other = _make_fabric(tmp_path, name="other")
+        (other / "scripts" / "planning_cli.py").write_text('sub.add_parser("vaporize")\n')
+        r = _run_static(root)
+        assert r.returncode != 0, r.stdout
+        assert "vnx objective vaporize" in r.stdout
+
+    def test_word_defined_by_the_group_handler_is_clean(self, tmp_path):
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\nThen `vnx objective show`.\n")
+        assert _run_static(root).returncode == 0
+
+    def test_shell_function_group_reads_its_own_function_body(self, tmp_path):
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\nThen `vnx role sync` and `vnx role explode`.\n")
+        (root / "bin" / "vnx").write_text(
+            FIXTURE_BIN_VNX.replace("  esac\n}", "    role)\n      cmd_role \"$@\" ;;\n  esac\n}")
+            + 'cmd_role() {\n  if [ "$1" = "sync" ]; then echo sync; fi\n}\n'
+        )
+        r = _run_static(root)
+        assert r.returncode != 0
+        assert "vnx role explode" in r.stdout and "vnx role sync" not in r.stdout
+
+
+class TestDocStateChecked:
+    """DISPATCH_RULES state paths meet the writers manifest too (point 3)."""
+
+    def _with_doc(self, tmp_path, text):
+        root = _make_fabric(tmp_path)
+        doc = root / "docs" / "core"
+        doc.mkdir(parents=True)
+        (doc / "DISPATCH_RULES.md").write_text(text)
+        return root
+
+    def test_doc_state_path_without_manifest_line_is_unwritten(self, tmp_path):
+        root = self._with_doc(tmp_path, "Read `.vnx-data/state/bestaat_niet.json`.\n")
+        r = _run_static(root)
+        assert r.returncode != 0
+        assert "STATE-UNWRITTEN" in r.stdout and "bestaat_niet.json" in r.stdout
+        assert "DISPATCH_RULES.md" in r.stdout
+
+    def test_doc_state_path_with_manifest_line_is_clean(self, tmp_path):
+        root = self._with_doc(tmp_path, "Read `.vnx-data/state/digest.json`.\n")
+        assert _run_static(root).returncode == 0
+
+    def test_doc_state_writer_gone_is_flagged_once_when_role_names_it_too(self, tmp_path):
+        root = self._with_doc(tmp_path, "Read `.vnx-data/state/digest.json`.\n")
+        (root / "scripts" / "open_items_manager.py").unlink()
+        r = _run_static(root)
+        assert r.returncode != 0
+        assert r.stdout.count("STATE-WRITER-GONE") == 1
+
+
+class TestFencedCommands:
+    """Command lines inside fenced blocks are audited; prose is not (point 4)."""
+
+    def test_fenced_unknown_command_is_flagged(self, tmp_path):
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\n```bash\nvnx bestaatniet\n```\n")
+        r = _run_static(root)
+        assert r.returncode != 0
+        assert "vnx bestaatniet" in r.stdout
+
+    def test_fenced_unknown_subcommand_after_prompt_marker_is_flagged(self, tmp_path):
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\n```\n  $ vnx objective vaporize\n```\n")
+        r = _run_static(root)
+        assert r.returncode != 0
+        assert "vnx objective vaporize" in r.stdout
+
+    def test_fenced_known_command_is_clean(self, tmp_path):
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\n```bash\nvnx objective show\nvnx dispatch\n```\n")
+        assert _run_static(root).returncode == 0
+
+    def test_prose_line_starting_with_vnx_outside_a_fence_is_ignored(self, tmp_path):
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\nvnx bestaatniet is prose here.\n")
+        assert _run_static(root).returncode == 0
+
+    def test_fence_closes_so_later_prose_is_ignored(self, tmp_path):
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\n```\nvnx dispatch\n```\nvnx bestaatniet\n")
+        assert _run_static(root).returncode == 0
 
 
 class TestConsumerProject:

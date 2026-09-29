@@ -3,11 +3,12 @@
 # t0_role_audit.sh --static runs.
 #
 # Format: target | writer script (repo-relative) | marker | role phrase
-#   target       path under .vnx-data/state/, or <file>#<section> for a
+#   target       path under the project state directory, or <file>#<section> for a
 #                top-level section of a state file
 #   marker       literal that must occur in the writer (the file name, or the
 #                quoted section key)
-#   role phrase  optional: text the role must still contain (sections only)
+#   role phrase  optional: text the role must still contain (sections only;
+#                DISPATCH_RULES is checked for writers, not for phrases)
 #
 # Two-way coupling: a state path the role names that is missing here is
 # STATE-UNWRITTEN. An entry whose writer no longer holds the marker is

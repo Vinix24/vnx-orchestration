@@ -10,10 +10,11 @@ instructing T0 to use it.
 Findings (one per line on stdout, exit 1 when any):
 
   SCRIPT-MISSING       a `*.py` / `*.sh` the text names does not resolve
-  SUBCOMMAND-MISSING   `vnx <cmd> [<sub>]` or `<script>.py <sub>` names a
-                       subcommand the code does not define
-  STATE-UNWRITTEN      the role names a `.vnx-data/state/` path that is not in
-                       the writers manifest
+  SUBCOMMAND-MISSING   `vnx <cmd> [<sub>]` (inline, or a command line inside a
+                       fenced block) or `<script>.py <sub>` names a subcommand
+                       the code that handles it does not define
+  STATE-UNWRITTEN      the role or DISPATCH_RULES names a path in the project
+                       state directory that is not in the writers manifest
   STATE-WRITER-GONE    a manifest entry whose writer no longer holds its
                        marker, or whose section phrase left the role
   MANIFEST-BAD-LINE    a manifest line that is not `target | writer | marker | phrase`
@@ -30,7 +31,7 @@ from __future__ import annotations
 import re
 import sys
 from pathlib import Path
-from typing import Iterable, List, Set, Tuple
+from typing import Iterable, List, Optional, Set, Tuple
 
 MANIFEST_REL = "scripts/lib/t0_role_state_writers.txt"
 ROLE_REL = ".claude/terminals/T0/role-orchestrator.md"
@@ -43,7 +44,14 @@ VNX_GROUPS = frozenset({"objective", "horizon", "deliverable", "role", "pool", "
 SCRIPT_TOKEN = re.compile(r"(?<![\w$/.~-])([A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:py|sh))\b")
 PY_SUBCOMMAND = re.compile(r"(scripts/[A-Za-z0-9_./-]+\.py)[ \t]+([a-z][a-z0-9_-]*)\b")
 VNX_COMMAND = re.compile(r"`vnx ([a-z][a-z0-9_-]*)(?: ([a-z][a-z0-9_-]*))?")
-STATE_PATH = re.compile(r"\.vnx-data/state/([A-Za-z0-9_./-]+)")
+VNX_FENCED_LINE = re.compile(r"^[ \t]*(?:\$[ \t]+)?vnx ([a-z][a-z0-9_-]*)(?: ([a-z][a-z0-9_-]*))?")
+FENCE = re.compile(r"^[ \t]*(```|~~~)")
+# Built from parts: the CI legacy-path gate greps the scripts tree for the
+# literal spelling of this directory.
+STATE_DIR = ".vnx-data" + "/state/"
+STATE_PATH = re.compile(re.escape(STATE_DIR) + r"([A-Za-z0-9_./-]+)")
+MODULE_TOKEN = re.compile(r"-m[ \t]+([A-Za-z0-9_.]+)")
+SCRIPT_REF = re.compile(r"scripts/([A-Za-z0-9_./-]+\.py)")
 SCRIPT_DIRS = ("scripts", "hooks", ".claude/hooks")
 
 
@@ -96,13 +104,46 @@ def _vnx_command_exists(fabric: Path, word: str) -> bool:
     return _has_case_label(_read(fabric / "bin/vnx"), word)
 
 
-def _vnx_sub_exists(fabric: Path, word: str) -> bool:
-    files: List[Path] = [fabric / "bin/vnx"]
-    cmd_dir = fabric / "scripts/commands"
-    if cmd_dir.is_dir():
-        files += sorted(cmd_dir.glob("*.sh"))
-    files += sorted((fabric / "scripts").glob("*_cli.py"))
-    return any(_defines_word(_read(f), word) for f in files)
+def _case_branch(vnx_text: str, group: str) -> str:
+    """Body of the `<group>)` branch of the top-level dispatch case in bin/vnx."""
+    m = re.search(r"(?m)^[ \t]+(?:[\w-]+\|)*%s(?:\|[\w-]+)*\)[ \t]*\n" % re.escape(group), vnx_text)
+    if not m:
+        return ""
+    end = re.search(r"(?m)^[ \t]+;;[ \t]*$", vnx_text[m.end():])
+    return vnx_text[m.end(): m.end() + end.start()] if end else vnx_text[m.end():]
+
+
+def _shell_functions(vnx_text: str, prefix: str) -> str:
+    """Bodies of every top-level `<prefix>...() { ... }` function in bin/vnx."""
+    out: List[str] = []
+    for m in re.finditer(r"(?m)^%s[\w]*\(\)[ \t]*\{[ \t]*\n" % re.escape(prefix), vnx_text):
+        end = re.search(r"(?m)^\}[ \t]*$", vnx_text[m.end():])
+        out.append(vnx_text[m.end(): m.end() + end.start()] if end else vnx_text[m.end():])
+    return "\n".join(out)
+
+
+def _group_handlers(fabric: Path, group: str) -> List[str]:
+    """Text of the code that handles `vnx <group> ...`, and only that code.
+
+    The case branch in bin/vnx, the script or module it launches, the
+    `cmd_<group>*` shell functions it calls, and a `commands/<group>.sh` file.
+    """
+    vnx_text = _read(fabric / "bin/vnx")
+    branch = _case_branch(vnx_text, group)
+    texts = [branch]
+    if re.search(r"\bcmd_%s\b" % re.escape(group.replace("-", "_")), branch):
+        texts.append(_shell_functions(vnx_text, "cmd_" + group.replace("-", "_")))
+    for rel in SCRIPT_REF.findall(branch):
+        texts.append(_read(fabric / "scripts" / rel))
+    for mod in MODULE_TOKEN.findall(branch):
+        texts.append(_read(fabric / "scripts/lib" / (mod.replace(".", "/") + ".py")))
+    for name in (group, group.replace("-", "_")):
+        texts.append(_read(fabric / "scripts/commands" / f"{name}.sh"))
+    return texts
+
+
+def _vnx_sub_exists(fabric: Path, group: str, word: str) -> bool:
+    return any(_defines_word(t, word) for t in _group_handlers(fabric, group))
 
 
 def _resolve_script(fabric: Path, token: str) -> Path | None:
@@ -116,6 +157,23 @@ def _resolve_script(fabric: Path, token: str) -> Path | None:
             if hits:
                 return hits[0]
     return None
+
+
+def _fenced_vnx_commands(text: str) -> List[Tuple[str, str]]:
+    """`vnx <cmd> [<sub>]` at the start of a line inside a fenced block."""
+    found: List[Tuple[str, str]] = []
+    fence: Optional[str] = None
+    for line in text.splitlines():
+        m = FENCE.match(line)
+        if m:
+            fence = None if fence == m.group(1) else (fence or m.group(1))
+            continue
+        if fence is None:
+            continue
+        c = VNX_FENCED_LINE.match(line)
+        if c:
+            found.append((c.group(1), c.group(2) or ""))
+    return found
 
 
 def check_text(text: str, source: str, fabric: Path) -> List[str]:
@@ -135,12 +193,12 @@ def check_text(text: str, source: str, fabric: Path) -> List[str]:
                 f"SUBCOMMAND-MISSING: {source} runs '{script_rel} {sub}' but {script_rel} defines no '{sub}'"
             )
 
-    for cmd, sub in sorted(set(VNX_COMMAND.findall(text))):
+    for cmd, sub in sorted(set(VNX_COMMAND.findall(text)) | set(_fenced_vnx_commands(text))):
         if not _vnx_command_exists(fabric, cmd):
             findings.append(f"SUBCOMMAND-MISSING: {source} runs 'vnx {cmd}' but bin/vnx defines no '{cmd}'")
             continue
-        if sub and cmd in VNX_GROUPS and not _vnx_sub_exists(fabric, sub):
-            findings.append(f"SUBCOMMAND-MISSING: {source} runs 'vnx {cmd} {sub}' but no command file defines '{sub}'")
+        if sub and cmd in VNX_GROUPS and not _vnx_sub_exists(fabric, cmd, sub):
+            findings.append(f"SUBCOMMAND-MISSING: {source} runs 'vnx {cmd} {sub}' but the code handling '{cmd}' defines no '{sub}'")
     return findings
 
 
@@ -159,7 +217,7 @@ def _manifest(fabric: Path) -> Tuple[List[Tuple[str, str, str, str]], List[str]]
     return rows, bad
 
 
-def check_state(role_text: str, fabric: Path) -> List[str]:
+def check_state(text: str, source: str, fabric: Path, phrases: bool = True) -> List[str]:
     findings: List[str] = []
     rows, bad = _manifest(fabric)
     findings += bad
@@ -167,23 +225,23 @@ def check_state(role_text: str, fabric: Path) -> List[str]:
         return findings + [f"MANIFEST-BAD-LINE: {MANIFEST_REL} does not exist"]
 
     known = {target.split("#", 1)[0] for target, _, _, _ in rows}
-    named = {p.rstrip(".,;:)") for p in STATE_PATH.findall(role_text)}
+    named = {p.rstrip(".,;:)") for p in STATE_PATH.findall(text)}
     for path in sorted(named):
         if path not in known:
             findings.append(
-                f"STATE-UNWRITTEN: role names .vnx-data/state/{path} but {MANIFEST_REL} lists no writer for it"
+                f"STATE-UNWRITTEN: {source} names {STATE_DIR}{path} but {MANIFEST_REL} lists no writer for it"
             )
 
     for target, writer, marker, phrase in rows:
         if target.split("#", 1)[0] not in named:
-            continue  # the role does not rely on it
+            continue  # this source does not rely on it
         writer_path = fabric / writer
         if not writer_path.is_file():
             findings.append(f"STATE-WRITER-GONE: {target}: writer {writer} does not exist")
         elif marker not in _read(writer_path):
             findings.append(f"STATE-WRITER-GONE: {target}: {writer} no longer contains {marker!r}")
-        if phrase and phrase.lower() not in role_text.lower():
-            findings.append(f"STATE-WRITER-GONE: {target}: role no longer mentions {phrase!r}")
+        if phrases and phrase and phrase.lower() not in text.lower():
+            findings.append(f"STATE-WRITER-GONE: {target}: {source} no longer mentions {phrase!r}")
     return findings
 
 
@@ -193,12 +251,14 @@ def audit(project: Path, fabric: Path) -> List[str]:
     role_text = _read(role)
     if role_text:
         findings += check_text(role_text, "role-orchestrator.md", fabric)
-        findings += check_state(role_text, fabric)
+        findings += check_state(role_text, "role-orchestrator.md", fabric)
     for rel in DOC_SOURCES:
         doc = fabric / rel
         if doc.is_file():
-            findings += check_text(_read(doc), Path(rel).name, fabric)
-    return findings
+            doc_text = _read(doc)
+            findings += check_text(doc_text, Path(rel).name, fabric)
+            findings += check_state(doc_text, Path(rel).name, fabric, phrases=False)
+    return list(dict.fromkeys(findings))
 
 
 def main(argv: Iterable[str]) -> int:

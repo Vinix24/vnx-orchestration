@@ -204,6 +204,11 @@ _t0_static_hook_injects_skill() {
 #                        the role (and DISPATCH_RULES) name a script,
 #                        subcommand or state file the repo no longer has or
 #                        writes. See scripts/lib/t0_role_sources_audit.py.
+#   SOURCES-AUDIT-FAILED — the sources audit could not run or crashed (no
+#                        python3, no auditor script, exit >1 or exit 1 with
+#                        no finding). An audit that could not measure is red.
+#   STATIC-CHECK-FAILED — this static check itself exited non-zero without
+#                        printing a finding.
 #   PLAYBOOK-MECHANISM-GAP — AGENTS.md/GEMINI.md (the codex/gemini T0
 #                        surfaces `vnx role sync` mirrors the role into) carry
 #                        the role text, but neither provider has a
@@ -291,13 +296,27 @@ _t0_static_check() {
   # Sources the role and DISPATCH_RULES name: scripts, subcommands, state files.
   # A consumer project has no scripts/ of its own, so it is judged against the
   # fabric this script belongs to.
-  local fabric_root="$root" sources_out
+  local fabric_root="$root" sources_out sources_rc=0 sources_script
   [ -f "$fabric_root/bin/vnx" ] || fabric_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-  if command -v python3 >/dev/null 2>&1 && [ -f "$fabric_root/scripts/lib/t0_role_sources_audit.py" ]; then
-    sources_out="$(python3 "$fabric_root/scripts/lib/t0_role_sources_audit.py" "$root" "$fabric_root")"
+  sources_script="$fabric_root/scripts/lib/t0_role_sources_audit.py"
+  # An audit that could not measure is a finding, never a silent skip: a
+  # missing python3, a missing auditor or a crashed auditor must not read as
+  # "clean". Exit 1 with output is the auditor's normal "findings" answer.
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "SOURCES-AUDIT-FAILED: python3 not found, the sources the role names could not be checked"
+    findings=$((findings + 1))
+  elif [ ! -f "$sources_script" ]; then
+    echo "SOURCES-AUDIT-FAILED: $sources_script does not exist, the sources the role names could not be checked"
+    findings=$((findings + 1))
+  else
+    sources_out="$(python3 "$sources_script" "$root" "$fabric_root")" || sources_rc=$?
     if [ -n "$sources_out" ]; then
       printf '%s\n' "$sources_out"
       findings=$((findings + $(printf '%s\n' "$sources_out" | wc -l)))
+    fi
+    if [ "$sources_rc" -gt 1 ] || { [ "$sources_rc" -ne 0 ] && [ -z "$sources_out" ]; }; then
+      echo "SOURCES-AUDIT-FAILED: exit $sources_rc from $sources_script, the sources the role names could not be checked"
+      findings=$((findings + 1))
     fi
   fi
 
@@ -350,7 +369,11 @@ main() {
       static_root="$(git rev-parse --show-toplevel 2>/dev/null)" || static_root="$(pwd)"
     fi
     local static_output
-    static_output="$(_t0_static_check "$static_root")"
+    local static_rc=0
+    static_output="$(_t0_static_check "$static_root")" || static_rc=$?
+    if [ -z "$static_output" ] && [ "$static_rc" -ne 0 ]; then
+      static_output="STATIC-CHECK-FAILED: the static check exited $static_rc without a finding, so nothing was measured"
+    fi
     if [ -z "$static_output" ]; then
       echo "(clean — no role<->skill invocability drift found in $static_root)"
       return 0
@@ -410,7 +433,11 @@ main() {
     _t0_audit_row "$(basename "$project_root")" "T0" "$loaded" "$cli" "$pane_path"
 
     local static_output_live
-    static_output_live="$(_t0_static_check "$project_root")"
+    local static_live_rc=0
+    static_output_live="$(_t0_static_check "$project_root")" || static_live_rc=$?
+    if [ -z "$static_output_live" ] && [ "$static_live_rc" -ne 0 ]; then
+      static_output_live="STATIC-CHECK-FAILED: the static check exited $static_live_rc without a finding, so nothing was measured"
+    fi
     if [ -n "$static_output_live" ]; then
       echo "  [static] role<->skill invocability drift:"
       printf '%s\n' "$static_output_live" | sed 's/^/    /'
