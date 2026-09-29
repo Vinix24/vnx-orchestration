@@ -645,5 +645,707 @@ class TestRepoSelfAudit:
             assert "t0-orchestrator" in out
 
 
+# ---------------------------------------------------------------------------
+# Sources the role names: scripts, subcommands, state files (fsh D10).
+#
+# Fixture fabric = a tmp project that carries bin/vnx, scripts/ and the writers
+# manifest, so the audit judges the role against THAT tree. ADR-007 does not
+# apply: the audit reads no central DB and creates no table.
+# ---------------------------------------------------------------------------
+
+FIXTURE_BIN_VNX = """\
+#!/usr/bin/env bash
+main() {
+  case "$1" in
+    dispatch)
+      echo dispatch ;;
+    objective)
+      "$VNX_PYTHON" "$VNX_HOME/scripts/planning_cli.py" objective "$@" ;;
+  esac
+}
+"""
+
+FIXTURE_MANIFEST = """\
+# fixture manifest
+t0_state.json | scripts/build_t0_state.py | t0_state.json |
+t0_state.json#open_items | scripts/build_t0_state.py | "open_items": | open items
+digest.json | scripts/open_items_manager.py | digest.json |
+"""
+
+FIXTURE_ROLE = """\
+# T0
+
+Read `.vnx-data/state/t0_state.json` for terminals and open items.
+
+```bash
+python3 scripts/receipt_query.py pull --json
+python3 scripts/open_items_manager.py digest
+vnx dispatch
+vnx objective list
+```
+
+Also `.vnx-data/state/digest.json`.
+"""
+
+
+# The planning CLI as bin/vnx runs it: `planning_cli.py objective ...` and
+# `planning_cli.py deliverable ...` are two argparse domains of one script.
+FIXTURE_PLANNING_CLI = """\
+import argparse
+
+
+def build_parser():
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="domain")
+    obj = sub.add_parser("objective", aliases=["horizon"])
+    obj_sub = obj.add_subparsers(dest="action")
+    obj_sub.add_parser("list")
+    obj_sub.add_parser("show")
+    obj_sub.add_parser("reconcile")
+    dlv = sub.add_parser("deliverable")
+    dlv_sub = dlv.add_subparsers(dest="action")
+    dlv_sub.add_parser("add")
+    return parser
+"""
+
+
+def _argparse_script(*subcommands: str) -> str:
+    lines = [
+        "import argparse",
+        "parser = argparse.ArgumentParser()",
+        'sub = parser.add_subparsers(dest="cmd")',
+    ]
+    lines += [f'sub.add_parser("{name}")' for name in subcommands]
+    return "\n".join(lines) + "\n"
+
+
+def _make_fabric(tmp_path: Path, role: str = FIXTURE_ROLE, name: str = "fabric") -> Path:
+    root = _make_project(tmp_path, name)
+    (root / "bin").mkdir()
+    (root / "bin" / "vnx").write_text(FIXTURE_BIN_VNX)
+    scripts = root / "scripts"
+    (scripts / "lib").mkdir(parents=True)
+    (scripts / "planning_cli.py").write_text(FIXTURE_PLANNING_CLI)
+    (scripts / "receipt_query.py").write_text(_argparse_script("pull", "digest"))
+    (scripts / "open_items_manager.py").write_text('OUT = "digest.json"\n' + _argparse_script("digest"))
+    (scripts / "build_t0_state.py").write_text('OUT = "t0_state.json"\nstate = {"open_items": 1}\n"open_items": 1,\n')
+    (scripts / "lib" / "t0_role_state_writers.txt").write_text(FIXTURE_MANIFEST)
+    # The audit script under test judges a fixture through its own copy of the auditor.
+    (scripts / "lib" / "t0_role_sources_audit.py").write_text(
+        (REPO / "scripts" / "lib" / "t0_role_sources_audit.py").read_text()
+    )
+    t0 = root / ".claude" / "terminals" / "T0"
+    (t0 / "CLAUDE.md").write_text("@role-orchestrator.md\n")
+    (t0 / "role-orchestrator.md").write_text(role)
+    return root
+
+
+class TestRoleSourcesHealthy:
+    def test_fixture_role_naming_only_real_sources_is_clean(self, tmp_path):
+        root = _make_fabric(tmp_path)
+        r = _run_static(root)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "clean" in r.stdout.lower()
+
+    def test_repo_role_names_only_sources_the_repo_has(self):
+        """The shipped role is green at merge of D10."""
+        r = _run_static(REPO)
+        out = r.stdout + r.stderr
+        for code in ("SCRIPT-MISSING", "SCRIPT-OUTSIDE-FABRIC", "SUBCOMMAND-MISSING", "STATE-UNWRITTEN", "STATE-WRITER-GONE"):
+            assert code not in out, out
+
+
+class TestScriptMissing:
+    def test_role_naming_nonexistent_script_is_flagged(self, tmp_path):
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\nRun `python3 scripts/ghost_tool.py --now`.\n")
+        r = _run_static(root)
+        assert r.returncode != 0
+        assert "SCRIPT-MISSING" in r.stdout
+        assert "scripts/ghost_tool.py" in r.stdout
+
+    def test_bare_script_name_resolves_anywhere_under_scripts(self, tmp_path):
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\nSee `t0_role_sources_audit.py`.\n")
+        r = _run_static(root)
+        assert r.returncode == 0, r.stdout
+
+    def test_deleting_a_script_the_role_names_turns_the_audit_red(self, tmp_path):
+        root = _make_fabric(tmp_path)
+        assert _run_static(root).returncode == 0
+        (root / "scripts" / "receipt_query.py").unlink()
+        r = _run_static(root)
+        assert r.returncode != 0
+        assert "SCRIPT-MISSING" in r.stdout and "receipt_query.py" in r.stdout
+
+    def test_docs_source_is_audited_too(self, tmp_path):
+        root = _make_fabric(tmp_path)
+        docs = root / "docs" / "core"
+        docs.mkdir(parents=True)
+        (docs / "DISPATCH_RULES.md").write_text("Run `python3 scripts/gone_script.py pull`.\n")
+        r = _run_static(root)
+        assert r.returncode != 0
+        assert "SCRIPT-MISSING" in r.stdout and "gone_script.py" in r.stdout
+        assert "DISPATCH_RULES.md" in r.stdout
+
+
+class TestSubcommandMissing:
+    def test_removed_script_subcommand_is_flagged(self, tmp_path):
+        root = _make_fabric(tmp_path)
+        (root / "scripts" / "receipt_query.py").write_text('sub.add_parser("digest")\n')
+        r = _run_static(root)
+        assert r.returncode != 0
+        assert "SUBCOMMAND-MISSING" in r.stdout
+        assert "receipt_query.py pull" in r.stdout
+
+    def test_unknown_vnx_command_is_flagged(self, tmp_path):
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\nThen `vnx teleport`.\n")
+        r = _run_static(root)
+        assert r.returncode != 0
+        assert "SUBCOMMAND-MISSING" in r.stdout and "vnx teleport" in r.stdout
+
+    def test_unknown_group_subcommand_is_flagged(self, tmp_path):
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\nThen `vnx objective vaporize`.\n")
+        r = _run_static(root)
+        assert r.returncode != 0
+        assert "vnx objective vaporize" in r.stdout
+
+    def test_second_word_of_plain_command_is_prose_not_a_subcommand(self, tmp_path):
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\nUse `vnx dispatch` to send work.\n")
+        r = _run_static(root)
+        assert r.returncode == 0, r.stdout
+
+    def test_command_with_a_main_case_branch_counts(self, tmp_path):
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\nThen `vnx snapshot`.\n")
+        (root / "bin" / "vnx").write_text(
+            FIXTURE_BIN_VNX.replace("  esac\n}", "    snapshot)\n      cmd_snapshot \"$@\" ;;\n  esac\n}")
+        )
+        (root / "scripts" / "commands").mkdir()
+        (root / "scripts" / "commands" / "snapshot.sh").write_text("cmd_snapshot() { :; }\n")
+        assert _run_static(root).returncode == 0
+
+
+class TestStateSources:
+    def test_state_file_absent_from_manifest_is_unwritten(self, tmp_path):
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\nRead `.vnx-data/state/ghost_state.json`.\n")
+        r = _run_static(root)
+        assert r.returncode != 0
+        assert "STATE-UNWRITTEN" in r.stdout and "ghost_state.json" in r.stdout
+
+    def test_builder_dropping_a_t0_state_section_turns_the_audit_red(self, tmp_path):
+        root = _make_fabric(tmp_path)
+        assert _run_static(root).returncode == 0
+        (root / "scripts" / "build_t0_state.py").write_text('OUT = "t0_state.json"\n')
+        r = _run_static(root)
+        assert r.returncode != 0
+        assert "STATE-WRITER-GONE" in r.stdout and "open_items" in r.stdout
+
+    def test_role_dropping_a_section_phrase_is_flagged(self, tmp_path):
+        role = FIXTURE_ROLE.replace("terminals and open items", "terminals")
+        root = _make_fabric(tmp_path, role)
+        r = _run_static(root)
+        assert r.returncode != 0
+        assert "STATE-WRITER-GONE" in r.stdout and "open items" in r.stdout
+
+    def test_writer_script_deleted_is_flagged(self, tmp_path):
+        root = _make_fabric(tmp_path)
+        (root / "scripts" / "open_items_manager.py").unlink()
+        r = _run_static(root)
+        assert r.returncode != 0
+        assert "STATE-WRITER-GONE" in r.stdout and "digest.json" in r.stdout
+
+    def test_malformed_manifest_line_is_flagged(self, tmp_path):
+        root = _make_fabric(tmp_path)
+        manifest = root / "scripts" / "lib" / "t0_role_state_writers.txt"
+        manifest.write_text(manifest.read_text() + "only-one-column\n")
+        r = _run_static(root)
+        assert r.returncode != 0
+        assert "MANIFEST-BAD-LINE" in r.stdout
+
+
+class TestSourcesAuditNeverSilent:
+    """An audit that could not measure is red, not clean (codex ff1, point 1)."""
+
+    def test_auditor_exiting_nonzero_without_output_is_a_finding(self, tmp_path):
+        root = _make_fabric(tmp_path)
+        assert _run_static(root).returncode == 0
+        (root / "scripts" / "lib" / "t0_role_sources_audit.py").write_text("import sys\nsys.exit(3)\n")
+        r = _run_static(root)
+        assert r.returncode != 0, r.stdout
+        assert "SOURCES-AUDIT-FAILED: exit 3" in r.stdout
+
+    def test_auditor_crashing_with_traceback_is_a_finding(self, tmp_path):
+        root = _make_fabric(tmp_path)
+        (root / "scripts" / "lib" / "t0_role_sources_audit.py").write_text("raise RuntimeError('boom')\n")
+        r = _run_static(root)
+        assert r.returncode != 0
+        assert "SOURCES-AUDIT-FAILED: exit 1" in r.stdout
+
+    def test_missing_auditor_script_is_a_finding(self, tmp_path):
+        root = _make_fabric(tmp_path)
+        (root / "scripts" / "lib" / "t0_role_sources_audit.py").unlink()
+        r = _run_static(root)
+        assert r.returncode != 0
+        assert "SOURCES-AUDIT-FAILED" in r.stdout and "does not exist" in r.stdout
+
+    def test_normal_findings_do_not_add_a_failure_line(self, tmp_path):
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\nThen `vnx teleport`.\n")
+        r = _run_static(root)
+        assert r.returncode != 0
+        assert "SOURCES-AUDIT-FAILED" not in r.stdout
+
+
+class TestSubcommandScopedPerGroup:
+    """`vnx <group> <sub>` is checked against the file that handles the group."""
+
+    def test_word_defined_by_another_command_file_does_not_satisfy_the_group(self, tmp_path):
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\nThen `vnx objective vaporize`.\n")
+        (root / "scripts" / "commands").mkdir()
+        (root / "scripts" / "commands" / "other.sh").write_text('case "$1" in vaporize) echo x ;; esac\n')
+        (root / "scripts" / "elsewhere_cli.py").write_text('sub.add_parser("vaporize")\n')
+        # A second project whose command file also defines it must not leak in.
+        other = _make_fabric(tmp_path, name="other")
+        (other / "scripts" / "planning_cli.py").write_text('sub.add_parser("vaporize")\n')
+        r = _run_static(root)
+        assert r.returncode != 0, r.stdout
+        assert "vnx objective vaporize" in r.stdout
+
+    def test_word_defined_by_the_group_handler_is_clean(self, tmp_path):
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\nThen `vnx objective show`.\n")
+        assert _run_static(root).returncode == 0
+
+    def test_shell_function_group_reads_its_own_function_body(self, tmp_path):
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\nThen `vnx role sync` and `vnx role explode`.\n")
+        (root / "bin" / "vnx").write_text(
+            FIXTURE_BIN_VNX.replace("  esac\n}", "    role)\n      cmd_role \"$@\" ;;\n  esac\n}")
+            + 'cmd_role() {\n  if [ "$1" = "sync" ]; then echo sync; fi\n}\n'
+        )
+        r = _run_static(root)
+        assert r.returncode != 0
+        assert "vnx role explode" in r.stdout and "vnx role sync" not in r.stdout
+
+
+class TestDocStateChecked:
+    """DISPATCH_RULES state paths meet the writers manifest too (point 3)."""
+
+    def _with_doc(self, tmp_path, text):
+        root = _make_fabric(tmp_path)
+        doc = root / "docs" / "core"
+        doc.mkdir(parents=True)
+        (doc / "DISPATCH_RULES.md").write_text(text)
+        return root
+
+    def test_doc_state_path_without_manifest_line_is_unwritten(self, tmp_path):
+        root = self._with_doc(tmp_path, "Read `.vnx-data/state/bestaat_niet.json`.\n")
+        r = _run_static(root)
+        assert r.returncode != 0
+        assert "STATE-UNWRITTEN" in r.stdout and "bestaat_niet.json" in r.stdout
+        assert "DISPATCH_RULES.md" in r.stdout
+
+    def test_doc_state_path_with_manifest_line_is_clean(self, tmp_path):
+        root = self._with_doc(tmp_path, "Read `.vnx-data/state/digest.json`.\n")
+        assert _run_static(root).returncode == 0
+
+    def test_doc_state_writer_gone_is_flagged_once_when_role_names_it_too(self, tmp_path):
+        root = self._with_doc(tmp_path, "Read `.vnx-data/state/digest.json`.\n")
+        (root / "scripts" / "open_items_manager.py").unlink()
+        r = _run_static(root)
+        assert r.returncode != 0
+        assert r.stdout.count("STATE-WRITER-GONE") == 1
+
+
+class TestFencedCommands:
+    """Command lines inside fenced blocks are audited; prose is not (point 4)."""
+
+    def test_fenced_unknown_command_is_flagged(self, tmp_path):
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\n```bash\nvnx bestaatniet\n```\n")
+        r = _run_static(root)
+        assert r.returncode != 0
+        assert "vnx bestaatniet" in r.stdout
+
+    def test_fenced_unknown_subcommand_after_prompt_marker_is_flagged(self, tmp_path):
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\n```\n  $ vnx objective vaporize\n```\n")
+        r = _run_static(root)
+        assert r.returncode != 0
+        assert "vnx objective vaporize" in r.stdout
+
+    def test_fenced_known_command_is_clean(self, tmp_path):
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\n```bash\nvnx objective show\nvnx dispatch\n```\n")
+        assert _run_static(root).returncode == 0
+
+    def test_prose_line_starting_with_vnx_outside_a_fence_is_ignored(self, tmp_path):
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\nvnx bestaatniet is prose here.\n")
+        assert _run_static(root).returncode == 0
+
+    def test_fence_closes_so_later_prose_is_ignored(self, tmp_path):
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\n```\nvnx dispatch\n```\nvnx bestaatniet\n")
+        assert _run_static(root).returncode == 0
+
+
+class TestScriptOutsideFabric:
+    """A script token only counts when it resolves inside the fabric (codex ff2).
+
+    The outside target is a second project next to the fabric, so a hit would
+    mean the audit read another project's file as the fabric's own.
+    """
+
+    def _other_project_script(self, tmp_path: Path) -> Path:
+        other = _make_fabric(tmp_path, name="other")
+        target = other / "scripts" / "outside.py"
+        target.write_text('sub.add_parser("pull")\n')
+        return target
+
+    def test_dotdot_token_leaving_the_fabric_is_flagged(self, tmp_path):
+        self._other_project_script(tmp_path)
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\nSee `scripts/../../other/scripts/outside.py`.\n")
+        r = _run_static(root)
+        assert r.returncode != 0, r.stdout
+        assert "SCRIPT-OUTSIDE-FABRIC" in r.stdout and "outside.py" in r.stdout
+
+    def test_dotdot_subcommand_target_outside_the_fabric_is_flagged(self, tmp_path):
+        self._other_project_script(tmp_path)
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\nRun `python3 scripts/../../other/scripts/outside.py pull`.\n")
+        r = _run_static(root)
+        assert r.returncode != 0, r.stdout
+        assert "SCRIPT-OUTSIDE-FABRIC" in r.stdout
+
+    def test_absolute_path_outside_the_fabric_is_flagged(self, tmp_path):
+        target = self._other_project_script(tmp_path)
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + f"\nRun `python3 {target}`.\n")
+        r = _run_static(root)
+        assert r.returncode != 0, r.stdout
+        assert "SCRIPT-OUTSIDE-FABRIC" in r.stdout and str(target) in r.stdout
+
+    def test_absolute_path_into_the_fabric_is_flagged_too(self, tmp_path):
+        """An absolute path is machine-bound even when it lands in the fabric."""
+        root = _make_fabric(tmp_path)
+        own = root / "scripts" / "receipt_query.py"
+        (root / ".claude" / "terminals" / "T0" / "role-orchestrator.md").write_text(
+            FIXTURE_ROLE + f"\nRun `python3 {own}`.\n"
+        )
+        r = _run_static(root)
+        assert r.returncode != 0, r.stdout
+        assert "SCRIPT-OUTSIDE-FABRIC" in r.stdout
+
+    def test_url_ending_in_a_script_is_not_an_absolute_path(self, tmp_path):
+        root = _make_fabric(
+            tmp_path, FIXTURE_ROLE + "\nSource: https://github.com/Vinix24/vnx-orchestration/blob/main/receipt_query.py\n"
+        )
+        assert _run_static(root).returncode == 0, _run_static(root).stdout
+
+    def test_symlink_in_scripts_pointing_outside_is_flagged(self, tmp_path):
+        target = self._other_project_script(tmp_path)
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\nSee `scripts/evil.py` and `evil_bare.py`.\n")
+        (root / "scripts" / "evil.py").symlink_to(target)
+        (root / "scripts" / "lib" / "evil_bare.py").symlink_to(target)
+        r = _run_static(root)
+        assert r.returncode != 0, r.stdout
+        assert "SCRIPT-OUTSIDE-FABRIC" in r.stdout
+        assert "'scripts/evil.py'" in r.stdout and "'evil_bare.py'" in r.stdout
+
+    def test_dotdot_token_staying_inside_the_fabric_is_clean(self, tmp_path):
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\nSee `scripts/lib/../receipt_query.py`.\n")
+        r = _run_static(root)
+        assert r.returncode == 0, r.stdout
+
+    def test_command_file_linking_outside_does_not_define_the_command(self, tmp_path):
+        """Second place: `scripts/commands/<cmd>.sh`, which `_load_command`
+        sources for the handler function, found via a symlink out."""
+        target = self._other_project_script(tmp_path)
+        outside_cmd = target.parent / "role.sh"
+        outside_cmd.write_text('cmd_role() {\n  if [ "$1" = "sync" ]; then echo sync; fi\n}\n')
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\nThen `vnx role sync`.\n")
+        (root / "bin" / "vnx").write_text(
+            FIXTURE_BIN_VNX.replace("  esac\n}", "    role)\n      cmd_role \"$@\" ;;\n  esac\n}")
+        )
+        (root / "scripts" / "commands").mkdir()
+        (root / "scripts" / "commands" / "role.sh").symlink_to(outside_cmd)
+        r = _run_static(root)
+        assert r.returncode != 0, r.stdout
+        assert "SUBCOMMAND-MISSING" in r.stdout and "vnx role sync" in r.stdout
+
+    def test_manifest_writer_linking_outside_is_gone(self, tmp_path):
+        """Second place: a manifest writer that is a symlink out of the fabric."""
+        other = _make_fabric(tmp_path, name="other")
+        root = _make_fabric(tmp_path)
+        writer = root / "scripts" / "open_items_manager.py"
+        writer.unlink()
+        writer.symlink_to(other / "scripts" / "open_items_manager.py")
+        r = _run_static(root)
+        assert r.returncode != 0, r.stdout
+        assert "STATE-WRITER-GONE" in r.stdout and "digest.json" in r.stdout
+
+    def test_symlink_inside_the_fabric_is_clean(self, tmp_path):
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\nSee `scripts/alias_query.py`.\n")
+        (root / "scripts" / "alias_query.py").symlink_to(root / "scripts" / "receipt_query.py")
+        r = _run_static(root)
+        assert r.returncode == 0, r.stdout
+
+
+def _with_branch(branch: str, prelude: str = "", functions: str = "") -> str:
+    """FIXTURE_BIN_VNX with one more `main()` branch, text before main and
+    shell functions after it."""
+    return prelude + FIXTURE_BIN_VNX.replace("  esac\n}", branch + "  esac\n}") + functions
+
+
+def _colliding_project(tmp_path: Path) -> Path:
+    """A second project next to the fabric that DOES dispatch every word the
+    tests below expect to be missing. A hit on any of them means the audit
+    read that project instead of the fabric under test."""
+    other = _make_fabric(tmp_path, name="other")
+    (other / "bin" / "vnx").write_text(_with_branch(
+        "    vaporize)\n      echo v ;;\n    role)\n      cmd_role \"$@\" ;;\n",
+        functions='cmd_role() {\n  case "$1" in\n    explode) echo x ;;\n  esac\n}\n',
+    ))
+    (other / "scripts" / "open_items_manager.py").write_text(_argparse_script("digest", "blocker"))
+    (other / "scripts" / "planning_cli.py").write_text(
+        FIXTURE_PLANNING_CLI.replace('dlv_sub.add_parser("add")', 'dlv_sub.add_parser("add")\n    dlv_sub.add_parser("reconcile")')
+    )
+    return other
+
+
+class TestOnlyTheDispatchPlaceCounts:
+    """A word is a command only where the code decides what runs for it
+    (codex ff3). Each test names a word that occurs in the fabric, but at a
+    place that does not dispatch it; a second project dispatches it for real."""
+
+    def _fabric(self, tmp_path: Path, role_extra: str, bin_vnx: str = None) -> Path:
+        _colliding_project(tmp_path)
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + role_extra)
+        if bin_vnx is not None:
+            (root / "bin" / "vnx").write_text(bin_vnx)
+        return root
+
+    def test_nested_subcommand_label_is_not_a_top_level_command(self, tmp_path):
+        """The blocking finding: `vaporize)` inside the `objective)` branch."""
+        root = self._fabric(tmp_path, "\nThen `vnx vaporize`.\n", FIXTURE_BIN_VNX.replace(
+            '    objective)\n',
+            '    objective)\n      case "$2" in\n        vaporize) echo nested ;;\n      esac\n',
+        ))
+        r = _run_static(root)
+        assert r.returncode != 0, r.stdout
+        assert "'vnx vaporize'" in r.stdout
+
+    def test_nested_case_does_not_cut_the_branch_short(self, tmp_path):
+        """The same nested case must not end the `objective)` branch early."""
+        root = self._fabric(tmp_path, "\nThen `vnx objective show`.\n", FIXTURE_BIN_VNX.replace(
+            '    objective)\n',
+            '    objective)\n      case "$2" in\n        vaporize) echo nested\n          ;;\n      esac\n',
+        ))
+        r = _run_static(root)
+        assert r.returncode == 0, r.stdout
+
+    def test_label_in_another_function_is_not_a_command(self, tmp_path):
+        root = self._fabric(tmp_path, "\nThen `vnx vaporize`.\n", _with_branch(
+            "", prelude='helper() {\n  case "$1" in\n    vaporize)\n      echo helper ;;\n  esac\n}\n',
+        ))
+        r = _run_static(root)
+        assert r.returncode != 0, r.stdout
+        assert "'vnx vaporize'" in r.stdout
+
+    def test_command_file_without_a_main_branch_is_not_a_command(self, tmp_path):
+        """Advisory 1: `_load_command` sources the file, `*)` still rejects."""
+        root = self._fabric(tmp_path, "\nThen `vnx vaporize`.\n")
+        (root / "scripts" / "commands").mkdir()
+        (root / "scripts" / "commands" / "vaporize.sh").write_text("cmd_vaporize() { :; }\n")
+        r = _run_static(root)
+        assert r.returncode != 0, r.stdout
+        assert "'vnx vaporize'" in r.stdout
+
+    def test_group_label_in_an_earlier_function_does_not_hijack_the_branch(self, tmp_path):
+        root = self._fabric(tmp_path, "\nThen `vnx objective vaporize`.\n", _with_branch(
+            "", prelude=(
+                'helper() {\n  case "$1" in\n    objective)\n'
+                '      "$VNX_PYTHON" "$VNX_HOME/scripts/fake_cli.py" ;;\n  esac\n}\n'
+            ),
+        ))
+        (root / "scripts" / "fake_cli.py").write_text(_argparse_script("vaporize"))
+        r = _run_static(root)
+        assert r.returncode != 0, r.stdout
+        assert "'vnx objective vaporize'" in r.stdout
+
+    def test_sibling_function_does_not_define_the_subcommand(self, tmp_path):
+        """Advisory 2: `cmd_role_explode` is not what `cmd_role` dispatches to."""
+        root = self._fabric(tmp_path, "\nThen `vnx role sync` and `vnx role explode`.\n", _with_branch(
+            '    role)\n      cmd_role "$@" ;;\n',
+            functions=(
+                'cmd_role() {\n  if [ "$1" = "sync" ]; then echo sync; fi\n}\n'
+                'cmd_role_explode() {\n  case "$1" in\n    explode) echo x ;;\n  esac\n  [ "$1" = "explode" ]\n}\n'
+            ),
+        ))
+        r = _run_static(root)
+        assert r.returncode != 0, r.stdout
+        assert "'vnx role explode'" in r.stdout and "'vnx role sync'" not in r.stdout
+
+    def test_other_function_in_the_command_file_does_not_define_the_subcommand(self, tmp_path):
+        root = self._fabric(tmp_path, "\nThen `vnx role sync` and `vnx role explode`.\n", _with_branch(
+            '    role)\n      cmd_role "$@" ;;\n',
+        ))
+        (root / "scripts" / "commands").mkdir()
+        (root / "scripts" / "commands" / "role.sh").write_text(
+            'cmd_role() {\n  local sub="${1:-}"\n  if [ "$sub" = "sync" ]; then echo sync; fi\n}\n'
+            '_role_helper() {\n  case "$1" in\n    explode) echo x ;;\n  esac\n}\n'
+        )
+        r = _run_static(root)
+        assert r.returncode != 0, r.stdout
+        assert "'vnx role explode'" in r.stdout and "'vnx role sync'" not in r.stdout
+
+    def test_case_on_a_later_argument_is_not_the_subcommand(self, tmp_path):
+        """After `local sub="$1"; shift`, a `case "$1"` reads the next word."""
+        root = self._fabric(tmp_path, "\nThen `vnx role sync` and `vnx role explode`.\n", _with_branch(
+            '    role)\n      cmd_role "$@" ;;\n',
+            functions=(
+                'cmd_role() {\n  local sub="${1:-}"\n  shift\n'
+                '  case "$1" in\n    explode) echo flag ;;\n  esac\n'
+                '  if [ "$sub" = "sync" ]; then echo sync; fi\n}\n'
+            ),
+        ))
+        r = _run_static(root)
+        assert r.returncode != 0, r.stdout
+        assert "'vnx role explode'" in r.stdout and "'vnx role sync'" not in r.stdout
+
+    def test_script_word_outside_its_parser_is_not_a_subcommand(self, tmp_path):
+        """`"blocker"` as a choices value and `"open"` in a comparison."""
+        root = self._fabric(
+            tmp_path, "\nRun `scripts/open_items_manager.py blocker` and `scripts/open_items_manager.py open`.\n"
+        )
+        (root / "scripts" / "open_items_manager.py").write_text(
+            'OUT = "digest.json"\n' + _argparse_script("digest")
+            + 'p = sub.add_parser("add")\np.add_argument("--severity", choices=["blocker"])\n'
+            + 'def status(item):\n    return item["status"] == "open"\n'
+        )
+        r = _run_static(root)
+        assert r.returncode != 0, r.stdout
+        assert "open_items_manager.py blocker" in r.stdout and "open_items_manager.py open" in r.stdout
+        assert "open_items_manager.py digest" not in r.stdout
+
+    def test_subcommand_of_another_domain_in_the_same_script_does_not_count(self, tmp_path):
+        """`reconcile` is an objective verb; bin/vnx runs `planning_cli.py deliverable`."""
+        root = self._fabric(tmp_path, "\nThen `vnx deliverable add` and `vnx deliverable reconcile`.\n", _with_branch(
+            '    deliverable)\n      "$VNX_PYTHON" "$VNX_HOME/scripts/planning_cli.py" deliverable "$@" ;;\n',
+        ))
+        r = _run_static(root)
+        assert r.returncode != 0, r.stdout
+        assert "'vnx deliverable reconcile'" in r.stdout and "'vnx deliverable add'" not in r.stdout
+
+    def test_parser_that_is_never_parsed_does_not_define_the_subcommand(self, tmp_path):
+        root = self._fabric(tmp_path, "\nRun `scripts/tool.py pull` and `scripts/tool.py phantom`.\n")
+        (root / "scripts" / "tool.py").write_text(
+            "import argparse\n\n"
+            "def _debug_parser():\n    dbg = argparse.ArgumentParser()\n"
+            '    dbg.add_subparsers().add_parser("phantom")\n    return dbg\n\n'
+            "def build_parser():\n    parser = argparse.ArgumentParser()\n"
+            '    parser.add_subparsers(dest="cmd").add_parser("pull")\n    return parser\n\n'
+            "def main(argv):\n    return build_parser().parse_args(argv)\n"
+        )
+        r = _run_static(root)
+        assert r.returncode != 0, r.stdout
+        assert "tool.py phantom" in r.stdout and "tool.py pull" not in r.stdout
+
+    def test_hand_rolled_argv_dispatch_counts(self, tmp_path):
+        root = self._fabric(tmp_path, "\nRun `scripts/bridge.py stage` and `scripts/bridge.py fire`.\n")
+        (root / "scripts" / "bridge.py").write_text(
+            'import sys\n\ndef main(raw_argv):\n    if raw_argv[0] == "stage":\n        return 0\n'
+            '    mode = "fire"\n    return mode\n'
+        )
+        r = _run_static(root)
+        assert r.returncode != 0, r.stdout
+        assert "bridge.py fire" in r.stdout and "bridge.py stage" not in r.stdout
+
+
+FIXTURE_PIP_MAIN = """\
+import argparse
+
+from vnx_cli.commands.gate import register_gate
+
+
+def _register_dispatch_agent(subparsers):
+    subparsers.add_parser("dispatch-agent")
+
+
+def _register_role(subparsers):
+    role = subparsers.add_parser("role")
+    role_subs = role.add_subparsers(dest="role_sub")
+    role_subs.add_parser("sync")
+
+
+def _other_tool():
+    tool = argparse.ArgumentParser()
+    tool_subs = tool.add_subparsers()
+    tool_subs.add_parser("phantom")
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="vnx")
+    subparsers = parser.add_subparsers(dest="command")
+    _register_dispatch_agent(subparsers)
+    _register_role(subparsers)
+    register_gate(subparsers)
+    parser.parse_args()
+"""
+
+
+class TestTwoEntrances:
+    """`vnx` is bin/vnx or the pip CLI; `bin/vnx` is only bin/vnx."""
+
+    def _fabric(self, tmp_path: Path, role_extra: str) -> Path:
+        _colliding_project(tmp_path)
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + role_extra)
+        cmds = root / "vnx_cli" / "commands"
+        cmds.mkdir(parents=True)
+        (root / "vnx_cli" / "__init__.py").write_text("")
+        (cmds / "__init__.py").write_text("")
+        (root / "vnx_cli" / "main.py").write_text(FIXTURE_PIP_MAIN)
+        (cmds / "gate.py").write_text('def register_gate(subparsers):\n    subparsers.add_parser("gate-check")\n')
+        (cmds / "pool.py").write_text(_argparse_script("status", "reap"))
+        return root
+
+    def test_pip_commands_count_including_imported_registration(self, tmp_path):
+        root = self._fabric(tmp_path, "\nUse `vnx dispatch-agent --agent x`, `vnx gate-check` and `vnx role sync`.\n")
+        r = _run_static(root)
+        assert r.returncode == 0, r.stdout
+
+    def test_parser_outside_the_pip_main_is_not_a_command(self, tmp_path):
+        root = self._fabric(tmp_path, "\nUse `vnx phantom`.\n")
+        r = _run_static(root)
+        assert r.returncode != 0, r.stdout
+        assert "'vnx phantom'" in r.stdout
+
+    def test_pip_subcommand_is_scoped_to_its_command(self, tmp_path):
+        root = self._fabric(tmp_path, "\nUse `vnx role explode`.\n")
+        r = _run_static(root)
+        assert r.returncode != 0, r.stdout
+        assert "'vnx role explode'" in r.stdout
+
+    def test_bin_vnx_form_needs_bin_vnx(self, tmp_path):
+        root = self._fabric(tmp_path, "\nUse `bin/vnx dispatch-agent` and `bin/vnx dispatch`.\n\n```\nbin/vnx gate-check\n```\n")
+        r = _run_static(root)
+        assert r.returncode != 0, r.stdout
+        assert "'bin/vnx dispatch-agent'" in r.stdout and "'bin/vnx gate-check'" in r.stdout
+        assert "'bin/vnx dispatch'" not in r.stdout
+
+    def test_module_handler_resolves_from_the_fabric_root(self, tmp_path):
+        root = self._fabric(tmp_path, "\nUse `vnx pool status` and `vnx pool vaporize`.\n")
+        (root / "bin" / "vnx").write_text(_with_branch(
+            '    pool)\n      PYTHONPATH="$VNX_HOME/scripts/lib" exec "$VNX_PYTHON" -m vnx_cli.commands.pool "$@"\n      ;;\n'
+        ))
+        r = _run_static(root)
+        assert r.returncode != 0, r.stdout
+        assert "'vnx pool vaporize'" in r.stdout and "'vnx pool status'" not in r.stdout
+
+
+class TestConsumerProject:
+    def test_project_without_scripts_is_judged_against_the_fabric(self, tmp_path):
+        """A consumer carries the synced role but no scripts/. It is checked
+        against the fabric the audit belongs to, so a role naming a real fabric
+        script is clean and one naming a ghost is flagged."""
+        consumer = _make_project(tmp_path, "consumer")
+        t0 = consumer / ".claude" / "terminals" / "T0"
+        (t0 / "CLAUDE.md").write_text("@role-orchestrator.md\n")
+        (t0 / "role-orchestrator.md").write_text("Run `python3 scripts/build_t0_state.py`.\n")
+        assert _run_static(consumer).returncode == 0
+        (t0 / "role-orchestrator.md").write_text("Run `python3 scripts/ghost_tool.py`.\n")
+        r = _run_static(consumer)
+        assert r.returncode != 0 and "SCRIPT-MISSING" in r.stdout
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
