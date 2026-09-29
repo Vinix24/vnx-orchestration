@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """fabric-state-herstel D3 — unit tests for `receipt_outcome.summarize`.
 
-The (a)-(h) behaviour tests live in test_receipt_outcome_digest.py and run
-through the digest; these pin the module's own rules. ADR-007: every ledger
-here also carries a colliding dispatch id from a second project that must not
-leak into the outcome.
+These pin the module's own rules; wiring the outcome into the digest is D3b.
+ADR-007: every ledger here also carries a colliding dispatch id from a second
+project that must not leak into the outcome.
 """
 
 from __future__ import annotations
 
-import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,10 +15,8 @@ from typing import Any, Dict, List
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
-sys.path.insert(0, str(SCRIPTS_DIR))
 
 import receipt_outcome as ro
-import receipt_query as rq
 
 GOOD = {"method": "pytest", "tests_run": 3, "tests_passed": 3, "tests_failed": 0}
 TS = "2026-09-29T10:00:00Z"
@@ -175,15 +171,51 @@ def test_evidence_only_dispatch_is_unknown_and_bookkeeping_is_counted():
     assert result["bookkeeping_counts"] == {"review_gate_request": 1, "state_mutation": 1}
 
 
-def test_digest_cli_project_id_flag_selects_the_other_project(tmp_path, capsys):
-    (tmp_path / rq.LEDGER_NAME).write_text(
-        json.dumps(_a("d1", "success", project_id="vnx-dev")) + "\n"
-        + json.dumps(FOREIGN) + "\n", encoding="utf-8",
+def test_refused_merge_without_pr_is_not_resolved_by_a_merge_without_pr():
+    refused = {"event_type": "pr_merge_refused", "dispatch_id": "d1", "status": "blocked",
+               "timestamp": TS}
+    merged = {"event_type": "pr_merged", "dispatch_id": "d1", "timestamp": TS}
+    result = _run(_a("d1", "success"), _b("d1"), refused, merged)
+    assert result["verdict_counts"]["investigate"] == 1
+    assert "pr_merge_refused" in _outcome(result, "d1")["reason"]
+
+
+def test_refused_merge_is_resolved_by_a_merge_on_the_same_pr():
+    refused = {"event_type": "pr_merge_refused", "dispatch_id": "d1", "pr_number": 42,
+               "status": "blocked", "timestamp": TS}
+    assert _run(_a("d1", "success"), _b("d1"), refused,
+                {"event_type": "pr_merged", "dispatch_id": "d1", "pr_number": 42,
+                 "timestamp": TS})["verdict_counts"]["accept"] == 1
+    assert _run(_a("d1", "success"), _b("d1"), refused,
+                {"event_type": "pr_merged", "dispatch_id": "d1", "pr_number": 43,
+                 "timestamp": TS})["verdict_counts"]["investigate"] == 1
+
+
+def test_reopened_obligation_without_pr_stays_open():
+    reopened = {"event_type": "gate_obligation_reopened_stale_evidence", "dispatch_id": "d1",
+                "gate": "codex_gate", "status": "reopened", "timestamp": TS}
+    result_line = {"event_type": "review_gate_result", "dispatch_id": "d1", "gate": "codex_gate",
+                   "status": "completed", "timestamp": TS}
+    result = _run(_a("d1", "success"), _b("d1"), reopened, result_line)
+    assert result["verdict_counts"]["investigate"] == 1
+
+
+def test_out_of_range_numeric_timestamp_is_unknown_but_keeps_file_order():
+    cutoff = datetime(2026, 9, 29, 0, 0, tzinfo=timezone.utc)
+    for bad in (10**20, -(10**20), float("nan")):
+        result = _run(_a("d1", "failure"), _a("d1", "success", timestamp=bad), _b("d1"),
+                      cutoff=cutoff)
+        assert result["verdict_counts"]["accept"] == 1, bad
+        only_bad = _run(_a("d2", "failure", timestamp=bad), cutoff=cutoff)
+        assert only_bad["outcomes"] == [], bad
+        assert _run(_a("d2", "failure", timestamp=bad))["verdict_counts"]["reject"] == 1, bad
+
+
+def test_contract_invalid_before_the_last_a_does_not_reject():
+    result = _run(
+        {"event_type": "report_contract_invalid", "receipt_kind": "dispatch", "timestamp": TS,
+         "dispatch_id": "d1", "status": "contract_invalid"},
+        _a("d1", "success"), _b("d1"),
     )
-    rc = rq.main(["digest", "--state-dir", str(tmp_path), "--project-id", "other-project",
-                  "--window", "36500d", "--json"])
-    assert rc == 0
-    out = json.loads(capsys.readouterr().out)
-    assert out["project_id"] == "other-project"
-    assert out["verdict_counts"]["reject"] == 1
-    assert out["noise_counts"] == {"foreign_project": 1}
+    assert result["verdict_counts"] == {"accept": 1, "investigate": 0, "reject": 0,
+                                        "superseded": 0, "unknown": 0}

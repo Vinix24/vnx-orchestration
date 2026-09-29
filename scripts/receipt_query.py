@@ -25,9 +25,7 @@ rest of the interface plus the §6.4 oi_pending follow-up loop:
                         AND project_id = ?`` query ``tracks.get_recent_receipts``
                         already runs; (2) ``find_receipts_by_dispatch`` per
                         resolved dispatch_id. No new index, no receipt-shape change.
-  digest             — per-dispatch outcome counts (accept/investigate/reject/
-                        superseded, via receipt_outcome.summarize) over a window,
-                        bookkeeping and test noise as separate line counts,
+  digest             — verdict counts (accept/investigate/reject) over a window,
                         the top ``warnings[]`` codes at destination:"counted",
                         a tally — "N warnings met oi_pending zonder
                         resolutie" (§6.4), computed as a dedup_key join against
@@ -80,7 +78,6 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from receipt_provenance import find_receipts_by_dispatch  # noqa: E402
-from receipt_outcome import summarize as summarize_outcomes
 
 LEDGER_NAME = "t0_receipts.ndjson"
 CURSOR_NAME = "receipt_pull_cursor.json"
@@ -350,15 +347,9 @@ def compute_digest(
     now: Optional[datetime] = None,
     max_age_days: float = DEFAULT_RECONCILE_MAX_AGE_DAYS,
     open_items_manager_module: Optional[Any] = None,
-    project_id: str = DEFAULT_PROJECT_ID,
 ) -> Dict[str, Any]:
-    """`digest` (ADR-035 §5.2/§6.4): verdict counts PER DISPATCH
-    (accept/investigate/reject/superseded, plus `unknown` for a dispatch with
-    only evidence) over `window`, read by `receipt_outcome.summarize` — one
-    outcome per dispatch, bookkeeping and test noise counted apart
-    (fabric-state-herstel D3). The old per-line stamp tally stays visible as
-    `line_verdict_counts` so a reader can see the delta. Then the top
-    `warnings[]` codes at `destination: "counted"`, and
+    """`digest` (ADR-035 §5.2/§6.4): verdict counts (accept/investigate/reject)
+    over `window`, the top `warnings[]` codes at `destination: "counted"`, and
     the "N warnings met oi_pending zonder resolutie" tally — plus, per §6.4's
     follow-up obligation ("surfaced via T0 digest, not a new alerting
     channel"), an `oi_pending_escalated_count` tally of unresolved entries
@@ -375,8 +366,8 @@ def compute_digest(
 
     A line missing `schema_version`/`verdict` entirely (legacy v1, or any
     line the writer never stamped a verdict onto) buckets under an explicit
-    `"unknown"` bucket of `line_verdict_counts` — never crashes, never
-    silently miscounted as a real verdict (T17). `open_items_manager_module` is a test-injection
+    `"unknown"` verdict count — never crashes, never silently miscounted as
+    a real verdict (T17). `open_items_manager_module` is a test-injection
     seam (mirrors `warning_destination.assign_destination`'s own seam);
     production callers rely on the default (the real on-disk OI store).
     """
@@ -385,13 +376,11 @@ def compute_digest(
     cutoff = now - delta
 
     verdict_counts: Dict[str, int] = {"accept": 0, "investigate": 0, "reject": 0, "unknown": 0}
-    entries: List[Dict[str, Any]] = []
     counted_codes: Dict[str, int] = {}
     oi_pending_window_candidates: List[Dict[str, Any]] = []
     oi_pending_all_candidates: List[Dict[str, Any]] = []
 
     for entry in _iter_ledger(ledger_path):
-        entries.append(entry)
         ts = _parse_iso8601(entry.get("timestamp"))
         in_window = ts is not None and ts >= cutoff
 
@@ -428,17 +417,10 @@ def compute_digest(
     unresolved = [entry for entry in all_unresolved if entry in oi_pending_window_candidates]
     escalated = _escalated_oi_pending(all_unresolved, now, max_age_days)
     top_counted = sorted(counted_codes.items(), key=lambda kv: (-kv[1], kv[0]))
-    outcomes = summarize_outcomes(entries, project_id=project_id, cutoff=cutoff)
 
     return {
         "window": window,
-        "project_id": project_id,
-        "verdict_counts": outcomes["verdict_counts"],
-        "line_verdict_counts": verdict_counts,
-        "bookkeeping_counts": outcomes["bookkeeping_counts"],
-        "noise_counts": outcomes["noise_counts"],
-        "unlinked_gate_evidence": outcomes["unlinked_gate_evidence"],
-        "outcomes": outcomes["outcomes"],
+        "verdict_counts": verdict_counts,
         "counted_warnings": [{"code": code, "count": count} for code, count in top_counted],
         "oi_pending_unresolved_count": len(unresolved),
         "oi_pending_unresolved": unresolved,
@@ -674,9 +656,7 @@ def _cmd_digest(args: argparse.Namespace) -> int:
     state_dir = Path(args.state_dir)
     ledger = _ledger_path(state_dir)
     try:
-        result = compute_digest(
-            ledger, window=args.window, max_age_days=args.max_age_days, project_id=args.project_id,
-        )
+        result = compute_digest(ledger, window=args.window, max_age_days=args.max_age_days)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -685,14 +665,11 @@ def _cmd_digest(args: argparse.Namespace) -> int:
         print(json.dumps(result, indent=2))
     else:
         vc = result["verdict_counts"]
-        print(f"digest (window={result['window']}, project={result['project_id']}):")
+        print(f"digest (window={result['window']}):")
         print(
-            f"  per dispatch: accept={vc['accept']} investigate={vc['investigate']} "
-            f"reject={vc['reject']} superseded={vc['superseded']} zonder uitkomst={vc['unknown']}"
+            f"  verdict: accept={vc['accept']} investigate={vc['investigate']} "
+            f"reject={vc['reject']} unknown={vc['unknown']}"
         )
-        print(f"  boekhouding (regels): {result['bookkeeping_counts']}")
-        print(f"  ruis (regels): {result['noise_counts']}")
-        print(f"  gate-bewijs zonder werk-dispatch: {result['unlinked_gate_evidence']}")
         print(f"  counted warnings (top codes): {result['counted_warnings']}")
         print(f"  oi_pending zonder resolutie: {result['oi_pending_unresolved_count']}")
         print(f"  oi_pending escalated (>{args.max_age_days}d, still failing): "
@@ -789,10 +766,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_digest.add_argument(
         "--max-age-days", type=float, default=DEFAULT_RECONCILE_MAX_AGE_DAYS,
         help="same threshold as reconcile-oi-pending's escalation rule (§6.4)",
-    )
-    p_digest.add_argument(
-        "--project-id", default=os.environ.get("VNX_PROJECT_ID", DEFAULT_PROJECT_ID),
-        help="receipts stamped with another project_id are left out (ADR-007)",
     )
     p_digest.add_argument("--json", action="store_true")
     p_digest.set_defaults(func=_cmd_digest)

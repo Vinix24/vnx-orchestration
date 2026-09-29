@@ -22,7 +22,8 @@ lines into one outcome (fabric-state-herstel D3):
 6. ``BLOCKING_EVENT_TYPES`` after the last outcome turn accept into
    investigate, unless resolved later: a refused merge by a ``pr_merged`` on
    that PR, a reopened obligation by a ``review_gate_result`` for that gate
-   and PR. ``door_bookkeeping_failed`` is never resolved.
+   and PR. A block without a PR number is never resolved, and neither is
+   ``door_bookkeeping_failed``.
 7. ``superseded`` only via an explicit link: a child carrying
    ``parent_dispatch`` or working on branch ``dispatch/<parent>``.
 
@@ -109,7 +110,12 @@ def _is_writer_b(receipt: Dict[str, Any]) -> bool:
 def _parse_ts(value: Any) -> Optional[datetime]:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         seconds = value / 1000 if value > 1e11 else value
-        return datetime.fromtimestamp(seconds, tz=timezone.utc)
+        try:
+            return datetime.fromtimestamp(seconds, tz=timezone.utc)
+        except (ValueError, OverflowError, OSError):
+            # vnx-silent-except: an out-of-range epoch is an unknown timestamp;
+            # the line still counts in file order.
+            return None
     try:
         dt = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
     except ValueError:
@@ -136,6 +142,8 @@ def _evidence_entry(receipt: Dict[str, Any], pos: int) -> Dict[str, Any]:
 
 
 def _blocking_resolved(block: Dict[str, Any], evidence: List[Dict[str, Any]]) -> bool:
+    if not block["pr"]:
+        return False
     later = [e for e in evidence if e["pos"] > block["pos"] and e["pr"] == block["pr"]]
     if block["event_type"] == "pr_merge_refused":
         return any(e["event_type"] == "pr_merged" for e in later)
@@ -172,6 +180,92 @@ def _decide(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return {"decision": decision, "status": merged.get("status"), "reason": reason}
 
 
+class _Window:
+    """Whether a line falls at or after ``cutoff``; None means every line does."""
+
+    def __init__(self, cutoff: Optional[datetime]) -> None:
+        self.cutoff = cutoff
+
+    def __call__(self, receipt: Dict[str, Any]) -> bool:
+        if self.cutoff is None:
+            return True
+        ts = _parse_ts(receipt.get("timestamp"))
+        return ts is not None and ts >= self.cutoff
+
+
+def _partition(receipts: Iterable[Dict[str, Any]], project_id: str, in_window: _Window,
+               noise: Counter, bookkeeping: Counter,
+               ) -> Tuple[List[Tuple[int, Dict[str, Any]]], Dict[str, str]]:
+    """Split off noise and bookkeeping; return kept lines with their file position
+    and the work dispatch that owns each PR."""
+    kept: List[Tuple[int, Dict[str, Any]]] = []
+    pr_owner: Dict[str, str] = {}
+    for pos, receipt in enumerate(r for r in receipts if isinstance(r, dict)):
+        reason = noise_reason(receipt, project_id)
+        if reason is None and receipt.get("event_type") in BOOKKEEPING_EVENT_TYPES:
+            bookkeeping[str(receipt["event_type"])] += in_window(receipt)
+        elif reason is not None:
+            noise[reason] += in_window(receipt)
+        else:
+            kept.append((pos, receipt))
+            did, pr = _dispatch_id(receipt), _pr_of(receipt)
+            if pr and did.lower() not in INVALID_DISPATCH_IDS and not GATE_DISPATCH_RE.match(did):
+                pr_owner[pr] = did
+    return kept, pr_owner
+
+
+def _attribute(receipt: Dict[str, Any], pr_owner: Dict[str, str]) -> Tuple[Optional[str], str]:
+    """The dispatch a line belongs to, or (None, why) when it cannot be attributed."""
+    did, event_type = _dispatch_id(receipt), receipt.get("event_type")
+    gate_match = GATE_DISPATCH_RE.match(did)
+    missing_id = did.lower() in INVALID_DISPATCH_IDS
+    linkable = event_type in EVIDENCE_EVENT_TYPES or event_type in BLOCKING_EVENT_TYPES
+    if gate_match or (missing_id and linkable):
+        owner = pr_owner.get(_pr_of(receipt) or (gate_match.group("pr") if gate_match else ""))
+        if owner is None:
+            return None, "missing_dispatch_id" if missing_id else "unlinked_gate"
+        return owner, ""
+    if missing_id:
+        return None, "missing_dispatch_id"
+    return did, ""
+
+
+def _fold(record: Dict[str, Any], receipt: Dict[str, Any], pos: int, did: str) -> None:
+    """Fold one attributed line into its dispatch record."""
+    event_type = receipt.get("event_type")
+    gate_match = GATE_DISPATCH_RE.match(_dispatch_id(receipt))
+    if gate_match or event_type in EVIDENCE_EVENT_TYPES:
+        record["evidence"].append(_evidence_entry(receipt, pos))
+    elif event_type in BLOCKING_EVENT_TYPES:
+        record["blocking"].append(_evidence_entry(receipt, pos))
+    elif event_type in CONTRACT_INVALID_EVENT_TYPES:
+        record["contract_invalid"], record["contract_invalid_pos"] = receipt, pos
+    elif _is_writer_b(receipt):
+        record["b"], record["b_pos"] = receipt, pos
+    elif _is_writer_a(receipt):
+        record["a"], record["a_pos"] = receipt, pos
+    if gate_match:
+        return
+    branch = str(receipt.get("branch") or "")
+    for parent in (str(receipt.get("parent_dispatch") or "").strip(),
+                   branch[len("dispatch/"):] if branch.startswith("dispatch/") else ""):
+        if parent and parent != did:
+            record["children_of"].add(parent)
+
+
+def _outcome_of(did: str, record: Dict[str, Any], superseded_by: Dict[str, str]) -> Dict[str, Any]:
+    decided = _decide(record) or {"decision": "unknown", "status": None,
+                                  "reason": "no outcome receipt, only evidence"}
+    if decided["decision"] in ("reject", "investigate") and did in superseded_by:
+        decided = {**decided, "decision": "superseded",
+                   "reason": f"{decided['decision']} superseded by {superseded_by[did]}"}
+    return {
+        "dispatch_id": did, **decided,
+        "evidence": [{k: v for k, v in e.items() if k != "pos"} for e in record["evidence"]],
+        "blocking": [{k: v for k, v in e.items() if k != "pos"} for e in record["blocking"]],
+    }
+
+
 def summarize(
     receipts: Iterable[Dict[str, Any]],
     *,
@@ -184,84 +278,35 @@ def summarize(
     or after it) and which lines are counted as bookkeeping/noise. A reported
     dispatch is always decided on its full history.
     """
-    def _in_window(receipt: Dict[str, Any]) -> bool:
-        ts = _parse_ts(receipt.get("timestamp"))
-        return cutoff is None or (ts is not None and ts >= cutoff)
-
+    in_window = _Window(cutoff)
     noise: Counter = Counter()
     bookkeeping: Counter = Counter()
-    kept: List[Tuple[int, Dict[str, Any]]] = []
-    pr_owner: Dict[str, str] = {}
-    for pos, receipt in enumerate(r for r in receipts if isinstance(r, dict)):
-        reason = noise_reason(receipt, project_id)
-        if reason is None and receipt.get("event_type") in BOOKKEEPING_EVENT_TYPES:
-            bookkeeping[str(receipt["event_type"])] += _in_window(receipt)
-        elif reason is not None:
-            noise[reason] += _in_window(receipt)
-        else:
-            kept.append((pos, receipt))
-            did, pr = _dispatch_id(receipt), _pr_of(receipt)
-            if pr and did.lower() not in INVALID_DISPATCH_IDS and not GATE_DISPATCH_RE.match(did):
-                pr_owner[pr] = did
+    kept, pr_owner = _partition(receipts, project_id, in_window, noise, bookkeeping)
 
     records: Dict[str, Dict[str, Any]] = {}
     unlinked_gate_evidence = 0
     for pos, receipt in kept:
-        did, event_type = _dispatch_id(receipt), receipt.get("event_type")
-        gate_match = GATE_DISPATCH_RE.match(did)
-        is_evidence = bool(gate_match) or event_type in EVIDENCE_EVENT_TYPES
-        is_blocking = event_type in BLOCKING_EVENT_TYPES
-        missing_id = did.lower() in INVALID_DISPATCH_IDS
-        if gate_match or (missing_id and (is_evidence or is_blocking)):
-            owner = pr_owner.get(_pr_of(receipt) or (gate_match.group("pr") if gate_match else ""))
-            if owner is None:
-                if missing_id:
-                    noise["missing_dispatch_id"] += _in_window(receipt)
-                else:
-                    unlinked_gate_evidence += _in_window(receipt)
-                continue
-            did = owner
-        elif missing_id:
-            noise["missing_dispatch_id"] += _in_window(receipt)
+        did, why = _attribute(receipt, pr_owner)
+        if did is None:
+            if why == "missing_dispatch_id":
+                noise[why] += in_window(receipt)
+            else:
+                unlinked_gate_evidence += in_window(receipt)
             continue
         record = records.setdefault(did, _new_record(did))
-        record["in_window"] = record["in_window"] or _in_window(receipt)
-        if is_evidence or is_blocking:
-            record["evidence" if is_evidence else "blocking"].append(_evidence_entry(receipt, pos))
-        elif event_type in CONTRACT_INVALID_EVENT_TYPES:
-            record["contract_invalid"], record["contract_invalid_pos"] = receipt, pos
-        elif _is_writer_b(receipt):
-            record["b"], record["b_pos"] = receipt, pos
-        elif _is_writer_a(receipt):
-            record["a"], record["a_pos"] = receipt, pos
-        if not gate_match:
-            branch = str(receipt.get("branch") or "")
-            for parent in (str(receipt.get("parent_dispatch") or "").strip(),
-                           branch[len("dispatch/"):] if branch.startswith("dispatch/") else ""):
-                if parent and parent != did:
-                    record["children_of"].add(parent)
+        record["in_window"] = record["in_window"] or in_window(receipt)
+        _fold(record, receipt, pos, did)
 
     superseded_by: Dict[str, str] = {}
     for did, record in records.items():
         for parent in record["children_of"]:
             superseded_by.setdefault(parent, did)
 
-    outcomes: List[Dict[str, Any]] = []
+    outcomes = [_outcome_of(did, record, superseded_by)
+                for did, record in records.items() if record["in_window"]]
     counts = {"accept": 0, "investigate": 0, "reject": 0, "superseded": 0, "unknown": 0}
-    for did, record in records.items():
-        if not record["in_window"]:
-            continue
-        decided = _decide(record) or {"decision": "unknown", "status": None,
-                                      "reason": "no outcome receipt, only evidence"}
-        if decided["decision"] in ("reject", "investigate") and did in superseded_by:
-            decided = {**decided, "decision": "superseded",
-                       "reason": f"{decided['decision']} superseded by {superseded_by[did]}"}
-        counts[decided["decision"]] += 1
-        outcomes.append({
-            "dispatch_id": did, **decided,
-            "evidence": [{k: v for k, v in e.items() if k != "pos"} for e in record["evidence"]],
-            "blocking": [{k: v for k, v in e.items() if k != "pos"} for e in record["blocking"]],
-        })
+    for outcome in outcomes:
+        counts[outcome["decision"]] += 1
     return {
         "verdict_counts": counts,
         "outcomes": outcomes,
