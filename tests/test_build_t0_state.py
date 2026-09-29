@@ -292,18 +292,23 @@ def test_shadow_mode_p95_latency_within_2x_per_project(
                         lambda pid: {"open_count": 0, "blocker_count": 0, "top_blockers": []})
     monkeypatch.setattr(bts, "_shadow_logger", _CaptureShadowLogger())
 
-    n = 10
+    # _collect_open_items reads one small JSON file, so a call takes well under a
+    # millisecond and a bare ratio compares timer noise (0.1ms against 0.0ms).
+    # Interleave the two modes over many rounds and bound the p95 by the ratio OR
+    # a fixed absolute margin, whichever is larger: a shadow path that starts doing
+    # real work (a DB open, a network read) still exceeds the margin.
+    n = 60
+    margin_s = 0.005
     per_project_times: List[float] = []
     shadow_times: List[float] = []
 
-    monkeypatch.delenv("VNX_USE_CENTRAL_DB", raising=False)
     for _ in range(n):
+        monkeypatch.delenv("VNX_USE_CENTRAL_DB", raising=False)
         t0 = time.perf_counter()
         bts._collect_open_items(SAMPLE_PROJECT_ID, state_dir)
         per_project_times.append(time.perf_counter() - t0)
 
-    monkeypatch.setenv("VNX_USE_CENTRAL_DB", "shadow")
-    for _ in range(n):
+        monkeypatch.setenv("VNX_USE_CENTRAL_DB", "shadow")
         t0 = time.perf_counter()
         bts._collect_open_items(SAMPLE_PROJECT_ID, state_dir)
         shadow_times.append(time.perf_counter() - t0)
@@ -313,9 +318,11 @@ def test_shadow_mode_p95_latency_within_2x_per_project(
     p95_idx = int(0.95 * n) - 1
     p95_per_project = per_project_times[p95_idx]
     p95_shadow = shadow_times[p95_idx]
+    limit = max(2.0 * p95_per_project, p95_per_project + margin_s)
 
-    assert p95_shadow <= 2.0 * p95_per_project, (
-        f"Shadow p95 {p95_shadow*1000:.1f}ms exceeds 2× per-project p95 {p95_per_project*1000:.1f}ms"
+    assert p95_shadow <= limit, (
+        f"Shadow p95 {p95_shadow*1000:.1f}ms exceeds limit {limit*1000:.1f}ms "
+        f"(per-project p95 {p95_per_project*1000:.1f}ms, 2x or +{margin_s*1000:.0f}ms)"
     )
 
 
