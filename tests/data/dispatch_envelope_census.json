@@ -1651,6 +1651,41 @@
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_sonnet_5_5_registry_and_model_resolved.py",
+      "line": 35,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "ClaudeSubprocessAdapter"
+    },
+    {
+      "file": "tests/test_sonnet_5_5_registry_and_model_resolved.py",
+      "line": 36,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_sonnet_5_5_registry_and_model_resolved.py",
+      "line": 37,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "run_envelope_headless_plan"
+    },
+    {
+      "file": "tests/test_sonnet_5_5_registry_and_model_resolved.py",
+      "line": 42,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_sonnet_5_5_registry_and_model_resolved.py",
+      "line": 259,
+      "mechanism": "patch.object-attr",
+      "module_target": "dispatch_envelope",
+      "symbol": "ClaudeSubprocessAdapter.run"
     }
   ],
   "family": [

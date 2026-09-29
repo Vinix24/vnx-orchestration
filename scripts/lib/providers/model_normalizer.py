@@ -17,6 +17,7 @@ Canonical name = the registry key (e.g. ``opus-5``, ``sonnet-5``,
   claude-opus-4-8               -> opus-4-8
   claude-opus-5                 -> opus-5
   claude-sonnet-5               -> sonnet-5
+  claude-sonnet-5-5             -> sonnet-5-5
   claude-sonnet-4-6             -> sonnet-4-6
   claude-fable-5                -> fable-5
 

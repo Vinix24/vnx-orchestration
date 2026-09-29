@@ -1034,5 +1034,6 @@ class TestEnvelopeCostUsd:
         mock_receipt.assert_called_once()
         cost_usd = mock_receipt.call_args[1]["cost_usd"]
         assert cost_usd is not None
-        # sonnet = 3.00/15.00 per MTok
-        assert abs(cost_usd - (3.0 * 0.0002 + 15.0 * 0.0001)) < 1e-9
+        # sonnet = claude-sonnet-5-5 = 2.00/10.00 per MTok (registry, 2026-09-29)
+        # plus 50 cache-hit tokens at the registry cache-read rate 0.20/MTok
+        assert abs(cost_usd - (2.0 * 0.0002 + 10.0 * 0.0001 + 0.20 * 0.00005)) < 1e-9

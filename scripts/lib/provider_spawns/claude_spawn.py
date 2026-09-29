@@ -66,6 +66,10 @@ class ClaudeSpawnResult:
     # events (incremental chunks); falls back to result event 'text' field.
     # Workers write their own reports; this field is additive for benchmark/utility callers.
     completion_text: str = ""
+    # Raw model id the claude CLI reported in the init event (e.g.
+    # ``claude-sonnet-5-5``), i.e. what the requested alias actually resolved
+    # to. None when the stream never emitted an init event with a model.
+    model_resolved: Optional[str] = None
     # Internal: the SubprocessAdapter instance used for this spawn.
     # Callers may use this for post-spawn cleanup (event_store.clear,
     # trigger_report_pipeline) to ensure the same session_id and state are
@@ -240,6 +244,7 @@ def spawn_claude(
     last_stuck_log = 0.0
     token_usage: Optional[Dict[str, Any]] = None
     text_parts: List[str] = []
+    model_resolved: Optional[str] = None
 
     try:
         for event in adapter.read_events_with_timeout(
@@ -254,6 +259,13 @@ def spawn_claude(
                 chunk = (event.data or {}).get("text", "") if isinstance(event.data, dict) else ""
                 if chunk:
                     text_parts.append(chunk)
+
+            # The init event carries the model the CLI actually resolved the
+            # requested alias to. First one wins; absent means no field.
+            if event.type == "init" and model_resolved is None and isinstance(event.data, dict):
+                _init_model = event.data.get("model")
+                if isinstance(_init_model, str) and _init_model.strip():
+                    model_resolved = _init_model.strip()
 
             # Capture final result event (agent_message + metadata + usage).
             if event.type == "result":
@@ -322,6 +334,7 @@ def spawn_claude(
             timed_out=False,
             error=str(e),
             completion_text="".join(text_parts),
+            model_resolved=model_resolved,
         )
 
     timed_out = adapter.was_timed_out(terminal_id)
@@ -342,5 +355,6 @@ def spawn_claude(
         stopped_early=stopped_early,
         token_usage=token_usage,
         completion_text=completion_text,
+        model_resolved=model_resolved,
         _adapter=adapter,
     )

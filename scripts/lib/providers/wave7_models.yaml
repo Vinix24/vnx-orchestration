@@ -52,16 +52,23 @@ providers:
         price_source: "Anthropic first-party pricing page (platform.claude.com/docs/en/about-claude/pricing)"
         price_checked_at: "2026-08-19"
         task_classes: ["coding-premium", "review", "analysis"]
+      # The `sonnet` alias tracks what `claude -p --model sonnet` resolves to.
+      # Since CLI 2.1.284 (2026-09-28 ~22:00) that is claude-sonnet-5-5, measured
+      # from the `model` field of the init event in the event archive (last 86
+      # runs before the switch: claude-sonnet-5, after: claude-sonnet-5-5). Same
+      # id and price as the sonnet-5-5 entry below; `sonnet-5` stays registered
+      # for the 5-versus-5.5 comparison, like opus-5 next to opus-5-5.
       sonnet:
-        litellm_name: "anthropic/claude-sonnet-5"
-        cost_input_per_mtok: 3.00
-        cost_output_per_mtok: 15.00
-        max_tokens: 64000
-        context_window: 200000
+        litellm_name: "anthropic/claude-sonnet-5-5"
+        cost_input_per_mtok: 2.00
+        cost_output_per_mtok: 10.00
+        cost_cache_read_per_mtok: 0.20
+        max_tokens: 128000
+        context_window: 1000000
         supports_streaming: true
         supports_tool_calls: true
-        price_source: "unverified: registry-authored"
-        price_checked_at: "2026-05-17"
+        price_source: "Anthropic first-party pricing and model overview (platform.claude.com/docs/en/about-claude/pricing, platform.claude.com/docs/en/about-claude/models/overview)"
+        price_checked_at: "2026-09-29"
         task_classes: ["coding", "review", "analysis"]
       haiku:
         litellm_name: "anthropic/claude-haiku-4-5-20251001"
@@ -95,6 +102,26 @@ providers:
         supports_tool_calls: true
         price_source: "Anthropic first-party pricing page (platform.claude.com/docs/en/about-claude/pricing)"
         price_checked_at: "2026-08-19"
+        task_classes: ["coding", "review", "analysis"]
+      # Sonnet 5.5 (dispatch-20260929-registry-sonnet-5-5): the alias `sonnet`
+      # resolves here since CLI 2.1.284. Facts from the official Anthropic model
+      # overview and pricing pages, fetched 2026-09-29: API id claude-sonnet-5-5,
+      # 1M context, 128K max output, default effort high. Per Mtok: input 2.00,
+      # output 10.00, cache write 5m 2.50, cache write 1h 4.00, cache hit 0.20.
+      # Only the cache-hit price is modelled (cost_cache_read_per_mtok); the
+      # registry has no cache-write attribute. sonnet-5 above stays for the
+      # comparison of 5 against 5.5.
+      sonnet-5-5:
+        litellm_name: "anthropic/claude-sonnet-5-5"
+        cost_input_per_mtok: 2.00
+        cost_output_per_mtok: 10.00
+        cost_cache_read_per_mtok: 0.20
+        max_tokens: 128000
+        context_window: 1000000
+        supports_streaming: true
+        supports_tool_calls: true
+        price_source: "Anthropic first-party pricing and model overview (platform.claude.com/docs/en/about-claude/pricing, platform.claude.com/docs/en/about-claude/models/overview)"
+        price_checked_at: "2026-09-29"
         task_classes: ["coding", "review", "analysis"]
       opus-5:
         litellm_name: "anthropic/claude-opus-5"

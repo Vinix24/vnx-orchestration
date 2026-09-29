@@ -102,3 +102,7 @@ class _AdapterResult:
     # actually ran, not a placeholder from the dispatch spec. None when the
     # adapter did not resolve a distinct model (caller falls back to spec.model).
     model: Optional[str] = None
+    # Raw model id the claude CLI reported in its init event (what the requested
+    # alias resolved to, e.g. "claude-sonnet-5-5"). Normalized and stamped on the
+    # receipt as model_resolved. None when the stream carried no init model.
+    model_resolved: Optional[str] = None

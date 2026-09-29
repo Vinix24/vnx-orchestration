@@ -395,8 +395,8 @@ class TestComputeCost:
         import provider_dispatch as pd
         pricing = pd._load_pricing_from_registry("claude", "sonnet")
         assert pricing is not None
-        assert abs(pricing["input"] - 3.0) < 1e-6
-        assert abs(pricing["output"] - 15.0) < 1e-6
+        assert abs(pricing["input"] - 2.0) < 1e-6
+        assert abs(pricing["output"] - 10.0) < 1e-6
 
     def test_load_pricing_registry_google_gemini(self):
         import provider_dispatch as pd

@@ -520,6 +520,7 @@ def _govern(
                         getattr(_role_app, "source_path", None) if _role_app is not None else None
                     ),
                     session_id=adapter_result.session_id,
+                    model_resolved=getattr(adapter_result, "model_resolved", None),
                     tool_call_count=_toolcall_signals.get("tool_call_count"),
                     tool_call_failures=_toolcall_signals.get("tool_call_failures"),
                     tool_call_retries=_toolcall_signals.get("tool_call_retries"),
