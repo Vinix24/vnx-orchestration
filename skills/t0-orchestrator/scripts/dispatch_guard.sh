@@ -11,8 +11,14 @@
 #
 # Exit codes:
 #   0 = GO (safe to dispatch)
-#   2 = WAIT (degraded, busy terminal, or active/pending queue)
+#   2 = WAIT (degraded, live work in the air, pending queue, or conflicts)
 #   1 = error (missing state)
+#
+# D5 (fabric-state-herstel): "is there work in the air" comes from
+# .live_work (dispatches table + occupancy flock), not from .terminals or
+# .queues.active_count, which the status snapshot no longer carries. Every
+# live, starting, stale or unmeasured row is WAIT; a missing or unavailable
+# live_work is Missing state, never GO.
 
 set -euo pipefail
 
@@ -40,7 +46,7 @@ Usage:
 
 Exit codes:
   0 = GO (safe to dispatch)
-  2 = WAIT (degraded, busy terminal, or active/pending queue)
+  2 = WAIT (degraded, live work in the air, pending queue, or conflicts)
   1 = error (missing state)
 USAGE
 }
@@ -77,6 +83,30 @@ _fetch_pool_json() {
     "$bin" pool status --json --project-dir "$REPO_ROOT" 2>/dev/null
 }
 
+_LIVE_BUCKETS_JQ='[.live_work.live, .live_work.starting, .live_work.stale, .live_work.unmeasured]'
+
+# "live=N starting=N stale=N unmeasured=N", counted from the row lists so a
+# stale .counts block can never under-report.
+_live_counts() {
+    jq -r '.live_work | "live=\(.live | length) starting=\(.starting | length) stale=\(.stale | length) unmeasured=\(.unmeasured | length)"' <<<"$1"
+}
+
+# Empty output = live_work usable. Otherwise the reason it is not.
+_live_work_problem() {
+    jq -r '
+        if (.live_work | type) != "object" or (.live_work | length) == 0 then
+            "live_work missing"
+        elif .live_work.available != true then
+            "live_work unavailable: " + (.live_work.reason // "no reason given" | tostring)
+        elif ([.live_work.live, .live_work.starting, .live_work.stale, .live_work.unmeasured]
+              | all(type == "array") | not) then
+            "live_work lacks a live/starting/stale/unmeasured list"
+        else
+            empty
+        end
+    ' <<<"$1"
+}
+
 evaluate_state() {
     _GUARD_REASON=""
     local status_json="$1"
@@ -90,20 +120,21 @@ evaluate_state() {
         return 2
     fi
 
-    # Check 2: busy terminal (working/blocked) → WAIT.
-    local busy_count
-    busy_count=$(jq -r '[.terminals | to_entries[] | select(.value.status == "working" or .value.status == "blocked")] | length' <<<"$status_json")
-    if [ "$busy_count" -gt 0 ]; then
-        _GUARD_REASON="busy: terminals=${busy_count}"
+    # Check 2: any in-flight dispatch row → WAIT. unmeasured means the lock
+    # probe raised: not measurable, so not GO. main() has already refused a
+    # snapshot whose live_work is missing, unavailable or lacks a bucket.
+    local live_total
+    live_total=$(jq -r "$_LIVE_BUCKETS_JQ | map(length) | add" <<<"$status_json")
+    if [ "$live_total" -gt 0 ]; then
+        _GUARD_REASON="busy: live_work $(_live_counts "$status_json")"
         return 2
     fi
 
-    # Check 3: active/pending dispatch queue → WAIT.
-    local pending_count active_count
+    # Check 3: pending dispatch queue → WAIT.
+    local pending_count
     pending_count=$(jq -r '.queues.pending_count // 0' <<<"$status_json")
-    active_count=$(jq -r '.queues.active_count // 0' <<<"$status_json")
-    if [ "$pending_count" -gt 0 ] || [ "$active_count" -gt 0 ]; then
-        _GUARD_REASON="queue: pending=${pending_count} active=${active_count}"
+    if [ "$pending_count" -gt 0 ]; then
+        _GUARD_REASON="queue: pending=${pending_count}"
         return 2
     fi
 
@@ -122,12 +153,12 @@ print_human() {
     if evaluate_state "$_STATUS_JSON"; then
         echo "GO: safe to dispatch"
     else
-        echo "WAIT: ${_GUARD_REASON:-terminals or queue are not idle}"
+        echo "WAIT: ${_GUARD_REASON:-live work or queue are not idle}"
     fi
 
-    echo "Queue: pending=$(jq -r '.queues.pending_count // 0' <<<"$_STATUS_JSON") active=$(jq -r '.queues.active_count // 0' <<<"$_STATUS_JSON") conflicts=$(jq -r '.queues.conflict_count // 0' <<<"$_STATUS_JSON")"
-    echo "Terminals:"
-    jq -r '.terminals | to_entries[] | "\(.key)=\(.value.status)(\(.value.status_age_seconds // 0)s)"' <<<"$_STATUS_JSON"
+    echo "Queue: pending=$(jq -r '.queues.pending_count // 0' <<<"$_STATUS_JSON") conflicts=$(jq -r '.queues.conflict_count // 0' <<<"$_STATUS_JSON")"
+    echo "Live work: $(_live_counts "$_STATUS_JSON")"
+    jq -r '.live_work | ("live", "starting", "stale", "unmeasured") as $b | .[$b][] | "  \($b) \(.dispatch_id // "?") state=\(.state // "?") lock=\(.lock // "?") age=\(.age_seconds // 0)s"' <<<"$_STATUS_JSON"
 
     local pool
     pool="$(_fetch_pool_json)" || true
@@ -147,8 +178,8 @@ print_json() {
     jq -n \
         --arg decision "$decision" \
         --arg reason "$_GUARD_REASON" \
-        --argjson state "$(jq -c '{queues: .queues, terminals: .terminals, system_health: .system_health}' <<<"$_STATUS_JSON")" \
-        '{decision: $decision, reason: $reason, queues: $state.queues, terminals: $state.terminals, system_health: $state.system_health}'
+        --argjson state "$(jq -c '{queues: .queues, live_work: .live_work, system_health: .system_health}' <<<"$_STATUS_JSON")" \
+        '{decision: $decision, reason: $reason, queues: $state.queues, live_work: $state.live_work, system_health: $state.system_health}'
 }
 
 main() {
@@ -170,6 +201,12 @@ main() {
     sh_status=$(jq -r '.system_health.status? // "unavailable"' <<<"$_STATUS_JSON")
     if [ "$sh_status" = "unavailable" ]; then
         echo "Missing state: system_health unavailable via 'vnx status --json'" >&2
+        exit 1
+    fi
+    local live_problem
+    live_problem="$(_live_work_problem "$_STATUS_JSON")"
+    if [ -n "$live_problem" ]; then
+        echo "Missing state: ${live_problem} via 'vnx status --json'" >&2
         exit 1
     fi
 

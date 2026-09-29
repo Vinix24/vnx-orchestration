@@ -45,6 +45,23 @@ Schema 2.2 addition (OI-1414, permission escalations):
     to see the backlog was the standalone ``vnx permission escalations`` CLI,
     which nobody ran proactively.
 
+Schema 2.2 change (D5 fabric-state-herstel, live work):
+  - ``live_work`` replaces ``active_work``: in-flight ``dispatches`` rows of
+    this project (runtime_coordination.db, read-only) classified by their
+    occupancy flock as live / starting / stale / unmeasured, with open PRs
+    linked by ``dispatch/<id>``. A failed read is ``available: false`` with a
+    reason and degrades system_health (``degraded_reasons``).
+  - ``queues.pending_count`` counts staged spec bundles
+    (``pending/<id>/dispatch-spec.json``) and ``pending/<id>.md`` files, one
+    per id; ``queues.active_count`` is gone. A ``pending/`` or
+    ``conflicts/`` directory that exists but cannot be listed is not zero:
+    its count is ``null`` with a ``*_unmeasured_reason`` and it degrades
+    system_health, so the dispatch guard reads WAIT, never GO.
+  - t0_index.json (schema ``t0_index/1.1``) drops ``terminals``,
+    ``queue.active`` and ``active_dispatches`` for a compact ``live_work``.
+    ``terminals`` stays in t0_state.json while headless_dispatch_daemon and
+    feature_state_machine read its ``lease_state``.
+
 Schema 2.1 changes (W4E / OI-1199):
   - feature_state union-merges register-canonical aggregation with the
     FEATURE_PLAN.md fallback fields (current_pr/next_task/assigned_track/
@@ -69,7 +86,6 @@ import json
 import logging
 import os
 import plistlib
-import re
 import shutil
 import sqlite3
 import subprocess
@@ -78,7 +94,7 @@ import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 log = logging.getLogger(__name__)
 
@@ -246,12 +262,65 @@ def _shadow_log(cmp: Any, project_id: str, read_site: str) -> None:
 
 
 def _count_md(directory: Path) -> int:
+    """``.md`` files in ``directory``; 0 when it does not exist.
+
+    Raises OSError when the directory exists but cannot be listed: not
+    measurable is not zero (see _measure_queue_count).
+    """
     if not directory.is_dir():
         return 0
-    try:
-        return sum(1 for f in directory.iterdir() if f.is_file() and f.suffix == ".md")
-    except Exception:
+    return sum(1 for f in directory.iterdir() if f.is_file() and f.suffix == ".md")
+
+
+def _count_pending_dispatches(directory: Path) -> int:
+    """Pending dispatches in both forms that still get written, one per id.
+
+    - ``pending/<id>/dispatch-spec.json``: the headless door's staged bundle
+      (dispatch_bridge.stage). A gate bundle holding only ``final_prompt.md``
+      (provider_dispatch) is not a staged dispatch and does not count.
+    - ``pending/<id>.md``: what queue_auto_accept.sh (started by
+      vnx_supervisor_simple.sh) moves over from ``queue/``.
+
+    A missing directory is 0: nothing is demonstrably staged there. Raises
+    OSError when the directory exists but cannot be listed.
+    """
+    if not directory.is_dir():
         return 0
+    ids = {
+        entry.stem if entry.is_file() else entry.name
+        for entry in directory.iterdir()
+        if (entry.is_file() and entry.suffix == ".md")
+        or (entry.is_dir() and (entry / "dispatch-spec.json").is_file())
+    }
+    return len(ids)
+
+
+def _measure_queue_count(
+    counter: Callable[[Path], int], directory: Path
+) -> Tuple[Optional[int], Optional[str]]:
+    """``(count, None)``, or ``(None, reason)`` when the directory is unreadable.
+
+    The count feeds dispatch_guard.sh (queues.pending_count /
+    queues.conflict_count). Folding a read error to 0 would read as GO while
+    work may be staged, so an unreadable directory yields no number at all.
+    """
+    try:
+        return counter(directory), None
+    except OSError as exc:
+        log.warning("queue directory %s unreadable: %s", directory, exc)
+        return None, f"{type(exc).__name__}: {exc}"
+
+
+def _queue_degraded_reasons(queues: Dict[str, Any]) -> List[str]:
+    """One system_health reason per queue count that could not be measured."""
+    return [
+        f"queues.{field} unmeasured: {queues[reason_key]}"
+        for field, reason_key in (
+            ("pending_count", "pending_unmeasured_reason"),
+            ("conflict_count", "conflict_unmeasured_reason"),
+        )
+        if queues.get(reason_key)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -469,7 +538,8 @@ def _build_terminals(state_dir: Path) -> Dict[str, Any]:
         from canonical_state_views import build_terminal_snapshot, _brief_terminals
         snapshot = build_terminal_snapshot(state_dir)
         terminals: Dict[str, Any] = _brief_terminals(snapshot)
-    except Exception:
+    except Exception as exc:
+        log.warning("terminal snapshot failed: %s", exc)
         terminals = {
             t: {
                 "status": "unknown",
@@ -478,6 +548,7 @@ def _build_terminals(state_dir: Path) -> Dict[str, Any]:
                 "current_task": None,
                 "last_update": "never",
                 "source": "error",
+                "error": f"{type(exc).__name__}: {exc}",
                 "status_age_seconds": None,
             }
             for t, tr in [("T1", "A"), ("T2", "B"), ("T3", "C")]
@@ -494,9 +565,12 @@ def _build_terminals(state_dir: Path) -> Dict[str, Any]:
                 )
                 # Rename current_task -> current_dispatch for schema 2.0
                 terminals[tid]["current_dispatch"] = terminals[tid].pop("current_task", None)
-    except Exception:
+    except Exception as exc:
+        # Not "idle": a lease read that failed is unmeasured, and says why.
+        log.warning("terminal lease read failed: %s", exc)
         for tid in ("T1", "T2", "T3"):
-            terminals.setdefault(tid, {})["lease_state"] = "idle"
+            terminals.setdefault(tid, {})["lease_state"] = "unknown"
+            terminals[tid]["lease_error"] = f"{type(exc).__name__}: {exc}"
             if "current_task" in terminals.get(tid, {}):
                 terminals[tid]["current_dispatch"] = terminals[tid].pop("current_task")
 
@@ -508,9 +582,12 @@ def _build_terminals(state_dir: Path) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def _build_queues(dispatch_dir: Path, state_dir: Path) -> Dict[str, Any]:
-    pending = _count_md(dispatch_dir / "pending")
-    active = _count_md(dispatch_dir / "active")
-    conflict = _count_md(dispatch_dir / "conflicts")
+    # D5: what is active comes from live_work (DB + occupancy flock), not
+    # from a directory the headless door never writes.
+    pending, pending_reason = _measure_queue_count(
+        _count_pending_dispatches, dispatch_dir / "pending"
+    )
+    conflict, conflict_reason = _measure_queue_count(_count_md, dispatch_dir / "conflicts")
 
     completed_last_hour = 0
     # Phase 6 P3: prefer central receipts when available (derived from state_dir)
@@ -555,12 +632,16 @@ def _build_queues(dispatch_dir: Path, state_dir: Path) -> Dict[str, Any]:
         except OSError as e:
             log.debug("Could not read receipts file %s: %s", receipts_path, e)
 
-    return {
+    queues: Dict[str, Any] = {
         "pending_count": pending,
-        "active_count": active,
         "completed_last_hour": completed_last_hour,
         "conflict_count": conflict,
     }
+    if pending_reason:
+        queues["pending_unmeasured_reason"] = pending_reason
+    if conflict_reason:
+        queues["conflict_unmeasured_reason"] = conflict_reason
+    return queues
 
 
 # ---------------------------------------------------------------------------
@@ -1609,118 +1690,247 @@ def _collect_dispatch_insights(
 
 
 # ---------------------------------------------------------------------------
-# Active work (scans dispatches/active/) — R6.2 + R6.3
+# Live work (D5 fabric-state-herstel): runtime_coordination.db + occupancy flock
 # ---------------------------------------------------------------------------
+#
+# What is running now comes from the two places that know: the ``dispatches``
+# rows the door moves to claimed/delivering (dispatch_cli.py) and the occupancy
+# flock the envelope holds from worktree creation to removal
+# (dispatch_worktree_isolation._acquire_occupancy). The old readers scanned
+# ``dispatches/active/``, which the headless door never writes, and the
+# terminals, which the headless lane does not use.
+#
+# Life is "lock held", not "row is young": a headless run of 90 minutes is
+# live as long as its holder is alive, and the kernel drops the lock the
+# instant the holder dies. A row in flight without a held lock gets a short
+# run-up (claim -> worktree) and is stale after that.
+
+_LIVE_WORK_STARTUP_GRACE_SECONDS = 120
+_LIVE_WORK_DB_BUSY_TIMEOUT_MS = 2000
+_INDEX_LIVE_WORK_LIVE_CAP = 8
+_INDEX_LIVE_WORK_STALE_CAP = 5
+_DISPATCH_BRANCH_PREFIX = "dispatch/"
 
 
-def _read_dir_dispatch(subdir: Path) -> tuple[Dict[str, Any], bool]:
-    """Read one directory-form active dispatch (active/<id>/manifest.json).
+def _parse_utc(raw: Any) -> Optional[datetime]:
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
-    Returns (item, has_error). R6.2: corrupt manifest yields a placeholder
-    with artifact_error so the dispatch is NOT silently dropped.
+
+def _live_work_unavailable(reason: str, *, read_error: bool) -> Dict[str, Any]:
+    """``read_error`` separates a read that raised (locked, malformed: health
+    degrades) from a precondition that was not met (no project_id, no DB, a
+    pre-migration schema: the R6.1 fallback, reported but not degrading)."""
+    return {"available": False, "reason": reason, "read_error": read_error}
+
+
+# Without these the read is unscoped (project_id, ADR-007) or has nothing to
+# classify: a store lacking one is pre-migration and live_work is unavailable.
+_LIVE_WORK_REQUIRED_COLUMNS = ("dispatch_id", "state", "project_id")
+# Selected when present, NULL otherwise. claimed_at arrives only with
+# migration 0026 (website-vincentvandeth had none on 29-09); the others are in
+# the base schema but a legacy table without them still has live work.
+_LIVE_WORK_OPTIONAL_COLUMNS = ("track", "gate", "created_at", "updated_at", "claimed_at")
+
+
+class LiveWorkSchemaError(Exception):
+    """The ``dispatches`` table lacks a column live_work cannot do without."""
+
+    def __init__(self, missing: List[str], table_exists: bool = True) -> None:
+        self.missing = missing
+        super().__init__(
+            f"dispatches lacks required column(s): {', '.join(missing)}"
+            if table_exists else "no dispatches table"
+        )
+
+
+def _read_in_flight_rows(db_path: Path, project_id: str, states: List[str]) -> List[tuple]:
+    """In-flight ``dispatches`` rows of *project_id*, newest first.
+
+    Each row is ``(dispatch_id, state, track, gate, created_at, updated_at,
+    claimed_at)``; an optional column the table does not have reads as None.
+    Raises LiveWorkSchemaError for a missing required column, sqlite3.Error
+    for a read that fails.
     """
-    dispatch_id = subdir.name
+    conn = sqlite3.connect(
+        f"file:{db_path}?mode=ro", uri=True,
+        timeout=_LIVE_WORK_DB_BUSY_TIMEOUT_MS / 1000,
+    )
     try:
-        started_at: Optional[str] = datetime.fromtimestamp(
-            subdir.stat().st_mtime, tz=timezone.utc
-        ).isoformat().replace("+00:00", "Z")
-    except OSError:
-        started_at = None
+        conn.execute(f"PRAGMA busy_timeout = {_LIVE_WORK_DB_BUSY_TIMEOUT_MS}")
+        present = {row[1] for row in conn.execute("PRAGMA table_info(dispatches)")}
+        missing = [c for c in _LIVE_WORK_REQUIRED_COLUMNS if c not in present]
+        if missing:
+            raise LiveWorkSchemaError(missing, table_exists=bool(present))
+        select = ", ".join(
+            [*_LIVE_WORK_REQUIRED_COLUMNS[:2]]
+            + [c if c in present else f"NULL AS {c}" for c in _LIVE_WORK_OPTIONAL_COLUMNS]
+        )
+        order = "created_at DESC" if "created_at" in present else "rowid DESC"
+        placeholders = ",".join("?" for _ in states)
+        return conn.execute(
+            f"SELECT {select} FROM dispatches"
+            f" WHERE project_id = ? AND state IN ({placeholders}) ORDER BY {order}",
+            (project_id, *states),
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def _link_open_prs(
+    pr_queue: Optional[Dict[str, Any]],
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """Map dispatch_id -> PR number via ``dispatch/<id>`` branches, plus every open PR."""
+    pr_by_dispatch: Dict[str, Any] = {}
+    linked_prs: List[Dict[str, Any]] = []
+    for pr in (pr_queue or {}).get("open_prs") or []:
+        branch = str(pr.get("branch") or "")
+        dispatch_id = (
+            branch[len(_DISPATCH_BRANCH_PREFIX):]
+            if branch.startswith(_DISPATCH_BRANCH_PREFIX) else None
+        )
+        if dispatch_id:
+            pr_by_dispatch[dispatch_id] = pr.get("number")
+        linked_prs.append({"number": pr.get("number"), "dispatch_id": dispatch_id})
+    return pr_by_dispatch, linked_prs
+
+
+def _classify_live_row(
+    row: tuple, claims_dir: Path, now: datetime, pr_by_dispatch: Dict[str, Any],
+) -> Tuple[str, Dict[str, Any]]:
+    """(bucket, item) for one in-flight row, judged by the lock in *claims_dir*."""
+    from dispatch_worktree_isolation import probe_occupancy
+
+    dispatch_id, state, track, gate, created_at, updated_at, claimed_at = row
+    started = _parse_utc(claimed_at) or _parse_utc(updated_at) or _parse_utc(created_at)
+    age = int((now - started).total_seconds()) if started else None
     try:
-        data = _safe_json(subdir / "manifest.json")
-        if data is None:
-            # Missing file or non-object JSON — flag as artifact error (Warning 3)
-            return {
-                "dispatch_id": dispatch_id,
-                "track": None, "gate": None, "started_at": started_at,
-                "artifact_error": "manifest missing or non-object",
-            }, True
-        return {
-            "dispatch_id": dispatch_id,
-            "track": data.get("track"),
-            "gate": data.get("gate"),
-            "started_at": started_at,
-        }, False
-    except json.JSONDecodeError as exc:
-        return {
-            "dispatch_id": dispatch_id,
-            "track": None, "gate": None, "started_at": started_at,
-            "artifact_error": str(exc),
-        }, True
+        lock = probe_occupancy(claims_dir, dispatch_id)
+    except OSError as exc:
+        lock = f"unmeasured: {exc}"
+    if lock == "held":
+        bucket = "live"
+    elif lock.startswith("unmeasured"):
+        bucket = "unmeasured"
+    elif age is not None and age < _LIVE_WORK_STARTUP_GRACE_SECONDS:
+        bucket = "starting"
+    else:
+        bucket = "stale"
+    return bucket, {
+        "dispatch_id": dispatch_id,
+        "state": state,
+        "age_seconds": age,
+        "lock": lock,
+        "track": track,
+        "gate": gate,
+        "started_at": started.isoformat() if started else None,
+        "pr": pr_by_dispatch.get(dispatch_id),
+    }
 
 
-def _read_md_dispatch(md_file: Path) -> tuple[Dict[str, Any], bool]:
-    """Read one legacy .md active dispatch. Returns (item, has_error)."""
-    dispatch_id = md_file.stem
-    try:
-        started_at = datetime.fromtimestamp(
-            md_file.stat().st_mtime, tz=timezone.utc
-        ).isoformat().replace("+00:00", "Z")
-        track: Optional[str] = None
-        gate: Optional[str] = None
-        for line in md_file.read_text(encoding="utf-8", errors="ignore").splitlines():
-            if track is None:
-                m = re.search(r"\[\[TARGET:([^\]]+)\]\]", line)
-                if m:
-                    track = m.group(1).strip()
-            if gate is None and re.match(r"^Gate:\s*\S+", line, re.IGNORECASE):
-                gate = line.split(":", 1)[1].strip()
-            if track and gate:
-                break
-        return {
-            "dispatch_id": dispatch_id,
-            "track": track, "gate": gate, "started_at": started_at,
-        }, False
-    except Exception as exc:
-        return {
-            "dispatch_id": dispatch_id,
-            "track": None, "gate": None, "started_at": None,
-            "artifact_error": str(exc),
-        }, True
+def _build_live_work(
+    state_dir: Path,
+    project_id: str,
+    pr_queue: Optional[Dict[str, Any]],
+    now: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """In-flight dispatches of *project_id*, classified by their occupancy lock.
 
+    ``live``: lock held. ``starting``: no lock yet, younger than the run-up.
+    ``stale``: no lock, older than the run-up. ``unmeasured``: the lock probe
+    itself raised. Open PRs are linked to their dispatch via ``dispatch/<id>``.
 
-def _build_active_work(
-    dispatch_dir: Path,
-) -> tuple[List[Dict[str, Any]], bool]:
-    """Scan active dispatches from directory and legacy .md forms.
+    ADR-007: the rows are filtered on project_id and the lock is probed in the
+    claim registry of the same state dir, which belongs to one project only
+    (``claims_dir_for_state_dir``, shared with the writer). Another project's
+    lock under a colliding dispatch_id lives in its own state dir and is never
+    seen here.
 
-    Returns (items, has_artifact_errors). R6.2+R6.3.
+    A failed DB read returns ``{"available": False, "reason": ...}``, never an
+    empty list that reads as "nothing running".
     """
-    active_dir = dispatch_dir / "active"
-    if not active_dir.is_dir():
-        return [], False
+    from coordination_db import IN_FLIGHT_DISPATCH_STATES
+    from dispatch_worktree_isolation import claims_dir_for_state_dir
 
-    items: List[Dict[str, Any]] = []
-    seen_ids: set[str] = set()
-    has_errors = False
+    if not project_id:
+        # ADR-007: an unscoped read of a shared table would show every project.
+        return _live_work_unavailable(
+            "no project_id: refusing an unscoped dispatches read", read_error=False,
+        )
+    db_path = state_dir / "runtime_coordination.db"
+    if not db_path.exists():
+        return _live_work_unavailable(
+            f"runtime_coordination.db not found at {db_path}", read_error=False,
+        )
 
-    # Directory-form: active/<dispatch_id>/manifest.json
+    states = sorted(IN_FLIGHT_DISPATCH_STATES)
     try:
-        for subdir in sorted(d for d in active_dir.iterdir() if d.is_dir()):
-            item, err = _read_dir_dispatch(subdir)
-            items.append(item)
-            if err:
-                has_errors = True
-            seen_ids.add(subdir.name)
-    except OSError as exc:
-        log.debug("Failed to enumerate active dispatch dirs in %s: %s", active_dir, exc)
-        has_errors = True  # R6.2: unreadable dir is a failure, not a silent skip
+        rows = _read_in_flight_rows(db_path, project_id, states)
+    except LiveWorkSchemaError as exc:
+        return _live_work_unavailable(f"premigration: {exc}", read_error=False)
+    except sqlite3.Error as exc:
+        kind = _classify_db_error(exc)
+        return _live_work_unavailable(
+            f"{kind}: {type(exc).__name__}: {exc}", read_error=(kind != "premigration"),
+        )
 
-    # Legacy .md form — de-dup against directory form (R6.3)
-    try:
-        for md_file in sorted(active_dir.glob("*.md")):
-            if md_file.stem in seen_ids:
-                continue
-            item, err = _read_md_dispatch(md_file)
-            items.append(item)
-            if err:
-                has_errors = True
-            seen_ids.add(md_file.stem)
-    except OSError as exc:
-        log.debug("Failed to enumerate active dispatches in %s: %s", active_dir, exc)
-        has_errors = True  # R6.2: unreadable dir is a failure, not a silent skip
+    pr_by_dispatch, linked_prs = _link_open_prs(pr_queue)
+    actual_now = now if now is not None else _now_utc()
+    claims_dir = claims_dir_for_state_dir(state_dir)
+    buckets: Dict[str, List[Dict[str, Any]]] = {
+        "live": [], "starting": [], "stale": [], "unmeasured": [],
+    }
+    for row in rows:
+        bucket, item = _classify_live_row(row, claims_dir, actual_now, pr_by_dispatch)
+        buckets[bucket].append(item)
 
-    return items[:5], has_errors
+    return {
+        "available": True,
+        "in_flight_states": states,
+        "startup_grace_seconds": _LIVE_WORK_STARTUP_GRACE_SECONDS,
+        **buckets,
+        "counts": {name: len(items) for name, items in buckets.items()},
+        "open_prs": linked_prs,
+    }
+
+
+def _live_work_index_summary(live_work: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Compact live_work for the always-loaded t0_index.json (<=5KB budget).
+
+    Lists are capped; ``counts`` keeps the true totals so a cap never reads
+    as "fewer running".
+    """
+    live_work = live_work or {}
+    if not live_work.get("available"):
+        return {"available": False, "reason": live_work.get("reason") or "live_work not built"}
+
+    def _slim(item: Dict[str, Any], *keys: str) -> Dict[str, Any]:
+        return {k: item.get(k) for k in keys}
+
+    running = (live_work.get("live") or []) + (live_work.get("starting") or [])
+    return {
+        "available": True,
+        "counts": live_work.get("counts") or {},
+        "live": [
+            _slim(i, "dispatch_id", "state", "age_seconds", "pr")
+            for i in running[:_INDEX_LIVE_WORK_LIVE_CAP]
+        ],
+        "stale": [
+            _slim(i, "dispatch_id", "state", "age_seconds", "lock")
+            for i in (live_work.get("stale") or [])[:_INDEX_LIVE_WORK_STALE_CAP]
+        ],
+        "unmeasured": [
+            i.get("dispatch_id") for i in (live_work.get("unmeasured") or [])
+        ][:_INDEX_LIVE_WORK_STALE_CAP],
+        "open_prs": [
+            p for p in (live_work.get("open_prs") or []) if p.get("dispatch_id")
+        ][:_INDEX_LIVE_WORK_LIVE_CAP],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -2267,11 +2477,11 @@ def _build_system_health(
     state_dir: Path,
     db_initialized: bool,
     *,
-    build_degraded: bool = False,
     db_health: str = "healthy",
     daemon_liveness: Optional[Dict[str, Any]] = None,
     expected_beacon_components: Optional[Sequence[str]] = None,
     launchd_liveness: Optional[Dict[str, Any]] = None,
+    degraded_reasons: Optional[Sequence[str]] = None,
     db_reason: Optional[str] = None,
 ) -> Dict[str, Any]:
     uptime_seconds = 0
@@ -2283,11 +2493,8 @@ def _build_system_health(
             log.debug("Could not stat panes.json for uptime: %s", e)
 
     # R6.1: DB health (locked/malformed) takes precedence over other signals.
-    # R6.2: artifact errors (corrupt manifest) flag build as degraded.
     if db_health in ("failed", "degraded"):
         status = db_health
-    elif build_degraded:
-        status = "degraded"
     elif (
         not (state_dir / "terminal_state.json").exists()
         and not (state_dir / "t0_receipts.ndjson").exists()
@@ -2365,17 +2572,21 @@ def _build_system_health(
 
     # R6.4 (D2): a summary can never report healthier than the worst thing it
     # summarizes. Before this, `status` was computed once above (from
-    # db_health/build_degraded/artifact-presence) and never revisited, so
+    # db_health/artifact-presence) and never revisited, so
     # `beacon_health.overall == "fail"` could sit right next to
     # `status: "healthy"` in the same object -- a structurally possible
     # outcome of the code, not a fluke (measured 2026-08-30 in production
     # t0_state.json). Every nested health field added here must feed this
-    # aggregation, including daemon_liveness and launchd_liveness.
+    # aggregation, including daemon_liveness, launchd_liveness and the D5
+    # degraded_reasons (a section that could not be read degrades health
+    # with its reason, instead of reading as an empty, healthy section).
+    reasons = [r for r in (degraded_reasons or ()) if r]
     status = worst_status(
         status,
         beacon_health.get("overall") if beacon_health else None,
         daemon_liveness.get("overall") if daemon_liveness else None,
         launchd_liveness.get("overall") if launchd_liveness else None,
+        "degraded" if reasons else None,
     )
 
     result: Dict[str, Any] = {
@@ -2383,6 +2594,8 @@ def _build_system_health(
         "db_initialized": db_initialized,
         "uptime_seconds": uptime_seconds,
     }
+    if reasons:
+        result["degraded_reasons"] = reasons
     result.update(_db_reason_fields(db_health, db_reason))
     if beacon_health is not None:
         result["beacon_health"] = beacon_health
@@ -2999,17 +3212,22 @@ def build_t0_state(
     dispatch_insights = _collect_dispatch_insights(project_id, state_dir=state_dir)
     recent_dispatches = _collect_recent_dispatches(project_id, state_dir)
     intelligence_brief = _collect_intelligence_brief(project_id, state_dir)
-    active_work, active_errors = _build_active_work(dispatch_dir)  # R6.2: track errors
     recent_receipts = _build_recent_receipts(state_dir, project_id=project_id, limit=20)
     register_events = _build_register_events(state_dir=state_dir)
     git_context = _build_git_context()
     pr_queue = _build_pr_queue_section(state_dir)  # R7.1: extracted helper
+    live_work = _build_live_work(state_dir, project_id, pr_queue)  # D5: DB + occupancy flock
     strategic_state = _build_strategic_state(state_dir)
     strategic_state_heavy = _build_strategic_state_heavy(state_dir)
     elapsed = time.monotonic() - start
     system_health = _build_system_health(
-        state_dir, db_ok, build_degraded=active_errors, db_health=db_health,
+        state_dir, db_ok, db_health=db_health,
         db_reason=db_reason,
+        degraded_reasons=(
+            ([f"live_work unavailable: {live_work.get('reason')}"]
+             if live_work.get("read_error") else [])
+            + _queue_degraded_reasons(queues)
+        ),
     )
 
     return {
@@ -3032,7 +3250,7 @@ def build_t0_state(
         "dispatch_insights": dispatch_insights,
         "recent_dispatches": recent_dispatches,
         "intelligence_brief": intelligence_brief,
-        "active_work": active_work,
+        "live_work": live_work,
         "recent_receipts": recent_receipts,
         "dispatch_register_events": register_events,
         "git_context": git_context,
@@ -3066,7 +3284,18 @@ def _state_to_brief(state: Dict[str, Any]) -> Dict[str, Any]:
     pr_raw = state.get("pr_progress") or {}
     oi = state.get("open_items") or {}
     sh = state.get("system_health") or {}
-    active_work = state.get("active_work") or []
+    # D5: the brief's active_work (schema 1.0 shape) is the running part of
+    # live_work, no longer a scan of dispatches/active/.
+    live_work = state.get("live_work") or {}
+    active_work = [
+        {
+            "dispatch_id": item.get("dispatch_id"),
+            "track": item.get("track"),
+            "gate": item.get("gate"),
+            "started_at": item.get("started_at"),
+        }
+        for item in (live_work.get("live") or []) + (live_work.get("starting") or [])
+    ]
 
     blockers = (oi.get("top_blockers") or [])[:3]
     next_gates = [
@@ -3081,7 +3310,7 @@ def _state_to_brief(state: Dict[str, Any]) -> Dict[str, Any]:
         "terminals": terminals,
         "queues": {
             "pending": queues.get("pending_count", 0),
-            "active": queues.get("active_count", 0),
+            "active": len(active_work),
             "completed_last_hour": queues.get("completed_last_hour", 0),
             "conflicts": queues.get("conflict_count", 0),
         },
@@ -3190,28 +3419,24 @@ def _build_t0_index(state: Dict[str, Any]) -> Dict[str, Any]:
     """
     queues = state.get("queues") or {}
     open_items = state.get("open_items") or {}
-    active_work = state.get("active_work") or []
     git_ctx = state.get("git_context") or {}
 
     last_commits: List[str] = git_ctx.get("last_5_commits") or []
     raw_head = last_commits[0].split()[0] if last_commits else ""
 
     return {
-        "schema": "t0_index/1.0",
+        "schema": "t0_index/1.1",
         "timestamp": state.get("generated_at", ""),
         "git_branch": git_ctx.get("branch", ""),
         "git_head": raw_head[:7],
-        "terminals": {
-            tid: {"status": t.get("status", "")}
-            for tid, t in (state.get("terminals") or {}).items()
-        },
+        # D5: live_work replaces terminals, queue.active and active_dispatches.
+        # The headless lane uses no terminals and never writes dispatches/active/.
         "queue": {
             "pending": queues.get("pending_count", 0),
-            "active": queues.get("active_count", 0),
             "open_prs": len((state.get("pr_queue") or {}).get("open_prs") or []),
             "blocking_open_items": open_items.get("blocker_count", 0),
         },
-        "active_dispatches": [d.get("dispatch_id", "") for d in active_work],
+        "live_work": _live_work_index_summary(state.get("live_work")),
         "recent_receipts": (state.get("recent_receipts") or [])[:3],
         "health": _slim_health_for_index(state.get("system_health") or {}),
         "track_freshness": _track_freshness_summary(state.get("track_freshness")),

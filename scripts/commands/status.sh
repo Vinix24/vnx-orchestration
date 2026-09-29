@@ -257,10 +257,18 @@ state = json.loads('''$state''')
 gen_at = state.get('generated_at', '?')[:19]
 stale = state.get('staleness_seconds', '?')
 queues = state.get('queues', {})
+# D5: what runs comes from live_work (dispatches table + occupancy flock).
+live_work = state.get('live_work') or {}
+if live_work.get('available'):
+    c = live_work.get('counts') or {}
+    active = (f'{c.get(\"live\", 0) + c.get(\"starting\", 0)}'
+              f' (stale: {c.get(\"stale\", 0)}, unmeasured: {c.get(\"unmeasured\", 0)})')
+else:
+    active = f'unavailable: {live_work.get(\"reason\") or \"no live_work\"}'
 print(f'  State generated:  {gen_at}')
 print(f'  Staleness:        {stale}s')
 print(f'  Pending:          {queues.get(\"pending_count\", \"?\")}')
-print(f'  Active:           {queues.get(\"active_count\", \"?\")}')
+print(f'  Active:           {active}')
 print(f'  Completed/hr:     {queues.get(\"completed_last_hour\", \"?\")}')
 print(f'  Conflicts:        {queues.get(\"conflict_count\", \"?\")}')
 "

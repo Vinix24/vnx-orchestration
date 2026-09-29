@@ -147,8 +147,15 @@ def _state_freshness(t0: dict, state_dir: Path) -> dict:
 
     try:
         session_started_at = datetime.fromtimestamp(panes_path.stat().st_mtime, tz=timezone.utc)
-    except OSError:
-        return {"applicable": False, "stale": False}
+    except OSError as exc:
+        # panes.json is there but its mtime cannot be read: freshness is
+        # unmeasured, not fresh. _build_json_output degrades on it.
+        return {
+            "applicable": True,
+            "stale": None,
+            "unmeasured_reason": f"{type(exc).__name__}: {exc}",
+            "generated_at": generated_at,
+        }
 
     stale = gen_dt < session_started_at
     return {
@@ -195,23 +202,40 @@ def _print_prs(cs: dict) -> None:
         print(f"  {_c('dim', chr(8226))} {pr}")
 
 
-def _print_terminals(t0: dict) -> None:
-    _header("Terminal Status")
-    terminals = t0.get("terminals", {})
-    if not terminals:
-        print("  (no terminal data — run vnx start first)")
+def _print_live_work(t0: dict) -> None:
+    # D5: what runs comes from the dispatches table plus the occupancy flock
+    # (build_t0_state._build_live_work). The headless lane uses no terminals.
+    _header("Live Work")
+    live_work = t0.get("live_work") or {}
+    if not live_work.get("available"):
+        reason = live_work.get("reason") or "no live_work in t0_state.json"
+        print(f"  {_c('yellow', 'unavailable')}: {reason}")
         return
-    for tid in sorted(terminals):
-        t = terminals[tid]
-        status = t.get("status", "unknown")
-        lease = t.get("lease_state", "idle")
-        track = t.get("track", "?")
-        dispatch = t.get("current_dispatch") or "—"
-        color = "green" if status == "idle" else "yellow" if status == "busy" else "dim"
+    running = (live_work.get("live") or []) + (live_work.get("starting") or [])
+    stale = live_work.get("stale") or []
+    # A lock probe that raised: in flight, but whether it runs is unknown.
+    # Shown so "nothing in flight" can never hide a measurement failure.
+    unmeasured = live_work.get("unmeasured") or []
+    if not running and not stale and not unmeasured:
+        print("  (nothing in flight)")
+    for item in running:
+        pr = f"  PR #{item['pr']}" if item.get("pr") else ""
         print(
-            f"  {_c('bold', tid)} [{track}] "
-            f"{_c(color, status)}/{lease}  "
-            f"{_c('dim', str(dispatch)[:45])}"
+            f"  {_c('green', item.get('state', '?'))} "
+            f"{str(item.get('dispatch_id', '?'))[:45]}  "
+            f"{_c('dim', str((item.get('age_seconds') or 0) // 60) + ' min')}{pr}"
+        )
+    for item in stale:
+        print(
+            f"  {_c('yellow', 'stale')} "
+            f"{str(item.get('dispatch_id', '?'))[:45]}  "
+            f"{_c('dim', str(item.get('state', '?')) + ', lock ' + str(item.get('lock', '?')))}"
+        )
+    for item in unmeasured:
+        print(
+            f"  {_c('red', 'unmeasured')} "
+            f"{str(item.get('dispatch_id', '?'))[:45]}  "
+            f"{_c('dim', str(item.get('state', '?')) + ', ' + str(item.get('lock', '?')))}"
         )
 
 
@@ -236,13 +260,20 @@ def _build_json_output(cs: dict, t0: dict, state_dir: Path) -> dict:
         # corruption) -- state built before this session started is a real,
         # measured problem, not an unmeasured one.
         system_health["status"] = worst_status(system_health.get("status", "healthy"), "fail")
+    elif freshness.get("unmeasured_reason"):
+        # Freshness that could not be measured must not read as fresh: the
+        # guard's Check 1 turns this into WAIT.
+        system_health["status"] = worst_status(system_health.get("status", "healthy"), "fail")
+        system_health["degraded_reasons"] = list(system_health.get("degraded_reasons") or []) + [
+            f"state_freshness unmeasured: {freshness['unmeasured_reason']}"
+        ]
 
     return {
         "schema": "vnx_status/1.0",
         "focus": cs.get("focus", ""),
         "active_waves": _active_waves(cs.get("waves", [])),
         "open_prs": cs.get("prs", [])[:3],
-        "terminals": t0.get("terminals", {}),
+        "live_work": t0.get("live_work", {}),
         "recent_decisions": cs.get("decisions", [])[:3],
         "queues": t0.get("queues", {}),
         "system_health": system_health,
@@ -313,7 +344,7 @@ def main(argv: list[str] | None = None, data_dir: Path | None = None) -> int:
     _print_focus(cs)
     _print_waves(cs)
     _print_prs(cs)
-    _print_terminals(t0)
+    _print_live_work(t0)
     _print_decisions(cs)
     print()
     return 0

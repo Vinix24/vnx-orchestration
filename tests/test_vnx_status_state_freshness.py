@@ -140,3 +140,49 @@ class TestStateFreshnessSchema:
         t0 = vs._load_t0_state(state_dir)
         out = vs._build_json_output({}, t0, state_dir)
         assert out["state_freshness"]["applicable"] is False
+
+
+class TestUnmeasuredFreshness:
+    """ff5: panes.json exists, but its mtime cannot be read. Unmeasured
+    freshness must not read as fresh, or the guard's Check 1 gives GO."""
+
+    def _stat_fails_after_exists(self, monkeypatch, panes: Path) -> None:
+        real_stat = Path.stat
+        calls = {"n": 0}
+
+        def _stat(self, *args, **kwargs):
+            if self == panes:
+                calls["n"] += 1
+                # 1st call is panes_path.exists(); the 2nd is the mtime read.
+                if calls["n"] > 1:
+                    raise PermissionError(13, "Permission denied", str(self))
+            return real_stat(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", _stat)
+
+    def test_unreadable_panes_mtime_degrades_health(self, tmp_path: Path, monkeypatch) -> None:
+        state_dir = tmp_path / "project-a" / "state"
+        now = time.time()
+        fresh_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - 60))
+        _write_state(state_dir, fresh_iso, panes_mtime=now - 300)
+        # Second project, same file layout, readable panes.json: stays healthy.
+        state_dir_b = tmp_path / "project-b" / "state"
+        _write_state(state_dir_b, fresh_iso, panes_mtime=now - 300)
+        t0 = vs._load_t0_state(state_dir)
+        t0_b = vs._load_t0_state(state_dir_b)
+
+        self._stat_fails_after_exists(monkeypatch, state_dir / "panes.json")
+        out = vs._build_json_output({}, t0, state_dir)
+        out_b = vs._build_json_output({}, t0_b, state_dir_b)
+
+        assert out["system_health"]["status"] != "healthy", (
+            "an unreadable panes.json mtime is unmeasured freshness, not fresh"
+        )
+        assert out["state_freshness"]["stale"] is None
+        assert "PermissionError" in out["state_freshness"]["unmeasured_reason"]
+        assert any(
+            r.startswith("state_freshness unmeasured")
+            for r in out["system_health"]["degraded_reasons"]
+        )
+        assert out_b["system_health"]["status"] == "healthy"
+        assert "degraded_reasons" not in out_b["system_health"]

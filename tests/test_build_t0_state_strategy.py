@@ -326,7 +326,7 @@ class TestBuildIntegration:
             "open_items",
             "quality_digest",
             "dispatch_insights",
-            "active_work",
+            "live_work",
             "recent_receipts",
             "dispatch_register_events",
             "git_context",

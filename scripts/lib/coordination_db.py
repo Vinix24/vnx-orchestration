@@ -60,6 +60,16 @@ DISPATCH_TRANSITIONS: Dict[str, frozenset] = {
     "recovered":       frozenset({"queued", "claimed", "expired", "dead_letter"}),
     "dead_letter":     frozenset(),
 }
+# States that have not started yet: planning gate and the queue.
+PRE_FLIGHT_DISPATCH_STATES = frozenset({"proposed", "ready", "queued"})
+# A dispatch is in flight between claim and completion. Derived, not listed:
+# everything that is neither terminal nor pre-flight, minus the recovery
+# branch (a state that can still be dead-lettered is a failure waiting for
+# recovery, not live work). A new state on the happy path joins by itself.
+IN_FLIGHT_DISPATCH_STATES = frozenset(
+    s for s in DISPATCH_STATES - TERMINAL_DISPATCH_STATES - PRE_FLIGHT_DISPATCH_STATES
+    if "dead_letter" not in DISPATCH_TRANSITIONS[s]
+)
 LEASE_TRANSITIONS: Dict[str, frozenset] = {
     "idle":       frozenset({"leased"}),
     "leased":     frozenset({"released", "expired"}),

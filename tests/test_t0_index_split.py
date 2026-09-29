@@ -2,7 +2,7 @@
 
 Covers:
   1. _build_t0_index returns ≤50 keys at top level
-  2. Index has all required fields (schema, timestamp, terminals, queue, recent_receipts)
+  2. Index has all required fields (schema, timestamp, queue, live_work, recent_receipts)
   3. _write_detail_files creates t0_detail/ with per-section files
   4. Detail files contain exactly the section content
   5. Index size in bytes <5KB (cheap-load constraint)
@@ -34,7 +34,6 @@ def _make_full_state(
     head_commit: str = "abc1234 some message",
     terminal_count: int = 3,
     pending: int = 2,
-    active: int = 1,
     blocker_count: int = 5,
     receipts_count: int = 5,
 ) -> dict:
@@ -65,7 +64,6 @@ def _make_full_state(
         "terminals": terminals,
         "queues": {
             "pending_count": pending,
-            "active_count": active,
             "completed_last_hour": 3,
             "conflict_count": 0,
         },
@@ -79,9 +77,17 @@ def _make_full_state(
             "blocker_count": blocker_count,
             "top_blockers": [{"id": "OI-1", "title": "Critical bug"}],
         },
-        "active_work": [
-            {"dispatch_id": "d-active-01", "track": "A", "gate": "codex"},
-        ],
+        "live_work": {
+            "available": True,
+            "live": [{"dispatch_id": "d-active-01", "state": "running",
+                      "age_seconds": 600, "lock": "held", "pr": 77}],
+            "starting": [],
+            "stale": [{"dispatch_id": "d-zombie-01", "state": "delivering",
+                       "age_seconds": 259200, "lock": "released"}],
+            "unmeasured": [],
+            "counts": {"live": 1, "starting": 0, "stale": 1, "unmeasured": 0},
+            "open_prs": [{"number": 77, "dispatch_id": "d-active-01"}],
+        },
         "recent_receipts": receipts,
         "feature_state": {
             "source": "dispatch_register",
@@ -128,8 +134,8 @@ class TestIndexKeyCount:
 # 2. Index has all required fields
 # ---------------------------------------------------------------------------
 
-_REQUIRED_FIELDS = ("schema", "timestamp", "terminals", "queue", "recent_receipts",
-                    "git_branch", "git_head", "active_dispatches", "health",
+_REQUIRED_FIELDS = ("schema", "timestamp", "queue", "live_work", "recent_receipts",
+                    "git_branch", "git_head", "health",
                     "last_rebuild_seconds")
 
 
@@ -141,7 +147,7 @@ class TestIndexRequiredFields:
 
     def test_schema_value(self):
         index = _build_t0_index(_make_full_state())
-        assert index["schema"] == "t0_index/1.0"
+        assert index["schema"] == "t0_index/1.1"
 
     def test_timestamp_from_generated_at(self):
         state = _make_full_state()
@@ -158,23 +164,19 @@ class TestIndexRequiredFields:
         index = _build_t0_index(state)
         assert index["git_head"] == "abc1234"
 
-    def test_terminals_status_present(self):
-        index = _build_t0_index(_make_full_state())
-        for tid, tdata in index["terminals"].items():
-            assert "status" in tdata, f"Terminal {tid} missing 'status'"
-            assert "lease_expires" not in tdata, f"Terminal {tid} carries dead 'lease_expires'"
+    def test_index_carries_no_terminals(self):
+        # D5: the headless lane uses no terminals; live work is live_work.
+        assert "terminals" not in _build_t0_index(_make_full_state())
 
-    def test_queue_has_four_subfields(self):
+    def test_queue_has_three_subfields(self):
         index = _build_t0_index(_make_full_state())
         q = index["queue"]
-        for field in ("pending", "active", "open_prs", "blocking_open_items"):
-            assert field in q, f"queue missing '{field}'"
+        assert set(q) == {"pending", "open_prs", "blocking_open_items"}
 
     def test_queue_values_correct(self):
-        state = _make_full_state(pending=3, active=2, blocker_count=7)
+        state = _make_full_state(pending=3, blocker_count=7)
         index = _build_t0_index(state)
         assert index["queue"]["pending"] == 3
-        assert index["queue"]["active"] == 2
         assert index["queue"]["blocking_open_items"] == 7
 
     def test_recent_receipts_at_most_3(self):
@@ -203,15 +205,12 @@ class TestIndexRequiredFields:
         state.pop("pr_queue", None)
         assert _build_t0_index(state)["queue"]["open_prs"] == 0
 
-    def test_terminal_entry_is_status_only(self):
-        state = _make_full_state()
-        state["terminals"]["T1"]["lease_expires_at"] = "2026-09-29T12:00:00+00:00"
-        assert _build_t0_index(state)["terminals"]["T1"] == {"status": "idle"}
-
-    def test_active_dispatches_list(self):
-        index = _build_t0_index(_make_full_state())
-        assert isinstance(index["active_dispatches"], list)
-        assert "d-active-01" in index["active_dispatches"]
+    def test_live_work_lists_live_and_stale_apart(self):
+        live = _build_t0_index(_make_full_state())["live_work"]
+        assert [i["dispatch_id"] for i in live["live"]] == ["d-active-01"]
+        assert live["live"][0]["pr"] == 77
+        assert [i["dispatch_id"] for i in live["stale"]] == ["d-zombie-01"]
+        assert live["counts"] == {"live": 1, "starting": 0, "stale": 1, "unmeasured": 0}
 
     def test_last_rebuild_seconds(self):
         state = _make_full_state()
@@ -220,9 +219,9 @@ class TestIndexRequiredFields:
 
     def test_empty_state_no_crash(self):
         index = _build_t0_index({})
-        assert index["schema"] == "t0_index/1.0"
-        assert index["terminals"] == {}
-        assert index["active_dispatches"] == []
+        assert index["schema"] == "t0_index/1.1"
+        assert "terminals" not in index
+        assert index["live_work"]["available"] is False
         assert index["recent_receipts"] == []
 
 
@@ -378,7 +377,7 @@ class TestIndexDetailSeparation:
         state = _make_full_state()
         index = _build_t0_index(state)
         # Index builds without needing t0_detail/ to exist
-        assert index["schema"] == "t0_index/1.0"
+        assert index["schema"] == "t0_index/1.1"
         assert not (tmp_path / "t0_detail").exists()
 
 
@@ -397,7 +396,7 @@ class TestIntegrationWithBuildT0State:
         state = build_t0_state(state_dir=state_dir, dispatch_dir=dispatch_dir)
         index = _build_t0_index(state)
 
-        assert index["schema"] == "t0_index/1.0"
+        assert index["schema"] == "t0_index/1.1"
         assert len(index) <= 50
         serialized = json.dumps(index, indent=2, default=str).encode("utf-8")
         assert len(serialized) < 5 * 1024
