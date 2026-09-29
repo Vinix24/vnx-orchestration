@@ -185,3 +185,32 @@ def test_fresh_contract_invalid_with_an_old_report_timestamp_is_counted(tmp_path
     out = _outcomes([ci, {**ci, "project_id": OTHER, "dispatch_id": "d1"}],
                     tmp_path=tmp_path, monkeypatch=monkeypatch, days=7)
     assert _counts(out) == (1, 0, 1, 0)
+
+
+def _status_only_ci(did: str, ts: str, **kw: Any) -> Dict[str, Any]:
+    return _a(did, "contract_invalid", ts, **kw)
+
+
+@pytest.mark.parametrize("shape", ["event_type", "status_only"])
+def test_frozen_contract_invalid_is_not_counted_in_either_shape(shape, tmp_path, monkeypatch):
+    if shape == "event_type":
+        old_ci = {"event_type": "report_contract_invalid", "dispatch_id": "frozen",
+                  "status": "contract_invalid", "project_id": PROJECT, "timestamp": _FROZEN}
+    else:
+        old_ci = _status_only_ci("frozen", _FROZEN)
+    out = _outcomes([old_ci, {**old_ci, "project_id": OTHER}, _a("d1", "success"), _b("d1")],
+                    tmp_path=tmp_path, monkeypatch=monkeypatch, days=30)
+    assert _counts(out) == (1, 1, 0, 0)
+
+
+@pytest.mark.parametrize("shape", ["event_type", "status_only"])
+def test_fresh_contract_invalid_counts_as_a_failure_in_either_shape(shape, tmp_path, monkeypatch):
+    old_report_ts = _iso(_NOW - timedelta(days=30))
+    if shape == "event_type":
+        ci = {"event_type": "report_contract_invalid", "dispatch_id": "d1", "status": "contract_invalid",
+              "project_id": PROJECT, "timestamp": old_report_ts, "ingested_at": _RECENT2}
+    else:
+        ci = _status_only_ci("d1", old_report_ts, ingested_at=_RECENT2, report_file="d1.md")
+    records = [_a("d1", "success", old_report_ts), ci, {**ci, "project_id": OTHER}]
+    out = _outcomes(records, tmp_path=tmp_path, monkeypatch=monkeypatch, days=7)
+    assert _counts(out) == (1, 0, 1, 0)

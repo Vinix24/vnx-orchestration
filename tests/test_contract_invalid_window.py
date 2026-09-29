@@ -218,6 +218,22 @@ class TestLearningLoopWindowing:
         # Stale via the dedicated staleness check (falls back to `timestamp`).
         assert len(patterns) == 0
 
+    def test_contract_invalid_event_type_with_another_status_is_windowed_and_counted(
+            self, tmp_path: Path) -> None:
+        # The event-type shape without the status literal is a contract_invalid
+        # too (contract_invalid_window.is_contract_invalid): the fresh one counts,
+        # the frozen one is stale.
+        receipts_path = tmp_path / "t0_receipts.ndjson"
+        fresh = {"event_type": "contract_invalid", "status": "unknown", "ingested_at": _FRESH,
+                 "provider": "claude"}
+        frozen = {**fresh, "ingested_at": _OLD_26D}
+        _write_receipts(receipts_path, [fresh, frozen])
+
+        loop = _build_learning_loop(receipts_path)
+        start_time = datetime.now(timezone.utc) - timedelta(days=365)
+        patterns = loop.extract_failure_patterns(start_time=start_time)
+        assert len(patterns) == 1
+
     def test_non_contract_invalid_failure_unaffected(self, tmp_path: Path) -> None:
         receipts_path = tmp_path / "t0_receipts.ndjson"
         fresh_failure = {"status": "failed", "timestamp": _FRESH, "provider": "claude"}

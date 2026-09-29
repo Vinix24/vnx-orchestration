@@ -70,9 +70,12 @@ if str(_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_LIB_DIR))
 
 from atomic_io import atomic_write_json  # noqa: E402
-from contract_invalid_window import contract_invalid_effective_timestamp  # noqa: E402
+from contract_invalid_window import (  # noqa: E402
+    CONTRACT_INVALID_STATUS,
+    contract_invalid_effective_timestamp,
+    is_contract_invalid as _is_contract_invalid,
+)
 
-CONTRACT_INVALID_STATUS = "contract_invalid"
 CONTRACT_INVALID_EVENT_TYPE = "report_contract_invalid"
 
 OPEN_LEDGER_FILENAME = "contract_invalid_open.json"
@@ -301,12 +304,6 @@ def _parse_ts(value: Optional[Any]) -> Optional[datetime]:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
-
-
-def _is_contract_invalid(record: Dict[str, Any]) -> bool:
-    status = str(record.get("status") or "").strip().lower()
-    event_type = str(record.get("event_type") or record.get("event") or "").strip().lower()
-    return status == CONTRACT_INVALID_STATUS or event_type == CONTRACT_INVALID_EVENT_TYPE
 
 
 def _is_outcome_receipt(record: Dict[str, Any]) -> bool:

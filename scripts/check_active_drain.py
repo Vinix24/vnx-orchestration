@@ -190,6 +190,33 @@ def iter_active_dispatches(dispatches_dir: Path) -> Iterator[DispatchEntry]:
 # Core drain logic
 # ---------------------------------------------------------------------------
 
+def _destination(
+    entry: DispatchEntry,
+    receipt_status: str | None,
+    now: datetime,
+    older_than_seconds: float,
+) -> tuple[str, str]:
+    """Where a dispatch goes and why: ``completed``, ``dead_letter`` or
+    ``skipped`` (it stays in active/)."""
+    if receipt_status == "investigate":
+        return "skipped", "outcome needs a human look (missing verification or open blocker)"
+    if receipt_status == "failure":
+        return "dead_letter", "receipt found with failure status"
+    if receipt_status == "unknown":
+        # Receipt with an unrecognised status — treat as failure to
+        # avoid silently recording bad outcomes as completed work.
+        return "dead_letter", "receipt found with unrecognised status"
+    if receipt_status is not None:
+        return "completed", "receipt found with success status"
+    if entry.timestamp is None:
+        # No timestamp → treat as orphaned regardless of age
+        return "dead_letter", "no receipt, no timestamp (orphaned)"
+    age = (now - entry.timestamp).total_seconds()
+    if age >= older_than_seconds:
+        return "dead_letter", f"no receipt, age {age / 3600:.1f}h > threshold"
+    return "skipped", f"no receipt yet, age {age / 3600:.2f}h < threshold"
+
+
 def drain_one(
     entry: DispatchEntry,
     receipt_index: "frozenset[str] | dict[str, str]",
@@ -207,43 +234,14 @@ def drain_one(
     else:
         receipt_status = None
 
-    if receipt_status == "investigate":
+    dest_bucket, reason = _destination(entry, receipt_status, now, older_than_seconds)
+    if dest_bucket == "skipped":
         return DrainResult(
             dispatch_id=entry.dispatch_id,
             action="skipped",
-            reason="outcome needs a human look (missing verification or open blocker)",
+            reason=reason,
             dry_run=dry_run,
         )
-
-    if receipt_status is not None:
-        if receipt_status == "failure":
-            dest_bucket = "dead_letter"
-            reason = "receipt found with failure status"
-        elif receipt_status == "unknown":
-            # Receipt with an unrecognised status — treat as failure to
-            # avoid silently recording bad outcomes as completed work.
-            dest_bucket = "dead_letter"
-            reason = "receipt found with unrecognised status"
-        else:
-            dest_bucket = "completed"
-            reason = "receipt found with success status"
-    else:
-        if entry.timestamp is None:
-            # No timestamp → treat as orphaned regardless of age
-            dest_bucket = "dead_letter"
-            reason = "no receipt, no timestamp (orphaned)"
-        else:
-            age = (now - entry.timestamp).total_seconds()
-            if age >= older_than_seconds:
-                dest_bucket = "dead_letter"
-                reason = f"no receipt, age {age / 3600:.1f}h > threshold"
-            else:
-                return DrainResult(
-                    dispatch_id=entry.dispatch_id,
-                    action="skipped",
-                    reason=f"no receipt yet, age {age / 3600:.2f}h < threshold",
-                    dry_run=dry_run,
-                )
 
     if dry_run:
         return DrainResult(

@@ -12,10 +12,11 @@ lines into one outcome (fabric-state-herstel D3):
 1. Noise out: ``source=pytest``, temp-dir ``report_path``, ``MagicMock``,
    id missing/``unknown``/``?``, another ``project_id``, and a frozen
    contract_invalid batch (``contract_invalid_window`` is the one source of
-   "stale"). Never on lane.
+   "stale", and its ``is_contract_invalid`` of what a contract_invalid is:
+   the event type or a status-only lane line). Never on lane.
 2. ``BOOKKEEPING_EVENT_TYPES`` are neither outcome nor evidence.
 3. Status: the last writer-A receipt in FILE order (ledger timestamps are not
-   monotonic); a later contract_invalid event wins as reject. A retry under
+   monotonic); a later contract_invalid (either shape) wins as reject. A retry under
    the same id is a new last A. ``task_failed`` and a terminal
    ``task_timeout`` are writer-A lines too; ``classify_event_outcome`` decides
    what their status means, and a pending ``task_timeout`` is no outcome.
@@ -47,7 +48,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from contract_invalid_window import contract_invalid_effective_timestamp, is_stale_contract_invalid
+from contract_invalid_window import (
+    contract_invalid_effective_timestamp,
+    is_contract_invalid,
+    is_stale_contract_invalid,
+)
 from event_outcome_semantics import classify_event_outcome
 from receipt_verdict import compute_verdict
 
@@ -63,7 +68,6 @@ EVIDENCE_EVENT_TYPES = frozenset({"review_gate_result", "pr_merged"})
 BLOCKING_EVENT_TYPES = frozenset({
     "pr_merge_refused", "door_bookkeeping_failed", "gate_obligation_reopened_stale_evidence",
 })
-CONTRACT_INVALID_EVENT_TYPES = frozenset({"contract_invalid", "report_contract_invalid"})
 # subprocess_completion is the same writer family as A: phantom_guard and
 # pr_enforcement use it to overturn a claimed success, and the synthesized
 # plan-gate lane reports its status only through it. task_failed/task_timeout
@@ -116,7 +120,7 @@ def noise_reason(receipt: Dict[str, Any], project_id: str) -> Optional[str]:
         return "temp_report_path"
     if "MagicMock" in json.dumps(receipt, default=str):
         return "magicmock"
-    if receipt.get("event_type") in CONTRACT_INVALID_EVENT_TYPES and is_stale_contract_invalid(receipt):
+    if is_contract_invalid(receipt) and is_stale_contract_invalid(receipt):
         return "stale_contract_invalid"
     return None
 
@@ -231,7 +235,7 @@ class _Window:
         # A contract_invalid line is dated by the processor's ``ingested_at``, the
         # same clock the staleness rule uses, not by a timestamp the report carries.
         stamp = (contract_invalid_effective_timestamp(receipt)
-                 if receipt.get("event_type") in CONTRACT_INVALID_EVENT_TYPES
+                 if is_contract_invalid(receipt)
                  else receipt.get("timestamp"))
         ts = _parse_ts(stamp)
         return ts is not None and ts >= self.cutoff
@@ -283,7 +287,7 @@ def _fold(record: Dict[str, Any], receipt: Dict[str, Any], pos: int, did: str) -
         record["evidence"].append(_evidence_entry(receipt, pos))
     elif event_type in BLOCKING_EVENT_TYPES:
         record["blocking"].append(_evidence_entry(receipt, pos))
-    elif event_type in CONTRACT_INVALID_EVENT_TYPES:
+    elif is_contract_invalid(receipt):
         record["contract_invalid"], record["contract_invalid_pos"] = receipt, pos
     elif _is_writer_b(receipt):
         record["b"], record["b_pos"] = receipt, pos

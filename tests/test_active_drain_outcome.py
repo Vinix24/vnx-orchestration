@@ -197,3 +197,32 @@ def test_fresh_contract_invalid_still_dead_letters_an_active_dispatch(tmp_path: 
                      "status": "contract_invalid", "project_id": PROJECT,
                      "timestamp": "2026-01-01T00:00:00Z", "ingested_at": _fresh()})
     assert [(r.dispatch_id, r.action) for r in drain_active(data)] == [("d1", "dead_letter")]
+
+
+def _status_only_ci(did: str, **kw: Any) -> Dict[str, Any]:
+    return {"event_type": "task_complete", "receipt_kind": "dispatch", "dispatch_id": did,
+            "status": "contract_invalid", "project_id": PROJECT, **kw}
+
+
+def test_frozen_status_only_contract_invalid_does_not_dead_letter_an_active_dispatch(tmp_path: Path) -> None:
+    data = _store(tmp_path)
+    _active(data, "d1", hours_old=0.1)
+    old_ci = _status_only_ci("d1", timestamp="2026-01-01T00:00:00Z")
+    _write(data, 0, old_ci)
+    _write(data, 1, {**old_ci, "project_id": OTHER, "ingested_at": _fresh()})
+    assert build_receipt_status_index(data / "receipts") == {}
+    assert [(r.dispatch_id, r.action) for r in drain_active(data)] == [("d1", "skipped")]
+    assert (data / "dispatches" / "active" / "d1").is_dir()
+
+
+def test_fresh_status_only_contract_invalid_after_success_dead_letters(tmp_path: Path) -> None:
+    data = _store(tmp_path)
+    _active(data, "d1", hours_old=0.1)
+    receipts = [_a("d1", "success"), _b("d1"),
+                _status_only_ci("d1", report_file="d1.md", timestamp="2026-01-01T00:00:00Z",
+                                ingested_at=_fresh()),
+                _a("d1", "failure", project_id=OTHER)]
+    for seq, receipt in enumerate(receipts):
+        _write(data, seq, receipt)
+    assert build_receipt_status_index(data / "receipts") == {"d1": "failure"}
+    assert [(r.dispatch_id, r.action) for r in drain_active(data)] == [("d1", "dead_letter")]

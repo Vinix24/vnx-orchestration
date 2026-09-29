@@ -344,3 +344,59 @@ def test_contract_invalid_window_uses_the_effective_timestamp_not_the_report_one
                   _stale_ci("d1", timestamp="2000-01-01T00:00:00Z", ingested_at=fresh.isoformat()),
                   cutoff=cutoff)
     assert [o["dispatch_id"] for o in result["outcomes"]] == ["d1"]
+
+
+# The ledger carries contract_invalid in two shapes: a report_contract_invalid
+# event, and a task_complete/subprocess_completion line whose status alone says
+# contract_invalid (46 such lines in the vnx-dev ledger on 29-09). Both shapes
+# must fold, window and go stale the same way.
+def _status_only_ci(did: str, **kw: Any) -> Dict[str, Any]:
+    return {"event_type": "task_complete", "receipt_kind": "dispatch", "dispatch_id": did,
+            "status": "contract_invalid", "project_id": "vnx-dev", **kw}
+
+
+def test_frozen_status_only_contract_invalid_is_stale_noise():
+    old = "2026-01-01T00:00:00Z"
+    result = _run(_a("d1", "success"), _b("d1"), _status_only_ci("d1", timestamp=old),
+                  _status_only_ci("frozen-only", timestamp=old),
+                  _status_only_ci("d1", timestamp=old, project_id="other-project"))
+    assert _outcome(result, "d1")["decision"] == "accept"
+    assert {o["dispatch_id"] for o in result["outcomes"]} == {"d1"}
+    assert result["noise_counts"]["stale_contract_invalid"] == 2
+
+
+def test_fresh_status_only_contract_invalid_after_the_last_a_rejects_in_both_writer_shapes():
+    fresh = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    result = _run(_a("lane", "success"), _b("lane"), _status_only_ci("lane", ingested_at=fresh),
+                  _a("report", "success"), _b("report"),
+                  _status_only_ci("report", ingested_at=fresh, report_file="report.md"))
+    assert _outcome(result, "lane")["decision"] == "reject"
+    assert _outcome(result, "report")["decision"] == "reject"
+
+
+def test_status_only_contract_invalid_before_a_retry_does_not_reject():
+    fresh = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    result = _run(_a("d1", "success"), _status_only_ci("d1", ingested_at=fresh, report_file="d1.md"),
+                  _a("d1", "success"), _b("d1"))
+    assert _outcome(result, "d1")["decision"] == "accept"
+
+
+def test_status_only_contract_invalid_is_windowed_on_the_effective_timestamp():
+    fresh = datetime.now(tz=timezone.utc)
+    cutoff = fresh.replace(year=fresh.year - 1)
+    old = "2000-01-01T00:00:00Z"
+    result = _run(_a("d1", "success", timestamp=old), _b("d1", timestamp=old),
+                  _status_only_ci("d1", timestamp=old, ingested_at=fresh.isoformat(),
+                                  report_file="d1.md"),
+                  cutoff=cutoff)
+    assert [(o["dispatch_id"], o["decision"]) for o in result["outcomes"]] == [("d1", "reject")]
+
+
+def test_is_contract_invalid_recognises_both_shapes_and_nothing_else():
+    assert ro.is_contract_invalid({"event_type": "report_contract_invalid"})
+    assert ro.is_contract_invalid({"event_type": "contract_invalid"})
+    assert ro.is_contract_invalid({"event": " Report_Contract_Invalid "})
+    assert ro.is_contract_invalid({"event_type": "task_complete", "status": "Contract_Invalid"})
+    assert not ro.is_contract_invalid({"event_type": "task_complete", "status": "failure"})
+    assert not ro.is_contract_invalid({"event_type": None, "status": None})
+    assert not ro.is_contract_invalid({})
