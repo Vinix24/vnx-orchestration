@@ -51,7 +51,7 @@ def build_project_status(state_dir: Path | None = None) -> str:
         f"- Branch: `{index.get('git_branch','?')}` @ `{index.get('git_head','?')}`",
         f"- Open PRs: {index.get('queue',{}).get('open_prs',0)}",
         f"- Live dispatches: {counts.get('live', 0) + counts.get('starting', 0)}"
-        f" (stale: {counts.get('stale', 0)})",
+        f" (stale: {counts.get('stale', 0)}, unmeasured: {counts.get('unmeasured', 0)})",
         f"- Pending dispatches: {index.get('queue',{}).get('pending',0)}",
         f"- Open items (blockers): {index.get('queue',{}).get('blocking_open_items',0)}",
         "",
@@ -72,6 +72,9 @@ def build_project_status(state_dir: Path | None = None) -> str:
             f"- stale {item.get('dispatch_id','?')}: {item.get('state','?')},"
             f" lock {item.get('lock','?')}"
         )
+    # A lock probe that raised: in flight, running unknown (index: ids only).
+    for dispatch_id in live_work.get("unmeasured") or []:
+        lines.append(f"- unmeasured {dispatch_id}: lock probe failed")
 
     lines.extend(["", "## Recent activity (last 5 register events)"])
     for ev in register_events[-5:]:

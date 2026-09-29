@@ -173,11 +173,12 @@ class TestSystemHealthAggregationContract:
         )
 
     def test_known_signals_are_actually_detected_not_a_vacuous_pass(self) -> None:
-        """Nul is eerst een meetfout: prove the scanner finds the THREE
+        """Nul is eerst een meetfout: prove the scanner finds the FOUR
         signals known to exist today (beacon_health, daemon_liveness,
-        launchd_liveness), so an empty-violations result above means
-        'checked three real signals and found them clean', not 'found
-        nothing to check'."""
+        launchd_liveness, and D5's degraded_reasons -- a section that could
+        not be read, folded as ``"degraded" if reasons``), so an
+        empty-violations result above means 'checked four real signals and
+        found them clean', not 'found nothing to check'."""
         source = (SCRIPTS / "build_t0_state.py").read_text(encoding="utf-8")
         tree = ast.parse(source, filename="build_t0_state.py")
         func = _find_function(tree, _TARGET_FUNC)
@@ -186,6 +187,7 @@ class TestSystemHealthAggregationContract:
             "beacon_health": "beacon_health",
             "daemon_liveness": "daemon_liveness",
             "launchd_liveness": "launchd_liveness",
+            "degraded_reasons": "reasons",
         }
 
     def test_producer_liveness_is_excluded_as_a_derived_value_not_a_raw_signal(self) -> None:

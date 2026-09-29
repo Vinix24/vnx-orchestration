@@ -147,7 +147,7 @@ class TestIndexRequiredFields:
 
     def test_schema_value(self):
         index = _build_t0_index(_make_full_state())
-        assert index["schema"] == "t0_index/1.0"
+        assert index["schema"] == "t0_index/1.1"
 
     def test_timestamp_from_generated_at(self):
         state = _make_full_state()
@@ -219,7 +219,7 @@ class TestIndexRequiredFields:
 
     def test_empty_state_no_crash(self):
         index = _build_t0_index({})
-        assert index["schema"] == "t0_index/1.0"
+        assert index["schema"] == "t0_index/1.1"
         assert "terminals" not in index
         assert index["live_work"]["available"] is False
         assert index["recent_receipts"] == []
@@ -377,7 +377,7 @@ class TestIndexDetailSeparation:
         state = _make_full_state()
         index = _build_t0_index(state)
         # Index builds without needing t0_detail/ to exist
-        assert index["schema"] == "t0_index/1.0"
+        assert index["schema"] == "t0_index/1.1"
         assert not (tmp_path / "t0_detail").exists()
 
 
@@ -396,7 +396,7 @@ class TestIntegrationWithBuildT0State:
         state = build_t0_state(state_dir=state_dir, dispatch_dir=dispatch_dir)
         index = _build_t0_index(state)
 
-        assert index["schema"] == "t0_index/1.0"
+        assert index["schema"] == "t0_index/1.1"
         assert len(index) <= 50
         serialized = json.dumps(index, indent=2, default=str).encode("utf-8")
         assert len(serialized) < 5 * 1024

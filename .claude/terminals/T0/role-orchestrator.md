@@ -45,9 +45,10 @@ cat .vnx-data/state/t0_state.json | python3 -m json.tool
 - `live` — the flock is held, however long the run already takes.
 - `stale` — in flight, no held flock, older than the 2-minute run-up. A zombie row, not a worker.
 - `starting` — no flock yet, younger than the run-up.
+- `unmeasured` — in flight, but the flock probe itself raised (the index lists the ids; the `lock` field in `t0_state.json` says why). Running or not is unknown: a measurement failure, never "nothing running". `vnx status` lists it.
 - `available: false` with a `reason` — the read failed or a precondition is missing. A lock or a corrupt DB also puts `system_health` on degraded. Never read it as "nothing running".
 
-Open PRs are linked to their dispatch through the branch `dispatch/<id>`. `queue.pending` counts staged spec bundles (`pending/<id>/dispatch-spec.json`), not `.md` files.
+Open PRs are linked to their dispatch through the branch `dispatch/<id>`. `queue.pending` counts staged spec bundles (`pending/<id>/dispatch-spec.json`) and `pending/<id>.md` files (still moved there by `queue_auto_accept.sh`), one per id. The index schema is `t0_index/1.1`.
 
 For crash recovery or if state appears stale, run the individual repair tools below.
 

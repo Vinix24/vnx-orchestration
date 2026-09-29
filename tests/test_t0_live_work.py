@@ -401,3 +401,118 @@ def test_brief_active_work_comes_from_live_work(tmp_path, monkeypatch, held_lock
 
     assert [w["dispatch_id"] for w in brief["active_work"]] == ["d5-brief"]
     assert brief["queues"]["active"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Fix-forward 2 (deepseek_gate on PR #1984)
+# ---------------------------------------------------------------------------
+
+
+def test_index_with_live_work_carries_schema_1_1(tmp_path, monkeypatch):
+    """The index shape changed (live_work in; terminals, queue.active and
+    active_dispatches out), so the schema version moves with it."""
+    state_dir, dispatch_dir = _env(tmp_path, monkeypatch)
+
+    index = bts._build_t0_index(bts.build_t0_state(state_dir, dispatch_dir))
+
+    assert "live_work" in index
+    assert index["schema"] == "t0_index/1.1"
+
+
+def test_legacy_md_in_pending_counts_as_pending(tmp_path, monkeypatch):
+    """queue_auto_accept.sh (still started by vnx_supervisor_simple.sh) moves
+    ``queue/<id>.md`` to ``pending/<id>.md``: that is a pending dispatch too."""
+    state_dir, dispatch_dir = _env(tmp_path, monkeypatch)
+    pending = dispatch_dir / "pending"
+    (pending / "20260929-legacy.md").write_text("x", encoding="utf-8")
+    bundle = pending / "20260929-staged"
+    bundle.mkdir()
+    (bundle / "dispatch-spec.json").write_text("{}", encoding="utf-8")
+    # The same id in both forms is one dispatch, not two.
+    (pending / "20260929-staged.md").write_text("x", encoding="utf-8")
+    (pending / "notes.txt").write_text("x", encoding="utf-8")
+
+    queues = bts._build_queues(dispatch_dir, state_dir)
+
+    assert queues["pending_count"] == 2
+
+
+def test_failed_lock_probe_is_unmeasured_and_shown_by_vnx_status(
+    tmp_path, monkeypatch, capsys
+):
+    """A probe that raises is not "nothing running": the row lands in
+    ``unmeasured`` and the human view names it."""
+    import dispatch_worktree_isolation as dwi
+
+    cli_dir = str(_REPO_ROOT / "scripts" / "cli")
+    if cli_dir not in sys.path:
+        sys.path.insert(0, cli_dir)
+    import vnx_status as vs
+
+    state_dir, dispatch_dir = _env(tmp_path, monkeypatch)
+    _insert(state_dir, "d5-unprobed", "running",
+            datetime.now(timezone.utc) - timedelta(minutes=30))
+    _insert(state_dir, "d5-unprobed", "running",
+            datetime.now(timezone.utc) - timedelta(minutes=30), PROJECT_B)
+
+    def _raising_probe(_claims_dir, _dispatch_id):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(dwi, "probe_occupancy", _raising_probe)
+    state = bts.build_t0_state(state_dir, dispatch_dir)
+    assert _ids(state["live_work"]["unmeasured"]) == ["d5-unprobed"]
+    assert _ids(state["live_work"]["live"]) == []
+
+    (state_dir / "t0_state.json").write_text(json.dumps(state), encoding="utf-8")
+    capsys.readouterr()
+    assert vs.main(argv=[], data_dir=tmp_path) == 0
+    out = capsys.readouterr().out
+
+    unmeasured_lines = [line for line in out.splitlines() if "d5-unprobed" in line]
+    assert len(unmeasured_lines) == 1
+    assert "unmeasured" in unmeasured_lines[0]
+    assert "nothing in flight" not in out
+
+
+def _status_sh_summary(tmp_path: Path, state: Dict[str, Any]) -> str:
+    """Run the REAL _s_print_summary from scripts/commands/status.sh against
+    *state* (only the state reader and the header are stubbed)."""
+    import subprocess
+
+    state_file = tmp_path / "t0_state_for_status_sh.json"
+    state_file.write_text(json.dumps(state), encoding="utf-8")
+    script = (
+        'source "$1"\n'
+        '_s_header() { echo "# $1"; }\n'
+        '_s_t0_state() { cat "$VNX_TEST_STATE_FILE"; }\n'
+        '_s_print_summary\n'
+    )
+    status_sh = _REPO_ROOT / "scripts" / "commands" / "status.sh"
+    proc = subprocess.run(
+        ["bash", "-c", script, "_", str(status_sh)],
+        capture_output=True, text=True, timeout=30,
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
+             "VNX_TEST_STATE_FILE": str(state_file)},
+    )
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout
+
+
+def test_status_sh_active_line_reads_live_work_including_unmeasured(tmp_path):
+    """queues.active_count is gone; status.sh's Active line printed "?"."""
+    out = _status_sh_summary(tmp_path, {
+        "queues": {"pending_count": 2},
+        "live_work": {"available": True, "counts": {
+            "live": 1, "starting": 1, "stale": 2, "unmeasured": 1}},
+    })
+
+    assert "Active:           2 (stale: 2, unmeasured: 1)" in out
+
+
+def test_status_sh_active_line_says_why_live_work_is_unavailable(tmp_path):
+    out = _status_sh_summary(tmp_path, {
+        "queues": {"pending_count": 0},
+        "live_work": {"available": False, "reason": "degraded: database is locked"},
+    })
+
+    assert "Active:           unavailable: degraded: database is locked" in out

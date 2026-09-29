@@ -206,7 +206,10 @@ def _print_live_work(t0: dict) -> None:
         return
     running = (live_work.get("live") or []) + (live_work.get("starting") or [])
     stale = live_work.get("stale") or []
-    if not running and not stale:
+    # A lock probe that raised: in flight, but whether it runs is unknown.
+    # Shown so "nothing in flight" can never hide a measurement failure.
+    unmeasured = live_work.get("unmeasured") or []
+    if not running and not stale and not unmeasured:
         print("  (nothing in flight)")
     for item in running:
         pr = f"  PR #{item['pr']}" if item.get("pr") else ""
@@ -220,6 +223,12 @@ def _print_live_work(t0: dict) -> None:
             f"  {_c('yellow', 'stale')} "
             f"{str(item.get('dispatch_id', '?'))[:45]}  "
             f"{_c('dim', str(item.get('state', '?')) + ', lock ' + str(item.get('lock', '?')))}"
+        )
+    for item in unmeasured:
+        print(
+            f"  {_c('red', 'unmeasured')} "
+            f"{str(item.get('dispatch_id', '?'))[:45]}  "
+            f"{_c('dim', str(item.get('state', '?')) + ', ' + str(item.get('lock', '?')))}"
         )
 
 

@@ -52,11 +52,12 @@ Schema 2.2 change (D5 fabric-state-herstel, live work):
     linked by ``dispatch/<id>``. A failed read is ``available: false`` with a
     reason and degrades system_health (``degraded_reasons``).
   - ``queues.pending_count`` counts staged spec bundles
-    (``pending/<id>/dispatch-spec.json``); ``queues.active_count`` is gone.
-  - t0_index.json drops ``terminals``, ``queue.active`` and
-    ``active_dispatches`` for a compact ``live_work``. ``terminals`` stays in
-    t0_state.json while headless_dispatch_daemon and feature_state_machine
-    read its ``lease_state``.
+    (``pending/<id>/dispatch-spec.json``) and ``pending/<id>.md`` files, one
+    per id; ``queues.active_count`` is gone.
+  - t0_index.json (schema ``t0_index/1.1``) drops ``terminals``,
+    ``queue.active`` and ``active_dispatches`` for a compact ``live_work``.
+    ``terminals`` stays in t0_state.json while headless_dispatch_daemon and
+    feature_state_machine read its ``lease_state``.
 
 Schema 2.1 changes (W4E / OI-1199):
   - feature_state union-merges register-canonical aggregation with the
@@ -82,7 +83,6 @@ import json
 import logging
 import os
 import plistlib
-import re
 import shutil
 import sqlite3
 import subprocess
@@ -260,22 +260,27 @@ def _count_md(directory: Path) -> int:
         return 0
 
 
-def _count_spec_bundles(directory: Path) -> int:
-    """Staged dispatches: ``pending/<id>/dispatch-spec.json`` (dispatch_bridge.stage).
+def _count_pending_dispatches(directory: Path) -> int:
+    """Pending dispatches in both forms that still get written, one per id.
 
-    The headless door stages directory bundles, not ``.md`` files. A gate
-    bundle holding only ``final_prompt.md`` (provider_dispatch) is not a
-    staged dispatch and does not count.
+    - ``pending/<id>/dispatch-spec.json``: the headless door's staged bundle
+      (dispatch_bridge.stage). A gate bundle holding only ``final_prompt.md``
+      (provider_dispatch) is not a staged dispatch and does not count.
+    - ``pending/<id>.md``: what queue_auto_accept.sh (started by
+      vnx_supervisor_simple.sh) moves over from ``queue/``.
     """
     if not directory.is_dir():
         return 0
     try:
-        return sum(
-            1 for d in directory.iterdir()
-            if d.is_dir() and (d / "dispatch-spec.json").is_file()
-        )
+        ids = {
+            entry.stem if entry.is_file() else entry.name
+            for entry in directory.iterdir()
+            if (entry.is_file() and entry.suffix == ".md")
+            or (entry.is_dir() and (entry / "dispatch-spec.json").is_file())
+        }
     except OSError:
         return 0
+    return len(ids)
 
 
 # ---------------------------------------------------------------------------
@@ -522,7 +527,7 @@ def _build_terminals(state_dir: Path) -> Dict[str, Any]:
 def _build_queues(dispatch_dir: Path, state_dir: Path) -> Dict[str, Any]:
     # D5: what is active comes from live_work (DB + occupancy flock), not
     # from a directory the headless door never writes.
-    pending = _count_spec_bundles(dispatch_dir / "pending")
+    pending = _count_pending_dispatches(dispatch_dir / "pending")
     conflict = _count_md(dispatch_dir / "conflicts")
 
     completed_last_hour = 0
@@ -2373,7 +2378,6 @@ def _build_system_health(
     state_dir: Path,
     db_initialized: bool,
     *,
-    build_degraded: bool = False,
     db_health: str = "healthy",
     daemon_liveness: Optional[Dict[str, Any]] = None,
     expected_beacon_components: Optional[Sequence[str]] = None,
@@ -2389,11 +2393,8 @@ def _build_system_health(
             log.debug("Could not stat panes.json for uptime: %s", e)
 
     # R6.1: DB health (locked/malformed) takes precedence over other signals.
-    # R6.2: artifact errors (corrupt manifest) flag build as degraded.
     if db_health in ("failed", "degraded"):
         status = db_health
-    elif build_degraded:
-        status = "degraded"
     elif (
         not (state_dir / "terminal_state.json").exists()
         and not (state_dir / "t0_receipts.ndjson").exists()
@@ -2471,23 +2472,22 @@ def _build_system_health(
 
     # R6.4 (D2): a summary can never report healthier than the worst thing it
     # summarizes. Before this, `status` was computed once above (from
-    # db_health/build_degraded/artifact-presence) and never revisited, so
+    # db_health/artifact-presence) and never revisited, so
     # `beacon_health.overall == "fail"` could sit right next to
     # `status: "healthy"` in the same object -- a structurally possible
     # outcome of the code, not a fluke (measured 2026-08-30 in production
     # t0_state.json). Every nested health field added here must feed this
-    # aggregation, including daemon_liveness and launchd_liveness.
+    # aggregation, including daemon_liveness, launchd_liveness and the D5
+    # degraded_reasons (a section that could not be read degrades health
+    # with its reason, instead of reading as an empty, healthy section).
+    reasons = [r for r in (degraded_reasons or ()) if r]
     status = worst_status(
         status,
         beacon_health.get("overall") if beacon_health else None,
         daemon_liveness.get("overall") if daemon_liveness else None,
         launchd_liveness.get("overall") if launchd_liveness else None,
+        "degraded" if reasons else None,
     )
-    # D5: a section that could not be read degrades health with its reason,
-    # instead of reading as an empty, healthy section.
-    reasons = [r for r in (degraded_reasons or ()) if r]
-    if reasons:
-        status = worst_status(status, "degraded")
 
     result: Dict[str, Any] = {
         "status": status,
@@ -3280,7 +3280,7 @@ def _build_t0_index(state: Dict[str, Any]) -> Dict[str, Any]:
     raw_head = last_commits[0].split()[0] if last_commits else ""
 
     return {
-        "schema": "t0_index/1.0",
+        "schema": "t0_index/1.1",
         "timestamp": state.get("generated_at", ""),
         "git_branch": git_ctx.get("branch", ""),
         "git_head": raw_head[:7],

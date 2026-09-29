@@ -32,7 +32,7 @@ from build_project_status import build_project_status, write_project_status
 def _write_index(state_dir: Path, branch: str = "main", head: str = "abc1234") -> None:
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "t0_index.json").write_text(json.dumps({
-        "schema": "t0_index/1.0",
+        "schema": "t0_index/1.1",
         "git_branch": branch,
         "git_head": head,
         "live_work": {
@@ -132,8 +132,25 @@ class TestExpectedSections:
         result = build_project_status(state_dir)
         assert "- d-live-01: running, 90 min, PR #1981" in result
         assert "- stale d-zombie-01: delivering, lock released" in result
-        assert "- Live dispatches: 1 (stale: 1)" in result
+        assert "- Live dispatches: 1 (stale: 1, unmeasured: 0)" in result
         assert "- T1:" not in result
+
+    def test_unmeasured_live_work_listed(self, tmp_path):
+        """A failed lock probe is named, never folded into 'nothing running'."""
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True)
+        (state_dir / "t0_index.json").write_text(json.dumps({
+            "schema": "t0_index/1.1",
+            "live_work": {
+                "available": True,
+                "counts": {"live": 0, "starting": 0, "stale": 0, "unmeasured": 1},
+                "live": [], "stale": [], "unmeasured": ["d-unprobed-01"],
+            },
+        }), encoding="utf-8")
+
+        result = build_project_status(state_dir)
+        assert "- Live dispatches: 0 (stale: 0, unmeasured: 1)" in result
+        assert "- unmeasured d-unprobed-01: lock probe failed" in result
 
     def test_unavailable_live_work_says_why(self, tmp_path):
         state_dir = tmp_path / "state"
