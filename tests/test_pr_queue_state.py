@@ -5,8 +5,7 @@ Covers:
   2. Empty state — no open PRs → empty arrays
   3. Integration — build_t0_state output contains pr_queue key
   4. Gates map — gate_passed/gate_failed register events populate correctly
-  5. Queued features — dispatches not in terminal state appear
-  6. Atomic write — pr_queue_state.json written atomically
+  5. Atomic write — pr_queue_state.json written atomically
 """
 from __future__ import annotations
 
@@ -23,7 +22,6 @@ sys.path.insert(0, str(_REPO_ROOT / "scripts" / "lib"))
 
 from pr_queue_state import (
     _build_gates_map,
-    _build_queued_features,
     build_pr_queue_state,
     write_pr_queue_state,
 )
@@ -61,7 +59,7 @@ class TestSchemaValidation:
         with patch("pr_queue_state._get_open_prs", return_value=[]), \
              patch("pr_queue_state._get_merged_today", return_value=[]):
             result = build_pr_queue_state(state_dir, register_events=[])
-        for key in ("schema", "timestamp", "open_prs", "merged_today", "queued_features"):
+        for key in ("schema", "timestamp", "open_prs", "merged_today"):
             assert key in result, f"Missing key: {key}"
 
     def test_open_prs_is_list(self, tmp_path):
@@ -105,7 +103,6 @@ class TestEmptyState:
             result = build_pr_queue_state(state_dir, register_events=[])
         assert result["open_prs"] == []
         assert result["merged_today"] == []
-        assert result["queued_features"] == []
 
     def test_no_register_file_empty_arrays(self, tmp_path):
         state_dir, _ = _make_dirs(tmp_path)
@@ -115,7 +112,6 @@ class TestEmptyState:
             result = build_pr_queue_state(state_dir)
         assert result["open_prs"] == []
         assert result["merged_today"] == []
-        assert result["queued_features"] == []
 
     def test_gh_failure_produces_empty_prs(self, tmp_path):
         state_dir, _ = _make_dirs(tmp_path)
@@ -210,63 +206,7 @@ class TestGatesMap:
 
 
 # ---------------------------------------------------------------------------
-# 5. Queued features
-# ---------------------------------------------------------------------------
-
-class TestQueuedFeatures:
-    def test_created_dispatch_appears(self):
-        events = [
-            {"dispatch_id": "d-001", "event": "dispatch_created",
-             "timestamp": "2026-04-28T00:00:00Z"},
-        ]
-        result = _build_queued_features(events)
-        assert any(e["dispatch_id"] == "d-001" for e in result)
-
-    def test_completed_dispatch_excluded(self):
-        events = [
-            {"dispatch_id": "d-002", "event": "dispatch_created",
-             "timestamp": "2026-04-28T00:00:00Z"},
-            {"dispatch_id": "d-002", "event": "dispatch_completed",
-             "timestamp": "2026-04-28T00:00:01Z"},
-        ]
-        result = _build_queued_features(events)
-        assert not any(e["dispatch_id"] == "d-002" for e in result)
-
-    def test_failed_dispatch_excluded(self):
-        events = [
-            {"dispatch_id": "d-003", "event": "dispatch_created",
-             "timestamp": "2026-04-28T00:00:00Z"},
-            {"dispatch_id": "d-003", "event": "dispatch_failed",
-             "timestamp": "2026-04-28T00:00:01Z"},
-        ]
-        result = _build_queued_features(events)
-        assert not any(e["dispatch_id"] == "d-003" for e in result)
-
-    def test_merged_pr_excluded(self):
-        events = [
-            {"dispatch_id": "d-004", "event": "dispatch_created",
-             "timestamp": "2026-04-28T00:00:00Z"},
-            {"dispatch_id": "d-004", "event": "pr_merged",
-             "timestamp": "2026-04-28T00:00:01Z"},
-        ]
-        result = _build_queued_features(events)
-        assert not any(e["dispatch_id"] == "d-004" for e in result)
-
-    def test_feature_id_propagated(self):
-        events = [
-            {"dispatch_id": "d-005", "event": "dispatch_created",
-             "feature_id": "F99", "timestamp": "2026-04-28T00:00:00Z"},
-        ]
-        result = _build_queued_features(events)
-        match = next(e for e in result if e["dispatch_id"] == "d-005")
-        assert match["feature_id"] == "F99"
-
-    def test_empty_events_empty_features(self):
-        assert _build_queued_features([]) == []
-
-
-# ---------------------------------------------------------------------------
-# 6. Atomic write
+# 5. Atomic write
 # ---------------------------------------------------------------------------
 
 class TestAtomicWrite:

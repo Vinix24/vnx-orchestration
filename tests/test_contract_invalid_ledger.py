@@ -840,8 +840,8 @@ def test_build_t0_state_preserves_existing_keys(
 
     state = bts.build_t0_state(state_dir, dispatch_dir)
 
-    assert "canonical_tracks" in state
-    assert "human_gate_queue" in state
+    assert "open_items" in state
+    assert "live_work" in state
     assert "contract_invalid" in state
 
 

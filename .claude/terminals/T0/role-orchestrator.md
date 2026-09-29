@@ -33,12 +33,17 @@ When operating in autonomous mode (no routine user checkpoints), follow this dis
 
 ## Startup State
 
-At session start, `.vnx-data/state/t0_state.json` is automatically built by the SessionStart hook.
-Read it for full situational awareness — queues, tracks, PR progress, open items, recent receipts, git context, and system health.
+At session start, `.vnx-data/state/t0_index.json` and `.vnx-data/state/t0_state.json` are automatically built by the SessionStart hook. The index is the cheap orientation; `t0_state.json` is the compact snapshot behind it (a test holds it under 80 KB). It holds terminals, queues, tracks, open items, live work, recent receipts, git context, system health and the open-PR queue.
 
 ```bash
 cat .vnx-data/state/t0_state.json | python3 -m json.tool
 ```
+
+The state carries no track list, no human-gate queue and no dispatch history. Ask for them with a command:
+
+- Tracks and their phase: `vnx objective list` and `vnx objective show <track_id>` (`scripts/planning_cli.py`).
+- The human gate (deliverables waiting on `vnx deliverable promote`): `vnx deliverable list`.
+- Dispatches and their receipts: `python3 scripts/receipt_query.py by-dispatch <dispatch_id> --state-dir <state-dir>`, `by-track <track_id>` and `since <timestamp>` (`scripts/receipt_query.py`).
 
 **What is running now** is `live_work` in `t0_index.json`, not the terminals and not `active_work` (both are gone from the index: the headless lane uses no terminals and never writes `dispatches/active/`). `live_work` reads this project's `dispatches` rows in an in-flight state (`claimed`, `delivering`, `accepted`, `running`, derived from the state machine) and probes each dispatch's occupancy flock:
 
@@ -358,7 +363,8 @@ python3 scripts/validate_skill.py --list
 
 ## Read-Only State Sources
 
-- `.vnx-data/state/t0_state.json` — **primary** (built by SessionStart hook, refresh with `python3 scripts/build_t0_state.py`)
+- `.vnx-data/state/t0_index.json` — orientation (built by SessionStart hook, refresh with `python3 scripts/build_t0_state.py`)
+- `.vnx-data/state/t0_state.json` — compact snapshot behind the index, same builder
 - `.vnx-data/state/t0_recommendations.json`
 - `.vnx-data/state/open_items_digest.json`
 - `.vnx-data/state/review_gates/requests/`

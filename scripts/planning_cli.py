@@ -2805,7 +2805,7 @@ def _fetch_deliverable_records(
                 # where the `deliverables` VIEW that normally shields this
                 # path via `output_ref IS NOT NULL` does not exist yet).
                 # Same discriminator as #1747/OI-1609's
-                # build_t0_state._build_human_gate_queue fix: only a
+                # the human-gate queue fix (build_t0_state, since removed by D8): only a
                 # dispatch cmd_deliverable_add actually created carries
                 # metadata_json.deliverable == true.
                 if not (isinstance(meta, dict) and meta.get("deliverable") is True):

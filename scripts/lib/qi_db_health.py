@@ -3,8 +3,8 @@
 
 Single source of truth for "is this SQLite file an actually-bootstrapped
 quality_intelligence.db, or an empty decoy (0 tables)?" Used by vnx_doctor's
-install-health check (``vnx_doctor.py::check_database``) and by the state
-builder's query layer (``build_t0_state.py::_query_qi_db``) so both sides
+install-health check (``vnx_doctor.py::check_database``) and by the
+intelligence selector (``intelligence_selector.py``) so both sides
 count tables the same way instead of drifting into two counters that can
 disagree (OI: absence-is-loud D5).
 

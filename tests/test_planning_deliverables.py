@@ -460,7 +460,7 @@ def test_ready_dispatch_is_claimable(state_with_track: tuple[Path, str], tmp_pat
 # applied yet") selects on `state IN ('proposed', 'ready')` alone, with no
 # check for the `metadata_json.deliverable == true` marker `cmd_deliverable_add`
 # stamps on every row it creates. That is the EXACT bug shape #1747/OI-1609
-# fixed in `build_t0_state._build_human_gate_queue`: state='proposed' is the
+# fixed in the human-gate queue reader (removed by D8): state='proposed' is the
 # door's ordinary rest state for ANY accepted dispatch
 # (dispatch_cli.py's `_persist_dispatch_row`), not a deliverable-specific
 # signal. Dormant on the live store today because the `deliverables` VIEW is

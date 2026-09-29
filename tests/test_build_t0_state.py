@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Tests for Wave 1 shadow-read wiring in build_t0_state.py.
 
-Covers all 4 instrumented read sites:
+Covers the instrumented read site that remains:
   - _collect_open_items          (open_items_digest.json)
-  - _collect_recent_dispatches   (dispatch_metadata table, quality_intelligence.db)
-  - _collect_intelligence_brief  (success_patterns table, quality_intelligence.db)
-  - _collect_dispatch_insights   (dispatch_experiments via DispatchParameterTracker)
 
-For each site: 3-state flag tests (unset / shadow+diverge / 1=central).
-Plus end-to-end shadow build + p95 latency regression guard.
+D8 (fabric-state-herstel) removed the other three (recent_dispatches,
+intelligence_brief, dispatch_insights): a T0 reads dispatches through
+receipt_query.py.
+
+3-state flag tests (unset / shadow+diverge / 1=central), plus an end-to-end
+shadow build and a p95 latency regression guard.
 """
 
 from __future__ import annotations
@@ -59,14 +60,6 @@ SAMPLE_DISPATCH = {
     "dispatched_at": "2026-05-01T10:00:00Z",
     "completed_at": "2026-05-01T11:00:00Z",
     "outcome_status": "success",
-}
-SAMPLE_PATTERN = {
-    "pattern_type": "approach",
-    "category": "testing",
-    "title": "Shadow Write Pattern",
-    "description": "Use atomic writes for state files",
-    "success_rate": 0.95,
-    "confidence_score": 0.92,
 }
 
 
@@ -250,237 +243,6 @@ class TestCollectOpenItems:
 
 
 # ---------------------------------------------------------------------------
-# _collect_recent_dispatches
-# ---------------------------------------------------------------------------
-
-
-class TestCollectRecentDispatches:
-    def test_collect_recent_dispatches_unset_uses_per_project(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.delenv("VNX_USE_CENTRAL_DB", raising=False)
-        _create_qi_db(
-            tmp_path / "quality_intelligence.db",
-            dispatches=[SAMPLE_DISPATCH],
-        )
-
-        result = bts._collect_recent_dispatches(SAMPLE_PROJECT_ID, tmp_path)
-
-        assert len(result) == 1
-        assert result[0]["dispatch_id"] == "d-001"
-
-    def test_collect_recent_dispatches_shadow_logs_divergence_when_central_diverges(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("VNX_USE_CENTRAL_DB", "shadow")
-        _create_qi_db(
-            tmp_path / "quality_intelligence.db",
-            dispatches=[SAMPLE_DISPATCH],
-        )
-
-        # Central DB with extra dispatch → count diverges
-        central_state = tmp_path / "central"
-        _create_qi_db(
-            central_state / "quality_intelligence.db",
-            dispatches=[
-                SAMPLE_DISPATCH,
-                {**SAMPLE_DISPATCH, "dispatch_id": "d-002"},
-            ],
-            has_project_id=True,
-        )
-
-        capture = _CaptureShadowLogger()
-        monkeypatch.setattr(bts, "_shadow_logger", capture)
-
-        def _fake_central(pid: str) -> List[Dict[str, Any]]:
-            return bts._collect_recent_dispatches_per_project(pid, central_state)
-
-        monkeypatch.setattr(bts, "_collect_recent_dispatches_central", _fake_central)
-
-        result = bts._collect_recent_dispatches(SAMPLE_PROJECT_ID, tmp_path)
-
-        # Legacy is authoritative
-        assert len(result) == 1
-        # Divergence logged (count mismatch: 1 vs 2)
-        assert len(capture.calls) == 1
-        assert len(capture.calls[0].divergences) >= 1
-        assert any(d.metric_id == 4 for d in capture.calls[0].divergences)
-
-    def test_collect_recent_dispatches_authoritative_uses_central(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("VNX_USE_CENTRAL_DB", "1")
-        _create_qi_db(
-            tmp_path / "quality_intelligence.db",
-            dispatches=[SAMPLE_DISPATCH],
-        )
-
-        central_state = tmp_path / "central"
-        _create_qi_db(
-            central_state / "quality_intelligence.db",
-            dispatches=[
-                {**SAMPLE_DISPATCH, "dispatch_id": "d-central-1"},
-                {**SAMPLE_DISPATCH, "dispatch_id": "d-central-2"},
-            ],
-            has_project_id=True,
-        )
-
-        def _fake_central(pid: str) -> List[Dict[str, Any]]:
-            return bts._collect_recent_dispatches_per_project(pid, central_state)
-
-        monkeypatch.setattr(bts, "_collect_recent_dispatches_central", _fake_central)
-
-        result = bts._collect_recent_dispatches(SAMPLE_PROJECT_ID, tmp_path)
-
-        assert len(result) == 2
-        ids = {r["dispatch_id"] for r in result}
-        assert "d-central-1" in ids
-
-
-# ---------------------------------------------------------------------------
-# _collect_intelligence_brief
-# ---------------------------------------------------------------------------
-
-
-class TestCollectIntelligenceBrief:
-    def test_collect_intelligence_brief_unset_uses_per_project(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.delenv("VNX_USE_CENTRAL_DB", raising=False)
-        _create_qi_db(
-            tmp_path / "quality_intelligence.db",
-            patterns=[SAMPLE_PATTERN],
-        )
-
-        result = bts._collect_intelligence_brief(SAMPLE_PROJECT_ID, tmp_path)
-
-        assert len(result) == 1
-        assert result[0]["title"] == "Shadow Write Pattern"
-
-    def test_collect_intelligence_brief_shadow_logs_divergence_when_central_diverges(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("VNX_USE_CENTRAL_DB", "shadow")
-        # Per-project: one pattern with id=1
-        _create_qi_db(
-            tmp_path / "quality_intelligence.db",
-            patterns=[SAMPLE_PATTERN],
-        )
-
-        # Central DB: seed a dummy first so the real pattern gets id=2 → top-N IDs differ
-        # (metric 3 compares item IDs, not content; per-project top-1 id=1 vs central id=2)
-        central_state = tmp_path / "central"
-        _create_qi_db(
-            central_state / "quality_intelligence.db",
-            patterns=[
-                {**SAMPLE_PATTERN, "title": "Dummy Low", "confidence_score": 0.1},
-                {**SAMPLE_PATTERN, "title": "Divergent High", "confidence_score": 0.99},
-            ],
-            has_project_id=True,
-        )
-
-        capture = _CaptureShadowLogger()
-        monkeypatch.setattr(bts, "_shadow_logger", capture)
-
-        def _fake_central(pid: str) -> List[Dict[str, Any]]:
-            return bts._collect_intelligence_brief_per_project(pid, central_state)
-
-        monkeypatch.setattr(bts, "_collect_intelligence_brief_central", _fake_central)
-
-        result = bts._collect_intelligence_brief(SAMPLE_PROJECT_ID, tmp_path)
-
-        # Legacy is authoritative
-        assert result[0]["title"] == "Shadow Write Pattern"
-        # Metric 3 divergence logged (top-1 id=1 per-project vs id=2 central)
-        assert len(capture.calls) == 1
-        assert any(d.metric_id == 3 for d in capture.calls[0].divergences)
-
-    def test_collect_intelligence_brief_authoritative_uses_central(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("VNX_USE_CENTRAL_DB", "1")
-        _create_qi_db(
-            tmp_path / "quality_intelligence.db",
-            patterns=[SAMPLE_PATTERN],
-        )
-
-        central_state = tmp_path / "central"
-        _create_qi_db(
-            central_state / "quality_intelligence.db",
-            patterns=[{**SAMPLE_PATTERN, "title": "Central Pattern"}],
-            has_project_id=True,
-        )
-
-        def _fake_central(pid: str) -> List[Dict[str, Any]]:
-            return bts._collect_intelligence_brief_per_project(pid, central_state)
-
-        monkeypatch.setattr(bts, "_collect_intelligence_brief_central", _fake_central)
-
-        result = bts._collect_intelligence_brief(SAMPLE_PROJECT_ID, tmp_path)
-
-        assert result[0]["title"] == "Central Pattern"
-
-
-# ---------------------------------------------------------------------------
-# _collect_dispatch_insights
-# ---------------------------------------------------------------------------
-
-
-class TestCollectDispatchInsights:
-    def test_collect_dispatch_insights_unset_uses_per_project(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.delenv("VNX_USE_CENTRAL_DB", raising=False)
-        # No experiments in DB → returns empty fallback
-        result = bts._collect_dispatch_insights(SAMPLE_PROJECT_ID, tmp_path)
-
-        assert result["available"] is False
-        assert result["insights"] == []
-
-    def test_collect_dispatch_insights_shadow_logs_divergence_when_central_diverges(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("VNX_USE_CENTRAL_DB", "shadow")
-        capture = _CaptureShadowLogger()
-        monkeypatch.setattr(bts, "_shadow_logger", capture)
-
-        # Per-project: empty
-        # Central: different non-empty result → diverges
-        def _fake_central(pid: str) -> Dict[str, Any]:
-            return {
-                "available": True,
-                "insights": [{"dimension": "role", "group_a": "A", "group_b": "B",
-                               "metric": "avg_cqs", "value_a": 0.9, "value_b": 0.7,
-                               "sample_a": 10, "sample_b": 10}],
-                "experiment_count": 25,
-            }
-
-        monkeypatch.setattr(bts, "_collect_dispatch_insights_central", _fake_central)
-
-        result = bts._collect_dispatch_insights(SAMPLE_PROJECT_ID, tmp_path)
-
-        assert result["available"] is False  # legacy is authoritative
-        # Divergence logged — dicts differ
-        assert len(capture.calls) == 1
-        assert len(capture.calls[0].divergences) >= 1
-
-    def test_collect_dispatch_insights_authoritative_uses_central(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("VNX_USE_CENTRAL_DB", "1")
-
-        def _fake_central(pid: str) -> Dict[str, Any]:
-            return {"available": True, "insights": ["sentinel"], "experiment_count": 99}
-
-        monkeypatch.setattr(bts, "_collect_dispatch_insights_central", _fake_central)
-
-        result = bts._collect_dispatch_insights(SAMPLE_PROJECT_ID, tmp_path)
-
-        assert result["available"] is True
-        assert result["experiment_count"] == 99
-
-
-# ---------------------------------------------------------------------------
 # End-to-end: full shadow build
 # ---------------------------------------------------------------------------
 
@@ -501,15 +263,10 @@ def test_full_state_build_in_shadow_mode_runs_without_error(
 
     # Plant minimal per-project data
     _write_open_items_digest(state_dir, open_count=2, blocker_count=0)
-    _create_qi_db(state_dir / "quality_intelligence.db", dispatches=[SAMPLE_DISPATCH])
 
-    # Stub central functions to return empty so shadow compares without error
+    # Stub the central reader to return empty so shadow compares without error
     monkeypatch.setattr(bts, "_collect_open_items_central",
                         lambda pid: {"open_count": 0, "blocker_count": 0, "top_blockers": []})
-    monkeypatch.setattr(bts, "_collect_recent_dispatches_central", lambda pid: [])
-    monkeypatch.setattr(bts, "_collect_intelligence_brief_central", lambda pid: [])
-    monkeypatch.setattr(bts, "_collect_dispatch_insights_central",
-                        lambda pid: {"available": False, "insights": [], "experiment_count": 0})
 
     capture = _CaptureShadowLogger()
     monkeypatch.setattr(bts, "_shadow_logger", capture)
@@ -518,55 +275,42 @@ def test_full_state_build_in_shadow_mode_runs_without_error(
     result = bts.build_t0_state(state_dir, dispatch_dir)
 
     assert "open_items" in result
-    assert "recent_dispatches" in result
-    assert "intelligence_brief" in result
-    assert "dispatch_insights" in result
-    # Divergence was logged for recent_dispatches (1 vs 0)
+    # Divergence was logged for open_items (2 vs 0)
     assert any(c.divergences for c in capture.calls)
 
 
 def test_shadow_mode_p95_latency_within_2x_per_project(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Shadow-mode latency for the 4 collect functions must stay within 2x per-project."""
+    """Shadow-mode latency of _collect_open_items must stay within 2x per-project."""
     state_dir = tmp_path / "state"
     state_dir.mkdir()
     _write_open_items_digest(state_dir)
-    _create_qi_db(
-        state_dir / "quality_intelligence.db",
-        dispatches=[{**SAMPLE_DISPATCH, "dispatch_id": f"d-{i}"} for i in range(20)],
-        patterns=[SAMPLE_PATTERN] * 5,
-    )
 
     # Stub central to return empty (no actual central DB on disk)
     monkeypatch.setattr(bts, "_collect_open_items_central",
                         lambda pid: {"open_count": 0, "blocker_count": 0, "top_blockers": []})
-    monkeypatch.setattr(bts, "_collect_recent_dispatches_central", lambda pid: [])
-    monkeypatch.setattr(bts, "_collect_intelligence_brief_central", lambda pid: [])
-    monkeypatch.setattr(bts, "_collect_dispatch_insights_central",
-                        lambda pid: {"available": False, "insights": [], "experiment_count": 0})
     monkeypatch.setattr(bts, "_shadow_logger", _CaptureShadowLogger())
 
-    n = 10
+    # _collect_open_items reads one small JSON file, so a call takes well under a
+    # millisecond and a bare ratio compares timer noise (0.1ms against 0.0ms).
+    # Interleave the two modes over many rounds and bound the p95 by the ratio OR
+    # a fixed absolute margin, whichever is larger: a shadow path that starts doing
+    # real work (a DB open, a network read) still exceeds the margin.
+    n = 60
+    margin_s = 0.005
     per_project_times: List[float] = []
     shadow_times: List[float] = []
 
-    monkeypatch.delenv("VNX_USE_CENTRAL_DB", raising=False)
     for _ in range(n):
+        monkeypatch.delenv("VNX_USE_CENTRAL_DB", raising=False)
         t0 = time.perf_counter()
         bts._collect_open_items(SAMPLE_PROJECT_ID, state_dir)
-        bts._collect_recent_dispatches(SAMPLE_PROJECT_ID, state_dir)
-        bts._collect_intelligence_brief(SAMPLE_PROJECT_ID, state_dir)
-        bts._collect_dispatch_insights(SAMPLE_PROJECT_ID, state_dir)
         per_project_times.append(time.perf_counter() - t0)
 
-    monkeypatch.setenv("VNX_USE_CENTRAL_DB", "shadow")
-    for _ in range(n):
+        monkeypatch.setenv("VNX_USE_CENTRAL_DB", "shadow")
         t0 = time.perf_counter()
         bts._collect_open_items(SAMPLE_PROJECT_ID, state_dir)
-        bts._collect_recent_dispatches(SAMPLE_PROJECT_ID, state_dir)
-        bts._collect_intelligence_brief(SAMPLE_PROJECT_ID, state_dir)
-        bts._collect_dispatch_insights(SAMPLE_PROJECT_ID, state_dir)
         shadow_times.append(time.perf_counter() - t0)
 
     per_project_times.sort()
@@ -574,9 +318,11 @@ def test_shadow_mode_p95_latency_within_2x_per_project(
     p95_idx = int(0.95 * n) - 1
     p95_per_project = per_project_times[p95_idx]
     p95_shadow = shadow_times[p95_idx]
+    limit = max(2.0 * p95_per_project, p95_per_project + margin_s)
 
-    assert p95_shadow <= 2.0 * p95_per_project, (
-        f"Shadow p95 {p95_shadow*1000:.1f}ms exceeds 2× per-project p95 {p95_per_project*1000:.1f}ms"
+    assert p95_shadow <= limit, (
+        f"Shadow p95 {p95_shadow*1000:.1f}ms exceeds limit {limit*1000:.1f}ms "
+        f"(per-project p95 {p95_per_project*1000:.1f}ms, 2x or +{margin_s*1000:.0f}ms)"
     )
 
 
