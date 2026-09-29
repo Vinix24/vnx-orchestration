@@ -176,6 +176,11 @@ class ReceiptV2:
     permission_posture: Optional[str] = None
     permission_profile: Optional[str] = None
     permission_allow_pattern_count: Optional[int] = None
+    # The model the harness reported it actually ran (init event), normalized to
+    # the registry key. ``model`` stays the REQUESTED value (often an alias such
+    # as "sonnet"); this field is what the alias resolved to. None omits the
+    # field: no init event means no observation, never a guess.
+    model_resolved: Optional[str] = None
 
     def __post_init__(self) -> None:
         # Receipt-quality PR-3: the closed-set lint lives in the contract now
@@ -275,6 +280,8 @@ class ReceiptV2:
             receipt["permission_profile"] = self.permission_profile
         if self.permission_allow_pattern_count is not None:
             receipt["permission_allow_pattern_count"] = self.permission_allow_pattern_count
+        if self.model_resolved is not None:
+            receipt["model_resolved"] = self.model_resolved
         return receipt
 
 

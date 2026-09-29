@@ -233,7 +233,11 @@ _PINNED_PRICES: dict[tuple[str, str], tuple[float, float]] = {
     ("anthropic", "opus"): (15.0, 75.0),
     ("anthropic", "opus-4-8"): (5.0, 25.0),
     ("anthropic", "opus-4-6"): (5.0, 25.0),
-    ("anthropic", "sonnet"): (3.0, 15.0),
+    # dispatch-20260929-registry-sonnet-5-5: the alias follows claude -p, which
+    # resolves `sonnet` to claude-sonnet-5-5 since CLI 2.1.284. Source: Anthropic
+    # pricing + model overview pages, fetched 2026-09-29.
+    ("anthropic", "sonnet"): (2.0, 10.0),
+    ("anthropic", "sonnet-5-5"): (2.0, 10.0),
     ("anthropic", "haiku"): (1.0, 5.0),
     ("anthropic", "sonnet-5"): (2.0, 10.0),
     ("anthropic", "opus-5"): (5.0, 25.0),
@@ -273,7 +277,6 @@ _PINNED_PRICES: dict[tuple[str, str], tuple[float, float]] = {
 #: Models whose price_source starts with "unverified" — a self-declared guess.
 _UNVERIFIED: set[tuple[str, str]] = {
     ("anthropic", "opus"),
-    ("anthropic", "sonnet"),
     ("anthropic", "haiku"),
     ("anthropic", "opus-5"),
     ("anthropic", "fable-5"),
@@ -296,7 +299,9 @@ _UNVERIFIED: set[tuple[str, str]] = {
 _VERIFIED: set[tuple[str, str]] = {
     ("anthropic", "opus-4-8"),
     ("anthropic", "opus-4-6"),
+    ("anthropic", "sonnet"),
     ("anthropic", "sonnet-5"),
+    ("anthropic", "sonnet-5-5"),
     ("anthropic", "opus-5-5"),
     ("openai", "gpt-5.5"),
     ("openai", "gpt-6-astra"),

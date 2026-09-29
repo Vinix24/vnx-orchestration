@@ -60,6 +60,9 @@ _AVG_OUTPUT_TOKENS = 2_000
 _ROUTING_MODEL_MAP: dict[str, tuple[str, str]] = {
     "claude-sonnet-4-6": ("anthropic", "sonnet"),
     "claude-sonnet-5": ("anthropic", "sonnet-5"),
+    # 2026-09-29 dispatch-20260929-registry-sonnet-5-5: the `sonnet` alias now
+    # resolves to claude-sonnet-5-5; sonnet-5 stays for the 5-vs-5.5 comparison.
+    "claude-sonnet-5-5": ("anthropic", "sonnet-5-5"),
     "claude-opus-4-6": ("anthropic", "opus"),
     "claude-opus-4-7": ("anthropic", "opus"),
     "claude-opus-4-8": ("anthropic", "opus-4-8"),

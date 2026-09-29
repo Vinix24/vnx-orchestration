@@ -185,6 +185,7 @@ class ClaudeSubprocessAdapter:
                 ),
             }
         model_used = getattr(result, "model", None) or spec.model
+        model_resolved = getattr(result, "model_resolved", None)
 
         if result.error:
             return _AdapterResult(
@@ -194,6 +195,7 @@ class ClaudeSubprocessAdapter:
                 token_usage=token_usage,
                 error=result.error,
                 session_id=result.session_id,
+                model_resolved=model_resolved,
                 model=model_used,
             )
         if result.timed_out:
@@ -204,6 +206,7 @@ class ClaudeSubprocessAdapter:
                 token_usage=token_usage,
                 timed_out=True,
                 session_id=result.session_id,
+                model_resolved=model_resolved,
                 model=model_used,
             )
         if result.stopped_early:
@@ -213,6 +216,7 @@ class ClaudeSubprocessAdapter:
                 status="success",
                 token_usage=token_usage,
                 session_id=result.session_id,
+                model_resolved=model_resolved,
                 model=model_used,
             )
         status = "success" if result.returncode == 0 else "failure"
@@ -222,5 +226,6 @@ class ClaudeSubprocessAdapter:
             status=status,
             token_usage=token_usage,
             session_id=result.session_id,
+            model_resolved=model_resolved,
             model=model_used,
         )

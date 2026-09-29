@@ -71,9 +71,11 @@ class TestComputeCostPerCall:
 
     def test_sonnet_cost_matches_wave7(self):
         cost = compute_cost_per_call("claude-sonnet-4-6")
-        # input: 5000 * 3.00 / 1M + output: 2000 * 15.00 / 1M = 0.015 + 0.030 = 0.045
+        # The retired claude-sonnet-4-6 id maps to the `sonnet` alias, which is
+        # claude-sonnet-5-5 at 2.00/10.00 since 2026-09-29.
+        # input: 5000 * 2.00 / 1M + output: 2000 * 10.00 / 1M = 0.010 + 0.020 = 0.030
         assert cost is not None
-        assert abs(cost - 0.045) < 1e-9
+        assert abs(cost - 0.030) < 1e-9
 
     def test_haiku_cheaper_than_sonnet(self):
         haiku = compute_cost_per_call("claude-haiku-4-5")

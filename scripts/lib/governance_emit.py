@@ -119,6 +119,7 @@ def emit_dispatch_receipt(
     permission_posture: Optional[str] = None,
     permission_profile: Optional[str] = None,
     permission_allow_pattern_count: Optional[int] = None,
+    model_resolved: Optional[str] = None,
 ) -> Path:
     """Atomic-append to t0_receipts.ndjson via the shared append primitive
     (ADR-035 §7.1) — same lock file, hash-chain stamping, and validator Path 2
@@ -219,6 +220,12 @@ def emit_dispatch_receipt(
     count`` are only meaningful for ``"scoped-allowlist"``. Conditionally
     stamped (None omits).
 
+    ``model_resolved``: the raw model id the harness reported in its init event
+    (what the requested alias actually ran as, e.g. ``claude-sonnet-5-5``).
+    Normalized through the same normalizer as ``model``; ``model`` keeps the
+    requested value. Stamped only when provided (None omits — no init event
+    means no observation).
+
     Raises:
         ValueError: provider field doesn't match required pattern, or
             receipt_kind missing / outside the closed set (PR-3 lint raise)
@@ -235,6 +242,8 @@ def emit_dispatch_receipt(
     try:
         from providers.model_normalizer import normalize_model_name  # noqa: PLC0415
         model = normalize_model_name(model)
+        if model_resolved:
+            model_resolved = normalize_model_name(model_resolved)
     except Exception:  # noqa: BLE001 — a normalizer failure must never block receipt emission
         logger.debug("emit_dispatch_receipt: model normalization failed dispatch=%s", dispatch_id, exc_info=True)
 
@@ -316,6 +325,7 @@ def emit_dispatch_receipt(
         permission_posture=permission_posture,
         permission_profile=permission_profile,
         permission_allow_pattern_count=permission_allow_pattern_count,
+        model_resolved=model_resolved or None,
     ).to_dict()
 
     receipt_path = Path(state_dir) / "t0_receipts.ndjson"
