@@ -124,6 +124,7 @@ def _enforce_push_pr(
     base_ref: str = "origin/main",
     target_remote_head: "Optional[str]" = None,
     skip_pr: bool = False,
+    work_ref: "Optional[str]" = None,
 ) -> "_AdapterResult":
     """Enforce the rij-7 push+PR obligation on an envelope-lane worktree.
 
@@ -139,6 +140,12 @@ def _enforce_push_pr(
 
     *skip_pr* (OI-1115): when True, the auto-PR creation is skipped.  Set when
     *base_ref* is a dispatch branch (the PR already exists).
+
+    *work_ref* (OI-1906): the spec's delivery branch (a fix-forward pushes
+    ``HEAD:<work_ref>`` while the worktree stays on its own local name). Passed
+    through to enforce_pr_exists, whose OI-1392 path looks for the PR of that
+    branch instead of opening a second PR on the same sha for the local name.
+    ``None`` leaves the behaviour unchanged.
 
     A non-applicable state (clean, or dirty with only untracked scratch — see
     OI-1119) leaves *result* unchanged. A ``dirty`` worktree with substantive
@@ -233,6 +240,7 @@ def _enforce_push_pr(
             # a dirty tree holds only generated files and the commit state is
             # read again without the working-tree verdict.
             base_sha=base_sha,
+            work_ref=work_ref,
         )
     except Exception as exc:  # noqa: BLE001 — never block a real completion on this guard
         logger.error(
@@ -764,6 +772,7 @@ def run_envelope_plan(
                 base_ref=_base_ref,
                 target_remote_head=_target_remote_head,
                 skip_pr=_skip_pr,
+                work_ref=plan.work_ref,
             )
     except Exception as _work_exc:  # noqa: BLE001 — never let a close-out error skip GOVERN
         logger.exception(
@@ -1051,6 +1060,7 @@ def run_envelope_headless_plan(
                 base_ref=_base_ref,
                 target_remote_head=_target_remote_head,
                 skip_pr=_skip_pr,
+                work_ref=plan.work_ref,
             )
     except Exception as _work_exc:  # noqa: BLE001 — never let a close-out error skip GOVERN
         logger.exception(

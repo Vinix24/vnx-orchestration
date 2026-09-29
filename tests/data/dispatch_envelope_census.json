@@ -1303,6 +1303,20 @@
       "symbol": "ProviderAdapter"
     },
     {
+      "file": "tests/test_oi1906_envelope_work_ref_no_duplicate_pr.py",
+      "line": 24,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_enforce_push_pr"
+    },
+    {
+      "file": "tests/test_oi1906_envelope_work_ref_no_duplicate_pr.py",
+      "line": 25,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "_AdapterResult"
+    },
+    {
       "file": "tests/test_phantom_guard_branch_fallback.py",
       "line": 122,
       "mechanism": "direct-call",
