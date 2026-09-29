@@ -195,23 +195,31 @@ def _print_prs(cs: dict) -> None:
         print(f"  {_c('dim', chr(8226))} {pr}")
 
 
-def _print_terminals(t0: dict) -> None:
-    _header("Terminal Status")
-    terminals = t0.get("terminals", {})
-    if not terminals:
-        print("  (no terminal data — run vnx start first)")
+def _print_live_work(t0: dict) -> None:
+    # D5: what runs comes from the dispatches table plus the occupancy flock
+    # (build_t0_state._build_live_work). The headless lane uses no terminals.
+    _header("Live Work")
+    live_work = t0.get("live_work") or {}
+    if not live_work.get("available"):
+        reason = live_work.get("reason") or "no live_work in t0_state.json"
+        print(f"  {_c('yellow', 'unavailable')}: {reason}")
         return
-    for tid in sorted(terminals):
-        t = terminals[tid]
-        status = t.get("status", "unknown")
-        lease = t.get("lease_state", "idle")
-        track = t.get("track", "?")
-        dispatch = t.get("current_dispatch") or "—"
-        color = "green" if status == "idle" else "yellow" if status == "busy" else "dim"
+    running = (live_work.get("live") or []) + (live_work.get("starting") or [])
+    stale = live_work.get("stale") or []
+    if not running and not stale:
+        print("  (nothing in flight)")
+    for item in running:
+        pr = f"  PR #{item['pr']}" if item.get("pr") else ""
         print(
-            f"  {_c('bold', tid)} [{track}] "
-            f"{_c(color, status)}/{lease}  "
-            f"{_c('dim', str(dispatch)[:45])}"
+            f"  {_c('green', item.get('state', '?'))} "
+            f"{str(item.get('dispatch_id', '?'))[:45]}  "
+            f"{_c('dim', str((item.get('age_seconds') or 0) // 60) + ' min')}{pr}"
+        )
+    for item in stale:
+        print(
+            f"  {_c('yellow', 'stale')} "
+            f"{str(item.get('dispatch_id', '?'))[:45]}  "
+            f"{_c('dim', str(item.get('state', '?')) + ', lock ' + str(item.get('lock', '?')))}"
         )
 
 
@@ -242,7 +250,7 @@ def _build_json_output(cs: dict, t0: dict, state_dir: Path) -> dict:
         "focus": cs.get("focus", ""),
         "active_waves": _active_waves(cs.get("waves", [])),
         "open_prs": cs.get("prs", [])[:3],
-        "terminals": t0.get("terminals", {}),
+        "live_work": t0.get("live_work", {}),
         "recent_decisions": cs.get("decisions", [])[:3],
         "queues": t0.get("queues", {}),
         "system_health": system_health,
@@ -313,7 +321,7 @@ def main(argv: list[str] | None = None, data_dir: Path | None = None) -> int:
     _print_focus(cs)
     _print_waves(cs)
     _print_prs(cs)
-    _print_terminals(t0)
+    _print_live_work(t0)
     _print_decisions(cs)
     print()
     return 0

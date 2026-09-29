@@ -2,7 +2,7 @@
 
 Covers:
   1. build_project_status returns string ≤100 lines
-  2. Output contains expected sections (Summary, Terminals, Recent activity, Health, Next actions)
+  2. Output contains expected sections (Summary, Live work, Recent activity, Health, Next actions)
   3. Empty state dir → minimal but valid output
   4. write_project_status uses atomic tmp+rename
   5. Output is markdown (no JSON-only payload)
@@ -35,14 +35,16 @@ def _write_index(state_dir: Path, branch: str = "main", head: str = "abc1234") -
         "schema": "t0_index/1.0",
         "git_branch": branch,
         "git_head": head,
-        "terminals": {
-            "T1": {"status": "idle"},
-            "T2": {"status": "working"},
-            "T3": {"status": "idle"},
+        "live_work": {
+            "available": True,
+            "counts": {"live": 1, "starting": 0, "stale": 1, "unmeasured": 0},
+            "live": [{"dispatch_id": "d-live-01", "state": "running",
+                      "age_seconds": 5400, "pr": 1981}],
+            "stale": [{"dispatch_id": "d-zombie-01", "state": "delivering",
+                       "age_seconds": 259200, "lock": "released"}],
         },
         "queue": {
             "pending": 2,
-            "active": 1,
             "open_prs": 3,
             "blocking_open_items": 0,
         },
@@ -110,7 +112,7 @@ class TestExpectedSections:
         result = build_project_status(state_dir)
 
         assert "## Summary" in result
-        assert "## Terminals" in result
+        assert "## Live work" in result
         assert "## Recent activity" in result
         assert "## Health" in result
         assert "## Next actions" in result
@@ -123,14 +125,25 @@ class TestExpectedSections:
         assert "feat/my-feature" in result
         assert "deadbeef" in result
 
-    def test_terminals_listed(self, tmp_path):
+    def test_live_work_listed(self, tmp_path):
         state_dir = tmp_path / "state"
         _write_index(state_dir)
 
         result = build_project_status(state_dir)
-        assert "- T1:" in result
-        assert "- T2:" in result
-        assert "- T3:" in result
+        assert "- d-live-01: running, 90 min, PR #1981" in result
+        assert "- stale d-zombie-01: delivering, lock released" in result
+        assert "- Live dispatches: 1 (stale: 1)" in result
+        assert "- T1:" not in result
+
+    def test_unavailable_live_work_says_why(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True)
+        (state_dir / "t0_index.json").write_text(json.dumps({
+            "live_work": {"available": False, "reason": "degraded: database is locked"},
+        }), encoding="utf-8")
+
+        result = build_project_status(state_dir)
+        assert "- unavailable: degraded: database is locked" in result
 
     def test_register_events_in_recent_activity(self, tmp_path):
         state_dir = tmp_path / "state"
@@ -175,7 +188,7 @@ class TestEmptyStateDir:
         state_dir.mkdir()
         result = build_project_status(state_dir)
         assert "## Summary" in result
-        assert "## Terminals" in result
+        assert "## Live work" in result
         assert "## Recent activity" in result
         assert "## Health" in result
         assert "## Next actions" in result
@@ -219,7 +232,7 @@ class TestAtomicWrite:
 
         # Both should have same sections (timestamps may differ by < 1s)
         assert "## Summary" in written
-        assert "## Terminals" in written
+        assert "## Live work" in written
 
     def test_returns_path_object(self, tmp_path):
         state_dir = tmp_path / "state"

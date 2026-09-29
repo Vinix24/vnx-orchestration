@@ -37,6 +37,9 @@ def build_project_status(state_dir: Path | None = None) -> str:
             except json.JSONDecodeError:
                 continue
 
+    live_work = index.get("live_work") or {}
+    counts = live_work.get("counts") or {}
+
     # Compose
     now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     lines = [
@@ -47,14 +50,28 @@ def build_project_status(state_dir: Path | None = None) -> str:
         "## Summary",
         f"- Branch: `{index.get('git_branch','?')}` @ `{index.get('git_head','?')}`",
         f"- Open PRs: {index.get('queue',{}).get('open_prs',0)}",
-        f"- Active dispatches: {index.get('queue',{}).get('active',0)}",
+        f"- Live dispatches: {counts.get('live', 0) + counts.get('starting', 0)}"
+        f" (stale: {counts.get('stale', 0)})",
         f"- Pending dispatches: {index.get('queue',{}).get('pending',0)}",
         f"- Open items (blockers): {index.get('queue',{}).get('blocking_open_items',0)}",
         "",
-        "## Terminals",
+        "## Live work",
     ]
-    for tid, t in (index.get("terminals") or {}).items():
-        lines.append(f"- {tid}: {t.get('status','?')}")
+    # D5: live work is the dispatches table plus the occupancy flock
+    # (build_t0_state._build_live_work), not the terminals.
+    if not live_work.get("available"):
+        lines.append(f"- unavailable: {live_work.get('reason') or 'no t0_index.json'}")
+    for item in live_work.get("live") or []:
+        pr = f", PR #{item['pr']}" if item.get("pr") else ""
+        lines.append(
+            f"- {item.get('dispatch_id','?')}: {item.get('state','?')},"
+            f" {(item.get('age_seconds') or 0) // 60} min{pr}"
+        )
+    for item in live_work.get("stale") or []:
+        lines.append(
+            f"- stale {item.get('dispatch_id','?')}: {item.get('state','?')},"
+            f" lock {item.get('lock','?')}"
+        )
 
     lines.extend(["", "## Recent activity (last 5 register events)"])
     for ev in register_events[-5:]:

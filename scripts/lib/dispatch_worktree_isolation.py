@@ -584,6 +584,32 @@ def _release_occupancy(wt_path: Path) -> None:
         fh.close()
 
 
+def probe_occupancy(claims_dir: Path, dispatch_id: str) -> str:
+    """Whether a live process holds the occupancy lock for *dispatch_id*.
+
+    Returns ``"held"`` (a live holder), ``"released"`` (the file exists and
+    nobody holds it: the run ended or its holder died), or ``"absent"`` (no
+    worktree was ever claimed under this id). The test is "lock held", never
+    "file exists": released lock files are never cleaned up.
+
+    Opens its OWN file description and asks LOCK_SH | LOCK_NB, which a
+    holder's LOCK_EX blocks, so it never measures its own lock. The file is
+    never created: a probe that fabricates it would turn "absent" into
+    "released". An OSError other than a blocked lock propagates; the caller
+    decides what an unmeasurable lock means.
+    """
+    lock_path = Path(claims_dir) / f"{_sanitize_dispatch_id(dispatch_id)}.occupancy"
+    if not lock_path.exists():
+        return "absent"
+    with open(lock_path, "a") as fh:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return "held"
+        fcntl.flock(fh, fcntl.LOCK_UN)
+    return "released"
+
+
 def _resolve_fabric_version_marker() -> str:
     """Return the fabric version the ``~/.vnx-system/current`` symlink names.
 
