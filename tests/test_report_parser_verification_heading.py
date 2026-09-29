@@ -170,10 +170,10 @@ def test_red_then_green_english_headings_count_the_last_green_run():
     assert (result["tests_passed"], result["tests_failed"]) == (42, 0)
 
 
-def test_red_and_green_on_one_line_counts_the_green_one():
+def test_red_words_mid_line_are_prose_and_the_failure_counts():
     body = "Rood op de oude code: 3 failed, 10 passed. Groen op de kop: 13 passed in 0.4s."
     result = _validation(body)
-    assert (result["tests_passed"], result["tests_failed"]) == (13, 0)
+    assert (result["tests_passed"], result["tests_failed"]) == (13, 3)
 
 
 def test_only_green_runs_take_the_last_one():
@@ -197,13 +197,13 @@ def test_green_run_with_a_real_failure_keeps_the_failure():
     assert (result["tests_passed"], result["tests_failed"]) == (8, 12)
 
 
-def test_mutation_check_after_the_green_run_is_not_the_final_count():
+def test_an_unlabelled_mutation_check_keeps_its_failure():
     body = (
         "- `pytest tests/test_a.py`: 16 passed.\n"
         "- Mutation (swap b and c, then restore): 1 failed / 7 passed.\n"
     )
     result = _validation(body)
-    assert (result["tests_passed"], result["tests_failed"]) == (16, 0)
+    assert (result["tests_passed"], result["tests_failed"]) == (7, 1)
 
 
 def test_red_then_green_receipt_is_accepted_on_success():
@@ -239,10 +239,32 @@ def test_dutch_verificatie_heading_is_read():
     assert receipt["verification"]["tests_passed"] == 21
 
 
-def test_prose_failures_are_not_a_run():
+def test_prose_failures_count_fail_closed():
     body = "The 2 failures in the neighbour file are pre-existing.\n\n`pytest tests/test_a.py` -> 30 passed\n"
     result = _validation(body)
-    assert (result["tests_passed"], result["tests_failed"]) == (30, 0)
+    assert (result["tests_passed"], result["tests_failed"]) == (30, 2)
+
+
+@pytest.mark.parametrize("line, failed", [
+    ("- Volle unit-suite: **7417 passed**; 10 failures in `tests/deploy/test_backup.py` zijn pre-existing", 10),
+    ("Resultaat: 4 FAIL, 1 WARN", 4),
+    ("Result: 1 FAILED (test_migration_file_exists)", 1),
+    ("**921 passed** after fixing the singleton test (5 failing before that fix).", 5),
+    ("op PRE-FIX code -> **5 van de 7 tests FAILEN** (staging, loading).", 7),
+    ("FAIL: 21 ongedekte route(s) > baseline 20. De baseline mag nooit stijgen", 21),
+    ("The contract test 3 fails on the current head.", 3),
+])
+def test_a_documented_failure_in_any_case_or_as_a_noun_counts(line, failed):
+    body = f"{line}\n\n`pytest tests/test_a.py` -> 38 passed\n"
+    receipt = _receipt(body)
+    assert receipt["verification"]["tests_failed"] == failed
+    assert compute_verdict({**receipt, "status": "success"})["decision"] != "accept"
+
+
+def test_zero_failures_in_prose_is_no_run():
+    body = "`pytest tests/test_a.py` -> 38 passed\n\nThere were 0 failures in the neighbour files.\n"
+    result = _validation(body)
+    assert (result["tests_passed"], result["tests_failed"]) == (38, 0)
 
 
 def test_gate_runner_report_is_marked_as_evidence_not_a_work_run():
@@ -282,28 +304,29 @@ def test_capitalised_prose_is_not_a_run():
     assert (result["tests_passed"], result["tests_failed"]) == (7, 0)
 
 
-def test_red_marker_later_in_the_same_sentence_marks_that_run():
+def test_a_red_word_later_in_the_sentence_is_no_label():
     body = (
         "- `pytest tests/test_a.py` -> 40 passed in 2.1s\n"
         "- `pytest tests/test_a.py` -> 7 failed, 6 passed on the old code, as expected.\n"
     )
     result = _validation(body)
-    assert (result["tests_passed"], result["tests_failed"]) == (40, 0)
+    assert (result["tests_passed"], result["tests_failed"]) == (6, 7)
 
 
-def test_baseline_run_before_the_change_is_not_the_final_count():
+def test_a_baseline_run_in_prose_keeps_its_failure():
     body = (
         "Groen na de fix:\n\n-> 145 passed in 12.37s\n\n"
         "Vooraf, ter baseline: de worker-tests gaven 8 failed, 20 passed.\n"
     )
     result = _validation(body)
-    assert (result["tests_passed"], result["tests_failed"]) == (145, 0)
+    assert (result["tests_passed"], result["tests_failed"]) == (20, 8)
 
 
 def test_a_later_sentence_with_a_marker_does_not_relabel_the_run_before_it():
     body = "Combined set: **392 passed, 3 failed**. The 3 fail identically on `main`.\n"
     result = _validation(body)
-    assert (result["tests_passed"], result["tests_failed"]) == (392, 3)
+    assert result["tests_failed"] == 3
+    assert compute_verdict({**_receipt(body), "status": "success"})["decision"] != "accept"
 
 
 def test_a_marker_in_the_middle_of_a_paragraph_does_not_relabel():
@@ -316,3 +339,180 @@ def test_a_marker_in_the_middle_of_a_paragraph_does_not_relabel():
     )
     result = _validation(body)
     assert (result["tests_passed"], result["tests_failed"]) == (162, 0)
+
+
+# ---------------------------------------------------------------------------
+# D1b fix-forward 1: only an explicit contract label discounts a run.
+#
+# deepseek_gate (PR #2000) found the "last green run counts" reading
+# fail-open: an unlabelled failing run vanished behind a later, narrower
+# green run. The two fixtures below reproduce the two reports it named, in
+# shape, not as copies.
+# ---------------------------------------------------------------------------
+
+from receipt_verdict import INCOMPLETE_EVIDENCE_METHODS
+from report_body_contract import GREEN_RUN_LABELS, RED_RUN_LABELS, build_directive
+
+# 20260118-151300-T3-VALIDATION-quality-validation-report.md: a failure in the
+# middle of three separate commands, the last one narrower and green.
+SEPARATE_COMMANDS_MIDDLE_FAILS = """### Tests Executed
+```bash
+pytest tests/storage/test_factory_singleton.py -v
+============= 11 passed in 0.36s =============
+
+pytest tests/integration/test_memory_usage.py -v
+============= 4 passed, 1 failed in 0.47s =============
+
+pytest tests/services/test_orchestrator_service.py -v
+============= 1 passed in 0.91s =============
+```
+"""
+
+# 20260226-111638-A-pr1-crawl-policy-schema-handoff.md: 10 failures on the PR
+# branch, then a green contract-test run of 6.
+PR_BRANCH_FAILS_THEN_CONTRACT_GREEN = """- Lint
+  - Command: `ruff check src/`
+  - Result: `All checks passed!`
+- Unit-tests (PR branch, after fixing `.claude/vnx-system`)
+  - Command: `python -m pytest -q tests/unit`
+  - Result: `10 failed, 517 passed, 20 warnings in 10.63s`
+- Contract-tests (exact)
+  - Command: `pytest tests/api/test_schema_contract.py -q`
+  - Result: `6 passed, 16 warnings in 0.80s`
+"""
+
+
+@pytest.mark.parametrize("body, expected", [
+    (SEPARATE_COMMANDS_MIDDLE_FAILS, (1, 1)),
+    (PR_BRANCH_FAILS_THEN_CONTRACT_GREEN, (6, 10)),
+])
+def test_deepseek_reports_keep_their_failure_and_are_not_accepted(tmp_path, body, expected):
+    result = _validation(body, heading="## Tests")
+    assert (result["tests_passed"], result["tests_failed"]) == expected
+    receipt = _receipt(body, heading="## Tests")
+    assert receipt["verification"]["tests_failed"] > 0
+    assert compute_verdict({**receipt, "status": "success"})["decision"] != "accept"
+    report = tmp_path / "20260929-d1b-test.md"
+    report.write_text(_report("## Tests", body).replace("d1-test", "20260929-d1b-test"),
+                      encoding="utf-8")
+    assert _verification_from_report(report) == receipt["verification"]
+
+
+def test_a_green_label_does_not_replace_an_earlier_unlabelled_failure():
+    body = (
+        "`pytest tests/test_a.py tests/test_b.py` -> 3 failed, 40 passed\n\n"
+        "**Green run** on the head: `pytest tests/test_a.py` -> 12 passed\n"
+    )
+    result = _validation(body)
+    assert (result["tests_passed"], result["tests_failed"]) == (12, 3)
+
+
+def test_the_same_failure_under_a_red_label_is_discounted():
+    body = (
+        "**Red run** on the old head: `pytest tests/test_a.py tests/test_b.py` -> 3 failed, 40 passed\n\n"
+        "**Green run** on the head: `pytest tests/test_a.py tests/test_b.py` -> 43 passed\n"
+    )
+    receipt = _receipt(body)
+    assert (receipt["verification"]["tests_passed"], receipt["verification"]["tests_failed"]) == (43, 0)
+    assert compute_verdict({**receipt, "status": "success"})["decision"] == "accept"
+
+
+@pytest.mark.parametrize("label", RED_RUN_LABELS)
+def test_every_contract_red_label_discounts_the_run_under_it(label):
+    body = f"{label}: `pytest tests/test_a.py` -> 2 failed, 5 passed\n\n`pytest tests/test_a.py` -> 7 passed\n"
+    result = _validation(body)
+    assert (result["tests_passed"], result["tests_failed"]) == (7, 0)
+
+
+@pytest.mark.parametrize("label", GREEN_RUN_LABELS)
+def test_no_green_label_discounts_a_failure(label):
+    body = f"{label}: `pytest tests/test_a.py` -> 2 failed, 5 passed\n"
+    result = _validation(body)
+    assert (result["tests_passed"], result["tests_failed"]) == (5, 2)
+
+
+@pytest.mark.parametrize("prefix", ["### ", "- ", "1. ", "**", "- **", "_"])
+def test_a_label_may_sit_behind_heading_bullet_or_emphasis(prefix):
+    body = f"{prefix}Rode run op kop abc123: 4 failed, 47 deselected in 0.71s\n\n### Groene run\n\n96 passed\n"
+    result = _validation(body)
+    assert (result["tests_passed"], result["tests_failed"]) == (96, 0)
+
+
+def test_a_red_list_item_reaches_only_its_own_item():
+    body = (
+        "- Red run: `pytest tests/test_a.py` -> 4 failed\n"
+        "- `pytest tests/test_b.py` -> 10 passed, 2 failed\n"
+        "- `pytest tests/test_a.py` -> 4 passed\n"
+    )
+    result = _validation(body)
+    assert (result["tests_passed"], result["tests_failed"]) == (4, 2)
+
+
+def test_a_red_paragraph_reaches_the_fence_right_after_it():
+    body = "**Red run** (old code), all four fail on behaviour:\n\n```\n4 failed, 47 deselected in 0.71s\n```\n\n```\n51 passed\n```\n"
+    result = _validation(body)
+    assert (result["tests_passed"], result["tests_failed"]) == (51, 0)
+
+
+def test_a_red_paragraph_does_not_reach_a_later_paragraph():
+    body = (
+        "Red run: `pytest tests/test_a.py` -> 4 failed\n\n"
+        "Then the neighbour file: `pytest tests/test_b.py` -> 20 passed, 1 failed\n\n"
+        "`pytest tests/test_a.py` -> 4 passed\n"
+    )
+    result = _validation(body)
+    assert (result["tests_passed"], result["tests_failed"]) == (4, 1)
+
+
+def test_a_red_heading_reaches_deeper_headings_but_not_a_sibling():
+    body = (
+        "### Red runs\n\n#### (a) the first test\n\n```\n1 failed, 3 passed\n```\n\n"
+        "### Neighbour files\n\n```\n2 failed, 30 passed\n```\n\n"
+        "### Green runs\n\n```\n34 passed\n```\n"
+    )
+    result = _validation(body)
+    assert (result["tests_passed"], result["tests_failed"]) == (34, 2)
+
+
+def test_a_label_inside_a_code_fence_is_no_label():
+    body = "```\nRed run: 3 failed, 9 passed\n```\n\n12 passed\n"
+    result = _validation(body)
+    assert (result["tests_passed"], result["tests_failed"]) == (12, 3)
+
+
+def test_unittest_expected_failures_do_not_overwrite_failures():
+    body = "Ran 10 tests in 0.2s\n\nFAILED (failures=1, expected failures=3)\n"
+    result = _validation(body)
+    assert (result["tests_passed"], result["tests_failed"]) == (6, 1)
+
+
+def test_an_errors_only_clause_counts_as_failed():
+    body = "`pytest tests/test_a.py` -> 20 passed\n\n`pytest tests/test_b.py` -> 2 errors in 0.31s\n"
+    result = _validation(body)
+    assert result["tests_failed"] == 2
+    assert compute_verdict({**_receipt(body), "status": "success"})["decision"] != "accept"
+
+
+def test_zero_errors_alone_is_no_run():
+    body = "`pytest tests/test_a.py` -> 20 passed\n\nruff: 0 errors\n"
+    result = _validation(body)
+    assert (result["tests_passed"], result["tests_failed"]) == (20, 0)
+
+
+@pytest.mark.parametrize("body", ["12/12 passing", "All tests pass.", "Tests: all green"])
+def test_a_claim_without_a_runner_summary_stays_unknown(body):
+    assert _receipt(body)["verification"]["method"] == "unknown"
+
+
+def test_gate_evidence_is_incomplete_evidence():
+    assert "gate_evidence" in INCOMPLETE_EVIDENCE_METHODS
+    verdict = compute_verdict({"status": "success", "verification": {
+        "method": "gate_evidence", "tests_run": 5, "tests_passed": 5, "tests_failed": 0}})
+    assert verdict["evidence_complete"] is False
+    assert verdict["decision"] == "investigate"
+
+
+def test_the_directive_tells_workers_the_red_label():
+    directive = build_directive("disp-x")
+    for label in ("Red run", "Rode run", "Before the fix", "Voor de fix"):
+        assert f"`{label}`" in directive

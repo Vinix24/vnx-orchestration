@@ -85,30 +85,41 @@ Computed by a pure function, `scripts/lib/receipt_verdict.py::compute_verdict(re
 |---|---|---|
 | `verdict.decision` | enum: `accept` \| `investigate` \| `reject` | The one-field answer to "do I need to open the report." |
 | `verdict.reason` | string | One line, composed from the same inputs the rule table used. |
-| `verdict.evidence_complete` | bool | `false` when `verification.method` is `unknown`, `none_claimed`, or `pending-report` — distinguishes "we checked and it's clean" from "we don't actually know." |
+| `verdict.evidence_complete` | bool | `false` when `verification.method` is `unknown`, `none_claimed`, `pending-report`, or `gate_evidence` — distinguishes "we checked and it's clean" from "we don't actually know." |
 
 Evaluation order (highest precedence first), as implemented in `receipt_verdict.py`:
 
 1. **`reject`** — `status` is a hard-failure literal (`failed`, `failure`, `error`, `blocked`, `timeout`, `contract_invalid` — the verified union of both write paths' literal failure vocabulary), or any `warnings[]` entry has `severity: "blocker"`.
 2. **`investigate`** — `status` is not a recognized success value (`done`, `success`, `complete`, `completed`). A non-success status never reaches `accept`, even for a doc-only change.
 3. **doc-only path** — `verification.method == "n/a"`: `accept` only if every path in `provenance.diff_summary.paths` is under `docs/**` and ends in `.md` (both conditions required); otherwise `investigate`. A missing/empty/null `paths` is treated as **unproven** doc-only-ness, never as vacuously true — absence of evidence is not evidence of doc-only.
-4. **`investigate`** — `verification.method == "pending-report"`, an unresolved `destination: "oi_pending"` warning, or incomplete verification evidence (`method` in `unknown`/`none_claimed`, or missing/failing test counts).
+4. **`investigate`** — `verification.method == "pending-report"`, an unresolved `destination: "oi_pending"` warning, or incomplete verification evidence (`method` in `unknown`/`none_claimed`/`gate_evidence`, or missing/failing test counts).
 5. **`accept`** — `status` claims success, `verification.tests_failed == 0` with `tests_run > 0`, no blocker or oi_pending warnings.
 
 ## `verification{}` — promoted from Path 2's regex extractor, extended to Path 1
 
 | Field | Type | Meaning |
 |---|---|---|
-| `verification.method` | enum: `pytest` \| `manual` \| `none_claimed` \| `n/a` \| `pending-report` \| `unknown` | `unknown` is the honest "we don't know" default — never a silent absence. |
-| `verification.tests_run` / `tests_passed` / `tests_failed` | int \| null | Regex-extracted from the report's `## Verification`/`## Test Results` section (`report_parser.py::extract_validation`). |
+| `verification.method` | enum: `pytest` \| `unittest` \| `manual` \| `none_claimed` \| `n/a` \| `pending-report` \| `gate_evidence` \| `unknown` | `unknown` is the honest "we don't know" default — never a silent absence. `unittest` is a run read from a `Ran N tests` + `OK`/`FAILED (...)` summary. `gate_evidence` marks a gate-runner report (`<gate>-gate-pr<N>-<ts>`): its reviewer's own runs are review evidence for another dispatch's PR, so it carries no counts and is incomplete evidence (`receipt_verdict.INCOMPLETE_EVIDENCE_METHODS`). |
+| `verification.tests_run` / `tests_passed` / `tests_failed` | int \| null | Read from the report's `## Verification` section or an alias (`report_parser.py::extract_validation` via `verification_runs.py`); see "Which test runs count" below. |
 | `verification.command` | string \| null | Not currently populated by the extractor (always `null` in practice); reserved for the literal test command. |
 | `verification.pr_ref` | string \| null | The PR/commit this verification is anchored to. Not currently populated by either write path (always `null` in practice) — reserved per ADR-035 §3.1, not yet wired to a value. |
 | `verification.push_verified` | bool \| null | Whether the writer confirmed the referenced commit reached the remote. Not currently populated (always `null` in practice). |
 | `verification.spec_deviation` | string \| null | `null` asserts "delivered exactly what the spec asked, nothing more, nothing withheld." Not currently populated by either write path. |
 
+### Which test runs count (fsh D1b)
+
+The section usually shows more than one run: a red run on the old code, runs per test file, a green run on the head. Until D1b the extractor took the first `N pass` and the first `N fail` anywhere in the section, so a report that followed the contract carried its red run's failures. `scripts/lib/verification_runs.py` now reads every run and counts them fail-closed:
+
+- A **run** is a runner summary: a pytest clause on one line (`4 failed, 47 deselected in 0.71s`, `12 failed, 8 passed`), or unittest `Ran N tests in Xs` followed by `OK` / `FAILED (failures=a, errors=b, expected failures=c)`. Errors count as failed, also in an errors-only clause. Failure terms are read in any case and as a noun or Dutch verb (`10 failures in test_x.py`, `4 FAIL`, `5 tests falen`), plus a checker line `FAIL: 21 ...`: a failure the report documents always counts. Pass terms are lowercase runner words only.
+- A run is **red** only under an explicit contract label, `report_body_contract.RED_RUN_LABELS`: `Red run`, `Rode run`, `Before the fix`, `Voor de fix` (plurals accepted), as the first words of a line or heading, optionally behind `#`s, a list bullet and bold: `**Red run** on c4c9d580:`. A heading label reaches until the next heading of the same or a higher level; a paragraph, bold-lead or list-item label reaches over its own paragraph (a list item: until the next item) and a code fence that follows it after blank lines only. No other word marks a run: "baseline", "mutation", "on main" or "old code" in a sentence is prose, and the failure next to it counts.
+- The receipt's `tests_passed` is the last run that is not red; `tests_failed` is the highest failure count among all runs that are not red. A later, narrower green run never hides an earlier unlabelled failure. A green label (`GREEN_RUN_LABELS`: `Green run`, `Groene run`, `After the fix`, `Na de fix`) only ends a red label's reach; it discounts nothing, because it says the run is on the new code, not that it covers what an earlier run selected. When every run is red the last red run counts, so a red-only report keeps `tests_failed > 0`.
+- Known property: a claim without a runner summary (`12/12 passing`, `All tests pass`) is no run and leaves `method=unknown`. Measured 29-09 over 13,018 reports: 45 went from `pytest` (first-regex-hit reading) to `unknown` this way. That is the fail-closed direction.
+
+Measured 29-09 on the same 13,018 reports: outside an explicit red label, no work report loses a failure count against the first-regex-hit reading; the 52 that do are 50 gate-runner reports (`gate_evidence`) and 2 first-regex-hit artefacts across a line break. Old receipts keep what they were written with (ADR-005).
+
 **Path 1's two sub-paths populate `verification{}` differently** (`docs/operations/RECEIPT_PIPELINE.md` documents why the write ordering differs):
 
-- **Envelope sub-path** (`dispatch_envelope.py`): the report already exists on disk by receipt-write time, so `dispatch_envelope.py::_verification_from_report` threads it through the same `report_parser.py::extract_validation` regex extractor Path 2 uses, and passes the result to `emit_dispatch_receipt(verification=...)`.
+- **Envelope sub-path** (`dispatch_envelope.py`): the report already exists on disk by receipt-write time, so `dispatch_envelope.py::_verification_from_report` threads it through the same `report_parser.py::extract_validation` extractor and `verification_runs.verification_record` builder Path 2 uses, and passes the result to `emit_dispatch_receipt(verification=...)`.
 - **Multi-provider sub-path** (`provider_dispatch.py`): `report_path` is a precomputed string; the file doesn't exist yet at receipt-write time. `provider_dispatch.py` passes `verification={"method": "pending-report", ...}` explicitly — never a silent blank. This is never backfilled (ADR-005 append-only forbids rewriting the line): `compute_verdict` reads it as `investigate`, `evidence_complete: false`, permanently.
 
 ## `warnings[]` — every warning gets an enforced destination

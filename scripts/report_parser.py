@@ -647,7 +647,7 @@ class ReportParser:
         if _lib not in sys.path:
             sys.path.insert(0, _lib)
         from report_body_contract import section_heading_names
-        from verification_runs import extract_runs, final_run
+        from verification_runs import counted_run, extract_runs
         val_section = None
         # `Verificatie` is not a contract heading, but 6 of 351 reports in the
         # seven days before 29-09 wrote their evidence under it (D1b).
@@ -657,10 +657,11 @@ class ReportParser:
                 break
 
         if val_section:
-            # D1b: the count is the last run not marked red, not the first
+            # D1b: the count is the last run outside a contract red label,
+            # with the highest failure count of every such run, not the first
             # regex hit (verification_runs explains what a run and a red
-            # marker are). A red-then-green report used to carry the red run.
-            run = final_run(extract_runs(val_section))
+            # label are). A red-then-green report used to carry the red run.
+            run = counted_run(extract_runs(val_section))
             if run is not None:
                 validation['tests_passed'] = run['passed']
                 validation['tests_failed'] = run['failed']
