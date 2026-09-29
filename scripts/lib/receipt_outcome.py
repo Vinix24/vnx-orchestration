@@ -45,7 +45,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from event_outcome_semantics import classify_event_outcome
+from event_outcome_semantics import SUCCESS_STATUSES, classify_event_outcome
 from receipt_verdict import compute_verdict
 
 # When the per-dispatch reading replaced the per-line stamp count: the auditable
@@ -349,3 +349,22 @@ def summarize(
         "noise_counts": {k: v for k, v in noise.items() if v},
         "unlinked_gate_evidence": unlinked_gate_evidence,
     }
+
+
+def lane_result(outcome: Dict[str, Any]) -> str:
+    """``success``, ``failure`` or ``unknown``: what a reader that counts a
+    dispatch or moves its work on takes from one outcome of ``summarize``.
+
+    ``reject`` is a failure and ``accept`` a success. ``investigate`` keeps the
+    lane's own status: missing verification or an open blocker asks a human to
+    look, it does not turn completed work into failed work. ``superseded`` and
+    ``unknown`` carry no result of their own.
+    """
+    decision = outcome.get("decision")
+    if decision == "reject":
+        return "failure"
+    if decision == "accept":
+        return "success"
+    if decision == "investigate" and str(outcome.get("status") or "").strip().lower() in SUCCESS_STATUSES:
+        return "success"
+    return "unknown"

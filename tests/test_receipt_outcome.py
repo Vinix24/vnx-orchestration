@@ -296,3 +296,21 @@ def test_pr_owner_is_the_first_work_dispatch_that_names_the_pr():
     assert [e["dispatch_id"] for e in _outcome(result, "d1")["evidence"]] == [
         "kimi-gate-pr42-1790000000", ""]
     assert _outcome(result, "d1-ff")["evidence"] == []
+
+
+def test_lane_result_reads_one_outcome_as_success_failure_or_unknown():
+    rejected = {"decision": "reject", "status": "success"}
+    accepted = {"decision": "accept", "status": "success"}
+    done_unverified = {"decision": "investigate", "status": "done"}
+    failed_unverified = {"decision": "investigate", "status": "failure"}
+    assert [ro.lane_result(o) for o in (rejected, accepted, done_unverified, failed_unverified)] == [
+        "failure", "success", "success", "unknown"]
+    assert ro.lane_result({"decision": "superseded", "status": "success"}) == "unknown"
+    assert ro.lane_result({"decision": "unknown", "status": None}) == "unknown"
+
+
+def test_lane_result_on_a_folded_ledger():
+    result = _run(_a("ok", "success"), _b("ok"), _a("bad", "failure"),
+                  _a("lane-only", "success"), _b("lane-only", "unknown", {"method": "unknown"}))
+    by_id = {o["dispatch_id"]: ro.lane_result(o) for o in result["outcomes"]}
+    assert by_id == {"ok": "success", "bad": "failure", "lane-only": "success"}
