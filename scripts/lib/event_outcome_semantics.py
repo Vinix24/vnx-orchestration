@@ -29,7 +29,7 @@ written with; only how that status is *interpreted* changes here.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Dict, Optional
 
 # ---------------------------------------------------------------------------
 # Status vocab for "completion" events (COMPLETION_EVENT_TYPES below).
@@ -153,6 +153,29 @@ def is_governed_failure(event_type: Optional[str], status: Optional[str]) -> boo
     return classify_event_outcome(event_type, status) == "failure"
 
 
+# The provider-lane writer records a lane result as {dispatch_id, provider,
+# model, status, ...} with no event_type at all (2559 such lines in the vnx-dev
+# ledger on 29-09, statuses success/failure/timeout/blocked). Its status is a
+# completion status, so it is read as one.
+STATUS_ONLY_EVENT_TYPE = "task_complete"
+
+
+def is_status_only_outcome(record: Dict[str, Any]) -> bool:
+    """True for a lane line that carries its outcome in ``status`` alone: no
+    ``event_type`` (nor the v1 ``event``) and a non-empty status. Any literal
+    counts, a known one or not: what it means is classify_event_outcome's call."""
+    return (not str(record.get("event_type") or record.get("event") or "").strip()
+            and bool(str(record.get("status") or "").strip()))
+
+
+def outcome_event_type(record: Dict[str, Any]) -> Optional[str]:
+    """The event type a record's status is read under: its own ``event_type``,
+    or the completion family for a status-only lane line."""
+    if is_status_only_outcome(record):
+        return STATUS_ONLY_EVENT_TYPE
+    return record.get("event_type")
+
+
 class UnknownStatusError(ValueError):
     """A report declared a status literal outside the canonical vocabulary.
 
@@ -195,8 +218,11 @@ __all__ = [
     "SUCCESS_STATUSES",
     "IGNORABLE_STATUSES",
     "COMPLETION_EVENT_TYPES",
+    "STATUS_ONLY_EVENT_TYPE",
     "UnknownStatusError",
     "classify_event_outcome",
     "is_governed_failure",
+    "is_status_only_outcome",
+    "outcome_event_type",
     "resolve_status_category",
 ]

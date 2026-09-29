@@ -20,6 +20,8 @@ lines into one outcome (fabric-state-herstel D3):
    the same id is a new last A. ``task_failed`` and a terminal
    ``task_timeout`` are writer-A lines too; ``classify_event_outcome`` decides
    what their status means, and a pending ``task_timeout`` is no outcome.
+   A status-only lane line (no event type, the provider-lane writer) is a
+   writer-A line read as a completion (``outcome_event_type``).
    Every status is read through ``classify_event_outcome`` (``ok`` is a
    success, ``timeout`` on a completion carries no signal), and a failure
    literal on writer B wins over A's success; B's ``unknown`` never does.
@@ -60,7 +62,7 @@ from contract_invalid_window import (
     is_contract_invalid,
     is_stale_contract_invalid,
 )
-from event_outcome_semantics import classify_event_outcome
+from event_outcome_semantics import classify_event_outcome, outcome_event_type
 from receipt_verdict import compute_verdict
 
 # When the per-dispatch reading replaced the per-line stamp count: the auditable
@@ -134,7 +136,7 @@ def noise_reason(receipt: Dict[str, Any], project_id: str) -> Optional[str]:
 
 
 def _is_writer_a(receipt: Dict[str, Any]) -> bool:
-    event_type = receipt.get("event_type")
+    event_type = outcome_event_type(receipt)
     if event_type == "task_timeout" and classify_event_outcome(
             event_type, receipt.get("status")) is None:
         return False  # pending (no_confirmation): not a terminal outcome
@@ -149,11 +151,11 @@ def _verdict_status(receipt: Dict[str, Any]) -> str:
     ``success`` whatever literal the line carries (``ok``, task_failed, a
     terminal task_timeout); a literal without outcome signal (``timeout`` on a
     completion, ``unknown``) reads as ``unknown`` and so as investigate."""
-    return classify_event_outcome(receipt.get("event_type"), receipt.get("status")) or "unknown"
+    return classify_event_outcome(outcome_event_type(receipt), receipt.get("status")) or "unknown"
 
 
 def _is_writer_b(receipt: Dict[str, Any]) -> bool:
-    return (receipt.get("event_type") in REPORT_EVENT_TYPES
+    return (outcome_event_type(receipt) in REPORT_EVENT_TYPES
             and receipt.get("receipt_kind") in ("dispatch", None)
             and bool(receipt.get("report_file")))
 
@@ -250,10 +252,12 @@ class _Window:
             return True
         # A contract_invalid line is dated by the processor's ``ingested_at``, the
         # same clock the staleness rule uses, not by a timestamp the report carries.
-        stamp = (contract_invalid_effective_timestamp(receipt)
-                 if is_contract_invalid(receipt)
-                 else receipt.get("timestamp"))
-        ts = _parse_ts(stamp)
+        # One it cannot date is live, as it is for is_stale_contract_invalid
+        # (fail-open): only a line positively dated before the cutoff is out.
+        if is_contract_invalid(receipt):
+            ts = _parse_ts(contract_invalid_effective_timestamp(receipt))
+            return ts is None or ts >= self.cutoff
+        ts = _parse_ts(receipt.get("timestamp"))
         return ts is not None and ts >= self.cutoff
 
 

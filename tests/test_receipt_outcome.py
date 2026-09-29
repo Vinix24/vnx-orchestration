@@ -9,7 +9,7 @@ project that must not leak into the outcome.
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -456,3 +456,52 @@ def test_a_blocking_event_under_a_gate_runner_id_still_blocks():
     assert result["verdict_counts"]["investigate"] == 1
     assert _outcome(result, "d1")["blocking"][0]["dispatch_id"] == "kimi-gate-pr42-123"
 
+
+# --- D4a ff3: a status-only lane line is an outcome ---------------------------
+# The provider-lane writer records {dispatch_id, provider, model, status} with
+# no event_type (2559 lines in the vnx-dev ledger on 29-09). Its status is a
+# completion status; _run wraps every ledger in a foreign 'd1' failure.
+
+def _status_only(did: str, status: str, **kw: Any) -> Dict[str, Any]:
+    return {"dispatch_id": did, "status": status, "provider": "kimi", "timestamp": TS, **kw}
+
+
+def test_status_only_lane_lines_are_accept_reject_or_investigate():
+    result = _run(_status_only("d1", "success", verification=GOOD), _status_only("d2", "failure"),
+                  _status_only("d3", "success"), _status_only("d4", "timeout"),
+                  _status_only("d5", "bananas"), _foreign(_status_only("d5", "success", verification=GOOD)))
+    decisions = {o["dispatch_id"]: o["decision"] for o in result["outcomes"]}
+    assert decisions == {"d1": "accept", "d2": "reject", "d3": "investigate",
+                         "d4": "investigate", "d5": "investigate"}
+    assert [ro.lane_result(_outcome(result, d)) for d in ("d1", "d2")] == ["success", "failure"]
+
+
+def test_a_later_status_only_failure_overturns_an_earlier_success():
+    result = _run(_a("d1", "success"), _b("d1"), _status_only("d1", "failure"))
+    assert _outcome(result, "d1")["decision"] == "reject"
+
+
+def test_a_line_with_neither_event_type_nor_status_is_no_outcome():
+    result = _run(_status_only("d1", ""), _gate_evidence_only("d2"))
+    assert {o["dispatch_id"]: o["decision"] for o in result["outcomes"]} == {
+        "d1": "unknown", "d2": "unknown"}
+
+
+def _gate_evidence_only(did: str) -> Dict[str, Any]:
+    return {"event_type": "review_gate_result", "dispatch_id": did, "gate": "codex_gate",
+            "pr_number": 7, "status": "pass", "timestamp": TS}
+
+
+def test_contract_invalid_without_a_datable_timestamp_is_in_the_window():
+    # The staleness rule is fail-open on a missing/unparseable effective
+    # timestamp; the digest window must be too, or a live failure vanishes.
+    now = datetime.now(tz=timezone.utc)
+    cutoff = now - timedelta(days=5)
+    undated = {"event_type": "report_contract_invalid", "dispatch_id": "d1",
+               "status": "contract_invalid", "timestamp": "not-a-date"}
+    result = _run(dict(undated), dict(undated, dispatch_id="d2", timestamp=None), cutoff=cutoff)
+    assert {o["dispatch_id"]: o["decision"] for o in result["outcomes"]} == {"d1": "reject", "d2": "reject"}
+    # dated before the cutoff but inside the 14-day staleness window: out of scope, not noise
+    before = (now - timedelta(days=10)).isoformat()
+    old = _run(dict(undated, timestamp=before, ingested_at=before), cutoff=cutoff)
+    assert (old["outcomes"], old["noise_counts"].get("stale_contract_invalid")) == ([], None)

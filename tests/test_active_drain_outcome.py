@@ -226,3 +226,76 @@ def test_fresh_status_only_contract_invalid_after_success_dead_letters(tmp_path:
         _write(data, seq, receipt)
     assert build_receipt_status_index(data / "receipts") == {"d1": "failure"}
     assert [(r.dispatch_id, r.action) for r in drain_active(data)] == [("d1", "dead_letter")]
+
+
+# --- ff3: a dispatch without an outcome of its own is not a failure ----------
+# receipt_outcome's ``unknown`` (only evidence) and ``superseded`` carry no
+# result: the dispatch has no index entry and takes the no-receipt age rule.
+# A status-only lane line (no event_type) is an outcome. ADR-007: every ledger
+# carries the same ids from a second project, which must not leak.
+
+def _drain(data: Path, receipts: List[Dict[str, Any]]) -> Dict[str, Any]:
+    for seq, receipt in enumerate(receipts):
+        _write(data, seq, receipt)
+    return {r.dispatch_id: r for r in drain_active(data)}
+
+
+def _gate_result(did: str, **kw: Any) -> Dict[str, Any]:
+    return {"event_type": "review_gate_result", "dispatch_id": did, "gate": "codex_gate",
+            "pr_number": 42, "status": "pass", "project_id": PROJECT,
+            "timestamp": "2026-09-29T10:00:00Z", **kw}
+
+
+def test_evidence_only_dispatch_is_not_dead_lettered_before_the_age_threshold(tmp_path: Path) -> None:
+    data = _store(tmp_path)
+    _active(data, "d1", hours_old=0.1)
+    results = _drain(data, [_gate_result("d1"), _a("d1", "failure", project_id=OTHER)])
+    assert build_receipt_status_index(data / "receipts") == {}
+    assert (results["d1"].action, results["d1"].reason.startswith("no receipt yet")) == ("skipped", True)
+    assert (data / "dispatches" / "active" / "d1").is_dir()
+
+
+def test_evidence_only_dispatch_past_the_threshold_takes_the_no_receipt_age_rule(tmp_path: Path) -> None:
+    data = _store(tmp_path)
+    _active(data, "d1", hours_old=2.0)
+    results = _drain(data, [_gate_result("d1"), _a("d1", "success", project_id=OTHER), _b("d1", project_id=OTHER)])
+    assert results["d1"].action == "dead_letter"
+    assert results["d1"].reason.startswith("no receipt, age")
+
+
+def test_status_only_success_with_verification_completes(tmp_path: Path) -> None:
+    data = _store(tmp_path)
+    _active(data, "d1")
+    _active(data, "d2")
+    status_only = {"dispatch_id": "d1", "status": "success", "provider": "kimi",
+                   "verification": GOOD, "timestamp": "2026-09-29T10:00:00Z", "project_id": PROJECT}
+    failed = {"dispatch_id": "d2", "status": "failure", "provider": "glm",
+              "timestamp": "2026-09-29T10:00:00Z", "project_id": PROJECT}
+    results = _drain(data, [status_only, failed, {**failed, "dispatch_id": "d1", "project_id": OTHER}])
+    assert {did: r.action for did, r in results.items()} == {"d1": "completed", "d2": "dead_letter"}
+
+
+def test_superseded_dispatch_is_not_dead_lettered_as_an_unknown_outcome(tmp_path: Path) -> None:
+    data = _store(tmp_path)
+    _active(data, "d1", hours_old=0.1)
+    _active(data, "d1-ff", hours_old=0.1)
+    receipts = [_a("d1", "failure"), _b("d1", "failure"),
+                _a("d1-ff", "success", branch="dispatch/d1"), _b("d1-ff", branch="dispatch/d1"),
+                _a("d1", "failure", project_id=OTHER)]
+    results = _drain(data, receipts)
+    assert build_receipt_status_index(data / "receipts") == {"d1-ff": "success"}
+    assert {did: r.action for did, r in results.items()} == {"d1": "skipped", "d1-ff": "completed"}
+    assert results["d1"].reason.startswith("no receipt yet")
+
+
+def test_status_only_line_with_an_unknown_literal_stays_in_active_for_a_human(tmp_path: Path) -> None:
+    data = _store(tmp_path)
+    _active(data, "d1", hours_old=2.0)
+    mystery = {"dispatch_id": "d1", "status": "bananas", "timestamp": "2026-09-29T10:00:00Z",
+               "project_id": PROJECT}
+    results = _drain(data, [mystery, {**mystery, "status": "success", "verification": GOOD,
+                                      "project_id": OTHER}])
+    assert build_receipt_status_index(data / "receipts") == {"d1": "investigate"}
+    assert results["d1"].action == "skipped"
+    assert "human look" in results["d1"].reason
+    assert not (data / "dispatches" / "completed" / "d1").exists()

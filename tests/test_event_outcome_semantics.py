@@ -252,3 +252,21 @@ def test_vocabulary_sets_are_disjoint_and_complete():
     assert set(_STATUS_VOCABULARY) == (
         FAILURE_STATUSES | SUCCESS_STATUSES | IGNORABLE_STATUSES
     )
+
+
+# --- status-only lane lines (fabric-state-herstel D4a ff3) -------------------
+
+def test_status_only_outcome_is_a_line_without_event_type_with_a_status():
+    from event_outcome_semantics import is_status_only_outcome, outcome_event_type
+
+    lane = {"dispatch_id": "d1", "status": "success", "provider": "kimi"}
+    assert is_status_only_outcome(lane)
+    assert is_status_only_outcome({"dispatch_id": "d1", "status": "bananas"})
+    assert outcome_event_type(lane) == "task_complete"
+    assert classify_event_outcome(outcome_event_type(lane), lane["status"]) == "success"
+    assert not is_status_only_outcome({"dispatch_id": "d1", "status": " "})
+    assert not is_status_only_outcome({"dispatch_id": "d1", "event": "task_complete", "status": "ok"})
+    gate = {"event_type": "review_gate_result", "status": "pass"}
+    assert not is_status_only_outcome(gate)
+    assert outcome_event_type(gate) == "review_gate_result"
+    assert outcome_event_type({}) is None

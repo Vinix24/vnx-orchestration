@@ -591,9 +591,10 @@ def test_t17_digest_buckets_v1_lines_as_unknown_verdict(tmp_path):
     assert result["line_verdict_counts"] == {"accept": 1, "investigate": 0, "reject": 1, "unknown": 1}
     # Per dispatch the reader recomputes the verdict instead of trusting the
     # stamp: d2/d3 claim done without test evidence (investigate), and the v1
-    # line carries no outcome event at all (unknown). fabric-state-herstel D3.
+    # line is a status-only lane line whose success has no verification
+    # (investigate too). fabric-state-herstel D3/D4a.
     assert result["verdict_counts"] == {
-        "accept": 0, "investigate": 2, "reject": 0, "superseded": 0, "unknown": 1,
+        "accept": 0, "investigate": 3, "reject": 0, "superseded": 0, "unknown": 0,
     }
 
 

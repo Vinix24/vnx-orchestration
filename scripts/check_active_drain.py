@@ -8,8 +8,10 @@ as a "currently in-flight" worklist.
 
 Rules
 -----
-* dispatch has a matching SUCCESS receipt in receipts/processed/   → move to completed/
-* dispatch has a matching FAILURE receipt in receipts/processed/   → move to dead_letter/
+* dispatch's outcome is accept (success)                              → move to completed/
+* dispatch's outcome is reject (failure)                              → move to dead_letter/
+* dispatch's outcome is investigate (missing verification, an open
+  blocker, a status literal nobody knows)                             → leave alone
 * dispatch has no receipt AND is older than --older-than-hours (default 1)   → move to dead_letter/
 * dispatch has no receipt AND is newer than the threshold                     → leave alone
 
@@ -46,7 +48,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_SCRIPTS_DIR / "lib"))
 
 from project_root import resolve_data_dir, resolve_project_id  # noqa: E402
-from receipt_outcome import lane_result, summarize as summarize_outcomes  # noqa: E402
+from receipt_outcome import summarize as summarize_outcomes  # noqa: E402
 from vnx_paths import project_id_from_state_dir  # noqa: E402
 
 
@@ -83,6 +85,14 @@ class DrainResult(NamedTuple):
 # The drain used to let any failure win, so an old failure outlived a
 # successful retry.
 _UNSCOPED_PROJECT = "\x00unscoped"
+
+# The index holds only dispatches with an outcome of their own. ``unknown``
+# (only evidence, no lane line) and ``superseded`` (a child took the work over)
+# are no outcome: such a dispatch has no entry and falls through to the age
+# rule for dispatches without a receipt, as before D4a. A receipt whose status
+# literal nobody knows reads as ``investigate`` (receipt_verdict), so it stays
+# in active/ for a human rather than going to completed/ or dead_letter/.
+_INDEX_STATUS = {"accept": "success", "reject": "failure", "investigate": "investigate"}
 
 
 def _project_id(data_dir: Path) -> str:
@@ -122,13 +132,15 @@ def _read_processed(processed: Path) -> list[dict]:
 
 
 def build_receipt_status_index(receipts_dir: Path) -> dict[str, str]:
-    """Map dispatch_id → \"success\" | \"failure\" | \"unknown\" | \"investigate\", one per dispatch.
+    """Map dispatch_id → \"success\" | \"failure\" | \"investigate\", one per dispatch.
 
-    ``investigate`` (missing verification, an open blocker) is not a result: the
-    dispatch stays in active/ until a human has looked.
+    ``investigate`` (missing verification, an open blocker, an unknown status
+    literal) is not a result: the dispatch stays in active/ until a human has
+    looked.
 
     ``receipts_dir`` is ``<data dir>/receipts``. A dispatch without an outcome
-    receipt (only bookkeeping, noise or another project's lines) has no entry.
+    of its own (only bookkeeping, noise, evidence, another project's lines, or
+    superseded by a child) has no entry.
     """
     processed = receipts_dir / "processed"
     if not processed.is_dir():
@@ -139,8 +151,8 @@ def build_receipt_status_index(receipts_dir: Path) -> dict[str, str]:
     if not project_id:
         receipts = [{k: v for k, v in r.items() if k != "project_id"} for r in receipts]
     summary = summarize_outcomes(receipts, project_id=project_id or _UNSCOPED_PROJECT)
-    return {o["dispatch_id"]: "investigate" if o["decision"] == "investigate" else lane_result(o)
-            for o in summary["outcomes"]}
+    return {o["dispatch_id"]: _INDEX_STATUS[o["decision"]]
+            for o in summary["outcomes"] if o["decision"] in _INDEX_STATUS}
 
 
 # ---------------------------------------------------------------------------
@@ -198,16 +210,15 @@ def _destination(
 ) -> tuple[str, str]:
     """Where a dispatch goes and why: ``completed``, ``dead_letter`` or
     ``skipped`` (it stays in active/)."""
-    if receipt_status == "investigate":
-        return "skipped", "outcome needs a human look (missing verification or open blocker)"
+    if receipt_status == "success":
+        return "completed", "receipt found with success status"
     if receipt_status == "failure":
         return "dead_letter", "receipt found with failure status"
-    if receipt_status == "unknown":
-        # Receipt with an unrecognised status — treat as failure to
-        # avoid silently recording bad outcomes as completed work.
-        return "dead_letter", "receipt found with unrecognised status"
     if receipt_status is not None:
-        return "completed", "receipt found with success status"
+        # investigate, or a status a caller's own index carries that is not a
+        # result: never completed work, never a failure either; a human looks.
+        return "skipped", (f"outcome {receipt_status!r} needs a human look "
+                           "(missing verification, open blocker or unknown status)")
     if entry.timestamp is None:
         # No timestamp → treat as orphaned regardless of age
         return "dead_letter", "no receipt, no timestamp (orphaned)"
