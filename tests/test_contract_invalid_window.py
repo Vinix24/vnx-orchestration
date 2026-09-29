@@ -8,10 +8,10 @@ Covers the windowing-only salvage of the parked report_contract_invalid fix
      unparseable time, ingested_at-over-timestamp precedence.
   2. scripts/lib/append_receipt_internals/payload.py — _stamp_ingested_at()
      always overwrites a caller-supplied value.
-  3. scripts/weekly_digest.py, scripts/learning_loop.py,
-     scripts/check_active_drain.py — a frozen old batch is excluded from the
+  3. scripts/learning_loop.py, scripts/check_active_drain.py — a frozen old batch is excluded from the
      live counters while a fresh contract_invalid (including one with a
      forged old `timestamp` but a fresh `ingested_at`) still counts.
+     (weekly_digest left this list in D4a: it windows through receipt_outcome.)
 
 The classification half (report_exempt / panel-seat / benchmark exemptions)
 is intentionally out of scope — parked for the receipt-v2 redesign.
@@ -157,84 +157,12 @@ class TestStampIngestedAt:
 
 
 # ---------------------------------------------------------------------------
-# 3a. weekly_digest.collect_metrics — windowing integration
+# 3a. shared receipt writer (weekly_digest windows through receipt_outcome since D4a)
 # ---------------------------------------------------------------------------
 
 def _write_receipts(path: Path, records: list) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
-
-
-def _run_weekly_digest(records: list, *, tmp_path: Path, days: int = 7) -> dict:
-    import unittest.mock as mock
-    import weekly_digest
-
-    receipts_path = tmp_path / "t0_receipts.ndjson"
-    _write_receipts(receipts_path, records)
-
-    with (
-        mock.patch.object(weekly_digest, "RECEIPTS_PATH", receipts_path),
-        mock.patch.object(weekly_digest, "DB_PATH", tmp_path / "nonexistent.db"),
-        mock.patch.object(weekly_digest, "PENDING_PATH", tmp_path / "nonexistent.json"),
-    ):
-        metrics = weekly_digest.collect_metrics(days=days)
-    return metrics["dispatch_outcomes"]
-
-
-class TestWeeklyDigestWindowing:
-    def test_frozen_batch_excluded_fresh_failure_counted(self, tmp_path: Path) -> None:
-        """36 frozen contract_invalid records (one old June-style batch) plus a
-        single fresh real failure — only the fresh one counts as live."""
-        frozen_batch = [
-            {"status": "contract_invalid", "ingested_at": _OLD_26D}
-            for _ in range(36)
-        ]
-        fresh_failure = {"status": "contract_invalid", "ingested_at": _FRESH}
-        out = _run_weekly_digest(frozen_batch + [fresh_failure], tmp_path=tmp_path)
-        assert out["total"] == 1
-        assert out["failure"] == 1
-
-    def test_forged_timestamp_fresh_ingested_at_still_counted(self, tmp_path: Path) -> None:
-        """A contract_invalid receipt with a forged old `timestamp` (outside the
-        digest's own --days window) but a fresh ingested_at must still count —
-        it must not be dropped by the generic --days filter before it reaches
-        the dedicated staleness check."""
-        record = {"status": "contract_invalid", "timestamp": _OLD_26D, "ingested_at": _FRESH}
-        out = _run_weekly_digest([record], tmp_path=tmp_path, days=7)
-        assert out["total"] == 1
-        assert out["failure"] == 1
-
-    def test_missing_ingested_at_fallback_counts_fresh_timestamp(self, tmp_path: Path) -> None:
-        record = {"status": "contract_invalid", "timestamp": _FRESH}
-        out = _run_weekly_digest([record], tmp_path=tmp_path)
-        assert out["total"] == 1
-        assert out["failure"] == 1
-
-    def test_missing_ingested_at_fallback_excludes_old_timestamp(self, tmp_path: Path) -> None:
-        record = {"status": "contract_invalid", "timestamp": _OLD_26D}
-        out = _run_weekly_digest([record], tmp_path=tmp_path)
-        assert out["total"] == 0
-        assert out["failure"] == 0
-
-    def test_missing_both_fields_fail_open_counted(self, tmp_path: Path) -> None:
-        record = {"status": "contract_invalid"}
-        out = _run_weekly_digest([record], tmp_path=tmp_path)
-        assert out["total"] == 1
-        assert out["failure"] == 1
-
-    def test_event_type_report_contract_invalid_windowed_too(self, tmp_path: Path) -> None:
-        stale = {"event_type": "report_contract_invalid", "status": "contract_invalid", "ingested_at": _OLD_26D}
-        out = _run_weekly_digest([stale], tmp_path=tmp_path)
-        assert out["total"] == 0
-
-    def test_non_contract_invalid_failure_unaffected(self, tmp_path: Path) -> None:
-        """Regression guard: ordinary failure statuses keep windowing on the
-        worker-suppliable timestamp exactly as before."""
-        old_failure = {"status": "failed", "timestamp": _OLD_26D}
-        fresh_failure = {"status": "failed", "timestamp": _FRESH}
-        out = _run_weekly_digest([old_failure, fresh_failure], tmp_path=tmp_path, days=7)
-        assert out["total"] == 1
-        assert out["failure"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -408,17 +336,6 @@ class TestMalformedPrefixValidCountsInAllCounters:
         patterns = loop.extract_failure_patterns(start_time=start_time)
         assert len(patterns) == 0
 
-    def test_weekly_digest_malformed_prefix_valid_counts(self, tmp_path: Path) -> None:
-        record = {"status": "contract_invalid", "ingested_at": "2020-01-01-not-a-date"}
-        out = _run_weekly_digest([record], tmp_path=tmp_path)
-        assert out["failure"] == 1
-        assert out["total"] == 1
-
-    def test_weekly_digest_genuine_old_excluded(self, tmp_path: Path) -> None:
-        record = {"status": "contract_invalid", "ingested_at": _OLD_26D}
-        out = _run_weekly_digest([record], tmp_path=tmp_path)
-        assert out["total"] == 0
-
     def test_check_active_drain_malformed_prefix_valid_counts(self, tmp_path: Path) -> None:
         from check_active_drain import build_receipt_status_index
 
@@ -545,38 +462,6 @@ class TestLearningLoopFailOpenOnUnparseableTime:
         start_time = datetime.now(timezone.utc) - timedelta(days=7)
         patterns = loop.extract_failure_patterns(start_time=start_time)
         assert len(patterns) == 0
-
-
-class TestWeeklyDigestFailOpenOnUnparseableTime:
-    """The lexicographic effective_ts[:10] < since check used to hide
-    contract_invalid records with an unparseable old-looking prefix."""
-
-    def test_zero_prefix_unparseable_counts(self, tmp_path: Path) -> None:
-        record = {"status": "contract_invalid", "ingested_at": "0000-not-a-date"}
-        out = _run_weekly_digest([record], tmp_path=tmp_path)
-        assert out["failure"] == 1
-        assert out["total"] == 1
-
-    def test_unparseable_text_counts(self, tmp_path: Path) -> None:
-        record = {"status": "contract_invalid", "ingested_at": "not-a-date"}
-        out = _run_weekly_digest([record], tmp_path=tmp_path)
-        assert out["failure"] == 1
-        assert out["total"] == 1
-
-    def test_report_contract_invalid_zero_prefix_counts(self, tmp_path: Path) -> None:
-        record = {
-            "event_type": "report_contract_invalid",
-            "status": "contract_invalid",
-            "ingested_at": "0000-not-a-date",
-        }
-        out = _run_weekly_digest([record], tmp_path=tmp_path)
-        assert out["failure"] == 1
-        assert out["total"] == 1
-
-    def test_old_parseable_still_excluded(self, tmp_path: Path) -> None:
-        record = {"status": "contract_invalid", "ingested_at": _OLD_26D}
-        out = _run_weekly_digest([record], tmp_path=tmp_path)
-        assert out["total"] == 0
 
 
 class TestCheckActiveDrainFailOpenOnUnparseableTime:

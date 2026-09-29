@@ -26,7 +26,9 @@ try:
     from vnx_paths import ensure_env
 except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
-from contract_invalid_window import is_stale_contract_invalid
+from project_root import resolve_project_id
+from receipt_outcome import lane_result, summarize as summarize_outcomes
+from vnx_paths import project_id_from_state_dir
 
 PATHS = ensure_env()
 STATE_DIR = Path(PATHS["VNX_STATE_DIR"])
@@ -37,12 +39,27 @@ RECEIPTS_PATH = STATE_DIR / "t0_receipts.ndjson"
 PENDING_PATH = STATE_DIR / "pending_edits.json"
 DIGEST_PATH = STATE_DIR / "weekly_digest.json"
 
+# receipt_outcome keys its foreign-project filter on a concrete id; this stands
+# in when no project can be resolved and the ledger is read unscoped.
+_UNSCOPED_PROJECT = "\x00unscoped"
+
 _SEVERITY_SCORE = {"critical": 1.0, "high": 0.75, "medium": 0.5, "low": 0.25}
 
 
 # ---------------------------------------------------------------------------
 # Metrics collection
 # ---------------------------------------------------------------------------
+
+def _project_id() -> str:
+    """The project this digest reads: the state dir's own, else the ambient one."""
+    derived = project_id_from_state_dir(STATE_DIR)
+    if derived:
+        return derived
+    try:
+        return resolve_project_id()
+    except RuntimeError:
+        return ""
+
 
 def collect_metrics(days: int = 7) -> dict:
     """Aggregate intelligence data for the last N days."""
@@ -110,72 +127,36 @@ def collect_metrics(days: int = 7) -> dict:
             log.debug("Failed to read intelligence DB metrics: %s", e)
 
     # --- Receipts outcomes ---
-    # Infrastructure events that carry no dispatch-outcome signal — excluded
-    # from total before classification so they don't inflate the unknown bucket.
-    # Keep in sync with check_active_drain.py FAILURE_STATUSES / SUCCESS_STATUSES.
-    _SKIP_EVENT_TYPES: frozenset[str] = frozenset({"state_mutation", "review_gate_request"})
-
-    # Canonical outcome vocabularies (sync with check_active_drain.py lines ~79-80).
-    # "contract_invalid" = report-body-contract failure → semantically a failure.
-    _SUCCESS_STATUSES: frozenset[str] = frozenset(
-        {"success", "completed", "complete", "ok", "done"}
-    )
-    _FAILURE_STATUSES: frozenset[str] = frozenset(
-        {"failed", "failure", "error", "blocked", "timeout", "contract_invalid"}
-    )
-
+    # One outcome per dispatch from receipt_outcome (fabric-state-herstel D3/D4a):
+    # bookkeeping, test noise and other projects are out, a dispatch that wrote
+    # two task_complete receipts counts once. OUTCOME_READER_EPOCH dates the
+    # switch from the per-line status count.
     if RECEIPTS_PATH.exists():
         try:
             lines = RECEIPTS_PATH.read_text(encoding="utf-8", errors="replace").splitlines()
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                # Skip infra events before counting totals.
-                event_type = (rec.get("event_type") or "").lower()
-                if event_type in _SKIP_EVENT_TYPES:
-                    continue
-                status = (rec.get("status") or "").lower()
-                is_contract_invalid = (
-                    status == "contract_invalid" or event_type == "report_contract_invalid"
-                )
-                if is_contract_invalid:
-                    # contract_invalid/report_contract_invalid records window
-                    # EXCLUSIVELY through the shared staleness helper. No
-                    # independent date-prefix pre-filter is allowed to drop them.
-                    if is_stale_contract_invalid(rec):
-                        continue
-                else:
-                    ts = rec.get("timestamp", "")
-                    if ts and isinstance(ts, str) and ts[:10] < since:
-                        continue
-                metrics["dispatch_outcomes"]["total"] += 1
-                # Empty status falls back to event_type for classification —
-                # preserves pre-vocab recall for e.g. status-less task_complete
-                # receipts (the old code classified on status OR event_type).
-                classify = status or event_type
-                if (
-                    classify in _SUCCESS_STATUSES
-                    or "success" in classify
-                    or "complete" in classify
-                    or "done" in classify
-                ):
-                    metrics["dispatch_outcomes"]["success"] += 1
-                elif (
-                    classify in _FAILURE_STATUSES
-                    or "fail" in classify
-                    or "error" in classify
-                    or "timeout" in classify
-                ):
-                    metrics["dispatch_outcomes"]["failure"] += 1
-                else:
-                    metrics["dispatch_outcomes"]["unknown"] += 1
         except OSError:
-            pass
+            lines = []
+        receipts = []
+        for line in lines:
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(rec, dict):
+                receipts.append(rec)
+        project_id = _project_id()
+        if not project_id:
+            receipts = [{k: v for k, v in r.items() if k != "project_id"} for r in receipts]
+        summary = summarize_outcomes(
+            receipts,
+            project_id=project_id or _UNSCOPED_PROJECT,
+            cutoff=datetime.fromisoformat(since).replace(tzinfo=_UTC),
+        )
+        outcomes = metrics["dispatch_outcomes"]
+        outcomes["total"] = len(summary["outcomes"])
+        for outcome in summary["outcomes"]:
+            outcomes[lane_result(outcome)] += 1
+        outcomes["verdict_counts"] = summary["verdict_counts"]
 
     # --- Pending suggestions ---
     if PENDING_PATH.exists():
