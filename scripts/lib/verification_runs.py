@@ -22,8 +22,10 @@ A run is one test-runner summary:
   ``2 PASSes`` is prose, and so are ``12/12 passing`` and ``All tests pass``,
   which leave the receipt at ``method=unknown``.
 - unittest: ``Ran N tests in Xs`` followed within a few lines by ``OK`` or
-  ``FAILED (failures=a, errors=b, skipped=c, expected failures=d)``.
-  ``Ran N tests`` without a result line is no run.
+  ``FAILED (failures=a, errors=b, skipped=c, expected failures=d, unexpected successes=e)``.
+  A FAILED line is always a failed run: failed is ``a + b + e`` and at least 1,
+  also for ``FAILED ()`` or a field the reader does not know. ``OK`` stays 0
+  failed, whatever its fields. ``Ran N tests`` without a result line is no run.
 
 Which runs count (fix-forward 1, fail-closed). A run is red ONLY when it sits
 under an explicit red label from the report contract
@@ -112,7 +114,8 @@ _LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+\.)\s+")
 _FENCE = re.compile(r"^\s*(?:```|~~~)")
 _UNITTEST_RAN = re.compile(r"\bRan (\d+) tests? in [\d.]+\s*s\b")
 _UNITTEST_OK = re.compile(r"^\s*OK\b(?:\s*\(([^)]*)\))?")
-_UNITTEST_FAILED = re.compile(r"^\s*FAILED\s*\(([^)]*)\)")
+# unittest writes a bare `FAILED` when it has no counts to add; the fields are optional.
+_UNITTEST_FAILED = re.compile(r"^\s*FAILED\s*(?:\(([^)]*)\)|$)")
 # `expected failures=3` is one key; `\w+` would read it as a second `failures`.
 _UNITTEST_FIELD = re.compile(r"([A-Za-z][A-Za-z ]*?)\s*=\s*(\d+)")
 _UNITTEST_RESULT_WINDOW = 5
@@ -151,7 +154,13 @@ def _pytest_clauses(line: str) -> List[Dict[str, Any]]:
 
 def _unittest_counts(ran: int, result: str, failed_form: bool) -> Dict[str, int]:
     fields = {k.strip().lower(): int(v) for k, v in _UNITTEST_FIELD.findall(result or "")}
-    failed = fields.get("failures", 0) + fields.get("errors", 0) if failed_form else 0
+    failed = 0
+    if failed_form:
+        # unittest prints FAILED whenever wasSuccessful() is False, unexpected
+        # successes included; a FAILED line is a failed run even when no field
+        # the extractor knows carries the count (fail-closed, ADR-035).
+        failed = max(1, fields.get("failures", 0) + fields.get("errors", 0)
+                     + fields.get("unexpected successes", 0))
     passed = max(0, ran - failed - fields.get("skipped", 0) - fields.get("expected failures", 0))
     return {"passed": passed, "failed": failed}
 

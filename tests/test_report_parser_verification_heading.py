@@ -516,3 +516,63 @@ def test_the_directive_tells_workers_the_red_label():
     directive = build_directive("disp-x")
     for label in ("Red run", "Rode run", "Before the fix", "Voor de fix"):
         assert f"`{label}`" in directive
+
+
+# ---------------------------------------------------------------------------
+# D1b ff2: a unittest run in FAILED form is always a failed run. unittest
+# prints FAILED whenever wasSuccessful() is False, which includes unexpected
+# successes; a FAILED line whose fields the extractor does not know still
+# counts as at least one failure (fail-closed, ADR-035).
+# ---------------------------------------------------------------------------
+
+_UNEXPECTED = "Ran 5 tests in 0.1s\n\nFAILED (unexpected successes=1)\n"
+_EXPECTED_ONLY = "Ran 5 tests in 0.1s\n\nFAILED (expected failures=1)\n"
+
+
+@pytest.mark.parametrize("prefix", ["", "**Green run** on the head:\n\n", "Groene run op de kop:\n\n"])
+def test_unittest_unexpected_success_is_a_failed_run(prefix):
+    body = prefix + "```\n" + _UNEXPECTED + "```\n"
+    receipt = _receipt(body)
+    assert receipt["verification"]["method"] == "unittest"
+    assert (receipt["verification"]["tests_passed"], receipt["verification"]["tests_failed"]) == (4, 1)
+    assert compute_verdict({**receipt, "status": "success"})["decision"] != "accept"
+
+
+@pytest.mark.parametrize("prefix", ["", "**Green run** on the head:\n\n", "Groene run op de kop:\n\n"])
+def test_unittest_failed_form_with_only_expected_failures_is_a_failed_run(prefix):
+    body = prefix + "```\n" + _EXPECTED_ONLY + "```\n"
+    receipt = _receipt(body)
+    assert receipt["verification"]["tests_failed"] == 1
+    assert receipt["verification"]["tests_passed"] == 3
+    assert compute_verdict({**receipt, "status": "success"})["decision"] != "accept"
+
+
+@pytest.mark.parametrize("result", ["FAILED (skipped=1)", "FAILED ()", "FAILED (flaky reruns=2)", "FAILED"])
+def test_unittest_failed_form_without_a_known_failure_field_counts_one(result):
+    body = f"Ran 5 tests in 0.1s\n\n{result}\n"
+    receipt = _receipt(body)
+    assert receipt["verification"]["method"] == "unittest"
+    assert receipt["verification"]["tests_failed"] >= 1
+    assert compute_verdict({**receipt, "status": "success"})["decision"] != "accept"
+
+
+def test_a_red_labelled_unexpected_success_is_discounted_by_a_later_ok_run():
+    body = (
+        "**Red run** on the old head:\n\n```\n" + _UNEXPECTED + "```\n\n"
+        "**Green run** on the head:\n\n```\nRan 5 tests in 0.1s\n\nOK (expected failures=1)\n```\n"
+    )
+    receipt = _receipt(body)
+    assert (receipt["verification"]["tests_passed"], receipt["verification"]["tests_failed"]) == (4, 0)
+    assert compute_verdict({**receipt, "status": "success"})["decision"] == "accept"
+
+
+@pytest.mark.parametrize("result, expected", [
+    ("OK (expected failures=1)", (4, 0)),
+    ("OK (skipped=2, expected failures=1)", (2, 0)),
+    ("FAILED (failures=2, errors=1)", (2, 3)),
+    ("FAILED (failures=1, unexpected successes=2)", (2, 3)),
+    ("FAILED (unexpected successes=9)", (0, 9)),
+])
+def test_unittest_result_counts(result, expected):
+    result_counts = _validation(f"Ran 5 tests in 0.1s\n\n{result}\n")
+    assert (result_counts["tests_passed"], result_counts["tests_failed"]) == expected
