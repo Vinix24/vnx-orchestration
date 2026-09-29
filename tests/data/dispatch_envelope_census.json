@@ -1548,6 +1548,13 @@
       "symbol": "_prepare"
     },
     {
+      "file": "tests/test_report_parser_verification_heading.py",
+      "line": 25,
+      "mechanism": "direct-call",
+      "module_target": "envelope_govern_support",
+      "symbol": "_verification_from_report"
+    },
+    {
       "file": "tests/test_report_path.py",
       "line": 383,
       "mechanism": "direct-call",

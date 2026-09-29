@@ -69,6 +69,18 @@ _SECTION_ALIASES: dict[str, tuple[str, ...]] = {
     "## Verification": ("## Test Results", "## Evidence", "## Tests"),
 }
 
+
+def section_heading_names(section: str) -> tuple[str, ...]:
+    """Bare heading texts (no ``## `` prefix) for a required section and its aliases.
+
+    The single source for readers that look a contract section up by name, so
+    they do not keep a second alias list. ``section`` is the ``## ``-prefixed
+    key, e.g. ``"## Verification"``.
+    """
+    return tuple(
+        heading[3:] for heading in (section, *_SECTION_ALIASES.get(section, ()))
+    )
+
 # Summary must not match this prefix — it is the placeholder body injected by
 # the old _emit_unified_report stub before govern() was wired in.
 _PLACEHOLDER_PATTERN = re.compile(
