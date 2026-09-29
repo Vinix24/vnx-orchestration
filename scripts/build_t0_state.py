@@ -91,7 +91,7 @@ import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 log = logging.getLogger(__name__)
 
@@ -1660,6 +1660,76 @@ def _live_work_unavailable(reason: str, *, read_error: bool) -> Dict[str, Any]:
     return {"available": False, "reason": reason, "read_error": read_error}
 
 
+def _read_in_flight_rows(db_path: Path, project_id: str, states: List[str]) -> List[tuple]:
+    """In-flight ``dispatches`` rows of *project_id*, newest first. Raises sqlite3.Error."""
+    placeholders = ",".join("?" for _ in states)
+    conn = sqlite3.connect(
+        f"file:{db_path}?mode=ro", uri=True,
+        timeout=_LIVE_WORK_DB_BUSY_TIMEOUT_MS / 1000,
+    )
+    try:
+        conn.execute(f"PRAGMA busy_timeout = {_LIVE_WORK_DB_BUSY_TIMEOUT_MS}")
+        return conn.execute(
+            "SELECT dispatch_id, state, track, gate, created_at, updated_at, claimed_at"
+            f" FROM dispatches WHERE project_id = ? AND state IN ({placeholders})"
+            " ORDER BY created_at DESC",
+            (project_id, *states),
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def _link_open_prs(
+    pr_queue: Optional[Dict[str, Any]],
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """Map dispatch_id -> PR number via ``dispatch/<id>`` branches, plus every open PR."""
+    pr_by_dispatch: Dict[str, Any] = {}
+    linked_prs: List[Dict[str, Any]] = []
+    for pr in (pr_queue or {}).get("open_prs") or []:
+        branch = str(pr.get("branch") or "")
+        dispatch_id = (
+            branch[len(_DISPATCH_BRANCH_PREFIX):]
+            if branch.startswith(_DISPATCH_BRANCH_PREFIX) else None
+        )
+        if dispatch_id:
+            pr_by_dispatch[dispatch_id] = pr.get("number")
+        linked_prs.append({"number": pr.get("number"), "dispatch_id": dispatch_id})
+    return pr_by_dispatch, linked_prs
+
+
+def _classify_live_row(
+    row: tuple, claims_dir: Path, now: datetime, pr_by_dispatch: Dict[str, Any],
+) -> Tuple[str, Dict[str, Any]]:
+    """(bucket, item) for one in-flight row, judged by the lock in *claims_dir*."""
+    from dispatch_worktree_isolation import probe_occupancy
+
+    dispatch_id, state, track, gate, created_at, updated_at, claimed_at = row
+    started = _parse_utc(claimed_at) or _parse_utc(updated_at) or _parse_utc(created_at)
+    age = int((now - started).total_seconds()) if started else None
+    try:
+        lock = probe_occupancy(claims_dir, dispatch_id)
+    except OSError as exc:
+        lock = f"unmeasured: {exc}"
+    if lock == "held":
+        bucket = "live"
+    elif lock.startswith("unmeasured"):
+        bucket = "unmeasured"
+    elif age is not None and age < _LIVE_WORK_STARTUP_GRACE_SECONDS:
+        bucket = "starting"
+    else:
+        bucket = "stale"
+    return bucket, {
+        "dispatch_id": dispatch_id,
+        "state": state,
+        "age_seconds": age,
+        "lock": lock,
+        "track": track,
+        "gate": gate,
+        "started_at": started.isoformat() if started else None,
+        "pr": pr_by_dispatch.get(dispatch_id),
+    }
+
+
 def _build_live_work(
     state_dir: Path,
     project_id: str,
@@ -1672,11 +1742,17 @@ def _build_live_work(
     ``stale``: no lock, older than the run-up. ``unmeasured``: the lock probe
     itself raised. Open PRs are linked to their dispatch via ``dispatch/<id>``.
 
+    ADR-007: the rows are filtered on project_id and the lock is probed in the
+    claim registry of the same state dir, which belongs to one project only
+    (``claims_dir_for_state_dir``, shared with the writer). Another project's
+    lock under a colliding dispatch_id lives in its own state dir and is never
+    seen here.
+
     A failed DB read returns ``{"available": False, "reason": ...}``, never an
     empty list that reads as "nothing running".
     """
     from coordination_db import IN_FLIGHT_DISPATCH_STATES
-    from dispatch_worktree_isolation import probe_occupancy
+    from dispatch_worktree_isolation import claims_dir_for_state_dir
 
     if not project_id:
         # ADR-007: an unscoped read of a shared table would show every project.
@@ -1690,71 +1766,23 @@ def _build_live_work(
         )
 
     states = sorted(IN_FLIGHT_DISPATCH_STATES)
-    placeholders = ",".join("?" for _ in states)
     try:
-        conn = sqlite3.connect(
-            f"file:{db_path}?mode=ro", uri=True,
-            timeout=_LIVE_WORK_DB_BUSY_TIMEOUT_MS / 1000,
-        )
-        try:
-            conn.execute(f"PRAGMA busy_timeout = {_LIVE_WORK_DB_BUSY_TIMEOUT_MS}")
-            rows = conn.execute(
-                "SELECT dispatch_id, state, track, gate, created_at, updated_at, claimed_at"
-                f" FROM dispatches WHERE project_id = ? AND state IN ({placeholders})"
-                " ORDER BY created_at DESC",
-                (project_id, *states),
-            ).fetchall()
-        finally:
-            conn.close()
+        rows = _read_in_flight_rows(db_path, project_id, states)
     except sqlite3.Error as exc:
         kind = _classify_db_error(exc)
         return _live_work_unavailable(
             f"{kind}: {type(exc).__name__}: {exc}", read_error=(kind != "premigration"),
         )
 
-    open_prs = (pr_queue or {}).get("open_prs") or []
-    pr_by_dispatch: Dict[str, Any] = {}
-    linked_prs: List[Dict[str, Any]] = []
-    for pr in open_prs:
-        branch = str(pr.get("branch") or "")
-        dispatch_id = (
-            branch[len(_DISPATCH_BRANCH_PREFIX):]
-            if branch.startswith(_DISPATCH_BRANCH_PREFIX) else None
-        )
-        if dispatch_id:
-            pr_by_dispatch[dispatch_id] = pr.get("number")
-        linked_prs.append({"number": pr.get("number"), "dispatch_id": dispatch_id})
-
+    pr_by_dispatch, linked_prs = _link_open_prs(pr_queue)
     actual_now = now if now is not None else _now_utc()
-    claims_dir = state_dir / "dispatch_worktree_claims"
+    claims_dir = claims_dir_for_state_dir(state_dir)
     buckets: Dict[str, List[Dict[str, Any]]] = {
         "live": [], "starting": [], "stale": [], "unmeasured": [],
     }
-    for dispatch_id, state, track, gate, created_at, updated_at, claimed_at in rows:
-        started = _parse_utc(claimed_at) or _parse_utc(updated_at) or _parse_utc(created_at)
-        age = int((actual_now - started).total_seconds()) if started else None
-        try:
-            lock = probe_occupancy(claims_dir, dispatch_id)
-        except OSError as exc:
-            lock = f"unmeasured: {exc}"
-        if lock == "held":
-            bucket = "live"
-        elif lock.startswith("unmeasured"):
-            bucket = "unmeasured"
-        elif age is not None and age < _LIVE_WORK_STARTUP_GRACE_SECONDS:
-            bucket = "starting"
-        else:
-            bucket = "stale"
-        buckets[bucket].append({
-            "dispatch_id": dispatch_id,
-            "state": state,
-            "age_seconds": age,
-            "lock": lock,
-            "track": track,
-            "gate": gate,
-            "started_at": started.isoformat() if started else None,
-            "pr": pr_by_dispatch.get(dispatch_id),
-        })
+    for row in rows:
+        bucket, item = _classify_live_row(row, claims_dir, actual_now, pr_by_dispatch)
+        buckets[bucket].append(item)
 
     return {
         "available": True,

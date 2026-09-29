@@ -164,7 +164,18 @@ def _claim_dir(project_root: Path) -> Path:
     """
     from vnx_paths import resolve_data_root  # noqa: PLC0415
     data_dir = Path(resolve_data_root(project_root))
-    return data_dir / "state" / "dispatch_worktree_claims"
+    return claims_dir_for_state_dir(data_dir / "state")
+
+
+def claims_dir_for_state_dir(state_dir: Path) -> Path:
+    """The claim registry inside one project's state dir.
+
+    The single derivation shared by the writer (``_claim_dir``) and readers
+    that already hold a state dir (build_t0_state live_work). A state dir
+    belongs to exactly one project (``resolve_data_root`` never collapses two
+    project_ids onto one root), so a lock found here is this project's lock.
+    """
+    return Path(state_dir) / "dispatch_worktree_claims"
 
 
 def _claim_path(safe_id: str, project_root: Path) -> Path:

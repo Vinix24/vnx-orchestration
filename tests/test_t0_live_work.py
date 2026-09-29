@@ -181,6 +181,43 @@ def test_in_flight_row_of_project_b_never_reaches_index_of_project_a(
     assert every_id == ["d5-mine"]
 
 
+def test_lock_of_project_b_under_colliding_id_never_makes_row_of_a_live(
+    tmp_path, monkeypatch
+):
+    """ADR-007 on the lock side: B holds the occupancy lock for the id that A
+    also has in flight. B's lock is taken by the real writer, anchored on B's
+    project root, so it lands in B's claim registry; A's probe reads A's."""
+    import dispatch_worktree_isolation as dwi
+
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    state_a, _ = _env(tmp_path / "a", monkeypatch)
+    state_b, _ = _env(tmp_path / "b", monkeypatch)
+    now = datetime.now(timezone.utc)
+    _insert(state_a, "d5-shared", "running", now - timedelta(minutes=10))
+    _insert(state_b, "d5-shared", "running", now - timedelta(minutes=10), PROJECT_B)
+
+    root_b = tmp_path / "b" / "repo"
+    root_b.mkdir()
+    monkeypatch.setenv("VNX_PROJECT_ID", PROJECT_B)
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    monkeypatch.setenv("VNX_DATA_DIR", str(state_b.parent))
+    assert dwi._claim_dir(root_b) == dwi.claims_dir_for_state_dir(state_b)
+    wt_b = root_b / "wt"
+    dwi._acquire_occupancy("d5-shared", wt_b, root_b)
+    try:
+        assert dwi.probe_occupancy(dwi.claims_dir_for_state_dir(state_b), "d5-shared") == "held"
+        section_a = bts._build_live_work(state_a, PROJECT_A, {"open_prs": []}, now=now)
+        section_b = bts._build_live_work(state_b, PROJECT_B, {"open_prs": []}, now=now)
+    finally:
+        dwi._release_occupancy(wt_b)
+
+    assert _ids(section_a["live"]) == []
+    assert _ids(section_a["stale"]) == ["d5-shared"]
+    assert section_a["stale"][0]["lock"] == "absent"
+    assert _ids(section_b["live"]) == ["d5-shared"]
+
+
 def test_staging_bundle_counts_as_pending(tmp_path, monkeypatch):
     state_dir, dispatch_dir = _env(tmp_path, monkeypatch)
     bundle = dispatch_dir / "pending" / "20260929-staged"
