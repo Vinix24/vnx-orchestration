@@ -347,6 +347,104 @@ def final_prompt_sha_for_dispatch(
     return ""
 
 
+# ---------------------------------------------------------------------------
+# Gate bundle archival
+# ---------------------------------------------------------------------------
+
+GATE_BUNDLE_OUTCOMES = ("completed", "failed")
+GATE_BUNDLE_IN_FLIGHT = "in_flight"
+
+
+def gate_bundle_outcome(status: str) -> str:
+    """Where a gate bundle belongs for a canonical gate *status*.
+
+    ``completed`` for a verdict (pass, fail, partial review), ``failed`` for the
+    other terminal statuses gate_recorder books (``unavailable``,
+    ``not_executable``), :data:`GATE_BUNDLE_IN_FLIGHT` for a run still pending,
+    running, queued or requested, and ``""`` for an empty or unknown status. Only
+    the first two are proof that the run ended; the bundle of a running gate is
+    still being read.
+    """
+    from gate_status import (
+        FAIL_STATES, INCOMPLETE_STATES, PARTIAL_REVIEW_STATES, PASS_STATES, UNAVAILABLE_STATES,
+    )
+
+    status = (status or "").strip().lower()
+    if status in PASS_STATES | FAIL_STATES | PARTIAL_REVIEW_STATES:
+        return "completed"
+    if status in UNAVAILABLE_STATES or status == "not_executable":
+        return "failed"
+    if status in INCOMPLETE_STATES:
+        return GATE_BUNDLE_IN_FLIGHT
+    return ""
+
+
+def is_final_prompt_only_bundle(bundle_dir: "str | Path") -> bool:
+    """True when *bundle_dir* is a gate bundle: ``final_prompt.md`` and no staged spec.
+
+    A staged dispatch bundle carries ``dispatch-spec.json`` and/or
+    ``instruction.md``; the door and the headless daemon own those, so they are
+    never a gate bundle, whatever their name.
+    """
+    bundle = Path(bundle_dir)
+    return (
+        (bundle / "final_prompt.md").is_file()
+        and not (bundle / "dispatch-spec.json").exists()
+        and not (bundle / "instruction.md").exists()
+    )
+
+
+def archive_gate_bundle(
+    dispatch_id: str,
+    data_dir: "str | Path",
+    outcome: str,
+) -> Optional[Path]:
+    """Move a finished gate's bundle from ``pending/`` to ``completed/`` or ``failed/``.
+
+    A gate dispatch leaves ``dispatches/pending/<id>/final_prompt.md`` behind and
+    nothing moved it on, so ``pending/`` filled with thousands of prompts of
+    gates that finished long ago. The bundle is sometimes the only local copy
+    of the prompt, so it is MOVED, never deleted, to a directory
+    :func:`final_prompt_sha_for_dispatch` also reads.
+
+    Only a final-prompt-only bundle moves: a directory with a spec or an
+    instruction is a staged dispatch and stays where the door put it. An
+    occupied destination is never overwritten; the bundle then stays in
+    ``pending/`` and the conflict is logged.
+
+    Returns the new location, or None when nothing moved. Never raises: the
+    gate result is already written and archival must not fail it.
+    """
+    if outcome not in GATE_BUNDLE_OUTCOMES:
+        logger.error(
+            "final_prompt_integrity: refusing to archive bundle %s to unknown outcome %r",
+            dispatch_id, outcome,
+        )
+        return None
+    if not dispatch_id or "/" in dispatch_id or dispatch_id in (".", ".."):
+        return None
+    src = _default_bundle_dir(data_dir, dispatch_id)
+    if not is_final_prompt_only_bundle(src):
+        return None
+    dest = Path(data_dir) / "dispatches" / outcome / dispatch_id
+    if dest.exists():
+        logger.warning(
+            "final_prompt_integrity: gate bundle %s stays in pending/: %s already exists",
+            dispatch_id, dest,
+        )
+        return None
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        os.rename(src, dest)
+    except OSError as exc:
+        logger.warning(
+            "final_prompt_integrity: could not move gate bundle %s to %s: %s",
+            dispatch_id, dest, exc,
+        )
+        return None
+    return dest
+
+
 def record_final_prompt_integrity(
     *,
     dispatch_id: str,

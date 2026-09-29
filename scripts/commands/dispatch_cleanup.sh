@@ -54,6 +54,17 @@ Classification:
                       Action: move to abandoned/
   recent-no-receipt   No receipt, younger than threshold
                       Action: skip (not stale yet)
+  gate-result-proven  Gate bundle (final_prompt.md only) whose dispatch-id has
+                      a gate result or review_gate_result receipt carrying the
+                      same final_prompt_sha256
+                      and a terminal status
+                      Action: move to completed/ (verdict) or failed/
+                      (unavailable, not_executable)
+  in_flight           Gate bundle whose same-sha gate result is still pending,
+                      running, queued or requested
+                      Action: skip (the running gate still uses the prompt)
+  unproven            Gate bundle without such a result, at any age
+                      Action: skip (may be the only copy of the prompt)
   empty               Missing both dispatch-spec.json and instruction.md
                       Action: error (manual review needed)
   error               Read/classify failure
@@ -63,6 +74,7 @@ Safety:
   - Dry-run is the DEFAULT. Nothing is moved without --apply.
   - Bundles with a receipt go to completed/, not abandoned/.
   - Recent bundles (within --stale-days) are never moved.
+  - Gate bundles move on proof only, never on age.
   - All bundles remain on disk — nothing is deleted.
 
 Examples:
