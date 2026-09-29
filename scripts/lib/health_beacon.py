@@ -286,6 +286,67 @@ def all_beacons(
     return out
 
 
+_REASON_MAX_CHARS = 200
+_DETAILS_COUNT_MAX_KEYS = 8
+_REASON_DETAIL_KEYS = ("reason", "error", "message")
+
+
+def _truncate(value: Any) -> str:
+    text = str(value)
+    return text if len(text) <= _REASON_MAX_CHARS else text[: _REASON_MAX_CHARS - 3] + "..."
+
+
+def _details_counts(details: Any) -> Dict[str, int]:
+    """Size of every list/dict value in ``details``, never the values themselves."""
+    if not isinstance(details, dict):
+        return {}
+    counts: Dict[str, int] = {}
+    for key in sorted(details, key=str):
+        value = details[key]
+        if isinstance(value, (list, dict)):
+            counts[str(key)] = len(value)
+            if len(counts) >= _DETAILS_COUNT_MAX_KEYS:
+                break
+    return counts
+
+
+def _beacon_reason(beacon: Dict[str, Any]) -> Optional[str]:
+    health = beacon.get("health")
+    if health == "absent":
+        return "expected beacon was never written"
+    if health == "parked":
+        return "parked by operator decision"
+    if health == "corrupt":
+        return _truncate(beacon.get("error") or "beacon unreadable")
+    details = beacon.get("details")
+    if isinstance(details, dict):
+        for key in _REASON_DETAIL_KEYS:
+            text = details.get(key)
+            if isinstance(text, str) and text:
+                return _truncate(text)
+    if health == "stale":
+        interval = beacon.get("expected_interval_seconds")
+        return f"older than its {interval}s interval" if interval else "no recent write"
+    if health == "unknown":
+        return "event-driven beacon past its freshness backstop"
+    if health == "fail":
+        return f"self-reported status {beacon.get('status')!r}"
+    return None
+
+
+def _compact_beacon(beacon: Dict[str, Any]) -> Dict[str, Any]:
+    """Bounded per-beacon projection: status, age, reason and counts, never
+    the verbatim ``details`` (a beacon can carry thousands of rows there)."""
+    return {
+        "component": beacon.get("component"),
+        "health": beacon.get("health", "corrupt"),
+        "status": beacon.get("status"),
+        "age_seconds": beacon.get("age_seconds"),
+        "reason": _beacon_reason(beacon),
+        "details_counts": _details_counts(beacon.get("details")),
+    }
+
+
 def beacon_summary(
     state_dir: Path,
     expected: Optional[Sequence[str]] = None,
@@ -303,7 +364,10 @@ def beacon_summary(
     as bad as a confirmed ``fail``, so it joins the ``fail`` tier. ``unknown``
     — an event-driven beacon whose freshness can no longer be verified — is
     "can't verify", not "confirmed bad", so it joins the milder ``stale``
-    tier instead. ``parked`` (golf C / C2a) deliberately joins NEITHER tier —
+    tier instead. Each entry under ``beacons`` is a bounded projection
+    (health, status, age, reason, ``details_counts``): ``details`` is never
+    copied verbatim, so one beacon with thousands of rows cannot bloat the
+    caller. ``all_beacons`` still returns the raw records. ``parked`` (golf C / C2a) deliberately joins NEITHER tier —
     it is an operator decision to stop expecting freshness, not evidence of
     a problem, so it never floors ``overall`` away from ``"ok"``.
     """
@@ -322,7 +386,7 @@ def beacon_summary(
     return {
         "overall": overall,
         "counts": counts,
-        "beacons": beacons,
+        "beacons": {name: _compact_beacon(b) for name, b in beacons.items()},
     }
 
 

@@ -78,7 +78,7 @@ import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 log = logging.getLogger(__name__)
 
@@ -269,28 +269,45 @@ def _classify_db_error(exc: Exception) -> str:
     return "failed"
 
 
-def _probe_db_health(db_path: Path) -> str:
-    """Quick read-only probe to classify a SQLite file's accessibility (R6.1).
+_DB_PROBE_BUSY_TIMEOUT_SECONDS = 2
 
-    Returns 'healthy' when absent (pre-migration) or when PRAGMA integrity_check passes.
-    Returns 'degraded' for SQLITE_BUSY/LOCKED; 'failed' for malformed / disk errors.
-    Non-pre-migration OperationalErrors are NOT silently swallowed as legacy fallbacks.
-    Uses PRAGMA integrity_check so page-level corruption and garbage files are detected —
-    SELECT 1 is computed purely in-memory and cannot detect a malformed file.
+
+def _probe_db_health_reason(db_path: Path) -> Tuple[str, Optional[str]]:
+    """Read-only probe that returns ``(health, reason)`` (R6.1).
+
+    ``health`` is 'healthy' when the file is absent (pre-migration) or when
+    PRAGMA integrity_check passes, 'degraded' for SQLITE_BUSY/LOCKED, 'failed'
+    for malformed / disk errors. ``reason`` is the exception text (or the
+    integrity_check verdict) for anything that is not healthy, so a locked
+    database reads as degraded WITH its cause instead of a bare status.
+    The connection is ``mode=ro`` with a bounded busy timeout: a health probe
+    must never take a write lock nor wait longer than that on a busy store.
+    Non-pre-migration OperationalErrors are NOT silently swallowed as legacy
+    fallbacks. PRAGMA integrity_check (not SELECT 1) is used so page-level
+    corruption and garbage files are detected.
     """
     if not db_path.exists():
-        return "healthy"
+        return "healthy", None
     try:
-        conn = sqlite3.connect(str(db_path), timeout=1)
+        conn = sqlite3.connect(
+            f"{db_path.resolve().as_uri()}?mode=ro",
+            uri=True,
+            timeout=_DB_PROBE_BUSY_TIMEOUT_SECONDS,
+        )
         try:
             result = conn.execute("PRAGMA integrity_check").fetchone()
             if result is None or result[0] != "ok":
-                return "failed"
+                return "failed", f"integrity_check: {result[0] if result else 'no result'}"
         finally:
             conn.close()
-        return "healthy"
+        return "healthy", None
     except (sqlite3.OperationalError, sqlite3.DatabaseError) as exc:
-        return _classify_db_error(exc)
+        return _classify_db_error(exc), f"{type(exc).__name__}: {exc}"
+
+
+def _probe_db_health(db_path: Path) -> str:
+    """Health classification only; see ``_probe_db_health_reason``."""
+    return _probe_db_health_reason(db_path)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -2240,6 +2257,17 @@ def _measure_launchd_liveness(
 # System health
 # ---------------------------------------------------------------------------
 
+def _db_reason_fields(db_health: str, db_reason: Optional[str]) -> Dict[str, str]:
+    """The probe's reason, only when it explains a failed/degraded verdict.
+
+    Already folded into ``status`` through ``db_health``; this is the text that
+    says why, not a second signal.
+    """
+    if db_health in ("failed", "degraded") and db_reason:
+        return {"db_reason": db_reason}
+    return {}
+
+
 def _build_system_health(
     state_dir: Path,
     db_initialized: bool,
@@ -2249,6 +2277,7 @@ def _build_system_health(
     daemon_liveness: Optional[Dict[str, Any]] = None,
     expected_beacon_components: Optional[Sequence[str]] = None,
     launchd_liveness: Optional[Dict[str, Any]] = None,
+    db_reason: Optional[str] = None,
 ) -> Dict[str, Any]:
     uptime_seconds = 0
     panes_path = state_dir / "panes.json"
@@ -2359,6 +2388,7 @@ def _build_system_health(
         "db_initialized": db_initialized,
         "uptime_seconds": uptime_seconds,
     }
+    result.update(_db_reason_fields(db_health, db_reason))
     if beacon_health is not None:
         result["beacon_health"] = beacon_health
     if daemon_liveness is not None:
@@ -2947,7 +2977,7 @@ def build_t0_state(
     )
     db_ok = _init_and_check_db(state_dir)
     # R6.1: probe quality_intelligence.db; classify locked/malformed (not premigration)
-    db_health = _probe_db_health(state_dir / "quality_intelligence.db")
+    db_health, db_reason = _probe_db_health_reason(state_dir / "quality_intelligence.db")
 
     # Fabric-freshness: resolve the tracks store ONCE (the central per-project
     # SSOT, with local fallback) and use it for BOTH the reconcile AND the
@@ -2983,7 +3013,8 @@ def build_t0_state(
     strategic_state_heavy = _build_strategic_state_heavy(state_dir)
     elapsed = time.monotonic() - start
     system_health = _build_system_health(
-        state_dir, db_ok, build_degraded=active_errors, db_health=db_health
+        state_dir, db_ok, build_degraded=active_errors, db_health=db_health,
+        db_reason=db_reason,
     )
 
     return {
@@ -3110,6 +3141,9 @@ _DETAIL_SECTION_MAP: Dict[str, str] = {
 }
 
 
+_INDEX_FAILING_BEACONS_MAX = 5
+
+
 def _slim_health_for_index(system_health: Dict[str, Any]) -> Dict[str, Any]:
     """Compact projection of system_health for the cheap, always-loaded
     t0_index.json (<=5KB budget, enforced by TestIntegrationWithBuildT0State
@@ -3132,10 +3166,20 @@ def _slim_health_for_index(system_health: Dict[str, Any]) -> Dict[str, Any]:
         "db_initialized": system_health.get("db_initialized"),
         "uptime_seconds": system_health.get("uptime_seconds"),
     }
+    if system_health.get("db_reason"):
+        slim["db_reason"] = system_health["db_reason"]
     for key in ("beacon_health", "daemon_liveness", "launchd_liveness"):
         nested = system_health.get(key)
         if nested is not None:
             slim[key] = {"overall": nested.get("overall")}
+    beacons = (system_health.get("beacon_health") or {}).get("beacons") or {}
+    failing = sorted(
+        name for name, b in beacons.items()
+        if (b or {}).get("health") not in ("ok", "parked")
+    )
+    if failing:
+        slim["beacon_health"]["failing"] = failing[:_INDEX_FAILING_BEACONS_MAX]
+        slim["beacon_health"]["failing_total"] = len(failing)
     if "producer_liveness" in system_health:
         # Already a lightweight summary (overall + two sub-overalls) -- no
         # per-item breakdown to strip.
