@@ -137,23 +137,41 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
             os.unlink(tmp)
 
 
-def _dependencies_for(state_dir: Path, track_id: str, project_id: str) -> list[str]:
-    """Return the to_track_ids this track depends on (hard/soft edges)."""
+def _dependency_edges_for(state_dir: Path, track_id: str, project_id: str) -> list[dict[str, Any]]:
+    """Return this track's outgoing edges: to_track_id, to_project_id, kind (every kind)."""
     import sqlite3
     db = Path(state_dir) / tracks_lib.DB_FILENAME
     conn = sqlite3.connect(str(db), timeout=10.0)
     try:
         rows = conn.execute(
             """
-            SELECT to_track_id FROM track_dependencies
+            SELECT to_track_id, to_project_id, kind FROM track_dependencies
             WHERE from_track_id = ? AND from_project_id = ?
-            ORDER BY to_track_id
+            ORDER BY to_track_id, to_project_id
             """,
             (track_id, project_id),
         ).fetchall()
-        return [r[0] for r in rows]
+        return [
+            {"to_track_id": r[0], "to_project_id": r[1], "kind": r[2]} for r in rows
+        ]
     finally:
         conn.close()
+
+
+def _dependencies_for(state_dir: Path, track_id: str, project_id: str) -> list[str]:
+    """Return the to_track_ids this track depends on (every kind)."""
+    return [e["to_track_id"] for e in _dependency_edges_for(state_dir, track_id, project_id)]
+
+
+def _format_dependency_edges(edges: list[dict[str, Any]]) -> str:
+    """Render edges for the text views; a soft/overlap edge is labelled advisory (D9)."""
+    parts = []
+    for e in edges:
+        if e["kind"] in track_reconciler.ADVISORY_DEPENDENCY_KINDS:
+            parts.append(f"{e['to_track_id']} ({e['kind']}, advisory)")
+        else:
+            parts.append(e["to_track_id"])
+    return ", ".join(parts)
 
 
 def _horizon_key(track: dict[str, Any]) -> Optional[str]:
@@ -297,9 +315,9 @@ def cmd_objective_list(args: argparse.Namespace) -> int:
             continue
         print(f"=== {_HORIZON_LABEL[band]} ({len(items)}) ===")
         for t in items:
-            deps = _dependencies_for(state_dir, t["track_id"], project_id)
+            dep_edges = _dependency_edges_for(state_dir, t["track_id"], project_id)
             marker = "*" if t.get("next_up") else " "
-            dep_str = f"  deps: {', '.join(deps)}" if deps else ""
+            dep_str = f"  deps: {_format_dependency_edges(dep_edges)}" if dep_edges else ""
             pr_str = f"  pr: {t['pr_ref']}" if t.get("pr_ref") else ""
             review = review_by_track[t["track_id"]]
             if review in (plan_gate_enforcement.UNREAD, plan_gate_enforcement.REFUSED):
@@ -332,7 +350,8 @@ def cmd_objective_show(args: argparse.Namespace) -> int:
         print(f"Objective not found: {args.track_id!r} (project {project_id!r})", file=sys.stderr)
         return 1
 
-    deps = _dependencies_for(state_dir, args.track_id, project_id)
+    dep_edges = _dependency_edges_for(state_dir, args.track_id, project_id)
+    deps = [e["to_track_id"] for e in dep_edges]
     open_items = tracks_lib.get_linked_open_items(state_dir, args.track_id, project_id)
 
     # Plan-gate review disposition, derived from facts already loaded: the open
@@ -357,6 +376,7 @@ def cmd_objective_show(args: argparse.Namespace) -> int:
     if args.json:
         out = dict(track)
         out["depends_on"] = deps
+        out["dependency_edges"] = dep_edges
         out["open_items"] = open_items
         out["lane_hint"] = _lane_hint_of(track)
         out["plan_gate_review"] = review
@@ -376,7 +396,7 @@ def cmd_objective_show(args: argparse.Namespace) -> int:
     print(f"  decision_ref: {_format_decision_ref(track.get('decision_ref'))}")
     print(f"  plan-gate: {review}")
     print(f"  goal     : {track.get('goal_state') or '-'}")
-    print(f"  depends  : {', '.join(deps) if deps else '(none)'}")
+    print(f"  depends  : {_format_dependency_edges(dep_edges) if dep_edges else '(none)'}")
     if open_items:
         print("  open items (unresolved):")
         for oi in open_items:
@@ -498,18 +518,11 @@ def _drift_reason(
                             return f"blocked: plan-gate refused ({oi_id})"
                         return f"blocked: plan-gate unread ({oi_id})"
                     return f"blocked by open item: {oi_id}"
-            unmet = conn.execute(
-                """
-                SELECT td.to_track_id
-                FROM track_dependencies td
-                JOIN tracks t ON t.track_id = td.to_track_id AND t.project_id = td.to_project_id
-                WHERE td.from_track_id = ? AND td.from_project_id = ? AND t.phase != 'done'
-                LIMIT 1
-                """,
-                (track_id, project_id),
-            ).fetchone()
-            if unmet:
-                return f"blocked by dependency: {unmet[0]}"
+            # D9: name a BLOCKING edge (hard, or an unknown kind fail-closed),
+            # never a soft/overlap one — same helper the reconciler derives with.
+            unmet = track_reconciler._unfinished_dependencies(conn, track_id, project_id)
+            if unmet["blocking"]:
+                return f"blocked by dependency: {unmet['blocking'][0]['track_id']}"
             return "blocked"
 
         # OI-1098: a delivery-held track (explicit non-'complete' marking on
@@ -1259,6 +1272,67 @@ def cmd_objective_unlink_pr(args: argparse.Namespace) -> int:
             print("  delivery markers: none had a marker")
         print(f"  reason: {reason}")
         print()
+    return 0
+
+
+def cmd_objective_remove_dependency(args: argparse.Namespace) -> int:
+    """Remove one dependency edge from a track (operator-gated; audited).
+
+    The edge is identified by its full key (track_id, --project-id, to_track_id,
+    --to-project-id); --to-project-id defaults to --project-id. The delete is
+    scoped to exactly that key (ADR-007), so an edge of another project with the
+    same track ids is never touched. A non-empty --reason is REQUIRED (an empty
+    reason is a refusal, same shape as unlink-pr). Removing an edge that does
+    not exist is a no-op that says so, not an error. The removal writes a
+    ``track_dep_removed`` event carrying the removed kind and the reason.
+    """
+    state_dir = _resolve_state_dir(args.state_dir)
+    project_id = args.project_id
+    to_project_id = args.to_project_id or project_id
+    reason = (args.reason or "").strip()
+
+    if not reason:
+        print(
+            "objective remove-dependency: --reason is required and must not be empty "
+            "(no silent bypass). No change made.",
+            file=sys.stderr,
+        )
+        return 2
+
+    for tid, pid in ((args.track_id, project_id), (args.to_track_id, to_project_id)):
+        if tracks_lib.get_track(state_dir, tid, pid) is None:
+            print(
+                f"objective remove-dependency: track not found: {tid!r} "
+                f"(project {pid!r}). No change made.",
+                file=sys.stderr,
+            )
+            return 1
+
+    removed = tracks_lib.remove_dependency(
+        state_dir, args.track_id, project_id, args.to_track_id, to_project_id,
+        reason=reason, actor="operator",
+    )
+    payload = {
+        "track_id": args.track_id,
+        "project_id": project_id,
+        "to_track_id": args.to_track_id,
+        "to_project_id": to_project_id,
+        "kind": removed["kind"] if removed else None,
+        "reason": reason,
+        "action": "removed" if removed else "noop_not_present",
+        "applied": removed is not None,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, default=str))
+        return 0
+    print(f"\nvnx objective remove-dependency — {args.track_id} (project '{project_id}')")
+    edge = f"{args.track_id} -> {args.to_track_id} (project '{to_project_id}')"
+    if removed:
+        print(f"  - removed {removed['kind']} edge: {edge}")
+        print(f"  reason: {reason}")
+    else:
+        print(f"  no edge {edge}; no change made.")
+    print()
     return 0
 
 
@@ -5194,6 +5268,25 @@ def _build_parser() -> argparse.ArgumentParser:
              "no silent bypass -- an empty reason is refused)",
     )
     p_unlink_pr.set_defaults(func=cmd_objective_unlink_pr)
+
+    p_remove_dep = obj_sub.add_parser(
+        "remove-dependency",
+        help="remove one dependency edge from a track, by its full key "
+             "(operator-gated; audited)",
+    )
+    _common(p_remove_dep)
+    p_remove_dep.add_argument("track_id", help="the dependent (from) track")
+    p_remove_dep.add_argument("to_track_id", help="the track it depends on")
+    p_remove_dep.add_argument(
+        "--to-project-id", default="", dest="to_project_id",
+        help="project of the to-track (default: --project-id)",
+    )
+    p_remove_dep.add_argument(
+        "--reason", default="",
+        help="REQUIRED, non-empty: why this edge is being removed (audited; "
+             "no silent bypass -- an empty reason is refused)",
+    )
+    p_remove_dep.set_defaults(func=cmd_objective_remove_dependency)
 
     p_unmark_delivery = obj_sub.add_parser(
         "unmark-delivery",

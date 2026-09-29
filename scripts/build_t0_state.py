@@ -2837,6 +2837,10 @@ def _reconcile_tracks_fresh(
         "tracks": 0,
         "drifted": 0,
         "drifted_tracks": [],
+        # D9: tracks held ONLY by the plan-first gate (OI-PLAN-* blockers, no
+        # blocking dependency) are intended blocks, counted apart from drift.
+        "plan_gated": 0,
+        "plan_gated_tracks": [],
         "reason": None,
         "seconds": 0.0,
         "store": None,
@@ -2878,22 +2882,47 @@ def _reconcile_tracks_fresh(
         log.warning("track reconcile failed (projection continues): %s", exc)
         return marker
 
-    drifted = [r for r in results if r.get("drifted")]
+    diverged = [r for r in results if r.get("drifted")]
+    plan_gated = [r for r in diverged if _is_plan_gated(r)]
+    drifted = [r for r in diverged if not _is_plan_gated(r)]
+
+    def _row(r: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "track_id": r.get("track_id"),
+            "declared_phase": r.get("declared_phase"),
+            "derived_status": r.get("derived_status"),
+        }
+
     marker.update(
         derived_refreshed=True,
         tracks=len(results),
         drifted=len(drifted),
-        drifted_tracks=[
-            {
-                "track_id": r.get("track_id"),
-                "declared_phase": r.get("declared_phase"),
-                "derived_status": r.get("derived_status"),
-            }
-            for r in drifted
-        ],
+        drifted_tracks=[_row(r) for r in drifted],
+        plan_gated=len(plan_gated),
+        plan_gated_tracks=[_row(r) for r in plan_gated],
         seconds=round(time.monotonic() - t0, 3),
     )
     return marker
+
+
+_PLAN_GATE_OI_PREFIX = "OI-PLAN-"
+
+
+def _is_plan_gated(result: Dict[str, Any]) -> bool:
+    """True when a reconcile result is blocked ONLY by plan-first-gate OIs.
+
+    Measured 2026-09-29 (D9): 91 of the 94 vnx-dev tracks declared 'queued' and
+    derived 'blocked' are held by nothing but an ``OI-PLAN-*`` blocker. Those
+    are intended blocks (the plan-gate has not run or was refused), not drift.
+    A track with any other blocking OI or any blocking dependency is drift.
+    """
+    if result.get("derived_status") != "blocked":
+        return False
+    detail = result.get("blocking_detail") or {}
+    ois = detail.get("blocking_ois") or []
+    if not ois or detail.get("blocking_deps"):
+        return False
+    return all(str(oi.get("oi_id") or "").startswith(_PLAN_GATE_OI_PREFIX) for oi in ois)
 
 
 # ---------------------------------------------------------------------------
@@ -3180,6 +3209,7 @@ def _track_freshness_summary(tf: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return {
         "derived_refreshed": bool(tf.get("derived_refreshed", False)),
         "drifted": tf.get("drifted", 0),
+        "plan_gated": tf.get("plan_gated", 0),
         "tracks": tf.get("tracks", 0),
         "reason": tf.get("reason"),
         "autoclose_degraded": bool(tf.get("autoclose_degraded", False)),
@@ -3403,6 +3433,7 @@ def _emit_health_beacon(
         details["track_freshness"] = {
             "derived_refreshed": bool(track_freshness.get("derived_refreshed", False)),
             "drifted": track_freshness.get("drifted", 0),
+            "plan_gated": track_freshness.get("plan_gated", 0),
             "reason": track_freshness.get("reason"),
             "autoclose_degraded": bool(track_freshness.get("autoclose_degraded", False)),
             "autoclose_reason": track_freshness.get("autoclose_reason"),

@@ -67,21 +67,12 @@ def _compute_derived_status(
     if blocker:
         return "blocked"
 
-    # 2. Dependency check: any dependency whose declared phase is not 'done' blocks this track.
-    #    Uses declared phase (authoritative) to avoid circular dependency on derived_status.
-    dep_phases = conn.execute(
-        """
-        SELECT t.phase
-        FROM track_dependencies td
-        JOIN tracks t
-          ON t.track_id = td.to_track_id AND t.project_id = td.to_project_id
-        WHERE td.from_track_id = ? AND td.from_project_id = ?
-        """,
-        (track_id, project_id),
-    ).fetchall()
-    for row in dep_phases:
-        if row[0] != "done":
-            return "blocked"
+    # 2. Dependency check: a 'hard' edge (or an unknown kind, fail-closed) to a
+    #    track whose declared phase is not 'done' blocks this track; 'soft' and
+    #    'overlap' edges are advice only (D9). Uses declared phase
+    #    (authoritative) to avoid circular dependency on derived_status.
+    if _unfinished_dependencies(conn, track_id, project_id)["blocking"]:
+        return "blocked"
 
     # 3. Fetch track's pr_ref and declared phase once (reused below).
     track_row = conn.execute(
@@ -183,4 +174,5 @@ from track_reconciler import (  # noqa: E402
     _delivery_hold,
     _has_col,
     _parse_pr_numbers,
+    _unfinished_dependencies,
 )

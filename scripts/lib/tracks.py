@@ -883,6 +883,82 @@ def add_dependency(
         conn.close()
 
 
+def remove_dependency(
+    state_dir: str | Path,
+    from_track_id: str,
+    from_project_id: str,
+    to_track_id: str,
+    to_project_id: str,
+    *,
+    reason: str,
+    actor: str = "operator",
+) -> Optional[dict[str, Any]]:
+    """Delete ONE dependency edge, identified by its full composite key.
+
+    The key is ``(from_track_id, from_project_id, to_track_id, to_project_id)``
+    — the table's PRIMARY KEY — so the delete can never touch an edge of
+    another project, nor a cross-project edge that shares the track ids
+    (ADR-007). A non-empty ``reason`` is required and lands in the
+    ``track_dep_removed`` event together with the removed edge's kind.
+
+    ADR-005 emit-first: the event is appended BEFORE the delete; a failing
+    append raises and leaves the edge in place. The read, the event and the
+    delete run inside one ``BEGIN IMMEDIATE`` so the kind in the event is the
+    kind of the row that is deleted.
+
+    Returns the removed edge as a dict (the four key columns plus ``kind``),
+    or None when no such edge exists (no event, no write). Raises ValueError
+    on an empty reason.
+    """
+    if not reason or not reason.strip():
+        raise ValueError("reason is required and must not be empty")
+    key = (from_track_id, from_project_id, to_track_id, to_project_id)
+    conn = _get_conn(state_dir)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            """
+            SELECT kind FROM track_dependencies
+            WHERE from_track_id = ? AND from_project_id = ?
+              AND to_track_id = ? AND to_project_id = ?
+            """,
+            key,
+        ).fetchone()
+        if row is None:
+            conn.rollback()
+            return None
+        kind = row["kind"]
+        _emit_track_event(
+            state_dir, "track_dep_removed", from_track_id, from_project_id, actor,
+            {
+                "to_track": to_track_id, "to_project": to_project_id,
+                "kind": kind, "reason": reason.strip(),
+            },
+        )
+        conn.execute(
+            """
+            DELETE FROM track_dependencies
+            WHERE from_track_id = ? AND from_project_id = ?
+              AND to_track_id = ? AND to_project_id = ?
+            """,
+            key,
+        )
+        conn.commit()
+    except BaseException:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return {
+        "from_track_id": from_track_id,
+        "from_project_id": from_project_id,
+        "to_track_id": to_track_id,
+        "to_project_id": to_project_id,
+        "kind": kind,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Dispatch link queries (used by `vnx track show`)
 # ---------------------------------------------------------------------------

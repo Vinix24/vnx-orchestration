@@ -99,8 +99,12 @@ when gh is healthy.
   repository; `gh auth status` returning exit 0 is a prerequisite for any run.
 - **Blocker OIs refuse.** A track with an unresolved `link_type='blocks'` open
   item returns `stale_candidate` at close time, even if all PRs are MERGED.
-- **Unmet dependencies refuse.** Every `track_dependencies` row must have a
-  dependency whose declared `phase='done'`; any non-done dependency → `stale_candidate`.
+- **Unmet hard dependencies refuse.** Every `hard` `track_dependencies` row (and
+  any row with an unknown kind, fail-closed) must point at a dependency whose
+  declared `phase='done'`; any non-done one → `stale_candidate`. `soft` and
+  `overlap` edges are advice and never refuse a close. Remove a wrong edge with
+  `vnx horizon remove-dependency <track> <to-track> [--to-project-id P] --reason "..."`
+  (full-key delete, audited as `track_dep_removed`).
 - **`parked` never touched.** Parked tracks are excluded at nomination. A parked
   track must be moved out of `parked` (to `queued` or `active`) before the
   reconciler will nominate it. `objective reopen` applies only to `done` tracks
@@ -149,7 +153,7 @@ before building one. To diagnose:
 1. Check `track_phase_history` for that `track_id` — a recent `done → active`
    row means the re-close guard fired (confirm by comparing the stamped `pr_ref`).
 2. Check `track_open_items` for unresolved `link_type='blocks'` rows.
-3. Check `track_dependencies` for dependencies with `phase != 'done'`.
+3. Check `track_dependencies` for `hard` (or unknown-kind) dependencies with `phase != 'done'`.
 
 The first matching condition is the actual rejection reason.
 

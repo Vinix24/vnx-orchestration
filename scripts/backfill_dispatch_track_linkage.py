@@ -6,7 +6,7 @@ WHY THIS EXISTS
   track_reconciler._compute_derived_status is dispatch-centric. For a feature track
   it reads, in order:
     1. track_open_items (link_type='blocks')          -> blocked
-    2. track_dependencies whose target phase != 'done' -> blocked
+    2. hard track_dependencies whose target phase != 'done' -> blocked (soft/overlap: advice)
     3. dispatches WHERE track = <feature_track_id>     -> if none, 'queued'
          - all dispatches terminal + tracks.pr_ref NULL              -> 'done'
          - all dispatches terminal + pr_merged event on a linked disp -> 'done'
