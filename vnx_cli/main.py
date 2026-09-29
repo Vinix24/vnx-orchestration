@@ -777,6 +777,24 @@ def _register_objective_verbs(subs: argparse.Action) -> None:
              "(audited; no silent bypass — an empty reason is refused)",
     )
 
+    p_remove_dep = subs.add_parser(
+        "remove-dependency",
+        help="remove one dependency edge from a track, by its full key "
+             "(operator-gated; audited)",
+    )
+    _common_horizon_args(p_remove_dep)
+    p_remove_dep.add_argument("track_id", metavar="TRACK_ID", help="the dependent (from) track")
+    p_remove_dep.add_argument("to_track_id", metavar="TO_TRACK_ID", help="the track it depends on")
+    p_remove_dep.add_argument(
+        "--to-project-id", default="", dest="to_project_id",
+        help="project of the to-track (default: --project-id)",
+    )
+    p_remove_dep.add_argument(
+        "--reason", default="",
+        help="REQUIRED, non-empty: why this edge is being removed "
+             "(audited; no silent bypass — an empty reason is refused)",
+    )
+
     p_unmark_delivery = subs.add_parser(
         "unmark-delivery",
         help="remove the delivery marker (partial|complete) of PR(s) on a track, "

@@ -641,9 +641,17 @@ class ReportParser:
         }
 
         # Find validation/testing section
-        val_section = self._extract_section(content, 'Validation')
-        if not val_section:
-            val_section = self._extract_section(content, 'Test')
+        # The report contract's own headings come first (## Verification and its
+        # aliases, one source: report_body_contract); the legacy names follow.
+        _lib = str(Path(__file__).resolve().parent / "lib")
+        if _lib not in sys.path:
+            sys.path.insert(0, _lib)
+        from report_body_contract import section_heading_names
+        val_section = None
+        for name in (*section_heading_names('## Verification'), 'Validation', 'Test'):
+            val_section = self._extract_section(content, re.escape(name))
+            if val_section:
+                break
 
         if val_section:
             # Extract test counts

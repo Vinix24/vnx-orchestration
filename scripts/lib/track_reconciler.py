@@ -387,6 +387,66 @@ def _has_col(conn: sqlite3.Connection, table: str, col: str) -> bool:
     return any(r[1] == col for r in conn.execute(f"PRAGMA table_info({table})"))
 
 
+# D9 (fabric-state-herstel): only a 'hard' edge blocks. 'soft' and 'overlap'
+# are advice. Any other value (NULL, or a legacy value in a store whose schema
+# predates the CHECK) is treated as 'hard' — fail-closed — and logged.
+ADVISORY_DEPENDENCY_KINDS = frozenset({"soft", "overlap"})
+KNOWN_DEPENDENCY_KINDS = frozenset({"hard"}) | ADVISORY_DEPENDENCY_KINDS
+
+
+def _unfinished_dependencies(
+    conn: sqlite3.Connection,
+    track_id: str,
+    project_id: str,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Split this track's edges to not-yet-done tracks by whether they block.
+
+    The single dependency read for every reconciler site (derived status,
+    blocking detail, the auto-close revalidation, planning_cli's drift reason),
+    so the kind rule cannot drift between them. Scoped on the full
+    (from_track_id, from_project_id) key and joined on (to_track_id,
+    to_project_id) per ADR-007. Uses the declared phase of the target (not its
+    derived_status) to avoid a circular derivation.
+
+    Returns {"blocking": [...], "advisory": [...]}, each entry
+    {"track_id", "project_id", "phase", "kind"}, ordered by target id.
+    """
+    rows = conn.execute(
+        """
+        SELECT td.to_track_id, td.to_project_id, td.kind, t.phase
+        FROM track_dependencies td
+        JOIN tracks t
+          ON t.track_id = td.to_track_id AND t.project_id = td.to_project_id
+        WHERE td.from_track_id = ? AND td.from_project_id = ?
+        ORDER BY td.to_project_id ASC, td.to_track_id ASC
+        """,
+        (track_id, project_id),
+    ).fetchall()
+    blocking: List[Dict[str, Any]] = []
+    advisory: List[Dict[str, Any]] = []
+    for row in rows:
+        if row["phase"] == "done":
+            continue
+        kind = row["kind"]
+        entry = {
+            "track_id": row["to_track_id"],
+            "project_id": row["to_project_id"],
+            "phase": row["phase"],
+            "kind": kind,
+        }
+        if kind in ADVISORY_DEPENDENCY_KINDS:
+            advisory.append(entry)
+            continue
+        if kind not in KNOWN_DEPENDENCY_KINDS:
+            log.warning(
+                "track_dependencies: unknown kind %r on edge (%r, %r) -> (%r, %r); "
+                "treated as 'hard' (fail-closed)",
+                kind, track_id, project_id, row["to_track_id"], row["to_project_id"],
+            )
+        blocking.append(entry)
+    return {"blocking": blocking, "advisory": advisory}
+
+
 def _blocking_detail(
     conn: sqlite3.Connection,
     track_id: str,
@@ -400,8 +460,10 @@ def _blocking_detail(
     existence probe — so the caller can NAME the blocker instead of merely
     detecting it. Reuses the same pre-0030 / project_id-column fallbacks.
 
-    Returns {"blocking_ois": [...], "blocking_deps": [...]}; both empty when
-    neither check currently blocks (i.e. when called for a non-blocked track).
+    Returns {"blocking_ois": [...], "blocking_deps": [...], "advisory_deps":
+    [...]}; the first two are empty when neither check currently blocks (i.e.
+    when called for a non-blocked track). advisory_deps are the soft/overlap
+    edges to unfinished tracks (D9): shown, never blocking.
     """
     has_project_id_col = _has_col(conn, "track_open_items", "project_id")
     has_resolved_at_col = _has_col(conn, "track_open_items", "resolved_at")
@@ -446,23 +508,13 @@ def _blocking_detail(
             entry["label"] = row[label_col]
         blocking_ois.append(entry)
 
-    dep_rows = conn.execute(
-        """
-        SELECT td.to_track_id, t.phase
-        FROM track_dependencies td
-        JOIN tracks t
-          ON t.track_id = td.to_track_id AND t.project_id = td.to_project_id
-        WHERE td.from_track_id = ? AND td.from_project_id = ?
-        """,
-        (track_id, project_id),
-    ).fetchall()
-    blocking_deps = [
-        {"track_id": row["to_track_id"], "phase": row["phase"]}
-        for row in dep_rows
-        if row["phase"] != "done"
-    ]
+    deps = _unfinished_dependencies(conn, track_id, project_id)
 
-    return {"blocking_ois": blocking_ois, "blocking_deps": blocking_deps}
+    return {
+        "blocking_ois": blocking_ois,
+        "blocking_deps": deps["blocking"],
+        "advisory_deps": deps["advisory"],
+    }
 
 
 _PLAN_OI_PREFIX = "OI-PLAN-"
@@ -518,7 +570,41 @@ def format_blocking_hint(detail: Optional[Dict[str, Any]]) -> str:
             f"blocked by dependency {dep.get('track_id')} "
             f"-- not done (phase={dep.get('phase')})"
         )
+    lines.extend(format_advisory_lines(detail.get("advisory_deps")))
     return "\n".join(lines)
+
+
+def format_advisory_lines(advisory_deps: Optional[List[Dict[str, Any]]]) -> List[str]:
+    """One line per soft/overlap edge to an unfinished track (D9): advice only."""
+    return [
+        f"advisory: {dep.get('kind')} dependency on {dep.get('track_id')} "
+        f"-- not done (phase={dep.get('phase')}); does not block"
+        for dep in (advisory_deps or [])
+    ]
+
+
+def _attach_dependency_view(
+    result: Dict[str, Any],
+    conn: sqlite3.Connection,
+    track_id: str,
+    project_id: str,
+) -> None:
+    """Carry the dependency view on a reconcile/peek result (D9).
+
+    A blocked track gets ``blocking_detail`` (which already splits blocking
+    from advisory edges). Every other track gets ``advisory_deps`` when it has
+    soft/overlap edges to unfinished tracks: shown as advice, never a block.
+    A blocked track mirrors its advisory edges to the same top-level key, so
+    callers read advice from one place regardless of the derived status.
+    """
+    if result["derived_status"] == "blocked":
+        detail = _blocking_detail(conn, track_id, project_id)
+        result["blocking_detail"] = detail
+        advisory = detail["advisory_deps"]
+    else:
+        advisory = _unfinished_dependencies(conn, track_id, project_id)["advisory"]
+    if advisory:
+        result["advisory_deps"] = advisory
 
 
 def _write_derived_status(
@@ -623,9 +709,8 @@ def reconcile_track(
             "declared_phase": declared,
             "drifted": declared != derived,
         }
-        if derived == "blocked":
-            result["blocking_detail"] = _blocking_detail(conn, track_id, project_id)
-        elif derived != "done":
+        _attach_dependency_view(result, conn, track_id, project_id)
+        if derived not in ("blocked", "done"):
             # OI-1098: a withheld nomination must be VISIBLE. When the track
             # did not derive 'done' and an explicit delivery marking holds it,
             # carry the operator-readable reason in the result.
@@ -686,9 +771,8 @@ def peek_derived_status(
             "declared_phase": declared,
             "drifted": declared != derived,
         }
-        if derived == "blocked":
-            result["blocking_detail"] = _blocking_detail(conn, track_id, project_id)
-        elif derived != "done":
+        _attach_dependency_view(result, conn, track_id, project_id)
+        if derived not in ("blocked", "done"):
             # OI-1098: same visibility contract as reconcile_track.
             hold = _delivery_hold(
                 conn, track_id, project_id, track_row["pr_ref"] if track_row else None

@@ -550,7 +550,11 @@ def test_blocking_detail_names_dependency(tmp_path):
     assert result["derived_status"] == "blocked"
     detail = result["blocking_detail"]
     assert detail["blocking_ois"] == []
-    assert detail["blocking_deps"] == [{"track_id": "T-hint-dep-parent", "phase": "queued"}]
+    assert detail["blocking_deps"] == [{
+        "track_id": "T-hint-dep-parent", "project_id": PROJECT_ID,
+        "phase": "queued", "kind": "hard",
+    }]
+    assert detail["advisory_deps"] == []
 
     hint = track_reconciler.format_blocking_hint(detail)
     assert "T-hint-dep-parent" in hint

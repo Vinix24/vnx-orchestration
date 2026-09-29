@@ -305,28 +305,45 @@ def _classify_db_error(exc: Exception) -> str:
     return "failed"
 
 
-def _probe_db_health(db_path: Path) -> str:
-    """Quick read-only probe to classify a SQLite file's accessibility (R6.1).
+_DB_PROBE_BUSY_TIMEOUT_SECONDS = 2
 
-    Returns 'healthy' when absent (pre-migration) or when PRAGMA integrity_check passes.
-    Returns 'degraded' for SQLITE_BUSY/LOCKED; 'failed' for malformed / disk errors.
-    Non-pre-migration OperationalErrors are NOT silently swallowed as legacy fallbacks.
-    Uses PRAGMA integrity_check so page-level corruption and garbage files are detected —
-    SELECT 1 is computed purely in-memory and cannot detect a malformed file.
+
+def _probe_db_health_reason(db_path: Path) -> Tuple[str, Optional[str]]:
+    """Read-only probe that returns ``(health, reason)`` (R6.1).
+
+    ``health`` is 'healthy' when the file is absent (pre-migration) or when
+    PRAGMA integrity_check passes, 'degraded' for SQLITE_BUSY/LOCKED, 'failed'
+    for malformed / disk errors. ``reason`` is the exception text (or the
+    integrity_check verdict) for anything that is not healthy, so a locked
+    database reads as degraded WITH its cause instead of a bare status.
+    The connection is ``mode=ro`` with a bounded busy timeout: a health probe
+    must never take a write lock nor wait longer than that on a busy store.
+    Non-pre-migration OperationalErrors are NOT silently swallowed as legacy
+    fallbacks. PRAGMA integrity_check (not SELECT 1) is used so page-level
+    corruption and garbage files are detected.
     """
     if not db_path.exists():
-        return "healthy"
+        return "healthy", None
     try:
-        conn = sqlite3.connect(str(db_path), timeout=1)
+        conn = sqlite3.connect(
+            f"{db_path.resolve().as_uri()}?mode=ro",
+            uri=True,
+            timeout=_DB_PROBE_BUSY_TIMEOUT_SECONDS,
+        )
         try:
             result = conn.execute("PRAGMA integrity_check").fetchone()
             if result is None or result[0] != "ok":
-                return "failed"
+                return "failed", f"integrity_check: {result[0] if result else 'no result'}"
         finally:
             conn.close()
-        return "healthy"
+        return "healthy", None
     except (sqlite3.OperationalError, sqlite3.DatabaseError) as exc:
-        return _classify_db_error(exc)
+        return _classify_db_error(exc), f"{type(exc).__name__}: {exc}"
+
+
+def _probe_db_health(db_path: Path) -> str:
+    """Health classification only; see ``_probe_db_health_reason``."""
+    return _probe_db_health_reason(db_path)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -2374,6 +2391,17 @@ def _measure_launchd_liveness(
 # System health
 # ---------------------------------------------------------------------------
 
+def _db_reason_fields(db_health: str, db_reason: Optional[str]) -> Dict[str, str]:
+    """The probe's reason, only when it explains a failed/degraded verdict.
+
+    Already folded into ``status`` through ``db_health``; this is the text that
+    says why, not a second signal.
+    """
+    if db_health in ("failed", "degraded") and db_reason:
+        return {"db_reason": db_reason}
+    return {}
+
+
 def _build_system_health(
     state_dir: Path,
     db_initialized: bool,
@@ -2383,6 +2411,7 @@ def _build_system_health(
     expected_beacon_components: Optional[Sequence[str]] = None,
     launchd_liveness: Optional[Dict[str, Any]] = None,
     degraded_reasons: Optional[Sequence[str]] = None,
+    db_reason: Optional[str] = None,
 ) -> Dict[str, Any]:
     uptime_seconds = 0
     panes_path = state_dir / "panes.json"
@@ -2496,6 +2525,7 @@ def _build_system_health(
     }
     if reasons:
         result["degraded_reasons"] = reasons
+    result.update(_db_reason_fields(db_health, db_reason))
     if beacon_health is not None:
         result["beacon_health"] = beacon_health
     if daemon_liveness is not None:
@@ -2974,6 +3004,10 @@ def _reconcile_tracks_fresh(
         "tracks": 0,
         "drifted": 0,
         "drifted_tracks": [],
+        # D9: tracks held ONLY by the plan-first gate (OI-PLAN-* blockers, no
+        # blocking dependency) are intended blocks, counted apart from drift.
+        "plan_gated": 0,
+        "plan_gated_tracks": [],
         "reason": None,
         "seconds": 0.0,
         "store": None,
@@ -3015,22 +3049,47 @@ def _reconcile_tracks_fresh(
         log.warning("track reconcile failed (projection continues): %s", exc)
         return marker
 
-    drifted = [r for r in results if r.get("drifted")]
+    diverged = [r for r in results if r.get("drifted")]
+    plan_gated = [r for r in diverged if _is_plan_gated(r)]
+    drifted = [r for r in diverged if not _is_plan_gated(r)]
+
+    def _row(r: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "track_id": r.get("track_id"),
+            "declared_phase": r.get("declared_phase"),
+            "derived_status": r.get("derived_status"),
+        }
+
     marker.update(
         derived_refreshed=True,
         tracks=len(results),
         drifted=len(drifted),
-        drifted_tracks=[
-            {
-                "track_id": r.get("track_id"),
-                "declared_phase": r.get("declared_phase"),
-                "derived_status": r.get("derived_status"),
-            }
-            for r in drifted
-        ],
+        drifted_tracks=[_row(r) for r in drifted],
+        plan_gated=len(plan_gated),
+        plan_gated_tracks=[_row(r) for r in plan_gated],
         seconds=round(time.monotonic() - t0, 3),
     )
     return marker
+
+
+_PLAN_GATE_OI_PREFIX = "OI-PLAN-"
+
+
+def _is_plan_gated(result: Dict[str, Any]) -> bool:
+    """True when a reconcile result is blocked ONLY by plan-first-gate OIs.
+
+    Measured 2026-09-29 (D9): 91 of the 94 vnx-dev tracks declared 'queued' and
+    derived 'blocked' are held by nothing but an ``OI-PLAN-*`` blocker. Those
+    are intended blocks (the plan-gate has not run or was refused), not drift.
+    A track with any other blocking OI or any blocking dependency is drift.
+    """
+    if result.get("derived_status") != "blocked":
+        return False
+    detail = result.get("blocking_detail") or {}
+    ois = detail.get("blocking_ois") or []
+    if not ois or detail.get("blocking_deps"):
+        return False
+    return all(str(oi.get("oi_id") or "").startswith(_PLAN_GATE_OI_PREFIX) for oi in ois)
 
 
 # ---------------------------------------------------------------------------
@@ -3055,7 +3114,7 @@ def build_t0_state(
     )
     db_ok = _init_and_check_db(state_dir)
     # R6.1: probe quality_intelligence.db; classify locked/malformed (not premigration)
-    db_health = _probe_db_health(state_dir / "quality_intelligence.db")
+    db_health, db_reason = _probe_db_health_reason(state_dir / "quality_intelligence.db")
 
     # Fabric-freshness: resolve the tracks store ONCE (the central per-project
     # SSOT, with local fallback) and use it for BOTH the reconcile AND the
@@ -3092,6 +3151,7 @@ def build_t0_state(
     elapsed = time.monotonic() - start
     system_health = _build_system_health(
         state_dir, db_ok, db_health=db_health,
+        db_reason=db_reason,
         degraded_reasons=(
             [f"live_work unavailable: {live_work.get('reason')}"]
             if live_work.get("read_error") else []
@@ -3233,6 +3293,9 @@ _DETAIL_SECTION_MAP: Dict[str, str] = {
 }
 
 
+_INDEX_FAILING_BEACONS_MAX = 5
+
+
 def _slim_health_for_index(system_health: Dict[str, Any]) -> Dict[str, Any]:
     """Compact projection of system_health for the cheap, always-loaded
     t0_index.json (<=5KB budget, enforced by TestIntegrationWithBuildT0State
@@ -3255,10 +3318,20 @@ def _slim_health_for_index(system_health: Dict[str, Any]) -> Dict[str, Any]:
         "db_initialized": system_health.get("db_initialized"),
         "uptime_seconds": system_health.get("uptime_seconds"),
     }
+    if system_health.get("db_reason"):
+        slim["db_reason"] = system_health["db_reason"]
     for key in ("beacon_health", "daemon_liveness", "launchd_liveness"):
         nested = system_health.get(key)
         if nested is not None:
             slim[key] = {"overall": nested.get("overall")}
+    beacons = (system_health.get("beacon_health") or {}).get("beacons") or {}
+    failing = sorted(
+        name for name, b in beacons.items()
+        if (b or {}).get("health") not in ("ok", "parked")
+    )
+    if failing:
+        slim["beacon_health"]["failing"] = failing[:_INDEX_FAILING_BEACONS_MAX]
+        slim["beacon_health"]["failing_total"] = len(failing)
     if "producer_liveness" in system_health:
         # Already a lightweight summary (overall + two sub-overalls) -- no
         # per-item breakdown to strip.
@@ -3325,6 +3398,7 @@ def _track_freshness_summary(tf: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return {
         "derived_refreshed": bool(tf.get("derived_refreshed", False)),
         "drifted": tf.get("drifted", 0),
+        "plan_gated": tf.get("plan_gated", 0),
         "tracks": tf.get("tracks", 0),
         "reason": tf.get("reason"),
         "autoclose_degraded": bool(tf.get("autoclose_degraded", False)),
@@ -3548,6 +3622,7 @@ def _emit_health_beacon(
         details["track_freshness"] = {
             "derived_refreshed": bool(track_freshness.get("derived_refreshed", False)),
             "drifted": track_freshness.get("drifted", 0),
+            "plan_gated": track_freshness.get("plan_gated", 0),
             "reason": track_freshness.get("reason"),
             "autoclose_degraded": bool(track_freshness.get("autoclose_degraded", False)),
             "autoclose_reason": track_freshness.get("autoclose_reason"),

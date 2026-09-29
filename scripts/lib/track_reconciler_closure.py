@@ -200,27 +200,18 @@ def close_track_if_done(
             # becomes advisory (reconcile_track still runs for the derived refresh).
             pr_results_list = evidence.get("pr_results") or []
             if pr_results_list:
-                # Dependency check: every dep must have declared phase 'done'.
-                dep_rows = conn.execute(
-                    """
-                    SELECT t.phase
-                    FROM track_dependencies td
-                    JOIN tracks t
-                      ON t.track_id = td.to_track_id AND t.project_id = td.to_project_id
-                    WHERE td.from_track_id = ? AND td.from_project_id = ?
-                    """,
-                    (track_id, project_id),
-                ).fetchall()
-                for dep_row in dep_rows:
-                    if dep_row[0] != "done":
-                        return {
-                            "track_id": track_id,
-                            "project_id": project_id,
-                            "declared_phase": track_row["phase"] if track_row else None,
-                            "derived_status": None,
-                            "action": "stale_candidate",
-                            "applied": False,
-                        }
+                # Dependency check: every blocking dep ('hard', or an unknown
+                # kind fail-closed) must have declared phase 'done'. 'soft' and
+                # 'overlap' edges are advice and never hold a close (D9).
+                if _unfinished_dependencies(conn, track_id, project_id)["blocking"]:
+                    return {
+                        "track_id": track_id,
+                        "project_id": project_id,
+                        "declared_phase": track_row["phase"] if track_row else None,
+                        "derived_status": None,
+                        "action": "stale_candidate",
+                        "applied": False,
+                    }
 
                 # gh evidence check: every parsed PR from pr_ref must appear in
                 # pr_results as MERGED (with mergedAt) or CLOSED (closed sibling).
@@ -415,4 +406,5 @@ from track_reconciler import (  # noqa: E402
     _phase_path_to,
     log,
     reconcile_track,
+    _unfinished_dependencies,
 )

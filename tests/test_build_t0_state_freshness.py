@@ -44,7 +44,8 @@ from fixtures.dispatches_schema_fixture import ensure_dispatches_columns  # noqa
 
 PROJECT_ID = "test-proj"
 _MARKER_KEYS = {
-    "derived_refreshed", "tracks", "drifted", "drifted_tracks", "reason", "seconds",
+    "derived_refreshed", "tracks", "drifted", "drifted_tracks", "plan_gated",
+    "plan_gated_tracks", "reason", "seconds",
     "store", "last_reconcile_at", "last_reconcile_age_hours", "gh_health",
     "nominated_not_closed", "autoclose_degraded", "autoclose_reason",
 }
@@ -217,23 +218,25 @@ def test_reconcile_resolves_central_store_not_ambient(tmp_path, monkeypatch):
 
 def test_index_summary_is_compact_and_mirrors_marker():
     full = {
-        "derived_refreshed": True, "tracks": 47, "drifted": 18,
-        "drifted_tracks": [{"track_id": "x"}], "reason": None, "seconds": 0.4, "store": "/s",
+        "derived_refreshed": True, "tracks": 47, "drifted": 18, "plan_gated": 91,
+        "drifted_tracks": [{"track_id": "x"}], "plan_gated_tracks": [{"track_id": "y"}],
+        "reason": None, "seconds": 0.4, "store": "/s",
         "last_reconcile_at": "2026-08-01T08:00:00Z", "last_reconcile_age_hours": 2.0,
         "gh_health": "ok", "nominated_not_closed": 0,
         "autoclose_degraded": False, "autoclose_reason": "ok",
     }
     summary = bts._track_freshness_summary(full)
     assert summary == {
-        "derived_refreshed": True, "drifted": 18, "tracks": 47, "reason": None,
-        "autoclose_degraded": False, "autoclose_reason": "ok",
+        "derived_refreshed": True, "drifted": 18, "plan_gated": 91, "tracks": 47,
+        "reason": None, "autoclose_degraded": False, "autoclose_reason": "ok",
     }
     assert "drifted_tracks" not in summary  # heavy detail excluded from the index
+    assert "plan_gated_tracks" not in summary
 
     none = bts._track_freshness_summary(None)
     assert none == {
-        "derived_refreshed": False, "drifted": 0, "tracks": 0, "reason": None,
-        "autoclose_degraded": False, "autoclose_reason": None,
+        "derived_refreshed": False, "drifted": 0, "plan_gated": 0, "tracks": 0,
+        "reason": None, "autoclose_degraded": False, "autoclose_reason": None,
     }
 
 

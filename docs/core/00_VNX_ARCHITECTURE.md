@@ -893,8 +893,10 @@ returns the first that applies. A track is **`done` only when all of these hold*
 
 - it has **zero unresolved blocking open-items** — no `track_open_items` row with
   `link_type = 'blocks'` and `resolved_at IS NULL`; and
-- **every dependency track is `done`** (each `track_dependencies` edge points at a
-  track whose phase is `done`); and
+- **every blocking dependency track is `done`** (each `hard` `track_dependencies`
+  edge points at a track whose phase is `done`; `soft` and `overlap` edges are
+  advice and never block, and an unknown kind counts as `hard`, fail-closed and
+  logged as a warning); and
 - **all of its dispatches are in terminal states** —
   `{completed, expired, dead_letter}`; and
 - **if it has a linked PR, that PR is confirmed merged** — via a `pr_merged`
