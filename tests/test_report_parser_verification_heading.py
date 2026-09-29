@@ -304,3 +304,15 @@ def test_a_later_sentence_with_a_marker_does_not_relabel_the_run_before_it():
     body = "Combined set: **392 passed, 3 failed**. The 3 fail identically on `main`.\n"
     result = _validation(body)
     assert (result["tests_passed"], result["tests_failed"]) == (392, 3)
+
+
+def test_a_marker_in_the_middle_of_a_paragraph_does_not_relabel():
+    body = (
+        "Green run:\n\n```\n162 passed in 7.10s\n```\n\n"
+        "### Red run - same test file against the pre-fix code\n\n"
+        "Method: replaced the scripts with the old versions, ran the target file,\n"
+        "then restored the fixed files and re-ran to confirm green again (shown above).\n\n"
+        "```\n5 failed, 2 passed in 1.64s\n```\n"
+    )
+    result = _validation(body)
+    assert (result["tests_passed"], result["tests_failed"]) == (162, 0)

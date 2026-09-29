@@ -25,9 +25,11 @@ when the text before it on its own line, or else the label it sits under,
 says so: red/rood/rode, old code/oude code, old head/oude kop, unfixed,
 before/without the fix, before the change, baseline, mutation, on/op main.
 A red marker later in the run's own sentence marks that run too. A label is a heading or a bold
-lead line inside the section, or a prose line (no run on it) that carries a
-red or green marker; a heading or bold lead without a marker resets to
-neutral. Code-fence content never relabels. When every run is red, the last
+lead line inside the section, or the first line of a paragraph or list item
+(with no run on it) that carries a red or green marker; a heading or bold
+lead without a marker resets to neutral. A continuation line in the middle
+of a paragraph ("... re-ran to confirm green again") and code-fence content
+never relabel. When every run is red, the last
 red run is the count, so a report with only a red run keeps
 ``tests_failed > 0`` and can never be accepted.
 
@@ -80,6 +82,7 @@ _SENTENCE_END = re.compile(r"\.(?:\s|$)|$")
 
 _HEADING = re.compile(r"^\s*#{1,6}\s")
 _BOLD_LEAD = re.compile(r"^\s*(?:[-*+]\s+|\d+\.\s+)?\*\*")
+_LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+\.)\s+")
 _FENCE = re.compile(r"^\s*(?:```|~~~)")
 _UNITTEST_RAN = re.compile(r"\bRan (\d+) tests? in [\d.]+\s*s\b")
 _UNITTEST_OK = re.compile(r"^\s*OK\b(?:\s*\(([^)]*)\))?")
@@ -132,10 +135,14 @@ def extract_runs(section: str) -> List[Dict[str, Any]]:
     runs: List[Dict[str, Any]] = []
     context: Optional[str] = None
     in_fence = False
+    paragraph_start = True
     for index, line in enumerate(lines):
         if _FENCE.match(line):
             in_fence = not in_fence
+            paragraph_start = not in_fence
             continue
+        is_lead = paragraph_start or bool(_LIST_ITEM.match(line))
+        paragraph_start = not line.strip() and not in_fence
         found: List[Dict[str, Any]] = [
             {**c, "method": "pytest"} for c in _pytest_clauses(line)
         ]
@@ -154,7 +161,7 @@ def extract_runs(section: str) -> List[Dict[str, Any]]:
                 color = _marker_color(line)
                 if _HEADING.match(line) or _BOLD_LEAD.match(line):
                     context = color
-                elif color is not None:
+                elif color is not None and is_lead:
                     context = color
             continue
         found.sort(key=lambda r: r["start"])
