@@ -352,6 +352,31 @@ def final_prompt_sha_for_dispatch(
 # ---------------------------------------------------------------------------
 
 GATE_BUNDLE_OUTCOMES = ("completed", "failed")
+GATE_BUNDLE_IN_FLIGHT = "in_flight"
+
+
+def gate_bundle_outcome(status: str) -> str:
+    """Where a gate bundle belongs for a canonical gate *status*.
+
+    ``completed`` for a verdict (pass, fail, partial review), ``failed`` for the
+    other terminal statuses gate_recorder books (``unavailable``,
+    ``not_executable``), :data:`GATE_BUNDLE_IN_FLIGHT` for a run still pending,
+    running, queued or requested, and ``""`` for an empty or unknown status. Only
+    the first two are proof that the run ended; the bundle of a running gate is
+    still being read.
+    """
+    from gate_status import (
+        FAIL_STATES, INCOMPLETE_STATES, PARTIAL_REVIEW_STATES, PASS_STATES, UNAVAILABLE_STATES,
+    )
+
+    status = (status or "").strip().lower()
+    if status in PASS_STATES | FAIL_STATES | PARTIAL_REVIEW_STATES:
+        return "completed"
+    if status in UNAVAILABLE_STATES or status == "not_executable":
+        return "failed"
+    if status in INCOMPLETE_STATES:
+        return GATE_BUNDLE_IN_FLIGHT
+    return ""
 
 
 def is_final_prompt_only_bundle(bundle_dir: "str | Path") -> bool:

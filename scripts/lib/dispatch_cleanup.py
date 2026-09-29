@@ -31,10 +31,11 @@ _LIB_DIR = str(Path(__file__).resolve().parent)
 if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 
-from final_prompt_integrity import compute_sha256, is_final_prompt_only_bundle
-from gate_status import (
-    FAIL_STATES, PARTIAL_REVIEW_STATES, PASS_STATES, canonical_status,
+from final_prompt_integrity import (
+    GATE_BUNDLE_IN_FLIGHT, GATE_BUNDLE_OUTCOMES, compute_sha256, gate_bundle_outcome,
+    is_final_prompt_only_bundle,
 )
+from gate_status import canonical_status
 
 
 # ── classification ─────────────────────────────────────────────────────────
@@ -53,7 +54,7 @@ class BundleEntry:
     role: str = ""
     gate: str = ""
     target_slot: str = ""
-    classification: str = ""  # "receipt-found", "stale-no-receipt", "recent-no-receipt", "gate-result-proven", "unproven", "empty", "error"
+    classification: str = ""  # "receipt-found", "stale-no-receipt", "recent-no-receipt", "gate-result-proven", "in_flight", "unproven", "empty", "error"
     action: str = ""  # "move-to-completed", "move-to-failed", "move-to-abandoned", "skip", "error"
     error: str = ""
     final_prompt_sha256: str = ""
@@ -145,11 +146,6 @@ def _build_receipt_index(state_dir: Path) -> Dict[str, bool]:
     return index
 
 
-def _gate_outcome(status: str) -> str:
-    """``completed`` for a run that reached a verdict, ``failed`` for any other booked run."""
-    return "completed" if status in (PASS_STATES | FAIL_STATES | PARTIAL_REVIEW_STATES) else "failed"
-
-
 def _build_prompt_sha_index(state_dir: Path) -> Dict[str, Dict[str, str]]:
     """Map dispatch_id -> {final_prompt_sha256: outcome} from this store's gate results.
 
@@ -159,6 +155,10 @@ def _build_prompt_sha_index(state_dir: Path) -> Dict[str, Dict[str, str]]:
     prompt sha counts; the pair is the proof that the gate booked a result for
     exactly the prompt the bundle holds. A result record outranks a receipt for
     the outcome, because the record is what the receipt was emitted from.
+
+    The outcome is :func:`final_prompt_integrity.gate_bundle_outcome`: only
+    ``completed`` and ``failed`` prove the run ended. A pending or running record
+    maps to ``in_flight`` and an unknown status to ``""`` (no proof).
     """
     index: Dict[str, Dict[str, str]] = {}
 
@@ -170,7 +170,7 @@ def _build_prompt_sha_index(state_dir: Path) -> Dict[str, Dict[str, str]]:
         status = str(rec.get("gate_status") or "").strip().lower() or canonical_status(rec)
         shas = index.setdefault(did, {})
         if overwrite or sha not in shas:
-            shas[sha] = _gate_outcome(status)
+            shas[sha] = gate_bundle_outcome(status)
 
     receipt_file = state_dir / "t0_receipts.ndjson"
     try:
@@ -209,7 +209,12 @@ def _classify_gate_bundle(
     age_days: float,
     prompt_sha_index: Dict[str, Dict[str, str]],
 ) -> BundleEntry:
-    """Classify a final-prompt-only gate bundle on proof: same dispatch-id, same sha."""
+    """Classify a final-prompt-only gate bundle on proof: same dispatch-id, same sha.
+
+    Only a terminal outcome moves the bundle. A result for the same sha that is
+    still pending or running is a live gate reading this prompt: the bundle stays
+    and reads ``in_flight``. Anything else stays and reads ``unproven``.
+    """
     dispatch_id = child.name
     try:
         sha = compute_sha256((child / "final_prompt.md").read_text(encoding="utf-8"))
@@ -221,13 +226,16 @@ def _classify_gate_bundle(
             error=f"final_prompt.md unreadable: {exc}",
         )
     outcome = prompt_sha_index.get(dispatch_id, {}).get(sha, "")
-    if outcome:
+    proven = outcome in GATE_BUNDLE_OUTCOMES
+    if proven:
         classification, action = "gate-result-proven", f"move-to-{outcome}"
+    elif outcome == GATE_BUNDLE_IN_FLIGHT:
+        classification, action = "in_flight", "skip"
     else:
         classification, action = "unproven", "skip"
     return BundleEntry(
         dispatch_id=dispatch_id, bundle_dir=str(child), age_days=round(age_days, 1),
-        has_receipt=bool(outcome), has_instruction=False, has_spec=False,
+        has_receipt=proven, has_instruction=False, has_spec=False,
         classification=classification, action=action, final_prompt_sha256=sha,
     )
 
@@ -445,7 +453,7 @@ def format_report(report: CleanupReport) -> str:
     # Skipped bundles summary
     skipped = [
         e for e in report.entries
-        if e.action == "skip" and e.classification != "unproven"
+        if e.action == "skip" and e.classification not in ("unproven", "in_flight")
     ]
     if skipped:
         age_vals = [e.age_days for e in skipped if e.age_days > 0]
@@ -458,6 +466,18 @@ def format_report(report: CleanupReport) -> str:
             "  These bundles have no matching receipt but are less than 7 days old."
         )
         lines.append("  They will be eligible for cleanup once they age past the threshold.")
+        lines.append("")
+
+    # A gate still running on this prompt: its bundle is in use.
+    in_flight = [e for e in report.entries if e.classification == "in_flight"]
+    if in_flight:
+        lines.append(f"## In-flight gate bundles ({len(in_flight)}, left in pending/)")
+        lines.append(
+            "  final_prompt.md only, and the gate result for the same final_prompt_sha256"
+        )
+        lines.append("  is still pending or running. The bundle moves once that run is booked.")
+        for e in in_flight:
+            lines.append(f"  [in_flight] {e.dispatch_id}  sha={e.final_prompt_sha256[:12]}")
         lines.append("")
 
     # Gate bundles without a gate result for the same prompt sha stay put.

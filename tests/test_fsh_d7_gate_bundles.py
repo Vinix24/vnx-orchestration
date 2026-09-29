@@ -417,3 +417,115 @@ def test_the_text_report_names_the_unproven_bundles(store):
 
     assert "unproven: 1" in text
     assert f"[unproven] {KIMI_ID}" in text
+
+
+# ---------------------------------------------------------------------------
+# 4. Only a terminal verdict is proof; a running gate keeps its bundle
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("status", ["pending", "running", "queued", "requested"])
+def test_a_running_gate_with_the_same_sha_keeps_its_bundle_in_pending(store, status):
+    data_dir, state_dir, _requests, results, _reports = store
+    _seed_gate_bundle(data_dir, KIMI_ID)
+    _seed_result(
+        results, "pr-1974-kimi_gate.json",
+        gate="kimi_gate", status=status, dispatch_id=KIMI_ID,
+        final_prompt_sha256=PROMPT_SHA,
+    )
+
+    entries = dc.scan_pending(data_dir, state_dir)
+    found = _entry(entries, KIMI_ID)
+    assert len(found) == 1
+    assert (found[0].classification, found[0].action) == ("in_flight", "skip")
+
+    dc.execute_cleanup(entries, data_dir, dry_run=False)
+    assert (_pending(data_dir, KIMI_ID) / "final_prompt.md").is_file()
+    assert not (data_dir / "dispatches" / "failed" / KIMI_ID).exists()
+
+
+def test_a_running_record_outranks_a_terminal_receipt_for_the_same_sha(store):
+    data_dir, state_dir, _requests, results, _reports = store
+    _seed_gate_bundle(data_dir, KIMI_ID)
+    _seed_receipt(
+        state_dir, event_type="review_gate_result", gate="kimi_gate",
+        gate_status="pass", dispatch_id=KIMI_ID, final_prompt_sha256=PROMPT_SHA,
+    )
+    _seed_result(
+        results, "pr-1974-kimi_gate.json",
+        gate="kimi_gate", status="running", dispatch_id=KIMI_ID,
+        final_prompt_sha256=PROMPT_SHA,
+    )
+
+    found = _entry(dc.scan_pending(data_dir, state_dir), KIMI_ID)
+    assert (found[0].classification, found[0].action) == ("in_flight", "skip")
+
+
+def test_an_unknown_status_is_no_proof(store):
+    data_dir, state_dir, _requests, results, _reports = store
+    _seed_gate_bundle(data_dir, KIMI_ID)
+    _seed_result(
+        results, "pr-1974-kimi_gate.json",
+        gate="kimi_gate", status="mystery", dispatch_id=KIMI_ID,
+        final_prompt_sha256=PROMPT_SHA,
+    )
+
+    found = _entry(dc.scan_pending(data_dir, state_dir), KIMI_ID)
+    assert (found[0].classification, found[0].action) == ("unproven", "skip")
+
+
+@pytest.mark.parametrize("status,outcome", [
+    ("pass", "completed"), ("fail", "completed"), ("partial_review", "completed"),
+    ("unavailable", "failed"), ("not_executable", "failed"),
+])
+def test_a_terminal_status_moves_the_bundle(store, status, outcome):
+    data_dir, state_dir, _requests, results, _reports = store
+    _seed_gate_bundle(data_dir, KIMI_ID)
+    _seed_result(
+        results, "pr-1974-kimi_gate.json",
+        gate="kimi_gate", status=status, dispatch_id=KIMI_ID,
+        final_prompt_sha256=PROMPT_SHA,
+    )
+
+    entries = dc.scan_pending(data_dir, state_dir)
+    assert _entry(entries, KIMI_ID)[0].action == f"move-to-{outcome}"
+    dc.execute_cleanup(entries, data_dir, dry_run=False)
+    assert (data_dir / "dispatches" / outcome / KIMI_ID / "final_prompt.md").is_file()
+    assert not _pending(data_dir, KIMI_ID).exists()
+
+
+def test_the_text_report_names_the_in_flight_bundles(store):
+    data_dir, state_dir, _requests, results, _reports = store
+    _seed_gate_bundle(data_dir, KIMI_ID)
+    _seed_result(
+        results, "pr-1974-kimi_gate.json",
+        gate="kimi_gate", status="running", dispatch_id=KIMI_ID,
+        final_prompt_sha256=PROMPT_SHA,
+    )
+
+    report = dc.execute_cleanup(dc.scan_pending(data_dir, state_dir), data_dir, dry_run=True)
+    text = dc.format_report(report)
+
+    assert "in_flight: 1" in text
+    assert f"[in_flight] {KIMI_ID}" in text
+    assert "[unproven]" not in text
+
+
+def test_proof_does_not_carry_over_from_one_bundle_to_the_next(store):
+    """Each bundle is proven against its own dispatch-id; the scan loop keeps no state."""
+    data_dir, state_dir, _requests, results, _reports = store
+    first, second = "glm-gate-pr1-1790000020", "kimi-gate-pr1-1790000021"
+    _seed_gate_bundle(data_dir, first)
+    _seed_gate_bundle(data_dir, second)
+    _seed_result(
+        results, f"{first}.json", gate="glm_gate", status="pass",
+        dispatch_id=first, final_prompt_sha256=PROMPT_SHA,
+    )
+
+    entries = dc.scan_pending(data_dir, state_dir)
+    assert _entry(entries, first)[0].action == "move-to-completed"
+    assert (_entry(entries, second)[0].classification, _entry(entries, second)[0].action) == (
+        "unproven", "skip",
+    )
+    dc.execute_cleanup(entries, data_dir, dry_run=False)
+    assert (_pending(data_dir, second) / "final_prompt.md").is_file()

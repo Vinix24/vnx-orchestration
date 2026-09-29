@@ -57,7 +57,12 @@ Classification:
   gate-result-proven  Gate bundle (final_prompt.md only) whose dispatch-id has
                       a gate result or review_gate_result receipt carrying the
                       same final_prompt_sha256
-                      Action: move to completed/ (verdict) or failed/ (no verdict)
+                      and a terminal status
+                      Action: move to completed/ (verdict) or failed/
+                      (unavailable, not_executable)
+  in_flight           Gate bundle whose same-sha gate result is still pending,
+                      running, queued or requested
+                      Action: skip (the running gate still uses the prompt)
   unproven            Gate bundle without such a result, at any age
                       Action: skip (may be the only copy of the prompt)
   empty               Missing both dispatch-spec.json and instruction.md
