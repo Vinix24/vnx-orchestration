@@ -9,7 +9,8 @@ sort mixed a naive value (from either path) with an aware one, Python raised
 build_t0_state.py's own top-level `except Exception` swallowed it (poort D).
 
 Reproduction confirmed against the pre-fix source (git HEAD at the time this
-test was written) for both call sites below before writing the fix.
+test was written) for both call sites before writing the fix. D8 removed the
+feature_state site with its section; the recent_receipts site stays covered.
 """
 
 from __future__ import annotations
@@ -66,48 +67,6 @@ def test_min_aware_datetime_is_aware_and_comparable():
     assert bts._MIN_AWARE_DATETIME.tzinfo is not None
     now_aware = bts._parse_iso("2026-08-07T08:01:47Z")
     assert bts._MIN_AWARE_DATETIME < now_aware  # must not raise
-
-
-# ---------------------------------------------------------------------------
-# _build_feature_state: sort key at the dispatch-grouping site (was ~L986)
-# ---------------------------------------------------------------------------
-
-def test_build_feature_state_survives_mixed_naive_and_z_timestamps(tmp_path: Path) -> None:
-    """A dispatch with one Z-suffixed and one naive event must not crash the
-    latest-event-wins sort (D1 crash site 1)."""
-    state_dir = tmp_path / "state"
-    state_dir.mkdir()
-    register = state_dir / "dispatch_register.ndjson"
-    events = [
-        {"dispatch_id": "D1", "event": "dispatch_created", "timestamp": "2026-08-07T08:00:00Z"},
-        # No trailing Z, no offset -> parses naive without the D1 fix.
-        {"dispatch_id": "D1", "event": "dispatch_completed", "timestamp": "2026-08-07T08:01:47"},
-    ]
-    register.write_text("\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8")
-
-    result = bts._build_feature_state(state_dir=state_dir)
-
-    assert result["source"] == "dispatch_register"
-    assert result["dispatches"]["D1"]["status"] == "completed"
-    assert result["dispatches"]["D1"]["latest_event"] == "dispatch_completed"
-
-
-def test_build_feature_state_survives_missing_timestamp_alongside_aware(tmp_path: Path) -> None:
-    """A completely missing timestamp falls back to _MIN_AWARE_DATETIME; this
-    must not crash when compared against a real aware timestamp in the same
-    dispatch's event group."""
-    state_dir = tmp_path / "state"
-    state_dir.mkdir()
-    register = state_dir / "dispatch_register.ndjson"
-    events = [
-        {"dispatch_id": "D1", "event": "dispatch_created"},  # no timestamp at all
-        {"dispatch_id": "D1", "event": "dispatch_completed", "timestamp": "2026-08-07T08:01:47Z"},
-    ]
-    register.write_text("\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8")
-
-    result = bts._build_feature_state(state_dir=state_dir)
-
-    assert result["dispatches"]["D1"]["status"] == "completed"
 
 
 # ---------------------------------------------------------------------------

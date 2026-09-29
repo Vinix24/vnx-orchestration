@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Feature state machine — parses FEATURE_PLAN.md and derives next dispatchable task.
 
-Used by build_t0_state.py to populate the `feature_state` section of t0_state.json,
-giving the headless T0 decision loop structured feature context.
+Used by auto_gate_trigger.py and the headless T0 decision loop for structured
+feature context. build_t0_state.py no longer calls it: D8 removed the
+`feature_state` section from t0_state.json.
 
 Supports two PR header formats:
   - F46-style:  ### F46-PR1: Title (used in F46-F50 plan)

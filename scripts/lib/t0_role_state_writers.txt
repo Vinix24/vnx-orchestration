@@ -14,11 +14,11 @@
 # STATE-UNWRITTEN. An entry whose writer no longer holds the marker is
 # STATE-WRITER-GONE. Removing a writer or a section therefore forces an edit
 # to this file, and the role edit that goes with it.
+t0_index.json | scripts/build_t0_state.py | t0_index.json |
 t0_state.json | scripts/build_t0_state.py | t0_state.json |
 t0_state.json#terminals | scripts/build_t0_state.py | "terminals": | terminals
 t0_state.json#queues | scripts/build_t0_state.py | "queues": | queues
 t0_state.json#tracks | scripts/build_t0_state.py | "tracks": | tracks
-t0_state.json#pr_progress | scripts/build_t0_state.py | "pr_progress": | PR progress
 t0_state.json#open_items | scripts/build_t0_state.py | "open_items": | open items
 t0_state.json#recent_receipts | scripts/build_t0_state.py | "recent_receipts": | recent receipts
 t0_state.json#git_context | scripts/build_t0_state.py | "git_context": | git context

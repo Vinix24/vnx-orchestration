@@ -121,36 +121,6 @@ def _build_gates_map(
     return pr_map
 
 
-def _build_queued_features(
-    register_events: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
-    """Derive queued features — dispatches not yet in a terminal state."""
-    terminal_events = {"dispatch_completed", "dispatch_failed", "pr_merged"}
-    by_dispatch: Dict[str, Dict[str, Any]] = {}
-    for ev in register_events:
-        did = ev.get("dispatch_id", "").strip()
-        if not did:
-            continue
-        entry = by_dispatch.setdefault(did, {
-            "dispatch_id": did,
-            "feature_id": "",
-            "status": "unknown",
-            "latest_ts": "",
-        })
-        ts = ev.get("timestamp", "")
-        if ts > entry["latest_ts"]:
-            entry["latest_ts"] = ts
-            entry["status"] = ev.get("event", "unknown")
-        if ev.get("feature_id"):
-            entry["feature_id"] = ev["feature_id"]
-
-    return [
-        {"dispatch_id": e["dispatch_id"], "feature_id": e["feature_id"], "status": e["status"]}
-        for e in by_dispatch.values()
-        if e["status"] not in terminal_events
-    ]
-
-
 def build_pr_queue_state(
     state_dir: Path,
     register_events: Optional[List[Dict[str, Any]]] = None,
@@ -188,7 +158,6 @@ def build_pr_queue_state(
         "timestamp": _now_iso(),
         "open_prs": open_prs,
         "merged_today": _get_merged_today(),
-        "queued_features": _build_queued_features(register_events),
     }
 
 

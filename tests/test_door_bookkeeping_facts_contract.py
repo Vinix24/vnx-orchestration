@@ -18,9 +18,8 @@ no review-gate obligation declared" with zero trace of why (OI-1617).
 The fix (``scripts/lib/dispatch_cli.py::_record_bookkeeping_failure``) does NOT stop the
 swallowing — a bookkeeping failure must still never block the door, that contract stands. It
 makes the swallow leave a FACT: a ``door_bookkeeping_failed`` event appended to
-``dispatch_register.ndjson``, the same ledger ``build_t0_state.py`` already folds into
-``dispatch_register_events`` on every T0 state build (a consumer that is ALREADY running, not a
-new file nobody opens), carrying a ``site`` field so each of the five call sites — or a future
+``dispatch_register.ndjson``, the same ledger the register readers already scan (a consumer
+that is ALREADY running, not a new file nobody opens), carrying a ``site`` field so each of the five call sites — or a future
 sixth — is distinguishable, never collapsed into "something in the door went wrong".
 
 This test is the STATIC backstop: an AST scan over the door module's ``except Exception``

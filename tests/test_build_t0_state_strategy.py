@@ -306,7 +306,8 @@ class TestBuildIntegration:
         assert state["_strategic_state_heavy"]["available"] is True
 
     def test_existing_schema_preserved(self, tmp_path):
-        # ADDITIVE-ONLY guarantee: the pre-W-state-5 keys must all remain.
+        # ADDITIVE-ONLY guarantee: the pre-W-state-5 keys must all remain,
+        # except the sections D8 removed (see tests/test_t0_state_slim.py).
         data_dir = tmp_path / ".vnx-data"
         state_dir = data_dir / "state"
         state_dir.mkdir(parents=True)
@@ -321,14 +322,10 @@ class TestBuildIntegration:
             "terminals",
             "queues",
             "tracks",
-            "pr_progress",
-            "feature_state",
             "open_items",
             "quality_digest",
-            "dispatch_insights",
             "live_work",
             "recent_receipts",
-            "dispatch_register_events",
             "git_context",
             "system_health",
             "pr_queue",

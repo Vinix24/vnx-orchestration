@@ -45,6 +45,19 @@ Schema 2.2 addition (OI-1414, permission escalations):
     to see the backlog was the standalone ``vnx permission escalations`` CLI,
     which nobody ran proactively.
 
+Schema 2.2 change (D8 fabric-state-herstel, dead and bloated sections out):
+  - t0_state.json drops ``feature_state``, ``pr_progress``, ``canonical_tracks``,
+    ``human_gate_queue``, ``dispatch_register_events``, ``recent_dispatches``,
+    ``intelligence_brief`` and ``dispatch_insights``. Measured 2026-09-29 on the
+    real vnx-dev store: 507 of 603 KB, and no code reader outside this builder.
+    Tracks and the human gate come from ``planning_cli.py`` (``vnx objective``,
+    ``vnx deliverable list``), dispatches from ``receipt_query.py``.
+  - ``pr_queue.queued_features`` is gone (514 items, 50 KB, no reader). The
+    t0_detail files ``feature_state.json`` and ``dispatch_register.json`` are
+    no longer written, and the brief (t0_brief.json, schema 1.0) carries no
+    ``pr_progress``. tests/test_t0_state_slim.py holds t0_state under 80 KB and
+    pins that the removed sections stay removed.
+
 Schema 2.2 change (D5 fabric-state-herstel, live work):
   - ``live_work`` replaces ``active_work``: in-flight ``dispatches`` rows of
     this project (runtime_coordination.db, read-only) classified by their
@@ -75,8 +88,9 @@ Schema 2.1 changes (W4E / OI-1199):
 Index/detail split (Sprint 4a):
   - t0_index.json: cheap always-loaded index (≤50 fields, ≤5KB)
   - t0_detail/<section>.json: full per-section files loaded on-demand
-  - t0_state.json: DEPRECATED — kept for backward-compat; future consumers
-    should read t0_index.json (orientation) + t0_detail/*.json (on-demand).
+  - t0_state.json: the compact snapshot behind the index (held under 80 KB by
+    tests/test_t0_state_slim.py); orientation reads t0_index.json first and
+    t0_detail/*.json on demand.
 """
 
 from __future__ import annotations
@@ -108,7 +122,6 @@ if str(_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_LIB_DIR))
 
 from health_status import worst_status  # noqa: E402
-from qi_db_health import is_empty_schema as _qi_db_is_empty_schema  # noqa: E402
 from vnx_paths import ensure_env, project_id_from_state_dir  # noqa: E402
 from contract_invalid_ledger import build_contract_invalid_summary as _build_contract_invalid_summary_counts  # noqa: E402
 try:
@@ -121,12 +134,6 @@ _STATE_DIR = Path(_PATHS["VNX_STATE_DIR"])
 _DISPATCH_DIR = Path(_PATHS["VNX_DISPATCH_DIR"])
 _DATA_DIR = Path(_PATHS["VNX_DATA_DIR"])
 _PROJECT_ROOT = Path(_PATHS["PROJECT_ROOT"])
-
-# Register events reader — used by _build_register_events and _build_feature_state
-try:
-    from dispatch_register import read_events as _dr_read_events
-except ImportError:
-    _dr_read_events = None
 
 try:
     from pr_queue_state import build_pr_queue_state as _build_pqs
@@ -232,17 +239,6 @@ def _central_state_dir_for(state_dir: Path) -> Optional[Path]:
         if central_state.resolve() == state_dir.resolve():
             return None
         return central_state
-    except Exception:
-        return None
-
-
-def _central_qi_db_for_project(project_id: str) -> Optional[Path]:
-    """Return central quality_intelligence.db path for a project_id, or None."""
-    if not project_id or resolve_central_data_dir is None:
-        return None
-    try:
-        db_path = resolve_central_data_dir(project_id) / "state" / "quality_intelligence.db"
-        return db_path if db_path.exists() else None
     except Exception:
         return None
 
@@ -716,187 +712,6 @@ def _build_tracks(state_dir: Path) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Canonical tracks (DB-backed, tenant-scoped) — R3.2 / ADR-007
-# ---------------------------------------------------------------------------
-#
-# ADR-007 binding: the canonical `tracks` / `track_open_items` tables are
-# multi-tenant, keyed by composite PRIMARY KEY (track_id, project_id). EVERY
-# read here MUST carry a `WHERE project_id = ?` predicate. A tenant-less SELECT
-# would merge rows across tenants — two tenants sharing a track_id would
-# overwrite/collide (codex F11 / opus #11). On an unavailable identity we return
-# a documented DEGRADED fallback (no rows + flag) rather than risk a
-# cross-tenant leak; we never SELECT canonical track rows without the predicate.
-
-_CANONICAL_TRACKS_SQL = (
-    "SELECT track_id, title, phase, next_up, sort_order, priority, "
-    "pr_ref, phase_changed_at, completed_at "
-    "FROM tracks WHERE project_id = ? "
-    "ORDER BY next_up DESC, sort_order ASC, track_id ASC"
-)
-
-_CANONICAL_TRACK_OI_SQL = (
-    "SELECT track_id, oi_id, link_type, link_source, linked_at "
-    "FROM track_open_items WHERE project_id = ? "
-    "ORDER BY linked_at DESC"
-)
-
-
-def _tracks_db_degraded(
-    reason: str, *, health: str, tenant_unavailable: bool
-) -> Dict[str, Any]:
-    """Documented DEGRADED fallback for canonical tracks (R3.2).
-
-    NEVER carries track rows — this guarantees no cross-tenant leak when the
-    identity is unavailable or the DB is locked/malformed.
-    """
-    return {
-        "available": False,
-        "health": health,
-        "tenant_unavailable": tenant_unavailable,
-        "reason": reason,
-        "project_id": None,
-        "tracks": [],
-        "open_items": [],
-    }
-
-
-def _query_canonical_scoped(db_path: Path, sql: str, project_id: str) -> List[Dict[str, Any]]:
-    """Run a tenant-scoped read-only query; project_id is ALWAYS bound (ADR-007)."""
-    conn = sqlite3.connect(str(db_path), timeout=5)
-    conn.row_factory = sqlite3.Row
-    try:
-        rows = conn.execute(sql, (project_id,)).fetchall()
-        return [dict(r) for r in rows]
-    finally:
-        conn.close()
-
-
-def _build_tracks_from_db(state_dir: Path, project_id: str) -> Dict[str, Any]:
-    """Tenant-scoped canonical tracks/track_open_items reader (R3.2, ADR-007).
-
-    Returns ``available=True`` with tenant-scoped rows when the identity
-    resolves and the DB is healthy. On UNAVAILABLE identity (no derivable
-    project_id) → DEGRADED fallback (no rows, ``tenant_unavailable=True``),
-    never another tenant's rows. On a locked/malformed DB → degraded/failed
-    (no rows). A pre-migration DB (no ``tracks`` table yet) is a healthy empty
-    result, not a tenant problem.
-    """
-    pid = (project_id or "").strip()
-    if not pid:
-        return _tracks_db_degraded(
-            "tenant_identity_unavailable", health="degraded", tenant_unavailable=True
-        )
-
-    db_path = state_dir / "runtime_coordination.db"
-    healthy_empty = {
-        "available": True, "health": "healthy", "tenant_unavailable": False,
-        "reason": None, "project_id": pid, "tracks": [], "open_items": [],
-    }
-    if not db_path.exists():
-        return healthy_empty
-    try:
-        tracks = _query_canonical_scoped(db_path, _CANONICAL_TRACKS_SQL, pid)
-        open_items = _query_canonical_scoped(db_path, _CANONICAL_TRACK_OI_SQL, pid)
-    except (sqlite3.OperationalError, sqlite3.DatabaseError) as exc:
-        cls = _classify_db_error(exc)
-        if cls == "premigration":
-            return {**healthy_empty, "reason": "premigration"}
-        return _tracks_db_degraded(f"db_{cls}", health=cls, tenant_unavailable=False)
-
-    return {**healthy_empty, "tracks": tracks, "open_items": open_items}
-
-
-# ---------------------------------------------------------------------------
-# Human gate queue — proposed deliverables awaiting operator promote (ADR-007)
-# ---------------------------------------------------------------------------
-#
-# `vnx deliverable add` writes a `dispatches` row with state='proposed'; it
-# stays un-promoted and NOT dispatchable until `vnx deliverable promote` moves
-# it to 'ready' (see planning_cli.py cmd_deliverable_add/cmd_deliverable_promote).
-# Today that row is invisible until an operator thinks to run
-# `vnx deliverable list`. This reader surfaces it at kickoff instead. Only
-# columns present since the v1 base schema are selected (dispatch_id, track,
-# metadata_json, created_at, project_id) so the query never trips on
-# later-migration-only columns (e.g. output_kind/output_ref) on a store that
-# hasn't run the out-of-band migration yet.
-#
-# state='proposed' is NOT unique to deliverables (OI-1609 point 3). Every
-# door-accepted dispatch also lands with state='proposed' — dispatch_cli.py's
-# _persist_dispatch_row deliberately uses it ("'proposed' is invisible to
-# [the claim/stuck/ghost sweeps] — the same state the deliverable layer
-# uses") and, per OI-1609 point 2 (separate dispatch), a plain dispatch
-# should leave 'proposed' once claimed but today does not. Selecting on
-# state alone therefore surfaced ~670 already-run dispatches alongside ~54
-# real deliverables (measured 2026-09-03 on vnx-dev). The `dlv-` id prefix
-# and a non-null `track` are correlated *observations* of that bug, not the
-# actual marker, and a non-null `track` would also disappear the day
-# _persist_dispatch_row starts stamping track_id-derived track values.
-#
-# The actual structural discriminator is `metadata_json.deliverable == true`
-# — the field `cmd_deliverable_add` (planning_cli.py) stamps on every row it
-# creates (`metadata_dict = {"title": title, "deliverable": True}`).
-# `_persist_dispatch_row` never writes metadata_json at all, so a plain
-# dispatch's row always parses to `{}` here. Filtering on this marker keeps
-# the reader correct independent of OI-1609 point 2 landing: it does not
-# rely on plain dispatches leaving 'proposed', so it stays correct before
-# and after that transition is fixed.
-
-_HUMAN_GATE_QUEUE_SQL = (
-    "SELECT dispatch_id, track, metadata_json, created_at "
-    "FROM dispatches WHERE project_id = ? AND state = 'proposed' "
-    "ORDER BY created_at ASC"
-)
-
-
-def _build_human_gate_queue(state_dir: Path, project_id: str) -> List[Dict[str, Any]]:
-    """Proposed deliverables waiting on an operator promote decision.
-
-    Read-only and additive: never mutates state, never promotes. Degrades to
-    an empty list (never raises) on unavailable identity, a missing/premigration
-    DB, or a locked/malformed DB — this is advisory surfacing, not a gate, so a
-    degraded read must not block SessionStart.
-
-    Only rows carrying ``metadata_json.deliverable == true`` are returned —
-    see the discriminator note above the SQL. A plain door-accepted dispatch
-    that happens to also sit at state='proposed' is not a decision an
-    operator owes; it is excluded even though it matches the SQL WHERE
-    clause.
-    """
-    pid = (project_id or "").strip()
-    if not pid:
-        return []
-
-    db_path = state_dir / "runtime_coordination.db"
-    if not db_path.exists():
-        return []
-
-    try:
-        rows = _query_canonical_scoped(db_path, _HUMAN_GATE_QUEUE_SQL, pid)
-    except (sqlite3.OperationalError, sqlite3.DatabaseError) as exc:
-        log.debug(
-            "human_gate_queue query failed (%s): %s", _classify_db_error(exc), exc
-        )
-        return []
-
-    queue: List[Dict[str, Any]] = []
-    for row in rows:
-        try:
-            meta = json.loads(row.get("metadata_json") or "{}")
-        except (TypeError, ValueError):
-            meta = {}
-        if not (isinstance(meta, dict) and meta.get("deliverable") is True):
-            continue
-        title = meta.get("title") if isinstance(meta, dict) else None
-        queue.append({
-            "id": row.get("dispatch_id"),
-            "title": title,
-            "track": row.get("track"),
-            "created_at": row.get("created_at"),
-        })
-    return queue
-
-
-# ---------------------------------------------------------------------------
 # Auto-dream review queue (ADR-019 / OI-896)
 # ---------------------------------------------------------------------------
 #
@@ -1071,252 +886,6 @@ def _build_permission_escalations(state_dir: Path) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Feature state — register-canonical aggregation with FEATURE_PLAN.md fallback
-# ---------------------------------------------------------------------------
-
-def _read_register_events(state_dir: Optional[Path] = None) -> list[dict]:
-    """Read all register events, honoring state_dir for test isolation."""
-    if _dr_read_events is None:
-        return []
-    try:
-        return _dr_read_events(state_dir=state_dir) or []
-    except Exception:
-        return []
-
-
-_EVENT_TO_STATUS: Dict[str, str] = {
-    "dispatch_completed": "completed",
-    "dispatch_failed": "failed",
-    "gate_failed": "failed",
-    "dispatch_promoted": "active",
-    "dispatch_started": "active",
-    "gate_requested": "active",
-    "gate_passed": "active",
-    "dispatch_created": "queued",
-    "pr_opened": "active",
-    "pr_merged": "completed",
-}
-
-
-# Keys contributed by the FEATURE_PLAN.md fallback. The register-canonical path
-# union-merges these into its own output so consumers see one stable shape
-# regardless of whether dispatch_register.ndjson has been populated yet
-# (W4E / OI-1199).
-_FEATURE_PLAN_KEYS: tuple[str, ...] = (
-    "feature_name",
-    "current_pr",
-    "next_task",
-    "assigned_track",
-    "assigned_role",
-    "completion_pct",
-    "total_prs",
-    "completed_prs",
-)
-
-
-def _build_feature_state(state_dir: Optional[Path] = None) -> Dict[str, Any]:
-    """Build feature_state from dispatch_register.ndjson (register-canonical).
-
-    Aggregation contract:
-    - Group events by dispatch_id when present; events lacking a dispatch_id
-      but identified by pr_number or feature_id are aggregated directly into
-      the PR/feature rollups (mirrors dispatch_register.append_event, which
-      requires only one of dispatch_id/pr_number/feature_id).
-    - Per-dispatch status: latest-event-wins (recency).
-    - Per-PR/feature: most-recently-active source (dispatch record or
-      dispatch-less event) wins.
-    - Events with no identifying field at all are dropped.
-    - FEATURE_PLAN.md fields (current_pr/next_task/assigned_track/
-      assigned_role/completion_pct/total_prs/completed_prs/feature_name)
-      are union-merged into the result so the schema is stable across the
-      empty-register and populated-register code paths.
-
-    Schema (schema_version 2.1):
-      source: "dispatch_register" | "feature_plan_md" (primary origin)
-      feature_plan_status: status reported by FEATURE_PLAN.md parser
-        ("planned" | "in_progress" | "completed") — only present when
-        register is populated; the top-level "status" key is reserved for
-        the FEATURE_PLAN.md fallback to preserve backward compatibility
-        with consumers that read it from the empty-register path.
-      dispatches/pr_status/feature_status/register_event_count: only
-        present when register is populated.
-      current_pr/next_task/assigned_track/assigned_role/completion_pct/
-        total_prs/completed_prs/feature_name: always present.
-
-    Refs: synthesis 2026-04-28 §D Sprint 3 split 3/3, codex findings
-    PR #276 r1+r2; W4E / OI-1199 schema split + any-ID filter.
-    """
-    register_events = _read_register_events(state_dir=state_dir)
-    feature_plan_part = _build_feature_state_from_feature_plan()
-    if not register_events:
-        return feature_plan_part
-
-    by_dispatch: Dict[str, list] = {}
-    dispatchless_events: list[dict] = []
-    for ev in register_events:
-        did = (ev.get("dispatch_id") or "").strip()
-        pr_number = ev.get("pr_number")
-        feature_id = (ev.get("feature_id") or "").strip()
-        if did:
-            by_dispatch.setdefault(did, []).append(ev)
-        elif pr_number is not None or feature_id:
-            dispatchless_events.append(ev)
-        # else: event lacks any identifying field — drop it.
-
-    dispatch_records: Dict[str, Any] = {}
-    for did, events in by_dispatch.items():
-        events_sorted = sorted(
-            events,
-            key=lambda e: (_parse_iso(e.get("timestamp", "")) or _MIN_AWARE_DATETIME, e.get("timestamp", "")),
-        )
-        latest = events_sorted[-1]
-        latest_event = latest.get("event", "")
-        status = _EVENT_TO_STATUS.get(latest_event, "unknown")
-        pr_number = next(
-            (e.get("pr_number") for e in events if e.get("pr_number") is not None), None
-        )
-        feature_id = next((e.get("feature_id") for e in events if e.get("feature_id")), "")
-        dispatch_records[did] = {
-            "status": status,
-            "latest_event": latest_event,
-            "latest_event_ts": latest.get("timestamp", ""),
-            "pr_number": pr_number,
-            "feature_id": feature_id,
-            "event_count": len(events),
-        }
-
-    by_pr: Dict[str, Any] = {}
-    by_feature: Dict[str, Any] = {}
-    for did, rec in dispatch_records.items():
-        if rec["pr_number"] is not None:
-            pr_key = str(rec["pr_number"])
-            existing = by_pr.get(pr_key)
-            if existing is None or rec["latest_event_ts"] > existing["latest_event_ts"]:
-                by_pr[pr_key] = rec
-        if rec["feature_id"]:
-            f_key = rec["feature_id"]
-            existing = by_feature.get(f_key)
-            if existing is None or rec["latest_event_ts"] > existing["latest_event_ts"]:
-                by_feature[f_key] = rec
-
-    # Roll up dispatch-less events (pr_number-only or feature_id-only).
-    # These come from writers that record PR-level lifecycle (pr_opened,
-    # pr_merged) without an originating dispatch_id.
-    for ev in dispatchless_events:
-        latest_event = ev.get("event", "")
-        ts = ev.get("timestamp", "")
-        synthetic = {
-            "status": _EVENT_TO_STATUS.get(latest_event, "unknown"),
-            "latest_event": latest_event,
-            "latest_event_ts": ts,
-            "pr_number": ev.get("pr_number"),
-            "feature_id": (ev.get("feature_id") or "").strip(),
-            "event_count": 1,
-            "dispatch_id": None,
-        }
-        if synthetic["pr_number"] is not None:
-            pr_key = str(synthetic["pr_number"])
-            existing = by_pr.get(pr_key)
-            if existing is None or ts > existing["latest_event_ts"]:
-                by_pr[pr_key] = synthetic
-        if synthetic["feature_id"]:
-            f_key = synthetic["feature_id"]
-            existing = by_feature.get(f_key)
-            if existing is None or ts > existing["latest_event_ts"]:
-                by_feature[f_key] = synthetic
-
-    # Union-merge: start with FEATURE_PLAN.md fields, then overlay register
-    # aggregation. The FEATURE_PLAN "status" field is preserved as
-    # "feature_plan_status" because the top-level key isn't currently used
-    # in the register-canonical path and we don't want to introduce a name
-    # collision that would change consumer behavior unexpectedly.
-    merged: Dict[str, Any] = {}
-    for key in _FEATURE_PLAN_KEYS:
-        merged[key] = feature_plan_part.get(key)
-    merged["feature_plan_status"] = feature_plan_part.get("status")
-    merged["source"] = "dispatch_register"
-    merged["dispatches"] = dispatch_records
-    merged["pr_status"] = by_pr
-    merged["feature_status"] = by_feature
-    merged["register_event_count"] = len(register_events)
-    return merged
-
-
-def _build_feature_state_from_feature_plan() -> Dict[str, Any]:
-    """FEATURE_PLAN.md parser — fallback when register is empty."""
-    _empty: Dict[str, Any] = {
-        "source": "feature_plan_md",
-        "feature_name": None,
-        "current_pr": None,
-        "next_task": None,
-        "assigned_track": None,
-        "assigned_role": None,
-        "completion_pct": 0,
-        "total_prs": 0,
-        "completed_prs": 0,
-        "status": "planned",
-    }
-    feature_plan = _PROJECT_ROOT / "FEATURE_PLAN.md"
-    if not feature_plan.exists():
-        return _empty
-    try:
-        from feature_state_machine import parse_feature_plan
-        state = parse_feature_plan(feature_plan)
-        result = state.as_dict()
-        result["source"] = "feature_plan_md"
-        return result
-    except Exception:
-        return _empty
-
-
-# ---------------------------------------------------------------------------
-# PR progress (via QueueReconciler)
-# ---------------------------------------------------------------------------
-
-def _build_pr_progress(dispatch_dir: Path, state_dir: Path) -> Dict[str, Any]:
-    _empty: Dict[str, Any] = {
-        "feature_name": None,
-        "total": 0,
-        "completed": 0,
-        "in_progress": [],
-        "completion_pct": 0,
-        "has_blocking_drift": False,
-    }
-    feature_plan = _PROJECT_ROOT / "FEATURE_PLAN.md"
-    if not feature_plan.exists():
-        return _empty
-
-    try:
-        from queue_reconciler import QueueReconciler
-        receipts = state_dir / "t0_receipts.ndjson"
-        proj = state_dir / "pr_queue_state.json"
-        result = QueueReconciler(
-            dispatch_dir=dispatch_dir,
-            receipts_file=receipts,
-            feature_plan=feature_plan,
-            projection_file=proj if proj.exists() else None,
-        ).reconcile()
-
-        total = len(result.prs)
-        completed = sum(1 for p in result.prs if p.state == "completed")
-        in_progress = [p.pr_id for p in result.prs if p.state == "active"]
-        pct = int(completed * 100 / total) if total > 0 else 0
-
-        blocked = [p.pr_id for p in result.prs if p.state == "blocked"]
-        return {
-            "feature_name": result.feature_name,
-            "total": total,
-            "completed": completed,
-            "in_progress": in_progress,
-            "completion_pct": pct,
-            "has_blocking_drift": result.has_blocking_drift,
-            "blocked": blocked,
-        }
-    except Exception:
-        return _empty
-
-
-# ---------------------------------------------------------------------------
 # Open items (reads existing digest)
 # ---------------------------------------------------------------------------
 
@@ -1408,278 +977,6 @@ def _build_quality_digest(state_dir: Path) -> Dict[str, Any]:
         "critical_high_count": int(summary.get("critical_or_high_count") or 0),
         "generated_at": data.get("run_at"),
     }
-
-
-# ---------------------------------------------------------------------------
-# Recent dispatches (direct query of dispatch_metadata) — Wave 1 shadow read
-# ---------------------------------------------------------------------------
-
-_RECENT_DISPATCHES_SQL = (
-    "SELECT dispatch_id, terminal, track, role, gate, priority, pr_id, "
-    "dispatched_at, completed_at, outcome_status, provider, model "
-    "FROM dispatch_metadata "
-    "ORDER BY dispatched_at DESC "
-    "LIMIT 50"
-)
-
-_RECENT_DISPATCHES_CENTRAL_SQL = (
-    "SELECT dispatch_id, terminal, track, role, gate, priority, pr_id, "
-    "dispatched_at, completed_at, outcome_status, provider, model "
-    "FROM dispatch_metadata "
-    "WHERE project_id = ? "
-    "ORDER BY dispatched_at DESC "
-    "LIMIT 50"
-)
-
-_RECENT_DISPATCHES_SQL_NO_PROVIDER = (
-    "SELECT dispatch_id, terminal, track, role, gate, priority, pr_id, "
-    "dispatched_at, completed_at, outcome_status "
-    "FROM dispatch_metadata "
-    "ORDER BY dispatched_at DESC "
-    "LIMIT 50"
-)
-
-_RECENT_DISPATCHES_CENTRAL_SQL_NO_PROVIDER = (
-    "SELECT dispatch_id, terminal, track, role, gate, priority, pr_id, "
-    "dispatched_at, completed_at, outcome_status "
-    "FROM dispatch_metadata "
-    "WHERE project_id = ? "
-    "ORDER BY dispatched_at DESC "
-    "LIMIT 50"
-)
-
-
-def _query_qi_db(db_path: Path, sql: str, params: tuple = ()) -> List[Dict[str, Any]]:
-    """Execute a read-only query against a quality_intelligence.db and return dicts.
-
-    A 0-table file at ``db_path`` (a decoy left by an interrupted
-    create-then-bootstrap sequence elsewhere, not a real quality_intelligence.db)
-    reads identically to "no rows yet" once ``sqlite3.OperationalError: no such
-    table`` is swallowed below — so it is checked and refused loudly BEFORE the
-    query runs, rather than silently degrading to the same empty list a
-    genuinely-empty-but-real table would return (OI: absence-is-loud D5).
-    """
-    if not db_path.exists():
-        return []
-    if _qi_db_is_empty_schema(db_path):
-        log.error(
-            "quality_intelligence.db at %s exists but has 0 tables — refusing to "
-            "read it as 'no data' (this is the wrong file, not empty state)",
-            db_path,
-        )
-        return []
-    try:
-        conn = sqlite3.connect(str(db_path), timeout=5)
-        conn.row_factory = sqlite3.Row
-        try:
-            rows = conn.execute(sql, params).fetchall()
-            return [dict(r) for r in rows]
-        finally:
-            conn.close()
-    except Exception:
-        return []
-
-
-def _dm_available_columns(db_path: Path) -> frozenset:
-    """Return frozenset of column names in dispatch_metadata (empty if DB absent/error)."""
-    if not db_path.exists():
-        return frozenset()
-    try:
-        conn = sqlite3.connect(str(db_path), timeout=5)
-        try:
-            rows = conn.execute("PRAGMA table_info(dispatch_metadata)").fetchall()
-            return frozenset(r[1] for r in rows)
-        finally:
-            conn.close()
-    except Exception:
-        return frozenset()
-
-
-def _collect_recent_dispatches_per_project(
-    project_id: str, state_dir: Path
-) -> List[Dict[str, Any]]:
-    db_path = state_dir / "quality_intelligence.db"
-    cols = _dm_available_columns(db_path)
-    provider_part = ", provider" if "provider" in cols else ""
-    model_part = ", model" if "model" in cols else ""
-    sql = (
-        "SELECT dispatch_id, terminal, track, role, gate, priority, pr_id, "
-        f"dispatched_at, completed_at, outcome_status{provider_part}{model_part} "
-        "FROM dispatch_metadata "
-        "ORDER BY dispatched_at DESC "
-        "LIMIT 50"
-    )
-    return _query_qi_db(db_path, sql)
-
-
-def _collect_recent_dispatches_central(project_id: str) -> List[Dict[str, Any]]:
-    db_path = _central_qi_db_for_project(project_id)
-    if db_path is None:
-        return []
-    cols = _dm_available_columns(db_path)
-    provider_part = ", provider" if "provider" in cols else ""
-    model_part = ", model" if "model" in cols else ""
-    sql = (
-        "SELECT dispatch_id, terminal, track, role, gate, priority, pr_id, "
-        f"dispatched_at, completed_at, outcome_status{provider_part}{model_part} "
-        "FROM dispatch_metadata "
-        "WHERE project_id = ? "
-        "ORDER BY dispatched_at DESC "
-        "LIMIT 50"
-    )
-    return _query_qi_db(db_path, sql, (project_id,))
-
-
-def _collect_recent_dispatches(
-    project_id: str, state_dir: Path
-) -> List[Dict[str, Any]]:
-    flag = os.environ.get("VNX_USE_CENTRAL_DB", "")
-    if flag == "":
-        return _collect_recent_dispatches_per_project(project_id, state_dir)
-    if flag == "1":
-        return _collect_recent_dispatches_central(project_id)
-    # flag == "shadow"
-    legacy_result = _collect_recent_dispatches_per_project(project_id, state_dir)
-    central_result = _collect_recent_dispatches_central(project_id)
-    if _shadow_verifier is not None:
-        cmp = _shadow_verifier.compare(
-            legacy_result,
-            central_result,
-            project_id=project_id,
-            read_site="build_t0_state._collect_recent_dispatches",
-            sql_template=_RECENT_DISPATCHES_SQL,
-            metric_id=4,
-            table="dispatch_metadata",
-        )
-        _shadow_log(cmp, project_id, "build_t0_state._collect_recent_dispatches")
-    return legacy_result
-
-
-# ---------------------------------------------------------------------------
-# Intelligence brief (success_patterns + antipatterns) — Wave 1 shadow read
-# ---------------------------------------------------------------------------
-
-_INTELLIGENCE_BRIEF_SQL = (
-    "SELECT id, pattern_type, category, title, description, "
-    "confidence_score "
-    "FROM success_patterns "
-    "ORDER BY confidence_score DESC "
-    "LIMIT 10"
-)
-
-_INTELLIGENCE_BRIEF_CENTRAL_SQL = (
-    "SELECT id, pattern_type, category, title, description, "
-    "confidence_score "
-    "FROM success_patterns "
-    "WHERE project_id = ? "
-    "ORDER BY confidence_score DESC "
-    "LIMIT 10"
-)
-
-
-def _collect_intelligence_brief_per_project(
-    project_id: str, state_dir: Path
-) -> List[Dict[str, Any]]:
-    return _query_qi_db(state_dir / "quality_intelligence.db", _INTELLIGENCE_BRIEF_SQL)
-
-
-def _collect_intelligence_brief_central(project_id: str) -> List[Dict[str, Any]]:
-    db_path = _central_qi_db_for_project(project_id)
-    if db_path is None:
-        return []
-    return _query_qi_db(db_path, _INTELLIGENCE_BRIEF_CENTRAL_SQL, (project_id,))
-
-
-def _collect_intelligence_brief(
-    project_id: str, state_dir: Path
-) -> List[Dict[str, Any]]:
-    flag = os.environ.get("VNX_USE_CENTRAL_DB", "")
-    if flag == "":
-        return _collect_intelligence_brief_per_project(project_id, state_dir)
-    if flag == "1":
-        return _collect_intelligence_brief_central(project_id)
-    # flag == "shadow"
-    legacy_result = _collect_intelligence_brief_per_project(project_id, state_dir)
-    central_result = _collect_intelligence_brief_central(project_id)
-    if _shadow_verifier is not None:
-        cmp = _shadow_verifier.compare(
-            legacy_result,
-            central_result,
-            project_id=project_id,
-            read_site="build_t0_state._collect_intelligence_brief",
-            sql_template=_INTELLIGENCE_BRIEF_SQL,
-            metric_id=3,
-        )
-        _shadow_log(cmp, project_id, "build_t0_state._collect_intelligence_brief")
-    return legacy_result
-
-
-# ---------------------------------------------------------------------------
-# Dispatch insights (from DispatchParameterTracker) — Wave 1 shadow-wrapped
-# ---------------------------------------------------------------------------
-
-# Wave 1 shadow — _collect_dispatch_insights is the 3-state dispatcher; the
-# original _build_dispatch_insights logic is in _collect_dispatch_insights_per_project.
-
-_DISPATCH_INSIGHTS_SQL_TEMPLATE = "dispatch_experiments"
-
-
-def _collect_dispatch_insights_per_project(
-    project_id: str, state_dir: Optional[Path] = None
-) -> Dict[str, Any]:
-    _empty: Dict[str, Any] = {"available": False, "insights": [], "experiment_count": 0}
-    actual_state_dir = state_dir if state_dir else _STATE_DIR
-    try:
-        from dispatch_parameter_tracker import DispatchParameterTracker
-        tracker = DispatchParameterTracker(state_dir=actual_state_dir)
-        stats = tracker.stats()
-        if not stats.get("insights_available"):
-            return {**_empty, "experiment_count": stats.get("completed", 0)}
-        top = tracker.top_insights_for_t0(n=5)
-        return {
-            "available": True,
-            "insights": top,
-            "experiment_count": stats.get("completed", 0),
-            "avg_cqs": stats.get("avg_cqs"),
-            "success_rate": stats.get("success_rate"),
-        }
-    except Exception:
-        return _empty
-
-
-def _collect_dispatch_insights_central(project_id: str) -> Dict[str, Any]:
-    if not project_id or resolve_central_data_dir is None:
-        return {"available": False, "insights": [], "experiment_count": 0}
-    try:
-        central_state = resolve_central_data_dir(project_id) / "state"
-        return _collect_dispatch_insights_per_project(project_id, central_state)
-    except Exception:
-        return {"available": False, "insights": [], "experiment_count": 0}
-
-
-def _collect_dispatch_insights(
-    project_id: str, state_dir: Optional[Path] = None
-) -> Dict[str, Any]:
-    flag = os.environ.get("VNX_USE_CENTRAL_DB", "")
-    if flag == "":
-        return _collect_dispatch_insights_per_project(project_id, state_dir)
-    if flag == "1":
-        return _collect_dispatch_insights_central(project_id)
-    # flag == "shadow"
-    legacy_result = _collect_dispatch_insights_per_project(project_id, state_dir)
-    central_result = _collect_dispatch_insights_central(project_id)
-    if _shadow_verifier is not None:
-        cmp = _shadow_verifier.compare(
-            [legacy_result],
-            [central_result],
-            project_id=project_id,
-            read_site="build_t0_state._collect_dispatch_insights",
-            sql_template=_DISPATCH_INSIGHTS_SQL_TEMPLATE,
-            metric_id=4,
-            table="dispatch_experiments",
-        )
-        _shadow_log(cmp, project_id, "build_t0_state._collect_dispatch_insights")
-    return legacy_result
 
 
 # ---------------------------------------------------------------------------
@@ -2634,21 +1931,6 @@ def _build_system_health(
 
 
 # ---------------------------------------------------------------------------
-# Register events (dispatch_register.ndjson reader)
-# ---------------------------------------------------------------------------
-
-def _build_register_events(state_dir: Optional[Path] = None, limit: int = 50) -> list[dict]:
-    """Last N register events (raw; for debugging)."""
-    if _dr_read_events is None:
-        return []
-    try:
-        events = _dr_read_events(state_dir=state_dir)
-        return events[-limit:] if events else []
-    except Exception:
-        return []
-
-
-# ---------------------------------------------------------------------------
 # Strategic state (Phase 2 W-state-5: surface strategy/ folder under t0_state)
 # ---------------------------------------------------------------------------
 
@@ -2898,7 +2180,6 @@ def _build_pr_queue_section(state_dir: Path) -> Dict[str, Any]:
         "timestamp": _now_iso(),
         "open_prs": [],
         "merged_today": [],
-        "queued_features": [],
     }
     if _build_pqs is not None:
         try:
@@ -3205,20 +2486,12 @@ def build_t0_state(
     terminals = _build_terminals(state_dir)
     queues = _build_queues(dispatch_dir, state_dir)
     tracks = _build_tracks(state_dir)
-    canonical_tracks = _build_tracks_from_db(tracks_store, project_id)  # R3.2/ADR-007: tenant-scoped (central SSOT)
-    human_gate_queue = _build_human_gate_queue(tracks_store, project_id)  # proposed deliverables awaiting operator promote
     dream_reviews = _build_dream_reviews(state_dir, project_id)  # auto-dream cycles awaiting T0 review (OI-896)
     permission_escalations = _build_permission_escalations(state_dir)  # pending worker-permission escalations (OI-1414)
     contract_invalid = _build_contract_invalid_summary(state_dir)  # contract_invalid receipt counters (OI-1638)
-    pr_progress = _build_pr_progress(dispatch_dir, state_dir)
-    feature_state = _build_feature_state(state_dir=state_dir)
     open_items = _collect_open_items(project_id, state_dir)
     quality_digest = _build_quality_digest(state_dir)
-    dispatch_insights = _collect_dispatch_insights(project_id, state_dir=state_dir)
-    recent_dispatches = _collect_recent_dispatches(project_id, state_dir)
-    intelligence_brief = _collect_intelligence_brief(project_id, state_dir)
     recent_receipts = _build_recent_receipts(state_dir, project_id=project_id, limit=20)
-    register_events = _build_register_events(state_dir=state_dir)
     git_context = _build_git_context()
     pr_queue = _build_pr_queue_section(state_dir)  # R7.1: extracted helper
     live_work = _build_live_work(state_dir, project_id, pr_queue)  # D5: DB + occupancy flock
@@ -3243,21 +2516,13 @@ def build_t0_state(
         "queues": queues,
         "tracks": tracks,
         "track_freshness": track_freshness,
-        "canonical_tracks": canonical_tracks,
-        "human_gate_queue": human_gate_queue,
         "dream_reviews": dream_reviews,
         "permission_escalations": permission_escalations,
         "contract_invalid": contract_invalid,
-        "pr_progress": pr_progress,
-        "feature_state": feature_state,
         "open_items": open_items,
         "quality_digest": quality_digest,
-        "dispatch_insights": dispatch_insights,
-        "recent_dispatches": recent_dispatches,
-        "intelligence_brief": intelligence_brief,
         "live_work": live_work,
         "recent_receipts": recent_receipts,
-        "dispatch_register_events": register_events,
         "git_context": git_context,
         "system_health": system_health,
         "pr_queue": pr_queue,
@@ -3286,7 +2551,6 @@ def _state_to_brief(state: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     queues = state.get("queues") or {}
-    pr_raw = state.get("pr_progress") or {}
     oi = state.get("open_items") or {}
     sh = state.get("system_health") or {}
     # D5: the brief's active_work (schema 1.0 shape) is the running part of
@@ -3329,13 +2593,6 @@ def _state_to_brief(state: Dict[str, Any]) -> Dict[str, Any]:
             "blocker_count": oi.get("blocker_count", 0),
             "top_blockers": (oi.get("top_blockers") or [])[:2],
         },
-        "pr_progress": {
-            "total": pr_raw.get("total", 0),
-            "completed": pr_raw.get("completed", 0),
-            "in_progress": pr_raw.get("in_progress", []),
-            "completion_percentage": pr_raw.get("completion_pct", 0),
-            "blocked": pr_raw.get("blocked", []),
-        },
         "system_health": {
             "status": sh.get("status", "unknown"),
             "uptime_seconds": sh.get("uptime_seconds", 0),
@@ -3355,10 +2612,8 @@ def _state_to_brief(state: Dict[str, Any]) -> Dict[str, Any]:
 
 # Maps state-dict key → detail file stem (t0_detail/<stem>.json)
 _DETAIL_SECTION_MAP: Dict[str, str] = {
-    "feature_state": "feature_state",
     "quality_digest": "quality_digest",
     "open_items": "open_items",
-    "dispatch_register_events": "dispatch_register",
     "active_chains": "active_chains",
     "intelligence": "intelligence",
     "dream_reviews": "dream_reviews",

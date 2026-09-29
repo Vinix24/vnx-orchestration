@@ -6,7 +6,6 @@ Covers:
   - v26 down: success_rate column is re-added, idx_patterns_category restored
   - round-trip: up then down restores the original column
   - idempotency: running up twice or down twice is safe
-  - build_t0_state ORDER BY: queries work correctly without success_rate
 """
 
 from __future__ import annotations
@@ -26,7 +25,6 @@ for _p in (str(SCRIPTS_DIR), str(LIB_DIR)):
         sys.path.insert(0, _p)
 
 import quality_db_init as qdi  # noqa: E402
-import build_t0_state as bts   # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -266,45 +264,3 @@ class TestBootstrapAppliesV26:
         conn3 = sqlite3.connect(str(db_path))
         assert "success_rate" not in _col_names(conn3, "success_patterns")
         conn3.close()
-
-
-# ---------------------------------------------------------------------------
-# build_t0_state ORDER BY without success_rate
-# ---------------------------------------------------------------------------
-
-class TestBuildT0StateOrderBy:
-    def test_intelligence_brief_sql_excludes_success_rate(self) -> None:
-        assert "success_rate" not in bts._INTELLIGENCE_BRIEF_SQL.lower()
-        assert "success_rate" not in bts._INTELLIGENCE_BRIEF_CENTRAL_SQL.lower()
-
-    def test_order_by_is_confidence_score_desc(self) -> None:
-        assert "order by confidence_score desc" in bts._INTELLIGENCE_BRIEF_SQL.lower()
-        assert "order by confidence_score desc" in bts._INTELLIGENCE_BRIEF_CENTRAL_SQL.lower()
-
-    def test_query_works_on_migrated_db(self, tmp_path: pytest.TempPathFactory) -> None:
-        """_collect_intelligence_brief_per_project returns results after v26 migration."""
-        db_path = tmp_path / "quality_intelligence.db"
-        conn = _make_v25_db(db_path)
-        qdi._migrate_v26(conn)
-        conn.close()
-
-        result = bts._collect_intelligence_brief_per_project("test-pid", tmp_path)
-
-        assert len(result) == 2
-        # Ordered by confidence_score DESC: Pattern A (0.9) before Pattern B (0.7)
-        assert result[0]["title"] == "Pattern A"
-        assert result[1]["title"] == "Pattern B"
-        assert "success_rate" not in result[0]
-
-    def test_query_works_on_legacy_db(self, tmp_path: pytest.TempPathFactory) -> None:
-        """_collect_intelligence_brief_per_project returns results from a pre-v26 DB."""
-        db_path = tmp_path / "quality_intelligence.db"
-        conn = _make_v25_db(db_path)
-        conn.close()
-
-        result = bts._collect_intelligence_brief_per_project("test-pid", tmp_path)
-
-        assert len(result) == 2
-        assert result[0]["title"] == "Pattern A"
-        # success_rate no longer selected even on legacy DB
-        assert "success_rate" not in result[0]

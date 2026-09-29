@@ -67,11 +67,6 @@ def _make_full_state(
             "completed_last_hour": 3,
             "conflict_count": 0,
         },
-        "pr_progress": {
-            "in_progress": ["PR-4", "PR-5"],
-            "total": 8,
-            "completed": 6,
-        },
         "open_items": {
             "open_count": 12,
             "blocker_count": blocker_count,
@@ -89,21 +84,11 @@ def _make_full_state(
             "open_prs": [{"number": 77, "dispatch_id": "d-active-01"}],
         },
         "recent_receipts": receipts,
-        "feature_state": {
-            "source": "dispatch_register",
-            "dispatches": {"d-001": {"status": "completed"}},
-            "pr_status": {},
-            "feature_status": {},
-            "register_event_count": 5,
-        },
         "quality_digest": {
             "operational_defects": 2,
             "total_items": 10,
             "generated_at": "2026-04-28T11:00:00Z",
         },
-        "dispatch_register_events": [
-            {"event": "dispatch_created", "dispatch_id": "d-001", "timestamp": "2026-04-28T10:00:00Z"}
-        ],
         "system_health": {
             "status": "healthy",
             "db_initialized": True,
@@ -236,11 +221,6 @@ class TestWriteDetailFilesCreation:
         _write_detail_files(_make_full_state(), detail_dir)
         assert detail_dir.is_dir()
 
-    def test_creates_feature_state_file(self, tmp_path):
-        detail_dir = tmp_path / "t0_detail"
-        _write_detail_files(_make_full_state(), detail_dir)
-        assert (detail_dir / "feature_state.json").exists()
-
     def test_creates_quality_digest_file(self, tmp_path):
         detail_dir = tmp_path / "t0_detail"
         _write_detail_files(_make_full_state(), detail_dir)
@@ -251,16 +231,11 @@ class TestWriteDetailFilesCreation:
         _write_detail_files(_make_full_state(), detail_dir)
         assert (detail_dir / "open_items.json").exists()
 
-    def test_creates_dispatch_register_file(self, tmp_path):
-        detail_dir = tmp_path / "t0_detail"
-        _write_detail_files(_make_full_state(), detail_dir)
-        assert (detail_dir / "dispatch_register.json").exists()
-
     def test_skips_missing_sections(self, tmp_path):
-        state = {"feature_state": {"source": "register"}}
+        state = {"open_items": {"open_count": 1}}
         detail_dir = tmp_path / "t0_detail"
         manifest = _write_detail_files(state, detail_dir)
-        assert "feature_state" in manifest
+        assert "open_items" in manifest
         assert "quality_digest" not in manifest
 
     def test_returns_manifest_with_paths(self, tmp_path):
@@ -282,13 +257,6 @@ class TestWriteDetailFilesCreation:
 # ---------------------------------------------------------------------------
 
 class TestDetailFileContent:
-    def test_feature_state_content_matches(self, tmp_path):
-        state = _make_full_state()
-        detail_dir = tmp_path / "t0_detail"
-        _write_detail_files(state, detail_dir)
-        on_disk = json.loads((detail_dir / "feature_state.json").read_text())
-        assert on_disk == state["feature_state"]
-
     def test_quality_digest_content_matches(self, tmp_path):
         state = _make_full_state()
         detail_dir = tmp_path / "t0_detail"
@@ -302,13 +270,6 @@ class TestDetailFileContent:
         _write_detail_files(state, detail_dir)
         on_disk = json.loads((detail_dir / "open_items.json").read_text())
         assert on_disk == state["open_items"]
-
-    def test_dispatch_register_content_matches(self, tmp_path):
-        state = _make_full_state()
-        detail_dir = tmp_path / "t0_detail"
-        _write_detail_files(state, detail_dir)
-        on_disk = json.loads((detail_dir / "dispatch_register.json").read_text())
-        assert on_disk == state["dispatch_register_events"]
 
 
 # ---------------------------------------------------------------------------
@@ -341,19 +302,18 @@ class TestIndexSizeConstraint:
 # ---------------------------------------------------------------------------
 
 class TestIndexDetailSeparation:
-    def test_index_file_does_not_contain_feature_state_data(self, tmp_path):
+    def test_removed_sections_get_no_detail_file(self, tmp_path):
+        # D8: feature_state and dispatch_register_events are gone from the
+        # builder; a state that still carries them must not resurrect a file.
         state = _make_full_state()
-        index = _build_t0_index(state)
-        index_text = json.dumps(index, indent=2, default=str)
-        # The deep register event count should only appear in feature_state detail
-        assert "register_event_count" not in index_text
-
-    def test_index_file_does_not_contain_dispatch_register_events(self, tmp_path):
-        state = _make_full_state()
-        index = _build_t0_index(state)
-        index_text = json.dumps(index, indent=2, default=str)
-        # dispatch_register_events content (event key) only appears in detail file
-        assert "dispatch_created" not in index_text
+        state["feature_state"] = {"source": "dispatch_register"}
+        state["dispatch_register_events"] = [{"event": "dispatch_created"}]
+        detail_dir = tmp_path / "t0_detail"
+        manifest = _write_detail_files(state, detail_dir)
+        assert "feature_state" not in manifest
+        assert "dispatch_register_events" not in manifest
+        assert not (detail_dir / "feature_state.json").exists()
+        assert not (detail_dir / "dispatch_register.json").exists()
 
     def test_index_and_detail_are_separate_files(self, tmp_path):
         state = _make_full_state()
@@ -363,9 +323,8 @@ class TestIndexDetailSeparation:
 
         # Index read path: only reads the index dict (no detail sections)
         index_keys = set(index.keys())
-        assert "feature_state" not in index_keys
         assert "quality_digest" not in index_keys
-        assert "dispatch_register_events" not in index_keys
+        assert "open_items" not in index_keys
 
         # Detail read path: only reads section files
         detail_keys = set(manifest.keys())
@@ -412,7 +371,6 @@ class TestIntegrationWithBuildT0State:
         detail_dir = tmp_path / "t0_detail"
         manifest = _write_detail_files(state, detail_dir)
 
-        # At minimum feature_state should always be written (fallback returns dict)
         assert isinstance(manifest, dict)
         for key, path_str in manifest.items():
             assert Path(path_str).exists(), f"{key} detail file not found: {path_str}"

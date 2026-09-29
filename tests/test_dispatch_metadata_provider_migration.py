@@ -10,7 +10,8 @@ Covers:
 - quality_db_init _migrate_v23 adds model column on a DB at user_version 22
 - log_dispatch_metadata does NOT clobber an existing (codex, gpt-probe) row (#778 FIX 1)
 - v21->v22->v23 migration path preserves model values (#778 FIX 2)
-- recent_comparable and build_t0_state SELECTs surface provider/model (#778 FIX 3)
+- recent_comparable SELECT surfaces provider/model (#778 FIX 3; the build_t0_state
+  recent_dispatches reader was removed by D8)
 
 Dispatch-ID: 20260601-1645-fixgap2
 ADR-007: composite uniqueness on dispatch_metadata enforced via UNIQUE INDEX
@@ -527,7 +528,7 @@ def test_v21_v22_v23_preserves_model_values():
 
 
 # ---------------------------------------------------------------------------
-# FIX 3 — recent_comparable and build_t0_state surface provider/model
+# FIX 3 — recent_comparable surfaces provider/model
 # ---------------------------------------------------------------------------
 
 def test_recent_comparable_select_includes_provider_model():
@@ -579,59 +580,6 @@ def test_recent_comparable_select_includes_provider_model():
         assert "codex" in content, f"provider 'codex' not surfaced in content: {content!r}"
         assert "gpt-probe" in content, f"model 'gpt-probe' not surfaced in content: {content!r}"
         conn.close()
-    finally:
-        db_path.unlink(missing_ok=True)
-
-
-def test_build_t0_state_recent_dispatches_sql_includes_provider_model():
-    """_RECENT_DISPATCHES_SQL must project provider and model. (#778 FIX 3)"""
-    import build_t0_state as BTS
-
-    for attr in ("_RECENT_DISPATCHES_SQL", "_RECENT_DISPATCHES_CENTRAL_SQL"):
-        sql = getattr(BTS, attr)
-        assert "provider" in sql, f"{attr} must SELECT provider"
-        assert "model" in sql, f"{attr} must SELECT model"
-
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        db_path = Path(f.name)
-    try:
-        conn = sqlite3.connect(str(db_path))
-        conn.row_factory = sqlite3.Row
-        conn.executescript("""
-            CREATE TABLE dispatch_metadata (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                dispatch_id TEXT NOT NULL,
-                project_id TEXT NOT NULL DEFAULT 'vnx-dev',
-                terminal TEXT NOT NULL,
-                track TEXT NOT NULL,
-                role TEXT,
-                gate TEXT,
-                priority TEXT DEFAULT 'P1',
-                pr_id TEXT,
-                provider TEXT,
-                model TEXT,
-                dispatched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                completed_at DATETIME,
-                outcome_status TEXT
-            );
-        """)
-        conn.execute(
-            "INSERT INTO dispatch_metadata "
-            "(dispatch_id, terminal, track, project_id, provider, model) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            ("t0-test-001", "T1", "A", "vnx-dev", "codex", "gpt-probe"),
-        )
-        conn.commit()
-        conn.close()
-
-        rows = BTS._query_qi_db(db_path, BTS._RECENT_DISPATCHES_SQL)
-        assert rows, "expected at least one row"
-        assert rows[0].get("provider") == "codex", (
-            f"provider not projected — got {rows[0].get('provider')!r}"
-        )
-        assert rows[0].get("model") == "gpt-probe", (
-            f"model not projected — got {rows[0].get('model')!r}"
-        )
     finally:
         db_path.unlink(missing_ok=True)
 
@@ -718,80 +666,6 @@ def test_recent_comparable_migrated_db_surfaces_provider_model():
     assert "gpt-probe" in content, f"model not surfaced: {content!r}"
 
 
-def test_build_t0_state_collect_recent_dispatches_unmigrated_no_crash(tmp_path):
-    """_collect_recent_dispatches_per_project on an unmigrated DB (no provider/model)
-    must return rows without crash; provider/model absent from result dicts."""
-    import build_t0_state as BTS
-
-    db_path = tmp_path / "state" / "quality_intelligence.db"
-    db_path.parent.mkdir(parents=True)
-
-    conn = sqlite3.connect(str(db_path))
-    conn.executescript("""
-        CREATE TABLE dispatch_metadata (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            dispatch_id TEXT NOT NULL UNIQUE,
-            terminal TEXT, track TEXT, role TEXT, gate TEXT,
-            priority TEXT DEFAULT 'P1', pr_id TEXT,
-            dispatched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            completed_at DATETIME, outcome_status TEXT
-        );
-    """)
-    from datetime import datetime, timedelta, timezone
-    ts = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
-    conn.execute(
-        "INSERT INTO dispatch_metadata (dispatch_id, terminal, track, dispatched_at) "
-        "VALUES (?, ?, ?, ?)",
-        ("legacy-bts-001", "T1", "A", ts),
-    )
-    conn.commit()
-    conn.close()
-
-    rows = BTS._collect_recent_dispatches_per_project("vnx-dev", db_path.parent)
-
-    assert rows, "must return rows from unmigrated DB without crash"
-    assert rows[0]["dispatch_id"] == "legacy-bts-001"
-    assert rows[0].get("provider") is None
-    assert rows[0].get("model") is None
-
-
-def test_build_t0_state_collect_recent_dispatches_migrated_surfaces_provider(tmp_path):
-    """_collect_recent_dispatches_per_project on a migrated DB surfaces provider/model."""
-    import build_t0_state as BTS
-
-    db_path = tmp_path / "state" / "quality_intelligence.db"
-    db_path.parent.mkdir(parents=True)
-
-    conn = sqlite3.connect(str(db_path))
-    conn.executescript("""
-        CREATE TABLE dispatch_metadata (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            dispatch_id TEXT NOT NULL UNIQUE,
-            terminal TEXT, track TEXT, role TEXT, gate TEXT,
-            priority TEXT DEFAULT 'P1', pr_id TEXT,
-            provider TEXT, model TEXT,
-            dispatched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            completed_at DATETIME, outcome_status TEXT
-        );
-    """)
-    from datetime import datetime, timedelta, timezone
-    ts = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
-    conn.execute(
-        "INSERT INTO dispatch_metadata "
-        "(dispatch_id, terminal, track, dispatched_at, provider, model) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        ("migrated-bts-001", "T1", "A", ts, "codex", "gpt-probe"),
-    )
-    conn.commit()
-    conn.close()
-
-    rows = BTS._collect_recent_dispatches_per_project("vnx-dev", db_path.parent)
-
-    assert rows, "must return rows from migrated DB"
-    assert rows[0]["provider"] == "codex", f"expected 'codex', got {rows[0].get('provider')!r}"
-    assert rows[0]["model"] == "gpt-probe", f"expected 'gpt-probe', got {rows[0].get('model')!r}"
-
-
 # ---------------------------------------------------------------------------
 # FIX 3c — provider-only DB (intermediate migration state: provider present, model absent)
 # ---------------------------------------------------------------------------
@@ -836,41 +710,3 @@ def test_recent_comparable_provider_only_db_no_crash():
     assert "provider-only-001" in items[0].source_refs
     assert "kimi" in items[0].content, f"provider 'kimi' must appear in content: {items[0].content!r}"
 
-
-def test_build_t0_state_provider_only_db_no_crash(tmp_path):
-    """_collect_recent_dispatches_per_project on a DB with provider but NOT model must
-    not crash; must surface provider; model absent from result dict. (#778 guard gap)"""
-    import build_t0_state as BTS
-
-    db_path = tmp_path / "state" / "quality_intelligence.db"
-    db_path.parent.mkdir(parents=True)
-
-    conn = sqlite3.connect(str(db_path))
-    conn.executescript("""
-        CREATE TABLE dispatch_metadata (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            dispatch_id TEXT NOT NULL UNIQUE,
-            terminal TEXT, track TEXT, role TEXT, gate TEXT,
-            priority TEXT DEFAULT 'P1', pr_id TEXT,
-            provider TEXT,
-            dispatched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            completed_at DATETIME, outcome_status TEXT
-        );
-    """)
-    from datetime import datetime, timedelta, timezone
-    ts = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
-    conn.execute(
-        "INSERT INTO dispatch_metadata "
-        "(dispatch_id, terminal, track, dispatched_at, provider) "
-        "VALUES (?, ?, ?, ?, ?)",
-        ("provider-only-bts-001", "T1", "A", ts, "kimi"),
-    )
-    conn.commit()
-    conn.close()
-
-    rows = BTS._collect_recent_dispatches_per_project("vnx-dev", db_path.parent)
-
-    assert rows, "must return rows from provider-only DB without crash"
-    assert rows[0]["dispatch_id"] == "provider-only-bts-001"
-    assert rows[0].get("provider") == "kimi", f"expected 'kimi', got {rows[0].get('provider')!r}"
-    assert rows[0].get("model") is None, f"model must be absent (None), got {rows[0].get('model')!r}"

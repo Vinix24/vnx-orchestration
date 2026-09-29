@@ -6,10 +6,10 @@ read canonical track rows without a `WHERE project_id = ?` predicate. On an
 unavailable identity it must emit a documented DEGRADED fallback (no rows +
 flag) rather than merge rows across tenants (codex F11 / opus #11).
 
-Acceptance (dispatch 20260614-fsr-b-tenant-guard):
-  (a) a DB with two tenants' tracks → only the resolved tenant's rows return,
-      including the same-track_id-no-overwrite case;
-  (b) identity unavailable → degraded flag set AND no canonical rows returned.
+D8 (fabric-state-herstel) removed the canonical_tracks projection: a T0 reads
+tracks through planning_cli.py. The tenant-scoped reader is gone; what stays
+here is the proof that neither tenant's rows reach the state document, and the
+tracks-store isolation guard.
 
 Discipline: temp-DB ONLY. Every test pins VNX_DATA_DIR_EXPLICIT=1 + a tmp
 VNX_DATA_DIR; the live ~/.vnx-data is never touched.
@@ -17,6 +17,7 @@ VNX_DATA_DIR; the live ~/.vnx-data is never touched.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import sys
 from pathlib import Path
@@ -136,92 +137,6 @@ def _make_v24_db(state_dir: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# (a) Direct reader: tenant isolation — only the resolved tenant's rows
-# ---------------------------------------------------------------------------
-
-def test_reader_returns_only_resolved_tenant(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    state_dir = _pin_isolation(tmp_path, monkeypatch)
-    _make_v24_db(state_dir)
-
-    result = bts._build_tracks_from_db(state_dir, _TENANT_A)
-
-    assert result["available"] is True
-    assert result["tenant_unavailable"] is False
-    assert result["health"] == "healthy"
-    assert result["project_id"] == _TENANT_A
-
-    ids = {t["track_id"] for t in result["tracks"]}
-    assert ids == {"shared-1", "a-only"}
-    assert "b-only" not in ids
-
-    shared = next(t for t in result["tracks"] if t["track_id"] == "shared-1")
-    assert shared["title"] == "tenant-A shared"  # no cross-tenant overwrite
-
-    oi_ids = {oi["oi_id"] for oi in result["open_items"]}
-    assert oi_ids == {"oi-A"}  # track_open_items also tenant-scoped
-
-
-def test_reader_scopes_to_other_tenant(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    state_dir = _pin_isolation(tmp_path, monkeypatch)
-    _make_v24_db(state_dir)
-
-    result = bts._build_tracks_from_db(state_dir, _TENANT_B)
-
-    ids = {t["track_id"] for t in result["tracks"]}
-    assert ids == {"shared-1", "b-only"}
-    assert "a-only" not in ids
-    shared = next(t for t in result["tracks"] if t["track_id"] == "shared-1")
-    assert shared["title"] == "tenant-B shared"
-    assert {oi["oi_id"] for oi in result["open_items"]} == {"oi-B"}
-
-
-# ---------------------------------------------------------------------------
-# (b) Direct reader: unavailable identity → degraded, no rows
-# ---------------------------------------------------------------------------
-
-@pytest.mark.parametrize("bad_pid", ["", "   ", None])
-def test_reader_unavailable_identity_is_degraded(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bad_pid
-) -> None:
-    state_dir = _pin_isolation(tmp_path, monkeypatch)
-    _make_v24_db(state_dir)  # DB HAS two tenants' rows — none may leak
-
-    result = bts._build_tracks_from_db(state_dir, bad_pid)
-
-    assert result["available"] is False
-    assert result["tenant_unavailable"] is True
-    assert result["health"] == "degraded"
-    assert result["tracks"] == []
-    assert result["open_items"] == []
-    assert result["project_id"] is None
-
-
-def test_reader_premigration_db_is_healthy_empty(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A DB without the tracks table is a healthy empty result, not a tenant fault."""
-    state_dir = _pin_isolation(tmp_path, monkeypatch)
-    db_path = state_dir / "runtime_coordination.db"
-    sqlite3.connect(str(db_path)).close()  # empty DB, no tracks table
-
-    result = bts._build_tracks_from_db(state_dir, _TENANT_A)
-
-    assert result["available"] is True
-    assert result["tenant_unavailable"] is False
-    assert result["reason"] == "premigration"
-    assert result["tracks"] == []
-
-
-def test_reader_absent_db_is_healthy_empty(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    state_dir = _pin_isolation(tmp_path, monkeypatch)
-    result = bts._build_tracks_from_db(state_dir, _TENANT_A)
-    assert result["available"] is True
-    assert result["tracks"] == []
-
-
-# ---------------------------------------------------------------------------
 # Builder-layer guard: _resolve_tracks_store must never escape to the real
 # central store during a pinned-isolation test run (audit #13 regression).
 # ---------------------------------------------------------------------------
@@ -263,45 +178,38 @@ def test_resolve_tracks_store_escape_is_neutralized_by_pinned_isolation(
 
 
 # ---------------------------------------------------------------------------
-# Through build_t0_state: wiring + output flag (acceptance a & b)
+# Through build_t0_state: the canonical projection is gone (D8), and with it
+# the only tenant-scoped row reader. Neither tenant's rows may reach the state.
 # ---------------------------------------------------------------------------
 
-def test_build_t0_state_canonical_tracks_tenant_scoped(
+def test_build_t0_state_carries_no_track_rows_of_either_tenant(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     state_dir = _pin_isolation(tmp_path, monkeypatch)
     _make_v24_db(state_dir)
-    # Marker resolves project identity to tenant A (ancestor of state_dir).
     (tmp_path / ".vnx-project-id").write_text(_TENANT_A + "\n", encoding="utf-8")
     dispatch_dir = tmp_path / "dispatches"
     dispatch_dir.mkdir()
 
     state = bts.build_t0_state(state_dir, dispatch_dir)
-    ct = state["canonical_tracks"]
+    dumped = json.dumps(state, default=str)
 
-    assert ct["available"] is True
-    assert ct["tenant_unavailable"] is False
-    ids = {t["track_id"] for t in ct["tracks"]}
-    assert "a-only" in ids
-    assert "b-only" not in ids  # no cross-tenant leak through the full builder
-    shared = next(t for t in ct["tracks"] if t["track_id"] == "shared-1")
-    assert shared["title"] == "tenant-A shared"
+    assert "canonical_tracks" not in state
+    assert "tenant-B" not in dumped  # no cross-tenant leak through the full builder
+    assert "tenant-A" not in dumped  # the projection itself is gone
 
 
-def test_build_t0_state_unavailable_identity_degraded_no_leak(
+def test_build_t0_state_unresolved_identity_carries_no_track_rows(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     state_dir = _pin_isolation(tmp_path, monkeypatch)
     _make_v24_db(state_dir)  # two tenants present; none may surface
-    # No .vnx-project-id marker anywhere up-tree, VNX_PROJECT_ID unset → unresolved.
     dispatch_dir = tmp_path / "dispatches"
     dispatch_dir.mkdir()
 
     state = bts.build_t0_state(state_dir, dispatch_dir)
-    ct = state["canonical_tracks"]
+    dumped = json.dumps(state, default=str)
 
-    assert ct["tenant_unavailable"] is True
-    assert ct["available"] is False
-    assert ct["health"] == "degraded"
-    assert ct["tracks"] == []
-    assert ct["open_items"] == []
+    assert "canonical_tracks" not in state
+    assert "tenant-A" not in dumped
+    assert "tenant-B" not in dumped

@@ -3,11 +3,14 @@
 File: $VNX_STATE_DIR/dispatch_register.ndjson
 
 Current consumers:
-- build_t0_state.py: exposes raw events list as dispatch_register_events (PR-4b2)
+- pr_queue_state.py: per-PR gates_passed / blocked_on
+- backfill_pr_merged_receipts.py: register events for pr_merged backfill
+
+build_t0_state.py no longer exposes the register (D8 removed
+dispatch_register_events, feature_state and pr_progress from t0_state).
 
 Future consumers (separate PRs):
 - append_receipt.py + gate_recorder.py + dispatch_lifecycle.sh: hook callers (PR-4b3, PR-4b4)
-- build_t0_state.py: full register-canonical pr_progress aggregation (PR-4c)
 """
 from __future__ import annotations
 import datetime as _dt

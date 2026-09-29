@@ -1185,8 +1185,8 @@ def _record_bookkeeping_failure(
     The fix is not "stop swallowing" — a bookkeeping failure must still never
     block the door. The fix is that swallowing now leaves a FACT: a
     ``door_bookkeeping_failed`` event appended to ``dispatch_register.ndjson``,
-    the same ledger ``build_t0_state.py`` already folds into
-    ``dispatch_register_events`` on every T0 state build — a consumer that is
+    the same ledger the register readers (``dispatch_register.read_events``,
+    ``backfill_pr_merged_receipts.py``) already scan — a consumer that is
     ALREADY running, not a new file nobody opens. ``site`` makes each of the
     five (or a future sixth) call sites distinguishable in that ledger; "iets
     ging mis in de deur" would be too coarse to act on.
@@ -1199,9 +1199,9 @@ def _record_bookkeeping_failure(
     handler is attached to the root logger, e.g. pytest's ``caplog``).
     Second, the same ``door_bookkeeping_failed`` fact is ALSO appended to
     ``t0_receipts.ndjson`` (the actual receipt ledger, via the canonical
-    ``append_receipt`` path) — ``dispatch_register.ndjson`` is folded into
-    ``dispatch_register_events`` by ``build_t0_state.py`` alone; the receipt
-    ledger is what every other receipt reader already scans.
+    ``append_receipt`` path) — ``dispatch_register.ndjson`` has few readers
+    (``build_t0_state.py`` stopped exposing it in D8); the receipt ledger is
+    what every other receipt reader already scans.
 
     Never raises: recording the failure must never itself become a second,
     worse failure. ``dispatch_register.append_event`` already swallows

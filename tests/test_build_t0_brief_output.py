@@ -1,7 +1,7 @@
 """Tests for _state_to_brief() and --format brief output path (PR-4b2 fixup 3).
 
 Covers:
-  BLOCKING 1 — pr_progress.blocked is present in brief when source has blocked PRs
+  BLOCKING 1 — the brief carries no pr_progress (D8 removed the section from the state)
   BLOCKING 2 — --format brief routes output to t0_brief.json, not t0_state.json
   ADVISORY   — blockers derived from open_items top_blockers; next_gates from live_work
 """
@@ -70,15 +70,6 @@ def _minimal_state(**overrides: Any) -> Dict[str, Any]:
             "conflict_count": 0,
         },
         "tracks": {},
-        "pr_progress": {
-            "feature_name": "test-feature",
-            "total": 3,
-            "completed": 1,
-            "in_progress": ["PR-2"],
-            "completion_pct": 33,
-            "has_blocking_drift": False,
-            "blocked": [],
-        },
         "open_items": {"open_count": 0, "blocker_count": 0, "top_blockers": []},
         "live_work": {"available": True, "live": [], "starting": [], "stale": []},
         "recent_receipts": [],
@@ -89,33 +80,18 @@ def _minimal_state(**overrides: Any) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# BLOCKING 1: pr_progress.blocked propagation into brief
+# BLOCKING 1: no pr_progress in the brief (removed from the state by D8)
 # ---------------------------------------------------------------------------
 
-class TestBriefPrProgressBlocked:
-    def test_blocked_field_present_in_brief(self):
-        state = _minimal_state()
-        state["pr_progress"]["blocked"] = ["PR-3", "PR-4"]
-        brief = _state_to_brief(state)
-        assert "blocked" in brief["pr_progress"]
+class TestBriefCarriesNoPrProgress:
+    def test_brief_has_no_pr_progress(self):
+        brief = _state_to_brief(_minimal_state())
+        assert "pr_progress" not in brief
 
-    def test_blocked_values_propagated(self):
-        state = _minimal_state()
-        state["pr_progress"]["blocked"] = ["PR-3", "PR-4"]
+    def test_stale_pr_progress_in_state_is_not_copied(self):
+        state = _minimal_state(pr_progress={"total": 3, "completed": 1, "blocked": ["PR-3"]})
         brief = _state_to_brief(state)
-        assert brief["pr_progress"]["blocked"] == ["PR-3", "PR-4"]
-
-    def test_blocked_empty_when_source_empty(self):
-        state = _minimal_state()
-        state["pr_progress"]["blocked"] = []
-        brief = _state_to_brief(state)
-        assert brief["pr_progress"]["blocked"] == []
-
-    def test_blocked_defaults_to_empty_when_key_absent(self):
-        state = _minimal_state()
-        state["pr_progress"].pop("blocked", None)
-        brief = _state_to_brief(state)
-        assert brief["pr_progress"]["blocked"] == []
+        assert "pr_progress" not in brief
 
 
 # ---------------------------------------------------------------------------
