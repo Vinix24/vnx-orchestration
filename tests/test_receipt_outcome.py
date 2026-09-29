@@ -219,3 +219,80 @@ def test_contract_invalid_before_the_last_a_does_not_reject():
     )
     assert result["verdict_counts"] == {"accept": 1, "investigate": 0, "reject": 0,
                                         "superseded": 0, "unknown": 0}
+
+
+def _foreign(receipt: Dict[str, Any]) -> Dict[str, Any]:
+    return dict(receipt, project_id="other-project")
+
+
+def test_task_failed_alone_is_a_failure_whatever_its_status():
+    for status in ("failure", "done"):
+        failed = {"event_type": "task_failed", "receipt_kind": "dispatch", "dispatch_id": "d1",
+                  "status": status, "timestamp": TS}
+        result = _run(_foreign(dict(failed, dispatch_id="d2")), failed)
+        assert result["verdict_counts"]["reject"] == 1, status
+        assert [o["dispatch_id"] for o in result["outcomes"]] == ["d1"], status
+
+
+def test_task_failed_after_a_success_overturns_it():
+    failed = {"event_type": "task_failed", "receipt_kind": "dispatch", "dispatch_id": "d1",
+              "status": "failure", "timestamp": TS}
+    result = _run(_a("d1", "success"), _b("d1"), failed, _foreign(_a("d1", "success")))
+    assert result["verdict_counts"]["reject"] == 1
+
+
+def test_task_timeout_terminal_is_a_failure_and_pending_is_no_outcome():
+    timeout = {"event_type": "task_timeout", "receipt_kind": "dispatch", "dispatch_id": "d1",
+               "timestamp": TS}
+    for status in ("timeout", "stalled", ""):
+        result = _run(_foreign(dict(timeout, status="no_confirmation")),
+                      dict(timeout, status=status))
+        assert result["verdict_counts"]["reject"] == 1, status
+    pending = dict(timeout, status="no_confirmation")
+    assert _run(pending)["verdict_counts"]["unknown"] == 1
+    after_success = _run(_a("d1", "success"), _b("d1"), pending,
+                         _foreign(dict(timeout, status="timeout")))
+    assert after_success["verdict_counts"]["accept"] == 1
+
+
+def test_task_completed_is_an_outcome_receipt():
+    completed = {"event_type": "task_completed", "receipt_kind": "dispatch", "dispatch_id": "d1",
+                 "status": "failed", "timestamp": TS}
+    result = _run(_foreign(dict(completed, status="success")), completed)
+    assert result["verdict_counts"]["reject"] == 1
+
+
+def test_pr_zero_is_no_pr_number():
+    foreign_owner = _foreign(_a("d2", "success", pr_id="0"))
+    result = _run(
+        foreign_owner,
+        _a("d1", "success", pr_id="0"), _b("d1"),
+        _a("codex-gate-pr0-123", "failure"),
+        {"event_type": "review_gate_result", "dispatch_id": "unknown", "gate": "kimi_gate",
+         "pr_id": "#0", "status": "completed", "timestamp": TS},
+    )
+    assert _outcome(result, "d1")["evidence"] == []
+    assert result["unlinked_gate_evidence"] == 1
+    assert result["noise_counts"]["missing_dispatch_id"] == 1
+    for zero in (0, "0", "#0"):
+        refused = {"event_type": "pr_merge_refused", "dispatch_id": "d1", "pr_number": zero,
+                   "status": "blocked", "timestamp": TS}
+        merged = {"event_type": "pr_merged", "dispatch_id": "d1", "pr_number": zero,
+                  "timestamp": TS}
+        blocked = _run(_a("d1", "success"), _b("d1"), refused, merged, _foreign(merged))
+        assert blocked["verdict_counts"]["investigate"] == 1, zero
+        assert _outcome(blocked, "d1")["blocking"][0]["pr"] is None, zero
+
+
+def test_pr_owner_is_the_first_work_dispatch_that_names_the_pr():
+    result = _run(
+        _foreign(_a("d1-ff", "success", pr_id="42")),
+        _a("d1", "success", pr_id="42"), _b("d1"),
+        _a("kimi-gate-pr42-1790000000", "failure"),
+        _a("d1-ff", "success", pr_id="42", branch="dispatch/d1-ff"), _b("d1-ff"),
+        {"event_type": "review_gate_result", "dispatch_id": "", "gate": "codex_gate",
+         "pr_id": "42", "status": "completed", "timestamp": TS},
+    )
+    assert [e["dispatch_id"] for e in _outcome(result, "d1")["evidence"]] == [
+        "kimi-gate-pr42-1790000000", ""]
+    assert _outcome(result, "d1-ff")["evidence"] == []
