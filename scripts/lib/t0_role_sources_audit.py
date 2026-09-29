@@ -10,6 +10,8 @@ instructing T0 to use it.
 Findings (one per line on stdout, exit 1 when any):
 
   SCRIPT-MISSING       a `*.py` / `*.sh` the text names does not resolve
+  SCRIPT-OUTSIDE-FABRIC  the name is an absolute path, or it only resolves
+                       (via `..` or a symlink) to a file outside the fabric
   SUBCOMMAND-MISSING   `vnx <cmd> [<sub>]` (inline, or a command line inside a
                        fenced block) or `<script>.py <sub>` names a subcommand
                        the code that handles it does not define
@@ -31,7 +33,7 @@ from __future__ import annotations
 import re
 import sys
 from pathlib import Path
-from typing import Iterable, List, Optional, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 MANIFEST_REL = "scripts/lib/t0_role_state_writers.txt"
 ROLE_REL = ".claude/terminals/T0/role-orchestrator.md"
@@ -42,6 +44,8 @@ DOC_SOURCES = ("docs/core/DISPATCH_RULES.md",)
 VNX_GROUPS = frozenset({"objective", "horizon", "deliverable", "role", "pool", "skills", "runtime"})
 
 SCRIPT_TOKEN = re.compile(r"(?<![\w$/.~-])([A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:py|sh))\b")
+# An absolute path; the `:` keeps the `//host/...` of a URL out.
+ABS_SCRIPT_TOKEN = re.compile(r"(?<![\w$/.~:-])(/[A-Za-z0-9_./-]+\.(?:py|sh))\b")
 PY_SUBCOMMAND = re.compile(r"(scripts/[A-Za-z0-9_./-]+\.py)[ \t]+([a-z][a-z0-9_-]*)\b")
 VNX_COMMAND = re.compile(r"`vnx ([a-z][a-z0-9_-]*)(?: ([a-z][a-z0-9_-]*))?")
 VNX_FENCED_LINE = re.compile(r"^[ \t]*(?:\$[ \t]+)?vnx ([a-z][a-z0-9_-]*)(?: ([a-z][a-z0-9_-]*))?")
@@ -62,27 +66,67 @@ def _read(path: Path) -> str:
         return ""
 
 
-def _script_index(fabric: Path) -> Tuple[Set[str], Set[str]]:
-    """Return (repo-relative paths, basenames) of every script the fabric holds."""
-    paths: Set[str] = set()
-    names: Set[str] = set()
+def _inside(fabric: Path, cand: Path) -> bool:
+    """`cand` resolves (symlinks and `..` followed) to a file under `fabric`."""
+    try:
+        return cand.resolve().is_relative_to(fabric.resolve())
+    except (OSError, RuntimeError):
+        return False
+
+
+def _fabric_text(fabric: Path, rel: str) -> str:
+    """Text of `fabric/rel`, or "" when that is no file inside the fabric."""
+    path = fabric / rel
+    return _read(path) if path.is_file() and _inside(fabric, path) else ""
+
+
+def _script_index(fabric: Path) -> Tuple[Dict[str, Path], Set[str]]:
+    """Return ({basename: first path inside the fabric}, basenames that only
+    exist as a link out of the fabric) for every script under SCRIPT_DIRS."""
+    inside: Dict[str, Path] = {}
+    outside: Set[str] = set()
     for d in SCRIPT_DIRS:
         base = fabric / d
         if not base.is_dir():
             continue
-        for p in base.rglob("*"):
-            if p.suffix in (".py", ".sh") and p.is_file():
-                paths.add(p.relative_to(fabric).as_posix())
-                names.add(p.name)
-    return paths, names
+        for p in sorted(base.rglob("*")):
+            if p.suffix not in (".py", ".sh") or not p.is_file():
+                continue
+            if _inside(fabric, p):
+                inside.setdefault(p.name, p)
+            else:
+                outside.add(p.name)
+    return inside, outside - set(inside)
 
 
-def _script_exists(token: str, paths: Set[str], names: Set[str], fabric: Path) -> bool:
+def _resolve_script(fabric: Path, token: str, index: Tuple[Dict[str, Path], Set[str]]) -> Tuple[Optional[Path], bool]:
+    """(the file `token` names inside the fabric, whether it only resolves outside).
+
+    A token is joined to the fabric root, so `..` or a symlink could land on a
+    file elsewhere; that file never counts as the fabric's own. An absolute
+    token is outside by definition: it is bound to one machine.
+    """
+    if token.startswith("/"):
+        return None, True
+    outside = False
+    for prefix in ("", "scripts", ".claude"):
+        cand = fabric / prefix / token
+        if cand.is_file():
+            if _inside(fabric, cand):
+                return cand, False
+            outside = True
     if "/" not in token:
-        return token in names
-    return any(
-        (fabric / prefix / token).is_file() for prefix in ("", ".claude", "scripts")
-    ) or token in paths
+        names, links_out = index
+        if token in names:
+            return names[token], False
+        outside = outside or token in links_out
+    return None, outside
+
+
+def _script_finding(source: str, token: str, outside: bool, fabric: Path) -> str:
+    if outside:
+        return f"SCRIPT-OUTSIDE-FABRIC: {source} names '{token}' but it resolves outside {fabric}"
+    return f"SCRIPT-MISSING: {source} names '{token}' but it does not exist under {fabric}"
 
 
 def _defines_word(text: str, word: str) -> bool:
@@ -97,10 +141,9 @@ def _has_case_label(text: str, word: str) -> bool:
 
 
 def _vnx_command_exists(fabric: Path, word: str) -> bool:
-    if (fabric / "scripts/commands" / f"{word}.sh").is_file():
-        return True
-    if (fabric / "scripts/commands" / f"{word.replace('-', '_')}.sh").is_file():
-        return True
+    for name in (word, word.replace("-", "_")):
+        if _fabric_text(fabric, f"scripts/commands/{name}.sh"):
+            return True
     return _has_case_label(_read(fabric / "bin/vnx"), word)
 
 
@@ -134,29 +177,16 @@ def _group_handlers(fabric: Path, group: str) -> List[str]:
     if re.search(r"\bcmd_%s\b" % re.escape(group.replace("-", "_")), branch):
         texts.append(_shell_functions(vnx_text, "cmd_" + group.replace("-", "_")))
     for rel in SCRIPT_REF.findall(branch):
-        texts.append(_read(fabric / "scripts" / rel))
+        texts.append(_fabric_text(fabric, "scripts/" + rel))
     for mod in MODULE_TOKEN.findall(branch):
-        texts.append(_read(fabric / "scripts/lib" / (mod.replace(".", "/") + ".py")))
+        texts.append(_fabric_text(fabric, "scripts/lib/" + mod.replace(".", "/") + ".py"))
     for name in (group, group.replace("-", "_")):
-        texts.append(_read(fabric / "scripts/commands" / f"{name}.sh"))
+        texts.append(_fabric_text(fabric, f"scripts/commands/{name}.sh"))
     return texts
 
 
 def _vnx_sub_exists(fabric: Path, group: str, word: str) -> bool:
     return any(_defines_word(t, word) for t in _group_handlers(fabric, group))
-
-
-def _resolve_script(fabric: Path, token: str) -> Path | None:
-    for prefix in ("", "scripts", ".claude"):
-        cand = fabric / prefix / token
-        if cand.is_file():
-            return cand
-    if "/" not in token:
-        for d in SCRIPT_DIRS:
-            hits = sorted((fabric / d).rglob(token)) if (fabric / d).is_dir() else []
-            if hits:
-                return hits[0]
-    return None
 
 
 def _fenced_vnx_commands(text: str) -> List[Tuple[str, str]]:
@@ -178,16 +208,18 @@ def _fenced_vnx_commands(text: str) -> List[Tuple[str, str]]:
 
 def check_text(text: str, source: str, fabric: Path) -> List[str]:
     findings: List[str] = []
-    paths, names = _script_index(fabric)
+    index = _script_index(fabric)
 
-    for token in sorted(set(SCRIPT_TOKEN.findall(text))):
-        if not _script_exists(token, paths, names, fabric):
-            findings.append(f"SCRIPT-MISSING: {source} names '{token}' but it does not exist under {fabric}")
+    for token in sorted(set(SCRIPT_TOKEN.findall(text)) | set(ABS_SCRIPT_TOKEN.findall(text))):
+        script, outside = _resolve_script(fabric, token, index)
+        if script is None:
+            findings.append(_script_finding(source, token, outside, fabric))
 
     for script_rel, sub in sorted(set(PY_SUBCOMMAND.findall(text))):
-        script = _resolve_script(fabric, script_rel)
+        script, outside = _resolve_script(fabric, script_rel, index)
         if script is None:
-            continue  # already reported as SCRIPT-MISSING
+            findings.append(_script_finding(source, script_rel, outside, fabric))
+            continue
         if not _defines_word(_read(script), sub):
             findings.append(
                 f"SUBCOMMAND-MISSING: {source} runs '{script_rel} {sub}' but {script_rel} defines no '{sub}'"
@@ -236,8 +268,8 @@ def check_state(text: str, source: str, fabric: Path, phrases: bool = True) -> L
         if target.split("#", 1)[0] not in named:
             continue  # this source does not rely on it
         writer_path = fabric / writer
-        if not writer_path.is_file():
-            findings.append(f"STATE-WRITER-GONE: {target}: writer {writer} does not exist")
+        if not writer_path.is_file() or not _inside(fabric, writer_path):
+            findings.append(f"STATE-WRITER-GONE: {target}: writer {writer} does not exist inside {fabric}")
         elif marker not in _read(writer_path):
             findings.append(f"STATE-WRITER-GONE: {target}: {writer} no longer contains {marker!r}")
         if phrases and phrase and phrase.lower() not in text.lower():

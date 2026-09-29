@@ -720,7 +720,7 @@ class TestRoleSourcesHealthy:
         """The shipped role is green at merge of D10."""
         r = _run_static(REPO)
         out = r.stdout + r.stderr
-        for code in ("SCRIPT-MISSING", "SUBCOMMAND-MISSING", "STATE-UNWRITTEN", "STATE-WRITER-GONE"):
+        for code in ("SCRIPT-MISSING", "SCRIPT-OUTSIDE-FABRIC", "SUBCOMMAND-MISSING", "STATE-UNWRITTEN", "STATE-WRITER-GONE"):
             assert code not in out, out
 
 
@@ -944,6 +944,102 @@ class TestFencedCommands:
     def test_fence_closes_so_later_prose_is_ignored(self, tmp_path):
         root = _make_fabric(tmp_path, FIXTURE_ROLE + "\n```\nvnx dispatch\n```\nvnx bestaatniet\n")
         assert _run_static(root).returncode == 0
+
+
+class TestScriptOutsideFabric:
+    """A script token only counts when it resolves inside the fabric (codex ff2).
+
+    The outside target is a second project next to the fabric, so a hit would
+    mean the audit read another project's file as the fabric's own.
+    """
+
+    def _other_project_script(self, tmp_path: Path) -> Path:
+        other = _make_fabric(tmp_path, name="other")
+        target = other / "scripts" / "outside.py"
+        target.write_text('sub.add_parser("pull")\n')
+        return target
+
+    def test_dotdot_token_leaving_the_fabric_is_flagged(self, tmp_path):
+        self._other_project_script(tmp_path)
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\nSee `scripts/../../other/scripts/outside.py`.\n")
+        r = _run_static(root)
+        assert r.returncode != 0, r.stdout
+        assert "SCRIPT-OUTSIDE-FABRIC" in r.stdout and "outside.py" in r.stdout
+
+    def test_dotdot_subcommand_target_outside_the_fabric_is_flagged(self, tmp_path):
+        self._other_project_script(tmp_path)
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\nRun `python3 scripts/../../other/scripts/outside.py pull`.\n")
+        r = _run_static(root)
+        assert r.returncode != 0, r.stdout
+        assert "SCRIPT-OUTSIDE-FABRIC" in r.stdout
+
+    def test_absolute_path_outside_the_fabric_is_flagged(self, tmp_path):
+        target = self._other_project_script(tmp_path)
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + f"\nRun `python3 {target}`.\n")
+        r = _run_static(root)
+        assert r.returncode != 0, r.stdout
+        assert "SCRIPT-OUTSIDE-FABRIC" in r.stdout and str(target) in r.stdout
+
+    def test_absolute_path_into_the_fabric_is_flagged_too(self, tmp_path):
+        """An absolute path is machine-bound even when it lands in the fabric."""
+        root = _make_fabric(tmp_path)
+        own = root / "scripts" / "receipt_query.py"
+        (root / ".claude" / "terminals" / "T0" / "role-orchestrator.md").write_text(
+            FIXTURE_ROLE + f"\nRun `python3 {own}`.\n"
+        )
+        r = _run_static(root)
+        assert r.returncode != 0, r.stdout
+        assert "SCRIPT-OUTSIDE-FABRIC" in r.stdout
+
+    def test_url_ending_in_a_script_is_not_an_absolute_path(self, tmp_path):
+        root = _make_fabric(
+            tmp_path, FIXTURE_ROLE + "\nSource: https://github.com/Vinix24/vnx-orchestration/blob/main/receipt_query.py\n"
+        )
+        assert _run_static(root).returncode == 0, _run_static(root).stdout
+
+    def test_symlink_in_scripts_pointing_outside_is_flagged(self, tmp_path):
+        target = self._other_project_script(tmp_path)
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\nSee `scripts/evil.py` and `evil_bare.py`.\n")
+        (root / "scripts" / "evil.py").symlink_to(target)
+        (root / "scripts" / "lib" / "evil_bare.py").symlink_to(target)
+        r = _run_static(root)
+        assert r.returncode != 0, r.stdout
+        assert "SCRIPT-OUTSIDE-FABRIC" in r.stdout
+        assert "'scripts/evil.py'" in r.stdout and "'evil_bare.py'" in r.stdout
+
+    def test_dotdot_token_staying_inside_the_fabric_is_clean(self, tmp_path):
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\nSee `scripts/lib/../receipt_query.py`.\n")
+        r = _run_static(root)
+        assert r.returncode == 0, r.stdout
+
+    def test_command_file_linking_outside_does_not_define_the_command(self, tmp_path):
+        """Second place: `scripts/commands/<cmd>.sh` found via a symlink out."""
+        target = self._other_project_script(tmp_path)
+        outside_cmd = target.parent / "snapshot.sh"
+        outside_cmd.write_text("cmd_snapshot() { :; }\n")
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\nThen `vnx snapshot`.\n")
+        (root / "scripts" / "commands").mkdir()
+        (root / "scripts" / "commands" / "snapshot.sh").symlink_to(outside_cmd)
+        r = _run_static(root)
+        assert r.returncode != 0, r.stdout
+        assert "SUBCOMMAND-MISSING" in r.stdout and "vnx snapshot" in r.stdout
+
+    def test_manifest_writer_linking_outside_is_gone(self, tmp_path):
+        """Second place: a manifest writer that is a symlink out of the fabric."""
+        other = _make_fabric(tmp_path, name="other")
+        root = _make_fabric(tmp_path)
+        writer = root / "scripts" / "open_items_manager.py"
+        writer.unlink()
+        writer.symlink_to(other / "scripts" / "open_items_manager.py")
+        r = _run_static(root)
+        assert r.returncode != 0, r.stdout
+        assert "STATE-WRITER-GONE" in r.stdout and "digest.json" in r.stdout
+
+    def test_symlink_inside_the_fabric_is_clean(self, tmp_path):
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\nSee `scripts/alias_query.py`.\n")
+        (root / "scripts" / "alias_query.py").symlink_to(root / "scripts" / "receipt_query.py")
+        r = _run_static(root)
+        assert r.returncode == 0, r.stdout
 
 
 class TestConsumerProject:
