@@ -133,3 +133,10 @@ def test_rows_are_newest_first_and_limited(tmp_path: Path) -> None:
     entries = [_line(f"d{i:02d}", "success", f"2026-09-29T{i:02d}:00:00Z") for i in range(10)]
     rows = _rows(tmp_path, entries, limit=3)
     assert [r["dispatch_id"] for r in rows] == ["d09", "d08", "d07"]
+
+
+def test_frozen_contract_invalid_batch_makes_no_row(tmp_path: Path) -> None:
+    old_ci = {"event_type": "report_contract_invalid", "dispatch_id": "d1", "status": "contract_invalid",
+              "project_id": PROJECT, "timestamp": "2026-01-01T00:00:00Z"}
+    rows = _rows(tmp_path, [old_ci, {**old_ci, "project_id": OTHER}])
+    assert rows == []

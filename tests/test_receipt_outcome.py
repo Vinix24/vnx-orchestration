@@ -304,7 +304,7 @@ def test_lane_result_reads_one_outcome_as_success_failure_or_unknown():
     done_unverified = {"decision": "investigate", "status": "done"}
     failed_unverified = {"decision": "investigate", "status": "failure"}
     assert [ro.lane_result(o) for o in (rejected, accepted, done_unverified, failed_unverified)] == [
-        "failure", "success", "success", "unknown"]
+        "failure", "success", "unknown", "unknown"]
     assert ro.lane_result({"decision": "superseded", "status": "success"}) == "unknown"
     assert ro.lane_result({"decision": "unknown", "status": None}) == "unknown"
 
@@ -313,4 +313,34 @@ def test_lane_result_on_a_folded_ledger():
     result = _run(_a("ok", "success"), _b("ok"), _a("bad", "failure"),
                   _a("lane-only", "success"), _b("lane-only", "unknown", {"method": "unknown"}))
     by_id = {o["dispatch_id"]: ro.lane_result(o) for o in result["outcomes"]}
-    assert by_id == {"ok": "success", "bad": "failure", "lane-only": "success"}
+    assert by_id == {"ok": "success", "bad": "failure", "lane-only": "unknown"}
+
+
+def _stale_ci(did: str, **kw: Any) -> Dict[str, Any]:
+    return {"event_type": "report_contract_invalid", "dispatch_id": did,
+            "status": "contract_invalid", "project_id": "vnx-dev", **kw}
+
+
+def test_frozen_contract_invalid_batch_is_noise_not_a_reject():
+    old = "2026-01-01T00:00:00Z"
+    result = _run(_a("d1", "success"), _b("d1"), _stale_ci("d1", timestamp=old),
+                  _stale_ci("frozen-only", timestamp=old))
+    assert _outcome(result, "d1")["decision"] == "accept"
+    assert {o["dispatch_id"] for o in result["outcomes"]} == {"d1"}
+    assert result["noise_counts"]["stale_contract_invalid"] == 2
+
+
+def test_fresh_ingested_at_beats_an_old_report_timestamp_on_contract_invalid():
+    fresh = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    result = _run(_a("d1", "success"), _b("d1"),
+                  _stale_ci("d1", timestamp="2026-01-01T00:00:00Z", ingested_at=fresh))
+    assert _outcome(result, "d1")["decision"] == "reject"
+
+
+def test_contract_invalid_window_uses_the_effective_timestamp_not_the_report_one():
+    fresh = datetime.now(tz=timezone.utc)
+    cutoff = fresh.replace(year=fresh.year - 1)
+    result = _run(_a("d1", "success", timestamp="2000-01-01T00:00:00Z"), _b("d1", timestamp="2000-01-01T00:00:00Z"),
+                  _stale_ci("d1", timestamp="2000-01-01T00:00:00Z", ingested_at=fresh.isoformat()),
+                  cutoff=cutoff)
+    assert [o["dispatch_id"] for o in result["outcomes"]] == ["d1"]

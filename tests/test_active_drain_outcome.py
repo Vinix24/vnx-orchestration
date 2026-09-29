@@ -74,9 +74,9 @@ def test_writer_b_done_does_not_hide_a_lane_failure(tmp_path: Path) -> None:
     assert _index(tmp_path, [_a("d1", "failure"), _b("d1", "done")]) == {"d1": "failure"}
 
 
-def test_lane_success_with_unknown_verification_is_still_a_success(tmp_path: Path) -> None:
+def test_lane_success_with_unknown_verification_is_investigate_not_success(tmp_path: Path) -> None:
     receipts = [_a("d1", "success"), _b("d1", "unknown", {"method": "unknown"})]
-    assert _index(tmp_path, receipts) == {"d1": "success"}
+    assert _index(tmp_path, receipts) == {"d1": "investigate"}
 
 
 def test_contract_invalid_after_the_last_lane_status_is_a_failure(tmp_path: Path) -> None:
@@ -86,8 +86,8 @@ def test_contract_invalid_after_the_last_lane_status_is_a_failure(tmp_path: Path
     assert _index(tmp_path, [_a("d1", "success"), invalid]) == {"d1": "failure"}
 
 
-def test_unrecognised_lane_status_is_unknown(tmp_path: Path) -> None:
-    assert _index(tmp_path, [_a("d1", "bananas")]) == {"d1": "unknown"}
+def test_unrecognised_lane_status_is_investigate(tmp_path: Path) -> None:
+    assert _index(tmp_path, [_a("d1", "bananas")]) == {"d1": "investigate"}
 
 
 def test_foreign_project_with_a_colliding_id_never_leaks(tmp_path: Path) -> None:
@@ -115,6 +115,7 @@ def test_receipts_fold_in_file_name_order_not_directory_order(tmp_path: Path) ->
     data = _store(tmp_path)
     processed = data / "receipts" / "processed"
     (processed / "1780000002-d1-2.json").write_text(json.dumps(_a("d1", "success")), encoding="utf-8")
+    (processed / "1780000003-d1-3.json").write_text(json.dumps(_b("d1")), encoding="utf-8")
     (processed / "1780000001-d1-1.json").write_text(json.dumps(_a("d1", "failure")), encoding="utf-8")
     assert build_receipt_status_index(data / "receipts") == {"d1": "success"}
 
@@ -125,6 +126,7 @@ def test_malformed_and_non_dict_files_are_skipped(tmp_path: Path) -> None:
     (processed / "1780000001-bad-1.json").write_text("{not json", encoding="utf-8")
     (processed / "1780000002-list-2.json").write_text("[1, 2]", encoding="utf-8")
     _write(data, 3, _a("d1", "success"))
+    _write(data, 4, _b("d1"))
     assert build_receipt_status_index(data / "receipts") == {"d1": "success"}
 
 
@@ -159,3 +161,39 @@ def test_drain_leaves_a_young_dispatch_with_only_bookkeeping_alone(tmp_path: Pat
     _active(data, "d1", hours_old=0.1)
     _write(data, 0, {"event_type": "state_mutation", "dispatch_id": "d1", "project_id": PROJECT})
     assert [(r.dispatch_id, r.action) for r in drain_active(data)] == [("d1", "skipped")]
+
+
+def _fresh() -> str:
+    return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def test_drain_leaves_a_success_without_verification_in_active(tmp_path: Path) -> None:
+    data = _store(tmp_path)
+    _active(data, "d1")
+    _active(data, "d2")
+    for seq, receipt in enumerate([_a("d1", "success"), _b("d1", "unknown", {"method": "unknown"}),
+                                   _a("d1", "success", project_id=OTHER), _a("d2", "success"), _b("d2")]):
+        _write(data, seq, receipt)
+    results = {r.dispatch_id: r.action for r in drain_active(data)}
+    assert results == {"d1": "skipped", "d2": "completed"}
+    assert (data / "dispatches" / "active" / "d1").is_dir()
+
+
+def test_frozen_contract_invalid_does_not_dead_letter_an_active_dispatch(tmp_path: Path) -> None:
+    data = _store(tmp_path)
+    _active(data, "d1", hours_old=0.1)
+    old_ci = {"event_type": "report_contract_invalid", "dispatch_id": "d1", "status": "contract_invalid",
+              "project_id": PROJECT, "timestamp": "2026-01-01T00:00:00Z"}
+    _write(data, 0, old_ci)
+    _write(data, 1, {**old_ci, "project_id": OTHER})
+    assert build_receipt_status_index(data / "receipts") == {}
+    assert [(r.dispatch_id, r.action) for r in drain_active(data)] == [("d1", "skipped")]
+
+
+def test_fresh_contract_invalid_still_dead_letters_an_active_dispatch(tmp_path: Path) -> None:
+    data = _store(tmp_path)
+    _active(data, "d1", hours_old=0.1)
+    _write(data, 0, {"event_type": "report_contract_invalid", "dispatch_id": "d1",
+                     "status": "contract_invalid", "project_id": PROJECT,
+                     "timestamp": "2026-01-01T00:00:00Z", "ingested_at": _fresh()})
+    assert [(r.dispatch_id, r.action) for r in drain_active(data)] == [("d1", "dead_letter")]

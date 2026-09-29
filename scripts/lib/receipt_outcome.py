@@ -10,7 +10,9 @@ overwrite A's ``failure``. This is the one place that folds a dispatch's
 lines into one outcome (fabric-state-herstel D3):
 
 1. Noise out: ``source=pytest``, temp-dir ``report_path``, ``MagicMock``,
-   id missing/``unknown``/``?``, another ``project_id``. Never on lane.
+   id missing/``unknown``/``?``, another ``project_id``, and a frozen
+   contract_invalid batch (``contract_invalid_window`` is the one source of
+   "stale"). Never on lane.
 2. ``BOOKKEEPING_EVENT_TYPES`` are neither outcome nor evidence.
 3. Status: the last writer-A receipt in FILE order (ledger timestamps are not
    monotonic); a later contract_invalid event wins as reject. A retry under
@@ -45,7 +47,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from event_outcome_semantics import SUCCESS_STATUSES, classify_event_outcome
+from contract_invalid_window import contract_invalid_effective_timestamp, is_stale_contract_invalid
+from event_outcome_semantics import classify_event_outcome
 from receipt_verdict import compute_verdict
 
 # When the per-dispatch reading replaced the per-line stamp count: the auditable
@@ -113,6 +116,8 @@ def noise_reason(receipt: Dict[str, Any], project_id: str) -> Optional[str]:
         return "temp_report_path"
     if "MagicMock" in json.dumps(receipt, default=str):
         return "magicmock"
+    if receipt.get("event_type") in CONTRACT_INVALID_EVENT_TYPES and is_stale_contract_invalid(receipt):
+        return "stale_contract_invalid"
     return None
 
 
@@ -223,7 +228,12 @@ class _Window:
     def __call__(self, receipt: Dict[str, Any]) -> bool:
         if self.cutoff is None:
             return True
-        ts = _parse_ts(receipt.get("timestamp"))
+        # A contract_invalid line is dated by the processor's ``ingested_at``, the
+        # same clock the staleness rule uses, not by a timestamp the report carries.
+        stamp = (contract_invalid_effective_timestamp(receipt)
+                 if receipt.get("event_type") in CONTRACT_INVALID_EVENT_TYPES
+                 else receipt.get("timestamp"))
+        ts = _parse_ts(stamp)
         return ts is not None and ts >= self.cutoff
 
 
@@ -355,16 +365,14 @@ def lane_result(outcome: Dict[str, Any]) -> str:
     """``success``, ``failure`` or ``unknown``: what a reader that counts a
     dispatch or moves its work on takes from one outcome of ``summarize``.
 
-    ``reject`` is a failure and ``accept`` a success. ``investigate`` keeps the
-    lane's own status: missing verification or an open blocker asks a human to
-    look, it does not turn completed work into failed work. ``superseded`` and
-    ``unknown`` carry no result of their own.
+    ``reject`` is a failure and ``accept`` a success. ``investigate`` (missing
+    verification, an open blocker) is ``unknown``: a reader that moves work on
+    leaves it where it is for a human to look at, and a counter does not book
+    it as a success. ``superseded`` and ``unknown`` carry no result of their own.
     """
     decision = outcome.get("decision")
     if decision == "reject":
         return "failure"
     if decision == "accept":
-        return "success"
-    if decision == "investigate" and str(outcome.get("status") or "").strip().lower() in SUCCESS_STATUSES:
         return "success"
     return "unknown"

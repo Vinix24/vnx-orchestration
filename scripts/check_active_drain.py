@@ -122,7 +122,10 @@ def _read_processed(processed: Path) -> list[dict]:
 
 
 def build_receipt_status_index(receipts_dir: Path) -> dict[str, str]:
-    """Map dispatch_id → \"success\" | \"failure\" | \"unknown\", one per dispatch.
+    """Map dispatch_id → \"success\" | \"failure\" | \"unknown\" | \"investigate\", one per dispatch.
+
+    ``investigate`` (missing verification, an open blocker) is not a result: the
+    dispatch stays in active/ until a human has looked.
 
     ``receipts_dir`` is ``<data dir>/receipts``. A dispatch without an outcome
     receipt (only bookkeeping, noise or another project's lines) has no entry.
@@ -136,7 +139,8 @@ def build_receipt_status_index(receipts_dir: Path) -> dict[str, str]:
     if not project_id:
         receipts = [{k: v for k, v in r.items() if k != "project_id"} for r in receipts]
     summary = summarize_outcomes(receipts, project_id=project_id or _UNSCOPED_PROJECT)
-    return {o["dispatch_id"]: lane_result(o) for o in summary["outcomes"]}
+    return {o["dispatch_id"]: "investigate" if o["decision"] == "investigate" else lane_result(o)
+            for o in summary["outcomes"]}
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +206,14 @@ def drain_one(
         receipt_status = "success"
     else:
         receipt_status = None
+
+    if receipt_status == "investigate":
+        return DrainResult(
+            dispatch_id=entry.dispatch_id,
+            action="skipped",
+            reason="outcome needs a human look (missing verification or open blocker)",
+            dry_run=dry_run,
+        )
 
     if receipt_status is not None:
         if receipt_status == "failure":

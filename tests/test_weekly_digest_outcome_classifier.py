@@ -35,6 +35,7 @@ _NOW = datetime.now(tz=timezone.utc)
 _RECENT = _iso(_NOW - timedelta(hours=1))
 _RECENT2 = _iso(_NOW - timedelta(minutes=30))
 _OLD = _iso(_NOW - timedelta(days=10))
+_FROZEN = _iso(_NOW - timedelta(days=20))
 
 
 def _a(did: str, status: str, ts: str = _RECENT, **kw: Any) -> Dict[str, Any]:
@@ -93,10 +94,10 @@ def test_contract_invalid_after_the_last_lane_status_is_a_failure(tmp_path, monk
     assert _counts(out) == (1, 0, 1, 0)
 
 
-def test_lane_success_without_verification_still_counts_as_success(tmp_path, monkeypatch):
+def test_lane_success_without_verification_counts_as_unknown_not_success(tmp_path, monkeypatch):
     out = _outcomes([_a("d1", "success"), _b("d1", "unknown", verification={"method": "unknown"})],
                     tmp_path=tmp_path, monkeypatch=monkeypatch)
-    assert _counts(out) == (1, 1, 0, 0)
+    assert _counts(out) == (1, 0, 0, 1)
     assert out["verdict_counts"]["investigate"] == 1
 
 
@@ -115,7 +116,7 @@ def test_lines_without_a_dispatch_id_are_noise(tmp_path, monkeypatch):
 
 
 def test_test_noise_is_not_counted(tmp_path, monkeypatch):
-    out = _outcomes([_a("real", "success"),
+    out = _outcomes([_a("real", "success"), _b("real"),
                      _a("leak-a", "success", source="pytest"),
                      _a("leak-b", "success", report_path="/var/folders/xx/r.md"),
                      _a("leak-c", "failure", title="<MagicMock id='4'>")],
@@ -125,13 +126,13 @@ def test_test_noise_is_not_counted(tmp_path, monkeypatch):
 
 def test_foreign_project_with_a_colliding_id_never_leaks(tmp_path, monkeypatch):
     out = _outcomes([_a("shared", "failure", project_id=OTHER), _a("shared", "failure", project_id=OTHER),
-                     _a("mine", "success")], tmp_path=tmp_path, monkeypatch=monkeypatch)
+                     _a("mine", "success"), _b("mine")], tmp_path=tmp_path, monkeypatch=monkeypatch)
     assert _counts(out) == (1, 1, 0, 0)
 
 
 def test_window_reports_dispatches_touched_inside_it(tmp_path, monkeypatch):
-    out = _outcomes([_a("old", "success", _OLD), _a("retried", "failure", _OLD),
-                     _a("retried", "success", _RECENT)], tmp_path=tmp_path, monkeypatch=monkeypatch, days=7)
+    out = _outcomes([_a("old", "success", _OLD), _b("old", ts=_OLD), _a("retried", "failure", _OLD),
+                     _a("retried", "success", _RECENT), _b("retried", ts=_RECENT)], tmp_path=tmp_path, monkeypatch=monkeypatch, days=7)
     assert _counts(out) == (1, 1, 0, 0)
 
 
@@ -168,3 +169,19 @@ def test_empty_and_missing_ledger(tmp_path, monkeypatch):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+def test_frozen_contract_invalid_batch_is_not_counted(tmp_path, monkeypatch):
+    old_ci = {"event_type": "report_contract_invalid", "dispatch_id": "frozen", "status": "contract_invalid",
+              "project_id": PROJECT, "timestamp": _FROZEN, "ingested_at": _FROZEN}
+    out = _outcomes([old_ci, {**old_ci, "project_id": OTHER}, _a("d1", "success"), _b("d1")],
+                    tmp_path=tmp_path, monkeypatch=monkeypatch, days=30)
+    assert _counts(out) == (1, 1, 0, 0)
+
+
+def test_fresh_contract_invalid_with_an_old_report_timestamp_is_counted(tmp_path, monkeypatch):
+    ci = {"event_type": "report_contract_invalid", "dispatch_id": "d1", "status": "contract_invalid",
+          "project_id": PROJECT, "timestamp": _iso(_NOW - timedelta(days=30)), "ingested_at": _RECENT}
+    out = _outcomes([ci, {**ci, "project_id": OTHER, "dispatch_id": "d1"}],
+                    tmp_path=tmp_path, monkeypatch=monkeypatch, days=7)
+    assert _counts(out) == (1, 0, 1, 0)

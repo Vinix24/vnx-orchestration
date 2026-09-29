@@ -61,21 +61,8 @@ def _project_id() -> str:
         return ""
 
 
-def collect_metrics(days: int = 7) -> dict:
-    """Aggregate intelligence data for the last N days."""
-    since = (datetime.now(tz=_UTC) - timedelta(days=days)).strftime("%Y-%m-%d")
-    metrics: dict = {
-        "patterns_learned": 0,
-        "top_patterns": [],
-        "antipatterns_active": 0,
-        "top_antipatterns": [],
-        "avg_success_confidence": None,
-        "dispatch_outcomes": {"total": 0, "success": 0, "failure": 0, "unknown": 0},
-        "pending_suggestions": 0,
-        "accepted_suggestions": 0,
-    }
-
-    # --- DB metrics ---
+def _collect_db_metrics(metrics: dict, since: str) -> None:
+    """Fill the pattern and antipattern metrics from the intelligence DB."""
     if DB_PATH.exists():
         try:
             con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
@@ -126,6 +113,9 @@ def collect_metrics(days: int = 7) -> dict:
         except sqlite3.Error as e:
             log.debug("Failed to read intelligence DB metrics: %s", e)
 
+
+def _collect_receipt_outcomes(metrics: dict, since: str) -> None:
+    """Fill dispatch_outcomes: one outcome per dispatch from receipt_outcome."""
     # --- Receipts outcomes ---
     # One outcome per dispatch from receipt_outcome (fabric-state-herstel D3/D4a):
     # bookkeeping, test noise and other projects are out, a dispatch that wrote
@@ -158,7 +148,9 @@ def collect_metrics(days: int = 7) -> dict:
             outcomes[lane_result(outcome)] += 1
         outcomes["verdict_counts"] = summary["verdict_counts"]
 
-    # --- Pending suggestions ---
+
+def _collect_pending_suggestions(metrics: dict) -> None:
+    """Fill the pending and accepted suggestion counts."""
     if PENDING_PATH.exists():
         try:
             data = json.loads(PENDING_PATH.read_text(encoding="utf-8"))
@@ -167,6 +159,25 @@ def collect_metrics(days: int = 7) -> dict:
             metrics["accepted_suggestions"] = sum(1 for e in edits if e.get("status") == "accepted")
         except (json.JSONDecodeError, OSError):
             pass
+
+
+def collect_metrics(days: int = 7) -> dict:
+    """Aggregate intelligence data for the last N days."""
+    since = (datetime.now(tz=_UTC) - timedelta(days=days)).strftime("%Y-%m-%d")
+    metrics: dict = {
+        "patterns_learned": 0,
+        "top_patterns": [],
+        "antipatterns_active": 0,
+        "top_antipatterns": [],
+        "avg_success_confidence": None,
+        "dispatch_outcomes": {"total": 0, "success": 0, "failure": 0, "unknown": 0},
+        "pending_suggestions": 0,
+        "accepted_suggestions": 0,
+    }
+
+    _collect_db_metrics(metrics, since)
+    _collect_receipt_outcomes(metrics, since)
+    _collect_pending_suggestions(metrics)
 
     return metrics
 

@@ -86,7 +86,9 @@ def _make_receipt(
     """Processed receipt with the given status."""
     receipt = data / "receipts" / "processed" / f"receipt-{pid}-{dispatch_id[:12]}.json"
     receipt.write_text(
-        json.dumps({"dispatch_id": dispatch_id, "event_type": "task_complete", "status": status}),
+        json.dumps({"dispatch_id": dispatch_id, "event_type": "task_complete", "status": status,
+                    "verification": {"method": "pytest", "tests_run": 3, "tests_passed": 3,
+                                     "tests_failed": 0}}),
         encoding="utf-8",
     )
     return receipt
