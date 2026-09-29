@@ -1722,19 +1722,53 @@ def _live_work_unavailable(reason: str, *, read_error: bool) -> Dict[str, Any]:
     return {"available": False, "reason": reason, "read_error": read_error}
 
 
+# Without these the read is unscoped (project_id, ADR-007) or has nothing to
+# classify: a store lacking one is pre-migration and live_work is unavailable.
+_LIVE_WORK_REQUIRED_COLUMNS = ("dispatch_id", "state", "project_id")
+# Selected when present, NULL otherwise. claimed_at arrives only with
+# migration 0026 (website-vincentvandeth had none on 29-09); the others are in
+# the base schema but a legacy table without them still has live work.
+_LIVE_WORK_OPTIONAL_COLUMNS = ("track", "gate", "created_at", "updated_at", "claimed_at")
+
+
+class LiveWorkSchemaError(Exception):
+    """The ``dispatches`` table lacks a column live_work cannot do without."""
+
+    def __init__(self, missing: List[str], table_exists: bool = True) -> None:
+        self.missing = missing
+        super().__init__(
+            f"dispatches lacks required column(s): {', '.join(missing)}"
+            if table_exists else "no dispatches table"
+        )
+
+
 def _read_in_flight_rows(db_path: Path, project_id: str, states: List[str]) -> List[tuple]:
-    """In-flight ``dispatches`` rows of *project_id*, newest first. Raises sqlite3.Error."""
-    placeholders = ",".join("?" for _ in states)
+    """In-flight ``dispatches`` rows of *project_id*, newest first.
+
+    Each row is ``(dispatch_id, state, track, gate, created_at, updated_at,
+    claimed_at)``; an optional column the table does not have reads as None.
+    Raises LiveWorkSchemaError for a missing required column, sqlite3.Error
+    for a read that fails.
+    """
     conn = sqlite3.connect(
         f"file:{db_path}?mode=ro", uri=True,
         timeout=_LIVE_WORK_DB_BUSY_TIMEOUT_MS / 1000,
     )
     try:
         conn.execute(f"PRAGMA busy_timeout = {_LIVE_WORK_DB_BUSY_TIMEOUT_MS}")
+        present = {row[1] for row in conn.execute("PRAGMA table_info(dispatches)")}
+        missing = [c for c in _LIVE_WORK_REQUIRED_COLUMNS if c not in present]
+        if missing:
+            raise LiveWorkSchemaError(missing, table_exists=bool(present))
+        select = ", ".join(
+            [*_LIVE_WORK_REQUIRED_COLUMNS[:2]]
+            + [c if c in present else f"NULL AS {c}" for c in _LIVE_WORK_OPTIONAL_COLUMNS]
+        )
+        order = "created_at DESC" if "created_at" in present else "rowid DESC"
+        placeholders = ",".join("?" for _ in states)
         return conn.execute(
-            "SELECT dispatch_id, state, track, gate, created_at, updated_at, claimed_at"
-            f" FROM dispatches WHERE project_id = ? AND state IN ({placeholders})"
-            " ORDER BY created_at DESC",
+            f"SELECT {select} FROM dispatches"
+            f" WHERE project_id = ? AND state IN ({placeholders}) ORDER BY {order}",
             (project_id, *states),
         ).fetchall()
     finally:
@@ -1830,6 +1864,8 @@ def _build_live_work(
     states = sorted(IN_FLIGHT_DISPATCH_STATES)
     try:
         rows = _read_in_flight_rows(db_path, project_id, states)
+    except LiveWorkSchemaError as exc:
+        return _live_work_unavailable(f"premigration: {exc}", read_error=False)
     except sqlite3.Error as exc:
         kind = _classify_db_error(exc)
         return _live_work_unavailable(

@@ -365,6 +365,82 @@ def test_malformed_db_is_a_read_error(tmp_path):
     assert section["read_error"] is True
 
 
+# ---------------------------------------------------------------------------
+# ff6: claimed_at comes with migration 0026 and is optional. A store without
+# that migration (website-vincentvandeth, measured 29-09) still has live work.
+# ---------------------------------------------------------------------------
+
+
+def _store_without_0026(tmp_path: Path) -> Path:
+    """Canonical multi-tenant dispatches table, migration 0026 never applied."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    with sqlite3.connect(str(state_dir / "runtime_coordination.db")) as conn:
+        conn.execute(dispatches_ddl())
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(dispatches)")}
+        assert "claimed_at" not in cols
+        started = _iso(datetime.now(timezone.utc) - timedelta(minutes=5))
+        for project_id in (PROJECT_A, PROJECT_B):
+            conn.execute(
+                "INSERT INTO dispatches (dispatch_id, project_id, state, attempt_count,"
+                " created_at, updated_at) VALUES (?, ?, 'running', 0, ?, ?)",
+                ("ff6-collide", project_id, started, started),
+            )
+    return state_dir
+
+
+def test_store_without_claim_migration_still_reads_live_work(tmp_path, held_locks):
+    state_dir = _store_without_0026(tmp_path)
+    held_locks.append(_HeldFlock(state_dir, "ff6-collide"))
+
+    section = bts._build_live_work(state_dir, PROJECT_A, {"open_prs": []})
+
+    assert section["available"] is True, section.get("reason")
+    assert _ids(section["live"]) == ["ff6-collide"]
+    assert section["counts"]["live"] == 1
+    # Project B's row under the same id never shows up in A's section.
+    assert sum(section["counts"].values()) == 1
+    rows = bts._read_in_flight_rows(
+        state_dir / "runtime_coordination.db", PROJECT_A, sorted(section["in_flight_states"]),
+    )
+    assert len(rows) == 1
+    assert rows[0][0] == "ff6-collide"
+    assert rows[0][-1] is None  # claimed_at: no column, NULL in its place
+
+
+def test_store_without_project_id_column_names_the_missing_column(tmp_path):
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    with sqlite3.connect(str(state_dir / "runtime_coordination.db")) as conn:
+        conn.execute(
+            "CREATE TABLE dispatches (dispatch_id TEXT, state TEXT, track TEXT,"
+            " gate TEXT, created_at TEXT, updated_at TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO dispatches (dispatch_id, state, created_at, updated_at)"
+            " VALUES ('ff6-noproj', 'running', '2026-09-29T10:00:00Z', '2026-09-29T10:00:00Z')"
+        )
+
+    section = bts._build_live_work(state_dir, PROJECT_A, {"open_prs": []})
+
+    assert section["available"] is False
+    assert section["read_error"] is False
+    assert "dispatches lacks required column(s): project_id" in section["reason"]
+
+
+def test_store_without_dispatches_table_says_so(tmp_path):
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    with sqlite3.connect(str(state_dir / "runtime_coordination.db")) as conn:
+        conn.execute("CREATE TABLE unrelated (x TEXT)")
+
+    section = bts._build_live_work(state_dir, PROJECT_A, {"open_prs": []})
+
+    assert section["available"] is False
+    assert section["read_error"] is False
+    assert section["reason"] == "premigration: no dispatches table"
+
+
 def test_index_drops_terminals_active_and_active_dispatches(tmp_path, monkeypatch):
     state_dir, dispatch_dir = _env(tmp_path, monkeypatch)
 

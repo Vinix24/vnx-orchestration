@@ -254,12 +254,15 @@ _PROJECT_B = "fshff5-bravo"
 
 
 def _built_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, project_id: str,
-                 unreadable: str | None = None, missing: str | None = None) -> dict:
+                 unreadable: str | None = None, missing: str | None = None,
+                 claim_migration: bool = True, running: tuple = ()) -> dict:
     """build_t0_state for an idle, otherwise healthy store of ``project_id``.
 
     Each project gets its own store under ``tmp_path/<project_id>`` with the
     multi-tenant dispatches schema; ``unreadable`` names the dispatches/ subdirectory
     whose listing raises PermissionError, ``missing`` one that is removed.
+    ``claim_migration=False`` leaves out migration 0026 (no ``claimed_at``);
+    ``running`` lists ``(dispatch_id, project_id)`` rows in state running.
     """
     root = tmp_path / project_id
     state_dir = root / "state"
@@ -272,7 +275,15 @@ def _built_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, project_id: st
         (dispatch_dir / missing).rmdir()
     with sqlite3.connect(str(state_dir / "runtime_coordination.db")) as conn:
         conn.execute(dispatches_ddl())
-        conn.execute("ALTER TABLE dispatches ADD COLUMN claimed_at TEXT")
+        if claim_migration:
+            conn.execute("ALTER TABLE dispatches ADD COLUMN claimed_at TEXT")
+        for dispatch_id, row_project in running:
+            conn.execute(
+                "INSERT INTO dispatches (dispatch_id, project_id, state, attempt_count,"
+                " created_at, updated_at) VALUES (?, ?, 'running', 0,"
+                " '2026-09-29T08:00:00Z', '2026-09-29T08:00:00Z')",
+                (dispatch_id, row_project),
+            )
     monkeypatch.setenv("VNX_PROJECT_ID", project_id)
     monkeypatch.setattr(bts, "_build_pr_queue_section", lambda _sd: {"open_prs": []})
     monkeypatch.setattr(bts, "_init_and_check_db", lambda _sd: True)
@@ -337,3 +348,29 @@ class TestGuardOnUnreadableQueueDirs:
         assert "pending_unmeasured_reason" not in state["queues"]
         result = _run_guard(tmp_path / "guard", state)
         assert result.returncode == 0, result.stdout + result.stderr
+
+
+class TestGuardOnStoreWithoutClaimMigration:
+    """ff6: a store without migration 0026 has no ``claimed_at``. Its live
+    work must still reach the guard, and an idle store must still be GO."""
+
+    def test_running_row_without_claimed_at_is_wait_on_the_row(self, tmp_path, monkeypatch):
+        state = _built_state(
+            tmp_path, monkeypatch, _PROJECT_A, claim_migration=False,
+            running=(("ff6-guard", _PROJECT_A), ("ff6-guard", _PROJECT_B)),
+        )
+        result = _run_guard(tmp_path / "guard", state, "json")
+        assert "Missing state" not in result.stderr, result.stderr
+        payload = json.loads(result.stdout)
+        assert payload["decision"] == "WAIT"
+        assert payload["reason"] == "busy: live_work live=0 starting=0 stale=1 unmeasured=0"
+        assert [i["dispatch_id"] for i in payload["live_work"]["stale"]] == ["ff6-guard"]
+
+    def test_idle_store_without_claimed_at_is_go(self, tmp_path, monkeypatch):
+        state = _built_state(
+            tmp_path, monkeypatch, _PROJECT_A, claim_migration=False,
+            running=(("ff6-guard", _PROJECT_B),),
+        )
+        result = _run_guard(tmp_path / "guard", state)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "GO: safe to dispatch" in result.stdout
