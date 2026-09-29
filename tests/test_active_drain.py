@@ -443,11 +443,25 @@ class TestStatusAwareDrain:
         # dispatch directory must be removed from active/
         assert not d.exists()
 
-    def test_timeout_receipt_routes_to_dead_letter(self, tmp_path: Path) -> None:
+    def test_timeout_status_on_a_completion_stays_in_active_for_a_human(self, tmp_path: Path) -> None:
+        """A completion with status ``timeout`` carries no outcome signal
+        (event_outcome_semantics, D3b): investigate, not a failure and not done."""
         data = _make_data_dir(tmp_path)
         did = "20260429-timeout-dispatch"
         _make_active_dispatch(data, did, hours_old=2.0)
         _make_receipt(data, did, pid=31, status="timeout")
+
+        results = drain_active(data_dir=data, older_than_hours=1.0, dry_run=False)
+        assert results[0].action == "skipped"
+        assert (data / "dispatches" / "active" / did).is_dir()
+
+    def test_terminal_task_timeout_routes_to_dead_letter(self, tmp_path: Path) -> None:
+        data = _make_data_dir(tmp_path)
+        did = "20260429-task-timeout-dispatch"
+        _make_active_dispatch(data, did, hours_old=2.0)
+        receipt = data / "receipts" / "processed" / "177633-task-timeout-33.json"
+        receipt.write_text(json.dumps({"dispatch_id": did, "event_type": "task_timeout",
+                                       "status": "timeout"}), encoding="utf-8")
 
         results = drain_active(data_dir=data, older_than_hours=1.0, dry_run=False)
         assert results[0].action == "dead_letter"
