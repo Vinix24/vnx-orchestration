@@ -76,6 +76,25 @@ _FUNC_START_RE = re.compile(r'^start_all\s*\(\)\s*\{')
 _IF_RE = re.compile(r'^if\b')
 
 
+# Daemons that ``start_all()`` still launches but that only the tmux era needed:
+# dispatching, ACK tracking and popups all live in the headless door now, the
+# dashboard generator is a convenience view, and only ``receipt_processor``
+# (plus the launchd jobs measured separately) is still owed. Their absence is
+# the normal state, so they must not floor ``system_health`` at degraded.
+# ``read_daemon_register`` keeps listing them (it documents what the supervisor
+# starts); only the liveness expectation drops them.
+NOT_EXPECTED_DAEMONS = frozenset({
+    "dispatcher",
+    "smart_tap",
+    "heartbeat_ack_monitor",
+    "queue_watcher",
+    "state_manager",
+    "intelligence_daemon",
+    "recommendations_engine",
+    "dashboard",
+})
+
+
 @dataclass(frozen=True)
 class DaemonSpec:
     """One daemon as declared by ``start_all()``.
@@ -215,10 +234,16 @@ def measure_daemon_liveness(
     processes and nothing says so" case this dispatch closes), ``"unknown"``
     when liveness could not be measured at all (psutil unavailable, or
     process enumeration itself raised — never silently reported as "ok").
+
+    With ``register=None`` the expectation is the supervisor's register minus
+    ``NOT_EXPECTED_DAEMONS``; an explicit ``register`` is measured as given.
     """
     if register is None:
         try:
-            register = read_daemon_register(supervisor_script)
+            register = tuple(
+                spec for spec in read_daemon_register(supervisor_script)
+                if spec.name not in NOT_EXPECTED_DAEMONS
+            )
         except (OSError, ValueError) as exc:
             return {"overall": "unknown", "daemons": {}, "reason": f"register unreadable: {exc}"}
 
@@ -281,4 +306,4 @@ def measure_daemon_liveness(
     return {"overall": "fail" if absent else "ok", "daemons": daemons}
 
 
-__all__ = ["DaemonSpec", "read_daemon_register", "measure_daemon_liveness"]
+__all__ = ["DaemonSpec", "NOT_EXPECTED_DAEMONS", "read_daemon_register", "measure_daemon_liveness"]
