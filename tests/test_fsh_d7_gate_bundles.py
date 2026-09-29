@@ -357,11 +357,14 @@ def test_dry_run_invariant_every_move_has_a_matching_result_and_the_rest_stays(s
     data_dir, state_dir, _requests, results, _reports = store
     _b_data, b_state, *_ = other_store
     proven = {"kimi-gate-pr1-1790000010": "completed", "glm-gate-pr2-1790000011": "unavailable"}
+    # The proof this project's store actually carries: dispatch-id -> result sha.
+    seeded_results = {}
     for did, status in proven.items():
         _seed_gate_bundle(data_dir, did, text=f"prompt {did}\n")
+        seeded_results[did] = hashlib.sha256(f"prompt {did}\n".encode()).hexdigest()
         _seed_result(
             results, f"{did}.json", gate="x", status=status, dispatch_id=did,
-            final_prompt_sha256=hashlib.sha256(f"prompt {did}\n".encode()).hexdigest(),
+            final_prompt_sha256=seeded_results[did],
         )
     unproven = ["deepseek-gate-pr3-1790000012", "plan-gate-harness-xyz"]
     for did in unproven:
@@ -379,7 +382,6 @@ def test_dry_run_invariant_every_move_has_a_matching_result_and_the_rest_stays(s
     report = json.loads(buf.getvalue())
     by_id = {e["dispatch_id"]: e for e in report["entries"]}
 
-    index = dc._build_prompt_sha_index(state_dir)
     movers = [e for e in report["entries"] if e["action"].startswith("move-to-")]
     assert {e["dispatch_id"] for e in movers} == set(proven)
     for e in movers:
@@ -387,7 +389,7 @@ def test_dry_run_invariant_every_move_has_a_matching_result_and_the_rest_stays(s
             (_pending(data_dir, e["dispatch_id"]) / "final_prompt.md").read_bytes()
         ).hexdigest()
         assert e["final_prompt_sha256"] == bundle_sha
-        assert bundle_sha in index[e["dispatch_id"]], "a move without a gate result for the same sha"
+        assert seeded_results.get(e["dispatch_id"]) == bundle_sha, "a move without a gate result for the same sha"
     assert by_id["kimi-gate-pr1-1790000010"]["action"] == "move-to-completed"
     assert by_id["glm-gate-pr2-1790000011"]["action"] == "move-to-failed"
     for did in unproven:
