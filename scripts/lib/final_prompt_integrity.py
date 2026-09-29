@@ -312,6 +312,47 @@ def _default_bundle_dir(data_dir: "str | Path", dispatch_id: str) -> Path:
     return Path(data_dir) / "dispatches" / "pending" / dispatch_id
 
 
+def archive_gate_bundle(
+    dispatch_id: str,
+    data_dir: "str | Path",
+    *,
+    succeeded: bool,
+) -> Optional[Path]:
+    """Move a finished gate's bundle out of ``dispatches/pending/``.
+
+    A gate bundle holds only ``final_prompt.md`` and is never picked up by the
+    door, so nothing else ever clears it from ``pending/``. It moves to
+    ``completed/`` (or ``failed/``), the same places
+    :func:`final_prompt_sha_for_dispatch` already reads back. Moved, never
+    deleted: the bundle is sometimes the only local copy of the prompt.
+
+    Returns the new location, or None when there was nothing to move or the move
+    was refused (no bundle, unsafe id, destination already present, OS error).
+    Never raises: a finished gate must not fail over housekeeping.
+    """
+    if not dispatch_id or dispatch_id in (".", "..") or "/" in dispatch_id or os.sep in dispatch_id:
+        return None
+    src = _default_bundle_dir(data_dir, dispatch_id)
+    if not src.is_dir():
+        return None
+    dest = Path(data_dir) / "dispatches" / ("completed" if succeeded else "failed") / dispatch_id
+    if dest.exists():
+        logger.warning(
+            "final_prompt_integrity: gate bundle %s stays in pending/ — %s already exists",
+            src, dest,
+        )
+        return None
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        os.rename(src, dest)
+    except OSError as exc:
+        logger.warning(
+            "final_prompt_integrity: could not move gate bundle %s to %s: %s", src, dest, exc,
+        )
+        return None
+    return dest
+
+
 def final_prompt_sha_for_dispatch(
     dispatch_id: str,
     data_dir: "str | Path",

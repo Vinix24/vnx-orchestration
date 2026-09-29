@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from governance_receipts import utc_now_iso
 import gate_depth
 import gate_recorder
-from final_prompt_integrity import final_prompt_sha_for_dispatch
+from final_prompt_integrity import archive_gate_bundle, final_prompt_sha_for_dispatch
 from codex_parser import (
     VERDICT_READABLE_BINARIES,
     extract_verdict_block,
@@ -282,11 +282,42 @@ def materialize_artifacts(
     results_dir: Path,
     reports_dir: Path,
 ) -> Dict[str, Any]:
-    """Atomic artifact materialization (GATE-11/12).
+    """Atomic artifact materialization (GATE-11/12), then archive the bundle.
 
     Sequence: write report → verify → compute hash → write result → verify.
-    On any failure, transitions to failed via gate_recorder.
+    On any failure, transitions to failed via gate_recorder. Whatever the
+    outcome, the gate is finished afterwards, so its prompt bundle leaves
+    ``dispatches/pending/`` (D7, fabric-state-herstel). The result record has
+    already stamped the prompt sha by then, and
+    :func:`final_prompt_sha_for_dispatch` reads the archived bundle too.
     """
+    outcome = _materialize_artifacts(
+        gate=gate, pr_number=pr_number, pr_id=pr_id, stdout=stdout,
+        request_payload=request_payload, duration_seconds=duration_seconds,
+        requests_dir=requests_dir, results_dir=results_dir, reports_dir=reports_dir,
+    )
+    dispatch_id = str(request_payload.get("dispatch_id") or "")
+    if dispatch_id:
+        archive_gate_bundle(
+            dispatch_id, results_dir.parents[2],
+            succeeded=outcome.get("status") in ("completed", "partial_review"),
+        )
+    return outcome
+
+
+def _materialize_artifacts(
+    *,
+    gate: str,
+    pr_number: Optional[int],
+    pr_id: str,
+    stdout: str,
+    request_payload: Dict[str, Any],
+    duration_seconds: float,
+    requests_dir: Path,
+    results_dir: Path,
+    reports_dir: Path,
+) -> Dict[str, Any]:
+    """Body of :func:`materialize_artifacts`; see there."""
     _fail = dict(
         gate=gate, pr_number=pr_number, pr_id=pr_id,
         request_payload=request_payload,

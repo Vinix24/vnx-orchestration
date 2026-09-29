@@ -11,6 +11,7 @@ without an explicit ``--apply`` flag.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -37,9 +38,10 @@ class BundleEntry:
     role: str = ""
     gate: str = ""
     target_slot: str = ""
-    classification: str = ""  # "receipt-found", "stale-no-receipt", "recent-no-receipt", "empty", "error"
+    classification: str = ""  # "receipt-found", "gate-result-found", "unproven", "stale-no-receipt", "recent-no-receipt", "empty", "error"
     action: str = ""  # "move-to-completed", "move-to-abandoned", "skip", "error"
     error: str = ""
+    final_prompt_sha: str = ""
 
 
 @dataclass
@@ -89,6 +91,12 @@ def _resolve_data_dir() -> Path:
     return Path.cwd() / ".vnx-data"
 
 
+def _resolve_project_id() -> str:
+    """Project id of the store being cleaned: VNX_PROJECT_ID, else the default."""
+    from project_scope import current_project_id
+    return current_project_id()
+
+
 def _resolve_state_dir() -> Path:
     """Resolve VNX_STATE_DIR."""
     env = os.environ.get("VNX_STATE_DIR", "")
@@ -128,6 +136,66 @@ def _build_receipt_index(state_dir: Path) -> Dict[str, bool]:
     return index
 
 
+def _build_gate_sha_index(state_dir: Path, project_id: str) -> Dict[str, bool]:
+    """Prompt shas that a gate result vouches for.
+
+    Two sources, both carrying ``final_prompt_sha256``: the result records in
+    ``state/review_gates/results/`` and ``review_gate_result`` receipts in
+    ``t0_receipts.ndjson``. A receipt stamped with another project's id does not
+    count (ADR-007): the ledger is a shared shape and a colliding sha or id must
+    not clear a bundle that belongs to this project.
+    """
+    index: Dict[str, bool] = {}
+
+    results_dir = state_dir / "review_gates" / "results"
+    if results_dir.is_dir():
+        for result_file in results_dir.glob("*.json"):
+            try:
+                rec = json.loads(result_file.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(rec, dict):
+                continue
+            rec_project = str(rec.get("project_id") or "")
+            if rec_project and project_id and rec_project != project_id:
+                continue
+            sha = str(rec.get("final_prompt_sha256") or "")
+            if sha:
+                index[sha] = True
+
+    receipt_file = state_dir / "t0_receipts.ndjson"
+    if receipt_file.is_file():
+        try:
+            with open(receipt_file, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    if "final_prompt_sha256" not in line or "review_gate_result" not in line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(rec, dict) or rec.get("event_type") != "review_gate_result":
+                        continue
+                    rec_project = str(rec.get("project_id") or "")
+                    if rec_project and project_id and rec_project != project_id:
+                        continue
+                    sha = str(rec.get("final_prompt_sha256") or "")
+                    if sha:
+                        index[sha] = True
+        except OSError:
+            pass
+
+    return index
+
+
+def _prompt_sha(prompt_file: Path) -> str:
+    """sha256 of a bundle's final_prompt.md, "" when unreadable."""
+    try:
+        return hashlib.sha256(prompt_file.read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
 # ── bundle scanning ────────────────────────────────────────────────────────
 
 def _read_spec(spec_file: Path) -> Dict[str, Any]:
@@ -138,17 +206,27 @@ def _read_spec(spec_file: Path) -> Dict[str, Any]:
         return {}
 
 
-def scan_pending(data_dir: Path, state_dir: Path) -> List[BundleEntry]:
+def scan_pending(
+    data_dir: Path,
+    state_dir: Path,
+    project_id: Optional[str] = None,
+) -> List[BundleEntry]:
     """Scan dispatches/pending/ for stale directory bundles.
 
-    A bundle is a subdirectory containing dispatch-spec.json and/or instruction.md.
+    A bundle is a subdirectory containing dispatch-spec.json and/or instruction.md,
+    or a gate bundle holding only final_prompt.md. A gate bundle moves to
+    completed/ only when a gate result of *project_id* carries the sha of its
+    prompt; without that proof it stays and is reported as ``unproven``.
     Returns a list of BundleEntry objects, one per bundle found.
     """
+    if project_id is None:
+        project_id = _resolve_project_id()
     pending_dir = data_dir / "dispatches" / "pending"
     if not pending_dir.is_dir():
         return []
 
     receipt_index = _build_receipt_index(state_dir)
+    gate_sha_index: Optional[Dict[str, bool]] = None
     now = datetime.now(timezone.utc)
     entries: List[BundleEntry] = []
 
@@ -168,8 +246,32 @@ def scan_pending(data_dir: Path, state_dir: Path) -> List[BundleEntry]:
         has_spec = spec_file.is_file()
         has_instruction = instr_file.is_file()
 
-        # Not a staged bundle — skip
+        prompt_file = child / "final_prompt.md"
+
+        # Gate bundle: final_prompt.md only. Moves only on proof from a gate result.
         if not has_spec and not has_instruction:
+            if not prompt_file.is_file():
+                continue
+            if gate_sha_index is None:
+                gate_sha_index = _build_gate_sha_index(state_dir, project_id)
+            sha = _prompt_sha(prompt_file)
+            proven = bool(sha) and gate_sha_index.get(sha, False)
+            try:
+                gate_age = (now.timestamp() - child.stat().st_mtime) / 86400.0
+            except OSError:
+                gate_age = 0.0
+            entries.append(BundleEntry(
+                dispatch_id=dispatch_id,
+                bundle_dir=str(child),
+                age_days=round(gate_age, 1),
+                has_receipt=receipt_index.get(dispatch_id, False),
+                has_instruction=False,
+                has_spec=False,
+                project_id=project_id,
+                classification="gate-result-found" if proven else "unproven",
+                action="move-to-completed" if proven else "skip",
+                final_prompt_sha=sha,
+            ))
             continue
 
         # Read spec metadata
@@ -322,7 +424,15 @@ def format_report(report: CleanupReport) -> str:
         lines.append("")
 
     # Skipped bundles summary
-    skipped = [e for e in report.entries if e.action == "skip"]
+    unproven = [e for e in report.entries if e.classification == "unproven"]
+    skipped = [e for e in report.entries if e.action == "skip" and e.classification != "unproven"]
+    if unproven:
+        lines.append(f"## Unproven gate bundles ({len(unproven)})")
+        lines.append(
+            "  final_prompt.md only, and no gate result or review_gate_result receipt"
+        )
+        lines.append("  carries the same prompt sha. They stay in pending/.")
+        lines.append("")
     if skipped:
         age_vals = [e.age_days for e in skipped if e.age_days > 0]
         youngest = min(age_vals) if age_vals else 0
@@ -369,6 +479,7 @@ def format_json(report: CleanupReport) -> str:
                 "gate": e.gate,
                 "target_slot": e.target_slot,
                 "project_id": e.project_id,
+                "final_prompt_sha": e.final_prompt_sha,
                 "error": e.error,
             }
             for e in report.entries

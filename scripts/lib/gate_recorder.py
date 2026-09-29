@@ -1617,7 +1617,7 @@ def _emit_terminal_result_receipt(
         "blocking_count": blocking_count,
         "verification": verification,
     }
-    for key in ("dispatch_id", "provider", "model", "pr_id"):
+    for key in ("dispatch_id", "provider", "model", "pr_id", "final_prompt_sha256"):
         value = str(payload.get(key) or "").strip()
         if value:
             fields[key] = value
