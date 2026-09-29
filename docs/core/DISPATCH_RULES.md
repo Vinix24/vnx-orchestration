@@ -288,3 +288,14 @@ receipt, or (b) an operator explicitly overrides.
 Staleness windowing (a frozen historical batch should not read as live
 churn) is delegated to the existing `contract_invalid_window.py` — not
 reimplemented in the ledger module.
+
+## 15. Live work — what is running right now (fabric-state-herstel D5)
+
+`t0_state.json` / `t0_index.json` carry a `live_work` section. It replaces `active_work`, `queues.active` and the terminal view in the index. Builder: `scripts/lib/live_work.py`.
+
+- **Rows:** `runtime_coordination.db` table `dispatches`, `WHERE project_id = ?` (ADR-007), in an in-flight state. The set is derived in code from the state machine (`DISPATCH_STATES` minus terminal, pre-execution `proposed/ready/queued` and recovery `timed_out/failed_delivery/recovered`): today `claimed`, `delivering`, `accepted`, `running`.
+- **Liveness is the occupancy flock**, `state/dispatch_worktree_claims/<id>.occupancy`, held by `dispatch_worktree_isolation._acquire_occupancy` for the whole run. Lock held = `live` at any age. No lock and younger than 120 s = `starting`. No lock and older = `stale`. "File exists" proves nothing: old files stay behind, and the kernel drops the lock when a holder dies.
+- **Lane coverage:** every lane that runs a dispatch takes this flock because they all create their worktree through `create_dispatch_worktree`: `dispatch_envelope` (headless), `provider_dispatch` (kimi/glm/deepseek, and the plan-gate seats through it), `subprocess_dispatch` (terminal-pinned). `gate_worktree.create_gate_worktree` (ephemeral review-gate checkouts) does not, and gate runs have no `dispatches` row, so they do not appear.
+- **Failure is loud:** a failed read (locked DB, no project id) gives `{"available": false, "reason": "<exception>"}` and health `degraded` with `degraded_reason`. Reads use `mode=ro` and a 2 s busy timeout.
+- **Pending:** `queues.pending_count` counts spec-bundles in `pending/` that hold a `dispatch-spec.json`. Gate bundles (only `final_prompt.md`) and loose `.md` files do not count.
+- **Open PRs** (from `pr_queue.open_prs`) are linked to their dispatch through the branch `dispatch/<id>`.

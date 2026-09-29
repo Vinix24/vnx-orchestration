@@ -260,7 +260,8 @@ queues = state.get('queues', {})
 print(f'  State generated:  {gen_at}')
 print(f'  Staleness:        {stale}s')
 print(f'  Pending:          {queues.get(\"pending_count\", \"?\")}')
-print(f'  Active:           {queues.get(\"active_count\", \"?\")}')
+live_counts = (state.get('live_work') or {}).get('counts') or {}
+print(f'  Live:             {live_counts.get(\"live\", \"?\")}  (stale: {live_counts.get(\"stale\", \"?\")})')
 print(f'  Completed/hr:     {queues.get(\"completed_last_hour\", \"?\")}')
 print(f'  Conflicts:        {queues.get(\"conflict_count\", \"?\")}')
 "

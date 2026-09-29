@@ -34,7 +34,16 @@ When operating in autonomous mode (no routine user checkpoints), follow this dis
 ## Startup State
 
 At session start, `.vnx-data/state/t0_state.json` is automatically built by the SessionStart hook.
-Read it for full situational awareness — terminals, queues, tracks, PR progress, open items, recent receipts, git context, and system health.
+Read it for full situational awareness — queues, tracks, PR progress, open items, recent receipts, git context, and system health.
+
+**What is running right now:** the `live_work` section of `t0_index.json` (full form in `t0_state.json`). Not `terminals`, not `active_work`, not `queue.active`: the headless lane uses no terminals and never fills `dispatches/active/`. `live_work` comes from the `dispatches` table (this project only, in-flight states) and the occupancy flock of each dispatch:
+
+- `live`: the flock is held. A run of 90 minutes is live; age never makes it stale.
+- `starting`: in flight, no lock yet, younger than 120 seconds (claim to worktree).
+- `stale`: in flight, no lock held, older than that. A zombie row (crashed worker), not work. Investigate before you count it.
+- `available: false` with a `reason`: the DB read failed (for example `database is locked`). It is NOT "nothing is running"; health is degraded with the same reason.
+
+`queue.pending` counts staged dispatches (spec-bundles in `pending/` with a `dispatch-spec.json`). Open PRs in `live_work.open_prs` are linked to their dispatch through the branch `dispatch/<id>`.
 
 ```bash
 cat .vnx-data/state/t0_state.json | python3 -m json.tool

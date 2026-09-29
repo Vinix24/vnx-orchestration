@@ -42,6 +42,10 @@ def _make_full_state(
         f"T{i}": {"status": "idle", "lease_expires_at": None, "track": "A"}
         for i in range(1, terminal_count + 1)
     }
+    live_dispatches = [
+        {"dispatch_id": "d-active-01", "state": "running", "status": "live",
+         "age_seconds": 5400, "track": "A", "gate": "codex"},
+    ][:active]
     receipts = [
         {
             "terminal": f"T{i}",
@@ -65,7 +69,6 @@ def _make_full_state(
         "terminals": terminals,
         "queues": {
             "pending_count": pending,
-            "active_count": active,
             "completed_last_hour": 3,
             "conflict_count": 0,
         },
@@ -79,9 +82,13 @@ def _make_full_state(
             "blocker_count": blocker_count,
             "top_blockers": [{"id": "OI-1", "title": "Critical bug"}],
         },
-        "active_work": [
-            {"dispatch_id": "d-active-01", "track": "A", "gate": "codex"},
-        ],
+        "live_work": {
+            "available": True,
+            "reason": None,
+            "counts": {"live": len(live_dispatches), "starting": 0, "stale": 0},
+            "dispatches": live_dispatches,
+            "open_prs": [],
+        },
         "recent_receipts": receipts,
         "feature_state": {
             "source": "dispatch_register",
@@ -128,8 +135,8 @@ class TestIndexKeyCount:
 # 2. Index has all required fields
 # ---------------------------------------------------------------------------
 
-_REQUIRED_FIELDS = ("schema", "timestamp", "terminals", "queue", "recent_receipts",
-                    "git_branch", "git_head", "active_dispatches", "health",
+_REQUIRED_FIELDS = ("schema", "timestamp", "live_work", "queue", "recent_receipts",
+                    "git_branch", "git_head", "health",
                     "last_rebuild_seconds")
 
 
@@ -158,23 +165,23 @@ class TestIndexRequiredFields:
         index = _build_t0_index(state)
         assert index["git_head"] == "abc1234"
 
-    def test_terminals_status_present(self):
+    def test_terminals_and_active_are_gone_from_the_index(self):
+        # D5: terminals and queue.active are replaced by live_work.
         index = _build_t0_index(_make_full_state())
-        for tid, tdata in index["terminals"].items():
-            assert "status" in tdata, f"Terminal {tid} missing 'status'"
-            assert "lease_expires" not in tdata, f"Terminal {tid} carries dead 'lease_expires'"
+        assert "terminals" not in index
+        assert "active_dispatches" not in index
+        assert "active" not in index["queue"]
 
-    def test_queue_has_four_subfields(self):
+    def test_queue_has_three_subfields(self):
         index = _build_t0_index(_make_full_state())
         q = index["queue"]
-        for field in ("pending", "active", "open_prs", "blocking_open_items"):
+        for field in ("pending", "open_prs", "blocking_open_items"):
             assert field in q, f"queue missing '{field}'"
 
     def test_queue_values_correct(self):
-        state = _make_full_state(pending=3, active=2, blocker_count=7)
+        state = _make_full_state(pending=3, blocker_count=7)
         index = _build_t0_index(state)
         assert index["queue"]["pending"] == 3
-        assert index["queue"]["active"] == 2
         assert index["queue"]["blocking_open_items"] == 7
 
     def test_recent_receipts_at_most_3(self):
@@ -203,15 +210,11 @@ class TestIndexRequiredFields:
         state.pop("pr_queue", None)
         assert _build_t0_index(state)["queue"]["open_prs"] == 0
 
-    def test_terminal_entry_is_status_only(self):
-        state = _make_full_state()
-        state["terminals"]["T1"]["lease_expires_at"] = "2026-09-29T12:00:00+00:00"
-        assert _build_t0_index(state)["terminals"]["T1"] == {"status": "idle"}
-
-    def test_active_dispatches_list(self):
+    def test_live_work_summary_lists_live_ids(self):
         index = _build_t0_index(_make_full_state())
-        assert isinstance(index["active_dispatches"], list)
-        assert "d-active-01" in index["active_dispatches"]
+        assert index["live_work"]["available"] is True
+        assert index["live_work"]["live"] == ["d-active-01"]
+        assert index["live_work"]["counts"]["live"] == 1
 
     def test_last_rebuild_seconds(self):
         state = _make_full_state()
@@ -221,8 +224,7 @@ class TestIndexRequiredFields:
     def test_empty_state_no_crash(self):
         index = _build_t0_index({})
         assert index["schema"] == "t0_index/1.0"
-        assert index["terminals"] == {}
-        assert index["active_dispatches"] == []
+        assert index["live_work"]["available"] is False
         assert index["recent_receipts"] == []
 
 
