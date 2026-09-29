@@ -647,21 +647,24 @@ class ReportParser:
         if _lib not in sys.path:
             sys.path.insert(0, _lib)
         from report_body_contract import section_heading_names
+        from verification_runs import extract_runs, final_run
         val_section = None
-        for name in (*section_heading_names('## Verification'), 'Validation', 'Test'):
+        # `Verificatie` is not a contract heading, but 6 of 351 reports in the
+        # seven days before 29-09 wrote their evidence under it (D1b).
+        for name in (*section_heading_names('## Verification'), 'Verificatie', 'Validation', 'Test'):
             val_section = self._extract_section(content, re.escape(name))
             if val_section:
                 break
 
         if val_section:
-            # Extract test counts
-            passed_match = re.search(r'(\d+)\s*(?:tests?\s*)?pass', val_section, re.IGNORECASE)
-            failed_match = re.search(r'(\d+)\s*(?:tests?\s*)?fail', val_section, re.IGNORECASE)
-
-            if passed_match:
-                validation['tests_passed'] = int(passed_match.group(1))
-            if failed_match:
-                validation['tests_failed'] = int(failed_match.group(1))
+            # D1b: the count is the last run not marked red, not the first
+            # regex hit (verification_runs explains what a run and a red
+            # marker are). A red-then-green report used to carry the red run.
+            run = final_run(extract_runs(val_section))
+            if run is not None:
+                validation['tests_passed'] = run['passed']
+                validation['tests_failed'] = run['failed']
+                validation['test_method'] = run['method']
 
             # Look for quality gates
             gates = ['syntax', 'types', 'lint', 'security', 'performance', 'coverage']
@@ -883,34 +886,17 @@ class ReportParser:
             receipt['recommendations'] = extracted['recommendations']
 
         # ADR-035 §3.1/§9 PR-5: promote the raw extract_validation() output to
-        # the canonical verification{} shape — the same shape
-        # dispatch_envelope.py::_verification_from_report builds for Path 1's
-        # envelope sub-path, so compute_verdict reads one consistent
+        # the canonical verification{} shape. verification_record is the one
+        # builder: envelope_govern_support._verification_from_report calls it
+        # too for Path 1's envelope sub-path, so compute_verdict reads one consistent
         # verification.method vocabulary regardless of which write path
         # produced the receipt. Always present (never omitted): an absent
         # verification{} reads to compute_verdict as evidence_complete=True
         # (method=None isn't in INCOMPLETE_EVIDENCE_METHODS), which is wrong —
         # "unknown" is the honest default when no evidence was found (§3.1).
-        raw_validation = extracted.get('validation') or {}
-        tests_passed = int(raw_validation.get('tests_passed') or 0)
-        tests_failed = int(raw_validation.get('tests_failed') or 0)
-        tests_run = tests_passed + tests_failed
-        if tests_run > 0:
-            verification_method = 'pytest'
-        elif raw_validation.get('quality_gates'):
-            verification_method = 'manual'
-        else:
-            verification_method = 'unknown'
-        receipt['verification'] = {
-            'method': verification_method,
-            'tests_run': tests_run if tests_run > 0 else None,
-            'tests_passed': tests_passed if tests_run > 0 else None,
-            'tests_failed': tests_failed if tests_run > 0 else None,
-            'command': None,
-            'pr_ref': None,
-            'push_verified': None,
-            'spec_deviation': None,
-        }
+        from verification_runs import verification_record
+        receipt['verification'] = verification_record(
+            extracted.get('validation') or {}, receipt.get('dispatch_id'))
 
         # INTELLIGENCE INTEGRATION (PR #8): Add quality_context to receipt
         # (pattern_count/quality_context are live readers, §3.2; prevention_rules
