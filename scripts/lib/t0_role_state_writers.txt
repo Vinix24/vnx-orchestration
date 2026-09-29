@@ -1,0 +1,28 @@
+# State files and t0_state sections the T0 role relies on, and the code that
+# really writes them. Read by scripts/lib/t0_role_sources_audit.py, which
+# t0_role_audit.sh --static runs.
+#
+# Format: target | writer script (repo-relative) | marker | role phrase
+#   target       path under .vnx-data/state/, or <file>#<section> for a
+#                top-level section of a state file
+#   marker       literal that must occur in the writer (the file name, or the
+#                quoted section key)
+#   role phrase  optional: text the role must still contain (sections only)
+#
+# Two-way coupling: a state path the role names that is missing here is
+# STATE-UNWRITTEN. An entry whose writer no longer holds the marker is
+# STATE-WRITER-GONE. Removing a writer or a section therefore forces an edit
+# to this file, and the role edit that goes with it.
+t0_state.json | scripts/build_t0_state.py | t0_state.json |
+t0_state.json#terminals | scripts/build_t0_state.py | "terminals": | terminals
+t0_state.json#queues | scripts/build_t0_state.py | "queues": | queues
+t0_state.json#tracks | scripts/build_t0_state.py | "tracks": | tracks
+t0_state.json#pr_progress | scripts/build_t0_state.py | "pr_progress": | PR progress
+t0_state.json#open_items | scripts/build_t0_state.py | "open_items": | open items
+t0_state.json#recent_receipts | scripts/build_t0_state.py | "recent_receipts": | recent receipts
+t0_state.json#git_context | scripts/build_t0_state.py | "git_context": | git context
+t0_state.json#system_health | scripts/build_t0_state.py | "system_health": | system health
+t0_recommendations.json | scripts/lib/recommendation_aggregator.py | t0_recommendations.json |
+open_items_digest.json | scripts/open_items_manager.py | open_items_digest.json |
+review_gates/requests/ | scripts/lib/gate_recorder.py | requests_dir |
+review_gates/results/ | scripts/lib/gate_recorder.py | review_gates/results |

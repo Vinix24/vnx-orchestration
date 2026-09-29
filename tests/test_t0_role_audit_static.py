@@ -645,5 +645,202 @@ class TestRepoSelfAudit:
             assert "t0-orchestrator" in out
 
 
+# ---------------------------------------------------------------------------
+# Sources the role names: scripts, subcommands, state files (fsh D10).
+#
+# Fixture fabric = a tmp project that carries bin/vnx, scripts/ and the writers
+# manifest, so the audit judges the role against THAT tree. ADR-007 does not
+# apply: the audit reads no central DB and creates no table.
+# ---------------------------------------------------------------------------
+
+FIXTURE_BIN_VNX = """\
+#!/usr/bin/env bash
+main() {
+  case "$1" in
+    dispatch)
+      echo dispatch ;;
+    objective)
+      echo objective ;;
+  esac
+}
+"""
+
+FIXTURE_MANIFEST = """\
+# fixture manifest
+t0_state.json | scripts/build_t0_state.py | t0_state.json |
+t0_state.json#open_items | scripts/build_t0_state.py | "open_items": | open items
+digest.json | scripts/open_items_manager.py | digest.json |
+"""
+
+FIXTURE_ROLE = """\
+# T0
+
+Read `.vnx-data/state/t0_state.json` for terminals and open items.
+
+```bash
+python3 scripts/receipt_query.py pull --json
+python3 scripts/open_items_manager.py digest
+vnx dispatch
+vnx objective list
+```
+
+Also `.vnx-data/state/digest.json`.
+"""
+
+
+def _make_fabric(tmp_path: Path, role: str = FIXTURE_ROLE, name: str = "fabric") -> Path:
+    root = _make_project(tmp_path, name)
+    (root / "bin").mkdir()
+    (root / "bin" / "vnx").write_text(FIXTURE_BIN_VNX)
+    scripts = root / "scripts"
+    (scripts / "lib").mkdir(parents=True)
+    (scripts / "planning_cli.py").write_text('sub.add_parser("list")\nsub.add_parser("show")\n')
+    (scripts / "receipt_query.py").write_text('sub.add_parser("pull")\nsub.add_parser("digest")\n')
+    (scripts / "open_items_manager.py").write_text('OUT = "digest.json"\nsub.add_parser("digest")\n')
+    (scripts / "build_t0_state.py").write_text('OUT = "t0_state.json"\nstate = {"open_items": 1}\n"open_items": 1,\n')
+    (scripts / "lib" / "t0_role_state_writers.txt").write_text(FIXTURE_MANIFEST)
+    # The audit script under test judges a fixture through its own copy of the auditor.
+    (scripts / "lib" / "t0_role_sources_audit.py").write_text(
+        (REPO / "scripts" / "lib" / "t0_role_sources_audit.py").read_text()
+    )
+    t0 = root / ".claude" / "terminals" / "T0"
+    (t0 / "CLAUDE.md").write_text("@role-orchestrator.md\n")
+    (t0 / "role-orchestrator.md").write_text(role)
+    return root
+
+
+class TestRoleSourcesHealthy:
+    def test_fixture_role_naming_only_real_sources_is_clean(self, tmp_path):
+        root = _make_fabric(tmp_path)
+        r = _run_static(root)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "clean" in r.stdout.lower()
+
+    def test_repo_role_names_only_sources_the_repo_has(self):
+        """The shipped role is green at merge of D10."""
+        r = _run_static(REPO)
+        out = r.stdout + r.stderr
+        for code in ("SCRIPT-MISSING", "SUBCOMMAND-MISSING", "STATE-UNWRITTEN", "STATE-WRITER-GONE"):
+            assert code not in out, out
+
+
+class TestScriptMissing:
+    def test_role_naming_nonexistent_script_is_flagged(self, tmp_path):
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\nRun `python3 scripts/ghost_tool.py --now`.\n")
+        r = _run_static(root)
+        assert r.returncode != 0
+        assert "SCRIPT-MISSING" in r.stdout
+        assert "scripts/ghost_tool.py" in r.stdout
+
+    def test_bare_script_name_resolves_anywhere_under_scripts(self, tmp_path):
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\nSee `t0_role_sources_audit.py`.\n")
+        r = _run_static(root)
+        assert r.returncode == 0, r.stdout
+
+    def test_deleting_a_script_the_role_names_turns_the_audit_red(self, tmp_path):
+        root = _make_fabric(tmp_path)
+        assert _run_static(root).returncode == 0
+        (root / "scripts" / "receipt_query.py").unlink()
+        r = _run_static(root)
+        assert r.returncode != 0
+        assert "SCRIPT-MISSING" in r.stdout and "receipt_query.py" in r.stdout
+
+    def test_docs_source_is_audited_too(self, tmp_path):
+        root = _make_fabric(tmp_path)
+        docs = root / "docs" / "core"
+        docs.mkdir(parents=True)
+        (docs / "DISPATCH_RULES.md").write_text("Run `python3 scripts/gone_script.py pull`.\n")
+        r = _run_static(root)
+        assert r.returncode != 0
+        assert "SCRIPT-MISSING" in r.stdout and "gone_script.py" in r.stdout
+        assert "DISPATCH_RULES.md" in r.stdout
+
+
+class TestSubcommandMissing:
+    def test_removed_script_subcommand_is_flagged(self, tmp_path):
+        root = _make_fabric(tmp_path)
+        (root / "scripts" / "receipt_query.py").write_text('sub.add_parser("digest")\n')
+        r = _run_static(root)
+        assert r.returncode != 0
+        assert "SUBCOMMAND-MISSING" in r.stdout
+        assert "receipt_query.py pull" in r.stdout
+
+    def test_unknown_vnx_command_is_flagged(self, tmp_path):
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\nThen `vnx teleport`.\n")
+        r = _run_static(root)
+        assert r.returncode != 0
+        assert "SUBCOMMAND-MISSING" in r.stdout and "vnx teleport" in r.stdout
+
+    def test_unknown_group_subcommand_is_flagged(self, tmp_path):
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\nThen `vnx objective vaporize`.\n")
+        r = _run_static(root)
+        assert r.returncode != 0
+        assert "vnx objective vaporize" in r.stdout
+
+    def test_second_word_of_plain_command_is_prose_not_a_subcommand(self, tmp_path):
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\nUse `vnx dispatch` to send work.\n")
+        r = _run_static(root)
+        assert r.returncode == 0, r.stdout
+
+    def test_command_file_under_scripts_commands_counts(self, tmp_path):
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\nThen `vnx snapshot`.\n")
+        (root / "scripts" / "commands").mkdir()
+        (root / "scripts" / "commands" / "snapshot.sh").write_text("cmd_snapshot() { :; }\n")
+        assert _run_static(root).returncode == 0
+
+
+class TestStateSources:
+    def test_state_file_absent_from_manifest_is_unwritten(self, tmp_path):
+        root = _make_fabric(tmp_path, FIXTURE_ROLE + "\nRead `.vnx-data/state/ghost_state.json`.\n")
+        r = _run_static(root)
+        assert r.returncode != 0
+        assert "STATE-UNWRITTEN" in r.stdout and "ghost_state.json" in r.stdout
+
+    def test_builder_dropping_a_t0_state_section_turns_the_audit_red(self, tmp_path):
+        root = _make_fabric(tmp_path)
+        assert _run_static(root).returncode == 0
+        (root / "scripts" / "build_t0_state.py").write_text('OUT = "t0_state.json"\n')
+        r = _run_static(root)
+        assert r.returncode != 0
+        assert "STATE-WRITER-GONE" in r.stdout and "open_items" in r.stdout
+
+    def test_role_dropping_a_section_phrase_is_flagged(self, tmp_path):
+        role = FIXTURE_ROLE.replace("terminals and open items", "terminals")
+        root = _make_fabric(tmp_path, role)
+        r = _run_static(root)
+        assert r.returncode != 0
+        assert "STATE-WRITER-GONE" in r.stdout and "open items" in r.stdout
+
+    def test_writer_script_deleted_is_flagged(self, tmp_path):
+        root = _make_fabric(tmp_path)
+        (root / "scripts" / "open_items_manager.py").unlink()
+        r = _run_static(root)
+        assert r.returncode != 0
+        assert "STATE-WRITER-GONE" in r.stdout and "digest.json" in r.stdout
+
+    def test_malformed_manifest_line_is_flagged(self, tmp_path):
+        root = _make_fabric(tmp_path)
+        manifest = root / "scripts" / "lib" / "t0_role_state_writers.txt"
+        manifest.write_text(manifest.read_text() + "only-one-column\n")
+        r = _run_static(root)
+        assert r.returncode != 0
+        assert "MANIFEST-BAD-LINE" in r.stdout
+
+
+class TestConsumerProject:
+    def test_project_without_scripts_is_judged_against_the_fabric(self, tmp_path):
+        """A consumer carries the synced role but no scripts/. It is checked
+        against the fabric the audit belongs to, so a role naming a real fabric
+        script is clean and one naming a ghost is flagged."""
+        consumer = _make_project(tmp_path, "consumer")
+        t0 = consumer / ".claude" / "terminals" / "T0"
+        (t0 / "CLAUDE.md").write_text("@role-orchestrator.md\n")
+        (t0 / "role-orchestrator.md").write_text("Run `python3 scripts/build_t0_state.py`.\n")
+        assert _run_static(consumer).returncode == 0
+        (t0 / "role-orchestrator.md").write_text("Run `python3 scripts/ghost_tool.py`.\n")
+        r = _run_static(consumer)
+        assert r.returncode != 0 and "SCRIPT-MISSING" in r.stdout
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

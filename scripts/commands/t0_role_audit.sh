@@ -200,6 +200,10 @@ _t0_static_hook_injects_skill() {
 #                        accepted as sufficient proof of in-context delivery,
 #                        without checking whether Claude Code is actually
 #                        configured to run it).
+#   SCRIPT-MISSING / SUBCOMMAND-MISSING / STATE-UNWRITTEN / STATE-WRITER-GONE —
+#                        the role (and DISPATCH_RULES) name a script,
+#                        subcommand or state file the repo no longer has or
+#                        writes. See scripts/lib/t0_role_sources_audit.py.
 #   PLAYBOOK-MECHANISM-GAP — AGENTS.md/GEMINI.md (the codex/gemini T0
 #                        surfaces `vnx role sync` mirrors the role into) carry
 #                        the role text, but neither provider has a
@@ -283,6 +287,19 @@ _t0_static_check() {
     echo "PLAYBOOK-MECHANISM-GAP: $provider_file carries the T0 role but has no SessionStart-hook equivalent to deliver the t0-orchestrator playbook body in-context on this surface (tracked open item, not currently blocking)"
     findings=$((findings + 1))
   done
+
+  # Sources the role and DISPATCH_RULES name: scripts, subcommands, state files.
+  # A consumer project has no scripts/ of its own, so it is judged against the
+  # fabric this script belongs to.
+  local fabric_root="$root" sources_out
+  [ -f "$fabric_root/bin/vnx" ] || fabric_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+  if command -v python3 >/dev/null 2>&1 && [ -f "$fabric_root/scripts/lib/t0_role_sources_audit.py" ]; then
+    sources_out="$(python3 "$fabric_root/scripts/lib/t0_role_sources_audit.py" "$root" "$fabric_root")"
+    if [ -n "$sources_out" ]; then
+      printf '%s\n' "$sources_out"
+      findings=$((findings + $(printf '%s\n' "$sources_out" | wc -l)))
+    fi
+  fi
 
   [ "$findings" -eq 0 ]
 }
