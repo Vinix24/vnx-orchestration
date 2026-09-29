@@ -296,3 +296,58 @@ def test_pr_owner_is_the_first_work_dispatch_that_names_the_pr():
     assert [e["dispatch_id"] for e in _outcome(result, "d1")["evidence"]] == [
         "kimi-gate-pr42-1790000000", ""]
     assert _outcome(result, "d1-ff")["evidence"] == []
+
+
+# --- D3b: the gate advisories on D3a (#1980), each pinned on behaviour -------
+
+def test_status_is_read_through_the_canonical_semantics():
+    # codex_gate: an `ok` success claim is a success, a completion `timeout`
+    # carries no signal (event_outcome_semantics), not a hard failure.
+    ok = _run(_a("d1", "ok"), _b("d1"), _foreign(_a("d1", "ok")))
+    assert ok["verdict_counts"]["accept"] == 1
+    timeout = _run(_a("d1", "timeout"), _b("d1"))
+    assert (timeout["verdict_counts"]["investigate"], timeout["verdict_counts"]["reject"]) == (1, 0)
+    assert "timeout" in _outcome(timeout, "d1")["reason"]
+
+
+def test_evidence_under_a_runner_id_goes_to_the_pr_owner():
+    # codex_gate: a pr_merged written under the merge runner's own id resolves
+    # the work dispatch's refused merge and is not an outcome of its own.
+    refused = {"event_type": "pr_merge_refused", "dispatch_id": "d1", "pr_number": 42,
+               "status": "blocked", "timestamp": TS}
+    merged = {"event_type": "pr_merged", "dispatch_id": "merge-runner-7", "pr_number": 42,
+              "status": "success", "timestamp": TS}
+    result = _run(_a("d1", "success", pr_id="42"), _b("d1"), refused, merged,
+                  _foreign(dict(refused, dispatch_id="merge-runner-7")))
+    assert [o["dispatch_id"] for o in result["outcomes"]] == ["d1"]
+    assert result["verdict_counts"]["accept"] == 1
+    orphan = _run({"event_type": "pr_merged", "dispatch_id": "merge-runner-8", "pr_number": 77,
+                   "timestamp": TS})
+    assert [o["dispatch_id"] for o in orphan["outcomes"]] == ["merge-runner-8"]
+
+
+def test_a_failure_literal_on_writer_b_wins_over_a_success():
+    # deepseek_gate: report_to_receipt_converter writes status='failed' on a
+    # nonzero exit code; B's `unknown` still never overturns A (plan rule a).
+    for status in ("failure", "failed", "contract_invalid"):
+        result = _run(_a("d1", "success"), _b("d1", status=status))
+        assert result["verdict_counts"]["reject"] == 1, status
+        assert _outcome(result, "d1")["status"] == status
+    assert _run(_a("d1", "success"), _b("d1", status="unknown"))["verdict_counts"]["accept"] == 1
+
+
+def test_a_retry_without_its_own_report_is_not_accepted_on_the_old_one():
+    # deepseek_gate: A(failure) + B(good) + A'(success) has no evidence for A'.
+    result = _run(_a("d1", "failure"), _b("d1"), _a("d1", "success"))
+    assert (result["verdict_counts"]["accept"], result["verdict_counts"]["investigate"]) == (0, 1)
+    retried = _run(_a("d1", "failure"), _b("d1"), _a("d1", "success"), _b("d1"))
+    assert retried["verdict_counts"]["accept"] == 1
+
+
+def test_a_blocking_event_under_a_gate_runner_id_still_blocks():
+    # deepseek_gate: pr_merge_refused under 'kimi-gate-pr42-123' was folded into evidence.
+    refused = {"event_type": "pr_merge_refused", "dispatch_id": "kimi-gate-pr42-123",
+               "pr_number": 42, "status": "blocked", "timestamp": TS}
+    result = _run(_a("d1", "success", pr_id="42"), _b("d1"), refused)
+    assert result["verdict_counts"]["investigate"] == 1
+    assert _outcome(result, "d1")["blocking"][0]["dispatch_id"] == "kimi-gate-pr42-123"

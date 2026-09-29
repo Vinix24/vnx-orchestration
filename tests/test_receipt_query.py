@@ -588,7 +588,13 @@ def test_t17_digest_buckets_v1_lines_as_unknown_verdict(tmp_path):
     result = rq.compute_digest(
         ledger, window="24h", now=now, open_items_manager_module=_NeverCalledOIM(),
     )
-    assert result["verdict_counts"] == {"accept": 1, "investigate": 0, "reject": 1, "unknown": 1}
+    assert result["line_verdict_counts"] == {"accept": 1, "investigate": 0, "reject": 1, "unknown": 1}
+    # Per dispatch the reader recomputes the verdict instead of trusting the
+    # stamp: d2/d3 claim done without test evidence (investigate), and the v1
+    # line carries no outcome event at all (unknown). fabric-state-herstel D3.
+    assert result["verdict_counts"] == {
+        "accept": 0, "investigate": 2, "reject": 0, "superseded": 0, "unknown": 1,
+    }
 
 
 def test_digest_never_crashes_on_non_dict_verdict(tmp_path):
