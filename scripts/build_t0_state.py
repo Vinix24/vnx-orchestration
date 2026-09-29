@@ -3134,20 +3134,17 @@ def _build_t0_index(state: Dict[str, Any]) -> Dict[str, Any]:
         "git_branch": git_ctx.get("branch", ""),
         "git_head": raw_head[:7],
         "terminals": {
-            tid: {
-                "status": t.get("status", ""),
-                "lease_expires": t.get("lease_expires_at"),
-            }
+            tid: {"status": t.get("status", "")}
             for tid, t in (state.get("terminals") or {}).items()
         },
         "queue": {
             "pending": queues.get("pending_count", 0),
             "active": queues.get("active_count", 0),
-            "open_prs": len((state.get("pr_progress") or {}).get("in_progress", [])),
+            "open_prs": len((state.get("pr_queue") or {}).get("open_prs") or []),
             "blocking_open_items": open_items.get("blocker_count", 0),
         },
         "active_dispatches": [d.get("dispatch_id", "") for d in active_work],
-        "recent_receipts": (state.get("recent_receipts") or [])[-3:],
+        "recent_receipts": (state.get("recent_receipts") or [])[:3],
         "health": _slim_health_for_index(state.get("system_health") or {}),
         "track_freshness": _track_freshness_summary(state.get("track_freshness")),
         "contract_invalid": _contract_invalid_index_summary(state.get("contract_invalid")),

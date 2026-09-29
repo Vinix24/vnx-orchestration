@@ -162,7 +162,7 @@ class TestIndexRequiredFields:
         index = _build_t0_index(_make_full_state())
         for tid, tdata in index["terminals"].items():
             assert "status" in tdata, f"Terminal {tid} missing 'status'"
-            assert "lease_expires" in tdata, f"Terminal {tid} missing 'lease_expires'"
+            assert "lease_expires" not in tdata, f"Terminal {tid} carries dead 'lease_expires'"
 
     def test_queue_has_four_subfields(self):
         index = _build_t0_index(_make_full_state())
@@ -181,6 +181,32 @@ class TestIndexRequiredFields:
         state = _make_full_state(receipts_count=10)
         index = _build_t0_index(state)
         assert len(index["recent_receipts"]) <= 3
+
+    def test_recent_receipts_are_the_newest_three(self):
+        # _build_recent_receipts returns newest-first; the index must keep the head.
+        state = _make_full_state(receipts_count=0)
+        state["recent_receipts"] = [
+            {"dispatch_id": f"d-{n:02d}", "timestamp": f"2026-09-29T10:{59 - n:02d}:00Z"}
+            for n in range(20)
+        ]
+        index = _build_t0_index(state)
+        assert [r["dispatch_id"] for r in index["recent_receipts"]] == ["d-00", "d-01", "d-02"]
+
+    def test_open_prs_counts_pr_queue_not_pr_progress(self):
+        state = _make_full_state()
+        state["pr_progress"] = {"in_progress": [], "total": 0, "completed": 0}
+        state["pr_queue"] = {"open_prs": [{"number": 101}, {"number": 102}]}
+        assert _build_t0_index(state)["queue"]["open_prs"] == 2
+
+    def test_open_prs_zero_without_pr_queue(self):
+        state = _make_full_state()
+        state.pop("pr_queue", None)
+        assert _build_t0_index(state)["queue"]["open_prs"] == 0
+
+    def test_terminal_entry_is_status_only(self):
+        state = _make_full_state()
+        state["terminals"]["T1"]["lease_expires_at"] = "2026-09-29T12:00:00+00:00"
+        assert _build_t0_index(state)["terminals"]["T1"] == {"status": "idle"}
 
     def test_active_dispatches_list(self):
         index = _build_t0_index(_make_full_state())
