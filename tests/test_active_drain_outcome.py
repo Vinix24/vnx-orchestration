@@ -21,9 +21,14 @@ for _p in (_SCRIPTS, _SCRIPTS / "lib"):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from check_active_drain import build_receipt_status_index, drain_active  # noqa: E402
+from check_active_drain import (  # noqa: E402
+    build_receipt_presence,
+    build_receipt_status_index,
+    drain_active,
+)
 
 PROJECT = "vnx-dev"
+RECEIPT_WITHOUT_OUTCOME = "receipt present without an outcome: needs a human look"
 OTHER = "other-project"
 GOOD = {"method": "pytest", "tests_run": 3, "tests_passed": 3, "tests_failed": 0}
 
@@ -251,16 +256,16 @@ def test_evidence_only_dispatch_is_not_dead_lettered_before_the_age_threshold(tm
     _active(data, "d1", hours_old=0.1)
     results = _drain(data, [_gate_result("d1"), _a("d1", "failure", project_id=OTHER)])
     assert build_receipt_status_index(data / "receipts") == {}
-    assert (results["d1"].action, results["d1"].reason.startswith("no receipt yet")) == ("skipped", True)
+    assert (results["d1"].action, results["d1"].reason) == ("skipped", RECEIPT_WITHOUT_OUTCOME)
     assert (data / "dispatches" / "active" / "d1").is_dir()
 
 
-def test_evidence_only_dispatch_past_the_threshold_takes_the_no_receipt_age_rule(tmp_path: Path) -> None:
+def test_evidence_only_dispatch_past_the_threshold_stays_in_active(tmp_path: Path) -> None:
     data = _store(tmp_path)
     _active(data, "d1", hours_old=2.0)
     results = _drain(data, [_gate_result("d1"), _a("d1", "success", project_id=OTHER), _b("d1", project_id=OTHER)])
-    assert results["d1"].action == "dead_letter"
-    assert results["d1"].reason.startswith("no receipt, age")
+    assert (results["d1"].action, results["d1"].reason) == ("skipped", RECEIPT_WITHOUT_OUTCOME)
+    assert (data / "dispatches" / "active" / "d1").is_dir()
 
 
 def test_status_only_success_with_verification_completes(tmp_path: Path) -> None:
@@ -285,7 +290,7 @@ def test_superseded_dispatch_is_not_dead_lettered_as_an_unknown_outcome(tmp_path
     results = _drain(data, receipts)
     assert build_receipt_status_index(data / "receipts") == {"d1-ff": "success"}
     assert {did: r.action for did, r in results.items()} == {"d1": "skipped", "d1-ff": "completed"}
-    assert results["d1"].reason.startswith("no receipt yet")
+    assert results["d1"].reason == RECEIPT_WITHOUT_OUTCOME
 
 
 def test_status_only_line_with_an_unknown_literal_stays_in_active_for_a_human(tmp_path: Path) -> None:
@@ -299,3 +304,78 @@ def test_status_only_line_with_an_unknown_literal_stays_in_active_for_a_human(tm
     assert results["d1"].action == "skipped"
     assert "human look" in results["d1"].reason
     assert not (data / "dispatches" / "completed" / "d1").exists()
+
+
+# --- ff4: a receipt without an outcome is not "no receipt" -------------------
+# Lines attributed to another dispatch or dropped as unlinked_gate give their
+# own id no index entry. The drain took that for "no receipt" and dead-lettered
+# the dispatch past the age threshold while its receipt was on disk (OI-1916,
+# glm-gate-pr1921-1790364889). ADR-007: every store carries the same ids from a
+# second project, which must not make a dispatch look like it has a receipt.
+
+def test_unlinked_gate_run_past_the_threshold_is_skipped_not_dead_lettered(tmp_path: Path) -> None:
+    data = _store(tmp_path)
+    gate = "glm-gate-pr1921-1790364889"
+    _active(data, gate, hours_old=5.0)
+    receipts = [_gate_result(gate, gate="glm_gate", pr_number=1921),
+                _a(gate, "failure", project_id=OTHER), _a("d9", "success", pr_number=1921, project_id=OTHER)]
+    results = _drain(data, receipts)
+    assert build_receipt_status_index(data / "receipts") == {}
+    assert build_receipt_presence(data / "receipts") == frozenset({gate})
+    assert (results[gate].action, results[gate].reason) == ("skipped", RECEIPT_WITHOUT_OUTCOME)
+    assert (data / "dispatches" / "active" / gate).is_dir()
+    assert not (data / "dispatches" / "dead_letter" / gate).exists()
+
+
+def test_receipt_attributed_to_another_dispatch_past_the_threshold_is_skipped(tmp_path: Path) -> None:
+    data = _store(tmp_path)
+    _active(data, "merge-runner-1", hours_old=5.0)
+    _active(data, "codex-gate-pr42-1790000000", hours_old=5.0)
+    receipts = [_a("d-work", "success", pr_number=42), _b("d-work", pr_number=42),
+                {"event_type": "pr_merged", "dispatch_id": "merge-runner-1", "pr_number": 42,
+                 "status": "merged", "project_id": PROJECT},
+                _gate_result("codex-gate-pr42-1790000000"),
+                _a("merge-runner-1", "failure", project_id=OTHER)]
+    results = _drain(data, receipts)
+    assert build_receipt_status_index(data / "receipts") == {"d-work": "success"}
+    for did in ("merge-runner-1", "codex-gate-pr42-1790000000"):
+        assert (results[did].action, results[did].reason) == ("skipped", RECEIPT_WITHOUT_OUTCOME)
+        assert (data / "dispatches" / "active" / did).is_dir()
+
+
+def test_receipt_without_an_outcome_and_without_a_timestamp_is_not_an_orphan(tmp_path: Path) -> None:
+    data = _store(tmp_path)
+    d = data / "dispatches" / "active" / "d1"
+    d.mkdir(parents=True)
+    results = _drain(data, [_gate_result("d1"), _a("d1", "failure", project_id=OTHER)])
+    assert (results["d1"].action, results["d1"].reason) == ("skipped", RECEIPT_WITHOUT_OUTCOME)
+
+
+def test_dispatch_without_any_receipt_past_the_threshold_still_dead_letters(tmp_path: Path) -> None:
+    data = _store(tmp_path)
+    _active(data, "d1", hours_old=5.0)
+    _active(data, "d2", hours_old=5.0)
+    receipts = [{"event_type": "state_mutation", "dispatch_id": "d1", "project_id": PROJECT},
+                {"event_type": "review_gate_request", "dispatch_id": "d2", "project_id": PROJECT},
+                _a("d1", "success", project_id=OTHER), _gate_result("d2", project_id=OTHER)]
+    results = _drain(data, receipts)
+    assert build_receipt_presence(data / "receipts") == frozenset()
+    for did in ("d1", "d2"):
+        assert results[did].action == "dead_letter"
+        assert results[did].reason.startswith("no receipt, age")
+        assert (data / "dispatches" / "dead_letter" / did).is_dir()
+
+
+def test_second_project_receipt_under_a_colliding_id_does_not_skip_an_orphan(tmp_path: Path) -> None:
+    data = _store(tmp_path)
+    gate = "glm-gate-pr1921-1790364889"
+    _active(data, gate, hours_old=5.0)
+    _active(data, "d1", hours_old=5.0)
+    receipts = [_gate_result(gate, gate="glm_gate", pr_number=1921, project_id=OTHER),
+                _gate_result("d1", project_id=OTHER), _a("d1", "success", project_id=OTHER),
+                _gate_result("d1", source="pytest"),
+                _gate_result("d1", report_path="/var/folders/xx/r.md")]
+    results = _drain(data, receipts)
+    assert build_receipt_presence(data / "receipts") == frozenset()
+    for did in (gate, "d1"):
+        assert (results[did].action, results[did].reason.startswith("no receipt, age")) == ("dead_letter", True)
