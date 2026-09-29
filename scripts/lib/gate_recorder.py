@@ -1617,7 +1617,7 @@ def _emit_terminal_result_receipt(
         "blocking_count": blocking_count,
         "verification": verification,
     }
-    for key in ("dispatch_id", "provider", "model", "pr_id"):
+    for key in ("dispatch_id", "provider", "model", "pr_id", "final_prompt_sha256"):
         value = str(payload.get(key) or "").strip()
         if value:
             fields[key] = value
@@ -1712,6 +1712,54 @@ def _feed_provider_reachability(payload: Dict[str, Any], *, gate: str, result_pa
         )
 
 
+def _archive_finished_gate_bundle(payload: Dict[str, Any], *, gate: str, result_path: Path) -> None:
+    """Move the gate's own prompt bundle out of ``dispatches/pending/`` once its run is booked.
+
+    A harness-lane gate run leaves ``pending/<gate-eigen id>/final_prompt.md``
+    behind (written by provider_dispatch), and nothing moved it on: 3.368 such
+    directories stood in one store on 28-09. The run is finished the moment its
+    result is booked, landed or refused by the overwrite guard alike, so every
+    result writer calls this after its write attempt.
+
+    A run that reached a verdict (pass, fail, partial review) archives to
+    ``completed/``; anything else (``unavailable``, ``not_executable``) to
+    ``failed/``. An in-flight record archives nothing. Only a gate-eigen
+    dispatch-id counts: a path_binary gate carries the builder's id by design,
+    and ``pending/<builder id>`` is the builder's staged bundle.
+
+    Called after the sha has been read: gate_artifacts pins
+    ``final_prompt_sha256`` before it writes, and
+    :func:`final_prompt_integrity.final_prompt_sha_for_dispatch` reads
+    ``completed/`` and ``failed/`` too, so a later reader still finds it.
+    """
+    from gate_status import (
+        FAIL_STATES, INCOMPLETE_STATES, PARTIAL_REVIEW_STATES, PASS_STATES, canonical_status,
+    )
+
+    dispatch_id = str(payload.get("dispatch_id") or "")
+    if not is_gate_eigen_dispatch_id(gate, dispatch_id):
+        return
+    status = canonical_status(payload)
+    if not status or status in INCOMPLETE_STATES:
+        return
+    state_dir = _state_dir_from_result_path(result_path)
+    if state_dir is None:
+        return
+    outcome = "completed" if status in (PASS_STATES | FAIL_STATES | PARTIAL_REVIEW_STATES) else "failed"
+    try:
+        from final_prompt_integrity import archive_gate_bundle
+
+        archive_gate_bundle(dispatch_id, state_dir.parent, outcome)
+    # vnx-broad-except: the result is already on disk; a bundle that could not
+    # be moved stays in pending/ where dispatch_cleanup reports it, and must
+    # never fail the write that booked the verdict.
+    except Exception as exc:
+        logger.warning(
+            "gate_recorder: gate bundle %s for gate=%s not archived — %s: %s",
+            dispatch_id, gate, type(exc).__name__, exc,
+        )
+
+
 def write_result_guarded(
     result_path: Path,
     payload: Dict[str, Any],
@@ -1788,8 +1836,14 @@ def write_result_guarded(
                 _audit_write_refusal(result_path, gate, pr_ref, payload)
             existing = _read_existing_result(result_path)
             on_disk = existing if isinstance(existing, dict) else {}
-            return on_disk or payload, False
-        _write_result_atomic(result_path, payload)
+            refused = True
+        else:
+            _write_result_atomic(result_path, payload)
+            refused = False
+    # A refused write still ends the run it describes, so its bundle moves too.
+    _archive_finished_gate_bundle(payload, gate=gate, result_path=result_path)
+    if refused:
+        return on_disk or payload, False
     # Outside the lock, and only on a write that landed: a refused write left
     # another writer's record standing, so publishing here would describe a
     # write that never happened (the same reason record_failure gates its
@@ -1907,8 +1961,10 @@ def record_terminal_result(
             _check_overwrite_guard(result_path, payload, gate=gate, pr_ref=pr_id)
         except ResultOverwriteRefused:
             _audit_write_refusal(result_path, gate, pr_id, payload)
+            _archive_finished_gate_bundle(payload, gate=gate, result_path=result_path)
             raise
         _write_result_atomic(result_path, payload)
+    _archive_finished_gate_bundle(payload, gate=gate, result_path=result_path)
     # After the write, outside the lock, non-fatal — see
     # :func:`publish_forge_check_run`. A refusal from the overwrite guard
     # raises above and never reaches this line, so the same "only publish a
@@ -2097,6 +2153,12 @@ def record_failure(
         failure_payload = (
             payload_on_disk if written
             else annotate_refused_write(payload_on_disk, failure_payload)
+        )
+        # The failure record carries no dispatch_id of its own; the run's
+        # identity lives on the request, so the bundle is named from there.
+        _archive_finished_gate_bundle(
+            {"status": status, "dispatch_id": request_payload.get("dispatch_id", "")},
+            gate=gate, result_path=rf,
         )
 
     # Emit gate_failed for codex_gate only when the gate itself reported a verdict
