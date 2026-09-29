@@ -38,9 +38,8 @@ from project_scope import resolve_stamp_project_id
 
 
 # Failure statuses sampled from the governed receipt stream when mining for
-# recurring failure patterns. Keep in sync with check_active_drain.FAILURE_STATUSES,
-# weekly_digest._FAILURE_STATUSES, receipt_classifier._FAILURE_STATUSES, and
-# payload.FAILURE_STATUSES (gate-F2). "timeout" is included here (unlike the
+# recurring failure patterns. Keep in sync with receipt_classifier._FAILURE_STATUSES
+# and payload.FAILURE_STATUSES (gate-F2). "timeout" is included here (unlike the
 # confidence-scoring set in payload.py): a recurring task_timeout is a legitimate
 # failure to learn a prevention rule from — generate_prevention_suggestion has a
 # dedicated 'timeout' branch.

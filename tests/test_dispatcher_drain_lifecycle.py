@@ -256,10 +256,13 @@ class TestDoneReceiptClassifiedAsSuccess:
     and passes after the fix (done → success → completed).
     """
 
-    def test_done_status_in_success_set(self) -> None:
-        from check_active_drain import SUCCESS_STATUSES
-        assert "done" in SUCCESS_STATUSES, (
-            "'done' must be in SUCCESS_STATUSES so subprocess-adapter receipts route to completed/"
+    def test_done_status_reads_as_success(self, tmp_path: Path) -> None:
+        from check_active_drain import build_receipt_status_index
+
+        data = _make_data_dir(tmp_path)
+        _make_receipt(data, "20260506-done-index-test", status="done")
+        assert build_receipt_status_index(data / "receipts") == {"20260506-done-index-test": "success"}, (
+            "'done' must read as success so subprocess-adapter receipts route to completed/"
         )
 
     def test_done_receipt_drain_to_completed(self, tmp_path: Path) -> None:

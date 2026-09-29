@@ -1,25 +1,22 @@
 """Gate-F2: cross-module vocabulary consistency tests.
 
-Three modules carry a FAILURE_STATUSES set that must be kept in sync
-(weekly_digest left the list in D4a: it counts through receipt_outcome):
-  1. scripts/check_active_drain.py         — FAILURE_STATUSES (frozenset)
-  2. scripts/lib/receipt_classifier.py     — _FAILURE_STATUSES (set)
-  3. scripts/lib/append_receipt_internals/payload.py — FAILURE_STATUSES (local set)
+Two modules carry a FAILURE_STATUSES set that must be kept in sync
+(weekly_digest and check_active_drain left the list in D4a: they read
+receipt_outcome):
+  1. scripts/lib/receipt_classifier.py     — _FAILURE_STATUSES (set)
+  2. scripts/lib/append_receipt_internals/payload.py — FAILURE_STATUSES (local set)
 
-Two modules carry a SUCCESS_STATUSES set that is also sync-guarded:
-  1. scripts/check_active_drain.py         — SUCCESS_STATUSES (frozenset)
-  2. scripts/lib/append_receipt_internals/payload.py — SUCCESS_STATUSES (local set)
+One module carries a SUCCESS_STATUSES set that is also guarded:
+  1. scripts/lib/append_receipt_internals/payload.py — SUCCESS_STATUSES (local set)
 
 This file contains:
   A) Per-module assertions that "contract_invalid" is present (gate-F2 requirement).
-  B) A cross-module consistency test that imports all three FAILURE sets and verifies
+  B) A cross-module consistency test that imports both FAILURE sets and verifies
      they are identical, so any future divergence fails CI structurally.
-  B2) Cross-module SUCCESS_STATUSES structural tests (drain/payload).
+  B2) Cross-module SUCCESS_STATUSES structural tests (payload).
       The canonical success set (payload imports it from event_outcome_semantics)
       is {success, completed, complete, ok, done}. Empty status ("") was removed
-      from canonical success — absence is not a success claim. drain still
-      carries "" as a documented read-side classifier tolerance this
-      consolidation leaves untouched.
+      from canonical success — absence is not a success claim.
   C) Semantic checks: the `failures_direct` branch in receipt_classifier is
      tested to fire immediately for a `contract_invalid` receipt and to
      queue for batch for a success receipt.
@@ -45,13 +42,8 @@ for p in (str(SCRIPTS_DIR), str(LIB_DIR)):
 
 
 # ---------------------------------------------------------------------------
-# Helpers to extract the three sets without side effects from module-level env.
+# Helpers to extract the two sets without side effects from module-level env.
 # ---------------------------------------------------------------------------
-
-def _get_drain_failure_statuses() -> FrozenSet[str]:
-    import check_active_drain
-    return check_active_drain.FAILURE_STATUSES
-
 
 def _extract_frozenset_or_set_literal(node: "ast.expr") -> FrozenSet[str]:  # type: ignore[name-defined]
     """Extract a frozenset from either a set literal or a frozenset({...}) call."""
@@ -152,8 +144,8 @@ def _get_payload_failure_statuses() -> FrozenSet[str]:
         classifier (receipt_classifier).
 
     The cross-module sync tests therefore compare the common-core subset
-    (i.e. drain ∩ classifier ∩ payload) rather than demanding
-    strict equality across all three sets.
+    (i.e. classifier ∩ payload) rather than demanding
+    strict equality across both sets.
     """
     return _extract_payload_vocab("FAILURE_STATUSES")
 
@@ -163,11 +155,6 @@ def _get_payload_failure_statuses() -> FrozenSet[str]:
 # ---------------------------------------------------------------------------
 
 class TestContractInvalidPresence:
-    def test_drain_has_contract_invalid(self):
-        assert "contract_invalid" in _get_drain_failure_statuses(), (
-            "check_active_drain.FAILURE_STATUSES is missing 'contract_invalid'"
-        )
-
     def test_classifier_has_contract_invalid(self):
         assert "contract_invalid" in _get_classifier_failure_statuses(), (
             "receipt_classifier._FAILURE_STATUSES is missing 'contract_invalid' (gate-F2)"
@@ -183,7 +170,7 @@ class TestContractInvalidPresence:
 # B) Cross-module structural consistency — FAILURE_STATUSES
 # ---------------------------------------------------------------------------
 
-# Intentional documented gaps between the three FAILURE_STATUSES sets:
+# Intentional documented gaps between the two FAILURE_STATUSES sets:
 #
 #   payload excludes 'timeout':
 #     task_timeout events reach the else-return branch in
@@ -196,37 +183,27 @@ class TestContractInvalidPresence:
 #
 # The canonical reference for the gate-F2 requirement is the shared core:
 #   {"failed","failure","error","blocked","contract_invalid"}
-# plus "timeout" for drain/classifier (but NOT payload — documented above).
+# plus "timeout" for the classifier (but NOT payload — documented above).
 
 _PAYLOAD_KNOWN_EXCLUSIONS: FrozenSet[str] = frozenset({"timeout"})
 
 
 class TestVocabCrossModuleSync:
-    """Structural drift tests between the three FAILURE_STATUSES sets.
+    """Structural drift tests between the two FAILURE_STATUSES sets.
 
-    The canonical reference is check_active_drain.FAILURE_STATUSES.
-    - classifier must exactly match drain.
-    - payload must contain all drain entries EXCEPT the documented exclusions.
-    Adding a new status to drain without updating the others fails this test.
+    The reference is receipt_classifier._FAILURE_STATUSES.
+    - payload must contain all classifier entries EXCEPT the documented exclusions.
+    Adding a new status to the classifier without updating payload fails this test.
     """
 
-    def test_classifier_failure_set_matches_drain(self):
-        drain = _get_drain_failure_statuses()
-        classifier = _get_classifier_failure_statuses()
-        assert classifier == drain, (
-            f"receipt_classifier._FAILURE_STATUSES diverged from check_active_drain.FAILURE_STATUSES.\n"
-            f"  drain only  : {drain - classifier}\n"
-            f"  classif only: {classifier - drain}"
-        )
-
-    def test_payload_contains_drain_minus_known_exclusions(self):
-        """payload.FAILURE_STATUSES must be a superset of (drain - _PAYLOAD_KNOWN_EXCLUSIONS).
+    def test_payload_contains_classifier_minus_known_exclusions(self):
+        """payload.FAILURE_STATUSES must be a superset of (classifier - _PAYLOAD_KNOWN_EXCLUSIONS).
 
         'timeout' is the only intentional exclusion; any other missing member is a bug.
         """
-        drain = _get_drain_failure_statuses()
+        reference = _get_classifier_failure_statuses()
         payload = _get_payload_failure_statuses()
-        required = drain - _PAYLOAD_KNOWN_EXCLUSIONS
+        required = reference - _PAYLOAD_KNOWN_EXCLUSIONS
         missing = required - payload
         assert not missing, (
             f"payload.FAILURE_STATUSES is missing required members (gate-F2).\n"
@@ -241,25 +218,23 @@ class TestVocabCrossModuleSync:
         If a new exclusion is intentional, add it to _PAYLOAD_KNOWN_EXCLUSIONS
         with an explicit comment explaining the semantic reason.
         """
-        drain = _get_drain_failure_statuses()
+        reference = _get_classifier_failure_statuses()
         payload = _get_payload_failure_statuses()
-        unexpected_missing = (drain - payload) - _PAYLOAD_KNOWN_EXCLUSIONS
+        unexpected_missing = (reference - payload) - _PAYLOAD_KNOWN_EXCLUSIONS
         assert not unexpected_missing, (
             f"payload.FAILURE_STATUSES has unexpected missing entries: {sorted(unexpected_missing)}.\n"
             "If intentional, add to _PAYLOAD_KNOWN_EXCLUSIONS with a comment."
         )
 
-    def test_common_core_present_in_all_three(self):
-        """The common core (gate-F2 requirements) must be in all three sets."""
+    def test_common_core_present_in_both(self):
+        """The common core (gate-F2 requirements) must be in both sets."""
         core = frozenset({
             "failed", "failure", "error", "blocked", "contract_invalid",
         })
-        drain = _get_drain_failure_statuses()
         classifier = _get_classifier_failure_statuses()
         payload = _get_payload_failure_statuses()
 
         sets = {
-            "drain": drain,
             "classifier": classifier,
             "payload": payload,
         }
@@ -277,11 +252,6 @@ class TestVocabCrossModuleSync:
 
 # Helpers to extract SUCCESS sets from the three modules that carry them.
 
-def _get_drain_success_statuses() -> FrozenSet[str]:
-    import check_active_drain
-    return check_active_drain.SUCCESS_STATUSES
-
-
 def _get_payload_success_statuses() -> FrozenSet[str]:
     """Extract SUCCESS_STATUSES used by payload._update_confidence_from_receipt.
 
@@ -295,26 +265,17 @@ def _get_payload_success_statuses() -> FrozenSet[str]:
 #
 #   empty status ("") is NOT canonical success:
 #     event_outcome_semantics dropped "" from SUCCESS_STATUSES — absence is not
-#     a success claim (resolve_status_category returns "no_signal"). drain still
-#     carries "" as a pre-existing read-side classifier tolerance this
-#     consolidation leaves untouched (check_active_drain is a read-side
-#     consumer, not the write path the consolidation governs).
+#     a success claim (resolve_status_category returns "no_signal").
 #
-# The canonical core that BOTH must carry:
+# The canonical core payload must carry:
 _SUCCESS_CORE = frozenset({"success", "completed", "complete", "ok", "done"})
 
-# drain-known extra vs canonical (documented acceptable difference):
-_DRAIN_SUCCESS_KNOWN_EXTRA: FrozenSet[str] = frozenset({""})
-
-
 class TestSuccessVocabCrossModuleSync:
-    """Structural drift tests between SUCCESS_STATUSES sets in drain / payload.
+    """Structural drift tests between SUCCESS_STATUSES sets in payload.
 
     The canonical reference is payload.SUCCESS_STATUSES (imported from
     event_outcome_semantics, the single generated source). It is exactly the
     core {success, completed, complete, ok, done}.
-    - drain may carry "" as a documented extra (read-side classifier tolerance).
-    - Both must contain the common core.
     """
 
     def test_payload_success_set_is_the_canonical_core(self):
@@ -326,18 +287,6 @@ class TestSuccessVocabCrossModuleSync:
             f"  actual  : {sorted(payload)}"
         )
 
-    def test_drain_success_carries_only_empty_as_extra(self):
-        """drain may differ from canonical only by the documented "" extra."""
-        drain = _get_drain_success_statuses()
-        assert drain - _SUCCESS_CORE == _DRAIN_SUCCESS_KNOWN_EXTRA, (
-            f"check_active_drain.SUCCESS_STATUSES has an undocumented extra vs canonical core:\n"
-            f"  drain only: {sorted(drain - _SUCCESS_CORE)}"
-        )
-        assert _SUCCESS_CORE - drain == frozenset(), (
-            f"check_active_drain.SUCCESS_STATUSES is missing canonical core entries: "
-            f"{sorted(_SUCCESS_CORE - drain)}"
-        )
-
     def test_payload_success_contains_done(self):
         """Regression guard: 'done' must be in payload.SUCCESS_STATUSES (gate finding)."""
         payload = _get_payload_success_statuses()
@@ -346,13 +295,6 @@ class TestSuccessVocabCrossModuleSync:
             "and those receipts must update success-confidence (gate finding)."
         )
 
-    def test_drain_success_core_present(self):
-        """drain.SUCCESS_STATUSES must contain the full common core."""
-        drain = _get_drain_success_statuses()
-        missing = _SUCCESS_CORE - drain
-        assert not missing, (
-            f"check_active_drain.SUCCESS_STATUSES missing core entries: {sorted(missing)}"
-        )
 
 # ---------------------------------------------------------------------------
 # B3) Regression coverage for the payload extractor's canonical-import form.
@@ -385,7 +327,7 @@ class TestPayloadCanonicalImportRecognition:
         We synthesize a payload.py body carrying a diverging LOCAL literal
         (rather than the canonical import) and feed it through the same
         extractor the real tests use, then reproduce the common-core
-        assertion from TestVocabCrossModuleSync.test_common_core_present_in_all_three
+        assertion from TestVocabCrossModuleSync.test_common_core_present_in_both
         inline. If the extractor ever regressed to silently preferring/ignoring
         a local override, this would go green when it must stay red.
         """

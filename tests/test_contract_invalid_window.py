@@ -8,10 +8,10 @@ Covers the windowing-only salvage of the parked report_contract_invalid fix
      unparseable time, ingested_at-over-timestamp precedence.
   2. scripts/lib/append_receipt_internals/payload.py — _stamp_ingested_at()
      always overwrites a caller-supplied value.
-  3. scripts/learning_loop.py, scripts/check_active_drain.py — a frozen old batch is excluded from the
-     live counters while a fresh contract_invalid (including one with a
-     forged old `timestamp` but a fresh `ingested_at`) still counts.
-     (weekly_digest left this list in D4a: it windows through receipt_outcome.)
+  3. scripts/learning_loop.py — a frozen old batch is excluded from the live
+     counters while a fresh contract_invalid (including one with a forged old
+     `timestamp` but a fresh `ingested_at`) still counts. weekly_digest and
+     check_active_drain left this list in D4a: they read receipt_outcome.
 
 The classification half (report_exempt / panel-seat / benchmark exemptions)
 is intentionally out of scope — parked for the receipt-v2 redesign.
@@ -237,18 +237,8 @@ class TestCheckActiveDrainWindowing:
     def _write_processed_receipt(self, receipts_dir: Path, dispatch_id: str, record: dict) -> None:
         processed = receipts_dir / "processed"
         processed.mkdir(parents=True, exist_ok=True)
-        payload = {"dispatch_id": dispatch_id, **record}
+        payload = {"dispatch_id": dispatch_id, "event_type": "report_contract_invalid", **record}
         (processed / f"receipt-{dispatch_id}.json").write_text(json.dumps(payload), encoding="utf-8")
-
-    def test_stale_contract_invalid_falls_through_as_if_absent(self, tmp_path: Path) -> None:
-        from check_active_drain import build_receipt_status_index
-
-        receipts_dir = tmp_path / "receipts"
-        self._write_processed_receipt(
-            receipts_dir, "d-stale", {"status": "contract_invalid", "ingested_at": _OLD_26D}
-        )
-        idx = build_receipt_status_index(receipts_dir)
-        assert "d-stale" not in idx
 
     def test_fresh_contract_invalid_is_failure(self, tmp_path: Path) -> None:
         from check_active_drain import build_receipt_status_index
@@ -260,18 +250,6 @@ class TestCheckActiveDrainWindowing:
         idx = build_receipt_status_index(receipts_dir)
         assert idx["d-fresh"] == "failure"
 
-    def test_forged_timestamp_fresh_ingested_at_still_failure(self, tmp_path: Path) -> None:
-        from check_active_drain import build_receipt_status_index
-
-        receipts_dir = tmp_path / "receipts"
-        self._write_processed_receipt(
-            receipts_dir,
-            "d-forged",
-            {"status": "contract_invalid", "timestamp": _OLD_26D, "ingested_at": _FRESH},
-        )
-        idx = build_receipt_status_index(receipts_dir)
-        assert idx["d-forged"] == "failure"
-
     def test_missing_timestamp_fail_open_still_failure(self, tmp_path: Path) -> None:
         """Backward-compat guard: a contract_invalid receipt with no timestamp
         field at all (pre-existing fixture shape) must still route to failure."""
@@ -281,16 +259,6 @@ class TestCheckActiveDrainWindowing:
         self._write_processed_receipt(receipts_dir, "d-no-ts", {"status": "contract_invalid"})
         idx = build_receipt_status_index(receipts_dir)
         assert idx["d-no-ts"] == "failure"
-
-    def test_stale_via_timestamp_fallback_falls_through(self, tmp_path: Path) -> None:
-        from check_active_drain import build_receipt_status_index
-
-        receipts_dir = tmp_path / "receipts"
-        self._write_processed_receipt(
-            receipts_dir, "d-old-v1", {"status": "contract_invalid", "timestamp": _OLD_26D}
-        )
-        idx = build_receipt_status_index(receipts_dir)
-        assert "d-old-v1" not in idx
 
 
 class TestMalformedPrefixValidCountsInAllCounters:
@@ -346,6 +314,7 @@ class TestMalformedPrefixValidCountsInAllCounters:
             json.dumps(
                 {
                     "dispatch_id": "d-prefix-valid",
+                    "event_type": "report_contract_invalid",
                     "status": "contract_invalid",
                     "ingested_at": "2020-01-01-not-a-date",
                 }
@@ -354,25 +323,6 @@ class TestMalformedPrefixValidCountsInAllCounters:
         )
         idx = build_receipt_status_index(receipts_dir)
         assert idx["d-prefix-valid"] == "failure"
-
-    def test_check_active_drain_genuine_old_excluded(self, tmp_path: Path) -> None:
-        from check_active_drain import build_receipt_status_index
-
-        receipts_dir = tmp_path / "receipts"
-        processed = receipts_dir / "processed"
-        processed.mkdir(parents=True, exist_ok=True)
-        (processed / "receipt-old.json").write_text(
-            json.dumps(
-                {"dispatch_id": "d-old", "status": "contract_invalid", "ingested_at": _OLD_26D}
-            ),
-            encoding="utf-8",
-        )
-        idx = build_receipt_status_index(receipts_dir)
-        assert "d-old" not in idx
-
-
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-v"]))
 
 
 # ---------------------------------------------------------------------------
@@ -491,7 +441,8 @@ class TestCheckActiveDrainFailOpenOnUnparseableTime:
         (active_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
 
         (receipts_processed / f"receipt-{did}.json").write_text(
-            json.dumps({"dispatch_id": did, "status": "contract_invalid"}),
+            json.dumps({"dispatch_id": did, "event_type": "report_contract_invalid",
+                        "status": "contract_invalid"}),
             encoding="utf-8",
         )
 
@@ -522,7 +473,8 @@ class TestCheckActiveDrainFailOpenOnUnparseableTime:
         processed.mkdir(parents=True)
         (processed / "receipt-bad-ts.json").write_text(
             json.dumps(
-                {"dispatch_id": "d-bad-ts", "status": "contract_invalid", "ingested_at": "0000-not-a-date"}
+                {"dispatch_id": "d-bad-ts", "event_type": "report_contract_invalid",
+                 "status": "contract_invalid", "ingested_at": "0000-not-a-date"}
             ),
             encoding="utf-8",
         )

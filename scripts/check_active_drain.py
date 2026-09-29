@@ -13,10 +13,10 @@ Rules
 * dispatch has no receipt AND is older than --older-than-hours (default 1)   → move to dead_letter/
 * dispatch has no receipt AND is newer than the threshold                     → leave alone
 
-Failed dispatches must NEVER be drained as completed: the receipt's
-``status`` field is consulted (canonical sets in scripts/append_receipt.py)
-so that timeout/error/blocked outcomes route to dead_letter/ instead of
-masquerading as successful work.
+Failed dispatches must NEVER be drained as completed: the dispatch's outcome
+(``receipt_outcome``) is consulted, so that a failed, timed-out or
+contract-invalid dispatch routes to dead_letter/ instead of masquerading as
+successful work. A failure that a later successful retry replaced does not.
 
 Exit codes
 ----------
@@ -45,8 +45,9 @@ from typing import Iterator, NamedTuple
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_SCRIPTS_DIR / "lib"))
 
-from project_root import resolve_data_dir  # noqa: E402
-from contract_invalid_window import is_stale_contract_invalid  # noqa: E402
+from project_root import resolve_data_dir, resolve_project_id  # noqa: E402
+from receipt_outcome import lane_result, summarize as summarize_outcomes  # noqa: E402
+from vnx_paths import project_id_from_state_dir  # noqa: E402
 
 
 def _data_dir(override: str | None) -> Path:
@@ -76,11 +77,23 @@ class DrainResult(NamedTuple):
 # Receipt index
 # ---------------------------------------------------------------------------
 
-# Canonical status sets (kept in sync with scripts/append_receipt.py and
-# scripts/weekly_digest.py _FAILURE_STATUSES).
-# "contract_invalid" = report-body-contract failure → semantically a failure.
-SUCCESS_STATUSES = frozenset({"success", "completed", "complete", "ok", "", "done"})
-FAILURE_STATUSES = frozenset({"failed", "failure", "error", "blocked", "timeout", "contract_invalid"})
+# What a dispatch's processed receipts add up to is receipt_outcome's call
+# (fabric-state-herstel D3/D4a): the last lane status in file order, a later
+# contract_invalid as a failure, noise, bookkeeping and other projects ignored.
+# The drain used to let any failure win, so an old failure outlived a
+# successful retry.
+_UNSCOPED_PROJECT = "\x00unscoped"
+
+
+def _project_id(data_dir: Path) -> str:
+    """The project whose store this is: derived from the data dir, else ambient."""
+    derived = project_id_from_state_dir(data_dir / "state")
+    if derived:
+        return derived
+    try:
+        return resolve_project_id()
+    except RuntimeError:
+        return ""
 
 
 def build_receipt_index(receipts_dir: Path) -> frozenset[str]:
@@ -92,52 +105,38 @@ def build_receipt_index(receipts_dir: Path) -> frozenset[str]:
     return frozenset(build_receipt_status_index(receipts_dir).keys())
 
 
-def build_receipt_status_index(receipts_dir: Path) -> dict[str, str]:
-    """Map dispatch_id → normalized status (\"success\" | \"failure\" | \"unknown\").
-
-    When multiple receipts exist for the same dispatch_id (e.g., a chain of
-    retries), a failure status wins over success — fail-closed semantics
-    ensure a partially-failed dispatch is never recorded as completed.
-    """
-    processed = receipts_dir / "processed"
-    if not processed.is_dir():
-        return {}
-
-    out: dict[str, str] = {}
-    for path in processed.iterdir():
+def _read_processed(processed: Path) -> list[dict]:
+    """Processed receipts in file-name order: the names start with the write
+    time in epoch seconds, so this is the order they arrived in."""
+    receipts: list[dict] = []
+    for path in sorted(processed.iterdir(), key=lambda p: p.name):
         if path.suffix != ".json":
             continue
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             continue
-        did = data.get("dispatch_id", "")
-        if not did or did == "unknown":
-            continue
-        status_raw = str(data.get("status", "")).strip().lower()
-        event_type_raw = str(data.get("event_type") or data.get("event") or "").strip().lower()
-        is_contract_invalid = (
-            status_raw == "contract_invalid" or event_type_raw == "report_contract_invalid"
-        )
-        # A frozen contract_invalid batch (bulk-emitted, single old timestamp)
-        # is not a live signal for the currently-active dispatch it happens to
-        # key-match — skip it as if no receipt were found (falls through to
-        # the active-dispatch's own age check instead).
-        if is_contract_invalid and is_stale_contract_invalid(data):
-            continue
-        if status_raw in FAILURE_STATUSES:
-            normalized = "failure"
-        elif status_raw in SUCCESS_STATUSES:
-            normalized = "success"
-        else:
-            normalized = "unknown"
-        # Fail-closed: failure beats success beats unknown.
-        prior = out.get(did)
-        if prior == "failure":
-            continue
-        if normalized == "failure" or prior is None or (prior == "unknown" and normalized == "success"):
-            out[did] = normalized
-    return out
+        if isinstance(data, dict):
+            receipts.append(data)
+    return receipts
+
+
+def build_receipt_status_index(receipts_dir: Path) -> dict[str, str]:
+    """Map dispatch_id → \"success\" | \"failure\" | \"unknown\", one per dispatch.
+
+    ``receipts_dir`` is ``<data dir>/receipts``. A dispatch without an outcome
+    receipt (only bookkeeping, noise or another project's lines) has no entry.
+    """
+    processed = receipts_dir / "processed"
+    if not processed.is_dir():
+        return {}
+
+    receipts = _read_processed(processed)
+    project_id = _project_id(receipts_dir.parent)
+    if not project_id:
+        receipts = [{k: v for k, v in r.items() if k != "project_id"} for r in receipts]
+    summary = summarize_outcomes(receipts, project_id=project_id or _UNSCOPED_PROJECT)
+    return {o["dispatch_id"]: lane_result(o) for o in summary["outcomes"]}
 
 
 # ---------------------------------------------------------------------------
