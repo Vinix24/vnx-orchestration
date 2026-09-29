@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Dict, FrozenSet, List, Optional, TypedDict
 
 import tracks as tracks_lib  # same package; importable whenever scripts/lib/ is in sys.path
+from track_dependency_kind import dependency_blocks
 
 log = logging.getLogger(__name__)
 
@@ -400,8 +401,11 @@ def _blocking_detail(
     existence probe — so the caller can NAME the blocker instead of merely
     detecting it. Reuses the same pre-0030 / project_id-column fallbacks.
 
-    Returns {"blocking_ois": [...], "blocking_deps": [...]}; both empty when
-    neither check currently blocks (i.e. when called for a non-blocked track).
+    Returns {"blocking_ois": [...], "blocking_deps": [...], "advisory_deps": [...]};
+    the first two are empty when neither check currently blocks (i.e. when called
+    for a non-blocked track). Only ``hard`` edges (and edges of an unrecognized
+    kind, fail-closed) land in blocking_deps; unfinished ``soft``/``overlap``
+    targets are listed in advisory_deps and never block.
     """
     has_project_id_col = _has_col(conn, "track_open_items", "project_id")
     has_resolved_at_col = _has_col(conn, "track_open_items", "resolved_at")
@@ -448,7 +452,7 @@ def _blocking_detail(
 
     dep_rows = conn.execute(
         """
-        SELECT td.to_track_id, t.phase
+        SELECT td.to_track_id, td.to_project_id, td.kind, t.phase
         FROM track_dependencies td
         JOIN tracks t
           ON t.track_id = td.to_track_id AND t.project_id = td.to_project_id
@@ -456,13 +460,27 @@ def _blocking_detail(
         """,
         (track_id, project_id),
     ).fetchall()
-    blocking_deps = [
-        {"track_id": row["to_track_id"], "phase": row["phase"]}
-        for row in dep_rows
-        if row["phase"] != "done"
-    ]
+    blocking_deps: List[Dict[str, Any]] = []
+    advisory_deps: List[Dict[str, Any]] = []
+    for row in dep_rows:
+        if row["phase"] == "done":
+            continue
+        if dependency_blocks(
+            row["kind"],
+            from_track_id=track_id, from_project_id=project_id,
+            to_track_id=row["to_track_id"], to_project_id=row["to_project_id"],
+        ):
+            blocking_deps.append({"track_id": row["to_track_id"], "phase": row["phase"]})
+        else:
+            advisory_deps.append(
+                {"track_id": row["to_track_id"], "phase": row["phase"], "kind": row["kind"]}
+            )
 
-    return {"blocking_ois": blocking_ois, "blocking_deps": blocking_deps}
+    return {
+        "blocking_ois": blocking_ois,
+        "blocking_deps": blocking_deps,
+        "advisory_deps": advisory_deps,
+    }
 
 
 _PLAN_OI_PREFIX = "OI-PLAN-"
@@ -481,6 +499,9 @@ def format_blocking_hint(detail: Optional[Dict[str, Any]]) -> str:
 
     Blocker-OI resolution stays HUMAN-GATED: this only formats the command; it
     never runs it and never clears the open-item itself.
+
+    Advisory (soft/overlap) dependencies are appended after the blockers, so the
+    operator sees them, but they never make a hint on their own.
 
     Returns "" when detail is None/empty or names no blockers.
     """
@@ -516,6 +537,11 @@ def format_blocking_hint(detail: Optional[Dict[str, Any]]) -> str:
     for dep in blocking_deps:
         lines.append(
             f"blocked by dependency {dep.get('track_id')} "
+            f"-- not done (phase={dep.get('phase')})"
+        )
+    for dep in detail.get("advisory_deps") or []:
+        lines.append(
+            f"advisory, not blocking: {dep.get('kind')} dependency {dep.get('track_id')} "
             f"-- not done (phase={dep.get('phase')})"
         )
     return "\n".join(lines)

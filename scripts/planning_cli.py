@@ -62,6 +62,7 @@ for _p in (_LIB, _HERE):
 import tracks as tracks_lib  # noqa: E402
 import seed_tracks_from_roadmap as seeder  # noqa: E402
 import track_reconciler  # noqa: E402
+from track_dependency_kind import dependency_blocks  # noqa: E402
 import objective_reconcile  # noqa: E402
 import plan_gate_enforcement  # noqa: E402
 
@@ -498,18 +499,23 @@ def _drift_reason(
                             return f"blocked: plan-gate refused ({oi_id})"
                         return f"blocked: plan-gate unread ({oi_id})"
                     return f"blocked by open item: {oi_id}"
-            unmet = conn.execute(
+            unmet_rows = conn.execute(
                 """
-                SELECT td.to_track_id
+                SELECT td.to_track_id, td.to_project_id, td.kind
                 FROM track_dependencies td
                 JOIN tracks t ON t.track_id = td.to_track_id AND t.project_id = td.to_project_id
                 WHERE td.from_track_id = ? AND td.from_project_id = ? AND t.phase != 'done'
-                LIMIT 1
+                ORDER BY td.to_track_id
                 """,
                 (track_id, project_id),
-            ).fetchone()
-            if unmet:
-                return f"blocked by dependency: {unmet[0]}"
+            ).fetchall()
+            for unmet in unmet_rows:
+                if dependency_blocks(
+                    unmet[2],
+                    from_track_id=track_id, from_project_id=project_id,
+                    to_track_id=unmet[0], to_project_id=unmet[1],
+                ):
+                    return f"blocked by dependency: {unmet[0]}"
             return "blocked"
 
         # OI-1098: a delivery-held track (explicit non-'complete' marking on
@@ -1259,6 +1265,43 @@ def cmd_objective_unlink_pr(args: argparse.Namespace) -> int:
             print("  delivery markers: none had a marker")
         print(f"  reason: {reason}")
         print()
+    return 0
+
+
+def cmd_objective_unlink_dep(args: argparse.Namespace) -> int:
+    """Remove one dependency edge (operator-gated; audited via track_dep_removed).
+
+    The edge is the full key (track_id, --project-id) -> (to_track_id,
+    --to-project-id, default: same project). Another project's edge with the
+    same ids is never touched (ADR-007). A non-empty --reason is REQUIRED.
+    Derived statuses refresh on the next reconcile; this verb does not run one.
+    """
+    state_dir = _resolve_state_dir(args.state_dir)
+    from_project = args.project_id
+    to_project = args.to_project_id or from_project
+    reason = (args.reason or "").strip()
+    if not reason:
+        print(
+            "objective unlink-dep: --reason is required and must not be empty "
+            "(no silent bypass). No change made.",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        removed = tracks_lib.remove_dependency(
+            state_dir, args.track_id, from_project, args.to_track_id, to_project,
+            reason=reason, actor="operator",
+        )
+    except tracks_lib.DependencyNotFoundError as exc:
+        print(f"objective unlink-dep: {exc}. No change made.", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps({**removed, "reason": reason, "applied": True}, indent=2))
+    else:
+        print(
+            f"\nvnx objective unlink-dep — removed {removed['kind']} edge "
+            f"{args.track_id} ({from_project}) -> {args.to_track_id} ({to_project})\n"
+        )
     return 0
 
 
@@ -5194,6 +5237,24 @@ def _build_parser() -> argparse.ArgumentParser:
              "no silent bypass -- an empty reason is refused)",
     )
     p_unlink_pr.set_defaults(func=cmd_objective_unlink_pr)
+
+    p_unlink_dep = obj_sub.add_parser(
+        "unlink-dep",
+        help="remove one dependency edge (operator-gated; audited as track_dep_removed)",
+    )
+    _common(p_unlink_dep)
+    p_unlink_dep.add_argument("track_id", help="the dependent track (edge source)")
+    p_unlink_dep.add_argument("to_track_id", help="the track it depends on (edge target)")
+    p_unlink_dep.add_argument(
+        "--to-project-id", default="", dest="to_project_id",
+        help="project of the target track (default: same as --project-id)",
+    )
+    p_unlink_dep.add_argument(
+        "--reason", default="",
+        help="REQUIRED, non-empty: why this edge is being removed (audited; "
+             "an empty reason is refused)",
+    )
+    p_unlink_dep.set_defaults(func=cmd_objective_unlink_dep)
 
     p_unmark_delivery = obj_sub.add_parser(
         "unmark-delivery",

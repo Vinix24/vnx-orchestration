@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any, Dict, FrozenSet, List, Optional
 
 import tracks as tracks_lib  # same package; importable whenever scripts/lib/ is in sys.path
+from track_dependency_kind import dependency_blocks
 
 def close_track_if_done(
     state_dir: "str | Path",
@@ -200,10 +201,11 @@ def close_track_if_done(
             # becomes advisory (reconcile_track still runs for the derived refresh).
             pr_results_list = evidence.get("pr_results") or []
             if pr_results_list:
-                # Dependency check: every dep must have declared phase 'done'.
+                # Dependency check: every HARD dep must have declared phase 'done'.
+                # soft/overlap edges are advice; unknown kinds count as hard.
                 dep_rows = conn.execute(
                     """
-                    SELECT t.phase
+                    SELECT t.phase, td.kind, td.to_track_id, td.to_project_id
                     FROM track_dependencies td
                     JOIN tracks t
                       ON t.track_id = td.to_track_id AND t.project_id = td.to_project_id
@@ -212,7 +214,12 @@ def close_track_if_done(
                     (track_id, project_id),
                 ).fetchall()
                 for dep_row in dep_rows:
-                    if dep_row[0] != "done":
+                    if dep_row["phase"] != "done" and dependency_blocks(
+                        dep_row["kind"],
+                        from_track_id=track_id, from_project_id=project_id,
+                        to_track_id=dep_row["to_track_id"],
+                        to_project_id=dep_row["to_project_id"],
+                    ):
                         return {
                             "track_id": track_id,
                             "project_id": project_id,

@@ -18,6 +18,8 @@ from __future__ import annotations
 import sqlite3
 from typing import FrozenSet
 
+from track_dependency_kind import dependency_blocks
+
 
 def _compute_derived_status(
     conn: sqlite3.Connection,
@@ -67,11 +69,13 @@ def _compute_derived_status(
     if blocker:
         return "blocked"
 
-    # 2. Dependency check: any dependency whose declared phase is not 'done' blocks this track.
-    #    Uses declared phase (authoritative) to avoid circular dependency on derived_status.
-    dep_phases = conn.execute(
+    # 2. Dependency check: any HARD dependency whose declared phase is not 'done' blocks
+    #    this track. soft/overlap edges are advice and never block; an unrecognized
+    #    kind counts as hard (fail-closed, warned). Uses declared phase (authoritative)
+    #    to avoid circular dependency on derived_status.
+    dep_rows = conn.execute(
         """
-        SELECT t.phase
+        SELECT t.phase, td.kind, td.to_track_id, td.to_project_id
         FROM track_dependencies td
         JOIN tracks t
           ON t.track_id = td.to_track_id AND t.project_id = td.to_project_id
@@ -79,8 +83,12 @@ def _compute_derived_status(
         """,
         (track_id, project_id),
     ).fetchall()
-    for row in dep_phases:
-        if row[0] != "done":
+    for row in dep_rows:
+        if row["phase"] != "done" and dependency_blocks(
+            row["kind"],
+            from_track_id=track_id, from_project_id=project_id,
+            to_track_id=row["to_track_id"], to_project_id=row["to_project_id"],
+        ):
             return "blocked"
 
     # 3. Fetch track's pr_ref and declared phase once (reused below).

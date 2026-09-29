@@ -103,6 +103,10 @@ class TrackNotFoundError(ValueError):
     pass
 
 
+class DependencyNotFoundError(ValueError):
+    """No track_dependencies edge with the given full key exists."""
+
+
 class InvalidPhaseError(ValueError):
     pass
 
@@ -879,6 +883,70 @@ def add_dependency(
             ),
         )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def remove_dependency(
+    state_dir: str | Path,
+    from_track_id: str,
+    from_project_id: str,
+    to_track_id: str,
+    to_project_id: str,
+    *,
+    reason: str,
+    actor: str = "operator",
+) -> dict[str, Any]:
+    """Delete one dependency edge and record a ``track_dep_removed`` event.
+
+    The edge is addressed by its full key (from_track_id, from_project_id,
+    to_track_id, to_project_id) per ADR-007: an edge of another project with the
+    same track ids is never touched. The audit event is written BEFORE the
+    delete (ADR-005): a failed write leaves the edge in place.
+
+    Returns the removed edge's kind. Raises ValueError on an empty reason or an
+    invalid actor, DependencyNotFoundError when no such edge exists.
+    """
+    reason = (reason or "").strip()
+    if not reason:
+        raise ValueError("remove_dependency requires a non-empty reason")
+    if actor not in ("operator", "T0", "system"):
+        raise ValueError(f"Invalid actor: {actor!r}. Must be operator, T0 or system")
+
+    conn = _get_conn(state_dir)
+    try:
+        key = (from_track_id, from_project_id, to_track_id, to_project_id)
+        row = conn.execute(
+            """
+            SELECT kind FROM track_dependencies
+            WHERE from_track_id = ? AND from_project_id = ?
+              AND to_track_id = ? AND to_project_id = ?
+            """,
+            key,
+        ).fetchone()
+        if row is None:
+            raise DependencyNotFoundError(
+                f"Dependency not found: ({from_track_id!r}, {from_project_id!r}) -> "
+                f"({to_track_id!r}, {to_project_id!r})"
+            )
+        kind = row["kind"]
+        _emit_track_event(
+            state_dir, "track_dep_removed", from_track_id, from_project_id, actor,
+            {"to_track": to_track_id, "to_project": to_project_id, "kind": kind, "reason": reason},
+        )
+        conn.execute(
+            """
+            DELETE FROM track_dependencies
+            WHERE from_track_id = ? AND from_project_id = ?
+              AND to_track_id = ? AND to_project_id = ?
+            """,
+            key,
+        )
+        conn.commit()
+        return {
+            "from_track_id": from_track_id, "from_project_id": from_project_id,
+            "to_track_id": to_track_id, "to_project_id": to_project_id, "kind": kind,
+        }
     finally:
         conn.close()
 
