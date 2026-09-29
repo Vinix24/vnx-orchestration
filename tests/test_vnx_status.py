@@ -91,8 +91,17 @@ SAMPLE_T0_STATE: dict = {
     },
     "queues": {
         "pending_count": 1,
-        "active_count": 1,
         "completed_last_hour": 3,
+    },
+    "live_work": {
+        "available": True,
+        "live": [{"dispatch_id": "20260506-w-ux-3", "state": "running",
+                  "age_seconds": 600, "lock": "held", "pr": 396}],
+        "starting": [],
+        "stale": [{"dispatch_id": "20260501-zombie", "state": "delivering",
+                   "age_seconds": 259200, "lock": "released"}],
+        "unmeasured": [],
+        "counts": {"live": 1, "starting": 0, "stale": 1, "unmeasured": 0},
     },
 }
 
@@ -174,12 +183,20 @@ class TestDashboardContent:
         assert rc == 0
         assert "PR #232" not in out
 
-    def test_terminal_status_present(self, data_dir: Path) -> None:
+    def test_live_work_present(self, data_dir: Path) -> None:
         rc, out = _run(data_dir_=data_dir)
         assert rc == 0
-        assert "T1" in out
-        assert "T2" in out
-        assert "T3" in out
+        assert "20260506-w-ux-3" in out
+        assert "20260501-zombie" in out
+        assert "Terminal Status" not in out
+
+    def test_unavailable_live_work_says_why(self, data_dir: Path) -> None:
+        state = dict(SAMPLE_T0_STATE)
+        state["live_work"] = {"available": False, "reason": "degraded: database is locked"}
+        (data_dir / "state" / "t0_state.json").write_text(json.dumps(state))
+        rc, out = _run(data_dir_=data_dir)
+        assert rc == 0
+        assert "database is locked" in out
 
     def test_decisions_present(self, data_dir: Path) -> None:
         rc, out = _run(data_dir_=data_dir)
@@ -198,7 +215,7 @@ class TestDashboardContent:
         assert "Current Focus" in out
         assert "Active Waves" in out
         assert "Open PRs" in out
-        assert "Terminal Status" in out
+        assert "Live Work" in out
         assert "Recent Decisions" in out
 
 
@@ -221,7 +238,7 @@ class TestJsonOutput:
         data = json.loads(out)
         required = {
             "schema", "focus", "active_waves", "open_prs",
-            "terminals", "recent_decisions", "queues",
+            "live_work", "recent_decisions", "queues",
             "strategy_available", "t0_state_available",
         }
         assert required.issubset(data.keys())
@@ -251,11 +268,11 @@ class TestJsonOutput:
         assert isinstance(data["open_prs"], list)
         assert len(data["open_prs"]) <= 3
 
-    def test_json_terminals_populated(self, data_dir: Path) -> None:
+    def test_json_live_work_populated(self, data_dir: Path) -> None:
         rc, out = _run(argv=["--json"], data_dir_=data_dir)
         data = json.loads(out)
-        assert "T1" in data["terminals"]
-        assert "T2" in data["terminals"]
+        assert [i["dispatch_id"] for i in data["live_work"]["live"]] == ["20260506-w-ux-3"]
+        assert "terminals" not in data
 
     def test_json_decisions_list(self, data_dir: Path) -> None:
         rc, out = _run(argv=["--json"], data_dir_=data_dir)
@@ -292,10 +309,10 @@ class TestMissingStrategyFallback:
         lower = out.lower()
         assert "strategy" in lower or "missing" in lower or "warn" in lower
 
-    def test_still_shows_terminal_data(self, no_strategy_dir: Path) -> None:
+    def test_still_shows_live_work(self, no_strategy_dir: Path) -> None:
         rc, out = _run(data_dir_=no_strategy_dir)
         assert rc == 0
-        assert "T1" in out
+        assert "20260506-w-ux-3" in out
 
     def test_json_exits_0(self, no_strategy_dir: Path) -> None:
         rc, out = _run(argv=["--json"], data_dir_=no_strategy_dir)

@@ -3,7 +3,7 @@
 Covers:
   BLOCKING 1 — pr_progress.blocked is present in brief when source has blocked PRs
   BLOCKING 2 — --format brief routes output to t0_brief.json, not t0_state.json
-  ADVISORY   — blockers derived from open_items top_blockers; next_gates from active_work
+  ADVISORY   — blockers derived from open_items top_blockers; next_gates from live_work
 """
 
 from __future__ import annotations
@@ -66,7 +66,6 @@ def _minimal_state(**overrides: Any) -> Dict[str, Any]:
         "terminals": {},
         "queues": {
             "pending_count": 0,
-            "active_count": 0,
             "completed_last_hour": 0,
             "conflict_count": 0,
         },
@@ -81,7 +80,7 @@ def _minimal_state(**overrides: Any) -> Dict[str, Any]:
             "blocked": [],
         },
         "open_items": {"open_count": 0, "blocker_count": 0, "top_blockers": []},
-        "active_work": [],
+        "live_work": {"available": True, "live": [], "starting": [], "stale": []},
         "recent_receipts": [],
         "system_health": {"status": "healthy", "db_initialized": True, "uptime_seconds": 0},
     }
@@ -211,7 +210,7 @@ class TestFormatBriefOutputPath:
 
 
 # ---------------------------------------------------------------------------
-# ADVISORY: blockers derived from open_items; next_gates from active_work
+# ADVISORY: blockers derived from open_items; next_gates from live_work
 # ---------------------------------------------------------------------------
 
 class TestBriefBlockers:
@@ -243,9 +242,9 @@ class TestBriefNextGates:
         brief = _state_to_brief(state)
         assert brief["next_gates"] == []
 
-    def test_next_gates_derived_from_active_work(self):
+    def test_next_gates_derived_from_live_work(self):
         state = _minimal_state()
-        state["active_work"] = [
+        state["live_work"]["live"] = [
             {"dispatch_id": "d-001", "track": "T1", "gate": "codex", "started_at": "2026-04-28T00:00:00Z"},
             {"dispatch_id": "d-002", "track": "T2", "gate": "ci", "started_at": "2026-04-28T00:01:00Z"},
         ]
@@ -254,12 +253,22 @@ class TestBriefNextGates:
 
     def test_next_gates_skips_none_gate_entries(self):
         state = _minimal_state()
-        state["active_work"] = [
+        state["live_work"]["live"] = [
             {"dispatch_id": "d-001", "track": "T1", "gate": None, "started_at": "2026-04-28T00:00:00Z"},
             {"dispatch_id": "d-002", "track": "T2", "gate": "review", "started_at": "2026-04-28T00:01:00Z"},
         ]
         brief = _state_to_brief(state)
         assert brief["next_gates"] == ["review"]
+
+    def test_stale_dispatches_are_not_active_work(self):
+        state = _minimal_state()
+        state["live_work"]["stale"] = [
+            {"dispatch_id": "d-zombie", "track": "T1", "gate": "codex", "started_at": None},
+        ]
+        brief = _state_to_brief(state)
+        assert brief["active_work"] == []
+        assert brief["next_gates"] == []
+        assert brief["queues"]["active"] == 0
 
     def test_brief_has_next_gates_key(self):
         state = _minimal_state()
