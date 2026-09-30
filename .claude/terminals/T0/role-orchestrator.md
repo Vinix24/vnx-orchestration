@@ -431,6 +431,7 @@ Every dispatch instruction MUST include the following footer (codified — don't
 - DO NOT bypass tests with --no-verify
 - DO NOT run the full suite (`pytest tests/`) — test ONLY the files you touched plus their direct neighbours. CI Profile A sweeps the whole tree on every PR; that run is not yours to duplicate
 - Order is: targeted tests green → COMMIT → PUSH → anything slower. A pushed branch with a red suite is an ordinary PR state; uncommitted work in a reaped worktree is loss
+- The red run (new tests on the OLD code) goes in the report under a line or heading that STARTS with `Red run` / `Rode run` / `Before the fix` / `Voor de fix` (e.g. `**Red run** on <old sha>:`). Only a run under that label is left out of the receipt's test count; every other failure shown counts (`report_body_contract.RED_RUN_LABELS`)
 - DO NOT abort if first sub-task succeeds — continue with rest
 - After commit: PUSH and CREATE PR (or update if existing) — dispatch is INCOMPLETE without PR
 - DO NOT suppress with `# noqa:` — the Lint Patterns gate rejects it. Use a PLAIN marker comment on the line: `# vnx-silent-except: <reason>` (silent except) / `# vnx-atomic-write: <reason>` (non-atomic state write)
