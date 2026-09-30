@@ -39,8 +39,11 @@ Each item carries ``kind``, counted in ``by_kind``:
   ``reject``, ``investigate`` or ``unknown`` (only evidence, no outcome line
   of its own). A ``superseded`` dispatch is no open point: the child that
   took the work over carries the outcome.
-* ``active_dispatch`` (D4b2) — a dispatch still in ``dispatches/active/``
-  that the active-drain leaves standing without an outcome: no receipt past
+* ``active_dispatch`` (D4b2) — a dispatch still in ``dispatches/active/``,
+  as an ``<id>/`` directory or as the ``<id>.md`` a failed headless delivery
+  leaves (``scan_active``; a ``.md`` without a ``[[TARGET:...]]`` marker is
+  no dispatch and only counted in ``ignored``), that the active-drain
+  leaves standing without an outcome: no receipt past
   the threshold (``no_receipt``), a receipt without an outcome of its own
   (``no_outcome``), or a receipt outcome other than accept (``reject``,
   ``investigate``). ``active_destination`` is the one rule for both the
@@ -60,6 +63,7 @@ BILLING SAFETY: No Anthropic SDK imports. No api.anthropic.com calls.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, NamedTuple, Optional
@@ -350,9 +354,26 @@ def active_destination(
 
 
 class DispatchEntry(NamedTuple):
+    """A dispatch in ``active/``. ``directory`` is its path there: a
+    ``<id>/`` directory, or an ``<id>.md`` file the headless daemon left
+    after a failed delivery (D4b2)."""
     dispatch_id: str
     directory: Path
     timestamp: Optional[datetime]
+
+
+class ActiveScan(NamedTuple):
+    """``active/`` read once: the dispatches, and ``(name, reason)`` for each
+    ``.md`` that is no dispatch and is ignored."""
+    entries: List[DispatchEntry]
+    ignored: List[tuple]
+
+
+# The marker every dispatch file carries (headless_dispatch_daemon, the bash
+# dispatcher); a README or a note in active/ has none.
+_DISPATCH_MARKER = re.compile(r"\[\[TARGET:[^\]\s]+\]\]")
+
+NOT_A_DISPATCH = "not a dispatch: no [[TARGET:...]] marker"
 
 
 def _manifest_timestamp(raw: str) -> Optional[datetime]:
@@ -367,29 +388,71 @@ def _manifest_timestamp(raw: str) -> Optional[datetime]:
     return None
 
 
-def iter_active_dispatches(dispatches_dir: Path) -> Iterator[DispatchEntry]:
-    """Yield a DispatchEntry for each directory under ``dispatches/active/``."""
+def markdown_dispatch(path: Path) -> tuple:
+    """``(entry, None)`` when ``active/<id>.md`` is a dispatch, else
+    ``(None, reason)``. The id is the file stem, the one the headless daemon
+    delivers and its receipts carry; the timestamp is the file's mtime (the
+    move into active/ keeps it). A file that cannot be read stays a dispatch:
+    nothing proves it is none, and an open point is safer than a silent one."""
+    path = Path(path)
+    try:
+        is_dispatch = bool(_DISPATCH_MARKER.search(path.read_text(encoding="utf-8", errors="replace")))
+    except OSError:
+        # vnx-silent-except: unreadable reads as a dispatch (an open point), see above.
+        is_dispatch = True
+    if not is_dispatch:
+        return None, NOT_A_DISPATCH
+    try:
+        timestamp: Optional[datetime] = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+    except OSError:
+        # vnx-silent-except: without a timestamp the dispatch is an open point.
+        timestamp = None
+    return DispatchEntry(dispatch_id=path.stem, directory=path, timestamp=timestamp), None
+
+
+def scan_active(dispatches_dir: Path) -> ActiveScan:
+    """Read ``dispatches/active/``: every directory and every ``.md`` that is a
+    dispatch (``markdown_dispatch``). Other files are no entry."""
     active = Path(dispatches_dir) / "active"
+    entries: List[DispatchEntry] = []
+    ignored: List[tuple] = []
     if not active.is_dir():
-        return
-    for entry_dir in sorted(active.iterdir()):
-        if not entry_dir.is_dir():
-            continue
-        manifest = entry_dir / "manifest.json"
-        dispatch_id = entry_dir.name
-        timestamp: Optional[datetime] = None
-        if manifest.exists():
-            try:
-                data = json.loads(manifest.read_text(encoding="utf-8"))
-                dispatch_id = data.get("dispatch_id", dispatch_id)
-                raw_ts = data.get("timestamp", "")
-                if raw_ts:
-                    timestamp = _manifest_timestamp(raw_ts)
-            except (json.JSONDecodeError, OSError, AttributeError):
-                # vnx-silent-except: an unreadable manifest is a dispatch
-                # without a timestamp, which is an open point, never a crash.
-                timestamp = None
-        yield DispatchEntry(dispatch_id=dispatch_id, directory=entry_dir, timestamp=timestamp)
+        return ActiveScan(entries, ignored)
+    for path in sorted(active.iterdir()):
+        if path.is_dir():
+            entries.append(_directory_dispatch(path))
+        elif path.is_file() and path.suffix == ".md":
+            entry, reason = markdown_dispatch(path)
+            if entry is None:
+                ignored.append((path.name, reason))
+            else:
+                entries.append(entry)
+    return ActiveScan(entries, ignored)
+
+
+def iter_active_dispatches(dispatches_dir: Path) -> Iterator[DispatchEntry]:
+    """Yield a DispatchEntry for each dispatch under ``dispatches/active/``:
+    a directory, or an ``<id>.md`` of a failed headless delivery."""
+    yield from scan_active(dispatches_dir).entries
+
+
+def _directory_dispatch(entry_dir: Path) -> DispatchEntry:
+    """A DispatchEntry for ``active/<id>/``, id and timestamp from its manifest."""
+    manifest = entry_dir / "manifest.json"
+    dispatch_id = entry_dir.name
+    timestamp: Optional[datetime] = None
+    if manifest.exists():
+        try:
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+            dispatch_id = data.get("dispatch_id", dispatch_id)
+            raw_ts = data.get("timestamp", "")
+            if raw_ts:
+                timestamp = _manifest_timestamp(raw_ts)
+        except (json.JSONDecodeError, OSError, AttributeError):
+            # vnx-silent-except: an unreadable manifest is a dispatch
+            # without a timestamp, which is an open point, never a crash.
+            timestamp = None
+    return DispatchEntry(dispatch_id=dispatch_id, directory=entry_dir, timestamp=timestamp)
 
 
 def active_dispatch_items(
@@ -399,13 +462,15 @@ def active_dispatch_items(
     project_id: str,
     now: Optional[datetime] = None,
     threshold_hours: float = NO_RECEIPT_THRESHOLD_HOURS,
+    scan: Optional[ActiveScan] = None,
 ) -> List[Dict[str, Any]]:
     """The dispatches in ``<data_dir>/dispatches/active/`` the drain leaves
     standing as an open point, read exactly as the drain reads them:
+    ``scan_active`` (directories and dispatch ``.md`` files), then
     ``receipts/processed`` through ``dispatch_receipts``, then
-    ``active_destination``."""
+    ``active_destination``. ``scan`` is an ``active/`` already read."""
     data_dir = Path(data_dir)
-    entries = list(iter_active_dispatches(data_dir / "dispatches"))
+    entries = (scan or scan_active(data_dir / "dispatches")).entries
     if not entries:
         return []
     receipts = read_processed(data_dir / "receipts")
@@ -413,8 +478,13 @@ def active_dispatch_items(
     status_index, presence = dispatch_receipts(receipts, pid)
     now = now or datetime.now(timezone.utc)
     items: List[Dict[str, Any]] = []
+    seen: set = set()
     for entry in entries:
         did = entry.dispatch_id
+        # an id both as <id>/ and <id>.md is one open point, not two
+        if did in seen:
+            continue
+        seen.add(did)
         age = (now - entry.timestamp).total_seconds() if entry.timestamp else None
         _, reason, open_as = active_destination(
             receipt_status=status_index.get(did), has_receipt=did in presence,
@@ -518,10 +588,12 @@ def build_open_outcomes(
 
     items = open_outcome_items(receipts, decisions, project_id=project_id, since=since)
     listed = {i["dispatch_id"] for i in items}
+    store = Path(data_dir) if data_dir else state_dir.parent
     try:
+        scan = scan_active(store / "dispatches")
         active = active_dispatch_items(
-            Path(data_dir) if data_dir else state_dir.parent, decisions,
-            project_id=project_id, now=now, threshold_hours=no_receipt_threshold_hours)
+            store, decisions, project_id=project_id, now=now,
+            threshold_hours=no_receipt_threshold_hours, scan=scan)
     except OSError as exc:
         return {"available": False, "reason": f"could not read dispatches/active: {exc}"}
     items += [i for i in active if i["dispatch_id"] not in listed]
@@ -542,4 +614,6 @@ def build_open_outcomes(
         "by_kind": by_kind,
         "items": shown,
         "more": len(items) - len(shown),
+        # .md files in active/ that are no dispatch (NOT_A_DISPATCH); the drain names them
+        "ignored": len(scan.ignored),
     }

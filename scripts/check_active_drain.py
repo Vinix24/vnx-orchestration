@@ -28,6 +28,11 @@ Rules
   - no receipt AND older than --older-than-hours (default 1), or no timestamp
 * dispatch has no receipt AND is newer than the threshold             → leave alone (still running)
 
+A dispatch in active/ is an ``<id>/`` directory or the ``<id>.md`` a failed
+headless delivery leaves there (open_outcomes.scan_active); both follow the
+rules above. A ``.md`` without a ``[[TARGET:...]]`` marker is no dispatch: it
+is reported as skipped with that reason and never moved.
+
 Failed dispatches must NEVER be drained as completed: the dispatch's outcome
 (``receipt_outcome``) is consulted, so that a failed, timed-out or
 contract-invalid dispatch stays open instead of masquerading as successful
@@ -68,6 +73,7 @@ from open_outcomes import (  # noqa: E402
     read_outcome_decisions,
     receipt_presence,
     receipt_status_index,
+    scan_active,
     scoped_processed,
 )
 from project_root import resolve_data_dir  # noqa: E402
@@ -241,8 +247,13 @@ def drain_active(
     now = datetime.now(tz=timezone.utc)
     older_than_seconds = older_than_hours * 3600.0
 
-    results: list[DrainResult] = []
-    for entry in iter_active_dispatches(dispatches_dir):
+    scan = scan_active(dispatches_dir)
+    # a .md in active/ that is no dispatch (a README) is named, never moved
+    results: list[DrainResult] = [
+        DrainResult(dispatch_id=name, action="skipped", reason=reason, dry_run=dry_run)
+        for name, reason in scan.ignored
+    ]
+    for entry in scan.entries:
         result = drain_one(
             entry=entry,
             receipt_index=receipt_index,

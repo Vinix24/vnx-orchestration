@@ -541,6 +541,9 @@ def _cmd_open_outcomes(args: argparse.Namespace) -> int:
                   f"[{item['kind']}] {item.get('reason') or ''}")
         if result["more"]:
             print(f"  ... and {result['more']} more")
+        if result.get("ignored"):
+            print(f"  ({result['ignored']} .md in dispatches/active/ without a [[TARGET:...]] "
+                  "marker ignored: no dispatch; check_active_drain.py names them)")
     return 0
 
 

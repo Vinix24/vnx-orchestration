@@ -53,7 +53,7 @@ def layout(tmp_path: Path):
 
 def _write_active(active: Path, dispatch_id: str, age_hours: float = 0.0) -> Path:
     f = active / f"{dispatch_id}.md"
-    f.write_text(f"# {dispatch_id}\n", encoding="utf-8")
+    f.write_text(f"[[TARGET:T1]]\n# {dispatch_id}\n", encoding="utf-8")
     if age_hours > 0:
         ts = time.time() - age_hours * 3600.0
         os.utime(f, (ts, ts))

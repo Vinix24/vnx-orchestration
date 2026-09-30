@@ -21,6 +21,7 @@ drains directories with; the receipts are read the same way
 - Failure/investigate outcome, or a receipt without an
   outcome of its own                                     → open (open point, file stays)
 - Otherwise                                              → skipped (file stays)
+- A .md without a [[TARGET:...]] marker (a README)       → ignored (no dispatch, file stays)
 
 A receipt of any kind used to promote the file, so a failure-only dispatch
 went to completed/. The store is ``receipts_processed_dir.parent.parent``:
@@ -58,6 +59,7 @@ from open_outcomes import (  # noqa: E402
     OUTCOME_NO_RECEIPT,
     active_destination,
     dispatch_receipts,
+    markdown_dispatch,
     read_outcome_decisions,
     scoped_processed,
 )
@@ -66,7 +68,7 @@ from open_outcomes import (  # noqa: E402
 @dataclass(frozen=True)
 class ReconcileResult:
     dispatch_id: str
-    action: str   # "completed" | "dead_letter" | "orphan" | "open" | "skipped" | "error"
+    action: str   # "completed" | "dead_letter" | "orphan" | "open" | "skipped" | "ignored" | "error"
     reason: str
 
 
@@ -76,12 +78,6 @@ def build_receipt_index(receipts_processed_dir: Path) -> frozenset[str]:
     bookkeeping, test noise and another project's lines are no receipt."""
     receipts, project_id = scoped_processed(Path(receipts_processed_dir).parent)
     return dispatch_receipts(receipts, project_id)[1]
-
-
-def _dispatch_id_from_filename(name: str) -> str:
-    if name.endswith(".md"):
-        return name[: -len(".md")]
-    return name
 
 
 def _move(path: Path, dest_dir: Path, did: str, action: str, reason: str) -> ReconcileResult:
@@ -123,12 +119,13 @@ def reconcile_active(
     for path in sorted(active_dir.iterdir()):
         if not path.is_file() or path.suffix != ".md":
             continue
-        did = _dispatch_id_from_filename(path.name)
-        try:
-            age = now - path.stat().st_mtime
-        except OSError as exc:
-            results.append(ReconcileResult(did, "error", f"stat failed: {exc}"))
+        # the drain's reading of a dispatch file (open_outcomes.markdown_dispatch)
+        entry, not_a_dispatch = markdown_dispatch(path)
+        if entry is None:
+            results.append(ReconcileResult(path.name, "ignored", not_a_dispatch))
             continue
+        did = entry.dispatch_id
+        age = now - entry.timestamp.timestamp() if entry.timestamp is not None else None
         destination, reason, open_as = active_destination(
             receipt_status=status_index.get(did), has_receipt=did in presence,
             decision=(decisions.get(did) or {}).get("decision"),

@@ -233,7 +233,7 @@ def _janitor_layout(tmp_path: Path) -> tuple:
 
 def _md(active: Path, did: str, age_hours: float = 0.0) -> None:
     f = active / f"{did}.md"
-    f.write_text(f"# {did}\n", encoding="utf-8")
+    f.write_text(f"[[TARGET:T1]]\n# {did}\n", encoding="utf-8")
     if age_hours:
         ts = time.time() - age_hours * 3600.0
         os.utime(f, (ts, ts))
@@ -424,3 +424,143 @@ def test_headless_daemon_keeps_a_failed_delivery_in_active(tmp_path: Path,
 
     assert [p.name for p in (data / "dispatches" / "active").iterdir()] == ["20260929-failing-A.md"]
     assert list((data / "dispatches" / "dead_letter").iterdir()) == []
+
+
+# ---------------------------------------------------------------------------
+# D4b2 fix-forward 1: a failed headless delivery stays in active/ as <id>.md;
+# open_outcomes lists it and a T0 reject dead-letters it (codex_gate #2010)
+# ---------------------------------------------------------------------------
+
+# the reason as a reader sees it (open_outcomes.NOT_A_DISPATCH)
+_NOT_A_DISPATCH = "not a dispatch: no [[TARGET:...]] marker"
+_DISPATCH_MD = "[[TARGET:T1]]\nTrack: A\nRole: backend-developer\nGate: g\n\n---\n\n## Instruction\n\nx\n"
+
+
+def _fail_headless_delivery(data: Path, did: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the real daemon on pending/<did>.md with a delivery that fails, so
+    the file lands in active/ exactly as production leaves it."""
+    import headless_dispatch_daemon as hdd
+
+    (data / "dispatches" / "pending").mkdir(exist_ok=True)
+    (data / "state" / "t0_state.json").write_text(json.dumps(
+        {"schema_version": "2.0", "terminals": {"T1": {"lease_state": "idle", "status": "idle"}}}))
+    (data / "dispatches" / "pending" / f"{did}.md").write_text(_DISPATCH_MD, encoding="utf-8")
+    monkeypatch.setenv("VNX_ADAPTER_T1", "subprocess")
+    monkeypatch.setattr(hdd, "_acquire_lease", lambda t, d: 1)
+    monkeypatch.setattr(hdd, "_deliver", lambda *a, **k: (False, "T1", 1))
+    monkeypatch.setattr(hdd, "_release_lease", lambda t, g: True)
+    monkeypatch.setattr(hdd, "_run_governance_pre_check", lambda *a, **k: (False, [], None))
+    hdd.DispatchDaemon(data_dir=data, state_dir=data / "state").run_once()
+    assert (data / "dispatches" / "active" / f"{did}.md").is_file()
+
+
+def _where_md(data: Path, did: str) -> str:
+    for sub in ("active", "completed", "dead_letter"):
+        if (data / "dispatches" / sub / f"{did}.md").exists():
+            return sub
+    return "missing"
+
+
+def _cli_decide(data: Path, did: str, decision: str) -> None:
+    import subprocess
+    done = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "receipt_query.py"), "decide", did, decision,
+         "--reason", "delivery failed, reviewed", "--state-dir", str(data / "state")],
+        capture_output=True, text=True, timeout=60,
+        env={**os.environ, "VNX_PROJECT_ID": PROJECT})
+    assert done.returncode == 0, done.stderr
+
+
+def test_failed_headless_delivery_md_is_an_open_point_until_a_t0_reject(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    data = _store(tmp_path)
+    did = "20260930-failing-A"
+    _fail_headless_delivery(data, did, monkeypatch)
+    _processed(data, [_a(did, "failure")])
+
+    drain_active(data, older_than_hours=1.0)
+    assert _where_md(data, did) == "active"
+    item = _item(data, did)
+    assert (item["kind"], item["outcome"]) == ("active_dispatch", "reject")
+
+    _cli_decide(data, did, "reject")
+    results = {r.dispatch_id: r for r in drain_active(data, older_than_hours=1.0)}
+    assert _where_md(data, did) == "dead_letter"
+    assert "T0 decision" in results[did].reason
+    assert did not in _open(data)
+
+
+def test_failed_headless_delivery_md_without_a_receipt_is_an_open_point(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    data = _store(tmp_path)
+    did = "20260930-silent-A"
+    _fail_headless_delivery(data, did, monkeypatch)
+    old = time.time() - 5 * 3600
+    os.utime(data / "dispatches" / "active" / f"{did}.md", (old, old))
+    item = _item(data, did)
+    assert (item["kind"], item["outcome"]) == ("active_dispatch", "no_receipt")
+    assert item["last_seen"] is not None
+
+
+def test_failed_md_delivery_with_a_colliding_id_of_another_project_does_not_leak(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    data = _store(tmp_path)
+    did = "20260930-shared-A"
+    _fail_headless_delivery(data, did, monkeypatch)
+    # the other project accepted and decided the same id: none of it is ours (ADR-007)
+    _processed(data, _accept(did, project=OTHER) + [_a(did, "failure")])
+    _decide(data, did, "accept", project=OTHER)
+    drain_active(data, older_than_hours=1.0)
+    assert _where_md(data, did) == "active"
+    assert _item(data, did)["outcome"] == "reject"
+    assert _open(data, project=OTHER) == {}
+    # the other project's reject does not dead-letter it either
+    _decide(data, did, "reject", project=OTHER)
+    drain_active(data, older_than_hours=1.0)
+    assert _where_md(data, did) == "active"
+
+
+def test_md_without_a_dispatch_marker_is_ignored_with_a_reason(tmp_path: Path) -> None:
+    data = _store(tmp_path)
+    readme = data / "dispatches" / "active" / "README.md"
+    readme.write_text("# what lives in active/\n", encoding="utf-8")
+    old = time.time() - 5 * 3600
+    os.utime(readme, (old, old))
+
+    section = oo.build_open_outcomes(data / "state", project_id=PROJECT, limit=None)
+    assert (section["items"], section.get("ignored")) == ([], 1)
+    drained = [(r.dispatch_id, r.action, r.reason) for r in drain_active(data, older_than_hours=1.0)]
+    assert drained == [("README.md", "skipped", _NOT_A_DISPATCH)]
+    assert readme.exists()
+    reconciled = [(r.dispatch_id, r.action, r.reason) for r in janitor.reconcile_active(
+        data / "dispatches" / "active", data / "dispatches" / "completed", data / "receipts" / "processed")]
+    assert reconciled == [("README.md", "ignored", _NOT_A_DISPATCH)]
+    assert readme.exists()
+
+
+def test_accepted_md_delivery_goes_to_completed_and_is_no_open_point(tmp_path: Path) -> None:
+    data = _store(tmp_path)
+    (data / "dispatches" / "active" / "d-ok.md").write_text(_DISPATCH_MD, encoding="utf-8")
+    _processed(data, _accept("d-ok"))
+    assert "d-ok" not in _open(data)
+    drain_active(data, older_than_hours=1.0)
+    assert _where_md(data, "d-ok") == "completed"
+
+
+def test_index_with_many_failed_md_deliveries_stays_within_budget(tmp_path: Path) -> None:
+    from build_t0_state import _build_t0_index
+
+    data = _store(tmp_path)
+    old = time.time() - 5 * 3600
+    for n in range(25):
+        did = f"20260930-fsh-long-headless-delivery-name-for-size-{n:02d}"
+        path = data / "dispatches" / "active" / f"{did}.md"
+        path.write_text(_DISPATCH_MD, encoding="utf-8")
+        os.utime(path, (old + n, old + n))
+    (data / "dispatches" / "active" / "README.md").write_text("# notes\n", encoding="utf-8")
+    section = oo.build_open_outcomes(data / "state", project_id=PROJECT)
+    assert (section["total"], section["by_kind"], section["ignored"]) == (
+        25, {"active_dispatch": 25}, 1)
+    index = _build_t0_index({"open_outcomes": section})["open_outcomes"]
+    assert (len(index["items"]), index["more"]) == (10, 15)
+    assert len(json.dumps(index, separators=(",", ":"))) < 2048
