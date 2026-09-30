@@ -246,13 +246,52 @@ def discover_orphans(data_dir: Path, state_dir: Path, project_id: str) -> list[O
 # Recovery actions
 # ---------------------------------------------------------------------------
 
+def _manifest_identity(manifest_path: Path) -> tuple[Optional[str], str]:
+    """(model, provider) the orphan ran with, from its manifest. The subprocess
+    lane only starts ``claude``, so a manifest without a provider is claude's."""
+    import json
+    try:
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None, "claude"
+    if not isinstance(data, dict):
+        return None, "claude"
+    model = data.get("model")
+    return (str(model) if model else None), str(data.get("provider") or "claude")
+
+
+def _write_fallback_report(orphan: Orphan, data_dir: Path, terminal: str,
+                           model: Optional[str], provider: str) -> None:
+    """The orphan's worker died before its close-out: write the fallback
+    report (fabric-state-herstel D4b2) so the dispatch has a report and an
+    outcome. A contract-valid report the worker already wrote is kept."""
+    from governance_emit import emit_fallback_report
+
+    try:
+        emit_fallback_report(
+            orphan.dispatch_id, data_dir, reason="killed", provider=provider,
+            model=model or "", terminal_id=terminal,
+            detail=f"Orchestrator pid {orphan.worker_pid} ({orphan.pid_source}) was no longer alive.",
+        )
+    except (ValueError, RuntimeError) as exc:
+        # vnx-silent-except: the recovery itself must go on; the reason is logged loudly
+        logger.error("crash_recovery: no fallback report for %s: %s", orphan.dispatch_id, exc)
+
+
 def _recover_orphan(orphan: Orphan, data_dir: Path) -> None:
-    """Finish recovery for one dead-PID orphan: receipt + dead_letter + cleanup.
+    """Finish recovery for one dead-PID orphan: report + receipt + dead_letter + cleanup.
+
+    A dead orchestrator PID is a real crash: nothing will ever write this
+    dispatch's outcome, which is why this path may still dead-letter without
+    a T0 decision. The failed receipt keeps it an open ``reject`` in
+    ``open_outcomes`` until a T0 decides.
 
     Order matches the in-process final-failure path so a crash-recovered orphan
     is indistinguishable downstream from a normally-failed one (apart from the
     ``failure_reason``):
 
+      0. Write the fallback unified report (reason ``killed``) into this
+         store's ``unified_reports/`` unless a contract-valid one exists.
       1. Write a ``failed`` receipt (idempotent via append_receipt dedup).
       2. Promote the manifest to ``dead_letter/`` (removes the active dir).
       3. cleanup_worker_exit: release lease, transition worker state, move any
@@ -263,25 +302,24 @@ def _recover_orphan(orphan: Orphan, data_dir: Path) -> None:
     if _scripts_lib not in sys.path:
         sys.path.insert(0, _scripts_lib)
 
-    from subprocess_dispatch_internals.receipt_writer import (
-        _write_receipt,
-        _ensure_unified_report,
-    )
+    from subprocess_dispatch_internals.receipt_writer import _write_receipt
     from subprocess_dispatch_internals.manifest import _promote_manifest
     from cleanup_worker_exit import cleanup_worker_exit
 
     terminal = orphan.terminal_id or "unknown"
+    model, provider = _manifest_identity(orphan.manifest_path)
 
-    # 1. Ensure a report stub exists, then write the failure receipt. The
-    # receipt writer dedups by content, so a re-run over an orphan that was
-    # already recovered (manifest already gone) does not double-write.
-    _ensure_unified_report(orphan.dispatch_id, terminal, "failed")
+    # 0+1. The fallback report, then the failure receipt. The receipt writer
+    # dedups by content, so a re-run over an orphan that was already recovered
+    # (manifest already gone) does not double-write.
+    _write_fallback_report(orphan, data_dir, terminal, model, provider)
     _write_receipt(
         orphan.dispatch_id,
         terminal,
         "failed",
         failure_reason=ORCHESTRATOR_DEATH_REASON,
         manifest_path=str(orphan.manifest_path),
+        model=model,
     )
 
     # 2. Promote manifest active/ -> dead_letter/ (idempotent; removes the

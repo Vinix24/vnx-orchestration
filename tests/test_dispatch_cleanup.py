@@ -14,6 +14,13 @@ if str(_LIB) not in sys.path:
 import dispatch_cleanup as dc  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _project(monkeypatch):
+    # the receipts are read for the store's project (ADR-007); the bundles and
+    # receipts here are project "test"
+    monkeypatch.setenv("VNX_PROJECT_ID", "test")
+
+
 def _make_pending_dir(tmp_path: Path) -> Path:
     """Create a minimal pending/ directory structure for testing."""
     pending = tmp_path / "dispatches" / "pending"
@@ -41,13 +48,15 @@ def _make_bundle(pending: Path, dispatch_id: str, *, with_spec: bool = True,
 
 
 def _make_receipt(state_dir: Path, dispatch_id: str) -> None:
-    """Write a minimal receipt to t0_receipts.ndjson."""
+    """Write an accept receipt to t0_receipts.ndjson: only an accept sends a
+    bundle to completed/ (fabric-state-herstel D4b2, OI-1907)."""
     receipt_file = state_dir / "t0_receipts.ndjson"
     receipt = json.dumps({
         "dispatch_id": dispatch_id,
         "timestamp": "2026-08-10T00:00:00Z",
         "event_type": "task_complete",
         "status": "success",
+        "verification": {"method": "pytest", "tests_run": 1, "tests_passed": 1, "tests_failed": 0},
         "project_id": "test",
     })
     with open(receipt_file, "a") as f:

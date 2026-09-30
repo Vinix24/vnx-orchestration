@@ -886,3 +886,94 @@ def emit_unified_report(
         dispatch_id, provider, report_path,
     )
     return report_path
+
+
+# ---------------------------------------------------------------------------
+# Fallback report (fabric-state-herstel D4b2)
+# ---------------------------------------------------------------------------
+
+#: Why a dispatch's own close-out (the lane's GOVERN step that writes the
+#: unified report) never ran. The cleanup that finds such a dispatch names one.
+FALLBACK_REPORT_REASONS: Dict[str, str] = {
+    "killed": "the worker process was killed before its close-out ran",
+    "session_limit": "the subscription session limit ended the worker before its close-out ran",
+    "deadline": "the dispatch deadline ended the worker before its close-out ran",
+    "receipt_refused": "the receipt of this dispatch was refused, so no outcome reached the ledger",
+}
+
+_NOT_A_MODEL = frozenset({"", "unknown", "null", "none", "n/a", "na", "unset", "-"})
+
+
+def fallback_report_body(
+    dispatch_id: str, *, reason: str, provider: str, model: str,
+    terminal_id: str = "", detail: str = "",
+) -> str:
+    """The report-contract body of a fallback report (Summary, Changes,
+    Verification, Open Items) with the identity block the receipt converter
+    requires. Raises ValueError on an unknown reason or a missing model: a
+    report without a real model would be refused at receipt-write time."""
+    if reason not in FALLBACK_REPORT_REASONS:
+        raise ValueError(f"reason must be one of {sorted(FALLBACK_REPORT_REASONS)}, got {reason!r}")
+    if str(model or "").strip().lower() in _NOT_A_MODEL:
+        raise ValueError(f"a fallback report for {dispatch_id} needs the model that ran, got {model!r}")
+    if not str(provider or "").strip():
+        raise ValueError(f"a fallback report for {dispatch_id} needs the provider that ran")
+    identity = [f"**Dispatch-ID**: {dispatch_id}", f"**Model**: {model}", f"**Provider**: {provider}"]
+    if terminal_id:
+        identity.append(f"**Terminal**: {terminal_id}")
+    identity += ["**Status**: failure", f"**Failure-Reason**: {reason}"]
+    detail_line = f"\n\n{detail.strip()}" if detail and detail.strip() else ""
+    return (
+        f"# Dispatch {dispatch_id}: fallback report\n\n"
+        + "\n".join(identity) + "\n\n"
+        "## Summary\n\n"
+        f"Fallback report: {FALLBACK_REPORT_REASONS[reason]} (reason `{reason}`). "
+        "The dispatch's own unified report was never written, so the cleanup that "
+        "found it writes this one with status failure. It gives the dispatch an "
+        f"outcome to decide on; it says nothing about the work itself.{detail_line}\n\n"
+        "## Changes\n\n"
+        "Not recorded: the worker ended before it could report its changes. Inspect "
+        f"the branch `dispatch/{dispatch_id}` and its worktree, if any.\n\n"
+        "## Verification\n\n"
+        "None: no verification ran after the worker ended.\n\n"
+        "## Open Items\n\n"
+        f"- A T0 decides this outcome: `receipt_query.py decide {dispatch_id} accept|reject`.\n"
+    )
+
+
+def emit_fallback_report(
+    dispatch_id: str,
+    data_dir: Path,
+    *,
+    reason: str,
+    provider: str,
+    model: str,
+    terminal_id: str = "",
+    detail: str = "",
+) -> Path:
+    """Write a minimal failure report for a dispatch whose close-out never ran.
+
+    Every dispatch has a report and so an outcome: a lane or drain that
+    cleans up a dispatch whose worker died before GOVERN calls this. It goes
+    through ``emit_unified_report`` (one writer, one format) with
+    ``preserve_partial``: a contract-valid report already on disk is kept
+    untouched, a partial one is kept as ``<id>.partial.md``. Written only into
+    ``data_dir/unified_reports`` of the store it is given (ADR-007).
+    Raises ValueError (see ``fallback_report_body``) and RuntimeError (write failed).
+    """
+    body = fallback_report_body(dispatch_id, reason=reason, provider=provider, model=model,
+                                terminal_id=terminal_id, detail=detail)
+    return emit_unified_report(
+        dispatch_id=dispatch_id,
+        terminal_id=terminal_id,
+        provider=provider,
+        instruction="",
+        response_text="",
+        findings=None,
+        duration_seconds=0.0,
+        data_dir=data_dir,
+        body_override=body,
+        preserve_partial=True,
+        model=model,
+    )
+

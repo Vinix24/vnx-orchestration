@@ -7,7 +7,8 @@ and not refreshed afterwards, so any legitimate task running longer than an
 hour was silently misclassified as completed and hidden from T0 state.
 
 These tests pin the new contract:
-1. Receipt evidence is required to promote a dispatch from active/ → completed/.
+1. An accept outcome is required to promote a dispatch from active/ → completed/
+   (fabric-state-herstel D4b2: a receipt as such, e.g. a failure, is not).
 2. A receiptless dispatch is NEVER moved on age alone.
 3. A receiptless dispatch older than --stale-hours is reported as orphan
    (so callers / operators can intervene) but the file stays in active/.
@@ -52,16 +53,23 @@ def layout(tmp_path: Path):
 
 def _write_active(active: Path, dispatch_id: str, age_hours: float = 0.0) -> Path:
     f = active / f"{dispatch_id}.md"
-    f.write_text(f"# {dispatch_id}\n", encoding="utf-8")
+    f.write_text(f"[[TARGET:T1]]\n# {dispatch_id}\n", encoding="utf-8")
     if age_hours > 0:
         ts = time.time() - age_hours * 3600.0
         os.utime(f, (ts, ts))
     return f
 
 
-def _write_receipt(receipts_processed: Path, dispatch_id: str, name: str = "r.json") -> Path:
+_VERIFIED = {"method": "pytest", "tests_run": 1, "tests_passed": 1, "tests_failed": 0}
+
+
+def _write_receipt(receipts_processed: Path, dispatch_id: str, name: str = "r.json",
+                   status: str = "success") -> Path:
+    """A lane receipt with verification: an accept (fabric-state-herstel D4b2
+    promotes only an accept, never a receipt as such)."""
     f = receipts_processed / name
-    f.write_text(json.dumps({"dispatch_id": dispatch_id, "event_type": "task_complete"}), encoding="utf-8")
+    f.write_text(json.dumps({"dispatch_id": dispatch_id, "event_type": "task_complete",
+                             "status": status, "verification": _VERIFIED}), encoding="utf-8")
     return f
 
 
@@ -110,7 +118,7 @@ class TestReconcileActive:
         f = _write_active(active, "d-receipt", age_hours=0.1)
         _write_receipt(processed, "d-receipt")
         results = reconcile_active(active, completed, processed)
-        assert results == [ReconcileResult("d-receipt", "completed", "receipt found")]
+        assert results == [ReconcileResult("d-receipt", "completed", "receipt found with success status")]
         assert not f.exists()
         assert (completed / "d-receipt.md").exists()
 
@@ -213,7 +221,7 @@ class TestCli:
         )
         assert result.returncode == 0, result.stderr
         payload = json.loads(result.stdout.strip())
-        assert payload == [{"dispatch_id": "d-cli", "action": "completed", "reason": "receipt found"}]
+        assert payload == [{"dispatch_id": "d-cli", "action": "completed", "reason": "receipt found with success status"}]
 
     def test_cli_no_results_returns_zero(self, layout):
         _, active, completed, processed = layout

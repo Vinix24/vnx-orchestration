@@ -805,15 +805,15 @@ def _check_hook_paths(project_dir: Path) -> Check:
 
 
 def _check_ledger_health(data_root: Path) -> Check:
-    """WARN from the ledger_health beacon: dispatches without a receipt, a
-    stale receipt-pull cursor, or a ledger that is unchained while
-    VNX_CHAIN_RECEIPTS is configured on.
+    """WARN from the ledger_health beacon: dispatches without a receipt, open
+    outcomes waiting past the threshold for a T0 decision, or a ledger that is
+    unchained while VNX_CHAIN_RECEIPTS is configured on.
 
     Delegates entirely to two existing modules instead of a third resolver
     or threshold set: ``health_beacon.all_beacons`` (the same staleness/
     corrupt classification every other subsystem beacon uses —
     ``vnx_cli/commands/subsystems.py``) reads the beacon file itself, and
-    ``ledger_health.COMPONENT_NAME`` names it — the actual coverage/cursor/
+    ``ledger_health.COMPONENT_NAME`` names it — the actual coverage/open-outcome/
     chain thresholds live only in ``scripts/ledger_health.py``. Mirrors
     ``_check_hook_paths``'s delegation to ``hookpin_check``.
 
@@ -865,16 +865,18 @@ def _check_ledger_health(data_root: Path) -> Check:
     elif coverage.get("status") == "SKIPPED_UNVERIFIED":
         findings.append(f"receipt coverage unmeasurable: {coverage.get('reason', '?')}")
 
-    cursor = checks.get("pull_cursor") or {}
-    if cursor.get("status") == "finding":
-        age_seconds = cursor.get("cursor_age_seconds")
-        age_h = round(age_seconds / 3600, 1) if isinstance(age_seconds, (int, float)) else "?"
+    open_outcomes = checks.get("open_outcomes") or {}
+    if open_outcomes.get("status") == "finding":
+        ids = open_outcomes.get("stale_dispatch_ids") or []
+        first = ", ".join(str(i) for i in ids) if isinstance(ids, list) else "?"
         findings.append(
-            f"receipt pull cursor is {age_h}h old "
-            f"(backlog {cursor.get('backlog_receipt_count', '?')} receipt(s))"
+            f"{open_outcomes.get('stale_count', '?')} open outcome(s) older than "
+            f"{open_outcomes.get('stale_threshold_hours', '?')}h without a T0 decision "
+            f"(of {open_outcomes.get('open_count', '?')} open; first: {first or '?'}) "
+            "— receipt_query.py open-outcomes / decide"
         )
-    elif cursor.get("status") == "SKIPPED_UNVERIFIED":
-        findings.append(f"pull-cursor health unmeasurable: {cursor.get('reason', '?')}")
+    elif open_outcomes.get("status") == "SKIPPED_UNVERIFIED":
+        findings.append(f"open outcomes unmeasurable: {open_outcomes.get('reason', '?')}")
 
     chain = checks.get("chain_status") or {}
     if chain.get("status") == "finding":
@@ -893,7 +895,7 @@ def _check_ledger_health(data_root: Path) -> Check:
 
     if findings:
         return _result(WARN, "; ".join(findings))
-    return _result(PASS, "receipt coverage, pull-cursor age, and chain status all healthy")
+    return _result(PASS, "receipt coverage, open outcomes, and chain status all healthy")
 
 
 def _check_launchd_agents(project_dir: Path) -> list[Check]:

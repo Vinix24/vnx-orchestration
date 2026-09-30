@@ -541,6 +541,9 @@ def _cmd_open_outcomes(args: argparse.Namespace) -> int:
                   f"[{item['kind']}] {item.get('reason') or ''}")
         if result["more"]:
             print(f"  ... and {result['more']} more")
+        if result.get("ignored"):
+            print(f"  ({result['ignored']} .md in dispatches/active/ without a [[TARGET:...]] "
+                  "marker ignored: no dispatch; check_active_drain.py names them)")
     return 0
 
 
@@ -696,7 +699,7 @@ def _add_outcome_parsers(sub: Any) -> None:
     """``open-outcomes`` and ``decide``: the T0's open points (fabric-state-herstel D4b)."""
     p_open = sub.add_parser(
         "open-outcomes",
-        help="reject/investigate dispatches of this project without a T0 decision",
+        help="dispatches of this project without an outcome a T0 decided on",
     )
     p_open.add_argument("--state-dir", required=True)
     p_open.add_argument(

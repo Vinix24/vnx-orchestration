@@ -269,7 +269,10 @@ class _Window:
         return ts is not None and ts >= self.cutoff
 
 
-def _is_outcome_line(receipt: Dict[str, Any]) -> bool:
+def is_outcome_line(receipt: Dict[str, Any]) -> bool:
+    """True when ``receipt`` reports a dispatch outcome: a lane status
+    (writer A), a report (writer B) or a contract_invalid in either shape.
+    The one test of "outcome receipt"; the merge-acceptance gate uses it too."""
     return (_is_writer_a(receipt) or _is_writer_b(receipt)
             or is_contract_invalid(receipt))
 
@@ -291,7 +294,7 @@ def _partition(receipts: Iterable[Dict[str, Any]], project_id: str, in_window: _
         else:
             kept.append((pos, receipt))
     work_ids = frozenset(
-        did for did in (_dispatch_id(r) for _, r in kept if _is_outcome_line(r))
+        did for did in (_dispatch_id(r) for _, r in kept if is_outcome_line(r))
         if did.lower() not in INVALID_DISPATCH_IDS and not GATE_DISPATCH_RE.match(did))
     pr_owner: Dict[str, str] = {}
     for _, receipt in kept:
