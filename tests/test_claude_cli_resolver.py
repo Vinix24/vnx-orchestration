@@ -21,7 +21,9 @@ sys.path.insert(0, str(_SCRIPTS_DIR / "lib"))
 from conversation_analyzer import deep_analyzer as da_module
 from conversation_analyzer.deep_analyzer import DeepAnalyzer, LLMOutcome
 
-LAUNCHD_PATH = "{repo}/.venv/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+# Hermetic: only tmp dirs and the system dirs. A claude in /opt/homebrew/bin or
+# /usr/local/bin on the host must never be reachable from these tests.
+LAUNCHD_PATH = "{repo}/.venv/bin:/usr/bin:/bin"
 FAKE_TEXT = "fake-claude-analysis-text"
 FAKE_JSON = '{"result": "%s"}' % FAKE_TEXT
 
@@ -103,7 +105,6 @@ def test_resolver_returns_none_when_nothing_found(launchd_env):
 def test_nightly_script_puts_local_bin_first_on_path(tmp_path):
     import subprocess
     script = (_SCRIPTS_DIR / "conversation_analyzer_nightly.sh").read_text()
-    assert 'export PATH="$HOME/.local/bin:$PATH"' in script
     home = tmp_path / "h"
     (home / ".local" / "bin").mkdir(parents=True)
     snippet = script[script.index('if [ -d "$HOME/.local/bin" ]'):]

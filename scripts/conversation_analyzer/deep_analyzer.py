@@ -336,10 +336,7 @@ Respond with valid JSON:
 
     @staticmethod
     def _try_claude_max(prompt: str) -> LLMOutcome:
-        claude_bin = resolve_claude_cli()
-        if claude_bin is None:
-            log("ERROR", "Claude CLI not found on PATH or in the native install locations")
-            return LLMOutcome("missing_cli")
+        claude_bin = resolve_claude_cli() or "claude"
         try:
             result = subprocess.run(
                 [claude_bin, "-p", "--output-format", "json", "--max-turns", "1"],
@@ -352,7 +349,7 @@ Respond with valid JSON:
             # The binary is absent from PATH — a launchd job inherits no shell
             # profile, so this is a distinct failure from a binary that runs
             # and then errors out (OI-1258).
-            log("ERROR", "Claude CLI not found on PATH")
+            log("ERROR", "Claude CLI not found on PATH or in the native install locations")
             return LLMOutcome("missing_cli")
         except subprocess.TimeoutExpired:
             log("ERROR", "Claude CLI timed out after 90s")
@@ -487,10 +484,7 @@ Respond with valid JSON:
         if preflight.status != "ok":
             return preflight
 
-        claude_bin = resolve_claude_cli()
-        if claude_bin is None:
-            log("ERROR", "Claude CLI not found for deepseek-harness")
-            return LLMOutcome("missing_cli")
+        claude_bin = resolve_claude_cli() or "claude"
         cli_args = [claude_bin, "-p", "--output-format", "json", "--max-turns", "1",
                     "--model", DEEPSEEK_HARNESS_MODEL]
         cli_args.extend(build_harness_cli_args())
