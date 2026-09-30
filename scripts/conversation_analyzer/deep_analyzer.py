@@ -17,6 +17,7 @@ from .models import (
     log,
 )
 from .detector import HeuristicDetector
+from claude_cli import resolve_claude_cli
 from provider_spawns.deepseek_harness_spawn import (
     build_harness_child_env,
     build_harness_cli_args,
@@ -335,9 +336,13 @@ Respond with valid JSON:
 
     @staticmethod
     def _try_claude_max(prompt: str) -> LLMOutcome:
+        claude_bin = resolve_claude_cli()
+        if claude_bin is None:
+            log("ERROR", "Claude CLI not found on PATH or in the native install locations")
+            return LLMOutcome("missing_cli")
         try:
             result = subprocess.run(
-                ["claude", "-p", "--output-format", "json", "--max-turns", "1"],
+                [claude_bin, "-p", "--output-format", "json", "--max-turns", "1"],
                 input=prompt,
                 capture_output=True,
                 text=True,
@@ -482,7 +487,11 @@ Respond with valid JSON:
         if preflight.status != "ok":
             return preflight
 
-        cli_args = ["claude", "-p", "--output-format", "json", "--max-turns", "1",
+        claude_bin = resolve_claude_cli()
+        if claude_bin is None:
+            log("ERROR", "Claude CLI not found for deepseek-harness")
+            return LLMOutcome("missing_cli")
+        cli_args = [claude_bin, "-p", "--output-format", "json", "--max-turns", "1",
                     "--model", DEEPSEEK_HARNESS_MODEL]
         cli_args.extend(build_harness_cli_args())
 
