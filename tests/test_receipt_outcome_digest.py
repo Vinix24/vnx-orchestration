@@ -238,8 +238,8 @@ def test_digest_cli_prints_per_dispatch_counts(tmp_path, capsys, monkeypatch):
     assert rc == 0
     out = json.loads(capsys.readouterr().out)
     assert out["verdict_counts"]["reject"] == 1
-    # The per-line tally still counts both writers and the foreign twins.
-    assert out.get("line_verdict_counts", {}).get("reject") == 3
+    # The per-line tally still counts both writers, but not the foreign twins (ADR-007).
+    assert out.get("line_verdict_counts", {}).get("reject") == 1
     assert out.get("line_verdict_counts", {}).get("investigate") == 1
 
 

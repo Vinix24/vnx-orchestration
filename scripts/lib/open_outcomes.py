@@ -50,7 +50,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional
 
-from receipt_outcome import OUTCOME_READER_EPOCH, summarize
+from receipt_outcome import OUTCOME_READER_EPOCH, noise_reason, summarize
 
 LEDGER_NAME = "t0_receipts.ndjson"
 DECISION_LOG_NAME = "t0_decision_log.jsonl"
@@ -167,9 +167,15 @@ def record_outcome_decision(
     return record
 
 
-def _last_seen(receipts: Iterable[Dict[str, Any]]) -> Dict[str, datetime]:
+def _last_seen(receipts: Iterable[Dict[str, Any]], project_id: str) -> Dict[str, datetime]:
+    """Latest receipt timestamp per dispatch_id over the lines ``summarize``
+    keeps for ``project_id``: ``noise_reason`` is the one project test, so a
+    receipt of another project or a noise line never makes an outcome of this
+    one look fresh (ADR-007)."""
     seen: Dict[str, datetime] = {}
     for receipt in receipts:
+        if not isinstance(receipt, dict) or noise_reason(receipt, project_id) is not None:
+            continue
         did = str(receipt.get("dispatch_id") or "").strip()
         ts = _parse_ts(receipt.get("timestamp"))
         if did and ts is not None:
@@ -189,7 +195,7 @@ def open_outcome_items(
     """Every ``reject``/``investigate`` dispatch of ``project_id`` without a
     decision, newest first (by its latest receipt timestamp)."""
     summary = summarize(receipts, project_id=project_id, cutoff=_parse_ts(since))
-    last_seen = _last_seen(receipts)
+    last_seen = _last_seen(receipts, project_id)
     items: List[Dict[str, Any]] = []
     for outcome in summary["outcomes"]:
         did = outcome["dispatch_id"]

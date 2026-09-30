@@ -76,7 +76,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from receipt_provenance import find_receipts_by_dispatch  # noqa: E402
-from receipt_outcome import OUTCOME_READER_EPOCH, summarize as summarize_outcomes
+from receipt_outcome import OUTCOME_READER_EPOCH, is_foreign_project, summarize as summarize_outcomes
 from open_outcomes import (
     DECISION_LOG_NAME,
     OUTCOME_DECISIONS,
@@ -338,7 +338,9 @@ def compute_digest(
     for entry in _iter_ledger(ledger_path):
         if not isinstance(entry, dict):
             continue  # a JSON line that is not an object is no receipt
-        entries.append(entry)
+        entries.append(entry)  # summarize_outcomes counts a foreign line as noise itself
+        if is_foreign_project(entry, project_id):
+            continue
         ts = _parse_iso8601(entry.get("timestamp"))
         in_window = ts is not None and ts >= cutoff
 
@@ -690,12 +692,8 @@ def _cmd_reconcile_oi_pending(args: argparse.Namespace) -> int:
     return 0
 
 
-def main(argv: Optional[List[str]] = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Receipt v2 query interface (ADR-035 §5)",
-    )
-    sub = parser.add_subparsers(dest="cmd", required=True)
-
+def _add_outcome_parsers(sub: Any) -> None:
+    """``open-outcomes`` and ``decide``: the T0's open points (fabric-state-herstel D4b)."""
     p_open = sub.add_parser(
         "open-outcomes",
         help="reject/investigate dispatches of this project without a T0 decision",
@@ -727,6 +725,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_decide.add_argument("--json", action="store_true")
     p_decide.set_defaults(func=_cmd_decide)
 
+
+def _add_lookup_parsers(sub: Any) -> None:
+    """``by-dispatch``, ``by-pr``, ``since`` and ``by-track``: raw ledger lookups (ADR-035 §5.2)."""
     p_by_dispatch = sub.add_parser(
         "by-dispatch",
         help="all receipts for a dispatch_id (wraps receipt_provenance.find_receipts_by_dispatch)",
@@ -766,6 +767,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_by_track.add_argument("--json", action="store_true")
     p_by_track.set_defaults(func=_cmd_by_track)
 
+
+def _add_digest_parsers(sub: Any) -> None:
+    """``digest`` and ``reconcile-oi-pending`` (ADR-035 §5.2/§6.4)."""
     p_digest = sub.add_parser(
         "digest",
         help="verdict counts + counted-warning top codes + oi_pending-unresolved/escalated tallies",
@@ -795,7 +799,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_reconcile.add_argument("--json", action="store_true")
     p_reconcile.set_defaults(func=_cmd_reconcile_oi_pending)
 
-    args = parser.parse_args(argv)
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Receipt v2 query interface (ADR-035 §5)",
+    )
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    _add_outcome_parsers(sub)
+    _add_lookup_parsers(sub)
+    _add_digest_parsers(sub)
+    return parser
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    args = _build_parser().parse_args(argv)
     return args.func(args)
 
 

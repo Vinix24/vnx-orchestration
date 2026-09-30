@@ -119,12 +119,20 @@ def _gate_pr(gate_match: Optional["re.Match[str]"]) -> Optional[str]:
     return _clean_pr(gate_match.group("pr")) if gate_match else None
 
 
+def is_foreign_project(receipt: Dict[str, Any], project_id: str) -> bool:
+    """True when the receipt is stamped with another project than ``project_id``.
+
+    The one project test of every ledger reader (ADR-007). A line without a
+    ``project_id`` in a project's own ledger is that project's."""
+    stamped = receipt.get("project_id")
+    return stamped not in (None, "") and str(stamped) != project_id
+
+
 def noise_reason(receipt: Dict[str, Any], project_id: str) -> Optional[str]:
     """Why a receipt is test noise or out of scope, or None when it is real."""
     if str(receipt.get("source") or "").strip().lower() == "pytest":
         return "pytest"
-    foreign = receipt.get("project_id")
-    if foreign not in (None, "") and str(foreign) != project_id:
+    if is_foreign_project(receipt, project_id):
         return "foreign_project"
     if str(receipt.get("report_path") or "").startswith(_TEMP_PREFIXES):
         return "temp_report_path"

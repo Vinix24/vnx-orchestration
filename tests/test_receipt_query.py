@@ -779,3 +779,38 @@ def test_digest_cli_max_age_days_flag(tmp_path, capsys):
     assert rc == 0
     out = json.loads(capsys.readouterr().out)
     assert "oi_pending_escalated_count" in out
+
+
+# ---------------------------------------------------------------------------
+# ADR-007 — digest's line tally, counted warnings and oi_pending are one project's
+# ---------------------------------------------------------------------------
+
+def test_digest_leaves_receipts_of_another_project_out_of_every_tally(tmp_path):
+    now = datetime(2026, 7, 22, 12, 0, 0, tzinfo=timezone.utc)
+    own = _v2_with("d1", timestamp="2026-07-22T01:00:00Z", project_id="proj-a")
+    own["warnings"] = [{"code": "own_code", "destination": "counted"}]
+    foreign = {
+        **_oi_pending_receipt("d1", "foreign_code", "2026-07-22T02:00:00Z", project_id="proj-b"),
+        "verdict": {"decision": "reject", "reason": "x", "evidence_complete": True},
+    }
+    foreign["warnings"].append({"code": "foreign_counted", "destination": "counted"})
+    _write_ledger(tmp_path, own, foreign)
+    result = rq.compute_digest(
+        tmp_path / rq.LEDGER_NAME, window="24h", now=now,
+        open_items_manager_module=_load_oim(tmp_path), project_id="proj-a",
+    )
+    assert result["line_verdict_counts"] == {"accept": 1, "investigate": 0, "reject": 0, "unknown": 0}
+    assert result["counted_warnings"] == [{"code": "own_code", "count": 1}]
+    assert result["oi_pending_unresolved_count"] == 0
+    assert result["oi_pending_escalated_count"] == 0
+    assert result["noise_counts"] == {"foreign_project": 1}
+
+
+def test_digest_counts_a_receipt_without_project_id_as_this_projects(tmp_path):
+    now = datetime(2026, 7, 22, 12, 0, 0, tzinfo=timezone.utc)
+    _write_ledger(tmp_path, _v2_with("d1", timestamp="2026-07-22T01:00:00Z"))
+    result = rq.compute_digest(
+        tmp_path / rq.LEDGER_NAME, window="24h", now=now,
+        open_items_manager_module=_NeverCalledOIM(), project_id="proj-a",
+    )
+    assert result["line_verdict_counts"]["accept"] == 1

@@ -378,3 +378,42 @@ def test_ledger_health_finds_an_open_outcome_waiting_too_long(tmp_path: Path) ->
     _decide(state, "d-1", "reject")
     result = check_open_outcomes(state, stale_hours=24.0, now=later)
     assert result["status"] == STATUS_OK and result["open_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# ADR-007: last_seen is read from this project's receipts only
+# ---------------------------------------------------------------------------
+
+_THREE_DAYS_LATER = datetime(2026, 10, 2, 10, 0, tzinfo=timezone.utc)
+_TODAY = "2026-10-02T09:00:00Z"
+
+
+def _item(state_dir: Path, did: str) -> Dict[str, Any]:
+    section = oo.build_open_outcomes(state_dir, project_id=PROJECT, limit=None)
+    return next(i for i in section["items"] if i["dispatch_id"] == did)
+
+
+def test_receipt_of_another_project_does_not_freshen_last_seen(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    _ledger(state, _reject("d-x") + _accept("d-x", project=OTHER, ts=_TODAY))
+    result = check_open_outcomes(state, stale_hours=24.0, now=_THREE_DAYS_LATER)
+    assert result["status"] == STATUS_FINDING and result["stale_dispatch_ids"] == ["d-x"]
+    assert _item(state, "d-x")["last_seen"] == "2026-09-29T10:00:00+00:00"
+
+
+def test_noise_receipt_does_not_freshen_last_seen(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    _ledger(state, _reject("d-x") + [_a("d-x", "success", ts=_TODAY, source="pytest")])
+    assert _item(state, "d-x")["last_seen"] == "2026-09-29T10:00:00+00:00"
+    result = check_open_outcomes(state, stale_hours=24.0, now=_THREE_DAYS_LATER)
+    assert result["status"] == STATUS_FINDING and result["stale_dispatch_ids"] == ["d-x"]
+
+
+def test_last_seen_without_a_colliding_project_is_the_latest_own_receipt(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    _ledger(state, _reject("d-x") + _reject("d-x", ts=_TODAY) + [
+        {k: v for k, v in r.items() if k != "project_id"} for r in _reject("d-y", ts=_TODAY)])
+    assert _item(state, "d-x")["last_seen"] == "2026-10-02T09:00:00+00:00"
+    # a line without project_id in this project's own ledger is this project's, as in summarize
+    assert _item(state, "d-y")["last_seen"] == "2026-10-02T09:00:00+00:00"
+    assert check_open_outcomes(state, stale_hours=24.0, now=_THREE_DAYS_LATER)["status"] == STATUS_OK
