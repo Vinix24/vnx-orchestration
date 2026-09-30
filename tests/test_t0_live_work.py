@@ -484,7 +484,7 @@ def test_brief_active_work_comes_from_live_work(tmp_path, monkeypatch, held_lock
 # ---------------------------------------------------------------------------
 
 
-def test_index_with_live_work_carries_schema_1_1(tmp_path, monkeypatch):
+def test_index_with_live_work_carries_the_current_schema(tmp_path, monkeypatch):
     """The index shape changed (live_work in; terminals, queue.active and
     active_dispatches out), so the schema version moves with it."""
     state_dir, dispatch_dir = _env(tmp_path, monkeypatch)
@@ -492,7 +492,7 @@ def test_index_with_live_work_carries_schema_1_1(tmp_path, monkeypatch):
     index = bts._build_t0_index(bts.build_t0_state(state_dir, dispatch_dir))
 
     assert "live_work" in index
-    assert index["schema"] == "t0_index/1.1"
+    assert index["schema"] == "t0_index/1.2"
 
 
 def test_legacy_md_in_pending_counts_as_pending(tmp_path, monkeypatch):

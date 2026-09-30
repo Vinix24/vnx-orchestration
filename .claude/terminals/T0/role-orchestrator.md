@@ -53,7 +53,9 @@ The state carries no track list, no human-gate queue and no dispatch history. As
 - `unmeasured` — in flight, but the flock probe itself raised (the index lists the ids; the `lock` field in `t0_state.json` says why). Running or not is unknown: a measurement failure, never "nothing running". `vnx status` lists it.
 - `available: false` with a `reason` — the read failed or a precondition is missing. A lock or a corrupt DB also puts `system_health` on degraded. Never read it as "nothing running".
 
-Open PRs are linked to their dispatch through the branch `dispatch/<id>`. `queue.pending` counts staged spec bundles (`pending/<id>/dispatch-spec.json`) and `pending/<id>.md` files (still moved there by `queue_auto_accept.sh`), one per id. The index schema is `t0_index/1.1`.
+Open PRs are linked to their dispatch through the branch `dispatch/<id>`. `queue.pending` counts staged spec bundles (`pending/<id>/dispatch-spec.json`) and `pending/<id>.md` files (still moved there by `queue_auto_accept.sh`), one per id. The index schema is `t0_index/1.2`.
+
+**What still needs a decision** is `open_outcomes` in `t0_index.json`: dispatches of this project whose outcome is `reject` or `investigate` and that no T0 has decided on (at most 10 items, the rest as `more`). A dispatch is only finished with an outcome; without one it stays an open point, never a silent end state. Nothing is consumed by reading it, so a second T0 session sees the same list. The full list: `python3 scripts/receipt_query.py open-outcomes --state-dir <state-dir>`. Record your decision after your own review with `python3 scripts/receipt_query.py decide <dispatch_id> accept|reject --reason "<why>" --state-dir <state-dir>`: it appends to `t0_decision_log.jsonl`, takes the dispatch off the list, and the active-drain then moves it out of `dispatches/active/` (accept to `completed/`, reject to `dead_letter/`). `docs/core/DISPATCH_RULES.md` §13 has the rules.
 
 For crash recovery or if state appears stale, run the individual repair tools below.
 
@@ -161,7 +163,7 @@ Project files describe the project; the fabric describes itself. A repo's `CLAUD
 
 ## Core Responsibilities
 
-1. Review receipts efficiently: accept clean work, investigate anomalies, reject failures.
+1. Review receipts efficiently: accept clean work, investigate anomalies, reject failures. Start each cycle with `open_outcomes` and close every point you reviewed with `receipt_query.py decide`.
 2. Evaluate quality advisory before deciding next action.
 3. Check open items and close only evidence-backed items.
 4. Complete PRs when all gates passed and no blockers remain.

@@ -5,8 +5,8 @@ VNX has integrity tooling for the receipts ledger itself (``audit_chain.py``,
 ``state_integrity.py``, three reconcilers) but nothing that asks the one
 question none of them ask: did every dispatch the register says was fired
 actually land a receipt? This is a read-only reconciliation over central
-state — it never mutates ``dispatch_register.ndjson``, ``t0_receipts.ndjson``,
-or ``receipt_pull_cursor.json`` — that answers three questions:
+state — it never mutates ``dispatch_register.ndjson``, ``t0_receipts.ndjson``
+or ``t0_decision_log.jsonl`` — that answers these questions:
 
   receipt_coverage — every ``dispatch_id`` in ``dispatch_register.ndjson``
       must have a receipt carrying that SAME ``dispatch_id`` (or, for legacy
@@ -20,19 +20,15 @@ or ``receipt_pull_cursor.json`` — that answers three questions:
       search over raw lines would call that a hit for the branch's dispatch,
       when no receipt anywhere carries that ``dispatch_id``.
 
-  pull_cursor — the age of ``receipt_pull_cursor.json`` (ADR-035 §5.3: the
-      PULL that replaced the retired T0-pane push, DISPATCH_RULES §13's step
-      0 of every T0 cycle) and the unread backlog behind it. The backlog is
-      read via the same byte-cursor primitive ``receipt_query.py``'s
-      ``pull --peek`` uses (``pull_new_receipts``) — this module never calls
-      ``save_cursor``, so the cursor position on disk is provably unchanged
-      by a health run. The offset itself is read by a local wrapper, not
-      ``receipt_query.load_cursor`` directly: that helper collapses a
-      missing cursor AND a corrupt/unparseable one to the same offset 0,
-      which is correct for its own caller (the pull cadence just starts
-      over) but would let a corrupt cursor file read as "legitimately at
-      byte 0" here. A ledger smaller than the cursor offset (truncation/
-      rotation) is its own finding, not just a reported field.
+  open_outcomes — (fabric-state-herstel D4b, replaces the pull-cursor age)
+      the reject/investigate dispatches of this project that no T0 has
+      decided on (``open_outcomes.build_open_outcomes``, the same reader the
+      t0_index uses), and which of them have waited longer than
+      ``--open-outcome-stale-hours`` since their latest receipt. One that
+      waits past the threshold is a finding: a dispatch without an outcome
+      is a point the T0 has to look at, not a state to leave standing. The
+      old cursor answered "has any T0 read the ledger lately", which said
+      nothing about whether the receipts it read away were decided.
 
   chain_status — the existing ``ndjson_hash_chain.verify_chain`` outcome,
       with ``unchained`` reported as its own explicit class rather than
@@ -54,7 +50,7 @@ or ``receipt_pull_cursor.json`` — that answers three questions:
       fall behind the numbered walk `vnx migrate` actually drives and stay
       behind silently forever. A store with no ``runtime_coordination.db`` yet
       has no schema state to be stale against — that is a legitimate nothing-
-      to-check case (mirrors ``pull_cursor``'s no-cursor+empty-ledger "OK"),
+      to-check case (as a ledger without receipts is for ``open_outcomes``),
       not a read failure, so it reports ``STATUS_OK`` rather than
       ``SKIPPED_UNVERIFIED``.
 
@@ -73,7 +69,7 @@ missing or unreadable) — mirrors ``pre_merge_gate.py``'s ``SKIPPED_UNVERIFIED`
 finding in the overall rollup.
 
 Out of scope (by dispatch instruction, not an oversight): does not enable
-``VNX_CHAIN_RECEIPTS``, does not run the pull cadence automatically, does not
+``VNX_CHAIN_RECEIPTS``, does not decide open outcomes, does not
 write receipts. Read-only on state; the only writes this module performs are
 its own atomic health beacon under ``<data_dir>/health/ledger_health.json``
 and, for the ``acknowledge`` subcommand alone, one appended line in
@@ -97,7 +93,8 @@ if str(LIB_DIR) not in sys.path:
     sys.path.insert(0, str(LIB_DIR))
 
 from ndjson_hash_chain import verify_chain  # noqa: E402
-from receipt_query import CURSOR_NAME, pull_new_receipts  # noqa: E402
+from open_outcomes import build_open_outcomes
+from vnx_paths import project_id_from_state_dir
 from migrations.auto_apply import _discover_migrations as _auto_apply_discover_migrations  # noqa: E402
 from migrations.auto_apply import _RUNNERS_DIR as _AUTO_APPLY_RUNNERS_DIR  # noqa: E402
 from migrations.auto_apply import _DEFAULT_MIGRATIONS_DIR as _AUTO_APPLY_MIGRATIONS_DIR  # noqa: E402
@@ -108,13 +105,10 @@ ACKNOWLEDGED_NAME = "ledger_coverage_acknowledged.ndjson"
 RUNTIME_DB_NAME = "runtime_coordination.db"
 COMPONENT_NAME = "ledger_health"
 
-# ADR-035 §5.3 made PULL step 0 of every T0 cycle; an active project runs
-# several T0 cycles a day. A cursor untouched for a full day/night cycle has
-# stopped advancing, not just gone quiet between sessions — the measured
-# incident this tool exists for (cursor stuck since 21 June, 16,292 unread
-# receipts) was months stale, not hours; 24h catches a dead cadence early
-# without paging on a single quiet evening.
-DEFAULT_CURSOR_STALE_HOURS = 24.0
+# An open outcome is a point a T0 has to decide on; an active project runs
+# several T0 cycles a day. One that waits a full day/night cycle since its
+# latest receipt is no longer "not looked at yet" but left standing.
+DEFAULT_OPEN_OUTCOME_STALE_HOURS = 24.0
 
 # Beacon refresh cadence (health_beacon.py convention — e.g. plan-gate-panel.json
 # also uses 86400 for a manually/periodically-triggered component). Wiring an
@@ -343,146 +337,49 @@ def check_receipt_coverage(state_dir: Path) -> Dict[str, Any]:
     return result
 
 
-def _read_cursor_offset(cursor_path: Path) -> Tuple[Optional[int], bool]:
-    """Read the byte offset from ``cursor_path`` directly, distinguishing a
-    corrupt/unparseable cursor file from a legitimate offset (including 0).
-
-    ``receipt_query.load_cursor`` intentionally collapses a missing cursor
-    AND a corrupt one to the same offset 0 — correct for its own caller (the
-    pull cadence just starts over from 0), but a health check consuming that
-    same 0 could not tell "cursor genuinely at byte 0" from "cursor file is
-    garbage, this 0 means nothing". Duplicated here as a two-line parse
-    (same shape as ``load_cursor``) rather than changing that helper's
-    contract for its other caller.
-
-    Returns ``(offset, is_corrupt)``. ``offset`` is ``None`` when corrupt.
-    Only called after the caller has already confirmed ``cursor_path``
-    exists.
-    """
-    try:
-        raw = cursor_path.read_text(encoding="utf-8")
-        data = json.loads(raw)
-        offset = int(data.get("offset", 0))
-    except (json.JSONDecodeError, ValueError, TypeError, AttributeError):
-        return None, True
-    return offset, False
+_STALE_IDS_MAX = 10
 
 
-def check_pull_cursor(
+def check_open_outcomes(
     state_dir: Path,
     *,
-    stale_hours: float = DEFAULT_CURSOR_STALE_HOURS,
+    stale_hours: float = DEFAULT_OPEN_OUTCOME_STALE_HOURS,
+    now: Optional[datetime] = None,
 ) -> Dict[str, Any]:
-    """Age of receipt_pull_cursor.json plus the unread backlog behind it.
-
-    Never advances the cursor: reads the offset with the local
-    ``_read_cursor_offset`` (a corruption-aware wrapper, see its docstring)
-    and the backlog with ``receipt_query.pull_new_receipts``, but never
-    calls ``save_cursor`` — the same non-mutating contract
-    ``receipt_query.py pull --peek`` gives its callers.
-    """
+    """Open outcomes (reject/investigate without a T0 decision) and the ones
+    waiting past ``stale_hours``. Read-only: reads the ledger and the decision
+    log, writes neither. A project id that cannot be derived is unmeasurable,
+    never a pass (ADR-007: open outcomes are one project's)."""
     ledger_path = state_dir / LEDGER_NAME
-    cursor_path = state_dir / CURSOR_NAME
-
     if not ledger_path.exists():
         return {"status": SKIPPED_UNVERIFIED, "reason": f"receipts ledger not found: {ledger_path}"}
+    project_id = project_id_from_state_dir(state_dir) or os.environ.get("VNX_PROJECT_ID", "").strip()
+    if not project_id:
+        return {"status": SKIPPED_UNVERIFIED,
+                "reason": f"no project id for {state_dir}: open outcomes are read per project"}
 
-    try:
-        ledger_size = ledger_path.stat().st_size
-    except OSError as exc:
-        return {"status": SKIPPED_UNVERIFIED, "reason": f"could not stat receipts ledger: {exc}"}
+    section = build_open_outcomes(state_dir, project_id=project_id, limit=None)
+    if not section["available"]:
+        return {"status": SKIPPED_UNVERIFIED, "reason": section["reason"]}
 
-    if not cursor_path.exists():
-        if ledger_size == 0:
-            return {
-                "status": STATUS_OK,
-                "cursor_path": str(cursor_path),
-                "cursor_exists": False,
-                "cursor_offset": 0,
-                "cursor_age_seconds": None,
-                "ledger_size_bytes": 0,
-                "backlog_bytes": 0,
-                "backlog_receipt_count": 0,
-                "stale_threshold_hours": stale_hours,
-                "reason": "no cursor yet, but the ledger is empty — nothing to pull",
-            }
-        return {
-            "status": STATUS_FINDING,
-            "cursor_path": str(cursor_path),
-            "cursor_exists": False,
-            "cursor_offset": 0,
-            "cursor_age_seconds": None,
-            "ledger_size_bytes": ledger_size,
-            "backlog_bytes": ledger_size,
-            "backlog_receipt_count": None,
-            "stale_threshold_hours": stale_hours,
-            "reason": "receipt_pull_cursor.json does not exist — the pull cadence (ADR-035 "
-                      "§5.3 / DISPATCH_RULES §13) has never run against this ledger",
-        }
-
-    try:
-        cursor_mtime = cursor_path.stat().st_mtime
-    except OSError as exc:
-        return {"status": SKIPPED_UNVERIFIED, "reason": f"could not read cursor: {exc}"}
-
-    cursor_offset, cursor_corrupt = _read_cursor_offset(cursor_path)
-
-    if cursor_corrupt:
-        # load_cursor() would silently coerce this same file to offset 0 —
-        # indistinguishable from a legitimate cursor that really is at byte
-        # 0. Never trust an offset we can't parse: status is
-        # SKIPPED_UNVERIFIED, not STATUS_OK on a guessed 0.
-        return {
-            "status": SKIPPED_UNVERIFIED,
-            "cursor_path": str(cursor_path),
-            "cursor_exists": True,
-            "cursor_corrupt": True,
-            "cursor_offset": None,
-            "cursor_age_seconds": round(max(0.0, time.time() - cursor_mtime), 1),
-            "ledger_size_bytes": ledger_size,
-            "stale_threshold_hours": stale_hours,
-            "reason": f"{cursor_path} exists but its offset could not be parsed as valid "
-                      "JSON — not the same as a legitimate offset of 0, so the cursor "
-                      "position cannot be trusted",
-        }
-
-    age_seconds = max(0.0, time.time() - cursor_mtime)
-    truncated = ledger_size < cursor_offset
-
-    try:
-        backlog_receipts, advanceable_offset = pull_new_receipts(ledger_path, cursor_offset)
-    except OSError as exc:
-        return {"status": SKIPPED_UNVERIFIED, "reason": f"could not read receipts ledger: {exc}"}
-
-    effective_offset = 0 if truncated else cursor_offset
-    backlog_bytes = max(0, advanceable_offset - effective_offset)
-
-    stale = age_seconds > (stale_hours * 3600.0)
-
-    reasons = []
-    if truncated:
-        reasons.append(
-            f"ledger ({ledger_size} bytes) is smaller than the cursor offset "
-            f"({cursor_offset} bytes) — truncated or rotated since the last pull"
-        )
-    if stale:
-        reasons.append(
-            f"cursor is {round(age_seconds / 3600.0, 1)}h old, past the {stale_hours}h threshold"
-        )
+    now = now or datetime.now(timezone.utc)
+    threshold = stale_hours * 3600.0
+    stale: List[str] = []
+    for item in section["items"]:
+        seen = item.get("last_seen")
+        if seen and (now - datetime.fromisoformat(seen)).total_seconds() > threshold:
+            stale.append(item["dispatch_id"])
 
     return {
-        "status": STATUS_FINDING if (stale or truncated) else STATUS_OK,
-        "cursor_path": str(cursor_path),
-        "cursor_exists": True,
-        "cursor_corrupt": False,
-        "cursor_offset": cursor_offset,
-        "cursor_age_seconds": round(age_seconds, 1),
-        "ledger_size_bytes": ledger_size,
-        "backlog_bytes": backlog_bytes,
-        "backlog_receipt_count": len(backlog_receipts),
-        "ledger_truncated_since_cursor": truncated,
+        "status": STATUS_FINDING if stale else STATUS_OK,
+        "project_id": project_id,
+        "open_count": section["total"],
+        "by_outcome": section["by_outcome"],
+        "stale_count": len(stale),
+        "stale_dispatch_ids": stale[:_STALE_IDS_MAX],
         "stale_threshold_hours": stale_hours,
-        "reason": "; ".join(reasons) if reasons else None,
+        "reason": (f"{len(stale)} open outcome(s) waited more than {stale_hours}h for a T0 decision "
+                   "(receipt_query.py open-outcomes / decide)") if stale else None,
     }
 
 
@@ -570,7 +467,7 @@ def check_migration_staleness(
 
     A store with no runtime_coordination.db yet has no schema state to be stale
     against — reported STATUS_OK (nothing to check), not SKIPPED_UNVERIFIED
-    (mirrors check_pull_cursor's no-cursor+empty-ledger OK case). A DB that
+    (as check_open_outcomes is for a ledger without receipts). A DB that
     exists but cannot be opened/read, or a migrations directory that yields no
     runner-backed migration at all, IS unmeasurable.
     """
@@ -628,12 +525,12 @@ def compute_health(
     data_dir: Path,
     state_dir: Path,
     *,
-    cursor_stale_hours: float = DEFAULT_CURSOR_STALE_HOURS,
+    open_outcome_stale_hours: float = DEFAULT_OPEN_OUTCOME_STALE_HOURS,
 ) -> Dict[str, Any]:
     """Run all four checks read-only. Pure function: no writes, no mutation."""
     checks = {
         "receipt_coverage": check_receipt_coverage(state_dir),
-        "pull_cursor": check_pull_cursor(state_dir, stale_hours=cursor_stale_hours),
+        "open_outcomes": check_open_outcomes(state_dir, stale_hours=open_outcome_stale_hours),
         "chain_status": check_chain_status(state_dir),
         "migration_staleness": check_migration_staleness(state_dir),
     }
@@ -654,7 +551,7 @@ def compute_health(
         "state_dir": str(state_dir),
         "overall_status": overall,
         "exit_code": exit_code,
-        "cursor_stale_hours_threshold": cursor_stale_hours,
+        "open_outcome_stale_hours_threshold": open_outcome_stale_hours,
         "checks": checks,
     }
 
@@ -782,15 +679,16 @@ def _run_acknowledge(args: argparse.Namespace) -> int:
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Reconcile dispatch_register.ndjson against t0_receipts.ndjson "
-                     "(coverage, pull-cursor freshness, chain status, migration staleness). "
+                     "(coverage, open outcomes without a T0 decision, chain status, migration staleness). "
                      "Read-only on state. The `acknowledge` subcommand records a gap that has "
                      "been investigated and explained.",
     )
     parser.add_argument("--data-dir", default=None, help="override VNX_DATA_DIR (default: ambient resolution)")
     parser.add_argument("--state-dir", default=None, help="override VNX_STATE_DIR (default: ambient resolution)")
     parser.add_argument(
-        "--cursor-stale-hours", type=float, default=DEFAULT_CURSOR_STALE_HOURS,
-        help=f"pull-cursor age threshold in hours (default: {DEFAULT_CURSOR_STALE_HOURS})",
+        "--open-outcome-stale-hours", type=float, default=DEFAULT_OPEN_OUTCOME_STALE_HOURS,
+        help="an open outcome older than this (since its latest receipt) is a finding "
+             f"(default: {DEFAULT_OPEN_OUTCOME_STALE_HOURS})",
     )
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     parser.add_argument(
@@ -828,7 +726,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     data_dir = Path(args.data_dir) if args.data_dir else default_data_dir
     state_dir = Path(args.state_dir) if args.state_dir else default_state_dir
 
-    result = compute_health(data_dir, state_dir, cursor_stale_hours=args.cursor_stale_hours)
+    result = compute_health(data_dir, state_dir, open_outcome_stale_hours=args.open_outcome_stale_hours)
 
     if not args.no_write:
         write_health_surface(data_dir, result)

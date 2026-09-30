@@ -4,7 +4,7 @@
 `t0_role_audit.sh --static` already checks role<->skill invocability. This
 module adds the second half: every script, subcommand and state file the role
 (and DISPATCH_RULES) name must still exist in the fabric. Without it a PR can
-delete `receipt_query.py pull` or a t0_state section and the role keeps
+delete a `receipt_query.py` subcommand or a t0_state section and the role keeps
 instructing T0 to use it.
 
 Findings (one per line on stdout, exit 1 when any):
