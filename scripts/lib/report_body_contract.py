@@ -63,6 +63,23 @@ UNDECLARED_STATUS_PLACEHOLDERS = frozenset(
 # trail can tell a derived ``done`` from a claimed one.
 DERIVED_STATUS_SOURCE = "report_contract"
 
+# fabric-state-herstel D1b: the ONE way a report marks a test run as red, i.e.
+# run on the old code to show the new test fails on behaviour. A run under a
+# red label does not count toward the receipt's final test figures; every
+# other run does, failures included (fail-closed). The label is the first
+# words of a line or heading in the Verification section, optionally behind
+# heading hashes, a list bullet and bold: `**Red run** on c4c9d580:`,
+# `### Rode run (oude kop)`, `- Before the fix: 4 failed`. It covers the runs
+# on its own line and below it, until the next heading of the same or a
+# higher level, the next bold lead line, or the next label. A green label only
+# ends a red label's reach early; it discounts nothing. Matched
+# case-insensitively, nowhere but at the start of a line: a red word in the
+# middle of a sentence is prose.
+RED_RUN_LABELS: tuple[str, ...] = ("Red run", "Red runs", "Rode run", "Rode runs",
+                                   "Before the fix", "Voor de fix")
+GREEN_RUN_LABELS: tuple[str, ...] = ("Green run", "Green runs", "Groene run", "Groene runs",
+                                     "After the fix", "Na de fix")
+
 # Aliases accepted by the validator so existing authored reports do not break.
 _SECTION_ALIASES: dict[str, tuple[str, ...]] = {
     "## Changes": ("## Files Modified", "## Work Completed"),
@@ -222,6 +239,15 @@ def build_directive(
         f"- `**Model**: {model_value}`\n"
         f"- `**Provider**: {provider_value}`\n"
     )
+    red_labels = " / ".join(
+        f"`{label}`" for label in RED_RUN_LABELS if not label.endswith("runs")
+    )
+    red_run_note = (
+        "\nA test run on the OLD code (the run that shows a new test fails) "
+        f"starts its line or heading in the Verification section with {red_labels}, "
+        "for example `**Red run** on <old sha>:`. Only a run under that label is "
+        "left out of the receipt's test count; every other failure you show counts.\n"
+    )
     return (
         f"{_DIRECTIVE_SENTINEL}\n\n"
         "## Report Body Contract\n\n"
@@ -232,6 +258,7 @@ def build_directive(
         "Each section must be non-empty. `## Open Items` may contain \"None\" explicitly.\n"
         f"{pr_ref_note}"
         f"{identity_note}"
+        f"{red_run_note}"
     )
 
 

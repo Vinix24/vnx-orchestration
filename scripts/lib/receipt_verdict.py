@@ -32,7 +32,11 @@ HARD_FAILURE_STATUSES = frozenset(
 
 # verification.method values that mean "we don't actually have evidence"
 # rather than "we checked and it's clean" — ADR-035 §3.1 (evidence_complete).
-INCOMPLETE_EVIDENCE_METHODS = frozenset({"unknown", "none_claimed", "pending-report"})
+# `gate_evidence` (fsh D1b): a gate-runner's report is review evidence for
+# another dispatch's PR, never work evidence of its own.
+INCOMPLETE_EVIDENCE_METHODS = frozenset(
+    {"unknown", "none_claimed", "pending-report", "gate_evidence"}
+)
 
 # status literals that assert the dispatch actually completed — the same
 # vocabulary phantom_guard.py::COMPLETION_STATUSES uses to decide whether a

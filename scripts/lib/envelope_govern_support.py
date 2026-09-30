@@ -263,29 +263,14 @@ def _verification_from_report(report_path: Optional[Path]) -> Dict[str, Any]:
         if _scripts_dir not in sys.path:
             sys.path.insert(0, _scripts_dir)
         from report_parser import ReportParser  # noqa: PLC0415
+        from verification_runs import verification_record
 
-        extracted = ReportParser().extract_validation(content)
-        tests_passed = int(extracted.get("tests_passed") or 0)
-        tests_failed = int(extracted.get("tests_failed") or 0)
-        tests_run = tests_passed + tests_failed
-
-        if tests_run > 0:
-            method = "pytest"
-        elif extracted.get("quality_gates"):
-            method = "manual"
-        else:
-            method = "unknown"
-
-        return {
-            "method": method,
-            "tests_run": tests_run if tests_run > 0 else None,
-            "tests_passed": tests_passed if tests_run > 0 else None,
-            "tests_failed": tests_failed if tests_run > 0 else None,
-            "command": None,
-            "pr_ref": None,
-            "push_verified": None,
-            "spec_deviation": None,
-        }
+        parser = ReportParser()
+        # D1b: the same builder as report_parser's receipt, keyed on the
+        # report's own Dispatch-ID, so a gate-runner report is evidence on
+        # this path too and one report never yields two verifications.
+        dispatch_id = parser.extract_metadata(content).get("dispatch_id")
+        return verification_record(parser.extract_validation(content), dispatch_id)
     except Exception as exc:  # noqa: BLE001 — never block the receipt write
         logger.warning(
             "envelope._verification_from_report: extraction failed for %s: %s",
