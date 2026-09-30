@@ -6,6 +6,203 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-09-30
+
+Every dispatch now has exactly one computed outcome, and a dispatch without an
+outcome never closes silently again. The outcome is folded from the ledger
+(`receipt_outcome`) instead of counted per verdict stamp, and the digest, the
+recent-receipts view, the weekly digest and the drain all read it. A dispatch
+that ends without an accept or a reject surfaces to the T0 as an
+`open_outcome`, and `dead_letter` is only reached through a T0 reject in the
+decision log. This release closes the `fabric-state-herstel` track (13 points),
+runs the learning loop in shadow mode, adds the Sonnet 5.5 registry entry and
+ships a series of fixes. The learning loop persists nothing in 1.7.0.
+
+### What's new
+
+- One outcome per dispatch: `receipt_outcome`, computed rather than claimed (#1980, #1990, #1992)
+- No end state without an outcome: `open_outcomes` surface to the T0 instead of a silent close (operator decision 6) (#2008, #2010)
+- The last green verification run counts, with an explicit red-run label (#2000, plus the T0 role rule in #2010)
+- A fresh store reaches `user_version` 33 again: `auto_apply` fails closed (#2009)
+- The nightly conversation analyzer runs again (claude found under the launchd PATH) (#2007)
+- No duplicate PR on a fix-forward (OI-1906) (#2003)
+- `t0_state` shrinks from 578 KB to 29 KB (#1999)
+- Live work comes from the `dispatches` table and the occupancy flock (#1984)
+- The test leak that wrote `PR_QUEUE.md` into the real checkout is closed (OI-1919) (#2006)
+
+### Added
+
+- **`receipt_outcome`: one outcome per dispatch (fsh D3a, D3b, D4a; #1980, #1990, #1992).**
+  `scripts/lib/receipt_outcome.py` folds a dispatch's ledger lines into one of
+  accept, investigate, reject, superseded or unknown. Noise (pytest sources,
+  temp report paths, foreign `project_id`) is dropped, gate-runner dispatches
+  count as evidence linked to the work dispatch via the PR, and the ledger
+  itself is untouched (`OUTCOME_READER_EPOCH` dates the reader-side switch).
+  `receipt_query.py digest` now reports per dispatch and keeps the old per-line
+  tally as `line_verdict_counts`. `_build_recent_receipts`, `weekly_digest` and
+  `check_active_drain` read the same module, so a later failure after an
+  earlier success shows as failure and a dispatch with two `task_complete`
+  receipts counts once.
+- **`open_outcomes` and `decide` (fsh D4b1, D4b2; #2008, #2010).**
+  `scripts/lib/open_outcomes.py` lists every dispatch of the project whose
+  outcome is reject or investigate and that has no `outcome_decision`.
+  `receipt_query.py decide <id> accept|reject --reason` records the decision
+  through `t0_decision_log.write_decision`, and the byte-cursor `pull` is
+  removed. `t0_index.json` carries `open_outcomes` (schema `t0_index/1.2`). A
+  new kind `active_dispatch` covers dispatches still in `active/` without a
+  receipt or outcome. `governance_emit.emit_fallback_report` writes a report
+  for a worker the crash sweep finds dead. The drain, the janitor and
+  `dispatch_cleanup` share one predicate and only move an accept to
+  `completed/`. The headless daemon keeps a failed delivery in `active/`, and
+  `vnx doctor` reads the `open_outcomes` check.
+- **`verification_runs`: the last green run counts (fsh D1b; #2000).**
+  `scripts/lib/verification_runs.py` reads every pytest or unittest summary in
+  the Verification section and counts the last run that is not marked red
+  (`Red run`, `Rode run`, `Before the fix`, `old code`, `baseline`). Both
+  receipt write paths build `verification{}` through one helper, and
+  gate-runner dispatches get `method="gate_evidence"` without counts.
+  `## Verificatie` is read as well.
+- **Learning loop in shadow mode (#1961, #1963, #1965, #1966, #1968, #1969, #1972).**
+  The loop runs as phase 2.6 of `conversation_analyzer_nightly.sh` with an
+  in-memory pattern DB and writes every would-be change to
+  `learning_loop_shadow_report.json`. Nothing is persisted: `VNX_LEARNING_LOOP_PERSIST=1`
+  is not part of 1.7.0. Receipts before `VNX_LEARNING_LOOP_CUTOFF` are ignored,
+  a `learning_loop_nightly_beacon.json` is written on every run (`vnx_doctor`
+  fails on a missing or 36 hour old beacon), and unresolved open items of the
+  project are a second signal source (a title class over 3 origin dispatches
+  becomes a proposal). The D3a filter keeps real failures with an unresolved
+  provider (895 of 931 receipts were dropped before). Pattern tables get the
+  natural key `(project_id, pattern_type, title)` with one write path
+  (`pattern_upsert.py`) and a dry-run-by-default migration
+  (`migrate_pattern_natural_key.py`). `pattern_reattribution.py` moves
+  mis-stamped rows to their real `project_id`. The nightly analyzer defaults to
+  `deepseek-flash`, checks `/user/balance` before it starts and bills cache-hit tokens.
+- **Sonnet 5.5 in the registry, and receipts record the model that ran (#1973).**
+  `sonnet-5-5` is added (alias `sonnet` resolves to `claude-sonnet-5-5`,
+  2.00/10.00 per Mtok) and `sonnet-5` stays for comparison. The headless lane
+  reads the real model from the claude-stream init event and stamps it as
+  `model_resolved` on the `task_complete` receipt.
+- **Reconciler honours dependency kind, plus `vnx horizon remove-dependency` (fsh D9; #1981).**
+  Only `hard` edges in `track_dependencies` block a track. `soft` and `overlap`
+  edges show as `advisory_deps`, and an unknown kind counts as `hard`. The new
+  verb deletes one edge by its full key and emits `track_dep_removed` first.
+- **`t0_role_audit.sh --static` checks the role against the repo (fsh D10; #1987).**
+  `scripts/lib/t0_role_sources_audit.py` tests every script and subcommand the
+  role and `DISPATCH_RULES` name, and every state path against the writers
+  manifest `t0_role_state_writers.txt`.
+
+### Changed
+
+- **`t0_state.json` goes from 578 KB to 29 KB (fsh D8; #1999).** Eight sections
+  without a reader outside the builder are gone (`feature_state`, `pr_progress`,
+  `canonical_tracks`, `human_gate_queue`, `dispatch_register_events`,
+  `recent_dispatches`, `intelligence_brief`, `dispatch_insights`), as is
+  `pr_queue.queued_features`. A T0 asks for what it needs with `vnx objective`,
+  `vnx deliverable list` and `receipt_query.py`.
+- **Live work comes from the `dispatches` table (fsh D5; #1984).** `live_work`
+  replaces `active_work`, `queues.active` and the terminals in `t0_index.json`.
+  It reads `runtime_coordination.db` through a read-only connection, and
+  liveness is "lock held" via `dispatch_worktree_isolation.probe_occupancy`
+  (`live`, `starting`, `stale` or `unmeasured`). A failed read degrades
+  `system_health` with a reason.
+- **Gate bundles leave `dispatches/pending/` (fsh D7; #1979).** The gate result
+  writers in `gate_recorder` move the gate's own `final_prompt` bundle to
+  `completed/` or `failed/`, and `dispatch_cleanup` only moves a bundle when a
+  matching result or `review_gate_result` receipt proves it. `_move_bundle`
+  refuses an existing destination.
+- **Reviewer prompts are no longer enriched (OI-1444; #1964).** A single
+  decision point, `reviewer_roles.enrichment_allowed`, keeps repo-map, skill
+  and intelligence context out of review-gate and plan-reviewer prompts on all
+  four injection paths.
+- **Health expects only headless-era daemons (fsh D6; #1983).** Only
+  `receipt_processor` is expected as a daemon. `beacon_summary` reports status,
+  age and reason per beacon (a beacon with 5,000 rejected rows went from 1.16 MB
+  to under 8 KB in `system_health`), and the quality DB probe is read-only and
+  reports `db_reason`.
+
+### Fixed
+
+- **`auto_apply` fails closed, a fresh store reaches `user_version` 33 (#2009).**
+  A fresh `runtime_coordination.db` stuck at 10 because `auto_apply` skipped
+  every number without an `apply_NNNN.py`, so 0015 never ran and 0022 raised
+  `no such column: project_id`. Every pending number now resolves to a runner,
+  the pure-SQL runner (0028, 0029, 0030) or a declared `APPLIED_ELSEWHERE`
+  entry, and anything else raises `UnhandledMigrationError`. `apply_0015.py`
+  carries the runtime partition of 0015 with column-existence guards.
+- **Nightly conversation analyzer finds claude under launchd (#2007).**
+  `claude_cli.resolve_claude_cli()` looks on PATH and then in `~/.local/bin`
+  and `~/.claude/local`, and is used at both call sites in `deep_analyzer.py`.
+- **Nightly analyzer fails on an error (D4a; #1966).**
+  `conversation_analyzer_nightly.sh` called the non-existent `ensure_env` and
+  lost `set -e` after sourcing `vnx_paths.sh`, so every phase logged complete.
+  Both are fixed and a failing phase now exits with its code.
+- **Dreaming reads its full input (OI-1821, OI-1258, OI-1822; #1967).** The
+  consolidation prompt is split into batches under 50,000 characters, failed
+  deep analyses are counted with a reason, and `check_dream_cycle` warns on a
+  degraded or proposal-only cycle.
+- **No duplicate PR on a fix-forward (OI-1906; #2003).** `_enforce_push_pr`
+  passes `work_ref` to `enforce_pr_exists`, so the OI-1392 path handles it.
+- **`parent_dispatch` is derived from `work_ref` on stage (#1962).** Only 37 of
+  1,365 receipts carried it. `resolve_parent_dispatch` derives it from
+  `dispatch/<X>` and refuses to stage a bundle with a conflicting lineage.
+- **`extract_validation` reads `## Verification` (fsh D1; #1975).** Contract
+  reports produced `method=unknown` and zero tests before.
+- **Three errors in the T0 index (fsh D2; #1974).** `recent_receipts` took the
+  oldest three instead of the newest, `queue.open_prs` counted an empty table,
+  and the dead `lease_expires` is removed.
+- **The PR queue test no longer writes into the real checkout (OI-1919; #2006).**
+  An autouse fixture points `VNX_PROJECT_ROOT`, `PROJECT_ROOT` and `VNX_HOME`
+  at `tmp_path`, and a module guard compares the real `PR_QUEUE.md` before and after.
+
+### Upgrade notes
+
+The migration to `user_version` 33 runs at rollout. A store below 33 (known:
+`website-vincentvandeth` at uv=10, OI-1927) gets a backup first, `user_version`
+and schema hash are recorded before and after, and the `dispatches` table must
+stay readable. If the migration fails, the backup is restored and that store
+stays on 1.6.x; the rest of the fleet does not wait for it.
+
+### Known issues
+
+Known properties of 1.7.0:
+
+- Receipt history sits at about 0 accept. Before D1b (#2000, merge `70574f5d`)
+  the receipt read the first, often red, run. Old receipts are not corrected
+  (operator decision 5, no epoch correction). From `70574f5d` the last green
+  run counts. Accept grows as writers use the red-run label.
+- Attribution (an outcome on a different id, `unlinked_gate`) follows as its own track.
+- 0015 column drift. On existing stores (vnx-dev, seocrawler-v2,
+  pacompany-engine) `project_id` is missing on 7 runtime tables:
+  `retry_budgets`, `retry_state`, `escalation_log`, `execution_targets`,
+  `inbound_inbox`, `recommendations` and `recommendation_outcomes`. A fresh
+  store has them. No code reads that column. A repair migration with an
+  idempotency test follows in 1.7.1.
+- Excluded tests (OI-1227, since 15-08), older than this release and unchanged:
+  `test_build_t0_state_exception_handling::TestRunsClean::test_build_t0_state_runs_clean_on_main`
+  (exit 1 is health degraded because beacons are absent on a fresh store);
+  `test_dispatcher_drain_lifecycle`: `test_dispatch_paths_written_when_provided`,
+  `test_classify_completion_no_dead_letter_on_failure`,
+  `test_transient_fail_then_success_only_completed`;
+  `test_wiring_completeness::test_provider_dispatch_auto_route_calls_smart_router_route`.
+
+Follows in 1.7.1:
+
+- What 1.7.0 does and does not guarantee. It guarantees that a dispatch
+  without an outcome never closes silently. It does NOT guarantee that every
+  dispatch has a report. The headless envelope lane, the default lane, has no
+  manifest in `active/` and no safety net if the orchestrator dies before
+  `_govern` (OI-1932, high).
+- `recovery.py:399` puts a dispatch in `dead_letter` after an exhausted retry
+  budget. That must become an `open_outcome` (OI-1931).
+- `recovery.py:281` writes a report stub without a contract (OI-1933).
+- A bundle in `abandoned/` also becomes an `open_outcome`. The bucket stays (OI-1934).
+- `cleanup_worker_exit` moves a failed dispatch to `rejected/<reason>/` without
+  a T0 decision. The bucket stays, the `open_outcome` decides (OI-1935).
+- `ledger_health check_receipt_coverage` does not filter on `project_id`. That
+  is fail-open under ADR-007 and a blocker candidate (OI-1924).
+- `receipt_query` readers and the digest default run without a project
+  resolver (OI-1925, OI-1928).
+
 ## [1.6.7] - 2026-09-28
 
 Closes the "poorten en workers in hun hok" goal. Harness-lane review gates
