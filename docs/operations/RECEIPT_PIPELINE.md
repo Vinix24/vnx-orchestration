@@ -5,7 +5,7 @@
 **Status**: Active
 **Purpose**: How worker output becomes a governed receipt in the NDJSON audit ledger.
 
-A receipt is the record that a dispatch happened and what it produced. Without a receipt, work is invisible to governance. This document describes the two paths a dispatch takes to land a line in `.vnx-data/state/t0_receipts.ndjson`, the shared append primitive both paths write through (ADR-035 §7.1), the pull interface T0 reads the ledger with (ADR-035 §5), and the optional integrity layers (`events_path`, hash-chain) on top.
+A receipt is the record that a dispatch happened and what it produced. Without a receipt, work is invisible to governance. This document describes the two paths a dispatch takes to land a line in `.vnx-data/state/t0_receipts.ndjson`, the shared append primitive both paths write through (ADR-035 §7.1), the query interface T0 reads the ledger with (ADR-035 §5), and the optional integrity layers (`events_path`, hash-chain) on top.
 
 For the receipt schema itself, see `docs/core/11_RECEIPT_FORMAT.md` (v2.0.0 — `verdict{}`, `verification{}`, `warnings[]`, `schema_version`). For the canonical-ledger principle, see ADR-005. For the full v2 redesign, see ADR-035 (Accepted).
 
@@ -86,10 +86,10 @@ rp_delivery.sh delivers the receipt to the T0 pane (outbox pattern)
 - `scripts/receipt_processor.sh` watches `VNX_REPORTS_DIR` (and `VNX_REPORTS_DIR/headless`) for new reports. Monitor mode processes only reports newer than startup; catchup mode reprocesses a recent window.
 - `scripts/report_parser.py` extracts the receipt fields from the report.
 - `scripts/append_receipt.py` performs the append, via `append_receipt_internals/payload.py::append_receipt_payload`, which calls the shared append primitive that also applies hash-chaining when `VNX_CHAIN_RECEIPTS=1` (see below — as of ADR-035 §7.1, Path 1 goes through the same primitive and the same chain-stamping).
-- Delivery to T0 uses an **outbox pattern** (`scripts/lib/receipt_processor/rp_delivery.sh`): the receipt is persisted to `receipts/pending/` first, then — only when `VNX_RECEIPT_T0_PUSH=1` (opt-in transition escape hatch; **default is `0`** since ADR-035 §5.3/§9 PR-8) — delivered to the T0 tmux pane via `tmux load-buffer` → `paste-buffer` → `Enter`. A retry poller re-delivers anything still pending after a restart when the push is enabled. Write-first guarantees no receipt is lost regardless of the push flag; the pull interface (`scripts/receipt_query.py pull`, `docs/core/DISPATCH_RULES.md` §13) is the default way T0 becomes aware of new receipts now.
+- Delivery to T0 uses an **outbox pattern** (`scripts/lib/receipt_processor/rp_delivery.sh`): the receipt is persisted to `receipts/pending/` first, then — only when `VNX_RECEIPT_T0_PUSH=1` (opt-in transition escape hatch; **default is `0`** since ADR-035 §5.3/§9 PR-8) — delivered to the T0 tmux pane via `tmux load-buffer` → `paste-buffer` → `Enter`. A retry poller re-delivers anything still pending after a restart when the push is enabled. Write-first guarantees no receipt is lost regardless of the push flag; T0 becomes aware of receipts through `open_outcomes` (`scripts/receipt_query.py open-outcomes`, `docs/core/DISPATCH_RULES.md` §13): a reject or investigate stays on that list until a T0 decides.
 - `scripts/report_watcher.sh` is **deprecated** (it exits 0 immediately); `receipt_processor.sh` is the single watcher.
 
-Report delivery via the T0 tmux pane (`VNX_RECEIPT_T0_PUSH=1`) requires a tmux pane to be present. Headless and CLI flows write the ledger line regardless; the pane paste is an opt-in T0-notification step, not the audit write — `scripts/receipt_query.py pull` is the default notification path (`docs/core/DISPATCH_RULES.md` §13).
+Report delivery via the T0 tmux pane (`VNX_RECEIPT_T0_PUSH=1`) requires a tmux pane to be present. Headless and CLI flows write the ledger line regardless; the pane paste is an opt-in T0-notification step, not the audit write — `open_outcomes` is the default way T0 learns what to look at (`docs/core/DISPATCH_RULES.md` §13).
 
 ## The mandatory report contract
 
@@ -101,12 +101,13 @@ report on disk → receipt processor → t0_receipts.ndjson
 
 Reports must carry the required headings (`## Summary`, `## Changes`, `## Verification`, `## Open Items`) and a `Dispatch-ID`. The contract is enforced by `scripts/lib/report_body_contract.py` and validated by `scripts/validate_report.py` / `scripts/guardrails/verify_report_schema.sh`. A report missing the contract produces no clean receipt — the work has no audit record.
 
-## The pull interface (ADR-035 §5)
+## The query interface (ADR-035 §5)
 
 `scripts/receipt_query.py` is how T0 and tooling read the ledger, replacing the tmux pane-paste push. Every subcommand tolerates a mixed v1/v2 ledger — a `schema_version`-absent line is read as v1, never a crash.
 
 ```bash
-scripts/receipt_query.py pull       --state-dir <dir> [--cursor-file <path>] [--seed-now] [--peek] [--json]
+scripts/receipt_query.py open-outcomes --state-dir <dir> [--project-id <id>] [--limit N] [--json]
+scripts/receipt_query.py decide     <dispatch_id> accept|reject --reason <why> --state-dir <dir> [--project-id <id>] [--json]
 scripts/receipt_query.py by-dispatch <dispatch_id> --state-dir <dir> [--json]
 scripts/receipt_query.py by-pr      <pr_id>        --state-dir <dir> [--json]
 scripts/receipt_query.py since      <ISO8601>       --state-dir <dir> [--json]
@@ -115,14 +116,15 @@ scripts/receipt_query.py digest     --state-dir <dir> [--window 24h] [--max-age-
 scripts/receipt_query.py reconcile-oi-pending --state-dir <dir> [--max-age-days 7] [--json]
 ```
 
-- **`pull`** — the tick primitive: byte-cursor read-then-advance (`receipt_pull_cursor.json` in the state dir by default), never consumes a concurrent writer's not-yet-newline-terminated line, resets to 0 on a truncated/rotated ledger. `--seed-now` jumps the cursor to EOF to skip the historical backlog without deleting it (still reachable via `by-dispatch`/`by-pr`/`since`); `--peek` reads without advancing.
+- **`open-outcomes`** — the dispatches of this project whose outcome is `reject` or `investigate` and that no T0 has decided on, since `OPEN_OUTCOMES_EPOCH` (`scripts/lib/open_outcomes.py`). Stateless: nothing is consumed, two readers see the same list. It replaced the byte-cursor `pull` (fabric-state-herstel D4b).
+- **`decide`** — appends a T0 decision (`outcome_decision`, with `project_id`) to `t0_decision_log.jsonl` through `t0_decision_log.write_decision` (append under `flock`). The last decision per dispatch in file order counts; the active-drain moves a decided dispatch out of `dispatches/active/`.
 - **`by-dispatch`** — thin wrapper over `receipt_provenance.find_receipts_by_dispatch`.
 - **`by-pr`, `since`** — linear scan with a predicate over `pr_id`/`timestamp` (both are plain fields on every line already; no new index or SQLite projection — ADR-035 §8 non-goal at current ~8k–13k lines/ledger scale).
 - **`by-track`** — **not** a linear scan: the receipt carries no `track_id` field (that would reintroduce the anti-pattern §4 of ADR-035 removed for `session{}`). Instead a two-step join reusing existing code: `tracks.get_recent_receipts`'s `SELECT dispatch_id FROM dispatches WHERE track = ? AND project_id = ?` query, then `find_receipts_by_dispatch` per resolved `dispatch_id`.
 - **`digest`** — verdict counts (`accept`/`investigate`/`reject`/`unknown`) over `--window` (default `24h`), the top `warnings[]` codes sitting at `destination: "counted"` with running totals, an `oi_pending_unresolved_count`/`oi_pending_unresolved` tally (dedup-key-joined against the *current* open-items store — never a rewrite of the immutable receipt line), and an `oi_pending_escalated_count`/`oi_pending_escalated` tally of entries already past `--max-age-days` (default 7) — computed over the full ledger regardless of `--window`, since an entry old enough to fall outside the window must still be able to escalate.
 - **`reconcile-oi-pending`** — scans the ledger for unresolved `oi_pending` warnings and retries `open_items_manager.add_item_programmatic` per entry using the preserved dedup key (`code`). A real failure is counted in `failed` (never a bare swallow) and an entry still failing past `--max-age-days` is reported as `escalated` — the same threshold `digest`'s escalation count reads, so a standing failure stays visible every time either command runs.
 
-Every T0 cycle's step 0 is `pull` (`docs/core/DISPATCH_RULES.md` §13), followed by `digest` for the rollup and, on the same cadence, `reconcile-oi-pending`.
+Every T0 cycle's step 0 is `open-outcomes` (`docs/core/DISPATCH_RULES.md` §13), followed by `digest` for the rollup and, on the same cadence, `reconcile-oi-pending`.
 
 ## `events_path` — receipt → event-stream linkage (PR #843)
 
@@ -145,7 +147,7 @@ Once receipts are on disk, deterministic tooling reads the ledger:
 - **Cost metrics** — `scripts/cost_tracker.py` / `vnx cost-report` aggregates receipts by model, terminal, and provider into `.vnx-data/state/cost_metrics.json`. Static pricing table, no external billing API; missing fields counted as `unknown`.
 - **Quality intelligence** — receipt `findings`/`risk` (v1) or `verdict{}`/`warnings[]` (v2) feed the quality projections; `cqs_calculator.py` reads `verdict{}`/`warnings[]` first, falling back to the pre-v2 `quality_advisory{}` only when replaying a receipt that predates the cutover.
 - **Audit chain** — `scripts/audit_chain.py` verifies integrity when chaining is enabled.
-- **T0 pull cadence** — `scripts/receipt_query.py` (see "The pull interface" above) is the default way T0 becomes aware of new receipts (`docs/core/DISPATCH_RULES.md` §13).
+- **T0 cycle step 0** — `open_outcomes` (see "The query interface" above) is the default way T0 becomes aware of receipts that need a decision (`docs/core/DISPATCH_RULES.md` §13).
 
 ## Troubleshooting
 
@@ -167,7 +169,7 @@ Common causes: processor not running; report predates monitor-mode startup (use 
 
 ### Receipt written but T0 did not see it
 
-As of ADR-035 §5.3 (§9 PR-8), `VNX_RECEIPT_T0_PUSH` defaults to `0` — the tmux pane paste is suppressed by default, and T0 is expected to pull instead: `python3 scripts/receipt_query.py pull --state-dir <state-dir>` (cadence + rationale: `docs/core/DISPATCH_RULES.md` §13). Set `VNX_RECEIPT_T0_PUSH=1` to re-enable the legacy pane push as a transition escape hatch — it works from a CLI or desktop tmux session but not from a mobile remote-control session. Either way, if receipts are on disk (`tail .vnx-data/state/t0_receipts.ndjson`) but T0 shows nothing, check the delivery/pull surface before suspecting the pipeline — the audit write already succeeded.
+As of ADR-035 §5.3 (§9 PR-8), `VNX_RECEIPT_T0_PUSH` defaults to `0` — the tmux pane paste is suppressed by default, and T0 reads `open_outcomes` instead: `python3 scripts/receipt_query.py open-outcomes --state-dir <state-dir>` (rationale: `docs/core/DISPATCH_RULES.md` §13). Set `VNX_RECEIPT_T0_PUSH=1` to re-enable the legacy pane push as a transition escape hatch — it works from a CLI or desktop tmux session but not from a mobile remote-control session. Either way, if receipts are on disk (`tail .vnx-data/state/t0_receipts.ndjson`) but T0 shows nothing, check `open_outcomes` and the push flag before suspecting the pipeline — the audit write already succeeded.
 
 ### Stranded reports — refused for a missing/invalid model
 
@@ -265,13 +267,13 @@ python3 scripts/audit_chain.py walk   .vnx-data/state/t0_receipts.ndjson | tail 
 
 - ADR-005 — Append-only NDJSON ledger as the canonical audit surface
 - ADR-023 — Receipt hash-chain (`prev_hash`, three-state verify)
-- ADR-035 — Receipt v2 redesign: shared append primitive (§7.1), pull interface (§5), warning-destination rule (§6)
+- ADR-035 — Receipt v2 redesign: shared append primitive (§7.1), query interface (§5), warning-destination rule (§6)
 - `docs/core/11_RECEIPT_FORMAT.md` — receipt schema (v1 + v2 fields, `events_path`, `prev_hash`)
-- `docs/core/DISPATCH_RULES.md` §13 — receipt pull cadence (T0 cycle step 0)
+- `docs/core/DISPATCH_RULES.md` §13 — open outcomes (T0 cycle step 0)
 - `docs/operations/EVENT_STREAMS.md` — per-terminal event streams and the `events_path` linkage
 - `scripts/lib/governance_emit.py` — `emit_dispatch_receipt` (Path 1)
 - `scripts/receipt_processor.sh`, `scripts/report_parser.py`, `scripts/append_receipt.py` — Path 2
 - `scripts/lib/append_receipt_internals/idempotency.py::_write_receipt_under_lock` — the shared append primitive both paths write through
-- `scripts/receipt_query.py` — the pull/by-dispatch/by-pr/since/by-track/digest/reconcile-oi-pending interface
+- `scripts/receipt_query.py` — the open-outcomes/decide/by-dispatch/by-pr/since/by-track/digest/reconcile-oi-pending interface
 - `scripts/restore_stranded_reports.py` — recovers reports fail-closed refused for a missing/invalid model (verified sources only, never a guessed value)
 - `scripts/lib/report_body_contract.py` — the mandatory report contract

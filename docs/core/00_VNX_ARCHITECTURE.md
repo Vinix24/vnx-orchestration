@@ -226,10 +226,11 @@ not this doc).
 - Uses `report_parser.py` to generate a compact JSON receipt
 - Attaches evidence to tracked open items via PR-ID (does NOT close items or complete PRs)
 - Appends receipts to `state/t0_receipts.ndjson` (production receipt log)
-- Delivery to T0 defaults to pull, not push: `VNX_RECEIPT_T0_PUSH=0` is the
-  default (ADR-035 §5.3), so T0 reads new receipts via `scripts/receipt_query.py pull`
-  rather than having them pasted into its pane. Setting the flag restores the
-  tmux buffer-paste push.
+- Delivery to T0 is not a push: `VNX_RECEIPT_T0_PUSH=0` is the default
+  (ADR-035 §5.3). T0 reads the dispatches it still has to decide on from
+  `open_outcomes` (`t0_index.json`, or `scripts/receipt_query.py open-outcomes`)
+  and closes each with `receipt_query.py decide` (DISPATCH_RULES §13). Setting
+  the flag restores the tmux buffer-paste push.
 - Includes flood protection + singleton enforcement
 
 **Governance**: Receipt processor is evidence-only. T0 reviews evidence, closes satisfied open items, and completes PRs when all blockers/warnings are resolved.
@@ -344,7 +345,7 @@ are not present in the tree and are not wired into `.claude/settings.json`.
 │     ├─► Parses structured data via report_parser.py            │
 │     ├─► Attaches evidence to open items (does NOT close)       │
 │     ├─► Appends to t0_receipts.ndjson                          │
-│     └─► T0 pulls it (`receipt_query.py pull`, push is opt-in)   │
+│     └─► T0 sees it in open_outcomes until it decides (§13)      │
 │                                                                  │
 │  10. Intelligence Aggregator Updates Context                    │
 │      ├─► Consolidates all system state                         │

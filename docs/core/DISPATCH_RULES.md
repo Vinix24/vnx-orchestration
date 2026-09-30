@@ -212,22 +212,30 @@ Proven end-to-end sequence for a T0 that has no role file loaded (no `.claude/te
 4. **Fire** — `bin/vnx dispatch <dispatch-id>`. The single-entry door selects the lane per §5/§8: claude/Opus/Sonnet → headless lane; kimi/glm/deepseek → `provider_dispatch.py`.
 5. **After merge (usually automatic)** — `stage_spec_bundle` accepts an optional `track_id` (OI-1632), carried onto the staged spec and, at the door, persisted onto the SAME `dispatches.track` column registration already writes (never a second column). When a bridge-staged dispatch declared a `track_id`, the TL-D2 auto-propagation that upserts `tracks.pr_ref` from `dispatch.track` on merge (`reconcile_commit_provenance`, #1034) fires normally. `python3 scripts/planning_cli.py objective link-pr <track-id> <pr-number>` remains the manual fallback for a dispatch staged WITHOUT a `track_id` (advisory-only by default; `VNX_REQUIRE_DISPATCH_TRACK` stays off).
 
-## 13. Receipt pull cadence — T0 cycle step 0 (ADR-035 §5/§5.3, §9 PR-8)
+## 13. Open outcomes — T0 cycle step 0 (fabric-state-herstel D4b)
 
-Receipts are no longer pushed into the T0 pane by default. **Step 0 of every T0 cycle, before reading any receipt, is a pull:**
+Receipts are not pushed into the T0 pane by default, and there is no read cursor. **Step 0 of every T0 cycle is the list of open outcomes:**
 
 ```bash
-python3 scripts/receipt_query.py pull --state-dir <state-dir> --json
+python3 scripts/receipt_query.py open-outcomes --state-dir <state-dir> --json
 ```
 
-- Reads everything appended to `t0_receipts.ndjson` since T0's own cursor (`receipt_pull_cursor.json` in the same state dir) and advances the cursor past what it read. A concurrent writer's not-yet-newline-terminated line is never consumed early (safe against a mid-append race).
-- **First use on a given state dir:** run once with `--seed-now` to set the cursor to EOF and skip the historical backlog (the backlog stays on disk, still reachable via `by-dispatch`/`by-pr`/`since` — nothing is deleted).
-- `--peek` reads without advancing the cursor, for a look-without-consuming check.
-- Follow the pull with `python3 scripts/receipt_query.py digest --state-dir <state-dir> --json` for the accept/investigate/reject rollup, and periodically (same cadence, not a separate operational task) `python3 scripts/receipt_query.py reconcile-oi-pending --state-dir <state-dir> --json` to retry any `oi_pending` warnings — see ADR-035 §6.4. An entry that keeps failing past `--max-age-days` (default 7) shows up in both `reconcile-oi-pending`'s own `escalated`/`failed` counts and in `digest`'s `oi_pending_escalated_count` — a standing operator obligation, not a new alerting channel.
-- This replaces waiting for `rp_delivery.sh`'s tmux pane-paste (`_deliver_receipt_to_t0_pane` / `_rpd_deliver_digest`), which is now suppressed by default (`VNX_RECEIPT_T0_PUSH` defaults to `0` — set it to `1` only as the transition escape hatch, e.g. a T0 setup that cannot run a pull cadence yet). The push code path and the flag are **kept**, not removed (§8/ADR-035 §5.3) — retiring them outright is a separate follow-up PR. The durability half (`send_receipt_to_t0`'s write-first-then-attempt-delivery) is untouched either way: the ledger line lands regardless of whether the pane notification fires.
-- **OI-188 note:** this step belongs in the `t0-orchestrator` skill's cycle steps (`.claude/skills/t0-orchestrator/SKILL.md` §"2. Primary workflow"), mirroring the parked commit `24f71d22`'s intent. No lane can reliably write under `.claude/skills/` (Claude treats it read-only) — this section is the canonical, git-tracked source until an operator applies the equivalent edit to the skill file by hand. Track as an operator follow-up, not something to force through a lane edit.
+- An open outcome is a dispatch of this project whose outcome (`receipt_outcome`, one per dispatch) is `reject` or `investigate` and that no T0 has decided on. A dispatch is only finished with an outcome (operator decision 29-09-2026): without a decision it stays on the list. `t0_index.json` carries the same list as `open_outcomes` (at most 10 items, the rest as `more`), built by the same reader (`scripts/lib/open_outcomes.py`).
+- Only dispatches with a receipt since `OPEN_OUTCOMES_EPOCH` (the per-dispatch reader's epoch, 2026-09-29) are listed. The backlog before it stays in the ledger, reachable via `by-dispatch`/`by-pr`/`since`.
+- Reading consumes nothing. Two T0 sessions see the same open outcomes; the byte cursor (`receipt_pull_cursor.json`, `receipt_query.py pull`) that let the first reader take a receipt away from every other one is removed.
+- **Deciding** removes a dispatch from the list:
 
-See also: `docs/operations/RECEIPT_PIPELINE.md` (pipeline mechanics), ADR-035 §5 (pull interface design), §5.3 (push retirement), §6.4 (`oi_pending` lifecycle + escalation).
+  ```bash
+  python3 scripts/receipt_query.py decide <dispatch_id> accept|reject --reason "<why>" --state-dir <state-dir>
+  ```
+
+  This appends one line (`decision_type: outcome_decision`, `dispatch_id`, `project_id`, `decision`, `timestamp`) to `t0_decision_log.jsonl` in the same state dir, through `t0_decision_log.write_decision` (append under an exclusive `flock`; the only writer, never a read-modify-write). A second decision about the same dispatch is allowed: the last in file order counts. A decision of another project never closes this project's open outcome (ADR-007). The project id comes from `--project-id`, else the state dir, else `VNX_PROJECT_ID`; without one the command refuses.
+- `check_active_drain.py` reads the same decisions: a dispatch in `dispatches/active/` with a decision moves in the next drain run, `accept` to `completed/`, `reject` to `dead_letter/`, whatever its receipts say. An `investigate` without a decision stays in `active/`.
+- `ledger_health.py` reports an open outcome that waited more than 24h (`--open-outcome-stale-hours`) since its latest receipt as a finding.
+- Follow with `python3 scripts/receipt_query.py digest --state-dir <state-dir> --json` for the accept/investigate/reject rollup, and periodically (same cadence, not a separate operational task) `python3 scripts/receipt_query.py reconcile-oi-pending --state-dir <state-dir> --json` to retry any `oi_pending` warnings — see ADR-035 §6.4. An entry that keeps failing past `--max-age-days` (default 7) shows up in both `reconcile-oi-pending`'s own `escalated`/`failed` counts and in `digest`'s `oi_pending_escalated_count`.
+- The tmux pane push (`rp_delivery.sh`'s `_deliver_receipt_to_t0_pane` / `_rpd_deliver_digest`) stays suppressed by default (`VNX_RECEIPT_T0_PUSH` defaults to `0`; `1` is the transition escape hatch). The durability half (`send_receipt_to_t0`'s write-first-then-attempt-delivery) is untouched: the ledger line lands regardless of whether the pane notification fires.
+
+See also: `docs/operations/RECEIPT_PIPELINE.md` (pipeline mechanics), ADR-035 §5 (query interface), §6.4 (`oi_pending` lifecycle + escalation).
 
 ## 14. `contract_invalid` — meaning and consequences (OI-1638)
 

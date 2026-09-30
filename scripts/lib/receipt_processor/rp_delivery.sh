@@ -8,8 +8,8 @@
 #           _rf_* fields, $RECEIPTS_PENDING_DIR, $RECEIPTS_PROCESSED_DIR
 # Env flags (OI-654, default flipped by ADR-035 §5.3/§9 PR-8):
 #           VNX_RECEIPT_T0_PUSH=0 (default) suppresses the pane-paste push —
-#           ndjson append + outbox still happen; T0 is expected to pull instead
-#           (scripts/receipt_query.py pull, docs/core/DISPATCH_RULES.md §13).
+#           ndjson append + outbox still happen; T0 reads open_outcomes instead
+#           (scripts/receipt_query.py open-outcomes, docs/core/DISPATCH_RULES.md §13).
 #           1 re-enables the legacy tmux pane push as a transition escape hatch.
 #           VNX_RECEIPT_DIGEST_THRESHOLD=5 (default) collapses a pending stack
 #           bigger than this into one digest paste instead of N individual ones.

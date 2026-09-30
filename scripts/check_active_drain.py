@@ -8,10 +8,15 @@ as a "currently in-flight" worklist.
 
 Rules
 -----
+* a T0 recorded a decision about the dispatch (t0_decision_log.jsonl,
+  read by open_outcomes.read_outcome_decisions): accept → completed/,
+  reject → dead_letter/. The decision wins over the receipts: the T0 is
+  the sole authority for acceptance (fabric-state-herstel D4b).
 * dispatch's outcome is accept (success)                              → move to completed/
 * dispatch's outcome is reject (failure)                              → move to dead_letter/
 * dispatch's outcome is investigate (missing verification, an open
   blocker, a status literal nobody knows)                             → leave alone
+  until a T0 decides; it is an open point in t0_index.json open_outcomes
 * dispatch has a receipt but no outcome of its own (only evidence,
   superseded by a child, its lines attributed to another dispatch or
   dropped as an unlinked gate run)                                    → leave alone, at any age
@@ -41,7 +46,7 @@ import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator, NamedTuple
+from typing import Iterator, Mapping, NamedTuple
 
 # ---------------------------------------------------------------------------
 # Path resolution
@@ -50,6 +55,7 @@ from typing import Iterator, NamedTuple
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_SCRIPTS_DIR / "lib"))
 
+from open_outcomes import DECISION_LOG_NAME, read_outcome_decisions
 from project_root import resolve_data_dir, resolve_project_id  # noqa: E402
 from receipt_outcome import (  # noqa: E402
     BOOKKEEPING_EVENT_TYPES,
@@ -261,15 +267,21 @@ def iter_active_dispatches(dispatches_dir: Path) -> Iterator[DispatchEntry]:
 _RECEIPT_WITHOUT_OUTCOME = "receipt present without an outcome: needs a human look"
 
 
+_DECISION_DESTINATION = {"accept": "completed", "reject": "dead_letter"}
+
+
 def _destination(
     entry: DispatchEntry,
     receipt_status: str | None,
     now: datetime,
     older_than_seconds: float,
     has_receipt: bool = False,
+    decision: str | None = None,
 ) -> tuple[str, str]:
     """Where a dispatch goes and why: ``completed``, ``dead_letter`` or
-    ``skipped`` (it stays in active/)."""
+    ``skipped`` (it stays in active/). A T0 ``decision`` goes first."""
+    if decision in _DECISION_DESTINATION:
+        return _DECISION_DESTINATION[decision], f"T0 decision {decision!r} in the decision log"
     if receipt_status == "success":
         return "completed", "receipt found with success status"
     if receipt_status == "failure":
@@ -301,9 +313,12 @@ def drain_one(
     older_than_seconds: float,
     dry_run: bool,
     receipt_present: "frozenset[str]" = frozenset(),
+    decisions: "Mapping[str, dict] | None" = None,
 ) -> DrainResult:
     """``receipt_present`` (build_receipt_presence) names the dispatches with a
-    receipt on disk; one of them without an index entry is left in active/."""
+    receipt on disk; one of them without an index entry is left in active/.
+    ``decisions`` (read_outcome_decisions) maps a dispatch id to the T0's last
+    recorded decision, which moves the dispatch whatever its receipts say."""
     # Accept either the legacy frozenset (success-implied) or the new
     # status-aware dict to keep external callers working.
     if isinstance(receipt_index, dict):
@@ -313,8 +328,10 @@ def drain_one(
     else:
         receipt_status = None
 
+    decision = ((decisions or {}).get(entry.dispatch_id) or {}).get("decision")
     dest_bucket, reason = _destination(entry, receipt_status, now, older_than_seconds,
-                                       has_receipt=entry.dispatch_id in receipt_present)
+                                       has_receipt=entry.dispatch_id in receipt_present,
+                                       decision=decision)
     if dest_bucket == "skipped":
         return DrainResult(
             dispatch_id=entry.dispatch_id,
@@ -372,6 +389,8 @@ def drain_active(
     summary = summarize_outcomes(receipts, project_id=project_id)
     receipt_index = _status_index(summary)
     receipt_present = _presence(receipts, project_id, summary)
+    # the sentinel project matches no decision: without a project id nothing is decided
+    decisions = read_outcome_decisions(data_dir / "state" / DECISION_LOG_NAME, project_id)
     now = datetime.now(tz=timezone.utc)
     older_than_seconds = older_than_hours * 3600.0
 
@@ -385,6 +404,7 @@ def drain_active(
             older_than_seconds=older_than_seconds,
             dry_run=dry_run,
             receipt_present=receipt_present,
+            decisions=decisions,
         )
         results.append(result)
     return results

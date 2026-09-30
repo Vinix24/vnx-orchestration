@@ -52,6 +52,13 @@ else
     VNX_PYTHON="python3"
 fi
 
+# launchd inherits no shell profile, so the PATH from the plist has no
+# ~/.local/bin, where the native installer puts `claude` (OI-1258). Put it first
+# so every child process finds the CLI, not only the analyzer's own resolver.
+if [ -d "$HOME/.local/bin" ]; then
+    export PATH="$HOME/.local/bin:$PATH"
+fi
+
 # Load user environment for email digest (launchd doesn't source ~/.zshrc)
 # Reads VNX_DIGEST_EMAIL and VNX_SMTP_PASS from ~/.zshrc or ~/.zprofile
 for _rc in "$HOME/.zprofile" "$HOME/.zshrc"; do

@@ -314,7 +314,7 @@ The tmux worker receipt omits `events_path` entirely — the key is absent, not 
 
 ## Integration points
 
-- **T0 Orchestrator** — reads `verdict.decision` (v2) or `status` (v1) to decide gate advancement, `report_path` to open the unified report, `pr_id` to track PRs, `warnings[]`/`findings` for quality signals. Pulls via `scripts/receipt_query.py pull` rather than waiting for a pane push — see `docs/core/DISPATCH_RULES.md` §13.
+- **T0 Orchestrator** — reads `verdict.decision` (v2) or `status` (v1) to decide gate advancement, `report_path` to open the unified report, `pr_id` to track PRs, `warnings[]`/`findings` for quality signals. Reads the dispatches it still has to decide on via `scripts/receipt_query.py open-outcomes` (or `open_outcomes` in `t0_index.json`) and records its decision with `receipt_query.py decide` — see `docs/core/DISPATCH_RULES.md` §13.
 - **Cost tracker** (`scripts/cost_tracker.py`, `vnx cost-report`) — aggregates receipts by `model`, `terminal_id`, and provider from `token_usage` + `cost_usd`. Missing fields are counted as `unknown`.
 - **Audit chain** (`scripts/audit_chain.py`) — verifies the `prev_hash` chain when `VNX_CHAIN_RECEIPTS=1`, across both write paths since ADR-035 §7.1.
 
@@ -323,13 +323,13 @@ The tmux worker receipt omits `events_path` entirely — the key is absent, not 
 - ADR-005 — Append-only NDJSON ledger as the canonical audit surface
 - ADR-023 — Receipt hash-chain (`prev_hash`, three-state verify)
 - ADR-016 — Unified event shape
-- ADR-035 — Receipt v2 redesign: `verdict{}`, warning-destination rule, pull model, terminal-state removal
-- `docs/operations/RECEIPT_PIPELINE.md` — report→receipt→ledger flow, the shared append primitive, the pull interface
+- ADR-035 — Receipt v2 redesign: `verdict{}`, warning-destination rule, query interface, terminal-state removal
+- `docs/operations/RECEIPT_PIPELINE.md` — report→receipt→ledger flow, the shared append primitive, the query interface
 - `docs/operations/EVENT_STREAMS.md` — per-terminal event streams and the `events_path` linkage
-- `docs/core/DISPATCH_RULES.md` §13 — receipt pull cadence
+- `docs/core/DISPATCH_RULES.md` §13 — open outcomes (T0 cycle step 0)
 - `scripts/lib/governance_emit.py` — `emit_dispatch_receipt` (Path 1, governed receipt writer)
 - `scripts/lib/append_receipt_internals/idempotency.py::_write_receipt_under_lock` — the shared append primitive both paths use
 - `scripts/lib/receipt_verdict.py` — `compute_verdict`
 - `scripts/lib/append_receipt_internals/warning_destination.py` — the destination-assignment engine
 - `scripts/lib/append_receipt_internals/validation.py` — the full append-time reject list
-- `scripts/receipt_query.py` — the pull/by-dispatch/by-pr/since/by-track/digest/reconcile-oi-pending interface
+- `scripts/receipt_query.py` — the open-outcomes/decide/by-dispatch/by-pr/since/by-track/digest/reconcile-oi-pending interface
