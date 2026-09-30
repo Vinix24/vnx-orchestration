@@ -30,6 +30,55 @@ _RECS_STATE_DIR_AT_IMPORT = _recs.STATE_DIR
 _RECS_PR_QUEUE_STATE_FILE_AT_IMPORT = _recs.PR_QUEUE_STATE_FILE
 
 
+def _real_project_root() -> Path:
+    """The project root PRQueueManager resolves WITHOUT any test isolation."""
+    saved = {k: os.environ.pop(k, None) for k in ("VNX_PROJECT_ROOT", "PROJECT_ROOT")}
+    try:
+        from vnx_paths import resolve_paths
+        return Path(resolve_paths()["PROJECT_ROOT"])
+    finally:
+        for k, v in saved.items():
+            if v is not None:
+                os.environ[k] = v
+
+
+def _snapshot(path: Path):
+    if not path.exists():
+        return None
+    return (path.stat().st_mtime_ns, path.read_bytes())
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _real_pr_queue_md_untouched():
+    """OI-1919: no test in this module may write PR_QUEUE.md in the real checkout.
+
+    Compares mtime plus content of the real-root PR_QUEUE.md before and after the
+    module. A leak (PRQueueManager() resolving PROJECT_ROOT to the real repo)
+    fails the module here instead of tripping the harness-lane main-checkout guard.
+    """
+    real_queue = _real_project_root() / "PR_QUEUE.md"
+    before = _snapshot(real_queue)
+    yield
+    after = _snapshot(real_queue)
+    assert after == before, f"test module modified the real {real_queue}"
+
+
+@pytest.fixture(autouse=True)
+def _tmp_project_root(tmp_path, monkeypatch):
+    """OI-1919: point PROJECT_ROOT (and VNX_HOME) of every test at tmp_path.
+
+    VNX_PROJECT_ROOT is the override vnx_paths honours ahead of the git
+    heuristics; PRQueueManager writes PR_QUEUE.md under the resolved root.
+    """
+    project_root = tmp_path / "project-root"
+    project_root.mkdir(parents=True, exist_ok=True)
+    vnx_home = tmp_path / "vnx-home"
+    vnx_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("VNX_PROJECT_ROOT", str(project_root))
+    monkeypatch.setenv("PROJECT_ROOT", str(project_root))
+    monkeypatch.setenv("VNX_HOME", str(vnx_home))
+
+
 @pytest.fixture
 def clean_state(tmp_path, monkeypatch):
     """Clean state directory before each test"""
