@@ -140,8 +140,9 @@ class TestLongRunningDispatchStaysActive:
             "Active dispatch directory must not be moved before receipt arrives"
         )
 
-    def test_exceeds_threshold_no_receipt_goes_dead_letter(self, tmp_path: Path) -> None:
-        """Confirms the drain does dead_letter old receiptless dispatches (control)."""
+    def test_exceeds_threshold_no_receipt_is_an_open_point(self, tmp_path: Path) -> None:
+        """An old receiptless dispatch stays in active/ as an open point for a
+        T0 (fabric-state-herstel D4b2: dead_letter is only a T0 decision)."""
         from check_active_drain import drain_one, DispatchEntry, build_receipt_status_index
 
         data = _make_data_dir(tmp_path)
@@ -165,9 +166,11 @@ class TestLongRunningDispatchStaysActive:
             dry_run=False,
         )
 
-        assert result.action == "dead_letter", (
-            f"Dispatch older than threshold with no receipt must go to dead_letter, got '{result.action}'"
+        assert result.action == "skipped", (
+            f"Dispatch older than threshold with no receipt must stay open, got '{result.action}'"
         )
+        assert result.reason.startswith("open point: no receipt, age")
+        assert entry_dir.is_dir()
 
 
 # ---------------------------------------------------------------------------

@@ -210,7 +210,8 @@ class TestDrainOne:
         assert not (data / "dispatches" / "active" / did).exists()
         assert (data / "dispatches" / "completed" / did).exists()
 
-    def test_moves_to_dead_letter_when_old_no_receipt(self, tmp_path: Path) -> None:
+    def test_old_dispatch_without_receipt_stays_as_an_open_point(self, tmp_path: Path) -> None:
+        """D4b2: the age rule no longer dead-letters; only a T0 reject does."""
         data = _make_data_dir(tmp_path)
         did = "20260414-old-orphan-A"
         d = _make_active_dispatch(data, did, hours_old=10.0)
@@ -225,9 +226,10 @@ class TestDrainOne:
             older_than_seconds=3600,
             dry_run=False,
         )
-        assert result.action == "dead_letter"
-        assert not (data / "dispatches" / "active" / did).exists()
-        assert (data / "dispatches" / "dead_letter" / did).exists()
+        assert result.action == "skipped"
+        assert result.reason.startswith("open point: no receipt, age")
+        assert (data / "dispatches" / "active" / did).exists()
+        assert not (data / "dispatches" / "dead_letter" / did).exists()
 
     def test_skips_young_dispatch_without_receipt(self, tmp_path: Path) -> None:
         data = _make_data_dir(tmp_path)
@@ -268,7 +270,7 @@ class TestDrainOne:
         # Original directory still exists
         assert (data / "dispatches" / "active" / did).exists()
 
-    def test_no_timestamp_treated_as_dead_letter(self, tmp_path: Path) -> None:
+    def test_no_timestamp_is_an_open_point(self, tmp_path: Path) -> None:
         data = _make_data_dir(tmp_path)
         did = "no-timestamp-dispatch-A"
         d = data / "dispatches" / "active" / did
@@ -283,7 +285,8 @@ class TestDrainOne:
             older_than_seconds=3600,
             dry_run=False,
         )
-        assert result.action == "dead_letter"
+        assert (result.action, result.reason) == ("skipped", "open point: no receipt, no timestamp")
+        assert d.exists()
 
     def test_receipt_beats_age_threshold(self, tmp_path: Path) -> None:
         """A dispatch with a receipt moves to completed even if it is very old."""
@@ -345,7 +348,7 @@ class TestDrainActive:
         # completed via receipt
         _make_active_dispatch(data, "dispatch-with-receipt", hours_old=5.0)
         _make_receipt(data, "dispatch-with-receipt", pid=1)
-        # dead_letter: old + no receipt
+        # open point: old + no receipt (stays in active/)
         _make_active_dispatch(data, "dispatch-orphan-old", hours_old=48.0)
         # skipped: new + no receipt
         _make_active_dispatch(data, "dispatch-new", hours_old=0.2)
@@ -354,7 +357,8 @@ class TestDrainActive:
         by_id = {r.dispatch_id: r for r in results}
 
         assert by_id["dispatch-with-receipt"].action == "completed"
-        assert by_id["dispatch-orphan-old"].action == "dead_letter"
+        assert by_id["dispatch-orphan-old"].action == "skipped"
+        assert (data / "dispatches" / "active" / "dispatch-orphan-old").is_dir()
         assert by_id["dispatch-new"].action == "skipped"
 
     def test_dry_run_leaves_active_untouched(self, tmp_path: Path) -> None:
@@ -428,7 +432,9 @@ class TestStatusAwareDrain:
         assert isinstance(idx, frozenset)
         assert "legacy-dispatch" in idx
 
-    def test_failed_receipt_routes_to_dead_letter(self, tmp_path: Path) -> None:
+    def test_failed_receipt_stays_open_until_a_t0_decides(self, tmp_path: Path) -> None:
+        """D4b2: a failure receipt is no outcome a T0 decided. It is never
+        completed work and never dead-lettered without a T0 reject."""
         data = _make_data_dir(tmp_path)
         did = "20260429-failed-dispatch"
         d = _make_active_dispatch(data, did, hours_old=2.0)
@@ -436,12 +442,11 @@ class TestStatusAwareDrain:
 
         results = drain_active(data_dir=data, older_than_hours=1.0, dry_run=False)
         assert len(results) == 1
-        assert results[0].action == "dead_letter"
-        assert "failure" in results[0].reason
-        assert (data / "dispatches" / "dead_letter" / did).exists()
+        assert results[0].action == "skipped"
+        assert "'reject'" in results[0].reason
+        assert not (data / "dispatches" / "dead_letter" / did).exists()
         assert not (data / "dispatches" / "completed" / did).exists()
-        # dispatch directory must be removed from active/
-        assert not d.exists()
+        assert d.exists()
 
     def test_timeout_status_on_a_completion_stays_in_active_for_a_human(self, tmp_path: Path) -> None:
         """A completion with status ``timeout`` carries no outcome signal
@@ -455,7 +460,7 @@ class TestStatusAwareDrain:
         assert results[0].action == "skipped"
         assert (data / "dispatches" / "active" / did).is_dir()
 
-    def test_terminal_task_timeout_routes_to_dead_letter(self, tmp_path: Path) -> None:
+    def test_terminal_task_timeout_is_an_open_reject(self, tmp_path: Path) -> None:
         data = _make_data_dir(tmp_path)
         did = "20260429-task-timeout-dispatch"
         _make_active_dispatch(data, did, hours_old=2.0)
@@ -464,7 +469,8 @@ class TestStatusAwareDrain:
                                        "status": "timeout"}), encoding="utf-8")
 
         results = drain_active(data_dir=data, older_than_hours=1.0, dry_run=False)
-        assert results[0].action == "dead_letter"
+        assert results[0].action == "skipped"
+        assert "'reject'" in results[0].reason
 
     def test_unknown_status_stays_in_active_for_a_human(self, tmp_path: Path) -> None:
         """Unrecognised statuses fail closed — never silently completed. Since

@@ -7,15 +7,24 @@ completed/, which silently misclassified legitimate long-running tasks
 (file mtime is set at delivery time and never refreshed) as completed and
 hid live work from T0 state.
 
-Reconciliation rules
---------------------
-- Dispatch has a matching receipt in receipts/processed/  → move to completed/
-- No receipt + age >= stale_hours                         → orphan (logged, file stays)
-- Otherwise                                               → skipped (file stays)
+Reconciliation rules (fabric-state-herstel D4b2)
+------------------------------------------------
+A dispatch is only finished with an outcome. The rule is
+``open_outcomes.active_destination``, the same one ``check_active_drain.py``
+drains directories with; the receipts are read the same way
+(``open_outcomes.dispatch_receipts``: ``receipt_outcome`` plus
+``receipt_presence``), scoped to this store's project (ADR-007).
 
-Receipts are scanned by reading every JSON file under
-``receipts/processed/`` once and indexing by ``dispatch_id`` (matches the
-existing janitor in ``check_active_drain.py``).
+- T0 decision accept, or receipt outcome accept          → move to completed/
+- T0 decision reject                                     → move to dead_letter/
+- No receipt + age >= stale_hours                        → orphan (open point, file stays)
+- Failure/investigate outcome, or a receipt without an
+  outcome of its own                                     → open (open point, file stays)
+- Otherwise                                              → skipped (file stays)
+
+A receipt of any kind used to promote the file, so a failure-only dispatch
+went to completed/. The store is ``receipts_processed_dir.parent.parent``:
+its ``state/t0_decision_log.jsonl`` carries the T0 decisions.
 
 CLI
 ---
@@ -40,32 +49,33 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
 
+_LIB_DIR = str(Path(__file__).resolve().parent)
+if _LIB_DIR not in sys.path:
+    sys.path.insert(0, _LIB_DIR)
+
+from open_outcomes import (  # noqa: E402
+    DECISION_LOG_NAME,
+    OUTCOME_NO_RECEIPT,
+    active_destination,
+    dispatch_receipts,
+    read_outcome_decisions,
+    scoped_processed,
+)
+
 
 @dataclass(frozen=True)
 class ReconcileResult:
     dispatch_id: str
-    action: str   # "completed" | "orphan" | "skipped" | "error"
+    action: str   # "completed" | "dead_letter" | "orphan" | "open" | "skipped" | "error"
     reason: str
 
 
 def build_receipt_index(receipts_processed_dir: Path) -> frozenset[str]:
-    """Return the set of dispatch_ids found in receipts/processed/*.json."""
-    if not receipts_processed_dir.is_dir():
-        return frozenset()
-    ids: set[str] = set()
-    for path in receipts_processed_dir.iterdir():
-        if path.suffix != ".json" or not path.is_file():
-            continue
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            continue
-        if not isinstance(data, dict):
-            continue
-        did = data.get("dispatch_id", "")
-        if isinstance(did, str) and did and did != "unknown":
-            ids.add(did)
-    return frozenset(ids)
+    """The dispatch_ids of this store's project with a receipt in
+    receipts/processed/*.json, outcome or not (open_outcomes.receipt_presence):
+    bookkeeping, test noise and another project's lines are no receipt."""
+    receipts, project_id = scoped_processed(Path(receipts_processed_dir).parent)
+    return dispatch_receipts(receipts, project_id)[1]
 
 
 def _dispatch_id_from_filename(name: str) -> str:
@@ -74,51 +84,65 @@ def _dispatch_id_from_filename(name: str) -> str:
     return name
 
 
+def _move(path: Path, dest_dir: Path, did: str, action: str, reason: str) -> ReconcileResult:
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(path), str(dest_dir / path.name))
+    except (OSError, shutil.Error) as exc:
+        return ReconcileResult(did, "error", f"move failed: {exc}")
+    return ReconcileResult(did, action, reason)
+
+
 def reconcile_active(
     active_dir: Path,
     completed_dir: Path,
     receipts_processed_dir: Path,
     stale_hours: float = 24.0,
     now_ts: Optional[float] = None,
+    dead_letter_dir: Optional[Path] = None,
 ) -> list[ReconcileResult]:
-    """Reconcile active/*.md files against the receipt index.
+    """Reconcile active/*.md files against the outcome of their receipts.
 
-    Never moves a file out of active/ purely on age — only receipt evidence
-    promotes a file to completed/. Orphans (no receipt, age >= stale_hours)
-    are surfaced via the result list so callers can log them, but the file
-    stays in active/ until a human or higher-level janitor decides.
+    Never moves a file out of active/ on age, and never on a receipt alone:
+    only an accept promotes to completed/, only a T0 reject goes to
+    ``dead_letter_dir`` (default: next to ``completed_dir``). Everything else
+    stays in active/ as an open point; orphans (no receipt, age >=
+    stale_hours) are reported as ``orphan`` so callers can log them.
     """
     if not active_dir.is_dir():
         return []
-    receipt_ids = build_receipt_index(receipts_processed_dir)
+    receipts_dir = Path(receipts_processed_dir).parent
+    receipts, project_id = scoped_processed(receipts_dir)
+    status_index, presence = dispatch_receipts(receipts, project_id)
+    decisions = read_outcome_decisions(receipts_dir.parent / "state" / DECISION_LOG_NAME, project_id)
+    dead_letter = dead_letter_dir if dead_letter_dir is not None else completed_dir.parent / "dead_letter"
     now = time.time() if now_ts is None else now_ts
-    stale_seconds = max(0.0, stale_hours) * 3600.0
+    # stale_hours <= 0 never reports an orphan (the CLI's historical meaning)
+    stale_seconds = stale_hours * 3600.0 if stale_hours > 0 else float("inf")
     results: list[ReconcileResult] = []
     for path in sorted(active_dir.iterdir()):
         if not path.is_file() or path.suffix != ".md":
             continue
         did = _dispatch_id_from_filename(path.name)
-        if did in receipt_ids:
-            try:
-                completed_dir.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(path), str(completed_dir / path.name))
-                results.append(ReconcileResult(did, "completed", "receipt found"))
-            except (OSError, shutil.Error) as exc:
-                results.append(ReconcileResult(did, "error", f"move failed: {exc}"))
-            continue
         try:
             age = now - path.stat().st_mtime
         except OSError as exc:
             results.append(ReconcileResult(did, "error", f"stat failed: {exc}"))
             continue
-        if stale_seconds and age >= stale_seconds:
-            results.append(
-                ReconcileResult(did, "orphan", f"no receipt, age {age / 3600.0:.1f}h >= {stale_hours:.1f}h")
-            )
+        destination, reason, open_as = active_destination(
+            receipt_status=status_index.get(did), has_receipt=did in presence,
+            decision=(decisions.get(did) or {}).get("decision"),
+            age_seconds=age, threshold_seconds=stale_seconds)
+        if destination == "completed":
+            results.append(_move(path, completed_dir, did, "completed", reason))
+        elif destination == "dead_letter":
+            results.append(_move(path, dead_letter, did, "dead_letter", reason))
+        elif open_as == OUTCOME_NO_RECEIPT:
+            results.append(ReconcileResult(did, "orphan", reason))
+        elif open_as is not None:
+            results.append(ReconcileResult(did, "open", reason))
         else:
-            results.append(
-                ReconcileResult(did, "skipped", f"no receipt, age {age / 3600.0:.2f}h < {stale_hours:.1f}h")
-            )
+            results.append(ReconcileResult(did, "skipped", reason))
     return results
 
 
@@ -138,6 +162,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--active-dir", required=True)
     parser.add_argument("--completed-dir", required=True)
     parser.add_argument("--receipts-processed-dir", required=True)
+    parser.add_argument("--dead-letter-dir", default=None,
+                        help="Destination of a T0 reject (default: dead_letter/ next to --completed-dir).")
     parser.add_argument(
         "--stale-hours",
         type=float,
@@ -152,6 +178,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         Path(args.completed_dir),
         Path(args.receipts_processed_dir),
         stale_hours=args.stale_hours,
+        dead_letter_dir=Path(args.dead_letter_dir) if args.dead_letter_dir else None,
     )
     if args.json:
         print(_format_json(results))

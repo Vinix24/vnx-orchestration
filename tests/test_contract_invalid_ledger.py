@@ -347,7 +347,7 @@ def test_real_outcome_success_after_gate_receipt_resolves(tmp_path: Path) -> Non
 
 def test_subprocess_completion_counts_as_outcome(tmp_path: Path) -> None:
     """subprocess_completion carries the literal 4x in the live ledger, so it
-    is in DELIVERABLE_OUTCOME_EVENT_TYPES and must be judged."""
+    is an outcome receipt and must be judged."""
     receipts = tmp_path / "t0_receipts.ndjson"
     _write_receipts(receipts, [
         _ci_receipt("d-sub", "kimi", "2026-09-06T10:00:00Z",
@@ -359,18 +359,24 @@ def test_subprocess_completion_counts_as_outcome(tmp_path: Path) -> None:
     assert ok is False
 
 
-def test_outcome_event_type_set_matches_measurement() -> None:
-    """Pin the set: measured 07-09 over 29.386 live records, the event types
-    that ever carry the contract_invalid literal are report_contract_invalid,
-    task_complete and subprocess_completion; task_failed is the fourth
-    deliverable outcome. review_gate_request must never be in here."""
-    assert cil.DELIVERABLE_OUTCOME_EVENT_TYPES == frozenset({
-        "report_contract_invalid",
-        "task_complete",
-        "subprocess_completion",
-        "task_failed",
-    })
-    assert "review_gate_request" not in cil.DELIVERABLE_OUTCOME_EVENT_TYPES
+def test_outcome_receipts_are_the_shared_outcome_predicate() -> None:
+    """OI-1917: the gate judges exactly what receipt_outcome.is_outcome_line
+    calls an outcome, no own event-type list. Measured 07-09 over 29.386 live
+    records, the event types that carry the contract_invalid literal are
+    report_contract_invalid, task_complete and subprocess_completion;
+    task_failed is the fourth deliverable outcome. ``event_type=contract_invalid``
+    is an outcome too; review_gate_request and pr_merged never are."""
+    from receipt_outcome import is_outcome_line
+
+    assert not hasattr(cil, "DELIVERABLE_OUTCOME_EVENT_TYPES")
+    for event_type, status in (("report_contract_invalid", None), ("task_complete", "success"),
+                               ("subprocess_completion", "failure"), ("task_failed", "failed"),
+                               ("contract_invalid", "contract_invalid")):
+        record = {"event_type": event_type, "dispatch_id": "d", "status": status}
+        assert cil._is_outcome_receipt(record) is is_outcome_line(record) is True, event_type
+    for event_type in ("review_gate_request", "pr_merged"):
+        record = {"event_type": event_type, "dispatch_id": "d", "status": "success"}
+        assert cil._is_outcome_receipt(record) is False, event_type
 
 
 # ---------------------------------------------------------------------------

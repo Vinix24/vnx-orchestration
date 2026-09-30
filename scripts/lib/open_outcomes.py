@@ -33,9 +33,23 @@ listed. Before the per-dispatch reader (``OUTCOME_READER_EPOCH``) an
 backlog before it is not a list of open points. It stays in the ledger,
 reachable through ``receipt_query.py by-dispatch``/``since``.
 
-Each item carries ``kind``. Today there is one, ``receipt_outcome``; other
-kinds of open point (a dispatch without any outcome, D4b2) are added as a
-new ``kind`` next to it, counted in ``by_kind``.
+Each item carries ``kind``, counted in ``by_kind``:
+
+* ``receipt_outcome`` — a dispatch in the ledger whose outcome is
+  ``reject``, ``investigate`` or ``unknown`` (only evidence, no outcome line
+  of its own). A ``superseded`` dispatch is no open point: the child that
+  took the work over carries the outcome.
+* ``active_dispatch`` (D4b2) — a dispatch still in ``dispatches/active/``
+  that the active-drain leaves standing without an outcome: no receipt past
+  the threshold (``no_receipt``), a receipt without an outcome of its own
+  (``no_outcome``), or a receipt outcome other than accept (``reject``,
+  ``investigate``). ``active_destination`` is the one rule for both the
+  drain and this list, and ``receipt_presence`` the one test of "has a
+  receipt"; the janitor and dispatch_cleanup read the same two.
+
+Nothing without an outcome ends in ``completed/`` or ``dead_letter/``: an
+accept goes to completed, dead_letter is only a T0 ``reject`` in the
+decision log (operator decision 29-09-2026).
 
 No database is read and no table is added: the per-project ledger and
 decision log plus the ``project_id`` filter are the whole scope.
@@ -48,9 +62,15 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional
+from typing import Any, Dict, Iterable, Iterator, List, NamedTuple, Optional
 
-from receipt_outcome import OUTCOME_READER_EPOCH, noise_reason, summarize
+from receipt_outcome import (
+    BOOKKEEPING_EVENT_TYPES,
+    INVALID_DISPATCH_IDS,
+    OUTCOME_READER_EPOCH,
+    noise_reason,
+    summarize,
+)
 
 LEDGER_NAME = "t0_receipts.ndjson"
 DECISION_LOG_NAME = "t0_decision_log.jsonl"
@@ -61,8 +81,30 @@ OPEN_OUTCOMES_EPOCH = OUTCOME_READER_EPOCH
 
 OUTCOME_DECISION_TYPE = "outcome_decision"
 OUTCOME_DECISIONS = frozenset({"accept", "reject"})
-OPEN_DECISIONS = ("reject", "investigate")
+OPEN_DECISIONS = ("reject", "investigate", "unknown")
 KIND_RECEIPT_OUTCOME = "receipt_outcome"
+KIND_ACTIVE_DISPATCH = "active_dispatch"
+
+# What an active dispatch without an outcome reads as in the list.
+OUTCOME_NO_RECEIPT = "no_receipt"
+OUTCOME_NO_OUTCOME = "no_outcome"
+
+# An active dispatch without any receipt is still running until it is this
+# old; after that it is an open point (the drain's --older-than-hours default).
+NO_RECEIPT_THRESHOLD_HOURS = 1.0
+
+# The index a reader of receipts/processed builds: receipt_outcome's decision
+# read as the drain's status literal. ``unknown`` and ``superseded`` carry no
+# result of their own and have no entry.
+_INDEX_STATUS = {"accept": "success", "reject": "failure", "investigate": "investigate"}
+_STATUS_OUTCOME = {v: k for k, v in _INDEX_STATUS.items()}
+
+_UNSCOPED_PROJECT = "\x00unscoped"
+
+# Noise that is not this dispatch's receipt: a test's line, or another
+# project's under a colliding id (ADR-007). A frozen contract_invalid is no
+# outcome but it is a receipt the dispatch wrote.
+_NOT_A_RECEIPT = frozenset({"pytest", "foreign_project", "temp_report_path", "magicmock"})
 
 # The always-loaded t0_index.json carries at most this many items, the rest as a count.
 INDEX_LIMIT = 10
@@ -167,6 +209,230 @@ def record_outcome_decision(
     return record
 
 
+# ---------------------------------------------------------------------------
+# The one predicate: has a receipt, and what its outcome is
+# ---------------------------------------------------------------------------
+
+def store_project_id(data_dir: Path) -> str:
+    """The project whose store ``data_dir`` is: derived from its state dir,
+    else ambient (``VNX_PROJECT_ID``, ``.vnx-project-id``), else ""."""
+    from vnx_paths import project_id_from_state_dir  # noqa: PLC0415
+
+    derived = project_id_from_state_dir(Path(data_dir) / "state")
+    if derived:
+        return derived
+    try:
+        from project_root import resolve_project_id  # noqa: PLC0415
+        return resolve_project_id()
+    except RuntimeError:
+        return ""
+
+
+def scope_receipts(receipts: List[Dict[str, Any]], project_id: str) -> tuple:
+    """``(receipts, project)`` to read them for. Without a project id the
+    lines' own ``project_id`` is dropped and they are read for a sentinel
+    project, so no line counts as another project's and no decision matches."""
+    if project_id:
+        return receipts, project_id
+    return ([{k: v for k, v in r.items() if k != "project_id"} for r in receipts],
+            _UNSCOPED_PROJECT)
+
+
+def read_processed(receipts_dir: Path) -> List[Dict[str, Any]]:
+    """The receipts in ``<receipts_dir>/processed`` in file-name order: the
+    names start with the write time in epoch seconds, so this is the order
+    they arrived in. Malformed and non-object files are skipped."""
+    processed = Path(receipts_dir) / "processed"
+    receipts: List[Dict[str, Any]] = []
+    if not processed.is_dir():
+        return receipts
+    for path in sorted(processed.iterdir(), key=lambda p: p.name):
+        if path.suffix != ".json":
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if isinstance(data, dict):
+            receipts.append(data)
+    return receipts
+
+
+def scoped_processed(receipts_dir: Path) -> tuple:
+    """The processed receipts of a store and the project they are read for
+    (``receipts_dir`` is ``<data dir>/receipts``)."""
+    receipts_dir = Path(receipts_dir)
+    if not (receipts_dir / "processed").is_dir():
+        return [], _UNSCOPED_PROJECT
+    return scope_receipts(read_processed(receipts_dir), store_project_id(receipts_dir.parent))
+
+
+def receipt_owner(receipt: Dict[str, Any], project_id: str) -> str:
+    """The dispatch id ``receipt`` is a receipt of in ``project_id``, outcome or
+    not, or "" when it is none: bookkeeping is written around a dispatch, not
+    by it; test noise and another project's line are no receipt of this one."""
+    did = str(receipt.get("dispatch_id") or "").strip()
+    if (did.lower() in INVALID_DISPATCH_IDS
+            or receipt.get("event_type") in BOOKKEEPING_EVENT_TYPES
+            or noise_reason(receipt, project_id) in _NOT_A_RECEIPT):
+        return ""
+    return did
+
+
+def receipt_presence(receipts: Iterable[Dict[str, Any]], project_id: str,
+                     summary: Dict[str, Any]) -> frozenset:
+    """The dispatch ids of ``project_id`` with a receipt, outcome or not: only
+    evidence, superseded, attributed to another dispatch, or dropped as an
+    unlinked gate run all count. Bookkeeping, test noise and another
+    project's lines do not."""
+    present = {receipt_owner(r, project_id) for r in receipts if isinstance(r, dict)} - {""}
+    # a dispatch that another id's lines were attributed to has a receipt too
+    return frozenset(present | {o["dispatch_id"] for o in summary["outcomes"]})
+
+
+def receipt_status_index(summary: Dict[str, Any]) -> Dict[str, str]:
+    """dispatch_id -> ``success`` | ``failure`` | ``investigate``, one per
+    dispatch with an outcome of its own."""
+    return {o["dispatch_id"]: _INDEX_STATUS[o["decision"]]
+            for o in summary["outcomes"] if o["decision"] in _INDEX_STATUS}
+
+
+def dispatch_receipts(receipts: List[Dict[str, Any]], project_id: str) -> tuple:
+    """``(status_index, presence)`` of ``receipts`` for ``project_id``: the one
+    reading every mover of dispatch files uses."""
+    summary = summarize(receipts, project_id=project_id)
+    return receipt_status_index(summary), receipt_presence(receipts, project_id, summary)
+
+
+_DECISION_DESTINATION = {"accept": "completed", "reject": "dead_letter"}
+
+RECEIPT_WITHOUT_OUTCOME = "receipt present without an outcome: needs a human look"
+
+
+def active_destination(
+    *,
+    receipt_status: Optional[str],
+    has_receipt: bool,
+    decision: Optional[str],
+    age_seconds: Optional[float],
+    threshold_seconds: float,
+) -> tuple:
+    """Where a dispatch in ``active/`` goes: ``(destination, reason, open)``.
+
+    ``destination`` is ``completed``, ``dead_letter`` or ``skipped`` (it stays).
+    ``open`` is what the open point reads as, or None when it is none (moved,
+    or without a receipt and still younger than the threshold).
+
+    A T0 ``decision`` goes first. Only an accept goes to completed; dead_letter
+    is only a T0 reject. Everything else stays in active/ as an open point:
+    a failure or investigate outcome, a receipt without an outcome of its own,
+    and no receipt past the threshold or without a timestamp.
+    """
+    if decision in _DECISION_DESTINATION:
+        return _DECISION_DESTINATION[decision], f"T0 decision {decision!r} in the decision log", None
+    if receipt_status == "success":
+        return "completed", "receipt found with success status", None
+    if receipt_status is not None:
+        outcome = _STATUS_OUTCOME.get(receipt_status, receipt_status)
+        return "skipped", (f"open point: outcome {outcome!r} needs a human look "
+                           "(a T0 decides: receipt_query.py decide)"), outcome
+    if has_receipt:
+        # Only evidence, superseded, attributed to another id or an unlinked
+        # gate run: the dispatch left a receipt, so it is no orphan, and nothing
+        # says it failed.
+        return "skipped", RECEIPT_WITHOUT_OUTCOME, OUTCOME_NO_OUTCOME
+    if age_seconds is None:
+        return "skipped", "open point: no receipt, no timestamp", OUTCOME_NO_RECEIPT
+    if age_seconds >= threshold_seconds:
+        return "skipped", (f"open point: no receipt, age {age_seconds / 3600:.1f}h "
+                           "> threshold"), OUTCOME_NO_RECEIPT
+    return "skipped", f"no receipt yet, age {age_seconds / 3600:.2f}h < threshold", None
+
+
+class DispatchEntry(NamedTuple):
+    dispatch_id: str
+    directory: Path
+    timestamp: Optional[datetime]
+
+
+def _manifest_timestamp(raw: str) -> Optional[datetime]:
+    """ISO-8601 manifest timestamp as an aware UTC datetime, or None."""
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z",
+                "%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
+        try:
+            dt = datetime.strptime(raw, fmt)
+        except ValueError:
+            continue
+        return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+    return None
+
+
+def iter_active_dispatches(dispatches_dir: Path) -> Iterator[DispatchEntry]:
+    """Yield a DispatchEntry for each directory under ``dispatches/active/``."""
+    active = Path(dispatches_dir) / "active"
+    if not active.is_dir():
+        return
+    for entry_dir in sorted(active.iterdir()):
+        if not entry_dir.is_dir():
+            continue
+        manifest = entry_dir / "manifest.json"
+        dispatch_id = entry_dir.name
+        timestamp: Optional[datetime] = None
+        if manifest.exists():
+            try:
+                data = json.loads(manifest.read_text(encoding="utf-8"))
+                dispatch_id = data.get("dispatch_id", dispatch_id)
+                raw_ts = data.get("timestamp", "")
+                if raw_ts:
+                    timestamp = _manifest_timestamp(raw_ts)
+            except (json.JSONDecodeError, OSError, AttributeError):
+                # vnx-silent-except: an unreadable manifest is a dispatch
+                # without a timestamp, which is an open point, never a crash.
+                timestamp = None
+        yield DispatchEntry(dispatch_id=dispatch_id, directory=entry_dir, timestamp=timestamp)
+
+
+def active_dispatch_items(
+    data_dir: Path,
+    decisions: Dict[str, Dict[str, Any]],
+    *,
+    project_id: str,
+    now: Optional[datetime] = None,
+    threshold_hours: float = NO_RECEIPT_THRESHOLD_HOURS,
+) -> List[Dict[str, Any]]:
+    """The dispatches in ``<data_dir>/dispatches/active/`` the drain leaves
+    standing as an open point, read exactly as the drain reads them:
+    ``receipts/processed`` through ``dispatch_receipts``, then
+    ``active_destination``."""
+    data_dir = Path(data_dir)
+    entries = list(iter_active_dispatches(data_dir / "dispatches"))
+    if not entries:
+        return []
+    receipts = read_processed(data_dir / "receipts")
+    receipts, pid = scope_receipts(receipts, project_id)
+    status_index, presence = dispatch_receipts(receipts, pid)
+    now = now or datetime.now(timezone.utc)
+    items: List[Dict[str, Any]] = []
+    for entry in entries:
+        did = entry.dispatch_id
+        age = (now - entry.timestamp).total_seconds() if entry.timestamp else None
+        _, reason, open_as = active_destination(
+            receipt_status=status_index.get(did), has_receipt=did in presence,
+            decision=(decisions.get(did) or {}).get("decision"),
+            age_seconds=age, threshold_seconds=threshold_hours * 3600.0)
+        if open_as is None:
+            continue
+        items.append({
+            "kind": KIND_ACTIVE_DISPATCH,
+            "dispatch_id": did,
+            "outcome": open_as,
+            "status": status_index.get(did),
+            "reason": reason,
+            "last_seen": entry.timestamp.isoformat() if entry.timestamp else None,
+        })
+    return items
+
+
 def _last_seen(receipts: Iterable[Dict[str, Any]], project_id: str) -> Dict[str, datetime]:
     """Latest receipt timestamp per dispatch_id over the lines ``summarize``
     keeps for ``project_id``: ``noise_reason`` is the one project test, so a
@@ -192,8 +458,8 @@ def open_outcome_items(
     project_id: str,
     since: str = OPEN_OUTCOMES_EPOCH,
 ) -> List[Dict[str, Any]]:
-    """Every ``reject``/``investigate`` dispatch of ``project_id`` without a
-    decision, newest first (by its latest receipt timestamp)."""
+    """Every ``reject``/``investigate``/``unknown`` dispatch of ``project_id``
+    without a decision, newest first (by its latest receipt timestamp)."""
     summary = summarize(receipts, project_id=project_id, cutoff=_parse_ts(since))
     last_seen = _last_seen(receipts, project_id)
     items: List[Dict[str, Any]] = []
@@ -223,9 +489,16 @@ def build_open_outcomes(
     decision_log_path: Optional[Path] = None,
     limit: Optional[int] = INDEX_LIMIT,
     since: str = OPEN_OUTCOMES_EPOCH,
+    data_dir: Optional[Path] = None,
+    now: Optional[datetime] = None,
+    no_receipt_threshold_hours: float = NO_RECEIPT_THRESHOLD_HOURS,
 ) -> Dict[str, Any]:
     """The open-outcomes section: counts over all open points, at most
     ``limit`` items (None = all), and ``more`` for the rest.
+
+    ``data_dir`` (default ``state_dir.parent``) holds ``dispatches/active``
+    and ``receipts/processed`` for the ``active_dispatch`` kind. An active
+    dispatch the ledger already lists is listed once, as ``receipt_outcome``.
 
     Stateless: two readers at the same moment get the same answer, and
     reading consumes nothing. Without a project id, or when a file cannot be
@@ -244,11 +517,21 @@ def build_open_outcomes(
         return {"available": False, "reason": f"could not read {ledger.name} or {log.name}: {exc}"}
 
     items = open_outcome_items(receipts, decisions, project_id=project_id, since=since)
+    listed = {i["dispatch_id"] for i in items}
+    try:
+        active = active_dispatch_items(
+            Path(data_dir) if data_dir else state_dir.parent, decisions,
+            project_id=project_id, now=now, threshold_hours=no_receipt_threshold_hours)
+    except OSError as exc:
+        return {"available": False, "reason": f"could not read dispatches/active: {exc}"}
+    items += [i for i in active if i["dispatch_id"] not in listed]
+    items.sort(key=lambda i: i["dispatch_id"])
+    items.sort(key=lambda i: i["last_seen"] or "", reverse=True)
     shown = items if limit is None else items[:max(0, limit)]
     by_outcome = {d: 0 for d in OPEN_DECISIONS}
     by_kind: Dict[str, int] = {}
     for item in items:
-        by_outcome[item["outcome"]] += 1
+        by_outcome[item["outcome"]] = by_outcome.get(item["outcome"], 0) + 1
         by_kind[item["kind"]] = by_kind.get(item["kind"], 0) + 1
     return {
         "available": True,

@@ -533,7 +533,9 @@ class DispatchDaemon:
       5. Move pending/ → active/
       6. Enrich dispatch instruction (repo map, future layers)
       7. Deliver via subprocess_dispatch
-      8. Move active/ → completed/  (or dead_letter/ on failure)
+      8. Move active/ → completed/ on success; a failed delivery stays in
+         active/ as an open point for a T0 (fabric-state-herstel D4b2:
+         dead_letter is only a T0 decision)
       9. Release lease
      10. Write audit record
     """
@@ -552,7 +554,6 @@ class DispatchDaemon:
         self.pending_dir = self.data_dir / "dispatches" / "pending"
         self.active_dir  = self.data_dir / "dispatches" / "active"
         self.completed_dir = self.data_dir / "dispatches" / "completed"
-        self.dead_letter_dir = self.data_dir / "dispatches" / "dead_letter"
 
         self._shutdown = threading.Event()
         self._processed: set[str] = set()   # dispatch_id stems already handled
@@ -707,12 +708,16 @@ class DispatchDaemon:
         finally:
             elapsed = time.monotonic() - start_ts
 
-        # Move active → completed or dead_letter
-        dest_dir = self.completed_dir if outcome == "done" else self.dead_letter_dir
-        try:
-            _move_dispatch(active_path, dest_dir)
-        except OSError as exc:
-            logger.warning("Cannot move %s to %s: %s", active_path.name, dest_dir.name, exc)
+        # Move active → completed on success. A failure is no outcome a T0
+        # decided: the file stays in active/, where active_dispatch_janitor
+        # reads its receipts and a T0 reject moves it to dead_letter/.
+        if outcome == "done":
+            try:
+                _move_dispatch(active_path, self.completed_dir)
+            except OSError as exc:
+                logger.warning("Cannot move %s to %s: %s", active_path.name, self.completed_dir.name, exc)
+        else:
+            logger.warning("Delivery of %s failed: left in active/ as an open point for a T0", dispatch_id)
 
         # Release lease — target the effective terminal (may differ after reroute)
         released = _release_lease(eff_terminal, eff_generation)

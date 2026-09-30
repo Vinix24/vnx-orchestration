@@ -38,7 +38,7 @@ it fires at all, and it takes TWO filters to get there:
     deliverable. Measured 07-09 over the live ledger: all 8 dispatch-ids
     with a contract_invalid receipt before their ``pr_merged`` had a
     ``review_gate_request`` in between, so the unfiltered version passed all
-    8. ``DELIVERABLE_OUTCOME_EVENT_TYPES`` is that filter.
+    8. ``receipt_outcome.is_outcome_line`` is that filter.
   - WHETHER IT DECIDES ANYTHING. An outcome receipt whose status says
     nothing about the deliverable (``unknown``, ``no_signal``, empty) must
     not lift an earlier refusal just by being later. It did: the plane
@@ -70,6 +70,7 @@ if str(_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_LIB_DIR))
 
 from atomic_io import atomic_write_json  # noqa: E402
+from receipt_outcome import is_outcome_line  # noqa: E402
 from contract_invalid_window import (  # noqa: E402
     CONTRACT_INVALID_STATUS,
     contract_invalid_effective_timestamp,
@@ -81,7 +82,11 @@ CONTRACT_INVALID_EVENT_TYPE = "report_contract_invalid"
 OPEN_LEDGER_FILENAME = "contract_invalid_open.json"
 
 # Receipts that carry a DELIVERABLE OUTCOME for a dispatch — the only ones
-# ``is_deliverable_acceptable`` may judge on.
+# ``is_deliverable_acceptable`` may judge on — are the ones
+# ``receipt_outcome.is_outcome_line`` names (``_is_outcome_receipt``). The
+# own event-type list that stood here (report_contract_invalid, task_complete,
+# subprocess_completion, task_failed) missed ``event_type="contract_invalid"``
+# (OI-1917): a last receipt in that shape went fail-open.
 #
 # Measured 07-09 over the live ledger (29.386 records,
 # ~/.vnx-data/vnx-dev/state/t0_receipts.ndjson): the event types that ever
@@ -103,12 +108,6 @@ OPEN_LEDGER_FILENAME = "contract_invalid_open.json"
 #
 # What this filter alone did NOT fix, measured on the same 8: it refuses 6.
 # The other 2 are what ``DECIDED_OUTCOME_STATUSES`` below is for.
-DELIVERABLE_OUTCOME_EVENT_TYPES = frozenset({
-    "report_contract_invalid",
-    "task_complete",
-    "subprocess_completion",
-    "task_failed",
-})
 
 # Outcome statuses that actually DECIDE the deliverable — the only ones that
 # may be chosen as "the latest outcome receipt".
@@ -309,12 +308,14 @@ def _parse_ts(value: Optional[Any]) -> Optional[datetime]:
 def _is_outcome_receipt(record: Dict[str, Any]) -> bool:
     """True when this receipt reports a deliverable outcome for its dispatch.
 
-    Decided on the event type alone (``DELIVERABLE_OUTCOME_EVENT_TYPES``), not
-    on the status: a gate-plane receipt is not a statement about the
-    deliverable regardless of what status it happens to carry.
+    ``receipt_outcome.is_outcome_line``, the one predicate every outcome
+    reader shares (OI-1917): its own event-type list here did not know
+    ``event_type="contract_invalid"``, so a last receipt in that shape read as
+    "no outcome receipt" and this gate went fail-open on it. A gate-plane
+    receipt (``review_gate_request``, ``pr_merged``) is still no statement
+    about the deliverable.
     """
-    event_type = str(record.get("event_type") or record.get("event") or "").strip().lower()
-    return event_type in DELIVERABLE_OUTCOME_EVENT_TYPES
+    return is_outcome_line(record)
 
 
 def _is_decided_outcome(record: Dict[str, Any]) -> bool:
@@ -621,7 +622,7 @@ def is_deliverable_acceptable(
         usually a gate-plane record: all 8 had a ``review_gate_request``
         written on the same dispatch_id in between, and the unfiltered
         version said GO on every one of them. Only
-        ``DELIVERABLE_OUTCOME_EVENT_TYPES`` is judged.
+        ``receipt_outcome.is_outcome_line`` is judged.
       - An outcome receipt that decides nothing may not overturn a governed
         refusal by being later: 2 of those 8 still passed on a
         ``task_complete``/``unknown`` written a minute after the
@@ -674,7 +675,6 @@ __all__ = [
     "CONTRACT_INVALID_STATUS",
     "CONTRACT_INVALID_EVENT_TYPE",
     "DECIDED_OUTCOME_STATUSES",
-    "DELIVERABLE_OUTCOME_EVENT_TYPES",
     "OPEN_LEDGER_FILENAME",
     "REFUSING_ACCEPTANCE_CODES",
     "DeliverableAcceptance",

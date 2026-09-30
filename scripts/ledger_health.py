@@ -21,9 +21,10 @@ or ``t0_decision_log.jsonl`` — that answers these questions:
       when no receipt anywhere carries that ``dispatch_id``.
 
   open_outcomes — (fabric-state-herstel D4b, replaces the pull-cursor age)
-      the reject/investigate dispatches of this project that no T0 has
-      decided on (``open_outcomes.build_open_outcomes``, the same reader the
-      t0_index uses), and which of them have waited longer than
+      the dispatches of this project without an outcome a T0 decided on
+      (reject/investigate/unknown in the ledger, and since D4b2 an active
+      dispatch the drain leaves standing; ``open_outcomes.build_open_outcomes``,
+      the same reader the t0_index uses), and which of them have waited longer than
       ``--open-outcome-stale-hours`` since their latest receipt. One that
       waits past the threshold is a finding: a dispatch without an outcome
       is a point the T0 has to look at, not a state to leave standing. The
@@ -346,7 +347,7 @@ def check_open_outcomes(
     stale_hours: float = DEFAULT_OPEN_OUTCOME_STALE_HOURS,
     now: Optional[datetime] = None,
 ) -> Dict[str, Any]:
-    """Open outcomes (reject/investigate without a T0 decision) and the ones
+    """Open outcomes (no outcome a T0 decided on) and the ones
     waiting past ``stale_hours``. Read-only: reads the ledger and the decision
     log, writes neither. A project id that cannot be derived is unmeasurable,
     never a pass (ADR-007: open outcomes are one project's)."""

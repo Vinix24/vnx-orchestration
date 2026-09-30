@@ -431,8 +431,9 @@ class TestLearningLoopFailOpenOnUnparseableTime:
 
 
 class TestCheckActiveDrainFailOpenOnUnparseableTime:
-    """contract_invalid must route to dead_letter even when the manifest
-    timestamp is missing or unparseable."""
+    """contract_invalid is read as a reject even when the manifest timestamp is
+    missing or unparseable. Since D4b2 a reject without a T0 decision stays in
+    active/ as an open point; it is never completed."""
 
     def _drain_one(self, tmp_path: Path, manifest_timestamp):
         from check_active_drain import (
@@ -473,13 +474,15 @@ class TestCheckActiveDrainFailOpenOnUnparseableTime:
             dry_run=False,
         )
 
-    def test_missing_manifest_timestamp_routes_dead_letter(self, tmp_path: Path) -> None:
+    def test_missing_manifest_timestamp_is_an_open_reject(self, tmp_path: Path) -> None:
         result = self._drain_one(tmp_path, manifest_timestamp=None)
-        assert result.action == "dead_letter"
+        assert result.action == "skipped"
+        assert "'reject'" in result.reason
 
-    def test_unparseable_manifest_timestamp_routes_dead_letter(self, tmp_path: Path) -> None:
+    def test_unparseable_manifest_timestamp_is_an_open_reject(self, tmp_path: Path) -> None:
         result = self._drain_one(tmp_path, manifest_timestamp="0000-not-a-date")
-        assert result.action == "dead_letter"
+        assert result.action == "skipped"
+        assert "'reject'" in result.reason
 
     def test_unparseable_ingested_at_still_failure_in_index(self, tmp_path: Path) -> None:
         from check_active_drain import build_receipt_status_index

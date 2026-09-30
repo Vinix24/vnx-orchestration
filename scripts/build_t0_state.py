@@ -71,7 +71,7 @@ Schema 2.2 change (D5 fabric-state-herstel, live work):
     its count is ``null`` with a ``*_unmeasured_reason`` and it degrades
     system_health, so the dispatch guard reads WAIT, never GO.
   - t0_index.json schema ``t0_index/1.2`` (D4b) adds ``open_outcomes``:
-    reject/investigate dispatches without a T0 decision, at most 10 items
+    dispatches without an outcome a T0 decided on, at most 10 items
     plus counts. The full section is ``open_outcomes`` in t0_state.json.
   - t0_index.json (schema ``t0_index/1.1``) drops ``terminals``,
     ``queue.active`` and ``active_dispatches`` for a compact ``live_work``.
@@ -1242,7 +1242,7 @@ def _live_work_index_summary(live_work: Optional[Dict[str, Any]]) -> Dict[str, A
 # ---------------------------------------------------------------------------
 
 def _build_open_outcomes(state_dir: Path, project_id: str) -> Dict[str, Any]:
-    """reject/investigate dispatches of this project without a T0 decision.
+    """Dispatches of this project without an outcome a T0 decided on.
 
     Read from the same store as the receipts (central when enabled). Replaces
     the byte cursor of ``receipt_query.py pull``: nothing is consumed, every
@@ -2545,7 +2545,7 @@ def build_t0_state(
     open_items = _collect_open_items(project_id, state_dir)
     quality_digest = _build_quality_digest(state_dir)
     recent_receipts = _build_recent_receipts(state_dir, project_id=project_id, limit=20)
-    open_outcomes = _build_open_outcomes(state_dir, project_id)  # D4b: undecided reject/investigate
+    open_outcomes = _build_open_outcomes(state_dir, project_id)  # D4b/D4b2: no outcome a T0 decided on
     git_context = _build_git_context()
     pr_queue = _build_pr_queue_section(state_dir)  # R7.1: extracted helper
     live_work = _build_live_work(state_dir, project_id, pr_queue)  # D5: DB + occupancy flock

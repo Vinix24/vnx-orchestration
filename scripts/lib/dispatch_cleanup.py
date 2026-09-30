@@ -3,9 +3,18 @@
 
 Scans dispatches/pending/ for directory bundles (dispatch-spec.json +
 instruction.md) that were staged but never cleaned up after the door processed
-them.  Each bundle is classified by age and whether a matching receipt exists
-in the ledger.  The default is a dry-run report — nothing is moved or deleted
+them.  Each bundle is classified by age and by the OUTCOME of its receipts in
+the ledger.  The default is a dry-run report — nothing is moved or deleted
 without an explicit ``--apply`` flag.
+
+Only an accept goes to ``completed/`` (fabric-state-herstel D4b2, OI-1907):
+a receipt outcome accept or a T0 ``accept`` in ``t0_decision_log.jsonl``. A
+T0 ``reject`` goes to ``failed/``. A bundle whose receipts carry a failure,
+an investigate or no outcome of its own is an ``open-outcome``: it stays in
+pending/ until a T0 decides. The receipts are read as the active-drain reads
+them (``open_outcomes.dispatch_receipts``), scoped to the store's project,
+so another project's receipt under a colliding id counts for nothing
+(ADR-007).
 
 Gate bundles (only ``final_prompt.md``, written by provider_dispatch for a
 gate run) are classified on proof, never on age: a bundle moves to
@@ -36,6 +45,14 @@ from final_prompt_integrity import (
     is_final_prompt_only_bundle,
 )
 from gate_status import canonical_status
+from open_outcomes import (
+    DECISION_LOG_NAME,
+    dispatch_receipts,
+    iter_complete_lines,
+    read_outcome_decisions,
+    scope_receipts,
+    store_project_id,
+)
 
 
 # ── classification ─────────────────────────────────────────────────────────
@@ -54,7 +71,7 @@ class BundleEntry:
     role: str = ""
     gate: str = ""
     target_slot: str = ""
-    classification: str = ""  # "receipt-found", "stale-no-receipt", "recent-no-receipt", "gate-result-proven", "in_flight", "unproven", "empty", "error"
+    classification: str = ""  # "receipt-found", "open-outcome", "t0-reject", "stale-no-receipt", "recent-no-receipt", "gate-result-proven", "in_flight", "unproven", "empty", "error"
     action: str = ""  # "move-to-completed", "move-to-failed", "move-to-abandoned", "skip", "error"
     error: str = ""
     final_prompt_sha256: str = ""
@@ -117,32 +134,25 @@ def _resolve_state_dir() -> Path:
 
 # ── receipt index ──────────────────────────────────────────────────────────
 
-def _build_receipt_index(state_dir: Path) -> Dict[str, bool]:
-    """Build a set of dispatch_ids that have at least one receipt in t0_receipts.ndjson.
+def _build_receipt_index(state_dir: Path) -> Dict[str, str]:
+    """Map dispatch_id -> what its receipts and T0 decisions add up to, for the
+    store's project: ``accept``, ``reject`` (a T0 reject), or ``open`` (a
+    receipt without an accept: failure, investigate, only evidence).
 
-    Returns a dict mapping dispatch_id → True for O(1) lookup.
+    A dispatch without a receipt of this project has no entry. The receipts
+    are ``state_dir/t0_receipts.ndjson`` read through
+    ``open_outcomes.dispatch_receipts``, the same reading the active-drain
+    uses; a T0 decision wins over the receipts.
     """
-    receipt_file = state_dir / "t0_receipts.ndjson"
-    index: Dict[str, bool] = {}
-    if not receipt_file.exists():
-        return index
-
-    try:
-        with open(receipt_file, "r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                    did = rec.get("dispatch_id", "")
-                    if did:
-                        index[did] = True
-                except json.JSONDecodeError:
-                    continue
-    except OSError:
-        pass
-
+    receipts = list(iter_complete_lines(state_dir / "t0_receipts.ndjson"))
+    receipts, project_id = scope_receipts(receipts, store_project_id(state_dir.parent))
+    status_index, presence = dispatch_receipts(receipts, project_id)
+    decisions = read_outcome_decisions(state_dir / DECISION_LOG_NAME, project_id)
+    index: Dict[str, str] = {
+        did: "accept" if status_index.get(did) == "success" else "open" for did in presence
+    }
+    for did, record in decisions.items():
+        index[did] = record["decision"]
     return index
 
 
@@ -303,7 +313,8 @@ def scan_pending(data_dir: Path, state_dir: Path) -> List[BundleEntry]:
         if has_spec:
             spec = _read_spec(spec_file)
 
-        has_receipt = receipt_index.get(dispatch_id, False)
+        receipt_outcome = receipt_index.get(dispatch_id)
+        has_receipt = receipt_outcome is not None
         project_id = str(spec.get("project_id", ""))
         role = str(spec.get("role", ""))
         gate = str(spec.get("gate", ""))
@@ -315,9 +326,16 @@ def scan_pending(data_dir: Path, state_dir: Path) -> List[BundleEntry]:
             classification = "empty"
             action = "error"
             error = "no spec or instruction"
-        elif has_receipt:
+        elif receipt_outcome == "accept":
             classification = "receipt-found"
             action = "move-to-completed"
+        elif receipt_outcome == "reject":
+            classification = "t0-reject"
+            action = "move-to-failed"
+        elif has_receipt:
+            # a receipt without an accept is no outcome "done" (OI-1907): a T0 decides
+            classification = "open-outcome"
+            action = "skip"
         elif age_days >= 7:
             classification = "stale-no-receipt"
             action = "move-to-abandoned"
@@ -453,7 +471,7 @@ def format_report(report: CleanupReport) -> str:
     # Skipped bundles summary
     skipped = [
         e for e in report.entries
-        if e.action == "skip" and e.classification not in ("unproven", "in_flight")
+        if e.action == "skip" and e.classification not in ("unproven", "in_flight", "open-outcome")
     ]
     if skipped:
         age_vals = [e.age_days for e in skipped if e.age_days > 0]
@@ -466,6 +484,16 @@ def format_report(report: CleanupReport) -> str:
             "  These bundles have no matching receipt but are less than 7 days old."
         )
         lines.append("  They will be eligible for cleanup once they age past the threshold.")
+        lines.append("")
+
+    # A receipt without an accept: an open point for a T0, never completed.
+    open_outcomes = [e for e in report.entries if e.classification == "open-outcome"]
+    if open_outcomes:
+        lines.append(f"## Open outcomes ({len(open_outcomes)}, left in pending/)")
+        lines.append("  A receipt exists but no accept (failure, investigate or only evidence).")
+        lines.append("  A T0 decides: receipt_query.py decide <dispatch-id> accept|reject.")
+        for e in open_outcomes:
+            lines.append(f"  [open-outcome] {e.dispatch_id}")
         lines.append("")
 
     # A gate still running on this prompt: its bundle is in use.

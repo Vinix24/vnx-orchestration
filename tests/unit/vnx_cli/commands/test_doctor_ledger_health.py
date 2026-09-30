@@ -207,3 +207,43 @@ class TestFailBeaconWithUnreadableDetails:
 
         result = _check_ledger_health(tmp_path)
         assert result.status == PASS
+        assert result.detail == "receipt coverage, open outcomes, and chain status all healthy"
+
+
+class TestOpenOutcomesCheck:
+    """fabric-state-herstel D4b2: D4b1 turned the pull-cursor check into an
+    ``open_outcomes`` check; doctor reads it instead of the gone cursor."""
+
+    def test_open_outcomes_finding_is_warn_with_count_and_ids(self, tmp_path):
+        _write_raw_beacon(
+            tmp_path,
+            status="fail",
+            details={"checks": {
+                "receipt_coverage": {"status": "ok"},
+                "open_outcomes": {
+                    "status": "finding", "open_count": 7, "stale_count": 3,
+                    "stale_dispatch_ids": ["d-1", "d-2", "d-3"],
+                    "stale_threshold_hours": 24.0,
+                },
+                "chain_status": {"status": "ok"},
+            }},
+        )
+
+        result = _check_ledger_health(tmp_path)
+        assert result.status == WARN
+        assert "no findings could be derived" not in result.detail
+        assert "3 open outcome(s) older than 24.0h without a T0 decision" in result.detail
+        assert "d-1, d-2, d-3" in result.detail
+
+    def test_open_outcomes_unmeasurable_is_warn(self, tmp_path):
+        _write_raw_beacon(
+            tmp_path,
+            status="ok",
+            details={"checks": {
+                "open_outcomes": {"status": "SKIPPED_UNVERIFIED", "reason": "no project id"},
+            }},
+        )
+
+        result = _check_ledger_health(tmp_path)
+        assert result.status == WARN
+        assert "open outcomes unmeasurable: no project id" in result.detail

@@ -153,12 +153,14 @@ def test_drain_completes_a_dispatch_whose_retry_succeeded(tmp_path: Path) -> Non
     assert (data / "dispatches" / "completed" / "d1").is_dir()
 
 
-def test_drain_dead_letters_a_dispatch_with_a_later_failure(tmp_path: Path) -> None:
+def test_drain_keeps_a_dispatch_with_a_later_failure_open(tmp_path: Path) -> None:
     data = _store(tmp_path)
     _active(data, "d1")
     for seq, receipt in enumerate([_a("d1", "success"), _b("d1"), _a("d1", "failure")]):
         _write(data, seq, receipt)
-    assert [(r.dispatch_id, r.action) for r in drain_active(data)] == [("d1", "dead_letter")]
+    # D4b2: a failure is an open point until a T0 rejects it; never dead_letter on its own
+    assert [(r.dispatch_id, r.action) for r in drain_active(data)] == [("d1", "skipped")]
+    assert (data / "dispatches" / "active" / "d1").is_dir()
 
 
 def test_drain_leaves_a_young_dispatch_with_only_bookkeeping_alone(tmp_path: Path) -> None:
@@ -195,13 +197,16 @@ def test_frozen_contract_invalid_does_not_dead_letter_an_active_dispatch(tmp_pat
     assert [(r.dispatch_id, r.action) for r in drain_active(data)] == [("d1", "skipped")]
 
 
-def test_fresh_contract_invalid_still_dead_letters_an_active_dispatch(tmp_path: Path) -> None:
+def test_fresh_contract_invalid_keeps_an_active_dispatch_open_as_a_reject(tmp_path: Path) -> None:
     data = _store(tmp_path)
     _active(data, "d1", hours_old=0.1)
     _write(data, 0, {"event_type": "report_contract_invalid", "dispatch_id": "d1",
                      "status": "contract_invalid", "project_id": PROJECT,
                      "timestamp": "2026-01-01T00:00:00Z", "ingested_at": _fresh()})
-    assert [(r.dispatch_id, r.action) for r in drain_active(data)] == [("d1", "dead_letter")]
+    assert build_receipt_status_index(data / "receipts") == {"d1": "failure"}
+    results = drain_active(data)
+    assert [(r.dispatch_id, r.action) for r in results] == [("d1", "skipped")]
+    assert "'reject'" in results[0].reason
 
 
 def _status_only_ci(did: str, **kw: Any) -> Dict[str, Any]:
@@ -220,7 +225,7 @@ def test_frozen_status_only_contract_invalid_does_not_dead_letter_an_active_disp
     assert (data / "dispatches" / "active" / "d1").is_dir()
 
 
-def test_fresh_status_only_contract_invalid_after_success_dead_letters(tmp_path: Path) -> None:
+def test_fresh_status_only_contract_invalid_after_success_is_an_open_reject(tmp_path: Path) -> None:
     data = _store(tmp_path)
     _active(data, "d1", hours_old=0.1)
     receipts = [_a("d1", "success"), _b("d1"),
@@ -230,12 +235,13 @@ def test_fresh_status_only_contract_invalid_after_success_dead_letters(tmp_path:
     for seq, receipt in enumerate(receipts):
         _write(data, seq, receipt)
     assert build_receipt_status_index(data / "receipts") == {"d1": "failure"}
-    assert [(r.dispatch_id, r.action) for r in drain_active(data)] == [("d1", "dead_letter")]
+    assert [(r.dispatch_id, r.action) for r in drain_active(data)] == [("d1", "skipped")]
 
 
 # --- ff3: a dispatch without an outcome of its own is not a failure ----------
 # receipt_outcome's ``unknown`` (only evidence) and ``superseded`` carry no
-# result: the dispatch has no index entry and takes the no-receipt age rule.
+# result: the dispatch has no index entry and stays in active/ as an open
+# point (ff4 for "has a receipt", D4b2 for "no receipt past the threshold").
 # A status-only lane line (no event_type) is an outcome. ADR-007: every ledger
 # carries the same ids from a second project, which must not leak.
 
@@ -277,7 +283,7 @@ def test_status_only_success_with_verification_completes(tmp_path: Path) -> None
     failed = {"dispatch_id": "d2", "status": "failure", "provider": "glm",
               "timestamp": "2026-09-29T10:00:00Z", "project_id": PROJECT}
     results = _drain(data, [status_only, failed, {**failed, "dispatch_id": "d1", "project_id": OTHER}])
-    assert {did: r.action for did, r in results.items()} == {"d1": "completed", "d2": "dead_letter"}
+    assert {did: r.action for did, r in results.items()} == {"d1": "completed", "d2": "skipped"}
 
 
 def test_superseded_dispatch_is_not_dead_lettered_as_an_unknown_outcome(tmp_path: Path) -> None:
@@ -351,7 +357,7 @@ def test_receipt_without_an_outcome_and_without_a_timestamp_is_not_an_orphan(tmp
     assert (results["d1"].action, results["d1"].reason) == ("skipped", RECEIPT_WITHOUT_OUTCOME)
 
 
-def test_dispatch_without_any_receipt_past_the_threshold_still_dead_letters(tmp_path: Path) -> None:
+def test_dispatch_without_any_receipt_past_the_threshold_is_an_open_point(tmp_path: Path) -> None:
     data = _store(tmp_path)
     _active(data, "d1", hours_old=5.0)
     _active(data, "d2", hours_old=5.0)
@@ -361,9 +367,9 @@ def test_dispatch_without_any_receipt_past_the_threshold_still_dead_letters(tmp_
     results = _drain(data, receipts)
     assert build_receipt_presence(data / "receipts") == frozenset()
     for did in ("d1", "d2"):
-        assert results[did].action == "dead_letter"
-        assert results[did].reason.startswith("no receipt, age")
-        assert (data / "dispatches" / "dead_letter" / did).is_dir()
+        assert results[did].action == "skipped"
+        assert results[did].reason.startswith("open point: no receipt, age")
+        assert (data / "dispatches" / "active" / did).is_dir()
 
 
 def test_second_project_receipt_under_a_colliding_id_does_not_skip_an_orphan(tmp_path: Path) -> None:
@@ -378,4 +384,4 @@ def test_second_project_receipt_under_a_colliding_id_does_not_skip_an_orphan(tmp
     results = _drain(data, receipts)
     assert build_receipt_presence(data / "receipts") == frozenset()
     for did in (gate, "d1"):
-        assert (results[did].action, results[did].reason.startswith("no receipt, age")) == ("dead_letter", True)
+        assert (results[did].action, results[did].reason.startswith("open point: no receipt, age")) == ("skipped", True)
