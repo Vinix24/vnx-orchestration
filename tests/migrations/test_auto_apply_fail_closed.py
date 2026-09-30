@@ -55,8 +55,8 @@ def _isolated_preflights(monkeypatch):
 
     Its v22 preflight demands a composite UNIQUE on dispatches BEFORE 0022, which
     only holds for stores that ran 0017's rebuild; a fresh store gets the composite
-    from 0022 itself. build_t0_state never imports migrate_future_system before
-    auto_apply, so a clean registry is the production state.
+    from 0022 itself. auto_apply walks with an empty registry of its own; the
+    fixture keeps each test's registry from reaching the next test.
     """
     saved = {k: list(v) for k, v in schema_migration._PREFLIGHT_HOOKS.items()}
     schema_migration._PREFLIGHT_HOOKS.clear()
@@ -482,3 +482,144 @@ def test_store_at_33_is_not_touched(tmp_path, monkeypatch, fleet_shape):
             ).fetchone() == (1,)
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# One process, several stores: a runner leaves no preflight behind
+# ---------------------------------------------------------------------------
+
+def _bootstrap_catching_refusal(state_dir: Path) -> tuple[int, str | None]:
+    """_fresh_t0_bootstrap, but a preflight refusal (RuntimeError) is an outcome too."""
+    try:
+        return _fresh_t0_bootstrap(state_dir)
+    except RuntimeError as exc:
+        return _user_version(db_path_from_state_dir(state_dir)), str(exc)
+
+
+def _assert_tenants_isolated(state_dir: Path) -> None:
+    """ADR-007: two tenants with one colliding dispatch_id, neither leaks."""
+    conn = sqlite3.connect(str(db_path_from_state_dir(state_dir)))
+    try:
+        for pid in ("proj-a", "proj-b"):
+            conn.execute(
+                "INSERT INTO dispatches (dispatch_id, project_id, state) VALUES ('d-1', ?, 'queued')",
+                (pid,),
+            )
+        conn.commit()
+        for pid in ("proj-a", "proj-b"):
+            assert conn.execute(
+                "SELECT project_id FROM dispatches WHERE dispatch_id = 'd-1' AND project_id = ?",
+                (pid,),
+            ).fetchall() == [(pid,)]
+    finally:
+        conn.close()
+
+
+def test_second_fresh_store_in_one_process_reaches_terminal(tmp_path, monkeypatch):
+    """vnx migrate / doctor walk several stores in one process.
+
+    Red on the old code: apply_0031's first ``import migrate_future_system`` armed
+    the v22 preflight process-wide, so store B (which gets its composite UNIQUE
+    from 0022 itself) stopped at (15, 'dispatches missing UNIQUE(dispatch_id,
+    project_id) ...').
+    """
+    # First import happens inside store A's 0031, as in a fresh `vnx init` process.
+    monkeypatch.delitem(sys.modules, "migrate_future_system", raising=False)
+    store_a = _central_state_dir(tmp_path / "a", "proj-a")
+    store_b = _central_state_dir(tmp_path / "b", "proj-b")
+
+    assert _bootstrap_catching_refusal(store_a) == (_TERMINAL, None)
+    assert "migrate_future_system" in sys.modules, "0031 no longer reaches mfs"
+    assert _bootstrap_catching_refusal(store_b) == (_TERMINAL, None)
+
+    _assert_tenants_isolated(store_a)
+    _assert_tenants_isolated(store_b)
+
+
+def test_fresh_stores_after_mfs_was_imported_reach_terminal(tmp_path, monkeypatch):
+    """`vnx migrate` over several stores imports migrate_future_system per store
+    (_run_future_system_pipeline), outside auto_apply, which arms the v22 hook in
+    the caller's registry. The next fresh store's auto_apply still reaches 33.
+
+    Red on the old code: (15, 'dispatches missing UNIQUE(dispatch_id, project_id) ...').
+    """
+    monkeypatch.delitem(sys.modules, "migrate_future_system", raising=False)
+    import migrate_future_system
+
+    assert migrate_future_system._assert_dispatches_schema_intact in (
+        schema_migration._PREFLIGHT_HOOKS.get(22, [])
+    )
+    for pid in ("proj-a", "proj-b"):
+        store = _central_state_dir(tmp_path / pid, pid)
+        assert _bootstrap_catching_refusal(store) == (_TERMINAL, None)
+        _assert_tenants_isolated(store)
+
+
+def test_auto_apply_restores_the_callers_registry(tmp_path, monkeypatch):
+    """The caller's hooks do not fire during the walk and are back afterwards;
+    what a runner registers (0031 importing mfs) does not outlive the call."""
+    monkeypatch.delitem(sys.modules, "migrate_future_system", raising=False)
+    fired = []
+
+    def refuse(conn):
+        fired.append(22)
+        raise RuntimeError("caller hook fired inside auto_apply")
+
+    schema_migration.register_preflight(22, refuse)
+    store = _central_state_dir(tmp_path, "proj-a")
+
+    assert _bootstrap_catching_refusal(store) == (_TERMINAL, None)
+
+    assert fired == []
+    assert "migrate_future_system" in sys.modules, "0031 no longer reaches mfs"
+    assert schema_migration._PREFLIGHT_HOOKS == {22: [refuse]}
+
+
+def test_auto_apply_restores_the_callers_registry_on_raise(tmp_path, monkeypatch):
+    def keep(conn):
+        return None
+
+    schema_migration.register_preflight(24, keep)
+    db_path = _store_at(tmp_path, 31)
+    (tmp_path / "migrations").mkdir(exist_ok=True)
+    (tmp_path / "migrations" / "0099_unhandled.sql").write_text("SELECT 1;\n")
+    with pytest.raises(auto_apply_mod.UnhandledMigrationError):
+        auto_apply(db_path, migrations_dir=tmp_path / "migrations")
+    assert schema_migration._PREFLIGHT_HOOKS == {24: [keep]}
+
+
+def _store_below_22(tmp_path: Path, pid: str) -> Path:
+    """A fresh store walked only through 0021: no composite UNIQUE on dispatches yet."""
+    state_dir = _central_state_dir(tmp_path, pid)
+    init_schema(state_dir)
+    partial = tmp_path / f"migrations-upto-21-{pid}"
+    partial.mkdir()
+    for number, sql_path in auto_apply_mod._discover_migrations(_MIGRATIONS_DIR):
+        if number <= 21:
+            (partial / sql_path.name).write_bytes(sql_path.read_bytes())
+    db_path = db_path_from_state_dir(state_dir)
+    auto_apply(db_path, migrations_dir=partial)
+    assert _user_version(db_path) == 21
+    return db_path
+
+
+def test_mfs_walk_still_refuses_a_store_without_the_0017_composite(tmp_path, monkeypatch):
+    """The v22 preflight keeps working where it belongs: migrate_future_system's
+    own numbered walk, also after an auto_apply in the same process restored the
+    registry."""
+    monkeypatch.delitem(sys.modules, "migrate_future_system", raising=False)
+    assert _bootstrap_catching_refusal(_central_state_dir(tmp_path / "a", "proj-a")) == (
+        _TERMINAL, None,
+    )
+    db_path = _store_below_22(tmp_path / "b", "proj-b")
+    import migrate_future_system
+
+    schema_before = _schema_hash(db_path)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        with pytest.raises(RuntimeError, match=r"dispatches missing UNIQUE\(dispatch_id, project_id\)"):
+            migrate_future_system._run_numbered_walk(conn, _REPO_ROOT)
+    finally:
+        conn.close()
+    assert _user_version(db_path) == 21
+    assert _schema_hash(db_path) == schema_before

@@ -16,7 +16,10 @@ Why Python and not the generic pure-SQL runner:
 
 Importing migrate_future_system registers its numbered-walk preflights in
 schema_migration (v22, v24, v27-v30). By the time 0031 runs in auto_apply every
-one of those versions is already applied on this store.
+one of those versions is already applied on this store. Those registrations
+are process-global; auto_apply walks with an empty registry and restores the
+caller's afterwards, so they never reach the next store in the same process
+(vnx migrate, doctor per project), whose 0022 the v22 hook would refuse.
 
 Idempotent: user_version >= 31 → apply_migration_v31 returns without writing.
 Applied by: scripts/lib/migrations/auto_apply.py

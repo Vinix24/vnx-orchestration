@@ -36,6 +36,19 @@ Mechanism:
 - Errors from handlers propagate; the rolled-back transaction is the
   handler's responsibility. The PRAGMA is only advanced when every handler
   returns cleanly.
+- The walk runs with an empty ``schema_migration._PREFLIGHT_HOOKS`` and puts
+  the caller's registry back on return and on raise. That registry is
+  process-global and only migrate_future_system fills it (v22-v30, at import
+  and again in its own numbered walk). Those hooks are preconditions of THAT
+  walk, which repairs dispatches before 0022; here a fresh store gets its
+  composite UNIQUE from 0022 itself, so the v22 hook refuses it ("dispatches
+  missing UNIQUE(dispatch_id, project_id)"). apply_0031 imports
+  migrate_future_system, and ``vnx migrate`` imports it per store, so without
+  the isolation every store after the first in one process could not reach
+  0022. The runners carry their own guards, and
+  ``schema_migration._assert_migration_prerequisite`` runs regardless of the
+  registry. Inside migrate_future_system.run() the sweep starts at >= 31, so
+  no hooked version is pending there and its CLI behaves as before.
 """
 
 from __future__ import annotations
@@ -201,7 +214,31 @@ def auto_apply(
     Raises ``UnhandledMigrationError`` for a pending number that has no
     handler, and sqlite3.Error (or whatever the runner raises) on failure; the
     PRAGMA user_version is not advanced past a number that raised.
+
+    The walk sees no preflight hook (see the module docstring); the caller's
+    registry is restored afterwards, and nothing a runner registers outlives
+    the call.
     """
+    # Lazy import, as in apply_pure_sql_migration.
+    import schema_migration
+
+    # In place: apply_script_if_below reads the module global at call time, and
+    # a caller may hold the dict itself.
+    registry = schema_migration._PREFLIGHT_HOOKS
+    saved = {version: list(hooks) for version, hooks in registry.items()}
+    registry.clear()
+    try:
+        return _walk(db_path, migrations_dir, runners_dir)
+    finally:
+        registry.clear()
+        registry.update(saved)
+
+
+def _walk(
+    db_path: Path,
+    migrations_dir: Optional[Path],
+    runners_dir: Optional[Path],
+) -> List[int]:
     mig_dir = migrations_dir or _DEFAULT_MIGRATIONS_DIR
     run_dir = runners_dir or _RUNNERS_DIR
     applied: List[int] = []
