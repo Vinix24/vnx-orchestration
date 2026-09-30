@@ -23,6 +23,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
 sys.path.insert(0, str(REPO_ROOT))
 
+# Both production callers (vnx init, vnx migrate) pass the CLI-derived tenant; the
+# 0031 tenant/FK repair in the bootstrap walk refuses to guess one (ADR-007).
+_BOOTSTRAP_PID = "bootstrap-test"
+
 
 @pytest.fixture(autouse=True)
 def _clear_schema_preflight_hooks():
@@ -211,7 +215,7 @@ class TestRuntimeSchemaVersionAfterBootstrap:
         monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
 
         from vnx_cli.commands.init_cmd import _bootstrap_runtime_dbs
-        _bootstrap_runtime_dbs(tmp_path)
+        _bootstrap_runtime_dbs(tmp_path, project_id=_BOOTSTRAP_PID)
 
         db = tmp_path / "state" / "runtime_coordination.db"
         max_ver = _max_runtime_schema_version(db)
@@ -361,7 +365,7 @@ class TestResolverAlignment:
         monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
 
         from vnx_cli.commands.init_cmd import _bootstrap_runtime_dbs
-        _bootstrap_runtime_dbs(tmp_path)
+        _bootstrap_runtime_dbs(tmp_path, project_id=_BOOTSTRAP_PID)
 
         import sqlite3
         db = tmp_path / "state" / "runtime_coordination.db"

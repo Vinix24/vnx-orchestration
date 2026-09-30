@@ -288,6 +288,25 @@ def _write_project_id_marker(project_dir: Path, project_id: str) -> bool:
     return True
 
 
+def _anchor_tenant_marker(data_root: Path, project_id: str) -> None:
+    """Write ``<data_root>/.vnx-project-id`` when absent; never overwrite one.
+
+    The migration runners resolve the tenant fail-closed from the DB path, the
+    nearest ``.vnx-project-id`` walking up from the DB, or VNX_PROJECT_ID
+    (ADR-007). A data root outside the ``.vnx-data/<pid>`` layout and outside
+    the project tree has none of the three, so the marker anchors THIS store's
+    tenant on disk instead of through a process-wide env mutation that would
+    leak across a fleet sweep or a shared test process.
+    """
+    marker = data_root / _engine.PROJECT_FILE_NAME
+    if marker.exists():
+        return
+    try:
+        marker.write_text(project_id + "\n", encoding="utf-8")
+    except OSError:
+        pass  # vnx-silent-except: advisory — central stores still resolve via the DB-path anchor
+
+
 def _is_within(child: Path, parent: Path) -> bool:
     try:
         Path(child).resolve().relative_to(Path(parent).resolve())
@@ -515,9 +534,9 @@ def _bootstrap_runtime_dbs(data_root: Path, project_id: str | None = None) -> No
     """Bootstrap runtime_coordination.db and quality_intelligence.db. Idempotent.
 
     Runs after vnx init creates the directory scaffold. Applies the full
-    migration chain (v1-v10 base schema + project_id columns + 0017/0019/0020/
-    0022/0024/0026 runners) so that vnx track list, vnx pool status, and
-    vnx dream status return empty results instead of "no such table".
+    migration chain (v1-v10 base schema + project_id columns + every numbered
+    migration auto_apply handles, through 0033) so that vnx track list, vnx pool
+    status, and vnx dream status return empty results instead of "no such table".
 
     Step order matters:
       1. init_schema: applies base schema v1 through v10 (dispatches table
@@ -526,8 +545,11 @@ def _bootstrap_runtime_dbs(data_root: Path, project_id: str | None = None) -> No
          to dispatches, terminal_leases, etc. (migration 0010). This must run
          BEFORE auto_apply so that migration 0022 (which SELECTs project_id from
          the old dispatches table) does not fail with "no such column: project_id".
-      3. auto_apply: applies numbered migration runners 0017+ (tracks, pool,
-         dispatches rebuild with CHECK, dream, dispatch claim).
+      3. auto_apply: applies numbered migrations 0015+ (project_id on the cold
+         tables, tracks, pool, dispatches rebuild with CHECK, dispatch claim,
+         horizon, the 0031 tenant/FK repair). 0031 resolves the tenant fail-closed,
+         so when project_id is given the tenant marker is anchored in data_root
+         first (``_anchor_tenant_marker``).
 
     When project_id is provided, inserts a default pool_config + worker_pools row
     for that project so vnx pool status works immediately after migrate.
@@ -553,7 +575,10 @@ def _bootstrap_runtime_dbs(data_root: Path, project_id: str | None = None) -> No
     from project_id_migration import run_runtime_coordination_migration  # type: ignore
     run_runtime_coordination_migration(db_path)
 
-    # Step 3: numbered migration runners 0017+ (tracks, pool, dream, claim) — CORE.
+    # Step 3: numbered migrations 0015+ — CORE. The 0031 tenant/FK repair refuses
+    # to guess a tenant, so anchor it on disk before the walk reaches it.
+    if project_id:
+        _anchor_tenant_marker(data_root, project_id)
     from migrations.auto_apply import auto_apply  # type: ignore
     auto_apply(db_path)
 

@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 from vnx_cli import _engine
-from vnx_cli.commands.init_cmd import _bootstrap_runtime_dbs
+from vnx_cli.commands.init_cmd import _anchor_tenant_marker, _bootstrap_runtime_dbs
 
 #: Central store layout ``.../.vnx-data/<pid>/`` — anchors the tenant on the data path.
 _DATA_PATH_PID_RE = re.compile(r"(?:^|/)\.vnx-data/([a-z0-9][a-z0-9._-]{0,63})/?$")
@@ -107,17 +107,11 @@ def _run_future_system_pipeline(data_root: Path, project_id: str) -> None:
     except ImportError:
         pass  # advisory tooling absent — never blocks the migration
 
-    # Anchor the tenant on disk (not via a global env mutation that would leak across
-    # a fleet sweep or a shared test process): write the canonical .vnx-project-id
-    # marker in the data root when absent, so the fail-closed resolver in the runner
-    # resolves THIS store's project_id even for a non-central (project-local) layout the
-    # DB-path anchor can't cover. Never overwrites an existing marker (reconciled above).
-    marker = data_root / ".vnx-project-id"
-    if not marker.exists():
-        try:
-            marker.write_text(project_id + "\n", encoding="utf-8")
-        except OSError:
-            pass  # advisory — central stores still resolve via the DB-path anchor
+    # Anchor the tenant on disk so the fail-closed resolver in the runner resolves THIS
+    # store's project_id even for a layout the DB-path anchor can't cover. Never
+    # overwrites an existing marker (reconciled above). The bootstrap already anchored
+    # it when it ran; this keeps the pipeline correct on its own.
+    _anchor_tenant_marker(data_root, project_id)
 
     # data_dir is threaded explicitly (D4 threading trap); no env mutation needed.
     # run_tenant_stamp=True (RE-ENABLED 2026-07-10): W1 tenant-stamping was disabled because

@@ -97,7 +97,9 @@
 #
 #
 tests/integration/test_gemini_streaming_gated.py  # OI-1227: red solo — TestDefaultOffBehavior expects 'done' got 'failed' (1 failed, 6 passed)
-tests/migrations/test_auto_apply.py  # OI-1227: red solo — sqlite3.OperationalError: no such table: dispatches (2 failed, 7 passed)
+# tests/migrations/test_auto_apply.py — REPAIRED (dispatch 20260930-rel170-auto-apply-fail-closed):
+# the two red tests fed the full migrations dir to a fixture that only has 0020's
+# tables; they now hand auto_apply the real 0020 alone. 9/9 green solo.
 tests/pool/test_pool_lease_e2e.py  # OI-1227: red solo — project-id resolution yields 'vnx-dev' not 'test-project' (2 failed, 6 passed)
 tests/test_adapter_conformance.py  # OI-1227: red solo — HeadlessAdapter.shutdown() unexpected kwarg 'graceful' (1 failed, 30 passed)
 tests/test_adr007_dispatches_repair.py  # OI-1227: red solo — 70-line gate flags run() at 78 lines (2 failed, 65 passed)
@@ -148,7 +150,9 @@ tests/test_headless_inspect.py  # OI-1227: red solo — HealthSummary.status_lab
 # attest delegation) was the red this exclusion hid. Suite is 85/85 green and
 # now rejoins the Profile A sweep so new drift fails the PR, not a red suite
 # nobody reads. No heavy-dep stack (sqlite3 + in-repo modules only).
-tests/test_horizon_schema_migration_fix.py  # OI-1227: red solo — pre-27 store migration to horizon fails (8 failed, 27 passed)
+# tests/test_horizon_schema_migration_fix.py — REPAIRED (dispatch 20260930-rel170-auto-apply-fail-closed):
+# the pre-27 fixture relied on auto_apply silently skipping 0027-0031 and the
+# asserts still expected 31 after the OI-1169 sweep. 35/35 green solo.
 tests/test_init_migrate_bootstrap.py  # OI-1420 gemeten 21-08: slaagt solo, valt onder volle sweep (18 failed) op hetzelfde ADR-007 project_id-conflict — zowel de "DB bootstrap failed" init-backfill vorm als "refusing to migrate a split-tenant store" (cli-derived project vs env:VNX_PROJECT_ID='vnx-dev')
 tests/test_installer_no_template_leak.py  # OI-1227: red solo — developer machine paths found in shipped sources (2 failed, 6 passed)
 tests/test_intelligence_ab_framework.py  # OI-1227: red solo — AB-framework conn lambda unexpected kwarg 'timeout' (2 failed, 9 passed)

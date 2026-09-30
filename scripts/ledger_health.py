@@ -98,8 +98,7 @@ if str(LIB_DIR) not in sys.path:
 
 from ndjson_hash_chain import verify_chain  # noqa: E402
 from receipt_query import CURSOR_NAME, pull_new_receipts  # noqa: E402
-from migrations.auto_apply import _discover_migrations as _auto_apply_discover_migrations  # noqa: E402
-from migrations.auto_apply import _RUNNERS_DIR as _AUTO_APPLY_RUNNERS_DIR  # noqa: E402
+from migrations.auto_apply import _RUNNERS_DIR as _AUTO_APPLY_RUNNERS_DIR, highest_auto_applicable_migration  # noqa: E402
 from migrations.auto_apply import _DEFAULT_MIGRATIONS_DIR as _AUTO_APPLY_MIGRATIONS_DIR  # noqa: E402
 
 REGISTER_NAME = "dispatch_register.ndjson"
@@ -539,26 +538,6 @@ def check_chain_status(state_dir: Path) -> Dict[str, Any]:
     }
 
 
-def _highest_runner_backed_migration(migrations_dir: Path, runners_dir: Path) -> Optional[int]:
-    """Highest NNNN under *migrations_dir* that has a paired ``apply_NNNN.py``
-    runner in *runners_dir* — i.e. the highest migration ``migrations.auto_apply``
-    can actually apply to ``runtime_coordination.db`` (OI-1169).
-
-    Deliberately NOT the naive highest-numbered-filename in the directory:
-    ``schemas/migrations/`` also holds date-named files (e.g.
-    ``2026_05_intelligence_hygiene.sql``) that match the same ``NNNN_*.sql``
-    discovery pattern with NNNN=2026 but target a different database and carry
-    no runner — counting those would make every real store permanently
-    "behind" a version no store can ever reach. None when no runner-backed
-    migration exists at all (unmeasurable, not zero).
-    """
-    highest: Optional[int] = None
-    for number, _sql_path in _auto_apply_discover_migrations(migrations_dir):
-        if (runners_dir / f"apply_{number:04d}.py").exists():
-            highest = number if highest is None else max(highest, number)
-    return highest
-
-
 def check_migration_staleness(
     state_dir: Path,
     *,
@@ -566,13 +545,14 @@ def check_migration_staleness(
     runners_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Compare runtime_coordination.db's PRAGMA user_version against the highest
-    runner-backed migration under schemas/migrations/ (OI-1169).
+    auto-applicable migration under schemas/migrations/ (OI-1169): one with a
+    paired runner or in auto_apply.PURE_SQL_MIGRATIONS.
 
     A store with no runtime_coordination.db yet has no schema state to be stale
     against — reported STATUS_OK (nothing to check), not SKIPPED_UNVERIFIED
     (mirrors check_pull_cursor's no-cursor+empty-ledger OK case). A DB that
     exists but cannot be opened/read, or a migrations directory that yields no
-    runner-backed migration at all, IS unmeasurable.
+    auto-applicable migration at all, IS unmeasurable.
     """
     db_path = state_dir / RUNTIME_DB_NAME
     mig_dir = migrations_dir or _AUTO_APPLY_MIGRATIONS_DIR
@@ -587,14 +567,14 @@ def check_migration_staleness(
         }
 
     try:
-        highest_available = _highest_runner_backed_migration(mig_dir, run_dir)
+        highest_available = highest_auto_applicable_migration(mig_dir, run_dir)
     except OSError as exc:
         return {"status": SKIPPED_UNVERIFIED, "reason": f"could not read migrations dir {mig_dir}: {exc}"}
 
     if highest_available is None:
         return {
             "status": SKIPPED_UNVERIFIED,
-            "reason": f"no runner-backed migration found under {mig_dir} — cannot determine staleness",
+            "reason": f"no auto-applicable migration found under {mig_dir} — cannot determine staleness",
         }
 
     try:
@@ -618,7 +598,7 @@ def check_migration_staleness(
     if behind > 0:
         result["reason"] = (
             f"store is at user_version={current_version}, highest available "
-            f"runner-backed migration is {highest_available:04d} — {behind} "
+            f"auto-applicable migration is {highest_available:04d} — {behind} "
             "migration(s) behind. Run `vnx migrate` to catch it up."
         )
     return result

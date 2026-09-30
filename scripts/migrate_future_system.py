@@ -25,11 +25,11 @@ run() ordering (R2.2 — repair → version-reconcile → numbered walk → auto
      numbered walk (A-D) stays a fixed, adaptive procedure (repair + tenant-stamping +
      manifest-backed preflights, not just DDL) and is never extended per-migration
      again; step F is how everything discovered under `schemas/migrations/` above it is
-     picked up generically, with zero code change here. A migration SQL file with no
-     paired `apply_NNNN.py` runner (e.g. a date-named file targeting a different
-     database such as quality_intelligence.db) is out of `auto_apply`'s scope by design
-     — see `migrations/auto_apply.py`'s own docstring — and does not advance this
-     store's `user_version`.
+     picked up generically, with zero code change here. Every numbered file resolves
+     to a runner, the generic pure-SQL runner, or a declared applied-elsewhere entry;
+     a number with none of them makes `auto_apply` raise (fail-closed). Date-named
+     files (e.g. `2026_05_intelligence_hygiene.sql`) are not numbered migrations and
+     are never discovered — see `migrations/auto_apply.py`'s own docstring.
 
 The reconciliation (B) runs BEFORE the walk (C) so the walk re-applies whatever the
 downgrade exposed. This matches the operator ordering in PRD §6 (migrate first) and
@@ -85,8 +85,8 @@ from atomic_io import audit_event_append
 import tenant_stamping
 from db_backup_rotation import parse_backup_keep, rotate_backups_safe
 from migrations.auto_apply import auto_apply
-from migrations.auto_apply import _discover_migrations as _auto_apply_discover_migrations
-from migrations.auto_apply import _RUNNERS_DIR as _AUTO_APPLY_RUNNERS_DIR
+from migrations.auto_apply import highest_auto_applicable_migration
+from migrations.apply_0027 import ensure_dispatches_output_columns
 
 
 # ---------------------------------------------------------------------------
@@ -1828,34 +1828,9 @@ def apply_migration_v24(conn: sqlite3.Connection, project_root: Path) -> None:
 # Step 5: PRAGMA pre-flight for 0027 — assert composite-key tracks intact
 # ---------------------------------------------------------------------------
 
-def _ensure_dispatches_output_columns(conn: sqlite3.Connection) -> None:
-    """Idempotently ensure dispatches carries output_ref + output_kind columns.
-
-    Migration 0027 creates the deliverables VIEW which reads dispatches.output_ref
-    and dispatches.output_kind. On the live DB these columns were added by the
-    structural-doctor repair step, but a fresh DB that arrives at v24 without the
-    structural-doctor pass (or via tests) will not have them. The VIEW creation
-    does not fail at DDL time (SQLite resolves view columns at query time), but
-    any SELECT from deliverables would fail.
-
-    This preflight adds the columns additively when they are absent, then back-
-    fills output_ref=pr_ref, output_kind='pr' for rows where pr_ref is set.
-    It is idempotent: column-existence checks guard the ALTER TABLE calls so
-    they are never attempted twice, and the UPDATE is a no-op after the first run.
-    """
-    cols = {row[1] for row in conn.execute("PRAGMA table_info('dispatches')")}
-
-    if "output_ref" not in cols:
-        conn.execute("ALTER TABLE dispatches ADD COLUMN output_ref TEXT")
-    if "output_kind" not in cols:
-        conn.execute("ALTER TABLE dispatches ADD COLUMN output_kind TEXT")
-    if "operator_approved_at" not in cols:
-        conn.execute("ALTER TABLE dispatches ADD COLUMN operator_approved_at TEXT")
-
-    conn.execute(
-        "UPDATE dispatches SET output_ref = pr_ref, output_kind = 'pr' "
-        "WHERE pr_ref IS NOT NULL AND output_ref IS NULL"
-    )
+# The v27 output-column preflight lives with the 0027 runner, which auto_apply
+# invokes on a fresh store (build_t0_state's path) without importing this module.
+_ensure_dispatches_output_columns = ensure_dispatches_output_columns
 
 
 def _assert_tracks_v24_intact(conn: sqlite3.Connection) -> None:
@@ -3210,22 +3185,6 @@ def _run_w1_coupled_migration(rc_db_path: Path) -> None:
         print("  [W1] No tenant-stamping changes needed (RC + QI already clean).")
 
 
-def _highest_runner_backed_auto_apply_migration() -> int | None:
-    """Highest NNNN under schemas/migrations/ that `auto_apply` can actually apply
-    to runtime_coordination.db — i.e. it has a paired `apply_NNNN.py` runner.
-
-    `schemas/migrations/` also holds date-named files (e.g.
-    ``2026_05_intelligence_hygiene.sql``) that target a different database and
-    have no runner; those are correctly out of scope for step F and must not be
-    counted here. None when no runner-backed migration exists at all.
-    """
-    highest: int | None = None
-    for number, _sql_path in _auto_apply_discover_migrations(_MIGRATIONS):
-        if (_AUTO_APPLY_RUNNERS_DIR / f"apply_{number:04d}.py").exists():
-            highest = number if highest is None else max(highest, number)
-    return highest
-
-
 def _pipeline_would_mutate(db_path: Path) -> bool:
     """Return True when the migration pipeline would change this DB.
 
@@ -3236,7 +3195,7 @@ def _pipeline_would_mutate(db_path: Path) -> bool:
     2. ADR-007 repair is needed → the dispatches table will be rebuilt.
     3. The DB's effective manifest does not hold → version reconciliation will
        downgrade user_version, which causes the walk to re-apply.
-    4. user_version < the highest runner-backed migration under schemas/migrations/
+    4. user_version < the highest auto-applicable migration under schemas/migrations/
        (OI-1169) → step F's generic auto-apply sweep will apply at least one
        migration above the numbered walk (e.g. 0032+), even when signals 1-3 are
        all clean because the numbered walk itself has nothing left to do.
@@ -3273,8 +3232,8 @@ def _pipeline_would_mutate(db_path: Path) -> bool:
                     return True
 
             # Signal 4 (OI-1169): the generic auto-apply sweep (step F) has a
-            # runner-backed migration above the current user_version to apply.
-            highest_available = _highest_runner_backed_auto_apply_migration()
+            # migration above the current user_version to apply.
+            highest_available = highest_auto_applicable_migration(_MIGRATIONS)
             if highest_available is not None and user_version < highest_available:
                 return True
 
@@ -3326,7 +3285,7 @@ def run(
     """Apply future-system migrations through 0031, then everything above it via a
     generic auto-apply sweep (+ optional W1 tenant-stamping). See the module
     docstring's step F (OI-1169): after this call the store is at the highest
-    migration number that has a paired `apply_NNNN.py` runner — never stuck at 0031.
+    migration number auto_apply can apply (a runner or pure SQL) — never stuck at 0031.
 
     DB path resolution (mirrors dispatch_cli.py:69-74):
     - Explicit ``data_dir`` argument wins (D4 threading trap): the CLI has already
