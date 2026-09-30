@@ -14,6 +14,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 VNX_ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(VNX_ROOT / "scripts"))
 sys.path.insert(0, str(VNX_ROOT / "scripts" / "lib"))
@@ -58,6 +60,12 @@ def _write_ndjson(path: Path, *records: dict) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+@pytest.fixture(autouse=True)
+def _project_id(monkeypatch):
+    # ledger_health reads open outcomes per project (ADR-007); a tmp state dir names none
+    monkeypatch.setenv("VNX_PROJECT_ID", "proj-doctor")
+
+
 class TestCheckLedgerHealth:
     def test_no_beacon_yet_is_pass_not_fail(self, tmp_path):
         result = _check_ledger_health(tmp_path)
@@ -69,10 +77,6 @@ class TestCheckLedgerHealth:
         state_dir.mkdir()
         _write_ndjson(state_dir / lh.REGISTER_NAME, _register_entry("d-001"))
         _write_ndjson(state_dir / lh.LEDGER_NAME, _receipt("d-001"))
-        ledger_size = (state_dir / lh.LEDGER_NAME).stat().st_size
-        (state_dir / lh.CURSOR_NAME).write_text(
-            __import__("json").dumps({"offset": ledger_size}), encoding="utf-8"
-        )
 
         computed = lh.compute_health(tmp_path, state_dir)
         lh.write_health_surface(tmp_path, computed)
@@ -85,10 +89,6 @@ class TestCheckLedgerHealth:
         state_dir.mkdir()
         _write_ndjson(state_dir / lh.REGISTER_NAME, _register_entry("d-orphan"))
         _write_ndjson(state_dir / lh.LEDGER_NAME, _receipt("d-001"))
-        ledger_size = (state_dir / lh.LEDGER_NAME).stat().st_size
-        (state_dir / lh.CURSOR_NAME).write_text(
-            __import__("json").dumps({"offset": ledger_size}), encoding="utf-8"
-        )
 
         computed = lh.compute_health(tmp_path, state_dir)
         lh.write_health_surface(tmp_path, computed)
@@ -134,10 +134,6 @@ class TestCheckLedgerHealth:
             encoding="utf-8",
         )
         _write_ndjson(state_dir / lh.LEDGER_NAME, _receipt("d-001"))
-        ledger_size = (state_dir / lh.LEDGER_NAME).stat().st_size
-        (state_dir / lh.CURSOR_NAME).write_text(
-            __import__("json").dumps({"offset": ledger_size}), encoding="utf-8"
-        )
 
         computed = lh.compute_health(tmp_path, state_dir)
         lh.write_health_surface(tmp_path, computed)
@@ -154,10 +150,6 @@ class TestCheckLedgerHealth:
         state_dir.mkdir()
         _write_ndjson(state_dir / lh.REGISTER_NAME, _register_entry("d-001"))
         _write_ndjson(state_dir / lh.LEDGER_NAME, _receipt("d-001"))
-        ledger_size = (state_dir / lh.LEDGER_NAME).stat().st_size
-        (state_dir / lh.CURSOR_NAME).write_text(
-            __import__("json").dumps({"offset": ledger_size}), encoding="utf-8"
-        )
         computed = lh.compute_health(tmp_path, state_dir)
         lh.write_health_surface(tmp_path, computed)
 
@@ -207,7 +199,7 @@ class TestFailBeaconWithUnreadableDetails:
             details={
                 "checks": {
                     "receipt_coverage": {"status": "ok"},
-                    "pull_cursor": {"status": "ok"},
+                    "open_outcomes": {"status": "ok"},
                     "chain_status": {"status": "ok"},
                 }
             },

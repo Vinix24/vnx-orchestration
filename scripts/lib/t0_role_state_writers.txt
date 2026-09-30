@@ -27,3 +27,5 @@ t0_recommendations.json | scripts/lib/recommendation_aggregator.py | t0_recommen
 open_items_digest.json | scripts/open_items_manager.py | open_items_digest.json |
 review_gates/requests/ | scripts/lib/gate_recorder.py | requests_dir |
 review_gates/results/ | scripts/lib/gate_recorder.py | review_gates/results |
+t0_index.json#open_outcomes | scripts/build_t0_state.py | "open_outcomes": | open_outcomes
+t0_decision_log.jsonl | scripts/lib/t0_decision_log.py | t0_decision_log.jsonl |

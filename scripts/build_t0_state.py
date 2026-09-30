@@ -70,6 +70,9 @@ Schema 2.2 change (D5 fabric-state-herstel, live work):
     ``conflicts/`` directory that exists but cannot be listed is not zero:
     its count is ``null`` with a ``*_unmeasured_reason`` and it degrades
     system_health, so the dispatch guard reads WAIT, never GO.
+  - t0_index.json schema ``t0_index/1.2`` (D4b) adds ``open_outcomes``:
+    reject/investigate dispatches without a T0 decision, at most 10 items
+    plus counts. The full section is ``open_outcomes`` in t0_state.json.
   - t0_index.json (schema ``t0_index/1.1``) drops ``terminals``,
     ``queue.active`` and ``active_dispatches`` for a compact ``live_work``.
     ``terminals`` stays in t0_state.json while headless_dispatch_daemon and
@@ -130,6 +133,10 @@ from receipt_outcome import (  # noqa: E402
     OUTCOME_READER_EPOCH,
     noise_reason,
     summarize as _summarize_outcomes,
+)
+from open_outcomes import (
+    INDEX_LIMIT as _OPEN_OUTCOMES_INDEX_LIMIT,
+    build_open_outcomes as _build_open_outcomes_section,
 )
 try:
     from vnx_paths import resolve_central_data_dir  # noqa: E402
@@ -1227,6 +1234,57 @@ def _live_work_index_summary(live_work: Optional[Dict[str, Any]]) -> Dict[str, A
         "open_prs": [
             p for p in (live_work.get("open_prs") or []) if p.get("dispatch_id")
         ][:_INDEX_LIVE_WORK_LIVE_CAP],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Open outcomes (fabric-state-herstel D4b)
+# ---------------------------------------------------------------------------
+
+def _build_open_outcomes(state_dir: Path, project_id: str) -> Dict[str, Any]:
+    """reject/investigate dispatches of this project without a T0 decision.
+
+    Read from the same store as the receipts (central when enabled). Replaces
+    the byte cursor of ``receipt_query.py pull``: nothing is consumed, every
+    T0 sees the same list, and a dispatch leaves it through a decision in
+    ``t0_decision_log.jsonl`` (``receipt_query.py decide``).
+    """
+    _central = _central_state_dir_for(state_dir)
+    try:
+        return _build_open_outcomes_section(
+            _central if _central is not None else state_dir,
+            project_id=project_id,
+            limit=_OPEN_OUTCOMES_INDEX_LIMIT,
+        )
+    except Exception as exc:  # vnx-silent-except: a bad section must not break the build; it says why
+        log.warning("open_outcomes unavailable: %s", exc)
+        return {"available": False, "reason": f"open_outcomes read failed: {exc}"}
+
+
+_INDEX_OPEN_OUTCOME_REASON_MAX = 60
+
+
+def _open_outcomes_index_summary(oo: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Compact open_outcomes for the always-loaded t0_index.json (<=5KB budget):
+    the counts (also per kind), and per item only what a T0 needs to pick it
+    up. The full items (kind, status, last_seen) are in t0_state.json."""
+    oo = oo or {}
+    if not oo.get("available"):
+        return {"available": False, "reason": oo.get("reason") or "open_outcomes not built"}
+    return {
+        "available": True,
+        "total": oo.get("total", 0),
+        "by_outcome": oo.get("by_outcome") or {},
+        "by_kind": oo.get("by_kind") or {},
+        "more": oo.get("more", 0),
+        "items": [
+            {
+                "dispatch_id": i.get("dispatch_id"),
+                "outcome": i.get("outcome"),
+                "reason": (i.get("reason") or "")[:_INDEX_OPEN_OUTCOME_REASON_MAX],
+            }
+            for i in (oo.get("items") or [])[:_OPEN_OUTCOMES_INDEX_LIMIT]
+        ],
     }
 
 
@@ -2487,6 +2545,7 @@ def build_t0_state(
     open_items = _collect_open_items(project_id, state_dir)
     quality_digest = _build_quality_digest(state_dir)
     recent_receipts = _build_recent_receipts(state_dir, project_id=project_id, limit=20)
+    open_outcomes = _build_open_outcomes(state_dir, project_id)  # D4b: undecided reject/investigate
     git_context = _build_git_context()
     pr_queue = _build_pr_queue_section(state_dir)  # R7.1: extracted helper
     live_work = _build_live_work(state_dir, project_id, pr_queue)  # D5: DB + occupancy flock
@@ -2518,6 +2577,7 @@ def build_t0_state(
         "quality_digest": quality_digest,
         "live_work": live_work,
         "recent_receipts": recent_receipts,
+        "open_outcomes": open_outcomes,
         "git_context": git_context,
         "system_health": system_health,
         "pr_queue": pr_queue,
@@ -2680,7 +2740,7 @@ def _build_t0_index(state: Dict[str, Any]) -> Dict[str, Any]:
     raw_head = last_commits[0].split()[0] if last_commits else ""
 
     return {
-        "schema": "t0_index/1.1",
+        "schema": "t0_index/1.2",
         "timestamp": state.get("generated_at", ""),
         "git_branch": git_ctx.get("branch", ""),
         "git_head": raw_head[:7],
@@ -2693,6 +2753,8 @@ def _build_t0_index(state: Dict[str, Any]) -> Dict[str, Any]:
         },
         "live_work": _live_work_index_summary(state.get("live_work")),
         "recent_receipts": (state.get("recent_receipts") or [])[:3],
+        # D4b: what a T0 still has to decide on; replaces the receipt pull cursor
+        "open_outcomes": _open_outcomes_index_summary(state.get("open_outcomes")),
         "health": _slim_health_for_index(state.get("system_health") or {}),
         "track_freshness": _track_freshness_summary(state.get("track_freshness")),
         "contract_invalid": _contract_invalid_index_summary(state.get("contract_invalid")),

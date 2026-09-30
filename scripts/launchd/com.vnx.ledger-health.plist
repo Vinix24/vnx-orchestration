@@ -6,11 +6,11 @@
   <key>Label</key><string>com.vnx.ledger-health</string>
   <!--
     OI-1409: ledger_health.py exists, works, mutates nothing, and had no
-    driver — nobody ever ran it, so its receipt-coverage/pull-cursor/chain
+    driver — nobody ever ran it, so its receipt-coverage/open-outcome/chain
     findings only ever reflected whatever state existed the one time a human
     happened to invoke it by hand. This job is the driver, nothing else: it
     does not fix findings, does not touch dispatch_register.ndjson or
-    t0_receipts.ndjson, and does not move DEFAULT_CURSOR_STALE_HOURS. It only
+    t0_receipts.ndjson, and does not move DEFAULT_OPEN_OUTCOME_STALE_HOURS. It only
     makes sure `python3 scripts/ledger_health.py` actually runs on a cadence,
     so `vnx doctor`'s ledger:health check (_check_ledger_health) reads a
     beacon that reflects current reality instead of a stale or nonexistent
@@ -19,9 +19,9 @@
     Interval: every 6h (21600s). ledger_health.py writes its own beacon with
     BEACON_EXPECTED_INTERVAL_SECONDS=86400 (health_beacon.py: a beacon whose
     age exceeds its own expected_interval_seconds reads as "stale" per
-    all_beacons()) and check_pull_cursor()'s DEFAULT_CURSOR_STALE_HOURS is
+    all_beacons()) and check_open_outcomes()'s DEFAULT_OPEN_OUTCOME_STALE_HOURS is
     24.0h = 86400s — both windows this job exists to stay inside. A
-    StartInterval at or above 86400 would make the beacon (or the cursor
+    StartInterval at or above 86400 would make the beacon (or the open-outcome
     check it reports on) stale by construction, which is exactly the
     "mechanism with no drive" defect this dispatch fixes. 21600s gives 4
     runs/day: even 3 consecutive missed runs (an 18h gap) still lands inside

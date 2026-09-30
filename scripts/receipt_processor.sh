@@ -69,8 +69,8 @@ RECEIPTS_PROCESSED_DIR="${VNX_DATA_DIR}/receipts/processed"
 RECEIPT_RETRY_INTERVAL="${VNX_RECEIPT_RETRY_INTERVAL:-10}"  # seconds between pending retry sweeps
 # VNX_RECEIPT_T0_PUSH=0 (default, ADR-035 §5.3/§9 PR-8) suppresses the pane
 # push entirely — ndjson append + outbox processing still happen (audit trail
-# intact), only the pane notification is skipped. T0 pulls instead
-# (scripts/receipt_query.py pull, docs/core/DISPATCH_RULES.md §13). 1
+# intact), only the pane notification is skipped. T0 reads open_outcomes
+# instead (scripts/receipt_query.py open-outcomes, DISPATCH_RULES.md §13). 1
 # re-enables the legacy tmux paste as a transition escape hatch.
 # Read directly (no indirection var) by rp_delivery.sh at delivery time.
 # VNX_RECEIPT_DIGEST_THRESHOLD=5 (default) — once more than this many distinct

@@ -1,20 +1,15 @@
 #!/usr/bin/env python3
-"""receipt_query.py — the receipt-v2 pull interface (ADR-035 §5).
+"""receipt_query.py — the receipt-v2 query interface (ADR-035 §5).
 
-PR-6 (ADR-035 §9) shipped ``pull``/``by-dispatch``. This PR (§9 PR-7) adds the
-rest of the interface plus the §6.4 oi_pending follow-up loop:
-
-  pull               — the tick primitive. Absorbs receipt_pull.py's cursor
-                        algorithm (parked branch feat/receipt-mailbox-delivery,
-                        commit 54089155), reimplemented against current main
-                        rather than resurrecting the branch: byte cursor in
-                        receipt_pull_cursor.json, read-then-advance, advances
-                        only past complete (newline-terminated) lines so a
-                        concurrent append's partial trailing line is never
-                        consumed early, resets to 0 on a truncated/rotated
-                        ledger, --seed-now sets the cursor to EOF (skip the
-                        backlog without deleting it), --peek reads without
-                        advancing.
+  open-outcomes      — the dispatches of this project whose outcome is reject
+                        or investigate and that no T0 has decided on yet
+                        (fabric-state-herstel D4b, ``open_outcomes``). Replaces
+                        the byte-cursor ``pull``: nothing is consumed, so two
+                        T0 sessions see the same open points, and a point
+                        leaves the list only through a recorded decision.
+  decide             — record a T0 decision (accept/reject) about one dispatch
+                        in ``t0_decision_log.jsonl`` through
+                        ``t0_decision_log.write_decision`` (append under flock).
   by-dispatch        — thin wrapper over receipt_provenance.find_receipts_by_dispatch.
                         No reimplementation.
   by-pr, since       — new, linear-scan-with-predicate over ``pr_id``/``timestamp``
@@ -82,9 +77,15 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from receipt_provenance import find_receipts_by_dispatch  # noqa: E402
 from receipt_outcome import OUTCOME_READER_EPOCH, summarize as summarize_outcomes
+from open_outcomes import (
+    DECISION_LOG_NAME,
+    OUTCOME_DECISIONS,
+    build_open_outcomes,
+    record_outcome_decision,
+)
+from vnx_paths import project_id_from_state_dir
 
 LEDGER_NAME = "t0_receipts.ndjson"
-CURSOR_NAME = "receipt_pull_cursor.json"
 RUNTIME_COORDINATION_DB_NAME = "runtime_coordination.db"
 DEFAULT_PROJECT_ID = "vnx-dev"
 DEFAULT_DIGEST_WINDOW = "24h"
@@ -95,64 +96,6 @@ _open_items_manager_cache: Optional[Any] = None
 
 def _ledger_path(state_dir: Path) -> Path:
     return state_dir / LEDGER_NAME
-
-
-def _default_cursor_path(state_dir: Path) -> Path:
-    return state_dir / CURSOR_NAME
-
-
-def load_cursor(cursor_path: Path) -> int:
-    """Read the byte offset from ``cursor_path``. Missing or corrupt -> 0."""
-    if not cursor_path.exists():
-        return 0
-    try:
-        return int(json.loads(cursor_path.read_text(encoding="utf-8")).get("offset", 0))
-    except (json.JSONDecodeError, ValueError, OSError, TypeError):
-        return 0
-
-
-def save_cursor(cursor_path: Path, offset: int) -> None:
-    """Atomically persist ``offset`` to ``cursor_path`` (tmp write + os.replace)."""
-    tmp = cursor_path.with_suffix(cursor_path.suffix + ".tmp")
-    tmp.write_text(json.dumps({"offset": int(offset)}), encoding="utf-8")
-    os.replace(tmp, cursor_path)
-
-
-def pull_new_receipts(
-    ledger_path: Path,
-    cursor_offset: int = 0,
-) -> Tuple[List[Dict[str, Any]], int]:
-    """Read receipts appended after ``cursor_offset``. Returns ``(receipts, new_offset)``.
-
-    Read-then-advance: ``new_offset`` only ever moves past COMPLETE
-    (newline-terminated) lines, so a concurrent append's partial trailing line is
-    left untouched for the next pull. A truncated/rotated ledger (smaller than the
-    cursor) resets the cursor to 0. A malformed complete line is skipped, but the
-    cursor still advances past it — it will never parse on a later pull either.
-    Mixed v1/v2 lines are both plain JSON objects; no schema_version branching is
-    needed to read them.
-    """
-    receipts: List[Dict[str, Any]] = []
-    new_offset = cursor_offset
-    if not ledger_path.exists():
-        return receipts, new_offset
-    if ledger_path.stat().st_size < cursor_offset:
-        new_offset = 0
-        cursor_offset = 0
-    with open(ledger_path, "rb") as f:
-        f.seek(cursor_offset)
-        while True:
-            raw = f.readline()
-            if not raw:
-                break
-            if not raw.endswith(b"\n"):
-                break  # incomplete trailing line (mid-append) — do not advance past it
-            new_offset = f.tell()
-            try:
-                receipts.append(json.loads(raw.decode("utf-8")))
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                continue  # skip a malformed complete line; cursor already advanced past it
-    return receipts, new_offset
 
 
 def _iter_ledger(ledger_path: Path):
@@ -563,38 +506,63 @@ def _format_receipt(r: Dict[str, Any]) -> str:
     return f"  {term} {did} [{status}] schema_version={schema_version} pr={pr}"
 
 
-def _cmd_pull(args: argparse.Namespace) -> int:
+def _project_id_for(args: argparse.Namespace, state_dir: Path) -> str:
+    """The project a state dir belongs to: ``--project-id``, else derived from
+    the state dir, else ``VNX_PROJECT_ID``. Empty when none is known — never a
+    default project, so a decision cannot land under the wrong one (ADR-007)."""
+    return (
+        (args.project_id or "").strip()
+        or project_id_from_state_dir(state_dir)
+        or os.environ.get("VNX_PROJECT_ID", "").strip()
+    )
+
+
+def _cmd_open_outcomes(args: argparse.Namespace) -> int:
     state_dir = Path(args.state_dir)
-    ledger = _ledger_path(state_dir)
-    cursor_path = Path(args.cursor_file) if args.cursor_file else _default_cursor_path(state_dir)
-
-    if args.seed_now:
-        eof = ledger.stat().st_size if ledger.exists() else 0
-        save_cursor(cursor_path, eof)
-        if args.json:
-            print(json.dumps({"seeded": True, "cursor": eof}))
-        else:
-            print(
-                f"cursor seeded to EOF ({eof} bytes) — "
-                "backlog skipped (still in the ledger, auditable)."
-            )
-        return 0
-
-    cursor = load_cursor(cursor_path)
-    receipts, new_offset = pull_new_receipts(ledger, cursor)
+    project_id = _project_id_for(args, state_dir)
+    if not project_id:
+        print("error: no project id (pass --project-id or set VNX_PROJECT_ID)", file=sys.stderr)
+        return 2
+    result = build_open_outcomes(state_dir, project_id=project_id, limit=args.limit)
+    if not result["available"]:
+        print(f"error: {result['reason']}", file=sys.stderr)
+        return 2
 
     if args.json:
-        print(json.dumps(
-            {"count": len(receipts), "cursor": new_offset, "receipts": receipts},
-            indent=2,
-        ))
+        print(json.dumps(result, indent=2))
     else:
-        print(f"{len(receipts)} new receipt(s) since cursor {cursor}:")
-        for r in receipts:
-            print(_format_receipt(r))
+        bo = result["by_outcome"]
+        print(f"open outcomes (project={project_id}, since {result['since']}): "
+              f"{result['total']} (reject={bo['reject']} investigate={bo['investigate']})")
+        for item in result["items"]:
+            print(f"  {item['outcome']:<11} {item['dispatch_id']}  "
+                  f"[{item['kind']}] {item.get('reason') or ''}")
+        if result["more"]:
+            print(f"  ... and {result['more']} more")
+    return 0
 
-    if not args.peek and new_offset != cursor:
-        save_cursor(cursor_path, new_offset)
+
+def _cmd_decide(args: argparse.Namespace) -> int:
+    state_dir = Path(args.state_dir)
+    project_id = _project_id_for(args, state_dir)
+    if not project_id:
+        print("error: no project id (pass --project-id or set VNX_PROJECT_ID)", file=sys.stderr)
+        return 2
+    if not (args.reason or "").strip():
+        print("error: --reason must not be blank", file=sys.stderr)
+        return 2
+    record = record_outcome_decision(
+        state_dir / DECISION_LOG_NAME,
+        dispatch_id=args.dispatch_id,
+        project_id=project_id,
+        decision=args.decision,
+        reason=args.reason.strip(),
+    )
+    if args.json:
+        print(json.dumps(record, indent=2))
+    else:
+        print(f"recorded {record['decision']} for {record['dispatch_id']} "
+              f"(project {project_id}) at {record['timestamp']}")
     return 0
 
 
@@ -724,28 +692,40 @@ def _cmd_reconcile_oi_pending(args: argparse.Namespace) -> int:
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Receipt v2 pull-model query interface (ADR-035 §5)",
+        description="Receipt v2 query interface (ADR-035 §5)",
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p_pull = sub.add_parser(
-        "pull", help="tick primitive — read receipts since the cursor, advance it",
+    p_open = sub.add_parser(
+        "open-outcomes",
+        help="reject/investigate dispatches of this project without a T0 decision",
     )
-    p_pull.add_argument("--state-dir", required=True)
-    p_pull.add_argument(
-        "--cursor-file", default=None,
-        help="override the cursor file path (default: <state-dir>/receipt_pull_cursor.json)",
+    p_open.add_argument("--state-dir", required=True)
+    p_open.add_argument(
+        "--project-id", default=None,
+        help="default: derived from --state-dir, else $VNX_PROJECT_ID (ADR-007)",
     )
-    p_pull.add_argument(
-        "--seed-now", action="store_true",
-        help="set the cursor to EOF (skip the backlog; it stays on disk, auditable)",
+    p_open.add_argument(
+        "--limit", type=int, default=None,
+        help="list at most N items; the counts always cover all (default: all)",
     )
-    p_pull.add_argument(
-        "--peek", action="store_true",
-        help="read new receipts without advancing the cursor",
+    p_open.add_argument("--json", action="store_true")
+    p_open.set_defaults(func=_cmd_open_outcomes)
+
+    p_decide = sub.add_parser(
+        "decide",
+        help="record a T0 decision about a dispatch's outcome (append-only decision log)",
     )
-    p_pull.add_argument("--json", action="store_true")
-    p_pull.set_defaults(func=_cmd_pull)
+    p_decide.add_argument("dispatch_id")
+    p_decide.add_argument("decision", choices=sorted(OUTCOME_DECISIONS))
+    p_decide.add_argument("--reason", required=True, help="why (must not be blank)")
+    p_decide.add_argument("--state-dir", required=True)
+    p_decide.add_argument(
+        "--project-id", default=None,
+        help="default: derived from --state-dir, else $VNX_PROJECT_ID (ADR-007)",
+    )
+    p_decide.add_argument("--json", action="store_true")
+    p_decide.set_defaults(func=_cmd_decide)
 
     p_by_dispatch = sub.add_parser(
         "by-dispatch",
