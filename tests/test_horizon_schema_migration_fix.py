@@ -35,6 +35,10 @@ for _p in (str(ROOT), str(ROOT / "scripts"), str(ROOT / "scripts" / "lib")):
 import migrate_future_system as mfs  # noqa: E402
 import tracks as tracks_dal  # noqa: E402
 
+#: mfs.run() ends with the auto_apply sweep (OI-1169), so a migrated store lands on
+#: the highest migration auto_apply can apply, not on the walk's own terminal 0031.
+_TERMINAL = mfs.highest_auto_applicable_migration(mfs._MIGRATIONS)
+
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -50,11 +54,23 @@ def _bootstrap_store(data_root: Path) -> Path:
     dispatches from solo→composite and would trip that preflight. Production is
     unaffected — vnx migrate imports mfs only AFTER the bootstrap — so we clear
     and restore the preflight registry around the bootstrap chain to mirror it.
+
+    auto_apply is handed only the migrations through 0026: it now applies
+    0027-0033 itself (fail-closed, no silent skip), so a store from the full
+    migrations dir is already converged and leaves the pipeline nothing to test.
+    This fixture is a store written by code that predates 0027.
     """
+    import shutil
+
     import schema_migration  # type: ignore
 
     state_dir = data_root / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
+    through_0026 = data_root / "_migrations_through_0026"
+    through_0026.mkdir(exist_ok=True)
+    for sql_path in (ROOT / "schemas" / "migrations").glob("00[0-2][0-9]_*.sql"):
+        if int(sql_path.name[:4]) <= 26:
+            shutil.copy2(sql_path, through_0026 / sql_path.name)
     saved_hooks = {k: list(v) for k, v in schema_migration._PREFLIGHT_HOOKS.items()}
     schema_migration._PREFLIGHT_HOOKS.clear()
     try:
@@ -64,7 +80,7 @@ def _bootstrap_store(data_root: Path) -> Path:
         from project_id_migration import run_runtime_coordination_migration  # type: ignore
         run_runtime_coordination_migration(db_path)
         from migrations.auto_apply import auto_apply  # type: ignore
-        auto_apply(db_path)
+        auto_apply(db_path, migrations_dir=through_0026)
     finally:
         schema_migration._PREFLIGHT_HOOKS.clear()
         schema_migration._PREFLIGHT_HOOKS.update(saved_hooks)
@@ -210,7 +226,7 @@ class TestD4WholePipeline:
         assert not _has_horizon(db_path)
         monkeypatch.setenv("VNX_DATA_DIR", str(data_root))
         mfs.run(data_dir=data_root, tenant_stamp_fatal=True)
-        assert _uv(db_path) == 31
+        assert _uv(db_path) == _TERMINAL
         assert _has_horizon(db_path)
 
     def test_schema_only_run_skips_w1_but_delivers_horizon(self, tmp_path: Path,
@@ -222,7 +238,7 @@ class TestD4WholePipeline:
         db_path = _bootstrap_store(data_root)
         monkeypatch.setenv("VNX_DATA_DIR", str(data_root))
         mfs.run(data_dir=data_root, run_tenant_stamp=False, backup=True)
-        assert _uv(db_path) == 31
+        assert _uv(db_path) == _TERMINAL
         assert _has_horizon(db_path)
         c = sqlite3.connect(str(db_path))
         try:
@@ -238,7 +254,7 @@ class TestD4WholePipeline:
         monkeypatch.setenv("VNX_DATA_DIR", str(data_root))
         mfs.run(data_dir=data_root, tenant_stamp_fatal=True)
         mfs.run(data_dir=data_root, tenant_stamp_fatal=True)  # re-run: no-op
-        assert _uv(db_path) == 31
+        assert _uv(db_path) == _TERMINAL
         assert _has_horizon(db_path)
         c = sqlite3.connect(str(db_path))
         try:
@@ -282,7 +298,7 @@ class TestD6Safety:
         c.close()
         monkeypatch.setenv("VNX_DATA_DIR", str(data_root))
         mfs.run(data_dir=data_root, tenant_stamp_fatal=True)
-        assert _uv(db_path) == 31
+        assert _uv(db_path) == _TERMINAL
         assert _has_horizon(db_path)
 
     def test_duplicate_column_rerun_is_noop(self, tmp_path: Path,
@@ -391,7 +407,7 @@ class TestD6Safety:
         conn.close()
 
         mfs.run(data_dir=data_root, tenant_stamp_fatal=True)
-        assert _uv(db_path) == 31
+        assert _uv(db_path) == _TERMINAL
         c = sqlite3.connect(str(db_path))
         try:
             assert c.execute("PRAGMA foreign_key_check").fetchall() == []
@@ -522,7 +538,7 @@ class TestResolvedPidValidation:
             "CREATE INDEX idx_headless_run_state ON headless_runs(state, started_at ASC)")
         conn.commit()
         conn.close()
-        assert _uv(db_path) == 31  # store stays v31 — the >= 31 fast-return would apply
+        assert _uv(db_path) == _TERMINAL  # past v31 — the >= 31 fast-return would apply
         with pytest.raises(RuntimeError, match="idx_headless_run_state.*differs"):
             mfs.run(data_dir=data_root, run_tenant_stamp=False)
 
@@ -673,7 +689,7 @@ class TestPremigrateBackupNoOp:
 
         # First run: migrate to terminal version (this creates a backup).
         mfs.run(data_dir=data_root, tenant_stamp_fatal=True, backup=True)
-        assert _uv(db_path) == 31
+        assert _uv(db_path) == _TERMINAL
 
         # Count existing premigrate backups after the first run.
         state_dir = data_root / "state"
@@ -705,7 +721,7 @@ class TestPremigrateBackupNoOp:
         assert len(before_backups) == 0, "no backups should exist before first run"
 
         mfs.run(data_dir=data_root, tenant_stamp_fatal=True, backup=True)
-        assert _uv(db_path) == 31
+        assert _uv(db_path) == _TERMINAL
 
         after_backups = list(state_dir.glob(
             "runtime_coordination.db.premigrate-*.bak"))

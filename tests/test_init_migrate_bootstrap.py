@@ -24,6 +24,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
 sys.path.insert(0, str(REPO_ROOT))
 
+# Both production callers (vnx init, vnx migrate) pass the CLI-derived tenant; the
+# 0031 tenant/FK repair in the bootstrap walk refuses to guess one (ADR-007).
+_BOOTSTRAP_PID = "bootstrap-test"
+
 
 @pytest.fixture(autouse=True)
 def _clear_schema_preflight_hooks():
@@ -99,7 +103,7 @@ class TestBootstrapRuntimeDbs:
         monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
 
         from vnx_cli.commands.init_cmd import _bootstrap_runtime_dbs
-        _bootstrap_runtime_dbs(tmp_path)
+        _bootstrap_runtime_dbs(tmp_path, project_id=_BOOTSTRAP_PID)
 
         db = tmp_path / "state" / "runtime_coordination.db"
         assert db.exists(), "runtime_coordination.db must be created"
@@ -109,7 +113,7 @@ class TestBootstrapRuntimeDbs:
         monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
 
         from vnx_cli.commands.init_cmd import _bootstrap_runtime_dbs
-        _bootstrap_runtime_dbs(tmp_path)
+        _bootstrap_runtime_dbs(tmp_path, project_id=_BOOTSTRAP_PID)
 
         db = tmp_path / "state" / "runtime_coordination.db"
         tables = _table_names(db)
@@ -122,7 +126,7 @@ class TestBootstrapRuntimeDbs:
         monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
 
         from vnx_cli.commands.init_cmd import _bootstrap_runtime_dbs
-        _bootstrap_runtime_dbs(tmp_path)
+        _bootstrap_runtime_dbs(tmp_path, project_id=_BOOTSTRAP_PID)
 
         db = tmp_path / "state" / "runtime_coordination.db"
         tables = _table_names(db)
@@ -135,7 +139,7 @@ class TestBootstrapRuntimeDbs:
         monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
 
         from vnx_cli.commands.init_cmd import _bootstrap_runtime_dbs
-        _bootstrap_runtime_dbs(tmp_path)
+        _bootstrap_runtime_dbs(tmp_path, project_id=_BOOTSTRAP_PID)
 
         db = tmp_path / "state" / "runtime_coordination.db"
         tables = _table_names(db)
@@ -149,7 +153,7 @@ class TestBootstrapRuntimeDbs:
         monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
 
         from vnx_cli.commands.init_cmd import _bootstrap_runtime_dbs
-        _bootstrap_runtime_dbs(tmp_path)
+        _bootstrap_runtime_dbs(tmp_path, project_id=_BOOTSTRAP_PID)
 
         db = tmp_path / "state" / "runtime_coordination.db"
         conn = sqlite3.connect(str(db))
@@ -170,8 +174,8 @@ class TestBootstrapRuntimeDbs:
         monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
 
         from vnx_cli.commands.init_cmd import _bootstrap_runtime_dbs
-        _bootstrap_runtime_dbs(tmp_path)
-        _bootstrap_runtime_dbs(tmp_path)  # second call — must not raise
+        _bootstrap_runtime_dbs(tmp_path, project_id=_BOOTSTRAP_PID)
+        _bootstrap_runtime_dbs(tmp_path, project_id=_BOOTSTRAP_PID)  # second call — must not raise
 
 
 # ---------------------------------------------------------------------------

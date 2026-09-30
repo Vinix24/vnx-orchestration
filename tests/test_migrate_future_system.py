@@ -142,10 +142,10 @@ class TestPragmaPreflightAssertion:
     def test_preflight_passes_on_v21_schema(self, tmp_path):
         """v21 DB with project_id passes the preflight and migration proceeds.
 
-        version == 32, not 31 (OI-1169): run() now ends with a generic
-        auto_apply sweep, so a single call carries a fresh store straight
-        through the numbered walk (0022->0031) AND everything runner-backed
-        above it (0032) in one pass.
+        version is the highest auto-applicable migration, not 31 (OI-1169): run()
+        now ends with a generic auto_apply sweep, so a single call carries a fresh
+        store straight through the numbered walk (0022->0031) AND everything above
+        it (0032, 0033) in one pass.
         """
         project_dir = _init_project(tmp_path)
         mod = _get_migrate_module()
@@ -156,7 +156,7 @@ class TestPragmaPreflightAssertion:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         conn.close()
         assert "project_id" in cols
-        assert version == 32
+        assert version == mod.highest_auto_applicable_migration(mod._MIGRATIONS)
 
 
 class TestBidirectionalPreflight:
@@ -313,10 +313,10 @@ class TestAutoApplySweep:
     def test_store_at_31_reaches_highest_available_after_run(self, tmp_path):
         """A store already at user_version 31 (the numbered-walk terminal
         version, simulating a store migrated before 0032 existed) must land
-        on the highest runner-backed migration (32) after a fresh run().
+        on the highest auto-applicable migration after a fresh run().
 
         Fails on the pre-fix code: run() stops at 31 and never advances
-        further, so the final assertion (version == 32) fails.
+        further, so the final version assertion fails.
         """
         project_dir = _init_project(tmp_path)
         db_path = project_dir / ".vnx-data" / "state" / "runtime_coordination.db"
@@ -347,5 +347,6 @@ class TestAutoApplySweep:
         ).fetchone()
         conn.close()
 
-        assert version == 32, "store must land on the highest available runner-backed migration"
+        assert version == real_mod.highest_auto_applicable_migration(real_mod._MIGRATIONS), (
+            "store must land on the highest auto-applicable migration")
         assert has_track_pr_delivery is not None, "0032's track_pr_delivery table must exist"

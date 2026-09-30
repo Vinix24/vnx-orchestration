@@ -72,6 +72,20 @@ def _seed_db_at_v13(db_path: Path) -> None:
         conn.close()
 
 
+def _only_real_0020(tmp_path: Path) -> Path:
+    """A migrations dir holding just the real 0020 file.
+
+    The fixture DB carries only the tables 0020 needs. Handing auto_apply the
+    full schemas/migrations/ dir would walk it into 0022, which rebuilds a
+    dispatches table this fixture never created.
+    """
+    mig_dir = tmp_path / "only_0020"
+    mig_dir.mkdir()
+    real = _MIGRATIONS_DIR / "0020_elastic_worker_pool.sql"
+    (mig_dir / real.name).write_text(real.read_text(encoding="utf-8"), encoding="utf-8")
+    return mig_dir
+
+
 def _user_version(db_path: Path) -> int:
     conn = sqlite3.connect(str(db_path))
     try:
@@ -143,14 +157,13 @@ def test_auto_apply_creates_pool_tables_and_bumps_user_version(tmp_path, caplog)
     assert not _table_exists(db_path, "pool_config")
 
     with caplog.at_level(logging.INFO, logger="migrations.auto_apply"):
-        applied = auto_apply(db_path)
+        applied = auto_apply(db_path, migrations_dir=_only_real_0020(tmp_path))
 
     assert 20 in applied
     assert _table_exists(db_path, "pool_config")
     assert _table_exists(db_path, "worker_pools")
     assert _table_exists(db_path, "worker_pool_membership")
-    # PRAGMA advances to the highest migration number we tried (20),
-    # regardless of which lower-numbered runners reported idempotent skips.
+    # PRAGMA advances to the highest migration number we tried (20).
     assert _user_version(db_path) == 20
     assert any("migration 0020 auto-applied" in rec.message for rec in caplog.records)
 
@@ -158,11 +171,12 @@ def test_auto_apply_creates_pool_tables_and_bumps_user_version(tmp_path, caplog)
 def test_auto_apply_is_idempotent_on_second_run(tmp_path, caplog):
     db_path = tmp_path / "runtime_coordination.db"
     _seed_db_at_v13(db_path)
-    auto_apply(db_path)
+    mig_dir = _only_real_0020(tmp_path)
+    auto_apply(db_path, migrations_dir=mig_dir)
 
     caplog.clear()
     with caplog.at_level(logging.INFO, logger="migrations.auto_apply"):
-        applied = auto_apply(db_path)
+        applied = auto_apply(db_path, migrations_dir=mig_dir)
 
     assert applied == []
     assert _user_version(db_path) == 20
