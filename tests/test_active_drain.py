@@ -63,19 +63,28 @@ def _make_active_dispatch(
     return d
 
 
+_PASSING_VERIFICATION = {"method": "pytest", "tests_run": 3, "tests_passed": 3, "tests_failed": 0}
+
+
 def _make_receipt(
     data: Path,
     dispatch_id: str,
     pid: int = 9999,
     status: str = "success",
+    verification: dict | None = None,
 ) -> Path:
-    """Create a processed receipt for the given dispatch_id."""
+    """Create a processed receipt for the given dispatch_id.
+
+    It carries a passing verification by default: since D4a a lane success
+    without one is ``investigate`` and stays in active/ (see
+    tests/test_active_drain_outcome.py for that rule)."""
     receipt = data / "receipts" / "processed" / f"1776{pid}-{dispatch_id[:12]}-{pid}.json"
     receipt.write_text(
         json.dumps({
             "dispatch_id": dispatch_id,
             "event_type": "task_complete",
             "status": status,
+            "verification": verification or _PASSING_VERIFICATION,
         }),
         encoding="utf-8",
     )
@@ -401,7 +410,7 @@ class TestStatusAwareDrain:
         assert idx["bad-dispatch"] == "failure"
         assert idx["err-dispatch"] == "failure"
         assert idx["blocked-dispatch"] == "failure"
-        assert idx["weird-dispatch"] == "unknown"
+        assert idx["weird-dispatch"] == "investigate"
 
     def test_status_index_failure_wins_over_success(self, tmp_path: Path) -> None:
         """If two receipts disagree, the failure status must win — fail-closed."""
@@ -434,25 +443,42 @@ class TestStatusAwareDrain:
         # dispatch directory must be removed from active/
         assert not d.exists()
 
-    def test_timeout_receipt_routes_to_dead_letter(self, tmp_path: Path) -> None:
+    def test_timeout_status_on_a_completion_stays_in_active_for_a_human(self, tmp_path: Path) -> None:
+        """A completion with status ``timeout`` carries no outcome signal
+        (event_outcome_semantics, D3b): investigate, not a failure and not done."""
         data = _make_data_dir(tmp_path)
         did = "20260429-timeout-dispatch"
         _make_active_dispatch(data, did, hours_old=2.0)
         _make_receipt(data, did, pid=31, status="timeout")
 
         results = drain_active(data_dir=data, older_than_hours=1.0, dry_run=False)
+        assert results[0].action == "skipped"
+        assert (data / "dispatches" / "active" / did).is_dir()
+
+    def test_terminal_task_timeout_routes_to_dead_letter(self, tmp_path: Path) -> None:
+        data = _make_data_dir(tmp_path)
+        did = "20260429-task-timeout-dispatch"
+        _make_active_dispatch(data, did, hours_old=2.0)
+        receipt = data / "receipts" / "processed" / "177633-task-timeout-33.json"
+        receipt.write_text(json.dumps({"dispatch_id": did, "event_type": "task_timeout",
+                                       "status": "timeout"}), encoding="utf-8")
+
+        results = drain_active(data_dir=data, older_than_hours=1.0, dry_run=False)
         assert results[0].action == "dead_letter"
 
-    def test_unknown_status_routes_to_dead_letter(self, tmp_path: Path) -> None:
-        """Unrecognised statuses fail closed — never silently completed."""
+    def test_unknown_status_stays_in_active_for_a_human(self, tmp_path: Path) -> None:
+        """Unrecognised statuses fail closed — never silently completed. Since
+        D4a the outcome is ``investigate``: the dispatch stays in active/."""
         data = _make_data_dir(tmp_path)
         did = "20260429-mystery-dispatch"
         _make_active_dispatch(data, did, hours_old=2.0)
         _make_receipt(data, did, pid=32, status="surprise")
 
         results = drain_active(data_dir=data, older_than_hours=1.0, dry_run=False)
-        assert results[0].action == "dead_letter"
-        assert "unrecognised" in results[0].reason
+        assert results[0].action == "skipped"
+        assert "human look" in results[0].reason
+        assert (data / "dispatches" / "active" / did).is_dir()
+        assert not (data / "dispatches" / "completed" / did).exists()
 
     def test_success_receipt_still_routes_to_completed(self, tmp_path: Path) -> None:
         data = _make_data_dir(tmp_path)

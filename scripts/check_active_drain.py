@@ -8,15 +8,20 @@ as a "currently in-flight" worklist.
 
 Rules
 -----
-* dispatch has a matching SUCCESS receipt in receipts/processed/   → move to completed/
-* dispatch has a matching FAILURE receipt in receipts/processed/   → move to dead_letter/
+* dispatch's outcome is accept (success)                              → move to completed/
+* dispatch's outcome is reject (failure)                              → move to dead_letter/
+* dispatch's outcome is investigate (missing verification, an open
+  blocker, a status literal nobody knows)                             → leave alone
+* dispatch has a receipt but no outcome of its own (only evidence,
+  superseded by a child, its lines attributed to another dispatch or
+  dropped as an unlinked gate run)                                    → leave alone, at any age
 * dispatch has no receipt AND is older than --older-than-hours (default 1)   → move to dead_letter/
 * dispatch has no receipt AND is newer than the threshold                     → leave alone
 
-Failed dispatches must NEVER be drained as completed: the receipt's
-``status`` field is consulted (canonical sets in scripts/append_receipt.py)
-so that timeout/error/blocked outcomes route to dead_letter/ instead of
-masquerading as successful work.
+Failed dispatches must NEVER be drained as completed: the dispatch's outcome
+(``receipt_outcome``) is consulted, so that a failed, timed-out or
+contract-invalid dispatch routes to dead_letter/ instead of masquerading as
+successful work. A failure that a later successful retry replaced does not.
 
 Exit codes
 ----------
@@ -45,8 +50,14 @@ from typing import Iterator, NamedTuple
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_SCRIPTS_DIR / "lib"))
 
-from project_root import resolve_data_dir  # noqa: E402
-from contract_invalid_window import is_stale_contract_invalid  # noqa: E402
+from project_root import resolve_data_dir, resolve_project_id  # noqa: E402
+from receipt_outcome import (  # noqa: E402
+    BOOKKEEPING_EVENT_TYPES,
+    INVALID_DISPATCH_IDS,
+    noise_reason,
+    summarize as summarize_outcomes,
+)
+from vnx_paths import project_id_from_state_dir  # noqa: E402
 
 
 def _data_dir(override: str | None) -> Path:
@@ -76,15 +87,39 @@ class DrainResult(NamedTuple):
 # Receipt index
 # ---------------------------------------------------------------------------
 
-# Canonical status sets (kept in sync with scripts/append_receipt.py and
-# scripts/weekly_digest.py _FAILURE_STATUSES).
-# "contract_invalid" = report-body-contract failure → semantically a failure.
-SUCCESS_STATUSES = frozenset({"success", "completed", "complete", "ok", "", "done"})
-FAILURE_STATUSES = frozenset({"failed", "failure", "error", "blocked", "timeout", "contract_invalid"})
+# What a dispatch's processed receipts add up to is receipt_outcome's call
+# (fabric-state-herstel D3/D4a): the last lane status in file order, a later
+# contract_invalid as a failure, noise, bookkeeping and other projects ignored.
+# The drain used to let any failure win, so an old failure outlived a
+# successful retry.
+_UNSCOPED_PROJECT = "\x00unscoped"
+
+# The index holds only dispatches with an outcome of their own. ``unknown``
+# (only evidence, no lane line) and ``superseded`` (a child took the work over)
+# are no outcome: such a dispatch has no entry. Whether it has a receipt at all
+# is a second question (build_receipt_presence): one with a receipt but no
+# outcome stays in active/ for a human, only one without any receipt takes the
+# age rule. A receipt whose status
+# literal nobody knows reads as ``investigate`` (receipt_verdict), so it stays
+# in active/ for a human rather than going to completed/ or dead_letter/.
+_INDEX_STATUS = {"accept": "success", "reject": "failure", "investigate": "investigate"}
+
+
+def _project_id(data_dir: Path) -> str:
+    """The project whose store this is: derived from the data dir, else ambient."""
+    derived = project_id_from_state_dir(data_dir / "state")
+    if derived:
+        return derived
+    try:
+        return resolve_project_id()
+    except RuntimeError:
+        return ""
 
 
 def build_receipt_index(receipts_dir: Path) -> frozenset[str]:
-    """Return the set of dispatch_ids present in receipts/processed/.
+    """Return the set of dispatch_ids with an outcome of their own in
+    receipts/processed/ (the keys of build_receipt_status_index); a receipt on
+    disk without an outcome is build_receipt_presence's.
 
     Kept for backwards compatibility — callers that need success/failure
     discrimination should use build_receipt_status_index instead.
@@ -92,52 +127,88 @@ def build_receipt_index(receipts_dir: Path) -> frozenset[str]:
     return frozenset(build_receipt_status_index(receipts_dir).keys())
 
 
-def build_receipt_status_index(receipts_dir: Path) -> dict[str, str]:
-    """Map dispatch_id → normalized status (\"success\" | \"failure\" | \"unknown\").
-
-    When multiple receipts exist for the same dispatch_id (e.g., a chain of
-    retries), a failure status wins over success — fail-closed semantics
-    ensure a partially-failed dispatch is never recorded as completed.
-    """
-    processed = receipts_dir / "processed"
-    if not processed.is_dir():
-        return {}
-
-    out: dict[str, str] = {}
-    for path in processed.iterdir():
+def _read_processed(processed: Path) -> list[dict]:
+    """Processed receipts in file-name order: the names start with the write
+    time in epoch seconds, so this is the order they arrived in."""
+    receipts: list[dict] = []
+    for path in sorted(processed.iterdir(), key=lambda p: p.name):
         if path.suffix != ".json":
             continue
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             continue
-        did = data.get("dispatch_id", "")
-        if not did or did == "unknown":
-            continue
-        status_raw = str(data.get("status", "")).strip().lower()
-        event_type_raw = str(data.get("event_type") or data.get("event") or "").strip().lower()
-        is_contract_invalid = (
-            status_raw == "contract_invalid" or event_type_raw == "report_contract_invalid"
-        )
-        # A frozen contract_invalid batch (bulk-emitted, single old timestamp)
-        # is not a live signal for the currently-active dispatch it happens to
-        # key-match — skip it as if no receipt were found (falls through to
-        # the active-dispatch's own age check instead).
-        if is_contract_invalid and is_stale_contract_invalid(data):
-            continue
-        if status_raw in FAILURE_STATUSES:
-            normalized = "failure"
-        elif status_raw in SUCCESS_STATUSES:
-            normalized = "success"
-        else:
-            normalized = "unknown"
-        # Fail-closed: failure beats success beats unknown.
-        prior = out.get(did)
-        if prior == "failure":
-            continue
-        if normalized == "failure" or prior is None or (prior == "unknown" and normalized == "success"):
-            out[did] = normalized
-    return out
+        if isinstance(data, dict):
+            receipts.append(data)
+    return receipts
+
+
+def _scoped_processed(receipts_dir: Path) -> tuple[list[dict], str]:
+    """The processed receipts and the project they are read for.
+
+    Without a project id the lines' own ``project_id`` is dropped and they are
+    read for a sentinel project, so no line counts as another project's."""
+    processed = receipts_dir / "processed"
+    if not processed.is_dir():
+        return [], _UNSCOPED_PROJECT
+    receipts = _read_processed(processed)
+    project_id = _project_id(receipts_dir.parent)
+    if not project_id:
+        receipts = [{k: v for k, v in r.items() if k != "project_id"} for r in receipts]
+    return receipts, project_id or _UNSCOPED_PROJECT
+
+
+def _status_index(summary: dict) -> dict[str, str]:
+    return {o["dispatch_id"]: _INDEX_STATUS[o["decision"]]
+            for o in summary["outcomes"] if o["decision"] in _INDEX_STATUS}
+
+
+# Noise that is not this dispatch's receipt: a test's line, or another
+# project's under a colliding id (ADR-007). A frozen contract_invalid is no
+# outcome but it is a receipt the dispatch wrote.
+_NOT_A_RECEIPT = frozenset({"pytest", "foreign_project", "temp_report_path", "magicmock"})
+
+
+def _receipt_owner(receipt: dict, project_id: str) -> str:
+    """The dispatch id ``receipt`` is a receipt of in ``project_id``, outcome or
+    not, or "" when it is none: bookkeeping is written around a dispatch, not
+    by it; test noise and another project's line are no receipt of this one."""
+    did = str(receipt.get("dispatch_id") or "").strip()
+    if (did.lower() in INVALID_DISPATCH_IDS
+            or receipt.get("event_type") in BOOKKEEPING_EVENT_TYPES
+            or noise_reason(receipt, project_id) in _NOT_A_RECEIPT):
+        return ""
+    return did
+
+
+def _presence(receipts: list[dict], project_id: str, summary: dict) -> frozenset[str]:
+    present = {_receipt_owner(r, project_id) for r in receipts} - {""}
+    # a dispatch that another id's lines were attributed to has a receipt too
+    return frozenset(present | {o["dispatch_id"] for o in summary["outcomes"]})
+
+
+def build_receipt_status_index(receipts_dir: Path) -> dict[str, str]:
+    """Map dispatch_id → \"success\" | \"failure\" | \"investigate\", one per dispatch.
+
+    ``investigate`` (missing verification, an open blocker, an unknown status
+    literal) is not a result: the dispatch stays in active/ until a human has
+    looked.
+
+    ``receipts_dir`` is ``<data dir>/receipts``. A dispatch without an outcome
+    of its own (only bookkeeping, noise, evidence, another project's lines, or
+    superseded by a child) has no entry.
+    """
+    receipts, project_id = _scoped_processed(receipts_dir)
+    return _status_index(summarize_outcomes(receipts, project_id=project_id))
+
+
+def build_receipt_presence(receipts_dir: Path) -> frozenset[str]:
+    """The dispatch ids of this project with a processed receipt on disk,
+    outcome or not: only evidence, superseded, attributed to another dispatch,
+    or dropped as an unlinked gate run all count. Bookkeeping, test noise and
+    another project's lines do not."""
+    receipts, project_id = _scoped_processed(receipts_dir)
+    return _presence(receipts, project_id, summarize_outcomes(receipts, project_id=project_id))
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +258,41 @@ def iter_active_dispatches(dispatches_dir: Path) -> Iterator[DispatchEntry]:
 # Core drain logic
 # ---------------------------------------------------------------------------
 
+_RECEIPT_WITHOUT_OUTCOME = "receipt present without an outcome: needs a human look"
+
+
+def _destination(
+    entry: DispatchEntry,
+    receipt_status: str | None,
+    now: datetime,
+    older_than_seconds: float,
+    has_receipt: bool = False,
+) -> tuple[str, str]:
+    """Where a dispatch goes and why: ``completed``, ``dead_letter`` or
+    ``skipped`` (it stays in active/)."""
+    if receipt_status == "success":
+        return "completed", "receipt found with success status"
+    if receipt_status == "failure":
+        return "dead_letter", "receipt found with failure status"
+    if receipt_status is not None:
+        # investigate, or a status a caller's own index carries that is not a
+        # result: never completed work, never a failure either; a human looks.
+        return "skipped", (f"outcome {receipt_status!r} needs a human look "
+                           "(missing verification, open blocker or unknown status)")
+    if has_receipt:
+        # Only evidence, superseded, attributed to another id or an unlinked
+        # gate run: the dispatch left a receipt, so it is no orphan, and nothing
+        # says it failed. Never dead_letter, however old.
+        return "skipped", _RECEIPT_WITHOUT_OUTCOME
+    if entry.timestamp is None:
+        # No timestamp → treat as orphaned regardless of age
+        return "dead_letter", "no receipt, no timestamp (orphaned)"
+    age = (now - entry.timestamp).total_seconds()
+    if age >= older_than_seconds:
+        return "dead_letter", f"no receipt, age {age / 3600:.1f}h > threshold"
+    return "skipped", f"no receipt yet, age {age / 3600:.2f}h < threshold"
+
+
 def drain_one(
     entry: DispatchEntry,
     receipt_index: "frozenset[str] | dict[str, str]",
@@ -194,7 +300,10 @@ def drain_one(
     now: datetime,
     older_than_seconds: float,
     dry_run: bool,
+    receipt_present: "frozenset[str]" = frozenset(),
 ) -> DrainResult:
+    """``receipt_present`` (build_receipt_presence) names the dispatches with a
+    receipt on disk; one of them without an index entry is left in active/."""
     # Accept either the legacy frozenset (success-implied) or the new
     # status-aware dict to keep external callers working.
     if isinstance(receipt_index, dict):
@@ -204,35 +313,15 @@ def drain_one(
     else:
         receipt_status = None
 
-    if receipt_status is not None:
-        if receipt_status == "failure":
-            dest_bucket = "dead_letter"
-            reason = "receipt found with failure status"
-        elif receipt_status == "unknown":
-            # Receipt with an unrecognised status — treat as failure to
-            # avoid silently recording bad outcomes as completed work.
-            dest_bucket = "dead_letter"
-            reason = "receipt found with unrecognised status"
-        else:
-            dest_bucket = "completed"
-            reason = "receipt found with success status"
-    else:
-        if entry.timestamp is None:
-            # No timestamp → treat as orphaned regardless of age
-            dest_bucket = "dead_letter"
-            reason = "no receipt, no timestamp (orphaned)"
-        else:
-            age = (now - entry.timestamp).total_seconds()
-            if age >= older_than_seconds:
-                dest_bucket = "dead_letter"
-                reason = f"no receipt, age {age / 3600:.1f}h > threshold"
-            else:
-                return DrainResult(
-                    dispatch_id=entry.dispatch_id,
-                    action="skipped",
-                    reason=f"no receipt yet, age {age / 3600:.2f}h < threshold",
-                    dry_run=dry_run,
-                )
+    dest_bucket, reason = _destination(entry, receipt_status, now, older_than_seconds,
+                                       has_receipt=entry.dispatch_id in receipt_present)
+    if dest_bucket == "skipped":
+        return DrainResult(
+            dispatch_id=entry.dispatch_id,
+            action="skipped",
+            reason=reason,
+            dry_run=dry_run,
+        )
 
     if dry_run:
         return DrainResult(
@@ -279,7 +368,10 @@ def drain_active(
     dispatches_dir = data_dir / "dispatches"
     receipts_dir = data_dir / "receipts"
 
-    receipt_index = build_receipt_status_index(receipts_dir)
+    receipts, project_id = _scoped_processed(receipts_dir)
+    summary = summarize_outcomes(receipts, project_id=project_id)
+    receipt_index = _status_index(summary)
+    receipt_present = _presence(receipts, project_id, summary)
     now = datetime.now(tz=timezone.utc)
     older_than_seconds = older_than_hours * 3600.0
 
@@ -292,6 +384,7 @@ def drain_active(
             now=now,
             older_than_seconds=older_than_seconds,
             dry_run=dry_run,
+            receipt_present=receipt_present,
         )
         results.append(result)
     return results

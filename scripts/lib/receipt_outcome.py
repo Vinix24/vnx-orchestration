@@ -10,13 +10,18 @@ overwrite A's ``failure``. This is the one place that folds a dispatch's
 lines into one outcome (fabric-state-herstel D3):
 
 1. Noise out: ``source=pytest``, temp-dir ``report_path``, ``MagicMock``,
-   id missing/``unknown``/``?``, another ``project_id``. Never on lane.
+   id missing/``unknown``/``?``, another ``project_id``, and a frozen
+   contract_invalid batch (``contract_invalid_window`` is the one source of
+   "stale", and its ``is_contract_invalid`` of what a contract_invalid is:
+   the event type or a status-only lane line). Never on lane.
 2. ``BOOKKEEPING_EVENT_TYPES`` are neither outcome nor evidence.
 3. Status: the last writer-A receipt in FILE order (ledger timestamps are not
-   monotonic); a later contract_invalid event wins as reject. A retry under
+   monotonic); a later contract_invalid (either shape) wins as reject. A retry under
    the same id is a new last A. ``task_failed`` and a terminal
    ``task_timeout`` are writer-A lines too; ``classify_event_outcome`` decides
    what their status means, and a pending ``task_timeout`` is no outcome.
+   A status-only lane line (no event type, the provider-lane writer) is a
+   writer-A line read as a completion (``outcome_event_type``).
    Every status is read through ``classify_event_outcome`` (``ok`` is a
    success, ``timeout`` on a completion carries no signal), and a failure
    literal on writer B wins over A's success; B's ``unknown`` never does.
@@ -52,7 +57,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from event_outcome_semantics import classify_event_outcome
+from contract_invalid_window import (
+    contract_invalid_effective_timestamp,
+    is_contract_invalid,
+    is_stale_contract_invalid,
+)
+from event_outcome_semantics import classify_event_outcome, outcome_event_type
 from receipt_verdict import compute_verdict
 
 # When the per-dispatch reading replaced the per-line stamp count: the auditable
@@ -68,7 +78,6 @@ EVIDENCE_EVENT_TYPES = frozenset({"review_gate_result", "pr_merged"})
 BLOCKING_EVENT_TYPES = frozenset({
     "pr_merge_refused", "door_bookkeeping_failed", "gate_obligation_reopened_stale_evidence",
 })
-CONTRACT_INVALID_EVENT_TYPES = frozenset({"contract_invalid", "report_contract_invalid"})
 # subprocess_completion is the same writer family as A: phantom_guard and
 # pr_enforcement use it to overturn a claimed success, and the synthesized
 # plan-gate lane reports its status only through it. task_failed/task_timeout
@@ -121,11 +130,13 @@ def noise_reason(receipt: Dict[str, Any], project_id: str) -> Optional[str]:
         return "temp_report_path"
     if "MagicMock" in json.dumps(receipt, default=str):
         return "magicmock"
+    if is_contract_invalid(receipt) and is_stale_contract_invalid(receipt):
+        return "stale_contract_invalid"
     return None
 
 
 def _is_writer_a(receipt: Dict[str, Any]) -> bool:
-    event_type = receipt.get("event_type")
+    event_type = outcome_event_type(receipt)
     if event_type == "task_timeout" and classify_event_outcome(
             event_type, receipt.get("status")) is None:
         return False  # pending (no_confirmation): not a terminal outcome
@@ -140,11 +151,11 @@ def _verdict_status(receipt: Dict[str, Any]) -> str:
     ``success`` whatever literal the line carries (``ok``, task_failed, a
     terminal task_timeout); a literal without outcome signal (``timeout`` on a
     completion, ``unknown``) reads as ``unknown`` and so as investigate."""
-    return classify_event_outcome(receipt.get("event_type"), receipt.get("status")) or "unknown"
+    return classify_event_outcome(outcome_event_type(receipt), receipt.get("status")) or "unknown"
 
 
 def _is_writer_b(receipt: Dict[str, Any]) -> bool:
-    return (receipt.get("event_type") in REPORT_EVENT_TYPES
+    return (outcome_event_type(receipt) in REPORT_EVENT_TYPES
             and receipt.get("receipt_kind") in ("dispatch", None)
             and bool(receipt.get("report_file")))
 
@@ -239,13 +250,20 @@ class _Window:
     def __call__(self, receipt: Dict[str, Any]) -> bool:
         if self.cutoff is None:
             return True
+        # A contract_invalid line is dated by the processor's ``ingested_at``, the
+        # same clock the staleness rule uses, not by a timestamp the report carries.
+        # One it cannot date is live, as it is for is_stale_contract_invalid
+        # (fail-open): only a line positively dated before the cutoff is out.
+        if is_contract_invalid(receipt):
+            ts = _parse_ts(contract_invalid_effective_timestamp(receipt))
+            return ts is None or ts >= self.cutoff
         ts = _parse_ts(receipt.get("timestamp"))
         return ts is not None and ts >= self.cutoff
 
 
 def _is_outcome_line(receipt: Dict[str, Any]) -> bool:
     return (_is_writer_a(receipt) or _is_writer_b(receipt)
-            or receipt.get("event_type") in CONTRACT_INVALID_EVENT_TYPES)
+            or is_contract_invalid(receipt))
 
 
 def _partition(receipts: Iterable[Dict[str, Any]], project_id: str, in_window: _Window,
@@ -308,7 +326,7 @@ def _fold(record: Dict[str, Any], receipt: Dict[str, Any], pos: int, did: str) -
         record["blocking"].append(_evidence_entry(receipt, pos))
     elif gate_match or event_type in EVIDENCE_EVENT_TYPES:
         record["evidence"].append(_evidence_entry(receipt, pos))
-    elif event_type in CONTRACT_INVALID_EVENT_TYPES:
+    elif is_contract_invalid(receipt):
         record["contract_invalid"], record["contract_invalid_pos"] = receipt, pos
     elif _is_writer_b(receipt):
         record["b"], record["b_pos"] = receipt, pos
@@ -384,3 +402,20 @@ def summarize(
         "noise_counts": {k: v for k, v in noise.items() if v},
         "unlinked_gate_evidence": unlinked_gate_evidence,
     }
+
+
+def lane_result(outcome: Dict[str, Any]) -> str:
+    """``success``, ``failure`` or ``unknown``: what a reader that counts a
+    dispatch or moves its work on takes from one outcome of ``summarize``.
+
+    ``reject`` is a failure and ``accept`` a success. ``investigate`` (missing
+    verification, an open blocker) is ``unknown``: a reader that moves work on
+    leaves it where it is for a human to look at, and a counter does not book
+    it as a success. ``superseded`` and ``unknown`` carry no result of their own.
+    """
+    decision = outcome.get("decision")
+    if decision == "reject":
+        return "failure"
+    if decision == "accept":
+        return "success"
+    return "unknown"

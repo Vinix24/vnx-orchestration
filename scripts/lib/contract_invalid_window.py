@@ -11,8 +11,15 @@ contract_invalid receipt older than the window never counts as an active
 failure signal, independent of whatever overall lookback window the caller
 itself uses.
 
-This module is deliberately scoped to windowing only — NOT classification.
-Whether a given dispatch is exempt from the report-body contract in the
+``is_contract_invalid`` is the one place that says whether a receipt IS a
+contract_invalid: the ledger carries it both as a ``report_contract_invalid``
+event and as a lane line (``task_complete``/``subprocess_completion``) whose
+status alone reads ``contract_invalid``. Every reader that windows, folds or
+refuses on contract_invalid recognises it through that predicate, so the two
+shapes can never go stale or count differently.
+
+This module is deliberately scoped to recognition and windowing — NOT
+exemption. Whether a given dispatch is exempt from the report-body contract in the
 first place (panel seats, benchmark harness runs, review roles, ...) is a
 separate, unrelated concern that belongs to a future receipt-v2 redesign.
 """
@@ -25,6 +32,18 @@ from typing import Any, Dict, Optional
 
 ENV_WINDOW_DAYS = "VNX_CONTRACT_INVALID_WINDOW_DAYS"
 DEFAULT_WINDOW_DAYS = 14
+
+CONTRACT_INVALID_STATUS = "contract_invalid"
+CONTRACT_INVALID_EVENT_TYPES = frozenset({"contract_invalid", "report_contract_invalid"})
+
+
+def is_contract_invalid(record: Dict[str, Any]) -> bool:
+    """True when the receipt is a contract_invalid in either ledger shape: an
+    event type in ``CONTRACT_INVALID_EVENT_TYPES`` (``event`` on old v1 lines),
+    or a status of ``contract_invalid`` on any event type."""
+    status = str(record.get("status") or "").strip().lower()
+    event_type = str(record.get("event_type") or record.get("event") or "").strip().lower()
+    return status == CONTRACT_INVALID_STATUS or event_type in CONTRACT_INVALID_EVENT_TYPES
 
 
 def contract_invalid_window_days() -> int:

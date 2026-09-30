@@ -293,9 +293,12 @@ class TestBuildRecentReceipts:
         assert by_id["failed"]["next_action"] == "fix_needed"
 
     def test_dedup_keeps_done_over_unknown_for_same_dispatch(self, tmp_path: Path) -> None:
+        # Writer B (report_file) carries done/unknown plus verification: it never
+        # overwrites the lane status writer A wrote.
         entries = [
             _make_receipt(dispatch_id="disp-1", status="done", terminal="T1", timestamp="2026-06-03T10:00:00Z"),
-            _make_receipt(dispatch_id="disp-1", status="unknown", terminal="unknown", timestamp="2026-06-03T10:10:00Z"),
+            {**_make_receipt(dispatch_id="disp-1", status="unknown", terminal="unknown", timestamp="2026-06-03T10:10:00Z"),
+             "event_type": "task_complete", "report_file": "disp-1.md"},
         ]
         state_dir = tmp_path / "state"
         _make_ndjson(tmp_path, entries)
@@ -306,7 +309,8 @@ class TestBuildRecentReceipts:
     def test_dedup_keeps_failed_over_unknown_for_same_dispatch(self, tmp_path: Path) -> None:
         entries = [
             _make_receipt(dispatch_id="disp-2", status="failed", terminal="T2", timestamp="2026-06-03T10:00:00Z"),
-            _make_receipt(dispatch_id="disp-2", status="unknown", terminal="unknown", timestamp="2026-06-03T10:10:00Z"),
+            {**_make_receipt(dispatch_id="disp-2", status="unknown", terminal="unknown", timestamp="2026-06-03T10:10:00Z"),
+             "event_type": "task_complete", "report_file": "disp-2.md"},
         ]
         state_dir = tmp_path / "state"
         _make_ndjson(tmp_path, entries)
@@ -325,20 +329,20 @@ class TestBuildRecentReceipts:
         assert len(result) == 1
         assert result[0]["terminal"] == "T1"
 
-    def test_dedup_no_dispatch_id_passes_through(self, tmp_path: Path) -> None:
+    def test_no_dispatch_id_is_not_an_outcome_row(self, tmp_path: Path) -> None:
         entry = _make_receipt(dispatch_id="", status="done", terminal="T1", timestamp="2026-06-03T10:00:00Z")
         entry["dispatch_id"] = ""
         state_dir = tmp_path / "state"
         _make_ndjson(tmp_path, [entry])
-        result = self._fn(state_dir)
-        assert len(result) == 1
+        assert self._fn(state_dir) == []
 
     def test_recent_receipts_after_dedup_max_one_per_dispatch_id(self, tmp_path: Path) -> None:
         entries = []
         for i in range(5):
             did = f"dup-{i:02d}"
             entries.append(_make_receipt(dispatch_id=did, status="done", terminal="T1", timestamp=f"2026-06-03T{i:02d}:00:00Z"))
-            entries.append(_make_receipt(dispatch_id=did, status="unknown", terminal="unknown", timestamp=f"2026-06-03T{i:02d}:10:00Z"))
+            entries.append({**_make_receipt(dispatch_id=did, status="unknown", terminal="unknown", timestamp=f"2026-06-03T{i:02d}:10:00Z"),
+                            "event_type": "task_complete", "report_file": f"{did}.md"})
         state_dir = tmp_path / "state"
         _make_ndjson(tmp_path, entries)
         result = self._fn(state_dir)

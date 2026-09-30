@@ -73,8 +73,7 @@ QUEUE_FILE_NAME = "receipt_classifier_queue.ndjson"
 PENDING_EDITS_FILE_NAME = "pending_edits.json"
 
 # Failure statuses we consider when sampling/branching.
-# Keep in sync with check_active_drain.FAILURE_STATUSES,
-# weekly_digest._FAILURE_STATUSES, and payload.FAILURE_STATUSES (gate-F2).
+# Keep in sync with payload.FAILURE_STATUSES (gate-F2).
 _FAILURE_STATUSES = {"failed", "failure", "error", "blocked", "timeout", "contract_invalid"}
 
 

@@ -31,6 +31,7 @@ except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
 from contract_invalid_window import (
     contract_invalid_effective_timestamp,
+    is_contract_invalid,
     is_stale_contract_invalid,
 )
 from pattern_upsert import upsert_antipattern, upsert_success_pattern
@@ -38,9 +39,8 @@ from project_scope import resolve_stamp_project_id
 
 
 # Failure statuses sampled from the governed receipt stream when mining for
-# recurring failure patterns. Keep in sync with check_active_drain.FAILURE_STATUSES,
-# weekly_digest._FAILURE_STATUSES, receipt_classifier._FAILURE_STATUSES, and
-# payload.FAILURE_STATUSES (gate-F2). "timeout" is included here (unlike the
+# recurring failure patterns. Keep in sync with receipt_classifier._FAILURE_STATUSES
+# and payload.FAILURE_STATUSES (gate-F2). "timeout" is included here (unlike the
 # confidence-scoring set in payload.py): a recurring task_timeout is a legitimate
 # failure to learn a prevention rule from — generate_prevention_suggestion has a
 # dedicated 'timeout' branch.
@@ -595,16 +595,13 @@ class LearningLoop:
 
                     total_scanned += 1
                     status = str(receipt.get("status", "")).lower()
-                    event_type = str(receipt.get("event_type") or receipt.get("event") or "").lower()
-                    is_contract_invalid = (
-                        status == "contract_invalid" or event_type == "report_contract_invalid"
-                    )
+                    receipt_is_contract_invalid = is_contract_invalid(receipt)
                     # Fixed cutoff: a receipt from before it (or one whose time
                     # cannot be shown to be after it) never counts, whatever
                     # the window, --from-history included. contract_invalid
                     # records date on the same effective time as the window
                     # (ingested_at first) and stay fail-open when it is unparseable.
-                    if is_contract_invalid:
+                    if receipt_is_contract_invalid:
                         receipt_ts = _parse_receipt_timestamp(
                             contract_invalid_effective_timestamp(receipt)
                         )
@@ -615,7 +612,7 @@ class LearningLoop:
                     if before:
                         before_cutoff += 1
                         continue
-                    if status not in _FAILURE_STATUSES:
+                    if status not in _FAILURE_STATUSES and not receipt_is_contract_invalid:
                         continue
 
                     ts_raw = receipt.get("timestamp")
@@ -625,7 +622,7 @@ class LearningLoop:
                     # timestamp parse (e.g. a date-prefix fallback) is allowed to
                     # drop them afterwards — a malformed-but-prefix-valid time
                     # fails strict parsing and must fail-open (counted).
-                    if is_contract_invalid:
+                    if receipt_is_contract_invalid:
                         if is_stale_contract_invalid(receipt):
                             continue
 
@@ -643,7 +640,7 @@ class LearningLoop:
                         no_provider_passed += 1
 
                     # Generic window filter for all other failure statuses.
-                    if not is_contract_invalid:
+                    if not receipt_is_contract_invalid:
                         ts_dt = _parse_receipt_timestamp(ts_raw)
                         if ts_dt is None or ts_dt < start_time:
                             continue
@@ -765,8 +762,7 @@ class LearningLoop:
         if reason:
             return str(reason)[:200]
 
-        status = str(receipt.get("status", "")).lower()
-        if status == "contract_invalid":
+        if is_contract_invalid(receipt):
             violations = receipt.get("contract_violations")
             summary = self._summarize_contract_violations(violations)
             if summary:

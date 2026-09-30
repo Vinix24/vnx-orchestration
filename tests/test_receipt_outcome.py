@@ -9,7 +9,7 @@ project that must not leak into the outcome.
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -298,6 +298,110 @@ def test_pr_owner_is_the_first_work_dispatch_that_names_the_pr():
     assert _outcome(result, "d1-ff")["evidence"] == []
 
 
+def test_lane_result_reads_one_outcome_as_success_failure_or_unknown():
+    rejected = {"decision": "reject", "status": "success"}
+    accepted = {"decision": "accept", "status": "success"}
+    done_unverified = {"decision": "investigate", "status": "done"}
+    failed_unverified = {"decision": "investigate", "status": "failure"}
+    assert [ro.lane_result(o) for o in (rejected, accepted, done_unverified, failed_unverified)] == [
+        "failure", "success", "unknown", "unknown"]
+    assert ro.lane_result({"decision": "superseded", "status": "success"}) == "unknown"
+    assert ro.lane_result({"decision": "unknown", "status": None}) == "unknown"
+
+
+def test_lane_result_on_a_folded_ledger():
+    result = _run(_a("ok", "success"), _b("ok"), _a("bad", "failure"),
+                  _a("lane-only", "success"), _b("lane-only", "unknown", {"method": "unknown"}))
+    by_id = {o["dispatch_id"]: ro.lane_result(o) for o in result["outcomes"]}
+    assert by_id == {"ok": "success", "bad": "failure", "lane-only": "unknown"}
+
+
+def _stale_ci(did: str, **kw: Any) -> Dict[str, Any]:
+    return {"event_type": "report_contract_invalid", "dispatch_id": did,
+            "status": "contract_invalid", "project_id": "vnx-dev", **kw}
+
+
+def test_frozen_contract_invalid_batch_is_noise_not_a_reject():
+    old = "2026-01-01T00:00:00Z"
+    result = _run(_a("d1", "success"), _b("d1"), _stale_ci("d1", timestamp=old),
+                  _stale_ci("frozen-only", timestamp=old))
+    assert _outcome(result, "d1")["decision"] == "accept"
+    assert {o["dispatch_id"] for o in result["outcomes"]} == {"d1"}
+    assert result["noise_counts"]["stale_contract_invalid"] == 2
+
+
+def test_fresh_ingested_at_beats_an_old_report_timestamp_on_contract_invalid():
+    fresh = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    result = _run(_a("d1", "success"), _b("d1"),
+                  _stale_ci("d1", timestamp="2026-01-01T00:00:00Z", ingested_at=fresh))
+    assert _outcome(result, "d1")["decision"] == "reject"
+
+
+def test_contract_invalid_window_uses_the_effective_timestamp_not_the_report_one():
+    fresh = datetime.now(tz=timezone.utc)
+    cutoff = fresh.replace(year=fresh.year - 1)
+    result = _run(_a("d1", "success", timestamp="2000-01-01T00:00:00Z"), _b("d1", timestamp="2000-01-01T00:00:00Z"),
+                  _stale_ci("d1", timestamp="2000-01-01T00:00:00Z", ingested_at=fresh.isoformat()),
+                  cutoff=cutoff)
+    assert [o["dispatch_id"] for o in result["outcomes"]] == ["d1"]
+
+
+# The ledger carries contract_invalid in two shapes: a report_contract_invalid
+# event, and a task_complete/subprocess_completion line whose status alone says
+# contract_invalid (46 such lines in the vnx-dev ledger on 29-09). Both shapes
+# must fold, window and go stale the same way.
+def _status_only_ci(did: str, **kw: Any) -> Dict[str, Any]:
+    return {"event_type": "task_complete", "receipt_kind": "dispatch", "dispatch_id": did,
+            "status": "contract_invalid", "project_id": "vnx-dev", **kw}
+
+
+def test_frozen_status_only_contract_invalid_is_stale_noise():
+    old = "2026-01-01T00:00:00Z"
+    result = _run(_a("d1", "success"), _b("d1"), _status_only_ci("d1", timestamp=old),
+                  _status_only_ci("frozen-only", timestamp=old),
+                  _status_only_ci("d1", timestamp=old, project_id="other-project"))
+    assert _outcome(result, "d1")["decision"] == "accept"
+    assert {o["dispatch_id"] for o in result["outcomes"]} == {"d1"}
+    assert result["noise_counts"]["stale_contract_invalid"] == 2
+
+
+def test_fresh_status_only_contract_invalid_after_the_last_a_rejects_in_both_writer_shapes():
+    fresh = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    result = _run(_a("lane", "success"), _b("lane"), _status_only_ci("lane", ingested_at=fresh),
+                  _a("report", "success"), _b("report"),
+                  _status_only_ci("report", ingested_at=fresh, report_file="report.md"))
+    assert _outcome(result, "lane")["decision"] == "reject"
+    assert _outcome(result, "report")["decision"] == "reject"
+
+
+def test_status_only_contract_invalid_before_a_retry_does_not_reject():
+    fresh = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    result = _run(_a("d1", "success"), _status_only_ci("d1", ingested_at=fresh, report_file="d1.md"),
+                  _a("d1", "success"), _b("d1"))
+    assert _outcome(result, "d1")["decision"] == "accept"
+
+
+def test_status_only_contract_invalid_is_windowed_on_the_effective_timestamp():
+    fresh = datetime.now(tz=timezone.utc)
+    cutoff = fresh.replace(year=fresh.year - 1)
+    old = "2000-01-01T00:00:00Z"
+    result = _run(_a("d1", "success", timestamp=old), _b("d1", timestamp=old),
+                  _status_only_ci("d1", timestamp=old, ingested_at=fresh.isoformat(),
+                                  report_file="d1.md"),
+                  cutoff=cutoff)
+    assert [(o["dispatch_id"], o["decision"]) for o in result["outcomes"]] == [("d1", "reject")]
+
+
+def test_is_contract_invalid_recognises_both_shapes_and_nothing_else():
+    assert ro.is_contract_invalid({"event_type": "report_contract_invalid"})
+    assert ro.is_contract_invalid({"event_type": "contract_invalid"})
+    assert ro.is_contract_invalid({"event": " Report_Contract_Invalid "})
+    assert ro.is_contract_invalid({"event_type": "task_complete", "status": "Contract_Invalid"})
+    assert not ro.is_contract_invalid({"event_type": "task_complete", "status": "failure"})
+    assert not ro.is_contract_invalid({"event_type": None, "status": None})
+    assert not ro.is_contract_invalid({})
+
+
 # --- D3b: the gate advisories on D3a (#1980), each pinned on behaviour -------
 
 def test_status_is_read_through_the_canonical_semantics():
@@ -351,3 +455,53 @@ def test_a_blocking_event_under_a_gate_runner_id_still_blocks():
     result = _run(_a("d1", "success", pr_id="42"), _b("d1"), refused)
     assert result["verdict_counts"]["investigate"] == 1
     assert _outcome(result, "d1")["blocking"][0]["dispatch_id"] == "kimi-gate-pr42-123"
+
+
+# --- D4a ff3: a status-only lane line is an outcome ---------------------------
+# The provider-lane writer records {dispatch_id, provider, model, status} with
+# no event_type (2559 lines in the vnx-dev ledger on 29-09). Its status is a
+# completion status; _run wraps every ledger in a foreign 'd1' failure.
+
+def _status_only(did: str, status: str, **kw: Any) -> Dict[str, Any]:
+    return {"dispatch_id": did, "status": status, "provider": "kimi", "timestamp": TS, **kw}
+
+
+def test_status_only_lane_lines_are_accept_reject_or_investigate():
+    result = _run(_status_only("d1", "success", verification=GOOD), _status_only("d2", "failure"),
+                  _status_only("d3", "success"), _status_only("d4", "timeout"),
+                  _status_only("d5", "bananas"), _foreign(_status_only("d5", "success", verification=GOOD)))
+    decisions = {o["dispatch_id"]: o["decision"] for o in result["outcomes"]}
+    assert decisions == {"d1": "accept", "d2": "reject", "d3": "investigate",
+                         "d4": "investigate", "d5": "investigate"}
+    assert [ro.lane_result(_outcome(result, d)) for d in ("d1", "d2")] == ["success", "failure"]
+
+
+def test_a_later_status_only_failure_overturns_an_earlier_success():
+    result = _run(_a("d1", "success"), _b("d1"), _status_only("d1", "failure"))
+    assert _outcome(result, "d1")["decision"] == "reject"
+
+
+def test_a_line_with_neither_event_type_nor_status_is_no_outcome():
+    result = _run(_status_only("d1", ""), _gate_evidence_only("d2"))
+    assert {o["dispatch_id"]: o["decision"] for o in result["outcomes"]} == {
+        "d1": "unknown", "d2": "unknown"}
+
+
+def _gate_evidence_only(did: str) -> Dict[str, Any]:
+    return {"event_type": "review_gate_result", "dispatch_id": did, "gate": "codex_gate",
+            "pr_number": 7, "status": "pass", "timestamp": TS}
+
+
+def test_contract_invalid_without_a_datable_timestamp_is_in_the_window():
+    # The staleness rule is fail-open on a missing/unparseable effective
+    # timestamp; the digest window must be too, or a live failure vanishes.
+    now = datetime.now(tz=timezone.utc)
+    cutoff = now - timedelta(days=5)
+    undated = {"event_type": "report_contract_invalid", "dispatch_id": "d1",
+               "status": "contract_invalid", "timestamp": "not-a-date"}
+    result = _run(dict(undated), dict(undated, dispatch_id="d2", timestamp=None), cutoff=cutoff)
+    assert {o["dispatch_id"]: o["decision"] for o in result["outcomes"]} == {"d1": "reject", "d2": "reject"}
+    # dated before the cutoff but inside the 14-day staleness window: out of scope, not noise
+    before = (now - timedelta(days=10)).isoformat()
+    old = _run(dict(undated, timestamp=before, ingested_at=before), cutoff=cutoff)
+    assert (old["outcomes"], old["noise_counts"].get("stale_contract_invalid")) == ([], None)
