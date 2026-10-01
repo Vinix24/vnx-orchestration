@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
 import subprocess
 import warnings
 from pathlib import Path
@@ -486,6 +487,49 @@ def refuse_real_launch_agents_write_under_test_runner(dest_dir: Path) -> None:
             "fake home before calling code that installs launchd plists, "
             "or monkeypatch subprocess.run to intercept launchctl calls."
         )
+
+
+#: Exported by ``tests/conftest.py`` when it puts its refusing ``launchctl`` shim
+#: on PATH. The backstop below accepts that shim, and nothing else, as the
+#: ``launchctl`` a test run may reach.
+LAUNCHCTL_SHIM_ENV = "VNX_TEST_LAUNCHCTL_SHIM"
+
+
+def refuse_real_launchctl_under_test_runner() -> None:
+    """Fail loud when code is ABOUT TO MUTATE launchd while running under a test
+    runner and the ``launchctl`` on PATH is a real one (OI-1891).
+
+    Call this right before any ``launchctl`` verb that changes state (``load``,
+    ``unload``, ``bootstrap``, ``bootout``, ...). The LaunchAgents write guard
+    above protects the plist file, not the launchd domain: a test that points
+    ``Path.home`` at a tmp dir passes it and still loads the job into the
+    operator's real gui domain. That is how ``com.vnx.*.project0`` got loaded
+    and ``com.vnx.ledger-health`` replaced.
+
+    Passes when the resolved ``launchctl`` is the conftest shim
+    (``VNX_TEST_LAUNCHCTL_SHIM``, which refuses every mutating verb itself), or
+    when there is no ``launchctl`` on PATH at all (nothing to protect; the call
+    would fail with FileNotFoundError). Refuses when anything else answers, which
+    covers ``python -m unittest``, a foreign conftest and a subprocess with a
+    hand-built PATH. Production is unaffected: ``running_under_test_runner()``
+    is False outside a pytest or unittest run.
+    """
+    if not running_under_test_runner():
+        return
+    found = shutil.which("launchctl")
+    if found is None:
+        return
+    shim = os.environ.get(LAUNCHCTL_SHIM_ENV)
+    if shim and os.path.realpath(found) == os.path.realpath(shim):
+        return
+    raise TestIsolationGuardError(
+        f"[TEST ISOLATION GUARD] about to run a mutating launchctl ('{found}') "
+        "while running under a test runner. A test lost its isolation: this "
+        "would load or unload jobs in the operator's real launchd domain. "
+        "Stub the install (e.g. monkeypatch init_cmd._install_launchd_agent) or "
+        "run under tests/conftest.py, which puts a refusing launchctl shim first "
+        f"on PATH and exports {LAUNCHCTL_SHIM_ENV}."
+    )
 
 
 def _resolve_state_root(project_id: Optional[str], project_root: Path) -> Path:

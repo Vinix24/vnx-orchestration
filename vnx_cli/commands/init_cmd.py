@@ -849,6 +849,12 @@ def _install_launchd_agent(
             pass
         raise
 
+    # OI-1891: the plist write guard above protects the file, not the launchd
+    # domain. Refuse before the first mutating verb unless launchctl is the
+    # conftest shim.
+    from vnx_paths import refuse_real_launchctl_under_test_runner
+    refuse_real_launchctl_under_test_runner()
+
     # Idempotent: unload any previously loaded instance before reloading.
     subprocess.run(
         ["launchctl", "unload", str(dest)], capture_output=True,
