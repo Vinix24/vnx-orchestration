@@ -421,6 +421,9 @@ def enforce_pr_exists(
     wt_path: "Optional[Path | str]" = None,
     work_ref: "Optional[str]" = None,
     base_sha: "Optional[str]" = None,
+    provider: "Optional[str]" = None,
+    terminal: "Optional[str]" = None,
+    terminal_id: "Optional[str]" = None,
 ) -> PrEnforcementResult:
     """Ensure *branch* is pushed to origin AND has an open PR.
 
@@ -471,6 +474,14 @@ def enforce_pr_exists(
     still act on the worktree's OWN branch, which is exactly the second-branch
     bug this closes. See ``_enforce_pr_exists_for_work_ref``.
 
+    *provider* / *terminal* (attribution): the dispatch's real provider and
+    terminal, supplied by the lane that knows them, stamped onto every
+    corrective receipt this call appends so a rejection is attributable
+    (which provider/lane failed to open the PR). When omitted, the door's
+    ``VNX_CURRENT_PROVIDER`` / ``VNX_CURRENT_TERMINAL`` env export is read as a
+    fallback; when no provider can be determined the field is left ABSENT,
+    never the literal ``"unknown"`` (same discipline as the model field).
+
     Never raises: a push or gh_pr_ensure exception is treated as a failure (still
     enforced — reported via PrEnforcementResult.ok=False + corrective receipt), not
     propagated, so a transient git/GitHub/network error never crashes the dispatch
@@ -480,6 +491,9 @@ def enforce_pr_exists(
     # (the operator's pre-push hooks and venv belong to the main checkout, not
     # here), repo_root otherwise. Read-only remote lookups keep using repo_root.
     run_dir = Path(wt_path) if wt_path is not None else Path(repo_root)
+    # The EnvelopeSpec/GovernSpec field is named ``terminal_id``; the receipt
+    # field is ``terminal``. Accept either spelling from a lane.
+    terminal = terminal or terminal_id
 
     work_ref_branch = _normalize_work_ref(work_ref)
     if work_ref_branch:
@@ -490,6 +504,8 @@ def enforce_pr_exists(
             receipts_file=receipts_file,
             pr_title=pr_title,
             pr_body=pr_body,
+            provider=provider,
+            terminal=terminal,
         )
 
     if worktree_state == "clean":
@@ -519,6 +535,7 @@ def enforce_pr_exists(
                 untracked_paths=classification.untracked_paths,
                 evidence=classification.evidence,
                 pr_title=pr_title, pr_body=pr_body, skip_pr=skip_pr, base_sha=base_sha,
+                provider=provider, terminal=terminal,
             )
         if not classification.generated_paths:
             return PrEnforcementResult(applicable=False, ok=True, reason=classification.evidence)
@@ -559,6 +576,7 @@ def enforce_pr_exists(
             _record_corrective_receipt(
                 dispatch_id=dispatch_id, branch=branch, reason=reason,
                 receipts_file=receipts_file, kind="push_failed",
+                provider=provider, terminal=terminal,
             )
             return PrEnforcementResult(applicable=True, ok=False, pushed=False, reason=reason)
         pushed = True
@@ -580,6 +598,7 @@ def enforce_pr_exists(
             _record_corrective_receipt(
                 dispatch_id=dispatch_id, branch=branch, reason=containment_reason,
                 receipts_file=receipts_file, kind="containment_failed",
+                provider=provider, terminal=terminal,
             )
             return PrEnforcementResult(
                 applicable=True, ok=False, pushed=pushed, reason=containment_reason,
@@ -618,6 +637,7 @@ def enforce_pr_exists(
     _record_corrective_receipt(
         dispatch_id=dispatch_id, branch=branch, reason=reason, receipts_file=receipts_file,
         kind="pr_failed",
+        provider=provider, terminal=terminal,
     )
     return PrEnforcementResult(applicable=True, ok=False, pushed=pushed, reason=reason)
 
@@ -630,6 +650,8 @@ def _enforce_pr_exists_for_work_ref(
     receipts_file: "str | Path",
     pr_title: str,
     pr_body: str,
+    provider: "Optional[str]" = None,
+    terminal: "Optional[str]" = None,
 ) -> PrEnforcementResult:
     """OI-1392: enforcement scoped to a spec-declared work_ref — never the
     worktree's own branch. *run_dir* is where ``gh`` runs (OI-1846).
@@ -682,6 +704,7 @@ def _enforce_pr_exists_for_work_ref(
     _record_corrective_receipt(
         dispatch_id=dispatch_id, branch=work_ref_branch, reason=reason,
         receipts_file=receipts_file, kind="pr_failed",
+        provider=provider, terminal=terminal,
     )
     return PrEnforcementResult(applicable=True, ok=False, pushed=False, reason=reason)
 
@@ -700,6 +723,8 @@ def _handle_dirty_substantive(
     skip_pr: bool,
     untracked_paths: "tuple[str, ...]" = (),
     base_sha: "Optional[str]" = None,
+    provider: "Optional[str]" = None,
+    terminal: "Optional[str]" = None,
 ) -> PrEnforcementResult:
     """OI-1119: a ``dirty`` tree with substantive uncommitted work — loud AND salvaged.
 
@@ -791,6 +816,7 @@ def _handle_dirty_substantive(
                     dispatch_id=dispatch_id, branch=branch, receipts_file=receipts_file,
                     salvage_reason=reason, delivery=delivery,
                     tracked_paths=tracked_paths, untracked_paths=untracked_paths,
+                    provider=provider, terminal=terminal,
                 )
             reason = f"{reason}; worker delivery not established: {delivery.reason}"
 
@@ -827,6 +853,7 @@ def _handle_dirty_substantive(
     _record_corrective_receipt(
         dispatch_id=dispatch_id, branch=branch, reason=reason, receipts_file=receipts_file,
         kind=kind,
+        provider=provider, terminal=terminal,
         extra_fields={
             "dirty_substantive": True,
             "dirty_files": list(tracked_paths[:25]),
@@ -949,6 +976,8 @@ def _delivered_despite_failed_salvage(
     delivery: _Delivery,
     tracked_paths: "tuple[str, ...]",
     untracked_paths: "tuple[str, ...]",
+    provider: "Optional[str]" = None,
+    terminal: "Optional[str]" = None,
 ) -> PrEnforcementResult:
     """The salvage push failed but the worker's work is on origin with a PR: stay
     loud, keep the outcome. Warning log + ``pr_enforcement_warning`` receipt; the
@@ -966,6 +995,7 @@ def _delivered_despite_failed_salvage(
     _record_delivery_warning_receipt(
         dispatch_id=dispatch_id, branch=branch, reason=warning, receipts_file=receipts_file,
         kind="dirty_substantive_salvage_push_failed_delivery_intact",
+        provider=provider, terminal=terminal,
         extra_fields={
             "pr_number": delivery.pr_number,
             "dirty_substantive": True,
@@ -1022,6 +1052,8 @@ def _record_corrective_receipt(
     *, dispatch_id: str, branch: str, reason: str, receipts_file: "str | Path",
     kind: str = "pr_failed",
     extra_fields: "Optional[dict]" = None,
+    provider: "Optional[str]" = None,
+    terminal: "Optional[str]" = None,
 ) -> None:
     """Append a corrective 'failed' completion receipt — the loud, receipt-visible
     signal that a committed-but-not-PR'd dispatch is incomplete. Never raises.
@@ -1030,6 +1062,10 @@ def _record_corrective_receipt(
     below, so a caller (e.g. the dirty-substantive path) can attach
     kind-specific evidence — file lists, salvage outcome — without every
     other corrective-receipt caller needing to know about it.
+
+    *provider* / *terminal* (attribution): the dispatch's real provider and
+    terminal, stamped so the rejection is attributable. A provider that cannot
+    be determined is omitted, never written as the literal ``"unknown"``.
     """
     payload = {
         "event_type": "subprocess_completion",
@@ -1047,7 +1083,7 @@ def _record_corrective_receipt(
         # an autopr_reason-aware reader already does.
         "failure_reason": reason,
         "branch": branch,
-        **_receipt_identity(),
+        **_receipt_identity(provider=provider, terminal=terminal),
     }
     if extra_fields:
         payload.update(extra_fields)
@@ -1057,6 +1093,8 @@ def _record_corrective_receipt(
 def _record_delivery_warning_receipt(
     *, dispatch_id: str, branch: str, reason: str, receipts_file: "str | Path",
     kind: str, extra_fields: "Optional[dict]" = None,
+    provider: "Optional[str]" = None,
+    terminal: "Optional[str]" = None,
 ) -> None:
     """Append a WARNING receipt (OI-1846): a cleanup step stumbled but the
     worker's work is delivered. Never raises.
@@ -1075,16 +1113,30 @@ def _record_delivery_warning_receipt(
         "autopr_reason": reason,
         "autopr_kind": kind,
         "branch": branch,
-        **_receipt_identity(),
+        **_receipt_identity(provider=provider, terminal=terminal),
     }
     if extra_fields:
         payload.update(extra_fields)
     _append_enforcement_receipt(payload, receipts_file=receipts_file, dispatch_id=dispatch_id)
 
 
-def _receipt_identity() -> dict:
-    """Fields every pr_enforcement receipt carries."""
-    return {
+def _receipt_identity(
+    provider: "Optional[str]" = None, terminal: "Optional[str]" = None,
+) -> dict:
+    """Fields every pr_enforcement receipt carries.
+
+    Provider/terminal are resolved here so every corrective/warning receipt this
+    module appends is attributable: the explicit slot first (the lane knows it),
+    then the door's ``VNX_CURRENT_PROVIDER`` / ``VNX_CURRENT_TERMINAL`` export.
+    A missing or sentinel provider is OMITTED, never stamped as ``"unknown"`` —
+    the same discipline the model field already follows (an undeterminable
+    provider must surface as absent, not as a fake name).
+    """
+    from providers.model_normalizer import is_unknown_provider  # noqa: PLC0415
+
+    resolved_provider = (provider or os.environ.get("VNX_CURRENT_PROVIDER") or "").strip()
+    resolved_terminal = (terminal or os.environ.get("VNX_CURRENT_TERMINAL") or "").strip()
+    identity = {
         "source": "pr_enforcement",
         "synthesized": False,
         # dispatch-20260802-model-ssot-en-ketenlink: carry the dispatch
@@ -1092,6 +1144,11 @@ def _receipt_identity() -> dict:
         "model": os.environ.get("VNX_CURRENT_MODEL") or None,
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
+    if resolved_provider and not is_unknown_provider(resolved_provider):
+        identity["provider"] = resolved_provider
+    if resolved_terminal:
+        identity["terminal"] = resolved_terminal
+    return identity
 
 
 def _append_enforcement_receipt(

@@ -3399,6 +3399,16 @@ def run_dispatch(
             # receipts (phantom_guard / pr_enforcement) can record the model the
             # dispatch ran without threading a parameter through every call site.
             os.environ["VNX_CURRENT_MODEL"] = plan.model
+            # Attribution fix: export the dispatch's real provider and terminal
+            # on the same fallback contract, so a corrective rejection receipt
+            # (phantom_guard / pr_enforcement) is attributable even when a call
+            # site does not thread them explicitly. A lane that passes the
+            # values explicitly always wins.
+            _provider_value = getattr(plan.provider, "value", plan.provider)
+            if _provider_value:
+                os.environ["VNX_CURRENT_PROVIDER"] = str(_provider_value)
+            if plan.target_id:
+                os.environ["VNX_CURRENT_TERMINAL"] = str(plan.target_id)
 
         permit = issue_permit(plan)
         try:

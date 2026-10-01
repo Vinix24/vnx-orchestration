@@ -491,6 +491,9 @@ def record_phantom_if_any(
     pr_id: Optional[str] = None,
     parent_dispatch: Optional[str] = None,
     repo: Optional[Path] = None,
+    provider: Optional[str] = None,
+    terminal: Optional[str] = None,
+    terminal_id: Optional[str] = None,
 ) -> PhantomVerdict:
     """``guard_at_govern`` + on a phantom verdict, append a corrective ``failed`` completion receipt.
 
@@ -503,6 +506,16 @@ def record_phantom_if_any(
     fails the moment an inline construction of it drops a field. ``token_usage``
     is corroborating detail only (never decision-relevant — see the module docstring)
     and stays a plain keyword.
+
+    ``provider``/``terminal`` (the corrective-receipt attribution fix): the dispatch's
+    real provider and terminal, supplied by the calling lane that knows them. They are
+    stamped onto the corrective receipt so the rejection is attributable (which provider
+    fabricated a success). ``terminal_id`` is accepted as an alias for ``terminal``
+    (the EnvelopeSpec/GovernSpec field name). A missing value falls back to the door's
+    ``VNX_CURRENT_PROVIDER`` / ``VNX_CURRENT_TERMINAL`` env export; when no provider can
+    be determined at all the field is left ABSENT (never the literal ``"unknown"``), the
+    same discipline the model field already follows — enrichment must not manufacture a
+    fake provider from a terminal it could not resolve.
 
     The corrective receipt uses ``event_type="subprocess_completion"`` (one of the watchers'
     ACTIONABLE_EVENTS — codex F3: a custom ``phantom_rejected`` event_type is invisible to the live
@@ -548,28 +561,44 @@ def record_phantom_if_any(
             if _scripts not in sys.path:
                 sys.path.insert(0, _scripts)
             from append_receipt import append_receipt_payload  # noqa: PLC0415
+            # Attribution fix: stamp the dispatch's REAL provider/terminal so a
+            # rejection is attributable. Explicit slot first (the lane knows it),
+            # then the door's env export. A provider that is absent or the
+            # sentinel "unknown" is OMITTED, never written as a fake name (the
+            # model field's existing discipline) — enrichment resolves a real
+            # provider from the terminal when one is known.
+            from providers.model_normalizer import is_unknown_provider  # noqa: PLC0415
+            _provider = (provider or os.environ.get("VNX_CURRENT_PROVIDER") or "").strip()
+            _terminal = (
+                terminal or terminal_id or os.environ.get("VNX_CURRENT_TERMINAL") or ""
+            ).strip()
+            payload = {
+                "event_type": "subprocess_completion",
+                "receipt_kind": "dispatch",
+                "dispatch_id": dispatch_id,
+                "status": "failed",
+                "phantom_rejected": True,
+                "phantom_reason": verdict.reason,
+                # OI-1415: the canonical failure_reason field (receipt_schema.py /
+                # failure_classification.py, read generically by e.g.
+                # dispatch_outcome_classifier._classify_receipts) — same text as
+                # phantom_reason above. Lane-specific field is kept unchanged; this
+                # is additive so a generic failure-reason reader sees the same
+                # rejection a phantom_reason-aware reader already does.
+                "failure_reason": verdict.reason,
+                "source": "phantom_guard",
+                "synthesized": False,
+                # dispatch-20260802-model-ssot-en-ketenlink: carry the dispatch
+                # model when the door exported it (best-effort; exempt source).
+                "model": os.environ.get("VNX_CURRENT_MODEL") or None,
+                "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+            if _provider and not is_unknown_provider(_provider):
+                payload["provider"] = _provider
+            if _terminal:
+                payload["terminal"] = _terminal
             append_receipt_payload(
-                {
-                    "event_type": "subprocess_completion",
-                    "receipt_kind": "dispatch",
-                    "dispatch_id": dispatch_id,
-                    "status": "failed",
-                    "phantom_rejected": True,
-                    "phantom_reason": verdict.reason,
-                    # OI-1415: the canonical failure_reason field (receipt_schema.py /
-                    # failure_classification.py, read generically by e.g.
-                    # dispatch_outcome_classifier._classify_receipts) — same text as
-                    # phantom_reason above. Lane-specific field is kept unchanged; this
-                    # is additive so a generic failure-reason reader sees the same
-                    # rejection a phantom_reason-aware reader already does.
-                    "failure_reason": verdict.reason,
-                    "source": "phantom_guard",
-                    "synthesized": False,
-                    # dispatch-20260802-model-ssot-en-ketenlink: carry the dispatch
-                    # model when the door exported it (best-effort; exempt source).
-                    "model": os.environ.get("VNX_CURRENT_MODEL") or None,
-                    "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                },
+                payload,
                 receipts_file=str(receipts_file),
                 cache_window_seconds=0,
             )
