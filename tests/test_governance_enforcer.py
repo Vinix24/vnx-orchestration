@@ -199,7 +199,7 @@ def test_codex_gate_required_file_missing(config_file: Path, gate_results_dir: P
 
 def test_codex_gate_required_pass_on_current_head_succeeds(config_file: Path, gate_results_dir: Path):
     gate_results_dir.joinpath("pr-42-codex_gate.json").write_text(
-        json.dumps({"contract_hash": "abc123xyz", "commit_sha": _HEAD_SHA})
+        json.dumps({"status": "completed", "contract_hash": "abc123xyz", "commit_sha": _HEAD_SHA})
     )
     enforcer = GovernanceEnforcer()
     enforcer.load_config(config_file)
@@ -294,7 +294,7 @@ def test_kimi_gate_required_file_missing(config_file: Path, gate_results_dir: Pa
 
 def test_kimi_gate_required_pass_on_current_head_succeeds(config_file: Path, gate_results_dir: Path):
     gate_results_dir.joinpath("pr-42-kimi_gate.json").write_text(
-        json.dumps({"contract_hash": "abc123xyz", "commit_sha": _HEAD_SHA})
+        json.dumps({"status": "completed", "contract_hash": "abc123xyz", "commit_sha": _HEAD_SHA})
     )
     enforcer = GovernanceEnforcer()
     enforcer.load_config(config_file)
@@ -366,6 +366,7 @@ def test_kimi_gate_required_satisfied_by_takeover_successor_on_current_head(
     gate_results_dir.joinpath("pr-42-glm_gate.json").write_text(
         json.dumps({
             "gate": "glm_gate",
+            "status": "completed",
             "contract_hash": "deadbeef1234",
             "commit_sha": _HEAD_SHA,
             "takeover_path": [{"gate": "kimi_gate", "reason": "unavailable", "status": "unavailable"}],
@@ -418,6 +419,175 @@ def test_kimi_gate_required_fails_without_result_or_takeover(config_file: Path, 
         result = enforcer.check("kimi_gate_required", {"pr_number": 42, "head_sha": _HEAD_SHA})
     assert result.passed is False
     assert "not found" in result.message
+
+
+# ---------------------------------------------------------------------------
+# Regression: a record on the current head that is not a PASS must fail the
+# seat (blocking findings / failed / unavailable / incomplete), direct or
+# takeover. Before this fix only contract_hash + commit_sha were consulted, so
+# a rejected or never-run gate read as a pass.
+# ---------------------------------------------------------------------------
+
+_BLOCKING_FINDING = {"severity": "blocker", "message": "unhandled error path"}
+
+
+def test_codex_gate_required_blocking_finding_is_not_a_pass(config_file: Path, gate_results_dir: Path):
+    """status completed + 1 blocking finding on the head is a decided non-pass."""
+    gate_results_dir.joinpath("pr-42-codex_gate.json").write_text(
+        json.dumps({
+            "status": "completed",
+            "contract_hash": "abc123xyz",
+            "commit_sha": _HEAD_SHA,
+            "blocking_findings": [_BLOCKING_FINDING],
+        })
+    )
+    enforcer = GovernanceEnforcer()
+    enforcer.load_config(config_file)
+    with patch("governance_enforcer.GATE_RESULTS_DIR", gate_results_dir):
+        result = enforcer.check("codex_gate_required", {"pr_number": 42, "head_sha": _HEAD_SHA})
+    assert result.passed is False
+    assert "not a PASS" in result.message
+    assert "blocking finding" in result.message
+    assert "codex_gate" in result.message
+    assert "oudere commit" not in result.message
+    assert "geen commit_sha" not in result.message
+    assert "not found" not in result.message
+
+
+def test_codex_gate_required_unavailable_is_not_a_pass(config_file: Path, gate_results_dir: Path):
+    """An unavailable gate (provider outage) that echoes a contract_hash is not
+    a pass: there is no verdict evidence."""
+    gate_results_dir.joinpath("pr-42-codex_gate.json").write_text(
+        json.dumps({
+            "status": "unavailable",
+            "contract_hash": "abc123xyz",
+            "commit_sha": _HEAD_SHA,
+        })
+    )
+    enforcer = GovernanceEnforcer()
+    enforcer.load_config(config_file)
+    with patch("governance_enforcer.GATE_RESULTS_DIR", gate_results_dir):
+        result = enforcer.check("codex_gate_required", {"pr_number": 42, "head_sha": _HEAD_SHA})
+    assert result.passed is False
+    assert "not a PASS" in result.message
+    assert "unavailable" in result.message
+    assert "codex_gate" in result.message
+    assert "oudere commit" not in result.message
+    assert "geen commit_sha" not in result.message
+    assert "not found" not in result.message
+
+
+def test_codex_gate_required_failed_is_not_a_pass(config_file: Path, gate_results_dir: Path):
+    """A failed review on the current head must fail the seat, naming status."""
+    gate_results_dir.joinpath("pr-42-codex_gate.json").write_text(
+        json.dumps({
+            "status": "failed",
+            "contract_hash": "abc123xyz",
+            "commit_sha": _HEAD_SHA,
+        })
+    )
+    enforcer = GovernanceEnforcer()
+    enforcer.load_config(config_file)
+    with patch("governance_enforcer.GATE_RESULTS_DIR", gate_results_dir):
+        result = enforcer.check("codex_gate_required", {"pr_number": 42, "head_sha": _HEAD_SHA})
+    assert result.passed is False
+    assert "not a PASS" in result.message
+    assert "failed" in result.message
+    assert "codex_gate" in result.message
+    assert "oudere commit" not in result.message
+    assert "geen commit_sha" not in result.message
+    assert "not found" not in result.message
+
+
+def test_codex_gate_required_incomplete_is_not_a_pass(config_file: Path, gate_results_dir: Path):
+    """An in-flight status (running) on the head is incomplete evidence, not a
+    pass."""
+    gate_results_dir.joinpath("pr-42-codex_gate.json").write_text(
+        json.dumps({
+            "status": "running",
+            "contract_hash": "abc123xyz",
+            "commit_sha": _HEAD_SHA,
+        })
+    )
+    enforcer = GovernanceEnforcer()
+    enforcer.load_config(config_file)
+    with patch("governance_enforcer.GATE_RESULTS_DIR", gate_results_dir):
+        result = enforcer.check("codex_gate_required", {"pr_number": 42, "head_sha": _HEAD_SHA})
+    assert result.passed is False
+    assert "not a PASS" in result.message
+    assert "incomplete" in result.message
+    assert "codex_gate" in result.message
+    assert "oudere commit" not in result.message
+    assert "geen commit_sha" not in result.message
+    assert "not found" not in result.message
+
+
+def test_kimi_gate_required_takeover_blocking_finding_is_not_a_pass(
+    config_file: Path, gate_results_dir: Path
+):
+    """A takeover successor (glm_gate reads kimi_gate) that found a blocker is
+    a decided non-pass: the successor does not satisfy the seat."""
+    gate_results_dir.joinpath("pr-42-glm_gate.json").write_text(
+        json.dumps({
+            "gate": "glm_gate",
+            "status": "completed",
+            "contract_hash": "deadbeef1234",
+            "commit_sha": _HEAD_SHA,
+            "blocking_findings": [_BLOCKING_FINDING],
+            "takeover_path": [{"gate": "kimi_gate", "reason": "unavailable", "status": "unavailable"}],
+        })
+    )
+    enforcer = GovernanceEnforcer()
+    enforcer.load_config(config_file)
+    with patch("governance_enforcer.GATE_RESULTS_DIR", gate_results_dir):
+        result = enforcer.check("kimi_gate_required", {"pr_number": 42, "head_sha": _HEAD_SHA})
+    assert result.passed is False
+    assert "not a PASS" in result.message
+    assert "blocking finding" in result.message
+    assert "glm_gate" in result.message
+    assert "kimi_gate" in result.message
+    assert "not found" not in result.message
+
+
+def test_kimi_gate_required_takeover_unavailable_successor_is_not_a_pass(
+    config_file: Path, gate_results_dir: Path
+):
+    """A takeover successor that is itself unavailable does not satisfy the seat."""
+    gate_results_dir.joinpath("pr-42-glm_gate.json").write_text(
+        json.dumps({
+            "gate": "glm_gate",
+            "status": "unavailable",
+            "contract_hash": "deadbeef1234",
+            "commit_sha": _HEAD_SHA,
+            "takeover_path": [{"gate": "kimi_gate", "reason": "unavailable", "status": "unavailable"}],
+        })
+    )
+    enforcer = GovernanceEnforcer()
+    enforcer.load_config(config_file)
+    with patch("governance_enforcer.GATE_RESULTS_DIR", gate_results_dir):
+        result = enforcer.check("kimi_gate_required", {"pr_number": 42, "head_sha": _HEAD_SHA})
+    assert result.passed is False
+    assert "not a PASS" in result.message
+    assert "unavailable" in result.message
+    assert "glm_gate" in result.message
+
+
+def test_genuine_pass_on_current_head_still_succeeds(config_file: Path, gate_results_dir: Path):
+    """The shared pass rule needs a canonical pass status: 'approve' must still
+    satisfy the check on the current head."""
+    gate_results_dir.joinpath("pr-42-codex_gate.json").write_text(
+        json.dumps({
+            "status": "approve",
+            "contract_hash": "abc123xyz",
+            "commit_sha": _HEAD_SHA,
+        })
+    )
+    enforcer = GovernanceEnforcer()
+    enforcer.load_config(config_file)
+    with patch("governance_enforcer.GATE_RESULTS_DIR", gate_results_dir):
+        result = enforcer.check("codex_gate_required", {"pr_number": 42, "head_sha": _HEAD_SHA})
+    assert result.passed is True
+    assert "passed on head" in result.message
 
 
 # ---------------------------------------------------------------------------
