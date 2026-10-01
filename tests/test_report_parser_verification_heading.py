@@ -106,6 +106,7 @@ def test_envelope_reader_unknown_without_evidence(tmp_path):
 # ---------------------------------------------------------------------------
 
 from receipt_verdict import compute_verdict
+from verification_runs import counted_run, extract_runs
 
 
 def _validation(body: str, heading: str = "## Verification") -> dict:
@@ -189,6 +190,57 @@ def test_only_a_red_run_keeps_its_failures_and_never_accepts():
     receipt = _receipt(body)
     assert receipt["verification"]["tests_failed"] == 5
     assert compute_verdict({**receipt, "status": "success"})["decision"] != "accept"
+
+
+# Only-red reports (D1b fix-forward): a red label discounts a run against a
+# green run on the new code, but when there is no green run at all the label
+# has nothing to discount. A later red run with 0 failures used to become the
+# whole count, so a documented failure disappeared from the receipt.
+ONLY_RED_FAILS_THEN_CLEAN = """### Red run
+
+`pytest tests/test_a.py` -> 3 failed, 10 passed in 0.5s
+
+### Red run (second)
+
+`pytest tests/test_a.py` -> 0 failed, 13 passed in 0.4s
+"""
+
+
+def test_only_red_runs_keep_the_highest_failure_count():
+    result = _validation(ONLY_RED_FAILS_THEN_CLEAN)
+    # passed/method come from the last run, the failure from the highest one.
+    assert result["tests_passed"] == 13
+    assert result["tests_failed"] == 3
+
+
+def test_only_red_runs_receipt_is_not_accepted(tmp_path):
+    receipt = _receipt(ONLY_RED_FAILS_THEN_CLEAN)
+    assert receipt["verification"]["method"] == "pytest"
+    assert receipt["verification"]["tests_run"] == 16
+    assert receipt["verification"]["tests_passed"] == 13
+    assert receipt["verification"]["tests_failed"] == 3
+    assert compute_verdict({**receipt, "status": "success"})["decision"] != "accept"
+    report = tmp_path / "20260929-d1b-test.md"
+    report.write_text(
+        _report("## Verification", ONLY_RED_FAILS_THEN_CLEAN).replace(
+            "d1-test", "20260929-d1b-test"), encoding="utf-8")
+    assert _verification_from_report(report) == receipt["verification"]
+
+
+def test_only_red_runs_with_no_failures_stay_at_zero():
+    body = "Red run: `pytest tests/test_a.py` -> 13 passed in 0.4s\n"
+    result = _validation(body)
+    assert (result["tests_passed"], result["tests_failed"]) == (13, 0)
+
+
+def test_single_red_run_with_failures_is_unchanged():
+    runs = extract_runs("Red run: `pytest tests/test_a.py` -> 3 failed, 10 passed in 0.5s\n")
+    assert counted_run(runs) == {"passed": 10, "failed": 3, "method": "pytest",
+                                 "color": "red"}
+
+
+def test_counted_run_without_runs_is_none():
+    assert counted_run([]) is None
 
 
 def test_green_run_with_a_real_failure_keeps_the_failure():
