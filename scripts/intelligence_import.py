@@ -17,6 +17,34 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 from vnx_paths import ensure_env
 
+# Pattern rows carry an autoincrement id that says nothing about which pattern
+# a row is; their identity is the natural key (project_id, pattern_type, title).
+# They are written through pattern_upsert — the one write path every other
+# pattern writer uses — instead of INSERT OR REPLACE so an import merges into
+# the local row and never deletes it on an id match.
+try:
+    from pattern_upsert import NATURAL_KEY, upsert_antipattern, upsert_success_pattern
+except ImportError:  # pragma: no cover - lib/ is already on sys.path above
+    sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+    from pattern_upsert import NATURAL_KEY, upsert_antipattern, upsert_success_pattern
+
+PATTERN_TABLES = ("success_patterns", "antipatterns")
+
+# Columns the upsert functions name explicitly. Everything else in an exported
+# record (except the id) is passed through as an extra column.
+_PATTERN_NAMED: dict[str, tuple[str, ...]] = {
+    "success_patterns": (
+        "project_id", "title", "description", "pattern_data", "pattern_type",
+        "category", "usage_count", "confidence_score", "source_dispatch_ids",
+        "source_receipts", "first_seen", "last_used",
+    ),
+    "antipatterns": (
+        "project_id", "title", "description", "pattern_data", "why_problematic",
+        "pattern_type", "category", "severity", "occurrence_count",
+        "source_dispatch_ids", "first_seen", "last_seen",
+    ),
+}
+
 
 def _db_path(paths: dict[str, str]) -> Path:
     return Path(paths["VNX_STATE_DIR"]) / "quality_intelligence.db"
@@ -102,7 +130,13 @@ def _ensure_columns(conn: sqlite3.Connection, table: str, record: dict, db_colum
 
 
 def _import_table(conn: sqlite3.Connection, table: str, ndjson_path: Path) -> int:
-    """Import NDJSON into a table using INSERT OR REPLACE. Returns row count."""
+    """Import NDJSON into a table using INSERT OR REPLACE. Returns row count.
+
+    Pattern tables (:data:`PATTERN_TABLES`) are refused: REPLACE on the exported
+    id deletes local rows. They go through :func:`_import_pattern_table`.
+    """
+    if table in PATTERN_TABLES:
+        raise ValueError(f"{table} must be imported via _import_pattern_table")
     if not ndjson_path.is_file():
         return 0
 
@@ -135,6 +169,100 @@ def _import_table(conn: sqlite3.Connection, table: str, ndjson_path: Path) -> in
             count += 1
 
     return count
+
+
+def _import_pattern_table(conn: sqlite3.Connection, table: str, ndjson_path: Path) -> dict:
+    """Merge exported pattern rows into the local table by natural key.
+
+    Unlike :func:`_import_table`, the exported ``id`` is dropped: it never
+    decides which row is written. A row whose natural key already exists is
+    merged into that local row (which keeps its id) through ``pattern_upsert``;
+    a row with a new natural key is inserted. Rows with a blank natural-key
+    part — most importantly a missing ``project_id`` — are skipped rather than
+    stamped with a guessed project.
+
+    ``counter="max"`` is the cumulative-counter merge rule used for
+    counter snapshots elsewhere (e.g. the learning loop): the export is a
+    snapshot, so re-importing it must not add counts again.
+
+    Returns ``{"inserted": n, "merged": n, "skipped": n}``.
+    """
+    empty = {"inserted": 0, "merged": 0, "skipped": 0}
+    if not ndjson_path.is_file():
+        return empty
+
+    db_columns = set(_get_columns(conn, table))
+    if not db_columns:
+        return empty
+
+    named = _PATTERN_NAMED[table]
+    upsert = upsert_success_pattern if table == "success_patterns" else upsert_antipattern
+    inserted = merged = skipped = 0
+    columns_extended = False
+
+    with open(ndjson_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            record = json.loads(line)
+            if not isinstance(record, dict):
+                skipped += 1
+                continue
+            # A pattern without all three key parts has no identity to merge
+            # on; leave it out instead of writing it under a guessed project.
+            if any(not str(record.get(key) or "").strip() for key in NATURAL_KEY):
+                skipped += 1
+                continue
+            # Keep the table shape in step with the export before writing.
+            if not columns_extended or not set(record.keys()).issubset(db_columns):
+                db_columns = _ensure_columns(conn, table, record, db_columns)
+                columns_extended = True
+
+            kwargs = {key: record[key] for key in named if key in record}
+            kwargs["counter"] = "max"
+            if table == "success_patterns":
+                kwargs.setdefault("description", "")
+                kwargs.setdefault("pattern_data", "")
+            else:
+                kwargs.setdefault("description", "")
+                kwargs.setdefault("pattern_data", "")
+                kwargs.setdefault("why_problematic", "")
+            # An export that omits the timestamps must not let the writer's
+            # "now" default drift the stored values on every re-import: fall
+            # back to the local row's timestamps (the merge rules then keep
+            # min/max unchanged). A brand-new row inserts "now" once.
+            last_seen_col = "last_used" if table == "success_patterns" else "last_seen"
+            if not kwargs.get("first_seen") or not kwargs.get(last_seen_col):
+                existing_ts = conn.execute(
+                    f"SELECT first_seen, {last_seen_col} FROM {table} "
+                    "WHERE project_id = ? AND pattern_type = ? AND title = ? "
+                    "ORDER BY id LIMIT 1",
+                    (record["project_id"], record["pattern_type"], record["title"]),
+                ).fetchone()
+                if existing_ts:
+                    if not kwargs.get("first_seen"):
+                        kwargs["first_seen"] = existing_ts[0]
+                    if not kwargs.get(last_seen_col):
+                        kwargs[last_seen_col] = existing_ts[1]
+            # The exported id is not part of the natural key, so it is never
+            # passed through; every other column rides along via **extra.
+            extra = {
+                key: value
+                for key, value in record.items()
+                if key not in named and key != "id"
+            }
+            # These are writer parameters, not pattern columns; an export
+            # carrying a same-named column must not shadow the merge mode.
+            extra.pop("counter", None)
+            extra.pop("always_update", None)
+            outcome = upsert(conn, **kwargs, **extra)
+            if outcome.inserted:
+                inserted += 1
+            else:
+                merged += 1
+
+    return {"inserted": inserted, "merged": merged, "skipped": skipped}
 
 
 def _sync_text_file(src: Path, dest: Path) -> bool:
@@ -191,6 +319,7 @@ def import_intelligence(paths: dict[str, str] | None = None) -> dict:
         "source": str(intel_dir),
         "db": str(db),
         "tables_imported": {},
+        "pattern_import": {},
         "export_timestamp": export_meta.get("export_timestamp"),
     }
 
@@ -208,7 +337,12 @@ def import_intelligence(paths: dict[str, str] | None = None) -> dict:
             # Auto-create table from NDJSON schema (handles tables added by migrations)
             if not _auto_create_table(conn, table, ndjson_file):
                 continue
-        count = _import_table(conn, table, ndjson_file)
+        if table in PATTERN_TABLES:
+            split = _import_pattern_table(conn, table, ndjson_file)
+            result["pattern_import"][table] = split
+            count = split["inserted"] + split["merged"]
+        else:
+            count = _import_table(conn, table, ndjson_file)
         if count > 0:
             result["tables_imported"][table] = count
 
