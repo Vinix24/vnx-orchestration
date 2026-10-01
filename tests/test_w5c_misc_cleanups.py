@@ -61,17 +61,17 @@ class TestEnsureUnifiedReport:
         from subprocess_dispatch_internals.receipt_writer import _ensure_unified_report
         return _ensure_unified_report
 
-    def test_creates_stub_when_missing(self, tmp_path, monkeypatch):
-        """_ensure_unified_report writes a stub when no report exists."""
+    def test_creates_contract_report_when_missing(self, tmp_path, monkeypatch):
+        """_ensure_unified_report writes a contract-valid report when none exists."""
         reports_dir = tmp_path / "unified_reports"
         monkeypatch.setenv("VNX_REPORTS_DIR", str(reports_dir))
 
         fn = self._import()
-        result = fn("20260501-120000-fix-test-B", "T2", "done")
+        result = fn("20260501-120000-fix-test-B", "T2", "done", model="sonnet")
 
         assert result is not None
         report_path = reports_dir / "20260501-120000-fix-test-B.md"
-        assert report_path.exists(), "Stub report must be written to unified_reports/"
+        assert report_path.exists(), "Report must be written to unified_reports/"
         content = report_path.read_text()
         assert "20260501-120000-fix-test-B" in content
         assert "T2" in content
@@ -93,15 +93,21 @@ class TestEnsureUnifiedReport:
         assert result is None, "Should return None when report already exists"
         assert existing.read_text() == "# Worker-written report\nCustom content.\n"
 
-    def test_returns_none_when_env_var_unset(self, monkeypatch):
-        """_ensure_unified_report is a no-op when VNX_REPORTS_DIR is unset."""
+    def test_writes_report_when_reports_dir_env_unset(self, tmp_path, monkeypatch):
+        """No silent skip: without VNX_REPORTS_DIR the report is still written.
+
+        The store is derived from the state/data dir, so a successful dispatch
+        always ends with a report on disk (the old code returned None here).
+        """
         monkeypatch.delenv("VNX_REPORTS_DIR", raising=False)
         fn = self._import()
         result = fn("20260501-120000-fix-no-env-B", "T2", "done")
-        assert result is None
 
-    def test_t1_also_gets_stub(self, tmp_path, monkeypatch):
-        """Stub creation applies to T1 as well as T2."""
+        assert result is not None, "Report must be written even without VNX_REPORTS_DIR"
+        assert result.exists()
+
+    def test_t1_also_gets_report(self, tmp_path, monkeypatch):
+        """Close-out report creation applies to T1 as well as T2."""
         reports_dir = tmp_path / "unified_reports"
         monkeypatch.setenv("VNX_REPORTS_DIR", str(reports_dir))
         fn = self._import()
@@ -109,8 +115,8 @@ class TestEnsureUnifiedReport:
         assert result is not None
         assert (reports_dir / "20260501-120000-fix-t1-A.md").exists()
 
-    def test_t3_also_gets_stub(self, tmp_path, monkeypatch):
-        """Stub creation applies to T3 as well as T2."""
+    def test_t3_also_gets_report(self, tmp_path, monkeypatch):
+        """Close-out report creation applies to T3 as well as T2."""
         reports_dir = tmp_path / "unified_reports"
         monkeypatch.setenv("VNX_REPORTS_DIR", str(reports_dir))
         fn = self._import()
