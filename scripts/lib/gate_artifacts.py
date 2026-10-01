@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from governance_receipts import utc_now_iso
 import gate_depth
 import gate_recorder
+from gate_lane_contract import canonical_review_verdict
 from final_prompt_integrity import final_prompt_sha_for_dispatch
 from codex_parser import (
     VERDICT_READABLE_BINARIES,
@@ -168,6 +169,44 @@ def _classify_findings(
         else:
             advisory.append(finding)
     return blocking, advisory
+
+
+VERDICT_ENTRY_PREFIX = "verdict_without_blocking_finding"
+
+
+def _with_verdict_entry(
+    findings: List[Dict[str, Any]], canonical_verdict: str, raw_verdict: Any,
+) -> List[Dict[str, Any]]:
+    """Let the verdict VALUE decide the outcome (OI-1938).
+
+    The booking derives pass/fail from finding severities alone. A ``fail`` or
+    ``blocked`` verdict (``revise`` reads as ``fail``) whose findings sit all
+    below a blocking severity would book a PASS. Add ONE explicit blocking entry
+    then, so the record, the report's findings section and ``is_pass`` agree with
+    what the reviewer decided. A ``pass``, and a rejection that already carries a
+    blocking finding, are returned unchanged. The model's own findings and
+    severities are never rewritten.
+    """
+    if canonical_verdict not in ("fail", "blocked"):
+        return findings
+    blocking, _advisory = _classify_findings(findings)
+    if blocking:
+        return findings
+    count = len(findings)
+    detail = (
+        f"{count} finding(s), none at a blocking severity" if count
+        else "the reviewer wrote no findings"
+    )
+    entry = {
+        "severity": "error",
+        "message": (
+            f"{VERDICT_ENTRY_PREFIX}: verdict {str(raw_verdict).strip()!r} read as "
+            f"{canonical_verdict}; {detail}"
+        ),
+        "file_path": "",
+        "line": 0,
+    }
+    return [*findings, entry]
 
 
 def _verdict_is_required(gate: str) -> bool:
@@ -341,6 +380,7 @@ def materialize_artifacts(
     findings: List[Dict[str, Any]] = []
     residual_risk = ""
     findings_parsed = False
+    raw_verdict: Any = None
     if gate == "codex_gate":
         # codex_gate goes through parse_codex_findings, which reads the verdict
         # with extract_verdict_block: the SAME reader the OI-1770 guard below
@@ -360,12 +400,17 @@ def materialize_artifacts(
         findings = parsed["findings"]
         residual_risk = parsed.get("residual_risk", "") or ""
         findings_parsed = True
+        verdict_obj = parsed.get("verdict")
+        raw_verdict = verdict_obj.get("verdict") if isinstance(verdict_obj, dict) else None
     else:
         verdict_block = extract_verdict_block(stdout)
         if verdict_block:
             findings = _normalize_findings(verdict_block.get("findings") or [])
             residual_risk = verdict_block.get("residual_risk") or ""
             findings_parsed = True
+            raw_verdict = verdict_block.get("verdict")
+    canonical_verdict = canonical_review_verdict(raw_verdict)
+    findings = _with_verdict_entry(findings, canonical_verdict, raw_verdict)
     blocking, advisory = _classify_findings(findings)
 
     report_file = Path(report_path)
@@ -637,11 +682,10 @@ def materialize_artifacts(
             # Trimmed and lowercased the way extract_verdict_block checks the
             # value: the dict it returns keeps the raw text, so " FAIL " clears
             # the guard as a fail and must register as one (OI-1786).
-            verdict_obj = parsed.get("verdict", {})
-            verdict_str = str(verdict_obj.get("verdict", "")).strip().lower() if isinstance(verdict_obj, dict) else ""
-            if verdict_str in ("pass", "passed"):
+            verdict_str = canonical_verdict
+            if verdict_str == "pass":
                 register_event = "gate_passed"
-            elif verdict_str in ("fail", "failed", "blocked"):
+            elif verdict_str in ("fail", "blocked"):
                 register_event = "gate_failed"
             else:
                 register_event = "gate_passed" if not blocking else "gate_failed"

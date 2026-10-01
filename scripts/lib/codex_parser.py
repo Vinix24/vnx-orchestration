@@ -9,7 +9,9 @@ import json
 import re
 from typing import Any, Dict, Iterator, List, Tuple
 
-from gate_lane_contract import VALID_VERDICTS  # C6 step 3 + OI-1767: one source, not a fourth literal copy
+# C6 step 3 + OI-1767 + OI-1938: one source, not a fourth literal copy.
+# VALID_VERDICTS stays importable from here: tests/test_gate_lane_contract.py pins its identity.
+from gate_lane_contract import VALID_VERDICTS, canonical_review_verdict
 from review_contract import _normalize_line  # canonical line-coercion, never a second copy
 
 # The PATH-binary providers (gate_recorder.GATE_PROVIDERS, kind ``path_binary``)
@@ -166,11 +168,11 @@ def _normalize_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             normalized.append({"severity": "warning", "message": str(f), "file_path": "", "line": 0})
             continue
         severity = str(f.get("severity", "warning")).lower()
-        message = f.get("message") or f.get("title") or f.get("details") or ""
+        message = f.get("message") or f.get("title") or f.get("details") or f.get("summary") or ""
         normalized.append({
             "severity": severity,
             "message": str(message),
-            "file_path": str(f.get("file_path", "") or ""),
+            "file_path": str(f.get("file_path") or f.get("file") or ""),
             "line": _normalize_line(f.get("line", 0)),
         })
     return normalized
@@ -281,7 +283,9 @@ def extract_verdict_block(stdout: str) -> Dict[str, Any]:
     verdict (OI-1767 fix-forward, live-reproduced against this scenario). Same
     rule glm_gate._extract_verdict and kimi_gate._extract_verdict apply: the
     LAST object wins, and only one whose ``verdict`` (trimmed, lowercased) is a
-    real value in :data:`gate_lane_contract.VALID_VERDICTS` counts — a report
+    real value in :data:`gate_lane_contract.VALID_VERDICTS` (or the closed alias
+    ``revise``, read as ``fail``, OI-1938; see
+    :func:`gate_lane_contract.canonical_review_verdict`) counts — a report
     that echoes the template, fenced or not, and then writes a real verdict
     resolves to that real verdict, not the template. Returns ``{}`` when no
     object clears that bar.
@@ -289,7 +293,7 @@ def extract_verdict_block(stdout: str) -> Dict[str, Any]:
     text = _extract_codex_text(stdout)
     verdict: Dict[str, Any] = {}
     for candidate in _iter_written_objects(text):
-        if str(candidate.get("verdict", "")).strip().lower() in VALID_VERDICTS:
+        if canonical_review_verdict(candidate.get("verdict", "")):
             verdict = candidate
     return verdict
 

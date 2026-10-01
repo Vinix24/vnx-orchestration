@@ -38,7 +38,7 @@ from gate_enforcement_verify import (  # noqa: E402
     extract_report,
     resolve_seat_entries,
 )
-from gate_status import FAIL_STATES  # noqa: E402
+from gate_status import FAIL_STATES, has_complete_evidence, is_pass, is_terminal  # noqa: E402
 
 
 def _reason_text(entry: Dict[str, Any]) -> str:
@@ -65,11 +65,18 @@ def _diff_truncated(entry: Dict[str, Any]) -> bool:
     return bool(detail.get("diff_truncated") or entry.get("diff_truncated"))
 
 
+def _decided_fail_reason(detail: Dict[str, Any]) -> str:
+    """The reason the seat's own record gives for not passing, e.g. ``1 blocking finding(s)``."""
+    return is_pass(detail)[1]
+
+
 def _verdict_label(entry: Dict[str, Any]) -> str:
     """PASS / FAIL (reason) / UNAVAILABLE (reason) for the gate that answered.
 
-    FAIL is reserved for the recognised fail statuses
-    (:data:`gate_status.FAIL_STATES`) -- a real, decided rejection. Everything
+    FAIL is reserved for a real, decided rejection: a recognised fail status
+    (:data:`gate_status.FAIL_STATES`), or the seat's own record being terminal,
+    carrying complete evidence and not passing (a review fail booked as
+    ``completed`` plus blocking findings, OI-1938). Everything
     else that is not a decided pass (unavailable, not_executable,
     chain_exhausted, an in-flight status, an unrecognised one) reads as
     UNAVAILABLE: no verdict was produced, which must never display as a
@@ -80,6 +87,14 @@ def _verdict_label(entry: Dict[str, Any]) -> str:
     status = str(entry.get("execution_status") or entry.get("request_status") or "").strip().lower()
     if status in FAIL_STATES:
         return f"FAIL ({_reason_text(entry)})"
+    detail = entry.get("detail")
+    if (
+        isinstance(detail, dict)
+        and is_terminal(detail)
+        and has_complete_evidence(detail)
+        and not is_pass(detail)[0]
+    ):
+        return f"FAIL ({_decided_fail_reason(detail)})"
     return f"UNAVAILABLE ({_reason_text(entry)})"
 
 
