@@ -34,7 +34,7 @@ echo "Step 1: Cleaning massive conversation logs (104GB)..."
 echo "Files to clean:"
 ls -lh "$STATE_DIR"/*_conversation.log 2>/dev/null | awk '{print "  ", $9, "-", $5}'
 
-read -p "Delete these huge conversation logs? (y/n) " -n 1 -r
+read -p "Delete these huge conversation logs? (y/n) " -n 1 -r || true
 echo ""
 if [[ $REPLY =~ ^[Yy]$ ]]; then
     # Keep only last 1000 lines of each as .tail backup
@@ -57,7 +57,7 @@ echo "Step 2: Cleaning old backup files (1.7GB)..."
 echo "Files to clean:"
 ls -lh "$STATE_DIR"/*.backup* 2>/dev/null | awk '{print "  ", $9, "-", $5}'
 
-read -p "Delete old backup files? (y/n) " -n 1 -r
+read -p "Delete old backup files? (y/n) " -n 1 -r || true
 echo ""
 if [[ $REPLY =~ ^[Yy]$ ]]; then
     rm -f "$STATE_DIR"/*.backup* 2>/dev/null || true
@@ -73,7 +73,7 @@ if [ -f "$LOGS_DIR/dashboard.log" ]; then
     SIZE=$(du -h "$LOGS_DIR/dashboard.log" | cut -f1)
     echo "  dashboard.log - $SIZE"
 
-    read -p "Truncate dashboard.log? (y/n) " -n 1 -r
+    read -p "Truncate dashboard.log? (y/n) " -n 1 -r || true
     echo ""
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         tail -10000 "$LOGS_DIR/dashboard.log" > "$LOGS_DIR/dashboard.log.tmp"
@@ -91,7 +91,7 @@ if [ -f "$STATE_DIR/t0_intelligence_archive.ndjson" ]; then
     SIZE=$(du -h "$STATE_DIR/t0_intelligence_archive.ndjson" | cut -f1)
     echo "  t0_intelligence_archive.ndjson - $SIZE"
 
-    read -p "Delete intelligence archive? (y/n) " -n 1 -r
+    read -p "Delete intelligence archive? (y/n) " -n 1 -r || true
     echo ""
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         rm -f "$STATE_DIR/t0_intelligence_archive.ndjson"
@@ -106,7 +106,7 @@ echo ""
 echo "Step 5: Cleaning compressed logs..."
 find "$STATE_DIR" -name "*.gz" -type f -exec ls -lh {} \; 2>/dev/null | awk '{print "  ", $9, "-", $5}'
 
-read -p "Delete compressed logs? (y/n) " -n 1 -r
+read -p "Delete compressed logs? (y/n) " -n 1 -r || true
 echo ""
 if [[ $REPLY =~ ^[Yy]$ ]]; then
     find "$STATE_DIR" -name "*.gz" -type f -delete
@@ -121,7 +121,7 @@ echo "Step 6: Cleaning corrupted and old receipt files..."
 ls -lh "$STATE_DIR"/*.corrupted 2>/dev/null | awk '{print "  ", $9, "-", $5}'
 ls -lh "$STATE_DIR"/*_migrated.ndjson 2>/dev/null | awk '{print "  ", $9, "-", $5}'
 
-read -p "Delete corrupted/migrated files? (y/n) " -n 1 -r
+read -p "Delete corrupted/migrated files? (y/n) " -n 1 -r || true
 echo ""
 if [[ $REPLY =~ ^[Yy]$ ]]; then
     rm -f "$STATE_DIR"/*.corrupted 2>/dev/null || true

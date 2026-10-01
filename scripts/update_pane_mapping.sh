@@ -33,11 +33,13 @@ if [ -z "$CURRENT_T1_PROVIDER" ] && command -v jq >/dev/null 2>&1 && [ -f "$PANE
 fi
 CURRENT_T1_PROVIDER="${CURRENT_T1_PROVIDER:-claude_code}"
 
-# Get current pane IDs from tmux
-T0_PANE=$(tmux list-panes -t "$SESSION:0" -F "#{pane_id}" | sed -n '1p')
-T2_PANE=$(tmux list-panes -t "$SESSION:0" -F "#{pane_id}" | sed -n '2p')
-T1_PANE=$(tmux list-panes -t "$SESSION:0" -F "#{pane_id}" | sed -n '3p')
-T3_PANE=$(tmux list-panes -t "$SESSION:0" -F "#{pane_id}" | sed -n '4p')
+# Get current pane IDs from tmux. `|| true`: a missing window 0 (or any tmux
+# query failure) leaves the pane id empty, which is the pre-fix behavior; without
+# the guard, pipefail would abort the whole remap.
+T0_PANE=$(tmux list-panes -t "$SESSION:0" -F "#{pane_id}" | sed -n '1p' || true)
+T2_PANE=$(tmux list-panes -t "$SESSION:0" -F "#{pane_id}" | sed -n '2p' || true)
+T1_PANE=$(tmux list-panes -t "$SESSION:0" -F "#{pane_id}" | sed -n '3p' || true)
+T3_PANE=$(tmux list-panes -t "$SESSION:0" -F "#{pane_id}" | sed -n '4p' || true)
 
 # Create updated panes.json
 cat > "$PANES_FILE" <<EOF

@@ -30,12 +30,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/vnx_paths.sh"
-# vnx_paths.sh snapshots the caller's shell options inside $(...), where bash
-# clears errexit, and restores that snapshot on exit: the `set -e` above is gone
-# after the source. Re-assert it so a failing command fails the job. The source
-# already exports the VNX_* environment; there is no separate ensure_env in bash
-# (that name only exists in scripts/lib/vnx_paths.py).
-set -euo pipefail
+# vnx_paths.sh restores the caller's strict mode exactly, so the `set -e` above
+# survives the source (regression-tested in tests/test_vnx_paths_shellopts.py);
+# no local re-assert is needed. The source already exports the VNX_* environment;
+# there is no separate ensure_env in bash (that name only exists in vnx_paths.py).
 
 # ── Interpreter resolution (measured 2026-07-30) ──────────────────────────
 # This script runs under launchd (com.vnx.conversation-analyzer), a pure

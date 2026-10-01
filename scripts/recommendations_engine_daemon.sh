@@ -14,6 +14,8 @@ SLEEP_SECONDS="${SLEEP_SECONDS:-30}"
 _activate_venv 2>/dev/null || true
 
 while true; do
-  python3 "$SCRIPTS_DIR/generate_t0_recommendations.py" --lookback "$LOOKBACK_MINUTES"
+  # `|| true`: one failed generation pass must not kill the daemon loop now that
+  # errexit is live; the loop is meant to keep retrying every SLEEP_SECONDS.
+  python3 "$SCRIPTS_DIR/generate_t0_recommendations.py" --lookback "$LOOKBACK_MINUTES" || true
   sleep "$SLEEP_SECONDS"
 done

@@ -2213,7 +2213,7 @@ cmd_worktree_status() {
       log "         WARNING: Run 'vnx worktree-start' to migrate to isolated model"
     elif [ -d "$wt_data" ] && [ -f "$wt_data/.snapshot_meta" ]; then
       local snap_date
-      snap_date=$(grep '^snapshot_date=' "$wt_data/.snapshot_meta" 2>/dev/null | cut -d= -f2)
+      snap_date=$(grep '^snapshot_date=' "$wt_data/.snapshot_meta" 2>/dev/null | cut -d= -f2 || true)
       log "Data:    ISOLATED (snapshot: ${snap_date:-unknown})"
     elif [ -d "$wt_data" ]; then
       log "Data:    DIRECTORY (no snapshot metadata)"

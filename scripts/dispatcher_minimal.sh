@@ -338,7 +338,7 @@ _validate_agent_intelligence() {
         log "V8 ERROR: Agent validation rejected '$agent_role' (mapped='$_mapped_role') — registry miss"
         log "Validation result: $validation_result"
         local suggested
-        suggested=$(echo "$validation_result" | grep -o '"suggestion": "[^"]*"' | cut -d'"' -f4)
+        suggested=$(echo "$validation_result" | grep -o '"suggestion": "[^"]*"' | cut -d'"' -f4 || true)
         if ! grep -q "\[SKILL_INVALID\]" "$dispatch"; then
             echo -e "\n\n[SKILL_INVALID] Skill '$agent_role' (mapped='$_mapped_role') not found in registry. Suggested: '${suggested:-unknown}'. Update Role and remove this marker to retry.\n" >> "$dispatch"
         fi
@@ -357,7 +357,7 @@ _validate_agent_intelligence() {
         log "V8 ERROR: Agent validation failed for '$agent_role' (mapped='$_mapped_role')"
         log "Validation result: $validation_result"
         local suggested
-        suggested=$(echo "$validation_result" | grep -o '"suggestion": "[^"]*"' | cut -d'"' -f4)
+        suggested=$(echo "$validation_result" | grep -o '"suggestion": "[^"]*"' | cut -d'"' -f4 || true)
         log "Suggested agent: $suggested"
         if ! grep -q "\[SKILL_INVALID\]" "$dispatch"; then
             echo -e "\n\n[SKILL_INVALID] Skill '$agent_role' (mapped='$_mapped_role') not found. Suggested: '$suggested'. Update Role and remove this marker to retry.\n" >> "$dispatch"
@@ -480,7 +480,7 @@ gather_dispatch_intelligence() {
 
     log "V8 INTELLIGENCE: Gathering intelligence for dispatch"
     local task_description terminal
-    task_description=$(extract_instruction_content "$dispatch")
+    task_description=$(extract_instruction_content "$dispatch" || true)
     terminal=$(track_to_terminal "$track")
     local intel_rc=0
     set +e

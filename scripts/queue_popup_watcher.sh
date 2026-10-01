@@ -63,7 +63,7 @@ resolve_project_tmux_session() {
 
     # Prefer currently attached session for this project so popups appear where user is looking.
     session=$(tmux list-panes -a -F '#{session_name} #{session_attached} #{pane_current_path}' 2>/dev/null \
-        | awk -v project_root="$PROJECT_ROOT" '$2 == "1" && $3 ~ "^" project_root "/\\.claude/terminals/" { print $1; exit }')
+        | awk -v project_root="$PROJECT_ROOT" '$2 == "1" && $3 ~ "^" project_root "/\\.claude/terminals/" { print $1; exit }' || true)
     if [ -n "$session" ] && tmux has-session -t "$session" 2>/dev/null; then
         echo "$session"
         return 0
@@ -88,7 +88,7 @@ PY
     fi
 
     session=$(tmux list-panes -a -F '#{session_name} #{pane_current_path}' 2>/dev/null \
-        | awk -v project_root="$PROJECT_ROOT" '$2 ~ "^" project_root "/\\.claude/terminals/" { print $1; exit }')
+        | awk -v project_root="$PROJECT_ROOT" '$2 ~ "^" project_root "/\\.claude/terminals/" { print $1; exit }' || true)
     echo "$session"
 }
 
@@ -171,6 +171,10 @@ _stale_pending_catchup() {
         fi
     done < <(find "$PENDING_DIR" -name "*.md" -type f -print0 2>/dev/null)
     [ "$found" -gt 0 ] && echo "[catchup] Re-offered $found stale dispatch(es) in pending/"
+    # Explicit success: the `&&` above leaves the function returning 1 on the
+    # normal "nothing stale" path, and the unguarded call sites below now run
+    # under errexit.
+    return 0
 }
 
 # Track last count to detect changes

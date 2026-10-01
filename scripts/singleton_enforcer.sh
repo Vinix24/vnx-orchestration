@@ -65,8 +65,12 @@ enforce_singleton() {
     # distinguish it from other failure modes (bad FD, syscall error, etc.).
     # Without -E, every non-zero exit looks the same and a real bug would be
     # silently masked as "another instance running".
-    flock -n -x -E 75 "$_VNX_SINGLETON_LOCK_FD"
-    local flock_rc=$?
+    # `|| flock_rc=$?` captures the status without tripping errexit: this
+    # function runs in the caller's shell, and callers that set `-e` (most
+    # daemons) must still reach the case below, where exit code 75 is the normal
+    # "another instance is already running" refusal, not an error.
+    local flock_rc=0
+    flock -n -x -E 75 "$_VNX_SINGLETON_LOCK_FD" || flock_rc=$?
     case $flock_rc in
         0)
             ;;

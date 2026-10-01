@@ -65,7 +65,9 @@ cmd_remove() {
     local wt_data="$wt_dir/.vnx-data"
     if [ -d "$wt_data" ] && [ ! -L "$wt_data" ] && [ -f "$wt_data/.snapshot_meta" ]; then
         local report_count
-        report_count=$(find "$wt_data/unified_reports" -name "*.md" 2>/dev/null | wc -l | tr -d ' ')
+        # `|| true`: unified_reports/ may be absent; find then exits non-zero and
+        # pipefail would abort the removal before the unmerged-reports warning.
+        report_count=$(find "$wt_data/unified_reports" -name "*.md" 2>/dev/null | wc -l | tr -d ' ' || true)
         if [ "$report_count" -gt 0 ]; then
             echo "WARNING: $report_count unmerged reports in $wt_data/unified_reports/"
             echo "Run 'vnx worktree-stop --merge-only' first to preserve intelligence,"

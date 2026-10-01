@@ -50,7 +50,7 @@ source "$VNX_DIR/scripts/pane_manager.sh"
 
 # Get T0 pane ID from dynamic discovery (prefers attached session).
 # Do not pin to panes.json here, because that can drift to an unattached session.
-T0_PANE=$(get_pane_id_smart "T0")
+T0_PANE=$(get_pane_id_smart "T0" || true)
 
 echo -e "${GREEN}Smart Tap (Multi-Block) starting...${NC}"
 echo "Monitoring T0 pane: $T0_PANE"
@@ -398,7 +398,7 @@ save_to_queue() {
         local temp_file
         temp_file=$(mktemp "${VNX_TMP_DIR}/json_block.XXXXXX.tmp")
         echo "$block" > "$temp_file"
-        processed_block=$(json_to_markdown "$temp_file")
+        processed_block=$(json_to_markdown "$temp_file" || true)
         rm -f "$temp_file"
     else
         # Markdown block - clean it for workers
@@ -426,7 +426,7 @@ save_to_queue() {
     local track=""
     if is_json "$block"; then
         # For JSON, extract track from original before conversion
-        track=$(echo "$block" | grep -o '"track"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/')
+        track=$(echo "$block" | grep -o '"track"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/' || true)
     else
         # For Markdown, extract from processed block
         track=$(echo "$processed_block" | sed -n 's/.*\[\[TARGET:\([^]]*\)\]].*/\1/p' | head -1)
@@ -440,7 +440,7 @@ save_to_queue() {
     # Extract Dispatch-ID from block content (preserve T0's original ID)
     local dispatch_id=""
     if is_json "$block"; then
-        dispatch_id=$(echo "$block" | grep -o '"dispatch_id"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/')
+        dispatch_id=$(echo "$block" | grep -o '"dispatch_id"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/' || true)
     else
         dispatch_id=$(echo "$processed_block" | sed -n 's/^Dispatch-ID:[[:space:]]*//Ip' | tr -d ' ' | head -1)
     fi
@@ -657,7 +657,7 @@ while true; do
         # Safety: grep filters to only the tmux pane ID (%N) in case sourced
         # functions leak debug output to stdout (the _pm_log rename prevents
         # this, but belt-and-suspenders).
-        NEW_PANE=$(get_pane_id_smart "T0" | grep -E '^%[0-9]+$' | tail -1)
+        NEW_PANE=$(get_pane_id_smart "T0" | grep -E '^%[0-9]+$' | tail -1 || true)
         if [ -n "$NEW_PANE" ] && [ "$NEW_PANE" != "$T0_PANE" ]; then
             log "T0 pane updated: $T0_PANE → $NEW_PANE"
             T0_PANE="$NEW_PANE"
