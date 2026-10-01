@@ -352,12 +352,35 @@ class GateExecutorMixin:
         Returns (gates_list, has_required_failure) tuple.
 
         has_required_failure is a UNION across gates, not a majority: it flips
-        True the moment ANY required gate is not decided_pass — there is no
+        True the moment ANY gate in this call is not decided_pass — there is no
         averaging or vote-counting here. Ground (measured 22-08): glm_gate and
         kimi_gate returned OPPOSITE verdicts on the identical diff with the
         identical contract_hash (glm FAIL with a blocking finding, kimi PASS
         with none) — neither reader outranks the other, so one blocking
         verdict is enough to block.
+
+        The two branches answer the same question — "must this call report
+        success?" — but from different inputs:
+
+        - an EXECUTED gate (request status "requested") that did not decide
+          PASS blocks regardless of the merge policy's ``required`` flag. A
+          caller that asked a seat into its review stack and got a blocker
+          back (blocking findings, failed, unavailable, incomplete evidence,
+          or a verdict about another commit) has not had a successful run;
+          ``required`` answers "does the final merge need this seat?", not
+          "did the seat we just ran return a verdict?" (measured live: a
+          per-PR ordinary-change codex_gate request carries required=false,
+          returned one blocking finding, and the call exited 0).
+        - a PRE-BOOKED gate (any other status) blocks only when ``required``
+          is true. That branch holds the advisory contract: wiring_gate in
+          shadow mode books status "advisory" with required=false and is
+          deliberately non-blocking (see ``_request_wiring_gate``). It also
+          keeps the OI-1265 inversion — a required gate with any non-pass
+          status, known or unknown, blocks.
+
+        ``required`` is untouched on the request records and in
+        ``auto_merge_policy``; only this call's rollup stops reading an
+        executed gate through it.
         """
         gates: List[Dict[str, Any]] = []
         has_required_failure = False
@@ -423,8 +446,13 @@ class GateExecutorMixin:
                     "write_refused": bool(exec_result.get("write_refused")),
                     "detail": exec_result,
                 })
-                required = req.get("required", True)
-                if gate_name != "claude_github_optional" and required and not decided_pass:
+                # An executed gate blocks on its verdict, not on the merge
+                # policy's ``required`` flag: the caller asked this seat into
+                # its stack, so a non-PASS it returned is a failure of this
+                # call whatever ``required`` says. ``claude_github_optional``
+                # stays optional by name — it is not a seat this call's
+                # success depends on.
+                if gate_name != "claude_github_optional" and not decided_pass:
                     has_required_failure = True
             else:
                 passed, pass_reason = is_pass(req)
