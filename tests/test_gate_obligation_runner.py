@@ -2341,3 +2341,322 @@ class TestStaleTerminalEvidenceReportedByRun:
         findings = summary.get("stale_terminal_evidence") or []
         assert any(f["dispatch_id"] == "20260917-open-one" for f in findings)
         assert not any(f["dispatch_id"] == "20260917-closed-one" for f in findings)
+
+
+# ---------------------------------------------------------------------------
+# Fix-forward head race (2026-09-30) — two defects that let the runner book a
+# verdict about OLDER code onto an obligation for a fix-forward dispatch.
+#
+# (a) The RESOLVED branch of _pre_execution_decision returned attempt_gate the
+#     moment the PR was OPEN, never asking whether the obligation's OWN
+#     dispatch was still running. A fix-forward dispatch binds to the existing
+#     PR immediately, but the PR head is the PREVIOUS round's code until it
+#     pushes. Measured live: a fix-forward's obligation was gated against the
+#     old head and booked with that verdict.
+# (b) fulfill_obligation read the PR head ONCE before request_and_execute and
+#     judged the result against that pre-run snapshot. A gate run takes
+#     minutes; a push landing mid-run left the result's commit_sha equal to
+#     the stale pre-run head, so it read as current. Measured live: the gate
+#     ran twice on the previous head and the obligation was booked fulfilled
+#     with the older commit's result.
+# ---------------------------------------------------------------------------
+
+_OLD_HEAD = "a1a1a1a1" * 5
+_NEW_HEAD = "b2b2b2b2" * 5
+
+
+class TestLiveDispatchOnOpenPrIsNotGated:
+    """Defect (a): an obligation whose dispatch is positively live (its
+    occupancy lock is held) must not be gated against an open PR's current
+    head, and nothing is booked against that head. Liveness that cannot be
+    measured keeps today's behaviour: the gate may run."""
+
+    def test_live_dispatch_on_open_pr_is_not_gated_and_stays_pending(self, tmp_path, monkeypatch):
+        state_dir = _make_state_dir(tmp_path)
+        dispatch_id = "20260930-ffrace-live-open-pr"
+        register_obligation(
+            state_dir, dispatch_id=dispatch_id, gate="codex_gate",
+            project_id="vnx-dev", pr_number=53001,
+        )
+        manager = _FakeReviewGateManager(state_dir, result_status="pass")
+        _patch_manager(monkeypatch, manager, pr_state="OPEN")
+        monkeypatch.setattr(runner, "_dispatch_is_live", lambda sd, did: True)
+
+        summary = runner.run(state_dir)
+
+        assert manager.calls == [], (
+            "a positively live dispatch must not be gated against the PR's "
+            "current head — until it pushes, that head is the previous "
+            "round's code"
+        )
+        record = _read_obligation(state_dir, dispatch_id)
+        assert record["status"] == STATUS_PENDING
+        assert record["reason"] == "dispatch_still_running"
+        assert record["status"] != STATUS_FULFILLED
+        assert "still running" in record["reason_detail"]
+        assert summary["pending_after"] == 1
+        assert summary["outcomes"][0]["action"] == "pending"
+
+    def test_live_dispatch_wins_over_a_matching_existing_verdict(self, tmp_path, monkeypatch):
+        """A pre-existing verdict that still matches the stale head is exactly
+        as much a verdict about other code: while the dispatch is provably
+        live, the obligation stays pending instead of being rescued with it."""
+        state_dir = _make_state_dir(tmp_path)
+        dispatch_id = "20260930-ffrace-live-with-evidence"
+        register_obligation(
+            state_dir, dispatch_id=dispatch_id, gate="codex_gate",
+            project_id="vnx-dev", pr_number=53002,
+        )
+        report_file = state_dir / "unified_reports" / "codex-gate-pr53002.md"
+        report_file.parent.mkdir(parents=True, exist_ok=True)
+        report_file.write_text("codex_gate report body", encoding="utf-8")
+        _seed_decided_gate_result(
+            state_dir, "codex_gate", 53002,
+            commit_sha=_DEFAULT_TEST_HEAD_SHA, report_path=report_file,
+        )
+        manager = _NoOpReviewGateManager(state_dir)
+        _patch_manager(monkeypatch, manager, pr_state="OPEN")
+        monkeypatch.setattr(runner, "_dispatch_is_live", lambda sd, did: True)
+
+        summary = runner.run(state_dir)
+
+        assert manager.calls == [], "no gate may run while the dispatch is live"
+        record = _read_obligation(state_dir, dispatch_id)
+        assert record["status"] == STATUS_PENDING
+        assert record["reason"] == "dispatch_still_running"
+        assert "fulfilled_by" not in record
+        assert summary["pending_after"] == 1
+
+    def test_unmeasured_liveness_on_open_pr_still_gates_control(self, tmp_path, monkeypatch):
+        """Control: no lock file (liveness unmeasurable, None) keeps today's
+        behaviour — the gate may run and a genuine pass still fulfils."""
+        state_dir = _make_state_dir(tmp_path)
+        dispatch_id = "20260930-ffrace-unmeasured-open-pr"
+        register_obligation(
+            state_dir, dispatch_id=dispatch_id, gate="codex_gate",
+            project_id="vnx-dev", pr_number=53003,
+        )
+        manager = _FakeReviewGateManager(state_dir, result_status="pass")
+        _patch_manager(monkeypatch, manager, pr_state="OPEN")
+        monkeypatch.setattr(runner, "_dispatch_is_live", lambda sd, did: None)
+
+        summary = runner.run(state_dir)
+
+        assert len(manager.calls) == 1, (
+            "liveness that cannot be measured must not block the gate — "
+            "today's behaviour stays"
+        )
+        record = _read_obligation(state_dir, dispatch_id)
+        assert record["status"] == STATUS_FULFILLED
+        assert summary["outcomes"][0]["action"] == STATUS_FULFILLED
+
+    def test_released_lock_on_open_pr_still_gates_control(self, tmp_path, monkeypatch):
+        """Control: the lock file exists but no process holds it (False, the
+        dispatch ended) — the gate may run and a genuine pass still fulfils."""
+        state_dir = _make_state_dir(tmp_path)
+        dispatch_id = "20260930-ffrace-dead-open-pr"
+        register_obligation(
+            state_dir, dispatch_id=dispatch_id, gate="codex_gate",
+            project_id="vnx-dev", pr_number=53004,
+        )
+        manager = _FakeReviewGateManager(state_dir, result_status="pass")
+        _patch_manager(monkeypatch, manager, pr_state="OPEN")
+        monkeypatch.setattr(runner, "_dispatch_is_live", lambda sd, did: False)
+
+        runner.run(state_dir)
+
+        assert len(manager.calls) == 1
+        record = _read_obligation(state_dir, dispatch_id)
+        assert record["status"] == STATUS_FULFILLED
+
+    def test_live_dispatch_dry_run_forecasts_pending(self, tmp_path, monkeypatch):
+        """Parity: a dry run forecasts the same stay-pending outcome without
+        invoking the gate."""
+        state_dir = _make_state_dir(tmp_path)
+        dispatch_id = "20260930-ffrace-live-dry-run"
+        register_obligation(
+            state_dir, dispatch_id=dispatch_id, gate="codex_gate",
+            project_id="vnx-dev", pr_number=53005,
+        )
+        manager = _FakeReviewGateManager(state_dir, result_status="pass")
+        _patch_manager(monkeypatch, manager, pr_state="OPEN")
+        monkeypatch.setattr(runner, "_dispatch_is_live", lambda sd, did: True)
+
+        summary = runner.run(state_dir, write=False)
+
+        assert manager.calls == []
+        outcome = summary["outcomes"][0]
+        assert outcome["action"] == "would_stay_pending_dispatch_live"
+        assert summary["pending_after"] == 1
+
+
+class TestHeadMovedDuringGateRunIsNotBooked:
+    """Defect (b): the head is re-resolved after the gate ran, and a result
+    whose commit is provably not that head is never booked. An unknown sha on
+    either side keeps the existing binding-unverifiable handling."""
+
+    def _register(self, state_dir: Path, dispatch_id: str, pr_number: int) -> None:
+        register_obligation(
+            state_dir, dispatch_id=dispatch_id, gate="codex_gate",
+            project_id="vnx-dev", pr_number=pr_number,
+        )
+
+    def test_push_between_request_and_execution_is_not_booked(self, tmp_path, monkeypatch):
+        """The manager's result is recorded on OLD while the head is re-read
+        as NEW after the run — the obligation must stay pending with a reason
+        naming both short shas, never fulfilled with the OLD result."""
+        state_dir = _make_state_dir(tmp_path)
+        dispatch_id = "20260930-ffrace-push-midrun"
+        self._register(state_dir, dispatch_id, 54001)
+        report_file = state_dir / "unified_reports" / "codex-gate-pr54001.md"
+        report_file.parent.mkdir(parents=True, exist_ok=True)
+        report_file.write_text("codex_gate report body", encoding="utf-8")
+
+        manager = _TakeoverFakeReviewGateManager(
+            state_dir, target_gate=None, status="pass", report_path=report_file,
+            commit_sha=_OLD_HEAD,
+        )
+        phase = {"ran": False}
+        real_request = manager.request_and_execute
+
+        def request_and_execute(**kwargs):
+            result = real_request(**kwargs)
+            phase["ran"] = True
+            return result
+
+        monkeypatch.setattr(manager, "request_and_execute", request_and_execute, raising=False)
+        _patch_manager(monkeypatch, manager, pr_state="OPEN")
+        monkeypatch.setattr(
+            runner, "_get_pr_head_sha_for_gate",
+            lambda pr_number: _NEW_HEAD if phase["ran"] else _OLD_HEAD,
+        )
+
+        summary = runner.run(state_dir)
+
+        assert manager.calls, "the gate run itself is allowed; only booking is refused"
+        record = _read_obligation(state_dir, dispatch_id)
+        assert record["status"] == STATUS_PENDING, (
+            "a result recorded on the pre-run head must not be booked once the "
+            "head has moved"
+        )
+        assert record["status"] != STATUS_FULFILLED
+        assert record["reason"] == "stale_evidence_sha_mismatch"
+        assert _OLD_HEAD[:8] in record["reason_detail"]
+        assert _NEW_HEAD[:8] in record["reason_detail"]
+        assert summary["pending_after"] == 1
+        assert summary["outcomes"][0]["action"] == "pending"
+
+    def test_incomplete_evidence_on_stale_head_is_not_booked(self, tmp_path, monkeypatch):
+        """Even a result below the complete-evidence bar (so
+        ``_has_decided_evidence`` cannot classify it as a decided mismatch)
+        is refused when its commit_sha is provably not the head at booking."""
+        state_dir = _make_state_dir(tmp_path)
+        dispatch_id = "20260930-ffrace-incomplete-stale"
+        self._register(state_dir, dispatch_id, 54002)
+        report_file = state_dir / "unified_reports" / "codex-gate-pr54002.md"
+        report_file.parent.mkdir(parents=True, exist_ok=True)
+        report_file.write_text("codex_gate report body", encoding="utf-8")
+
+        manager = _TakeoverFakeReviewGateManager(
+            state_dir, target_gate=None, status="pass", report_path=report_file,
+            contract_hash="",  # incomplete evidence -> not a decided record
+            commit_sha=_OLD_HEAD,
+        )
+        phase = {"ran": False}
+        real_request = manager.request_and_execute
+
+        def request_and_execute(**kwargs):
+            result = real_request(**kwargs)
+            phase["ran"] = True
+            return result
+
+        monkeypatch.setattr(manager, "request_and_execute", request_and_execute, raising=False)
+        _patch_manager(monkeypatch, manager, pr_state="OPEN")
+        monkeypatch.setattr(
+            runner, "_get_pr_head_sha_for_gate",
+            lambda pr_number: _NEW_HEAD if phase["ran"] else _OLD_HEAD,
+        )
+
+        runner.run(state_dir)
+
+        record = _read_obligation(state_dir, dispatch_id)
+        assert record["status"] == STATUS_PENDING
+        assert record["status"] != STATUS_FULFILLED
+        assert record["reason"] == "stale_evidence_sha_mismatch"
+        assert _OLD_HEAD[:8] in record["reason_detail"]
+        assert _NEW_HEAD[:8] in record["reason_detail"]
+
+    def test_result_on_the_new_head_after_a_push_still_fulfils(self, tmp_path, monkeypatch):
+        """Positive half of the re-resolution: a push lands mid-run and the
+        gate's result IS on the new head — a genuine current verdict must
+        still fulfil, never be refused because the pre-run snapshot moved."""
+        state_dir = _make_state_dir(tmp_path)
+        dispatch_id = "20260930-ffrace-current-still-fulfils"
+        self._register(state_dir, dispatch_id, 54003)
+        report_file = state_dir / "unified_reports" / "codex-gate-pr54003.md"
+        report_file.parent.mkdir(parents=True, exist_ok=True)
+        report_file.write_text("codex_gate report body", encoding="utf-8")
+
+        manager = _TakeoverFakeReviewGateManager(
+            state_dir, target_gate=None, status="pass", report_path=report_file,
+            commit_sha=_NEW_HEAD,
+        )
+        phase = {"ran": False}
+        real_request = manager.request_and_execute
+
+        def request_and_execute(**kwargs):
+            result = real_request(**kwargs)
+            phase["ran"] = True
+            return result
+
+        monkeypatch.setattr(manager, "request_and_execute", request_and_execute, raising=False)
+        _patch_manager(monkeypatch, manager, pr_state="OPEN")
+        monkeypatch.setattr(
+            runner, "_get_pr_head_sha_for_gate",
+            lambda pr_number: _NEW_HEAD if phase["ran"] else _OLD_HEAD,
+        )
+
+        summary = runner.run(state_dir)
+
+        record = _read_obligation(state_dir, dispatch_id)
+        assert record["status"] == STATUS_FULFILLED
+        assert record["fulfilled_by"] == "codex_gate"
+        assert summary["pending_after"] == 0
+
+    def test_takeover_successor_on_the_new_head_still_fulfils(self, tmp_path, monkeypatch):
+        """Requirement 3, takeover path: the declared gate stays stuck while
+        the takeover successor carries a current verdict on the NEW head —
+        the post-run re-resolution must still book it via the takeover walk."""
+        state_dir = _make_state_dir(tmp_path)
+        dispatch_id = "20260930-ffrace-takeover-new-head"
+        self._register(state_dir, dispatch_id, 54004)
+        _seed_stuck_gate_result(state_dir, "codex_gate", 54004)
+        report_file = state_dir / "unified_reports" / "kimi-gate-pr54004.md"
+        report_file.parent.mkdir(parents=True, exist_ok=True)
+        report_file.write_text("kimi_gate report body", encoding="utf-8")
+
+        manager = _TakeoverFakeReviewGateManager(
+            state_dir, target_gate="kimi_gate", status="pass", report_path=report_file,
+            commit_sha=_NEW_HEAD,
+        )
+        phase = {"ran": False}
+        real_request = manager.request_and_execute
+
+        def request_and_execute(**kwargs):
+            result = real_request(**kwargs)
+            phase["ran"] = True
+            return result
+
+        monkeypatch.setattr(manager, "request_and_execute", request_and_execute, raising=False)
+        _patch_manager(monkeypatch, manager, pr_state="OPEN")
+        monkeypatch.setattr(
+            runner, "_get_pr_head_sha_for_gate",
+            lambda pr_number: _NEW_HEAD if phase["ran"] else _OLD_HEAD,
+        )
+
+        summary = runner.run(state_dir)
+
+        record = _read_obligation(state_dir, dispatch_id)
+        assert record["status"] == STATUS_FULFILLED
+        assert record["resolved_by_gate"] == "kimi_gate"
+        assert summary["pending_after"] == 0

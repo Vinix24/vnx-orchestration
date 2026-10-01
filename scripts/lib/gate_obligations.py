@@ -109,6 +109,16 @@ REASON_NO_PR_BRANCH_EXISTS = "no_pr_branch_exists"
 # silent default the old two-way ``False`` collapsed them into.
 REASON_NO_PR_BRANCH_GONE_LIVE = "no_pr_branch_gone_live"
 REASON_NO_PR_BRANCH_GONE_UNMEASURED = "no_pr_branch_gone_unmeasured"
+# OI-1532 follow-up (2026-09-30): the SAME occupancy-lock answer, but for an
+# obligation whose PR is ALREADY RESOLVED and still OPEN. A fix-forward
+# dispatch is registered against an existing PR, so its obligation resolves to
+# that PR immediately; the PR head is the PREVIOUS round's code until the
+# dispatch pushes. When the dispatch's occupancy lock is positively held, the
+# runner must not gate that stale head (nor book any verdict about it) — it
+# stays pending under this reason, distinct from REASON_NO_PR_BRANCH_GONE_LIVE
+# (which is only emitted when the head BRANCH is gone). Unmeasured liveness
+# keeps today's behaviour: the gate may run.
+REASON_DISPATCH_STILL_RUNNING = "dispatch_still_running"
 
 # D2e takeover bookings (writer: scripts/gate_obligation_runner.py, the
 # ``_find_takeover_successor_evidence`` branch): the declared gate never
@@ -529,6 +539,7 @@ __all__ = [
     "REASON_NO_PR_BRANCH_EXISTS",
     "REASON_NO_PR_BRANCH_GONE_LIVE",
     "REASON_NO_PR_BRANCH_GONE_UNMEASURED",
+    "REASON_DISPATCH_STILL_RUNNING",
     "REASON_FULFILLED_BY_TAKEOVER",
     "REASON_FAILED_BY_TAKEOVER",
     "REASON_GATE_PARKED",
