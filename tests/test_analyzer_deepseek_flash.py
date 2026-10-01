@@ -57,6 +57,20 @@ def _balance_body(total="5.00", currency="USD", available=True):
     }
 
 
+def _git_passthrough_run(result):
+    """subprocess.run stand-in: config-dir path resolution shells out to git, claude is mocked."""
+    real_run = subprocess.run
+    mock = MagicMock(return_value=result)
+
+    def _run(cmd, *a, **kw):
+        if cmd and os.path.basename(str(cmd[0])) == "git":
+            return real_run(cmd, *a, **kw)
+        return mock(cmd, *a, **kw)
+
+    _run.mock = mock
+    return _run
+
+
 def _ok_completion():
     return MagicMock(returncode=0, stdout=json.dumps({"result": '{"suggestions": []}'}), stderr="")
 
@@ -86,13 +100,13 @@ def test_harness_call_names_the_model_and_is_key_auth_hardened():
     with patch.dict(os.environ, hostile), \
          patch.object(DeepAnalyzer, "_fetch_deepseek_balance", return_value=_balance_body(), create=True), \
          patch.object(da_module, "DEEPSEEK_HARNESS_MODEL", "deepseek-flash"), \
-         patch("subprocess.run", return_value=_ok_completion()) as run:
+         patch("subprocess.run", _git_passthrough_run(_ok_completion())) as run:
         outcome = DeepAnalyzer._try_deepseek_harness("prompt")
 
     assert outcome.status == "ok"
-    run.assert_called_once()
-    args = run.call_args.args[0]
-    env = run.call_args.kwargs["env"]
+    run.mock.assert_called_once()
+    args = run.mock.call_args.args[0]
+    env = run.mock.call_args.kwargs["env"]
     assert args[args.index("--model") + 1] == "deepseek-flash"
     assert "--strict-mcp-config" in args
     assert args[args.index("--mcp-config") + 1] == '{"mcpServers":{}}'

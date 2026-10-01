@@ -37,6 +37,13 @@ if _LIB_DIR not in sys.path:
 
 from provider_spawns.claude_spawn import spawn_claude  # noqa: E402
 
+from provider_spawns.harness_config_dir import (
+    HarnessConfigDirError,
+    harness_config_env,
+)
+
+HARNESS_LANE = "glm-harness"
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_GLM_PROXY_URL = "http://localhost:4141"
@@ -151,6 +158,16 @@ def spawn_glm_harness(
     # Mandatory harness env wins over caller extra_env so the redirect/auth cannot be overridden.
     merged_env: Dict[str, str] = dict(extra_env or {})
     merged_env.update(build_harness_env())
+    try:
+        # Applied last: replaces any inherited CLAUDE_CONFIG_DIR. Fail closed, no spawn.
+        merged_env.update(harness_config_env(HARNESS_LANE))
+    except HarnessConfigDirError as exc:
+        logger.error("spawn_glm_harness: %s; refusing to spawn.", exc)
+        return GLMHarnessSpawnResult(
+            returncode=1, completion={}, events_written=0, session_id=None,
+            timed_out=False, model=resolved_model,
+            error=f"harness config dir unsafe: {exc}",
+        )
 
     claude_result = spawn_claude(
         prompt=prompt,

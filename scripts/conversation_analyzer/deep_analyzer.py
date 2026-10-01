@@ -23,6 +23,7 @@ from provider_spawns.deepseek_harness_spawn import (
     build_harness_cli_args,
     DEEPSEEK_API_KEY_ENV,
 )
+from provider_spawns.harness_config_dir import HarnessConfigDirError
 
 DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
 
@@ -489,7 +490,11 @@ Respond with valid JSON:
                     "--model", DEEPSEEK_HARNESS_MODEL]
         cli_args.extend(build_harness_cli_args())
 
-        child_env = build_harness_child_env(api_key)
+        try:
+            child_env = build_harness_child_env(api_key)
+        except HarnessConfigDirError as exc:
+            log("ERROR", f"DeepSeek harness config dir unsafe, not spawning: {exc}")
+            return LLMOutcome("error", stderr=str(exc)[:200])
 
         try:
             result = subprocess.run(

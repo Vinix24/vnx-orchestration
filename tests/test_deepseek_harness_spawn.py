@@ -301,7 +301,10 @@ class TestFinalPopenEnvScrub:
             def wait(self, timeout=None):
                 return 0
 
+        _real_popen = sa.subprocess.Popen
         def _fake_popen(cmd, **kwargs):
+            if cmd and cmd[0] == "git":  # config-dir path resolution shells out to git
+                return _real_popen(cmd, **kwargs)
             captured["env"] = kwargs.get("env")
             proc = _FakeProc()
             # Provide real pipe fds so Popen tracking code doesn't crash.
@@ -354,7 +357,10 @@ class TestFinalPopenEnvScrub:
             def wait(self, timeout=None):
                 return 0
 
+        _real_popen = sa.subprocess.Popen
         def _fake_popen(cmd, **kwargs):
+            if cmd and cmd[0] == "git":  # config-dir path resolution shells out to git
+                return _real_popen(cmd, **kwargs)
             captured["env"] = kwargs.get("env")
             proc = _FakeProc()
             proc.stdout = MagicMock()

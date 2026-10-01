@@ -47,6 +47,13 @@ if _LIB_DIR not in sys.path:
 
 from provider_spawns.claude_spawn import spawn_claude  # noqa: E402 (path-setup above)
 
+from provider_spawns.harness_config_dir import (
+    HarnessConfigDirError,
+    harness_config_env,
+)
+
+HARNESS_LANE = "deepseek-harness"
+
 logger = logging.getLogger(__name__)
 
 # DeepSeek's Anthropic-compatible Messages endpoint base.  The ``claude`` CLI
@@ -121,6 +128,7 @@ def build_harness_child_env(api_key: str, base_env: Optional[Dict[str, str]] = N
     for key in _HARNESS_SCRUB_KEYS:
         env.pop(key, None)
     env.update(build_harness_env(api_key))
+    env.update(harness_config_env(HARNESS_LANE))
     return env
 
 
@@ -236,6 +244,20 @@ def spawn_deepseek_harness(
     # non-overridable.
     merged_env: Dict[str, str] = dict(extra_env or {})
     merged_env.update(build_harness_env(resolved_key))
+    try:
+        # Applied last: replaces any inherited CLAUDE_CONFIG_DIR. Fail closed, no spawn.
+        merged_env.update(harness_config_env(HARNESS_LANE))
+    except HarnessConfigDirError as exc:
+        logger.error("spawn_deepseek_harness: %s; refusing to spawn.", exc)
+        return DeepSeekHarnessSpawnResult(
+            returncode=1,
+            completion={},
+            events_written=0,
+            session_id=None,
+            timed_out=False,
+            model=resolved_model,
+            error=f"harness config dir unsafe: {exc}",
+        )
 
     claude_result = spawn_claude(
         prompt=prompt,
