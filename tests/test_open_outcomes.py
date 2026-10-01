@@ -13,6 +13,7 @@ import multiprocessing
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List
@@ -303,7 +304,7 @@ def test_pull_subcommand_and_cursor_are_gone(tmp_path: Path) -> None:
 
 def _store(tmp_path: Path) -> Path:
     data = tmp_path / ".vnx-data"
-    for sub in ("active", "completed", "dead_letter"):
+    for sub in ("active", "completed", "dead_letter", "abandoned"):
         (data / "dispatches" / sub).mkdir(parents=True)
     (data / "receipts" / "processed").mkdir(parents=True)
     (data / "state").mkdir()
@@ -362,6 +363,87 @@ def test_t0_decision_overrides_the_receipt_outcome(tmp_path: Path) -> None:
     _decide(data / "state", "d-1", "accept")
     drain_active(data, older_than_hours=1.0)
     assert _where(data, "d-1") == "completed"
+
+
+# ---------------------------------------------------------------------------
+# lv-04: a bundle cleanup moved to abandoned/ is still an open point
+# ---------------------------------------------------------------------------
+
+def _abandoned(data: Path, did: str, *, age_days: float = 8.0) -> Path:
+    """A bundle dispatch_cleanup.py moved to abandoned/: spec + instruction, 8 days old."""
+    bundle = data / "dispatches" / "abandoned" / did
+    bundle.mkdir(parents=True)
+    (bundle / "dispatch-spec.json").write_text(
+        json.dumps({"dispatch_id": did, "project_id": PROJECT}), encoding="utf-8")
+    (bundle / "instruction.md").write_text("# staged, never ran\n", encoding="utf-8")
+    old = time.time() - age_days * 86400
+    os.utime(bundle, (old, old))
+    return bundle
+
+
+def _abandoned_ids(data: Path, project: str = PROJECT) -> List[str]:
+    section = oo.build_open_outcomes(data / "state", project_id=project, limit=None)
+    assert section["available"], section
+    return sorted(i["dispatch_id"] for i in section["items"])
+
+
+def test_abandoned_bundle_without_decision_is_an_open_point(tmp_path: Path) -> None:
+    data = _store(tmp_path)
+    _abandoned(data, "d-aband")
+    section = oo.build_open_outcomes(data / "state", project_id=PROJECT, limit=None)
+    items = [i for i in section["items"] if i["dispatch_id"] == "d-aband"]
+    assert len(items) == 1
+    assert items[0]["kind"] == oo.KIND_ABANDONED_DISPATCH
+    assert items[0]["outcome"] == oo.OUTCOME_NO_DECISION
+    assert items[0]["reason"]
+    assert section["by_kind"][oo.KIND_ABANDONED_DISPATCH] == 1
+    assert section["total"] == 1
+
+
+def test_abandoned_bundle_a_t0_decision_closes_it(tmp_path: Path) -> None:
+    data = _store(tmp_path)
+    _abandoned(data, "d-aband")
+    assert _abandoned_ids(data) == ["d-aband"]
+    _decide(data / "state", "d-aband", "accept")
+    assert _abandoned_ids(data) == []
+
+
+def test_abandoned_bundle_another_projects_decision_does_not_close_it(tmp_path: Path) -> None:
+    data = _store(tmp_path)
+    _abandoned(data, "d-aband")
+    _decide(data / "state", "d-aband", "accept", project=OTHER)
+    assert _abandoned_ids(data) == ["d-aband"]
+
+
+def test_abandoned_bundle_already_listed_under_another_kind_appears_once(tmp_path: Path) -> None:
+    data = _store(tmp_path)
+    _abandoned(data, "d-x")
+    _abandoned(data, "d-only")
+    _ledger(data / "state", _reject("d-x"))
+    section = oo.build_open_outcomes(data / "state", project_id=PROJECT, limit=None)
+    items = [i for i in section["items"] if i["dispatch_id"] == "d-x"]
+    assert len(items) == 1 and items[0]["kind"] == oo.KIND_RECEIPT_OUTCOME
+    assert _abandoned_ids(data) == ["d-only", "d-x"]
+    assert section["total"] == 2
+    assert section["by_kind"] == {oo.KIND_RECEIPT_OUTCOME: 1, oo.KIND_ABANDONED_DISPATCH: 1}
+
+
+def test_abandoned_bundle_that_cannot_be_read_is_still_listed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = _store(tmp_path)
+    bundle = _abandoned(data, "d-unreadable")
+    real_stat = os.stat
+
+    def _stat(path, *args, **kwargs):
+        if Path(path) == bundle:
+            raise OSError("permission denied")
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", _stat)
+    section = oo.build_open_outcomes(data / "state", project_id=PROJECT, limit=None)
+    item = next(i for i in section["items"] if i["dispatch_id"] == "d-unreadable")
+    assert item["kind"] == oo.KIND_ABANDONED_DISPATCH and item["last_seen"] is None
 
 
 # ---------------------------------------------------------------------------

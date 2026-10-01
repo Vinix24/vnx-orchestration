@@ -39,16 +39,30 @@ Each item carries ``kind``, counted in ``by_kind``:
   ``reject``, ``investigate`` or ``unknown`` (only evidence, no outcome line
   of its own). A ``superseded`` dispatch is no open point: the child that
   took the work over carries the outcome.
-* ``active_dispatch`` (D4b2) — a dispatch still in ``dispatches/active/``,
-  as an ``<id>/`` directory or as the ``<id>.md`` a failed headless delivery
-  leaves (``scan_active``; a ``.md`` without a ``[[TARGET:...]]`` marker is
-  no dispatch and only counted in ``ignored``), that the active-drain
-  leaves standing without an outcome: no receipt past
+* ``active_dispatch`` (D4b2) — a dispatch still in a live bucket as an
+  ``<id>/`` directory or as the ``<id>.md`` a failed delivery leaves
+  (``scan_active``/``scan_rejected``; a ``.md`` without a ``[[TARGET:...]]``
+  marker is no dispatch and only counted in ``ignored``), that the
+  active-drain leaves standing without an outcome: no receipt past
   the threshold (``no_receipt``), a receipt without an outcome of its own
   (``no_outcome``), or a receipt outcome other than accept (``reject``,
   ``investigate``). ``active_destination`` is the one rule for both the
   drain and this list, and ``receipt_presence`` the one test of "has a
   receipt"; the janitor and dispatch_cleanup read the same two.
+* ``abandoned_dispatch`` — a bundle ``dispatch_cleanup.py`` moved out of
+  ``dispatches/pending/`` into ``dispatches/abandoned/`` (a
+  ``stale-no-receipt`` bundle: no receipt, at least 7 days old) that no
+  outcome decision of this project has closed. ``abandoned/`` stays the
+  storage bucket cleanup moves it to; the bucket is not an outcome. A
+  bundle that cannot be read is listed too: an open point is safer than a
+  silent one.
+
+  The live buckets are ``dispatches/active/`` **and**
+  ``dispatches/rejected/<reason>/``: the post-worker-exit cleanup
+  (``cleanup_worker_exit._move_dispatch_file_step``) moves a non-success
+  exit's dispatch file there by itself, with no T0 decision behind it, so
+  the bucket is storage, never an ending — the dispatch stays an open point
+  until a T0 records accept or reject for it (``scan_open_buckets``).
 
 Nothing without an outcome ends in ``completed/`` or ``dead_letter/``: an
 accept goes to completed, dead_letter is only a T0 ``reject`` in the
@@ -63,7 +77,9 @@ BILLING SAFETY: No Anthropic SDK imports. No api.anthropic.com calls.
 from __future__ import annotations
 
 import json
+import os
 import re
+import stat
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, NamedTuple, Optional
@@ -88,10 +104,13 @@ OUTCOME_DECISIONS = frozenset({"accept", "reject"})
 OPEN_DECISIONS = ("reject", "investigate", "unknown")
 KIND_RECEIPT_OUTCOME = "receipt_outcome"
 KIND_ACTIVE_DISPATCH = "active_dispatch"
+KIND_ABANDONED_DISPATCH = "abandoned_dispatch"
 
 # What an active dispatch without an outcome reads as in the list.
 OUTCOME_NO_RECEIPT = "no_receipt"
 OUTCOME_NO_OUTCOME = "no_outcome"
+# What an abandoned bundle nothing decided on reads as.
+OUTCOME_NO_DECISION = "no_decision"
 
 # An active dispatch without any receipt is still running until it is this
 # old; after that it is an open point (the drain's --older-than-hours default).
@@ -354,12 +373,15 @@ def active_destination(
 
 
 class DispatchEntry(NamedTuple):
-    """A dispatch in ``active/``. ``directory`` is its path there: a
-    ``<id>/`` directory, or an ``<id>.md`` file the headless daemon left
-    after a failed delivery (D4b2)."""
+    """A dispatch in a live bucket: ``active/``, ``rejected/<reason>/`` or
+    ``abandoned/``. ``directory`` is its path there: a ``<id>/`` directory, or
+    an ``<id>.md`` file the headless daemon or the post-exit cleanup left
+    behind (D4b2). ``bucket`` names which one it is: ``active``, ``rejected``
+    or ``abandoned`` (a ``<id>/`` bundle ``dispatch_cleanup.py`` moved there)."""
     dispatch_id: str
     directory: Path
     timestamp: Optional[datetime]
+    bucket: str = "active"
 
 
 class ActiveScan(NamedTuple):
@@ -388,7 +410,7 @@ def _manifest_timestamp(raw: str) -> Optional[datetime]:
     return None
 
 
-def markdown_dispatch(path: Path) -> tuple:
+def markdown_dispatch(path: Path, bucket: str = "active") -> tuple:
     """``(entry, None)`` when ``active/<id>.md`` is a dispatch, else
     ``(None, reason)``. The id is the file stem, the one the headless daemon
     delivers and its receipts carry; the timestamp is the file's mtime (the
@@ -407,27 +429,63 @@ def markdown_dispatch(path: Path) -> tuple:
     except OSError:
         # vnx-silent-except: without a timestamp the dispatch is an open point.
         timestamp = None
-    return DispatchEntry(dispatch_id=path.stem, directory=path, timestamp=timestamp), None
+    return DispatchEntry(dispatch_id=path.stem, directory=path, timestamp=timestamp,
+                         bucket=bucket), None
 
 
-def scan_active(dispatches_dir: Path) -> ActiveScan:
-    """Read ``dispatches/active/``: every directory and every ``.md`` that is a
-    dispatch (``markdown_dispatch``). Other files are no entry."""
-    active = Path(dispatches_dir) / "active"
+def _scan_bucket(bucket_dir: Path, bucket: str = "active") -> ActiveScan:
+    """Read one directory of dispatches: every subdirectory and every ``.md``
+    that is a dispatch (``markdown_dispatch``). Other files are no entry."""
     entries: List[DispatchEntry] = []
     ignored: List[tuple] = []
-    if not active.is_dir():
+    if not bucket_dir.is_dir():
         return ActiveScan(entries, ignored)
-    for path in sorted(active.iterdir()):
+    for path in sorted(bucket_dir.iterdir()):
         if path.is_dir():
-            entries.append(_directory_dispatch(path))
+            entries.append(_directory_dispatch(path, bucket))
         elif path.is_file() and path.suffix == ".md":
-            entry, reason = markdown_dispatch(path)
+            entry, reason = markdown_dispatch(path, bucket)
             if entry is None:
                 ignored.append((path.name, reason))
             else:
                 entries.append(entry)
     return ActiveScan(entries, ignored)
+
+
+def scan_active(dispatches_dir: Path) -> ActiveScan:
+    """Read ``dispatches/active/``: every directory and every ``.md`` that is a
+    dispatch (``markdown_dispatch``). Other files are no entry."""
+    return _scan_bucket(Path(dispatches_dir) / "active", "active")
+
+
+def scan_rejected(dispatches_dir: Path) -> ActiveScan:
+    """Read ``dispatches/rejected/<reason>/``: dispatch files the post-worker-exit
+    cleanup moved there on a non-success exit, one directory per reason
+    (``failure``/``timeout``/``killed``/``stuck``). The reason subdirectory is
+    storage, not an outcome: no T0 decided anything by the move, so these stay
+    open points exactly like a file in ``active/`` (``scan_active``)."""
+    rejected = Path(dispatches_dir) / "rejected"
+    entries: List[DispatchEntry] = []
+    ignored: List[tuple] = []
+    if not rejected.is_dir():
+        return ActiveScan(entries, ignored)
+    for reason_dir in sorted(rejected.iterdir()):
+        if not reason_dir.is_dir():
+            continue
+        scan = _scan_bucket(reason_dir, "rejected")
+        entries.extend(scan.entries)
+        ignored.extend(scan.ignored)
+    return ActiveScan(entries, ignored)
+
+
+def scan_open_buckets(dispatches_dir: Path) -> ActiveScan:
+    """Every bucket a dispatch file the fabric has not decided on can sit in:
+    ``active/`` first, then ``rejected/<reason>/`` (``scan_active`` /
+    ``scan_rejected``). One dispatch with a file in both is one entry — the
+    ``active/`` one wins in ``active_dispatch_items``'s ``seen`` filter."""
+    active = scan_active(dispatches_dir)
+    rejected = scan_rejected(dispatches_dir)
+    return ActiveScan(active.entries + rejected.entries, active.ignored + rejected.ignored)
 
 
 def iter_active_dispatches(dispatches_dir: Path) -> Iterator[DispatchEntry]:
@@ -436,7 +494,7 @@ def iter_active_dispatches(dispatches_dir: Path) -> Iterator[DispatchEntry]:
     yield from scan_active(dispatches_dir).entries
 
 
-def _directory_dispatch(entry_dir: Path) -> DispatchEntry:
+def _directory_dispatch(entry_dir: Path, bucket: str = "active") -> DispatchEntry:
     """A DispatchEntry for ``active/<id>/``, id and timestamp from its manifest."""
     manifest = entry_dir / "manifest.json"
     dispatch_id = entry_dir.name
@@ -452,7 +510,8 @@ def _directory_dispatch(entry_dir: Path) -> DispatchEntry:
             # vnx-silent-except: an unreadable manifest is a dispatch
             # without a timestamp, which is an open point, never a crash.
             timestamp = None
-    return DispatchEntry(dispatch_id=dispatch_id, directory=entry_dir, timestamp=timestamp)
+    return DispatchEntry(dispatch_id=dispatch_id, directory=entry_dir, timestamp=timestamp,
+                         bucket=bucket)
 
 
 def active_dispatch_items(
@@ -464,13 +523,15 @@ def active_dispatch_items(
     threshold_hours: float = NO_RECEIPT_THRESHOLD_HOURS,
     scan: Optional[ActiveScan] = None,
 ) -> List[Dict[str, Any]]:
-    """The dispatches in ``<data_dir>/dispatches/active/`` the drain leaves
-    standing as an open point, read exactly as the drain reads them:
-    ``scan_active`` (directories and dispatch ``.md`` files), then
-    ``receipts/processed`` through ``dispatch_receipts``, then
-    ``active_destination``. ``scan`` is an ``active/`` already read."""
+    """The dispatches in a live bucket (``<data_dir>/dispatches/active/`` and
+    ``rejected/<reason>/``) the drain leaves standing as an open point, read
+    exactly as the drain reads them: the bucket scan (directories and dispatch
+    ``.md`` files), then ``receipts/processed`` through
+    ``dispatch_receipts``, then ``active_destination``. ``scan`` is a bucket
+    set already read (``scan_open_buckets``); an id in both buckets is one
+    item, the ``active/`` entry first."""
     data_dir = Path(data_dir)
-    entries = (scan or scan_active(data_dir / "dispatches")).entries
+    entries = (scan or scan_open_buckets(data_dir / "dispatches")).entries
     if not entries:
         return []
     receipts = read_processed(data_dir / "receipts")
@@ -481,15 +542,27 @@ def active_dispatch_items(
     seen: set = set()
     for entry in entries:
         did = entry.dispatch_id
-        # an id both as <id>/ and <id>.md is one open point, not two
+        # one dispatch with files in several buckets (active/, rejected/) is
+        # one open point, not two; active/ comes first, so it wins
         if did in seen:
             continue
         seen.add(did)
         age = (now - entry.timestamp).total_seconds() if entry.timestamp else None
+        status = status_index.get(did)
+        has_receipt = did in presence
+        decision = (decisions.get(did) or {}).get("decision")
         _, reason, open_as = active_destination(
-            receipt_status=status_index.get(did), has_receipt=did in presence,
-            decision=(decisions.get(did) or {}).get("decision"),
-            age_seconds=age, threshold_seconds=threshold_hours * 3600.0)
+            receipt_status=status, has_receipt=has_receipt,
+            decision=decision, age_seconds=age,
+            threshold_seconds=threshold_hours * 3600.0)
+        if (open_as is None and entry.bucket == "rejected"
+                and decision is None and status is None and not has_receipt):
+            # A file under rejected/<reason>/ is there because the worker
+            # exited non-successfully (cleanup_worker_exit step 3), so the
+            # "may still be running" grace of the no-receipt threshold does
+            # not apply: without a decision it is an open point at once.
+            open_as = OUTCOME_NO_RECEIPT
+            reason = "open point: no receipt after a failed exit"
         if open_as is None:
             continue
         items.append({
@@ -498,6 +571,81 @@ def active_dispatch_items(
             "outcome": open_as,
             "status": status_index.get(did),
             "reason": reason,
+            "last_seen": entry.timestamp.isoformat() if entry.timestamp else None,
+        })
+    return items
+
+
+def _abandoned_dispatch(entry_dir: Path) -> DispatchEntry:
+    """A DispatchEntry for ``abandoned/<id>/``: the directory name is the
+    dispatch id (cleanup moves ``pending/<id>/`` under the same name), the
+    timestamp its mtime. A bundle whose mtime cannot be read stays an entry
+    without a timestamp — an open point, never a crash."""
+    entry_dir = Path(entry_dir)
+    try:
+        timestamp: Optional[datetime] = datetime.fromtimestamp(entry_dir.stat().st_mtime, tz=timezone.utc)
+    except OSError:
+        # vnx-silent-except: without a timestamp the bundle is still an open point.
+        timestamp = None
+    return DispatchEntry(dispatch_id=entry_dir.name, directory=entry_dir, timestamp=timestamp)
+
+
+def scan_abandoned(dispatches_dir: Path) -> List[DispatchEntry]:
+    """Read ``dispatches/abandoned/``: every directory there is a bundle
+    ``dispatch_cleanup.py`` moved out of ``pending/``. An entry that cannot be
+    read is still a dispatch (``_abandoned_dispatch``): an open point is safer
+    than a silent one, so a stat that fails lists the entry rather than dropping it."""
+    abandoned = Path(dispatches_dir) / "abandoned"
+    entries: List[DispatchEntry] = []
+    if not abandoned.is_dir():
+        return entries
+    for path in sorted(abandoned.iterdir()):
+        try:
+            is_dir = stat.S_ISDIR(os.stat(path, follow_symlinks=False).st_mode)
+        except OSError:
+            # vnx-silent-except: cannot tell what it is; an open point is safer.
+            is_dir = True
+        if is_dir:
+            entries.append(_abandoned_dispatch(path))
+    return entries
+
+
+ABANDONED_WITHOUT_DECISION = (
+    "abandoned bundle without a T0 decision: an open point "
+    "(receipt_query.py decide <dispatch-id> accept|reject)")
+
+
+def abandoned_dispatch_items(
+    data_dir: Path,
+    decisions: Dict[str, Dict[str, Any]],
+    *,
+    scan: Optional[List[DispatchEntry]] = None,
+) -> List[Dict[str, Any]]:
+    """The bundles in ``<data_dir>/dispatches/abandoned/`` that no outcome
+    decision of this project closes.
+
+    ``decisions`` is already scoped to the project (``read_outcome_decisions``):
+    another project's decision about the same dispatch id is not in it, so it
+    closes nothing. ``scan`` is an ``abandoned/`` already read. An unreadable
+    bundle is listed too.
+    """
+    data_dir = Path(data_dir)
+    entries = scan if scan is not None else scan_abandoned(data_dir / "dispatches")
+    items: List[Dict[str, Any]] = []
+    seen: set = set()
+    for entry in entries:
+        did = entry.dispatch_id
+        # an id both here and in another list is one open point (the caller
+        # drops the duplicate); a decision of this project closes it.
+        if did in seen or did in decisions:
+            continue
+        seen.add(did)
+        items.append({
+            "kind": KIND_ABANDONED_DISPATCH,
+            "dispatch_id": did,
+            "outcome": OUTCOME_NO_DECISION,
+            "status": None,
+            "reason": ABANDONED_WITHOUT_DECISION,
             "last_seen": entry.timestamp.isoformat() if entry.timestamp else None,
         })
     return items
@@ -566,9 +714,12 @@ def build_open_outcomes(
     """The open-outcomes section: counts over all open points, at most
     ``limit`` items (None = all), and ``more`` for the rest.
 
-    ``data_dir`` (default ``state_dir.parent``) holds ``dispatches/active``
-    and ``receipts/processed`` for the ``active_dispatch`` kind. An active
-    dispatch the ledger already lists is listed once, as ``receipt_outcome``.
+    ``data_dir`` (default ``state_dir.parent``) holds ``dispatches/active``,
+    ``dispatches/rejected/<reason>`` and ``receipts/processed`` for the
+    ``active_dispatch`` kind, and ``dispatches/abandoned`` for the
+    ``abandoned_dispatch`` kind. A dispatch the ledger already lists is listed
+    once, as ``receipt_outcome``; one with files in several buckets is one
+    item too.
 
     Stateless: two readers at the same moment get the same answer, and
     reading consumes nothing. Without a project id, or when a file cannot be
@@ -590,13 +741,20 @@ def build_open_outcomes(
     listed = {i["dispatch_id"] for i in items}
     store = Path(data_dir) if data_dir else state_dir.parent
     try:
-        scan = scan_active(store / "dispatches")
+        scan = scan_open_buckets(store / "dispatches")
         active = active_dispatch_items(
             store, decisions, project_id=project_id, now=now,
             threshold_hours=no_receipt_threshold_hours, scan=scan)
+        abandoned = abandoned_dispatch_items(store, decisions)
     except OSError as exc:
-        return {"available": False, "reason": f"could not read dispatches/active: {exc}"}
-    items += [i for i in active if i["dispatch_id"] not in listed]
+        return {"available": False, "reason": f"could not read dispatches/active, /rejected or /abandoned: {exc}"}
+    # an id in more than one bucket is one open point: the ledger kind wins,
+    # then active/ (over rejected/), then the abandoned bucket.
+    for item in active + abandoned:
+        if item["dispatch_id"] in listed:
+            continue
+        listed.add(item["dispatch_id"])
+        items.append(item)
     items.sort(key=lambda i: i["dispatch_id"])
     items.sort(key=lambda i: i["last_seen"] or "", reverse=True)
     shown = items if limit is None else items[:max(0, limit)]
@@ -614,6 +772,7 @@ def build_open_outcomes(
         "by_kind": by_kind,
         "items": shown,
         "more": len(items) - len(shown),
-        # .md files in active/ that are no dispatch (NOT_A_DISPATCH); the drain names them
+        # .md files in active/ and rejected/<reason>/ that are no dispatch
+        # (NOT_A_DISPATCH); the drain names the active/ ones
         "ignored": len(scan.ignored),
     }
