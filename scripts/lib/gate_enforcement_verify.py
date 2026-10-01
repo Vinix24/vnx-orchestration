@@ -18,10 +18,33 @@ by an earlier round. So the gates verified are the reported ones.
 
 Fail-closed
 -----------
+A reported gate's artifacts must be present AND readable. A request file or a
+result file that is missing is MISSING_ARTIFACT. A result file that exists but
+does not parse into a JSON object (a truncated or half-copied write, or a value
+that is not an object) is also MISSING_ARTIFACT: it says nothing about what the
+review found, so it is no artifact at all -- never a run that returned a
+non-passing status. Only a readable object whose ``status`` is not
+``completed``/``passed`` is reported-but-not-failed (``GATE_NOT_COMPLETED``), the
+"let T0 decide" case.
+
 A seat is accounted for when a reported gate is that seat, when the seat appears
 in a reported gate's ``takeover_path`` (it was passed over and that gate read in
 its place), or when its takeover chain was recorded as exhausted. A seat with none
 of these has no request, no result and no takeover record: MISSING_ARTIFACT.
+
+Commit binding
+--------------
+A gate result is a statement about ONE commit. Every executed entry in the
+report carries ``head_sha`` (the head this run sampled) and
+``result_commit_sha`` (the commit the result record names, also on the record
+itself as ``commit_sha``). A result whose commit is not the head of this run is
+not evidence about this head, so the gate is not verified and the wrapper exits
+non-zero -- otherwise a fix-forward push lets a completed result from the
+previous head verify cleanly. The decision is three-way, matching
+``gate_executor._classify_sha_binding``: ``match``, ``mismatch``, and
+``unknown``. ``unknown`` (either sha absent -- ``gh`` unreachable, a writer that
+stamped no identity) is not a polite mismatch and never fails the run; it stays
+exactly as the verifier behaved before this check existed.
 
 The requested stack is parsed from the same arguments the manager received, with
 argparse, so ``--review-stack a,b`` and ``--review-stack=a,b`` and a quoted
@@ -56,10 +79,11 @@ class Verification:
     missing: List[str] = field(default_factory=list)
     not_completed: List[str] = field(default_factory=list)
     verified: List[str] = field(default_factory=list)
+    sha_mismatch: List[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
-        return not self.missing
+        return not self.missing and not self.sha_mismatch
 
 
 def parse_request_args(
@@ -151,6 +175,44 @@ def _takeover_hops(entry: Dict[str, Any], request_file: Path) -> List[str]:
     return [str(hop["gate"]) for hop in _raw_takeover_path(entry, request_file)]
 
 
+def _classify_binding(head_sha: str, result_sha: str) -> str:
+    """Three answers, not two: ``match``, ``mismatch``, ``unknown``.
+
+    Mirrors ``gate_executor._classify_sha_binding`` (the classifier the manager
+    stamped the entry's ``sha_binding`` with). It is duplicated rather than
+    imported because this verifier is copied standalone into the enforcement
+    sandbox (see ``tests/test_t0_gate_enforcement.py``) and must not drag in the
+    executor's import graph. Either sha absent is ``unknown``: it says nothing
+    about the code and never fails a run.
+    """
+    if not head_sha or not result_sha:
+        return "unknown"
+    return "match" if head_sha == result_sha else "mismatch"
+
+
+def _short_sha(sha: str) -> str:
+    """The abbreviated sha a failure message can name, or ``unknown``."""
+    return sha[:8] if sha else "unknown"
+
+
+def _entry_binding(
+    entry: Dict[str, Any],
+    result: Optional[Dict[str, Any]],
+) -> "tuple[str, str, str]":
+    """``(binding, head_sha, result_sha)`` for a reported executed entry.
+
+    ``head_sha`` is the head the manager sampled for this run. The result side
+    is the commit named by the on-disk result record when it carries one (the
+    artifact is the evidence), falling back to the entry's
+    ``result_commit_sha`` (a summary; a report may omit or predate the field).
+    Either side absent makes the binding ``unknown``.
+    """
+    head_sha = str(entry.get("head_sha") or "")
+    record_sha = str((result or {}).get("commit_sha") or "")
+    result_sha = record_sha or str(entry.get("result_commit_sha") or "")
+    return _classify_binding(head_sha, result_sha), head_sha, result_sha
+
+
 def verify_report(
     report: Dict[str, Any],
     *,
@@ -177,6 +239,10 @@ def verify_report(
             record = results_dir / f"pr-{pr_number}-{gate}-chain-exhausted.json"
             if not record.is_file():
                 outcome.missing.append(str(record))
+            elif _load_json(record) is None:
+                outcome.missing.append(
+                    f"{record} is unreadable (not a JSON object)"
+                )
             else:
                 outcome.verified.append(gate)
                 outcome.not_completed.append(f"{gate} status={_CHAIN_EXHAUSTED}")
@@ -186,14 +252,32 @@ def verify_report(
             )
         else:
             result_file = results_dir / f"pr-{pr_number}-{gate}.json"
+            result = _load_json(result_file) if result_file.is_file() else None
             if not request_file.is_file():
                 outcome.missing.append(str(request_file))
             if not result_file.is_file():
                 outcome.missing.append(str(result_file))
-            if request_file.is_file() and result_file.is_file():
-                outcome.verified.append(gate)
-                result = _load_json(result_file)
-                status = str((result or {}).get("status", "unknown"))
+            elif result is None:
+                # The file exists but is not a JSON object: a truncated or
+                # half-copied write, or a value that is not an object. Nobody
+                # can read what the gate found, so this is no artifact at all --
+                # not a run that returned a non-passing status. Fail closed
+                # instead of loading it as "status=unknown" and passing.
+                outcome.missing.append(
+                    f"{result_file} is unreadable (not a JSON object)"
+                )
+            elif request_file.is_file():
+                status = str(result.get("status", "unknown"))
+                binding, head_sha, result_sha = _entry_binding(entry, result)
+                if binding == "mismatch":
+                    # A verdict about another commit is not evidence about this
+                    # head. Unknown is not a mismatch and stays as it was.
+                    outcome.sha_mismatch.append(
+                        f"{gate}: result records commit {_short_sha(result_sha)} but the "
+                        f"PR head is {_short_sha(head_sha)} — this verdict is about other code"
+                    )
+                else:
+                    outcome.verified.append(gate)
                 if status not in _COMPLETED_STATUSES:
                     outcome.not_completed.append(f"{gate} status={status}")
             hops = _takeover_hops(entry, request_file)
@@ -286,6 +370,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     for name in outcome.missing:
         print(f"MISSING_ARTIFACT: {name}", file=sys.stderr)
+    for name in outcome.sha_mismatch:
+        print(f"SHA_MISMATCH: {name}", file=sys.stderr)
     if not outcome.ok:
         return 1
     for name in outcome.not_completed:
