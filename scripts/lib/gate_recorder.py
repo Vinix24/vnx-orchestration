@@ -623,13 +623,18 @@ def write_skip_rationale(
 # ---------------------------------------------------------------------------
 
 
-def _gh_pr_view_field(pr_number: Optional[int], field: str) -> str:
-    """Fetch one ``gh pr view --json <field>`` value. Returns "" on any failure."""
+def _gh_pr_view_field(pr_number: Optional[int], field: str, repo: Optional[str] = None) -> str:
+    """Fetch one ``gh pr view --json <field>`` value. Returns "" on any failure.
+
+    ``repo`` (``owner/repo``) pins the lookup to that repo; without it ``gh``
+    infers the repo from the cwd.
+    """
     if not pr_number or shutil.which("gh") is None:
         return ""
+    repo_args = ["--repo", repo] if repo else []
     try:
         proc = subprocess.run(
-            ["gh", "pr", "view", str(pr_number), "--json", field],
+            ["gh", "pr", "view", str(pr_number), *repo_args, "--json", field],
             capture_output=True, text=True, timeout=10, check=False,
         )
     except (subprocess.TimeoutExpired, OSError):
@@ -644,7 +649,7 @@ def _gh_pr_view_field(pr_number: Optional[int], field: str) -> str:
     return str(value or "").strip()
 
 
-def get_pr_head_sha(pr_number: Optional[int]) -> str:
+def get_pr_head_sha(pr_number: Optional[int], repo: Optional[str] = None) -> str:
     """Return the PR head commit sha via ``gh pr view --json headRefOid``.
 
     The PR head sha lives on GitHub, not in the local checkout. A request
@@ -654,7 +659,7 @@ def get_pr_head_sha(pr_number: Optional[int]) -> str:
     gated merge. This is the single source of truth for the PR head identity;
     callers must not fall back to the local HEAD (OI-1307 / B6).
     """
-    return _gh_pr_view_field(pr_number, "headRefOid")
+    return _gh_pr_view_field(pr_number, "headRefOid", repo)
 
 
 def get_pr_head_branch(pr_number: Optional[int]) -> str:
@@ -1509,10 +1514,13 @@ def publish_forge_review_summary(
     scopes the door lookup exactly as the merge door scopes it; absent, it is
     omitted rather than guessed, and the verdict then falls back to the
     publisher's own wider scope. ``project_id`` and ``project_root`` are NOT
-    passed: the recorder holds neither. Deriving a project_root from
-    ``__file__`` here would name whichever checkout this module was imported
-    from — in a dispatch worktree, not the repo the PR lives in — so the
-    publisher's own ``origin``-based resolution is the better-informed one.
+    passed, and not because the recorder is blind to them: the publisher derives
+    the target repo from the store ``results_dir`` belongs to (results dir ->
+    state dir -> project id -> the checkout registered for it ->
+    its origin), the same store the record was written to. A root taken from
+    ``__file__`` would name the ENGINE's checkout (the central install, or a
+    dispatch worktree), a different repo from the project's; a store that cannot
+    be attributed to a project is refused there and logged below with the repair.
     """
     try:
         from forge_gate_publisher import (  # noqa: PLC0415
