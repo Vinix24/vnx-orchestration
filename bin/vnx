@@ -2362,7 +2362,10 @@ cmd_update() {
 
   local tmpdir
   tmpdir="$(mktemp -d)"
-  trap 'rm -rf "$tmpdir"' EXIT
+  # Expand now: the EXIT trap fires after this function returns, when the local
+  # $tmpdir is out of scope and `set -u` would abort on it.
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmpdir'" EXIT
 
   if ! git clone --depth 1 --branch "$branch" "$origin_url" "$tmpdir" 2>/dev/null; then
     err "Failed to clone $origin_url (branch: $branch)"
