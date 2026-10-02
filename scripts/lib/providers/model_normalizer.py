@@ -224,6 +224,21 @@ def is_unknown_model(model: Optional[str]) -> bool:
     return _norm(str(model)) in _UNKNOWN_SENTINELS
 
 
+def is_unknown_provider(provider: Optional[str]) -> bool:
+    """True when the provider is absent or an explicit unknown sentinel.
+
+    The provider analogue of :func:`is_unknown_model`, sharing the same
+    sentinel set. Receipt enrichment uses it to refuse to STAMP the literal
+    ``"unknown"`` as a provider name: a corrective receipt whose dispatch
+    provider cannot be determined must leave the field absent (exactly how an
+    undeterminable model is handled), not claim a fake provider that
+    downstream attribution would read as real.
+    """
+    if not provider:
+        return True
+    return _norm(str(provider)) in _UNKNOWN_SENTINELS
+
+
 def tier_for_model(model: Optional[str]) -> Optional[str]:
     """Reverse-map a model to its cost tier (deterministic).
 

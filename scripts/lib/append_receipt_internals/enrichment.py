@@ -72,11 +72,21 @@ def _enrich_session_metadata(enriched: Dict[str, Any], state_dir: Path) -> None:
     # ``_validate_model_present`` refuses the receipt loudly. An undeterminable
     # model must surface, not land in the ledger as a fake name.
     sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
-    from providers.model_normalizer import is_unknown_model  # noqa: PLC0415
+    from providers.model_normalizer import is_unknown_model, is_unknown_provider  # noqa: PLC0415
     resolved_model = str(session_meta.get("model") or "").strip()
     if resolved_model and not is_unknown_model(resolved_model):
         enriched.setdefault("model", resolved_model)
-    enriched.setdefault("provider", session_meta.get("provider", "unknown"))
+    # Same discipline for the provider: the resolver legitimately returns the
+    # literal "unknown" when it cannot determine one, but that is NOT a provider
+    # name. Stamping it made a corrective receipt (phantom_guard /
+    # pr_enforcement) read as if it carried a real, attributable provider.
+    # Only a resolved, non-sentinel provider is stamped; an undeterminable one
+    # leaves the field absent. Caller-supplied real providers are preserved
+    # (setdefault), so a lane that already knows the provider is never
+    # overwritten by resolution.
+    resolved_provider = str(session_meta.get("provider") or "").strip()
+    if resolved_provider and not is_unknown_provider(resolved_provider):
+        enriched.setdefault("provider", resolved_provider)
     if "token_usage" in session_meta:
         enriched.setdefault("token_usage", session_meta["token_usage"])
     if "instruction_sha256" in session_meta:
