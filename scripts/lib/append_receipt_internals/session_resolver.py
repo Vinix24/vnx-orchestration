@@ -175,17 +175,28 @@ def _extract_session_token_usage(session_id: str, terminal: str) -> Optional[Dic
     if not session_id or session_id == "unknown":
         return None
 
-    claude_projects = Path.home() / ".claude" / "projects"
-    if not claude_projects.is_dir():
-        return None
+    search_dirs = [Path.home() / ".claude" / "projects"]
+    try:
+        _lib = str(SCRIPTS_DIR / "lib")
+        if _lib not in sys.path:
+            sys.path.insert(0, _lib)
+        from provider_spawns.harness_config_dir import harness_projects_dirs
+        search_dirs.extend(harness_projects_dirs())
+    except Exception:  # vnx-silent-except: harness transcript lookup is best-effort
+        pass
 
     session_file = None
-    for project_dir in claude_projects.iterdir():
-        if not project_dir.is_dir():
+    for claude_projects in search_dirs:
+        if not claude_projects.is_dir():
             continue
-        candidate = project_dir / f"{session_id}.jsonl"
-        if candidate.is_file():
-            session_file = candidate
+        for project_dir in claude_projects.iterdir():
+            if not project_dir.is_dir():
+                continue
+            candidate = project_dir / f"{session_id}.jsonl"
+            if candidate.is_file():
+                session_file = candidate
+                break
+        if session_file:
             break
 
     if not session_file:
