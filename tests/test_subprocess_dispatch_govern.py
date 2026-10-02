@@ -2,13 +2,15 @@
 """Tests for the subprocess lane's VNX_SHARED_GOVERN wiring onto dispatch_govern.govern().
 
 dispatch_govern.py's own module docstring names tmux AND subprocess as its intended
-callers, but only the tmux lane called govern() — the subprocess lane still used the
-legacy stub-writer (_ensure_unified_report) on success and emitted no report at all on
-a budget-exhausted failure. This closes that gap behind VNX_SHARED_GOVERN (default off).
+callers, but only the tmux lane called govern() — the subprocess lane wrote its own
+contract-valid close-out report (_ensure_unified_report) on success and emitted no
+report at all on a budget-exhausted failure. This closes that gap behind
+VNX_SHARED_GOVERN (default off).
 
 Verifies that:
   - VNX_SHARED_GOVERN unset/0 (default): behavior is unchanged — _ensure_unified_report
-    runs on success, dispatch_govern.govern() is never called, and no report is emitted
+    (the contract-valid close-out report writer) runs on success,
+    dispatch_govern.govern() is never called, and no report is emitted
     on final failure (matching pre-existing behavior).
   - VNX_SHARED_GOVERN=1: govern() runs instead of _ensure_unified_report on success, and
     also runs on final failure (new coverage) — both with lane="subprocess".
@@ -86,15 +88,20 @@ class _HandleSuccessTestBase(unittest.TestCase):
 
 
 class TestHandleSuccessSharedGovernOff(_HandleSuccessTestBase):
-    def test_default_off_uses_legacy_stub_writer(self):
+    def test_default_off_uses_closeout_report_writer(self):
         os.environ.pop("VNX_SHARED_GOVERN", None)
         mock_receipt, mock_stub, mock_dg_govern = self._run_handle_success()
 
-        mock_stub.assert_called_once_with("dispatch-govern-success", "T1", "done")
+        # The success path writes a contract-valid close-out report and must pass
+        # the model it ran with — without it the receipt converter refuses the report.
+        mock_stub.assert_called_once_with(
+            "dispatch-govern-success", "T1", "done",
+            model="sonnet", provider="claude", changed_files=[],
+        )
         mock_dg_govern.assert_not_called()
         mock_receipt.assert_called_once()
 
-    def test_explicit_off_uses_legacy_stub_writer(self):
+    def test_explicit_off_uses_closeout_report_writer(self):
         os.environ["VNX_SHARED_GOVERN"] = "0"
         try:
             mock_receipt, mock_stub, mock_dg_govern = self._run_handle_success()
