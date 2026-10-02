@@ -46,8 +46,11 @@ elsewhere in a sentence marks a run: "baseline", "mutation", "on main" or
   green run (deepseek_gate, PR #2000). A green label does not lift that: it
   says a run is on the new code, not that it covers what an earlier run
   selected. Only a red label removes a failure.
-- When every run is red, the last red run is the count, so a report with only
-  a red run keeps ``tests_failed > 0`` and can never be accepted.
+- When every run is red, ``tests_passed`` and ``method`` still come from the
+  last red run, but ``tests_failed`` is the HIGHEST failure count among the red
+  runs: a report with only red runs keeps ``tests_failed > 0`` whenever any of
+  them failed, so a later red run with 0 failures cannot erase an earlier one
+  and the report can never be accepted on that evidence.
 
 ``verification_record`` turns that reading into the ADR-035 ``verification{}``
 shape. Both write paths (``report_parser._build_enhanced_receipt`` and
@@ -245,12 +248,18 @@ def counted_run(runs: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """The figures a receipt carries for ``runs`` (see the module docstring).
 
     ``passed``/``method`` from the last run that is not red, ``failed`` the
-    highest failure count among the runs that are not red; the last red run
-    when every run is red; None without runs.
+    highest failure count among the runs that are not red. When every run is
+    red the last run still gives ``passed``/``method``, but ``failed`` is the
+    highest failure count among the red runs: a later red run with 0 failures
+    may not erase the failure an earlier red run documented, so a report with
+    only red runs always keeps ``tests_failed > 0`` when any of them failed.
+    None without runs.
     """
     not_red = [r for r in runs if r["color"] != "red"]
     if not not_red:
-        return dict(runs[-1]) if runs else None
+        if not runs:
+            return None
+        return {**runs[-1], "failed": max(r["failed"] for r in runs)}
     last = not_red[-1]
     return {**last, "failed": max(r["failed"] for r in not_red)}
 
