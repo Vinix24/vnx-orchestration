@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
+from receipt_outcome import is_foreign_project
 from runtime_coordination import _append_event, _now_utc
 
 logger = logging.getLogger(__name__)
@@ -992,11 +993,18 @@ def _calculate_chain_status(
 def find_receipts_by_dispatch(
     receipts_path: Path,
     dispatch_id: str,
+    project_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Find all receipts linked to a dispatch_id.
 
     Scans the NDJSON receipts file for matching dispatch_id or cmd_id.
     This is the Dispatch -> Receipt direction.
+
+    ``project_id`` scopes the scan to one project (ADR-007): a line stamped
+    with another ``project_id`` is left out, a line without one belongs to the
+    ledger's project. ``None`` (the default) keeps the historical, unscoped
+    scan for callers that have no project to scope by; readers that know their
+    project pass it so colliding dispatch ids across tenants cannot leak.
     """
     if not receipts_path.exists():
         return []
@@ -1010,6 +1018,10 @@ def find_receipts_by_dispatch(
             try:
                 entry = json.loads(line)
             except json.JSONDecodeError:
+                continue
+            if not isinstance(entry, dict):
+                continue
+            if project_id is not None and is_foreign_project(entry, project_id):
                 continue
             entry_did = str(entry.get("dispatch_id") or entry.get("cmd_id") or "")
             if entry_did == dispatch_id:
