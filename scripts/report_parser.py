@@ -182,6 +182,7 @@ class ReportParser:
         paths = ensure_env()
         self.vnx_home = Path(paths["VNX_HOME"])
         self.dispatch_completed_dir = Path(paths["VNX_DISPATCH_DIR"]) / "completed"
+        self.state_dir = Path(paths["VNX_STATE_DIR"])
 
         self.header_pattern = re.compile(r'^#{1,3}\s+(.+)$', re.MULTILINE)
         self.metadata_pattern = re.compile(r'\*\*([^*]+)\*\*:\s*(.+)')
@@ -780,6 +781,21 @@ class ReportParser:
 
         return intelligence
 
+    def _resolve_receipt_role(self, metadata: Dict[str, Any]) -> str:
+        """Resolve the receipt role through the shared resolver. FAIL-OPEN to the marker."""
+        from dispatch_identity import _IDENTITY_UNRESOLVED, resolve_effective_role
+        dispatch_id = str(metadata.get('dispatch_id') or '').strip()
+        try:
+            project_id = os.environ.get('VNX_PROJECT_ID', '').strip()
+            if not project_id:
+                from dispatch_cli import _resolve_project_id
+                project_id = _resolve_project_id()
+            return resolve_effective_role(
+                metadata.get('role'), dispatch_id, project_id, state_dir=self.state_dir,
+            )
+        except Exception:
+            return _IDENTITY_UNRESOLVED
+
     def _build_enhanced_receipt(self, extracted: Dict, report_path: str) -> Dict[str, Any]:
         """Build enhanced receipt structure from extracted data"""
         metadata = extracted.get('metadata', {})
@@ -833,8 +849,12 @@ class ReportParser:
             'event_type': _event_type,  # Primary field for structured processing
             'event': _event_type,  # Legacy compatibility field
             # Receipt-quality PR-3: report-derived receipts are dispatch-lane
-            # outcomes (closed-set kind; role propagates via PR-1/2 lanes).
+            # outcomes (closed-set kind).
             'receipt_kind': 'dispatch',
+            # The lane receipt can be absent, so this writer resolves the role
+            # itself: the report's own role, else the dispatch spec, else
+            # dispatch_metadata, else the identity_unresolved marker.
+            'role': self._resolve_receipt_role(metadata),
             'timestamp': _work_ts,
             'terminal': metadata.get('terminal', 'unknown'),
             'track': metadata.get('track'),  # Include track field for terminal routing
