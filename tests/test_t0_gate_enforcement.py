@@ -13,10 +13,15 @@ These tests cover the two halves:
   * the wrapper itself, run through bash against a stub ``review_gate_manager.py``
     that prints a canned request-and-execute report. No real gate is spawned:
     the stub is the only "manager" in the temp project.
+
+They also pin the commit binding: a result whose ``commit_sha`` is not the head
+of this run must not verify (fix-forward after a push), a result for the head
+must, and an absent sha on either side stays ``unknown`` -- never a mismatch.
 """
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import shutil
@@ -40,6 +45,10 @@ from gate_enforcement_verify import (
 
 DEFAULT_STACK = ["codex_gate", "kimi_gate"]
 
+# Two full-length shas, so the abbreviated forms in messages are unambiguous.
+NEW_HEAD = "a" * 40
+OLD_HEAD = "b" * 40
+
 
 # ---------------------------------------------------------------------------
 # Fixtures and builders
@@ -50,17 +59,27 @@ def _entry(
     *,
     request_status: str = "requested",
     takeover_path: Optional[List[str]] = None,
+    head_sha: Optional[str] = None,
+    result_commit_sha: Optional[str] = None,
+    sha_binding: Optional[str] = None,
 ) -> Dict[str, Any]:
     detail: Dict[str, Any] = {"gate": gate}
     if takeover_path is not None:
         detail["takeover_path"] = [{"gate": hop, "reason": "quota", "status": "unavailable"} for hop in takeover_path]
-    return {
+    entry = {
         "gate": gate,
         "request_status": request_status,
         "execution_status": "completed",
         "passed": True,
         "detail": detail,
     }
+    if head_sha is not None:
+        entry["head_sha"] = head_sha
+    if result_commit_sha is not None:
+        entry["result_commit_sha"] = result_commit_sha
+    if sha_binding is not None:
+        entry["sha_binding"] = sha_binding
+    return entry
 
 
 def _report(*entries: Dict[str, Any]) -> Dict[str, Any]:
@@ -76,6 +95,7 @@ def _write_artifacts(
     result: bool = True,
     status: str = "completed",
     request_takeover_path: Optional[List[str]] = None,
+    commit_sha: Optional[str] = None,
 ) -> None:
     requests_dir = state_dir / "review_gates" / "requests"
     results_dir = state_dir / "review_gates" / "results"
@@ -87,8 +107,11 @@ def _write_artifacts(
             payload["takeover_path"] = [{"gate": hop} for hop in request_takeover_path]
         (requests_dir / f"pr-{pr}-{gate}.json").write_text(json.dumps(payload), encoding="utf-8")
     if result:
+        result_payload: Dict[str, Any] = {"gate": gate, "status": status}
+        if commit_sha is not None:
+            result_payload["commit_sha"] = commit_sha
         (results_dir / f"pr-{pr}-{gate}.json").write_text(
-            json.dumps({"gate": gate, "status": status}), encoding="utf-8",
+            json.dumps(result_payload), encoding="utf-8",
         )
 
 
@@ -288,6 +311,75 @@ def test_a_reported_gate_without_its_artifact_is_missing(state_dir: Path, missin
     assert f"review_gates/{missing}s" in outcome.missing[0]
 
 
+@pytest.mark.parametrize(
+    "content",
+    ['{"status": "compl', '["not", "an", "object"]', "null", ""],
+    ids=["truncated", "json-list", "json-null", "empty"],
+)
+def test_a_reported_gate_with_an_unreadable_result_is_missing(
+    state_dir: Path, content: str,
+) -> None:
+    """An existing result file that does not parse into a JSON object is no
+    artifact at all. It used to load as nothing -> ``status=unknown`` -> only
+    ``not_completed``, leaving ``ok`` true and the wrapper exiting 0 on a record
+    nobody can read.
+    """
+    _write_artifacts(state_dir, "codex_gate", result=False)
+    result_file = state_dir / "review_gates" / "results" / "pr-7-codex_gate.json"
+    result_file.write_text(content, encoding="utf-8")
+
+    outcome = verify_report(
+        _report(_entry("codex_gate")), pr_number=7, seats=["codex_gate"], state_dir=state_dir,
+    )
+
+    assert not outcome.ok
+    assert outcome.verified == []
+    assert outcome.not_completed == []
+    assert len(outcome.missing) == 1
+    assert str(result_file) in outcome.missing[0]
+    assert "unreadable" in outcome.missing[0]
+
+
+def test_an_unreadable_chain_exhausted_record_is_missing(state_dir: Path) -> None:
+    """The same fail-closed rule for the chain-exhausted terminal record: a
+    present-but-unreadable record is no evidence the chain was recorded."""
+    results_dir = state_dir / "review_gates" / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    record = results_dir / "pr-7-codex_gate-chain-exhausted.json"
+    record.write_text('{"status": "chain_exh', encoding="utf-8")
+    entry = _entry("codex_gate", request_status="chain_exhausted", takeover_path=["codex_gate"])
+
+    outcome = verify_report(_report(entry), pr_number=7, seats=["codex_gate"], state_dir=state_dir)
+
+    assert not outcome.ok
+    assert outcome.verified == []
+    assert outcome.not_completed == []
+    assert outcome.missing == [f"{record} is unreadable (not a JSON object)"]
+
+
+def test_main_exits_1_on_a_corrupt_result_file(
+    state_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+) -> None:
+    """End-to-end CLI: the corrupt result makes the verifier exit 1, with the
+    file named and called unreadable, instead of "all artifacts verified"."""
+    _write_artifacts(state_dir, "codex_gate", result=False)
+    (state_dir / "review_gates" / "results" / "pr-7-codex_gate.json").write_text(
+        '{"status": "compl', encoding="utf-8",
+    )
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(_report(_entry("codex_gate")))))
+
+    rc = verify.main(
+        ["--state-dir", str(state_dir), "--", "--pr", "7", "--review-stack", "codex_gate"],
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "MISSING_ARTIFACT" in captured.err
+    assert "pr-7-codex_gate.json" in captured.err
+    assert "unreadable" in captured.err
+    assert "GATE_ENFORCEMENT_COMPLETE" not in captured.out
+
+
 def test_a_gate_that_ran_but_did_not_complete_is_reported_not_failed(state_dir: Path) -> None:
     _write_artifacts(state_dir, "codex_gate", status="failed")
     outcome = verify_report(
@@ -339,6 +431,223 @@ def test_a_reported_gate_name_that_is_not_a_plain_name_is_refused(state_dir: Pat
         verify_report(
             _report(_entry("../../etc/passwd")), pr_number=7, seats=["codex_gate"], state_dir=state_dir,
         )
+
+
+# ---------------------------------------------------------------------------
+# Commit binding: a result about another commit is not evidence about this head
+# ---------------------------------------------------------------------------
+
+def test_a_result_for_another_commit_does_not_verify(state_dir: Path) -> None:
+    """The reproduced defect: a completed result from the previous head, with a
+    mismatched binding in the report entry, used to verify as clean."""
+    _write_artifacts(state_dir, "codex_gate", commit_sha=OLD_HEAD)
+    entry = _entry(
+        "codex_gate", head_sha=NEW_HEAD, result_commit_sha=OLD_HEAD, sha_binding="mismatch",
+    )
+    outcome = verify_report(
+        _report(entry), pr_number=7, seats=["codex_gate"], state_dir=state_dir,
+    )
+
+    assert not outcome.ok
+    assert outcome.missing == []
+    assert outcome.verified == []
+    assert len(outcome.sha_mismatch) == 1
+    message = outcome.sha_mismatch[0]
+    assert message.startswith("codex_gate:")
+    assert OLD_HEAD[:8] in message
+    assert NEW_HEAD[:8] in message
+
+
+def test_a_result_for_this_commit_still_verifies(state_dir: Path) -> None:
+    _write_artifacts(state_dir, "codex_gate", commit_sha=NEW_HEAD)
+    entry = _entry(
+        "codex_gate", head_sha=NEW_HEAD, result_commit_sha=NEW_HEAD, sha_binding="match",
+    )
+    outcome = verify_report(
+        _report(entry), pr_number=7, seats=["codex_gate"], state_dir=state_dir,
+    )
+
+    assert outcome.ok, outcome.missing
+    assert outcome.verified == ["codex_gate"]
+    assert outcome.sha_mismatch == []
+
+
+def test_the_results_own_commit_sha_is_read_when_the_entry_omits_it(state_dir: Path) -> None:
+    """An older report may carry ``head_sha`` but not ``result_commit_sha``; the
+    result record's own ``commit_sha`` is the same fact."""
+    _write_artifacts(state_dir, "codex_gate", commit_sha=OLD_HEAD)
+    entry = _entry("codex_gate", head_sha=NEW_HEAD)
+    outcome = verify_report(
+        _report(entry), pr_number=7, seats=["codex_gate"], state_dir=state_dir,
+    )
+
+    assert not outcome.ok
+    assert len(outcome.sha_mismatch) == 1
+    assert OLD_HEAD[:8] in outcome.sha_mismatch[0]
+    assert NEW_HEAD[:8] in outcome.sha_mismatch[0]
+
+
+def test_the_result_record_is_the_evidence_over_the_entry_summary(state_dir: Path) -> None:
+    """The artifact is what gets merged. An entry claiming the head while the
+    record on disk names another commit is still a mismatch."""
+    _write_artifacts(state_dir, "codex_gate", commit_sha=OLD_HEAD)
+    entry = _entry(
+        "codex_gate", head_sha=NEW_HEAD, result_commit_sha=NEW_HEAD, sha_binding="match",
+    )
+    outcome = verify_report(
+        _report(entry), pr_number=7, seats=["codex_gate"], state_dir=state_dir,
+    )
+
+    assert not outcome.ok
+    assert len(outcome.sha_mismatch) == 1
+
+
+def test_a_lying_sha_binding_field_does_not_override_the_shas(state_dir: Path) -> None:
+    _write_artifacts(state_dir, "codex_gate", commit_sha=OLD_HEAD)
+    entry = _entry(
+        "codex_gate", head_sha=NEW_HEAD, result_commit_sha=OLD_HEAD, sha_binding="match",
+    )
+    outcome = verify_report(
+        _report(entry), pr_number=7, seats=["codex_gate"], state_dir=state_dir,
+    )
+
+    assert not outcome.ok
+    assert len(outcome.sha_mismatch) == 1
+
+
+@pytest.mark.parametrize(
+    "head_sha,result_sha",
+    [("", NEW_HEAD), (NEW_HEAD, ""), ("", "")],
+    ids=["no-head", "no-result", "neither"],
+)
+def test_an_unknown_binding_behaves_as_today(
+    state_dir: Path, head_sha: str, result_sha: str,
+) -> None:
+    """Unknown is not a polite mismatch: either sha absent stays verified."""
+    _write_artifacts(state_dir, "codex_gate", commit_sha=result_sha)
+    entry = _entry(
+        "codex_gate", head_sha=head_sha, result_commit_sha=result_sha, sha_binding="unknown",
+    )
+    outcome = verify_report(
+        _report(entry), pr_number=7, seats=["codex_gate"], state_dir=state_dir,
+    )
+
+    assert outcome.ok, outcome.missing
+    assert outcome.verified == ["codex_gate"]
+    assert outcome.sha_mismatch == []
+
+
+def test_a_result_without_any_commit_fields_behaves_as_today(state_dir: Path) -> None:
+    _write_artifacts(state_dir, "codex_gate")
+    outcome = verify_report(
+        _report(_entry("codex_gate")), pr_number=7, seats=["codex_gate"], state_dir=state_dir,
+    )
+
+    assert outcome.ok, outcome.missing
+    assert outcome.verified == ["codex_gate"]
+    assert outcome.sha_mismatch == []
+
+
+def test_a_mismatched_gate_still_accounts_for_its_seat(state_dir: Path) -> None:
+    """The gate ran and answered the seat; the failure is the binding, not a
+    missing artifact, so only one failure is reported."""
+    _write_artifacts(state_dir, "codex_gate", commit_sha=OLD_HEAD)
+    entry = _entry(
+        "codex_gate", head_sha=NEW_HEAD, result_commit_sha=OLD_HEAD, sha_binding="mismatch",
+    )
+    outcome = verify_report(
+        _report(entry), pr_number=7, seats=["codex_gate"], state_dir=state_dir,
+    )
+
+    assert outcome.missing == []
+    assert not outcome.ok
+
+
+def test_a_takeover_reader_about_another_commit_does_not_verify(state_dir: Path) -> None:
+    _write_artifacts(state_dir, "kimi_gate", commit_sha=OLD_HEAD)
+    report = _report(
+        _entry("kimi_gate", takeover_path=["codex_gate"], head_sha=NEW_HEAD,
+               result_commit_sha=OLD_HEAD, sha_binding="mismatch"),
+    )
+    outcome = verify_report(
+        report, pr_number=7, seats=DEFAULT_STACK, state_dir=state_dir,
+    )
+
+    assert not outcome.ok
+    assert outcome.missing == []
+    assert outcome.sha_mismatch[0].startswith("kimi_gate:")
+
+
+def test_chain_exhausted_reporting_is_unchanged_by_the_binding_check(state_dir: Path) -> None:
+    _write_chain_exhausted(state_dir, "codex_gate")
+    entry = _entry("codex_gate", request_status="chain_exhausted", takeover_path=["codex_gate", "kimi_gate"])
+    outcome = verify_report(
+        _report(entry), pr_number=7, seats=["codex_gate", "kimi_gate"], state_dir=state_dir,
+    )
+    assert outcome.ok, outcome.missing
+    assert outcome.not_completed == ["codex_gate status=chain_exhausted"]
+    assert outcome.sha_mismatch == []
+
+
+# ---------------------------------------------------------------------------
+# main(): the verifier's own exit code, over stdin
+# ---------------------------------------------------------------------------
+
+def _run_main(
+    state_dir: Path,
+    report: Dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> int:
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(report)))
+    return verify.main(
+        ["--state-dir", str(state_dir), "--", "--pr", "7", "--review-stack", "codex_gate"],
+    )
+
+
+def test_main_fails_when_a_result_is_bound_to_another_commit(
+    state_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+) -> None:
+    _write_artifacts(state_dir, "codex_gate", commit_sha=OLD_HEAD)
+    report = _report(
+        _entry("codex_gate", head_sha=NEW_HEAD, result_commit_sha=OLD_HEAD, sha_binding="mismatch"),
+    )
+    rc = _run_main(state_dir, report, monkeypatch)
+    captured = capsys.readouterr()
+
+    assert rc == 1
+    assert "SHA_MISMATCH" in captured.err
+    assert "codex_gate" in captured.err
+    assert OLD_HEAD[:8] in captured.err
+    assert NEW_HEAD[:8] in captured.err
+    assert "GATE_ENFORCEMENT_COMPLETE" not in captured.out
+
+
+def test_main_passes_when_a_result_is_bound_to_this_head(
+    state_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+) -> None:
+    _write_artifacts(state_dir, "codex_gate", commit_sha=NEW_HEAD)
+    report = _report(
+        _entry("codex_gate", head_sha=NEW_HEAD, result_commit_sha=NEW_HEAD, sha_binding="match"),
+    )
+    rc = _run_main(state_dir, report, monkeypatch)
+    captured = capsys.readouterr()
+
+    assert rc == 0, captured.err
+    assert "GATE_ENFORCEMENT_COMPLETE" in captured.out
+    assert "SHA_MISMATCH" not in captured.err
+
+
+def test_main_passes_when_the_binding_is_unknown(
+    state_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+) -> None:
+    _write_artifacts(state_dir, "codex_gate")
+    report = _report(_entry("codex_gate"))
+    rc = _run_main(state_dir, report, monkeypatch)
+    captured = capsys.readouterr()
+
+    assert rc == 0, captured.err
+    assert "GATE_ENFORCEMENT_COMPLETE" in captured.out
+    assert "SHA_MISMATCH" not in captured.err
 
 
 # ---------------------------------------------------------------------------
@@ -461,6 +770,81 @@ def test_wrapper_fails_a_reported_gate_whose_result_is_missing(project: Path) ->
     assert proc.returncode == 1
     assert "MISSING_ARTIFACT" in proc.stderr
     assert "pr-7-kimi_gate.json" in proc.stderr
+
+
+def test_wrapper_fails_a_result_bound_to_another_commit(project: Path) -> None:
+    """Fix-forward: codex passed on the new head, kimi's completed result is
+    about the old one. The wrapper must not call this head reviewed."""
+    state = _project_state_dir(project)
+    _write_artifacts(state, "codex_gate", commit_sha=NEW_HEAD)
+    _write_artifacts(state, "kimi_gate", commit_sha=OLD_HEAD)
+    report = _report(
+        _entry("codex_gate", head_sha=NEW_HEAD, result_commit_sha=NEW_HEAD, sha_binding="match"),
+        _entry("kimi_gate", head_sha=NEW_HEAD, result_commit_sha=OLD_HEAD, sha_binding="mismatch"),
+    )
+    proc = _run_wrapper(
+        project, report,
+        "--pr", "7", "--branch", "feat/x", "--review-stack", "codex_gate,kimi_gate",
+    )
+
+    assert proc.returncode == 1
+    assert "SHA_MISMATCH" in proc.stderr
+    assert "kimi_gate" in proc.stderr
+    assert OLD_HEAD[:8] in proc.stderr
+    assert NEW_HEAD[:8] in proc.stderr
+    assert "GATE_ENFORCEMENT_COMPLETE" not in proc.stdout
+
+
+def test_wrapper_passes_when_every_result_matches_the_head(project: Path) -> None:
+    state = _project_state_dir(project)
+    for gate in DEFAULT_STACK:
+        _write_artifacts(state, gate, commit_sha=NEW_HEAD)
+    report = _report(
+        _entry("codex_gate", head_sha=NEW_HEAD, result_commit_sha=NEW_HEAD, sha_binding="match"),
+        _entry("kimi_gate", head_sha=NEW_HEAD, result_commit_sha=NEW_HEAD, sha_binding="match"),
+    )
+    proc = _run_wrapper(
+        project, report,
+        "--pr", "7", "--branch", "feat/x", "--review-stack", "codex_gate,kimi_gate",
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert "GATE_ENFORCEMENT_COMPLETE" in proc.stdout
+    assert "SHA_MISMATCH" not in proc.stderr
+
+
+def test_wrapper_passes_when_the_binding_is_unknown(project: Path) -> None:
+    """No sha on either side: the pre-fix behaviour is preserved."""
+    state = _project_state_dir(project)
+    for gate in DEFAULT_STACK:
+        _write_artifacts(state, gate)
+    proc = _run_wrapper(
+        project, _report(_entry("codex_gate"), _entry("kimi_gate")),
+        "--pr", "7", "--branch", "feat/x", "--review-stack", "codex_gate,kimi_gate",
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert "GATE_ENFORCEMENT_COMPLETE" in proc.stdout
+    assert "SHA_MISMATCH" not in proc.stderr
+
+
+def test_wrapper_fails_a_reported_gate_whose_result_is_unreadable(project: Path) -> None:
+    """The wrapper must not exit 0 on a result file nobody can read, even though
+    the file is present and the gate only lands in not_completed today."""
+    state_dir = _project_state_dir(project)
+    _write_artifacts(state_dir, "kimi_gate", result=False)
+    (state_dir / "review_gates" / "results" / "pr-7-kimi_gate.json").write_text(
+        '{"status": "compl', encoding="utf-8",
+    )
+    proc = _run_wrapper(
+        project, _report(_entry("kimi_gate", takeover_path=["codex_gate"])),
+        "--pr", "7", "--branch", "feat/x", "--review-stack", "codex_gate,kimi_gate",
+    )
+    assert proc.returncode == 1
+    assert "MISSING_ARTIFACT" in proc.stderr
+    assert "pr-7-kimi_gate.json" in proc.stderr
+    assert "unreadable" in proc.stderr
+    assert "GATE_ENFORCEMENT_COMPLETE" not in proc.stdout
 
 
 def test_wrapper_reports_but_does_not_fail_a_gate_that_ran_without_completing(project: Path) -> None:
