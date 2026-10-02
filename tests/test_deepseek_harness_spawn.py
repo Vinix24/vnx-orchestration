@@ -79,7 +79,7 @@ class TestHarnessHelpers:
         # --mcp-config is variadic; JSON value first, boolean terminator last so
         # the positional prompt is not slurped into the config list.
         args = build_harness_cli_args()
-        assert args == ["--mcp-config", '{"mcpServers":{}}', "--strict-mcp-config"]
+        assert args == ["--bare", "--mcp-config", '{"mcpServers":{}}', "--strict-mcp-config"]
         assert args[-1] == "--strict-mcp-config", "boolean must terminate the variadic"
 
     def test_default_model_is_v4_pro(self):
@@ -126,11 +126,9 @@ class TestSpawnContract:
         assert env["ANTHROPIC_BASE_URL"] == DEEPSEEK_ANTHROPIC_BASE_URL
         assert env["ANTHROPIC_AUTH_TOKEN"] == _FAKE_KEY
         assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
-        assert captured["extra_cli_args"] == [
-            "--mcp-config",
-            '{"mcpServers":{}}',
-            "--strict-mcp-config",
-        ]
+        args = captured["extra_cli_args"]
+        assert args[0] == "--bare"
+        assert args[-3:] == ["--mcp-config", '{"mcpServers":{}}', "--strict-mcp-config"]
         assert captured["model"] == "deepseek-v4-pro"
         assert result.returncode == 0
 

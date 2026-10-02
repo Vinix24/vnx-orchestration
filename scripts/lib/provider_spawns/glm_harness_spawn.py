@@ -39,7 +39,9 @@ from provider_spawns.claude_spawn import spawn_claude  # noqa: E402
 
 from provider_spawns.harness_config_dir import (
     HarnessConfigDirError,
+    bare_harness_cli_args,
     harness_config_env,
+    require_harness_credential,
 )
 
 HARNESS_LANE = "glm-harness"
@@ -81,8 +83,9 @@ def build_harness_env() -> Dict[str, str]:
     }
 
 
-def build_harness_cli_args() -> List[str]:
-    return ["--mcp-config", MCP_OFF_CONFIG, "--strict-mcp-config"]
+def build_harness_cli_args(cwd: Optional[Any] = None) -> List[str]:
+    """``--bare`` (no ancestor CLAUDE.md), the worktree's own CLAUDE.md, MCP fully off."""
+    return [*bare_harness_cli_args(cwd), "--mcp-config", MCP_OFF_CONFIG, "--strict-mcp-config"]
 
 
 def _proxy_reachable(url: str, timeout: float = 3.0) -> bool:
@@ -161,6 +164,7 @@ def spawn_glm_harness(
     try:
         # Applied last: replaces any inherited CLAUDE_CONFIG_DIR. Fail closed, no spawn.
         merged_env.update(harness_config_env(HARNESS_LANE))
+        require_harness_credential(merged_env)
     except HarnessConfigDirError as exc:
         logger.error("spawn_glm_harness: %s; refusing to spawn.", exc)
         return GLMHarnessSpawnResult(
@@ -178,7 +182,7 @@ def spawn_glm_harness(
         health_monitor=health_monitor,
         on_event=on_event,
         extra_env=merged_env,
-        extra_cli_args=build_harness_cli_args(),
+        extra_cli_args=build_harness_cli_args(cwd if cwd is not None else os.getcwd()),
         cwd=cwd,
         scrub_env_keys=_HARNESS_SCRUB_KEYS,
         **kwargs,

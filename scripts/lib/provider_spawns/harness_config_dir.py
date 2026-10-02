@@ -20,16 +20,29 @@ helper: its keychain login is bound to its config-dir path.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
 
 _LIB_DIR = str(Path(__file__).resolve().parents[1])
 if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 
+from atomic_io import atomic_write_text
+
+logger = logging.getLogger(__name__)
+
 HARNESS_CONFIG_SUBDIR = "harness-config"
+
+# ``claude --bare`` skips CLAUDE.md auto-discovery. Without it the child walks from its
+# cwd up to ``/`` and sends every ancestor CLAUDE.md / .claude/rules/*.md (the operator's
+# ``$HOME/.claude``) to the provider, whatever CLAUDE_CONFIG_DIR says (measured 2026-10-02,
+# claude 2.1.287). Every harness child that talks to a redirected endpoint carries it.
+BARE_FLAG = "--bare"
+APPEND_SYSTEM_PROMPT_FILE_FLAG = "--append-system-prompt-file"
+PROJECT_INSTRUCTIONS_FILE = "CLAUDE.md"
 
 # Fabric constant, never copied from ~/.claude/settings.json at runtime.
 DESTRUCTIVE_BASH_ASK_RULES: List[str] = [
@@ -151,10 +164,8 @@ def ensure_harness_config_dir(lane: str) -> Path:
             raise HarnessConfigDirError(f"unreadable {settings_path}: {exc}") from exc
         if not isinstance(existing, dict) or "hooks" in existing:
             raise HarnessConfigDirError(f"{settings_path} carries hooks or is not an object")
-    tmp = lane_dir / "settings.json.tmp"
     try:
-        tmp.write_text(_settings_payload(), encoding="utf-8")
-        os.replace(tmp, settings_path)  # vnx-atomic-write: tmp + os.replace
+        atomic_write_text(settings_path, _settings_payload())
     except OSError as exc:
         raise HarnessConfigDirError(f"cannot write {settings_path}: {exc}") from exc
     return lane_dir
@@ -170,8 +181,53 @@ def harness_config_env(lane: str) -> Dict[str, str]:
 
 def harness_projects_dirs() -> List[Path]:
     """``<VNX_DATA_DIR>/harness-config/*/projects`` dirs that exist (read-only, never raises)."""
+    base: Optional[Path] = None
     try:
         base = _resolve_data_dir() / HARNESS_CONFIG_SUBDIR
         return sorted(p for p in base.glob("*/projects") if p.is_dir())
-    except Exception:  # vnx-silent-except: transcript lookup is best-effort
+    except (HarnessConfigDirError, OSError) as exc:
+        logger.warning(
+            "harness_projects_dirs: cannot list harness transcript dirs under %s: %s",
+            base if base is not None else "<unresolved VNX_DATA_DIR>", exc,
+        )
         return []
+
+
+def project_instructions_args(cwd: Optional[Any]) -> List[str]:
+    """``--append-system-prompt-file`` for exactly ``<cwd>/CLAUDE.md``, when it exists.
+
+    ``--bare`` drops auto-discovery, so the worker's project instructions (the report
+    contract) are passed explicitly. Only the file at the worktree root counts, and a
+    symlink that resolves outside that root is refused: nothing from outside the
+    worktree may reach the provider. ``@import`` lines inside the file stay literal text.
+    """
+    if cwd is None:
+        return []
+    root = Path(os.path.realpath(cwd))
+    candidate = root / PROJECT_INSTRUCTIONS_FILE
+    if not candidate.is_file():
+        return []
+    resolved = Path(os.path.realpath(candidate))
+    if resolved.parent != root:
+        logger.warning(
+            "project_instructions_args: %s resolves outside the worktree (%s); not passed",
+            candidate, resolved,
+        )
+        return []
+    return [APPEND_SYSTEM_PROMPT_FILE_FLAG, str(resolved)]
+
+
+def bare_harness_cli_args(cwd: Optional[Any] = None) -> List[str]:
+    """Flags every harness child starts with: ``--bare`` plus the worktree instructions."""
+    return [BARE_FLAG, *project_instructions_args(cwd)]
+
+
+def require_harness_credential(env: Dict[str, str]) -> None:
+    """Refuse a spawn whose child env carries no credential ``--bare`` can use.
+
+    Under ``--bare`` the keychain and OAuth are never read, so an env without
+    ``ANTHROPIC_AUTH_TOKEN`` or ``ANTHROPIC_API_KEY`` would only fail later and opaquely.
+    Both forms were measured to arrive as a header under ``--bare`` (claude 2.1.287).
+    """
+    if not any((env.get(key) or "").strip() for key in ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")):
+        raise HarnessConfigDirError("harness child env has no ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY")

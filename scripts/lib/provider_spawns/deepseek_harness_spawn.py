@@ -49,7 +49,9 @@ from provider_spawns.claude_spawn import spawn_claude  # noqa: E402 (path-setup 
 
 from provider_spawns.harness_config_dir import (
     HarnessConfigDirError,
+    bare_harness_cli_args,
     harness_config_env,
+    require_harness_credential,
 )
 
 HARNESS_LANE = "deepseek-harness"
@@ -129,11 +131,17 @@ def build_harness_child_env(api_key: str, base_env: Optional[Dict[str, str]] = N
         env.pop(key, None)
     env.update(build_harness_env(api_key))
     env.update(harness_config_env(HARNESS_LANE))
+    require_harness_credential(env)
     return env
 
 
-def build_harness_cli_args() -> List[str]:
-    """Return the claude CLI flags that force MCP fully off for this lane.
+def build_harness_cli_args(cwd: Optional[Any] = None) -> List[str]:
+    """Return the claude CLI flags for this lane: ``--bare`` and MCP fully off.
+
+    ``--bare`` stops the child from loading every ancestor CLAUDE.md (the operator's
+    ``$HOME/.claude``). ``cwd`` is the worktree root; its ``CLAUDE.md`` alone is passed
+    back explicitly via ``--append-system-prompt-file``. Callers with no worktree
+    (the analyzer) pass nothing and get ``--bare`` only.
 
     Order matters: ``--mcp-config`` is VARIADIC (``<configs...>``) in the claude
     CLI, so it greedily consumes following args until the next option flag.  The
@@ -141,7 +149,7 @@ def build_harness_cli_args() -> List[str]:
     ``--strict-mcp-config`` placed LAST so it terminates the variadic before the
     positional prompt (otherwise the prompt is slurped as a bogus config path).
     """
-    return ["--mcp-config", MCP_OFF_CONFIG, "--strict-mcp-config"]
+    return [*bare_harness_cli_args(cwd), "--mcp-config", MCP_OFF_CONFIG, "--strict-mcp-config"]
 
 
 @dataclass
@@ -192,6 +200,25 @@ class DeepSeekHarnessSpawnResult:
         }
 
 
+def _prepare_harness_env(
+    api_key: str, extra_env: Optional[Dict[str, str]]
+) -> "tuple[Dict[str, str], Optional[HarnessConfigDirError]]":
+    """Merged child env for a spawn, or the fail-closed error that forbids the spawn.
+
+    The mandatory harness env wins over any caller-supplied ``extra_env`` so the
+    account-safety vars (base URL, key-auth token, telemetry-off) are non-overridable.
+    The config-dir overlay is applied last and replaces any inherited CLAUDE_CONFIG_DIR.
+    """
+    merged_env: Dict[str, str] = dict(extra_env or {})
+    merged_env.update(build_harness_env(api_key))
+    try:
+        merged_env.update(harness_config_env(HARNESS_LANE))
+        require_harness_credential(merged_env)
+    except HarnessConfigDirError as exc:
+        return merged_env, exc
+    return merged_env, None
+
+
 def spawn_deepseek_harness(
     prompt: str,
     model: Optional[str],
@@ -239,16 +266,9 @@ def spawn_deepseek_harness(
 
     resolved_model = resolve_harness_model(model)
 
-    # Mandatory harness env wins over any caller-supplied extra_env so the
-    # account-safety vars (base URL, key-auth token, telemetry-off) are
-    # non-overridable.
-    merged_env: Dict[str, str] = dict(extra_env or {})
-    merged_env.update(build_harness_env(resolved_key))
-    try:
-        # Applied last: replaces any inherited CLAUDE_CONFIG_DIR. Fail closed, no spawn.
-        merged_env.update(harness_config_env(HARNESS_LANE))
-    except HarnessConfigDirError as exc:
-        logger.error("spawn_deepseek_harness: %s; refusing to spawn.", exc)
+    merged_env, refusal = _prepare_harness_env(resolved_key, extra_env)
+    if refusal is not None:
+        logger.error("spawn_deepseek_harness: %s; refusing to spawn.", refusal)
         return DeepSeekHarnessSpawnResult(
             returncode=1,
             completion={},
@@ -256,7 +276,7 @@ def spawn_deepseek_harness(
             session_id=None,
             timed_out=False,
             model=resolved_model,
-            error=f"harness config dir unsafe: {exc}",
+            error=f"harness config dir unsafe: {refusal}",
         )
 
     claude_result = spawn_claude(
@@ -268,7 +288,7 @@ def spawn_deepseek_harness(
         health_monitor=health_monitor,
         on_event=on_event,
         extra_env=merged_env,
-        extra_cli_args=build_harness_cli_args(),
+        extra_cli_args=build_harness_cli_args(cwd if cwd is not None else os.getcwd()),
         cwd=cwd,
         scrub_env_keys=_HARNESS_SCRUB_KEYS,
         **kwargs,

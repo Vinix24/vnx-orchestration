@@ -75,7 +75,8 @@ def _harness_projects_dirs() -> list:
     try:
         from provider_spawns.harness_config_dir import harness_projects_dirs
         return harness_projects_dirs()
-    except Exception:  # vnx-silent-except: transcript lookup is best-effort
+    except ImportError as exc:
+        logger.warning("token_harvest: harness transcript dirs unavailable (import failed): %s", exc)
         return []
 
 
@@ -199,7 +200,10 @@ def harvest_session_tokens(
         try:
             transcript_path = _find_transcript(session_id, projects_dir)
         except OSError as exc:
-            logger.debug("token_harvest: transcript lookup failed for session_id=%s: %s", session_id, exc)
+            logger.warning(
+                "token_harvest: transcript lookup failed for session_id=%s in %s: %s",
+                session_id, projects_dir, exc,
+            )
             continue
         if transcript_path is not None:
             break

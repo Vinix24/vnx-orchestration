@@ -20,7 +20,12 @@ import subprocess
 import time
 from typing import Optional
 
-from provider_spawns.harness_config_dir import HarnessConfigDirError, harness_config_env
+from provider_spawns.harness_config_dir import (
+    HarnessConfigDirError,
+    bare_harness_cli_args,
+    harness_config_env,
+    require_harness_credential,
+)
 
 from .base import ClassifierProvider, ClassifierResult, parse_json_block
 
@@ -71,11 +76,13 @@ class DeepSeekProvider(ClassifierProvider):
         env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
         # Own config dir, applied last: never inherit the operator's CLAUDE.md/skills/memory.
         env.update(harness_config_env("deepseek-harness"))
+        # --bare reads only ANTHROPIC_API_KEY: refuse a child that would carry none.
+        require_harness_credential(env)
         return env
 
     def classify(self, prompt: str, _max_tokens: int = 1500) -> ClassifierResult:
         cmd = [
-            "claude", "--print", "--model", self.model,
+            "claude", "--print", *bare_harness_cli_args(), "--model", self.model,
             "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
         ]
         start = time.monotonic()
