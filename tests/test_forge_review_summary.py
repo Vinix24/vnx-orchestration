@@ -39,6 +39,8 @@ import forge_gate_publisher as fgp  # noqa: E402
 import forge_protection_drift as drift  # noqa: E402
 from dispatch_spec import Gate  # noqa: E402
 
+pytestmark = pytest.mark.usefixtures("attributed_forge_target")
+
 HEAD = "c" * 40
 OTHER_HEAD = "d" * 40
 PR_NUMBER = 4242
@@ -332,7 +334,7 @@ class TestReviewPublication:
         # The armed-auto-merge refusal DOES run under --dry-run, exactly as it
         # does for the per-gate publisher: a rehearsal that hides a refusal is
         # rehearsing the wrong run.
-        monkeypatch.setattr(fgp, "auto_merge_is_armed", lambda pr: False)
+        monkeypatch.setattr(fgp, "auto_merge_is_armed", lambda pr, repo=None: False)
         _write(results_dir, "glm_gate", _record(tmp_path, "glm_gate"))
 
         payload = fgp.publish_review_summary(
@@ -349,7 +351,7 @@ class TestReviewPublication:
         recorder = _Recorder()
         monkeypatch.setattr(fgp, "publish_check_run", recorder)
         monkeypatch.setattr(fgp, "load_app_config", lambda *a, **k: fgp.AppConfig("vnx-gate", 1))
-        monkeypatch.setattr(fgp, "auto_merge_is_armed", lambda pr: False)
+        monkeypatch.setattr(fgp, "auto_merge_is_armed", lambda pr, repo=None: False)
         monkeypatch.setattr(fgp, "_emit_publication_event", lambda **kw: None)
         _write(results_dir, "glm_gate", _record(tmp_path, "glm_gate"))
 
@@ -366,7 +368,7 @@ class TestReviewPublication:
         recorder = _Recorder()
         monkeypatch.setattr(fgp, "publish_check_run", recorder)
         monkeypatch.setattr(fgp, "load_app_config", lambda *a, **k: fgp.AppConfig("vnx-gate", 1))
-        monkeypatch.setattr(fgp, "auto_merge_is_armed", lambda pr: True)
+        monkeypatch.setattr(fgp, "auto_merge_is_armed", lambda pr, repo=None: True)
         monkeypatch.setattr(fgp, "_emit_publication_event", lambda **kw: None)
         _write(results_dir, "glm_gate", _record(tmp_path, "glm_gate"))
 
@@ -382,7 +384,7 @@ class TestReviewPublication:
         monkeypatch.setattr(
             fgp, "publish_check_run", lambda *a, **k: pytest.fail("dry-run mag niet posten")
         )
-        monkeypatch.setattr(fgp, "auto_merge_is_armed", lambda pr: True)
+        monkeypatch.setattr(fgp, "auto_merge_is_armed", lambda pr, repo=None: True)
         monkeypatch.setattr(fgp, "_emit_publication_event", lambda **kw: None)
         _write(results_dir, "glm_gate", _record(tmp_path, "glm_gate"))
 
@@ -398,7 +400,7 @@ class TestReviewPublication:
         recorder = _Recorder()
         monkeypatch.setattr(fgp, "publish_check_run", recorder)
         monkeypatch.setattr(fgp, "load_app_config", lambda *a, **k: fgp.AppConfig("vnx-gate", 1))
-        monkeypatch.setattr(fgp, "auto_merge_is_armed", lambda pr: True)
+        monkeypatch.setattr(fgp, "auto_merge_is_armed", lambda pr, repo=None: True)
         monkeypatch.setattr(fgp, "_emit_publication_event", lambda **kw: None)
         _write(results_dir, "ci_gate", _record(tmp_path, "ci_gate"))
 

@@ -60,9 +60,11 @@ from forge_check_run import (  # noqa: E402
     ForgeAppConfigError,
     ForgeCheckRunError,
     ForgeKeychainError,
+    ForgePublishRefused,
     load_app_config,
     publish_check_run,
 )
+from forge_project_target import ForgeTarget, resolve_forge_target
 from gate_status import (  # noqa: E402
     ALL_KNOWN_STATES,
     FAIL_STATES,
@@ -170,15 +172,6 @@ class ForgeStatusUnmapped(ForgeCheckRunError):
     outside :data:`gate_status.ALL_KNOWN_STATES` means a writer and this
     mapping have drifted apart; that is an operator's problem to see, not a
     default's to hide.
-    """
-
-
-class ForgePublishRefused(ForgeCheckRunError):
-    """This publication is refused on policy, not on transport.
-
-    Distinct from :class:`ForgeAPIError` (GitHub said no) and
-    :class:`ForgeKeychainError` (we could not authenticate): here nothing was
-    ever sent, because sending it would have been wrong.
     """
 
 
@@ -730,8 +723,12 @@ def gates_with_a_record(results_dir: Path, pr_number: int) -> List[str]:
 # ---------------------------------------------------------------------------
 
 
-def _gh_pr_json(pr_number: int, field: str) -> Dict[str, Any]:
-    """One ``gh pr view --json <field>`` object, or refuse.
+def _gh_pr_json(pr_number: int, field: str, repo: str) -> Dict[str, Any]:
+    """One ``gh pr view --repo <repo> --json <field>`` object, or refuse.
+
+    ``repo`` is the project's ``owner/repo`` (:func:`forge_project_target.
+    resolve_forge_target`), never inferred from the cwd: the auto-merge state
+    read here must belong to the same PR the check-run is posted on.
 
     Deliberately NOT ``gate_recorder._gh_pr_view_field``, which returns "" on
     every failure. That leniency is right for stamping identity onto a record
@@ -749,7 +746,7 @@ def _gh_pr_json(pr_number: int, field: str) -> Dict[str, Any]:
         )
     try:
         proc = subprocess.run(
-            ["gh", "pr", "view", str(pr_number), "--json", field],
+            ["gh", "pr", "view", str(pr_number), "--repo", repo, "--json", field],
             capture_output=True,
             text=True,
             timeout=_GH_TIMEOUT_SECONDS,
@@ -778,17 +775,17 @@ def _gh_pr_json(pr_number: int, field: str) -> Dict[str, Any]:
     return data
 
 
-def auto_merge_is_armed(pr_number: int) -> bool:
+def auto_merge_is_armed(pr_number: int, repo: str) -> bool:
     """Whether this PR will merge itself once its checks go green.
 
     Raises :class:`ForgePublishRefused` when the answer cannot be established —
     see :func:`_gh_pr_json`. "I could not look" is not "no".
     """
-    data = _gh_pr_json(pr_number, "autoMergeRequest")
+    data = _gh_pr_json(pr_number, "autoMergeRequest", repo)
     return bool(data.get("autoMergeRequest"))
 
 
-def refuse_if_auto_merge_is_armed(pr_number: int) -> None:
+def refuse_if_auto_merge_is_armed(pr_number: int, repo: str) -> None:
     """Refuse a ``success`` publication on a PR that has auto-merge queued.
 
     ``pr_merge.py:430`` adds ``--auto`` as soon as the repo allows it, and the
@@ -810,7 +807,7 @@ def refuse_if_auto_merge_is_armed(pr_number: int) -> None:
     only one refused here. Callers publish red regardless (and say so out loud:
     :func:`_note_red_over_armed_auto_merge`).
     """
-    if auto_merge_is_armed(pr_number):
+    if auto_merge_is_armed(pr_number, repo):
         raise ForgePublishRefused(
             f"PR #{pr_number} heeft een actieve auto-merge (autoMergeRequest): een "
             "success-publicatie is geweigerd, want een groene check zou hier de merge "
@@ -819,7 +816,9 @@ def refuse_if_auto_merge_is_armed(pr_number: int) -> None:
         )
 
 
-def _note_red_over_armed_auto_merge(pr_number: int, check_name: str, conclusion: str) -> None:
+def _note_red_over_armed_auto_merge(
+    pr_number: int, check_name: str, conclusion: str, repo: str
+) -> None:
     """Say out loud that a red conclusion is going out onto a self-merging PR.
 
     Advisory only, and deliberately unable to stop anything: the auto-merge
@@ -835,7 +834,7 @@ def _note_red_over_armed_auto_merge(pr_number: int, check_name: str, conclusion:
     be indistinguishable from a permanently unarmed PR.
     """
     try:
-        armed = auto_merge_is_armed(pr_number)
+        armed = auto_merge_is_armed(pr_number, repo)
     except ForgePublishRefused as exc:
         logger.warning(
             "forge_gate_publisher: auto-merge-status van PR #%s niet vast te stellen (%s); "
@@ -947,6 +946,22 @@ def _emit_publication_event(
         )
 
 
+def _publication_target(record_path: Optional[Path], results_dir: Optional[Path]) -> ForgeTarget:
+    """The project a publication is for, from the store the record lives in.
+
+    ``record_path`` is the file itself, ``results_dir`` the CLI's store, neither
+    the default store: the same three-way choice as the record lookup, so the
+    repo is always the one the record was read from.
+    """
+    if record_path is not None:
+        store = Path(record_path).parent
+    elif results_dir is not None:
+        store = Path(results_dir)
+    else:
+        store = _default_results_dir()
+    return resolve_forge_target(store)
+
+
 def publish_for_record(
     pr_number: int,
     gate: str,
@@ -955,7 +970,6 @@ def publish_for_record(
     results_dir: Optional[Path] = None,
     record_path: Optional[Path] = None,
     dry_run: bool = False,
-    project_root: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Publish ``vnx-gate/<gate>`` for ``pr_number`` from the record on disk.
 
@@ -987,6 +1001,12 @@ def publish_for_record(
     cannot complete a merge, they are what holds an armed auto-merge back, and
     withholding one would leave a stale ``success`` on the head as the last
     thing branch protection sees.
+
+    **Which repo.** The one the store holding the record belongs to
+    (:func:`forge_project_target.resolve_forge_target`): every ``gh`` lookup and
+    the POST itself use that repo. When the store cannot be attributed to a
+    project the publication is refused (:class:`ForgePublishRefused`), because
+    the only other candidate, the engine's own checkout, is a different repo.
     """
     resolved_head = _require_head(head_sha)
 
@@ -1014,9 +1034,10 @@ def publish_for_record(
         else:
             record = read_result_record(pr_number, gate, results_dir=results_dir)
         verdict = classify_record(record, resolved_head)
+        target = _publication_target(record_path, results_dir)
 
         if verdict.conclusion == CONCLUSION_SUCCESS:
-            refuse_if_auto_merge_is_armed(pr_number)
+            refuse_if_auto_merge_is_armed(pr_number, target.owner_repo)
             proven, why = _proven_pass_on_head(record, resolved_head)
             if not proven:
                 raise ForgePublishRefused(
@@ -1026,7 +1047,9 @@ def publish_for_record(
         elif not dry_run:
             # Red goes out whatever the auto-merge state is; the operator still
             # gets told. A rehearsal posts nothing, so it has nothing to note.
-            _note_red_over_armed_auto_merge(pr_number, check_run_name(gate), verdict.conclusion)
+            _note_red_over_armed_auto_merge(
+                pr_number, check_run_name(gate), verdict.conclusion, target.owner_repo
+            )
 
         name = check_run_name(gate)
         payload: Dict[str, Any] = {
@@ -1044,7 +1067,11 @@ def publish_for_record(
             return payload
 
         response = publish_check_run(
-            resolved_head, name, verdict.conclusion, payload["summary"], project_root=project_root
+            resolved_head,
+            name,
+            verdict.conclusion,
+            payload["summary"],
+            project_root=target.project_root,
         )
     # vnx-broad-except: every way this can end without a check-run — a refusal,
     # a corrupt record, GitHub saying no — is one line in the trail, and the
@@ -1103,7 +1130,6 @@ def publish_review_summary(
     branch: Optional[str] = None,
     project_id: Optional[str] = None,
     dry_run: bool = False,
-    project_root: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Publish ``vnx-gate/review`` for one head. Returns the payload sent.
 
@@ -1134,11 +1160,13 @@ def publish_review_summary(
             pr_number, resolved_head, results_dir=results_dir, branch=branch,
             project_id=project_id,
         )
+        # The same store, so the same repo, as the per-gate check of this record.
+        target = _publication_target(None, results_dir)
         if verdict.conclusion == CONCLUSION_SUCCESS:
-            refuse_if_auto_merge_is_armed(pr_number)
+            refuse_if_auto_merge_is_armed(pr_number, target.owner_repo)
         elif not dry_run:
             _note_red_over_armed_auto_merge(
-                pr_number, REVIEW_SUMMARY_CHECK_NAME, verdict.conclusion
+                pr_number, REVIEW_SUMMARY_CHECK_NAME, verdict.conclusion, target.owner_repo
             )
 
         payload: Dict[str, Any] = {
@@ -1159,7 +1187,7 @@ def publish_review_summary(
             REVIEW_SUMMARY_CHECK_NAME,
             verdict.conclusion,
             payload["summary"],
-            project_root=project_root,
+            project_root=target.project_root,
         )
     # vnx-broad-except: every way this ends without a check-run is one line in
     # the trail, and the exception is re-raised unchanged.
@@ -1278,18 +1306,18 @@ EXIT_ERROR = 1
 EXIT_STALE_VERDICT = 2
 
 
-def _resolve_head_sha(pr_number: int) -> str:
-    """The PR head from GitHub, via the fleet's single source of truth.
+def _resolve_head_sha(pr_number: int, repo: str) -> str:
+    """The PR head from GitHub (in ``repo``), via the fleet's single source of truth.
 
     ``gate_recorder.get_pr_head_sha`` — never ``git rev-parse HEAD``, which
     resolves against the process cwd and is not the PR head (OI-1307).
     """
     from gate_recorder import get_pr_head_sha  # noqa: PLC0415
 
-    return get_pr_head_sha(pr_number)
+    return get_pr_head_sha(pr_number, repo=repo)
 
 
-def _resolve_head_branch(pr_number: int) -> str:
+def _resolve_head_branch(pr_number: int, repo: str) -> str:
     """The PR's head branch, or refuse.
 
     Uses this module's strict :func:`_gh_pr_json`, not
@@ -1299,7 +1327,7 @@ def _resolve_head_branch(pr_number: int) -> str:
     check would then accept evidence the door itself rejects as stale — the
     one direction a summary check may never fall.
     """
-    branch = str(_gh_pr_json(pr_number, "headRefName").get("headRefName") or "").strip()
+    branch = str(_gh_pr_json(pr_number, "headRefName", repo).get("headRefName") or "").strip()
     if not branch:
         raise ForgePublishRefused(
             f"`gh pr view {pr_number} --json headRefName` gaf geen branch terug — zonder "
@@ -1354,9 +1382,9 @@ def _publish_one(
     return EXIT_OK
 
 
-def _run_review(args: argparse.Namespace, results_dir: Path, head_sha: str) -> int:
+def _run_review(args: argparse.Namespace, results_dir: Path, head_sha: str, repo: str) -> int:
     """``review`` — publish the one summary check for this head."""
-    branch = args.branch or _resolve_head_branch(args.pr)
+    branch = args.branch or _resolve_head_branch(args.pr, repo)
     payload = publish_review_summary(
         args.pr,
         head_sha,
@@ -1480,7 +1508,16 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     results_dir = Path(args.results_dir) if args.results_dir else _default_results_dir()
 
-    head_sha = _resolve_head_sha(args.pr)
+    # The repo comes from the store being published, before any gh lookup: the
+    # head, the branch and the auto-merge state must all be read from the repo
+    # the check-run lands on, not from whatever repo the cwd happens to be.
+    try:
+        repo = resolve_forge_target(results_dir).owner_repo
+    except ForgeCheckRunError as exc:
+        print(f"{args.command}: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+    head_sha = _resolve_head_sha(args.pr, repo)
     if not head_sha:
         print(
             f"kan de kop van PR #{args.pr} niet ophalen (gh pr view --json headRefOid gaf "
@@ -1491,7 +1528,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.command == "review":
         try:
-            return _run_review(args, results_dir, head_sha)
+            return _run_review(args, results_dir, head_sha, repo)
         except ForgeCheckRunError as exc:
             print(f"{REVIEW_SUMMARY_CHECK_NAME}: {exc}", file=sys.stderr)
             return EXIT_ERROR

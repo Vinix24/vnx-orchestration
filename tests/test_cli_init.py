@@ -845,6 +845,13 @@ class TestInitDoctorDataDirConsistency:
         fake_home = tmp_path_factory.mktemp("home")
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
 
+        # This test is about the data-dir mismatch warning, not about launchd.
+        # Without this stub vnx_init would run the real `launchctl unload/load -w`
+        # (OI-1891: it loaded com.vnx.*.project0 on the operator's Mac and
+        # replaced the operator's com.vnx.ledger-health).
+        from vnx_cli.commands import init_cmd
+        monkeypatch.setattr(init_cmd, "_install_launchd_agent", lambda *a, **k: False)
+
         # Clean env: let the resolver's default branch drive the result.
         for key in (
             "VNX_DATA_DIR", "VNX_DATA_DIR_EXPLICIT",

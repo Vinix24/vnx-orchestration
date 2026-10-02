@@ -34,6 +34,8 @@ import gate_recorder  # noqa: E402
 import gate_status  # noqa: E402
 
 HEAD = "a" * 40
+
+pytestmark = pytest.mark.usefixtures("attributed_forge_target")
 OTHER_HEAD = "b" * 40
 
 #: What ``gh pr view --json autoMergeRequest`` returns on a PR that will merge
@@ -619,7 +621,7 @@ def test_cli_publish_on_a_pass_for_an_older_sha_exits_nonzero(
     _write_record(results_dir, 1811, "glm_gate", _proven_pass(tmp_path, commit_sha=OTHER_HEAD))
     _gh_returning(monkeypatch, {"autoMergeRequest": None})
     calls = _capture_publish(monkeypatch)
-    monkeypatch.setattr(fcr, "_resolve_head_sha", lambda _pr: HEAD)
+    monkeypatch.setattr(fcr, "_resolve_head_sha", lambda _pr, _repo=None: HEAD)
     monkeypatch.setattr(fcr, "_default_results_dir", lambda: results_dir)
 
     rc = fcr.main(["publish", "--pr", "1811", "--gate", "glm_gate"])
@@ -639,7 +641,7 @@ def test_cli_publish_never_posts_an_old_verdict_on_a_new_head(
     _write_record(results_dir, 1811, "glm_gate", _proven_pass(tmp_path, commit_sha=OTHER_HEAD))
     _gh_returning(monkeypatch, {"autoMergeRequest": None})
     calls = _capture_publish(monkeypatch)
-    monkeypatch.setattr(fcr, "_resolve_head_sha", lambda _pr: HEAD)
+    monkeypatch.setattr(fcr, "_resolve_head_sha", lambda _pr, _repo=None: HEAD)
     monkeypatch.setattr(fcr, "_default_results_dir", lambda: results_dir)
 
     fcr.main(["publish", "--pr", "1811", "--gate", "glm_gate"])
@@ -655,7 +657,7 @@ def test_cli_publish_on_a_fresh_pass_exits_zero(
     _write_record(results_dir, 1811, "glm_gate", _proven_pass(tmp_path))
     _gh_returning(monkeypatch, {"autoMergeRequest": None})
     calls = _capture_publish(monkeypatch)
-    monkeypatch.setattr(fcr, "_resolve_head_sha", lambda _pr: HEAD)
+    monkeypatch.setattr(fcr, "_resolve_head_sha", lambda _pr, _repo=None: HEAD)
     monkeypatch.setattr(fcr, "_default_results_dir", lambda: results_dir)
 
     rc = fcr.main(["publish", "--pr", "1811", "--gate", "glm_gate"])
@@ -674,7 +676,7 @@ def test_cli_without_gate_publishes_every_slot_for_the_pr(
     )
     _gh_returning(monkeypatch, {"autoMergeRequest": None})
     calls = _capture_publish(monkeypatch)
-    monkeypatch.setattr(fcr, "_resolve_head_sha", lambda _pr: HEAD)
+    monkeypatch.setattr(fcr, "_resolve_head_sha", lambda _pr, _repo=None: HEAD)
     monkeypatch.setattr(fcr, "_default_results_dir", lambda: results_dir)
 
     fcr.main(["publish", "--pr", "1811"])
@@ -685,7 +687,7 @@ def test_cli_without_gate_publishes_every_slot_for_the_pr(
 def test_cli_refuses_a_pr_without_a_resolvable_head(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(fcr, "_resolve_head_sha", lambda _pr: "")
+    monkeypatch.setattr(fcr, "_resolve_head_sha", lambda _pr, _repo=None: "")
     monkeypatch.setattr(fcr, "_default_results_dir", lambda: tmp_path)
     calls = _capture_publish(monkeypatch)
 
@@ -1268,7 +1270,7 @@ def test_the_cli_publishes_from_the_results_dir_flag_not_a_single_file(
     empty_default = tmp_path / "default_store"
     empty_default.mkdir()
     monkeypatch.setattr(fcr, "_default_results_dir", lambda: empty_default)
-    monkeypatch.setattr(fcr, "_resolve_head_sha", lambda _pr: HEAD)
+    monkeypatch.setattr(fcr, "_resolve_head_sha", lambda _pr, _repo=None: HEAD)
     _gh_returning(monkeypatch, {"autoMergeRequest": None})
     calls = _capture_publish(monkeypatch)
 

@@ -252,6 +252,7 @@ from gate_status import (  # noqa: E402
     is_pass as _gate_is_pass,
 )
 from gate_executor import _classify_sha_binding  # noqa: E402
+from forge_project_target import project_checkout_path as _project_checkout_path
 
 _LOG = logging.getLogger("gate_obligation_runner")
 
@@ -757,39 +758,6 @@ def _git_remote_origin(project_root: Path) -> Optional[str]:
     if proc.returncode != 0 or not proc.stdout.strip():
         return None
     return proc.stdout.strip()
-
-
-def _project_checkout_path(project_id: str) -> Optional[Path]:
-    """Resolve the project's checkout path from the operator registry.
-
-    ``~/.vnx/projects.json`` (vnx_identity schema v2) maps ``project_id`` →
-    ``path``. This is the cwd-independent link from a central-install runner's
-    store (``~/.vnx-data/<project_id>/state``) back to the actual checkout whose
-    ``origin`` remote is a real GitHub URL. Returns None when the id is not
-    registered or the path is gone.
-    """
-    if not project_id:
-        return None
-    try:
-        registry_path = Path("~/.vnx/projects.json").expanduser()
-        registry = json.loads(registry_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    for entry in registry.get("projects", []) or []:
-        if not isinstance(entry, dict):
-            continue
-        if entry.get("project_id") != project_id:
-            continue
-        raw_path = entry.get("path")
-        if not raw_path:
-            continue
-        try:
-            candidate = Path(raw_path).expanduser()
-        except (OSError, ValueError):
-            continue
-        if candidate.is_dir():
-            return candidate
-    return None
 
 
 def _resolve_github_owner_repo(state_dir: Path) -> Optional[str]:

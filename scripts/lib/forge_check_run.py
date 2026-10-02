@@ -78,8 +78,9 @@ from chain_origin_anchor import _owner_repo_from_remote  # noqa: E402
 from forge_protection_drift import PROTECTION_YAML_RELATIVE_PATH  # noqa: E402
 
 #: scripts/lib/forge_check_run.py -> scripts/lib -> scripts -> repo root.
-#: Derived from ``__file__``, never from the cwd: this module is imported by
-#: callers whose cwd is a dispatch worktree, not the checkout.
+#: Only locates the fabric's own App config (``DEFAULT_YAML_PATH``). It is the
+#: ENGINE's checkout, never the project a check-run is published for: the target
+#: repo comes from the store the record was written to (forge_project_target).
 REPO_ROOT = _LIB_DIR.parent.parent
 
 DEFAULT_YAML_PATH = REPO_ROOT / PROTECTION_YAML_RELATIVE_PATH
@@ -142,6 +143,15 @@ class ForgeAPIError(ForgeCheckRunError):
         super().__init__(message)
         self.status = status
         self.body = body
+
+
+class ForgePublishRefused(ForgeCheckRunError):
+    """This publication is refused on policy, not on transport.
+
+    Distinct from :class:`ForgeAPIError` (GitHub said no) and
+    :class:`ForgeKeychainError` (we could not authenticate): here nothing was
+    ever sent, because sending it would have been wrong.
+    """
 
 
 class ForgeTestPostRefused(ForgeCheckRunError):
@@ -427,9 +437,16 @@ def resolve_owner_repo(project_root: Optional[Path] = None) -> str:
     """``owner/repo`` from the ``origin`` remote of ``project_root``.
 
     Reuses ``chain_origin_anchor._owner_repo_from_remote`` rather than adding
-    a fourth copy of the same regex to this repo.
+    a fourth copy of the same regex to this repo. ``project_root`` is required
+    in practice: there is no default repo, because the only candidate (the
+    engine's own checkout) is a different repo from the project's.
     """
-    root = Path(project_root) if project_root is not None else REPO_ROOT
+    if project_root is None:
+        raise ForgeCheckRunError(
+            "geen project_root: een check-run heeft een doelproject nodig en er is geen "
+            "standaard-repo (de checkout van de engine is niet het project)"
+        )
+    root = Path(project_root)
     owner_repo = _owner_repo_from_remote(root)
     if not owner_repo:
         raise ForgeCheckRunError(
