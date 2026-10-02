@@ -305,10 +305,13 @@ def _handle_request_and_execute(manager: ReviewGateManager, args: argparse.Names
     )
     print(json.dumps(result, indent=2))
     if result.get("has_required_failure"):
-        # OI-1178: surface every required gate that did not PASS, not just the
-        # not_executable/not_configured ones. An executed gate that booked
-        # ``unavailable`` (did not run) or ``failed`` (ran and found a blockade)
-        # is a non-pass and must be named here so the operator sees which gate.
+        # OI-1178: surface every gate of this call that did not PASS, not just
+        # the not_executable/not_configured ones. An executed gate that booked
+        # ``unavailable`` (did not run), ``failed`` (ran and found a blockade)
+        # or simply carried a blocking finding is a non-pass and must be named
+        # here so the operator sees which gate -- including a gate the merge
+        # policy stamped ``required: false``, whose blocker still fails this
+        # call (the exit code is what loops act on).
         non_pass_gates = [
             g["gate"] for g in result.get("gates", [])
             if g.get("gate") != "claude_github_optional"
