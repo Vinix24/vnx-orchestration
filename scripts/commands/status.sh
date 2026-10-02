@@ -131,8 +131,8 @@ _s_print_dispatches() {
       if [[ "$f" == *.md ]]; then
         name="$(basename "$f")"
         local target role
-        target=$(head -3 "$f" 2>/dev/null | grep '^\[\[TARGET:' | sed 's/\[\[TARGET://;s/\]\]//')
-        role=$(head -5 "$f" 2>/dev/null | grep '^Role:' | sed 's/Role: *//')
+        target=$(head -3 "$f" 2>/dev/null | grep '^\[\[TARGET:' | sed 's/\[\[TARGET://;s/\]\]//' || true)
+        role=$(head -5 "$f" 2>/dev/null | grep '^Role:' | sed 's/Role: *//' || true)
         printf '    %s%-40s%s  %s→%s %s [%s]\n' \
           "$(_s_dim)" "$name" "$(_s_reset)" \
           "$(_s_cyan)" "$(_s_reset)" \
@@ -150,7 +150,7 @@ _s_print_dispatches() {
         local name
         name="$(basename "$f")"
         local target
-        target=$(head -3 "$f" 2>/dev/null | grep '^\[\[TARGET:' | sed 's/\[\[TARGET://;s/\]\]//')
+        target=$(head -3 "$f" 2>/dev/null | grep '^\[\[TARGET:' | sed 's/\[\[TARGET://;s/\]\]//' || true)
         printf '    %s%-40s%s  %s→%s %s\n' \
           "$(_s_bold)" "$name" "$(_s_reset)" \
           "$(_s_green)" "$(_s_reset)" "${target:-?}"

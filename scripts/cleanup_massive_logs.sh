@@ -18,7 +18,7 @@ echo ""
 
 # Show current size
 echo "Current size of .claude directory:"
-du -sh "$PROJECT_ROOT/.claude"
+du -sh "$PROJECT_ROOT/.claude" 2>/dev/null || true
 echo ""
 
 # Backup important files first
@@ -138,7 +138,7 @@ echo "   Cleanup Complete"
 echo "═══════════════════════════════════════════════════════════"
 echo ""
 echo "New size of .claude directory:"
-du -sh "$PROJECT_ROOT/.claude"
+du -sh "$PROJECT_ROOT/.claude" 2>/dev/null || true
 echo ""
 echo "Disk space reclaimed!"
 echo ""

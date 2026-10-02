@@ -185,7 +185,7 @@ _finish_wt_stop_processes() {
     for pid_file in "$wt_data/pids"/*.pid; do
       [ -f "$pid_file" ] || continue
       local pid proc_name
-      pid="$(cat "$pid_file" 2>/dev/null)"
+      pid="$(cat "$pid_file" 2>/dev/null || true)"
       proc_name="$(basename "${pid_file%.pid}")"
 
       if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then

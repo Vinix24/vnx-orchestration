@@ -22,7 +22,7 @@ _vnx_pane_active_cli() {
   local pane_pid="$1" pid comm
   [ -z "$pane_pid" ] && return 1
   for pid in "$pane_pid" $(pgrep -P "$pane_pid" 2>/dev/null); do
-    comm="$(ps -o comm= -p "$pid" 2>/dev/null | tr -d ' ')"
+    comm="$(ps -o comm= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
     comm="${comm##*/}"
     case "$comm" in
       claude|codex|gemini|node) return 0 ;;
@@ -73,7 +73,7 @@ cmd_start() {
   # Processes are matched by VNX_DATA_DIR in their command line (log redirects).
   local _kill_scope="$runtime_dir"
   local stale_count
-  stale_count=$(pgrep -f "$_kill_scope" 2>/dev/null | wc -l | tr -d ' ')
+  stale_count=$(pgrep -f "$_kill_scope" 2>/dev/null | wc -l | tr -d ' ' || true)
   if [ "$stale_count" -gt 0 ]; then
     log "Cleaning up $stale_count orphan VNX process(es)..."
     pkill -f "vnx_supervisor.*$_kill_scope" 2>/dev/null || true
@@ -266,7 +266,7 @@ cmd_start() {
       # and can briefly coexist as a second window in this session.
       local T0
       T0="$(tmux list-panes -t "$session_name" -F '#{window_name} #{pane_id}' 2>/dev/null \
-        | awk '$1!="VNX-Queue" {print $2; exit}')"
+        | awk '$1!="VNX-Queue" {print $2; exit}' || true)"
 
       local node_path=""
       node_path="$(_resolve_node_path 2>/dev/null)" || node_path=""
@@ -481,7 +481,7 @@ TSJSON
     local popup_full_cmd="$popup_env; bash '$popup_script'"
 
     # Store per-session so Ctrl+G resolves the correct project at runtime.
-    tmux set-option -t "$session_name" @vnx_popup_cmd "$popup_full_cmd" 2>/dev/null
+    tmux set-option -t "$session_name" @vnx_popup_cmd "$popup_full_cmd" 2>/dev/null || true
 
     # Backfill: ensure all other VNX sessions also have @vnx_popup_cmd set.
     # Without this, old sessions (started before the resolver existed) have no
@@ -558,10 +558,10 @@ fi
 RESOLVER
     chmod +x "$resolver"
 
-    tmux bind-key -n C-g display-popup -E -w 80% -h 60% "bash $resolver" 2>/dev/null
-    tmux bind-key -n 'C-\' display-popup -E -w 80% -h 60% "bash $resolver" 2>/dev/null
-    tmux bind-key q display-popup -E -w 80% -h 60% "bash $resolver" 2>/dev/null
-    tmux bind-key p display-popup -E -w 80% -h 60% "bash $resolver" 2>/dev/null
+    tmux bind-key -n C-g display-popup -E -w 80% -h 60% "bash $resolver" 2>/dev/null || true
+    tmux bind-key -n 'C-\' display-popup -E -w 80% -h 60% "bash $resolver" 2>/dev/null || true
+    tmux bind-key q display-popup -E -w 80% -h 60% "bash $resolver" 2>/dev/null || true
+    tmux bind-key p display-popup -E -w 80% -h 60% "bash $resolver" 2>/dev/null || true
     log "Popup queue bound to Ctrl+G, Ctrl+\\, Ctrl+B Q/P (resolver-based)"
   fi
 

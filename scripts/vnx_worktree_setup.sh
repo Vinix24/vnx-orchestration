@@ -54,7 +54,7 @@ cmd_remove() {
 
     # Safety: warn if there are uncommitted changes
     local dirty_count
-    dirty_count=$(git -C "$wt_dir" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+    dirty_count=$(git -C "$wt_dir" status --porcelain 2>/dev/null | wc -l | tr -d ' ' || true)
     if [ "$dirty_count" -gt 0 ]; then
         echo "WARNING: $dirty_count uncommitted files in $wt_dir"
         echo "Aborting. Commit or discard changes first, or use: git worktree remove --force $wt_dir"

@@ -2622,7 +2622,7 @@ main() {
       ;;
     *)
       local hint
-      hint="$(_suggest_working_form "$cmd")"
+      hint="$(_suggest_working_form "$cmd")" || hint=""
       if [ -n "$hint" ]; then
         err "Unknown command: $cmd. $hint"
       else

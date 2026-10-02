@@ -39,7 +39,7 @@ echo "Popup script: $POPUP_SCRIPT"
 # Function to count files in directory
 count_files() {
     local dir="$1"
-    find "$dir" -type f -name "*.md" 2>/dev/null | wc -l | tr -d ' '
+    { find "$dir" -type f -name "*.md" 2>/dev/null || true; } | wc -l | tr -d ' '
 }
 
 # Function to check if popup is already running
@@ -165,7 +165,7 @@ _stale_pending_catchup() {
         mtime=$(stat -f%m "$f" 2>/dev/null || stat -c%Y "$f" 2>/dev/null || echo 0)
         local age_secs=$(( now - mtime ))
         if [ "$age_secs" -ge "$stale_threshold" ]; then
-            touch "$f"
+            touch "$f" 2>/dev/null || continue
             echo "[catchup] Re-offered stale pending dispatch: $(basename "$f") (age: $((age_secs/60))m)"
             found=$(( found + 1 ))
         fi
