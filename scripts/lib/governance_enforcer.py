@@ -49,6 +49,11 @@ try:
 except ImportError:  # pragma: no cover — verify module optional at import time
     _takeover_hop_gates = None  # type: ignore[assignment]
 
+# The fabric's single source of truth for "is this gate result a PASS?"
+# (CFX-3). The review-gate checks must not apply a weaker rule of their own:
+# status, blocking findings and coverage all live in ``gate_status.is_pass``.
+import gate_status
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
@@ -386,8 +391,17 @@ class GovernanceEnforcer:
     def _check_review_gate_required(
         self, cfg: CheckConfig, ctx: Dict[str, Any], gate_name: str,
     ) -> EnforcementResult:
-        """``<gate_name>`` gate result must exist with non-empty contract_hash
-        AND a ``commit_sha`` equal to the PR's CURRENT head (OI-1884).
+        """``<gate_name>`` must be a PASS on the PR's CURRENT head (OI-1884).
+
+        A record satisfies the seat only when all three hold: it is a PASS by
+        the fabric's shared rule (:func:`gate_status.is_pass` — status in the
+        canonical pass set, zero blocking findings, complete coverage), it
+        carries a non-empty ``contract_hash``, and its ``commit_sha`` equals
+        the current head. A record with a blocking finding, a ``failed``,
+        ``unavailable`` or in-flight status on the head is a decided
+        non-pass, not a pass: it must fail the check with a message that names
+        why, distinct from the stale-commit, missing-``commit_sha`` and
+        missing-record messages.
 
         A PASS recorded against an older commit never reviewed the code that
         sits on the head now — after a fix-forward push, an unbound
@@ -437,15 +451,17 @@ class GovernanceEnforcer:
             contract_hash = direct_data.get("contract_hash", "")
             commit_sha = direct_data.get("commit_sha", "")
             if contract_hash and commit_sha and commit_sha == head_sha:
-                return EnforcementResult(
-                    check_name=cfg.name, level=cfg.level, passed=True,
-                    message=(
-                        f"{gate_name} passed on head {_short_sha(head_sha)} — "
-                        f"contract_hash: {contract_hash[:12]}..."
-                    ),
-                    override_key=f"VNX_OVERRIDE_{cfg.name.upper()}",
-                )
+                if gate_status.is_pass(direct_data)[0]:
+                    return EnforcementResult(
+                        check_name=cfg.name, level=cfg.level, passed=True,
+                        message=(
+                            f"{gate_name} passed on head {_short_sha(head_sha)} — "
+                            f"contract_hash: {contract_hash[:12]}..."
+                        ),
+                        override_key=f"VNX_OVERRIDE_{cfg.name.upper()}",
+                    )
 
+        takeover_failure: Optional[str] = None
         if _takeover_hop_gates is not None:
             for candidate in sorted(GATE_RESULTS_DIR.glob(f"pr-{pr_number}-*.json")):
                 if candidate == result_path:
@@ -458,8 +474,11 @@ class GovernanceEnforcer:
                     continue
                 contract_hash = data.get("contract_hash", "")
                 commit_sha = data.get("commit_sha", "")
-                if contract_hash and commit_sha and commit_sha == head_sha:
-                    successor = data.get("gate") or candidate.stem
+                if not (contract_hash and commit_sha and commit_sha == head_sha):
+                    continue
+                successor = data.get("gate") or candidate.stem
+                passed, reason = gate_status.is_pass(data)
+                if passed:
                     return EnforcementResult(
                         check_name=cfg.name, level=cfg.level, passed=True,
                         message=(
@@ -468,6 +487,13 @@ class GovernanceEnforcer:
                         ),
                         override_key=f"VNX_OVERRIDE_{cfg.name.upper()}",
                     )
+                # A successor on the head that did not pass is a decided
+                # non-pass: remember why so the seat fails on the verdict,
+                # not on the weaker "no result" message.
+                takeover_failure = (
+                    f"{gate_name} seat taken over by {successor} on head "
+                    f"{_short_sha(head_sha)} is not a PASS: {reason}"
+                )
 
         if direct_data is not None:
             stale_commit = direct_data.get("commit_sha", "")
@@ -481,13 +507,25 @@ class GovernanceEnforcer:
                     f"{gate_name} PASS staat op een oudere commit ({_short_sha(stale_commit)}) "
                     f"dan de huidige PR-kop ({_short_sha(head_sha)}): opnieuw reviewen vereist"
                 )
-            else:
+            elif not direct_data.get("contract_hash", ""):
                 message = (
                     f"{gate_name} result has empty contract_hash and no takeover successor found"
+                )
+            else:
+                _passed, reason = gate_status.is_pass(direct_data)
+                message = (
+                    f"{gate_name} result on head {_short_sha(head_sha)} is not a PASS: "
+                    f"{reason} (no takeover successor found)"
                 )
             return EnforcementResult(
                 check_name=cfg.name, level=cfg.level, passed=False,
                 message=message,
+                override_key=f"VNX_OVERRIDE_{cfg.name.upper()}",
+            )
+        if takeover_failure is not None:
+            return EnforcementResult(
+                check_name=cfg.name, level=cfg.level, passed=False,
+                message=takeover_failure,
                 override_key=f"VNX_OVERRIDE_{cfg.name.upper()}",
             )
         return EnforcementResult(
