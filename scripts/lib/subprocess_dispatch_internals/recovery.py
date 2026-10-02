@@ -306,6 +306,7 @@ def _handle_success(
         model=model,
         lane="subprocess",
         mandate_id=mandate_id,
+        role=role,
     )
     quality_db = _sd._default_state_dir() / "quality_intelligence.db"
     patt_updated = _sd._update_pattern_confidence(dispatch_id, "success", quality_db)
@@ -387,6 +388,7 @@ def _handle_final_failure(
         sub_provider="anthropic",
         model=model,
         lane="subprocess",
+        role=role,
     )
     quality_db = _sd._default_state_dir() / "quality_intelligence.db"
     patt_updated = _sd._update_pattern_confidence(dispatch_id, "failure", quality_db)

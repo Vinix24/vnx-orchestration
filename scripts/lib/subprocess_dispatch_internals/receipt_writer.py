@@ -218,6 +218,7 @@ def _write_receipt(
     model: str | None = None,
     lane: str | None = None,
     mandate_id: str | None = None,
+    role: str | None = None,
 ) -> Path:
     """Append a subprocess completion receipt to t0_receipts.ndjson.
 
@@ -245,8 +246,28 @@ def _write_receipt(
         model=model,
         lane=lane,
         mandate_id=mandate_id,
+        role=role,
     )
     return _persist_receipt(receipt, dispatch_id, terminal_id, status)
+
+
+def _resolve_receipt_role(role: str | None, dispatch_id: str) -> str:
+    """Resolve the receipt role via the shared resolver. FAIL-OPEN to the marker."""
+    from dispatch_identity import _IDENTITY_UNRESOLVED, resolve_effective_role
+    try:
+        import subprocess_dispatch as _sd
+        state_dir = _sd._default_state_dir()
+        project_id = os.environ.get("VNX_PROJECT_ID", "").strip()
+        if not project_id:
+            from dispatch_cli import _resolve_project_id
+            project_id = _resolve_project_id()
+        return resolve_effective_role(role, dispatch_id, project_id, state_dir=state_dir)
+    except Exception:
+        logger.debug(
+            "receipt_writer: role resolution failed open dispatch=%s",
+            dispatch_id, exc_info=True,
+        )
+        return (role or "").strip() or _IDENTITY_UNRESOLVED
 
 
 def _build_receipt_payload(
@@ -272,8 +293,15 @@ def _build_receipt_payload(
     model: str | None = None,
     lane: str | None = None,
     mandate_id: str | None = None,
+    role: str | None = None,
 ) -> dict:
-    """Assemble the receipt dict from the named fields."""
+    """Assemble the receipt dict from the named fields.
+
+    ``role`` is stamped unconditionally through the shared resolver: the caller
+    role if genuinely set, else the role in the dispatch's own spec, else
+    ``dispatch_metadata``, else the ``identity_unresolved`` marker. Never a
+    guessed role name.
+    """
     receipt = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "event_type": "subprocess_completion",
@@ -285,6 +313,7 @@ def _build_receipt_payload(
         "event_count": event_count,
         "session_id": session_id,
         "source": "subprocess",
+        "role": _resolve_receipt_role(role, dispatch_id),
     }
     if provider is not None:
         receipt["provider"] = provider

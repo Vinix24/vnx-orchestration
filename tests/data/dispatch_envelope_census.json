@@ -107,63 +107,63 @@
     },
     {
       "file": "tests/test_dispatch_envelope.py",
-      "line": 622,
+      "line": 623,
       "mechanism": "logger-name",
       "module_target": "envelope_govern_support",
       "symbol": ""
     },
     {
       "file": "tests/test_dispatch_envelope.py",
-      "line": 656,
+      "line": 657,
       "mechanism": "logger-name",
       "module_target": "envelope_govern_support",
       "symbol": ""
     },
     {
       "file": "tests/test_dispatch_envelope.py",
-      "line": 658,
+      "line": 659,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_receipt_exists_for_dispatch"
     },
     {
       "file": "tests/test_dispatch_envelope.py",
-      "line": 849,
+      "line": 850,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "ClaudeSubprocessAdapter"
     },
     {
       "file": "tests/test_dispatch_envelope.py",
-      "line": 931,
+      "line": 932,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_govern"
     },
     {
       "file": "tests/test_dispatch_envelope.py",
-      "line": 956,
+      "line": 957,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_AdapterResult"
     },
     {
       "file": "tests/test_dispatch_envelope.py",
-      "line": 991,
+      "line": 992,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_AdapterResult"
     },
     {
       "file": "tests/test_dispatch_envelope.py",
-      "line": 1012,
+      "line": 1013,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_AdapterResult"
     },
     {
       "file": "tests/test_dispatch_envelope.py",
-      "line": 1027,
+      "line": 1028,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_govern"
@@ -881,6 +881,62 @@
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "_resolve_phantom_diff"
+    },
+    {
+      "file": "tests/test_fase0_rol_in_receipt.py",
+      "line": 34,
+      "mechanism": "direct-call",
+      "module_target": "envelope_govern",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_fase0_rol_in_receipt.py",
+      "line": 35,
+      "mechanism": "direct-call",
+      "module_target": "envelope_govern_support",
+      "symbol": "_receipt_exists_for_dispatch"
+    },
+    {
+      "file": "tests/test_fase0_rol_in_receipt.py",
+      "line": 36,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_fase0_rol_in_receipt.py",
+      "line": 36,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_fase0_rol_in_receipt.py",
+      "line": 122,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_archive_dispatch_events"
+    },
+    {
+      "file": "tests/test_fase0_rol_in_receipt.py",
+      "line": 123,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_clear_dispatch_events"
+    },
+    {
+      "file": "tests/test_fase0_rol_in_receipt.py",
+      "line": 233,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_archive_dispatch_events"
+    },
+    {
+      "file": "tests/test_fase0_rol_in_receipt.py",
+      "line": 234,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_clear_dispatch_events"
     },
     {
       "file": "tests/test_final_prompt_integrity.py",
@@ -1748,6 +1804,7 @@
     "envelope_govern::_record_receipt_emit_failure",
     "envelope_govern_support::_archive_dispatch_events",
     "envelope_govern_support::_clear_dispatch_events",
+    "envelope_govern_support::_is_lane_completion_receipt",
     "envelope_govern_support::_receipt_exists_for_dispatch",
     "envelope_govern_support::_resolve_fix_forward_diff",
     "envelope_govern_support::_resolve_phantom_diff",
