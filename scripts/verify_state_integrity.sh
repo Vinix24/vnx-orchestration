@@ -32,8 +32,11 @@ resolve_target() {
 }
 
 TARGETS=(
-  "$(resolve_target pr_queue.json)"
-  "$(resolve_target progress_state.yaml)"
+  # `|| true`: resolve_target returns 1 on a miss by design (it still echoes the
+  # fallback path), and an unguarded array substitution would abort here under
+  # errexit before the missing-file reporting below can run.
+  "$(resolve_target pr_queue.json || true)"
+  "$(resolve_target progress_state.yaml || true)"
 )
 
 missing=0

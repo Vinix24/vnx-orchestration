@@ -39,9 +39,9 @@ echo "$current_hash" > "$HASH_CACHE"
 touch "$ACK_FLAG"
 
 # Extract key metrics for output (minimal tokens)
-PENDING=$(jq -r '.queues.pending // 0' "$BRIEF")
-T1=$(jq -r '.terminals.T1.status // "unknown"' "$BRIEF")
-T2=$(jq -r '.terminals.T2.status // "unknown"' "$BRIEF")
-T3=$(jq -r '.terminals.T3.status // "unknown"' "$BRIEF")
+PENDING=$(jq -r '.queues.pending // 0' "$BRIEF" || echo 0)
+T1=$(jq -r '.terminals.T1.status // "unknown"' "$BRIEF" || echo "unknown")
+T2=$(jq -r '.terminals.T2.status // "unknown"' "$BRIEF" || echo "unknown")
+T3=$(jq -r '.terminals.T3.status // "unknown"' "$BRIEF" || echo "unknown")
 
 echo "✅ Intelligence ACK set | T1=$T1 T2=$T2 T3=$T3 Queue=$PENDING"

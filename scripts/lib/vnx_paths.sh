@@ -2,7 +2,27 @@
 # Shared path resolver for VNX scripts.
 # Allows environment overrides while defaulting to repo-relative paths.
 
-__VNX_PATHS_SHELLOPTS="$(set +o)"
+# Snapshot the caller's strict-mode options so they can be restored at the end.
+# Do NOT capture this with `$(set +o)`: bash clears errexit inside a command
+# substitution, so that snapshot always reads "errexit off" and the restore
+# silently turned `set -e` off in the caller (nounset/pipefail survived — only
+# -e was lost). `[[ -o ... ]]` tests the option in the *current* shell, so it
+# reports the truth on bash 3.2 as well as newer bash.
+__VNX_PATHS_ERREXIT=0
+if [[ -o errexit ]]; then __VNX_PATHS_ERREXIT=1; fi
+__VNX_PATHS_NOUNSET=0
+if [[ -o nounset ]]; then __VNX_PATHS_NOUNSET=1; fi
+__VNX_PATHS_PIPEFAIL=0
+if [[ -o pipefail ]]; then __VNX_PATHS_PIPEFAIL=1; fi
+
+# Restore the caller's strict mode exactly (a no-op for options it never had on).
+# Also called from the central-install write guard before its unconditional exit.
+_vnx_paths_restore_strict_mode() {
+  if [ "$__VNX_PATHS_ERREXIT" = "1" ]; then set -e; else set +e; fi
+  if [ "$__VNX_PATHS_NOUNSET" = "1" ]; then set -u; else set +u; fi
+  if [ "$__VNX_PATHS_PIPEFAIL" = "1" ]; then set -o pipefail; else set +o pipefail; fi
+}
+
 set -euo pipefail
 
 # Resolve this file's directory without clobbering the caller's SCRIPT_DIR.
@@ -350,7 +370,7 @@ if [ -f "${VNX_HOME}/.vnx-install-mode" ] \
         # Data-integrity guard: halt unconditionally so the misconfiguration
         # cannot proceed to write into the code tree, regardless of whether the
         # caller enabled `set -e`. Restore the caller's shell options first.
-        eval "$__VNX_PATHS_SHELLOPTS"
+        _vnx_paths_restore_strict_mode
         exit 1
         ;;
     esac
@@ -468,5 +488,6 @@ _activate_venv() {
 unset _VNX_PATHS_DIR
 unset -f _vnx_canon_dir _vnx_is_embedded_layout _vnx_git_toplevel _vnx_git_common_root
 unset -f _vnx_valid_project_id _vnx_state_project_id _vnx_resolve_state_root
-eval "$__VNX_PATHS_SHELLOPTS"
-unset __VNX_PATHS_SHELLOPTS
+_vnx_paths_restore_strict_mode
+unset __VNX_PATHS_ERREXIT __VNX_PATHS_NOUNSET __VNX_PATHS_PIPEFAIL
+unset -f _vnx_paths_restore_strict_mode

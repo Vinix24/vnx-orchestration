@@ -172,7 +172,7 @@ _doctor_check_worktree() {
       err "[doctor] WARN: .vnx-data is a SYMLINK (old model). Run 'vnx worktree-start' to migrate to isolated model."
     elif [ -d "$wt_data" ] && [ -f "$wt_data/.snapshot_meta" ]; then
       local snap_date
-      snap_date=$(grep '^snapshot_date=' "$wt_data/.snapshot_meta" 2>/dev/null | cut -d= -f2)
+      snap_date=$(grep '^snapshot_date=' "$wt_data/.snapshot_meta" 2>/dev/null | cut -d= -f2 || true)
       log "[doctor] OK worktree: isolated .vnx-data (snapshot: ${snap_date:-unknown})"
       # Check snapshot freshness (warn if >14 days old)
       if command -v python3 >/dev/null 2>&1 && [ -n "$snap_date" ]; then

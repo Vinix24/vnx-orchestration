@@ -17,7 +17,9 @@ echo "Merging intelligence from $WT_DATA → $MAIN_DATA"
 
 # 1. Reports (unique timestamp filenames, no conflicts)
 if [ -d "$WT_REPORTS_DIR" ]; then
-  count=$(ls "$WT_REPORTS_DIR/"*.md 2>/dev/null | wc -l)
+  # `|| true` after the pipeline: an empty reports dir makes `ls` exit 2, and
+  # pipefail would otherwise abort the script now that errexit is real.
+  count=$(ls "$WT_REPORTS_DIR/"*.md 2>/dev/null | wc -l || true)
   cp -n "$WT_REPORTS_DIR/"*.md "$VNX_REPORTS_DIR/" 2>/dev/null || true
   echo "[ok] Reports: $count files merged"
 fi
@@ -30,7 +32,9 @@ if [ -f "$WT_RECEIPTS" ]; then
     <(jq -r '.receipt_id' "$WT_RECEIPTS" 2>/dev/null | sort -u) \
     <(jq -r '.receipt_id' "$MAIN_RECEIPTS" 2>/dev/null | sort -u) \
   | while read -r rid; do
-      grep "\"receipt_id\":\"$rid\"" "$WT_RECEIPTS" >> "$MAIN_RECEIPTS"
+      # `|| true`: a non-matching pattern (e.g. spaced NDJSON) must not abort the
+      # merge loop under pipefail; it just skips that receipt.
+      grep "\"receipt_id\":\"$rid\"" "$WT_RECEIPTS" >> "$MAIN_RECEIPTS" || true
     done
   echo "[ok] Receipts: merged (deduplicated)"
 fi

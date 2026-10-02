@@ -88,8 +88,8 @@ HEADLESS_REPORTS="{headless}"
 BOOTSTRAP_MAX_AGE="{bootstrap_max_age}"
 VNX_DATA_DIR="{data_dir}"
 
-_rp_apply_bootstrap_protection
-_rc=$?
+_rc=0
+_rp_apply_bootstrap_protection || _rc=$?
 cat "{watermark_file}"
 exit $_rc
 """

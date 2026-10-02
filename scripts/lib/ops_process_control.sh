@@ -2,7 +2,23 @@
 # Shared process-stop helpers for operational scripts.
 # Enforces ownership + fingerprint checks and graceful stop with bounded timeout.
 
-__VNX_OPS_PROC_SHELLOPTS="$(set +o)"
+# Snapshot the caller's strict mode. Never use `$(set +o)` here: bash clears
+# errexit inside a command substitution, so that snapshot always reads "errexit
+# off" and the restore below would silently disable `set -e` in the caller.
+# `[[ -o ... ]]` reads the option in the current shell.
+__VNX_OPS_PROC_ERREXIT=0
+if [[ -o errexit ]]; then __VNX_OPS_PROC_ERREXIT=1; fi
+__VNX_OPS_PROC_NOUNSET=0
+if [[ -o nounset ]]; then __VNX_OPS_PROC_NOUNSET=1; fi
+__VNX_OPS_PROC_PIPEFAIL=0
+if [[ -o pipefail ]]; then __VNX_OPS_PROC_PIPEFAIL=1; fi
+
+_vnx_ops_proc_restore_strict_mode() {
+  if [ "$__VNX_OPS_PROC_ERREXIT" = "1" ]; then set -e; else set +e; fi
+  if [ "$__VNX_OPS_PROC_NOUNSET" = "1" ]; then set -u; else set +u; fi
+  if [ "$__VNX_OPS_PROC_PIPEFAIL" = "1" ]; then set -o pipefail; else set +o pipefail; fi
+}
+
 set -euo pipefail
 
 _OPS_PC_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -101,5 +117,6 @@ vnx_stop_listening_port_processes() {
   return "$stopped"
 }
 
-eval "$__VNX_OPS_PROC_SHELLOPTS"
-unset __VNX_OPS_PROC_SHELLOPTS
+_vnx_ops_proc_restore_strict_mode
+unset __VNX_OPS_PROC_ERREXIT __VNX_OPS_PROC_NOUNSET __VNX_OPS_PROC_PIPEFAIL
+unset -f _vnx_ops_proc_restore_strict_mode
