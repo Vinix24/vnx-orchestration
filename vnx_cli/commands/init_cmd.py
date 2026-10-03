@@ -777,33 +777,32 @@ def _install_launchd_agent(
 
     Returns True if the plist was installed or reloaded.
     Returns False if the template does not exist (not a VNX orchestration repo
-    or central install — silently skip).
+    or central install — silently skip), or if the install guard refuses the
+    engine root (OI-1942: ``scripts/lib/launchd_install_guard.py``; the reason
+    is printed).
 
-    Raises RuntimeError if launchctl load fails, or if the resolved plist has
-    no readable Label (never silent).
+    Raises RuntimeError if launchctl load fails, if the resolved plist has
+    no readable Label, if a per-project template gets an invalid project id,
+    or if any ``${...}`` placeholder remains after substitution (never silent).
     Raises OSError if the template exists but is unreadable.
     """
-    # --- OI-1117: refuse launchd agent install on an unstable root -----------
-    # When vnx init runs from an ephemeral worktree (dispatch/PR isolation),
-    # engine_root() resolves to a directory under .vnx-data/worktrees/. A
-    # launchd agent pointing at that path becomes stale the moment the worktree
-    # is reaped — and worse, writes to the HOST ~/Library/LaunchAgents from
-    # what should be an isolated workspace. Refuse silently (return False)
-    # like the missing-template case: non-main-checkout callers should not
-    # install host-wide agents. The operator can install manually via
-    # reload_plist.sh from the main checkout.
+    # --- OI-1117 / OI-1942: one install guard, shared with reload_plist.sh ----
+    # The engine root becomes VNX_HOME in the plist. A root that is not stable
+    # (ephemeral worktree, linked worktree, unregistered clone) leaves a job that
+    # points at a path that disappears and replaces the operator's job of the
+    # same Label. Refuse like the missing-template case: return False with the
+    # reason and the manual command printed.
     engine_root = _engine.engine_root().resolve()
-    engine_parts = engine_root.parts
-    for i, part in enumerate(engine_parts):
-        if part == ".vnx-data" and i + 1 < len(engine_parts) and engine_parts[i + 1] == "worktrees":
-            print(
-                f"  skipped {plist_name} launchd agent — engine root is under "
-                f".vnx-data/worktrees/ ({engine_root}); launchd agents must be "
-                "installed from the main checkout, not an ephemeral worktree. "
-                "Run: bash scripts/launchd/reload_plist.sh "
-                f"{plist_name}"
-            )
-            return False
+    _engine.ensure_engine_on_path()
+    from launchd_install_guard import refusal_reason
+    refused = refusal_reason(engine_root)
+    if refused is not None:
+        print(
+            f"  skipped {plist_name} launchd agent: {refused}. "
+            "Install from the main checkout or a central install: "
+            f"bash scripts/launchd/reload_plist.sh {plist_name}"
+        )
+        return False
 
     template = engine_root / "scripts" / "launchd" / f"{plist_name}.plist"
     if not template.is_file():
@@ -818,9 +817,25 @@ def _install_launchd_agent(
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     content = template.read_text(encoding="utf-8")
+    # OI-1942: fail closed. A per-project template installed with an empty or
+    # malformed id, or with any placeholder left over, would land a job that runs
+    # against the wrong store (the measured literal `${VNX_PROJECT_ID}` survived
+    # for five weeks). Mirrors reload_plist.sh's checks.
+    if "${VNX_PROJECT_ID}" in content and not _engine._PROJECT_ID_RE.match(project_id or ""):
+        raise RuntimeError(
+            f"{plist_name} is a per-project template but project id {project_id!r} does not "
+            f"match {_engine._PROJECT_ID_RE.pattern}: refusing to install"
+        )
     content = content.replace("${VNX_HOME}", vnx_home)
     content = content.replace("${VNX_PROJECT_ID}", project_id)
     content = content.replace("${VNX_PROJECT_ROOT}", project_root)
+
+    leftover = sorted(set(re.findall(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}", content)))
+    if leftover:
+        raise RuntimeError(
+            f"unresolved placeholder(s) remain in {plist_name}.plist after substitution: "
+            f"{', '.join(leftover)}: refusing to install"
+        )
 
     # OI-1510: destination filename comes from the RESOLVED Label, not the
     # plist_name argument — see the docstring above.
@@ -909,8 +924,11 @@ def _install_ledger_health_runner(vnx_home: str, project_id: str = "") -> bool:
     ``scripts/ledger_health.py`` is read-only reconciliation tooling that
     existed with nothing ever invoking it — this gives it the same launchd
     drive OI-917 already gave gate-obligation-runner, on its own cadence
-    (see the plist's comment block for the interval rationale). Thin wrapper
-    over ``_install_launchd_agent``, mirroring ``_install_gate_obligation_runner``.
+    (see the plist's comment block for the interval rationale). One job per
+    project (OI-1942): the Label carries ``project_id``, so a second project's
+    ``vnx init`` installs its own job instead of replacing the first one.
+    Thin wrapper over ``_install_launchd_agent``, mirroring
+    ``_install_gate_obligation_runner``.
     """
     return _install_launchd_agent(
         vnx_home, "com.vnx.ledger-health", project_id=project_id
@@ -1081,7 +1099,7 @@ def _vnx_init_scaffold(project_dir, template, force, set_version, project_id) ->
             str(_engine.engine_root()), project_id=project_id
         )
         if not installed:
-            print("  skipped gate-obligation-runner (plist template not found)")
+            print("  skipped gate-obligation-runner (plist template not found or install root refused, see above)")
     except (OSError, RuntimeError) as exc:
         print(f"  warning: gate-obligation-runner install failed: {exc}")
 
@@ -1091,7 +1109,7 @@ def _vnx_init_scaffold(project_dir, template, force, set_version, project_id) ->
             str(_engine.engine_root()), project_id=project_id
         )
         if not installed:
-            print("  skipped ledger-health (plist template not found)")
+            print("  skipped ledger-health (plist template not found or install root refused, see above)")
     except (OSError, RuntimeError) as exc:
         print(f"  warning: ledger-health install failed: {exc}")
 
@@ -1101,7 +1119,7 @@ def _vnx_init_scaffold(project_dir, template, force, set_version, project_id) ->
             str(_engine.engine_root()), project_id=project_id
         )
         if not installed:
-            print("  skipped receipt-processor (plist template not found)")
+            print("  skipped receipt-processor (plist template not found or install root refused, see above)")
     except (OSError, RuntimeError) as exc:
         print(f"  warning: receipt-processor install failed: {exc}")
 
@@ -1111,7 +1129,7 @@ def _vnx_init_scaffold(project_dir, template, force, set_version, project_id) ->
             str(_engine.engine_root()), project_id=project_id
         )
         if not installed:
-            print("  skipped cleanup-reviewed-worktrees (plist template not found)")
+            print("  skipped cleanup-reviewed-worktrees (plist template not found or install root refused, see above)")
     except (OSError, RuntimeError) as exc:
         print(f"  warning: cleanup-reviewed-worktrees install failed: {exc}")
 

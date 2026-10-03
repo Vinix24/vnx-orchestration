@@ -31,6 +31,7 @@ sys.path.insert(0, str(VNX_ROOT / "scripts"))
 sys.path.insert(0, str(VNX_ROOT))
 
 import vnx_paths
+from launchd_test_support import register_engine
 
 
 def _recording_stub(bin_dir: Path, *, list_output: str = "") -> Path:
@@ -182,6 +183,10 @@ def _fake_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     home = tmp_path / "fake-home"
     home.mkdir()
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    # The install guard (OI-1942) judges the engine root before the launchctl backstop
+    # is reached. The fake engine is a registered primary checkout under the patched
+    # home, so these tests still exercise the backstop.
+    register_engine(home, engine, "tst")
     return init_cmd, engine
 
 
@@ -192,7 +197,7 @@ def test_init_install_refuses_a_real_launchctl_under_a_test_runner(
 
     with pytest.raises(vnx_paths.TestIsolationGuardError, match=r"\[TEST ISOLATION GUARD\]"):
         init_cmd._install_launchd_agent(
-            str(engine), "com.vnx.gate-obligation-runner", project_id="t"
+            str(engine), "com.vnx.gate-obligation-runner", project_id="tst"
         )
 
     assert _logged(stub_first_on_path) == []
@@ -230,7 +235,7 @@ def test_the_backstop_lets_the_conftest_shim_through(
 
     assert shutil.which("launchctl") == str(stub)
 
-    init_cmd._install_launchd_agent(str(engine), "com.vnx.gate-obligation-runner", project_id="t")
+    init_cmd._install_launchd_agent(str(engine), "com.vnx.gate-obligation-runner", project_id="tst")
 
     assert [line.split()[0] for line in _logged(stub)][:2] == ["unload", "load"]
 
@@ -252,7 +257,7 @@ def test_the_backstop_does_not_fire_when_there_is_no_launchctl(
         lambda cmd, **k: MagicMock(returncode=0, stdout="", stderr=""),
     )
 
-    init_cmd._install_launchd_agent(str(engine), "com.vnx.gate-obligation-runner", project_id="t")
+    init_cmd._install_launchd_agent(str(engine), "com.vnx.gate-obligation-runner", project_id="tst")
 
 
 # ---------------------------------------------------------------------------

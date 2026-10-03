@@ -226,9 +226,10 @@ def test_real_repo_launchd_templates_clear_the_guard(monkeypatch) -> None:
         c["label"] for c in result["consumers"] if c.get("relevant") and c.get("in_range") is not None
     }
     assert gate_obligation_runner_label in checked_labels
-    assert "com.vnx.ledger-health" in checked_labels
+    ledger_health_label = "com.vnx.ledger-health.${VNX_PROJECT_ID}"
+    assert ledger_health_label in checked_labels
     for c in result["consumers"]:
-        if c["label"] in (gate_obligation_runner_label, "com.vnx.ledger-health"):
+        if c["label"] in (gate_obligation_runner_label, ledger_health_label):
             assert c["in_range"] is True, c
 
 

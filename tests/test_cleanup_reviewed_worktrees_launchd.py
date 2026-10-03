@@ -35,6 +35,7 @@ sys.path.insert(0, str(LAUNCHD_DIR))
 
 from vnx_cli.commands import init_cmd  # noqa: E402
 import launchd_project_scope as lps  # noqa: E402
+from launchd_test_support import make_central_engine  # noqa: E402
 
 CLEANUP_WORKTREES = "com.vnx.cleanup-reviewed-worktrees"
 
@@ -45,7 +46,7 @@ def _fake_engine_root(tmp_path: Path) -> Path:
     in _install_launchd_agent does not fire and silently skip the install."""
     real_engine = init_cmd._engine.engine_root()
     fake_engine_root = tmp_path / "fake-vnx-engine"
-    fake_engine_root.mkdir()
+    make_central_engine(fake_engine_root)
     (fake_engine_root / "scripts").symlink_to(real_engine / "scripts", target_is_directory=True)
     return fake_engine_root
 

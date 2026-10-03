@@ -69,7 +69,18 @@ REQUIRED_PER_PROJECT_FAMILIES: tuple = (
     "com.vnx.gate-obligation-runner",
     "com.vnx.receipt-processor",
     "com.vnx.cleanup-reviewed-worktrees",
+    "com.vnx.ledger-health",
 )
+
+# Templates that use ${VNX_PROJECT_ID} in their body but deliberately keep a bare
+# Label: one job per machine by documented decision, never installed by `vnx init`.
+# Every other template that mentions the placeholder must carry it in its Label
+# (OI-1942: ledger-health used it in its environment with a bare Label, so every
+# project's install replaced the previous project's job). Each entry names its reason.
+MACHINE_WIDE_TEMPLATES: Dict[str, str] = {
+    "com.vnx.subsystem-probe": "one probe per machine; it reads the project id only to locate the store it reports on",
+    "com.vnx.fleet-role-drift": "one drift check per machine across the registered fleet",
+}
 
 _PLACEHOLDER = "${VNX_PROJECT_ID}"
 
@@ -136,6 +147,39 @@ def check_template_contract(
                         f"{_PLACEHOLDER}; two projects installing this template "
                         "would resolve to the SAME launchd Label and collide "
                         "(OI-1509/OI-1510)"
+                    ),
+                }
+            )
+
+    for template_path in sorted(templates_dir.glob("*.plist")):
+        family = template_path.stem
+        if family in families or family in MACHINE_WIDE_TEMPLATES:
+            continue
+        try:
+            raw = template_path.read_text(encoding="utf-8")
+        except OSError:
+            # vnx-silent-except: an unreadable non-family template is reported as unreadable below
+            violations.append(
+                {
+                    "family": family,
+                    "kind": "template_unreadable",
+                    "detail": f"could not read {template_path}",
+                }
+            )
+            continue
+        if _PLACEHOLDER not in raw:
+            continue
+        label = _read_template_label(template_path)
+        if label is None or _PLACEHOLDER not in label:
+            violations.append(
+                {
+                    "family": family,
+                    "kind": "label_not_project_scoped",
+                    "detail": (
+                        f"{template_path.name} uses {_PLACEHOLDER} but its Label={label!r} does not "
+                        "carry it; every install of this template would replace the previous "
+                        "project's job (OI-1942). Put the placeholder in the Label, or list the "
+                        "template in MACHINE_WIDE_TEMPLATES with a reason"
                     ),
                 }
             )
