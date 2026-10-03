@@ -395,6 +395,11 @@ CREATE TABLE IF NOT EXISTS session_analytics (
     analyzed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     analyzer_version TEXT DEFAULT '1.0.0',
 
+    -- Content origin (v34): where the work came from. project_id stays the store tenant.
+    origin_class TEXT,
+    origin_project_id TEXT,
+    origin_source TEXT,
+
     UNIQUE (project_id, session_id)
 );
 
@@ -418,7 +423,8 @@ CREATE TABLE IF NOT EXISTS improvement_suggestions (
     status TEXT DEFAULT 'new',
     digest_id TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    acted_on_at DATETIME
+    acted_on_at DATETIME,
+    origin_class TEXT  -- v34: class of the session the suggestion came from
 );
 
 CREATE INDEX IF NOT EXISTS idx_improvement_category ON improvement_suggestions (category, status);

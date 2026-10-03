@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import content_class
 from .models import (
     format_failure_reasons,
     SessionMetrics, SessionFlags, RunStats,
@@ -120,6 +121,7 @@ class ConversationAnalyzer:
 
         metrics, messages = self.parser.parse_file(jsonl_path)
 
+        origin = self._classify_origin(metrics)
         flags = self.detector.detect_patterns(metrics, messages)
         log("INFO", f"  Activity={flags.primary_activity} "
                      f"err={flags.has_error_recovery} ctx={flags.has_context_reset} "
@@ -129,17 +131,15 @@ class ConversationAnalyzer:
         suggestions = []
         if deep_allowed and self.deep.should_deep_analyze(metrics, flags):
             log("ANALYZE", "  Deep analyzing (flagged)...")
-            deep_result = self.deep.analyze_session(jsonl_path, metrics, flags)
-            if deep_result and "suggestions" in deep_result:
-                for sg in deep_result["suggestions"]:
-                    sg["session_id"] = metrics.session_id
-                suggestions = deep_result.get("suggestions", [])
+            deep_result = self.deep.analyze_session(jsonl_path, metrics, flags,
+                                                    origin=origin)
+            suggestions = self._tag_suggestions(deep_result, metrics, origin)
 
         # Single transaction over both writes (ADR-007 atomicity):
         # _store_session first so a failing INSERT does not leave orphan
         # intelligence rows from bridge_session_to_intelligence.
         try:
-            self._store_session(metrics, flags, deep_result)
+            self._store_session(metrics, flags, deep_result, origin)
             self.bridge_session_to_intelligence(metrics, flags)
             self.conn.commit()
         except Exception:
@@ -162,8 +162,35 @@ class ConversationAnalyzer:
             "total_output_tokens": metrics.total_output_tokens,
             "cache_read_tokens": metrics.cache_read_tokens,
             "cache_creation_tokens": metrics.cache_creation_tokens,
+            "origin_class": origin.cls,
         }
         return row, suggestions
+
+    def _classify_origin(self, metrics: SessionMetrics) -> content_class.Origin:
+        """Class of the place the session worked in, from the transcript cwd.
+
+        The decoded dir name is the fallback for a transcript with no cwd. A missing boundary
+        file gives ``unknown``: with no roots to compare against, no path can be called safe.
+        """
+        boundary = content_class.load_boundary()
+        origin = content_class.classify_path(metrics.project_path or None, boundary)
+        if not boundary.configured:
+            return content_class.Origin(content_class.UNKNOWN, origin.project_id, origin.source)
+        return origin
+
+    @staticmethod
+    def _origin_source(metrics: SessionMetrics) -> str:
+        return "cwd" if metrics.cwd else "decoded_dirname"
+
+    @staticmethod
+    def _tag_suggestions(deep_result: Optional[dict], metrics: SessionMetrics,
+                         origin: content_class.Origin) -> List[dict]:
+        if not deep_result or "suggestions" not in deep_result:
+            return []
+        for sg in deep_result["suggestions"]:
+            sg["session_id"] = metrics.session_id
+            sg["origin_class"] = origin.cls
+        return deep_result.get("suggestions", [])
 
     def bridge_session_to_intelligence(self, metrics: SessionMetrics,
                                        flags: SessionFlags):
@@ -172,7 +199,9 @@ class ConversationAnalyzer:
         )
 
     def _store_session(self, metrics: SessionMetrics, flags: SessionFlags,
-                       deep_result: Optional[dict]):
+                       deep_result: Optional[dict],
+                       origin: Optional[content_class.Origin] = None):
+        origin = origin or self._classify_origin(metrics)
         project_id = self._resolve_project_id()
         cur = self.conn.cursor()
         cur.execute("""
@@ -188,9 +217,10 @@ class ConversationAnalyzer:
                 has_error_recovery, has_context_reset, context_reset_count,
                 has_large_refactor, has_test_cycle, primary_activity,
                 deep_analysis_json, deep_analysis_model, deep_analysis_at,
-                file_size_bytes, analyzer_version, session_model, dispatch_id
+                file_size_bytes, analyzer_version, session_model, dispatch_id,
+                origin_class, origin_project_id, origin_source
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             metrics.session_id, project_id, metrics.project_path, metrics.terminal,
             metrics.session_date,
@@ -212,6 +242,7 @@ class ConversationAnalyzer:
             metrics.file_size_bytes, ANALYZER_VERSION,
             metrics.session_model or "unknown",
             metrics.dispatch_id or None,
+            origin.cls, origin.project_id, self._origin_source(metrics),
         ))
 
     def _resolve_project_id(self) -> str:
@@ -258,8 +289,8 @@ class ConversationAnalyzer:
                 INSERT INTO improvement_suggestions (
                     session_id, category, component,
                     current_behavior, suggested_improvement,
-                    evidence, priority, digest_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    evidence, priority, digest_id, origin_class
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 sg.get("session_id", ""),
                 sg.get("category", "workflow"),
@@ -269,6 +300,7 @@ class ConversationAnalyzer:
                 sg.get("evidence", ""),
                 sg.get("priority", "medium"),
                 digest_id,
+                sg.get("origin_class"),
             ))
         self.conn.commit()
 
@@ -297,6 +329,13 @@ class ConversationAnalyzer:
         log("INFO", "Starting conversation analysis pipeline...")
         run_date = datetime.now().strftime("%Y-%m-%d")
         stats = RunStats()
+        self.deep.reset_restricted_run()
+
+        boundary = content_class.load_boundary()
+        if not boundary.configured:
+            log("ERROR", f"Content boundary unconfigured ({boundary.reason}): every session is "
+                         f"treated as restricted and goes to Claude only, never to another "
+                         f"provider. Write ~/.vnx/content_boundary.json to classify sessions.")
 
         sessions = self.find_unanalyzed_sessions(project_filter, terminal_filter,
                                                   diagnostics=dry_run)
@@ -305,19 +344,37 @@ class ConversationAnalyzer:
         # Inform the deep analyzer of the backlog size for the billing guard.
         self.deep.set_session_backlog(len(sessions))
 
+        deep_remaining = deep_budget
+        session_rows: List[dict] = []
+
+        # Restricted sessions that were deferred on an earlier night get the Claude budget
+        # first. Their rows are already stored, so known_ids never lets them back in.
+        if not dry_run:
+            self._process_restricted_backlog(stats)
+
         if not sessions:
             log("INFO", "Nothing to analyze")
+            self._copy_deep_counters(stats)
+            if not dry_run and stats.suggestions:
+                self._finalize_run(stats, session_rows, run_date)
             return stats
 
         sessions = sessions[:max_sessions]
-        deep_remaining = deep_budget
-        session_rows: List[dict] = []
 
         for i, jsonl_path in enumerate(sessions, 1):
             log("ANALYZE", f"[{i}/{len(sessions)}] {jsonl_path.parent.name}/{jsonl_path.name}")
             deep_remaining = self._process_one_session(
                 jsonl_path, dry_run, deep_remaining, stats, session_rows)
 
+        self._copy_deep_counters(stats)
+
+        if not dry_run:
+            self._finalize_run(stats, session_rows, run_date)
+
+        self._print_summary(stats, dry_run, run_date)
+        return stats
+
+    def _copy_deep_counters(self, stats: RunStats) -> None:
         # OI-1258: copy the analyzer's per-run attempt accounting into the run
         # stats so the digest, DB row, and fail-closed exit code all see the
         # attempts/failures alongside the success-only ``sessions_deep``.
@@ -325,12 +382,73 @@ class ConversationAnalyzer:
         stats.deep_failures = self.deep.deep_failures
         stats.deep_failure_reasons = dict(self.deep.deep_failure_reasons)
         stats.deep_config_skips = self.deep.deep_config_skips
+        stats.deep_restricted_claude = self.deep.deep_restricted_claude
+        stats.deep_restricted_deferred = self.deep.deep_restricted_deferred
 
-        if not dry_run:
-            self._finalize_run(stats, session_rows, run_date)
+    def _process_restricted_backlog(self, stats: RunStats) -> None:
+        """Spend the restricted Claude budget on stored sessions that still lack a deep result.
 
-        self._print_summary(stats, dry_run, run_date)
-        return stats
+        Candidates are rows of this store (ADR-007: filtered on project_id) with a restricted
+        origin class and no deep result, newest first, whose transcript still exists and is
+        flagged for deep analysis. A legacy row with a NULL origin is not a candidate: the
+        correction step labels it first, so no night silently backfills history.
+        """
+        if getattr(self, "conn", None) is None or not self.deep.restricted_budget_left():
+            return
+        boundary = content_class.load_boundary()
+        projects_dir = _get_claude_projects_dir()
+        if not projects_dir.exists():
+            return
+        placeholders = ",".join("?" for _ in content_class.ANALYZER_RESTRICTED)
+        rows = self.conn.execute(
+            "SELECT session_id FROM session_analytics "
+            f"WHERE project_id = ? AND origin_class IN ({placeholders}) "
+            "AND deep_analysis_json IS NULL "
+            "ORDER BY session_date DESC, id DESC",
+            (self._resolve_project_id(), *sorted(content_class.ANALYZER_RESTRICTED)),
+        ).fetchall()
+
+        for row in rows:
+            if not self.deep.restricted_budget_left():
+                break
+            matches = sorted(projects_dir.glob(f"*/{row['session_id']}.jsonl"))
+            if not matches:
+                continue
+            jsonl_path = matches[0]
+            try:
+                metrics, messages = self.parser.parse_file(jsonl_path)
+                flags = self.detector.detect_patterns(metrics, messages)
+                if not self.deep.should_deep_analyze(metrics, flags):
+                    continue
+                origin = self._classify_origin(metrics)
+                if self.deep.route_for_origin(origin, boundary) != "restricted":
+                    continue
+                log("ANALYZE", f"Deferred restricted session {metrics.session_id[:8]}...: "
+                               f"deep analysing on Claude")
+                deep_result = self.deep.analyze_session(jsonl_path, metrics, flags,
+                                                        origin=origin)
+                if not deep_result:
+                    continue
+                suggestions = self._tag_suggestions(deep_result, metrics, origin)
+                self._store_deep_result(metrics.session_id, deep_result)
+                stats.sessions_deep += 1
+                stats.suggestions.extend(suggestions)
+            except Exception as e:
+                log("ERROR", f"  Deferred session {row['session_id'][:8]}... failed: {e}")
+                stats.errors += 1
+                try:
+                    self.conn.rollback()
+                except sqlite3.Error as rb_exc:
+                    log("ERROR", f"  Rollback failed: {rb_exc}")
+
+    def _store_deep_result(self, session_id: str, deep_result: dict) -> None:
+        self.conn.execute(
+            "UPDATE session_analytics SET deep_analysis_json = ?, deep_analysis_model = ?, "
+            "deep_analysis_at = ? WHERE project_id = ? AND session_id = ?",
+            (json.dumps(deep_result), deep_result.get("_model", "unknown"),
+             datetime.now().isoformat(), self._resolve_project_id(), session_id),
+        )
+        self.conn.commit()
 
     def _process_one_session(self, jsonl_path: Path, dry_run: bool,
                               deep_remaining: int, stats: RunStats,
@@ -339,6 +457,8 @@ class ConversationAnalyzer:
             metrics, _ = self.parser.parse_file(jsonl_path)
             log("INFO", f"  [DRY RUN] tokens={metrics.total_output_tokens:,} "
                         f"tools={metrics.tool_calls_total}")
+            origin_cls = self._classify_origin(metrics).cls
+            stats.sessions_by_origin[origin_cls] = stats.sessions_by_origin.get(origin_cls, 0) + 1
             stats.sessions_analyzed += 1
             stats.total_tokens += metrics.total_output_tokens
             return deep_remaining
@@ -347,6 +467,8 @@ class ConversationAnalyzer:
             row, suggestions = self.analyze_session(jsonl_path, deep_remaining > 0)
             stats.sessions_analyzed += 1
             stats.total_tokens += row.get("total_output_tokens", 0)
+            origin_cls = row["origin_class"]
+            stats.sessions_by_origin[origin_cls] = stats.sessions_by_origin.get(origin_cls, 0) + 1
             session_rows.append(row)
             if suggestions:
                 stats.sessions_deep += 1
@@ -378,6 +500,11 @@ class ConversationAnalyzer:
         if stats.deep_failures:
             print(f"DEGRADED:          deep analysis failed ({format_failure_reasons(stats.deep_failure_reasons)})")
         print(f"Deep Config Skips: {stats.deep_config_skips}")
+        print(f"Deep Restricted:   {stats.deep_restricted_claude} on Claude, "
+              f"{stats.deep_restricted_deferred} deferred")
+        if stats.sessions_by_origin:
+            by_origin = ", ".join(f"{cls} x{n}" for cls, n in sorted(stats.sessions_by_origin.items()))
+            print(f"Sessions by origin: {by_origin}")
         print(f"Suggestions:       {len(stats.suggestions)}")
         print(f"Total Tokens:      {stats.total_tokens:,}")
         print(f"Errors:            {stats.errors}")

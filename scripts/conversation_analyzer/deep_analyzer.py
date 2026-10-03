@@ -14,8 +14,10 @@ from .models import (
     DEEPSEEK_MIN_BALANCE_CNY,
     AUTO_CLAUSE_MAX_SESSIONS,
     DEEP_THRESHOLD_TOKENS, DEEP_THRESHOLD_TOOLS,
+    restricted_claude_cap,
     log,
 )
+import content_class
 from .detector import HeuristicDetector
 from claude_cli import resolve_claude_cli
 from provider_spawns.deepseek_harness_spawn import (
@@ -112,6 +114,22 @@ class DeepAnalyzer:
         # (``cli_failed``, ``timeout``, ``empty``, ``unparseable`` ...). A bare
         # count says something broke; the reason says what to fix.
         self.deep_failure_reasons: Dict[str, int] = {}
+        self.reset_restricted_run()
+        # Outcome of the last analyze_session call: ``ok``, ``failed`` or
+        # ``restricted_deferred``. The runner reads it to tell a deferred session
+        # (stays eligible tomorrow) from a failed one.
+        self.last_status = "failed"
+
+    def reset_restricted_run(self) -> None:
+        """Start a new night for the restricted Claude lane: budget, counters, availability."""
+        self.restricted_claude_calls = 0
+        self.deep_restricted_claude = 0
+        self.deep_restricted_deferred = 0
+        self._restricted_claude_down = False
+
+    def restricted_budget_left(self) -> bool:
+        return (not self._restricted_claude_down
+                and self.restricted_claude_calls < restricted_claude_cap())
 
     def _record_failure(self, reason: str) -> None:
         self.deep_failures += 1
@@ -155,13 +173,41 @@ Respond with valid JSON:
             return True
         return False
 
+    @staticmethod
+    def route_for_origin(origin: Optional[content_class.Origin],
+                         boundary: content_class.Boundary) -> str:
+        """``restricted`` or ``open`` from the session origin alone (the summary is checked later).
+
+        A restricted session goes to Claude only. The one way out is a project exception: a
+        client session whose only restricted signal is a project id that the boundary grants
+        deepseek. ``None`` means the caller supplied no origin and only the text rule applies.
+        """
+        if origin is None:
+            return "open"
+        if not boundary.configured:
+            return "restricted"
+        if origin.cls not in content_class.ANALYZER_RESTRICTED:
+            return "open"
+        if content_class.exception_applies(origin, "deepseek", boundary):
+            return "open"
+        return "restricted"
+
     def analyze_session(self, jsonl_path: Path,
                         metrics: SessionMetrics,
-                        flags: SessionFlags) -> Optional[dict]:
+                        flags: SessionFlags,
+                        origin: Optional[content_class.Origin] = None) -> Optional[dict]:
         summary = self._build_session_summary(jsonl_path, metrics, flags)
         prompt = f"{self.SYSTEM_PROMPT}\n\n## Session Summary\n\n{summary}"
 
+        boundary = content_class.load_boundary()
+        restricted = (self.route_for_origin(origin, boundary) == "restricted"
+                      or content_class.classify_text(summary, boundary) is not None)
+        if restricted:
+            return self._analyze_restricted(prompt)
+
         result_text = None
+        # Lane that produced ``result_text``; stamped into the result as ``_model``.
+        lane = "unknown"
         # ``any_attempted`` records whether an LLM was actually invoked this
         # session — derived from each candidate's own LLMOutcome.attempted,
         # not from which branch was merely tried. A config gap (missing
@@ -182,6 +228,7 @@ Respond with valid JSON:
             if outcome.attempted:
                 last_attempted_status = outcome.status
             result_text = outcome.text if outcome.status == "ok" else None
+            lane = f"deepseek-harness:{DEEPSEEK_HARNESS_MODEL}"
         # Billing guard: in "auto" mode, refuse the claude path when the
         # session backlog exceeds the threshold. "claude-only" bypasses
         # the guard — the operator explicitly opted in to metered spend.
@@ -191,6 +238,7 @@ Respond with valid JSON:
             if outcome.attempted:
                 last_attempted_status = outcome.status
             result_text = outcome.text if outcome.status == "ok" else None
+            lane = "claude-max"
         elif LLM_STRATEGY == "auto":
             if self._session_backlog <= AUTO_CLAUSE_MAX_SESSIONS:
                 outcome = self._try_claude_max(prompt)
@@ -198,6 +246,7 @@ Respond with valid JSON:
                 if outcome.attempted:
                     last_attempted_status = outcome.status
                 result_text = outcome.text if outcome.status == "ok" else None
+                lane = "claude-max"
             else:
                 if self._session_backlog > 0:
                     log("WARNING",
@@ -212,6 +261,7 @@ Respond with valid JSON:
             if outcome.attempted:
                 last_attempted_status = outcome.status
             result_text = outcome.text if outcome.status == "ok" else None
+            lane = f"ollama:{OLLAMA_MODEL}"
 
         if any_attempted:
             self.deep_attempts += 1
@@ -221,20 +271,70 @@ Respond with valid JSON:
             # attempt, not a failed one (fix1585-r2).
             self.deep_config_skips += 1
 
+        self.last_status = "failed"
         if result_text is None:
             if any_attempted:
                 self._record_failure(last_attempted_status)
                 log("ERROR", f"Deep analysis failed: {last_attempted_status}")
             return None
 
+        return self._finish_result(result_text, lane)
+
+    def _finish_result(self, result_text: str, lane: str) -> Optional[dict]:
         parsed = self._parse_response(result_text)
         if parsed is None or "suggestions" not in parsed:
             # The LLM answered but nothing parseable — or no "suggestions"
             # key — came back: an attempt that produced no usable result,
             # distinct from a hard failure but still not success.
             self._record_failure("unparseable")
+            self.last_status = "failed"
             return None
+        parsed["_model"] = lane
+        self.last_status = "ok"
         return parsed
+
+    def _defer_restricted(self, reason: str) -> None:
+        self.deep_restricted_deferred += 1
+        self.last_status = "restricted_deferred"
+        log("WARNING", f"Restricted session deferred to the next night ({reason}); "
+                       f"no other provider is tried")
+
+    def _analyze_restricted(self, prompt: str) -> Optional[dict]:
+        """Deep analysis of restricted content: Claude only, capped, deferred instead of lost.
+
+        Never deepseek, glm, kimi or ollama. Over the cap, or with Claude unavailable (quota,
+        auth, timeout, missing CLI), the session is deferred: not analysed, not an attempt,
+        not a failure. Once Claude has failed this run the remaining restricted sessions are
+        deferred without another call.
+        """
+        cap = restricted_claude_cap()
+        if self._restricted_claude_down:
+            self._defer_restricted("claude unavailable this run")
+            return None
+        if self.restricted_claude_calls >= cap:
+            self._defer_restricted(f"cap of {cap} reached")
+            return None
+
+        self.restricted_claude_calls += 1
+        try:
+            outcome = self._try_claude_max(prompt)
+        except Exception as exc:
+            self._restricted_claude_down = True
+            self._defer_restricted(f"claude raised {type(exc).__name__}")
+            return None
+
+        if outcome.status == "ok":
+            self.deep_attempts += 1
+            result = self._finish_result(outcome.text or "", "claude-max")
+            if result is not None:
+                self.deep_restricted_claude += 1
+            else:
+                log("ERROR", "Deep analysis failed: unparseable")
+            return result
+        if outcome.status != "empty":
+            self._restricted_claude_down = True
+        self._defer_restricted(f"claude {outcome.status}")
+        return None
 
     @classmethod
     def set_session_backlog(cls, count: int):

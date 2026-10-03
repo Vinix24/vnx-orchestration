@@ -45,6 +45,20 @@ AUTO_CLAUSE_MAX_SESSIONS = int(
     os.environ.get("VNX_ANALYZER_AUTO_MAX_SESSIONS", "50")
 )
 
+# Content-boundary lane (operator 03-10): deep analysis of client, personal and unknown sessions
+# runs on Claude only, at most this many calls per run. Over the cap the session is deferred to
+# the next night, never sent to another provider. Read at call time so a run can be re-capped.
+RESTRICTED_CLAUDE_CAP_DEFAULT = 20
+
+
+def restricted_claude_cap() -> int:
+    raw = os.environ.get("VNX_ANALYZER_RESTRICTED_CLAUDE_CAP", "")
+    try:
+        return max(0, int(raw)) if raw.strip() else RESTRICTED_CLAUDE_CAP_DEFAULT
+    except ValueError:
+        return RESTRICTED_CLAUDE_CAP_DEFAULT
+
+
 DEEP_THRESHOLD_TOKENS = 100_000
 DEEP_THRESHOLD_TOOLS = 100
 
@@ -124,6 +138,7 @@ class SessionMetrics:
     duration_minutes: float = 0.0
     file_size_bytes: int = 0
     session_model: str = ""
+    cwd: str = ""
 
 
 @dataclass
@@ -147,6 +162,9 @@ class RunStats:
     total_tokens: int = 0
     errors: int = 0
     skipped: int = 0
+    sessions_by_origin: Dict[str, int] = field(default_factory=dict)
+    deep_restricted_claude: int = 0
+    deep_restricted_deferred: int = 0
     suggestions: List[dict] = field(default_factory=list)
 
 

@@ -87,6 +87,9 @@ def main():
             if stats is not None:
                 details["deep_attempts"] = stats.deep_attempts
                 details["deep_failures"] = stats.deep_failures
+                details["sessions_by_origin"] = dict(stats.sessions_by_origin)
+                details["deep_restricted_claude"] = stats.deep_restricted_claude
+                details["deep_restricted_deferred"] = stats.deep_restricted_deferred
             if run_error:
                 details["error"] = run_error
             HealthBeacon(
