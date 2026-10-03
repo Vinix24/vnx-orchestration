@@ -68,6 +68,7 @@ def _mock_launchd_agents_loaded(project_dir, monkeypatch):
             f"-\t0\tcom.vnx.gate-obligation-runner.{project_id}\n"
             f"-\t0\tcom.vnx.receipt-processor.{project_id}\n"
             f"-\t0\tcom.vnx.cleanup-reviewed-worktrees.{project_id}\n"
+            f"-\t0\tcom.vnx.ledger-health.{project_id}\n"
         ),
     )
 

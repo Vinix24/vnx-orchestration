@@ -750,6 +750,56 @@ def vnx_init(args) -> int:
         return 1
 
 
+def _install_root_refused(engine_root: Path, plist_name: str) -> bool:
+    """OI-1117 / OI-1942: refuse an engine root that is not stable.
+
+    The engine root becomes VNX_HOME in the plist. A root that is not stable
+    (ephemeral worktree, linked worktree, unregistered clone) leaves a job that
+    points at a path that disappears and replaces the operator's job of the
+    same Label. Prints the reason and the manual command; returns True when
+    the install must be skipped.
+    """
+    _engine.ensure_engine_on_path()
+    from launchd_install_guard import refusal_reason
+    refused = refusal_reason(engine_root)
+    if refused is None:
+        return False
+    print(
+        f"  skipped {plist_name} launchd agent: {refused}. "
+        "Install from the main checkout or a central install: "
+        f"bash scripts/launchd/reload_plist.sh {plist_name}"
+    )
+    return True
+
+
+def _render_plist_template(
+    content: str, plist_name: str, vnx_home: str, project_id: str, project_root: str
+) -> str:
+    """OI-1942: substitute placeholders, failing closed.
+
+    A per-project template installed with an empty or malformed id, or with any
+    placeholder left over, would land a job that runs against the wrong store
+    (the measured literal `${VNX_PROJECT_ID}` survived for five weeks). Mirrors
+    reload_plist.sh's checks. Raises RuntimeError on either condition.
+    """
+    if "${VNX_PROJECT_ID}" in content and not _engine._PROJECT_ID_RE.match(project_id or ""):
+        raise RuntimeError(
+            f"{plist_name} is a per-project template but project id {project_id!r} does not "
+            f"match {_engine._PROJECT_ID_RE.pattern}: refusing to install"
+        )
+    content = content.replace("${VNX_HOME}", vnx_home)
+    content = content.replace("${VNX_PROJECT_ID}", project_id)
+    content = content.replace("${VNX_PROJECT_ROOT}", project_root)
+
+    leftover = sorted(set(re.findall(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}", content)))
+    if leftover:
+        raise RuntimeError(
+            f"unresolved placeholder(s) remain in {plist_name}.plist after substitution: "
+            f"{', '.join(leftover)}: refusing to install"
+        )
+    return content
+
+
 def _install_launchd_agent(
     vnx_home: str, plist_name: str, project_id: str = "", project_root: str = ""
 ) -> bool:
@@ -787,21 +837,8 @@ def _install_launchd_agent(
     Raises OSError if the template exists but is unreadable.
     """
     # --- OI-1117 / OI-1942: one install guard, shared with reload_plist.sh ----
-    # The engine root becomes VNX_HOME in the plist. A root that is not stable
-    # (ephemeral worktree, linked worktree, unregistered clone) leaves a job that
-    # points at a path that disappears and replaces the operator's job of the
-    # same Label. Refuse like the missing-template case: return False with the
-    # reason and the manual command printed.
     engine_root = _engine.engine_root().resolve()
-    _engine.ensure_engine_on_path()
-    from launchd_install_guard import refusal_reason
-    refused = refusal_reason(engine_root)
-    if refused is not None:
-        print(
-            f"  skipped {plist_name} launchd agent: {refused}. "
-            "Install from the main checkout or a central install: "
-            f"bash scripts/launchd/reload_plist.sh {plist_name}"
-        )
+    if _install_root_refused(engine_root, plist_name):
         return False
 
     template = engine_root / "scripts" / "launchd" / f"{plist_name}.plist"
@@ -816,26 +853,9 @@ def _install_launchd_agent(
     refuse_real_launch_agents_write_under_test_runner(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
 
-    content = template.read_text(encoding="utf-8")
-    # OI-1942: fail closed. A per-project template installed with an empty or
-    # malformed id, or with any placeholder left over, would land a job that runs
-    # against the wrong store (the measured literal `${VNX_PROJECT_ID}` survived
-    # for five weeks). Mirrors reload_plist.sh's checks.
-    if "${VNX_PROJECT_ID}" in content and not _engine._PROJECT_ID_RE.match(project_id or ""):
-        raise RuntimeError(
-            f"{plist_name} is a per-project template but project id {project_id!r} does not "
-            f"match {_engine._PROJECT_ID_RE.pattern}: refusing to install"
-        )
-    content = content.replace("${VNX_HOME}", vnx_home)
-    content = content.replace("${VNX_PROJECT_ID}", project_id)
-    content = content.replace("${VNX_PROJECT_ROOT}", project_root)
-
-    leftover = sorted(set(re.findall(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}", content)))
-    if leftover:
-        raise RuntimeError(
-            f"unresolved placeholder(s) remain in {plist_name}.plist after substitution: "
-            f"{', '.join(leftover)}: refusing to install"
-        )
+    content = _render_plist_template(
+        template.read_text(encoding="utf-8"), plist_name, vnx_home, project_id, project_root
+    )
 
     # OI-1510: destination filename comes from the RESOLVED Label, not the
     # plist_name argument — see the docstring above.
