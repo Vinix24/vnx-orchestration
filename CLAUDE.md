@@ -18,6 +18,13 @@ Everything above this block describes *this project*. Everything the fabric does
      the canonical role + docs/core/DISPATCH_RULES.md. They stay outside the bootstrap
      block so `vnx role sync` / re-init never propagates them into consumer files. -->
 
+## Build rules
+
+- No `TODO` / `FIXME` comments: finish the implementation or leave it out.
+- No mock objects, placeholder data or stub implementations in shipped code. Tests patch external processes and services as the test rules require; that stays allowed and stays inside `tests/`.
+- Tests go in `tests/`, never next to the source. Scripts go in `scripts/`.
+- Never create `_v2`, `_fixed` or `_new` duplicate files: edit the original.
+
 ## Mandatory Report Contract
 
 **Every agent and worker MUST write a unified report on completing any task.**
