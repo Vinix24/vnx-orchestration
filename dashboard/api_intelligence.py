@@ -1400,8 +1400,9 @@ def _dispatch_get_events(dispatch_id: str) -> tuple[dict, int]:
         return {"error": f"event archive not found for dispatch: {dispatch_id}"}, 404
 
     try:
-        raw_lines = archive_path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError as exc:
+        with _event_store().open_archive_text(archive_path) as fh:
+            raw_lines = fh.read().splitlines()
+    except (OSError, EOFError) as exc:
         return {"error": f"failed to read archive: {exc}"}, 500
 
     events_out: list[dict] = []
@@ -1470,14 +1471,17 @@ def _classify_phase(tool_name: str, cmd: str) -> str:
     return "other"
 
 
+def _event_store():
+    """The scripts/lib event_store module (archive helpers), imported lazily."""
+    if _SCRIPTS_LIB_PATH not in sys.path:
+        sys.path.insert(0, _SCRIPTS_LIB_PATH)
+    import event_store
+    return event_store
+
+
 def _find_archive(dispatch_id: str, archive_dir: Path) -> Path | None:
-    """Locate NDJSON archive for a dispatch_id."""
-    if not archive_dir.exists():
-        return None
-    for path in archive_dir.rglob("*.ndjson"):
-        if path.stem == dispatch_id or dispatch_id in path.stem:
-            return path
-    return None
+    """Locate the plain or gzip NDJSON archive for a dispatch_id."""
+    return _event_store().find_archive_file(archive_dir, dispatch_id)
 
 
 # ---------------------------------------------------------------------------

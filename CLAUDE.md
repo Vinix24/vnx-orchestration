@@ -95,6 +95,8 @@ All scripts must resolve project root via helper libraries — never hardcode pa
 
 `.vnx-data/events/T{n}.ndjson` is a **per-dispatch ring buffer**, not a long-running log. At the end of each subprocess-adapter dispatch, the live file is archived to `.vnx-data/events/archive/{terminal}/{dispatch_id}.ndjson` and truncated to 0 bytes. If you're debugging "the live file is empty", look in the archive directory instead.
 
+An archive file may be compressed: `<dispatch_id>.ndjson.gz` (plain wins when both exist). Open archives through the helpers in `scripts/lib/event_store.py` (`resolve_archive_file`, `open_archive_text`, `list_archive_files`, `find_archive_file`), never with a bare `*.ndjson` glob. The `vnx-data-footprint` probe (`scripts/lib/vnx_data_footprint_probe.py`) reports archive, salvage and free-disk footprint per store.
+
 Only subprocess-routed terminals produce this stream. TmuxAdapter-routed terminals (T0 default; T2/T3 unless `VNX_ADAPTER_T{n}=subprocess`) produce no per-terminal NDJSON.
 
 ## Supervisor Mode

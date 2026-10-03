@@ -25,7 +25,7 @@ _SCRIPTS_LIB = str(Path(__file__).resolve().parents[1] / "scripts" / "lib")
 if _SCRIPTS_LIB not in sys.path:
     sys.path.insert(0, _SCRIPTS_LIB)
 
-from event_store import EventStore
+from event_store import EventStore, archive_id, open_archive_text
 
 _store = EventStore()
 
@@ -120,10 +120,10 @@ def handle_agent_stream_archive_list(handler: "BaseHTTPRequestHandler", terminal
         return
 
     entries = []
-    for f in sorted(archive_dir.glob("*.ndjson")):
+    for f in _store.list_archive_ids(terminal):
         stat = f.stat()
         entries.append({
-            "dispatch_id": f.stem,
+            "dispatch_id": archive_id(f),
             "file_size": stat.st_size,
             "modified_at": stat.st_mtime,
         })
@@ -142,21 +142,25 @@ def handle_agent_stream_archive(
         _send_json(handler, HTTPStatus.BAD_REQUEST, {"error": "Invalid dispatch_id"})
         return
 
-    archive_file = _store.archive_dir(terminal) / f"{dispatch_id}.ndjson"
-    if not archive_file.exists():
+    archive_file = _store.resolve_archive(terminal, dispatch_id)
+    if archive_file is None:
         _send_json(handler, HTTPStatus.NOT_FOUND, {"error": f"Archive not found: {dispatch_id}"})
         return
 
     events = []
-    with open(archive_file, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                events.append(json.loads(line))
-            except json.JSONDecodeError:
-                pass
+    try:
+        with open_archive_text(archive_file) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    events.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+    except (OSError, EOFError) as exc:
+        _send_json(handler, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"Archive unreadable: {exc}"})
+        return
     _send_json(handler, HTTPStatus.OK, events)
 
 

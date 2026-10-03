@@ -23,6 +23,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+_LIB_DIR = str(Path(__file__).resolve().parent)
+if _LIB_DIR not in sys.path:
+    sys.path.insert(0, _LIB_DIR)
+
+# Import after the sys.path guard above: event_store lives next to this module.
+from event_store import (
+    archive_id,
+    find_archive_file,
+    list_archive_files,
+    open_archive_text,
+)
+
 # ---------------------------------------------------------------------------
 # Data model
 # ---------------------------------------------------------------------------
@@ -77,7 +89,7 @@ def _parse_ts(ts_str: str) -> datetime:
 def analyze_dispatch(archive_path: Path) -> DispatchBehavior:
     """Parse a single NDJSON archive file and extract behavioral metrics."""
     events: list[dict[str, Any]] = []
-    with open(archive_path, encoding="utf-8") as fh:
+    with open_archive_text(archive_path) as fh:
         for line in fh:
             line = line.strip()
             if not line:
@@ -91,7 +103,7 @@ def analyze_dispatch(archive_path: Path) -> DispatchBehavior:
         raise ValueError(f"No events in {archive_path}")
 
     # --- Extract metadata from init event ---
-    dispatch_id = archive_path.stem
+    dispatch_id = archive_id(archive_path)
     terminal = "unknown"
     role = "unknown"
 
@@ -313,9 +325,9 @@ def _append_phase(phases: list[str], phase: str) -> None:
 # ---------------------------------------------------------------------------
 
 def analyze_all(archive_dir: Path) -> list[DispatchBehavior]:
-    """Scan all .ndjson files under archive_dir recursively, return sorted by timestamp."""
+    """Scan all .ndjson and .ndjson.gz archives under archive_dir recursively, return sorted by timestamp."""
     behaviors: list[DispatchBehavior] = []
-    for ndjson_path in sorted(archive_dir.rglob("*.ndjson")):
+    for ndjson_path in list_archive_files(archive_dir, recursive=True):
         try:
             b = analyze_dispatch(ndjson_path)
             behaviors.append(b)
@@ -427,11 +439,8 @@ def _default_archive_dir() -> Path:
 
 
 def _find_dispatch_archive(dispatch_id: str, archive_dir: Path) -> Path | None:
-    """Locate the ndjson file for a dispatch_id anywhere under archive_dir."""
-    for path in archive_dir.rglob("*.ndjson"):
-        if path.stem == dispatch_id or dispatch_id in path.stem:
-            return path
-    return None
+    """Locate the ndjson(.gz) file for a dispatch_id anywhere under archive_dir."""
+    return find_archive_file(archive_dir, dispatch_id)
 
 
 # ---------------------------------------------------------------------------
