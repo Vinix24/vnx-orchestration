@@ -144,15 +144,14 @@ def isolate_config_runtime(monkeypatch):
 
 
 class TestMaxDiffChars:
-    """OI-1874: the per-gate diff-char cap resolver.
+    """The diff-char cap resolver (OI-1874, one shared default since step 1 of
+    the operator's 500K-token reading decision of 2026-10-03).
 
-    kimi_gate runs on the kimi CLI OAuth subscription and kimi-k3 carries a
-    1M-token context (wave7_models.yaml), so its default is 400000 -- far
-    above glm_gate's and deepseek_gate's 50000, both API-credit fallback
-    seats billed per token. A missing/invalid/non-positive config value falls
-    back to that SAME gate's own default -- never to unlimited, never to a
-    different gate's default -- and an unknown gate name gets the
-    conservative 50000.
+    All three harness-lane gates share ONE default of 800000 chars, the highest
+    value the argv delivery route can carry (OI-1961). Each gate still resolves
+    its own config key. A missing/invalid/non-positive config value falls back
+    to that default, a valid value above the ceiling is clamped to it, and an
+    unknown gate name gets the same default.
     """
 
     @pytest.fixture(autouse=True)
@@ -169,8 +168,7 @@ class TestMaxDiffChars:
         stored ``VNX_KIMI_GATE_MAX_DIFF_CHARS`` value -- the exact shape an
         operator sets via the dashboard -- and confirm it takes effect once
         wired, while glm_gate/deepseek_gate, which carry no stored value,
-        still resolve to their OWN hardcoded defaults: never the kimi_gate
-        override, and never each other's."""
+        still resolve to the shared default: never the kimi_gate override."""
         sd = tmp_path / "state"
         sd.mkdir()
         conn = sqlite3.connect(sd / "runtime_coordination.db")
@@ -185,38 +183,82 @@ class TestMaxDiffChars:
         monkeypatch.setattr(vnx_paths, "project_id_from_state_dir", lambda _sd: "some-project")
 
         assert gate_lane_contract.max_diff_chars("kimi_gate") == 999
-        assert gate_lane_contract.max_diff_chars("glm_gate") == 50000
-        assert gate_lane_contract.max_diff_chars("deepseek_gate") == 50000
+        assert gate_lane_contract.max_diff_chars("glm_gate") == 800000
+        assert gate_lane_contract.max_diff_chars("deepseek_gate") == 800000
 
-    def test_defaults_differ_by_gate(self, monkeypatch):
+    def test_all_three_gates_share_one_default(self, monkeypatch):
         for key in (
             "VNX_KIMI_GATE_MAX_DIFF_CHARS", "VNX_GLM_GATE_MAX_DIFF_CHARS",
             "VNX_DEEPSEEK_GATE_MAX_DIFF_CHARS",
         ):
             monkeypatch.delenv(key, raising=False)
-        assert gate_lane_contract.max_diff_chars("kimi_gate") == 400000
-        assert gate_lane_contract.max_diff_chars("glm_gate") == 50000
-        assert gate_lane_contract.max_diff_chars("deepseek_gate") == 50000
+        assert gate_lane_contract.max_diff_chars("kimi_gate") == 800000
+        assert gate_lane_contract.max_diff_chars("glm_gate") == 800000
+        assert gate_lane_contract.max_diff_chars("deepseek_gate") == 800000
 
     def test_config_override_is_honored_per_gate(self, monkeypatch):
         monkeypatch.setenv("VNX_KIMI_GATE_MAX_DIFF_CHARS", "12345")
         monkeypatch.delenv("VNX_GLM_GATE_MAX_DIFF_CHARS", raising=False)
         assert gate_lane_contract.max_diff_chars("kimi_gate") == 12345
         # An override on one gate must never leak onto another's resolution.
-        assert gate_lane_contract.max_diff_chars("glm_gate") == 50000
+        assert gate_lane_contract.max_diff_chars("glm_gate") == 800000
 
-    def test_invalid_value_falls_back_to_that_gates_own_default(self, monkeypatch):
-        monkeypatch.setenv("VNX_KIMI_GATE_MAX_DIFF_CHARS", "not-a-number")
-        assert gate_lane_contract.max_diff_chars("kimi_gate") == 400000
+    @pytest.mark.parametrize("gate,key", [
+        ("kimi_gate", "VNX_KIMI_GATE_MAX_DIFF_CHARS"),
+        ("glm_gate", "VNX_GLM_GATE_MAX_DIFF_CHARS"),
+        ("deepseek_gate", "VNX_DEEPSEEK_GATE_MAX_DIFF_CHARS"),
+    ])
+    def test_value_above_the_ceiling_is_clamped_with_one_warning(
+        self, gate, key, monkeypatch, caplog
+    ):
+        monkeypatch.setenv(key, "2000000")
+        with caplog.at_level("WARNING", logger=gate_lane_contract.logger.name):
+            assert gate_lane_contract.max_diff_chars(gate) == 800000
+        warnings = [
+            r for r in caplog.records
+            if r.levelname == "WARNING" and r.name == gate_lane_contract.logger.name
+        ]
+        assert len(warnings) == 1
+        assert key in warnings[0].getMessage()
+        assert "OI-1961" in warnings[0].getMessage()
 
-    def test_non_positive_value_falls_back_to_that_gates_own_default(self, monkeypatch):
+    def test_value_at_the_ceiling_is_honored_without_a_warning(self, monkeypatch, caplog):
+        monkeypatch.setenv("VNX_GLM_GATE_MAX_DIFF_CHARS", "800000")
+        with caplog.at_level("WARNING", logger=gate_lane_contract.logger.name):
+            assert gate_lane_contract.max_diff_chars("glm_gate") == 800000
+        assert not [
+            r for r in caplog.records
+            if r.levelname == "WARNING" and r.name == gate_lane_contract.logger.name
+        ]
+
+    def test_invalid_value_falls_back_to_the_default(self, monkeypatch):
+        for key, gate in (
+            ("VNX_KIMI_GATE_MAX_DIFF_CHARS", "kimi_gate"),
+            ("VNX_GLM_GATE_MAX_DIFF_CHARS", "glm_gate"),
+            ("VNX_DEEPSEEK_GATE_MAX_DIFF_CHARS", "deepseek_gate"),
+        ):
+            monkeypatch.setenv(key, "not-a-number")
+            assert gate_lane_contract.max_diff_chars(gate) == 800000
+
+    def test_non_positive_value_falls_back_to_the_default(self, monkeypatch):
         monkeypatch.setenv("VNX_GLM_GATE_MAX_DIFF_CHARS", "0")
-        assert gate_lane_contract.max_diff_chars("glm_gate") == 50000
+        assert gate_lane_contract.max_diff_chars("glm_gate") == 800000
         monkeypatch.setenv("VNX_GLM_GATE_MAX_DIFF_CHARS", "-100")
-        assert gate_lane_contract.max_diff_chars("glm_gate") == 50000
+        assert gate_lane_contract.max_diff_chars("glm_gate") == 800000
 
-    def test_unknown_gate_gets_the_conservative_default(self):
-        assert gate_lane_contract.max_diff_chars("some_future_gate") == 50000
+    def test_unknown_gate_gets_the_shared_default(self):
+        assert gate_lane_contract.max_diff_chars("some_future_gate") == 800000
+
+    def test_default_is_derived_from_the_named_constants(self):
+        assert gate_lane_contract.REVIEW_READ_TOKENS_TARGET == 500_000
+        assert gate_lane_contract.ARGV_SAFE_MAX_DIFF_CHARS < 1_048_576
+        assert gate_lane_contract.DEFAULT_MAX_DIFF_CHARS == min(
+            int(
+                gate_lane_contract.REVIEW_READ_TOKENS_TARGET
+                * gate_lane_contract.DIFF_CHARS_PER_TOKEN
+            ),
+            gate_lane_contract.ARGV_SAFE_MAX_DIFF_CHARS,
+        )
 
     def test_config_registry_carries_the_same_defaults(self):
         # gate_lane_contract.DIFF_CHAR_CONFIG and config_registry.CONFIG_REGISTRY
@@ -324,6 +366,28 @@ def test_resolver_read_once_per_run_prompt_and_recorded_cap_never_disagree(
         )
         if prompt_was_truncated:
             assert depth["diff_limit"] == low_cap
+
+
+def test_glm_gate_reads_a_120000_char_diff_whole_with_no_config(
+    tmp_path, monkeypatch, isolate_config_runtime,
+):
+    """Step 1 of the 500K-token reading decision (2026-10-03): with no config
+    glm_gate no longer cuts a 120000-char diff (PR #2032 was 107797 chars and
+    booked a billed partial_review at the old 50000 cap)."""
+    monkeypatch.delenv("VNX_GLM_GATE_MODEL", raising=False)
+    from gate_prompt import TRUNCATION_NOTICE
+
+    diff = "diff --git a/scripts/big.py b/scripts/big.py\n" + "+x = 1\n" * 17200
+    assert 120000 <= len(diff.strip()) < 125000
+
+    record, prompt = _run_gate_capturing_prompt(
+        glm_gate, "glm_gate", tmp_path, monkeypatch, diff=diff, pr="2032",
+    )
+    depth = record["execution_depth"]
+    assert depth["diff_truncated"] is False
+    assert depth["diff_limit"] == 800000
+    assert depth["diff_chars"] == len(diff.strip())
+    assert TRUNCATION_NOTICE not in prompt
 
 
 def test_model_env_var_names_come_from_the_shared_map():

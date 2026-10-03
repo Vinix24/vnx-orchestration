@@ -54,22 +54,50 @@ TIMEOUT_SECONDS = 900
 # Diff cap applied by gate_prompt.build_review_prompt: the diff is delimited,
 # untrusted DATA, and this bounds how much of it enters the prompt.
 #
-# OI-1874: one fixed cap shared by all three harness-lane gates was never
-# chosen per model. kimi-k3 carries a 1M-token context (wave7_models.yaml) and
-# runs on the kimi CLI OAuth subscription, so raising its cap costs nothing;
-# glm_gate (OpenRouter) and deepseek_gate (deepseek-harness) are API-credit
-# fallback seats and stay at the original conservative cap. gate name -> (config
-# key, default chars). config_registry carries the same defaults and the
-# per-gate rationale; a project may raise or lower either via config or env.
+# Operator decision 2026-10-03: every reviewer may read up to 500,000 tokens of
+# diff by default, configurable per gate. A cut diff books partial_review,
+# billed and worth nothing (PR #2032: 107,797 chars against the old 50,000 cap).
+# The model windows allow it (kimi-k3 1,000,000, glm-5.2 1,048,576,
+# deepseek-flash 1,000,000; wave7_models.yaml). The delivery route does not
+# yet: see ARGV_SAFE_MAX_DIFF_CHARS. So all three gates share one default, the
+# operator's reading budget bounded by that ceiling, and a project may lower it
+# per gate. gate name -> (config key, default chars). config_registry carries
+# the same defaults.
+
+# Operator decision 2026-10-03: the reading budget per review, in tokens.
+REVIEW_READ_TOKENS_TARGET = 500_000
+
+# Characters per token on this repo's diffs, measured 2026-10-03 with tiktoken
+# (cl100k_base and o200k_base) on four real diffs (#2030, #2029, #2025, #2032):
+# 322,709 chars = 84,989 and 85,400 tokens, 3.78 to 3.80.
+DIFF_CHARS_PER_TOKEN = 3.8
+
+# The ceiling of the current delivery route (OI-1961). The harness-lane prompt,
+# diff included, travels as ONE command-line argument at three places:
+# plan_gate_panel.py ("--instruction" to provider_dispatch.py),
+# subprocess_adapter.py (claude -p <instruction>) and
+# provider_spawns/kimi_spawn.py (-p <prompt>). macOS ARG_MAX is 1,048,576 bytes
+# for argv plus environment, and a live glm review measured about 11 KB of
+# scaffold plus 4.7 KB of environment around the diff. 800,000 chars leaves
+# about 23% of ARG_MAX for multi-byte text, that scaffold and the environment.
+# OI-1961 (deliver the prompt by stdin or file) lifts this ceiling.
+ARGV_SAFE_MAX_DIFF_CHARS = 800_000
+
+# 800,000 today; 1,900,000 the day OI-1961 removes the argv ceiling.
+DEFAULT_MAX_DIFF_CHARS = min(
+    int(REVIEW_READ_TOKENS_TARGET * DIFF_CHARS_PER_TOKEN),
+    ARGV_SAFE_MAX_DIFF_CHARS,
+)
+
 DIFF_CHAR_CONFIG: Dict[str, tuple] = {
-    "kimi_gate": ("VNX_KIMI_GATE_MAX_DIFF_CHARS", 400000),
-    "glm_gate": ("VNX_GLM_GATE_MAX_DIFF_CHARS", 50000),
-    "deepseek_gate": ("VNX_DEEPSEEK_GATE_MAX_DIFF_CHARS", 50000),
+    "kimi_gate": ("VNX_KIMI_GATE_MAX_DIFF_CHARS", DEFAULT_MAX_DIFF_CHARS),
+    "glm_gate": ("VNX_GLM_GATE_MAX_DIFF_CHARS", DEFAULT_MAX_DIFF_CHARS),
+    "deepseek_gate": ("VNX_DEEPSEEK_GATE_MAX_DIFF_CHARS", DEFAULT_MAX_DIFF_CHARS),
 }
 
-# The conservative fallback for a gate name this table does not know at all —
-# never unlimited, never a crash.
-_UNKNOWN_GATE_MAX_DIFF_CHARS = 50000
+# A gate name this table does not know at all gets the same default: never
+# unlimited, never a crash.
+_UNKNOWN_GATE_MAX_DIFF_CHARS = DEFAULT_MAX_DIFF_CHARS
 
 
 def max_diff_chars(gate: str) -> int:
@@ -77,18 +105,20 @@ def max_diff_chars(gate: str) -> int:
     per-gate config keys and their defaults (OI-1874).
 
     Read at runtime via ``config_runtime.get`` so a project config (or an env
-    var, or the operator override brake) can raise or lower it per gate — see
+    var, or the operator override brake) can lower it per gate — see
     ``config_runtime``'s precedence chain. A gate this table does not carry
-    (``_UNKNOWN_GATE_MAX_DIFF_CHARS``), a missing/unset config value (falls
-    back to that gate's own default), and an invalid or non-positive config
-    value (same fallback, plus a logged warning) all resolve to a bounded,
-    positive cap — never to "no limit", and never by raising.
+    (``_UNKNOWN_GATE_MAX_DIFF_CHARS``), a missing/unset config value, and an
+    invalid or non-positive config value (plus a logged warning) all resolve
+    to the shared default. A valid value above ``ARGV_SAFE_MAX_DIFF_CHARS`` is
+    clamped to it with one warning, because the argv route cannot spawn a
+    larger prompt (OI-1961). The result is always bounded and positive — never
+    "no limit", and never by raising.
     """
     entry = DIFF_CHAR_CONFIG.get(gate)
     if entry is None:
         logger.warning(
             "gate_lane_contract.max_diff_chars: unknown gate %r, falling back "
-            "to the conservative default %d", gate, _UNKNOWN_GATE_MAX_DIFF_CHARS,
+            "to the default %d", gate, _UNKNOWN_GATE_MAX_DIFF_CHARS,
         )
         return _UNKNOWN_GATE_MAX_DIFF_CHARS
     key, default = entry
@@ -109,6 +139,13 @@ def max_diff_chars(gate: str) -> int:
             "for %s, falling back to the %s default %d", value, key, gate, default,
         )
         return default
+    if value > ARGV_SAFE_MAX_DIFF_CHARS:
+        logger.warning(
+            "gate_lane_contract.max_diff_chars: config value %d for %s exceeds "
+            "the argv ceiling %d, clamped to it (the prompt travels as one "
+            "command-line argument, OI-1961)", value, key, ARGV_SAFE_MAX_DIFF_CHARS,
+        )
+        return ARGV_SAFE_MAX_DIFF_CHARS
     return value
 
 

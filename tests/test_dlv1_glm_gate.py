@@ -586,10 +586,12 @@ def test_pass_verdict_on_whitespace_only_diff_becomes_unavailable_degenerate(
 
 def test_pass_verdict_on_truncated_diff_is_partial_review_not_unavailable(glm_gate, tmp_path, monkeypatch):
     """A ~60000-character diff capped at glm_gate's own resolved diff-char cap
-    (OI-1874: gate_lane_contract.max_diff_chars, 50000 by default) still
+    (OI-1874: gate_lane_contract.max_diff_chars, set to 50000 here; the shared
+    default is 800000) still
     handed the model real content to review — truncation must never flip a
     real pass into unavailable. Since OI-1851 it is not a pass either: the
     model saw only part of the diff, so the record says partial_review."""
+    monkeypatch.setenv("VNX_GLM_GATE_MAX_DIFF_CHARS", "50000")
     big_diff = "diff --git a/x b/x\n" + ("+ok\n" * 15000)
     assert len(big_diff) > gate_lane_contract.max_diff_chars("glm_gate")
     diff_file = tmp_path / "x.diff"

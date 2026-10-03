@@ -1427,16 +1427,19 @@ class TestHarnessLaneDelegation:
         never reached the model at all.
 
         Proves both halves: a prompt IS built for deepseek_gate now, and it is
-        capped at deepseek_gate's OWN limit (50000), not kimi_gate's (400000) —
-        a diff sized strictly between the two truncates here exactly like it
-        does for glm_gate in test_oi1851_truncated_gate_not_a_pass.py.
+        capped at deepseek_gate's OWN limit, not kimi_gate's — the test sets
+        the two caps explicitly (deepseek 50000, kimi 400000), so a diff sized
+        strictly between them truncates here exactly like it does for glm_gate
+        in test_oi1851_truncated_gate_not_a_pass.py.
         """
         import gate_lane_contract
         from gate_prompt import TRUNCATION_NOTICE
 
+        monkeypatch.setenv("VNX_DEEPSEEK_GATE_MAX_DIFF_CHARS", "50000")
+        monkeypatch.setenv("VNX_KIMI_GATE_MAX_DIFF_CHARS", "400000")
         deepseek_cap = gate_lane_contract.max_diff_chars("deepseek_gate")
         kimi_cap = gate_lane_contract.max_diff_chars("kimi_gate")
-        assert deepseek_cap < kimi_cap
+        assert (deepseek_cap, kimi_cap) == (50000, 400000)
 
         head = "diff --git a/scripts/head.py b/scripts/head.py\n" + "+x = 1\n" * 100
         tail_line = "+y = 2\n"
@@ -1456,7 +1459,6 @@ class TestHarnessLaneDelegation:
 
         monkeypatch.setattr("plan_gate_panel._make_default_dispatcher", factory)
         monkeypatch.delenv("VNX_DEEPSEEK_GATE_MODEL", raising=False)
-        monkeypatch.delenv("VNX_DEEPSEEK_GATE_MAX_DIFF_CHARS", raising=False)
         monkeypatch.setattr(
             GateRunner, "_fetch_gh_pr_diff", staticmethod(lambda pr: big_diff),
         )
@@ -1529,6 +1531,50 @@ class TestHarnessLaneDelegation:
             assert calls[0]["provider"] == "deepseek-harness"
             saved = json.loads((gate_env["results_dir"] / f"pr-{pr}-deepseek_gate.json").read_text(encoding="utf-8"))
             assert saved["model"] == expected
+
+    def test_deepseek_gate_reads_a_120000_char_diff_whole_with_no_config(
+        self, gate_env, monkeypatch,
+    ):
+        """Step 1 of the 500K-token reading decision (2026-10-03): with no
+        config the shared default (800000) lets deepseek_gate read a
+        120000-char diff whole instead of cutting it at 50000."""
+        from gate_prompt import TRUNCATION_NOTICE
+
+        monkeypatch.delenv("VNX_DEEPSEEK_GATE_MODEL", raising=False)
+        monkeypatch.delenv("VNX_DEEPSEEK_GATE_MAX_DIFF_CHARS", raising=False)
+        big_diff = "diff --git a/scripts/big.py b/scripts/big.py\n" + "+x = 1\n" * 17200
+        assert 120000 <= len(big_diff.strip()) < 125000
+        report_text = (
+            "Reviewed the diff.\nRan the tests.\nNo blocking findings.\n\n"
+            "```json\n"
+            '{"verdict": "pass", "findings": [], "residual_risk": null}\n'
+            "```\n"
+        )
+        factory, calls = self._fake_dispatcher(report_text)
+        monkeypatch.setattr("plan_gate_panel._make_default_dispatcher", factory)
+        monkeypatch.setattr(
+            GateRunner, "_fetch_gh_pr_diff", staticmethod(lambda pr: big_diff),
+        )
+        report_path = str(gate_env["reports_dir"] / "deepseek-gate-pr4.md")
+        payload = _make_request_payload(
+            gate="deepseek_gate", report_path=report_path,
+            dispatch_id="deepseek-gate-pr4-1788815400",
+        )
+        payload.pop("prompt")
+        runner = GateRunner(
+            state_dir=gate_env["state_dir"], reports_dir=gate_env["reports_dir"],
+        )
+        runner.run(gate="deepseek_gate", request_payload=payload, pr_number=4)
+
+        assert len(calls) == 1
+        assert TRUNCATION_NOTICE not in calls[0]["instruction"]
+        saved = json.loads(
+            (gate_env["results_dir"] / "pr-4-deepseek_gate.json").read_text(encoding="utf-8")
+        )
+        depth = saved["execution_depth"]
+        assert depth["diff_truncated"] is False
+        assert depth["diff_limit"] == 800000
+        assert depth["diff_chars"] == len(big_diff.strip())
 
     def test_harness_lane_spawn_failure_report_is_not_booked_completed(
         self, gate_env, monkeypatch,

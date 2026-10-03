@@ -5,11 +5,12 @@ glm_gate booked `completed` with `diff_chars: 0, diff_truncated: false` and the
 merge door read it as passing. Real code throughout; only the provider call,
 the diff fetch and the gh identity lookups are stubbed.
 
-OI-1874 made the cap per-gate (``gate_lane_contract.max_diff_chars``): glm_gate
-and deepseek_gate stayed at 50000, kimi_gate rose to 400000. Diffs below are
-sized against each gate's OWN resolved cap rather than a shared literal, so this
-suite still proves the OI-1851 contract (a truncated diff can never book a
-silent pass) for every gate at ITS actual cap, not at the old constant.
+OI-1874 made the cap per-gate (``gate_lane_contract.max_diff_chars``). Since
+2026-10-03 all three gates share one default of 800000, so this suite sets the
+caps it needs explicitly (glm 50000, kimi 400000, via the ``explicit_caps``
+fixture) instead of building megabyte diffs to reach the default. It still
+proves the OI-1851 contract (a truncated diff can never book a silent pass)
+and the OI-1874 contract (one gate's cap never applies to another gate).
 """
 from __future__ import annotations
 
@@ -77,12 +78,19 @@ def _diff_over(chars: int) -> str:
     return diff
 
 
-GLM_CAP = gate_lane_contract.DIFF_CHAR_CONFIG["glm_gate"][1]
-KIMI_CAP = gate_lane_contract.DIFF_CHAR_CONFIG["kimi_gate"][1]
+GLM_CAP = 50000
+KIMI_CAP = 400000
+
+
+@pytest.fixture(autouse=True)
+def explicit_caps(monkeypatch, isolate_config_runtime):
+    """Every test here sets the two caps it relies on, never the shared default."""
+    monkeypatch.setenv("VNX_GLM_GATE_MAX_DIFF_CHARS", str(GLM_CAP))
+    monkeypatch.setenv("VNX_KIMI_GATE_MAX_DIFF_CHARS", str(KIMI_CAP))
+
 
 # Over glm_gate's cap (50000), under kimi_gate's cap (400000) — the exact shape
-# of PR #1936 (OI-1874): a diff too big for the API-credit fallback but well
-# inside the subscription-billed kimi lane's 1M-token context.
+# of PR #1936 (OI-1874): a diff too big for one gate's cap but inside another's.
 BIG_DIFF = _diff_over(GLM_CAP)
 assert len(BIG_DIFF) < KIMI_CAP, "BIG_DIFF must sit strictly between the two caps"
 
@@ -121,8 +129,6 @@ def _run_standalone(module, gate: str, tmp_path, monkeypatch, *, diff: str, repo
 def standalone_gate(request, monkeypatch):
     monkeypatch.delenv("VNX_GLM_GATE_MODEL", raising=False)
     monkeypatch.delenv("VNX_KIMI_GATE_MODEL", raising=False)
-    monkeypatch.delenv("VNX_GLM_GATE_MAX_DIFF_CHARS", raising=False)
-    monkeypatch.delenv("VNX_KIMI_GATE_MAX_DIFF_CHARS", raising=False)
     module = __import__(request.param)
     return module, request.param
 
@@ -134,6 +140,7 @@ def test_single_shot_pass_on_a_truncated_diff_is_partial_review_and_no_go(
     # OI-1874: each gate's own resolved cap, not a shared literal — glm_gate and
     # kimi_gate no longer truncate at the same size.
     cap = gate_lane_contract.max_diff_chars(gate)
+    assert cap == {"glm_gate": GLM_CAP, "kimi_gate": KIMI_CAP}[gate]
     diff = _diff_over(cap)
     rc, record, results_dir = _run_standalone(
         module, gate, tmp_path, monkeypatch, diff=diff, report=PASS_REPORT, pr="1915",
@@ -158,6 +165,7 @@ def test_single_shot_pass_on_a_truncated_diff_is_partial_review_and_no_go(
 def test_single_shot_fail_on_a_truncated_diff_stays_a_fail(standalone_gate, tmp_path, monkeypatch):
     module, gate = standalone_gate
     cap = gate_lane_contract.max_diff_chars(gate)
+    assert cap == {"glm_gate": GLM_CAP, "kimi_gate": KIMI_CAP}[gate]
     diff = _diff_over(cap)
     rc, record, _ = _run_standalone(
         module, gate, tmp_path, monkeypatch, diff=diff, report=FAIL_REPORT, pr="1916",
@@ -171,10 +179,10 @@ def test_glm_gate_truncates_kimi_gate_does_not_on_the_same_diff(
 ):
     """OI-1874, the exact PR #1936 shape: one diff, two harness-lane gates.
 
-    On the OLD code (one shared MAX_DIFF_CHARS=50000) kimi_gate would have
-    truncated this diff exactly like glm_gate, both reporting
-    diff_truncated=True. On the new per-gate cap, glm_gate (still 50000)
-    truncates it and books a partial_review; kimi_gate (raised to 400000)
+    With one shared cap kimi_gate would truncate this diff exactly like
+    glm_gate, both reporting diff_truncated=True. With the per-gate caps set
+    here, glm_gate (50000) truncates it and books a partial_review; kimi_gate
+    (400000)
     reports diff_truncated=False and books a real pass over the whole diff.
     """
     monkeypatch.delenv("VNX_GLM_GATE_MODEL", raising=False)
@@ -239,8 +247,6 @@ def test_full_peer_pass_is_the_way_out_of_a_partial_review(tmp_path, monkeypatch
     """A full review by a peer on the same head is the way out."""
     monkeypatch.delenv("VNX_GLM_GATE_MODEL", raising=False)
     monkeypatch.delenv("VNX_KIMI_GATE_MODEL", raising=False)
-    monkeypatch.delenv("VNX_GLM_GATE_MAX_DIFF_CHARS", raising=False)
-    monkeypatch.delenv("VNX_KIMI_GATE_MAX_DIFF_CHARS", raising=False)
     import glm_gate
     import kimi_gate
 
@@ -275,7 +281,6 @@ def runner_env(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
     monkeypatch.setenv("VNX_REPORTS_DIR", str(reports_dir))
     monkeypatch.delenv("VNX_GLM_GATE_MODEL", raising=False)
-    monkeypatch.delenv("VNX_GLM_GATE_MAX_DIFF_CHARS", raising=False)
     real_popen = gate_runner.subprocess.Popen
 
     def _fail_unless_git(*a, **kw):
