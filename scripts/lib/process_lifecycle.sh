@@ -2,7 +2,23 @@
 # VNX process lifecycle helper
 # Provides PID-safe ownership validation, atomic locking, and graceful stop with fallback.
 
-__VNX_PROC_SHELLOPTS="$(set +o)"
+# Snapshot the caller's strict mode. Never use `$(set +o)` here: bash clears
+# errexit inside a command substitution, so that snapshot always reads "errexit
+# off" and the restore below would silently disable `set -e` in the caller.
+# `[[ -o ... ]]` reads the option in the current shell.
+__VNX_PROC_ERREXIT=0
+if [[ -o errexit ]]; then __VNX_PROC_ERREXIT=1; fi
+__VNX_PROC_NOUNSET=0
+if [[ -o nounset ]]; then __VNX_PROC_NOUNSET=1; fi
+__VNX_PROC_PIPEFAIL=0
+if [[ -o pipefail ]]; then __VNX_PROC_PIPEFAIL=1; fi
+
+_vnx_proc_restore_strict_mode() {
+  if [ "$__VNX_PROC_ERREXIT" = "1" ]; then set -e; else set +e; fi
+  if [ "$__VNX_PROC_NOUNSET" = "1" ]; then set -u; else set +u; fi
+  if [ "$__VNX_PROC_PIPEFAIL" = "1" ]; then set -o pipefail; else set +o pipefail; fi
+}
+
 set -euo pipefail
 
 _PL_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -295,5 +311,6 @@ vnx_proc_acquire_lock() {
   return 1
 }
 
-eval "$__VNX_PROC_SHELLOPTS"
-unset __VNX_PROC_SHELLOPTS
+_vnx_proc_restore_strict_mode
+unset __VNX_PROC_ERREXIT __VNX_PROC_NOUNSET __VNX_PROC_PIPEFAIL
+unset -f _vnx_proc_restore_strict_mode

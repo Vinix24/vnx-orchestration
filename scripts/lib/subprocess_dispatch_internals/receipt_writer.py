@@ -34,52 +34,162 @@ except ImportError:
     pass  # governance_emit not yet on path — callers will import directly
 
 
-def _ensure_unified_report(
+def _resolve_reports_dir() -> Path:
+    """Resolve the unified_reports store, honoring ``$VNX_REPORTS_DIR`` first.
+
+    ``$VNX_REPORTS_DIR`` is the fabric's explicit override (receipt_processor.sh
+    reads it as the canonical store).  When it is unset the store is derived
+    from the state/data dir — never skipped: a completed dispatch always ends
+    with a report on disk, so this resolution must not depend on an optional
+    environment variable being present.
+    """
+    reports_env = os.environ.get("VNX_REPORTS_DIR", "").strip()
+    if reports_env:
+        return Path(reports_env).expanduser()
+    try:
+        return _default_state_dir().parent / "unified_reports"
+    except Exception as exc:  # vnx-silent-except: resolution must never block close-out; falls back to VNX_DATA_DIR
+        logger.warning(
+            "_ensure_unified_report: state dir resolution failed (%s); "
+            "falling back to VNX_DATA_DIR", exc,
+        )
+    data_env = os.environ.get("VNX_DATA_DIR", "").strip()
+    if data_env:
+        return Path(data_env).expanduser() / "unified_reports"
+    return Path.cwd() / ".vnx-data" / "unified_reports"
+
+
+def _closeout_report_body(
     dispatch_id: str,
     terminal_id: str,
     status: str,
+    model: "str | None",
+    provider: "str | None",
+    changed_files: "list[str] | None",
+) -> str:
+    """Contract-valid body for a dispatch the worker closed out without a report.
+
+    Carries all four required sections (Summary, Changes, Verification, Open
+    Items) and the identity block the receipt converter requires (Dispatch-ID,
+    Model, Provider) — the same shape ``governance_emit.fallback_report_body``
+    produces for a crash, but for the success path.
+    """
+    identity = [f"**Dispatch-ID**: {dispatch_id}"]
+    if model:
+        identity.append(f"**Model**: {model}")
+    if provider:
+        identity.append(f"**Provider**: {provider}")
+    if terminal_id:
+        identity.append(f"**Terminal**: {terminal_id}")
+    identity.append(f"**Status**: {status}")
+    identity.append("**Auto-Generated**: lane close-out (no worker report)")
+
+    if changed_files:
+        changes = (
+            "The worker wrote no unified report of its own, so the lane recorded "
+            "the files this dispatch touched (from its event stream):\n\n"
+            + "\n".join(f"- `{path}`" for path in changed_files)
+            + "\n"
+        )
+    else:
+        changes = (
+            "The worker wrote no unified report of its own and its event stream "
+            "recorded no touched paths. Any changes it made are on this dispatch's "
+            "branch/worktree — inspect them there before deciding the outcome.\n"
+        )
+
+    return (
+        f"# Dispatch {dispatch_id}\n\n"
+        + "\n".join(identity) + "\n\n"
+        "## Summary\n\n"
+        "The subprocess lane closed this dispatch out successfully, but the worker "
+        "wrote no unified report of its own, so the lane wrote this one in its "
+        "place. The dispatch reached its end state with a report that satisfies the "
+        "report body contract; the lane receipt records the delivery outcome, model "
+        "and cost.\n\n"
+        "## Changes\n\n" + changes + "\n"
+        "## Verification\n\n"
+        "No verification was recorded by the worker. The lane's own delivery checks "
+        "(worker health monitor, event stream, commit check) decided success and are "
+        "recorded on this dispatch's receipt.\n\n"
+        "## Open Items\n\n"
+        "- None.\n"
+    )
+
+
+def _ensure_unified_report(
+    dispatch_id: str,
+    terminal_id: str,
+    status: str = "done",
+    *,
+    model: "str | None" = None,
+    provider: "str | None" = None,
+    changed_files: "list[str] | None" = None,
 ) -> "Path | None":
-    """Write a stub unified report if the worker did not write one.
+    """Ensure a contract-valid unified report exists for a completed dispatch.
 
-    Workers are instructed to write <dispatch_id>.md to unified_reports/
-    as part of their task. This call ensures the file always exists before the
-    t0_receipts.ndjson entry is written so the receipt processor never sees a
-    dispatch with no corresponding report.
+    Called on the subprocess lane's success path when the worker wrote no report
+    of its own. The body it writes passes ``report_body_contract.validate_body``
+    (Summary, Changes, Verification, Open Items) and carries the identity block
+    (Dispatch-ID, Model, Provider, ...) ``append_receipt_internals.validation``
+    requires, so the dispatch's receipt can actually be written. The write goes
+    through the one writer, ``governance_emit.emit_unified_report``.
 
-    Idempotent: returns None without modifying anything if the report already exists.
+    There is no silent skip: ``$VNX_REPORTS_DIR`` is honored when set, but when
+    it is unset the store is derived from the state/data dir (see
+    ``_resolve_reports_dir``).
+
+    Idempotent across all accepted filename forms (canonical ``<id>.md`` and the
+    two legacy forms): a worker-authored report is never overwritten or altered.
+
+    Never raises — a close-out failure is logged loudly, not propagated into the
+    dispatch's success path.
     """
     from report_path import _FILENAME_FORMS
     try:
-        reports_dir_env = os.environ.get("VNX_REPORTS_DIR", "").strip()
-        if not reports_dir_env:
-            logger.debug("_ensure_unified_report: VNX_REPORTS_DIR not set, skipping")
-            return None
-        reports_dir = Path(reports_dir_env).expanduser()
+        reports_dir = _resolve_reports_dir()
         # Check all filename forms (canonical + two legacy) for idempotency.
         for form in _FILENAME_FORMS:
             if (reports_dir / form.format(dispatch_id=dispatch_id)).exists():
+                logger.debug(
+                    "_ensure_unified_report: worker report already present for %s",
+                    dispatch_id,
+                )
                 return None
-        report_path = reports_dir / f"{dispatch_id}.md"
-        reports_dir.mkdir(parents=True, exist_ok=True)
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        stub = (
-            f"**Dispatch ID**: {dispatch_id}\n"
-            f"**Terminal**: {terminal_id}\n"
-            f"**Status**: {status}\n"
-            f"**Generated**: {now}\n"
-            f"**Auto-Generated**: stub\n\n"
-            "## Summary\n"
-            "Auto-generated stub — worker completed without writing a manual unified report.\n\n"
-            "## Open Items\n"
+        body = _closeout_report_body(
+            dispatch_id, terminal_id, status, model, provider, changed_files,
         )
-        report_path.write_text(stub, encoding="utf-8")
+        # The one writer derives its store as <data_dir>/unified_reports, so the
+        # data dir is the reports dir's parent (VNX_REPORTS_DIR invariable ends
+        # in "unified_reports" — vnx_paths.sh, new_worktree.sh, receipt_processor.sh).
+        from governance_emit import emit_unified_report
+        report_path = emit_unified_report(
+            dispatch_id=dispatch_id,
+            terminal_id=terminal_id,
+            provider=provider or "claude",
+            instruction="",
+            response_text="",
+            findings=None,
+            duration_seconds=0.0,
+            data_dir=reports_dir.parent,
+            body_override=body,
+            model=model,
+        )
+        if report_path.parent.resolve() != reports_dir.resolve():
+            logger.warning(
+                "_ensure_unified_report: report for %s landed at %s, not the "
+                "resolved store %s (VNX_REPORTS_DIR basename is not "
+                "'unified_reports')",
+                dispatch_id, report_path, reports_dir,
+            )
         logger.info(
-            "_ensure_unified_report: stub written for dispatch=%s terminal=%s status=%s",
-            dispatch_id, terminal_id, status,
+            "_ensure_unified_report: contract-valid report written for "
+            "dispatch=%s terminal=%s status=%s model=%s",
+            dispatch_id, terminal_id, status, model,
         )
         return report_path
     except Exception as exc:
-        logger.warning(
+        logger.error(
             "_ensure_unified_report: failed for dispatch=%s: %s", dispatch_id, exc
         )
         return None
@@ -108,6 +218,7 @@ def _write_receipt(
     model: str | None = None,
     lane: str | None = None,
     mandate_id: str | None = None,
+    role: str | None = None,
 ) -> Path:
     """Append a subprocess completion receipt to t0_receipts.ndjson.
 
@@ -135,8 +246,28 @@ def _write_receipt(
         model=model,
         lane=lane,
         mandate_id=mandate_id,
+        role=role,
     )
     return _persist_receipt(receipt, dispatch_id, terminal_id, status)
+
+
+def _resolve_receipt_role(role: str | None, dispatch_id: str) -> str:
+    """Resolve the receipt role via the shared resolver. FAIL-OPEN to the marker."""
+    from dispatch_identity import _IDENTITY_UNRESOLVED, resolve_effective_role
+    try:
+        import subprocess_dispatch as _sd
+        state_dir = _sd._default_state_dir()
+        project_id = os.environ.get("VNX_PROJECT_ID", "").strip()
+        if not project_id:
+            from dispatch_cli import _resolve_project_id
+            project_id = _resolve_project_id()
+        return resolve_effective_role(role, dispatch_id, project_id, state_dir=state_dir)
+    except Exception:
+        logger.debug(
+            "receipt_writer: role resolution failed open dispatch=%s",
+            dispatch_id, exc_info=True,
+        )
+        return (role or "").strip() or _IDENTITY_UNRESOLVED
 
 
 def _build_receipt_payload(
@@ -162,8 +293,15 @@ def _build_receipt_payload(
     model: str | None = None,
     lane: str | None = None,
     mandate_id: str | None = None,
+    role: str | None = None,
 ) -> dict:
-    """Assemble the receipt dict from the named fields."""
+    """Assemble the receipt dict from the named fields.
+
+    ``role`` is stamped unconditionally through the shared resolver: the caller
+    role if genuinely set, else the role in the dispatch's own spec, else
+    ``dispatch_metadata``, else the ``identity_unresolved`` marker. Never a
+    guessed role name.
+    """
     receipt = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "event_type": "subprocess_completion",
@@ -175,6 +313,7 @@ def _build_receipt_payload(
         "event_count": event_count,
         "session_id": session_id,
         "source": "subprocess",
+        "role": _resolve_receipt_role(role, dispatch_id),
     }
     if provider is not None:
         receipt["provider"] = provider

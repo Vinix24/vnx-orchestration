@@ -25,14 +25,14 @@ if [[ ! -f "$PROGRESS" ]]; then
 fi
 
 # Extract key fields using jq
-PENDING=$(jq -r '.queues.pending // 0' "$BRIEF")
-T1_STATUS=$(jq -r '.terminals.T1.status // "unknown"' "$BRIEF")
-T2_STATUS=$(jq -r '.terminals.T2.status // "unknown"' "$BRIEF")
-T3_STATUS=$(jq -r '.terminals.T3.status // "unknown"' "$BRIEF")
+PENDING=$(jq -r '.queues.pending // 0' "$BRIEF" || echo 0)
+T1_STATUS=$(jq -r '.terminals.T1.status // "unknown"' "$BRIEF" || echo "unknown")
+T2_STATUS=$(jq -r '.terminals.T2.status // "unknown"' "$BRIEF" || echo "unknown")
+T3_STATUS=$(jq -r '.terminals.T3.status // "unknown"' "$BRIEF" || echo "unknown")
 
-TRACK_A_GATE=$(jq -r '.tracks.A.current_gate // "unknown"' "$BRIEF")
-TRACK_B_GATE=$(jq -r '.tracks.B.current_gate // "unknown"' "$BRIEF")
-TRACK_C_GATE=$(jq -r '.tracks.C.current_gate // "unknown"' "$BRIEF")
+TRACK_A_GATE=$(jq -r '.tracks.A.current_gate // "unknown"' "$BRIEF" || echo "unknown")
+TRACK_B_GATE=$(jq -r '.tracks.B.current_gate // "unknown"' "$BRIEF" || echo "unknown")
+TRACK_C_GATE=$(jq -r '.tracks.C.current_gate // "unknown"' "$BRIEF" || echo "unknown")
 
 # Minimal summary (50-100 tokens)
 cat <<EOF

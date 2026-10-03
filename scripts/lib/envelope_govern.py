@@ -653,6 +653,12 @@ def _govern(
             base_sha=None,
             receipts_file=str(spec.state_dir / "t0_receipts.ndjson"),
             state_dir=spec.state_dir,
+            # Attribution fix: the provider lane KNOWS the dispatch's provider
+            # and terminal (both on EnvelopeSpec) — pass them so the corrective
+            # rejection receipt names the fabricator instead of landing with the
+            # sentinel "unknown". Never overwritten by enrichment.
+            provider=spec.provider,
+            terminal=spec.terminal_id,
         )
     except Exception as exc:  # noqa: BLE001
         logger.error(

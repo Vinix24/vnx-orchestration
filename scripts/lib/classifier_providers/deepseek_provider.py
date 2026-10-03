@@ -20,6 +20,13 @@ import subprocess
 import time
 from typing import Optional
 
+from provider_spawns.harness_config_dir import (
+    HarnessConfigDirError,
+    bare_harness_cli_args,
+    harness_config_env,
+    require_harness_credential,
+)
+
 from .base import ClassifierProvider, ClassifierResult, parse_json_block
 
 _DEFAULT_MODEL = "deepseek-v4-flash"
@@ -67,14 +74,26 @@ class DeepSeekProvider(ClassifierProvider):
         # Hardening: kill non-essential traffic + telemetry so 0 calls reach
         # api.anthropic.com (the measured-safe configuration in the constraint doc).
         env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+        # Own config dir, applied last: never inherit the operator's CLAUDE.md/skills/memory.
+        env.update(harness_config_env("deepseek-harness"))
+        # --bare reads only ANTHROPIC_API_KEY: refuse a child that would carry none.
+        require_harness_credential(env)
         return env
 
     def classify(self, prompt: str, _max_tokens: int = 1500) -> ClassifierResult:
         cmd = [
-            "claude", "--print", "--model", self.model,
+            "claude", "--print", *bare_harness_cli_args(), "--model", self.model,
             "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
         ]
         start = time.monotonic()
+        try:
+            child_env = self._harness_env()
+        except HarnessConfigDirError as exc:
+            return ClassifierResult(
+                raw_response="", parsed_json=None, cost_usd=0.0,
+                latency_ms=int((time.monotonic() - start) * 1000),
+                provider=self.name, error=f"harness config dir unsafe: {exc}",
+            )
         try:
             proc = subprocess.run(
                 cmd,
@@ -82,7 +101,7 @@ class DeepSeekProvider(ClassifierProvider):
                 capture_output=True,
                 text=True,
                 timeout=self.timeout_seconds,
-                env=self._harness_env(),
+                env=child_env,
             )
         except FileNotFoundError as exc:
             return ClassifierResult(

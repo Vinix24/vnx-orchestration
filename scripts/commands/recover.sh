@@ -86,8 +86,7 @@ HELP
       [ "$json_output" = true ] && runtime_args+=("--json")
 
       PYTHONPATH="$scripts_lib${PYTHONPATH:+:$PYTHONPATH}" \
-        python3 "$scripts_lib/vnx_recover_runtime.py" "${runtime_args[@]}"
-      runtime_exit=$?
+        python3 "$scripts_lib/vnx_recover_runtime.py" "${runtime_args[@]}" || runtime_exit=$?
 
       if [ "$runtime_exit" -eq 0 ]; then
         log "[recover] Runtime recovery: clean or recovered"
@@ -133,8 +132,7 @@ HELP
     [ "${VNX_RUNTIME_PRIMARY:-1}" = "1" ] && legacy_args+=("--runtime-primary")
 
     PYTHONPATH="$scripts_lib${PYTHONPATH:+:$PYTHONPATH}" \
-      python3 "$scripts_lib/vnx_recover_legacy.py" "${legacy_args[@]}"
-    _legacy_exit=$?
+      python3 "$scripts_lib/vnx_recover_legacy.py" "${legacy_args[@]}" || _legacy_exit=$?
   else
     log "[recover] Python legacy cleanup not available — using inline fallback"
     # Minimal inline fallback: just clear unclean marker and stale PIDs
@@ -155,7 +153,7 @@ HELP
     log "[recover] Aggressive mode: killing all scoped VNX processes..."
     if [ "$dry_run" = true ]; then
       local orphan_count
-      orphan_count="$(pgrep -f "${VNX_DATA_DIR:-$PROJECT_ROOT/.vnx-data}" 2>/dev/null | grep -v "^$$\$" | wc -l | tr -d ' ')"
+      orphan_count="$(pgrep -f "${VNX_DATA_DIR:-$PROJECT_ROOT/.vnx-data}" 2>/dev/null | grep -v "^$$\$" | wc -l | tr -d ' ' || true)"
       log "  WOULD KILL: $orphan_count process(es) scoped to $VNX_DATA_DIR"
     else
       local _scripts_dir="$VNX_HOME/scripts"

@@ -11,6 +11,7 @@ and never raises — receipt emission must never break on the identity join.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -128,6 +129,73 @@ def _resolve_db_path(state_dir: Optional[Path] = None) -> Optional[Path]:
     return None
 
 
+def _candidate_state_dirs(state_dir: Optional[Path]) -> "list[Path]":
+    """State dirs to search for the dispatch's own store, in resolution order.
+
+    An explicit ``state_dir`` owns the lookup alone: its store is the only one
+    consulted (ADR-007, a dispatch_id is only unique per project). Without one
+    the order mirrors ``_resolve_db_path``: ``VNX_STATE_DIR`` env, then the
+    canonical ``vnx_paths`` resolver.
+    """
+    if state_dir is not None:
+        return [Path(state_dir)]
+    candidates: "list[Path]" = []
+    state_dir_env = os.environ.get("VNX_STATE_DIR")
+    if state_dir_env:
+        candidates.append(Path(state_dir_env))
+    try:
+        from vnx_paths import resolve_paths
+        candidates.append(Path(resolve_paths()["VNX_STATE_DIR"]))
+    except Exception:
+        logger.debug(
+            "dispatch_identity: vnx_paths canonical resolver unavailable",
+            exc_info=True,
+        )
+    return candidates
+
+
+def resolve_spec_role(
+    dispatch_id: str,
+    state_dir: Optional[Path] = None,
+) -> Optional[str]:
+    """Return the role from the dispatch's own ``dispatch-spec.json``, or None.
+
+    Looks only in ``<data_dir>/dispatches/*/<dispatch_id>/dispatch-spec.json``
+    of the store that owns ``state_dir`` (``data_dir = state_dir.parent``);
+    never globs across stores. The value passes ``normalize_role``, so an empty
+    role or the ``identity_unresolved`` sentinel never counts. A missing or
+    unreadable spec, or one without a role, returns None. FAIL-OPEN: never raises.
+    """
+    try:
+        did = (dispatch_id or "").strip()
+        if not did or "/" in did or "\\" in did or did in (".", ".."):
+            return None
+        for candidate in _candidate_state_dirs(state_dir):
+            dispatches_dir = candidate.parent / "dispatches"
+            if not dispatches_dir.is_dir():
+                continue
+            for spec_path in sorted(dispatches_dir.glob(f"*/{did}/dispatch-spec.json")):
+                try:
+                    data = json.loads(spec_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                if not isinstance(data, dict):
+                    continue
+                role = data.get("role")
+                if not isinstance(role, str):
+                    continue
+                normalized = normalize_role(role)
+                if normalized:
+                    return normalized
+        return None
+    except Exception:
+        logger.debug(
+            "dispatch_identity: spec role resolution failed open dispatch=%s",
+            dispatch_id, exc_info=True,
+        )
+        return None
+
+
 def resolve_dispatch_role(
     dispatch_id: str,
     project_id: str,
@@ -191,10 +259,12 @@ def resolve_effective_role(
     Order:
       1. A genuinely-set caller role (never the canonical ``identity_unresolved``
          sentinel, which writers stamp when they never resolved a real role).
-      2. ``dispatch_metadata`` via the ADR-007 composite key
-         (``dispatch_id``, ``project_id``) — the fallback for writers that
-         never carried a real role on the spec.
-      3. ``_IDENTITY_UNRESOLVED`` — the single canonical sentinel, imported
+      2. The role in the dispatch's own ``dispatch-spec.json``, in the store
+         that owns ``state_dir`` only (``resolve_spec_role``).
+      3. ``dispatch_metadata`` via the ADR-007 composite key
+         (``dispatch_id``, ``project_id``) — the fallback for dispatches
+         whose spec carries no role.
+      4. ``_IDENTITY_UNRESOLVED`` — the single canonical sentinel, imported
          from this module by every emit path.
 
     FAIL-OPEN: never raises — receipt/report emission must not break on the
@@ -203,5 +273,8 @@ def resolve_effective_role(
     candidate = (role or "").strip()
     if candidate and candidate != _FAKE_DEFAULT_ROLE:
         return candidate
+    spec_role = resolve_spec_role(dispatch_id, state_dir=state_dir)
+    if spec_role:
+        return spec_role
     resolved = resolve_dispatch_role(dispatch_id, project_id, state_dir=state_dir)
     return resolved or _IDENTITY_UNRESOLVED

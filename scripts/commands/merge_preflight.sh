@@ -252,7 +252,7 @@ print('|'.join(holds))
     for pid_file in "$wt_data/pids"/*.pid; do
       [ -f "$pid_file" ] || continue
       local pid
-      pid="$(cat "$pid_file" 2>/dev/null)"
+      pid="$(cat "$pid_file" 2>/dev/null || true)"
       if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
         running_procs=$((running_procs + 1))
       fi
@@ -288,8 +288,8 @@ print('|'.join(holds))
     local ci_verdict
     local ci_msg
     if [ -n "$ci_json" ]; then
-      ci_verdict="$(printf '%s' "$ci_json" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("verdict",""))' 2>/dev/null)"
-      ci_msg="$(printf '%s' "$ci_json" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("message",""))' 2>/dev/null)"
+      ci_verdict="$(printf '%s' "$ci_json" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("verdict",""))' 2>/dev/null || true)"
+      ci_msg="$(printf '%s' "$ci_json" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("message",""))' 2>/dev/null || true)"
     fi
     if [ "$ci_verdict" = "GO" ]; then
       details="${details}\n  INFO: ${ci_msg:-VNX CI geslaagd}"

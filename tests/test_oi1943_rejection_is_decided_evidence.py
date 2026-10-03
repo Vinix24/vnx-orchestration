@@ -442,6 +442,34 @@ class TestPostExecution:
         assert booked["status"] == STATUS_FAILED
         assert booked.get("reason") != REASON_FAILED_BY_GATE_VERDICT
 
+    def test_stale_rejection_stays_pending_and_current_rejection_books_failed(
+        self, tmp_path, monkeypatch,
+    ):
+        """OI-1914 first, OI-1943 second: a rejection about a superseded head is
+        never booked; the same rejection about the current head books failed."""
+        state_dir = _state_dir(tmp_path)
+        _register(state_dir, "d-stale", "codex_gate", 7108)
+        stale = _rejection(state_dir, "codex_gate", 7108, commit_sha=OLD)
+        _patch(monkeypatch, _Manager(state_dir, {"codex_gate": stale}), head=HEAD)
+
+        runner.run(state_dir)
+
+        pending = _obligation(state_dir, "d-stale")
+        assert pending["status"] == STATUS_PENDING
+        assert pending["reason"] == "stale_evidence_sha_mismatch"
+
+        other = _state_dir(tmp_path, "vnx-data-other")
+        _register(other, "d-stale", "codex_gate", 7108, project_id="other")
+        current = _rejection(other, "codex_gate", 7108, commit_sha=HEAD)
+        _patch(monkeypatch, _Manager(other, {"codex_gate": current}), head=HEAD)
+
+        runner.run(other)
+
+        booked = _obligation(other, "d-stale")
+        assert booked["status"] == STATUS_FAILED
+        assert booked["reason"] == REASON_FAILED_BY_GATE_VERDICT
+        assert _obligation(state_dir, "d-stale")["status"] == STATUS_PENDING
+
 
 # ---------------------------------------------------------------------------
 # Merge door peers (A8, C6, C7)

@@ -315,6 +315,11 @@ class GovernSpec:
     # door's VNX_WORK_REF env var when the spec does not carry it.
     work_ref: Optional[str] = None
     model: Optional[str] = None
+    # Attribution fix: the dispatch's real provider, when the caller knows it.
+    # The corrective phantom-guard receipt needs it to be attributable; None
+    # (the tmux/subprocess lanes resolve it from terminal_id + the door's
+    # VNX_CURRENT_PROVIDER export) leaves enrichment to resolve it instead.
+    provider: Optional[str] = None
     # When role="plan-reviewer" the worker's report is a free-form review ending
     # with a vnx-plan-verdict fence — it intentionally lacks the standard contract
     # headings (## Changes / ## Verification / ## Open Items).  govern() must not
@@ -511,6 +516,13 @@ def govern(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome:
             pr_id=spec.pr_id or os.environ.get("VNX_PR_ID") or None,
             parent_dispatch=spec.parent_dispatch or os.environ.get("VNX_PARENT_DISPATCH") or None,
             repo=spec.worktree_path,
+            # Attribution fix: carry the dispatch's real provider + terminal so
+            # the corrective rejection receipt is attributable. When the spec
+            # does not carry a provider, record_phantom_if_any falls back to the
+            # door's VNX_CURRENT_PROVIDER export; enrichment resolves it from the
+            # terminal otherwise. Never the sentinel "unknown".
+            provider=spec.provider or os.environ.get("VNX_CURRENT_PROVIDER"),
+            terminal=spec.terminal_id,
         )
     except Exception as exc:  # noqa: BLE001
         logger.error("govern: phantom-guard check failed (non-fatal) dispatch=%s: %s", dispatch_id, exc)

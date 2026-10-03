@@ -70,6 +70,61 @@ del _env_key, _subdir
 # already delenv/setenv it themselves (test_data_dir_guard.py,
 # test_path_resolution_regression.py, etc.) and win via monkeypatch.
 os.environ["VNX_DATA_HOME"] = str(Path(_CONFTEST_ISOLATION_TMP) / "account-home")
+# ---------------------------------------------------------------------------
+# launchctl shim (OI-1891): no test may mutate the operator's launchd domain
+# ---------------------------------------------------------------------------
+# A test that points Path.home at a tmp dir passes the LaunchAgents WRITE guard
+# and still ran the real `launchctl unload/load -w`: com.vnx.*.project0 got
+# loaded on the operator's Mac and com.vnx.ledger-health was replaced. The shim
+# sits first on PATH for the whole session, so it also covers bash paths and
+# subprocesses. Read verbs are forwarded to the launchctl that was on PATH when
+# conftest loaded; every other verb (unknown ones included) is refused with
+# `[TEST ISOLATION GUARD]`, logged, and fails the test that triggered it
+# (_fail_on_refused_launchctl below). Installed ONLY when a launchctl exists:
+# without one (Linux CI) the `which("launchctl") is None` branches keep behaving
+# as they do there today.
+_LAUNCHCTL_READ_VERBS = ("list", "print", "print-disabled", "blame", "version", "help", "error")
+_LAUNCHCTL_SHIM_REFUSED_LOG = None
+
+
+def _install_launchctl_shim() -> None:
+    global _LAUNCHCTL_SHIM_REFUSED_LOG
+    import atexit
+    import shlex
+    import shutil
+    import stat
+
+    real = shutil.which("launchctl")
+    if real is None:
+        return
+    shim_dir = Path(tempfile.mkdtemp(prefix="vnx_launchctl_shim_"))
+    calls_log = shim_dir / "calls.log"
+    refused_log = shim_dir / "refused.log"
+    shim = shim_dir / "launchctl"
+    shim.write_text(
+        "#!/bin/sh\n"
+        f"REAL={shlex.quote(real)}\n"
+        f"printf '%s\\t%s\\n' \"$*\" \"${{PYTEST_CURRENT_TEST:-}}\" >> {shlex.quote(str(calls_log))}\n"
+        'case "$1" in\n'
+        f"  {'|'.join(_LAUNCHCTL_READ_VERBS)}) exec \"$REAL\" \"$@\" ;;\n"
+        "esac\n"
+        f"printf '%s\\t%s\\n' \"$*\" \"${{PYTEST_CURRENT_TEST:-}}\" >> {shlex.quote(str(refused_log))}\n"
+        'echo "[TEST ISOLATION GUARD] launchctl $* refused: a test must not change the '
+        "operator's launchd domain. Stub the install instead of reaching launchctl.\" >&2\n"
+        "exit 78\n",
+        encoding="utf-8",
+    )
+    shim.chmod(shim.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    refused_log.touch()
+    os.environ["PATH"] = str(shim_dir) + os.pathsep + os.environ.get("PATH", "")
+    os.environ["VNX_TEST_LAUNCHCTL_SHIM"] = str(shim)
+    _LAUNCHCTL_SHIM_REFUSED_LOG = refused_log
+    atexit.register(shutil.rmtree, str(shim_dir))
+
+
+_install_launchctl_shim()
+del _install_launchctl_shim
+
 # Keep the new data-dir guard from emitting warnings during normal tests.
 # Tests that exercise the guard override this explicitly.
 os.environ.setdefault("VNX_DATA_DIR_GUARD", "off")
@@ -459,6 +514,51 @@ def _stub_forge_check_run_post(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         forge_gate_publisher, "publish_check_run", offline_publish_check_run
     )
+
+
+@pytest.fixture()
+def attributed_forge_target(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> "object":
+    """Give the publisher's store -> project -> repo resolution a fixed answer.
+
+    For the tests about WHICH CONCLUSION a record maps to: they write records
+    into a bare ``tmp_path`` that belongs to no project, and the publisher now
+    refuses such a store (OI-1789). The resolution itself is covered, unstubbed,
+    by tests/test_forge_project_target.py. Returns the ``ForgeTarget`` it hands
+    out, so a test can assert the repo that reached ``gh`` or the POST.
+    """
+    try:
+        import forge_gate_publisher
+        from forge_project_target import ForgeTarget
+    except ImportError:
+        return None
+
+    checkout = tmp_path / "attributed-checkout"
+    checkout.mkdir(exist_ok=True)
+    target = ForgeTarget(project_id="proj-a", project_root=checkout, owner_repo="acme/proj-a")
+    monkeypatch.setattr(forge_gate_publisher, "resolve_forge_target", lambda _results_dir: target)
+    return target
+
+
+@pytest.fixture(autouse=True)
+def _fail_on_refused_launchctl():
+    """Fail a test that reached the refusing launchctl shim with a mutating verb."""
+    log = _LAUNCHCTL_SHIM_REFUSED_LOG
+    if log is None:
+        yield
+        return
+    before = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+    yield
+    after = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+    new = after[len(before):]
+    if new:
+        argv = [line.split("\t", 1)[0] for line in new]
+        pytest.fail(
+            "[TEST ISOLATION GUARD] this test ran a mutating launchctl, which the "
+            f"conftest shim refused: {argv}. Stub the launchd install in the test.",
+            pytrace=False,
+        )
 
 
 # ---------------------------------------------------------------------------

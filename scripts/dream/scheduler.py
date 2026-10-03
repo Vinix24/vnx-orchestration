@@ -93,6 +93,9 @@ def _install_macos(project_id: str, project_root: Path, vnx_bin: str) -> str:
             pass
         raise
 
+    # OI-1891: refuse to mutate the real launchd domain from a test run.
+    _vnx_paths.refuse_real_launchctl_under_test_runner()
+
     # Idempotent: unload before re-loading (suppressed if not loaded yet)
     subprocess.run(["launchctl", "unload", "-w", str(out_path)], capture_output=True)
     result = subprocess.run(
@@ -111,6 +114,7 @@ def _uninstall_macos() -> str:
     out_path = Path.home() / "Library" / "LaunchAgents" / _PLIST_NAME
     if not out_path.exists():
         return f"Not installed: {out_path}"
+    _vnx_paths.refuse_real_launchctl_under_test_runner()
     subprocess.run(["launchctl", "unload", "-w", str(out_path)], capture_output=True)
     out_path.unlink()
     return f"Unloaded and removed: {out_path}"

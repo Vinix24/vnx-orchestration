@@ -406,7 +406,9 @@ class TestQueueAutoAcceptOrdering:
         )
         # The mv that promotes the file (after the dedup early-return) — the FIRST
         # mv in the body is the queue→pending mv
-        mv_match = re.search(r"^\s*mv\s+\"\$f\"\s+\"\$target\"", body, re.MULTILINE)
+        mv_match = re.search(
+            r"^\s*(?:if\s+!\s+)?mv\s+\"\$f\"\s+\"\$target\"", body, re.MULTILINE
+        )
         assert emit_match, "dispatch_created emit not found in queue_auto_accept loop"
         assert mv_match, "queue→pending mv not found in queue_auto_accept loop"
         assert emit_match.start() < mv_match.start(), (

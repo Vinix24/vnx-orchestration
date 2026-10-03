@@ -39,7 +39,7 @@ echo "Popup script: $POPUP_SCRIPT"
 # Function to count files in directory
 count_files() {
     local dir="$1"
-    find "$dir" -type f -name "*.md" 2>/dev/null | wc -l | tr -d ' '
+    { find "$dir" -type f -name "*.md" 2>/dev/null || true; } | wc -l | tr -d ' '
 }
 
 # Function to check if popup is already running
@@ -63,7 +63,7 @@ resolve_project_tmux_session() {
 
     # Prefer currently attached session for this project so popups appear where user is looking.
     session=$(tmux list-panes -a -F '#{session_name} #{session_attached} #{pane_current_path}' 2>/dev/null \
-        | awk -v project_root="$PROJECT_ROOT" '$2 == "1" && $3 ~ "^" project_root "/\\.claude/terminals/" { print $1; exit }')
+        | awk -v project_root="$PROJECT_ROOT" '$2 == "1" && $3 ~ "^" project_root "/\\.claude/terminals/" { print $1; exit }' || true)
     if [ -n "$session" ] && tmux has-session -t "$session" 2>/dev/null; then
         echo "$session"
         return 0
@@ -88,7 +88,7 @@ PY
     fi
 
     session=$(tmux list-panes -a -F '#{session_name} #{pane_current_path}' 2>/dev/null \
-        | awk -v project_root="$PROJECT_ROOT" '$2 ~ "^" project_root "/\\.claude/terminals/" { print $1; exit }')
+        | awk -v project_root="$PROJECT_ROOT" '$2 ~ "^" project_root "/\\.claude/terminals/" { print $1; exit }' || true)
     echo "$session"
 }
 
@@ -165,12 +165,16 @@ _stale_pending_catchup() {
         mtime=$(stat -f%m "$f" 2>/dev/null || stat -c%Y "$f" 2>/dev/null || echo 0)
         local age_secs=$(( now - mtime ))
         if [ "$age_secs" -ge "$stale_threshold" ]; then
-            touch "$f"
+            touch "$f" 2>/dev/null || continue
             echo "[catchup] Re-offered stale pending dispatch: $(basename "$f") (age: $((age_secs/60))m)"
             found=$(( found + 1 ))
         fi
     done < <(find "$PENDING_DIR" -name "*.md" -type f -print0 2>/dev/null)
     [ "$found" -gt 0 ] && echo "[catchup] Re-offered $found stale dispatch(es) in pending/"
+    # Explicit success: the `&&` above leaves the function returning 1 on the
+    # normal "nothing stale" path, and the unguarded call sites below now run
+    # under errexit.
+    return 0
 }
 
 # Track last count to detect changes

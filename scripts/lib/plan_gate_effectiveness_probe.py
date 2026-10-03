@@ -30,6 +30,14 @@ OI-PLAN resolution count, because the ledger is the durable record of whether
 the panel converged (OI-888). Both read as "panel verdicts disagree" in the
 PRD's vocabulary.
 
+A source the probe could not read is a measurement gap, not a zero measurement
+(measured 24-09: a stale checkout DB had no ``track_open_items`` table, so every
+``oi_plan_*`` counter read 0 and the beacon said ``ok`` over 90 real blockers).
+When the coordination DB exists but its blocker table/column is missing — or the
+DB cannot be queried — the probe reports ``oi_plan_source: "unreadable"``, leaves
+the three blocker counters as ``None`` (never 0), says so in the signal, and
+classifies ``degraded`` (see ``health()`` for why ``degraded`` over ``unknown``).
+
 Scope-skip signal (OI-888): the ``VNX_PLAN_GATE_COMPLEX_ONLY`` read-site now
 exists in ``plan_gate_enforcement.plan_gate_scope`` + ``complex_only_active``
 (2026-08-08 dispatch) — a LIGHT-scope plan under the flag runs the reduced
@@ -71,6 +79,16 @@ _ACTIVITY_KEYS = (
     "oi_plan_resolved",
     "seat_total",
 )
+
+# Where the OI-PLAN blocker counts came from. ``read`` = the table and its
+# ``resolved_at`` column were queried; ``db_absent`` = no coordination DB yet
+# (legitimately no rows); ``unreadable`` = the DB exists but the source could not
+# be read, so the counters carry no measurement (they are ``None``, never 0).
+OI_PLAN_SOURCE_KEY = "oi_plan_source"
+OI_PLAN_SOURCE_REASON_KEY = "oi_plan_source_reason"
+OI_PLAN_SOURCE_READ = "read"
+OI_PLAN_SOURCE_DB_ABSENT = "db_absent"
+OI_PLAN_SOURCE_UNREADABLE = "unreadable"
 
 
 def _has_table(conn: sqlite3.Connection, name: str) -> bool:
@@ -139,14 +157,22 @@ class PlanGateEffectivenessProbe(EffectivenessProbe):
                 elif verdict == "abstain":
                     seat_abstain += 1
 
-        oi_plan_unresolved = 0
-        oi_plan_stale_unresolved = 0
-        oi_plan_resolved = 0
+        oi_plan_unresolved: Optional[int] = 0
+        oi_plan_stale_unresolved: Optional[int] = 0
+        oi_plan_resolved: Optional[int] = 0
+        oi_plan_source = OI_PLAN_SOURCE_DB_ABSENT
+        oi_plan_reason: Optional[str] = None
         db_path = self._db_path()
         if db_path.exists():
-            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=10.0)
+            conn: Optional[sqlite3.Connection] = None
             try:
-                if _has_table(conn, "track_open_items") and _has_col(conn, "track_open_items", "resolved_at"):
+                conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=10.0)
+                if not _has_table(conn, "track_open_items"):
+                    oi_plan_reason = "coordination DB has no track_open_items table"
+                elif not _has_col(conn, "track_open_items", "resolved_at"):
+                    oi_plan_reason = "track_open_items has no resolved_at column"
+                else:
+                    oi_plan_source = OI_PLAN_SOURCE_READ
                     cutoff = (datetime.now(timezone.utc) - timedelta(days=STALE_DAYS)).isoformat()
                     rows = conn.execute(
                         "SELECT linked_at, resolved_at FROM track_open_items "
@@ -160,8 +186,20 @@ class PlanGateEffectivenessProbe(EffectivenessProbe):
                             oi_plan_unresolved += 1
                             if linked_at and str(linked_at) < cutoff:
                                 oi_plan_stale_unresolved += 1
+            except sqlite3.Error as exc:
+                oi_plan_reason = f"coordination DB could not be queried ({exc})"
             finally:
-                conn.close()
+                if conn is not None:
+                    conn.close()
+            if oi_plan_reason is not None:
+                # A source that could not be read is a measurement gap, not a
+                # zero measurement: report ``None`` for every blocker counter so
+                # no consumer can read "0 blockers, healthy" out of a missing
+                # table. ``oi_plan_source`` carries the explicit marker.
+                oi_plan_source = OI_PLAN_SOURCE_UNREADABLE
+                oi_plan_unresolved = None
+                oi_plan_stale_unresolved = None
+                oi_plan_resolved = None
 
         return {
             "ledger_total": ledger_total,
@@ -169,6 +207,8 @@ class PlanGateEffectivenessProbe(EffectivenessProbe):
             "oi_plan_unresolved": oi_plan_unresolved,
             "oi_plan_stale_unresolved": oi_plan_stale_unresolved,
             "oi_plan_resolved": oi_plan_resolved,
+            OI_PLAN_SOURCE_KEY: oi_plan_source,
+            OI_PLAN_SOURCE_REASON_KEY: oi_plan_reason,
             "seat_total": seat_total,
             "seat_responded": seat_responded,
             "seat_abstain": seat_abstain,
@@ -179,15 +219,26 @@ class PlanGateEffectivenessProbe(EffectivenessProbe):
         }
 
     def signal(self, raw: Dict[str, Any]) -> str:
-        if not any(raw.get(k) for k in _ACTIVITY_KEYS):
+        unreadable = raw.get(OI_PLAN_SOURCE_KEY) == OI_PLAN_SOURCE_UNREADABLE
+        if not unreadable and not any(raw.get(k) for k in _ACTIVITY_KEYS):
             return "no plan-gate activity yet (no ledger records, no OI-PLAN blockers, no seat records)"
         parts = [
             f"{raw['ledger_total']} plan-gate-pass record(s) "
             f"({raw['ledger_attest_count']} via manual attest)",
-            f"{raw['oi_plan_unresolved']} unresolved OI-PLAN blocker(s) "
-            f"({raw['oi_plan_stale_unresolved']} stale >{STALE_DAYS}d), "
-            f"{raw['oi_plan_resolved']} resolved",
         ]
+        if unreadable:
+            # Never print the (None) counters as "0 unresolved": a source the
+            # probe could not read is a gap to name, not a zero to report.
+            parts.append(
+                f"OI-PLAN blocker source UNREADABLE ({raw.get(OI_PLAN_SOURCE_REASON_KEY)}) "
+                "— blocker counts unavailable, not 0"
+            )
+        else:
+            parts.append(
+                f"{raw['oi_plan_unresolved']} unresolved OI-PLAN blocker(s) "
+                f"({raw['oi_plan_stale_unresolved']} stale >{STALE_DAYS}d), "
+                f"{raw['oi_plan_resolved']} resolved"
+            )
         if raw["seat_total"]:
             parts.append(
                 f"{raw['seat_total']} seat record(s) "
@@ -198,6 +249,17 @@ class PlanGateEffectivenessProbe(EffectivenessProbe):
         return "; ".join(parts)
 
     def health(self, raw: Dict[str, Any]) -> str:
+        if raw.get(OI_PLAN_SOURCE_KEY) == OI_PLAN_SOURCE_UNREADABLE:
+            # The blocker source could not be read, so the probe cannot rule out a
+            # stale OI-PLAN backlog: it must not claim ``ok``. ``degraded`` rather
+            # than ``unknown`` is deliberate — ``effectiveness_probe.PROBE_TO_BEACON``
+            # has no ``unknown`` entry, so ``aggregate()`` writes NO beacon for it
+            # and the subsystem's previous beacon (possibly ``ok``) would stay put,
+            # still hiding the gap. ``degraded`` writes a ``stale`` beacon and makes
+            # the unreadable source loud, matching the probe's purpose (measure, do
+            # not guess). Checked before the no-activity branch so an unreadable
+            # source is never reported as "no plan-gate activity yet".
+            return "degraded"
         if not any(raw.get(k) for k in _ACTIVITY_KEYS):
             return "unknown"
         if raw["oi_plan_stale_unresolved"] > 0:
@@ -217,4 +279,9 @@ __all__ = [
     "SEAT_LEDGER_RELPATH",
     "COORDINATION_DB_FILENAME",
     "STALE_DAYS",
+    "OI_PLAN_SOURCE_KEY",
+    "OI_PLAN_SOURCE_REASON_KEY",
+    "OI_PLAN_SOURCE_READ",
+    "OI_PLAN_SOURCE_DB_ABSENT",
+    "OI_PLAN_SOURCE_UNREADABLE",
 ]

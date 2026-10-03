@@ -36,6 +36,7 @@ from contract_invalid_window import (
 )
 from pattern_upsert import upsert_antipattern, upsert_success_pattern
 from project_scope import resolve_stamp_project_id
+from receipt_outcome import is_foreign_project
 
 
 # Failure statuses sampled from the governed receipt stream when mining for
@@ -273,7 +274,8 @@ class LearningLoop:
     @property
     def receipt_stats(self) -> Dict[str, int]:
         return self.__dict__.setdefault(
-            "_receipt_stats", {"read": 0, "after_cutoff": 0, "before_cutoff": 0}
+            "_receipt_stats",
+            {"read": 0, "after_cutoff": 0, "before_cutoff": 0, "foreign_project": 0},
         )
 
     @receipt_stats.setter
@@ -302,7 +304,7 @@ class LearningLoop:
         """
         self.persist = persist_enabled() if persist is None else persist
         self.cutoff = resolve_receipt_cutoff()
-        self.receipt_stats = {"read": 0, "after_cutoff": 0, "before_cutoff": 0}
+        self.receipt_stats = {"read": 0, "after_cutoff": 0, "before_cutoff": 0, "foreign_project": 0}
         self.shadow: Dict[str, Any] = {
             "proposals": [],
             "archival_candidates": [],
@@ -549,6 +551,24 @@ class LearningLoop:
         except sqlite3.OperationalError as e:
             log.debug("Failed to commit ignored_count updates: %s", e)
 
+    def _resolve_own_project_id(self) -> Optional[str]:
+        """The project_id of the ledger this loop reads, or None when unresolved.
+
+        Resolved the same way the loop's other project-scoped work resolves it
+        (``resolve_stamp_project_id``). The ``db_path`` anchor carries
+        path-layout, marker and env sources; a loop built via ``__new__``
+        without ``db_path`` (tests) has no anchor, so the resolver's
+        ``VNX_PROJECT_ID`` source is all that remains. No source, or
+        conflicting sources, leaves the project unresolved: this returns None
+        and the caller then counts no ``project_id``-stamped receipt as this
+        project's.
+        """
+        try:
+            return resolve_stamp_project_id(db_path=getattr(self, "db_path", None))
+        except Exception as exc:  # vnx-silent-except: unresolved project fails closed (None), logged at debug
+            log.debug("learning loop project_id unresolved: %s: %s", type(exc).__name__, exc)
+            return None
+
     def extract_failure_patterns(self, start_time: datetime = None) -> List[Dict]:
         """Extract recurring failure patterns from the governed receipt stream.
 
@@ -566,6 +586,14 @@ class LearningLoop:
         booked with an unresolved provider (a real ``model`` value, or a
         converter-stamped ``report_path``) now reaches pattern detection. The
         post-filter corpus size and both counters are logged.
+
+        Project scope (ADR-007): a line stamped with another project's
+        ``project_id`` is that project's failure, never this one's — even when
+        the dispatch id collides. A line without ``project_id`` is this
+        ledger's own (``receipt_outcome.is_foreign_project``, the one project
+        test every ledger reader uses). When the own project cannot be resolved
+        (``_resolve_own_project_id`` returns None), no stamped line counts as
+        this project's; only unstamped lines remain attributable.
         """
         if not start_time:
             start_time = datetime.now(timezone.utc) - timedelta(hours=24)
@@ -577,10 +605,12 @@ class LearningLoop:
         if not self.receipts_path.exists():
             return failure_patterns
 
+        own_project = self._resolve_own_project_id()
         total_scanned = 0
         before_cutoff = 0
         no_provider_skipped = 0
         no_provider_passed = 0
+        foreign_project = 0
 
         try:
             with open(self.receipts_path, "r", encoding="utf-8", errors="replace") as f:
@@ -626,6 +656,17 @@ class LearningLoop:
                         if is_stale_contract_invalid(receipt):
                             continue
 
+                    # Project scope (ADR-007): a line stamped with another
+                    # project's project_id is that project's failure, never this
+                    # one's — dispatch ids collide across projects. A line with
+                    # no project_id, or the resolved own project's, belongs to
+                    # this ledger. When the own project is unresolved, only
+                    # unstamped lines are attributable (is_foreign_project
+                    # treats every stamped id as foreign to None).
+                    if is_foreign_project(receipt, own_project):
+                        foreign_project += 1
+                        continue
+
                     # D3a data-quality filter: a sentinel provider alone is no
                     # longer enough to skip a receipt. Only double-sentinel
                     # receipts with no other governance provenance (see
@@ -661,13 +702,15 @@ class LearningLoop:
             "after_cutoff": total_scanned - before_cutoff,
             "before_cutoff": before_cutoff,
             "no_provider_filtered": no_provider_skipped,
+            "foreign_project": foreign_project,
         }
-        post_filter = total_scanned - no_provider_skipped
+        post_filter = total_scanned - no_provider_skipped - foreign_project
         print(
             f"  Receipt corpus: {total_scanned} scanned, "
             f"{before_cutoff} before cutoff {self.cutoff.isoformat()}, "
             f"{no_provider_skipped} no-provider filtered "
-            f"({no_provider_passed} no-provider passed on governance provenance) "
+            f"({no_provider_passed} no-provider passed on governance provenance), "
+            f"{foreign_project} foreign-project filtered "
             f"→ {post_filter} effective; "
             f"{len(failure_patterns)} failures in window"
         )
@@ -1521,7 +1564,9 @@ class LearningLoop:
         self.learning_stats["receipts_read"] = receipt_stats["read"]
         self.learning_stats["receipts_after_cutoff"] = receipt_stats["after_cutoff"]
         self.learning_stats["receipts_skipped"] = (
-            receipt_stats["before_cutoff"] + receipt_stats.get("no_provider_filtered", 0)
+            receipt_stats["before_cutoff"]
+            + receipt_stats.get("no_provider_filtered", 0)
+            + receipt_stats.get("foreign_project", 0)
         )
         report["mode"] = "persist" if self.persist else "shadow"
         report["cutoff"] = self.cutoff.isoformat()

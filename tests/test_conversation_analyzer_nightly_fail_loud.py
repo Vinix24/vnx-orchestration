@@ -107,10 +107,19 @@ def test_normal_run_completes(tmp_path):
         assert n in log
 
 
-def test_errexit_is_reasserted_right_after_the_vnx_paths_source():
+def test_script_relies_on_resolver_preserving_errexit():
+    """No local `set -e` re-assert after the source.
+
+    That workaround existed only because vnx_paths.sh used to lose errexit in
+    the caller. The resolver now restores the caller's strict mode exactly
+    (regression-tested in tests/test_vnx_paths_shellopts.py), so a re-assert here
+    would mask a regression in the resolver. The behavior it protected is still
+    covered by test_missing_function_after_prelude_fails_the_job.
+    """
     after_source = _SCRIPT.read_text(encoding="utf-8").split(_SOURCE_LINE, 1)[1]
     prelude = after_source.split("VNX_PYTHON=", 1)[0]
-    assert "\nset -euo pipefail\n" in prelude
+    commands = [ln for ln in prelude.splitlines() if not ln.lstrip().startswith("#")]
+    assert all("set -e" not in ln for ln in commands)
 
 
 def test_phase0_failure_aborts_without_complete_line(tmp_path):

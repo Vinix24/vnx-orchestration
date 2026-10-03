@@ -872,8 +872,8 @@ EOF
     if command -v yq >/dev/null 2>&1; then
       feature_name=$(yq '.active_feature.name' "$STATE_DIR/pr_queue_state.yaml" 2>/dev/null || echo "None")
       completed_list=$(yq '.completed_prs | join(", ")' "$STATE_DIR/pr_queue_state.yaml" 2>/dev/null || echo "none")
-      in_prog=$(yq '.in_progress // "none"' "$STATE_DIR/pr_queue_state.yaml" 2>/dev/null)
-      next_pr=$(yq '.next_available[0] // "none"' "$STATE_DIR/pr_queue_state.yaml" 2>/dev/null)
+      in_prog=$(yq '.in_progress // "none"' "$STATE_DIR/pr_queue_state.yaml" 2>/dev/null || echo "none")
+      next_pr=$(yq '.next_available[0] // "none"' "$STATE_DIR/pr_queue_state.yaml" 2>/dev/null || echo "none")
     else
       # Fallback to Python (use tab separator to handle spaces in names)
       local py_output

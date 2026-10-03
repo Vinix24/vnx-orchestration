@@ -278,7 +278,15 @@ def _handle_success(
             token_usage=token_usage, cost_usd=cost_usd,
         )
     else:
-        _sd._ensure_unified_report(dispatch_id, terminal_id, "done")
+        # The worker wrote no report of its own: write a contract-valid close-out
+        # report. The model the dispatch actually ran with must reach the report's
+        # identity block or the receipt converter refuses the dispatch report.
+        _sd._ensure_unified_report(
+            dispatch_id, terminal_id, "done",
+            model=model,
+            provider="claude",
+            changed_files=sorted(getattr(sub_result, "touched_files", None) or ()),
+        )
     _sd._write_receipt(
         dispatch_id, terminal_id, "done",
         event_count=sub_result.event_count,
@@ -298,6 +306,7 @@ def _handle_success(
         model=model,
         lane="subprocess",
         mandate_id=mandate_id,
+        role=role,
     )
     quality_db = _sd._default_state_dir() / "quality_intelligence.db"
     patt_updated = _sd._update_pattern_confidence(dispatch_id, "success", quality_db)
@@ -379,6 +388,7 @@ def _handle_final_failure(
         sub_provider="anthropic",
         model=model,
         lane="subprocess",
+        role=role,
     )
     quality_db = _sd._default_state_dir() / "quality_intelligence.db"
     patt_updated = _sd._update_pattern_confidence(dispatch_id, "failure", quality_db)

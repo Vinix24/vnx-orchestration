@@ -549,7 +549,8 @@ class TestEnvelopeIdempotentDedup:
         # Pre-populate the NDJSON with a line for this dispatch_id
         receipt_path.parent.mkdir(parents=True, exist_ok=True)
         receipt_path.write_text(
-            '{"dispatch_id":"env-pr2-test-001","status":"success"}\n',
+            '{"dispatch_id":"env-pr2-test-001","receipt_kind":"dispatch",'
+            '"source":"subprocess","status":"success"}\n',
             encoding="utf-8",
         )
 

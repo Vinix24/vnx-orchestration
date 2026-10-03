@@ -55,7 +55,10 @@ while true; do
             echo "[auto-accept] WARNING: dispatch_created emit failed for $_dispatch_id rc=$_reg_rc stderr=${_reg_stderr} (non-fatal — proceeding with mv)"
         fi
 
-        mv "$f" "$target"
+        if ! mv "$f" "$target"; then
+            echo "[auto-accept] WARNING: mv failed for $filename (file moved or removed concurrently)"
+            continue
+        fi
         moved=$((moved + 1))
         echo "[auto-accept] $(date +%H:%M:%S) Moved to pending: $filename"
     done

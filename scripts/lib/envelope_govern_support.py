@@ -19,6 +19,7 @@ bind against these functions' OWN globals (their
 
 from __future__ import annotations
 
+import json
 import logging
 import subprocess
 import sys
@@ -35,20 +36,54 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+def _is_lane_completion_receipt(entry: Any, dispatch_id: str) -> bool:
+    """True when a parsed ledger entry is a lane completion receipt for dispatch_id.
+
+    Two shapes count: the ``deliver_with_recovery`` safety net
+    (``receipt_kind: dispatch`` with ``source: subprocess``) and the ReceiptV2
+    shape written by ``emit_dispatch_receipt`` (``receipt_kind: dispatch``, no
+    ``source``, carrying ``completion_pct``, ``risk`` and ``findings``; ``deadline_seconds``
+    is optional and so not part of the test). Review-gate,
+    report_parser, converter, restore and corrective (``pr_enforcement`` /
+    ``phantom_guard``) records are not lane completion receipts.
+    """
+    if not isinstance(entry, dict):
+        return False
+    if entry.get("dispatch_id") != dispatch_id:
+        return False
+    if entry.get("receipt_kind") != "dispatch":
+        return False
+    source = entry.get("source")
+    if source == "subprocess":
+        return True
+    if source:
+        return False
+    return all(key in entry for key in ("completion_pct", "risk", "findings"))
+
+
 def _receipt_exists_for_dispatch(receipt_path: Path, dispatch_id: str) -> bool:
-    """Check whether the NDJSON receipt file already contains a line for dispatch_id.
+    """Check whether the NDJSON receipt file already holds a lane completion receipt.
 
     Used for idempotent dedup: when the legacy path (deliver_with_recovery) already
-    wrote a receipt for this dispatch, the envelope GOVERN skips its own receipt
-    write to avoid double-emit.
+    wrote its lane receipt for this dispatch, the envelope GOVERN skips its own
+    receipt write to avoid double-emit. Only a real lane completion receipt counts
+    (see ``_is_lane_completion_receipt``); any other earlier line for the id must
+    not suppress the lane's own role-carrying receipt. The decision is made on the
+    parsed JSON, so compact and spaced serialisations behave the same; a substring
+    test on the id is only a cheap prefilter.
     """
     if not receipt_path.exists():
         return False
-    target = f'"dispatch_id":"{dispatch_id}"'
     try:
         with open(receipt_path, "r", encoding="utf-8") as fh:
             for line in fh:
-                if target in line:
+                if dispatch_id not in line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                if _is_lane_completion_receipt(entry, dispatch_id):
                     return True
     except OSError as exc:
         logger.warning(

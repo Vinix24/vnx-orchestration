@@ -70,6 +70,16 @@ def _default_claude_projects_dir() -> Path:
     return Path.home() / ".claude" / "projects"
 
 
+def _harness_projects_dirs() -> list:
+    """``<VNX_DATA_DIR>/harness-config/*/projects`` (never raises)."""
+    try:
+        from provider_spawns.harness_config_dir import harness_projects_dirs
+        return harness_projects_dirs()
+    except ImportError as exc:
+        logger.warning("token_harvest: harness transcript dirs unavailable (import failed): %s", exc)
+        return []
+
+
 def _find_transcript(session_id: str, projects_dir: Path) -> Optional[Path]:
     """Locate the transcript file for ``session_id`` under ``projects_dir``.
 
@@ -176,15 +186,27 @@ def harvest_session_tokens(
     if not session_id:
         return dict(_UNAVAILABLE)
 
-    projects_dir = claude_projects_dir or _default_claude_projects_dir()
-    if not projects_dir.is_dir():
-        return dict(_UNAVAILABLE)
+    if claude_projects_dir is not None:
+        search_dirs = [claude_projects_dir]
+    else:
+        # Harness lanes (glm/deepseek) run under a fabric-owned CLAUDE_CONFIG_DIR, so
+        # their transcripts live under <VNX_DATA_DIR>/harness-config/*/projects.
+        search_dirs = [_default_claude_projects_dir(), *_harness_projects_dirs()]
 
-    try:
-        transcript_path = _find_transcript(session_id, projects_dir)
-    except OSError as exc:
-        logger.debug("token_harvest: transcript lookup failed for session_id=%s: %s", session_id, exc)
-        return dict(_UNAVAILABLE)
+    transcript_path = None
+    for projects_dir in search_dirs:
+        if not projects_dir.is_dir():
+            continue
+        try:
+            transcript_path = _find_transcript(session_id, projects_dir)
+        except OSError as exc:
+            logger.warning(
+                "token_harvest: transcript lookup failed for session_id=%s in %s: %s",
+                session_id, projects_dir, exc,
+            )
+            continue
+        if transcript_path is not None:
+            break
 
     if transcript_path is None:
         return dict(_UNAVAILABLE)

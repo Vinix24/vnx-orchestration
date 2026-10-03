@@ -166,6 +166,32 @@ runner fulfils them:
       branch name is a separate, larger change (registration happens at
       ``vnx dispatch`` time, before any PR exists to bind an identifier to)
       and is filed as an open item rather than forced into this sweep.
+  13. Fix-forward head race (2026-09-30). Two gaps let the runner book a
+      verdict about OLDER code onto an obligation for a fix-forward dispatch.
+      (a) The RESOLVED branch of :func:`_pre_execution_decision` returned
+      ``attempt_gate`` the moment the PR was OPEN, never asking whether the
+      obligation's OWN dispatch was still running. A fix-forward dispatch is
+      registered against an existing PR, so its obligation resolves to that
+      PR immediately — but until the dispatch pushes, the PR head is the
+      PREVIOUS round's code. The occupancy-lock probe
+      :func:`_dispatch_is_live` (OI-1532) existed but was consulted only when
+      the head branch was gone. It is now consulted FIRST in the RESOLVED
+      branch too: when the lock is positively held the obligation stays
+      pending under :data:`REASON_DISPATCH_STILL_RUNNING`, no gate runs, and
+      no pre-existing verdict about the stale head is booked. Liveness that
+      cannot be measured (no lock file) keeps today's behaviour — the gate
+      may run. (b) :func:`fulfill_obligation` read the PR head ONCE before
+      ``request_and_execute`` and judged the result against that pre-run
+      snapshot. A gate run takes minutes; a push landing mid-run left the
+      result's ``commit_sha`` equal to the stale pre-run head, so it read as
+      current and the obligation was booked although the head had moved. The
+      head is now re-resolved AFTER the gate ran and the result is judged
+      against that value: a provable mismatch stays pending (reason
+      ``stale_evidence_sha_mismatch``, naming both short shas), while an
+      unknown sha on either side keeps the existing "binding unverifiable"
+      handling and is never treated as a mismatch. A result on the current
+      head — including the takeover-successor path — still fulfils/fails
+      exactly as before.
 
 Scheduling: launchd ``com.vnx.gate-obligation-runner.plist`` (StartInterval
 900s); also safe to run manually at any time — fulfilment is idempotent
@@ -197,6 +223,7 @@ sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
 from gate_obligations import (  # noqa: E402
     NO_GATE_KEY,
+    REASON_DISPATCH_STILL_RUNNING,
     REASON_FAILED_BY_GATE_VERDICT,
     REASON_FAILED_BY_TAKEOVER,
     REASON_FULFILLED_BY_TAKEOVER,
@@ -229,6 +256,7 @@ from gate_status import (  # noqa: E402
     is_terminal as _gate_is_terminal,
 )
 from gate_executor import _classify_sha_binding  # noqa: E402
+from forge_project_target import project_checkout_path as _project_checkout_path
 
 _LOG = logging.getLogger("gate_obligation_runner")
 
@@ -734,39 +762,6 @@ def _git_remote_origin(project_root: Path) -> Optional[str]:
     if proc.returncode != 0 or not proc.stdout.strip():
         return None
     return proc.stdout.strip()
-
-
-def _project_checkout_path(project_id: str) -> Optional[Path]:
-    """Resolve the project's checkout path from the operator registry.
-
-    ``~/.vnx/projects.json`` (vnx_identity schema v2) maps ``project_id`` →
-    ``path``. This is the cwd-independent link from a central-install runner's
-    store (``~/.vnx-data/<project_id>/state``) back to the actual checkout whose
-    ``origin`` remote is a real GitHub URL. Returns None when the id is not
-    registered or the path is gone.
-    """
-    if not project_id:
-        return None
-    try:
-        registry_path = Path("~/.vnx/projects.json").expanduser()
-        registry = json.loads(registry_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    for entry in registry.get("projects", []) or []:
-        if not isinstance(entry, dict):
-            continue
-        if entry.get("project_id") != project_id:
-            continue
-        raw_path = entry.get("path")
-        if not raw_path:
-            continue
-        try:
-            candidate = Path(raw_path).expanduser()
-        except (OSError, ValueError):
-            continue
-        if candidate.is_dir():
-            return candidate
-    return None
 
 
 def _resolve_github_owner_repo(state_dir: Path) -> Optional[str]:
@@ -2013,6 +2008,13 @@ def _pre_execution_decision(
         the caller records WHY it stayed pending, not just that it did.
         OI-1587: DELIBERATELY unbounded, no attempts threshold — see the
         branch's own comment for the reasoning
+      - ``stay_pending_dispatch_live``  — fix-forward defect (2026-09-30): the
+        PR is RESOLVED and OPEN but the obligation's own dispatch is
+        positively live (occupancy lock held) — the current head is the
+        PREVIOUS round's code, so the gate is not run and nothing is booked
+        against that head. Stays pending under
+        :data:`REASON_DISPATCH_STILL_RUNNING`; like ``stay_pending_live`` it is
+        deliberately UNBOUNDED (kernel-released on holder exit)
       - ``stay_pending_unmeasured``    — OI-1532 third state: branch gone and
         liveness could not be measured — stays pending (never retired on
         ambiguous evidence), carried distinctly; OI-1587: bounded by the SAME
@@ -2186,6 +2188,38 @@ def _pre_execution_decision(
     # that alone never used to be checked against existing evidence or the
     # PR's live state — see the docstring measurement above.
     #
+    # Fix-forward defect (2026-09-30): an obligation whose OWN dispatch is
+    # positively live (its occupancy lock is held by a live process) must not
+    # be gated against the PR's CURRENT head, and no verdict about that head
+    # may be booked for it either. A fix-forward dispatch is registered
+    # against an existing PR, so this branch resolves to that PR immediately —
+    # but until the dispatch pushes, that head is the PREVIOUS round's code.
+    # Gating it wastes a full run and books the new obligation with a verdict
+    # about code that does not contain the dispatch's changes (a PASS for
+    # unreviewed code at the merge door). The occupancy lock is the one
+    # positive signal that the dispatch is still working and has not pushed
+    # yet, so it takes precedence over the evidence rescue too: an existing
+    # result that still matches the stale head is exactly as much a verdict
+    # about other code. The obligation stays pending until the holder exits,
+    # and is deliberately UNBOUNDED by attempts — the kernel releases the lock
+    # the instant the holder exits, so the state self-corrects without a timer
+    # (same reasoning as the AWAITING branch's ``stay_pending_live``).
+    #
+    # ``is True`` is load-bearing: ``False`` (the lock file exists but no
+    # holder) and ``None`` (no lock file, or the probe failed) both keep
+    # today's behaviour — the gate may run. Only positive proof of a live
+    # dispatch blocks.
+    if _dispatch_is_live(state_dir, dispatch_id) is True:
+        return {
+            "kind": "stay_pending_dispatch_live",
+            "detail": (
+                f"dispatch {dispatch_id} is still running (its occupancy lock "
+                f"is held by a live process) — PR #{resolution.pr_number} is "
+                "not gated and no verdict is booked against its current head "
+                "until the dispatch has pushed and exited"
+            ),
+        }
+
     # OI-1612: this is the ONE branch that can pass pr_number into the
     # lookup — the dispatch_id-only join could structurally never find
     # pre-existing evidence here (see GateResultIndex/_fulfilling_result):
@@ -2247,6 +2281,7 @@ _DRY_RUN_ACTION_LABELS: Dict[str, str] = {
     "sha_unverifiable": "would_stay_pending_sha_unverifiable",
     "retire": "would_retire",
     "stay_pending_live": "would_stay_pending_live",
+    "stay_pending_dispatch_live": "would_stay_pending_dispatch_live",
     "stay_pending_unmeasured": "would_stay_pending_unmeasured",
     "stay_pending": "would_stay_pending",
     "escalate_stay_pending": "would_escalate_stay_pending",
@@ -2327,6 +2362,11 @@ def _dry_run_outcome(
         )
         if decision.get("mismatch_detail"):
             outcome["detail"] = f"{outcome['detail']} (rejected mismatched evidence: {decision['mismatch_detail']})"
+    elif decision["kind"] == "stay_pending_dispatch_live":
+        outcome["detail"] = decision.get("detail") or (
+            "PR is open but the obligation's own dispatch is still running "
+            "(occupancy lock held) — not gated against the previous head"
+        )
     elif decision["kind"] == "stay_pending_unmeasured":
         outcome["detail"] = (
             "dispatch branch is gone on GitHub but liveness could not be measured "
@@ -2675,6 +2715,41 @@ def fulfill_obligation(
         )
         return outcome
 
+    if decision["kind"] == "stay_pending_dispatch_live":
+        # Fix-forward defect (2026-09-30): the PR is resolved and OPEN, but
+        # the obligation's OWN dispatch is positively live — a held occupancy
+        # lock. A fix-forward dispatch binds to the existing PR immediately,
+        # so the current head is the PREVIOUS round's code until it pushes.
+        # Gating that head would waste a full run and book the new obligation
+        # with a verdict about code that does not contain the dispatch's
+        # changes. Stays pending under its own reason, never terminal, and is
+        # deliberately UNBOUNDED by attempts (the kernel releases the lock the
+        # instant the holder exits, so the state self-corrects without a
+        # timer — same reasoning as the AWAITING branch's stay_pending_live).
+        update_obligation(
+            path,
+            status=STATUS_PENDING,
+            attempts=attempts,
+            last_attempt_at=now,
+            reason=REASON_DISPATCH_STILL_RUNNING,
+            reason_detail=(
+                f"dispatch {dispatch_id} is still running (its occupancy lock "
+                f"at {_occupancy_lock_path(state_dir, dispatch_id)} is held by "
+                f"a live process) and has not pushed yet, so PR "
+                f"#{resolution.pr_number}'s current head is the previous "
+                f"round's code. Not gating it and not booking any verdict "
+                f"against it — the obligation stays pending until the dispatch "
+                f"has pushed and exited, then it is evaluated against the new "
+                f"head."
+            ),
+        )
+        outcome["action"] = "pending"
+        outcome["detail"] = decision.get("detail") or (
+            "dispatch still running (occupancy lock held) — not gated against "
+            "the previous head"
+        )
+        return outcome
+
     if decision["kind"] == "stay_pending_unmeasured":
         # OI-1532 third state: the branch is gone but liveness could not be
         # measured (no occupancy lock file — the dispatch never created a
@@ -2814,12 +2889,15 @@ def fulfill_obligation(
     # decision["kind"] == "attempt_gate": a PR is resolved — actually run it.
     pr_number = resolution.pr_number
     owner_repo = resolution.owner_repo or _resolve_github_owner_repo(state_dir)
-    # OI-1571 tak 3: resolved ONCE for this attempt and reused for every sha
-    # check below (the declared gate's own record, the takeover walk, and
-    # the final terminal fallback) — never re-fetched per check, and never a
-    # second implementation of "what is the PR head" (gate_executor's own
-    # fresh-execution sha check uses the exact same source).
-    head_sha = _get_pr_head_sha_for_gate(pr_number)
+    # The PR head is captured BEFORE the run so a push that lands DURING the
+    # run can be detected, and then re-resolved AFTER it (below, once the
+    # result is on disk) so the result is booked against the head that exists
+    # at booking time — never the pre-run head. A gate run takes minutes; a
+    # result about the pre-run head reads as "current" against that stale
+    # snapshot even after a fix-forward push moved the head, which is exactly
+    # how the runner booked a verdict about older code onto a new obligation
+    # (defect fixed 2026-09-30).
+    head_sha_before_run = _get_pr_head_sha_for_gate(pr_number)
 
     branch = (
         str(record.get("branch") or "").strip()
@@ -2862,6 +2940,24 @@ def fulfill_obligation(
                 result_reason = str(result_data.get("reason") or "")
         except (OSError, json.JSONDecodeError) as exc:
             _LOG.debug("result status unreadable for pr-%s-%s: %s", pr_number, gate, exc)
+
+        # The head is resolved AGAIN here, after the gate ran, and every sha
+        # check below is judged against THIS value — the head at booking time.
+        # The run takes minutes; a fix-forward push can land mid-run, leaving
+        # the result's commit_sha equal to the STALE pre-run head. Judged
+        # against the pre-run snapshot that reads as "current" and the
+        # obligation is booked with a verdict about code that no longer exists
+        # (defect fixed 2026-09-30). ``_get_pr_head_sha_for_gate`` is the same
+        # source the pre-run capture used, never a second implementation.
+        head_sha = _get_pr_head_sha_for_gate(pr_number)
+        # The commit the result under decision actually records. An empty sha
+        # (record has no commit_sha, or no record at all) keeps the existing
+        # "binding unverifiable" handling: unknown is never a mismatch.
+        result_commit_sha = (
+            str(result_data.get("commit_sha") or "")
+            if isinstance(result_data, dict) else ""
+        )
+        result_sha_binding = _classify_sha_binding(head_sha, result_commit_sha)
 
         # D2e: the declared gate's own record can be a permanent dead end
         # (lane_exhausted, PR #1726 measured live) while the review-gate
@@ -3113,6 +3209,45 @@ def fulfill_obligation(
             outcome["detail"] = declared_detail
             return outcome
 
+        # Fix-forward defect (2026-09-30): the result is judged against the
+        # head re-resolved AFTER the run. A result whose recorded commit is
+        # provably not that head is about superseded code — it must never be
+        # booked, even when its evidence is too incomplete for
+        # _has_decided_evidence to classify it as a decided MISMATCH above
+        # (the two branches above cover complete-evidence records; this one
+        # covers the rest without ever weakening them). An UNKNOWN binding
+        # (empty sha on either side) is deliberately NOT a mismatch: it keeps
+        # the existing "binding unverifiable" handling, exactly as a complete
+        # record with a missing sha does above.
+        if result_sha_binding == "mismatch":
+            head_moved_detail = (
+                f"{gate} result for PR #{pr_number} records commit "
+                f"{result_commit_sha[:8] or '?'} but the PR head was "
+                f"re-resolved as {head_sha[:8] or '?'} after the gate ran (it "
+                f"was {head_sha_before_run[:8] or '?'} before) — the head "
+                "moved while the gate ran, so this verdict is about "
+                "superseded code and is never booked"
+            )
+            update_obligation(
+                path,
+                status=STATUS_PENDING,
+                pr_number=pr_number,
+                branch=branch,
+                attempts=attempts,
+                last_attempt_at=now,
+                request_path=str(manager._request_path(gate, pr_number)),
+                result_path=str(result_file),
+                reason="stale_evidence_sha_mismatch",
+                reason_detail=(
+                    f"{head_moved_detail} and no takeover successor produced "
+                    "current evidence either — staying pending, never booking "
+                    "a verdict about other code (defect fixed 2026-09-30)"
+                ),
+            )
+            outcome["action"] = "pending"
+            outcome["detail"] = head_moved_detail
+            return outcome
+
         # OI-1943: a review rejection is written as status ``completed`` plus
         # blocking findings, so the status string alone would book it fulfilled.
         # The shared predicate decides; the reason is never null for it.
@@ -3311,6 +3446,7 @@ def run(
             if outcome["action"] in (
                 "would_stay_pending",
                 "would_stay_pending_live",
+                "would_stay_pending_dispatch_live",
                 "would_stay_pending_unmeasured",
                 "would_stay_unresolvable",
                 "would_fulfill",

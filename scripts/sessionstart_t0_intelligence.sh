@@ -28,14 +28,16 @@ EOF
   exit 0
 fi
 
-# Extract current summary
-PENDING=$(jq -r '.queues.pending // 0' "$BRIEF")
-T1=$(jq -r '.terminals.T1.status // "?"' "$BRIEF")
-T2=$(jq -r '.terminals.T2.status // "?"' "$BRIEF")
-T3=$(jq -r '.terminals.T3.status // "?"' "$BRIEF")
-T1_GATE=$(jq -r '.tracks.A.current_gate // "?"' "$BRIEF")
-T2_GATE=$(jq -r '.tracks.B.current_gate // "?"' "$BRIEF")
-T3_GATE=$(jq -r '.tracks.C.current_gate // "?"' "$BRIEF")
+# Extract current summary. The `|| echo` guards keep a truncated/partially
+# written brief (a real race while state refresh rewrites it) from aborting the
+# hook now that errexit is live; the `// default` filters handle missing keys.
+PENDING=$(jq -r '.queues.pending // 0' "$BRIEF" || echo 0)
+T1=$(jq -r '.terminals.T1.status // "?"' "$BRIEF" || echo "?")
+T2=$(jq -r '.terminals.T2.status // "?"' "$BRIEF" || echo "?")
+T3=$(jq -r '.terminals.T3.status // "?"' "$BRIEF" || echo "?")
+T1_GATE=$(jq -r '.tracks.A.current_gate // "?"' "$BRIEF" || echo "?")
+T2_GATE=$(jq -r '.tracks.B.current_gate // "?"' "$BRIEF" || echo "?")
+T3_GATE=$(jq -r '.tracks.C.current_gate // "?"' "$BRIEF" || echo "?")
 
 current_summary="T1=${T1}@${T1_GATE}|T2=${T2}@${T2_GATE}|T3=${T3}@${T3_GATE}|Q=${PENDING}"
 

@@ -37,6 +37,15 @@ if _LIB_DIR not in sys.path:
 
 from provider_spawns.claude_spawn import spawn_claude  # noqa: E402
 
+from provider_spawns.harness_config_dir import (
+    HarnessConfigDirError,
+    bare_harness_cli_args,
+    harness_config_env,
+    require_harness_credential,
+)
+
+HARNESS_LANE = "glm-harness"
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_GLM_PROXY_URL = "http://localhost:4141"
@@ -74,8 +83,9 @@ def build_harness_env() -> Dict[str, str]:
     }
 
 
-def build_harness_cli_args() -> List[str]:
-    return ["--mcp-config", MCP_OFF_CONFIG, "--strict-mcp-config"]
+def build_harness_cli_args(cwd: Optional[Any] = None) -> List[str]:
+    """``--bare`` (no ancestor CLAUDE.md), the worktree's own CLAUDE.md, MCP fully off."""
+    return [*bare_harness_cli_args(cwd), "--mcp-config", MCP_OFF_CONFIG, "--strict-mcp-config"]
 
 
 def _proxy_reachable(url: str, timeout: float = 3.0) -> bool:
@@ -151,6 +161,17 @@ def spawn_glm_harness(
     # Mandatory harness env wins over caller extra_env so the redirect/auth cannot be overridden.
     merged_env: Dict[str, str] = dict(extra_env or {})
     merged_env.update(build_harness_env())
+    try:
+        # Applied last: replaces any inherited CLAUDE_CONFIG_DIR. Fail closed, no spawn.
+        merged_env.update(harness_config_env(HARNESS_LANE))
+        require_harness_credential(merged_env)
+    except HarnessConfigDirError as exc:
+        logger.error("spawn_glm_harness: %s; refusing to spawn.", exc)
+        return GLMHarnessSpawnResult(
+            returncode=1, completion={}, events_written=0, session_id=None,
+            timed_out=False, model=resolved_model,
+            error=f"harness config dir unsafe: {exc}",
+        )
 
     claude_result = spawn_claude(
         prompt=prompt,
@@ -161,7 +182,7 @@ def spawn_glm_harness(
         health_monitor=health_monitor,
         on_event=on_event,
         extra_env=merged_env,
-        extra_cli_args=build_harness_cli_args(),
+        extra_cli_args=build_harness_cli_args(cwd if cwd is not None else os.getcwd()),
         cwd=cwd,
         scrub_env_keys=_HARNESS_SCRUB_KEYS,
         **kwargs,
