@@ -6,6 +6,248 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 
 ## [Unreleased]
 
+## [1.7.1] - 2026-10-03
+
+A review verdict is now evidence in both directions. A rejection books as a
+rejection: `REVISE` counts as `fail`, an executed gate that does not PASS fails
+`request-and-execute`, and a `fail` without a blocking finding still blocks the
+merge. A verdict is bound to the PR head it was given on, so a result about an
+older head is neither booked nor accepted. A reviewer reads the whole diff
+instead of the first 50,000 characters: `kimi_gate`, `glm_gate` and
+`deepseek_gate` share one default cap of 800,000 characters. The second theme is
+per-project guarantees: `ledger-health` is one launchd job per project, and
+receipt lookups and the learning loop no longer mix receipts of projects that
+share a dispatch id.
+
+### What's new
+
+- Reviewers read the whole diff: one default cap of 800,000 chars for `kimi_gate`, `glm_gate` and `deepseek_gate` (#2034)
+- A rejection is a rejection: `REVISE` counts as fail and `deepseek_gate` defaults to `deepseek-flash` (#2025); an executed gate that does not PASS fails `request-and-execute` (#2013); the review-gate check requires a PASS by the shared rule (#2016)
+- A verdict belongs to one PR head: no verdict about an older head is booked (#2019), verified results are bound to the head and an unreadable result counts as missing (#2021)
+- `ledger-health` is one launchd job per project, guarded at install and at run (#2029)
+- Abandoned bundles and failed worker exits stay open outcomes for the T0 (#2018)
+- `project_id` scoping in `receipt_query` (#2024) and in the learning loop (#2023)
+- Event archives may be compressed: readers open `.ndjson.gz`, and a footprint probe reports archive, salvage and free disk (#2030)
+- Content boundary, part 1: the analyzer routes deep analysis by content and labels the session origin (#2032); glm and deepseek harness lanes get a clean `CLAUDE_CONFIG_DIR` (#2026); the dispatch role reaches the receipt (#2028)
+
+### Added
+
+- **Reviewer diff cap: one default of 800,000 characters (OI-1961 step 1; #2034).**
+  `gate_lane_contract.DEFAULT_MAX_DIFF_CHARS` is derived from named constants
+  (the 500,000 token target, a measured 3.8 characters per token and
+  `ARGV_SAFE_MAX_DIFF_CHARS`) and is the default for `kimi_gate`, `glm_gate`,
+  `deepseek_gate` and an unknown gate. A configured value above the ceiling is
+  clamped with a warning that names the key and OI-1961. The config registry
+  rows for the three `VNX_*_GATE_MAX_DIFF_CHARS` keys carry the same default.
+- **Review verdict vocabulary: `canonical_review_verdict` (OI-1938; #2025).**
+  One closed alias map turns `revise` into `fail` next to `VALID_VERDICTS`
+  (unchanged). `extract_verdict_block` accepts a verdict through it, the codex
+  register emit uses it, and `vnx gate` prints FAIL for a decided fail record.
+  `materialize_artifacts` books one `verdict_without_blocking_finding` entry
+  when a fail or blocked verdict carries no blocking-severity finding, so the
+  verdict value decides and the status stays `completed`.
+- **One install guard for launchd (OI-1942; #2029).**
+  `scripts/lib/launchd_install_guard.py` is the single refusal rule for
+  `vnx init` and `scripts/launchd/reload_plist.sh`. `com.vnx.ledger-health` gets a
+  per-project Label, per-project logs and RunAtLoad, and joins
+  `REQUIRED_PER_PROJECT_FAMILIES`. `vnx doctor` reads the job per project and
+  warns about an installed plist that still holds a `${...}` placeholder.
+- **Open outcomes for abandoned bundles and failed worker exits (OI-1934, OI-1935; #2018).**
+  `open_outcomes` gets the kind `abandoned_dispatch` for bundles in
+  `dispatches/abandoned/` (closed by a decision of the same project, deduped, an
+  unreadable bundle still listed). `rejected/<reason>/` becomes a live bucket:
+  a failed worker exit stays open until a T0 decision, with or without a
+  receipt. `DISPATCH_RULES` section 13 is updated.
+- **Compressed event archives and a footprint probe (OI-1944 part C1; #2030).**
+  `event_store` gets `resolve_archive_file`, `open_archive_text`,
+  `list_archive_files` and `find_archive_file`; agent-stream, `api_intelligence`,
+  `event_analyzer` and `retroactive_backfill` read `.ndjson.gz` through them. The
+  `vnx-data-footprint` probe (`scripts/lib/vnx_data_footprint_probe.py`)
+  reports archive, salvage and free-disk footprint per store. Retention is not
+  part of this release.
+- **Content classifier and session origin (fase 0 F2 part 1; #2032).**
+  `scripts/lib/content_class.py` classifies a session by boundary file, path
+  and text. The analyzer stores `origin_class`, `origin_project_id` and
+  `origin_source` per session and `improvement_suggestions.origin_class`.
+  Client, personal and unknown sessions, a summary that names a restricted path
+  and an unconfigured boundary get deep analysis on Claude only, capped at
+  `VNX_ANALYZER_RESTRICTED_CLAUDE_CAP` (default 20). Over the cap, or with
+  Claude unavailable, a session is `restricted_deferred` and gets the budget
+  first the next night. `pacompany-engine` keeps its DeepSeek exception through
+  `provider_exceptions`, never when the cwd or summary also hits a restricted
+  root. Restricted and legacy NULL-origin suggestions no longer bridge into
+  `antipatterns`, and `deep_analysis_model` names the lane.
+- **Clean `CLAUDE_CONFIG_DIR` for harness lanes (fase 0 F1; #2026).**
+  glm-harness, deepseek-harness, the deep analyzer and the deepseek classifier
+  run under `<VNX_DATA_DIR>/harness-config/<lane>` with
+  `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, so the operator's `CLAUDE.md`, imports,
+  memory and personal skills no longer reach the provider. The lane fails
+  closed. Transcript readers also search the lane directories.
+- **Four build rules in the project `CLAUDE.md` (fase 0; #2031).**
+  A `## Build rules` section outside the bootstrap block, so harness-lane, kimi
+  and codex workers see them. The bootstrap block is unchanged.
+
+### Changed
+
+- **A dispatch role reaches the receipt (fase 0 F3; #2028).**
+  `dispatch_identity.resolve_effective_role` puts the role of the spec between
+  the caller's role and `dispatch_metadata`, and `report_parser` and
+  `receipt_writer` stamp `role` through it. `_receipt_exists_for_dispatch` in
+  `envelope_govern_support` only lets a lane completion receipt suppress the
+  envelope receipt, decided on parsed JSON.
+- **Corrective receipts carry the real provider and terminal (OI-1898; #2020).**
+  The phantom guard and the PR enforcement receive provider and terminal from
+  the lanes (the door's env export as fallback), and enrichment no longer stamps
+  the sentinel provider.
+- **`deepseek_gate` defaults to `deepseek-flash` (OI-1939; #2025).**
+  `VNX_DEEPSEEK_GATE_MODEL` still overrides it. The plan gate and the build-lane
+  default are untouched.
+
+### Fixed
+
+- **A rejection is a rejection (OI-1921, OI-1892, OI-1938; #2013, #2016, #2025).**
+  `_execute_requested_gates` no longer reads the merge-policy `required` flag
+  for an executed gate: a decided non-pass fails the call (#2013).
+  `_check_review_gate_required` (direct and takeover) requires
+  `gate_status.is_pass` on top of contract hash and head binding, with a failure
+  message that names the reason (#2016). `REVISE` and a `fail` without a
+  blocking finding book as a rejection (#2025).
+- **A verdict is bound to the PR head (OI-1914, OI-1893, OI-1877; #2019, #2021).**
+  The gate-obligation runner re-resolves the PR head after the gate ran: a
+  provable mismatch stays pending (`stale_evidence_sha_mismatch`) and a PR with a
+  positively live dispatch stays pending (`dispatch_still_running`) (#2019).
+  `verify_report` binds each gate that is not chain-exhausted to the PR head
+  (`SHA_MISMATCH`, exit 1) and a result file that is not a JSON object is
+  `MISSING_ARTIFACT`, also for the chain-exhausted record (#2021).
+- **Receipt lookups scope by `project_id` (OI-1925; #2024).**
+  `by-pr`, `since`, `by-dispatch`, `by-track` and `reconcile-oi-pending` filter
+  through `receipt_outcome.is_foreign_project` (ADR-007). The functions take
+  `project_id`, the CLI gets `--project-id` and the JSON output names the
+  project. Reconcile no longer files or counts foreign warnings. The `digest`
+  default without a project resolver is OI-1928 and is not part of this fix.
+- **The learning loop scopes failure receipts by `project_id` (OI-1909; #2023).**
+  `extract_failure_patterns` no longer turns another project's failure receipts
+  (colliding dispatch ids) into patterns of this project. An unresolved project
+  fails closed for stamped lines. The foreign count shows in `receipt_stats`,
+  the corpus log and `receipts_skipped`.
+- **Pattern import merges on the natural key (OI-1899; #2017).**
+  `success_patterns` and `antipatterns` import goes through `pattern_upsert`
+  (counter is the max, exported id dropped, rows without `project_id` skipped
+  and counted) and the result carries `pattern_import {inserted, merged, skipped}`.
+  Other tables keep `INSERT OR REPLACE`.
+- **The subprocess success path writes a contract-valid report (OI-1933; #2015).**
+  `_handle_success` no longer writes the legacy stub. The close-out report has
+  Summary, Changes, Verification and Open Items plus Dispatch-ID, Model and
+  Provider, is written without `VNX_REPORTS_DIR`, and never overwrites a report
+  the worker wrote.
+- **All-red verification keeps the highest failure count (OI-1922; #2012).**
+  The all-red branch of `counted_run` returns the maximum failed count over the
+  red runs, with passed and method taken from the last run.
+- **The plan-gate probe reports an unreadable blocker table as degraded (OI-1840; #2014).**
+  `PlanGateEffectivenessProbe` records `oi_plan_source: unreadable` with a
+  reason, reports the three `oi_plan_*` counters as `None` instead of 0 and
+  returns `degraded`.
+- **`vnx_paths.sh` no longer turns off errexit in its callers (OI-1904; #2022).**
+  The option snapshot ran inside `$(...)`, where bash clears errexit, so the
+  trailing `eval` switched `set -e` off in every caller. Options are captured
+  with `[[ -o ... ]]` in the current shell and restored explicitly. The same fix
+  is in `process_lifecycle.sh` and `ops_process_control.sh`.
+- **Forge check-runs go to the project's repo, and no test mutates launchd (OI-1789, OI-1891; #2027).**
+  The target repo comes from the store the record was written to. An
+  unattributable store, an id mismatch, a central install or a non-GitHub origin
+  is refused without a POST. A `launchctl` shim in `tests/conftest.py` refuses
+  every mutating verb under the test runner.
+
+### Upgrade notes
+
+- **ledger-health (#2029).** After the update every project reinstalls its job
+  with `bash scripts/launchd/reload_plist.sh com.vnx.ledger-health <project-id>`,
+  then unloads and removes the legacy bare install
+  (`launchctl unload ~/Library/LaunchAgents/com.vnx.ledger-health.plist`, then
+  remove that file). Until then the bare job stops without writing a beacon,
+  because `scripts/ledger_health.py` rejects a `VNX_PROJECT_ID` that is not a
+  project id (the unsubstituted `${VNX_PROJECT_ID}` of the old plist). `vnx doctor`
+  fails on a missing per-project job and warns about a bare label and about an
+  installed plist that holds a placeholder. The install guard refuses a
+  worktree, a linked worktree and an unregistered clone.
+- **Review diff cap (#2034).** Defaults at v1.7.0: `kimi_gate` 400,000,
+  `glm_gate` 50,000, `deepseek_gate` 50,000, unknown gate 50,000. From 1.7.1 all
+  four are 800,000. A project value in `VNX_KIMI_GATE_MAX_DIFF_CHARS`,
+  `VNX_GLM_GATE_MAX_DIFF_CHARS` or `VNX_DEEPSEEK_GATE_MAX_DIFF_CHARS` still wins;
+  a value above 800,000 is clamped with a warning. A large diff on an API-billed
+  seat costs more per review than before.
+- **Review verdicts (#2025, #2013, #2016).** `REVISE` counts as fail. A `fail`
+  verdict without a blocking finding books as a rejection. A project that relied
+  on such a review passing now sees a blocked merge.
+- **`deepseek_gate` model (#2025).** The default is `deepseek-flash`;
+  `VNX_DEEPSEEK_GATE_MODEL` still overrides it.
+- **Schema (#2032).** `schemas/quality_intelligence.sql` gains the origin
+  columns marked v34 (`origin_class`, `origin_project_id`, `origin_source` on
+  `session_analytics`, `origin_class` on `improvement_suggestions`). This is the
+  quality intelligence database (`quality_intelligence.db`), not the runtime
+  coordination store. A fresh store gets the columns from the schema file. An
+  existing store gets them from `_migrate_v34` in `scripts/quality_db_init.py`
+  (additive, nullable TEXT, no default), which also adds
+  `session_analytics.deep_deferred_reason`, and ends on `user_version` 34
+  (`HIGHEST_QI_VERSION`). Rows written before v34 stay NULL and the readers treat
+  them as restricted. `scripts/lib/migrations/` is unchanged since v1.7.0, so
+  the runtime coordination store stays on `user_version` 33. The installed
+  conversation-analyzer plist must be re-rendered to pick up
+  `VNX_ANALYZER_RESTRICTED_CLAUDE_CAP`.
+
+### Known issues
+
+Known properties of 1.7.1:
+
+- The reading budget is 800,000 chars, not the decided 500,000 tokens. The
+  review prompt travels as one command-line argument and macOS allows about
+  1 MB for argv plus environment. Delivery by stdin or file follows (OI-1961).
+- A review that returns `fail` with only warning-level findings blocks the
+  merge. The first case was a function-size warning on #2029. A deterministic
+  function-size check in CI replaces the reviewer rule in a following release.
+- Receipt history sits at about 0 accept. Before D1b (#2000, merge `70574f5d`)
+  the receipt read the first, often red, run. Old receipts are not corrected
+  (operator decision 5, no epoch correction). From `70574f5d` the last green
+  run counts. Accept grows as writers use the red-run label.
+- Attribution (an outcome on a different id, `unlinked_gate`) follows as its own track.
+- 0015 column drift. On existing stores (vnx-dev, seocrawler-v2,
+  pacompany-engine) `project_id` is missing on 7 runtime tables:
+  `retry_budgets`, `retry_state`, `escalation_log`, `execution_targets`,
+  `inbound_inbox`, `recommendations` and `recommendation_outcomes`. A fresh
+  store has them. No code reads that column. The repair migration did not make
+  1.7.1.
+- Excluded tests, as in `scripts/ci/test_exclusions.txt` on this release (OI-1227,
+  since 15-08): `test_build_t0_state_exception_handling::TestRunsClean::test_build_t0_state_runs_clean_on_main`
+  (exit 1 is health degraded because beacons are absent on a fresh store);
+  `test_dispatcher_drain_lifecycle`: `test_dispatch_paths_written_when_provided`,
+  `test_classify_completion_no_dead_letter_on_failure`,
+  `test_transient_fail_then_success_only_completed`;
+  `test_wiring_completeness::test_provider_dispatch_auto_route_calls_smart_router_route`.
+  `tests/test_conversation_analyzer.py` is excluded too and now points to OI-1958
+  (#2033): two tests assert behaviour from before the inference guard of #805,
+  which emits no hint. Measured solo: 2 failed, 90 passed.
+
+Delivered from the "Follows in 1.7.1" list of 1.7.0:
+
+- OI-1933: the subprocess success report is contract-valid (#2015).
+- OI-1934 and OI-1935: abandoned bundles and failed worker exits stay open outcomes (#2018).
+- OI-1925: `receipt_query` lookups scope by `project_id` (#2024). The `digest`
+  default without a project resolver (OI-1928) is not part of it.
+
+Follows in 1.7.2:
+
+- What 1.7.0 does and does not guarantee. It guarantees that a dispatch
+  without an outcome never closes silently. It does NOT guarantee that every
+  dispatch has a report. The headless envelope lane, the default lane, has no
+  manifest in `active/` and no safety net if the orchestrator dies before
+  `_govern` (OI-1932, high).
+- `recovery.py:399` puts a dispatch in `dead_letter` after an exhausted retry
+  budget. That must become an `open_outcome` (OI-1931).
+- `ledger_health check_receipt_coverage` does not filter on `project_id`. That
+  is fail-open under ADR-007 and a blocker candidate (OI-1924).
+- `receipt_query` readers and the digest default run without a project
+  resolver (OI-1928).
+
 ## [1.7.0] - 2026-09-30
 
 Every dispatch now has exactly one computed outcome, and a dispatch without an
