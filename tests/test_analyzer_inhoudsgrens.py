@@ -686,3 +686,63 @@ def test_d3_replay_clears_the_marker_and_a_third_run_leaves_the_session_alone(wo
     spies3.claude.assert_not_called()
     spies3.deepseek.assert_not_called()
     assert getattr(stats3, "sessions_deep", None) == 0
+
+
+# --- E1-E3: fix-forward round 3 on PR #2032 ------------------------------------------------------
+
+def test_e1_empty_claude_output_on_restricted_sessions_is_a_failed_night(world):
+    p = world["projects"]
+    _write_session(p, "-client", "s-client", cwd=world["client"] / "acme")
+    _write_session(p, "-personal", "s-personal", cwd=world["personal"] / "health")
+    with Spies(claude=lambda prompt: LLMOutcome("empty")) as spies:
+        stats = _run(world)
+    assert len(spies.claude.call_args_list) == 2
+    assert stats.deep_attempts == 2
+    assert stats.deep_failures == 2
+    assert stats.deep_failure_reasons == {"empty": 2}
+    assert fail_closed_exit_code(stats) == 1
+    spies.deepseek.assert_not_called()
+    rows = _by_session(world["db"])
+    for sid in ("s-client", "s-personal"):
+        assert rows[sid]["deep_analysis_json"] is None
+        assert rows[sid]["deep_deferred_reason"] == "claude_empty"
+
+    _plant_other_tenant_copy(world, "s-client")
+    with Spies() as spies2:
+        stats2 = _run(world)
+    assert sorted(spies2.sessions(spies2.claude)) == ["s-client", "s-personal"]
+    assert stats2.deep_restricted_claude == 2
+    assert _mine(world, "s-client")["deep_analysis_json"] is not None
+    assert [r for r in _rows(world["db"])
+            if r["project_id"] == OTHER_TENANT and r["deep_analysis_json"]] == []
+
+
+def test_e2_replay_draws_from_the_same_deep_budget_as_the_main_loop(world, monkeypatch):
+    _named_fabric_session(world)
+    monkeypatch.setenv("VNX_ANALYZER_RESTRICTED_CLAUDE_CAP", "0")
+    with Spies():
+        _run(world)
+    assert _mine(world, "s-named")["deep_deferred_reason"] == "cap"
+
+    _write_session(world["projects"], "-other", "s-new", cwd=world["other"])
+    monkeypatch.setenv("VNX_ANALYZER_RESTRICTED_CLAUDE_CAP", "5")
+    with Spies() as spies:
+        _run(world, deep_budget=1)
+    total = len(spies.claude.call_args_list) + len(spies.deepseek.call_args_list)
+    assert total == 1
+    assert spies.sessions(spies.claude) == ["s-named"]
+    assert _mine(world, "s-new")["deep_analysis_json"] is None
+
+
+def test_e3_quota_error_before_the_call_is_still_a_deferral_not_a_failure(world):
+    _write_session(world["projects"], "-client", "s-client", cwd=world["client"] / "acme")
+
+    def quota(prompt):
+        raise RuntimeError("quota exceeded")
+
+    with Spies(claude=quota):
+        stats = _run(world)
+    assert stats.deep_restricted_deferred == 1
+    assert stats.deep_attempts == 0 and stats.deep_failures == 0
+    assert fail_closed_exit_code(stats) == 0
+    assert _by_session(world["db"])["s-client"]["deep_deferred_reason"] == "claude_unavailable"

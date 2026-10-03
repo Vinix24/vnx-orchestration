@@ -21,6 +21,27 @@ from conversation_analyzer import (  # noqa: E402 (path insert above)
 )
 
 
+def _write_heartbeat(args, stats, run_status, run_error):
+    try:
+        from health_beacon import HealthBeacon
+        details = {"max_sessions": args.max_sessions, "dry_run": args.dry_run}
+        if stats is not None:
+            details["deep_attempts"] = stats.deep_attempts
+            details["deep_failures"] = stats.deep_failures
+            details["sessions_by_origin"] = dict(stats.sessions_by_origin)
+            details["deep_restricted_claude"] = stats.deep_restricted_claude
+            details["deep_restricted_deferred"] = stats.deep_restricted_deferred
+        if run_error:
+            details["error"] = run_error
+        HealthBeacon(
+            Path(PATHS["VNX_DATA_DIR"]),
+            "conversation_analyzer",
+            expected_interval_seconds=86400,
+        ).heartbeat(status=run_status, details=details)
+    except (ImportError, OSError, RuntimeError) as exc:
+        log("WARNING", f"health_beacon failed: {exc}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="VNX Conversation Analyzer — Nightly Session Mining Pipeline")
@@ -81,24 +102,7 @@ def main():
             rc = 1
     finally:
         analyzer.close()
-        try:
-            from health_beacon import HealthBeacon
-            details = {"max_sessions": args.max_sessions, "dry_run": args.dry_run}
-            if stats is not None:
-                details["deep_attempts"] = stats.deep_attempts
-                details["deep_failures"] = stats.deep_failures
-                details["sessions_by_origin"] = dict(stats.sessions_by_origin)
-                details["deep_restricted_claude"] = stats.deep_restricted_claude
-                details["deep_restricted_deferred"] = stats.deep_restricted_deferred
-            if run_error:
-                details["error"] = run_error
-            HealthBeacon(
-                Path(PATHS["VNX_DATA_DIR"]),
-                "conversation_analyzer",
-                expected_interval_seconds=86400,
-            ).heartbeat(status=run_status, details=details)
-        except (ImportError, OSError, RuntimeError) as exc:
-            log("WARNING", f"health_beacon failed: {exc}")
+        _write_heartbeat(args, stats, run_status, run_error)
 
     return rc
 

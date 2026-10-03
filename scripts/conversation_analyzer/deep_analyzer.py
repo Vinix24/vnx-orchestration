@@ -307,9 +307,10 @@ Respond with valid JSON:
     def _analyze_restricted(self, prompt: str) -> Optional[dict]:
         """Deep analysis of restricted content: Claude only, capped, deferred instead of lost.
 
-        Never deepseek, glm, kimi or ollama. Over the cap, or with Claude unavailable (quota,
-        auth, timeout, missing CLI), the session is deferred: not analysed, not an attempt,
-        not a failure. Once Claude has failed this run the remaining restricted sessions are
+        Never deepseek, glm, kimi or ollama. Over the cap, or with Claude unavailable before a call
+        (quota, auth, timeout, missing CLI), the session is deferred: not analysed, not an
+        attempt, not a failure. A call that ran and returned empty output is an attempt and a
+        failure, and the session keeps its deferral marker so it is retried. Once Claude has failed this run the remaining restricted sessions are
         deferred without another call.
         """
         cap = restricted_claude_cap()
@@ -333,11 +334,18 @@ Respond with valid JSON:
             result = self._finish_result(outcome.text or "", "claude-max")
             if result is not None:
                 self.deep_restricted_claude += 1
-            else:
-                log("ERROR", "Deep analysis failed: unparseable")
-            return result
-        if outcome.status != "empty":
-            self._restricted_claude_down = True
+                return result
+            log("ERROR", "Deep analysis failed: unparseable")
+            return None
+        if outcome.status == "empty":
+            # Claude ran and answered nothing: an attempt and a failure, not an
+            # unavailable provider. The marker stays so the session is retried tomorrow.
+            self.deep_attempts += 1
+            self._record_failure("empty")
+            log("ERROR", "Deep analysis failed: empty")
+            self._defer_restricted("claude returned empty output", "claude_empty")
+            return None
+        self._restricted_claude_down = True
         self._defer_restricted(f"claude {outcome.status}")
         return None
 

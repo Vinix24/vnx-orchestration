@@ -353,9 +353,10 @@ class ConversationAnalyzer:
         session_rows: List[dict] = []
 
         # Restricted sessions that were deferred on an earlier night get the Claude budget
-        # first. Their rows are already stored, so known_ids never lets them back in.
+        # first. Their rows are already stored, so known_ids never lets them back in. They draw
+        # from the same deep budget as the sessions below.
         if not dry_run:
-            self._process_restricted_backlog(stats)
+            deep_remaining = self._process_restricted_backlog(stats, deep_remaining)
 
         if not sessions:
             log("INFO", "Nothing to analyze")
@@ -390,7 +391,7 @@ class ConversationAnalyzer:
         stats.deep_restricted_claude = self.deep.deep_restricted_claude
         stats.deep_restricted_deferred = self.deep.deep_restricted_deferred
 
-    def _process_restricted_backlog(self, stats: RunStats) -> None:
+    def _process_restricted_backlog(self, stats: RunStats, deep_remaining: int) -> int:
         """Spend the restricted Claude budget on stored sessions that still lack a deep result.
 
         Candidates are rows of this store (ADR-007: filtered on project_id) carrying a
@@ -398,12 +399,15 @@ class ConversationAnalyzer:
         is flagged for deep analysis. The marker is independent of the origin class: a fabric
         session routed to Claude by its summary text is replayed too. A legacy row has no
         marker, so no night silently backfills history.
+
+        Every Claude call made here decrements ``deep_remaining`` (the run's ``--deep-budget``);
+        the restricted Claude cap stays a separate, additional limit. Returns the budget left.
         """
         if getattr(self, "conn", None) is None or not self.deep.restricted_budget_left():
-            return
+            return deep_remaining
         projects_dir = _get_claude_projects_dir()
         if not projects_dir.exists():
-            return
+            return deep_remaining
         rows = self.conn.execute(
             "SELECT session_id FROM session_analytics "
             "WHERE project_id = ? AND deep_deferred_reason IS NOT NULL "
@@ -413,7 +417,7 @@ class ConversationAnalyzer:
         ).fetchall()
 
         for row in rows:
-            if not self.deep.restricted_budget_left():
+            if deep_remaining <= 0 or not self.deep.restricted_budget_left():
                 break
             matches = sorted(projects_dir.glob(f"*/{row['session_id']}.jsonl"))
             if not matches:
@@ -427,8 +431,10 @@ class ConversationAnalyzer:
                 origin = self._classify_origin(metrics)
                 log("ANALYZE", f"Deferred restricted session {metrics.session_id[:8]}...: "
                                f"deep analysing on Claude")
+                calls_before = self.deep.restricted_claude_calls
                 deep_result = self.deep.analyze_session(jsonl_path, metrics, flags,
                                                         origin=origin)
+                deep_remaining -= self.deep.restricted_claude_calls - calls_before
                 if not deep_result:
                     if self.deep.last_status == "restricted_deferred":
                         self._store_deferral(metrics.session_id, self.deep.last_defer_reason)
@@ -444,6 +450,7 @@ class ConversationAnalyzer:
                     self.conn.rollback()
                 except sqlite3.Error as rb_exc:
                     log("ERROR", f"  Rollback failed: {rb_exc}")
+        return deep_remaining
 
     def _store_deep_result(self, session_id: str, deep_result: dict) -> None:
         self.conn.execute(
