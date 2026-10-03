@@ -593,3 +593,96 @@ def test_plist_template_keeps_the_lane_adds_the_cap_and_drops_the_inert_data_dir
     assert env["VNX_ANALYZER_LLM"] == "deepseek-harness"
     assert env["VNX_ANALYZER_RESTRICTED_CLAUDE_CAP"] == "20"
     assert "VNX_DATA_DIR" not in env
+
+
+# --- D1-D3: a deferral outlives the origin class (fix-forward on PR #2032) ---------------------
+
+def _named_fabric_session(world):
+    named = f"please open {world['client']}/acme/notes.md and fix it"
+    _write_session(world["projects"], "-fabric", "s-named", cwd=world["fabric"],
+                   texts=("start", named))
+
+
+def _plant_other_tenant_copy(world, sid):
+    """ADR-007: the second tenant holds the same session id, deferred and unanalysed."""
+    row = dict(_by_session(world["db"])[sid])
+    row.pop("id")
+    row["project_id"] = OTHER_TENANT
+    conn = sqlite3.connect(world["db"])
+    conn.execute(f"INSERT INTO session_analytics ({', '.join(row)}) "
+                 f"VALUES ({', '.join('?' for _ in row)})", list(row.values()))
+    conn.commit()
+    conn.close()
+
+
+def _mine(world, sid):
+    return next(r for r in _rows(world["db"])
+                if r["project_id"] == TENANT and r["session_id"] == sid)
+
+
+def test_d1_fabric_session_deferred_by_its_summary_is_replayed_on_claude_only(world, monkeypatch):
+    _named_fabric_session(world)
+    monkeypatch.setenv("VNX_ANALYZER_RESTRICTED_CLAUDE_CAP", "0")
+    with Spies() as spies:
+        stats = _run(world)
+    assert getattr(stats, "deep_restricted_deferred", None) == 1
+    row = _mine(world, "s-named")
+    assert row["origin_class"] == "fabric"
+    assert row["deep_analysis_json"] is None
+    assert row.get("deep_deferred_reason") == "cap"
+    spies.claude.assert_not_called()
+    spies.deepseek.assert_not_called()
+
+    _plant_other_tenant_copy(world, "s-named")
+    monkeypatch.setenv("VNX_ANALYZER_RESTRICTED_CLAUDE_CAP", "1")
+    with Spies() as spies2:
+        stats2 = _run(world)
+    assert spies2.sessions(spies2.claude) == ["s-named"]
+    spies2.deepseek.assert_not_called()
+    spies2.ollama.assert_not_called()
+    assert getattr(stats2, "deep_restricted_claude", None) == 1
+    assert _mine(world, "s-named")["deep_analysis_json"] is not None
+    leaked = [r for r in _rows(world["db"])
+              if r["project_id"] == OTHER_TENANT and r["deep_analysis_json"]]
+    assert leaked == []
+
+
+def test_d2_claude_unavailable_defers_with_its_own_reason_and_is_picked_up_next_run(
+        world, monkeypatch):
+    _named_fabric_session(world)
+
+    def quota(prompt):
+        raise RuntimeError("quota exceeded")
+
+    with Spies(claude=quota) as spies:
+        stats = _run(world)
+    spies.deepseek.assert_not_called()
+    assert getattr(stats, "deep_restricted_deferred", None) == 1
+    row = _mine(world, "s-named")
+    assert row["deep_analysis_json"] is None
+    assert row.get("deep_deferred_reason") == "claude_unavailable"
+
+    with Spies() as spies2:
+        _run(world)
+    assert spies2.sessions(spies2.claude) == ["s-named"]
+    spies2.deepseek.assert_not_called()
+    assert _mine(world, "s-named")["deep_analysis_json"] is not None
+
+
+def test_d3_replay_clears_the_marker_and_a_third_run_leaves_the_session_alone(world, monkeypatch):
+    _named_fabric_session(world)
+    monkeypatch.setenv("VNX_ANALYZER_RESTRICTED_CLAUDE_CAP", "0")
+    with Spies():
+        _run(world)
+    monkeypatch.setenv("VNX_ANALYZER_RESTRICTED_CLAUDE_CAP", "5")
+    with Spies():
+        _run(world)
+    row = _mine(world, "s-named")
+    assert row["deep_analysis_json"] is not None
+    assert row.get("deep_deferred_reason") is None
+
+    with Spies() as spies3:
+        stats3 = _run(world)
+    spies3.claude.assert_not_called()
+    spies3.deepseek.assert_not_called()
+    assert getattr(stats3, "sessions_deep", None) == 0

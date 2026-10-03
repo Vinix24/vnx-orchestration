@@ -119,6 +119,9 @@ class DeepAnalyzer:
         # ``restricted_deferred``. The runner reads it to tell a deferred session
         # (stays eligible tomorrow) from a failed one.
         self.last_status = "failed"
+        # Why the last ``restricted_deferred`` happened: ``cap`` or ``claude_unavailable``.
+        # None for any other status. The runner stores it on the session row.
+        self.last_defer_reason: Optional[str] = None
 
     def reset_restricted_run(self) -> None:
         """Start a new night for the restricted Claude lane: budget, counters, availability."""
@@ -196,6 +199,7 @@ Respond with valid JSON:
                         metrics: SessionMetrics,
                         flags: SessionFlags,
                         origin: Optional[content_class.Origin] = None) -> Optional[dict]:
+        self.last_defer_reason = None
         summary = self._build_session_summary(jsonl_path, metrics, flags)
         prompt = f"{self.SYSTEM_PROMPT}\n\n## Session Summary\n\n{summary}"
 
@@ -293,9 +297,10 @@ Respond with valid JSON:
         self.last_status = "ok"
         return parsed
 
-    def _defer_restricted(self, reason: str) -> None:
+    def _defer_restricted(self, reason: str, kind: str = "claude_unavailable") -> None:
         self.deep_restricted_deferred += 1
         self.last_status = "restricted_deferred"
+        self.last_defer_reason = kind
         log("WARNING", f"Restricted session deferred to the next night ({reason}); "
                        f"no other provider is tried")
 
@@ -312,7 +317,7 @@ Respond with valid JSON:
             self._defer_restricted("claude unavailable this run")
             return None
         if self.restricted_claude_calls >= cap:
-            self._defer_restricted(f"cap of {cap} reached")
+            self._defer_restricted(f"cap of {cap} reached", "cap")
             return None
 
         self.restricted_claude_calls += 1

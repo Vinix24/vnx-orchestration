@@ -98,6 +98,7 @@ def _create_schema(conn: sqlite3.Connection):
             origin_class TEXT,
             origin_project_id TEXT,
             origin_source TEXT,
+            deep_deferred_reason TEXT,
             UNIQUE (project_id, session_id)
         );
         CREATE TABLE IF NOT EXISTS improvement_suggestions (

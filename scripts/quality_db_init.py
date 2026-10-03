@@ -1703,13 +1703,15 @@ def _migrate_v34(conn: sqlite3.Connection) -> None:
     (the ``.vnx-project-id`` or registry id of the cwd, NULL when there is none) and
     ``origin_source`` (``cwd`` or ``decoded_dirname``). ``improvement_suggestions.origin_class``
     lets the intelligence bridge keep client-derived suggestions out of ``antipatterns``.
+    ``deep_deferred_reason`` (``cap`` or ``claude_unavailable``) marks a restricted session whose
+    deep analysis was deferred, so the backlog replay finds it whatever its origin class.
 
     Purely additive: nullable TEXT, no default. A row written before v34 stays NULL, which the
     readers treat as restricted rather than guessing a class for it. The correction step for
     existing rows is a separate, operator-approved script.
     """
     sa_cols = {r[1] for r in conn.execute("PRAGMA table_info(session_analytics)").fetchall()}
-    for col in ("origin_class", "origin_project_id", "origin_source"):
+    for col in ("origin_class", "origin_project_id", "origin_source", "deep_deferred_reason"):
         if col not in sa_cols:
             conn.execute(f"ALTER TABLE session_analytics ADD COLUMN {col} TEXT")
             log('INFO', f"Migrated: added {col} column to session_analytics (v34)")

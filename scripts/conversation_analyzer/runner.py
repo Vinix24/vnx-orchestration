@@ -129,17 +129,20 @@ class ConversationAnalyzer:
 
         deep_result = None
         suggestions = []
+        deferred_reason = None
         if deep_allowed and self.deep.should_deep_analyze(metrics, flags):
             log("ANALYZE", "  Deep analyzing (flagged)...")
             deep_result = self.deep.analyze_session(jsonl_path, metrics, flags,
                                                     origin=origin)
             suggestions = self._tag_suggestions(deep_result, metrics, origin)
+            if deep_result is None and self.deep.last_status == "restricted_deferred":
+                deferred_reason = self.deep.last_defer_reason
 
         # Single transaction over both writes (ADR-007 atomicity):
         # _store_session first so a failing INSERT does not leave orphan
         # intelligence rows from bridge_session_to_intelligence.
         try:
-            self._store_session(metrics, flags, deep_result, origin)
+            self._store_session(metrics, flags, deep_result, origin, deferred_reason)
             self.bridge_session_to_intelligence(metrics, flags)
             self.conn.commit()
         except Exception:
@@ -200,7 +203,8 @@ class ConversationAnalyzer:
 
     def _store_session(self, metrics: SessionMetrics, flags: SessionFlags,
                        deep_result: Optional[dict],
-                       origin: Optional[content_class.Origin] = None):
+                       origin: Optional[content_class.Origin] = None,
+                       deferred_reason: Optional[str] = None):
         origin = origin or self._classify_origin(metrics)
         project_id = self._resolve_project_id()
         cur = self.conn.cursor()
@@ -218,9 +222,9 @@ class ConversationAnalyzer:
                 has_large_refactor, has_test_cycle, primary_activity,
                 deep_analysis_json, deep_analysis_model, deep_analysis_at,
                 file_size_bytes, analyzer_version, session_model, dispatch_id,
-                origin_class, origin_project_id, origin_source
+                origin_class, origin_project_id, origin_source, deep_deferred_reason
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             metrics.session_id, project_id, metrics.project_path, metrics.terminal,
             metrics.session_date,
@@ -243,6 +247,7 @@ class ConversationAnalyzer:
             metrics.session_model or "unknown",
             metrics.dispatch_id or None,
             origin.cls, origin.project_id, self._origin_source(metrics),
+            None if deep_result else deferred_reason,
         ))
 
     def _resolve_project_id(self) -> str:
@@ -388,24 +393,23 @@ class ConversationAnalyzer:
     def _process_restricted_backlog(self, stats: RunStats) -> None:
         """Spend the restricted Claude budget on stored sessions that still lack a deep result.
 
-        Candidates are rows of this store (ADR-007: filtered on project_id) with a restricted
-        origin class and no deep result, newest first, whose transcript still exists and is
-        flagged for deep analysis. A legacy row with a NULL origin is not a candidate: the
-        correction step labels it first, so no night silently backfills history.
+        Candidates are rows of this store (ADR-007: filtered on project_id) carrying a
+        deferral marker and no deep result, newest first, whose transcript still exists and
+        is flagged for deep analysis. The marker is independent of the origin class: a fabric
+        session routed to Claude by its summary text is replayed too. A legacy row has no
+        marker, so no night silently backfills history.
         """
         if getattr(self, "conn", None) is None or not self.deep.restricted_budget_left():
             return
-        boundary = content_class.load_boundary()
         projects_dir = _get_claude_projects_dir()
         if not projects_dir.exists():
             return
-        placeholders = ",".join("?" for _ in content_class.ANALYZER_RESTRICTED)
         rows = self.conn.execute(
             "SELECT session_id FROM session_analytics "
-            f"WHERE project_id = ? AND origin_class IN ({placeholders}) "
+            "WHERE project_id = ? AND deep_deferred_reason IS NOT NULL "
             "AND deep_analysis_json IS NULL "
             "ORDER BY session_date DESC, id DESC",
-            (self._resolve_project_id(), *sorted(content_class.ANALYZER_RESTRICTED)),
+            (self._resolve_project_id(),),
         ).fetchall()
 
         for row in rows:
@@ -421,13 +425,13 @@ class ConversationAnalyzer:
                 if not self.deep.should_deep_analyze(metrics, flags):
                     continue
                 origin = self._classify_origin(metrics)
-                if self.deep.route_for_origin(origin, boundary) != "restricted":
-                    continue
                 log("ANALYZE", f"Deferred restricted session {metrics.session_id[:8]}...: "
                                f"deep analysing on Claude")
                 deep_result = self.deep.analyze_session(jsonl_path, metrics, flags,
                                                         origin=origin)
                 if not deep_result:
+                    if self.deep.last_status == "restricted_deferred":
+                        self._store_deferral(metrics.session_id, self.deep.last_defer_reason)
                     continue
                 suggestions = self._tag_suggestions(deep_result, metrics, origin)
                 self._store_deep_result(metrics.session_id, deep_result)
@@ -444,9 +448,17 @@ class ConversationAnalyzer:
     def _store_deep_result(self, session_id: str, deep_result: dict) -> None:
         self.conn.execute(
             "UPDATE session_analytics SET deep_analysis_json = ?, deep_analysis_model = ?, "
-            "deep_analysis_at = ? WHERE project_id = ? AND session_id = ?",
+            "deep_analysis_at = ?, deep_deferred_reason = NULL WHERE project_id = ? AND session_id = ?",
             (json.dumps(deep_result), deep_result.get("_model", "unknown"),
              datetime.now().isoformat(), self._resolve_project_id(), session_id),
+        )
+        self.conn.commit()
+
+    def _store_deferral(self, session_id: str, reason: Optional[str]) -> None:
+        self.conn.execute(
+            "UPDATE session_analytics SET deep_deferred_reason = ? "
+            "WHERE project_id = ? AND session_id = ?",
+            (reason, self._resolve_project_id(), session_id),
         )
         self.conn.commit()
 
