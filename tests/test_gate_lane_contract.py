@@ -441,3 +441,8 @@ def test_model_defaults_exist_in_wave7_registry():
         "every MODEL_DEFAULTS model must be a key in wave7_models.yaml, or the "
         f"harness lane dispatches a name the registry does not know: {missing}"
     )
+
+
+def test_deepseek_gate_default_is_flash_41():
+    """OI-1939 (operator decision 2026-09-30): Flash 4.1 under its existing name."""
+    assert gate_lane_contract.MODEL_DEFAULTS["deepseek_gate"] == ("VNX_DEEPSEEK_GATE_MODEL", "deepseek-flash")
