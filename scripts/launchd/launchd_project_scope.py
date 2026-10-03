@@ -41,7 +41,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 _SCRIPTS_LIB = Path(__file__).resolve().parent.parent / "lib"
 if str(_SCRIPTS_LIB) not in sys.path:
@@ -99,58 +99,52 @@ def _read_template_label(plist_path: Path) -> Optional[str]:
     return label if isinstance(label, str) else None
 
 
-def check_template_contract(
-    templates_dir: Path,
-    families: Sequence[str] = REQUIRED_PER_PROJECT_FAMILIES,
-) -> Dict[str, Any]:
-    """Static contract check: no host, no launchctl, no environment — every
-    required family's template must exist under ``templates_dir`` and its
-    ``Label`` must contain the ``${VNX_PROJECT_ID}`` placeholder.
+def _check_family_template(
+    templates_dir: Path, family: str
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Return ``(violations, checked entry)`` for one required family's template."""
+    template_path = templates_dir / f"{family}.plist"
+    if not template_path.is_file():
+        violation = {
+            "family": family,
+            "kind": "template_missing",
+            "detail": f"no template at {template_path}",
+        }
+        return [violation], {"family": family, "template": str(template_path), "label": None}
+
+    label = _read_template_label(template_path)
+    entry = {"family": family, "template": str(template_path), "label": label}
+
+    if label is None:
+        violation = {
+            "family": family,
+            "kind": "template_unreadable",
+            "detail": f"could not read a Label out of {template_path}",
+        }
+        return [violation], entry
+
+    if _PLACEHOLDER not in label:
+        violation = {
+            "family": family,
+            "kind": "label_not_project_scoped",
+            "detail": (
+                f"{template_path.name} Label={label!r} does not contain "
+                f"{_PLACEHOLDER}; two projects installing this template "
+                "would resolve to the SAME launchd Label and collide "
+                "(OI-1509/OI-1510)"
+            ),
+        }
+        return [violation], entry
+    return [], entry
+
+
+def _scan_unlisted_templates(
+    templates_dir: Path, families: Sequence[str]
+) -> List[Dict[str, Any]]:
+    """Return violations for templates outside ``families`` and ``MACHINE_WIDE_TEMPLATES``
+    that use the placeholder without carrying it in their Label.
     """
-    templates_dir = Path(templates_dir)
     violations: List[Dict[str, Any]] = []
-    checked: List[Dict[str, Any]] = []
-
-    for family in families:
-        template_path = templates_dir / f"{family}.plist"
-        if not template_path.is_file():
-            violations.append(
-                {
-                    "family": family,
-                    "kind": "template_missing",
-                    "detail": f"no template at {template_path}",
-                }
-            )
-            checked.append({"family": family, "template": str(template_path), "label": None})
-            continue
-
-        label = _read_template_label(template_path)
-        checked.append({"family": family, "template": str(template_path), "label": label})
-
-        if label is None:
-            violations.append(
-                {
-                    "family": family,
-                    "kind": "template_unreadable",
-                    "detail": f"could not read a Label out of {template_path}",
-                }
-            )
-            continue
-
-        if _PLACEHOLDER not in label:
-            violations.append(
-                {
-                    "family": family,
-                    "kind": "label_not_project_scoped",
-                    "detail": (
-                        f"{template_path.name} Label={label!r} does not contain "
-                        f"{_PLACEHOLDER}; two projects installing this template "
-                        "would resolve to the SAME launchd Label and collide "
-                        "(OI-1509/OI-1510)"
-                    ),
-                }
-            )
-
     for template_path in sorted(templates_dir.glob("*.plist")):
         family = template_path.stem
         if family in families or family in MACHINE_WIDE_TEMPLATES:
@@ -183,6 +177,27 @@ def check_template_contract(
                     ),
                 }
             )
+    return violations
+
+
+def check_template_contract(
+    templates_dir: Path,
+    families: Sequence[str] = REQUIRED_PER_PROJECT_FAMILIES,
+) -> Dict[str, Any]:
+    """Static contract check: no host, no launchctl, no environment — every
+    required family's template must exist under ``templates_dir`` and its
+    ``Label`` must contain the ``${VNX_PROJECT_ID}`` placeholder.
+    """
+    templates_dir = Path(templates_dir)
+    violations: List[Dict[str, Any]] = []
+    checked: List[Dict[str, Any]] = []
+
+    for family in families:
+        family_violations, entry = _check_family_template(templates_dir, family)
+        violations.extend(family_violations)
+        checked.append(entry)
+
+    violations.extend(_scan_unlisted_templates(templates_dir, families))
 
     return {"ok": not violations, "violations": violations, "checked": checked}
 

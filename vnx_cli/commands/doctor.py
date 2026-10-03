@@ -821,6 +821,61 @@ def _ledger_health_job(data_root: Path, project_id: str) -> tuple[str, str]:
     return f"com.vnx.ledger-health.{pid}", f"/tmp/vnx-ledger-health-{pid}.err"
 
 
+def _ledger_stale_finding(beacon: dict, job_label: str, job_err: str) -> str:
+    """Return the stale-beacon finding text naming the beacon age, window, job and err log."""
+    age = beacon.get("age_seconds")
+    age_str = f"{round(age / 3600, 1)}h" if isinstance(age, (int, float)) else "?"
+    window = beacon.get("expected_interval_seconds")
+    window_str = f"{round(window / 3600, 1)}h" if isinstance(window, (int, float)) else "?"
+    return (
+        f"beacon is stale ({age_str} old, window {window_str}): job {job_label} "
+        f"is not running or failing, see {job_err}"
+    )
+
+
+def _ledger_check_findings(beacon: dict) -> list[str]:
+    """Return the findings from the beacon's receipt_coverage, open_outcomes and chain_status checks, in that order."""
+    findings: list[str] = []
+    details = beacon.get("details") or {}
+    if not isinstance(details, dict):
+        details = {}
+    checks = details.get("checks") or {}
+    if not isinstance(checks, dict):
+        checks = {}
+
+    coverage = checks.get("receipt_coverage") or {}
+    if coverage.get("status") == "finding":
+        findings.append(
+            f"{coverage.get('missing_receipt_count', '?')} dispatch(es) in the register "
+            "have no matching receipt"
+        )
+    elif coverage.get("status") == "SKIPPED_UNVERIFIED":
+        findings.append(f"receipt coverage unmeasurable: {coverage.get('reason', '?')}")
+
+    open_outcomes = checks.get("open_outcomes") or {}
+    if open_outcomes.get("status") == "finding":
+        ids = open_outcomes.get("stale_dispatch_ids") or []
+        first = ", ".join(str(i) for i in ids) if isinstance(ids, list) else "?"
+        findings.append(
+            f"{open_outcomes.get('stale_count', '?')} open outcome(s) older than "
+            f"{open_outcomes.get('stale_threshold_hours', '?')}h without a T0 decision "
+            f"(of {open_outcomes.get('open_count', '?')} open; first: {first or '?'}) "
+            "— receipt_query.py open-outcomes / decide"
+        )
+    elif open_outcomes.get("status") == "SKIPPED_UNVERIFIED":
+        findings.append(f"open outcomes unmeasurable: {open_outcomes.get('reason', '?')}")
+
+    chain = checks.get("chain_status") or {}
+    if chain.get("status") == "finding":
+        findings.append(
+            f"receipts ledger is {chain.get('chain_state', '?')} while VNX_CHAIN_RECEIPTS "
+            "is configured on"
+        )
+    elif chain.get("status") == "SKIPPED_UNVERIFIED":
+        findings.append(f"chain-status unmeasurable: {chain.get('reason', '?')}")
+    return findings
+
+
 def _check_ledger_health(data_root: Path, project_id: str = "") -> Check:
     """WARN from the ledger_health beacon: dispatches without a receipt, open
     outcomes waiting past the threshold for a T0 decision, or a ledger that is
@@ -867,52 +922,8 @@ def _check_ledger_health(data_root: Path, project_id: str = "") -> Check:
 
     findings: list[str] = []
     if health == "stale":
-        age = beacon.get("age_seconds")
-        age_str = f"{round(age / 3600, 1)}h" if isinstance(age, (int, float)) else "?"
-        window = beacon.get("expected_interval_seconds")
-        window_str = f"{round(window / 3600, 1)}h" if isinstance(window, (int, float)) else "?"
-        findings.append(
-            f"beacon is stale ({age_str} old, window {window_str}): job {job_label} "
-            f"is not running or failing, see {job_err}"
-        )
-
-    details = beacon.get("details") or {}
-    if not isinstance(details, dict):
-        details = {}
-    checks = details.get("checks") or {}
-    if not isinstance(checks, dict):
-        checks = {}
-
-    coverage = checks.get("receipt_coverage") or {}
-    if coverage.get("status") == "finding":
-        findings.append(
-            f"{coverage.get('missing_receipt_count', '?')} dispatch(es) in the register "
-            "have no matching receipt"
-        )
-    elif coverage.get("status") == "SKIPPED_UNVERIFIED":
-        findings.append(f"receipt coverage unmeasurable: {coverage.get('reason', '?')}")
-
-    open_outcomes = checks.get("open_outcomes") or {}
-    if open_outcomes.get("status") == "finding":
-        ids = open_outcomes.get("stale_dispatch_ids") or []
-        first = ", ".join(str(i) for i in ids) if isinstance(ids, list) else "?"
-        findings.append(
-            f"{open_outcomes.get('stale_count', '?')} open outcome(s) older than "
-            f"{open_outcomes.get('stale_threshold_hours', '?')}h without a T0 decision "
-            f"(of {open_outcomes.get('open_count', '?')} open; first: {first or '?'}) "
-            "— receipt_query.py open-outcomes / decide"
-        )
-    elif open_outcomes.get("status") == "SKIPPED_UNVERIFIED":
-        findings.append(f"open outcomes unmeasurable: {open_outcomes.get('reason', '?')}")
-
-    chain = checks.get("chain_status") or {}
-    if chain.get("status") == "finding":
-        findings.append(
-            f"receipts ledger is {chain.get('chain_state', '?')} while VNX_CHAIN_RECEIPTS "
-            "is configured on"
-        )
-    elif chain.get("status") == "SKIPPED_UNVERIFIED":
-        findings.append(f"chain-status unmeasurable: {chain.get('reason', '?')}")
+        findings.append(_ledger_stale_finding(beacon, job_label, job_err))
+    findings.extend(_ledger_check_findings(beacon))
 
     if health == "fail" and not findings:
         findings.append(
