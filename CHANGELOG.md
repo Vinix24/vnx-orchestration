@@ -245,8 +245,8 @@ Follows in 1.7.2:
   budget. That must become an `open_outcome` (OI-1931).
 - `ledger_health check_receipt_coverage` does not filter on `project_id`. That
   is fail-open under ADR-007 and a blocker candidate (OI-1924).
-- `receipt_query` readers and the digest default run without a project
-  resolver (OI-1928).
+- The `receipt_query` `digest` default runs without a project resolver
+  (OI-1928).
 
 ## [1.7.0] - 2026-09-30
 
