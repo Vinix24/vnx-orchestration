@@ -55,8 +55,9 @@ runner fulfils them:
      evidence fields on a FAILED run since #1669, and PR #1692's own
      glm_gate verdict on itself (a genuine ``fail`` with complete evidence)
      is the live record that proved it. The discriminator now asks a second
-     question before writing, using :func:`gate_status.is_pass` and
-     :data:`gate_status.FAIL_STATES` — never a new vocabulary of its own:
+     question before writing, using :func:`gate_status.decided_verdict`
+     (OI-1943: a pass, or a fail status, or a ``completed`` record carrying
+     blocking evidence) — never a new vocabulary of its own:
      a decided PASS still books ``fulfilled`` exactly as item 7 describes; a
      decided FAIL books the distinct, already-defined terminal ``failed``
      status instead (``reason=failed_by_existing_evidence``) — the
@@ -196,6 +197,7 @@ sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
 from gate_obligations import (  # noqa: E402
     NO_GATE_KEY,
+    REASON_FAILED_BY_GATE_VERDICT,
     REASON_FAILED_BY_TAKEOVER,
     REASON_FULFILLED_BY_TAKEOVER,
     REASON_GATE_PARKED,
@@ -217,12 +219,14 @@ from gate_obligations import (  # noqa: E402
     update_obligation,
 )
 from gate_status import (  # noqa: E402
-    FAIL_STATES as _GATE_RESULT_FAIL_STATES,
     PASS_STATES as _GATE_RESULT_PASS_STATES,
     UNAVAILABLE_STATES as _GATE_RESULT_UNAVAILABLE_STATES,
     canonical_status as _gate_canonical_status,
+    decided_verdict as _gate_decided_verdict,
     has_complete_evidence,
+    has_evidence_fields as _gate_has_evidence_fields,
     is_pass as _gate_is_pass,
+    is_terminal as _gate_is_terminal,
 )
 from gate_executor import _classify_sha_binding  # noqa: E402
 
@@ -1412,9 +1416,12 @@ def _has_decided_evidence(record: Dict[str, Any], head_sha: str) -> Tuple[str, s
     the report file the record points to still exists, plus (BETA3-C2) a
     DECIDED-verdict check: ``not_executable`` is never evidence regardless
     of what its evidence fields contain (the gate never ran), and neither is
-    any other status that is not a decided pass/fail (incomplete,
-    ``unavailable``, or unrecognised) — only :func:`gate_status.is_pass`
-    returning True, or a status in :data:`gate_status.FAIL_STATES`, counts.
+    any other record that is not a decided pass/fail (incomplete,
+    ``unavailable``, or unrecognised) — only :func:`gate_status.decided_verdict`
+    returning ``"pass"`` or ``"fail"`` counts (OI-1943: a review rejection,
+    ``completed`` plus blocking findings, is a ``"fail"``; its evidence bar is
+    terminal plus populated fields, without the coverage clause). The sha
+    binding below applies to a rejection exactly as to a pass.
     Any of these gaps returns :data:`_EVIDENCE_NOT_DECIDED`.
 
     OI-1571 tak 3: a record that clears every check above can still be
@@ -1449,15 +1456,22 @@ def _has_decided_evidence(record: Dict[str, Any], head_sha: str) -> Tuple[str, s
     :func:`fulfill_obligation` shares it too: a THIRD direct call site,
     not just the two above.
     """
-    if not has_complete_evidence(record):
+    verdict = _gate_decided_verdict(record)
+    if verdict == "fail":
+        # OI-1943: a rejection needs terminal status plus populated evidence
+        # fields. The coverage clause of has_complete_evidence does not apply:
+        # a rejection of the part the gate saw still stands.
+        evidence_complete = _gate_is_terminal(record) and _gate_has_evidence_fields(record)
+    else:
+        evidence_complete = has_complete_evidence(record)
+    if not evidence_complete:
         return _EVIDENCE_NOT_DECIDED, "incomplete evidence (contract_hash/report_path)"
     if not Path(str(record.get("report_path"))).exists():
         return _EVIDENCE_NOT_DECIDED, "report_path no longer exists on disk"
     status = _gate_canonical_status(record)
     if status == "not_executable":
         return _EVIDENCE_NOT_DECIDED, "not_executable is never evidence — the gate never ran"
-    passed, _reason = _gate_is_pass(record)
-    if not (passed or status in _GATE_RESULT_FAIL_STATES):
+    if not verdict:
         return _EVIDENCE_NOT_DECIDED, f"status {status!r} is not a decided pass/fail verdict"
 
     result_sha = str(record.get("commit_sha") or "")
@@ -3099,7 +3113,25 @@ def fulfill_obligation(
             outcome["detail"] = declared_detail
             return outcome
 
-        terminal = result_status if result_status in TERMINAL_STATUSES else STATUS_FULFILLED
+        # OI-1943: a review rejection is written as status ``completed`` plus
+        # blocking findings, so the status string alone would book it fulfilled.
+        # The shared predicate decides; the reason is never null for it.
+        rejected = (
+            result_data is not None
+            and result_status not in TERMINAL_STATUSES
+            and _gate_decided_verdict(result_data) == "fail"
+        )
+        if rejected:
+            terminal = STATUS_FAILED
+            booking_reason = (
+                "required_failure" if result.get("has_required_failure")
+                else REASON_FAILED_BY_GATE_VERDICT
+            )
+            booking_detail = _gate_is_pass(result_data)[1]
+        else:
+            terminal = result_status if result_status in TERMINAL_STATUSES else STATUS_FULFILLED
+            booking_reason = None if not result.get("has_required_failure") else "required_failure"
+            booking_detail = None if terminal == STATUS_FULFILLED else f"result status: {result_status}"
         fast_fulfillment_warning = None
         if terminal in (STATUS_FULFILLED, STATUS_FAILED):
             fast_fulfillment_warning = _flag_fast_fulfillment_if_evidence_predates_attempt(
@@ -3115,8 +3147,8 @@ def fulfill_obligation(
             resolved_at=utc_now_iso(),
             request_path=str(manager._request_path(gate, pr_number)),
             result_path=str(result_file),
-            reason=None if not result.get("has_required_failure") else "required_failure",
-            reason_detail=None if terminal == STATUS_FULFILLED else f"result status: {result_status}",
+            reason=booking_reason,
+            reason_detail=booking_detail,
             fulfilled_by=gate if terminal in (STATUS_FULFILLED, STATUS_FAILED) else None,
             takeover_gate=None,
             evidence_result_path=(

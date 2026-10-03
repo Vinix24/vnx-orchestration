@@ -121,6 +121,11 @@ REASON_NO_PR_BRANCH_GONE_UNMEASURED = "no_pr_branch_gone_unmeasured"
 REASON_FULFILLED_BY_TAKEOVER = "fulfilled_by_takeover_evidence"
 REASON_FAILED_BY_TAKEOVER = "failed_by_takeover_evidence"
 
+# OI-1943: the gate the obligation names ran and rejected the PR (a record with
+# status ``completed`` plus blocking findings). Written by the runner's
+# post-execution booking when no required_failure reason applies.
+REASON_FAILED_BY_GATE_VERDICT = "failed_by_gate_verdict"
+
 # OI-1721 (2026-09-12): a gate that could not run because it was PARKED
 # (provider binary missing / config flag disabled — the runner's
 # ``_TEMPORARY_NOT_EXECUTABLE_REASONS`` set) stays pending under a bounded

@@ -122,6 +122,7 @@ from gate_lane_contract import (  # C6 step 3: one source, three readers
     TIMEOUT_SECONDS,
     VALID_VERDICTS,
     VERDICT_CONTRACT,
+    canonical_review_verdict,
     max_diff_chars,
 )
 from gate_prompt import (  # OI-1442: the diff is data, not instruction
@@ -156,7 +157,7 @@ def _extract_verdict(text: str) -> dict:
             obj = json.loads(block)
         except (ValueError, TypeError):
             continue
-        if isinstance(obj, dict) and str(obj.get("verdict", "")).strip().lower() in _VALID_VERDICTS:
+        if isinstance(obj, dict) and canonical_review_verdict(obj.get("verdict")):
             return obj
     return {}
 
@@ -344,7 +345,7 @@ def _verdict_to_status(
     instead of the "kimi did respond" parse-miss residual below — the report
     having content is not proof kimi ran; the frontmatter's own exit_code is.
     """
-    v = (verdict.get("verdict") or "").strip().lower() if verdict else ""
+    v = canonical_review_verdict(verdict.get("verdict")) if verdict else ""
     findings = verdict.get("findings") or [] if verdict else []
     blocking = [
         f for f in findings
