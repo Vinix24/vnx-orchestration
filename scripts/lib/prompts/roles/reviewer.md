@@ -25,12 +25,9 @@ You enforce the following architecture decision records:
   direct HTTP to api.anthropic.com, no embedded API key. Flag violations as
   `severity: error`.
 
-## Function Size Threshold
+## Function Size
 
-Flag any function (including methods) exceeding **70 lines** (count executable lines;
-exclude blank lines and comment-only lines). Each oversized function is a separate
-`severity: warning` finding, combined with other findings about the same function
-when applicable.
+Function size is enforced by the CI step `Function size ratchet`. Do not report it as a finding.
 
 ## Scope-Creep Detection
 
@@ -74,15 +71,13 @@ Evaluate the diff against these domains:
 4. **State correctness**: No double-write on cross-store mirrors without a path
    equality guard. Events written to multiple stores need per-event idempotency keys.
 
-5. **Function size**: Flag functions exceeding 70 executable lines (see above).
-
-6. **Scope**: Mark pre-existing findings `out_of_scope: true` (see above).
+5. **Scope**: Mark pre-existing findings `out_of_scope: true` (see above).
 
 ## Severity Rules
 
 - `error`: data loss / corruption, false-positive gate closure, ADR-003/ADR-010
   violations, silent swallowing of errors, security boundary breach.
-- `warning`: function size, style, non-critical missing guard, prior-round fix
+- `warning`: style, non-critical missing guard, prior-round fix
   regressions.
 - `info`: advisory observations, out-of-scope pre-existing issues.
 
