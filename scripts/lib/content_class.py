@@ -30,7 +30,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, FrozenSet, Iterable, Optional, Tuple
+from typing import Dict, FrozenSet, Iterable, List, Optional, Tuple
 
 BOUNDARY_ENV = "VNX_CONTENT_BOUNDARY_FILE"
 BOUNDARY_VERSION = 1
@@ -194,25 +194,40 @@ def _marker_id(path: Path) -> Optional[str]:
         current = current.parent
 
 
-def _registry_id(path: Path, registry_path: Optional[os.PathLike]) -> Optional[str]:
-    """Project whose registered checkout contains ``path``. Tolerant like the gate runner's reader."""
+def _registry_ids(path: Path, registry_path: Optional[os.PathLike]) -> List[str]:
+    """Ids of the registered checkouts at the deepest level that contains ``path``.
+
+    Tolerant like the gate runner's reader. The deepest checkout decides (path components of
+    the realpath, never file order), so a nested project outranks a broad one listed before it.
+    Several entries on that same path are all returned, in file order. An entry without a usable
+    id contributes ``""``. No containing entry: an empty list.
+    """
     reg = Path(registry_path).expanduser() if registry_path else Path.home() / ".vnx" / "projects.json"
     try:
         data = json.loads(reg.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return None
+        return []
     if not isinstance(data, dict):
-        return None
+        return []
+    deepest = -1
+    ids: List[str] = []
     for entry in data.get("projects", []) or []:
         if not isinstance(entry, dict):
             continue
         raw = entry.get("path")
         if not isinstance(raw, str) or not raw.strip():
             continue
-        if _under(path, _real(raw)):
-            pid = entry.get("project_id")
-            return pid if isinstance(pid, str) and pid else ""
-    return None
+        root = _real(raw)
+        if not _under(path, root):
+            continue
+        depth = len(root.parts)
+        pid = entry.get("project_id")
+        pid = pid if isinstance(pid, str) and pid else ""
+        if depth > deepest:
+            deepest, ids = depth, [pid]
+        elif depth == deepest:
+            ids.append(pid)
+    return ids
 
 
 def classify_path(path: Optional[os.PathLike], boundary: Boundary,
@@ -233,11 +248,12 @@ def classify_path(path: Optional[os.PathLike], boundary: Boundary,
             return Origin(CLIENT, marker, SRC_CLIENT_PROJECT_ID)
         return Origin(FABRIC, marker, SRC_MARKER)
 
-    registered = _registry_id(resolved, registry_path)
-    if registered is not None:
-        if registered in boundary.client_project_ids:
-            return Origin(CLIENT, registered, SRC_CLIENT_PROJECT_ID)
-        return Origin(FABRIC, registered or None, SRC_REGISTRY)
+    registered = _registry_ids(resolved, registry_path)
+    if registered:
+        for pid in registered:
+            if pid in boundary.client_project_ids:
+                return Origin(CLIENT, pid, SRC_CLIENT_PROJECT_ID)
+        return Origin(FABRIC, registered[0] or None, SRC_REGISTRY)
 
     home = _home()
     if resolved != home and home in resolved.parents:

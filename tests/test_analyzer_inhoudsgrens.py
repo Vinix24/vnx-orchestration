@@ -945,3 +945,87 @@ def test_f9_a_line_that_is_not_json_is_skipped_and_does_not_restrict(world):
         _run(world)
     assert spies.sessions(spies.deepseek) == ["s-junk"]
     spies.claude.assert_not_called()
+
+
+# --- G6, G7: fix-forward round 5 on PR #2032 -------------------------------------------------------
+
+def test_g6_nested_client_project_in_the_registry_never_reaches_deepseek(world):
+    broad = world["home"] / "dev" / "broad"
+    nested = broad / "client-x"
+    nested.mkdir(parents=True)
+    registry = world["home"] / ".vnx" / "projects.json"
+    registry.parent.mkdir()
+    registry.write_text(json.dumps({"projects": [
+        {"project_id": "proj-broad", "path": str(broad)},
+        {"project_id": "client-x-id", "path": str(nested)},
+    ]}))
+    world["boundary_file"].write_text(json.dumps({
+        "version": 1,
+        "client_roots": [str(world["client"])],
+        "personal_roots": [str(world["personal"])],
+        "client_project_ids": ["client-x-id"],
+    }))
+    _write_session(world["projects"], "-nested", "s-nested", cwd=nested)
+    with Spies() as spies:
+        _run(world)
+    spies.deepseek.assert_not_called()
+    assert spies.sessions(spies.claude) == ["s-nested"]
+    assert _by_session(world["db"])["s-nested"].get("origin_class") == "client"
+
+
+def _two_analysed_and_a_malformed_row(world, bad_id):
+    p = world["projects"]
+    _write_session(p, "-fabric", "s-real-1", cwd=world["fabric"])
+    _write_session(p, "-fabric", "s-real-2", cwd=world["fabric"])
+    with Spies():
+        _run(world)
+    rows = _by_session(world["db"])
+    assert rows["s-real-1"]["deep_analysis_json"] and rows["s-real-2"]["deep_analysis_json"]
+    row = dict(rows["s-real-1"])
+    row.pop("id")
+    row.update(session_id=bad_id, deep_analysis_json=None, deep_analysis_model=None,
+               deep_analysis_at=None, deep_deferred_reason="cap")
+    conn = sqlite3.connect(world["db"])
+    conn.execute(f"INSERT INTO session_analytics ({', '.join(row)}) "
+                 f"VALUES ({', '.join('?' for _ in row)})", list(row.values()))
+    conn.commit()
+    conn.close()
+    return {sid: r["deep_analysis_json"] for sid, r in _by_session(world["db"]).items()}
+
+
+@pytest.mark.parametrize("bad_id", ["*", "../s-real-1", "s-real-?", "s-real-[12]", "a/b", ".", ".."])
+def test_g7_a_malformed_stored_session_id_is_skipped_not_globbed(world, capsys, bad_id):
+    before = _two_analysed_and_a_malformed_row(world, bad_id)
+    capsys.readouterr()
+    with Spies() as spies:
+        stats = _run(world)
+    out = capsys.readouterr().out
+    spies.claude.assert_not_called()
+    spies.deepseek.assert_not_called()
+    spies.ollama.assert_not_called()
+    assert {sid: r["deep_analysis_json"] for sid, r in _by_session(world["db"]).items()} == before
+    assert out.count("[WARNING]") == 1
+    assert getattr(stats, "errors", 0) == 0
+    assert getattr(stats, "deep_restricted_claude", None) == 0
+
+
+def test_g7_the_loop_continues_after_a_skipped_row_and_replays_a_good_one(world, monkeypatch):
+    _named_fabric_session(world)
+    monkeypatch.setenv("VNX_ANALYZER_RESTRICTED_CLAUDE_CAP", "0")
+    with Spies():
+        _run(world)
+    row = dict(_mine(world, "s-named"))
+    row.pop("id")
+    row["session_id"] = "*"
+    row["session_date"] = "2099-01-01"
+    conn = sqlite3.connect(world["db"])
+    conn.execute(f"INSERT INTO session_analytics ({', '.join(row)}) "
+                 f"VALUES ({', '.join('?' for _ in row)})", list(row.values()))
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv("VNX_ANALYZER_RESTRICTED_CLAUDE_CAP", "5")
+    with Spies() as spies:
+        _run(world)
+    assert spies.sessions(spies.claude) == ["s-named"]
+    assert _mine(world, "s-named")["deep_analysis_json"] is not None
+

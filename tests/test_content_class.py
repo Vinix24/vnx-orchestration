@@ -257,3 +257,80 @@ def test_exception_never_covers_glm_or_kimi(world):
     assert not cc.exception_applies(origin, "kimi", b)
     assert not cc.exception_applies(cc.Origin(cc.CLIENT, "pacompany-engine", cc.SRC_CLIENT_ROOT),
                                     "deepseek", b)
+
+
+# --- registry fallback: the most specific entry decides (fix-forward round 5 on PR #2032) ------
+
+def _registry(world, entries, client_ids=("client-x-id",)):
+    """Write a registry of (project_id, path) pairs and a boundary that knows the client ids."""
+    world["registry"].write_text(json.dumps({"projects": [
+        {"project_id": pid, "path": str(path)} for pid, path in entries]}))
+    world["boundary_file"].write_text(json.dumps({
+        "version": 1,
+        "client_roots": [str(world["client"])],
+        "personal_roots": [str(world["personal"])],
+        "client_project_ids": list(client_ids),
+    }))
+    world["boundary"] = cc.load_boundary(world["boundary_file"])
+
+
+def _nested(world):
+    broad = world["home"] / "dev" / "broad"
+    nested = broad / "client-x"
+    (nested / "src").mkdir(parents=True)
+    (broad / "other").mkdir()
+    return broad, nested
+
+
+def test_g1_nested_client_checkout_wins_over_a_broad_entry_listed_first(world):
+    broad, nested = _nested(world)
+    _registry(world, [("proj-broad", broad), ("client-x-id", nested)])
+    origin = _classify(world, nested / "src")
+    assert (origin.cls, origin.project_id, origin.source) == (
+        cc.CLIENT, "client-x-id", cc.SRC_CLIENT_PROJECT_ID)
+
+
+def test_g2_file_order_does_not_matter(world):
+    broad, nested = _nested(world)
+    _registry(world, [("client-x-id", nested), ("proj-broad", broad)])
+    origin = _classify(world, nested / "src")
+    assert (origin.cls, origin.project_id, origin.source) == (
+        cc.CLIENT, "client-x-id", cc.SRC_CLIENT_PROJECT_ID)
+
+
+def test_g3_path_below_the_broad_entry_only_stays_fabric(world):
+    broad, nested = _nested(world)
+    _registry(world, [("proj-broad", broad), ("client-x-id", nested)])
+    origin = _classify(world, broad / "other")
+    assert (origin.cls, origin.project_id, origin.source) == (
+        cc.FABRIC, "proj-broad", cc.SRC_REGISTRY)
+
+
+def test_g4_same_path_with_a_client_id_listed_second_is_client(world):
+    broad, _ = _nested(world)
+    _registry(world, [("proj-broad", broad), ("client-x-id", broad)])
+    origin = _classify(world, broad / "other")
+    assert (origin.cls, origin.project_id, origin.source) == (
+        cc.CLIENT, "client-x-id", cc.SRC_CLIENT_PROJECT_ID)
+
+
+def test_g4b_same_path_with_two_fabric_ids_gives_the_first(world):
+    broad, _ = _nested(world)
+    _registry(world, [("proj-first", broad), ("proj-second", broad)])
+    origin = _classify(world, broad / "other")
+    assert (origin.cls, origin.project_id, origin.source) == (
+        cc.FABRIC, "proj-first", cc.SRC_REGISTRY)
+
+
+@pytest.mark.parametrize("order", [(0, 1, 2), (2, 1, 0), (1, 2, 0), (1, 0, 2)])
+def test_g5_three_levels_the_deepest_containing_entry_decides(world, order):
+    dev = world["home"] / "dev"
+    broad = dev / "broad"
+    deep = broad / "client-x"
+    (deep / "src").mkdir(parents=True)
+    levels = [("proj-dev", dev), ("proj-broad", broad), ("client-x-id", deep)]
+    _registry(world, [levels[i] for i in order])
+    assert _classify(world, dev / "plain").project_id == "proj-dev"
+    assert _classify(world, broad).project_id == "proj-broad"
+    assert _classify(world, deep / "src").project_id == "client-x-id"
+

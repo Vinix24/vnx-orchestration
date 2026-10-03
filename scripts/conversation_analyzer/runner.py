@@ -1,6 +1,7 @@
 """Orchestrator: full 4-phase pipeline + storage."""
 
 import json
+import os
 import sqlite3
 import sys
 from datetime import datetime
@@ -419,10 +420,9 @@ class ConversationAnalyzer:
         for row in rows:
             if deep_remaining <= 0 or not self.deep.restricted_budget_left():
                 break
-            matches = sorted(projects_dir.glob(f"*/{row['session_id']}.jsonl"))
-            if not matches:
+            jsonl_path = self._stored_transcript(projects_dir, row["session_id"])
+            if jsonl_path is None:
                 continue
-            jsonl_path = matches[0]
             try:
                 metrics, messages = self.parser.parse_file(jsonl_path)
                 flags = self.detector.detect_patterns(metrics, messages)
@@ -451,6 +451,30 @@ class ConversationAnalyzer:
                 except sqlite3.Error as rb_exc:
                     log("ERROR", f"  Rollback failed: {rb_exc}")
         return deep_remaining
+
+    @staticmethod
+    def _stored_transcript(projects_dir: Path, session_id) -> Optional[Path]:
+        """Transcript of a stored session id, or None when the id is malformed or has no file.
+
+        A session id is a transcript file stem. One holding a separator, a glob metacharacter,
+        NUL or a dot-only name is skipped with a warning (first 8 characters only), and a match
+        is used only when its realpath lies below the realpath of the projects dir.
+        """
+        sid = session_id if isinstance(session_id, str) else ""
+        if (not sid or sid in (".", "..") or "\0" in sid
+                or any(ch in sid for ch in "/\\*?[]")):
+            log("WARNING", f"Deferred session {sid[:8]!r}: stored session id is not a plain "
+                           f"file stem, replay skipped")
+            return None
+        root = Path(os.path.realpath(projects_dir))
+        matches = sorted(projects_dir.glob(f"*/{sid}.jsonl"))
+        for match in matches:
+            if root in Path(os.path.realpath(match)).parents:
+                return match
+        if matches:
+            log("WARNING", f"Deferred session {sid[:8]!r}: transcript resolves outside the "
+                           f"projects dir, replay skipped")
+        return None
 
     def _store_deep_result(self, session_id: str, deep_result: dict) -> None:
         self.conn.execute(
