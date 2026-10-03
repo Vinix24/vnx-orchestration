@@ -60,16 +60,21 @@ def _ok(priority="high", improvement="make the thing better"):
 
 
 def _write_session(projects_dir, dirname, sid, cwd=None, texts=("hello there",),
-                   out_tokens=150_000):
+                   out_tokens=150_000, extra_records=()):
+    """A ``texts`` entry is a string, or a dict with ``content`` (str or list) and optional ``isMeta``."""
     folder = projects_dir / dirname
     folder.mkdir(parents=True, exist_ok=True)
     records = []
     for i, text in enumerate(texts):
-        rec = {"type": "user", "timestamp": f"2026-10-01T10:0{i}:00Z",
-               "message": {"role": "user", "content": text}}
+        extra = text if isinstance(text, dict) else {"content": text}
+        rec = {"type": "user", "timestamp": f"2026-10-01T10:{i % 60:02d}:00Z",
+               "message": {"role": "user", "content": extra["content"]}}
+        if extra.get("isMeta"):
+            rec["isMeta"] = True
         if cwd is not None:
             rec["cwd"] = str(cwd)
         records.append(rec)
+    records.extend(extra_records)
     records.append({
         "type": "assistant", "timestamp": "2026-10-01T10:30:00Z",
         "message": {"model": "claude-sonnet-5-5", "content": [],
@@ -746,3 +751,197 @@ def test_e3_quota_error_before_the_call_is_still_a_deferral_not_a_failure(world)
     assert stats.deep_attempts == 0 and stats.deep_failures == 0
     assert fail_closed_exit_code(stats) == 0
     assert _by_session(world["db"])["s-client"]["deep_deferred_reason"] == "claude_unavailable"
+
+
+# --- F1-F9: fix-forward round 4 on PR #2032, the boundary reads the transcript ---------------------
+
+def _many(n, at, line, filler="working on the next step"):
+    return [line if i == at else f"{filler} {i}" for i in range(1, n + 1)]
+
+
+def _assert_claude_only(world, spies, sid, stats):
+    spies.deepseek.assert_not_called()
+    assert spies.sessions(spies.claude) == [sid]
+    assert getattr(stats, "deep_restricted_claude", None) == 1
+    assert _by_session(world["db"])[sid].get("origin_class") == "fabric"
+
+
+def test_f1_client_path_in_a_middle_message_never_reaches_deepseek(world):
+    texts = _many(45, 25, f"open {world['client']}/acme/notes.md")
+    _write_session(world["projects"], "-fabric", "s-mid", cwd=world["fabric"], texts=texts)
+    with Spies() as spies:
+        stats = _run(world)
+    _assert_claude_only(world, spies, "s-mid", stats)
+
+
+def test_f1b_personal_path_in_a_middle_message_never_reaches_deepseek(world):
+    texts = _many(45, 25, f"open {world['personal']}/health/log.md")
+    _write_session(world["projects"], "-fabric", "s-mid", cwd=world["fabric"], texts=texts)
+    with Spies() as spies:
+        stats = _run(world)
+    _assert_claude_only(world, spies, "s-mid", stats)
+
+
+def test_f2_client_path_after_character_250_is_still_seen(world):
+    long_msg = "x" * 250 + f" {world['client']}/acme/notes.md"
+    _write_session(world["projects"], "-fabric", "s-long", cwd=world["fabric"],
+                   texts=("start", long_msg, "end"))
+    with Spies() as spies:
+        stats = _run(world)
+    _assert_claude_only(world, spies, "s-long", stats)
+
+
+def test_f3_path_straddling_character_200_is_seen_whole(world):
+    root = f"{world['client']}/"
+    msg = "y" * (200 - len(root) // 2) + root + "acme/notes.md"
+    assert len(msg) - len("acme/notes.md") - len(root) < 200 < len(msg) - len("notes.md")
+    _write_session(world["projects"], "-fabric", "s-cut", cwd=world["fabric"], texts=("start", msg))
+    with Spies() as spies:
+        stats = _run(world)
+    _assert_claude_only(world, spies, "s-cut", stats)
+
+
+def test_f4_client_path_only_in_a_tool_use_input(world):
+    tool = {"type": "assistant", "timestamp": "2026-10-01T10:20:00Z", "message": {
+        "content": [{"type": "tool_use", "id": "t1", "name": "Read",
+                     "input": {"file_path": f"{world['client']}/acme/notes.md"}}]}}
+    _write_session(world["projects"], "-fabric", "s-tool", cwd=world["fabric"],
+                   texts=("start", "go on"), extra_records=[tool])
+    with Spies() as spies:
+        stats = _run(world)
+    _assert_claude_only(world, spies, "s-tool", stats)
+
+
+def test_f5_canary_token_in_a_middle_message_never_reaches_deepseek(world):
+    token = "CANARYfixture" + "q7Zx9" * 4
+    token_file = world["tmp"] / "canary.token"
+    token_file.write_text(token + "\n")
+    world["boundary_file"].write_text(json.dumps({
+        "version": 1, "client_roots": [str(world["client"])],
+        "personal_roots": [str(world["personal"])], "client_project_ids": [],
+        "canary_token_file": str(token_file),
+        "canary_armed_in": [str(world["personal"] / "canary.md")],
+    }))
+    texts = _many(45, 25, f"note this {token} down")
+    _write_session(world["projects"], "-fabric", "s-canary", cwd=world["fabric"], texts=texts)
+    with Spies() as spies:
+        stats = _run(world)
+    _assert_claude_only(world, spies, "s-canary", stats)
+
+
+def _f6_sessions(world):
+    path = f"{world['client']}/acme/notes.md"
+    p = world["projects"]
+    # The injected text sits beyond character 200, so the summary sample cuts it off on any code.
+    pad = "z" * 250
+    reminder = {"content": f"fix the bug {pad} <system-reminder>instructions mention {path}"
+                           f"</system-reminder> please"}
+    _write_session(p, "-f6a", "s-reminder", cwd=world["fabric"], texts=("start", reminder))
+    meta = {"content": f"injected context {pad} {path}", "isMeta": True}
+    _write_session(p, "-f6b", "s-meta", cwd=world["fabric"], texts=("start", meta))
+    result = {"content": [{"type": "tool_result", "tool_use_id": "t1", "content": f"saw {path}"}]}
+    _write_session(p, "-f6c", "s-result", cwd=world["fabric"], texts=("start", result))
+    attach = {"type": "attachment", "timestamp": "2026-10-01T10:20:00Z",
+              "attachment": {"type": "file", "filename": path, "content": path}}
+    _write_session(p, "-f6d", "s-attach", cwd=world["fabric"], texts=("start", "go"),
+                   extra_records=[attach])
+
+
+def test_f6_injected_context_results_and_attachments_do_not_restrict(world):
+    _f6_sessions(world)
+    with Spies() as spies:
+        _run(world)
+    assert sorted(spies.sessions(spies.deepseek)) == [
+        "s-attach", "s-meta", "s-reminder", "s-result"]
+    spies.claude.assert_not_called()
+
+
+@pytest.mark.parametrize("dropped,fallen", [
+    ("system_reminder", "s-reminder"), ("meta", "s-meta"),
+    ("tool_result", "s-result"), ("attachment", "s-attach"),
+])
+def test_f6_each_exclusion_matters(world, monkeypatch, dropped, fallen):
+    """Mutation check: with one exclusion dropped the matching case lands on Claude."""
+    _f6_sessions(world)
+    if dropped == "system_reminder":
+        monkeypatch.setattr(DeepAnalyzer, "_SYSTEM_REMINDER", __import__("re").compile(r"(?!)"))
+    original = DeepAnalyzer._user_prompt_text.__func__
+
+    def user_text(cls, record):
+        if dropped == "meta":
+            record = {k: v for k, v in record.items() if k != "isMeta"}
+        if dropped == "tool_result":
+            content = (record.get("message") or {}).get("content")
+            if isinstance(content, list):
+                flat = " ".join(str(i.get("content", "")) for i in content if isinstance(i, dict))
+                record = {**record, "message": {"content": flat}}
+        return original(cls, record)
+
+    monkeypatch.setattr(DeepAnalyzer, "_user_prompt_text", classmethod(user_text))
+    if dropped == "attachment":
+        real = DeepAnalyzer._iter_transcript_lines
+
+        def with_attachment_as_user(path):
+            for line in real(path):
+                rec = json.loads(line)
+                if rec.get("type") == "attachment":
+                    rec = {"type": "user", "message": {"content": rec["attachment"]["content"]}}
+                yield json.dumps(rec)
+
+        monkeypatch.setattr(DeepAnalyzer, "_iter_transcript_lines",
+                            staticmethod(with_attachment_as_user))
+    with Spies() as spies:
+        _run(world)
+    assert spies.sessions(spies.claude) == [fallen]
+
+
+def test_f7_pacompany_exception_does_not_cover_a_transcript_path(world):
+    _grant_pacompany(world)
+    texts = _many(45, 25, f"look at {world['client']}/acme/spec.md")
+    _write_session(world["projects"], "-pa", "s-pa-mid", cwd=world["pa"], texts=texts)
+    with Spies() as spies:
+        _run(world)
+    spies.deepseek.assert_not_called()
+    assert spies.sessions(spies.claude) == ["s-pa-mid"]
+
+
+def test_f8_transcript_restricted_session_is_deferred_then_replayed_on_claude(world, monkeypatch):
+    texts = _many(45, 25, f"open {world['client']}/acme/notes.md")
+    _write_session(world["projects"], "-fabric", "s-mid", cwd=world["fabric"], texts=texts)
+    monkeypatch.setenv("VNX_ANALYZER_RESTRICTED_CLAUDE_CAP", "0")
+    with Spies() as spies:
+        stats = _run(world)
+    spies.deepseek.assert_not_called()
+    spies.claude.assert_not_called()
+    assert getattr(stats, "deep_restricted_deferred", None) == 1
+    assert _mine(world, "s-mid").get("deep_deferred_reason") == "cap"
+
+    monkeypatch.delenv("VNX_ANALYZER_RESTRICTED_CLAUDE_CAP")
+    with Spies() as spies2:
+        _run(world)
+    spies2.deepseek.assert_not_called()
+    assert spies2.sessions(spies2.claude) == ["s-mid"]
+    assert _mine(world, "s-mid")["deep_analysis_json"] is not None
+
+
+def test_f9_unreadable_transcript_at_routing_time_is_restricted(world, monkeypatch):
+    _write_session(world["projects"], "-fabric", "s-plain", cwd=world["fabric"])
+
+    def unreadable(path):
+        raise PermissionError("no access")
+        yield
+
+    monkeypatch.setattr(DeepAnalyzer, "_iter_transcript_lines", staticmethod(unreadable))
+    with Spies() as spies:
+        _run(world)
+    spies.deepseek.assert_not_called()
+    assert spies.sessions(spies.claude) == ["s-plain"]
+
+
+def test_f9_a_line_that_is_not_json_is_skipped_and_does_not_restrict(world):
+    path = _write_session(world["projects"], "-fabric", "s-junk", cwd=world["fabric"])
+    path.write_text("not json at all\n" + path.read_text())
+    with Spies() as spies:
+        _run(world)
+    assert spies.sessions(spies.deepseek) == ["s-junk"]
+    spies.claude.assert_not_called()

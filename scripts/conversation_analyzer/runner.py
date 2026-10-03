@@ -397,7 +397,7 @@ class ConversationAnalyzer:
         Candidates are rows of this store (ADR-007: filtered on project_id) carrying a
         deferral marker and no deep result, newest first, whose transcript still exists and
         is flagged for deep analysis. The marker is independent of the origin class: a fabric
-        session routed to Claude by its summary text is replayed too. A legacy row has no
+        session routed to Claude by its transcript or summary text is replayed too. A legacy row has no
         marker, so no night silently backfills history.
 
         Every Claude call made here decrements ``deep_remaining`` (the run's ``--deep-budget``);

@@ -179,7 +179,7 @@ Respond with valid JSON:
     @staticmethod
     def route_for_origin(origin: Optional[content_class.Origin],
                          boundary: content_class.Boundary) -> str:
-        """``restricted`` or ``open`` from the session origin alone (the summary is checked later).
+        """``restricted`` or ``open`` from the session origin alone (transcript and summary are checked later).
 
         A restricted session goes to Claude only. The one way out is a project exception: a
         client session whose only restricted signal is a project id that the boundary grants
@@ -205,6 +205,7 @@ Respond with valid JSON:
 
         boundary = content_class.load_boundary()
         restricted = (self.route_for_origin(origin, boundary) == "restricted"
+                      or self._transcript_is_restricted(jsonl_path, boundary)
                       or content_class.classify_text(summary, boundary) is not None)
         if restricted:
             return self._analyze_restricted(prompt)
@@ -403,6 +404,70 @@ Respond with valid JSON:
                            f"deep analysis will be skipped for this run")
             cls._ollama_probed = False
             return False
+
+    _SYSTEM_REMINDER = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
+
+    @staticmethod
+    def _iter_transcript_lines(jsonl_path: Path):
+        with open(jsonl_path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                yield line
+
+    @classmethod
+    def _user_prompt_text(cls, record: dict) -> str:
+        """What the operator typed: no injected meta records, no system-reminder blocks, no tool results."""
+        if record.get("isMeta"):
+            return ""
+        content = (record.get("message") or {}).get("content", "")
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict) and item.get("type", "text") == "text":
+                    parts.append(item.get("text") or "")
+            content = " ".join(parts)
+        if not isinstance(content, str):
+            return ""
+        return cls._SYSTEM_REMINDER.sub("", content)
+
+    def _transcript_is_restricted(self, jsonl_path: Path,
+                                  boundary: content_class.Boundary) -> bool:
+        """True when the transcript names a restricted path or holds the canary.
+
+        Signal: the full text of every user prompt (minus ``isMeta`` records and
+        ``<system-reminder>`` blocks) and the JSON input of every assistant ``tool_use``.
+        ``tool_result`` items, attachments and assistant text are not classified. Scans line
+        by line and stops at the first hit. A line that is not JSON is skipped; a transcript
+        that cannot be read fails closed.
+        """
+        try:
+            for line in self._iter_transcript_lines(jsonl_path):
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                kind = record.get("type")
+                if kind == "user":
+                    texts = [self._user_prompt_text(record)]
+                elif kind == "assistant":
+                    content = (record.get("message") or {}).get("content")
+                    texts = [
+                        json.dumps(item.get("input"), ensure_ascii=False)
+                        for item in (content if isinstance(content, list) else [])
+                        if isinstance(item, dict) and item.get("type") == "tool_use"
+                    ]
+                else:
+                    continue
+                for text in texts:
+                    if content_class.classify_text(text, boundary) is not None:
+                        return True
+        except (OSError, ValueError):
+            log("WARNING", "Transcript unreadable at routing time; session treated as restricted")
+            return True
+        return False
 
     def _build_session_summary(self, jsonl_path: Path,
                                metrics: SessionMetrics,
