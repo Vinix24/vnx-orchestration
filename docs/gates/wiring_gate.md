@@ -86,7 +86,3 @@ result: WiringGateResult = check_pr_wiring(pr_number=567)
   "summary": "1 unwired symbol(s): orphan_func"
 }
 ```
-
-## Related CI check: function size ratchet
-
-Function size is a count, so CI decides it and the reviewer does not. The step `Function size ratchet` in the required job `Lint Patterns (silent-except + atomic-write)` runs `scripts/ci/check_function_size_ratchet.py` against the merge base and fails on two kinds: `crossed` (a function over 70 executable lines that is new or had 70 or fewer at base) and `grew` (a function already over 70 that got longer). A head file that does not parse is `unparseable`. Existing oversized functions block nothing as long as they do not grow.
