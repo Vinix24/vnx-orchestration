@@ -306,6 +306,17 @@ def test_p1_second_project_does_not_leak(tmp_path, monkeypatch):
     assert json.loads((beta / "health" / "vnx-data-footprint.json").read_text())["status"] == "ok"
 
 
+def test_p1_store_without_archive_or_salvage_is_unknown_and_writes_nothing(tmp_path, monkeypatch):
+    alpha, beta = tmp_path / "alpha", tmp_path / "beta"
+    alpha.mkdir()
+    _plain_archive(beta, "same-id.ndjson", age_days=1)
+    _disk(monkeypatch, 0.04)
+
+    assert _aggregate(alpha)["vnx-data-footprint"]["status"] == "unknown"
+    assert not (alpha / "health").exists()
+    assert _aggregate(beta)["vnx-data-footprint"]["status"] == "produces_crap"
+
+
 def test_p2_free_disk_thresholds(tmp_path, monkeypatch):
     store = tmp_path / "alpha"
     gz = store / "events" / "archive" / "T1" / "old.ndjson.gz"

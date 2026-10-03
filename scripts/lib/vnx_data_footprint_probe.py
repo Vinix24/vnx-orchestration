@@ -9,6 +9,9 @@ Classification:
 - ``produces_crap``: free disk under 5% or the archive over 8 GiB.
 - ``degraded``: plain archive bytes older than N+2 days above 0 (retention is not
   running), the archive over 3 GiB, salvage over 1 GiB, or free disk under 15%.
+- ``unknown`` when the store has neither ``events/archive`` nor ``salvage``: there
+  is nothing to measure yet, and (like the other registered probes) an unknown
+  probe writes no beacon.
 - ``ok`` otherwise.
 
 N is ``VNX_EVENTS_ARCHIVE_COMPRESS_DAYS`` (default 14). Read-only: this probe
@@ -108,6 +111,8 @@ class VnxDataFootprintProbe(EffectivenessProbe):
         total, free = _disk_usage(self._data_dir if self._data_dir.exists() else self._data_dir.parent)
         return {
             "data_dir": str(self._data_dir),
+            "has_footprint": (self._data_dir / "events" / "archive").is_dir()
+            or (self._data_dir / "salvage").is_dir(),
             "compress_days": window_days,
             "archive_bytes": archive_bytes,
             "plain_archive_bytes_older_than_window": plain_old_bytes,
@@ -120,6 +125,8 @@ class VnxDataFootprintProbe(EffectivenessProbe):
         }
 
     def signal(self, raw: Dict[str, Any]) -> str:
+        if not raw["has_footprint"]:
+            return "no events/archive or salvage in this store yet"
         return (
             f"archive {raw['archive_bytes'] / GIB:.2f} GiB "
             f"({raw['plain_archive_files_older_than_window']} plain files past "
@@ -129,6 +136,8 @@ class VnxDataFootprintProbe(EffectivenessProbe):
         )
 
     def health(self, raw: Dict[str, Any]) -> str:
+        if not raw["has_footprint"]:
+            return "unknown"
         if raw["disk_free_fraction"] < FREE_CRAP_FRACTION or raw["archive_bytes"] > ARCHIVE_CRAP_BYTES:
             return "produces_crap"
         if (
