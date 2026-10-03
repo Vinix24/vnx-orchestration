@@ -184,10 +184,15 @@ class TestDiscoverLaunchdJobs:
         TestResolveLaunchdLabel and TestMeasureLaunchdLivenessProjectScoped
         below for the behavior this was actually supposed to protect).
         com.vnx.receipt-processor.plist is new (same golf, same per-project
-        pattern) -- the >= 7 floor still holds with it counted in."""
+        pattern) -- the >= 7 floor still holds with it counted in.
+
+        OI-1942: ledger-health joined the per-project templates, so its
+        register label is ``com.vnx.ledger-health.<project_id>``; the bare
+        family name can never match the installed job in `launchctl list`."""
         labels = bts._discover_launchd_jobs(project_id="vnx-dev")
         assert "com.vnx.producer-freshness-monitor" in labels
-        assert "com.vnx.ledger-health" in labels
+        assert "com.vnx.ledger-health.vnx-dev" in labels
+        assert "com.vnx.ledger-health" not in labels
         assert "com.vnx.gate-obligation-runner.vnx-dev" in labels
         assert "com.vnx.receipt-processor.vnx-dev" in labels
         assert len(labels) >= 7
@@ -197,6 +202,7 @@ class TestDiscoverLaunchdJobs:
         # contract, not a silently-wrong default.
         unresolved = bts._discover_launchd_jobs()
         assert "com.vnx.gate-obligation-runner.${VNX_PROJECT_ID}" in unresolved
+        assert "com.vnx.ledger-health.${VNX_PROJECT_ID}" in unresolved
 
 
 class TestResolveLaunchdLabel:
