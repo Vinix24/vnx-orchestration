@@ -116,11 +116,11 @@ def current_contract_hash(gate: str, pr_number: int) -> str:
     (OI-1874: ``gate_lane_contract.max_diff_chars``, keyed by ``gate`` — never
     a fixed constant) — instead of importing the standalone gate module.
     Verified against PR #1691, whose recorded hash ``dd5ac45f7e84535e`` this
-    reproduces exactly. Historical ``kimi_gate`` records over 50000 chars were
-    hashed under the old shared cap (pre-OI-1874); reanchoring one of those
-    recomputes the hash under kimi_gate's current 400000-char cap instead, so
-    a diff between 50000 and 400000 chars now hashes byte-identically to how
-    it was originally reviewed rather than to a truncated version of itself.
+    reproduces exactly. Records of a diff that a former, lower cap cut (50000
+    for every gate before OI-1874, 400000 for ``kimi_gate`` before the shared
+    800000 default of 2026-10-03) were hashed over the cut prompt; the hash is
+    recomputed under the gate's current cap, so such a record no longer
+    reproduces and reanchoring it is refused rather than relocated.
     """
     if gate not in DIFF_DERIVED_HASH_GATES:
         raise ValueError(f"{gate} has no diff-derived contract hash")

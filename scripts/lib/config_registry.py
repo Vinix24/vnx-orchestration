@@ -348,12 +348,11 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         subsystem="t0-context-rotation", status="ACTIVATE", cockpit_canonical=True),
 
     # OI-1874: per-gate diff-char cap for the harness-lane review gates, read at
-    # runtime by gate_lane_contract.max_diff_chars(). One fixed cap shared by all
-    # three (MAX_DIFF_CHARS=50000, consolidated in #1846) was never chosen per
-    # model -- kimi-k3 carries a 1M-token context (wave7_models.yaml) and runs on
-    # the kimi CLI OAuth subscription, so a much larger cap costs nothing there;
-    # glm_gate (OpenRouter) and deepseek_gate (deepseek-harness) bill per token as
-    # API-credit fallback seats and stay at the original conservative default.
+    # runtime by gate_lane_contract.max_diff_chars(). Since the operator decision
+    # of 2026-10-03 (every reviewer may read up to 500,000 tokens of diff) all
+    # three share ONE default, gate_lane_contract.DEFAULT_MAX_DIFF_CHARS (800000):
+    # the reading budget, bounded by the argv ceiling of the delivery route
+    # (OI-1961). Each gate keeps its own key so a project may lower it per gate.
     #
     # OI-1874 r3: subsystem="harness-lane-review-gates", NOT
     # "governance-enforcement-stack" -- these three keys used to carry that tag,
@@ -399,24 +398,27 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
     # agrees with cockpit_canonical is the narrow fix that only touches this
     # new row.
     "VNX_GLM_GATE_MAX_DIFF_CHARS": _e(
-        "VNX_GLM_GATE_MAX_DIFF_CHARS", "string", "50000", "gate",
-        "Diff-char cap for the prompt glm_gate builds from a PR diff. glm_gate is an "
-        "OpenRouter API-credit fallback seat, billed per token, so the default stays "
-        "conservative; a project may raise or lower it.",
+        "VNX_GLM_GATE_MAX_DIFF_CHARS", "string", "800000", "gate",
+        "Diff-char cap for the prompt glm_gate builds from a PR diff. The default is "
+        "the operator's reading budget (500,000 tokens), bounded by the argv ceiling "
+        "of 800000 chars (OI-1961); a value above the ceiling is clamped to it. A "
+        "project may lower it.",
         approval=True,
         subsystem="harness-lane-review-gates", status="ACTIVATE"),
     "VNX_DEEPSEEK_GATE_MAX_DIFF_CHARS": _e(
-        "VNX_DEEPSEEK_GATE_MAX_DIFF_CHARS", "string", "50000", "gate",
-        "Diff-char cap for the prompt deepseek_gate builds from a PR diff. "
-        "deepseek_gate is an API-credit fallback seat, billed per token, so the "
-        "default stays conservative; a project may raise or lower it.",
+        "VNX_DEEPSEEK_GATE_MAX_DIFF_CHARS", "string", "800000", "gate",
+        "Diff-char cap for the prompt deepseek_gate builds from a PR diff. The "
+        "default is the operator's reading budget (500,000 tokens), bounded by the "
+        "argv ceiling of 800000 chars (OI-1961); a value above the ceiling is "
+        "clamped to it. A project may lower it.",
         approval=True,
         subsystem="harness-lane-review-gates", status="ACTIVATE"),
     "VNX_KIMI_GATE_MAX_DIFF_CHARS": _e(
-        "VNX_KIMI_GATE_MAX_DIFF_CHARS", "string", "400000", "gate",
-        "Diff-char cap for the prompt kimi_gate builds from a PR diff. kimi-k3's "
-        "1M-token context and subscription billing make a much larger cap free; a "
-        "project may raise or lower it.",
+        "VNX_KIMI_GATE_MAX_DIFF_CHARS", "string", "800000", "gate",
+        "Diff-char cap for the prompt kimi_gate builds from a PR diff. The default is "
+        "the operator's reading budget (500,000 tokens), bounded by the argv ceiling "
+        "of 800000 chars (OI-1961); a value above the ceiling is clamped to it. A "
+        "project may lower it.",
         approval=True,
         subsystem="harness-lane-review-gates", status="ACTIVATE", cockpit_canonical=True),
 }

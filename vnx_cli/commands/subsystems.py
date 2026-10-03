@@ -69,9 +69,10 @@ SUBSYSTEM_DESCRIPTIONS: Dict[str, str] = {
         "SURFACED here; enforcement wiring deferred."
     ),
     "harness-lane-review-gates": (
-        "Per-gate diff-char cap for the harness-lane review gates "
-        "(glm_gate/kimi_gate/deepseek_gate), read at runtime by "
-        "gate_lane_contract.max_diff_chars() (OI-1874)."
+        "Diff-char cap for the harness-lane review gates "
+        "(glm_gate/kimi_gate/deepseek_gate): one shared default of 800000, "
+        "bounded by the argv ceiling (OI-1961), configurable per gate, read at "
+        "runtime by gate_lane_contract.max_diff_chars() (OI-1874)."
     ),
     "receipt-hash-chain": "Tamper-evident NDJSON hash-chain (ADR-029).",
     "signed-attestation": "SSH-signed PR attestation manifests (ADR-027).",

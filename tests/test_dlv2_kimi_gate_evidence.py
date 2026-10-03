@@ -351,13 +351,14 @@ def test_pass_verdict_on_whitespace_only_diff_becomes_unavailable_degenerate(tmp
 
 def test_pass_verdict_on_truncated_diff_is_partial_review_not_unavailable(tmp_path, monkeypatch):
     """A diff over kimi_gate's own resolved diff-char cap (OI-1874:
-    gate_lane_contract.max_diff_chars, 400000 by default -- raised from the
-    old shared 50000 since kimi-k3 carries a 1M-token context and runs on the
-    subscription lane) still handed the model real content to review --
+    gate_lane_contract.max_diff_chars, set to 400000 here; the shared default
+    is 800000) still handed the model real content to review --
     truncation must never flip a real pass into unavailable. Since OI-1851 it
     is not a pass either: the model saw only part of the diff, so the record
     says partial_review."""
+    monkeypatch.setenv("VNX_KIMI_GATE_MAX_DIFF_CHARS", "400000")
     kimi_cap = gate_lane_contract.max_diff_chars("kimi_gate")
+    assert kimi_cap == 400000
     lines_needed = (kimi_cap // len("+ok\n")) + 200
     big_diff = "diff --git a/x b/x\n" + ("+ok\n" * lines_needed)
     assert len(big_diff) > kimi_cap
