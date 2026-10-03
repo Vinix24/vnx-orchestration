@@ -12,13 +12,14 @@ BILLING SAFETY: No Anthropic SDK imports. Local filesystem only.
 from __future__ import annotations
 
 import fcntl
+import gzip
 import json
 import logging
 import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Iterator, Optional, Union
+from typing import IO, TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Union
 
 if TYPE_CHECKING:
     from canonical_event import CanonicalEvent
@@ -40,6 +41,88 @@ _SIZE_HARD_LIMIT_BYTES = 50 * 1024 * 1024
 # keeping the still-oversize condition visible to the dispatcher and the
 # operator dashboard (ADR-005 observability).
 _OVERSIZE_FLAG_SUFFIX = ".oversize"
+
+
+# ---------------------------------------------------------------------------
+# Archive file helpers (OI-1944 C1)
+#
+# An archive entry is ``<id>.ndjson`` or, once compressed, ``<id>.ndjson.gz``.
+# Every reader goes through these helpers so a compressed archive is as
+# readable as a plain one. Plain wins when both exist: the plain file is the
+# original, the ``.gz`` is a copy that may still be in flight.
+# ---------------------------------------------------------------------------
+
+ARCHIVE_SUFFIX = ".ndjson"
+ARCHIVE_GZ_SUFFIX = ".ndjson.gz"
+
+
+def archive_id(path: Union[str, Path]) -> str:
+    """Dispatch id of an archive file name: both suffixes stripped."""
+    name = Path(path).name
+    for suffix in (ARCHIVE_GZ_SUFFIX, ARCHIVE_SUFFIX):
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return Path(name).stem
+
+
+def is_archive_file(path: Union[str, Path]) -> bool:
+    """True for ``*.ndjson`` and ``*.ndjson.gz``."""
+    name = Path(path).name
+    return name.endswith(ARCHIVE_SUFFIX) or name.endswith(ARCHIVE_GZ_SUFFIX)
+
+
+def resolve_archive_file(directory: Union[str, Path], dispatch_id: str) -> Optional[Path]:
+    """``<dir>/<id>.ndjson`` if it exists, else ``<dir>/<id>.ndjson.gz``, else None."""
+    directory = Path(directory)
+    for suffix in (ARCHIVE_SUFFIX, ARCHIVE_GZ_SUFFIX):
+        candidate = directory / f"{dispatch_id}{suffix}"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def open_archive_text(path: Union[str, Path]) -> IO[str]:
+    """Open a plain or gzip archive file as UTF-8 text, chosen by suffix."""
+    path = Path(path)
+    if path.name.endswith(".gz"):
+        return gzip.open(path, "rt", encoding="utf-8", errors="replace")
+    return open(path, "r", encoding="utf-8", errors="replace")
+
+
+def list_archive_files(directory: Union[str, Path], recursive: bool = False) -> List[Path]:
+    """Archive files under ``directory``, one per id, plain preferred over ``.gz``.
+
+    Sorted by file name. ``recursive`` walks sub-directories (terminal dirs);
+    an id is deduplicated per containing directory.
+    """
+    directory = Path(directory)
+    if not directory.exists():
+        return []
+    walker = directory.rglob if recursive else directory.glob
+    chosen: Dict[tuple, Path] = {}
+    for path in walker("*"):
+        if not is_archive_file(path) or not path.is_file():
+            continue
+        key = (path.parent, archive_id(path))
+        current = chosen.get(key)
+        if current is None or (current.name.endswith(".gz") and not path.name.endswith(".gz")):
+            chosen[key] = path
+    return sorted(chosen.values(), key=lambda p: (str(p.parent), p.name))
+
+
+def find_archive_file(directory: Union[str, Path], dispatch_id: str) -> Optional[Path]:
+    """Locate the archive of ``dispatch_id`` anywhere under ``directory``.
+
+    Exact id match wins over a substring match; plain wins over ``.gz``.
+    """
+    files = list_archive_files(directory, recursive=True)
+    for path in files:
+        if archive_id(path) == dispatch_id:
+            return path
+    for path in files:
+        if dispatch_id in archive_id(path):
+            return path
+    return None
 
 
 def _events_dir() -> Path:
@@ -433,6 +516,14 @@ class EventStore:
     def archive_dir(self, terminal: str) -> Path:
         """Return the archive directory for a terminal."""
         return self._events_dir / "archive" / terminal
+
+    def resolve_archive(self, terminal: str, dispatch_id: str) -> Optional[Path]:
+        """Archive file of a dispatch in a terminal dir: plain, else ``.gz``."""
+        return resolve_archive_file(self.archive_dir(terminal), dispatch_id)
+
+    def list_archive_ids(self, terminal: str) -> List[Path]:
+        """Archive files of a terminal, one per dispatch id, plain preferred."""
+        return list_archive_files(self.archive_dir(terminal))
 
     def archive(self, terminal: str, dispatch_id: str) -> Optional[Path]:
         """Copy current event file to archive before clearing.

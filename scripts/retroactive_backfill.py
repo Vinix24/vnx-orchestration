@@ -34,6 +34,8 @@ from typing import Optional
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
+from event_store import list_archive_files, archive_id, open_archive_text
+
 try:
     from vnx_paths import ensure_env
     _PATHS = ensure_env()
@@ -129,8 +131,8 @@ def _build_archive_index() -> dict[str, Path]:
     index: dict[str, Path] = {}
     if not ARCHIVE_DIR.exists():
         return index
-    for path in ARCHIVE_DIR.rglob("*.ndjson"):
-        index[path.stem] = path
+    for path in list_archive_files(ARCHIVE_DIR, recursive=True):
+        index[archive_id(path)] = path
     return index
 
 
@@ -156,7 +158,7 @@ def _parse_archive(path: Path) -> ArchiveSummary:
     timestamps: list[str] = []
 
     try:
-        with open(path, encoding="utf-8") as fh:
+        with open_archive_text(path) as fh:
             for line in fh:
                 line = line.strip()
                 if not line:
@@ -472,7 +474,7 @@ def run_event_analyzer(dry_run: bool = False) -> int:
     """
     print("[step2] Running event_analyzer on all archives...")
     if dry_run:
-        archives = list(ARCHIVE_DIR.rglob("*.ndjson")) if ARCHIVE_DIR.exists() else []
+        archives = list_archive_files(ARCHIVE_DIR, recursive=True)
         print(f"[dry-run] Would analyze {len(archives)} archives → {BEHAVIORS_OUTPUT}")
         return len(archives)
 

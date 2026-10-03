@@ -14,6 +14,8 @@
 .vnx-data/events/archive/{terminal}/{dispatch_id}.ndjson
 ```
 
+An archive file can later be compressed in place to `{dispatch_id}.ndjson.gz`. Every reader resolves either form through the helpers in `scripts/lib/event_store.py` (`resolve_archive_file`, `open_archive_text`, `list_archive_files`, `find_archive_file`). When both exist the plain file wins. The `vnx-data-footprint` effectiveness probe measures archive bytes, plain archive bytes past the retention window, salvage bytes and free disk per store.
+
 …and the live file is truncated to 0 bytes so the next dispatch starts from a clean slate. Both `event_store.clear(terminal_id, archive_dispatch_id=...)` call sites (`scripts/lib/subprocess_dispatch_internals/delivery.py:412`, in the delivery `finally` block, and `scripts/lib/subprocess_adapter.py:413`, at the next dispatch's spawn) implement this.
 
 **Correction (2026-07-30, measured, not designed):** the archive half works; the truncate half does not, reliably. On 2026-07-30, `T1.ndjson` accumulated events across *multiple* dispatches without an intervening truncation and reached ~19-20MB, which made provider-lane dispatches on that terminal die on a 300s chunk-read timeout. Proof: the archived rescue copy `.vnx-data/events/archive/T1/20260730-131817-oversized-rescue.ndjson` (17.4MB) contains events from two distinct dispatches —
@@ -43,6 +45,8 @@ Governed-path receipts (written by `emit_dispatch_receipt`) always carry an `eve
 ```
 events_path = .vnx-data/events/archive/{terminal}/{dispatch_id}.ndjson
 ```
+
+Once an archive is compressed, the file at that path is `<events_path>.gz`. Receipts are never rewritten: a consumer that finds no file at `events_path` tries `events_path + ".gz"`.
 
 For multi-provider dispatches, the GOVERN step archives the live stream and records its path on the receipt. The receipt → stream linkage is an explicit data pointer, not a filename convention you have to reconstruct from the `dispatch_id`.
 

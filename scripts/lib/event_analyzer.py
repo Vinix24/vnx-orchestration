@@ -23,6 +23,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+_LIB_DIR = str(Path(__file__).resolve().parent)
+if _LIB_DIR not in sys.path:
+    sys.path.insert(0, _LIB_DIR)
+
+# Import after the sys.path guard above: event_store lives next to this module.
+from event_store import (  # noqa: E402
+    archive_id,
+    find_archive_file,
+    list_archive_files,
+    open_archive_text,
+)
+
 # ---------------------------------------------------------------------------
 # Data model
 # ---------------------------------------------------------------------------
@@ -74,10 +86,10 @@ def _parse_ts(ts_str: str) -> datetime:
     return datetime.fromisoformat(ts_str)
 
 
-def analyze_dispatch(archive_path: Path) -> DispatchBehavior:
-    """Parse a single NDJSON archive file and extract behavioral metrics."""
+def _load_events(archive_path: Path) -> list[dict[str, Any]]:
+    """Read every parseable JSON line of an archive; raise when none is left."""
     events: list[dict[str, Any]] = []
-    with open(archive_path, encoding="utf-8") as fh:
+    with open_archive_text(archive_path) as fh:
         for line in fh:
             line = line.strip()
             if not line:
@@ -89,19 +101,23 @@ def analyze_dispatch(archive_path: Path) -> DispatchBehavior:
 
     if not events:
         raise ValueError(f"No events in {archive_path}")
+    return events
 
-    # --- Extract metadata from init event ---
-    dispatch_id = archive_path.stem
+
+def _init_metadata(events: list[dict[str, Any]], archive_path: Path) -> tuple[str, str]:
+    """Return (dispatch_id, terminal), taken from the first init event when present."""
+    dispatch_id = archive_id(archive_path)
     terminal = "unknown"
-    role = "unknown"
-
     for ev in events:
         if ev.get("type") == "init":
             dispatch_id = ev.get("dispatch_id", dispatch_id)
             terminal = ev.get("terminal", terminal)
             break
+    return dispatch_id, terminal
 
-    # --- Collect timestamps ---
+
+def _timing(events: list[dict[str, Any]]) -> tuple[str, str, float]:
+    """Return (first_ts, last_ts, duration_seconds) over the events' timestamps."""
     timestamps = [ev["timestamp"] for ev in events if "timestamp" in ev]
     first_ts = timestamps[0] if timestamps else ""
     last_ts = timestamps[-1] if timestamps else ""
@@ -112,160 +128,164 @@ def analyze_dispatch(archive_path: Path) -> DispatchBehavior:
             duration = (_parse_ts(last_ts) - _parse_ts(first_ts)).total_seconds()
         except Exception:
             duration = 0.0
+    return first_ts, last_ts, duration
 
-    # --- Build ordered tool_use / tool_result pairs ---
-    # Map tool_use_id -> tool_use event for result correlation
-    tool_use_by_id: dict[str, dict] = {}
-    ordered_uses: list[dict] = []  # tool_use events in sequence order
+
+def _index_tool_events(
+    events: list[dict[str, Any]],
+) -> tuple[list[dict], dict[str, dict]]:
+    """Return (tool_use events in sequence order, tool_result events by tool_use_id)."""
+    ordered_uses: list[dict] = []
     results_by_id: dict[str, dict] = {}
-
     for ev in events:
         if ev.get("type") == "tool_use":
-            tid = ev["data"].get("id", "")
-            tool_use_by_id[tid] = ev
             ordered_uses.append(ev)
         elif ev.get("type") == "tool_result":
             tid = ev["data"].get("tool_use_id", "")
             results_by_id[tid] = ev
+    return ordered_uses, results_by_id
 
-    # --- Per-tool counters and file tracking ---
-    reads = 0
-    writes = 0
-    edits = 0
-    bash_calls = 0
-    grep_calls = 0
-    glob_calls = 0
 
-    files_read: list[str] = []
-    files_written: list[str] = []
+@dataclass
+class _ToolScan:
+    """Mutable accumulator for the per-tool-call pass in analyze_dispatch."""
 
-    # reads_before_first_write
+    reads: int = 0
+    writes: int = 0
+    edits: int = 0
+    bash_calls: int = 0
+    grep_calls: int = 0
+    glob_calls: int = 0
+    files_read: list = field(default_factory=list)
+    files_written: list = field(default_factory=list)
     first_write_idx: int | None = None
-    reads_before_first_write = 0
+    reads_before_first_write: int = 0
+    edit_counts_per_file: Counter = field(default_factory=Counter)
+    phases: list = field(default_factory=list)
+    # pytest fail->edit cycle detection. States: idle | pytest_ran | pytest_failed
+    pytest_state: str = "idle"
+    test_fail_edit_cycles: int = 0
+    test_results: dict = field(default_factory=dict)
+    bash_errors: list = field(default_factory=list)
+    committed: bool = False
+    pushed: bool = False
+    wrote_report: bool = False
 
-    # Edit rework: track edit counts per file
-    edit_counts_per_file: Counter = Counter()
 
-    # Phase classification
-    phases: list[str] = []
-    last_phase = None
+def _scan_read(scan: _ToolScan, inp: dict) -> None:
+    scan.reads += 1
+    fp = inp.get("file_path", "")
+    if fp:
+        scan.files_read.append(fp)
+    if scan.first_write_idx is None:
+        scan.reads_before_first_write += 1
+    _append_phase(scan.phases, "explore")
 
-    # Test fail→edit cycle detection
-    # States: idle | pytest_ran | pytest_failed
-    pytest_state = "idle"
-    test_fail_edit_cycles = 0
-    test_results: dict[str, int] = {}
-    bash_errors: list[str] = []
 
-    committed = False
-    pushed = False
-    wrote_report = False
+def _scan_write(scan: _ToolScan, name: str, inp: dict, idx: int) -> None:
+    if name == "Write":
+        scan.writes += 1
+    else:
+        scan.edits += 1
+    fp = inp.get("file_path", "")
+    if fp:
+        scan.files_written.append(fp)
+        if name in ("Edit", "MultiEdit"):
+            scan.edit_counts_per_file[fp] += 1
+    if scan.first_write_idx is None:
+        scan.first_write_idx = idx
+    # Test-fail -> edit cycle detection
+    if scan.pytest_state == "pytest_failed":
+        scan.test_fail_edit_cycles += 1
+        scan.pytest_state = "idle"
+    _append_phase(scan.phases, "implement")
 
+
+def _scan_pytest_result(scan: _ToolScan, result_content: str) -> None:
+    """Parse pytest totals from a Bash result and advance the fail->edit state."""
+    passed_m = re.search(r"(\d+)\s+passed", result_content)
+    failed_m = re.search(r"(\d+)\s+failed", result_content)
+    if passed_m or failed_m:
+        p = int(passed_m.group(1)) if passed_m else 0
+        fa = int(failed_m.group(1)) if failed_m else 0
+        # Keep the last run's totals
+        scan.test_results["passed"] = p
+        scan.test_results["failed"] = fa
+        scan.pytest_state = "pytest_failed" if fa > 0 else "pytest_ran"
+    else:
+        scan.pytest_state = "idle"
+
+
+def _scan_bash(scan: _ToolScan, inp: Any, result_content: str) -> None:
+    scan.bash_calls += 1
+    cmd = inp.get("command", "") if isinstance(inp, dict) else str(inp)
+    if "git commit" in cmd or "git push" in cmd:
+        _append_phase(scan.phases, "commit")
+    elif "pytest" in cmd or "python3 -m pytest" in cmd or "python -m pytest" in cmd:
+        _append_phase(scan.phases, "test")
+    else:
+        _append_phase(scan.phases, "implement")
+    if "git commit" in cmd:
+        scan.committed = True
+    if "git push" in cmd:
+        scan.pushed = True
+    if "unified_reports" in cmd:
+        scan.wrote_report = True
+    if "pytest" in cmd and result_content:
+        _scan_pytest_result(scan, result_content)
+    if result_content:
+        for line in result_content.splitlines():
+            if any(kw in line for kw in ("Error", "Exception", "FAILED", "Traceback")):
+                cleaned = line.strip()
+                if cleaned and cleaned not in scan.bash_errors:
+                    scan.bash_errors.append(cleaned)
+
+
+def _scan_tool_calls(
+    ordered_uses: list[dict], results_by_id: dict[str, dict]
+) -> _ToolScan:
+    """Walk the tool_use events once and accumulate counters, files and phases."""
+    scan = _ToolScan()
     for idx, use_ev in enumerate(ordered_uses):
         name = use_ev["data"].get("name", "")
         inp = use_ev["data"].get("input", {})
-        tool_id = use_ev["data"].get("id", "")
-        result_ev = results_by_id.get(tool_id)
+        result_ev = results_by_id.get(use_ev["data"].get("id", ""))
         result_content = ""
         if result_ev:
             rc = result_ev["data"].get("content", "")
             result_content = rc if isinstance(rc, str) else json.dumps(rc)
 
-        # --- Count tools ---
         if name == "Read":
-            reads += 1
-            fp = inp.get("file_path", "")
-            if fp:
-                files_read.append(fp)
-            if first_write_idx is None:
-                reads_before_first_write += 1
-            # Phase
-            _append_phase(phases, "explore")
-
+            _scan_read(scan, inp)
         elif name in ("Write", "Edit", "MultiEdit"):
-            if name == "Write":
-                writes += 1
-            else:
-                edits += 1
-            fp = inp.get("file_path", "")
-            if fp:
-                files_written.append(fp)
-                if name in ("Edit", "MultiEdit"):
-                    edit_counts_per_file[fp] += 1
-            # Track first write index
-            if first_write_idx is None:
-                first_write_idx = idx
-            # Test-fail → edit cycle detection
-            if pytest_state == "pytest_failed":
-                test_fail_edit_cycles += 1
-                pytest_state = "idle"
-            # Phase
-            _append_phase(phases, "implement")
-
+            _scan_write(scan, name, inp, idx)
         elif name == "Bash":
-            bash_calls += 1
-            cmd = inp.get("command", "") if isinstance(inp, dict) else str(inp)
-            # Phase
-            if "git commit" in cmd or "git push" in cmd:
-                _append_phase(phases, "commit")
-            elif "pytest" in cmd or "python3 -m pytest" in cmd or "python -m pytest" in cmd:
-                _append_phase(phases, "test")
-            else:
-                _append_phase(phases, "implement")
-            # Commit / push detection
-            if "git commit" in cmd:
-                committed = True
-            if "git push" in cmd:
-                pushed = True
-            # Report write detection
-            if "unified_reports" in cmd:
-                wrote_report = True
-            # Pytest result parsing
-            if "pytest" in cmd and result_content:
-                passed_m = re.search(r"(\d+)\s+passed", result_content)
-                failed_m = re.search(r"(\d+)\s+failed", result_content)
-                if passed_m or failed_m:
-                    p = int(passed_m.group(1)) if passed_m else 0
-                    fa = int(failed_m.group(1)) if failed_m else 0
-                    # Keep the last run's totals
-                    test_results["passed"] = p
-                    test_results["failed"] = fa
-                    if fa > 0:
-                        pytest_state = "pytest_failed"
-                    else:
-                        pytest_state = "pytest_ran"
-                else:
-                    pytest_state = "idle"
-            # Extract bash errors from result
-            if result_content:
-                for line in result_content.splitlines():
-                    if any(kw in line for kw in ("Error", "Exception", "FAILED", "Traceback")):
-                        cleaned = line.strip()
-                        if cleaned and cleaned not in bash_errors:
-                            bash_errors.append(cleaned)
-
+            _scan_bash(scan, inp, result_content)
         elif name == "Grep":
-            grep_calls += 1
-            _append_phase(phases, "explore")
-
+            scan.grep_calls += 1
+            _append_phase(scan.phases, "explore")
         elif name == "Glob":
-            glob_calls += 1
-            _append_phase(phases, "explore")
+            scan.glob_calls += 1
+            _append_phase(scan.phases, "explore")
 
-        # Write tool — also check file_path for report detection
-        if name == "Write":
-            fp = inp.get("file_path", "")
-            if "unified_reports" in fp:
-                wrote_report = True
+        # Write tool: also check file_path for report detection
+        if name == "Write" and "unified_reports" in inp.get("file_path", ""):
+            scan.wrote_report = True
+    return scan
 
-    # --- Edit rework: files edited more than once ---
+
+def analyze_dispatch(archive_path: Path) -> DispatchBehavior:
+    """Parse a single NDJSON archive file and extract behavioral metrics."""
+    events = _load_events(archive_path)
+    dispatch_id, terminal = _init_metadata(events, archive_path)
+    first_ts, last_ts, duration = _timing(events)
+    ordered_uses, results_by_id = _index_tool_events(events)
+    scan = _scan_tool_calls(ordered_uses, results_by_id)
+
+    # Edit rework: files edited more than once
     edit_cycles_same_file = sum(
-        count - 1 for count in edit_counts_per_file.values() if count > 1
+        count - 1 for count in scan.edit_counts_per_file.values() if count > 1
     )
-
-    # --- Unique files ---
-    unique_files_read = len(set(files_read))
-    unique_files_written = len(set(files_written))
 
     total_events = sum(
         1 for ev in events
@@ -275,28 +295,28 @@ def analyze_dispatch(archive_path: Path) -> DispatchBehavior:
     return DispatchBehavior(
         dispatch_id=dispatch_id,
         terminal=terminal,
-        role=role,
+        role="unknown",
         duration_seconds=round(duration, 1),
         total_events=total_events,
-        reads=reads,
-        writes=writes,
-        edits=edits,
-        bash_calls=bash_calls,
-        grep_calls=grep_calls,
-        glob_calls=glob_calls,
-        reads_before_first_write=reads_before_first_write,
+        reads=scan.reads,
+        writes=scan.writes,
+        edits=scan.edits,
+        bash_calls=scan.bash_calls,
+        grep_calls=scan.grep_calls,
+        glob_calls=scan.glob_calls,
+        reads_before_first_write=scan.reads_before_first_write,
         edit_cycles_same_file=edit_cycles_same_file,
-        test_fail_edit_cycles=test_fail_edit_cycles,
-        unique_files_read=unique_files_read,
-        unique_files_written=unique_files_written,
-        phase_sequence=phases,
-        bash_errors=bash_errors[:50],  # cap at 50
-        test_results=test_results,
-        files_read=list(dict.fromkeys(files_read)),   # dedup preserving order
-        files_written=list(dict.fromkeys(files_written)),
-        committed=committed,
-        pushed=pushed,
-        wrote_report=wrote_report,
+        test_fail_edit_cycles=scan.test_fail_edit_cycles,
+        unique_files_read=len(set(scan.files_read)),
+        unique_files_written=len(set(scan.files_written)),
+        phase_sequence=scan.phases,
+        bash_errors=scan.bash_errors[:50],  # cap at 50
+        test_results=scan.test_results,
+        files_read=list(dict.fromkeys(scan.files_read)),   # dedup preserving order
+        files_written=list(dict.fromkeys(scan.files_written)),
+        committed=scan.committed,
+        pushed=scan.pushed,
+        wrote_report=scan.wrote_report,
         first_timestamp=first_ts,
         last_timestamp=last_ts,
     )
@@ -313,9 +333,9 @@ def _append_phase(phases: list[str], phase: str) -> None:
 # ---------------------------------------------------------------------------
 
 def analyze_all(archive_dir: Path) -> list[DispatchBehavior]:
-    """Scan all .ndjson files under archive_dir recursively, return sorted by timestamp."""
+    """Scan all .ndjson and .ndjson.gz archives under archive_dir recursively, return sorted by timestamp."""
     behaviors: list[DispatchBehavior] = []
-    for ndjson_path in sorted(archive_dir.rglob("*.ndjson")):
+    for ndjson_path in list_archive_files(archive_dir, recursive=True):
         try:
             b = analyze_dispatch(ndjson_path)
             behaviors.append(b)
@@ -427,11 +447,8 @@ def _default_archive_dir() -> Path:
 
 
 def _find_dispatch_archive(dispatch_id: str, archive_dir: Path) -> Path | None:
-    """Locate the ndjson file for a dispatch_id anywhere under archive_dir."""
-    for path in archive_dir.rglob("*.ndjson"):
-        if path.stem == dispatch_id or dispatch_id in path.stem:
-            return path
-    return None
+    """Locate the ndjson(.gz) file for a dispatch_id anywhere under archive_dir."""
+    return find_archive_file(archive_dir, dispatch_id)
 
 
 # ---------------------------------------------------------------------------
