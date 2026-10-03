@@ -685,6 +685,21 @@ jobs:
           fi
           printf '%s\n' "$added" | python3 "$VNX_HOME/scripts/ci_lint_patterns.py" --scan-stdin
 
+      # Own step, not part of the lint step: that step exits early (exit 0)
+      # when no line was added, which must not skip this check.
+      - name: Function size ratchet
+        env:
+          VNX_HOME: ${{ github.workspace }}/.claude/vnx-system
+        run: |
+          set -euo pipefail
+          # Needs git, so it runs from the outer checkout, not the rsynced copy.
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base_ref="origin/${{ github.base_ref }}"
+          else
+            base_ref="HEAD^"
+          fi
+          python3 "$VNX_HOME/scripts/ci/check_function_size_ratchet.py" --base "${base_ref}" --head HEAD
+
   profile-d:
     name: Profile D (pip install smoke)
     runs-on: ubuntu-latest
