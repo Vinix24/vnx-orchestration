@@ -282,7 +282,7 @@ The receipt object written by `emit_dispatch_receipt` (the governed path) before
 
 It is `null` when the lane produces no event stream (tmux, claude subprocess) or when the archive step was skipped. Only subprocess-routed terminals produce a per-terminal event stream; the live `.vnx-data/events/T{n}.ndjson` is a ring buffer truncated after each dispatch, with the durable copy in the archive directory.
 
-`events_path` turns dispatch→stream linkage from a filename convention (matching `dispatch_id`) into an explicit data pointer. A reviewer can walk from a receipt straight to its event archive instead of inferring the path. See `docs/operations/EVENT_STREAMS.md` and ADR-005. Unchanged in v2.
+`events_path` turns dispatch→stream linkage from a filename convention (matching `dispatch_id`) into an explicit data pointer. A reviewer can walk from a receipt straight to its event archive instead of inferring the path. See `docs/operations/EVENT_STREAMS.md` and ADR-005. Unchanged in v2. An archive may be compressed later: the file then lives at `<events_path>.gz` and the receipt keeps the original path (receipts are never rewritten). Resolve it with `event_store.resolve_archive_file`.
 
 ## Status truth
 

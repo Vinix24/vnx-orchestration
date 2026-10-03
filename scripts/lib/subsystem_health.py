@@ -42,6 +42,8 @@ import governance_effectiveness_probe  # noqa: E402,F401
 import injection_effectiveness_probe  # noqa: E402,F401
 import migration_effectiveness_probe  # noqa: E402,F401
 import plan_gate_effectiveness_probe  # noqa: E402,F401
+# Registers the vnx-data-footprint probe on import (OI-1944), like the four above.
+import vnx_data_footprint_probe  # noqa: E402,F401
 
 
 def known_subsystems() -> List[str]:

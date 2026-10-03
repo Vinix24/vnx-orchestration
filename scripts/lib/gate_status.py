@@ -161,6 +161,47 @@ def _is_populated_evidence_field(value: Any) -> bool:
     return stripped.lower() not in _EVIDENCE_SENTINEL_VALUES
 
 
+def has_evidence_fields(result: Dict[str, Any]) -> bool:
+    """True when ``contract_hash`` and ``report_path`` are both real, populated
+    values (:func:`_is_populated_evidence_field`). The evidence-field bar on its
+    own, without any statement about the verdict or the coverage of the review."""
+    return _is_populated_evidence_field(result.get("contract_hash")) and _is_populated_evidence_field(
+        result.get("report_path")
+    )
+
+
+def decided_verdict(result: Dict[str, Any]) -> str:
+    """``"pass"``, ``"fail"`` or ``""`` for a gate result (OI-1943).
+
+    The one place that answers "did this gate decide, and how", so no reader
+    re-derives a fail from the status string. Review gates book a rejection as
+    ``completed`` plus blocking evidence, not as a fail status.
+
+    - ``"fail"``: the canonical status is in :data:`FAIL_STATES`, or it is in
+      :data:`PASS_STATES` and the record carries blocking evidence (a non-empty
+      ``blocking_findings`` list or an int ``blocking_count`` above zero). A
+      coverage gap does not void a rejection: a rejection of the part the gate
+      saw still stands (``gate_artifacts``).
+    - ``"pass"``: :func:`is_pass`.
+    - ``""``: everything else (``partial_review``, ``not_executable``,
+      ``unavailable``, in-flight, unknown, and a pass status with a coverage gap
+      and nothing blocking).
+    """
+    status, _legacy = _coerce_status(result)
+    if status in FAIL_STATES:
+        return "fail"
+    if status in PASS_STATES:
+        blocking_findings = result.get("blocking_findings")
+        blocking_count = result.get("blocking_count")
+        if isinstance(blocking_findings, list) and blocking_findings:
+            return "fail"
+        if isinstance(blocking_count, int) and not isinstance(blocking_count, bool) and blocking_count > 0:
+            return "fail"
+    if is_pass(result)[0]:
+        return "pass"
+    return ""
+
+
 def has_complete_evidence(result: Dict[str, Any]) -> bool:
     """True when a gate result is terminal AND carries a complete evidence
     trail (OI-1178, hardened OI-1435).
@@ -195,9 +236,7 @@ def has_complete_evidence(result: Dict[str, Any]) -> bool:
         return False
     if canonical_status(result) in PARTIAL_REVIEW_STATES or review_coverage_gap(result):
         return False
-    return _is_populated_evidence_field(result.get("contract_hash")) and _is_populated_evidence_field(
-        result.get("report_path")
-    )
+    return has_evidence_fields(result)
 
 
 def has_producer_identity(result: Dict[str, Any]) -> bool:

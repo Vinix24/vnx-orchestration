@@ -1482,7 +1482,7 @@ class TestHarnessLaneDelegation:
 
         assert len(calls) == 1
         assert calls[0]["provider"] == "deepseek-harness"
-        assert calls[0]["model"] == "deepseek-v4-pro"
+        assert calls[0]["model"] == "deepseek-flash"
         instruction = calls[0]["instruction"]
         assert "BEGIN PR DIFF: UNTRUSTED DATA" in instruction
         assert TRUNCATION_NOTICE in instruction
@@ -1491,10 +1491,46 @@ class TestHarnessLaneDelegation:
 
         result_file = gate_env["results_dir"] / "pr-3-deepseek_gate.json"
         saved = json.loads(result_file.read_text(encoding="utf-8"))
+        assert saved["model"] == "deepseek-flash"
         depth = saved["execution_depth"]
         assert depth["diff_truncated"] is True
         assert depth["diff_limit"] == deepseek_cap
         assert depth["diff_chars"] == len(big_diff.strip())
+
+    def test_deepseek_gate_default_model_is_flash_and_env_override_wins(
+        self, gate_env, monkeypatch,
+    ):
+        """OI-1939: default ``deepseek-flash``; ``VNX_DEEPSEEK_GATE_MODEL`` still wins,
+        in the dispatcher call and in the saved record."""
+        report_text = (
+            "Reviewed the diff.\nRan the tests.\nNo blocking findings.\n\n"
+            "```json\n"
+            '{"verdict": "pass", "findings": [], "residual_risk": null}\n'
+            "```\n"
+        )
+        monkeypatch.setattr(
+            GateRunner, "_fetch_gh_pr_diff", staticmethod(lambda pr: "diff --git a/x b/x\n+x = 1\n"),
+        )
+        for pr, env_value, expected in ((4, None, "deepseek-flash"), (5, "deepseek-v4-pro", "deepseek-v4-pro")):
+            factory, calls = self._fake_dispatcher(report_text)
+            monkeypatch.setattr("plan_gate_panel._make_default_dispatcher", factory)
+            if env_value is None:
+                monkeypatch.delenv("VNX_DEEPSEEK_GATE_MODEL", raising=False)
+            else:
+                monkeypatch.setenv("VNX_DEEPSEEK_GATE_MODEL", env_value)
+            payload = _make_request_payload(
+                gate="deepseek_gate",
+                report_path=str(gate_env["reports_dir"] / f"deepseek-gate-pr{pr}.md"),
+                dispatch_id=f"deepseek-gate-pr{pr}-17888153{pr:02d}",
+            )
+            payload.pop("prompt")
+            runner = GateRunner(state_dir=gate_env["state_dir"], reports_dir=gate_env["reports_dir"])
+            runner.run(gate="deepseek_gate", request_payload=payload, pr_number=pr)
+
+            assert calls[0]["model"] == expected
+            assert calls[0]["provider"] == "deepseek-harness"
+            saved = json.loads((gate_env["results_dir"] / f"pr-{pr}-deepseek_gate.json").read_text(encoding="utf-8"))
+            assert saved["model"] == expected
 
     def test_deepseek_gate_reads_a_120000_char_diff_whole_with_no_config(
         self, gate_env, monkeypatch,

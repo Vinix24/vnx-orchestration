@@ -58,7 +58,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-_VALID_VERDICTS = {"pass", "fail", "blocked"}
+from gate_lane_contract import canonical_review_verdict  # OI-1947: one reading of a verdict word (revise = fail)
 
 # The exact same fence-scan rule glm_gate._extract_verdict / kimi_gate._extract_verdict
 # use, duplicated here on purpose (not imported cross-module) — this module's job is
@@ -165,7 +165,7 @@ def _extract_verdict_block(text: str) -> dict:
             obj = json.loads(block)
         except (ValueError, TypeError):
             continue
-        if isinstance(obj, dict) and str(obj.get("verdict", "")).strip().lower() in _VALID_VERDICTS:
+        if isinstance(obj, dict) and canonical_review_verdict(obj.get("verdict")):
             return obj
     return {}
 
@@ -261,7 +261,7 @@ def find_recovery_candidate(
 # response already implied, never PRODUCE one the primary response contradicts.
 # ---------------------------------------------------------------------------
 
-_LOOSE_VERDICT_RE = re.compile(r'"verdict"\s*:\s*"(pass|fail|blocked)"', re.IGNORECASE)
+_LOOSE_VERDICT_RE = re.compile(r'"verdict"\s*:\s*"(pass|fail|blocked|revise)"', re.IGNORECASE)
 _LOOSE_SEVERITY_RE = re.compile(r'"severity"\s*:\s*"(error|blocked|blocker)"', re.IGNORECASE)
 
 # Matches glm_gate._verdict_to_status / kimi_gate._verdict_to_status's own
@@ -283,10 +283,10 @@ def recovered_verdict_conflicts(primary_text: str, recovered_verdict: dict) -> "
     response is silent about; it may never override what the primary response
     already, however messily, said.
     """
-    verdict_words = [m.group(1).lower() for m in _LOOSE_VERDICT_RE.finditer(primary_text or "")]
+    verdict_words = [canonical_review_verdict(m.group(1)) for m in _LOOSE_VERDICT_RE.finditer(primary_text or "")]
     blocking_mentions = len(_LOOSE_SEVERITY_RE.findall(primary_text or ""))
 
-    recovered_v = str(recovered_verdict.get("verdict", "")).strip().lower()
+    recovered_v = canonical_review_verdict(recovered_verdict.get("verdict"))
     recovered_blocking = len([
         f for f in (recovered_verdict.get("findings") or [])
         if isinstance(f, dict) and str(f.get("severity", "")).strip().lower() in _BLOCKING_SEVERITIES

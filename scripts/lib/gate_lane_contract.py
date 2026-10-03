@@ -29,16 +29,19 @@ logger = logging.getLogger(__name__)
 #
 # glm_gate runs glm-5.2 (deprecated-glm-models allowlist, operator directive
 # 2026-08-03) via the glm-harness lane; kimi_gate runs kimi-k3 via the kimi
-# CLI; deepseek_gate runs deepseek-v4-pro via the deepseek-harness lane
-# (DEFAULT_DEEPSEEK_HARNESS_MODEL, provider_spawns/deepseek_harness_spawn.py
-# — the SAME default the build lane dispatches, registry wave7_models.yaml
-# `deepseek_harness.deepseek-v4-pro` with dispatch_allowed: true). The env var
-# is the per-gate override an operator sets before the run; the default is
-# what the governed lane dispatches when it is unset.
+# CLI; deepseek_gate runs deepseek-flash (DeepSeek V4.1-Flash, registry
+# wave7_models.yaml `deepseek_harness.deepseek-flash`, operator decision
+# 2026-09-30, OI-1939) via the deepseek-harness lane. That default deliberately
+# differs from the build lane's DEFAULT_DEEPSEEK_HARNESS_MODEL
+# (provider_spawns/deepseek_harness_spawn.py, deepseek-v4-pro). The name
+# `deepseek-v4-flash` is a phased-out alias the vendor reroutes to V4.1-Flash
+# and must not be used as the default. The env var is the per-gate override an
+# operator sets before the run; the default is what the governed lane
+# dispatches when it is unset.
 MODEL_DEFAULTS: Dict[str, tuple] = {
     "glm_gate": ("VNX_GLM_GATE_MODEL", "glm-5.2"),
     "kimi_gate": ("VNX_KIMI_GATE_MODEL", "kimi-k3"),
-    "deepseek_gate": ("VNX_DEEPSEEK_GATE_MODEL", "deepseek-v4-pro"),
+    "deepseek_gate": ("VNX_DEEPSEEK_GATE_MODEL", "deepseek-flash"),
 }
 
 # glm_gate.py/kimi_gate.py drive the governed lane with DEFAULT_TIMEOUT=900.
@@ -55,7 +58,7 @@ TIMEOUT_SECONDS = 900
 # diff by default, configurable per gate. A cut diff books partial_review,
 # billed and worth nothing (PR #2032: 107,797 chars against the old 50,000 cap).
 # The model windows allow it (kimi-k3 1,000,000, glm-5.2 1,048,576,
-# deepseek-v4-pro 1,000,000; wave7_models.yaml). The delivery route does not
+# deepseek-flash 1,000,000; wave7_models.yaml). The delivery route does not
 # yet: see ARGV_SAFE_MAX_DIFF_CHARS. So all three gates share one default, the
 # operator's reading budget bounded by that ceiling, and a project may lower it
 # per gate. gate name -> (config key, default chars). config_registry carries
@@ -175,3 +178,22 @@ VERDICT_CONTRACT = (
 # independent literals; OI-1767 fix-forward, this module already being the
 # one source for the contract those values gate).
 VALID_VERDICTS = frozenset({"pass", "fail", "blocked"})
+
+# Review gates also meet a verdict word that is not in VALID_VERDICTS. Operator
+# decision 2026-09-30 (OI-1938): a REVISE is a fail. The map is closed: it holds
+# only the word measured on real deepseek_gate reports. `approve`, `block`,
+# `changes_requested` and anything else stay refused. VALID_VERDICTS itself is
+# unchanged (glm_gate/kimi_gate and the plan gate read their own vocabulary).
+REVIEW_VERDICT_ALIASES: Dict[str, str] = {"revise": "fail"}
+
+
+def canonical_review_verdict(value: object) -> str:
+    """Trim and lowercase *value* and return a member of :data:`VALID_VERDICTS`.
+
+    A word in :data:`REVIEW_VERDICT_ALIASES` is mapped first. Returns ``""`` for
+    anything else (the echoed placeholder ``pass|fail|blocked``, an unknown word,
+    a non-string value).
+    """
+    word = str(value if value is not None else "").strip().lower()
+    word = REVIEW_VERDICT_ALIASES.get(word, word)
+    return word if word in VALID_VERDICTS else ""

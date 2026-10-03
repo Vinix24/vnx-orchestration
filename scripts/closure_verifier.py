@@ -26,6 +26,7 @@ from governance_receipts import emit_governance_receipt
 from review_contract import ReviewContract
 from codex_final_gate import enforce_codex_gate
 from codex_severity_translator import translate_findings as translate_codex_findings
+from gate_lane_contract import canonical_review_verdict
 from gate_status import (
     FAIL_STATES as _GATE_FAIL_STATES,
     PARTIAL_REVIEW_STATES as _GATE_PARTIAL_REVIEW_STATES,
@@ -33,6 +34,7 @@ from gate_status import (
     UNAVAILABLE_STATES as _GATE_UNAVAILABLE_STATES,
     review_coverage_gap as gate_review_coverage_gap,
     canonical_status as gate_canonical_status,
+    decided_verdict as gate_decided_verdict,
     has_complete_evidence as gate_has_complete_evidence,
     is_pass as gate_is_pass,
     is_terminal as gate_is_terminal,
@@ -901,7 +903,7 @@ def _consult_peers_for_absence(
     )
     peer_fails = [
         (peer_gate, peer) for peer_gate, peer in peers
-        if gate_canonical_status(peer) in _GATE_FAIL_STATES
+        if gate_decided_verdict(peer) == "fail"
     ]
     if peer_fails:
         # A real rejection blocks the merge regardless of what the absent
@@ -1061,7 +1063,7 @@ def _consult_obligation_takeover_booking(
     )
     peer_fails = [
         (peer_gate, peer) for peer_gate, peer in peers
-        if gate_canonical_status(peer) in _GATE_FAIL_STATES
+        if gate_decided_verdict(peer) == "fail"
     ]
     if peer_fails:
         culprit_gate, culprit = sorted(peer_fails, key=lambda item: item[0])[0]
@@ -2320,7 +2322,22 @@ def _extract_normalized_findings_section(content: str) -> Optional[str]:
 # Kept as its own copy for the same reason those two don't share one: each
 # reader stays self-contained, but the RULE must never diverge.
 _VERDICT_FENCE_RE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
-_FENCE_VALID_VERDICTS = frozenset({"pass", "fail", "blocked", "block"})
+_FENCE_EXTRA_VERDICTS = frozenset({"block"})
+
+
+def _fence_verdict_word(value: Any) -> str:
+    """The fence's verdict as a lowercase word, ``""`` when it is not a real one.
+
+    The shared reading :func:`gate_lane_contract.canonical_review_verdict`
+    (``revise`` is a ``fail``, OI-1947) plus the ``block`` word this reader has
+    always accepted. ``approve``, the echoed ``pass|fail|blocked`` placeholder and
+    anything else stay refused.
+    """
+    word = canonical_review_verdict(value)
+    if word:
+        return word
+    raw = str(value if value is not None else "").strip().lower()
+    return raw if raw in _FENCE_EXTRA_VERDICTS else ""
 _FENCE_BLOCKING_SEVERITIES = frozenset({"blocking", "error"})
 
 
@@ -2345,7 +2362,7 @@ def _extract_report_verdict_fence(content: str) -> Optional[Dict[str, Any]]:
             obj = json.loads(block)
         except (ValueError, TypeError):
             continue
-        if isinstance(obj, dict) and str(obj.get("verdict", "")).strip().lower() in _FENCE_VALID_VERDICTS:
+        if isinstance(obj, dict) and _fence_verdict_word(obj.get("verdict")):
             return obj
     return None
 
@@ -2360,7 +2377,7 @@ def _count_fence_blocking_indicators(fence: Dict[str, Any]) -> int:
     this invariant must not do (OI-1473).
     """
     count = 0
-    verdict = str(fence.get("verdict", "")).strip().lower()
+    verdict = _fence_verdict_word(fence.get("verdict"))
     if verdict and verdict != "pass":
         count += 1
     findings = fence.get("findings")
