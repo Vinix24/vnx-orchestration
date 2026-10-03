@@ -96,6 +96,7 @@ if str(LIB_DIR) not in sys.path:
 from ndjson_hash_chain import verify_chain  # noqa: E402
 from open_outcomes import build_open_outcomes
 from vnx_paths import project_id_from_state_dir
+from vnx_ids import PROJECT_ID_RE
 from migrations.auto_apply import _RUNNERS_DIR as _AUTO_APPLY_RUNNERS_DIR, highest_auto_applicable_migration  # noqa: E402
 from migrations.auto_apply import _DEFAULT_MIGRATIONS_DIR as _AUTO_APPLY_MIGRATIONS_DIR  # noqa: E402
 
@@ -699,6 +700,21 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.command == "acknowledge":
         return _run_acknowledge(args)
+
+    # OI-1942: a VNX_PROJECT_ID that is set but not a project id (the measured
+    # literal `${VNX_PROJECT_ID}` from an unsubstituted plist) must never fall
+    # through to the ambient resolver, which would measure whichever store the cwd
+    # marker names and write that store's beacon on behalf of a broken job.
+    raw_project_id = os.environ.get("VNX_PROJECT_ID")
+    if raw_project_id is not None and raw_project_id.strip() and not PROJECT_ID_RE.match(raw_project_id.strip()):
+        print(
+            f"ledger_health: VNX_PROJECT_ID={raw_project_id!r} is not a project id "
+            f"(expected {PROJECT_ID_RE.pattern}); the launchd plist was installed with an "
+            "unsubstituted placeholder. Reinstall: bash scripts/launchd/reload_plist.sh "
+            "com.vnx.ledger-health <project-id>. No beacon written.",
+            file=sys.stderr,
+        )
+        return EXIT_UNMEASURABLE
 
     default_data_dir, default_state_dir = (None, None)
     if args.data_dir is None or args.state_dir is None:

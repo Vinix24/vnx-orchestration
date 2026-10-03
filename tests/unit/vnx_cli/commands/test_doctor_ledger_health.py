@@ -67,10 +67,11 @@ def _project_id(monkeypatch):
 
 
 class TestCheckLedgerHealth:
-    def test_no_beacon_yet_is_pass_not_fail(self, tmp_path):
-        result = _check_ledger_health(tmp_path)
-        assert result.status == PASS
-        assert "ledger_health.py" in result.detail
+    def test_no_beacon_yet_is_warn_naming_the_job(self, tmp_path):
+        """The job has RunAtLoad, so an absent beacon means it never ran (OI-1942)."""
+        result = _check_ledger_health(tmp_path, "proj-doctor")
+        assert result.status == WARN
+        assert "com.vnx.ledger-health.proj-doctor" in result.detail
 
     def test_all_healthy_beacon_is_pass(self, tmp_path):
         state_dir = tmp_path / "state"

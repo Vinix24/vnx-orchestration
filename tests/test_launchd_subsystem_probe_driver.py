@@ -38,6 +38,8 @@ from typing import Any, Dict, List
 
 import pytest
 
+from launchd_test_support import register_engine
+
 REPO = Path(__file__).resolve().parent.parent
 LAUNCHD_DIR = REPO / "scripts" / "launchd"
 TEMPLATE = LAUNCHD_DIR / "com.vnx.subsystem-probe.plist"
@@ -124,6 +126,9 @@ def _install(root: Path, engine: Path) -> Dict[str, Any]:
     nothing is loaded on the machine running the test. Returns the plist it wrote."""
     home = root / "home"
     (home / "Library" / "LaunchAgents").mkdir(parents=True)
+    # reload_plist.sh judges VNX_HOME with the install guard (OI-1942): the throwaway
+    # engine is a primary checkout registered under this install's HOME.
+    register_engine(home, engine, PROJECT)
     stub_dir = root / "bin"
     stub_dir.mkdir()
     loaded = root / "loaded.txt"

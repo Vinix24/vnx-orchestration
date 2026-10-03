@@ -34,6 +34,7 @@ import launchd_project_scope as lps  # noqa: E402
 RECEIPT_PROCESSOR = "com.vnx.receipt-processor"
 GATE_OBLIGATION = "com.vnx.gate-obligation-runner"
 CLEANUP_WORKTREES = "com.vnx.cleanup-reviewed-worktrees"
+LEDGER_HEALTH = "com.vnx.ledger-health"
 
 
 def _write_marker(project_dir: Path, project_id: str) -> None:
@@ -119,6 +120,7 @@ class TestCleanStateIsGreen:
                 f"{RECEIPT_PROCESSOR}.vnx-dev",
                 f"{GATE_OBLIGATION}.vnx-dev",
                 f"{CLEANUP_WORKTREES}.vnx-dev",
+                f"{LEDGER_HEALTH}.vnx-dev",
             ],
         )
 
@@ -201,6 +203,8 @@ class TestWiredIntoVnxDoctor:
         monkeypatch.setattr(
             doctor._engine, "resolve_data_root", lambda project_dir: tmp_path / "_data"
         )
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "_home")
 
         args = argparse.Namespace(project_dir=str(tmp_path), json=True, strict=False)
         rc = doctor.vnx_doctor(args)

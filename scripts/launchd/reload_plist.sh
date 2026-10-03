@@ -6,7 +6,10 @@
 #                   e.g. com.vnx.conversation-analyzer
 #   [project_id]  — optional; only consulted when <name>'s template Label
 #                    contains the ${VNX_PROJECT_ID} placeholder (e.g.
-#                    com.vnx.gate-obligation-runner, com.vnx.receipt-processor).
+#                    com.vnx.gate-obligation-runner, com.vnx.receipt-processor,
+#                    com.vnx.ledger-health: since OI-1942 ledger-health runs one
+#                    job per project, so its project id is required and lands in
+#                    the Label and in the log paths).
 #                    Falls back to $VNX_PROJECT_ID, then the nearest
 #                    .vnx-project-id marker walking up from $VNX_HOME.
 #
@@ -26,6 +29,11 @@
 # now carries ${VNX_PROJECT_ID}, so two projects resolve to two different
 # Labels and therefore two different destination files, and never touch each
 # other's job.
+#
+# OI-1942: before anything is written, the engine root that becomes VNX_HOME is
+# judged by scripts/lib/launchd_install_guard.py, the same rule `vnx init` applies.
+# A linked worktree, a root under .vnx-data/worktrees/ and an unregistered clone are
+# refused (exit non-zero, nothing written, launchctl never called).
 #
 # Returns 0 on success, non-zero on failure.
 
@@ -60,6 +68,16 @@ if ! command -v python3 >/dev/null 2>&1; then
     echo "  handles all of them instead of a fragile single-line regex)." >&2
     exit 1
 fi
+
+GUARD_PY="$SCRIPT_DIR/../lib/launchd_install_guard.py"
+if [ ! -f "$GUARD_PY" ]; then
+    echo "ERROR: install guard not found: $GUARD_PY" >&2
+    exit 1
+fi
+python3 "$GUARD_PY" "$VNX_HOME" || {
+    echo "ERROR: $TEMPLATE_NAME not installed: VNX_HOME ($VNX_HOME) is not a stable engine root." >&2
+    exit 1
+}
 
 # Best-effort project_id resolution: explicit arg > $VNX_PROJECT_ID env >
 # nearest .vnx-project-id marker walking up from $VNX_HOME. Mirrors

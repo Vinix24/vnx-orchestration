@@ -18,6 +18,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from vnx_cli.commands.init_cmd import vnx_init
 from vnx_cli import __version__
 from vnx_cli._engine import resolve_data_root
+from launchd_test_support import make_central_engine  # noqa: E402
 
 
 def _args(tmp_path, **overrides):
@@ -460,6 +461,7 @@ class TestGateObligationRunnerInstall:
         from vnx_cli.commands import init_cmd
 
         engine_root = tmp_path / "engine"
+        make_central_engine(engine_root)
         launchd_dir = engine_root / "scripts" / "launchd"
         launchd_dir.mkdir(parents=True)
         (launchd_dir / f"{self.PLIST_NAME}.plist").write_text(
@@ -528,6 +530,7 @@ class TestGateObligationRunnerInstall:
         from vnx_cli.commands import init_cmd
 
         engine_root = tmp_path / "engine"
+        make_central_engine(engine_root)
         launchd_dir = engine_root / "scripts" / "launchd"
         launchd_dir.mkdir(parents=True)
         (launchd_dir / f"{self.PLIST_NAME}.plist").write_text(
@@ -569,8 +572,8 @@ class TestGateObligationRunnerInstall:
         from vnx_cli.commands import init_cmd
 
         engine_root = tmp_path / "engine"
+        make_central_engine(engine_root)
         # No scripts/launchd/ directory at all.
-        engine_root.mkdir()
         monkeypatch.setattr(
             init_cmd._engine, "engine_root", lambda: engine_root,
         )
@@ -588,6 +591,7 @@ class TestGateObligationRunnerInstall:
         import stat
 
         engine_root = tmp_path / "engine"
+        make_central_engine(engine_root)
         launchd_dir = engine_root / "scripts" / "launchd"
         launchd_dir.mkdir(parents=True)
         plist_path = launchd_dir / f"{self.PLIST_NAME}.plist"
@@ -616,6 +620,7 @@ class TestGateObligationRunnerInstall:
         from vnx_cli.commands import init_cmd
 
         engine_root = tmp_path / "engine"
+        make_central_engine(engine_root)
         launchd_dir = engine_root / "scripts" / "launchd"
         launchd_dir.mkdir(parents=True)
         # Real, parseable plist (not a bare-string placeholder): OI-1510
@@ -659,6 +664,7 @@ class TestGateObligationRunnerInstall:
         from vnx_cli.commands import init_cmd
 
         engine_root = tmp_path / "engine"
+        make_central_engine(engine_root)
         launchd_dir = engine_root / "scripts" / "launchd"
         launchd_dir.mkdir(parents=True)
         # Real, parseable plist — see the sibling load-failure test above for
@@ -719,7 +725,7 @@ class TestGateObligationRunnerInstall:
 
         real_engine = init_cmd._engine.engine_root()
         fake_engine_root = tmp_path / "fake-vnx-engine"
-        fake_engine_root.mkdir()
+        make_central_engine(fake_engine_root)
         for d in ("templates", "scripts", "schemas"):
             _os.symlink(real_engine / d, fake_engine_root / d, target_is_directory=True)
         monkeypatch.setattr(
@@ -782,7 +788,7 @@ class TestGateObligationRunnerInstall:
         # OI-1117: mock engine_root() to a non-worktree location via symlinks.
         real_engine = init_cmd._engine.engine_root()
         fake_engine_root = tmp_path / "fake-vnx-engine"
-        fake_engine_root.mkdir()
+        make_central_engine(fake_engine_root)
         for d in ("templates", "scripts", "schemas"):
             _os.symlink(real_engine / d, fake_engine_root / d, target_is_directory=True)
         monkeypatch.setattr(
@@ -886,6 +892,7 @@ class TestInitDoctorDataDirConsistency:
                 f"-\t0\tcom.vnx.gate-obligation-runner.{resolved_project_id}\n"
                 f"-\t0\tcom.vnx.receipt-processor.{resolved_project_id}\n"
                 f"-\t0\tcom.vnx.cleanup-reviewed-worktrees.{resolved_project_id}\n"
+                f"-\t0\tcom.vnx.ledger-health.{resolved_project_id}\n"
             ),
         )
 

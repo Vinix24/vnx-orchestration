@@ -4,12 +4,15 @@
 import json
 import logging
 import os
+import plistlib
+import re
 import shutil
 import sqlite3
 import subprocess
 import sys
 from pathlib import Path
 from typing import NamedTuple
+from xml.parsers.expat import ExpatError
 
 from vnx_cli import _engine
 from vnx_cli._reexec import PIN_FILE_NAME, _find_pin_dir, _normalize_version
@@ -804,51 +807,35 @@ def _check_hook_paths(project_dir: Path) -> Check:
     return _result(PASS, "all referenced hook script paths resolve")
 
 
-def _check_ledger_health(data_root: Path) -> Check:
-    """WARN from the ledger_health beacon: dispatches without a receipt, open
-    outcomes waiting past the threshold for a T0 decision, or a ledger that is
-    unchained while VNX_CHAIN_RECEIPTS is configured on.
+def _ledger_health_job(data_root: Path, project_id: str) -> tuple[str, str]:
+    """(launchd Label, err log path) of the job that should write this project's beacon.
 
-    Delegates entirely to two existing modules instead of a third resolver
-    or threshold set: ``health_beacon.all_beacons`` (the same staleness/
-    corrupt classification every other subsystem beacon uses —
-    ``vnx_cli/commands/subsystems.py``) reads the beacon file itself, and
-    ``ledger_health.COMPONENT_NAME`` names it — the actual coverage/open-outcome/
-    chain thresholds live only in ``scripts/ledger_health.py``. Mirrors
-    ``_check_hook_paths``'s delegation to ``hookpin_check``.
-
-    The beacon is written by a separate, manual/periodic run of
-    ``python3 scripts/ledger_health.py`` (wiring an automatic cadence is out
-    of scope — see the dispatch this check shipped with) — so a project that
-    has never run it gets PASS-with-a-pointer, not a false FAIL.
+    The project id comes from the caller, else from the environment, else from the
+    store dir name (``~/.vnx-data/<project_id>``), so a detail never names a bare
+    Label (OI-1942: the job is per project).
     """
-    def _result(status: str, detail: str) -> Check:
-        return Check(name="ledger:health", status=status, detail=detail)
+    pid = project_id or ""
+    if not pid:
+        env_pid = (os.environ.get("VNX_PROJECT_ID") or "").strip()
+        pid = env_pid if _engine._PROJECT_ID_RE.match(env_pid) else Path(data_root).name
+    return f"com.vnx.ledger-health.{pid}", f"/tmp/vnx-ledger-health-{pid}.err"
 
-    try:
-        _engine.ensure_engine_on_path()
-        from health_beacon import all_beacons
-        from ledger_health import COMPONENT_NAME
-    except Exception as exc:
-        return _result(WARN, f"could not load ledger_health/health_beacon module: {exc}")
 
-    beacon = all_beacons(data_root).get(COMPONENT_NAME)
-    if beacon is None:
-        return _result(
-            PASS,
-            "no ledger-health beacon yet — run `python3 scripts/ledger_health.py` to populate",
-        )
+def _ledger_stale_finding(beacon: dict, job_label: str, job_err: str) -> str:
+    """Return the stale-beacon finding text naming the beacon age, window, job and err log."""
+    age = beacon.get("age_seconds")
+    age_str = f"{round(age / 3600, 1)}h" if isinstance(age, (int, float)) else "?"
+    window = beacon.get("expected_interval_seconds")
+    window_str = f"{round(window / 3600, 1)}h" if isinstance(window, (int, float)) else "?"
+    return (
+        f"beacon is stale ({age_str} old, window {window_str}): job {job_label} "
+        f"is not running or failing, see {job_err}"
+    )
 
-    health = beacon.get("health", "unknown")
-    if health == "corrupt":
-        return _result(WARN, f"ledger-health beacon is corrupt/unreadable: {beacon.get('error', '?')}")
 
+def _ledger_check_findings(beacon: dict) -> list[str]:
+    """Return the findings from the beacon's receipt_coverage, open_outcomes and chain_status checks, in that order."""
     findings: list[str] = []
-    if health == "stale":
-        age = beacon.get("age_seconds")
-        age_str = f"{round(age / 3600, 1)}h" if isinstance(age, (int, float)) else "?"
-        findings.append(f"beacon is stale ({age_str} old) — rerun ledger_health.py")
-
     details = beacon.get("details") or {}
     if not isinstance(details, dict):
         details = {}
@@ -886,6 +873,57 @@ def _check_ledger_health(data_root: Path) -> Check:
         )
     elif chain.get("status") == "SKIPPED_UNVERIFIED":
         findings.append(f"chain-status unmeasurable: {chain.get('reason', '?')}")
+    return findings
+
+
+def _check_ledger_health(data_root: Path, project_id: str = "") -> Check:
+    """WARN from the ledger_health beacon: dispatches without a receipt, open
+    outcomes waiting past the threshold for a T0 decision, or a ledger that is
+    unchained while VNX_CHAIN_RECEIPTS is configured on.
+
+    Delegates entirely to two existing modules instead of a third resolver
+    or threshold set: ``health_beacon.all_beacons`` (the same staleness/
+    corrupt classification every other subsystem beacon uses —
+    ``vnx_cli/commands/subsystems.py``) reads the beacon file itself, and
+    ``ledger_health.COMPONENT_NAME`` names it — the actual coverage/open-outcome/
+    chain thresholds live only in ``scripts/ledger_health.py``. Mirrors
+    ``_check_hook_paths``'s delegation to ``hookpin_check``.
+
+    The beacon is written by the per-project launchd job
+    ``com.vnx.ledger-health.<project_id>`` (OI-1409 driver, per-project and
+    RunAtLoad since OI-1942). An absent or stale beacon therefore means that
+    job is not installed, displaced or failing, and the detail names the job
+    and its err log. Both stay WARN (never FAIL): a project that has not been
+    reinstalled yet is not broken, but it is not measured either.
+    """
+    def _result(status: str, detail: str) -> Check:
+        return Check(name="ledger:health", status=status, detail=detail)
+
+    try:
+        _engine.ensure_engine_on_path()
+        from health_beacon import all_beacons
+        from ledger_health import COMPONENT_NAME
+    except Exception as exc:
+        return _result(WARN, f"could not load ledger_health/health_beacon module: {exc}")
+
+    job_label, job_err = _ledger_health_job(data_root, project_id)
+    beacon = all_beacons(data_root).get(COMPONENT_NAME)
+    if beacon is None:
+        return _result(
+            WARN,
+            f"no ledger-health beacon: the job {job_label} (RunAtLoad) should have written one "
+            f"— check `launchctl list | grep {job_label}` and {job_err}; install with "
+            f"`bash scripts/launchd/reload_plist.sh com.vnx.ledger-health <project-id>`",
+        )
+
+    health = beacon.get("health", "unknown")
+    if health == "corrupt":
+        return _result(WARN, f"ledger-health beacon is corrupt/unreadable: {beacon.get('error', '?')}")
+
+    findings: list[str] = []
+    if health == "stale":
+        findings.append(_ledger_stale_finding(beacon, job_label, job_err))
+    findings.extend(_ledger_check_findings(beacon))
 
     if health == "fail" and not findings:
         findings.append(
@@ -971,6 +1009,44 @@ def _check_launchd_agents(project_dir: Path) -> list[Check]:
     for v in template_violations:
         checks.append(Check(f"launchd:{v['family']}:{v['kind']}", WARN, v["detail"]))
 
+    return checks
+
+
+def _check_installed_plist_placeholders() -> list[Check]:
+    """WARN per installed ``com.vnx.*.plist`` that still holds a ``${...}`` placeholder.
+
+    Read-only. OI-1942: a plist written by a pre-d3944a52 ``reload_plist.sh``
+    kept the literal ``VNX_PROJECT_ID=${VNX_PROJECT_ID}`` for five weeks and
+    nothing re-checked installed files. Scans Label, ProgramArguments and
+    EnvironmentVariables of every ``~/Library/LaunchAgents/com.vnx.*.plist``.
+    """
+    agents_dir = Path.home() / "Library" / "LaunchAgents"
+    pattern = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
+    checks: list[Check] = []
+    for plist_path in sorted(agents_dir.glob("com.vnx.*.plist")):
+        try:
+            with open(plist_path, "rb") as fh:
+                data = plistlib.load(fh)
+        except (OSError, plistlib.InvalidFileException, ValueError, ExpatError) as exc:
+            checks.append(Check(
+                f"launchd:plist:{plist_path.stem}", WARN, f"{plist_path} is unreadable: {exc}",
+            ))
+            continue
+        scanned = " ".join([
+            str(data.get("Label", "")),
+            " ".join(str(a) for a in (data.get("ProgramArguments") or [])),
+            " ".join(f"{k}={v}" for k, v in (data.get("EnvironmentVariables") or {}).items()),
+        ])
+        leftovers = sorted(set(pattern.findall(scanned)))
+        if leftovers:
+            label = data.get("Label")
+            checks.append(Check(
+                f"launchd:plist:{plist_path.stem}",
+                WARN,
+                f"{plist_path} still holds {', '.join(leftovers)}: the job runs with a literal "
+                "placeholder. Unload it, remove the file and reinstall with "
+                f"`bash scripts/launchd/reload_plist.sh <template> <project-id>` (Label {label})",
+            ))
     return checks
 
 
@@ -1092,8 +1168,9 @@ def vnx_doctor(args) -> int:
     checks.extend(_check_worktree_orphans(project_dir))
     checks.append(_check_active_drain(data_root))
     checks.append(_check_hook_paths(project_dir))
-    checks.append(_check_ledger_health(data_root))
+    checks.append(_check_ledger_health(data_root, _engine.read_marker_project_id(project_dir) or ""))
     checks.extend(_check_launchd_agents(project_dir))
+    checks.extend(_check_installed_plist_placeholders())
     checks.append(_check_embedded_path_assumptions())
     checks.extend(_check_t0_state_freshness(project_dir, data_root))
 

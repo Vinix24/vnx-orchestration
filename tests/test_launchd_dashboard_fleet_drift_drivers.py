@@ -42,6 +42,7 @@ RELOAD = LAUNCHD_DIR / "reload_plist.sh"
 
 sys.path.insert(0, str(LAUNCHD_DIR))
 import launchd_project_scope as lps  # noqa: E402
+from launchd_test_support import register_engine  # noqa: E402
 
 
 def _load(path: Path) -> Dict[str, Any]:
@@ -191,10 +192,17 @@ class TestInstallableByReloadPlist:
         )
         stub.chmod(0o755)
         loaded.write_text("", encoding="utf-8")
+        # reload_plist.sh judges VNX_HOME with the install guard (OI-1942): this
+        # checkout may be a worktree or an unregistered CI clone, so the install
+        # runs from a registered engine of its own whose scripts are this repo's.
+        engine = tmp_path / "engine"
+        engine.mkdir()
+        (engine / "scripts").symlink_to(REPO / "scripts", target_is_directory=True)
+        register_engine(home, engine, self.PROJECT)
         env = {
             "HOME": str(home),
             "PATH": f"{stub_dir}{os.pathsep}{os.environ['PATH']}",
-            "VNX_HOME": str(REPO),
+            "VNX_HOME": str(engine),
             "VNX_PROJECT_ID": self.PROJECT,
         }
         return subprocess.run(
@@ -214,10 +222,11 @@ class TestInstallableByReloadPlist:
         data = self._installed(tmp_path, f"com.vnx.dashboard-generator.{self.PROJECT}")
         assert data["Label"] == f"com.vnx.dashboard-generator.{self.PROJECT}"
         assert data["EnvironmentVariables"]["VNX_PROJECT_ID"] == self.PROJECT
-        assert data["EnvironmentVariables"]["VNX_HOME"] == str(REPO)
+        engine = tmp_path / "engine"
+        assert data["EnvironmentVariables"]["VNX_HOME"] == str(engine)
         assert data["StandardOutPath"] == f"/tmp/vnx-dashboard-generator-{self.PROJECT}.log"
-        assert data["WorkingDirectory"] == str(REPO)
-        assert f"cd {REPO} && exec bash scripts/generate_valid_dashboard.sh" in data["ProgramArguments"][2]
+        assert data["WorkingDirectory"] == str(engine)
+        assert f"cd {engine} && exec bash scripts/generate_valid_dashboard.sh" in data["ProgramArguments"][2]
 
     def test_fleet_role_drift_installs_with_the_project_id_in_its_environment(self, tmp_path: Path) -> None:
         result = self._install(tmp_path, "com.vnx.fleet-role-drift")
@@ -226,7 +235,7 @@ class TestInstallableByReloadPlist:
         data = self._installed(tmp_path, "com.vnx.fleet-role-drift")
         assert data["EnvironmentVariables"]["VNX_PROJECT_ID"] == self.PROJECT
         assert data["StartInterval"] == _load(FLEET_TEMPLATE)["StartInterval"]
-        assert f"cd {REPO} && exec python3 scripts/fleet_role_drift.py --write-state" in data["ProgramArguments"][2]
+        assert f"cd {tmp_path / 'engine'} && exec python3 scripts/fleet_role_drift.py --write-state" in data["ProgramArguments"][2]
 
 
 @pytest.mark.skipif(shutil.which("flock") is None, reason="enforce_singleton needs flock(1)")

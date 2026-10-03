@@ -48,6 +48,7 @@ sys.path.insert(0, str(VNX_ROOT))
 import ledger_health as lh  # noqa: E402
 import health_beacon  # noqa: E402
 from vnx_cli.commands import init_cmd  # noqa: E402
+from launchd_test_support import register_engine  # noqa: E402
 
 PLIST_NAME = "com.vnx.ledger-health"
 
@@ -60,8 +61,8 @@ def _install_and_read_interval(tmp_path, monkeypatch) -> int:
 
     Fake engine root lives under ``tmp_path`` (never under
     ``.vnx-data/worktrees/``, which this very test suite's real repo path
-    is) so the OI-1117 worktree guard in ``_install_launchd_agent`` does not
-    fire and silently skip the install.
+    is) and registered under the patched home, so the install guard in
+    ``_install_launchd_agent`` (OI-1117 / OI-1942) lets the install through.
     """
     real_engine = init_cmd._engine.engine_root()
     fake_engine_root = tmp_path / "fake-vnx-engine"
@@ -74,12 +75,13 @@ def _install_and_read_interval(tmp_path, monkeypatch) -> int:
     fake_home = tmp_path / "fake-home"
     fake_home.mkdir()
     monkeypatch.setattr(Path, "home", lambda: fake_home)
+    register_engine(fake_home, fake_engine_root, "test-project")
 
     def fake_run(cmd, **kwargs):
         m = MagicMock()
         m.returncode = 0
         m.stderr = ""
-        m.stdout = f"{PLIST_NAME}\n" if cmd == ["launchctl", "list"] else ""
+        m.stdout = f"{PLIST_NAME}.test-project\n" if cmd == ["launchctl", "list"] else ""
         return m
 
     monkeypatch.setattr(init_cmd.subprocess, "run", fake_run)
@@ -92,7 +94,7 @@ def _install_and_read_interval(tmp_path, monkeypatch) -> int:
         "or the install wiring is missing (OI-1409 not implemented)"
     )
 
-    dest = fake_home / "Library" / "LaunchAgents" / f"{PLIST_NAME}.plist"
+    dest = fake_home / "Library" / "LaunchAgents" / f"{PLIST_NAME}.test-project.plist"
     with dest.open("rb") as fh:
         data = plistlib.load(fh)
     return int(data["StartInterval"])
