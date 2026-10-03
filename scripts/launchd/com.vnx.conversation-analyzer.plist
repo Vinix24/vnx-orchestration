@@ -24,10 +24,15 @@
     <dict>
         <key>VNX_HOME</key>
         <string>${VNX_HOME}</string>
-        <key>VNX_DATA_DIR</key>
-        <string>${VNX_HOME}/.vnx-data</string>
+        <!--
+            VNX_ANALYZER_LLM governs only unrestricted sessions. Client, personal and
+            unclassified sessions are routed in code: Claude only, at most the cap below
+            per night, deferred (never lost) when over the cap or Claude is unavailable.
+        -->
         <key>VNX_ANALYZER_LLM</key>
         <string>deepseek-harness</string>
+        <key>VNX_ANALYZER_RESTRICTED_CLAUDE_CAP</key>
+        <string>20</string>
         <!--
             DEEPSEEK_API_KEY must be available in the launchd environment.
             The nightly runner sources ~/.zprofile / ~/.zshrc for export VNX_*

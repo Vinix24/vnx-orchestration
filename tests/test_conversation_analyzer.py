@@ -95,6 +95,10 @@ def _create_schema(conn: sqlite3.Connection):
             file_size_bytes INTEGER,
             analyzed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             analyzer_version TEXT DEFAULT '1.0.0',
+            origin_class TEXT,
+            origin_project_id TEXT,
+            origin_source TEXT,
+            deep_deferred_reason TEXT,
             UNIQUE (project_id, session_id)
         );
         CREATE TABLE IF NOT EXISTS improvement_suggestions (
@@ -109,7 +113,8 @@ def _create_schema(conn: sqlite3.Connection):
             status TEXT DEFAULT 'new',
             digest_id TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            acted_on_at DATETIME
+            acted_on_at DATETIME,
+            origin_class TEXT
         );
         CREATE TABLE IF NOT EXISTS nightly_digests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1506,15 +1511,19 @@ class TestBridgeSessionToIntelligence:
         assert row["severity"] == "low"
 
     def test_improvement_suggestion_bridged_as_antipattern(self):
-        """High-priority improvement_suggestions with status='new' must become antipatterns."""
+        """High-priority improvement_suggestions with status='new' must become antipatterns.
+
+        Only a suggestion from an unrestricted session bridges (F2): the seed carries
+        origin_class='fabric'. tests/test_analyzer_inhoudsgrens.py::test_a5 pins the restricted and NULL cases.
+        """
         analyzer = _make_analyzer_with_intel_db()
         # Seed a high-priority suggestion
         analyzer.conn.execute(
             "INSERT INTO improvement_suggestions "
             "(session_id, category, component, current_behavior, suggested_improvement, "
-            " priority, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            " priority, status, origin_class) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             ("s1", "workflow", "dispatcher_v8", "slow delivery",
-             "batch dispatch creation", "high", "new"),
+             "batch dispatch creation", "high", "new", "fabric"),
         )
         analyzer.conn.commit()
 

@@ -1,6 +1,7 @@
 """Phase 1: JSONL session parser."""
 
 import json
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -71,6 +72,11 @@ class SessionParser:
 
         messages, first_ts, last_ts = self._parse_records(jsonl_path, metrics)
 
+        # The transcript's own cwd is the truth about where the work happened. The decoded
+        # dir name is lossy (every '-' becomes '/') and stays only as the fallback.
+        if metrics.cwd:
+            metrics.project_path = os.path.realpath(metrics.cwd)
+
         if first_ts and last_ts:
             delta = (last_ts - first_ts).total_seconds()
             metrics.duration_minutes = round(delta / 60.0, 1)
@@ -98,6 +104,11 @@ class SessionParser:
                     record = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+
+                if not metrics.cwd:
+                    record_cwd = record.get("cwd")
+                    if isinstance(record_cwd, str) and record_cwd.strip():
+                        metrics.cwd = record_cwd.strip()
 
                 msg_type = record.get("type", "")
                 timestamp_str = record.get("timestamp", "")

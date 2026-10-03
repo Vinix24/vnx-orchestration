@@ -1,0 +1,1031 @@
+"""Fase 0 F2, part 1: the conversation analyzer routes by content, not by provider.
+
+Restricted sessions (client, personal, unknown) get deep analysis on Claude only, capped per
+night, deferred instead of lost. Every provider call is a spy: no claude, deepseek, glm or
+ollama process starts, and nothing reads the real ~/.claude, ~/.vnx or ~/.vnx-data. HOME, the
+boundary file, the projects dir and the QI database all live in tmp_path.
+
+The tests read rows with ``SELECT *`` and never import the new classifier, so on the old code
+they fail on behaviour (wrong row, wrong call count), not on a missing symbol.
+"""
+
+import json
+import os
+import sqlite3
+import sys
+import tempfile
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+REPO = Path(__file__).resolve().parent.parent
+SCRIPTS = REPO / "scripts"
+sys.path.insert(0, str(SCRIPTS))
+sys.path.insert(0, str(SCRIPTS / "lib"))
+
+_import_env = {
+    "VNX_HOME": tempfile.mkdtemp(),
+    "VNX_STATE_DIR": tempfile.mkdtemp(),
+    "PROJECT_ROOT": tempfile.mkdtemp(),
+}
+with patch.dict(os.environ, _import_env):
+    import conversation_analyzer as ca_pkg
+    import conversation_analyzer.deep_analyzer as da_module
+    import conversation_analyzer.runner as runner_module
+    from conversation_analyzer import (
+        ConversationAnalyzer, DeepAnalyzer, SessionParser, fail_closed_exit_code,
+    )
+    from conversation_analyzer.deep_analyzer import LLMOutcome
+
+import quality_db_init  # noqa: E402
+
+TENANT = "tenant-t"
+OTHER_TENANT = "other-proj"
+
+
+def _suggestion_text(priority="high", improvement="make the thing better"):
+    return json.dumps({"result": json.dumps({
+        "patterns": [], "bottlenecks": [],
+        "suggestions": [{
+            "category": "workflow", "component": "dispatcher",
+            "current_behavior": "x", "suggested_improvement": improvement,
+            "evidence": "e", "priority": priority,
+        }],
+    })})
+
+
+def _ok(priority="high", improvement="make the thing better"):
+    return LLMOutcome("ok", text=json.loads(_suggestion_text(priority, improvement))["result"])
+
+
+def _write_session(projects_dir, dirname, sid, cwd=None, texts=("hello there",),
+                   out_tokens=150_000, extra_records=()):
+    """A ``texts`` entry is a string, or a dict with ``content`` (str or list) and optional ``isMeta``."""
+    folder = projects_dir / dirname
+    folder.mkdir(parents=True, exist_ok=True)
+    records = []
+    for i, text in enumerate(texts):
+        extra = text if isinstance(text, dict) else {"content": text}
+        rec = {"type": "user", "timestamp": f"2026-10-01T10:{i % 60:02d}:00Z",
+               "message": {"role": "user", "content": extra["content"]}}
+        if extra.get("isMeta"):
+            rec["isMeta"] = True
+        if cwd is not None:
+            rec["cwd"] = str(cwd)
+        records.append(rec)
+    records.extend(extra_records)
+    records.append({
+        "type": "assistant", "timestamp": "2026-10-01T10:30:00Z",
+        "message": {"model": "claude-sonnet-5-5", "content": [],
+                    "usage": {"input_tokens": 10, "output_tokens": out_tokens}},
+    })
+    path = folder / f"{sid}.jsonl"
+    path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+    return path
+
+
+def _rows(db_path, table="session_analytics"):
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        return [dict(r) for r in conn.execute(f"SELECT * FROM {table}").fetchall()]
+    finally:
+        conn.close()
+
+
+def _by_session(db_path):
+    return {r["session_id"]: r for r in _rows(db_path)}
+
+
+@pytest.fixture
+def world(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    client_root = home / "BUSINESS" / "clients"
+    personal_root = home / "Personal"
+    fabric = home / "dev" / "proj-a"
+    pa = home / "dev" / "pa-engine"
+    other = home / "dev" / "other"
+    for d in (client_root / "acme", personal_root / "health", fabric, pa, other):
+        d.mkdir(parents=True)
+    (fabric / ".vnx-project-id").write_text("proj-a\n")
+    (pa / ".vnx-project-id").write_text("pacompany-engine\n")
+    (other / ".vnx-project-id").write_text("other-proj\n")
+
+    boundary_file = tmp_path / "content_boundary.json"
+    boundary_file.write_text(json.dumps({
+        "version": 1,
+        "client_roots": [str(client_root)],
+        "personal_roots": [str(personal_root)],
+        "client_project_ids": [],
+    }))
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VNX_CONTENT_BOUNDARY_FILE", str(boundary_file))
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
+    monkeypatch.delenv("VNX_ANALYZER_RESTRICTED_CLAUDE_CAP", raising=False)
+
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    monkeypatch.setattr(ca_pkg, "CLAUDE_PROJECTS_DIR", projects)
+    monkeypatch.setattr(da_module, "LLM_STRATEGY", "deepseek-harness")
+    monkeypatch.setattr(DeepAnalyzer, "_ollama_probed", False)
+    monkeypatch.setattr(runner_module, "resolve_stamp_project_id",
+                        lambda *a, **k: TENANT)
+
+    db_path = tmp_path / "state" / "quality_intelligence.db"
+    db_path.parent.mkdir()
+    assert quality_db_init.bootstrap_qi_db(db_path)
+    # A bare bootstrap leaves the pattern tables without the tenant column the writers need.
+    conn = sqlite3.connect(db_path)
+    for table in ("success_patterns", "antipatterns"):
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN project_id TEXT")
+    conn.commit()
+    conn.close()
+
+    return {
+        "home": home, "client": client_root, "personal": personal_root,
+        "fabric": fabric, "pa": pa, "other": other, "projects": projects,
+        "db": db_path, "boundary_file": boundary_file, "tmp": tmp_path,
+    }
+
+
+class Spies:
+    """The three provider lanes, patched on DeepAnalyzer. Prompts show which session each saw."""
+
+    def __init__(self, claude=None, deepseek=None):
+        self.claude = MagicMock(side_effect=claude or (lambda prompt: _ok()))
+        self.deepseek = MagicMock(side_effect=deepseek or (lambda prompt: _ok()))
+        self.ollama = MagicMock(return_value=LLMOutcome("config_skip"))
+
+    def sessions(self, spy):
+        out = []
+        for call in spy.call_args_list:
+            prompt = call.args[0]
+            line = next(l for l in prompt.splitlines() if l.startswith("Session: "))
+            out.append(line.split("Session: ", 1)[1].strip())
+        return out
+
+    def __enter__(self):
+        self._patches = [
+            patch.object(DeepAnalyzer, "_try_claude_max", self.claude),
+            patch.object(DeepAnalyzer, "_try_deepseek_harness", self.deepseek),
+            patch.object(DeepAnalyzer, "_try_ollama", self.ollama),
+        ]
+        for p in self._patches:
+            p.start()
+        return self
+
+    def __exit__(self, *exc):
+        for p in self._patches:
+            p.stop()
+
+
+def _run(world, deep_budget=20):
+    analyzer = ConversationAnalyzer(world["db"])
+    analyzer.connect()
+    try:
+        return analyzer.run(dry_run=False, deep_budget=deep_budget)
+    finally:
+        analyzer.close()
+
+
+def _four_sessions(world):
+    p = world["projects"]
+    _write_session(p, "-fabric", "s-fabric", cwd=world["fabric"])
+    _write_session(p, "-client", "s-client", cwd=world["client"] / "acme")
+    _write_session(p, "-personal", "s-personal", cwd=world["personal"] / "health")
+    _write_session(p, "-nocwd", "s-nocwd", cwd=None)
+
+
+# --- A1 --------------------------------------------------------------------------------------
+
+def test_a1_restricted_sessions_go_to_claude_only_and_every_session_is_stored(world):
+    _four_sessions(world)
+    with Spies() as spies:
+        stats = _run(world)
+
+    rows = _by_session(world["db"])
+    assert len(rows) == 4
+    assert {r["project_id"] for r in rows.values()} == {TENANT}
+    assert {sid: r.get("origin_class") for sid, r in rows.items()} == {
+        "s-fabric": "fabric", "s-client": "client",
+        "s-personal": "personal", "s-nocwd": "unknown",
+    }
+    assert rows["s-fabric"].get("origin_project_id") == "proj-a"
+
+    assert spies.sessions(spies.deepseek) == ["s-fabric"]
+    assert sorted(spies.sessions(spies.claude)) == ["s-client", "s-nocwd", "s-personal"]
+    spies.ollama.assert_not_called()
+    assert getattr(stats, "deep_restricted_claude", None) == 3
+    assert getattr(stats, "deep_restricted_deferred", None) == 0
+    assert fail_closed_exit_code(stats) == 0
+    assert getattr(stats, "sessions_by_origin", None) == {
+        "fabric": 1, "client": 1, "personal": 1, "unknown": 1,
+    }
+
+
+# --- A2 --------------------------------------------------------------------------------------
+
+def test_a2_cap_defers_the_rest_and_the_next_night_spends_on_a_deferred_one(world, monkeypatch):
+    _four_sessions(world)
+    monkeypatch.setenv("VNX_ANALYZER_RESTRICTED_CLAUDE_CAP", "1")
+    with Spies() as spies:
+        stats = _run(world)
+    first_run_claude = spies.sessions(spies.claude)
+    assert len(first_run_claude) == 1
+    assert getattr(stats, "deep_restricted_deferred", None) == 2
+    assert fail_closed_exit_code(stats) == 0
+
+    rows = _by_session(world["db"])
+    analysed = first_run_claude[0]
+    deferred = {sid for sid in ("s-client", "s-personal", "s-nocwd") if sid != analysed}
+    assert rows[analysed]["deep_analysis_json"] is not None
+    for sid in deferred:
+        assert rows[sid]["deep_analysis_json"] is None, "a deferred session is stored, not analysed"
+        assert rows[sid]["deep_analysis_model"] is None
+
+    # ADR-007: a second tenant holds the same session ids and must not be touched.
+    conn = sqlite3.connect(world["db"])
+    for sid in deferred:
+        template = dict(rows[sid])
+        template.pop("id")
+        template["project_id"] = OTHER_TENANT
+        cols = ", ".join(template)
+        conn.execute(f"INSERT INTO session_analytics ({cols}) VALUES ({', '.join('?' for _ in template)})",
+                     list(template.values()))
+    conn.commit()
+    conn.close()
+
+    with Spies() as spies2:
+        stats2 = _run(world)
+    second_run_claude = spies2.sessions(spies2.claude)
+    assert len(second_run_claude) == 1
+    assert second_run_claude[0] in deferred
+    assert analysed not in second_run_claude
+    spies2.deepseek.assert_not_called()
+    assert getattr(stats2, "deep_restricted_deferred", None) == 0
+
+    all_rows = _rows(world["db"])
+    done = [r for r in all_rows if r["project_id"] == TENANT and r["deep_analysis_json"]]
+    assert len([r for r in done if r["session_id"] in ("s-client", "s-personal", "s-nocwd")]) == 2
+    leaked = [r for r in all_rows if r["project_id"] == OTHER_TENANT and r["deep_analysis_json"]]
+    assert leaked == []
+
+
+# --- A3 --------------------------------------------------------------------------------------
+
+def test_a3_claude_unavailable_defers_and_never_falls_back(world):
+    _four_sessions(world)
+
+    def quota(prompt):
+        raise RuntimeError("quota exceeded")
+
+    with Spies(claude=quota) as spies:
+        stats = _run(world)
+
+    assert spies.sessions(spies.deepseek) == ["s-fabric"]
+    spies.ollama.assert_not_called()
+    assert getattr(stats, "deep_restricted_deferred", None) == 3
+    assert getattr(stats, "deep_restricted_claude", None) == 0
+    assert fail_closed_exit_code(stats) == 0
+    rows = _by_session(world["db"])
+    for sid in ("s-client", "s-personal", "s-nocwd"):
+        assert rows[sid]["deep_analysis_json"] is None
+
+
+def test_a3_claude_cli_failure_outcome_also_defers(world):
+    _four_sessions(world)
+    with Spies(claude=lambda prompt: LLMOutcome("timeout")) as spies:
+        stats = _run(world)
+    assert getattr(stats, "deep_restricted_deferred", None) == 3
+    assert getattr(stats, "deep_attempts", None) == 1, "only the fabric session was an attempt"
+    assert fail_closed_exit_code(stats) == 0
+    spies.ollama.assert_not_called()
+    assert spies.sessions(spies.deepseek) == ["s-fabric"]
+
+
+# --- A4 --------------------------------------------------------------------------------------
+
+def test_a4_fabric_session_naming_a_client_path_never_reaches_deepseek(world):
+    named = f"please open {world['client']}/acme/notes.md and fix it"
+    _write_session(world["projects"], "-fabric", "s-named", cwd=world["fabric"],
+                   texts=("start", named))
+    with Spies() as spies:
+        _run(world)
+    spies.deepseek.assert_not_called()
+    assert spies.sessions(spies.claude) == ["s-named"]
+    assert _by_session(world["db"])["s-named"].get("origin_class") == "fabric"
+
+
+# --- A11 -------------------------------------------------------------------------------------
+
+def _grant_pacompany(world):
+    world["boundary_file"].write_text(json.dumps({
+        "version": 1,
+        "client_roots": [str(world["client"])],
+        "personal_roots": [str(world["personal"])],
+        "client_project_ids": ["pacompany-engine"],
+        "provider_exceptions": {"pacompany-engine": ["deepseek"]},
+    }))
+
+
+def test_a11_pacompany_engine_may_use_deepseek_unless_the_summary_names_a_client_path(world):
+    _grant_pacompany(world)
+    _write_session(world["projects"], "-pa", "s-pa", cwd=world["pa"])
+    _write_session(world["projects"], "-pa2", "s-pa-named", cwd=world["pa"],
+                   texts=("start", f"look at {world['client']}/acme/spec.md"))
+    with Spies() as spies:
+        _run(world)
+    assert spies.sessions(spies.deepseek) == ["s-pa"]
+    assert spies.sessions(spies.claude) == ["s-pa-named"]
+    rows = _by_session(world["db"])
+    assert rows["s-pa"].get("origin_class") == "client"
+    assert rows["s-pa"].get("origin_project_id") == "pacompany-engine"
+
+
+def test_a11_pacompany_cwd_inside_a_client_root_stays_claude_only(world):
+    _grant_pacompany(world)
+    nested = world["client"] / "acme" / "build" / "pa-engine"
+    nested.mkdir(parents=True)
+    (nested / ".vnx-project-id").write_text("pacompany-engine\n")
+    _write_session(world["projects"], "-nested", "s-nested", cwd=nested)
+    with Spies() as spies:
+        _run(world)
+    spies.deepseek.assert_not_called()
+    assert spies.sessions(spies.claude) == ["s-nested"]
+
+
+def test_a11_the_exception_does_not_cover_another_client_project(world):
+    _grant_pacompany(world)
+    _write_session(world["projects"], "-acme", "s-acme", cwd=world["client"] / "acme")
+    with Spies() as spies:
+        _run(world)
+    spies.deepseek.assert_not_called()
+    assert spies.sessions(spies.claude) == ["s-acme"]
+
+
+# --- A5 --------------------------------------------------------------------------------------
+
+def _seed_suggestions(db_path):
+    conn = sqlite3.connect(db_path)
+    has_origin = "origin_class" in {r[1] for r in conn.execute(
+        "PRAGMA table_info(improvement_suggestions)")}
+    for sid, origin, text in (
+        ("old-client", "client", "client derived improvement"),
+        ("old-fabric", "fabric", "fabric derived improvement"),
+        ("old-personal", "personal", "personal derived improvement"),
+        ("old-unknown", "unknown", "unknown derived improvement"),
+        ("old-legacy", None, "legacy row without origin"),
+    ):
+        conn.execute(
+            "INSERT INTO improvement_suggestions (session_id, category, component, "
+            "current_behavior, suggested_improvement, priority, status) "
+            "VALUES (?, 'workflow', 'dispatcher', 'x', ?, 'high', 'new')", (sid, text))
+        if origin is not None and has_origin:
+            conn.execute("UPDATE improvement_suggestions SET origin_class = ? WHERE session_id = ?",
+                         (origin, sid))
+    conn.commit()
+    conn.close()
+
+
+def test_a5_only_unrestricted_suggestions_are_bridged_into_antipatterns(world):
+    _seed_suggestions(world["db"])
+    _write_session(world["projects"], "-fabric", "s-new", cwd=world["fabric"], out_tokens=10)
+    with Spies():
+        _run(world)
+    conn = sqlite3.connect(world["db"])
+    titles = [r[0] for r in conn.execute(
+        "SELECT title FROM antipatterns WHERE pattern_type = 'suggestion'").fetchall()]
+    conn.close()
+    assert len(titles) == 1 and "fabric derived improvement" in titles[0], titles
+
+
+def test_a5_suggestions_are_stamped_with_the_origin_of_their_session(world):
+    _four_sessions(world)
+    with Spies():
+        _run(world)
+    by_session = {r["session_id"]: r.get("origin_class")
+                  for r in _rows(world["db"], "improvement_suggestions")}
+    assert by_session == {"s-fabric": "fabric", "s-client": "client",
+                          "s-personal": "personal", "s-nocwd": "unknown"}
+
+
+# --- A6 --------------------------------------------------------------------------------------
+
+def test_a6_origin_project_id_comes_from_the_marker_not_from_the_env(world):
+    _write_session(world["projects"], "-other", "s-other", cwd=world["other"], out_tokens=10)
+    with Spies():
+        _run(world)
+    row = _by_session(world["db"])["s-other"]
+    assert os.environ["VNX_PROJECT_ID"] == "vnx-dev"
+    assert row.get("origin_project_id") == "other-proj"
+    assert row["project_id"] == TENANT
+
+
+# --- A7 --------------------------------------------------------------------------------------
+
+def _origin_columns(db_path):
+    conn = sqlite3.connect(db_path)
+    sa = {r[1] for r in conn.execute("PRAGMA table_info(session_analytics)")}
+    imp = {r[1] for r in conn.execute("PRAGMA table_info(improvement_suggestions)")}
+    conn.close()
+    return sa, imp
+
+
+def test_a7_v34_adds_the_columns_once_and_touches_no_row(world):
+    db = world["db"]
+    sa, imp = _origin_columns(db)
+    assert {"origin_class", "origin_project_id", "origin_source"} <= sa
+    assert "origin_class" in imp
+
+    conn = sqlite3.connect(db)
+    for col in ("origin_class", "origin_project_id", "origin_source"):
+        conn.execute(f"ALTER TABLE session_analytics DROP COLUMN {col}")
+    conn.execute("ALTER TABLE improvement_suggestions DROP COLUMN origin_class")
+    for pid in (TENANT, OTHER_TENANT):
+        conn.execute(
+            "INSERT INTO session_analytics (session_id, project_id, project_path, session_date) "
+            "VALUES ('same-id', ?, '/x', '2026-10-01')", (pid,))
+    conn.execute("PRAGMA user_version = 33")
+    conn.commit()
+    conn.close()
+    assert _origin_columns(db)[0].isdisjoint({"origin_class", "origin_project_id", "origin_source"})
+
+    assert quality_db_init.bootstrap_qi_db(db)
+    sa, imp = _origin_columns(db)
+    assert {"origin_class", "origin_project_id", "origin_source"} <= sa
+    assert "origin_class" in imp
+    rows = _rows(db)
+    assert sorted(r["project_id"] for r in rows) == [OTHER_TENANT, TENANT]
+    assert all(r["origin_class"] is None for r in rows)
+
+    assert quality_db_init.bootstrap_qi_db(db)
+    assert _origin_columns(db) == (sa, imp)
+    assert len(_rows(db)) == 2
+    conn = sqlite3.connect(db)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] >= 34
+    conn.close()
+
+
+def test_a7_a_fresh_store_has_the_columns(world):
+    sa, imp = _origin_columns(world["db"])
+    assert {"origin_class", "origin_project_id", "origin_source"} <= sa
+    assert "origin_class" in imp
+
+
+# --- A8 --------------------------------------------------------------------------------------
+
+def test_a8_without_a_boundary_file_every_session_is_restricted_and_the_error_is_loud(
+        world, monkeypatch, capsys):
+    monkeypatch.setenv("VNX_CONTENT_BOUNDARY_FILE", str(world["tmp"] / "does-not-exist.json"))
+    _four_sessions(world)
+    with Spies() as spies:
+        _run(world)
+    spies.deepseek.assert_not_called()
+    spies.ollama.assert_not_called()
+    rows = _by_session(world["db"])
+    assert len(rows) == 4
+    assert {r.get("origin_class") for r in rows.values()} == {"unknown"}
+    out = capsys.readouterr().out
+    error_lines = [l for l in out.splitlines() if "[ERROR]" in l and "unconfigured" in l]
+    assert error_lines, out
+
+
+# --- A9 --------------------------------------------------------------------------------------
+
+def test_a9_project_path_is_the_realpath_of_the_cwd_and_the_lane_is_stamped(world):
+    real = world["home"] / "dev" / "real-dir"
+    real.mkdir()
+    (real / ".vnx-project-id").write_text("linked\n")
+    link = world["home"] / "dev" / "link-dir"
+    link.symlink_to(real)
+    _write_session(world["projects"], "-link", "s-link", cwd=link)
+    _write_session(world["projects"], "-client", "s-client", cwd=world["client"] / "acme")
+    with Spies():
+        _run(world)
+    rows = _by_session(world["db"])
+    assert rows["s-link"]["project_path"] == os.path.realpath(link)
+    assert rows["s-link"].get("origin_source") == "cwd"
+    assert rows["s-link"]["deep_analysis_model"] == "deepseek-harness:deepseek-flash"
+    assert rows["s-client"]["deep_analysis_model"] == "claude-max"
+
+
+def test_a9_decoded_dirname_is_the_fallback_when_the_transcript_has_no_cwd(world):
+    _write_session(world["projects"], "-nocwd", "s-nocwd", cwd=None, out_tokens=10)
+    with Spies():
+        _run(world)
+    row = _by_session(world["db"])["s-nocwd"]
+    assert row["project_path"] == "/nocwd"
+    assert row.get("origin_source") == "decoded_dirname"
+
+
+def test_parser_records_the_first_non_empty_cwd(world):
+    path = _write_session(world["projects"], "-p", "s-p", cwd=world["fabric"], out_tokens=10)
+    metrics, _ = SessionParser().parse_file(path)
+    assert getattr(metrics, "cwd", None) == str(world["fabric"])
+    assert metrics.project_path == os.path.realpath(world["fabric"])
+
+
+# --- dry run, cap parsing ----------------------------------------------------------------------
+
+def test_dry_run_counts_origins_and_writes_nothing(world):
+    _four_sessions(world)
+    with Spies() as spies:
+        analyzer = ConversationAnalyzer(world["db"])
+        analyzer.connect()
+        stats = analyzer.run(dry_run=True)
+        analyzer.close()
+    assert _rows(world["db"]) == []
+    spies.claude.assert_not_called()
+    spies.deepseek.assert_not_called()
+    assert getattr(stats, "sessions_by_origin", None) == {
+        "fabric": 1, "client": 1, "personal": 1, "unknown": 1,
+    }
+
+
+@pytest.mark.parametrize("raw", [None, "", "banana", "-3x"])
+def test_cap_defaults_to_twenty_when_unset_or_garbage(world, monkeypatch, raw):
+    if raw is None:
+        monkeypatch.delenv("VNX_ANALYZER_RESTRICTED_CLAUDE_CAP", raising=False)
+    else:
+        monkeypatch.setenv("VNX_ANALYZER_RESTRICTED_CLAUDE_CAP", raw)
+    for i in range(21):
+        _write_session(world["projects"], f"-c{i}", f"s-c{i:02d}", cwd=world["client"] / "acme")
+    with Spies() as spies:
+        stats = _run(world, deep_budget=100)
+    assert spies.claude.call_count == 20
+    assert getattr(stats, "deep_restricted_deferred", None) == 1
+
+
+def test_cap_zero_defers_every_restricted_session(world, monkeypatch):
+    monkeypatch.setenv("VNX_ANALYZER_RESTRICTED_CLAUDE_CAP", "0")
+    _four_sessions(world)
+    with Spies() as spies:
+        stats = _run(world)
+    spies.claude.assert_not_called()
+    assert getattr(stats, "deep_restricted_deferred", None) == 3
+
+
+def test_unparseable_claude_answer_is_a_failed_attempt_not_a_deferral(world):
+    _write_session(world["projects"], "-client", "s-client", cwd=world["client"] / "acme")
+    with Spies(claude=lambda prompt: LLMOutcome("ok", text="no json here")) as spies:
+        stats = _run(world)
+    assert getattr(stats, "deep_restricted_deferred", None) == 0
+    assert stats.deep_attempts == 1 and stats.deep_failures == 1
+    assert stats.deep_failure_reasons == {"unparseable": 1}
+    spies.deepseek.assert_not_called()
+
+
+def test_legacy_row_without_origin_is_not_backfilled_by_the_nightly_run(world):
+    _write_session(world["projects"], "-client", "s-legacy", cwd=world["client"] / "acme")
+    conn = sqlite3.connect(world["db"])
+    conn.execute(
+        "INSERT INTO session_analytics (session_id, project_id, project_path, session_date) "
+        "VALUES ('s-legacy', ?, '/x', '2026-10-01')", (TENANT,))
+    conn.commit()
+    conn.close()
+    with Spies() as spies:
+        _run(world)
+    spies.claude.assert_not_called()
+    spies.deepseek.assert_not_called()
+    assert _by_session(world["db"])["s-legacy"]["deep_analysis_json"] is None
+
+
+def test_plist_template_keeps_the_lane_adds_the_cap_and_drops_the_inert_data_dir():
+    import plistlib
+    template = SCRIPTS / "launchd" / "com.vnx.conversation-analyzer.plist"
+    env = plistlib.loads(template.read_bytes())["EnvironmentVariables"]
+    assert env["VNX_ANALYZER_LLM"] == "deepseek-harness"
+    assert env["VNX_ANALYZER_RESTRICTED_CLAUDE_CAP"] == "20"
+    assert "VNX_DATA_DIR" not in env
+
+
+# --- D1-D3: a deferral outlives the origin class (fix-forward on PR #2032) ---------------------
+
+def _named_fabric_session(world):
+    named = f"please open {world['client']}/acme/notes.md and fix it"
+    _write_session(world["projects"], "-fabric", "s-named", cwd=world["fabric"],
+                   texts=("start", named))
+
+
+def _plant_other_tenant_copy(world, sid):
+    """ADR-007: the second tenant holds the same session id, deferred and unanalysed."""
+    row = dict(_by_session(world["db"])[sid])
+    row.pop("id")
+    row["project_id"] = OTHER_TENANT
+    conn = sqlite3.connect(world["db"])
+    conn.execute(f"INSERT INTO session_analytics ({', '.join(row)}) "
+                 f"VALUES ({', '.join('?' for _ in row)})", list(row.values()))
+    conn.commit()
+    conn.close()
+
+
+def _mine(world, sid):
+    return next(r for r in _rows(world["db"])
+                if r["project_id"] == TENANT and r["session_id"] == sid)
+
+
+def test_d1_fabric_session_deferred_by_its_summary_is_replayed_on_claude_only(world, monkeypatch):
+    _named_fabric_session(world)
+    monkeypatch.setenv("VNX_ANALYZER_RESTRICTED_CLAUDE_CAP", "0")
+    with Spies() as spies:
+        stats = _run(world)
+    assert getattr(stats, "deep_restricted_deferred", None) == 1
+    row = _mine(world, "s-named")
+    assert row["origin_class"] == "fabric"
+    assert row["deep_analysis_json"] is None
+    assert row.get("deep_deferred_reason") == "cap"
+    spies.claude.assert_not_called()
+    spies.deepseek.assert_not_called()
+
+    _plant_other_tenant_copy(world, "s-named")
+    monkeypatch.setenv("VNX_ANALYZER_RESTRICTED_CLAUDE_CAP", "1")
+    with Spies() as spies2:
+        stats2 = _run(world)
+    assert spies2.sessions(spies2.claude) == ["s-named"]
+    spies2.deepseek.assert_not_called()
+    spies2.ollama.assert_not_called()
+    assert getattr(stats2, "deep_restricted_claude", None) == 1
+    assert _mine(world, "s-named")["deep_analysis_json"] is not None
+    leaked = [r for r in _rows(world["db"])
+              if r["project_id"] == OTHER_TENANT and r["deep_analysis_json"]]
+    assert leaked == []
+
+
+def test_d2_claude_unavailable_defers_with_its_own_reason_and_is_picked_up_next_run(
+        world, monkeypatch):
+    _named_fabric_session(world)
+
+    def quota(prompt):
+        raise RuntimeError("quota exceeded")
+
+    with Spies(claude=quota) as spies:
+        stats = _run(world)
+    spies.deepseek.assert_not_called()
+    assert getattr(stats, "deep_restricted_deferred", None) == 1
+    row = _mine(world, "s-named")
+    assert row["deep_analysis_json"] is None
+    assert row.get("deep_deferred_reason") == "claude_unavailable"
+
+    with Spies() as spies2:
+        _run(world)
+    assert spies2.sessions(spies2.claude) == ["s-named"]
+    spies2.deepseek.assert_not_called()
+    assert _mine(world, "s-named")["deep_analysis_json"] is not None
+
+
+def test_d3_replay_clears_the_marker_and_a_third_run_leaves_the_session_alone(world, monkeypatch):
+    _named_fabric_session(world)
+    monkeypatch.setenv("VNX_ANALYZER_RESTRICTED_CLAUDE_CAP", "0")
+    with Spies():
+        _run(world)
+    monkeypatch.setenv("VNX_ANALYZER_RESTRICTED_CLAUDE_CAP", "5")
+    with Spies():
+        _run(world)
+    row = _mine(world, "s-named")
+    assert row["deep_analysis_json"] is not None
+    assert row.get("deep_deferred_reason") is None
+
+    with Spies() as spies3:
+        stats3 = _run(world)
+    spies3.claude.assert_not_called()
+    spies3.deepseek.assert_not_called()
+    assert getattr(stats3, "sessions_deep", None) == 0
+
+
+# --- E1-E3: fix-forward round 3 on PR #2032 ------------------------------------------------------
+
+def test_e1_empty_claude_output_on_restricted_sessions_is_a_failed_night(world):
+    p = world["projects"]
+    _write_session(p, "-client", "s-client", cwd=world["client"] / "acme")
+    _write_session(p, "-personal", "s-personal", cwd=world["personal"] / "health")
+    with Spies(claude=lambda prompt: LLMOutcome("empty")) as spies:
+        stats = _run(world)
+    assert len(spies.claude.call_args_list) == 2
+    assert stats.deep_attempts == 2
+    assert stats.deep_failures == 2
+    assert stats.deep_failure_reasons == {"empty": 2}
+    assert fail_closed_exit_code(stats) == 1
+    spies.deepseek.assert_not_called()
+    rows = _by_session(world["db"])
+    for sid in ("s-client", "s-personal"):
+        assert rows[sid]["deep_analysis_json"] is None
+        assert rows[sid]["deep_deferred_reason"] == "claude_empty"
+
+    _plant_other_tenant_copy(world, "s-client")
+    with Spies() as spies2:
+        stats2 = _run(world)
+    assert sorted(spies2.sessions(spies2.claude)) == ["s-client", "s-personal"]
+    assert stats2.deep_restricted_claude == 2
+    assert _mine(world, "s-client")["deep_analysis_json"] is not None
+    assert [r for r in _rows(world["db"])
+            if r["project_id"] == OTHER_TENANT and r["deep_analysis_json"]] == []
+
+
+def test_e2_replay_draws_from_the_same_deep_budget_as_the_main_loop(world, monkeypatch):
+    _named_fabric_session(world)
+    monkeypatch.setenv("VNX_ANALYZER_RESTRICTED_CLAUDE_CAP", "0")
+    with Spies():
+        _run(world)
+    assert _mine(world, "s-named")["deep_deferred_reason"] == "cap"
+
+    _write_session(world["projects"], "-other", "s-new", cwd=world["other"])
+    monkeypatch.setenv("VNX_ANALYZER_RESTRICTED_CLAUDE_CAP", "5")
+    with Spies() as spies:
+        _run(world, deep_budget=1)
+    total = len(spies.claude.call_args_list) + len(spies.deepseek.call_args_list)
+    assert total == 1
+    assert spies.sessions(spies.claude) == ["s-named"]
+    assert _mine(world, "s-new")["deep_analysis_json"] is None
+
+
+def test_e3_quota_error_before_the_call_is_still_a_deferral_not_a_failure(world):
+    _write_session(world["projects"], "-client", "s-client", cwd=world["client"] / "acme")
+
+    def quota(prompt):
+        raise RuntimeError("quota exceeded")
+
+    with Spies(claude=quota):
+        stats = _run(world)
+    assert stats.deep_restricted_deferred == 1
+    assert stats.deep_attempts == 0 and stats.deep_failures == 0
+    assert fail_closed_exit_code(stats) == 0
+    assert _by_session(world["db"])["s-client"]["deep_deferred_reason"] == "claude_unavailable"
+
+
+# --- F1-F9: fix-forward round 4 on PR #2032, the boundary reads the transcript ---------------------
+
+def _many(n, at, line, filler="working on the next step"):
+    return [line if i == at else f"{filler} {i}" for i in range(1, n + 1)]
+
+
+def _assert_claude_only(world, spies, sid, stats):
+    spies.deepseek.assert_not_called()
+    assert spies.sessions(spies.claude) == [sid]
+    assert getattr(stats, "deep_restricted_claude", None) == 1
+    assert _by_session(world["db"])[sid].get("origin_class") == "fabric"
+
+
+def test_f1_client_path_in_a_middle_message_never_reaches_deepseek(world):
+    texts = _many(45, 25, f"open {world['client']}/acme/notes.md")
+    _write_session(world["projects"], "-fabric", "s-mid", cwd=world["fabric"], texts=texts)
+    with Spies() as spies:
+        stats = _run(world)
+    _assert_claude_only(world, spies, "s-mid", stats)
+
+
+def test_f1b_personal_path_in_a_middle_message_never_reaches_deepseek(world):
+    texts = _many(45, 25, f"open {world['personal']}/health/log.md")
+    _write_session(world["projects"], "-fabric", "s-mid", cwd=world["fabric"], texts=texts)
+    with Spies() as spies:
+        stats = _run(world)
+    _assert_claude_only(world, spies, "s-mid", stats)
+
+
+def test_f2_client_path_after_character_250_is_still_seen(world):
+    long_msg = "x" * 250 + f" {world['client']}/acme/notes.md"
+    _write_session(world["projects"], "-fabric", "s-long", cwd=world["fabric"],
+                   texts=("start", long_msg, "end"))
+    with Spies() as spies:
+        stats = _run(world)
+    _assert_claude_only(world, spies, "s-long", stats)
+
+
+def test_f3_path_straddling_character_200_is_seen_whole(world):
+    root = f"{world['client']}/"
+    msg = "y" * (200 - len(root) // 2) + root + "acme/notes.md"
+    assert len(msg) - len("acme/notes.md") - len(root) < 200 < len(msg) - len("notes.md")
+    _write_session(world["projects"], "-fabric", "s-cut", cwd=world["fabric"], texts=("start", msg))
+    with Spies() as spies:
+        stats = _run(world)
+    _assert_claude_only(world, spies, "s-cut", stats)
+
+
+def test_f4_client_path_only_in_a_tool_use_input(world):
+    tool = {"type": "assistant", "timestamp": "2026-10-01T10:20:00Z", "message": {
+        "content": [{"type": "tool_use", "id": "t1", "name": "Read",
+                     "input": {"file_path": f"{world['client']}/acme/notes.md"}}]}}
+    _write_session(world["projects"], "-fabric", "s-tool", cwd=world["fabric"],
+                   texts=("start", "go on"), extra_records=[tool])
+    with Spies() as spies:
+        stats = _run(world)
+    _assert_claude_only(world, spies, "s-tool", stats)
+
+
+def test_f5_canary_token_in_a_middle_message_never_reaches_deepseek(world):
+    token = "CANARYfixture" + "q7Zx9" * 4
+    token_file = world["tmp"] / "canary.token"
+    token_file.write_text(token + "\n")
+    world["boundary_file"].write_text(json.dumps({
+        "version": 1, "client_roots": [str(world["client"])],
+        "personal_roots": [str(world["personal"])], "client_project_ids": [],
+        "canary_token_file": str(token_file),
+        "canary_armed_in": [str(world["personal"] / "canary.md")],
+    }))
+    texts = _many(45, 25, f"note this {token} down")
+    _write_session(world["projects"], "-fabric", "s-canary", cwd=world["fabric"], texts=texts)
+    with Spies() as spies:
+        stats = _run(world)
+    _assert_claude_only(world, spies, "s-canary", stats)
+
+
+def _f6_sessions(world):
+    path = f"{world['client']}/acme/notes.md"
+    p = world["projects"]
+    # The injected text sits beyond character 200, so the summary sample cuts it off on any code.
+    pad = "z" * 250
+    reminder = {"content": f"fix the bug {pad} <system-reminder>instructions mention {path}"
+                           f"</system-reminder> please"}
+    _write_session(p, "-f6a", "s-reminder", cwd=world["fabric"], texts=("start", reminder))
+    meta = {"content": f"injected context {pad} {path}", "isMeta": True}
+    _write_session(p, "-f6b", "s-meta", cwd=world["fabric"], texts=("start", meta))
+    result = {"content": [{"type": "tool_result", "tool_use_id": "t1", "content": f"saw {path}"}]}
+    _write_session(p, "-f6c", "s-result", cwd=world["fabric"], texts=("start", result))
+    attach = {"type": "attachment", "timestamp": "2026-10-01T10:20:00Z",
+              "attachment": {"type": "file", "filename": path, "content": path}}
+    _write_session(p, "-f6d", "s-attach", cwd=world["fabric"], texts=("start", "go"),
+                   extra_records=[attach])
+
+
+def test_f6_injected_context_results_and_attachments_do_not_restrict(world):
+    _f6_sessions(world)
+    with Spies() as spies:
+        _run(world)
+    assert sorted(spies.sessions(spies.deepseek)) == [
+        "s-attach", "s-meta", "s-reminder", "s-result"]
+    spies.claude.assert_not_called()
+
+
+@pytest.mark.parametrize("dropped,fallen", [
+    ("system_reminder", "s-reminder"), ("meta", "s-meta"),
+    ("tool_result", "s-result"), ("attachment", "s-attach"),
+])
+def test_f6_each_exclusion_matters(world, monkeypatch, dropped, fallen):
+    """Mutation check: with one exclusion dropped the matching case lands on Claude."""
+    _f6_sessions(world)
+    if dropped == "system_reminder":
+        monkeypatch.setattr(DeepAnalyzer, "_SYSTEM_REMINDER", __import__("re").compile(r"(?!)"))
+    original = DeepAnalyzer._user_prompt_text.__func__
+
+    def user_text(cls, record):
+        if dropped == "meta":
+            record = {k: v for k, v in record.items() if k != "isMeta"}
+        if dropped == "tool_result":
+            content = (record.get("message") or {}).get("content")
+            if isinstance(content, list):
+                flat = " ".join(str(i.get("content", "")) for i in content if isinstance(i, dict))
+                record = {**record, "message": {"content": flat}}
+        return original(cls, record)
+
+    monkeypatch.setattr(DeepAnalyzer, "_user_prompt_text", classmethod(user_text))
+    if dropped == "attachment":
+        real = DeepAnalyzer._iter_transcript_lines
+
+        def with_attachment_as_user(path):
+            for line in real(path):
+                rec = json.loads(line)
+                if rec.get("type") == "attachment":
+                    rec = {"type": "user", "message": {"content": rec["attachment"]["content"]}}
+                yield json.dumps(rec)
+
+        monkeypatch.setattr(DeepAnalyzer, "_iter_transcript_lines",
+                            staticmethod(with_attachment_as_user))
+    with Spies() as spies:
+        _run(world)
+    assert spies.sessions(spies.claude) == [fallen]
+
+
+def test_f7_pacompany_exception_does_not_cover_a_transcript_path(world):
+    _grant_pacompany(world)
+    texts = _many(45, 25, f"look at {world['client']}/acme/spec.md")
+    _write_session(world["projects"], "-pa", "s-pa-mid", cwd=world["pa"], texts=texts)
+    with Spies() as spies:
+        _run(world)
+    spies.deepseek.assert_not_called()
+    assert spies.sessions(spies.claude) == ["s-pa-mid"]
+
+
+def test_f8_transcript_restricted_session_is_deferred_then_replayed_on_claude(world, monkeypatch):
+    texts = _many(45, 25, f"open {world['client']}/acme/notes.md")
+    _write_session(world["projects"], "-fabric", "s-mid", cwd=world["fabric"], texts=texts)
+    monkeypatch.setenv("VNX_ANALYZER_RESTRICTED_CLAUDE_CAP", "0")
+    with Spies() as spies:
+        stats = _run(world)
+    spies.deepseek.assert_not_called()
+    spies.claude.assert_not_called()
+    assert getattr(stats, "deep_restricted_deferred", None) == 1
+    assert _mine(world, "s-mid").get("deep_deferred_reason") == "cap"
+
+    monkeypatch.delenv("VNX_ANALYZER_RESTRICTED_CLAUDE_CAP")
+    with Spies() as spies2:
+        _run(world)
+    spies2.deepseek.assert_not_called()
+    assert spies2.sessions(spies2.claude) == ["s-mid"]
+    assert _mine(world, "s-mid")["deep_analysis_json"] is not None
+
+
+def test_f9_unreadable_transcript_at_routing_time_is_restricted(world, monkeypatch):
+    _write_session(world["projects"], "-fabric", "s-plain", cwd=world["fabric"])
+
+    def unreadable(path):
+        raise PermissionError("no access")
+        yield
+
+    monkeypatch.setattr(DeepAnalyzer, "_iter_transcript_lines", staticmethod(unreadable))
+    with Spies() as spies:
+        _run(world)
+    spies.deepseek.assert_not_called()
+    assert spies.sessions(spies.claude) == ["s-plain"]
+
+
+def test_f9_a_line_that_is_not_json_is_skipped_and_does_not_restrict(world):
+    path = _write_session(world["projects"], "-fabric", "s-junk", cwd=world["fabric"])
+    path.write_text("not json at all\n" + path.read_text())
+    with Spies() as spies:
+        _run(world)
+    assert spies.sessions(spies.deepseek) == ["s-junk"]
+    spies.claude.assert_not_called()
+
+
+# --- G6, G7: fix-forward round 5 on PR #2032 -------------------------------------------------------
+
+def test_g6_nested_client_project_in_the_registry_never_reaches_deepseek(world):
+    broad = world["home"] / "dev" / "broad"
+    nested = broad / "client-x"
+    nested.mkdir(parents=True)
+    registry = world["home"] / ".vnx" / "projects.json"
+    registry.parent.mkdir()
+    registry.write_text(json.dumps({"projects": [
+        {"project_id": "proj-broad", "path": str(broad)},
+        {"project_id": "client-x-id", "path": str(nested)},
+    ]}))
+    world["boundary_file"].write_text(json.dumps({
+        "version": 1,
+        "client_roots": [str(world["client"])],
+        "personal_roots": [str(world["personal"])],
+        "client_project_ids": ["client-x-id"],
+    }))
+    _write_session(world["projects"], "-nested", "s-nested", cwd=nested)
+    with Spies() as spies:
+        _run(world)
+    spies.deepseek.assert_not_called()
+    assert spies.sessions(spies.claude) == ["s-nested"]
+    assert _by_session(world["db"])["s-nested"].get("origin_class") == "client"
+
+
+def _two_analysed_and_a_malformed_row(world, bad_id):
+    p = world["projects"]
+    _write_session(p, "-fabric", "s-real-1", cwd=world["fabric"])
+    _write_session(p, "-fabric", "s-real-2", cwd=world["fabric"])
+    with Spies():
+        _run(world)
+    rows = _by_session(world["db"])
+    assert rows["s-real-1"]["deep_analysis_json"] and rows["s-real-2"]["deep_analysis_json"]
+    row = dict(rows["s-real-1"])
+    row.pop("id")
+    row.update(session_id=bad_id, deep_analysis_json=None, deep_analysis_model=None,
+               deep_analysis_at=None, deep_deferred_reason="cap")
+    conn = sqlite3.connect(world["db"])
+    conn.execute(f"INSERT INTO session_analytics ({', '.join(row)}) "
+                 f"VALUES ({', '.join('?' for _ in row)})", list(row.values()))
+    conn.commit()
+    conn.close()
+    return {sid: r["deep_analysis_json"] for sid, r in _by_session(world["db"]).items()}
+
+
+@pytest.mark.parametrize("bad_id", ["*", "../s-real-1", "s-real-?", "s-real-[12]", "a/b", ".", ".."])
+def test_g7_a_malformed_stored_session_id_is_skipped_not_globbed(world, capsys, bad_id):
+    before = _two_analysed_and_a_malformed_row(world, bad_id)
+    capsys.readouterr()
+    with Spies() as spies:
+        stats = _run(world)
+    out = capsys.readouterr().out
+    spies.claude.assert_not_called()
+    spies.deepseek.assert_not_called()
+    spies.ollama.assert_not_called()
+    assert {sid: r["deep_analysis_json"] for sid, r in _by_session(world["db"]).items()} == before
+    assert out.count("[WARNING]") == 1
+    assert getattr(stats, "errors", 0) == 0
+    assert getattr(stats, "deep_restricted_claude", None) == 0
+
+
+def test_g7_the_loop_continues_after_a_skipped_row_and_replays_a_good_one(world, monkeypatch):
+    _named_fabric_session(world)
+    monkeypatch.setenv("VNX_ANALYZER_RESTRICTED_CLAUDE_CAP", "0")
+    with Spies():
+        _run(world)
+    row = dict(_mine(world, "s-named"))
+    row.pop("id")
+    row["session_id"] = "*"
+    row["session_date"] = "2099-01-01"
+    conn = sqlite3.connect(world["db"])
+    conn.execute(f"INSERT INTO session_analytics ({', '.join(row)}) "
+                 f"VALUES ({', '.join('?' for _ in row)})", list(row.values()))
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv("VNX_ANALYZER_RESTRICTED_CLAUDE_CAP", "5")
+    with Spies() as spies:
+        _run(world)
+    assert spies.sessions(spies.claude) == ["s-named"]
+    assert _mine(world, "s-named")["deep_analysis_json"] is not None
+

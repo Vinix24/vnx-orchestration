@@ -31,7 +31,7 @@ from db_backup_rotation import parse_backup_keep, rotate_backups_safe
 
 # Highest PRAGMA user_version stamped by bootstrap_qi_db.
 # Increment this constant whenever a new migration block is added.
-HIGHEST_QI_VERSION = 33
+HIGHEST_QI_VERSION = 34
 
 # VNX Base Configuration
 PATHS = ensure_env()
@@ -1695,6 +1695,32 @@ def _migrate_v33(conn: sqlite3.Connection) -> None:
                            "after operator approval, --apply (v33)")
 
 
+def _migrate_v34(conn: sqlite3.Connection) -> None:
+    """V34: content origin on session_analytics and improvement_suggestions.
+
+    ``project_id`` stays the store tenant (ADR-026, ADR-007). The origin says where the work
+    came from: ``origin_class`` (client, personal, fabric, own, unknown), ``origin_project_id``
+    (the ``.vnx-project-id`` or registry id of the cwd, NULL when there is none) and
+    ``origin_source`` (``cwd`` or ``decoded_dirname``). ``improvement_suggestions.origin_class``
+    lets the intelligence bridge keep client-derived suggestions out of ``antipatterns``.
+    ``deep_deferred_reason`` (``cap`` or ``claude_unavailable``) marks a restricted session whose
+    deep analysis was deferred, so the backlog replay finds it whatever its origin class.
+
+    Purely additive: nullable TEXT, no default. A row written before v34 stays NULL, which the
+    readers treat as restricted rather than guessing a class for it. The correction step for
+    existing rows is a separate, operator-approved script.
+    """
+    sa_cols = {r[1] for r in conn.execute("PRAGMA table_info(session_analytics)").fetchall()}
+    for col in ("origin_class", "origin_project_id", "origin_source", "deep_deferred_reason"):
+        if col not in sa_cols:
+            conn.execute(f"ALTER TABLE session_analytics ADD COLUMN {col} TEXT")
+            log('INFO', f"Migrated: added {col} column to session_analytics (v34)")
+    is_cols = {r[1] for r in conn.execute("PRAGMA table_info(improvement_suggestions)").fetchall()}
+    if "origin_class" not in is_cols:
+        conn.execute("ALTER TABLE improvement_suggestions ADD COLUMN origin_class TEXT")
+        log('INFO', "Migrated: added origin_class column to improvement_suggestions (v34)")
+
+
 # Registry mapping version → migration function.
 # bootstrap_qi_db iterates this in sorted key order after V1.
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
@@ -1730,6 +1756,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     31: _migrate_v31,
     32: _migrate_v32,
     33: _migrate_v33,
+    34: _migrate_v34,
 }
 
 

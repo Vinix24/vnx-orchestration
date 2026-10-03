@@ -13,6 +13,7 @@ from typing import Any, Optional
 
 # .models puts scripts/lib on sys.path, so it is imported first.
 from .models import SessionMetrics, SessionFlags, log
+import content_class
 from pattern_upsert import upsert_antipattern, upsert_success_pattern
 
 
@@ -95,10 +96,20 @@ def _write_error_recovery_antipattern(conn: Any, now: str, project_id: str):
 
 def _bridge_improvement_suggestions(conn: Any, now: str, project_id: str) -> int:
     _priority_to_severity = {"critical": "critical", "high": "high"}
+    # antipatterns feed the intelligence injected into kimi, deepseek and glm prompts, so a
+    # suggestion derived from client, personal or unclassified content must not enter them.
+    # Only an explicitly unrestricted origin bridges; NULL (a legacy row) counts as restricted.
+    open_classes = (content_class.FABRIC, content_class.OWN)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(improvement_suggestions)")}
+    if "origin_class" not in columns:
+        # A store below QI v34 has no origin on any row: every row is legacy, so none bridges.
+        return 0
     suggestion_rows = conn.execute(
         "SELECT id, category, component, suggested_improvement, priority "
         "FROM improvement_suggestions "
-        "WHERE priority IN ('critical', 'high') AND status = 'new'",
+        "WHERE priority IN ('critical', 'high') AND status = 'new' "
+        f"AND origin_class IN ({','.join('?' for _ in open_classes)})",
+        open_classes,
     ).fetchall()
 
     count = 0
