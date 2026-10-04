@@ -7,7 +7,7 @@ test: a failed kimi seat falls over to glm and does not stay undecided).
 RED-on-main proof (recorded before the fix landed, dispatch report has the
 full command + failure line):
 
-    pytest tests/test_dlv5_review_gate_takeover.py::TestKimiTakeoverToGlm::test_kimi_lane_exhausted_takes_over_to_glm -x
+    pytest tests/test_dlv5_review_gate_takeover.py::TestKimiTakeoverToGlm::test_kimi_lane_exhausted_takes_over_to_deepseek -x
 
     AssertionError: expected a glm_gate request record for the takeover seat
     assert False
@@ -159,11 +159,11 @@ _KIMI_UNREADABLE_VERDICT_RESULT = {
 }
 
 
-class TestKimiTakeoverToGlm:
-    """Deliverable 8: a failed kimi seat (toestand 1) falls over to glm and
-    is not left undecided."""
+class TestKimiTakeoverToDeepseek:
+    """Deliverable 8: a failed kimi seat (toestand 1) falls over to the next
+    link of the chain (deepseek_gate, OI-1984) and is not left undecided."""
 
-    def test_kimi_lane_exhausted_takes_over_to_glm(self, manager_env, monkeypatch):
+    def test_kimi_lane_exhausted_takes_over_to_deepseek(self, manager_env, monkeypatch):
         monkeypatch.chdir(manager_env["project_root"])
         manager = _make_manager()
         pr_number = 501
@@ -181,19 +181,19 @@ class TestKimiTakeoverToGlm:
                 dispatch_id="dlv5-takeover-test",
             )
 
-        # The seat is filled by glm_gate, not left as an undecided kimi_gate.
+        # The seat is filled by deepseek_gate, not left as an undecided kimi_gate.
         assert len(result["requested"]) == 1
-        assert result["requested"][0]["gate"] == "glm_gate"
+        assert result["requested"][0]["gate"] == "deepseek_gate"
 
-        glm_request_file = manager_env["requests_dir"] / f"pr-{pr_number}-glm_gate.json"
-        assert glm_request_file.exists(), "expected a glm_gate request record for the takeover seat"
-        record = json.loads(glm_request_file.read_text(encoding="utf-8"))
+        takeover_request_file = manager_env["requests_dir"] / f"pr-{pr_number}-deepseek_gate.json"
+        assert takeover_request_file.exists(), "expected a deepseek_gate request record for the takeover seat"
+        record = json.loads(takeover_request_file.read_text(encoding="utf-8"))
 
-        # Split asserts (no compound judgement): "glm heeft overgenomen" and
+        # Split asserts (no compound judgement): "deepseek heeft overgenomen" and
         # "de reden is niet leeg" are two independent claims and must fail
         # independently if either half regresses.
         assert record.get("takeover_from") == "kimi_gate", (
-            f"expected glm_gate's record to name kimi_gate as the takeover source, got: {record.get('takeover_from')!r}"
+            f"expected deepseek_gate's record to name kimi_gate as the takeover source, got: {record.get('takeover_from')!r}"
         )
         assert record.get("failure_reason", "").strip() != "", (
             "failure_reason must be a non-empty, mandatory field on a takeover record — "
@@ -270,9 +270,9 @@ class TestKimiTakeoverToGlm:
         _write_result(manager_env["results_dir"], pr_number, "kimi_gate", {
             **_KIMI_LANE_EXHAUSTED_RESULT, "pr_id": "503", "pr_number": 503,
         })
-        # Force the configured fallback (glm_gate) unavailable too, so the
-        # takeover attempt itself fails.
-        monkeypatch.setattr(manager, "_glm_gate_available", lambda: False)
+        # Force the next link of the chain (deepseek_gate) unavailable too, so
+        # the takeover attempt itself fails.
+        monkeypatch.setattr(manager, "_deepseek_gate_available", lambda: False)
 
         with patch("governance_receipts.emit_governance_receipt"):
             result = manager.request_reviews(
@@ -286,7 +286,7 @@ class TestKimiTakeoverToGlm:
             )
 
         seat = result["requested"][0]
-        assert seat["gate"] == "glm_gate", "the takeover must still be attempted"
+        assert seat["gate"] == "deepseek_gate", "the takeover must still be attempted"
         assert seat["status"] != "pass", (
             "an unavailable fallback must never resolve the seat to a pass"
         )
@@ -294,11 +294,45 @@ class TestKimiTakeoverToGlm:
 
         # And the ON-DISK result record (not just the in-memory payload) must
         # show the same — read back from disk, never asserted from code alone.
-        glm_result_file = manager_env["results_dir"] / f"pr-{pr_number}-glm_gate.json"
-        assert glm_result_file.exists()
-        recorded = json.loads(glm_result_file.read_text(encoding="utf-8"))
+        takeover_result_file = manager_env["results_dir"] / f"pr-{pr_number}-deepseek_gate.json"
+        assert takeover_result_file.exists()
+        recorded = json.loads(takeover_result_file.read_text(encoding="utf-8"))
         assert recorded["status"] != "pass"
         assert recorded.get("failure_reason", "").strip() != ""
+
+    def test_kimi_and_deepseek_exhausted_walk_lands_on_glm(self, manager_env, monkeypatch):
+        """glm is the last link: with kimi and deepseek both exhausted the
+        walk continues to glm_gate, and that seat is never a pass either."""
+        monkeypatch.chdir(manager_env["project_root"])
+        manager = _make_manager()
+        pr_number = 504
+
+        _write_result(manager_env["results_dir"], pr_number, "kimi_gate", {
+            **_KIMI_LANE_EXHAUSTED_RESULT, "pr_id": "504", "pr_number": 504,
+        })
+        _write_result(manager_env["results_dir"], pr_number, "deepseek_gate", {
+            **_KIMI_LANE_EXHAUSTED_RESULT, "pr_id": "504", "pr_number": 504,
+            "gate": "deepseek_gate", "provider": "deepseek", "model": "deepseek-flash",
+            "dispatch_id": "deepseek-gate-pr504-1755852660",
+            "residual_risk": "governed deepseek dispatch failed: Error code: 402 - Insufficient Balance",
+        })
+        monkeypatch.setattr(manager, "_glm_gate_available", lambda: False)
+
+        with patch("governance_receipts.emit_governance_receipt"):
+            result = manager.request_reviews(
+                pr_number=pr_number,
+                branch="fix/control-walk-to-glm",
+                review_stack=["kimi_gate"],
+                risk_class="medium",
+                changed_files=["scripts/foo.py"],
+                mode="per_pr",
+                dispatch_id="dlv5-control-walk-to-glm",
+            )
+
+        seat = result["requested"][0]
+        assert seat["gate"] == "glm_gate", "glm is the last link of the chain"
+        assert seat["status"] != "pass"
+        assert seat["status"] == "not_executable"
 
 
 class TestMarkGateUnavailableStampsCanonicalFailureReason:

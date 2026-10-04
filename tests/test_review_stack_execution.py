@@ -392,18 +392,18 @@ class TestCodexAtItsLimitGoesToKimi:
             f"kimi is a real, minutes-long provider call: it ran {len(lane)} times"
         )
 
-    def test_glm_reads_only_when_codex_and_kimi_are_both_at_their_limit(self, env, default_stack):
+    def test_deepseek_reads_only_when_codex_and_kimi_are_both_at_their_limit(self, env, default_stack):
         _write_result(env, "codex_gate", _CODEX_LIMIT_RECORD)
         _write_result(env, "kimi_gate", _KIMI_LIMIT_RECORD)
 
         result = _request(_manager(), None)
 
-        assert _requested_gates(result) == ["glm_gate"], (
-            f"both subscription seats are exhausted: glm reads, once. requested={_requested_gates(result)}"
+        assert _requested_gates(result) == ["deepseek_gate"], (
+            f"both subscription seats are exhausted: deepseek reads, once. requested={_requested_gates(result)}"
         )
         seat = result["requested"][0]
         assert [hop["gate"] for hop in seat["takeover_path"]] == ["codex_gate", "kimi_gate"]
-        assert not (env["requests_dir"] / f"pr-{PR}-deepseek_gate.json").exists()
+        assert not (env["requests_dir"] / f"pr-{PR}-glm_gate.json").exists()
 
     def test_a_stack_that_names_the_same_gate_twice_requests_it_once(self, env, default_stack):
         result = _request(_manager(), ["kimi_gate", "kimi_gate"])
