@@ -116,6 +116,27 @@ state with full confidence.
    `claude --model opus`, plus `--remote-control "<name>"` when `CLAUDE_CODE_BRIDGE_SESSION_ID`
    is set (`--rc` / `--no-rc` override), prefixed with `CLAUDE_CONFIG_DIR=...` when that is set
    (tmux does not carry a bare export into a new pane).
+
+   **Start folder.** The successor starts in `<root>/.claude/terminals/T0` when that folder has
+   a `CLAUDE.md` AND its `.claude` resolves (physical path) to `<root>/.claude`. Then the launch
+   line is `cd -- <T0 folder> && claude ...`, and after the footer shows the spawner reads the
+   new pane's folder: another folder means the new window is closed, exit 5, nothing typed, no
+   latch, no receipt. In every other case the successor starts in the project root as before, with
+   one log line. A broken T0 folder adds a WARNING with a repair that destroys nothing, which the
+   spawner prints and never runs: a link to another target gets
+   `ln -sfn <root>/.claude <T0>/.claude`; a plain directory gets
+   `mv <T0>/.claude <T0>/.claude.replaced-<date> && ln -s <root>/.claude <T0>/.claude` (only with
+   no session running in that folder). A missing `.vnx-data` link in a healthy T0 folder is one
+   log line, not a reason to start elsewhere. When the old session runs in another folder than
+   the start folder, one log line names both.
+
+   **Switch.** `VNX_T0_ROTATE_START_DIR` is `t0` (default) or `root`. The tmux global environment
+   is read first, the process environment second; `root` forces the project-root start.
+   ```
+   tmux set-environment -g VNX_T0_ROTATE_START_DIR root     # project root
+   tmux set-environment -gu VNX_T0_ROTATE_START_DIR         # back to the default
+   ```
+   Any other value is refused with exit 2 before a window is opened.
 2. After the footer (`auto mode`) shows, one line of natural language: close the old window
    (`tmux kill-window -t <old>`), run the kickoff skill on the handoff, then take up step 1:
    `<first next step>`. Natural language, because a leading `/` opens the slash autocomplete.
@@ -147,6 +168,9 @@ a real claude or touch a real tmux session, so the sequence is designed, not obs
   `VNX_T0_ROTATE_BUSY_PATTERN`, `VNX_T0_ROTATE_GOAL_ACTIVE_PATTERN`); set the real footer text
   there after the first live rotation if it differs.
 
+The last stdout line is `new_window=@N old_window=@N goal_followup=0|1 run_dir=PATH start_dir=PATH`;
+`start_dir` is shell-quoted (`%q`) and is the last field.
+
 Every run leaves `prompt.txt`, `first_step.txt`, `goal.txt` and `goal_followup.log` in
 `~/.vnx-data/<project>/state/t0_rotation/rotation-<timestamp>-<pid>/`.
 
@@ -155,10 +179,10 @@ Every run leaves `prompt.txt`, `first_step.txt`, `goal.txt` and `goal_followup.l
 | Code | Meaning |
 |---|---|
 | 0 | successor started (and the goal follow-up handed to the tmux server, if any) |
-| 2 | usage error |
+| 2 | usage error, or an invalid `VNX_T0_ROTATE_START_DIR` (valid: `t0`, `root`) |
 | 3 | not in tmux, project root unresolvable, handoff missing or stale |
 | 4 | handoff has no numbered next step |
-| 5 | the successor never showed its footer; nothing was typed, the old window keeps running |
+| 5 | the successor never showed its footer, or started in another folder than the T0 folder; nothing was typed, the old window keeps running |
 
 ## Receipts
 
