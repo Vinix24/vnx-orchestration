@@ -211,3 +211,92 @@ def test_a5_output_without_recount_is_the_old_output(store: Dict[str, Path]) -> 
     expected = json.dumps(oo.build_open_outcomes(store["state"], project_id=PROJECT, limit=None), indent=2)
     assert proc.stdout == expected + "\n"
     assert "recount" not in proc.stdout
+
+
+# ---------------------------------------------------------------------------
+# containment: a report is read only inside <data_dir>/unified_reports
+# ---------------------------------------------------------------------------
+
+def _one_dispatch_store(tmp_path: Path, named: str) -> Dict[str, Path]:
+    root = tmp_path / "vnx"
+    state = root / "state"
+    state.mkdir(parents=True)
+    (root / "unified_reports").mkdir()
+    receipts = [_line("d-one", PROJECT, "success"),
+                _line("d-one", PROJECT, "done", report_file=named, verification=STALE)]
+    (state / oo.LEDGER_NAME).write_text(
+        "".join(json.dumps(r) + "\n" for r in receipts), encoding="utf-8")
+    return {"root": root, "state": state, "tmp": tmp_path}
+
+
+def _recount_of(store_: Dict[str, Path]) -> Dict[str, Any]:
+    return _items(_cli(store_["state"], "--recount"))["d-one"]["recount"]
+
+
+def _assert_refused(recount: Dict[str, Any]) -> None:
+    assert recount["fresh_decision"] == "no_report"
+    assert recount["refused"] == "outside_reports_dir"
+    assert recount["tests_run"] is None and recount["tests_failed"] is None
+    assert recount["method"] is None
+
+
+def test_t1_absolute_path_outside_the_store_is_refused(tmp_path: Path) -> None:
+    outside = _report(tmp_path / "elsewhere" / "outside.md", "`pytest t -q` gave 12 passed.")
+    _assert_refused(_recount_of(_one_dispatch_store(tmp_path, str(outside))))
+
+
+def test_t2_relative_path_climbing_out_is_refused(tmp_path: Path) -> None:
+    _report(tmp_path / "outside.md", "`pytest t -q` gave 12 passed.")
+    store_ = _one_dispatch_store(tmp_path, "../../outside.md")
+    _report(tmp_path / "vnx" / "outside.md", "`pytest t -q` gave 12 passed.")
+    recount = _recount_of(store_)
+    _assert_refused(recount)
+    assert recount["report"].endswith("outside.md")
+
+
+def test_t3_symlink_pointing_out_of_the_folder_is_refused(tmp_path: Path) -> None:
+    outside = _report(tmp_path / "elsewhere" / "clean.md", "`pytest t -q` gave 12 passed.")
+    store_ = _one_dispatch_store(tmp_path, "link.md")
+    (store_["root"] / "unified_reports" / "link.md").symlink_to(outside)
+    _assert_refused(_recount_of(store_))
+
+
+@pytest.mark.parametrize("absolute", [False, True])
+def test_t4_subfolder_report_is_read_as_before(tmp_path: Path, absolute: bool) -> None:
+    store_ = _one_dispatch_store(tmp_path, "headless/x.md")
+    report = _report(store_["root"] / "unified_reports" / "headless" / "x.md",
+                     "`pytest t -q` gave 12 passed.")
+    if absolute:
+        store_ = _one_dispatch_store(tmp_path / "abs", str(report))
+        _report(store_["root"] / "unified_reports" / "headless" / "x.md",
+                "`pytest t -q` gave 12 passed.")
+        named = store_["root"] / "unified_reports" / "headless" / "x.md"
+        (store_["state"] / oo.LEDGER_NAME).write_text("".join(
+            json.dumps(r) + "\n" for r in [
+                _line("d-one", PROJECT, "success"),
+                _line("d-one", PROJECT, "done", report_file=str(named), verification=STALE)]),
+            encoding="utf-8")
+    recount = _recount_of(store_)
+    assert recount["fresh_decision"] == "accept"
+    assert recount["refused"] is None
+    assert recount["tests_run"] == 12
+
+
+def test_t5_summary_counts_a_refused_item_under_no_report(tmp_path: Path) -> None:
+    outside = _report(tmp_path / "elsewhere" / "outside.md", "`pytest t -q` gave 12 passed.")
+    store_ = _one_dispatch_store(tmp_path, str(outside))
+    summary = json.loads(_cli(store_["state"], "--recount").stdout)["recount_summary"]
+    assert {(p["fresh_decision"], p["count"]) for p in summary} == {("no_report", 1)}
+
+
+def test_a4_recount_with_a_refused_path_writes_nothing(tmp_path: Path) -> None:
+    outside = _report(tmp_path / "elsewhere" / "outside.md", "`pytest t -q` gave 12 passed.")
+    store_ = _one_dispatch_store(tmp_path, str(outside))
+    before = _snapshot(store_["tmp"])
+    assert _cli(store_["state"], "--recount").returncode == 0
+    assert _snapshot(store_["tmp"]) == before
+
+
+def test_every_recount_object_carries_refused(store: Dict[str, Path]) -> None:
+    items = _items(_cli(store["state"], "--recount"))
+    assert all(i["recount"]["refused"] is None for i in items.values())

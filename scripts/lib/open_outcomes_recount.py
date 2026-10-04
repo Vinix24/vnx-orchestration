@@ -29,6 +29,7 @@ from receipt_verdict import compute_verdict
 
 NO_REPORT = "no_report"
 REPORTS_DIRNAME = "unified_reports"
+REFUSED_OUTSIDE = "outside_reports_dir"
 
 
 def last_report_receipts(
@@ -54,6 +55,15 @@ def report_path_for(receipt: Optional[Dict[str, Any]], dispatch_id: str, data_di
     return path if path.is_absolute() else reports / path
 
 
+def _inside_reports_dir(path: Path, data_dir: Path) -> bool:
+    """True when ``path``, symlinks followed, lies inside the project's report folder."""
+    try:
+        path.resolve().relative_to((Path(data_dir) / REPORTS_DIRNAME).resolve())
+    except (ValueError, OSError, RuntimeError):
+        return False
+    return True
+
+
 def _stored_reading(receipt: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     verification = (receipt or {}).get("verification") or {}
     return {key: verification.get(key) for key in ("method", "tests_run", "tests_failed")}
@@ -72,13 +82,17 @@ def recount_item(
     """The ``recount`` object of one open item."""
     path = report_path_for(report_receipt, item["dispatch_id"], data_dir)
     stored = _stored_reading(report_receipt)
+    if not _inside_reports_dir(path, data_dir):
+        return {"stored": stored, "report": str(path), "method": None, "tests_run": None,
+                "tests_failed": None, "fresh_decision": NO_REPORT, "refused": REFUSED_OUTSIDE}
     if not path.is_file():
         return {"stored": stored, "report": str(path), "method": None, "tests_run": None,
-                "tests_failed": None, "fresh_decision": NO_REPORT}
+                "tests_failed": None, "fresh_decision": NO_REPORT, "refused": None}
     fresh = _verification_from_report(path)
     return {
         "stored": stored,
         "report": str(path),
+        "refused": None,
         "method": fresh.get("method"),
         "tests_run": fresh.get("tests_run"),
         "tests_failed": fresh.get("tests_failed"),

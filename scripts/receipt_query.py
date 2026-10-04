@@ -89,7 +89,6 @@ from receipt_provenance import find_receipts_by_dispatch as _find_receipts_by_di
 from receipt_outcome import OUTCOME_READER_EPOCH, is_foreign_project, summarize as summarize_outcomes
 from open_outcomes import (
     DECISION_LOG_NAME,
-    LEDGER_NAME,
     OUTCOME_DECISIONS,
     build_open_outcomes,
     iter_complete_lines,
