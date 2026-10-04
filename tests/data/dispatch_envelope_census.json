@@ -1763,6 +1763,13 @@
       "mechanism": "patch.object-attr",
       "module_target": "dispatch_envelope",
       "symbol": "ClaudeSubprocessAdapter.run"
+    },
+    {
+      "file": "tests/test_verification_recount.py",
+      "line": 26,
+      "mechanism": "direct-call",
+      "module_target": "envelope_govern_support",
+      "symbol": "_verification_from_report"
     }
   ],
   "family": [
