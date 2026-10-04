@@ -695,14 +695,15 @@ class TestSeatWalkSkipsAnUnreachableSeat:
         pr.record_failure("codex", _CODEX_QUOTA_TEXT, source="test", state_dir=state_dir)
         pr.record_failure("kimi", "403 access_terminated_error: reached your usage limit", source="test",
                           state_dir=state_dir)
+        pr.record_failure("deepseek-harness", _DEEPSEEK_402_TEXT, source="test", state_dir=state_dir)
         asked, requested = _walk(manager, monkeypatch, ["codex_gate"], 903)
         assert asked == ["glm_gate"]
-        assert [h["gate"] for h in requested[0]["takeover_path"]] == ["codex_gate", "kimi_gate"]
+        assert [h["gate"] for h in requested[0]["takeover_path"]] == ["codex_gate", "kimi_gate", "deepseek_gate"]
 
     def test_a_credential_refusal_is_reported_as_auth_not_as_quota(self, manager, state_dir, monkeypatch):
         pr.record_failure("kimi", "Error code: 401 - invalid api key", source="test", state_dir=state_dir)
         asked, requested = _walk(manager, monkeypatch, ["kimi_gate"], 904)
-        assert asked == ["glm_gate"]
+        assert asked == ["deepseek_gate"]
         assert requested[0]["takeover_path"][0]["reason"] == pr.REASON_AUTH_401
 
     def test_when_every_seat_is_unreachable_the_chain_ends_named_and_asks_nobody(self, manager, state_dir, monkeypatch):

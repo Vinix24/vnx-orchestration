@@ -47,9 +47,10 @@ class Gate(str, Enum):
     "no gate assigned" and is handled separately by callers — it is not a member
     here so ``Gate("")`` fails the same as any other unknown value.
 
-    KIMI_GATE and GLM_GATE (dlv45) extend the closed set with the same
-    discipline as every other member: each has a ``gate_request_handler``
-    dispatch branch and a ``closure_verifier._GATE_HANDLERS`` entry, pinned by
+    KIMI_GATE and GLM_GATE (dlv45) and DEEPSEEK_GATE (OI-1984) extend the closed
+    set with the same discipline as every other member: each has a
+    ``gate_request_handler`` dispatch branch and a
+    ``closure_verifier._GATE_HANDLERS`` entry, pinned by
     ``test_closure_verifier_gate_enum_drift.py``. Extending the enum without
     both is what OI-1094 exists to catch — see that test module before adding
     another member.
@@ -60,16 +61,17 @@ class Gate(str, Enum):
     WIRING_GATE             = "wiring_gate"
     KIMI_GATE               = "kimi_gate"
     GLM_GATE                = "glm_gate"
+    DEEPSEEK_GATE           = "deepseek_gate"
 
 
 # Review gates that are registered and runnable but deliberately NOT members of
-# the closed ``Gate`` enum. deepseek_gate is a config-based harness-lane gate
-# (gate_recorder.GATE_PROVIDERS, OI-1714/OI-1838) with a request branch in
-# gate_request_handler, yet it has no closure_verifier._GATE_HANDLERS entry, and
-# adding an enum member without one trips test_closure_verifier_gate_enum_drift
-# (OI-1094). Membership here says "this name exists and may be declared, staged
-# and requested"; it does NOT claim the closure verifier can attest it.
-GATES_OUTSIDE_ENUM = frozenset({"deepseek_gate"})
+# the closed ``Gate`` enum. Empty since OI-1984: deepseek_gate, the last one,
+# joined the enum together with its closure_verifier._GATE_HANDLERS entry (the
+# discipline test_closure_verifier_gate_enum_drift pins, OI-1094). A gate that is
+# runnable but has no handler would go here again; membership says "this name
+# exists and may be declared, staged and requested", not that the closure
+# verifier can attest it.
+GATES_OUTSIDE_ENUM: frozenset = frozenset()
 
 # THE answer to "which gate names exist". Every reader that has to decide
 # whether a gate name is legal reads this one set: dispatch_spec.validate()

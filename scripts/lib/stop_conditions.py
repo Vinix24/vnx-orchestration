@@ -796,6 +796,7 @@ GATE_LEDGER_PROVIDERS: Dict[str, FrozenSet[str]] = {
     "wiring_gate": frozenset(),  # runs on gh, no model provider — explicit, not absent
     "kimi_gate": frozenset({"kimi"}),
     "glm_gate": frozenset({"glm-harness"}),
+    "deepseek_gate": frozenset({"deepseek-harness"}),  # GATE_PROVIDERS lane name; 449 ledger rows carry this label
 }
 
 

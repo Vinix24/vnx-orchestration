@@ -354,7 +354,7 @@ A result record is stale if:
 
 | # | Non-Goal | Rationale |
 |---|----------|-----------|
-| NG-1 | Adding new gate types beyond codex_gate, claude_github_optional (amended 2026-09-28: the gates registered today are codex_gate, claude_github_optional, and the harness-lane trio kimi_gate/glm_gate/deepseek_gate — `gate_recorder.GATE_PROVIDERS`, `scripts/lib/gate_recorder.py:72-86`. The standing default review stack is `codex_gate,kimi_gate`; `glm_gate`/`deepseek_gate` are takeover-only fallback via `VNX_REVIEW_GATE_TAKEOVER_CHAIN`, default `codex_gate,kimi_gate,glm_gate,deepseek_gate` — `scripts/lib/gate_request_handler.py:78`) | FEATURE_PLAN scopes this out explicitly |
+| NG-1 | Adding new gate types beyond codex_gate, claude_github_optional (amended 2026-09-28: the gates registered today are codex_gate, claude_github_optional, and the harness-lane trio kimi_gate/glm_gate/deepseek_gate — `gate_recorder.GATE_PROVIDERS`, `scripts/lib/gate_recorder.py:72-86`. The standing default review stack is `codex_gate,kimi_gate`; `glm_gate`/`deepseek_gate` are takeover-only fallback via `VNX_REVIEW_GATE_TAKEOVER_CHAIN`, default `codex_gate,kimi_gate,deepseek_gate,glm_gate` (order changed 2026-10-04, OI-1984: deepseek_gate follows kimi_gate, glm_gate is the last link) — `scripts/lib/gate_request_handler.py:78`) | FEATURE_PLAN scopes this out explicitly |
 | NG-2 | Changing the review contract or evidence verification rules | Doc 45 and Doc 130 govern evidence rules; this contract governs execution lifecycle |
 | NG-3 | Modifying PR completion criteria | Those remain per existing contracts |
 | NG-4 | Automatic retry of failed gates | Failed gates require explicit re-request. Automatic retry is a future concern. |

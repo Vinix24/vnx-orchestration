@@ -94,6 +94,13 @@ GATE_COST: Dict[str, GateCost] = {
         note="governed lane entry (C6 step 3); request --review-stack glm_gate first, then "
              "source ~/.config/vnx/provider-usage.env in the same subshell; glm-5.2 only",
     ),
+    Gate.DEEPSEEK_GATE.value: GateCost(
+        command="python3 scripts/review_gate_manager.py execute --gate deepseek_gate --pr {pr}",
+        lane="deepseek-harness → DeepSeek API",
+        usd="API credit, 0.30 in / 1.20 out per Mtok",
+        note="governed lane entry (OI-1984); request --review-stack deepseek_gate first; "
+             "deepseek-flash (V4.1-Flash) peak tariff per wave7_models.yaml; takes over after kimi, before glm",
+    ),
     Gate.KIMI_GATE.value: GateCost(
         command="python3 scripts/review_gate_manager.py execute --gate kimi_gate --pr {pr}",
         lane="kimi CLI (OAuth)",
@@ -262,14 +269,15 @@ class Readiness:
             # list was the one place this report said "nothing outstanding"
             # about a PR it had just called NOT READY.
             # Subscription reviewers first (operator decision 2026-09-26): codex and
-            # kimi cost nothing per run, glm bills API credit and is named last, as
-            # the fallback for the day both are unavailable.
+            # kimi cost nothing per run. deepseek bills API credit and is the first
+            # fallback, glm the last (chain codex > kimi > deepseek > glm, OI-1984).
             choices = " or ".join(
                 f"{name} ({GATE_COST[name].usd})"
                 for name in (Gate.CODEX_GATE.value, Gate.KIMI_GATE.value)
             )
             fallback = (
-                f"{Gate.GLM_GATE.value} ({GATE_COST[Gate.GLM_GATE.value].usd}) only when both are unavailable"
+                f"{Gate.DEEPSEEK_GATE.value} ({GATE_COST[Gate.DEEPSEEK_GATE.value].usd}), "
+                f"then {Gate.GLM_GATE.value} ({GATE_COST[Gate.GLM_GATE.value].usd}), only when both are unavailable"
             )
             out.append(
                 f"declare and run a review gate for #{self.pr_number} — {choices}, "

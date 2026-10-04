@@ -137,15 +137,18 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         subsystem="governance-enforcement-stack", status="LIVE"),
     "VNX_REVIEW_GATE_TAKEOVER_CHAIN": _e(
         "VNX_REVIEW_GATE_TAKEOVER_CHAIN", "string",
-        "codex_gate,kimi_gate,glm_gate,deepseek_gate", "gate",
-        "Ordered review-gate takeover chain (BETA3-E1, 26-08 operator decision). On "
-        "lane_exhausted a seat rolls over to the NEXT gate named here. The order is "
-        "subscription reviewers first (codex_gate, kimi_gate), API-credit reviewers only "
-        "after both (glm_gate, deepseek_gate); a guard test fails when an API-credit gate "
-        "is placed before a subscription gate. deepseek_gate is the "
-        "chain's last configured link -- since OI-1714/OI-1838 it is a real harness-lane gate "
-        "(available by registration, requested via gate_request_handler._request_deepseek), not "
-        "a skip pending a runner. "
+        "codex_gate,kimi_gate,deepseek_gate,glm_gate", "gate",
+        "Ordered review-gate takeover chain (BETA3-E1, 26-08 operator decision; order "
+        "changed 2026-10-04, OI-1984). On lane_exhausted a seat rolls over to the NEXT gate "
+        "named here. The order is subscription reviewers first (codex_gate, kimi_gate), "
+        "then the API-credit reviewers: deepseek_gate is the fallback after kimi_gate and "
+        "glm_gate is the last link. Both API-credit gates stay behind both subscription "
+        "gates and are a fallback only, never a project default reviewer; a guard test fails "
+        "when an API-credit gate is placed before a subscription gate. Since "
+        "OI-1714/OI-1838 deepseek_gate is a real harness-lane gate (available by "
+        "registration, requested via gate_request_handler._request_deepseek), and since "
+        "OI-1984 it is a member of the dispatch_spec.Gate enum, so its takeover record "
+        "signs the seat it took over at the merge door. "
         "ABSENT (no env/DB override) falls back to this literal default string. An EXPLICIT "
         "empty value ('') means NO takeover chain at all -- distinct from absent. Any name "
         "outside the known gate set, or a name repeated (a cycle), fails loud at read time. "

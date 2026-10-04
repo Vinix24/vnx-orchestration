@@ -443,7 +443,7 @@ class TestOutcomeActionMirrorsRecordStatus:
 
 # ---------------------------------------------------------------------------
 # D2e (dispatch 20260830-120000-d2e-takeover-keten-bewijs) — the review-gate
-# takeover chain (codex_gate -> kimi_gate -> glm_gate -> deepseek_gate,
+# takeover chain (codex_gate -> kimi_gate -> deepseek_gate -> glm_gate,
 # gate_request_handler._build_review_gate_takeover_chain) substitutes a
 # successor gate as the READER at request time, but writes that successor's
 # verdict under its OWN name (pr-<n>-<successor>.json), never under the
@@ -530,8 +530,8 @@ def _seed_stuck_gate_result(state_dir: Path, gate: str, pr_number: int) -> None:
 class TestTakeoverChainEvidence:
     @pytest.fixture(autouse=True)
     def _clean_takeover_chain_env(self, monkeypatch):
-        # Hermetic: the default chain (codex_gate,kimi_gate,glm_gate,
-        # deepseek_gate) must come from the registry default, never from
+        # Hermetic: the default chain (codex_gate,kimi_gate,deepseek_gate,
+        # glm_gate) must come from the registry default, never from
         # whatever happens to be set in the ambient shell/CI environment.
         monkeypatch.delenv("VNX_REVIEW_GATE_TAKEOVER_CHAIN", raising=False)
         monkeypatch.delenv("VNX_OVERRIDE_VNX_REVIEW_GATE_TAKEOVER_CHAIN", raising=False)

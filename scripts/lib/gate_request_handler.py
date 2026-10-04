@@ -51,15 +51,14 @@ class ReviewGateTakeoverConfigError(ValueError):
 
 # Ordered review-gate takeover chain (BETA3-E1, 26-08 operator decision,
 # dispatch 20260826-beta3-e1-overname-keten-en-uitputtingstoets): codex_gate
-# -> kimi_gate -> glm_gate -> deepseek_gate. This SUPERSEDES the single-hop
-# dict a prior deliverable shipped, but PRESERVES that hop's own decision
-# unchanged: kimi_gate -> glm_gate is still the same pairing the 22-08
-# operator decision made (see the historical rationale this replaces, below)
-# -- it is now just one link inside a longer, explicitly configured chain
-# rather than the whole chain.
+# -> kimi_gate -> glm_gate -> deepseek_gate. OI-1984 (operator decision
+# 2026-10-04) reordered the last two links: the chain is now codex_gate ->
+# kimi_gate -> deepseek_gate -> glm_gate, so glm is the last link and no longer
+# the fallback after kimi. Both API-credit gates stay behind both subscription
+# gates. The historical rationale below describes the 22-08 pairing that the
+# 26-08 chain built on; it is kept as history.
 #
-# Historical rationale for kimi_gate -> glm_gate (22-08, unchanged by this
-# dispatch): on 22-08 glm_gate and kimi_gate gave OPPOSITE verdicts on the
+# Historical rationale for kimi_gate -> glm_gate (22-08): on 22-08 glm_gate and kimi_gate gave OPPOSITE verdicts on the
 # identical diff/contract_hash -- glm FAIL with a blocking finding, kimi PASS
 # with zero findings -- so there is no measured basis for which reader is the
 # better fallback, only that a working reader beats an unfilled seat. The
@@ -67,15 +66,16 @@ class ReviewGateTakeoverConfigError(ValueError):
 # question 1); this mapping stays a choice under uncertainty until that
 # lands.
 #
-# deepseek_gate is the chain's END-LINK: no gate is configured after it, so a
-# takeover walk stops there. Since OI-1714/OI-1838 it is a real harness-lane
-# gate (gate_recorder.GATE_PROVIDERS, "deepseek-harness"), available by
+# glm_gate is the chain's END-LINK since 2026-10-04 (OI-1984): no gate is
+# configured after it, so a takeover walk stops there. deepseek_gate sits one
+# link earlier, right after kimi_gate. Since OI-1714/OI-1838 deepseek_gate is a
+# real harness-lane gate (gate_recorder.GATE_PROVIDERS, "deepseek-harness"), available by
 # REGISTRATION -- `gate_is_available("deepseek_gate")` is True and
 # `_request_deepseek` (below) actually requests it, the same as any other
 # harness-lane gate. It no longer resolves not_executable/gate_runner_missing
 # by design; that was the pre-OI-1714 defect (a script-runner registration
 # pointing at a file that never existed), not the current end-link behaviour.
-_DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN = "codex_gate,kimi_gate,glm_gate,deepseek_gate"
+_DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN = "codex_gate,kimi_gate,deepseek_gate,glm_gate"
 
 
 def _parse_review_gate_takeover_chain(raw: str) -> Dict[str, str]:
@@ -221,8 +221,8 @@ def _scan_seat_failure_text(result: Dict[str, Any], manager: "Optional[GateReque
 # a lane_exhausted classification had no time dimension at all -- a quota
 # refusal is inherently temporary, but the walk in _dispatch_review_seat
 # reads it as a permanent property of the lane. Measured live: once EVERY
-# gate in the configured chain (codex_gate -> kimi_gate -> glm_gate ->
-# deepseek_gate) has a lane_exhausted record on file, the walk always lands
+# gate in the configured chain (codex_gate -> kimi_gate -> deepseek_gate ->
+# glm_gate) has a lane_exhausted record on file, the walk always lands
 # on _chain_exhausted_result and NOTHING ever gets a fresh attempt again --
 # PR #1719 stayed blocked on a 10:13 record five hours later, at 15:08, with
 # five OTHER PRs completing real codex runs in between (no provider outage).
@@ -1697,9 +1697,8 @@ class GateRequestHandlerMixin:
         20260911-c6 step 2), reached through the "deepseek-harness" provider
         lane rather than a repo script, so its availability is decided by
         REGISTRATION alone (gate_recorder.gate_is_available) and it is
-        requestable with no runner file on disk. It is deliberately NOT a
-        ``dispatch_spec.Gate`` enum member yet (it lives in
-        ``dispatch_spec.GATES_OUTSIDE_ENUM``) but IS a registered gate name
+        requestable with no runner file on disk. It is a ``dispatch_spec.Gate``
+        enum member (OI-1984) and a registered gate name
         (``REGISTERED_GATE_NAMES``): a legal review-gate-takeover-CHAIN link
         (BETA3-E1, 26-08 operator decision), a legal spec/staging gate and a
         legal ``VNX_DEFAULT_REVIEW_STACK`` entry.
