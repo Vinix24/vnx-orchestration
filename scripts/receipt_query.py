@@ -91,8 +91,10 @@ from open_outcomes import (
     DECISION_LOG_NAME,
     OUTCOME_DECISIONS,
     build_open_outcomes,
+    iter_complete_lines,
     record_outcome_decision,
 )
+from open_outcomes_recount import add_recount
 from vnx_paths import project_id_from_state_dir
 
 LEDGER_NAME = "t0_receipts.ndjson"
@@ -578,31 +580,53 @@ def _project_id_for(args: argparse.Namespace, state_dir: Path) -> str:
     )
 
 
+def _recounted(result: Dict[str, Any], state_dir: Path, project_id: str,
+               limit: Optional[int]) -> Dict[str, Any]:
+    """``result`` (built without a limit) with the fresh reading per item and the
+    summary over all of them; ``limit`` then trims what is shown. Read-only."""
+    receipts = list(iter_complete_lines(state_dir / LEDGER_NAME))
+    counted = add_recount(result, receipts, project_id=project_id, data_dir=state_dir.parent)
+    shown = counted["items"] if limit is None else counted["items"][:max(0, limit)]
+    return dict(counted, items=shown, more=len(counted["items"]) - len(shown))
+
+
+def _print_open_outcomes(result: Dict[str, Any], project_id: str) -> None:
+    bo = result["by_outcome"]
+    print(f"open outcomes (project={project_id}, since {result['since']}): "
+          f"{result['total']} (reject={bo['reject']} investigate={bo['investigate']})")
+    for item in result["items"]:
+        fresh = item.get("recount", {}).get("fresh_decision")
+        column = f"  fresh={fresh}" if fresh else ""
+        print(f"  {item['outcome']:<11} {item['dispatch_id']}  "
+              f"[{item['kind']}] {item.get('reason') or ''}{column}")
+    if result["more"]:
+        print(f"  ... and {result['more']} more")
+    if result.get("ignored"):
+        print(f"  ({result['ignored']} .md in dispatches/active/ without a [[TARGET:...]] "
+              "marker ignored: no dispatch; check_active_drain.py names them)")
+    for pair in result.get("recount_summary", []):
+        print(f"  recount: stored={pair['stored_decision']} fresh={pair['fresh_decision']} "
+              f"count={pair['count']}")
+
+
 def _cmd_open_outcomes(args: argparse.Namespace) -> int:
     state_dir = Path(args.state_dir)
     project_id = _project_id_for(args, state_dir)
     if not project_id:
         print("error: no project id (pass --project-id or set VNX_PROJECT_ID)", file=sys.stderr)
         return 2
-    result = build_open_outcomes(state_dir, project_id=project_id, limit=args.limit)
+    result = build_open_outcomes(
+        state_dir, project_id=project_id, limit=None if args.recount else args.limit)
     if not result["available"]:
         print(f"error: {result['reason']}", file=sys.stderr)
         return 2
+    if args.recount:
+        result = _recounted(result, state_dir, project_id, args.limit)
 
     if args.json:
         print(json.dumps(result, indent=2))
     else:
-        bo = result["by_outcome"]
-        print(f"open outcomes (project={project_id}, since {result['since']}): "
-              f"{result['total']} (reject={bo['reject']} investigate={bo['investigate']})")
-        for item in result["items"]:
-            print(f"  {item['outcome']:<11} {item['dispatch_id']}  "
-                  f"[{item['kind']}] {item.get('reason') or ''}")
-        if result["more"]:
-            print(f"  ... and {result['more']} more")
-        if result.get("ignored"):
-            print(f"  ({result['ignored']} .md in dispatches/active/ without a [[TARGET:...]] "
-                  "marker ignored: no dispatch; check_active_drain.py names them)")
+        _print_open_outcomes(result, project_id)
     return 0
 
 
@@ -787,6 +811,11 @@ def _add_outcome_parsers(sub: Any) -> None:
     p_open.add_argument(
         "--limit", type=int, default=None,
         help="list at most N items; the counts always cover all (default: all)",
+    )
+    p_open.add_argument(
+        "--recount", action="store_true",
+        help="next to the stored reading: the reading of the report with the reader on "
+             "this checkout and the decision it would give (read-only)",
     )
     p_open.add_argument("--json", action="store_true")
     p_open.set_defaults(func=_cmd_open_outcomes)

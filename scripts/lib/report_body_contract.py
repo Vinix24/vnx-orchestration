@@ -79,6 +79,10 @@ RED_RUN_LABELS: tuple[str, ...] = ("Red run", "Red runs", "Rode run", "Rode runs
                                    "Before the fix", "Voor de fix")
 GREEN_RUN_LABELS: tuple[str, ...] = ("Green run", "Green runs", "Groene run", "Groene runs",
                                      "After the fix", "Na de fix")
+# Bare green words that are a label only with a colon right behind them
+# (emphasis may sit between the word and the colon): `Green: 63 passed`,
+# `**Groen**: 63 passed`. `Green` without the colon is prose.
+GREEN_COLON_LABELS: tuple[str, ...] = ("Green", "Groen")
 
 # Aliases accepted by the validator so existing authored reports do not break.
 _SECTION_ALIASES: dict[str, tuple[str, ...]] = {
