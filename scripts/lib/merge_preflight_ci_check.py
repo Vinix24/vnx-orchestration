@@ -108,6 +108,15 @@ GH_AUTH_TIMEOUT = 10
 GH_RUN_LIST_TIMEOUT = 15
 GIT_TIMEOUT = 10
 
+# Closed set of ``reason`` codes: every return path of ``check_ci_run_for_head``
+# carries exactly one, so a caller never has to parse the Dutch message.
+REASON_CODES = frozenset({
+    "go", "overridden", "running", "conclusion", "no_run", "order_undeterminable",
+    "gh_missing", "gh_auth_timeout", "gh_unauthenticated", "gh_run_list_timeout",
+    "gh_run_list_failed", "unparseable", "short_sha", "head_unresolved",
+    "override_without_reason",
+})
+
 
 def _resolve_workflow_name(workflow_name: Optional[str], project_workflow: Optional[str] = None) -> str:
     """Resolve the workflow name: explicit arg > the project's ``ci_workflow`` >
@@ -182,9 +191,11 @@ def _git(project_root: Path, args: List[str]) -> Optional[str]:
     return result.stdout.strip()
 
 
-def _no_go(message: str, **extra: Any) -> Dict[str, Any]:
+def _no_go(reason: str, message: str, **extra: Any) -> Dict[str, Any]:
+    """NO-GO verdict. ``reason`` is the machine-readable code (closed set, see ``REASON_CODES``)."""
     base: Dict[str, Any] = {
         "verdict": "NO-GO",
+        "reason": reason,
         "message": message,
         "ci_conclusion": None,
         "ran_on_sha": False,
@@ -201,6 +212,7 @@ def _overridden_go(reason: str, head_sha: Optional[str], workflow_name: str) -> 
     """GO verdict for an explicit operator override. Always visible, never silent."""
     return {
         "verdict": "GO",
+        "reason": "overridden",
         "message": f"OVERRIDE: VNX CI-check overgeslagen voor merge ({reason})",
         "ci_conclusion": None,
         "ran_on_sha": False,
@@ -210,6 +222,34 @@ def _overridden_go(reason: str, head_sha: Optional[str], workflow_name: str) -> 
         "overridden": True,
         "override_reason": reason,
     }
+
+
+def _go(workflow: str, head_sha: str, run_id: Any, detail: str) -> Dict[str, Any]:
+    return {
+        "verdict": "GO",
+        "reason": "go",
+        "message": f"{workflow} geslaagd op {head_sha[:12]} ({detail})",
+        "ci_conclusion": "success",
+        "ran_on_sha": True,
+        "head_sha": head_sha,
+        "ci_run_id": run_id,
+        "workflow_name": workflow,
+        "overridden": False,
+        "override_reason": None,
+    }
+
+
+def _fail(workflow: str, head_sha: str, run_id: Any, conclusion: str, detail: str) -> Dict[str, Any]:
+    return _no_go(
+        "conclusion",
+        f"{workflow} conclusion is '{conclusion}' op {head_sha[:12]} ({detail}): "
+        "deze merge is niet toetsbaar",
+        ci_conclusion=conclusion or None,
+        ran_on_sha=True,
+        head_sha=head_sha,
+        ci_run_id=run_id,
+        workflow_name=workflow,
+    )
 
 
 def check_ci_run_for_head(
@@ -246,7 +286,7 @@ def check_ci_run_for_head(
     reason = _resolve_override_reason(override_reason)
     if reason is not None:
         if not reason:
-            return _no_go(
+            return _no_go("override_without_reason",
                 "override zonder reden geweigerd: een override vereist een niet-lege reden "
                 "(geen stille bypass)",
                 workflow_name=resolved_workflow,
@@ -257,7 +297,7 @@ def check_ci_run_for_head(
 
     # ── gh availability ────────────────────────────────────────────────────
     if shutil.which(gh_bin) is None:
-        return _no_go(
+        return _no_go("gh_missing",
             "gh CLI niet beschikbaar: deze merge is niet toetsbaar",
             workflow_name=resolved_workflow,
         )
@@ -268,7 +308,7 @@ def check_ci_run_for_head(
     if head_sha is None:
         head_sha = _git(project_root, ["rev-parse", "HEAD"])
         if not head_sha:
-            return _no_go(
+            return _no_go("head_unresolved",
                 "HEAD-SHA kon niet worden bepaald: deze merge is niet toetsbaar",
                 workflow_name=resolved_workflow,
             )
@@ -278,7 +318,7 @@ def check_ci_run_for_head(
     # "no CI ran" instead of "wrong query". A short head_sha here would recreate
     # that exact false-NO-GO, so it is refused explicitly rather than queried.
     if len(head_sha) < 40:
-        return _no_go(
+        return _no_go("short_sha",
             f"head_sha '{head_sha}' is afgekort ({len(head_sha)} tekens): "
             "gh run list --commit vereist de volle 40-teken sha, anders komt er stil nul "
             "rijen terug: deze merge is niet toetsbaar",
@@ -287,21 +327,21 @@ def check_ci_run_for_head(
         )
 
     # ── gh authentication ──────────────────────────────────────────────────
-    auth, auth_err = _capture([gh_bin, "auth", "status"], timeout=GH_AUTH_TIMEOUT)
+    auth, auth_err = _capture([gh_bin, "auth", "status"], timeout=GH_AUTH_TIMEOUT, cwd=str(project_root))
     if auth_err == "missing":
-        return _no_go(
+        return _no_go("gh_missing",
             "gh CLI niet beschikbaar: deze merge is niet toetsbaar",
             head_sha=head_sha,
             workflow_name=resolved_workflow,
         )
     if auth_err == "timeout":
-        return _no_go(
+        return _no_go("gh_auth_timeout",
             "gh auth status liep vast: deze merge is niet toetsbaar",
             head_sha=head_sha,
             workflow_name=resolved_workflow,
         )
     if auth is None or auth.returncode != 0:
-        return _no_go(
+        return _no_go("gh_unauthenticated",
             "gh is niet geauthenticeerd (gh auth status faalde): deze merge is niet toetsbaar",
             head_sha=head_sha,
             workflow_name=resolved_workflow,
@@ -320,20 +360,20 @@ def check_ci_run_for_head(
         cwd=str(project_root),
     )
     if run_err == "missing":
-        return _no_go(
+        return _no_go("gh_missing",
             "gh CLI niet beschikbaar: deze merge is niet toetsbaar",
             head_sha=head_sha,
             workflow_name=resolved_workflow,
         )
     if run_err == "timeout":
-        return _no_go(
+        return _no_go("gh_run_list_timeout",
             f"gh run list liep vast voor workflow '{resolved_workflow}': deze merge is niet toetsbaar",
             head_sha=head_sha,
             workflow_name=resolved_workflow,
         )
     if run_list is None or run_list.returncode != 0:
         stderr = (run_list.stderr if run_list else "").strip()
-        return _no_go(
+        return _no_go("gh_run_list_failed",
             f"gh run list faalde voor workflow '{resolved_workflow}': deze merge is niet toetsbaar"
             + (f" ({stderr[:120]})" if stderr else ""),
             head_sha=head_sha,
@@ -343,7 +383,7 @@ def check_ci_run_for_head(
     try:
         runs = json.loads(run_list.stdout)
     except json.JSONDecodeError:
-        return _no_go(
+        return _no_go("unparseable",
             f"gh-uitvoer niet te parsen voor workflow '{resolved_workflow}': deze merge is niet toetsbaar",
             head_sha=head_sha,
             workflow_name=resolved_workflow,
@@ -354,7 +394,7 @@ def check_ci_run_for_head(
     # defensive no-op against a gh quirk returning extra entries.
     matching = [run for run in runs if run.get("headSha") == head_sha]
     if not matching:
-        return _no_go(
+        return _no_go("no_run",
             f"Geen VNX CI-run gevonden voor {head_sha[:12]}: deze merge is niet toetsbaar",
             head_sha=head_sha,
             workflow_name=resolved_workflow,
@@ -368,7 +408,7 @@ def check_ci_run_for_head(
     running = [run for run in matching if (run.get("status") or "") in ("in_progress", "queued")]
     if running:
         run_id = running[0].get("databaseId")
-        return _no_go(
+        return _no_go("running",
             f"{resolved_workflow} draait nog op {head_sha[:12]} (status: {running[0].get('status')}): "
             "deze merge is niet toetsbaar tot alle runs op deze commit op 'success' eindigen",
             ci_conclusion=None,
@@ -382,38 +422,14 @@ def check_ci_run_for_head(
     # filtered above).
     completed = matching
 
-    def _go(run_id: Any, detail: str) -> Dict[str, Any]:
-        return {
-            "verdict": "GO",
-            "message": f"{resolved_workflow} geslaagd op {head_sha[:12]} ({detail})",
-            "ci_conclusion": "success",
-            "ran_on_sha": True,
-            "head_sha": head_sha,
-            "ci_run_id": run_id,
-            "workflow_name": resolved_workflow,
-            "overridden": False,
-            "override_reason": None,
-        }
-
-    def _fail(run_id: Any, conclusion: str, detail: str) -> Dict[str, Any]:
-        return _no_go(
-            f"{resolved_workflow} conclusion is '{conclusion}' op {head_sha[:12]} ({detail}): "
-            "deze merge is niet toetsbaar",
-            ci_conclusion=conclusion or None,
-            ran_on_sha=True,
-            head_sha=head_sha,
-            ci_run_id=run_id,
-            workflow_name=resolved_workflow,
-        )
-
     # ── Exactly one completed run: its conclusion decides (unchanged) ──────
     if len(completed) == 1:
         run = completed[0]
         run_id = run.get("databaseId")
         conclusion = run.get("conclusion") or ""
         if conclusion != "success":
-            return _fail(run_id, conclusion, f"run {run_id}")
-        return _go(run_id, f"run {run_id}")
+            return _fail(resolved_workflow, head_sha, run_id, conclusion, f"run {run_id}")
+        return _go(resolved_workflow, head_sha, run_id, f"run {run_id}")
 
     # ── Multiple completed runs on the same commit: the LATEST decides ─────
     # (OI-1613). A stale failing run next to a newer successful one on the
@@ -423,7 +439,7 @@ def check_ci_run_for_head(
     # "first in the list".
     dated = [(_parse_created_at(run.get("createdAt")), run) for run in completed]
     if any(ts is None for ts, _ in dated):
-        return _no_go(
+        return _no_go("order_undeterminable",
             f"kan de volgorde van {len(completed)} klare VNX CI-runs op {head_sha[:12]} niet "
             "vaststellen (createdAt ontbreekt of is onparsebaar bij minstens een run): "
             "deze merge is niet toetsbaar",
@@ -436,7 +452,7 @@ def check_ci_run_for_head(
     latest_ts, latest_run = dated[0]
     second_ts, _second_run = dated[1]
     if latest_ts == second_ts:
-        return _no_go(
+        return _no_go("order_undeterminable",
             f"kan de volgorde van {len(completed)} klare VNX CI-runs op {head_sha[:12]} niet "
             "vaststellen (twee runs delen exact dezelfde createdAt): deze merge is niet toetsbaar",
             ran_on_sha=True,
@@ -448,8 +464,8 @@ def check_ci_run_for_head(
     conclusion = latest_run.get("conclusion") or ""
     detail = f"laatste van {len(completed)} runs: {run_id}, createdAt {latest_run.get('createdAt')}"
     if conclusion != "success":
-        return _fail(run_id, conclusion, detail)
-    return _go(run_id, detail)
+        return _fail(resolved_workflow, head_sha, run_id, conclusion, detail)
+    return _go(resolved_workflow, head_sha, run_id, detail)
 
 
 def main(argv: Optional[List[str]] = None) -> int:

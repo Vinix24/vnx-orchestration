@@ -492,7 +492,7 @@ def test_index_with_live_work_carries_the_current_schema(tmp_path, monkeypatch):
     index = bts._build_t0_index(bts.build_t0_state(state_dir, dispatch_dir))
 
     assert "live_work" in index
-    assert index["schema"] == "t0_index/1.2"
+    assert index["schema"] == "t0_index/1.3"
 
 
 def test_legacy_md_in_pending_counts_as_pending(tmp_path, monkeypatch):

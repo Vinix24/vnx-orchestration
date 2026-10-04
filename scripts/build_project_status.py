@@ -15,6 +15,14 @@ from datetime import datetime, timezone
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+def _open_prs_text(index: dict) -> str:
+    """Open-PR count for the summary; ``unknown (<reason>)`` when the read failed."""
+    count = (index.get("queue") or {}).get("open_prs", 0)
+    if count is None:
+        return f"unknown ({index.get('pr_queue_unavailable') or 'no reason given'})"
+    return str(count)
+
+
 def build_project_status(state_dir: Path | None = None) -> str:
     """Build PROJECT_STATUS.md content from current state files."""
     state_dir = state_dir or _resolve_state_dir()
@@ -49,7 +57,7 @@ def build_project_status(state_dir: Path | None = None) -> str:
         "",
         "## Summary",
         f"- Branch: `{index.get('git_branch','?')}` @ `{index.get('git_head','?')}`",
-        f"- Open PRs: {index.get('queue',{}).get('open_prs',0)}",
+        f"- Open PRs: {_open_prs_text(index)}",
         f"- Live dispatches: {counts.get('live', 0) + counts.get('starting', 0)}"
         f" (stale: {counts.get('stale', 0)}, unmeasured: {counts.get('unmeasured', 0)})",
         f"- Pending dispatches: {index.get('queue',{}).get('pending',0)}",

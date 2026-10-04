@@ -954,6 +954,10 @@ abort before any mutation, and there is **never a silent `vnx-dev` default**.
 flag (empty rows) rather than leaking cross-tenant data (PR-B #863). See
 ADR-007 and `docs/MIGRATION_GUIDE.md` for the operator runbook.
 
+### Open PRs in the T0 state
+
+`build_t0_state` carries a `pr_queue` section (schema `pr_queue/1.1`) with one row per open PR: `head_sha`, `mergeable`, `merge_state` and a `ci` object. CI on the head is judged by the merge door's own judge (`check_ci_run_for_head`), not by a rule of the builder. A failed `gh` read gives `available: false` with a reason, and `t0_index.json` (`t0_index/1.3`) then shows `queue.open_prs: null` with `pr_queue_unavailable` instead of `0`. The row keys, the `ci.state` values, the measure cap of 8 and the 12-second deadline are in `docs/core/STATE_FABRIC.md`, "Current: `pr_queue`, the open PRs".
+
 ---
 
 ## Staging Workflow

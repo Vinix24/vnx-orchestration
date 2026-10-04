@@ -63,6 +63,33 @@ Each row lands in exactly one bucket (`_classify_live_row`):
 
 Age runs from `claimed_at`, else `updated_at`, else `created_at`. Keys of the object when it is available: `available: true`, `in_flight_states`, `startup_grace_seconds`, the four bucket lists, `counts` (one count per bucket) and `open_prs` (every open PR as `{number, dispatch_id}`, the id set when the branch is `dispatch/<id>`). An item holds `dispatch_id`, `state`, `age_seconds`, `lock`, `track`, `gate`, `started_at` and `pr`. When it cannot be read the object is `{available: false, reason, read_error}`: `read_error: true` (the read raised) degrades `system_health`; `read_error: false` (no project id, no database, a pre-migration schema) does not. `t0_index.json` carries a compact form with the true `counts` and capped lists (`live` plus `starting` at 8, `stale` at 5, `unmeasured` ids at 5, `open_prs` with a dispatch id at 8). The caps never change `counts`. Tests: `tests/test_t0_live_work.py`. Lock overview: `docs/core/LOCKS_AND_RELEASES.md` stage 4.
 
+### Current: `pr_queue`, the open PRs
+
+The `pr_queue` key of `t0_state.json` (schema `pr_queue/1.1`, built by `scripts/lib/pr_queue_state.py`, also written to `pr_queue_state.json`) lists every open PR with what a T0 needs to see whether it can merge. Every `gh` call runs in the project root (`project_root`), never in whatever folder the builder was started from.
+
+A row holds `number`, `title`, `branch`, `state` (`active` or `draft`), `head_sha` (40 characters), `mergeable`, `merge_state`, `ci`, `ci_status`, `gates_passed` and `blocked_on`.
+
+- `mergeable`: `mergeable`, `conflicting` or `unknown`. GitHub's `UNKNOWN` stays `unknown` and is never shown as clean.
+- `merge_state`: GitHub's `mergeStateStatus` lowercased (`clean`, `blocked`, `behind`, `dirty`, `unstable`, `draft`, `has_hooks`, `unknown`).
+- `ci`: CI on the head, judged by the merge door's own judge, `merge_preflight_ci_check.check_ci_run_for_head`, with the workflow name read the way the door reads it (`forge_protection_drift.fetch_ci_workflow_from_main`). The builder holds no CI rule of its own. Keys: `workflow`, `state`, `conclusion`, `run_id`, `reason`.
+- `ci_status` keeps its four values and is derived from `ci.state`: `success` gives `pass`, `failed` gives `fail`, `running` gives `pending`, every other state gives `unknown`.
+
+| `ci.state` | Meaning | `reason` |
+|---|---|---|
+| `success` | the latest completed run on the head concluded `success` | none |
+| `failed` | the latest completed run did not conclude `success`; `conclusion` says what it did | none |
+| `running` | a run on the head is queued or in progress | none |
+| `no_run` | no run of the workflow exists for the head | none |
+| `undetermined` | two or more completed runs and their order cannot be established | none |
+| `overridden` | `VNX_MERGE_OVERRIDE_REASON` is set in the builder's environment; never shown as `success` | none |
+| `unmeasured` | CI was not judged for this row | the judge's code (`gh_run_list_failed`, `gh_unauthenticated`, `short_sha`, and so on), or the builder's own: `workflow_unreadable` (the workflow-name read failed, every measured row gets it), `cap`, `budget`, `judge_failed` |
+
+CI is measured for at most 8 rows (`PR_ROW_MEASURE_CAP`): PRs on a `dispatch/<id>` branch first, non-draft before draft, lowest PR number first. The other rows carry `unmeasured` with `reason: cap`. The CI step runs the workflow-name read and the judge calls in daemon threads, at most 4 at a time, and stops waiting 12 seconds after it started (`CI_STEP_DEADLINE_SECONDS`, the name read included). A row whose call has not returned by then carries `unmeasured` with `reason: budget`.
+
+The section itself carries `available` and `reason`. When `gh pr list` for the open PRs fails, `available` is `false`, `reason` holds the return code and the first 120 characters of stderr, and `open_prs` stays an empty list so every reader keeps its type. A failed read of the merged PRs adds `merged_today_error` and leaves `available` alone. A builder that is missing or raises gives `available: false` with `reason: builder_failed: <exception type>`. One unmeasured row does not make the section unavailable.
+
+`t0_index.json` (schema `t0_index/1.3`) shows `queue.open_prs` as `null`, not `0`, when the section is unavailable, plus a top-level `pr_queue_unavailable` holding the reason. The key is absent when the read succeeded. `PROJECT_STATUS.md` prints `Open PRs: unknown (<reason>)` for the `null`.
+
 ### Future — authored intent
 `ROADMAP.yaml` is the only hand-edited planning surface. `FEATURE_PLAN.md` and
 `PR_QUEUE.md` are **generated** from it (`scripts/build_feature_plan.py`,

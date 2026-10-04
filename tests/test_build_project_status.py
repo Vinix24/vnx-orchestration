@@ -309,3 +309,37 @@ class TestBuildT0StateHook:
             assert path.exists()
         except Exception as exc:
             pytest.fail(f"write_project_status raised unexpectedly: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# 7. A failed open-PR read reads as unknown, never as 0 (P5)
+# ---------------------------------------------------------------------------
+
+class TestOpenPrsLine:
+    def _line(self, tmp_path, index_patch):
+        _write_index(tmp_path)
+        path = tmp_path / "t0_index.json"
+        index = json.loads(path.read_text(encoding="utf-8"))
+        index.update(index_patch)
+        path.write_text(json.dumps(index), encoding="utf-8")
+        return next(l for l in build_project_status(tmp_path).splitlines() if l.startswith("- Open PRs"))
+
+    def test_null_prints_unknown_with_the_reason(self, tmp_path):
+        line = self._line(tmp_path, {"queue": {"open_prs": None}, "pr_queue_unavailable": "rc=4: gh auth login"})
+        assert line == "- Open PRs: unknown (rc=4: gh auth login)"
+
+    def test_zero_still_prints_zero(self, tmp_path):
+        assert self._line(tmp_path, {"queue": {"open_prs": 0}}) == "- Open PRs: 0"
+
+    def test_end_to_end_failing_gh_to_the_status_line(self, tmp_path):
+        import subprocess
+        from build_t0_state import _build_t0_index
+        from pr_queue_state import build_pr_queue_state
+        failing = subprocess.CompletedProcess([], 4, stdout="", stderr="gh auth login")
+        with patch("subprocess.run", return_value=failing):
+            section = build_pr_queue_state(tmp_path, register_events=[], project_root=tmp_path)
+        index = _build_t0_index({"pr_queue": section})
+        assert index["queue"]["open_prs"] is None
+        (tmp_path / "t0_index.json").write_text(json.dumps(index), encoding="utf-8")
+        line = next(l for l in build_project_status(tmp_path).splitlines() if l.startswith("- Open PRs"))
+        assert line == "- Open PRs: unknown (rc=4: gh auth login)"
