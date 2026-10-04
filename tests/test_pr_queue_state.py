@@ -553,3 +553,36 @@ class TestFailedRead:
         with patch.object(bts, "_build_pqs", return_value={"available": True}) as build:
             bts._build_pr_queue_section(state_dir)
         assert build.call_args.kwargs["project_root"] == bts._PROJECT_ROOT
+
+
+# ---------------------------------------------------------------------------
+# Register read failure is reported, never an empty event list
+# ---------------------------------------------------------------------------
+
+class TestRegisterError:
+    def test_failed_register_read_is_named_and_logged(self, tmp_path, caplog):
+        state_dir, _ = _make_dirs(tmp_path)
+        with patch("dispatch_register.read_events", side_effect=OSError("disk gone")), \
+             patch("pr_queue_state._get_open_prs", return_value=([], None)), \
+             patch("pr_queue_state._get_merged_today", return_value=([], None)), \
+             caplog.at_level("WARNING", logger="pr_queue_state"):
+            state = build_pr_queue_state(state_dir, project_root=tmp_path)
+        assert state.get("register_error") == "OSError: disk gone"
+        assert any("OSError" in r.getMessage() and r.levelname == "WARNING" for r in caplog.records)
+
+    def test_clean_register_read_gives_null(self, tmp_path):
+        state_dir, _ = _make_dirs(tmp_path)
+        with patch("dispatch_register.read_events", return_value=[]), \
+             patch("pr_queue_state._get_open_prs", return_value=([], None)), \
+             patch("pr_queue_state._get_merged_today", return_value=([], None)):
+            state = build_pr_queue_state(state_dir, project_root=tmp_path)
+        assert "register_error" in state and state["register_error"] is None
+
+    def test_events_passed_in_give_null_and_skip_the_read(self, tmp_path):
+        state_dir, _ = _make_dirs(tmp_path)
+        with patch("dispatch_register.read_events", side_effect=OSError("must not run")) as rd, \
+             patch("pr_queue_state._get_open_prs", return_value=([], None)), \
+             patch("pr_queue_state._get_merged_today", return_value=([], None)):
+            state = build_pr_queue_state(state_dir, register_events=[], project_root=tmp_path)
+        assert "register_error" in state and state["register_error"] is None
+        rd.assert_not_called()

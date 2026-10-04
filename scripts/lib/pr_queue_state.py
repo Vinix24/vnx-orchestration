@@ -258,15 +258,17 @@ def _build_gates_map(
     return pr_map
 
 
-def _load_register_events(state_dir: Path) -> List[Dict[str, Any]]:
+def _load_register_events(state_dir: Path) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """Return ``(events, reason)``. A failed read gives ``[]`` plus ``<Type>: <message>``."""
     try:
         scripts_lib = str(_REPO_ROOT / "scripts" / "lib")
         if scripts_lib not in sys.path:
             sys.path.insert(0, scripts_lib)
-        from dispatch_register import read_events  # noqa: PLC0415
-        return read_events(state_dir=state_dir) or []
-    except Exception:
-        return []
+        from dispatch_register import read_events
+        return (read_events(state_dir=state_dir) or []), None
+    except Exception as exc:
+        log.warning("dispatch register read failed: %s: %s", type(exc).__name__, exc)
+        return [], f"{type(exc).__name__}: {exc}"
 
 
 def build_pr_queue_state(
@@ -278,11 +280,14 @@ def build_pr_queue_state(
     """Build pr_queue_state dict. Never raises.
 
     A failed ``gh pr list`` for the open PRs gives ``available: false`` with the reason
-    and an empty ``open_prs``; a failed read of the merged PRs gives ``merged_today_error``.
+    and an empty ``open_prs``; a failed read of the merged PRs gives ``merged_today_error``;
+    a failed read of the dispatch register gives ``register_error`` (``<Type>: <message>``,
+    null when the read succeeded or the caller passed the events in).
     Every ``gh`` call runs in ``project_root``.
     """
+    register_error: Optional[str] = None
     if register_events is None:
-        register_events = _load_register_events(state_dir)
+        register_events, register_error = _load_register_events(state_dir)
 
     gates_map = _build_gates_map(register_events)
     open_prs, open_error = _get_open_prs(project_root)
@@ -301,6 +306,7 @@ def build_pr_queue_state(
         "reason": open_error,
         "open_prs": open_prs,
         "merged_today": merged_today,
+        "register_error": register_error,
     }
     if merged_error:
         section["merged_today_error"] = merged_error
