@@ -63,6 +63,16 @@ STATE_PATH = re.compile(re.escape(STATE_DIR) + r"([A-Za-z0-9_./-]+)")
 SCRIPT_DIRS = ("scripts", "hooks", ".claude/hooks")
 
 
+# The role anchors its commands so they run from any folder inside the repo:
+# `python3 "${VNX_HOME:-$(git rev-parse --show-toplevel)}/scripts/x.py"`. The
+# audit reads the command as `python3 scripts/x.py`, the path it checks.
+ROLE_ANCHOR = re.compile(r'"\$\{VNX_HOME:-\$\(git rev-parse --show-toplevel\)\}/([^"\s]+)"')
+
+
+def _strip_anchor(text: str) -> str:
+    return ROLE_ANCHOR.sub(r"\1", text)
+
+
 def _read(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8", errors="replace")
@@ -687,7 +697,7 @@ def check_state(text: str, source: str, fabric: Path, phrases: bool = True) -> L
 def audit(project: Path, fabric: Path) -> List[str]:
     role = project / ROLE_REL
     findings: List[str] = []
-    role_text = _read(role)
+    role_text = _strip_anchor(_read(role))
     if role_text:
         findings += check_text(role_text, "role-orchestrator.md", fabric)
         findings += check_state(role_text, "role-orchestrator.md", fabric)

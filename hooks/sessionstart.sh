@@ -419,16 +419,21 @@ ${_ROLE_REASON:+$_ROLE_REASON
     # hook error — and each hook run recomputes this fresh from disk, so
     # nothing accumulates across repeated SessionStart fires (/clear, etc).
     T0_SKILL_BODY=""
+    T0_PLAYBOOK_LINE=""
     if [ -n "$PROJECT_ROOT" ]; then
       _T0_SKILL_MD="$PROJECT_ROOT/.claude/skills/t0-orchestrator/SKILL.md"
       if [ -f "$_T0_SKILL_MD" ]; then
         T0_SKILL_BODY="$(cat "$_T0_SKILL_MD" 2>/dev/null || true)"
+        T0_PLAYBOOK_LINE="Playbook file (Read it when the '# T0 Orchestrator' heading is not in your context): $_T0_SKILL_MD"
+      else
+        T0_PLAYBOOK_LINE="Playbook file NOT FOUND: $_T0_SKILL_MD does not exist. Do not orchestrate from memory."
       fi
     fi
 
     ADDITIONAL_CONTEXT="${ROLE_ALARM:+$ROLE_ALARM
 
-}T0 Master Orchestrator Active${PROJECT_NAME:+ — $PROJECT_NAME}
+}T0 Master Orchestrator Active${PROJECT_NAME:+ — $PROJECT_NAME}${T0_PLAYBOOK_LINE:+
+$T0_PLAYBOOK_LINE}
 Model-invocable skills: @horizon @planner @panel @fabric-reference
 Operator-only skills (not model-invocable): @t0-orchestrator @architect
 Full registry: skills/skills.yaml (repo) or \$VNX_SKILLS_DIR/skills.yaml (consumer)
