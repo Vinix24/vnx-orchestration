@@ -71,7 +71,7 @@ runner fulfils them:
   9. D2e (2026-08-30, dispatch 20260830-120000-d2e-takeover-keten-bewijs):
      items 1-8 above only ever look at the DECLARED gate's own result file
      (``manager._result_path(gate, pr_number)``). But the review-gate
-     takeover chain (``codex_gate -> kimi_gate -> glm_gate -> deepseek_gate``,
+     takeover chain (``codex_gate -> kimi_gate -> deepseek_gate -> glm_gate``,
      ``gate_request_handler._build_review_gate_takeover_chain``, BETA3-E1)
      can already have substituted a SUCCESSOR gate as the reader at request
      time — and that successor writes its verdict under its OWN name, never

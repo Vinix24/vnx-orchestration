@@ -64,7 +64,7 @@ De derde producentgroep in de registry, `review_gate_obligations`
    result-record met status `not_executable` plus skip-rationale-audit.
    Stilte is geen eindtoestand meer.
    **D2e (30-08): de overname-keten telt mee als bewijs.** De review-gate
-   overname-keten (`codex_gate -> kimi_gate -> glm_gate -> deepseek_gate`,
+   overname-keten (`codex_gate -> kimi_gate -> deepseek_gate -> glm_gate`,
    `gate_request_handler._build_review_gate_takeover_chain`, BETA3-E1)
    substitueert op aanvraag-tijd al een opvolger als lezer, maar schrijft
    diens oordeel onder de OPVOLGER's eigen naam

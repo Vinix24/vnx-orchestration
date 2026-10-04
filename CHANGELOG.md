@@ -6,6 +6,8 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 
 ## [Unreleased]
 
+- Review takeover chain is now `codex_gate,kimi_gate,deepseek_gate,glm_gate` (operator decision 2026-10-04, OI-1984): deepseek is the API-credit fallback after kimi and glm is the last link. Both API-credit gates stay behind both subscription gates. `deepseek_gate` is a member of the `Gate` enum with a `closure_verifier` handler, so a deepseek takeover pass now signs the seat it took over at the merge door and counts in the `vnx-gate/review` summary (before, the record was skipped as a non-peer and the seat stayed unsigned). `GATES_OUTSIDE_ENUM` is empty. A consumer project follows after a release and a repin, or through a per-project value of `VNX_REVIEW_GATE_TAKEOVER_CHAIN`
+
 - Docs: `docs/core/LOCKS_AND_RELEASES.md` lists every lock from dispatch to merge with its releases, who may use them, the trail and the test. New accounts of the merge door and of what a green CI does not prove (`DISPATCH_RULES.md` 2.2 and 2.3), `live_work` (`STATE_FABRIC.md`), `takeover_from` (`45_HEADLESS_REVIEW_EVIDENCE_CONTRACT.md`), the plan-gate evidence file and the reconciler's automatic closing of deliverables (`HORIZON_LIFECYCLE.md`), and `open-outcomes --recount` (`11_RECEIPT_FORMAT.md`, `DISPATCH_RULES.md` section 13)
 
 ## [1.7.1] - 2026-10-03

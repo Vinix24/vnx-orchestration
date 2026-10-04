@@ -1,7 +1,7 @@
 """tests/test_beta3_e1_review_gate_chain.py — BETA3-E1 (dispatch
 20260826-beta3-e1-overname-keten-en-uitputtingstoets): the review-gate
-takeover CHAIN (codex_gate -> kimi_gate -> glm_gate -> deepseek_gate,
-operator decision 26-08) plus the per-provider exhaustion test the chain is
+takeover CHAIN (codex_gate -> kimi_gate -> deepseek_gate -> glm_gate,
+operator decisions 26-08 and 04-10, OI-1984) plus the per-provider exhaustion test the chain is
 built on.
 
 Point 1 is the core of this dispatch, not the chain: measured on the live
@@ -535,7 +535,7 @@ def test_three_step_chain_carries_full_path_in_annotation(manager_env, monkeypat
         )
 
     seat = result["requested"][0]
-    assert seat["gate"] == "glm_gate", f"expected the walk to land on glm_gate, got {seat['gate']!r}"
+    assert seat["gate"] == "deepseek_gate", f"expected the walk to land on deepseek_gate, got {seat['gate']!r}"
     assert seat["takeover_from"] == "kimi_gate"
     path = seat["takeover_path"]
     assert [hop["gate"] for hop in path] == ["codex_gate", "kimi_gate"], (
@@ -547,13 +547,15 @@ def test_three_step_chain_carries_full_path_in_annotation(manager_env, monkeypat
     assert "insufficient_quota" in path[0]["detail"] or "429" in path[0]["detail"]
     assert "access_terminated_error" in path[1]["detail"] or "403" in path[1]["detail"]
 
-    # On-disk: glm_gate's OWN request record also carries the full path.
-    on_disk = json.loads((manager_env["requests_dir"] / f"pr-{pr_number}-glm_gate.json").read_text())
+    # On-disk: deepseek_gate's OWN request record also carries the full path.
+    on_disk = json.loads((manager_env["requests_dir"] / f"pr-{pr_number}-deepseek_gate.json").read_text())
     assert [hop["gate"] for hop in on_disk["takeover_path"]] == ["codex_gate", "kimi_gate"]
 
 
 # ---------------------------------------------------------------------------
-# Point 3 -- deepseek_gate as the configured end-link: glm_gate exhausted
+# Point 3 -- deepseek_gate as a non-first link (the standard chain since
+# OI-1984 puts it before glm_gate, so this test pins the legacy order
+# explicitly): glm_gate exhausted
 # (using the REAL pr-1691 record + report, T0's request) rolls to
 # deepseek_gate, which is REQUESTED, not skipped — it is a config-based
 # harness-lane gate, available without a runner file (OI-1714, dispatch
@@ -563,6 +565,7 @@ def test_three_step_chain_carries_full_path_in_annotation(manager_env, monkeypat
 
 def test_glm_exhausted_real_record_rolls_to_deepseek_requested(manager_env, monkeypatch):
     monkeypatch.chdir(manager_env["project_root"])
+    monkeypatch.setenv("VNX_REVIEW_GATE_TAKEOVER_CHAIN", "codex_gate,kimi_gate,glm_gate,deepseek_gate")
     pr_number = 1691
 
     report_file = manager_env["reports_dir"] / "glm-gate-pr1691-1787754901.md"
@@ -672,7 +675,7 @@ def test_chain_runs_empty_is_named_terminal_state(manager_env, monkeypatch):
 # (control, beyond dlv5's kimi-only coverage: glm and codex too).
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("gate,successor", [("codex_gate", "kimi_gate"), ("glm_gate", "deepseek_gate")])
+@pytest.mark.parametrize("gate,successor", [("codex_gate", "kimi_gate"), ("deepseek_gate", "glm_gate")])
 def test_unreadable_verdict_never_takes_over(gate, successor, manager_env, monkeypatch):
     monkeypatch.chdir(manager_env["project_root"])
     manager = _make_manager()
@@ -752,8 +755,8 @@ def test_absent_config_falls_back_to_standard_chain(manager_env, monkeypatch):
     chain = _build_review_gate_takeover_chain()
     assert chain == {
         "codex_gate": "kimi_gate",
-        "kimi_gate": "glm_gate",
-        "glm_gate": "deepseek_gate",
+        "kimi_gate": "deepseek_gate",
+        "deepseek_gate": "glm_gate",
     }
 
 
@@ -807,11 +810,13 @@ def test_codex_gate_added_with_kimi_gate_as_first_fallback():
     from gate_request_handler import _parse_review_gate_takeover_chain, _DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN
     chain = _parse_review_gate_takeover_chain(_DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN)
     assert chain["codex_gate"] == "kimi_gate", (
-        "codex_gate must be the new entry point; the 22-08 kimi_gate -> glm_gate "
-        "relationship must survive unchanged as the SECOND hop"
+        "codex_gate must be the entry point; kimi_gate is the first fallback"
     )
-    assert chain["kimi_gate"] == "glm_gate"
-    assert chain["glm_gate"] == "deepseek_gate"
+    assert chain["kimi_gate"] == "deepseek_gate", (
+        "OI-1984 (operator decision 2026-10-04): deepseek_gate follows kimi_gate"
+    )
+    assert chain["deepseek_gate"] == "glm_gate"
+    assert "glm_gate" not in chain, "glm_gate is the last link: no successor"
 
 
 # ---------------------------------------------------------------------------
@@ -1079,8 +1084,10 @@ def test_pr1696_real_glm_record_rolls_to_deepseek_requested(manager_env, monkeyp
     config-based harness-lane gate available without a runner file (OI-1714,
     dispatch 20260911-c6 step 2). Proven here on the pr-1696 record whose
     report_path field is empty (the derivation-fallback case), not
-    pre-populated."""
+    pre-populated. The standard chain puts deepseek_gate BEFORE glm_gate since
+    OI-1984, so the legacy order is set explicitly."""
     monkeypatch.chdir(manager_env["project_root"])
+    monkeypatch.setenv("VNX_REVIEW_GATE_TAKEOVER_CHAIN", "codex_gate,kimi_gate,glm_gate,deepseek_gate")
     pr_number = 1696
 
     report_file = manager_env["reports_dir"] / f"{_PR1696_REAL_GLM_RESULT['dispatch_id']}.md"

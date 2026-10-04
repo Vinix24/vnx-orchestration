@@ -118,7 +118,7 @@ T0 MUST NOT treat `queued` plus ad hoc shell output as valid closure evidence un
 
 ### 3.5 Takeover: `takeover_from` and its companions
 
-When a seat cannot review, the next seat in the takeover chain reads the PR in its place. The default chain is `codex_gate,kimi_gate,glm_gate,deepseek_gate` (`gate_request_handler._DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN`, `VNX_REVIEW_GATE_TAKEOVER_CHAIN` sets another order or an empty chain). A seat is passed over only when its own result for this PR head says the lane is exhausted, or its provider is recorded unreachable. A result about another head does not count (`gate_recorder.result_is_for_head`). A chain that runs out ends as `chain_exhausted`, never as a silent re-dispatch.
+When a seat cannot review, the next seat in the takeover chain reads the PR in its place. The default chain is `codex_gate,kimi_gate,deepseek_gate,glm_gate` (operator decision 2026-10-04: deepseek_gate is the API-credit fallback after kimi_gate, glm_gate is the last link; a takeover record of deepseek_gate signs the seat it took over because `deepseek_gate` is a `Gate` enum member and a review peer in the closure verifier) (`gate_request_handler._DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN`, `VNX_REVIEW_GATE_TAKEOVER_CHAIN` sets another order or an empty chain). A seat is passed over only when its own result for this PR head says the lane is exhausted, or its provider is recorded unreachable. A result about another head does not count (`gate_recorder.result_is_for_head`). A chain that runs out ends as `chain_exhausted`, never as a silent re-dispatch.
 
 The record of the seat that took over carries these fields:
 
