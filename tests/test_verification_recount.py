@@ -25,6 +25,7 @@ for _p in (_SCRIPTS, _SCRIPTS / "lib"):
 import open_outcomes as oo
 from envelope_govern_support import _verification_from_report
 from receipt_verdict import compute_verdict
+from report_body_contract import RED_RUN_LABELS
 from verification_runs import label_color
 
 FIXTURES = _REPO / "tests" / "fixtures" / "verification_reports"
@@ -92,6 +93,26 @@ def test_no_new_red_label_a_failing_run_after_prose_red_still_counts(tmp_path: P
     report.write_text(
         "## Verification\nRood: `pytest x` gave 2 failed, 10 passed.\n", encoding="utf-8")
     assert _verification_from_report(report)["tests_failed"] == 2
+
+
+@pytest.mark.parametrize("line", ["Before the fixture rewrite: 3 failed", "Red runner: 3 failed",
+                                  "Voor de fixatie: 2 failed", "Rode runs2: 1 failed"])
+def test_w1_red_label_keeps_its_word_boundary(line: str) -> None:
+    assert label_color(line) is None
+
+
+def test_w2_failing_run_after_a_red_label_lookalike_still_counts(tmp_path: Path) -> None:
+    report = tmp_path / "r.md"
+    report.write_text(
+        "## Verification\nBefore the fixture rewrite: `pytest x` gave 3 failed, 10 passed.\n",
+        encoding="utf-8")
+    assert _verification_from_report(report)["tests_failed"] == 3
+
+
+@pytest.mark.parametrize("label", sorted(RED_RUN_LABELS))
+@pytest.mark.parametrize("form", ["{} on abc:", "{}:", "**{}**"])
+def test_w3_real_red_labels_still_match(label: str, form: str) -> None:
+    assert label_color(form.format(label) + " `pytest x` gave 1 failed") == "red"
 
 
 # ---------------------------------------------------------------------------

@@ -82,7 +82,7 @@ def _label_alternation(labels) -> str:
 # bullet and emphasis may precede it, nothing else.
 _LABEL = re.compile(
     r"^\s*(?:#{1,6}\s+)?(?:(?:[-*+]|\d+\.)\s+)?(?:\*\*|__|\*|_)?\s*"
-    rf"(?:(?P<red>{_label_alternation(RED_RUN_LABELS)})"
+    rf"(?:(?P<red>{_label_alternation(RED_RUN_LABELS)})\b"
     rf"|(?P<green>{_label_alternation(GREEN_RUN_LABELS)})\b"
     rf"|(?P<green_colon>{_label_alternation(GREEN_COLON_LABELS)})(?:\*\*|__|\*|_)?\s*:)",
     re.IGNORECASE,
