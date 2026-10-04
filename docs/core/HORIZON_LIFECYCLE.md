@@ -82,6 +82,22 @@ advisory-first via `VNX_PLAN_GATE_ENFORCE` (`off | advisory | required`, default
 - **Merge gate** — the second chokepoint (a PR whose linked track's plan gate is
   unresolved). In progress; see ADR-030.
 
+**Evidence file.** Every plan-gate pass leaves one `plan_gate_pass` record in
+`.vnx-attest/plan-gates.ndjson` under the repo root: a panel PASS, a derived zero-seat
+pass, a tiebreaker START or STOP, and an operator `attest`. The record holds the track
+id, the project id, the resolver (`run` or `attest`), the time, and when known the seats,
+the scope, the approval id, the reason and the governance variant. Each line is
+hash-chained to the one before it (`prev_hash`, appended under the ADR-034 flock), whatever
+`VNX_CHAIN_RECEIPTS` says. The planning CLI passes no signing key, so a real record is
+chained and unsigned: it shows tampering, it does not prove who wrote it. Nothing is
+written for a REVISE, BLOCK, infrastructure failure or refused run. A failed ledger write
+prints a warning and the blocker stays resolved. A companion file,
+`.vnx-attest/plan-gate-seats.ndjson`, holds one `plan_gate_seat` record per panelist per
+run. The writer is `scripts/lib/plan_gate_evidence.py` `emit_plan_gate_pass`;
+`verify_plan_gate_pass` reads the chain back and answers verified, present-unsigned or
+absent. No production code calls `verify_plan_gate_pass` yet; the merge gate above is still in progress. Every lock in this chain and every way to open it:
+`docs/core/LOCKS_AND_RELEASES.md`.
+
 ### 4. Work — dispatch → PR
 
 Gated work leaves Horizon through the single-entry door (`vnx dispatch`; see
@@ -102,6 +118,25 @@ falsely confirmed).
 nominates CONFIRMED tracks for close. `--apply` writes; without it, it is advisory
 (CHECK) and only reports. `reconcile-review` records a post-run verdict; `reconcile-
 streak` reports the clean-run streak (now observability-only — see auto-close).
+
+Reconcile also completes deliverable stubs. In `scripts/lib/track_reconciler.py`,
+`_reconcile_deliverable_dispatches` (OI-840) runs inside `reconcile_track` before the
+derived status is computed. A deliverable is a `dispatches` row of the track with a
+non-empty `output_ref`. When the track has real dispatches (rows without `output_ref`),
+all of them must be in a terminal state (`completed`, `expired`, `dead_letter`), or
+nothing happens. Evidence is then a `pr_merged` event on one of the real dispatches, or
+track-level evidence: the track's phase is `done`, or every PR number in its `pr_ref` is
+in the merged-PR set (NDJSON, ROADMAP and by default `gh pr list`; `VNX_RECONCILE_GIT=0`
+turns the `gh` source off). With evidence, every deliverable of the track that is not yet
+`completed`, `expired` or `dead_letter` moves to `completed`, whatever its state was:
+`proposed`, `ready` and the in-flight states included. Each one gets a `coordination_events`
+row `deliverable_auto_completed` with actor `reconciler`. The function does not ask GitHub
+itself, does not set `pr_ref` or `operator_approved_at`, does not look at the plan gate,
+an `OI-PLAN` blocker or the promote state, and writes no receipt. It runs on every
+`reconcile_track` or `reconcile_all_tracks` call, so a check-mode `vnx horizon reconcile`
+writes these completions too. It is idempotent. It bit on 2026-10-04 (OI-1969): a
+follow-up deliverable proposed on a track with merged PRs was completed within minutes,
+without a promote.
 
 ### 7. Close — evidence + revalidation
 

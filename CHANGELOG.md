@@ -6,6 +6,8 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 
 ## [Unreleased]
 
+- Docs: `docs/core/LOCKS_AND_RELEASES.md` lists every lock from dispatch to merge with its releases, who may use them, the trail and the test. New accounts of the merge door and of what a green CI does not prove (`DISPATCH_RULES.md` 2.2 and 2.3), `live_work` (`STATE_FABRIC.md`), `takeover_from` (`45_HEADLESS_REVIEW_EVIDENCE_CONTRACT.md`), the plan-gate evidence file and the reconciler's automatic closing of deliverables (`HORIZON_LIFECYCLE.md`), and `open-outcomes --recount` (`11_RECEIPT_FORMAT.md`, `DISPATCH_RULES.md` section 13)
+
 ## [1.7.1] - 2026-10-03
 
 A review verdict is now evidence in both directions. A rejection books as a

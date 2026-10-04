@@ -43,6 +43,26 @@ whether declared phase has caught up. Declared phase advances to `done` via two
 paths: the automated reconcile loop (`vnx objective reconcile --apply`, gh-verified,
 system actor) or an explicit human close (`vnx objective close --apply --approval-id`).
 
+### Current — `live_work`, what is running right now
+
+`dispatches.state` says what a row claims. The `live_work` key of `t0_state.json` says whether the process behind it is alive. `scripts/build_t0_state.py` `_build_live_work` reads the rows of this project in `runtime_coordination.db` (read-only, filtered on `project_id`; without a project id it refuses an unscoped read) whose state is in `coordination_db.IN_FLIGHT_DISPATCH_STATES`: `accepted`, `claimed`, `delivering`, `running`. For each row `scripts/lib/dispatch_worktree_isolation.py` `probe_occupancy` looks at `<state-dir>/dispatch_worktree_claims/<dispatch-id>.occupancy`. The envelope process that owns the worktree holds an exclusive non-blocking `flock` on that file from worktree creation to removal (`_acquire_occupancy`); the kernel drops the lock when the process dies. The probe takes a non-blocking shared lock to see whether the holder is still there. It never creates the file and never measures its own lock. The claims directory belongs to the state directory, so another project's lock under a colliding dispatch id is never seen (ADR-007).
+
+| Lock reading | Meaning |
+|---|---|
+| `held` | an exclusive lock is held: the process is alive |
+| `released` | the file exists and nobody holds it |
+| `absent` | no file |
+| `unmeasured: <error>` | the probe raised an `OSError` |
+
+Each row lands in exactly one bucket (`_classify_live_row`):
+
+- `live`: the lock is `held`, however old the row.
+- `unmeasured`: the probe raised.
+- `starting`: the lock is not held and the row is younger than 120 seconds (`_LIVE_WORK_STARTUP_GRACE_SECONDS`).
+- `stale`: the lock is not held and the row is 120 seconds or older. Both `absent` and `released` count.
+
+Age runs from `claimed_at`, else `updated_at`, else `created_at`. Keys of the object when it is available: `available: true`, `in_flight_states`, `startup_grace_seconds`, the four bucket lists, `counts` (one count per bucket) and `open_prs` (every open PR as `{number, dispatch_id}`, the id set when the branch is `dispatch/<id>`). An item holds `dispatch_id`, `state`, `age_seconds`, `lock`, `track`, `gate`, `started_at` and `pr`. When it cannot be read the object is `{available: false, reason, read_error}`: `read_error: true` (the read raised) degrades `system_health`; `read_error: false` (no project id, no database, a pre-migration schema) does not. `t0_index.json` carries a compact form with the true `counts` and capped lists (`live` plus `starting` at 8, `stale` at 5, `unmeasured` ids at 5, `open_prs` with a dispatch id at 8). The caps never change `counts`. Tests: `tests/test_t0_live_work.py`. Lock overview: `docs/core/LOCKS_AND_RELEASES.md` stage 4.
+
 ### Future — authored intent
 `ROADMAP.yaml` is the only hand-edited planning surface. `FEATURE_PLAN.md` and
 `PR_QUEUE.md` are **generated** from it (`scripts/build_feature_plan.py`,

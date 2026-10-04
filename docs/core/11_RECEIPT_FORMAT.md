@@ -122,6 +122,30 @@ Measured 29-09 on the same 13,018 reports: outside an explicit red label, no wor
 - **Envelope sub-path** (`dispatch_envelope.py`): the report already exists on disk by receipt-write time, so `dispatch_envelope.py::_verification_from_report` threads it through the same `report_parser.py::extract_validation` extractor and `verification_runs.verification_record` builder Path 2 uses, and passes the result to `emit_dispatch_receipt(verification=...)`.
 - **Multi-provider sub-path** (`provider_dispatch.py`): `report_path` is a precomputed string; the file doesn't exist yet at receipt-write time. `provider_dispatch.py` passes `verification={"method": "pending-report", ...}` explicitly — never a silent blank. This is never backfilled (ADR-005 append-only forbids rewriting the line): `compute_verdict` reads it as `investigate`, `evidence_complete: false`, permanently.
 
+## Fresh reading: `open-outcomes --recount`
+
+The ledger is append-only, so the `verification{}` of a receipt is the reading of the reader as it was the day the receipt was written. A receipt from before a reader repair keeps its old reading for good, and the `outcome` of an open item is decided on it. `--recount` puts the reading of today next to it:
+
+```bash
+python3 scripts/receipt_query.py open-outcomes --state-dir <state-dir> --recount --json
+```
+
+`--state-dir` is required. `--project-id` defaults to the project of the state dir, else `VNX_PROJECT_ID`; without one the command prints an error and exits 2. `--limit N` shows at most N items; with `--recount` the list is built without the limit, recounted, and trimmed afterwards, so the summary always covers every counted item. Without `--recount` the output is the same as before the flag existed. The code is `scripts/lib/open_outcomes_recount.py` (`add_recount`); the CLI wiring is `_recounted` in `scripts/receipt_query.py`.
+
+Only items of kind `receipt_outcome` get a `recount` object. Items of kind `active_dispatch` and `abandoned_dispatch` get none. For each dispatch the command takes the last report-writing receipt of this project (filtered on `project_id` first, ADR-007, so another project that reuses a dispatch id never points at its report), opens the report that receipt names (`report_file` or `report_path`; a relative path sits under `<data-dir>/unified_reports/`; with none named, `<data-dir>/unified_reports/<dispatch_id>.md`) and reads it with the reader both write paths use, `envelope_govern_support._verification_from_report`. There is no second parser.
+
+| Field of `recount` | Meaning |
+|---|---|
+| `stored` | `{method, tests_run, tests_failed}` as the receipt holds them |
+| `report` | The path that was read |
+| `refused` | `null`, or `outside_reports_dir` when the path, symlinks followed, lies outside `<data-dir>/unified_reports` |
+| `method`, `tests_run`, `tests_failed` | The fresh reading, or `null` when no report was read |
+| `fresh_decision` | `accept`, `investigate` or `reject`: `compute_verdict` on that receipt with its status judged again and `verification` replaced by the fresh reading. `no_report` when the path is refused or the file does not exist |
+
+The item's own `outcome` is the stored decision. The result also gets a top-level `recount_summary`: one entry per pair of stored and fresh decision, `{stored_decision, fresh_decision, count}`, most frequent first. In the text output each recounted item ends with `fresh=<decision>`, and each summary pair prints as `recount: stored=<x> fresh=<y> count=<n>`.
+
+`--recount` is read-only. It writes no ledger line, no decision and no state file. A fresh `accept` next to a stored `investigate` is a reason to read the report; the item leaves the list only through `receipt_query.py decide` (`docs/core/DISPATCH_RULES.md` section 13). Tests: `tests/test_verification_recount.py`.
+
 ## `warnings[]` — every warning gets an enforced destination
 
 ```json

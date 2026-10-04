@@ -46,8 +46,8 @@ top-level alias `vnx deliverable <verb>`:
 |---|---|
 | `add` | Add a deliverable to a track (optional `--task-class`/`--routing-floor`). |
 | `list` | List a track's deliverables, incl. `task_class`/`routing_floor` (explicit "not set" when absent). |
-| `promote` | Promote a deliverable (proposed → ready; human gate). |
-| `close` | afboeken (done): close a ready deliverable → completed (operator-attested PR evidence). |
+| `promote` | Promote a deliverable (proposed → ready; human gate). Not the only way out of `proposed`: the reconciler completes a deliverable of a track whose real work is done without a promote (see `docs/core/HORIZON_LIFECYCLE.md` stage 6). |
+| `close` | afboeken (done): close a ready deliverable → completed (operator-attested PR evidence). The reconciler can also complete a deliverable by itself (`deliverable_auto_completed`, stage 6 of the lifecycle). |
 | `set` | Tag an EXISTING deliverable with `task_class`/`routing_floor` — the rubric fields the plan-gate reads (see `_format_deliverable_for_plan`). |
 
 ### Plan-gate verbs
@@ -59,7 +59,7 @@ Nested under `vnx horizon plan-gate <verb>`:
 | `seed` | Seed the `OI-PLAN-<track>` blocker so the track is born plan-gated. |
 | `run` | Run the plan-first panel over the plan text; on PASS the blocker resolves. The plan text comes from `--doc <path>` when given, otherwise from the track's `goal_state` plus its deliverables (see below). A `goal_state` under `goal_min_chars` meaningful characters (whitespace-stripped, `configs/plan_gate_panel.yaml`), or a track with zero deliverables, is refused loud; `--doc` wins explicitly over goal+deliverables, and the output names which source the gate judged. |
 | `status` | Show a track's plan-gate state + `derived_status`. |
-| `attest` | Operator escape-hatch: attest the gate as passed without re-running the panel; requires `--reason` and `--approval-id`. |
+| `attest` | Operator escape-hatch: attest the gate as passed without re-running the panel; requires `--reason` and `--approval-id`. Writes a `plan_gate_pass` record to `.vnx-attest/plan-gates.ndjson` (see `docs/core/HORIZON_LIFECYCLE.md` stage 3). |
 | `missing-reasons` | Read-only audit: list resolved plan-gate blockers that carry no `resolution_reason`. |
 | `backfill-reason` | Record the missing `resolution_reason` on an already-resolved row; refuses an unresolved row and refuses to overwrite an existing reason. |
 | `reblock` | Put back a wrongly-lifted blocker (track is blocked again); the reversal stays visible in `resolution_reason`. |
