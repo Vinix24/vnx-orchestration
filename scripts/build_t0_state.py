@@ -70,6 +70,11 @@ Schema 2.2 change (D5 fabric-state-herstel, live work):
     ``conflicts/`` directory that exists but cannot be listed is not zero:
     its count is ``null`` with a ``*_unmeasured_reason`` and it degrades
     system_health, so the dispatch guard reads WAIT, never GO.
+  - t0_index.json schema ``t0_index/1.3`` makes ``queue.open_prs`` nullable: ``null``
+    plus a top-level ``pr_queue_unavailable`` (the reason) when the open-PR read
+    failed, instead of ``0``. The key is absent when the read succeeded. The
+    ``pr_queue`` section (``pr_queue/1.1``) carries ``available``/``reason`` and
+    per row ``head_sha``, ``mergeable``, ``merge_state`` and ``ci``.
   - t0_index.json schema ``t0_index/1.2`` (D4b) adds ``open_outcomes``:
     dispatches without an outcome a T0 decided on, at most 10 items
     plus counts. The full section is ``open_outcomes`` in t0_state.json.
@@ -2227,19 +2232,27 @@ def _pytest_db_isolation_guard(state_dir: Path) -> None:
         )
 
 def _build_pr_queue_section(state_dir: Path) -> Dict[str, Any]:
-    """Build pr_queue section. Best-effort — never raises."""
-    pr_queue: Dict[str, Any] = {
-        "schema": "pr_queue/1.0",
+    """Build pr_queue section. Best-effort — never raises.
+
+    A builder that is missing or raises gives ``available: false`` with
+    ``builder_failed`` and the exception type, never an empty list that reads
+    as "no open PRs".
+    """
+    reason = "builder_failed: pr_queue_state not importable"
+    if _build_pqs is not None:
+        try:
+            return _build_pqs(state_dir, project_root=_PROJECT_ROOT)
+        except Exception as e:
+            log.warning("pr_queue_state build failed (best-effort): %s", e)
+            reason = f"builder_failed: {type(e).__name__}"
+    return {
+        "schema": "pr_queue/1.1",
         "timestamp": _now_iso(),
+        "available": False,
+        "reason": reason,
         "open_prs": [],
         "merged_today": [],
     }
-    if _build_pqs is not None:
-        try:
-            pr_queue = _build_pqs(state_dir)
-        except Exception as e:
-            log.warning("pr_queue_state build failed (best-effort): %s", e)
-    return pr_queue
 
 
 # ---------------------------------------------------------------------------
@@ -2739,8 +2752,10 @@ def _build_t0_index(state: Dict[str, Any]) -> Dict[str, Any]:
     last_commits: List[str] = git_ctx.get("last_5_commits") or []
     raw_head = last_commits[0].split()[0] if last_commits else ""
 
-    return {
-        "schema": "t0_index/1.2",
+    pr_queue = state.get("pr_queue") or {}
+    pr_unavailable = pr_queue.get("available") is False
+    index = {
+        "schema": "t0_index/1.3",
         "timestamp": state.get("generated_at", ""),
         "git_branch": git_ctx.get("branch", ""),
         "git_head": raw_head[:7],
@@ -2748,7 +2763,7 @@ def _build_t0_index(state: Dict[str, Any]) -> Dict[str, Any]:
         # The headless lane uses no terminals and never writes dispatches/active/.
         "queue": {
             "pending": queues.get("pending_count", 0),
-            "open_prs": len((state.get("pr_queue") or {}).get("open_prs") or []),
+            "open_prs": None if pr_unavailable else len(pr_queue.get("open_prs") or []),
             "blocking_open_items": open_items.get("blocker_count", 0),
         },
         "live_work": _live_work_index_summary(state.get("live_work")),
@@ -2760,6 +2775,9 @@ def _build_t0_index(state: Dict[str, Any]) -> Dict[str, Any]:
         "contract_invalid": _contract_invalid_index_summary(state.get("contract_invalid")),
         "last_rebuild_seconds": state.get("_build_seconds"),
     }
+    if pr_unavailable:
+        index["pr_queue_unavailable"] = pr_queue.get("reason") or "unknown"
+    return index
 
 
 def _contract_invalid_index_summary(ci: Optional[Dict[str, Any]]) -> Dict[str, Any]:

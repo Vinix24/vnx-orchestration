@@ -132,7 +132,7 @@ class TestIndexRequiredFields:
 
     def test_schema_value(self):
         index = _build_t0_index(_make_full_state())
-        assert index["schema"] == "t0_index/1.2"
+        assert index["schema"] == "t0_index/1.3"
 
     def test_timestamp_from_generated_at(self):
         state = _make_full_state()
@@ -204,7 +204,7 @@ class TestIndexRequiredFields:
 
     def test_empty_state_no_crash(self):
         index = _build_t0_index({})
-        assert index["schema"] == "t0_index/1.2"
+        assert index["schema"] == "t0_index/1.3"
         assert "terminals" not in index
         assert index["live_work"]["available"] is False
         assert index["recent_receipts"] == []
@@ -336,7 +336,7 @@ class TestIndexDetailSeparation:
         state = _make_full_state()
         index = _build_t0_index(state)
         # Index builds without needing t0_detail/ to exist
-        assert index["schema"] == "t0_index/1.2"
+        assert index["schema"] == "t0_index/1.3"
         assert not (tmp_path / "t0_detail").exists()
 
 
@@ -355,7 +355,7 @@ class TestIntegrationWithBuildT0State:
         state = build_t0_state(state_dir=state_dir, dispatch_dir=dispatch_dir)
         index = _build_t0_index(state)
 
-        assert index["schema"] == "t0_index/1.2"
+        assert index["schema"] == "t0_index/1.3"
         assert len(index) <= 50
         serialized = json.dumps(index, indent=2, default=str).encode("utf-8")
         assert len(serialized) < 5 * 1024
@@ -374,3 +374,35 @@ class TestIntegrationWithBuildT0State:
         assert isinstance(manifest, dict)
         for key, path_str in manifest.items():
             assert Path(path_str).exists(), f"{key} detail file not found: {path_str}"
+
+
+# ---------------------------------------------------------------------------
+# 7. queue.open_prs is null, never 0, when the open-PR read failed (P5)
+# ---------------------------------------------------------------------------
+
+class TestOpenPrsWhenTheReadFailed:
+    _REASON = "rc=4: " + "x" * 120
+
+    def _state(self, pr_queue):
+        state = _make_full_state()
+        state["pr_queue"] = pr_queue
+        return state
+
+    def test_unavailable_section_gives_null_and_the_reason(self):
+        index = _build_t0_index(self._state({"available": False, "reason": self._REASON, "open_prs": []}))
+        assert index["queue"]["open_prs"] is None
+        assert index["pr_queue_unavailable"] == self._REASON
+
+    def test_available_section_gives_the_count_and_no_marker(self):
+        index = _build_t0_index(self._state({"available": True, "reason": None, "open_prs": [{"number": 1}]}))
+        assert index["queue"]["open_prs"] == 1
+        assert "pr_queue_unavailable" not in index
+
+    def test_available_and_empty_is_zero(self):
+        index = _build_t0_index(self._state({"available": True, "reason": None, "open_prs": []}))
+        assert index["queue"]["open_prs"] == 0
+
+    def test_index_with_the_marker_stays_under_5kb(self):
+        state = self._state({"available": False, "reason": self._REASON, "open_prs": []})
+        serialized = json.dumps(_build_t0_index(state), indent=2, default=str).encode("utf-8")
+        assert len(serialized) < 5120

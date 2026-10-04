@@ -223,7 +223,7 @@ def test_pr_queue_state_unlink_failure_does_not_mask_original_error(tmp_path):
 
     with patch("pr_queue_state.build_pr_queue_state", side_effect=RuntimeError("build failed")):
         with pytest.raises(RuntimeError, match="build failed"):
-            m.write_pr_queue_state(tmp_path)
+            m.write_pr_queue_state(tmp_path, project_root=tmp_path)
 
 
 # ---------------------------------------------------------------------------

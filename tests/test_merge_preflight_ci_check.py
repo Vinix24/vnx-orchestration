@@ -606,3 +606,95 @@ class TestCLI:
         gh_call_args = mock_run.call_args_list[-1].args[0]
         assert "--branch" not in gh_call_args
         assert "--commit" in gh_call_args
+
+
+# ---------------------------------------------------------------------------
+# P3: every return path carries a ``reason`` from the closed set
+# ---------------------------------------------------------------------------
+
+import subprocess as _subprocess
+
+from merge_preflight_ci_check import REASON_CODES
+
+
+def _run_entry(conclusion, sha, status="completed", run_id=1, created_at="2026-01-01T00:00:00Z"):
+    return {"conclusion": conclusion, "headSha": sha, "status": status,
+            "databaseId": run_id, "createdAt": created_at}
+
+
+_P3_SHA = "d" * 40
+
+
+def _p3_scenarios():
+    sha = _P3_SHA
+    ok, fail = _gh_auth_ok(), _gh_auth_fail()
+    timeout = _subprocess.TimeoutExpired(cmd="gh", timeout=1)
+    missing = FileNotFoundError("gh")
+    git_fail = MagicMock(returncode=128, stdout="", stderr="fatal")
+    bad_json = MagicMock(returncode=0, stdout="not json", stderr="")
+    run_fail = MagicMock(returncode=1, stdout="", stderr="HTTP 403")
+    runs = lambda *entries: _gh_multi_run_output(list(entries))  # noqa: E731
+    return [
+        ("go", {"head_sha": sha}, GH_PRESENT, [ok, runs(_run_entry("success", sha))]),
+        ("overridden", {"head_sha": sha, "override_reason": "operator"}, GH_PRESENT, []),
+        ("override_without_reason", {"head_sha": sha, "override_reason": ""}, GH_PRESENT, []),
+        ("gh_missing", {"head_sha": sha}, None, []),
+        ("gh_missing", {"head_sha": sha}, GH_PRESENT, [missing]),
+        ("gh_missing", {"head_sha": sha}, GH_PRESENT, [ok, missing]),
+        ("head_unresolved", {}, GH_PRESENT, [git_fail]),
+        ("short_sha", {"head_sha": "abc1234"}, GH_PRESENT, []),
+        ("gh_unauthenticated", {"head_sha": sha}, GH_PRESENT, [fail]),
+        ("gh_auth_timeout", {"head_sha": sha}, GH_PRESENT, [timeout]),
+        ("gh_run_list_timeout", {"head_sha": sha}, GH_PRESENT, [ok, timeout]),
+        ("gh_run_list_failed", {"head_sha": sha}, GH_PRESENT, [ok, run_fail]),
+        ("unparseable", {"head_sha": sha}, GH_PRESENT, [ok, bad_json]),
+        ("no_run", {"head_sha": sha}, GH_PRESENT, [ok, _gh_empty_output()]),
+        ("running", {"head_sha": sha}, GH_PRESENT, [ok, runs(_run_entry(None, sha, status="in_progress"))]),
+        ("conclusion", {"head_sha": sha}, GH_PRESENT, [ok, runs(_run_entry("failure", sha))]),
+        ("conclusion", {"head_sha": sha}, GH_PRESENT, [
+            ok, runs(_run_entry("success", sha, run_id=1, created_at="2026-01-01T00:00:00Z"),
+                     _run_entry("failure", sha, run_id=2, created_at="2026-01-02T00:00:00Z"))]),
+        ("order_undeterminable", {"head_sha": sha}, GH_PRESENT, [
+            ok, runs(_run_entry("success", sha, run_id=1), _run_entry("failure", sha, run_id=2))]),
+        ("order_undeterminable", {"head_sha": sha}, GH_PRESENT, [
+            ok, runs(_run_entry("success", sha, run_id=1, created_at=""),
+                     _run_entry("success", sha, run_id=2))]),
+    ]
+
+
+class TestReasonCodes:
+    @pytest.mark.parametrize("expected,kwargs,which,effects", _p3_scenarios())
+    def test_every_return_path_names_its_reason(self, tmp_path, monkeypatch, expected, kwargs, which, effects):
+        monkeypatch.delenv(OVERRIDE_ENV_VAR, raising=False)
+        with patch("merge_preflight_ci_check.subprocess.run", side_effect=effects), \
+             patch("merge_preflight_ci_check.shutil.which", return_value=which):
+            result = check_ci_run_for_head(tmp_path, **kwargs)
+        assert result["reason"] == expected
+        assert result["reason"] in REASON_CODES
+
+    def test_scenarios_cover_the_whole_closed_set(self):
+        assert {s[0] for s in _p3_scenarios()} == REASON_CODES
+
+    def test_go_and_no_go_verdicts_keep_their_shape(self, tmp_path):
+        sha = _P3_SHA
+        with patch("merge_preflight_ci_check.subprocess.run",
+                   side_effect=[_gh_auth_ok(), _gh_run_output("success", sha)]), \
+             patch("merge_preflight_ci_check.shutil.which", return_value=GH_PRESENT):
+            go = check_ci_run_for_head(tmp_path, head_sha=sha)
+        assert go["verdict"] == "GO"
+        assert go["message"] == f"VNX CI geslaagd op {sha[:12]} (run 12345)"
+
+    def test_auth_status_runs_in_the_project_root(self, tmp_path):
+        sha = _P3_SHA
+        with patch("merge_preflight_ci_check.subprocess.run",
+                   side_effect=[_gh_auth_ok(), _gh_run_output("success", sha)]) as run, \
+             patch("merge_preflight_ci_check.shutil.which", return_value=GH_PRESENT):
+            check_ci_run_for_head(tmp_path, head_sha=sha)
+        assert [c.kwargs.get("cwd") for c in run.call_args_list] == [str(tmp_path)] * 2
+
+    def test_the_function_is_smaller_than_before_the_reason_codes(self):
+        from function_size_gate import measure_source
+        source = Path(mpci.__file__).read_text(encoding="utf-8")
+        sizes = {m.qualname: m.executable_lines for m in measure_source(source)}
+        assert sizes["check_ci_run_for_head"] < 176
+        assert not any(name.startswith("check_ci_run_for_head.<locals>") for name in sizes)
