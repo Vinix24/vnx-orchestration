@@ -14,11 +14,16 @@ from memory. Its content reaches your context one of two ways:
    body as `additionalContext` for T0 sessions before you see the first prompt — no `@`-import,
    no Skill-tool call, no interactive trust prompt. If you can see a `# T0 Orchestrator` heading
    anywhere in this loaded context, this is already satisfied; proceed.
-2. **Skill-tool invocation (fallback)** — if that heading is absent (e.g. this project's
-   SessionStart hook hasn't been synced/wired yet), invoke `@t0-orchestrator` via the Skill
-   tool. If that call returns `Unknown skill` or the skill is not model-invocable, STOP: do not
-   orchestrate from memory. Report role↔skill drift and run
-   `bash scripts/commands/t0_role_audit.sh` to confirm.
+2. **Read the playbook file (fallback)** — if that heading is absent (the hook output is large and
+   the harness inlines only a preview of it), read `.claude/skills/t0-orchestrator/SKILL.md` under
+   the repo root with the Read tool. The SessionStart hook prints the absolute path of that file in the
+   first lines of its context. The skill is not model-invocable by design, so do not try the Skill
+   tool. STOP only when that file does not exist: do not orchestrate from memory. Report role↔skill
+   drift and run `bash "${VNX_HOME:-$(git rev-parse --show-toplevel)}/scripts/commands/t0_role_audit.sh"` to confirm.
+
+**Command anchor.** Every command in this role starts from `${VNX_HOME:-$(git rev-parse --show-toplevel)}`, so it runs from any folder inside
+the repo, including `.claude/terminals/T0`. In a consumer repo without `scripts/` these commands need
+`VNX_HOME` set to the install; that is existing debt and is not widened here.
 
 ### Autonomous Execution
 
@@ -33,17 +38,18 @@ When operating in autonomous mode (no routine user checkpoints), follow this dis
 
 ## Startup State
 
-At session start, `.vnx-data/state/t0_index.json` and `.vnx-data/state/t0_state.json` are automatically built by the SessionStart hook. The index is the cheap orientation; `t0_state.json` is the compact snapshot behind it (a test holds it under 80 KB). It holds terminals, queues, tracks, open items, live work, recent receipts, git context, system health and the open-PR queue.
+At session start, `t0_index.json` and `t0_state.json` in the resolved central state dir are automatically built by the SessionStart hook. The index is the cheap orientation; `t0_state.json` is the compact snapshot behind it (a test holds it under 80 KB). It holds terminals, queues, tracks, open items, live work, recent receipts, git context, system health and the open-PR queue.
 
 ```bash
-cat .vnx-data/state/t0_state.json | python3 -m json.tool
+cat "$(python3 "${VNX_HOME:-$(git rev-parse --show-toplevel)}/scripts/lib/vnx_paths.py" | sed -n 's/^VNX_STATE_DIR=//p')/t0_state.json" | python3 -m json.tool
+# the path is the resolved central store (~/.vnx-data/<project>/state), not a folder under the cwd
 ```
 
 The state carries no track list, no human-gate queue and no dispatch history. Ask for them with a command:
 
 - Tracks and their phase: `vnx objective list` and `vnx objective show <track_id>` (`scripts/planning_cli.py`).
 - The human gate (deliverables waiting on `vnx deliverable promote`): `vnx deliverable list`.
-- Dispatches and their receipts: `python3 scripts/receipt_query.py by-dispatch <dispatch_id> --state-dir <state-dir>`, `by-track <track_id>` and `since <timestamp>` (`scripts/receipt_query.py`).
+- Dispatches and their receipts: `python3 "${VNX_HOME:-$(git rev-parse --show-toplevel)}/scripts/receipt_query.py" by-dispatch <dispatch_id> --state-dir <state-dir>`, `by-track <track_id>` and `since <timestamp>` (`scripts/receipt_query.py`).
 
 **What is running now** is `live_work` in `t0_index.json`, not the terminals and not `active_work` (both are gone from the index: the headless lane uses no terminals and never writes `dispatches/active/`). `live_work` reads this project's `dispatches` rows in an in-flight state (`claimed`, `delivering`, `accepted`, `running`, derived from the state machine) and probes each dispatch's occupancy flock:
 
@@ -55,7 +61,7 @@ The state carries no track list, no human-gate queue and no dispatch history. As
 
 Open PRs are linked to their dispatch through the branch `dispatch/<id>`. `queue.pending` counts staged spec bundles (`pending/<id>/dispatch-spec.json`) and `pending/<id>.md` files (still moved there by `queue_auto_accept.sh`), one per id. The index schema is `t0_index/1.2`.
 
-**What still needs a decision** is `open_outcomes` in `t0_index.json`: dispatches of this project without an outcome a T0 decided on (at most 10 items, the rest as `more`): a `reject`, `investigate` or evidence-only outcome in the ledger, or a dispatch still in `dispatches/active/` without a receipt past 1h, without an outcome of its own, or with a failure. A dispatch is only finished with an outcome; without one it stays an open point, never a silent end state. Nothing is consumed by reading it, so a second T0 session sees the same list. The full list: `python3 scripts/receipt_query.py open-outcomes --state-dir <state-dir>`. Record your decision after your own review with `python3 scripts/receipt_query.py decide <dispatch_id> accept|reject --reason "<why>" --state-dir <state-dir>`: it appends to `t0_decision_log.jsonl`, takes the dispatch off the list, and the active-drain then moves it out of `dispatches/active/` (accept to `completed/`, reject to `dead_letter/`). Your reject is the only way into `dead_letter/`: the drain no longer dead-letters on age or on a failure receipt. `docs/core/DISPATCH_RULES.md` §13 has the rules.
+**What still needs a decision** is `open_outcomes` in `t0_index.json`: dispatches of this project without an outcome a T0 decided on (at most 10 items, the rest as `more`): a `reject`, `investigate` or evidence-only outcome in the ledger, or a dispatch still in `dispatches/active/` without a receipt past 1h, without an outcome of its own, or with a failure. A dispatch is only finished with an outcome; without one it stays an open point, never a silent end state. Nothing is consumed by reading it, so a second T0 session sees the same list. The full list: `python3 "${VNX_HOME:-$(git rev-parse --show-toplevel)}/scripts/receipt_query.py" open-outcomes --state-dir <state-dir>`. Record your decision after your own review with `python3 "${VNX_HOME:-$(git rev-parse --show-toplevel)}/scripts/receipt_query.py" decide <dispatch_id> accept|reject --reason "<why>" --state-dir <state-dir>`: it appends to `t0_decision_log.jsonl`, takes the dispatch off the list, and the active-drain then moves it out of `dispatches/active/` (accept to `completed/`, reject to `dead_letter/`). Your reject is the only way into `dead_letter/`: the drain no longer dead-letters on age or on a failure receipt. `docs/core/DISPATCH_RULES.md` §13 has the rules.
 
 For crash recovery or if state appears stale, run the individual repair tools below.
 
@@ -94,13 +100,13 @@ DELIVERABLE = a proposed dispatch created with `vnx deliverable add --objective 
 **Worker dispatch policy:**
 
 - All dispatches go through the single-entry door `vnx dispatch <pending-id>`, which decides the lane. Calling a lane script directly is a side door (rollback only: `VNX_DISPATCH_LEGACY=1`).
-- Source vs. consumer: the door above (`bin/vnx dispatch <id>`) is the fabric source repo's form. In a pip-installed consumer repo (no `bin/`), the equivalent governed door is `vnx dispatch-agent --agent <name>` (it routes through the same `deliver_via_door` bridge); `vnx pool` replaces `bin/vnx pool`.
+- Source vs. consumer: the door above (`"${VNX_HOME:-$(git rev-parse --show-toplevel)}/bin/vnx" dispatch <id>`) is the fabric source repo's form. In a pip-installed consumer repo (no `bin/`), the equivalent governed door is `vnx dispatch-agent --agent <name>` (it routes through the same `deliver_via_door` bridge); `vnx pool` replaces `"${VNX_HOME:-$(git rev-parse --show-toplevel)}/bin/vnx" pool`.
 - Provider→lane (hard): `claude`/Opus/Sonnet are NEVER routed through `provider_dispatch` (it refuses claude). `kimi`/`glm`/`deepseek` route via `provider_dispatch.py`. For claude there is no lane to choose:
   - A `claude` spec runs on the default lane `claude_headless` (`dispatch_envelope.run_envelope_headless_plan`, `claude -p`, subscription-preserving). Opened 2026-08-11 (dispatch-20260811c-b), default since A2 on 2026-08-26 (dispatch-20260826-alpha-a2-headless-default), and the only claude lane since the tmux-spawn lane was removed on 2026-09-18. There is no opt-out. What was removed and what stayed: `docs/operations/TMUX_SPAWN_LANE.md`.
   - `--allow-headless` + `--headless-reason` does not change the lane. It adds one audit line to the plan: `HEADLESS lane opted-in`, followed by the reason. Without the flags the same lane runs and that line is absent.
   - So `allow_headless=False` in a staged spec means "no opt-in stated", not "not headless". On 17/18-09 such specs were taken for tmux dispatches. They ran on the same lane as every other claude dispatch.
   - The `claude-headless` constraint warn on every headless dispatch, flagged or not, blocks none of them. `audit_severity` is `warn` in `provider_constraints.yaml`: the dispatch proceeds and the lane stays visible in the audit trail.
-  - To see the lane and the plan warnings before firing: `bin/vnx dispatch <dispatch-id> --dry-run`.
+  - To see the lane and the plan warnings before firing: `"${VNX_HOME:-$(git rev-parse --show-toplevel)}/bin/vnx" dispatch <dispatch-id> --dry-run`.
 - Build-worker provider and model are a **free per-dispatch choice**: what the dispatch spec says wins (`workers-kimi-pinned`, pin_semantics=default). sonnet is the default when the spec carries no explicit model (operator decision 2026-09-23). kimi-k3 is an explicit choice, not the default. No override env needed. T0 stays Opus as a governance floor (`t0-opus-only`, pin_semantics=floor).
 - `provider=claude` for a build-worker still routes through a separate gate: `VNX_OVERRIDE_WORKER_CLAUDE=1` with an audit reason in `VNX_OVERRIDE_WORKER_CLAUDE_REASON` (the symbols are `dispatch_cli.WORKER_CLAUDE_OVERRIDE_ENV` and `dispatch_cli.WORKER_CLAUDE_OVERRIDE_REASON_ENV`). Track `worker-provider-free-choice` aims to eventually remove this remaining lock.
 - Default reviewers are `codex_gate` + `kimi_gate`, both on a subscription. `glm_gate` and `deepseek_gate` run on API credit: they are a fallback inside the takeover chain only, never a project default. Do not add an API gate to a review stack, or run one by hand, unless codex and kimi are both unavailable. The mechanism lives in `docs/core/DISPATCH_RULES.md`.
@@ -131,7 +137,7 @@ Quick reference: validate schema → repair stale leases → reconcile queue →
 If you are reading this file, your role loaded correctly — Claude Code found it by walking up from cwd, which only happens when cwd is (under) `.claude/terminals/T0`. If a tmux restart, `tmux-resurrect`/`continuum` auto-restore, or manual re-attach ever drops cwd back to the project root, a T0 session silently loses this entire file with no error — it just runs the generic project `CLAUDE.md` instead. `vnx start` self-heals this on the next launch for genuinely stale sessions; it cannot touch a session with a live CLI already running (by design — it will not kill your session). To check the whole fleet for this drift without disturbing any running session:
 
 ```bash
-bash scripts/commands/t0_role_audit.sh
+bash "${VNX_HOME:-$(git rev-parse --show-toplevel)}/scripts/commands/t0_role_audit.sh"
 ```
 
 ## File-Layout Discipline (master-rule)
@@ -243,9 +249,9 @@ All 7 invariants must hold before PR closure. Any missing or mismatched surface 
 
 | # | Invariant | Blocks on |
 |---|---|---|
-| 1 | Request record exists | `.vnx-data/state/review_gates/requests/` |
+| 1 | Request record exists | `review_gates/requests/` |
 | 2 | Execution actively started (not just `queued`) | Runner confirmed or dispatch sent |
-| 3 | Result record exists | `.vnx-data/state/review_gates/results/` |
+| 3 | Result record exists | `review_gates/results/` |
 | 4 | `contract_hash` matches active review contract | Non-empty + matches |
 | 5 | `report_path` non-empty in result | Present in result payload |
 | 6 | Markdown report file exists | `$VNX_DATA_DIR/unified_reports/` |
@@ -294,11 +300,11 @@ Before the first promote of any new feature chain, check all target terminals fo
 # pin forks state from the central store (~/.vnx-data/<project>) = split-brain.
 # Check each terminal
 for T in T1 T2 T3; do
-  python3 scripts/runtime_core_cli.py check-terminal --terminal $T --dispatch-id <new-dispatch-id>
+  python3 "${VNX_HOME:-$(git rev-parse --show-toplevel)}/scripts/runtime_core_cli.py" check-terminal --terminal $T --dispatch-id <new-dispatch-id>
 done
 # If any shows lease_expired_not_cleaned, find generation and release:
 sqlite3 "$VNX_STATE_DIR/runtime_coordination.db" "SELECT * FROM terminal_leases WHERE terminal_id='<T>';"
-python3 scripts/runtime_core_cli.py release-on-failure --terminal <T> --dispatch-id <old-dispatch> --generation <gen> --reason "stale_lease_cleanup"
+python3 "${VNX_HOME:-$(git rev-parse --show-toplevel)}/scripts/runtime_core_cli.py" release-on-failure --terminal <T> --dispatch-id <old-dispatch> --generation <gen> --reason "stale_lease_cleanup"
 ```
 
 ## Headless T1 Dispatch
@@ -322,7 +328,7 @@ The subprocess automatically loads T1's CLAUDE.md as skill context (injected by 
 
 For parallel dispatches or high-throughput scenarios, use the elastic pool instead of direct terminal-pinning.
 
-**CLI:** `bin/vnx pool {status,scale,config,reap}`
+**CLI:** `"${VNX_HOME:-$(git rev-parse --show-toplevel)}/bin/vnx" pool {status,scale,config,reap}`
 
 | Use pool when | Use terminal-pin when |
 |---|---|
@@ -351,26 +357,28 @@ T0 does not invoke it per dispatch but should know the opt-in flags:
 
 ```bash
 # Refresh state mid-session
-python3 scripts/build_t0_state.py
+python3 "${VNX_HOME:-$(git rev-parse --show-toplevel)}/scripts/build_t0_state.py"
 
 # On-demand queue drift repair
-python3 scripts/reconcile_queue_state.py --repair
+python3 "${VNX_HOME:-$(git rev-parse --show-toplevel)}/scripts/reconcile_queue_state.py" --repair
 
 # Open items (if digest needs refresh)
-python3 scripts/open_items_manager.py digest
+python3 "${VNX_HOME:-$(git rev-parse --show-toplevel)}/scripts/open_items_manager.py" digest
 
 # Skill listing
-python3 scripts/validate_skill.py --list
+python3 "${VNX_HOME:-$(git rev-parse --show-toplevel)}/scripts/validate_skill.py" --list
 ```
 
 ## Read-Only State Sources
 
-- `.vnx-data/state/t0_index.json` — orientation (built by SessionStart hook, refresh with `python3 scripts/build_t0_state.py`)
-- `.vnx-data/state/t0_state.json` — compact snapshot behind the index, same builder
-- `.vnx-data/state/t0_recommendations.json`
-- `.vnx-data/state/open_items_digest.json`
-- `.vnx-data/state/review_gates/requests/`
-- `.vnx-data/state/review_gates/results/`
+All paths below are relative to the resolved central state dir (`VNX_STATE_DIR`, `~/.vnx-data/<project>/state`), never to the cwd.
+
+- `t0_index.json` — orientation (built by SessionStart hook, refresh with `python3 "${VNX_HOME:-$(git rev-parse --show-toplevel)}/scripts/build_t0_state.py"`)
+- `t0_state.json` — compact snapshot behind the index, same builder
+- `t0_recommendations.json`
+- `open_items_digest.json`
+- `review_gates/requests/`
+- `review_gates/results/`
 - `$VNX_DATA_DIR/unified_reports/`
 
 ## Feature Plan Path
@@ -386,7 +394,7 @@ Cite the policy code (A1, B2, etc) when invoking.
 - **A1**: Codex CLI rate-limited → wait for reset (default 5h+, max 5d acceptable). NEVER fall back unless explicitly authorized this session as Option B.
 - **A2 (Option B fallback, opt-in only)**: When operator explicitly says "Option B" or "kimi-only OK": merge with kimi PASS + CI green; file codex re-audit OI per merge. Use template:
   ```
-  python3 scripts/open_items_manager.py add \
+  python3 "${VNX_HOME:-$(git rev-parse --show-toplevel)}/scripts/open_items_manager.py" add \
     --title "Codex re-audit pending PR #N (merged with codex unavailable)" \
     --severity info --pr N --dispatch "20260430-codex-rate-limit-mayX" \
     --details "..."
