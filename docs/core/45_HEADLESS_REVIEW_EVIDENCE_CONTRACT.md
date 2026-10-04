@@ -116,6 +116,24 @@ Headless review orchestration MUST distinguish these states:
 T0 MUST NOT treat `queued` or `requested` as evidence that the gate is already running.
 T0 MUST NOT treat `queued` plus ad hoc shell output as valid closure evidence unless the structured result and normalized report are also present.
 
+### 3.5 Takeover: `takeover_from` and its companions
+
+When a seat cannot review, the next seat in the takeover chain reads the PR in its place. The default chain is `codex_gate,kimi_gate,glm_gate,deepseek_gate` (`gate_request_handler._DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN`, `VNX_REVIEW_GATE_TAKEOVER_CHAIN` sets another order or an empty chain). A seat is passed over only when its own result for this PR head says the lane is exhausted, or its provider is recorded unreachable. A result about another head does not count (`gate_recorder.result_is_for_head`). A chain that runs out ends as `chain_exhausted`, never as a silent re-dispatch.
+
+The record of the seat that took over carries these fields:
+
+| Field | Meaning |
+|---|---|
+| `takeover` | `true` |
+| `takeover_path` | list of `{gate, reason, detail, status}`, one entry per seat that was passed over |
+| `takeover_from` | the gate of the last hop in `takeover_path`: the seat directly passed over. In a chain of several hops it is not the first seat. The signer is the record's own `gate` |
+| `takeover_reason`, `takeover_source_status` | taken from the last hop |
+| `failure_reason` | prose |
+
+In a `chain_exhausted` result `takeover_from` is the gate that was originally requested. The fields are written by `gate_request_handler._stamp_takeover_annotations` (request file, and the result file when it exists), copied onto the result by `gate_recorder.stamp_request_identity` when the request has `takeover` true, set by `_chain_exhausted_result`, and copied to the `review_gate_request` receipt in `request_reviews`. Read the last line of a gate report with `takeover_from` in mind: "kimi_gate: PASS" can be a seat that took over, and `takeover_from` names whose turn it was.
+
+The merge door does not read `takeover_from`. It reads `takeover` and `takeover_path` (`closure_verifier._find_takeover_successor_results`): a successor counts for the declared gate only when it is a review gate, has `takeover: true`, and its `takeover_path` names the declared gate, matches the PR scope, and passes the same evidence chain. The obligation booking `fulfilled_by_takeover_evidence` is the other way a takeover stands for a gate (`_consult_obligation_takeover_booking`). `vnx pr-ready` prints the result as `OK via overname` or `OK via takeover-boeking`. Tests: `tests/test_beta3_e1_review_gate_chain.py`, `tests/test_oi1576_merge_door_takeover_evidence.py`, `tests/test_oi1719_obligation_takeover_booking.py`. Every release around the review stage: `docs/core/LOCKS_AND_RELEASES.md` stage 6.
+
 ## 4. Required Gate Result Fields
 
 Every `review_gate_result` relevant to closure MUST include:

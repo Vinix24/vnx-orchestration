@@ -66,6 +66,46 @@ The `dispatch_register.ndjson` register event is **best-effort**, not binding. I
 
 **Where this is enforced:** `merge_pr` returns the result dict; `main` maps the three rows to exit codes (`EXIT_OK` only on dry-run or `success and receipt_ok`, else `EXIT_ERROR`). The code is authoritative; this section describes intent.
 
+### 2.2 The merge door as a whole (`scripts/pr_merge.py`)
+
+Five preflights run in the order of `PREFLIGHT_ORDER`. The door stops at the first refusal, writes a `pr_merge_refused` receipt (status `blocked`, the later preflights marked `not_evaluated`; nothing under `--dry-run`) and exits non-zero. The first output line names the target repo (`doelrepo: owner/name`).
+
+| # | Preflight | Refuses when | Release |
+|---|---|---|---|
+| 1 | `ci` (`_run_ci_gate`) | the PR head cannot be resolved, the head SHA is not 40 characters, the project's CI workflow has no run for that SHA, a run is running or queued, or the latest completed run is not `success` | `--override-reason "<text>"` or `VNX_MERGE_OVERRIDE_REASON`; one reason also covers preflight 2 |
+| 2 | `review` (`_run_review_gate`) | no obligation names a gate for this PR, or `check_review_gate_for_merge` does not return GO (evidence, head scope, takeover rules: `docs/core/45_HEADLESS_REVIEW_EVIDENCE_CONTRACT.md`) | the same reason |
+| 3 | `adr` (`_run_adr_gate`) | an ADR file added by the PR reuses a number already on the base branch; skipped for a PR GitHub already shows as MERGED | none |
+| 4 | `contract_invalid` (`_run_contract_invalid_gate`) | the latest decided deliverable outcome receipt of the dispatch is `contract_invalid`, or the ledger is unreadable; without a resolvable dispatch id the gate is a loud GO (section 14) | `--override-contract-invalid "<text>"`, for that one code only |
+| 5 | `branch_protection` (`_run_branch_protection_gate`) | the running door differs from main, live protection drifts from `branch_protection.yaml`, or the PR's YAML weakens main's | `--allow-weaken "<text>"`, for a weakening the PR's own YAML makes; drift under `enforcement: enforce` and a door mismatch have no release |
+
+The door checks itself inside preflight 5 (`_door_blob_hash_gate`): it hashes eight files of its own library with `git hash-object` and compares them with the blob SHAs on `main` (or on the release tag for an install): `scripts/pr_merge.py`, `scripts/lib/forge_protection_drift.py`, `scripts/lib/merge_preflight_adr_check.py`, `scripts/lib/merge_preflight_ci_check.py`, `scripts/lib/contract_invalid_ledger.py`, `scripts/lib/merge_target.py`, `scripts/lib/vnx_paths.py` and `scripts/lib/ci_contexts.py`. The check runs inside `pr_merge.py` itself, and it runs after preflights 1 to 4, not before them.
+
+After the five preflights `merge_pr` calls `_do_merge`:
+
+1. **The pin.** `gh pr merge --<method> --match-head-commit <sha>` with the SHA preflight 1 approved. A head that moved since is refused (`_is_head_moved_refusal`). `--auto` is added only when the repo allows auto-merge. A direct caller of `merge_pr` with an empty `head_sha` merges unpinned.
+2. **GitHub must say MERGED.** A zero exit of `gh` is not a merge. `_pr_actually_merged` reads the PR again and requires state `MERGED`.
+3. **The binding receipt.** `_emit_receipt` writes `pr_merged` with all five `preflight_gates` records (each overridden gate shows `overridden: true`). The exit is 0 only when the merge happened and the receipt status is `appended` or `duplicate` (the three outcomes of section 2.1). The `dispatch_register.ndjson` event is best-effort and never changes the exit code.
+
+A raw `gh pr merge` runs none of this code; only GitHub's branch protection applies to it. Every release of this door, who may use it and the trail it leaves: `docs/core/LOCKS_AND_RELEASES.md` stage 7.
+
+`vnx pr-ready <PR> [<PR> ...] [--json] [--verbose]` (`scripts/pr_ready.py`, `scripts/lib/pr_readiness.py` `assess`) lays out the evidence per PR before the door is called: a header line, `CI` (required contexts passed of total), `GATES` (each declared gate: OK on head, OK via takeover, NOT on head, absent, UNMEASURABLE), `COST` (what is still outstanding) and `VERDICT` (`READY`, `NOT READY` or `UNMEASURABLE`). Exit codes: 0 ready, 1 not ready, 2 unmeasurable (it beats not ready), 10 bad input. Nothing consults it: it reads the declared gates and the required branch-protection contexts, not the door's workflow-run check, and it runs neither the ADR, `contract_invalid`, door-integrity nor weakening checks. `READY` does not mean the door will merge.
+
+### 2.3 The CI sweep and what a green CI does not prove
+
+The Profile A job of `.github/workflows/vnx-ci.yml` runs pytest over `tests/` with a 180 second limit per test, and skips every file listed in `scripts/ci/test_exclusions.txt`. At base `cab945ad` the file has 228 lines: 119 entries and 109 comment lines. Format: one entry per line, `tests/<path>.py  # <OI or measurement>`; whole-line comments and blank lines are skipped. The workflow strips the comment and passes `--ignore=<path>` to pytest, and it does not check that the path exists. `scripts/ci/check_test_exclusions.py` requires a reason, an existing path and no duplicate; it runs from `scripts/local-ci.sh`, and in CI only through `tests/test_ci_check_test_exclusions.py`, which is inside the sweep. Of the 1328 tracked `test_*.py` files, 119 (about 9 percent) are excluded. The reasons: 91 cite OI-1227 (red when run alone), 15 cite OI-1420 (green alone, red in the sweep), the others cite single OIs, four are hangs and one depends on the CI image. Several excluded files test the review-evidence lock itself.
+
+The sweep also skips tests whose name or class contains `TestFlagGateClaude`, `test_ensure_receipt_does_not_touch_real_store`, and the `live`-marked replay tests under `tests/f39/`. A PR that changes only `docs/`, `claudedocs/` or root `.md` files runs 4 test files instead (the light profile, `scripts/ci/classify_ci_profile.py`).
+
+So a green CI does **not** prove:
+
+- that an excluded test file passes, or that it would catch the change of the PR;
+- that the door logic works against live GitHub: the suite stubs the `gh` calls of the ADR, branch-protection and target-repo gates in `tests/conftest.py`;
+- that a review verdict exists, that the ADR number is free, that the dispatch is not `contract_invalid`, or that branch protection holds: those are the merge door's checks, and CI does not run the door;
+- function size outside `scripts/`, `vnx_cli/` and `dashboard/`, or inside a `tests` or `spikes` path; lint patterns outside `scripts/` and `dashboard/` or on lines the PR did not add;
+- anything on a docs-only PR beyond the four light-profile files.
+
+A required check is not a verdict either: the `Dispatch-ID Slug-Match Gate` is a required context that cannot fail while `VNX_SLUG_ENFORCEMENT` is `0` in the workflow. Do not quote a test count from a green run. Every CI lock, its release and its test: `docs/core/LOCKS_AND_RELEASES.md` stage 5.
+
 ## 3. PR size + iteration caps
 
 - Target **150–200 LOC** delta; **hard cap 300** (override `--allow-large-pr` or split via track_dependencies). Exceptions (no cap): auto-generated migration SQL, single-bug-class test surface, mechanical renames. Put the LOC budget in the dispatch instruction.
@@ -227,6 +267,7 @@ python3 scripts/receipt_query.py open-outcomes --state-dir <state-dir> --json
   - **A failed worker exit does not end the dispatch.** `cleanup_worker_exit.py` (the single post-exit cleanup for both lanes) moves a non-success exit's dispatch file out of `active/` on its own — `failure`/`timeout`/`killed`/`stuck` → `dispatches/rejected/<reason>/` — with no T0 decision behind it, so `rejected/` is storage, never an ending: `open_outcomes.scan_rejected` reads it with the same predicate as `active/`, and the dispatch stays listed as an open point until a T0 records accept or reject for it, receipt or no receipt. A file in `rejected/` with neither a receipt nor a decision is an open point at once (`no_receipt`) — the worker already exited, so the "may still be running" 1h grace does not apply. The reason subdirectory is kept for the storage it gives; a T0 decision closes the open point in the list without moving the file out of `rejected/`. A dispatch id is one item whatever mix of ledger, `active/` and `rejected/` entries it has (`active/` wins over `rejected/`, the ledger wins over both).
   - `abandoned_dispatch` (lv-04): a bundle in `dispatches/abandoned/`, where `dispatch_cleanup.py` moves a `stale-no-receipt` bundle (no receipt, at least 7 days old). The bucket is storage, not an outcome: every bundle there that no outcome decision of this project closes is an open point (`outcome: no_decision`), and a bundle that cannot be read is listed too. A decision (`receipt_query.py decide <id> accept|reject`) closes it; the same id is listed once if it also shows up under another kind.
 - The `receipt_outcome` kind lists only dispatches with a receipt since `OPEN_OUTCOMES_EPOCH` (the per-dispatch reader's epoch, 2026-09-29). The backlog before it stays in the ledger, reachable via `by-dispatch`/`by-pr`/`since`. The `active_dispatch` kind has no epoch: `active/`, `rejected/` and `abandoned/` are the live buckets.
+- **The list shows the reading stored at write time.** An item's `outcome` is the decision the ledger holds for it: the reader of the day computed it when the receipt was written, and the ledger is append-only, so a later reader never changes it. `receipt_query.py open-outcomes --state-dir <state-dir> --recount` adds, for each `receipt_outcome` item, a fresh reading: it opens the report again with the reader on this checkout and gives the decision that reading would produce, read-only (no ledger line, no decision, no state file). Output and fields: `docs/core/11_RECEIPT_FORMAT.md`, section "Fresh reading: `open-outcomes --recount`". Use it before naming a cause for an item whose stored outcome looks stale, and still decide with `decide`: `--recount` closes nothing.
 - Reading consumes nothing. Two T0 sessions see the same open outcomes; the byte cursor (`receipt_pull_cursor.json`, `receipt_query.py pull`) that let the first reader take a receipt away from every other one is removed.
 - **Deciding** removes a dispatch from the list:
 

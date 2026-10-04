@@ -23,6 +23,7 @@
 | Core Architecture | `docs/core/00_VNX_ARCHITECTURE.md` | Complete system architecture and data flow, incl. *Future-State Reconciliation* (open-item → track → dispatch lifecycle, the autopilot loop, and the precise `derived_status` rule) |
 | Dispatch & Intelligence Architecture | `docs/core/DISPATCH_AND_INTELLIGENCE_ARCHITECTURE.md` | Current end-to-end flow: stage → single door → assembly (skill + intelligence injection + report-contract) → claude-headless / provider-envelope lane delivery → govern (phantom-guard) → intelligence injection + self-learning loop |
 | Dispatch Rules | `docs/core/DISPATCH_RULES.md` | Canonical, machine-checkable lane/provider/gate decision rules: `claude_headless` vs `subprocess_dispatch` vs `provider_dispatch`, concurrency, failure modes |
+| Locks and Releases | `docs/core/LOCKS_AND_RELEASES.md` | Register of every lock between a dispatch and a merge (eight stages), the flags, variables, attests and human steps that open each one, who may use them, the trail they leave and the test that holds the lock shut |
 | Provider Lanes | `docs/core/PROVIDER_LANES.md` | How VNX drives AI coding CLIs as subprocess workers, never a vendor SDK; per-provider lane and billing detail |
 | State Fabric | `docs/core/STATE_FABRIC.md` | The state layers VNX governs work across, and how they reconcile |
 | Horizon Planning | `docs/core/HORIZON_PLANNING.md` | Horizon, VNX's planning surface: objectives (tracks) and the `vnx horizon` command surface |
