@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -36,7 +37,7 @@ PANE = "%9"
 SESSION = "sess-rot-1"
 
 STUB_TMUX = r'''#!/usr/bin/env python3
-import json, os, subprocess, sys
+import json, os, re, subprocess, sys
 stub = os.environ["STUB_DIR"]
 args = sys.argv[1:]
 with open(os.path.join(stub, "calls.ndjson"), "a") as fh:
@@ -64,16 +65,45 @@ def submitted():
     return out, pending
 
 cmd = args[0] if args else ""
+def pane_path(target):
+    """Folder of a pane: the old pane is configurable, the new window defaults to the -c folder of
+    new-window and is overridable (STUB_NEW_PANE_PATH) for the wrong-folder case."""
+    if target == "%9":
+        return os.environ.get("STUB_OLD_PANE_PATH", "")
+    if os.environ.get("STUB_NEW_PANE_PATH"):
+        return os.environ["STUB_NEW_PANE_PATH"]
+    path = os.path.join(stub, "new_window_cwd")
+    return open(path).read() if os.path.exists(path) else ""
+
 if cmd == "display-message" and "-p" in args:
     fmt = args[-1]
-    print({"#{window_id}": "@1", "#{window_name}": "VNX ORCH"}.get(fmt, ""))
+    target = args[args.index("-t") + 1] if "-t" in args else ""
+    if fmt == "#{pane_current_path}":
+        print(pane_path(target))
+    else:
+        print({"#{window_id}": "@1", "#{window_name}": "VNX ORCH"}.get(fmt, ""))
+elif cmd == "show-environment":
+    # Only ever asked for ONE variable by name, in the three real forms.
+    name = args[-1]
+    state = os.environ.get("STUB_TMUX_GLOBAL", "unset")
+    if args[:2] != ["show-environment", "-g"] or name.startswith("-") or len(args) != 3:
+        sys.stderr.write("stub: show-environment must name exactly one variable\n")
+        sys.exit(64)
+    if state == "unset":
+        sys.stderr.write("unknown variable: %s\n" % name)
+        sys.exit(1)
+    print("-" + name if state == "removed" else "%s=%s" % (name, state))
 elif cmd == "new-window":
+    if "-c" in args:
+        open(os.path.join(stub, "new_window_cwd"), "w").write(args[args.index("-c") + 1])
     print("@7")
 elif cmd == "capture-pane":
     subs, typed = submitted()
     counter = os.path.join(stub, "captures_after_kickoff")
     screen = "vincent@mac project % "
-    launched = any(s and s.startswith(("claude ", "CLAUDE_CONFIG_DIR=")) for s in subs)
+    # A T0-folder start types `cd -- <folder> && <launch>`; recognise the launch behind the prefix.
+    bare = [re.sub(r"^cd -- (?:\\.|\S)+ && ", "", s) for s in subs if s]
+    launched = any(s.startswith(("claude ", "CLAUDE_CONFIG_DIR=")) for s in bare)
     if launched and not os.environ.get("STUB_NO_FOOTER"):
         screen = "> \n  ⏵⏵ auto mode on (shift+tab to cycle)"
         if any(s and s.startswith("Je bent de verse T0") for s in subs):
@@ -470,3 +500,198 @@ def test_goal_text_stays_within_the_limit():
 
 def test_spawn_script_passes_bash_syntax_check():
     assert subprocess.run(["bash", "-n", str(SPAWN)], capture_output=True).returncode == 0
+
+
+# ── start folder (dispatch 20261004-t0-rotatie-spawner-startmap) ─────────────
+
+
+def _t0_folder(rig, *, vnx_data: bool = True) -> Path:
+    """A healthy T0 folder inside the rig project: CLAUDE.md plus .claude -> <root>/.claude."""
+    root = rig["project"].resolve()
+    t0 = root / ".claude" / "terminals" / "T0"
+    t0.mkdir(parents=True)
+    (t0 / "CLAUDE.md").write_text("@role-orchestrator.md\n", encoding="utf-8")
+    (t0 / ".claude").symlink_to(root / ".claude")
+    if vnx_data:
+        (t0 / ".vnx-data").symlink_to(rig["tmp"] / "state")
+    return t0
+
+
+def _new_window_dir(rig) -> str:
+    call = next(c for c in _calls(rig) if c[0] == "new-window")
+    return call[call.index("-c") + 1]
+
+
+def _root_start_asserted(rig, proc) -> None:
+    assert proc.returncode == 0, proc.stderr
+    assert _new_window_dir(rig) == str(rig["project"].resolve())
+    assert _typed(rig)[0] == "claude --model opus"
+    assert not any(c[0] == "kill-window" for c in _calls(rig))
+
+
+def test_b1_t0_folder_start_from_the_project_root(rig):
+    t0 = _t0_folder(rig)
+    _handoff(rig, HANDOFF_BASE)
+    root = rig["project"].resolve()
+    proc = _spawn(rig, env_extra={"STUB_OLD_PANE_PATH": str(root)})
+    assert proc.returncode == 0, proc.stderr
+    assert _new_window_dir(rig) == str(t0)
+    assert _typed(rig)[0] == f"cd -- {t0} && claude --model opus"
+    correction = [ln for ln in proc.stderr.splitlines() if "start folder correction" in ln]
+    assert len(correction) == 1 and str(root) in correction[0] and str(t0) in correction[0]
+    _assert_enter_always_separate(rig)
+
+
+def test_b2_started_from_the_t0_folder_reads_the_root_handoff_and_logs_no_correction(rig):
+    t0 = _t0_folder(rig)
+    root = rig["project"].resolve()
+    subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+    _handoff(rig, HANDOFF_BASE)
+    env = {**rig["env"], "STUB_OLD_PANE_PATH": str(t0)}
+    proc = subprocess.run(["bash", str(SPAWN)], env=env, cwd=t0, capture_output=True,
+                          text=True, timeout=120)
+    assert proc.returncode == 0, proc.stderr
+    assert _new_window_dir(rig) == str(t0)
+    assert "start folder correction" not in proc.stderr
+    assert "#1920 mergen" in _typed(rig)[1]
+    assert (root / "daily-log" / "handoff.md").is_file()
+    assert not (t0 / "daily-log").exists()
+
+
+def test_b3_no_t0_claude_md_starts_in_the_project_root(rig):
+    _handoff(rig, HANDOFF_BASE)
+    proc = _spawn(rig)
+    _root_start_asserted(rig, proc)
+    lines = [ln for ln in proc.stderr.splitlines() if "no T0 folder" in ln]
+    assert len(lines) == 1
+    assert "WARNING" not in proc.stderr and "Repair" not in proc.stderr
+
+
+def test_b4_plain_directory_in_place_of_the_link_warns_with_a_safe_repair(rig):
+    t0 = _t0_folder(rig)
+    (t0 / ".claude").unlink()
+    (t0 / ".claude").mkdir()
+    (t0 / ".claude" / "keep.txt").write_text("mine", encoding="utf-8")
+    _handoff(rig, HANDOFF_BASE)
+    proc = _spawn(rig)
+    _root_start_asserted(rig, proc)
+    root = rig["project"].resolve()
+    warning = next(ln for ln in proc.stderr.splitlines() if "WARNING" in ln)
+    assert f"mv {t0}/.claude {t0}/.claude.replaced-" in warning
+    assert f"&& ln -s {root}/.claude {t0}/.claude" in warning
+    assert "vnx start" not in proc.stderr
+    assert (t0 / ".claude").is_dir() and not (t0 / ".claude").is_symlink()
+    assert (t0 / ".claude" / "keep.txt").read_text() == "mine"
+
+
+def test_b5_link_to_another_directory_warns_with_ln_sfn(rig):
+    t0 = _t0_folder(rig)
+    other = rig["tmp"] / "other"
+    other.mkdir()
+    (t0 / ".claude").unlink()
+    (t0 / ".claude").symlink_to(other)
+    _handoff(rig, HANDOFF_BASE)
+    proc = _spawn(rig)
+    _root_start_asserted(rig, proc)
+    root = rig["project"].resolve()
+    warning = next(ln for ln in proc.stderr.splitlines() if "WARNING" in ln)
+    assert f"ln -sfn {root}/.claude {t0}/.claude" in warning
+    assert "vnx start" not in proc.stderr
+    assert (t0 / ".claude").is_symlink() and (t0 / ".claude").resolve() == other.resolve()
+
+
+def test_b6_missing_vnx_data_link_still_starts_in_the_t0_folder(rig):
+    t0 = _t0_folder(rig, vnx_data=False)
+    _handoff(rig, HANDOFF_BASE)
+    proc = _spawn(rig, env_extra={"STUB_OLD_PANE_PATH": str(t0)})
+    assert proc.returncode == 0, proc.stderr
+    assert _new_window_dir(rig) == str(t0)
+    assert len([ln for ln in proc.stderr.splitlines() if ".vnx-data link" in ln]) == 1
+    assert "WARNING" not in proc.stderr
+
+
+@pytest.mark.parametrize("tmux_global, process, expect_t0", [
+    ("root", None, False),
+    ("unset", "root", False),
+    ("removed", "root", False),
+    ("root", "t0", False),
+    ("t0", "root", True),
+    ("unset", None, True),
+])
+def test_b7_the_switch_prefers_the_tmux_global(rig, tmux_global, process, expect_t0):
+    t0 = _t0_folder(rig)
+    _handoff(rig, HANDOFF_BASE)
+    extra = {"STUB_TMUX_GLOBAL": tmux_global, "STUB_OLD_PANE_PATH": str(t0)}
+    if process is not None:
+        extra["VNX_T0_ROTATE_START_DIR"] = process
+    proc = _spawn(rig, env_extra=extra)
+    assert proc.returncode == 0, proc.stderr
+    assert _new_window_dir(rig) == (str(t0) if expect_t0 else str(rig["project"].resolve()))
+    assert "WARNING" not in proc.stderr
+
+
+@pytest.mark.parametrize("tmux_global, process", [("bogus", None), ("unset", "bogus"), ("t0", "bogus")])
+def test_b7_an_invalid_switch_value_is_refused_before_a_window_opens(rig, tmux_global, process):
+    _t0_folder(rig)
+    _handoff(rig, HANDOFF_BASE)
+    extra = {"STUB_TMUX_GLOBAL": tmux_global}
+    if process is not None:
+        extra["VNX_T0_ROTATE_START_DIR"] = process
+    proc = _spawn(rig, env_extra=extra)
+    if (tmux_global, process) == ("t0", "bogus"):
+        # a set global wins, so the bad process value is never consulted
+        assert proc.returncode == 0, proc.stderr
+        return
+    assert proc.returncode == 2
+    assert "bogus" in proc.stderr and "'t0'" in proc.stderr and "'root'" in proc.stderr
+    assert not any(c[0] == "new-window" for c in _calls(rig))
+
+
+def test_b8_a_successor_in_the_wrong_folder_is_closed_and_nothing_is_typed(rig):
+    t0 = _t0_folder(rig)
+    _handoff(rig, HANDOFF_BASE)
+    wrong = rig["tmp"] / "elsewhere"
+    wrong.mkdir()
+    proc = _spawn(rig, env_extra={"STUB_NEW_PANE_PATH": str(wrong), "STUB_OLD_PANE_PATH": str(t0)})
+    assert proc.returncode == 5
+    assert str(wrong.resolve()) in proc.stderr and str(t0) in proc.stderr
+    assert ["kill-window", "-t", NEW_WIN] in _calls(rig)
+    assert _typed(rig) == [f"cd -- {t0} && claude --model opus"]
+    assert not any(c[:2] == ["kill-window", "-t"] and c[2] == OLD_WIN for c in _calls(rig))
+    assert not list(rig["state"].glob("latch-*"))
+    assert _receipts(rig) == []
+
+
+def test_b9_the_last_line_keeps_the_four_fields_the_rotate_skill_reads(rig):
+    """The skill's own expressions, as written, on a state dir without spaces."""
+    _t0_folder(rig)
+    _handoff(rig, HANDOFF_BASE)
+    proc = _spawn(rig)
+    assert proc.returncode == 0, proc.stderr
+    last = proc.stdout.strip().splitlines()[-1]
+    pipeline = ("printf '%s\n' \"$LAST\" | grep -E '^new_window=@[0-9]+ old_window=@[0-9]+' "
+                "| sed -E 's/{expr}/\\1/'")
+    got = {}
+    for key, expr in {"new": ".*new_window=(@[0-9]+).*", "old": ".*old_window=(@[0-9]+).*",
+                      "run": ".*run_dir=([^ ]+).*"}.items():
+        out = subprocess.run(["bash", "-c", pipeline.format(expr=expr)], capture_output=True,
+                             text=True, env={**os.environ, "LAST": last})
+        got[key] = out.stdout.strip()
+    assert got["new"] == NEW_WIN and got["old"] == OLD_WIN
+    assert got["run"].startswith(str(rig["state"])) and " " not in got["run"]
+    assert re.search(r" start_dir=\S+$", last)
+
+
+def test_b9_start_dir_is_the_last_field_and_decodes_with_a_space_in_the_root(rig):
+    rig["project"] = rig["tmp"] / "my project"
+    (rig["project"] / "daily-log").mkdir(parents=True)
+    t0 = _t0_folder(rig)
+    _handoff(rig, HANDOFF_BASE)
+    proc = _spawn(rig)
+    assert proc.returncode == 0, proc.stderr
+    last = proc.stdout.strip().splitlines()[-1]
+    assert last.rsplit(" run_dir=", 1)[1].split(" start_dir=", 1)[0] == str(next(rig["state"].glob("rotation-*")))
+    encoded = last.split(" start_dir=", 1)[1]
+    decoded = subprocess.run(["bash", "-c", 'eval "printf %s $1"', "_", encoded],
+                             capture_output=True, text=True).stdout
+    assert decoded == str(t0)

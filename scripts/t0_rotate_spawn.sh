@@ -13,6 +13,12 @@
 #   3. Opens a new window next to the current one, with the current window's name, and types
 #      `claude --model opus` (plus `--remote-control "<name>"` when this session is bridged,
 #      and CLAUDE_CONFIG_DIR when set: tmux does not carry a bare export into the pane).
+#      The window starts in <root>/.claude/terminals/T0 when that folder has a CLAUDE.md AND its
+#      `.claude` resolves (pwd -P) to <root>/.claude; otherwise in the project root, with one log
+#      line, and a WARNING naming a non-destructive repair when the T0 folder is the broken one
+#      (the spawner prints the repair, it runs nothing). A T0-folder start types
+#      `cd -- <folder> && <launch>` and checks the new pane's folder before the prompt is typed.
+#      A healthy T0 folder without a `.vnx-data` link still starts there (one log line).
 #   4. Waits for the claude footer, then types ONE line of natural language: kill the old
 #      window, run the kickoff skill on the handoff, then take up step 1. Enter is always a
 #      separate send-keys call.
@@ -33,8 +39,17 @@
 # Screen patterns (env, grep -E): VNX_T0_ROTATE_FOOTER_PATTERN ("auto mode"),
 # VNX_T0_ROTATE_BUSY_PATTERN ("esc to interrupt"), VNX_T0_ROTATE_GOAL_ACTIVE_PATTERN ("/goal active").
 #
-# Exit codes: 0 spawned, 2 usage, 3 not in tmux / handoff missing or stale, 4 handoff without a
-# first step, 5 successor did not come up (the old window is left untouched).
+# Switch: VNX_T0_ROTATE_START_DIR = t0 (default) | root. The tmux global environment is read first
+# (`tmux show-environment -g VNX_T0_ROTATE_START_DIR`), the process environment second; `root`
+# forces the project-root start. Set it with `tmux set-environment -g VNX_T0_ROTATE_START_DIR root`,
+# remove it with `tmux set-environment -gu VNX_T0_ROTATE_START_DIR`.
+#
+# Last stdout line: new_window=@N old_window=@N goal_followup=0|1 run_dir=PATH start_dir=PATH
+# (start_dir is shell-quoted with %q and is the last field).
+#
+# Exit codes: 0 spawned, 2 usage / invalid VNX_T0_ROTATE_START_DIR, 3 not in tmux / handoff missing
+# or stale, 4 handoff without a first step, 5 successor did not come up or started in another
+# folder than the start folder (the old window is left untouched).
 
 set -euo pipefail
 
@@ -161,13 +176,27 @@ while [ $# -gt 0 ]; do
     --project-root) PROJECT_ROOT_ARG="$2"; shift 2 ;;
     --rc) RC_MODE="on"; shift ;;
     --no-rc) RC_MODE="off"; shift ;;
-    -h|--help) sed -n '2,40p' "$SCRIPT_PATH"; exit 0 ;;
+    -h|--help) sed -n '2,60p' "$SCRIPT_PATH"; exit 0 ;;
     *) die 2 "unknown argument: $1" ;;
   esac
 done
 [[ "$MAX_AGE_MIN" =~ ^[0-9]+$ ]] || die 2 "--max-age-minutes must be a whole number, got '$MAX_AGE_MIN'"
 
 [ -n "${TMUX:-}" ] && [ -n "${TMUX_PANE:-}" ] || die 3 "not running inside tmux (TMUX/TMUX_PANE unset); rotation needs a tmux window to hand over"
+
+# The switch is validated before any window is opened. A set tmux global wins over the process
+# value; an unset or removed global (`unknown variable`, or `-NAME`) falls through to it.
+START_MODE="${VNX_T0_ROTATE_START_DIR:-}"
+if tmux_global="$(tmux show-environment -g VNX_T0_ROTATE_START_DIR 2>/dev/null)"; then
+  case "$tmux_global" in
+    VNX_T0_ROTATE_START_DIR=?*) START_MODE="${tmux_global#VNX_T0_ROTATE_START_DIR=}" ;;
+  esac
+fi
+START_MODE="${START_MODE:-t0}"
+case "$START_MODE" in
+  t0|root) ;;
+  *) die 2 "VNX_T0_ROTATE_START_DIR='$START_MODE' is invalid; valid values are 't0' (default) and 'root'" ;;
+esac
 
 if [ -n "$PROJECT_ROOT_ARG" ]; then
   PROJECT_ROOT="$(cd "$PROJECT_ROOT_ARG" && pwd -P)"
@@ -208,6 +237,38 @@ PROMPT="$(cat "$RUN_DIR/prompt.txt")"
 HAS_GOAL=0
 [ -f "$RUN_DIR/goal.txt" ] && HAS_GOAL=1
 
+# The start folder. T0 folder only when it carries a CLAUDE.md and its `.claude` is the project's
+# `.claude`; every other case is the project-root start of old, with one log line.
+phys() { [ -n "$1" ] || return 0; (cd -- "$1" 2>/dev/null && pwd -P) || printf '%s' "$1"; }
+T0_DIR="$PROJECT_ROOT/.claude/terminals/T0"
+START_DIR="$PROJECT_ROOT"
+START_IN_T0=0
+if [ "$START_MODE" = "root" ]; then
+  log "start folder: project root $PROJECT_ROOT (VNX_T0_ROTATE_START_DIR=root)"
+elif [ ! -f "$T0_DIR/CLAUDE.md" ]; then
+  log "start folder: project root $PROJECT_ROOT (no $T0_DIR/CLAUDE.md: this project has no T0 folder)"
+else
+  t0_link="$T0_DIR/.claude"
+  root_claude="$PROJECT_ROOT/.claude"
+  if [ -d "$t0_link" ] && [ "$(phys "$t0_link")" = "$(phys "$root_claude")" ]; then
+    START_DIR="$T0_DIR"
+    START_IN_T0=1
+    [ -e "$T0_DIR/.vnx-data" ] || log "start folder: $T0_DIR has no .vnx-data link; starting there anyway (the T0 hooks resolve the data dir from the project root)"
+  elif [ -L "$t0_link" ]; then
+    log "WARNING: $t0_link does not resolve to $root_claude; starting in the project root $PROJECT_ROOT. Repair (not run): ln -sfn $root_claude $t0_link"
+  elif [ -d "$t0_link" ]; then
+    log "WARNING: $t0_link is a plain directory, not a link to $root_claude; starting in the project root $PROJECT_ROOT. Repair (not run, only with no session running in $T0_DIR): mv $t0_link $t0_link.replaced-$(date +%Y%m%d) && ln -s $root_claude $t0_link"
+  else
+    log "WARNING: $t0_link is missing; starting in the project root $PROJECT_ROOT. Repair (not run): ln -s $root_claude $t0_link"
+  fi
+fi
+if [ "$START_IN_T0" -eq 1 ]; then
+  old_path="$(phys "$(tmux display-message -p -t "$TMUX_PANE" '#{pane_current_path}' 2>/dev/null || true)")"
+  if [ "$old_path" != "$(phys "$START_DIR")" ]; then
+    log "start folder correction: the old session runs in $old_path, the successor starts in the T0 folder $START_DIR"
+  fi
+fi
+
 launch="claude --model opus"
 case "$RC_MODE" in
   on) launch="$launch --remote-control $(printf '%q' "$OLD_NAME")" ;;
@@ -216,8 +277,10 @@ esac
 if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   launch="CLAUDE_CONFIG_DIR=$(printf '%q' "$CLAUDE_CONFIG_DIR") $launch"
 fi
+# `cd --` first, so a shell rc that changes directory cannot move the session out of the T0 folder.
+[ "$START_IN_T0" -eq 1 ] && launch="cd -- $(printf '%q' "$START_DIR") && $launch"
 
-NEW_WIN="$(tmux new-window -a -t "$OLD_WIN" -c "$PROJECT_ROOT" -n "$OLD_NAME" -P -F '#{window_id}')"
+NEW_WIN="$(tmux new-window -a -t "$OLD_WIN" -c "$START_DIR" -n "$OLD_NAME" -P -F '#{window_id}')"
 [ -n "$NEW_WIN" ] || die 5 "tmux new-window returned no window id"
 log "old_window=$OLD_WIN new_window=$NEW_WIN name=$OLD_NAME goal_followup=$HAS_GOAL"
 
@@ -226,6 +289,13 @@ if ! wait_for_screen "$NEW_WIN" "$FOOTER_PATTERN" "$FOOTER_TIMEOUT"; then
   die 5 "claude did not show its footer in $NEW_WIN within ${FOOTER_TIMEOUT}s; nothing sent, old window $OLD_WIN left running"
 fi
 sleep "$SETTLE"
+if [ "$START_IN_T0" -eq 1 ]; then
+  new_path="$(phys "$(tmux display-message -p -t "$NEW_WIN" '#{pane_current_path}' 2>/dev/null || true)")"
+  if [ "$new_path" != "$(phys "$START_DIR")" ]; then
+    tmux kill-window -t "$NEW_WIN" || log "could not close $NEW_WIN; close it by hand"
+    die 5 "successor started in $new_path instead of the T0 folder $START_DIR; window $NEW_WIN closed, nothing sent, old window $OLD_WIN left running (VNX_T0_ROTATE_START_DIR=root starts in the project root)"
+  fi
+fi
 type_line "$NEW_WIN" "$PROMPT"
 
 latch_args=(latch --project-root "$PROJECT_ROOT" --pane "$TMUX_PANE" --old-window "$OLD_WIN"
@@ -254,4 +324,4 @@ if [ "$HAS_GOAL" -eq 1 ]; then
   fi
 fi
 
-printf 'new_window=%s old_window=%s goal_followup=%s run_dir=%s\n' "$NEW_WIN" "$OLD_WIN" "$HAS_GOAL" "$RUN_DIR"
+printf 'new_window=%s old_window=%s goal_followup=%s run_dir=%s start_dir=%q\n' "$NEW_WIN" "$OLD_WIN" "$HAS_GOAL" "$RUN_DIR" "$START_DIR"
