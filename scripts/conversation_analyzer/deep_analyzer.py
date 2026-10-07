@@ -119,7 +119,9 @@ class DeepAnalyzer:
         # ``restricted_deferred``. The runner reads it to tell a deferred session
         # (stays eligible tomorrow) from a failed one.
         self.last_status = "failed"
-        # Why the last ``restricted_deferred`` happened: ``cap`` or ``claude_unavailable``.
+        # Why the last ``restricted_deferred`` happened: ``cap``, ``claude_unavailable`` or
+        # ``claude_empty``. (``budget`` is set by the runner, not here: the run's deep budget
+        # was used up before the analyzer was called.)
         # None for any other status. The runner stores it on the session row.
         self.last_defer_reason: Optional[str] = None
 
@@ -195,6 +197,27 @@ Respond with valid JSON:
             return "open"
         return "restricted"
 
+    def _routes_restricted(self, jsonl_path: Path, summary: str,
+                           origin: Optional[content_class.Origin]) -> bool:
+        """The whole restricted-routing decision: origin, transcript content and summary text."""
+        boundary = content_class.load_boundary()
+        return (self.route_for_origin(origin, boundary) == "restricted"
+                or self._transcript_is_restricted(jsonl_path, boundary)
+                or content_class.classify_text(summary, boundary) is not None)
+
+    def would_route_restricted(self, jsonl_path: Path,
+                               metrics: SessionMetrics,
+                               flags: SessionFlags,
+                               origin: Optional[content_class.Origin] = None) -> bool:
+        """True when ``analyze_session`` would send this session down the restricted path.
+
+        Side-effect-free: no LLM call, no write, no counter or ``last_status`` change. It only
+        reads the transcript. The runner uses it to mark a restricted session it had no budget
+        to analyse, so the backlog replay finds it later.
+        """
+        summary = self._build_session_summary(jsonl_path, metrics, flags)
+        return self._routes_restricted(jsonl_path, summary, origin)
+
     def analyze_session(self, jsonl_path: Path,
                         metrics: SessionMetrics,
                         flags: SessionFlags,
@@ -203,11 +226,7 @@ Respond with valid JSON:
         summary = self._build_session_summary(jsonl_path, metrics, flags)
         prompt = f"{self.SYSTEM_PROMPT}\n\n## Session Summary\n\n{summary}"
 
-        boundary = content_class.load_boundary()
-        restricted = (self.route_for_origin(origin, boundary) == "restricted"
-                      or self._transcript_is_restricted(jsonl_path, boundary)
-                      or content_class.classify_text(summary, boundary) is not None)
-        if restricted:
+        if self._routes_restricted(jsonl_path, summary, origin):
             return self._analyze_restricted(prompt)
 
         result_text = None

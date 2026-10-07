@@ -18,6 +18,9 @@ from .models import (
 from .parser import SessionParser
 from .detector import HeuristicDetector
 from .deep_analyzer import DeepAnalyzer
+
+# Deferral marker for a restricted session skipped because the run's --deep-budget was used up.
+DEFER_BUDGET = "budget"
 from .generator import DigestGenerator
 from . import intelligence_bridge
 
@@ -138,6 +141,12 @@ class ConversationAnalyzer:
             suggestions = self._tag_suggestions(deep_result, metrics, origin)
             if deep_result is None and self.deep.last_status == "restricted_deferred":
                 deferred_reason = self.deep.last_defer_reason
+        elif (not deep_allowed and self.deep.should_deep_analyze(metrics, flags)
+              and self.deep.would_route_restricted(jsonl_path, metrics, flags, origin)):
+            # The run's --deep-budget is used up. A restricted session keeps a marker so
+            # _process_restricted_backlog finds it on a later night.
+            log("INFO", "  Restricted session deferred: deep budget of this run is used up")
+            deferred_reason = DEFER_BUDGET
 
         # Single transaction over both writes (ADR-007 atomicity):
         # _store_session first so a failing INSERT does not leave orphan

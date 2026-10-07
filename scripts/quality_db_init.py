@@ -1703,7 +1703,8 @@ def _migrate_v34(conn: sqlite3.Connection) -> None:
     (the ``.vnx-project-id`` or registry id of the cwd, NULL when there is none) and
     ``origin_source`` (``cwd`` or ``decoded_dirname``). ``improvement_suggestions.origin_class``
     lets the intelligence bridge keep client-derived suggestions out of ``antipatterns``.
-    ``deep_deferred_reason`` (``cap`` or ``claude_unavailable``) marks a restricted session whose
+    ``deep_deferred_reason`` (``cap``, ``claude_unavailable``, ``claude_empty`` or ``budget``,
+    the last meaning the run's ``--deep-budget`` was used up) marks a restricted session whose
     deep analysis was deferred, so the backlog replay finds it whatever its origin class.
 
     Purely additive: nullable TEXT, no default. A row written before v34 stays NULL, which the

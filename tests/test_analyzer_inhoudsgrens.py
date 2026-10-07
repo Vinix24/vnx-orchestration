@@ -1029,3 +1029,86 @@ def test_g7_the_loop_continues_after_a_skipped_row_and_replays_a_good_one(world,
     assert spies.sessions(spies.claude) == ["s-named"]
     assert _mine(world, "s-named")["deep_analysis_json"] is not None
 
+
+
+# --- H1-H3: a restricted session skipped for the run budget keeps a marker (OI-1964) ---------------
+
+def _restricted_and_open_sessions(world):
+    p = world["projects"]
+    _write_session(p, "-client", "s-client", cwd=world["client"] / "acme")
+    _write_session(p, "-fabric", "s-fabric", cwd=world["fabric"])
+
+
+def test_h1_restricted_session_skipped_for_the_budget_is_stored_with_a_marker(world):
+    _four_sessions(world)
+    with Spies() as spies:
+        stats = _run(world, deep_budget=0)
+    spies.claude.assert_not_called()
+    spies.deepseek.assert_not_called()
+    assert stats.sessions_analyzed == 4
+    rows = _by_session(world["db"])
+    for sid in ("s-client", "s-personal", "s-nocwd"):
+        assert rows[sid]["deep_analysis_json"] is None
+        assert rows[sid]["deep_deferred_reason"] == "budget"
+
+
+def test_h1b_a_session_restricted_only_by_its_transcript_gets_the_marker(world):
+    texts = _many(45, 25, f"open {world['client']}/acme/notes.md")
+    _write_session(world["projects"], "-fabric", "s-mid", cwd=world["fabric"], texts=texts)
+    with Spies():
+        _run(world, deep_budget=0)
+    assert _mine(world, "s-mid")["origin_class"] == "fabric"
+    assert _mine(world, "s-mid")["deep_deferred_reason"] == "budget"
+
+
+def test_h2_the_next_run_with_budget_replays_the_session_and_clears_the_marker(world):
+    _restricted_and_open_sessions(world)
+    with Spies():
+        _run(world, deep_budget=0)
+    assert _mine(world, "s-client")["deep_deferred_reason"] == "budget"
+
+    _plant_other_tenant_copy(world, "s-client")
+    with Spies() as spies2:
+        stats2 = _run(world)
+    assert spies2.sessions(spies2.claude) == ["s-client"]
+    spies2.deepseek.assert_not_called()
+    assert stats2.deep_restricted_claude == 1
+    row = _mine(world, "s-client")
+    assert row["deep_analysis_json"] is not None
+    assert row["deep_deferred_reason"] is None
+    assert [r for r in _rows(world["db"])
+            if r["project_id"] == OTHER_TENANT and r["deep_analysis_json"]] == []
+
+
+def test_h3_unrestricted_or_unflagged_sessions_get_no_marker_under_the_budget(world):
+    p = world["projects"]
+    _write_session(p, "-fabric", "s-open", cwd=world["fabric"])
+    _write_session(p, "-client", "s-small", cwd=world["client"] / "acme", out_tokens=10)
+    with Spies() as spies:
+        _run(world, deep_budget=0)
+    spies.claude.assert_not_called()
+    spies.deepseek.assert_not_called()
+    rows = _by_session(world["db"])
+    assert rows["s-open"]["deep_deferred_reason"] is None
+    assert rows["s-small"]["deep_deferred_reason"] is None
+
+
+def test_h4_would_route_restricted_has_no_side_effects(world):
+    path = _write_session(world["projects"], "-client", "s-client", cwd=world["client"] / "acme")
+    analyzer = DeepAnalyzer()
+    metrics, messages = SessionParser().parse_file(path)
+    from conversation_analyzer.detector import HeuristicDetector
+    flags = HeuristicDetector().detect_patterns(metrics, messages)
+    origin = content_class_origin(metrics)
+    with Spies() as spies:
+        assert analyzer.would_route_restricted(path, metrics, flags, origin) is True
+    spies.claude.assert_not_called()
+    assert analyzer.last_status == "failed"
+    assert analyzer.restricted_claude_calls == 0
+    assert analyzer.deep_restricted_deferred == 0
+    assert analyzer.last_defer_reason is None
+
+
+def content_class_origin(metrics):
+    return runner_module.content_class.classify_path(
+        metrics.project_path or None, runner_module.content_class.load_boundary())
