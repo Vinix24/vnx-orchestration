@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
-from terminal_state_shadow import (
+from terminal_state_core import (
     SCHEMA_VERSION,
     TERMINAL_STATE_FILENAME,
     validate_terminal_state_document,

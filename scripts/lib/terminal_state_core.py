@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shadow writer for terminal_state.json."""
+"""Shadow writer library for terminal_state.json (CLI wrapper: scripts/terminal_state_shadow.py)."""
 
 from __future__ import annotations
 

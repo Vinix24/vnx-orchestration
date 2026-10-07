@@ -50,14 +50,14 @@ except Exception as exc:
     raise SystemExit(f"Failed to load project_scope: {exc}")
 
 try:
-    from terminal_state_shadow import TerminalUpdate, default_lease_expires, update_terminal_state
+    from terminal_state_core import TerminalUpdate, default_lease_expires, update_terminal_state
     SHADOW_TERMINAL_STATE_AVAILABLE = True
 except Exception as exc:
     TerminalUpdate = None  # type: ignore[assignment]
     default_lease_expires = None  # type: ignore[assignment]
     update_terminal_state = None  # type: ignore[assignment]
     SHADOW_TERMINAL_STATE_AVAILABLE = False
-    logger.warning(f"[SHADOW] terminal_state_shadow unavailable; continuing without shadow writes: {exc}")
+    logger.warning(f"[SHADOW] terminal_state_core unavailable; continuing without shadow writes: {exc}")
 
 try:
     from append_receipt import AppendReceiptError, append_receipt_payload

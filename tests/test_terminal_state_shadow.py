@@ -12,7 +12,7 @@ import pytest
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 
-import terminal_state_shadow as ts  # noqa: E402
+import terminal_state_core as ts  # noqa: E402
 
 
 def test_schema_validation_accepts_required_fields():
