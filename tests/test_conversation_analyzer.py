@@ -39,7 +39,10 @@ with patch.dict(os.environ, {
     )
     from generate_t0_session_brief import (
         generate_brief, get_model_performance, get_model_routing_hints,
-        get_active_concerns,
+        get_active_concerns, _activity_sessions,
+    )
+    from model_inference_guard import (
+        evaluate_activity_routing, INSUFFICIENT, MIN_COMPARABLE_SAMPLE,
     )
     from generate_suggested_edits import (
         generate_memory_suggestions, generate_digest_section,
@@ -131,6 +134,24 @@ def _create_schema(conn: sqlite3.Connection):
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
     """)
+
+
+def _seed_sessions(conn: sqlite3.Connection, model: str, errors: list,
+                   tokens: int = 50000, activity: str = "coding") -> None:
+    """Insert one session_analytics row per entry in ``errors`` (has_error_recovery)."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    for i, has_err in enumerate(errors):
+        conn.execute("""
+            INSERT INTO session_analytics (
+                session_id, project_id, project_path, terminal, session_date,
+                total_output_tokens, primary_activity, has_error_recovery, session_model
+            ) VALUES (?, 'vnx-dev', '/test', 'T1', ?, ?, ?, ?, ?)
+        """, (f"{model}-{activity}-{i}", today, tokens, activity, has_err, model))
+    conn.commit()
+
+
+def _since() -> str:
+    return (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
 
 
 def _make_assistant_msg(tool_name: str = None,
@@ -1172,26 +1193,68 @@ class TestSessionBrief:
         conn.close()
 
     def test_active_concerns_high_error_rate(self):
-        """Concerns are raised for models with >30% error recovery."""
+        """A high has_error_recovery rate alone raises no concern (post-#805 guard)."""
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         _create_schema(conn)
+        # 67% error recovery for sonnet, 3 sessions: below the comparable sample.
+        _seed_sessions(conn, "claude-sonnet", [1, 1, 0])
 
-        today = datetime.now().strftime("%Y-%m-%d")
-        # 3 sessions for sonnet-storage, 2 with errors = 67% error rate
-        for i, has_err in enumerate([1, 1, 0]):
-            conn.execute("""
-                INSERT INTO session_analytics (
-                    session_id, project_id, project_path, terminal, session_date,
-                    primary_activity, has_error_recovery, session_model
-                ) VALUES (?, 'vnx-dev', '/test', 'T2', ?, 'coding', ?, 'claude-sonnet')
-            """, (f"err-test-{i}", today, has_err))
-        conn.commit()
+        assert get_active_concerns(conn, _since()) == []
 
-        since = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
-        concerns = get_active_concerns(conn, since)
-        assert len(concerns) >= 1
-        assert concerns[0]["model"] == "claude-sonnet"
+        result = evaluate_activity_routing("coding", _activity_sessions(conn, _since())["coding"])
+        assert result["status"] == INSUFFICIENT
+        assert "No difficulty-comparable bucket" in result["reason"]
+        conn.close()
+
+    def test_gate_a_sample_below_minimum_yields_nothing(self):
+        """Gate A: two models, one short of MIN_COMPARABLE_SAMPLE, in one bucket."""
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        _create_schema(conn)
+        n = MIN_COMPARABLE_SAMPLE
+        _seed_sessions(conn, "claude-opus", [0] * n)
+        _seed_sessions(conn, "claude-sonnet", [1] * (n - 1))
+
+        assert get_active_concerns(conn, _since()) == []
+        assert get_model_routing_hints(conn, _since()) == []
+        result = evaluate_activity_routing("coding", _activity_sessions(conn, _since())["coding"])
+        assert result["status"] == INSUFFICIENT
+        assert f">= {n} sessions per model" in result["reason"]
+        conn.close()
+
+    def test_gate_a_models_in_different_difficulty_buckets(self):
+        """Gate A: enough sessions per model, but never in the same difficulty bucket."""
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        _create_schema(conn)
+        n = MIN_COMPARABLE_SAMPLE
+        _seed_sessions(conn, "claude-opus", [0] * n, tokens=700_000)
+        _seed_sessions(conn, "claude-sonnet", [1] * n, tokens=30_000)
+
+        assert get_active_concerns(conn, _since()) == []
+        result = evaluate_activity_routing("coding", _activity_sessions(conn, _since())["coding"])
+        assert result["status"] == INSUFFICIENT
+        assert "No difficulty-comparable bucket" in result["reason"]
+        conn.close()
+
+    def test_gate_b_enough_sessions_but_no_reasoning_signal(self):
+        """Gate B: a full comparable sample with opposite error rates still gives nothing."""
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        _create_schema(conn)
+        n = MIN_COMPARABLE_SAMPLE
+        _seed_sessions(conn, "claude-opus", [0] * n)
+        _seed_sessions(conn, "claude-sonnet", [1] * n)
+
+        assert get_active_concerns(conn, _since()) == []
+        assert get_model_routing_hints(conn, _since()) == []
+        sessions = _activity_sessions(conn, _since())["coding"]
+        assert all(s["reasoning_error"] is None for ms in sessions.values() for s in ms)
+        assert any(s["has_error_recovery"] for ms in sessions.values() for s in ms)
+        result = evaluate_activity_routing("coding", sessions)
+        assert result["status"] == INSUFFICIENT
+        assert "infra-excluded reasoning-error signal" in result["reason"]
         conn.close()
 
 
@@ -1246,38 +1309,32 @@ class TestSuggestedEdits:
         assert section == ""
 
     def test_memory_suggestions_from_db(self):
-        """Memory suggestions are generated from model performance data."""
+        """has_error_recovery alone yields no memory suggestion (post-#805 guard)."""
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         _create_schema(conn)
+        # 6 opus sessions (1 error recovery) and 5 sonnet sessions (3 error recovery):
+        # below MIN_COMPARABLE_SAMPLE for both models.
+        _seed_sessions(conn, "claude-opus", [1, 0, 0, 0, 0, 0])
+        _seed_sessions(conn, "claude-sonnet", [0, 0, 1, 1, 1])
 
-        today = datetime.now().strftime("%Y-%m-%d")
-        # 6 opus coding sessions (5 success, 1 error)
-        for i in range(6):
-            conn.execute("""
-                INSERT INTO session_analytics (
-                    session_id, project_id, project_path, terminal, session_date,
-                    total_output_tokens, cache_read_tokens, cache_creation_tokens,
-                    primary_activity, has_error_recovery, session_model
-                ) VALUES (?, 'vnx-dev', '/test', 'T1', ?, 50000, 900, 100, 'coding', ?, 'claude-opus')
-            """, (f"opus-{i}", today, 1 if i == 0 else 0))
+        assert generate_memory_suggestions(conn, _since()) == []
 
-        # 5 sonnet coding sessions (2 success, 3 error)
-        for i in range(5):
-            conn.execute("""
-                INSERT INTO session_analytics (
-                    session_id, project_id, project_path, terminal, session_date,
-                    total_output_tokens, cache_read_tokens, cache_creation_tokens,
-                    primary_activity, has_error_recovery, session_model
-                ) VALUES (?, 'vnx-dev', '/test', 'T2', ?, 30000, 400, 100, 'coding', ?, 'claude-sonnet')
-            """, (f"sonnet-{i}", today, 0 if i < 2 else 1))
-        conn.commit()
+        result = evaluate_activity_routing("coding", _activity_sessions(conn, _since())["coding"])
+        assert result["status"] == INSUFFICIENT
+        assert "No difficulty-comparable bucket" in result["reason"]
+        conn.close()
 
-        since = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
-        suggestions = generate_memory_suggestions(conn, since)
+    def test_memory_suggestions_full_sample_without_reasoning_signal(self):
+        """Gate B for suggestions: full sample, opposite error rates, still no suggestion."""
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        _create_schema(conn)
+        n = MIN_COMPARABLE_SAMPLE
+        _seed_sessions(conn, "claude-opus", [0] * n)
+        _seed_sessions(conn, "claude-sonnet", [1] * n)
 
-        # Should find at least one suggestion comparing opus vs sonnet for coding
-        assert len(suggestions) >= 1
+        assert generate_memory_suggestions(conn, _since()) == []
         conn.close()
 
 
