@@ -1,18 +1,18 @@
-"""tests/test_deliverable_reconciliation.py — OI-840: deliverable dispatch auto-completion.
+"""tests/test_deliverable_reconciliation.py — OI-840 / OI-1969: deliverable stubs.
 
-Verifies that when a track's derived_status reaches 'done' (all terminal dispatches
-+ merged PR evidence), the reconciler also marks non-terminal deliverable dispatches
-for that track as 'completed'.
-
-Without this, the deliverable-plane shows 'ready' items as dispatchable work when the
-underlying code already shipped — the failure mode from
-memory/verify-before-build-done-maar-queued.
+A track a human declared done (phase 'done') ends its stubs: ready -> completed,
+proposed -> expired (nothing was built). Merge evidence on the track never ends
+a stub (nothing links a worker dispatch to the deliverable it implements): the
+reconciler reports such stubs as close candidates and the operator closes them
+with `vnx deliverable close --evidence`.
 """
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -26,6 +26,7 @@ for p in (_LIB, _SCRIPTS):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
+import planning_cli
 import schema_migration
 import track_reconciler
 import tracks as tracks_lib
@@ -216,8 +217,8 @@ def test_deliverable_dispatches_completed_when_track_done(tmp_path):
     assert states_after["D-dlv-1"] == "completed", (
         f"deliverable D-dlv-1 (ready -> completed) wasn't reconciled: got {states_after['D-dlv-1']!r}"
     )
-    assert states_after["D-dlv-2"] == "completed", (
-        f"deliverable D-dlv-2 (proposed -> completed) wasn't reconciled: got {states_after['D-dlv-2']!r}"
+    assert states_after["D-dlv-2"] == "expired", (
+        f"deliverable D-dlv-2 (proposed -> expired) wasn't reconciled: got {states_after['D-dlv-2']!r}"
     )
 
     # Already-terminal dispatches should be untouched.
@@ -333,14 +334,9 @@ def test_deliverables_completed_when_no_real_dispatches_and_track_done(tmp_path)
 
     # Reconcile.
     result = track_reconciler.reconcile_track(state_dir, "T-pathb", PROJECT_ID)
-    # derived_status is 'queued' for declared-done tracks with no real dispatches
-    # and deliverable stubs blocking — the reconciler writes 'queued' into
-    # derived_status.  The important regressie-gate is that deliverable stubs
-    # are auto-completed, *not* that derived_status reads 'done'.
-    # (Without deliverable auto-completion, derived_status would still be
-    # 'queued' because the stubs block it.)
+    assert result["derived_status"] == "done"
 
-    # After: deliverable stubs should be completed.
+    # After: ready stubs completed, the proposed stub expired.
     states_after = _get_dispatch_states(state_dir, "T-pathb")
     assert states_after["D-pathb-0"] == "completed", (
         f"Path B: deliverable D-pathb-0 should be completed, got {states_after['D-pathb-0']!r}"
@@ -348,8 +344,8 @@ def test_deliverables_completed_when_no_real_dispatches_and_track_done(tmp_path)
     assert states_after["D-pathb-1"] == "completed", (
         f"Path B: deliverable D-pathb-1 should be completed, got {states_after['D-pathb-1']!r}"
     )
-    assert states_after["D-pathb-2"] == "completed", (
-        f"Path B: deliverable D-pathb-2 should be completed, got {states_after['D-pathb-2']!r}"
+    assert states_after["D-pathb-2"] == "expired", (
+        f"Path B: deliverable D-pathb-2 should be expired, got {states_after['D-pathb-2']!r}"
     )
 
 
@@ -370,3 +366,176 @@ def test_deliverables_not_completed_when_track_not_done_no_real_dispatches(tmp_p
     assert states["D-pathbnd-0"] == "ready", (
         f"Deliverable should stay ready when track is not done: got {states['D-pathbnd-0']!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# OI-1969: merge evidence on the track never ends a stub
+# ---------------------------------------------------------------------------
+
+def _events(state_dir: Path, event_type: str) -> list[sqlite3.Row]:
+    conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT * FROM coordination_events WHERE event_type=? ORDER BY id", (event_type,)
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def _merged_track(state_dir: Path, track_id: str, *, stub_states: list[str]) -> None:
+    _seed_track(state_dir, track_id, pr_ref="#2041")
+    _seed_dispatch(state_dir, f"{track_id}-w", track_id, state="completed", pr_ref="#2041")
+    for i, st in enumerate(stub_states):
+        _seed_dispatch(state_dir, f"{track_id}-dlv{i}", track_id, state=st,
+                       output_ref=f"pr:{track_id}-dlv{i}", output_kind="pr")
+
+
+def test_proposed_stub_stays_proposed_and_is_a_close_candidate(tmp_path):
+    state_dir = _build_db(tmp_path)
+    _merged_track(state_dir, "T-prop", stub_states=["proposed"])
+
+    result = track_reconciler.reconcile_track(
+        state_dir, "T-prop", PROJECT_ID, _merged_pr_numbers=frozenset({2041})
+    )
+
+    assert _get_dispatch_states(state_dir, "T-prop")["T-prop-dlv0"] == "proposed"
+    cands = result["deliverable_close_candidates"]
+    assert [c["dispatch_id"] for c in cands] == ["T-prop-dlv0"]
+    assert cands[0]["state"] == "proposed"
+    assert "#2041" in cands[0]["evidence"]
+
+
+def test_ready_stub_stays_ready_and_is_a_close_candidate(tmp_path):
+    state_dir = _build_db(tmp_path)
+    _merged_track(state_dir, "T-rdy", stub_states=["ready"])
+    _seed_pr_merged_event(state_dir, "T-rdy-w")
+
+    result = track_reconciler.reconcile_track(state_dir, "T-rdy", PROJECT_ID)
+
+    assert _get_dispatch_states(state_dir, "T-rdy")["T-rdy-dlv0"] == "ready"
+    cands = result["deliverable_close_candidates"]
+    assert [c["dispatch_id"] for c in cands] == ["T-rdy-dlv0"]
+    assert cands[0]["state"] == "ready"
+    assert "T-rdy-w" in cands[0]["evidence"]
+    assert _events(state_dir, "deliverable_auto_completed") == []
+
+
+def test_one_completed_dispatch_does_not_close_two_ready_stubs(tmp_path):
+    state_dir = _build_db(tmp_path)
+    _merged_track(state_dir, "T-two", stub_states=["ready", "ready"])
+    _seed_pr_merged_event(state_dir, "T-two-w")
+
+    result = track_reconciler.reconcile_track(
+        state_dir, "T-two", PROJECT_ID, _merged_pr_numbers=frozenset({2041})
+    )
+
+    states = _get_dispatch_states(state_dir, "T-two")
+    assert states["T-two-dlv0"] == "ready"
+    assert states["T-two-dlv1"] == "ready"
+    assert len(result["deliverable_close_candidates"]) == 2
+    assert result["derived_status"] != "done"
+
+
+def test_no_candidate_without_evidence(tmp_path):
+    state_dir = _build_db(tmp_path)
+    _seed_track(state_dir, "T-noev", pr_ref="#9999")
+    _seed_dispatch(state_dir, "T-noev-w", "T-noev", state="completed")
+    _seed_dispatch(state_dir, "T-noev-dlv", "T-noev", state="ready",
+                   output_ref="pr:x", output_kind="pr")
+
+    result = track_reconciler.reconcile_track(
+        state_dir, "T-noev", PROJECT_ID, _merged_pr_numbers=frozenset({2041})
+    )
+    assert "deliverable_close_candidates" not in result
+
+
+def test_done_track_ends_stubs_and_derives_done(tmp_path):
+    state_dir = _build_db(tmp_path)
+    _seed_track(state_dir, "T-fin", phase="done")
+    _seed_dispatch(state_dir, "T-fin-r", "T-fin", state="ready",
+                   output_ref="pr:r", output_kind="pr")
+    _seed_dispatch(state_dir, "T-fin-p", "T-fin", state="proposed",
+                   output_ref="pr:p", output_kind="pr")
+
+    result = track_reconciler.reconcile_track(state_dir, "T-fin", PROJECT_ID)
+
+    states = _get_dispatch_states(state_dir, "T-fin")
+    assert states["T-fin-r"] == "completed"
+    assert states["T-fin-p"] == "expired"
+    assert result["derived_status"] == "done"
+    assert [e["entity_id"] for e in _events(state_dir, "deliverable_auto_completed")] == ["T-fin-r"]
+    assert [e["entity_id"] for e in _events(state_dir, "deliverable_expired_on_done")] == ["T-fin-p"]
+    assert "deliverable_close_candidates" not in result
+
+
+def test_deliverable_close_verb_still_closes_ready_stub(tmp_path):
+    state_dir = _build_db(tmp_path)
+    _merged_track(state_dir, "T-verb", stub_states=["ready"])
+    track_reconciler.reconcile_track(
+        state_dir, "T-verb", PROJECT_ID, _merged_pr_numbers=frozenset({2041})
+    )
+
+    rc = planning_cli.main([
+        "deliverable", "close", "T-verb-dlv0",
+        "--evidence", "2041",
+        "--project-id", PROJECT_ID,
+        "--state-dir", str(state_dir),
+    ])
+
+    assert rc == 0
+    assert _get_dispatch_states(state_dir, "T-verb")["T-verb-dlv0"] == "completed"
+
+
+def test_event_occurred_at_is_iso8601_with_seconds(tmp_path):
+    state_dir = _build_db(tmp_path)
+    _seed_track(state_dir, "T-ts", phase="done")
+    _seed_dispatch(state_dir, "T-ts-r", "T-ts", state="ready",
+                   output_ref="pr:r", output_kind="pr")
+
+    track_reconciler.reconcile_track(state_dir, "T-ts", PROJECT_ID)
+
+    ev = _events(state_dir, "deliverable_auto_completed")[0]
+    parsed = datetime.strptime(ev["occurred_at"], "%Y-%m-%dT%H:%M:%S.%fZ")
+    assert parsed.year >= 2026
+    assert len(ev["occurred_at"].split("T")[1].split(":")) == 3
+
+
+def test_other_project_stubs_untouched_by_reconcile(tmp_path):
+    state_dir = _build_db(tmp_path)
+    _seed_track(state_dir, "T-shared", phase="done")
+    _seed_dispatch(state_dir, "T-shared-mine", "T-shared", state="ready",
+                   output_ref="pr:m", output_kind="pr")
+    conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+    conn.execute(
+        "INSERT INTO dispatches (dispatch_id, project_id, state, track, output_ref, output_kind) "
+        "VALUES ('T-shared-other', 'other-proj', 'ready', 'T-shared', 'pr:o', 'pr')"
+    )
+    conn.commit()
+    conn.close()
+
+    track_reconciler.reconcile_track(state_dir, "T-shared", PROJECT_ID)
+
+    conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+    other = conn.execute(
+        "SELECT state FROM dispatches WHERE dispatch_id='T-shared-other' AND project_id='other-proj'"
+    ).fetchone()[0]
+    conn.close()
+    assert other == "ready"
+    assert _get_dispatch_states(state_dir, "T-shared")["T-shared-mine"] == "completed"
+
+
+def test_drift_report_lists_close_candidates(tmp_path, capsys):
+    state_dir = _build_db(tmp_path)
+    _merged_track(state_dir, "T-drift", stub_states=["ready"])
+    _seed_pr_merged_event(state_dir, "T-drift-w")
+
+    rc = planning_cli.main([
+        "objective", "drift", "--json",
+        "--project-id", PROJECT_ID,
+        "--state-dir", str(state_dir),
+    ])
+
+    assert rc == 0
+    summary = json.loads(capsys.readouterr().out)
+    cands = summary["deliverable_close_candidates"]
+    assert [c["dispatch_id"] for c in cands] == ["T-drift-dlv0"]
