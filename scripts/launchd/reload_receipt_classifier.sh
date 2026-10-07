@@ -44,7 +44,9 @@ sed "s|\${VNX_HOME}|$VNX_HOME|g" "$PLIST_SRC" > "$PLIST_DEST"
 launchctl load "$PLIST_DEST"
 echo "Loaded: $PLIST_LABEL (runs hourly)"
 
-if launchctl list | grep -q "$PLIST_LABEL"; then
+# Capture first: `launchctl list | grep -q` ends on 141 under pipefail (SIGPIPE) after a match.
+LOADED_AGENTS="$(launchctl list)"
+if grep -q "$PLIST_LABEL" <<<"$LOADED_AGENTS"; then
     echo "OK: agent registered in launchctl"
 else
     echo "WARNING: agent not found in launchctl list — check $PLIST_DEST" >&2
