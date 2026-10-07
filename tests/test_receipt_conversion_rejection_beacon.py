@@ -216,18 +216,28 @@ class TestStatusFollowsTheConverterHistory:
 
         assert self._payload(tmp_path)["status"] == "fail"
 
-    def test_a_report_refused_on_every_scan_is_named_once_with_its_newest_timestamp(self, tmp_path: Path) -> None:
-        state_dir = _seed_converter_history(
-            tmp_path, _entry("again", 5), _entry("again", 3), _entry("again", 1), _entry("other", 2),
-        )
+    @pytest.mark.parametrize("clock", ["wall", "one_second_per_read"])
+    def test_a_report_refused_on_every_scan_is_named_once_with_its_newest_timestamp(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clock: str,
+    ) -> None:
+        """The expectation is the seeded entries' own `rejected_at`, never a
+        timestamp rebuilt from the clock. `one_second_per_read` makes every
+        `time.time()` read land one second after the last, which is the second
+        boundary a CI run hit between seeding and expecting."""
+        if clock == "one_second_per_read":
+            reads = iter(range(1_790_000_000, 1_790_001_000))
+            monkeypatch.setattr(time, "time", lambda: float(next(reads)))
+        again_oldest, again_mid, again_newest = _entry("again", 5), _entry("again", 3), _entry("again", 1)
+        other = _entry("other", 2)
+        state_dir = _seed_converter_history(tmp_path, again_oldest, again_mid, again_newest, other)
 
         beacon_mod.record_rejections(state_dir, [])
 
         recent = self._payload(tmp_path)["details"]["recent_rejected"]
         # Ascending by rejected_at: "other" (2h ago), then "again" at its newest (1h ago).
         assert [(e["dispatch_id"], e["rejected_at"]) for e in recent] == [
-            ("other", _entry("other", 2)["rejected_at"]),
-            ("again", _entry("again", 1)["rejected_at"]),
+            ("other", other["rejected_at"]),
+            ("again", again_newest["rejected_at"]),
         ]
 
     def test_window_is_reported_so_a_reader_can_see_why_it_is_fail(self, tmp_path: Path) -> None:
