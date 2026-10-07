@@ -205,7 +205,9 @@ launchctl load "$PLIST_DEST"
 echo "Loaded: $RESOLVED_LABEL"
 
 # Verify the agent appears in launchctl list
-if launchctl list | grep -qF "$RESOLVED_LABEL"; then
+# Capture first: `launchctl list | grep -q` ends on 141 under pipefail (SIGPIPE) after a match.
+LOADED_AGENTS="$(launchctl list)"
+if grep -qF "$RESOLVED_LABEL" <<<"$LOADED_AGENTS"; then
     echo "OK: agent registered in launchctl"
 else
     echo "WARNING: agent not found in launchctl list — check $PLIST_DEST" >&2
