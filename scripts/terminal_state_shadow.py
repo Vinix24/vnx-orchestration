@@ -11,23 +11,16 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
-# Import the lib module by file path to avoid self-shadowing: this CLI wrapper
-# is also named terminal_state_shadow.py, so a bare `from terminal_state_shadow`
-# would resolve back to this file when scripts/ is on sys.path.
-import importlib.util as _ilu
-_name = "terminal_state_shadow_lib"
-_spec = _ilu.spec_from_file_location(
-    _name,
-    str(SCRIPT_DIR / "lib" / "terminal_state_shadow.py"),
+# The library lives in scripts/lib/terminal_state_core.py. Its stem differs from this
+# wrapper's on purpose: a library that shared the stem `terminal_state_shadow` was
+# shadowed by this file whenever scripts/ preceded scripts/lib/ on sys.path.
+from terminal_state_core import (
+    TerminalUpdate,
+    default_lease_expires,
+    get_worktree_path,
+    set_worktree_path,
+    update_terminal_state,
 )
-_mod = _ilu.module_from_spec(_spec)
-sys.modules[_name] = _mod  # required: @dataclass resolves annotations via sys.modules
-_spec.loader.exec_module(_mod)
-TerminalUpdate = _mod.TerminalUpdate
-default_lease_expires = _mod.default_lease_expires
-get_worktree_path = _mod.get_worktree_path
-set_worktree_path = _mod.set_worktree_path
-update_terminal_state = _mod.update_terminal_state
 
 from vnx_paths import ensure_env  # noqa: E402
 

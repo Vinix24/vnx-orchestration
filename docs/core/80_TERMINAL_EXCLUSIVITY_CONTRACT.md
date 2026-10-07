@@ -309,6 +309,8 @@ The `LeaseManager` class is the Python API for canonical lease operations. This 
 
 ### 6.4 terminal_state_shadow.py
 
+The CLI wrapper is `scripts/terminal_state_shadow.py`; the library behind it is `scripts/lib/terminal_state_core.py`.
+
 The terminal state shadow remains as a defense-in-depth layer and as the write target for the legacy `acquire_terminal_claim()` path. This contract does not remove it. It constrains it: the shadow cannot override a canonical block, and the shadow cannot substitute for a missing canonical check when the runtime core is active.
 
 ### 6.5 Dispatcher V8

@@ -107,7 +107,7 @@ class TestCentralStoreResolution:
         # Golf 3A fix-forward: this fixture used to write the singular-terminal
         # filename `terminal_state_T1.json` with a top-level `current_task`
         # field. Measured against the real writer
-        # (scripts/lib/terminal_state_shadow.py:TERMINAL_STATE_FILENAME) while
+        # (scripts/lib/terminal_state_core.py:TERMINAL_STATE_FILENAME) while
         # fixing hooks/sessionstart.sh's own dead read of that same filename:
         # the writer has only ever produced the SINGULAR `terminal_state.json`
         # with a `.terminals.<id>` map (no `current_task` field — the hook

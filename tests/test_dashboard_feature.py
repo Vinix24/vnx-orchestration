@@ -33,8 +33,7 @@ DASHBOARD_DIR = PROJECT_ROOT / "dashboard"
 
 # IMPORTANT: Only add scripts/lib/ to sys.path, NOT scripts/.
 # scripts/terminal_state_shadow.py is a CLI wrapper that imports from
-# scripts/lib/terminal_state_shadow.py. Having both on sys.path causes
-# a circular import because Python resolves the wrong module first.
+# scripts/lib/terminal_state_core.py.
 if str(SCRIPTS_LIB) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_LIB))
 # Remove scripts/ if it was added (e.g. by another test module)
@@ -585,8 +584,7 @@ class TestComputeTerminalAttention(unittest.TestCase):
         scripts_lib = str(SCRIPTS_LIB)
         scripts_dir = str(PROJECT_ROOT / "scripts")
 
-        # Remove scripts/ to prevent the CLI wrapper (scripts/terminal_state_shadow.py)
-        # from shadowing the library module (scripts/lib/terminal_state_shadow.py).
+        # Remove scripts/ so the lib modules resolve from scripts/lib/ only.
         # test_vnx_process_ux.py adds scripts/ at module load time, which can re-introduce
         # the shadowing after the module-level cleanup at the top of this file.
         while scripts_dir in sys.path:
@@ -598,7 +596,7 @@ class TestComputeTerminalAttention(unittest.TestCase):
         sys.path.insert(0, scripts_lib)
 
         # Purge any cached modules that may have been loaded with wrong path resolution.
-        for mod in ("terminal_state_shadow", "terminal_state_reconciler", "canonical_state_views"):
+        for mod in ("terminal_state_core", "terminal_state_reconciler", "canonical_state_views"):
             sys.modules.pop(mod, None)
 
         import canonical_state_views as csv_mod

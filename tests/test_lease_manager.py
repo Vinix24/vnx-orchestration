@@ -503,10 +503,10 @@ class TestShadowGCGuard(unittest.TestCase):
 
     def setUp(self):
         import importlib.util
-        _name = "terminal_state_shadow_lib"
+        _name = "terminal_state_core"
         spec = importlib.util.spec_from_file_location(
             _name,
-            str(SCRIPT_DIR / "lib" / "terminal_state_shadow.py"),
+            str(SCRIPT_DIR / "lib" / "terminal_state_core.py"),
         )
         mod = importlib.util.module_from_spec(spec)
         sys.modules[_name] = mod  # required: @dataclass resolves annotations via sys.modules

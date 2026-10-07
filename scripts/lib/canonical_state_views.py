@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, Tuple
 
 from terminal_state_reconciler import ReconcilerConfig, reconcile_terminal_state
-from terminal_state_shadow import validate_terminal_state_document
+from terminal_state_core import validate_terminal_state_document
 
 try:
     import yaml
