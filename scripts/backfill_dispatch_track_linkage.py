@@ -97,7 +97,7 @@ def _utc_stamp() -> str:
 
 def _utc_iso() -> str:
     """Return current UTC timestamp in ISO form for event occurred_at."""
-    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%fZ")
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:

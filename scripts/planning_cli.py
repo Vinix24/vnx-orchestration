@@ -739,7 +739,9 @@ def cmd_objective_drift(args: argparse.Namespace) -> int:
     results = track_reconciler.reconcile_all_tracks(state_dir, project_id, repo_root=repo_root)
 
     divergent = []
+    close_candidates = []
     for r in results:
+        close_candidates.extend(r.get("deliverable_close_candidates", []))
         if r["drifted"]:
             divergent.append({
                 "track_id": r["track_id"],
@@ -762,6 +764,7 @@ def cmd_objective_drift(args: argparse.Namespace) -> int:
         "total_tracks": len(results),
         "divergent_count": len(divergent),
         "divergent": divergent,
+        "deliverable_close_candidates": close_candidates,
         "note": note,
     }
 
@@ -786,6 +789,17 @@ def cmd_objective_drift(args: argparse.Namespace) -> int:
             print(
                 f"  ~ {d['track_id']:<28} declared={d['declared_phase'] or '-':<7} "
                 f"derived={d['derived_status']:<12} ({d['reason']})"
+            )
+    if close_candidates:
+        print(
+            f"\n  deliverable close candidates: {len(close_candidates)} "
+            "(evidence seen on the track; close with "
+            "`vnx deliverable close <id> --evidence <pr>`)"
+        )
+        for c in close_candidates:
+            print(
+                f"  > {c['dispatch_id']:<32} [{c['state']}] track={c['track_id']} "
+                f"({c['evidence']})"
             )
     print(f"\n  note: {note}")
     print(f"  written: {drift_path}\n")

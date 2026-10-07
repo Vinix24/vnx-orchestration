@@ -30,7 +30,7 @@ import sqlite3
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, List, Optional, TypedDict
+from typing import Any, Dict, FrozenSet, List, Optional, Tuple, TypedDict
 
 import tracks as tracks_lib  # same package; importable whenever scripts/lib/ is in sys.path
 
@@ -684,12 +684,11 @@ def reconcile_track(
             if _merged_pr_numbers is not None
             else _load_merged_pr_numbers(state_dir, repo_root)
         )
-        # OI-840: auto-complete deliverable stubs BEFORE computing derived_status.
-        # Deliverable dispatches (output_ref IS NOT NULL) are planning stubs, not
-        # real worker work. If all real dispatches are terminal with merged-PR
-        # evidence, the stubs should be completed — otherwise they block the
-        # track from deriving 'done' even though the code already shipped.
+        # OI-840 / OI-1969: end the stubs of a track a human declared done BEFORE
+        # computing derived_status, so open stubs do not block it from deriving
+        # 'done'. Merge evidence alone never ends a stub: it is only reported.
         _reconcile_deliverable_dispatches(conn, track_id, project_id, merged)
+        candidates = deliverable_close_candidates(conn, track_id, project_id, merged)
         derived = _compute_derived_status(conn, track_id, project_id, merged)
         _write_derived_status(conn, track_id, project_id, derived)
         conn.commit()
@@ -710,6 +709,8 @@ def reconcile_track(
             "drifted": declared != derived,
         }
         _attach_dependency_view(result, conn, track_id, project_id)
+        if candidates:
+            result["deliverable_close_candidates"] = candidates
         if derived not in ("blocked", "done"):
             # OI-1098: a withheld nomination must be VISIBLE. When the track
             # did not derive 'done' and an explicit delivery marking holds it,
@@ -848,95 +849,13 @@ def reconcile_all_tracks(
 
 
 # ---------------------------------------------------------------------------
-# Deliverable auto-completion (OI-840)
+# Deliverable stubs: closed by a declared-done track, never inferred (OI-840, OI-1969)
 # ---------------------------------------------------------------------------
 
-def _reconcile_deliverable_dispatches(
-    conn: sqlite3.Connection,
-    track_id: str,
-    project_id: str,
-    merged_pr_numbers: FrozenSet[int] = frozenset(),
-) -> int:
-    """Auto-complete deliverable dispatch stubs when their track's real work is done.
-
-    Deliverable dispatches (output_ref IS NOT NULL) are planning stubs — they
-    represent a planned output, not real worker work. There are two paths to
-    auto-completion:
-
-    Path A (has real dispatches): ALL non-deliverable dispatches for the track
-    are in terminal states AND merged-PR evidence exists (pr_merged coordination
-    event, declared-done phase, or track pr_ref confirmed merged).
-
-    Path B (no real dispatches): the track itself carries completion evidence:
-    declared-done phase OR track pr_ref confirmed merged via all evidence sources.
-    This covers tracks whose real worker dispatches were never attributed (common
-    for historical tracks that used lane letters instead of track_ids).
-
-    Idempotent: already-completed dispatches are no-ops. Returns the number of
-    deliverable dispatches transitioned to 'completed'.
-
-    OI-840: without this, the deliverable-plane shows 'ready' items as
-    dispatchable work when the underlying code already shipped.
-    """
-    # 1. Find all non-deliverable dispatches for this track.
-    non_deliverable = conn.execute(
-        "SELECT dispatch_id, state FROM dispatches "
-        "WHERE track = ? AND project_id = ? "
-        "AND (output_ref IS NULL OR output_ref = '')",
-        (track_id, project_id),
-    ).fetchall()
-
-    # 2. Resolve the track row once (reused below).
-    track_row = conn.execute(
-        "SELECT pr_ref, phase FROM tracks WHERE track_id = ? AND project_id = ?",
-        (track_id, project_id),
-    ).fetchone()
-    track_pr_ref = track_row["pr_ref"] if track_row else None
-    track_phase = track_row["phase"] if track_row else None
-
-    # 3. Determine if merged-PR evidence exists.
-    pr_evidence = False
-
-    if non_deliverable:
-        # Path A: real dispatches exist. They must ALL be terminal.
-        all_terminal = all(
-            row["state"] in TERMINAL_DISPATCH_STATES for row in non_deliverable
-        )
-        if not all_terminal:
-            return 0
-
-        # Check pr_merged coordination event on a non-deliverable dispatch.
-        non_dlv_ids = [row["dispatch_id"] for row in non_deliverable]
-        placeholders = ",".join("?" * len(non_dlv_ids))
-        merged_event = conn.execute(
-            f"""
-            SELECT 1 FROM coordination_events
-            WHERE event_type = 'pr_merged'
-              AND project_id = ?
-              AND entity_id IN ({placeholders})
-            LIMIT 1
-            """,
-            [project_id, *non_dlv_ids],
-        ).fetchone()
-
-        if merged_event:
-            pr_evidence = True
-
-    # 4. Track-level evidence (applies to both paths).
-    if not pr_evidence:
-        if track_phase == "done":
-            pr_evidence = True
-        else:
-            nums = _parse_pr_numbers(track_pr_ref)
-            if nums and nums <= merged_pr_numbers:
-                pr_evidence = True
-
-    if not pr_evidence:
-        return 0
-
-    # 5. Transition non-terminal deliverable dispatches to 'completed'.
-    now = conn.execute("SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now')").fetchone()[0]
-    deliverable_rows = conn.execute(
+def _deliverable_stubs(
+    conn: sqlite3.Connection, track_id: str, project_id: str
+) -> List[sqlite3.Row]:
+    return conn.execute(
         "SELECT dispatch_id, state FROM dispatches "
         "WHERE track = ? AND project_id = ? "
         "AND output_ref IS NOT NULL AND output_ref != '' "
@@ -944,26 +863,139 @@ def _reconcile_deliverable_dispatches(
         (track_id, project_id),
     ).fetchall()
 
-    for row in deliverable_rows:
+
+def _real_dispatches_terminal(
+    conn: sqlite3.Connection, track_id: str, project_id: str
+) -> Tuple[bool, List[str]]:
+    """(all non-deliverable dispatches terminal, their ids)."""
+    rows = conn.execute(
+        "SELECT dispatch_id, state FROM dispatches "
+        "WHERE track = ? AND project_id = ? "
+        "AND (output_ref IS NULL OR output_ref = '')",
+        (track_id, project_id),
+    ).fetchall()
+    return (
+        all(r["state"] in TERMINAL_DISPATCH_STATES for r in rows),
+        [r["dispatch_id"] for r in rows],
+    )
+
+
+def deliverable_close_candidates(
+    conn: sqlite3.Connection,
+    track_id: str,
+    project_id: str,
+    merged_pr_numbers: FrozenSet[int] = frozenset(),
+) -> List[Dict[str, Any]]:
+    """Open deliverable stubs that track-level evidence suggests have shipped.
+
+    OI-1969: nothing links a worker dispatch to the deliverable it implements,
+    so track-level evidence (a merged pr_ref, a pr_merged event on a sibling
+    dispatch, one dispatch closing several stubs) cannot say WHICH stub shipped.
+    The reconciler therefore only REPORTS these stubs; a human closes a ready
+    one with ``vnx deliverable close <id> --evidence <pr>``. Each entry carries
+    the stub id, its state and the evidence seen. A track declared done is not
+    a candidate source: ``_reconcile_deliverable_dispatches`` ends its stubs.
+    """
+    track_row = conn.execute(
+        "SELECT pr_ref, phase FROM tracks WHERE track_id = ? AND project_id = ?",
+        (track_id, project_id),
+    ).fetchone()
+    if track_row is None or track_row["phase"] == "done":
+        return []
+    stubs = _deliverable_stubs(conn, track_id, project_id)
+    if not stubs:
+        return []
+    all_terminal, real_ids = _real_dispatches_terminal(conn, track_id, project_id)
+    if not all_terminal:
+        return []
+
+    evidence: Optional[str] = None
+    if real_ids:
+        placeholders = ",".join("?" * len(real_ids))
+        event = conn.execute(
+            f"""
+            SELECT entity_id FROM coordination_events
+            WHERE event_type = 'pr_merged'
+              AND project_id = ?
+              AND entity_id IN ({placeholders})
+            LIMIT 1
+            """,
+            [project_id, *real_ids],
+        ).fetchone()
+        if event:
+            evidence = f"pr_merged event on dispatch {event['entity_id']}"
+    if evidence is None:
+        nums = _parse_pr_numbers(track_row["pr_ref"])
+        if nums and nums <= merged_pr_numbers:
+            evidence = f"track pr_ref {track_row['pr_ref']} merged"
+    if evidence is None:
+        return []
+    return [
+        {
+            "dispatch_id": s["dispatch_id"],
+            "state": s["state"],
+            "track_id": track_id,
+            "evidence": evidence,
+        }
+        for s in stubs
+    ]
+
+
+def _reconcile_deliverable_dispatches(
+    conn: sqlite3.Connection,
+    track_id: str,
+    project_id: str,
+    merged_pr_numbers: FrozenSet[int] = frozenset(),
+) -> int:
+    """End the deliverable stubs of a track a human declared done.
+
+    Only ``tracks.phase == 'done'`` acts (the door refuses dispatches on a done
+    track, so no stub can still be built): a ``ready`` stub becomes
+    ``completed`` (``deliverable_auto_completed``), a ``proposed`` stub becomes
+    ``expired`` (``deliverable_expired_on_done``: nothing was built). Merge
+    evidence on the track never completes a stub (OI-1969); see
+    ``deliverable_close_candidates``. ``merged_pr_numbers`` is kept so the
+    signature of the callers does not change.
+
+    Idempotent. Returns the number of stubs transitioned.
+    """
+    track_row = conn.execute(
+        "SELECT phase FROM tracks WHERE track_id = ? AND project_id = ?",
+        (track_id, project_id),
+    ).fetchone()
+    if track_row is None or track_row["phase"] != "done":
+        return 0
+    all_terminal, _ = _real_dispatches_terminal(conn, track_id, project_id)
+    if not all_terminal:
+        return 0
+
+    now = conn.execute("SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now')").fetchone()[0]
+    stubs = _deliverable_stubs(conn, track_id, project_id)
+    for row in stubs:
+        expired = row["state"] == "proposed"
+        to_state = "expired" if expired else "completed"
         conn.execute(
-            "UPDATE dispatches SET state = 'completed', updated_at = ? "
+            "UPDATE dispatches SET state = ?, updated_at = ? "
             "WHERE dispatch_id = ? AND project_id = ?",
-            (now, row["dispatch_id"], project_id),
+            (to_state, now, row["dispatch_id"], project_id),
         )
         _append_coordination_event(
             conn,
-            event_type="deliverable_auto_completed",
+            event_type="deliverable_expired_on_done" if expired else "deliverable_auto_completed",
             entity_type="dispatch",
             entity_id=row["dispatch_id"],
             from_state=row["state"],
-            to_state="completed",
+            to_state=to_state,
             actor="reconciler",
-            reason=f"OI-840: track {track_id} real work done; auto-completing deliverable stub",
+            reason=(
+                f"OI-1969: track {track_id} declared done; "
+                + ("proposed stub never built, expiring" if expired
+                   else "ending deliverable stub")
+            ),
             metadata={"track_id": track_id, "project_id": project_id},
             project_id=project_id,
         )
-
-    return len(deliverable_rows)
+    return len(stubs)
 
 
 def _append_coordination_event(
@@ -1004,7 +1036,7 @@ def _append_coordination_event(
 
 def _now_utc() -> str:
     from datetime import datetime, timezone
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%fZ")
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 # ---------------------------------------------------------------------------

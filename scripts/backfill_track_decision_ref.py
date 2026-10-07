@@ -92,7 +92,7 @@ def _extract_model_field(text: str) -> str:
 
 
 def _utc_iso() -> str:
-    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%fZ")
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _known_labels() -> list[str]:
