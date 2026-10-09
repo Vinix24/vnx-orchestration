@@ -8,6 +8,7 @@ it to the live central store advances ``user_version`` past the reviewed version
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import sqlite3
 import sys
@@ -119,9 +120,73 @@ def test_linked_worktree_explicit_tmp_state_dir_is_migrated(env, monkeypatch):
     assert _user_version(other / "runtime_coordination.db") == PENDING
 
 
-def test_linked_worktree_build_still_writes_state_file(env, monkeypatch):
+class CentralResolverError(RuntimeError):
+    """The central-store check failing in a way the guard cannot decide on."""
+
+
+def _raise_resolver(_project_id):
+    raise CentralResolverError("central resolver down")
+
+
+def test_linked_worktree_central_check_error_fails_closed(env, monkeypatch, caplog):
     bts, tmp_path, central_state = env
     _use_tree(monkeypatch, bts, tmp_path, linked=True)
+    monkeypatch.setattr(bts, "resolve_central_data_dir", _raise_resolver)
+    db = central_state / "runtime_coordination.db"
+    before_hash, before_version = _digest(db), _user_version(db)
+
+    with caplog.at_level(logging.WARNING, logger=bts.log.name):
+        assert bts._init_and_check_db(central_state) is True
+
+    assert _user_version(db) == before_version
+    assert _digest(db) == before_hash
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert str(tmp_path / "wt-tree") in message
+    assert str(central_state) in message
+    assert "CentralResolverError" in message
+
+
+def test_linked_worktree_without_central_resolver_fails_closed(env, monkeypatch):
+    bts, tmp_path, central_state = env
+    _use_tree(monkeypatch, bts, tmp_path, linked=True)
+    monkeypatch.setattr(bts, "resolve_central_data_dir", None)
+    db = central_state / "runtime_coordination.db"
+    before_version = _user_version(db)
+
+    assert bts._init_and_check_db(central_state) is True
+
+    assert _user_version(db) == before_version
+
+
+def test_main_checkout_central_check_error_changes_nothing(env, monkeypatch):
+    bts, tmp_path, central_state = env
+    _use_tree(monkeypatch, bts, tmp_path, linked=False)
+    monkeypatch.setattr(bts, "resolve_central_data_dir", _raise_resolver)
+    db = central_state / "runtime_coordination.db"
+
+    assert bts._init_and_check_db(central_state) is True
+
+    assert _user_version(db) == PENDING
+
+
+@pytest.mark.parametrize(
+    "case, expected_reason",
+    [
+        ("linked", "central store"),
+        ("linked-check-raises", "central-store check raised CentralResolverError"),
+        ("main", None),
+    ],
+)
+def test_linked_worktree_build_still_writes_state_file(env, monkeypatch, caplog, case, expected_reason):
+    """The build writes its state in every case; only a skip carries ``migrations_skipped``."""
+    bts, tmp_path, central_state = env
+    linked = case != "main"
+    _use_tree(monkeypatch, bts, tmp_path, linked=linked)
+    if case == "linked-check-raises":
+        monkeypatch.setattr(bts, "resolve_central_data_dir", _raise_resolver)
+    tree = tmp_path / ("wt-tree" if linked else "main-tree")
     dispatch_dir = central_state.parent / "dispatches"
     dispatch_dir.mkdir()
     out = tmp_path / "out" / "t0_state.json"
@@ -131,13 +196,40 @@ def test_linked_worktree_build_still_writes_state_file(env, monkeypatch):
 
     monkeypatch.setattr(bts, "_STATE_DIR", central_state)
     monkeypatch.setattr(bts, "_DISPATCH_DIR", dispatch_dir)
-    monkeypatch.setattr(bts, "_PROJECT_ROOT", tmp_path / "wt-tree")
+    monkeypatch.setattr(bts, "_PROJECT_ROOT", tree)
     monkeypatch.setattr(sys, "argv", ["build_t0_state.py", "--output", str(out)])
     monkeypatch.setattr(bts, "_emit_health_beacon", lambda *a, **k: None)
     monkeypatch.setattr(bts, "_emit_build_signal", lambda *a, **k: None)
     monkeypatch.setattr(bts, "_write_all_state_outputs", lambda *a, **k: False)
 
-    assert bts.main() in (0, 1)
+    with caplog.at_level(logging.WARNING, logger=bts.log.name):
+        assert bts.main() in (0, 1)
 
     assert out.is_file() and out.stat().st_size > 0
-    assert _user_version(db) == before_version
+    health = json.loads(out.read_text(encoding="utf-8"))["system_health"]
+    skip_warnings = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING and "migrations skipped" in r.getMessage()
+    ]
+    if expected_reason is None:
+        assert "migrations_skipped" not in health
+        assert skip_warnings == []
+        assert _user_version(db) == PENDING
+    else:
+        assert health.get("migrations_skipped") == {
+            "tree": str(tree),
+            "store": str(central_state),
+            "reason": expected_reason,
+        }
+        assert len(skip_warnings) == 1
+        assert _user_version(db) == before_version
+
+
+def test_index_health_carries_the_migration_skip(env):
+    bts, _tmp_path, central_state = env
+    skip = {"tree": "<tree>", "store": str(central_state), "reason": "central store"}
+
+    slim = bts._slim_health_for_index({"status": "healthy", "migrations_skipped": skip})
+
+    assert slim.get("migrations_skipped") == skip
+    assert "migrations_skipped" not in bts._slim_health_for_index({"status": "healthy"})

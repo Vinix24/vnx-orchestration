@@ -178,7 +178,7 @@ def locked_health(tmp_path_factory: pytest.TempPathFactory) -> Dict[str, Any]:
         conn.execute("PRAGMA journal_mode=DELETE")
         conn.execute("CREATE TABLE t (x)")
         conn.execute("BEGIN EXCLUSIVE")
-        monkeypatch.setattr(bts, "_init_and_check_db", lambda _sd: True)
+        monkeypatch.setattr(bts, "_init_and_check_db", lambda _sd, _skip=None: True)
         monkeypatch.setattr(bts, "_DB_PROBE_BUSY_TIMEOUT_SECONDS", 0.1, raising=False)
         monkeypatch.setattr(dr, "measure_daemon_liveness", lambda *_a, **_k: {"overall": "ok", "daemons": {}})
         monkeypatch.setattr(bts, "_measure_launchd_liveness", lambda *_a, **_k: {"overall": "ok", "jobs": {}})

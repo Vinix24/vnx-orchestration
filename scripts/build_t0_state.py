@@ -503,6 +503,12 @@ def _running_from_linked_worktree() -> bool:
     Rule: the tree root is the parent of ``scripts/``. In a linked worktree its
     ``.git`` is a file holding ``gitdir: <main>/.git/worktrees/<name>``; in a
     main checkout ``.git`` is a directory. No subprocess is started.
+
+    The same ``.git`` rule also lives in ``git_target_guard.resolves_to_main_checkout``
+    and in ``launchd_install_guard.refusal_reason``. Neither is reused here: the
+    first runs ``git rev-parse`` for any path, the second is not a predicate but
+    one refusal among several, and it counts every ``.git`` file (a submodule
+    too) as a linked worktree.
     """
     git_entry = _SCRIPT_DIR.parent / ".git"
     if not git_entry.is_file():
@@ -519,34 +525,65 @@ def _is_central_store_state_dir(state_dir: Path) -> bool:
     """True when ``state_dir`` is ``<central data dir>/state`` of a project.
 
     Uses the central resolver; a state dir outside the central root (a tmp dir
-    passed by a caller or a test) is not a central store.
+    passed by a caller or a test) is not a central store. Raises when it cannot
+    decide: the caller in a linked worktree treats that as central.
     """
     if resolve_central_data_dir is None:
+        raise RuntimeError("central data dir resolver unavailable")
+    project_id = project_id_from_state_dir(state_dir)
+    if not project_id:
         return False
+    central_state = resolve_central_data_dir(project_id) / "state"
+    return central_state.resolve() == Path(state_dir).resolve()
+
+
+def _migration_skip(state_dir: Path) -> Optional[Dict[str, str]]:
+    """Why schema init and migrations are skipped for ``state_dir``; None when they run.
+
+    A worktree's unmerged migrations must not migrate the live central store.
+    Outside a linked worktree nothing is skipped. Inside one, the central store
+    is skipped, and so is a store the central-store check cannot decide on
+    (fail closed). Each skip logs one WARNING naming the tree and the store.
+    """
+    if not _running_from_linked_worktree():
+        return None
+    tree = _SCRIPT_DIR.parent
     try:
-        project_id = project_id_from_state_dir(state_dir)
-        if not project_id:
-            return False
-        central_state = resolve_central_data_dir(project_id) / "state"
-        return central_state.resolve() == Path(state_dir).resolve()
-    except Exception:
-        return False
-
-
-def _migrations_guarded(state_dir: Path) -> bool:
-    """A worktree's unmerged migrations must not migrate the live central store."""
-    if _running_from_linked_worktree() and _is_central_store_state_dir(state_dir):
+        central = _is_central_store_state_dir(state_dir)
+    except Exception as exc:  # vnx-silent-except: fail closed, the skip is logged here and written to system_health
         log.warning(
-            "linked worktree %s: schema init and migrations skipped for central store %s",
-            _SCRIPT_DIR.parent, state_dir,
+            "linked worktree %s: central-store check for %s raised %s; "
+            "schema init and migrations skipped (fail closed)",
+            tree, state_dir, type(exc).__name__,
         )
-        return True
-    return False
+        return {
+            "tree": str(tree),
+            "store": str(state_dir),
+            "reason": f"central-store check raised {type(exc).__name__}",
+        }
+    if not central:
+        return None
+    log.warning(
+        "linked worktree %s: schema init and migrations skipped for central store %s",
+        tree, state_dir,
+    )
+    return {"tree": str(tree), "store": str(state_dir), "reason": "central store"}
 
 
-def _init_and_check_db(state_dir: Path) -> bool:
-    """Idempotent schema init. Returns True if DB is operational."""
-    guarded = _migrations_guarded(state_dir)
+_SKIP_UNDECIDED: Any = object()
+
+
+def _init_and_check_db(state_dir: Path, migration_skip: Any = _SKIP_UNDECIDED) -> bool:
+    """Idempotent schema init. Returns True if DB is operational.
+
+    ``migration_skip`` is the verdict of ``_migration_skip`` when the caller
+    already took it (``build_t0_state`` also writes it into system_health, so
+    it is taken once per build). Left out, it is taken here: every caller of
+    this function is guarded.
+    """
+    if migration_skip is _SKIP_UNDECIDED:
+        migration_skip = _migration_skip(state_dir)
+    guarded = migration_skip is not None
     if not guarded:
         try:
             from coordination_db import db_path_from_state_dir, init_schema
@@ -1884,6 +1921,20 @@ def _db_reason_fields(db_health: str, db_reason: Optional[str]) -> Dict[str, str
     return {}
 
 
+def _migrations_skipped_fields(migration_skip: Optional[Dict[str, str]]) -> Dict[str, Any]:
+    """The guard's skip of schema init and migrations, only when it skipped.
+
+    A note, not a health signal, so it does not feed ``status``: a linked
+    worktree's build writes the central t0_state.json every T0 reads, and the
+    skip is the intended outcome there, not a fault. The WARNING of the guard
+    goes to stderr, which the SessionStart hook drops on exit 0; this field is
+    what stays visible.
+    """
+    if migration_skip:
+        return {"migrations_skipped": dict(migration_skip)}
+    return {}
+
+
 def _build_system_health(
     state_dir: Path,
     db_initialized: bool,
@@ -1894,6 +1945,7 @@ def _build_system_health(
     launchd_liveness: Optional[Dict[str, Any]] = None,
     degraded_reasons: Optional[Sequence[str]] = None,
     db_reason: Optional[str] = None,
+    migration_skip: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     uptime_seconds = 0
     panes_path = state_dir / "panes.json"
@@ -2008,6 +2060,7 @@ def _build_system_health(
     if reasons:
         result["degraded_reasons"] = reasons
     result.update(_db_reason_fields(db_health, db_reason))
+    result.update(_migrations_skipped_fields(migration_skip))
     if beacon_health is not None:
         result["beacon_health"] = beacon_health
     if daemon_liveness is not None:
@@ -2586,7 +2639,8 @@ def build_t0_state(
         project_id_from_state_dir(state_dir)
         or os.environ.get("VNX_PROJECT_ID", "").strip()
     )
-    db_ok = _init_and_check_db(state_dir)
+    migration_skip = _migration_skip(state_dir)
+    db_ok = _init_and_check_db(state_dir, migration_skip)
     # R6.1: probe quality_intelligence.db; classify locked/malformed (not premigration)
     db_health, db_reason = _probe_db_health_reason(state_dir / "quality_intelligence.db")
 
@@ -2619,6 +2673,7 @@ def build_t0_state(
     system_health = _build_system_health(
         state_dir, db_ok, db_health=db_health,
         db_reason=db_reason,
+        migration_skip=migration_skip,
         degraded_reasons=(
             ([f"live_work unavailable: {live_work.get('reason')}"]
              if live_work.get("read_error") else [])
@@ -2771,6 +2826,8 @@ def _slim_health_for_index(system_health: Dict[str, Any]) -> Dict[str, Any]:
     }
     if system_health.get("db_reason"):
         slim["db_reason"] = system_health["db_reason"]
+    if system_health.get("migrations_skipped"):
+        slim["migrations_skipped"] = system_health["migrations_skipped"]
     for key in ("beacon_health", "daemon_liveness", "launchd_liveness"):
         nested = system_health.get(key)
         if nested is not None:
