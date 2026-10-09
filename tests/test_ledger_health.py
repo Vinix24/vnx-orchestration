@@ -288,6 +288,56 @@ class TestOpenOutcomes:
         assert result["status"] == lh.SKIPPED_UNVERIFIED
 
 
+class TestReceiptCoveragePerProject:
+    """OI-1924: a receipt of another project never covers this project's dispatch."""
+
+    def test_foreign_receipt_with_colliding_id_does_not_cover(self, state_dir):
+        _write_ndjson(state_dir / lh.REGISTER_NAME, _register_entry("d-collide"))
+        _write_ndjson(state_dir / lh.LEDGER_NAME, _receipt("d-collide", project_id="proj-other"))
+
+        result = lh.check_receipt_coverage(state_dir)
+
+        assert result["status"] == lh.STATUS_FINDING
+        assert result["missing_receipt_dispatch_ids"] == ["d-collide"]
+
+    def test_same_project_receipt_still_covers(self, state_dir):
+        _write_ndjson(state_dir / lh.REGISTER_NAME, _register_entry("d-own"))
+        _write_ndjson(state_dir / lh.LEDGER_NAME,
+                      _receipt("d-own", project_id=PROJECT),
+                      _receipt("d-own", project_id="proj-other"))
+
+        result = lh.check_receipt_coverage(state_dir)
+
+        assert result["status"] == lh.STATUS_OK
+        assert result["missing_receipt_count"] == 0
+
+    def test_unstamped_receipt_still_covers(self, state_dir):
+        _write_ndjson(state_dir / lh.REGISTER_NAME, _register_entry("d-legacy"))
+        _write_ndjson(state_dir / lh.LEDGER_NAME, _receipt("d-legacy"))
+
+        assert lh.check_receipt_coverage(state_dir)["status"] == lh.STATUS_OK
+
+    def test_unstamped_register_rows_are_not_filtered(self, state_dir):
+        _write_ndjson(state_dir / lh.REGISTER_NAME, _register_entry("d-unstamped-reg"))
+        _write_ndjson(state_dir / lh.LEDGER_NAME, _receipt("other-id", project_id=PROJECT))
+
+        result = lh.check_receipt_coverage(state_dir)
+
+        assert result["register_dispatch_count"] == 1
+        assert result["missing_receipt_dispatch_ids"] == ["d-unstamped-reg"]
+
+    def test_unresolved_project_is_named_never_unfiltered(self, state_dir, monkeypatch):
+        monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
+        _write_ndjson(state_dir / lh.REGISTER_NAME, _register_entry("d-001"))
+        _write_ndjson(state_dir / lh.LEDGER_NAME, _receipt("d-001", project_id="proj-other"))
+
+        result = lh.check_receipt_coverage(state_dir)
+
+        assert result["status"] == lh.SKIPPED_UNVERIFIED
+        assert "no project id" in result["reason"]
+        assert "receipt coverage" in result["reason"]
+
+
 # ---------------------------------------------------------------------------
 # chain_status
 # ---------------------------------------------------------------------------
