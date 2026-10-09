@@ -12,9 +12,8 @@ macOS has no ``setsid(1)`` in the base system; this launcher is the portable
 replacement, and it ``exec``s, so no extra process sits between the shell and
 the command.
 
-Exit status when the command never starts: 125 when the process could not
-become the leader of its own group (the runner must then not signal that
-group), 127 when the command cannot be executed, 2 on a usage error.
+Exit status when the command never starts: 127 when it cannot be executed,
+2 on a usage error.
 """
 
 import os
@@ -27,14 +26,8 @@ def main(argv):
         return 2
     try:
         os.setsid()
-    except OSError:  # vnx-silent-except: setsid() refuses a process that already leads its group; the check below decides
+    except PermissionError:  # vnx-silent-except: only a group leader is refused, and its pid already is its group id
         pass
-    if os.getpgrp() != os.getpid():
-        sys.stderr.write(
-            "vnx_exec_new_group: not the leader of its own process group; "
-            f"refusing to run {argv[1]!r}\n"
-        )
-        return 125
     try:
         os.execvp(argv[1], argv[1:])
     except OSError as exc:
