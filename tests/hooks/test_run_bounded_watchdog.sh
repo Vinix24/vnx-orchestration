@@ -19,6 +19,9 @@
 #     which no shell test can reliably force on macOS). Test 4 instead
 #     asserts the actual property that makes pid reuse harmless regardless:
 #     the watchdog cannot still be alive by the time vnx_run_bounded returns.
+#
+# Tests 6-11 cover vnx_run_bounded_group (OI-2021), which bounds a child that
+# leads its own process group and signals that group, never the caller's.
 
 set -uo pipefail
 
@@ -153,6 +156,143 @@ else
     echo "FAIL: test5 — expected exit status 7 via fake timeout fast path, got $status"
     overall_pass=0
 fi
+
+# ── vnx_run_bounded_group (OI-2021) ────────────────────────────────────────
+# Children start through the real launcher, so each leads its own process
+# group. Time checks use wide windows: shared CI runners are slow.
+LAUNCHER="$ROOT/scripts/lib/vnx_exec_new_group.py"
+own_group="$(ps -o pgid= -p $$ | tr -d ' ')"
+
+# ── Test 6: an overrun ends the whole group, member included ───────────────
+memberfile="$WORK_DIR/member.pid"
+python3 "$LAUNCHER" bash -c 'sleep 999 & echo $! > "$1"; sleep 999' _ "$memberfile" &
+leader=$!
+start=$(date +%s)
+status=0
+vnx_run_bounded_group "$leader" 2 1 3 || status=$?
+elapsed=$(( $(date +%s) - start ))
+member="$(cat "$memberfile" 2>/dev/null || echo '')"
+if [ "$status" -ne "$VNX_RUN_BOUNDED_DEADLINE" ] || [ "$VNX_BOUNDED_GROUP_OUTCOME" != "deadline" ]; then
+    echo "FAIL: test6 — expected status $VNX_RUN_BOUNDED_DEADLINE/outcome deadline, got $status/$VNX_BOUNDED_GROUP_OUTCOME"
+    overall_pass=0
+elif [ "$VNX_BOUNDED_GROUP_STATUS" != "134" ]; then
+    echo "FAIL: test6 — expected the leader to end on SIGABRT (134), got status '$VNX_BOUNDED_GROUP_STATUS'"
+    overall_pass=0
+elif [ -z "$member" ] || kill -0 "$member" 2>/dev/null; then
+    echo "FAIL: test6 — group member pid='$member' is still alive"
+    overall_pass=0
+elif [ "$elapsed" -ge 25 ]; then
+    echo "FAIL: test6 took ${elapsed}s for a 2s deadline"
+    overall_pass=0
+else
+    echo "PASS: test6 — leader and member ended by the group signal in ${elapsed}s (status $VNX_BOUNDED_GROUP_STATUS)"
+fi
+
+# ── Test 7: the caller and a sibling in the caller's own group survive ─────
+sleep 60 &
+sibling=$!
+python3 "$LAUNCHER" sleep 999 &
+child=$!
+status=0
+vnx_run_bounded_group "$child" 1 1 3 || status=$?
+if ! kill -0 "$sibling" 2>/dev/null; then
+    echo "FAIL: test7 — sibling pid=$sibling in the caller's group was signalled"
+    overall_pass=0
+elif kill -0 "$child" 2>/dev/null; then
+    echo "FAIL: test7 — bounded child pid=$child is still alive"
+    overall_pass=0
+elif [ "$status" -ne "$VNX_RUN_BOUNDED_DEADLINE" ]; then
+    echo "FAIL: test7 — expected status $VNX_RUN_BOUNDED_DEADLINE, got $status"
+    overall_pass=0
+else
+    echo "PASS: test7 — caller pid=$$ and sibling pid=$sibling (group $own_group) alive after the child's group was killed"
+fi
+kill "$sibling" 2>/dev/null
+wait "$sibling" 2>/dev/null
+
+# ── Test 8: no signal and no wait for an id that is not a child group ──────
+for bad in "" "$own_group" 0 1 abc; do
+    start=$(date +%s)
+    status=0
+    vnx_run_bounded_group "$bad" 30 1 1 || status=$?
+    elapsed=$(( $(date +%s) - start ))
+    if [ "$status" -ne "$VNX_RUN_BOUNDED_REFUSED" ] || [ "$VNX_BOUNDED_GROUP_OUTCOME" != "refused" ] || [ "$elapsed" -ge 5 ]; then
+        echo "FAIL: test8 — id '$bad': status=$status outcome=$VNX_BOUNDED_GROUP_OUTCOME elapsed=${elapsed}s (expected an immediate refusal)"
+        overall_pass=0
+    else
+        echo "PASS: test8 — id '$bad' refused at once (status $status), caller still alive"
+    fi
+done
+python3 "$LAUNCHER" sleep 999 &
+child=$!
+status=0
+vnx_run_bounded_group "$child" 30 1 "two" || status=$?
+if [ "$status" -ne "$VNX_RUN_BOUNDED_REFUSED" ] || ! kill -0 "$child" 2>/dev/null; then
+    echo "FAIL: test8 — a non-numeric reap window must be refused without signalling (status=$status)"
+    overall_pass=0
+else
+    echo "PASS: test8 — non-numeric reap window refused, child pid=$child not signalled"
+fi
+kill -KILL "$child" 2>/dev/null
+wait "$child" 2>/dev/null
+
+# ── Test 9: a child that ends inside the deadline returns its own status ───
+python3 "$LAUNCHER" bash -c 'exit 7' &
+child=$!
+start=$(date +%s)
+status=0
+vnx_run_bounded_group "$child" 30 1 1 || status=$?
+elapsed=$(( $(date +%s) - start ))
+if [ "$status" -ne 7 ] || [ "$VNX_BOUNDED_GROUP_OUTCOME" != "exited" ] || [ "$elapsed" -ge 10 ]; then
+    echo "FAIL: test9 — expected exit 7/outcome exited promptly, got $status/$VNX_BOUNDED_GROUP_OUTCOME in ${elapsed}s"
+    overall_pass=0
+else
+    echo "PASS: test9 — own exit status 7 returned after ${elapsed}s"
+fi
+
+# ── Test 10: a child that ignores SIGABRT is ended by SIGKILL ──────────────
+python3 "$LAUNCHER" python3 -c 'import signal, time
+signal.signal(signal.SIGABRT, signal.SIG_IGN)
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+time.sleep(999)' &
+child=$!
+status=0
+vnx_run_bounded_group "$child" 2 1 3 || status=$?
+if [ "$status" -ne "$VNX_RUN_BOUNDED_DEADLINE" ] || [ "$VNX_BOUNDED_GROUP_STATUS" != "137" ] || kill -0 "$child" 2>/dev/null; then
+    echo "FAIL: test10 — expected SIGKILL (137), got status=$status child_status=$VNX_BOUNDED_GROUP_STATUS"
+    overall_pass=0
+else
+    echo "PASS: test10 — SIGABRT ignored, SIGKILL ended the group (status $VNX_BOUNDED_GROUP_STATUS)"
+fi
+
+# ── Test 11: a child that outlives SIGKILL does not hold the caller ────────
+# A process in an uninterruptible call cannot be produced here, so `kill` is
+# shadowed to drop the two group signals; the child then stays as such a
+# process would, and the function must still return after the reap window.
+kill() {
+    if [ "${1:-}" = "-s" ]; then
+        return 0
+    fi
+    builtin kill "$@"
+}
+python3 "$LAUNCHER" sleep 999 &
+child=$!
+start=$(date +%s)
+status=0
+vnx_run_bounded_group "$child" 1 1 2 || status=$?
+elapsed=$(( $(date +%s) - start ))
+unset -f kill
+if [ "$status" -ne "$VNX_RUN_BOUNDED_DEADLINE" ] || [ "$VNX_BOUNDED_GROUP_OUTCOME" != "deadline_unreaped" ]; then
+    echo "FAIL: test11 — expected outcome deadline_unreaped, got $status/$VNX_BOUNDED_GROUP_OUTCOME"
+    overall_pass=0
+elif [ "$elapsed" -ge 25 ]; then
+    echo "FAIL: test11 took ${elapsed}s; the reap window is 2s"
+    overall_pass=0
+else
+    echo "PASS: test11 — returned after ${elapsed}s with the child still present (outcome $VNX_BOUNDED_GROUP_OUTCOME)"
+fi
+kill -KILL "$child" 2>/dev/null
+wait "$child" 2>/dev/null
 
 if [ "$overall_pass" -eq 1 ]; then
     echo "PASS: all vnx_run_bounded watchdog tests passed"

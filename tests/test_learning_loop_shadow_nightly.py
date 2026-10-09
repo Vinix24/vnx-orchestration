@@ -356,7 +356,8 @@ def _run_job(tmp_path: Path, **stub_exits: int):
 def test_nightly_job_runs_the_learning_loop_phase_between_analyzer_and_digest(tmp_path):
     proc, log = _run_job(tmp_path)
     assert proc.returncode == 0, proc.stderr
-    assert "STUB learning_loop_nightly persist=unset" in proc.stdout
+    # Phase output goes to the log by redirection, no longer copied to stdout (OI-2021).
+    assert "STUB learning_loop_nightly persist=unset" in log
     assert "Phase 2.6 complete" in log
     assert log.index("Phase 1 complete") < log.index("Phase 2.6") < log.index("Phase 4")
 
