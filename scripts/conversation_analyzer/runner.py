@@ -36,6 +36,16 @@ except ImportError:
     TenantUnresolved = RuntimeError  # type: ignore[assignment,misc]
 
 
+def _log_step(message: str) -> None:
+    """Log the step that comes next and flush it.
+
+    Under the nightly wrapper stdout is a pipe and block-buffered: without the flush the line
+    naming the path would still be in the buffer when the call after it hangs.
+    """
+    log("INFO", message)
+    sys.stdout.flush()
+
+
 def _get_claude_projects_dir() -> Path:
     """Late-bind CLAUDE_PROJECTS_DIR to support test patching via the package namespace."""
     pkg = sys.modules.get(__package__)
@@ -123,6 +133,7 @@ class ConversationAnalyzer:
                         deep_allowed: bool = True) -> Tuple[Optional[dict], List[dict]]:
         log("ANALYZE", f"Parsing: {jsonl_path.name} ({jsonl_path.stat().st_size // 1024}KB)")
 
+        _log_step(f"step=parse {jsonl_path}")
         metrics, messages = self.parser.parse_file(jsonl_path)
 
         origin = self._classify_origin(metrics)
@@ -185,6 +196,7 @@ class ConversationAnalyzer:
         The decoded dir name is the fallback for a transcript with no cwd. A missing boundary
         file gives ``unknown``: with no roots to compare against, no path can be called safe.
         """
+        _log_step(f"step=origin cwd={metrics.project_path}")
         boundary = content_class.load_boundary()
         origin = content_class.classify_path(metrics.project_path or None, boundary)
         if not boundary.configured:
@@ -433,6 +445,7 @@ class ConversationAnalyzer:
             if jsonl_path is None:
                 continue
             try:
+                _log_step(f"step=parse {jsonl_path}")
                 metrics, messages = self.parser.parse_file(jsonl_path)
                 flags = self.detector.detect_patterns(metrics, messages)
                 if not self.deep.should_deep_analyze(metrics, flags):
@@ -506,6 +519,7 @@ class ConversationAnalyzer:
                               deep_remaining: int, stats: RunStats,
                               session_rows: List[dict]) -> int:
         if dry_run:
+            _log_step(f"step=parse {jsonl_path}")
             metrics, _ = self.parser.parse_file(jsonl_path)
             log("INFO", f"  [DRY RUN] tokens={metrics.total_output_tokens:,} "
                         f"tools={metrics.tool_calls_total}")
