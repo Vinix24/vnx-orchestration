@@ -22,8 +22,9 @@
                         already runs; (2) ``find_receipts_by_dispatch`` per
                         resolved dispatch_id. No new index, no receipt-shape change.
 
-  Every lookup is project-scoped (ADR-007): ``--project-id`` (default
-  ``$VNX_PROJECT_ID``, else ``vnx-dev``) leaves out a receipt stamped with
+  Every subcommand is project-scoped (ADR-007): ``--project-id`` (default:
+  derived from ``--state-dir``, else ``$VNX_PROJECT_ID``, else the command
+  refuses; there is no default project) leaves out a receipt stamped with
   another project's ``project_id``, while a line without one counts as this
   project's own (``receipt_outcome.is_foreign_project``). Dispatch ids and PR
   numbers collide across projects, so an unscoped lookup could show a T0 the
@@ -99,7 +100,6 @@ from vnx_paths import project_id_from_state_dir
 
 LEDGER_NAME = "t0_receipts.ndjson"
 RUNTIME_COORDINATION_DB_NAME = "runtime_coordination.db"
-DEFAULT_PROJECT_ID = "vnx-dev"
 DEFAULT_DIGEST_WINDOW = "24h"
 DEFAULT_RECONCILE_MAX_AGE_DAYS = 7.0
 
@@ -149,7 +149,7 @@ def _parse_iso8601(value: Any) -> Optional[datetime]:
 def find_receipts_by_dispatch(
     ledger_path: Path,
     dispatch_id: str,
-    project_id: str = DEFAULT_PROJECT_ID,
+    project_id: str,
 ) -> List[Dict[str, Any]]:
     """`by-dispatch` — the project-scoped wrapper over
     ``receipt_provenance.find_receipts_by_dispatch`` (ADR-007).
@@ -158,15 +158,15 @@ def find_receipts_by_dispatch(
     another project's receipt and show a T0 the wrong status. The shared
     ``receipt_outcome.is_foreign_project`` test scopes the result: a line
     stamped with another project is left out, a line without ``project_id``
-    belongs to the ledger's project. The default matches the CLI's
-    ``--project-id`` so importers of this function get the same filter."""
+    belongs to the ledger's project. ``project_id`` is required: no caller
+    gets a silent default project."""
     return _find_receipts_by_dispatch(ledger_path, dispatch_id, project_id=project_id)
 
 
 def find_receipts_by_pr(
     ledger_path: Path,
     pr_id: str,
-    project_id: str = DEFAULT_PROJECT_ID,
+    project_id: str,
 ) -> List[Dict[str, Any]]:
     """`by-pr` (ADR-035 §5.2) — linear scan-with-predicate over ``pr_id``, the
     same approach ``find_receipts_by_dispatch`` already uses (no new index —
@@ -189,7 +189,7 @@ def find_receipts_by_pr(
 def find_receipts_since(
     ledger_path: Path,
     since_iso: str,
-    project_id: str = DEFAULT_PROJECT_ID,
+    project_id: str,
 ) -> List[Dict[str, Any]]:
     """`since` (ADR-035 §5.2) — linear scan-with-predicate over ``timestamp``
     (v2 and legacy v1 both carry it — §3.2). Raises ValueError only for an
@@ -345,7 +345,7 @@ def compute_digest(
     now: Optional[datetime] = None,
     max_age_days: float = DEFAULT_RECONCILE_MAX_AGE_DAYS,
     open_items_manager_module: Optional[Any] = None,
-    project_id: str = DEFAULT_PROJECT_ID,
+    project_id: str,
 ) -> Dict[str, Any]:
     """`digest` (ADR-035 §5.2/§6.4): verdict counts PER DISPATCH
     (accept/investigate/reject/superseded, plus `unknown` for a dispatch with
@@ -461,7 +461,7 @@ def reconcile_oi_pending(
     max_age_days: float = DEFAULT_RECONCILE_MAX_AGE_DAYS,
     now: Optional[datetime] = None,
     open_items_manager_module: Optional[Any] = None,
-    project_id: str = DEFAULT_PROJECT_ID,
+    project_id: str,
 ) -> Dict[str, Any]:
     """`reconcile-oi-pending` (ADR-035 §6.4): scans the ledger for every
     `warnings[]` entry with `destination == "oi_pending"` and retries
@@ -580,6 +580,15 @@ def _project_id_for(args: argparse.Namespace, state_dir: Path) -> str:
     )
 
 
+def _resolve_project(args: argparse.Namespace, state_dir: Path) -> Optional[str]:
+    """The project of a subcommand, or None after printing the refusal."""
+    project_id = _project_id_for(args, state_dir)
+    if not project_id:
+        print("error: no project id (pass --project-id or set VNX_PROJECT_ID)", file=sys.stderr)
+        return None
+    return project_id
+
+
 def _recounted(result: Dict[str, Any], state_dir: Path, project_id: str,
                limit: Optional[int]) -> Dict[str, Any]:
     """``result`` (built without a limit) with the fresh reading per item and the
@@ -611,9 +620,8 @@ def _print_open_outcomes(result: Dict[str, Any], project_id: str) -> None:
 
 def _cmd_open_outcomes(args: argparse.Namespace) -> int:
     state_dir = Path(args.state_dir)
-    project_id = _project_id_for(args, state_dir)
+    project_id = _resolve_project(args, state_dir)
     if not project_id:
-        print("error: no project id (pass --project-id or set VNX_PROJECT_ID)", file=sys.stderr)
         return 2
     result = build_open_outcomes(
         state_dir, project_id=project_id, limit=None if args.recount else args.limit)
@@ -632,9 +640,8 @@ def _cmd_open_outcomes(args: argparse.Namespace) -> int:
 
 def _cmd_decide(args: argparse.Namespace) -> int:
     state_dir = Path(args.state_dir)
-    project_id = _project_id_for(args, state_dir)
+    project_id = _resolve_project(args, state_dir)
     if not project_id:
-        print("error: no project id (pass --project-id or set VNX_PROJECT_ID)", file=sys.stderr)
         return 2
     if not (args.reason or "").strip():
         print("error: --reason must not be blank", file=sys.stderr)
@@ -656,14 +663,17 @@ def _cmd_decide(args: argparse.Namespace) -> int:
 
 def _cmd_by_dispatch(args: argparse.Namespace) -> int:
     state_dir = Path(args.state_dir)
+    project_id = _resolve_project(args, state_dir)
+    if not project_id:
+        return 2
     ledger = _ledger_path(state_dir)
-    receipts = find_receipts_by_dispatch(ledger, args.dispatch_id, args.project_id)
+    receipts = find_receipts_by_dispatch(ledger, args.dispatch_id, project_id)
 
     if args.json:
         print(json.dumps(
             {
                 "dispatch_id": args.dispatch_id,
-                "project_id": args.project_id,
+                "project_id": project_id,
                 "count": len(receipts),
                 "receipts": receipts,
             },
@@ -671,7 +681,7 @@ def _cmd_by_dispatch(args: argparse.Namespace) -> int:
         ))
     else:
         print(f"{len(receipts)} receipt(s) for dispatch {args.dispatch_id} "
-              f"(project {args.project_id}):")
+              f"(project {project_id}):")
         for r in receipts:
             print(_format_receipt(r))
     return 0
@@ -679,21 +689,24 @@ def _cmd_by_dispatch(args: argparse.Namespace) -> int:
 
 def _cmd_by_pr(args: argparse.Namespace) -> int:
     state_dir = Path(args.state_dir)
+    project_id = _resolve_project(args, state_dir)
+    if not project_id:
+        return 2
     ledger = _ledger_path(state_dir)
-    receipts = find_receipts_by_pr(ledger, args.pr_id, args.project_id)
+    receipts = find_receipts_by_pr(ledger, args.pr_id, project_id)
 
     if args.json:
         print(json.dumps(
             {
                 "pr_id": args.pr_id,
-                "project_id": args.project_id,
+                "project_id": project_id,
                 "count": len(receipts),
                 "receipts": receipts,
             },
             indent=2,
         ))
     else:
-        print(f"{len(receipts)} receipt(s) for pr {args.pr_id} (project {args.project_id}):")
+        print(f"{len(receipts)} receipt(s) for pr {args.pr_id} (project {project_id}):")
         for r in receipts:
             print(_format_receipt(r))
     return 0
@@ -701,9 +714,12 @@ def _cmd_by_pr(args: argparse.Namespace) -> int:
 
 def _cmd_since(args: argparse.Namespace) -> int:
     state_dir = Path(args.state_dir)
+    project_id = _resolve_project(args, state_dir)
+    if not project_id:
+        return 2
     ledger = _ledger_path(state_dir)
     try:
-        receipts = find_receipts_since(ledger, args.timestamp, args.project_id)
+        receipts = find_receipts_since(ledger, args.timestamp, project_id)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -712,14 +728,14 @@ def _cmd_since(args: argparse.Namespace) -> int:
         print(json.dumps(
             {
                 "since": args.timestamp,
-                "project_id": args.project_id,
+                "project_id": project_id,
                 "count": len(receipts),
                 "receipts": receipts,
             },
             indent=2,
         ))
     else:
-        print(f"{len(receipts)} receipt(s) since {args.timestamp} (project {args.project_id}):")
+        print(f"{len(receipts)} receipt(s) since {args.timestamp} (project {project_id}):")
         for r in receipts:
             print(_format_receipt(r))
     return 0
@@ -727,21 +743,24 @@ def _cmd_since(args: argparse.Namespace) -> int:
 
 def _cmd_by_track(args: argparse.Namespace) -> int:
     state_dir = Path(args.state_dir)
+    project_id = _resolve_project(args, state_dir)
+    if not project_id:
+        return 2
     ledger = _ledger_path(state_dir)
-    receipts = find_receipts_by_track(state_dir, ledger, args.track_id, args.project_id)
+    receipts = find_receipts_by_track(state_dir, ledger, args.track_id, project_id)
 
     if args.json:
         print(json.dumps(
             {
                 "track_id": args.track_id,
-                "project_id": args.project_id,
+                "project_id": project_id,
                 "count": len(receipts),
                 "receipts": receipts,
             },
             indent=2,
         ))
     else:
-        print(f"{len(receipts)} receipt(s) for track {args.track_id} (project {args.project_id}):")
+        print(f"{len(receipts)} receipt(s) for track {args.track_id} (project {project_id}):")
         for r in receipts:
             print(_format_receipt(r))
     return 0
@@ -749,10 +768,13 @@ def _cmd_by_track(args: argparse.Namespace) -> int:
 
 def _cmd_digest(args: argparse.Namespace) -> int:
     state_dir = Path(args.state_dir)
+    project_id = _resolve_project(args, state_dir)
+    if not project_id:
+        return 2
     ledger = _ledger_path(state_dir)
     try:
         result = compute_digest(
-            ledger, window=args.window, max_age_days=args.max_age_days, project_id=args.project_id,
+            ledger, window=args.window, max_age_days=args.max_age_days, project_id=project_id,
         )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -780,9 +802,12 @@ def _cmd_digest(args: argparse.Namespace) -> int:
 
 def _cmd_reconcile_oi_pending(args: argparse.Namespace) -> int:
     state_dir = Path(args.state_dir)
+    project_id = _resolve_project(args, state_dir)
+    if not project_id:
+        return 2
     ledger = _ledger_path(state_dir)
     result = reconcile_oi_pending(
-        ledger, max_age_days=args.max_age_days, project_id=args.project_id,
+        ledger, max_age_days=args.max_age_days, project_id=project_id,
     )
 
     if args.json:
@@ -845,8 +870,9 @@ def _add_lookup_parsers(sub: Any) -> None:
     p_by_dispatch.add_argument("dispatch_id")
     p_by_dispatch.add_argument("--state-dir", required=True)
     p_by_dispatch.add_argument(
-        "--project-id", default=os.environ.get("VNX_PROJECT_ID", DEFAULT_PROJECT_ID),
-        help="receipts stamped with another project_id are left out (ADR-007)",
+        "--project-id", default=None,
+        help="default: derived from --state-dir, else $VNX_PROJECT_ID; receipts stamped "
+             "with another project_id are left out (ADR-007)",
     )
     p_by_dispatch.add_argument("--json", action="store_true")
     p_by_dispatch.set_defaults(func=_cmd_by_dispatch)
@@ -858,8 +884,9 @@ def _add_lookup_parsers(sub: Any) -> None:
     p_by_pr.add_argument("pr_id")
     p_by_pr.add_argument("--state-dir", required=True)
     p_by_pr.add_argument(
-        "--project-id", default=os.environ.get("VNX_PROJECT_ID", DEFAULT_PROJECT_ID),
-        help="receipts stamped with another project_id are left out (ADR-007)",
+        "--project-id", default=None,
+        help="default: derived from --state-dir, else $VNX_PROJECT_ID; receipts stamped "
+             "with another project_id are left out (ADR-007)",
     )
     p_by_pr.add_argument("--json", action="store_true")
     p_by_pr.set_defaults(func=_cmd_by_pr)
@@ -871,8 +898,9 @@ def _add_lookup_parsers(sub: Any) -> None:
     p_since.add_argument("timestamp", help="ISO8601 timestamp, e.g. 2026-07-20T00:00:00Z")
     p_since.add_argument("--state-dir", required=True)
     p_since.add_argument(
-        "--project-id", default=os.environ.get("VNX_PROJECT_ID", DEFAULT_PROJECT_ID),
-        help="receipts stamped with another project_id are left out (ADR-007)",
+        "--project-id", default=None,
+        help="default: derived from --state-dir, else $VNX_PROJECT_ID; receipts stamped "
+             "with another project_id are left out (ADR-007)",
     )
     p_since.add_argument("--json", action="store_true")
     p_since.set_defaults(func=_cmd_since)
@@ -884,8 +912,9 @@ def _add_lookup_parsers(sub: Any) -> None:
     p_by_track.add_argument("track_id")
     p_by_track.add_argument("--state-dir", required=True)
     p_by_track.add_argument(
-        "--project-id", default=os.environ.get("VNX_PROJECT_ID", DEFAULT_PROJECT_ID),
-        help="receipts stamped with another project_id are left out (ADR-007)",
+        "--project-id", default=None,
+        help="default: derived from --state-dir, else $VNX_PROJECT_ID; receipts stamped "
+             "with another project_id are left out (ADR-007)",
     )
     p_by_track.add_argument("--json", action="store_true")
     p_by_track.set_defaults(func=_cmd_by_track)
@@ -904,8 +933,9 @@ def _add_digest_parsers(sub: Any) -> None:
         help="same threshold as reconcile-oi-pending's escalation rule (§6.4)",
     )
     p_digest.add_argument(
-        "--project-id", default=os.environ.get("VNX_PROJECT_ID", DEFAULT_PROJECT_ID),
-        help="receipts stamped with another project_id are left out (ADR-007)",
+        "--project-id", default=None,
+        help="default: derived from --state-dir, else $VNX_PROJECT_ID; receipts stamped "
+             "with another project_id are left out (ADR-007)",
     )
     p_digest.add_argument("--json", action="store_true")
     p_digest.set_defaults(func=_cmd_digest)
@@ -920,8 +950,9 @@ def _add_digest_parsers(sub: Any) -> None:
         help="a still-failing entry older than this (by its receipt's own timestamp) escalates",
     )
     p_reconcile.add_argument(
-        "--project-id", default=os.environ.get("VNX_PROJECT_ID", DEFAULT_PROJECT_ID),
-        help="warnings on receipts stamped with another project_id are left out (ADR-007)",
+        "--project-id", default=None,
+        help="default: derived from --state-dir, else $VNX_PROJECT_ID; warnings on receipts "
+             "stamped with another project_id are left out (ADR-007)",
     )
     p_reconcile.add_argument("--json", action="store_true")
     p_reconcile.set_defaults(func=_cmd_reconcile_oi_pending)

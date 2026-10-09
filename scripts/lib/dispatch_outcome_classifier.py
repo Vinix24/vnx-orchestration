@@ -129,8 +129,7 @@ ENV_ABANDONED_WINDOW_HOURS = "VNX_ABANDONED_WINDOW_HOURS"
 
 # A receipt with no project_id field predates project-id stamping and is
 # treated as this legacy default project — mirrors the same "vnx-dev"
-# fallback already established in receipt_provenance.py / receipt_query.py
-# (e.g. receipt_query.DEFAULT_PROJECT_ID), never silently dropped or
+# fallback already established in receipt_provenance.py, never silently dropped or
 # silently assigned to every project (Laag 1, OI-824).
 _LEGACY_RECEIPT_PROJECT_ID = "vnx-dev"
 
