@@ -497,22 +497,71 @@ def state_freshness_for_file(
 # Step 1: Schema init (absorbed from runtime_coordination_init.py)
 # ---------------------------------------------------------------------------
 
+def _running_from_linked_worktree() -> bool:
+    """True when this ``build_t0_state.py`` lives in a linked git worktree.
+
+    Rule: the tree root is the parent of ``scripts/``. In a linked worktree its
+    ``.git`` is a file holding ``gitdir: <main>/.git/worktrees/<name>``; in a
+    main checkout ``.git`` is a directory. No subprocess is started.
+    """
+    git_entry = _SCRIPT_DIR.parent / ".git"
+    if not git_entry.is_file():
+        return False
+    try:
+        first = git_entry.read_text(encoding="utf-8").splitlines()[0]
+    except (OSError, IndexError):
+        return False
+    gitdir = first.partition(":")[2].strip().replace("\\", "/")
+    return "/worktrees/" in gitdir
+
+
+def _is_central_store_state_dir(state_dir: Path) -> bool:
+    """True when ``state_dir`` is ``<central data dir>/state`` of a project.
+
+    Uses the central resolver; a state dir outside the central root (a tmp dir
+    passed by a caller or a test) is not a central store.
+    """
+    if resolve_central_data_dir is None:
+        return False
+    try:
+        project_id = project_id_from_state_dir(state_dir)
+        if not project_id:
+            return False
+        central_state = resolve_central_data_dir(project_id) / "state"
+        return central_state.resolve() == Path(state_dir).resolve()
+    except Exception:
+        return False
+
+
+def _migrations_guarded(state_dir: Path) -> bool:
+    """A worktree's unmerged migrations must not migrate the live central store."""
+    if _running_from_linked_worktree() and _is_central_store_state_dir(state_dir):
+        log.warning(
+            "linked worktree %s: schema init and migrations skipped for central store %s",
+            _SCRIPT_DIR.parent, state_dir,
+        )
+        return True
+    return False
+
+
 def _init_and_check_db(state_dir: Path) -> bool:
     """Idempotent schema init. Returns True if DB is operational."""
-    try:
-        from coordination_db import db_path_from_state_dir, init_schema
-        init_schema(state_dir)
-        # PR-6.5d: auto-apply any pending numbered migrations (e.g. 0020 pool tables)
-        # before downstream readers touch the DB. Best-effort: a migration error
-        # must not block SessionStart, but surface at WARNING for operator visibility.
+    guarded = _migrations_guarded(state_dir)
+    if not guarded:
         try:
-            from migrations.auto_apply import auto_apply
-            auto_apply(db_path_from_state_dir(state_dir))
-        except Exception as e:
-            log.warning("migration auto_apply failed: %s", e)
-        return True
-    except (ImportError, OSError, sqlite3.OperationalError) as e:
-        log.debug("coordination_db init failed, falling back: %s", e)
+            from coordination_db import db_path_from_state_dir, init_schema
+            init_schema(state_dir)
+            # PR-6.5d: auto-apply any pending numbered migrations (e.g. 0020 pool tables)
+            # before downstream readers touch the DB. Best-effort: a migration error
+            # must not block SessionStart, but surface at WARNING for operator visibility.
+            try:
+                from migrations.auto_apply import auto_apply
+                auto_apply(db_path_from_state_dir(state_dir))
+            except Exception as e:
+                log.warning("migration auto_apply failed: %s", e)
+            return True
+        except (ImportError, OSError, sqlite3.OperationalError) as e:
+            log.debug("coordination_db init failed, falling back: %s", e)
     # Fallback: check if DB already exists and has tables
     db_path = state_dir / "runtime_coordination.db"
     if not db_path.exists():
@@ -528,6 +577,8 @@ def _init_and_check_db(state_dir: Path) -> bool:
         return False
     # PR-6.5d fallback: DB exists but coordination_db init failed (e.g. locked).
     # Still attempt auto_apply with the known path so pending migrations run.
+    if guarded:
+        return True
     try:
         from migrations.auto_apply import auto_apply
         auto_apply(db_path)
