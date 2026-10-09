@@ -16,14 +16,18 @@ had ``scripts/`` on its own path:
    through ``from append_receipt import``, with no path guard. The receipt was
    silently lost; only the ``dispatch_register.ndjson`` copy landed.
 
-Every test here starts a fresh Python process with the environment the
+The door tests start a fresh Python process with the environment the
 ``bin/vnx`` wrapper gives the door, so the in-process ``sys.path`` of pytest
 cannot hide the defect. The store, ``HOME`` and the state dir are all under
 ``tmp_path``. ``claude``, ``codex``, ``kimi`` and ``gemini`` are shadowed on
 ``PATH`` by tripwires that record any start; a dry-run must start none of them.
+
+``TestOneBillingTable`` pins the shape of the fix: one table, imported by both
+readers, in a module that imports nothing outside the standard library.
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import subprocess
@@ -254,3 +258,51 @@ class TestBookkeepingFailureReceiptWithScriptsLibOnly:
         # exist in both directories and the door's scripts/lib copies must keep winning.
         assert 0 <= report["lib_index"] < report["scripts_index"], report
         _assert_no_tripwire(store)
+
+
+# ---------------------------------------------------------------------------
+# Step 1: one billing table, in a module the door can always import
+# ---------------------------------------------------------------------------
+
+
+def _in_process(module_name: str):
+    """Import a fabric module in this process (pytest has both dirs on the path)."""
+    import importlib
+
+    for path in (str(SCRIPTS), str(LIB)):
+        if path not in sys.path:
+            sys.path.insert(0, path)
+    return importlib.import_module(module_name)
+
+
+class TestOneBillingTable:
+    def test_gate_recorder_and_smart_router_read_the_same_table(self):
+        table = _in_process("gate_billing_table")
+        recorder = _in_process("gate_recorder")
+        router = _in_process("smart_router")
+
+        # The same objects, not equal copies: a copy could drift the day one side is edited.
+        assert recorder.GATE_BILLING is table.GATE_BILLING
+        assert recorder.gate_billing is table.gate_billing
+        assert recorder.metered_before_subscription is table.metered_before_subscription
+        assert router.gate_billing is table.gate_billing
+        # One exception class, so smart_router's `except UnknownGateProvider` also
+        # catches the availability error gate_recorder raises.
+        assert recorder.UnknownGateProvider is table.UnknownGateProvider
+        assert router.UnknownGateProvider is table.UnknownGateProvider
+
+    def test_the_table_module_imports_only_the_standard_library(self):
+        source_path = LIB / "gate_billing_table.py"
+        tree = ast.parse(source_path.read_text(encoding="utf-8"))
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                assert node.level == 0, "a relative import ties the table to a package layout"
+                imported.add((node.module or "").split(".")[0])
+        non_stdlib = sorted(imported - set(sys.stdlib_module_names) - {"__future__"})
+        assert non_stdlib == [], (
+            f"gate_billing_table imports {non_stdlib}: the door reads this table with only "
+            "scripts/lib on sys.path, so it must stay importable without any fabric module"
+        )

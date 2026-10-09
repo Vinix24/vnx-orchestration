@@ -9,7 +9,8 @@ codex, glm or deepseek process.
 
 1. Guard: no API-credit gate stands before a subscription gate in the registry
    default stack or in the takeover chain. Classification comes from ONE place,
-   ``gate_recorder.GATE_BILLING``.
+   ``gate_billing_table.GATE_BILLING`` (imported by ``gate_recorder``, which is
+   where this file reads it).
 2. The obligation the door declares follows the same order (``_primary_review_gate``).
 
 The shared project-store setup is in ``tests/review_stack_support.py``.
