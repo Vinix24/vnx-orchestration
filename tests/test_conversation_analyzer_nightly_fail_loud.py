@@ -506,25 +506,31 @@ def test_invalid_limit_falls_back_to_the_default(run_script):
     assert "WARNING: VNX_ANALYZER_PHASE1_TIMEOUT=0 would end every phase at once; using 1800" in run.log
 
 
-def test_fail_beacon_flag_writes_and_keeps(tmp_path):
-    data = tmp_path / "data"
+def _analyzer_cli(data: Path, home: Path, *args: str) -> subprocess.CompletedProcess:
+    """The real analyzer CLI with a tmp HOME and the store at ``data``."""
     env = {
         "PATH": os.environ["PATH"],
-        "HOME": str(tmp_path),
+        "HOME": str(home),
         "VNX_DATA_DIR": str(data),
         "VNX_DATA_DIR_EXPLICIT": "1",
         "VNX_STATE_DIR": str(data / "state"),
         "VNX_DATA_DIR_GUARD": "off",
     }
+    return subprocess.run([sys.executable, str(_REAL_ANALYZER), *args],
+                          env=env, capture_output=True, text=True, timeout=60)
+
+
+def test_fail_beacon_flag_writes_and_keeps(tmp_path):
+    data = tmp_path / "data"
 
     def cli(*args: str) -> subprocess.CompletedProcess:
-        return subprocess.run([sys.executable, str(_REAL_ANALYZER), *args],
-                              env=env, capture_output=True, text=True, timeout=60)
+        return _analyzer_cli(data, tmp_path, *args)
 
     beacon_path = data / "health" / "conversation_analyzer.json"
     assert cli("--write-fail-beacon", "first").returncode == 0
     assert json.loads(beacon_path.read_text())["details"]["error"] == "first"
     kept = cli("--write-fail-beacon", "second", "--unless-beacon-since", "0")
+    assert kept.returncode == 0, kept.stderr
     assert "this run's beacon is present (status=fail)" in kept.stdout
     assert json.loads(beacon_path.read_text())["details"]["error"] == "first"
     future = str(int(time.time()) + 3600)
@@ -533,6 +539,94 @@ def test_fail_beacon_flag_writes_and_keeps(tmp_path):
     lone = cli("--unless-beacon-since", "0")
     assert lone.returncode == 2
     assert "--unless-beacon-since requires --write-fail-beacon" in lone.stderr
+
+
+def _seed_old_ok_beacon(health: Path) -> dict:
+    """Last night's `ok` beacon, as the analyzer left it a day ago."""
+    health.mkdir(parents=True, exist_ok=True)
+    yesterday = int(time.time()) - 86400
+    beacon = {
+        "component": "conversation_analyzer",
+        "last_run_ts": yesterday,
+        "last_run_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(yesterday)),
+        "status": "ok",
+        "details": {"max_sessions": 50, "dry_run": False},
+        "expected_interval_seconds": 86400,
+    }
+    (health / "conversation_analyzer.json").write_text(json.dumps(beacon), encoding="utf-8")
+    return beacon
+
+
+def _health_is_a_file(health: Path) -> dict | None:
+    # The beacon's directory cannot be created: _write_heartbeat catches and logs.
+    health.parent.mkdir(parents=True, exist_ok=True)
+    health.write_text("not a directory", encoding="utf-8")
+    return None
+
+
+def _tmp_sibling_is_a_directory(health: Path) -> dict | None:
+    # The atomic write's tmp file cannot be opened: HealthBeacon.heartbeat
+    # swallows that without a word, and last night's `ok` stays in place.
+    old = _seed_old_ok_beacon(health)
+    (health / "conversation_analyzer.json.tmp").mkdir()
+    return old
+
+
+# OI-2021 round 2: the CLI used to print "fail beacon written" and exit 0 here.
+@pytest.mark.parametrize("make_unwritable", [_health_is_a_file, _tmp_sibling_is_a_directory])
+def test_fail_beacon_flag_exits_nonzero_when_the_beacon_does_not_land(tmp_path, make_unwritable):
+    data = tmp_path / "data"
+    health = data / "health"
+    old = make_unwritable(health)
+
+    plain = _analyzer_cli(data, tmp_path, "--write-fail-beacon", "Phase 1 timed out after 3s")
+    assert plain.returncode != 0
+    assert "fail beacon NOT written" in plain.stderr
+    assert "Phase 1 timed out after 3s" in plain.stderr
+    assert "fail beacon written" not in plain.stdout
+
+    # No beacon of this run to keep, so the write is attempted and fails too.
+    since = _analyzer_cli(data, tmp_path, "--write-fail-beacon", "Phase 1 exited 3",
+                          "--unless-beacon-since", str(int(time.time())))
+    assert since.returncode != 0
+    assert "fail beacon NOT written" in since.stderr
+
+    if old is not None:
+        on_disk = json.loads((health / "conversation_analyzer.json").read_text())
+        assert on_disk == old
+
+
+def test_fail_beacon_flag_refuses_a_same_second_beacon_it_did_not_write(tmp_path):
+    """A `fail` beacon with the same reason, stamped this second by an earlier
+    call, is not proof that this call wrote one."""
+    data = tmp_path / "data"
+    health = data / "health"
+    assert _analyzer_cli(data, tmp_path, "--write-fail-beacon", "same reason").returncode == 0
+    (health / "conversation_analyzer.json.tmp").mkdir()
+    again = _analyzer_cli(data, tmp_path, "--write-fail-beacon", "same reason")
+    assert again.returncode != 0
+    assert "fail beacon NOT written" in again.stderr
+
+
+def test_overrun_with_an_unwritable_beacon_location_is_logged_and_fails(tmp_path):
+    run = Run(tmp_path, _SCRIPT.read_text(encoding="utf-8"),
+              {"STUB_MODE_conversation_analyzer": "block",
+               "VNX_ANALYZER_PHASE1_TIMEOUT": str(LIMIT)})
+    old = _tmp_sibling_is_a_directory(run.data / "health")
+    try:
+        rc = run.start().finish(WINDOW)
+    finally:
+        run.kill_leftovers()
+    log = run.log
+    reason = f"Phase 1 timed out after {LIMIT}s"
+    assert f"Phase 1 TIMEOUT: still running after {LIMIT}s" in log
+    assert f"ERROR: fail beacon NOT written (exit 1), reason it carried: {reason}" in log
+    assert f"{reason}; fail beacon not written (exit 1)" in log[log.index(FAILED):]
+    assert COMPLETE not in log
+    assert rc != 0
+    # The write could not land, so last night's `ok` is still on disk: the log
+    # line and the exit status are what report this night.
+    assert run.beacon == old
 
 
 @pytest.fixture(autouse=True)

@@ -152,17 +152,21 @@ FAIL_REASONS=""
 
 # write_fail_beacon [keep_since_epoch]
 # With an epoch, a beacon the analyzer itself wrote at or after it is kept.
+# The CLI reads the beacon back and exits non-zero when it did not land; then
+# the previous night's `ok` may still be on disk, so the miss gets its own log
+# line and joins FAIL_REASONS, which keeps the run's exit non-zero.
 write_fail_beacon() {
-    local rc=0
+    local rc=0 reasons="$FAIL_REASONS"
     if [ -n "${1:-}" ]; then
         run_bounded "Fail beacon" "$BEACON_TIMEOUT_SECS" conversation_analyzer.py \
-            --write-fail-beacon "$FAIL_REASONS" --unless-beacon-since "$1" || rc=$?
+            --write-fail-beacon "$reasons" --unless-beacon-since "$1" || rc=$?
     else
         run_bounded "Fail beacon" "$BEACON_TIMEOUT_SECS" conversation_analyzer.py \
-            --write-fail-beacon "$FAIL_REASONS" || rc=$?
+            --write-fail-beacon "$reasons" || rc=$?
     fi
     if [ "$rc" -ne 0 ]; then
-        log_msg "WARNING: fail beacon write ended with exit $rc"
+        log_msg "ERROR: fail beacon NOT written (exit $rc), reason it carried: $reasons"
+        FAIL_REASONS="$reasons; fail beacon not written (exit $rc)"
     fi
 }
 
@@ -349,7 +353,8 @@ else
 fi
 
 # A failing later phase stays non-fatal, an overrun does not: it is the hang
-# this runner now reports, and the beacon already says `fail`.
+# this runner now reports, and the beacon already says `fail` (or the log says
+# it could not be written, and FAIL_REASONS carries that too).
 if [ "$ANALYZER_EXIT" -ne 0 ] || [ -n "$FAIL_REASONS" ]; then
     log_msg "=== Nightly analysis pipeline FAILED (analyzer_exit=$ANALYZER_EXIT${FAIL_REASONS:+; $FAIL_REASONS}) ==="
     if [ "$ANALYZER_EXIT" -ne 0 ]; then
