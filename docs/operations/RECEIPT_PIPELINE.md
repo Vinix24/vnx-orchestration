@@ -108,13 +108,15 @@ Reports must carry the required headings (`## Summary`, `## Changes`, `## Verifi
 ```bash
 scripts/receipt_query.py open-outcomes --state-dir <dir> [--project-id <id>] [--limit N] [--json]
 scripts/receipt_query.py decide     <dispatch_id> accept|reject --reason <why> --state-dir <dir> [--project-id <id>] [--json]
-scripts/receipt_query.py by-dispatch <dispatch_id> --state-dir <dir> [--json]
-scripts/receipt_query.py by-pr      <pr_id>        --state-dir <dir> [--json]
-scripts/receipt_query.py since      <ISO8601>       --state-dir <dir> [--json]
+scripts/receipt_query.py by-dispatch <dispatch_id> --state-dir <dir> [--project-id <id>] [--json]
+scripts/receipt_query.py by-pr      <pr_id>        --state-dir <dir> [--project-id <id>] [--json]
+scripts/receipt_query.py since      <ISO8601>       --state-dir <dir> [--project-id <id>] [--json]
 scripts/receipt_query.py by-track   <track_id>      --state-dir <dir> [--project-id <id>] [--json]
-scripts/receipt_query.py digest     --state-dir <dir> [--window 24h] [--max-age-days 7] [--json]
-scripts/receipt_query.py reconcile-oi-pending --state-dir <dir> [--max-age-days 7] [--json]
+scripts/receipt_query.py digest     --state-dir <dir> [--window 24h] [--max-age-days 7] [--project-id <id>] [--json]
+scripts/receipt_query.py reconcile-oi-pending --state-dir <dir> [--max-age-days 7] [--project-id <id>] [--json]
 ```
+
+Every subcommand resolves its project the same way: `--project-id`, else derived from `--state-dir`, else `VNX_PROJECT_ID`, else it exits 2 with an error. There is no default project.
 
 - **`open-outcomes`** — the dispatches of this project without an outcome a T0 decided on (`scripts/lib/open_outcomes.py`): a `reject`, `investigate` or `unknown` outcome in the ledger since `OPEN_OUTCOMES_EPOCH`, and a dispatch still in `dispatches/active/` that the drain leaves standing (no receipt past 1h, no outcome of its own, a failure). Stateless: nothing is consumed, two readers see the same list. It replaced the byte-cursor `pull` (fabric-state-herstel D4b).
 - **`decide`** — appends a T0 decision (`outcome_decision`, with `project_id`) to `t0_decision_log.jsonl` through `t0_decision_log.write_decision` (append under `flock`). The last decision per dispatch in file order counts; the active-drain moves a decided dispatch out of `dispatches/active/`.
