@@ -1935,6 +1935,25 @@ def _migrations_skipped_fields(migration_skip: Optional[Dict[str, str]]) -> Dict
     return {}
 
 
+def _producer_liveness_summary(
+    daemon_liveness: Optional[Dict[str, Any]],
+    launchd_liveness: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """The combined producer verdict plus each class's own overall, nothing more.
+
+    Derived from the two liveness signals, not a third one, so it carries
+    their ``overall`` values only; the per-daemon and per-job detail stays in
+    the sibling ``daemon_liveness`` and ``launchd_liveness`` keys.
+    """
+    daemon_overall = daemon_liveness.get("overall") if daemon_liveness else None
+    launchd_overall = launchd_liveness.get("overall") if launchd_liveness else None
+    return {
+        "overall": _combine_liveness_overall(daemon_overall, launchd_overall),
+        "daemon_overall": daemon_overall,
+        "launchd_overall": launchd_overall,
+    }
+
+
 def _build_system_health(
     state_dir: Path,
     db_initialized: bool,
@@ -2081,14 +2100,7 @@ def _build_system_health(
     # pushed a real t0_index.json from 3559 to 8024 bytes). Per-daemon and
     # per-job detail is one field away (daemon_liveness/launchd_liveness
     # above) for a caller that wants it.
-    result["producer_liveness"] = {
-        "overall": _combine_liveness_overall(
-            daemon_liveness.get("overall") if daemon_liveness else None,
-            launchd_liveness.get("overall") if launchd_liveness else None,
-        ),
-        "daemon_overall": daemon_liveness.get("overall") if daemon_liveness else None,
-        "launchd_overall": launchd_liveness.get("overall") if launchd_liveness else None,
-    }
+    result["producer_liveness"] = _producer_liveness_summary(daemon_liveness, launchd_liveness)
     return result
 
 
