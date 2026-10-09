@@ -8,6 +8,7 @@ Run: python3 scripts/conversation_analyzer.py [--max-sessions N] [--dry-run] ...
 """
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -42,6 +43,41 @@ def _write_heartbeat(args, stats, run_status, run_error):
         log("WARNING", f"health_beacon failed: {exc}")
 
 
+def _beacon_written_since(since_ts):
+    """The status of the analyzer beacon when it was written at or after
+    ``since_ts`` (epoch seconds), else None: no beacon, an older one, or one
+    that cannot be read all count as "no beacon of this run"."""
+    path = Path(PATHS["VNX_DATA_DIR"]) / "health" / "conversation_analyzer.json"
+    try:
+        beacon = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(beacon, dict):
+        return None
+    written = beacon.get("last_run_ts")
+    if isinstance(written, int) and written >= since_ts:
+        return beacon.get("status")
+    return None
+
+
+def _write_fail_beacon(args):
+    """Write a ``fail`` beacon for a run the nightly runner saw fail (OI-2021).
+
+    The runner calls this when the analyzer itself cannot report: a phase
+    overran its time limit, Phase 1 exited non-zero without a beacon, Phase 0
+    failed, or another run still holds the lock. With ``--unless-beacon-since``
+    a beacon the analyzer wrote during this run is kept, not overwritten.
+    """
+    if args.unless_beacon_since is not None:
+        status = _beacon_written_since(args.unless_beacon_since)
+        if status is not None:
+            print(f"fail beacon not written: this run's beacon is present (status={status})")
+            return 0
+    _write_heartbeat(args, None, "fail", args.write_fail_beacon)
+    print(f"fail beacon written: {args.write_fail_beacon}")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="VNX Conversation Analyzer — Nightly Session Mining Pipeline")
@@ -55,7 +91,16 @@ def main():
                         help="Only analyze sessions from project matching this string")
     parser.add_argument("--terminal-filter",
                         help="Only analyze sessions from this terminal (T-MANAGER, T1, T2, T3)")
+    parser.add_argument("--write-fail-beacon", metavar="REASON",
+                        help="Only write a 'fail' health beacon with REASON and exit")
+    parser.add_argument("--unless-beacon-since", type=int, metavar="EPOCH",
+                        help="With --write-fail-beacon: keep a beacon written at or after EPOCH")
     args = parser.parse_args()
+
+    if args.unless_beacon_since is not None and args.write_fail_beacon is None:
+        parser.error("--unless-beacon-since requires --write-fail-beacon")
+    if args.write_fail_beacon is not None:
+        return _write_fail_beacon(args)
 
     print(f"\n{Colors.BLUE}{'=' * 70}")
     print("VNX Conversation Analyzer")

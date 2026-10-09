@@ -127,3 +127,96 @@ vnx_run_bounded() {
 
     return $status
 }
+
+# vnx_run_bounded_group <group_id> <deadline_secs> <grace_secs> <reap_secs>
+#
+# Bounds a child that the CALLING shell started with `&` as the leader of its
+# own process group, so that its pid is also its group id (start it through
+# scripts/lib/vnx_exec_new_group.py; macOS has no setsid(1)). Unlike
+# vnx_run_bounded above, which signals one worker pid, this signals the whole
+# group: a phase that hangs in a grandchild is ended as a unit (OI-2021).
+#
+#   <group_id>:      the child's pid ($!), equal to its process group id.
+#   <deadline_secs>: whole seconds the group may run; it is never cut short.
+#   <grace_secs>:    seconds between SIGABRT and SIGKILL. SIGABRT comes first
+#       so a Python child started with `-X faulthandler` dumps its traceback
+#       into its own stderr before it dies.
+#   <reap_secs>:     seconds to wait for the child to be gone after SIGKILL.
+#
+# Never signals when <group_id> is empty, not a number, 0 or 1 (kill(2) reads
+# -0 as "my own group" and -1 as "every process I may signal"), or equal to the
+# calling shell's own process group, or when that own group cannot be read.
+# Those cases return $VNX_RUN_BOUNDED_REFUSED at once, without waiting.
+#
+# Never waits unbounded: the child is polled with `kill -0` (bash reaps a
+# finished background child by itself, after which `kill -0` fails), and
+# `wait` is only called once the child is gone, so it returns at once. A child
+# still present after the reap window (stuck in an uninterruptible call) is
+# left behind and the function returns anyway.
+#
+# Return status: the child's own exit status when it ended inside the
+# deadline; $VNX_RUN_BOUNDED_DEADLINE (124) after an overrun. Detail for the
+# caller's log lands in two globals (bash 3.2 has no namerefs):
+#   VNX_BOUNDED_GROUP_OUTCOME  exited | deadline | deadline_unreaped | refused
+#   VNX_BOUNDED_GROUP_STATUS   the child's raw wait status, empty when unknown
+#                              (134 = ended by SIGABRT, 137 = by SIGKILL)
+if [ -z "${VNX_RUN_BOUNDED_REFUSED:-}" ]; then
+    readonly VNX_RUN_BOUNDED_REFUSED=125
+fi
+
+# Polls until <pid> is gone (return 0) or more than <secs> whole seconds have
+# passed (return 1). Short naps first, so a quick phase costs no full second.
+_vnx_bounded_group_gone_within() {
+    local pid="$1" secs="$2" start=$SECONDS
+    while kill -0 "$pid" 2>/dev/null; do
+        [ $((SECONDS - start)) -le "$secs" ] || return 1
+        if [ $((SECONDS - start)) -lt 2 ]; then
+            sleep 0.1
+        else
+            sleep 0.5
+        fi
+    done
+    return 0
+}
+
+vnx_run_bounded_group() {
+    local group_id="$1" deadline_secs="$2" grace_secs="$3" reap_secs="$4"
+    VNX_BOUNDED_GROUP_OUTCOME="refused"
+    VNX_BOUNDED_GROUP_STATUS=""
+
+    local value
+    for value in "$deadline_secs" "$grace_secs" "$reap_secs"; do
+        case "$value" in
+            ''|*[!0-9]*) return "$VNX_RUN_BOUNDED_REFUSED" ;;
+        esac
+    done
+    case "$group_id" in
+        ''|*[!0-9]*|0|1) return "$VNX_RUN_BOUNDED_REFUSED" ;;
+    esac
+    local own_group
+    own_group="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ')" || own_group=""
+    if [ -z "$own_group" ] || [ "$group_id" = "$own_group" ]; then
+        return "$VNX_RUN_BOUNDED_REFUSED"
+    fi
+
+    local status=0
+    if _vnx_bounded_group_gone_within "$group_id" "$deadline_secs"; then
+        wait "$group_id" || status=$?
+        VNX_BOUNDED_GROUP_OUTCOME="exited"
+        VNX_BOUNDED_GROUP_STATUS="$status"
+        return "$status"
+    fi
+
+    kill -s ABRT -- "-$group_id" 2>/dev/null || true
+    _vnx_bounded_group_gone_within "$group_id" "$grace_secs" || true
+    # Also when the leader died on SIGABRT: members it started may remain.
+    kill -s KILL -- "-$group_id" 2>/dev/null || true
+    if _vnx_bounded_group_gone_within "$group_id" "$reap_secs"; then
+        wait "$group_id" || status=$?
+        VNX_BOUNDED_GROUP_OUTCOME="deadline"
+        VNX_BOUNDED_GROUP_STATUS="$status"
+    else
+        VNX_BOUNDED_GROUP_OUTCOME="deadline_unreaped"
+    fi
+    return "$VNX_RUN_BOUNDED_DEADLINE"
+}
