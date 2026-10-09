@@ -60,7 +60,7 @@ def _r(did: str, terminal: str = "T2", status: str = "success", **overrides: Any
 
 def test_by_dispatch_returns_matching_receipts(tmp_path, capsys):
     _write_ledger(tmp_path, _r("d1"), _r("d2"), _r("d1", status="failed"))
-    rc = rq.main(["by-dispatch", "d1", "--state-dir", str(tmp_path), "--json"])
+    rc = rq.main(["by-dispatch", "d1", "--project-id", "vnx-dev", "--state-dir", str(tmp_path), "--json"])
     assert rc == 0
     out = json.loads(capsys.readouterr().out)
     assert out["dispatch_id"] == "d1"
@@ -70,7 +70,7 @@ def test_by_dispatch_returns_matching_receipts(tmp_path, capsys):
 
 def test_by_dispatch_no_matches_is_empty_not_error(tmp_path, capsys):
     _write_ledger(tmp_path, _r("d1"))
-    rc = rq.main(["by-dispatch", "does-not-exist", "--state-dir", str(tmp_path), "--json"])
+    rc = rq.main(["by-dispatch", "does-not-exist", "--project-id", "vnx-dev", "--state-dir", str(tmp_path), "--json"])
     assert rc == 0
     out = json.loads(capsys.readouterr().out)
     assert out["count"] == 0
@@ -78,7 +78,7 @@ def test_by_dispatch_no_matches_is_empty_not_error(tmp_path, capsys):
 
 
 def test_by_dispatch_missing_ledger_is_empty(tmp_path, capsys):
-    rc = rq.main(["by-dispatch", "d1", "--state-dir", str(tmp_path), "--json"])
+    rc = rq.main(["by-dispatch", "d1", "--project-id", "vnx-dev", "--state-dir", str(tmp_path), "--json"])
     assert rc == 0
     out = json.loads(capsys.readouterr().out)
     assert out["count"] == 0
@@ -106,7 +106,7 @@ def _v2_receipt(did: str) -> Dict[str, Any]:
 
 def test_by_dispatch_handles_mixed_v1_v2_ledger(tmp_path, capsys):
     _write_ledger(tmp_path, _v1_receipt("shared"), _v2_receipt("shared"))
-    rc = rq.main(["by-dispatch", "shared", "--state-dir", str(tmp_path), "--json"])
+    rc = rq.main(["by-dispatch", "shared", "--project-id", "vnx-dev", "--state-dir", str(tmp_path), "--json"])
     assert rc == 0
     out = json.loads(capsys.readouterr().out)
     assert out["count"] == 2
@@ -194,37 +194,37 @@ def test_t14_by_pr_returns_every_matching_receipt(tmp_path):
         _v2_with("d4", pr_id="300"),
     )
     ledger = tmp_path / rq.LEDGER_NAME
-    receipts = rq.find_receipts_by_pr(ledger, "100")
+    receipts = rq.find_receipts_by_pr(ledger, "100", project_id="vnx-dev")
     assert {r["dispatch_id"] for r in receipts} == {"d1", "d3"}
 
 
 def test_t14_by_pr_matches_across_schema_versions(tmp_path):
     _write_ledger(tmp_path, _v1_with("d1", pr_id="7"), _v2_with("d2", pr_id="7"))
     ledger = tmp_path / rq.LEDGER_NAME
-    receipts = rq.find_receipts_by_pr(ledger, "7")
+    receipts = rq.find_receipts_by_pr(ledger, "7", project_id="vnx-dev")
     assert {r["dispatch_id"] for r in receipts} == {"d1", "d2"}
 
 
 def test_by_pr_matches_int_and_str_pr_id(tmp_path):
     _write_ledger(tmp_path, _r("d1", pr_id=123))
     ledger = tmp_path / rq.LEDGER_NAME
-    assert [r["dispatch_id"] for r in rq.find_receipts_by_pr(ledger, "123")] == ["d1"]
+    assert [r["dispatch_id"] for r in rq.find_receipts_by_pr(ledger, "123", project_id="vnx-dev")] == ["d1"]
 
 
 def test_by_pr_no_match_is_empty_not_error(tmp_path):
     _write_ledger(tmp_path, _r("d1", pr_id="1"))
     ledger = tmp_path / rq.LEDGER_NAME
-    assert rq.find_receipts_by_pr(ledger, "999") == []
+    assert rq.find_receipts_by_pr(ledger, "999", project_id="vnx-dev") == []
 
 
 def test_by_pr_missing_ledger_is_empty(tmp_path):
     ledger = tmp_path / rq.LEDGER_NAME
-    assert rq.find_receipts_by_pr(ledger, "1") == []
+    assert rq.find_receipts_by_pr(ledger, "1", project_id="vnx-dev") == []
 
 
 def test_by_pr_cli(tmp_path, capsys):
     _write_ledger(tmp_path, _r("d1", pr_id="42"), _r("d2", pr_id="43"))
-    rc = rq.main(["by-pr", "42", "--state-dir", str(tmp_path), "--json"])
+    rc = rq.main(["by-pr", "42", "--project-id", "vnx-dev", "--state-dir", str(tmp_path), "--json"])
     assert rc == 0
     out = json.loads(capsys.readouterr().out)
     assert out["count"] == 1
@@ -243,14 +243,14 @@ def test_t16_since_filters_v2_and_legacy_v1_timestamps(tmp_path):
         _v1_with("d3", timestamp="2026-07-20T00:00:00Z"),
     )
     ledger = tmp_path / rq.LEDGER_NAME
-    receipts = rq.find_receipts_since(ledger, "2026-07-10T00:00:00Z")
+    receipts = rq.find_receipts_since(ledger, "2026-07-10T00:00:00Z", project_id="vnx-dev")
     assert {r["dispatch_id"] for r in receipts} == {"d2", "d3"}
 
 
 def test_since_boundary_is_inclusive(tmp_path):
     _write_ledger(tmp_path, _r("d1", timestamp="2026-07-10T00:00:00Z"))
     ledger = tmp_path / rq.LEDGER_NAME
-    receipts = rq.find_receipts_since(ledger, "2026-07-10T00:00:00Z")
+    receipts = rq.find_receipts_since(ledger, "2026-07-10T00:00:00Z", project_id="vnx-dev")
     assert [r["dispatch_id"] for r in receipts] == ["d1"]
 
 
@@ -262,18 +262,18 @@ def test_since_skips_missing_or_unparseable_timestamp_without_crashing(tmp_path)
         _r("d3", timestamp="2026-07-20T00:00:00Z"),
     )
     ledger = tmp_path / rq.LEDGER_NAME
-    receipts = rq.find_receipts_since(ledger, "2026-01-01T00:00:00Z")
+    receipts = rq.find_receipts_since(ledger, "2026-01-01T00:00:00Z", project_id="vnx-dev")
     assert [r["dispatch_id"] for r in receipts] == ["d3"]
 
 
 def test_since_invalid_argument_raises_value_error(tmp_path):
     ledger = tmp_path / rq.LEDGER_NAME
     with pytest.raises(ValueError):
-        rq.find_receipts_since(ledger, "not-iso8601")
+        rq.find_receipts_since(ledger, "not-iso8601", project_id="vnx-dev")
 
 
 def test_since_cli_reports_error_for_invalid_timestamp(tmp_path):
-    rc = rq.main(["since", "garbage", "--state-dir", str(tmp_path)])
+    rc = rq.main(["since", "garbage", "--project-id", "vnx-dev", "--state-dir", str(tmp_path)])
     assert rc == 1
 
 
@@ -283,7 +283,7 @@ def test_since_cli(tmp_path, capsys):
         _r("d1", timestamp="2026-07-01T00:00:00Z"),
         _r("d2", timestamp="2026-07-20T00:00:00Z"),
     )
-    rc = rq.main(["since", "2026-07-10T00:00:00Z", "--state-dir", str(tmp_path), "--json"])
+    rc = rq.main(["since", "2026-07-10T00:00:00Z", "--project-id", "vnx-dev", "--state-dir", str(tmp_path), "--json"])
     assert rc == 0
     out = json.loads(capsys.readouterr().out)
     assert out["count"] == 1
@@ -415,6 +415,7 @@ def test_t17_digest_buckets_v1_lines_as_unknown_verdict(tmp_path):
     ledger = tmp_path / rq.LEDGER_NAME
     result = rq.compute_digest(
         ledger, window="24h", now=now, open_items_manager_module=_NeverCalledOIM(),
+        project_id="vnx-dev",
     )
     assert result["line_verdict_counts"] == {"accept": 1, "investigate": 0, "reject": 1, "unknown": 1}
     # Per dispatch the reader recomputes the verdict instead of trusting the
@@ -435,6 +436,7 @@ def test_digest_never_crashes_on_non_dict_verdict(tmp_path):
     ledger = tmp_path / rq.LEDGER_NAME
     result = rq.compute_digest(
         ledger, window="24h", now=now, open_items_manager_module=_NeverCalledOIM(),
+        project_id="vnx-dev",
     )
     assert result["verdict_counts"]["unknown"] == 1
 
@@ -449,6 +451,7 @@ def test_digest_window_excludes_older_receipts(tmp_path):
     ledger = tmp_path / rq.LEDGER_NAME
     result = rq.compute_digest(
         ledger, window="24h", now=now, open_items_manager_module=_NeverCalledOIM(),
+        project_id="vnx-dev",
     )
     assert sum(result["verdict_counts"].values()) == 1
 
@@ -473,6 +476,7 @@ def test_digest_counted_warnings_top_codes(tmp_path):
     ledger = tmp_path / rq.LEDGER_NAME
     result = rq.compute_digest(
         ledger, window="24h", now=now, open_items_manager_module=_NeverCalledOIM(),
+        project_id="vnx-dev",
     )
     assert result["counted_warnings"][0] == {"code": "report_contract_invalid", "count": 2}
 
@@ -480,12 +484,12 @@ def test_digest_counted_warnings_top_codes(tmp_path):
 def test_digest_invalid_window_raises(tmp_path):
     ledger = tmp_path / rq.LEDGER_NAME
     with pytest.raises(ValueError):
-        rq.compute_digest(ledger, window="banana")
+        rq.compute_digest(ledger, window="banana", project_id="vnx-dev")
 
 
 def test_digest_cli(tmp_path, capsys):
     _write_ledger(tmp_path, _v2_with("d1", timestamp="2026-07-22T01:00:00Z"))
-    rc = rq.main(["digest", "--state-dir", str(tmp_path), "--json"])
+    rc = rq.main(["digest", "--project-id", "vnx-dev", "--state-dir", str(tmp_path), "--json"])
     assert rc == 0
     out = json.loads(capsys.readouterr().out)
     assert "verdict_counts" in out
@@ -522,11 +526,11 @@ def test_t34_oi_pending_drops_out_of_digest_tally_after_reconcile(tmp_path):
     ledger = tmp_path / rq.LEDGER_NAME
     raw_before = ledger.read_text(encoding="utf-8")
 
-    before = rq.compute_digest(ledger, window="24h", now=now, open_items_manager_module=oim)
+    before = rq.compute_digest(ledger, window="24h", now=now, open_items_manager_module=oim, project_id="vnx-dev")
     assert before["oi_pending_unresolved_count"] == 1
     assert before["oi_pending_unresolved"][0]["dispatch_id"] == "d1"
 
-    result = rq.reconcile_oi_pending(ledger, now=now, open_items_manager_module=oim)
+    result = rq.reconcile_oi_pending(ledger, now=now, open_items_manager_module=oim, project_id="vnx-dev")
     assert result["scanned"] == 1
     assert result["reconciled"] == 1
     assert result["still_pending"] == 0
@@ -537,7 +541,7 @@ def test_t34_oi_pending_drops_out_of_digest_tally_after_reconcile(tmp_path):
     assert match is not None
     assert match["status"] == "open"
 
-    after = rq.compute_digest(ledger, window="24h", now=now, open_items_manager_module=oim)
+    after = rq.compute_digest(ledger, window="24h", now=now, open_items_manager_module=oim, project_id="vnx-dev")
     assert after["oi_pending_unresolved_count"] == 0
 
     # the receipt line itself never changed — the join reads the OI store,
@@ -559,6 +563,7 @@ def test_reconcile_oi_pending_escalates_stale_still_failing_entries(tmp_path):
 
     result = rq.reconcile_oi_pending(
         ledger, now=now, max_age_days=7.0, open_items_manager_module=_AlwaysFailingOIM(),
+        project_id="vnx-dev",
     )
     assert result["scanned"] == 1
     assert result["reconciled"] == 0
@@ -581,6 +586,7 @@ def test_reconcile_oi_pending_no_escalation_for_recent_failures(tmp_path):
 
     result = rq.reconcile_oi_pending(
         ledger, now=now, max_age_days=7.0, open_items_manager_module=_AlwaysFailingOIM(),
+        project_id="vnx-dev",
     )
     assert result["still_pending"] == 1
     assert result["escalated"] == []
@@ -595,7 +601,7 @@ def test_reconcile_oi_pending_missing_code_is_skipped_not_crashed(tmp_path):
     _write_ledger(tmp_path, receipt)
     ledger = tmp_path / rq.LEDGER_NAME
 
-    result = rq.reconcile_oi_pending(ledger, open_items_manager_module=_NeverCalledOIM())
+    result = rq.reconcile_oi_pending(ledger, open_items_manager_module=_NeverCalledOIM(), project_id="vnx-dev")
     assert result["scanned"] == 1
     assert result["reconciled"] == 0
     assert result["still_pending"] == 1
@@ -607,7 +613,7 @@ def test_reconcile_oi_pending_cli(tmp_path, capsys):
     _write_ledger(tmp_path, receipt)
 
     with patch.object(rq, "_load_open_items_manager", return_value=oim):
-        rc = rq.main(["reconcile-oi-pending", "--state-dir", str(tmp_path), "--json"])
+        rc = rq.main(["reconcile-oi-pending", "--project-id", "vnx-dev", "--state-dir", str(tmp_path), "--json"])
     assert rc == 0
     # open_items_manager.add_item_programmatic prints its own "Digest updated"
     # line as a side effect (generate_digest()) — parse from the JSON's own
@@ -639,6 +645,7 @@ def test_reconcile_oi_pending_failure_is_counted_and_logged_not_swallowed(tmp_pa
 
     result = rq.reconcile_oi_pending(
         ledger, now=now, max_age_days=7.0, open_items_manager_module=_AlwaysFailingOIM(),
+        project_id="vnx-dev",
     )
     assert result["scanned"] == 1
     assert result["reconciled"] == 0
@@ -660,7 +667,7 @@ def test_reconcile_oi_pending_missing_code_is_not_counted_as_failed(tmp_path):
     _write_ledger(tmp_path, receipt)
     ledger = tmp_path / rq.LEDGER_NAME
 
-    result = rq.reconcile_oi_pending(ledger, open_items_manager_module=_NeverCalledOIM())
+    result = rq.reconcile_oi_pending(ledger, open_items_manager_module=_NeverCalledOIM(), project_id="vnx-dev")
     assert result["still_pending"] == 1
     assert result["failed"] == 0  # skipped before any add_item_programmatic attempt
 
@@ -675,7 +682,7 @@ def test_reconcile_oi_pending_cli_reports_failed_count(tmp_path, capsys):
             raise RuntimeError("boom")
 
     with patch.object(rq, "_load_open_items_manager", return_value=_AlwaysFailingOIM()):
-        rc = rq.main(["reconcile-oi-pending", "--state-dir", str(tmp_path), "--json"])
+        rc = rq.main(["reconcile-oi-pending", "--project-id", "vnx-dev", "--state-dir", str(tmp_path), "--json"])
     assert rc == 0
     raw = capsys.readouterr().out
     out = json.loads(raw[raw.index("{"):])
@@ -700,6 +707,7 @@ def test_digest_surfaces_oi_pending_escalated_count_for_stale_entries(tmp_path):
 
     result = rq.compute_digest(
         ledger, window="30d", now=now, max_age_days=7.0, open_items_manager_module=oim,
+        project_id="vnx-dev",
     )
     assert result["oi_pending_unresolved_count"] == 1
     assert result["oi_pending_escalated_count"] == 1
@@ -718,6 +726,7 @@ def test_digest_does_not_escalate_recent_oi_pending_entries(tmp_path):
 
     result = rq.compute_digest(
         ledger, window="24h", now=now, max_age_days=7.0, open_items_manager_module=oim,
+        project_id="vnx-dev",
     )
     assert result["oi_pending_unresolved_count"] == 1
     assert result["oi_pending_escalated_count"] == 0
@@ -739,6 +748,7 @@ def test_digest_escalates_oi_pending_entry_outside_digest_window(tmp_path):
 
     result = rq.compute_digest(
         ledger, window="24h", now=now, max_age_days=7.0, open_items_manager_module=oim,
+        project_id="vnx-dev",
     )
     assert result["oi_pending_unresolved_count"] == 0  # outside the window -> tally excludes it
     assert result["oi_pending_escalated_count"] == 1  # but escalation is window-independent
@@ -758,14 +768,16 @@ def test_digest_escalation_drops_out_after_reconcile_resolves_it(tmp_path):
 
     before = rq.compute_digest(
         ledger, window="30d", now=now, max_age_days=7.0, open_items_manager_module=oim,
+        project_id="vnx-dev",
     )
     assert before["oi_pending_escalated_count"] == 1
 
-    result = rq.reconcile_oi_pending(ledger, now=now, open_items_manager_module=oim)
+    result = rq.reconcile_oi_pending(ledger, now=now, open_items_manager_module=oim, project_id="vnx-dev")
     assert result["reconciled"] == 1
 
     after = rq.compute_digest(
         ledger, window="30d", now=now, max_age_days=7.0, open_items_manager_module=oim,
+        project_id="vnx-dev",
     )
     assert after["oi_pending_escalated_count"] == 0
     assert after["oi_pending_unresolved_count"] == 0
@@ -774,7 +786,7 @@ def test_digest_escalation_drops_out_after_reconcile_resolves_it(tmp_path):
 def test_digest_cli_max_age_days_flag(tmp_path, capsys):
     _write_ledger(tmp_path, _v2_with("d1", timestamp="2026-07-22T01:00:00Z"))
     rc = rq.main([
-        "digest", "--state-dir", str(tmp_path), "--max-age-days", "3", "--json",
+        "digest", "--project-id", "vnx-dev", "--state-dir", str(tmp_path), "--max-age-days", "3", "--json",
     ])
     assert rc == 0
     out = json.loads(capsys.readouterr().out)

@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Any, Dict, List
 from unittest.mock import patch
 
+import pytest
+
 TESTS_DIR = Path(__file__).resolve().parent
 VNX_ROOT = TESTS_DIR.parent
 SCRIPTS_DIR = VNX_ROOT / "scripts"
@@ -173,11 +175,10 @@ def test_find_receipts_by_pr_scopes_to_the_project(tmp_path):
     ] == [FOREIGN]
 
 
-def test_find_receipts_by_pr_default_is_this_projects(tmp_path):
+def test_find_receipts_by_pr_requires_a_project_id(tmp_path):
     _write_ledger(tmp_path, _colliding(OWN), _colliding(FOREIGN))
-    ledger = tmp_path / rq.LEDGER_NAME
-    # the function default matches the CLI default (ADR-007)
-    assert [r["project_id"] for r in rq.find_receipts_by_pr(ledger, "42")] == [OWN]
+    with pytest.raises(TypeError):
+        rq.find_receipts_by_pr(tmp_path / rq.LEDGER_NAME, "42")
 
 
 def test_lookup_without_project_id_counts_as_this_projects(tmp_path):
@@ -201,14 +202,12 @@ def test_by_pr_cli_accepts_project_id_and_filters(tmp_path, capsys):
     assert out["receipts"][0]["project_id"] == OWN
 
 
-def test_by_pr_cli_default_project_is_vnx_dev(tmp_path, capsys, monkeypatch):
+def test_by_pr_cli_without_a_project_refuses(tmp_path, capsys, monkeypatch):
     monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
     _write_ledger(tmp_path, _colliding(OWN), _colliding(FOREIGN))
     rc = rq.main(["by-pr", "42", "--state-dir", str(tmp_path), "--json"])
-    assert rc == 0
-    out = json.loads(capsys.readouterr().out)
-    assert out["project_id"] == rq.DEFAULT_PROJECT_ID
-    assert out["count"] == 1
+    assert rc == 2
+    assert "no project id" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------

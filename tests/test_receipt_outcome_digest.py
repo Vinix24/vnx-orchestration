@@ -76,6 +76,7 @@ def _digest(tmp_path: Path, *receipts: Dict[str, Any]) -> Dict[str, Any]:
     return rq.compute_digest(
         tmp_path / rq.LEDGER_NAME, window="24h", now=NOW,
         open_items_manager_module=_NoOIM(),
+        project_id="vnx-dev",
     )
 
 
@@ -227,14 +228,14 @@ def test_digest_survives_non_object_lines_and_out_of_range_epochs(tmp_path):
     good = [_a("d1", "failure"), _a("d1", "success", timestamp=10**20), _b("d1", "done", GOOD)]
     ledger.write_text("[1, 2]\n\"text\"\n" + "".join(json.dumps(r) + "\n" for r in good),
                       encoding="utf-8")
-    result = rq.compute_digest(ledger, window="24h", now=NOW, open_items_manager_module=_NoOIM())
+    result = rq.compute_digest(ledger, window="24h", now=NOW, open_items_manager_module=_NoOIM(), project_id="vnx-dev")
     assert _counts(result) == {"accept": 1, "investigate": 0, "reject": 0, "superseded": 0}
 
 
 def test_digest_cli_prints_per_dispatch_counts(tmp_path, capsys, monkeypatch):
     monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
     _digest(tmp_path, _a("d1", "failure"), _b("d1", "unknown", UNKNOWN))
-    rc = rq.main(["digest", "--state-dir", str(tmp_path), "--window", "36500d", "--json"])
+    rc = rq.main(["digest", "--project-id", "vnx-dev", "--state-dir", str(tmp_path), "--window", "36500d", "--json"])
     assert rc == 0
     out = json.loads(capsys.readouterr().out)
     assert out["verdict_counts"]["reject"] == 1
@@ -246,7 +247,7 @@ def test_digest_cli_prints_per_dispatch_counts(tmp_path, capsys, monkeypatch):
 def test_digest_cli_text_names_per_dispatch_and_project(tmp_path, capsys, monkeypatch):
     monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
     _digest(tmp_path, _a("d1", "success"), _b("d1", "done", GOOD))
-    rc = rq.main(["digest", "--state-dir", str(tmp_path), "--window", "36500d"])
+    rc = rq.main(["digest", "--project-id", "vnx-dev", "--state-dir", str(tmp_path), "--window", "36500d"])
     assert rc == 0
     out = capsys.readouterr().out
     assert "project=vnx-dev" in out
