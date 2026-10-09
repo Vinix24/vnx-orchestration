@@ -1112,3 +1112,53 @@ def test_h4_would_route_restricted_has_no_side_effects(world):
 def content_class_origin(metrics):
     return runner_module.content_class.classify_path(
         metrics.project_path or None, runner_module.content_class.load_boundary())
+
+
+# --- OI-2021: the last line before a parse or an origin read names the path -------------------
+
+def _last_line_at_each_call(monkeypatch, capsys):
+    """Record, at each transcript parse and each origin classification, the last printed line."""
+    printed, seen = [], []
+    real_parse = SessionParser.parse_file
+    real_classify = runner_module.content_class.classify_path
+
+    def last_line():
+        printed.extend(capsys.readouterr().out.splitlines())
+        return printed[-1] if printed else ""
+
+    def parse_spy(self, jsonl_path):
+        seen.append(("parse", f"step=parse {jsonl_path}", last_line()))
+        return real_parse(self, jsonl_path)
+
+    def classify_spy(path, boundary, *args, **kwargs):
+        seen.append(("origin", f"step=origin cwd={path}", last_line()))
+        return real_classify(path, boundary, *args, **kwargs)
+
+    monkeypatch.setattr(SessionParser, "parse_file", parse_spy)
+    monkeypatch.setattr(runner_module.content_class, "classify_path", classify_spy)
+    return seen
+
+
+def test_oi2021_the_last_line_before_each_parse_and_origin_read_names_the_path(
+        world, monkeypatch, capsys):
+    _restricted_and_open_sessions(world)
+    seen = _last_line_at_each_call(monkeypatch, capsys)
+    with Spies() as spies:
+        analyzer = ConversationAnalyzer(world["db"])
+        analyzer.connect()
+        try:
+            analyzer.run(dry_run=True)
+        finally:
+            analyzer.close()
+        dry_run = len(seen)
+        _run(world, deep_budget=0)
+        first_run = len(seen)
+        _run(world)
+
+    assert spies.sessions(spies.claude) == ["s-client"], "the backlog replay did not run"
+    kinds = [kind for kind, _, _ in seen]
+    assert kinds[:dry_run].count("parse") == 2
+    assert kinds[dry_run:first_run].count("parse") == 2
+    assert kinds[first_run:].count("parse") >= 1
+    for kind, expected, last in seen:
+        assert last.endswith(expected), (kind, expected, last)

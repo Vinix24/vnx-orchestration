@@ -25,16 +25,31 @@ restricted).
 
 from __future__ import annotations
 
+import codecs
 import json
+import logging
+import math
 import os
 import re
+import stat
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, FrozenSet, Iterable, List, Optional, Tuple
+from typing import Dict, FrozenSet, Iterable, List, Optional, Set, Tuple
+
+logger = logging.getLogger(__name__)
 
 BOUNDARY_ENV = "VNX_CONTENT_BOUNDARY_FILE"
 BOUNDARY_VERSION = 1
 PROJECT_MARKER = ".vnx-project-id"
+
+# Bounds on one marker read. The path comes from data (a transcript cwd, a dispatch), so the
+# read may land on a FIFO, a device or a file whose open never returns.
+MARKER_TIMEOUT_ENV = "VNX_MARKER_READ_TIMEOUT_SECONDS"
+MARKER_TIMEOUT_DEFAULT = 5.0
+MARKER_MAX_BYTES = 4096
+# Reader threads that timed out and are still blocked. At this many, no new read is started.
+MARKER_MAX_ABANDONED = 8
 
 CLIENT = "client"
 PERSONAL = "personal"
@@ -56,6 +71,8 @@ SRC_MARKER = "project_marker"
 SRC_REGISTRY = "registry"
 SRC_HOME = "home"
 SRC_NONE = "none"
+# A marker on the way up could not be read: the class is ``unknown`` and the walk stopped there.
+SRC_MARKER_UNREADABLE = "marker_unreadable"
 SRC_TEXT_PATH = "text_path"
 SRC_CANARY = "canary"
 
@@ -178,19 +195,157 @@ def _under(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
 
 
-def _marker_id(path: Path) -> Optional[str]:
-    """Id in the nearest ``.vnx-project-id`` walking up. Reads the file, never ``VNX_PROJECT_ID``."""
+@dataclass(frozen=True)
+class _MarkerRead:
+    """One bounded marker read: an id line, nothing to read here (both empty), or a refusal."""
+
+    line: str = ""
+    refusal: str = ""
+
+
+@dataclass(frozen=True)
+class _Marker:
+    """End of the walk up: the nearest id, no marker at all, or the directory that stopped it."""
+
+    project_id: Optional[str] = None
+    unreadable_dir: Optional[Path] = None
+    reason: str = ""
+
+
+class _Attempt:
+    """What a caller and its reader thread share. Guarded by ``_marker_lock``."""
+
+    __slots__ = ("outcome", "finished", "abandoned", "done")
+
+    def __init__(self) -> None:
+        self.outcome = _MarkerRead(refusal="reader failed")
+        self.finished = False
+        self.abandoned = False
+        self.done = threading.Event()
+
+
+_marker_lock = threading.Lock()
+# Directories whose marker read timed out, kept for the life of the process. One entry costs one
+# timeout to add, so the set grows by at most one path per timeout period.
+_stuck_marker_dirs: Set[str] = set()
+_abandoned_readers = 0
+
+
+def marker_timeout() -> float:
+    """Seconds one marker read may take, from ``VNX_MARKER_READ_TIMEOUT_SECONDS``.
+
+    Unset, unparseable, not finite or not above zero gives the default of 5 seconds.
+    """
+    try:
+        value = float(os.environ.get(MARKER_TIMEOUT_ENV, "").strip())
+    except ValueError:
+        return MARKER_TIMEOUT_DEFAULT
+    if not math.isfinite(value) or value <= 0:
+        return MARKER_TIMEOUT_DEFAULT
+    return min(value, threading.TIMEOUT_MAX)
+
+
+def _first_line(data: bytes) -> _MarkerRead:
+    """First line of what was read. Refuses bytes that are not UTF-8 and a line cut by the bound."""
+    full = len(data) >= MARKER_MAX_BYTES
+    try:
+        # A full buffer may end inside a multi-byte character; that tail is not an error.
+        text = codecs.getincrementaldecoder("utf-8")().decode(data, final=not full)
+    except UnicodeDecodeError:
+        return _MarkerRead(refusal="not UTF-8")
+    lines = text.splitlines()
+    if not lines:
+        return _MarkerRead()
+    if full and len(lines[0]) == len(text):
+        return _MarkerRead(refusal=f"first line does not end within {MARKER_MAX_BYTES} bytes")
+    return _MarkerRead(line=lines[0].strip())
+
+
+def _open_and_read(marker: Path) -> _MarkerRead:
+    """Open without blocking on a FIFO or device, refuse what is not a regular file, read once."""
+    try:
+        fd = os.open(marker, os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY)
+    except (FileNotFoundError, NotADirectoryError):
+        return _MarkerRead()
+    except (OSError, ValueError) as exc:
+        return _MarkerRead(refusal=f"open failed: {type(exc).__name__}")
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return _MarkerRead(refusal="not a regular file")
+        data = os.read(fd, MARKER_MAX_BYTES)
+    except OSError as exc:
+        return _MarkerRead(refusal=f"read failed: {type(exc).__name__}")
+    finally:
+        os.close(fd)
+    return _first_line(data)
+
+
+def _marker_reader(marker: Path, attempt: _Attempt) -> None:
+    """Thread body. An unexpected error keeps the "reader failed" refusal and still signs off."""
+    global _abandoned_readers
+    try:
+        attempt.outcome = _open_and_read(marker)
+    finally:
+        with _marker_lock:
+            attempt.finished = True
+            if attempt.abandoned:
+                _abandoned_readers -= 1
+        attempt.done.set()
+
+
+def _read_marker_line(directory: Path, timeout: float) -> _MarkerRead:
+    """First line of the marker in ``directory``, bounded in file type, size and time.
+
+    The open and the read run in a daemon thread, so a call that never returns costs
+    ``timeout`` seconds and not the process. A directory that timed out is remembered and
+    refused at once from then on. Its thread is abandoned, never killed; while
+    ``MARKER_MAX_ABANDONED`` of them are still blocked, every read is refused at once and no
+    thread is started. Reads resume when a blocked one returns. Only a missing marker
+    (``ENOENT``, ``ENOTDIR``) and a blank first line count as "no marker here"; every other
+    failure is a refusal, because a marker that may exist and cannot be read decides nothing.
+    """
+    global _abandoned_readers
+    key = str(directory)
+    with _marker_lock:
+        if key in _stuck_marker_dirs:
+            return _MarkerRead(refusal="timed out earlier in this process, not retried")
+        if _abandoned_readers >= MARKER_MAX_ABANDONED:
+            return _MarkerRead(
+                refusal=f"{_abandoned_readers} marker reads are still blocked, no new read started")
+    attempt = _Attempt()
+    thread = threading.Thread(target=_marker_reader, args=(directory / PROJECT_MARKER, attempt),
+                              daemon=True, name="vnx-marker-read")
+    try:
+        thread.start()
+    except RuntimeError:
+        return _MarkerRead(refusal="no reader thread could be started")
+    if attempt.done.wait(timeout):
+        return attempt.outcome
+    with _marker_lock:
+        if attempt.finished:
+            return attempt.outcome
+        attempt.abandoned = True
+        _abandoned_readers += 1
+        _stuck_marker_dirs.add(key)
+    return _MarkerRead(refusal=f"no answer within {timeout:g} seconds")
+
+
+def _marker_id(path: Path) -> _Marker:
+    """Nearest ``.vnx-project-id`` walking up. Reads the file, never ``VNX_PROJECT_ID``.
+
+    An unreadable marker ends the walk at its directory: the id of a parent says nothing about
+    a nearer marker that may name another project.
+    """
+    timeout = marker_timeout()
     current = path
     while True:
-        marker = current / PROJECT_MARKER
-        try:
-            first = marker.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            first = []
-        if first and first[0].strip():
-            return first[0].strip()
+        read = _read_marker_line(current, timeout)
+        if read.refusal:
+            return _Marker(unreadable_dir=current, reason=read.refusal)
+        if read.line:
+            return _Marker(project_id=read.line)
         if current.parent == current:
-            return None
+            return _Marker()
         current = current.parent
 
 
@@ -232,16 +387,38 @@ def _registry_ids(path: Path, registry_path: Optional[os.PathLike]) -> List[str]
 
 def classify_path(path: Optional[os.PathLike], boundary: Boundary,
                   registry_path: Optional[os.PathLike] = None) -> Origin:
-    """Class of the place work comes from. Compares path components, never string prefixes."""
+    """Class of the place work comes from. Compares path components, never string prefixes.
+
+    The personal and client roots are compared first: that reads no file and decides the class
+    on its own. The marker is read after that, bounded (``_read_marker_line``). Under a root it
+    only fills ``project_id``, and an unreadable marker leaves that ``None``. Outside the roots
+    an unreadable marker gives ``unknown`` with source ``marker_unreadable``; the walk stops
+    there, so the result is never ``fabric`` or ``own`` on the word of a parent directory.
+    Either way one WARNING names the directory.
+    """
     if path is None or not str(path).strip():
         return Origin(UNKNOWN, None, SRC_NONE)
     resolved = _real(path)
-    marker = _marker_id(resolved)
 
-    if any(_under(resolved, root) for root in boundary.personal_roots):
-        return Origin(PERSONAL, marker, SRC_PERSONAL_ROOT)
-    if any(_under(resolved, root) for root in boundary.client_roots):
-        return Origin(CLIENT, marker, SRC_CLIENT_ROOT)
+    root: Optional[Tuple[str, str]] = None
+    if any(_under(resolved, r) for r in boundary.personal_roots):
+        root = (PERSONAL, SRC_PERSONAL_ROOT)
+    elif any(_under(resolved, r) for r in boundary.client_roots):
+        root = (CLIENT, SRC_CLIENT_ROOT)
+
+    found = _marker_id(resolved)
+    marker = found.project_id
+    if root is not None:
+        if found.unreadable_dir is not None:
+            logger.warning("content_class: project marker in %s unreadable (%s); class stays %s "
+                           "from the root, project id left empty",
+                           found.unreadable_dir, found.reason, root[0])
+        return Origin(root[0], marker, root[1])
+    if found.unreadable_dir is not None:
+        logger.warning("content_class: project marker in %s unreadable (%s); classified %s (%s), "
+                       "no parent directory consulted",
+                       found.unreadable_dir, found.reason, UNKNOWN, SRC_MARKER_UNREADABLE)
+        return Origin(UNKNOWN, None, SRC_MARKER_UNREADABLE)
 
     if marker:
         if marker in boundary.client_project_ids:
