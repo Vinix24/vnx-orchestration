@@ -286,7 +286,7 @@ def _built_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, project_id: st
             )
     monkeypatch.setenv("VNX_PROJECT_ID", project_id)
     monkeypatch.setattr(bts, "_build_pr_queue_section", lambda _sd: {"open_prs": []})
-    monkeypatch.setattr(bts, "_init_and_check_db", lambda _sd: True)
+    monkeypatch.setattr(bts, "_init_and_check_db", lambda _sd, _skip=None: True)
     monkeypatch.setattr(bts, "_build_terminals", lambda _sd: {})
 
     real_health = bts._build_system_health
