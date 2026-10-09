@@ -29,6 +29,13 @@ from observability_tier import GOVERNANCE_MIN_TIERS
 # ``smart_router.ReviewGateConfigError`` for the callers that already use it.
 from dispatch_spec import REGISTERED_GATE_NAMES, ReviewGateConfigError, retired_gate_hint
 
+# The billing table ranks the review seat (_primary_review_gate). It comes from
+# gate_billing_table, a standard-library-only module, and never through
+# gate_recorder: gate_recorder needs scripts/ on sys.path (governance_receipts ->
+# append_receipt) and the door runs with scripts/lib alone, so reading the table
+# through it refused every gate-silent spec as gate-config-unreadable (OI-2022).
+from gate_billing_table import GATE_BILLING_SUBSCRIPTION, UnknownGateProvider, gate_billing
+
 _RECOMMENDATIONS_PATH = Path(__file__).parent / "providers" / "routing_recommendations.yaml"
 
 
@@ -806,20 +813,6 @@ def _primary_review_gate() -> str:
             "The stack must name a real review gate, not a private label — "
             "refusing to guess one."
         )
-
-    try:
-        from gate_recorder import (  # lazy: gate_recorder is heavy
-            GATE_BILLING_SUBSCRIPTION,
-            UnknownGateProvider,
-            gate_billing,
-        )
-    except Exception as exc:  # pragma: no cover - import failure is environmental
-        raise ReviewGateConfigError(
-            f"{DEFAULT_REVIEW_STACK_KEY}={raw!r} cannot be ranked: the gate billing "
-            f"table ({type(exc).__name__}: {exc}) is unavailable, so a subscription "
-            "reviewer cannot be told from an API-credit one. Refusing to pick a seat "
-            "by stack order alone."
-        ) from exc
 
     try:
         return max(

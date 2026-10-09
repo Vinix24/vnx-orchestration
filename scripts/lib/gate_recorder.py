@@ -13,10 +13,24 @@ import shutil
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 
 from atomic_io import atomic_write_json, slot_lock
 from failure_classification import GATE_QUOTA_REFUSAL_REASON
+# The billing table is owned by gate_billing_table, not by this module: the door
+# reads it with only scripts/lib on sys.path, and this module's imports
+# (governance_receipts -> append_receipt) need scripts/ as well (OI-2022). The
+# names are imported here so every existing `from gate_recorder import ...`
+# reads the same objects, never a copy.
+from gate_billing_table import (
+    GATE_BILLING,
+    GATE_BILLING_METERED,
+    GATE_BILLING_NONE,
+    GATE_BILLING_SUBSCRIPTION,
+    UnknownGateProvider,
+    gate_billing,
+    metered_before_subscription,
+)
 from governance_emit import _classify_lane_log_text  # the fabric's single quota-marker list — never a second scan
 from governance_receipts import emit_governance_receipt, utc_now_iso
 import gate_depth
@@ -93,70 +107,6 @@ _GATE_BINARIES: Dict[str, str] = {
     if kind == GATE_PROVIDER_PATH_BINARY
 }
 
-# How each gate's provider is BILLED. The operator decision of 2026-09-26: a
-# review gate chooses a subscription reviewer (codex, kimi) first and an
-# API-credit reviewer (glm, deepseek) only when both subscription seats are
-# unavailable. The order of a review stack and of the takeover chain is that
-# decision written down, so "which side of the line is this gate" needs exactly
-# one answer, kept here next to the registry that names the gates.
-#
-# The vocabulary is the one ``dispatch_plan.ExecutionPlan.billing`` already
-# uses for a dispatch lane ("subscription" / "provider_metered"), so a gate and
-# the lane that carries it cannot describe one provider in two different words.
-# ``none`` is a gate that drives ``gh`` and no model at all.
-GATE_BILLING_SUBSCRIPTION = "subscription"
-GATE_BILLING_METERED = "provider_metered"
-GATE_BILLING_NONE = "none"
-
-GATE_BILLING: Dict[str, str] = {
-    "codex_gate": GATE_BILLING_SUBSCRIPTION,   # codex CLI, ChatGPT subscription
-    "kimi_gate": GATE_BILLING_SUBSCRIPTION,    # kimi CLI OAuth (kimi-via-cli-only)
-    # gemini CLI on OAuth. VNX_GEMINI_ROUTING=vertex is an explicit opt-in that
-    # bills the API; the default routing is oauth, so the default is a subscription.
-    "gemini_review": GATE_BILLING_SUBSCRIPTION,
-    "glm_gate": GATE_BILLING_METERED,          # OpenRouter credit (zai-via-openrouter-only)
-    "deepseek_gate": GATE_BILLING_METERED,     # DeepSeek API credit
-    "claude_github_optional": GATE_BILLING_NONE,
-    "ci_gate": GATE_BILLING_NONE,
-    "wiring_gate": GATE_BILLING_NONE,
-}
-
-
-def gate_billing(gate: str) -> str:
-    """Billing class of a registered gate.
-
-    An unregistered gate raises :class:`UnknownGateProvider` rather than
-    returning a guess: a gate nobody classified is a gate whose position in a
-    stack nobody can judge, and "assume subscription" is the answer that would
-    let an API-credit reviewer slip in unnoticed.
-    """
-    billing = GATE_BILLING.get(gate)
-    if billing is None:
-        raise UnknownGateProvider(
-            f"{gate} has no billing class in gate_recorder.GATE_BILLING — classify it "
-            f"next to its GATE_PROVIDERS entry before placing it in a review stack"
-        )
-    return billing
-
-
-def metered_before_subscription(gates: Iterable[str]) -> Optional[Tuple[str, str]]:
-    """First ``(metered_gate, subscription_gate)`` pair where an API-credit gate
-    stands EARLIER in ``gates`` than a subscription gate, else ``None``.
-
-    Read as an ordered preference list (a review stack, a takeover chain): the
-    first pair returned is the violation of "subscription reviewers first".
-    Gates that drive no model (``none``) neither violate nor satisfy the order.
-    """
-    first_metered: Optional[str] = None
-    for gate in gates:
-        billing = gate_billing(gate)
-        if billing == GATE_BILLING_METERED and first_metered is None:
-            first_metered = gate
-        elif billing == GATE_BILLING_SUBSCRIPTION and first_metered is not None:
-            return first_metered, gate
-    return None
-
-
 def resolve_gate_provider(gate: str) -> Optional[Tuple[str, str]]:
     """Return ``(kind, name)`` for a gate, or ``None`` when unregistered.
 
@@ -224,19 +174,6 @@ def gate_dispatch_identity_error(gate: str, dispatch_id: Optional[str]) -> Optio
         "never the builder's dispatch-id — refusing to book the builder's "
         "report as this gate's verdict (OI-1725)"
     )
-
-
-class UnknownGateProvider(ValueError):
-    """A gate key was asked for availability and is not registered (or its
-    provider kind is unknown).
-
-    Raised where a silent skip would do the most damage: an operator
-    configures a review stack with a gate name
-    (``VNX_OVERRIDE_DEFAULT_REVIEW_STACK=glm_gate,claude_github_optional``)
-    and a typo books the seat as ``not_executable`` while every other gate
-    runs — the request fails without ever naming the key that was wrong.
-    The name is carried in the message, so the error is loud and actionable.
-    """
 
 
 def gate_is_available(gate: str, *, repo_root: Optional[Path] = None) -> bool:
