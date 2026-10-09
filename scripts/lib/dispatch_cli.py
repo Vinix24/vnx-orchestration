@@ -25,6 +25,7 @@ from typing import Optional, Set
 _LIB_DIR = Path(__file__).resolve().parent
 if str(_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_LIB_DIR))
+_SCRIPTS_DIR = str(_LIB_DIR.parent)
 
 logger = logging.getLogger(__name__)
 
@@ -1242,6 +1243,15 @@ def _record_bookkeeping_failure(
         )
 
     try:
+        # append_receipt lives in scripts/, and the door is started with only
+        # scripts/lib on sys.path (bin/vnx dispatch), so without this the import
+        # failed and the receipt-ledger copy of this fact was never written
+        # (OI-2022, same guard as dispatch_govern.ensure_receipt). Appended, not
+        # inserted at 0: seven module stems exist in both scripts/ and
+        # scripts/lib (orphan_sweep, cost_tracker, ...), and the door's own
+        # scripts/lib copies must keep resolving first for the rest of this process.
+        if _SCRIPTS_DIR not in sys.path:
+            sys.path.append(_SCRIPTS_DIR)
         from append_receipt import append_receipt_payload  # noqa: PLC0415
         append_receipt_payload(
             {

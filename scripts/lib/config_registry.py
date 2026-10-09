@@ -121,7 +121,7 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "(API credit) are not standing seats: they only read a PR when both subscription "
         "seats are unavailable, which is what VNX_REVIEW_GATE_TAKEOVER_CHAIN does. Do not "
         "put an API-credit gate before a subscription gate here or in the chain "
-        "(gate_recorder.GATE_BILLING classifies every gate; a guard test pins both). "
+        "(gate_billing_table.GATE_BILLING classifies every gate; a guard test pins both). "
         "History: the default was gemini_review,codex_gate,claude_github_optional until "
         "20260914, when gemini_review (binary never on PATH) and claude_github_optional "
         "(never configured) were dropped and glm_gate was added as a second standing seat "
