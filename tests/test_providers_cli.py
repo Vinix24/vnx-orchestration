@@ -384,6 +384,29 @@ def test_list_shows_overrides_from_env_and_launchd(home, capsys, monkeypatch):
     assert "kimi        effective OFF (override" in out
 
 
+def test_list_reports_a_malformed_plist_and_keeps_the_valid_one(home, tmp_path):
+    agents = home / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True)
+    (agents / "com.vnx.broken.plist").write_bytes(
+        b'<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>Label</key>')
+    with (agents / "com.vnx.valid.plist").open("wb") as fh:
+        plistlib.dump({"Label": "com.vnx.valid",
+                       "EnvironmentVariables": {"VNX_OVERRIDE_PROVIDER_GLM": "off"}}, fh)
+
+    listed = run_cli("list", cwd=tmp_path)
+    assert listed.returncode == 0, listed.stderr
+    assert "launchd com.vnx.broken.plist: unreadable: " in listed.stdout
+    assert ("launchd com.vnx.valid.plist: VNX_OVERRIDE_PROVIDER_GLM=off "
+            "(switches glm off for that process)") in listed.stdout
+
+    as_json = run_cli("list", "--json", cwd=tmp_path)
+    assert as_json.returncode == 0, as_json.stderr
+    launchd = json.loads(as_json.stdout)["overrides"]["launchd"]
+    assert launchd["com.vnx.broken.plist"]["error"].startswith("unreadable: ")
+    assert launchd["com.vnx.valid.plist"]["VNX_OVERRIDE_PROVIDER_GLM"]["meaning"] == (
+        "switches glm off for that process")
+
+
 def _engine(root: Path, families: List[str] = None) -> Path:
     (root / "scripts" / "lib").mkdir(parents=True)
     if families is not None:

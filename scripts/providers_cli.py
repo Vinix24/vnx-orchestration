@@ -26,6 +26,7 @@ import plistlib
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from xml.parsers.expat import ExpatError
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 for _path in (SCRIPT_DIR, SCRIPT_DIR / "lib"):
@@ -186,7 +187,8 @@ def override_rows() -> Dict[str, Any]:
         try:
             with plist.open("rb") as fh:
                 data = plistlib.load(fh)
-        except (OSError, plistlib.InvalidFileException, ValueError) as exc:
+        except (OSError, plistlib.InvalidFileException, ValueError, ExpatError) as exc:
+            # Malformed XML raises ExpatError, which is none of the others.
             launchd[plist.name] = {"error": f"unreadable: {exc}"}
             continue
         variables = data.get("EnvironmentVariables") if isinstance(data, dict) else None
