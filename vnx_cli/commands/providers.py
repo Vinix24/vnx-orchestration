@@ -54,4 +54,8 @@ def vnx_providers(args) -> int:
             file=sys.stderr,
         )
         return _EXIT_WRITE_FAILED
-    return subprocess.run([sys.executable, str(script), *getattr(args, "providers_args", [])]).returncode
+    try:
+        return subprocess.run([sys.executable, str(script), *getattr(args, "providers_args", [])]).returncode
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"vnx providers: could not start providers_cli.py: {exc}", file=sys.stderr)
+        return _EXIT_WRITE_FAILED

@@ -593,6 +593,36 @@ def test_pip_entrance_passes_every_argument_through_verbatim(args, home, monkeyp
     assert received == [[sys.executable, str(CLI), *args]]
 
 
+@pytest.mark.parametrize("error", [
+    OSError("no such interpreter"),
+    subprocess.SubprocessError("launch failed"),
+])
+def test_pip_entrance_returns_failure_code_when_the_launch_raises(error, home, monkeypatch, capsys):
+    """A launch that raises is a defined failure: one stderr line and exit 1, never a traceback."""
+    from vnx_cli.commands import providers as pip_providers
+
+    def boom(argv, **kwargs):
+        raise error
+
+    monkeypatch.setattr(pip_providers.subprocess, "run", boom)
+    args = type("Args", (), {"providers_args": ["list"]})()
+    assert pip_providers.vnx_providers(args) == 1
+    err = capsys.readouterr().err
+    assert err.strip() == f"vnx providers: could not start providers_cli.py: {error}"
+
+
+def test_pip_entrance_does_not_swallow_other_launch_errors(home, monkeypatch):
+    """Only OSError and SubprocessError are mapped; anything wider still surfaces."""
+    from vnx_cli.commands import providers as pip_providers
+
+    def boom(argv, **kwargs):
+        raise ValueError("not a launch failure")
+
+    monkeypatch.setattr(pip_providers.subprocess, "run", boom)
+    with pytest.raises(ValueError):
+        pip_providers.vnx_providers(type("Args", (), {"providers_args": []})())
+
+
 def test_pip_entrance_help_is_the_script_help(home, tmp_path):
     for flag in ("--help", "-h"):
         result = _pip(flag, cwd=tmp_path)
