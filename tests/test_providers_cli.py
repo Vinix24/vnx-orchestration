@@ -659,7 +659,19 @@ DENIED = [
     "python3 scripts/providers_cli.py list",
     "python3 /abs/scripts/providers_cli.py check deepseek",
 ]
-READ_ONLY = ["vnx providers", "vnx providers list --json", "vnx providers check deepseek"]
+DENIED += [
+    "python3 scripts/providers_cli.py off kimi",
+    "bin/vnx providers off kimi",
+    "vnx providers repair --empty",
+]
+READ_ONLY = [
+    "vnx providers",
+    "vnx providers list --json",
+    "vnx providers check deepseek",
+    "python3 -m pytest tests/test_providers_cli.py -q",
+    "pytest tests/test_providers_cli.py::test_x",
+    "cat scripts/lib/provider_switch.py",
+]
 
 
 def test_template_denies_the_write_verbs_for_every_profile():
