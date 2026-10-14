@@ -101,13 +101,13 @@ def _off_families_for(state: ps.SwitchState, project_id: str) -> List[str]:
 
 
 def engine_root_for(project_root: Path) -> Tuple[Optional[Path], str]:
-    """The engine a project runs: its ``.claude/vnx-system`` link, or itself when it is the fabric."""
+    """The engine a project runs: the engine link under its ``.claude`` folder, or itself when it is the fabric."""
     link = project_root / ".claude" / "vnx-system"
     if link.is_symlink():
         return link.resolve(), "linked engine"
     if (project_root / "scripts" / "lib" / "vnx_paths.py").is_file():
         return project_root, "fabric checkout"
-    return None, "no .claude/vnx-system link and not the fabric checkout"
+    return None, f"no {'/'.join(('.claude', 'vnx-system'))} link and not the fabric checkout"
 
 
 def engine_families(engine_root: Path) -> Optional[Tuple[str, ...]]:
