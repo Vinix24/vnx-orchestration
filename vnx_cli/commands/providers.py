@@ -33,6 +33,7 @@ def register_providers_subparser(subparsers) -> None:
         prefix_chars="\x00",
     )
     parser.add_argument("providers_args", nargs=argparse.REMAINDER)
+    parser.set_defaults(func=vnx_providers)
 
 
 def resolve_providers_script(root: Path | None = None) -> Path:

@@ -309,19 +309,20 @@ def _entry_text(entry: Optional[Dict[str, Any]]) -> str:
     return ("on" if entry["enabled"] else "OFF") + (f" {provenance}" if provenance else "")
 
 
-def render_text(report: Dict[str, Any]) -> str:
-    out: List[str] = []
+def _render_header(report: Dict[str, Any]) -> List[str]:
     if not report["readable"]:
-        out.append(f"Provider switch: UNREADABLE {report['switch_file']}")
-        out.append(f"  {report['error']}")
-        out.append("  every switchable family is refused until `vnx providers repair`")
+        out = [f"Provider switch: UNREADABLE {report['switch_file']}", f"  {report['error']}",
+               "  every switchable family is refused until `vnx providers repair`"]
     elif not report["exists"]:
-        out.append(f"Provider switch: {report['switch_file']} (missing: no switches, everything on)")
+        out = [f"Provider switch: {report['switch_file']} (missing: no switches, everything on)"]
     else:
-        out.append(f"Provider switch: {report['switch_file']} (version {report['version']})")
+        out = [f"Provider switch: {report['switch_file']} (version {report['version']})"]
     out.append(f"Current project: {report['project'] or 'none (global section only)'}")
-    out.append("")
-    out.append("Families:")
+    return out
+
+
+def _render_families(report: Dict[str, Any]) -> List[str]:
+    out = ["Families:"]
     for row in report["families"]:
         eff = row["effective"]
         state = "on " if eff["allowed"] else "OFF"
@@ -337,21 +338,26 @@ def render_text(report: Dict[str, Any]) -> str:
             out.append(f"  {'':<11} project {pid}: {_entry_text(entry)}")
     out.append("Never switchable:")
     out.extend(f"  {name:<11} {reason}" for name, reason in report["non_switchable"].items())
-    out.append("")
+    return out
+
+
+def _render_enforcement(report: Dict[str, Any]) -> List[str]:
     enf = report["enforcement"]
-    pending_total = sum(len(v) for v in enf["pending"].values())
     if enf["enforced"]:
-        out.append(f"Enforcement: live, all {enf['launch_functions']} launch functions call provider_switch.require")
-    else:
-        out.append(f"Enforcement: NOT enforced yet. {pending_total} of {enf['launch_functions']} launch "
-                   "functions do not call provider_switch.require; the write verbs refuse until they do")
-        for deliverable, entries in enf["pending"].items():
-            if entries:
-                out.append(f"  pending {deliverable} ({len(entries)}):")
-                out.extend(f"    {e}" for e in entries)
-    out.append("")
+        return [f"Enforcement: live, all {enf['launch_functions']} launch functions call provider_switch.require"]
+    pending_total = sum(len(v) for v in enf["pending"].values())
+    out = [f"Enforcement: NOT enforced yet. {pending_total} of {enf['launch_functions']} launch "
+           "functions do not call provider_switch.require; the write verbs refuse until they do"]
+    for deliverable, entries in enf["pending"].items():
+        if entries:
+            out.append(f"  pending {deliverable} ({len(entries)}):")
+            out.extend(f"    {e}" for e in entries)
+    return out
+
+
+def _render_projects(report: Dict[str, Any]) -> List[str]:
     projects = report["projects"]
-    out.append(f"Projects ({projects['registry']}):")
+    out = [f"Projects ({projects['registry']}):"]
     if projects["error"]:
         out.append(f"  {projects['error']}")
     for row in projects["projects"]:
@@ -363,8 +369,11 @@ def render_text(report: Dict[str, Any]) -> str:
         for family in row["off_families_unknown_to_engine"]:
             out.append(f"  {'':<18} WARNING: {family} is off but this engine does not know the family: it keeps calling it")
         out.append(f"  {'':<18} {row['application_code']}")
-    out.append("")
-    out.append("Overrides (VNX_OVERRIDE_PROVIDER_*):")
+    return out
+
+
+def _render_overrides(report: Dict[str, Any]) -> List[str]:
+    out = ["Overrides (VNX_OVERRIDE_PROVIDER_*):"]
     env = report["overrides"]["environment"]
     launchd = report["overrides"]["launchd"]
     if not env and not launchd:
@@ -377,9 +386,14 @@ def render_text(report: Dict[str, Any]) -> str:
             continue
         for name, item in items.items():
             out.append(f"  launchd {plist}: {name}={item['value']} ({item['meaning']})")
-    out.append("")
-    out.extend(_consequence_lines(report["consequences"]))
-    return "\n".join(out)
+    return out
+
+
+def render_text(report: Dict[str, Any]) -> str:
+    sections = (_render_header(report), _render_families(report), _render_enforcement(report),
+                _render_projects(report), _render_overrides(report),
+                _consequence_lines(report["consequences"]))
+    return "\n\n".join("\n".join(section) for section in sections)
 
 
 def _consequence_lines(lines: List[str]) -> List[str]:

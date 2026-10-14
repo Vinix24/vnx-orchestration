@@ -1627,10 +1627,6 @@ def _dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
         from vnx_cli.commands.worktree import vnx_worktree_release
         sys.exit(vnx_worktree_release(args))
 
-    elif args.command == "providers":
-        from vnx_cli.commands.providers import vnx_providers
-        sys.exit(vnx_providers(args))
-
     else:
         parser.print_help()
         sys.exit(0)
@@ -1680,6 +1676,10 @@ def main() -> None:
     _register_providers_subparser(subparsers)
 
     args = parser.parse_args()
+    # A command module that binds its own handler (set_defaults(func=...), as pool.py does
+    # for its verbs) runs it directly instead of growing the elif chain below.
+    if getattr(args, "func", None) is not None:
+        sys.exit(args.func(args))
     _dispatch_command(args, parser)
 
 
