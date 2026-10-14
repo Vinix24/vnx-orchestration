@@ -2,7 +2,8 @@
 
 Every test runs with HOME and VNX_PROVIDER_SWITCH_FILE inside tmp_path and a tmp project
 registry: the operator's real ~/.vnx (switch file, audit log, lock, quarantine, projects.json)
-and ~/Library/LaunchAgents are never read or written.
+and ~/Library/LaunchAgents are never read or written. The tmp HOME also carries no ambient
+VNX_OVERRIDE_* variable: a test that needs one sets it itself.
 """
 
 from __future__ import annotations
@@ -31,6 +32,16 @@ CONFIG_KEYS = ("VNX_REVIEW_GATE_TAKEOVER_CHAIN", "VNX_TAGGER_PROVIDER", "VNX_SCO
                "VNX_TAGGER_ENABLED", "VNX_SCOUT_PREPASS")
 
 
+def strip_ambient_overrides(monkeypatch) -> None:
+    """Remove every ambient VNX_OVERRIDE_* variable, not only the provider brakes.
+
+    ``config_registry.get`` returns ``VNX_OVERRIDE_<key>`` before anything else, so an override
+    left in the shell (even an empty one) changes what the consequence lines read.
+    """
+    for key in [k for k in os.environ if k.startswith("VNX_OVERRIDE_")]:
+        monkeypatch.delenv(key)
+
+
 @pytest.fixture
 def home(tmp_path, monkeypatch) -> Path:
     """A tmp HOME holding the switch file, its audit log and the project registry."""
@@ -41,6 +52,7 @@ def home(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("VNX_PROJECT_ID", PROJECT)
     for key in CONFIG_KEYS:
         monkeypatch.delenv(key, raising=False)
+    strip_ambient_overrides(monkeypatch)
     outside = tmp_path / "cwd"
     outside.mkdir()
     monkeypatch.chdir(outside)

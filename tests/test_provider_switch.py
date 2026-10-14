@@ -28,8 +28,16 @@ import provider_switch as ps  # noqa: E402
 FAMILIES = ps.SWITCHABLE_FAMILIES
 
 
+def strip_ambient_overrides(monkeypatch) -> None:
+    """Remove every ambient VNX_OVERRIDE_* variable, not only the provider brakes conftest
+    strips: a test that needs one sets it itself, after the fixture."""
+    for key in [k for k in os.environ if k.startswith("VNX_OVERRIDE_")]:
+        monkeypatch.delenv(key)
+
+
 @pytest.fixture
-def switch_file() -> Path:
+def switch_file(monkeypatch) -> Path:
+    strip_ambient_overrides(monkeypatch)
     path = ps.switch_file_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
@@ -51,6 +59,7 @@ def writable(monkeypatch, tmp_path):
         monkeypatch.setattr(ps, name, ())
     for marker in ps.DISPATCH_MARKER_ENV:
         monkeypatch.delenv(marker, raising=False)
+    strip_ambient_overrides(monkeypatch)
     outside = tmp_path / "outside-any-repo"
     outside.mkdir()
     monkeypatch.chdir(outside)
