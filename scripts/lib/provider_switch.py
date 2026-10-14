@@ -30,11 +30,12 @@ import re
 import shutil
 import subprocess
 import sys
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
 from urllib.parse import urlsplit
 
 _LIB = str(Path(__file__).resolve().parent)
@@ -707,24 +708,73 @@ def _write_document(path: Path, document: Dict[str, Any]) -> None:
     atomic_write_text(path, json.dumps(document, indent=2, ensure_ascii=False) + "\n")
 
 
-def _append_audit(path: Path, *, op: str, scope: str, family: Optional[str], old: Any, new: Any,
-                  reason: str, actor: str) -> None:
+OP_ABORT = "abort"
+
+
+def _audit_header(op: str, actor: str) -> Dict[str, Any]:
+    """The fields every audit record carries, starting with its unique ``id``."""
     ppid = os.getppid()
     try:
         cwd = os.getcwd()
     except OSError as exc:
         cwd = f"<unavailable: {exc}>"
-    line = {
-        "ts": _now(), "op": op, "actor": actor, "cwd": cwd, "pid": os.getpid(), "ppid": ppid,
-        "parent_cmd": _parent_command(ppid), "argv": list(sys.argv),
-        "scope": scope, "family": family, "old": old, "new": new, "reason": reason,
+    return {
+        "id": uuid.uuid4().hex, "ts": _now(), "op": op, "actor": actor, "cwd": cwd,
+        "pid": os.getpid(), "ppid": ppid, "parent_cmd": _parent_command(ppid), "argv": list(sys.argv),
     }
+
+
+def _append_audit_record(path: Path, record: Dict[str, Any]) -> None:
     audit = audit_log_path(path)
     audit.parent.mkdir(parents=True, exist_ok=True)
     with audit.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(line, ensure_ascii=False) + "\n")
+        fh.write(json.dumps(record, ensure_ascii=False) + "\n")
         fh.flush()
         os.fsync(fh.fileno())
+
+
+def _append_audit(path: Path, *, op: str, scope: str, family: Optional[str], old: Any, new: Any,
+                  reason: str, actor: str) -> str:
+    """Append one change record and return its id."""
+    record = {**_audit_header(op, actor),
+              "scope": scope, "family": family, "old": old, "new": new, "reason": reason}
+    _append_audit_record(path, record)
+    return record["id"]
+
+
+def _append_abort(path: Path, ref: str, error: BaseException, actor: str) -> Optional[str]:
+    """Append the ``abort`` record for the change record ``ref``.
+
+    Returns None when it landed, else why it could not be appended.
+    """
+    try:
+        _append_audit_record(path, {**_audit_header(OP_ABORT, actor), "ref": ref,
+                                    "error": f"{type(error).__name__}: {error}"})
+    except Exception as exc:  # the caller re-raises the original error and names the unconfirmed line
+        logger.error("provider_switch: cannot append the abort for audit record %s: %s", ref, exc)
+        return f"{type(exc).__name__}: {exc}"
+    return None
+
+
+def _replace_after_audit(path: Path, document: Dict[str, Any], audit_id: str, actor: str) -> None:
+    """Replace the switch file with the change the audit record ``audit_id`` already holds.
+
+    The log stays append-only and ledger-first. When the replace raises, an ``abort`` record for
+    ``audit_id`` follows it, so :func:`replay_audit` never replays a change that did not land, and
+    the original error is re-raised with ``aborted_audit_id`` set. When the abort cannot be
+    appended either, the original error is re-raised with ``unconfirmed_audit_id`` set (and
+    ``abort_error``): the log may then hold that one unconfirmed line.
+    """
+    try:
+        _write_document(path, document)
+    except BaseException as exc:
+        abort_error = _append_abort(path, audit_id, exc, actor)
+        if abort_error is None:
+            exc.aborted_audit_id = audit_id
+        else:
+            exc.unconfirmed_audit_id = audit_id
+            exc.abort_error = abort_error
+        raise
 
 
 def _assert_write_allowed() -> None:
@@ -748,7 +798,8 @@ def set_switch(family: str, enabled: bool, *, scope: str, actor: str, reason: st
     """Switch ``family`` on or off, globally (``scope="global"``) or for one project.
 
     Locks the sidecar lock, re-reads the file (refusing an unreadable one), preserves unknown
-    families and fields verbatim, appends the audit line, then replaces the file atomically.
+    families and fields verbatim, appends the audit line, then replaces the file atomically. A
+    failed replace is marked in the log: see :func:`_replace_after_audit`.
     """
     name = check_switchable(family)
     target = SCOPE_GLOBAL if scope == SCOPE_GLOBAL else check_project_id(scope)
@@ -767,9 +818,9 @@ def set_switch(family: str, enabled: bool, *, scope: str, actor: str, reason: st
         new = dict(old) if isinstance(old, dict) else {}
         new.update({"enabled": enabled, "changed_at": _now(), "changed_by": actor, "reason": reason})
         section[name] = new
-        _append_audit(path, op="set", scope=target, family=name, old=old, new=new,
-                      reason=reason, actor=actor)
-        _write_document(path, document)
+        audit_id = _append_audit(path, op="set", scope=target, family=name, old=old, new=new,
+                                 reason=reason, actor=actor)
+        _replace_after_audit(path, document, audit_id, actor)
     return WriteResult(changed=True, scope=target, family=name, old=old, new=new, path=path)
 
 
@@ -790,26 +841,21 @@ def clear_project_override(family: str, project_id: str, *, actor: str, reason: 
         old = copy.deepcopy(section.pop(name))
         if not section:
             document["projects"].pop(pid, None)
-        _append_audit(path, op="clear", scope=pid, family=name, old=old, new=None,
-                      reason=reason, actor=actor)
-        _write_document(path, document)
+        audit_id = _append_audit(path, op="clear", scope=pid, family=name, old=old, new=None,
+                                 reason=reason, actor=actor)
+        _replace_after_audit(path, document, audit_id, actor)
     return WriteResult(changed=True, scope=pid, family=name, old=old, new=None, path=path)
 
 
-def replay_audit(audit: Optional[Path] = None) -> Dict[str, Any]:
-    """Rebuild the switch document by replaying the audit log in order.
-
-    Raises :class:`AuditLogUnreadable` when the log is missing, a line is not a JSON object,
-    an op is unknown, or the result does not pass the version policy.
-    """
-    log_path = audit or audit_log_path()
+def _read_audit_records(log_path: Path) -> List[Tuple[int, Dict[str, Any]]]:
+    """Every non-blank line of the audit log as ``(lineno, record)``."""
     try:
         text = log_path.read_text(encoding="utf-8")
     except FileNotFoundError as exc:
         raise AuditLogUnreadable(f"the audit log {log_path} does not exist") from exc
     except (OSError, UnicodeDecodeError) as exc:
         raise AuditLogUnreadable(f"cannot read the audit log {log_path}: {exc}") from exc
-    document = _empty_document()
+    records: List[Tuple[int, Dict[str, Any]]] = []
     for lineno, raw in enumerate(text.splitlines(), 1):
         if not raw.strip():
             continue
@@ -819,19 +865,73 @@ def replay_audit(audit: Optional[Path] = None) -> Dict[str, Any]:
             raise AuditLogUnreadable(f"{log_path} line {lineno} is not valid JSON: {exc}") from exc
         if not isinstance(record, dict):
             raise AuditLogUnreadable(f"{log_path} line {lineno} is not an object")
-        op, scope, name, new = record.get("op"), record.get("scope"), record.get("family"), record.get("new")
-        if op == "set" and isinstance(scope, str) and isinstance(name, str) and isinstance(new, dict):
-            _section(document, scope, create=True)[name] = copy.deepcopy(new)
-        elif op == "clear" and isinstance(scope, str) and isinstance(name, str):
-            section = _section(document, scope, create=False)
-            if isinstance(section, dict):
-                section.pop(name, None)
-                if not section:
-                    document["projects"].pop(scope, None)
-        elif op == "repair" and isinstance(new, dict):
-            document = copy.deepcopy(new)
-        else:
-            raise AuditLogUnreadable(f"{log_path} line {lineno}: unrecognised record (op={op!r})")
+        records.append((lineno, record))
+    return records
+
+
+def _aborted_ids(log_path: Path, records: List[Tuple[int, Dict[str, Any]]]) -> Set[str]:
+    """The ids of the change records a later ``abort`` cancels.
+
+    A record without ``id`` (written before ids existed) is accepted. An ``id`` that is not a
+    string or repeats an earlier one, and an ``abort`` whose ``ref`` names no earlier change
+    record, make the log unreadable.
+    """
+    seen: Set[str] = set()
+    changes: Set[str] = set()
+    aborted: Set[str] = set()
+    for lineno, record in records:
+        rid = record.get("id")
+        if rid is not None:
+            if not isinstance(rid, str) or rid in seen:
+                raise AuditLogUnreadable(f"{log_path} line {lineno}: id {rid!r} is not a unique string")
+            seen.add(rid)
+        if record.get("op") != OP_ABORT:
+            if rid is not None:
+                changes.add(rid)
+            continue
+        ref = record.get("ref")
+        if not isinstance(ref, str) or ref not in changes:
+            raise AuditLogUnreadable(
+                f"{log_path} line {lineno}: unrecognised record (abort of ref={ref!r}, which no earlier record has)"
+            )
+        aborted.add(ref)
+    return aborted
+
+
+def _apply_audit_record(document: Dict[str, Any], record: Dict[str, Any], log_path: Path,
+                        lineno: int) -> Dict[str, Any]:
+    op, scope, name, new = record.get("op"), record.get("scope"), record.get("family"), record.get("new")
+    if op == "set" and isinstance(scope, str) and isinstance(name, str) and isinstance(new, dict):
+        _section(document, scope, create=True)[name] = copy.deepcopy(new)
+    elif op == "clear" and isinstance(scope, str) and isinstance(name, str):
+        section = _section(document, scope, create=False)
+        if isinstance(section, dict):
+            section.pop(name, None)
+            if not section:
+                document["projects"].pop(scope, None)
+    elif op == "repair" and isinstance(new, dict):
+        document = copy.deepcopy(new)
+    else:
+        raise AuditLogUnreadable(f"{log_path} line {lineno}: unrecognised record (op={op!r})")
+    return document
+
+
+def replay_audit(audit: Optional[Path] = None) -> Dict[str, Any]:
+    """Rebuild the switch document by replaying the audit log in order.
+
+    Skips every change record that a later ``abort`` references (a write that never landed).
+    Raises :class:`AuditLogUnreadable` when the log is missing, a line is not a JSON object,
+    an op is unknown, an ``abort`` references no earlier change record, an id repeats, or the
+    result does not pass the version policy.
+    """
+    log_path = audit or audit_log_path()
+    records = _read_audit_records(log_path)
+    aborted = _aborted_ids(log_path, records)
+    document = _empty_document()
+    for lineno, record in records:
+        if record.get("op") == OP_ABORT or record.get("id") in aborted:
+            continue
+        document = _apply_audit_record(document, record, log_path, lineno)
     _, _, _, error = parse_document(document)
     if error:
         raise AuditLogUnreadable(f"replaying {log_path} gives an unreadable state: {error}")
@@ -867,11 +967,11 @@ def repair(*, actor: str, empty: bool = False) -> WriteResult:
         rebuilt = _empty_document() if empty else replay_audit(audit_log_path(path))
         quarantined = _quarantine_path(path)
         shutil.copy2(path, quarantined)
-        _append_audit(path, op="repair", scope="*", family=None,
-                      old={"quarantined_to": quarantined.name, "error": state.error},
-                      new=rebuilt, reason="empty" if empty else "replayed from the audit log",
-                      actor=actor)
-        _write_document(path, rebuilt)
+        audit_id = _append_audit(path, op="repair", scope="*", family=None,
+                                 old={"quarantined_to": quarantined.name, "error": state.error},
+                                 new=rebuilt, reason="empty" if empty else "replayed from the audit log",
+                                 actor=actor)
+        _replace_after_audit(path, rebuilt, audit_id, actor)
     return WriteResult(changed=True, scope="*", family=None, old=state.error, new=rebuilt,
                        path=path, quarantined_to=quarantined)
 

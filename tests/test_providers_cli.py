@@ -318,6 +318,80 @@ def test_repair_verbs(live, capsys):
     assert json.loads(switch_path(live).read_text()) == {"version": 1, "global": {}, "projects": {}}
 
 
+# ---------------------------------------------------------------------------
+# A replace that fails after the audit line: an abort record, never a phantom replay
+# ---------------------------------------------------------------------------
+
+def audit_records(home: Path) -> List[dict]:
+    text = ps.audit_log_path(switch_path(home)).read_text(encoding="utf-8")
+    return [json.loads(line) for line in text.splitlines() if line.strip()]
+
+
+def _no_space(*_args, **_kwargs):
+    raise OSError(28, "No space left on device")
+
+
+# writer -> (verbs that build the state, the verb whose replace fails, the op of its audit line)
+FAILED_WRITES = {
+    "set": ([["off", "deepseek", "--reason", "sparen"]], ["off", "glm", "--reason", "proxy weg"], "set"),
+    "clear": ([["off", "kimi"], ["on", "kimi", "--project", PROJECT]], ["reset", "kimi", "--project", PROJECT],
+              "clear"),
+    "repair": ([["off", "deepseek", "--reason", "sparen"]], ["repair", "--empty"], "repair"),
+}
+
+
+@pytest.mark.parametrize("writer", sorted(FAILED_WRITES))
+def test_a_failed_replace_is_aborted_and_never_replayed(writer, live, capsys, monkeypatch):
+    setup, failing, op = FAILED_WRITES[writer]
+    for args in setup:
+        assert run_main(capsys, *args)[0] == 0
+    expected = json.loads(switch_path(live).read_text(encoding="utf-8"))
+    if writer == "repair":
+        write_switches(live, "{broken")
+    before = switch_path(live).read_bytes()
+
+    with monkeypatch.context() as patched:
+        patched.setattr(os, "replace", _no_space)
+        code, _, err = run_main(capsys, *failing)
+    log_after_failure = audit_records(live)
+    assert code == providers_cli.EXIT_WRITE_FAILED == 1
+    assert switch_path(live).read_bytes() == before
+
+    # repair rebuilds the state the setup left: the change that never landed is not replayed
+    write_switches(live, "{truncated by a crash")
+    repaired, out, _ = run_main(capsys, "repair")
+    assert repaired == 0, out
+    assert json.loads(switch_path(live).read_text(encoding="utf-8")) == expected
+
+    original, abort = log_after_failure[-2], log_after_failure[-1]
+    assert original["op"] == op and original.get("id")
+    assert (abort["op"], abort["ref"]) == ("abort", original["id"])
+    assert abort["id"] != original["id"] and "No space left on device" in abort["error"]
+    what = "repair" if writer == "repair" else "write"
+    assert f"vnx providers: {what} failed: [Errno 28] No space left on device" in err
+    assert f"the audit line with id {original['id']} is followed by an abort record" in err
+
+
+def test_an_abort_that_cannot_be_appended_names_the_unconfirmed_line(live, capsys, monkeypatch):
+    real_append = ps._append_audit_record
+
+    def append_all_but_the_abort(path, record):
+        if record["op"] == "abort":
+            raise OSError(5, "Input/output error")
+        real_append(path, record)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(os, "replace", _no_space)
+        patched.setattr(ps, "_append_audit_record", append_all_but_the_abort)
+        code, _, err = run_main(capsys, "off", "gemini")
+    records = audit_records(live)
+    assert code == providers_cli.EXIT_WRITE_FAILED and not switch_path(live).exists()
+    assert [r["op"] for r in records] == ["set"]
+    assert "vnx providers: write failed: [Errno 28] No space left on device" in err
+    assert f"the audit log may hold one unconfirmed line: id {records[0]['id']}" in err
+    assert "Input/output error" in err
+
+
 def _git(*args, cwd: Path) -> None:
     subprocess.run(["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t", *args],
                    cwd=str(cwd), check=True, capture_output=True, text=True)

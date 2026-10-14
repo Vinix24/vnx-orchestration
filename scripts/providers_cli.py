@@ -427,6 +427,21 @@ def _write_refused(exc: ps.SwitchWriteRefused) -> int:
     return EXIT_WRITE_REFUSED
 
 
+def _write_failed(what: str, exc: OSError) -> int:
+    """A failed replace: say whether the audit log marks its line aborted or may hold it unconfirmed."""
+    print(f"vnx providers: {what} failed: {exc}", file=sys.stderr)
+    unconfirmed = getattr(exc, "unconfirmed_audit_id", None)
+    aborted = getattr(exc, "aborted_audit_id", None)
+    if unconfirmed:
+        print(f"  the audit log may hold one unconfirmed line: id {unconfirmed} records a change that "
+              f"did not land, and its abort record could not be appended "
+              f"({getattr(exc, 'abort_error', 'unknown error')})", file=sys.stderr)
+    elif aborted:
+        print(f"  nothing changed: the audit line with id {aborted} is followed by an abort record, "
+              "so repair never replays it", file=sys.stderr)
+    return EXIT_WRITE_FAILED
+
+
 def _unreadable(exc: ps.SwitchFileUnreadable) -> int:
     print(f"vnx providers: the switch file is unreadable: {exc}", file=sys.stderr)
     print("  run `vnx providers repair` (or `vnx providers repair --empty`)", file=sys.stderr)
@@ -457,8 +472,7 @@ def cmd_switch(args: argparse.Namespace) -> int:
     except ps.SwitchFileUnreadable as exc:
         return _unreadable(exc)
     except OSError as exc:
-        print(f"vnx providers: write failed: {exc}", file=sys.stderr)
-        return EXIT_WRITE_FAILED
+        return _write_failed("write", exc)
     where = "globally" if scope == ps.SCOPE_GLOBAL else f"for project {scope}"
     was = _entry_text(result.old) if result.old else "unset"
     print(f"{result.family} switched {'on' if enabled else 'OFF'} {where} (was {was}). "
@@ -478,8 +492,7 @@ def cmd_reset(args: argparse.Namespace) -> int:
     except ps.SwitchFileUnreadable as exc:
         return _unreadable(exc)
     except OSError as exc:
-        print(f"vnx providers: write failed: {exc}", file=sys.stderr)
-        return EXIT_WRITE_FAILED
+        return _write_failed("write", exc)
     if not result.changed:
         print(f"no project override for {result.family} in {result.scope}: nothing changed")
         return EXIT_OK
@@ -502,8 +515,7 @@ def cmd_repair(args: argparse.Namespace) -> int:
         print("  rerun with --empty to write an empty version 1 file (every family on)", file=sys.stderr)
         return EXIT_UNREADABLE
     except OSError as exc:
-        print(f"vnx providers: repair failed: {exc}", file=sys.stderr)
-        return EXIT_WRITE_FAILED
+        return _write_failed("repair", exc)
     how = "an empty version 1 file" if args.empty else "the state replayed from the audit log"
     print(f"repaired {result.path}: the unreadable file is kept as {result.quarantined_to.name}; wrote {how}:")
     print(json.dumps(result.new, indent=2, ensure_ascii=False))

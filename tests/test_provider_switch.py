@@ -520,7 +520,9 @@ def test_audit_line_content(switch_file, writable):
     lines = audit_lines(switch_file)
     assert len(lines) == 2
     line = lines[0]
-    assert set(line) >= {"ts", "actor", "cwd", "ppid", "parent_cmd", "scope", "family", "old", "new", "reason", "op", "argv"}
+    assert set(line) >= {"id", "ts", "actor", "cwd", "ppid", "parent_cmd", "scope", "family", "old", "new", "reason",
+                         "op", "argv"}
+    assert isinstance(line["id"], str) and line["id"] and line["id"] != lines[1]["id"]
     assert line["op"] == "set" and line["actor"] == "vincent" and line["scope"] == "global"
     assert line["family"] == "deepseek" and line["old"] is None and line["reason"] == "tegoed sparen"
     assert line["new"]["enabled"] is False and line["new"]["changed_by"] == "vincent"
@@ -667,6 +669,65 @@ def test_repair_refuses_a_malformed_audit_line(switch_file, writable):
 def test_repair_refuses_a_missing_file(switch_file, writable):
     with pytest.raises(ps.RepairNotNeeded, match="missing"):
         ps.repair(actor="op")
+
+
+def append_records(path: Path, *records) -> None:
+    with ps.audit_log_path(path).open("a", encoding="utf-8") as fh:
+        fh.writelines(json.dumps(record) + "\n" for record in records)
+
+
+def test_replay_accepts_a_log_written_before_ids(switch_file):
+    append_records(
+        switch_file,
+        {"ts": "2026-10-12T08:00:00Z", "op": "set", "scope": "global", "family": "deepseek", "old": None,
+         "new": entry(False), "reason": "r", "actor": "op"},
+        {"op": "set", "scope": "proj-a", "family": "glm", "old": None, "new": entry(True)},
+        {"op": "set", "scope": "proj-a", "family": "kimi", "old": None, "new": entry(False)},
+        {"op": "clear", "scope": "proj-a", "family": "glm", "old": entry(True), "new": None},
+    )
+    expected = {"version": 1, "global": {"deepseek": entry(False)}, "projects": {"proj-a": {"kimi": entry(False)}}}
+    assert ps.replay_audit(ps.audit_log_path(switch_file)) == expected
+
+    # new records with ids, and an abort of one of them, replay on top of the old ones
+    append_records(
+        switch_file,
+        {"id": "a1", "op": "set", "scope": "global", "family": "gemini", "old": None, "new": entry(False)},
+        {"id": "a2", "op": "abort", "ref": "a1", "error": "OSError: disk full"},
+    )
+    assert ps.replay_audit(ps.audit_log_path(switch_file)) == expected
+
+
+ABORT_REFS = {
+    "an id no record has": ({"id": "s1", "op": "set", "scope": "global", "family": "glm", "new": entry(False)},
+                            {"id": "x1", "op": "abort", "ref": "missing", "error": "e"}),
+    "a later record": ({"id": "x1", "op": "abort", "ref": "s1", "error": "e"},
+                       {"id": "s1", "op": "set", "scope": "global", "family": "glm", "new": entry(False)}),
+    "another abort": ({"id": "s1", "op": "set", "scope": "global", "family": "glm", "new": entry(False)},
+                      {"id": "x1", "op": "abort", "ref": "s1", "error": "e"},
+                      {"id": "x2", "op": "abort", "ref": "x1", "error": "e"}),
+    "no ref": ({"id": "s1", "op": "set", "scope": "global", "family": "glm", "new": entry(False)},
+               {"id": "x1", "op": "abort", "error": "e"}),
+    "a record without id": ({"op": "set", "scope": "global", "family": "glm", "new": entry(False)},
+                            {"id": "x1", "op": "abort", "ref": None, "error": "e"}),
+}
+
+
+@pytest.mark.parametrize("name", sorted(ABORT_REFS))
+def test_an_abort_with_an_unknown_ref_makes_the_log_unreadable(name, switch_file, writable):
+    append_records(switch_file, *ABORT_REFS[name])
+    write_doc(switch_file, "{broken")
+    with pytest.raises(ps.AuditLogUnreadable, match="unrecognised record"):
+        ps.repair(actor="op")
+    assert switch_file.read_text(encoding="utf-8") == "{broken"
+
+
+@pytest.mark.parametrize("second_id", ["s1", 7])
+def test_a_repeated_or_non_string_id_makes_the_log_unreadable(second_id, switch_file):
+    append_records(switch_file,
+                   {"id": "s1", "op": "set", "scope": "global", "family": "glm", "new": entry(False)},
+                   {"id": second_id, "op": "set", "scope": "global", "family": "kimi", "new": entry(False)})
+    with pytest.raises(ps.AuditLogUnreadable, match="line 2: id"):
+        ps.replay_audit(ps.audit_log_path(switch_file))
 
 
 # ---------------------------------------------------------------------------
