@@ -194,6 +194,8 @@ def test_write_verbs_refuse_while_pending(args, home, tmp_path):
     assert result.returncode == providers_cli.EXIT_WRITE_REFUSED == 5
     assert "write refused" in result.stderr and "not enforced yet" in result.stderr
     assert f"B: {len(ps.PENDING_B)}" in result.stderr
+    for entry in (*ps.PENDING_B, *ps.PENDING_C, *ps.PENDING_E):
+        assert f"    {entry}\n" in result.stderr
     assert not switch_path(home).exists() and not ps.audit_log_path(switch_path(home)).exists()
 
 

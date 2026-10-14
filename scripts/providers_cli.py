@@ -417,6 +417,11 @@ def _write_refused(exc: ps.SwitchWriteRefused) -> int:
     print("vnx providers: write refused:", file=sys.stderr)
     for reason in exc.reasons:
         print(f"  - {reason}", file=sys.stderr)
+    for deliverable, entries in ps.pending_launch_functions().items():
+        if entries:
+            print(f"  pending {deliverable} ({len(entries)}):", file=sys.stderr)
+            for entry in entries:
+                print(f"    {entry}", file=sys.stderr)
     return EXIT_WRITE_REFUSED
 
 
