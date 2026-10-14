@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -26,6 +27,11 @@ OTHER = "other-project"
 def _line(did: str, status: str, ts: str, *, project: str = PROJECT, **kw: Any) -> Dict[str, Any]:
     return {"event_type": "task_complete", "receipt_kind": "dispatch", "dispatch_id": did,
             "status": status, "project_id": project, "terminal": "T1", "timestamp": ts, **kw}
+
+
+def _recent() -> str:
+    """A timestamp inside the live contract_invalid window whatever day the test runs."""
+    return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _rows(tmp_path: Path, entries: List[Dict[str, Any]], project_id: str = PROJECT,
@@ -78,7 +84,7 @@ def test_contract_invalid_after_success_is_a_reject_row(tmp_path: Path) -> None:
     rows = _rows(tmp_path, [
         _line("d4", "success", "2026-09-29T10:00:00Z"),
         {"event_type": "report_contract_invalid", "dispatch_id": "d4", "status": "contract_invalid",
-         "project_id": PROJECT, "timestamp": "2026-09-29T10:05:00Z"},
+         "project_id": PROJECT, "timestamp": _recent()},
     ])
     row = _row(rows, "d4")
     assert row["status"] == "contract_invalid"

@@ -24,6 +24,11 @@ FOREIGN = {"event_type": "task_complete", "receipt_kind": "dispatch", "dispatch_
            "status": "failure", "project_id": "other-project", "timestamp": TS}
 
 
+def _recent() -> str:
+    """A timestamp inside the live contract_invalid window whatever day the test runs."""
+    return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _a(did: str, status: str, **kw: Any) -> Dict[str, Any]:
     return {"event_type": "task_complete", "receipt_kind": "dispatch", "dispatch_id": did,
             "status": status, "timestamp": TS, **kw}
@@ -89,7 +94,7 @@ def test_synthesized_lane_is_not_filtered():
 def test_contract_invalid_after_the_last_a_wins_as_reject():
     result = _run(
         _a("d1", "success"), _b("d1"),
-        {"event_type": "report_contract_invalid", "receipt_kind": "dispatch", "timestamp": TS,
+        {"event_type": "report_contract_invalid", "receipt_kind": "dispatch", "timestamp": _recent(),
          "dispatch_id": "d1", "status": "contract_invalid"},
     )
     assert result["verdict_counts"]["reject"] == 1
@@ -434,7 +439,7 @@ def test_a_failure_literal_on_writer_b_wins_over_a_success():
     # deepseek_gate: report_to_receipt_converter writes status='failed' on a
     # nonzero exit code; B's `unknown` still never overturns A (plan rule a).
     for status in ("failure", "failed", "contract_invalid"):
-        result = _run(_a("d1", "success"), _b("d1", status=status))
+        result = _run(_a("d1", "success"), _b("d1", status=status, timestamp=_recent()))
         assert result["verdict_counts"]["reject"] == 1, status
         assert _outcome(result, "d1")["status"] == status
     assert _run(_a("d1", "success"), _b("d1", status="unknown"))["verdict_counts"]["accept"] == 1
