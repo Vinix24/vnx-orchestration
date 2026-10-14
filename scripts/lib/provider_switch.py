@@ -278,10 +278,9 @@ _LOGGED_IGNORED_FAMILIES: set = set()
 
 
 def _log_ignored_family_once(name: str, where: str) -> None:
-    key = (name, where.split(".", 1)[0])
-    if key in _LOGGED_IGNORED_FAMILIES:
+    if name in _LOGGED_IGNORED_FAMILIES:
         return
-    _LOGGED_IGNORED_FAMILIES.add(key)
+    _LOGGED_IGNORED_FAMILIES.add(name)
     if name in NON_SWITCHABLE_CLASSES:
         logger.info("provider_switch: %s.%s ignored: %s", where, name, NON_SWITCHABLE_CLASSES[name])
     else:
