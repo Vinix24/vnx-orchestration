@@ -87,7 +87,7 @@ def test_lane_success_with_unknown_verification_is_investigate_not_success(tmp_p
 def test_contract_invalid_after_the_last_lane_status_is_a_failure(tmp_path: Path) -> None:
     invalid = {"event_type": "report_contract_invalid", "dispatch_id": "d1",
                "status": "contract_invalid", "project_id": PROJECT,
-               "timestamp": "2026-09-29T10:05:00Z"}
+               "timestamp": _fresh()}
     assert _index(tmp_path, [_a("d1", "success"), invalid]) == {"d1": "failure"}
 
 
