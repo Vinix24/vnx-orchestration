@@ -872,15 +872,97 @@ def repair(*, actor: str, empty: bool = False) -> WriteResult:
 # call require() before its first launch call or be pending, and an EXEMPT entry must still
 # match something.
 
-LAUNCH_FUNCTIONS: Tuple[str, ...] = ()
-
-PENDING_C: Tuple[str, ...] = ()
-
-PENDING_E: Tuple[str, ...] = ()
-
-PENDING_B: Tuple[str, ...] = ()
-
 # Launch functions the detector cannot see, each with the reason.
-UNDETECTED_LAUNCH_FUNCTIONS: Dict[str, str] = {}
+UNDETECTED_LAUNCH_FUNCTIONS: Dict[str, str] = {
+    "scripts/lib/provider_spawns/claude_spawn.py:spawn_claude":
+        "host-keyed check: a claude launch whose received env carries a non-Anthropic "
+        "ANTHROPIC_BASE_URL maps that host to its family; the launch itself goes through "
+        "SubprocessAdapter, so this body holds no process call",
+    "scripts/lib/provider_spawns/deepseek_harness_spawn.py:spawn_deepseek_harness":
+        "delegates to spawn_claude with the DeepSeek ANTHROPIC_BASE_URL; no process call in "
+        "its own body",
+    "scripts/lib/provider_spawns/glm_harness_spawn.py:spawn_glm_harness":
+        "delegates to spawn_claude with the :4141 proxy ANTHROPIC_BASE_URL; no process call "
+        "in its own body",
+    "scripts/lib/provider_spawns/kimi_spawn.py:_start_kimi_subprocess":
+        "Popen of an argv that arrives as a parameter; the literal 'kimi' head sits in "
+        "_build_kimi_cmd, called by spawn_kimi",
+    "scripts/lib/provider_spawns/gemini_spawn.py:_start_gemini_subprocess":
+        "Popen of an argv that arrives as a parameter; the literal 'gemini' head sits in "
+        "_build_gemini_cmd, called by _spawn_streaming and _spawn_legacy",
+    "scripts/lib/provider_spawns/litellm_spawn.py:_start_litellm_subprocess":
+        "starts the litellm runner through sys.executable; the model sits in the stdin payload",
+    "scripts/lib/provider_spawns/litellm_spawn.py:spawn_litellm_agentic":
+        "starts the agentic litellm runner through sys.executable; the model sits in the "
+        "stdin payload",
+    "scripts/lib/envelope_adapters_provider.py:ProviderAdapter._run_kimi":
+        "the envelope's kimi branch; it reaches the CLI through spawn_kimi",
+    "scripts/lib/llm_decision_router.py:_call_ollama_adapter":
+        "reaches ollama through OllamaAdapter.execute; the host constant lives in this module "
+        "but the HTTP call in the adapter",
+    "scripts/lib/providers/local_gemma/spawn.py:spawn_local_gemma":
+        "runs local-gemma in-process through MLX (runtime_mlx.run_mlx): no process or request "
+        "for the detector to see",
+}
 
-EXEMPT: Dict[str, str] = {}
+PENDING_C: Tuple[str, ...] = (
+    "scripts/gate_runner.py:GateRunner._run_with_stall_detection",
+)
+
+PENDING_E: Tuple[str, ...] = (
+    "scripts/conversation_analyzer/deep_analyzer.py:DeepAnalyzer._try_ollama",
+)
+
+PENDING_B: Tuple[str, ...] = (
+    "scripts/benchmark/field-tests/runners/scorer.py:_judge_kimi",
+    "scripts/conversation_analyzer/deep_analyzer.py:DeepAnalyzer._try_deepseek_harness",
+    "scripts/lib/adapters/_litellm_agentic_runner.py:main",
+    "scripts/lib/adapters/_litellm_runner.py:main",
+    "scripts/lib/adapters/gemini_adapter.py:GeminiAdapter._execute_legacy",
+    "scripts/lib/adapters/gemini_adapter.py:GeminiAdapter.stream_events",
+    "scripts/lib/adapters/ollama_adapter.py:OllamaAdapter._drain_http_stream",
+    "scripts/lib/classifier_providers/deepseek_provider.py:DeepSeekProvider.classify",
+    "scripts/lib/classifier_providers/gemini_provider.py:GeminiProvider.classify",
+    "scripts/lib/classifier_providers/ollama_provider.py:OllamaProvider.classify",
+    "scripts/lib/gemini_wrapper.py:gemini_exec",
+    "scripts/lib/kimi_wrapper.py:kimi_exec",
+    "scripts/lib/providers/local_gemma/spawn.py:_run_ollama_fallback",
+    "scripts/lib/vertex_ai_runner.py:run_vertex_ai",
+    "scripts/llm_benchmark.py:_ollama_api",
+    "scripts/llm_benchmark.py:_ollama_stream",
+    *UNDETECTED_LAUNCH_FUNCTIONS,
+)
+
+LAUNCH_FUNCTIONS: Tuple[str, ...] = tuple(sorted({*PENDING_C, *PENDING_E, *PENDING_B}))
+
+# Flagged by the detector or named by the plan, and deliberately outside layer 1. An entry is a
+# function (``path:qualname``), a file or a directory (trailing slash).
+EXEMPT: Dict[str, str] = {
+    "scripts/lib/provider_spawns/claude_spawn.py":
+        "claude launches are never switchable (decision 2b); spawn_claude is in the census "
+        "only for its host-keyed check",
+    "scripts/lib/provider_spawns/codex_spawn.py": "codex launch (decision 2b)",
+    "scripts/lib/providers/provider_lanes/codex.py": "re-export of the codex lane (decision 2b)",
+    "scripts/lib/classifier_providers/haiku_provider.py": "claude (haiku) launch (decision 2b)",
+    "scripts/lib/classifier_providers/codex_provider.py": "codex launch (decision 2b)",
+    "scripts/lib/adapters/codex_adapter.py:CodexAdapter.stream_events": "codex launch (decision 2b)",
+    "scripts/conversation_analyzer/deep_analyzer.py:DeepAnalyzer._try_claude_max":
+        "claude launch on the subscription (decision 2b)",
+    "scripts/lib/dispatch_cli.py:_check_reachability":
+        "reachability probe (GET /v1/models): no model call",
+    "scripts/lib/adapters/ollama_adapter.py:OllamaAdapter.reachability":
+        "reachability probe (GET /api/tags): no model call",
+    "scripts/conversation_analyzer/deep_analyzer.py:DeepAnalyzer._probe_ollama":
+        "reachability probe (GET /api/tags): no model call",
+    "scripts/conversation_analyzer/deep_analyzer.py:DeepAnalyzer._fetch_deepseek_balance":
+        "balance probe (GET /user/balance): no model call",
+    "scripts/benchmark/field-tests/runners/check_openrouter_credits.py:check":
+        "credit probe (GET /api/v1/auth/key): no model call",
+    "scripts/lib/adapters/litellm_adapter.py:LiteLLMAdapter.health_check":
+        "`litellm --health-check`: no model call",
+    "scripts/lib/provider_spawns/kimi_spawn.py:_harvest_session_token_usage":
+        "`kimi export` reads a finished session's archive for its token accounting: no model call",
+    "scripts/llm_benchmark.py:pull_ollama_model": "`ollama pull` downloads weights: no model call",
+    "scripts/conversation_analyzer_nightly.sh": "daemon start-up (`ollama serve`): no model call",
+    "scripts/spikes/": "throwaway spikes; no runtime module imports from them",
+}
