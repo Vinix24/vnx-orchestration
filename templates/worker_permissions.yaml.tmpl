@@ -47,6 +47,12 @@ profiles:
       - "git push --force*"
       - "git push -f*"
       - "curl*anthropic*"
+      # Provider switch (provider-schakelaar): workers never change switches.
+      - "*vnx providers off*"
+      - "*vnx providers on*"
+      - "*vnx providers reset*"
+      - "*vnx providers repair*"
+      - "*providers_cli.py*"
     file_write_scope:
       - "scripts/**"
       - "tests/**"
@@ -70,6 +76,12 @@ profiles:
       - "git push --force*"
       - "git push -f*"
       - "curl*anthropic*"
+      # Provider switch (provider-schakelaar): workers never change switches.
+      - "*vnx providers off*"
+      - "*vnx providers on*"
+      - "*vnx providers reset*"
+      - "*vnx providers repair*"
+      - "*providers_cli.py*"
     file_write_scope:
       - "tests/**"
       - "scripts/check_*"
@@ -88,6 +100,12 @@ profiles:
     bash_deny_patterns:
       - "rm -rf*"
       - "git push --force*"
+      # Provider switch (provider-schakelaar): workers never change switches.
+      - "*vnx providers off*"
+      - "*vnx providers on*"
+      - "*vnx providers reset*"
+      - "*vnx providers repair*"
+      - "*providers_cli.py*"
     file_write_scope:
       - "dashboard/**"
 
@@ -108,6 +126,12 @@ profiles:
       - "git reset --hard*"
       - "git push --force*"
       - "git push -f*"
+      # Provider switch (provider-schakelaar): workers never change switches.
+      - "*vnx providers off*"
+      - "*vnx providers on*"
+      - "*vnx providers reset*"
+      - "*vnx providers repair*"
+      - "*providers_cli.py*"
     file_write_scope:
       - "docs/governance/decisions/**"
       - "scripts/**"
@@ -132,6 +156,12 @@ profiles:
       - "git push --force*"
       - "git push -f*"
       - "curl*anthropic*"
+      # Provider switch (provider-schakelaar): workers never change switches.
+      - "*vnx providers off*"
+      - "*vnx providers on*"
+      - "*vnx providers reset*"
+      - "*vnx providers repair*"
+      - "*providers_cli.py*"
     file_write_scope:
       - "scripts/**"
       - "tests/**"
@@ -153,6 +183,12 @@ profiles:
       - "git commit*"
       - "git push*"
       - "rm*"
+      # Provider switch (provider-schakelaar): workers never change switches.
+      - "*vnx providers off*"
+      - "*vnx providers on*"
+      - "*vnx providers reset*"
+      - "*vnx providers repair*"
+      - "*providers_cli.py*"
     file_write_scope:
       - ".vnx-data/unified_reports/**"
 
@@ -171,6 +207,12 @@ profiles:
       - "git commit*"
       - "git push*"
       - "rm*"
+      # Provider switch (provider-schakelaar): workers never change switches.
+      - "*vnx providers off*"
+      - "*vnx providers on*"
+      - "*vnx providers reset*"
+      - "*vnx providers repair*"
+      - "*providers_cli.py*"
     file_write_scope:
       - ".vnx-data/unified_reports/**"
 
