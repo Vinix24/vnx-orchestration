@@ -26,6 +26,8 @@ _EXIT_WRITE_FAILED = 1
 
 def register_providers_subparser(subparsers) -> None:
     """Register ``vnx providers``. All arguments pass through to ``scripts/providers_cli.py``."""
+    # No argument starts with "\x00", so argparse sees no option here and REMAINDER takes all; add_help=False keeps
+    # -h for the script. Without both, a leading dash (`--json`, `-h`, any flag) dies as "unrecognized arguments".
     parser = subparsers.add_parser(
         "providers",
         help="turn model providers on and off (list/off/on/reset/repair/check)",

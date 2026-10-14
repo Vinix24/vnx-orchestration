@@ -561,6 +561,47 @@ def test_pip_entrance_runs_the_same_module(home, tmp_path):
     assert _pip("check", "kimi", cwd=tmp_path).returncode == 0
 
 
+PASS_THROUGH = [
+    ["--help"],
+    ["-h"],
+    ["list", "--json"],
+    ["check", "deepseek-harness", "--project", "other-app"],
+    ["--no-such-flag", "x"],
+    ["list", "--no-such-flag"],
+]
+
+
+@pytest.mark.parametrize("args", PASS_THROUGH)
+def test_pip_entrance_passes_every_argument_through_verbatim(args, home, monkeypatch):
+    """The argv the providers_cli.py subprocess receives is exactly what followed `vnx providers`."""
+    import vnx_cli._reexec
+    import vnx_cli.main
+    from vnx_cli.commands import providers as pip_providers
+    received = []
+
+    def record(argv, **kwargs):
+        received.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(vnx_cli._reexec, "maybe_reexec_pinned", lambda argv=None: None)
+    monkeypatch.setattr(pip_providers.subprocess, "run", record)
+    monkeypatch.setattr(sys, "argv", ["vnx", "providers", *args])
+    with pytest.raises(SystemExit) as exc:
+        vnx_cli.main.main()
+    assert exc.value.code == 0
+    assert pip_providers.resolve_providers_script() == CLI
+    assert received == [[sys.executable, str(CLI), *args]]
+
+
+def test_pip_entrance_help_is_the_script_help(home, tmp_path):
+    for flag in ("--help", "-h"):
+        result = _pip(flag, cwd=tmp_path)
+        assert result.returncode == 0, result.stderr
+        assert "Turn model providers on and off." in result.stdout
+    checked = _pip("check", "deepseek-harness", "--project", "other-app", cwd=tmp_path)
+    assert checked.returncode == 0 and "scope=other-app" in checked.stdout
+
+
 def test_bin_vnx_entrance(home, no_markers, tmp_path):
     env = {k: v for k, v in os.environ.items() if k not in ps.DISPATCH_MARKER_ENV}
     vnx = str(REPO_ROOT / "bin" / "vnx")
