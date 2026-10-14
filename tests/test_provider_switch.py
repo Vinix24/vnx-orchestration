@@ -140,6 +140,56 @@ def test_family_of_host_unknown_raises():
         ps.family_of_host("https://llm.example.invalid/v1")
 
 
+@pytest.mark.parametrize("url,family", [
+    ("http://localhost:11434", "local"),
+    ("http://127.0.0.1:11434/api/generate", "local"),
+    ("http://[::1]:11434", "local"),
+    ("LOCALHOST:11434", "local"),
+    ("http://localhost:4141/v1/messages", "glm"),
+    ("127.0.0.1:4141", "glm"),
+    ("http://[::1]:4141", "glm"),
+])
+def test_family_of_host_maps_the_ports_on_loopback(url, family):
+    assert ps.family_of_host(url) == family
+
+
+NON_LOOPBACK_ON_A_MAPPED_PORT = [
+    "http://some-remote-host:11434",
+    "https://10.0.0.5:11434/api/generate",
+    "gpu-box.lan:11434",
+    "http://other:4141",
+    "http://127.0.0.2:4141/v1",
+    "http://[fe80::1]:4141",
+]
+
+
+@pytest.mark.parametrize("url", NON_LOOPBACK_ON_A_MAPPED_PORT)
+def test_family_of_host_refuses_a_mapped_port_on_another_host(url):
+    with pytest.raises(ps.UnknownProviderError):
+        ps.family_of_host(url)
+
+
+@pytest.mark.parametrize("url", NON_LOOPBACK_ON_A_MAPPED_PORT)
+def test_a_host_decision_for_a_non_loopback_port_is_refused(url, switch_file):
+    decision = ps.decide_host(url, consumer="harness", project_id="p-x")
+    assert (decision.allowed, decision.source, decision.family) == (
+        False, ps.SOURCE_UNKNOWN_IDENTIFIER, ps.UNKNOWN_FAMILY)
+    assert "not in the provider_switch host map" in decision.error
+    with pytest.raises(ps.ProviderDisabledError) as exc:
+        ps.require_host(url, consumer="harness", project_id="p-x")
+    assert exc.value.decision.source == ps.SOURCE_UNKNOWN_IDENTIFIER
+
+
+def test_a_host_decision_follows_the_family_switch(switch_file):
+    write_doc(switch_file, {"version": 1, "global": {"glm": entry(False, reason="proxy weg")}})
+    refused = ps.decide_host("http://127.0.0.1:4141/v1", consumer="harness", project_id="p-x")
+    assert (refused.allowed, refused.family, refused.source, refused.reason) == (False, "glm", ps.SOURCE_GLOBAL, "proxy weg")
+    assert refused.identifier == "127.0.0.1:4141"
+    allowed = ps.require_host("https://openrouter.ai/api/v1", model="meta-llama/llama-4", consumer="h", project_id="p-x")
+    assert (allowed.allowed, allowed.family, allowed.identifier) == (True, "openrouter", "openrouter.ai")
+    assert ps.decide_host("https://api.anthropic.com", consumer="h", project_id="p-x").source == ps.SOURCE_NOT_SWITCHABLE
+
+
 # ---------------------------------------------------------------------------
 # Precedence
 # ---------------------------------------------------------------------------

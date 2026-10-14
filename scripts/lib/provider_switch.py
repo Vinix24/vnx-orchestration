@@ -32,7 +32,7 @@ import subprocess
 import sys
 import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
@@ -75,8 +75,9 @@ NON_SWITCHABLE_CLASSES: Dict[str, str] = {
 
 UNKNOWN_FAMILY = "unknown"
 
-# Exact identifiers, matched case-insensitively after strip. Family names are identifiers too,
-# so ``require(family_of_host(url), ...)`` decides on the family the host maps to.
+# Exact identifiers, matched case-insensitively after strip. Family names are identifiers too.
+# The host-keyed check is ``decide_host``/``require_host``: they decide on the family a host maps
+# to and refuse a host the map does not know, like an unknown identifier.
 _EXACT: Dict[str, str] = {
     "deepseek": DEEPSEEK, "deepseek-harness": DEEPSEEK, "deepseek_harness": DEEPSEEK,
     "deepseek_gate": DEEPSEEK,
@@ -136,10 +137,12 @@ _HOSTS: Dict[str, str] = {
     "api.anthropic.com": CLAUDE,
     "api.openai.com": CODEX,
 }
+# Ports that name a family on a loopback host only; on any other host they map to nothing.
 _PORTS: Dict[int, str] = {
     11434: LOCAL,  # ollama
     4141: GLM,     # the local litellm proxy that fronts GLM
 }
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
 class UnknownProviderError(ValueError):
@@ -172,20 +175,26 @@ def family_of(identifier: str) -> str:
     )
 
 
+def _split_host(url_or_host: str) -> Tuple[str, Optional[int]]:
+    """``(lower-case host, port)`` of a base URL or a bare ``host[:port]``. Raises ValueError."""
+    raw = url_or_host.strip()
+    parts = urlsplit(raw if "://" in raw else f"//{raw}")
+    return (parts.hostname or "").lower(), parts.port
+
+
 def family_of_host(url_or_host: str, *, model: Optional[str] = None) -> str:
     """Return the family behind a base URL or host (the host-keyed check).
 
     ``openrouter.ai`` maps to the maker of ``model`` when the model is known, else to
-    ``openrouter``. Port 11434 is ollama (``local``); port 4141 is the litellm proxy that fronts
-    GLM. Raises :class:`UnknownProviderError` for a host the map does not know.
+    ``openrouter``. On a loopback host (``localhost``, ``127.0.0.1``, ``::1``) port 11434 is
+    ollama (``local``) and port 4141 the litellm proxy that fronts GLM; the same ports on any
+    other host are not in the map. Raises :class:`UnknownProviderError` for a host the map does
+    not know, so a remote host on one of those ports is refused, not taken for a local model.
     """
     if not isinstance(url_or_host, str) or not url_or_host.strip():
         raise UnknownProviderError(f"host {url_or_host!r} is empty or not a string")
-    raw = url_or_host.strip()
     try:
-        parts = urlsplit(raw if "://" in raw else f"//{raw}")
-        host = (parts.hostname or "").lower()
-        port = parts.port
+        host, port = _split_host(url_or_host)
     except ValueError as exc:
         raise UnknownProviderError(f"host {url_or_host!r} cannot be parsed: {exc}") from exc
     family = _HOSTS.get(host)
@@ -194,7 +203,7 @@ def family_of_host(url_or_host: str, *, model: Optional[str] = None) -> str:
             family = GEMINI
         elif host.startswith("api.moonshot."):
             family = KIMI
-        elif port in _PORTS:
+        elif port in _PORTS and host in _LOOPBACK_HOSTS:
             family = _PORTS[port]
     if family is None:
         raise UnknownProviderError(
@@ -536,6 +545,48 @@ def decide(identifier: str, *, consumer: str, project_id: Optional[str] = None) 
 def require(identifier: str, *, consumer: str, project_id: Optional[str] = None) -> SwitchDecision:
     """Return the decision when allowed; raise :class:`ProviderDisabledError` when not."""
     decision = decide(identifier, consumer=consumer, project_id=project_id)
+    if not decision.allowed:
+        raise ProviderDisabledError(decision)
+    return decision
+
+
+def _host_identifier(url_or_host: Any) -> str:
+    """``host[:port]`` of a base URL, so a decision never echoes a URL's path or credentials."""
+    if not isinstance(url_or_host, str):
+        return repr(url_or_host)
+    try:
+        host, port = _split_host(url_or_host)
+    except ValueError:
+        return "<unparseable host>"
+    if not host:
+        return "<no host>"
+    shown = f"[{host}]" if ":" in host else host
+    return f"{shown}:{port}" if port is not None else shown
+
+
+def decide_host(url_or_host: str, *, consumer: str, project_id: Optional[str] = None,
+                model: Optional[str] = None) -> SwitchDecision:
+    """The host-keyed check: decide on the family behind a base URL or host. Never raises.
+
+    A host :func:`family_of_host` does not know is refused with source ``unknown-identifier``,
+    exactly like an unknown identifier in :func:`decide`.
+    """
+    ident = _host_identifier(url_or_host)
+    try:
+        family = family_of_host(url_or_host, model=model)
+    except UnknownProviderError as exc:
+        who = str(consumer or "unknown-consumer")
+        logger.error("provider_switch: refusing host %s for consumer %s: %s", ident, who, exc)
+        return SwitchDecision(identifier=ident, allowed=False, family=UNKNOWN_FAMILY,
+                              source=SOURCE_UNKNOWN_IDENTIFIER, scope=resolve_project(project_id) or SCOPE_GLOBAL,
+                              consumer=who, error=str(exc))
+    return replace(decide(family, consumer=consumer, project_id=project_id), identifier=ident)
+
+
+def require_host(url_or_host: str, *, consumer: str, project_id: Optional[str] = None,
+                 model: Optional[str] = None) -> SwitchDecision:
+    """Return the host decision when allowed; raise :class:`ProviderDisabledError` when not."""
+    decision = decide_host(url_or_host, consumer=consumer, project_id=project_id, model=model)
     if not decision.allowed:
         raise ProviderDisabledError(decision)
     return decision
