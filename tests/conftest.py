@@ -70,6 +70,17 @@ del _env_key, _subdir
 # already delenv/setenv it themselves (test_data_dir_guard.py,
 # test_path_resolution_regression.py, etc.) and win via monkeypatch.
 os.environ["VNX_DATA_HOME"] = str(Path(_CONFTEST_ISOLATION_TMP) / "account-home")
+# Provider switch (provider-schakelaar A): the operator's ~/.vnx/providers.json is a
+# fleet-level operator file, like ~/.vnx/projects.json. VNX_PROVIDER_SWITCH_FILE moves the
+# switch file and, with it, the audit log, the lock and every quarantined copy (they live in
+# its directory), so pinning it here keeps all four out of the real ~/.vnx for the whole
+# session. _provider_switch_isolation below re-pins it per test to tmp_path. Ambient
+# VNX_OVERRIDE_PROVIDER_* emergency brakes are operator state too: a test that needs one sets
+# it with monkeypatch.
+_PROVIDER_SWITCH_ISOLATION_FILE = Path(_CONFTEST_ISOLATION_TMP) / "provider-switch" / "providers.json"
+os.environ["VNX_PROVIDER_SWITCH_FILE"] = str(_PROVIDER_SWITCH_ISOLATION_FILE)
+for _env_key in [k for k in os.environ if k.startswith("VNX_OVERRIDE_PROVIDER_")]:
+    del os.environ[_env_key]
 # ---------------------------------------------------------------------------
 # launchctl shim (OI-1891): no test may mutate the operator's launchd domain
 # ---------------------------------------------------------------------------
@@ -260,6 +271,17 @@ def _vnx_data_dir_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     isolated = tmp_path / "_vnx_test_data"
     isolated.mkdir(parents=True, exist_ok=True)
     pin_vnx_data_dir(monkeypatch, isolated)
+
+
+@pytest.fixture(autouse=True)
+def _provider_switch_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the provider switch file (and so its audit log, lock and quarantine) per test.
+
+    The module-level pin above keeps every test out of the operator's ~/.vnx; this one keeps
+    tests out of each other's switches. A test that needs a specific file sets
+    VNX_PROVIDER_SWITCH_FILE itself: same function-scoped monkeypatch, later call wins.
+    """
+    monkeypatch.setenv("VNX_PROVIDER_SWITCH_FILE", str(tmp_path / "_vnx_provider_switch" / "providers.json"))
 
 
 @pytest.fixture(autouse=True)

@@ -347,6 +347,13 @@ Permission relay (detached-worker prompt governance):
   permission resolve-stale <dispatch_id> --note ...  Close an escalation with no live worker session
   permission scan [--json]                           Scan LIVE workers for an unmeasured permission stall
 
+Provider switch (turn model providers on and off, ~/.vnx/providers.json):
+  providers [list] [--json]          Families, enforcement status, projects, overrides, consequences
+  providers off|on <family> [--project <pid>] [--reason <text>]
+  providers reset <family> --project <pid>   Remove a project override
+  providers repair [--empty]         Rebuild an unreadable switch file from the audit log
+  providers check <identifier>       Exit 0 when allowed, 4 when switched off (for shell callers)
+
 Gate commands (pre-merge verification):
   gate-check --pr <ID>  Run deterministic pre-merge gate checks (GO/HOLD verdict)
   pr-ready <N> [<N>..]  Merge readiness: required contexts + gate evidence on the
@@ -2547,6 +2554,9 @@ main() {
       ;;
     pr-ready)
       "$VNX_PYTHON" "$VNX_HOME/scripts/pr_ready.py" "$@"
+      ;;
+    providers)
+      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" "$VNX_HOME/scripts/providers_cli.py" "$@"
       ;;
     gate-reanchor)
       "$VNX_PYTHON" "$VNX_HOME/scripts/gate_reanchor_cli.py" "$@"

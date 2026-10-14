@@ -1528,6 +1528,13 @@ def _register_worktree_release_subparser(subparsers: argparse.Action) -> None:
     register_worktree_release_subparser(subparsers)
 
 
+def _register_providers_subparser(subparsers: argparse.Action) -> None:
+    """`vnx providers` — the operator's provider switch (scripts/providers_cli.py), the same
+    module the fabric's `bin/vnx providers` runs. Parser lives in the command module."""
+    from vnx_cli.commands.providers import register_providers_subparser
+    register_providers_subparser(subparsers)
+
+
 def _dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     if args.command == "init":
         from vnx_cli.commands.init_cmd import vnx_init
@@ -1666,8 +1673,13 @@ def main() -> None:
     _register_gate_check_subparser(subparsers)
     _register_pr_ready_subparser(subparsers)
     _register_worktree_release_subparser(subparsers)
+    _register_providers_subparser(subparsers)
 
     args = parser.parse_args()
+    # A command module that binds its own handler (set_defaults(func=...), as pool.py does
+    # for its verbs) runs it directly instead of growing the elif chain below.
+    if getattr(args, "func", None) is not None:
+        sys.exit(args.func(args))
     _dispatch_command(args, parser)
 
 
