@@ -396,8 +396,22 @@ REASON_SWITCHED_OFF = "provider_switched_off"
 EXIT_PROVIDER_SWITCHED_OFF = 4
 
 OVERRIDE_ENV_PREFIX = "VNX_OVERRIDE_PROVIDER_"
+OVERRIDE_OFF = "off"
+OVERRIDE_IGNORED = "ignored"
+OVERRIDE_INVALID = "invalid"
 _OVERRIDE_OFF_TOKENS = frozenset({"off", "0", "false", "no"})
 _OVERRIDE_ON_TOKENS = frozenset({"on", "1", "true", "yes"})
+
+
+def interpret_override(value: str) -> str:
+    """``off`` (switches the family off), ``ignored`` (an on-token: only the CLI re-enables) or
+    ``invalid`` (any other value refuses the family). Case-insensitive, trimmed."""
+    token = (value or "").strip().lower()
+    if token in _OVERRIDE_OFF_TOKENS:
+        return OVERRIDE_OFF
+    if token in _OVERRIDE_ON_TOKENS:
+        return OVERRIDE_IGNORED
+    return OVERRIDE_INVALID
 
 
 @dataclass(frozen=True)
@@ -488,12 +502,12 @@ def decide(identifier: str, *, consumer: str, project_id: Optional[str] = None) 
     env_key = OVERRIDE_ENV_PREFIX + family.upper()
     raw = os.environ.get(env_key)
     if raw is not None:
-        token = raw.strip().lower()
-        if token in _OVERRIDE_OFF_TOKENS:
+        meaning = interpret_override(raw)
+        if meaning == OVERRIDE_OFF:
             logger.warning("provider_switch: %s=%r switches %s off for consumer %s (pid %d)",
                            env_key, raw, family, who, os.getpid())
             return _decision(False, family, SOURCE_OVERRIDE, reason=f"{env_key}={raw.strip()}")
-        if token in _OVERRIDE_ON_TOKENS:
+        if meaning == OVERRIDE_IGNORED:
             logger.warning(
                 "provider_switch: %s=%r ignored for consumer %s (pid %d): an override can only "
                 "switch a family off; re-enable with `vnx providers on %s`",
