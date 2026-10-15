@@ -37,8 +37,9 @@ exists carries project_id, and every ``ux_<table>_pid`` is attached to its own
 table as a UNIQUE index over the listed columns (composite_index_audit plus the
 key check). ``CREATE UNIQUE INDEX IF NOT EXISTS`` is a silent no-op when an index
 of that name belongs to another table; the post-condition catches that. Any
-failure raises inside apply_if_below's SAVEPOINT: everything rolls back and
-user_version stays below 34.
+failure raises inside apply_if_below's SAVEPOINT, which sits in an outer
+``BEGIN IMMEDIATE``; that transaction is rolled back, so user_version stays
+below 34 and the file stays byte-equal.
 
 A table that does not exist is not created: 0034 adds columns and indexes, not
 tables. A store without one of these tables (a partial fixture) passes over it.
@@ -188,7 +189,16 @@ def apply_migration(db_path: Path, migration_sql_path: Path) -> bool:
                 pid, added or "no table", indexed,
             )
 
-        applied = schema_migration.apply_if_below(conn, _TARGET_VERSION, _migrate)
+        # apply_if_below's own rollback (ROLLBACK TO + RELEASE) commits an empty
+        # transaction and so bumps the file's change counter. The outer
+        # transaction is rolled back instead: a refused store stays byte-equal.
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            applied = schema_migration.apply_if_below(conn, _TARGET_VERSION, _migrate)
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+        conn.execute("COMMIT")
     finally:
         conn.close()
 
