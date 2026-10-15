@@ -33,10 +33,10 @@ if _LIB_DIR not in sys.path:
 from _streaming_drainer import StreamingDrainerMixin, coerce_chunk_stall  # noqa: E402
 from canonical_event import CanonicalEvent  # noqa: E402
 from env_scrub_patterns import DEFAULT_SCRUB_KEY_PATTERNS, scrub_env  # noqa: E402
+from failure_classification import find_codex_model_refusal
+from providers import provider_registry
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_CODEX_MODEL = "gpt-5.5"
 
 # Cap on stderr lines drained per spawn. A real codex subprocess closes its pipe,
 # so readline() returns b"" and the loop breaks on EOF. This bound is the safety
@@ -345,11 +345,10 @@ def normalize_codex_event(raw: dict, terminal_id: str, dispatch_id: str) -> Cano
 
 
 def _resolve_codex_model(model: Optional[str]) -> str:
-    """Resolve explicit model first, then env default, then the current CLI default."""
-    requested = (model or "").strip()
-    if requested:
-        return requested
-    return os.environ.get("VNX_CODEX_DEFAULT_MODEL", "").strip() or DEFAULT_CODEX_MODEL
+    """Resolve explicit model first, then env default, then ``openai.default_model`` (OI-2062)."""
+    return provider_registry.resolve_codex_model(
+        explicit=model, env_names=("VNX_CODEX_DEFAULT_MODEL",),
+    )
 
 
 def _build_cmd(model: Optional[str]) -> list:
@@ -728,7 +727,10 @@ def spawn_codex(
     if returncode != 0 or error:
         tail_lines = getattr(proc, "_vnx_stderr_tail", None) or []
         tail = b"".join(tail_lines[-60:]).decode("utf-8", "ignore").strip()[-1200:]
-        if tail:
+        refusal = find_codex_model_refusal(error, tail)
+        if refusal:
+            error = f"model_not_supported: {refusal} | requested model: {_resolve_codex_model(model)}"
+        elif tail:
             error = ((error + " | ") if error else "") + f"codex stderr tail: {tail}"
 
     if event_writer_strict and _event_writer_failures > 0:

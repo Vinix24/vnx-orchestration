@@ -35,13 +35,31 @@ DispatcherFn = Callable[[str, str, str, str], str]
 
 # Default panel roster (provider, model). Each entry routes through its own governed lane.
 # deepseek-harness is optional (needs its own key + hardening) — degrades gracefully if absent.
-DEFAULT_ROSTER: List[Tuple[str, str]] = [
-    ("codex", "gpt-5.5"),
+def _codex_registry_default() -> str:
+    from providers import provider_registry
+    return provider_registry.CODEX_REGISTRY_DEFAULT
+
+
+_DEFAULT_ROSTER_ENTRIES: List[Tuple[str, str]] = [
+    ("codex", _codex_registry_default()),
     ("kimi", "kimi-k3"),
     ("claude", "sonnet"),
     ("glm-harness", "glm-5.2"),
     ("deepseek-harness", "deepseek-v4-pro"),
 ]
+
+
+def default_roster() -> List[Tuple[str, str]]:
+    """The shipped roster, with the codex model resolved from the registry (OI-2062).
+
+    Resolved when the roster is built, never at import time and never from a
+    model name written in this module.
+    """
+    from providers import provider_registry
+    return [
+        (provider, provider_registry.resolve_codex_model() if model == provider_registry.CODEX_REGISTRY_DEFAULT else model)
+        for provider, model in _DEFAULT_ROSTER_ENTRIES
+    ]
 
 
 @dataclass
@@ -436,7 +454,7 @@ def run_deliberation(
     spec = MODES.get(mode)
     if spec is None:
         raise ValueError(f"unknown mode {mode!r}; choose one of {sorted(MODES)}")
-    roster = roster or DEFAULT_ROSTER
+    roster = roster or default_roster()
     ctx_block = f"\n\n## Shared context\n{context}\n" if context else ""
     result = DeliberationResult(mode=mode, question=question)
 
@@ -973,4 +991,4 @@ def _first_ok(
     return unmeasured_fallback if unmeasured_fallback is not None else last
 
 
-__all__ = ["MODES", "DEFAULT_ROSTER", "ModeSpec", "DeliberationResult", "run_deliberation"]
+__all__ = ["MODES", "default_roster", "ModeSpec", "DeliberationResult", "run_deliberation"]

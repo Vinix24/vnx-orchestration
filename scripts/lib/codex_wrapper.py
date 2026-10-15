@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """codex_wrapper.py — Lightweight Codex CLI wrapper with cost emission.
 
-Wraps `codex exec --json --model <model>` (prompt via stdin) and emits a
+Wraps `codex exec --json --model <model>` (model from openai.default_model unless given) (prompt via stdin) and emits a
 provider cost event to .vnx-data/events/provider_costs.ndjson per ADR-005.
 
 BILLING SAFETY: only subprocess.Popen(["codex", "exec", "--json"]) is invoked.
@@ -22,7 +22,6 @@ if _LIB_DIR not in sys.path:
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CODEX_MODEL = "gpt-5.5"
 DEFAULT_TIMEOUT = 300.0
 
 
@@ -55,7 +54,7 @@ def _parse_codex_token_usage(stdout: str) -> Optional[dict]:
 
 def codex_exec(
     prompt: str,
-    model: str = DEFAULT_CODEX_MODEL,
+    model: Optional[str] = None,
     dispatch_id: Optional[str] = None,
     project_id: Optional[str] = None,
     timeout: float = DEFAULT_TIMEOUT,
@@ -68,6 +67,9 @@ def codex_exec(
     Raises RuntimeError on non-zero exit.
     """
     from provider_costs import emit_provider_cost, _compute_cost_from_rates  # noqa: PLC0415
+    from providers import provider_registry
+
+    model = provider_registry.resolve_codex_model(explicit=model)
 
     cmd = ["codex", "exec", "--json", "--model", model]
 

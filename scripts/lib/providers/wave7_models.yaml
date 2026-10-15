@@ -176,6 +176,15 @@ providers:
     enabled: true
     api_key_env: OPENAI_API_KEY
     dispatch_enum: codex
+    # Operator decision 2026-10-15 (OI-2062): the model every codex launch path
+    # passes (gate_runner codex_gate, codex_wrapper, codex_spawn, plan-gate panel,
+    # deliberation panel) is resolved from this key by
+    # provider_registry.resolve_codex_model. Measured: since 2026-10-14 ~18:45 codex
+    # refuses gpt-5.5 for the ChatGPT login with http 400 ("not supported when using
+    # Codex with a ChatGPT account"). On a ChatGPT login codex only accepts the models
+    # in its own ~/.codex/models_cache.json, so this value must be one that cache lists.
+    # No code path may carry a model name of its own.
+    default_model: gpt-6-astra
     models:
       # Price corrected 2026-08-19: this key carried the gpt-5.4 price
       # (1.25/10.00) rather than gpt-5.5's own rate.
@@ -204,8 +213,8 @@ providers:
       # Allowlist extension by operator decision 2026-09-05
       # (dispatch-20260905-084500-registry-gpt6-astra): GPT-6 Astra released
       # 2026-09-03, broad rollout 2026-09-05. Deliberate addition, not an
-      # automatic pickup — gpt-5.5/gpt-5.4 stay registered; DEFAULT_CODEX_MODEL
-      # in scripts/lib/provider_spawns/codex_spawn.py stays put.
+      # automatic pickup — gpt-5.5/gpt-5.4 stay registered. Since 2026-10-15 this
+      # model is also the provider default (openai.default_model above, OI-2062).
       # Cost notes that shaped this entry:
       #   - prompts above 272K input tokens are billed at 2x input and 1.5x
       #     output for the WHOLE request; the flat rates below apply under that

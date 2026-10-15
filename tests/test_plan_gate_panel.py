@@ -407,10 +407,10 @@ def test_run_panel_all_pass(tmp_path):
     doc.write_text("## Problem\n## Approach\n", encoding="utf-8")
     # every default-panel provider passes -> PASS across the full family panel (panel grew to
     # five families in #991, so map every default provider rather than a hard-coded three).
-    disp = _fake_dispatcher({m["provider"]: '{"verdict": "pass"}' for m in pgp.DEFAULT_PANEL})
+    disp = _fake_dispatcher({m["provider"]: '{"verdict": "pass"}' for m in pgp.default_panel()})
     out = pgp.run_panel(doc, track_id="feat-x", project_id="p1", dispatcher=disp)
     assert out["decision"] == "PASS"
-    assert len(out["panelists"]) == len(pgp.DEFAULT_PANEL)
+    assert len(out["panelists"]) == len(pgp.default_panel())
 
 
 def test_run_panel_one_block_revises(tmp_path):
@@ -2220,7 +2220,7 @@ def test_load_panel_seats_parses_config_reproducing_default_panel(tmp_path):
     shipped = repo_root / "configs" / "plan_gate_panel.yaml"
     assert shipped.is_file(), "configs/plan_gate_panel.yaml must exist"
     seats = pgp.load_panel_seats(shipped)
-    assert seats == pgp.DEFAULT_PANEL
+    assert seats == pgp.default_panel()
     # every seat carries the three documented keys
     for s in seats:
         assert set(s.keys()) == {"label", "provider", "model_arg"}
@@ -2228,7 +2228,7 @@ def test_load_panel_seats_parses_config_reproducing_default_panel(tmp_path):
 
 def test_load_panel_seats_absent_file_falls_back_to_default_panel(tmp_path):
     absent = tmp_path / "does-not-exist.yaml"
-    assert pgp.load_panel_seats(absent) == pgp.DEFAULT_PANEL
+    assert pgp.load_panel_seats(absent) == pgp.default_panel()
 
 
 def test_load_panel_seats_rejects_unknown_provider_with_naming_error(tmp_path):
@@ -2292,16 +2292,16 @@ def test_shipped_config_synthesis_min_seats_is_positive():
 
 
 def test_filter_panel_seats_filters_to_requested_labels():
-    seats = pgp.DEFAULT_PANEL
+    seats = pgp.default_panel()
     filtered = pgp.filter_panel_seats(seats, ["opus", "glm-5.2-harness"])
     labels = [s["label"] for s in filtered]
     assert labels == ["opus", "glm-5.2-harness"]  # configured order, not request order
 
 
 def test_filter_panel_seats_rejects_unknown_label_listing_configured():
-    configured = [s["label"] for s in pgp.DEFAULT_PANEL]
+    configured = [s["label"] for s in pgp.default_panel()]
     with pytest.raises(ValueError) as excinfo:
-        pgp.filter_panel_seats(pgp.DEFAULT_PANEL, ["opus", "ghost"])
+        pgp.filter_panel_seats(pgp.default_panel(), ["opus", "ghost"])
     msg = str(excinfo.value)
     assert "ghost" in msg
     # lists the configured labels so the operator sees what is available
@@ -2316,34 +2316,34 @@ def test_filter_panel_seats_rejects_unknown_label_listing_configured():
 # --------------------------------------------------------------------------
 
 def test_seat_labels_minimal_is_empty():
-    assert pgp.seat_labels_for_governance_variant(pgp.DEFAULT_PANEL, "minimal") == []
+    assert pgp.seat_labels_for_governance_variant(pgp.default_panel(), "minimal") == []
 
 
 def test_seat_labels_default_is_opus_kimi():
-    labels = pgp.seat_labels_for_governance_variant(pgp.DEFAULT_PANEL, "default")
+    labels = pgp.seat_labels_for_governance_variant(pgp.default_panel(), "default")
     assert labels == ["opus", "kimi"]
 
 
 def test_seat_labels_coding_strict_is_three_families():
-    labels = pgp.seat_labels_for_governance_variant(pgp.DEFAULT_PANEL, "coding-strict")
+    labels = pgp.seat_labels_for_governance_variant(pgp.default_panel(), "coding-strict")
     assert labels == ["opus", "kimi", "glm-5.2-harness"]
 
 
 def test_seat_labels_light_is_single_opus_seat():
-    assert pgp.seat_labels_for_governance_variant(pgp.DEFAULT_PANEL, "light") == ["opus"]
-    assert pgp.seat_labels_for_governance_variant(pgp.DEFAULT_PANEL, "business-light") == ["opus"]
+    assert pgp.seat_labels_for_governance_variant(pgp.default_panel(), "light") == ["opus"]
+    assert pgp.seat_labels_for_governance_variant(pgp.default_panel(), "business-light") == ["opus"]
 
 
 def test_seat_labels_new_feature_is_full_panel_regardless_of_variant():
     labels = pgp.seat_labels_for_governance_variant(
-        pgp.DEFAULT_PANEL, "minimal", is_new_feature=True,
+        pgp.default_panel(), "minimal", is_new_feature=True,
     )
-    assert labels == [s["label"] for s in pgp.DEFAULT_PANEL]
+    assert labels == [s["label"] for s in pgp.default_panel()]
 
 
 def test_seat_labels_unknown_variant_fails_loud():
     with pytest.raises(ValueError, match="unknown governance variant"):
-        pgp.seat_labels_for_governance_variant(pgp.DEFAULT_PANEL, "not-a-variant")
+        pgp.seat_labels_for_governance_variant(pgp.default_panel(), "not-a-variant")
 
 
 def test_seat_override_direction_upgrade_when_operator_adds_seats():

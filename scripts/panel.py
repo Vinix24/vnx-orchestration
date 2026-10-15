@@ -19,7 +19,7 @@ _LIB = Path(__file__).resolve().parent / "lib"
 if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 
-from deliberation_panel import DEFAULT_ROSTER, MODES, run_deliberation  # noqa: E402
+from deliberation_panel import default_roster, MODES, run_deliberation
 
 
 def _resolve_reports_dir() -> Path:
@@ -39,10 +39,10 @@ def _parse_seats(value: str | None) -> "list[tuple[str, str]] | None":
 
     seats = [part.strip() for part in value.split(",")]
     if not seats or any(not seat for seat in seats):
-        known = ", ".join(sorted(provider for provider, _ in DEFAULT_ROSTER))
+        known = ", ".join(sorted(provider for provider, _ in default_roster()))
         raise ValueError(f"--seats must be a comma-list of known seats: {known}")
 
-    known_roster = {provider: (provider, model) for provider, model in DEFAULT_ROSTER}
+    known_roster = {provider: (provider, model) for provider, model in default_roster()}
     unknown = [seat for seat in seats if seat not in known_roster]
     if unknown:
         known = ", ".join(sorted(known_roster))
