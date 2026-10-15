@@ -255,7 +255,7 @@ def test_auto_gate_trigger_passes_dispatch_id_to_log_gate_result(tmp_path, monke
             gh_pr_ensure, "ensure_pr",
             return_value={"pr_number": 261, "created": False, "reason": None},
         ),
-        patch.object(auto_gate_trigger, "_trigger_gate", return_value=True),
+        patch.object(auto_gate_trigger, "_trigger_gate", return_value=auto_gate_trigger.TRIGGERED),
         patch.object(auto_gate_trigger, "_log_auto_gate_event", return_value=None),
     ):
         # Patch parse_feature_plan via module import

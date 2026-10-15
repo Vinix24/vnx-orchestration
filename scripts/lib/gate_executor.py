@@ -346,10 +346,14 @@ class GateExecutorMixin:
         self,
         request_result: Dict[str, Any],
         pr_number: int,
+        head_sha: Optional[str] = None,
     ) -> tuple:
         """Execute all requested gates and classify results.
 
         Returns (gates_list, has_required_failure) tuple.
+
+        ``head_sha`` is the PR head the caller already observed for this call
+        (``request_and_execute``); ``None`` looks it up here.
 
         has_required_failure is a UNION across gates, not a majority: it flips
         True the moment ANY gate in this call is not decided_pass — there is no
@@ -400,7 +404,8 @@ class GateExecutorMixin:
         # about a different commit.
         #
         # Fetched once per call, not per gate: it is a gh round-trip.
-        head_sha = _rec.get_pr_head_sha(pr_number)
+        if head_sha is None:
+            head_sha = _rec.get_pr_head_sha(pr_number)
 
         for req in request_result.get("requested", []):
             gate_name = req.get("gate", "")
@@ -491,8 +496,17 @@ class GateExecutorMixin:
         Sets ``VNX_CODEX_HEADLESS_ENABLED=1`` in the process environment before
         checking availability so codex is never silently disabled during
         enforcement.
+
+        The PR head is looked up ONCE for the whole call and handed to both
+        halves: the request round judges a switched-off seat's standing verdict
+        against it, and the executor binds every result to it. Two separate gh
+        round-trips could disagree, and a standing verdict would then be checked
+        against a different head than the one this call reports.
         """
+        import gate_recorder as _rec
+
         os.environ["VNX_CODEX_HEADLESS_ENABLED"] = "1"
+        head_sha = _rec.get_pr_head_sha(pr_number)
 
         request_result = self.request_reviews(
             pr_number=pr_number,
@@ -502,10 +516,11 @@ class GateExecutorMixin:
             changed_files=changed_files,
             mode=mode,
             dispatch_id=dispatch_id,
+            head_sha=head_sha,
         )
 
         gates, has_required_failure = self._execute_requested_gates(
-            request_result, pr_number,
+            request_result, pr_number, head_sha=head_sha,
         )
 
         return {

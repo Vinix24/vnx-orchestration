@@ -12,7 +12,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from atomic_io import atomic_write_json
 from auto_merge_policy import codex_final_gate_required
@@ -20,14 +20,21 @@ from dispatch_spec import REGISTERED_GATE_NAMES, RETIRED_GATE_NAMES, retired_gat
 from review_contract import ReviewContract
 from gemini_prompt_renderer import render_gemini_prompt
 from gate_recorder import (
+    PROVIDER_SWITCHED_OFF_REASON,
     QUOTA_REFUSAL_REASON,
     gate_is_available,
     gate_provider_reachability,
+    gate_switch_refusal,
     get_pr_head_sha,
+    resolve_gate_provider,
     result_is_for_head,
     write_result_guarded,
 )
+from gate_executor import _classify_sha_binding
+from gate_result_parser import evidence_error
+from gate_status import decided_verdict, has_complete_evidence
 from governance_emit import _classify_lane_log_text
+from provider_switch import SwitchDecision
 from claude_github_receipt import (
     ClaudeGitHubReviewReceipt,
     STATE_NOT_CONFIGURED,
@@ -321,6 +328,117 @@ _REVIEW_REQUEST_REFUSED_STATUSES = frozenset({
 })
 
 
+# Seat states (``_classify_review_seat_failure``) whose record does not hold the
+# seat: the walk decides the seat as if the record were absent, reachability
+# included. An expired or unverifiable exhaustion (OI-1569 tak 1+2), and a
+# ``provider_switched_off`` note left by a round in which the family was off.
+_RECORD_DOES_NOT_HOLD_THE_SEAT = frozenset({
+    "lane_exhausted_expired",
+    "lane_exhausted_unknown_age",
+    "switched_off",
+})
+
+
+# The consumer name every review-seat switch decision carries in its detail line.
+_SEAT_SWITCH_CONSUMER = "review_gate_request"
+
+
+class _PrHead:
+    """The PR head for one request round: handed in, or looked up at most once.
+
+    ``request_and_execute`` hands in the head it observed, so the round and the
+    executor judge every record against one answer. ``request_reviews`` on its
+    own looks the head up lazily, on the first seat that needs it, so a round in
+    which no seat has a record costs no gh round-trip. ``""`` is an answer too:
+    the head could not be resolved.
+    """
+
+    def __init__(self, pr_number: int, sha: Optional[str] = None) -> None:
+        self._pr_number = pr_number
+        self._sha = sha
+
+    def sha(self) -> str:
+        if self._sha is None:
+            self._sha = get_pr_head_sha(self._pr_number)
+        return self._sha
+
+
+def _verdict_stands(existing: Optional[Dict[str, Any]], head_sha: str) -> bool:
+    """Does ``existing`` hold a decided pass or fail about ``head_sha``?
+
+    The switch governs calls, never evidence: a switched-off seat whose own
+    decided verdict on this head is on disk keeps the seat. It is neither
+    re-dispatched nor passed over to a successor, so switching a family off can
+    never turn a standing FAIL into a successor's PASS. Whether that verdict may
+    then be reported as the seat's verdict is :func:`_standing_verdict_gap`.
+    """
+    return existing is not None and bool(decided_verdict(existing)) and result_is_for_head(existing, head_sha)
+
+
+def _standing_verdict_gap(existing: Dict[str, Any], head_sha: str) -> str:
+    """Why ``existing`` may not stand as a switched-off seat's verdict on ``head_sha``; ``""`` when it may.
+
+    A standing verdict is reported in place of a run, so it clears the bar a
+    fresh result clears before the executor counts it, with the same code:
+
+    - evidence: ``gate_status.has_complete_evidence``, the executor's own check
+      (terminal, a populated ``contract_hash`` and ``report_path``, the whole
+      diff reviewed), and ``gate_result_parser.evidence_error``, the result
+      writer's check that the report file is on disk;
+    - head: the record's ``commit_sha`` against the head this request observed,
+      classified by the executor's ``_classify_sha_binding``. Only ``match``
+      stands. The executor lets an ``unknown`` binding through for a result it
+      just produced; a verdict reused instead of a run is evidence about this
+      head only when it provably names it.
+    """
+    record_sha = str(existing.get("commit_sha") or "")
+    binding = _classify_sha_binding(head_sha, record_sha)
+    if binding != "match":
+        return (
+            f"head binding {binding}: the record names commit {record_sha[:8] or '(none)'}, "
+            f"the observed head is {head_sha[:8] or '(unknown)'}"
+        )
+    if not has_complete_evidence(existing):
+        return "evidence incomplete: contract_hash or report_path not populated, or a partial review"
+    return evidence_error(existing)
+
+
+def _takeover_failure_reason(path: List[Dict[str, Any]], reader: str) -> str:
+    """The canonical ``failure_reason`` of a takeover: every hop with its own reason."""
+    return " -- ".join(
+        f"{hop['gate']} unavailable ({hop['reason']}): {hop['detail']}" for hop in path
+    ) + f" -- {reader} substituted as reader"
+
+
+def _standing_verdict_payload(
+    existing: Dict[str, Any], gate: str, verdict: str, decision: SwitchDecision,
+    path: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """The seat payload that reports a switched-off ``gate``'s standing ``verdict``.
+
+    Status and evidence as recorded, plus the switch decision, plus the takeover
+    path when the walk passed over other seats to reach ``gate``. Built in memory
+    only: nothing is written over the evidence record.
+    """
+    payload = dict(existing)
+    payload["gate"] = gate
+    payload["provider_switch"] = decision.detail()
+    payload["redispatch_refused"] = (
+        f"{gate} is switched off; its own {verdict} on this head stands and is not re-dispatched"
+    )
+    if path:
+        last_hop = path[-1]
+        payload.update({
+            "failure_reason": _takeover_failure_reason(path, gate),
+            "takeover": True,
+            "takeover_from": last_hop["gate"],
+            "takeover_reason": last_hop["reason"],
+            "takeover_source_status": last_hop["status"],
+            "takeover_path": path,
+        })
+    return payload
+
+
 def _gates_with_accepted_request(requested: Iterable[Dict[str, Any]]) -> List[str]:
     """Gates whose request in this ``request_reviews`` round was actually
     dispatched, in the order requested. A payload the request itself refused
@@ -423,13 +541,25 @@ class GateRequestHandlerMixin:
             )
 
     def _kimi_gate_available(self) -> bool:
-        return gate_is_available("kimi_gate")
+        return gate_is_available("kimi_gate", state_dir=getattr(self, "state_dir", None))
 
     def _glm_gate_available(self) -> bool:
-        return gate_is_available("glm_gate")
+        return gate_is_available("glm_gate", state_dir=getattr(self, "state_dir", None))
 
     def _deepseek_gate_available(self) -> bool:
-        return gate_is_available("deepseek_gate")
+        return gate_is_available("deepseek_gate", state_dir=getattr(self, "state_dir", None))
+
+    def _seat_switch_refusal(self, gate: str) -> Optional[SwitchDecision]:
+        """The provider switch's refusal for a review seat, or ``None`` when it may be called.
+
+        A retired gate is left to ``_dispatch_one_review``, which books it
+        ``retired_review_gate``: it is no reviewer at all, switched on or off.
+        """
+        if gate in RETIRED_GATE_NAMES:
+            return None
+        return gate_switch_refusal(
+            gate, consumer=_SEAT_SWITCH_CONSUMER, state_dir=getattr(self, "state_dir", None),
+        )
 
     def _dispatch_one_review(
         self,
@@ -530,6 +660,14 @@ class GateRequestHandlerMixin:
             'no_response'        -- toestand 3: a bare non-zero exit with no
                                      body, or no signal at all. Never take
                                      over.
+            'switched_off'       -- a ``provider_switched_off`` note: the
+                                     operator's switch refused the call in an
+                                     earlier round. Classified by its reason,
+                                     before any text scan, so an operator's
+                                     reason text that happens to read like a
+                                     quota message is never ``lane_exhausted``.
+                                     The record does not hold the seat; the
+                                     switch is consulted fresh instead.
             'ok'                 -- a real terminal verdict (pass/fail), or a
                                      not_executable refusal that is not a
                                      provider reason (e.g. glm's pre-dlv1
@@ -537,6 +675,8 @@ class GateRequestHandlerMixin:
                                      Dispatch normally.
         """
         status = result.get("status", "")
+        if status in ("not_executable", "unavailable") and result.get("reason") == PROVIDER_SWITCHED_OFF_REASON:
+            return "switched_off"
         if status == "not_executable":
             # A code-not-shipped refusal is not a provider outage -- taking
             # over FROM a seat that was never real would misattribute cause.
@@ -800,11 +940,14 @@ class GateRequestHandlerMixin:
     ) -> Dict[str, Any]:
         """Named terminal end-state (BETA3-E1): the takeover chain starting
         from ``gate`` walked every configured hop and every one of them was
-        ``lane_exhausted``, with no further successor configured. Written to
-        its OWN file (``*-chain-exhausted.json``) -- it never overwrites any
-        individual gate's own request/result record, and it is NEVER a
-        silent re-dispatch of ``gate`` itself, which ``path`` already proves
-        dead.
+        passed over (``lane_exhausted``, recorded unreachable, or switched off
+        by the operator's provider switch), with no further successor
+        configured. The failure reason names each hop's own reason, so a chain
+        that ran out on ``provider_switched_off`` reads differently from one
+        that ran out on quota. Written to its OWN file
+        (``*-chain-exhausted.json``) -- it never overwrites any individual
+        gate's own request/result record, and it is NEVER a silent re-dispatch
+        of ``gate`` itself, which ``path`` already proves dead.
         """
         from review_gate_manager import _utc_now
 
@@ -861,39 +1004,75 @@ class GateRequestHandlerMixin:
             "status": "unreachable",
         }
 
+    def _switched_off_seat_hop(self, gate: str, decision: SwitchDecision) -> Dict[str, Any]:
+        """A takeover-path hop for a seat the operator's provider switch refuses.
+
+        Same shape as :meth:`_unreachable_seat_hop`. The hop is the only place
+        the refusal is recorded on the walk: it is never written to the
+        reachability record that hop reads, so switching the family back on
+        leaves no cooldown and no unreachable fact behind.
+        """
+        logger.info(
+            "gate_request_handler: passing over gate=%s -- %s", gate, decision.detail(),
+        )
+        return {
+            "gate": gate,
+            "reason": PROVIDER_SWITCHED_OFF_REASON,
+            "status": "disabled",
+            "detail": decision.detail(),
+        }
+
     def _walk_takeover_chain(
         self, gate: str, pr_number: int, chain: Dict[str, str],
-    ) -> "tuple[Optional[str], List[Dict[str, Any]]]":
-        """Walk the takeover ``chain`` from ``gate`` and return ``(reader, path)``.
+        refusal: Optional[SwitchDecision], *, head: _PrHead,
+    ) -> "tuple[Optional[str], List[Dict[str, Any]], Optional[SwitchDecision]]":
+        """Walk the takeover ``chain`` from ``gate`` and return ``(reader, path, reader_refusal)``.
 
         ``reader`` is the first gate on the chain that is not recorded as
-        exhausted or unreachable for this PR, and ``path`` is one hop per
-        seat passed over on the way (empty when ``gate`` itself reads).
-        ``reader`` is ``None`` when the chain ran out with the last hop still
-        dead: a named terminal end-state the caller books via
+        exhausted or unreachable for this PR and not switched off, and ``path``
+        is one hop per seat passed over on the way (empty when ``gate`` itself
+        reads). ``reader`` is ``None`` when the chain ran out with the last hop
+        still dead: a named terminal end-state the caller books via
         ``_chain_exhausted_result``, never a fall-back to ``gate``. The rules the
-        walk applies (lane exhaustion, head scoping, reachability) are
+        walk applies (switch, lane exhaustion, head scoping, reachability) are
         documented on ``_dispatch_review_seat``.
+
+        ``refusal`` is the switch decision the caller already made for ``gate``;
+        every later candidate is decided here, fresh. ``reader_refusal`` is not
+        ``None`` only when the walk stopped at a switched-off seat because it
+        holds its own decided verdict on this head: the caller decides whether
+        that verdict stands (``_refuse_switched_off_seat``) and dispatches
+        nothing. ``head`` is the round's PR head (``_PrHead``).
         """
         path: List[Dict[str, Any]] = []
         current = gate
-        head_sha: Optional[str] = None  # resolved lazily; see _dispatch_review_seat
+        current_refusal = refusal
         while True:
             hop: Optional[Dict[str, Any]] = None
             consult_reachability = True
             existing_result = self._read_existing_gate_result(current, pr_number)
             if existing_result is not None:
-                if head_sha is None:
-                    head_sha = get_pr_head_sha(pr_number)
+                head_sha = head.sha()
                 if not result_is_for_head(existing_result, head_sha):
                     logger.info(
                         "gate_request_handler: ignoring gate=%s result for pr=%s "
                         "recorded against head=%r while the PR head is %r -- a "
                         "verdict about another commit cannot decide whether this "
-                        "seat is skipped; dispatching it live (OI-1668)",
+                        "seat is skipped; the seat is decided as if it had no "
+                        "record (OI-1668)",
                         current, pr_number,
                         (existing_result.get("commit_sha") or ""), head_sha,
                     )
+                elif current_refusal is not None:
+                    if _verdict_stands(existing_result, head_sha):
+                        logger.info(
+                            "gate_request_handler: gate=%s is switched off, but its own "
+                            "%s on pr=%s head=%r holds the seat -- not re-dispatched and "
+                            "not passed over (%s)",
+                            current, decided_verdict(existing_result), pr_number, head_sha,
+                            current_refusal.detail(),
+                        )
+                        return current, path, current_refusal
                 else:
                     seat_state = self._classify_review_seat_failure(existing_result)
                     if seat_state == "lane_exhausted":
@@ -913,20 +1092,26 @@ class GateRequestHandlerMixin:
                             "detail": hop_detail,
                             "status": existing_result.get("status", ""),
                         }
-                    elif seat_state not in ("lane_exhausted_expired", "lane_exhausted_unknown_age"):
+                    elif seat_state not in _RECORD_DOES_NOT_HOLD_THE_SEAT:
                         # The seat answered (or abstained) on THIS head: its own
                         # record decides, and a provider-level record does not
                         # overrule a result this PR already has.
                         consult_reachability = False
+            # A switched-off seat is passed over before a live dispatch would
+            # happen, ahead of reachability: the hop names the switch, and a
+            # refusal is never read from or written to the reachability record.
+            if hop is None and current_refusal is not None:
+                hop = self._switched_off_seat_hop(current, current_refusal)
             if hop is None and consult_reachability:
                 hop = self._unreachable_seat_hop(current)
             if hop is None:
-                return current, path
+                return current, path, None
             path.append(hop)
             next_gate = chain.get(current)
             if next_gate is None:
-                return None, path
+                return None, path, None
             current = next_gate
+            current_refusal = self._seat_switch_refusal(current)
 
     def _dispatch_review_seat(
         self,
@@ -939,6 +1124,7 @@ class GateRequestHandlerMixin:
         dispatch_id: str,
         chain: Optional[Dict[str, str]] = None,
         dispatched: Optional[Iterable[str]] = None,
+        head: Optional[_PrHead] = None,
     ) -> Optional[Dict[str, Any]]:
         """Dispatch one review-stack seat, walking the configured takeover
         CHAIN (BETA3-E1) forward while every candidate's own last-recorded
@@ -1006,15 +1192,18 @@ class GateRequestHandlerMixin:
         already moved to ``1f8c985f``, and the walk kept routing around a seat
         that had never been asked about the current code.
 
-        The head sha is resolved LAZILY -- once, on the first candidate that
-        actually has a prior result -- so the common first-round shape (no
-        record anywhere) still costs no GitHub round-trip, and a multi-hop
-        walk costs one lookup rather than one per hop. When it cannot be
-        resolved at all (``""``: gh missing, unauthenticated, or a PR that
-        does not resolve) the head question is unanswerable, and
-        ``result_is_for_head`` answers True so the walk behaves exactly as it
-        did before -- a failed lookup must never silently redirect a takeover
-        decision.
+        The head sha comes from ``head`` (``_PrHead``), shared by every seat of
+        the round: the head ``request_and_execute`` observed, or one resolved
+        LAZILY -- once, on the first candidate that actually has a prior result
+        -- so the common first-round shape (no record anywhere) still costs no
+        GitHub round-trip, and a multi-hop walk costs one lookup rather than
+        one per hop. When it cannot be resolved at all (``""``: gh missing,
+        unauthenticated, or a PR that does not resolve) the head question is
+        unanswerable, and ``result_is_for_head`` answers True so the walk
+        behaves exactly as it did before -- a failed lookup must never silently
+        redirect a takeover decision. A standing verdict is held to the
+        stricter bar: an unanswerable head never lets one stand
+        (``_standing_verdict_gap``).
 
         ONE REQUEST PER GATE (``dispatched``): the gates that earlier seats of
         the SAME ``request_reviews`` round actually got dispatched
@@ -1032,10 +1221,36 @@ class GateRequestHandlerMixin:
         ``not_configured``, ``chain_exhausted``) asked no reader anything, so a
         later seat that resolves to the same gate is dispatched, not skipped: a
         refusal must not suppress the one seat that could still get a verdict.
+
+        PROVIDER SWITCH (provider-schakelaar C): the operator's switch is
+        consulted for every seat before the chain branch, and for every
+        candidate the walk reaches, read fresh each time. A switched-off
+        candidate is passed over with a ``provider_switched_off`` hop before a
+        live dispatch would happen, in the same round (no second round is
+        needed: the refusal is known now, not measured from a failed run). A
+        chain that runs out that way books ``chain_exhausted`` with each hop's
+        reason named. A switched-off seat with no successor to pass over to
+        (not a chain key: the chain tail, an empty chain, a profile stack) is
+        booked ``not_executable``/``provider_switched_off``, a record the gate's
+        own later result for the same head replaces. The switch governs calls,
+        never evidence: a switched-off seat whose own decided pass or fail on
+        this head is on disk keeps the seat -- it is neither re-dispatched nor
+        passed over, and nothing is written over that record. The verdict is
+        reported as the seat's only when it clears the bar a fresh result
+        clears before the executor counts it (complete evidence, its report on
+        disk, the observed head: ``_standing_verdict_gap``); otherwise the seat
+        is booked ``not_executable``/``provider_switched_off`` and never counts
+        as a pass. The refusal never reaches the reachability record, the
+        known-rejected ledger or a cooldown, so switching the family back on
+        lets the next request dispatch it.
         """
         already = set(dispatched or ())
         if chain is None:
             chain = _build_review_gate_takeover_chain()
+        if head is None:
+            head = _PrHead(pr_number)
+
+        refusal = self._seat_switch_refusal(gate)
 
         # A gate with no configured successor -- the chain is empty (operator
         # explicitly disabled takeover) or this gate was never wired into it --
@@ -1046,7 +1261,7 @@ class GateRequestHandlerMixin:
         current: str = gate
         path: List[Dict[str, Any]] = []
         if gate in chain:
-            walked, path = self._walk_takeover_chain(gate, pr_number, chain)
+            walked, path, refusal = self._walk_takeover_chain(gate, pr_number, chain, refusal, head=head)
             if walked is None:
                 return self._chain_exhausted_result(
                     gate=gate, pr_number=pr_number, branch=branch, dispatch_id=dispatch_id, path=path,
@@ -1061,23 +1276,130 @@ class GateRequestHandlerMixin:
             )
             return None
 
+        if refusal is not None:
+            return self._refuse_switched_off_seat(
+                current, refusal, pr_number=pr_number, branch=branch, risk_class=risk_class,
+                changed_files=changed_files, mode=mode, dispatch_id=dispatch_id, path=path, head=head,
+            )
+
         payload = self._dispatch_one_review(current, pr_number, branch, risk_class, changed_files, mode, dispatch_id)
         if not path:
             return payload
 
-        failure_reason = " -- ".join(
-            f"{hop['gate']} unavailable ({hop['reason']}): {hop['detail']}" for hop in path
-        ) + f" -- {current} substituted as reader"
         last_hop = path[-1]
         return self._stamp_takeover_annotations(
             payload,
             pr_number=pr_number,
             takeover_from=last_hop["gate"],
-            failure_reason=failure_reason,
+            failure_reason=_takeover_failure_reason(path, current),
             takeover_reason=last_hop["reason"],
             takeover_source_status=last_hop["status"],
             takeover_path=path,
         )
+
+    def _refuse_switched_off_seat(
+        self,
+        gate: str,
+        decision: SwitchDecision,
+        *,
+        pr_number: int,
+        branch: str,
+        risk_class: str,
+        changed_files: List[str],
+        mode: str,
+        dispatch_id: str,
+        path: List[Dict[str, Any]],
+        head: _PrHead,
+    ) -> Dict[str, Any]:
+        """The seat payload for a switched-off ``gate`` that is not passed over.
+
+        Two shapes, and neither dispatches anything:
+
+        - ``gate``'s own decided verdict is on disk and stands
+          (:func:`_standing_verdict_gap`: complete evidence, its report on disk,
+          and the head ``head`` observed). The payload reports it (status and
+          evidence as recorded, plus the switch decision) and NOTHING is
+          written: no request, no result, no takeover annotation on the
+          evidence record.
+        - otherwise, including a decided verdict that does not stand: ``gate``
+          is booked ``not_executable``/``provider_switched_off`` through the
+          same request-time writers every other refusal uses (request record,
+          guarded result record, skip-rationale), which never counts as a pass.
+          A verdict that does not stand is named on the booked request; the
+          guard leaves the record itself on disk.
+        """
+        existing = self._read_existing_gate_result(gate, pr_number)
+        verdict = decided_verdict(existing) if existing is not None else ""
+        gap = ""
+        if verdict:
+            # The head lookup is a gh round-trip, so it runs only when there is a verdict to bind.
+            gap = _standing_verdict_gap(existing, head.sha())
+            if not gap:
+                return _standing_verdict_payload(existing, gate, verdict, decision, path)
+            gap = f"{gate}'s own {verdict} on disk does not stand: {gap}"
+            logger.warning("gate_request_handler: pr=%s %s", pr_number, gap)
+        return self._book_switched_off_seat(
+            gate, decision, pr_number=pr_number, branch=branch, risk_class=risk_class,
+            changed_files=changed_files, mode=mode, dispatch_id=dispatch_id, head=head,
+            standing_verdict_refused=gap,
+        )
+
+    def _book_switched_off_seat(
+        self,
+        gate: str,
+        decision: SwitchDecision,
+        *,
+        pr_number: int,
+        branch: str,
+        risk_class: str,
+        changed_files: List[str],
+        mode: str,
+        dispatch_id: str,
+        head: _PrHead,
+        standing_verdict_refused: str = "",
+    ) -> Dict[str, Any]:
+        """Book a switched-off seat ``not_executable``/``provider_switched_off``.
+
+        Written with the decision already made for this seat, never a second
+        one, so the request record and the result record name the same
+        refusal. The result write goes through the overwrite guard, where
+        ``provider_switched_off`` is a runner-refusal note: it never displaces
+        what the provider already did on this head, and the gate's own later
+        result replaces it. ``commit_sha`` is the round's head (``head``), and
+        ``standing_verdict_refused`` names why the seat's own verdict on disk
+        did not stand, when it had one.
+        """
+        from review_gate_manager import _utc_now
+
+        logger.warning(
+            "gate_request_handler: switched-off seat %s for pr=%s is not passed over -- "
+            "booking %s (%s)", gate, pr_number, PROVIDER_SWITCHED_OFF_REASON, decision.detail(),
+        )
+        provider = resolve_gate_provider(gate)
+        requested_at = _utc_now()
+        payload: Dict[str, Any] = {
+            "gate": gate,
+            "status": "not_executable",
+            "provider": provider[1] if provider else "",
+            "branch": branch,
+            "pr_number": pr_number,
+            "review_mode": mode,
+            "risk_class": risk_class,
+            "changed_files": changed_files,
+            "requested_at": requested_at,
+            "commit_sha": head.sha(),
+            "report_path": "",
+        }
+        if dispatch_id:
+            payload["dispatch_id"] = dispatch_id
+        if standing_verdict_refused:
+            payload["standing_verdict_refused"] = standing_verdict_refused
+        self._mark_gate_unavailable(
+            payload, gate=gate, pr_number=pr_number, pr_id="", dispatch_id=dispatch_id,
+            classification=(PROVIDER_SWITCHED_OFF_REASON, decision.detail()),
+        )
+        atomic_write_json(self._request_path(gate, pr_number), payload)
+        return payload
 
     def request_reviews(
         self,
@@ -1089,7 +1411,14 @@ class GateRequestHandlerMixin:
         changed_files: Iterable[str],
         mode: str,
         dispatch_id: str = "",
+        head_sha: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """Request every seat of the review stack for ``pr_number``.
+
+        ``head_sha`` is the PR head the caller already observed
+        (``request_and_execute``), shared by every seat of the round; ``None``
+        resolves it lazily, at most once per round (``_PrHead``).
+        """
         from review_gate_manager import DEFAULT_REVIEW_STACK, _utc_now, emit_governance_receipt
 
         changed_files = [str(path).strip() for path in changed_files if str(path).strip()]
@@ -1107,11 +1436,12 @@ class GateRequestHandlerMixin:
         # operator-configured chain, and a single log line per PR-review
         # cycle is enough operator visibility without repeating it per gate.
         chain = _build_review_gate_takeover_chain()
+        head = _PrHead(pr_number, head_sha)
 
         for gate in review_stack_list:
             payload = self._dispatch_review_seat(
                 gate, pr_number, branch, risk_class, changed_files, mode, dispatch_id, chain=chain,
-                dispatched=_gates_with_accepted_request(requested),
+                dispatched=_gates_with_accepted_request(requested), head=head,
             )
             if payload is None:
                 continue
@@ -1155,8 +1485,13 @@ class GateRequestHandlerMixin:
         pr_id: str,
         contract_hash: str = "",
         dispatch_id: str = "",
+        classification: Optional[Tuple[str, str]] = None,
     ) -> None:
         """Record unavailability in payload and write skip/result records.
+
+        ``classification`` is ``(reason, detail)`` when the caller already
+        decided why the gate is unavailable (a provider-switch refusal, decided
+        once per seat); otherwise ``_classify_unavailable`` answers.
 
         The in-memory ``payload`` (the REQUEST record) always carries
         ``reason``/``reason_detail``/``failure_reason`` regardless of what
@@ -1185,7 +1520,7 @@ class GateRequestHandlerMixin:
         call instead (``commit_sha=`` below), so nothing about the refused
         write is lost.
         """
-        reason, detail = self._classify_unavailable(gate)
+        reason, detail = classification or self._classify_unavailable(gate)
         payload["reason"] = reason
         payload["reason_detail"] = detail
         # OI-1415 (same fix as #1666 for phantom_guard/pr_enforcement): stamp
@@ -1624,8 +1959,10 @@ class GateRequestHandlerMixin:
         harness-lane gate: the governed dispatcher drives it and its runner
         file (scripts/glm_gate.py) is only the standalone entry point. Its
         availability is kind-based (gate_recorder.gate_is_available) —
-        decided by REGISTRATION, not by a file on disk. The refusal below is
-        defensive (a registered harness-lane gate is always available): it
+        decided by REGISTRATION and the operator's provider switch, not by a
+        file on disk. A registered harness-lane gate is unavailable only when
+        its family is switched off (booked ``provider_switched_off``); the
+        ``gate_runner_missing`` answer stays as the defensive one. Either way it
         refuses with a reason distinct from ``unknown_review_gate``
         (dispatch_spec Gate rejects an unknown request before it ever
         reaches here) so an operator can tell "not a real gate" apart from
@@ -1655,8 +1992,9 @@ class GateRequestHandlerMixin:
         if dispatch_id:
             payload["dispatch_id"] = dispatch_id
         if not available:
-            reason = "gate_runner_missing"
-            reason_detail = "glm_gate is not available — its registered provider route is not present"
+            # Classified by name (gate_result_parser._classify_unavailable): a
+            # switched-off glm is provider_switched_off, never gate_runner_missing.
+            reason, reason_detail = self._classify_unavailable("glm_gate")
             payload["reason"] = reason
             payload["reason_detail"] = reason_detail
             payload["resolved_at"] = payload["requested_at"]
@@ -1697,8 +2035,8 @@ class GateRequestHandlerMixin:
         """deepseek_gate is a config-based harness-lane gate (OI-1714, dispatch
         20260911-c6 step 2), reached through the "deepseek-harness" provider
         lane rather than a repo script, so its availability is decided by
-        REGISTRATION alone (gate_recorder.gate_is_available) and it is
-        requestable with no runner file on disk. It is a ``dispatch_spec.Gate``
+        REGISTRATION and the provider switch (gate_recorder.gate_is_available)
+        and it is requestable with no runner file on disk. It is a ``dispatch_spec.Gate``
         enum member (OI-1984) and a registered gate name
         (``REGISTERED_GATE_NAMES``): a legal review-gate-takeover-CHAIN link
         (BETA3-E1, 26-08 operator decision), a legal spec/staging gate and a
@@ -1728,8 +2066,8 @@ class GateRequestHandlerMixin:
         if dispatch_id:
             payload["dispatch_id"] = dispatch_id
         if not available:
-            reason = "gate_runner_missing"
-            reason_detail = "deepseek_gate is not available — its registered provider route is not present"
+            # Classified by name, same as _request_glm above.
+            reason, reason_detail = self._classify_unavailable("deepseek_gate")
             payload["reason"] = reason
             payload["reason_detail"] = reason_detail
             payload["resolved_at"] = payload["requested_at"]

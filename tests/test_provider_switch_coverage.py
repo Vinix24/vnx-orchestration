@@ -6,7 +6,7 @@ non-claude provider process or request — over ``scripts/`` (minus ``scripts/sp
 ``scripts/lib/provider_switch.py`` must match it:
 
 - every flagged function calls ``provider_switch.require`` in its own body before its first
-  launch call, is pending (``PENDING_B``/``PENDING_C``), or is exempt with a
+  launch call (``ENFORCED``), is pending (``PENDING_B``), or is exempt with a
   reason;
 - every entry of the measured floor exists, is flagged or listed as undetectable with a
   reason, and is enforced (calls require, or is pending);
@@ -560,24 +560,32 @@ def test_every_exempt_entry_still_matches_something(units):
     assert exempt_violations(units, REPO_ROOT, provider_switch.EXEMPT) == []
 
 
-def test_pending_tuples_partition_the_unenforced_census(units):
-    b, c = provider_switch.PENDING_B, provider_switch.PENDING_C
-    enforced_entries = provider_switch.ENFORCED
-    assert len(set(b)) == len(b) and len(set(c)) == len(c)
-    assert len(set(enforced_entries)) == len(enforced_entries)
-    assert not (set(b) & set(c))
-    assert not (set(enforced_entries) & (set(b) | set(c)))
+def test_enforced_and_pending_tuples_partition_the_census(units):
+    enforced, b = provider_switch.ENFORCED, provider_switch.PENDING_B
+    assert len(set(enforced)) == len(enforced) and len(set(b)) == len(b)
+    assert not (set(enforced) & set(b))
     census = set(provider_switch.LAUNCH_FUNCTIONS)
-    assert set(b) | set(c) | set(enforced_entries) == census
-    enforced = {k for k in census if units[k].require_positions}
-    assert census - enforced == set(b) | set(c)
-    assert all(k.startswith("scripts/gate_runner.py:") for k in c)
+    assert set(enforced) | set(b) == census
+    calling_require = {k for k in census if units[k].require_positions}
+    assert census - calling_require == set(b)
+    assert provider_switch.pending_launch_functions() == {"B": tuple(b)}
 
 
-def test_every_enforced_entry_calls_require_before_its_first_launch_call(units):
+def test_every_enforced_entry_calls_require_before_its_first_launch(units):
+    """ENFORCED is a claim about the code, so the guard reads the code: a detected entry calls
+    require before its first launch call in AST order, an undetectable one calls it at all."""
+    assert provider_switch.ENFORCED
     for key in provider_switch.ENFORCED:
         unit = units[key]
-        assert unit.requires_before_launch, f"{key} is in ENFORCED but does not call require before its launch"
+        if unit.flagged:
+            assert unit.requires_before_launch, f"{key} does not call require before its first launch"
+        else:
+            assert key in provider_switch.UNDETECTED_LAUNCH_FUNCTIONS and unit.require_positions, key
+    assert {
+        "scripts/conversation_analyzer/deep_analyzer.py:DeepAnalyzer._try_deepseek_harness",
+        "scripts/conversation_analyzer/deep_analyzer.py:DeepAnalyzer._try_ollama",
+        "scripts/gate_runner.py:GateRunner._run_with_stall_detection",
+    } <= set(provider_switch.ENFORCED)
 
 
 def test_census_matches_the_detected_set(units):

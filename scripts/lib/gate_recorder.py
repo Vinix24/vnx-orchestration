@@ -35,6 +35,7 @@ from governance_emit import _classify_lane_log_text  # the fabric's single quota
 from governance_receipts import emit_governance_receipt, utc_now_iso
 import gate_depth
 import provider_reachability
+import provider_switch
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +119,60 @@ def resolve_gate_provider(gate: str) -> Optional[Tuple[str, str]]:
     return GATE_PROVIDERS.get(gate)
 
 
+# The reason a review gate is booked under when the operator's provider switch refuses its
+# provider family (provider-schakelaar C). Never a reachability fact: a record with this
+# reason is ``not_executable``, which neither the reachability feed nor the takeover walk's
+# exhaustion check reads as quota, credit or auth.
+PROVIDER_SWITCHED_OFF_REASON = provider_switch.REASON_SWITCHED_OFF
+
+
+def switch_project_id(state_dir: Optional[Path]) -> Optional[str]:
+    """The project a gate's switch decisions are for: the one its own state dir names.
+
+    The state dir is the explicit statement of whose gate this is, so it is passed to the
+    switch as the explicit project. ``None`` when it names no project; the switch then
+    resolves one itself (``VNX_PROJECT_ID``, then the process's state dir).
+    """
+    if state_dir is None:
+        return None
+    import vnx_paths  # deferred import: pulls in data_dir_guard / project_root
+
+    return vnx_paths.project_id_from_state_dir(Path(state_dir)) or None
+
+
+def gate_never_switched(gate: str) -> bool:
+    """True when ``gate``'s family is a class the switch never refuses (decision 2b).
+
+    ``codex_gate`` is codex, the claude gates are claude and the ``gh`` gates are tooling:
+    answered from the gate name alone, without reading the switch or resolving a project. A
+    gate the family map does not know is not answered here; the switch decides it, and so
+    refuses it (fail-closed).
+    """
+    try:
+        family = provider_switch.family_of(gate)
+    except provider_switch.UnknownProviderError:
+        return False
+    return family in provider_switch.NON_SWITCHABLE_CLASSES
+
+
+def gate_switch_refusal(
+    gate: str, *, consumer: str = "review_gate", state_dir: Optional[Path] = None,
+) -> Optional[provider_switch.SwitchDecision]:
+    """The provider switch's refusal for ``gate``, or ``None`` when it may be called.
+
+    The gate name is the identifier: ``kimi_gate`` decides the ``kimi`` family. A class the
+    switch never refuses is answered by :func:`gate_never_switched`. An unregistered gate
+    returns ``None``: it has no provider to call, and the caller's own
+    ``unsupported_gate_type`` answer stays the one that names it. A registered gate the family
+    map does not know is decided, and so refused (fail-closed). Read fresh on every call, so a
+    switch change takes effect on the next request.
+    """
+    if resolve_gate_provider(gate) is None or gate_never_switched(gate):
+        return None
+    decision = provider_switch.decide(gate, consumer=consumer, project_id=switch_project_id(state_dir))
+    return None if decision.allowed else decision
+
+
 def harness_lane_dispatch_prefix(gate: str) -> str:
     """Return the gate-eigen dispatch-id prefix for a harness-lane gate.
 
@@ -176,7 +231,9 @@ def gate_dispatch_identity_error(gate: str, dispatch_id: Optional[str]) -> Optio
     )
 
 
-def gate_is_available(gate: str, *, repo_root: Optional[Path] = None) -> bool:
+def gate_is_available(
+    gate: str, *, repo_root: Optional[Path] = None, state_dir: Optional[Path] = None,
+) -> bool:
     """Availability by REGISTRATION plus lane executability, never path existence.
 
     dispatch 20260911-c6 step 2. The previous rule — ``<runner_path>.exists()``
@@ -199,7 +256,12 @@ def gate_is_available(gate: str, *, repo_root: Optional[Path] = None) -> bool:
     - ``script_runner`` the gate IS a repo script: available when the script
       file is on disk. A gate that still needs a file keeps that check.
     - ``harness_lane``  the gate is config-based: available by registration
-      alone. There is no file to look for, and none is expected.
+      and the operator's provider switch. There is no file to look for, and
+      none is expected. A harness-lane gate whose family is switched off is
+      not available, so the request-time helpers (``_kimi_gate_available``
+      and friends) and every other caller see the same answer; ``state_dir``
+      names the project the switch decides for (provider-schakelaar C). A
+      switch refusal is not a reachability fact and is never booked as one.
 
     An unregistered gate raises :class:`UnknownGateProvider` — never ``False``,
     never a fallback to a binary name invented from the gate's own name.
@@ -221,7 +283,9 @@ def gate_is_available(gate: str, *, repo_root: Optional[Path] = None) -> bool:
     if kind == GATE_PROVIDER_SCRIPT_RUNNER:
         return ((repo_root or _repo_root()) / name).exists()
     if kind == GATE_PROVIDER_HARNESS_LANE:
-        return True
+        return gate_switch_refusal(
+            gate, consumer="gate_recorder.gate_is_available", state_dir=state_dir,
+        ) is None
     raise UnknownGateProvider(
         f"{gate} has an unknown provider kind {kind!r} — cannot determine availability"
     )
@@ -771,8 +835,14 @@ def result_is_for_head(result: Dict[str, Any], head_sha: str) -> bool:
 # over either of them anyway (no runner on disk; no route to one), so widening
 # the hole for them buys nothing and costs the protection. A reason enters
 # this set on a measurement, not on a resemblance.
+#
+# ``provider_switched_off`` (provider-schakelaar C) is the operator's switch
+# saying the gate may not be called right now: a statement about this process's
+# permission, not about the PR or the provider. Once the family is switched back
+# on, the gate's own result for the same head replaces it whatever its status.
 NON_VERDICT_NOT_EXECUTABLE_REASONS: frozenset = frozenset({
     "gate_not_subprocess_routable",
+    PROVIDER_SWITCHED_OFF_REASON,
 })
 
 
@@ -817,10 +887,16 @@ def is_routing_announcement(result: Dict[str, Any]) -> bool:
 # reasons are the runner describing itself — a missing runner or an
 # unregistered gate is no more a verdict about the PR than a refused routing
 # is. A reason enters this set on a measurement, not on a resemblance.
+#
+# ``provider_switched_off`` belongs here too: the switch governs calls, never
+# evidence (provider-schakelaar C). Switching a family off must not erase what
+# its provider already did on this head, an ``unavailable`` outage included, so
+# a switch note lands only on an empty slot or over another runner-refusal note.
 RUNNER_REFUSAL_NOT_EXECUTABLE_REASONS: frozenset = frozenset({
     "gate_not_subprocess_routable",
     "gate_runner_missing",
     "unsupported_gate_type",
+    PROVIDER_SWITCHED_OFF_REASON,
 })
 
 
