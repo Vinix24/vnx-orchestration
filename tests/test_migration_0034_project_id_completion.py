@@ -46,7 +46,7 @@ from coordination_db import (
 )
 from execution_target_registry import ExecutionTargetRegistry
 from inbound_inbox import InboundInbox
-from incident_log import get_budget
+from incident_log import create_incident, get_budget
 from incident_taxonomy import IncidentClass, Severity
 from migrations import auto_apply as auto_apply_mod
 from migrations.apply_0015 import runtime_tables_from_sql
@@ -54,7 +54,7 @@ from migrations.auto_apply import auto_apply
 import tenant_stamping
 from project_scope import TenantUnresolved
 from recommendation_tracker import RecommendationTracker
-from workflow_incident_handler import record_escalation
+from workflow_incident_handler import record_escalation, record_incident
 from workflow_supervisor import WorkflowSupervisor
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -202,8 +202,25 @@ def _rebuild_to_sales_copilot_shape(db: Path, pid: str) -> None:
         conn.close()
 
 
+def _enforce_measured_tenant_shape(db: Path) -> None:
+    """project_id NOT NULL without a default on the four tables outside the
+    seven, as measured on vnx-dev, mission-control, seocrawler-v2,
+    pacompany-engine and sales-copilot: tenant stamping phase 3 left them so.
+    The same phase 3 makes this fixture."""
+    conn = sqlite3.connect(str(db))
+    try:
+        present = [t for t in UX_OUTSIDE_THE_SEVEN if _table_exists(conn, t)]
+        tenant_stamping.run_phase3_enforce(conn, present, db_label="fixture")
+    finally:
+        conn.close()
+
+
 def _make_store(templates: _Templates, root: Path, shape: str, pid: str) -> Path:
-    """A copy of *shape* for *pid* under ``root/.vnx-data/<pid>/state``."""
+    """A copy of *shape* for *pid* under ``root/.vnx-data/<pid>/state``.
+
+    "fresh-at-33" is the at-33 template as the code before 0034 builds a new
+    store: project_id with a default on the seven, and recommendation_outcomes'
+    only natural key without it, (recommendation_id, metric_name)."""
     if shape == "website":
         source = templates.at10(pid)
     else:
@@ -212,8 +229,10 @@ def _make_store(templates: _Templates, root: Path, shape: str, pid: str) -> Path
     shutil.copyfile(source, db)
     if shape == "vnx-dev":
         _strip_to_vnx_dev_shape(db)
+        _enforce_measured_tenant_shape(db)
     elif shape == "sales-copilot":
         _rebuild_to_sales_copilot_shape(db, pid)
+        _enforce_measured_tenant_shape(db)
     return db
 
 
@@ -366,6 +385,8 @@ def test_execution_targets_rows_survive_with_the_store_id(make_store):
 
 
 def test_sales_copilot_shape_gains_only_ux_indexes(make_store):
+    """The ux_<table>_pid indexes and the upsert's per-project key are the only
+    new objects; the table SQL and the rows stay as they were."""
     db = make_store("sales-copilot", "sales-copilot")
     schema_before = _schema(db)
     rows_before = {t: _rows_hash(db, t, ["*"]) for t in SEVEN}
@@ -374,7 +395,9 @@ def test_sales_copilot_shape_gains_only_ux_indexes(make_store):
 
     schema_after = _schema(db)
     added = set(schema_after) - set(schema_before)
-    assert added == {("index", f"ux_{t}_pid") for t in SEVEN + UX_OUTSIDE_THE_SEVEN}
+    assert added == {("index", f"ux_{t}_pid") for t in SEVEN + UX_OUTSIDE_THE_SEVEN} | {
+        ("index", UPSERT_INDEX)
+    }
     assert set(schema_before) <= set(schema_after)
     for key, value in schema_before.items():
         assert schema_after[key] == value, key
@@ -611,18 +634,7 @@ WRITERS: Dict[str, Tuple[Callable[[Path], None], Tuple[str, str]]] = {
          "inbound_inbox"),
     ),
 }
-#: ON CONFLICT(recommendation_id, metric_name) names a single-store natural key;
-#: the sales-copilot shape only has (recommendation_id, metric_name, project_id).
-ON_CONFLICT_SINGLE_STORE_KEY = (
-    "recommendation_tracker.record_baseline",
-    "recommendation_tracker.record_outcome",
-)
-_WRITER_CASES = [
-    (shape, name)
-    for shape in ("vnx-dev", "sales-copilot")
-    for name in WRITERS
-    if not (shape == "sales-copilot" and name in ON_CONFLICT_SINGLE_STORE_KEY)
-]
+_WRITER_CASES = [(shape, name) for shape in ("vnx-dev", "sales-copilot") for name in WRITERS]
 
 
 def _make_stamped_store(make_store, pid: str) -> Path:
@@ -672,28 +684,274 @@ def test_writer_stamps_the_store_id(make_store, shape, writer):
     _assert_writer_stamps(_make_store_and_migrate(make_store, shape, pid), writer, pid)
 
 
-@pytest.mark.parametrize(
-    "writer", [w for w in WRITERS if w not in ON_CONFLICT_SINGLE_STORE_KEY]
-)
+@pytest.mark.parametrize("writer", WRITERS)
 def test_writer_stamps_the_store_id_after_tenant_stamping(make_store, writer):
     """Tenant stamping drops the default 0034 gave the seven; a writer that
     relied on it would fail on NOT NULL there."""
     _assert_writer_stamps(_make_stamped_store(make_store, "proj-a"), writer, "proj-a")
 
 
-@pytest.mark.parametrize("shape", ["sales-copilot", "stamped"])
-@pytest.mark.parametrize("writer", ON_CONFLICT_SINGLE_STORE_KEY)
-def test_on_conflict_writer_names_a_single_store_key(make_store, shape, writer):
-    """Open item, not fixed here: the conflict target lacks project_id, which
-    the composite UNIQUE of the sales-copilot shape carries. Tenant stamping
-    gives every store that shape after 0034. The stamp is not the cause."""
-    if shape == "stamped":
-        db = _make_stamped_store(make_store, "proj-a")
+# ---------------------------------------------------------------------------
+# The two upserts: a conflict target the store carries, in every shape
+# ---------------------------------------------------------------------------
+
+#: Every shape recommendation_outcomes takes: (how it is built, whether 0034 ran).
+UPSERT_SHAPES: Dict[str, Tuple[str, bool]] = {
+    "vnx-dev-before-0034": ("vnx-dev", False),
+    "fresh-at-33-before-0034": ("fresh-at-33", False),
+    "sales-copilot-before-0034": ("sales-copilot", False),
+    "vnx-dev": ("vnx-dev", True),
+    "website": ("website", True),
+    "fresh": ("fresh", True),
+    "sales-copilot": ("sales-copilot", True),
+    "stamped": ("stamped", True),
+}
+
+
+def _upsert_store(make_store, templates, tmp_path, shape: str, pid: str) -> Path:
+    kind, migrate = UPSERT_SHAPES[shape]
+    if kind == "stamped":
+        return _make_stamped_store(make_store, pid)
+    if kind == "fresh":
+        db = _store_db(tmp_path / "fresh", pid)
+        shutil.copyfile(templates.fresh(pid), db)
+        return db
+    db = make_store(kind, pid)
+    if migrate:
+        auto_apply(db)
+    return db
+
+
+@pytest.mark.parametrize("shape", UPSERT_SHAPES)
+def test_upsert_keeps_one_row_per_recommendation_and_metric(make_store, templates, tmp_path, shape):
+    """record_baseline and record_outcome upsert one row per (store,
+    recommendation, metric) on every shape: a baseline, an outcome and a second
+    baseline end in a single row that carries all three writes."""
+    db = _upsert_store(make_store, templates, tmp_path, shape, "proj-a")
+    tracker = _propose(db.parent)
+    raised = None
+    try:
+        tracker.record_baseline("rec-1", "first_pass_success_rate", 0.7, 10)
+        tracker.record_outcome("rec-1", "first_pass_success_rate", 0.8, 10)
+        tracker.record_baseline("rec-1", "first_pass_success_rate", 0.6, 12)
+    except sqlite3.Error as exc:  # vnx-silent-except: reported in the assertion below
+        raised = f"{type(exc).__name__}: {exc}"
+    has_column = "project_id" in _columns(db, "recommendation_outcomes")
+    pid_col = ", project_id" if has_column else ""
+    conn = sqlite3.connect(str(db))
+    try:
+        rows = conn.execute(
+            f"SELECT baseline_value, baseline_sample_size, outcome_value{pid_col}"
+            " FROM recommendation_outcomes"
+            " WHERE recommendation_id = 'rec-1' AND metric_name = 'first_pass_success_rate'"
+        ).fetchall()
+    finally:
+        conn.close()
+    expected = (0.6, 12, 0.8, "proj-a") if has_column else (0.6, 12, 0.8)
+    assert rows == [expected], f"{shape}: rows={rows}, writer raised {raised}"
+
+
+#: The name 0034 gives the upsert's per-project key; the v34 manifest pins it.
+UPSERT_INDEX = "ux_recommendation_outcomes_pid_rec_metric"
+
+
+@pytest.mark.parametrize("shape", ["vnx-dev", "website", "fresh", "sales-copilot", "stamped"])
+def test_0034_gives_the_upsert_a_per_project_key(make_store, templates, tmp_path, shape):
+    """After 0034 recommendation_outcomes carries a full UNIQUE index over
+    (project_id, recommendation_id, metric_name) on every shape, so the upsert's
+    per-project conflict target always has a constraint to match."""
+    db = _upsert_store(make_store, templates, tmp_path, shape, "proj-a")
+    conn = sqlite3.connect(str(db))
+    try:
+        indexes = {r[1]: (r[2], r[4]) for r in conn.execute("PRAGMA index_list(recommendation_outcomes)")}
+        key = [r[2] for r in conn.execute(f"PRAGMA index_info({UPSERT_INDEX})")]
+        owner = conn.execute(
+            "SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND name = ?", (UPSERT_INDEX,)
+        ).fetchone()
+    finally:
+        conn.close()
+    assert owner == ("recommendation_outcomes",), (shape, sorted(indexes))
+    assert indexes[UPSERT_INDEX] == (1, 0)
+    assert key == ["project_id", "recommendation_id", "metric_name"]
+
+
+# ---------------------------------------------------------------------------
+# A shape the v34 manifest rejects is never stamped 34
+# ---------------------------------------------------------------------------
+
+#: Each case: the shape it starts from and the statements that put a wrong
+#: index in the place 0034's ``CREATE ... IF NOT EXISTS`` would fill. The first
+#: two are codex_gate's reproduction on 280b58f7.
+REJECTED_SHAPES: Dict[str, Tuple[str, Tuple[str, ...]]] = {
+    "partial ux_<t>_pid": ("sales-copilot", (
+        "CREATE UNIQUE INDEX ux_retry_budgets_pid ON retry_budgets (project_id, id) WHERE id > 0",
+    )),
+    "idx_<t>_project on another table": ("vnx-dev", (
+        "CREATE INDEX idx_retry_budgets_project ON execution_targets (target_type)",
+    )),
+    "idx_<t>_project over other columns": ("vnx-dev", (
+        "CREATE INDEX idx_retry_budgets_project ON retry_budgets (incident_class)",
+    )),
+    "partial idx_<t>_project": ("sales-copilot", (
+        "DROP INDEX idx_retry_state_project",
+        "CREATE INDEX idx_retry_state_project ON retry_state (project_id) WHERE id > 0",
+    )),
+    "unique idx_<t>_project": ("sales-copilot", (
+        "DROP INDEX idx_retry_state_project",
+        "CREATE UNIQUE INDEX idx_retry_state_project ON retry_state (project_id)",
+    )),
+    "partial ux_<t>_pid outside the seven": ("vnx-dev", (
+        "CREATE UNIQUE INDEX ux_incident_log_pid ON incident_log (project_id, id) WHERE id > 0",
+    )),
+    "partial upsert key": ("sales-copilot", (
+        f"CREATE UNIQUE INDEX {UPSERT_INDEX} ON recommendation_outcomes"
+        " (project_id, recommendation_id, metric_name) WHERE id > 0",
+    )),
+    "upsert key not unique": ("sales-copilot", (
+        f"CREATE INDEX {UPSERT_INDEX} ON recommendation_outcomes"
+        " (project_id, recommendation_id, metric_name)",
+    )),
+    "upsert key on another table": ("vnx-dev", (
+        f"CREATE INDEX {UPSERT_INDEX} ON recommendations (recommendation_id)",
+    )),
+}
+
+
+def _execute(db: Path, statements: Tuple[str, ...]) -> None:
+    conn = sqlite3.connect(str(db))
+    try:
+        for statement in statements:
+            conn.execute(statement)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("case", REJECTED_SHAPES)
+def test_a_shape_the_manifest_rejects_is_refused_and_left_untouched(make_store, case):
+    shape, statements = REJECTED_SHAPES[case]
+    db = make_store(shape, shape)
+    _execute(db, statements)
+    before = (_user_version(db), _file_hash(db))
+    assert before[0] == 33
+
+    try:
+        auto_apply(db)
+    except RuntimeError as exc:
+        assert "did not reach the 0034 shape" in str(exc), exc
     else:
-        db = _make_store_and_migrate(make_store, "sales-copilot", "sales-copilot")
-    driver, _query = WRITERS[writer]
-    with pytest.raises(sqlite3.OperationalError, match="ON CONFLICT clause does not match"):
-        driver(db.parent)
+        conn = sqlite3.connect(str(db))
+        try:
+            violations = schema_manifest.validate_db_at_version(conn, 34)
+        finally:
+            conn.close()
+        pytest.fail(
+            f"{case}: 0034 stamped user_version {_user_version(db)}; "
+            f"the v34 manifest says {violations}"
+        )
+
+    assert (_user_version(db), _file_hash(db)) == before
+
+
+@pytest.mark.parametrize("shape", ["vnx-dev", "website", "fresh", "sales-copilot", "stamped"])
+def test_every_store_0034_stamps_holds_the_v34_manifest(make_store, templates, tmp_path, shape):
+    """The other side: what 0034 does stamp 34, the manifest accepts, also after
+    tenant stamping, so reconcile_user_version leaves it at 34."""
+    db = _upsert_store(make_store, templates, tmp_path, shape, "proj-a")
+    conn = sqlite3.connect(str(db))
+    try:
+        assert schema_manifest.validate_db_at_version(conn, 34) == []
+        result = schema_manifest.reconcile_user_version(conn)
+    finally:
+        conn.close()
+    assert (result.reconciled, result.corrected) == (False, 34)
+
+
+# ---------------------------------------------------------------------------
+# incident_log: the two writers outside the nine
+# ---------------------------------------------------------------------------
+
+def _w_create_incident(state_dir: Path) -> None:
+    create_incident(
+        state_dir, incident_class=IncidentClass.PROCESS_CRASH,
+        entity_type="component", entity_id="c-1", failure_detail="crash",
+    )
+
+
+def _w_record_incident(state_dir: Path) -> None:
+    with get_connection(state_dir) as conn:
+        record_incident(
+            conn, incident_class=IncidentClass.PROCESS_CRASH, severity=Severity.ERROR,
+            dispatch_id=None, terminal_id=None, component="c-1", attempt_number=1,
+            recovery_action=None, recovery_outcome=None, reason="crash",
+            budget_remaining=None, escalated=False, dead_lettered=False, metadata=None,
+        )
+        conn.commit()
+
+
+INCIDENT_WRITERS: Dict[str, Callable[[Path], None]] = {
+    "incident_log.create_incident": _w_create_incident,
+    "workflow_incident_handler.record_incident": _w_record_incident,
+}
+#: The shapes on which incident_log.project_id is NOT NULL without a default:
+#: five of the six real stores, before and after 0034, and every stamped store.
+INCIDENT_SHAPES = ("vnx-dev-before-0034", "vnx-dev", "sales-copilot", "stamped")
+
+
+def _incident_store(make_store, shape: str, pid: str) -> Path:
+    if shape == "stamped":
+        db = _make_stamped_store(make_store, pid)
+    elif shape == "vnx-dev-before-0034":
+        db = make_store("vnx-dev", pid)
+    else:
+        db = _make_store_and_migrate(make_store, shape, pid)
+    conn = sqlite3.connect(str(db))
+    try:
+        column = [(r[3], r[4]) for r in conn.execute("PRAGMA table_info(incident_log)") if r[1] == "project_id"]
+    finally:
+        conn.close()
+    assert column == [(1, None)], f"{shape}: incident_log.project_id (notnull, default) = {column}"
+    return db
+
+
+@pytest.mark.parametrize("writer", INCIDENT_WRITERS)
+@pytest.mark.parametrize("shape", INCIDENT_SHAPES)
+def test_incident_writer_stamps_the_store_id(make_store, shape, writer):
+    db = _incident_store(make_store, shape, "proj-a")
+    raised = None
+    try:
+        INCIDENT_WRITERS[writer](db.parent)
+    except sqlite3.Error as exc:  # vnx-silent-except: reported in the assertion below
+        raised = f"{type(exc).__name__}: {exc}"
+    stamped = _project_ids(db, "SELECT project_id FROM incident_log WHERE entity_id = 'c-1'")
+    assert stamped == ["proj-a"], f"{shape}: stamped={stamped}, writer raised {raised}"
+
+
+@pytest.mark.parametrize("shape", INCIDENT_SHAPES)
+def test_handle_incident_reaches_the_retry_state_and_escalation_writers(make_store, shape):
+    """A lease conflict escalates on its first attempt. handle_incident creates
+    the retry state, records the incident, counts the attempt and writes the
+    escalation, all in one transaction: an incident row that cannot be written
+    takes the other three with it."""
+    db = _incident_store(make_store, shape, "proj-a")
+    supervisor = WorkflowSupervisor(db.parent, auto_init=False)
+    raised = None
+    try:
+        decision = supervisor.handle_incident(
+            incident_class=IncidentClass.LEASE_CONFLICT, dispatch_id="d-1",
+            terminal_id="T1", reason="lease held by another dispatch",
+        )
+        assert decision.should_escalate and decision.escalation_record is not None
+    except sqlite3.Error as exc:  # vnx-silent-except: reported in the assertion below
+        raised = f"{type(exc).__name__}: {exc}"
+    written, expected = {}, {}
+    for table, extra in (("incident_log", ""), ("retry_state", " || ':' || attempts_used"),
+                         ("escalation_log", "")):
+        # Before 0034 the seven have no project_id; the row is all there is to see.
+        stamp = "project_id" if "project_id" in _columns(db, table) else "'-'"
+        written[table] = _project_ids(db, f"SELECT {stamp}{extra} FROM {table} WHERE dispatch_id = 'd-1'")
+        expected[table] = [("proj-a" if stamp == "project_id" else "-") + (":1" if extra else "")]
+    assert written == expected, f"{shape}: written={written}, handle_incident raised {raised}"
 
 
 @pytest.mark.parametrize("where", ["loose-file", "in-memory"])
