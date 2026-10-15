@@ -259,8 +259,14 @@ _LAUNCH_MODULES = (
     "scripts/lib/provider_spawns/codex_spawn.py",
     "scripts/lib/plan_gate_panel.py",
     "scripts/lib/deliberation_panel.py",
+    "scripts/lib/provider_dispatch.py",
 )
 _GPT_LITERAL = re.compile(r"^gpt-[0-9]")
+# Bookkeeping, not a launch model: the openrouter lane-key alias for the
+# arbitrary-OpenRouter litellm lane, which dispatches gpt-4o-mini and never codex.
+_NOT_A_CODEX_MODEL = {
+    "scripts/lib/provider_dispatch.py": {"gpt-4o-mini-default"},
+}
 
 
 @pytest.mark.parametrize("module", _LAUNCH_MODULES)
@@ -271,7 +277,7 @@ def test_launch_module_carries_no_gpt_model_literal(module):
             n.value for n in ast.walk(tree)
             if isinstance(n, ast.Constant) and isinstance(n.value, str)
             and _GPT_LITERAL.match(n.value.strip())
-        }
+        } - _NOT_A_CODEX_MODEL.get(module, set())
     )
     assert "gpt-5.5" not in found
     assert found == [], f"{module} hard-codes a codex model: {found}"
@@ -504,3 +510,164 @@ def test_deliberation_codex_seat_fails_alone_when_model_unresolved(tmp_path, mon
     assert "codex" not in [p for p, _ in seen]
     assert any(p == "claude" for p, _ in seen)
     assert any(s["provider"] == "codex" for s in result.failed_seats)
+
+
+# ---------------------------------------------------------------------------
+# Sixth path: provider_dispatch and its envelope adapter resolve through the resolver
+# ---------------------------------------------------------------------------
+
+import argparse  # noqa: E402
+import types  # noqa: E402
+
+import provider_dispatch  # noqa: E402
+from dispatch_spec import Provider  # noqa: E402
+from envelope_adapters_provider import ProviderAdapter  # noqa: E402
+
+FIRST_MODEL = "gpt-5.5"
+
+
+@pytest.fixture
+def first_model_registry(tmp_path, monkeypatch):
+    """openai lists gpt-5.5 FIRST while default_model names another model."""
+    path = _write_registry(
+        tmp_path / "first.yaml", default_model=TMP_MODEL, models=(FIRST_MODEL, TMP_MODEL),
+    )
+    monkeypatch.setattr(provider_registry, "_REGISTRY_PATH", path)
+    for name in ("VNX_CODEX_MODEL", "VNX_CODEX_DEFAULT_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+    return path
+
+
+@pytest.fixture
+def unreadable_registry(tmp_path, monkeypatch):
+    monkeypatch.setattr(provider_registry, "_REGISTRY_PATH", tmp_path / "missing.yaml")
+    monkeypatch.delenv("VNX_CODEX_MODEL", raising=False)
+
+
+def _args():
+    return provider_dispatch._build_parser().parse_args(
+        ["--provider", "codex", "--terminal-id", "T1", "--dispatch-id", "r3-codex",
+         "--instruction", "noop", "--model", "sonnet"]
+    )
+
+
+def _spawn_result():
+    return MagicMock(
+        returncode=0, error=None, timed_out=False, event_writer_failures=0,
+    )
+
+
+def _run_dispatch_codex(args):
+    """Run the legacy codex lane with everything but model resolution stubbed."""
+    spawn = MagicMock(return_value=_spawn_result())
+    with patch("provider_dispatch._emit_governance"), \
+         patch("provider_dispatch._enrich_instruction", return_value="noop"), \
+         patch("provider_dispatch._prepare_provider_workdir", return_value=(None, None)), \
+         patch("provider_dispatch._finish_provider_worktree"), \
+         patch("provider_dispatch._event_store_safety_net"), \
+         patch("event_store.EventStore", return_value=MagicMock()), \
+         patch("provider_spawns.codex_spawn.spawn_codex", spawn):
+        code = provider_dispatch._dispatch_codex(args)
+    return code, spawn
+
+
+def _run_dispatch_via_envelope(args):
+    run = MagicMock(return_value=MagicMock(returncode=0))
+    with patch("dispatch_envelope.run_envelope", run):
+        code = provider_dispatch._dispatch_codex_via_envelope(args)
+    return code, run
+
+
+def _adapter_plan(model="default"):
+    return types.SimpleNamespace(
+        provider=Provider.CODEX, model=model, role=None, dispatch_id="r3-codex",
+        target_id="T1", dispatch_paths=(),
+    )
+
+
+def _run_adapter(plan):
+    spawn = MagicMock(return_value=_spawn_result())
+    with patch("provider_spawns.codex_spawn.spawn_codex", spawn):
+        result = ProviderAdapter().run(plan, "noop")
+    return result, spawn
+
+
+def test_all_callers_resolve_to_registry_default_not_the_first_model(first_model_registry):
+    assert provider_dispatch._constraint_model_for_provider(_args(), "codex") == TMP_MODEL
+
+    code, spawn = _run_dispatch_codex(_args())
+    assert code == 0
+    assert spawn.call_args.kwargs["model"] == TMP_MODEL
+
+    code, run = _run_dispatch_via_envelope(_args())
+    assert code == 0
+    assert run.call_args.args[0].model == TMP_MODEL
+
+    _, spawn = _run_adapter(_adapter_plan())
+    assert spawn.call_args.kwargs["model"] == TMP_MODEL
+
+
+def test_vnx_codex_model_env_still_wins_in_every_caller(first_model_registry, monkeypatch):
+    monkeypatch.setenv("VNX_CODEX_MODEL", "from-env")
+    assert provider_dispatch._constraint_model_for_provider(_args(), "codex") == "from-env"
+    _, spawn = _run_dispatch_codex(_args())
+    assert spawn.call_args.kwargs["model"] == "from-env"
+    _, run = _run_dispatch_via_envelope(_args())
+    assert run.call_args.args[0].model == "from-env"
+    _, spawn = _run_adapter(_adapter_plan())
+    assert spawn.call_args.kwargs["model"] == "from-env"
+
+
+def test_adapter_explicit_plan_model_beats_env_and_registry(first_model_registry, monkeypatch):
+    monkeypatch.setenv("VNX_CODEX_MODEL", "from-env")
+    _, spawn = _run_adapter(_adapter_plan(model="from-plan"))
+    assert spawn.call_args.kwargs["model"] == "from-plan"
+
+
+def test_unresolved_model_ends_the_codex_lane_as_a_named_failure(unreadable_registry):
+    recorded = []
+    with patch("provider_dispatch._emit_refusal_receipt",
+               side_effect=lambda *a, **k: recorded.append((a, k))):
+        code, spawn = _run_dispatch_codex(_args())
+    assert code == 1
+    spawn.assert_not_called()
+    assert len(recorded) == 1
+    (_, provider, model, reason), kwargs = recorded[0]
+    assert provider == "codex"
+    assert reason.startswith("codex_model_unresolved: ")
+    assert "gpt-5.2-codex" not in reason
+    assert kwargs["status"] == "failure"
+
+
+def test_unresolved_model_ends_the_envelope_lane_as_a_named_failure(unreadable_registry):
+    recorded = []
+    with patch("provider_dispatch._emit_refusal_receipt",
+               side_effect=lambda *a, **k: recorded.append(a)):
+        code, run = _run_dispatch_via_envelope(_args())
+    assert code == 1
+    run.assert_not_called()
+    assert recorded[0][3].startswith("codex_model_unresolved: ")
+
+
+def test_unresolved_model_is_a_failed_adapter_result_not_an_exception(unreadable_registry):
+    result, spawn = _run_adapter(_adapter_plan())
+    spawn.assert_not_called()
+    assert result.returncode == 1
+    assert result.status == "failure"
+    assert result.error.startswith("codex_model_unresolved: ")
+
+
+def test_constraint_preflight_defers_an_unresolved_model_to_the_lane(unreadable_registry):
+    assert provider_dispatch._constraint_model_for_provider(_args(), "codex") == ""
+
+
+def test_failure_receipt_write_error_does_not_leave_the_lane(unreadable_registry):
+    with patch("provider_dispatch._emit_refusal_receipt", side_effect=OSError("disk full")):
+        code, spawn = _run_dispatch_codex(_args())
+    assert code == 1
+    spawn.assert_not_called()
+
+
+def test_provider_dispatch_has_no_hardcoded_codex_fallback():
+    source = (VNX_ROOT / "scripts" / "lib" / "provider_dispatch.py").read_text(encoding="utf-8")
+    assert "gpt-5.2-codex" not in source

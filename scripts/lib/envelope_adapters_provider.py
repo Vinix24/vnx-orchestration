@@ -163,6 +163,7 @@ class ProviderAdapter:
         role: Optional[str] = None,
     ) -> _AdapterResult:
         from dispatch_spec import Provider, dispatch_paths_raw  # noqa: PLC0415
+        from providers.provider_registry import CodexModelResolutionError  # noqa: PLC0415
         from provider_dispatch import (  # noqa: PLC0415
             _MLX_MODEL_MAP,
             _build_lane_key,
@@ -203,9 +204,15 @@ class ProviderAdapter:
         if pv == Provider.CODEX:
             from provider_spawns.codex_spawn import spawn_codex  # noqa: PLC0415
 
-            model = (
-                plan.model if plan.model not in ("default", "") else _resolve_codex_model()
-            )
+            try:
+                model = (
+                    plan.model if plan.model not in ("default", "") else _resolve_codex_model()
+                )
+            except CodexModelResolutionError as exc:
+                return _AdapterResult(
+                    returncode=1, completion_text="", status="failure",
+                    error=f"codex_model_unresolved: {exc}",
+                )
             try:
                 result = spawn_codex(
                     prompt=instruction,

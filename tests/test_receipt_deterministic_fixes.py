@@ -37,33 +37,36 @@ sys.path.insert(0, str(SCRIPTS_LIB))
 
 
 class TestResolveCodexModel:
-    """_resolve_codex_model() returns a non-empty string in all paths."""
+    """_resolve_codex_model() resolves through the registry resolver; no hard-coded fallback."""
 
-    def test_returns_nonempty_from_registry(self):
-        """When registry loads successfully, returns first model key (non-empty)."""
+    def test_returns_nonempty_from_registry(self, monkeypatch):
+        """With VNX_CODEX_MODEL unset the shipped openai.default_model is returned."""
         import provider_dispatch
 
+        monkeypatch.delenv("VNX_CODEX_MODEL", raising=False)
         result = provider_dispatch._resolve_codex_model()
         assert isinstance(result, str)
         assert result.strip() != "", "_resolve_codex_model must return non-empty string"
 
-    def test_fallback_when_registry_unavailable(self):
-        """When registry raises, falls back to hardcoded 'gpt-5.2-codex'."""
+    def test_registry_unavailable_raises_instead_of_falling_back(self, monkeypatch):
+        """An unreadable registry is a named resolution error, never 'gpt-5.2-codex'."""
         import provider_dispatch
+        from providers import provider_registry
 
+        monkeypatch.delenv("VNX_CODEX_MODEL", raising=False)
         with patch("providers.provider_registry.load", side_effect=FileNotFoundError("no yaml")):
-            result = provider_dispatch._resolve_codex_model()
-        assert result == "gpt-5.2-codex"
+            with pytest.raises(provider_registry.CodexModelResolutionError):
+                provider_dispatch._resolve_codex_model()
 
-    def test_fallback_when_openai_missing_from_registry(self):
-        """When openai section is absent, returns hardcoded fallback."""
+    def test_openai_missing_from_registry_raises(self, monkeypatch):
+        """When the openai section is absent there is no default to return."""
         import provider_dispatch
-        from unittest.mock import MagicMock
+        from providers import provider_registry
 
-        mock_registry = {}  # empty — no 'openai' key
-        with patch("providers.provider_registry.load", return_value=mock_registry):
-            result = provider_dispatch._resolve_codex_model()
-        assert result == "gpt-5.2-codex"
+        monkeypatch.delenv("VNX_CODEX_MODEL", raising=False)
+        with patch("providers.provider_registry.load", return_value={}):
+            with pytest.raises(provider_registry.CodexModelResolutionError):
+                provider_dispatch._resolve_codex_model()
 
 
 class TestResolveKimiModelLabel:

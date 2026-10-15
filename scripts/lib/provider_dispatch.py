@@ -1432,7 +1432,15 @@ def _litellm_parts(provider: str) -> tuple[str, "str | None"]:
 def _constraint_model_for_provider(args: argparse.Namespace, provider: str) -> str:
     """Resolve the model label used by dispatch pre-flight checks."""
     if provider == "codex":
-        return os.environ.get("VNX_CODEX_MODEL", "") or _resolve_codex_model()
+        # An unresolved model does not refuse here: the lane resolves again at spawn
+        # and records the named codex_model_unresolved failure there, once. No
+        # model-pinned constraint can match an absent model (OI-2062).
+        from providers import provider_registry as _reg  # noqa: PLC0415
+
+        try:
+            return _resolve_codex_model()
+        except _reg.CodexModelResolutionError:
+            return ""
     if provider == "gemini":
         return args.model if (args.model and args.model != "sonnet") else os.environ.get("VNX_GEMINI_MODEL", "gemini-2.5-pro")
     if provider == "kimi":
@@ -2154,7 +2162,10 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
         )
         return 1
 
-    model = os.environ.get("VNX_CODEX_MODEL", "") or _resolve_codex_model()
+    model = _codex_model_or_record_failure(args)
+    if model is None:
+        _event_store_safety_net(event_store, args)
+        return 1
     enriched_instruction = _enrich_instruction(args)
     # Isolation + (bench) seed materialization. Fail-loud by design, never a
     # silent shared-checkout fallback. VNX_BENCH_REQUIRE_ISOLATION=1 (benchmark):
@@ -2245,7 +2256,9 @@ def _dispatch_codex_via_envelope(args: argparse.Namespace) -> int:
     """
     from dispatch_envelope import EnvelopeGovernError, EnvelopeSpec, run_envelope  # noqa: PLC0415
 
-    model = os.environ.get("VNX_CODEX_MODEL", "") or _resolve_codex_model()
+    model = _codex_model_or_record_failure(args)
+    if model is None:
+        return 1
     state_dir = _resolve_state_dir()
     data_dir = _resolve_data_dir()
 
@@ -2316,22 +2329,42 @@ def _dispatch_claude_via_envelope(args: argparse.Namespace) -> int:
 
 
 def _resolve_codex_model() -> str:
-    """Load codex model key from registry (openai section), fallback to hardcoded default.
+    """The codex model for this lane: ``VNX_CODEX_MODEL``, else ``openai.default_model`` (OI-2062).
 
-    Returns the registry model key (e.g. 'gpt-5.2-codex') so the receipt model field
-    is never empty when VNX_CODEX_MODEL is unset.
+    One resolver for every codex launch path (provider_registry.resolve_codex_model).
+    Raises CodexModelResolutionError when the registry gives no model: there is no
+    hard-coded fallback, a name written into code is what codex refused on 14-10.
     """
-    _CODEX_FALLBACK = "gpt-5.2-codex"
+    from providers import provider_registry as _reg
+
+    return _reg.resolve_codex_model(env_names=("VNX_CODEX_MODEL",))
+
+
+def _codex_model_or_record_failure(args: argparse.Namespace) -> "str | None":
+    """Resolve the codex model; an unresolved model ends as a recorded failure.
+
+    Returns the model, or None after writing a ``codex_model_unresolved`` failure
+    receipt (OI-2062). Never raises: the lane returns 1 instead of leaving the door
+    with an exception and no receipt.
+    """
+    from providers import provider_registry as _reg
+
     try:
-        from providers import provider_registry as _reg
-        registry = _reg.load()
-    except Exception as e:
-        logger.error("provider_dispatch: registry load failed for codex: %s", e)
-        return _CODEX_FALLBACK
-    cfg = registry.get("openai")
-    if cfg is None or not cfg.models:
-        return _CODEX_FALLBACK
-    return next(iter(cfg.models.keys()))
+        return _resolve_codex_model()
+    except _reg.CodexModelResolutionError as exc:
+        failure_reason = f"codex_model_unresolved: {exc}"
+        try:
+            _emit_refusal_receipt(
+                args, "codex", "", failure_reason,
+                delivery_state=_DELIVERY_STATE_DELIVER_FAILED, status="failure",
+            )
+        except Exception as rec_exc:
+            logger.error(
+                "provider_dispatch: failure receipt failed for unresolved codex model dispatch=%s: %s",
+                args.dispatch_id, rec_exc,
+            )
+        print(f"provider_dispatch: {failure_reason}", file=sys.stderr)
+        return None
 
 
 class KimiModelResolutionError(ValueError):

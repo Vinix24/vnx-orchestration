@@ -1,6 +1,20 @@
 {
   "couplings": [
     {
+      "file": "tests/test_codex_model_registry.py",
+      "line": 524,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_provider",
+      "symbol": "ProviderAdapter"
+    },
+    {
+      "file": "tests/test_codex_model_registry.py",
+      "line": 576,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "run_envelope"
+    },
+    {
       "file": "tests/test_d1_reviewer_no_injection.py",
       "line": 41,
       "mechanism": "direct-call",
