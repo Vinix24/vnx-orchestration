@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import select
 import shutil
 import signal
@@ -30,6 +31,7 @@ from headless_adapter import gate_timeout, gate_stall_threshold
 from unified_report_schema import SchemaViolation, extract_frontmatter, parse_frontmatter
 import gate_recorder as _rec
 import gate_artifacts as _art
+import provider_switch
 import vertex_ai_runner as _vtx
 from gate_worktree import (
     create_gate_worktree,
@@ -106,6 +108,14 @@ _HARNESS_LANE_ISOLATION_NOTICE = (
     "`git fetch`, `git checkout`, `git switch`, or `git branch` against any "
     "other checkout."
 )
+
+# The consumer name the runner's provider-switch decisions carry (provider-schakelaar C).
+_SWITCH_CONSUMER = "gate_runner"
+
+# The dispatcher (plan_gate_panel._make_default_dispatcher) reports a provider_dispatch
+# run that left no report as ``no report for <id> (rc=<exit code>)``. That message is the
+# only place the exit code of the lane surfaces, so the refusal exit code is read from it.
+_DISPATCH_EXIT_CODE_RE = re.compile(r"^no report for \S+ \(rc=(-?\d+)\)")
 
 # Harness-lane gates (glm_gate/kimi_gate) delegate to the governed dispatcher
 # (C6 step 1). The _HARNESS_LANE_* aliases imported at the top are the SAME
@@ -222,6 +232,34 @@ def _lifted_harness_lane_exit_code(report_text: str) -> Optional[int]:
         return None
     exit_code = frontmatter.get("exit_code")
     return exit_code if isinstance(exit_code, int) else None
+
+
+def _dispatch_exit_code(exc: BaseException) -> Optional[int]:
+    """The lane's exit code a dispatcher exception names, or None when it names none."""
+    match = _DISPATCH_EXIT_CODE_RE.match(str(exc))
+    return int(match.group(1)) if match else None
+
+
+def _switch_refusal_detail(dispatch_exc: Optional[BaseException], report_text: str) -> Optional[str]:
+    """The provider switch's refusal behind a harness-lane dispatch, or None.
+
+    Two shapes reach the runner, and both mean nothing was called: the lane
+    exited with ``EXIT_PROVIDER_SWITCHED_OFF`` and left no report (the dispatcher
+    raises, naming the exit code), or it left a governed report whose frontmatter
+    ``failure_reason`` names ``provider_switched_off``. Either is booked as a
+    switch refusal, never as ``harness_lane_dispatch_error`` or
+    ``harness_lane_no_model_response``: those are execution failures whose text
+    the reachability feed reads, and an operator's reason such as "insufficient
+    balance" would then become a quota fact.
+    """
+    if dispatch_exc is not None:
+        if _dispatch_exit_code(dispatch_exc) == provider_switch.EXIT_PROVIDER_SWITCHED_OFF:
+            return _tail(str(dispatch_exc), _REASON_DETAIL_TAIL_CHARS)
+        return None
+    lifted = _lifted_harness_lane_failure_reason(report_text) or ""
+    if lifted.startswith(provider_switch.REASON_SWITCHED_OFF):
+        return lifted
+    return None
 
 
 def _git_capture(args: List[str], cwd: str) -> str:
@@ -390,6 +428,16 @@ class GateRunner:
         # lookup on the provider string.
         harness_provider = ""
 
+        # Provider switch (provider-schakelaar C): decided before anything is marked executing
+        # or launched, on every path (subprocess, vertex, harness lane), with the gate name as
+        # the identifier. An unregistered gate keeps its unsupported_gate_type answer below.
+        refusal = _rec.gate_switch_refusal(gate, consumer=_SWITCH_CONSUMER)
+        if refusal is not None:
+            return self._record_switched_off(
+                gate=gate, pr_number=pr_number, pr_id=pr_id,
+                detail=refusal.detail(), request_payload=request_payload,
+            )
+
         if not using_vertex:
             # OI-1490: three outcomes, not one. Before this, an unregistered
             # gate and a script-runner gate both collapsed into "binary not
@@ -494,6 +542,31 @@ class GateRunner:
             pr_number=pr_number, pr_id=pr_id, request_payload=request_payload,
         )
 
+    def _record_switched_off(
+        self, *, gate: str, pr_number: Optional[int], pr_id: str, detail: str,
+        request_payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Book a provider-switch refusal: ``not_executable``/``provider_switched_off``.
+
+        Nothing was launched, so this is a not_executable record, never an
+        execution failure: the reachability feed reads neither its status nor its
+        text, and the overwrite guard treats it as a runner-refusal note that
+        never displaces what the provider already did on this head and that the
+        gate's own later result replaces.
+        """
+        log.warning(
+            "gate_runner: %s not launched for pr=%s -- %s", gate, pr_id or pr_number, detail,
+        )
+        return _rec.record_not_executable(
+            gate=gate, pr_number=pr_number, pr_id=pr_id,
+            reason=_rec.PROVIDER_SWITCHED_OFF_REASON,
+            reason_detail=detail,
+            request_payload=request_payload,
+            requests_dir=self._requests_dir,
+            results_dir=self._results_dir,
+            state_dir=self._state_dir,
+        )
+
     def _resolve_prompt(
         self, gate: str, request_payload: Dict[str, Any], using_vertex: bool,
     ) -> str:
@@ -580,6 +653,13 @@ class GateRunner:
                 timeout=gate_timeout(gate), stall_threshold=gate_stall_threshold(gate),
                 request_payload=request_payload,
                 cwd=worktree_path,
+            )
+        except provider_switch.ProviderDisabledError as exc:
+            # Layer 1 refused the launch: the family was switched off after run()
+            # decided. Nothing started, so this books the refusal, not a failure.
+            return self._record_switched_off(
+                gate=gate, pr_number=pr_number, pr_id=pr_id,
+                detail=exc.decision.detail(), request_payload=request_payload,
             )
         finally:
             remove_gate_worktree(worktree_path, project_root=self._project_root)
@@ -755,6 +835,17 @@ class GateRunner:
                 request_payload=request_payload,
                 requests_dir=self._requests_dir,
                 results_dir=self._results_dir,
+            )
+
+        # provider-schakelaar C: the lane refused the call because the family is switched
+        # off (exit EXIT_PROVIDER_SWITCHED_OFF, or a report that names the refusal). Booked
+        # as that refusal before the failure branches below, which would read it as an
+        # execution failure and hand its text to the reachability feed.
+        switch_refusal = _switch_refusal_detail(dispatch_exc, report_text)
+        if switch_refusal is not None:
+            return self._record_switched_off(
+                gate=gate, pr_number=pr_number, pr_id=pr_id,
+                detail=switch_refusal, request_payload=request_payload,
             )
 
         if dispatch_exc is not None:
@@ -1156,7 +1247,13 @@ class GateRunner:
         `cwd` (OI-708) pins the subprocess's working directory to the isolated
         gate worktree so the gate agent's own file reads match the PR branch
         under review instead of the orchestrator's ambient checkout.
+
+        Layer 1 of the provider switch (provider-schakelaar C): the gate name is
+        the identifier, decided fresh right before the launch, and a switched-off
+        family raises ``ProviderDisabledError`` without starting anything.
+        ``_run_subprocess_path`` books that as ``provider_switched_off``.
         """
+        provider_switch.require(gate, consumer=_SWITCH_CONSUMER)
         cmd = self._build_gate_cmd(gate, binary, request_payload)
         start = time.monotonic()
         try:

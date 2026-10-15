@@ -68,7 +68,7 @@ def no_markers(monkeypatch):
 @pytest.fixture
 def live(home, no_markers, monkeypatch):
     """The live write path: the pending tuples emptied in this test process only."""
-    for name in ("PENDING_B", "PENDING_C", "PENDING_E"):
+    for name in ("PENDING_B", "PENDING_E"):
         monkeypatch.setattr(ps, name, ())
     return home
 
@@ -117,8 +117,11 @@ def test_list_text_on_a_tmp_home(home, tmp_path):
         assert f"  {family:<11} effective on  (default)" in out
     assert "Never switchable:" in out and "operator decision 2b" in out
     assert "Enforcement: NOT enforced yet" in out
-    assert f"pending B ({len(ps.PENDING_B)}):" in out and "pending C (1):" in out and "pending E (1):" in out
-    assert "scripts/gate_runner.py:GateRunner._run_with_stall_detection" in out
+    assert f"pending B ({len(ps.PENDING_B)}):" in out and "pending E (1):" in out
+    assert "pending C" not in out
+    pending_total = len(ps.PENDING_B) + len(ps.PENDING_E)
+    assert f"{pending_total} of {len(ps.LAUNCH_FUNCTIONS)} launch functions" in out
+    assert "scripts/gate_runner.py:GateRunner._run_with_stall_detection" not in out
     assert "Projects (~/.vnx/projects.json):" in out and "no project registry" in out
     assert "Overrides (VNX_OVERRIDE_PROVIDER_*):\n  none" in out
     assert "Consequences: none" in out
@@ -140,7 +143,8 @@ def test_list_json(home, tmp_path):
     assert glm["effective"]["allowed"] is True and glm["effective"]["source"] == "project"
     assert report["enforcement"]["enforced"] is False
     assert {k: len(v) for k, v in report["enforcement"]["pending"].items()} == {
-        "B": len(ps.PENDING_B), "C": 1, "E": 1}
+        "B": len(ps.PENDING_B), "E": 1}
+    assert report["enforcement"]["launch_functions"] == len(ps.LAUNCH_FUNCTIONS)
     assert set(report["non_switchable"]) == {"claude", "codex", "tooling", "unresolved"}
     assert report["projects"]["error"] == "no project registry"
     assert report["overrides"] == {"environment": {}, "launchd": {}}
@@ -206,8 +210,10 @@ def test_write_verbs_refuse_while_pending(args, home, tmp_path):
     assert result.returncode == providers_cli.EXIT_WRITE_REFUSED == 5
     assert "write refused" in result.stderr and "not enforced yet" in result.stderr
     assert f"B: {len(ps.PENDING_B)}" in result.stderr
-    for entry in (*ps.PENDING_B, *ps.PENDING_C, *ps.PENDING_E):
+    for entry in (*ps.PENDING_B, *ps.PENDING_E):
         assert f"    {entry}\n" in result.stderr
+    for entry in ps.ENFORCED:
+        assert entry not in result.stderr
     assert not switch_path(home).exists() and not ps.audit_log_path(switch_path(home)).exists()
 
 

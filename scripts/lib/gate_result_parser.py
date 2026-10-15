@@ -243,10 +243,15 @@ class GateResultParserMixin:
         ``gate_runner``'s, on the other of the two paths; fixing one and
         leaving the other is a promise the code does not keep.
 
-        Four answers, matching gate_runner's:
+        Five answers, matching gate_runner's:
 
         * unregistered gate -> ``unsupported_gate_type``; a routing bug, not an
           environment complaint.
+        * a gate whose provider family the operator switched off ->
+          ``provider_switched_off``, with the switch decision as the detail.
+          Named before every kind-specific branch below, so a switched-off
+          harness-lane gate is never booked ``gate_runner_missing`` and never
+          looks like a missing binary (provider-schakelaar C).
         * script-runner gate -> ``gate_runner_missing``. Reaching here means
           the caller's own availability check (``_kimi_gate_available`` and
           friends, which test for the runner FILE) already said no, so the
@@ -263,6 +268,8 @@ class GateResultParserMixin:
         from gate_recorder import (  # noqa: PLC0415
             GATE_PROVIDER_HARNESS_LANE,
             GATE_PROVIDER_SCRIPT_RUNNER,
+            PROVIDER_SWITCHED_OFF_REASON,
+            gate_switch_refusal,
             resolve_gate_provider,
         )
 
@@ -274,6 +281,9 @@ class GateResultParserMixin:
                 f"binary, a script runner, or a harness lane; no binary name is guessed "
                 f"from the gate name",
             )
+        refusal = gate_switch_refusal(gate, consumer="gate_result_parser._classify_unavailable")
+        if refusal is not None:
+            return (PROVIDER_SWITCHED_OFF_REASON, refusal.detail())
         provider_kind, binary_name = provider
         if provider_kind == GATE_PROVIDER_SCRIPT_RUNNER:
             return (

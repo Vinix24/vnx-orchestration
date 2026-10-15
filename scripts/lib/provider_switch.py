@@ -627,7 +627,7 @@ def linked_worktree_root(start: Path) -> Optional[Path]:
 
 def pending_launch_functions() -> Dict[str, Tuple[str, ...]]:
     """Launch functions that do not call :func:`require` yet, per deliverable."""
-    return {"B": tuple(PENDING_B), "C": tuple(PENDING_C), "E": tuple(PENDING_E)}
+    return {"B": tuple(PENDING_B), "E": tuple(PENDING_E)}
 
 
 def write_refusals() -> List[str]:
@@ -1069,7 +1069,9 @@ UNDETECTED_LAUNCH_FUNCTIONS: Dict[str, str] = {
         "for the detector to see",
 }
 
-PENDING_C: Tuple[str, ...] = (
+# Census entries that call require() before their first launch call. The coverage guard
+# asserts that each one really does.
+ENFORCED: Tuple[str, ...] = (
     "scripts/gate_runner.py:GateRunner._run_with_stall_detection",
 )
 
@@ -1097,7 +1099,7 @@ PENDING_B: Tuple[str, ...] = (
     *UNDETECTED_LAUNCH_FUNCTIONS,
 )
 
-LAUNCH_FUNCTIONS: Tuple[str, ...] = tuple(sorted({*PENDING_C, *PENDING_E, *PENDING_B}))
+LAUNCH_FUNCTIONS: Tuple[str, ...] = tuple(sorted({*ENFORCED, *PENDING_E, *PENDING_B}))
 
 # Flagged by the detector or named by the plan, and deliberately outside layer 1. An entry is a
 # function (``path:qualname``), a file or a directory (trailing slash).
