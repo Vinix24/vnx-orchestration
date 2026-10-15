@@ -206,8 +206,10 @@ class TestGateBranchDerivation:
         assert _captured_branch(env) == PR_HEAD
 
     def test_resolution_logged_explicitly(self, env):
-        """The headRefName-derived branch is reported on stdout."""
-        result = _run_cmd_gate(env, "1281", "--only", "gemini")
+        """The headRefName-derived branch is reported on stdout. The gate is named
+        by its registered name: a bare `gemini` is not a gate and is refused
+        before the branch is resolved (OI-2070)."""
+        result = _run_cmd_gate(env, "1281", "--only", "gemini_review")
         assert result.returncode == 0, result.stderr
         assert "Resolved PR 1281 head branch" in result.stdout
         assert PR_HEAD in result.stdout

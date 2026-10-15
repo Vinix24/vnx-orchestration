@@ -227,8 +227,16 @@ def resolve_codex_model(
     Order: *explicit* model, then the first non-empty env var in *env_names*
     (each path keeps its own names and precedence), then ``openai.default_model``
     from wave7_models.yaml. Raises :class:`CodexModelResolutionError` when the
-    registry is unreadable, has no ``openai`` section, carries no
-    ``default_model``, or names a default that is not one of its models.
+    registry is unreadable, holds a model row it cannot parse, has no ``openai``
+    section, carries no ``default_model``, or names a default that is not one of
+    its models.
+
+    A row is parsed by :func:`_parse_model` for every provider section, so one
+    malformed row anywhere stops the resolution: a missing field raises
+    ``KeyError``, a null where a number belongs ``TypeError``, a bad number
+    ``ValueError``, a row that is no mapping ``AttributeError``. Each of them is
+    this error, never a raise past it: a gate run that met one stayed
+    ``executing`` with no result (OI-2068).
     """
     requested = (explicit or "").strip()
     if requested:
@@ -240,10 +248,15 @@ def resolve_codex_model(
     path = Path(registry_path) if registry_path is not None else _REGISTRY_PATH
     try:
         registry = load(path)
-    except (OSError, yaml.YAMLError, ValueError, AttributeError) as exc:
+    except (OSError, yaml.YAMLError) as exc:
         raise CodexModelResolutionError(
             f"codex model: registry {path} is unreadable ({exc}); "
             "no model given and no hard-coded fallback exists"
+        ) from exc
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise CodexModelResolutionError(
+            f"codex model: registry {path} holds an entry it cannot parse "
+            f"({type(exc).__name__}: {exc}); no model given and no hard-coded fallback exists"
         ) from exc
     cfg = registry.get("openai")
     default_key = (getattr(cfg, "default_model", None) or "").strip()

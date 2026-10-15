@@ -238,3 +238,70 @@ def test_status_only_never_consults_the_switch(harness):
 
     assert result.returncode == 0, result.stderr
     assert not harness["capture"].exists()
+
+
+# ---------------------------------------------------------------------------
+# R7 (OI-2070): an unknown gate name is unknown, not switched off
+# ---------------------------------------------------------------------------
+
+REGISTERED_GATES = ("ci_gate", "claude_github_optional", "codex_gate", "deepseek_gate",
+                    "gemini_review", "glm_gate", "kimi_gate", "wiring_gate")
+
+
+@pytest.mark.parametrize("name", ["kimmi", "gemini", "kimi_cli"], ids=["typo", "short-name", "provider-not-gate"])
+def test_only_an_unknown_gate_is_refused_as_unknown(harness, name):
+    """`kimmi` is a typo the family map does not know (the old code said "switched off");
+    `gemini` and `kimi_cli` are names the family map does know, so the old code let them
+    through to the gate manager as a gate nobody registered."""
+    result = run_gate(harness, PR, "--only", name)
+
+    booked = [record["reason"] for record in audit_records(harness)]
+    assert (result.returncode, booked) == (2, []), result.stderr
+    assert f"unknown gate '{name}'" in result.stderr
+    for gate in REGISTERED_GATES:
+        assert gate in result.stderr
+    assert "switched off" not in result.stderr
+    assert "vnx providers on" not in result.stderr
+    assert not harness["capture"].exists(), "review_gate_manager ran for an unknown gate"
+    assert not harness["gh_log"].exists(), "the PR branch was resolved for an unknown gate"
+
+
+def test_only_an_unknown_gate_is_unknown_with_every_family_switched_off(harness):
+    """With the switch refusing everything, an unknown name still reads as unknown:
+    the name is checked before the switch is asked."""
+    switch_off(harness, "kimi", "glm", "deepseek", "gemini")
+
+    result = run_gate(harness, PR, "--only", "kimmi")
+
+    booked = [record["reason"] for record in audit_records(harness)]
+    assert (result.returncode, booked) == (2, []), result.stderr
+    assert "unknown gate 'kimmi'" in result.stderr
+    assert "provider_switched_off" not in result.stderr
+
+
+def test_only_every_registered_gate_passes_the_name_check(harness):
+    """No registered gate is refused as unknown; the switch still decides the switchable ones."""
+    switch_off(harness, "kimi")
+
+    for gate in REGISTERED_GATES:
+        result = run_gate(harness, PR, "--only", gate)
+        assert "unknown gate" not in result.stderr, (gate, result.stderr)
+    assert [r["gate"] for r in audit_records(harness)] == ["kimi_gate"]
+
+
+def test_only_refuses_fail_closed_when_the_gate_names_cannot_be_read(harness):
+    """The name check reads gate_recorder's registry; without it nothing is requested and
+    nothing reads as a switch refusal or as an unknown name. The module is replaced, not
+    removed: VNX_HOME's scripts/lib comes first on PYTHONPATH, so a broken copy there
+    shadows any gate_recorder an inherited PYTHONPATH would otherwise find."""
+    (harness["vnx_home"] / "scripts" / "lib" / "gate_recorder.py").write_text(
+        'raise ImportError("gate_recorder is unavailable in this test")\n', encoding="utf-8",
+    )
+
+    result = run_gate(harness, PR, "--only", "kimi")
+
+    assert result.returncode == 1
+    assert "Could not check the gate name 'kimi_gate'" in result.stderr
+    assert "unknown gate" not in result.stderr
+    assert audit_records(harness) == []
+    assert not harness["capture"].exists()

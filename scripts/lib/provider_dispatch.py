@@ -805,6 +805,95 @@ def _deadline_frontmatter(result: Any) -> Dict[str, Any]:
     return {"deadline_exceeded": True, "deadline_seconds": float(seconds)}
 
 
+_DEADLINE_MARK_KEYS = ("deadline_exceeded", "deadline_seconds")
+
+
+def _split_readable_frontmatter(text: str) -> Optional[tuple]:
+    """``(mapping, rest)`` when *text* opens with a frontmatter block that parses
+    to a mapping, else None. *rest* is everything after the closing fence, byte
+    for byte. The fences are found with the same rule as
+    ``unified_report_schema.extract_frontmatter``, so a block this function
+    accepts is the block every report reader parses.
+    """
+    from unified_report_schema import SchemaViolation, parse_frontmatter
+
+    try:
+        mapping = parse_frontmatter(text)
+    except SchemaViolation:
+        return None
+    lines = text.splitlines(keepends=True)
+    start = next(i for i, line in enumerate(lines) if line.strip() != "")
+    end = next(j for j in range(start + 1, len(lines)) if lines[j].strip() == "---")
+    return mapping, "".join(lines[end + 1:])
+
+
+def _mark_deadline_on_report(report_path: Path, frontmatter: Dict[str, Any]) -> None:
+    """Put the lane's deadline mark on the report on disk when the deadline cut the run (OI-2069).
+
+    ``emit_unified_report`` keeps a contract-valid report that already exists
+    (idempotent early return), so a worker that wrote its own early PASS report
+    before the deadline killed it left a report without ``deadline_exceeded``,
+    and every verdict reader booked it as a finished review: codex reproduced
+    ``kimi_gate`` pass, exit 0, ``closure_verifier`` GO.
+
+    The mark goes onto the report, not into a second channel next to it. The
+    readers of the signal (``gate_lane_contract.lane_deadline_detail``: the
+    review-gate runner's harness lane, ``kimi_gate`` and ``glm_gate`` live and
+    with ``--reprocess``, the companion-report search, the plan-gate seat
+    reader, its re-extraction and the tiebreaker) all read report text; the
+    governed dispatcher hands back text and never the run result, and
+    ``--reprocess`` and the companion search read a report long after the run.
+
+    Only the pair is written, and nothing else in the report changes:
+
+    - a readable frontmatter mapping keeps its own fields and gains the pair
+      (the lane's statement wins over a value the worker wrote for it); the
+      text after the closing fence stays byte for byte;
+    - a report without a readable frontmatter (none, invalid YAML, not a
+      mapping, never closed) gets a frontmatter holding only the pair on top of
+      its full original text. No exit code or failure reason appears that the
+      worker did not write, so every other reader keeps its old reading.
+
+    Does nothing when *frontmatter* carries no ``deadline_exceeded: true`` (the
+    run was not cut by its deadline) or when the report already carries the
+    pair. Raises RuntimeError when the report cannot be read or written, which
+    the report step's retry loop treats as a failed report write.
+    """
+    mark = {key: frontmatter[key] for key in _DEADLINE_MARK_KEYS if key in frontmatter}
+    if mark.get("deadline_exceeded") is not True:
+        return
+    import atomic_io
+    import yaml
+
+    path = Path(report_path)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"deadline mark: cannot read report {path}: {exc}") from exc
+    split = _split_readable_frontmatter(text)
+    if split is None:
+        mapping, rest = dict(mark), text
+    else:
+        mapping, rest = split
+        # Type as well as value: a worker's `deadline_exceeded: 1` equals True in
+        # Python, but the readers take only a YAML `true` as the signal.
+        if all(type(mapping.get(key)) is type(value) and mapping.get(key) == value
+               for key, value in mark.items()):
+            return
+        mapping = {**mapping, **mark}
+    block = yaml.safe_dump(mapping, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    content = f"---\n{block}---\n" + (rest if split is not None else f"\n{rest}")
+    try:
+        atomic_io.atomic_write_text(path, content)
+    except OSError as exc:
+        raise RuntimeError(f"deadline mark: cannot write report {path}: {exc}") from exc
+    logger.warning(
+        "provider_dispatch: deadline mark written onto the existing report %s "
+        "(deadline_seconds=%s): the lane's deadline cut this run",
+        path, mark.get("deadline_seconds"),
+    )
+
+
 _EMIT_MAX_RETRIES = 3
 _EMIT_RETRY_DELAY = 0.5  # seconds; multiplied by attempt number for backoff
 
@@ -1422,6 +1511,11 @@ def _emit_governance(
                 # file blocking the canonical (structured) failure report.
                 preserve_partial=status != "success",
             )
+            # OI-2069: emit_unified_report keeps a contract-valid report the
+            # worker already wrote, so the deadline pair in `frontmatter` never
+            # reached it. The mark goes onto the report on disk here, inside the
+            # retry loop: a mark that cannot be written is a failed report write.
+            _mark_deadline_on_report(report_path, frontmatter)
             print(f"Report: {report_path}", file=sys.stderr)
             break
         except RuntimeError as exc:

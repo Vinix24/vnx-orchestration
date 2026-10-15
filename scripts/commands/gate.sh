@@ -114,6 +114,43 @@ _g_normalize_gate() {
   esac
 }
 
+_g_gate_known() {
+  # An `--only` name must be a gate gate_recorder registers (GATE_PROVIDERS),
+  # checked before the provider switch is asked. An unregistered name has no
+  # provider, so it is never a switch refusal: it is refused by name with the
+  # registered names, exit 2, and writes no GATE-9 line
+  # (gate_recorder.gate_switch_refusal answers None for it too). Before this,
+  # `providers check` refused a name its family map does not know with exit 4
+  # and this command reported a typo as "switched off" with a
+  # provider_switched_off line (OI-2070); a name the map does know (`gemini`,
+  # `kimi_cli`) passed the switch and reached the gate manager unregistered.
+  # A check that cannot run refuses fail-closed with exit 1.
+  local gate="$1"
+  local pythonpath="$VNX_HOME/scripts/lib:${VNX_HOME}/scripts:${PYTHONPATH:-}"
+  local names_rc=0
+  local names_out
+  names_out=$(PYTHONPATH="$pythonpath" python3 -c '
+import sys
+
+from gate_recorder import GATE_PROVIDERS, resolve_gate_provider
+
+if resolve_gate_provider(sys.argv[1]) is not None:
+    sys.exit(0)
+print(", ".join(sorted(GATE_PROVIDERS)))
+sys.exit(3)
+' "$gate") || names_rc=$?
+  if [ "$names_rc" -eq 0 ]; then
+    return 0
+  fi
+  if [ "$names_rc" -eq 3 ]; then
+    err "[gate] unknown gate '$gate': not a registered gate; nothing was requested or launched"
+    err "[gate] Registered gates: $names_out (short names: codex, ci, kimi, glm, deepseek)"
+    return 2
+  fi
+  err "[gate] Could not check the gate name '$gate' (exit $names_rc); refusing"
+  return 1
+}
+
 _g_record_switch_refusal() {
   # A switched-off gate is a gate decision, so it lands in a canonical ledger
   # before `--only` returns (ADR-005): one GATE-9 skip-rationale line in
@@ -313,6 +350,10 @@ Gate names:
   deepseek_gate         DeepSeek review gate (API credit, fallback when codex and kimi are unavailable)
   ci_gate               CI green check
 
+Exit codes:
+  0 gates passed, 1 a gate failed or an error, 2 unknown --only gate name,
+  4 the --only gate is switched off by the provider switch
+
 Examples:
   vnx gate 221
   vnx gate 221 --only codex
@@ -343,10 +384,16 @@ HELP
     return 0
   fi
 
-  # --only <gate>: a switched-off provider is refused here, before the PR branch
-  # is resolved and before anything is requested or launched.
+  # --only <gate>: an unknown gate name (exit 2) and a switched-off provider
+  # (exit 4) are refused here, in that order, before the PR branch is resolved
+  # and before anything is requested or launched.
   if [ -n "$only_gate" ]; then
     only_gate="$(_g_normalize_gate "$only_gate")"
+    local name_rc=0
+    _g_gate_known "$only_gate" || name_rc=$?
+    if [ "$name_rc" -ne 0 ]; then
+      return "$name_rc"
+    fi
     local switch_rc=0
     _g_switch_allows "$only_gate" "$pr_number" || switch_rc=$?
     if [ "$switch_rc" -ne 0 ]; then

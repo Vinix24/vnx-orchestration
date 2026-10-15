@@ -681,7 +681,9 @@ def spawn_codex(
     """Spawn `codex exec --json` and consume the NDJSON event stream.
 
     Returns CodexSpawnResult on completion (success OR controlled failure).
-    Returns CodexSpawnResult(returncode=127) when the codex binary is absent.
+    Returns CodexSpawnResult(returncode=127) when the codex binary is absent, and
+    CodexSpawnResult(returncode=1, error="codex_model_unresolved: ...") when the
+    registry gives no model (OI-2062, OI-2068).
     Caller is responsible for lease/manifest/receipt/event-archive/retry.
 
     event_writer_strict=True raises RuntimeError if any event_writer call failed,
@@ -707,7 +709,16 @@ def spawn_codex(
     if "VNX_CODEX_STALL_THRESHOLD" not in os.environ:
         chunk_timeout = coerce_chunk_stall(chunk_timeout, total_deadline)
 
-    proc, early_result = _launch_codex_proc(prompt, model, extra_env, cwd)
+    # Resolved once, here: the name codex is launched with is the name a refusal
+    # below reports. Resolving again while formatting the refusal read the
+    # registry a second time, and with model=None and a registry gone after the
+    # start that raised inside the refusal itself (OI-2068).
+    try:
+        launch_model = _resolve_codex_model(model)
+    except provider_registry.CodexModelResolutionError as exc:
+        return _launch_failure(1, f"codex_model_unresolved: {exc}")
+
+    proc, early_result = _launch_codex_proc(prompt, launch_model, extra_env, cwd)
     if early_result is not None:
         return early_result
 
@@ -730,7 +741,7 @@ def spawn_codex(
         tail = b"".join(tail_lines[-60:]).decode("utf-8", "ignore").strip()[-1200:]
         refusal = find_codex_model_refusal(error, tail)
         if refusal:
-            error = f"model_not_supported: {refusal} | requested model: {_resolve_codex_model(model)}"
+            error = f"model_not_supported: {refusal} | requested model: {launch_model}"
         elif tail:
             error = ((error + " | ") if error else "") + f"codex stderr tail: {tail}"
 
