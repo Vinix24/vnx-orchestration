@@ -312,74 +312,8 @@ Respond with valid JSON:
 
         self.deep_open_sessions += 1
         project_id = self._switch_project(origin)
-        disabled_lanes: List[str] = []
-
-        result_text = None
-        # Lane that produced ``result_text``; stamped into the result as ``_model``.
-        lane = "unknown"
-        # ``any_attempted`` records whether an LLM was actually invoked this
-        # session — derived from each candidate's own LLMOutcome.attempted,
-        # not from which branch was merely tried. A config gap (missing
-        # DEEPSEEK_API_KEY, no usable Ollama model/server) refuses before any
-        # subprocess starts, so it must never flip this to True (fix1585-r2).
-        any_attempted = False
-        # Status of the last candidate that actually fired: the reason a
-        # session ends up without a usable result (OI-1258).
-        last_attempted_status = "error"
-        last_attempted_cause = ""
-
-        # deepseek-harness: own-key auth via the claude CLI driving DeepSeek's
-        # Anthropic-compatible endpoint.  Fails closed when DEEPSEEK_API_KEY is
-        # unset — never falls back to the OAuth subscription (constraint
-        # deepseek-harness-subscription-blocked).
-        if LLM_STRATEGY == "deepseek-harness":
-            outcome = self._launch_lane(self._try_deepseek_harness, prompt, project_id)
-            if outcome.status == STATUS_SWITCHED_OFF:
-                disabled_lanes.append("deepseek-harness")
-            any_attempted = any_attempted or outcome.attempted
-            if outcome.attempted:
-                last_attempted_status = outcome.status
-                last_attempted_cause = outcome.cause
-            result_text = outcome.text if outcome.status == "ok" else None
-            lane = f"deepseek-harness:{DEEPSEEK_HARNESS_MODEL}"
-        # Billing guard: in "auto" mode, refuse the claude path when the
-        # session backlog exceeds the threshold. "claude-only" bypasses
-        # the guard — the operator explicitly opted in to metered spend.
-        elif LLM_STRATEGY == "claude-only":
-            outcome = self._try_claude_max(prompt)
-            any_attempted = any_attempted or outcome.attempted
-            if outcome.attempted:
-                last_attempted_status = outcome.status
-                last_attempted_cause = outcome.cause
-            result_text = outcome.text if outcome.status == "ok" else None
-            lane = "claude-max"
-        elif LLM_STRATEGY == "auto":
-            if self._session_backlog <= AUTO_CLAUSE_MAX_SESSIONS:
-                outcome = self._try_claude_max(prompt)
-                any_attempted = any_attempted or outcome.attempted
-                if outcome.attempted:
-                    last_attempted_status = outcome.status
-                    last_attempted_cause = outcome.cause
-                result_text = outcome.text if outcome.status == "ok" else None
-                lane = "claude-max"
-            else:
-                if self._session_backlog > 0:
-                    log("WARNING",
-                        f"auto: skipping claude path — {self._session_backlog} "
-                        f"session backlog exceeds AUTO_CLAUSE_MAX_SESSIONS "
-                        f"({AUTO_CLAUSE_MAX_SESSIONS}). "
-                        f"Use VNX_ANALYZER_LLM=claude-only to override.")
-
-        if result_text is None and LLM_STRATEGY in ("auto", "ollama-only"):
-            outcome = self._launch_lane(self._try_ollama, prompt, project_id)
-            if outcome.status == STATUS_SWITCHED_OFF:
-                disabled_lanes.append("ollama")
-            any_attempted = any_attempted or outcome.attempted
-            if outcome.attempted:
-                last_attempted_status = outcome.status
-                last_attempted_cause = outcome.cause
-            result_text = outcome.text if outcome.status == "ok" else None
-            lane = f"ollama:{OLLAMA_MODEL}"
+        result_text, lane, any_attempted, last_status, last_cause, disabled_lanes = \
+            self._run_lanes(prompt, project_id)
 
         if any_attempted:
             self.deep_attempts += 1
@@ -394,12 +328,68 @@ Respond with valid JSON:
         self.last_status = "failed"
         if result_text is None:
             if any_attempted:
-                self._record_failure(last_attempted_status, last_attempted_cause)
-                log("ERROR", f"Deep analysis failed: {last_attempted_status}"
-                             + (f" ({last_attempted_cause})" if last_attempted_cause else ""))
+                self._record_failure(last_status, last_cause)
+                log("ERROR", f"Deep analysis failed: {last_status}"
+                             + (f" ({last_cause})" if last_cause else ""))
             return None
 
         return self._finish_result(result_text, lane)
+
+    def _run_lanes(self, prompt: str, project_id: str):
+        """Try the lanes the strategy allows, in order, until one yields text.
+
+        Returns ``(result_text, lane, any_attempted, last_status, last_cause,
+        disabled_lanes)``. ``any_attempted`` is derived from each candidate's own
+        LLMOutcome.attempted, not from which branch was merely tried: a config gap
+        (missing DEEPSEEK_API_KEY, no usable Ollama model/server) refuses before any
+        subprocess starts and never flips it (fix1585-r2). ``last_status`` and
+        ``last_cause`` belong to the last candidate that actually fired: the reason a
+        session ends up without a usable result (OI-1258).
+        """
+        disabled_lanes: List[str] = []
+        state = {"text": None, "lane": "unknown", "attempted": False,
+                 "status": "error", "cause": ""}
+
+        def absorb(outcome: LLMOutcome, lane: str) -> None:
+            state["attempted"] = state["attempted"] or outcome.attempted
+            if outcome.attempted:
+                state["status"] = outcome.status
+                state["cause"] = outcome.cause
+            state["text"] = outcome.text if outcome.status == "ok" else None
+            state["lane"] = lane
+
+        # deepseek-harness: own-key auth via the claude CLI driving DeepSeek's
+        # Anthropic-compatible endpoint.  Fails closed when DEEPSEEK_API_KEY is
+        # unset, never falls back to the OAuth subscription (constraint
+        # deepseek-harness-subscription-blocked).
+        if LLM_STRATEGY == "deepseek-harness":
+            outcome = self._launch_lane(self._try_deepseek_harness, prompt, project_id)
+            if outcome.status == STATUS_SWITCHED_OFF:
+                disabled_lanes.append("deepseek-harness")
+            absorb(outcome, f"deepseek-harness:{DEEPSEEK_HARNESS_MODEL}")
+        # Billing guard: in "auto" mode, refuse the claude path when the
+        # session backlog exceeds the threshold. "claude-only" bypasses
+        # the guard: the operator explicitly opted in to metered spend.
+        elif LLM_STRATEGY == "claude-only":
+            absorb(self._try_claude_max(prompt), "claude-max")
+        elif LLM_STRATEGY == "auto":
+            if self._session_backlog <= AUTO_CLAUSE_MAX_SESSIONS:
+                absorb(self._try_claude_max(prompt), "claude-max")
+            elif self._session_backlog > 0:
+                log("WARNING",
+                    f"auto: skipping claude path — {self._session_backlog} "
+                    f"session backlog exceeds AUTO_CLAUSE_MAX_SESSIONS "
+                    f"({AUTO_CLAUSE_MAX_SESSIONS}). "
+                    f"Use VNX_ANALYZER_LLM=claude-only to override.")
+
+        if state["text"] is None and LLM_STRATEGY in ("auto", "ollama-only"):
+            outcome = self._launch_lane(self._try_ollama, prompt, project_id)
+            if outcome.status == STATUS_SWITCHED_OFF:
+                disabled_lanes.append("ollama")
+            absorb(outcome, f"ollama:{OLLAMA_MODEL}")
+
+        return (state["text"], state["lane"], state["attempted"],
+                state["status"], state["cause"], disabled_lanes)
 
     @staticmethod
     def _launch_lane(lane_fn, prompt: str, project_id: str) -> LLMOutcome:
@@ -471,7 +461,6 @@ Respond with valid JSON:
             self._defer_restricted("claude returned empty output", "claude_empty")
             return None
         self._restricted_claude_down = True
-        self._note_cause(outcome.cause)
         self._defer_restricted(f"claude {outcome.status}"
                                + (f" ({outcome.cause})" if outcome.cause else ""))
         return None

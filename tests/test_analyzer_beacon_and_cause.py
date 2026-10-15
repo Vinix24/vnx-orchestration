@@ -177,3 +177,16 @@ def test_analyzer_argv_comes_from_the_shared_builder(lane, monkeypatch):
                                       output_format="json", print_flags=["--max-turns", "1"])
     assert argv[-len(build_harness_cli_args()):] == build_harness_cli_args()
     assert argv[argv.index("--model") + 1] == "deepseek-flash"
+
+
+# --- causes only for counted failures (R2 round 2, deepseek info) --------------------------
+
+def test_restricted_deferral_with_claude_down_records_no_failure_cause(monkeypatch):
+    monkeypatch.setattr(da_module, "resolve_claude_cli", lambda: "claude")
+    stdout = json.dumps({"is_error": True, "result": "API Error: 402 Insufficient Balance"})
+    monkeypatch.setattr(da_module.subprocess, "run", MagicMock(return_value=_fail_run(stdout)))
+    analyzer = DeepAnalyzer()
+    assert analyzer._analyze_restricted("prompt") is None
+    assert analyzer.deep_failures == 0
+    assert analyzer.deep_failure_causes == {}
+    assert analyzer.deep_restricted_deferred == 1
