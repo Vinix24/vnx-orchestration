@@ -48,12 +48,14 @@ def _mock_stderr(*lines: bytes) -> MagicMock:
 class TestCodexSpawnModelResolution:
     """codex_spawn uses the current Codex CLI default unless explicitly overridden."""
 
-    def test_build_cmd_defaults_to_gpt55(self, monkeypatch):
+    def test_build_cmd_defaults_to_registry_model(self, monkeypatch):
         monkeypatch.delenv("VNX_CODEX_DEFAULT_MODEL", raising=False)
         monkeypatch.delenv("VNX_CODEX_SANDBOX", raising=False)
+        from providers import provider_registry
+        expected = provider_registry.load()["openai"].default_model
         assert _build_cmd("") == [
             "codex", "exec", "--json",
-            "--dangerously-bypass-approvals-and-sandbox", "--model", "gpt-5.5",
+            "--dangerously-bypass-approvals-and-sandbox", "--model", expected,
         ]
 
     def test_build_cmd_uses_env_default(self, monkeypatch):

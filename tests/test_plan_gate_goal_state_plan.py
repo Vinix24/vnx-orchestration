@@ -262,7 +262,7 @@ def test_threshold_comes_from_config_not_hardcoded(tmp_path, monkeypatch, capsys
     # must come from this 50-char config. Seat composition is orthogonal to the
     # threshold; keep it deterministic via DEFAULT_PANEL.
     monkeypatch.setattr(pgp, "_default_panel_config_path", lambda: cfg)
-    monkeypatch.setattr(pgp, "load_panel_seats", lambda *a, **k: list(pgp.DEFAULT_PANEL))
+    monkeypatch.setattr(pgp, "load_panel_seats", lambda *a, **k: list(pgp.default_panel()))
 
     rc_ok = _run(state_dir, "feat-ok", goal_state="g" * 90, captured=captured)
     assert rc_ok == 0, "90 chars >= 50 must pass when the threshold is read from config"

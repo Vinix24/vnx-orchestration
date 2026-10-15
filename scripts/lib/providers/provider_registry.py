@@ -9,6 +9,7 @@ BILLING SAFETY: read-only data loader; no Anthropic SDK, no API calls.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -200,6 +201,63 @@ def get_default_model(
     if cfg is None or not cfg.enabled or not cfg.models:
         return None
     return next(iter(cfg.models.values()))
+
+
+# Written where a seat or roster entry means "whatever openai.default_model says":
+# a template names no codex model of its own, the builder swaps this for the
+# registry value when the panel is built (OI-2062).
+CODEX_REGISTRY_DEFAULT = "registry-default"
+
+
+class CodexModelResolutionError(ValueError):
+    """The codex model could not be resolved from the registry.
+
+    Raised instead of ever substituting a hard-coded model name: a name written
+    into code is exactly what codex refused on 14-10 (OI-2062).
+    """
+
+
+def resolve_codex_model(
+    explicit: Optional[str] = None,
+    env_names: tuple = (),
+    registry_path: Optional[Path] = None,
+) -> str:
+    """Return the model every codex launch path passes to the codex CLI.
+
+    Order: *explicit* model, then the first non-empty env var in *env_names*
+    (each path keeps its own names and precedence), then ``openai.default_model``
+    from wave7_models.yaml. Raises :class:`CodexModelResolutionError` when the
+    registry is unreadable, has no ``openai`` section, carries no
+    ``default_model``, or names a default that is not one of its models.
+    """
+    requested = (explicit or "").strip()
+    if requested:
+        return requested
+    for name in env_names:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    path = Path(registry_path) if registry_path is not None else _REGISTRY_PATH
+    try:
+        registry = load(path)
+    except (OSError, yaml.YAMLError, ValueError, AttributeError) as exc:
+        raise CodexModelResolutionError(
+            f"codex model: registry {path} is unreadable ({exc}); "
+            "no model given and no hard-coded fallback exists"
+        ) from exc
+    cfg = registry.get("openai")
+    default_key = (getattr(cfg, "default_model", None) or "").strip()
+    if not default_key:
+        raise CodexModelResolutionError(
+            f"codex model: registry {path} carries no openai.default_model; "
+            "no model given and no hard-coded fallback exists"
+        )
+    if default_key not in cfg.models:
+        raise CodexModelResolutionError(
+            f"codex model: openai.default_model {default_key!r} in {path} "
+            "is not one of the registered openai models"
+        )
+    return default_key
 
 
 def _resolve_step(

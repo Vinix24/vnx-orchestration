@@ -33,10 +33,10 @@ if _LIB_DIR not in sys.path:
 from _streaming_drainer import StreamingDrainerMixin, coerce_chunk_stall  # noqa: E402
 from canonical_event import CanonicalEvent  # noqa: E402
 from env_scrub_patterns import DEFAULT_SCRUB_KEY_PATTERNS, scrub_env  # noqa: E402
+from failure_classification import find_codex_model_refusal
+from providers import provider_registry
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_CODEX_MODEL = "gpt-5.5"
 
 # Cap on stderr lines drained per spawn. A real codex subprocess closes its pipe,
 # so readline() returns b"" and the loop breaks on EOF. This bound is the safety
@@ -345,11 +345,10 @@ def normalize_codex_event(raw: dict, terminal_id: str, dispatch_id: str) -> Cano
 
 
 def _resolve_codex_model(model: Optional[str]) -> str:
-    """Resolve explicit model first, then env default, then the current CLI default."""
-    requested = (model or "").strip()
-    if requested:
-        return requested
-    return os.environ.get("VNX_CODEX_DEFAULT_MODEL", "").strip() or DEFAULT_CODEX_MODEL
+    """Resolve explicit model first, then env default, then ``openai.default_model`` (OI-2062)."""
+    return provider_registry.resolve_codex_model(
+        explicit=model, env_names=("VNX_CODEX_DEFAULT_MODEL",),
+    )
 
 
 def _build_cmd(model: Optional[str]) -> list:
@@ -398,6 +397,15 @@ class _NormalizerHost(StreamingDrainerMixin):
 # Spawn helpers — split to stay ≤70 lines per function
 # ---------------------------------------------------------------------------
 
+def _launch_failure(returncode: int, error: str) -> CodexSpawnResult:
+    """The result of a codex launch that never produced a process."""
+    return CodexSpawnResult(
+        returncode=returncode, completion_text="", events_written=0, session_id=None,
+        timed_out=False, stopped_early=False, token_usage=None, error=error,
+        event_writer_failures=0,
+    )
+
+
 def _launch_codex_proc(
     prompt: str,
     model: Optional[str],
@@ -407,9 +415,14 @@ def _launch_codex_proc(
     """Start codex subprocess and write prompt to stdin.
 
     Returns (proc, None) on success, or (None, error_result) on failure.
-    Returns (None, CodexSpawnResult(returncode=127)) when binary is missing.
+    Returns (None, CodexSpawnResult(returncode=127)) when binary is missing, and
+    (None, CodexSpawnResult(returncode=1, error="codex_model_unresolved: ...")) when the
+    registry gives no model (OI-2062).
     """
-    cmd = _build_cmd(model)
+    try:
+        cmd = _build_cmd(model)
+    except provider_registry.CodexModelResolutionError as exc:
+        return None, _launch_failure(1, f"codex_model_unresolved: {exc}")
     # OI-1619: codex is a real worker subprocess (untrusted-model-driven) — the
     # parent env must be scrubbed of secrets before it crosses into it. This lane
     # Popens directly (no SubprocessAdapter to route the scrub through), so the
@@ -428,22 +441,9 @@ def _launch_codex_proc(
             start_new_session=True,
         )
     except FileNotFoundError as e:
-        return None, CodexSpawnResult(
-            returncode=127,
-            completion_text="",
-            events_written=0,
-            session_id=None,
-            timed_out=False,
-            stopped_early=False,
-            token_usage=None,
-            error=f"codex binary not found: {e}",
-            event_writer_failures=0,
-        )
+        return None, _launch_failure(127, f"codex binary not found: {e}")
     except OSError as exc:
-        return None, CodexSpawnResult(
-            returncode=1, completion_text="", events_written=0,
-            session_id=None, timed_out=False, error=str(exc),
-        )
+        return None, _launch_failure(1, str(exc))
 
     # Drain codex stderr in a daemon thread. Unlike SubprocessAdapter (claude/deepseek),
     # which logs stderr to a file (the H1 fix), codex_spawn's _drain_stream reads ONLY stdout
@@ -728,7 +728,10 @@ def spawn_codex(
     if returncode != 0 or error:
         tail_lines = getattr(proc, "_vnx_stderr_tail", None) or []
         tail = b"".join(tail_lines[-60:]).decode("utf-8", "ignore").strip()[-1200:]
-        if tail:
+        refusal = find_codex_model_refusal(error, tail)
+        if refusal:
+            error = f"model_not_supported: {refusal} | requested model: {_resolve_codex_model(model)}"
+        elif tail:
             error = ((error + " | ") if error else "") + f"codex stderr tail: {tail}"
 
     if event_writer_strict and _event_writer_failures > 0:

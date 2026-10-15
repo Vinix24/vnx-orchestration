@@ -6,6 +6,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+from providers import provider_registry
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -51,7 +53,7 @@ def test_seats_filters_to_requested_roster(tmp_path, monkeypatch):
 
     assert rc == 0
     assert calls["run_deliberation"]["kwargs"]["roster"] == [
-        ("codex", "gpt-5.5"),
+        ("codex", provider_registry.resolve_codex_model()),
         ("claude", "sonnet"),
     ]
     assert calls["dispatcher_factory"]["role"] == "deliberation-panelist"

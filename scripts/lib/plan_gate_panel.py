@@ -123,15 +123,48 @@ _PANEL_TERMINAL_ID = "plan-gate"
 # ABSTAINS as a non-scoring lane instead of vetoing — so a single down lane no longer forces a
 # REVISE (apply_panel_rule's liveness quorum). Keep every provider here runnable anyway; the
 # retry only rescues transient flakes. glm-harness requires the local litellm proxy on :4141.
-DEFAULT_PANEL: List[Dict[str, str]] = [
+def _codex_registry_default() -> str:
+    from providers import provider_registry
+    return provider_registry.CODEX_REGISTRY_DEFAULT
+
+
+_DEFAULT_PANEL_SEATS: List[Dict[str, str]] = [
     {"label": "opus", "provider": "claude", "model_arg": "opus"},
     {"label": "kimi", "provider": "kimi", "model_arg": "kimi-k3"},
     {"label": "glm-5.2-harness", "provider": "glm-harness", "model_arg": "glm-5.2"},
     {"label": "deepseek", "provider": "deepseek-harness", "model_arg": "deepseek-v4-pro"},
-    {"label": "codex", "provider": "codex", "model_arg": "gpt-5.5"},
+    {"label": "codex", "provider": "codex", "model_arg": _codex_registry_default()},
     # gemini is intentionally omitted until the `gemini` CLI is installed: an unrunnable
     # panelist emits no verdict, which the fail-safe rule turns into an unconditional REVISE.
 ]
+
+
+def resolve_codex_seat_models(seats: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """Copy of *seats* with every codex seat that asks for the registry default resolved.
+
+    The codex model is read from ``openai.default_model`` when the panel is built,
+    never at import time and never from a name written in this module (OI-2062). A
+    seat that names its own model keeps it. When the registry cannot give a model the
+    seat keeps the marker and carries the resolver's message in ``model_error``:
+    ``_dispatch_one`` then abstains that one seat under ``model_unresolved`` instead
+    of the whole panel failing to build.
+    """
+    from providers import provider_registry
+    resolved: List[Dict[str, str]] = []
+    for seat in seats:
+        seat = dict(seat)
+        if seat["provider"] == "codex" and seat["model_arg"] == provider_registry.CODEX_REGISTRY_DEFAULT:
+            try:
+                seat["model_arg"] = provider_registry.resolve_codex_model()
+            except provider_registry.CodexModelResolutionError as exc:
+                seat["model_error"] = str(exc)
+        resolved.append(seat)
+    return resolved
+
+
+def default_panel() -> List[Dict[str, str]]:
+    """The shipped five-seat panel, with the codex model resolved from the registry."""
+    return resolve_codex_seat_models(_DEFAULT_PANEL_SEATS)
 
 VERDICT_FENCE = "vnx-plan-verdict"
 
@@ -160,6 +193,7 @@ SEAT_PROSE_NO_FENCE = "prose_no_fence"                    # real content, zero v
 SEAT_UNPARSEABLE_FENCE = "unparseable_fence"              # a fence exists, no body parses into a verdict
 SEAT_LANE_NO_ANSWER = "lane_no_answer"                    # governance synthesized the body (timeout/error/no file)
 SEAT_DISPATCH_FAILED = "dispatch_failed"                  # the dispatch call itself raised
+SEAT_MODEL_UNRESOLVED = "model_unresolved"                # codex seat: the registry gave no model, nothing was dispatched (OI-2062)
 
 # The statuses that COUNT toward the panel's quorum and its pass/fail arithmetic.
 # Everything else is non-scoring. Membership is the single source of truth — the
@@ -169,6 +203,7 @@ SCORING_SEAT_STATUSES: frozenset = frozenset({SEAT_SCORED, SEAT_SCORED_VIA_REEXT
 SEAT_STATUSES: frozenset = frozenset({
     SEAT_SCORED, SEAT_SCORED_VIA_REEXTRACTION, SEAT_NO_REPORT, SEAT_PROSE_NO_FENCE,
     SEAT_UNPARSEABLE_FENCE, SEAT_LANE_NO_ANSWER, SEAT_DISPATCH_FAILED,
+    SEAT_MODEL_UNRESOLVED,
 })
 
 # The second-extraction deadline (OI-1434). Deliberately an order of magnitude
@@ -232,7 +267,7 @@ def _validate_seat(seat: Any, index: int, valid_providers: List[str]) -> Dict[st
 def load_panel_seats(config_path: Optional[Path] = None) -> List[Dict[str, str]]:
     """Load the ordered seat list from ``configs/plan_gate_panel.yaml``.
 
-    Falls back to ``DEFAULT_PANEL`` when the file is absent or unreadable (a
+    Falls back to ``default_panel()`` when the file is absent or unreadable (a
     missing config never breaks the gate; the code constant is the safety net).
     A present-but-invalid config fails LOUD: each seat must carry the three keys
     ``label``/``provider``/``model_arg`` and ``provider`` must be a member of the
@@ -243,24 +278,24 @@ def load_panel_seats(config_path: Optional[Path] = None) -> List[Dict[str, str]]
     """
     path = Path(config_path) if config_path is not None else _default_panel_config_path()
     if not path.is_file():
-        return list(DEFAULT_PANEL)
+        return default_panel()
     try:
         import yaml  # noqa: PLC0415
         loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError) as exc:
         warnings.warn(
-            f"plan_gate_panel: failed to load {path}: {exc} — using DEFAULT_PANEL",
+            f"plan_gate_panel: failed to load {path}: {exc} — using the default panel",
             RuntimeWarning,
             stacklevel=2,
         )
-        return list(DEFAULT_PANEL)
+        return default_panel()
     if not isinstance(loaded, dict) or "seats" not in loaded:
         warnings.warn(
-            f"plan_gate_panel: {path} has no 'seats' list — using DEFAULT_PANEL",
+            f"plan_gate_panel: {path} has no 'seats' list — using the default panel",
             RuntimeWarning,
             stacklevel=2,
         )
-        return list(DEFAULT_PANEL)
+        return default_panel()
     raw_seats = loaded["seats"]
     if not isinstance(raw_seats, list) or not raw_seats:
         raise ValueError(
@@ -268,7 +303,9 @@ def load_panel_seats(config_path: Optional[Path] = None) -> List[Dict[str, str]]
             f"{type(raw_seats).__name__}"
         )
     valid_providers = _valid_provider_strings()
-    return [_validate_seat(s, i, valid_providers) for i, s in enumerate(raw_seats)]
+    return resolve_codex_seat_models(
+        [_validate_seat(s, i, valid_providers) for i, s in enumerate(raw_seats)]
+    )
 
 
 def load_goal_min_chars(config_path: Optional[Path] = None) -> int:
@@ -380,7 +417,7 @@ def filter_panel_seats(
 #   default (code)                       -> 2 seats (opus, kimi)
 #   coding-strict (core / irreversible)  -> 3 seats (opus, kimi, glm-5.2-harness)
 #   new feature (task_class 01_code_generation) -> full panel, regardless of variant
-# Labels are ordered to match DEFAULT_PANEL so filter_panel_seats keeps the
+# Labels are ordered to match the default panel so filter_panel_seats keeps the
 # configured (auditable) order; the tuple length IS the seat count, so there is
 # no second count dict to drift.
 # ---------------------------------------------------------------------------
@@ -1520,6 +1557,13 @@ def _dispatch_one(
     is left untouched for a real report whose fence would not parse (the 2026-06-24
     fail-safe stays exactly as-is). All three non-scoring flavors are retryable.
     """
+    if member.get("model_error"):
+        return PanelistResult(
+            label=member["label"], provider=member["provider"],
+            model=member.get("model_arg", ""),
+            dispatched=False, error=member["model_error"], report_path=dispatch_id,
+            seat_status=SEAT_MODEL_UNRESOLVED,
+        )
     try:
         report_text = dispatcher(member["provider"], member["model_arg"], instruction, dispatch_id)
     except Exception as exc:  # vnx-silent-except: dispatch/report-read failure -> no verdict, recorded as abstain
@@ -1784,7 +1828,7 @@ def run_panel(
     told apart by their instruction and their dispatch id (``<seat-id>-reextract``),
     never by which lane object served them.
     """
-    panel = panel or DEFAULT_PANEL
+    panel = panel or default_panel()
     resolved_timeout = _seat_timeout(timeout_seconds)
     caller_supplied_lane = dispatcher is not None
     dispatcher = dispatcher or _make_default_dispatcher(data_dir, resolved_timeout)

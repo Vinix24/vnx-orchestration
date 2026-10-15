@@ -29,6 +29,8 @@ from governance_receipts import utc_now_iso
 from headless_adapter import gate_timeout, gate_stall_threshold
 from unified_report_schema import SchemaViolation, extract_frontmatter, parse_frontmatter
 import gate_recorder as _rec
+from failure_classification import find_codex_model_refusal
+from providers import provider_registry
 import gate_artifacts as _art
 import vertex_ai_runner as _vtx
 from gate_worktree import (
@@ -330,6 +332,31 @@ def _main_checkout_state_diff(
     return "; ".join(diffs) if diffs else None
 
 
+def _codex_model_refusal(
+    cmd: List[str], stdout: str, stderr: str, returncode: int,
+) -> Optional[str]:
+    """Name a refused codex model, or None when the failure is something else (OI-2062).
+
+    Codex answers an unsupported model with http 400 and one of two measured
+    sentences, on stderr or inside the JSON event stream. The unrelated
+    ``failed to load models cache`` line is noise and never read as the cause.
+    Returns the reason_detail: the provider's own sentence (at most 500
+    characters), the model that was requested and the resolved path of the
+    codex binary that ran, so the install that refused can be told apart.
+    """
+    if returncode == 0:
+        return None
+    sentence = find_codex_model_refusal(stderr, stdout)
+    if not sentence:
+        return None
+    requested = ""
+    for idx, arg in enumerate(cmd):
+        if arg == "-c" and idx + 1 < len(cmd) and cmd[idx + 1].startswith("model="):
+            requested = cmd[idx + 1][len("model="):].strip('"')
+    binary_path = shutil.which(cmd[0]) or cmd[0]
+    return f"{sentence} | requested model: {requested} | codex binary: {os.path.realpath(binary_path)}"
+
+
 def _build_reason_detail(base_detail: str, stdout: str, stderr: str) -> str:
     """Attach diagnostic evidence to a failure reason instead of discarding it (OI-1293).
 
@@ -581,6 +608,15 @@ class GateRunner:
                 request_payload=request_payload,
                 cwd=worktree_path,
             )
+        except provider_registry.CodexModelResolutionError as exc:
+            # The gate never started: no model to launch it with (OI-2062). Booked
+            # like a missing binary, so the request ends terminal, never `executing`.
+            result = {
+                "status": "failed", "reason": "codex_model_unresolved",
+                "reason_detail": str(exc), "stdout": "", "stderr": str(exc),
+                "duration_seconds": 0.0, "partial_output_lines": 0,
+                "runner_pid": os.getpid(),
+            }
         finally:
             remove_gate_worktree(worktree_path, project_root=self._project_root)
 
@@ -1043,18 +1079,15 @@ class GateRunner:
             model = os.environ.get("GEMINI_MODEL", "gemini-2.5-pro")
             cli_args = ["--model", model] + cli_args
         elif gate == "codex_gate":
-            # Model selection: only override if explicitly requested via env/payload.
-            # Default path: let codex use ~/.codex/config.toml (currently gpt-5.5).
-            # 2026-04-19: gpt-5.2-codex deprecated via Codex CLI model-migration mapping;
-            # ChatGPT-account auth rejects older explicit model flags, causing gate
-            # failures with "model not supported when using Codex with a ChatGPT account".
-            model = (
-                os.environ.get("VNX_CODEX_HEADLESS_MODEL")
+            # The model is always passed, so ~/.codex/config.toml never decides the
+            # gate's model (OI-2062: it said gpt-5.5, which codex refuses on a
+            # ChatGPT login). Order: env override, payload, openai.default_model.
+            model = provider_registry.resolve_codex_model(
+                explicit=os.environ.get("VNX_CODEX_HEADLESS_MODEL")
                 or os.environ.get("VNX_CODEX_MODEL")
-                or request_payload.get("model")
+                or request_payload.get("model"),
             )
-            if model:
-                cli_args = cli_args + ["-c", f'model="{model}"']
+            cli_args = cli_args + ["-c", f'model="{model}"']
         return [binary] + cli_args
 
     def _drain_remaining(self, fd_map: Dict[int, str], raw_fds: List[int],
@@ -1196,6 +1229,19 @@ class GateRunner:
         stderr = b"".join(stderr_parts).decode("utf-8", errors="replace")
         _base = {"stdout": stdout, "stderr": stderr, "duration_seconds": elapsed,
                  "partial_output_lines": lcount, "runner_pid": proc.pid}
+        return self._classify_finished_run(
+            gate=gate, cmd=cmd, status=status, timeout=timeout,
+            stall_threshold=stall_threshold, base=_base, returncode=proc.returncode,
+        )
+
+    @staticmethod
+    def _classify_finished_run(
+        *, gate: str, cmd: List[str], status: str, timeout: int, stall_threshold: int,
+        base: Dict[str, Any], returncode: int,
+    ) -> Dict[str, Any]:
+        """Turn a finished gate subprocess into its result dict (timeout/stall/refusal/exit)."""
+        _base = base
+        stdout, stderr = base["stdout"], base["stderr"]
         if status == "timeout":
             detail = _build_reason_detail(
                 f"Subprocess exceeded {timeout}s timeout", stdout, stderr,
@@ -1208,13 +1254,17 @@ class GateRunner:
             )
             return {"status": "failed", "reason": "stall",
                     "reason_detail": detail, **_base}
-        if proc.returncode != 0:
+        refusal = _codex_model_refusal(cmd, stdout, stderr, returncode) if gate == "codex_gate" else None
+        if refusal:
+            return {"status": "failed", "reason": "model_not_supported",
+                    "reason_detail": refusal, **_base}
+        if returncode != 0:
             detail = _build_reason_detail(
-                f"Subprocess exited with code {proc.returncode}", stdout, stderr,
+                f"Subprocess exited with code {returncode}", stdout, stderr,
             )
             return {"status": "failed", "reason": "exit_nonzero",
                     "reason_detail": detail, **_base}
-        return {"status": "completed", **_base, "exit_code": proc.returncode}
+        return {"status": "completed", **_base, "exit_code": returncode}
 
     @staticmethod
     def _kill_process(proc: subprocess.Popen) -> None:
