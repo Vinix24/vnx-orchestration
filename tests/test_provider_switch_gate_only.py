@@ -244,8 +244,20 @@ def test_status_only_never_consults_the_switch(harness):
 # R7 (OI-2070): an unknown gate name is unknown, not switched off
 # ---------------------------------------------------------------------------
 
-REGISTERED_GATES = ("ci_gate", "claude_github_optional", "codex_gate", "deepseek_gate",
-                    "gemini_review", "glm_gate", "kimi_gate", "wiring_gate")
+# The gates `--only` may run: registered in gate_recorder.GATE_PROVIDERS and not retired in
+# dispatch_spec.RETIRED_GATE_NAMES. Pinned against both below, so a new or retired gate
+# fails here instead of drifting.
+LIVE_GATES = ("ci_gate", "claude_github_optional", "codex_gate", "deepseek_gate",
+              "glm_gate", "kimi_gate", "wiring_gate")
+RETIRED_GATE = "gemini_review"
+
+
+def test_the_live_gates_are_the_registered_minus_the_retired():
+    from dispatch_spec import RETIRED_GATE_NAMES
+    from gate_recorder import GATE_PROVIDERS
+
+    assert set(LIVE_GATES) == set(GATE_PROVIDERS) - RETIRED_GATE_NAMES
+    assert RETIRED_GATE in RETIRED_GATE_NAMES and RETIRED_GATE in GATE_PROVIDERS
 
 
 @pytest.mark.parametrize("name", ["kimmi", "gemini", "kimi_cli"], ids=["typo", "short-name", "provider-not-gate"])
@@ -258,8 +270,9 @@ def test_only_an_unknown_gate_is_refused_as_unknown(harness, name):
     booked = [record["reason"] for record in audit_records(harness)]
     assert (result.returncode, booked) == (2, []), result.stderr
     assert f"unknown gate '{name}'" in result.stderr
-    for gate in REGISTERED_GATES:
+    for gate in LIVE_GATES:
         assert gate in result.stderr
+    assert RETIRED_GATE not in result.stderr, "a retired gate is offered as a live one"
     assert "switched off" not in result.stderr
     assert "vnx providers on" not in result.stderr
     assert not harness["capture"].exists(), "review_gate_manager ran for an unknown gate"
@@ -279,14 +292,49 @@ def test_only_an_unknown_gate_is_unknown_with_every_family_switched_off(harness)
     assert "provider_switched_off" not in result.stderr
 
 
-def test_only_every_registered_gate_passes_the_name_check(harness):
-    """No registered gate is refused as unknown; the switch still decides the switchable ones."""
+def test_only_every_live_gate_passes_the_name_check(harness):
+    """No live gate is refused by name; the switch still decides the switchable ones."""
     switch_off(harness, "kimi")
 
-    for gate in REGISTERED_GATES:
+    for gate in LIVE_GATES:
         result = run_gate(harness, PR, "--only", gate)
         assert "unknown gate" not in result.stderr, (gate, result.stderr)
+        assert "retired gate" not in result.stderr, (gate, result.stderr)
     assert [r["gate"] for r in audit_records(harness)] == ["kimi_gate"]
+
+
+def test_only_a_retired_gate_is_refused_as_retired(harness):
+    """`gemini_review` is still in GATE_PROVIDERS, so registration alone let it through to a
+    gate manager that refuses it as retired_review_gate (deepseek, PR #2068). It is refused
+    by name, as retired and not as unknown, with the live gates and no switch line."""
+    result = run_gate(harness, PR, "--only", RETIRED_GATE)
+
+    booked = [record["reason"] for record in audit_records(harness)]
+    assert (result.returncode, booked) == (2, []), result.stderr
+    assert f"retired gate '{RETIRED_GATE}'" in result.stderr
+    assert "retired and no longer a reviewer" in result.stderr
+    assert "unknown gate" not in result.stderr
+    live_line = next(line for line in result.stderr.splitlines() if "Live gates:" in line)
+    for gate in LIVE_GATES:
+        assert gate in live_line
+    assert RETIRED_GATE not in live_line
+    assert "provider_switched_off" not in result.stderr
+    assert "switched off" not in result.stderr
+    assert not harness["capture"].exists(), "review_gate_manager ran for a retired gate"
+    assert not harness["gh_log"].exists(), "the PR branch was resolved for a retired gate"
+
+
+def test_only_a_retired_gate_is_retired_with_its_family_switched_off(harness):
+    """The retirement is checked before the switch, so a switched-off gemini family never
+    turns a retired gate into a switch refusal."""
+    switch_off(harness, "gemini")
+
+    result = run_gate(harness, PR, "--only", RETIRED_GATE)
+
+    booked = [record["reason"] for record in audit_records(harness)]
+    assert (result.returncode, booked) == (2, []), result.stderr
+    assert f"retired gate '{RETIRED_GATE}'" in result.stderr
+    assert "provider_switched_off" not in result.stderr
 
 
 def test_only_refuses_fail_closed_when_the_gate_names_cannot_be_read(harness):

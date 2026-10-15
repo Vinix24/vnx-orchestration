@@ -20,11 +20,12 @@ import fcntl
 import json
 import logging
 import os
+import re
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -807,24 +808,140 @@ def _deadline_frontmatter(result: Any) -> Dict[str, Any]:
 
 _DEADLINE_MARK_KEYS = ("deadline_exceeded", "deadline_seconds")
 
+# The name a worker report that cannot carry the mark is set aside under
+# (OI-2069 round 2). Not ``.md``: every reader of unified_reports/ takes either
+# the exact ``<dispatch_id>.md`` (plan_gate_panel._read_report, kimi_gate,
+# glm_gate, gate_runner via the governed dispatcher) or a ``*.md`` glob (the
+# companion-report search, the receipt processor and its converter), so no
+# reader ever books a verdict from it.
+_UNMARKED_REPORT_SUFFIX = ".deadline-unmarked"
+
+
+class DeadlineMarkError(RuntimeError):
+    """The lane's deadline mark could not be put on the report on disk (OI-2069).
+
+    A RuntimeError, so the report step's retry loop in ``_emit_governance``
+    retries it like any failed report write. Every way the mark can fail ends
+    here: a read error, a report that is not UTF-8, a composed text the readers'
+    parser does not read as cut off, and a write error.
+    """
+
 
 def _split_readable_frontmatter(text: str) -> Optional[tuple]:
-    """``(mapping, rest)`` when *text* opens with a frontmatter block that parses
-    to a mapping, else None. *rest* is everything after the closing fence, byte
-    for byte. The fences are found with the same rule as
-    ``unified_report_schema.extract_frontmatter``, so a block this function
-    accepts is the block every report reader parses.
+    """``(mapping, lines, start, end)`` when *text* opens with a frontmatter block
+    that parses to a mapping, else None.
+
+    *lines* is ``text.splitlines(keepends=True)``; ``lines[start]`` is the
+    opening fence and ``lines[end]`` the closing one. The fences are found with
+    the same rule as ``unified_report_schema.extract_frontmatter``, so a block
+    this function accepts is the block every report reader parses. A block the
+    readers' parser refuses, by SchemaViolation or by any other ValueError (a
+    timestamp such as ``2026-13-45`` raises a plain ValueError from inside
+    ``yaml.safe_load``) or by running out of recursion depth, is not readable.
     """
-    from unified_report_schema import SchemaViolation, parse_frontmatter
+    from unified_report_schema import parse_frontmatter
 
     try:
         mapping = parse_frontmatter(text)
-    except SchemaViolation:
+    except (ValueError, RecursionError):
         return None
     lines = text.splitlines(keepends=True)
     start = next(i for i, line in enumerate(lines) if line.strip() != "")
     end = next(j for j in range(start + 1, len(lines)) if lines[j].strip() == "---")
-    return mapping, "".join(lines[end + 1:])
+    return mapping, lines, start, end
+
+
+def _commented_top_level_entries(block: List[str], keys: List[str]) -> List[str]:
+    """*block* (frontmatter lines, without fences) with the top-level entries for *keys* commented out.
+
+    An entry is its key line at column 0 (``key:``, ``"key":`` or ``'key':``) plus
+    the indented lines that continue it, up to the next line that starts at
+    column 0. Each of its non-blank lines gains a ``# `` in front; every other
+    line is kept as it is. Commented, not removed: the line stays where it was,
+    so a block scalar above it keeps the line break that ends its value (the
+    readers join the block without the last line break), and the value the
+    worker wrote stays readable for a person. The caller verifies the result
+    with the readers' parser, so an entry this rule reads wrongly never reaches
+    disk.
+    """
+    if not keys:
+        return block
+    alternatives = "|".join(
+        f'{re.escape(key)}|"{re.escape(key)}"|\'{re.escape(key)}\'' for key in keys
+    )
+    key_line = re.compile(rf"^(?:{alternatives})[ \t]*:(?:[ \t]|$)")
+    result: List[str] = []
+    in_entry = False
+    for line in block:
+        content = line.rstrip("\r\n")
+        if not (in_entry and (content[:1] in (" ", "\t") or content.strip() == "")):
+            in_entry = bool(key_line.match(content))
+        result.append(f"# {line}" if in_entry and content.strip() else line)
+    return result
+
+
+def _marked_report_text(text: str, mark: Dict[str, Any]) -> Optional[str]:
+    """*text* with the lane's deadline mark in its frontmatter, or None when it already carries it.
+
+    The worker's own bytes stay as they are; the mark is inserted as text, never
+    by serialising the worker's frontmatter again. ``yaml.safe_dump`` of a
+    worker mapping rewrote an escaped ``summary: "A\\n---\\nB"`` into a block
+    scalar with an indented ``---`` line, which the report readers take for the
+    closing fence: the frontmatter became unreadable and the deadline vanished
+    (codex on fc66dc12).
+
+    - A readable frontmatter keeps every line, and the two mark lines go in
+      directly after its opening fence. Not before the closing one: the readers
+      join the block's lines without the last line break
+      (``extract_frontmatter``), so anything after a trailing block scalar
+      changes its value (``|`` gains a ``\\n``, ``|+`` gains the blank lines
+      under it). A top-level entry the worker wrote for one of the two mark keys
+      is commented out first: the lane's statement wins, and the block holds
+      each key once.
+    - A report without a readable frontmatter gets a block holding only the
+      pair on top of its full original text.
+
+    Before the text is returned it is parsed with the readers' own parser
+    (``unified_report_schema.parse_frontmatter``, the parser behind
+    ``gate_lane_contract.lane_deadline_detail``). It must read as cut off, hold
+    each mark key exactly once with the lane's value and type, and keep every
+    other field the worker wrote with the same value. Anything else raises
+    DeadlineMarkError, so the report on disk is never replaced by one the
+    readers cannot read.
+    """
+    import yaml
+    from gate_lane_contract import lane_deadline_detail
+    from unified_report_schema import extract_frontmatter, parse_frontmatter
+
+    split = _split_readable_frontmatter(text)
+    if split is None:
+        pair = yaml.safe_dump(mark, default_flow_style=False, sort_keys=False)
+        marked = f"---\n{pair}---\n\n{text}"
+        expected = dict(mark)
+    else:
+        mapping, lines, start, end = split
+        # Type as well as value: a worker's `deadline_exceeded: 1` equals True in
+        # Python, but the readers take only a YAML `true` as the signal.
+        if all(type(mapping.get(key)) is type(value) and mapping.get(key) == value
+               for key, value in mark.items()):
+            return None
+        block = _commented_top_level_entries(lines[start + 1:end], [key for key in mark if key in mapping])
+        newline = "\r\n" if lines[start].endswith("\r\n") else "\n"
+        pair = yaml.safe_dump(mark, default_flow_style=False, sort_keys=False).replace("\n", newline)
+        marked = "".join(lines[:start + 1]) + pair + "".join(block + lines[end:])
+        expected = {**mapping, **mark}
+
+    if lane_deadline_detail(marked) is None:
+        raise DeadlineMarkError("the marked report does not read as cut off by its deadline")
+    parsed = parse_frontmatter(marked)
+    if parsed != expected or any(type(parsed[key]) is not type(value) for key, value in mark.items()):
+        changed = sorted(str(key) for key in set(parsed) | set(expected) if parsed.get(key) != expected.get(key))
+        raise DeadlineMarkError(f"the marked frontmatter does not read as the worker's plus the mark (changed: {changed})")
+    root = yaml.compose(extract_frontmatter(marked)[0], Loader=yaml.SafeLoader)
+    key_names = [key_node.value for key_node, _value_node in root.value]
+    if any(key_names.count(key) != 1 for key in mark):
+        raise DeadlineMarkError("the marked frontmatter does not hold each mark key exactly once")
+    return marked
 
 
 def _mark_deadline_on_report(report_path: Path, frontmatter: Dict[str, Any]) -> None:
@@ -844,54 +961,130 @@ def _mark_deadline_on_report(report_path: Path, frontmatter: Dict[str, Any]) -> 
     governed dispatcher hands back text and never the run result, and
     ``--reprocess`` and the companion search read a report long after the run.
 
-    Only the pair is written, and nothing else in the report changes:
-
-    - a readable frontmatter mapping keeps its own fields and gains the pair
-      (the lane's statement wins over a value the worker wrote for it); the
-      text after the closing fence stays byte for byte;
-    - a report without a readable frontmatter (none, invalid YAML, not a
-      mapping, never closed) gets a frontmatter holding only the pair on top of
-      its full original text. No exit code or failure reason appears that the
-      worker did not write, so every other reader keeps its old reading.
+    Only the pair is added (``_marked_report_text``): the worker's frontmatter
+    lines stay as they are and the text after the closing fence stays byte for
+    byte; a report without a readable frontmatter gets a pair-only block on top.
+    No exit code or failure reason appears that the worker did not write, so
+    every other reader keeps its old reading.
 
     Does nothing when *frontmatter* carries no ``deadline_exceeded: true`` (the
     run was not cut by its deadline) or when the report already carries the
-    pair. Raises RuntimeError when the report cannot be read or written, which
-    the report step's retry loop treats as a failed report write.
+    pair. Raises DeadlineMarkError, a RuntimeError, on every failure: the read
+    (OSError, a report that is not UTF-8), composing and verifying the marked
+    text, and the write. The report step's retry loop retries it; when it keeps
+    failing, ``_set_unmarkable_report_aside`` takes over.
     """
     mark = {key: frontmatter[key] for key in _DEADLINE_MARK_KEYS if key in frontmatter}
     if mark.get("deadline_exceeded") is not True:
         return
     import atomic_io
-    import yaml
 
     path = Path(report_path)
     try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise RuntimeError(f"deadline mark: cannot read report {path}: {exc}") from exc
-    split = _split_readable_frontmatter(text)
-    if split is None:
-        mapping, rest = dict(mark), text
-    else:
-        mapping, rest = split
-        # Type as well as value: a worker's `deadline_exceeded: 1` equals True in
-        # Python, but the readers take only a YAML `true` as the signal.
-        if all(type(mapping.get(key)) is type(value) and mapping.get(key) == value
-               for key, value in mark.items()):
-            return
-        mapping = {**mapping, **mark}
-    block = yaml.safe_dump(mapping, default_flow_style=False, sort_keys=False, allow_unicode=True)
-    content = f"---\n{block}---\n" + (rest if split is not None else f"\n{rest}")
+        text = path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise DeadlineMarkError(f"deadline mark: cannot read report {path}: {exc}") from exc
     try:
-        atomic_io.atomic_write_text(path, content)
-    except OSError as exc:
-        raise RuntimeError(f"deadline mark: cannot write report {path}: {exc}") from exc
+        marked = _marked_report_text(text, mark)
+    except DeadlineMarkError as exc:
+        raise DeadlineMarkError(f"deadline mark: report {path} left as it is: {exc}") from exc
+    except Exception as exc:
+        raise DeadlineMarkError(
+            f"deadline mark: report {path} left as it is: {type(exc).__name__}: {exc}"
+        ) from exc
+    if marked is None:
+        return
+    try:
+        atomic_io.atomic_write_text(path, marked)
+    except (OSError, ValueError) as exc:
+        raise DeadlineMarkError(f"deadline mark: cannot write report {path}: {exc}") from exc
     logger.warning(
         "provider_dispatch: deadline mark written onto the existing report %s "
         "(deadline_seconds=%s): the lane's deadline cut this run",
         path, mark.get("deadline_seconds"),
     )
+
+
+def _set_unmarkable_report_aside(
+    report_path: Path, frontmatter: Dict[str, Any], write_lane_report: Any, failure: BaseException,
+) -> Path:
+    """The fail-closed end state of a cut run whose report cannot carry the mark (OI-2069 round 2).
+
+    After a deadline cut, the report on disk either carries the readable mark or
+    no reader can book it as a pass. When ``_mark_deadline_on_report`` keeps
+    failing, the worker's report is renamed to ``<dispatch_id>.md.deadline-unmarked``
+    (``_UNMARKED_REPORT_SUFFIX``: no reader takes it) and *write_lane_report*
+    writes the lane's own report at the canonical path. That is the report a
+    cut run gets when its worker wrote none: the lane's full frontmatter
+    (*frontmatter*) with ``deadline_exceeded: true``, which every reader books
+    as timeout, plus ``worker_report_set_aside`` naming where the worker's bytes
+    went. The lane's report goes through the same marker before it is checked:
+    ``emit_unified_report`` serialises with ``yaml.dump``, which turns a lane
+    string holding a ``---`` line (a lifted ``failure_reason``) into a scalar
+    the readers cut at that line, and the marker then puts a pair-only block on
+    top.
+
+    The rename comes first because it is the step least likely to fail and the
+    one that settles the outcome: from that moment the canonical path holds
+    nothing a reader can book as a pass. When the rename fails the report is
+    removed instead. When the lane's report cannot be written or does not read
+    as cut off, the canonical path is left empty and DeadlineMarkError is
+    raised: no report, so the gate books its dispatch as failed, never as a
+    pass. Only when neither the rename nor the removal works does the unmarked
+    report stay, and the error says so.
+
+    Returns the canonical report path holding the lane's report.
+    """
+    from gate_lane_contract import lane_deadline_detail
+
+    path = Path(report_path)
+    aside: Optional[Path] = path.with_name(path.name + _UNMARKED_REPORT_SUFFIX)
+    try:
+        os.replace(path, aside)
+    except FileNotFoundError:
+        aside = None
+    except OSError as move_exc:
+        aside = None
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as unlink_exc:
+            logger.critical(
+                "provider_dispatch: the unmarked report %s stays on disk after a deadline cut: "
+                "it could not be set aside (%s) nor removed (%s)",
+                path, move_exc, unlink_exc,
+            )
+            raise DeadlineMarkError(
+                f"deadline mark: {failure}; the unmarked report {path} could not be set aside "
+                f"({move_exc}) nor removed ({unlink_exc})"
+            ) from failure
+        logger.error(
+            "provider_dispatch: unmarked report %s removed after a deadline cut: it could not be "
+            "set aside (%s)", path, move_exc,
+        )
+    try:
+        written = Path(write_lane_report(aside.name if aside is not None else None))
+        _mark_deadline_on_report(written, frontmatter)
+        if lane_deadline_detail(written.read_bytes().decode("utf-8")) is None:
+            raise DeadlineMarkError(f"the lane's report {written} does not read as cut off")
+    except Exception as exc:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as unlink_exc:
+            logger.critical(
+                "provider_dispatch: an unverified lane report %s stays on disk after a deadline cut: %s",
+                path, unlink_exc,
+            )
+        raise DeadlineMarkError(
+            f"deadline mark: {failure}; the lane's own report could not take its place either "
+            f"({type(exc).__name__}: {exc}); no report remains at {path}"
+            + (f", the worker's report is at {aside}" if aside is not None else "")
+        ) from exc
+    logger.error(
+        "provider_dispatch: deadline mark could not be written onto %s (%s); the worker's report "
+        "was set aside at %s and the lane's own report took its place",
+        path, failure, aside if aside is not None else "(removed)",
+    )
+    return written
 
 
 _EMIT_MAX_RETRIES = 3
@@ -1486,31 +1679,38 @@ def _emit_governance(
         args, provider, model_used, result, duration, token_usage, cost_usd,
     )
 
+    def _write_report(report_frontmatter: Dict[str, Any]) -> Path:
+        return emit_unified_report(
+            dispatch_id=args.dispatch_id,
+            terminal_id=args.terminal_id,
+            provider=provider,
+            model=model_used,
+            instruction=args.instruction,
+            response_text=_extract_response_text(result),
+            # The generic wrapper reports the response text, it never extracts
+            # structured findings — None marks "not captured", not a false "zero".
+            findings=None,
+            duration_seconds=duration,
+            data_dir=data_dir,
+            frontmatter=report_frontmatter,
+            # OI-1710: thread the spawn-layer diagnosis into the report so an
+            # empty response never falls back to "(no response captured)" when
+            # the spawn layer already knows why it produced nothing (proxy
+            # unreachable, harness refused to start). Shared across every lane.
+            spawn_error=getattr(result, "error", None),
+            # OI-903: on failure/timeout, preserve a killed worker's partial
+            # report under a .partial.md sidecar instead of leaving an invalid
+            # file blocking the canonical (structured) failure report.
+            preserve_partial=status != "success",
+        )
+
+    def _write_lane_report(aside_name: Optional[str]) -> Path:
+        set_aside = {"worker_report_set_aside": aside_name} if aside_name else {}
+        return _write_report({**frontmatter, **set_aside})
+
     for attempt in range(_EMIT_MAX_RETRIES):
         try:
-            report_path = emit_unified_report(
-                dispatch_id=args.dispatch_id,
-                terminal_id=args.terminal_id,
-                provider=provider,
-                model=model_used,
-                instruction=args.instruction,
-                response_text=_extract_response_text(result),
-                # The generic wrapper reports the response text, it never extracts
-                # structured findings — None marks "not captured", not a false "zero".
-                findings=None,
-                duration_seconds=duration,
-                data_dir=data_dir,
-                frontmatter=frontmatter,
-                # OI-1710: thread the spawn-layer diagnosis into the report so an
-                # empty response never falls back to "(no response captured)" when
-                # the spawn layer already knows why it produced nothing (proxy
-                # unreachable, harness refused to start). Shared across every lane.
-                spawn_error=getattr(result, "error", None),
-                # OI-903: on failure/timeout, preserve a killed worker's partial
-                # report under a .partial.md sidecar instead of leaving an invalid
-                # file blocking the canonical (structured) failure report.
-                preserve_partial=status != "success",
-            )
+            report_path = _write_report(frontmatter)
             # OI-2069: emit_unified_report keeps a contract-valid report the
             # worker already wrote, so the deadline pair in `frontmatter` never
             # reached it. The mark goes onto the report on disk here, inside the
@@ -1526,6 +1726,14 @@ def _emit_governance(
                 )
                 time.sleep(_EMIT_RETRY_DELAY * (attempt + 1))
                 continue
+            if isinstance(exc, DeadlineMarkError):
+                # OI-2069 round 2: a cut run never ends with an unmarked worker
+                # report on disk. The worker's report is set aside under a name
+                # no reader takes and the lane's own report takes its place; when
+                # even that fails the canonical path stays empty and this raises.
+                report_path = _set_unmarkable_report_aside(report_path, frontmatter, _write_lane_report, exc)
+                print(f"Report: {report_path}", file=sys.stderr)
+                break
             logger.error(
                 "_emit_governance: persistent report write failure after %d retries: %s — report may be lost",
                 _EMIT_MAX_RETRIES, exc,
