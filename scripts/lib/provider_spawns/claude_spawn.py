@@ -70,6 +70,13 @@ class ClaudeSpawnResult:
     # ``claude-sonnet-5-5``), i.e. what the requested alias actually resolved
     # to. None when the stream never emitted an init event with a model.
     model_resolved: Optional[str] = None
+    # OI-2066: the total deadline, in seconds, when SubprocessAdapter stopped
+    # the stream BECAUSE that deadline ran out (see
+    # SubprocessAdapter.deadline_exceeded_seconds). None for a chunk (stall)
+    # timeout alone and for every other outcome; ``timed_out`` covers both.
+    # provider_dispatch stamps it into the report as deadline_exceeded +
+    # deadline_seconds.
+    deadline_exceeded_seconds: Optional[float] = None
     # Internal: the SubprocessAdapter instance used for this spawn.
     # Callers may use this for post-spawn cleanup (event_store.clear,
     # trigger_report_pipeline) to ensure the same session_id and state are
@@ -337,7 +344,6 @@ def spawn_claude(
             model_resolved=model_resolved,
         )
 
-    timed_out = adapter.was_timed_out(terminal_id)
     obs = adapter.observe(terminal_id)
     returncode: Optional[int] = obs.transport_state.get("returncode")
     if returncode is None:
@@ -351,7 +357,8 @@ def spawn_claude(
         completion=completion,
         events_written=events_written,
         session_id=adapter.get_session_id(terminal_id),
-        timed_out=timed_out,
+        timed_out=adapter.was_timed_out(terminal_id),
+        deadline_exceeded_seconds=adapter.deadline_exceeded_seconds(terminal_id),
         stopped_early=stopped_early,
         token_usage=token_usage,
         completion_text=completion_text,

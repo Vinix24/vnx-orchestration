@@ -286,11 +286,16 @@ def _build_harness_lane_dispatcher(
     )
 
 
-def _raise_if_lane_deadline_fired(
-    report_text: str, elapsed: float, deadline: Optional[int],
-) -> None:
+def _frontmatter_number(value: Any) -> Optional[float]:
+    """A frontmatter value as a float when it is a plain number, else None (a bool is not a number)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _raise_if_lane_deadline_fired(report_text: str, elapsed: float) -> None:
     """OI-2066: raise :class:`_HarnessLaneDeadlineExceeded` when the returned
-    report is a run the lane's OWN deadline stopped.
+    report says the lane's OWN deadline stopped the run.
 
     The drainer (kimi) and the claude-harness adapter (glm, deepseek) kill the
     run at the deadline, and provider_dispatch still writes the governed
@@ -299,35 +304,41 @@ def _raise_if_lane_deadline_fired(
     ``harness_lane_no_model_response`` or ``harness_lane_exit_nonzero``, with
     the lane's own text in ``reason_detail``.
 
-    The signal is structural, never the prose (a reviewed diff can quote
-    "deadline exceeded" as easily as a quota message): the frontmatter says
-    the run failed — a ``failure_reason``, or a non-zero ``exit_code`` — AND
-    the run lasted the whole deadline. The lane's own ``duration_seconds`` is
-    the measure; the runner's elapsed time stands in when the report carries
-    none. A run that failed after lasting the whole deadline was stopped by
-    it: the lane kills at the deadline, so no later failure exists.
+    The signal is the lane's explicit statement, never an inference:
+    ``deadline_exceeded: true`` in the report frontmatter, which
+    provider_dispatch stamps (``_deadline_frontmatter``, with
+    ``deadline_seconds``) only when the code that killed the run did so
+    because its total deadline ran out. Without that field every report keeps
+    its old booking, quota detection included.
+
+    Duration is never the deciding signal (codex on 595c3e8e): deepseek's
+    ``duration_seconds`` includes prompt and worktree setup, while its timer
+    starts after delivery — a quota failure after 20 s of setup and 890 s of
+    work "lasted" a 900 s deadline that never fired. The lane's
+    ``duration_seconds`` (or the runner's ``elapsed`` when the report carries
+    none) goes into the message as information only. The message is built
+    from numbers only, never from the report's text.
     """
-    if not report_text or not deadline:
+    if not report_text:
         return
     try:
         frontmatter = parse_frontmatter(report_text)
     except SchemaViolation:
         return
+    if frontmatter.get("deadline_exceeded") is not True:
+        return
+    deadline = _frontmatter_number(frontmatter.get("deadline_seconds"))
+    ran = _frontmatter_number(frontmatter.get("duration_seconds"))
     exit_code = frontmatter.get("exit_code")
-    failed = bool(str(frontmatter.get("failure_reason") or "").strip()) or (
-        isinstance(exit_code, int) and not isinstance(exit_code, bool) and exit_code != 0
+    of_deadline = f" of {deadline:.0f} s" if deadline is not None else ""
+    exit_note = (
+        f" (report exit_code={exit_code})"
+        if isinstance(exit_code, int) and not isinstance(exit_code, bool) else ""
     )
-    lane_duration = frontmatter.get("duration_seconds")
-    lasted = (
-        float(lane_duration)
-        if isinstance(lane_duration, (int, float)) and not isinstance(lane_duration, bool)
-        else elapsed
+    raise _HarnessLaneDeadlineExceeded(
+        f"the lane reported its own deadline{of_deadline} stopped the run; "
+        f"it ran {ran if ran is not None else elapsed:.0f} s{exit_note}"
     )
-    if failed and lasted >= deadline:
-        raise _HarnessLaneDeadlineExceeded(
-            f"the lane's own deadline stopped the run after {lasted:.0f} s "
-            f"(report exit_code={exit_code!r})"
-        )
 
 
 def _harness_lane_exception_outcome(
@@ -827,8 +838,9 @@ class GateRunner:
 
         OI-2066: the deadline fits the diff (``_build_harness_lane_dispatcher``)
         and a timeout books ``timeout`` — whether the dispatcher raised
-        ``subprocess.TimeoutExpired`` or the lane's own deadline stopped the
-        run and the lane returned its report (``_raise_if_lane_deadline_fired``).
+        ``subprocess.TimeoutExpired`` or the lane returned a report whose
+        frontmatter says its own deadline stopped the run
+        (``deadline_exceeded``, read by ``_raise_if_lane_deadline_fired``).
         """
         branch = request_payload.get("branch", "")
         identifier = pr_id if pr_id else (str(pr_number) if pr_number is not None else "unknown")
@@ -868,10 +880,9 @@ class GateRunner:
                 gate, data_dir, base_ref, request_payload, prompt,
             )
             report_text = dispatcher(provider, model, prompt, dispatch_id)
-            # OI-2066: a report the lane's own deadline produced is a timeout.
-            _raise_if_lane_deadline_fired(
-                report_text, time.monotonic() - _start, request_payload.get("timeout_seconds"),
-            )
+            # OI-2066: a report that SAYS the lane's own deadline stopped the
+            # run (deadline_exceeded) is a timeout.
+            _raise_if_lane_deadline_fired(report_text, time.monotonic() - _start)
         except Exception as exc:  # noqa: BLE001 — governed dispatch/report-read failure
             dispatch_exc = exc
 

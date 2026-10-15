@@ -262,11 +262,19 @@ class TestDispatcherTimeoutIsBookedAsTimeout:
 
 
 # ---------------------------------------------------------------------------
-# 2. The lane's own deadline: the dispatcher returns the lane's report
+# 2. The lane's own deadline: the dispatcher returns the lane's report, and
+#    the report SAYS the deadline stopped the run (round 2: never inferred
+#    from duration_seconds)
 # ---------------------------------------------------------------------------
 
 
-def _lane_report(*, exit_code, duration, failure_reason=None, body="(partial output)\n"):
+def _lane_report(
+    *, exit_code, duration, failure_reason=None, body="(partial output)\n",
+    deadline_exceeded=None, deadline_seconds=None,
+):
+    """A governed lane report. ``deadline_exceeded``/``deadline_seconds`` are
+    the pair provider_dispatch stamps when the lane's own deadline killed the
+    run; left None they are absent, as on every other report."""
     lines = [
         "---",
         "dispatch_id: glm-gate-pr2058-1792000000",
@@ -276,40 +284,54 @@ def _lane_report(*, exit_code, duration, failure_reason=None, body="(partial out
     ]
     if failure_reason:
         lines.append(f"failure_reason: '{failure_reason}'")
+    if deadline_exceeded is not None:
+        lines.append(f"deadline_exceeded: {deadline_exceeded}")
+    if deadline_seconds is not None:
+        lines.append(f"deadline_seconds: {deadline_seconds}")
     lines.append("---")
     return "\n".join(lines) + "\n\n# Dispatch glm-gate-pr2058-1792000000\n\n## Response\n\n" + body
 
 
 _SMALL_DIFF = "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-old\n+new\n"
 
+# The quota refusal DeepSeek answers with, as the lane records it.
+_DEEPSEEK_402 = f"[quota_or_auth] provider=deepseek msg=API Error: 402 {QUOTA_PHRASE_A.title()}"
+
 
 class TestLaneDeadlineIsBookedAsTimeout:
     def test_a_report_stopped_by_the_lane_deadline_books_timeout(self, gate_dirs, monkeypatch):
-        """kimi's shape: the drainer's 'total deadline Ns exceeded' became the
-        spawn error and the report's failure_reason. Before OI-2066 this booked
-        harness_lane_no_model_response."""
+        """kimi's shape: the drainer killed the run at its total deadline and
+        said so (deadline_exceeded + deadline_seconds); its 'total deadline Ns
+        exceeded' also became the report's failure_reason. Before OI-2066 this
+        booked harness_lane_no_model_response."""
         report = _lane_report(
             exit_code=1, duration=900.4, failure_reason="total deadline 900s exceeded",
+            deadline_exceeded="true", deadline_seconds=900.0,
         )
         result, on_disk, _calls = _run(
-            gate_dirs, monkeypatch, "glm_gate", lambda *_: report, diff=_SMALL_DIFF,
+            gate_dirs, monkeypatch, "kimi_gate", lambda *_: report, diff=_SMALL_DIFF,
         )
         for record in (result, on_disk):
             assert record["reason"] == "timeout"
             assert record["status"] == "unavailable"
             assert record["timeout_seconds"] == 900
         assert result["reason_detail"] == (
-            f"harness lane glm_gate exceeded 900 s (diff {len(_SMALL_DIFF.strip())} chars): "
-            "the lane's own deadline stopped the run after 900 s (report exit_code=1)"
+            f"harness lane kimi_gate exceeded 900 s (diff {len(_SMALL_DIFF.strip())} chars): "
+            "the lane reported its own deadline of 900 s stopped the run; it ran 900 s "
+            "(report exit_code=1)"
         )
 
     def test_a_partial_answer_quoting_quota_text_is_still_a_timeout(self, gate_dirs, monkeypatch):
         """The claude-harness shape: killed at the deadline with partial text,
-        a non-zero exit_code and no failure_reason. Before OI-2066 this booked
-        harness_lane_exit_nonzero with the body's tail in reason_detail — and
-        a body quoting the diff's quota fixtures re-booked it as a spent quota."""
+        a non-zero exit_code, no failure_reason, and the adapter's deadline
+        pair. Before OI-2066 this booked harness_lane_exit_nonzero with the
+        body's tail in reason_detail — and a body quoting the diff's quota
+        fixtures re-booked it as a spent quota."""
         body = f"Reviewing tests/test_quota.py: REFUSAL_402 = 'API Error: 402 {QUOTA_PHRASE_A}'\n"
-        report = _lane_report(exit_code=-15, duration=1500.2, body=body)
+        report = _lane_report(
+            exit_code=-15, duration=1500.2, body=body,
+            deadline_exceeded="true", deadline_seconds=1500.0,
+        )
         result, _on_disk, _calls = _run(
             gate_dirs, monkeypatch, "deepseek_gate", lambda *_: report,
             diff=_pr2058_shaped_diff(),
@@ -319,9 +341,81 @@ class TestLaneDeadlineIsBookedAsTimeout:
         _assert_no_diff_text(result["reason_detail"])
         assert result["timeout_seconds"] == 1500
 
+    def test_the_lane_field_decides_even_when_the_run_was_shorter_than_the_runner_deadline(
+        self, gate_dirs, monkeypatch,
+    ):
+        """The lane's own word, not the runner's arithmetic: a lane whose
+        deadline was set lower (VNX_KIMI_TIMEOUT) says it fired at 600 s while
+        the runner applied 900 s. The old duration rule read that as a quick
+        failure."""
+        report = _lane_report(
+            exit_code=1, duration=601.0, failure_reason="total deadline 600s exceeded",
+            deadline_exceeded="true", deadline_seconds=600.0,
+        )
+        result, _on_disk, _calls = _run(
+            gate_dirs, monkeypatch, "kimi_gate", lambda *_: report, diff=_SMALL_DIFF,
+        )
+        assert result["reason"] == "timeout"
+        assert "deadline of 600 s" in result["reason_detail"]
+        assert result["timeout_seconds"] == 900
+
+
+class TestDurationIsNotADeadlineSignal:
+    """codex_gate on 595c3e8e: ``failed and lasted >= deadline`` mixed up the
+    dispatch duration with the lane timer. DeepSeek's ``duration_seconds``
+    includes prompt and worktree setup, its timer starts after delivery: a
+    quota failure after 20 s of setup and 890 s of work 'lasted' the 900 s
+    deadline, was booked ``timeout``, lost its quota diagnosis and read as
+    ``no_response`` in the takeover chain. The quick-failure and long-clean-run
+    cases at the end of this class predate round 2 and keep their booking."""
+
+    def test_a_quota_refusal_that_outlasted_the_deadline_stays_a_quota_refusal(
+        self, gate_dirs, monkeypatch,
+    ):
+        report = _lane_report(exit_code=1, duration=910.0, failure_reason=_DEEPSEEK_402)
+        result, on_disk, _calls = _run(
+            gate_dirs, monkeypatch, "deepseek_gate", lambda *_: report, diff=_SMALL_DIFF,
+        )
+        for record in (result, on_disk):
+            assert record["reason"] == "lane_exhausted"
+            assert record["status"] == "unavailable"
+            assert record["reason_before_classification"] == "harness_lane_no_model_response"
+            assert record["timeout_seconds"] == 900
+        assert GateRequestHandlerMixin._classify_review_seat_failure(None, on_disk) == (
+            "lane_exhausted"
+        )
+
+    def test_a_402_body_that_outlasted_the_deadline_stays_a_quota_refusal(
+        self, gate_dirs, monkeypatch,
+    ):
+        """OI-1753's shape (exit_code 1, no failure_reason, the 402 in the
+        body), after a long setup: the provider answered, the deadline never
+        fired."""
+        report = _lane_report(
+            exit_code=1, duration=905.5, body=f"API Error: 402 {QUOTA_PHRASE_A.title()}\n",
+        )
+        result, _on_disk, _calls = _run(
+            gate_dirs, monkeypatch, "deepseek_gate", lambda *_: report, diff=_SMALL_DIFF,
+        )
+        assert result["reason"] == "lane_exhausted"
+        assert result["reason_before_classification"] == "harness_lane_exit_nonzero"
+
+    @pytest.mark.parametrize("value", ["false", "'true'", "1"], ids=["false", "string", "int"])
+    def test_only_a_true_flag_is_the_signal(self, gate_dirs, monkeypatch, value):
+        """``deadline_exceeded`` must be YAML ``true``: false, a quoted string
+        or a number keeps the old booking."""
+        report = _lane_report(
+            exit_code=1, duration=910.0, failure_reason=_DEEPSEEK_402,
+            deadline_exceeded=value, deadline_seconds=900.0,
+        )
+        result, _on_disk, _calls = _run(
+            gate_dirs, monkeypatch, "deepseek_gate", lambda *_: report, diff=_SMALL_DIFF,
+        )
+        assert result["reason"] == "lane_exhausted"
+
     def test_a_quick_spawn_failure_keeps_its_own_reason(self, gate_dirs, monkeypatch):
-        """OI-1748 is unchanged: a failure that did not last the deadline is
-        not a timeout."""
+        """OI-1748 is unchanged: a failure the lane does not call a deadline
+        kill is not a timeout."""
         report = _lane_report(
             exit_code=1, duration=4.2,
             failure_reason="[quota_or_auth] provider=kimi msg=Error code: 403",

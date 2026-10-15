@@ -774,7 +774,35 @@ def _build_frontmatter(
     if tum is not None:
         frontmatter["token_usage_measured"] = bool(tum)
 
+    # OI-2066: the lane's own statement that its deadline stopped the run.
+    frontmatter.update(_deadline_frontmatter(result))
+
     return frontmatter
+
+
+def _deadline_frontmatter(result: Any) -> Dict[str, Any]:
+    """``deadline_exceeded: true`` + ``deadline_seconds`` when the lane's own
+    total deadline stopped the run, else nothing (OI-2066).
+
+    One pair of fields for every lane, set only where the run was killed BECAUSE
+    the deadline ran out: the drainer for kimi
+    (``_streaming_drainer._make_error_event`` -> ``KimiSpawnResult``) and
+    ``SubprocessAdapter.read_events_with_timeout`` for the claude-harness lanes
+    (``ClaudeSpawnResult`` -> the glm/deepseek harness results). A stall kill
+    or any other failure carries no ``deadline_exceeded_seconds`` and adds
+    nothing here. The review-gate runner books ``timeout`` on this pair alone
+    (``gate_runner._raise_if_lane_deadline_fired``) and never infers it from
+    ``duration_seconds``, which for deepseek includes prompt and worktree setup
+    the lane's timer never saw.
+
+    Read from the result object, like ``token_usage_measured``, so the
+    ``frontmatter_fields()`` contract stays as it is. Only a real number counts:
+    a result without the attribute, or a test double, adds nothing.
+    """
+    seconds = getattr(result, "deadline_exceeded_seconds", None)
+    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
+        return {}
+    return {"deadline_exceeded": True, "deadline_seconds": float(seconds)}
 
 
 _EMIT_MAX_RETRIES = 3

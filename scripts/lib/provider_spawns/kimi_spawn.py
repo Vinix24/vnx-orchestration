@@ -66,7 +66,12 @@ _LIB_DIR = str(Path(__file__).resolve().parents[1])
 if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 
-from _streaming_drainer import StreamingDrainerMixin, _kill_process, coerce_chunk_stall  # noqa: E402
+from _streaming_drainer import (  # noqa: E402
+    StreamingDrainerMixin,
+    _kill_process,
+    coerce_chunk_stall,
+    deadline_exceeded_seconds,
+)
 from canonical_event import CanonicalEvent  # noqa: E402
 from env_scrub_patterns import DEFAULT_SCRUB_KEY_PATTERNS, scrub_env  # noqa: E402
 # OI-1087: the read-only task-class list lives in ONE place — phantom_guard's
@@ -91,6 +96,12 @@ class KimiSpawnResult:
     token_usage: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
     event_writer_failures: int = 0
+    # OI-2066: the drainer's total deadline, in seconds, when that deadline is
+    # what stopped the run (read from the drainer's own marker on its error
+    # event); None for every other outcome, a stall kill included.
+    # provider_dispatch stamps it into the report as deadline_exceeded +
+    # deadline_seconds.
+    deadline_exceeded_seconds: Optional[float] = None
 
     @property
     def token_usage_measured(self) -> bool:
@@ -931,12 +942,16 @@ def _consume_kimi_stream(
     chunk_timeout: float,
     total_deadline: float,
     heartbeat_log_path: Optional[Path] = None,
-) -> "tuple[str, int, Optional[Dict], bool, bool, int, list, bool, list, bool]":
+) -> "tuple[str, int, Optional[Dict], bool, bool, int, list, bool, list, bool, Optional[float]]":
     """Drain the stream.
 
     Returns (completion_text, events_written, token_usage, timed_out,
     stopped_early, failures, errors_captured, saw_stream_output, raw_samples,
-    saw_tool_calls).
+    saw_tool_calls, deadline_seconds).
+
+    ``deadline_seconds`` (OI-2066) is the drainer's total deadline when the
+    drainer said that deadline stopped the run (``_read_kimi_error_event``),
+    else None.
 
     ``saw_stream_output`` is True once the CLI emits any real message line (text,
     tool, thinking, or info event). Combined with an empty ``completion_text`` it
@@ -959,6 +974,7 @@ def _consume_kimi_stream(
     saw_stream_output = False
     saw_tool_calls = False
     raw_samples: list = []
+    deadline_seconds: Optional[float] = None
 
     _CONTENT_EVENT_TYPES = ("text", "tool_use", "tool_result", "thinking", "info")
 
@@ -991,21 +1007,13 @@ def _consume_kimi_stream(
             if tc:
                 token_usage = tc
         elif evt_type == "error":
-            data = canonical_event.data or {}
-            reason = (data.get("reason") or "").lower()
-            if "timeout" in reason or "deadline" in reason:
-                timed_out = True
-            raw_line = data.get("raw", "")
-            msg_text = data.get("message") or data.get("reason") or str(data)[:200]
-            # Detect quota / auth / 403 signals from non-JSON lines or JSON error bodies.
-            # The drainer stores the original line in data["raw"] when JSON parsing fails.
-            if _is_quota_or_auth_error(raw_line) or _is_quota_or_auth_error(str(msg_text)):
-                errors_captured.append(
-                    f"[quota_or_auth] provider=kimi reason=quota_or_auth"
-                    f" msg={str(msg_text)[:200]!r} raw={str(raw_line)[:200]!r}"
-                )
-            else:
-                errors_captured.append(str(msg_text))
+            event_timed_out, error_text, event_deadline = _read_kimi_error_event(
+                canonical_event.data or {},
+            )
+            timed_out = timed_out or event_timed_out
+            if event_deadline is not None:
+                deadline_seconds = event_deadline
+            errors_captured.append(error_text)
 
         if health_monitor is not None:
             health_monitor.update(canonical_event)
@@ -1032,8 +1040,38 @@ def _consume_kimi_stream(
     return (
         "".join(completion_parts), events_written, token_usage, timed_out,
         stopped_early, _event_writer_failures, errors_captured,
-        saw_stream_output, raw_samples, saw_tool_calls,
+        saw_stream_output, raw_samples, saw_tool_calls, deadline_seconds,
     )
+
+
+def _read_kimi_error_event(data: Dict[str, Any]) -> "tuple[bool, str, Optional[float]]":
+    """Read one ``error`` event from the kimi stream.
+
+    Returns ``(timed_out, error_text, deadline_seconds)``:
+
+    - ``timed_out``: the drainer stopped the run on a timeout of any kind, the
+      stall timeout included (its reason names a timeout or the deadline).
+    - ``error_text``: the line ``errors_captured`` records. Quota / auth / 403
+      signals are tagged ``[quota_or_auth]``, from non-JSON lines or JSON error
+      bodies alike — the drainer stores the original line in ``data["raw"]``
+      when JSON parsing fails.
+    - ``deadline_seconds`` (OI-2066): the total deadline, only when the
+      drainer's own structured marker says that deadline stopped the run
+      (``_streaming_drainer.deadline_exceeded_seconds``). Never inferred from
+      the reason text, which a stall kill near the deadline shares.
+    """
+    reason = (data.get("reason") or "").lower()
+    timed_out = "timeout" in reason or "deadline" in reason
+    raw_line = data.get("raw", "")
+    msg_text = data.get("message") or data.get("reason") or str(data)[:200]
+    if _is_quota_or_auth_error(raw_line) or _is_quota_or_auth_error(str(msg_text)):
+        error_text = (
+            f"[quota_or_auth] provider=kimi reason=quota_or_auth"
+            f" msg={str(msg_text)[:200]!r} raw={str(raw_line)[:200]!r}"
+        )
+    else:
+        error_text = str(msg_text)
+    return timed_out, error_text, deadline_exceeded_seconds(data)
 
 
 def _finalize_kimi_result(
@@ -1050,8 +1088,13 @@ def _finalize_kimi_result(
     saw_tool_calls: bool = False,
     worktree: Optional[Any] = None,
     task_class: Optional[str] = None,
+    deadline_seconds: Optional[float] = None,
 ) -> KimiSpawnResult:
     """Wait for process exit and return a KimiSpawnResult.
+
+    ``deadline_seconds`` (OI-2066) is carried onto the result unchanged as
+    ``deadline_exceeded_seconds``: the drainer's total deadline when that
+    deadline stopped the run, else None.
 
     ``saw_tool_calls`` + ``worktree`` feed the completion-vs-execution invariant:
     when the stream showed kimi attempting to call a tool, a clean result is only
@@ -1122,10 +1165,8 @@ def _finalize_kimi_result(
         )
         if rc == 0:
             rc = 1
-    elif rc != 0:
-        error = f"kimi exited with code {rc}"
     else:
-        error = None
+        error = f"kimi exited with code {rc}" if rc != 0 else None
 
     return KimiSpawnResult(
         returncode=rc,
@@ -1137,6 +1178,7 @@ def _finalize_kimi_result(
         token_usage=token_usage,
         event_writer_failures=event_writer_failures,
         error=error,
+        deadline_exceeded_seconds=deadline_seconds,
     )
 
 
@@ -1286,7 +1328,7 @@ def spawn_kimi(
         (
             completion_text, events_written, token_usage, timed_out, stopped_early,
             _event_writer_failures, errors_captured, saw_stream_output, raw_samples,
-            saw_tool_calls,
+            saw_tool_calls, deadline_seconds,
         ) = _consume_kimi_stream(
             proc=proc, host=host, on_event=on_event,
             health_monitor=health_monitor, event_writer=event_writer,
@@ -1309,7 +1351,7 @@ def spawn_kimi(
         raw_samples=raw_samples,
         saw_tool_calls=saw_tool_calls,
         worktree=cwd,
-        task_class=task_class,
+        task_class=task_class, deadline_seconds=deadline_seconds,
     )
     if _hb_killed.is_set():
         # The heartbeat already wrote the terminal failure report — replace the
