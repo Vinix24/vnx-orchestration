@@ -725,6 +725,34 @@ jobs:
           set -euo pipefail
           bash "$GITHUB_WORKSPACE/scripts/ci/pip_install_smoke.sh"
 
+  context-rotation-plugin:
+    name: Context-rotation plugin tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    # See "Profile A" above: bounds a hung job to minutes, not GitHub's 6-hour hard limit.
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.12"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install pytest
+        run: python -m pip install pytest
+
+      - name: Run package tests
+        # Own pytest.ini (testpaths = tests). No tests collected is pytest
+        # exit code 5, which fails the step: it is deliberately not masked.
+        working-directory: packages/claude-code-toolkit/context-rotation
+        run: python -m pytest -q
+
   state-pin-gate:
     name: Repo-local state-pin gate (#1043 footgun)
     runs-on: ubuntu-latest

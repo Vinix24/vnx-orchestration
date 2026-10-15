@@ -1,0 +1,50 @@
+{
+ "parentUuid": null,
+ "logicalParentUuid": "<uuid>",
+ "isSidechain": false,
+ "type": "system",
+ "subtype": "compact_boundary",
+ "content": "<text>",
+ "level": "info",
+ "compactMetadata": {
+  "trigger": "manual",
+  "preTokens": 76944,
+  "postTokens": 15713,
+  "cumulativeDroppedTokens": 61231,
+  "durationMs": 12679,
+  "preservedSegment": {
+   "headUuid": "<uuid>",
+   "anchorUuid": "<uuid>",
+   "tailUuid": "<uuid>"
+  },
+  "preservedMessages": {
+   "anchorUuid": "<uuid>",
+   "uuids": [
+    "<uuid>",
+    "<uuid>",
+    "<uuid>",
+    "<uuid>",
+    "<uuid>",
+    "<uuid>"
+   ],
+   "allUuids": [
+    "<uuid>",
+    "<uuid>",
+    "<uuid>",
+    "<uuid>",
+    "<uuid>",
+    "<uuid>",
+    "<uuid>"
+   ]
+  }
+ },
+ "uuid": "<uuid>",
+ "timestamp": "<timestamp>",
+ "userType": "external",
+ "entrypoint": "cli",
+ "cwd": "<project_dir>",
+ "sessionId": "<session_id>",
+ "version": "2.1.300",
+ "gitBranch": "<branch>",
+ "slug": "hazy-jumping-pascal"
+}

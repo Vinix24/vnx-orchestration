@@ -1,0 +1,75 @@
+{
+ "parentUuid": "<uuid>",
+ "isSidechain": false,
+ "message": {
+  "model": "claude-sonnet-5-5",
+  "id": "<message_id>",
+  "type": "message",
+  "role": "assistant",
+  "content": [
+   {
+    "type": "text",
+    "text": "<assistant_text>"
+   }
+  ],
+  "container": null,
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "stop_details": null,
+  "usage": {
+   "input_tokens": 4,
+   "cache_creation_input_tokens": 468,
+   "cache_read_input_tokens": 76157,
+   "output_tokens": 71,
+   "output_tokens_details": {
+    "thinking_tokens": 0
+   },
+   "server_tool_use": {
+    "web_search_requests": 0,
+    "web_fetch_requests": 0
+   },
+   "service_tier": "standard",
+   "cache_creation": {
+    "ephemeral_1h_input_tokens": 468,
+    "ephemeral_5m_input_tokens": 0
+   },
+   "inference_geo": "global",
+   "iterations": [
+    {
+     "input_tokens": 4,
+     "output_tokens": 71,
+     "cache_read_input_tokens": 76157,
+     "cache_creation_input_tokens": 468,
+     "cache_creation": {
+      "ephemeral_5m_input_tokens": 0,
+      "ephemeral_1h_input_tokens": 468
+     },
+     "type": "message"
+    }
+   ],
+   "speed": "standard",
+   "fallback_credit": null
+  },
+  "input_transformations": [],
+  "diagnostics": null,
+  "context_management": null
+ },
+ "serverClassifierRequest": "<uuid>",
+ "apiBlockIndex": 0,
+ "requestId": "<request_id>",
+ "requestRef": "<uuid>",
+ "requestedModel": "claude-sonnet-5-5",
+ "type": "assistant",
+ "uuid": "<uuid>",
+ "timestamp": "<timestamp>",
+ "advisorModel": "claude-opus-5-5",
+ "effort": "medium",
+ "perTurnEffort": "medium",
+ "session_id": "<session_id>",
+ "userType": "external",
+ "entrypoint": "cli",
+ "cwd": "<project_dir>",
+ "sessionId": "<session_id>",
+ "version": "2.1.300",
+ "gitBranch": "<branch>"
+}
