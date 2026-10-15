@@ -1234,6 +1234,7 @@ class GateRequestHandlerMixin:
           guarded result record, skip-rationale).
         """
         existing = self._read_existing_gate_result(gate, pr_number)
+        # The head lookup is a gh round-trip, so it runs only when there is a verdict to scope.
         if existing is not None and decided_verdict(existing) and _verdict_stands(existing, get_pr_head_sha(pr_number)):
             payload = dict(existing)
             payload["gate"] = gate
