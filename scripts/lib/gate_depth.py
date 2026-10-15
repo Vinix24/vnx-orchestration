@@ -240,6 +240,22 @@ def diff_coverage(diff_text: str, max_chars: int) -> Dict[str, Any]:
     }
 
 
+def prompt_diff_chars(coverage: Any) -> int:
+    """How much of the diff a :func:`diff_coverage` record says entered the
+    prompt (OI-2066): the full size, or the cap when the diff was cut. The
+    harness-lane deadline is sized on this. A missing or malformed record
+    counts as 0 — the deadline then stays at its base.
+    """
+    if not isinstance(coverage, dict):
+        return 0
+    try:
+        chars = int(coverage.get("diff_chars") or 0)
+        limit = int(coverage.get("diff_limit") or 0)
+    except (TypeError, ValueError):
+        return 0
+    return min(chars, limit) if limit > 0 else chars
+
+
 def with_diff_coverage(depth: ExecutionDepth, coverage: Any) -> ExecutionDepth:
     """Stamp a :func:`diff_coverage` result onto any depth (OI-1851). A
     non-dict ``coverage`` (no diff in hand) leaves ``depth`` unmeasured."""

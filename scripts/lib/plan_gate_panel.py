@@ -1295,9 +1295,26 @@ def _run_claude_headless_seat(
     return report
 
 
+def _seat_child_env(base: Path, total_deadline_seconds: Optional[int]) -> Dict[str, str]:
+    """The environment ``_make_default_dispatcher`` hands a provider_dispatch child.
+
+    A copy of this process's environment — never ``os.environ`` itself — with the
+    data dir pinned (OI-1153, see the call site) and, when a caller passes one, the
+    lane's own deadline as ``VNX_TOTAL_DEADLINE`` (OI-2066). Without a deadline the
+    result is exactly the env the dispatcher built before OI-2066.
+    """
+    env = dict(os.environ)
+    env["VNX_DATA_DIR"] = str(base)
+    env["VNX_DATA_DIR_EXPLICIT"] = "1"
+    if total_deadline_seconds is not None:
+        env["VNX_TOTAL_DEADLINE"] = str(total_deadline_seconds)
+    return env
+
+
 def _make_default_dispatcher(
     data_dir: Optional[str], timeout_seconds: int,
     *, role: str = "plan-reviewer", base_ref: Optional[str] = None,
+    total_deadline_seconds: Optional[int] = None,
 ) -> DispatcherFn:
     """Real dispatcher: run a panelist through its governed lane, return the report text.
 
@@ -1326,11 +1343,20 @@ def _make_default_dispatcher(
     branch, so both keep isolating on main. Never applies to the claude branch below —
     that lane isolates via ``dispatch_worktree_isolation`` on its own dispatch_id and has
     no PR branch to isolate on either.
+
+    ``total_deadline_seconds``: OI-2066 — the lane's OWN deadline, set as
+    ``VNX_TOTAL_DEADLINE`` in the provider_dispatch child's environment (the drainer and
+    the claude-harness adapter read it there). ``timeout_seconds`` stays the outer
+    subprocess timeout; a review gate passes it with a margin on top so the lane's own
+    deadline fires first and the lane writes its own report. Only the child env carries
+    it — this process's ``os.environ`` is never touched. None (the default) leaves the
+    plan-gate and deliberation-panel callers exactly as they were. The claude branch
+    keeps running its seat with ``timeout_seconds`` as its deadline; no review gate
+    routes through it.
     """
     base = _resolve_data_dir(data_dir)
 
     def _dispatch(provider: str, model_arg: str, instruction: str, dispatch_id: str) -> str:
-        env = dict(os.environ)
         # OI-1153: pin the seat subprocess to the SAME data dir this dispatcher
         # resolved (`base`), or the lane re-resolves its own. provider_dispatch
         # honors the two-key VNX_DATA_DIR + VNX_DATA_DIR_EXPLICIT=1 contract (see
@@ -1340,8 +1366,7 @@ def _make_default_dispatcher(
         # never found. The claude branch pins the same two keys — see
         # _run_claude_headless_seat, which sets them on os.environ because on that
         # lane they must bind in this process as well as in the child.
-        env["VNX_DATA_DIR"] = str(base)
-        env["VNX_DATA_DIR_EXPLICIT"] = "1"
+        env = _seat_child_env(base, total_deadline_seconds)
         _tmp_doc_path: Optional[str] = None
         try:
             if provider in _CLAUDE_PROVIDERS:

@@ -302,7 +302,8 @@ def runner_env(tmp_path, monkeypatch):
 
 
 def _run_harness_lane(runner_env, monkeypatch, *, diff: str, report: str, pr: int):
-    def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None):
+    def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None,
+            total_deadline_seconds=None):
         def dispatch(provider, model, instruction, dispatch_id):
             return report
         return dispatch

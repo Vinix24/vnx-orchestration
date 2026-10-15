@@ -108,10 +108,11 @@ import gate_depth  # OI-1618: a verdict without investigation is no verdict, on 
 from gate_artifacts import _compute_contract_hash  # canonical hash source — never a second hasher
 from gate_lane_contract import (  # C6 step 3: one source, three readers
     MODEL_DEFAULTS,
-    TIMEOUT_SECONDS,
     VALID_VERDICTS,
     VERDICT_CONTRACT,
     canonical_review_verdict,
+    describe_dispatch_exception,
+    harness_dispatcher_timeouts,
     max_diff_chars,
 )
 from gate_prompt import (  # OI-1442: the diff is data, not instruction
@@ -159,10 +160,33 @@ def _extract_verdict(text: str) -> dict:
 # One source (C6 step 3): model env var/default, timeout, diff cap and verdict
 # contract come from gate_lane_contract — the SAME objects gate_runner and
 # kimi_gate read. The aliases keep this gate's existing names for the readers
-# below; ALLOWED_MODELS stays here because it is glm-specific.
+# below; ALLOWED_MODELS stays here because it is glm-specific. The timeout has
+# no alias since OI-2066: it is resolved per run, for the diff in hand
+# (``_review_dispatcher``).
 _MODEL_ENV, DEFAULT_MODEL = MODEL_DEFAULTS["glm_gate"]
-DEFAULT_TIMEOUT = TIMEOUT_SECONDS
 _VERDICT_CONTRACT = VERDICT_CONTRACT
+
+
+def _review_dispatcher(
+    base_data_dir: Path, branch: str, coverage: dict, explicit_timeout: "int | None",
+):
+    """The governed dispatcher for one glm_gate run, with a deadline that fits the diff.
+
+    OI-2066, identical to ``kimi_gate._review_dispatcher``: the lane deadline
+    comes from ``gate_lane_contract.harness_timeout_seconds`` for the part of
+    the diff that enters the prompt (``gate_depth.prompt_diff_chars``), unless
+    the operator passed ``--timeout``. It reaches the lane as its own deadline
+    (``VNX_TOTAL_DEADLINE`` in the child env) and, plus a margin, as the outer
+    subprocess timeout. Before this both were a fixed 900 s. role and
+    base_ref: see the call site.
+    """
+    return _make_default_dispatcher(
+        str(base_data_dir), role="review-gate",
+        base_ref=(f"origin/{branch}" if branch else None),
+        **harness_dispatcher_timeouts(
+            "glm_gate", gate_depth.prompt_diff_chars(coverage), explicit=explicit_timeout,
+        ),
+    )
 
 # This gate pins to exactly the configured default model (MODEL_DEFAULTS /
 # VNX_GLM_GATE_MODEL) — narrower by design than deprecated-glm-models, which
@@ -472,7 +496,8 @@ def main(argv: "list[str] | None" = None) -> int:
                     help="VNX data dir; report lands in <data-dir>/unified_reports/ and the "
                          "result in <data-dir>/state/review_gates/results/")
     ap.add_argument("--model", default=os.environ.get(_MODEL_ENV, DEFAULT_MODEL))
-    ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
+    # OI-2066: no fixed default — unset, the deadline is resolved for the diff.
+    ap.add_argument("--timeout", type=int, default=None)
     ap.add_argument("--json", action="store_true", help="print the result record as JSON")
     ap.add_argument(
         "--reprocess", metavar="DISPATCH_ID", default=None,
@@ -641,10 +666,7 @@ def main(argv: "list[str] | None" = None) -> int:
         # orchestrator's own checkout. `branch` is already resolved above
         # (get_pr_head_branch, empty only for an offline --diff-file run,
         # which has no real branch to isolate on either).
-        dispatcher = _make_default_dispatcher(
-            str(base_data_dir), args.timeout, role="review-gate",
-            base_ref=(f"origin/{branch}" if branch else None),
-        )
+        dispatcher = _review_dispatcher(base_data_dir, branch, coverage, args.timeout)
         prompt = _build_prompt(diff, args.pr, diff_cap)
         # OI-1442: the deterministic half. The prompt tells the model to report
         # instruction-shaped text in the diff as a finding; this scan does not
@@ -664,8 +686,10 @@ def main(argv: "list[str] | None" = None) -> int:
         except Exception as exc:  # noqa: BLE001 — dispatch/report-read failure
             # OI-1142: do NOT bail without a record — a required gate that cannot fire
             # must surface as ``unavailable`` in the results dir, not vanish.
-            dispatch_error = str(exc)
-            print(f"glm_gate: governed glm dispatch failed: {exc}", file=sys.stderr)
+            # OI-2066: str(exc) of a TimeoutExpired is the whole argv, the diff
+            # included — describe it without argv or prompt, bounded.
+            dispatch_error = describe_dispatch_exception(exc, prompt=prompt)
+            print(f"glm_gate: governed glm dispatch failed: {dispatch_error}", file=sys.stderr)
         duration = time.monotonic() - start
 
         report_path_obj = base_data_dir / "unified_reports" / f"{dispatch_id}.md"

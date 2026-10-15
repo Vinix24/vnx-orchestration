@@ -350,6 +350,36 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         approval=True,
         subsystem="t0-context-rotation", status="ACTIVATE", cockpit_canonical=True),
 
+    # OI-2066: per-gate BASE lane deadline for the harness-lane review gates,
+    # read at runtime by gate_lane_contract.harness_timeout_seconds(), which adds
+    # 600 s for every started 100,000 diff chars above the first 100,000 and
+    # clamps the result to 3600 s. Same defaults as
+    # gate_lane_contract.TIMEOUT_CONFIG (900). Defined BEFORE the three
+    # *_MAX_DIFF_CHARS keys below on purpose: the ledger generator shows a
+    # subsystem's LAST-INSERTED flag (see OI-1874 r4 below), and that must stay
+    # VNX_KIMI_GATE_MAX_DIFF_CHARS, the row's cockpit_canonical flag.
+    "VNX_GLM_GATE_TIMEOUT_SECONDS": _e(
+        "VNX_GLM_GATE_TIMEOUT_SECONDS", "string", "900", "gate",
+        "Base lane deadline (seconds) for glm_gate. The diff extends it by 600 s per "
+        "started 100,000 chars above the first 100,000; 3600 s bounds the result, a "
+        "configured base included. An invalid or non-positive value falls back to 900.",
+        approval=True,
+        subsystem="harness-lane-review-gates", status="ACTIVATE"),
+    "VNX_DEEPSEEK_GATE_TIMEOUT_SECONDS": _e(
+        "VNX_DEEPSEEK_GATE_TIMEOUT_SECONDS", "string", "900", "gate",
+        "Base lane deadline (seconds) for deepseek_gate. The diff extends it by 600 s "
+        "per started 100,000 chars above the first 100,000; 3600 s bounds the result, a "
+        "configured base included. An invalid or non-positive value falls back to 900.",
+        approval=True,
+        subsystem="harness-lane-review-gates", status="ACTIVATE"),
+    "VNX_KIMI_GATE_TIMEOUT_SECONDS": _e(
+        "VNX_KIMI_GATE_TIMEOUT_SECONDS", "string", "900", "gate",
+        "Base lane deadline (seconds) for kimi_gate. The diff extends it by 600 s per "
+        "started 100,000 chars above the first 100,000; 3600 s bounds the result, a "
+        "configured base included. An invalid or non-positive value falls back to 900.",
+        approval=True,
+        subsystem="harness-lane-review-gates", status="ACTIVATE"),
+
     # OI-1874: per-gate diff-char cap for the harness-lane review gates, read at
     # runtime by gate_lane_contract.max_diff_chars(). Since the operator decision
     # of 2026-10-03 (every reviewer may read up to 500,000 tokens of diff) all

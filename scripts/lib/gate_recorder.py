@@ -2026,6 +2026,16 @@ def _failure_payload(
     }
     if reason_before_classification:
         failure_payload["reason_before_classification"] = reason_before_classification
+    # OI-2066: the lane deadline a harness-lane run applied, stamped on the
+    # request by gate_runner before it dispatched — so a failure record says
+    # which deadline the run had, exactly like the success record
+    # (gate_artifacts.materialize_artifacts stamps the same field).
+    provider = resolve_gate_provider(gate)
+    if (
+        "timeout_seconds" in request_payload
+        and provider is not None and provider[0] == GATE_PROVIDER_HARNESS_LANE
+    ):
+        failure_payload["timeout_seconds"] = request_payload["timeout_seconds"]
     if extra:
         # Identity and verdict are the record's own. So is the evidence trio:
         # `report_path`, `contract_hash` and `required_reruns` are what

@@ -140,7 +140,8 @@ def lane(env, monkeypatch):
 
     calls: list = []
 
-    def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None):
+    def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None,
+            total_deadline_seconds=None):
         def dispatch(provider, model, instruction, dispatch_id):
             calls.append({
                 "provider": provider, "model": model, "dispatch_id": dispatch_id,
