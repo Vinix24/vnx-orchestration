@@ -152,7 +152,8 @@ class TestNormalRunIsolatesAndLeavesMainCheckoutUntouched:
         checkout = orchestrator_repo["checkout"]
         env = _gate_env(tmp_path)
 
-        def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None):
+        def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None,
+                total_deadline_seconds=None):
             def dispatch(provider, model, instruction, dispatch_id):
                 return _pass_report_text()
             return dispatch
@@ -181,7 +182,8 @@ class TestNormalRunIsolatesAndLeavesMainCheckoutUntouched:
         env = _gate_env(tmp_path)
         calls = []
 
-        def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None):
+        def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None,
+                total_deadline_seconds=None):
             calls.append({"base_ref": base_ref})
 
             def dispatch(provider, model, instruction, dispatch_id):
@@ -211,7 +213,8 @@ class TestAgentTouchingMainCheckoutIsCaught:
         env = _gate_env(tmp_path)
         calls = []
 
-        def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None):
+        def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None,
+                total_deadline_seconds=None):
             def dispatch(provider, model, instruction, dispatch_id):
                 calls.append(1)
                 # Reproduces the measured 27-09 incident: the agent fetches
@@ -267,7 +270,8 @@ class TestDispatchBranchChurnIsExcludedFromTheVangnet:
         env = _gate_env(tmp_path)
         provider_worktree = tmp_path / "provider-worktree"
 
-        def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None):
+        def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None,
+                total_deadline_seconds=None):
             def dispatch(provider, model, instruction, dispatch_id):
                 _run_git(
                     ["worktree", "add", str(provider_worktree), "-b",
@@ -298,7 +302,8 @@ class TestDispatchBranchChurnIsExcludedFromTheVangnet:
         checkout = orchestrator_repo["checkout"]
         env = _gate_env(tmp_path)
 
-        def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None):
+        def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None,
+                total_deadline_seconds=None):
             def dispatch(provider, model, instruction, dispatch_id):
                 # Simulates a sibling dispatch's worktree branch appearing
                 # in the shared refs/heads while THIS gate run is in flight.
@@ -326,7 +331,8 @@ class TestDispatchBranchChurnIsExcludedFromTheVangnet:
         env = _gate_env(tmp_path)
         calls = []
 
-        def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None):
+        def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None,
+                total_deadline_seconds=None):
             def dispatch(provider, model, instruction, dispatch_id):
                 calls.append(1)
                 _run_git(["branch", "pr1950"], checkout)
@@ -357,7 +363,8 @@ class TestMissingBranchNeverDispatches:
         env = _gate_env(tmp_path)
         calls = []
 
-        def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None):
+        def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None,
+                total_deadline_seconds=None):
             def dispatch(provider, model, instruction, dispatch_id):
                 calls.append(1)
                 return _pass_report_text()

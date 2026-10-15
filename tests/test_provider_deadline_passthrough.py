@@ -156,6 +156,7 @@ class TestClaudeSubprocessAdapterDeadline:
                 error: str | None = None
                 token_usage: dict | None = None
                 completion_text: str = ""
+                deadline_exceeded_seconds: float | None = None
                 _adapter: object = None
             return _FakeResult()
 
@@ -198,6 +199,7 @@ class TestClaudeSubprocessAdapterDeadline:
                 error: str | None = None
                 token_usage: dict | None = None
                 completion_text: str = ""
+                deadline_exceeded_seconds: float | None = None
                 _adapter: object = None
             return _FakeResult()
 
@@ -363,6 +365,7 @@ class TestHarnessLaneDeadlinePassthrough:
                 error: str | None = None
                 token_usage: dict | None = None
                 completion_text: str = ""
+                deadline_exceeded_seconds: float | None = None
                 _adapter: object = None
             return _FakeResult()
 
@@ -402,6 +405,7 @@ class TestHarnessLaneDeadlinePassthrough:
                 error: str | None = None
                 token_usage: dict | None = None
                 completion_text: str = ""
+                deadline_exceeded_seconds: float | None = None
                 _adapter: object = None
             return _FakeResult()
 
@@ -443,6 +447,7 @@ class TestHarnessLaneDeadlinePassthrough:
                 error: str | None = None
                 token_usage: dict | None = None
                 completion_text: str = ""
+                deadline_exceeded_seconds: float | None = None
                 _adapter: object = None
             return _FakeResult()
 

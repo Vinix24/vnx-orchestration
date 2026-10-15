@@ -94,11 +94,13 @@ def _run_harness(gate_dirs, monkeypatch, gate: str, report_text: str, pr_number:
     """
     calls = []
 
-    def fake_factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None):
+    def fake_factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None,
+            total_deadline_seconds=None):
         def _dispatch(provider, model, instruction, dispatch_id):
             calls.append({
                 "data_dir": data_dir,
                 "timeout_seconds": timeout_seconds,
+                "total_deadline_seconds": total_deadline_seconds,
                 "role": role,
                 "base_ref": base_ref,
                 "provider": provider,
@@ -158,10 +160,15 @@ def test_a_harness_lane_gate_delegates_to_the_governed_dispatcher(
     assert calls[0]["provider"] == provider
     assert calls[0]["role"] == "review-gate"
     assert calls[0]["model"] in ("glm-5.2", "kimi-k3")
-    assert calls[0]["timeout_seconds"] == 900, (
-        "the dispatcher's timeout must match the standalone gate's own "
-        "DEFAULT_TIMEOUT, not the runner's PATH-binary default"
+    # OI-2066: the lane deadline is resolved by the same
+    # gate_lane_contract.harness_timeout_seconds the standalone gate uses (900
+    # for this small diff), never the runner's PATH-binary default; the outer
+    # subprocess timeout carries the 60 s margin on top.
+    assert calls[0]["total_deadline_seconds"] == 900, (
+        "the lane deadline must match the standalone gate's own resolved "
+        "deadline, not the runner's PATH-binary default"
     )
+    assert calls[0]["timeout_seconds"] == 960
 
 
 def test_a_harness_lane_run_never_consults_path(gate_dirs, monkeypatch):

@@ -309,6 +309,31 @@ def _write_result_record(
     return None
 
 
+def _stamp_harness_lane_run(
+    result_payload: Dict[str, Any], request_payload: Dict[str, Any], gate: str,
+) -> None:
+    """Stamp a harness-lane gate's run fields from its request onto its result.
+
+    OI-1725: a harness-lane gate result must carry its provider/model, exactly
+    like the standalone glm_gate.py/kimi_gate.py write path (the correct
+    pr-1839-glm_gate.json). Before #1837 these fields were left unstamped on
+    the gate_runner lane, so the record read provider=None/model=None and
+    looked like a non-run. The provider comes from the registry; the model
+    from the request payload the runner stamps before dispatching.
+
+    OI-2066: so does ``timeout_seconds``, the lane deadline the runner applied
+    (``gate_recorder.record_failure`` stamps the same field on a failure).
+    Any other gate is left untouched.
+    """
+    provider_info = gate_recorder.resolve_gate_provider(gate)
+    if provider_info is None or provider_info[0] != gate_recorder.GATE_PROVIDER_HARNESS_LANE:
+        return
+    result_payload["provider"] = request_payload.get("provider") or provider_info[1]
+    result_payload["model"] = request_payload.get("model", "")
+    if "timeout_seconds" in request_payload:
+        result_payload["timeout_seconds"] = request_payload["timeout_seconds"]
+
+
 def materialize_artifacts(
     *,
     gate: str,
@@ -621,16 +646,7 @@ def materialize_artifacts(
     gate_recorder.stamp_request_identity(result_payload, request_payload)
     if real_dispatch_id:
         result_payload["dispatch_id"] = real_dispatch_id
-    # OI-1725: a harness-lane gate result must carry its provider/model, exactly
-    # like the standalone glm_gate.py/kimi_gate.py write path (the correct
-    # pr-1839-glm_gate.json). Before #1837 these fields were left unstamped on
-    # the gate_runner lane, so the record read provider=None/model=None and
-    # looked like a non-run. The provider comes from the registry; the model
-    # from the request payload the runner stamps before dispatching.
-    provider_info = gate_recorder.resolve_gate_provider(gate)
-    if provider_info is not None and provider_info[0] == gate_recorder.GATE_PROVIDER_HARNESS_LANE:
-        result_payload["provider"] = request_payload.get("provider") or provider_info[1]
-        result_payload["model"] = request_payload.get("model", "")
+    _stamp_harness_lane_run(result_payload, request_payload, gate)
 
     if (write_err := _write_result_record(results_dir, gate, pr_number, pr_id, result_payload, report_file)):
         return gate_recorder.record_failure_simple(

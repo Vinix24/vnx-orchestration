@@ -46,9 +46,13 @@ from gate_prompt import (  # OI-1442: the diff is data, not instruction
 import gate_depth  # OI-1851: record what part of the diff each prompt carries
 from prompt_assembler import PromptAssembler, format_for_provider
 from gate_lane_contract import (  # C6 step 3: one source, three readers
+    DISPATCH_ERROR_DETAIL_MAX_CHARS as _DISPATCH_ERROR_DETAIL_MAX_CHARS,
     MODEL_DEFAULTS as _HARNESS_LANE_MODEL,
-    TIMEOUT_SECONDS as _HARNESS_LANE_TIMEOUT_SECONDS,
+    TIMEOUT_OUTER_MARGIN_SECONDS as _HARNESS_LANE_OUTER_MARGIN_SECONDS,
     VERDICT_CONTRACT as _HARNESS_LANE_VERDICT_CONTRACT,
+    describe_dispatch_exception,
+    harness_dispatcher_timeouts as _harness_lane_dispatcher_timeouts,
+    lane_deadline_detail,
     max_diff_chars as _harness_lane_max_diff_chars,
 )
 
@@ -224,6 +228,126 @@ def _lifted_harness_lane_exit_code(report_text: str) -> Optional[int]:
         return None
     exit_code = frontmatter.get("exit_code")
     return exit_code if isinstance(exit_code, int) else None
+
+
+class _HarnessLaneDeadlineExceeded(Exception):
+    """OI-2066: the lane's OWN deadline stopped the run, and the lane still
+    wrote and returned its report.
+
+    Raised inside ``_run_harness_lane_path``'s dispatch ``try`` (see
+    :func:`_raise_if_lane_deadline_fired`), so this shape and an outer
+    ``subprocess.TimeoutExpired`` reach the ONE place that books a timeout as
+    a timeout (:func:`_harness_lane_exception_outcome`). Its message is built
+    from numbers only, never from the report's text.
+    """
+
+
+def _harness_lane_prompt_diff_chars(request_payload: Dict[str, Any], prompt: str) -> int:
+    """The length of the diff that entered a harness-lane prompt, after the cap (OI-2066).
+
+    ``diff_coverage`` is what ``_build_harness_lane_prompt`` recorded for this
+    run (OI-1851): the diff's full size and the cap it was cut at, read by
+    ``gate_depth.prompt_diff_chars`` — the same reading the standalone gates
+    use. A caller-supplied prompt has no coverage record; then the whole
+    prompt is what the lane reads, and its length counts.
+    """
+    coverage = request_payload.get("diff_coverage")
+    if not isinstance(coverage, dict):
+        return len(prompt or "")
+    return gate_depth.prompt_diff_chars(coverage)
+
+
+def _build_harness_lane_dispatcher(
+    gate: str, data_dir: Path, base_ref: str, request_payload: Dict[str, Any], prompt: str,
+):
+    """Build the governed dispatcher with a deadline that fits the diff (OI-2066).
+
+    The lane deadline comes from ``gate_lane_contract.harness_timeout_seconds``
+    for the diff that entered the prompt. It is handed to the dispatcher twice:
+    as ``total_deadline_seconds`` (``VNX_TOTAL_DEADLINE`` in the child's env,
+    the drainer's own deadline) and, with
+    ``gate_lane_contract.TIMEOUT_OUTER_MARGIN_SECONDS`` on top, as the outer
+    subprocess timeout — so the lane's deadline fires first and the lane
+    writes its own report. Before this both were a fixed 900 s, and raising
+    only the outer one would still have let the drainer stop at 900 s.
+
+    The applied deadline is stamped on the request as ``timeout_seconds``; the
+    success writer (``gate_artifacts.materialize_artifacts``) and the failure
+    writer (``gate_recorder.record_failure``) both carry it onto the result.
+    """
+    # Lazy import: plan_gate_panel pulls in the whole governed dispatch
+    # graph, and only the harness-lane path needs it.
+    from plan_gate_panel import _make_default_dispatcher
+
+    timeouts = _harness_lane_dispatcher_timeouts(
+        gate, _harness_lane_prompt_diff_chars(request_payload, prompt),
+    )
+    request_payload["timeout_seconds"] = timeouts["total_deadline_seconds"]
+    return _make_default_dispatcher(
+        str(data_dir), timeouts["timeout_seconds"], role="review-gate", base_ref=base_ref,
+        total_deadline_seconds=timeouts["total_deadline_seconds"],
+    )
+
+
+def _raise_if_lane_deadline_fired(report_text: str, elapsed: float) -> None:
+    """OI-2066: raise :class:`_HarnessLaneDeadlineExceeded` when the returned
+    report says the lane's OWN deadline stopped the run.
+
+    The drainer (kimi) and the claude-harness adapter (glm, deepseek) kill the
+    run at the deadline, and provider_dispatch still writes the governed
+    report, so the dispatcher returns text instead of raising. That report
+    used to fall through to the OI-1748/OI-1753 checks and book as
+    ``harness_lane_no_model_response`` or ``harness_lane_exit_nonzero``, with
+    the lane's own text in ``reason_detail``.
+
+    The reading is ``gate_lane_contract.lane_deadline_detail``, the one reader
+    the standalone gates and the plan-gate readers call too: the frontmatter's
+    ``deadline_exceeded``, never a duration. ``elapsed`` only fills in the
+    message when the report carries no ``duration_seconds``.
+    """
+    detail = lane_deadline_detail(report_text, elapsed)
+    if detail is not None:
+        raise _HarnessLaneDeadlineExceeded(detail)
+
+
+def _harness_lane_exception_outcome(
+    gate: str, exc: Exception, request_payload: Dict[str, Any], prompt: str,
+) -> Dict[str, str]:
+    """The ``reason`` and ``reason_detail`` a failed harness-lane dispatch books (OI-2066).
+
+    A timeout books ``timeout``: the dispatcher's outer
+    ``subprocess.TimeoutExpired`` and the lane's own deadline
+    (:class:`_HarnessLaneDeadlineExceeded`) alike, with a short detail naming
+    the gate, the applied deadline and the diff size. ``timeout`` is in
+    ``gate_recorder.EXECUTION_FAILURE_REASONS`` (it books ``unavailable``) and
+    NOT in ``gate_recorder._CAUSE_AGNOSTIC_FAILURE_REASONS``, so the quota
+    re-booking never reads it.
+
+    Every other exception stays ``harness_lane_dispatch_error``, described by
+    ``gate_lane_contract.describe_dispatch_exception``: type and message, no
+    argv, no prompt, at most ``DISPATCH_ERROR_DETAIL_MAX_CHARS``. Measured
+    15-10 on PR #2058: ``str(TimeoutExpired)`` is the whole argv, the diff
+    under review included, and the quota scan found two test fixtures in it.
+    ``summary`` and ``failure_reason`` are derived from ``reason_detail``, so
+    bounding it here bounds them too.
+    """
+    if not isinstance(exc, (subprocess.TimeoutExpired, _HarnessLaneDeadlineExceeded)):
+        return {
+            "reason": "harness_lane_dispatch_error",
+            "reason_detail": describe_dispatch_exception(exc, prompt=prompt),
+        }
+    if isinstance(exc, subprocess.TimeoutExpired):
+        how = (
+            f"{describe_dispatch_exception(exc)}, the outer timeout "
+            f"({_HARNESS_LANE_OUTER_MARGIN_SECONDS} s above the lane deadline)"
+        )
+    else:
+        how = str(exc)
+    detail = (
+        f"harness lane {gate} exceeded {request_payload.get('timeout_seconds')} s "
+        f"(diff {_harness_lane_prompt_diff_chars(request_payload, prompt):,} chars): {how}"
+    )
+    return {"reason": "timeout", "reason_detail": detail[:_DISPATCH_ERROR_DETAIL_MAX_CHARS]}
 
 
 def _git_capture(args: List[str], cwd: str) -> str:
@@ -714,11 +838,13 @@ class GateRunner:
              OVERRIDES whatever the dispatch itself returned, including a
              PASS: a verdict produced while the orchestrator's own checkout
              was mutated is not trustworthy evidence.
-        """
-        # Lazy import: plan_gate_panel pulls in the whole governed dispatch
-        # graph, and only the harness-lane path needs it.
-        from plan_gate_panel import _make_default_dispatcher
 
+        OI-2066: the deadline fits the diff (``_build_harness_lane_dispatcher``)
+        and a timeout books ``timeout`` — whether the dispatcher raised
+        ``subprocess.TimeoutExpired`` or the lane returned a report whose
+        frontmatter says its own deadline stopped the run
+        (``deadline_exceeded``, read by ``_raise_if_lane_deadline_fired``).
+        """
         branch = request_payload.get("branch", "")
         identifier = pr_id if pr_id else (str(pr_number) if pr_number is not None else "unknown")
         try:
@@ -753,11 +879,13 @@ class GateRunner:
         dispatch_exc: Optional[Exception] = None
         report_text = ""
         try:
-            dispatcher = _make_default_dispatcher(
-                str(data_dir), _HARNESS_LANE_TIMEOUT_SECONDS, role="review-gate",
-                base_ref=base_ref,
+            dispatcher = _build_harness_lane_dispatcher(
+                gate, data_dir, base_ref, request_payload, prompt,
             )
             report_text = dispatcher(provider, model, prompt, dispatch_id)
+            # OI-2066: a report that SAYS the lane's own deadline stopped the
+            # run (deadline_exceeded) is a timeout.
+            _raise_if_lane_deadline_fired(report_text, time.monotonic() - _start)
         except Exception as exc:  # noqa: BLE001 — governed dispatch/report-read failure
             dispatch_exc = exc
 
@@ -794,13 +922,14 @@ class GateRunner:
             )
 
         if dispatch_exc is not None:
+            # OI-2066: `timeout` for either timeout shape; every other failure
+            # stays harness_lane_dispatch_error. Neither detail carries argv.
             return _rec.record_failure(
                 gate=gate, pr_number=pr_number, pr_id=pr_id,
                 result={
-                    "reason": "harness_lane_dispatch_error",
-                    "reason_detail": str(dispatch_exc),
+                    **_harness_lane_exception_outcome(gate, dispatch_exc, request_payload, prompt),
                     "duration_seconds": time.monotonic() - _start,
-                    "partial_output_lines": 0,
+                    "partial_output_lines": len(report_text.splitlines()),
                     "runner_pid": os.getpid(),
                 },
                 request_payload=request_payload,

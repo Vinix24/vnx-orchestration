@@ -58,7 +58,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from gate_lane_contract import canonical_review_verdict  # OI-1947: one reading of a verdict word (revise = fail)
+from gate_lane_contract import (
+    canonical_review_verdict,  # OI-1947: one reading of a verdict word (revise = fail)
+    lane_deadline_detail,  # OI-2066: one reading of a report the lane's own deadline cut off
+)
 
 # The exact same fence-scan rule glm_gate._extract_verdict / kimi_gate._extract_verdict
 # use, duplicated here on purpose (not imported cross-module) — this module's job is
@@ -211,8 +214,12 @@ def find_recovery_candidate(
          FILENAME **or** its body text (a companion is sometimes named after
          its own dispatch-id, carrying no PR number at all in the name; see
          module docstring, measured on PR #1684),
-      3. has an mtime in the inclusive window [*window_start*, *window_end*], and
-      4. is not *exclude_name* (the gate's own report for this exact dispatch).
+      3. has an mtime in the inclusive window [*window_start*, *window_end*],
+      4. is not *exclude_name* (the gate's own report for this exact dispatch), and
+      5. is not a report whose frontmatter says the lane's own deadline stopped
+         the run (OI-2066, ``gate_lane_contract.lane_deadline_detail``): a
+         sibling gate's cut-off report can hold a partial verdict block, and a
+         review that never finished is no evidence for this one.
 
     Widening point 2 to the body text makes 2+ candidates strictly MORE likely
     (any report mentioning the PR at all is now in scope, not just ones named
@@ -245,6 +252,8 @@ def find_recovery_candidate(
         except OSError:
             continue
         if not pattern.search(path.name) and not pattern.search(text):
+            continue
+        if lane_deadline_detail(text) is not None:
             continue
         verdict = _extract_verdict_block(text) or extract_relabeled_verdict(text)
         if not verdict:

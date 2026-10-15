@@ -170,6 +170,9 @@ class DeepSeekHarnessSpawnResult:
     stopped_early: bool = False
     error: Optional[str] = None
     token_usage: Optional[Dict[str, Any]] = None
+    # OI-2066: carried from ClaudeSpawnResult.deadline_exceeded_seconds — the
+    # total deadline when that deadline stopped the run, else None.
+    deadline_exceeded_seconds: Optional[float] = None
     _adapter: Any = field(default=None, repr=False)
 
     @property
@@ -255,12 +258,8 @@ def spawn_deepseek_harness(
             DEEPSEEK_API_KEY_ENV,
         )
         return DeepSeekHarnessSpawnResult(
-            returncode=1,
-            completion={},
-            events_written=0,
-            session_id=None,
-            timed_out=False,
-            model=resolve_harness_model(model),
+            returncode=1, completion={}, events_written=0, session_id=None,
+            timed_out=False, model=resolve_harness_model(model),
             error=f"{DEEPSEEK_API_KEY_ENV} unset — key-auth required, OAuth fallback forbidden",
         )
 
@@ -270,12 +269,8 @@ def spawn_deepseek_harness(
     if refusal is not None:
         logger.error("spawn_deepseek_harness: %s; refusing to spawn.", refusal)
         return DeepSeekHarnessSpawnResult(
-            returncode=1,
-            completion={},
-            events_written=0,
-            session_id=None,
-            timed_out=False,
-            model=resolved_model,
+            returncode=1, completion={}, events_written=0, session_id=None,
+            timed_out=False, model=resolved_model,
             error=f"harness config dir unsafe: {refusal}",
         )
 
@@ -307,6 +302,7 @@ def spawn_deepseek_harness(
         events_written=claude_result.events_written,
         session_id=claude_result.session_id,
         timed_out=claude_result.timed_out,
+        deadline_exceeded_seconds=claude_result.deadline_exceeded_seconds,
         model=resolved_model,
         stopped_early=claude_result.stopped_early,
         error=err,

@@ -66,6 +66,11 @@ try:
 except Exception:  # vnx-silent-except: keep the panel importable without govern
     SYNTHESIZED_REPORT_MARKER = "VNX_SYNTHESIZED_REPORT_BY_GOVERNANCE"
 
+# OI-2066: the lane's own statement that its deadline cut a seat off. The same
+# reader the review gates use, so a seat and a gate can never read a cut-off
+# report differently.
+from gate_lane_contract import lane_deadline_detail
+
 # The three keys every seat declares. Kept as a tuple so the loader and its
 # validation stay in lock-step — a drift here would silently change what counts
 # as a well-formed seat.
@@ -191,7 +196,7 @@ SEAT_SCORED_VIA_REEXTRACTION = "scored_via_reextraction"  # readable only after 
 SEAT_NO_REPORT = "no_report"                              # the lane returned an empty body
 SEAT_PROSE_NO_FENCE = "prose_no_fence"                    # real content, zero verdict fences
 SEAT_UNPARSEABLE_FENCE = "unparseable_fence"              # a fence exists, no body parses into a verdict
-SEAT_LANE_NO_ANSWER = "lane_no_answer"                    # governance synthesized the body (timeout/error/no file)
+SEAT_LANE_NO_ANSWER = "lane_no_answer"                    # governance synthesized the body (timeout/error/no file), or the lane's own deadline cut it off
 SEAT_DISPATCH_FAILED = "dispatch_failed"                  # the dispatch call itself raised
 SEAT_MODEL_UNRESOLVED = "model_unresolved"                # codex seat: the registry gave no model, nothing was dispatched (OI-2062)
 
@@ -1332,9 +1337,26 @@ def _run_claude_headless_seat(
     return report
 
 
+def _seat_child_env(base: Path, total_deadline_seconds: Optional[int]) -> Dict[str, str]:
+    """The environment ``_make_default_dispatcher`` hands a provider_dispatch child.
+
+    A copy of this process's environment — never ``os.environ`` itself — with the
+    data dir pinned (OI-1153, see the call site) and, when a caller passes one, the
+    lane's own deadline as ``VNX_TOTAL_DEADLINE`` (OI-2066). Without a deadline the
+    result is exactly the env the dispatcher built before OI-2066.
+    """
+    env = dict(os.environ)
+    env["VNX_DATA_DIR"] = str(base)
+    env["VNX_DATA_DIR_EXPLICIT"] = "1"
+    if total_deadline_seconds is not None:
+        env["VNX_TOTAL_DEADLINE"] = str(total_deadline_seconds)
+    return env
+
+
 def _make_default_dispatcher(
     data_dir: Optional[str], timeout_seconds: int,
     *, role: str = "plan-reviewer", base_ref: Optional[str] = None,
+    total_deadline_seconds: Optional[int] = None,
 ) -> DispatcherFn:
     """Real dispatcher: run a panelist through its governed lane, return the report text.
 
@@ -1363,11 +1385,20 @@ def _make_default_dispatcher(
     branch, so both keep isolating on main. Never applies to the claude branch below —
     that lane isolates via ``dispatch_worktree_isolation`` on its own dispatch_id and has
     no PR branch to isolate on either.
+
+    ``total_deadline_seconds``: OI-2066 — the lane's OWN deadline, set as
+    ``VNX_TOTAL_DEADLINE`` in the provider_dispatch child's environment (the drainer and
+    the claude-harness adapter read it there). ``timeout_seconds`` stays the outer
+    subprocess timeout; a review gate passes it with a margin on top so the lane's own
+    deadline fires first and the lane writes its own report. Only the child env carries
+    it — this process's ``os.environ`` is never touched. None (the default) leaves the
+    plan-gate and deliberation-panel callers exactly as they were. The claude branch
+    keeps running its seat with ``timeout_seconds`` as its deadline; no review gate
+    routes through it.
     """
     base = _resolve_data_dir(data_dir)
 
     def _dispatch(provider: str, model_arg: str, instruction: str, dispatch_id: str) -> str:
-        env = dict(os.environ)
         # OI-1153: pin the seat subprocess to the SAME data dir this dispatcher
         # resolved (`base`), or the lane re-resolves its own. provider_dispatch
         # honors the two-key VNX_DATA_DIR + VNX_DATA_DIR_EXPLICIT=1 contract (see
@@ -1377,8 +1408,7 @@ def _make_default_dispatcher(
         # never found. The claude branch pins the same two keys — see
         # _run_claude_headless_seat, which sets them on os.environ because on that
         # lane they must bind in this process as well as in the child.
-        env["VNX_DATA_DIR"] = str(base)
-        env["VNX_DATA_DIR_EXPLICIT"] = "1"
+        env = _seat_child_env(base, total_deadline_seconds)
         _tmp_doc_path: Optional[str] = None
         try:
             if provider in _CLAUDE_PROVIDERS:
@@ -1579,11 +1609,18 @@ def _dispatch_one(
     # the very conflation this fix separates. The marker is the writer's own
     # machine-readable stamp, so an exact substring match is both sufficient and
     # stable (prose wording drifts; the marker does not).
-    if SYNTHESIZED_REPORT_MARKER in (report_text or ""):
+    # OI-2066: a report whose frontmatter says the lane's own deadline stopped
+    # the run is the same no-verdict seat, whatever fence it happens to hold —
+    # the review never finished, so a partial verdict block in it never scores.
+    no_answer = (
+        "synthesized report" if SYNTHESIZED_REPORT_MARKER in (report_text or "")
+        else lane_deadline_detail(report_text)
+    )
+    if no_answer is not None:
         return PanelistResult(
             label=member["label"], provider=member["provider"],
             model=member.get("model_arg", ""),
-            verdict="revise", rationale="lane produced no verdict (synthesized report)",
+            verdict="revise", rationale=f"lane produced no verdict ({no_answer})",
             dispatched=True, parse_error=False, no_verdict=True,
             report_path=dispatch_id,
             seat_status=SEAT_LANE_NO_ANSWER,
@@ -1625,14 +1662,15 @@ def _reextract_verdict(
     cheap one would have sufficed is pure waste, so the cheap one goes first and a success
     means the retry never fires at all.
 
-    FAILURE CONTRACT — three ways this can fail, one outcome for all three: the seat is
+    FAILURE CONTRACT — four ways this can fail, one outcome for all four: the seat is
     returned EXACTLY as it came in (``parse_error=True``, ``seat_status=prose_no_fence``,
     non-scoring). A second extraction never upgrades a seat except by producing a real,
     parseable verdict block:
 
       1. the extra dispatch raises (lane down, timeout, no report file);
       2. the answer is empty;
-      3. the answer parses no verdict — no fence, or a fence that will not read.
+      3. the answer's frontmatter says the lane's own deadline cut it off (OI-2066);
+      4. the answer parses no verdict — no fence, or a fence that will not read.
 
     Never a pass by default, never a fabricated verdict. The returned result carries
     ``reextraction_dispatch_id`` either way, so a failed attempt is as visible in the seat
@@ -1654,6 +1692,11 @@ def _reextract_verdict(
         return _unchanged(f"verdict re-extraction failed: {exc}")
     if not (answer or "").strip():
         return _unchanged("verdict re-extraction returned an empty answer")
+    # OI-2066: an answer the lane's own deadline cut off is no answer, even
+    # when a fence in it would parse.
+    deadline = lane_deadline_detail(answer)
+    if deadline is not None:
+        return _unchanged(f"verdict re-extraction was cut off: {deadline}")
     parsed = parse_verdict(answer)
     if parsed["parse_error"]:
         return _unchanged(

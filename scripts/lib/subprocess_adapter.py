@@ -185,6 +185,9 @@ class SubprocessAdapter:
         self._dispatch_ids: Dict[str, str] = {}
         # Set of terminal_ids that were killed by chunk/total timeout
         self._timed_out: set = set()
+        # OI-2066: terminal_id -> total deadline (seconds) for a read that the
+        # TOTAL deadline stopped; a chunk (stall) timeout alone never lands here
+        self._deadline_exceeded: Dict[str, float] = {}
         # terminal_id -> final returncode captured by stop() or EOF (OI-1120)
         self._returncode_cache: Dict[str, int] = {}
         # terminal_id -> Path of the stderr logfile for the current dispatch
@@ -198,6 +201,29 @@ class SubprocessAdapter:
         hit chunk_timeout or total_deadline. Callers should check this after
         iteration to classify outcome as failure rather than success."""
         return terminal_id in self._timed_out
+
+    def deadline_exceeded_seconds(self, terminal_id: str) -> Optional[float]:
+        """OI-2066: the total deadline, in seconds, when the last
+        read_events_with_timeout() for terminal_id was stopped BECAUSE that
+        deadline ran out (the plain deadline kill, or a stall window the
+        deadline cut short). None for a chunk (stall) timeout alone, a clean
+        end, or no read at all — so a caller can say the deadline fired
+        without inferring it from how long the run took."""
+        return self._deadline_exceeded.get(terminal_id)
+
+    def _stop_on_timeout(
+        self, terminal_id: str, what: str, deadline_seconds: Optional[float],
+    ) -> None:
+        """Log, flag and stop a read that ran out of time.
+
+        ``deadline_seconds`` is passed only when the TOTAL deadline is what
+        stopped the read; it is kept for :meth:`deadline_exceeded_seconds`.
+        """
+        logger.warning("read_events_with_timeout: %s for %s", what, terminal_id)
+        self._timed_out.add(terminal_id)
+        if deadline_seconds is not None:
+            self._deadline_exceeded[terminal_id] = deadline_seconds
+        self.stop(terminal_id)
 
     @property
     def event_store(self):
@@ -673,8 +699,9 @@ class SubprocessAdapter:
         # is set explicitly — env overrides retain top precedence.
         if "VNX_CHUNK_TIMEOUT" not in os.environ:
             chunk_timeout = coerce_chunk_stall(chunk_timeout, total_deadline)
-        # Clear any prior timeout flag for this terminal
+        # Clear any prior timeout flags for this terminal
         self._timed_out.discard(terminal_id)
+        self._deadline_exceeded.pop(terminal_id, None)
         process = self._processes.get(terminal_id)
         if process is None or process.stdout is None:
             return
@@ -686,24 +713,23 @@ class SubprocessAdapter:
         while True:
             elapsed = time.time() - start_time
             if elapsed > total_deadline:
-                logger.warning(
-                    "read_events_with_timeout: total deadline (%.0fs) exceeded for %s",
-                    total_deadline, terminal_id,
+                self._stop_on_timeout(
+                    terminal_id, f"total deadline ({total_deadline:.0f}s) exceeded", total_deadline,
                 )
-                self._timed_out.add(terminal_id)
-                self.stop(terminal_id)
                 break
 
             remaining = min(chunk_timeout, total_deadline - elapsed)
             ready, _, _ = select.select([fd], [], [], remaining)
 
             if not ready:
-                logger.warning(
-                    "read_events_with_timeout: chunk timeout (%.0fs) for %s",
-                    chunk_timeout, terminal_id,
+                # OI-2066: a wait the deadline cut short ended AT the deadline.
+                deadline_hit = remaining < chunk_timeout
+                self._stop_on_timeout(
+                    terminal_id,
+                    f"{'deadline-compressed stall' if deadline_hit else 'chunk timeout'} "
+                    f"({remaining:.0f}s)",
+                    total_deadline if deadline_hit else None,
                 )
-                self._timed_out.add(terminal_id)
-                self.stop(terminal_id)
                 break
 
             # Non-blocking raw read: select() says data is available, but readline()

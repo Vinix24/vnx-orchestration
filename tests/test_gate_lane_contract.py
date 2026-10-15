@@ -95,9 +95,13 @@ def test_model_timeout_and_diff_cap_are_one_source():
     assert gate_runner._HARNESS_LANE_MODEL is gate_lane_contract.MODEL_DEFAULTS
     assert glm_gate.DEFAULT_MODEL == gate_lane_contract.MODEL_DEFAULTS["glm_gate"][1]
     assert kimi_gate.DEFAULT_MODEL == gate_lane_contract.MODEL_DEFAULTS["kimi_gate"][1]
-    assert glm_gate.DEFAULT_TIMEOUT == gate_lane_contract.TIMEOUT_SECONDS
-    assert kimi_gate.DEFAULT_TIMEOUT == gate_lane_contract.TIMEOUT_SECONDS
-    assert gate_runner._HARNESS_LANE_TIMEOUT_SECONDS == gate_lane_contract.TIMEOUT_SECONDS
+    # OI-2066: the timeout is no longer one shared constant either -- all three
+    # readers resolve it through the SAME function, for the diff in hand.
+    assert glm_gate.harness_dispatcher_timeouts is gate_lane_contract.harness_dispatcher_timeouts
+    assert kimi_gate.harness_dispatcher_timeouts is gate_lane_contract.harness_dispatcher_timeouts
+    assert gate_runner._harness_lane_dispatcher_timeouts is gate_lane_contract.harness_dispatcher_timeouts
+    assert not hasattr(glm_gate, "DEFAULT_TIMEOUT")
+    assert not hasattr(kimi_gate, "DEFAULT_TIMEOUT")
     # OI-1874: the diff cap is no longer one shared constant -- glm_gate,
     # kimi_gate and gate_runner's harness-lane path all resolve it through the
     # SAME function (gate_lane_contract.max_diff_chars), keyed per gate, so a

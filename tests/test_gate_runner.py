@@ -1244,11 +1244,13 @@ class TestHarnessLaneDelegation:
     def _fake_dispatcher(report_text):
         calls = []
 
-        def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None):
+        def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None,
+                total_deadline_seconds=None):
             def dispatch(provider, model, instruction, dispatch_id):
                 calls.append({
                     "data_dir": data_dir,
                     "timeout_seconds": timeout_seconds,
+                    "total_deadline_seconds": total_deadline_seconds,
                     "role": role,
                     "base_ref": base_ref,
                     "provider": provider,
