@@ -600,6 +600,11 @@ class SubprocessAdapter:
             _usage = payload.get("usage")
             if isinstance(_usage, dict) and _usage:
                 result_data["usage"] = _usage
+            # R6 (OI-2039): the CLI's own statement that the session ended in an
+            # error. Kept so a reader of the archive can refuse a failed run's
+            # final answer; a payload without the field adds nothing.
+            if isinstance(payload.get("is_error"), bool):
+                result_data["is_error"] = payload["is_error"]
             return [{"type": "result", "data": result_data}]
 
         # rate_limit_event → skip (not dashboard-relevant)

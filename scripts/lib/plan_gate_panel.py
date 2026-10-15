@@ -47,6 +47,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+# R6 (OI-2039): a seat whose report carries no verdict fence may still have its
+# verdict in its final answer, the result event of its archived event stream.
+import final_answer_verdict
+
 HERE = Path(__file__).resolve().parent
 PROVIDER_DISPATCH = HERE / "provider_dispatch.py"
 _SCRIPTS_DIR = HERE.parent
@@ -193,6 +197,7 @@ VERDICT_FENCE = "vnx-plan-verdict"
 # never again share one word.
 SEAT_SCORED = "scored"                                    # the seat's own report carried a readable verdict
 SEAT_SCORED_VIA_REEXTRACTION = "scored_via_reextraction"  # readable only after the second extraction
+SEAT_SCORED_VIA_FINAL_ANSWER = "scored_via_final_answer"  # the report had no fence; the run's final answer had a readable one (R6)
 SEAT_NO_REPORT = "no_report"                              # the lane returned an empty body
 SEAT_PROSE_NO_FENCE = "prose_no_fence"                    # real content, zero verdict fences
 SEAT_UNPARSEABLE_FENCE = "unparseable_fence"              # a fence exists, no body parses into a verdict
@@ -203,10 +208,13 @@ SEAT_MODEL_UNRESOLVED = "model_unresolved"                # codex seat: the regi
 # The statuses that COUNT toward the panel's quorum and its pass/fail arithmetic.
 # Everything else is non-scoring. Membership is the single source of truth — the
 # rule below asks this set, never a list of flags.
-SCORING_SEAT_STATUSES: frozenset = frozenset({SEAT_SCORED, SEAT_SCORED_VIA_REEXTRACTION})
+SCORING_SEAT_STATUSES: frozenset = frozenset({
+    SEAT_SCORED, SEAT_SCORED_VIA_REEXTRACTION, SEAT_SCORED_VIA_FINAL_ANSWER,
+})
 
 SEAT_STATUSES: frozenset = frozenset({
-    SEAT_SCORED, SEAT_SCORED_VIA_REEXTRACTION, SEAT_NO_REPORT, SEAT_PROSE_NO_FENCE,
+    SEAT_SCORED, SEAT_SCORED_VIA_REEXTRACTION, SEAT_SCORED_VIA_FINAL_ANSWER,
+    SEAT_NO_REPORT, SEAT_PROSE_NO_FENCE,
     SEAT_UNPARSEABLE_FENCE, SEAT_LANE_NO_ANSWER, SEAT_DISPATCH_FAILED,
     SEAT_MODEL_UNRESOLVED,
 })
@@ -910,6 +918,11 @@ class PanelistResult:
     # a re-extraction was attempted — its presence is the seat's provenance trail
     # from the resolved verdict back to the governed dispatch that produced it.
     reextraction_dispatch_id: str = ""
+    # R6 (OI-2039): why the run's final answer was refused — the run did not end
+    # normally, or its archive is not bound to this dispatch. Non-empty ONLY then.
+    # A seat R6 refused keeps its booking and is never re-extracted: the second
+    # extraction would hand a failed run a verdict R6 refused it.
+    final_answer_refused: str = ""
 
 
 def is_scoring(result: "PanelistResult") -> bool:
@@ -1565,8 +1578,40 @@ def _seat_timeout(explicit: "int | None" = None) -> int:
     return val if val >= 1 else DEFAULT_SEAT_TIMEOUT_SECONDS
 
 
+# The two parse outcomes in which a report carries no verdict fence at all (R6). A
+# report whose fence exists but will not parse is the model's own written block, and
+# its booking (unparseable_fence) stands: the final answer never overrides it.
+_NO_FENCE_STATUSES = frozenset({SEAT_NO_REPORT, SEAT_PROSE_NO_FENCE})
+
+
+def _readable_plan_verdict(text: str) -> Optional[Dict[str, Any]]:
+    """``parse_verdict`` of *text* when it reads a verdict, else None (R6's parser for a seat)."""
+    parsed = parse_verdict(text)
+    return None if parsed["parse_error"] else parsed
+
+
+def _seat_final_answer(
+    archive_base: Optional[Path], dispatch_id: str, report_text: str, parsed: Dict[str, Any],
+) -> Optional[final_answer_verdict.FinalAnswerVerdict]:
+    """The verdict of a seat's final answer when its report carries no fence (R6, OI-2039).
+
+    Read with ``parse_verdict``, the parser a seat's report goes through, so a
+    plan seat never reads a PR-review verdict. ``archive_base`` is the data dir
+    the panel's lanes write under; without one there is nothing to read. A
+    synthesized or deadline-cut report never gets here: ``_dispatch_one`` books
+    those as ``lane_no_answer`` first, and ``recover_verdict`` refuses them as
+    well.
+    """
+    if archive_base is None or parsed["seat_status"] not in _NO_FENCE_STATUSES:
+        return None
+    return final_answer_verdict.recover_verdict(
+        archive_base, dispatch_id, report_text=report_text, parse=_readable_plan_verdict,
+    )
+
+
 def _dispatch_one(
     dispatcher: DispatcherFn, member: Dict[str, str], instruction: str, dispatch_id: str,
+    archive_base: Optional[Path] = None,
 ) -> PanelistResult:
     """Dispatch ONE panelist once and parse its verdict into a ``PanelistResult``.
 
@@ -1586,6 +1631,12 @@ def _dispatch_one(
     (the 2026-06-24 undispatched-lane non-scoring behaviour), and ``parse_error``
     is left untouched for a real report whose fence would not parse (the 2026-06-24
     fail-safe stays exactly as-is). All three non-scoring flavors are retryable.
+
+    R6 (OI-2039): a report with no verdict fence is not the end of it when
+    ``archive_base`` is given. The run's final answer is read
+    (``_seat_final_answer``); a readable verdict there books the seat
+    ``scored_via_final_answer``. A run R6 refuses keeps its booking and carries
+    the reason in ``final_answer_refused``.
     """
     if member.get("model_error"):
         return PanelistResult(
@@ -1626,6 +1677,9 @@ def _dispatch_one(
             seat_status=SEAT_LANE_NO_ANSWER,
         )
     parsed = parse_verdict(report_text)
+    final_answer = _seat_final_answer(archive_base, dispatch_id, report_text, parsed)
+    if final_answer is not None and final_answer.recovered:
+        parsed = {**final_answer.verdict, "seat_status": SEAT_SCORED_VIA_FINAL_ANSWER}
     # OI-839: on parse_error the raw lane output is the ONLY diagnostic that tells
     # us WHAT failed to parse (trailing comma, prose-bleed, nested fence). Keep it
     # on the result so _emit_seat_records can persist it into the hash-chained
@@ -1638,6 +1692,9 @@ def _dispatch_one(
         dispatched=True, report_path=dispatch_id,
         raw_text=report_text if parsed["parse_error"] else "",
         seat_status=parsed["seat_status"],
+        final_answer_refused=(
+            final_answer.detail if final_answer is not None and final_answer.refused else ""
+        ),
     )
 
 
@@ -1675,7 +1732,15 @@ def _reextract_verdict(
     Never a pass by default, never a fabricated verdict. The returned result carries
     ``reextraction_dispatch_id`` either way, so a failed attempt is as visible in the seat
     ledger as a successful one.
+
+    ORDER AGAINST R6 (OI-2039, pinned by test): the final-answer fallback runs first,
+    inside ``_dispatch_one``. A seat it scored is never re-extracted into another verdict,
+    and a seat whose run it refused (``final_answer_refused``) is never handed a verdict
+    here. Both come back untouched, with no extraction dispatched and none recorded.
     """
+    if result.final_answer_refused or is_scoring(result):
+        return result
+
     def _unchanged(note: str) -> PanelistResult:
         """Hand the seat back exactly as it came in, with the reason appended."""
         result.reextraction_dispatch_id = dispatch_id
@@ -1817,6 +1882,9 @@ def _emit_seat_records(
             # is as much a fact about this seat as a successful one.
             if result.reextraction_dispatch_id:
                 record["reextraction_dispatch_id"] = result.reextraction_dispatch_id
+            # R6 (OI-2039): why the final-answer fallback refused this seat's run.
+            if result.final_answer_refused:
+                record["final_answer_refused"] = result.final_answer_refused
             # OI-839: carry the raw lane output on parse-error records so the
             # unparseable text is preserved in the durable, hash-chained ledger
             # for diagnosis — a later parser hardening can be built against the
@@ -1826,6 +1894,29 @@ def _emit_seat_records(
             append_chained_entry(seat_ledger_path, record)
     except Exception:  # vnx-silent-except: seat persistence must never break the gate
         return
+
+
+def _with_truncation_note(summary: Dict[str, Any], doc_truncation: Dict[str, Any]) -> Dict[str, Any]:
+    """*summary* with a quantified note in its rationale when the plan doc was truncated.
+
+    The gate must never certify a verdict while silently hiding that it only read
+    PART of the plan — fold an explicit, quantified note into the rationale (the one
+    field every consumer — CLI text, --json, callers reading result["summary"]) already
+    surfaces, alongside the structured detail ``run_panel`` returns for a caller that
+    wants the exact counts.
+    """
+    if not doc_truncation["truncated"]:
+        return summary
+    pct = 100.0 * doc_truncation["kept_chars"] / doc_truncation["original_chars"]
+    return {
+        **summary,
+        "rationale": (
+            summary["rationale"]
+            + f"; PLAN DOC TRUNCATED: gate read {doc_truncation['kept_chars']} of "
+            f"{doc_truncation['original_chars']} chars ({pct:.1f}%) — verdict may be "
+            "based on an incomplete plan"
+        ),
+    }
 
 
 def run_panel(
@@ -1899,6 +1990,9 @@ def run_panel(
     instruction = build_plan_review_instruction(doc_text, track_id)
 
     retries = _panel_retry_count()
+    # R6 (OI-2039): the data dir the seats' lanes write their event archives under.
+    # Only an explicit one: the governed caller (planning_cli) always passes it.
+    archive_base = Path(data_dir) if data_dir else None
 
     results: List[PanelistResult] = []
     for member in panel:
@@ -1918,7 +2012,7 @@ def run_panel(
         reextractions_left = REEXTRACTION_BUDGET_PER_SEAT
         for _ in range(retries + 1):
             did = f"plan-gate-{track_id}-{member['label']}-{uuid.uuid4().hex[:8]}"
-            result = _dispatch_one(dispatcher, member, instruction, did)
+            result = _dispatch_one(dispatcher, member, instruction, did, archive_base)
             # A SCORING verdict: dispatched, no parse error, and NOT a no-verdict
             # synthesized report. OI-1066: a no-verdict seat (lane timed out /
             # governance-synthesized) is retryable too — the lane may deliver on
@@ -1926,7 +2020,9 @@ def run_panel(
             # continues past a parse_error or a raised dispatch.
             if is_scoring(result):
                 break  # readable verdict — no retry needed
-            if result.seat_status == SEAT_PROSE_NO_FENCE and reextractions_left > 0:
+            # R6: a seat whose run the final-answer fallback refused is not re-extracted.
+            if (result.seat_status == SEAT_PROSE_NO_FENCE and reextractions_left > 0
+                    and not result.final_answer_refused):
                 reextractions_left -= 1
                 result = _reextract_verdict(
                     _extraction_lane(), member, result, f"{did}-reextract",
@@ -1941,22 +2037,7 @@ def run_panel(
     _emit_seat_records(
         results, track_id=track_id, project_id=project_id, seat_ledger_path=seat_ledger_path,
     )
-    if doc_truncation["truncated"]:
-        # The gate must never certify a verdict while silently hiding that it only read
-        # PART of the plan — fold an explicit, quantified note into the rationale (the one
-        # field every consumer — CLI text, --json, callers reading result["summary"]) already
-        # surfaces, alongside the structured detail below for a caller that wants the exact
-        # counts.
-        pct = 100.0 * doc_truncation["kept_chars"] / doc_truncation["original_chars"]
-        summary = {
-            **summary,
-            "rationale": (
-                summary["rationale"]
-                + f"; PLAN DOC TRUNCATED: gate read {doc_truncation['kept_chars']} of "
-                f"{doc_truncation['original_chars']} chars ({pct:.1f}%) — verdict may be "
-                "based on an incomplete plan"
-            ),
-        }
+    summary = _with_truncation_note(summary, doc_truncation)
     return {
         "track_id": track_id,
         "project_id": project_id,

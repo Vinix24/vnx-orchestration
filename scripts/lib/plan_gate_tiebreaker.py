@@ -52,6 +52,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 # Reuse the panel's dispatcher contract + ledger constants so the stop-rule and
 # the panel never drift on what a "dispatcher" is or where the seat ledger lives.
 import plan_gate_panel as pgp  # noqa: PLC0415  (sibling module, on sys.path)
+import final_answer_verdict  # noqa: PLC0415  (sibling module, on sys.path)
 
 # The round-counter record type, appended to the SAME seat ledger as the
 # per-seat verdicts (SEAT_LEDGER_RELPATH). One ``plan_gate_round`` record per
@@ -103,6 +104,10 @@ class TiebreakerResult:
     so the audit trail names WHO decided. ``round`` is the round number this
     tiebreaker ran at (>= 1). ``raw_text`` is kept ONLY on a parse failure so
     the unparseable output survives for diagnosis instead of vanishing.
+    ``verdict_source`` (R6, OI-2039) is ``report`` when the decision came from
+    the tiebreaker's report, ``final_answer`` when the report carried no
+    decision block and the run's final answer did; a recovered decision says so
+    in its ``resolution_reason``.
     """
     outcome: str
     model: str
@@ -110,6 +115,7 @@ class TiebreakerResult:
     required_change: str = ""
     rationale: str = ""
     raw_text: str = ""
+    verdict_source: str = final_answer_verdict.VERDICT_SOURCE_REPORT
 
 
 class TiebreakerParseError(ValueError):
@@ -807,6 +813,44 @@ def parse_tiebreaker(report_text: str) -> TiebreakerResult:
     raise TiebreakerParseError(last_reason, raw=last_raw)
 
 
+def _decision_or_none(text: str) -> Optional[TiebreakerResult]:
+    """``parse_tiebreaker`` of *text*, or None when it does not satisfy the contract (R6's parser)."""
+    try:
+        return parse_tiebreaker(text)
+    except TiebreakerParseError:
+        return None
+
+
+def _parse_decision(report_text: str, dispatch_id: str, data_dir: Optional[str]) -> TiebreakerResult:
+    """The tiebreaker's decision: from its report, or from its final answer when the report has none.
+
+    R6 (OI-2039), measured 2026-10-12: ``plan-tiebreak-provider-schakelaar-20757ee5``
+    chose START in a valid ``vnx-plan-tiebreak`` block in its final answer, its
+    report had no block, and the run raised ``TiebreakerParseError``. When the
+    report carries no tiebreak fence at all, the run's final answer (the result
+    event of its archived event stream under *data_dir*) is read with
+    ``parse_tiebreaker``, the same strict parser. Only a run that ended normally
+    gets it (``final_answer_verdict.recover_verdict``). A report that DOES carry a
+    fence keeps its own reading: a block the contract rejects (a findings list,
+    two changes) is the tiebreaker's own written answer, and the final answer
+    never overrides it. When nothing is recovered, the report's own
+    ``TiebreakerParseError`` is raised, unchanged.
+    """
+    try:
+        return parse_tiebreaker(report_text)
+    except TiebreakerParseError:
+        if not data_dir or _iter_tiebreak_fence_bodies(report_text):
+            raise
+        final_answer = final_answer_verdict.recover_verdict(
+            Path(data_dir), dispatch_id, report_text=report_text, parse=_decision_or_none,
+        )
+        if not final_answer.recovered:
+            raise
+        result = final_answer.verdict
+    result.verdict_source = final_answer_verdict.VERDICT_SOURCE_FINAL_ANSWER
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Tiebreaker dispatch (punt 8)
 # ---------------------------------------------------------------------------
@@ -935,7 +979,7 @@ def run_tiebreaker(
     # parser so the two distinct failures read distinctly.
     if not (report_text or "").strip():
         raise TiebreakerNoAnswerError(status="empty", raw=report_text or "")
-    result = parse_tiebreaker(report_text)
+    result = _parse_decision(report_text, did, data_dir)
     # Stamp the model + round the parser cannot know.
     result.model = resolved_model
     result.round = round_number
@@ -958,9 +1002,13 @@ def _resolution_reason(
     """
     change = result.required_change.strip()
     change_clause = f"; required change: {change!r}" if change else ""
+    source_clause = (
+        "; decision read from the run's final answer (its report carried none)"
+        if result.verdict_source == final_answer_verdict.VERDICT_SOURCE_FINAL_ANSWER else ""
+    )
     return (
         f"tiebreaker {outcome_label} (model={result.model}, "
-        f"round={result.round}){change_clause}"
+        f"round={result.round}){change_clause}{source_clause}"
     )
 
 
