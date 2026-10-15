@@ -1013,6 +1013,84 @@ def check_learning_loop_beacon(paths: Dict[str, str]) -> List[CheckResult]:
 
 
 # ---------------------------------------------------------------------------
+# Check: content-boundary beacon (nightly Phase 1.1)
+# ---------------------------------------------------------------------------
+
+CONTENT_BOUNDARY_MAX_AGE_HOURS = 36
+
+
+def check_content_boundary_beacon(paths: Dict[str, str]) -> List[CheckResult]:
+    """The nightly content-boundary measurement must be fresh and must have found nothing.
+
+    FAIL on status ``fail`` (restricted content in an external-lane transcript, or an
+    unconfigured boundary). FAIL when the beacon is missing or older than 36 hours while
+    the nightly job runs in this project. WARN when the canary is not armed.
+    """
+    data_dir = Path(paths["VNX_DATA_DIR"])
+    state_dir = Path(paths["VNX_STATE_DIR"])
+    beacon_file = data_dir / "health" / "content_boundary.json"
+    job_expected = (state_dir / "conversation_analyzer.log").exists()
+    remediation = (
+        "Run scripts/conversation_analyzer_nightly.sh once and read "
+        f"{state_dir / 'conversation_analyzer.log'} (Phase 1.1)."
+    )
+
+    beacon = None
+    try:
+        loaded = json.loads(beacon_file.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            beacon = loaded
+    except (OSError, ValueError):
+        beacon = None
+
+    if beacon is None:
+        if not job_expected:
+            return [CheckResult("content_boundary", PASS,
+                                "Nightly job has not run in this project; no content boundary beacon expected")]
+        return [CheckResult(
+            "content_boundary", FAIL,
+            f"No content boundary beacon ({beacon_file}) although the nightly job runs here",
+            remediation,
+        )]
+
+    written = beacon.get("last_run_ts")
+    age_h = (datetime.now(timezone.utc).timestamp() - written) / 3600 \
+        if isinstance(written, (int, float)) and not isinstance(written, bool) else None
+    if age_h is None or age_h > CONTENT_BOUNDARY_MAX_AGE_HOURS:
+        age = "unreadable timestamp" if age_h is None else f"{age_h:.1f}h old"
+        return [CheckResult(
+            "content_boundary", FAIL,
+            f"Content boundary beacon is stale ({age}, limit {CONTENT_BOUNDARY_MAX_AGE_HOURS}h)",
+            remediation,
+        )]
+
+    details = beacon.get("details") if isinstance(beacon.get("details"), dict) else {}
+    status = beacon.get("status")
+    if status != "ok":
+        if details.get("unconfigured"):
+            message = "Content boundary is unconfigured: no restricted roots known, nothing can be measured"
+            fix = "Write the operator boundary file (see scripts/lib/content_class.py) and rerun the nightly job."
+        else:
+            message = (f"Content boundary breached: restricted content found in external-lane transcripts "
+                       f"({details.get('gating_total', 'unknown')} in the window, status={status!r})")
+            fix = ("Read health/content_boundary.json (counts per signal and lane, session ids) "
+                   "and content_boundary_findings.ndjson in the state dir.")
+        return [CheckResult("content_boundary", FAIL, message, fix)]
+
+    if not details.get("canary_armed"):
+        return [CheckResult(
+            "content_boundary", WARN,
+            f"Content boundary clean ({age_h:.1f}h ago) but the canary is not armed: "
+            f"{details.get('canary_armed_reason', 'unknown')}",
+            "Create the canary token file (mode 0600) and place the token in every canary_armed_in file.",
+        )]
+    return [CheckResult(
+        "content_boundary", PASS,
+        f"Content boundary beacon fresh ({age_h:.1f}h ago), no restricted content, canary armed",
+    )]
+
+
+# ---------------------------------------------------------------------------
 # Check: t0_state.json freshness + SessionStart refresh hook (OI-1058)
 # ---------------------------------------------------------------------------
 
@@ -1216,6 +1294,7 @@ def run_doctor(paths: Dict[str, str], *,
     results.extend(check_state_root_location(paths))
     results.extend(check_dream_cycle(paths))
     results.extend(check_learning_loop_beacon(paths))
+    results.extend(check_content_boundary_beacon(paths))
     results.extend(check_t0_state_freshness(paths))
     results.extend(check_branch_protection_drift(paths))
 

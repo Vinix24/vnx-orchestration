@@ -335,6 +335,9 @@ def test_real_scripts_tree_gives_the_nine_measured_writers() -> None:
     does not carry. This is the same category of deliberate addition the
     D3a/D3b fix-forwards already bumped this measurement for — not a name
     accidentally picked up by the scan.
+
+    content_boundary (scripts/content_boundary_check.py, nightly Phase 1.1) is the 11th:
+    the measurement of restricted content in external-lane transcripts.
     """
     reg = br.read_beacon_register()
     names = {s.name for s in reg}
@@ -349,4 +352,5 @@ def test_real_scripts_tree_gives_the_nine_measured_writers() -> None:
         "producer_freshness_monitor",
         "report_to_receipt_converter",
         "receipt_conversion_rejections",
+        "content_boundary",
     }
