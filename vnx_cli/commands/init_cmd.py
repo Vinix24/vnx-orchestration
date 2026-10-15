@@ -970,7 +970,9 @@ def _install_receipt_processor_runner(vnx_home: str, project_id: str = "") -> bo
     )
 
 
-def _install_cleanup_reviewed_worktrees_runner(vnx_home: str, project_id: str = "") -> bool:
+def _install_cleanup_reviewed_worktrees_runner(
+    vnx_home: str, project_id: str = "", *, project_root: str
+) -> bool:
     """Install the cleanup-reviewed-worktrees launchd plist (OI-1629 deel c).
 
     Thin wrapper over ``_install_launchd_agent``, mirroring
@@ -980,14 +982,17 @@ def _install_cleanup_reviewed_worktrees_runner(vnx_home: str, project_id: str = 
     even though ``scripts/cleanup_reviewed_worktrees.py`` has a ``--repo-root``
     flag, so every other repo's ``.vnx-data/worktrees/`` grew unchecked.
 
-    The one thing this wrapper adds over the other runners is which checkout
-    to sweep. The worktrees live under each project's own checkout, not under
-    the engine root, and a central install shares one engine across many
-    projects. ``VNX_PROJECT_ROOT`` is the central shim's export for "the
-    project checkout vnx init is running inside"; a standalone dev checkout
-    has no shim, and there VNX_HOME IS the checkout, so fall back to it.
+    The worktrees live under each project's own checkout, not under the engine
+    root, and a central install shares one engine across many projects. The
+    caller names the checkout (``vnx init`` passes the directory it initialises);
+    there is no fallback to the engine root, so a job can never sweep the
+    engine install (OI-1629 B).
     """
-    project_root = os.environ.get("VNX_PROJECT_ROOT") or vnx_home
+    if not (project_root or "").strip():
+        raise RuntimeError(
+            "cleanup-reviewed-worktrees needs the project checkout (project_root); "
+            "refusing to fall back to the engine root"
+        )
     return _install_launchd_agent(
         vnx_home,
         "com.vnx.cleanup-reviewed-worktrees",
@@ -1146,7 +1151,7 @@ def _vnx_init_scaffold(project_dir, template, force, set_version, project_id) ->
     # --- OI-1629 deel c: install cleanup-reviewed-worktrees launchd agent ------
     try:
         installed = _install_cleanup_reviewed_worktrees_runner(
-            str(_engine.engine_root()), project_id=project_id
+            str(_engine.engine_root()), project_id=project_id, project_root=str(project_dir)
         )
         if not installed:
             print("  skipped cleanup-reviewed-worktrees (plist template not found or install root refused, see above)")
