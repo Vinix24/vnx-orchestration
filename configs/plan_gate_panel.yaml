@@ -2,12 +2,12 @@
 # gate dispatches before any implementation begins.
 #
 # See scripts/lib/plan_gate_panel.py (load_panel_seats) for the loader. Every
-# field here mirrors the keys DEFAULT_PANEL used historically so this file is a
+# field here mirrors the keys the code default panel used historically so this file is a
 # behaviour-neutral externalisation of that constant on the day it shipped:
 # edit this file to change which seats run, leave it and the code falls back to
-# DEFAULT_PANEL.
+# the code default panel.
 #
-# Each seat has the SAME three keys the in-code DEFAULT_PANEL uses:
+# Each seat has the SAME three keys the in-code the code default panel uses:
 #   label      — the panelist identifier (stable, used by --panel-seats filtering
 #                and the per-seat verdict ledger)
 #   provider   — a member of the closed Provider enum in
@@ -93,4 +93,4 @@ seats:
     model_arg: deepseek-v4-pro
   - label: codex
     provider: codex
-    model_arg: gpt-5.5
+    model_arg: registry-default  # resolved to openai.default_model when the panel is built (OI-2062)

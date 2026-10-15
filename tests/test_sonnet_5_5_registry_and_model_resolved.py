@@ -133,6 +133,9 @@ class _FakeStreamAdapter:
     def was_timed_out(self, terminal_id):
         return False
 
+    def deadline_exceeded_seconds(self, terminal_id):
+        return None
+
     def observe(self, terminal_id):
         class _Obs:
             transport_state = {"returncode": 0}

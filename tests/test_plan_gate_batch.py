@@ -380,10 +380,10 @@ def test_seat_count_matches_ladder(tmp_path, monkeypatch):
         run_kwargs={"task_class": "01_code_generation"}, restart=True,
         min_goal_chars=200,
     )
-    assert summary2["results"][0]["seats"] == len(pgp.DEFAULT_PANEL), (
+    assert summary2["results"][0]["seats"] == len(pgp.default_panel()), (
         "new feature always runs the full panel"
     )
-    assert len(captured2[0]["panel"]) == len(pgp.DEFAULT_PANEL)
+    assert len(captured2[0]["panel"]) == len(pgp.default_panel())
 
 
 # ---------------------------------------------------------------------------

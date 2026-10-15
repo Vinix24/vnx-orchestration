@@ -13,9 +13,8 @@ if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 
 from codex_wrapper import (  # noqa: F401, E402
-    DEFAULT_CODEX_MODEL,
     DEFAULT_TIMEOUT,
     codex_exec,
 )
 
-__all__ = ["codex_exec", "DEFAULT_CODEX_MODEL", "DEFAULT_TIMEOUT"]
+__all__ = ["codex_exec", "DEFAULT_TIMEOUT"]

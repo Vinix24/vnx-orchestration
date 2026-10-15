@@ -143,7 +143,8 @@ class TiebreakerNoAnswerError(Exception):
     names the actual state instead of blaming the parser:
 
       - ``timeout``    — a synthesized report whose Status line names a timeout,
-        or a hung lane subprocess (``subprocess.TimeoutExpired``);
+        a hung lane subprocess (``subprocess.TimeoutExpired``), or a report
+        whose frontmatter says the lane's own deadline stopped it (OI-2066);
       - ``error``      — a synthesized report whose Status line names an error;
       - ``empty``      — an empty completion (zero tokens / whitespace-only);
       - ``no-output``  — the lane dropped without authoring a report file (the
@@ -861,9 +862,10 @@ def run_tiebreaker(
     the strict contract (no fence, wrong outcome, a findings list, more than one
     change) — the caller treats that as a loud failure, never silently filling
     in a decision. Raises ``TiebreakerNoAnswerError`` when the lane delivered no
-    answer at all — a governance-synthesized report (timeout / error), an EMPTY
-    completion (zero tokens), or a raised lane that dropped without authoring a
-    report file — a distinct loud failure from a parse failure, which stays
+    answer at all — a governance-synthesized report (timeout / error), a report
+    the lane's own deadline cut off (OI-2066), an EMPTY completion (zero
+    tokens), or a raised lane that dropped without authoring a report file — a
+    distinct loud failure from a parse failure, which stays
     reserved for an answer that exists but fails the contract. A no-answer is
     NEVER a decision: there is no ``TiebreakerResult``, so it can never read as
     START/STOP (and hence never as a PASS or REVISE).
@@ -921,6 +923,11 @@ def run_tiebreaker(
         raise TiebreakerNoAnswerError(
             status=_extract_synthesized_status(report_text), raw=report_text,
         )
+    # OI-2066: a report whose frontmatter says the lane's own deadline stopped
+    # the run is a timeout, even when a decision fence in it would parse — the
+    # tiebreaker never finished deciding.
+    if pgp.lane_deadline_detail(report_text) is not None:
+        raise TiebreakerNoAnswerError(status="timeout", raw=report_text)
     # Punt 17 — an EMPTY completion (zero tokens) is a NO-ANSWER, not a parse
     # failure. parse_tiebreaker("") would raise TiebreakerParseError("empty
     # tiebreaker report"), which conflates "the model said nothing" with "the

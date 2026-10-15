@@ -774,7 +774,35 @@ def _build_frontmatter(
     if tum is not None:
         frontmatter["token_usage_measured"] = bool(tum)
 
+    # OI-2066: the lane's own statement that its deadline stopped the run.
+    frontmatter.update(_deadline_frontmatter(result))
+
     return frontmatter
+
+
+def _deadline_frontmatter(result: Any) -> Dict[str, Any]:
+    """``deadline_exceeded: true`` + ``deadline_seconds`` when the lane's own
+    total deadline stopped the run, else nothing (OI-2066).
+
+    One pair of fields for every lane, set only where the run was killed BECAUSE
+    the deadline ran out: the drainer for kimi
+    (``_streaming_drainer._make_error_event`` -> ``KimiSpawnResult``) and
+    ``SubprocessAdapter.read_events_with_timeout`` for the claude-harness lanes
+    (``ClaudeSpawnResult`` -> the glm/deepseek harness results). A stall kill
+    or any other failure carries no ``deadline_exceeded_seconds`` and adds
+    nothing here. The review-gate runner books ``timeout`` on this pair alone
+    (``gate_runner._raise_if_lane_deadline_fired``) and never infers it from
+    ``duration_seconds``, which for deepseek includes prompt and worktree setup
+    the lane's timer never saw.
+
+    Read from the result object, like ``token_usage_measured``, so the
+    ``frontmatter_fields()`` contract stays as it is. Only a real number counts:
+    a result without the attribute, or a test double, adds nothing.
+    """
+    seconds = getattr(result, "deadline_exceeded_seconds", None)
+    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
+        return {}
+    return {"deadline_exceeded": True, "deadline_seconds": float(seconds)}
 
 
 _EMIT_MAX_RETRIES = 3
@@ -1432,7 +1460,15 @@ def _litellm_parts(provider: str) -> tuple[str, "str | None"]:
 def _constraint_model_for_provider(args: argparse.Namespace, provider: str) -> str:
     """Resolve the model label used by dispatch pre-flight checks."""
     if provider == "codex":
-        return os.environ.get("VNX_CODEX_MODEL", "") or _resolve_codex_model()
+        # An unresolved model does not refuse here: the lane resolves again at spawn
+        # and records the named codex_model_unresolved failure there, once. No
+        # model-pinned constraint can match an absent model (OI-2062).
+        from providers import provider_registry as _reg  # noqa: PLC0415
+
+        try:
+            return _resolve_codex_model()
+        except _reg.CodexModelResolutionError:
+            return ""
     if provider == "gemini":
         return args.model if (args.model and args.model != "sonnet") else os.environ.get("VNX_GEMINI_MODEL", "gemini-2.5-pro")
     if provider == "kimi":
@@ -2134,6 +2170,19 @@ def _finish_provider_worktree(
     )
 
 
+def _codex_event_store() -> "Any | None":
+    """The EventStore audit sink for a codex dispatch, or None when it cannot start (ADR-005)."""
+    try:
+        from event_store import EventStore
+        return EventStore()
+    except Exception as _es_exc:
+        logger.error(
+            "_dispatch_codex: EventStore init failed; cannot proceed without audit sink (ADR-005): %s",
+            _es_exc,
+        )
+        return None
+
+
 def _dispatch_codex(args: argparse.Namespace) -> int:
     """Route to spawn_codex for codex-provider dispatches (PR-4.6.3).
 
@@ -2143,18 +2192,14 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
     """
     from provider_spawns.codex_spawn import spawn_codex
 
-    event_store = None
-    try:
-        from event_store import EventStore
-        event_store = EventStore()
-    except Exception as _es_exc:
-        logger.error(
-            "_dispatch_codex: EventStore init failed; cannot proceed without audit sink (ADR-005): %s",
-            _es_exc,
-        )
+    event_store = _codex_event_store()
+    if event_store is None:
         return 1
 
-    model = os.environ.get("VNX_CODEX_MODEL", "") or _resolve_codex_model()
+    model = _codex_model_or_record_failure(args)
+    if model is None:
+        _event_store_safety_net(event_store, args)
+        return 1
     enriched_instruction = _enrich_instruction(args)
     # Isolation + (bench) seed materialization. Fail-loud by design, never a
     # silent shared-checkout fallback. VNX_BENCH_REQUIRE_ISOLATION=1 (benchmark):
@@ -2245,7 +2290,9 @@ def _dispatch_codex_via_envelope(args: argparse.Namespace) -> int:
     """
     from dispatch_envelope import EnvelopeGovernError, EnvelopeSpec, run_envelope  # noqa: PLC0415
 
-    model = os.environ.get("VNX_CODEX_MODEL", "") or _resolve_codex_model()
+    model = _codex_model_or_record_failure(args)
+    if model is None:
+        return 1
     state_dir = _resolve_state_dir()
     data_dir = _resolve_data_dir()
 
@@ -2316,22 +2363,42 @@ def _dispatch_claude_via_envelope(args: argparse.Namespace) -> int:
 
 
 def _resolve_codex_model() -> str:
-    """Load codex model key from registry (openai section), fallback to hardcoded default.
+    """The codex model for this lane: ``VNX_CODEX_MODEL``, else ``openai.default_model`` (OI-2062).
 
-    Returns the registry model key (e.g. 'gpt-5.2-codex') so the receipt model field
-    is never empty when VNX_CODEX_MODEL is unset.
+    One resolver for every codex launch path (provider_registry.resolve_codex_model).
+    Raises CodexModelResolutionError when the registry gives no model: there is no
+    hard-coded fallback, a name written into code is what codex refused on 14-10.
     """
-    _CODEX_FALLBACK = "gpt-5.2-codex"
+    from providers import provider_registry as _reg
+
+    return _reg.resolve_codex_model(env_names=("VNX_CODEX_MODEL",))
+
+
+def _codex_model_or_record_failure(args: argparse.Namespace) -> "str | None":
+    """Resolve the codex model; an unresolved model ends as a recorded failure.
+
+    Returns the model, or None after writing a ``codex_model_unresolved`` failure
+    receipt (OI-2062). Never raises: the lane returns 1 instead of leaving the door
+    with an exception and no receipt.
+    """
+    from providers import provider_registry as _reg
+
     try:
-        from providers import provider_registry as _reg
-        registry = _reg.load()
-    except Exception as e:
-        logger.error("provider_dispatch: registry load failed for codex: %s", e)
-        return _CODEX_FALLBACK
-    cfg = registry.get("openai")
-    if cfg is None or not cfg.models:
-        return _CODEX_FALLBACK
-    return next(iter(cfg.models.keys()))
+        return _resolve_codex_model()
+    except _reg.CodexModelResolutionError as exc:
+        failure_reason = f"codex_model_unresolved: {exc}"
+        try:
+            _emit_refusal_receipt(
+                args, "codex", "", failure_reason,
+                delivery_state=_DELIVERY_STATE_DELIVER_FAILED, status="failure",
+            )
+        except Exception as rec_exc:
+            logger.error(
+                "provider_dispatch: failure receipt failed for unresolved codex model dispatch=%s: %s",
+                args.dispatch_id, rec_exc,
+            )
+        print(f"provider_dispatch: {failure_reason}", file=sys.stderr)
+        return None
 
 
 class KimiModelResolutionError(ValueError):

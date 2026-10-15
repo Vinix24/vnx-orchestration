@@ -16,14 +16,12 @@ if _LIB_DIR not in sys.path:
 
 class TestCodexWrapperBackwardCompat(unittest.TestCase):
     def test_old_codex_wrapper_import(self):
-        from codex_wrapper import codex_exec, DEFAULT_CODEX_MODEL
+        from codex_wrapper import codex_exec
         self.assertIsNotNone(codex_exec)
-        self.assertIsInstance(DEFAULT_CODEX_MODEL, str)
 
     def test_new_provider_lanes_codex_import(self):
-        from providers.provider_lanes.codex import codex_exec as new_exec, DEFAULT_CODEX_MODEL as new_model
+        from providers.provider_lanes.codex import codex_exec as new_exec
         self.assertIsNotNone(new_exec)
-        self.assertIsInstance(new_model, str)
 
     def test_old_and_new_same_object(self):
         from codex_wrapper import codex_exec as old

@@ -194,6 +194,27 @@ _MAX_DETAIL_LEN = 300
 _NEAR_EMPTY_COMPLETION_CHARS = 25
 
 
+# OI-2062: codex answers a model it will not run with http 400 and one of two
+# measured sentences, on stderr or inside the JSON event stream. The unrelated
+# line "failed to load models cache: missing field base_instructions" is noise
+# and never matches. The sentence carries the provider's own words, so a gate
+# result or a build report can name the refused model instead of a bare exit code.
+_CODEX_MODEL_REFUSAL_RE = re.compile(
+    r"The '[^']+' model (?:is not supported when using Codex with a ChatGPT account\.?"
+    r"|requires a newer version of Codex\.(?: Please upgrade to the latest app or CLI and try again\.)?)"
+)
+CODEX_MODEL_REFUSAL_SENTENCE_CHARS = 500
+
+
+def find_codex_model_refusal(*texts: Optional[str]) -> Optional[str]:
+    """Return codex's own model-refusal sentence (at most 500 chars) found in *texts*, else None."""
+    for text in texts:
+        match = _CODEX_MODEL_REFUSAL_RE.search(text or "")
+        if match:
+            return match.group(0)[:CODEX_MODEL_REFUSAL_SENTENCE_CHARS]
+    return None
+
+
 def _extract_detail(text: Optional[str], max_len: int = _MAX_DETAIL_LEN) -> str:
     """Pull a bounded, human-readable detail out of raw error/completion text.
 

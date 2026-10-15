@@ -38,9 +38,8 @@ from vertex_ai_runner import collect_file_contents
 
 logger = logging.getLogger(__name__)
 
-# Model: empty string = use codex CLI config.toml default (currently gpt-5.5).
-# 2026-04-19: gpt-5.2-codex deprecated via Codex CLI model-migration mapping;
-# ChatGPT-account auth rejects older explicit model flags.
+# Model: empty string = spawn_codex resolves openai.default_model from the registry
+# (OI-2062); ~/.codex/config.toml never decides the model.
 _DEFAULT_MODEL = ""
 _DEFAULT_TIMEOUT = 300
 _DEFAULT_STALL_THRESHOLD = 60

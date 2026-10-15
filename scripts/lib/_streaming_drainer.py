@@ -60,6 +60,30 @@ _DEFAULT_QUEUE_MAXSIZE = 256
 # operator who sets a stall threshold deliberately keeps it.
 _STALL_FLOOR_FRACTION = 0.5
 
+# OI-2066: the structured marker a drainer error event carries when the TOTAL
+# deadline is what stopped the run — the plain deadline kill, and a stall
+# window the deadline cut short. A kill on the chunk (stall) timeout alone
+# never carries it. The keys are the ones the governed report carries
+# (provider_dispatch._build_frontmatter), so the review-gate runner reads the
+# lane's own statement instead of inferring a deadline from a duration.
+DEADLINE_EXCEEDED_KEY = "deadline_exceeded"
+DEADLINE_SECONDS_KEY = "deadline_seconds"
+
+
+def deadline_exceeded_seconds(event_data: Any) -> Optional[float]:
+    """The deadline a drainer error event says stopped the run, or None.
+
+    None for any event that does not carry the marker exactly as
+    :func:`_make_error_event` writes it — a ``True`` flag and a number — so a
+    malformed or provider-shaped event can never read as a deadline kill.
+    """
+    if not isinstance(event_data, dict) or event_data.get(DEADLINE_EXCEEDED_KEY) is not True:
+        return None
+    seconds = event_data.get(DEADLINE_SECONDS_KEY)
+    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
+        return None
+    return float(seconds)
+
 
 def coerce_chunk_stall(chunk_timeout: float, total_deadline: float) -> float:
     """Return *chunk_timeout* coerced into the stall band relative to *total_deadline*.
@@ -302,6 +326,7 @@ def _run_producer(
                     provider=provider_name,
                     raw=None,
                     reason=f"total deadline {total_deadline:.0f}s exceeded",
+                    deadline_seconds=total_deadline,
                 )
                 _append_to_store(event_store, terminal_id, err, dispatch_id)
                 result_queue.put(err)
@@ -345,6 +370,8 @@ def _run_producer(
                     provider=provider_name,
                     raw=None,
                     reason=reason,
+                    # OI-2066: a compressed window ended AT the total deadline.
+                    deadline_seconds=total_deadline if deadline_compressed else None,
                 )
                 _append_to_store(event_store, terminal_id, err, dispatch_id)
                 result_queue.put(err)
@@ -356,10 +383,9 @@ def _run_producer(
                 break  # fd closed (process killed)
 
             if not chunk:
-                # EOF — process finished cleanly
-                rc = process.poll()
-                if rc is not None:
-                    pass  # returncode available for post-drain check
+                # EOF — process finished cleanly; reap the returncode for the
+                # post-drain check.
+                process.poll()
                 break
 
             if tee_fh is not None:
@@ -452,11 +478,20 @@ def _make_error_event(
     provider: str,
     raw: Optional[str],
     reason: str,
+    deadline_seconds: Optional[float] = None,
 ) -> CanonicalEvent:
-    """Build a canonical error event for malformed chunks or fatal conditions."""
+    """Build a canonical error event for malformed chunks or fatal conditions.
+
+    ``deadline_seconds`` is passed only by a kill the TOTAL deadline caused; it
+    stamps the OI-2066 marker (``DEADLINE_EXCEEDED_KEY`` plus the deadline)
+    that :func:`deadline_exceeded_seconds` reads back.
+    """
     data: Dict[str, Any] = {"reason": reason}
     if raw is not None:
         data["raw"] = raw[:500]  # truncate to avoid enormous NDJSON lines
+    if deadline_seconds is not None:
+        data[DEADLINE_EXCEEDED_KEY] = True
+        data[DEADLINE_SECONDS_KEY] = float(deadline_seconds)
     return CanonicalEvent(
         dispatch_id=dispatch_id,
         terminal_id=terminal_id,

@@ -46,14 +46,14 @@ def _run(tmp_path, *, verdict_by_provider, seat_ledger_path, track="feat-seats")
 def test_run_panel_persists_one_row_per_seat(tmp_path):
     """Every scoring seat lands a hash-chained row carrying its verdict + model."""
     seat_ledger = tmp_path / "plan-gate-seats.ndjson"
-    verdicts = {m["provider"]: '{"verdict": "pass"}' for m in pgp.DEFAULT_PANEL}
+    verdicts = {m["provider"]: '{"verdict": "pass"}' for m in pgp.default_panel()}
     out = _run(tmp_path, verdict_by_provider=verdicts, seat_ledger_path=seat_ledger)
 
     assert out["decision"] == "PASS"
     rows = list(walk_chain(seat_ledger))
-    assert len(rows) == len(pgp.DEFAULT_PANEL)
+    assert len(rows) == len(pgp.default_panel())
 
-    by_label = {m["label"]: m for m in pgp.DEFAULT_PANEL}
+    by_label = {m["label"]: m for m in pgp.default_panel()}
     for _line_no, rec, _hash in rows:
         assert rec["type"] == "plan_gate_seat"
         assert rec["track_id"] == "feat-seats"
@@ -129,11 +129,11 @@ def test_run_panel_persists_abstain_for_parse_error_seat(tmp_path):
 
 def test_run_panel_panelist_rows_carry_model(tmp_path):
     """The panelists in the returned result expose the model they were dispatched with."""
-    verdicts = {m["provider"]: '{"verdict": "pass"}' for m in pgp.DEFAULT_PANEL}
+    verdicts = {m["provider"]: '{"verdict": "pass"}' for m in pgp.default_panel()}
     out = _run(tmp_path, verdict_by_provider=verdicts,
                seat_ledger_path=tmp_path / "seats.ndjson")
     by_label = {p["label"]: p for p in out["panelists"]}
-    for member in pgp.DEFAULT_PANEL:
+    for member in pgp.default_panel():
         assert by_label[member["label"]]["model"] == member["model_arg"]
 
 

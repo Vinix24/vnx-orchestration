@@ -140,26 +140,34 @@ def switch_project_id(state_dir: Optional[Path]) -> Optional[str]:
     return vnx_paths.project_id_from_state_dir(Path(state_dir)) or None
 
 
+def gate_never_switched(gate: str) -> bool:
+    """True when ``gate``'s family is a class the switch never refuses (decision 2b).
+
+    ``codex_gate`` is codex, the claude gates are claude and the ``gh`` gates are tooling:
+    answered from the gate name alone, without reading the switch or resolving a project. A
+    gate the family map does not know is not answered here; the switch decides it, and so
+    refuses it (fail-closed).
+    """
+    try:
+        family = provider_switch.family_of(gate)
+    except provider_switch.UnknownProviderError:
+        return False
+    return family in provider_switch.NON_SWITCHABLE_CLASSES
+
+
 def gate_switch_refusal(
     gate: str, *, consumer: str = "review_gate", state_dir: Optional[Path] = None,
 ) -> Optional[provider_switch.SwitchDecision]:
     """The provider switch's refusal for ``gate``, or ``None`` when it may be called.
 
-    The gate name is the identifier: ``kimi_gate`` decides the ``kimi`` family, ``codex_gate``
-    is codex and the ``gh`` gates are tooling. Those classes are never refused (decision 2b),
-    so they are answered here without reading the switch or resolving a project. An
-    unregistered gate returns ``None``: it has no provider to call, and the caller's own
+    The gate name is the identifier: ``kimi_gate`` decides the ``kimi`` family. A class the
+    switch never refuses is answered by :func:`gate_never_switched`. An unregistered gate
+    returns ``None``: it has no provider to call, and the caller's own
     ``unsupported_gate_type`` answer stays the one that names it. A registered gate the family
     map does not know is decided, and so refused (fail-closed). Read fresh on every call, so a
     switch change takes effect on the next request.
     """
-    if resolve_gate_provider(gate) is None:
-        return None
-    try:
-        family = provider_switch.family_of(gate)
-    except provider_switch.UnknownProviderError:
-        family = provider_switch.UNKNOWN_FAMILY
-    if family in provider_switch.NON_SWITCHABLE_CLASSES:
+    if resolve_gate_provider(gate) is None or gate_never_switched(gate):
         return None
     decision = provider_switch.decide(gate, consumer=consumer, project_id=switch_project_id(state_dir))
     return None if decision.allowed else decision
@@ -326,6 +334,15 @@ EXECUTION_FAILURE_REASONS: frozenset = frozenset({
     "network_error", "auth_error",
     # Vertex REST path (gemini_review) API failures (OI-1178)
     "vertex_api_error",
+    # codex refused the requested model (http 400: not supported for the ChatGPT
+    # login, or the CLI is too old for it; OI-2062). The gate never ran, so it
+    # books `unavailable` like any execution failure, but under its own name so
+    # the refused model is visible instead of a bare exit_nonzero.
+    "model_not_supported",
+    # The codex model could not be resolved from the registry (unreadable
+    # registry or no openai.default_model; OI-2062). The gate never started,
+    # exactly like `binary_not_found`: it books `unavailable`.
+    "codex_model_unresolved",
     # The gate ran to completion and investigated nothing (OI-1485). Absence
     # of evidence, exactly like a timeout: the PR was never actually reviewed,
     # so this must book `unavailable` and be re-bought, never `failed` (which
@@ -2094,6 +2111,16 @@ def _failure_payload(
     }
     if reason_before_classification:
         failure_payload["reason_before_classification"] = reason_before_classification
+    # OI-2066: the lane deadline a harness-lane run applied, stamped on the
+    # request by gate_runner before it dispatched — so a failure record says
+    # which deadline the run had, exactly like the success record
+    # (gate_artifacts.materialize_artifacts stamps the same field).
+    provider = resolve_gate_provider(gate)
+    if (
+        "timeout_seconds" in request_payload
+        and provider is not None and provider[0] == GATE_PROVIDER_HARNESS_LANE
+    ):
+        failure_payload["timeout_seconds"] = request_payload["timeout_seconds"]
     if extra:
         # Identity and verdict are the record's own. So is the evidence trio:
         # `report_path`, `contract_hash` and `required_reruns` are what

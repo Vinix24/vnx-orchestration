@@ -98,12 +98,12 @@ def _utc_iso() -> str:
 def _known_labels() -> list[str]:
     """The closed set of plan-gate seat labels used to parse report filenames.
 
-    Union of the shipped DEFAULT_PANEL labels and the current config's labels, so a
+    Union of the shipped default panel labels and the current config's labels, so a
     label that was later removed from the config (or a historical default) still
     parses. Sorted longest-first so the right-anchored match tries the most specific
     label first.
     """
-    labels: set[str] = {s["label"] for s in pgp.DEFAULT_PANEL}
+    labels: set[str] = {s["label"] for s in pgp.default_panel()}
     try:
         labels.update(s["label"] for s in pgp.load_panel_seats())
     except Exception:  # vnx-silent-except: config load failure must not break the backfill

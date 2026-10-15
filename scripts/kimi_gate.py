@@ -43,6 +43,11 @@ guesses). Only ``dispatch_error``/``no_verdict`` may claim a provider outage
 in their summary text; the recovery-related reasons must not, since kimi
 plainly produced output.
 
+OI-2066: ``timeout`` is the report whose frontmatter says the lane's own
+deadline stopped the run (``deadline_exceeded``). It is checked before any
+verdict extraction, so a partial verdict block in a cut-off report never
+counts (``_unread_run_outcome``).
+
 OI-1291 (fix-forward): the first cut of this split used "did a report come
 back" as the discriminator between a parse miss and outage. That axis is
 wrong — a real quota/auth outage still writes a report, because the
@@ -119,10 +124,12 @@ import gate_depth  # OI-1618: a verdict without investigation is no verdict, on 
 from gate_artifacts import _compute_contract_hash  # canonical hash source — never a second hasher
 from gate_lane_contract import (  # C6 step 3: one source, three readers
     MODEL_DEFAULTS,
-    TIMEOUT_SECONDS,
     VALID_VERDICTS,
     VERDICT_CONTRACT,
     canonical_review_verdict,
+    describe_dispatch_exception,
+    harness_dispatcher_timeouts,
+    lane_deadline_detail,
     max_diff_chars,
 )
 from gate_prompt import (  # OI-1442: the diff is data, not instruction
@@ -164,10 +171,32 @@ def _extract_verdict(text: str) -> dict:
 # One source (C6 step 3): model env var/default, timeout, diff cap and verdict
 # contract come from gate_lane_contract — the SAME objects gate_runner and
 # glm_gate read. The aliases keep this gate's existing names for the readers
-# below.
+# below. The timeout has no alias since OI-2066: it is resolved per run, for
+# the diff in hand (``_review_dispatcher``).
 _MODEL_ENV, DEFAULT_MODEL = MODEL_DEFAULTS["kimi_gate"]
-DEFAULT_TIMEOUT = TIMEOUT_SECONDS
 _VERDICT_CONTRACT = VERDICT_CONTRACT
+
+
+def _review_dispatcher(
+    base_data_dir: Path, branch: str, coverage: dict, explicit_timeout: "int | None",
+):
+    """The governed dispatcher for one kimi_gate run, with a deadline that fits the diff.
+
+    OI-2066: the lane deadline comes from
+    ``gate_lane_contract.harness_timeout_seconds`` for the part of the diff
+    that enters the prompt (``gate_depth.prompt_diff_chars``), unless the
+    operator passed ``--timeout``. It reaches the lane as its own deadline
+    (``VNX_TOTAL_DEADLINE`` in the child env) and, plus a margin, as the outer
+    subprocess timeout — the same pair gate_runner's harness lane hands over.
+    Before this both were a fixed 900 s. role and base_ref: see the call site.
+    """
+    return _make_default_dispatcher(
+        str(base_data_dir), role="review-gate",
+        base_ref=(f"origin/{branch}" if branch else None),
+        **harness_dispatcher_timeouts(
+            "kimi_gate", gate_depth.prompt_diff_chars(coverage), explicit=explicit_timeout,
+        ),
+    )
 
 
 def _build_prompt(diff_text: str, pr: str, max_chars: int) -> str:
@@ -387,7 +416,31 @@ _UNAVAILABLE_SUMMARIES = {
     "recovery_conflict": "recovery_conflict — a companion report's verdict conflicted with the primary response",
     "reprocess_no_identity_anchor": "reprocess_no_identity_anchor — no addressable original result record to verify against",
     "reprocess_stale_evidence": "reprocess_stale_evidence — PR head has moved since this dispatch ran",
+    "timeout": "timeout — the lane's own deadline stopped the run before the review finished",
 }
+
+
+def _unread_run_outcome(
+    dispatch_error: str, report_text: str, duration: float,
+) -> "tuple[str, list, str, str] | None":
+    """``(status, blocking, residual, reason)`` for a run whose report is never
+    read for a verdict, else None. Both cases book ``unavailable``:
+
+    - the dispatcher raised (``dispatch_error``): there is no report to read;
+    - OI-2066: the report says the lane's OWN deadline stopped the run
+      (``gate_lane_contract.lane_deadline_detail``, the reader gate_runner's
+      harness lane uses). Such a report can still hold a partial ```json```
+      block with a pass in it, and codex reproduced exactly that on 4ac2669a:
+      ``pass``, exit 0, for a review that never finished. It books
+      ``timeout`` as gate_runner does, and no verdict, relabeled verdict or
+      companion report is read for it.
+    """
+    if dispatch_error:
+        return "unavailable", [], f"governed kimi dispatch failed: {dispatch_error[:400]}", "dispatch_error"
+    deadline = lane_deadline_detail(report_text, duration)
+    if deadline is not None:
+        return "unavailable", [], f"kimi_gate timed out: {deadline} — not a review outcome", "timeout"
+    return None
 
 
 def _lift_lane_log_reason(dispatch_id: str, data_dir: "Path | None") -> "str | None":
@@ -434,7 +487,8 @@ def main(argv: "list[str] | None" = None) -> int:
                     help="VNX data dir; report lands in <data-dir>/unified_reports/ and the "
                          "result in <data-dir>/state/review_gates/results/")
     ap.add_argument("--model", default=os.environ.get(_MODEL_ENV, DEFAULT_MODEL))
-    ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
+    # OI-2066: no fixed default — unset, the deadline is resolved for the diff.
+    ap.add_argument("--timeout", type=int, default=None)
     ap.add_argument("--json", action="store_true", help="print the result record as JSON")
     ap.add_argument(
         "--reprocess", metavar="DISPATCH_ID", default=None,
@@ -580,10 +634,7 @@ def main(argv: "list[str] | None" = None) -> int:
         # glm_gate's identical call site for the measured incident (PR #1950,
         # via gate_runner's harness-lane path). `branch` is already resolved
         # above (get_pr_head_branch, empty only for an offline --diff-file run).
-        dispatcher = _make_default_dispatcher(
-            str(base_data_dir), args.timeout, role="review-gate",
-            base_ref=(f"origin/{branch}" if branch else None),
-        )
+        dispatcher = _review_dispatcher(base_data_dir, branch, coverage, args.timeout)
         prompt = _build_prompt(diff, args.pr, diff_cap)
         # OI-1442: the deterministic half — see glm_gate's identical call site.
         # The prompt asks the model to report instruction-shaped text in the
@@ -599,8 +650,10 @@ def main(argv: "list[str] | None" = None) -> int:
         except Exception as exc:  # noqa: BLE001 — dispatch/report-read failure
             # OI-1142: do NOT bail without a record — a required gate that cannot fire
             # must surface as ``unavailable`` in the results dir, not vanish.
-            dispatch_error = str(exc)
-            print(f"kimi_gate: governed kimi dispatch failed: {exc}", file=sys.stderr)
+            # OI-2066: str(exc) of a TimeoutExpired is the whole argv, the diff
+            # included — describe it without argv or prompt, bounded.
+            dispatch_error = describe_dispatch_exception(exc, prompt=prompt)
+            print(f"kimi_gate: governed kimi dispatch failed: {dispatch_error}", file=sys.stderr)
         duration = time.monotonic() - start
 
         report_path_obj = base_data_dir / "unified_reports" / f"{dispatch_id}.md"
@@ -641,11 +694,10 @@ def main(argv: "list[str] | None" = None) -> int:
     # build can stamp the canonical failure_reason field (see there) — only
     # ever set by the lane-log lift in the run_failed branch, never guessed.
     lane_log_reason: "str | None" = None
-    if dispatch_error:
+    unread = _unread_run_outcome(dispatch_error, report_text or "", duration)
+    if unread is not None:
         verdict: dict = {}
-        status, blocking = "unavailable", []
-        residual = f"governed kimi dispatch failed: {dispatch_error[:400]}"
-        reason = "dispatch_error"
+        status, blocking, residual, reason = unread
     else:
         verdict = _extract_verdict(report_text or "")
         if verdict:

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, List
@@ -91,7 +92,8 @@ def dispatcher(monkeypatch):
     """The harness lane's dispatcher, recording calls; ``behaviour`` decides what it does."""
     state: Dict[str, Any] = {"calls": [], "behaviour": None, "fetched": []}
 
-    def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None):
+    def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None,
+                total_deadline_seconds=None):
         def dispatch(provider, model, instruction, dispatch_id):
             state["calls"].append({"provider": provider, "dispatch_id": dispatch_id})
             return state["behaviour"](dispatch_id)
@@ -196,6 +198,38 @@ def test_a_layer_one_refusal_is_booked_as_the_switch_and_the_worktree_removed(en
     assert popen == []
 
 
+@pytest.mark.parametrize("gate,never", [
+    ("codex_gate", True), ("claude_github_optional", True),
+    ("gemini_review", False), ("kimi_gate", False), ("deepseek_gate", False), ("not_a_gate", False),
+])
+def test_gate_never_switched_answers_from_the_gate_name(gate, never):
+    assert gate_recorder.gate_never_switched(gate) is never
+
+
+class _ReachedTheCommand(Exception):
+    pass
+
+
+def test_layer_one_resolves_no_project_for_a_codex_gate(env, popen, monkeypatch):
+    """A codex launch is never refused (decision 2b), so layer 1 neither decides it nor resolves
+    a project for it: that resolution can start ``git``, and nothing may start before the gate."""
+    def no_decision(*args, **kwargs):
+        raise AssertionError("the switch was consulted for a codex gate")
+
+    def reached(self, gate, binary, request_payload):
+        raise _ReachedTheCommand(gate)
+
+    monkeypatch.setattr(provider_switch, "decide", no_decision)
+    monkeypatch.setattr(gate_recorder, "switch_project_id", no_decision)
+    monkeypatch.setattr(GateRunner, "_build_gate_cmd", reached)
+    with pytest.raises(_ReachedTheCommand):
+        runner(env)._run_with_stall_detection(
+            gate="codex_gate", binary="codex", prompt="x", timeout=5, stall_threshold=5,
+            request_payload=payload("codex_gate"),
+        )
+    assert popen == []
+
+
 def test_codex_is_never_refused_by_layer_one(env):
     """Decision 2b: require allows codex whatever the switch file says."""
     Path(os.environ["VNX_PROVIDER_SWITCH_FILE"]).parent.mkdir(parents=True, exist_ok=True)
@@ -231,6 +265,40 @@ def test_lane_exit_provider_switched_off_is_booked_as_the_switch_not_a_dispatch_
     record = result_record(env, "kimi_gate")
     assert record["reason"] == SWITCHED_OFF and "reason_before_classification" not in record
     assert provider_reachability.get("kimi", state_dir=env["state_dir"]).state.value == "unmeasured"
+    assert no_reachability_fact(env)
+
+
+DIFF_UNDER_REVIEW = (
+    "diff --git a/scripts/billing.py b/scripts/billing.py\n"
+    "+    raise QuotaError('402 insufficient balance on the deepseek key')\n"
+)
+
+
+def test_a_lane_refusal_raised_with_its_argv_books_the_switch_without_the_diff(env, dispatcher):
+    """A ``CalledProcessError`` carries the lane's argv, the diff under review included. The
+    refusal is still booked as the switch, and ``reason_detail`` names the exception and the exit
+    code but never the argv: the quota words in the diff never reach the record (#2060)."""
+    set_switches(kimi=True)
+    request = {**payload("kimi_gate"), "prompt": f"Review the PR diff below.\n{DIFF_UNDER_REVIEW}"}
+
+    def refused_with_argv(dispatch_id):
+        raise subprocess.CalledProcessError(
+            provider_switch.EXIT_PROVIDER_SWITCHED_OFF,
+            ["python3", "/repo/scripts/lib/provider_dispatch.py", "--provider", "kimi",
+             "--dispatch-id", dispatch_id, "--instruction", request["prompt"], "--no-auto-commit"],
+        )
+
+    dispatcher["behaviour"] = refused_with_argv
+
+    result = runner(env).run(gate="kimi_gate", request_payload=request, pr_number=PR)
+
+    assert result["status"] == "not_executable" and result["reason"] == SWITCHED_OFF
+    record = result_record(env, "kimi_gate")
+    for detail in (result["reason_detail"], record["reason_detail"]):
+        assert "insufficient balance" not in detail and "diff --git" not in detail
+        assert "--instruction" not in detail
+        assert "CalledProcessError" in detail
+        assert f"exit code {provider_switch.EXIT_PROVIDER_SWITCHED_OFF}" in detail
     assert no_reachability_fact(env)
 
 
@@ -272,6 +340,25 @@ def test_a_lane_report_that_names_the_refusal_is_booked_as_the_switch(env, dispa
 ])
 def test_dispatch_exit_code_is_read_only_from_the_no_report_message(message, expected):
     assert gate_runner._dispatch_exit_code(RuntimeError(message)) == expected
+
+
+@pytest.mark.parametrize("returncode", [provider_switch.EXIT_PROVIDER_SWITCHED_OFF, 1, -9])
+def test_dispatch_exit_code_of_a_called_process_error_is_its_returncode(returncode):
+    exc = subprocess.CalledProcessError(returncode, ["provider_dispatch.py", "--instruction", "rc=4"])
+    assert gate_runner._dispatch_exit_code(exc) == returncode
+
+
+def test_a_lane_refusal_message_keeps_its_exit_code_and_drops_the_prompt():
+    """The dispatcher's RuntimeError is described with the prompt replaced by its length."""
+    prompt = f"Review the PR diff below.\n{DIFF_UNDER_REVIEW}"
+    exc = RuntimeError(
+        f"no report for kimi-gate-pr1-2 (rc={provider_switch.EXIT_PROVIDER_SWITCHED_OFF}): "
+        f"stdout: {prompt} | stderr: provider_switched_off: kimi family=kimi"
+    )
+    detail = gate_runner._switch_refusal_detail(exc, "", prompt)
+    assert detail.startswith(f"lane exit code {provider_switch.EXIT_PROVIDER_SWITCHED_OFF}: RuntimeError: ")
+    assert DIFF_UNDER_REVIEW not in detail and f"<prompt: {len(prompt)} chars>" in detail
+    assert "provider_switched_off: kimi family=kimi" in detail
 
 
 # ---------------------------------------------------------------------------

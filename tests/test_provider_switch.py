@@ -489,16 +489,17 @@ def _classifier_keys() -> Set[str]:
 def _plan_gate_identifiers() -> Set[str]:
     config = yaml.safe_load((REPO_ROOT / "configs" / "plan_gate_panel.yaml").read_text(encoding="utf-8"))
     found = {s["provider"] for s in config["seats"]} | {s["model_arg"] for s in config["seats"]}
+    found.discard("registry-default")  # codex seat: resolved from openai.default_model at build time
     found |= {config["tiebreaker"]["provider"], config["tiebreaker"]["model"]}
-    default_panel = _assigned(_parse("scripts/lib/plan_gate_panel.py"), "DEFAULT_PANEL")
+    default_panel = _assigned(_parse("scripts/lib/plan_gate_panel.py"), "_DEFAULT_PANEL_SEATS")
     for seat in default_panel.elts:
-        values = dict(zip((k.value for k in seat.keys), (v.value for v in seat.values)))
-        found |= {values["provider"], values["model_arg"]}
+        values = {k.value: v.value for k, v in zip(seat.keys, seat.values) if isinstance(v, ast.Constant)}
+        found |= {values["provider"], values.get("model_arg", values["provider"])}
     return found
 
 
 def _deliberation_roster() -> Set[str]:
-    return _strings(_assigned(_parse("scripts/lib/deliberation_panel.py"), "DEFAULT_ROSTER"))
+    return _strings(_assigned(_parse("scripts/lib/deliberation_panel.py"), "_DEFAULT_ROSTER_ENTRIES"))
 
 
 def _lane_checks() -> Set[str]:
@@ -532,7 +533,7 @@ def _wave7_identifiers() -> Set[str]:
     ("gate_recorder.GATE_PROVIDERS", _gate_providers, 10),
     ("classifier_providers.get_provider", _classifier_keys, 5),
     ("plan-gate seats + tiebreaker", _plan_gate_identifiers, 10),
-    ("deliberation roster", _deliberation_roster, 10),
+    ("deliberation roster", _deliberation_roster, 9),
     ("availability._LANE_CHECKS", _lane_checks, 5),
     ("wave7_models.yaml", _wave7_identifiers, 40),
 ])

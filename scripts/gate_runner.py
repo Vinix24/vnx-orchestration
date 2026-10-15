@@ -30,6 +30,8 @@ from governance_receipts import utc_now_iso
 from headless_adapter import gate_timeout, gate_stall_threshold
 from unified_report_schema import SchemaViolation, extract_frontmatter, parse_frontmatter
 import gate_recorder as _rec
+from failure_classification import find_codex_model_refusal
+from providers import provider_registry
 import gate_artifacts as _art
 import provider_switch
 import vertex_ai_runner as _vtx
@@ -46,9 +48,13 @@ from gate_prompt import (  # OI-1442: the diff is data, not instruction
 import gate_depth  # OI-1851: record what part of the diff each prompt carries
 from prompt_assembler import PromptAssembler, format_for_provider
 from gate_lane_contract import (  # C6 step 3: one source, three readers
+    DISPATCH_ERROR_DETAIL_MAX_CHARS as _DISPATCH_ERROR_DETAIL_MAX_CHARS,
     MODEL_DEFAULTS as _HARNESS_LANE_MODEL,
-    TIMEOUT_SECONDS as _HARNESS_LANE_TIMEOUT_SECONDS,
+    TIMEOUT_OUTER_MARGIN_SECONDS as _HARNESS_LANE_OUTER_MARGIN_SECONDS,
     VERDICT_CONTRACT as _HARNESS_LANE_VERDICT_CONTRACT,
+    describe_dispatch_exception,
+    harness_dispatcher_timeouts as _harness_lane_dispatcher_timeouts,
+    lane_deadline_detail,
     max_diff_chars as _harness_lane_max_diff_chars,
 )
 
@@ -113,8 +119,9 @@ _HARNESS_LANE_ISOLATION_NOTICE = (
 _SWITCH_CONSUMER = "gate_runner"
 
 # The dispatcher (plan_gate_panel._make_default_dispatcher) reports a provider_dispatch
-# run that left no report as ``no report for <id> (rc=<exit code>)``. That message is the
-# only place the exit code of the lane surfaces, so the refusal exit code is read from it.
+# run that left no report as ``no report for <id> (rc=<exit code>)``. For that RuntimeError the
+# message is the only place the exit code of the lane surfaces, so the refusal exit code is read
+# from it.
 _DISPATCH_EXIT_CODE_RE = re.compile(r"^no report for \S+ \(rc=(-?\d+)\)")
 
 # Harness-lane gates (glm_gate/kimi_gate) delegate to the governed dispatcher
@@ -234,13 +241,141 @@ def _lifted_harness_lane_exit_code(report_text: str) -> Optional[int]:
     return exit_code if isinstance(exit_code, int) else None
 
 
+class _HarnessLaneDeadlineExceeded(Exception):
+    """OI-2066: the lane's OWN deadline stopped the run, and the lane still
+    wrote and returned its report.
+
+    Raised inside ``_run_harness_lane_path``'s dispatch ``try`` (see
+    :func:`_raise_if_lane_deadline_fired`), so this shape and an outer
+    ``subprocess.TimeoutExpired`` reach the ONE place that books a timeout as
+    a timeout (:func:`_harness_lane_exception_outcome`). Its message is built
+    from numbers only, never from the report's text.
+    """
+
+
+def _harness_lane_prompt_diff_chars(request_payload: Dict[str, Any], prompt: str) -> int:
+    """The length of the diff that entered a harness-lane prompt, after the cap (OI-2066).
+
+    ``diff_coverage`` is what ``_build_harness_lane_prompt`` recorded for this
+    run (OI-1851): the diff's full size and the cap it was cut at, read by
+    ``gate_depth.prompt_diff_chars`` — the same reading the standalone gates
+    use. A caller-supplied prompt has no coverage record; then the whole
+    prompt is what the lane reads, and its length counts.
+    """
+    coverage = request_payload.get("diff_coverage")
+    if not isinstance(coverage, dict):
+        return len(prompt or "")
+    return gate_depth.prompt_diff_chars(coverage)
+
+
+def _build_harness_lane_dispatcher(
+    gate: str, data_dir: Path, base_ref: str, request_payload: Dict[str, Any], prompt: str,
+):
+    """Build the governed dispatcher with a deadline that fits the diff (OI-2066).
+
+    The lane deadline comes from ``gate_lane_contract.harness_timeout_seconds``
+    for the diff that entered the prompt. It is handed to the dispatcher twice:
+    as ``total_deadline_seconds`` (``VNX_TOTAL_DEADLINE`` in the child's env,
+    the drainer's own deadline) and, with
+    ``gate_lane_contract.TIMEOUT_OUTER_MARGIN_SECONDS`` on top, as the outer
+    subprocess timeout — so the lane's deadline fires first and the lane
+    writes its own report. Before this both were a fixed 900 s, and raising
+    only the outer one would still have let the drainer stop at 900 s.
+
+    The applied deadline is stamped on the request as ``timeout_seconds``; the
+    success writer (``gate_artifacts.materialize_artifacts``) and the failure
+    writer (``gate_recorder.record_failure``) both carry it onto the result.
+    """
+    # Lazy import: plan_gate_panel pulls in the whole governed dispatch
+    # graph, and only the harness-lane path needs it.
+    from plan_gate_panel import _make_default_dispatcher
+
+    timeouts = _harness_lane_dispatcher_timeouts(
+        gate, _harness_lane_prompt_diff_chars(request_payload, prompt),
+    )
+    request_payload["timeout_seconds"] = timeouts["total_deadline_seconds"]
+    return _make_default_dispatcher(
+        str(data_dir), timeouts["timeout_seconds"], role="review-gate", base_ref=base_ref,
+        total_deadline_seconds=timeouts["total_deadline_seconds"],
+    )
+
+
+def _raise_if_lane_deadline_fired(report_text: str, elapsed: float) -> None:
+    """OI-2066: raise :class:`_HarnessLaneDeadlineExceeded` when the returned
+    report says the lane's OWN deadline stopped the run.
+
+    The drainer (kimi) and the claude-harness adapter (glm, deepseek) kill the
+    run at the deadline, and provider_dispatch still writes the governed
+    report, so the dispatcher returns text instead of raising. That report
+    used to fall through to the OI-1748/OI-1753 checks and book as
+    ``harness_lane_no_model_response`` or ``harness_lane_exit_nonzero``, with
+    the lane's own text in ``reason_detail``.
+
+    The reading is ``gate_lane_contract.lane_deadline_detail``, the one reader
+    the standalone gates and the plan-gate readers call too: the frontmatter's
+    ``deadline_exceeded``, never a duration. ``elapsed`` only fills in the
+    message when the report carries no ``duration_seconds``.
+    """
+    detail = lane_deadline_detail(report_text, elapsed)
+    if detail is not None:
+        raise _HarnessLaneDeadlineExceeded(detail)
+
+
+def _harness_lane_exception_outcome(
+    gate: str, exc: Exception, request_payload: Dict[str, Any], prompt: str,
+) -> Dict[str, str]:
+    """The ``reason`` and ``reason_detail`` a failed harness-lane dispatch books (OI-2066).
+
+    A timeout books ``timeout``: the dispatcher's outer
+    ``subprocess.TimeoutExpired`` and the lane's own deadline
+    (:class:`_HarnessLaneDeadlineExceeded`) alike, with a short detail naming
+    the gate, the applied deadline and the diff size. ``timeout`` is in
+    ``gate_recorder.EXECUTION_FAILURE_REASONS`` (it books ``unavailable``) and
+    NOT in ``gate_recorder._CAUSE_AGNOSTIC_FAILURE_REASONS``, so the quota
+    re-booking never reads it.
+
+    Every other exception stays ``harness_lane_dispatch_error``, described by
+    ``gate_lane_contract.describe_dispatch_exception``: type and message, no
+    argv, no prompt, at most ``DISPATCH_ERROR_DETAIL_MAX_CHARS``. Measured
+    15-10 on PR #2058: ``str(TimeoutExpired)`` is the whole argv, the diff
+    under review included, and the quota scan found two test fixtures in it.
+    ``summary`` and ``failure_reason`` are derived from ``reason_detail``, so
+    bounding it here bounds them too.
+    """
+    if not isinstance(exc, (subprocess.TimeoutExpired, _HarnessLaneDeadlineExceeded)):
+        return {
+            "reason": "harness_lane_dispatch_error",
+            "reason_detail": describe_dispatch_exception(exc, prompt=prompt),
+        }
+    if isinstance(exc, subprocess.TimeoutExpired):
+        how = (
+            f"{describe_dispatch_exception(exc)}, the outer timeout "
+            f"({_HARNESS_LANE_OUTER_MARGIN_SECONDS} s above the lane deadline)"
+        )
+    else:
+        how = str(exc)
+    detail = (
+        f"harness lane {gate} exceeded {request_payload.get('timeout_seconds')} s "
+        f"(diff {_harness_lane_prompt_diff_chars(request_payload, prompt):,} chars): {how}"
+    )
+    return {"reason": "timeout", "reason_detail": detail[:_DISPATCH_ERROR_DETAIL_MAX_CHARS]}
+
+
 def _dispatch_exit_code(exc: BaseException) -> Optional[int]:
-    """The lane's exit code a dispatcher exception names, or None when it names none."""
+    """The lane's exit code a dispatcher exception names, or None when it names none.
+
+    A ``CalledProcessError`` carries it as ``returncode``; the dispatcher's own
+    ``no report for <id> (rc=<code>)`` message carries it as text.
+    """
+    if isinstance(exc, subprocess.CalledProcessError):
+        return exc.returncode
     match = _DISPATCH_EXIT_CODE_RE.match(str(exc))
     return int(match.group(1)) if match else None
 
 
-def _switch_refusal_detail(dispatch_exc: Optional[BaseException], report_text: str) -> Optional[str]:
+def _switch_refusal_detail(
+    dispatch_exc: Optional[BaseException], report_text: str, prompt: str,
+) -> Optional[str]:
     """The provider switch's refusal behind a harness-lane dispatch, or None.
 
     Two shapes reach the runner, and both mean nothing was called: the lane
@@ -251,11 +386,16 @@ def _switch_refusal_detail(dispatch_exc: Optional[BaseException], report_text: s
     ``harness_lane_no_model_response``: those are execution failures whose text
     the reachability feed reads, and an operator's reason such as "insufficient
     balance" would then become a quota fact.
+
+    The exception is described by ``gate_lane_contract.describe_dispatch_exception``,
+    never by ``str()``: for a ``CalledProcessError`` that is the whole argv, the
+    diff under review included (OI-2066).
     """
     if dispatch_exc is not None:
-        if _dispatch_exit_code(dispatch_exc) == provider_switch.EXIT_PROVIDER_SWITCHED_OFF:
-            return _tail(str(dispatch_exc), _REASON_DETAIL_TAIL_CHARS)
-        return None
+        exit_code = _dispatch_exit_code(dispatch_exc)
+        if exit_code != provider_switch.EXIT_PROVIDER_SWITCHED_OFF:
+            return None
+        return f"lane exit code {exit_code}: {describe_dispatch_exception(dispatch_exc, prompt=prompt)}"
     lifted = _lifted_harness_lane_failure_reason(report_text) or ""
     if lifted.startswith(provider_switch.REASON_SWITCHED_OFF):
         return lifted
@@ -366,6 +506,31 @@ def _main_checkout_state_diff(
         if before.get(key) != after.get(key)
     ]
     return "; ".join(diffs) if diffs else None
+
+
+def _codex_model_refusal(
+    cmd: List[str], stdout: str, stderr: str, returncode: int,
+) -> Optional[str]:
+    """Name a refused codex model, or None when the failure is something else (OI-2062).
+
+    Codex answers an unsupported model with http 400 and one of two measured
+    sentences, on stderr or inside the JSON event stream. The unrelated
+    ``failed to load models cache`` line is noise and never read as the cause.
+    Returns the reason_detail: the provider's own sentence (at most 500
+    characters), the model that was requested and the resolved path of the
+    codex binary that ran, so the install that refused can be told apart.
+    """
+    if returncode == 0:
+        return None
+    sentence = find_codex_model_refusal(stderr, stdout)
+    if not sentence:
+        return None
+    requested = ""
+    for idx, arg in enumerate(cmd):
+        if arg == "-c" and idx + 1 < len(cmd) and cmd[idx + 1].startswith("model="):
+            requested = cmd[idx + 1][len("model="):].strip('"')
+    binary_path = shutil.which(cmd[0]) or cmd[0]
+    return f"{sentence} | requested model: {requested} | codex binary: {os.path.realpath(binary_path)}"
 
 
 def _build_reason_detail(base_detail: str, stdout: str, stderr: str) -> str:
@@ -670,6 +835,15 @@ class GateRunner:
                 gate=gate, pr_number=pr_number, pr_id=pr_id,
                 detail=exc.decision.detail(), request_payload=request_payload,
             )
+        except provider_registry.CodexModelResolutionError as exc:
+            # The gate never started: no model to launch it with (OI-2062). Booked
+            # like a missing binary, so the request ends terminal, never `executing`.
+            result = {
+                "status": "failed", "reason": "codex_model_unresolved",
+                "reason_detail": str(exc), "stdout": "", "stderr": str(exc),
+                "duration_seconds": 0.0, "partial_output_lines": 0,
+                "runner_pid": os.getpid(),
+            }
         finally:
             remove_gate_worktree(worktree_path, project_root=self._project_root)
 
@@ -767,11 +941,13 @@ class GateRunner:
              OVERRIDES whatever the dispatch itself returned, including a
              PASS: a verdict produced while the orchestrator's own checkout
              was mutated is not trustworthy evidence.
-        """
-        # Lazy import: plan_gate_panel pulls in the whole governed dispatch
-        # graph, and only the harness-lane path needs it.
-        from plan_gate_panel import _make_default_dispatcher
 
+        OI-2066: the deadline fits the diff (``_build_harness_lane_dispatcher``)
+        and a timeout books ``timeout`` — whether the dispatcher raised
+        ``subprocess.TimeoutExpired`` or the lane returned a report whose
+        frontmatter says its own deadline stopped the run
+        (``deadline_exceeded``, read by ``_raise_if_lane_deadline_fired``).
+        """
         branch = request_payload.get("branch", "")
         identifier = pr_id if pr_id else (str(pr_number) if pr_number is not None else "unknown")
         try:
@@ -806,11 +982,13 @@ class GateRunner:
         dispatch_exc: Optional[Exception] = None
         report_text = ""
         try:
-            dispatcher = _make_default_dispatcher(
-                str(data_dir), _HARNESS_LANE_TIMEOUT_SECONDS, role="review-gate",
-                base_ref=base_ref,
+            dispatcher = _build_harness_lane_dispatcher(
+                gate, data_dir, base_ref, request_payload, prompt,
             )
             report_text = dispatcher(provider, model, prompt, dispatch_id)
+            # OI-2066: a report that SAYS the lane's own deadline stopped the
+            # run (deadline_exceeded) is a timeout.
+            _raise_if_lane_deadline_fired(report_text, time.monotonic() - _start)
         except Exception as exc:  # noqa: BLE001 — governed dispatch/report-read failure
             dispatch_exc = exc
 
@@ -842,7 +1020,7 @@ class GateRunner:
         # off (exit EXIT_PROVIDER_SWITCHED_OFF, or a report that names the refusal). Booked
         # as that refusal before the failure branches below, which would read it as an
         # execution failure and hand its text to the reachability feed.
-        switch_refusal = _switch_refusal_detail(dispatch_exc, report_text)
+        switch_refusal = _switch_refusal_detail(dispatch_exc, report_text, prompt)
         if switch_refusal is not None:
             return self._record_switched_off(
                 gate=gate, pr_number=pr_number, pr_id=pr_id,
@@ -850,10 +1028,12 @@ class GateRunner:
             )
 
         if dispatch_exc is not None:
+            # OI-2066: `timeout` for either timeout shape; every other failure
+            # stays harness_lane_dispatch_error. Neither detail carries argv.
             return self._record_lane_failure(
                 gate=gate, pr_number=pr_number, pr_id=pr_id, request_payload=request_payload,
-                reason="harness_lane_dispatch_error", reason_detail=str(dispatch_exc),
-                started=_start, output_lines=0,
+                **_harness_lane_exception_outcome(gate, dispatch_exc, request_payload, prompt),
+                started=_start, output_lines=len(report_text.splitlines()),
             )
 
         # OI-1748: the dispatcher can also fail WITHOUT raising. It returns
@@ -1136,18 +1316,15 @@ class GateRunner:
             model = os.environ.get("GEMINI_MODEL", "gemini-2.5-pro")
             cli_args = ["--model", model] + cli_args
         elif gate == "codex_gate":
-            # Model selection: only override if explicitly requested via env/payload.
-            # Default path: let codex use ~/.codex/config.toml (currently gpt-5.5).
-            # 2026-04-19: gpt-5.2-codex deprecated via Codex CLI model-migration mapping;
-            # ChatGPT-account auth rejects older explicit model flags, causing gate
-            # failures with "model not supported when using Codex with a ChatGPT account".
-            model = (
-                os.environ.get("VNX_CODEX_HEADLESS_MODEL")
+            # The model is always passed, so ~/.codex/config.toml never decides the
+            # gate's model (OI-2062: it said gpt-5.5, which codex refuses on a
+            # ChatGPT login). Order: env override, payload, openai.default_model.
+            model = provider_registry.resolve_codex_model(
+                explicit=os.environ.get("VNX_CODEX_HEADLESS_MODEL")
                 or os.environ.get("VNX_CODEX_MODEL")
-                or request_payload.get("model")
+                or request_payload.get("model"),
             )
-            if model:
-                cli_args = cli_args + ["-c", f'model="{model}"']
+            cli_args = cli_args + ["-c", f'model="{model}"']
         return [binary] + cli_args
 
     def _drain_remaining(self, fd_map: Dict[int, str], raw_fds: List[int],
@@ -1253,9 +1430,11 @@ class GateRunner:
         Layer 1 of the provider switch (provider-schakelaar C): the gate name is
         the identifier, decided fresh right before the launch, and a switched-off
         family raises ``ProviderDisabledError`` without starting anything.
-        ``_run_subprocess_path`` books that as ``provider_switched_off``.
+        ``_run_subprocess_path`` books that as ``provider_switched_off``. A gate
+        the switch never refuses (codex, claude) resolves no project for it.
         """
-        provider_switch.require(gate, consumer=_SWITCH_CONSUMER, project_id=_rec.switch_project_id(self._state_dir))
+        if not _rec.gate_never_switched(gate):
+            provider_switch.require(gate, consumer=_SWITCH_CONSUMER, project_id=_rec.switch_project_id(self._state_dir))
         cmd = self._build_gate_cmd(gate, binary, request_payload)
         start = time.monotonic()
         try:
@@ -1295,6 +1474,19 @@ class GateRunner:
         stderr = b"".join(stderr_parts).decode("utf-8", errors="replace")
         _base = {"stdout": stdout, "stderr": stderr, "duration_seconds": elapsed,
                  "partial_output_lines": lcount, "runner_pid": proc.pid}
+        return self._classify_finished_run(
+            gate=gate, cmd=cmd, status=status, timeout=timeout,
+            stall_threshold=stall_threshold, base=_base, returncode=proc.returncode,
+        )
+
+    @staticmethod
+    def _classify_finished_run(
+        *, gate: str, cmd: List[str], status: str, timeout: int, stall_threshold: int,
+        base: Dict[str, Any], returncode: int,
+    ) -> Dict[str, Any]:
+        """Turn a finished gate subprocess into its result dict (timeout/stall/refusal/exit)."""
+        _base = base
+        stdout, stderr = base["stdout"], base["stderr"]
         if status == "timeout":
             detail = _build_reason_detail(
                 f"Subprocess exceeded {timeout}s timeout", stdout, stderr,
@@ -1307,13 +1499,17 @@ class GateRunner:
             )
             return {"status": "failed", "reason": "stall",
                     "reason_detail": detail, **_base}
-        if proc.returncode != 0:
+        refusal = _codex_model_refusal(cmd, stdout, stderr, returncode) if gate == "codex_gate" else None
+        if refusal:
+            return {"status": "failed", "reason": "model_not_supported",
+                    "reason_detail": refusal, **_base}
+        if returncode != 0:
             detail = _build_reason_detail(
-                f"Subprocess exited with code {proc.returncode}", stdout, stderr,
+                f"Subprocess exited with code {returncode}", stdout, stderr,
             )
             return {"status": "failed", "reason": "exit_nonzero",
                     "reason_detail": detail, **_base}
-        return {"status": "completed", **_base, "exit_code": proc.returncode}
+        return {"status": "completed", **_base, "exit_code": returncode}
 
     @staticmethod
     def _kill_process(proc: subprocess.Popen) -> None:

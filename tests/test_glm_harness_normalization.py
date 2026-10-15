@@ -34,9 +34,9 @@ def test_bridge_alias_normalizes_zai_to_harness():
 
 
 def test_panel_default_uses_glm_harness_not_plain_runner():
-    glm = [m for m in plan_gate_panel.DEFAULT_PANEL if m["label"].startswith("glm")]
+    glm = [m for m in plan_gate_panel.default_panel() if m["label"].startswith("glm")]
     assert glm and glm[0]["provider"] == "glm-harness"
-    assert all(m["provider"] != "litellm:zai" for m in plan_gate_panel.DEFAULT_PANEL)
+    assert all(m["provider"] != "litellm:zai" for m in plan_gate_panel.default_panel())
 
 
 def test_door_and_provider_dispatch_agree_on_via():
