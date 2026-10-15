@@ -123,7 +123,22 @@ def _restrict_to_content(args, roster, context, allow_reason):
     return roster, seat_env, boundary_note
 
 
-def main(argv: "list[str] | None" = None) -> int:
+def _below_synthesis_minimum(args, roster, min_seats) -> bool:
+    """True (after saying why) when the roster cannot reach the synthesis minimum and the run
+    is not degraded: refused before any seat runs, so no seat work is spent on a refused synthesis."""
+    seats = len(roster if roster is not None else default_roster())
+    if min_seats is None or seats >= min_seats or args.allow_degraded:
+        return False
+    print(
+        f"panel: {seats} seat(s) cannot reach the synthesis minimum of {min_seats}; "
+        "nothing was dispatched. Pass --allow-degraded to synthesize from fewer seats, or "
+        "--allow-external-seats REASON to let the seats outside codex and claude run",
+        file=sys.stderr,
+    )
+    return True
+
+
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="VNX multi-provider deliberation panel")
     parser.add_argument("mode", choices=sorted(MODES), help="deliberation mode")
     parser.add_argument("question", help="the question / target for the panel")
@@ -143,7 +158,11 @@ def main(argv: "list[str] | None" = None) -> int:
         help="proceed with the synthesis even when fewer than the configured "
              "minimum seats delivered a report (the choice is stamped on the report)",
     )
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: "list[str] | None" = None) -> int:
+    args = _build_parser().parse_args(argv)
 
     try:
         roster = _parse_seats(args.seats)
@@ -173,6 +192,10 @@ def main(argv: "list[str] | None" = None) -> int:
         _make_default_dispatcher,
         load_synthesis_min_seats,
     )
+    # OI-1154: the synthesis coverage floor comes from the config, never a Python literal.
+    min_seats = load_synthesis_min_seats()
+    if _below_synthesis_minimum(args, roster, min_seats):
+        return 2
     # Pass a REAL data_dir: the claude/tmux lane writes each report to
     # <data_dir>/unified_reports/<id>.md and _read_report falls back to that path. With
     # data_dir=None the claude-lane reports (fan-out + synthesis) are written but never found
@@ -189,18 +212,6 @@ def main(argv: "list[str] | None" = None) -> int:
     dispatcher = _make_default_dispatcher(
         data_dir, args.timeout, role="deliberation-panelist", **dispatcher_kwargs,
     )
-    # OI-1154: the synthesis coverage floor comes from the config, never a Python literal.
-    min_seats = load_synthesis_min_seats()
-    effective_seats = len(roster if roster is not None else default_roster())
-    if min_seats is not None and effective_seats < min_seats and not args.allow_degraded:
-        print(
-            f"panel: {effective_seats} seat(s) cannot reach the synthesis minimum of {min_seats}; "
-            "nothing was dispatched. Pass --allow-degraded to synthesize from fewer seats, or "
-            "--allow-external-seats REASON to let the seats outside codex and claude run",
-            file=sys.stderr,
-        )
-        return 2
-
     print(f"[panel] mode={args.mode} — running 4-stage deliberation across the fleet ...", file=sys.stderr)
     if roster is None:
         result = run_deliberation(

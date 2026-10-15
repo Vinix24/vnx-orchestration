@@ -2282,6 +2282,44 @@ def _record_content_override(
     return ()
 
 
+def _raw_model_guard_verdicts(
+    spec: DispatchSpec, provider: str, sub_provider: Optional[str], via: Optional[str],
+    content_class: Any, verdicts: "tuple[ConstraintVerdict, ...]",
+) -> "tuple[ConstraintVerdict, ...]":
+    """``verdicts`` plus the blocking verdicts of the same check run on the RAW requested model."""
+    from providers.constraint_enforcer import check_constraints as _constraint_check  # noqa: PLC0415
+    try:
+        raw_violations = _constraint_check(
+            provider=provider,
+            sub_provider=sub_provider,
+            model=spec.model,
+            terminal_id=spec.target_slot,
+            role=spec.role,
+            via=via,
+            env=os.environ,
+            check_registry=False,
+            content_class=content_class,
+        )
+    except Exception as exc:
+        raw_violations = []
+        verdicts = verdicts + (ConstraintVerdict(
+            code="registry-unavailable",
+            severity="blocking",
+            message=f"Constraint registry unavailable (raw-model guard) — fail-closed: {exc}",
+        ),)
+    existing_codes = {v.code for v in verdicts}
+    for v in raw_violations:
+        if v.severity == "blocking" and v.code not in existing_codes:
+            verdicts = verdicts + (ConstraintVerdict(
+                code=v.code,
+                severity=v.severity,
+                message=f"[raw-model guard] {v.message}",
+                override_applied=v.override_applied,
+            ),)
+            existing_codes.add(v.code)
+    return verdicts
+
+
 def build_runtime_snapshot(
     vspec: ValidatedSpec,
     *,
@@ -2437,37 +2475,9 @@ def build_runtime_snapshot(
     # mask a mismatched provider. Only BLOCKING verdicts are folded in — warn-only pin
     # noise (e.g. --model opus pinned to sonnet) is already reported once via D4's own
     # warning.
-    raw_model = spec.model
-    if raw_model and raw_model != effective_model:
-        try:
-            raw_violations = _constraint_check(
-                provider=provider_value,
-                sub_provider=sub_provider,
-                model=raw_model,
-                terminal_id=spec.target_slot,
-                role=spec.role,
-                via=via,
-                env=os.environ,
-                check_registry=False,
-                content_class=content_class,
-            )
-        except Exception as exc:
-            raw_violations = []
-            constraint_verdicts = constraint_verdicts + (ConstraintVerdict(
-                code="registry-unavailable",
-                severity="blocking",
-                message=f"Constraint registry unavailable (raw-model guard) — fail-closed: {exc}",
-            ),)
-        existing_codes = {v.code for v in constraint_verdicts}
-        for v in raw_violations:
-            if v.severity == "blocking" and v.code not in existing_codes:
-                constraint_verdicts = constraint_verdicts + (ConstraintVerdict(
-                    code=v.code,
-                    severity=v.severity,
-                    message=f"[raw-model guard] {v.message}",
-                    override_applied=v.override_applied,
-                ),)
-                existing_codes.add(v.code)
+    if spec.model and spec.model != effective_model:
+        constraint_verdicts = _raw_model_guard_verdicts(
+            spec, provider_value, sub_provider, via, content_class, constraint_verdicts)
 
     # worker-claude-override verdicts: a gate refusal (reason required) is
     # prepended so it surfaces as THE reject; an applied override is recorded as an
