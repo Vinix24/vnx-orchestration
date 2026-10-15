@@ -608,6 +608,15 @@ class GateRunner:
                 request_payload=request_payload,
                 cwd=worktree_path,
             )
+        except provider_registry.CodexModelResolutionError as exc:
+            # The gate never started: no model to launch it with (OI-2062). Booked
+            # like a missing binary, so the request ends terminal, never `executing`.
+            result = {
+                "status": "failed", "reason": "codex_model_unresolved",
+                "reason_detail": str(exc), "stdout": "", "stderr": str(exc),
+                "duration_seconds": 0.0, "partial_output_lines": 0,
+                "runner_pid": os.getpid(),
+            }
         finally:
             remove_gate_worktree(worktree_path, project_root=self._project_root)
 
@@ -1220,6 +1229,19 @@ class GateRunner:
         stderr = b"".join(stderr_parts).decode("utf-8", errors="replace")
         _base = {"stdout": stdout, "stderr": stderr, "duration_seconds": elapsed,
                  "partial_output_lines": lcount, "runner_pid": proc.pid}
+        return self._classify_finished_run(
+            gate=gate, cmd=cmd, status=status, timeout=timeout,
+            stall_threshold=stall_threshold, base=_base, returncode=proc.returncode,
+        )
+
+    @staticmethod
+    def _classify_finished_run(
+        *, gate: str, cmd: List[str], status: str, timeout: int, stall_threshold: int,
+        base: Dict[str, Any], returncode: int,
+    ) -> Dict[str, Any]:
+        """Turn a finished gate subprocess into its result dict (timeout/stall/refusal/exit)."""
+        _base = base
+        stdout, stderr = base["stdout"], base["stderr"]
         if status == "timeout":
             detail = _build_reason_detail(
                 f"Subprocess exceeded {timeout}s timeout", stdout, stderr,
@@ -1232,17 +1254,17 @@ class GateRunner:
             )
             return {"status": "failed", "reason": "stall",
                     "reason_detail": detail, **_base}
-        refusal = _codex_model_refusal(cmd, stdout, stderr, proc.returncode) if gate == "codex_gate" else None
+        refusal = _codex_model_refusal(cmd, stdout, stderr, returncode) if gate == "codex_gate" else None
         if refusal:
             return {"status": "failed", "reason": "model_not_supported",
                     "reason_detail": refusal, **_base}
-        if proc.returncode != 0:
+        if returncode != 0:
             detail = _build_reason_detail(
-                f"Subprocess exited with code {proc.returncode}", stdout, stderr,
+                f"Subprocess exited with code {returncode}", stdout, stderr,
             )
             return {"status": "failed", "reason": "exit_nonzero",
                     "reason_detail": detail, **_base}
-        return {"status": "completed", **_base, "exit_code": proc.returncode}
+        return {"status": "completed", **_base, "exit_code": returncode}
 
     @staticmethod
     def _kill_process(proc: subprocess.Popen) -> None:

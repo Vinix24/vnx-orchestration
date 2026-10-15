@@ -56,10 +56,31 @@ def default_roster() -> List[Tuple[str, str]]:
     model name written in this module.
     """
     from providers import provider_registry
-    return [
-        (provider, provider_registry.resolve_codex_model() if model == provider_registry.CODEX_REGISTRY_DEFAULT else model)
-        for provider, model in _DEFAULT_ROSTER_ENTRIES
-    ]
+    roster: List[Tuple[str, str]] = []
+    for provider, model in _DEFAULT_ROSTER_ENTRIES:
+        if model == provider_registry.CODEX_REGISTRY_DEFAULT:
+            try:
+                model = provider_registry.resolve_codex_model()
+            except provider_registry.CodexModelResolutionError:
+                # The marker stays in the roster. The seat fails at dispatch time
+                # through ``_seat_model``, so one unresolvable codex seat degrades
+                # the panel by one seat instead of stopping it from being built.
+                pass
+        roster.append((provider, model))
+    return roster
+
+
+def _seat_model(model: str) -> str:
+    """The model a seat is dispatched with: a registry-default marker is resolved now.
+
+    Raises ``CodexModelResolutionError`` (with the registry path and what was
+    missing) when the registry still gives no model; the seat's dispatch ``try``
+    turns that into a failed seat, so the panel carries on without it (OI-2062).
+    """
+    from providers import provider_registry
+    if model == provider_registry.CODEX_REGISTRY_DEFAULT:
+        return provider_registry.resolve_codex_model()
+    return model
 
 
 @dataclass
@@ -474,7 +495,7 @@ def run_deliberation(
         did = f"panel-{mode}-diverge-{idx}-{uuid.uuid4().hex[:6]}"
         raised = False
         try:
-            text = dispatcher(provider, model, prompt, did)
+            text = dispatcher(provider, _seat_model(model), prompt, did)
         except Exception as exc:  # noqa: BLE001 — a dead provider degrades the panel, never kills it
             text = f"[dispatch error: {exc!r}]"
             raised = True
@@ -974,7 +995,7 @@ def _first_ok(
         did = f"{did_prefix}-{provider}-{uuid.uuid4().hex[:6]}"
         raised = False
         try:
-            out = dispatcher(provider, model, prompt, did)
+            out = dispatcher(provider, _seat_model(model), prompt, did)
         except Exception as exc:  # noqa: BLE001
             out = f"[dispatch error {provider}: {exc!r}]"
             raised = True

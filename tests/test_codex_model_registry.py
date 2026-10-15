@@ -408,3 +408,99 @@ def test_build_lane_failure_reason_names_the_refused_model(tmp_registry, sentenc
     assert "requested model: gpt-5.5" in result.error
     assert sentence in classified["failure_reason"]
     assert "base_instructions" not in classified["failure_reason"]
+
+
+# ---------------------------------------------------------------------------
+# Fix round 2 (OI-2062): an unresolvable model ends as a recorded result
+# ---------------------------------------------------------------------------
+
+def _unresolvable_registry(kind: str, tmp_path, monkeypatch) -> Path:
+    if kind == "no_default":
+        path = _write_registry(tmp_path / "registry.yaml", default_model=None)
+    else:
+        path = tmp_path / "registry-dir"
+        path.mkdir()
+    monkeypatch.setattr(provider_registry, "_REGISTRY_PATH", path)
+    for name in ("VNX_CODEX_HEADLESS_MODEL", "VNX_CODEX_MODEL", "VNX_CODEX_DEFAULT_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+    return path
+
+
+def _read_gate_files(runner, sub):
+    return [json.loads(p.read_text(encoding="utf-8"))
+            for p in sorted((runner._state_dir / "review_gates" / sub).glob("*.json"))]
+
+
+def test_codex_model_unresolved_is_an_execution_failure_reason():
+    assert "codex_model_unresolved" in EXECUTION_FAILURE_REASONS
+
+
+@pytest.mark.parametrize("kind", ["no_default", "unreadable"])
+def test_gate_run_records_unresolved_model_and_leaves_no_executing_request(runner, tmp_path, monkeypatch, kind):
+    registry_path = _unresolvable_registry(kind, tmp_path, monkeypatch)
+    worktree = tmp_path / "gate-wt"
+    worktree.mkdir()
+    payload = {"prompt": "review", "branch": "dispatch/x", "pr_number": 7}
+    with patch("gate_runner.shutil.which", return_value="/usr/bin/codex"), \
+         patch("gate_runner.create_gate_worktree", return_value=worktree), \
+         patch("gate_runner.remove_gate_worktree"), \
+         patch("gate_runner.subprocess.Popen") as popen:
+        result = runner.run(gate="codex_gate", request_payload=payload, pr_number=7, pr_id="pr-7")
+    popen.assert_not_called()
+    results = _read_gate_files(runner, "results")
+    assert len(results) == 1
+    assert results[0]["reason"] == "codex_model_unresolved"
+    assert results[0]["status"] == "unavailable"
+    assert str(registry_path) in results[0]["reason_detail"]
+    assert result["reason"] == "codex_model_unresolved"
+    requests = _read_gate_files(runner, "requests")
+    assert requests and all(r["status"] != "executing" for r in requests)
+
+
+def test_codex_spawn_unresolved_model_returns_a_named_failure(tmp_path, monkeypatch):
+    path = _unresolvable_registry("no_default", tmp_path, monkeypatch)
+    with patch("provider_spawns.codex_spawn.subprocess.Popen") as popen:
+        proc, early = codex_spawn._launch_codex_proc("prompt", None, None, None)
+    popen.assert_not_called()
+    assert proc is None
+    assert early.returncode == 1
+    assert early.error.startswith("codex_model_unresolved: ")
+    assert str(path) in early.error
+
+
+def test_plan_gate_seat_abstains_with_a_named_status_when_model_unresolved(tmp_path, monkeypatch):
+    _unresolvable_registry("no_default", tmp_path, monkeypatch)
+    seats = {s["label"]: s for s in pgp.default_panel()}
+    assert seats["opus"]["model_arg"] == "opus"
+    calls = []
+
+    def dispatcher(provider, model, instruction, dispatch_id):
+        calls.append(provider)
+        return "x"
+
+    result = pgp._dispatch_one(dispatcher, seats["codex"], "plan", "seat-codex")
+    assert result.seat_status == pgp.SEAT_MODEL_UNRESOLVED
+    assert pgp.SEAT_MODEL_UNRESOLVED in pgp.SEAT_STATUSES
+    assert pgp.SEAT_MODEL_UNRESOLVED not in pgp.SCORING_SEAT_STATUSES
+    assert result.dispatched is False
+    assert "openai.default_model" in result.error
+    assert calls == []
+
+
+def test_deliberation_codex_seat_fails_alone_when_model_unresolved(tmp_path, monkeypatch):
+    _unresolvable_registry("no_default", tmp_path, monkeypatch)
+    roster = deliberation_panel.default_roster()
+    assert dict(roster)["claude"] == "sonnet"
+    seen = []
+
+    def dispatcher(provider, model, prompt, dispatch_id):
+        seen.append((provider, model))
+        return f"answer from {provider}"
+
+    result = deliberation_panel.run_deliberation(
+        "sweep", "a question", roster=roster, dispatcher=dispatcher,
+        receipts_path=tmp_path / "none.ndjson",
+    )
+    assert "codex" not in [p for p, _ in seen]
+    assert any(p == "claude" for p, _ in seen)
+    assert any(s["provider"] == "codex" for s in result.failed_seats)

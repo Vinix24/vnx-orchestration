@@ -144,14 +144,20 @@ def resolve_codex_seat_models(seats: List[Dict[str, str]]) -> List[Dict[str, str
 
     The codex model is read from ``openai.default_model`` when the panel is built,
     never at import time and never from a name written in this module (OI-2062). A
-    seat that names its own model keeps it.
+    seat that names its own model keeps it. When the registry cannot give a model the
+    seat keeps the marker and carries the resolver's message in ``model_error``:
+    ``_dispatch_one`` then abstains that one seat under ``model_unresolved`` instead
+    of the whole panel failing to build.
     """
     from providers import provider_registry
     resolved: List[Dict[str, str]] = []
     for seat in seats:
         seat = dict(seat)
         if seat["provider"] == "codex" and seat["model_arg"] == provider_registry.CODEX_REGISTRY_DEFAULT:
-            seat["model_arg"] = provider_registry.resolve_codex_model()
+            try:
+                seat["model_arg"] = provider_registry.resolve_codex_model()
+            except provider_registry.CodexModelResolutionError as exc:
+                seat["model_error"] = str(exc)
         resolved.append(seat)
     return resolved
 
@@ -187,6 +193,7 @@ SEAT_PROSE_NO_FENCE = "prose_no_fence"                    # real content, zero v
 SEAT_UNPARSEABLE_FENCE = "unparseable_fence"              # a fence exists, no body parses into a verdict
 SEAT_LANE_NO_ANSWER = "lane_no_answer"                    # governance synthesized the body (timeout/error/no file)
 SEAT_DISPATCH_FAILED = "dispatch_failed"                  # the dispatch call itself raised
+SEAT_MODEL_UNRESOLVED = "model_unresolved"                # codex seat: the registry gave no model, nothing was dispatched (OI-2062)
 
 # The statuses that COUNT toward the panel's quorum and its pass/fail arithmetic.
 # Everything else is non-scoring. Membership is the single source of truth — the
@@ -196,6 +203,7 @@ SCORING_SEAT_STATUSES: frozenset = frozenset({SEAT_SCORED, SEAT_SCORED_VIA_REEXT
 SEAT_STATUSES: frozenset = frozenset({
     SEAT_SCORED, SEAT_SCORED_VIA_REEXTRACTION, SEAT_NO_REPORT, SEAT_PROSE_NO_FENCE,
     SEAT_UNPARSEABLE_FENCE, SEAT_LANE_NO_ANSWER, SEAT_DISPATCH_FAILED,
+    SEAT_MODEL_UNRESOLVED,
 })
 
 # The second-extraction deadline (OI-1434). Deliberately an order of magnitude
@@ -1549,6 +1557,13 @@ def _dispatch_one(
     is left untouched for a real report whose fence would not parse (the 2026-06-24
     fail-safe stays exactly as-is). All three non-scoring flavors are retryable.
     """
+    if member.get("model_error"):
+        return PanelistResult(
+            label=member["label"], provider=member["provider"],
+            model=member.get("model_arg", ""),
+            dispatched=False, error=member["model_error"], report_path=dispatch_id,
+            seat_status=SEAT_MODEL_UNRESOLVED,
+        )
     try:
         report_text = dispatcher(member["provider"], member["model_arg"], instruction, dispatch_id)
     except Exception as exc:  # vnx-silent-except: dispatch/report-read failure -> no verdict, recorded as abstain

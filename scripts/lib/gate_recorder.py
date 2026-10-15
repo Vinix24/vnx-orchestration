@@ -275,6 +275,10 @@ EXECUTION_FAILURE_REASONS: frozenset = frozenset({
     # books `unavailable` like any execution failure, but under its own name so
     # the refused model is visible instead of a bare exit_nonzero.
     "model_not_supported",
+    # The codex model could not be resolved from the registry (unreadable
+    # registry or no openai.default_model; OI-2062). The gate never started,
+    # exactly like `binary_not_found`: it books `unavailable`.
+    "codex_model_unresolved",
     # The gate ran to completion and investigated nothing (OI-1485). Absence
     # of evidence, exactly like a timeout: the PR was never actually reviewed,
     # so this must book `unavailable` and be re-bought, never `failed` (which

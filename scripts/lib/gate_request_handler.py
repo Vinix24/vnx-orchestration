@@ -1545,8 +1545,9 @@ class GateRequestHandlerMixin:
 
         required = mode == "final" or codex_final_gate_required(changed_files)
         available = self._codex_headless_available()
-        # Model from env only; empty string means "use codex config.toml default".
-        # See gate_runner._build_gate_cmd and ~/.codex/config.toml for defaults.
+        # Model from env only; empty string means "use the registry's
+        # openai.default_model", resolved in gate_runner._build_gate_cmd (OI-2062).
+        # ~/.codex/config.toml never decides the gate's model.
         model = os.environ.get("VNX_CODEX_HEADLESS_MODEL") or os.environ.get("VNX_CODEX_MODEL") or ""
         requested_at = _utc_now()
         payload = {

@@ -406,9 +406,18 @@ def _launch_codex_proc(
     """Start codex subprocess and write prompt to stdin.
 
     Returns (proc, None) on success, or (None, error_result) on failure.
-    Returns (None, CodexSpawnResult(returncode=127)) when binary is missing.
+    Returns (None, CodexSpawnResult(returncode=127)) when binary is missing, and
+    (None, CodexSpawnResult(returncode=1, error="codex_model_unresolved: ...")) when the
+    registry gives no model (OI-2062).
     """
-    cmd = _build_cmd(model)
+    try:
+        cmd = _build_cmd(model)
+    except provider_registry.CodexModelResolutionError as exc:
+        return None, CodexSpawnResult(
+            returncode=1, completion_text="", events_written=0,
+            session_id=None, timed_out=False,
+            error=f"codex_model_unresolved: {exc}",
+        )
     # OI-1619: codex is a real worker subprocess (untrusted-model-driven) — the
     # parent env must be scrubbed of secrets before it crosses into it. This lane
     # Popens directly (no SubprocessAdapter to route the scrub through), so the
