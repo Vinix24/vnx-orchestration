@@ -101,8 +101,8 @@ def assistant(model: str, cwd: str = "/tmp/x") -> dict:
     return {"type": "assistant", "cwd": cwd, "message": {"model": model, "content": [{"type": "text", "text": "ok"}]}}
 
 
-def tool_use(path: str) -> dict:
-    return {"type": "assistant", "message": {"model": "x", "content": [
+def tool_use(path: str, model: str = "claude-sonnet-5-5") -> dict:
+    return {"type": "assistant", "message": {"model": model, "content": [
         {"type": "tool_use", "name": "Read", "input": {"file_path": path}}]}}
 
 
@@ -121,14 +121,17 @@ def instructions(path: str, kind: str = "User") -> dict:
 
 
 @pytest.fixture
-def world(tmp_path):
+def world(tmp_path, monkeypatch):
+    # Path.home() is the tmp home too: content_class reads ~/.vnx/projects.json when it
+    # classifies a cwd outside the roots, and that must not be the operator's registry.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     return World(tmp_path)
 
 
 def _leaky_world(w: World) -> content_class.Boundary:
     boundary = w.write_boundary()
     w.claude("ds-config", [assistant("deepseek-v4-pro"), instructions(str(w.home / ".claude" / "CLAUDE.md"))])
-    w.claude("glm-access", [assistant("z-ai/glm-5.2"), tool_use(w.client_file)])
+    w.claude("glm-access", [assistant("z-ai/glm-5.2"), tool_use(w.client_file, "z-ai/glm-5.2")])
     w.claude("claude-model", [assistant("claude-sonnet-5-5"), tool_use(w.client_file)])
     w.claude("glm-result-only", [assistant("z-ai/glm-5.2"), tool_result(f"see {w.client_file}")])
     w.lane("glm-harness", "lane-canary", [assistant("z-ai/glm-5.2"), user_text(f"leak {TOKEN}")])
@@ -495,3 +498,366 @@ def test_failed_ledger_append_does_not_advance_the_beacon(world, monkeypatch):
     retry = world.run(boundary)
     assert retry["details"]["gating_total"] == 1
     assert len(world.ledger_path().read_text().splitlines()) == 1
+
+
+# ---------------------------------------------------------------------------
+# Fix round 3 (PR #2061): the checkpoint moves only after a complete, configured scan
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def not_root():
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root lists a chmod 000 directory, so nothing is unreadable")
+
+
+def _write_raw(path: Path, lines: list, mtime: float = NOW - 60) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
+    os.utime(path, (mtime, mtime))
+    return path
+
+
+def _cut_after(record: dict, needle: str) -> str:
+    """The JSON line of ``record`` cut off right after ``needle``: a truncated record."""
+    line = json.dumps(record)
+    return line[:line.index(needle) + len(needle)]
+
+
+def _claude_path(world: World, name: str) -> Path:
+    return world.home / ".claude" / "projects" / "proj" / f"{name}.jsonl"
+
+
+def _lane_path(world: World, lane: str, name: str) -> Path:
+    return world.stores / "store1" / "harness-config" / lane / "projects" / "proj" / f"{name}.jsonl"
+
+
+def _kimi_path(world: World, session: str, name: str = "context.jsonl") -> Path:
+    return world.home / ".kimi" / "sessions" / "hash" / session / name
+
+
+def _leak(token_text: str = "") -> list:
+    return [assistant("z-ai/glm-5.2"), user_text(token_text or f"leak {TOKEN}")]
+
+
+# Case 1: an unreadable harness project directory
+def test_unreadable_harness_project_dir_keeps_the_checkpoint_and_the_leak_counts_after_repair(world, not_root):
+    boundary = world.write_boundary()
+    first = _run_at(world, boundary, NOW - 86400, since=SINCE - 86400)
+    assert first["status"] == "ok"
+    kept = cbc.read_previous_scanned_through(world.data)
+    assert kept == int(NOW - 86400)
+
+    leak = world.lane("glm-harness", "hidden-leak", _leak(), mtime=NOW - 600)
+    os.chmod(leak.parent, 0o000)
+    try:
+        second = _run_at(world, boundary, NOW)
+    finally:
+        os.chmod(leak.parent, 0o755)
+    d = second["details"]
+    assert second["status"] != "ok"
+    assert d["traversal_errors"] == 1
+    assert d["incomplete_reasons"] == ["traversal_errors"]
+    assert d["incomplete_where"] == [{"condition": "traversal_error", "root": "harness_config",
+                                      "lane": "glm-harness", "error": "PermissionError"}]
+    assert d["scanned_through"] == kept
+    assert cbc.read_previous_scanned_through(world.data) == kept
+    (check,) = vnx_doctor.check_content_boundary_beacon(_doctor_paths(world))
+    assert check.status == vnx_doctor.FAIL and "traversal_errors" in check.message
+    beacon = world.beacon_path().read_text(encoding="utf-8")
+    assert str(world.stores) not in beacon and str(world.home) not in beacon
+
+    third = _run_at(world, boundary, NOW + 3600)
+    assert third["details"]["since"] == kept
+    assert third["details"]["counts"]["canary"] == {"glm-harness": 1}
+    assert third["details"]["historic_total"] == 0
+    assert third["status"] == "fail"
+
+
+# Case 2: truncated harness records
+def test_truncated_harness_records_naming_a_restricted_path_or_carrying_the_canary_gate(world):
+    boundary = world.write_boundary()
+    _write_raw(_lane_path(world, "glm-harness", "cut-path"), [
+        json.dumps(assistant("z-ai/glm-5.2")),
+        _cut_after(tool_use(world.client_file, "z-ai/glm-5.2"), world.client_file),
+    ])
+    _write_raw(_lane_path(world, "deepseek-harness", "cut-canary"), [
+        json.dumps(assistant("deepseek-flash")),
+        _cut_after(user_text(f"leak {TOKEN} and more"), TOKEN),
+    ])
+    result = world.run(boundary)
+    d = result["details"]
+    assert result["status"] == "fail"
+    assert d["counts"]["restricted_access"] == {"glm-harness": 1}
+    assert d["counts"]["canary"] == {"deepseek-harness": 1}
+    assert d["malformed_records"] == 2
+    assert sorted(d["malformed_sessions"]) == ["cut-canary", "cut-path"]
+    assert d["incomplete_reasons"] == []
+
+
+# Case 3: the same for a Kimi transcript
+def test_truncated_kimi_records_gate_and_a_truncated_system_prompt_is_only_reported(world):
+    boundary = world.write_boundary()
+    _write_raw(_kimi_path(world, "cut-path"), [
+        json.dumps({"role": "_system_prompt", "content": "skills"}),
+        _cut_after({"role": "user", "content": f"read {world.client_file} now"}, world.client_file),
+    ])
+    _write_raw(_kimi_path(world, "cut-canary"), [
+        _cut_after({"role": "assistant", "content": f"x {TOKEN} y"}, TOKEN),
+    ])
+    _write_raw(_kimi_path(world, "cut-system"), [
+        _cut_after({"role": "_system_prompt", "content": f"skills in {world.personal_root}/Lifestyle/x and more"},
+                   "Lifestyle/x"),
+    ])
+    result = world.run(boundary)
+    d = result["details"]
+    assert result["status"] == "fail"
+    assert d["counts"]["restricted_access"] == {"kimi": 1}
+    assert d["sessions"]["restricted_access"] == ["cut-path"]
+    assert d["counts"]["canary"] == {"kimi": 1}
+    assert d["kimi_system_prompt_reported"] == 1
+    assert d["malformed_records"] == 3
+    assert d["incomplete_reasons"] == []
+
+
+@pytest.mark.parametrize("root", ["claude", "harness", "kimi"])
+def test_a_clean_malformed_line_alone_does_not_keep_the_checkpoint(world, root):
+    boundary = world.write_boundary()
+    if root == "claude":
+        _write_raw(_claude_path(world, "torn"), [json.dumps(assistant("deepseek-v4-pro")),
+                                                 '{"type": "user", "message": {"content": "hel'])
+    elif root == "harness":
+        _write_raw(_lane_path(world, "glm-harness", "torn"), [json.dumps(assistant("z-ai/glm-5.2")), "{not json"])
+    else:
+        _write_raw(_kimi_path(world, "torn"), ['{"role": "user", "content": "hel'])
+    result = world.run(boundary)
+    d = result["details"]
+    assert result["status"] == "ok"
+    assert d["malformed_records"] == 1
+    assert d["malformed_sessions"] == ["torn"]
+    assert d["scanned_through"] == int(NOW)
+    assert cbc.read_previous_scanned_through(world.data) == int(NOW)
+    (check,) = vnx_doctor.check_content_boundary_beacon(_doctor_paths(world))
+    assert check.status == vnx_doctor.PASS
+
+
+# Case 4: an unconfigured run, then a configured run
+def test_unconfigured_run_keeps_the_checkpoint_and_the_configured_run_scans_its_window(world):
+    unconfigured = content_class.load_boundary(world.boundary_file)
+    assert not unconfigured.configured
+    first_since = NOW - 7200
+    world.lane("glm-harness", "during-unconfigured", _leak(), mtime=NOW - 5400)
+    first = _run_at(world, unconfigured, NOW - 3600, since=first_since)
+    assert first["status"] == "fail"
+    assert first["details"]["scanned_through"] == int(first_since)
+    assert cbc.read_previous_scanned_through(world.data) == int(first_since)
+    assert first["details"]["incomplete_reasons"] == ["boundary_unconfigured"]
+    (check,) = vnx_doctor.check_content_boundary_beacon(_doctor_paths(world))
+    assert check.status == vnx_doctor.FAIL and "unconfigured" in check.message
+
+    world.lane("deepseek-harness", "between-runs",
+               [assistant("deepseek-flash"), tool_use(world.client_file, "deepseek-flash")], mtime=NOW - 1800)
+    configured = world.write_boundary()
+    second = _run_at(world, configured, NOW)
+    d = second["details"]
+    assert d["since"] == int(first_since)
+    assert d["since_source"] == "beacon"
+    assert d["counts"]["canary"] == {"glm-harness": 1}
+    assert d["counts"]["restricted_access"] == {"deepseek-harness": 1}
+    assert d["historic_total"] == 0
+    assert second["status"] == "fail"
+    assert d["scanned_through"] == int(NOW)
+
+
+# Audit sites (case 5)
+def test_subagent_transcripts_and_rotated_kimi_contexts_are_reached(world):
+    boundary = world.write_boundary()
+    _write(world.home / ".claude" / "projects" / "proj" / "sess" / "subagents" / "agent-a1.jsonl",
+           [assistant("deepseek-v4-pro"), user_text(f"leak {TOKEN}")], NOW - 60)
+    _write(_lane_path(world, "glm-harness", "x").parent / "sess" / "subagents" / "agent-b2.jsonl",
+           [assistant("z-ai/glm-5.2"), tool_use(world.client_file, "z-ai/glm-5.2")], NOW - 60)
+    _write(_kimi_path(world, "ksess", "context_1.jsonl"), [{"role": "user", "content": f"leak {TOKEN}"}], NOW - 60)
+    _write(_kimi_path(world, "ksess", "subagents") / "sub1" / "context.jsonl",
+           [{"role": "user", "content": f"read {world.client_file}"}], NOW - 60)
+    result = world.run(boundary)
+    d = result["details"]
+    assert d["counts"]["canary"] == {"deepseek": 1, "kimi": 1}
+    assert d["counts"]["restricted_access"] == {"glm-harness": 1, "kimi": 1}
+    assert d["scanned"] == {"claude_projects": 1, "harness_config": 1, "kimi": 2}
+
+
+def test_an_unrecognized_model_counts_as_an_external_lane(world):
+    boundary = world.write_boundary()
+    world.claude("new-lane", [assistant("moonshot-k3"), user_text(f"leak {TOKEN}")])
+    world.claude("synthetic", [assistant("<synthetic>"), assistant("claude-opus-5-5"), user_text(f"leak {TOKEN}")])
+    result = world.run(boundary)
+    assert result["details"]["counts"]["canary"] == {"unrecognized_model": 1}
+    assert result["details"]["scanned"]["claude_projects"] == 1
+
+
+def test_a_kimi_record_with_an_unknown_role_is_inspected(world):
+    boundary = world.write_boundary()
+    world.kimi("new-role", [{"role": "system", "content": f"read {world.client_file}"}])
+    world.kimi("tool-only", [{"role": "tool", "tool_call_id": "c1", "content": f"see {world.client_file}"}])
+    result = world.run(boundary)
+    assert result["details"]["counts"]["restricted_access"] == {"kimi": 1}
+    assert result["details"]["sessions"]["restricted_access"] == ["new-role"]
+
+
+def test_a_json_line_that_is_no_object_is_inspected_as_raw_text(world):
+    boundary = world.write_boundary()
+    _write_raw(_lane_path(world, "glm-harness", "list-line"), [json.dumps(assistant("z-ai/glm-5.2")),
+                                                               json.dumps(["note", world.client_file])])
+    result = world.run(boundary)
+    assert result["details"]["counts"]["restricted_access"] == {"glm-harness": 1}
+    assert result["details"]["malformed_records"] == 1
+
+
+def test_prompt_text_outside_typed_blocks_and_paths_as_keys_count(world):
+    boundary = world.write_boundary()
+    world.claude("bare-block", [assistant("deepseek-v4-pro"),
+                                {"type": "user", "message": {"role": "user", "content": [f"read {world.client_file}"]}}])
+    world.claude("key-path", [assistant("z-ai/glm-5.2"), {"type": "assistant", "message": {
+        "model": "z-ai/glm-5.2", "content": [{"type": "tool_use", "name": "Edit",
+                                              "input": {"edits": {world.client_file: "new text"}}}]}}])
+    result = world.run(boundary)
+    assert result["details"]["counts"]["restricted_access"] == {"deepseek": 1, "glm": 1}
+    assert result["details"]["malformed_records"] == 0
+
+
+def test_a_record_that_breaks_the_inspection_is_inspected_as_raw_text(world):
+    boundary = world.write_boundary()
+    record = {"type": "assistant", "cwd": "/tmp/x\u0000y", "message": {"model": "deepseek-v4-pro", "content": [
+        {"type": "tool_use", "name": "Read", "input": {"file_path": world.client_file}}]}}
+    world.claude("nul-cwd", [record])
+    world.claude("nul-config", [assistant("z-ai/glm-5.2"), instructions(str(world.home / ".claude" / "x\u0000.md"))])
+    result = world.run(boundary)
+    d = result["details"]
+    assert d["counts"]["restricted_access"] == {"deepseek": 1}
+    assert d["malformed_records"] == 2
+    assert d["incomplete_reasons"] == []
+
+
+def test_a_cut_off_claude_record_still_sets_its_lane_cwd_and_config_leak(world):
+    boundary = world.write_boundary()
+    _write_raw(_claude_path(world, "cut-lane"),
+               [_cut_after(tool_use(world.client_file, "deepseek-v4-pro"), world.client_file)])
+    _write_raw(_claude_path(world, "cut-cwd"), [
+        json.dumps(assistant("z-ai/glm-5.2")),
+        _cut_after({"type": "user", "cwd": str(world.client_root), "message": {"role": "user", "content": "hello"}},
+                   "hel"),
+    ])
+    _write_raw(_claude_path(world, "cut-config"), [
+        json.dumps(assistant("z-ai/glm-5.2")),
+        _cut_after(instructions(str(world.home / ".claude" / "CLAUDE.md")), "CLAUDE.md"),
+    ])
+    result = world.run(boundary)
+    d = result["details"]
+    assert d["counts"]["restricted_access"] == {"deepseek": 1}
+    assert d["counts"]["restricted_cwd"] == {"glm": 1}
+    assert d["counts"]["config_leak"] == {"glm": 1}
+    assert d["malformed_records"] == 3
+
+
+def test_an_unlistable_home_is_a_traversal_error(world, not_root):
+    boundary = world.write_boundary()
+    world.claude("ds", [assistant("deepseek-v4-pro"), user_text(f"leak {TOKEN}")])
+    os.chmod(world.home, 0o000)
+    try:
+        result = world.run(boundary)
+    finally:
+        os.chmod(world.home, 0o755)
+    d = result["details"]
+    assert result["status"] == "fail"
+    assert d["incomplete_reasons"] == ["traversal_errors"]
+    assert {w["root"] for w in d["incomplete_where"]} == {"config_dirs", "claude_projects", "kimi"}
+    assert d["scanned_through"] == int(SINCE)
+
+
+def test_an_unreadable_transcript_file_is_named_by_root_and_session(world, not_root):
+    boundary = world.write_boundary()
+    path = world.claude("locked", [assistant("deepseek-v4-pro")])
+    os.chmod(path, 0o000)
+    try:
+        result = world.run(boundary)
+    finally:
+        os.chmod(path, 0o644)
+    d = result["details"]
+    assert result["status"] == "fail"
+    assert d["incomplete_reasons"] == ["unreadable_files"]
+    assert d["incomplete_where"] == [{"condition": "unreadable_file", "root": "claude_projects",
+                                      "session": "locked", "error": "PermissionError"}]
+
+
+def test_a_dangling_transcript_link_is_counted_and_does_not_keep_the_checkpoint(world):
+    boundary = world.write_boundary()
+    world.claude("ds", [assistant("deepseek-v4-pro")])
+    os.symlink(world.home / "nowhere.jsonl", _claude_path(world, "dangling"))
+    result = world.run(boundary)
+    d = result["details"]
+    assert result["status"] == "ok"
+    assert d["non_regular_files"] == 1
+    assert d["scanned_through"] == int(NOW)
+
+
+def test_linked_directories_are_followed_once(world):
+    boundary = world.write_boundary()
+    projects = world.home / ".claude" / "projects"
+    _write(projects / "real-proj" / "linked.jsonl", [assistant("deepseek-v4-pro"), user_text(f"leak {TOKEN}")], NOW - 60)
+    os.symlink(projects / "real-proj", projects / "alias-proj")
+    os.symlink(projects, projects / "real-proj" / "loop")
+    result = world.run(boundary)
+    d = result["details"]
+    assert d["counts"]["canary"] == {"deepseek": 1}
+    assert d["scanned"]["claude_projects"] == 1
+    assert d["traversal_errors"] == 0
+
+
+@pytest.mark.parametrize("corruption", ["not_json", "no_checkpoint"])
+def test_a_lost_beacon_checkpoint_falls_back_to_the_ledger(world, corruption):
+    boundary = world.write_boundary()
+    first = _run_at(world, boundary, NOW - 86400, since=SINCE - 86400)
+    assert first["status"] == "ok"
+    world.lane("glm-harness", "after-first", _leak(), mtime=NOW - 86400 + 600)
+    world.beacon_path().write_text("{" if corruption == "not_json" else json.dumps({"details": {}}), encoding="utf-8")
+    second = _run_at(world, boundary, NOW)
+    d = second["details"]
+    assert d["counts"]["canary"] == {"glm-harness": 1}
+    assert d["historic_total"] == 0
+    assert d["since"] == int(SINCE - 86400)
+    assert d["since_source"] == "ledger"
+
+
+def test_a_lost_checkpoint_without_a_ledger_scans_everything(world):
+    boundary = world.write_boundary()
+    world.lane("glm-harness", "old", _leak(), mtime=NOW - 30 * 86400)
+    world.beacon_path().parent.mkdir(parents=True, exist_ok=True)
+    world.beacon_path().write_text("{", encoding="utf-8")
+    d = _run_at(world, boundary, NOW)["details"]
+    assert d["counts"]["canary"] == {"glm-harness": 1}
+    assert d["since"] == 0
+    assert d["since_source"] == "full"
+
+
+def test_no_beacon_and_no_ledger_is_a_first_run(world):
+    boundary = world.write_boundary()
+    d = _run_at(world, boundary, NOW)["details"]
+    assert d["since"] == int(cbc._first_run_since(NOW))
+    assert d["since_source"] == "first_run"
+
+
+def test_a_checkpoint_after_now_is_not_trusted(world):
+    boundary = world.write_boundary()
+    _run_at(world, boundary, NOW + 86400, since=SINCE)
+    assert cbc.read_previous_scanned_through(world.data) == int(NOW + 86400)
+    world.lane("glm-harness", "clock-skew", _leak(), mtime=NOW - 600)
+    d = _run_at(world, boundary, NOW)["details"]
+    assert d["counts"]["canary"] == {"glm-harness": 1}
+    assert d["since"] == int(SINCE)
+    assert d["since_source"] == "ledger"
+
+
+def test_doctor_fails_on_an_ok_beacon_that_reports_traversal_errors(world):
+    _write_beacon(world, "ok", gating_total=0, canary_armed=True, traversal_errors=1)
+    (check,) = vnx_doctor.check_content_boundary_beacon(_doctor_paths(world))
+    assert check.status == vnx_doctor.FAIL
+    assert "traversal_errors" in check.message

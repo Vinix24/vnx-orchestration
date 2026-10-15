@@ -25,7 +25,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
@@ -1019,12 +1019,50 @@ def check_learning_loop_beacon(paths: Dict[str, str]) -> List[CheckResult]:
 CONTENT_BOUNDARY_MAX_AGE_HOURS = 36
 
 
-def check_content_boundary_beacon(paths: Dict[str, str]) -> List[CheckResult]:
-    """The nightly content-boundary measurement must be fresh and must have found nothing.
+def _content_boundary_incomplete_reasons(details: Dict[str, Any]) -> List[str]:
+    """Why the scan behind a content-boundary beacon was incomplete; empty when it was complete.
 
-    FAIL on status ``fail`` (restricted content in an external-lane transcript, or an
-    unconfigured boundary). FAIL when the beacon is missing or older than 36 hours while
-    the nightly job runs in this project. WARN when the canary is not armed.
+    Reads the reasons the scanner names, and also the raw counters, so a beacon that says
+    ``ok`` next to an unreadable transcript or an unlistable directory is still incomplete.
+    """
+    named = details.get("incomplete_reasons")
+    reasons = [str(r) for r in named] if isinstance(named, list) else []
+    for counter in ("unreadable_files", "traversal_errors"):
+        value = details.get(counter)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0 and counter not in reasons:
+            reasons.append(counter)
+    if details.get("scan_incomplete") and not reasons:
+        reasons.append("scan_incomplete")
+    return reasons
+
+
+def _content_boundary_failure(details: Dict[str, Any], status: Any, reasons: List[str]) -> Tuple[str, str]:
+    kept = "the checkpoint was kept, so the next run scans the same window again"
+    if details.get("unconfigured"):
+        return ("Content boundary is unconfigured: no restricted roots known, nothing can be measured; "
+                f"{kept}",
+                "Write the operator boundary file (see scripts/lib/content_class.py) and rerun the nightly job.")
+    if reasons and not details.get("gating_total"):
+        return (f"Content boundary scan is incomplete ({', '.join(reasons)}), so the window is not "
+                f"proven clean (status={status!r}); {kept}",
+                "Read incomplete_where in health/content_boundary.json (root, lane, session, error type), "
+                "fix the permissions there and rerun the nightly job.")
+    message = (f"Content boundary breached: restricted content found in external-lane transcripts "
+               f"({details.get('gating_total', 'unknown')} in the window, status={status!r})")
+    if reasons:
+        message += f"; the scan was also incomplete ({', '.join(reasons)})"
+    return (message,
+            "Read health/content_boundary.json (counts per signal and lane, session ids) "
+            "and content_boundary_findings.ndjson in the state dir.")
+
+
+def check_content_boundary_beacon(paths: Dict[str, str]) -> List[CheckResult]:
+    """The nightly content-boundary measurement must be fresh, complete and must have found nothing.
+
+    FAIL on status ``fail`` (restricted content in an external-lane transcript, an
+    unconfigured boundary, or an incomplete scan) and on an ``ok`` beacon that reports an
+    incomplete scan. FAIL when the beacon is missing or older than 36 hours while the
+    nightly job runs in this project. WARN when the canary is not armed.
     """
     data_dir = Path(paths["VNX_DATA_DIR"])
     state_dir = Path(paths["VNX_STATE_DIR"])
@@ -1066,25 +1104,11 @@ def check_content_boundary_beacon(paths: Dict[str, str]) -> List[CheckResult]:
 
     details = beacon.get("details") if isinstance(beacon.get("details"), dict) else {}
     status = beacon.get("status")
-    unreadable = details.get("unreadable_files")
-    incomplete = bool(details.get("scan_incomplete")) or (
-        isinstance(unreadable, int) and not isinstance(unreadable, bool) and unreadable > 0)
-    if status == "ok" and incomplete:
+    reasons = _content_boundary_incomplete_reasons(details)
+    if status == "ok" and reasons:
         status = "ok-but-incomplete"
     if status != "ok":
-        if incomplete and not details.get("gating_total"):
-            message = (f"Content boundary scan is incomplete: {unreadable if unreadable is not None else 'some'} "
-                       f"transcript(s) could not be read, so the window is not proven clean (status={status!r})")
-            fix = ("Fix the permissions of the unreadable transcript and rerun the nightly job; "
-                   "the checkpoint was kept, so the next run scans the same window again.")
-        elif details.get("unconfigured"):
-            message = "Content boundary is unconfigured: no restricted roots known, nothing can be measured"
-            fix = "Write the operator boundary file (see scripts/lib/content_class.py) and rerun the nightly job."
-        else:
-            message = (f"Content boundary breached: restricted content found in external-lane transcripts "
-                       f"({details.get('gating_total', 'unknown')} in the window, status={status!r})")
-            fix = ("Read health/content_boundary.json (counts per signal and lane, session ids) "
-                   "and content_boundary_findings.ndjson in the state dir.")
+        message, fix = _content_boundary_failure(details, status, reasons)
         return [CheckResult("content_boundary", FAIL, message, fix)]
 
     if not details.get("canary_armed"):
