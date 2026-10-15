@@ -367,6 +367,79 @@ class TestRepeatedGateFailureCause:
         result = check_repeated_gate_failure_cause(results_dir, n=3)
         assert result.status == CheckStatus.TRIGGERED
 
+    @staticmethod
+    def _write_blocked(results_dir, pr, gate, findings, day):
+        d = _gate_result(
+            pr, gate, status="completed",
+            blocking_findings=findings,
+            recorded_at=f"2026-10-{day:02d}T00:00:00Z",
+        )
+        (results_dir / f"pr-{pr}-{gate}.json").write_text(json.dumps(d))
+
+    def test_three_prs_blocked_in_three_different_files_do_not_trigger(self, tmp_path):
+        # OI-2074: #2061/#2062/#2063 each carried a different defect in a
+        # different file; that is three findings, not one recurring cause.
+        results_dir = tmp_path / "results"
+        results_dir.mkdir()
+        files = ["scripts/content_boundary_check.py", "scripts/cleanup_reviewed_worktrees.py", "scripts/lib/content_class.py"]
+        for i, (pr, path) in enumerate(zip([2061, 2062, 2063], files)):
+            self._write_blocked(results_dir, pr, "codex_gate", [{"severity": "error", "message": f"defect {i}", "file_path": path}], i + 1)
+        result = check_repeated_gate_failure_cause(results_dir, n=3)
+        assert result.status == CheckStatus.CLEAR
+
+    def test_three_prs_blocked_in_the_same_file_trigger_despite_different_wording(self, tmp_path):
+        results_dir = tmp_path / "results"
+        results_dir.mkdir()
+        for i, pr in enumerate([2101, 2102, 2103]):
+            self._write_blocked(results_dir, pr, "codex_gate", [{"severity": "error", "message": f"worded differently {i}", "file_path": "scripts/lib/x.py", "line": 10 + i}], i + 1)
+        result = check_repeated_gate_failure_cause(results_dir, n=3)
+        assert result.status == CheckStatus.TRIGGERED
+        assert "file:scripts/lib/x.py" in result.message
+
+    def test_same_file_trips_also_with_different_extra_findings(self, tmp_path):
+        # Risk R-h: a shared file still trips E6 when each PR carries other
+        # blocking findings in other files besides.
+        results_dir = tmp_path / "results"
+        results_dir.mkdir()
+        extras = ["scripts/a.py", "scripts/b.py", "scripts/c.py"]
+        for i, (pr, extra) in enumerate(zip([2201, 2202, 2203], extras)):
+            self._write_blocked(
+                results_dir, pr, "codex_gate",
+                [
+                    {"severity": "error", "message": "m", "file_path": extra},
+                    {"severity": "error", "message": "n", "file_path": "scripts/shared.py"},
+                ],
+                i + 1,
+            )
+        result = check_repeated_gate_failure_cause(results_dir, n=3)
+        assert result.status == CheckStatus.TRIGGERED
+
+    def test_shared_file_must_be_in_every_pr_of_the_window(self, tmp_path):
+        results_dir = tmp_path / "results"
+        results_dir.mkdir()
+        files = ["scripts/shared.py", "scripts/other.py", "scripts/shared.py"]
+        for i, (pr, path) in enumerate(zip([2301, 2302, 2303], files)):
+            self._write_blocked(results_dir, pr, "codex_gate", [{"severity": "error", "message": "m", "file_path": path}], i + 1)
+        result = check_repeated_gate_failure_cause(results_dir, n=3)
+        assert result.status == CheckStatus.CLEAR
+
+    def test_blocking_finding_without_file_path_keeps_legacy_cause(self, tmp_path):
+        results_dir = tmp_path / "results"
+        results_dir.mkdir()
+        findings = [[{"severity": "error", "message": "a"}], [{"severity": "error", "message": "b", "file_path": ""}], [{"severity": "error", "message": "c", "file_path": None}]]
+        for i, (pr, f) in enumerate(zip([2401, 2402, 2403], findings)):
+            self._write_blocked(results_dir, pr, "codex_gate", f, i + 1)
+        result = check_repeated_gate_failure_cause(results_dir, n=3)
+        assert result.status == CheckStatus.TRIGGERED
+
+    def test_gate_result_cause_shapes(self):
+        from stop_conditions import _gate_result_cause
+        assert _gate_result_cause({"status": "completed", "blocking_findings": [{"file_path": "a.py"}, {"file_path": "b.py"}, {"message": "x"}]}) == frozenset({"file:a.py", "file:b.py", "blocking_findings"})
+        assert _gate_result_cause({"status": "completed", "blocking_findings": []}) is None
+        assert _gate_result_cause({"status": "completed", "blocking_findings": ["junk"]}) == frozenset({"blocking_findings"})
+        assert _gate_result_cause({"status": "failed", "reason": "exit_nonzero"}) == frozenset({"reason:exit_nonzero"})
+        assert _gate_result_cause({"status": "pass"}) is None
+
     def test_insufficient_dated_records_is_unmeasurable(self, tmp_path):
         results_dir = tmp_path / "results"
         results_dir.mkdir()
