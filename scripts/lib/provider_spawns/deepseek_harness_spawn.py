@@ -152,6 +152,28 @@ def build_harness_cli_args(cwd: Optional[Any] = None) -> List[str]:
     return [*bare_harness_cli_args(cwd), "--mcp-config", MCP_OFF_CONFIG, "--strict-mcp-config"]
 
 
+def build_harness_argv(
+    claude_bin: str,
+    model: str,
+    *,
+    output_format: str,
+    print_flags: Optional[List[str]] = None,
+    cwd: Optional[Any] = None,
+) -> List[str]:
+    """Complete ``claude -p`` argv for a direct call against the DeepSeek endpoint.
+
+    The single place where a caller that runs ``subprocess.run`` itself (the analyzer)
+    gets the same model flag and the same ``--bare`` / MCP-off tail as
+    ``spawn_deepseek_harness``, so the two launches cannot drift apart.
+    """
+    return [
+        claude_bin, "-p", "--output-format", output_format,
+        *(print_flags or []),
+        "--model", model,
+        *build_harness_cli_args(cwd),
+    ]
+
+
 @dataclass
 class DeepSeekHarnessSpawnResult:
     """Spawn outcome for the DeepSeek-harness lane.
