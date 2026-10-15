@@ -68,7 +68,7 @@ def no_markers(monkeypatch):
 @pytest.fixture
 def live(home, no_markers, monkeypatch):
     """The live write path: the pending tuples emptied in this test process only."""
-    for name in ("PENDING_B", "PENDING_C", "PENDING_E"):
+    for name in ("PENDING_B", "PENDING_C"):
         monkeypatch.setattr(ps, name, ())
     return home
 
@@ -140,7 +140,7 @@ def test_list_json(home, tmp_path):
     assert glm["effective"]["allowed"] is True and glm["effective"]["source"] == "project"
     assert report["enforcement"]["enforced"] is False
     assert {k: len(v) for k, v in report["enforcement"]["pending"].items()} == {
-        "B": len(ps.PENDING_B), "C": 1, "E": 1}
+        "B": len(ps.PENDING_B), "C": 1}
     assert set(report["non_switchable"]) == {"claude", "codex", "tooling", "unresolved"}
     assert report["projects"]["error"] == "no project registry"
     assert report["overrides"] == {"environment": {}, "launchd": {}}
@@ -206,7 +206,7 @@ def test_write_verbs_refuse_while_pending(args, home, tmp_path):
     assert result.returncode == providers_cli.EXIT_WRITE_REFUSED == 5
     assert "write refused" in result.stderr and "not enforced yet" in result.stderr
     assert f"B: {len(ps.PENDING_B)}" in result.stderr
-    for entry in (*ps.PENDING_B, *ps.PENDING_C, *ps.PENDING_E):
+    for entry in (*ps.PENDING_B, *ps.PENDING_C):
         assert f"    {entry}\n" in result.stderr
     assert not switch_path(home).exists() and not ps.audit_log_path(switch_path(home)).exists()
 

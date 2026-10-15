@@ -410,6 +410,8 @@ class ConversationAnalyzer:
         stats.deep_failures = self.deep.deep_failures
         stats.deep_failure_reasons = dict(self.deep.deep_failure_reasons)
         stats.deep_config_skips = self.deep.deep_config_skips
+        stats.deep_disabled_skips = self.deep.deep_disabled_skips
+        stats.deep_open_sessions = self.deep.deep_open_sessions
         stats.deep_restricted_claude = self.deep.deep_restricted_claude
         stats.deep_restricted_deferred = self.deep.deep_restricted_deferred
 
@@ -566,6 +568,8 @@ class ConversationAnalyzer:
         if stats.deep_failures:
             print(f"DEGRADED:          deep analysis failed ({format_failure_reasons(stats.deep_failure_reasons)})")
         print(f"Deep Config Skips: {stats.deep_config_skips}")
+        if stats.deep_disabled_skips:
+            print(f"Deep Switched Off: {stats.deep_disabled_skips} (provider_switched_off)")
         print(f"Deep Restricted:   {stats.deep_restricted_claude} on Claude, "
               f"{stats.deep_restricted_deferred} deferred")
         if stats.sessions_by_origin:

@@ -154,7 +154,7 @@ class Spies:
 
     def __init__(self, claude=None, deepseek=None):
         self.claude = MagicMock(side_effect=claude or (lambda prompt: _ok()))
-        self.deepseek = MagicMock(side_effect=deepseek or (lambda prompt: _ok()))
+        self.deepseek = MagicMock(side_effect=deepseek or (lambda prompt, **_: _ok()))
         self.ollama = MagicMock(return_value=LLMOutcome("config_skip"))
 
     def sessions(self, spy):

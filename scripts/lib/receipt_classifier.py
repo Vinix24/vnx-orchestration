@@ -459,7 +459,23 @@ def _run_classification(
         )
         return {"status": "skipped", "reason": "budget_exhausted"}
 
-    prov = provider or get_provider(get_provider_name())
+    if provider is not None:
+        prov = provider
+    else:
+        import provider_switch
+        name = get_provider_name()
+        project_id = next((str(r["project_id"]) for r in receipts
+                           if isinstance(r, dict) and r.get("project_id")), None)
+        try:
+            prov = get_provider(name, project_id=project_id) if project_id else get_provider(name)
+        except provider_switch.ProviderDisabledError as exc:
+            logger.warning("receipt_classifier skipped: provider switched off: %s", exc.decision.detail())
+            return {
+                "status": "skipped",
+                "reason": provider_switch.REASON_SWITCHED_OFF,
+                "provider": name,
+                "detail": exc.decision.detail(),
+            }
     prompt = _build_prompt(receipts)
 
     result: ClassifierResult = prov.classify(prompt)

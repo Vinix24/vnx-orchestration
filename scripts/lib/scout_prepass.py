@@ -283,6 +283,9 @@ _SKIP_LANES = frozenset({"claude_headless"})
 # constraint "never a claude/subscription lane for the scout".
 _ALLOWED_SCOUT_PROVIDERS = frozenset({"deepseek", "ollama", "gemini", "codex"})
 
+# Scout model calls skipped because the operator switched the provider family off, per process.
+SCOUT_SWITCH_SKIPS: Dict[str, int] = {"count": 0}
+
 
 def scout_prepass_enabled() -> bool:
     """Opt-in flag for the scout producer (default OFF). Resolved through config_runtime so an
@@ -421,21 +424,41 @@ def _build_scout_prompt(instruction_text: str, candidate_refs: List[str]) -> str
     )
 
 
+def _project_of_state_dir(state_dir: "Path | str | None") -> Optional[str]:
+    """The project the scouted dispatch belongs to, from its state dir; None when not derivable."""
+    if not state_dir:
+        return None
+    try:
+        from vnx_paths import project_id_from_state_dir
+        return project_id_from_state_dir(Path(state_dir)) or None
+    except Exception as exc:
+        logger.debug("scout: project of %s not derivable (%s)", state_dir, exc)
+        return None
+
+
 def _invoke_scout_model(
-    prompt: str, provider_name: str
+    prompt: str, provider_name: str, project_id: Optional[str] = None
 ) -> "tuple[Optional[Dict[str, Any]], str, float, int]":
     """Call the cheap key-auth classifier.
 
     Returns (parsed JSON | None, model, cost_usd, latency_ms) — the cost/latency feed
     the scout receipt so the model call is cost-tracked in the governed audit trail.
+
+    A provider family the operator switched off (``vnx providers``) makes no call: the result is
+    the empty verdict, with one WARNING and the skip counted in ``SCOUT_SWITCH_SKIPS``.
     """
     try:
         from classifier_providers import get_provider
         from classifier_providers.base import describe_unavailable
+        import provider_switch
     except ImportError:
         return None, "", 0.0, 0
     try:
-        provider = get_provider(provider_name)
+        provider = get_provider(provider_name, project_id=project_id) if project_id else get_provider(provider_name)
+    except provider_switch.ProviderDisabledError as exc:
+        SCOUT_SWITCH_SKIPS["count"] += 1
+        logger.warning("scout: skipped, provider switched off: %s", exc)
+        return None, "", 0.0, 0
     except ValueError:
         logger.debug("scout: unknown provider %r", provider_name)
         return None, "", 0.0, 0
@@ -628,7 +651,8 @@ def maybe_run_scout(
             return None
         provider_name = _scout_provider_name()
         prompt = _build_scout_prompt(instruction_text, candidate_refs)
-        parsed, model, cost_usd, latency_ms = _invoke_scout_model(prompt, provider_name)
+        parsed, model, cost_usd, latency_ms = _invoke_scout_model(
+            prompt, provider_name, _project_of_state_dir(state_dir))
         if not parsed:
             return None
         sidecar = _assemble_sidecar(dispatch_id, parsed, candidate_refs, provider_name, model, sha)
@@ -672,6 +696,15 @@ def scout_pending_sweep(
     pending = Path(data_dir) / "dispatches" / "pending"
     if not pending.is_dir():
         return summary
+    skips_before = SCOUT_SWITCH_SKIPS["count"]
+    try:
+        return _sweep_bundles(pending, state_dir, limit, summary)
+    finally:
+        summary["provider_switched_off"] = SCOUT_SWITCH_SKIPS["count"] - skips_before
+
+
+def _sweep_bundles(pending: Path, state_dir: "Path | str", limit: "int | None",
+                   summary: Dict[str, Any]) -> Dict[str, Any]:
     for bundle in sorted(p for p in pending.iterdir() if p.is_dir()):
         if limit is not None and summary["produced"] >= limit:
             break
