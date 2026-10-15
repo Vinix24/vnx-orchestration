@@ -39,6 +39,7 @@ from coordination_db import (  # noqa: F401
     project_id_stamp,
     project_terminal_state,
     stamp_project_id,
+    upsert_conflict_target,
     _migrate_v11_composite_keys,
 )
 

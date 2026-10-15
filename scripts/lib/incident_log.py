@@ -27,7 +27,7 @@ import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from incident_taxonomy import (
     RECOVERY_CONTRACTS,
@@ -95,6 +95,25 @@ def is_shadow_mode() -> bool:
 # Incident creation
 # ---------------------------------------------------------------------------
 
+def _insert_open_incident_row(conn, row: Tuple[Any, ...]) -> None:
+    """INSERT one incident_log row in state 'open' with zeroed counters. *row*
+    holds incident_id to component_name, then failure_detail, actor, occurred_at
+    and metadata_json. project_id is stamped explicitly: five of the six measured
+    stores carry it NOT NULL without a default (OI-2026)."""
+    stamp = project_id_stamp(conn, "incident_log")
+    conn.execute(
+        f"""
+        INSERT INTO incident_log
+            (incident_id, incident_class, severity, entity_type, entity_id,
+             dispatch_id, terminal_id, component_name, state, attempt_count,
+             budget_exhausted, escalated, auto_recovery_halted,
+             failure_detail, actor, occurred_at, metadata_json{stamp.column})
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', 0, 0, 0, 0, ?, ?, ?, ?{stamp.placeholder})
+        """,
+        (*row, *stamp.values),
+    )
+
+
 def create_incident(
     state_dir: str | Path,
     *,
@@ -144,30 +163,11 @@ def create_incident(
     now = _now_utc()
 
     with get_connection(state_dir) as conn:
-        conn.execute(
-            """
-            INSERT INTO incident_log
-                (incident_id, incident_class, severity, entity_type, entity_id,
-                 dispatch_id, terminal_id, component_name, state, attempt_count,
-                 budget_exhausted, escalated, auto_recovery_halted,
-                 failure_detail, actor, occurred_at, metadata_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', 0, 0, 0, 0, ?, ?, ?, ?)
-            """,
-            (
-                incident_id,
-                ic.value,
-                severity,
-                entity_type,
-                entity_id,
-                dispatch_id,
-                terminal_id,
-                component_name,
-                failure_detail,
-                actor,
-                now,
-                _dump(metadata),
-            ),
-        )
+        _insert_open_incident_row(conn, (
+            incident_id, ic.value, severity, entity_type, entity_id,
+            dispatch_id, terminal_id, component_name,
+            failure_detail, actor, now, _dump(metadata),
+        ))
         conn.commit()
 
         row = conn.execute(

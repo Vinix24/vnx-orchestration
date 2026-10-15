@@ -43,6 +43,25 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
 
 
+def _insert_incident_row(conn, row: Tuple[Any, ...]) -> None:
+    """INSERT one incident_log row. *row* holds the seventeen columns from
+    incident_id to metadata_json, in table order; project_id is stamped
+    explicitly: five of the six measured stores carry it NOT NULL without a
+    default (OI-2026)."""
+    stamp = project_id_stamp(conn, "incident_log")
+    conn.execute(
+        f"""
+        INSERT INTO incident_log
+            (incident_id, incident_class, severity, entity_type, entity_id,
+             dispatch_id, terminal_id, component_name, state,
+             attempt_count, budget_exhausted, escalated, auto_recovery_halted,
+             failure_detail, actor, occurred_at, metadata_json{stamp.column})
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?{stamp.placeholder})
+        """,
+        (*row, *stamp.values),
+    )
+
+
 def _insert_escalation_row(conn, row: Tuple[Any, ...]) -> None:
     """INSERT one escalation_log row. *row* holds the thirteen columns from
     escalation_id to created_at, in table order; project_id is stamped
@@ -164,35 +183,13 @@ def record_incident(
 
     budget_exhausted = (budget_remaining is not None and budget_remaining == 0)
 
-    conn.execute(
-        """
-        INSERT INTO incident_log
-            (incident_id, incident_class, severity, entity_type, entity_id,
-             dispatch_id, terminal_id, component_name, state,
-             attempt_count, budget_exhausted, escalated, auto_recovery_halted,
-             failure_detail, actor, occurred_at, metadata_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            incident_id,
-            incident_class.value,
-            severity.value,
-            entity_type,
-            entity_id,
-            dispatch_id,
-            terminal_id,
-            component,
-            state,
-            attempt_number or 0,
-            int(budget_exhausted),
-            int(escalated),
-            0,  # auto_recovery_halted tracked in retry_state
-            reason,
-            "workflow_supervisor",
-            now,
-            json.dumps(full_metadata),
-        ),
-    )
+    _insert_incident_row(conn, (
+        incident_id, incident_class.value, severity.value, entity_type, entity_id,
+        dispatch_id, terminal_id, component, state,
+        attempt_number or 0, int(budget_exhausted), int(escalated),
+        0,  # auto_recovery_halted tracked in retry_state
+        reason, "workflow_supervisor", now, json.dumps(full_metadata),
+    ))
 
     _append_event(
         conn,

@@ -19,7 +19,14 @@ Target shape, per table:
     already has the column (sales-copilot, a fresh store) keeps its column, its
     natural keys and its table SQL;
   - every table of _RC_COMPOSITE_KEYS that exists: ``ux_<table>_pid`` UNIQUE over
-    the listed columns, ``(project_id, id)`` for all eleven.
+    the listed columns, ``(project_id, id)`` for all eleven;
+  - recommendation_outcomes: ``ux_recommendation_outcomes_pid_rec_metric`` UNIQUE
+    over ``(project_id, recommendation_id, metric_name)``, the conflict target
+    of recommendation_tracker's two upserts (UPSERT_KEYS). Tenant stamping
+    rebuilds the table with that key in it; a store at 34 has it before that,
+    so the target is the same on every shape with the column. On sales-copilot
+    the table's own composite UNIQUE already covers the same columns; the index
+    is created there too, so every v34 store carries it under one name.
 No table is rebuilt and no row is touched: an added column takes its value from
 the default, which is the store's own id.
 
@@ -32,14 +39,15 @@ Why Python and not the generic pure-SQL runner:
   - the indexes are created here with plain statements, not through
     _migrate_v11_composite_keys, so a duplicate row or a missing column raises.
 
-Post-condition, checked before the version stamp: every one of the seven that
-exists carries project_id, and every ``ux_<table>_pid`` is attached to its own
-table as a UNIQUE index over the listed columns (composite_index_audit plus the
-key check). ``CREATE UNIQUE INDEX IF NOT EXISTS`` is a silent no-op when an index
-of that name belongs to another table; the post-condition catches that. Any
-failure raises inside apply_if_below's SAVEPOINT, which sits in an outer
-``BEGIN IMMEDIATE``; that transaction is rolled back, so user_version stays
-below 34 and the file stays byte-equal.
+Post-condition, checked before the version stamp (shape_violations):
+composite_index_audit reports nothing missing, and the v34 schema manifest's own
+invariants hold for everything v34 adds to v33. ``CREATE [UNIQUE] INDEX IF NOT
+EXISTS`` is a silent no-op when an index of that name already exists, on another
+table, over other columns, partial or with the wrong uniqueness; the
+post-condition refuses each of those, so 0034 never stamps 34 on a shape the
+manifest would send back to 33. Any failure raises inside apply_if_below's
+SAVEPOINT, which sits in an outer ``BEGIN IMMEDIATE``; that transaction is rolled
+back, so user_version stays below 34 and the file stays byte-equal.
 
 A table that does not exist is not created: 0034 adds columns and indexes, not
 tables. A store without one of these tables (a partial fixture) passes over it.
@@ -73,6 +81,7 @@ if str(_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_LIB_DIR))
 
 import project_id_migration
+import schema_manifest
 import schema_migration
 from coordination_db import _RC_COMPOSITE_KEYS, composite_index_audit
 
@@ -97,21 +106,20 @@ class Migration0034Error(RuntimeError):
     """The store did not reach the 0034 shape; the migration rolled back."""
 
 
+#: The per-project upsert key: (table, index, columns). recommendation_tracker's
+#: two upserts name it as their conflict target wherever the store carries it.
+#: Over a superset of the natural key (recommendation_id, metric_name), which is
+#: already UNIQUE on every shape, so creating it never meets a duplicate.
+UPSERT_KEYS: Tuple[Tuple[str, str, Tuple[str, ...]], ...] = (
+    ("recommendation_outcomes", "ux_recommendation_outcomes_pid_rec_metric",
+     ("project_id", "recommendation_id", "metric_name")),
+)
+
+
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
     return conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
     ).fetchone() is not None
-
-
-def _index_key(conn: sqlite3.Connection, index_name: str) -> Tuple[str, ...]:
-    return tuple(r[2] for r in conn.execute(f"PRAGMA index_info({index_name})").fetchall())
-
-
-def _index_is_unique(conn: sqlite3.Connection, table: str, index_name: str) -> bool:
-    for row in conn.execute(f"PRAGMA index_list({table})").fetchall():
-        if row[1] == index_name:
-            return bool(row[2])
-    return False
 
 
 def create_composite_indexes(conn: sqlite3.Connection) -> List[str]:
@@ -132,29 +140,45 @@ def create_composite_indexes(conn: sqlite3.Connection) -> List[str]:
     return done
 
 
-def shape_violations(conn: sqlite3.Connection) -> List[str]:
-    """What keeps *conn*'s store from the 0034 shape; empty when it holds."""
-    out: List[str] = []
-    for table in COLUMN_TABLES:
-        if _table_exists(conn, table) and not project_id_migration._column_exists(
-            conn, table, "project_id"
-        ):
-            out.append(f"{table}: no project_id column")
-    audit = composite_index_audit(conn)
-    for missing in audit["missing"]:
-        out.append(
-            f"{missing['table']}: index {missing['index']} is not attached to the table"
-        )
-    missing_tables = {m["table"] for m in audit["missing"]}
-    for table, cols in _RC_COMPOSITE_KEYS:
-        if table in missing_tables or not _table_exists(conn, table):
+def create_upsert_keys(conn: sqlite3.Connection) -> List[str]:
+    """``CREATE UNIQUE INDEX IF NOT EXISTS`` for each :data:`UPSERT_KEYS` entry
+    whose table exists. Returns the indexes it ran the statement for."""
+    done: List[str] = []
+    for table, index_name, cols in UPSERT_KEYS:
+        if not _table_exists(conn, table):
             continue
-        index_name = f"ux_{table}_pid"
-        key = _index_key(conn, index_name)
-        if key != cols:
-            out.append(f"{table}: {index_name} keys {key}, expected {cols}")
-        if not _index_is_unique(conn, table, index_name):
-            out.append(f"{table}: {index_name} is not UNIQUE")
+        conn.execute(
+            f"CREATE UNIQUE INDEX IF NOT EXISTS {index_name} ON {table} ({', '.join(cols)})"
+        )
+        done.append(index_name)
+    return done
+
+
+def shape_violations(conn: sqlite3.Connection) -> List[str]:
+    """What keeps *conn*'s store from the 0034 shape; empty when it holds.
+
+    Two checks, both on the tables the store has (0034 creates no table):
+      - spec step 2d: ``composite_index_audit`` reports no ux_<table>_pid
+        missing from its own table;
+      - the v34 manifest's own invariants for what v34 adds to v33: a table v33
+        does not declare is validated whole, worker_pool_membership on what v34
+        adds to it. So every v34 rejection 0034 is answerable for is a refusal
+        here: a missing column, a partial or non-UNIQUE ux_<table>_pid, an
+        idx_<table>_project on another table, over other columns, partial or
+        UNIQUE, and the upsert key with any of those defects. A violation that
+        v33 reports as well is left to the reconciler; 0034 did not cause it.
+    """
+    out: List[str] = [
+        f"{m['table']}: index {m['index']} is not attached to the table"
+        for m in composite_index_audit(conn)["missing"]
+    ]
+    for tbl in schema_manifest.SCHEMA_MANIFEST[_TARGET_VERSION].tables:
+        prev = schema_manifest.table_at(_TARGET_VERSION - 1, tbl.name)
+        if tbl == prev or not _table_exists(conn, tbl.name):
+            continue
+        found = schema_manifest.validate_table(conn, tbl)
+        known = set(schema_manifest.validate_table(conn, prev)) if prev else set()
+        out.extend(v for v in found if v not in known)
     return out
 
 
@@ -181,6 +205,7 @@ def apply_migration(db_path: Path, migration_sql_path: Path) -> bool:
                 c, COLUMN_TABLES, default_project_id=pid
             )
             indexed = create_composite_indexes(c)
+            upsert_keys = create_upsert_keys(c)
             violations = shape_violations(c)
             if violations:
                 raise Migration0034Error(
@@ -189,8 +214,9 @@ def apply_migration(db_path: Path, migration_sql_path: Path) -> bool:
                 )
             added = sorted(t for t, status in results.items() if status == "added")
             log.info(
-                "apply_0034: project_id=%r added to %s; ux_<table>_pid ensured on %s",
-                pid, added or "no table", indexed,
+                "apply_0034: project_id=%r added to %s; ux_<table>_pid ensured on %s; "
+                "upsert keys ensured: %s",
+                pid, added or "no table", indexed, upsert_keys,
             )
 
         # apply_if_below's own rollback (ROLLBACK TO + RELEASE) commits an empty

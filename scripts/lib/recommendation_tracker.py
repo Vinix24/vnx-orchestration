@@ -34,6 +34,7 @@ from runtime_coordination import (
     _now_utc,
     get_connection,
     project_id_stamp,
+    upsert_conflict_target,
 )
 from recommendation_metrics import (
     COMPARISON_COMPUTED,
@@ -186,6 +187,15 @@ class Recommendation:
 
 def _new_id() -> str:
     return str(uuid.uuid4())
+
+
+def _outcome_conflict_target(conn) -> str:
+    """The upsert key of recommendation_outcomes on the store *conn* is open on:
+    one row per (store, recommendation, metric). (project_id, recommendation_id,
+    metric_name) where the store carries that key, which migration 0034 and
+    tenant stamping guarantee; (recommendation_id, metric_name) before 0034
+    (OI-2026)."""
+    return upsert_conflict_target(conn, "recommendation_outcomes", ("recommendation_id", "metric_name"))
 
 
 def _validate_acceptance_transition(from_state: str, to_state: str) -> None:
@@ -597,7 +607,7 @@ class RecommendationTracker:
                     (recommendation_id, metric_name, baseline_value,
                      baseline_sample_size, comparison_status{stamp.column})
                 VALUES (?, ?, ?, ?, ?{stamp.placeholder})
-                ON CONFLICT(recommendation_id, metric_name)
+                ON CONFLICT({_outcome_conflict_target(conn)})
                 DO UPDATE SET
                     baseline_value = excluded.baseline_value,
                     baseline_sample_size = excluded.baseline_sample_size,
@@ -664,7 +674,7 @@ class RecommendationTracker:
                      outcome_sample_size, delta, direction,
                      comparison_status, computed_at{stamp.column})
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?{stamp.placeholder})
-                ON CONFLICT(recommendation_id, metric_name)
+                ON CONFLICT({_outcome_conflict_target(conn)})
                 DO UPDATE SET
                     outcome_value = excluded.outcome_value,
                     outcome_sample_size = excluded.outcome_sample_size,

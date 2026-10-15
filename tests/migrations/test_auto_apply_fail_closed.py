@@ -432,6 +432,7 @@ def _strip_0015_runtime_columns(db_path: Path) -> None:
     finds it."""
     conn = sqlite3.connect(str(db_path))
     try:
+        conn.execute("DROP INDEX IF EXISTS ux_recommendation_outcomes_pid_rec_metric")
         for table in _P4_RUNTIME_TABLES:
             conn.execute(f"DROP INDEX IF EXISTS idx_{table}_project")
             conn.execute(f"DROP INDEX IF EXISTS ux_{table}_pid")

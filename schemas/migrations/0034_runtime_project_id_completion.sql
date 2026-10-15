@@ -24,11 +24,26 @@
 --     the column keeps its column, its natural keys and its table SQL.
 --   - every table of _RC_COMPOSITE_KEYS that exists (eleven tables):
 --       CREATE UNIQUE INDEX IF NOT EXISTS ux_<table>_pid ON <table>(project_id, id);
+--   - recommendation_outcomes, the per-project key of its two upserts
+--     (recommendation_tracker record_baseline / record_outcome name it as their
+--     ON CONFLICT target wherever the store carries it):
+--       CREATE UNIQUE INDEX IF NOT EXISTS ux_recommendation_outcomes_pid_rec_metric
+--           ON recommendation_outcomes(project_id, recommendation_id, metric_name);
+--     It extends the natural key (recommendation_id, metric_name), which is
+--     UNIQUE on every shape, so it never meets a duplicate. Tenant stamping
+--     (vnx migrate) later rebuilds the table with a UNIQUE over the same three
+--     columns and keeps this index.
 --   No table is rebuilt; no row is rewritten.
 --
 -- ADR-007 binding: the composite UNIQUE over (project_id, id) is the ADR-007
 --          key for these single-column-PK tables. The single-column
 --          idx_<table>_project is a lookup index, not a uniqueness constraint.
+--
+-- Post-condition: the v34 schema manifest (scripts/lib/schema_manifest.py)
+-- holds for everything v34 adds to v33. An index of one of these names that
+-- already exists on another table, over other columns, partial or with the
+-- wrong uniqueness turns IF NOT EXISTS into a silent no-op; the runner refuses
+-- that store instead of stamping 34.
 --
 -- This file is not executed as-is. The default is the store's id, resolved
 -- fail-closed from the DB path (resolve_init_project_id, strict), and ALTER TABLE

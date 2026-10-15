@@ -1,27 +1,32 @@
 """Migration 0034 and the nine runtime writers (OI-2026).
 
 0034 gives project_id to the seven runtime tables of 0015's runtime partition
-where a store missed it, and the ADR-007 composite UNIQUE ``ux_<table>_pid`` to
-every table of ``coordination_db._RC_COMPOSITE_KEYS``. The nine INSERT sites
-stamp the store's own project id instead of leaving it to a column default.
+where a store missed it, the ADR-007 composite UNIQUE ``ux_<table>_pid`` to every
+table of ``coordination_db._RC_COMPOSITE_KEYS``, and recommendation_outcomes the
+per-project key its two upserts name as their conflict target. The nine INSERT
+sites and the two incident_log writers stamp the store's own project id instead
+of leaving it to a column default.
 
 Every store here is a tmp store in the ``<root>/.vnx-data/<pid>/state`` layout,
 so its owner resolves from the path. The shapes mirror what was measured on
 read-only copies of the real stores on 2026-10-15:
   - "vnx-dev": user_version 33, no project_id on the seven, no
-    ``ux_<table>_pid`` on any table (vnx-dev, mission-control, seocrawler-v2;
-    pacompany-engine has the same seven);
+    ``ux_<table>_pid`` on any table, and project_id NOT NULL without a default
+    on the four tables outside the seven (vnx-dev, mission-control,
+    seocrawler-v2; pacompany-engine has the same seven);
   - "sales-copilot": the seven rebuilt with that store's verbatim DDL
     (tests/fixtures/migration_0034/), project_id NOT NULL without a default and
-    part of composite natural keys;
+    part of composite natural keys; the four outside the seven as on vnx-dev;
   - "website": a store init_schema left at user_version 10 (the
     website-vincentvandeth store);
-  - "fresh": init_schema plus auto_apply, the shape the current code builds.
+  - "fresh": init_schema plus auto_apply, the shape the current code builds;
+  - "fresh-at-33": what the code before 0034 builds for a new store;
+  - "stamped": vnx-dev after 0034 and after tenant stamping (``vnx migrate``).
 
-Only names that also exist before 0034 are imported, so the red run on the old
-tree fails on behaviour.
+Module-level imports name only what also exists before this round, so the red
+run on the old tree fails on behaviour.
 
-Dispatch-ID: 20261008-g5-p5-kolomdrift-0015
+Dispatch-ID: 20261008-g5-p5-kolomdrift-0015, 20261015-g5-p5-r3
 """
 
 from __future__ import annotations
@@ -749,6 +754,46 @@ def test_upsert_keeps_one_row_per_recommendation_and_metric(make_store, template
         conn.close()
     expected = (0.6, 12, 0.8, "proj-a") if has_column else (0.6, 12, 0.8)
     assert rows == [expected], f"{shape}: rows={rows}, writer raised {raised}"
+
+
+@pytest.mark.parametrize("keys, expected", [
+    (("UNIQUE (a, b)",), "a, b"),
+    (("UNIQUE (b, a, project_id)",), "project_id, a, b"),
+    (("UNIQUE (a, b)", "UNIQUE (project_id, a, b)"), "project_id, a, b"),
+    ((), None),
+    (("UNIQUE (a)", "UNIQUE (a, b, c)"), None),
+], ids=["natural-key", "composite-key", "both-keys", "no-key", "other-keys"])
+def test_upsert_conflict_target_names_a_key_the_table_carries(keys, expected):
+    """The target is the per-project key where the table has one, else the
+    natural key; with neither, the named error the statement would raise."""
+    from coordination_db import upsert_conflict_target
+
+    conn = sqlite3.connect(":memory:")
+    columns = "id INTEGER PRIMARY KEY, project_id TEXT, a TEXT, b TEXT, c TEXT"
+    conn.execute(f"CREATE TABLE t ({', '.join((columns, *keys))})")
+    if expected is None:
+        with pytest.raises(sqlite3.OperationalError, match="carries no full UNIQUE index"):
+            upsert_conflict_target(conn, "t", ("a", "b"))
+    else:
+        assert upsert_conflict_target(conn, "t", ("a", "b")) == expected
+        conn.execute(f"INSERT INTO t (project_id, a, b) VALUES ('p', 'x', 'y') ON CONFLICT({expected}) DO NOTHING")
+    conn.close()
+
+
+def test_upsert_conflict_target_passes_over_a_partial_key():
+    """A partial UNIQUE index cannot be an ON CONFLICT target without a WHERE."""
+    from coordination_db import upsert_conflict_target
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, project_id TEXT, a TEXT, b TEXT, UNIQUE (a, b))")
+    conn.execute("CREATE UNIQUE INDEX t_pid_key ON t (project_id, a, b) WHERE id > 0")
+    assert upsert_conflict_target(conn, "t", ("a", "b")) == "a, b"
+    conn.execute("DROP TABLE t")
+    conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, project_id TEXT, a TEXT, b TEXT)")
+    conn.execute("CREATE UNIQUE INDEX t_pid_key ON t (project_id, a, b) WHERE id > 0")
+    with pytest.raises(sqlite3.OperationalError, match="carries no full UNIQUE index"):
+        upsert_conflict_target(conn, "t", ("a", "b"))
+    conn.close()
 
 
 #: The name 0034 gives the upsert's per-project key; the v34 manifest pins it.

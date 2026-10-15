@@ -224,6 +224,37 @@ def project_id_stamp(conn: sqlite3.Connection, table: str) -> ProjectIdStamp:
     return ProjectIdStamp(", project_id", ", ?", (stamp_project_id(conn),))
 
 
+def upsert_conflict_target(
+    conn: sqlite3.Connection, table: str, natural_key: Tuple[str, ...]
+) -> str:
+    """The ON CONFLICT target of an upsert on *table* keyed by *natural_key*, as
+    the store *conn* is open on carries it (OI-2026).
+
+    SQLite accepts a conflict target only when a full (not partial) UNIQUE index
+    or PRIMARY KEY covers exactly its columns, in any order. The store carries
+    one of two keys:
+      - ``(project_id, *natural_key)``: migration 0034 creates it wherever the
+        table has project_id, and the sales-copilot shape and tenant stamping
+        build it into the table itself. It wins when present: a row of another
+        project then fails on a single-store key instead of updating that
+        project's row;
+      - *natural_key* alone: a store before 0034, with or without the column.
+    Raises sqlite3.OperationalError naming the table when the store carries
+    neither, which is what the statement itself would raise.
+    """
+    keys = set()
+    for row in conn.execute(f"PRAGMA index_list('{table}')").fetchall():
+        if row[2] and not row[4]:
+            keys.add(frozenset(r[2] for r in conn.execute(f"PRAGMA index_info('{row[1]}')")))
+    for candidate in (("project_id", *natural_key), tuple(natural_key)):
+        if frozenset(candidate) in keys:
+            return ", ".join(candidate)
+    raise sqlite3.OperationalError(
+        f"upsert_conflict_target: {table} carries no full UNIQUE index over "
+        f"{natural_key}, with or without project_id"
+    )
+
+
 def _has_project_id_col(conn: sqlite3.Connection, table: str) -> bool:
     """True if `table` has a project_id column (post-migration-0010)."""
     try:

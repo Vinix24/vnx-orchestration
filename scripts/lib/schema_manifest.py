@@ -502,9 +502,12 @@ def _track_pr_delivery() -> TableInvariant:
 # v34 (OI-2026, schemas/migrations/0034_runtime_project_id_completion.sql): the
 # seven tables of 0015's runtime partition carry project_id + idx_<table>_project,
 # and every table of coordination_db._RC_COMPOSITE_KEYS carries the ADR-007
-# composite UNIQUE ux_<table>_pid over (project_id, id). Only the columns 0034
-# guarantees are declared: the store shapes differ in natural keys (sales-copilot
-# carries composite ones) and defaults, so neither is an invariant here.
+# composite UNIQUE ux_<table>_pid over (project_id, id). recommendation_outcomes
+# also carries ux_recommendation_outcomes_pid_rec_metric, the per-project key the
+# upserts of recommendation_tracker name as their conflict target. Only the
+# columns 0034 guarantees are declared: the store shapes differ in natural keys
+# (sales-copilot carries composite ones) and defaults, so neither is an invariant
+# here.
 _V34_COLUMN_TABLES: Tuple[str, ...] = (
     "retry_budgets", "retry_state", "escalation_log", "execution_targets",
     "inbound_inbox", "recommendations", "recommendation_outcomes",
@@ -516,6 +519,12 @@ _V34_UX_ONLY_TABLES: Tuple[str, ...] = (
 # valid at v34 (partial fixtures, stores that never had the table).
 _CONDITIONAL_V34_TABLES = frozenset(_V34_COLUMN_TABLES + _V34_UX_ONLY_TABLES)
 _V34_ID_PID_COLS = _cols(("id", "INTEGER", False), ("project_id", "TEXT", True))
+_V34_UPSERT_KEYS: Dict[str, Tuple[IndexInvariant, ...]] = {
+    "recommendation_outcomes": (
+        IndexInvariant("ux_recommendation_outcomes_pid_rec_metric",
+                       ("project_id", "recommendation_id", "metric_name"), unique=True),
+    ),
+}
 
 
 def _composite_pid_index(table: str) -> IndexInvariant:
@@ -534,7 +543,7 @@ def _runtime_tables_v34() -> Tuple[TableInvariant, ...]:
         TableInvariant(
             name=table, columns=_V34_ID_PID_COLS, pk=("id",),
             indexes=(IndexInvariant(f"idx_{table}_project", ("project_id",)),
-                     _composite_pid_index(table)),
+                     _composite_pid_index(table), *_V34_UPSERT_KEYS.get(table, ())),
         )
         for table in _V34_COLUMN_TABLES
     )
