@@ -623,6 +623,108 @@ def _gate_result_cause(record: Dict[str, Any]) -> Optional[FrozenSet[str]]:
     return None
 
 
+def _classify_gate_record(record: Dict[str, Any]) -> Tuple[str, Optional[FrozenSet[str]]]:
+    """Bucket one review_gates result for E6: ``unbuilt``, ``exhausted`` or ``counted``.
+
+    _gate_result_cause reports what the record honestly says, for any
+    infra-fail reason alike. The POLICY choice of which causes count toward a
+    repeating-failure streak belongs here, not in that helper. Two causes are
+    excluded, for opposite reasons, and each keeps its OWN bucket so the two
+    stay distinguishable in the output:
+      - gate_runner_missing: the gate was never built, so it cannot recover
+        on retry — a standing configuration gap (OI-1693).
+      - a quota refusal: an external, time-boxed condition that recovers BY
+        ITSELF, usually at a date the provider states out loud
+        (D-gate-quota-105245). Halting on it stays broken for exactly as long
+        as the provider's window lasts.
+    Both are reported as loud, non-triggering notices — excluded from the
+    streak, never silently dropped.
+    """
+    cause = _gate_result_cause(record)
+    cause_reason = None
+    if cause is not None and len(cause) == 1:
+        (only,) = cause
+        if only.startswith("reason:"):
+            cause_reason = only[len("reason:") :]
+    if cause_reason in _UNBUILT_GATE_REASONS:
+        return "unbuilt", cause
+    if cause_reason in _EXTERNAL_TRANSIENT_GATE_REASONS:
+        return "exhausted", cause
+    return "counted", cause
+
+
+def _gate_window_result(
+    check_id: str,
+    gate: str,
+    entries: List[Tuple[datetime, Any, Optional[FrozenSet[str]]]],
+    n: int,
+) -> StopConditionResult:
+    """Window check for one gate: do the last ``n`` results share a cause?"""
+    sub_id = f"{check_id}:{gate}"
+    entries.sort(key=lambda e: e[0])
+    if len(entries) < n:
+        return _unmeasurable(sub_id, f"minder dan {n} geordende resultaten voor gate '{gate}' ({len(entries)})", gate=gate, count=len(entries))
+    window = entries[-n:]
+    cause_sets = [c for (_, _, c) in window]
+    causes = [sorted(c) if c is not None else None for c in cause_sets]
+    prs = [pr for (_, pr, _) in window]
+    # One cause shared by every PR in the window trips E6, also when the
+    # PRs carry other findings besides (OI-2074).
+    common: FrozenSet[str] = frozenset()
+    if all(c is not None for c in cause_sets):
+        common = frozenset.intersection(*cause_sets)
+    if common:
+        shared = ", ".join(sorted(common))
+        return _triggered(
+            sub_id,
+            f"laatste {n} PR's op gate '{gate}' allemaal geblokkeerd door dezelfde oorzaak ({shared}) (E6)",
+            gate=gate, cause=sorted(common)[0], common_causes=sorted(common), prs=prs,
+        )
+    return _clear(sub_id, f"laatste {n} PR's op gate '{gate}' niet allemaal dezelfde blokkade-oorzaak", gate=gate, causes=causes, prs=prs)
+
+
+def _excluded_gate_notices(
+    check_id: str,
+    unbuilt_gate_records: Dict[str, List[Tuple[datetime, Any]]],
+    exhausted_gate_records: Dict[str, List[Tuple[datetime, Any]]],
+) -> List[StopConditionResult]:
+    """Loud, non-triggering notices for the records kept out of the streak.
+
+    Absence must be loud: a gate requested with no runner on disk is a
+    standing configuration gap, not a recurring failure (OI-1693). Same shape,
+    different cause: an external quota/credit refusal, for which the designed
+    response is the review-gate takeover chain
+    (VNX_REVIEW_GATE_TAKEOVER_CHAIN), not a stop condition. Both are
+    _unmeasurable-shaped, a status that can never tip _combine's verdict to
+    TRIGGERED, so each is a loud non-event, never a silent one or a halt.
+    """
+    notices: List[StopConditionResult] = []
+    for gate, records in unbuilt_gate_records.items():
+        records.sort(key=lambda r: r[0])
+        newest_pr = records[-1][1]
+        notices.append(
+            _unmeasurable(
+                f"{check_id}:unbuilt:{gate}",
+                f"gate '{gate}' wordt aangevraagd maar heeft geen runner "
+                f"(reason:gate_runner_missing, {len(records)}x gezien, meest recente PR #{newest_pr})",
+                gate=gate, reason="gate_runner_missing", count=len(records), newest_pr=newest_pr,
+            )
+        )
+    for gate, records in exhausted_gate_records.items():
+        records.sort(key=lambda r: r[0])
+        newest_pr = records[-1][1]
+        notices.append(
+            _unmeasurable(
+                f"{check_id}:quota:{gate}",
+                f"gate '{gate}' werd geweigerd door een externe quota-limiet "
+                f"(reason:{QUOTA_REFUSAL_REASON}, {len(records)}x gezien, meest recente PR #{newest_pr}) "
+                f"— externe, tijdelijke oorzaak, telt niet mee als systemische herhaling",
+                gate=gate, reason=QUOTA_REFUSAL_REASON, count=len(records), newest_pr=newest_pr,
+            )
+        )
+    return notices
+
+
 def check_repeated_gate_failure_cause(
     results_dir: Optional[Path] = None,
     *,
@@ -679,102 +781,21 @@ def check_repeated_gate_failure_cause(
         ts = _parse_iso(d.get("recorded_at"))
         if ts is None:
             continue
-        # _gate_result_cause reports what the record honestly says, for any
-        # infra-fail reason alike. The POLICY choice of which causes count
-        # toward a repeating-failure streak belongs here, not in that
-        # helper. Two causes are excluded, for opposite reasons, and each
-        # keeps its OWN bucket so the two stay distinguishable in the output:
-        #   - gate_runner_missing: the gate was never built, so it cannot
-        #     recover on retry — a standing configuration gap (OI-1693).
-        #   - a quota refusal: an external, time-boxed condition that recovers
-        #     BY ITSELF, usually at a date the provider states out loud
-        #     (D-gate-quota-105245). Halting on it stays broken for exactly as
-        #     long as the provider's window lasts.
-        # Both are reported below as loud, non-triggering notices — excluded
-        # from the streak, never silently dropped.
-        cause = _gate_result_cause(d)
-        cause_reason = None
-        if cause is not None and len(cause) == 1:
-            (only,) = cause
-            if only.startswith("reason:"):
-                cause_reason = only[len("reason:") :]
-        if cause_reason in _UNBUILT_GATE_REASONS:
+        bucket, cause = _classify_gate_record(d)
+        if bucket == "unbuilt":
             unbuilt_gate_records.setdefault(gate, []).append((ts, d.get("pr_number")))
-            continue
-        if cause_reason in _EXTERNAL_TRANSIENT_GATE_REASONS:
+        elif bucket == "exhausted":
             exhausted_gate_records.setdefault(gate, []).append((ts, d.get("pr_number")))
-            continue
-        by_gate.setdefault(gate, []).append((ts, d.get("pr_number"), cause))
+        else:
+            by_gate.setdefault(gate, []).append((ts, d.get("pr_number"), cause))
 
     if not by_gate and not unbuilt_gate_records and not exhausted_gate_records:
         return _unmeasurable(check_id, "geen bruikbare gate-resultaten met geldige recorded_at gevonden")
 
-    sub_results: List[StopConditionResult] = []
-    for gate, entries in by_gate.items():
-        sub_id = f"{check_id}:{gate}"
-        entries.sort(key=lambda e: e[0])
-        if len(entries) < n:
-            sub_results.append(_unmeasurable(sub_id, f"minder dan {n} geordende resultaten voor gate '{gate}' ({len(entries)})", gate=gate, count=len(entries)))
-            continue
-        window = entries[-n:]
-        cause_sets = [c for (_, _, c) in window]
-        causes = [sorted(c) if c is not None else None for c in cause_sets]
-        prs = [pr for (_, pr, _) in window]
-        # One cause shared by every PR in the window trips E6, also when the
-        # PRs carry other findings besides (OI-2074).
-        common: FrozenSet[str] = frozenset()
-        if all(c is not None for c in cause_sets):
-            common = frozenset.intersection(*cause_sets)
-        if common:
-            shared = ", ".join(sorted(common))
-            sub_results.append(
-                _triggered(
-                    sub_id,
-                    f"laatste {n} PR's op gate '{gate}' allemaal geblokkeerd door dezelfde oorzaak ({shared}) (E6)",
-                    gate=gate, cause=sorted(common)[0], common_causes=sorted(common), prs=prs,
-                )
-            )
-        else:
-            sub_results.append(_clear(sub_id, f"laatste {n} PR's op gate '{gate}' niet allemaal dezelfde blokkade-oorzaak", gate=gate, causes=causes, prs=prs))
-
-    # Absence must be loud: a gate requested with no runner on disk is a
-    # standing configuration gap, not a recurring failure. Report it every
-    # time it is seen, per gate, as an _unmeasurable-shaped notice — that
-    # status can never tip _combine's verdict to TRIGGERED below, so this
-    # can only ever be a loud non-event, never a silent one (OI-1693).
-    for gate, records in unbuilt_gate_records.items():
-        records.sort(key=lambda r: r[0])
-        newest_pr = records[-1][1]
-        sub_id = f"{check_id}:unbuilt:{gate}"
-        sub_results.append(
-            _unmeasurable(
-                sub_id,
-                f"gate '{gate}' wordt aangevraagd maar heeft geen runner "
-                f"(reason:gate_runner_missing, {len(records)}x gezien, meest recente PR #{newest_pr})",
-                gate=gate, reason="gate_runner_missing", count=len(records), newest_pr=newest_pr,
-            )
-        )
-
-    # Same shape, different cause: an external quota/credit refusal. Reported
-    # every time it is seen, per gate, as an _unmeasurable notice — which can
-    # never tip _combine's verdict to TRIGGERED below, so a spent provider
-    # quota is a loud non-event here instead of a fabric-wide halt. The
-    # designed response to this state is the review-gate takeover chain
-    # (VNX_REVIEW_GATE_TAKEOVER_CHAIN), not a stop condition.
-    for gate, records in exhausted_gate_records.items():
-        records.sort(key=lambda r: r[0])
-        newest_pr = records[-1][1]
-        sub_id = f"{check_id}:quota:{gate}"
-        sub_results.append(
-            _unmeasurable(
-                sub_id,
-                f"gate '{gate}' werd geweigerd door een externe quota-limiet "
-                f"(reason:{QUOTA_REFUSAL_REASON}, {len(records)}x gezien, meest recente PR #{newest_pr}) "
-                f"— externe, tijdelijke oorzaak, telt niet mee als systemische herhaling",
-                gate=gate, reason=QUOTA_REFUSAL_REASON, count=len(records), newest_pr=newest_pr,
-            )
-        )
-
+    sub_results: List[StopConditionResult] = [
+        _gate_window_result(check_id, gate, entries, n) for gate, entries in by_gate.items()
+    ]
+    sub_results.extend(_excluded_gate_notices(check_id, unbuilt_gate_records, exhausted_gate_records))
     return _combine(check_id, sub_results, sub_key="per_gate")
 
 
