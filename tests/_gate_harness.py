@@ -13,6 +13,15 @@ call fails with ENOENT before it ever gets to interpret a report.
 `GATE_LIB_MODULES` is the closure of gate_seat_line.py's own imports:
 gate_enforcement_verify (seat/takeover resolution), gate_status (PASS/FAIL
 classification, itself importing gate_depth), and gate_depth.
+
+`vnx gate --only <gate>` also asks the provider switch first
+(provider-schakelaar C): it runs `scripts/providers_cli.py check`, which needs
+`provider_switch.py` and its two imports (`atomic_io`, `vnx_ids`). A fake
+VNX_HOME without them would make every `--only` run refuse fail-closed.
+`PROVIDER_SWITCH_LIB_MODULES` and `PROVIDER_SWITCH_SCRIPTS` are that closure.
+The decision reads the switch file at `VNX_PROVIDER_SWITCH_FILE`, so a harness
+that strips `VNX_*` from the environment must set that variable to a tmp path
+again: without it the check would read the operator's real `~/.vnx`.
 """
 from __future__ import annotations
 
@@ -29,10 +38,23 @@ GATE_LIB_MODULES = (
     "gate_seat_line.py",
 )
 
+PROVIDER_SWITCH_LIB_MODULES = (
+    "provider_switch.py",
+    "atomic_io.py",
+    "vnx_ids.py",
+)
+
+PROVIDER_SWITCH_SCRIPTS = (
+    "providers_cli.py",
+)
+
 
 def install_gate_lib_modules(lib_dir: Path) -> None:
     """Copy the real gate_seat_line.py + its real deps into `lib_dir` (a fake
-    VNX_HOME's scripts/lib)."""
+    VNX_HOME's scripts/lib), and the provider-switch check gate.sh runs for
+    `--only` into its scripts/ and scripts/lib."""
     lib_dir.mkdir(parents=True, exist_ok=True)
-    for name in GATE_LIB_MODULES:
+    for name in (*GATE_LIB_MODULES, *PROVIDER_SWITCH_LIB_MODULES):
         shutil.copy2(REPO_ROOT / "scripts" / "lib" / name, lib_dir / name)
+    for name in PROVIDER_SWITCH_SCRIPTS:
+        shutil.copy2(REPO_ROOT / "scripts" / name, lib_dir.parent / name)

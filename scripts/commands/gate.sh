@@ -101,6 +101,43 @@ print(','.join(result) if result else '$default_stack')
 "
 }
 
+_g_normalize_gate() {
+  # Short names to the gate names review_gate_manager knows: codex -> codex_gate,
+  # ci -> ci_gate (OI-1265), and the kimi/glm/deepseek reviewers by the same rule.
+  case "$1" in
+    codex)    printf 'codex_gate' ;;
+    ci)       printf 'ci_gate' ;;
+    kimi)     printf 'kimi_gate' ;;
+    glm)      printf 'glm_gate' ;;
+    deepseek) printf 'deepseek_gate' ;;
+    *)        printf '%s' "$1" ;;
+  esac
+}
+
+_g_switch_allows() {
+  # The operator's provider switch decides before anything is requested
+  # (provider-schakelaar C). Runs the module behind `vnx providers check`:
+  # exit 0 allowed, 4 switched off. Any other exit means the switch could not be
+  # consulted, and that refuses too: fail-closed.
+  local gate="$1"
+  local pythonpath="$VNX_HOME/scripts/lib:${VNX_HOME}/scripts:${PYTHONPATH:-}"
+  local check_rc=0
+  local check_out
+  check_out=$(PYTHONPATH="$pythonpath" python3 "$VNX_HOME/scripts/providers_cli.py" \
+    check "$gate" --consumer "vnx gate --only" 2>&1) || check_rc=$?
+  if [ "$check_rc" -eq 0 ]; then
+    return 0
+  fi
+  if [ "$check_rc" -eq 4 ]; then
+    err "[gate] '$gate' is switched off by the provider switch; nothing was requested or launched"
+    err "[gate] $check_out"
+    err "[gate] Re-enable with: vnx providers on <family>"
+    return 4
+  fi
+  err "[gate] Could not consult the provider switch for '$gate' (exit $check_rc); refusing: $check_out"
+  return 1
+}
+
 _g_print_seat_lines() {
   # Read "TAG<TAB>line" pairs (gate_seat_line.py's stdout) and print each with
   # log()/err() styling, keyed off the tag rather than re-parsing the line
@@ -267,6 +304,17 @@ HELP
     return 0
   fi
 
+  # --only <gate>: a switched-off provider is refused here, before the PR branch
+  # is resolved and before anything is requested or launched.
+  if [ -n "$only_gate" ]; then
+    only_gate="$(_g_normalize_gate "$only_gate")"
+    local switch_rc=0
+    _g_switch_allows "$only_gate" || switch_rc=$?
+    if [ "$switch_rc" -ne 0 ]; then
+      return "$switch_rc"
+    fi
+  fi
+
   # Auto-detect branch. The PR's head ref (gh pr view headRefName) is the only
   # acceptable answer: the gate worktree must match the diff under review, and
   # T0 routinely runs `vnx gate` from main (OI-904). A PR whose head ref cannot
@@ -311,18 +359,8 @@ HELP
   local pythonpath="$VNX_HOME/scripts/lib:${VNX_HOME}/scripts:${PYTHONPATH:-}"
 
   if [ -n "$only_gate" ]; then
-    # Run a specific gate
-    # Normalize short names: codex -> codex_gate, ci -> ci_gate
-    # (the name review_gate_manager knows; OI-1265), and the
-    # kimi/glm/deepseek reviewers by the same rule.
-    case "$only_gate" in
-      codex)    only_gate="codex_gate" ;;
-      ci)       only_gate="ci_gate" ;;
-      kimi)     only_gate="kimi_gate" ;;
-      glm)      only_gate="glm_gate" ;;
-      deepseek) only_gate="deepseek_gate" ;;
-    esac
-
+    # Run a specific gate (its name was normalized and cleared by the provider
+    # switch above, before the branch was resolved).
     log "[gate] Running gate '$only_gate' for PR $pr_number (branch: $branch)"
 
     local exit_code=0

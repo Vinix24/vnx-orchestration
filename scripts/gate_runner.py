@@ -431,7 +431,7 @@ class GateRunner:
         # Provider switch (provider-schakelaar C): decided before anything is marked executing
         # or launched, on every path (subprocess, vertex, harness lane), with the gate name as
         # the identifier. An unregistered gate keeps its unsupported_gate_type answer below.
-        refusal = _rec.gate_switch_refusal(gate, consumer=_SWITCH_CONSUMER)
+        refusal = _rec.gate_switch_refusal(gate, consumer=_SWITCH_CONSUMER, state_dir=self._state_dir)
         if refusal is not None:
             return self._record_switched_off(
                 gate=gate, pr_number=pr_number, pr_id=pr_id,
@@ -1253,7 +1253,9 @@ class GateRunner:
         family raises ``ProviderDisabledError`` without starting anything.
         ``_run_subprocess_path`` books that as ``provider_switched_off``.
         """
-        provider_switch.require(gate, consumer=_SWITCH_CONSUMER)
+        provider_switch.require(
+            gate, consumer=_SWITCH_CONSUMER, project_id=_rec.switch_project_id(self._state_dir),
+        )
         cmd = self._build_gate_cmd(gate, binary, request_payload)
         start = time.monotonic()
         try:

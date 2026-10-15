@@ -461,13 +461,13 @@ class GateRequestHandlerMixin:
             )
 
     def _kimi_gate_available(self) -> bool:
-        return gate_is_available("kimi_gate")
+        return gate_is_available("kimi_gate", state_dir=getattr(self, "state_dir", None))
 
     def _glm_gate_available(self) -> bool:
-        return gate_is_available("glm_gate")
+        return gate_is_available("glm_gate", state_dir=getattr(self, "state_dir", None))
 
     def _deepseek_gate_available(self) -> bool:
-        return gate_is_available("deepseek_gate")
+        return gate_is_available("deepseek_gate", state_dir=getattr(self, "state_dir", None))
 
     def _seat_switch_refusal(self, gate: str) -> Optional[SwitchDecision]:
         """The provider switch's refusal for a review seat, or ``None`` when it may be called.
@@ -477,7 +477,9 @@ class GateRequestHandlerMixin:
         """
         if gate in RETIRED_GATE_NAMES:
             return None
-        return gate_switch_refusal(gate, consumer=_SEAT_SWITCH_CONSUMER)
+        return gate_switch_refusal(
+            gate, consumer=_SEAT_SWITCH_CONSUMER, state_dir=getattr(self, "state_dir", None),
+        )
 
     def _dispatch_one_review(
         self,

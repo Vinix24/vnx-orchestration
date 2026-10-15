@@ -33,6 +33,12 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 # test pins the two equal).
 _DEFAULT_GATE_STACK = ["codex_gate", "kimi_gate"]
 
+# What one gate trigger came to. A switch refusal is named on its own: the operator
+# switched the gate's provider off (provider-schakelaar C), which is not a failed gate.
+TRIGGERED = "triggered"
+FAILED = "failed"
+SWITCHED_OFF = "provider_switched_off"
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -102,10 +108,50 @@ def _get_current_branch() -> str:
         return ""
 
 
-def _trigger_gate(pr_number: int, branch: str, gate_name: str) -> bool:
+def _hop_is_switch_refusal(hop: Any) -> bool:
+    return isinstance(hop, dict) and hop.get("reason") == SWITCHED_OFF
+
+
+def _seat_refused_by_switch(entry: Dict[str, Any]) -> bool:
+    """Was this non-passing seat refused by the provider switch, and by nothing else?
+
+    Either the seat was booked ``provider_switched_off`` (at request time, or by
+    the runner when the switch flipped before the launch), or its takeover chain
+    ran out with every hop switched off.
+    """
+    detail = entry.get("detail") if isinstance(entry.get("detail"), dict) else {}
+    if SWITCHED_OFF in (entry.get("reason"), detail.get("reason")):
+        return True
+    path = detail.get("takeover_path")
+    return (
+        detail.get("status") == "chain_exhausted"
+        and isinstance(path, list) and bool(path)
+        and all(_hop_is_switch_refusal(hop) for hop in path)
+    )
+
+
+def _classify_trigger_failure(stdout: str) -> str:
+    """``SWITCHED_OFF`` when every seat that did not pass was refused by the provider
+    switch, else ``FAILED``. Output that cannot be read is a failure, never a refusal."""
+    try:
+        report = json.loads(stdout or "")
+    except ValueError:
+        return FAILED
+    gates = report.get("gates") if isinstance(report, dict) else None
+    if not isinstance(gates, list):
+        return FAILED
+    not_passed = [g for g in gates if isinstance(g, dict) and g.get("passed") is not True]
+    if not_passed and all(_seat_refused_by_switch(g) for g in not_passed):
+        return SWITCHED_OFF
+    return FAILED
+
+
+def _trigger_gate(pr_number: int, branch: str, gate_name: str) -> str:
     """Invoke review_gate_manager request-and-execute for a single gate.
 
-    Returns True on exit-0, False otherwise.
+    Returns ``TRIGGERED`` on exit 0, ``SWITCHED_OFF`` when the call failed only
+    because the provider switch refused every seat that did not pass, and
+    ``FAILED`` otherwise.
     """
     script = _REPO_ROOT / "scripts" / "review_gate_manager.py"
     cmd = [
@@ -122,19 +168,26 @@ def _trigger_gate(pr_number: int, branch: str, gate_name: str) -> bool:
             cwd=str(_REPO_ROOT),
         )
         if proc.returncode != 0:
+            outcome = _classify_trigger_failure(proc.stdout)
+            if outcome == SWITCHED_OFF:
+                logger.warning(
+                    "Gate %s not run for PR #%d: the provider switch refused every seat "
+                    "that did not pass (exit %d)", gate_name, pr_number, proc.returncode,
+                )
+                return SWITCHED_OFF
             logger.warning(
                 "Gate %s trigger failed (exit %d): %s",
                 gate_name, proc.returncode, proc.stderr.strip()[:400],
             )
-            return False
+            return FAILED
         logger.info("Gate %s triggered successfully for PR #%d", gate_name, pr_number)
-        return True
+        return TRIGGERED
     except subprocess.TimeoutExpired:
         logger.warning("Gate %s trigger timed out (300s)", gate_name)
-        return False
+        return FAILED
     except Exception as exc:
         logger.warning("Gate %s trigger exception: %s", gate_name, exc)
-        return False
+        return FAILED
 
 
 def _log_auto_gate_event(data_dir: Path, record: Dict[str, Any]) -> None:
@@ -248,6 +301,8 @@ def trigger_gates_if_feature_complete(
     gates = _load_required_gates()
     triggered_gates: List[str] = []
     failed_gates: List[str] = []
+    switched_off_gates: List[str] = []
+    by_outcome = {TRIGGERED: triggered_gates, FAILED: failed_gates, SWITCHED_OFF: switched_off_gates}
 
     try:
         from governance_audit import log_gate_result as _log_gate_result  # noqa: PLC0415
@@ -255,17 +310,14 @@ def trigger_gates_if_feature_complete(
         _log_gate_result = None  # type: ignore[assignment]
 
     for gate_name in gates:
-        ok = _trigger_gate(pr_number, branch, gate_name)
-        if ok:
-            triggered_gates.append(gate_name)
-        else:
-            failed_gates.append(gate_name)
+        outcome = _trigger_gate(pr_number, branch, gate_name)
+        by_outcome[outcome].append(gate_name)
         if _log_gate_result is not None:
             try:
                 _log_gate_result(
                     gate=gate_name,
                     pr_number=pr_number,
-                    status="triggered" if ok else "failed",
+                    status=outcome,
                     findings_count=0,
                     dispatch_id=dispatch_id,
                 )
@@ -280,13 +332,14 @@ def trigger_gates_if_feature_complete(
         "pr_number": pr_number,
         "gates_triggered": triggered_gates,
         "gates_failed": failed_gates,
+        "gates_switched_off": switched_off_gates,
         "triggered": True,
     }
     _log_auto_gate_event(data_dir, event)
 
     logger.info(
-        "auto_gate_trigger: triggered %d gate(s) for %s PR #%d (failed: %s)",
-        len(triggered_gates), feature_id, pr_number, failed_gates,
+        "auto_gate_trigger: triggered %d gate(s) for %s PR #%d (failed: %s, switched off: %s)",
+        len(triggered_gates), feature_id, pr_number, failed_gates, switched_off_gates,
     )
 
     return {
@@ -294,5 +347,6 @@ def trigger_gates_if_feature_complete(
         "pr_number": pr_number,
         "gates": triggered_gates,
         "gates_failed": failed_gates,
+        "gates_switched_off": switched_off_gates,
         "reason": None,
     }

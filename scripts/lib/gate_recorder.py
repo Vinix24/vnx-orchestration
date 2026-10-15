@@ -126,20 +126,42 @@ def resolve_gate_provider(gate: str) -> Optional[Tuple[str, str]]:
 PROVIDER_SWITCHED_OFF_REASON = provider_switch.REASON_SWITCHED_OFF
 
 
+def switch_project_id(state_dir: Optional[Path]) -> Optional[str]:
+    """The project a gate's switch decisions are for: the one its own state dir names.
+
+    The state dir is the explicit statement of whose gate this is, so it is passed to the
+    switch as the explicit project. ``None`` when it names no project; the switch then
+    resolves one itself (``VNX_PROJECT_ID``, then the process's state dir).
+    """
+    if state_dir is None:
+        return None
+    import vnx_paths  # noqa: PLC0415  (deferred: pulls in data_dir_guard / project_root)
+
+    return vnx_paths.project_id_from_state_dir(Path(state_dir)) or None
+
+
 def gate_switch_refusal(
-    gate: str, *, consumer: str = "review_gate",
+    gate: str, *, consumer: str = "review_gate", state_dir: Optional[Path] = None,
 ) -> Optional[provider_switch.SwitchDecision]:
     """The provider switch's refusal for ``gate``, or ``None`` when it may be called.
 
     The gate name is the identifier: ``kimi_gate`` decides the ``kimi`` family, ``codex_gate``
-    is codex and the ``gh`` gates are tooling, neither of which the switch ever refuses. An
+    is codex and the ``gh`` gates are tooling. Those classes are never refused (decision 2b),
+    so they are answered here without reading the switch or resolving a project. An
     unregistered gate returns ``None``: it has no provider to call, and the caller's own
-    ``unsupported_gate_type`` answer stays the one that names it. Read fresh on every call,
-    so a switch change takes effect on the next request.
+    ``unsupported_gate_type`` answer stays the one that names it. A registered gate the family
+    map does not know is decided, and so refused (fail-closed). Read fresh on every call, so a
+    switch change takes effect on the next request.
     """
     if resolve_gate_provider(gate) is None:
         return None
-    decision = provider_switch.decide(gate, consumer=consumer)
+    try:
+        family = provider_switch.family_of(gate)
+    except provider_switch.UnknownProviderError:
+        family = provider_switch.UNKNOWN_FAMILY
+    if family in provider_switch.NON_SWITCHABLE_CLASSES:
+        return None
+    decision = provider_switch.decide(gate, consumer=consumer, project_id=switch_project_id(state_dir))
     return None if decision.allowed else decision
 
 
@@ -201,7 +223,9 @@ def gate_dispatch_identity_error(gate: str, dispatch_id: Optional[str]) -> Optio
     )
 
 
-def gate_is_available(gate: str, *, repo_root: Optional[Path] = None) -> bool:
+def gate_is_available(
+    gate: str, *, repo_root: Optional[Path] = None, state_dir: Optional[Path] = None,
+) -> bool:
     """Availability by REGISTRATION plus lane executability, never path existence.
 
     dispatch 20260911-c6 step 2. The previous rule — ``<runner_path>.exists()``
@@ -224,7 +248,12 @@ def gate_is_available(gate: str, *, repo_root: Optional[Path] = None) -> bool:
     - ``script_runner`` the gate IS a repo script: available when the script
       file is on disk. A gate that still needs a file keeps that check.
     - ``harness_lane``  the gate is config-based: available by registration
-      alone. There is no file to look for, and none is expected.
+      and the operator's provider switch. There is no file to look for, and
+      none is expected. A harness-lane gate whose family is switched off is
+      not available, so the request-time helpers (``_kimi_gate_available``
+      and friends) and every other caller see the same answer; ``state_dir``
+      names the project the switch decides for (provider-schakelaar C). A
+      switch refusal is not a reachability fact and is never booked as one.
 
     An unregistered gate raises :class:`UnknownGateProvider` — never ``False``,
     never a fallback to a binary name invented from the gate's own name.
@@ -233,12 +262,6 @@ def gate_is_available(gate: str, *, repo_root: Optional[Path] = None) -> bool:
     quota is spent is still "available" here (OI-1454). Whether the provider
     behind a gate answers is measured from real outcomes and read through
     :func:`gate_provider_reachability`.
-
-    The operator's provider switch comes first, for every kind: a gate whose
-    family is switched off is not available, so the request-time helpers
-    (``_kimi_gate_available`` and friends) and every other caller see the same
-    answer. A switch refusal is not a reachability fact and is never booked as
-    one (provider-schakelaar C).
     """
     provider = resolve_gate_provider(gate)
     if provider is None:
@@ -246,15 +269,15 @@ def gate_is_available(gate: str, *, repo_root: Optional[Path] = None) -> bool:
             f"{gate} is not a registered gate in gate_recorder.GATE_PROVIDERS — "
             f"register it before asking whether it is available"
         )
-    if gate_switch_refusal(gate, consumer="gate_recorder.gate_is_available") is not None:
-        return False
     kind, name = provider
     if kind == GATE_PROVIDER_PATH_BINARY:
         return shutil.which(name) is not None
     if kind == GATE_PROVIDER_SCRIPT_RUNNER:
         return ((repo_root or _repo_root()) / name).exists()
     if kind == GATE_PROVIDER_HARNESS_LANE:
-        return True
+        return gate_switch_refusal(
+            gate, consumer="gate_recorder.gate_is_available", state_dir=state_dir,
+        ) is None
     raise UnknownGateProvider(
         f"{gate} has an unknown provider kind {kind!r} — cannot determine availability"
     )

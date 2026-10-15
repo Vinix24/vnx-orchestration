@@ -281,7 +281,10 @@ class GateResultParserMixin:
                 f"binary, a script runner, or a harness lane; no binary name is guessed "
                 f"from the gate name",
             )
-        refusal = gate_switch_refusal(gate, consumer="gate_result_parser._classify_unavailable")
+        refusal = gate_switch_refusal(
+            gate, consumer="gate_result_parser._classify_unavailable",
+            state_dir=getattr(self, "state_dir", None),
+        )
         if refusal is not None:
             return (PROVIDER_SWITCHED_OFF_REASON, refusal.detail())
         provider_kind, binary_name = provider
