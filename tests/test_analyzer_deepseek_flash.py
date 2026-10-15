@@ -47,6 +47,13 @@ def _fresh_preflight(monkeypatch):
     monkeypatch.setattr(DeepAnalyzer, "_deepseek_preflight_cache", None, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _switch_project_known(monkeypatch):
+    """The provider switch resolves the project from the environment; without it the resolver
+    runs git, which the "no subprocess started" assertions below would count."""
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
+
+
 def _balance_body(total="5.00", currency="USD", available=True):
     return {
         "is_available": available,

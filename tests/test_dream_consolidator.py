@@ -50,6 +50,15 @@ def _dream_activation_gate_open(monkeypatch):
     monkeypatch.setattr(consolidator, "_injection_probe_health", lambda state_dir: "ok")
 
 
+@pytest.fixture(autouse=True)
+def _dream_boundary_configured(monkeypatch, tmp_path_factory):
+    """A configured, empty content boundary in a tmp file: the dream cycle refuses to run on an
+    unconfigured one, and a test must never read the operator's real boundary file."""
+    boundary_file = tmp_path_factory.mktemp("dream-boundary") / "content_boundary.json"
+    boundary_file.write_text(json.dumps({"version": 1}), encoding="utf-8")
+    monkeypatch.setenv("VNX_CONTENT_BOUNDARY_FILE", str(boundary_file))
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

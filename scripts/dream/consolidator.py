@@ -52,6 +52,8 @@ _PROBE_HEALTH_RUNNABLE: frozenset[str] = frozenset(
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 import vnx_paths as _vnx_paths
+import content_class
+import provider_switch
 
 # Character budget for the serialized pattern JSON inside one kimi prompt. Input
 # that does not fit is split over several prompts, never cut off (OI-1821).
@@ -185,6 +187,50 @@ def _fetch_patterns(conn: sqlite3.Connection, project_id: str) -> dict[str, list
         except sqlite3.OperationalError:
             results[table] = []
     return results
+
+
+def _filter_restricted_rows(
+    patterns: dict[str, list[dict]], boundary: "content_class.Boundary"
+) -> tuple[dict[str, list[dict]], dict[str, int]]:
+    """Leave out every row that carries a restricted signal; count the dropped rows per table.
+
+    A row is serialized the way the prompt serializes it and classified as text: a concrete
+    client or personal path, or the canary, makes it restricted. The text of a dropped row is
+    never logged, printed or emitted: only the count per table survives.
+    """
+    clean: dict[str, list[dict]] = {}
+    dropped: dict[str, int] = {}
+    for table, rows in patterns.items():
+        kept: list[dict] = []
+        for row in rows:
+            if content_class.classify_text(_compact_json(row), boundary) is None:
+                kept.append(row)
+        clean[table] = kept
+        dropped[table] = len(rows) - len(kept)
+    return clean, dropped
+
+
+def _skip_cycle(
+    cycle_id: str, project_id: str, data_root: Path, outcome: str, detail: str, **extra: Any
+) -> dict[str, Any]:
+    """Emit a ``dream_cycle_skipped`` event and return the skipped result, both carrying ``outcome``."""
+    _emit_dream_event(
+        {
+            "event_type": "dream_cycle_skipped",
+            "cycle_id": cycle_id,
+            "project_id": project_id,
+            "reason": outcome,
+            "outcome": outcome,
+            "detail": detail,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            **extra,
+        },
+        data_root,
+    )
+    return {
+        "status": "skipped", "cycle_id": cycle_id, "reason": outcome, "outcome": outcome,
+        "detail": detail, **extra,
+    }
 
 
 def _extract_kimi_text(stdout: str) -> str:
@@ -396,6 +442,17 @@ def run_dream_cycle(
             "detail": "VNX_DREAM_SCHEDULER_ENABLED=0",
         }
 
+    # Content boundary, before any kimi call: the rows are mined from sessions and may carry
+    # client or personal text. An unconfigured boundary reads as restricted, like the analyzer.
+    boundary = content_class.load_boundary()
+    if not boundary.configured:
+        return _skip_cycle(cycle_id, project_id, _data_root, "content_boundary_unconfigured",
+                           boundary.reason)
+    if (project_id in boundary.client_project_ids
+            and "kimi" not in content_class.allowed_exception_providers(project_id, boundary)):
+        return _skip_cycle(cycle_id, project_id, _data_root, "content_restricted_project",
+                           "client project without a kimi exception")
+
     probe_health = _injection_probe_health(db_path.parent)
     if probe_health not in _PROBE_HEALTH_RUNNABLE:
         _emit_dream_event(
@@ -458,7 +515,15 @@ def run_dream_cycle(
     conn.row_factory = sqlite3.Row
     try:
         patterns = _fetch_patterns(conn, project_id)
+        fetched_rows = sum(len(v) for v in patterns.values())
+        patterns, restricted_rows_dropped = _filter_restricted_rows(patterns, boundary)
         total_input = sum(len(v) for v in patterns.values())
+        if fetched_rows > 0 and total_input == 0:
+            return _skip_cycle(
+                cycle_id, project_id, _data_root, "content_restricted_all_rows",
+                f"all {fetched_rows} rows carry a restricted signal",
+                restricted_rows_dropped=restricted_rows_dropped,
+            )
 
         # Insufficient-data guard: skip cleanly when there are no core patterns to
         # consolidate (e.g. freshly-bootstrapped DB). Kimi is NOT invoked. (GAP-7)
@@ -485,6 +550,14 @@ def run_dream_cycle(
                 "reason": "insufficient_data",
                 "detail": f"core_count={core_count}",
             }
+
+        # The switch decides after the content boundary; both must allow, neither widens the other.
+        decision = provider_switch.decide("kimi", consumer="dream", project_id=project_id)
+        if not decision.allowed:
+            return _skip_cycle(
+                cycle_id, project_id, _data_root, provider_switch.REASON_SWITCHED_OFF,
+                decision.detail(), restricted_rows_dropped=restricted_rows_dropped,
+            )
 
         try:
             consolidation = _dispatch_kimi_consolidation(
@@ -526,6 +599,7 @@ def run_dream_cycle(
             "cycle_id": cycle_id,
             "project_id": project_id,
             "input_count": total_input,
+            "restricted_rows_dropped": restricted_rows_dropped,
             "probe_health": probe_health,
             "consolidation": consolidation,
             "requires_operator_review": True,
@@ -546,6 +620,7 @@ def run_dream_cycle(
                 "project_id": project_id,
                 "probe_health": probe_health,
                 "input_count": total_input,
+                "restricted_rows_dropped": restricted_rows_dropped,
                 "merged_count": merged_count,
                 "dropped_count": dropped_count,
                 "archived_count": archived_count,
@@ -582,6 +657,7 @@ def run_dream_cycle(
             "cycle_id": cycle_id,
             "probe_health": probe_health,
             "input_count": total_input,
+            "restricted_rows_dropped": restricted_rows_dropped,
             "merged_count": merged_count,
             "dropped_count": dropped_count,
             "archived_count": archived_count,

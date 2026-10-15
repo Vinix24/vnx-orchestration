@@ -117,7 +117,7 @@ def test_list_text_on_a_tmp_home(home, tmp_path):
         assert f"  {family:<11} effective on  (default)" in out
     assert "Never switchable:" in out and "operator decision 2b" in out
     assert "Enforcement: NOT enforced yet" in out
-    assert f"pending B ({len(ps.PENDING_B)}):" in out and "pending C (1):" in out and "pending E (1):" in out
+    assert f"pending B ({len(ps.PENDING_B)}):" in out and "pending C (1):" in out and "pending E" not in out
     assert "scripts/gate_runner.py:GateRunner._run_with_stall_detection" in out
     assert "Projects (~/.vnx/projects.json):" in out and "no project registry" in out
     assert "Overrides (VNX_OVERRIDE_PROVIDER_*):\n  none" in out
