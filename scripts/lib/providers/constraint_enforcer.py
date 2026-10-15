@@ -11,7 +11,7 @@ import os
 import re
 import tokenize
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Union
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +69,18 @@ def _match_value(actual: Optional[str], spec: Any) -> bool:
 
 def _override_key(code: str) -> str:
     return "VNX_OVERRIDE_" + code.upper().replace("-", "_")
+
+
+def _override_reason(code: str, env: Mapping[str, str]) -> str:
+    return (env.get(_override_key(code) + "_REASON") or "").strip()
+
+
+# Rule values ``check_constraints`` evaluates. ``load_constraints`` raises on any other value,
+# so a rule added to provider_constraints.yaml without code behind it fails at load and never
+# silently passes at the door. A rule that is known and not applied would go in the second
+# set; the live enforcer has none (the legacy enforcer skips forbid_import).
+APPLIED_RULES = frozenset({"forbid_route", "require_route", "forbid_import", "require_content_route"})
+KNOWN_NOT_APPLIED_RULES: frozenset[str] = frozenset()
 
 
 def _provider_parts(provider: Optional[str], sub_provider: Optional[str]) -> tuple[str, Optional[str]]:
@@ -484,6 +496,64 @@ def _scan_anthropic_sdk_references(
     return scan_anthropic_sdk_text(haystack, patterns=patterns)
 
 
+def content_route_names(provider: Optional[str], sub_provider: Optional[str]) -> frozenset[str]:
+    """Names a provider answers to in ``provider_exceptions`` of the content boundary file.
+
+    The registry key, the key without a ``_harness`` suffix (``deepseek_harness`` -> ``deepseek``)
+    and the provider string itself, so an exception written for ``deepseek`` covers
+    ``deepseek-harness`` and ``litellm:deepseek``.
+    """
+    key = _registry_key_for(provider, sub_provider)
+    names = {_norm(provider)}
+    if key:
+        names.add(key)
+        names.add(key.removesuffix("_harness"))
+    return frozenset(names)
+
+
+def _content_route_verdict(
+    constraint: Mapping[str, Any],
+    provider: Optional[str],
+    sub_provider: Optional[str],
+    content: Any,
+) -> Optional[tuple[str, str]]:
+    """``(code, detail)`` when the content may not take this route, else None.
+
+    ``content`` is a ``DispatchClass`` (or a bare class string). None means the caller declared
+    no content class and the rule does not apply. A provider that resolves to no registry key,
+    ``auto`` included, is not allowed.
+    """
+    if content is None:
+        return None
+    spec = constraint.get("required_content_route") or {}
+    if not isinstance(spec, Mapping):
+        return None
+    cls = content if isinstance(content, str) else getattr(content, "cls", None)
+    classes = {_norm(str(c)) for c in (spec.get("content_class") or [])}
+    unreadable = bool(getattr(content, "unreadable", False))
+    if _norm(cls) not in classes and not unreadable:
+        return None
+    key = _registry_key_for(provider, sub_provider)
+    allowed = {_norm(str(k)) for k in (spec.get("allowed_providers") or [])}
+    if key is not None and key in allowed:
+        return None
+    signal = getattr(content, "signal", "") or "no signal recorded"
+    if _norm(cls) in classes:
+        granted = {_norm(p) for p in getattr(content, "exception_providers", ()) or ()}
+        if granted & content_route_names(provider, sub_provider):
+            return None
+        return (
+            "content-boundary",
+            f"content class {cls!r} (signal: {signal}) may not route to provider "
+            f"{provider!r} (registry key {key!r})",
+        )
+    return (
+        "content-boundary-unreadable",
+        f"a project marker could not be read (signal: {signal}), so the class of this content "
+        f"is unknown and it may not route to provider {provider!r} (registry key {key!r})",
+    )
+
+
 def _violation_from_constraint(
     constraint: Mapping[str, Any],
     prefix: str,
@@ -516,6 +586,14 @@ class ConstraintEnforcer:
         constraints = data.get("constraints", [])
         if not isinstance(constraints, list):
             raise ValueError("constraints key must be a list")
+        for constraint in constraints:
+            rule = constraint.get("rule") if isinstance(constraint, Mapping) else None
+            if rule not in APPLIED_RULES and rule not in KNOWN_NOT_APPLIED_RULES:
+                cid = constraint.get("id") if isinstance(constraint, Mapping) else constraint
+                raise ValueError(
+                    f"constraint {cid!r} in {self._path} has unknown rule type {rule!r}; "
+                    f"known: {sorted(APPLIED_RULES | KNOWN_NOT_APPLIED_RULES)}"
+                )
         self._constraints = constraints
 
     def check_constraints(
@@ -530,7 +608,11 @@ class ConstraintEnforcer:
         instruction_text: Optional[str] = None,
         env: Optional[Mapping[str, str]] = None,
         check_registry: bool = False,
+        content_class: Optional[Union[str, Any]] = None,
     ) -> list[ConstraintViolation]:
+        """Evaluate every constraint. ``content_class`` is a ``content_class.DispatchClass`` or a
+        bare class string; None means the caller declared none and ``require_content_route`` does
+        not apply."""
         env_map = env or os.environ
         violations: list[ConstraintViolation] = []
 
@@ -539,6 +621,9 @@ class ConstraintEnforcer:
             code = str(constraint.get("id") or constraint.get("code") or "unknown")
             override_allowed = bool(constraint.get("override_allowed", False))
             override_applied = override_allowed and env_map.get(_override_key(code)) == "1"
+            if override_applied and constraint.get("override_requires_reason") \
+                    and not _override_reason(code, env_map):
+                override_applied = False
 
             violation: Optional[ConstraintViolation] = None
             if rule == "forbid_import":
@@ -562,6 +647,18 @@ class ConstraintEnforcer:
                     violation = _violation_from_constraint(
                         constraint,
                         "Required route not met",
+                        override_applied=override_applied,
+                    )
+            elif rule == "require_content_route":
+                content_verdict = _content_route_verdict(constraint, provider, sub_provider, content_class)
+                if content_verdict is not None:
+                    verdict_code, detail = content_verdict
+                    reason = str(constraint.get("reason") or "no reason given")
+                    suffix = f" Override reason: {_override_reason(code, env_map)}" if override_applied else ""
+                    violation = ConstraintViolation(
+                        code=verdict_code,
+                        severity="warn" if override_applied else str(constraint.get("audit_severity") or "blocking"),
+                        message=f"Route forbidden: {detail}. {reason}{suffix}",
                         override_applied=override_applied,
                     )
 

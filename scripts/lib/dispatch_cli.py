@@ -20,7 +20,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Optional, Set
+from typing import Any, Optional, Set
 
 _LIB_DIR = Path(__file__).resolve().parent
 if str(_LIB_DIR) not in sys.path:
@@ -2175,6 +2175,25 @@ def _check_stop_conditions_verdict(
     )
 
 
+def _classify_door_content(vspec: ValidatedSpec):
+    """Class of the work behind this dispatch: cwd, project root, declared paths, project id, text.
+
+    The project id and the cwd both say "dev" for a panel run from a client folder, so neither
+    is the primary signal alone: the most restrictive class over all of them decides.
+    """
+    from content_class import classify_dispatch
+    from dispatch_worktree_isolation import resolve_consumer_project_root
+
+    spec = vspec.spec
+    return classify_dispatch(
+        cwd=Path.cwd(),
+        project_root=resolve_consumer_project_root(),
+        dispatch_paths=spec.dispatch_paths,
+        project_id=spec.project_id,
+        instruction=vspec.instruction_text,
+    )
+
+
 def build_runtime_snapshot(
     vspec: ValidatedSpec,
     *,
@@ -2281,8 +2300,32 @@ def build_runtime_snapshot(
     if is_claude_lane:
         via = "headless"
 
+    # Content boundary (F2 part 2): classify where this dispatch comes from ONCE and hand the
+    # class to both constraint checks below. Fail-closed: a classifier that cannot run blocks.
+    content_class: Optional[Any] = None
+    content_verdicts: tuple[ConstraintVerdict, ...] = ()
+    try:
+        content_class = _classify_door_content(vspec)
+    except Exception as exc:
+        content_verdicts = (ConstraintVerdict(
+            code="content-boundary-unavailable",
+            severity="blocking",
+            message=f"Content classifier unavailable — fail-closed: {exc}",
+        ),)
+    if content_class is not None and not content_class.configured:
+        content_verdicts = content_verdicts + (ConstraintVerdict(
+            code="content-boundary-unconfigured",
+            severity="warn",
+            message=(
+                "no content boundary file is configured (~/.vnx/content_boundary.json or "
+                "VNX_CONTENT_BOUNDARY_FILE): client and personal roots are unknown, so only "
+                "project markers, the project registry and the instruction text can classify "
+                "this dispatch"
+            ),
+        ),)
+
     # P0-1: constraint check with instruction_text + check_registry=True; FAIL-CLOSED on error
-    constraint_verdicts: tuple[ConstraintVerdict, ...] = ()
+    constraint_verdicts: tuple[ConstraintVerdict, ...] = content_verdicts
     try:
         raw_violations = _constraint_check(
             provider=provider_value,
@@ -2294,8 +2337,9 @@ def build_runtime_snapshot(
             env=os.environ,
             check_registry=True,
             instruction_text=vspec.instruction_text,
+            content_class=content_class,
         )
-        constraint_verdicts = tuple(
+        constraint_verdicts = constraint_verdicts + tuple(
             ConstraintVerdict(
                 code=v.code,
                 severity=v.severity,
@@ -2304,6 +2348,14 @@ def build_runtime_snapshot(
             )
             for v in raw_violations
         )
+        for v in raw_violations:
+            if v.override_applied and v.code.startswith("content-boundary"):
+                logger.warning(
+                    "[dispatch_cli] AUDIT content-boundary-override-applied dispatch=%s "
+                    "provider=%s reason=%s",
+                    spec.dispatch_id, provider_value,
+                    (os.environ.get("VNX_OVERRIDE_CONTENT_BOUNDARY_REASON") or "").strip(),
+                )
     except Exception as exc:
         constraint_verdicts = (ConstraintVerdict(
             code="registry-unavailable",
@@ -2334,6 +2386,7 @@ def build_runtime_snapshot(
                 via=via,
                 env=os.environ,
                 check_registry=False,
+                content_class=content_class,
             )
         except Exception as exc:
             raw_violations = []

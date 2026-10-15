@@ -493,3 +493,134 @@ def exception_applies(origin: Origin, provider: str, boundary: Boundary) -> bool
         and origin.source == SRC_CLIENT_PROJECT_ID
         and provider.strip().lower() in allowed_exception_providers(origin.project_id, boundary)
     )
+
+
+# ---------------------------------------------------------------------------
+# Dispatch classification (the door, provider_dispatch and the panel runner)
+# ---------------------------------------------------------------------------
+
+_ACCESS_SUFFIXES = frozenset({"read", "write", "read_write", "create"})
+_SIGNAL_LABELS = {
+    "cwd": "cwd",
+    "project_root": "project root",
+    "dispatch_path": "dispatch path",
+    "project_id": "project id",
+    "instruction": "instruction text",
+    "extra_path": "path argument",
+}
+
+
+@dataclass(frozen=True)
+class DispatchClass:
+    """Class of one dispatch with the signal that decided it.
+
+    ``cls`` is the most restrictive class over every signal. ``signal`` names the deciding
+    signal and its source, never a path. ``unreadable`` is True when no restricted signal was
+    found but a project marker on the way up could not be read: ``cls`` is then ``unknown``
+    with source ``marker_unreadable``. ``exception_providers`` is non-empty only when every
+    restricted signal is a project id that grants those providers (``provider_exceptions``).
+    """
+
+    cls: str
+    project_id: Optional[str] = None
+    source: str = SRC_NONE
+    signal: str = ""
+    unreadable: bool = False
+    exception_providers: FrozenSet[str] = frozenset()
+    configured: bool = True
+
+    @property
+    def restricted(self) -> bool:
+        return self.cls in DISPATCH_RESTRICTED
+
+
+def _entry_path(entry: object) -> str:
+    """Path part of one dispatch-path entry: a ``DispatchPath``-like object or a raw string."""
+    raw = getattr(entry, "path", entry)
+    text = str(raw).strip()
+    if ":" in text:
+        head, _, suffix = text.rpartition(":")
+        if suffix in _ACCESS_SUFFIXES:
+            text = head
+    return text
+
+
+def _strip_glob(path: str) -> str:
+    """Leading components of ``path`` up to the first one with a glob character."""
+    parts = path.split("/")
+    for index, part in enumerate(parts):
+        if any(c in part for c in _GLOB_CHARS):
+            return "/".join(parts[:index]) or ("/" if path.startswith("/") else ".")
+    return path
+
+
+def classify_dispatch(
+    *,
+    cwd: Optional[os.PathLike] = None,
+    project_root: Optional[os.PathLike] = None,
+    dispatch_paths: Iterable[object] = (),
+    project_id: Optional[str] = None,
+    instruction: Optional[str] = None,
+    extra_paths: Iterable[os.PathLike] = (),
+    boundary: Optional[Boundary] = None,
+    registry_path: Optional[os.PathLike] = None,
+) -> DispatchClass:
+    """Most restrictive class over where a dispatch comes from and what it names.
+
+    Signals: the cwd, the project root, every dispatch path (relative ones resolved against
+    the project root), ``extra_paths`` (the panel runner's context file and output path), the
+    project id against ``client_project_ids``, and the instruction text. On equal rank a signal
+    that is not a bare project id decides, so a cwd under a client root outranks a project id
+    that carries a provider exception.
+    """
+    b = boundary if boundary is not None else load_boundary()
+    signals: List[Tuple[str, Origin]] = []
+    signals.append(("cwd", classify_path(cwd, b, registry_path)))
+    signals.append(("project_root", classify_path(project_root, b, registry_path)))
+
+    base = Path(project_root) if project_root is not None else None
+    for entry in dispatch_paths or ():
+        raw = _strip_glob(_entry_path(entry))
+        if not raw:
+            continue
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute() and base is not None:
+            candidate = base / candidate
+        elif not candidate.is_absolute():
+            continue
+        signals.append(("dispatch_path", classify_path(candidate, b, registry_path)))
+    for extra in extra_paths or ():
+        if extra is not None and str(extra).strip():
+            signals.append(("extra_path", classify_path(extra, b, registry_path)))
+
+    if project_id and project_id in b.client_project_ids:
+        signals.append(("project_id", Origin(CLIENT, project_id, SRC_CLIENT_PROJECT_ID)))
+    text_hit = classify_text(instruction, b)
+    if text_hit is not None:
+        signals.append(("instruction", text_hit))
+
+    def _describe(label: str, origin: Origin) -> str:
+        return f"{_SIGNAL_LABELS[label]} ({origin.source})"
+
+    restricted = [(label, o) for label, o in signals if o.cls in DISPATCH_RESTRICTED]
+    unreadable = [(label, o) for label, o in signals if o.source == SRC_MARKER_UNREADABLE]
+
+    if restricted:
+        label, origin = max(
+            restricted, key=lambda item: (_RANK[item[1].cls], item[1].source != SRC_CLIENT_PROJECT_ID))
+        granted: Optional[FrozenSet[str]] = None
+        if not unreadable and all(o.source == SRC_CLIENT_PROJECT_ID for _, o in restricted):
+            for pid in {o.project_id for _, o in restricted}:
+                allowed = allowed_exception_providers(pid, b)
+                granted = allowed if granted is None else granted & allowed
+        return DispatchClass(origin.cls, origin.project_id, origin.source, _describe(label, origin),
+                             exception_providers=granted or frozenset(), configured=b.configured)
+
+    if unreadable:
+        label, origin = unreadable[0]
+        return DispatchClass(UNKNOWN, None, SRC_MARKER_UNREADABLE, _describe(label, origin),
+                             unreadable=True, configured=b.configured)
+
+    label, origin = max(signals, key=lambda item: _RANK.get(item[1].cls, 0))
+    return DispatchClass(origin.cls, origin.project_id, origin.source, _describe(label, origin),
+                         configured=b.configured)

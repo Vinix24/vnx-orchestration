@@ -1337,7 +1337,11 @@ def _run_claude_headless_seat(
     return report
 
 
-def _seat_child_env(base: Path, total_deadline_seconds: Optional[int]) -> Dict[str, str]:
+def _seat_child_env(
+    base: Path,
+    total_deadline_seconds: Optional[int],
+    extra_env: Optional[Dict[str, str]] = None,
+) -> Dict[str, str]:
     """The environment ``_make_default_dispatcher`` hands a provider_dispatch child.
 
     A copy of this process's environment — never ``os.environ`` itself — with the
@@ -1350,6 +1354,8 @@ def _seat_child_env(base: Path, total_deadline_seconds: Optional[int]) -> Dict[s
     env["VNX_DATA_DIR_EXPLICIT"] = "1"
     if total_deadline_seconds is not None:
         env["VNX_TOTAL_DEADLINE"] = str(total_deadline_seconds)
+    if extra_env:
+        env.update(extra_env)
     return env
 
 
@@ -1357,6 +1363,7 @@ def _make_default_dispatcher(
     data_dir: Optional[str], timeout_seconds: int,
     *, role: str = "plan-reviewer", base_ref: Optional[str] = None,
     total_deadline_seconds: Optional[int] = None,
+    extra_env: Optional[Dict[str, str]] = None,
 ) -> DispatcherFn:
     """Real dispatcher: run a panelist through its governed lane, return the report text.
 
@@ -1395,6 +1402,11 @@ def _make_default_dispatcher(
     plan-gate and deliberation-panel callers exactly as they were. The claude branch
     keeps running its seat with ``timeout_seconds`` as its deadline; no review gate
     routes through it.
+
+    ``extra_env``: F2 part 2 — variables for the provider_dispatch child's environment ONLY
+    (the content-boundary override and its reason, set by ``scripts/panel.py`` when the
+    operator passes ``--allow-external-seats``). This process's ``os.environ`` is never
+    touched, and the claude seat, which runs in-process on an allowed lane, does not read it.
     """
     base = _resolve_data_dir(data_dir)
 
@@ -1408,7 +1420,7 @@ def _make_default_dispatcher(
         # never found. The claude branch pins the same two keys — see
         # _run_claude_headless_seat, which sets them on os.environ because on that
         # lane they must bind in this process as well as in the child.
-        env = _seat_child_env(base, total_deadline_seconds)
+        env = _seat_child_env(base, total_deadline_seconds, extra_env)
         _tmp_doc_path: Optional[str] = None
         try:
             if provider in _CLAUDE_PROVIDERS:

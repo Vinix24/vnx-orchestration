@@ -1622,6 +1622,33 @@ def _emit_refusal_receipt(
             fcntl.flock(fh, fcntl.LOCK_UN)
 
 
+def _classify_dispatch_content(args: argparse.Namespace):
+    """Content class of this dispatch from cwd, project root, declared paths, project id and text.
+
+    Same signals as the door (dispatch_cli._classify_door_content). A classifier that cannot
+    run is a blocking violation, never a silent pass: the refusal path then writes its receipt.
+    """
+    from providers.constraint_enforcer import ConstraintViolation, ConstraintViolationError
+
+    try:
+        from content_class import classify_dispatch
+        from dispatch_worktree_isolation import resolve_consumer_project_root
+
+        return classify_dispatch(
+            cwd=Path.cwd(),
+            project_root=resolve_consumer_project_root(),
+            dispatch_paths=_resolve_dispatch_paths(getattr(args, "dispatch_paths", "") or "") or (),
+            project_id=os.environ.get("VNX_PROJECT_ID"),
+            instruction=args.instruction,
+        )
+    except Exception as exc:
+        raise ConstraintViolationError(ConstraintViolation(
+            code="content-boundary-unavailable",
+            severity="blocking",
+            message=f"Content classifier unavailable - fail-closed: {exc}",
+        )) from exc
+
+
 def _check_constraints(args: argparse.Namespace, provider: str):
     """Run provider_constraints.yaml pre-flight and raise on blocking violations."""
     from providers.constraint_enforcer import ConstraintViolationError, check_constraints  # noqa: PLC0415
@@ -1639,6 +1666,7 @@ def _check_constraints(args: argparse.Namespace, provider: str):
         sub_provider = "zai"
     model = _constraint_model_for_provider(args, provider)
     via = _constraint_via_for_provider(provider, sub_provider)
+    content_class = _classify_dispatch_content(args)
     violations = check_constraints(
         provider=provider,
         sub_provider=sub_provider,
@@ -1649,11 +1677,18 @@ def _check_constraints(args: argparse.Namespace, provider: str):
         instruction_text=args.instruction,
         env=os.environ,
         check_registry=_constraint_registry_check_enabled(args, provider),
+        content_class=content_class,
     )
     for violation in violations:
         if violation.severity == "blocking":
             raise ConstraintViolationError(violation)
-        if violation.override_applied:
+        if violation.override_applied and violation.code.startswith("content-boundary"):
+            logger.warning(
+                "[%s] content boundary override applied dispatch=%s reason=%s",
+                violation.code, args.dispatch_id,
+                (os.environ.get("VNX_OVERRIDE_CONTENT_BOUNDARY_REASON") or "").strip(),
+            )
+        elif violation.override_applied:
             logger.warning("[%s] warning overridden by env flag: %s", violation.code, violation.message)
         else:
             logger.warning("[%s] %s", violation.code, violation.message)

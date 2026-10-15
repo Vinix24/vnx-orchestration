@@ -3,7 +3,10 @@
 
 Loads the constraints SSOT from scripts/lib/providers/provider_constraints.yaml
 and enforces forbid_route / require_route rules before any provider handler runs.
-forbid_import rules are CI-only (grep-based) and skipped at runtime.
+forbid_import rules are CI-only (grep-based) and skipped at runtime. require_content_route
+needs a content class this enforcer is never given; the live enforcer
+(providers/constraint_enforcer.py) applies it and this one skips it. Any other rule value
+makes the load raise.
 
 PR-SR-2: initial implementation.
 """
@@ -18,6 +21,11 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 _CONSTRAINTS_PATH = Path(__file__).parent / "providers" / "provider_constraints.yaml"
+
+# Rule values ``enforce`` evaluates, and rule values it knows and deliberately does not apply.
+# ``load_constraints`` raises on a value in neither set.
+APPLIED_RULES = frozenset({"forbid_route", "require_route"})
+KNOWN_NOT_APPLIED_RULES = frozenset({"forbid_import", "require_content_route"})
 
 
 class HardConstraintViolation(RuntimeError):
@@ -103,6 +111,14 @@ class ConstraintEnforcer:
         self._constraints = data.get("constraints", [])
         if not isinstance(self._constraints, list):
             raise ValueError("constraints key must be a list")
+        for constraint in self._constraints:
+            rule = constraint.get("rule") if isinstance(constraint, dict) else None
+            if rule not in APPLIED_RULES and rule not in KNOWN_NOT_APPLIED_RULES:
+                cid = constraint.get("id") if isinstance(constraint, dict) else constraint
+                raise ValueError(
+                    f"constraint {cid!r} in {self._path} has unknown rule type {rule!r}; "
+                    f"known: {sorted(APPLIED_RULES | KNOWN_NOT_APPLIED_RULES)}"
+                )
 
     def _is_overridden(self, constraint: Dict[str, Any]) -> bool:
         if not constraint.get("override_allowed", False):
@@ -135,7 +151,7 @@ class ConstraintEnforcer:
             enforcement = c.get("enforcement", "")
             severity = c.get("audit_severity", "info")
 
-            if rule == "forbid_import":
+            if rule in KNOWN_NOT_APPLIED_RULES:
                 continue
 
             if rule == "forbid_route":
