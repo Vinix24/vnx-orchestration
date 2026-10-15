@@ -1,0 +1,46 @@
+-- 0034_runtime_project_id_completion.sql
+-- OI-2026: column drift from migration 0015.
+--
+-- Purpose: give project_id to the seven runtime tables of 0015's runtime
+--          partition on stores that missed it, and create the ADR-007 composite
+--          UNIQUE index ux_<table>_pid on every table of
+--          coordination_db._RC_COMPOSITE_KEYS.
+--
+-- Measured before this migration (stores at user_version 33, 2026-10-15):
+--   - vnx-dev, mission-control, seocrawler-v2, pacompany-engine: retry_budgets,
+--     retry_state, escalation_log, execution_targets, inbound_inbox,
+--     recommendations and recommendation_outcomes have no project_id;
+--   - sales-copilot: the seven have project_id TEXT NOT NULL without a default
+--     and composite natural keys (a rebuilt shape);
+--   - every store but pacompany-engine misses ux_<table>_pid on
+--     coordination_events, incident_log and intelligence_injections, and every
+--     store misses it on worker_pool_membership (0015 runs before 0020 adds it).
+--
+-- Target shape:
+--   - the seven, where the column is missing:
+--       ALTER TABLE <table> ADD COLUMN project_id TEXT NOT NULL DEFAULT '<store id>';
+--       CREATE INDEX IF NOT EXISTS idx_<table>_project ON <table>(project_id);
+--     where '<store id>' is the store's own project id. A table that already has
+--     the column keeps its column, its natural keys and its table SQL.
+--   - every table of _RC_COMPOSITE_KEYS that exists (eleven tables):
+--       CREATE UNIQUE INDEX IF NOT EXISTS ux_<table>_pid ON <table>(project_id, id);
+--   No table is rebuilt; no row is rewritten.
+--
+-- ADR-007 binding: the composite UNIQUE over (project_id, id) is the ADR-007
+--          key for these single-column-PK tables. The single-column
+--          idx_<table>_project is a lookup index, not a uniqueness constraint.
+--
+-- This file is not executed as-is. The default is the store's id, resolved
+-- fail-closed from the DB path (resolve_init_project_id, strict), and ALTER TABLE
+-- ADD COLUMN has no IF NOT EXISTS. Both need code: the runner below produces this
+-- shape inside one SAVEPOINT, checks it, and only then stamps user_version 34.
+-- An unresolvable store, a source conflict, an index that cannot be created or a
+-- failed post-condition rolls back and leaves user_version at 33.
+--
+-- No down migration: see the runner's docstring. The rollback path is the
+-- pre-0034 backup of the store; code at v1.7.1 writes into the 0034 shape
+-- unchanged.
+--
+-- Target DB:  runtime_coordination.db
+-- Applied by: scripts/lib/migrations/apply_0034.py (via auto_apply.py)
+-- Tested by:  tests/test_migration_0034_project_id_completion.py
