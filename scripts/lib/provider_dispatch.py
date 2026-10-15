@@ -820,7 +820,7 @@ _UNMARKED_REPORT_SUFFIX = ".deadline-unmarked"
 class DeadlineMarkError(RuntimeError):
     """The lane's deadline mark could not be put on the report on disk (OI-2069).
 
-    A RuntimeError, so the report step's retry loop in ``_emit_governance``
+    A RuntimeError, so the report step's retry loop (``_emit_marked_report``)
     retries it like any failed report write. Every way the mark can fail ends
     here: a read error, a report that is not UTF-8, a composed text the readers'
     parser does not read as cut off, and a write error.
@@ -1704,13 +1704,27 @@ def _emit_governance(
             preserve_partial=status != "success",
         )
 
+    _emit_marked_report(_write_report, frontmatter, report_path)
+
+
+def _emit_marked_report(write_report: Any, frontmatter: Dict[str, Any], report_path: Path) -> None:
+    """The report step of ``_emit_governance``: write the report, put the deadline mark on it, retry.
+
+    *write_report* writes the unified report with the frontmatter it is given
+    and returns the path it wrote; *report_path* is the canonical path the step
+    starts from. A RuntimeError from either the write or the mark retries up to
+    _EMIT_MAX_RETRIES times with backoff. A mark that still fails on the last
+    attempt sets the worker's report aside (``_set_unmarkable_report_aside``);
+    any other persistent failure raises to the caller. An exception that is
+    not a RuntimeError is not retried.
+    """
     def _write_lane_report(aside_name: Optional[str]) -> Path:
         set_aside = {"worker_report_set_aside": aside_name} if aside_name else {}
-        return _write_report({**frontmatter, **set_aside})
+        return write_report({**frontmatter, **set_aside})
 
     for attempt in range(_EMIT_MAX_RETRIES):
         try:
-            report_path = _write_report(frontmatter)
+            report_path = write_report(frontmatter)
             # OI-2069: emit_unified_report keeps a contract-valid report the
             # worker already wrote, so the deadline pair in `frontmatter` never
             # reached it. The mark goes onto the report on disk here, inside the
