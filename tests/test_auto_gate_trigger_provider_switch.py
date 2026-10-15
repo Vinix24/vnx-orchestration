@@ -18,7 +18,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib"))
 
-import auto_gate_trigger  # noqa: E402
+import auto_gate_trigger  # after the sys.path insert above
 
 SWITCHED_OFF = "provider_switched_off"
 

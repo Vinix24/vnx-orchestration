@@ -20,7 +20,7 @@ TESTS_DIR = Path(__file__).resolve().parent
 if str(TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(TESTS_DIR))
 
-from _gate_harness import GATE_SH, install_gate_lib_modules  # noqa: E402
+from _gate_harness import GATE_SH, install_gate_lib_modules  # after the sys.path insert above
 
 PR = "1281"
 PR_HEAD = "dispatch/20261015-ps-c-review-gates"

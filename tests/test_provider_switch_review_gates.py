@@ -33,7 +33,7 @@ for _p in (str(VNX_ROOT / "scripts"), str(VNX_ROOT / "scripts" / "lib")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-import config_registry as cr  # noqa: E402
+import config_registry as cr  # after the sys.path insert above
 
 HEAD = "c" * 40
 OTHER_HEAD = "d" * 40

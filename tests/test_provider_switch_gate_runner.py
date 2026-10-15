@@ -24,11 +24,12 @@ for _p in (str(VNX_ROOT / "scripts"), str(VNX_ROOT / "scripts" / "lib")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-import gate_recorder  # noqa: E402
-import gate_runner  # noqa: E402
-import provider_reachability  # noqa: E402
-import provider_switch  # noqa: E402
-from gate_runner import GateRunner  # noqa: E402
+# Imported after the sys.path insert above.
+import gate_recorder
+import gate_runner
+import provider_reachability
+import provider_switch
+from gate_runner import GateRunner
 
 PR = 7312
 HEAD = "e" * 40

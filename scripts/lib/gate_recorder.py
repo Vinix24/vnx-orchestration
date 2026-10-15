@@ -135,7 +135,7 @@ def switch_project_id(state_dir: Optional[Path]) -> Optional[str]:
     """
     if state_dir is None:
         return None
-    import vnx_paths  # noqa: PLC0415  (deferred: pulls in data_dir_guard / project_root)
+    import vnx_paths  # deferred import: pulls in data_dir_guard / project_root
 
     return vnx_paths.project_id_from_state_dir(Path(state_dir)) or None
 
