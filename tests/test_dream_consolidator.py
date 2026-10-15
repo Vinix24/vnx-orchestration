@@ -1351,3 +1351,224 @@ class TestPromptCarriesAllInputAsValidJson:
         # text-heavy rows dominate, so batching (not compaction) carries the fit.
         assert compact < indented
         assert compact > 50_000
+
+
+# ---------------------------------------------------------------------------
+# Content boundary and provider switch (provider-schakelaar E)
+# ---------------------------------------------------------------------------
+
+_CANARY = "CANARYTOKEN0123456789abcdef"
+
+
+class TestDreamContentBoundaryAndSwitch:
+    """The dream cycle sends pattern rows to kimi. The content boundary decides which rows may
+    go (and whether the project may use kimi at all), then the provider switch decides whether
+    kimi may be called. ``kimi_exec`` is patched in every test: no kimi process starts."""
+
+    @pytest.fixture
+    def world(self, tmp_path, monkeypatch):
+        client_root = tmp_path / "clients-root"
+        personal_root = tmp_path / "personal-root"
+        client_root.mkdir()
+        personal_root.mkdir()
+        token_file = tmp_path / "canary.txt"
+        token_file.write_text(_CANARY, encoding="utf-8")
+        boundary_file = tmp_path / "boundary" / "content_boundary.json"
+        boundary_file.parent.mkdir()
+        monkeypatch.setenv("VNX_CONTENT_BOUNDARY_FILE", str(boundary_file))
+        monkeypatch.setenv("VNX_PROVIDER_SWITCH_FILE", str(tmp_path / "switch" / "providers.json"))
+        for name in list(__import__("os").environ):
+            if name.startswith("VNX_OVERRIDE_PROVIDER_"):
+                monkeypatch.delenv(name)
+        data_root = tmp_path / ".vnx-data"
+        db_path = tmp_path / "state" / "quality_intelligence.db"
+        db_path.parent.mkdir()
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript(_DREAM_SCHEMA)
+        conn.commit()
+        conn.close()
+        _make_fresh_receipts(data_root)
+
+        def write_boundary(**extra):
+            document = {"version": 1, "client_roots": [str(client_root)],
+                        "personal_roots": [str(personal_root)],
+                        "canary_token_file": str(token_file), **extra}
+            boundary_file.write_text(json.dumps(document), encoding="utf-8")
+
+        def seed(project_id, title, description="desc"):
+            conn = sqlite3.connect(str(db_path))
+            conn.execute(
+                "INSERT INTO success_patterns (project_id, title, description) VALUES (?, ?, ?)",
+                (project_id, title, description),
+            )
+            conn.commit()
+            conn.close()
+
+        def events():
+            lines = []
+            for path in sorted((data_root / "events" / "dream").glob("*.ndjson")):
+                lines += [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines() if x]
+            return lines
+
+        write_boundary()
+        return {"client_root": client_root, "personal_root": personal_root, "db": db_path,
+                "data_root": data_root, "write_boundary": write_boundary, "seed": seed,
+                "events": events, "boundary_file": boundary_file, "tmp": tmp_path}
+
+    @staticmethod
+    def _run(world, project_id="proj-x"):
+        with patch("kimi_wrapper.kimi_exec", return_value=_KIMI_STREAM_JSON) as kimi:
+            result = consolidator.run_dream_cycle(
+                project_id, world["db"], dry_run=True, data_root=world["data_root"])
+        return result, kimi
+
+    @staticmethod
+    def _prompts(kimi):
+        return [call.args[0] for call in kimi.call_args_list]
+
+    def test_unconfigured_boundary_makes_no_kimi_call(self, world):
+        world["boundary_file"].unlink()
+        world["seed"]("proj-x", "clean")
+        result, kimi = self._run(world)
+        kimi.assert_not_called()
+        assert result["status"] == "skipped" and result["outcome"] == "content_boundary_unconfigured"
+        event = [e for e in world["events"]() if e["event_type"] == "dream_cycle_skipped"][-1]
+        assert event["outcome"] == "content_boundary_unconfigured" and event["detail"]
+
+    def test_client_project_without_exception_makes_no_kimi_call(self, world):
+        world["write_boundary"](client_project_ids=["proj-x"])
+        world["seed"]("proj-x", "clean")
+        result, kimi = self._run(world)
+        kimi.assert_not_called()
+        assert result["outcome"] == "content_restricted_project"
+        assert [e["outcome"] for e in world["events"]()] == ["content_restricted_project"]
+
+    def test_client_project_with_a_kimi_exception_reaches_kimi(self, world):
+        world["write_boundary"](client_project_ids=["proj-x"],
+                                provider_exceptions={"proj-x": ["kimi"]})
+        world["seed"]("proj-x", "clean row")
+        result, kimi = self._run(world)
+        assert kimi.call_count == 1
+        assert result["input_count"] == 1
+
+    def test_client_project_with_an_exception_for_another_provider_is_refused(self, world):
+        world["write_boundary"](client_project_ids=["proj-x"],
+                                provider_exceptions={"proj-x": ["deepseek"]})
+        world["seed"]("proj-x", "clean row")
+        result, kimi = self._run(world)
+        kimi.assert_not_called()
+        assert result["outcome"] == "content_restricted_project"
+
+    def test_row_naming_a_concrete_client_path_is_left_out(self, world):
+        concrete = world["client_root"] / "acme" / "notes.md"
+        world["seed"]("proj-x", "clean row")
+        world["seed"]("proj-x", "restricted row", description=f"see {concrete}")
+        result, kimi = self._run(world)
+        assert kimi.call_count == 1
+        prompt = self._prompts(kimi)[0]
+        assert "clean row" in prompt
+        assert "restricted row" not in prompt and str(concrete) not in prompt
+        assert result["restricted_rows_dropped"]["success_patterns"] == 1
+        assert result["input_count"] == 1
+
+    def test_row_naming_a_personal_path_is_left_out(self, world):
+        concrete = world["personal_root"] / "health" / "log.md"
+        world["seed"]("proj-x", "clean row")
+        world["seed"]("proj-x", "personal row", description=str(concrete))
+        _, kimi = self._run(world)
+        assert "personal row" not in self._prompts(kimi)[0]
+
+    def test_row_with_the_canary_is_left_out(self, world):
+        world["seed"]("proj-x", "clean row")
+        world["seed"]("proj-x", "canary row", description=f"x {_CANARY} y")
+        result, kimi = self._run(world)
+        prompt = self._prompts(kimi)[0]
+        assert "canary row" not in prompt and _CANARY not in prompt
+        assert result["restricted_rows_dropped"]["success_patterns"] == 1
+
+    def test_a_glob_under_the_root_is_not_a_concrete_path(self, world):
+        world["seed"]("proj-x", "glob row", description=f"{world['client_root']}/*/x")
+        result, kimi = self._run(world)
+        assert kimi.call_count == 1 and result["restricted_rows_dropped"]["success_patterns"] == 0
+
+    def test_dropped_rows_are_counted_and_their_text_never_emitted(self, world):
+        concrete = world["client_root"] / "acme" / "secret-name.md"
+        world["seed"]("proj-x", "clean row")
+        world["seed"]("proj-x", "dropped row", description=f"{concrete}")
+        result, kimi = self._run(world)
+        completed = [e for e in world["events"]() if e["event_type"] == "dream_cycle_completed"][-1]
+        assert completed["restricted_rows_dropped"] == {
+            "success_patterns": 1, "antipatterns": 0, "intelligence_injections": 0}
+        review = Path(result["review_path"]).read_text(encoding="utf-8")
+        events_text = json.dumps(world["events"]())
+        for text in (events_text, review):
+            assert "secret-name" not in text and "dropped row" not in text
+
+    def test_every_row_restricted_makes_no_kimi_call(self, world):
+        concrete = world["client_root"] / "acme" / "x.md"
+        world["seed"]("proj-x", "row one", description=str(concrete))
+        world["seed"]("proj-x", f"row two {_CANARY}")
+        result, kimi = self._run(world)
+        kimi.assert_not_called()
+        assert result["outcome"] == "content_restricted_all_rows"
+        assert result["restricted_rows_dropped"]["success_patterns"] == 2
+
+    def test_clean_row_reaches_kimi(self, world):
+        world["seed"]("proj-x", "clean row")
+        result, kimi = self._run(world)
+        assert kimi.call_count == 1 and "clean row" in self._prompts(kimi)[0]
+        assert result["restricted_rows_dropped"] == {
+            "success_patterns": 0, "antipatterns": 0, "intelligence_injections": 0}
+
+    @staticmethod
+    def _switch(world, document):
+        path = Path(__import__("os").environ["VNX_PROVIDER_SWITCH_FILE"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(document), encoding="utf-8")
+
+    @staticmethod
+    def _entry(enabled):
+        return {"enabled": enabled, "changed_at": "2026-10-15T08:00:00Z",
+                "changed_by": "op", "reason": "test"}
+
+    def test_kimi_switched_off_makes_no_kimi_call_and_names_the_outcome(self, world):
+        self._switch(world, {"version": 1, "global": {"kimi": self._entry(False)}, "projects": {}})
+        world["seed"]("proj-x", "clean row")
+        result, kimi = self._run(world)
+        kimi.assert_not_called()
+        assert result["status"] == "skipped" and result["outcome"] == "provider_switched_off"
+        event = [e for e in world["events"]() if e["event_type"] == "dream_cycle_skipped"][-1]
+        assert event["outcome"] == "provider_switched_off" and "family=kimi" in event["detail"]
+
+    def test_project_override_on_beats_a_global_off(self, world):
+        self._switch(world, {"version": 1, "global": {"kimi": self._entry(False)},
+                             "projects": {"proj-x": {"kimi": self._entry(True)}}})
+        world["seed"]("proj-x", "clean row")
+        _, kimi = self._run(world)
+        assert kimi.call_count == 1
+
+    def test_the_switch_does_not_widen_the_boundary(self, world):
+        self._switch(world, {"version": 1, "global": {"kimi": self._entry(True)}, "projects": {}})
+        world["write_boundary"](client_project_ids=["proj-x"])
+        world["seed"]("proj-x", "clean row")
+        result, kimi = self._run(world)
+        kimi.assert_not_called()
+        assert result["outcome"] == "content_restricted_project"
+
+    def test_the_boundary_does_not_widen_the_switch(self, world):
+        self._switch(world, {"version": 1, "global": {"kimi": self._entry(False)}, "projects": {}})
+        world["write_boundary"](client_project_ids=["proj-x"],
+                                provider_exceptions={"proj-x": ["kimi"]})
+        world["seed"]("proj-x", "clean row")
+        result, kimi = self._run(world)
+        kimi.assert_not_called()
+        assert result["outcome"] == "provider_switched_off"
+
+    def test_unreadable_switch_file_refuses_kimi(self, world):
+        path = Path(__import__("os").environ["VNX_PROVIDER_SWITCH_FILE"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{broken", encoding="utf-8")
+        world["seed"]("proj-x", "clean row")
+        result, kimi = self._run(world)
+        kimi.assert_not_called()
+        assert result["outcome"] == "provider_switched_off"
