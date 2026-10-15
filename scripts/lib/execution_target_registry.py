@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from runtime_coordination import (
     _append_event,
@@ -187,6 +187,22 @@ def _validate_capabilities(capabilities: List[str]) -> None:
             )
 
 
+def _insert_target_row(conn: Any, row: Tuple[Any, ...]) -> None:
+    """INSERT one execution_targets row. *row* holds the ten columns before
+    project_id, in table order; project_id is stamped explicitly (OI-2026)."""
+    stamp = project_id_stamp(conn, "execution_targets")
+    conn.execute(
+        f"""
+        INSERT INTO execution_targets
+            (target_id, target_type, terminal_id, capabilities_json,
+             health, health_checked_at, model, registered_at, updated_at,
+             metadata_json{stamp.column})
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?{stamp.placeholder})
+        """,
+        (*row, *stamp.values),
+    )
+
+
 # ---------------------------------------------------------------------------
 # ExecutionTargetRegistry
 # ---------------------------------------------------------------------------
@@ -266,19 +282,10 @@ class ExecutionTargetRegistry:
                         f"{occupied['target_id']!r} (2.1-1)"
                     )
 
-            stamp = project_id_stamp(conn, "execution_targets")
-            conn.execute(
-                f"""
-                INSERT INTO execution_targets
-                    (target_id, target_type, terminal_id, capabilities_json,
-                     health, health_checked_at, model, registered_at, updated_at,
-                     metadata_json{stamp.column})
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?{stamp.placeholder})
-                """,
-                (target_id, target_type, terminal_id, caps_json,
-                 health, now if health != "offline" else None, model, now, now, meta_json,
-                 *stamp.values),
-            )
+            _insert_target_row(conn, (
+                target_id, target_type, terminal_id, caps_json, health,
+                now if health != "offline" else None, model, now, now, meta_json,
+            ))
 
             _append_event(
                 conn,

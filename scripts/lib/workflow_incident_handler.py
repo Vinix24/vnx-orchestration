@@ -13,7 +13,7 @@ import json
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from incident_taxonomy import (
     DEAD_LETTER_SOURCE_STATES,
@@ -41,6 +41,24 @@ def _new_id() -> str:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
+
+
+def _insert_escalation_row(conn, row: Tuple[Any, ...]) -> None:
+    """INSERT one escalation_log row. *row* holds the thirteen columns from
+    escalation_id to created_at, in table order; project_id is stamped
+    explicitly (OI-2026)."""
+    stamp = project_id_stamp(conn, "escalation_log")
+    conn.execute(
+        f"""
+        INSERT INTO escalation_log
+            (escalation_id, incident_id, dispatch_id, terminal_id,
+             incident_class, severity, escalated_to, reason,
+             retry_count, budget_exhausted, auto_recovery_halted,
+             metadata_json, created_at{stamp.column})
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?{stamp.placeholder})
+        """,
+        (*row, *stamp.values),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -232,33 +250,12 @@ def record_escalation(
     now = _now_iso()
     escalated_to = get_contract(incident_class).escalation.escalate_to
 
-    stamp = project_id_stamp(conn, "escalation_log")
-    conn.execute(
-        f"""
-        INSERT INTO escalation_log
-            (escalation_id, incident_id, dispatch_id, terminal_id,
-             incident_class, severity, escalated_to, reason,
-             retry_count, budget_exhausted, auto_recovery_halted,
-             metadata_json, created_at{stamp.column})
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?{stamp.placeholder})
-        """,
-        (
-            escalation_id,
-            incident_id,
-            dispatch_id,
-            terminal_id,
-            incident_class.value,
-            severity.value,
-            escalated_to,
-            reason,
-            retry_count,
-            int(budget_exhausted),
-            int(auto_recovery_halted),
-            json.dumps(metadata or {}),
-            now,
-            *stamp.values,
-        ),
-    )
+    _insert_escalation_row(conn, (
+        escalation_id, incident_id, dispatch_id, terminal_id,
+        incident_class.value, severity.value, escalated_to, reason,
+        retry_count, int(budget_exhausted), int(auto_recovery_halted),
+        json.dumps(metadata or {}), now,
+    ))
 
     _append_event(
         conn,
