@@ -153,6 +153,45 @@ class ProviderAdapter:
     later PR); the audit gap is documented in Open Items.
     """
 
+    def _run_codex(
+        self,
+        plan: "ExecutionPlan",
+        instruction: str,
+        *,
+        event_writer: Optional[Callable],
+        cwd: Optional[Path],
+        role_env: dict,
+    ) -> _AdapterResult:
+        """Codex lane: resolve the model (an unresolved one is a named failure), then spawn."""
+        from provider_dispatch import _resolve_codex_model  # noqa: PLC0415
+        from provider_spawns.codex_spawn import spawn_codex  # noqa: PLC0415
+        from providers.provider_registry import CodexModelResolutionError  # noqa: PLC0415
+
+        pv = plan.provider
+        try:
+            model = plan.model if plan.model not in ("default", "") else _resolve_codex_model()
+        except CodexModelResolutionError as exc:
+            return _AdapterResult(
+                returncode=1, completion_text="", status="failure",
+                error=f"codex_model_unresolved: {exc}",
+            )
+        try:
+            result = spawn_codex(
+                prompt=instruction,
+                model=model,
+                dispatch_id=plan.dispatch_id,
+                terminal_id=plan.target_id,
+                event_writer=event_writer,
+                extra_env=role_env,
+                cwd=cwd,
+            )
+        except BrokenPipeError as exc:
+            return _AdapterResult(
+                returncode=1, completion_text="", status="failure",
+                error=f"codex spawn BrokenPipeError: {exc}",
+            )
+        return _map_generic_spawn_result(result, pv.value, model=model)
+
     def run(
         self,
         plan: "ExecutionPlan",
@@ -163,12 +202,10 @@ class ProviderAdapter:
         role: Optional[str] = None,
     ) -> _AdapterResult:
         from dispatch_spec import Provider, dispatch_paths_raw  # noqa: PLC0415
-        from providers.provider_registry import CodexModelResolutionError  # noqa: PLC0415
         from provider_dispatch import (  # noqa: PLC0415
             _MLX_MODEL_MAP,
             _build_lane_key,
             _extract_token_usage,
-            _resolve_codex_model,
             _resolve_deepseek_model,
             _resolve_moonshot_model,
             _resolve_zai_model,
@@ -202,33 +239,7 @@ class ProviderAdapter:
 
         # ---- codex ----
         if pv == Provider.CODEX:
-            from provider_spawns.codex_spawn import spawn_codex  # noqa: PLC0415
-
-            try:
-                model = (
-                    plan.model if plan.model not in ("default", "") else _resolve_codex_model()
-                )
-            except CodexModelResolutionError as exc:
-                return _AdapterResult(
-                    returncode=1, completion_text="", status="failure",
-                    error=f"codex_model_unresolved: {exc}",
-                )
-            try:
-                result = spawn_codex(
-                    prompt=instruction,
-                    model=model,
-                    dispatch_id=plan.dispatch_id,
-                    terminal_id=plan.target_id,
-                    event_writer=event_writer,
-                    extra_env=role_env,
-                    cwd=cwd,
-                )
-            except BrokenPipeError as exc:
-                return _AdapterResult(
-                    returncode=1, completion_text="", status="failure",
-                    error=f"codex spawn BrokenPipeError: {exc}",
-                )
-            return _map_generic_spawn_result(result, pv.value, model=model)
+            return self._run_codex(plan, instruction, event_writer=event_writer, cwd=cwd, role_env=role_env)
 
         # ---- kimi ----
         if pv == Provider.KIMI:

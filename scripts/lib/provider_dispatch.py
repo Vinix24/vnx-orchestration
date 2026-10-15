@@ -2142,6 +2142,19 @@ def _finish_provider_worktree(
     )
 
 
+def _codex_event_store() -> "Any | None":
+    """The EventStore audit sink for a codex dispatch, or None when it cannot start (ADR-005)."""
+    try:
+        from event_store import EventStore
+        return EventStore()
+    except Exception as _es_exc:
+        logger.error(
+            "_dispatch_codex: EventStore init failed; cannot proceed without audit sink (ADR-005): %s",
+            _es_exc,
+        )
+        return None
+
+
 def _dispatch_codex(args: argparse.Namespace) -> int:
     """Route to spawn_codex for codex-provider dispatches (PR-4.6.3).
 
@@ -2151,15 +2164,8 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
     """
     from provider_spawns.codex_spawn import spawn_codex
 
-    event_store = None
-    try:
-        from event_store import EventStore
-        event_store = EventStore()
-    except Exception as _es_exc:
-        logger.error(
-            "_dispatch_codex: EventStore init failed; cannot proceed without audit sink (ADR-005): %s",
-            _es_exc,
-        )
+    event_store = _codex_event_store()
+    if event_store is None:
         return 1
 
     model = _codex_model_or_record_failure(args)
