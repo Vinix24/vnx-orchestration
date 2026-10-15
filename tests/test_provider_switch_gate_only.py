@@ -80,7 +80,15 @@ def harness(tmp_path):
     driver.chmod(0o755)
     return {"tmp": tmp_path, "vnx_home": vnx_home, "driver": driver, "bin_dir": bin_dir,
             "capture": tmp_path / "captured_args.json", "gh_log": tmp_path / "gh.log",
-            "switch": tmp_path / "switch" / "providers.json"}
+            "switch": tmp_path / "switch" / "providers.json",
+            "audit": state_dir / "gate_execution_audit.ndjson"}
+
+
+def audit_records(harness) -> list:
+    """The GATE-9 lines in the gate audit ledger, oldest first."""
+    if not harness["audit"].exists():
+        return []
+    return [json.loads(line) for line in harness["audit"].read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 def write_switch(harness, text: str) -> None:
@@ -156,6 +164,71 @@ def test_only_refuses_fail_closed_when_the_switch_cannot_be_consulted(harness):
     assert result.returncode == 1
     assert "Could not consult the provider switch for 'codex_gate'" in result.stderr
     assert not harness["capture"].exists()
+
+
+# ---------------------------------------------------------------------------
+# Fix round 2 (PR #2058, codex warning): the refusal lands in the gate audit ledger
+# ---------------------------------------------------------------------------
+
+def test_only_a_switched_off_gate_records_its_refusal_in_the_gate_audit_ledger(harness):
+    """ADR-005: the refusal is a gate decision, so it is a GATE-9 line in
+    gate_execution_audit.ndjson, written by gate_recorder.write_skip_rationale, before the
+    command returns 4."""
+    switch_off(harness, "kimi")
+
+    result = run_gate(harness, PR, "--only", "kimi")
+
+    assert result.returncode == 4, result.stderr
+    [record] = audit_records(harness)
+    assert record["event_type"] == "gate_skip_rationale"
+    assert record["gate"] == "kimi_gate"
+    assert record["pr_id"] == PR
+    assert record["reason"] == "provider_switched_off"
+    detail = record["reason_detail"]
+    assert detail.startswith("provider_switched_off: kimi_gate family=kimi ")
+    assert "source=global" in detail and "scope=global" in detail
+    assert "consumer=vnx gate --only" in detail
+    assert "reason='tegoed'" in detail
+    # The refusal comes before the PR is looked up: no head, and gh is never called.
+    assert record["commit_sha"] == ""
+    assert record["provider_check"]["provider_kind"] == "harness_lane"
+    assert not harness["gh_log"].exists()
+    assert not harness["capture"].exists()
+
+
+def test_only_an_allowed_gate_writes_no_refusal_line(harness):
+    switch_off(harness, "kimi")
+
+    result = run_gate(harness, PR, "--only", "deepseek")
+
+    assert result.returncode == 0, result.stderr
+    assert audit_records(harness) == []
+
+
+def test_only_a_refusal_that_cannot_be_recorded_returns_1_and_launches_nothing(harness):
+    """An unrecorded decision never reads as an ordinary switch refusal (exit 4)."""
+    switch_off(harness, "kimi")
+    harness["audit"].mkdir()  # the ledger path is a directory: the append fails
+
+    result = run_gate(harness, PR, "--only", "kimi")
+
+    assert result.returncode == 1
+    assert "'kimi_gate' is switched off by the provider switch" in result.stderr
+    assert "Could not record the refusal in the gate audit ledger" in result.stderr
+    assert not harness["capture"].exists()
+    assert not harness["gh_log"].exists()
+
+
+def test_only_the_fail_closed_refusal_writes_no_switch_line(harness):
+    """With the switch unconsultable there is no switch decision to record: exit 1, the same
+    class as gate.sh's other environment errors, and no provider_switched_off line."""
+    (harness["vnx_home"] / "scripts" / "providers_cli.py").unlink()
+    write_switch(harness, "{broken")
+
+    result = run_gate(harness, PR, "--only", "kimi")
+
+    assert result.returncode == 1
+    assert audit_records(harness) == []
 
 
 def test_status_only_never_consults_the_switch(harness):

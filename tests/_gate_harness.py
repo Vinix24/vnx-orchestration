@@ -22,11 +22,23 @@ VNX_HOME without them would make every `--only` run refuse fail-closed.
 The decision reads the switch file at `VNX_PROVIDER_SWITCH_FILE`, so a harness
 that strips `VNX_*` from the environment must set that variable to a tmp path
 again: without it the check would read the operator's real `~/.vnx`.
+
+A refused `--only` is recorded through `gate_recorder.write_skip_rationale`
+(the GATE-9 line in `gate_execution_audit.ndjson`). `gate_recorder` imports a
+wide closure (receipts, governance emit, provider reachability, ...), so that
+closure is measured, not listed: `module_closure` imports the module in a
+subprocess and returns every file under `scripts/` it loaded. A listed copy
+would break the moment one of those modules gains an import.
 """
 from __future__ import annotations
 
+import functools
+import json
 import shutil
+import subprocess
+import sys
 from pathlib import Path
+from typing import Tuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 GATE_SH = REPO_ROOT / "scripts" / "commands" / "gate.sh"
@@ -48,13 +60,48 @@ PROVIDER_SWITCH_SCRIPTS = (
     "providers_cli.py",
 )
 
+# The module gate.sh imports to record a refused `--only` (see the module docstring).
+SWITCH_REFUSAL_RECORDER = "gate_recorder"
+
+_CLOSURE_PROBE = """\
+import json, os, sys
+scripts = sys.argv[1]
+sys.path[:0] = [os.path.join(scripts, "lib"), scripts]
+__import__(sys.argv[2])
+loaded = {
+    os.path.relpath(os.path.realpath(module.__file__), scripts)
+    for module in list(sys.modules.values())
+    if getattr(module, "__file__", None) and os.path.realpath(module.__file__).startswith(scripts + os.sep)
+}
+print(json.dumps(sorted(loaded)))
+"""
+
+
+@functools.lru_cache(maxsize=None)
+def module_closure(module: str) -> Tuple[str, ...]:
+    """Every file under scripts/ that importing ``module`` loads, relative to scripts/."""
+    scripts = (REPO_ROOT / "scripts").resolve()
+    proc = subprocess.run(
+        [sys.executable, "-c", _CLOSURE_PROBE, str(scripts), module],
+        capture_output=True, text=True, timeout=60, check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"cannot import {module} to measure its closure: {proc.stderr.strip()}")
+    return tuple(json.loads(proc.stdout))
+
 
 def install_gate_lib_modules(lib_dir: Path) -> None:
     """Copy the real gate_seat_line.py + its real deps into `lib_dir` (a fake
-    VNX_HOME's scripts/lib), and the provider-switch check gate.sh runs for
-    `--only` into its scripts/ and scripts/lib."""
+    VNX_HOME's scripts/lib), the provider-switch check gate.sh runs for
+    `--only` into its scripts/ and scripts/lib, and the closure of the
+    recorder that books a refused `--only`."""
     lib_dir.mkdir(parents=True, exist_ok=True)
+    scripts_dir = lib_dir.parent
+    for relative in module_closure(SWITCH_REFUSAL_RECORDER):
+        target = scripts_dir / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(REPO_ROOT / "scripts" / relative, target)
     for name in (*GATE_LIB_MODULES, *PROVIDER_SWITCH_LIB_MODULES):
         shutil.copy2(REPO_ROOT / "scripts" / "lib" / name, lib_dir / name)
     for name in PROVIDER_SWITCH_SCRIPTS:
-        shutil.copy2(REPO_ROOT / "scripts" / name, lib_dir.parent / name)
+        shutil.copy2(REPO_ROOT / "scripts" / name, scripts_dir / name)
