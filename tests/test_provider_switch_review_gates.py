@@ -351,6 +351,157 @@ def test_request_and_execute_runs_no_switched_off_seat(store, monkeypatch):
     assert outcome["has_required_failure"] is True
 
 
+# ---------------------------------------------------------------------------
+# Fix round 2 (PR #2058, codex finding 1): a standing verdict passes the same checks a fresh
+# result passes, against the head the executor observes
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def executor(store, launches, monkeypatch):
+    """``request_and_execute`` on kimi alone, with the executor's run patched: it records the
+    gate it would have run and launches nothing. ``lookups`` counts every PR-head lookup, per
+    module, so a test can pin that the call looked the head up once."""
+    import gate_recorder
+    import gate_request_handler
+    import review_gate_manager
+    executed: List[str] = []
+    lookups = {"executor": 0, "handler": 0}
+
+    def fake_execute_gate(self, *, gate, pr_number=None, pr_id=""):
+        executed.append(gate)
+        return {"gate": gate, "status": "completed", "commit_sha": HEAD, "blocking_findings": []}
+
+    def executor_head(pr_number):
+        lookups["executor"] += 1
+        return HEAD
+
+    def handler_head(pr_number):
+        lookups["handler"] += 1
+        return HEAD
+
+    monkeypatch.setattr(review_gate_manager.ReviewGateManager, "execute_gate", fake_execute_gate)
+    monkeypatch.setattr(gate_recorder, "get_pr_head_sha", executor_head)
+    monkeypatch.setattr(gate_request_handler, "get_pr_head_sha", handler_head)
+    monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "1")
+    set_switches(kimi=False)
+
+    def run():
+        outcome = manager().request_and_execute(
+            pr_number=PR, branch="feat/switch", review_stack=["kimi_gate"], risk_class="medium",
+            changed_files=["scripts/x.py"], mode="per_pr", dispatch_id="20261015-ps-c-r2-test",
+        )
+        [entry] = [g for g in outcome["gates"] if g["gate"] == "kimi_gate"]
+        return outcome, entry
+
+    return {"run": run, "executed": executed, "lookups": lookups, "launches": launches}
+
+
+def assert_booked_switched_off(store, outcome, entry, refused: str) -> Dict[str, Any]:
+    """The seat did not pass and is booked not_executable/provider_switched_off."""
+    assert entry["passed"] is False
+    assert entry["execution_status"] == "not_executable"
+    assert entry["reason"] == SWITCHED_OFF
+    assert outcome["has_required_failure"] is True
+    request_record = json.loads((store["requests_dir"] / f"pr-{PR}-kimi_gate.json").read_text(encoding="utf-8"))
+    assert request_record["status"] == "not_executable" and request_record["reason"] == SWITCHED_OFF
+    assert request_record["commit_sha"] == HEAD
+    assert refused in request_record["standing_verdict_refused"]
+    return request_record
+
+
+@pytest.mark.parametrize("missing", ["contract_hash", "report_path"])
+def test_a_standing_pass_without_evidence_does_not_pass(store, executor, monkeypatch, missing):
+    monkeypatch.setenv("VNX_REVIEW_GATE_TAKEOVER_CHAIN", "")
+    record = decided_result(store, "kimi_gate", "pass")
+    record[missing] = ""
+    on_disk = write_result(store, "kimi_gate", record)
+    before = on_disk.read_bytes()
+
+    outcome, entry = executor["run"]()
+
+    assert_booked_switched_off(store, outcome, entry, "evidence incomplete")
+    assert executor["executed"] == [] and executor["launches"] == []
+    # The guard leaves the seat's own record standing on disk; only the request is booked.
+    assert on_disk.read_bytes() == before
+
+
+def test_a_standing_pass_whose_report_file_is_gone_does_not_pass(store, executor, monkeypatch):
+    """The result writer's own check (gate_result_parser.evidence_error): the report is on disk."""
+    monkeypatch.setenv("VNX_REVIEW_GATE_TAKEOVER_CHAIN", "")
+    record = decided_result(store, "kimi_gate", "pass")
+    Path(record["report_path"]).unlink()
+    write_result(store, "kimi_gate", record)
+
+    outcome, entry = executor["run"]()
+
+    assert_booked_switched_off(store, outcome, entry, "report_path file does not exist")
+
+
+def test_a_standing_pass_about_another_head_than_the_executor_observes_does_not_pass(
+    store, executor, monkeypatch,
+):
+    """Codex's reproduction: the handler's own lookup named the record's head, the executor's
+    named another. One lookup now decides both, and it is the executor's."""
+    import gate_request_handler
+    monkeypatch.setenv("VNX_REVIEW_GATE_TAKEOVER_CHAIN", "")
+    monkeypatch.setattr(gate_request_handler, "get_pr_head_sha", lambda pr_number: OTHER_HEAD)
+    write_result(store, "kimi_gate", decided_result(store, "kimi_gate", "pass", head=OTHER_HEAD))
+
+    outcome, entry = executor["run"]()
+
+    assert_booked_switched_off(store, outcome, entry, "head binding mismatch")
+    assert executor["lookups"]["executor"] == 1
+
+
+def test_a_complete_standing_pass_on_the_observed_head_stands(store, executor, monkeypatch):
+    monkeypatch.setenv("VNX_REVIEW_GATE_TAKEOVER_CHAIN", "")
+    on_disk = write_result(store, "kimi_gate", decided_result(store, "kimi_gate", "pass"))
+    before = on_disk.read_bytes()
+
+    outcome, entry = executor["run"]()
+
+    assert entry["passed"] is True
+    assert entry["execution_status"] == "pass"
+    assert outcome["has_required_failure"] is False
+    assert SWITCHED_OFF in entry["detail"]["provider_switch"]
+    assert executor["executed"] == [] and executor["launches"] == []
+    assert on_disk.read_bytes() == before
+    assert not (store["requests_dir"] / f"pr-{PR}-kimi_gate.json").exists()
+    # One head lookup for the whole call, shared by the request round and the executor.
+    assert executor["lookups"] == {"executor": 1, "handler": 0}
+
+
+def test_a_standing_verdict_on_an_unknown_head_does_not_stand(store, executor, monkeypatch):
+    """The executor lets an unknown binding through for a result it just produced; a verdict
+    reused instead of a run stands only when it provably names the observed head."""
+    import gate_recorder
+    monkeypatch.setenv("VNX_REVIEW_GATE_TAKEOVER_CHAIN", "")
+    monkeypatch.setattr(gate_recorder, "get_pr_head_sha", lambda pr_number: "")
+    write_result(store, "kimi_gate", decided_result(store, "kimi_gate", "pass"))
+
+    outcome, entry = executor["run"]()
+
+    assert entry["passed"] is False and entry["reason"] == SWITCHED_OFF
+    assert outcome["has_required_failure"] is True
+
+
+def test_a_chain_seat_whose_standing_pass_lacks_evidence_is_booked_not_passed_over(
+    store, executor, monkeypatch,
+):
+    """With the default chain kimi is a chain key. Its own decided verdict on this head keeps the
+    seat (no successor reads in its place); a verdict that does not stand is booked, never a
+    pass and never handed to deepseek."""
+    record = decided_result(store, "kimi_gate", "pass")
+    record["contract_hash"] = ""
+    write_result(store, "kimi_gate", record)
+
+    outcome, entry = executor["run"]()
+
+    assert executor["launches"] == [] and executor["executed"] == []
+    assert_booked_switched_off(store, outcome, entry, "evidence incomplete")
+    assert not (store["requests_dir"] / f"pr-{PR}-deepseek_gate.json").exists()
+
+
 def test_request_time_glm_and_deepseek_are_classified_by_name(store):
     """The direct request methods (reached when the switch flips between the seat decision and
     the request) book provider_switched_off, never gate_runner_missing."""
