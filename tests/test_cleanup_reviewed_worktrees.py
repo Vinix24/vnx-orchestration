@@ -200,6 +200,51 @@ class TestSymlinkIsNotWork:
         assert not crw.evaluate_worktree(fx.repo, wt, "o/r").safe
 
 
+class TestCleanCheckReadsBytes:
+    """The clean check reads ``git status -z`` as bytes: a name with ``\\r`` or ``\\n`` is the
+    name on disk, not a universal-newline rewrite of it."""
+
+    @staticmethod
+    def _make(path: Path, *, file: bool = False, link: bool = False, target: Path | None = None,
+              name_file: str = "", name_link: str = "") -> None:
+        try:
+            if file:
+                (path / name_file).write_text("work\n", encoding="utf-8")
+            if link:
+                os.symlink(target, path / name_link)
+        except OSError as exc:
+            pytest.skip(f"filesystem refuses the filename: {exc}")
+
+    def test_cr_file_next_to_an_internal_symlink_named_with_newline_is_not_clean(self, fx):
+        wt = fx.worktree("x")
+        (fx.repo / ".venv").mkdir()
+        self._make(wt.path, file=True, link=True, target=fx.repo / ".venv",
+                   name_file="notes\r", name_link="notes\n")
+        assert not crw.is_worktree_clean(wt.path, fx.repo)
+
+    def test_untracked_file_with_a_newline_in_its_name_is_not_clean(self, fx):
+        wt = fx.worktree("x")
+        self._make(wt.path, file=True, name_file="a\nb")
+        assert not crw.is_worktree_clean(wt.path, fx.repo)
+
+    def test_only_an_internal_symlink_is_clean(self, fx):
+        wt = fx.worktree("x")
+        (fx.repo / ".venv").mkdir()
+        os.symlink(fx.repo / ".venv", wt.path / ".venv")
+        assert crw.is_worktree_clean(wt.path, fx.repo)
+
+    def test_staged_rename_is_not_clean_and_second_path_is_not_judged_alone(self, fx):
+        wt = fx.worktree("x")
+        (fx.repo / ".venv").mkdir()
+        # the rename source is itself named like an untracked internal symlink record
+        git(wt.path, "mv", "a.txt", "renamed.txt")
+        os.symlink(fx.repo / ".venv", wt.path / ".venv")
+        assert not crw.is_worktree_clean(wt.path, fx.repo)
+
+    def test_failing_git_status_is_not_clean(self, fx, tmp_path):
+        assert not crw.is_worktree_clean(tmp_path / "missing", fx.repo)
+
+
 def run_main(fx: Fixture, *extra: str) -> dict:
     import io
     from contextlib import redirect_stdout

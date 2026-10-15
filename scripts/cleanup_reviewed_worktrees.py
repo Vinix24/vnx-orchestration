@@ -268,16 +268,38 @@ def _is_internal_symlink(entry_path: Path, repo_root: Path) -> bool:
     return target == root or root in target.parents
 
 
+def _git_status_bytes(wt_path: Path) -> bytes | None:
+    """Raw ``git status --porcelain -z`` output. No text mode: universal
+    newlines would rewrite a ``\\r`` in a filename and the record would no
+    longer name the file on disk."""
+    try:
+        proc = subprocess.run(
+            ["git", "status", "--porcelain", "-z"],
+            cwd=str(wt_path), capture_output=True, check=False,
+        )
+    except OSError:
+        return None
+    return proc.stdout if proc.returncode == 0 else None
+
+
 def is_worktree_clean(wt_path: Path, repo_root: Path) -> bool:
-    proc = run_git(["status", "--porcelain", "-z"], cwd=wt_path)
-    if proc.returncode != 0:
+    """Clean = nothing but untracked internal symlinks. Anything the parser
+    cannot turn into a path counts as dirty: fail toward keeping the work."""
+    raw = _git_status_bytes(wt_path)
+    if raw is None:
         return False
-    for record in proc.stdout.split("\0"):
+    for record in raw.split(b"\0"):
         if not record:
             continue
-        if not record.startswith("?? "):
+        # A rename/copy record is not "?? ", so it returns False here before
+        # its second (source) path is ever read as a record of its own.
+        if not record.startswith(b"?? "):
             return False
-        if not _is_internal_symlink(wt_path / record[3:], repo_root):
+        try:
+            name = os.fsdecode(record[3:])
+        except (UnicodeError, ValueError):
+            return False
+        if not name or not _is_internal_symlink(wt_path / name, repo_root):
             return False
     return True
 
