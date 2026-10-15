@@ -19,8 +19,11 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from conversation_analyzer import (  # noqa: E402 (path insert above)
     ConversationAnalyzer, Colors, log,
     DB_PATH, PATHS, VNX_BASE, ANALYZER_VERSION,
-    fail_closed_exit_code,
+    fail_closed_exit_code, deep_all_skipped_by_switch,
 )
+
+
+REASON_SWITCHED_OFF = "provider_switched_off"
 
 
 def _write_heartbeat(args, stats, run_status, run_error):
@@ -33,6 +36,12 @@ def _write_heartbeat(args, stats, run_status, run_error):
             details["sessions_by_origin"] = dict(stats.sessions_by_origin)
             details["deep_restricted_claude"] = stats.deep_restricted_claude
             details["deep_restricted_deferred"] = stats.deep_restricted_deferred
+            details["deep_disabled_skips"] = stats.deep_disabled_skips
+            if run_status == "ok" and deep_all_skipped_by_switch(stats):
+                # Nothing was analysed because the operator switched the provider off: the
+                # beacon must not say ok. (OI-2043, the general case, stays its own item.)
+                run_status = "degraded"
+                details["reason"] = REASON_SWITCHED_OFF
         if run_error:
             details["error"] = run_error
         HealthBeacon(

@@ -669,6 +669,12 @@ class TestDeepAnalyzerCounter:
 
 class TestDeepAnalyzerStrategy:
 
+    @pytest.fixture(autouse=True)
+    def _switch_project_known(self, monkeypatch):
+        """The provider switch resolves the project from the environment; without it the
+        resolver runs git, which the "no subprocess started" assertions would count."""
+        monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
+
     def test_deepseek_harness_strategy_skips_claude_and_ollama(self):
         """LLM_STRATEGY=deepseek-harness calls only the harness path, not claude or ollama."""
         import conversation_analyzer.deep_analyzer as da_module
@@ -714,10 +720,13 @@ class TestDeepAnalyzerStrategy:
         # namespace to ensure the method sees the empty key.
         import conversation_analyzer.deep_analyzer as da_module
 
-        with patch.dict(da_module.os.environ, {}, clear=True), \
+        # The cleared environment keeps the test's own switch file: the provider switch must
+        # never fall back to the operator's real file.
+        kept = {"VNX_PROVIDER_SWITCH_FILE": os.environ["VNX_PROVIDER_SWITCH_FILE"]}
+        with patch.dict(da_module.os.environ, kept, clear=True), \
              patch.object(DeepAnalyzer, "_deepseek_preflight_cache", None), \
              patch("subprocess.run") as run:
-            result = DeepAnalyzer._try_deepseek_harness("test prompt")
+            result = DeepAnalyzer._try_deepseek_harness("test prompt", project_id="vnx-dev")
             assert result.status == "key_missing"
             assert result.attempted is True
             run.assert_not_called()

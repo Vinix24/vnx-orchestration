@@ -176,26 +176,39 @@ def parse_json_block(text: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def get_provider(name: Optional[str] = None) -> ClassifierProvider:
+def _require_switch(key: str, project_id: Optional[str]) -> None:
+    import provider_switch
+    provider_switch.require(key, consumer="classifier_providers.get_provider", project_id=project_id)
+
+
+def get_provider(name: Optional[str] = None, *, project_id: Optional[str] = None) -> ClassifierProvider:
     """Return a configured provider instance for `name`.
 
     Lazy imports keep optional dependencies out of the import path until used.
-    Unknown names raise ValueError so misconfigurations surface loudly.
+    Unknown names raise ValueError so misconfigurations surface loudly. A provider whose
+    family the operator switched off (``vnx providers``) raises
+    ``provider_switch.ProviderDisabledError`` for ``project_id`` (the project of the item the
+    caller classifies; None falls back to the process project).
     """
     key = (name or "haiku").strip().lower()
     if key == "haiku":
+        _require_switch(key, project_id)
         from .haiku_provider import HaikuProvider
         return HaikuProvider()
     if key == "ollama":
+        _require_switch(key, project_id)
         from .ollama_provider import OllamaProvider
         return OllamaProvider()
     if key == "gemini":
+        _require_switch(key, project_id)
         from .gemini_provider import GeminiProvider
         return GeminiProvider()
     if key == "codex":
+        _require_switch(key, project_id)
         from .codex_provider import CodexProvider
         return CodexProvider()
     if key == "deepseek":
+        _require_switch(key, project_id)
         from .deepseek_provider import DeepSeekProvider
         return DeepSeekProvider()
     raise ValueError(f"unknown classifier provider: {key}")

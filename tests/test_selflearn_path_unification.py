@@ -247,6 +247,14 @@ class TestDreamCycleConsolidatesSeededPatterns:
     """Seed N>=threshold patterns in the canonical db, run dream cycle → consolidates."""
 
     @pytest.fixture(autouse=True)
+    def _dream_boundary_configured(self, tmp_path_factory, monkeypatch):
+        """run_dream_cycle refuses to run without a content boundary. Point it at an
+        empty tmp boundary so the tests never read the operator's ~/.vnx file."""
+        boundary_file = tmp_path_factory.mktemp("dream-boundary") / "content_boundary.json"
+        boundary_file.write_text(json.dumps({"version": 1}), encoding="utf-8")
+        monkeypatch.setenv("VNX_CONTENT_BOUNDARY_FILE", str(boundary_file))
+
+    @pytest.fixture(autouse=True)
     def _dream_activation_gate_open(self, monkeypatch):
         """PR-17 added an activation gate that defaults closed; these tests exercise
         consolidation mechanics, so arm the scheduler and stub the probe to 'ok' —

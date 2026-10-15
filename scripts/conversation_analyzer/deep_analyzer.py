@@ -6,7 +6,7 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from .models import (
     SessionMetrics, SessionFlags,
@@ -18,6 +18,7 @@ from .models import (
     log,
 )
 import content_class
+import provider_switch
 from .detector import HeuristicDetector
 from claude_cli import resolve_claude_cli
 from provider_spawns.deepseek_harness_spawn import (
@@ -28,6 +29,8 @@ from provider_spawns.deepseek_harness_spawn import (
 from provider_spawns.harness_config_dir import HarnessConfigDirError
 
 DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
+
+STATUS_SWITCHED_OFF = provider_switch.REASON_SWITCHED_OFF
 
 
 @dataclass(frozen=True)
@@ -47,6 +50,9 @@ class LLMOutcome:
       - ``key_missing``  — deepseek-harness was chosen but no own
                            ``DEEPSEEK_API_KEY`` reached the job: the operator
                            asked for this lane, so it is a failure, not a skip
+      - ``provider_switched_off`` — the operator switched the lane's provider family
+                           off (``vnx providers``): no invocation was made, and no
+                           attempt, failure or config gap is counted
       - ``balance_low`` / ``balance_unavailable`` — the DeepSeek ``/user/balance``
                            check said the account cannot pay, or could not be
                            read; same reasoning, a failure the digest shows
@@ -58,7 +64,8 @@ class LLMOutcome:
     collapsed to ``None`` (OI-1258).
 
     ``attempted`` is derived from ``status``: every status counts as an
-    attempt except ``config_skip``, which by definition never started one.
+    attempt except ``config_skip`` and ``provider_switched_off``, which by definition never
+    started one.
     This is what distinguishes a failed attempt from a skipped one
     (fix1585-r2): an Ollama config gap must not count as "tried and failed".
     The deepseek-harness pre-flight statuses (``key_missing``, ``balance_*``)
@@ -73,7 +80,7 @@ class LLMOutcome:
 
     @property
     def attempted(self) -> bool:
-        return self.status != "config_skip"
+        return self.status not in ("config_skip", STATUS_SWITCHED_OFF)
 
 
 class DeepAnalyzer:
@@ -110,6 +117,12 @@ class DeepAnalyzer:
         # or server) — a config gap, not a failed attempt. Kept separate from
         # ``deep_attempts``/``deep_failures`` so it never fail-closes the run.
         self.deep_config_skips = 0
+        # Sessions whose every candidate lane was refused by the operator's provider switch:
+        # nothing was invoked, so they are neither attempts, failures nor config gaps.
+        self.deep_disabled_skips = 0
+        # Sessions that entered the non-restricted path this run: the denominator of "every
+        # non-restricted deep attempt was skipped".
+        self.deep_open_sessions = 0
         # OI-1258: why the failures happened, keyed by LLMOutcome status
         # (``cli_failed``, ``timeout``, ``empty``, ``unparseable`` ...). A bare
         # count says something broke; the reason says what to fix.
@@ -218,6 +231,23 @@ Respond with valid JSON:
         summary = self._build_session_summary(jsonl_path, metrics, flags)
         return self._routes_restricted(jsonl_path, summary, origin)
 
+    def _record_disabled_skip(self, disabled_lanes: List[str], project_id: str) -> None:
+        """Every lane that ran was refused by the provider switch: a skipped session, counted
+        on its own, never as a failed attempt and never as a config gap."""
+        self.deep_disabled_skips += 1
+        log("WARNING", f"Deep analysis skipped, provider switched off "
+                       f"({', '.join(disabled_lanes)}; scope={project_id})")
+
+    @staticmethod
+    def _switch_project(origin: Optional[content_class.Origin]) -> str:
+        """Project whose provider switch decides: the session's own, else the global section.
+
+        Never the project of this process.
+        """
+        if origin is not None and origin.project_id:
+            return origin.project_id
+        return provider_switch.SCOPE_GLOBAL
+
     def analyze_session(self, jsonl_path: Path,
                         metrics: SessionMetrics,
                         flags: SessionFlags,
@@ -228,6 +258,10 @@ Respond with valid JSON:
 
         if self._routes_restricted(jsonl_path, summary, origin):
             return self._analyze_restricted(prompt)
+
+        self.deep_open_sessions += 1
+        project_id = self._switch_project(origin)
+        disabled_lanes: List[str] = []
 
         result_text = None
         # Lane that produced ``result_text``; stamped into the result as ``_model``.
@@ -247,7 +281,9 @@ Respond with valid JSON:
         # unset — never falls back to the OAuth subscription (constraint
         # deepseek-harness-subscription-blocked).
         if LLM_STRATEGY == "deepseek-harness":
-            outcome = self._try_deepseek_harness(prompt)
+            outcome = self._launch_lane(self._try_deepseek_harness, prompt, project_id)
+            if outcome.status == STATUS_SWITCHED_OFF:
+                disabled_lanes.append("deepseek-harness")
             any_attempted = any_attempted or outcome.attempted
             if outcome.attempted:
                 last_attempted_status = outcome.status
@@ -280,7 +316,9 @@ Respond with valid JSON:
                         f"Use VNX_ANALYZER_LLM=claude-only to override.")
 
         if result_text is None and LLM_STRATEGY in ("auto", "ollama-only"):
-            outcome = self._try_ollama(prompt)
+            outcome = self._launch_lane(self._try_ollama, prompt, project_id)
+            if outcome.status == STATUS_SWITCHED_OFF:
+                disabled_lanes.append("ollama")
             any_attempted = any_attempted or outcome.attempted
             if outcome.attempted:
                 last_attempted_status = outcome.status
@@ -289,6 +327,8 @@ Respond with valid JSON:
 
         if any_attempted:
             self.deep_attempts += 1
+        elif disabled_lanes:
+            self._record_disabled_skip(disabled_lanes, project_id)
         else:
             # No candidate strategy ever invoked an LLM this session — every
             # branch that ran refused on a config gap. That is a skipped
@@ -303,6 +343,14 @@ Respond with valid JSON:
             return None
 
         return self._finish_result(result_text, lane)
+
+    @staticmethod
+    def _launch_lane(lane_fn, prompt: str, project_id: str) -> LLMOutcome:
+        """Run one lane; a lane the provider switch refuses makes no attempt (outcome ``provider_switched_off``)."""
+        try:
+            return lane_fn(prompt, project_id=project_id)
+        except provider_switch.ProviderDisabledError as exc:
+            return LLMOutcome(STATUS_SWITCHED_OFF, stderr=exc.decision.detail())
 
     def _finish_result(self, result_text: str, lane: str) -> Optional[dict]:
         parsed = self._parse_response(result_text)
@@ -660,7 +708,7 @@ Respond with valid JSON:
         return LLMOutcome("ok")
 
     @classmethod
-    def _try_deepseek_harness(cls, prompt: str) -> LLMOutcome:
+    def _try_deepseek_harness(cls, prompt: str, project_id: Optional[str] = None) -> LLMOutcome:
         """Run deep analysis via the claude CLI driving DeepSeek's Anthropic-compatible endpoint.
 
         Uses the measured-safe key-auth recipe from
@@ -676,7 +724,12 @@ Respond with valid JSON:
         subprocess is started.
 
         Model is ``VNX_ANALYZER_DEEPSEEK_MODEL`` (default ``deepseek-flash``).
+
+        Layer 1 of the provider switch: raises ``provider_switch.ProviderDisabledError`` before
+        any balance check or launch when the deepseek family is switched off for ``project_id``.
         """
+        provider_switch.require("deepseek-harness", consumer="deep_analyzer.deepseek_harness",
+                                project_id=project_id)
         api_key = os.environ.get(DEEPSEEK_API_KEY_ENV, "")
         preflight = cls._deepseek_preflight(api_key)
         if preflight.status != "ok":
@@ -727,7 +780,8 @@ Respond with valid JSON:
             return LLMOutcome("error", stderr=str(e))
 
     @classmethod
-    def _try_ollama(cls, prompt: str) -> LLMOutcome:
+    def _try_ollama(cls, prompt: str, project_id: Optional[str] = None) -> LLMOutcome:
+        provider_switch.require("ollama", consumer="deep_analyzer.ollama", project_id=project_id)
         if not cls._probe_ollama():
             # The probe already logs the specific reason (unreachable server,
             # zero models, or the configured model missing) — no subprocess-

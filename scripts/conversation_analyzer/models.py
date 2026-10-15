@@ -159,6 +159,8 @@ class RunStats:
     deep_failures: int = 0
     deep_failure_reasons: Dict[str, int] = field(default_factory=dict)
     deep_config_skips: int = 0
+    deep_disabled_skips: int = 0
+    deep_open_sessions: int = 0
     total_tokens: int = 0
     errors: int = 0
     skipped: int = 0
@@ -166,6 +168,19 @@ class RunStats:
     deep_restricted_claude: int = 0
     deep_restricted_deferred: int = 0
     suggestions: List[dict] = field(default_factory=list)
+
+
+def deep_all_skipped_by_switch(stats: "RunStats | None") -> bool:
+    """True when every non-restricted deep session of the run was skipped by the provider switch.
+
+    Nothing was analysed and nothing failed or was skipped for another reason: the beacon says
+    ``degraded`` with reason ``provider_switched_off``, not ``ok``. The restricted path (claude
+    only) is not part of this count.
+    """
+    if stats is None or stats.deep_disabled_skips <= 0:
+        return False
+    return (stats.deep_attempts == 0 and stats.deep_config_skips == 0
+            and stats.deep_disabled_skips == stats.deep_open_sessions)
 
 
 def format_failure_reasons(reasons: Dict[str, int]) -> str:
