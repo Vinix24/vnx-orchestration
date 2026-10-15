@@ -48,6 +48,11 @@ verbatim below — same governed-report frontmatter shape, same ``exit_code``/
 dispatch_error/genuine-parse-miss split that gates entry into the recovery
 path.
 
+OI-2066: ``timeout`` is the report whose frontmatter says the lane's own
+deadline stopped the run (``deadline_exceeded``). It is checked before any
+verdict extraction, so a partial verdict block in a cut-off report never
+counts (``_unread_run_outcome``).
+
 OI-1178 / OI-1435: a terminal (pass/fail) record must carry ``contract_hash``
 + ``report_path`` or ``gate_status.has_complete_evidence`` — and therefore
 ``closure_verifier``'s merge check — refuses it as evidence, forever. Measured
@@ -113,6 +118,7 @@ from gate_lane_contract import (  # C6 step 3: one source, three readers
     canonical_review_verdict,
     describe_dispatch_exception,
     harness_dispatcher_timeouts,
+    lane_deadline_detail,
     max_diff_chars,
 )
 from gate_prompt import (  # OI-1442: the diff is data, not instruction
@@ -426,7 +432,32 @@ _UNAVAILABLE_SUMMARIES = {
     "recovery_conflict": "recovery_conflict — a companion report's verdict conflicted with the primary response",
     "reprocess_no_identity_anchor": "reprocess_no_identity_anchor — no addressable original result record to verify against",
     "reprocess_stale_evidence": "reprocess_stale_evidence — PR head has moved since this dispatch ran",
+    "timeout": "timeout — the lane's own deadline stopped the run before the review finished",
 }
+
+
+def _unread_run_outcome(
+    dispatch_error: str, report_text: str, duration: float,
+) -> "tuple[str, list, str, str] | None":
+    """``(status, blocking, residual, reason)`` for a run whose report is never
+    read for a verdict, else None. Same two cases as
+    ``kimi_gate._unread_run_outcome``, both ``unavailable``:
+
+    - the dispatcher raised (``dispatch_error``): there is no report to read;
+    - OI-2066: the report says the lane's OWN deadline stopped the run
+      (``gate_lane_contract.lane_deadline_detail``, the reader gate_runner's
+      harness lane uses). Such a report can still hold a partial ```json```
+      block with a pass in it, and codex reproduced exactly that on 4ac2669a:
+      ``pass``, exit 0, for a review that never finished. It books
+      ``timeout`` as gate_runner does, and no verdict, relabeled verdict or
+      companion report is read for it.
+    """
+    if dispatch_error:
+        return "unavailable", [], f"governed glm dispatch failed: {dispatch_error[:400]}", "dispatch_error"
+    deadline = lane_deadline_detail(report_text, duration)
+    if deadline is not None:
+        return "unavailable", [], f"glm_gate timed out: {deadline} — not a review outcome", "timeout"
+    return None
 
 
 def _lift_lane_log_reason(dispatch_id: str, data_dir: "Path | None") -> "str | None":
@@ -732,11 +763,10 @@ def main(argv: "list[str] | None" = None) -> int:
     # OI-1710: also lifted from the report frontmatter when the lane log does
     # not exist at all (a spawn-layer failure writes no lane log).
     lifted_reason: "str | None" = None
-    if dispatch_error:
+    unread = _unread_run_outcome(dispatch_error, report_text or "", duration)
+    if unread is not None:
         verdict: dict = {}
-        status, blocking = "unavailable", []
-        residual = f"governed glm dispatch failed: {dispatch_error[:400]}"
-        reason = "dispatch_error"
+        status, blocking, residual, reason = unread
     else:
         verdict = _extract_verdict(report_text or "")
         if verdict:

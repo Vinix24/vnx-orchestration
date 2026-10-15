@@ -50,6 +50,7 @@ from gate_lane_contract import (  # C6 step 3: one source, three readers
     VERDICT_CONTRACT as _HARNESS_LANE_VERDICT_CONTRACT,
     describe_dispatch_exception,
     harness_dispatcher_timeouts as _harness_lane_dispatcher_timeouts,
+    lane_deadline_detail,
     max_diff_chars as _harness_lane_max_diff_chars,
 )
 
@@ -286,13 +287,6 @@ def _build_harness_lane_dispatcher(
     )
 
 
-def _frontmatter_number(value: Any) -> Optional[float]:
-    """A frontmatter value as a float when it is a plain number, else None (a bool is not a number)."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    return float(value)
-
-
 def _raise_if_lane_deadline_fired(report_text: str, elapsed: float) -> None:
     """OI-2066: raise :class:`_HarnessLaneDeadlineExceeded` when the returned
     report says the lane's OWN deadline stopped the run.
@@ -304,41 +298,14 @@ def _raise_if_lane_deadline_fired(report_text: str, elapsed: float) -> None:
     ``harness_lane_no_model_response`` or ``harness_lane_exit_nonzero``, with
     the lane's own text in ``reason_detail``.
 
-    The signal is the lane's explicit statement, never an inference:
-    ``deadline_exceeded: true`` in the report frontmatter, which
-    provider_dispatch stamps (``_deadline_frontmatter``, with
-    ``deadline_seconds``) only when the code that killed the run did so
-    because its total deadline ran out. Without that field every report keeps
-    its old booking, quota detection included.
-
-    Duration is never the deciding signal (codex on 595c3e8e): deepseek's
-    ``duration_seconds`` includes prompt and worktree setup, while its timer
-    starts after delivery — a quota failure after 20 s of setup and 890 s of
-    work "lasted" a 900 s deadline that never fired. The lane's
-    ``duration_seconds`` (or the runner's ``elapsed`` when the report carries
-    none) goes into the message as information only. The message is built
-    from numbers only, never from the report's text.
+    The reading is ``gate_lane_contract.lane_deadline_detail``, the one reader
+    the standalone gates and the plan-gate readers call too: the frontmatter's
+    ``deadline_exceeded``, never a duration. ``elapsed`` only fills in the
+    message when the report carries no ``duration_seconds``.
     """
-    if not report_text:
-        return
-    try:
-        frontmatter = parse_frontmatter(report_text)
-    except SchemaViolation:
-        return
-    if frontmatter.get("deadline_exceeded") is not True:
-        return
-    deadline = _frontmatter_number(frontmatter.get("deadline_seconds"))
-    ran = _frontmatter_number(frontmatter.get("duration_seconds"))
-    exit_code = frontmatter.get("exit_code")
-    of_deadline = f" of {deadline:.0f} s" if deadline is not None else ""
-    exit_note = (
-        f" (report exit_code={exit_code})"
-        if isinstance(exit_code, int) and not isinstance(exit_code, bool) else ""
-    )
-    raise _HarnessLaneDeadlineExceeded(
-        f"the lane reported its own deadline{of_deadline} stopped the run; "
-        f"it ran {ran if ran is not None else elapsed:.0f} s{exit_note}"
-    )
+    detail = lane_deadline_detail(report_text, elapsed)
+    if detail is not None:
+        raise _HarnessLaneDeadlineExceeded(detail)
 
 
 def _harness_lane_exception_outcome(

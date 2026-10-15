@@ -22,6 +22,7 @@ if _LIB not in sys.path:
     sys.path.insert(0, _LIB)
 
 import config_runtime  # noqa: E402  (after the scripts/lib path guard above)
+from unified_report_schema import SchemaViolation, parse_frontmatter  # after the same path guard
 
 logger = logging.getLogger(__name__)
 
@@ -334,6 +335,63 @@ def describe_dispatch_exception(exc: BaseException, *, prompt: str = "") -> str:
         suffix = " ... [truncated]"
         text = text[: DISPATCH_ERROR_DETAIL_MAX_CHARS - len(suffix)] + suffix
     return text
+
+
+def _frontmatter_number(value: object) -> "float | None":
+    """A frontmatter value as a float when it is a plain number, else None (a bool is not a number)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def lane_deadline_detail(report_text: str, elapsed: "float | None" = None) -> "str | None":
+    """One line saying the lane's OWN deadline stopped the run, or None (OI-2066).
+
+    The ONE reader of that signal. gate_runner's harness lane, glm_gate,
+    kimi_gate, the plan-gate seat reader, its tiebreaker and the companion
+    report search all call it before they read a verdict: a report the lane cut
+    off can still hold a partial verdict block, and a review that never
+    finished must not count as one. Measured on 4ac2669a (codex): glm_gate and
+    kimi_gate booked ``pass`` with exit 0 on a deadline-killed report whose
+    body held a partial pass block.
+
+    The signal is the lane's explicit statement, never an inference:
+    ``deadline_exceeded: true`` in the report frontmatter, which
+    provider_dispatch stamps (``_deadline_frontmatter``, with
+    ``deadline_seconds``) only when the code that killed the run did so
+    because its total deadline ran out — the drainer for kimi, the claude
+    harness adapter for glm and deepseek. Unreadable frontmatter, or any
+    other value than ``True``, returns None and the report keeps its old
+    reading, quota detection included.
+
+    Duration is never the deciding signal (codex on 595c3e8e): deepseek's
+    ``duration_seconds`` includes prompt and worktree setup, while its timer
+    starts after delivery — a quota failure after 20 s of setup and 890 s of
+    work "lasted" a 900 s deadline that never fired. The lane's
+    ``duration_seconds`` (or *elapsed* when the report carries none) goes into
+    the line as information only. The line is built from numbers only, never
+    from the report's text.
+    """
+    if not report_text:
+        return None
+    try:
+        frontmatter = parse_frontmatter(report_text)
+    except SchemaViolation:
+        return None
+    if frontmatter.get("deadline_exceeded") is not True:
+        return None
+    deadline = _frontmatter_number(frontmatter.get("deadline_seconds"))
+    ran = _frontmatter_number(frontmatter.get("duration_seconds"))
+    if ran is None:
+        ran = elapsed
+    exit_code = frontmatter.get("exit_code")
+    of_deadline = f" of {deadline:.0f} s" if deadline is not None else ""
+    ran_note = f"; it ran {ran:.0f} s" if ran is not None else ""
+    exit_note = (
+        f" (report exit_code={exit_code})"
+        if isinstance(exit_code, int) and not isinstance(exit_code, bool) else ""
+    )
+    return f"the lane reported its own deadline{of_deadline} stopped the run{ran_note}{exit_note}"
 
 
 # The verdict the gate must end its report with. Verbatim-identical across
