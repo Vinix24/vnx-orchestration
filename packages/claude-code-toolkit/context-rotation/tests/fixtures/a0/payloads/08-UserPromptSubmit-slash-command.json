@@ -1,0 +1,44 @@
+{
+ "event": "UserPromptSubmit",
+ "payload": {
+  "session_id": "<session_id>",
+  "transcript_path": "<home>/.claude/projects/<project>/<session_id>.jsonl",
+  "cwd": "<project_dir>",
+  "scratchpad_dir": "<scratchpad_dir>",
+  "prompt_id": "<prompt_id>",
+  "permission_mode": "auto",
+  "hook_event_name": "UserPromptSubmit",
+  "prompt": "/a0probe:rotate release"
+ },
+ "env_present": [
+  "CLAUDECODE",
+  "CLAUDE_CODE_CHILD_SESSION",
+  "CLAUDE_CODE_ENTRYPOINT",
+  "CLAUDE_CODE_MESSAGING_SOCKET",
+  "CLAUDE_CODE_MESSAGING_TOKEN",
+  "CLAUDE_CODE_SESSION_ATTENDED",
+  "CLAUDE_CODE_SESSION_ID",
+  "CLAUDE_PID",
+  "CLAUDE_PLUGIN_DATA",
+  "CLAUDE_PLUGIN_ROOT",
+  "CLAUDE_PROJECT_DIR",
+  "TMUX",
+  "TMUX_PANE",
+  "TMUX_PLUGIN_MANAGER_PATH",
+  "TMUX_TMPDIR"
+ ],
+ "env_values": {
+  "CLAUDE_PID": "<pid>",
+  "CLAUDE_CODE_SESSION_ID": "<session_id>",
+  "TMUX_PANE": "%<n>",
+  "CLAUDE_CODE_ENTRYPOINT": "cli",
+  "CLAUDECODE": "1"
+ },
+ "ancestry": [
+  "<pid> <ppid> <lstart> python3",
+  "<pid> <ppid> <lstart> sh",
+  "<pid> <ppid> <lstart> claude",
+  "<pid> <ppid> <lstart> -zsh",
+  "<pid> <ppid> <lstart> tmux"
+ ]
+}

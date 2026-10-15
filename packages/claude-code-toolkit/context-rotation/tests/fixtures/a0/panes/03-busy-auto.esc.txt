@@ -1,0 +1,49 @@
+
+[38;5;174m ▐[48;5;16m▛███▛█[39m[49m   [1mClaude Code[0m [38;5;246mv2.1.300[39m
+[38;5;174m▝▜[48;5;16m█████[49m█▀[39m  [38;5;246mSonnet 5.5 · Claude Max[39m
+[38;5;174m ▝▝   ▝▝ [39m  [38;5;246m<path>>/scratchpad/a0/repo[39m
+
+[38;5;246m  ⎿  SessionStart:startup says: A0-SM SessionStart
+
+[48;5;237m❯ [38;5;231mSay OK and nothing else.[39m
+[38;5;246m[49m  ⎿  UserPromptSubmit says: A0-SM UserPromptSubmit
+
+[38;5;231m⏺[39m OK
+[38;5;246m  ⎿  Stop says: A0-SM Stop[39m
+
+[38;5;246m✻[39m [38;5;246mChurned for 1s · done 7:00 PM[39m
+
+[38;5;246m[48;5;237m❯ [38;5;231mUse the Bash tool to run: sleep 12. Then create the file notes.txt containing the word x with the Write tool. Then say done.[39m
+[38;5;246m[49m  ⎿  UserPromptSubmit says: A0-SM UserPromptSubmit
+
+⏺[39m Waiting 12 seconds[38;5;246m · 3s[39m
+[38;5;246m  ⎿  $ sleep 12 (3s)[39m
+     [38;5;246m(ctrl+b ctrl+b (twice) to run in background)[39m
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[38;5;174m✳[39m [38;5;216mGusting…[38;5;174m [38;5;246m(5s · ↓[39m [38;5;246m80 tokens)[39m
+[38;5;246m  ⎿  Tip: Continue your session in Claude Code Desktop with [38;5;153m/desktop[39m
+
+[38;5;244m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[38;5;246m❯ [39m
+[38;5;244m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  [38;5;246mSonnet 5.5 │ repo │ ⎇ master[39m
+  [38;5;220m⏵⏵ auto mode on[38;5;246m (shift+tab to cycle) · ← 2 agents[39m

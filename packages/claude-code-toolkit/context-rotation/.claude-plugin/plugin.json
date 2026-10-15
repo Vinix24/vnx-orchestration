@@ -1,0 +1,5 @@
+{
+  "name": "context-rotation",
+  "version": "0.1.0",
+  "description": "Measures how full a Claude Code session's context is and warns before it degrades."
+}
