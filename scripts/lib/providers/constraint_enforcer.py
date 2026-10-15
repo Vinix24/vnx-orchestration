@@ -573,6 +573,52 @@ def _violation_from_constraint(
     )
 
 
+def _content_route_violation(
+    constraint: Mapping[str, Any], provider: Optional[str], sub_provider: Optional[str],
+    content_class: Optional[Union[str, Any]], override_applied: bool, env_map: Mapping[str, str],
+) -> Optional[ConstraintViolation]:
+    """The ``require_content_route`` violation for this route, or None when the content may go."""
+    content_verdict = _content_route_verdict(constraint, provider, sub_provider, content_class)
+    if content_verdict is None:
+        return None
+    verdict_code, detail = content_verdict
+    code = str(constraint.get("id") or constraint.get("code") or "unknown")
+    reason = str(constraint.get("reason") or "no reason given")
+    suffix = f" Override reason: {_override_reason(code, env_map)}" if override_applied else ""
+    return ConstraintViolation(
+        code=verdict_code,
+        severity="warn" if override_applied else str(constraint.get("audit_severity") or "blocking"),
+        message=f"Route forbidden: {detail}. {reason}{suffix}",
+        override_applied=override_applied,
+    )
+
+
+def _registry_violation(
+    provider: Optional[str], sub_provider: Optional[str], model: str,
+) -> Optional[ConstraintViolation]:
+    """``model-not-in-current-registry`` when ``model`` is not registered for the provider."""
+    base, sub = _provider_parts(provider, sub_provider)
+    # OI-707: a bare `--model kimi`/`kimi-default` reaching this door
+    # pre-flight normalizes to the registry default before the lookup —
+    # a real unmapped id (e.g. 'kimi-bogus') is untouched and still fails.
+    registry_check_model = model
+    if _norm(base) == "kimi":
+        bare_alias_default = _kimi_bare_alias_registry_default(_norm(model))
+        if bare_alias_default:
+            registry_check_model = bare_alias_default
+    if _model_in_registry(base, sub, registry_check_model):
+        return None
+    registry_key = _registry_key_for(base, sub) or "unknown"
+    return ConstraintViolation(
+        code="model-not-in-current-registry",
+        severity="blocking",
+        message=(
+            f"Route forbidden: model {model!r} is not registered for "
+            f"provider {provider!r} (registry key {registry_key!r})."
+        ),
+    )
+
+
 class ConstraintEnforcer:
     """Loads and evaluates provider dispatch constraints."""
 
@@ -650,17 +696,8 @@ class ConstraintEnforcer:
                         override_applied=override_applied,
                     )
             elif rule == "require_content_route":
-                content_verdict = _content_route_verdict(constraint, provider, sub_provider, content_class)
-                if content_verdict is not None:
-                    verdict_code, detail = content_verdict
-                    reason = str(constraint.get("reason") or "no reason given")
-                    suffix = f" Override reason: {_override_reason(code, env_map)}" if override_applied else ""
-                    violation = ConstraintViolation(
-                        code=verdict_code,
-                        severity="warn" if override_applied else str(constraint.get("audit_severity") or "blocking"),
-                        message=f"Route forbidden: {detail}. {reason}{suffix}",
-                        override_applied=override_applied,
-                    )
+                violation = _content_route_violation(
+                    constraint, provider, sub_provider, content_class, override_applied, env_map)
 
             if violation is not None:
                 violations.append(violation)
@@ -682,24 +719,9 @@ class ConstraintEnforcer:
             ))
 
         if check_registry and model:
-            # OI-707: a bare `--model kimi`/`kimi-default` reaching this door
-            # pre-flight normalizes to the registry default before the lookup —
-            # a real unmapped id (e.g. 'kimi-bogus') is untouched and still fails.
-            registry_check_model = model
-            if _norm(base) == "kimi":
-                bare_alias_default = _kimi_bare_alias_registry_default(model_norm)
-                if bare_alias_default:
-                    registry_check_model = bare_alias_default
-            if not _model_in_registry(base, sub, registry_check_model):
-                registry_key = _registry_key_for(base, sub) or "unknown"
-                violations.append(ConstraintViolation(
-                    code="model-not-in-current-registry",
-                    severity="blocking",
-                    message=(
-                        f"Route forbidden: model {model!r} is not registered for "
-                        f"provider {provider!r} (registry key {registry_key!r})."
-                    ),
-                ))
+            registry_violation = _registry_violation(provider, sub_provider, model)
+            if registry_violation is not None:
+                violations.append(registry_violation)
 
         return violations
 

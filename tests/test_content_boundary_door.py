@@ -324,7 +324,7 @@ def test_classifier_failure_blocks_with_a_receipt(world, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def _snapshot(world: World, provider: str, instruction: str = "Role: backend-developer\n\nDo the work.\n",
-              project_id: str = "vnx-dev"):
+              project_id: str = "vnx-dev", dispatch_paths: list[str] | None = None):
     staging_id = "20261015-staging-content"
     data_dir = world.tmp / "vnx-data"
     bundle = data_dir / "dispatches" / "pending" / staging_id
@@ -334,7 +334,8 @@ def _snapshot(world: World, provider: str, instruction: str = "Role: backend-dev
     spec = {
         "schema_version": 1, "project_id": project_id, "dispatch_id": "20261015-content-dispatch",
         "staging_id": staging_id, "instruction_file": str(inst), "role": "backend-developer",
-        "target_slot": "T1", "gate": "codex_gate", "dispatch_paths": [], "provider": provider,
+        "target_slot": "T1", "gate": "codex_gate", "dispatch_paths": [{"path": p, "access": "read"} for p in dispatch_paths or []],
+        "provider": provider,
         "model": None, "deadline_seconds": 3600, "isolation": "worktree",
     }
     spec_file = bundle / "dispatch-spec.json"
@@ -559,3 +560,159 @@ def test_classify_dispatch_prefers_a_non_exception_signal_on_equal_rank(world):
     only = content_class.classify_dispatch(
         cwd=world.fabric, project_root=world.fabric, project_id="pacompany-engine", boundary=boundary)
     assert only.source == "client_project_id" and only.exception_providers == {"deepseek"}
+
+
+# ---------------------------------------------------------------------------
+# Glob paths and the content boundary (PR #2063 fix round 2)
+# ---------------------------------------------------------------------------
+
+def _glob_world(world: World) -> Path:
+    """A project root that holds a restricted root at ``clients/acme``."""
+    project = world.tmp / "project"
+    (project / "clients" / "acme").mkdir(parents=True)
+    (project / "scripts").mkdir()
+    world.write_boundary(client_roots=[str(project / "clients" / "acme")])
+    return project
+
+
+def _glob_class(world: World, project: Path, declared: str) -> content_class.DispatchClass:
+    boundary = content_class.load_boundary(world.boundary_file)
+    return content_class.classify_dispatch(
+        cwd=world.fabric, project_root=project, dispatch_paths=[declared], boundary=boundary)
+
+
+def test_glob_matching_a_restricted_root_under_the_static_prefix_is_restricted(world):
+    project = _glob_world(world)
+    dc = _glob_class(world, project, "clients/*/**:read")
+    assert dc.cls == "client" and dc.signal == "dispatch path (client_root)"
+
+
+def test_glob_codex_case_is_refused_at_the_side_door(world, monkeypatch):
+    project = _glob_world(world)
+    monkeypatch.setenv("VNX_PROJECT_ROOT", str(project))
+    monkeypatch.chdir(project)
+    argv = _argv("deepseek-harness") + ["--dispatch-paths", "clients/*/**:read"]
+    with patch.object(pd, "_dispatch_deepseek_harness", return_value=0) as lane:
+        rc = pd.main(argv)
+    assert rc == 1
+    lane.assert_not_called()
+
+
+def test_glob_codex_case_is_refused_at_the_door(world, monkeypatch):
+    project = _glob_world(world)
+    monkeypatch.setenv("VNX_PROJECT_ROOT", str(project))
+    monkeypatch.chdir(project)
+    snapshot = _snapshot(world, "deepseek-harness", dispatch_paths=["clients/*/**"])
+    assert "content-boundary" in _codes(snapshot, "blocking")
+
+
+def test_double_star_markdown_from_a_root_holding_a_restricted_root_is_restricted(world):
+    project = _glob_world(world)
+    assert _glob_class(world, project, "**/*.md:read").cls == "client"
+
+
+def test_glob_that_cannot_reach_the_restricted_root_is_not_restricted(world):
+    project = _glob_world(world)
+    assert not _glob_class(world, project, "scripts/**:read").restricted
+    assert not _glob_class(world, project, "clients/other-*/**:read").restricted
+
+
+def test_glob_with_its_static_prefix_inside_a_restricted_root_is_restricted(world):
+    project = _glob_world(world)
+    assert _glob_class(world, project, "clients/acme/docs/*.md:read").cls == "client"
+
+
+def test_a_plain_path_above_a_restricted_root_keeps_todays_behaviour(world):
+    project = _glob_world(world)
+    assert not _glob_class(world, project, "clients:read").restricted
+
+
+@pytest.mark.parametrize("pattern,rel,expected", [
+    (("**",), ("a", "b"), True),
+    (("*", "**"), ("a", "b"), True),
+    (("*",), ("a", "b"), False),
+    (("a*", "b"), ("ax", "b"), True),
+    (("a*", "c"), ("ax", "b"), False),
+    (("**", "b", "*.md"), ("a", "b"), True),
+])
+def test_pattern_reaches_matches_component_by_component(pattern, rel, expected):
+    assert content_class._pattern_reaches(pattern, rel) is expected
+
+
+def test_pattern_resolution_error_counts_as_restricted(world, monkeypatch):
+    project = _glob_world(world)
+    monkeypatch.setattr(content_class, "_pattern_reaches",
+                        lambda *_a: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert _glob_class(world, project, "clients/*/**:read").cls == "client"
+
+
+# ---------------------------------------------------------------------------
+# Applied override: the ledger record comes first (ADR-005)
+# ---------------------------------------------------------------------------
+
+def test_applied_override_is_in_the_ledger_before_the_handler_runs(world, monkeypatch):
+    monkeypatch.chdir(world.client)
+    monkeypatch.setenv("VNX_OVERRIDE_CONTENT_BOUNDARY", "1")
+    monkeypatch.setenv("VNX_OVERRIDE_CONTENT_BOUNDARY_REASON", "operator wants the full panel")
+    seen: list[list[dict]] = []
+
+    def handler(*_a, **_k):
+        seen.append(_refusals("d-override-ledger"))
+        return 0
+
+    with patch.object(pd, "_dispatch_deepseek_harness", side_effect=handler):
+        rc = pd.main(_argv("deepseek-harness", dispatch_id="d-override-ledger"))
+    assert rc == 0
+    assert len(seen) == 1
+    events = [r for r in seen[0] if r.get("event_type") == "content_boundary_override_applied"]
+    assert len(events) == 1
+    event = events[0]
+    assert event["constraint_id"] == "content-boundary"
+    assert event["provider"] == "deepseek-harness" and event["model"]
+    assert event["content_class"] == "client" and event["signal"] == "cwd (client_root)"
+    assert event["override_reason"] == "operator wants the full panel"
+    assert event["override_applied"] is True
+
+
+def test_failing_ledger_write_refuses_the_override(world, monkeypatch, capsys):
+    monkeypatch.chdir(world.client)
+    monkeypatch.setenv("VNX_OVERRIDE_CONTENT_BOUNDARY", "1")
+    monkeypatch.setenv("VNX_OVERRIDE_CONTENT_BOUNDARY_REASON", "operator wants the full panel")
+
+    def broken(*_a, **_k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(pd, "_record_content_override", broken)
+    with patch.object(pd, "_dispatch_deepseek_harness", return_value=0) as lane:
+        rc = pd.main(_argv("deepseek-harness", dispatch_id="d-override-fail"))
+    assert rc == 1
+    lane.assert_not_called()
+    assert "audit record could not be written" in capsys.readouterr().err
+
+
+def test_door_applied_override_is_written_to_the_receipt_ledger(world, monkeypatch):
+    monkeypatch.chdir(world.client)
+    monkeypatch.setenv("VNX_OVERRIDE_CONTENT_BOUNDARY", "1")
+    monkeypatch.setenv("VNX_OVERRIDE_CONTENT_BOUNDARY_REASON", "full panel wanted")
+    snapshot = _snapshot(world, "deepseek-harness")
+    assert "content-boundary-audit-unwritten" not in _codes(snapshot)
+    ledger = world.tmp / "vnx-data" / "state" / "t0_receipts.ndjson"
+    rows = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines() if line]
+    events = [r for r in rows if r.get("event_type") == "content_boundary_override_applied"]
+    assert len(events) == 1
+    assert events[0]["dispatch_id"] == "20261015-content-dispatch"
+    assert events[0]["override_reason"] == "full panel wanted"
+
+
+def test_door_failing_ledger_write_blocks_the_override(world, monkeypatch):
+    monkeypatch.chdir(world.client)
+    monkeypatch.setenv("VNX_OVERRIDE_CONTENT_BOUNDARY", "1")
+    monkeypatch.setenv("VNX_OVERRIDE_CONTENT_BOUNDARY_REASON", "full panel wanted")
+    import append_receipt
+
+    def broken(*_a, **_k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(append_receipt, "append_receipt_payload", broken)
+    snapshot = _snapshot(world, "deepseek-harness")
+    assert "content-boundary-audit-unwritten" in _codes(snapshot, "blocking")

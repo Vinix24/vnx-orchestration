@@ -69,7 +69,6 @@ def run(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_PROJECT_ROOT", str(fabric))
     monkeypatch.setattr(dp, "_default_receipts_path",
                         lambda: tmp_path / "no-ledger" / "t0_receipts.ndjson", raising=False)
-    monkeypatch.setattr(plan_gate_panel, "load_synthesis_min_seats", lambda: None)
     for key in ("VNX_OVERRIDE_CONTENT_BOUNDARY", "VNX_OVERRIDE_CONTENT_BOUNDARY_REASON"):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.chdir(fabric)
@@ -94,7 +93,7 @@ def _main(run, *extra: str, question: str = "assess the proposal") -> int:
 
 def test_b7_client_cwd_without_seats_runs_only_codex_and_claude(run, monkeypatch, capsys):
     monkeypatch.chdir(run.client)
-    assert _main(run) == 0
+    assert _main(run, "--allow-degraded") == 0
     assert run.recorder.providers == {"codex", "claude"}
     err = capsys.readouterr().err
     assert "client content" in err and "cwd (client_root)" in err and "codex, claude" in err
@@ -106,25 +105,25 @@ def test_b7_client_cwd_without_seats_runs_only_codex_and_claude(run, monkeypatch
 
 def test_personal_cwd_without_seats_runs_only_codex_and_claude(run, monkeypatch):
     monkeypatch.chdir(run.personal)
-    assert _main(run) == 0
+    assert _main(run, "--allow-degraded") == 0
     assert run.recorder.providers == {"codex", "claude"}
 
 
 def test_context_file_in_a_client_folder_restricts_a_fabric_cwd(run):
     context = run.client / "brief.md"
     context.write_text("background", encoding="utf-8")
-    assert _main(run, "--context-file", str(context)) == 0
+    assert _main(run, "--context-file", str(context), "--allow-degraded") == 0
     assert run.recorder.providers == {"codex", "claude"}
 
 
 def test_out_path_in_a_client_folder_restricts_a_fabric_cwd(run):
     run.out = run.client / "panel.md"
-    assert _main(run) == 0
+    assert _main(run, "--allow-degraded") == 0
     assert run.recorder.providers == {"codex", "claude"}
 
 
 def test_question_naming_a_client_path_restricts_a_fabric_cwd(run):
-    assert _main(run, question=f"assess {run.client}/offer.md") == 0
+    assert _main(run, "--allow-degraded", question=f"assess {run.client}/offer.md") == 0
     assert run.recorder.providers == {"codex", "claude"}
 
 
@@ -139,7 +138,7 @@ def test_b8_explicit_external_seat_from_a_client_cwd_is_rc_2(run, monkeypatch, c
 
 def test_b8_allow_external_seats_dispatches_with_override_env_and_names_it_in_the_report(run, monkeypatch):
     monkeypatch.chdir(run.client)
-    assert _main(run, "--seats", "codex,kimi", "--allow-external-seats", "operator wants kimi") == 0
+    assert _main(run, "--seats", "codex,kimi", "--allow-external-seats", "operator wants kimi", "--allow-degraded") == 0
     assert run.recorder.providers == {"codex", "kimi"}
     assert run.factory_calls == [{"extra_env": {
         "VNX_OVERRIDE_CONTENT_BOUNDARY": "1",
@@ -159,7 +158,7 @@ def test_allow_external_seats_without_seats_runs_the_full_fleet(run, monkeypatch
 def test_override_never_reaches_this_process_environment(run, monkeypatch):
     import os
     monkeypatch.chdir(run.client)
-    assert _main(run, "--seats", "kimi", "--allow-external-seats", "because") == 0
+    assert _main(run, "--seats", "kimi", "--allow-external-seats", "because", "--allow-degraded") == 0
     assert "VNX_OVERRIDE_CONTENT_BOUNDARY" not in os.environ
     assert "VNX_OVERRIDE_CONTENT_BOUNDARY_REASON" not in os.environ
 
@@ -183,7 +182,7 @@ def test_b9_fabric_cwd_default_is_still_the_full_fleet(run):
 
 
 def test_b9_fabric_cwd_still_accepts_an_external_seat(run):
-    assert _main(run, "--seats", "kimi,claude") == 0
+    assert _main(run, "--seats", "kimi,claude", "--allow-degraded") == 0
     assert run.recorder.providers == {"kimi", "claude"}
 
 
@@ -232,3 +231,18 @@ def test_seat_dispatcher_without_extra_env_carries_no_override(tmp_path, monkeyp
                                                         role="deliberation-panelist")
     dispatch("kimi", "kimi-k3", "question", "did-2")
     assert "VNX_OVERRIDE_CONTENT_BOUNDARY" not in seen["env"]
+
+
+def test_restricted_roster_below_the_shipped_minimum_is_rc_2_before_any_seat(run, monkeypatch, capsys):
+    assert plan_gate_panel.load_synthesis_min_seats() == 3
+    monkeypatch.chdir(run.client)
+    assert _main(run) == 2
+    assert run.recorder.calls == []
+    err = capsys.readouterr().err
+    assert "--allow-degraded" in err and "--allow-external-seats" in err
+
+
+def test_restricted_roster_below_the_shipped_minimum_runs_with_allow_degraded(run, monkeypatch):
+    monkeypatch.chdir(run.client)
+    assert _main(run, "--allow-degraded") == 0
+    assert run.recorder.providers == {"codex", "claude"}

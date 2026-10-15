@@ -26,6 +26,7 @@ restricted).
 from __future__ import annotations
 
 import codecs
+import fnmatch
 import json
 import logging
 import math
@@ -545,13 +546,59 @@ def _entry_path(entry: object) -> str:
     return text
 
 
-def _strip_glob(path: str) -> str:
-    """Leading components of ``path`` up to the first one with a glob character."""
+def _split_glob(path: str) -> Tuple[str, Tuple[str, ...]]:
+    """``(static prefix, remaining pattern components)``; the remainder is empty without a glob."""
     parts = path.split("/")
     for index, part in enumerate(parts):
         if any(c in part for c in _GLOB_CHARS):
-            return "/".join(parts[:index]) or ("/" if path.startswith("/") else ".")
-    return path
+            prefix = "/".join(parts[:index]) or ("/" if path.startswith("/") else ".")
+            return prefix, tuple(p for p in parts[index:] if p)
+    return path, ()
+
+
+def _pattern_reaches(pattern: Tuple[str, ...], rel: Tuple[str, ...]) -> bool:
+    """True when ``pattern`` can match the path ``rel`` or any path below it.
+
+    Component by component with fnmatch semantics; ``**`` matches any number of components,
+    zero included. Case is ignored so a case-insensitive filesystem cannot slip past.
+    """
+    pat = tuple(p.lower() for p in pattern)
+    parts = tuple(p.lower() for p in rel)
+
+    def walk(pi: int, ri: int) -> bool:
+        if ri == len(parts):
+            return True
+        if pi == len(pat):
+            return False
+        if pat[pi] == "**":
+            return walk(pi + 1, ri) or walk(pi, ri + 1)
+        return fnmatch.fnmatchcase(parts[ri], pat[pi]) and walk(pi + 1, ri + 1)
+
+    return walk(0, 0)
+
+
+def _glob_reach_origin(prefix: Path, pattern: Tuple[str, ...], b: Boundary) -> Optional[Origin]:
+    """Restricted origin when a glob under ``prefix`` can reach a restricted root, else None.
+
+    The static prefix alone does not decide: ``clients/*/**`` has the prefix ``clients``, which
+    is outside a root ``clients/acme`` that the pattern still matches. Any failure to decide
+    counts as restricted.
+    """
+    hit: Optional[Origin] = None
+    for cls, src, roots in ((PERSONAL, SRC_PERSONAL_ROOT, b.personal_roots),
+                            (CLIENT, SRC_CLIENT_ROOT, b.client_roots)):
+        for root in roots:
+            try:
+                real_root = _real(root)
+                if real_root == prefix or prefix not in real_root.parents:
+                    continue
+                reached = _pattern_reaches(pattern, real_root.relative_to(prefix).parts)
+            except Exception:
+                reached = True
+            if reached:
+                origin = Origin(cls, None, src)
+                hit = origin if hit is None else most_restrictive_origin(hit, origin)
+    return hit
 
 
 def classify_dispatch(
@@ -580,7 +627,7 @@ def classify_dispatch(
 
     base = Path(project_root) if project_root is not None else None
     for entry in dispatch_paths or ():
-        raw = _strip_glob(_entry_path(entry))
+        raw, pattern = _split_glob(_entry_path(entry))
         if not raw:
             continue
         candidate = Path(raw).expanduser()
@@ -589,6 +636,10 @@ def classify_dispatch(
         elif not candidate.is_absolute():
             continue
         signals.append(("dispatch_path", classify_path(candidate, b, registry_path)))
+        if pattern:
+            reach = _glob_reach_origin(_real(candidate), pattern, b)
+            if reach is not None:
+                signals.append(("dispatch_path", reach))
     for extra in extra_paths or ():
         if extra is not None and str(extra).strip():
             signals.append(("extra_path", classify_path(extra, b, registry_path)))

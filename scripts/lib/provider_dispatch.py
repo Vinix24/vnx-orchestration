@@ -1612,7 +1612,12 @@ def _emit_refusal_receipt(
         "failure_reason": failure_reason,
         "timestamp": now_ts,
     }
-    line = json.dumps(receipt, separators=(",", ":")) + "\n"
+    _append_ledger_record(receipt_path, receipt)
+
+
+def _append_ledger_record(receipt_path: Path, record: dict) -> None:
+    """Append one NDJSON line to the receipt ledger under an exclusive flock."""
+    line = json.dumps(record, separators=(",", ":")) + "\n"
     with receipt_path.open("a", encoding="utf-8") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
         try:
@@ -1620,6 +1625,29 @@ def _emit_refusal_receipt(
             fh.flush()
         finally:
             fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def _record_content_override(args: argparse.Namespace, provider: str, content_class) -> None:
+    """Write the applied content-boundary override to the receipt ledger (ADR-005).
+
+    Raises when the ledger cannot be written: the caller refuses the dispatch, because an
+    override that exists only as a log line leaves no audit trail.
+    """
+    receipt_path = _resolve_state_dir() / "t0_receipts.ndjson"
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    _append_ledger_record(receipt_path, {
+        "event_type": "content_boundary_override_applied",
+        "dispatch_id": args.dispatch_id,
+        "terminal_id": args.terminal_id,
+        "constraint_id": "content-boundary",
+        "provider": provider,
+        "model": _constraint_model_for_provider(args, provider),
+        "content_class": getattr(content_class, "cls", None),
+        "signal": getattr(content_class, "signal", None),
+        "override_reason": (os.environ.get("VNX_OVERRIDE_CONTENT_BOUNDARY_REASON") or "").strip(),
+        "override_applied": True,
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    })
 
 
 def _classify_dispatch_content(args: argparse.Namespace):
@@ -1683,6 +1711,16 @@ def _check_constraints(args: argparse.Namespace, provider: str):
         if violation.severity == "blocking":
             raise ConstraintViolationError(violation)
         if violation.override_applied and violation.code.startswith("content-boundary"):
+            try:
+                _record_content_override(args, provider, content_class)
+            except Exception as exc:
+                from providers.constraint_enforcer import ConstraintViolation, ConstraintViolationError
+                raise ConstraintViolationError(ConstraintViolation(
+                    code=violation.code,
+                    severity="blocking",
+                    message=(f"content-boundary override refused: the audit record could not "
+                             f"be written to the receipt ledger ({exc})"),
+                )) from exc
             logger.warning(
                 "[%s] content boundary override applied dispatch=%s reason=%s",
                 violation.code, args.dispatch_id,

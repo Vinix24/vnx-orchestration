@@ -87,6 +87,42 @@ def _external_seats(roster: "list[tuple[str, str]]", content) -> "list[str]":
     return external
 
 
+def _restrict_to_content(args, roster, context, allow_reason):
+    """``(roster, seat_env, boundary_note)`` after the content boundary, or an rc when refused."""
+    boundary_note = ""
+    seat_env: "dict[str, str] | None" = None
+    content = _classify_panel_content(args, context)
+    if not (content.restricted or content.unreadable):
+        return roster, seat_env, boundary_note
+    what = f"{content.cls} content" if content.restricted else "content of unknown class (marker unreadable)"
+    planned = roster if roster is not None else default_roster()
+    external = _external_seats(planned, content)
+    if allow_reason is not None and allow_reason.strip():
+        if external:
+            seat_env = {
+                "VNX_OVERRIDE_CONTENT_BOUNDARY": "1",
+                "VNX_OVERRIDE_CONTENT_BOUNDARY_REASON": allow_reason.strip(),
+            }
+            boundary_note = (
+                f"{what} (signal: {content.signal}); external seats allowed by "
+                f"--allow-external-seats: {', '.join(external)}. Reason: {allow_reason.strip()}"
+            )
+    elif roster is None:
+        roster = [seat for seat in default_roster() if seat[0] not in external]
+        seats = ", ".join(provider for provider, _ in roster)
+        print(f"panel: {what} (signal: {content.signal}); running seats: {seats}", file=sys.stderr)
+        boundary_note = f"{what} (signal: {content.signal}); seats limited to: {seats}"
+    elif external:
+        print(
+            f"panel: {what} (signal: {content.signal}) may not go to seat(s): "
+            f"{', '.join(external)}. Use the seats {', '.join(KERN_ROSTER_SEATS)} or pass "
+            "--allow-external-seats REASON",
+            file=sys.stderr,
+        )
+        return 2
+    return roster, seat_env, boundary_note
+
+
 def main(argv: "list[str] | None" = None) -> int:
     parser = argparse.ArgumentParser(description="VNX multi-provider deliberation panel")
     parser.add_argument("mode", choices=sorted(MODES), help="deliberation mode")
@@ -128,36 +164,10 @@ def main(argv: "list[str] | None" = None) -> int:
         print("panel: --allow-external-seats needs a non-empty REASON", file=sys.stderr)
         return 2
 
-    boundary_note = ""
-    seat_env: "dict[str, str] | None" = None
-    content = _classify_panel_content(args, context)
-    if content.restricted or content.unreadable:
-        what = f"{content.cls} content" if content.restricted else "content of unknown class (marker unreadable)"
-        planned = roster if roster is not None else default_roster()
-        external = _external_seats(planned, content)
-        if allow_reason is not None and allow_reason.strip():
-            if external:
-                seat_env = {
-                    "VNX_OVERRIDE_CONTENT_BOUNDARY": "1",
-                    "VNX_OVERRIDE_CONTENT_BOUNDARY_REASON": allow_reason.strip(),
-                }
-                boundary_note = (
-                    f"{what} (signal: {content.signal}); external seats allowed by "
-                    f"--allow-external-seats: {', '.join(external)}. Reason: {allow_reason.strip()}"
-                )
-        elif roster is None:
-            roster = [seat for seat in default_roster() if seat[0] not in external]
-            seats = ", ".join(provider for provider, _ in roster)
-            print(f"panel: {what} (signal: {content.signal}); running seats: {seats}", file=sys.stderr)
-            boundary_note = f"{what} (signal: {content.signal}); seats limited to: {seats}"
-        elif external:
-            print(
-                f"panel: {what} (signal: {content.signal}) may not go to seat(s): "
-                f"{', '.join(external)}. Use the seats {', '.join(KERN_ROSTER_SEATS)} or pass "
-                "--allow-external-seats REASON",
-                file=sys.stderr,
-            )
-            return 2
+    restriction = _restrict_to_content(args, roster, context, allow_reason)
+    if isinstance(restriction, int):
+        return restriction
+    roster, seat_env, boundary_note = restriction
 
     from plan_gate_panel import (  # noqa: PLC0415
         _make_default_dispatcher,
@@ -181,6 +191,15 @@ def main(argv: "list[str] | None" = None) -> int:
     )
     # OI-1154: the synthesis coverage floor comes from the config, never a Python literal.
     min_seats = load_synthesis_min_seats()
+    effective_seats = len(roster if roster is not None else default_roster())
+    if min_seats is not None and effective_seats < min_seats and not args.allow_degraded:
+        print(
+            f"panel: {effective_seats} seat(s) cannot reach the synthesis minimum of {min_seats}; "
+            "nothing was dispatched. Pass --allow-degraded to synthesize from fewer seats, or "
+            "--allow-external-seats REASON to let the seats outside codex and claude run",
+            file=sys.stderr,
+        )
+        return 2
 
     print(f"[panel] mode={args.mode} — running 4-stage deliberation across the fleet ...", file=sys.stderr)
     if roster is None:

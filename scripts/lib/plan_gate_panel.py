@@ -1362,8 +1362,7 @@ def _seat_child_env(
 def _make_default_dispatcher(
     data_dir: Optional[str], timeout_seconds: int,
     *, role: str = "plan-reviewer", base_ref: Optional[str] = None,
-    total_deadline_seconds: Optional[int] = None,
-    extra_env: Optional[Dict[str, str]] = None,
+    total_deadline_seconds: Optional[int] = None, extra_env: Optional[Dict[str, str]] = None,
 ) -> DispatcherFn:
     """Real dispatcher: run a panelist through its governed lane, return the report text.
 
