@@ -587,8 +587,8 @@ _EXTERNAL_TRANSIENT_GATE_REASONS = frozenset({QUOTA_REFUSAL_REASON})
 DEFAULT_REPEAT_THRESHOLD = 3
 
 
-def _gate_result_cause(record: Dict[str, Any]) -> Optional[str]:
-    """Canonical 'cause' for a review_gates/results/*.json record, or None
+def _gate_result_cause(record: Dict[str, Any]) -> Optional[FrozenSet[str]]:
+    """Set of atomic causes for a review_gates/results/*.json record, or None
     for a clean pass (or an outcome this can't classify either way).
 
     Two blocked shapes exist in that store:
@@ -596,15 +596,30 @@ def _gate_result_cause(record: Dict[str, Any]) -> Optional[str]:
         not_executable}) carrying a ``reason`` enum (e.g.
         "provider_not_installed", "gate_execution_degenerate") — the exact
         shape the role file's own E6 example (Legacy path gate tripping on a
-        literal string) would produce.
-      - a completed run with non-empty ``blocking_findings``.
+        literal string) would produce. Cause: ``{"reason:<enum>"}``.
+      - a completed run with non-empty ``blocking_findings``. The cause is the
+        set of ``file:<file_path>`` entries of the blocking findings, never
+        the message text (a model words the same finding differently every
+        time; OI-2074). A blocking finding without a usable ``file_path``
+        contributes the legacy ``blocking_findings`` cause, so a run that
+        names no file can still trip E6.
     """
     status = record.get("status")
     if status in _INFRA_FAIL_STATUSES:
         reason = record.get("reason")
-        return f"reason:{reason}" if reason else None
+        return frozenset({f"reason:{reason}"}) if reason else None
     if status == "completed":
-        return "blocking_findings" if record.get("blocking_findings") else None
+        findings = record.get("blocking_findings")
+        if not findings:
+            return None
+        causes = set()
+        for finding in findings:
+            path = finding.get("file_path") if isinstance(finding, dict) else None
+            if isinstance(path, str) and path.strip():
+                causes.add(f"file:{path.strip()}")
+            else:
+                causes.add("blocking_findings")
+        return frozenset(causes)
     return None
 
 
@@ -648,7 +663,7 @@ def check_repeated_gate_failure_cause(
     except OSError as exc:
         return _unmeasurable(check_id, f"resultaten-map niet leesbaar: {exc}")
 
-    by_gate: Dict[str, List[Tuple[datetime, Any, Optional[str]]]] = {}
+    by_gate: Dict[str, List[Tuple[datetime, Any, Optional[FrozenSet[str]]]]] = {}
     unbuilt_gate_records: Dict[str, List[Tuple[datetime, Any]]] = {}
     exhausted_gate_records: Dict[str, List[Tuple[datetime, Any]]] = {}
     for fp in files:
@@ -678,7 +693,11 @@ def check_repeated_gate_failure_cause(
         # Both are reported below as loud, non-triggering notices — excluded
         # from the streak, never silently dropped.
         cause = _gate_result_cause(d)
-        cause_reason = cause[len("reason:") :] if cause is not None and cause.startswith("reason:") else None
+        cause_reason = None
+        if cause is not None and len(cause) == 1:
+            (only,) = cause
+            if only.startswith("reason:"):
+                cause_reason = only[len("reason:") :]
         if cause_reason in _UNBUILT_GATE_REASONS:
             unbuilt_gate_records.setdefault(gate, []).append((ts, d.get("pr_number")))
             continue
@@ -698,14 +717,21 @@ def check_repeated_gate_failure_cause(
             sub_results.append(_unmeasurable(sub_id, f"minder dan {n} geordende resultaten voor gate '{gate}' ({len(entries)})", gate=gate, count=len(entries)))
             continue
         window = entries[-n:]
-        causes = [c for (_, _, c) in window]
+        cause_sets = [c for (_, _, c) in window]
+        causes = [sorted(c) if c is not None else None for c in cause_sets]
         prs = [pr for (_, pr, _) in window]
-        if causes[0] is not None and all(c == causes[0] for c in causes):
+        # One cause shared by every PR in the window trips E6, also when the
+        # PRs carry other findings besides (OI-2074).
+        common: FrozenSet[str] = frozenset()
+        if all(c is not None for c in cause_sets):
+            common = frozenset.intersection(*cause_sets)
+        if common:
+            shared = ", ".join(sorted(common))
             sub_results.append(
                 _triggered(
                     sub_id,
-                    f"laatste {n} PR's op gate '{gate}' allemaal geblokkeerd door dezelfde oorzaak ({causes[0]}) (E6)",
-                    gate=gate, cause=causes[0], prs=prs,
+                    f"laatste {n} PR's op gate '{gate}' allemaal geblokkeerd door dezelfde oorzaak ({shared}) (E6)",
+                    gate=gate, cause=sorted(common)[0], common_causes=sorted(common), prs=prs,
                 )
             )
         else:
