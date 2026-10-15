@@ -50,6 +50,9 @@ def gate_env(tmp_path, monkeypatch):
     (state_dir / "review_gates" / "requests").mkdir(parents=True)
     (state_dir / "review_gates" / "results").mkdir(parents=True)
     reports_dir.mkdir(parents=True)
+    # The state dir names its project, so the provider switch decides for it and never falls
+    # back to resolving one through `git` (a Popen the routing assertions would count).
+    (tmp_path / ".vnx-project-id").write_text("gemini-routing-test\n", encoding="utf-8")
     monkeypatch.setenv("VNX_HOME", str(VNX_ROOT))
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
