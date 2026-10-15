@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from xml.parsers.expat import ExpatError
 
 from vnx_cli import _engine, __version__
 
@@ -861,7 +862,7 @@ def _install_launchd_agent(
     # plist_name argument — see the docstring above.
     try:
         resolved_label = plistlib.loads(content.encode("utf-8")).get("Label")
-    except (plistlib.InvalidFileException, ValueError):
+    except (plistlib.InvalidFileException, ExpatError, ValueError):
         resolved_label = None
     if not isinstance(resolved_label, str) or not resolved_label:
         raise RuntimeError(
