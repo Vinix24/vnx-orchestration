@@ -175,8 +175,9 @@ def main(argv: "list[str] | None" = None) -> int:
     # "you are an independent plan reviewer... review the IMPLEMENTATION PLAN" framing,
     # which a plan-reviewer-role worker correctly rejected as not a plan, corrupting the
     # panel stage.
+    dispatcher_kwargs = {"extra_env": seat_env} if seat_env else {}
     dispatcher = _make_default_dispatcher(
-        data_dir, args.timeout, role="deliberation-panelist", extra_env=seat_env,
+        data_dir, args.timeout, role="deliberation-panelist", **dispatcher_kwargs,
     )
     # OI-1154: the synthesis coverage floor comes from the config, never a Python literal.
     min_seats = load_synthesis_min_seats()
