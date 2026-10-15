@@ -35,6 +35,12 @@
 # A linked worktree, a root under .vnx-data/worktrees/ and an unregistered clone are
 # refused (exit non-zero, nothing written, launchctl never called).
 #
+# OI-1629 B: a template that declares ${VNX_PROJECT_ROOT} (the per-project worktree
+# sweeper) gets the project's checkout from the registry for the resolved project id
+# (scripts/lib/launchd_project_root.py). An explicit VNX_PROJECT_ROOT counts only when
+# its .vnx-project-id equals that id. An unregistered project exits non-zero naming the
+# project and the registry file, and nothing is written. VNX_HOME is never the fallback.
+#
 # Returns 0 on success, non-zero on failure.
 
 set -euo pipefail
@@ -132,12 +138,23 @@ if printf '%s' "$RESOLVED" | grep -q '\${VNX_PROJECT_ID}'; then
     echo "Resolved project id: $PROJECT_ID"
 fi
 
-# OI-1629 deel c: point per-project worktree sweepers at the PROJECT checkout,
-# not the shared engine root. VNX_PROJECT_ROOT is the central shim's export for
-# the checkout vnx init ran inside; a standalone checkout has no shim and
-# VNX_HOME IS the checkout, so fall back to it.
+# OI-1629 deel c / B: point per-project worktree sweepers at the PROJECT checkout,
+# never at the engine root. The root comes from the registry (~/.vnx/projects.json)
+# for the resolved PROJECT_ID, through the same lookup the install guard uses. An
+# explicit VNX_PROJECT_ROOT is accepted only when its .vnx-project-id equals
+# PROJECT_ID. There is no fallback to VNX_HOME.
 if printf '%s' "$RESOLVED" | grep -q '\${VNX_PROJECT_ROOT}'; then
-    PROJECT_ROOT="${VNX_PROJECT_ROOT:-$VNX_HOME}"
+    if [ -z "${PROJECT_ID:-}" ]; then
+        echo "ERROR: $TEMPLATE_NAME needs a project checkout (\${VNX_PROJECT_ROOT}) but no project id" >&2
+        echo "  was resolved; the checkout is looked up per project id. Nothing written." >&2
+        exit 1
+    fi
+    ROOT_PY="$SCRIPT_DIR/../lib/launchd_project_root.py"
+    if [ ! -f "$ROOT_PY" ]; then
+        echo "ERROR: project root resolver not found: $ROOT_PY" >&2
+        exit 1
+    fi
+    PROJECT_ROOT="$(python3 "$ROOT_PY" "$PROJECT_ID" "${VNX_PROJECT_ROOT:-}")" || exit 1
     RESOLVED="$(printf '%s' "$RESOLVED" | sed "s|\${VNX_PROJECT_ROOT}|$PROJECT_ROOT|g")"
     echo "Resolved project root: $PROJECT_ROOT"
 fi

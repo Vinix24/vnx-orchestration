@@ -26,17 +26,18 @@
     (<checkout>/.vnx-data/worktrees/), not under the engine root. A central
     install shares one engine across many projects, so the script must be told
     which checkout to sweep. The repo-root argument is ${VNX_PROJECT_ROOT}:
-    the central shim exports it (the project's git root) when vnx init runs
-    inside the project; a standalone dev checkout has no shim, and there
-    _install_launchd_agent falls back to VNX_HOME, which IS the checkout. The
+    vnx init passes the directory it initialises, and reload_plist.sh looks it
+    up in the registry (~/.vnx/projects.json) for the project id. There is no
+    fallback to VNX_HOME: an engine install is never swept. The
     EnvironmentVariables entry below carries the same value for the script's
     own resolution.
 
     Applying the sweep is deliberate and safe: the script is dry-run by
     construction and only ever releases a worktree whose work is provably
-    captured elsewhere (HEAD ancestor-of-origin/main, or HEAD equal/ancestor
-    of a MERGED PR's headRefOid, and the worktree is clean). Its judgment rule
-    is deliberately strict and is not changed here.
+    captured elsewhere (HEAD ancestor-of-origin/main, HEAD equal/ancestor of a
+    MERGED or CLOSED PR's headRefOid, or a T0 reject for the dispatch, and the
+    worktree is clean). The branch of a closed PR is deleted only when git
+    ls-remote shows the commit on the remote; a T0 reject keeps the branch.
 
     Installed by vnx init (_install_cleanup_reviewed_worktrees_runner in
     vnx_cli/commands/init_cmd.py), or manually via reload_plist.sh:

@@ -28,10 +28,27 @@ as captured:
    than anything the branch ever held, so (1) alone would never fire even
    though the PR shipped everything the worktree has.
 
-Releasing under either proof can never discard work: every commit the
-worktree holds is already durably recorded elsewhere (in main's history, or
-as the head of a merged PR), and an empty ``git status --porcelain`` means
-there is nothing beyond those commits to lose.
+3. GitHub reports a CLOSED (rejected) pull request whose ``headRefOid``
+   equals the worktree's HEAD or has it as an ancestor. The commits stay
+   reachable as ``refs/pull/<n>/head``. The worktree is released like a
+   MERGED one, but the local branch is deleted only after ``git ls-remote
+   origin`` shows ``refs/pull/<n>/head`` or ``refs/heads/<branch>`` at HEAD
+   (or a descendant of it). Without that proof, or when ``ls-remote`` fails,
+   the branch stays and the reason says which.
+4. The T0 decision log of the project holds an ``outcome_decision`` of
+   ``reject`` for the dispatch id. The worktree is released and the local
+   branch is KEPT: its commits may exist nowhere else.
+
+The project is the one in ``<repo-root>/.vnx-project-id`` (``VNX_PROJECT_ID``
+is used when the marker is absent); a ``VNX_PROJECT_ID`` that differs from the
+marker is refused by name. ``--repo-root`` is required: there is no default
+checkout, so a job can never sweep the engine install by accident.
+
+Releasing under a proof can never discard work: every commit the worktree
+holds is already durably recorded elsewhere (in main's history, in a PR, or
+on a branch kept by the reject rule), and a tree with no uncommitted change
+(an untracked symlink that resolves inside the repo is not a change) has
+nothing beyond those commits to lose.
 
 Dry-run by default — this script only ever WRITES when called with
 ``--apply``. Even then it only touches ``git worktree``/``git branch``
@@ -42,7 +59,7 @@ and via cwd).
 
 Usage::
 
-    python3 scripts/cleanup_reviewed_worktrees.py [--repo-root DIR]
+    python3 scripts/cleanup_reviewed_worktrees.py --repo-root DIR
                                                     [--only DISPATCH_ID ...]
                                                     [--apply] [--json]
 
@@ -63,9 +80,12 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TypedDict
+from typing import Any, TypedDict
 
-REPO_ROOT_DEFAULT = Path(__file__).resolve().parent.parent
+_LIB_DIR = Path(__file__).resolve().parent / "lib"
+if str(_LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(_LIB_DIR))
+
 LOCK_REASON_PREFIX = "vnx preserve"
 _DISPATCH_DIR_RE = re.compile(r"^dispatch-(?P<id>[A-Za-z0-9][A-Za-z0-9_-]*)$")
 
@@ -117,6 +137,9 @@ class LockedWorktree:
 class Verdict:
     safe: bool
     reason: str
+    # False keeps the local branch after the worktree is released: the proof
+    # that fired does not show the commits exist on the remote.
+    delete_branch: bool = True
 
 
 @dataclass
@@ -235,9 +258,50 @@ def get_repo_slug(repo_root: Path) -> str | None:
     return m.group(1) if m else None
 
 
-def is_worktree_clean(wt_path: Path) -> bool:
-    proc = run_git(["status", "--porcelain"], cwd=wt_path)
-    return proc.returncode == 0 and proc.stdout.strip() == ""
+def _is_internal_symlink(entry_path: Path, repo_root: Path) -> bool:
+    """An untracked symlink whose target resolves inside ``repo_root`` (such as
+    ``.venv -> <checkout>/.venv``) is a convenience link, not work."""
+    if not entry_path.is_symlink():
+        return False
+    target = Path(os.path.realpath(entry_path))
+    root = Path(os.path.realpath(repo_root))
+    return target == root or root in target.parents
+
+
+def _git_status_bytes(wt_path: Path) -> bytes | None:
+    """Raw ``git status --porcelain -z`` output. No text mode: universal
+    newlines would rewrite a ``\\r`` in a filename and the record would no
+    longer name the file on disk."""
+    try:
+        proc = subprocess.run(
+            ["git", "status", "--porcelain", "-z"],
+            cwd=str(wt_path), capture_output=True, check=False,
+        )
+    except OSError:
+        return None
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def is_worktree_clean(wt_path: Path, repo_root: Path) -> bool:
+    """Clean = nothing but untracked internal symlinks. Anything the parser
+    cannot turn into a path counts as dirty: fail toward keeping the work."""
+    raw = _git_status_bytes(wt_path)
+    if raw is None:
+        return False
+    for record in raw.split(b"\0"):
+        if not record:
+            continue
+        # A rename/copy record is not "?? ", so it returns False here before
+        # its second (source) path is ever read as a record of its own.
+        if not record.startswith(b"?? "):
+            return False
+        try:
+            name = os.fsdecode(record[3:])
+        except (UnicodeError, ValueError):
+            return False
+        if not name or not _is_internal_symlink(wt_path / name, repo_root):
+            return False
+    return True
 
 
 def is_ancestor(repo_root: Path, ancestor_sha: str, descendant_sha: str) -> bool:
@@ -261,53 +325,109 @@ def try_fetch_sha(repo_root: Path, sha: str) -> bool:
     return proc.returncode == 0 and object_available(repo_root, sha)
 
 
-def find_merged_pr_head(repo_slug: str, branch: str) -> str | None:
-    """The ``headRefOid`` of a MERGED pull request for *branch*, or
-    ``None`` if ``gh`` found none / isn't usable. Multiple PRs can share a
-    branch name over time; any MERGED entry is sufficient proof."""
+@dataclass(frozen=True)
+class PrEntry:
+    number: int | None
+    state: str
+    head_ref_oid: str
+
+
+def find_captured_prs(repo_slug: str, branch: str) -> list[PrEntry]:
+    """MERGED and CLOSED pull requests for *branch* that carry a
+    ``headRefOid``, MERGED first. Empty when ``gh`` found none or is not
+    usable. Multiple PRs can share a branch name over time; any one of them
+    that holds the worktree's HEAD is sufficient proof."""
     raw = run_gh_pr_list(repo_slug, branch)
     if not raw:
-        return None
+        return []
     try:
         entries = json.loads(raw)
     except (ValueError, TypeError):
-        return None
+        return []
+    found: list[PrEntry] = []
     for entry in entries:
-        if isinstance(entry, dict) and entry.get("state") == "MERGED" and entry.get("headRefOid"):
-            return str(entry["headRefOid"])
-    return None
+        if not isinstance(entry, dict) or not entry.get("headRefOid"):
+            continue
+        state = entry.get("state")
+        if state not in ("MERGED", "CLOSED"):
+            continue
+        number = entry.get("number")
+        found.append(PrEntry(number if isinstance(number, int) else None, state, str(entry["headRefOid"])))
+    found.sort(key=lambda e: e.state != "MERGED")
+    return found
 
 
-def evaluate_worktree(repo_root: Path, wt: LockedWorktree, repo_slug: str | None) -> Verdict:
+def _holds_head(repo_root: Path, head_sha: str, oid: str) -> bool:
+    if head_sha == oid:
+        return True
+    try_fetch_sha(repo_root, oid)
+    return is_ancestor(repo_root, head_sha, oid)
+
+
+def remote_holds_head(repo_root: Path, wt: LockedWorktree, pr_number: int | None) -> tuple[bool, str]:
+    """Proof that the commits of *wt* exist on the remote: ``git ls-remote
+    origin`` shows ``refs/pull/<n>/head`` or ``refs/heads/<branch>`` at HEAD or
+    at a descendant of it. Returns ``(proven, what was found or why not)``."""
+    refs = [f"refs/heads/{wt.branch}"]
+    if pr_number is not None:
+        refs.insert(0, f"refs/pull/{pr_number}/head")
+    proc = run_git(["ls-remote", "origin", *refs], cwd=repo_root)
+    if proc.returncode != 0:
+        return False, f"git ls-remote origin faalde ({(proc.stderr or '').strip()})"
+    for line in proc.stdout.splitlines():
+        oid, _, ref = line.partition("\t")
+        if oid and ref in refs and _holds_head(repo_root, wt.head_sha or "", oid):
+            return True, f"{ref} staat op {oid[:12]}"
+    return False, "geen van " + " / ".join(refs) + " op de remote bevat HEAD"
+
+
+def evaluate_worktree(
+    repo_root: Path,
+    wt: LockedWorktree,
+    repo_slug: str | None,
+    decisions: dict[str, dict[str, Any]] | None = None,
+) -> Verdict:
     if wt.branch is None:
         return Verdict(False, "worktree staat op een detached HEAD — geen branch-identiteit om te verifiëren")
     if wt.head_sha is None:
         return Verdict(False, "kon HEAD-sha niet bepalen")
-    if not is_worktree_clean(wt.path):
-        return Verdict(False, "werkmap is niet schoon (ongecommitte tracked wijzigingen) — dataverlies-risico")
+    if not is_worktree_clean(wt.path, repo_root):
+        return Verdict(False, "werkmap is niet schoon (ongecommitte wijzigingen of untracked bestanden) — dataverlies-risico")
 
     if is_ancestor(repo_root, wt.head_sha, "origin/main"):
         return Verdict(True, f"HEAD ({wt.head_sha[:12]}) is ancestor van origin/main")
 
+    pr_note = ""
     if repo_slug is None:
-        return Verdict(False, "HEAD zit niet in origin/main en de PR-status kon niet gecontroleerd worden (geen origin-remote herkend)")
+        pr_note = "HEAD zit niet in origin/main en de PR-status kon niet gecontroleerd worden (geen origin-remote herkend)"
+    else:
+        prs = find_captured_prs(repo_slug, wt.branch)
+        for pr in prs:
+            if not _holds_head(repo_root, wt.head_sha, pr.head_ref_oid):
+                continue
+            if pr.state == "MERGED":
+                return Verdict(True, f"HEAD is (ancestor van) de headRefOid ({pr.head_ref_oid[:12]}) van een MERGED PR voor {wt.branch!r}")
+            proven, found = remote_holds_head(repo_root, wt, pr.number)
+            head_proof = f"HEAD is (ancestor van) de headRefOid ({pr.head_ref_oid[:12]}) van een CLOSED PR voor {wt.branch!r}"
+            if proven:
+                return Verdict(True, f"{head_proof}; remote bewijs: {found}")
+            return Verdict(True, f"{head_proof}; lokale branch blijft: {found}", delete_branch=False)
+        if not prs:
+            pr_note = f"geen MERGED of CLOSED pull request gevonden voor branch {wt.branch!r} — werk is niet aantoonbaar afgerond"
+        else:
+            pr_note = (
+                f"branch {wt.branch!r} heeft een PR, maar HEAD ({wt.head_sha[:12]}) bevat commits die niet in "
+                "de PR-head terechtkwamen — mogelijk verder gewerkt na de laatste push vanuit deze worktree"
+            )
 
-    pr_head = find_merged_pr_head(repo_slug, wt.branch)
-    if pr_head is None:
-        return Verdict(False, f"geen MERGED pull request gevonden voor branch {wt.branch!r} — werk is niet aantoonbaar afgerond")
-
-    if wt.head_sha == pr_head:
-        return Verdict(True, f"HEAD is exact de headRefOid van een MERGED PR voor {wt.branch!r}")
-
-    try_fetch_sha(repo_root, pr_head)
-    if is_ancestor(repo_root, wt.head_sha, pr_head):
-        return Verdict(True, f"HEAD is ancestor van de headRefOid ({pr_head[:12]}) van een MERGED PR voor {wt.branch!r}")
-
-    return Verdict(
-        False,
-        f"branch {wt.branch!r} heeft een MERGED PR, maar HEAD ({wt.head_sha[:12]}) bevat commits die niet in "
-        f"die PR ({pr_head[:12]}) terechtkwamen — mogelijk verder gewerkt na de laatste push vanuit deze worktree",
-    )
+    decision = (decisions or {}).get(wt.dispatch_dir_id or "")
+    if decision is not None and decision.get("decision") == "reject":
+        return Verdict(
+            True,
+            f"T0 heeft dispatch {wt.dispatch_dir_id} afgewezen (reject) en de werkmap is schoon; lokale branch blijft",
+            delete_branch=False,
+        )
+    return Verdict(False, pr_note)
 
 
 @contextmanager
@@ -327,7 +447,7 @@ def _flock_context(repo_root: Path) -> Iterator[None]:
             fcntl.flock(lf, fcntl.LOCK_UN)
 
 
-def release_worktree(repo_root: Path, wt: LockedWorktree) -> ReleaseResult:
+def release_worktree(repo_root: Path, wt: LockedWorktree, *, delete_branch: bool) -> ReleaseResult:
     errors: list[str] = []
     with _flock_context(repo_root):
         unlock = run_git(["worktree", "unlock", str(wt.path)], cwd=repo_root)
@@ -340,7 +460,7 @@ def release_worktree(repo_root: Path, wt: LockedWorktree) -> ReleaseResult:
             errors.append(f"worktree remove failed: {(remove.stderr or '').strip()}")
             return ReleaseResult(released=False, errors=errors)
 
-        if wt.branch:
+        if wt.branch and delete_branch:
             branch_delete = run_git(["branch", "-D", wt.branch], cwd=repo_root)
             if branch_delete.returncode != 0:
                 errors.append(f"branch delete failed (worktree already removed): {(branch_delete.stderr or '').strip()}")
@@ -350,7 +470,10 @@ def release_worktree(repo_root: Path, wt: LockedWorktree) -> ReleaseResult:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--repo-root", type=Path, default=REPO_ROOT_DEFAULT)
+    parser.add_argument(
+        "--repo-root", type=Path, required=True,
+        help="de checkout van het project waarvan .vnx-data/worktrees wordt opgeruimd (verplicht)",
+    )
     parser.add_argument(
         "--only",
         action="append",
@@ -376,11 +499,47 @@ class WorktreeReportEntry(TypedDict):
     reason: str
     released: bool
     errors: list[str]
+    delete_branch: bool
+
+
+def resolve_project_id(repo_root: Path) -> tuple[str, str | None]:
+    """``(project_id, refusal)``: the id of the checkout (``.vnx-project-id``,
+    else ``VNX_PROJECT_ID``). A ``VNX_PROJECT_ID`` that differs from the marker
+    is refused by name."""
+    from forge_project_target import checkout_project_id
+
+    marker_id = checkout_project_id(repo_root)
+    env_id = os.environ.get("VNX_PROJECT_ID", "").strip()
+    if marker_id and env_id and marker_id != env_id:
+        return marker_id, (
+            f"VNX_PROJECT_ID={env_id!r} wijkt af van het project van {repo_root} "
+            f"({marker_id!r} in .vnx-project-id): niets opgeruimd"
+        )
+    return marker_id or env_id, None
+
+
+def read_reject_decisions(repo_root: Path, project_id: str) -> dict[str, dict[str, Any]]:
+    """Outcome decisions of *project_id* from its own decision log."""
+    if not project_id:
+        return {}
+    import vnx_paths
+    from open_outcomes import DECISION_LOG_NAME, read_outcome_decisions
+
+    state_dir = vnx_paths.resolve_data_root(repo_root) / "state"
+    return read_outcome_decisions(state_dir / DECISION_LOG_NAME, project_id)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
     repo_root = args.repo_root.resolve()
+
+    project_id, refusal = resolve_project_id(repo_root)
+    if refusal:
+        print(f"cleanup_reviewed_worktrees: {refusal}", file=sys.stderr)
+        return 2
+    if not project_id:
+        print("WAARSCHUWING: geen project-id (.vnx-project-id of VNX_PROJECT_ID) — T0-reject-besluiten worden niet gelezen.", file=sys.stderr)
+    decisions = read_reject_decisions(repo_root, project_id)
 
     candidates = discover_locked_dispatch_worktrees(repo_root)
     if args.only:
@@ -389,7 +548,7 @@ def main(argv: list[str] | None = None) -> int:
 
     repo_slug = get_repo_slug(repo_root)
     if repo_slug is None:
-        print("WAARSCHUWING: kon geen github.com owner/repo herkennen uit origin — PR-gebaseerde verificatie (squash-merges) wordt overgeslagen, alleen ancestor-of-main telt.")
+        print("WAARSCHUWING: kon geen github.com owner/repo herkennen uit origin — PR-gebaseerde verificatie (squash-merges) wordt overgeslagen, alleen ancestor-of-main telt.", file=sys.stderr)
 
     report: list[WorktreeReportEntry] = []
     released = 0
@@ -398,7 +557,7 @@ def main(argv: list[str] | None = None) -> int:
         if is_current_worktree(wt):
             skipped_self += 1
             continue
-        verdict = evaluate_worktree(repo_root, wt, repo_slug)
+        verdict = evaluate_worktree(repo_root, wt, repo_slug, decisions)
         entry: WorktreeReportEntry = {
             "dispatch_id": wt.dispatch_dir_id,
             "path": str(wt.path),
@@ -409,9 +568,10 @@ def main(argv: list[str] | None = None) -> int:
             "reason": verdict.reason,
             "released": False,
             "errors": [],
+            "delete_branch": verdict.delete_branch,
         }
         if verdict.safe and args.apply:
-            result = release_worktree(repo_root, wt)
+            result = release_worktree(repo_root, wt, delete_branch=verdict.delete_branch)
             entry["released"] = result.released
             entry["errors"] = result.errors
             if result.released:
