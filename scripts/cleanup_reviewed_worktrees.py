@@ -516,7 +516,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"cleanup_reviewed_worktrees: {refusal}", file=sys.stderr)
         return 2
     if not project_id:
-        print("WAARSCHUWING: geen project-id (.vnx-project-id of VNX_PROJECT_ID) — T0-reject-besluiten worden niet gelezen.")
+        print("WAARSCHUWING: geen project-id (.vnx-project-id of VNX_PROJECT_ID) — T0-reject-besluiten worden niet gelezen.", file=sys.stderr)
     decisions = read_reject_decisions(repo_root, project_id)
 
     candidates = discover_locked_dispatch_worktrees(repo_root)
@@ -526,7 +526,7 @@ def main(argv: list[str] | None = None) -> int:
 
     repo_slug = get_repo_slug(repo_root)
     if repo_slug is None:
-        print("WAARSCHUWING: kon geen github.com owner/repo herkennen uit origin — PR-gebaseerde verificatie (squash-merges) wordt overgeslagen, alleen ancestor-of-main telt.")
+        print("WAARSCHUWING: kon geen github.com owner/repo herkennen uit origin — PR-gebaseerde verificatie (squash-merges) wordt overgeslagen, alleen ancestor-of-main telt.", file=sys.stderr)
 
     report: list[WorktreeReportEntry] = []
     released = 0
