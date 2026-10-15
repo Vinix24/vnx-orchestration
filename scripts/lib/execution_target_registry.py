@@ -30,6 +30,7 @@ from runtime_coordination import (
     _append_event,
     _now_utc,
     get_connection,
+    project_id_stamp,
 )
 
 
@@ -265,15 +266,18 @@ class ExecutionTargetRegistry:
                         f"{occupied['target_id']!r} (2.1-1)"
                     )
 
+            stamp = project_id_stamp(conn, "execution_targets")
             conn.execute(
-                """
+                f"""
                 INSERT INTO execution_targets
                     (target_id, target_type, terminal_id, capabilities_json,
-                     health, health_checked_at, model, registered_at, updated_at, metadata_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     health, health_checked_at, model, registered_at, updated_at,
+                     metadata_json{stamp.column})
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?{stamp.placeholder})
                 """,
                 (target_id, target_type, terminal_id, caps_json,
-                 health, now if health != "offline" else None, model, now, now, meta_json),
+                 health, now if health != "offline" else None, model, now, now, meta_json,
+                 *stamp.values),
             )
 
             _append_event(

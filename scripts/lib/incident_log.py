@@ -38,7 +38,7 @@ from incident_taxonomy import (
     should_escalate,
     validate_incident_class,
 )
-from runtime_coordination import get_connection
+from runtime_coordination import get_connection, project_id_stamp
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -211,13 +211,14 @@ def get_budget(
             return dict(existing)
 
         # Create from contract defaults
+        stamp = project_id_stamp(conn, "retry_budgets")
         conn.execute(
-            """
+            f"""
             INSERT OR IGNORE INTO retry_budgets
                 (budget_key, entity_type, entity_id, incident_class,
                  attempts_used, max_retries, cooldown_seconds, backoff_factor,
-                 max_cooldown_seconds, created_at, updated_at)
-            VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
+                 max_cooldown_seconds, created_at, updated_at{stamp.column})
+            VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?{stamp.placeholder})
             """,
             (
                 key,
@@ -230,6 +231,7 @@ def get_budget(
                 budget.max_cooldown_seconds,
                 now,
                 now,
+                *stamp.values,
             ),
         )
         conn.commit()

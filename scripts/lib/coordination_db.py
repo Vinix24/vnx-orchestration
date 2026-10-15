@@ -8,9 +8,10 @@ import logging
 import sqlite3
 import uuid
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Generator, List, Optional
+from typing import Any, Dict, Generator, List, Optional, Tuple
 
 import schema_migration
 
@@ -196,6 +197,31 @@ def stamp_project_id(conn: sqlite3.Connection) -> str:
             "is no project store; refusing to stamp a guessed project_id"
         )
     return _resolve_stamp_project_id(db_path=path)
+
+
+@dataclass(frozen=True)
+class ProjectIdStamp:
+    """The project_id part of an INSERT: ``column`` and ``placeholder`` go at the
+    end of the column list and the VALUES list, ``values`` at the end of the
+    parameters. All three are empty for a table without the column."""
+
+    column: str
+    placeholder: str
+    values: Tuple[str, ...]
+
+
+def project_id_stamp(conn: sqlite3.Connection, table: str) -> ProjectIdStamp:
+    """How an INSERT into *table* carries project_id on the store *conn* is open on.
+
+    A table with the column gets the store's id from :func:`stamp_project_id`,
+    explicitly: the sales-copilot shape has no default to fall back on. A table
+    without it (a store before migration 0034, or one init_schema built without
+    the numbered migrations) gets nothing, and the INSERT keeps the column list
+    it had before 0034.
+    """
+    if not _has_project_id_col(conn, table):
+        return ProjectIdStamp("", "", ())
+    return ProjectIdStamp(", project_id", ", ?", (stamp_project_id(conn),))
 
 
 def _has_project_id_col(conn: sqlite3.Connection, table: str) -> bool:

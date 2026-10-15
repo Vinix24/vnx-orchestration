@@ -37,6 +37,7 @@ from runtime_coordination import (
     _append_event,
     _now_utc,
     get_connection,
+    project_id_stamp,
     register_dispatch,
 )
 
@@ -265,16 +266,17 @@ class InboundInbox:
                 conn.commit()
                 return ReceiveResult(event=event, already_existed=True)
 
+            stamp = project_id_stamp(conn, "inbound_inbox")
             try:
                 conn.execute(
-                    """
+                    f"""
                     INSERT INTO inbound_inbox
                         (event_id, channel_id, dedupe_key, state, payload_json,
-                         routing_hints_json, max_retries, metadata_json)
-                    VALUES (?, ?, ?, 'received', ?, ?, ?, ?)
+                         routing_hints_json, max_retries, metadata_json{stamp.column})
+                    VALUES (?, ?, ?, 'received', ?, ?, ?, ?{stamp.placeholder})
                     """,
                     (event_id, channel_id, dedupe_key, payload_json,
-                     hints_json, max_retries, meta_json),
+                     hints_json, max_retries, meta_json, *stamp.values),
                 )
             except sqlite3.IntegrityError:
                 # Race condition: another process inserted between our check and insert

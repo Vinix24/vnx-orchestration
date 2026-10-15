@@ -26,6 +26,7 @@ from runtime_coordination import (
     DISPATCH_TRANSITIONS,
     _append_event,
     get_dispatch,
+    project_id_stamp,
     transition_dispatch,
 )
 
@@ -231,14 +232,15 @@ def record_escalation(
     now = _now_iso()
     escalated_to = get_contract(incident_class).escalation.escalate_to
 
+    stamp = project_id_stamp(conn, "escalation_log")
     conn.execute(
-        """
+        f"""
         INSERT INTO escalation_log
             (escalation_id, incident_id, dispatch_id, terminal_id,
              incident_class, severity, escalated_to, reason,
              retry_count, budget_exhausted, auto_recovery_halted,
-             metadata_json, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             metadata_json, created_at{stamp.column})
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?{stamp.placeholder})
         """,
         (
             escalation_id,
@@ -254,6 +256,7 @@ def record_escalation(
             int(auto_recovery_halted),
             json.dumps(metadata or {}),
             now,
+            *stamp.values,
         ),
     )
 

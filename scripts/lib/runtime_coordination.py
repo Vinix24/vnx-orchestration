@@ -35,6 +35,8 @@ from coordination_db import (  # noqa: F401
     get_events,
     get_lease,
     init_schema,
+    ProjectIdStamp,
+    project_id_stamp,
     project_terminal_state,
     stamp_project_id,
     _migrate_v11_composite_keys,
