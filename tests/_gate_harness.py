@@ -29,6 +29,12 @@ wide closure (receipts, governance emit, provider reachability, ...), so that
 closure is measured, not listed: `module_closure` imports the module in a
 subprocess and returns every file under `scripts/` it loaded. A listed copy
 would break the moment one of those modules gains an import.
+
+Before the switch is asked, `--only` checks that the name is a live gate:
+registered in `gate_recorder.GATE_PROVIDERS` and not retired in
+`dispatch_spec.RETIRED_GATE_NAMES` (OI-2070 round 2). `dispatch_spec` is not
+in the recorder's closure, so its own closure is installed too
+(`GATE_NAME_MODULES`).
 """
 from __future__ import annotations
 
@@ -63,6 +69,9 @@ PROVIDER_SWITCH_SCRIPTS = (
 # The module gate.sh imports to record a refused `--only` (see the module docstring).
 SWITCH_REFUSAL_RECORDER = "gate_recorder"
 
+# The modules gate.sh's `--only` name check imports (see the module docstring).
+GATE_NAME_MODULES = (SWITCH_REFUSAL_RECORDER, "dispatch_spec")
+
 _CLOSURE_PROBE = """\
 import json, os, sys
 scripts = sys.argv[1]
@@ -93,14 +102,15 @@ def module_closure(module: str) -> Tuple[str, ...]:
 def install_gate_lib_modules(lib_dir: Path) -> None:
     """Copy the real gate_seat_line.py + its real deps into `lib_dir` (a fake
     VNX_HOME's scripts/lib), the provider-switch check gate.sh runs for
-    `--only` into its scripts/ and scripts/lib, and the closure of the
-    recorder that books a refused `--only`."""
+    `--only` into its scripts/ and scripts/lib, and the closures of the
+    name check and of the recorder that books a refused `--only`."""
     lib_dir.mkdir(parents=True, exist_ok=True)
     scripts_dir = lib_dir.parent
-    for relative in module_closure(SWITCH_REFUSAL_RECORDER):
-        target = scripts_dir / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(REPO_ROOT / "scripts" / relative, target)
+    for module in GATE_NAME_MODULES:
+        for relative in module_closure(module):
+            target = scripts_dir / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(REPO_ROOT / "scripts" / relative, target)
     for name in (*GATE_LIB_MODULES, *PROVIDER_SWITCH_LIB_MODULES):
         shutil.copy2(REPO_ROOT / "scripts" / "lib" / name, lib_dir / name)
     for name in PROVIDER_SWITCH_SCRIPTS:

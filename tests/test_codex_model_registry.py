@@ -671,3 +671,140 @@ def test_failure_receipt_write_error_does_not_leave_the_lane(unreadable_registry
 def test_provider_dispatch_has_no_hardcoded_codex_fallback():
     source = (VNX_ROOT / "scripts" / "lib" / "provider_dispatch.py").read_text(encoding="utf-8")
     assert "gpt-5.2-codex" not in source
+
+
+# ---------------------------------------------------------------------------
+# R7 (OI-2068): a malformed model row is an unresolved model, never a raise
+# ---------------------------------------------------------------------------
+
+# load() parses every model row of every provider section, so one malformed row
+# anywhere in the registry stops the codex resolution. Each kind is one parse
+# error _parse_model raises for a row: a missing field (KeyError) and a null
+# where a number belongs (TypeError), in the openai section and in another one.
+_OTHER_SECTION_NULL_MAX_TOKENS = """  kimi_cli:
+    enabled: true
+    api_key_env: ""
+    models:
+      kimi-k3:
+        litellm_name: "kimi/k3"
+        cost_input_per_mtok: 1.0
+        cost_output_per_mtok: 2.0
+        max_tokens: null
+        supports_streaming: true
+        supports_tool_calls: true
+"""
+
+_MALFORMED_KINDS = {
+    "openai-row-without-litellm_name": "KeyError",
+    "openai-row-with-null-price": "TypeError",
+    "other-section-row-with-null-max_tokens": "TypeError",
+}
+
+
+def _malformed_registry(kind: str, tmp_path, monkeypatch) -> Path:
+    path = _write_registry(tmp_path / "malformed.yaml", default_model=TMP_MODEL)
+    text = path.read_text(encoding="utf-8")
+    if kind == "openai-row-without-litellm_name":
+        text = text.replace(f'        litellm_name: "openai/{TMP_MODEL}"\n', "")
+    elif kind == "openai-row-with-null-price":
+        text = text.replace("cost_input_per_mtok: 1.0", "cost_input_per_mtok: null")
+    else:
+        text += _OTHER_SECTION_NULL_MAX_TOKENS
+    path.write_text(text, encoding="utf-8")
+    monkeypatch.setattr(provider_registry, "_REGISTRY_PATH", path)
+    for name in ("VNX_CODEX_HEADLESS_MODEL", "VNX_CODEX_MODEL", "VNX_CODEX_DEFAULT_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+    return path
+
+
+_MALFORMED = pytest.mark.parametrize("kind", sorted(_MALFORMED_KINDS))
+
+
+@_MALFORMED
+def test_resolver_wraps_a_malformed_model_row(tmp_path, monkeypatch, kind):
+    path = _malformed_registry(kind, tmp_path, monkeypatch)
+    with pytest.raises(provider_registry.CodexModelResolutionError) as caught:
+        provider_registry.resolve_codex_model()
+    message = str(caught.value)
+    assert str(path) in message
+    assert _MALFORMED_KINDS[kind] in message, "the parse error is named, not swallowed"
+    assert type(caught.value.__cause__).__name__ == _MALFORMED_KINDS[kind]
+
+
+@_MALFORMED
+def test_gate_run_books_a_malformed_row_and_leaves_no_executing_request(runner, tmp_path, monkeypatch, kind):
+    """The red run of OI-2068: GateRunner.run raised and the request stayed `executing`."""
+    path = _malformed_registry(kind, tmp_path, monkeypatch)
+    worktree = tmp_path / "gate-wt"
+    worktree.mkdir()
+    payload = {"prompt": "review", "branch": "dispatch/x", "pr_number": 7}
+    raised = None
+    result = None
+    with patch("gate_runner.shutil.which", return_value="/usr/bin/codex"), \
+         patch("gate_runner.create_gate_worktree", return_value=worktree), \
+         patch("gate_runner.remove_gate_worktree"), \
+         patch("gate_runner.subprocess.Popen") as popen:
+        try:
+            result = runner.run(gate="codex_gate", request_payload=payload, pr_number=7, pr_id="pr-7")
+        except Exception as exc:  # the old shape: the run raised out of the runner
+            raised = exc
+    popen.assert_not_called()
+    requests = _read_gate_files(runner, "requests")
+    statuses = [r["status"] for r in requests]
+    assert statuses and "executing" not in statuses, f"request statuses {statuses}"
+    assert raised is None, f"GateRunner.run raised {raised!r}"
+    results = _read_gate_files(runner, "results")
+    assert len(results) == 1
+    assert (results[0]["status"], results[0]["reason"]) == ("unavailable", "codex_model_unresolved")
+    assert str(path) in results[0]["reason_detail"]
+    assert result["reason"] == "codex_model_unresolved"
+
+
+@_MALFORMED
+def test_codex_spawn_books_a_malformed_row_as_unresolved(tmp_path, monkeypatch, kind):
+    _malformed_registry(kind, tmp_path, monkeypatch)
+    with patch("provider_spawns.codex_spawn.subprocess.Popen") as popen:
+        result = codex_spawn.spawn_codex(prompt="x", model=None, dispatch_id="d-malformed", terminal_id="T1")
+    popen.assert_not_called()
+    assert result.returncode == 1
+    assert result.error.startswith("codex_model_unresolved: ")
+
+
+@_MALFORMED
+def test_plan_gate_codex_seat_abstains_on_a_malformed_row(tmp_path, monkeypatch, kind):
+    _malformed_registry(kind, tmp_path, monkeypatch)
+    seats = {s["label"]: s for s in pgp.default_panel()}
+    result = pgp._dispatch_one(lambda *_a: "x", seats["codex"], "plan", "seat-codex")
+    assert result.seat_status == pgp.SEAT_MODEL_UNRESOLVED
+    assert result.dispatched is False
+
+
+def test_a_refusal_is_formatted_from_the_launch_model_not_a_second_resolution(tmp_registry):
+    """codex_spawn resolved the model again while formatting a refusal. With
+    model=None and a registry gone after the start, that raised inside the
+    refusal itself; the model that was launched is already known."""
+    from failure_classification import classify_failure
+
+    def start_then_lose_the_registry(*_args, **_kwargs):
+        tmp_registry.unlink()
+        return proc
+
+    with patch("threading.Thread", _InlineThread), \
+         patch("provider_spawns.codex_spawn.subprocess.Popen", side_effect=start_then_lose_the_registry):
+        proc = MagicMock()
+        proc.pid = 99
+        proc.returncode = 1
+        proc.wait = MagicMock(return_value=1)
+        proc.poll = MagicMock(return_value=1)
+        proc.stdin = MagicMock()
+        proc.stderr = MagicMock()
+        proc.stderr.readline.side_effect = [f"ERROR: {REFUSAL_CHATGPT}\n".encode(), b""]
+        with patch("provider_spawns.codex_spawn._NormalizerHost.drain_stream", return_value=iter([])):
+            result = codex_spawn.spawn_codex(prompt="x", model=None, dispatch_id="d-refused", terminal_id="T1")
+
+    assert not tmp_registry.exists()
+    assert result.error.startswith("model_not_supported: ")
+    assert REFUSAL_CHATGPT in result.error
+    assert f"requested model: {TMP_MODEL}" in result.error
+    classified = classify_failure(status="failed", error=result.error, provider="codex", returncode=1)
+    assert REFUSAL_CHATGPT in classified["failure_reason"]
