@@ -466,10 +466,13 @@ def resolve_project(project_id: Optional[str] = None) -> Optional[str]:
     """The project a decision is for, or None (the decision then uses the global section only).
 
     Order: the explicit argument, ``VNX_PROJECT_ID``, the state-dir resolver of the process
-    (``vnx_paths``), none.
+    (``vnx_paths``), none. The explicit argument ``SCOPE_GLOBAL`` ("global", never a project id)
+    forces the global section: a batch job whose item has no resolvable project passes it, so the
+    process's own project does not stand in for the item's.
     """
     if isinstance(project_id, str) and project_id.strip():
-        return project_id.strip()
+        pid = project_id.strip()
+        return None if pid == SCOPE_GLOBAL else pid
     env_pid = os.environ.get("VNX_PROJECT_ID", "").strip()
     if env_pid:
         return env_pid
@@ -627,7 +630,7 @@ def linked_worktree_root(start: Path) -> Optional[Path]:
 
 def pending_launch_functions() -> Dict[str, Tuple[str, ...]]:
     """Launch functions that do not call :func:`require` yet, per deliverable."""
-    return {"B": tuple(PENDING_B), "E": tuple(PENDING_E)}
+    return {"B": tuple(PENDING_B)}
 
 
 def write_refusals() -> List[str]:
@@ -1069,19 +1072,16 @@ UNDETECTED_LAUNCH_FUNCTIONS: Dict[str, str] = {
         "for the detector to see",
 }
 
-# Census entries that call require() before their first launch call. The coverage guard
-# asserts that each one really does.
+# Census entries that call require() before their first launch call. They stay in
+# LAUNCH_FUNCTIONS: the coverage guard asserts that each one still does.
 ENFORCED: Tuple[str, ...] = (
-    "scripts/gate_runner.py:GateRunner._run_with_stall_detection",
-)
-
-PENDING_E: Tuple[str, ...] = (
+    "scripts/conversation_analyzer/deep_analyzer.py:DeepAnalyzer._try_deepseek_harness",
     "scripts/conversation_analyzer/deep_analyzer.py:DeepAnalyzer._try_ollama",
+    "scripts/gate_runner.py:GateRunner._run_with_stall_detection",
 )
 
 PENDING_B: Tuple[str, ...] = (
     "scripts/benchmark/field-tests/runners/scorer.py:_judge_kimi",
-    "scripts/conversation_analyzer/deep_analyzer.py:DeepAnalyzer._try_deepseek_harness",
     "scripts/lib/adapters/_litellm_agentic_runner.py:main",
     "scripts/lib/adapters/_litellm_runner.py:main",
     "scripts/lib/adapters/gemini_adapter.py:GeminiAdapter._execute_legacy",
@@ -1099,7 +1099,7 @@ PENDING_B: Tuple[str, ...] = (
     *UNDETECTED_LAUNCH_FUNCTIONS,
 )
 
-LAUNCH_FUNCTIONS: Tuple[str, ...] = tuple(sorted({*ENFORCED, *PENDING_E, *PENDING_B}))
+LAUNCH_FUNCTIONS: Tuple[str, ...] = tuple(sorted({*ENFORCED, *PENDING_B}))
 
 # Flagged by the detector or named by the plan, and deliberately outside layer 1. An entry is a
 # function (``path:qualname``), a file or a directory (trailing slash).

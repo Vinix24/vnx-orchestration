@@ -18,6 +18,8 @@ later matches.
 from __future__ import annotations
 
 import json
+import logging
+import threading
 from typing import List, Optional
 
 try:
@@ -39,6 +41,8 @@ except ImportError:  # pragma: no cover - path fallback
         derive_tags,
         validate_tags,
     )
+
+logger = logging.getLogger(__name__)
 
 ENV_ENABLED = "VNX_TAGGER_ENABLED"
 ENV_PROVIDER = "VNX_TAGGER_PROVIDER"
@@ -63,6 +67,24 @@ CREATE TABLE IF NOT EXISTS tagging_events (
 );
 CREATE INDEX IF NOT EXISTS idx_tagging_events_recent ON tagging_events(project_id, tagged_at DESC);
 """
+
+
+# Calls skipped because the operator switched the tagger's provider family off. A run reads the
+# delta (``enrich_pattern_tags``) so the skip is counted where the tagger keeps its stats.
+_switch_skips = 0
+_switch_skips_lock = threading.Lock()
+
+
+def switch_skip_count() -> int:
+    with _switch_skips_lock:
+        return _switch_skips
+
+
+def _record_switch_skip(exc: Exception) -> None:
+    global _switch_skips
+    with _switch_skips_lock:
+        _switch_skips += 1
+    logger.warning("vnx_tagger: LLM tagging skipped, provider switched off: %s", exc)
 
 
 def is_enabled() -> bool:
@@ -95,12 +117,18 @@ def _build_prompt(text: str, paths: Optional[List[str]]) -> str:
     )
 
 
-def llm_tags(text: str, paths: Optional[List[str]] = None) -> List[str]:
+def llm_tags(text: str, paths: Optional[List[str]] = None,
+             project_id: Optional[str] = None) -> List[str]:
     """Return validated VNX tags from the configured LLM, or [] on any failure.
 
-    Honours VNX_TAGGER_ENABLED (opt-in) and VNX_TAGGER_PROVIDER (model-agnostic).
+    Honours VNX_TAGGER_ENABLED (opt-in), VNX_TAGGER_PROVIDER (model-agnostic) and the
+    operator's provider switch (``vnx providers``) for ``project_id``, the project the
+    tagged item belongs to (None: the process project).
     """
-    tags, _ = _llm_tags_with_cost(text, paths, enabled_override=False)
+    if project_id:
+        tags, _ = _llm_tags_with_cost(text, paths, enabled_override=False, project_id=project_id)
+    else:
+        tags, _ = _llm_tags_with_cost(text, paths, enabled_override=False)
     return tags
 
 
@@ -108,20 +136,24 @@ def _llm_tags_with_cost(
     text: str,
     paths: Optional[List[str]] = None,
     enabled_override: bool = False,
+    project_id: Optional[str] = None,
 ) -> "tuple[List[str], float]":
     """Like llm_tags but returns (tags, cost_usd). For A/B measurement use.
 
     enabled_override=True bypasses VNX_TAGGER_ENABLED so the caller can run the
     LLM arm regardless of the env flag (the A/B harness controls the flag itself).
-    Fail-silent: any error returns ([], 0.0).
+    Fail-silent: any error returns ([], 0.0). A provider the operator switched off is skipped:
+    one WARNING, the skip is counted (``switch_skip_count``), the result is ([], 0.0).
     """
     if not enabled_override and not is_enabled():
         return [], 0.0
     if not (text or paths):
         return [], 0.0
+    import provider_switch
     try:
         from classifier_providers import get_provider
-        provider = get_provider(get_tagger_provider_name())
+        name = get_tagger_provider_name()
+        provider = get_provider(name, project_id=project_id) if project_id else get_provider(name)
         if not provider.is_available():
             return [], 0.0
         result = provider.classify(_build_prompt(text or "", paths), _max_tokens=200)
@@ -138,20 +170,49 @@ def _llm_tags_with_cost(
         tags = validate_tags(list(data.get("tags", []))[: _MAX_TAGS * 2])
         cost = float(getattr(result, "cost_usd", None) or 0.0)
         return tags, cost
+    except provider_switch.ProviderDisabledError as exc:
+        _record_switch_skip(exc)
+        return [], 0.0
     except Exception:
         return [], 0.0
 
 
-def enrich_tags(text: str, paths: Optional[List[str]] = None) -> List[str]:
+def enrich_tags(text: str, paths: Optional[List[str]] = None,
+                project_id: Optional[str] = None) -> List[str]:
     """Deterministic tags + (when enabled) validated LLM tags, deduplicated.
 
     The deterministic derive_tags() is always the floor; the LLM only adds.
     """
     tags = list(derive_tags(text, paths))
-    for t in llm_tags(text, paths):
+    for t in llm_tags(text, paths, project_id=project_id):
         if t not in tags:
             tags.append(t)
     return tags
+
+
+def _provider_switch_global() -> str:
+    """Explicit global scope: without it the factory would fall back to the process project."""
+    import provider_switch
+    return provider_switch.SCOPE_GLOBAL
+
+
+def _row_project(value) -> Optional[str]:
+    """The project a database row belongs to; ``None`` (the explicit global section) when it has none.
+
+    Never the process project: the row's own project_id decides the provider switch.
+    """
+    return (str(value).strip() if value else "") or None
+
+
+def _log_tagging_event(conn, project_id, table, pattern_id, title, tags, provider) -> None:
+    """Audit event for the dashboard: only meaningful (non-empty) taggings are logged."""
+    import json as _json
+    conn.execute(
+        "INSERT OR IGNORE INTO tagging_events "
+        "(project_id, table_name, pattern_id, pattern_title, tags_json, provider) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (project_id, table, pattern_id, title, _json.dumps(tags), provider),
+    )
 
 
 def enrich_pattern_tags(
@@ -170,7 +231,8 @@ def enrich_pattern_tags(
     on the fly, so the stored column is only worth populating when the LLM enriches.
     Best-effort + never raises; missing ``tags`` column → skipped.
 
-    Returns a per-table count dict, e.g. ``{"success_patterns": 12, "antipatterns": 7}``.
+    Returns a per-table count dict, e.g. ``{"success_patterns": 12, "antipatterns": 7}``. LLM calls
+    skipped because the provider family is switched off are counted under ``_provider_switched_off``.
     """
     if not is_enabled():
         return {"_skipped": "tagger_disabled"}
@@ -198,7 +260,10 @@ def enrich_pattern_tags(
         conn.executescript(_TAGGING_EVENTS_SCHEMA)
     except _sqlite3.Error:
         pass
-    _project_id = _os.environ.get("VNX_PROJECT_ID") or "vnx-dev"
+    # The process project only labels the audit event when a row carries no project of its own.
+    # It never decides the provider switch: that is resolved per row from the row's project_id.
+    _audit_default_project = _os.environ.get("VNX_PROJECT_ID") or "vnx-dev"
+    _skips_before = switch_skip_count()
     _provider = get_tagger_provider_name()
     try:
         for tbl in tbls:
@@ -210,26 +275,23 @@ def enrich_pattern_tags(
                 continue
             where = "WHERE tags IS NULL OR tags = '' OR tags = '[]'" if only_untagged else ""
             desc_col = "COALESCE(description,'')" if "description" in cols else "''"
+            project_col = "project_id" if "project_id" in cols else "NULL"
             try:
                 rows = conn.execute(
-                    f"SELECT id, title, {desc_col} FROM {tbl} {where} ORDER BY id DESC LIMIT ?",
+                    f"SELECT id, title, {desc_col}, {project_col} FROM {tbl} {where} ORDER BY id DESC LIMIT ?",
                     (safe_limit,),
                 ).fetchall()
             except _sqlite3.Error:
                 continue
             n = 0
-            for pid, title, desc in rows:
-                tags = enrich_tags(f"{title or ''} {desc or ''}".strip())
+            for pid, title, desc, row_project in rows:
+                item_project = _row_project(row_project)
+                tags = enrich_tags(f"{title or ''} {desc or ''}".strip(),
+                                   project_id=item_project or _provider_switch_global())
                 try:
                     conn.execute(f"UPDATE {tbl} SET tags = ? WHERE id = ?", (_json.dumps(tags), pid))
                     if tags:
-                        # Audit event for the dashboard — only meaningful taggings (non-empty).
-                        conn.execute(
-                            "INSERT OR IGNORE INTO tagging_events "
-                            "(project_id, table_name, pattern_id, pattern_title, tags_json, provider) "
-                            "VALUES (?, ?, ?, ?, ?, ?)",
-                            (_project_id, tbl, pid, title, _json.dumps(tags), _provider),
-                        )
+                        _log_tagging_event(conn, item_project or _audit_default_project, tbl, pid, title, tags, _provider)
                     n += 1
                 except _sqlite3.Error:
                     continue
@@ -237,4 +299,7 @@ def enrich_pattern_tags(
             out[tbl] = n
     finally:
         conn.close()
+    skipped = switch_skip_count() - _skips_before
+    if skipped:
+        out["_provider_switched_off"] = skipped
     return out

@@ -6,7 +6,7 @@ non-claude provider process or request — over ``scripts/`` (minus ``scripts/sp
 ``scripts/lib/provider_switch.py`` must match it:
 
 - every flagged function calls ``provider_switch.require`` in its own body before its first
-  launch call (``ENFORCED``), is pending (``PENDING_B``/``PENDING_E``), or is exempt with a
+  launch call (``ENFORCED``), is pending (``PENDING_B``), or is exempt with a
   reason;
 - every entry of the measured floor exists, is flagged or listed as undetectable with a
   reason, and is enforced (calls require, or is pending);
@@ -561,14 +561,14 @@ def test_every_exempt_entry_still_matches_something(units):
 
 
 def test_enforced_and_pending_tuples_partition_the_census(units):
-    enforced, b, e = provider_switch.ENFORCED, provider_switch.PENDING_B, provider_switch.PENDING_E
-    assert len(set(enforced)) == len(enforced) and len(set(b)) == len(b) and len(set(e)) == len(e)
-    assert not (set(enforced) & set(b)) and not (set(enforced) & set(e)) and not (set(b) & set(e))
+    enforced, b = provider_switch.ENFORCED, provider_switch.PENDING_B
+    assert len(set(enforced)) == len(enforced) and len(set(b)) == len(b)
+    assert not (set(enforced) & set(b))
     census = set(provider_switch.LAUNCH_FUNCTIONS)
-    assert set(enforced) | set(b) | set(e) == census
+    assert set(enforced) | set(b) == census
     calling_require = {k for k in census if units[k].require_positions}
-    assert census - calling_require == set(b) | set(e)
-    assert set(e) <= {"scripts/conversation_analyzer/deep_analyzer.py:DeepAnalyzer._try_ollama"}
+    assert census - calling_require == set(b)
+    assert provider_switch.pending_launch_functions() == {"B": tuple(b)}
 
 
 def test_every_enforced_entry_calls_require_before_its_first_launch(units):
@@ -581,7 +581,11 @@ def test_every_enforced_entry_calls_require_before_its_first_launch(units):
             assert unit.requires_before_launch, f"{key} does not call require before its first launch"
         else:
             assert key in provider_switch.UNDETECTED_LAUNCH_FUNCTIONS and unit.require_positions, key
-    assert "scripts/gate_runner.py:GateRunner._run_with_stall_detection" in provider_switch.ENFORCED
+    assert {
+        "scripts/conversation_analyzer/deep_analyzer.py:DeepAnalyzer._try_deepseek_harness",
+        "scripts/conversation_analyzer/deep_analyzer.py:DeepAnalyzer._try_ollama",
+        "scripts/gate_runner.py:GateRunner._run_with_stall_detection",
+    } <= set(provider_switch.ENFORCED)
 
 
 def test_census_matches_the_detected_set(units):

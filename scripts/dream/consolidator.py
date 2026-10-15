@@ -52,6 +52,8 @@ _PROBE_HEALTH_RUNNABLE: frozenset[str] = frozenset(
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 import vnx_paths as _vnx_paths
+import content_class
+import provider_switch
 
 # Character budget for the serialized pattern JSON inside one kimi prompt. Input
 # that does not fit is split over several prompts, never cut off (OI-1821).
@@ -185,6 +187,127 @@ def _fetch_patterns(conn: sqlite3.Connection, project_id: str) -> dict[str, list
         except sqlite3.OperationalError:
             results[table] = []
     return results
+
+
+def _filter_restricted_rows(
+    patterns: dict[str, list[dict]], boundary: "content_class.Boundary"
+) -> tuple[dict[str, list[dict]], dict[str, int]]:
+    """Leave out every row that carries a restricted signal; count the dropped rows per table.
+
+    A row is serialized the way the prompt serializes it and classified as text: a concrete
+    client or personal path, or the canary, makes it restricted. The text of a dropped row is
+    never logged, printed or emitted: only the count per table survives.
+    """
+    clean: dict[str, list[dict]] = {}
+    dropped: dict[str, int] = {}
+    for table, rows in patterns.items():
+        kept: list[dict] = []
+        for row in rows:
+            if content_class.classify_text(_compact_json(row), boundary) is None:
+                kept.append(row)
+        clean[table] = kept
+        dropped[table] = len(rows) - len(kept)
+    return clean, dropped
+
+
+def _skip_cycle(
+    cycle_id: str, project_id: str, data_root: Path, outcome: str, detail: str, **extra: Any
+) -> dict[str, Any]:
+    """Emit a ``dream_cycle_skipped`` event and return the skipped result, both carrying ``outcome``."""
+    _emit_dream_event(
+        {
+            "event_type": "dream_cycle_skipped",
+            "cycle_id": cycle_id,
+            "project_id": project_id,
+            "reason": outcome,
+            "outcome": outcome,
+            "detail": detail,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            **extra,
+        },
+        data_root,
+    )
+    return {
+        "status": "skipped", "cycle_id": cycle_id, "reason": outcome, "outcome": outcome,
+        "detail": detail, **extra,
+    }
+
+
+def _content_boundary_skip(
+    cycle_id: str, project_id: str, data_root: Path
+) -> "tuple[content_class.Boundary, dict[str, Any] | None]":
+    """Load the content boundary and return it with a skipped result when it forbids the cycle.
+
+    The rows are mined from sessions and may carry client or personal text. An unconfigured
+    boundary reads as restricted, like the analyzer.
+    """
+    boundary = content_class.load_boundary()
+    if not boundary.configured:
+        return boundary, _skip_cycle(cycle_id, project_id, data_root,
+                                     "content_boundary_unconfigured", boundary.reason)
+    if (project_id in boundary.client_project_ids
+            and "kimi" not in content_class.allowed_exception_providers(project_id, boundary)):
+        return boundary, _skip_cycle(cycle_id, project_id, data_root,
+                                     "content_restricted_project",
+                                     "client project without a kimi exception")
+    return boundary, None
+
+
+def _unrestricted_patterns(
+    conn: sqlite3.Connection, project_id: str, boundary: "content_class.Boundary",
+    cycle_id: str, data_root: Path,
+) -> "tuple[dict[str, list[dict]], dict[str, int], dict[str, Any] | None]":
+    """Fetch the rows without restricted signals; a skipped result when every row was dropped."""
+    patterns = _fetch_patterns(conn, project_id)
+    fetched_rows = sum(len(v) for v in patterns.values())
+    patterns, dropped = _filter_restricted_rows(patterns, boundary)
+    if fetched_rows > 0 and sum(len(v) for v in patterns.values()) == 0:
+        return patterns, dropped, _skip_cycle(
+            cycle_id, project_id, data_root, "content_restricted_all_rows",
+            f"all {fetched_rows} rows carry a restricted signal",
+            restricted_rows_dropped=dropped,
+        )
+    return patterns, dropped, None
+
+
+def _pre_kimi_skip(
+    patterns: dict[str, list[dict]], cycle_id: str, project_id: str, data_root: Path,
+    restricted_rows_dropped: dict[str, int],
+) -> "dict[str, Any] | None":
+    """Skipped result for the guards that sit directly before the kimi call, else None.
+
+    Insufficient-data guard: skip cleanly when there are no core patterns to consolidate
+    (e.g. freshly-bootstrapped DB). Then the switch, which decides after the content
+    boundary; both must allow, neither widens the other. Kimi is NOT invoked. (GAP-7)
+    """
+    core_count = len(patterns.get("success_patterns", [])) + len(
+        patterns.get("antipatterns", [])
+    )
+    if core_count < _MIN_PATTERN_THRESHOLD:
+        _emit_dream_event(
+            {
+                "event_type": "dream_cycle_skipped",
+                "cycle_id": cycle_id,
+                "project_id": project_id,
+                "reason": "insufficient_data",
+                "detail": f"core_count={core_count} below threshold={_MIN_PATTERN_THRESHOLD}",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+            data_root,
+        )
+        return {
+            "status": "skipped",
+            "cycle_id": cycle_id,
+            "reason": "insufficient_data",
+            "detail": f"core_count={core_count}",
+        }
+    decision = provider_switch.decide("kimi", consumer="dream", project_id=project_id)
+    if not decision.allowed:
+        return _skip_cycle(
+            cycle_id, project_id, data_root, provider_switch.REASON_SWITCHED_OFF,
+            decision.detail(), restricted_rows_dropped=restricted_rows_dropped,
+        )
+    return None
 
 
 def _extract_kimi_text(stdout: str) -> str:
@@ -396,6 +519,11 @@ def run_dream_cycle(
             "detail": "VNX_DREAM_SCHEDULER_ENABLED=0",
         }
 
+    # Content boundary, before any kimi call.
+    boundary, skipped = _content_boundary_skip(cycle_id, project_id, _data_root)
+    if skipped is not None:
+        return skipped
+
     probe_health = _injection_probe_health(db_path.parent)
     if probe_health not in _PROBE_HEALTH_RUNNABLE:
         _emit_dream_event(
@@ -457,34 +585,14 @@ def run_dream_cycle(
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     try:
-        patterns = _fetch_patterns(conn, project_id)
-        total_input = sum(len(v) for v in patterns.values())
-
-        # Insufficient-data guard: skip cleanly when there are no core patterns to
-        # consolidate (e.g. freshly-bootstrapped DB). Kimi is NOT invoked. (GAP-7)
-        core_count = len(patterns.get("success_patterns", [])) + len(
-            patterns.get("antipatterns", [])
+        patterns, restricted_rows_dropped, skipped = _unrestricted_patterns(
+            conn, project_id, boundary, cycle_id, _data_root
         )
-        if core_count < _MIN_PATTERN_THRESHOLD:
-            _emit_dream_event(
-                {
-                    "event_type": "dream_cycle_skipped",
-                    "cycle_id": cycle_id,
-                    "project_id": project_id,
-                    "reason": "insufficient_data",
-                    "detail": (
-                        f"core_count={core_count} below threshold={_MIN_PATTERN_THRESHOLD}"
-                    ),
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                },
-                _data_root,
-            )
-            return {
-                "status": "skipped",
-                "cycle_id": cycle_id,
-                "reason": "insufficient_data",
-                "detail": f"core_count={core_count}",
-            }
+        if skipped is None:
+            skipped = _pre_kimi_skip(patterns, cycle_id, project_id, _data_root, restricted_rows_dropped)
+        if skipped is not None:
+            return skipped
+        total_input = sum(len(v) for v in patterns.values())
 
         try:
             consolidation = _dispatch_kimi_consolidation(
@@ -526,6 +634,7 @@ def run_dream_cycle(
             "cycle_id": cycle_id,
             "project_id": project_id,
             "input_count": total_input,
+            "restricted_rows_dropped": restricted_rows_dropped,
             "probe_health": probe_health,
             "consolidation": consolidation,
             "requires_operator_review": True,
@@ -546,6 +655,7 @@ def run_dream_cycle(
                 "project_id": project_id,
                 "probe_health": probe_health,
                 "input_count": total_input,
+                "restricted_rows_dropped": restricted_rows_dropped,
                 "merged_count": merged_count,
                 "dropped_count": dropped_count,
                 "archived_count": archived_count,
@@ -582,6 +692,7 @@ def run_dream_cycle(
             "cycle_id": cycle_id,
             "probe_health": probe_health,
             "input_count": total_input,
+            "restricted_rows_dropped": restricted_rows_dropped,
             "merged_count": merged_count,
             "dropped_count": dropped_count,
             "archived_count": archived_count,
