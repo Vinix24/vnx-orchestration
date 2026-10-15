@@ -164,7 +164,8 @@ def test_garbage_stdin_exits_zero_silently(raw):
 def test_unwritable_state_never_raises(tmp_path, project):
     (project / ".claude").write_text("a file where the directory should be")
     proc = run_guard(payload_for(project, unknown_transcript(tmp_path)))
-    assert (proc.returncode, proc.stdout) == (0, "")
+    assert (proc.returncode, proc.stdout) == (1, "")
+    assert "Traceback" not in proc.stderr
 
 
 def test_missing_transcript_path_counts_as_unknown(tmp_path, project):
@@ -173,3 +174,82 @@ def test_missing_transcript_path_counts_as_unknown(tmp_path, project):
     for _ in range(2):
         run_guard(payload)
     assert "systemMessage" in json.loads(run_guard(payload).stdout)
+
+
+def error_log(project):
+    return project / ".claude" / "rotation" / "errors.log"
+
+
+def test_failed_state_write_leaves_a_trace_and_does_not_block(tmp_path, project):
+    (project / ".claude").write_text("a file where the directory should be")
+    proc = run_guard(payload_for(project, unknown_transcript(tmp_path)))
+    assert proc.returncode == 1
+    assert proc.stdout == ""
+    lines = proc.stderr.strip().splitlines()
+    assert len(lines) == 1
+    assert "context-rotation" in lines[0]
+    assert "save state" in lines[0]
+    assert "OSError" in lines[0] or "FileExistsError" in lines[0] or "NotADirectoryError" in lines[0]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_failed_state_write_is_appended_to_the_error_log(tmp_path, project):
+    sdir = state_dir(project)
+    sdir.mkdir(parents=True)
+    sdir.chmod(0o500)
+    try:
+        proc = run_guard(payload_for(project, unknown_transcript(tmp_path)))
+    finally:
+        sdir.chmod(0o700)
+    assert proc.returncode == 1
+    assert "save state" in proc.stderr
+    logged = error_log(project).read_text(encoding="utf-8")
+    assert "save state" in logged and "PermissionError" in logged
+    assert (project / ".claude" / "rotation" / ".gitignore").read_text() == "*\n"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_error_log_is_bounded(tmp_path, project):
+    sdir = state_dir(project)
+    sdir.mkdir(parents=True)
+    sdir.chmod(0o500)
+    try:
+        for _ in range(80):
+            run_guard(payload_for(project, unknown_transcript(tmp_path)))
+    finally:
+        sdir.chmod(0o700)
+    assert len(error_log(project).read_text(encoding="utf-8").splitlines()) <= 50
+
+
+def test_never_exits_two_on_unexpected_failure(tmp_path, project):
+    (project / ".claude").write_text("x")
+    proc = run_guard(payload_for(project, unknown_transcript(tmp_path)))
+    assert proc.returncode != 2
+
+
+def test_first_measurement_above_warn_protects_the_handover_before_naming_it(tmp_path, project):
+    proc = run_guard(payload_for(project, transcript_with(tmp_path, 120000)))
+    assert proc.returncode == 0
+    assert "handover-sess-1.md" in json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+    ignore = project / ".claude" / "rotation" / ".gitignore"
+    assert ignore.read_text() == "*\n"
+
+
+def test_no_handover_instruction_when_protection_cannot_be_made(tmp_path, project):
+    (project / ".claude").write_text("a file where the directory should be")
+    proc = run_guard(payload_for(project, transcript_with(tmp_path, 120000)))
+    assert proc.stdout == ""
+    assert proc.returncode == 1
+    assert "ignore protection" in proc.stderr
+
+
+def test_latch_records_when_and_why_the_notice_was_set(tmp_path, project):
+    payload = payload_for(project, unknown_transcript(tmp_path))
+    for _ in range(3):
+        run_guard(payload)
+    state = json.loads((state_dir(project) / "sess-1.json").read_text())
+    assert state["notice_sent"] is True
+    assert state["notice_sent_band"] == "unknown"
+    assert state["notice_sent_size"] is None
+    assert state["notice_sent_unknown_count"] == 3
+    assert state["notice_sent_at"].endswith("Z")

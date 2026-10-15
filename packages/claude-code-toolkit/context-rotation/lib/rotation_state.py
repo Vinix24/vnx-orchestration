@@ -10,6 +10,7 @@ import json
 import os
 import re
 import tempfile
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -74,3 +75,38 @@ def save_state(project_dir: str, session_id: str, state: Dict[str, Any]) -> Opti
             os.unlink(temp)
         raise
     return target
+
+
+ERROR_LOG_MAX_LINES = 50
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def log_error(project_dir: str, line: str) -> None:
+    """Append one line to rotation/errors.log, keeping the last ERROR_LOG_MAX_LINES.
+
+    Never raises: the log is a courtesy of a hook that already failed.
+    """
+    try:
+        ensure_gitignore(project_dir)
+        target = os.path.join(rotation_dir(project_dir), "errors.log")
+        try:
+            with open(target, "r", encoding="utf-8") as handle:
+                lines = handle.read().splitlines()
+        except OSError:
+            lines = []
+        lines = (lines + [line.replace("\n", " ")])[-ERROR_LOG_MAX_LINES:]
+        descriptor, temp = tempfile.mkstemp(dir=rotation_dir(project_dir), prefix=".errors-", suffix=".tmp")
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write("\n".join(lines) + "\n")
+            os.replace(temp, target)
+        except BaseException:
+            if os.path.exists(temp):
+                os.unlink(temp)
+            raise
+    except Exception:
+        # The log is best effort; a failure here must not mask the original error.
+        return
