@@ -119,7 +119,7 @@ def resolve_project_state_dir(
         )
     # The directory's own identity only (marker, git remote): an ambient
     # VNX_PROJECT_ID must not make a directory "belong" to a project it does not.
-    dir_pid = _dir_project_id(root)
+    dir_pid = dir_project_id(root)
     if project_dir_explicit and dir_pid and dir_pid != project_id:
         raise ProjectStoreError(
             f"--project-id {project_id!r} does not match --project-dir {str(root)!r}, "
@@ -137,15 +137,47 @@ def resolve_project_state_dir(
     return store / "state"
 
 
-def _dir_project_id(root: Path) -> Optional[str]:
-    """Project a directory belongs to by its own signals: nearest marker, else git remote."""
+def dir_project_id(root) -> Optional[str]:
+    """Project a directory belongs to by its own signals, in the resolver's order.
+
+    Nearest ``.vnx-project-id`` marker, then the operator registry
+    (``~/.vnx/projects.json``, read by ``vnx_identity``'s own reader), then the git
+    remote. Ambient ``VNX_PROJECT_ID`` is deliberately not consulted. None when
+    the directory carries no identity.
+    """
+    root = Path(root).expanduser().resolve()
     for ancestor in (root, *root.parents):
         marker_pid = read_marker_project_id(ancestor)
         if marker_pid:
             return marker_pid
+    ensure_engine_on_path()
+    import vnx_identity
     import vnx_paths
 
+    registry = vnx_identity._load_registry(vnx_identity.REGISTRY_PATH)
+    if registry is not None:
+        entry = vnx_identity._registry_lookup(registry, root)
+        registered = entry.get("project_id") if entry else None
+        if registered and _PROJECT_ID_RE.match(registered):
+            return registered
     return vnx_paths._project_id_from_git_remote(root)
+
+
+def require_source_project(project_id: str, sources) -> None:
+    """Refuse when a repository source belongs to another project than ``project_id``.
+
+    ``sources`` are the directories a command reads from (project dir, repo root,
+    roadmap location). A source whose identity cannot be established passes: it
+    is unattributable and the operator's explicit ``--project-id`` stands.
+    """
+    for source in sources:
+        owner = dir_project_id(source)
+        if owner and owner != project_id:
+            raise ProjectStoreError(
+                f"--project-id {project_id!r} but the repository source "
+                f"{str(Path(source).expanduser().resolve())!r} belongs to project {owner!r}; "
+                "refusing to write its content into another project's store"
+            )
 
 
 def _override_owner(store: Path) -> Optional[str]:

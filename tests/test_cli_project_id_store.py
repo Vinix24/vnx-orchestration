@@ -203,3 +203,163 @@ def test_a_project_dir_only_caller_keeps_its_behaviour(home, monkeypatch, capsys
     rc, out, err = _run(monkeypatch, capsys, ["horizon", "list", "--project-dir", str(proj_a), "--json"])
     assert rc == 0, err
     assert _ids(out) == {"trk-alpha"}
+
+
+# Round 2 (codex_gate on 896ff345): the SOURCE follows the store, and a
+# registered checkout keeps its identity.
+
+_ROADMAP = "features:\n  - feature_id: beta-only\n    title: Beta only\n    status: planned\n"
+
+
+def _store_track_ids(state_dir: Path) -> set[str]:
+    db = state_dir / "runtime_coordination.db"
+    if not db.exists():
+        return set()
+    conn = sqlite3.connect(str(db))
+    try:
+        return {r[0] for r in conn.execute("SELECT track_id FROM tracks")}
+    finally:
+        conn.close()
+
+
+def _register(monkeypatch, home: Path, project_id: str, path: Path) -> None:
+    """A tmp ``~/.vnx/projects.json`` (schema v2) naming ``path`` as ``project_id``."""
+    import vnx_identity as ident
+
+    registry = home / ".vnx" / "projects.json"
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    registry.write_text(json.dumps({
+        "schema_version": 2,
+        "operator_id": "op",
+        "projects": [{"project_id": project_id, "path": str(path)}],
+    }), encoding="utf-8")
+    monkeypatch.setattr(ident, "REGISTRY_PATH", registry)
+
+
+def _git_remote(directory: Path, url: str) -> None:
+    import subprocess
+
+    directory.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", str(directory)], check=True)
+    subprocess.run(["git", "-C", str(directory), "remote", "add", "origin", url], check=True)
+
+
+def test_sync_from_a_checkout_of_another_project_writes_nothing(home, monkeypatch, capsys):
+    """Codex finding 1: beta's roadmap must not enter alpha's store, default `.` or explicit."""
+    proj_b = _marker(home / "proj-b", "beta")
+    (proj_b / "ROADMAP.yaml").write_text(_ROADMAP, encoding="utf-8")
+    alpha_state = home / ".vnx-data" / "alpha" / "state"
+    _seed(alpha_state, "alpha", "trk-alpha")
+
+    monkeypatch.chdir(proj_b)
+    rc, out, err = _run(monkeypatch, capsys, ["horizon", "sync", "--project-id", "alpha", "--apply", "--json"])
+    assert rc == 2
+    assert "alpha" in err and "beta" in err
+    assert _store_track_ids(alpha_state) == {"trk-alpha"}
+
+    monkeypatch.chdir(home)
+    rc, out, err = _run(monkeypatch, capsys, [
+        "horizon", "sync", "--project-id", "alpha", "--project-dir", str(proj_b), "--apply", "--json"])
+    assert rc == 2
+    assert _store_track_ids(alpha_state) == {"trk-alpha"}
+
+
+def test_sync_with_a_roadmap_flag_in_another_projects_checkout_is_refused(home, monkeypatch, capsys):
+    proj_b = _marker(home / "proj-b", "beta")
+    (proj_b / "ROADMAP.yaml").write_text(_ROADMAP, encoding="utf-8")
+    proj_a = _marker(home / "proj-a", "alpha")
+    alpha_state = home / ".vnx-data" / "alpha" / "state"
+    _seed(alpha_state, "alpha", "trk-alpha")
+    rc, out, err = _run(monkeypatch, capsys, [
+        "horizon", "sync", "--project-id", "alpha", "--project-dir", str(proj_a),
+        "--roadmap", str(proj_b / "ROADMAP.yaml"), "--apply", "--json"])
+    assert rc == 2
+    assert "beta" in err
+    assert _store_track_ids(alpha_state) == {"trk-alpha"}
+
+
+@pytest.mark.parametrize("verb", [
+    ["drift"], ["reconcile"], ["close", "trk-alpha"],
+    ["plan-gate", "run", "trk-alpha"], ["plan-gate", "attest", "trk-alpha"], ["plan-gate", "batch"],
+])
+def test_repository_dependent_verbs_refuse_a_checkout_of_another_project(home, monkeypatch, capsys, verb):
+    proj_b = _marker(home / "proj-b", "beta")
+    _seed(home / ".vnx-data" / "alpha" / "state", "alpha", "trk-alpha")
+    monkeypatch.chdir(proj_b)
+    rc, out, err = _run(monkeypatch, capsys, ["horizon", *verb, "--project-id", "alpha"])
+    assert rc == 2, err
+    assert "alpha" in err and "beta" in err
+
+
+def test_repo_root_of_another_project_is_refused(home, monkeypatch, capsys):
+    proj_a = _marker(home / "proj-a", "alpha")
+    proj_b = _marker(home / "proj-b", "beta")
+    _seed(home / ".vnx-data" / "alpha" / "state", "alpha", "trk-alpha")
+    rc, out, err = _run(monkeypatch, capsys, [
+        "horizon", "drift", "--project-id", "alpha", "--project-dir", str(proj_a),
+        "--repo-root", str(proj_b)])
+    assert rc == 2
+    assert "beta" in err
+
+
+def test_repository_dependent_verb_with_unknown_identity_proceeds(home, monkeypatch, capsys):
+    """No marker, registry or remote: the source is unattributable, the operator's --project-id stands."""
+    bare = home / "bare"
+    bare.mkdir()
+    (bare / "ROADMAP.yaml").write_text(_ROADMAP, encoding="utf-8")
+    alpha_state = home / ".vnx-data" / "alpha" / "state"
+    _seed(alpha_state, "alpha", "trk-alpha")
+    rc, out, err = _run(monkeypatch, capsys, [
+        "horizon", "sync", "--project-id", "alpha", "--project-dir", str(bare), "--json"])
+    assert rc == 0, err
+
+
+def test_repository_dependent_verb_of_the_same_project_is_accepted(home, monkeypatch, capsys):
+    proj_a = _marker(home / "proj-a", "alpha")
+    (proj_a / "ROADMAP.yaml").write_text(_ROADMAP, encoding="utf-8")
+    alpha_state = home / ".vnx-data" / "alpha" / "state"
+    _seed(alpha_state, "alpha", "trk-alpha")
+    monkeypatch.chdir(proj_a)
+    rc, out, err = _run(monkeypatch, capsys, ["horizon", "sync", "--project-id", "alpha", "--json"])
+    assert rc == 0, err
+    assert "beta-only" in json.loads(out)["created"]
+
+
+def test_store_only_verbs_still_accept_the_default_dir_of_another_project(home, monkeypatch, capsys):
+    proj_b = _marker(home / "proj-b", "beta")
+    _seed(home / ".vnx-data" / "alpha" / "state", "alpha", "trk-alpha")
+    monkeypatch.chdir(proj_b)
+    for verb in (["list", "--json"], ["show", "trk-alpha", "--json"]):
+        rc, out, err = _run(monkeypatch, capsys, ["horizon", *verb, "--project-id", "alpha"])
+        assert rc == 0, err
+
+
+def test_registry_identity_is_honoured_before_the_git_remote(home, monkeypatch, capsys):
+    """Codex finding 2: a markerless checkout registered as alpha, remote basename repo-name."""
+    checkout = home / "checkout"
+    _git_remote(checkout, "https://example.com/org/repo-name.git")
+    _register(monkeypatch, home, "alpha", checkout)
+    _seed(home / ".vnx-data" / "alpha" / "state", "alpha", "trk-alpha")
+    assert _engine.dir_project_id(checkout) == "alpha"
+    rc, out, err = _run(monkeypatch, capsys, [
+        "horizon", "list", "--project-id", "alpha", "--project-dir", str(checkout), "--json"])
+    assert rc == 0, err
+    assert _ids(out) == {"trk-alpha"}
+
+
+def test_registry_identity_of_another_project_is_refused(home, monkeypatch, capsys):
+    checkout = home / "checkout"
+    checkout.mkdir()
+    _register(monkeypatch, home, "beta", checkout)
+    _seed(home / ".vnx-data" / "alpha" / "state", "alpha", "trk-alpha")
+    rc, out, err = _run(monkeypatch, capsys, [
+        "horizon", "list", "--project-id", "alpha", "--project-dir", str(checkout)])
+    assert rc == 2
+    assert "alpha" in err and "beta" in err
+
+
+def test_marker_wins_over_registry_and_remote(home, monkeypatch):
+    checkout = _marker(home / "checkout", "gamma")
+    _git_remote(checkout, "https://example.com/org/repo-name.git")
+    _register(monkeypatch, home, "alpha", checkout)
+    assert _engine.dir_project_id(checkout) == "gamma"

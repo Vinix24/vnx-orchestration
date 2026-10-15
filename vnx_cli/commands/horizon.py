@@ -131,6 +131,36 @@ def _default_roadmap(args: Any) -> None:
     args.roadmap = str(Path(args.project_dir).resolve() / "ROADMAP.yaml")
 
 
+def _prep_repo(args: Any, default: str | None = "repo_root") -> None:
+    """``_prep`` plus the repository defaults, for a verb that reads the repository.
+
+    Repository-dependent verbs: ``sync`` (ROADMAP.yaml), ``drift``, ``reconcile``,
+    ``close`` (git/gh evidence under ``--repo-root``) and ``plan-gate run`` /
+    ``attest`` / ``batch`` (``--repo-root``, checked but not defaulted). With an explicit ``--project-id`` the
+    SOURCE must be that project too: the project dir (also the default ``.``), the
+    ``--repo-root`` and the roadmap location must not belong to another project.
+    A source whose identity cannot be established passes, because the operator's
+    explicit ``--project-id`` is then the only signal there is.
+    """
+    explicit = bool(getattr(args, "project_id", None))
+    _prep(args)
+    if default == "roadmap":
+        _default_roadmap(args)
+    elif default == "repo_root":
+        _default_repo_root(args)
+    if not explicit:
+        return
+    sources = [Path(args.project_dir), Path(getattr(args, "repo_root", None) or args.project_dir)]
+    roadmap = getattr(args, "roadmap", None) or os.environ.get("VNX_ROADMAP_PATH")
+    if roadmap:
+        sources.append(Path(roadmap).expanduser().resolve().parent)
+    try:
+        _engine.require_source_project(args.project_id, sources)
+    except _engine.ProjectStoreError as exc:
+        print(f"  Error: {exc}", file=sys.stderr)
+        sys.exit(2)
+
+
 # ---------------------------------------------------------------------------
 # objective-domain verbs
 # ---------------------------------------------------------------------------
@@ -155,22 +185,19 @@ def _cmd_show(args: Any) -> int:
 
 def _cmd_sync(args: Any) -> int:
     pc = _require_planning_cli()
-    _prep(args)
-    _default_roadmap(args)
+    _prep_repo(args, default="roadmap")
     return pc.cmd_objective_sync(args)
 
 
 def _cmd_drift(args: Any) -> int:
     pc = _require_planning_cli()
-    _prep(args)
-    _default_repo_root(args)
+    _prep_repo(args)
     return pc.cmd_objective_drift(args)
 
 
 def _cmd_reconcile(args: Any) -> int:
     pc = _require_planning_cli()
-    _prep(args)
-    _default_repo_root(args)
+    _prep_repo(args)
     return pc.cmd_objective_reconcile(args)
 
 
@@ -188,8 +215,7 @@ def _cmd_reconcile_streak(args: Any) -> int:
 
 def _cmd_close(args: Any) -> int:
     pc = _require_planning_cli()
-    _prep(args)
-    _default_repo_root(args)
+    _prep_repo(args)
     return pc.cmd_objective_close(args)
 
 
@@ -310,7 +336,7 @@ def _cmd_plan_gate_seed(args: Any) -> int:
 
 def _cmd_plan_gate_run(args: Any) -> int:
     pc = _require_planning_cli()
-    _prep(args)
+    _prep_repo(args, default=None)
     return pc.cmd_plan_gate_run(args)
 
 
@@ -322,7 +348,7 @@ def _cmd_plan_gate_status(args: Any) -> int:
 
 def _cmd_plan_gate_attest(args: Any) -> int:
     pc = _require_planning_cli()
-    _prep(args)
+    _prep_repo(args, default=None)
     return pc.cmd_plan_gate_attest(args)
 
 
@@ -346,7 +372,7 @@ def _cmd_plan_gate_reblock(args: Any) -> int:
 
 def _cmd_plan_gate_batch(args: Any) -> int:
     pc = _require_planning_cli()
-    _prep(args)
+    _prep_repo(args, default=None)
     return pc.cmd_plan_gate_batch(args)
 
 
