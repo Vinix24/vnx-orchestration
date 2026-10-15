@@ -113,7 +113,7 @@ def test_enrich_noop_when_disabled(tmp_path, monkeypatch):
 def test_enrich_tags_only_untagged_when_enabled(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_TAGGER_ENABLED", "1")
     # Mock the LLM enrichment so the test is deterministic + offline.
-    monkeypatch.setattr(vnx_tagger, "enrich_tags", lambda text, paths=None: ["tests_harness", "add_test"])
+    monkeypatch.setattr(vnx_tagger, "enrich_tags", lambda text, paths=None, project_id=None: ["tests_harness", "add_test"])
     db = tmp_path / "qi.db"
     _seed(db)
 
@@ -137,7 +137,7 @@ def test_enrich_tags_only_untagged_when_enabled(tmp_path, monkeypatch):
 
 def test_enrich_all_rows_when_only_untagged_false(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_TAGGER_ENABLED", "1")
-    monkeypatch.setattr(vnx_tagger, "enrich_tags", lambda text, paths=None: ["redone"])
+    monkeypatch.setattr(vnx_tagger, "enrich_tags", lambda text, paths=None, project_id=None: ["redone"])
     db = tmp_path / "qi.db"
     _seed(db)
     result = vnx_tagger.enrich_pattern_tags(db, only_untagged=False)
@@ -151,7 +151,7 @@ def test_enrich_all_rows_when_only_untagged_false(tmp_path, monkeypatch):
 
 def test_enrich_missing_tags_column_skipped(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_TAGGER_ENABLED", "1")
-    monkeypatch.setattr(vnx_tagger, "enrich_tags", lambda text, paths=None: ["x"])
+    monkeypatch.setattr(vnx_tagger, "enrich_tags", lambda text, paths=None, project_id=None: ["x"])
     db = tmp_path / "qi.db"
     conn = sqlite3.connect(str(db))
     conn.execute("CREATE TABLE success_patterns (id INTEGER PRIMARY KEY, title TEXT)")  # no tags col

@@ -465,3 +465,58 @@ def test_a_config_skip_next_to_switch_skips_is_not_every_session():
     assert ca_pkg.deep_all_skipped_by_switch(RunStats(deep_disabled_skips=2, deep_open_sessions=2)) is True
     assert ca_pkg.deep_all_skipped_by_switch(RunStats()) is False
     assert ca_pkg.deep_all_skipped_by_switch(None) is False
+
+
+# ---------------------------------------------------------------------------
+# Per-item project decisions (PR #2057 fix round 2)
+# ---------------------------------------------------------------------------
+
+def test_receipt_batch_decides_the_switch_per_receipt(switch, monkeypatch, tmp_path):
+    """DeepSeek off globally, on only for X: a receipt of Y in the same batch never reaches the prompt."""
+    switch(global_off=["deepseek"], project_on={PROJECT_X: ["deepseek"]})
+    monkeypatch.setenv(receipt_classifier.ENV_PROVIDER, "deepseek")
+    monkeypatch.setenv(receipt_classifier.ENV_DAILY_BUDGET, "5")
+    monkeypatch.setenv(receipt_classifier.ENV_STATE_DIR, str(tmp_path))
+    spy = _Spy(monkeypatch, parsed={"impact_class": "none"})
+    result = receipt_classifier.classify_batch([
+        {"dispatch_id": "d-x", "project_id": PROJECT_X, "summary": "secret-of-x"},
+        {"dispatch_id": "d-y", "project_id": PROJECT_Y, "summary": "secret-of-y"},
+    ])
+    assert all("secret-of-y" not in call for call in spy.calls)
+    assert len(spy.calls) == 1 and "secret-of-x" in spy.calls[0]
+    assert result["status"] == "ok" and result["switched_off_receipts"] == 1
+
+
+def test_receipt_batch_all_projects_off_is_skipped(switch, monkeypatch, tmp_path):
+    switch(global_off=["deepseek"])
+    monkeypatch.setenv(receipt_classifier.ENV_PROVIDER, "deepseek")
+    monkeypatch.setenv(receipt_classifier.ENV_DAILY_BUDGET, "5")
+    monkeypatch.setenv(receipt_classifier.ENV_STATE_DIR, str(tmp_path))
+    spy = _Spy(monkeypatch)
+    result = receipt_classifier.classify_batch([
+        {"dispatch_id": "d-x", "project_id": PROJECT_X, "summary": "secret-of-x"},
+        {"dispatch_id": "d-y", "project_id": PROJECT_Y, "summary": "secret-of-y"},
+    ])
+    assert result["status"] == "skipped" and result["reason"] == "provider_switched_off"
+    assert spy.calls == []
+
+
+def test_tagger_rows_decide_the_switch_by_their_own_project(switch, monkeypatch, tmp_path):
+    """Process project X is on, the row of disabled project Y must not reach the provider."""
+    switch(global_off=["deepseek"], project_on={PROJECT_X: ["deepseek"]})
+    monkeypatch.setenv("VNX_TAGGER_ENABLED", "1")
+    monkeypatch.delenv("VNX_TAGGER_PROVIDER", raising=False)
+    spy = _Spy(monkeypatch)
+    db = tmp_path / "qi.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE success_patterns (id INTEGER PRIMARY KEY, title TEXT, "
+                 "description TEXT, tags TEXT, project_id TEXT)")
+    conn.executemany("INSERT INTO success_patterns (title, description, project_id) VALUES (?, ?, ?)",
+                     [("fix-x-lane", "", PROJECT_X), ("secret-y-lane", "", PROJECT_Y),
+                      ("no-project-lane", "", None)])
+    conn.commit()
+    conn.close()
+    out = vnx_tagger.enrich_pattern_tags(db, tables=["success_patterns"])
+    assert all("secret-y-lane" not in c and "no-project-lane" not in c for c in spy.calls)
+    assert len(spy.calls) == 1 and "fix-x-lane" in spy.calls[0]
+    assert out["success_patterns"] == 3 and out["_provider_switched_off"] == 2

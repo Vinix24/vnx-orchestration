@@ -190,6 +190,31 @@ def enrich_tags(text: str, paths: Optional[List[str]] = None,
     return tags
 
 
+def _provider_switch_global() -> str:
+    """Explicit global scope: without it the factory would fall back to the process project."""
+    import provider_switch
+    return provider_switch.SCOPE_GLOBAL
+
+
+def _row_project(value) -> Optional[str]:
+    """The project a database row belongs to; ``None`` (the explicit global section) when it has none.
+
+    Never the process project: the row's own project_id decides the provider switch.
+    """
+    return (str(value).strip() if value else "") or None
+
+
+def _log_tagging_event(conn, project_id, table, pattern_id, title, tags, provider) -> None:
+    """Audit event for the dashboard: only meaningful (non-empty) taggings are logged."""
+    import json as _json
+    conn.execute(
+        "INSERT OR IGNORE INTO tagging_events "
+        "(project_id, table_name, pattern_id, pattern_title, tags_json, provider) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (project_id, table, pattern_id, title, _json.dumps(tags), provider),
+    )
+
+
 def enrich_pattern_tags(
     db_path: "object",
     *,
@@ -235,8 +260,9 @@ def enrich_pattern_tags(
         conn.executescript(_TAGGING_EVENTS_SCHEMA)
     except _sqlite3.Error:
         pass
-    _item_project = _os.environ.get("VNX_PROJECT_ID") or None
-    _project_id = _item_project or "vnx-dev"
+    # The process project only labels the audit event when a row carries no project of its own.
+    # It never decides the provider switch: that is resolved per row from the row's project_id.
+    _audit_default_project = _os.environ.get("VNX_PROJECT_ID") or "vnx-dev"
     _skips_before = switch_skip_count()
     _provider = get_tagger_provider_name()
     try:
@@ -249,26 +275,23 @@ def enrich_pattern_tags(
                 continue
             where = "WHERE tags IS NULL OR tags = '' OR tags = '[]'" if only_untagged else ""
             desc_col = "COALESCE(description,'')" if "description" in cols else "''"
+            project_col = "project_id" if "project_id" in cols else "NULL"
             try:
                 rows = conn.execute(
-                    f"SELECT id, title, {desc_col} FROM {tbl} {where} ORDER BY id DESC LIMIT ?",
+                    f"SELECT id, title, {desc_col}, {project_col} FROM {tbl} {where} ORDER BY id DESC LIMIT ?",
                     (safe_limit,),
                 ).fetchall()
             except _sqlite3.Error:
                 continue
             n = 0
-            for pid, title, desc in rows:
-                tags = enrich_tags(f"{title or ''} {desc or ''}".strip(), project_id=_item_project)
+            for pid, title, desc, row_project in rows:
+                item_project = _row_project(row_project)
+                tags = enrich_tags(f"{title or ''} {desc or ''}".strip(),
+                                   project_id=item_project or _provider_switch_global())
                 try:
                     conn.execute(f"UPDATE {tbl} SET tags = ? WHERE id = ?", (_json.dumps(tags), pid))
                     if tags:
-                        # Audit event for the dashboard — only meaningful taggings (non-empty).
-                        conn.execute(
-                            "INSERT OR IGNORE INTO tagging_events "
-                            "(project_id, table_name, pattern_id, pattern_title, tags_json, provider) "
-                            "VALUES (?, ?, ?, ?, ?, ?)",
-                            (_project_id, tbl, pid, title, _json.dumps(tags), _provider),
-                        )
+                        _log_tagging_event(conn, item_project or _audit_default_project, tbl, pid, title, tags, _provider)
                     n += 1
                 except _sqlite3.Error:
                     continue

@@ -231,6 +231,23 @@ Respond with valid JSON:
         summary = self._build_session_summary(jsonl_path, metrics, flags)
         return self._routes_restricted(jsonl_path, summary, origin)
 
+    def _record_disabled_skip(self, disabled_lanes: List[str], project_id: str) -> None:
+        """Every lane that ran was refused by the provider switch: a skipped session, counted
+        on its own, never as a failed attempt and never as a config gap."""
+        self.deep_disabled_skips += 1
+        log("WARNING", f"Deep analysis skipped, provider switched off "
+                       f"({', '.join(disabled_lanes)}; scope={project_id})")
+
+    @staticmethod
+    def _switch_project(origin: Optional[content_class.Origin]) -> str:
+        """Project whose provider switch decides: the session's own, else the global section.
+
+        Never the project of this process.
+        """
+        if origin is not None and origin.project_id:
+            return origin.project_id
+        return provider_switch.SCOPE_GLOBAL
+
     def analyze_session(self, jsonl_path: Path,
                         metrics: SessionMetrics,
                         flags: SessionFlags,
@@ -243,10 +260,7 @@ Respond with valid JSON:
             return self._analyze_restricted(prompt)
 
         self.deep_open_sessions += 1
-        # The project the session belongs to when its origin resolves to one; otherwise the
-        # global section decides, never the project of this process.
-        project_id = (origin.project_id if origin is not None and origin.project_id
-                      else provider_switch.SCOPE_GLOBAL)
+        project_id = self._switch_project(origin)
         disabled_lanes: List[str] = []
 
         result_text = None
@@ -314,11 +328,7 @@ Respond with valid JSON:
         if any_attempted:
             self.deep_attempts += 1
         elif disabled_lanes:
-            # Every lane that ran was refused by the provider switch: a skipped session, counted
-            # on its own, never as a failed attempt and never as a config gap.
-            self.deep_disabled_skips += 1
-            log("WARNING", f"Deep analysis skipped, provider switched off "
-                           f"({', '.join(disabled_lanes)}; scope={project_id})")
+            self._record_disabled_skip(disabled_lanes, project_id)
         else:
             # No candidate strategy ever invoked an LLM this session — every
             # branch that ran refused on a config gap. That is a skipped

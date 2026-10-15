@@ -442,6 +442,44 @@ def _queue_pending_edit(parsed: Dict[str, Any], source_dispatch_id: str) -> Opti
     return edit_id
 
 
+def _provider_switch():
+    import provider_switch
+    return provider_switch
+
+
+def _select_enabled_receipts(receipts: List[Dict[str, Any]]):
+    """Decide the provider switch per receipt, by the receipt's own project.
+
+    A receipt without a project is decided by the explicit global section, never the process project. Returns
+    ``(provider, kept_receipts, refusal, switched_off_count)``; ``provider`` is ``None``
+    (and ``refusal`` the first ProviderDisabledError) when no receipt may reach the provider.
+    A receipt whose project is switched off is dropped here and never enters the prompt.
+    """
+    switch = _provider_switch()
+    name = get_provider_name()
+    verdicts: Dict[Optional[str], Any] = {}
+    kept: List[Dict[str, Any]] = []
+    prov = None
+    refusal = None
+    for rcpt in receipts:
+        raw = rcpt.get("project_id") if isinstance(rcpt, dict) else None
+        project_id = str(raw) if raw else None
+        if project_id not in verdicts:
+            try:
+                verdicts[project_id] = get_provider(name, project_id=project_id or switch.SCOPE_GLOBAL)
+            except switch.ProviderDisabledError as exc:
+                verdicts[project_id] = exc
+        verdict = verdicts[project_id]
+        if isinstance(verdict, switch.ProviderDisabledError):
+            refusal = refusal or verdict
+            continue
+        prov = prov or verdict
+        kept.append(rcpt)
+    if not kept:
+        return None, [], refusal, len(receipts)
+    return prov, kept, refusal, len(receipts) - len(kept)
+
+
 def _run_classification(
     receipts: List[Dict[str, Any]],
     *,
@@ -459,22 +497,18 @@ def _run_classification(
         )
         return {"status": "skipped", "reason": "budget_exhausted"}
 
+    switched_off = 0
     if provider is not None:
         prov = provider
     else:
-        import provider_switch
-        name = get_provider_name()
-        project_id = next((str(r["project_id"]) for r in receipts
-                           if isinstance(r, dict) and r.get("project_id")), None)
-        try:
-            prov = get_provider(name, project_id=project_id) if project_id else get_provider(name)
-        except provider_switch.ProviderDisabledError as exc:
-            logger.warning("receipt_classifier skipped: provider switched off: %s", exc.decision.detail())
+        prov, receipts, refusal, switched_off = _select_enabled_receipts(receipts)
+        if prov is None:
+            logger.warning("receipt_classifier skipped: provider switched off: %s", refusal.decision.detail())
             return {
                 "status": "skipped",
-                "reason": provider_switch.REASON_SWITCHED_OFF,
-                "provider": name,
-                "detail": exc.decision.detail(),
+                "reason": _provider_switch().REASON_SWITCHED_OFF,
+                "provider": get_provider_name(),
+                "detail": refusal.decision.detail(),
             }
     prompt = _build_prompt(receipts)
 
@@ -511,6 +545,7 @@ def _run_classification(
         "provider": prov.name,
         "parsed": parsed,
         "queued_edit_ids": queued,
+        "switched_off_receipts": switched_off,
         "cost_usd": result.cost_usd,
         "latency_ms": result.latency_ms,
     }
