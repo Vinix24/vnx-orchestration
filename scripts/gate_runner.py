@@ -431,12 +431,11 @@ class GateRunner:
         # Provider switch (provider-schakelaar C): decided before anything is marked executing
         # or launched, on every path (subprocess, vertex, harness lane), with the gate name as
         # the identifier. An unregistered gate keeps its unsupported_gate_type answer below.
-        refusal = _rec.gate_switch_refusal(gate, consumer=_SWITCH_CONSUMER, state_dir=self._state_dir)
-        if refusal is not None:
-            return self._record_switched_off(
-                gate=gate, pr_number=pr_number, pr_id=pr_id,
-                detail=refusal.detail(), request_payload=request_payload,
-            )
+        switched_off = self._refuse_if_switched_off(
+            gate, pr_number=pr_number, pr_id=pr_id, request_payload=request_payload,
+        )
+        if switched_off is not None:
+            return switched_off
 
         if not using_vertex:
             # OI-1490: three outcomes, not one. Before this, an unregistered
@@ -449,18 +448,14 @@ class GateRunner:
             # binary. `provider_not_installed` stays temporary and stays
             # correct for the gates it actually describes.
             if provider is None:
-                return _rec.record_not_executable(
-                    gate=gate, pr_number=pr_number, pr_id=pr_id,
+                return self._not_executable(
+                    gate=gate, pr_number=pr_number, pr_id=pr_id, request_payload=request_payload,
                     reason="unsupported_gate_type",
                     reason_detail=(
                         f"{gate} is not in gate_recorder.GATE_PROVIDERS — register it as a "
                         f"PATH binary, a script runner, or a harness lane; this runner "
                         f"will not guess a binary name from the gate name"
                     ),
-                    request_payload=request_payload,
-                    requests_dir=self._requests_dir,
-                    results_dir=self._results_dir,
-                    state_dir=self._state_dir,
                 )
             kind, provider_name = provider
             if kind == _rec.GATE_PROVIDER_HARNESS_LANE:
@@ -478,20 +473,16 @@ class GateRunner:
                 # `gate_runner_missing` here rather than mint a second name
                 # for the fact gate_request_handler already books.
                 if not _rec.gate_is_available(gate):
-                    return _rec.record_not_executable(
-                        gate=gate, pr_number=pr_number, pr_id=pr_id,
+                    return self._not_executable(
+                        gate=gate, pr_number=pr_number, pr_id=pr_id, request_payload=request_payload,
                         reason="gate_runner_missing",
                         reason_detail=(
                             f"{provider_name} is not on disk — {gate} is registered "
                             f"as a script runner and its runner is unavailable"
                         ),
-                        request_payload=request_payload,
-                        requests_dir=self._requests_dir,
-                        results_dir=self._results_dir,
-                        state_dir=self._state_dir,
                     )
-                return _rec.record_not_executable(
-                    gate=gate, pr_number=pr_number, pr_id=pr_id,
+                return self._not_executable(
+                    gate=gate, pr_number=pr_number, pr_id=pr_id, request_payload=request_payload,
                     reason="gate_not_subprocess_routable",
                     reason_detail=(
                         f"{gate} is a script runner ({provider_name}) with its own "
@@ -499,22 +490,14 @@ class GateRunner:
                         f"CLI this runner can drive with a prompt. Run it directly: "
                         f"python3 {provider_name} --pr {pr_ref}"
                     ),
-                    request_payload=request_payload,
-                    requests_dir=self._requests_dir,
-                    results_dir=self._results_dir,
-                    state_dir=self._state_dir,
                 )
             else:
                 binary = provider_name
                 if shutil.which(binary) is None:
-                    return _rec.record_not_executable(
-                        gate=gate, pr_number=pr_number, pr_id=pr_id,
+                    return self._not_executable(
+                        gate=gate, pr_number=pr_number, pr_id=pr_id, request_payload=request_payload,
                         reason="provider_not_installed",
                         reason_detail=f"{binary} binary not found in PATH",
-                        request_payload=request_payload,
-                        requests_dir=self._requests_dir,
-                        results_dir=self._results_dir,
-                        state_dir=self._state_dir,
                     )
         else:
             binary = GATE_BINARIES.get(gate, "")
@@ -542,6 +525,37 @@ class GateRunner:
             pr_number=pr_number, pr_id=pr_id, request_payload=request_payload,
         )
 
+    def _not_executable(
+        self, *, gate: str, pr_number: Optional[int], pr_id: str,
+        request_payload: Dict[str, Any], reason: str, reason_detail: str,
+    ) -> Dict[str, Any]:
+        """Book ``gate`` ``not_executable`` with ``reason`` in this runner's own stores (GATE-4/9)."""
+        return _rec.record_not_executable(
+            gate=gate, pr_number=pr_number, pr_id=pr_id,
+            reason=reason,
+            reason_detail=reason_detail,
+            request_payload=request_payload,
+            requests_dir=self._requests_dir,
+            results_dir=self._results_dir,
+            state_dir=self._state_dir,
+        )
+
+    def _refuse_if_switched_off(
+        self, gate: str, *, pr_number: Optional[int], pr_id: str, request_payload: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """The provider switch's refusal for ``gate``, booked; ``None`` when it may run.
+
+        Decided fresh, with the gate name as the identifier. An unregistered
+        gate is never refused here (``gate_recorder.gate_switch_refusal``).
+        """
+        refusal = _rec.gate_switch_refusal(gate, consumer=_SWITCH_CONSUMER, state_dir=self._state_dir)
+        if refusal is None:
+            return None
+        return self._record_switched_off(
+            gate=gate, pr_number=pr_number, pr_id=pr_id,
+            detail=refusal.detail(), request_payload=request_payload,
+        )
+
     def _record_switched_off(
         self, *, gate: str, pr_number: Optional[int], pr_id: str, detail: str,
         request_payload: Dict[str, Any],
@@ -557,14 +571,9 @@ class GateRunner:
         log.warning(
             "gate_runner: %s not launched for pr=%s -- %s", gate, pr_id or pr_number, detail,
         )
-        return _rec.record_not_executable(
-            gate=gate, pr_number=pr_number, pr_id=pr_id,
-            reason=_rec.PROVIDER_SWITCHED_OFF_REASON,
-            reason_detail=detail,
-            request_payload=request_payload,
-            requests_dir=self._requests_dir,
-            results_dir=self._results_dir,
-            state_dir=self._state_dir,
+        return self._not_executable(
+            gate=gate, pr_number=pr_number, pr_id=pr_id, request_payload=request_payload,
+            reason=_rec.PROVIDER_SWITCHED_OFF_REASON, reason_detail=detail,
         )
 
     def _resolve_prompt(
@@ -823,18 +832,10 @@ class GateRunner:
                 "checkout during dispatch: %s",
                 gate, pr_id or pr_number, main_checkout_drift,
             )
-            return _rec.record_failure(
-                gate=gate, pr_number=pr_number, pr_id=pr_id,
-                result={
-                    "reason": "harness_lane_touched_main_checkout",
-                    "reason_detail": main_checkout_drift,
-                    "duration_seconds": time.monotonic() - _start,
-                    "partial_output_lines": len(report_text.splitlines()) if report_text else 0,
-                    "runner_pid": os.getpid(),
-                },
-                request_payload=request_payload,
-                requests_dir=self._requests_dir,
-                results_dir=self._results_dir,
+            return self._record_lane_failure(
+                gate=gate, pr_number=pr_number, pr_id=pr_id, request_payload=request_payload,
+                reason="harness_lane_touched_main_checkout", reason_detail=main_checkout_drift,
+                started=_start, output_lines=len(report_text.splitlines()) if report_text else 0,
             )
 
         # provider-schakelaar C: the lane refused the call because the family is switched
@@ -849,18 +850,10 @@ class GateRunner:
             )
 
         if dispatch_exc is not None:
-            return _rec.record_failure(
-                gate=gate, pr_number=pr_number, pr_id=pr_id,
-                result={
-                    "reason": "harness_lane_dispatch_error",
-                    "reason_detail": str(dispatch_exc),
-                    "duration_seconds": time.monotonic() - _start,
-                    "partial_output_lines": 0,
-                    "runner_pid": os.getpid(),
-                },
-                request_payload=request_payload,
-                requests_dir=self._requests_dir,
-                results_dir=self._results_dir,
+            return self._record_lane_failure(
+                gate=gate, pr_number=pr_number, pr_id=pr_id, request_payload=request_payload,
+                reason="harness_lane_dispatch_error", reason_detail=str(dispatch_exc),
+                started=_start, output_lines=0,
             )
 
         # OI-1748: the dispatcher can also fail WITHOUT raising. It returns
@@ -896,21 +889,14 @@ class GateRunner:
         # guarantee avoids a second, weaker half-check in the shared path.
         no_response_reason = _lifted_harness_lane_failure_reason(report_text)
         if no_response_reason:
-            return _rec.record_failure(
-                gate=gate, pr_number=pr_number, pr_id=pr_id,
-                result={
-                    "reason": "harness_lane_no_model_response",
-                    "reason_detail": (
-                        f"{gate} report carries failure_reason in its frontmatter "
-                        f"(spawn layer failed before the model ran): {no_response_reason}"
-                    ),
-                    "duration_seconds": time.monotonic() - _start,
-                    "partial_output_lines": len(report_text.splitlines()),
-                    "runner_pid": os.getpid(),
-                },
-                request_payload=request_payload,
-                requests_dir=self._requests_dir,
-                results_dir=self._results_dir,
+            return self._record_lane_failure(
+                gate=gate, pr_number=pr_number, pr_id=pr_id, request_payload=request_payload,
+                reason="harness_lane_no_model_response",
+                reason_detail=(
+                    f"{gate} report carries failure_reason in its frontmatter "
+                    f"(spawn layer failed before the model ran): {no_response_reason}"
+                ),
+                started=_start, output_lines=len(report_text.splitlines()),
             )
 
         # OI-1753: the vangnet below the failure_reason check above. Some
@@ -942,23 +928,16 @@ class GateRunner:
                 _, report_body = extract_frontmatter(report_text)
             except SchemaViolation:
                 report_body = report_text
-            return _rec.record_failure(
-                gate=gate, pr_number=pr_number, pr_id=pr_id,
-                result={
-                    "reason": "harness_lane_exit_nonzero",
-                    "reason_detail": (
-                        f"{gate} report carries exit_code={exit_code} in its "
-                        "frontmatter with no failure_reason (the provider/model "
-                        f"layer reported the failure after the spawn started): "
-                        f"{_tail(report_body, _REASON_DETAIL_TAIL_CHARS)}"
-                    ),
-                    "duration_seconds": time.monotonic() - _start,
-                    "partial_output_lines": len(report_text.splitlines()),
-                    "runner_pid": os.getpid(),
-                },
-                request_payload=request_payload,
-                requests_dir=self._requests_dir,
-                results_dir=self._results_dir,
+            return self._record_lane_failure(
+                gate=gate, pr_number=pr_number, pr_id=pr_id, request_payload=request_payload,
+                reason="harness_lane_exit_nonzero",
+                reason_detail=(
+                    f"{gate} report carries exit_code={exit_code} in its "
+                    "frontmatter with no failure_reason (the provider/model "
+                    f"layer reported the failure after the spawn started): "
+                    f"{_tail(report_body, _REASON_DETAIL_TAIL_CHARS)}"
+                ),
+                started=_start, output_lines=len(report_text.splitlines()),
             )
 
         return _art.materialize_artifacts(
@@ -967,6 +946,29 @@ class GateRunner:
             duration_seconds=time.monotonic() - _start,
             requests_dir=self._requests_dir, results_dir=self._results_dir,
             reports_dir=self._reports_dir,
+        )
+
+    def _record_lane_failure(
+        self, *, gate: str, pr_number: Optional[int], pr_id: str, request_payload: Dict[str, Any],
+        reason: str, reason_detail: str, started: float, output_lines: int,
+    ) -> Dict[str, Any]:
+        """Book a harness-lane execution failure for ``gate`` (``unavailable``, never ``failed``).
+
+        ``reason`` is one of the lane's ``gate_recorder.EXECUTION_FAILURE_REASONS``;
+        the duration runs from ``started`` to now.
+        """
+        return _rec.record_failure(
+            gate=gate, pr_number=pr_number, pr_id=pr_id,
+            result={
+                "reason": reason,
+                "reason_detail": reason_detail,
+                "duration_seconds": time.monotonic() - started,
+                "partial_output_lines": output_lines,
+                "runner_pid": os.getpid(),
+            },
+            request_payload=request_payload,
+            requests_dir=self._requests_dir,
+            results_dir=self._results_dir,
         )
 
     # Vertex AI wrappers — stay here so tests can patch gate_runner.subprocess.run
@@ -1253,9 +1255,7 @@ class GateRunner:
         family raises ``ProviderDisabledError`` without starting anything.
         ``_run_subprocess_path`` books that as ``provider_switched_off``.
         """
-        provider_switch.require(
-            gate, consumer=_SWITCH_CONSUMER, project_id=_rec.switch_project_id(self._state_dir),
-        )
+        provider_switch.require(gate, consumer=_SWITCH_CONSUMER, project_id=_rec.switch_project_id(self._state_dir))
         cmd = self._build_gate_cmd(gate, binary, request_payload)
         start = time.monotonic()
         try:

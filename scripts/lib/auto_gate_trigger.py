@@ -190,6 +190,37 @@ def _trigger_gate(pr_number: int, branch: str, gate_name: str) -> str:
         return FAILED
 
 
+def _trigger_each_gate(
+    pr_number: int, branch: str, gates: List[str], dispatch_id: Optional[str],
+) -> Dict[str, List[str]]:
+    """Trigger every gate in ``gates`` in order; the gate names per outcome.
+
+    Each outcome is also logged to the governance audit when that module is
+    importable. An audit failure never blocks the trigger flow.
+    """
+    by_outcome: Dict[str, List[str]] = {TRIGGERED: [], FAILED: [], SWITCHED_OFF: []}
+    try:
+        from governance_audit import log_gate_result as _log_gate_result  # deferred: optional audit dependency
+    except ImportError:
+        _log_gate_result = None  # type: ignore[assignment]
+
+    for gate_name in gates:
+        outcome = _trigger_gate(pr_number, branch, gate_name)
+        by_outcome[outcome].append(gate_name)
+        if _log_gate_result is not None:
+            try:
+                _log_gate_result(
+                    gate=gate_name,
+                    pr_number=pr_number,
+                    status=outcome,
+                    findings_count=0,
+                    dispatch_id=dispatch_id,
+                )
+            except Exception:  # vnx-silent-except: audit must never block gate trigger flow
+                pass
+    return by_outcome
+
+
 def _log_auto_gate_event(data_dir: Path, record: Dict[str, Any]) -> None:
     events_dir = data_dir / "events"
     events_dir.mkdir(parents=True, exist_ok=True)
@@ -298,31 +329,10 @@ def trigger_gates_if_feature_complete(
     logger.info("Using PR #%d for gate triggers", pr_number)
 
     # 5. Load required gate stack and trigger each
-    gates = _load_required_gates()
-    triggered_gates: List[str] = []
-    failed_gates: List[str] = []
-    switched_off_gates: List[str] = []
-    by_outcome = {TRIGGERED: triggered_gates, FAILED: failed_gates, SWITCHED_OFF: switched_off_gates}
-
-    try:
-        from governance_audit import log_gate_result as _log_gate_result  # noqa: PLC0415
-    except ImportError:
-        _log_gate_result = None  # type: ignore[assignment]
-
-    for gate_name in gates:
-        outcome = _trigger_gate(pr_number, branch, gate_name)
-        by_outcome[outcome].append(gate_name)
-        if _log_gate_result is not None:
-            try:
-                _log_gate_result(
-                    gate=gate_name,
-                    pr_number=pr_number,
-                    status=outcome,
-                    findings_count=0,
-                    dispatch_id=dispatch_id,
-                )
-            except Exception:
-                pass  # audit must never block gate trigger flow
+    by_outcome = _trigger_each_gate(pr_number, branch, _load_required_gates(), dispatch_id)
+    triggered_gates = by_outcome[TRIGGERED]
+    failed_gates = by_outcome[FAILED]
+    switched_off_gates = by_outcome[SWITCHED_OFF]
 
     # 6. Log event
     event: Dict[str, Any] = {
