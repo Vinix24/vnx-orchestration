@@ -84,6 +84,89 @@ def resolve_data_root(project_dir) -> Path:
     return _resolve_data_root(Path(project_dir))
 
 
+class ProjectStoreError(ValueError):
+    """An explicit --project-id cannot be served without reading another project's store."""
+
+
+def resolve_project_state_dir(
+    project_dir,
+    project_id: Optional[str] = None,
+    project_dir_explicit: bool = False,
+) -> Path:
+    """State dir for a CLI command, honouring an explicit ``--project-id`` (ADR-007).
+
+    Without ``project_id`` this is the old behaviour: the store of ``project_dir``.
+    With one, the store is that project's, resolved through the supported chain
+    (``vnx_paths.resolve_project_data_root``: explicit override, ``VNX_DATA_HOME``,
+    ``~/.vnx-data/<id>``), never the store of the directory the command runs in.
+
+    Refusals, each naming both projects (``ProjectStoreError``):
+      * ``project_dir_explicit`` and that directory belongs to another project;
+      * a configured override store (``VNX_DATA_DIR``) that is the central or
+        ``VNX_DATA_HOME`` store of another project.
+    The default ``--project-dir .`` is never refused: it only tells where the
+    command was started.
+    """
+    root = Path(project_dir).expanduser().resolve()
+    if not project_id:
+        return resolve_data_root(root) / "state"
+    ensure_engine_on_path()
+    import vnx_paths
+
+    if not _PROJECT_ID_RE.match(project_id):
+        raise ProjectStoreError(
+            f"invalid --project-id {project_id!r}: must match {_PROJECT_ID_RE.pattern}"
+        )
+    # The directory's own identity only (marker, git remote): an ambient
+    # VNX_PROJECT_ID must not make a directory "belong" to a project it does not.
+    dir_pid = _dir_project_id(root)
+    if project_dir_explicit and dir_pid and dir_pid != project_id:
+        raise ProjectStoreError(
+            f"--project-id {project_id!r} does not match --project-dir {str(root)!r}, "
+            f"which belongs to project {dir_pid!r}; refusing to pick a store"
+        )
+    store = vnx_paths.resolve_project_data_root(
+        project_id, root if dir_pid == project_id else None
+    )
+    owner = _override_owner(store)
+    if owner and owner != project_id:
+        raise ProjectStoreError(
+            f"--project-id {project_id!r} but the configured store {str(store)!r} "
+            f"belongs to project {owner!r}; refusing to read it"
+        )
+    return store / "state"
+
+
+def _dir_project_id(root: Path) -> Optional[str]:
+    """Project a directory belongs to by its own signals: nearest marker, else git remote."""
+    for ancestor in (root, *root.parents):
+        marker_pid = read_marker_project_id(ancestor)
+        if marker_pid:
+            return marker_pid
+    import vnx_paths
+
+    return vnx_paths._project_id_from_git_remote(root)
+
+
+def _override_owner(store: Path) -> Optional[str]:
+    """Project that a configured ``VNX_DATA_DIR`` override names, else None.
+
+    Only a store directly under ``~/.vnx-data`` or ``$VNX_DATA_HOME`` names its
+    owner (the directory name is the project_id there). Any other path carries
+    no identity and is taken as the operator's choice.
+    """
+    import os
+
+    if os.environ.get("VNX_DATA_DIR_EXPLICIT") != "1" or not os.environ.get("VNX_DATA_DIR"):
+        return None
+    parents = {(Path.home() / ".vnx-data").resolve()}
+    if os.environ.get("VNX_DATA_HOME"):
+        parents.add(Path(os.environ["VNX_DATA_HOME"]).expanduser().resolve())
+    if store.parent in parents and _PROJECT_ID_RE.match(store.name):
+        return store.name
+    return None
+
+
 def slugify_project_id(name: str) -> Optional[str]:
     """Derive a valid project_id (``^[a-z][a-z0-9-]{1,31}$``) from a free name.
 

@@ -601,7 +601,7 @@ def test_negative_control_regressed_resolver_would_be_caught(tmp_path, isolated_
 
     monkeypatch.setenv("VNX_DATA_DIR", str(decoy_dir))  # stray, unguarded (no EXPLICIT flag)
 
-    def _regressed_resolve_state_dir(project_dir):
+    def _regressed_resolve_state_dir(project_dir, *_args, **_kwargs):
         env_val = os.environ.get("VNX_DATA_DIR")
         if env_val:
             return Path(env_val) / "state"

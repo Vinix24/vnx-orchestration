@@ -35,13 +35,23 @@ from typing import Any, Callable
 from vnx_cli import _engine
 
 
-def resolve_state_dir(project_dir: str | Path) -> Path:
+def resolve_state_dir(
+    project_dir: str | Path,
+    project_id: str | None = None,
+    project_dir_explicit: bool = False,
+) -> Path:
     """Central data root for planning state — matches ``vnx track``/``vnx status``.
 
     NOT ``planning_cli._resolve_state_dir`` (that resolves the repo-local
-    ``.vnx-data/state`` degraded path).
+    ``.vnx-data/state`` degraded path). An explicit ``project_id`` selects that
+    project's store (see ``_engine.resolve_project_state_dir``); a store that
+    would belong to another project exits 2 naming both.
     """
-    return _engine.resolve_data_root(Path(project_dir).resolve()) / "state"
+    try:
+        return _engine.resolve_project_state_dir(project_dir, project_id, project_dir_explicit)
+    except _engine.ProjectStoreError as exc:
+        print(f"  Error: {exc}", file=sys.stderr)
+        sys.exit(2)
 
 
 def resolve_project_id(args: Any) -> str:
@@ -75,7 +85,13 @@ def _require_planning_cli():
 
 def _prep(args: Any) -> None:
     """Bind the tenant-safe state_dir + resolved project_id onto args, in place."""
-    args.state_dir = str(resolve_state_dir(args.project_dir))
+    args.state_dir = str(
+        resolve_state_dir(
+            args.project_dir,
+            getattr(args, "project_id", None),
+            project_dir_explicit=args.project_dir != ".",
+        )
+    )
     args.project_id = resolve_project_id(args)
 
 
