@@ -45,11 +45,15 @@ A table that does not exist is not created: 0034 adds columns and indexes, not
 tables. A store without one of these tables (a partial fixture) passes over it.
 
 No down script. The forward shape is additive and the code before it (v1.7.1)
-writes into it unchanged, its INSERTs taking the store id from the default. A
-generic down cannot be correct for every shape: on the sales-copilot shape
-project_id is part of the composite natural keys, so DROP COLUMN refuses, and
-on fresh and pacompany-engine stores some ``ux_<table>_pid`` indexes predate
-0034. The rollback path is the pre-0034 backup of the store.
+writes into it unchanged, its INSERTs taking the store id from the default.
+That holds until tenant stamping (``vnx migrate``, W1 phases 1-3) runs on the
+store: it then rebuilds the seven to composite natural keys with project_id
+NOT NULL and no default, and v1.7.1's INSERTs fail on NOT NULL (measured on tmp
+copies, 2026-10-15). A generic down cannot be correct for every shape: on the
+sales-copilot shape project_id is part of the composite natural keys, so DROP
+COLUMN refuses, and on fresh and pacompany-engine stores some
+``ux_<table>_pid`` indexes predate 0034. The rollback path is the pre-0034
+backup of the store.
 
 Idempotent: skipped entirely when user_version >= 34; every step is itself a
 no-op on a store that already carries its result.

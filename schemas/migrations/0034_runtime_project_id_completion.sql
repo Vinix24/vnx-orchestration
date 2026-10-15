@@ -38,8 +38,9 @@
 -- failed post-condition rolls back and leaves user_version at 33.
 --
 -- No down migration: see the runner's docstring. The rollback path is the
--- pre-0034 backup of the store; code at v1.7.1 writes into the 0034 shape
--- unchanged.
+-- pre-0034 backup of the store. Code at v1.7.1 writes into the 0034 shape
+-- unchanged, until tenant stamping (vnx migrate) removes the default from the
+-- seven; after that its INSERTs fail on NOT NULL.
 --
 -- Target DB:  runtime_coordination.db
 -- Applied by: scripts/lib/migrations/apply_0034.py (via auto_apply.py)

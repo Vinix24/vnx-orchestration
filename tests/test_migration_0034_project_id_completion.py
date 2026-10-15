@@ -51,6 +51,7 @@ from incident_taxonomy import IncidentClass, Severity
 from migrations import auto_apply as auto_apply_mod
 from migrations.apply_0015 import runtime_tables_from_sql
 from migrations.auto_apply import auto_apply
+import tenant_stamping
 from project_scope import TenantUnresolved
 from recommendation_tracker import RecommendationTracker
 from workflow_incident_handler import record_escalation
@@ -624,12 +625,29 @@ _WRITER_CASES = [
 ]
 
 
-@pytest.mark.parametrize("shape, writer", _WRITER_CASES)
-def test_writer_stamps_the_store_id(make_store, shape, writer):
+def _make_stamped_store(make_store, pid: str) -> Path:
+    """The vnx-dev shape after 0034 and after the tenant stamping that
+    ``vnx migrate`` runs (W1 phases 1-3). Measured on tmp copies of
+    mission-control, seocrawler-v2, pacompany-engine and website-vincentvandeth
+    (2026-10-15): it rebuilds the seven to composite natural keys with
+    project_id NOT NULL and no default, the sales-copilot shape."""
+    db = _make_store_and_migrate(make_store, "vnx-dev", pid)
+    tenant_stamping.run_three_phase_migration_on_db(db, pid, db_label="RC")
+    conn = sqlite3.connect(str(db))
+    try:
+        defaults = {
+            t: [r[4] for r in conn.execute(f"PRAGMA table_info({t})") if r[1] == "project_id"]
+            for t in SEVEN
+        }
+    finally:
+        conn.close()
+    assert defaults == {t: [None] for t in SEVEN}, defaults
+    return db
+
+
+def _assert_writer_stamps(db: Path, writer: str, pid: str) -> None:
     """The writer leaves a row, and the row names the store. What the writer
     raised on the way is part of the failure message, not the failure."""
-    pid = "sales-copilot" if shape == "sales-copilot" else "vnx-dev"
-    db = _make_store_and_migrate(make_store, shape, pid)
     driver, query = WRITERS[writer]
     raised = None
     try:
@@ -648,11 +666,31 @@ def test_writer_stamps_the_store_id(make_store, shape, writer):
     )
 
 
+@pytest.mark.parametrize("shape, writer", _WRITER_CASES)
+def test_writer_stamps_the_store_id(make_store, shape, writer):
+    pid = "sales-copilot" if shape == "sales-copilot" else "vnx-dev"
+    _assert_writer_stamps(_make_store_and_migrate(make_store, shape, pid), writer, pid)
+
+
+@pytest.mark.parametrize(
+    "writer", [w for w in WRITERS if w not in ON_CONFLICT_SINGLE_STORE_KEY]
+)
+def test_writer_stamps_the_store_id_after_tenant_stamping(make_store, writer):
+    """Tenant stamping drops the default 0034 gave the seven; a writer that
+    relied on it would fail on NOT NULL there."""
+    _assert_writer_stamps(_make_stamped_store(make_store, "proj-a"), writer, "proj-a")
+
+
+@pytest.mark.parametrize("shape", ["sales-copilot", "stamped"])
 @pytest.mark.parametrize("writer", ON_CONFLICT_SINGLE_STORE_KEY)
-def test_on_conflict_writer_names_a_single_store_key_on_the_sales_copilot_shape(make_store, writer):
+def test_on_conflict_writer_names_a_single_store_key(make_store, shape, writer):
     """Open item, not fixed here: the conflict target lacks project_id, which
-    the sales-copilot shape's UNIQUE carries. The stamp is not the cause."""
-    db = _make_store_and_migrate(make_store, "sales-copilot", "sales-copilot")
+    the composite UNIQUE of the sales-copilot shape carries. Tenant stamping
+    gives every store that shape after 0034. The stamp is not the cause."""
+    if shape == "stamped":
+        db = _make_stamped_store(make_store, "proj-a")
+    else:
+        db = _make_store_and_migrate(make_store, "sales-copilot", "sales-copilot")
     driver, _query = WRITERS[writer]
     with pytest.raises(sqlite3.OperationalError, match="ON CONFLICT clause does not match"):
         driver(db.parent)
