@@ -386,3 +386,112 @@ def test_nightly_script_registers_the_phase_through_run_phase():
     assert 'run_phase "Phase 1.1" "$PHASE_TIMEOUT" content_boundary_check.py' in text
     assert text.index("Phase 1.1") > text.index('run_phase "Phase 1" ')
     assert text.index('run_phase "Phase 1.1"') < text.index('run_phase "Phase 1.5"')
+
+
+# ---------------------------------------------------------------------------
+# Fix round 2 (PR #2061): incomplete scan, canary in system prompt, any external model, ledger first
+# ---------------------------------------------------------------------------
+
+def _run_at(world: World, boundary, now: float, **kw) -> dict:
+    return cbc.run_check(home=world.home, stores_root=world.stores, data_dir=world.data,
+                         state_dir=world.state, boundary=boundary, now=now, **kw)
+
+
+def test_unreadable_transcript_is_not_ok_keeps_checkpoint_and_is_rescanned(world, monkeypatch):
+    boundary = world.write_boundary()
+    first = _run_at(world, boundary, NOW - 86400, since=SINCE - 86400)
+    assert first["status"] == "ok"
+    kept = cbc.read_previous_scanned_through(world.data)
+    assert kept == int(NOW - 86400)
+
+    leak = world.lane("glm-harness", "late-leak", [assistant("z-ai/glm-5.2"), user_text(f"leak {TOKEN}")],
+                      mtime=NOW - 600)
+    real_scan = cbc.scan_claude_transcript
+
+    def flaky(path, ctx):
+        if path == leak:
+            raise PermissionError("denied")
+        return real_scan(path, ctx)
+
+    monkeypatch.setattr(cbc, "scan_claude_transcript", flaky)
+    second = _run_at(world, boundary, NOW)
+    assert second["details"]["unreadable_files"] == 1
+    assert second["status"] != "ok"
+    assert second["details"]["scanned_through"] == kept
+    assert cbc.read_previous_scanned_through(world.data) == kept
+    (check,) = vnx_doctor.check_content_boundary_beacon(_doctor_paths(world))
+    assert check.status != vnx_doctor.PASS
+
+    monkeypatch.setattr(cbc, "scan_claude_transcript", real_scan)
+    third = _run_at(world, boundary, NOW + 3600)
+    assert third["details"]["since"] == kept
+    assert third["details"]["gating_total"] == 1
+    assert third["details"]["historic_total"] == 0
+    assert third["status"] == "fail"
+
+
+def test_doctor_fails_on_an_ok_beacon_that_reports_unreadable_files(world):
+    _write_beacon(world, "ok", gating_total=0, canary_armed=True, unreadable_files=2)
+    (check,) = vnx_doctor.check_content_boundary_beacon(_doctor_paths(world))
+    assert check.status == vnx_doctor.FAIL
+
+
+def test_canary_in_a_kimi_system_prompt_gates(world):
+    boundary = world.write_boundary()
+    world.kimi("sys-canary", [
+        {"role": "_system_prompt", "content": f"instructions {TOKEN}"},
+        {"role": "user", "content": "hello"},
+    ])
+    result = world.run(boundary)
+    assert result["details"]["gating_total"] >= 1
+    assert result["details"]["counts"]["canary"] == {"kimi": 1}
+    assert result["status"] == "fail"
+
+
+def test_kimi_system_prompt_path_name_is_still_only_reported(world):
+    boundary = world.write_boundary()
+    world.kimi("sys-path", [
+        {"role": "_system_prompt", "content": f"see {world.client_file}"},
+        {"role": "user", "content": "hello"},
+    ])
+    result = world.run(boundary)
+    assert result["details"]["gating_total"] == 0
+    assert result["details"]["kimi_system_prompt_reported"] == 1
+
+
+def test_later_external_model_in_a_claude_transcript_sets_the_lane(world):
+    boundary = world.write_boundary()
+    world.claude("mixed", [assistant("claude-sonnet-5-5"), assistant("deepseek-v4-pro"),
+                           user_text(f"leak {TOKEN}")])
+    world.claude("pure-claude", [assistant("claude-sonnet-5-5"), user_text(f"leak {TOKEN}")])
+    result = world.run(boundary)
+    assert result["details"]["counts"]["canary"] == {"deepseek": 1}
+    assert result["details"]["scanned"]["claude_projects"] == 1
+
+
+def test_two_external_lanes_in_one_transcript_count_once_per_lane(world):
+    boundary = world.write_boundary()
+    world.claude("two", [assistant("deepseek-v4-pro"), assistant("z-ai/glm-5.2"), user_text(f"leak {TOKEN}")])
+    result = world.run(boundary)
+    assert result["details"]["counts"]["canary"] == {"deepseek": 1, "glm": 1}
+
+
+def test_failed_ledger_append_does_not_advance_the_beacon(world, monkeypatch):
+    boundary = world.write_boundary()
+    world.claude("leak", [assistant("deepseek-v4-pro"), user_text(f"leak {TOKEN}")])
+    real_open = os.open
+
+    def failing_open(path, *a, **k):
+        if str(path).endswith(cbc.LEDGER_NAME):
+            raise OSError("ledger unavailable")
+        return real_open(path, *a, **k)
+
+    monkeypatch.setattr(os, "open", failing_open)
+    with pytest.raises(OSError):
+        world.run(boundary)
+    monkeypatch.setattr(os, "open", real_open)
+    assert not world.beacon_path().exists()
+    assert cbc.read_previous_scanned_through(world.data) is None
+    retry = world.run(boundary)
+    assert retry["details"]["gating_total"] == 1
+    assert len(world.ledger_path().read_text().splitlines()) == 1

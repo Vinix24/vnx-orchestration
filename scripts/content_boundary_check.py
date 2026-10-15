@@ -79,10 +79,17 @@ def _strings(value: Any) -> Iterator[str]:
 
 @dataclasses.dataclass
 class Transcript:
-    """What one transcript showed: the signals it raised and the lane it belongs to."""
+    """What one transcript showed: the signals it raised and the lanes it belongs to.
+
+    A harness-config or kimi transcript has one lane. A ``.claude/projects`` transcript can
+    hold responses of several models: it counts once for every external lane seen in any
+    assistant entry, so an external-lane signal is never dropped because a Claude response
+    came first. A pure Claude transcript has no lane and stays out.
+    """
 
     session_id: str
     lane: Optional[str] = None
+    lanes: set = dataclasses.field(default_factory=set)
     signals: set = dataclasses.field(default_factory=set)
     system_reported: bool = False
 
@@ -164,7 +171,6 @@ def _read_lines(path: Path) -> Iterator[str]:
 def scan_claude_transcript(path: Path, ctx: Context) -> Transcript:
     result = Transcript(session_id=path.stem)
     token = ctx.boundary.canary_token
-    first_model_seen = False
     for line in _read_lines(path):
         if token and token in line:
             result.signals.add("canary")
@@ -174,12 +180,11 @@ def scan_claude_transcript(path: Path, ctx: Context) -> Transcript:
             continue
         if not isinstance(record, dict):
             continue
-        if not first_model_seen and record.get("type") == "assistant":
+        if record.get("type") == "assistant":
             message = record.get("message")
-            model = message.get("model") if isinstance(message, dict) else None
-            if model:
-                first_model_seen = True
-                result.lane = _model_lane(model)
+            lane = _model_lane(message.get("model")) if isinstance(message, dict) else None
+            if lane:
+                result.lanes.add(lane)
         if "restricted_cwd" not in result.signals and _cwd_restricted(record.get("cwd"), ctx):
             result.signals.add("restricted_cwd")
         attachment = record.get("attachment")
@@ -204,12 +209,12 @@ def scan_kimi_transcript(path: Path, ctx: Context) -> Transcript:
         except ValueError:
             record = None
         role = record.get("role") if isinstance(record, dict) else None
+        if token and token in line:
+            result.signals.add("canary")
         if role == "_system_prompt":
             if _names_restricted_path("\n".join(_strings(record.get("content"))), ctx):
                 result.system_reported = True
             continue
-        if token and token in line:
-            result.signals.add("canary")
         if role in ("user", "assistant") and "restricted_access" not in result.signals:
             text = "\n".join(_strings(record.get("content")))
             calls = record.get("tool_calls")
@@ -327,16 +332,21 @@ def run_check(*, home: Path, stores_root: Path, data_dir: Path, state_dir: Path,
                 unreadable += 1
                 continue
             if root == ROOT_LANE:
-                found.lane = lane_dir
-            elif root == ROOT_CLAUDE and found.lane is None:
-                continue
+                lanes = [lane_dir]
+            elif root == ROOT_CLAUDE:
+                lanes = sorted(found.lanes)
+                if not lanes:
+                    continue
+            else:
+                lanes = [found.lane or "unknown"]
             scanned[root] += 1
             if root == ROOT_KIMI:
                 found.signals &= set(KIMI_SIGNALS)
                 if found.system_reported and in_window:
                     kimi_system_reported += 1
             for signal in sorted(found.signals):
-                _bump(counts if in_window else historic, signal, found.lane or "unknown")
+                for lane in lanes:
+                    _bump(counts if in_window else historic, signal, lane)
                 if in_window and len(sessions[signal]) < SESSION_ID_LIMIT:
                     sessions[signal].append(found.session_id)
 
@@ -357,7 +367,14 @@ def run_check(*, home: Path, stores_root: Path, data_dir: Path, state_dir: Path,
         "since": int(since),
         "scanned_through": int(now),
     }
-    status = "fail" if (gating > 0 or not boundary.configured) else "ok"
+    # An incomplete scan (a transcript that could not be read) is not ok and does not move the
+    # checkpoint: the next run starts from the same ``since`` and sees that transcript again.
+    incomplete = unreadable > 0
+    if incomplete:
+        details["scan_incomplete"] = True
+        details["scanned_through"] = int(since)
+        details["scanned_through_kept"] = "previous_since_because_unreadable_files"
+    status = "fail" if (gating > 0 or incomplete or not boundary.configured) else "ok"
 
     if write:
         _write_outputs(data_dir, state_dir, status, details, now)
@@ -366,8 +383,6 @@ def run_check(*, home: Path, stores_root: Path, data_dir: Path, state_dir: Path,
 
 def _write_outputs(data_dir: Path, state_dir: Path, status: str, details: Dict[str, Any], now: float) -> None:
     from health_beacon import HealthBeacon
-    HealthBeacon(Path(data_dir), "content_boundary",
-                 expected_interval_seconds=BEACON_INTERVAL_SECONDS).heartbeat_strict(status, details)
     ledger = Path(state_dir) / LEDGER_NAME
     ledger.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps({"ts": int(now), "status": status, "details": details}, sort_keys=True) + "\n"
@@ -376,6 +391,11 @@ def _write_outputs(data_dir: Path, state_dir: Path, status: str, details: Dict[s
         os.write(fd, line.encode("utf-8"))
     finally:
         os.close(fd)
+    # The ledger is primary (ADR-005): the beacon, and the checkpoint it carries, only move
+    # after the append succeeded. A failed append raises, the run exits non-zero and the old
+    # checkpoint stays, so the next run re-scans the same window.
+    HealthBeacon(Path(data_dir), "content_boundary",
+                 expected_interval_seconds=BEACON_INTERVAL_SECONDS).heartbeat_strict(status, details)
 
 
 def _summary(result: Dict[str, Any]) -> str:
@@ -383,7 +403,7 @@ def _summary(result: Dict[str, Any]) -> str:
     per_signal = {s: sum(v.values()) for s, v in d["counts"].items()}
     return (f"content_boundary status={result['status']} "
             f"configured={d['configured']} gating={d['gating_total']} {per_signal} "
-            f"historic={d['historic_total']} scanned={d['scanned']} canary_armed={d['canary_armed']}")
+            f"incomplete={d.get('scan_incomplete', False)} historic={d['historic_total']} scanned={d['scanned']} canary_armed={d['canary_armed']}")
 
 
 def main(argv: Optional[List[str]] = None) -> int:

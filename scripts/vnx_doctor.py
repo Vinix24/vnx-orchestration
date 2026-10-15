@@ -1066,8 +1066,18 @@ def check_content_boundary_beacon(paths: Dict[str, str]) -> List[CheckResult]:
 
     details = beacon.get("details") if isinstance(beacon.get("details"), dict) else {}
     status = beacon.get("status")
+    unreadable = details.get("unreadable_files")
+    incomplete = bool(details.get("scan_incomplete")) or (
+        isinstance(unreadable, int) and not isinstance(unreadable, bool) and unreadable > 0)
+    if status == "ok" and incomplete:
+        status = "ok-but-incomplete"
     if status != "ok":
-        if details.get("unconfigured"):
+        if incomplete and not details.get("gating_total"):
+            message = (f"Content boundary scan is incomplete: {unreadable if unreadable is not None else 'some'} "
+                       f"transcript(s) could not be read, so the window is not proven clean (status={status!r})")
+            fix = ("Fix the permissions of the unreadable transcript and rerun the nightly job; "
+                   "the checkpoint was kept, so the next run scans the same window again.")
+        elif details.get("unconfigured"):
             message = "Content boundary is unconfigured: no restricted roots known, nothing can be measured"
             fix = "Write the operator boundary file (see scripts/lib/content_class.py) and rerun the nightly job."
         else:
