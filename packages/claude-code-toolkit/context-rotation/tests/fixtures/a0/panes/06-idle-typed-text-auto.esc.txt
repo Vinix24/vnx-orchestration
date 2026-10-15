@@ -1,0 +1,49 @@
+
+[38;5;174m ▐[48;5;16m▛███▛█[39m[49m   [1mClaude Code[0m [38;5;246mv2.1.300[39m
+[38;5;174m▝▜[48;5;16m█████[49m█▀[39m  [38;5;246mSonnet 5.5 · Claude Max[39m
+[38;5;174m ▝▝   ▝▝ [39m  [38;5;246m<path>>/scratchpad/a0/repo[39m
+
+[38;5;246m  ⎿  SessionStart:startup says: A0-SM SessionStart
+
+[48;5;237m❯ [38;5;231mSay OK and nothing else.[39m
+[38;5;246m[49m  ⎿  UserPromptSubmit says: A0-SM UserPromptSubmit
+
+[38;5;231m⏺[39m OK
+[38;5;246m  ⎿  Stop says: A0-SM Stop[39m
+
+[38;5;246m✻[39m [38;5;246mChurned for 1s · done 7:00 PM[39m
+
+[38;5;246m[48;5;237m❯ [38;5;231mUse the Bash tool to run: sleep 12. Then create the file notes.txt containing the word x with the Write tool. Then say done.[39m
+[38;5;246m[49m  ⎿  UserPromptSubmit says: A0-SM UserPromptSubmit
+
+[39m  [38;5;246mRan [1m1[0m[38;5;246m shell command [39m
+[38;5;246m  ⎿  PreToolUse:Bash says: A0-SM PreToolUse[39m
+[38;5;246m  ⎿  PostToolUse:Bash says: A0-SM PostToolUse[39m
+
+[38;5;114m⏺[39m [1mWrite[0m(]8;id=g4dszy;file://<path>>/scratchpad/a0/repo/notes.txt\notes.txt]8;;\)
+[38;5;246m  ⎿  PreToolUse:Write says: A0-SM PreToolUse[39m
+[38;5;246m  ⎿  [39mWrote [1m1[0m line to [1mnotes.txt[0m
+     [2m[38;5;231m 1 [0m[38;5;231mx[39m
+[38;5;246m  ⎿  PostToolUse:Write says: A0-SM PostToolUse[39m
+
+[38;5;231m⏺[39m Done.
+[38;5;246m  ⎿  Stop says: A0-SM Stop[39m
+
+[38;5;246m✻[39m [38;5;246mBaked for 17s · done 7:01 PM[39m
+
+
+
+
+
+
+
+
+
+
+
+
+[38;5;244m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m❯ half typed
+[38;5;244m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  [38;5;246mSonnet 5.5 │ repo │ ⎇ master[39m
+  [38;5;220m⏵⏵ auto mode on[38;5;246m (shift+tab to cycle)[39m

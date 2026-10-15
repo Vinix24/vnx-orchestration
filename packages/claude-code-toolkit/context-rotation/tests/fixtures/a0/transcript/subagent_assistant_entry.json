@@ -1,0 +1,60 @@
+{
+ "parentUuid": "<uuid>",
+ "isSidechain": true,
+ "agentId": "<agent_id>",
+ "message": {
+  "model": "claude-sonnet-5-5",
+  "id": "<message_id>",
+  "type": "message",
+  "role": "assistant",
+  "content": [
+   {
+    "type": "text",
+    "text": "<assistant_text>"
+   }
+  ],
+  "container": null,
+  "stop_reason": null,
+  "stop_sequence": null,
+  "stop_details": null,
+  "usage": {
+   "input_tokens": 2,
+   "cache_creation_input_tokens": 58839,
+   "cache_read_input_tokens": 0,
+   "cache_creation": {
+    "ephemeral_5m_input_tokens": 58839,
+    "ephemeral_1h_input_tokens": 0
+   },
+   "output_tokens": 16,
+   "service_tier": "standard",
+   "inference_geo": "global"
+  },
+  "input_transformations": [],
+  "diagnostics": null,
+  "context_management": null
+ },
+ "wireToolInputs": {
+  "<tool_use_id>": {
+   "command": "ls",
+   "description": "List files in current directory"
+  }
+ },
+ "serverClassifierRequest": "<uuid>",
+ "apiBlockIndex": 0,
+ "requestId": "<request_id>",
+ "requestRef": "<uuid>",
+ "requestedModel": "claude-sonnet-5-5",
+ "attributionAgent": "general-purpose",
+ "type": "assistant",
+ "uuid": "<uuid>",
+ "timestamp": "<timestamp>",
+ "advisorModel": "claude-opus-5-5",
+ "effort": "medium",
+ "perTurnEffort": "medium",
+ "userType": "external",
+ "entrypoint": "cli",
+ "cwd": "<project_dir>",
+ "sessionId": "<session_id>",
+ "version": "2.1.300",
+ "gitBranch": "<branch>"
+}
