@@ -17,8 +17,8 @@ for _p in (REPO_ROOT / "scripts" / "launchd", REPO_ROOT / "scripts" / "lib", REP
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-import launchd_project_scope as lps  # noqa: E402
-from launchd_test_support import make_central_engine  # noqa: E402
+import launchd_project_scope as lps
+from launchd_test_support import make_central_engine
 
 BROKEN_XML = '<?xml version="1.0"?><plist><dict><key>Label</key><string>com.vnx.x</dict></plist>'
 PLIST_NAME = "com.vnx.gate-obligation-runner"
