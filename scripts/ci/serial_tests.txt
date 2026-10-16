@@ -27,3 +27,4 @@
 #
 # Format: one entry per line, relative to the repository root. A line starting
 # with `#` is a comment; an inline comment starts at whitespace followed by `#`.
+tests/test_zz_redrun_sleep.py  # red run (c), temporary

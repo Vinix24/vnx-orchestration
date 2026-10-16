@@ -279,6 +279,18 @@ jobs:
           set -euo pipefail
           mkdir -p "$SHADOW_EVIDENCE"
           bash "$GITHUB_WORKSPACE/scripts/ci/profile_a_pytest_args.sh" "$SHADOW_EVIDENCE/args"
+          # red run (a)+(c), temporary: narrow phase 2 to a few files.
+          python3 - "$SHADOW_EVIDENCE/args/parallel.args" "$GITHUB_WORKSPACE" \
+            tests/test_zz_redrun_xdist_only.py tests/test_observability_rework_section.py \
+            tests/test_ci_profile_classification.py <<'PY'
+          import sys
+          path, root, *files = sys.argv[1:]
+          args = open(path, "rb").read()[:-1].decode().split("\0")
+          i = args.index(root + "/tests")
+          args[i:i + 1] = [root + "/" + f for f in files]
+          open(path, "wb").write(b"".join(a.encode() + b"\0" for a in args))
+          print("narrowed parallel.args:", args[i:i + len(files)])
+          PY
           if [ -f "$SHADOW_EVIDENCE/args/serial.args" ]; then
             echo "serial_active=true" >> "$GITHUB_OUTPUT"
           else
@@ -292,7 +304,7 @@ jobs:
         id: serial
         if: ${{ !cancelled() && steps.plan.outcome == 'success' && steps.plan.outputs.serial_active == 'true' }}
         continue-on-error: true
-        timeout-minutes: 15
+        timeout-minutes: 2  # red run (c), temporary
         env:
           VNX_HOME: ${{ steps.prelude.outputs.vnx-home }}
           VNX_DATA_DIR: ${{ steps.prelude.outputs.vnx-data-dir }}
