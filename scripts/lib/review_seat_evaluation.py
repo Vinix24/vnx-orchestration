@@ -40,7 +40,10 @@ closure verifier's own: the seat's own record, a successor that answers for
 the seat, the OI-1719 obligation booking, and the OI-1624/OI-1642 independent
 peer for a confirmed absence (also after an OI-1851 partial review, which
 itself fills no seat). A reviewer fills at most one seat: the booking and the
-peer route only accept a reviewer that no other seat counts.
+peer route only accept a reviewer that no other seat counts. Every route hands
+back the exact record it accepted (``evidence_record``), and that record is
+the seat's evidence (:class:`SeatFill`): track closure, ``vnx-gate/review`` and
+``vnx pr-ready`` never look the reviewer up a second time.
 
 **Blocking always blocks.** A record on the head from a review peer rejects
 it when its decided verdict is FAIL, or when its report on disk carries a FAIL
@@ -60,6 +63,7 @@ side needs (``closure_verifier``, ``gate_status``, ``review_seats``,
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -463,10 +467,12 @@ class SeatFill:
     waiting (``action_required``); one that spoke and is still unfilled was
     judged and did not hold (``failure``).
 
-    ``record`` is the evidence track closure checks the contract hash and the
-    report of (``closure_verifier._seat_rule_checks``): the filling reviewer's
-    record on the head, or for an unfilled seat the record that answered for it
-    and did not hold; ``None`` when no record answered for the seat at all.
+    ``record`` is the seat's evidence. For a filled seat it is the exact record
+    the route accepted, so track closure checks the contract hash and the
+    report of that record (``closure_verifier._seat_rule_checks``), and
+    ``vnx-gate/review`` and ``vnx pr-ready`` read it too. For an unfilled seat
+    it is the record that answered for the seat and did not hold; ``None`` when
+    no record answered for the seat at all.
     """
 
     seat: str
@@ -589,19 +595,21 @@ def _spoke(seat: str, seated: Dict[str, SeatedRecord], filled: bool) -> bool:
     return any(entry.seat == seat and decided_verdict(entry.record) for entry in seated.values())
 
 
-def _answering_record(seat: str, reviewer: str, seated: Dict[str, SeatedRecord]) -> Optional[Dict[str, Any]]:
-    """The record track closure checks for ``seat`` (see :class:`SeatFill`).
+def _answering_record(
+    seat: str, verdict: Dict[str, Any], seated: Dict[str, SeatedRecord],
+) -> Optional[Dict[str, Any]]:
+    """The seat's evidence (see :class:`SeatFill`).
 
-    A filled seat: the filling reviewer's record on the head, the slot
-    ``closure_verifier._find_gate_result`` returns (the record ``vnx-gate/review``
-    proves and ``vnx pr-ready`` reports). An unfilled seat: of the records that
-    answer for it, one that rendered a verdict first, the seat gate's own first.
+    A filled seat: the record its route accepted, carried beside the GO
+    (``evidence_record``, ``closure_verifier._accepted``), never a second lookup
+    of the reviewer's slot. That slot can hold another record than the one a
+    booking pointed at. An unfilled seat: of the records that answer for it, one
+    that rendered a verdict first, the seat gate's own first.
     """
     from gate_status import decided_verdict
 
-    if reviewer:
-        entry = seated.get(reviewer)
-        return entry.record if entry is not None else None
+    if verdict.get("verdict") == "GO":
+        return verdict["evidence_record"]
     answering = sorted(
         (entry for entry in seated.values() if entry.seat == seat),
         key=lambda entry: (not decided_verdict(entry.record), entry.gate != seat, entry.gate),
@@ -626,18 +634,39 @@ def fill_seats(scope: SeatScope, seats: Sequence[str], seated, stated) -> Tuple[
             route=route if filled else "", message=str(verdict.get("message") or ""),
             spoke=_spoke(seat, seated, filled), evidence_via=str(verdict.get("evidence_via") or ""),
             could_fill=() if filled else could_fill(seat, _excluded(seat, seats, seated, taken)),
-            record=_answering_record(seat, reviewer, seated),
+            record=_answering_record(seat, verdict, seated),
         ))
     return tuple(fills)
 
 
+def _report_fallback(function: str, exc: Exception, fallback: str) -> None:
+    """One stderr line for a failed read, before its fallback is used: a failure is never swallowed.
+
+    The line names the function, the exception type and its message (folded
+    onto the one line), and what the fallback means for the refusal text.
+    """
+    message = " ".join(str(exc).split())
+    print(
+        f"[review_seat_evaluation] {function}: {type(exc).__name__}: {message}. Terugval: {fallback}",
+        file=sys.stderr,
+    )
+
+
 def _takeover_chain() -> List[str]:
-    """The operator's takeover chain, in order (fresh, as the request side reads it)."""
+    """The operator's takeover chain, in order (fresh, as the request side reads it).
+
+    The chain only orders a hint in a refusal text; the refusal never depends
+    on it. A failed read is reported on stderr and the chain is then empty.
+    """
     try:
         import config_runtime
 
         raw = config_runtime.get(TAKEOVER_CHAIN_KEY) or ""
-    except Exception:  # vnx-silent-except: the chain only orders a hint in a refusal text; the refusal itself never depends on it
+    except Exception as exc:
+        _report_fallback("_takeover_chain", exc, (
+            f"{TAKEOVER_CHAIN_KEY} niet gelezen; de weigering noemt per open seat alleen de seat "
+            "zelf als mogelijke vuller, zonder opvolgers uit de overnameketen"
+        ))
         raw = ""
     return [item.strip() for item in raw.split(",") if item.strip()]
 
@@ -733,12 +762,20 @@ def _filled_text(evaluation: SeatEvaluation) -> str:
 
 
 def _family_of(gate: str) -> str:
+    """The provider family the refusal's ``vnx providers on <family>`` names.
+
+    A failed lookup is reported on stderr; the gate's bare name stands in.
+    """
     try:
         import provider_switch
 
         return provider_switch.family_of(gate)
-    except Exception:  # vnx-silent-except: the family only names a command in a refusal text; an unknown gate keeps its bare name
-        return gate[:-5] if gate.endswith("_gate") else gate
+    except Exception as exc:
+        family = gate[:-5] if gate.endswith("_gate") else gate
+        _report_fallback("_family_of", exc, (
+            f"de weigering noemt `vnx providers on {family}`, afgeleid uit de kale poortnaam {gate}"
+        ))
+        return family
 
 
 def _switch_text(seat: str, gate: str, detail: str) -> str:

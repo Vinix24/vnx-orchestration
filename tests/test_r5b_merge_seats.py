@@ -26,6 +26,12 @@ hash and the report of every record that fills a seat; and for every head of thi
 ``vnx pr-ready`` says READY and ``vnx-gate/review`` says ``success`` exactly when the door
 says GO.
 
+Round 3 (codex FAIL on ``b3e2c669``): a failed read of the takeover chain or of a provider
+family is reported on stderr before its fallback is used; and closure, ``vnx-gate/review`` and
+``vnx pr-ready`` read the exact record the door's route accepted for a seat, never a second
+lookup of the reviewer's slot (codex's reproduction: a booking to a legacy glm PASS beside an
+unavailable contract-named glm record).
+
 No real provider, store or GitHub: tmp stores, ``gh`` replaced at the edge (``_query_pr``,
 ``_run_ci_gate``, ``fetch_pr_facts``, ``ci_contexts.evaluate_commit``), and every config value
 resolved with no store behind it (``review_seat_support``).
@@ -200,6 +206,18 @@ def _obligation(store, gate: str = "codex_gate") -> None:
     gate_obligations.register_obligation(
         store["state"], dispatch_id=DISPATCH, gate=gate, pr_number=PR, pr_id=PR_ID, branch=BRANCH,
     )
+
+
+def _booking(store, pointed_gate: str) -> None:
+    """The OI-1719 booking: codex_gate's obligation fulfilled by ``pointed_gate``'s legacy record."""
+    root = store["state"] / "review_gates" / "obligations"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / f"{DISPATCH}.json").write_text(json.dumps({
+        "schema_version": 1, "kind": "review_gate_obligation", "dispatch_id": DISPATCH,
+        "gate": "codex_gate", "pr_number": PR, "status": "fulfilled",
+        "reason": "fulfilled_by_takeover_evidence",
+        "result_path": str(store["results"] / f"pr-{PR}-{pointed_gate}.json"),
+    }), encoding="utf-8")
 
 
 def _json_out(capsys) -> Dict[str, Any]:
@@ -467,21 +485,11 @@ class TestEvidenceRoutes:
         assert seats["filled_by"] == {"codex_gate": "kimi_gate", "kimi_gate": "deepseek_gate"}
         assert seats["routes"] == {"codex_gate": "takeover", "kimi_gate": "takeover"}
 
-    def _booking(self, store, pointed_gate: str) -> None:
-        root = store["state"] / "review_gates" / "obligations"
-        root.mkdir(parents=True, exist_ok=True)
-        (root / f"{DISPATCH}.json").write_text(json.dumps({
-            "schema_version": 1, "kind": "review_gate_obligation", "dispatch_id": DISPATCH,
-            "gate": "codex_gate", "pr_number": PR, "status": "fulfilled",
-            "reason": "fulfilled_by_takeover_evidence",
-            "result_path": str(store["results"] / f"pr-{PR}-{pointed_gate}.json"),
-        }), encoding="utf-8")
-
     def test_booking_fills_the_seat_it_was_booked_for(self, store):
         _write(store, "codex_gate", _absent("codex_gate"))
         _write(store, "kimi_gate", _record(store, "kimi_gate"))
         _write(store, "glm_gate", _record(store, "glm_gate"))
-        self._booking(store, "glm_gate")
+        _booking(store, "glm_gate")
 
         verdict = _door(store)
 
@@ -492,7 +500,7 @@ class TestEvidenceRoutes:
     def test_booking_never_points_at_a_reviewer_another_seat_counts(self, store):
         _write(store, "codex_gate", _absent("codex_gate"))
         _write(store, "kimi_gate", _record(store, "kimi_gate"))
-        self._booking(store, "kimi_gate")
+        _booking(store, "kimi_gate")
 
         verdict = _door(store)
 
@@ -919,26 +927,32 @@ CONTRACT_HASH = "c0ffee01" + "0" * 56
 STALE_HASH = "deadbeef" + "0" * 56
 
 
-class TestClosureChecksEverySeatsEvidence:
-    def _checks(self, store, merge_record: Dict[str, Any], stack: Optional[List[str]] = None):
-        checks = closure_verifier._validate_review_evidence(
-            _contract(stack or STACK, content_hash=CONTRACT_HASH), store["results"], branch=BRANCH,
-            merge_record=merge_record,
-        )
-        return {check.name: check for check in checks}, checks
+def _closure_checks(store, merge_record: Dict[str, Any], stack: Optional[List[str]] = None):
+    checks = closure_verifier._validate_review_evidence(
+        _contract(stack or STACK, content_hash=CONTRACT_HASH), store["results"], branch=BRANCH,
+        merge_record=merge_record,
+    )
+    return {check.name: check for check in checks}, checks
 
+
+def _named(by_name: Dict[str, Any], name: str) -> "closure_verifier.CheckResult":
+    """The check called ``name``; a check closure did not run reads as status ``absent``."""
+    return by_name.get(name) or closure_verifier.CheckResult(name, "absent", "")
+
+
+class TestClosureChecksEverySeatsEvidence:
     def test_a_stale_hash_on_a_seats_own_record_fails_that_seat(self, store):
         _write(store, "codex_gate", _record(store, "codex_gate", contract_hash=STALE_HASH))
         _write(store, "kimi_gate", _record(store, "kimi_gate", contract_hash=CONTRACT_HASH))
 
-        by_name, _checks = self._checks(store, _merged(_seat_rule(STACK)))
+        by_name, _checks = _closure_checks(store, _merged(_seat_rule(STACK)))
 
         assert by_name["seat_codex_gate"].status == "PASS"
         hash_check = by_name["hash_codex_gate"]
         assert hash_check.status == "FAIL"
         assert "codex_gate" in hash_check.detail
         assert "c0ffee01" in hash_check.detail and "deadbeef" in hash_check.detail
-        assert "hash_kimi_gate" not in by_name
+        assert _named(by_name, "hash_kimi_gate").status == "PASS"
 
     def test_a_stale_hash_names_the_reviewer_that_filled_the_seat(self, store):
         _write(store, "codex_gate", _absent("codex_gate", status="not_executable", reason="quota_exceeded"))
@@ -949,18 +963,19 @@ class TestClosureChecksEverySeatsEvidence:
             store, "deepseek_gate", contract_hash=CONTRACT_HASH, **_took_over("kimi_gate"),
         ))
 
-        by_name, _checks = self._checks(store, _merged(_seat_rule(STACK)))
+        by_name, _checks = _closure_checks(store, _merged(_seat_rule(STACK)))
 
         assert by_name["seat_codex_gate"].status == "PASS"
         assert by_name["hash_codex_gate"].status == "FAIL"
         assert "kimi_gate" in by_name["hash_codex_gate"].detail
-        assert "hash_kimi_gate" not in by_name
+        assert _named(by_name, "hash_kimi_gate").status == "PASS"
+        assert "deepseek_gate" in _named(by_name, "hash_kimi_gate").detail
 
     def test_matching_hashes_pass(self, store):
         _write(store, "codex_gate", _record(store, "codex_gate", contract_hash=CONTRACT_HASH))
         _write(store, "kimi_gate", _record(store, "kimi_gate", contract_hash=CONTRACT_HASH))
 
-        by_name, checks = self._checks(store, _merged(_seat_rule(STACK)))
+        by_name, checks = _closure_checks(store, _merged(_seat_rule(STACK)))
 
         assert all(check.status == "PASS" for check in checks), [c.__dict__ for c in checks if c.status != "PASS"]
         assert by_name["report_codex_gate"].status == "PASS" and by_name["report_kimi_gate"].status == "PASS"
@@ -968,7 +983,7 @@ class TestClosureChecksEverySeatsEvidence:
     def test_a_grandfathered_merge_keeps_the_old_hash_check(self, store):
         _write(store, "codex_gate", _record(store, "codex_gate", contract_hash=STALE_HASH))
 
-        by_name, checks = self._checks(store, _merged(), stack=["codex_gate"])
+        by_name, checks = _closure_checks(store, _merged(), stack=["codex_gate"])
 
         assert by_name["hash_codex_gate"].status == "FAIL"
         assert "codex_gate receipt hash mismatch" in by_name["hash_codex_gate"].detail
@@ -980,7 +995,7 @@ class TestClosureChecksEverySeatsEvidence:
         _write(store, "kimi_gate", _record(store, "kimi_gate", contract_hash=CONTRACT_HASH))
         (store["reports"] / "codex_gate.md").unlink()
 
-        by_name, _checks = self._checks(store, _merged(_seat_rule(STACK)))
+        by_name, _checks = _closure_checks(store, _merged(_seat_rule(STACK)))
 
         assert by_name["seat_codex_gate"].status == "FAIL"
         report_check = by_name["report_codex_gate"]
@@ -1081,3 +1096,108 @@ def test_readiness_and_the_summary_say_go_exactly_when_the_door_does(store, monk
     assert door["verdict"] == door_says, door["message"]
     assert (ready.verdict == pr_readiness.VERDICT_READY) == (door["verdict"] == "GO"), ready.to_dict()
     assert (summary.conclusion == fgp.CONCLUSION_SUCCESS) == (door["verdict"] == "GO"), summary.reason
+
+
+# ---------------------------------------------------------------------------
+# Round 3 (codex FAIL on b3e2c669): a failed config read is reported, and closure checks the
+# record the route accepted
+# ---------------------------------------------------------------------------
+
+
+class TestAFailedConfigReadIsReported:
+    def test_an_unreadable_takeover_chain_keeps_its_fallback_and_says_so_on_stderr(self, store, monkeypatch, capsys):
+        import config_runtime
+
+        real_get = config_runtime.get
+
+        def get(key: str):
+            if key == "VNX_REVIEW_GATE_TAKEOVER_CHAIN":
+                raise RuntimeError("config store locked")
+            return real_get(key)
+
+        monkeypatch.setattr(config_runtime, "get", get)
+        _write(store, "codex_gate", _record(store, "codex_gate"))
+
+        verdict = _door(store)
+
+        assert verdict["verdict"] == "NO-GO"
+        assert verdict["message"].endswith("kan nog gevuld worden door: kimi_gate"), verdict["message"]
+        err = capsys.readouterr().err
+        assert "_takeover_chain" in err
+        assert "RuntimeError: config store locked" in err
+        assert "zonder opvolgers uit de overnameketen" in err
+
+    def test_an_unresolvable_family_keeps_the_bare_name_and_says_so_on_stderr(self, store, monkeypatch, capsys):
+        import provider_switch
+
+        def family_of(identifier: str) -> str:
+            raise RuntimeError("family table unreadable")
+
+        monkeypatch.setattr(provider_switch, "family_of", family_of)
+        _write(store, "codex_gate", _record(store, "codex_gate"))
+        _write(store, "kimi_gate", _absent(
+            "kimi_gate", status="not_executable", reason="provider_switched_off",
+            reason_detail="provider_switched_off: kimi_gate family=kimi",
+        ))
+
+        verdict = _door(store)
+
+        assert verdict["verdict"] == "NO-GO"
+        assert "`vnx providers on kimi`" in verdict["message"]
+        err = capsys.readouterr().err
+        assert "_family_of" in err
+        assert "RuntimeError: family table unreadable" in err
+        assert "kale poortnaam kimi_gate" in err
+
+
+def _booked_glm(store, legacy_hash: str) -> None:
+    """codex's reproduction: codex_gate booked to a legacy glm PASS, next to an unavailable contract-named glm record.
+
+    ``closure_verifier._find_gate_result`` returns the contract-named record first, so a
+    second lookup of the reviewer's slot finds the unavailable record, not the PASS the
+    booking accepted.
+    """
+    _write(store, "codex_gate", _absent("codex_gate"))
+    _write(store, "kimi_gate", _record(store, "kimi_gate", contract_hash=CONTRACT_HASH))
+    (store["results"] / f"{PR_ID}-glm_gate-contract.json").write_text(
+        json.dumps(_absent("glm_gate")), encoding="utf-8",
+    )
+    _write(store, "glm_gate", _record(store, "glm_gate", contract_hash=legacy_hash))
+    _booking(store, "glm_gate")
+
+
+class TestClosureChecksTheRecordTheRouteAccepted:
+    def test_a_stale_hash_on_the_booked_record_fails_the_seat_and_names_glm(self, store):
+        _booked_glm(store, STALE_HASH)
+
+        door = _door(store)
+        by_name, checks = _closure_checks(store, _merged(_seat_rule(STACK)))
+
+        assert door["verdict"] == "GO", door["message"]
+        assert door["review_seats"]["routes"]["codex_gate"] == "takeover_booking"
+        assert door["review_seats"]["filled_by"]["codex_gate"] == "glm_gate"
+        assert [check.name for check in checks if check.status != "PASS"] == ["hash_codex_gate"], [
+            check.__dict__ for check in checks
+        ]
+        hash_check = _named(by_name, "hash_codex_gate")
+        assert "seat codex_gate: glm_gate" in hash_check.detail
+        assert "contract=c0ffee01" in hash_check.detail and "receipt=deadbeef" in hash_check.detail
+
+    def test_a_matching_hash_on_the_booked_record_passes_on_exactly_that_record(self, store, monkeypatch):
+        _booked_glm(store, CONTRACT_HASH)
+
+        by_name, checks = _closure_checks(store, _merged(_seat_rule(STACK)))
+
+        assert all(check.status == "PASS" for check in checks), [c.__dict__ for c in checks if c.status != "PASS"]
+        hash_check = _named(by_name, "hash_codex_gate")
+        assert hash_check.status == "PASS", hash_check
+        assert "seat codex_gate: glm_gate" in hash_check.detail and "c0ffee01" in hash_check.detail
+        report_check = _named(by_name, "report_codex_gate")
+        assert report_check.status == "PASS", report_check
+        assert report_check.detail.endswith(str(store["reports"] / "glm_gate.md")), report_check.detail
+        # vnx-gate/review and vnx pr-ready read the same record for the seat.
+        summary = _summary(store)
+        assert summary.conclusion == fgp.CONCLUSION_SUCCESS, summary.reason
+        line = next(gate for gate in _ready(store, monkeypatch).gates if gate.gate == "codex_gate")
+        assert (line.verdict, line.evidence_gate, line.record_sha) == ("GO", "glm_gate", HEAD)
+        assert line.report_path == str(store["reports"] / "glm_gate.md")

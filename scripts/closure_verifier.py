@@ -945,7 +945,7 @@ def _consult_peers_for_absence(
             continue
         peer_verdict = _merge_door_record_verdict(peer, peer_gate, pr_id)
         if peer_verdict["verdict"] == "GO":
-            return {
+            return _accepted({
                 "verdict": "GO",
                 "message": (
                     f"{gate} is afwezig voor {pr_id} (status={declared_status!r}: "
@@ -957,7 +957,7 @@ def _consult_peers_for_absence(
                 "override_reason": None,
                 "gate": gate,
                 "evidence_gate": peer_gate,
-            }
+            }, peer)
     return _no_signer_verdict(gate, pr_id, declared_status, scope_note, counted_elsewhere)
 
 
@@ -1122,7 +1122,7 @@ def _consult_obligation_takeover_booking(
             continue
         verdict = _merge_door_record_verdict(pointed, evidence_gate, pr_id)
         if verdict["verdict"] == "GO":
-            return {
+            return _accepted({
                 "verdict": "GO",
                 "message": (
                     f"{gate} bewezen via takeover-boeking: verplichting {booking_id} "
@@ -1134,7 +1134,7 @@ def _consult_obligation_takeover_booking(
                 "gate": gate,
                 "evidence_gate": evidence_gate,
                 "evidence_via": "takeover_boeking",
-            }
+            }, pointed)
         refusal_notes.append(verdict["message"])
 
     return {
@@ -1242,7 +1242,9 @@ def check_review_gate_for_merge(
     no kimi record merged.
 
     Each seat is filled through the evidence routes below, in this order, and
-    each route fills at most that one seat:
+    each route fills at most that one seat. A route's GO carries the exact
+    record it accepted (:func:`_accepted`), and that record is the seat's
+    evidence for ``vnx-gate/review``, ``vnx pr-ready`` and track closure:
 
     - the seat's OWN record, when it answers for this seat itself (its request
       states the seat, or it carries no takeover). A decided verdict there
@@ -1317,7 +1319,7 @@ def _seat_claimed_verdict(
         # status in someone else's takeover_path can never disqualify a gate
         # that carries its own decided record (live #1729: deepseek's path
         # called glm_gate not_executable while glm_gate itself passed).
-        return _merge_door_record_verdict(own, seat, pr_id)
+        return _accepted(_merge_door_record_verdict(own, seat, pr_id), own)
     successors, provenance_notes = _find_takeover_successor_results(
         seat, pr_id, results_dir, branch=branch, project_id=project_id, head_sha=head_sha,
         stated_seats=stated_seats,
@@ -1333,7 +1335,7 @@ def _seat_claimed_verdict(
             continue
         verdict = _merge_door_record_verdict(successor, successor_gate, pr_id)
         if verdict["verdict"] == "GO":
-            return {
+            return _accepted({
                 "verdict": "GO",
                 "message": (
                     f"{seat} bewezen via overname: {successor_gate} leest seat {seat} "
@@ -1343,7 +1345,7 @@ def _seat_claimed_verdict(
                 "override_reason": None,
                 "gate": seat,
                 "evidence_gate": successor_gate,
-            }
+            }, successor)
         if first_failure is None:
             first_failure = verdict
     if first_failure is not None:
@@ -1364,6 +1366,19 @@ def _no_go(gate: str, message: str) -> Dict[str, Any]:
         "override_reason": None,
         "gate": gate,
     }
+
+
+def _accepted(verdict: Dict[str, Any], record: Dict[str, Any]) -> Dict[str, Any]:
+    """A route's GO with the exact record it accepted beside it (``evidence_record``).
+
+    The seat evaluation makes that record the seat's evidence
+    (``review_seat_evaluation.SeatFill.record``), so track closure checks the
+    hash and the report of the record the door accepted, never a second lookup
+    of the reviewer's slot (OI-2058 R5b round 3). A NO-GO carries no record.
+    """
+    if verdict.get("verdict") != "GO":
+        return verdict
+    return dict(verdict, evidence_record=record)
 
 
 def _seat_absence_verdict(
@@ -1413,7 +1428,7 @@ def _seat_absence_verdict(
         )
     if result is None:
         return _seat_without_record(seat, pr_id, results_dir, exclude=exclude, **scope)
-    return _merge_door_record_verdict(result, seat, pr_id)
+    return _accepted(_merge_door_record_verdict(result, seat, pr_id), result)
 
 
 def _seat_without_record(
@@ -1878,8 +1893,8 @@ def _check_contract_hashes(
     to match the same call site as the original gate-loop (branch=contract.branch, no project_id arg).
 
     ``skip`` holds the seats the seat rule already judged on the merged head
-    (OI-2058, R5b): their evidence is the filling reviewer's record, bound to
-    that head, not the seat gate's own slot. :func:`_seat_rule_checks` runs the
+    (OI-2058, R5b): their evidence is the record the door's route accepted for
+    the seat, bound to that head, not the seat gate's own slot. :func:`_seat_rule_checks` runs the
     same comparison on that record, so skipping a seat here moves its check,
     it never drops it.
     """
@@ -1898,18 +1913,28 @@ def _check_contract_hashes(
 
 def _record_hash_check(
     name: str, label: str, result: Optional[Dict[str, Any]], content_hash: str,
+    *, report_match: bool = False,
 ) -> Optional[CheckResult]:
     """``hash_<name>`` FAIL when ``result`` carries a contract hash other than the contract's.
 
     One comparison for both closure rules: the old rule checks a gate's own
     record (``label`` is the gate), the seat rule the record that fills the
     seat (``label`` names the seat and its reviewer, OI-2058 R5b round 2).
+    ``report_match`` (the seat rule, round 3) also reports a matching hash as a
+    PASS, so the check says which record it compared; the old rule keeps
+    reporting only a mismatch.
     """
     if not result or not content_hash:
         return None
     result_hash = result.get("contract_hash") or result.get("content_hash") or ""
-    if not result_hash or result_hash == content_hash:
+    if not result_hash:
         return None
+    if result_hash == content_hash:
+        if not report_match:
+            return None
+        return CheckResult(
+            f"hash_{name}", "PASS", f"{label} receipt hash matches the contract ({content_hash[:8]}..)",
+        )
     return CheckResult(
         f"hash_{name}",
         "FAIL",
@@ -1999,8 +2024,10 @@ def _seat_rule_checks(
 
     No check the old rule ran disappears for a seat: the hash and report checks
     (:func:`_record_hash_check`, :func:`_record_report_check`) move to the
-    record that fills the seat, named after the seat (OI-2058 R5b round 2). An
-    unfilled seat gets them on the record that answered for it and did not hold.
+    record that fills the seat, named after the seat (OI-2058 R5b round 2).
+    That record is ``SeatFill.record``: the exact record the door's route
+    accepted (round 3), not a second lookup of the reviewer's slot. An unfilled
+    seat gets them on the record that answered for it and did not hold.
     """
     from review_seat_evaluation import SOURCE_MERGE_RECORD, evaluate_review_seats
 
@@ -2026,11 +2053,15 @@ def _seat_rule_checks(
 
 
 def _seat_evidence_checks(fill: Any, content_hash: str) -> List[CheckResult]:
-    """The old rule's hash and report checks on the record that answers for one seat."""
+    """The old rule's hash and report checks on the record that answers for one seat.
+
+    A matching hash is a PASS here, so each seat names the reviewer and the hash
+    of the record it checked.
+    """
     reviewer = fill.reviewer or str((fill.record or {}).get("gate") or fill.seat)
     label = f"seat {fill.seat}: {reviewer}"
     found = (
-        _record_hash_check(fill.seat, label, fill.record, content_hash),
+        _record_hash_check(fill.seat, label, fill.record, content_hash, report_match=True),
         _record_report_check(fill.seat, label, fill.record),
     )
     return [check for check in found if check is not None]

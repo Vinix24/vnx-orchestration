@@ -451,11 +451,16 @@ def collect_gate_evidence(
 
 
 def _seat_evidence(fill: Any, pr_number: int, results_dir: Path, *, declared: bool) -> GateEvidence:
-    """The readiness line for one seat, with where its newest record sits."""
+    """The readiness line for one seat, with where its newest record sits.
+
+    A filled seat reports the record the door's route accepted
+    (``SeatFill.record``, OI-2058 R5b round 3), the one track closure checks and
+    ``vnx-gate/review`` proves. An open seat reports the seat gate's newest
+    record on any head, so the line can say where it ran.
+    """
     from closure_verifier import _find_gate_result
 
-    reviewer = fill.reviewer if fill.filled else fill.seat
-    anywhere = _find_gate_result(reviewer, str(pr_number), results_dir)
+    anywhere = fill.record if fill.filled else _find_gate_result(fill.seat, str(pr_number), results_dir)
     record_sha = report_path = report_exists = None
     if anywhere:
         record_sha = anywhere.get("commit_sha") or None

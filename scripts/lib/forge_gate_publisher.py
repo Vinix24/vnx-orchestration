@@ -527,7 +527,7 @@ def review_verdict(
             CONCLUSION_FAILURE,
             f"geen review-akkoord op deze kop (seats: {seats}): {evaluation.message()}",
         )
-    unproven = _unproven_fills(evaluation, directory, branch, project_id, resolved_head)
+    unproven = _unproven_fills(evaluation, resolved_head)
     judged = [fill for fill in evaluation.unfilled if fill.spoke]
     if judged or unproven:
         reasons = [f"seat {fill.seat}: {fill.message}" for fill in judged] + unproven
@@ -544,24 +544,21 @@ def review_verdict(
     return ForgeVerdict(CONCLUSION_SUCCESS, f"geldig review-akkoord op deze kop: {evaluation.message()}")
 
 
-def _unproven_fills(evaluation, directory: Path, branch, project_id, head_sha: str) -> List[str]:
+def _unproven_fills(evaluation, head_sha: str) -> List[str]:
     """Every filled seat whose record the per-gate predicate does not call a proven pass.
 
-    The door accepts it, this layer does not. Never silent: the two
+    The record is the one the door's route accepted for the seat
+    (``SeatFill.record``, OI-2058 R5b round 3), never a second lookup of the
+    reviewer's slot, which can hold another record than the one a booking
+    pointed at. The door accepts it, this layer does not. Never silent: the two
     disagreeing is exactly the state an operator has to see, because the merge
     would go through while the check stays red.
     """
-    from closure_verifier import _find_gate_result
-
     reasons: List[str] = []
     for fill in evaluation.fills:
         if not fill.filled:
             continue
-        record = _find_gate_result(
-            fill.reviewer, str(evaluation.scope.pr_id), directory, branch=branch,
-            project_id=project_id, head_sha=head_sha,
-        )
-        proven, why = _proven_pass_on_head(record, head_sha)
+        proven, why = _proven_pass_on_head(fill.record, head_sha)
         if proven:
             continue
         logger.warning(
