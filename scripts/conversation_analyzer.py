@@ -19,11 +19,12 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from conversation_analyzer import (  # noqa: E402 (path insert above)
     ConversationAnalyzer, Colors, log,
     DB_PATH, PATHS, VNX_BASE, ANALYZER_VERSION,
-    fail_closed_exit_code, deep_all_skipped_by_switch,
+    fail_closed_exit_code, deep_all_skipped_by_switch, deep_none_attempted,
 )
 
 
 REASON_SWITCHED_OFF = "provider_switched_off"
+REASON_NONE_ANALYSED = "sessions_due_none_analysed"
 
 
 def _write_heartbeat(args, stats, run_status, run_error):
@@ -37,11 +38,19 @@ def _write_heartbeat(args, stats, run_status, run_error):
             details["deep_restricted_claude"] = stats.deep_restricted_claude
             details["deep_restricted_deferred"] = stats.deep_restricted_deferred
             details["deep_disabled_skips"] = stats.deep_disabled_skips
+            details["deep_config_skips"] = stats.deep_config_skips
+            if stats.deep_failure_causes:
+                details["failure_causes"] = dict(stats.deep_failure_causes)
             if run_status == "ok" and deep_all_skipped_by_switch(stats):
                 # Nothing was analysed because the operator switched the provider off: the
                 # beacon must not say ok. (OI-2043, the general case, stays its own item.)
                 run_status = "degraded"
                 details["reason"] = REASON_SWITCHED_OFF
+            elif run_status == "ok" and deep_none_attempted(stats):
+                # OI-2043: sessions were due (deferred, config gap) and the night attempted
+                # none of them. 2026-10-10: 51 deferred, 0 attempts, beacon said ok.
+                run_status = "degraded"
+                details["reason"] = REASON_NONE_ANALYSED
         if run_error:
             details["error"] = run_error
         HealthBeacon(

@@ -28,6 +28,7 @@ from .models import (
     RunStats,
     fail_closed_exit_code,
     deep_all_skipped_by_switch,
+    deep_none_attempted,
 )
 from .parser import SessionParser
 from .detector import HeuristicDetector
@@ -38,7 +39,7 @@ from .runner import ConversationAnalyzer
 __all__ = [
     "SessionParser", "SessionMetrics", "SessionFlags",
     "HeuristicDetector", "DeepAnalyzer", "DigestGenerator",
-    "ConversationAnalyzer", "RunStats", "fail_closed_exit_code", "deep_all_skipped_by_switch", "normalize_model",
+    "ConversationAnalyzer", "RunStats", "fail_closed_exit_code", "deep_all_skipped_by_switch", "deep_none_attempted", "normalize_model",
     "Colors", "log",
     "CLAUDE_PROJECTS_DIR", "SCRIPT_DIR", "PATHS",
     "VNX_BASE", "STATE_DIR", "DB_PATH", "ANALYZER_VERSION",

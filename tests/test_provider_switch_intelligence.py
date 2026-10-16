@@ -273,7 +273,7 @@ def harness(monkeypatch):
     monkeypatch.setattr(DeepAnalyzer, "_deepseek_preflight",
                         classmethod(lambda cls, key: LLMOutcome("ok")))
     monkeypatch.setattr(da_module, "build_harness_child_env", lambda key: {})
-    monkeypatch.setattr(da_module, "build_harness_cli_args", lambda: [])
+    monkeypatch.setattr(da_module, "build_harness_argv", lambda *a, **k: ["claude"])
     monkeypatch.setattr(da_module, "resolve_claude_cli", lambda: "claude")
     answer = json.dumps({"result": json.dumps({"patterns": [], "bottlenecks": [], "suggestions": []})})
     run = MagicMock(return_value=subprocess.CompletedProcess(["claude"], 0, answer, ""))
