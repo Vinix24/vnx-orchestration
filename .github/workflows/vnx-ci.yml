@@ -263,8 +263,6 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         continue-on-error: true
         timeout-minutes: 10
-        env:
-          VNX_PRELUDE_FORCE_FAIL: "1"  # red run (b), temporary
         uses: ./.github/actions/profile-a-prelude
 
       - name: Plan the shadow phases
