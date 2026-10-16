@@ -10,6 +10,12 @@ lost: it is the ``result`` event of the run's archived event stream,
 ``events/archive/plan-gate/<dispatch_id>.ndjson``, whose ``data.text`` ends in
 the verdict block.
 
+Each run writes its own live stream, ``events/plan-gate/<dispatch_id>.ndjson``
+(``event_store.PER_RUN_TERMINALS``, OI-2115), and its teardown moves that
+stream into the same archive path as before. Seats that run at the same time
+therefore each keep their own final answer, and an archive written before that
+change is read exactly as one written after it.
+
 This module reads that event. It decides nothing about the verdict: each
 surface hands in its own parser (PR-review seats
 ``codex_parser.extract_verdict_block``, plan-gate seats
@@ -63,11 +69,10 @@ import event_store
 from gate_lane_contract import lane_deadline_detail
 from unified_report_schema import parse_frontmatter
 
-# The terminal every harness seat is dispatched under: provider_dispatch gets
-# ``--terminal-id plan-gate`` from plan_gate_panel._make_default_dispatcher, and
-# the claude seat runs with plan_gate_panel._PANEL_TERMINAL_ID. A test pins the
-# two to this name.
-HARNESS_SEAT_TERMINAL = "plan-gate"
+# The terminal every harness seat is dispatched under, defined where its live
+# stream is kept per run (event_store). A test pins plan_gate_panel's
+# --terminal-id and _PANEL_TERMINAL_ID to this name.
+HARNESS_SEAT_TERMINAL = event_store.HARNESS_SEAT_TERMINAL
 
 VERDICT_SOURCE_REPORT = "report"
 VERDICT_SOURCE_FINAL_ANSWER = "final_answer"
@@ -146,7 +151,7 @@ def recover_verdict(
             head_sha=(head_sha or "").strip(), **extra,
         )
 
-    if data_dir is None or not _is_single_name(dispatch_id):
+    if data_dir is None or not event_store.is_single_name(dispatch_id):
         return _result(UNAVAILABLE, f"no archive can be located for dispatch id {dispatch_id!r}")
     if head_sha is not None and not head_sha.strip():
         return _result(REFUSED, "the run names no head sha, so a recovered verdict would bind to no commit")
@@ -176,13 +181,6 @@ def recover_verdict(
         )
     return _result(RECOVERED, f"verdict read from the result event in {archive.name}",
                    verdict=verdict, archive_path=archive)
-
-
-def _is_single_name(dispatch_id: str) -> bool:
-    """A dispatch id that names one file in the archive directory and nothing else."""
-    value = (dispatch_id or "").strip()
-    return bool(value) and value == dispatch_id and value not in (".", "..") \
-        and "/" not in value and "\\" not in value and "\x00" not in value
 
 
 def _report_refusal(report_text: str) -> str:
