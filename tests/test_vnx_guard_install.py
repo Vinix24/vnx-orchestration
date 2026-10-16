@@ -695,7 +695,7 @@ def test_the_written_command_is_silent_outside_a_vnx_project(home, tmp_path, she
 
 def test_scripts_vnx_guard_runs_install_and_check_end_to_end(home):
     _account(home)
-    env = {**os.environ, "HOME": str(home)}
+    env = _branch_env(home)
 
     def run(*argv):
         return subprocess.run(
@@ -714,20 +714,29 @@ def test_scripts_vnx_guard_runs_install_and_check_end_to_end(home):
 
 def test_bin_vnx_routes_guard_to_the_same_script(home):
     _account(home)
-    env = {**os.environ, "HOME": str(home)}
+    env = _branch_env(home)
     proc = subprocess.run(["bash", str(REPO_ROOT / "bin" / "vnx"), "guard", "install", "--dry-run"],
                           capture_output=True, text=True, env=env, timeout=120)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "nothing was written" in proc.stdout
 
 
+def _branch_env(home: Path) -> dict:
+    """Subprocess environment that resolves vnx_cli and scripts from THIS checkout first."""
+    env = {**os.environ, "HOME": str(home)}
+    env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+    return env
+
+
 def test_the_pip_cli_routes_guard_to_the_same_script(home):
     _account(home)
-    env = {**os.environ, "HOME": str(home)}
+    env = _branch_env(home)
     proc = subprocess.run(
         [sys.executable, "-c",
-         "import sys; from vnx_cli.main import main; "
-         "sys.argv = ['vnx', 'guard', 'install', '--dry-run']; sys.exit(main())"],
+         "import sys, pathlib; import vnx_cli.main as m; "
+         f"root = pathlib.Path({str(REPO_ROOT)!r}).resolve(); "
+         "assert root in pathlib.Path(m.__file__).resolve().parents, m.__file__; "
+         "sys.argv = ['vnx', 'guard', 'install', '--dry-run']; sys.exit(m.main())"],
         capture_output=True, text=True, env=env, cwd=REPO_ROOT, timeout=120)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "nothing was written" in proc.stdout
