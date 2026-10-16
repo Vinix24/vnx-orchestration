@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """EventStore — NDJSON persistence for agent stream events.
 
-Stores one NDJSON file per terminal at .vnx-data/events/{terminal}.ndjson.
-Supports atomic append, tail-with-since, and clear (per-dispatch retention).
+Stores one NDJSON file per terminal at .vnx-data/events/{terminal}.ndjson,
+except for a per-run terminal (``PER_RUN_TERMINALS``), which keeps one file
+per run at .vnx-data/events/{terminal}/{dispatch_id}.ndjson. Supports atomic
+append, tail-with-since, and clear (per-dispatch retention).
 
 File locking via fcntl.flock ensures concurrent write safety.
 
@@ -127,6 +129,52 @@ def find_archive_file(directory: Union[str, Path], dispatch_id: str) -> Optional
     return None
 
 
+# ---------------------------------------------------------------------------
+# Per-run live streams (OI-2115)
+#
+# Every harness seat run, a review-gate seat as well as a plan-gate or
+# deliberation panel seat, is dispatched on the one terminal ``plan-gate``.
+# With one live file per terminal, seats that ran at the same time shared
+# ``events/plan-gate.ndjson``: the second run's boundary archived and cleared
+# the first run's stream, and its end-of-run teardown truncated what the first
+# had written since. Measured 2026-10-16 on deepseek_gate for #2075 and #2076,
+# five seconds apart: the archive of #2076 held only its
+# ``provider_teardown_worktree`` event, so its final answer was gone.
+#
+# A per-run terminal keeps one live file per dispatch id,
+# ``events/<terminal>/<dispatch_id>.ndjson``, so a run's boundary touches its
+# own stream and nothing else. The archive layout does not change
+# (``events/archive/<terminal>/<dispatch_id>.ndjson``), so an archive written
+# before this change reads exactly as before.
+# ---------------------------------------------------------------------------
+
+# The terminal every harness seat is dispatched under: provider_dispatch gets
+# ``--terminal-id plan-gate`` from plan_gate_panel._make_default_dispatcher, and
+# the claude seat runs with plan_gate_panel._PANEL_TERMINAL_ID.
+HARNESS_SEAT_TERMINAL = "plan-gate"
+
+# Terminals whose live stream is one file per run. A terminal-pinned stream
+# (``T{n}``) stays the single per-terminal ring buffer it always was.
+PER_RUN_TERMINALS = frozenset({HARNESS_SEAT_TERMINAL})
+
+# How often an append opens its stream again when it finds the file it holds
+# removed (a per-run stream moved into its archive while the append waited on
+# the lock). One reopen is the normal case; more means the stream is moved
+# again and again under the writer, which is a fault worth raising.
+_APPEND_REOPEN_ATTEMPTS = 8
+
+
+def is_single_name(dispatch_id: str) -> bool:
+    """A dispatch id that names one file in a directory and nothing else.
+
+    The one rule for turning a dispatch id into a file name: the per-run live
+    stream and the final-answer reader (``final_answer_verdict``) both use it.
+    """
+    value = (dispatch_id or "").strip()
+    return bool(value) and value == dispatch_id and value not in (".", "..") \
+        and "/" not in value and "\\" not in value and "\x00" not in value
+
+
 def _stream_belongs_to(content: bytes, dispatch_id: str) -> bool:
     """True when *content* holds an event of *dispatch_id* and none of another dispatch.
 
@@ -220,6 +268,37 @@ class EventStore:
     def _terminal_path(self, terminal: str) -> Path:
         return self._events_dir / f"{terminal}.ndjson"
 
+    @staticmethod
+    def _run_id(terminal: str, dispatch_id: Optional[str]) -> Optional[str]:
+        """The run *terminal* keeps a stream of its own for, or None for the shared stream.
+
+        A per-run terminal keeps one for a dispatch id that names one file. Any
+        other terminal, and a per-run terminal without such an id (an event
+        that names no dispatch), keeps the one stream ``<terminal>.ndjson``.
+        """
+        if terminal in PER_RUN_TERMINALS and dispatch_id and is_single_name(dispatch_id):
+            return dispatch_id
+        return None
+
+    def _stream_path(self, terminal: str, run_id: Optional[str] = None) -> Path:
+        if run_id:
+            return self._events_dir / terminal / f"{run_id}{ARCHIVE_SUFFIX}"
+        return self._terminal_path(terminal)
+
+    @staticmethod
+    def _stream_key(terminal: str, run_id: Optional[str] = None) -> str:
+        """The key of a stream's sequence counter: the terminal, or ``<terminal>/<run>``."""
+        return f"{terminal}/{run_id}" if run_id else terminal
+
+    def live_path(self, terminal: str, dispatch_id: Optional[str] = None) -> Path:
+        """The live file *terminal*'s events of *dispatch_id* are appended to.
+
+        ``events/<terminal>/<dispatch_id>.ndjson`` for a per-run terminal,
+        ``events/<terminal>.ndjson`` for every other terminal (the dispatch id
+        then changes nothing).
+        """
+        return self._stream_path(terminal, self._run_id(terminal, dispatch_id))
+
     def _next_sequence(self, terminal: str) -> int:
         seq = self._sequences.get(terminal, 0) + 1
         self._sequences[terminal] = seq
@@ -248,22 +327,22 @@ class EventStore:
                 )
         return _SIZE_ROTATION_BYTES
 
-    def _oversize_flag_path(self, terminal: str) -> Path:
-        return self._terminal_path(terminal).with_suffix(_OVERSIZE_FLAG_SUFFIX)
+    def _oversize_flag_path(self, terminal: str, run_id: Optional[str] = None) -> Path:
+        return self._stream_path(terminal, run_id).with_suffix(_OVERSIZE_FLAG_SUFFIX)
 
-    def _write_oversize_flag(self, terminal: str) -> None:
+    def _write_oversize_flag(self, terminal: str, run_id: Optional[str] = None) -> None:
         """Persist the still-oversize marker after a failed rotation."""
         try:
-            self._oversize_flag_path(terminal).write_text(
-                f"oversize:{terminal}:rotation-failed:"
+            self._oversize_flag_path(terminal, run_id).write_text(
+                f"oversize:{self._stream_key(terminal, run_id)}:rotation-failed:"
                 f"{datetime.now(timezone.utc).isoformat()}\n"
             )
         except OSError:
             pass
 
-    def _remove_oversize_flag(self, terminal: str) -> None:
+    def _remove_oversize_flag(self, terminal: str, run_id: Optional[str] = None) -> None:
         try:
-            self._oversize_flag_path(terminal).unlink(missing_ok=True)
+            self._oversize_flag_path(terminal, run_id).unlink(missing_ok=True)
         except OSError:
             pass
 
@@ -278,7 +357,7 @@ class EventStore:
         """
         return "size-rotation-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
 
-    def _rotate_on_size(self, terminal: str) -> None:
+    def _rotate_on_size(self, terminal: str, run_id: Optional[str] = None) -> None:
         """Rotate the live stream once it exceeds the size threshold.
 
         Archives the current content to
@@ -288,12 +367,14 @@ class EventStore:
         LOCK_EX on the live file, so a concurrent appender that is blocked on
         the lock writes into the fresh file afterwards — it can never lose an
         event to a truncate that lands between the archive read and the clear.
+        *run_id* names a per-run stream; its rotation lands in the same
+        terminal archive dir.
 
         Never raises: a failed rotation logs ERROR (visible) and leaves the
         live file in place, so a broken log rotation never blocks the dispatch.
         The hard-limit backstop still bounds worst-case growth.
         """
-        path = self._terminal_path(terminal)
+        path = self._stream_path(terminal, run_id)
         if not path.exists():
             return
         threshold = self._rotation_threshold()
@@ -334,7 +415,7 @@ class EventStore:
                 exc,
                 exc_info=True,
             )
-            self._write_oversize_flag(terminal)
+            self._write_oversize_flag(terminal, run_id)
             if tmp is not None:
                 try:
                     tmp.unlink(missing_ok=True)
@@ -342,8 +423,8 @@ class EventStore:
                     pass
             return
 
-        self._sequences.pop(terminal, None)
-        self._remove_oversize_flag(terminal)
+        self._sequences.pop(self._stream_key(terminal, run_id), None)
+        self._remove_oversize_flag(terminal, run_id)
         logger.info(
             "event_store: rotated %s (%d bytes) over %d-byte threshold",
             path,
@@ -396,8 +477,10 @@ class EventStore:
         if not prev_dispatch_id or prev_dispatch_id == new_dispatch_id:
             return
         try:
-            self.archive(terminal, prev_dispatch_id)
-            self.clear(terminal)
+            # The shared stream itself, never a run's own stream: on a per-run
+            # terminal this is the stream of events that name no usable id.
+            self._copy_to_archive(self._terminal_path(terminal), terminal, prev_dispatch_id)
+            self._reset_stream(terminal)
             self._sequences.pop(terminal, None)
             logger.warning(
                 "event_store: dispatch boundary %s -> %s — archived previous "
@@ -430,17 +513,22 @@ class EventStore:
         dispatch_id precedence: explicit kwarg (when not None) wins over the
         event's own dispatch_id field. Omitting the kwarg (None) falls back to
         the event's field. Fixes OI-1349.
+
+        A per-run terminal (``PER_RUN_TERMINALS``) appends to the stream of
+        the effective dispatch id (``live_path``); the envelope still names the
+        terminal itself, so a reader binds an event to its terminal as before.
         """
         from canonical_event import CanonicalEvent as _CE, EventShapeError  # noqa: F401 (used below)
-
-        self._events_dir.mkdir(parents=True, exist_ok=True)
-        path = self._terminal_path(terminal)
 
         if isinstance(event, _CE):
             event.validate_shape()  # raises EventShapeError on schema violations
             effective_dispatch_id = dispatch_id if dispatch_id is not None else event.dispatch_id
         else:
             effective_dispatch_id = dispatch_id if dispatch_id is not None else event.get("dispatch_id", "")
+
+        run_id = self._run_id(terminal, effective_dispatch_id)
+        path = self._stream_path(terminal, run_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
 
         # OI-878: enforce the per-dispatch ring-buffer boundary on the write
         # side.  When a new dispatch's first event arrives and the live file
@@ -449,15 +537,38 @@ class EventStore:
         # the previous dispatch's events under its own dispatch_id and truncate
         # the live file before appending. Runs BEFORE the envelope is built so a
         # rotation's sequence reset is visible to this event's sequence number.
-        self._rotate_at_dispatch_boundary(terminal, effective_dispatch_id)
+        # A per-run stream holds one dispatch by construction: it has no boundary.
+        if run_id is None:
+            self._rotate_at_dispatch_boundary(terminal, effective_dispatch_id)
+
+        envelope = self._envelope(
+            event, terminal, effective_dispatch_id,
+            self._next_sequence(self._stream_key(terminal, run_id)),
+        )
+        self._append_line(path, json.dumps(envelope, separators=(",", ":")) + "\n")
+
+        # Size-based rotation: once the live stream exceeds the rotation
+        # threshold, archive it to the per-dispatch archive dir and truncate to
+        # 0 so the file can never grow unbounded. This replaces the old log-only
+        # "operator intervention recommended" warning (OI-858) that fired every
+        # dispatch and changed nothing.
+        self._rotate_on_size(terminal, run_id)
+        self._enforce_hard_limit(terminal, run_id)
+
+    @staticmethod
+    def _envelope(
+        event: "Union[Dict[str, Any], CanonicalEvent]", terminal: str, dispatch_id: str, sequence: int,
+    ) -> Dict[str, Any]:
+        """The NDJSON envelope ``append`` writes for *event*."""
+        from canonical_event import CanonicalEvent as _CE  # noqa: PLC0415
 
         if isinstance(event, _CE):
-            envelope: Dict[str, Any] = {
+            return {
                 "type": event.event_type,
                 "timestamp": event.timestamp,
-                "dispatch_id": effective_dispatch_id,
+                "dispatch_id": dispatch_id,
                 "terminal": terminal,
-                "sequence": self._next_sequence(terminal),
+                "sequence": sequence,
                 "data": event.data,
                 "observability_tier": event.observability_tier,
                 "event_id": event.event_id,
@@ -465,79 +576,96 @@ class EventStore:
                 "terminal_id": event.terminal_id,
                 "provider_meta": event.provider_meta,
             }
-        else:
-            # Legacy dict path — default tier 2 (buffered) for backwards compat
-            envelope = {
-                "type": event.get("type", "unknown"),
-                "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
-                "dispatch_id": effective_dispatch_id,
-                "terminal": terminal,
-                "sequence": self._next_sequence(terminal),
-                "data": event.get("data", event),
-                "observability_tier": int(event.get("observability_tier", 2)),
-            }
+        # Legacy dict path — default tier 2 (buffered) for backwards compat
+        return {
+            "type": event.get("type", "unknown"),
+            "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            "dispatch_id": dispatch_id,
+            "terminal": terminal,
+            "sequence": sequence,
+            "data": event.get("data", event),
+            "observability_tier": int(event.get("observability_tier", 2)),
+        }
 
-        line = json.dumps(envelope, separators=(",", ":")) + "\n"
+    @staticmethod
+    def _append_line(path: Path, line: str) -> None:
+        """Append *line* under LOCK_EX to the file that is at *path* once the lock is held.
 
-        with open(path, "a", encoding="utf-8") as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-            try:
-                f.write(line)
-                f.flush()
-            finally:
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-
-        # Size-based rotation: once the live stream exceeds the rotation
-        # threshold, archive it to the per-dispatch archive dir and truncate to
-        # 0 so the file can never grow unbounded. This replaces the old log-only
-        # "operator intervention recommended" warning (OI-858) that fired every
-        # dispatch and changed nothing.
-        self._rotate_on_size(terminal)
-
-        # Hard upper bound: if the file has grown past the hard limit (50 MB),
-        # auto-truncate with an emergency archive so the lane doesn't block.
-        # This must work without any teardown — the write itself is the gate.
-        # The emergency archive uses a synthetic dispatch_id so the events are
-        # not lost, just moved out of the live stream.
-        try:
-            if path.stat().st_size > _SIZE_HARD_LIMIT_BYTES:
-                emergency_id = (
-                    f"emergency-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
-                )
-                logger.error(
-                    "event_store: HARD LIMIT (%d bytes) exceeded for %s — "
-                    "emergency archive+truncate to prevent lane blockage (OI-858)",
-                    _SIZE_HARD_LIMIT_BYTES,
-                    path,
-                )
+        The line is written in a single write() call including the trailing
+        newline. A per-run stream is removed when it moves into its archive
+        (``_move_to_archive``). An append that opened the file before and then
+        waited on the lock would write into the removed file and the event
+        would be lost; it finds no link left and opens the path again, which
+        starts a fresh stream.
+        """
+        for _ in range(_APPEND_REOPEN_ATTEMPTS):
+            with open(path, "a", encoding="utf-8") as f:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
                 try:
-                    self.archive(terminal, emergency_id)
-                except Exception as _arch_exc:
-                    logger.error(
-                        "event_store: emergency archive failed for %s: %s",
-                        terminal,
-                        _arch_exc,
-                    )
-                # clear() is called AFTER archive so the archive can read the
-                # full file before truncation. Pass no archive_dispatch_id —
-                # archive was just done above.
-                self.clear(terminal)
-                # Re-count sequences from 1 after emergency truncation
-                self._sequences.pop(terminal, None)
+                    if os.fstat(f.fileno()).st_nlink == 0:
+                        continue
+                    f.write(line)
+                    f.flush()
+                    return
+                finally:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        raise OSError(
+            f"event_store: {path} was removed {_APPEND_REOPEN_ATTEMPTS} times under one append"
+        )
+
+    def _enforce_hard_limit(self, terminal: str, run_id: Optional[str]) -> None:
+        """Hard upper bound: emergency archive + truncate past ``_SIZE_HARD_LIMIT_BYTES``.
+
+        If the file has grown past the hard limit (50 MB), auto-truncate with an
+        emergency archive so the lane doesn't block. This must work without any
+        teardown — the write itself is the gate. The emergency archive uses a
+        synthetic dispatch_id so the events are not lost, just moved out of the
+        live stream.
+        """
+        path = self._stream_path(terminal, run_id)
+        try:
+            if path.stat().st_size <= _SIZE_HARD_LIMIT_BYTES:
+                return
+        except OSError:
+            return
+        emergency_id = f"emergency-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+        logger.error(
+            "event_store: HARD LIMIT (%d bytes) exceeded for %s — "
+            "emergency archive+truncate to prevent lane blockage (OI-858)",
+            _SIZE_HARD_LIMIT_BYTES,
+            path,
+        )
+        try:
+            self._copy_to_archive(path, terminal, emergency_id)
+        except Exception as _arch_exc:
+            logger.error(
+                "event_store: emergency archive failed for %s: %s",
+                self._stream_key(terminal, run_id),
+                _arch_exc,
+            )
+        # The truncate runs AFTER the archive so the archive can read the full
+        # file before truncation; it re-counts sequences from 1.
+        try:
+            self._reset_stream(terminal, run_id)
         except OSError:
             pass
 
-    def tail(self, terminal: str, since: Optional[str] = None) -> Iterator[Dict[str, Any]]:
+    def tail(
+        self, terminal: str, since: Optional[str] = None, *, dispatch_id: Optional[str] = None,
+    ) -> Iterator[Dict[str, Any]]:
         """Yield events since a timestamp (ISO 8601 string).
 
         Uses LOCK_SH for read safety. Events are yielded in file order.
-        If since is None, all events are returned.
+        If since is None, all events are returned. *dispatch_id* selects the
+        run's own stream on a per-run terminal (``live_path``).
         """
-        path = self._terminal_path(terminal)
-        if not path.exists():
+        path = self.live_path(terminal, dispatch_id)
+        try:
+            f = open(path, "r", encoding="utf-8")
+        except FileNotFoundError:
             return
 
-        with open(path, "r", encoding="utf-8") as f:
+        with f:
             fcntl.flock(f.fileno(), fcntl.LOCK_SH)
             try:
                 for raw_line in f:
@@ -577,19 +705,37 @@ class EventStore:
         """Copy current event file to archive before clearing.
 
         Returns the archive path on success, None if nothing to archive.
+
+        On a per-run terminal the run's own stream moves into its archive:
+        the archive it already has is extended, never replaced, and the live
+        file is removed in the same locked step (``_move_to_archive``), so a
+        second call archives nothing twice and a late event of the run is
+        added instead of replacing what was archived before it.
         """
-        event_file = self._terminal_path(terminal)
+        run_id = self._run_id(terminal, dispatch_id)
+        if run_id is not None:
+            return self._archive_run_stream(terminal, run_id, owned_only=False)
+        return self._copy_to_archive(self._terminal_path(terminal), terminal, dispatch_id)
+
+    def _copy_to_archive(self, event_file: Path, terminal: str, archive_id: str) -> Optional[Path]:
+        """Copy *event_file* to ``<archive_dir(terminal)>/<archive_id>.ndjson``, replacing it."""
         if not event_file.exists() or event_file.stat().st_size == 0:
             return None
 
         archive_path = self.archive_dir(terminal)
         archive_path.mkdir(parents=True, exist_ok=True)
-        dest = archive_path / f"{dispatch_id}.ndjson"
+        dest = archive_path / f"{archive_id}.ndjson"
         shutil.copy2(str(event_file), str(dest))
         logger.info("event_store: archived %s -> %s", event_file, dest)
         return dest
 
-    def clear(self, terminal: str, archive_dispatch_id: Optional[str] = None) -> None:
+    def clear(
+        self,
+        terminal: str,
+        archive_dispatch_id: Optional[str] = None,
+        *,
+        dispatch_id: Optional[str] = None,
+    ) -> None:
         """Truncate the event file for a terminal (new dispatch clears old events).
 
         If archive_dispatch_id is provided and the file has content, the events
@@ -597,20 +743,31 @@ class EventStore:
         before truncation.
 
         Also resets the sequence counter and removes any oversize flag file.
-        """
-        if archive_dispatch_id:
-            self.archive(terminal, archive_dispatch_id)
 
-        path = self._terminal_path(terminal)
-        self._sequences.pop(terminal, None)
-        self._boundary_terminal.pop(terminal, None)
+        On a per-run terminal the stream is the run's own: *dispatch_id*, or
+        else *archive_dispatch_id*, names it. Its events belong to that run
+        and nowhere else, so they move into that run's archive
+        (``archive``) rather than being dropped, and another run's stream is
+        never touched. Without either id it is the terminal's shared stream,
+        as on every other terminal; there *dispatch_id* changes nothing.
+        """
+        run_id = self._run_id(terminal, dispatch_id or archive_dispatch_id)
+        if run_id is not None:
+            self._archive_run_stream(terminal, run_id, owned_only=False)
+            return
+        if archive_dispatch_id:
+            self._copy_to_archive(self._terminal_path(terminal), terminal, archive_dispatch_id)
+        self._reset_stream(terminal)
+
+    def _reset_stream(self, terminal: str, run_id: Optional[str] = None) -> None:
+        """Truncate a live stream, reset its counters and remove its oversize flag."""
+        path = self._stream_path(terminal, run_id)
+        key = self._stream_key(terminal, run_id)
+        self._sequences.pop(key, None)
+        self._boundary_terminal.pop(key, None)
 
         # Remove any oversize flag file on clean teardown
-        flag_path = path.with_suffix(_OVERSIZE_FLAG_SUFFIX)
-        try:
-            flag_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        self._remove_oversize_flag(terminal, run_id)
 
         if not path.exists():
             return
@@ -636,29 +793,99 @@ class EventStore:
         (OI-1869, OI-1930: parallel dispatches share one ring buffer per
         terminal) is left untouched for the boundary guard, as before:
         archiving it would file the other dispatch's events under this id, and
-        truncating it would drop that dispatch's live events.
+        truncating it would drop that dispatch's live events. A per-run
+        stream (OI-2115) holds another dispatch's event only through a write
+        that bypassed this store; it is left in place too.
 
         An archive this dispatch already has (a parallel dispatch's boundary
         guard archived the head of its stream) is extended, never replaced. The
         check, the copy and the truncate run under one LOCK_EX on the live
         file, the lock every appender takes, so no event lands between the copy
         and the truncate; the archive is written to a per-writer scratch file
-        and moved into place (``_replace_from_scratch``). Never raises: a
-        failure is logged, leaves no scratch file, and leaves the live file for
-        the boundary guard. Returns the archive path, or None when nothing was
+        and moved into place (``_replace_from_scratch``). A per-run stream's
+        live file is removed in that same step. Never raises: a failure is
+        logged, leaves no scratch file, and leaves the live file for the
+        boundary guard. Returns the archive path, or None when nothing was
         archived.
         """
-        path = self._terminal_path(terminal)
-        if not dispatch_id or not path.exists():
+        if not dispatch_id:
             return None
-        dest = self.archive_dir(terminal) / f"{dispatch_id}{ARCHIVE_SUFFIX}"
+        run_id = self._run_id(terminal, dispatch_id)
+        path = self._stream_path(terminal, run_id)
         try:
-            with open(path, "rb+") as f:
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-                try:
-                    content = f.read()
-                    if not _stream_belongs_to(content, dispatch_id):
-                        return None
+            if run_id is not None:
+                dest = self._archive_run_stream(terminal, run_id, owned_only=True)
+            else:
+                dest = self._move_to_archive(
+                    path, self.archive_dir(terminal) / f"{dispatch_id}{ARCHIVE_SUFFIX}", dispatch_id,
+                    owned_only=True, remove_live=False,
+                )
+        except Exception as exc:  # vnx-silent-except: an end-of-run archive must never break the run; logged, live file left for the boundary guard
+            logger.error(
+                "event_store: end-of-run archive failed for %s (dispatch %s): %s",
+                path, dispatch_id, exc, exc_info=True,
+            )
+            return None
+        if dest is None:
+            return None
+        if run_id is None:
+            self._sequences.pop(terminal, None)
+            self._boundary_terminal.pop(terminal, None)
+            self._remove_oversize_flag(terminal)
+        logger.info("event_store: end-of-run archived %s -> %s", path, dest)
+        return dest
+
+    def _archive_run_stream(self, terminal: str, run_id: str, *, owned_only: bool) -> Optional[Path]:
+        """Move per-run stream *run_id* into its archive and reset its counters.
+
+        Raises what ``_move_to_archive`` raises; the live file then stays.
+        """
+        dest = self._move_to_archive(
+            self._stream_path(terminal, run_id),
+            self.archive_dir(terminal) / f"{run_id}{ARCHIVE_SUFFIX}",
+            run_id,
+            owned_only=owned_only,
+            remove_live=True,
+        )
+        if dest is not None:
+            self._sequences.pop(self._stream_key(terminal, run_id), None)
+            self._remove_oversize_flag(terminal, run_id)
+            logger.info("event_store: archived run stream %s/%s -> %s", terminal, run_id, dest)
+        return dest
+
+    @staticmethod
+    def _move_to_archive(
+        path: Path, dest: Path, dispatch_id: str, *, owned_only: bool, remove_live: bool,
+    ) -> Optional[Path]:
+        """Add the live stream at *path* to the archive *dest* and empty it, under one lock.
+
+        The archive *dest* already holds is extended, never replaced; a head
+        without a final newline is not glued to the tail. The read, the
+        archive write (a per-writer scratch file moved into place) and the
+        truncate run under one LOCK_EX on the live file, the lock every
+        appender takes, so no event lands between the copy and the truncate.
+        *owned_only* leaves a stream that holds no event of *dispatch_id*, or
+        an event of another dispatch, untouched. *remove_live* also removes
+        the emptied live file (a per-run stream); an append that waited on the
+        lock then opens a fresh one (``_append_line``), and a second mover that
+        waited finds no link left and archives nothing twice.
+
+        Returns *dest*, or None when nothing was archived. Raises on a failed
+        write, leaving the live file as it was and no scratch file behind.
+        """
+        try:
+            f = open(path, "rb+")
+        except FileNotFoundError:
+            return None
+        with f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                if os.fstat(f.fileno()).st_nlink == 0:
+                    return None
+                content = f.read()
+                if owned_only and not _stream_belongs_to(content, dispatch_id):
+                    return None
+                if content:
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     head = dest.read_bytes() if dest.is_file() else b""
                     if head and not head.endswith(b"\n"):
@@ -668,19 +895,11 @@ class EventStore:
                     f.seek(0)
                     f.truncate(0)
                     f.flush()
-                finally:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-        except Exception as exc:  # vnx-silent-except: an end-of-run archive must never break the run; logged, live file left for the boundary guard
-            logger.error(
-                "event_store: end-of-run archive failed for %s (dispatch %s): %s",
-                path, dispatch_id, exc, exc_info=True,
-            )
-            return None
-        self._sequences.pop(terminal, None)
-        self._boundary_terminal.pop(terminal, None)
-        self._remove_oversize_flag(terminal)
-        logger.info("event_store: end-of-run archived %s -> %s", path, dest)
-        return dest
+                if remove_live:
+                    path.unlink(missing_ok=True)
+                return dest if content else None
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
     def oversize_flags(self) -> list[Path]:
         """Return paths to all oversize flag files currently present.
@@ -690,30 +909,45 @@ class EventStore:
         still oversize and needs manual attention. A successful rotation removes
         the flag. The dispatcher can call this to surface the condition in
         ``vnx pool status`` without tailing the log stream (OI-858 consumer).
+        A per-run stream's flag sits beside it, under ``events/<terminal>/``.
         """
         if not self._events_dir.exists():
             return []
-        return sorted(self._events_dir.glob(f"*{_OVERSIZE_FLAG_SUFFIX}"))
+        flags = list(self._events_dir.glob(f"*{_OVERSIZE_FLAG_SUFFIX}"))
+        for terminal in sorted(PER_RUN_TERMINALS):
+            flags.extend((self._events_dir / terminal).glob(f"*{_OVERSIZE_FLAG_SUFFIX}"))
+        return sorted(flags)
 
-    def event_count(self, terminal: str) -> int:
-        """Count events in the NDJSON file for a terminal."""
-        path = self._terminal_path(terminal)
-        if not path.exists():
+    def event_count(self, terminal: str, dispatch_id: Optional[str] = None) -> int:
+        """Count events in the NDJSON file for a terminal.
+
+        *dispatch_id* selects the run's own stream on a per-run terminal.
+        """
+        path = self.live_path(terminal, dispatch_id)
+        try:
+            f = open(path, "r", encoding="utf-8")
+        except FileNotFoundError:
             return 0
         count = 0
-        with open(path, "r", encoding="utf-8") as f:
+        with f:
             for line in f:
                 if line.strip():
                     count += 1
         return count
 
-    def last_event(self, terminal: str) -> Optional[Dict[str, Any]]:
-        """Return the last event for a terminal, or None."""
-        path = self._terminal_path(terminal)
-        if not path.exists():
+    def last_event(self, terminal: str, dispatch_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Return the last event for a terminal, or None.
+
+        *dispatch_id* selects the run's own stream on a per-run terminal
+        (``live_path``); on every other terminal it changes nothing.
+        """
+        path = self.live_path(terminal, dispatch_id)
+        try:
+            f = open(path, "r", encoding="utf-8")
+        except FileNotFoundError:
             return None
         last = None
-        with open(path, "r", encoding="utf-8") as f:
+        with f:
             for raw_line in f:
                 raw_line = raw_line.rstrip("\n")
                 if not raw_line:
