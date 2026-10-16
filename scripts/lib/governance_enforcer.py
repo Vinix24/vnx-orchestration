@@ -39,15 +39,13 @@ except ImportError:  # pragma: no cover — audit module optional at import time
     _log_enforcement_audit = None  # type: ignore[assignment]
     _ga_get_recent = None  # type: ignore[assignment]
 
-try:
-    # Same source t0_gate_enforcement's gate_enforcement_verify.py uses to
-    # resolve a takeover seat: the "gate" fields of a takeover_path list.
-    # Reused here so a kimi (or codex) seat read by a successor in
-    # VNX_REVIEW_GATE_TAKEOVER_CHAIN is recognised the same way in both
-    # places, instead of a second takeover interpretation.
-    from gate_enforcement_verify import _hop_gates as _takeover_hop_gates
-except ImportError:  # pragma: no cover — verify module optional at import time
-    _takeover_hop_gates = None  # type: ignore[assignment]
+# The seat a record answers for, from the one place every evaluator reads it
+# (OI-2058, R5b): the seat its own request states, else takeover_path[0], else
+# its own gate. gate_enforcement_verify and the merge door read the same
+# function, so a kimi (or codex) seat read by a successor is recognised the
+# same way everywhere, and a takeover record never also fills its own gate's
+# seat (OI-2107).
+from review_seat_evaluation import seat_for, stated_seat
 
 # The fabric's single source of truth for "is this gate result a PASS?"
 # (CFX-3). The review-gate checks must not apply a weaker rule of their own:
@@ -178,6 +176,49 @@ def _resolve_pr_head_sha(pr_number: Any, ctx: Dict[str, Any]) -> Optional[str]:
         return None
     sha = data.get("headRefOid")
     return str(sha) if sha else None
+
+
+def _record_seat(pr_number: Any, gate: str, data: Dict[str, Any], head_sha: str) -> str:
+    """The one seat ``gate``'s record answers for (``review_seat_evaluation.seat_for``)."""
+    requests_dir = GATE_RESULTS_DIR.parent / "requests"
+    stated = stated_seat(requests_dir, str(pr_number), gate, head_sha)
+    return seat_for(gate, stated=stated, takeover_path=data.get("takeover_path"))
+
+
+def _seat_successor(
+    gate_name: str, pr_number: Any, head_sha: str, result_path: Path,
+) -> "tuple[Optional[str], Optional[str]]":
+    """``(pass_message, failure)`` for the successors that answer for seat ``gate_name`` on the head.
+
+    A successor counts only when its one seat (:func:`_record_seat`) is this
+    seat, it carries a ``contract_hash`` and it names the head. The first PASS
+    wins. A successor on the head that did not pass is a decided non-pass:
+    its reason is returned so the seat fails on the verdict, not on the weaker
+    "no result" message.
+    """
+    failure: Optional[str] = None
+    for candidate in sorted(GATE_RESULTS_DIR.glob(f"pr-{pr_number}-*.json")):
+        if candidate == result_path:
+            continue
+        try:
+            data = json.loads(candidate.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        successor = data.get("gate") or candidate.stem
+        contract_hash = data.get("contract_hash", "")
+        commit_sha = data.get("commit_sha", "")
+        if _record_seat(pr_number, successor, data, head_sha) != gate_name:
+            continue
+        if not (contract_hash and commit_sha and commit_sha == head_sha):
+            continue
+        passed, reason = gate_status.is_pass(data)
+        taken = f"{gate_name} seat taken over by {successor} on head {_short_sha(head_sha)}"
+        if passed:
+            return f"{taken} — contract_hash: {contract_hash[:12]}...", None
+        failure = f"{taken} is not a PASS: {reason}"
+    return None, failure
 
 
 def _short_sha(sha: str) -> str:
@@ -413,10 +454,17 @@ class GovernanceEnforcer:
 
         A seat also counts as satisfied when a successor in the takeover chain
         (``VNX_REVIEW_GATE_TAKEOVER_CHAIN``, e.g. glm_gate/deepseek_gate reading
-        in kimi_gate's place) read it instead of ``gate_name`` itself. Resolved
-        from the SAME source ``gate_enforcement_verify.py`` uses for
-        ``t0_gate_enforcement``: the ``takeover_path`` hops recorded on the
-        successor's own result file — never a second takeover interpretation.
+        in kimi_gate's place) read it instead of ``gate_name`` itself.
+
+        Every record answers for ONE seat (OI-2058 R5b, OI-2107), read with
+        ``review_seat_evaluation.seat_for``, the function the merge door and
+        ``gate_enforcement_verify`` use: the seat its own request on this head
+        states, else ``takeover_path[0]``, else its own gate. So a kimi PASS
+        that read codex's seat satisfies ``codex_gate_required`` and NOT
+        ``kimi_gate_required``, and a successor that merely walked past
+        ``gate_name`` (a later hop) does not satisfy it either. Before this,
+        the check credited a seat from a result's own gate name and from any
+        hop of its ``takeover_path``.
         """
         pr_number = ctx.get("pr_number")
         if not pr_number:
@@ -439,6 +487,7 @@ class GovernanceEnforcer:
 
         result_path = GATE_RESULTS_DIR / f"pr-{pr_number}-{gate_name}.json"
         direct_data: Optional[Dict[str, Any]] = None
+        direct_seat = gate_name
         if result_path.exists():
             try:
                 direct_data = json.loads(result_path.read_text(encoding="utf-8"))
@@ -450,7 +499,8 @@ class GovernanceEnforcer:
                 )
             contract_hash = direct_data.get("contract_hash", "")
             commit_sha = direct_data.get("commit_sha", "")
-            if contract_hash and commit_sha and commit_sha == head_sha:
+            direct_seat = _record_seat(pr_number, gate_name, direct_data, head_sha)
+            if contract_hash and commit_sha and commit_sha == head_sha and direct_seat == gate_name:
                 if gate_status.is_pass(direct_data)[0]:
                     return EnforcementResult(
                         check_name=cfg.name, level=cfg.level, passed=True,
@@ -461,41 +511,23 @@ class GovernanceEnforcer:
                         override_key=f"VNX_OVERRIDE_{cfg.name.upper()}",
                     )
 
-        takeover_failure: Optional[str] = None
-        if _takeover_hop_gates is not None:
-            for candidate in sorted(GATE_RESULTS_DIR.glob(f"pr-{pr_number}-*.json")):
-                if candidate == result_path:
-                    continue
-                try:
-                    data = json.loads(candidate.read_text(encoding="utf-8"))
-                except (json.JSONDecodeError, OSError):
-                    continue
-                if gate_name not in _takeover_hop_gates(data.get("takeover_path")):
-                    continue
-                contract_hash = data.get("contract_hash", "")
-                commit_sha = data.get("commit_sha", "")
-                if not (contract_hash and commit_sha and commit_sha == head_sha):
-                    continue
-                successor = data.get("gate") or candidate.stem
-                passed, reason = gate_status.is_pass(data)
-                if passed:
-                    return EnforcementResult(
-                        check_name=cfg.name, level=cfg.level, passed=True,
-                        message=(
-                            f"{gate_name} seat taken over by {successor} on head "
-                            f"{_short_sha(head_sha)} — contract_hash: {contract_hash[:12]}..."
-                        ),
-                        override_key=f"VNX_OVERRIDE_{cfg.name.upper()}",
-                    )
-                # A successor on the head that did not pass is a decided
-                # non-pass: remember why so the seat fails on the verdict,
-                # not on the weaker "no result" message.
-                takeover_failure = (
-                    f"{gate_name} seat taken over by {successor} on head "
-                    f"{_short_sha(head_sha)} is not a PASS: {reason}"
-                )
+        takeover_pass, takeover_failure = _seat_successor(gate_name, pr_number, head_sha, result_path)
+        if takeover_pass is not None:
+            return EnforcementResult(
+                check_name=cfg.name, level=cfg.level, passed=True, message=takeover_pass,
+                override_key=f"VNX_OVERRIDE_{cfg.name.upper()}",
+            )
 
-        if direct_data is not None:
+        if direct_data is not None and direct_seat != gate_name and takeover_failure is None:
+            return EnforcementResult(
+                check_name=cfg.name, level=cfg.level, passed=False,
+                message=(
+                    f"{gate_name} read seat {direct_seat} on head {_short_sha(head_sha)} "
+                    f"(a reviewer fills one seat): seat {gate_name} has no reviewer of its own"
+                ),
+                override_key=f"VNX_OVERRIDE_{cfg.name.upper()}",
+            )
+        if direct_data is not None and direct_seat == gate_name:
             stale_commit = direct_data.get("commit_sha", "")
             if not stale_commit:
                 message = (

@@ -134,7 +134,7 @@ def test_pass_verdict_clears_closure_verifier_merge_check(tmp_path, monkeypatch)
     assert rc == 0
 
     results_dir = data_dir / "state" / "review_gates" / "results"
-    gate = closure_verifier.check_review_gate_for_merge("4242", "kimi_gate", results_dir)
+    gate = closure_verifier.check_review_gate_for_merge("4242", "kimi_gate", results_dir, seats=["kimi_gate"])
 
     assert gate["verdict"] == "GO", gate["message"]
     assert "mist contract_hash" not in gate["message"]
@@ -201,7 +201,7 @@ def test_offline_run_is_test_run_and_rejected_by_merge_check_despite_complete_ev
     # ...but the merge door must still refuse it: is_test_run_record is
     # checked before contract_hash/report_path are ever consulted.
     results_dir = data_dir / "state" / "review_gates" / "results"
-    gate = closure_verifier.check_review_gate_for_merge("0", "kimi_gate", results_dir)
+    gate = closure_verifier.check_review_gate_for_merge("0", "kimi_gate", results_dir, seats=["kimi_gate"])
     assert gate["verdict"] == "NO-GO"
     assert "geen review-gate resultaat" in gate["message"]
 

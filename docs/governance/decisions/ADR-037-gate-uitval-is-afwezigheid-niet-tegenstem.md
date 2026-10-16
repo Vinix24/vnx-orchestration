@@ -1,6 +1,6 @@
 # ADR-037 — Een poort-uitval is afwezigheid, geen tegenstem
 
-**Status:** Accepted (dispatch 20260906-oi1624-uitval-is-afwezigheid)
+**Status:** Accepted (dispatch 20260906-oi1624-uitval-is-afwezigheid); amended 2026-10-16 by reparatiegolf R5b (see the last section: every seat of the review stack, each with its own reviewer)
 **Date:** 2026-09-06
 **Decided by:** T0, op basis van een live blokkade op vijf PR's (#1777-#1781) op main `36ee70a3`.
 **Resolves / Cross-refs:** OI-1624. Bouwt voort op OI-1576 (`_find_takeover_successor_results`, ADR nog niet apart vastgelegd) en OI-1469/OI-1470 (de overschrijfwachter in `gate_recorder._check_overwrite_guard`, die dit ADR ongemoeid laat).
@@ -151,3 +151,76 @@ iemand hem in een van beide verzamelingen zet — vastgepind door de drift-test 
 **Wat dit niet verandert:** de voorrangsregel en de zeven bewijs-invarianten uit het
 hoofd-ADR blijven ongewijzigd voor elke poort die WEL in `_REVIEW_PEER_GATES` zit. Alleen
 de kandidatenverzameling is versmald van "interpreteerbaar" naar "een review".
+
+## Amendement (OI-2058, OI-2064, OI-2107; reparatiegolf R5b, 2026-10-16): elke seat van de review-stack, elk met een eigen reviewer
+
+Plan: `claudedocs/specs/reparatiegolf/plan.md`, sectie "R5 in detail" (de R5b-delen).
+De T0 besliste welke seats vereist zijn; dat stond in het plan nog open.
+
+**Wat verandert.** Dit ADR liet de merge toe zodra minstens één review-peer op de kop
+had getekend. Dat wordt: **elke seat van de review-stack van het project is gevuld door
+een eigen, verschillende reviewer.** Gemeten op 2026-10-15/16: de deur toetste alleen de
+ene gedeclareerde poort (`codex_gate`), dus een kop met een codex-PASS en geen enkel
+kimi-record mergede. Op 27-09 is precies dat gebeurd (#1952, kimi `unavailable`). En
+`vnx-gate/review` stopte bij de eerste seat met een GO: op #2058 (`71f92de1`) stond de
+samenvatting op `success` terwijl `vnx-gate/codex_gate` op `failure` stond (OI-2064).
+
+**Welke seats.** De stack die een request op deze kop met `source=config` boekte, anders
+een verse `review_seats.resolve_review_seats()` voor het project. Een request met
+`source=explicit` versmalt die set nooit: de T0 vraagt seats een voor een aan, en elk
+van die records noemt er een. Wijken de geboekte en de verse stack af, dan wint de
+geboekte (plan, acceptatie (b)) en zegt het merge-record dat.
+
+**Welke seat een record vult.** De `seat` die het eigen request op deze kop noemt
+(gestempeld sinds R5a), anders `takeover_path[0]`, anders de eigen poort. `takeover_from`
+telt niet: dat is de laatste hop, niet de seat. Een reviewer vult hoogstens een seat. Een
+overname-record vult dus nooit ook de seat van zijn eigen poort, en een opvolger die een
+seat alleen passeerde (een latere hop) vult die seat niet. De governance-enforcer las dat
+anders (OI-2107) en volgt nu dezelfde functie.
+
+**De routes van dit ADR blijven, elk voor een seat.** De onafhankelijke peer bij een
+bevestigde afwezigheid (hoofd-ADR en OI-1642) vult alleen de afwezige seat, en de
+ondertekenaar moet verschillen van elke reviewer die voor een andere seat telt. Hetzelfde
+geldt voor de OI-1719-boeking. Een gedeeltelijke review (OI-1851) vult geen seat; de
+weigering noemt de knip.
+
+**Een afkeuring blokkeert altijd.** Regel 1 van de voorrangsregel hierboven gold alleen
+binnen de afwezigheidsroute. Hij geldt nu voor de hele kop: een record van een
+review-peer op deze kop keurt af als zijn beslist verdict FAIL is, of als zijn rapport op
+schijf een FAIL-verdict of een blokkerende bevinding draagt, wat de JSON ook zegt. Dat is
+invariant 7 van de merge-deur, gelezen met de lezer van de deur zelf
+(`closure_verifier._report_blocking_indicators`), voor elke review-peer: binnen en buiten
+de vereiste seats, de gedeclareerde poort inbegrepen. Zo'n afkeuring houdt de merge
+tegen, wat de andere seats ook zeggen. Op `main` deed invariant 7 dat alleen voor het
+record van de gedeclareerde poort; ronde 1 van R5b liet de gedeclareerde poort geen seat
+meer beslissen en las het rapport daarna nergens meer (codex FAIL op #2074). Een record
+dat alleen onvolledig is (geen rapport op schijf) is geen afkeuring: het vult geen seat
+en blokkeert niet op zichzelf.
+
+**Een uitgeschakelde seat telt nooit als pass.** Heeft de keten geen beschikbare
+opvolger, dan noemt de weigering de seat, de schakelaar en de twee uitwegen:
+`vnx providers on <familie>`, of een project-override van `VNX_DEFAULT_REVIEW_STACK`.
+
+**Een plek.** `scripts/lib/review_seat_evaluation.py` (`evaluate_review_seats`) is de
+enige seat-evaluatie. De merge-deur (`closure_verifier.check_review_gate_for_merge`),
+`vnx-gate/review` (`forge_gate_publisher.review_verdict`), `vnx pr-ready`
+(`pr_readiness.collect_gate_evidence`) en track-closure lezen haar. `success` op
+`vnx-gate/review` alleen als elke seat gevuld is; `failure` zodra een review-peer
+afkeurt (in zijn JSON of in zijn rapport) of een reviewer sprak en het bewijs niet houdt;
+`action_required` zolang een vereiste seat niet heeft gesproken. `vnx pr-ready` geeft
+elke afkeurende reviewer een eigen NO-GO-regel, ook als zijn poortnaam een seat is die een
+andere reviewer vulde. Alleen een seat-regel die dezelfde reviewer al als NO-GO noemt,
+wordt niet herhaald. READY dus precies als de deur GO zegt.
+
+**Track-closure.** Het `pr_merged`-receipt draagt sinds R5b `review_seats` (regel,
+seats, bron, kop, wie welke seat vulde). Closure past de seat-regel toe op een PR met dat
+veld. Geen controle van de oude regel verdwijnt voor een seat: de hash-controle en de
+rapport-controle gaan mee naar het record dat de seat vult (`hash_<seat>`,
+`report_<seat>`, met de vullende reviewer en bij een mismatch beide hashes). Bij een
+niet-gevulde seat draaien ze op het record dat voor de seat antwoordde. Een PR die
+daarvoor is gemerged, zonder dat veld, blijft onder de regel waaronder hij is gemerged:
+geen gesloten of sluitbare track gaat weer open.
+
+**Uitrol.** R5b zelf mergt onder de oude regel: het kan zichzelf niet reviewen. De regel
+geldt voor vnx-dev vanaf de merge daarna. Consumers draaien `~/.vnx-system/current`; zij
+krijgen de regel pas na een release met R5a en R5b die de operator uitrolt.
