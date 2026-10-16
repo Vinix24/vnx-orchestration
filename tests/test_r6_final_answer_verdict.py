@@ -20,6 +20,7 @@ from __future__ import annotations
 import gzip
 import json
 import os
+import stat
 import subprocess
 import sys
 import zlib
@@ -1179,12 +1180,16 @@ class TestEndOfRunArchive:
         events_dir = tmp_path / "events"
         events = _run_events(self.DID, PLAN_PASS_ANSWER)
         live = _live_stream(events_dir, events)
+        live_mode = stat.S_IMODE(live.stat().st_mode)
         store = event_store.EventStore(events_dir=events_dir)
         dest = store.archive_completed_stream(TERMINAL, self.DID)
         assert dest == events_dir / "archive" / TERMINAL / f"{self.DID}.ndjson"
         assert [json.loads(line) for line in dest.read_text(encoding="utf-8").splitlines()] == events
         assert live.read_text(encoding="utf-8") == ""
-        assert not dest.with_name(dest.name + ".tmp").exists()
+        # No scratch file of any name beside the archive, and the archive keeps
+        # the live stream's mode, as archive()'s copy2 gives it (not mkstemp's 0600).
+        assert [p.name for p in dest.parent.iterdir()] == [dest.name]
+        assert stat.S_IMODE(dest.stat().st_mode) == live_mode
         # A second call finds nothing of this dispatch left: idempotent.
         assert store.archive_completed_stream(TERMINAL, self.DID) is None
         assert len(dest.read_text(encoding="utf-8").splitlines()) == len(events)
@@ -1264,6 +1269,42 @@ class TestEndOfRunArchive:
         store = event_store.EventStore(events_dir=events_dir)
         assert store.archive_completed_stream(TERMINAL, self.DID) is None
         assert live.read_bytes() == before
+
+    @pytest.mark.parametrize("fails_at", ["write", "move"])
+    def test_a_failed_write_leaves_no_scratch_file_beside_the_archive(self, tmp_path, monkeypatch, fails_at):
+        """The scratch file is the writer's own (OI-1486), so the writer removes it on failure."""
+        events_dir = tmp_path / "events"
+        live = _live_stream(events_dir, _run_events(self.DID, PLAN_PASS_ANSWER))
+        before = live.read_bytes()
+        archive_dir = events_dir / "archive" / TERMINAL
+        if fails_at == "write":
+            def no_sync(_fd):
+                raise OSError(28, "No space left on device")
+            monkeypatch.setattr(event_store.os, "fsync", no_sync)
+            expected = []
+        else:
+            # A directory where the archive file belongs: the move onto it fails.
+            (archive_dir / f"{self.DID}.ndjson").mkdir(parents=True)
+            (archive_dir / f"{self.DID}.ndjson" / "occupant").write_text("x\n")
+            expected = [f"{self.DID}.ndjson"]
+        store = event_store.EventStore(events_dir=events_dir)
+        assert store.archive_completed_stream(TERMINAL, self.DID) is None
+        assert sorted(p.name for p in archive_dir.iterdir()) == expected
+        assert live.read_bytes() == before
+
+    def test_another_writers_scratch_file_is_never_taken_over(self, tmp_path):
+        """A scratch named after the destination alone is every writer's scratch (OI-1486)."""
+        events = _run_events(self.DID, PLAN_PASS_ANSWER)
+        _live_stream(tmp_path / "events", events)
+        archive_dir = tmp_path / "events" / "archive" / TERMINAL
+        archive_dir.mkdir(parents=True)
+        theirs = archive_dir / f"{self.DID}.ndjson.tmp"
+        theirs.write_bytes(b"another writer's half-written bytes\n")
+        dest = event_store.EventStore(events_dir=tmp_path / "events").archive_completed_stream(
+            TERMINAL, self.DID,
+        )
+        assert [json.loads(line) for line in dest.read_text(encoding="utf-8").splitlines()] == events
+        assert theirs.read_bytes() == b"another writer's half-written bytes\n"
 
     def test_the_next_dispatch_starts_a_fresh_stream(self, tmp_path):
         events_dir = tmp_path / "events"

@@ -17,6 +17,8 @@ import json
 import logging
 import os
 import shutil
+import stat
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Union
@@ -146,6 +148,29 @@ def _stream_belongs_to(content: bytes, dispatch_id: str) -> bool:
             return False
         own = True
     return own
+
+
+def _replace_from_scratch(dest: Path, mode: int, *chunks: bytes) -> None:
+    """Write *chunks* to a scratch file beside *dest* and move it onto *dest*.
+
+    The scratch name comes from ``mkstemp``, unique to this writer: a name
+    derived from *dest* alone is shared by every concurrent writer of it
+    (OI-1486). The scratch takes *mode*, so the archive carries the permission
+    bits ``archive()``'s ``copy2`` gives it. On any failure the scratch is
+    removed and the error re-raised; *dest* is never half-written.
+    """
+    fd, tmp_name = tempfile.mkstemp(dir=dest.parent, prefix=f".{dest.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as tmp_f:
+            os.fchmod(tmp_f.fileno(), mode)
+            for chunk in chunks:
+                tmp_f.write(chunk)
+            tmp_f.flush()
+            os.fsync(tmp_f.fileno())
+        os.replace(tmp_name, dest)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
 
 
 def _events_dir() -> Path:
@@ -617,8 +642,9 @@ class EventStore:
         guard archived the head of its stream) is extended, never replaced. The
         check, the copy and the truncate run under one LOCK_EX on the live
         file, the lock every appender takes, so no event lands between the copy
-        and the truncate; the archive is written to a temp file and moved into
-        place. Never raises: a failure is logged and leaves the live file for
+        and the truncate; the archive is written to a per-writer scratch file
+        and moved into place (``_replace_from_scratch``). Never raises: a
+        failure is logged, leaves no scratch file, and leaves the live file for
         the boundary guard. Returns the archive path, or None when nothing was
         archived.
         """
@@ -626,7 +652,6 @@ class EventStore:
         if not dispatch_id or not path.exists():
             return None
         dest = self.archive_dir(terminal) / f"{dispatch_id}{ARCHIVE_SUFFIX}"
-        tmp = dest.with_name(dest.name + ".tmp")
         try:
             with open(path, "rb+") as f:
                 fcntl.flock(f.fileno(), fcntl.LOCK_EX)
@@ -638,8 +663,8 @@ class EventStore:
                     head = dest.read_bytes() if dest.is_file() else b""
                     if head and not head.endswith(b"\n"):
                         head += b"\n"
-                    tmp.write_bytes(head + content)
-                    os.replace(tmp, dest)
+                    live_mode = stat.S_IMODE(os.fstat(f.fileno()).st_mode)
+                    _replace_from_scratch(dest, live_mode, head, content)
                     f.seek(0)
                     f.truncate(0)
                     f.flush()
@@ -650,10 +675,6 @@ class EventStore:
                 "event_store: end-of-run archive failed for %s (dispatch %s): %s",
                 path, dispatch_id, exc, exc_info=True,
             )
-            try:
-                tmp.unlink(missing_ok=True)
-            except OSError:
-                pass
             return None
         self._sequences.pop(terminal, None)
         self._boundary_terminal.pop(terminal, None)
