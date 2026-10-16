@@ -19,7 +19,8 @@
 #      (`--transcript`, else the pending marker's `transcript_path`) as a readable JSONL file,
 #      books a `t0_context_rotation_wrap_skipped` receipt before any window opens (ledger first,
 #      ADR-005; a refusing ledger refuses the spawn), and puts a catch-up wrap from that
-#      transcript at the head of the prompt.
+#      transcript at the head of the prompt. A relative transcript path is made absolute against
+#      the caller's folder first, because the successor starts in another folder.
 #   3. Opens a new window next to the current one, with the current window's name, and types
 #      `claude --model opus` (plus `--remote-control "<name>"` when this session is bridged,
 #      and CLAUDE_CONFIG_DIR when set: tmux does not carry a bare export into the pane).
@@ -62,7 +63,8 @@
 # 3 not in tmux / handoff missing or stale, 4 handoff without a first step, 5 successor did not
 # come up or started in another folder than the start folder (the old window is left untouched),
 # 6 no valid wrap proof ("run /build-log wrap"), or a skip run without a readable JSONL
-# transcript or whose receipt the ledger refused (no window opened in any of these).
+# transcript, with a transcript path that cannot be made absolute, or whose receipt the ledger
+# refused (no window opened in any of these).
 
 set -euo pipefail
 
@@ -198,7 +200,7 @@ while [ $# -gt 0 ]; do
     --transcript)
       [ $# -ge 2 ] || die 2 "--transcript needs a path"
       TRANSCRIPT_ARG="$2"; shift 2 ;;
-    -h|--help) sed -n '2,65p' "$SCRIPT_PATH"; exit 0 ;;
+    -h|--help) sed -n '2,67p' "$SCRIPT_PATH"; exit 0 ;;
     *) die 2 "unknown argument: $1" ;;
   esac
 done
@@ -208,6 +210,28 @@ if [ "$SKIP_WRAP" -eq 1 ] && [ -z "${SKIP_REASON//[[:space:]]/}" ]; then
 fi
 if [ -n "$TRANSCRIPT_ARG" ] && [ "$SKIP_WRAP" -eq 0 ]; then
   die 2 "--transcript only applies with --skip-wrap-reason"
+fi
+
+# A relative transcript path names a file in the folder this was called from, but the successor
+# starts in another one (the T0 folder). Prefix the physical folder (`pwd -P`: the folder the
+# kernel resolves the relative path against, so a `..` keeps its meaning); an absolute path stays
+# byte for byte. Fails when that folder is gone.
+absolute_path() {
+  local here
+  case "$1" in
+    /*) printf '%s\n' "$1" ;;
+    *)
+      here="$(pwd -P 2>/dev/null)" && [ -n "$here" ] || return 1
+      printf '%s/%s\n' "$here" "$1" ;;
+  esac
+}
+
+# Resolved now, before anything else runs: the check, the receipt and the prompt all see the path
+# the caller meant.
+if [ -n "$TRANSCRIPT_ARG" ]; then
+  transcript_abs="$(absolute_path "$TRANSCRIPT_ARG")" \
+    || die 6 "cannot resolve --transcript $TRANSCRIPT_ARG to an absolute path: the folder it is relative to is gone; nothing opened"
+  TRANSCRIPT_ARG="$transcript_abs"
 fi
 
 [ -n "${TMUX:-}" ] && [ -n "${TMUX_PANE:-}" ] || die 3 "not running inside tmux (TMUX/TMUX_PANE unset); rotation needs a tmux window to hand over"
@@ -259,8 +283,9 @@ STATE_DIR="$("$PYTHON" "$STATE_PY" state-dir --project-root "$PROJECT_ROOT")"
 RUN_DIR="$STATE_DIR/rotation-$(date +%Y%m%d-%H%M%S)-$$"
 mkdir -p "$RUN_DIR"
 
-# The predecessor's transcript of a skip run: --transcript, else the pending marker the guard
-# wrote for this pane. compose refuses (6) when it is not a readable JSONL file.
+# The predecessor's transcript of a skip run: --transcript (already absolute), else the pending
+# marker the guard wrote for this pane, made absolute the same way. compose refuses (6) when it is
+# not a readable JSONL file.
 TRANSCRIPT=""
 if [ "$SKIP_WRAP" -eq 1 ]; then
   if [ -n "$TRANSCRIPT_ARG" ]; then
@@ -269,6 +294,11 @@ if [ "$SKIP_WRAP" -eq 1 ]; then
     pending_args=(pending-transcript --project-root "$PROJECT_ROOT" --pane "$TMUX_PANE")
     [ -n "$SESSION_ID" ] && pending_args+=(--session-id "$SESSION_ID")
     TRANSCRIPT="$("$PYTHON" "$STATE_PY" "${pending_args[@]}")" || TRANSCRIPT=""
+    if [ -n "$TRANSCRIPT" ]; then
+      transcript_abs="$(absolute_path "$TRANSCRIPT")" \
+        || die 6 "cannot resolve the pending marker's transcript $TRANSCRIPT to an absolute path: the folder it is relative to is gone; nothing opened"
+      TRANSCRIPT="$transcript_abs"
+    fi
   fi
   [ -n "$TRANSCRIPT" ] || die 6 "--skip-wrap-reason needs the predecessor's transcript for the catch-up wrap: no --transcript and no transcript_path in the pending marker of pane $TMUX_PANE; nothing opened"
 fi

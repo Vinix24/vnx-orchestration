@@ -499,6 +499,99 @@ def test_wrap_start_and_finish_leave_no_scratch_file_behind(tmp_path, monkeypatc
     assert _scratch_files(root / "daily-log") == []
 
 
+# ── one wrap-start proves one wrap ───────────────────────────────────────────
+
+
+def _start_record(tmp_path: Path) -> dict:
+    return json.loads((tmp_path / "state" / "wrap-start.json").read_text(encoding="utf-8"))
+
+
+def test_a_second_finish_without_a_new_start_cannot_refresh_an_old_proof(tmp_path, monkeypatch,
+                                                                          capsys):
+    """codex_gate on 3c2bdd24: a second finish stamped a fresh wrapped_at on a wrap of two hours
+    ago, and the unchanged old daily log then passed the age check."""
+    root = _project(tmp_path, monkeypatch)
+    sdir = tmp_path / "state"
+    now = time.time()
+    rotation_state.start_wrap(sdir, project_root=str(root), slug=SLUG, bucket=None, now=now - 7200)
+    handoff = _write_handoff(root)
+    _write_daily(root, mtime=now - 7100)
+    rotation_state.finish_wrap(sdir, project_root=root, handoff=handoff, daily_log=root / DAILY,
+                               now=now - 7000)
+    with pytest.raises(rotation_state.WrapProofError) as old:
+        rotation_state.verify_wrap_proof(handoff, project_root=root, max_age_minutes=15, now=now)
+    assert old.value.check == "wrapped_at_age"
+    proof = handoff.read_text(encoding="utf-8")
+
+    with pytest.raises(rotation_state.WrapHelperError, match="run wrap-start first"):
+        rotation_state.finish_wrap(sdir, project_root=root, handoff=handoff,
+                                   daily_log=root / DAILY, now=now)
+    assert rotation_state.main(["wrap-finish", "--project-root", str(root), "--daily-log", DAILY]) == 3
+    assert "run wrap-start first" in capsys.readouterr().err
+    assert handoff.read_text(encoding="utf-8") == proof, "a refused finish rewrote the proof"
+    assert _compose(root, handoff, tmp_path / "run") == 6
+    assert "wrap proof check 'wrapped_at_age'" in capsys.readouterr().err
+
+
+def test_each_new_wrap_start_proves_one_more_wrap(tmp_path, monkeypatch):
+    root = _project(tmp_path, monkeypatch)
+    handoff = _write_handoff(root)
+    for run in ("first", "second"):
+        assert rotation_state.main(["wrap-start", "--project-root", str(root),
+                                    "--project-slug", SLUG]) == 0
+        assert "consumed_at" not in _start_record(tmp_path)
+        _write_daily(root)
+        assert rotation_state.main(["wrap-finish", "--project-root", str(root),
+                                    "--daily-log", DAILY]) == 0, run
+        block = rotation_state.read_frontmatter(handoff)["wrap"]
+        assert _start_record(tmp_path)["consumed_at"] == block["wrapped_at"]
+        assert _compose(root, handoff, tmp_path / f"run-{run}") == 0, run
+
+
+@pytest.mark.parametrize("failure", ["daily_log_missing", "self_check"])
+def test_a_failed_finish_leaves_the_start_usable(tmp_path, monkeypatch, failure):
+    """The operator repairs the daily log and finishes again, without a new wrap-start."""
+    root = _project(tmp_path, monkeypatch)
+    handoff = _write_handoff(root)
+    assert rotation_state.main(["wrap-start", "--project-root", str(root), "--project-slug", SLUG]) == 0
+    started = _start_record(tmp_path)
+    if failure == "self_check":
+        _write_daily(root, flag="false")
+    expected = 3 if failure == "daily_log_missing" else 6
+    assert rotation_state.main(["wrap-finish", "--project-root", str(root), "--daily-log", DAILY]) == expected
+    assert _start_record(tmp_path) == started, "a failed finish consumed the start"
+
+    _write_daily(root)
+    assert rotation_state.main(["wrap-finish", "--project-root", str(root), "--daily-log", DAILY]) == 0
+    assert rotation_state.read_frontmatter(handoff)["wrap"]["started_at"] == started["started_at"]
+    assert _compose(root, handoff, tmp_path / "run") == 0
+
+
+def test_two_finishes_racing_on_one_start_let_exactly_one_through(tmp_path, monkeypatch):
+    root = _project(tmp_path, monkeypatch)
+    sdir = tmp_path / "state"
+    rotation_state.start_wrap(sdir, project_root=str(root), slug=SLUG, bucket=None)
+    handoff = _write_handoff(root)
+    _write_daily(root)
+    barrier = threading.Barrier(2)
+    outcomes: List[str] = []
+
+    def finish() -> None:
+        barrier.wait()
+        try:
+            rotation_state.finish_wrap(sdir, project_root=root, handoff=handoff, daily_log=root / DAILY)
+            outcomes.append("passed")
+        except rotation_state.WrapHelperError:
+            outcomes.append("refused")
+
+    threads = [threading.Thread(target=finish) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert sorted(outcomes) == ["passed", "refused"]
+
+
 # ── wrap proof: compose refuses with 6 per named check ───────────────────────
 
 

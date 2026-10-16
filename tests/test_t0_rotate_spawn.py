@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -294,10 +295,12 @@ def _handoff(rig, text: str, age_seconds: int = 0, *, wrap: bool = True) -> Path
     return path
 
 
-def _spawn(rig, *args: str, env_extra: Dict[str, str] = None) -> subprocess.CompletedProcess:
+def _spawn(rig, *args: str, env_extra: Dict[str, str] = None,
+           cwd: Path = None) -> subprocess.CompletedProcess:
     env = {**rig["env"], **(env_extra or {})}
     return subprocess.run(["bash", str(SPAWN), "--project-root", str(rig["project"]), *args],
-                          env=env, cwd=rig["project"], capture_output=True, text=True, timeout=120)
+                          env=env, cwd=cwd or rig["project"], capture_output=True, text=True,
+                          timeout=120)
 
 
 def _calls(rig) -> List[list]:
@@ -833,7 +836,7 @@ def test_nuggets_that_do_not_match_the_bucket_are_refused(rig, case):
 def test_a_valid_wrap_with_nuggets_in_the_bucket_spawns(rig):
     now = time.time()
     headings = [f"### 2026-10-16 · {SLUG} · gate-loopt-vast"]
-    bucket = _bucket(rig, headings + [f"### 2026-10-16 · seocrawler-v2 · iets-anders"])
+    bucket = _bucket(rig, headings + ["### 2026-10-16 · seocrawler-v2 · iets-anders"])
     _daily_log(rig, now - 60)
     _handoff(rig, _wrap_frontmatter(started=now - 300, wrapped=now - 10, headings=headings,
                                     bucket=str(bucket)) + HANDOFF_BASE, wrap=False)
@@ -935,6 +938,65 @@ def test_a_transcript_that_is_not_jsonl_refuses_before_any_window(rig, source, c
     assert "readable JSONL" in proc.stderr
     _assert_nothing_opened(rig)
     assert _skipped(rig) == []
+
+
+_DIGEST_RE = re.compile(r"via de digest: (python3 \S+ transcript-digest --transcript \S+?)\. Je bent")
+
+
+def test_a_relative_transcript_is_absolute_in_receipt_prompt_and_digest(rig):
+    """codex_gate on 3c2bdd24: `--transcript predecessor.jsonl` passed the check from the caller's
+    folder, then the successor, started in the T0 folder, could not find the file."""
+    successor_dir = _t0_folder(rig)
+    transcript = _transcript(rig)
+    caller_dir = transcript.parent
+    absolute = os.path.join(os.path.realpath(caller_dir), transcript.name)
+    _handoff(rig, HANDOFF_BASE, wrap=False)
+    proc = _spawn(rig, "--skip-wrap-reason", "noodrem", "--transcript", transcript.name, cwd=caller_dir)
+    assert proc.returncode == 0, proc.stderr
+    assert _new_window_dir(rig) == str(successor_dir)
+
+    [receipt] = _skipped(rig)
+    assert receipt["transcript"] == absolute
+    prompt = _typed(rig)[1]
+    assert f"/build-log wrap --from-transcript {absolute}" in prompt
+    digest = _DIGEST_RE.search(prompt)
+    assert digest, prompt
+    argv = shlex.split(digest.group(1))
+    assert argv[-1] == absolute
+    read = subprocess.run([sys.executable, *argv[1:]], cwd=successor_dir, env=rig["env"],
+                          capture_output=True, text=True, timeout=60)
+    assert read.returncode == 0, read.stderr
+    assert "rotate please" in read.stdout and "on it" in read.stdout
+
+
+def test_a_relative_transcript_from_the_pending_marker_is_made_absolute(rig):
+    transcript = _transcript(rig)
+    rotation_state.write_pending(rig["state"], pane=PANE, session_id=SESSION, tokens=612_000,
+                                 level="hard", transcript_path=transcript.name)
+    _handoff(rig, HANDOFF_BASE, wrap=False)
+    proc = _spawn(rig, "--skip-wrap-reason", "noodrem", cwd=transcript.parent)
+    assert proc.returncode == 0, proc.stderr
+    absolute = os.path.join(os.path.realpath(transcript.parent), transcript.name)
+    [receipt] = _skipped(rig)
+    assert receipt["transcript"] == absolute
+    assert f"transcript-digest --transcript {absolute}" in _typed(rig)[1]
+
+
+def test_a_transcript_that_cannot_be_resolved_refuses_before_any_window(rig):
+    """A relative path from a folder that is gone names no file anyone can find again."""
+    _transcript(rig)
+    _handoff(rig, HANDOFF_BASE, wrap=False)
+    gone = rig["tmp"] / "gone"
+    gone.mkdir()
+    proc = subprocess.run(
+        ["bash", "-c", 'cd "$1" && rmdir "$1" && shift && exec bash "$@"', "_", str(gone),
+         str(SPAWN), "--project-root", str(rig["project"]), "--skip-wrap-reason", "noodrem",
+         "--transcript", "predecessor.jsonl"],
+        env=rig["env"], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 6, proc.stderr
+    assert "cannot resolve" in _refusal(proc)
+    _assert_nothing_opened(rig)
+    assert _receipts(rig) == []
 
 
 def test_a_refusing_ledger_refuses_the_skip_spawn(rig):

@@ -131,6 +131,16 @@ resolves against the project root. A wrap without `--bucket` records `nuggets: 0
 and `bucket: null`. After writing, `wrap-finish` runs the same check as the spawner and exits 6
 when that check would refuse, so the wrap can still repair it.
 
+**One wrap-start proves one wrap.** A `wrap-finish` whose block passes that check writes
+`consumed_at` (its `wrapped_at`) into `wrap-start.json`. A second `wrap-finish` without a new
+`wrap-start` refuses with exit 3 and "run wrap-start first", and writes nothing, so a fresh
+`wrapped_at` can never be stamped on the daily log and nuggets of an older wrap. A finish that
+fails (a missing daily log: exit 3; a block the check refuses: exit 6) leaves the start record
+usable, so the wrap repairs the cause and finishes again. The read, the block, the check and the
+consumption hold one lock on the start record (`atomic_io.slot_lock`, the sibling
+`.wrap-start.json.lock`), and `wrap-start` takes the same lock: of two finishes on one start,
+exactly one passes. `compose` only reads the handoff block and the daily log.
+
 ```yaml
 wrap:
   started_at: 2026-10-16T09:31:02Z
@@ -174,6 +184,11 @@ curation step itself is not proven.
   marker the guard wrote for this pane (only the marker of `--session-id` when that is given).
   With neither, or when that file is not a readable JSONL file (a regular file whose first
   non-empty line is a JSON object), the spawner refuses with exit 6 before any window opens.
+- A relative transcript path (from `--transcript` or from the marker) is made absolute first,
+  against the physical folder the spawner was called from (`pwd -P`), because the successor
+  starts in another folder. The JSONL check, the receipt, the prompt and the digest command all
+  carry that absolute path. An absolute path stays byte for byte. A relative path whose folder
+  is gone is exit 6, before any window.
 - Ledger first (ADR-005): `record-skip` books a `t0_context_rotation_wrap_skipped` receipt
   with the reason and the transcript before the first window opens. A ledger that refuses it
   refuses the spawn, exit 6: a skip never goes unrecorded.
@@ -266,7 +281,7 @@ Every run leaves `prompt.txt`, `first_step.txt`, `goal.txt` and `goal_followup.l
 | 3 | not in tmux, project root unresolvable, handoff missing or stale |
 | 4 | handoff has no numbered next step |
 | 5 | the successor never showed its footer, or started in another folder than the T0 folder; nothing was typed, the old window keeps running |
-| 6 | no valid wrap proof (the message names the check and ends with "run /build-log wrap"); in a skip run: no readable JSONL transcript, or the ledger refused the skip receipt. No window was opened |
+| 6 | no valid wrap proof (the message names the check and ends with "run /build-log wrap"); in a skip run: no readable JSONL transcript, a relative transcript path whose folder is gone, or the ledger refused the skip receipt. No window was opened |
 
 ## Receipts
 

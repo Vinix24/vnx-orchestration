@@ -40,6 +40,10 @@ already in the month bucket, ``wrap-finish`` (last step) writes a ``wrap:`` bloc
 handoff frontmatter with the system clock. ``compose`` refuses with exit 6 unless that block
 binds to this wrap: the daily log was written inside the wrap's window and every nugget heading
 it lists is in the bucket. Frontmatter is read with a stdlib parser; the fabric has no PyYAML.
+One wrap-start proves one wrap: a ``wrap-finish`` whose block passes the check writes
+``consumed_at`` into the start record, and a second finish without a new start refuses, so a
+fresh ``wrapped_at`` can never be stamped on old evidence. ``compose`` only reads the handoff
+block and the daily log; it never touches the start record.
 
 EMERGENCY PATH (operator decision 2026-10-16 c). ``compose --skip-wrap-reason`` skips the wrap
 proof (never the first-step check), needs the predecessor's transcript as a readable JSONL
@@ -582,7 +586,9 @@ def new_nugget_headings(before: List[str], after: List[str], slug: str) -> List[
 
 def start_wrap(sdir: Path, *, project_root: str, slug: str, bucket: Optional[Path],
                now: Optional[float] = None) -> Dict[str, Any]:
-    """Write ``wrap-start.json``: the start time, the bucket, and the headings in it now."""
+    """Write ``wrap-start.json``: the start time, the bucket, and the headings in it now. A new
+    record carries no ``consumed_at``, so it proves the next wrap. Written under the record's
+    lock, so it never lands between a finish's read and its consumption."""
     record = {
         "started_at": _iso_utc(time.time() if now is None else now),
         "project_root": project_root,
@@ -590,7 +596,9 @@ def start_wrap(sdir: Path, *, project_root: str, slug: str, bucket: Optional[Pat
         "bucket": str(bucket) if bucket is not None else None,
         "headings": bucket_headings(bucket),
     }
-    atomic_write_json(wrap_start_path(sdir), record)
+    path = wrap_start_path(sdir)
+    with slot_lock(path):
+        atomic_write_json(path, record)
     return record
 
 
@@ -601,32 +609,65 @@ def _relative_to_root(path: Path, root: Path) -> str:
         return str(path.resolve())
 
 
-def finish_wrap(sdir: Path, *, project_root: Path, handoff: Path, daily_log: Path,
-                now: Optional[float] = None) -> Dict[str, Any]:
-    """Compute this wrap's nuggets from ``wrap-start.json`` and write the ``wrap:`` block into
-    the handoff. Raises WrapHelperError when the start record, the handoff or the daily log is
-    missing."""
-    start = _read_json(wrap_start_path(sdir))
+def _unconsumed_start(path: Path) -> Dict[str, Any]:
+    """The start record of the running wrap. Raises WrapHelperError when there is none, or when
+    a finish already consumed it: one wrap-start proves one wrap."""
+    start = _read_json(path)
     if not start or not isinstance(start.get("started_at"), str) or not start.get("project_slug"):
-        raise WrapHelperError(f"no usable {wrap_start_path(sdir)}: run wrap-start as the first "
-                              "step of the wrap")
-    if not handoff.is_file():
-        raise WrapHelperError(f"handoff not found: {handoff} (the wrap writes it before wrap-finish)")
-    if not daily_log.is_file():
-        raise WrapHelperError(f"daily log not found: {daily_log} (the wrap writes it before "
-                              "wrap-finish)")
+        raise WrapHelperError(f"no usable {path}: run wrap-start first, as the first step of "
+                              "the wrap")
+    if start.get("consumed_at") is not None:
+        raise WrapHelperError(f"{path} already proved the wrap that finished at "
+                              f"{start['consumed_at']}, and one wrap-start proves one wrap: run "
+                              "wrap-start first")
+    return start
+
+
+def _wrap_block_from(start: Dict[str, Any], *, project_root: Path, daily_log: Path,
+                     wrapped_at: str) -> Dict[str, Any]:
     bucket = Path(start["bucket"]) if start.get("bucket") else None
     headings = new_nugget_headings([h for h in start.get("headings") or [] if isinstance(h, str)],
                                    bucket_headings(bucket), str(start["project_slug"]))
-    block = {
+    return {
         "started_at": start["started_at"],
-        "wrapped_at": _iso_utc(time.time() if now is None else now),
+        "wrapped_at": wrapped_at,
         "nuggets": len(headings),
         "nugget_headings": headings,
         "daily_log": _relative_to_root(daily_log, project_root),
         "bucket": str(bucket) if bucket is not None else None,
     }
-    write_wrap_block(handoff, block)
+
+
+def finish_wrap(sdir: Path, *, project_root: Path, handoff: Path, daily_log: Path,
+                now: Optional[float] = None) -> Dict[str, Any]:
+    """Compute this wrap's nuggets from ``wrap-start.json``, write the ``wrap:`` block into the
+    handoff, run the spawner's check on it, and consume the start record.
+
+    Raises WrapHelperError, with nothing written, when the start record is missing or already
+    consumed, or the handoff or the daily log is missing. Raises WrapProofError when the block is
+    written but the check refuses it; the start record then stays usable, so the wrap repairs
+    what the check names and finishes again.
+
+    One wrap-start proves one wrap: only a finish whose block passes the check writes
+    ``consumed_at`` into the start record, so a second finish cannot stamp a fresh ``wrapped_at``
+    on old evidence. The whole read-check-write holds the record's lock (``slot_lock``), so a
+    second finish, or a wrap-start, cannot land between the read and the consumption."""
+    finished = time.time() if now is None else now
+    path = wrap_start_path(sdir)
+    with slot_lock(path):
+        start = _unconsumed_start(path)
+        if not handoff.is_file():
+            raise WrapHelperError(f"handoff not found: {handoff} (the wrap writes it before "
+                                  "wrap-finish)")
+        if not daily_log.is_file():
+            raise WrapHelperError(f"daily log not found: {daily_log} (the wrap writes it before "
+                                  "wrap-finish)")
+        block = _wrap_block_from(start, project_root=project_root, daily_log=daily_log,
+                                 wrapped_at=_iso_utc(finished))
+        write_wrap_block(handoff, block)
+        verify_wrap_proof(handoff, project_root=project_root,
+                          max_age_minutes=DEFAULT_MAX_AGE_MINUTES, now=finished)
+        atomic_write_json(path, {**start, "consumed_at": block["wrapped_at"]})
     return block
 
 
@@ -996,19 +1037,18 @@ def _cmd_wrap_finish(args: argparse.Namespace) -> int:
     try:
         block = finish_wrap(state_dir(str(root)), project_root=root, handoff=handoff,
                             daily_log=_under_root(args.daily_log, root))
+    except WrapProofError as exc:
+        # finish_wrap runs the spawner's check, so the wrap learns about a refusal while it can
+        # still repair it (a daily log without `handoff: true`, written before wrap-start).
+        sys.stderr.write(f"wrap-finish wrote the block, but the spawner will refuse it: "
+                         f"check '{exc.check}': {exc.detail}. The start record stays usable: "
+                         "repair this and run wrap-finish again\n")
+        return EXIT_WRAP_PROOF
     except (WrapHelperError, OSError, ValueError) as exc:
         sys.stderr.write(f"wrap-finish: {exc}\n")
         return 3
     sys.stdout.write(f"wrap-finish: {handoff} wrapped_at={block['wrapped_at']} "
                      f"nuggets={block['nuggets']} daily_log={block['daily_log']}\n")
-    # The same check the spawner runs, now, so the wrap learns about a refusal while it can
-    # still repair it (a daily log without `handoff: true`, written before wrap-start).
-    try:
-        verify_wrap_proof(handoff, project_root=root, max_age_minutes=DEFAULT_MAX_AGE_MINUTES)
-    except WrapProofError as exc:
-        sys.stderr.write(f"wrap-finish wrote the block, but the spawner will refuse it: "
-                         f"check '{exc.check}': {exc.detail}\n")
-        return EXIT_WRAP_PROOF
     return 0
 
 
