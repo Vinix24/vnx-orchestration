@@ -6,10 +6,16 @@ the one check-run per HEAD that answers the only question branch protection
 needs answered: is there a valid review accord on this exact commit?
 
 The rule is not restated here and it is not restated in the code either — it is
-``closure_verifier._REVIEW_PEER_GATES`` + ``check_review_gate_for_merge``, the
-same truth the merge door enforces. ``TestTheRuleComesFromTheMergeDoor`` pins
-that: changing the door's peer set changes this check's answer, which is only
-possible if the peer set is being READ rather than copied.
+``review_seat_evaluation.evaluate_review_seats`` over
+``closure_verifier._REVIEW_PEER_GATES``, the same truth the merge door enforces
+(OI-2058, R5b: every seat of the project's review stack filled by a distinct
+reviewer, and no blocking finding on the head). ``TestTheRuleComesFromTheMergeDoor``
+pins that: changing the door's peer set changes this check's answer, which is
+only possible if the peer set is being READ rather than copied.
+
+Each test runs in a project whose review stack it names (``pin_review_stack``):
+most of them in a one-seat ``glm_gate`` project, so a glm record decides the
+whole review. ``tests/test_r5b_merge_seats.py`` covers the two-seat stack.
 
 Mocking boundary: only the client's POST (``forge_check_run.publish_check_run``)
 and ``gh pr view`` (``subprocess.run``) are replaced. Every conclusion in this
@@ -38,6 +44,7 @@ import forge_check_run  # noqa: E402
 import forge_gate_publisher as fgp  # noqa: E402
 import forge_protection_drift as drift  # noqa: E402
 from dispatch_spec import Gate  # noqa: E402
+from review_seat_support import pin_review_stack  # noqa: E402
 
 pytestmark = pytest.mark.usefixtures("attributed_forge_target")
 
@@ -130,6 +137,11 @@ def _write(results_dir: Path, gate: str, record: Dict[str, Any]) -> Path:
     return path
 
 
+@pytest.fixture(autouse=True)
+def _one_seat_glm_project(monkeypatch):
+    pin_review_stack(monkeypatch, "glm_gate")
+
+
 @pytest.fixture()
 def results_dir(tmp_path: Path) -> Path:
     directory = tmp_path / "results"
@@ -147,19 +159,20 @@ def _verdict(results_dir: Path, head: str = HEAD) -> fgp.ForgeVerdict:
 
 
 class TestSummaryConclusion:
-    def test_ci_gate_pass_alone_is_failure(self, tmp_path, results_dir):
+    def test_ci_gate_pass_alone_never_fills_a_seat(self, tmp_path, results_dir):
         """OI-1645 on the check-run surface: CI is not a review signer.
 
-        A head whose only fully-evidenced pass is ``ci_gate`` has been judged —
-        just never reviewed. ``action_required`` would read as "still waiting";
-        this state is not waiting, it is decided and unsigned.
+        A head whose only fully-evidenced pass is ``ci_gate`` has never been
+        reviewed. Since R5b the summary says so per seat: the required seat has
+        not spoken on this head, which is ``action_required`` (blocking on a
+        required check), never ``success``.
         """
         _write(results_dir, "ci_gate", _record(tmp_path, "ci_gate"))
 
         verdict = _verdict(results_dir)
 
-        assert verdict.conclusion == fgp.CONCLUSION_FAILURE
-        assert "ci_gate" in verdict.reason
+        assert verdict.conclusion == fgp.CONCLUSION_ACTION_REQUIRED
+        assert "glm_gate" in verdict.reason
 
     def test_glm_pass_with_full_evidence_is_success(self, tmp_path, results_dir):
         _write(results_dir, "glm_gate", _record(tmp_path, "glm_gate"))
@@ -182,8 +195,13 @@ class TestSummaryConclusion:
 
         assert verdict.conclusion == fgp.CONCLUSION_ACTION_REQUIRED
 
-    def test_takeover_successor_signs_for_the_declared_gate(self, tmp_path, results_dir):
-        """OI-1576: the chain slid forward and the successor named the gate."""
+    def test_takeover_successor_signs_for_the_declared_gate(self, tmp_path, results_dir, monkeypatch):
+        """OI-1576: the chain slid forward and the successor named the gate.
+
+        A codex-only project: glm's record answers for codex's seat
+        (``takeover_path[0]``), and fills nothing else.
+        """
+        pin_review_stack(monkeypatch, "codex_gate")
         _write(
             results_dir,
             "glm_gate",
@@ -285,8 +303,12 @@ class TestTheRuleComesFromTheMergeDoor:
     def test_ci_gate_signs_only_if_the_door_says_it_may(
         self, tmp_path, results_dir, monkeypatch
     ):
+        """A stack naming ``ci_gate`` names no review seat while the door says CI
+        is no reviewer, so nothing can sign; widen the door's peer set and the
+        same stack has a seat that the CI pass fills."""
+        pin_review_stack(monkeypatch, "ci_gate")
         _write(results_dir, "ci_gate", _record(tmp_path, "ci_gate"))
-        assert _verdict(results_dir).conclusion == fgp.CONCLUSION_FAILURE
+        assert _verdict(results_dir).conclusion == fgp.CONCLUSION_ACTION_REQUIRED
 
         monkeypatch.setattr(
             closure_verifier,
@@ -402,7 +424,7 @@ class TestReviewPublication:
         monkeypatch.setattr(fgp, "load_app_config", lambda *a, **k: fgp.AppConfig("vnx-gate", 1))
         monkeypatch.setattr(fgp, "auto_merge_is_armed", lambda pr, repo=None: True)
         monkeypatch.setattr(fgp, "_emit_publication_event", lambda **kw: None)
-        _write(results_dir, "ci_gate", _record(tmp_path, "ci_gate"))
+        _write(results_dir, "glm_gate", _record(tmp_path, "glm_gate", status="fail"))
 
         fgp.publish_review_summary(PR_NUMBER, HEAD, results_dir=results_dir, branch=BRANCH)
 

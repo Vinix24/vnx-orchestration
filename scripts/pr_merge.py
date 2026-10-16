@@ -13,9 +13,11 @@ unverifiable state is a refusal — never a silent pass. ``--override-reason``
 skips the check visibly with a mandatory reason.
 
 Review gate (20260816-gate-never-skippable): a second fail-closed check runs
-after the CI gate — a passing, fully-evidenced review-gate result must exist
-for this PR (see ``_run_review_gate`` ->
-``closure_verifier.check_review_gate_for_merge``). A missing result, an empty
+after the CI gate — every seat of the project's review stack must be filled by
+a distinct reviewer with a passing, fully-evidenced result on this head, and no
+review peer may carry a blocking finding on it (OI-2058, R5b; see
+``_run_review_gate`` -> ``closure_verifier.check_review_gate_for_merge`` ->
+``review_seat_evaluation``). A missing seat, an empty
 ``contract_hash``/``report_path``, or a verdict contradicting its report is a
 refusal. The same ``--override-reason`` valve applies with a mandatory reason.
 
@@ -88,6 +90,14 @@ Receipt written to t0_receipts.ndjson:
     branch      : <from gh api>
     preflight_gates: <list of 5 dicts — every preflight's own verdict; see
                                  "Preflight ledger" below>
+    review_seats: <dict — the seat rule the merge was judged under (OI-2058,
+                                 R5b): rule, pr_id, head_sha, the effective
+                                 seats and their source, who filled which
+                                 seat; ``seats`` empty with ``verdict``
+                                 ``overridden`` or ``not_evaluated`` when the
+                                 review gate did not judge. Always written,
+                                 so track closure tells a merge under the
+                                 seat rule from one before it>
     contract_invalid_override: <dict, optional — {"flag", "reason"}, only
                                  present when --override-contract-invalid
                                  was used to bypass a contract_invalid latest
@@ -600,20 +610,46 @@ def _resolve_declared_gate(pr_number: int, *, state_dir: Path) -> str:
     return ""
 
 
+def _unjudged_seats_record(pr_number: int, head_sha: str, verdict: str, reason: str = "") -> Dict[str, Any]:
+    """The ``review_seats`` a merge record carries when the review gate did not judge the seats.
+
+    ``verdict`` is ``overridden`` (``--override-reason``) or ``not_evaluated``
+    (a caller of ``merge_pr`` that ran no preflight). ``seats`` stays empty:
+    nobody established them, and track closure then resolves them the way the
+    door does instead of reading this merge as one from before the seat rule.
+    """
+    from review_seat_evaluation import SEAT_RULE
+
+    record: Dict[str, Any] = {
+        "rule": SEAT_RULE,
+        "pr_id": str(pr_number),
+        "head_sha": head_sha or "",
+        "seats": [],
+        "source": "",
+        "verdict": verdict,
+    }
+    if reason:
+        record["override_reason"] = reason
+    return record
+
+
 def _run_review_gate(
     pr_number: int,
     *,
     override_reason: Optional[str] = None,
 ) -> tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
-    """Fail-closed review-gate check: a passing, evidenced review-gate result
-    must exist for this PR before merge.
+    """Fail-closed review-gate check: every review seat of the project is filled
+    on this PR head before merge (OI-2058, R5b).
 
-    Resolves the PR branch via ``gh pr view``, resolves the declared gate from
-    the door's obligation record (joined on the GitHub PR number), then
-    delegates result validation to
-    ``closure_verifier.check_review_gate_for_merge`` — the SAME truth the
-    closure verifier uses. Returns ``(gate, pr_data)``; the caller merges only
-    when ``gate["verdict"] == "GO"``.
+    Resolves the PR branch via ``gh pr view``, requires the door's obligation
+    record (joined on the GitHub PR number), then delegates the seat
+    evaluation to ``closure_verifier.check_review_gate_for_merge`` — the SAME
+    truth ``vnx-gate/review``, ``vnx pr-ready`` and track closure use. Which
+    seats: the project's review stack as a request on this head recorded it,
+    else resolved fresh; the obligation's declared gate decides no seat.
+    Returns ``(gate, pr_data)``; the caller merges only when
+    ``gate["verdict"] == "GO"``. ``gate["review_seats"]`` is the seat record
+    the ``pr_merged`` receipt carries.
 
     The result key is the bare PR number string (``str(pr_number)``): the
     governed obligation runner records gate results under that key regardless
@@ -675,6 +711,7 @@ def _run_review_gate(
             "overridden": True,
             "override_reason": reason,
             "gate": None,
+            "review_seats": _unjudged_seats_record(pr_number, head_sha, "overridden", reason),
         }, pr_data
 
     # ── Declared gate from the door's obligation ──────────────────────────
@@ -695,13 +732,8 @@ def _run_review_gate(
 
     from closure_verifier import check_review_gate_for_merge
 
-    results_dir = state_dir / "review_gates" / "results"
     gate = check_review_gate_for_merge(
-        str(pr_number),
-        gate_name,
-        results_dir,
-        branch=branch,
-        head_sha=head_sha,
+        str(pr_number), gate_name, state_dir / "review_gates" / "results", branch=branch, head_sha=head_sha,
     )
     return gate, pr_data
 
@@ -1479,6 +1511,7 @@ def _emit_receipt(
     receipts_file: Optional[str] = None,
     contract_invalid_override: Optional[Dict[str, Any]] = None,
     preflight_gates: Optional[list[Dict[str, Any]]] = None,
+    review_seats: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Write pr_merged receipt to t0_receipts.ndjson with dual-scheme linkage.
 
@@ -1503,6 +1536,12 @@ def _emit_receipt(
     the full five-record ledger with every verdict ``not_evaluated`` and
     ``GATES_NOT_RUN_MESSAGE`` as the reason, so a reader sees one uniform shape
     and field-presence alone separates a post-D3 receipt from a pre-D3 one.
+
+    ``review_seats`` (OI-2058, R5b) is the seat rule the review preflight
+    judged the merge under. Written always, for the same reason: track closure
+    reads its presence to tell a merge under the seat rule from one before it,
+    so a caller that ran no gate records ``verdict: not_evaluated`` and no
+    seats rather than nothing.
     """
     kwargs: Dict[str, Any] = {
         "pr_number": pr_number,
@@ -1522,6 +1561,7 @@ def _emit_receipt(
     kwargs["preflight_gates"] = preflight_gates or _preflight_ledger(
         [], unevaluated_message=GATES_NOT_RUN_MESSAGE,
     )
+    kwargs["review_seats"] = review_seats or _unjudged_seats_record(pr_number, "", "not_evaluated")
     return emit_governance_receipt(
         "pr_merged",
         receipt_kind="state_mutation",
@@ -1720,6 +1760,7 @@ def merge_pr(
     pr_data: Optional[Dict[str, Any]] = None,
     contract_invalid_override: Optional[Dict[str, Any]] = None,
     preflight_gates: Optional[list[Dict[str, Any]]] = None,
+    review_seats: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Merge a PR and emit audit trail.
 
@@ -1732,6 +1773,10 @@ def merge_pr(
     ``preflight_gates`` (Golf Bx, D3): the five preflight verdicts ``main()``
     collected on the way here, forwarded onto the ``pr_merged`` receipt.
     ``None`` (default) omits the field for callers that never ran the gates.
+
+    ``review_seats`` (OI-2058, R5b): the seat record the review preflight
+    returned, forwarded onto the ``pr_merged`` receipt. ``None`` records
+    ``verdict: not_evaluated`` for the head merged.
 
     ``head_sha`` is the exact commit the gates approved; it is threaded into
     ``gh pr merge --match-head-commit`` so the merge refuses any other commit.
@@ -1822,16 +1867,13 @@ def merge_pr(
     # best-effort and is not touched.
     try:
         receipt = _emit_receipt(
-            pr_number=pr_number,
-            dispatch_id=dispatch_id,
-            merge_method=merge_method,
-            pr_title=result["pr_title"],
-            branch=result["branch"],
-            pr_id=pr_id or "",
-            pr_id_resolution="" if pr_id else "unmatched",
+            pr_number=pr_number, dispatch_id=dispatch_id, merge_method=merge_method,
+            pr_title=result["pr_title"], branch=result["branch"],
+            pr_id=pr_id or "", pr_id_resolution="" if pr_id else "unmatched",
             receipts_file=receipts_file,
             contract_invalid_override=contract_invalid_override,
             preflight_gates=preflight_gates,
+            review_seats=review_seats or _unjudged_seats_record(pr_number, head_sha, "not_evaluated"),
         )
         append_status = (receipt or {}).get("append_status", "unknown")
         result["receipt_status"] = append_status
@@ -2044,14 +2086,11 @@ def _run_door(args: argparse.Namespace) -> int:
     )
 
     result = merge_pr(
-        pr_number=args.pr,
-        dispatch_id=args.dispatch_id or "",
-        merge_method=method,
-        dry_run=args.dry_run,
-        head_sha=head_sha,
-        pr_data=pr_data,
+        pr_number=args.pr, dispatch_id=args.dispatch_id or "", merge_method=method,
+        dry_run=args.dry_run, head_sha=head_sha, pr_data=pr_data,
         contract_invalid_override=contract_invalid_override,
         preflight_gates=preflight_gates,
+        review_seats=review_gate.get("review_seats"),
     )
 
     result["target_repo"] = _ACTIVE_TARGET.repo if _ACTIVE_TARGET is not None else ""

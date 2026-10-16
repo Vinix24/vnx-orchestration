@@ -117,6 +117,7 @@ class TestInvariant7DoesNotBlockOnNegatedProse:
 
         gate = cv.check_review_gate_for_merge(
             "PR-1691", "glm_gate", results_dir, branch="feature/oi-1473",
+            seats=["glm_gate"],
         )
 
         assert gate["verdict"] == "GO", gate["message"]
@@ -129,6 +130,7 @@ class TestInvariant7DoesNotBlockOnNegatedProse:
 
         gate = cv.check_review_gate_for_merge(
             "PR-1691", "glm_gate", results_dir, branch="feature/oi-1473",
+            seats=["glm_gate"],
         )
 
         assert gate["verdict"] == "GO", gate["message"]
@@ -184,6 +186,7 @@ class TestInvariant7StillCatchesRealContradictions:
 
         gate = cv.check_review_gate_for_merge(
             "PR-1691", "glm_gate", results_dir, branch="feature/oi-1473",
+            seats=["glm_gate"],
         )
 
         assert gate["verdict"] == "NO-GO"
@@ -208,6 +211,7 @@ class TestInvariant7StillCatchesRealContradictions:
 
         gate = cv.check_review_gate_for_merge(
             "PR-1691", "glm_gate", results_dir, branch="feature/oi-1473",
+            seats=["glm_gate"],
         )
 
         assert gate["verdict"] == "NO-GO"
@@ -226,6 +230,7 @@ class TestFailOpenOnAbsenceOfEvidence:
 
         gate = cv.check_review_gate_for_merge(
             "PR-1691", "glm_gate", results_dir, branch="feature/oi-1473",
+            seats=["glm_gate"],
         )
 
         assert gate["verdict"] == "GO", gate["message"]

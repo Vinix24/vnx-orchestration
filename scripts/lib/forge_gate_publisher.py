@@ -459,67 +459,50 @@ def review_verdict(
     branch: Optional[str] = None,
     project_id: Optional[str] = None,
 ) -> ForgeVerdict:
-    """Is there a valid review accord on THIS head? One verdict for all gates.
+    """Is every review seat filled on THIS head? One verdict for the whole review.
 
     Where :func:`classify_record` answers "what did gate X say", this answers
     the question branch protection actually needs answered, and it is the only
     one of the two that can be made required: a per-gate check would force
-    whichever gate happened to be named, on every PR, while the fleet's real
-    rule has always been "at least one review peer signed".
+    whichever gate happened to be named, on every PR.
 
-    **The rule is read, never restated.** ``closure_verifier``'s
-    ``_REVIEW_PEER_GATES`` (who may sign — OI-1645 keeps ``ci_gate`` out: it
-    verifies tests, lint and build, never the change) and
-    ``check_review_gate_for_merge`` (whether a signature holds, including the
-    OI-1576 takeover chain and the OI-1624 peer route) do the deciding. A
-    second copy here would be a check that says GO where the merge door says
-    NO-GO, and the whole point of publishing this to GitHub is that the two
-    agree. ``TestTheRuleComesFromTheMergeDoor`` pins the reading: widen the
-    door's peer set and this conclusion moves with it.
+    **The rule is read, never restated.** The answer comes from
+    ``review_seat_evaluation.evaluate_review_seats``, the one seat evaluation
+    the merge door (``closure_verifier.check_review_gate_for_merge``),
+    ``vnx pr-ready`` and track closure use too (OI-2058, OI-2064, R5b). Before
+    it, this check stopped at the first seat with a GO: on PR #2058 head
+    ``71f92de1`` it said ``success`` while ``vnx-gate/codex_gate`` said
+    ``failure`` with a blocking finding on the same head.
 
-    On top of the door, :func:`_proven_pass_on_head` — the SAME predicate the
-    per-gate publisher consults before a green check leaves the machine. The
-    door does not read ``evidence_source``, so without this the summary would
-    be MORE permissive than the per-gate check it summarizes, and a
-    ``reanchored`` verdict could sign a head no gate ever ran against.
+    On top of the door, :func:`_proven_pass_on_head` for every record that
+    fills a seat — the SAME predicate the per-gate publisher consults before a
+    green check leaves the machine. The door does not read
+    ``evidence_source``, so without this the summary would be MORE permissive
+    than the per-gate checks it summarizes.
 
-    The three conclusions, and why the split falls where it does:
+    The three conclusions:
 
-    ``success``       a review peer signed this exact head, and that signature
-                      survives the merge door's chain and the head/test-run/
-                      provenance conditions.
-    ``failure``       nobody signed, and the head is not waiting on anything:
-                      some gate DID render a verdict here. Either a review
-                      peer said no (or said yes and its own report contradicts
-                      it), or the only evidence is non-review evidence — a
-                      ``ci_gate`` pass and nothing else is the OI-1645 state,
-                      fully judged and entirely unreviewed.
-    ``action_required``  nothing decided has been said about this head at all:
-                      no records, provider outage, a gate still running, or a
-                      verdict that belongs to another commit. Absence of
-                      evidence, which on a required check must block — never
-                      ``neutral`` or ``skipped``, both of which GitHub reads
-                      as SATISFIED.
+    ``failure``          a review peer on this head has a blocking finding,
+                         whatever the other seats say; or a seat's reviewer
+                         spoke on this head and what it left does not hold up
+                         (a contradicted pass, incomplete evidence, a pass the
+                         per-gate predicate refuses).
+    ``action_required``  a required seat has not spoken on this head: no
+                         record, an outage, a run still going, a verdict about
+                         another commit, or a seat list that cannot be
+                         established. Absence of evidence, which on a required
+                         check must block — never ``neutral`` or ``skipped``,
+                         both of which GitHub reads as SATISFIED.
+    ``success``          every required seat is filled by a distinct reviewer
+                         with a proven pass on this head, and nothing blocks.
 
-    ``branch``/``project_id`` are passed straight through to the door. Handing
-    it less scope than the merge door gets would make this check the more
-    lenient of the two, which is the one direction that costs something.
+    ``branch``/``project_id`` are passed straight through. Handing the
+    evaluation less scope than the merge door gets would make this check the
+    more lenient of the two, which is the one direction that costs something.
     """
     resolved_head = _require_head(head_sha)
     directory = results_dir if results_dir is not None else _default_results_dir()
-    pr_id = str(pr_number)
 
-    # Imported at call time for the same reason _proven_pass_on_head does it:
-    # closure_verifier's import tail has no business loading on every gate run
-    # that merely records a result.
-    from closure_verifier import (  # noqa: PLC0415
-        _KNOWN_GATES,
-        _REVIEW_PEER_GATES,
-        _find_gate_result,
-        check_review_gate_for_merge,
-    )
-
-    peers = sorted(_REVIEW_PEER_GATES)
     if not directory.exists():
         return ForgeVerdict(
             CONCLUSION_ACTION_REQUIRED,
@@ -527,85 +510,66 @@ def review_verdict(
             "dus geen enkele review-poort heeft hier een record achtergelaten",
         )
 
-    for gate in peers:
-        door = check_review_gate_for_merge(
-            pr_id, gate, directory, branch=branch, project_id=project_id,
-            head_sha=resolved_head,
-        )
-        if door.get("verdict") != "GO":
-            continue
-        # WHICH record carried the GO: the declared gate's own, or the peer /
-        # takeover successor the door accepted in its place.
-        evidence_gate = str(door.get("evidence_gate") or gate)
-        record = _find_gate_result(
-            evidence_gate, pr_id, directory, branch=branch, project_id=project_id,
-            head_sha=resolved_head,
-        )
-        proven, why = _proven_pass_on_head(record, resolved_head)
-        if not proven:
-            # The door accepts it, this layer does not. Never silent: the two
-            # disagreeing is exactly the state an operator has to see, because
-            # the merge would go through while the check stays red.
-            logger.warning(
-                "forge_gate_publisher: de merge-deur telt %s als ondertekenaar voor %s op "
-                "%s, maar het record is hier geen bewezen pass (%s) — de samenvattende "
-                "check blijft rood",
-                evidence_gate, gate, resolved_head[:12], why,
-            )
-            continue
-        via = (
-            f"{evidence_gate} (via overname/ondertekening voor {gate})"
-            if evidence_gate != gate
-            else evidence_gate
-        )
-        return ForgeVerdict(
-            CONCLUSION_SUCCESS,
-            f"geldig review-akkoord op deze kop: {via} — {why}",
-        )
+    # Imported at call time: closure_verifier's import tail (which the
+    # evaluation reaches) has no business loading on every gate run that
+    # merely records a result.
+    from review_seat_evaluation import evaluate_review_seats
 
-    # Nobody signed. Is this head still waiting, or has it been judged and
-    # found unreviewed? Everything the closure verifier can interpret counts
-    # towards "something was decided here", INCLUDING the gates that may not
-    # sign — that is precisely what separates the two red conclusions.
-    spoken: List[Tuple[str, str]] = []
-    for gate in sorted(_KNOWN_GATES):
-        record = _find_gate_result(
-            gate, pr_id, directory, branch=branch, project_id=project_id,
-            head_sha=resolved_head,
-        )
-        if record is None:
-            continue
-        status = canonical_status(record)
-        if status in (PASS_STATES | FAIL_STATES):
-            spoken.append((gate, status))
-
-    if not spoken:
-        return ForgeVerdict(
-            CONCLUSION_ACTION_REQUIRED,
-            "geen review-akkoord op deze kop: geen enkele poort heeft hier een beslissende "
-            "uitspraak achtergelaten (afwezig, uitgevallen, nog bezig, of een oordeel over "
-            f"een andere commit). Draai een review-poort op {resolved_head[:12]}. "
-            f"Ondertekenaars die tellen: {', '.join(peers)}.",
-        )
-
-    everyone = ", ".join(f"{gate}={status}" for gate, status in spoken)
-    signers_spoke = [
-        f"{gate}={status}" for gate, status in spoken if gate in _REVIEW_PEER_GATES
-    ]
-    if signers_spoke:
+    evaluation = evaluate_review_seats(
+        str(pr_number), directory, branch=branch, project_id=project_id, head_sha=resolved_head,
+    )
+    seats = ", ".join(evaluation.seats) or "geen"
+    if evaluation.required.error:
+        return ForgeVerdict(CONCLUSION_ACTION_REQUIRED, f"geen review-akkoord op deze kop: {evaluation.message()}")
+    if evaluation.blocking:
         return ForgeVerdict(
             CONCLUSION_FAILURE,
-            "geen geldig review-akkoord op deze kop: de review-poorten die hier spraken "
-            f"({', '.join(signers_spoke)}) leverden geen bewezen pass. Volledige uitspraak "
-            f"op deze kop: {everyone}.",
+            f"geen review-akkoord op deze kop (seats: {seats}): {evaluation.message()}",
         )
-    return ForgeVerdict(
-        CONCLUSION_FAILURE,
-        f"geen review-akkoord op deze kop: alleen niet-review-bewijs ({everyone}). "
-        "CI is een tweede, zelfstandige merge-eis en nooit een ondertekenaar (OI-1645), "
-        "dus deze kop is beoordeeld maar niet gereviewd. Ondertekenaars die tellen: "
-        f"{', '.join(peers)}.",
-    )
+    unproven = _unproven_fills(evaluation, directory, branch, project_id, resolved_head)
+    judged = [fill for fill in evaluation.unfilled if fill.spoke]
+    if judged or unproven:
+        reasons = [f"seat {fill.seat}: {fill.message}" for fill in judged] + unproven
+        return ForgeVerdict(
+            CONCLUSION_FAILURE,
+            f"geen geldig review-akkoord op deze kop (seats: {seats}): " + "; ".join(reasons),
+        )
+    if evaluation.unfilled:
+        return ForgeVerdict(
+            CONCLUSION_ACTION_REQUIRED,
+            f"geen review-akkoord op deze kop: een vereiste seat heeft hier nog niet gesproken "
+            f"(seats: {seats}). Draai de review-poorten op {resolved_head[:12]}. {evaluation.message()}",
+        )
+    return ForgeVerdict(CONCLUSION_SUCCESS, f"geldig review-akkoord op deze kop: {evaluation.message()}")
+
+
+def _unproven_fills(evaluation, directory: Path, branch, project_id, head_sha: str) -> List[str]:
+    """Every filled seat whose record the per-gate predicate does not call a proven pass.
+
+    The door accepts it, this layer does not. Never silent: the two
+    disagreeing is exactly the state an operator has to see, because the merge
+    would go through while the check stays red.
+    """
+    from closure_verifier import _find_gate_result
+
+    reasons: List[str] = []
+    for fill in evaluation.fills:
+        if not fill.filled:
+            continue
+        record = _find_gate_result(
+            fill.reviewer, str(evaluation.scope.pr_id), directory, branch=branch,
+            project_id=project_id, head_sha=head_sha,
+        )
+        proven, why = _proven_pass_on_head(record, head_sha)
+        if proven:
+            continue
+        logger.warning(
+            "forge_gate_publisher: de merge-deur telt %s als reviewer voor seat %s op %s, maar "
+            "het record is hier geen bewezen pass (%s) — de samenvattende check blijft rood",
+            fill.reviewer, fill.seat, head_sha[:12], why,
+        )
+        reasons.append(f"seat {fill.seat}: {fill.reviewer} is hier geen bewezen pass ({why})")
+    return reasons
 
 
 # ---------------------------------------------------------------------------

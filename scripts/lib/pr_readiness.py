@@ -15,10 +15,12 @@ opinion beside each one:
                   "not created yet" separated from "never created")
   declared gates  ``gate_obligations.declared_gates_for_pr`` (the door's own
                   obligation record, the same join ``pr_merge`` uses)
-  gate evidence   ``closure_verifier.check_review_gate_for_merge`` (record on
-                  this head, terminal, contract_hash + report_path non-empty,
-                  report on disk, verdict passes, report does not contradict
-                  the verdict)
+  gate evidence   ``review_seat_evaluation.evaluate_review_seats``, the seat
+                  evaluation the merge door runs (every seat of the project's
+                  review stack filled by a distinct reviewer on this head:
+                  terminal, contract_hash + report_path non-empty, report on
+                  disk, verdict passes, report does not contradict it; and no
+                  review peer with a blocking finding on the head)
 
 What is new is only the aggregation, the cost of closing each gap, and the
 refusal to round anything unmeasured up to green.
@@ -137,7 +139,7 @@ GATE_COST: Dict[str, GateCost] = {
 
 @dataclass(frozen=True)
 class GateEvidence:
-    """One declared gate, and whether its evidence holds for THIS head."""
+    """One review seat (or a blocking reviewer), and whether its evidence holds for THIS head."""
 
     gate: str
     verdict: str  # "GO" | "NO-GO" | "UNMEASURABLE"
@@ -394,70 +396,76 @@ def collect_gate_evidence(
     head_sha: str,
     declared: Optional[Sequence[str]] = None,
 ) -> List[GateEvidence]:
-    """Evaluate each declared gate against ``head_sha``.
+    """One entry per review seat of the project, judged against ``head_sha``.
 
-    Delegates the verdict to ``closure_verifier.check_review_gate_for_merge`` —
-    the same five invariants the merge door enforces, never a weaker second
-    copy. On top of that it records WHERE the newest record for this gate sits
-    when it is not on this head, because "the gate ran, two commits ago" and
-    "the gate never ran" cost completely different things to fix and the merge
-    door's binary verdict cannot tell them apart.
+    Delegates to ``review_seat_evaluation.evaluate_review_seats``, the seat
+    evaluation the merge door itself runs (OI-2058, R5b), so "ready" and "the
+    door says GO" cannot differ: every seat filled by a distinct reviewer, and
+    no review peer with a blocking finding on the head. A blocking reviewer
+    that is no seat of its own gets an entry of its own, so the report names
+    what blocks. ``declared_gates`` (the obligations plus gates run off the
+    door) decides no seat; it marks which seat an obligation declared.
+
+    On top of that it records WHERE the newest record for a seat sits when it
+    is not on this head, because "the gate ran, two commits ago" and "the gate
+    never ran" cost completely different things to fix and the merge door's
+    binary verdict cannot tell them apart.
     """
-    from closure_verifier import _find_gate_result, check_review_gate_for_merge
+    from review_seat_evaluation import evaluate_review_seats
 
     results_dir = Path(state_dir) / "review_gates" / "results"
     declared_set = set(declared_gates if declared is None else declared)
-    evidence: List[GateEvidence] = []
-    for gate in declared_gates:
-        try:
-            verdict = check_review_gate_for_merge(
-                str(pr_number), gate, results_dir, branch=branch, head_sha=head_sha,
-            )
-        except (OSError, ValueError) as exc:
-            evidence.append(
-                GateEvidence(
-                    gate=gate,
-                    verdict=VERDICT_UNMEASURABLE,
-                    message=f"gate evidence could not be read: {type(exc).__name__}: {exc}",
-                    declared=gate in declared_set,
-                )
-            )
-            continue
-
-        record_sha = None
-        report_path = None
-        report_exists = None
-        # Only interesting when the head-bound lookup found nothing: name the
-        # commit the newest record DOES sit on, so the reader sees "stale" and
-        # "absent" as the different problems they are.
-        anywhere = _find_gate_result(gate, str(pr_number), results_dir)
-        evidence_gate = verdict.get("evidence_gate")
-        evidence_via = verdict.get("evidence_via")
-        if anywhere is None and evidence_gate and evidence_gate != gate:
-            # The evidence lives under another gate's name (an OI-1576
-            # successor or an OI-1719 takeover booking): show where THAT
-            # record sits, never a blank "absent" for a declared gate whose
-            # obligation was fulfilled through someone else's record.
-            anywhere = _find_gate_result(evidence_gate, str(pr_number), results_dir)
-        if anywhere:
-            record_sha = anywhere.get("commit_sha") or None
-            report_path = anywhere.get("report_path") or None
-            if report_path:
-                report_exists = Path(report_path).exists()
-        evidence.append(
-            GateEvidence(
-                gate=gate,
-                verdict=verdict.get("verdict", VERDICT_UNMEASURABLE),
-                message=verdict.get("message", ""),
-                record_sha=record_sha,
-                report_path=report_path,
-                report_exists=report_exists,
-                declared=gate in declared_set,
-                evidence_gate=evidence_gate,
-                evidence_via=evidence_via,
-            )
+    try:
+        evaluation = evaluate_review_seats(
+            str(pr_number), results_dir, branch=branch, head_sha=head_sha,
         )
+    except (OSError, ValueError) as exc:
+        return [GateEvidence(
+            gate="review_seats", verdict=VERDICT_UNMEASURABLE,
+            message=f"gate evidence could not be read: {type(exc).__name__}: {exc}",
+        )]
+    if evaluation.required.error:
+        return [GateEvidence(gate="review_seats", verdict=VERDICT_UNMEASURABLE, message=evaluation.message())]
+    evidence = [
+        _seat_evidence(fill, pr_number, results_dir, declared=fill.seat in declared_set)
+        for fill in evaluation.fills
+    ]
+    for gate, seat, status in evaluation.blocking:
+        if gate in evaluation.seats:
+            continue
+        evidence.append(GateEvidence(
+            gate=gate, verdict="NO-GO", declared=gate in declared_set,
+            message=(
+                f"{gate} keurde deze kop af ({status!r}, reviewer voor seat {seat or gate}): "
+                "een blokkerende bevinding blokkeert de merge, ook naast gevulde seats"
+            ),
+        ))
     return evidence
+
+
+def _seat_evidence(fill: Any, pr_number: int, results_dir: Path, *, declared: bool) -> GateEvidence:
+    """The readiness line for one seat, with where its newest record sits."""
+    from closure_verifier import _find_gate_result
+
+    reviewer = fill.reviewer if fill.filled else fill.seat
+    anywhere = _find_gate_result(reviewer, str(pr_number), results_dir)
+    record_sha = report_path = report_exists = None
+    if anywhere:
+        record_sha = anywhere.get("commit_sha") or None
+        report_path = anywhere.get("report_path") or None
+        if report_path:
+            report_exists = Path(report_path).exists()
+    return GateEvidence(
+        gate=fill.seat,
+        verdict="GO" if fill.filled else "NO-GO",
+        message=fill.message,
+        record_sha=record_sha,
+        report_path=report_path,
+        report_exists=report_exists,
+        declared=declared,
+        evidence_gate=fill.reviewer if fill.filled and fill.reviewer != fill.seat else None,
+        evidence_via=fill.evidence_via or None,
+    )
 
 
 def assess(
