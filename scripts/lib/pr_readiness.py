@@ -20,7 +20,8 @@ opinion beside each one:
                   review stack filled by a distinct reviewer on this head:
                   terminal, contract_hash + report_path non-empty, report on
                   disk, verdict passes, report does not contradict it; and no
-                  review peer with a blocking finding on the head)
+                  review peer on the head that rejected it, in its JSON or in
+                  its report)
 
 What is new is only the aggregation, the cost of closing each gap, and the
 refusal to round anything unmeasured up to green.
@@ -156,6 +157,10 @@ class GateEvidence:
     #: gate looked at the code itself.
     evidence_gate: Optional[str] = None
     evidence_via: Optional[str] = None
+    #: True for the line of a reviewer that rejected this head (in its JSON or in
+    #: its report), as opposed to a seat without evidence: the two cost different
+    #: things to close, and the renderer must not call a rejection "absent".
+    rejected: bool = False
 
     @property
     def satisfied(self) -> bool:
@@ -172,6 +177,7 @@ class GateEvidence:
             "declared": self.declared,
             "evidence_gate": self.evidence_gate,
             "evidence_via": self.evidence_via,
+            "rejected": self.rejected,
         }
 
 
@@ -401,10 +407,12 @@ def collect_gate_evidence(
     Delegates to ``review_seat_evaluation.evaluate_review_seats``, the seat
     evaluation the merge door itself runs (OI-2058, R5b), so "ready" and "the
     door says GO" cannot differ: every seat filled by a distinct reviewer, and
-    no review peer with a blocking finding on the head. A blocking reviewer
-    that is no seat of its own gets an entry of its own, so the report names
-    what blocks. ``declared_gates`` (the obligations plus gates run off the
-    door) decides no seat; it marks which seat an obligation declared.
+    no review peer that rejected the head (in its JSON or in its report). Every
+    rejecting reviewer gets a NO-GO entry of its own, also when its gate name
+    is a seat that another reviewer filled; only a seat line that already names
+    the same reviewer as NO-GO is not repeated. ``declared_gates`` (the
+    obligations plus gates run off the door) decides no seat; it marks which
+    seat an obligation declared.
 
     On top of that it records WHERE the newest record for a seat sits when it
     is not on this head, because "the gate ran, two commits ago" and "the gate
@@ -430,15 +438,14 @@ def collect_gate_evidence(
         _seat_evidence(fill, pr_number, results_dir, declared=fill.seat in declared_set)
         for fill in evaluation.fills
     ]
-    for gate, seat, status in evaluation.blocking:
-        if gate in evaluation.seats:
+    refused_seats = {line.gate for line in evidence if line.verdict == "NO-GO"}
+    for rejection in evaluation.blocking:
+        if rejection.gate == rejection.seat and rejection.gate in refused_seats:
+            # The seat's own line already names this reviewer as NO-GO.
             continue
         evidence.append(GateEvidence(
-            gate=gate, verdict="NO-GO", declared=gate in declared_set,
-            message=(
-                f"{gate} keurde deze kop af ({status!r}, reviewer voor seat {seat or gate}): "
-                "een blokkerende bevinding blokkeert de merge, ook naast gevulde seats"
-            ),
+            gate=rejection.gate, verdict="NO-GO", declared=rejection.gate in declared_set,
+            message=rejection.text(), rejected=True,
         ))
     return evidence
 

@@ -482,8 +482,9 @@ def review_verdict(
 
     The three conclusions:
 
-    ``failure``          a review peer on this head has a blocking finding,
-                         whatever the other seats say; or a seat's reviewer
+    ``failure``          a review peer on this head rejected it (a FAIL
+                         verdict or a blocking finding, in its JSON or in its
+                         report), whatever the other seats say; or a seat's reviewer
                          spoke on this head and what it left does not hold up
                          (a contradicted pass, incomplete evidence, a pass the
                          per-gate predicate refuses).

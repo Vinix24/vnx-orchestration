@@ -792,9 +792,8 @@ def _merge_door_record_verdict(
         }
     # Invariant 7: a passing verdict whose report still carries blocking
     # indicators is a contradiction, not evidence.
-    try:
-        report_content = report_path.read_text(encoding="utf-8")
-    except OSError:
+    indicators = _report_blocking_indicators(report_path)
+    if indicators is None:
         return {
             "verdict": "NO-GO",
             "message": f"{gate_label} report_path onleesbaar: {report_path}",
@@ -802,7 +801,7 @@ def _merge_door_record_verdict(
             "override_reason": None,
             "gate": gate_label,
         }
-    if _count_report_blocking_indicators(report_content) > 0:
+    if indicators > 0:
         return {
             "verdict": "NO-GO",
             "message": (
@@ -1226,8 +1225,11 @@ def check_review_gate_for_merge(
          disk, a pass that the report does not contradict
          (:func:`_merge_door_record_verdict`, the same five invariants as
          before); and
-      2. no review peer on this head carries a blocking finding: a rejection
-         blocks, whatever the other seats say.
+      2. no review peer on this head rejected it: a FAIL verdict or a
+         blocking finding in its JSON, or in its report on disk whatever its
+         JSON says (invariant 7, read for every review peer, the declared gate
+         and reviewers outside the seats included). A rejection blocks,
+         whatever the other seats say.
 
     Which seats: the ``review_seats`` (source ``config``) a request on this
     head recorded, else a fresh ``review_seats.resolve_review_seats()``; a
@@ -1877,7 +1879,9 @@ def _check_contract_hashes(
 
     ``skip`` holds the seats the seat rule already judged on the merged head
     (OI-2058, R5b): their evidence is the filling reviewer's record, bound to
-    that head, not the seat gate's own slot.
+    that head, not the seat gate's own slot. :func:`_seat_rule_checks` runs the
+    same comparison on that record, so skipping a seat here moves its check,
+    it never drops it.
     """
     checks: List[CheckResult] = []
     for gate in contract.review_stack:
@@ -1886,16 +1890,32 @@ def _check_contract_hashes(
         result = _find_gate_result(
             gate, contract.pr_id, results_dir, branch=contract.branch or None,
         )
-        if result and contract.content_hash:
-            result_hash = result.get("contract_hash") or result.get("content_hash") or ""
-            if result_hash and result_hash != contract.content_hash:
-                checks.append(CheckResult(
-                    f"hash_{gate}",
-                    "FAIL",
-                    f"{gate} receipt hash mismatch — evidence is stale "
-                    f"(contract={contract.content_hash[:8]}.. receipt={result_hash[:8]}..)",
-                ))
+        check = _record_hash_check(gate, gate, result, contract.content_hash)
+        if check is not None:
+            checks.append(check)
     return checks
+
+
+def _record_hash_check(
+    name: str, label: str, result: Optional[Dict[str, Any]], content_hash: str,
+) -> Optional[CheckResult]:
+    """``hash_<name>`` FAIL when ``result`` carries a contract hash other than the contract's.
+
+    One comparison for both closure rules: the old rule checks a gate's own
+    record (``label`` is the gate), the seat rule the record that fills the
+    seat (``label`` names the seat and its reviewer, OI-2058 R5b round 2).
+    """
+    if not result or not content_hash:
+        return None
+    result_hash = result.get("contract_hash") or result.get("content_hash") or ""
+    if not result_hash or result_hash == content_hash:
+        return None
+    return CheckResult(
+        f"hash_{name}",
+        "FAIL",
+        f"{label} receipt hash mismatch — evidence is stale "
+        f"(contract={content_hash[:8]}.. receipt={result_hash[:8]}..)",
+    )
 
 
 def _check_report_paths(
@@ -1912,27 +1932,25 @@ def _check_report_paths(
         result = _find_gate_result(
             gate, contract.pr_id, results_dir, branch=contract.branch or None,
         )
-        if result is not None and gate_is_terminal(result):
-            report_path = result.get("report_path", "")
-            if not report_path:
-                checks.append(CheckResult(
-                    f"report_{gate}",
-                    "FAIL",
-                    f"{gate} gate result is missing required report_path field",
-                ))
-            elif not Path(report_path).exists():
-                checks.append(CheckResult(
-                    f"report_{gate}",
-                    "FAIL",
-                    f"{gate} report_path does not exist: {report_path}",
-                ))
-            else:
-                checks.append(CheckResult(
-                    f"report_{gate}",
-                    "PASS",
-                    f"{gate} normalized report exists at {report_path}",
-                ))
+        check = _record_report_check(gate, gate, result)
+        if check is not None:
+            checks.append(check)
     return checks
+
+
+def _record_report_check(name: str, label: str, result: Optional[Dict[str, Any]]) -> Optional[CheckResult]:
+    """``report_<name>`` for a terminal ``result``: its report_path is set and the file exists.
+
+    Shared by both closure rules, as :func:`_record_hash_check`.
+    """
+    if result is None or not gate_is_terminal(result):
+        return None
+    report_path = result.get("report_path", "")
+    if not report_path:
+        return CheckResult(f"report_{name}", "FAIL", f"{label} gate result is missing required report_path field")
+    if not Path(report_path).exists():
+        return CheckResult(f"report_{name}", "FAIL", f"{label} report_path does not exist: {report_path}")
+    return CheckResult(f"report_{name}", "PASS", f"{label} normalized report exists at {report_path}")
 
 
 def _check_deterministic_findings(contract: ReviewContract) -> CheckResult:
@@ -1978,6 +1996,11 @@ def _seat_rule_checks(
     the door resolves them. Returns the checks and the seats they cover, so the
     per-gate handlers skip those gates (a seat may be filled by a takeover,
     which the per-gate reading of the old rule cannot see).
+
+    No check the old rule ran disappears for a seat: the hash and report checks
+    (:func:`_record_hash_check`, :func:`_record_report_check`) move to the
+    record that fills the seat, named after the seat (OI-2058 R5b round 2). An
+    unfilled seat gets them on the record that answered for it and did not hold.
     """
     from review_seat_evaluation import SOURCE_MERGE_RECORD, evaluate_review_seats
 
@@ -1990,18 +2013,27 @@ def _seat_rule_checks(
     checks: List[CheckResult] = []
     if evaluation.required.error:
         checks.append(CheckResult("review_seats", "FAIL", evaluation.message()))
-    for gate, seat, status in evaluation.blocking:
-        checks.append(CheckResult(
-            "review_seats_blocking", "FAIL",
-            f"{gate} keurde de gemergde kop af ({status!r}, reviewer voor seat {seat or gate})",
-        ))
+    for rejection in evaluation.blocking:
+        checks.append(CheckResult("review_seats_blocking", "FAIL", f"gemergde kop: {rejection.text()}"))
     for fill in evaluation.fills:
         detail = (
             f"seat {fill.seat} gevuld door {fill.reviewer} ({fill.route})" if fill.filled
             else f"seat {fill.seat} niet gevuld: {fill.message}"
         )
         checks.append(CheckResult(f"seat_{fill.seat}", "PASS" if fill.filled else "FAIL", detail))
+        checks.extend(_seat_evidence_checks(fill, contract.content_hash))
     return checks, frozenset(evaluation.seats)
+
+
+def _seat_evidence_checks(fill: Any, content_hash: str) -> List[CheckResult]:
+    """The old rule's hash and report checks on the record that answers for one seat."""
+    reviewer = fill.reviewer or str((fill.record or {}).get("gate") or fill.seat)
+    label = f"seat {fill.seat}: {reviewer}"
+    found = (
+        _record_hash_check(fill.seat, label, fill.record, content_hash),
+        _record_report_check(fill.seat, label, fill.record),
+    )
+    return [check for check in found if check is not None]
 
 
 def _validate_review_evidence(
@@ -2638,6 +2670,22 @@ def _count_report_blocking_indicators(content: str) -> int:
         return _count_matches_excluding_negations(_FINDINGS_SECTION_PATTERNS, findings_section)
 
     return _count_matches_excluding_negations(_PROSE_FALLBACK_PATTERNS, filtered)
+
+
+def _report_blocking_indicators(report_path: Path) -> Optional[int]:
+    """Invariant 7's reading of one report on disk: its blocking indicators, ``None`` when unreadable.
+
+    The one report reader for a contradiction between a record and its report.
+    The merge door judges a seat's record with it
+    (:func:`_merge_door_record_verdict`), and the seat evaluation uses it to
+    find a rejection in the report of any review peer on the head
+    (``review_seat_evaluation.report_rejects``, OI-2058 R5b round 2).
+    """
+    try:
+        content = Path(report_path).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    return _count_report_blocking_indicators(content)
 
 
 def verify_closure(

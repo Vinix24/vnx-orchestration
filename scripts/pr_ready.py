@@ -154,6 +154,8 @@ def _gate_line(report: Readiness) -> str:
                 parts.append(f"{gate.gate} OK via overname -> {gate.evidence_gate} on head{suffix}")
             else:
                 parts.append(f"{gate.gate} OK on head{suffix}")
+        elif gate.rejected:
+            parts.append(f"{gate.gate} REJECTED on head ({gate.message}){suffix}")
         elif gate.verdict == VERDICT_UNMEASURABLE:
             parts.append(f"{gate.gate} UNMEASURABLE ({gate.message})")
         elif gate.record_sha and gate.record_sha != report.head_sha:

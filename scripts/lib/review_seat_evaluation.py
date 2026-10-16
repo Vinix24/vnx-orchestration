@@ -42,19 +42,25 @@ peer for a confirmed absence (also after an OI-1851 partial review, which
 itself fills no seat). A reviewer fills at most one seat: the booking and the
 peer route only accept a reviewer that no other seat counts.
 
-**Blocking always blocks.** Any completed record on the head from a review
-peer with a blocking finding refuses the merge, whatever the other seats say.
+**Blocking always blocks.** A record on the head from a review peer rejects
+it when its decided verdict is FAIL, or when its report on disk carries a FAIL
+verdict or a blocking finding, whatever its JSON says (:func:`report_rejects`:
+invariant 7 of the merge door, read with the door's own reader). That holds for
+every review peer, inside or outside the required seats, the declared gate
+included, and a rejection refuses the merge whatever the other seats say. A
+record that is only incomplete (no report on disk) is no rejection: it fills
+no seat and does not block on its own.
 
 BILLING SAFETY: no Anthropic SDK, no network, no subprocess. Only the standard
 library is imported at module level: ``gate_enforcement_verify`` is copied into
 the enforcement sandbox with this one module beside it. Everything the merge
-side needs (``closure_verifier``, ``review_seats``, ``config_runtime``) is
-imported inside the function that uses it.
+side needs (``closure_verifier``, ``gate_status``, ``review_seats``,
+``config_runtime``) is imported inside the function that uses it.
 """
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -374,17 +380,73 @@ def seated_records(scope: SeatScope, stated: Dict[str, str], gates: Sequence[str
     return seated
 
 
-def blocking_records(seated: Dict[str, SeatedRecord]) -> Tuple[Tuple[str, str, str], ...]:
-    """``(gate, seat, status)`` for every review peer on the head that rejected it: blocking always blocks."""
+@dataclass(frozen=True)
+class Rejection:
+    """One review peer on the head that rejected it, the seat it answered for, and how it said so.
+
+    ``contradicted`` is True when the record's JSON did not say FAIL and its
+    report on disk did (a FAIL verdict or a blocking finding): invariant 7 of
+    the merge door, read for every reviewer and not only for one that fills a seat.
+    """
+
+    gate: str
+    seat: str
+    status: str
+    contradicted: bool = False
+
+    def text(self) -> str:
+        if self.contradicted:
+            return (
+                f"{self.gate} (reviewer voor seat {self.seat or 'onbekend'}) zegt {self.status!r} in zijn "
+                "JSON, maar zijn rapport op schijf draagt een FAIL-verdict of een blokkerende bevinding: "
+                "het rapport spreekt de JSON tegen, en een afkeuring blokkeert de merge, ook naast een "
+                "pass op een andere seat"
+            )
+        where = f" (reviewer voor seat {self.seat})" if self.seat and self.seat != self.gate else ""
+        return (
+            f"{self.gate}{where} keurde deze kop af ({self.status!r}, blokkerende bevinding): een afkeuring "
+            "blokkeert de merge, ook naast een pass op een andere seat"
+        )
+
+
+def report_rejects(record: Dict[str, Any]) -> bool:
+    """Does the report on disk of a record that reviewed carry a FAIL verdict or a blocking finding?
+
+    Read with the merge door's own reader (``closure_verifier._report_blocking_indicators``),
+    whatever the record's JSON says. Only a record that reviewed is read (status
+    pass, fail or partial review): an outage or a gate that never ran has no
+    review to contradict. A record without a report on disk, or with one that
+    cannot be read, is incomplete, never a rejection: it fills no seat and does
+    not block on its own.
+    """
+    import closure_verifier as cv
+    from gate_status import FAIL_STATES, PARTIAL_REVIEW_STATES, PASS_STATES, canonical_status
+
+    if canonical_status(record) not in PASS_STATES | FAIL_STATES | PARTIAL_REVIEW_STATES:
+        return False
+    report_path = record.get("report_path")
+    if not isinstance(report_path, str) or not report_path.strip():
+        return False
+    indicators = cv._report_blocking_indicators(Path(report_path.strip()))
+    return bool(indicators)
+
+
+def blocking_records(seated: Dict[str, SeatedRecord]) -> Tuple[Rejection, ...]:
+    """Every review peer on the head that rejected it, in its JSON or in its report: blocking always blocks."""
     from gate_status import canonical_status, decided_verdict
     from review_seats import review_peer_gates
 
     peers = review_peer_gates()
-    return tuple(
-        (gate, entry.seat, canonical_status(entry.record))
-        for gate, entry in sorted(seated.items())
-        if gate in peers and decided_verdict(entry.record) == "fail"
-    )
+    found: List[Rejection] = []
+    for gate, entry in sorted(seated.items()):
+        if gate not in peers:
+            continue
+        status = canonical_status(entry.record)
+        if decided_verdict(entry.record) == "fail":
+            found.append(Rejection(gate, entry.seat, status))
+        elif report_rejects(entry.record):
+            found.append(Rejection(gate, entry.seat, status, contradicted=True))
+    return tuple(found)
 
 
 # ---------------------------------------------------------------------------
@@ -400,6 +462,11 @@ class SeatFill:
     decided verdict on the head. A seat that is unfilled and has not spoken is
     waiting (``action_required``); one that spoke and is still unfilled was
     judged and did not hold (``failure``).
+
+    ``record`` is the evidence track closure checks the contract hash and the
+    report of (``closure_verifier._seat_rule_checks``): the filling reviewer's
+    record on the head, or for an unfilled seat the record that answered for it
+    and did not hold; ``None`` when no record answered for the seat at all.
     """
 
     seat: str
@@ -410,6 +477,7 @@ class SeatFill:
     spoke: bool
     could_fill: Tuple[str, ...] = ()
     evidence_via: str = ""
+    record: Optional[Dict[str, Any]] = field(default=None, compare=False, repr=False)
 
 
 def _excluded(seat: str, seats: Sequence[str], seated: Dict[str, SeatedRecord], taken: Dict[str, str]) -> frozenset:
@@ -521,6 +589,26 @@ def _spoke(seat: str, seated: Dict[str, SeatedRecord], filled: bool) -> bool:
     return any(entry.seat == seat and decided_verdict(entry.record) for entry in seated.values())
 
 
+def _answering_record(seat: str, reviewer: str, seated: Dict[str, SeatedRecord]) -> Optional[Dict[str, Any]]:
+    """The record track closure checks for ``seat`` (see :class:`SeatFill`).
+
+    A filled seat: the filling reviewer's record on the head, the slot
+    ``closure_verifier._find_gate_result`` returns (the record ``vnx-gate/review``
+    proves and ``vnx pr-ready`` reports). An unfilled seat: of the records that
+    answer for it, one that rendered a verdict first, the seat gate's own first.
+    """
+    from gate_status import decided_verdict
+
+    if reviewer:
+        entry = seated.get(reviewer)
+        return entry.record if entry is not None else None
+    answering = sorted(
+        (entry for entry in seated.values() if entry.seat == seat),
+        key=lambda entry: (not decided_verdict(entry.record), entry.gate != seat, entry.gate),
+    )
+    return answering[0].record if answering else None
+
+
 def fill_seats(scope: SeatScope, seats: Sequence[str], seated, stated) -> Tuple[SeatFill, ...]:
     """Fill every seat through the evidence routes, in three rounds, one reviewer per seat."""
     settled = _claimed_round(scope, seats, seated, stated)
@@ -532,11 +620,13 @@ def fill_seats(scope: SeatScope, seats: Sequence[str], seated, stated) -> Tuple[
     for seat in seats:
         route, verdict = settled[seat]
         filled = verdict.get("verdict") == "GO"
+        reviewer = _reviewer_of(seat, verdict) if filled else ""
         fills.append(SeatFill(
-            seat=seat, filled=filled, reviewer=_reviewer_of(seat, verdict) if filled else "",
+            seat=seat, filled=filled, reviewer=reviewer,
             route=route if filled else "", message=str(verdict.get("message") or ""),
             spoke=_spoke(seat, seated, filled), evidence_via=str(verdict.get("evidence_via") or ""),
             could_fill=() if filled else could_fill(seat, _excluded(seat, seats, seated, taken)),
+            record=_answering_record(seat, reviewer, seated),
         ))
     return tuple(fills)
 
@@ -572,7 +662,7 @@ class SeatEvaluation:
     scope: SeatScope
     required: RequiredSeats
     fills: Tuple[SeatFill, ...]
-    blocking: Tuple[Tuple[str, str, str], ...]
+    blocking: Tuple[Rejection, ...]
     hints: Dict[str, str]
 
     @property
@@ -593,7 +683,7 @@ class SeatEvaluation:
     def message(self) -> str:
         if self.required.error:
             return f"de vereiste review-seats zijn niet vast te stellen: {self.required.error}"
-        parts = [_blocking_text(gate, seat, status) for gate, seat, status in self.blocking]
+        parts = [rejection.text() for rejection in self.blocking]
         parts += [_unfilled_text(fill, self.hints.get(fill.seat, "")) for fill in self.unfilled]
         if not parts:
             parts = [_filled_text(self)]
@@ -615,17 +705,9 @@ class SeatEvaluation:
             "filled_by": {fill.seat: fill.reviewer for fill in self.fills if fill.filled},
             "routes": {fill.seat: fill.route for fill in self.fills if fill.filled},
             "unfilled": [fill.seat for fill in self.unfilled],
-            "blocking": [gate for gate, _seat, _status in self.blocking],
+            "blocking": [rejection.gate for rejection in self.blocking],
             "verdict": "GO" if self.go else "NO-GO",
         }
-
-
-def _blocking_text(gate: str, seat: str, status: str) -> str:
-    where = f" (reviewer voor seat {seat})" if seat and seat != gate else ""
-    return (
-        f"{gate}{where} keurde deze kop af ({status!r}, blokkerende bevinding): een afkeuring "
-        "blokkeert de merge, ook naast een pass op een andere seat"
-    )
 
 
 def _unfilled_text(fill: SeatFill, hint: str) -> str:

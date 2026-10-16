@@ -185,9 +185,17 @@ geldt voor de OI-1719-boeking. Een gedeeltelijke review (OI-1851) vult geen seat
 weigering noemt de knip.
 
 **Een afkeuring blokkeert altijd.** Regel 1 van de voorrangsregel hierboven gold alleen
-binnen de afwezigheidsroute. Hij geldt nu voor de hele kop: elk afgerond record van een
-review-peer met een blokkerende bevinding houdt de merge tegen, wat de andere seats ook
-zeggen.
+binnen de afwezigheidsroute. Hij geldt nu voor de hele kop: een record van een
+review-peer op deze kop keurt af als zijn beslist verdict FAIL is, of als zijn rapport op
+schijf een FAIL-verdict of een blokkerende bevinding draagt, wat de JSON ook zegt. Dat is
+invariant 7 van de merge-deur, gelezen met de lezer van de deur zelf
+(`closure_verifier._report_blocking_indicators`), voor elke review-peer: binnen en buiten
+de vereiste seats, de gedeclareerde poort inbegrepen. Zo'n afkeuring houdt de merge
+tegen, wat de andere seats ook zeggen. Op `main` deed invariant 7 dat alleen voor het
+record van de gedeclareerde poort; ronde 1 van R5b liet de gedeclareerde poort geen seat
+meer beslissen en las het rapport daarna nergens meer (codex FAIL op #2074). Een record
+dat alleen onvolledig is (geen rapport op schijf) is geen afkeuring: het vult geen seat
+en blokkeert niet op zichzelf.
 
 **Een uitgeschakelde seat telt nooit als pass.** Heeft de keten geen beschikbare
 opvolger, dan noemt de weigering de seat, de schakelaar en de twee uitwegen:
@@ -197,14 +205,21 @@ opvolger, dan noemt de weigering de seat, de schakelaar en de twee uitwegen:
 enige seat-evaluatie. De merge-deur (`closure_verifier.check_review_gate_for_merge`),
 `vnx-gate/review` (`forge_gate_publisher.review_verdict`), `vnx pr-ready`
 (`pr_readiness.collect_gate_evidence`) en track-closure lezen haar. `success` op
-`vnx-gate/review` alleen als elke seat gevuld is; `failure` zodra een seat een
-blokkerende bevinding heeft of een reviewer sprak en het bewijs niet houdt;
-`action_required` zolang een vereiste seat niet heeft gesproken.
+`vnx-gate/review` alleen als elke seat gevuld is; `failure` zodra een review-peer
+afkeurt (in zijn JSON of in zijn rapport) of een reviewer sprak en het bewijs niet houdt;
+`action_required` zolang een vereiste seat niet heeft gesproken. `vnx pr-ready` geeft
+elke afkeurende reviewer een eigen NO-GO-regel, ook als zijn poortnaam een seat is die een
+andere reviewer vulde. Alleen een seat-regel die dezelfde reviewer al als NO-GO noemt,
+wordt niet herhaald. READY dus precies als de deur GO zegt.
 
 **Track-closure.** Het `pr_merged`-receipt draagt sinds R5b `review_seats` (regel,
 seats, bron, kop, wie welke seat vulde). Closure past de seat-regel toe op een PR met dat
-veld. Een PR die daarvoor is gemerged, zonder dat veld, blijft onder de regel waaronder
-hij is gemerged: geen gesloten of sluitbare track gaat weer open.
+veld. Geen controle van de oude regel verdwijnt voor een seat: de hash-controle en de
+rapport-controle gaan mee naar het record dat de seat vult (`hash_<seat>`,
+`report_<seat>`, met de vullende reviewer en bij een mismatch beide hashes). Bij een
+niet-gevulde seat draaien ze op het record dat voor de seat antwoordde. Een PR die
+daarvoor is gemerged, zonder dat veld, blijft onder de regel waaronder hij is gemerged:
+geen gesloten of sluitbare track gaat weer open.
 
 **Uitrol.** R5b zelf mergt onder de oude regel: het kan zichzelf niet reviewen. De regel
 geldt voor vnx-dev vanaf de merge daarna. Consumers draaien `~/.vnx-system/current`; zij

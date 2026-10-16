@@ -20,6 +20,12 @@ pinned here:
 - the governance enforcer credits a seat the same way (OI-2107), and the enforcement verifier
   resolves its default seats fresh.
 
+Round 2 (codex FAIL on ``389036f6``): a PASS JSON that its own report contradicts is a
+rejection, for every review peer on the head, inside or outside the seats; closure checks the
+hash and the report of every record that fills a seat; and for every head of this file
+``vnx pr-ready`` says READY and ``vnx-gate/review`` says ``success`` exactly when the door
+says GO.
+
 No real provider, store or GitHub: tmp stores, ``gh`` replaced at the edge (``_query_pr``,
 ``_run_ci_gate``, ``fetch_pr_facts``, ``ci_contexts.evaluate_commit``), and every config value
 resolved with no store behind it (``review_seat_support``).
@@ -43,6 +49,7 @@ import closure_verifier
 import forge_gate_publisher as fgp
 import gate_obligations
 import pr_merge
+import pr_ready
 import pr_readiness
 from review_seat_support import no_config_store, pin_review_stack
 
@@ -612,14 +619,14 @@ class TestMergeRecord:
         assert (seats["verdict"], seats["seats"], seats["head_sha"]) == ("overridden", [], HEAD)
 
 
-def _contract(review_stack: List[str], pr_id: str = PR_ID):
+def _contract(review_stack: List[str], pr_id: str = PR_ID, content_hash: str = ""):
     from review_contract import Deliverable, ReviewContract
 
     return ReviewContract(
         pr_id=pr_id, pr_title="R5b", feature_title="reparatiegolf", branch=BRANCH, track="A",
         risk_class="low", merge_policy="standard", closure_stage="ready",
         deliverables=[Deliverable(category="impl", description="seat rule")],
-        review_stack=review_stack, content_hash="",
+        review_stack=review_stack, content_hash=content_hash,
     )
 
 
@@ -762,3 +769,315 @@ class TestEveryReaderUsesTheSameSeat:
 
         assert list(stack()) == ["codex_gate"]
         assert list(gate_enforcement_verify.requested_stack({"gates": []}, lambda: STACK)()) == STACK
+
+
+# ---------------------------------------------------------------------------
+# Round 2: a rejection blocks, whichever record says it (codex blocking 2, warning 3)
+# ---------------------------------------------------------------------------
+
+
+def _rejecting_report(store, name: str) -> str:
+    """A report whose own verdict fence says FAIL with a blocking finding (invariant 7)."""
+    return _report(store, name, (
+        "# review\n\n```json\n" + json.dumps({"verdict": "fail", "findings": [
+            {"severity": "blocking", "title": "breekt elke aanroeper"}]}) + "\n```\n"
+    ))
+
+
+def _contradicted(store, gate: str, **extra: Any) -> Dict[str, Any]:
+    """A PASS JSON whose report on disk carries a FAIL verdict and a blocking finding."""
+    return _record(store, gate, report_path=_rejecting_report(store, f"{gate}-contradicted.md"), **extra)
+
+
+def _ready(store, monkeypatch) -> "pr_readiness.Readiness":
+    monkeypatch.setattr(pr_readiness, "fetch_pr_facts", lambda *a, **k: dict(_PR_DATA))
+    monkeypatch.setattr(
+        ci_contexts, "evaluate_commit",
+        lambda *a, **k: [ci_contexts.ContextState(context="VNX CI", state=ci_contexts.STATE_PASSED, detail="ok")],
+    )
+    return pr_readiness.assess(PR, store["tmp"], store["state"])
+
+
+def _full_house(store) -> None:
+    _write(store, "codex_gate", _record(store, "codex_gate"))
+    _write(store, "kimi_gate", _record(store, "kimi_gate"))
+
+
+def _rejection_beside_a_filled_seat(store) -> None:
+    """codex reads its own seat, kimi rejects while reading codex's seat, deepseek reads kimi's."""
+    _request(store, "codex_gate", seat="codex_gate", seats=STACK)
+    _request(store, "kimi_gate", seat="codex_gate", seats=STACK)
+    _request(store, "deepseek_gate", seat="kimi_gate", seats=STACK, **_took_over("kimi_gate"))
+    _write(store, "codex_gate", _record(store, "codex_gate"))
+    _write(store, "kimi_gate", _record(store, "kimi_gate", status="completed", blocking=True))
+    _write(store, "deepseek_gate", _record(store, "deepseek_gate", **_took_over("kimi_gate")))
+
+
+class TestARejectionInTheReportBlocks:
+    def test_a_reviewer_outside_the_seats_whose_report_rejects_its_pass_blocks(self, store, monkeypatch):
+        """codex's reproduction: both seats filled, glm's PASS JSON contradicted by its FAIL report."""
+        _full_house(store)
+        _write(store, "glm_gate", _contradicted(store, "glm_gate"))
+        _obligation(store)
+
+        verdict = _door(store)
+
+        assert verdict["verdict"] == "NO-GO", verdict["message"]
+        assert verdict["review_seats"]["filled_by"] == {"codex_gate": "codex_gate", "kimi_gate": "kimi_gate"}
+        assert verdict["review_seats"]["blocking"] == ["glm_gate"]
+        assert "glm_gate (reviewer voor seat glm_gate)" in verdict["message"]
+        assert "spreekt de JSON tegen" in verdict["message"]
+        summary = _summary(store)
+        assert summary.conclusion == fgp.CONCLUSION_FAILURE, summary.reason
+        assert "glm_gate" in summary.reason
+        report = _ready(store, monkeypatch)
+        assert report.verdict != pr_readiness.VERDICT_READY, report.to_dict()
+        assert any(gate.gate == "glm_gate" and gate.verdict == "NO-GO" for gate in report.gates)
+
+    def test_the_same_rejection_blocks_when_glm_is_the_obligations_declared_gate(self, store, monkeypatch, capsys):
+        _full_house(store)
+        _write(store, "glm_gate", _contradicted(store, "glm_gate"))
+        _obligation(store, "glm_gate")
+        _stub_door_edges(monkeypatch)
+
+        assert _door(store, "glm_gate")["verdict"] == "NO-GO"
+        rc = pr_merge.main(["--pr", PR_ID, "--dry-run", "--json"])
+        payload = _json_out(capsys)
+
+        assert rc == pr_merge.EXIT_ERROR, payload
+        assert payload["refused_by"] == "review"
+        assert "glm_gate" in payload["error"] and "spreekt de JSON tegen" in payload["error"]
+        assert _summary(store).conclusion == fgp.CONCLUSION_FAILURE
+        assert _ready(store, monkeypatch).verdict != pr_readiness.VERDICT_READY
+
+    def test_a_seats_own_reviewer_whose_report_contradicts_its_pass_blocks_and_fills_nothing(self, store, monkeypatch):
+        _write(store, "codex_gate", _record(store, "codex_gate"))
+        _write(store, "kimi_gate", _contradicted(store, "kimi_gate"))
+        _obligation(store)
+
+        verdict = _door(store)
+
+        assert verdict["verdict"] == "NO-GO"
+        assert "kimi_gate" not in verdict["review_seats"]["filled_by"]
+        assert verdict["review_seats"]["blocking"] == ["kimi_gate"]
+        assert "kimi_gate (reviewer voor seat kimi_gate)" in verdict["message"]
+        assert _summary(store).conclusion == fgp.CONCLUSION_FAILURE
+        report = _ready(store, monkeypatch)
+        assert report.verdict != pr_readiness.VERDICT_READY
+        assert [gate.gate for gate in report.gates].count("kimi_gate") == 1, "the seat line already names kimi"
+
+    @pytest.mark.parametrize("report_path", ["", "missing"], ids=["empty_report_path", "no_report_on_disk"])
+    def test_an_incomplete_stray_record_is_no_rejection(self, store, monkeypatch, report_path):
+        """Incomplete evidence fills no seat, and on its own it never blocks either."""
+        _full_house(store)
+        path = str(store["reports"] / "glm-never-written.md") if report_path else ""
+        _write(store, "glm_gate", _record(store, "glm_gate", status="completed", report_path=path))
+        _obligation(store)
+
+        verdict = _door(store)
+
+        assert verdict["verdict"] == "GO", verdict["message"]
+        assert verdict["review_seats"]["blocking"] == []
+        assert _summary(store).conclusion == fgp.CONCLUSION_SUCCESS
+        assert _ready(store, monkeypatch).verdict == pr_readiness.VERDICT_READY
+
+    def test_a_rejection_for_a_seat_another_reviewer_filled_still_blocks_readiness(self, store, monkeypatch):
+        """codex's warning 3: kimi rejects while reading codex's seat, deepseek fills kimi's."""
+        _rejection_beside_a_filled_seat(store)
+        _obligation(store)
+
+        verdict = _door(store)
+        report = _ready(store, monkeypatch)
+
+        assert verdict["verdict"] == "NO-GO"
+        assert verdict["review_seats"]["filled_by"] == {"codex_gate": "codex_gate", "kimi_gate": "deepseek_gate"}
+        assert verdict["review_seats"]["blocking"] == ["kimi_gate"]
+        assert report.verdict != pr_readiness.VERDICT_READY, report.to_dict()
+        blocking_lines = [g for g in report.gates if g.gate == "kimi_gate" and g.verdict == "NO-GO"]
+        assert len(blocking_lines) == 1
+        assert blocking_lines[0].rejected is True
+        assert "reviewer voor seat codex_gate" in blocking_lines[0].message
+        assert "kimi_gate REJECTED on head" in pr_ready._gate_line(report)
+        assert _summary(store).conclusion == fgp.CONCLUSION_FAILURE
+
+    def test_a_seat_rejected_by_its_own_reviewer_gets_one_readiness_line(self, store, monkeypatch):
+        _write(store, "codex_gate", _record(store, "codex_gate", status="completed", blocking=True))
+        _write(store, "kimi_gate", _record(store, "kimi_gate"))
+        _obligation(store)
+
+        report = _ready(store, monkeypatch)
+
+        assert report.verdict != pr_readiness.VERDICT_READY
+        assert [gate.gate for gate in report.gates] == ["codex_gate", "kimi_gate"]
+
+
+# ---------------------------------------------------------------------------
+# Round 2: closure checks the hash and the report of every seat's filling record (codex blocking 1)
+# ---------------------------------------------------------------------------
+
+CONTRACT_HASH = "c0ffee01" + "0" * 56
+STALE_HASH = "deadbeef" + "0" * 56
+
+
+class TestClosureChecksEverySeatsEvidence:
+    def _checks(self, store, merge_record: Dict[str, Any], stack: Optional[List[str]] = None):
+        checks = closure_verifier._validate_review_evidence(
+            _contract(stack or STACK, content_hash=CONTRACT_HASH), store["results"], branch=BRANCH,
+            merge_record=merge_record,
+        )
+        return {check.name: check for check in checks}, checks
+
+    def test_a_stale_hash_on_a_seats_own_record_fails_that_seat(self, store):
+        _write(store, "codex_gate", _record(store, "codex_gate", contract_hash=STALE_HASH))
+        _write(store, "kimi_gate", _record(store, "kimi_gate", contract_hash=CONTRACT_HASH))
+
+        by_name, _checks = self._checks(store, _merged(_seat_rule(STACK)))
+
+        assert by_name["seat_codex_gate"].status == "PASS"
+        hash_check = by_name["hash_codex_gate"]
+        assert hash_check.status == "FAIL"
+        assert "codex_gate" in hash_check.detail
+        assert "c0ffee01" in hash_check.detail and "deadbeef" in hash_check.detail
+        assert "hash_kimi_gate" not in by_name
+
+    def test_a_stale_hash_names_the_reviewer_that_filled_the_seat(self, store):
+        _write(store, "codex_gate", _absent("codex_gate", status="not_executable", reason="quota_exceeded"))
+        _request(store, "kimi_gate", seat="codex_gate", seats=STACK, **_took_over("codex_gate"))
+        _request(store, "deepseek_gate", seat="kimi_gate", seats=STACK, **_took_over("kimi_gate"))
+        _write(store, "kimi_gate", _record(store, "kimi_gate", contract_hash=STALE_HASH, **_took_over("codex_gate")))
+        _write(store, "deepseek_gate", _record(
+            store, "deepseek_gate", contract_hash=CONTRACT_HASH, **_took_over("kimi_gate"),
+        ))
+
+        by_name, _checks = self._checks(store, _merged(_seat_rule(STACK)))
+
+        assert by_name["seat_codex_gate"].status == "PASS"
+        assert by_name["hash_codex_gate"].status == "FAIL"
+        assert "kimi_gate" in by_name["hash_codex_gate"].detail
+        assert "hash_kimi_gate" not in by_name
+
+    def test_matching_hashes_pass(self, store):
+        _write(store, "codex_gate", _record(store, "codex_gate", contract_hash=CONTRACT_HASH))
+        _write(store, "kimi_gate", _record(store, "kimi_gate", contract_hash=CONTRACT_HASH))
+
+        by_name, checks = self._checks(store, _merged(_seat_rule(STACK)))
+
+        assert all(check.status == "PASS" for check in checks), [c.__dict__ for c in checks if c.status != "PASS"]
+        assert by_name["report_codex_gate"].status == "PASS" and by_name["report_kimi_gate"].status == "PASS"
+
+    def test_a_grandfathered_merge_keeps_the_old_hash_check(self, store):
+        _write(store, "codex_gate", _record(store, "codex_gate", contract_hash=STALE_HASH))
+
+        by_name, checks = self._checks(store, _merged(), stack=["codex_gate"])
+
+        assert by_name["hash_codex_gate"].status == "FAIL"
+        assert "codex_gate receipt hash mismatch" in by_name["hash_codex_gate"].detail
+        assert not any(check.name.startswith("seat_") for check in checks)
+
+    def test_a_filling_record_that_lost_its_report_fails_its_seats_report_check(self, store):
+        """The report existed when the door merged; at closure it is gone."""
+        _write(store, "codex_gate", _record(store, "codex_gate", contract_hash=CONTRACT_HASH))
+        _write(store, "kimi_gate", _record(store, "kimi_gate", contract_hash=CONTRACT_HASH))
+        (store["reports"] / "codex_gate.md").unlink()
+
+        by_name, _checks = self._checks(store, _merged(_seat_rule(STACK)))
+
+        assert by_name["seat_codex_gate"].status == "FAIL"
+        report_check = by_name["report_codex_gate"]
+        assert report_check.status == "FAIL"
+        assert "does not exist" in report_check.detail and "codex_gate.md" in report_check.detail
+        assert by_name["report_kimi_gate"].status == "PASS"
+
+
+# ---------------------------------------------------------------------------
+# Round 2: readiness and vnx-gate/review answer what the door answers, on every head
+# ---------------------------------------------------------------------------
+
+
+def _head_a_and_d(store) -> str:
+    """Round 1 (a), and (d) which reads the same head through readiness."""
+    _write(store, "codex_gate", _record(store, "codex_gate"))
+    return "codex_gate"
+
+
+def _head_b(store) -> str:
+    _write(store, "codex_gate", _record(store, "codex_gate", status="completed", blocking=True))
+    _write(store, "kimi_gate", _record(store, "kimi_gate"))
+    return "codex_gate"
+
+
+def _head_c(store) -> str:
+    _write(store, "codex_gate", _absent("codex_gate"))
+    _request(store, "codex_gate", seat="codex_gate", seats=STACK)
+    _request(store, "kimi_gate", seat="codex_gate", seats=STACK, **_took_over("codex_gate"))
+    _write(store, "kimi_gate", _record(store, "kimi_gate", **_took_over("codex_gate")))
+    return "codex_gate"
+
+
+def _head_e(store) -> str:
+    _request(store, "codex_gate", seat="codex_gate", seats=["codex_gate"], source="explicit")
+    _request(store, "kimi_gate", seat="kimi_gate", seats=["kimi_gate"], source="explicit",
+             requested_at="2026-10-16T10:05:00Z")
+    _write(store, "codex_gate", _record(store, "codex_gate"))
+    return "codex_gate"
+
+
+def _head_full_house(store) -> str:
+    _full_house(store)
+    return "codex_gate"
+
+
+def _head_stray_contradicted(store) -> str:
+    _full_house(store)
+    _write(store, "glm_gate", _contradicted(store, "glm_gate"))
+    return "codex_gate"
+
+
+def _head_declared_contradicted(store) -> str:
+    _head_stray_contradicted(store)
+    return "glm_gate"
+
+
+def _head_seat_contradicted(store) -> str:
+    _write(store, "codex_gate", _record(store, "codex_gate"))
+    _write(store, "kimi_gate", _contradicted(store, "kimi_gate"))
+    return "codex_gate"
+
+
+def _head_incomplete_stray(store) -> str:
+    _full_house(store)
+    _write(store, "glm_gate", _record(store, "glm_gate", status="completed", report_path=""))
+    return "codex_gate"
+
+
+def _head_rejection_beside_a_filled_seat(store) -> str:
+    _rejection_beside_a_filled_seat(store)
+    return "codex_gate"
+
+
+_HEADS = [
+    pytest.param(_head_a_and_d, "NO-GO", id="round1_a_and_d"),
+    pytest.param(_head_b, "NO-GO", id="round1_b"),
+    pytest.param(_head_c, "NO-GO", id="round1_c"),
+    pytest.param(_head_e, "NO-GO", id="round1_e"),
+    pytest.param(_head_full_house, "GO", id="full_house"),
+    pytest.param(_head_stray_contradicted, "NO-GO", id="stray_report_contradicts_pass"),
+    pytest.param(_head_declared_contradicted, "NO-GO", id="declared_report_contradicts_pass"),
+    pytest.param(_head_seat_contradicted, "NO-GO", id="seat_report_contradicts_pass"),
+    pytest.param(_head_incomplete_stray, "GO", id="incomplete_stray_record"),
+    pytest.param(_head_rejection_beside_a_filled_seat, "NO-GO", id="rejection_beside_a_filled_seat"),
+]
+
+
+@pytest.mark.parametrize("build, door_says", _HEADS)
+def test_readiness_and_the_summary_say_go_exactly_when_the_door_does(store, monkeypatch, build, door_says):
+    gate = build(store)
+    _obligation(store, gate)
+
+    door = _door(store, gate)
+    ready = _ready(store, monkeypatch)
+    summary = _summary(store)
+
+    assert door["verdict"] == door_says, door["message"]
+    assert (ready.verdict == pr_readiness.VERDICT_READY) == (door["verdict"] == "GO"), ready.to_dict()
+    assert (summary.conclusion == fgp.CONCLUSION_SUCCESS) == (door["verdict"] == "GO"), summary.reason
