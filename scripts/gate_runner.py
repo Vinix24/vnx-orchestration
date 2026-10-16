@@ -241,6 +241,29 @@ def _lifted_harness_lane_exit_code(report_text: str) -> Optional[int]:
     return exit_code if isinstance(exit_code, int) else None
 
 
+def _harness_lane_exit_nonzero_detail(gate: str, report_text: str) -> Optional[str]:
+    """The ``reason_detail`` of a harness-lane report whose frontmatter says
+    ``exit_code`` is not 0 (OI-1753), or None when it says 0 or nothing.
+
+    The detail names the exit code and carries the tail of the report BODY: the
+    provider's own error text (``API Error: 402 Insufficient Balance``), never
+    the frontmatter.
+    """
+    exit_code = _lifted_harness_lane_exit_code(report_text)
+    if exit_code is None or exit_code == 0:
+        return None
+    try:
+        _, report_body = extract_frontmatter(report_text)
+    except SchemaViolation:
+        report_body = report_text
+    return (
+        f"{gate} report carries exit_code={exit_code} in its "
+        "frontmatter with no failure_reason (the provider/model "
+        f"layer reported the failure after the spawn started): "
+        f"{_tail(report_body, _REASON_DETAIL_TAIL_CHARS)}"
+    )
+
+
 class _HarnessLaneDeadlineExceeded(Exception):
     """OI-2066: the lane's OWN deadline stopped the run, and the lane still
     wrote and returned its report.
@@ -1102,30 +1125,25 @@ class GateRunner:
         # gate_recorder.EXECUTION_FAILURE_REASONS so it books `unavailable`,
         # same as its sibling — never `failed` (a rejected PR) and never
         # `completed` (a clean review).
-        exit_code = _lifted_harness_lane_exit_code(report_text)
-        if exit_code is not None and exit_code != 0:
-            try:
-                _, report_body = extract_frontmatter(report_text)
-            except SchemaViolation:
-                report_body = report_text
+        exit_nonzero = _harness_lane_exit_nonzero_detail(gate, report_text)
+        if exit_nonzero is not None:
             return self._record_lane_failure(
                 gate=gate, pr_number=pr_number, pr_id=pr_id, request_payload=request_payload,
-                reason="harness_lane_exit_nonzero",
-                reason_detail=(
-                    f"{gate} report carries exit_code={exit_code} in its "
-                    "frontmatter with no failure_reason (the provider/model "
-                    f"layer reported the failure after the spawn started): "
-                    f"{_tail(report_body, _REASON_DETAIL_TAIL_CHARS)}"
-                ),
+                reason="harness_lane_exit_nonzero", reason_detail=exit_nonzero,
                 started=_start, output_lines=len(report_text.splitlines()),
             )
 
+        # R6 (OI-2039): every failed, cut-off and timed-out run is booked
+        # above, so a run that reaches this line ended normally as far as the
+        # runner can see. final_answer_dir lets materialize_artifacts book the
+        # verdict of the run's final answer when the lane's report has none;
+        # the lane wrote that answer under the same data dir as its report.
         return _art.materialize_artifacts(
             gate=gate, pr_number=pr_number, pr_id=pr_id,
             stdout=report_text, request_payload=request_payload,
             duration_seconds=time.monotonic() - _start,
             requests_dir=self._requests_dir, results_dir=self._results_dir,
-            reports_dir=self._reports_dir,
+            reports_dir=self._reports_dir, final_answer_dir=data_dir,
         )
 
     def _record_lane_failure(

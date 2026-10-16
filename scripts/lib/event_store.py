@@ -17,6 +17,8 @@ import json
 import logging
 import os
 import shutil
+import stat
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Union
@@ -123,6 +125,52 @@ def find_archive_file(directory: Union[str, Path], dispatch_id: str) -> Optional
         if dispatch_id in archive_id(path):
             return path
     return None
+
+
+def _stream_belongs_to(content: bytes, dispatch_id: str) -> bool:
+    """True when *content* holds an event of *dispatch_id* and none of another dispatch.
+
+    An event names its dispatch in ``dispatch_id``; one that names another,
+    the empty id included, makes the stream shared. A line that is not a JSON
+    object (a torn write) names no dispatch and decides nothing.
+    """
+    own = False
+    for line in content.splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(event, dict) or "dispatch_id" not in event:
+            continue
+        if event["dispatch_id"] != dispatch_id:
+            return False
+        own = True
+    return own
+
+
+def _replace_from_scratch(dest: Path, mode: int, *chunks: bytes) -> None:
+    """Write *chunks* to a scratch file beside *dest* and move it onto *dest*.
+
+    The scratch name comes from ``mkstemp``, unique to this writer: a name
+    derived from *dest* alone is shared by every concurrent writer of it
+    (OI-1486). The scratch takes *mode*, so the archive carries the permission
+    bits ``archive()``'s ``copy2`` gives it. On any failure the scratch is
+    removed and the error re-raised; *dest* is never half-written.
+    """
+    fd, tmp_name = tempfile.mkstemp(dir=dest.parent, prefix=f".{dest.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as tmp_f:
+            os.fchmod(tmp_f.fileno(), mode)
+            for chunk in chunks:
+                tmp_f.write(chunk)
+            tmp_f.flush()
+            os.fsync(tmp_f.fileno())
+        os.replace(tmp_name, dest)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
 
 
 def _events_dir() -> Path:
@@ -573,6 +621,66 @@ class EventStore:
                 f.truncate(0)
             finally:
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+    def archive_completed_stream(self, terminal: str, dispatch_id: str) -> Optional[Path]:
+        """Archive and clear the live stream at the end of *dispatch_id*'s run, when it is its alone.
+
+        For a lane whose run ends without a teardown that archives: the
+        plan-gate's claude seat writes here through SubprocessAdapter, and
+        neither the adapter nor dispatch_govern archives, so the archive came
+        into being only when the NEXT dispatch on the terminal rotated the
+        boundary. A reader at the end of the run (R6, OI-2039) found none.
+
+        Only a stream that holds this dispatch's events and no other
+        dispatch's is archived. A stream another dispatch writes into as well
+        (OI-1869, OI-1930: parallel dispatches share one ring buffer per
+        terminal) is left untouched for the boundary guard, as before:
+        archiving it would file the other dispatch's events under this id, and
+        truncating it would drop that dispatch's live events.
+
+        An archive this dispatch already has (a parallel dispatch's boundary
+        guard archived the head of its stream) is extended, never replaced. The
+        check, the copy and the truncate run under one LOCK_EX on the live
+        file, the lock every appender takes, so no event lands between the copy
+        and the truncate; the archive is written to a per-writer scratch file
+        and moved into place (``_replace_from_scratch``). Never raises: a
+        failure is logged, leaves no scratch file, and leaves the live file for
+        the boundary guard. Returns the archive path, or None when nothing was
+        archived.
+        """
+        path = self._terminal_path(terminal)
+        if not dispatch_id or not path.exists():
+            return None
+        dest = self.archive_dir(terminal) / f"{dispatch_id}{ARCHIVE_SUFFIX}"
+        try:
+            with open(path, "rb+") as f:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                try:
+                    content = f.read()
+                    if not _stream_belongs_to(content, dispatch_id):
+                        return None
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    head = dest.read_bytes() if dest.is_file() else b""
+                    if head and not head.endswith(b"\n"):
+                        head += b"\n"
+                    live_mode = stat.S_IMODE(os.fstat(f.fileno()).st_mode)
+                    _replace_from_scratch(dest, live_mode, head, content)
+                    f.seek(0)
+                    f.truncate(0)
+                    f.flush()
+                finally:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        except Exception as exc:  # vnx-silent-except: an end-of-run archive must never break the run; logged, live file left for the boundary guard
+            logger.error(
+                "event_store: end-of-run archive failed for %s (dispatch %s): %s",
+                path, dispatch_id, exc, exc_info=True,
+            )
+            return None
+        self._sequences.pop(terminal, None)
+        self._boundary_terminal.pop(terminal, None)
+        self._remove_oversize_flag(terminal)
+        logger.info("event_store: end-of-run archived %s -> %s", path, dest)
+        return dest
 
     def oversize_flags(self) -> list[Path]:
         """Return paths to all oversize flag files currently present.
