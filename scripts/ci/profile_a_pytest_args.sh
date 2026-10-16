@@ -49,7 +49,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/../lib/vnx_resolve_root.sh"
 QUARANTINE_K="not TestFlagGateClaude and not test_ensure_receipt_does_not_touch_real_store"
 PER_TEST_TIMEOUT=180
 # The runner has 4 vCPUs (plan ci-profile-a-xdist, settings from SEOcrawler B2).
-XDIST_WORKERS=4
+XDIST_WORKERS=3
 
 SERIAL_CHECK_DIR=""
 trap 'if [ -n "$SERIAL_CHECK_DIR" ]; then rm -rf "$SERIAL_CHECK_DIR"; fi' EXIT

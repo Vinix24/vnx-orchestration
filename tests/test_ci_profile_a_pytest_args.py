@@ -32,7 +32,7 @@ PLUGIN = REPO_ROOT / "scripts" / "ci" / "pytest_collection_manifest.py"
 SERIAL_LIST = REPO_ROOT / "scripts" / "ci" / "serial_tests.txt"
 
 QUARANTINE_K = "not TestFlagGateClaude and not test_ensure_receipt_does_not_touch_real_store"
-XDIST_FLAGS = ["-n", "4", "--dist", "loadfile", "--no-loadscope-reorder", "--max-worker-restart=0"]
+XDIST_FLAGS = ["-n", "3", "--dist", "loadfile", "--no-loadscope-reorder", "--max-worker-restart=0"]
 
 # The selection block of the Profile A step in .github/workflows/vnx-ci.yml
 # before D1 (lines 202-230 at a8b51008), code lines verbatim, the long comment
