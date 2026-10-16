@@ -27,10 +27,12 @@ non-passing status. Only a readable object whose ``status`` is not
 ``completed``/``passed`` is reported-but-not-failed (``GATE_NOT_COMPLETED``), the
 "let T0 decide" case.
 
-A seat is accounted for when a reported gate is that seat, when the seat appears
-in a reported gate's ``takeover_path`` (it was passed over and that gate read in
-its place), or when its takeover chain was recorded as exhausted. A seat with none
-of these has no request, no result and no takeover record: MISSING_ARTIFACT.
+A seat is accounted for by the reported entry whose request states it as its
+``seat`` (since OI-2058 R5a). An entry from before R5a states none; it accounts
+for its own gate's seat, for the first seat of its ``takeover_path`` (it was
+passed over and that gate read in its place), or, for a recorded exhausted
+takeover chain, for the seat the chain started from. A seat with none of these
+has no request, no result and no takeover record: MISSING_ARTIFACT.
 
 Commit binding
 --------------
@@ -178,18 +180,26 @@ def _takeover_hops(entry: Dict[str, Any], request_file: Path) -> List[str]:
 def _entry_seat(entry: Dict[str, Any], gate: str, request_file: Path) -> Optional[str]:
     """The one seat ``entry`` answers for, or ``None`` (OI-2058, R5a).
 
-    A reviewer fills at most one seat. A takeover answers for the seat its walk
-    started from (``takeover_path[0]``), never also for its own gate's seat or
-    for a seat it was walked past: since R5a the request side gives every seat
-    its own reviewer, so when kimi reads codex's seat, kimi's own seat has an
-    entry of its own (deepseek, or an unfillable record), and only that entry
-    may speak for it. A recorded chain-exhausted (or unfillable) seat answers
-    for the seat it was booked for, its own gate. An entry the same call
-    handed on (``superseded_by``: its reviewer ran out and the seat went to the
-    next one) answers for nothing; its successor does.
+    A reviewer fills at most one seat, and the seat its request record states
+    wins: ``seat``, stamped on every seat's request since R5a and carried onto
+    the report entry by the executor. A takeover annotation is history, not
+    identity: a switched-off kimi whose standing PASS still carries an earlier
+    round's codex ``takeover_path`` reads kimi's own seat when this request asked
+    it for kimi's seat (codex WARNING on #2073).
+
+    Only an entry without a stated seat (written before R5a) falls back: a
+    recorded chain-exhausted (or unfillable) seat answers for its own gate, a
+    takeover for the seat its walk started from (``takeover_path[0]``), never
+    also for its own gate's seat or for a seat it was walked past, and anything
+    else for its own gate. An entry the same call handed on (``superseded_by``:
+    its reviewer ran out and the seat went to the next one) answers for
+    nothing; its successor does.
     """
     if entry.get("superseded_by"):
         return None
+    stated = entry.get("seat")
+    if stated:
+        return _check_gate_name(str(stated))
     if entry.get("request_status") == _CHAIN_EXHAUSTED:
         return gate
     hops = _takeover_hops(entry, request_file)
@@ -324,9 +334,10 @@ def resolve_seat_entries(
     this module's own :func:`verify_report` (artifact enforcement) and
     ``gate_seat_line.py`` (the ``vnx gate`` slot-line, OI-1888). Both need the
     same answer to "which entry speaks for seat X", and both get it from
-    :func:`_entry_seat`: an entry speaks for its own gate's seat when there was
-    no takeover, and for the seat its walk started from when there was one --
-    one seat per entry, never the seats a takeover was walked past (OI-2058).
+    :func:`_entry_seat`: an entry speaks for the seat its request states, and
+    without one for its own gate's seat when there was no takeover and for the
+    seat its walk started from when there was one -- one seat per entry, never
+    the seats a takeover was walked past (OI-2058).
 
     A seat with no entry in the returned mapping was neither answered,
     taken over, nor recorded as chain-exhausted -- exactly the

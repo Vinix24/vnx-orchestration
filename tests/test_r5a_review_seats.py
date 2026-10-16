@@ -13,7 +13,10 @@ pinned here:
 - acceptance (c): a switched-off provider's seat moves along the chain and is never filled;
 - acceptance (d): a seat whose reviewer runs out DURING the request goes to the next distinct
   reviewer in the same call (measured 2026-10-15/16 on #2066 and #2072);
-- a seat with no distinct reviewer left is booked unfillable by name, with the reviewers tried.
+- a seat with no distinct reviewer left is booked unfillable by name, with the reviewers tried;
+- round 2 (codex FAIL on #2073): a decided verdict, PASS or FAIL, is never handed on, and a
+  seat only moves forward from the reviewer whose own record says it ran out; an entry's
+  own ``seat`` beats an earlier round's ``takeover_path`` when verification credits it.
 
 Everything runs the real request and execute code on a tmp store. The provider edge is the
 only thing replaced (``execute_gate`` for the run, ``gh`` for the head); nothing starts a
@@ -23,9 +26,9 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List
 
 import pytest
 
@@ -33,6 +36,8 @@ import review_stack_support  # noqa: F401  (puts scripts/ and scripts/lib on sys
 from review_stack_support import BRANCH, HEAD_SHA, PR, build_project_store, isolate_config_registry
 
 _FRESH = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+# Two hours back: past the one-hour lane-exhaustion TTL (OI-1569), so the record no longer holds.
+_EXPIRED = (datetime.now(timezone.utc) - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 _CODEX_LIMIT_RECORD = {
     "gate": "codex_gate", "pr_id": str(PR), "pr_number": PR, "status": "unavailable",
@@ -423,21 +428,25 @@ def _pass_record(env, gate: str) -> Dict[str, Any]:
 @pytest.fixture
 def runs(env, monkeypatch):
     """``execute_gate`` replaced at the provider edge: each gate's scripted outcome is written
-    to its result record, as a real run would, and returned. Records which gates ran."""
+    to its result record, as a real run would, and returned. Records which gates ran.
+    ``during[gate]`` runs while that gate reviews: time passing for the rest of the store."""
     import review_gate_manager
 
     monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "1")
     outcomes: Dict[str, Dict[str, Any]] = {}
+    during: Dict[str, Callable[[], None]] = {}
     ran: List[str] = []
 
     def execute_gate(self, *, gate, pr_number, pr_id=""):
         ran.append(gate)
+        if gate in during:
+            during[gate]()
         record = outcomes.get(gate) or _pass_record(env, gate)
         _write_result(env, gate, record)
         return record
 
     monkeypatch.setattr(review_gate_manager.ReviewGateManager, "execute_gate", execute_gate)
-    return {"outcomes": outcomes, "ran": ran}
+    return {"outcomes": outcomes, "during": during, "ran": ran}
 
 
 def _request_and_execute(review_stack):
@@ -503,6 +512,173 @@ class TestAReviewerThatRunsOutDuringTheRequest:
         entries = resolve_seat_entries(result, pr_number=PR, state_dir=env["state_dir"])
         assert entries["kimi_gate"]["gate"] == "deepseek_gate"
         assert verify_report(result, pr_number=PR, seats=["kimi_gate"], state_dir=env["state_dir"]).ok
+
+
+# ---------------------------------------------------------------------------
+# Round 2, codex BLOCKING on #2073: a decided verdict is never handed on
+# ---------------------------------------------------------------------------
+
+def _fail_record(env, gate: str) -> Dict[str, Any]:
+    """A review rejection as review gates book it: ``completed`` plus a blocking finding."""
+    record = _pass_record(env, gate)
+    record.update(status="completed", blocking_findings=[
+        {"severity": "error", "file": "scripts/lib/example.py", "summary": "the seat rejects the change"},
+    ])
+    return record
+
+
+def _codex_limit_expires_while(env, runs, reviewer: str) -> None:
+    """codex is at its limit when the round walks codex's seat; while ``reviewer`` reads that
+    seat, the hour passes and codex's exhaustion record expires."""
+    _write_result(env, "codex_gate", _CODEX_LIMIT_RECORD)
+    runs["during"][reviewer] = lambda: _write_result(
+        env, "codex_gate", {**_CODEX_LIMIT_RECORD, "recorded_at": _EXPIRED},
+    )
+
+
+class TestADecidedVerdictIsNeverHandedOn:
+    def test_a_substitute_fail_survives_the_expiry_of_the_exhaustion_it_replaced(self, env, runs):
+        """Codex's reproduction. Red on 7f70286e: the walk after the round went back to codex,
+        superseded kimi's FAIL with codex's PASS and the call reported no failure."""
+        _codex_limit_expires_while(env, runs, "kimi_gate")
+        runs["outcomes"]["kimi_gate"] = _fail_record(env, "kimi_gate")
+
+        result = _request_and_execute(["codex_gate"])
+
+        assert result["has_required_failure"] is True, "kimi's FAIL is the answer for codex's seat"
+        kimi = result["gates"][0]
+        assert "superseded_by" not in kimi, "a decided FAIL is the seat's answer, never handed on"
+        assert runs["ran"] == ["kimi_gate"], "codex is not asked again for the seat kimi decided"
+        assert [g["gate"] for g in result["gates"]] == ["kimi_gate"]
+        assert (kimi["gate"], kimi["seat"], kimi["passed"]) == ("kimi_gate", "codex_gate", False)
+        assert not (env["requests_dir"] / f"pr-{PR}-codex_gate.json").exists()
+
+    def test_a_substitute_pass_keeps_its_seat_too(self, env, runs):
+        _codex_limit_expires_while(env, runs, "kimi_gate")
+
+        result = _request_and_execute(["codex_gate"])
+
+        kimi = result["gates"][0]
+        assert "superseded_by" not in kimi, "a decided PASS is the seat's answer, never handed on"
+        assert runs["ran"] == ["kimi_gate"]
+        assert [g["gate"] for g in result["gates"]] == ["kimi_gate"]
+        assert (kimi["gate"], kimi["passed"]) == ("kimi_gate", True)
+        assert result["has_required_failure"] is False
+
+    def test_neither_seat_moves_when_both_reviewers_decided(self, env, runs):
+        """The default two-seat stack: kimi reads codex's seat and rejects, deepseek reads kimi's
+        and passes. Red on 7f70286e: codex took its seat back and kimi took its own seat from
+        deepseek, so four gates ran for two seats."""
+        _codex_limit_expires_while(env, runs, "kimi_gate")
+        runs["outcomes"]["kimi_gate"] = _fail_record(env, "kimi_gate")
+
+        result = _request_and_execute(None)
+
+        assert [g.get("superseded_by") for g in result["gates"]] == [None, None]
+        assert runs["ran"] == ["kimi_gate", "deepseek_gate"]
+        assert [(g["gate"], g["seat"]) for g in result["gates"]] == [
+            ("kimi_gate", "codex_gate"), ("deepseek_gate", "kimi_gate"),
+        ]
+        assert result["has_required_failure"] is True
+
+    def test_an_abstaining_reviewer_keeps_its_seat(self, env, runs):
+        """No verdict, but no exhaustion either: only the reviewer's own run-out record moves a
+        seat, and an abstention is not one. The call fails on the missing verdict."""
+        _codex_limit_expires_while(env, runs, "kimi_gate")
+        runs["outcomes"]["kimi_gate"] = {
+            **_KIMI_WEEKLY_LIMIT_RECORD, "reason": "no_verdict",
+            "reason_detail": "the model answered without a verdict block",
+        }
+
+        result = _request_and_execute(["codex_gate"])
+
+        assert [g["gate"] for g in result["gates"]] == ["kimi_gate"]
+        assert "superseded_by" not in result["gates"][0]
+        assert runs["ran"] == ["kimi_gate"]
+        assert result["has_required_failure"] is True
+
+    def test_a_substitute_that_runs_out_hands_the_seat_forward_never_back(self, env, runs):
+        """kimi read codex's seat and ran out; codex's own exhaustion expired meanwhile. The seat
+        walks on from kimi to deepseek. Red on 7f70286e: the walk restarted at codex."""
+        _codex_limit_expires_while(env, runs, "kimi_gate")
+        runs["outcomes"]["kimi_gate"] = _KIMI_WEEKLY_LIMIT_RECORD
+
+        result = _request_and_execute(["codex_gate"])
+
+        assert [g["gate"] for g in result["gates"]] == ["kimi_gate", "deepseek_gate"]
+        assert runs["ran"] == ["kimi_gate", "deepseek_gate"]
+        assert result["gates"][0]["superseded_by"] == "deepseek_gate"
+        assert result["has_required_failure"] is False
+        record = _request_record(env, "deepseek_gate")
+        assert record["seat"] == "codex_gate"
+        assert [(h["gate"], h["reason"]) for h in record["takeover_path"]] == [
+            ("codex_gate", "exit_nonzero"), ("kimi_gate", "lane_exhausted"),
+        ], "the successor's path names every reviewer the seat passed, starting at the seat"
+
+    def test_an_own_seat_reviewer_that_runs_out_still_goes_to_deepseek(self, env, runs):
+        """Round 1's case (d) under the round-2 rule: the confirmed exhaustion still moves."""
+        runs["outcomes"]["kimi_gate"] = _KIMI_WEEKLY_LIMIT_RECORD
+
+        result = _request_and_execute(["kimi_gate"])
+
+        assert [g["gate"] for g in result["gates"]] == ["kimi_gate", "deepseek_gate"]
+        assert result["gates"][0]["superseded_by"] == "deepseek_gate"
+        assert result["has_required_failure"] is False
+
+
+# ---------------------------------------------------------------------------
+# Round 2, codex WARNING on #2073: an entry's own seat beats its takeover history
+# ---------------------------------------------------------------------------
+
+class TestAnEntrysOwnSeatWins:
+    def test_a_standing_pass_with_an_old_codex_takeover_is_credited_to_kimis_own_seat(self, env, runs):
+        """Codex's reproduction: kimi is switched off, and its standing PASS on this head still
+        carries the codex takeover of the round in which kimi read codex's seat. A request for
+        kimi's own seat reports that PASS. Red on 7f70286e: verification credited it to codex's
+        seat and reported kimi's seat missing."""
+        _set_switches(kimi=False)
+        codex_hop = {"gate": "codex_gate", "reason": "exit_nonzero", "status": "unavailable",
+                     "detail": "You've hit your usage limit."}
+        _write_result(env, "kimi_gate", {
+            **_pass_record(env, "kimi_gate"), "status": "completed", "takeover_path": [codex_hop],
+        })
+        # The earlier round's request record: kimi read codex's seat then. A stale seat on disk
+        # does not decide either; the entry carries the seat THIS request asked kimi for.
+        (env["requests_dir"] / f"pr-{PR}-kimi_gate.json").write_text(json.dumps({
+            "gate": "kimi_gate", "status": "completed", "pr_number": PR, "seat": "codex_gate",
+            "takeover": True, "takeover_from": "codex_gate", "takeover_path": [codex_hop],
+        }), encoding="utf-8")
+
+        result = _request_and_execute(["kimi_gate"])
+
+        from gate_enforcement_verify import resolve_seat_entries, verify_report
+        outcome = verify_report(result, pr_number=PR, seats=["kimi_gate"], state_dir=env["state_dir"])
+        assert outcome.missing == [], "kimi's own seat is answered by kimi's own standing PASS"
+        assert outcome.ok
+        kimi = result["gates"][0]
+        assert resolve_seat_entries(result, pr_number=PR, state_dir=env["state_dir"]) == {"kimi_gate": kimi}
+        assert [g["gate"] for g in result["gates"]] == ["kimi_gate"]
+        assert (kimi["seat"], kimi["passed"]) == ("kimi_gate", True)
+        assert kimi["detail"]["takeover_path"] == [codex_hop], "the history is still on the record"
+        assert runs["ran"] == [], "a switched-off seat's standing verdict is reported, never re-run"
+
+    def test_an_entry_without_a_stated_seat_still_falls_back_to_its_takeover(self, env):
+        """A record from before R5a names no seat: its walk's first hop is the seat it read."""
+        from gate_enforcement_verify import resolve_seat_entries
+
+        report = {"gates": [{"gate": "kimi_gate", "request_status": "requested", "detail": {
+            "takeover_path": [{"gate": "codex_gate", "reason": "exit_nonzero", "status": "unavailable"}],
+        }}]}
+
+        assert list(resolve_seat_entries(report, pr_number=PR, state_dir=env["state_dir"])) == ["codex_gate"]
+
+    def test_a_stated_seat_that_is_not_a_plain_name_is_refused(self, env):
+        from gate_enforcement_verify import VerificationError, resolve_seat_entries
+
+        report = {"gates": [{"gate": "kimi_gate", "seat": "../codex_gate", "request_status": "requested"}]}
+
+        with pytest.raises(VerificationError, match="not a plain identifier"):
+            resolve_seat_entries(report, pr_number=PR, state_dir=env["state_dir"])
 
 
 # ---------------------------------------------------------------------------

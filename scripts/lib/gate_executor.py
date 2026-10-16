@@ -415,7 +415,19 @@ class GateExecutorMixin:
         """Run (or read back) one requested gate: ``(report entry, blocks the call)``.
 
         The rules are :meth:`_execute_requested_gates`'s, one request at a time.
+        The entry carries the ``seat`` its request record states (OI-2058, R5a),
+        so a reader of the report credits the seat this request filled, not one
+        an earlier round's takeover annotation names.
         """
+        entry, blocks = self._execute_or_read_request(req, pr_number, head_sha)
+        if req.get("seat"):
+            entry["seat"] = req["seat"]
+        return entry, blocks
+
+    def _execute_or_read_request(
+        self, req: Dict[str, Any], pr_number: int, head_sha: str,
+    ) -> "tuple[Dict[str, Any], bool]":
+        """:meth:`_execute_one_request` without the seat stamp."""
         from gate_status import has_complete_evidence, is_pass
 
         gate_name = req.get("gate", "")
@@ -513,8 +525,10 @@ class GateExecutorMixin:
         next distinct reviewer in this call (:meth:`_advance_exhausted_seats`,
         OI-2058 R5a case d). The exhausted entry stays in ``gates`` with
         ``superseded_by`` naming its successor, and only the seat's final
-        reviewer decides ``has_required_failure``. ``review_seats`` is the seat
-        list the round requested (``request_reviews``).
+        reviewer decides ``has_required_failure``. A reviewer that decided, PASS
+        or FAIL, is never superseded, so a blocking verdict always reaches
+        ``has_required_failure``. ``review_seats`` is the seat list the round
+        requested (``request_reviews``).
         """
         import gate_recorder as _rec
 
@@ -576,12 +590,22 @@ class GateExecutorMixin:
         ``requested`` and ``rows`` (``(entry, blocks)`` per request) grow in
         place: the new request is appended, and the entry it replaces gets
         ``superseded_by``. Only the reviewers that ran in the previous pass are
-        walked again. A reviewer that came back exhausted is passed over on its
-        fresh record from then on, so every pass hands a seat to a gate that has
-        not run out in this call; there are fewer gates than the bound below,
-        which is the termination argument, not a guess.
+        walked again.
+
+        Only a confirmed exhaustion hands a seat on (codex FAIL on #2073). An
+        entry whose reviewer decided, PASS or FAIL, is the seat's answer: it is
+        never superseded and its seat is never re-requested in this call, or a
+        blocking verdict would vanish from ``has_required_failure`` behind a
+        later reviewer's pass. Every other entry goes to ``_advance_seat``,
+        which moves the seat only on its reviewer's own exhaustion record on
+        this head, and only forward along the chain from that reviewer: an
+        earlier reviewer whose exhaustion record expired meanwhile never gets
+        the seat back. Every move goes strictly further down a chain that
+        names each gate at most once, so the bound below (the number of
+        registered gates) is the termination argument, not a guess.
         """
         from dispatch_spec import REGISTERED_GATE_NAMES
+        from gate_status import decided_verdict
         # At call time: gate_request_handler imports this module at its top.
         from gate_request_handler import _held_reviewers
 
@@ -591,6 +615,8 @@ class GateExecutorMixin:
             for index in pending:
                 if not requested[index].get("seat"):
                     continue  # an extra gate (ci_gate, an optional gate) fills no seat to hand on
+                if decided_verdict(rows[index][0]["detail"]):
+                    continue  # a decided verdict, PASS or FAIL, keeps its seat
                 live = [req for req, (entry, _b) in zip(requested, rows) if not entry.get("superseded_by")]
                 successor = self._advance_seat(
                     requested[index], _held_reviewers(live), pr_number=pr_number, branch=branch,

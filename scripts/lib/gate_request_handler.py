@@ -1226,9 +1226,11 @@ class GateRequestHandlerMixin:
         uniform rule. A request round on its own therefore fills a seat whose
         reviewer died in it only on the next round. ``request_and_execute``
         closes that gap without a second rule (OI-2058 R5a, case d): after the
-        round's reviewers ran, it walks every seat again over the records they
-        just left (``_advance_seat``), and a seat whose walk now lands on another
-        reviewer is requested and run in the same call.
+        round's reviewers ran, a seat whose reviewer left its own record on this
+        head that this walk passes over as run out is walked on, forward from
+        that reviewer (``_advance_seat``), and its next reviewer is requested and
+        run in the same call. A reviewer that decided, PASS or FAIL, keeps its
+        seat.
 
         If the chain runs out (no ``chain.get(current)``) while ``current``
         is still ``lane_exhausted``, that is a NAMED terminal end-state
@@ -1606,15 +1608,24 @@ class GateRequestHandlerMixin:
         self, payload: Dict[str, Any], held: Dict[str, str], *, pr_number: int, branch: str,
         risk_class: str, changed_files: List[str], mode: str, dispatch_id: str, head_sha: Optional[str],
     ) -> Optional[Dict[str, Any]]:
-        """Walk ``payload``'s seat again after its reviewer ran (OI-2058 R5a, case d).
+        """Hand ``payload``'s seat on after its reviewer ran out (OI-2058 R5a, case d).
 
-        The same walk as the request round, over the records the round just
-        left: a reviewer that came back ``lane_exhausted`` (kimi at its weekly
-        limit, measured four times on 2026-10-15/16) is now passed over on its
-        own record, exactly as the next round would pass over it. When the walk
-        lands on a reviewer other than ``payload['gate']``, that reviewer is
-        requested for the seat (takeover annotation, seat fields, receipt) and
-        its payload returned; otherwise ``None`` and nothing is written.
+        Only a confirmed exhaustion moves a seat (codex FAIL on #2073). The
+        reviewer that just ran for the seat (``payload['gate']``) must have left
+        its own record on this head that the request round passes over as run
+        out (:meth:`_exhaustion_hop`): kimi at its weekly limit, measured four
+        times on 2026-10-15/16. A reviewer that decided, PASS or FAIL, or
+        abstained, or left no fresh record keeps the seat, and ``None`` is
+        returned with nothing written.
+
+        The walk then runs FORWARD from that reviewer, never again from the
+        seat: the chain names each gate once, so an earlier reviewer of the
+        chain can never get the seat back. Re-walking from the seat let an
+        exhaustion record of codex that expired while kimi read codex's seat
+        pull the seat back to codex, superseding kimi's FAIL with codex's PASS.
+        When the walk lands on a reviewer, it is requested for the seat
+        (takeover annotation with the seat's whole path, seat fields, receipt)
+        and its payload returned.
 
         ``held`` is every reviewer of this call that still holds a seat; the
         seat's own reviewer is left out, so its fresh record decides, not the
@@ -1624,19 +1635,27 @@ class GateRequestHandlerMixin:
         is a seat's payload (it carries ``seat``); a booked end-state has no
         reviewer to replace.
         """
-        seat = payload["seat"]
+        seat, reviewer = payload["seat"], payload["gate"]
         if payload.get("status") == "chain_exhausted":
             return None
-        others = {gate: holder for gate, holder in held.items() if holder != seat}
         head = _PrHead(pr_number, head_sha)
-        chain = _build_review_gate_takeover_chain()
-        reader, path, refusal = self._resolve_seat_reader(seat, pr_number, chain, others, head)
-        if reader is None or refusal is not None or reader == payload.get("gate"):
+        ran_out = self._exhaustion_hop(reviewer, pr_number, head)
+        if ran_out is None:
             return None
+        chain = _build_review_gate_takeover_chain()
+        successor = chain.get(reviewer)
+        if successor is None:
+            return None
+        others = {gate: holder for gate, holder in held.items() if holder != seat}
+        reader, walked, refusal = self._walk_takeover_chain(
+            successor, pr_number, chain, self._seat_switch_refusal(successor), head=head, held=others,
+        )
+        if reader is None or refusal is not None:
+            return None
+        path = list(payload.get("takeover_path") or []) + [ran_out] + walked
         logger.info(
             "gate_request_handler: seat %s for pr=%s moves from %s to %s in the same call -- "
-            "%s left a record that passes it over", seat, pr_number, payload.get("gate"), reader,
-            payload.get("gate"),
+            "%s left a record that passes it over", seat, pr_number, reviewer, reader, reviewer,
         )
         advanced = self._request_seat_reader(
             reader, None, path, pr_number=pr_number, branch=branch, risk_class=risk_class,
@@ -1648,6 +1667,23 @@ class GateRequestHandlerMixin:
             changed_files=changed_files, dispatch_id=dispatch_id,
         )
         return advanced
+
+    def _exhaustion_hop(self, reviewer: str, pr_number: int, head: _PrHead) -> Optional[Dict[str, Any]]:
+        """The takeover hop for ``reviewer`` when its own record on ``head`` says it ran out, else ``None``.
+
+        The record must exist and be about this head: a missing record, or one
+        about another commit, confirms nothing about this run. On that record the
+        request round's own candidate rule decides (``_candidate_hop``, not
+        switched off, holding no seat): a ``lane_exhausted`` record within its
+        TTL, or a record that does not hold the seat while the provider is
+        recorded unreachable, is passed over; a decided verdict, an abstention
+        or an expired exhaustion is not.
+        """
+        record = self._read_existing_gate_result(reviewer, pr_number)
+        if record is None or not result_is_for_head(record, head.sha()):
+            return None
+        hop, _stands = self._candidate_hop(reviewer, None, pr_number, head=head, held={})
+        return hop
 
     def _mark_gate_unavailable(
         self,
