@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import json
 import re
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
@@ -79,6 +80,18 @@ REFUSED = "refused"           # the run is refused: failed-run precedence or bin
 _MARKER_PREFIX = "<!-- vnx-final-answer-verdict"
 _MARKER_LINE_RE = re.compile(r"^<!-- vnx-final-answer-verdict\b.*-->[ \t]*$", re.MULTILINE)
 RECOVERED_SECTION_HEADING = "## Verdict recovered from the final answer"
+
+# What locating and reading an archive can raise. Measured on 3,000 damaged
+# copies of a gzip archive: zlib.error (a damaged deflate body; not an
+# OSError), EOFError (a cut-off stream) and gzip.BadGzipFile (an OSError: a
+# bad header or CRC). A plain archive is opened with errors="replace" and so
+# raises no UnicodeDecodeError today; it is caught all the same, so a change of
+# decoder cannot reopen the escape.
+_ARCHIVE_READ_ERRORS = (OSError, EOFError, zlib.error, UnicodeDecodeError)
+# What decoding one line can raise: a torn write (JSONDecodeError, a
+# ValueError) or nesting deeper than the recursion limit (RecursionError, which
+# is not a ValueError).
+_LINE_DECODE_ERRORS = (ValueError, RecursionError)
 
 
 @dataclass(frozen=True)
@@ -140,7 +153,10 @@ def recover_verdict(
     refusal = _report_refusal(report_text)
     if refusal:
         return _result(REFUSED, refusal)
-    archive = event_store.resolve_archive_file(Path(data_dir) / "events" / "archive" / terminal, dispatch_id)
+    try:
+        archive = event_store.resolve_archive_file(Path(data_dir) / "events" / "archive" / terminal, dispatch_id)
+    except _ARCHIVE_READ_ERRORS as exc:
+        return _result(UNAVAILABLE, f"the archive of {dispatch_id} cannot be located ({_cause(exc)})")
     if archive is None:
         return _result(UNAVAILABLE, f"no archived event stream for {dispatch_id}")
     data, outcome, detail = _read_result_event(archive, dispatch_id, terminal)
@@ -219,9 +235,13 @@ def _read_result_event(
     *dispatch_id* and holds exactly one result event; ``outcome`` and
     ``detail`` then stay empty. Otherwise ``data`` is None and ``outcome``
     says why. A line that is not JSON is a torn write and carries no event; an
-    event of another dispatch or terminal refuses the whole archive.
+    event of another dispatch or terminal refuses the whole archive. An archive
+    that cannot be read to its end (a damaged gzip body, a cut-off stream) is
+    ``unavailable`` with the error named in ``detail``: nothing it raises
+    leaves this function.
     """
     results = []
+    undecodable = 0
     try:
         with event_store.open_archive_text(archive) as handle:
             for line in handle:
@@ -230,7 +250,8 @@ def _read_result_event(
                     continue
                 try:
                     event = json.loads(line)
-                except ValueError:
+                except _LINE_DECODE_ERRORS:
+                    undecodable += 1
                     continue
                 if not isinstance(event, dict):
                     continue
@@ -239,10 +260,11 @@ def _read_result_event(
                     return None, REFUSED, f"{archive.name}: {foreign}"
                 if event.get("type") == "result":
                     results.append(event)
-    except (OSError, EOFError) as exc:
-        return None, UNAVAILABLE, f"{archive.name} is unreadable ({type(exc).__name__})"
+    except _ARCHIVE_READ_ERRORS as exc:
+        return None, UNAVAILABLE, f"{archive.name} is unreadable ({_cause(exc)})"
     if not results:
-        return None, UNAVAILABLE, f"{archive.name} holds no result event"
+        torn = f" ({undecodable} line(s) not JSON)" if undecodable else ""
+        return None, UNAVAILABLE, f"{archive.name} holds no result event{torn}"
     if len(results) > 1:
         return None, REFUSED, f"{archive.name} holds {len(results)} result events; the final answer is ambiguous"
     event = results[0]
@@ -252,6 +274,18 @@ def _read_result_event(
     if not isinstance(data, dict):
         return None, UNAVAILABLE, f"{archive.name}: the result event carries no data object"
     return data, "", ""
+
+
+def _cause(exc: BaseException) -> str:
+    """``<module>.<type>: <message>`` of *exc*, one line, for a ``detail``.
+
+    The module is named for a type outside builtins: ``zlib.error`` says what
+    broke, a bare ``error`` does not.
+    """
+    kind = type(exc)
+    name = kind.__qualname__ if kind.__module__ == "builtins" else f"{kind.__module__}.{kind.__qualname__}"
+    message = " ".join(str(exc).split())[:200]
+    return f"{name}: {message}" if message else name
 
 
 def _foreign_binding(event: Dict[str, Any], dispatch_id: str, terminal: str) -> str:

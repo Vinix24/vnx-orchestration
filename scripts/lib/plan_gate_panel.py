@@ -42,13 +42,16 @@ import sys
 import tempfile
 import uuid
 import warnings
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
 # R6 (OI-2039): a seat whose report carries no verdict fence may still have its
 # verdict in its final answer, the result event of its archived event stream.
+# A claude seat's stream is archived when its run ends (_archive_seat_stream).
+import event_store
 import final_answer_verdict
 
 HERE = Path(__file__).resolve().parent
@@ -1235,6 +1238,52 @@ def _seat_lane_outcome(result: Any) -> str:
     )
 
 
+@contextmanager
+def _seat_env_pins(base: Path) -> Iterator[None]:
+    """The claude seat's env pins on ``os.environ`` for one run, restored exactly afterwards.
+
+    Why on ``os.environ`` and not a child-only mapping: see
+    ``_run_claude_headless_seat``. A key that did not exist before the run does
+    not exist after it.
+    """
+    pins = {
+        "VNX_DATA_DIR": str(base),
+        "VNX_DATA_DIR_EXPLICIT": "1",
+        "VNX_WORKER_SCOPED": "1",
+    }
+    restore = {key: os.environ.get(key) for key in pins}
+    try:
+        os.environ.update(pins)
+        yield
+    finally:
+        for key, previous in restore.items():
+            if previous is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = previous
+
+
+def _archive_seat_stream(base: Path, dispatch_id: str) -> Optional[Path]:
+    """Archive a claude seat's completed event stream when its run ends (R6, OI-2039).
+
+    The seat's adapter writes ``<base>/events/plan-gate.ndjson`` (its
+    EventStore resolves the data dir while the pins are on), and neither the
+    adapter nor ``dispatch_govern`` archives it. The archive came into being
+    only when the next dispatch on the terminal rotated the boundary, seconds
+    after ``_seat_final_answer`` had looked for it, so a claude seat's final
+    answer was never read. This is the teardown provider_dispatch and the
+    door's headless envelope already run, done for the seat's own events dir
+    (an explicit path, not the ambient env the pins were just taken off).
+
+    A stream another dispatch is writing into as well is left alone
+    (``EventStore.archive_completed_stream``); the seat then reads as it did
+    before: no archive, so the re-extraction runs.
+    """
+    return event_store.EventStore(events_dir=Path(base) / "events").archive_completed_stream(
+        _PANEL_TERMINAL_ID, dispatch_id,
+    )
+
+
 def _run_claude_headless_seat(
     *,
     dispatch_id: str,
@@ -1298,23 +1347,11 @@ def _run_claude_headless_seat(
         task_class="research_structured",
     )
 
-    pins = {
-        "VNX_DATA_DIR": str(base),
-        "VNX_DATA_DIR_EXPLICIT": "1",
-        "VNX_WORKER_SCOPED": "1",
-    }
-    restore = {key: os.environ.get(key) for key in pins}
     start = datetime.now(timezone.utc)
-    try:
-        os.environ.update(pins)
+    with _seat_env_pins(base):
         result = ClaudeSubprocessAdapter().run(spec, cwd=checkout)
-    finally:
-        for key, previous in restore.items():
-            if previous is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = previous
     duration = (datetime.now(timezone.utc) - start).total_seconds()
+    _archive_seat_stream(base, dispatch_id)
 
     from dispatch_govern import GovernRaw, GovernSpec, govern  # noqa: PLC0415
     govern(

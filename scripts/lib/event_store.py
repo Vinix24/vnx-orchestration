@@ -125,6 +125,29 @@ def find_archive_file(directory: Union[str, Path], dispatch_id: str) -> Optional
     return None
 
 
+def _stream_belongs_to(content: bytes, dispatch_id: str) -> bool:
+    """True when *content* holds an event of *dispatch_id* and none of another dispatch.
+
+    An event names its dispatch in ``dispatch_id``; one that names another,
+    the empty id included, makes the stream shared. A line that is not a JSON
+    object (a torn write) names no dispatch and decides nothing.
+    """
+    own = False
+    for line in content.splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(event, dict) or "dispatch_id" not in event:
+            continue
+        if event["dispatch_id"] != dispatch_id:
+            return False
+        own = True
+    return own
+
+
 def _events_dir() -> Path:
     """Resolve the events directory, failing loud on a read-only version store.
 
@@ -573,6 +596,70 @@ class EventStore:
                 f.truncate(0)
             finally:
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+    def archive_completed_stream(self, terminal: str, dispatch_id: str) -> Optional[Path]:
+        """Archive and clear the live stream at the end of *dispatch_id*'s run, when it is its alone.
+
+        For a lane whose run ends without a teardown that archives: the
+        plan-gate's claude seat writes here through SubprocessAdapter, and
+        neither the adapter nor dispatch_govern archives, so the archive came
+        into being only when the NEXT dispatch on the terminal rotated the
+        boundary. A reader at the end of the run (R6, OI-2039) found none.
+
+        Only a stream that holds this dispatch's events and no other
+        dispatch's is archived. A stream another dispatch writes into as well
+        (OI-1869, OI-1930: parallel dispatches share one ring buffer per
+        terminal) is left untouched for the boundary guard, as before:
+        archiving it would file the other dispatch's events under this id, and
+        truncating it would drop that dispatch's live events.
+
+        An archive this dispatch already has (a parallel dispatch's boundary
+        guard archived the head of its stream) is extended, never replaced. The
+        check, the copy and the truncate run under one LOCK_EX on the live
+        file, the lock every appender takes, so no event lands between the copy
+        and the truncate; the archive is written to a temp file and moved into
+        place. Never raises: a failure is logged and leaves the live file for
+        the boundary guard. Returns the archive path, or None when nothing was
+        archived.
+        """
+        path = self._terminal_path(terminal)
+        if not dispatch_id or not path.exists():
+            return None
+        dest = self.archive_dir(terminal) / f"{dispatch_id}{ARCHIVE_SUFFIX}"
+        tmp = dest.with_name(dest.name + ".tmp")
+        try:
+            with open(path, "rb+") as f:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                try:
+                    content = f.read()
+                    if not _stream_belongs_to(content, dispatch_id):
+                        return None
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    head = dest.read_bytes() if dest.is_file() else b""
+                    if head and not head.endswith(b"\n"):
+                        head += b"\n"
+                    tmp.write_bytes(head + content)
+                    os.replace(tmp, dest)
+                    f.seek(0)
+                    f.truncate(0)
+                    f.flush()
+                finally:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        except Exception as exc:  # vnx-silent-except: an end-of-run archive must never break the run; logged, live file left for the boundary guard
+            logger.error(
+                "event_store: end-of-run archive failed for %s (dispatch %s): %s",
+                path, dispatch_id, exc, exc_info=True,
+            )
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return None
+        self._sequences.pop(terminal, None)
+        self._boundary_terminal.pop(terminal, None)
+        self._remove_oversize_flag(terminal)
+        logger.info("event_store: end-of-run archived %s -> %s", path, dest)
+        return dest
 
     def oversize_flags(self) -> list[Path]:
         """Return paths to all oversize flag files currently present.
