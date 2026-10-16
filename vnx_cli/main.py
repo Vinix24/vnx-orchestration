@@ -1637,17 +1637,9 @@ def _dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
         from vnx_cli.commands.attest import vnx_attest
         sys.exit(vnx_attest(args))
 
-    elif args.command == "horizon":
-        from vnx_cli.commands.horizon import vnx_horizon
-        sys.exit(vnx_horizon(args))
-
-    elif args.command == "objective":
-        from vnx_cli.commands.horizon import vnx_objective
-        sys.exit(vnx_objective(args))
-
-    elif args.command == "deliverable":
-        from vnx_cli.commands.horizon import vnx_deliverable
-        sys.exit(vnx_deliverable(args))
+    elif args.command in ("horizon", "objective", "deliverable"):
+        from vnx_cli.commands import horizon as horizon_commands
+        sys.exit(getattr(horizon_commands, f"vnx_{args.command}")(args))
 
     elif args.command == "gate-check":
         from vnx_cli.commands.gate_check import vnx_gate_check
