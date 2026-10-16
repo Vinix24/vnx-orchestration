@@ -384,7 +384,7 @@ jobs:
           if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
             {
               printf '### Profile A (xdist shadow)\n\n'
-              printf 'Not a required check. Verdict: `%s` (profile `%s`).\n\n' "$verdict" "${SHADOW_PROFILE:-unknown}"
+              printf 'Not a required check. Verdict: **%s** (profile %s).\n\n' "$verdict" "${SHADOW_PROFILE:-unknown}"
               printf '| step | outcome | exit | seconds | peak used kB |\n|---|---|---|---|---|\n'
               printf '| checkout | %s | | | |\n' "${OUTCOME_CHECKOUT:-}"
               printf '| prelude | %s | | | |\n' "${OUTCOME_PRELUDE:-}"

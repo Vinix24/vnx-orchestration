@@ -324,6 +324,13 @@ def test_inline_comments_end_at_whitespace_hash_only(tmp_path):
         ("scripts/ci/profile_a_pytest_args.sh\n", "not a test file under tests/"),
         ("tests/../tests/test_gamma.py\n", "must be plain"),
     ],
+    # Explicit ids: a generated id would carry the entry text, and the one
+    # naming the quarantined class would itself be deselected by Profile A's -k.
+    ids=[
+        "missing-file", "unknown-nodeid", "prefix-of-a-sibling", "parametrized-base-name",
+        "deselected-by-the-quarantine", "excluded-file", "collects-nothing", "duplicate",
+        "nodeid-inside-a-file-entry", "outside-tests", "dot-dot-path",
+    ],
 )
 def test_an_entry_that_does_not_match_exactly_is_refused(tmp_path, serial, message):
     root = _suite_root(tmp_path, serial)

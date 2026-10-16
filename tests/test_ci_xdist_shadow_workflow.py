@@ -216,7 +216,7 @@ def test_the_record_step_maps_outcomes_to_a_verdict(jobs, tmp_path, overrides, v
     assert record["verdict"] == verdict
     assert record["schema"] == "vnx-xdist-shadow/1"
     assert record["steps"]["prelude"] == {**SUCCESS_RUN, **overrides}["OUTCOME_PRELUDE"]
-    assert f"Verdict: `{verdict}`" in summary
+    assert f"Verdict: **{verdict}**" in summary
 
 
 def test_the_record_step_reads_exit_codes_durations_and_memory(jobs, tmp_path):
