@@ -259,10 +259,15 @@ if role == "second":
 write("system", {"subtype": "init"})
 (barrier / f"{role}-started").touch()
 wait("second-started" if role == "first" else "first-started")
+if role == "second":
+    # The overlap the old defect needs: the first run has written its events and its final
+    # answer, with nothing archived yet, before the second run writes and tears down.
+    wait("first-wrote")
 for i in range(count):
     write("text", {"text": f"{did} event {i}"})
 write("result", {"text": f"FINAL ANSWER OF {did}", "subtype": "success", "is_error": False})
 if role == "first":
+    (barrier / "first-wrote").touch()
     wait("second-done")  # the second run tears down while the first still writes
     for i in range(3):
         write("text", {"text": f"{did} late {i}"})
@@ -628,21 +633,24 @@ class TestPerRunStream:
         store = event_store.EventStore()
         store.append(TERMINAL, {"type": "init", "data": {}}, dispatch_id=FIRST)
         live = store.live_path(TERMINAL, FIRST)
-        held = []
+        links_held = []
+        moving = []
         real_flock = fcntl.flock
 
         def flock(fd, operation):
-            if operation == fcntl.LOCK_EX and not held:
+            if operation == fcntl.LOCK_EX and not moving:
+                moving.append(True)  # the archive below takes this lock too
                 # The append holds the file open; another process moves the stream first.
-                held.append(os.fstat(fd).st_ino)
+                # Link count, not inode number: a filesystem may reuse a freed inode number.
                 event_store.EventStore().archive(TERMINAL, FIRST)
+                links_held.append(os.fstat(fd).st_nlink)
             return real_flock(fd, operation)
 
         with monkeypatch.context() as m:
             m.setattr(event_store.fcntl, "flock", flock)
             store.append(TERMINAL, {"type": "text", "data": {"text": "late"}}, dispatch_id=FIRST)
 
-        assert held and live.exists() and live.stat().st_ino != held[0]
+        assert links_held == [0] and live.exists()
         assert [json.loads(line)["type"] for line in live.read_text().splitlines()] == ["text"]
         store.archive(TERMINAL, FIRST)
         assert [e["type"] for e in _archive_events(FIRST)] == ["init", "text"]
