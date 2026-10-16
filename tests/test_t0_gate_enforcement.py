@@ -82,8 +82,19 @@ def _entry(
     return entry
 
 
-def _report(*entries: Dict[str, Any]) -> Dict[str, Any]:
-    return {"pr_number": 7, "branch": "feat/x", "gates": list(entries), "has_required_failure": False}
+#: The seat list ``request-and-execute`` reports since OI-2058 R5a: the seats its
+#: round resolved. Without ``--review-stack`` the verifier holds the run to it.
+REPORTED_SEATS: Dict[str, Any] = {
+    "seats": list(DEFAULT_STACK), "extra_gates": [], "source": "config",
+    "key": "VNX_DEFAULT_REVIEW_STACK", "value": ",".join(DEFAULT_STACK), "profile_stack": None,
+}
+
+
+def _report(*entries: Dict[str, Any], review_seats: Optional[Dict[str, Any]] = REPORTED_SEATS) -> Dict[str, Any]:
+    report = {"pr_number": 7, "branch": "feat/x", "gates": list(entries), "has_required_failure": False}
+    if review_seats is not None:
+        report["review_seats"] = review_seats
+    return report
 
 
 def _write_artifacts(
@@ -724,6 +735,8 @@ def project(tmp_path: Path) -> Path:
     shutil.copy2(REPO_ROOT / "scripts" / "t0_gate_enforcement.sh", root / "scripts")
     shutil.copy2(REPO_ROOT / "scripts" / "lib" / "vnx_resolve_root.sh", root / "scripts" / "lib")
     shutil.copy2(REPO_ROOT / "scripts" / "lib" / "gate_enforcement_verify.py", root / "scripts" / "lib")
+    # The verifier's one dependency: the shared seat reading (OI-2058, R5b).
+    shutil.copy2(REPO_ROOT / "scripts" / "lib" / "review_seat_evaluation.py", root / "scripts" / "lib")
     (root / "scripts" / "review_gate_manager.py").write_text(STUB_MANAGER, encoding="utf-8")
     return root
 

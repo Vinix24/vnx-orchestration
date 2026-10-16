@@ -506,12 +506,14 @@ class SubprocessAdapter:
                     _rec_exc,
                 )
 
-        # Archive previous dispatch events, then clear for new dispatch
+        # Archive previous dispatch events, then clear for new dispatch. On a
+        # per-run terminal (plan-gate, OI-2115) the dispatch id names this run's
+        # own stream, so a seat starting never archives or clears another seat's.
         es = self._get_event_store()
         if es is not None:
-            last = es.last_event(terminal_id)
+            last = es.last_event(terminal_id, dispatch_id=dispatch_id)
             prev_dispatch_id = last.get("dispatch_id") if last else None
-            es.clear(terminal_id, archive_dispatch_id=prev_dispatch_id or None)
+            es.clear(terminal_id, archive_dispatch_id=prev_dispatch_id or None, dispatch_id=dispatch_id)
 
         return DeliveryResult(
             success=True,

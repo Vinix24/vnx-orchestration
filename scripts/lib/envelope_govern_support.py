@@ -349,7 +349,9 @@ def _archive_dispatch_events(
         from event_store import EventStore  # noqa: PLC0415
 
         store = EventStore()
-        last = store.last_event(terminal)
+        # The dispatch id names this run's own stream on a per-run terminal
+        # (OI-2115); on a terminal-pinned stream it changes nothing.
+        last = store.last_event(terminal, dispatch_id=dispatch_id)
         last_dispatch = (last or {}).get("dispatch_id") or ""
         if last_dispatch and last_dispatch != dispatch_id:
             logger.debug(
@@ -385,11 +387,11 @@ def _clear_dispatch_events(terminal: Optional[str], dispatch_id: str) -> None:
         from event_store import EventStore  # noqa: PLC0415
 
         store = EventStore()
-        last = store.last_event(terminal)
+        last = store.last_event(terminal, dispatch_id=dispatch_id)
         last_dispatch = (last or {}).get("dispatch_id") or ""
         if last_dispatch and last_dispatch != dispatch_id:
             return
-        store.clear(terminal)
+        store.clear(terminal, dispatch_id=dispatch_id)
     except Exception as exc:  # noqa: BLE001 — teardown must never break the dispatch
         logger.warning(
             "envelope: end-dispatch event clear failed terminal=%s dispatch=%s (non-fatal): %s",

@@ -122,10 +122,11 @@ _CLAUDE_PROVIDERS = {"claude"}
 # and a door receipt name the same lane instead of two.
 _HEADLESS_LANE = "claude_headless"
 
-# The terminal every panel seat books its lane work under. Matches the --terminal-id the
-# provider branch below already passes, so seat receipts from both lanes land under one
-# name rather than splitting the audit trail by lane.
-_PANEL_TERMINAL_ID = "plan-gate"
+# The terminal every panel seat books its lane work under. The provider branch below
+# passes it as --terminal-id, so seat receipts from both lanes land under one name rather
+# than splitting the audit trail by lane. event_store keeps its live stream per run
+# (OI-2115), so seats running at the same time never share one stream.
+_PANEL_TERMINAL_ID = event_store.HARNESS_SEAT_TERMINAL
 
 # Full diverse-family assurance panel: (label, provider string, model_arg).
 # One panelist per provider family (Anthropic / Moonshot / Zhipu / DeepSeek / OpenAI) so a
@@ -1266,16 +1267,17 @@ def _seat_env_pins(base: Path) -> Iterator[None]:
 def _archive_seat_stream(base: Path, dispatch_id: str) -> Optional[Path]:
     """Archive a claude seat's completed event stream when its run ends (R6, OI-2039).
 
-    The seat's adapter writes ``<base>/events/plan-gate.ndjson`` (its
-    EventStore resolves the data dir while the pins are on), and neither the
-    adapter nor ``dispatch_govern`` archives it. The archive came into being
-    only when the next dispatch on the terminal rotated the boundary, seconds
-    after ``_seat_final_answer`` had looked for it, so a claude seat's final
-    answer was never read. This is the teardown provider_dispatch and the
+    The seat's adapter writes ``<base>/events/plan-gate/<dispatch_id>.ndjson``
+    (its EventStore resolves the data dir while the pins are on; the stream is
+    the run's own, OI-2115), and neither the adapter nor ``dispatch_govern``
+    archives it. Before R6 the archive came into being only when the next
+    dispatch on the terminal rotated the boundary, seconds after
+    ``_seat_final_answer`` had looked for it, so a claude seat's final answer
+    was never read. This is the teardown provider_dispatch and the
     door's headless envelope already run, done for the seat's own events dir
     (an explicit path, not the ambient env the pins were just taken off).
 
-    A stream another dispatch is writing into as well is left alone
+    A stream that holds another dispatch's event is left alone
     (``EventStore.archive_completed_stream``); the seat then reads as it did
     before: no archive, so the re-extraction runs.
     """
@@ -1514,7 +1516,7 @@ def _make_default_dispatcher(
             cmd = [
                 sys.executable, str(PROVIDER_DISPATCH),
                 "--provider", provider,
-                "--terminal-id", "plan-gate",
+                "--terminal-id", _PANEL_TERMINAL_ID,
                 "--dispatch-id", dispatch_id,
                 "--model", model_arg,
                 "--role", role,

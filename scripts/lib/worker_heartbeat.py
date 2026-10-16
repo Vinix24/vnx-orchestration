@@ -143,10 +143,14 @@ class EventStreamHeartbeat:
         return self._store
 
     def _last_event(self) -> Optional[Dict[str, Any]]:
-        """Return the last event in the stream for this terminal."""
+        """Return the last event in the stream for this terminal.
+
+        On a per-run terminal (OI-2115) that is this dispatch's own stream,
+        so a parallel run's events never read as this worker's liveness.
+        """
         try:
             store = self._get_store()
-            return store.last_event(self.terminal_id)
+            return store.last_event(self.terminal_id, dispatch_id=self.dispatch_id)
         except Exception as exc:
             logger.debug(
                 "worker_heartbeat: EventStore read failed for %s: %s",

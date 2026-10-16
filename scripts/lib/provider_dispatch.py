@@ -1665,9 +1665,11 @@ def _emit_governance(
 
     # Clear (truncate) the live event file now that the archive + receipt are done.
     # Only when event_store is wired in — otherwise the caller's finally block handles it.
+    # The dispatch id names this run's own stream on a per-run terminal (plan-gate,
+    # OI-2115); a bare clear there would reach the shared stream, not this run's.
     if event_store is not None:
         try:
-            event_store.clear(args.terminal_id)
+            event_store.clear(args.terminal_id, dispatch_id=args.dispatch_id)
         except Exception as _clr_exc:
             logger.warning(
                 "_emit_governance: event_store.clear failed for dispatch=%s (non-fatal): %s",

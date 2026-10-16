@@ -271,7 +271,9 @@ class TestMergeDoorAcceptsKimi:
         gate, _pr_data = pr_merge._run_review_gate(PR)
         return gate
 
-    def test_a_kimi_pass_opens_the_door_when_kimi_is_the_declared_gate(self, env, lane, monkeypatch):
+    def test_a_kimi_pass_opens_the_door_of_a_project_whose_stack_is_kimi(self, env, lane, monkeypatch):
+        """The door holds a merge to the project's stack, never to the declared gate (OI-2058, R5b)."""
+        monkeypatch.setenv("VNX_DEFAULT_REVIEW_STACK", "kimi_gate")
         _manager().request_and_execute(
             pr_number=PR, branch=BRANCH, review_stack=["kimi_gate"], risk_class="medium",
             changed_files=["scripts/lib/example.py"], mode="final", dispatch_id=self.DISPATCH,
@@ -281,10 +283,15 @@ class TestMergeDoorAcceptsKimi:
 
         assert gate["verdict"] == "GO", gate["message"]
         assert gate["overridden"] is False
+        assert gate["review_seats"]["seats"] == ["kimi_gate"]
 
-    def test_a_kimi_pass_opens_the_door_for_a_codex_obligation_when_kimi_took_the_seat(
-        self, env, lane, monkeypatch,
-    ):
+    def test_a_kimi_pass_for_codexs_seat_fills_that_seat_and_no_other(self, env, lane, monkeypatch):
+        """kimi took codex's seat: it fills codex's seat only (OI-2058, R5b).
+
+        Under the default stack ``codex_gate,kimi_gate`` kimi's own seat is then
+        still open, and the door says so by name. In a codex-only project the
+        same evidence opens the door.
+        """
         _write_result(env, "codex_gate", _CODEX_LIMIT_RECORD)
         _manager().request_and_execute(
             pr_number=PR, branch=BRANCH, review_stack=["codex_gate"], risk_class="medium",
@@ -294,6 +301,16 @@ class TestMergeDoorAcceptsKimi:
         assert record["takeover_from"] == "codex_gate", "kimi must carry the takeover it was booked under"
 
         gate = self._door(env, monkeypatch, "codex_gate")
+
+        assert gate["verdict"] == "NO-GO", gate["message"]
+        assert gate["review_seats"]["filled_by"] == {"codex_gate": "kimi_gate"}
+        assert gate["review_seats"]["unfilled"] == ["kimi_gate"]
+        assert "seat kimi_gate" in gate["message"]
+
+        import pr_merge
+
+        monkeypatch.setenv("VNX_DEFAULT_REVIEW_STACK", "codex_gate")
+        gate, _pr_data = pr_merge._run_review_gate(PR)
 
         assert gate["verdict"] == "GO", gate["message"]
         assert gate.get("evidence_gate") == "kimi_gate"

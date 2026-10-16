@@ -79,7 +79,7 @@ def test_marker_far_beyond_eighty_chars_survives_the_snippet():
 
 
 def test_earliest_position_marker_wins_not_first_tuple_order():
-    early_marker = "reached your usage limit"  # last in _LANE_EXHAUSTED_MARKERS
+    early_marker = "reached your usage limit"  # later in _LANE_EXHAUSTED_MARKERS
     late_marker = "access_terminated_error"  # first in _LANE_EXHAUSTED_MARKERS
     filler = "tool call chatter with no quota keywords in it. " * 40  # ~2000 chars
     text = f"You've {early_marker} for this cycle. " + filler + f"{late_marker} — done."

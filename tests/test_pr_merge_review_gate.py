@@ -61,7 +61,8 @@ class TestCheckReviewGateForMerge:
     def test_missing_result_is_no_go(self, tmp_path):
         results_dir = tmp_path / "results"
         gate = closure_verifier.check_review_gate_for_merge(
-            "PR-42", "codex_gate", results_dir, branch="feature/x"
+            "PR-42", "codex_gate", results_dir, branch="feature/x",
+            seats=["codex_gate"],
         )
         assert gate["verdict"] == "NO-GO"
         assert "geen review-gate resultaat" in gate["message"]
@@ -76,7 +77,8 @@ class TestCheckReviewGateForMerge:
         )
 
         gate = closure_verifier.check_review_gate_for_merge(
-            "PR-42", "codex_gate", results_dir, branch="feature/x"
+            "PR-42", "codex_gate", results_dir, branch="feature/x",
+            seats=["codex_gate"],
         )
 
         assert gate["verdict"] == "NO-GO"
@@ -90,7 +92,8 @@ class TestCheckReviewGateForMerge:
         )
 
         gate = closure_verifier.check_review_gate_for_merge(
-            "PR-42", "codex_gate", results_dir, branch="feature/x"
+            "PR-42", "codex_gate", results_dir, branch="feature/x",
+            seats=["codex_gate"],
         )
 
         assert gate["verdict"] == "NO-GO"
@@ -106,7 +109,8 @@ class TestCheckReviewGateForMerge:
         )
 
         gate = closure_verifier.check_review_gate_for_merge(
-            "PR-42", "codex_gate", results_dir, branch="feature/x"
+            "PR-42", "codex_gate", results_dir, branch="feature/x",
+            seats=["codex_gate"],
         )
 
         assert gate["verdict"] == "NO-GO"
@@ -119,7 +123,8 @@ class TestCheckReviewGateForMerge:
         _write_result(results_dir, "PR-42", "codex_gate", _result(report))
 
         gate = closure_verifier.check_review_gate_for_merge(
-            "PR-42", "codex_gate", results_dir, branch="feature/x"
+            "PR-42", "codex_gate", results_dir, branch="feature/x",
+            seats=["codex_gate"],
         )
 
         assert gate["verdict"] == "GO"
@@ -207,6 +212,7 @@ class TestRealWriterThroughRealMergeCheck:
             "PR-42", "gemini_review", results_dir,
             branch="feature/x",
             head_sha=self.KNOWN_HEAD_OID,
+            seats=["gemini_review"],
         )
 
         assert gate["verdict"] == "GO"
@@ -218,6 +224,7 @@ class TestRealWriterThroughRealMergeCheck:
             "PR-42", "gemini_review", results_dir,
             branch="feature/x",
             head_sha="9999999999999999999999999999999999999999",
+            seats=["gemini_review"],
         )
 
         assert gate["verdict"] == "NO-GO"

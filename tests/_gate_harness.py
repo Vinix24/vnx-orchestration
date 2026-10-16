@@ -51,6 +51,7 @@ GATE_SH = REPO_ROOT / "scripts" / "commands" / "gate.sh"
 
 GATE_LIB_MODULES = (
     "gate_enforcement_verify.py",
+    "review_seat_evaluation.py",
     "gate_status.py",
     "gate_depth.py",
     "gate_seat_line.py",

@@ -634,8 +634,10 @@ def _find_takeover_successor_results(
     branch: Optional[str] = None,
     project_id: Optional[str] = None,
     head_sha: Optional[str] = None,
+    *,
+    stated_seats: Optional[Dict[str, str]] = None,
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
-    """OI-1576: successor records that name ``gate`` in their OWN takeover_path.
+    """OI-1576: successor records that answer for seat ``gate`` themselves.
 
     The gate chain slides forward (codex unavailable -> kimi not executable ->
     glm takes over and writes a valid verdict under its OWN name). The runner
@@ -643,12 +645,16 @@ def _find_takeover_successor_results(
     the successor record carries about itself, so no reader ever has to
     reconstruct the chain from other records again.
 
-    A record is a provenance candidate for declared gate ``gate`` when, and
-    only when:
+    A record is a provenance candidate for seat ``gate`` when, and only when:
 
-      1. it carries ``takeover: true`` AND a non-empty ``takeover_path``
-      2. an element of ``takeover_path`` has ``gate == <declared gate>``
-      3. it is in scope for this PR under the SAME matcher the declared-gate
+      1. its seat is ``gate`` (``review_seat_evaluation.seat_for``): the seat
+         its own request on this head states (``stated_seats``, stamped since
+         R5a) wins; without one the record must carry ``takeover: true`` and
+         ``takeover_path[0]`` must be ``gate``. Only the FIRST hop names the
+         seat (OI-2058, R5b): a later hop is a reviewer the walk passed over,
+         and a record naming ``gate`` anywhere in its path used to count for
+         every seat it walked past
+      2. it is in scope for this PR under the SAME matcher the declared-gate
          lookup uses (``_record_matches_scope``: test_run rejection, pr_id,
          project_id, branch, and the head-sha binding from #1740)
 
@@ -661,10 +667,14 @@ def _find_takeover_successor_results(
 
     Returns ``(candidates, provenance_notes)``. ``provenance_notes`` names any
     record that claims ``takeover: true`` but carries an empty or absent
-    ``takeover_path``: that is a THIRD outcome — not "no takeover", not
-    "proven provenance" — and the caller must refuse it as provenance evidence
-    with a message that the provenance could not be determined.
+    ``takeover_path`` and states no seat: that is a THIRD outcome — not "no
+    takeover", not "proven provenance" — and the caller must refuse it as
+    provenance evidence with a message that the provenance could not be
+    determined.
     """
+    from review_seat_evaluation import seat_for, takeover_origin
+
+    stated_seats = stated_seats or {}
     candidates: List[Dict[str, Any]] = []
     provenance_notes: List[str] = []
     if not results_dir.exists():
@@ -689,23 +699,21 @@ def _find_takeover_successor_results(
         # risking a second, diverging notion of "who may sign".
         if record_gate not in _REVIEW_PEER_GATES:
             continue
-        if data.get("takeover") is not True:
+        stated = stated_seats.get(record_gate, "")
+        if not stated and data.get("takeover") is not True:
             continue
         if not _record_matches_scope(data, pr_id, branch, project_id, head_sha):
             continue
         takeover_path = data.get("takeover_path")
-        if not isinstance(takeover_path, list) or not takeover_path:
+        if not stated and (not isinstance(takeover_path, list) or not takeover_path):
             provenance_notes.append(
                 f"{record_gate} (bestand {path.name}) claimt overname maar draagt "
                 "een lege of afwezige takeover_path"
             )
             continue
-        path_gates = [
-            str(step.get("gate") or "").strip()
-            for step in takeover_path
-            if isinstance(step, dict)
-        ]
-        if gate not in path_gates:
+        if not stated and not takeover_origin(takeover_path):
+            continue
+        if seat_for(record_gate, stated=stated, takeover_path=takeover_path) != gate:
             continue
         candidates.append(data)
     return candidates, provenance_notes
@@ -784,9 +792,8 @@ def _merge_door_record_verdict(
         }
     # Invariant 7: a passing verdict whose report still carries blocking
     # indicators is a contradiction, not evidence.
-    try:
-        report_content = report_path.read_text(encoding="utf-8")
-    except OSError:
+    indicators = _report_blocking_indicators(report_path)
+    if indicators is None:
         return {
             "verdict": "NO-GO",
             "message": f"{gate_label} report_path onleesbaar: {report_path}",
@@ -794,7 +801,7 @@ def _merge_door_record_verdict(
             "override_reason": None,
             "gate": gate_label,
         }
-    if _count_report_blocking_indicators(report_content) > 0:
+    if indicators > 0:
         return {
             "verdict": "NO-GO",
             "message": (
@@ -883,6 +890,7 @@ def _consult_peers_for_absence(
     project_id: Optional[str],
     head_sha: Optional[str],
     scope_note: str = "",
+    exclude: frozenset = frozenset(),
 ) -> Dict[str, Any]:
     """OI-1624/OI-1642: the shared peer-consultation verdict for a CONFIRMED
     absent declared gate — reached either because the declared gate's own,
@@ -890,13 +898,18 @@ def _consult_peers_for_absence(
     record falls outside the requested branch/project_id/head_sha scope but
     is itself an absence (OI-1642, e.g. a ``not_executable`` record written
     before the scope fields were threaded through). Both call sites in
-    ``check_review_gate_for_merge`` route through this ONE function so they
-    can never drift apart on what counts as a valid peer signer.
+    the seat evaluation route through this ONE function so they can never
+    drift apart on what counts as a valid peer signer.
 
     ``declared_status`` is the declared gate's own canonical status, used only
     for the message. ``scope_note``, when given, is folded into every returned
     message so the operator sees WHY the declared gate's own record could not
     stand for itself (OI-1642: which scope fields it failed to match).
+
+    ``exclude`` (OI-2058, R5b) names the reviewers another seat already
+    counts. The peer fills only this absent seat, and its signer is distinct
+    from every reviewer counted for another seat: an excluded peer never
+    signs. Its rejection still blocks, like any other peer's.
     """
     peers = _find_peer_gate_results(
         gate, pr_id, results_dir, branch=branch, project_id=project_id, head_sha=head_sha,
@@ -923,12 +936,16 @@ def _consult_peers_for_absence(
             "override_reason": None,
             "gate": gate,
         }
+    counted_elsewhere: List[str] = []
     for peer_gate, peer in sorted(peers, key=lambda item: item[0]):
         if gate_canonical_status(peer) not in _GATE_PASS_STATES:
             continue
+        if peer_gate in exclude:
+            counted_elsewhere.append(peer_gate)
+            continue
         peer_verdict = _merge_door_record_verdict(peer, peer_gate, pr_id)
         if peer_verdict["verdict"] == "GO":
-            return {
+            return _accepted({
                 "verdict": "GO",
                 "message": (
                     f"{gate} is afwezig voor {pr_id} (status={declared_status!r}: "
@@ -940,25 +957,32 @@ def _consult_peers_for_absence(
                 "override_reason": None,
                 "gate": gate,
                 "evidence_gate": peer_gate,
-            }
-    # Zero valid signers: the declared gate is confirmed absent and no other
-    # known gate on this exact head rendered a usable verdict either. Still
-    # NO-GO (nul geldige ondertekenaars blijft NO-GO), but honestly reported
-    # as absence, never as "bewijs onvolledig" — that phrasing belongs to a
-    # record that attempted a verdict and fell short, not to one that never
-    # tried.
-    return {
-        "verdict": "NO-GO",
-        "message": (
-            f"{gate} is afwezig voor {pr_id} (status={declared_status!r}: "
-            f"geen uitspraak gedaan{scope_note}, geen ondertekening) en geen andere poort op "
-            "deze head leverde een geldige, volledig bewezen uitspraak — nul "
-            "geldige ondertekenaars"
-        ),
-        "overridden": False,
-        "override_reason": None,
-        "gate": gate,
-    }
+            }, peer)
+    return _no_signer_verdict(gate, pr_id, declared_status, scope_note, counted_elsewhere)
+
+
+def _no_signer_verdict(
+    gate: str, pr_id: str, declared_status: str, scope_note: str, counted_elsewhere: List[str],
+) -> Dict[str, Any]:
+    """Zero valid signers for a confirmed absence.
+
+    The declared gate is confirmed absent and no other known gate on this exact
+    head rendered a usable verdict either. Still NO-GO (nul geldige
+    ondertekenaars blijft NO-GO), but honestly reported as absence, never as
+    "bewijs onvolledig" — that phrasing belongs to a record that attempted a
+    verdict and fell short, not to one that never tried. A peer that passed but
+    already counts for another seat is named (OI-2058, R5b).
+    """
+    elsewhere = (
+        f" ({', '.join(counted_elsewhere)} telt al voor een andere seat: een reviewer vult één seat)"
+        if counted_elsewhere else ""
+    )
+    return _no_go(gate, (
+        f"{gate} is afwezig voor {pr_id} (status={declared_status!r}: "
+        f"geen uitspraak gedaan{scope_note}, geen ondertekening) en geen andere poort op "
+        "deze head leverde een geldige, volledig bewezen uitspraak — nul "
+        f"geldige ondertekenaars{elsewhere}"
+    ))
 
 
 def _find_obligation_takeover_bookings(
@@ -1019,10 +1043,16 @@ def _consult_obligation_takeover_booking(
     branch: Optional[str],
     project_id: Optional[str],
     head_sha: Optional[str],
+    exclude: frozenset = frozenset(),
 ) -> Optional[Dict[str, Any]]:
     """OI-1719: the obligation store's takeover booking as a THIRD evidence
     source, next to the successor's self-carried ``takeover_path`` (OI-1576)
     and the independent peer signer for a confirmed absence (OI-1624/OI-1642).
+
+    The booking fills the seat it was booked for (``gate``) and nothing else.
+    ``exclude`` (OI-2058, R5b) names the reviewers another seat already counts:
+    a booking that points at one of them is refused by name, because a
+    reviewer fills one seat.
 
     Returns ``None`` when NO obligation joins this PR+gate as
     fulfilled-by-takeover — the route is simply absent and the caller falls
@@ -1083,39 +1113,16 @@ def _consult_obligation_takeover_booking(
     refusal_notes: List[str] = []
     for booking in sorted(bookings, key=lambda b: str(b.get("dispatch_id") or "")):
         booking_id = str(booking.get("dispatch_id") or "<onbekende verplichting>")
-        evidence_ref = booking.get("result_path") or booking.get("evidence_result_path")
-        evidence_ref = str(evidence_ref).strip() if evidence_ref else ""
-        if not evidence_ref:
-            refusal_notes.append(
-                f"verplichting {booking_id} wijst geen bewijs aan "
-                "(result_path/evidence_result_path ontbreken)"
-            )
-            continue
-        try:
-            pointed = json.loads(_read_text(Path(evidence_ref)))
-        except (OSError, json.JSONDecodeError):
-            pointed = None
-        if not isinstance(pointed, dict):
-            refusal_notes.append(
-                f"verplichting {booking_id} wijst naar onleesbaar bewijs: {evidence_ref}"
-            )
-            continue
-        if not _record_matches_scope(pointed, pr_id, branch, project_id, head_sha or ""):
-            refusal_notes.append(
-                f"het aangewezen record van verplichting {booking_id} staat niet op de "
-                f"huidige kop ({_describe_scope_mismatch(pointed, branch, project_id, head_sha or '')})"
-            )
-            continue
-        evidence_gate = (pointed.get("gate") or "").strip() or gate
-        if evidence_gate != gate and evidence_gate not in _REVIEW_PEER_GATES:
-            refusal_notes.append(
-                f"verplichting {booking_id} wijst naar {evidence_gate}, dat geen "
-                "review-ondertekenaar is (OI-1645)"
-            )
+        pointed, evidence_gate, refusal = _booking_evidence(
+            booking, booking_id, gate, pr_id,
+            branch=branch, project_id=project_id, head_sha=head_sha, exclude=exclude,
+        )
+        if pointed is None:
+            refusal_notes.append(refusal)
             continue
         verdict = _merge_door_record_verdict(pointed, evidence_gate, pr_id)
         if verdict["verdict"] == "GO":
-            return {
+            return _accepted({
                 "verdict": "GO",
                 "message": (
                     f"{gate} bewezen via takeover-boeking: verplichting {booking_id} "
@@ -1127,7 +1134,7 @@ def _consult_obligation_takeover_booking(
                 "gate": gate,
                 "evidence_gate": evidence_gate,
                 "evidence_via": "takeover_boeking",
-            }
+            }, pointed)
         refusal_notes.append(verdict["message"])
 
     return {
@@ -1142,6 +1149,57 @@ def _consult_obligation_takeover_booking(
     }
 
 
+def _booking_evidence(
+    booking: Dict[str, Any],
+    booking_id: str,
+    gate: str,
+    pr_id: str,
+    *,
+    branch: Optional[str],
+    project_id: Optional[str],
+    head_sha: Optional[str],
+    exclude: frozenset,
+) -> Tuple[Optional[Dict[str, Any]], str, str]:
+    """``(record, evidence_gate, refusal)`` for the record one booking points at.
+
+    ``record`` is ``None`` when the booking cannot be honoured, and
+    ``refusal`` then says why: no pointer, an unreadable record, a record not
+    on the current head (an unknown head refuses here, it does not suspend
+    judgement), a record under a gate that may not sign a review (OI-1645), or
+    a reviewer that already counts for another seat (OI-2058, R5b).
+    """
+    evidence_ref = booking.get("result_path") or booking.get("evidence_result_path")
+    evidence_ref = str(evidence_ref).strip() if evidence_ref else ""
+    if not evidence_ref:
+        return None, "", (
+            f"verplichting {booking_id} wijst geen bewijs aan "
+            "(result_path/evidence_result_path ontbreken)"
+        )
+    try:
+        pointed = json.loads(_read_text(Path(evidence_ref)))
+    except (OSError, json.JSONDecodeError):
+        pointed = None
+    if not isinstance(pointed, dict):
+        return None, "", f"verplichting {booking_id} wijst naar onleesbaar bewijs: {evidence_ref}"
+    if not _record_matches_scope(pointed, pr_id, branch, project_id, head_sha or ""):
+        return None, "", (
+            f"het aangewezen record van verplichting {booking_id} staat niet op de "
+            f"huidige kop ({_describe_scope_mismatch(pointed, branch, project_id, head_sha or '')})"
+        )
+    evidence_gate = (pointed.get("gate") or "").strip() or gate
+    if evidence_gate != gate and evidence_gate not in _REVIEW_PEER_GATES:
+        return None, evidence_gate, (
+            f"verplichting {booking_id} wijst naar {evidence_gate}, dat geen "
+            "review-ondertekenaar is (OI-1645)"
+        )
+    if evidence_gate in exclude:
+        return None, evidence_gate, (
+            f"verplichting {booking_id} wijst naar {evidence_gate}, dat al voor een "
+            "andere seat telt: een reviewer vult één seat"
+        )
+    return pointed, evidence_gate, ""
+
+
 def check_review_gate_for_merge(
     pr_id: str,
     gate: str,
@@ -1150,271 +1208,260 @@ def check_review_gate_for_merge(
     branch: Optional[str] = None,
     project_id: Optional[str] = None,
     head_sha: Optional[str] = None,
+    seats: Optional[Sequence[str]] = None,
+    seats_source: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """GO/NO-GO merge verdict: a passing, fully-evidenced gate result exists.
+    """GO/NO-GO merge verdict: every review seat of the project is filled on this head.
 
     The merge door's second fail-closed check (next to the CI check in
-    ``pr_merge._run_ci_gate``). Reuses ``_find_gate_result`` (pr_id/branch/
-    project_id/head-sha matching + offline test_run rejection), ``gate_is_terminal``,
-    ``gate_has_complete_evidence``, ``gate_is_pass`` and
-    ``_count_report_blocking_indicators`` — the SAME evidence the closure
-    verifier already checks, never a second, weaker copy of the invariants.
-    The enforceable subset at merge time:
+    ``pr_merge._run_ci_gate``). Since OI-2058 (reparatiegolf R5b) the door asks
+    ``review_seat_evaluation.evaluate_review_seats``, the one seat evaluation
+    ``vnx-gate/review``, ``vnx pr-ready`` and track closure ask as well, so the
+    four can never disagree. GO only when:
 
-      1. a result exists for this pr_id + gate (result exists)
-      2. it is terminal (execution actually reached a verdict)
-      3. contract_hash + report_path both non-empty (``has_complete_evidence``)
-      4. the report file exists on disk
-      5. the verdict is a pass and does not contradict the report's content
+      1. every seat of the project's review stack is filled by a DISTINCT
+         reviewer: a completed record on this head (sha binding ``match``),
+         terminal, ``contract_hash`` + ``report_path`` non-empty, the report on
+         disk, a pass that the report does not contradict
+         (:func:`_merge_door_record_verdict`, the same five invariants as
+         before); and
+      2. no review peer on this head rejected it: a FAIL verdict or a
+         blocking finding in its JSON, or in its report on disk whatever its
+         JSON says (invariant 7, read for every review peer, the declared gate
+         and reviewers outside the seats included). A rejection blocks,
+         whatever the other seats say.
 
-    "contract_hash matches the active review contract" is enforced at closure
-    time (the contract is not available here); the merge check enforces the
-    non-empty subset so an empty-hash result can never green-light a merge.
+    Which seats: the ``review_seats`` (source ``config``) a request on this
+    head recorded, else a fresh ``review_seats.resolve_review_seats()``; a
+    request with ``source=explicit`` never narrows that set. ``seats`` names
+    them directly (track closure passes the merge record's list,
+    ``seats_source`` says where it came from). ``gate`` is the declared gate of
+    the obligation: it names the evidence in the returned dict and decides no
+    seat. A dispatch declares one gate (``gate_obligations.declared_gates_for_pr``),
+    and holding a merge to that one gate is how a head with a codex PASS and
+    no kimi record merged.
+
+    Each seat is filled through the evidence routes below, in this order, and
+    each route fills at most that one seat. A route's GO carries the exact
+    record it accepted (:func:`_accepted`), and that record is the seat's
+    evidence for ``vnx-gate/review``, ``vnx pr-ready`` and track closure:
+
+    - the seat's OWN record, when it answers for this seat itself (its request
+      states the seat, or it carries no takeover). A decided verdict there
+      stands on its own and is never overridden by a successor.
+    - OI-1576: a SUCCESSOR that answers for the seat
+      (:func:`_find_takeover_successor_results`: its own request states the
+      seat, else ``takeover_path[0]``). Golf Bx/D7: a successor without a
+      verdict of its own is skipped, never judged. A takeover record fills
+      only the seat its walk started from, never also its own gate's seat.
+    - a takeover claim without a path is a refusal (provenance undeterminable).
+    - OI-1719: the obligation store's takeover booking
+      (:func:`_consult_obligation_takeover_booking`), for a reviewer no other
+      seat counts.
+    - OI-1851: a review of part of the diff fills no seat; an independent peer
+      may still sign, else the refusal names the cut.
+    - OI-1624/OI-1642: for a CONFIRMED absence of the seat's own gate (an
+      in-scope absence record, or an out-of-scope one), an independent peer's
+      full pass on this head signs (:func:`_consult_peers_for_absence`), only
+      when that peer is distinct from every reviewer counted for another seat.
+      No record at all gets no peer fallback (ADR-037).
+
     The override escape hatch lives in the caller (``pr_merge._run_review_gate``),
     mirroring how the CI gate keeps its override in ``check_ci_run_for_head``.
-
-    OI-1576: when the declared gate never reached its own verdict (record
-    absent, or a non-verdict status like ``unavailable``/``not_executable`` —
-    the chain slid forward), a SUCCESSOR record that names the declared gate
-    in its own ``takeover_path`` counts as evidence, under the SAME invariants
-    (``_merge_door_record_verdict``) plus the SAME scope/sha binding
-    (``_record_matches_scope``). The door reads the provenance FIELD the
-    successor carries about itself; it never walks the chain through other
-    records. A decided verdict at the declared gate (pass or fail) always
-    stands on its own and is never overridden by a successor.
-
-    Golf Bx/D7: a successor that claims the takeover but rendered NO verdict
-    of its own (canonical status outside ``_DECIDED_VERDICT_STATES``) is
-    SKIPPED by that loop rather than judged by
-    :func:`_merge_door_record_verdict`. Such a record only ever says something
-    about the runner (measured live on PR #1818: ``kimi_gate``
-    ``not_executable`` / ``gate_not_subprocess_routable``), so running it
-    through machinery that asks "is this a valid pass" produced a guaranteed
-    NO-GO, and that NO-GO latched into ``first_failure`` — outranking the
-    OI-1624/OI-1642 independent-signer branch below, which is never consulted
-    once ``first_failure`` is set. The result was a merge blocked by a
-    non-judgement while ``glm_gate`` carried a fully evidenced pass on the
-    exact same head. A successor that DID render a verdict is judged by the
-    unchanged invariant chain and still blocks — a real rejection is never
-    weakened — and the loop's position in FRONT of the independent-signer
-    branch is deliberately unchanged, because a successor that explicitly
-    claims the declared gate is stronger evidence than a lane that does not.
-
-    OI-1624: a gate-UITVAL is an ABSENCE, never a rejection (see
-    :func:`_is_absent_without_verdict`) — ``not_executable``/``unavailable``
-    mean "this attempt concluded without a verdict", not "this attempt
-    concluded with a NO". When the declared gate is absent AND no formal
-    takeover successor names it either, the declared gate's own absent
-    record is never run back through :func:`_merge_door_record_verdict`
-    (that machinery judges "is this a valid pass", not "did anyone speak at
-    all" — feeding it an absent record used to read as "resultaat mist
-    contract_hash en/of report_path", indistinguishable from a botched
-    attempt). Instead every OTHER known gate's own rendered verdict for the
-    SAME PR/branch/sha is consulted (:func:`_consult_peers_for_absence` /
-    :func:`_find_peer_gate_results`): a real rejection anywhere in that set
-    still blocks the merge (an echte afkeuring blijft blokkeren, ook naast
-    een pass van een andere poort), a fully-evidenced pass stands in as the
-    signer, and zero rendered peer verdicts is still NO-GO (nul geldige
-    ondertekenaars blijft NO-GO) — now honestly reported as absence rather
-    than "incomplete evidence". See ADR-037.
-
-    OI-1642 (b): the same peer route also opens when the declared gate's OWN
-    record is not even found IN SCOPE (``_find_gate_result`` returned
-    ``None``), but a record for this exact gate+pr_id DOES exist somewhere
-    outside the requested branch/project_id/head_sha scope AND that record is
-    itself a confirmed absence (measured live: PR #1777's ``codex_gate``
-    record predates OI-1624 threading ``branch``/``commit_sha`` through, so it
-    carries neither field at all, and the overwrite guard (OI-1469/OI-1470)
-    permanently refuses to rerun it once terminal). This is NOT the same as
-    "no record at all" (case a, ``TestUnrelatedRecordsNeverTakeOver`` /
-    ADR-037's "geen enig record krijgt geen peer-fallback", which stays
-    unchanged): a gate that was genuinely never asked for this PR gets no
-    peer-fallback, but a gate that WAS asked and answered with an absence —
-    just not scoped the way this call expected — is exactly as confirmed an
-    absence as the in-scope case OI-1624 already handles, and is routed
-    through the identical :func:`_consult_peers_for_absence`. An out-of-scope
-    record that DOES carry a decided verdict (pass/fail on a different
-    branch/sha) is stale evidence, not an absence, and falls through to the
-    unchanged "no evidence found" message instead.
-
-    OI-1719: a THIRD evidence source sits between the successor route and the
-    absence routes — the obligation store's own takeover booking
-    (:func:`_consult_obligation_takeover_booking`). The runner (D2e) books an
-    obligation ``fulfilled`` with ``reason=fulfilled_by_takeover_evidence`` and
-    ``result_path`` pointing at the successor's record when the chain
-    substituted a reader; successors started by hand carry no ``takeover_path``
-    (measured live: PRs #1830/#1832-#1838, whose glm gates were started
-    manually while codex sat at its usage limit and kimi/deepseek were
-    ``not_executable``), so the OI-1576 route never fires for them and the
-    booking in the obligation itself is the only place the takeover is
-    recorded. The booking is honoured under the SAME invariants — the same
-    join (:func:`obligation_matches_pr`), the same scope/sha binding
-    (:func:`_record_matches_scope`, refusing on an unknown head rather than
-    suspending judgement), the same signer set (``_REVIEW_PEER_GATES``), and
-    the same verdict chain (:func:`_merge_door_record_verdict`) — and under
-    the same hard boundary: a real rejection on this head, whether by the
-    pointed-at record or by any review peer, is never weakened by a booking.
-    An obligation already terminal ``failed`` never opens this route.
+    The returned dict carries ``review_seats``: the effective seat list, its
+    source and who filled what, the shape the merge record stores.
     """
-    result = _find_gate_result(
-        gate, pr_id, results_dir, branch=branch, project_id=project_id, head_sha=head_sha
+    from review_seat_evaluation import SOURCE_EXPLICIT, evaluate_review_seats
+
+    evaluation = evaluate_review_seats(
+        pr_id, results_dir, branch=branch, project_id=project_id, head_sha=head_sha,
+        seats=seats, seats_source=seats_source or SOURCE_EXPLICIT,
     )
-    if result is not None and gate_canonical_status(result) in _DECIDED_VERDICT_STATES:
-        # The declared gate reached its own verdict: it stands on its own.
+    verdict: Dict[str, Any] = {
+        "verdict": "GO" if evaluation.go else "NO-GO",
+        "message": evaluation.message(),
+        "overridden": False,
+        "override_reason": None,
+        "gate": gate,
+        "review_seats": evaluation.to_record(),
+    }
+    named = evaluation.fill_for(gate) or (evaluation.fills[0] if len(evaluation.fills) == 1 else None)
+    if named is not None and named.filled and named.reviewer != named.seat:
+        verdict["evidence_gate"] = named.reviewer
+    if named is not None and named.filled and named.evidence_via:
+        verdict["evidence_via"] = named.evidence_via
+    return verdict
+
+
+def _seat_claimed_verdict(
+    seat: str,
+    pr_id: str,
+    results_dir: Path,
+    *,
+    own: Optional[Dict[str, Any]],
+    stated_seats: Dict[str, str],
+    branch: Optional[str],
+    project_id: Optional[str],
+    head_sha: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    """The records that answer for ``seat`` themselves, or ``None`` when none settles it.
+
+    ``own`` is the seat gate's own in-scope record when it answers for this
+    seat (``None`` when it answers for another seat, or there is none). Its
+    decided verdict stands on its own. Otherwise every successor that answers
+    for the seat is judged by the unchanged invariant chain; the first GO
+    fills the seat, a decided successor that does not hold is a NO-GO, and a
+    takeover claim without a path is refused as undeterminable. ``None``
+    hands the seat to the booking and absence routes.
+    """
+    if own is not None and gate_canonical_status(own) in _DECIDED_VERDICT_STATES:
         # This is also what keeps the walking-reader trap closed — a step
         # status in someone else's takeover_path can never disqualify a gate
         # that carries its own decided record (live #1729: deepseek's path
         # called glm_gate not_executable while glm_gate itself passed).
-        return _merge_door_record_verdict(result, gate, pr_id)
-
-    # The declared gate produced no decided verdict. Consult successor
-    # records that name this gate in their OWN takeover_path (OI-1576).
+        return _accepted(_merge_door_record_verdict(own, seat, pr_id), own)
     successors, provenance_notes = _find_takeover_successor_results(
-        gate, pr_id, results_dir, branch=branch, project_id=project_id, head_sha=head_sha
+        seat, pr_id, results_dir, branch=branch, project_id=project_id, head_sha=head_sha,
+        stated_seats=stated_seats,
     )
     first_failure: Optional[Dict[str, Any]] = None
     for successor in successors:
-        successor_gate = (successor.get("gate") or "").strip() or gate
+        successor_gate = (successor.get("gate") or "").strip() or seat
         if gate_canonical_status(successor) not in _DECIDED_VERDICT_STATES:
-            # Golf Bx/D7: this successor claims the takeover but rendered no
-            # verdict of its own — the SAME "did anyone speak at all" test the
-            # declared-gate branch above already applies, and the same one
-            # _find_peer_gate_results uses to decide who may sign. Judging it
-            # with _merge_door_record_verdict here would be asking "is this a
-            # valid pass" of a record that never attempted one, and its
-            # inevitable NO-GO would be latched into first_failure — silently
-            # outranking the OI-1624/OI-1642 independent-signer branch below,
-            # which never even gets consulted once first_failure is set.
-            #
-            # Measured live on main 58330dd4 while merging PR #1818 (head
-            # 3074b642): kimi_gate recorded not_executable with
-            # reason='gate_not_subprocess_routable' and a takeover_path naming
-            # codex_gate, while glm_gate carried a fully evidenced pass on that
-            # exact head. The door refused with "overname-route voor
-            # codex_gate: kimi_gate resultaat mist contract_hash en/of
-            # report_path" — a statement about the RUNNER's routing blocking a
-            # proven review. Skipping it here restores the fall-through to the
-            # independent signer; the loop ORDER is deliberately unchanged,
-            # because a successor that does render a verdict is stronger
-            # evidence than a lane that never claimed the gate at all.
+            # Golf Bx/D7: a successor that rendered no verdict of its own says
+            # something about the runner, never about the code (measured on
+            # #1818: kimi_gate not_executable / gate_not_subprocess_routable).
+            # Judging it would latch a guaranteed NO-GO ahead of the peer route.
             continue
         verdict = _merge_door_record_verdict(successor, successor_gate, pr_id)
         if verdict["verdict"] == "GO":
-            return {
+            return _accepted({
                 "verdict": "GO",
                 "message": (
-                    f"{gate} bewezen via overname: {successor_gate} draagt {gate} in "
-                    f"zijn takeover_path en is zelf passing voor {pr_id}"
+                    f"{seat} bewezen via overname: {successor_gate} leest seat {seat} "
+                    f"(takeover_path[0] of de seat van zijn verzoek) en is zelf passing voor {pr_id}"
                 ),
                 "overridden": False,
                 "override_reason": None,
-                "gate": gate,
+                "gate": seat,
                 "evidence_gate": successor_gate,
-            }
+            }, successor)
         if first_failure is None:
             first_failure = verdict
     if first_failure is not None:
-        return {
-            "verdict": "NO-GO",
-            "message": (
-                f"overname-route voor {gate}: {first_failure['message']}"
-            ),
-            "overridden": False,
-            "override_reason": None,
-            "gate": gate,
-        }
+        return _no_go(seat, f"overname-route voor {seat}: {first_failure['message']}")
     if provenance_notes:
-        # Third branch: takeover claimed but provenance not determinable.
-        # Not "no takeover", not "proven provenance" — a refusal that says
-        # exactly what could not be established.
-        return {
-            "verdict": "NO-GO",
-            "message": (
-                f"overnamebewijs voor {gate} op {pr_id} geweigerd: herkomst niet "
-                f"vast te stellen ({'; '.join(provenance_notes)})"
-            ),
-            "overridden": False,
-            "override_reason": None,
-            "gate": gate,
-        }
+        return _no_go(seat, (
+            f"overnamebewijs voor {seat} op {pr_id} geweigerd: herkomst niet "
+            f"vast te stellen ({'; '.join(provenance_notes)})"
+        ))
+    return None
 
-    # OI-1719: the obligation store's OWN takeover booking as a third evidence
-    # source, next to the successor-carried takeover_path above and the peer
-    # signer below. Read after the successor loop on purpose: a successor that
-    # explicitly claims the gate (and rendered a verdict) already settled the
-    # question, and its real rejection latched in first_failure blocks before
-    # any booking is consulted. A booking that cannot be honoured is an
-    # explicit NO-GO from the route itself; no booking at all falls through.
-    booking_verdict = _consult_obligation_takeover_booking(
-        gate, pr_id, results_dir, branch=branch, project_id=project_id, head_sha=head_sha
-    )
-    if booking_verdict is not None:
-        return booking_verdict
 
+def _no_go(gate: str, message: str) -> Dict[str, Any]:
+    return {
+        "verdict": "NO-GO",
+        "message": message,
+        "overridden": False,
+        "override_reason": None,
+        "gate": gate,
+    }
+
+
+def _accepted(verdict: Dict[str, Any], record: Dict[str, Any]) -> Dict[str, Any]:
+    """A route's GO with the exact record it accepted beside it (``evidence_record``).
+
+    The seat evaluation makes that record the seat's evidence
+    (``review_seat_evaluation.SeatFill.record``), so track closure checks the
+    hash and the report of the record the door accepted, never a second lookup
+    of the reviewer's slot (OI-2058 R5b round 3). A NO-GO carries no record.
+    """
+    if verdict.get("verdict") != "GO":
+        return verdict
+    return dict(verdict, evidence_record=record)
+
+
+def _seat_absence_verdict(
+    seat: str,
+    pr_id: str,
+    results_dir: Path,
+    *,
+    own_record: Optional[Dict[str, Any]],
+    read_other_seat: str,
+    exclude: frozenset,
+    branch: Optional[str],
+    project_id: Optional[str],
+    head_sha: Optional[str],
+) -> Dict[str, Any]:
+    """The last routes for a seat nothing claimed: partial review, absence, or nothing.
+
+    ``read_other_seat`` names the seat the seat gate's own record answered for
+    instead (it read another seat): that reviewer is taken, the seat has no
+    reader of its own, and no peer fills it (it is not an absence). ``exclude``
+    is every reviewer another seat counts; a peer among them never signs.
+    """
+    scope = {"branch": branch, "project_id": project_id, "head_sha": head_sha}
+    if read_other_seat:
+        return _no_go(seat, (
+            f"{seat} las op deze kop seat {read_other_seat} (een reviewer vult één seat): "
+            f"seat {seat} heeft geen eigen reviewer op {pr_id}"
+        ))
+    result = own_record
     if result is not None and gate_canonical_status(result) in _GATE_PARTIAL_REVIEW_STATES:
-        # OI-1851: no verdict about the whole PR, so the peers that may sign
-        # for an absent gate may sign here: their full pass on this head is
-        # the second review that reads the rest. Else NO-GO with the size.
+        # OI-1851: the partial review fills no seat; an independent peer's full
+        # pass on this head is the second review that reads the rest.
         peer_verdict = _consult_peers_for_absence(
-            gate, pr_id, results_dir, gate_canonical_status(result),
-            branch=branch, project_id=project_id, head_sha=head_sha,
+            seat, pr_id, results_dir, gate_canonical_status(result),
             scope_note=f"; zag maar een deel van de diff: {gate_review_coverage_gap(result)}",
+            exclude=exclude, **scope,
         )
         if peer_verdict["verdict"] == "GO":
             return peer_verdict
-        return {
-            "verdict": "NO-GO",
-            "message": (
-                f"{_partial_review_message(result, gate, pr_id)} — "
-                f"andere poorten: {peer_verdict['message']}"
-            ),
-            "overridden": False,
-            "override_reason": None,
-            "gate": gate,
-        }
-
+        return _no_go(seat, (
+            f"{_partial_review_message(result, seat, pr_id)} — "
+            f"andere poorten: {peer_verdict['message']}"
+        ))
     if result is not None and _is_absent_without_verdict(result):
-        # OI-1624: the declared gate spoke (a record exists, in scope) and
-        # what it said is that it will render no verdict for this attempt —
-        # an ABSENCE, never a rejection. Consult every OTHER known gate's own
-        # rendered verdict for the exact same PR/branch/sha before falling
-        # back to "no evidence at all".
+        # OI-1624: the seat's gate spoke, and what it said is an absence.
         return _consult_peers_for_absence(
-            gate, pr_id, results_dir, gate_canonical_status(result),
-            branch=branch, project_id=project_id, head_sha=head_sha,
+            seat, pr_id, results_dir, gate_canonical_status(result), exclude=exclude, **scope,
         )
-
     if result is None:
-        # OI-1642: no IN-SCOPE record exists, but a record for this exact
-        # gate+pr_id may still exist OUTSIDE the requested scope — most often
-        # because it predates OI-1624 threading branch/commit_sha through, and
-        # the overwrite guard (OI-1469/OI-1470) now permanently refuses to
-        # rerun it once terminal. That is a DIFFERENT fact than "this gate was
-        # never asked for this PR" (case a — stays NO-GO unchanged, per
-        # TestUnrelatedRecordsNeverTakeOver / ADR-037). Only when the
-        # out-of-scope record is ITSELF a confirmed absence does the same
-        # peer route open; an out-of-scope record carrying a decided verdict
-        # (pass/fail on a stale branch/sha) is stale evidence, not an
-        # absence, and falls through unchanged below.
-        out_of_scope = _find_gate_result_ignoring_scope(gate, pr_id, results_dir)
-        if out_of_scope is not None and _is_absent_without_verdict(out_of_scope):
-            scope_note = (
-                f"; eigen record buiten scope "
-                f"({_describe_scope_mismatch(out_of_scope, branch, project_id, head_sha)})"
-            )
-            return _consult_peers_for_absence(
-                gate, pr_id, results_dir, gate_canonical_status(out_of_scope),
-                branch=branch, project_id=project_id, head_sha=head_sha,
-                scope_note=scope_note,
-            )
-        return {
-            "verdict": "NO-GO",
-            "message": f"geen review-gate resultaat gevonden voor {gate} op {pr_id}: merge niet toetsbaar",
-            "overridden": False,
-            "override_reason": None,
-            "gate": gate,
-        }
-    return _merge_door_record_verdict(result, gate, pr_id)
+        return _seat_without_record(seat, pr_id, results_dir, exclude=exclude, **scope)
+    return _accepted(_merge_door_record_verdict(result, seat, pr_id), result)
+
+
+def _seat_without_record(
+    seat: str,
+    pr_id: str,
+    results_dir: Path,
+    *,
+    exclude: frozenset,
+    branch: Optional[str],
+    project_id: Optional[str],
+    head_sha: Optional[str],
+) -> Dict[str, Any]:
+    """OI-1642: no in-scope record for the seat's gate.
+
+    A record for this exact gate+pr_id may still exist OUTSIDE the requested
+    scope, most often because it predates OI-1624 threading branch/commit_sha
+    through (the overwrite guard then refuses to rerun it). Only when that
+    out-of-scope record is itself a confirmed absence does the peer route
+    open; a decided verdict about another branch/sha is stale evidence, and a
+    gate that was never asked gets no peer fallback (ADR-037).
+    """
+    out_of_scope = _find_gate_result_ignoring_scope(seat, pr_id, results_dir)
+    if out_of_scope is not None and _is_absent_without_verdict(out_of_scope):
+        scope_note = (
+            f"; eigen record buiten scope "
+            f"({_describe_scope_mismatch(out_of_scope, branch, project_id, head_sha)})"
+        )
+        return _consult_peers_for_absence(
+            seat, pr_id, results_dir, gate_canonical_status(out_of_scope),
+            branch=branch, project_id=project_id, head_sha=head_sha,
+            scope_note=scope_note, exclude=exclude,
+        )
+    return _no_go(seat, f"geen review-gate resultaat gevonden voor {seat} op {pr_id}: merge niet toetsbaar")
 
 
 # Request-side states for the optional Claude GitHub review gate that record
@@ -1837,61 +1884,98 @@ def _check_single_gate(
     return handler(contract, result, results_dir, branch)
 
 
-def _check_contract_hashes(contract: ReviewContract, results_dir: Path) -> List[CheckResult]:
+def _check_contract_hashes(
+    contract: ReviewContract, results_dir: Path, skip: frozenset = frozenset(),
+) -> List[CheckResult]:
     """Check content hash consistency between contract and gate receipts.
 
     ADR-007: project_id-scoped filtering is enforced inside _find_gate_result; not added here
     to match the same call site as the original gate-loop (branch=contract.branch, no project_id arg).
+
+    ``skip`` holds the seats the seat rule already judged on the merged head
+    (OI-2058, R5b): their evidence is the record the door's route accepted for
+    the seat, bound to that head, not the seat gate's own slot. :func:`_seat_rule_checks` runs the
+    same comparison on that record, so skipping a seat here moves its check,
+    it never drops it.
     """
     checks: List[CheckResult] = []
     for gate in contract.review_stack:
-        if gate not in _KNOWN_GATES:
+        if gate not in _KNOWN_GATES or gate in skip:
             continue
         result = _find_gate_result(
             gate, contract.pr_id, results_dir, branch=contract.branch or None,
         )
-        if result and contract.content_hash:
-            result_hash = result.get("contract_hash") or result.get("content_hash") or ""
-            if result_hash and result_hash != contract.content_hash:
-                checks.append(CheckResult(
-                    f"hash_{gate}",
-                    "FAIL",
-                    f"{gate} receipt hash mismatch — evidence is stale "
-                    f"(contract={contract.content_hash[:8]}.. receipt={result_hash[:8]}..)",
-                ))
+        check = _record_hash_check(gate, gate, result, contract.content_hash)
+        if check is not None:
+            checks.append(check)
     return checks
 
 
-def _check_report_paths(contract: ReviewContract, results_dir: Path) -> List[CheckResult]:
-    """Validate that every terminal gate result carries a report_path pointing to a real file."""
+def _record_hash_check(
+    name: str, label: str, result: Optional[Dict[str, Any]], content_hash: str,
+    *, report_match: bool = False,
+) -> Optional[CheckResult]:
+    """``hash_<name>`` FAIL when ``result`` carries a contract hash other than the contract's.
+
+    One comparison for both closure rules: the old rule checks a gate's own
+    record (``label`` is the gate), the seat rule the record that fills the
+    seat (``label`` names the seat and its reviewer, OI-2058 R5b round 2).
+    ``report_match`` (the seat rule, round 3) also reports a matching hash as a
+    PASS, so the check says which record it compared; the old rule keeps
+    reporting only a mismatch.
+    """
+    if not result or not content_hash:
+        return None
+    result_hash = result.get("contract_hash") or result.get("content_hash") or ""
+    if not result_hash:
+        return None
+    if result_hash == content_hash:
+        if not report_match:
+            return None
+        return CheckResult(
+            f"hash_{name}", "PASS", f"{label} receipt hash matches the contract ({content_hash[:8]}..)",
+        )
+    return CheckResult(
+        f"hash_{name}",
+        "FAIL",
+        f"{label} receipt hash mismatch — evidence is stale "
+        f"(contract={content_hash[:8]}.. receipt={result_hash[:8]}..)",
+    )
+
+
+def _check_report_paths(
+    contract: ReviewContract, results_dir: Path, skip: frozenset = frozenset(),
+) -> List[CheckResult]:
+    """Validate that every terminal gate result carries a report_path pointing to a real file.
+
+    ``skip``: the seats the seat rule already judged (see :func:`_check_contract_hashes`).
+    """
     checks: List[CheckResult] = []
     for gate in contract.review_stack:
-        if gate not in _KNOWN_GATES:
+        if gate not in _KNOWN_GATES or gate in skip:
             continue
         result = _find_gate_result(
             gate, contract.pr_id, results_dir, branch=contract.branch or None,
         )
-        if result is not None and gate_is_terminal(result):
-            report_path = result.get("report_path", "")
-            if not report_path:
-                checks.append(CheckResult(
-                    f"report_{gate}",
-                    "FAIL",
-                    f"{gate} gate result is missing required report_path field",
-                ))
-            elif not Path(report_path).exists():
-                checks.append(CheckResult(
-                    f"report_{gate}",
-                    "FAIL",
-                    f"{gate} report_path does not exist: {report_path}",
-                ))
-            else:
-                checks.append(CheckResult(
-                    f"report_{gate}",
-                    "PASS",
-                    f"{gate} normalized report exists at {report_path}",
-                ))
+        check = _record_report_check(gate, gate, result)
+        if check is not None:
+            checks.append(check)
     return checks
+
+
+def _record_report_check(name: str, label: str, result: Optional[Dict[str, Any]]) -> Optional[CheckResult]:
+    """``report_<name>`` for a terminal ``result``: its report_path is set and the file exists.
+
+    Shared by both closure rules, as :func:`_record_hash_check`.
+    """
+    if result is None or not gate_is_terminal(result):
+        return None
+    report_path = result.get("report_path", "")
+    if not report_path:
+        return CheckResult(f"report_{name}", "FAIL", f"{label} gate result is missing required report_path field")
+    if not Path(report_path).exists():
+        return CheckResult(f"report_{name}", "FAIL", f"{label} report_path does not exist: {report_path}")
+    return CheckResult(f"report_{name}", "PASS", f"{label} normalized report exists at {report_path}")
 
 
 def _check_deterministic_findings(contract: ReviewContract) -> CheckResult:
@@ -1907,10 +1991,88 @@ def _check_deterministic_findings(contract: ReviewContract) -> CheckResult:
     return CheckResult("deterministic_findings", "PASS", f"{total} deterministic finding(s), 0 errors")
 
 
+def _merge_record_seats(merge_record: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The seat record a merge under the seat rule stored, or ``None`` for an older merge.
+
+    The door writes ``review_seats`` (rule ``review_seat_evaluation.SEAT_RULE``)
+    on every ``pr_merged`` receipt since OI-2058 R5b. A receipt without it was
+    merged under the one-seat rule; closure grandfathers it under that rule.
+    """
+    from review_seat_evaluation import SEAT_RULE
+
+    if not isinstance(merge_record, dict):
+        return None
+    record = merge_record.get("review_seats")
+    if isinstance(record, dict) and record.get("rule") == SEAT_RULE:
+        return record
+    return None
+
+
+def _seat_rule_checks(
+    contract: ReviewContract,
+    results_dir: Path,
+    seat_record: Dict[str, Any],
+) -> Tuple[List[CheckResult], frozenset]:
+    """The seat rule for a PR merged under it: one check per seat, plus what blocks.
+
+    Evaluated with the merge record's own seat list on the head it merged
+    (``head_sha``), through the same evaluation the door used. A merge whose
+    review was overridden recorded no seat list; its seats are resolved the way
+    the door resolves them. Returns the checks and the seats they cover, so the
+    per-gate handlers skip those gates (a seat may be filled by a takeover,
+    which the per-gate reading of the old rule cannot see).
+
+    No check the old rule ran disappears for a seat: the hash and report checks
+    (:func:`_record_hash_check`, :func:`_record_report_check`) move to the
+    record that fills the seat, named after the seat (OI-2058 R5b round 2).
+    That record is ``SeatFill.record``: the exact record the door's route
+    accepted (round 3), not a second lookup of the reviewer's slot. An unfilled
+    seat gets them on the record that answered for it and did not hold.
+    """
+    from review_seat_evaluation import SOURCE_MERGE_RECORD, evaluate_review_seats
+
+    seats = [str(seat) for seat in seat_record.get("seats") or [] if str(seat).strip()]
+    evaluation = evaluate_review_seats(
+        str(seat_record.get("pr_id") or contract.pr_id), results_dir,
+        branch=contract.branch or None, head_sha=str(seat_record.get("head_sha") or ""),
+        seats=seats or None, seats_source=SOURCE_MERGE_RECORD,
+    )
+    checks: List[CheckResult] = []
+    if evaluation.required.error:
+        checks.append(CheckResult("review_seats", "FAIL", evaluation.message()))
+    for rejection in evaluation.blocking:
+        checks.append(CheckResult("review_seats_blocking", "FAIL", f"gemergde kop: {rejection.text()}"))
+    for fill in evaluation.fills:
+        detail = (
+            f"seat {fill.seat} gevuld door {fill.reviewer} ({fill.route})" if fill.filled
+            else f"seat {fill.seat} niet gevuld: {fill.message}"
+        )
+        checks.append(CheckResult(f"seat_{fill.seat}", "PASS" if fill.filled else "FAIL", detail))
+        checks.extend(_seat_evidence_checks(fill, contract.content_hash))
+    return checks, frozenset(evaluation.seats)
+
+
+def _seat_evidence_checks(fill: Any, content_hash: str) -> List[CheckResult]:
+    """The old rule's hash and report checks on the record that answers for one seat.
+
+    A matching hash is a PASS here, so each seat names the reviewer and the hash
+    of the record it checked.
+    """
+    reviewer = fill.reviewer or str((fill.record or {}).get("gate") or fill.seat)
+    label = f"seat {fill.seat}: {reviewer}"
+    found = (
+        _record_hash_check(fill.seat, label, fill.record, content_hash, report_match=True),
+        _record_report_check(fill.seat, label, fill.record),
+    )
+    return [check for check in found if check is not None]
+
+
 def _validate_review_evidence(
     contract: ReviewContract,
     results_dir: Path,
     branch: Optional[str] = None,
+    *,
+    merge_record: Optional[Dict[str, Any]] = None,
 ) -> List[CheckResult]:
     """Validate review contract presence and gate results against the review stack.
 
@@ -1925,22 +2087,77 @@ def _validate_review_evidence(
     When ``branch`` is provided, gate results from a different branch are
     rejected as stale evidence — preventing a result from a prior branch with
     the same ``pr_id`` from satisfying current closure.
+
+    ``merge_record`` (OI-2058, R5b) is the PR's ``pr_merged`` receipt. When it
+    carries the seat rule (``review_seats``), every seat of that list must be
+    filled by a distinct reviewer on the merged head and no reviewer may have
+    rejected it (:func:`_seat_rule_checks`); the per-gate checks then cover
+    only the gates that are no seat. A merge record without it (merged before
+    R5b), or no merge record, keeps the rule it was merged under: every gate of
+    the contract's stack checked on its own record, so no closed or closable
+    track reopens.
     """
     checks = _check_contract_fields(contract)
     if any(c.status == "FAIL" for c in checks):
         return checks
 
+    seat_gates: frozenset = frozenset()
+    seat_record = _merge_record_seats(merge_record)
+    if seat_record is not None:
+        seat_checks, seat_gates = _seat_rule_checks(contract, results_dir, seat_record)
+        checks.extend(seat_checks)
+
     for gate in contract.review_stack:
+        if gate in seat_gates:
+            continue
         result = _find_gate_result(
             gate, contract.pr_id, results_dir, branch=contract.branch or None,
         )
         checks.append(_check_single_gate(gate, contract, result, results_dir, branch))
 
-    checks.extend(_check_contract_hashes(contract, results_dir))
-    checks.extend(_check_report_paths(contract, results_dir))
+    checks.extend(_check_contract_hashes(contract, results_dir, seat_gates))
+    checks.extend(_check_report_paths(contract, results_dir, seat_gates))
     checks.append(_check_deterministic_findings(contract))
 
     return checks
+
+
+def _find_merge_record(receipts_file: Optional[Path], pr_id: str) -> Optional[Dict[str, Any]]:
+    """The latest ``pr_merged`` receipt for this PR in ``receipts_file``, or ``None``.
+
+    An internal label (``PR-HYG-1``) joins the receipt's own ``pr_id``,
+    normalised on both sides. A bare GitHub number (``2073``) joins the
+    receipt's ``pr_number`` and the ``pr_id`` its seat record names. The two
+    namespaces are never crossed: label ``PR-3`` is not GitHub PR #3. A missing
+    ledger is no merge record: closure then keeps the rule it had
+    (grandfathered).
+    """
+    from gate_obligations import normalise_pr_id
+
+    if receipts_file is None or not Path(receipts_file).is_file():
+        return None
+    found: Optional[Dict[str, Any]] = None
+    with open(receipts_file, encoding="utf-8") as handle:
+        for line in handle:
+            if '"pr_merged"' not in line:
+                continue
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(record, dict) or record.get("event_type") != "pr_merged":
+                continue
+            if _merge_record_names(record, pr_id, normalise_pr_id):
+                found = record
+    return found
+
+
+def _merge_record_names(record: Dict[str, Any], pr_id: str, normalise) -> bool:
+    if pr_id.isdigit():
+        seats = record.get("review_seats") if isinstance(record.get("review_seats"), dict) else {}
+        return pr_id in {str(record.get("pr_number") or ""), str(seats.get("pr_id") or "")}
+    label = str(record.get("pr_id") or "")
+    return bool(label) and normalise(label) == normalise(pr_id)
 
 
 def _check_stale_staging(paths: Dict[str, str], active_pr_ids: Iterable[str]) -> CheckResult:
@@ -2059,9 +2276,9 @@ def verify_pr_closure(
             effective_results_dir = gate_results_dir
             if effective_results_dir is None:
                 effective_results_dir = Path(paths["VNX_STATE_DIR"]) / "review_gates" / "results"
-            checks.extend(
-                _validate_review_evidence(review_contract, effective_results_dir, branch=branch)
-            )
+            merge_record = _find_merge_record(receipts_file, pr_id)
+            evidence = _validate_review_evidence(review_contract, effective_results_dir, branch=branch, merge_record=merge_record)
+            checks.extend(evidence)
 
             # 5. Gate result vs report contradiction detection
             checks.extend(
@@ -2486,6 +2703,22 @@ def _count_report_blocking_indicators(content: str) -> int:
     return _count_matches_excluding_negations(_PROSE_FALLBACK_PATTERNS, filtered)
 
 
+def _report_blocking_indicators(report_path: Path) -> Optional[int]:
+    """Invariant 7's reading of one report on disk: its blocking indicators, ``None`` when unreadable.
+
+    The one report reader for a contradiction between a record and its report.
+    The merge door judges a seat's record with it
+    (:func:`_merge_door_record_verdict`), and the seat evaluation uses it to
+    find a rejection in the report of any review peer on the head
+    (``review_seat_evaluation.report_rejects``, OI-2058 R5b round 2).
+    """
+    try:
+        content = Path(report_path).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    return _count_report_blocking_indicators(content)
+
+
 def verify_closure(
     *,
     project_root: Path,
@@ -2597,9 +2830,9 @@ def verify_closure(
         effective_results_dir = gate_results_dir
         if effective_results_dir is None:
             effective_results_dir = Path(paths["VNX_STATE_DIR"]) / "review_gates" / "results"
-        checks.extend(
-            _validate_review_evidence(review_contract, effective_results_dir, branch=branch)
-        )
+        checks.extend(_validate_review_evidence(
+            review_contract, effective_results_dir, branch=branch, merge_record=_feature_merge_record(pr, paths),
+        ))
         # Gate result vs report contradiction detection — feature-level closure
         # must catch a [BLOCKING] report shipped alongside a passing gate JSON.
         checks.extend(
@@ -2634,6 +2867,13 @@ def verify_closure(
         "review_evidence": review_evidence_summary,
     }
     return payload
+
+
+def _feature_merge_record(pr: Optional[Dict[str, Any]], paths: Dict[str, str]) -> Optional[Dict[str, Any]]:
+    """The ``pr_merged`` receipt of the feature branch's PR in this project's ledger, or ``None``."""
+    if not pr or pr.get("number") is None:
+        return None
+    return _find_merge_record(Path(paths["VNX_STATE_DIR"]) / "t0_receipts.ndjson", str(pr.get("number")))
 
 
 def _default_claim_file(paths: Dict[str, str]) -> Path:

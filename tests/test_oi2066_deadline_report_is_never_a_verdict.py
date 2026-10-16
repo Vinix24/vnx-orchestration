@@ -179,6 +179,7 @@ class TestStandaloneGateRefusesACutOffReport:
         )
         door = closure_verifier.check_review_gate_for_merge(
             _PR, gate, data_dir / "state" / "review_gates" / "results",
+            seats=[gate],  # one-seat project (OI-2058 R5b: the door needs every seat of the stack)
         )
         assert door["verdict"] != "GO", door["message"]
 
@@ -208,6 +209,7 @@ class TestStandaloneGateRefusesACutOffReport:
         assert (rc, record["status"], record["reason"]) == (0, "pass", "verdict")
         door = closure_verifier.check_review_gate_for_merge(
             _PR, module.__name__, data_dir / "state" / "review_gates" / "results",
+            seats=[module.__name__],  # one-seat project (OI-2058 R5b: the door needs every seat of the stack)
         )
         assert door["verdict"] == "GO", door["message"]
 

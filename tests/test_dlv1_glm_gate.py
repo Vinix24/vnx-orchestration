@@ -199,7 +199,7 @@ def test_pass_verdict_clears_closure_verifier_merge_check(glm_gate, tmp_path, mo
     assert rc == 0
 
     results_dir = data_dir / "state" / "review_gates" / "results"
-    gate = closure_verifier.check_review_gate_for_merge("4242", "glm_gate", results_dir)
+    gate = closure_verifier.check_review_gate_for_merge("4242", "glm_gate", results_dir, seats=["glm_gate"])
 
     assert gate["verdict"] == "GO", gate["message"]
     assert "mist contract_hash" not in gate["message"]
@@ -292,7 +292,7 @@ def test_offline_run_is_test_run_and_rejected_by_merge_check_despite_complete_ev
     assert has_complete_evidence(record) is True
 
     results_dir = data_dir / "state" / "review_gates" / "results"
-    gate = closure_verifier.check_review_gate_for_merge("0", "glm_gate", results_dir)
+    gate = closure_verifier.check_review_gate_for_merge("0", "glm_gate", results_dir, seats=["glm_gate"])
     assert gate["verdict"] == "NO-GO"
     assert "geen review-gate resultaat" in gate["message"]
 
