@@ -8,9 +8,10 @@ Registered on UserPromptSubmit, PreToolUse and Stop. T0 only. A session is guard
 three rules hold (``is_guarded_session``, plan t0-guard-gebruikersniveau), and is a silent
 no-op otherwise:
 
-  1. a VNX project with a T0: the git toplevel of the payload ``cwd`` has a
-     ``.vnx-project-id`` with a non-empty first line and ``.claude/terminals/T0/CLAUDE.md``,
-     and the cwd is not a dispatch worktree (``hook_coverage.t0_project_root``);
+  1. a VNX project with a T0: the root of the payload ``cwd`` (the nearest directory holding a
+     ``.git`` entry, found without starting git) has a ``.vnx-project-id`` with a non-empty
+     first line and ``.claude/terminals/T0/CLAUDE.md``, and the cwd is not a dispatch worktree
+     (``hook_coverage.t0_project_root``);
   2. the T0 by convention: the identity check the T0 rotation safety net uses
      (``session_stop_rotation._is_t0_session``). A side session opts out with
      ``VNX_TERMINAL=<name>``;
@@ -21,7 +22,13 @@ no-op otherwise:
 User scope. Registered at user level the guard is started with ``VNX_HOOK_SCOPE=user``
 (``scripts/hooks/vnx_hook_shim.sh``). It then stays silent for an event, or a PreToolUse tool,
 that the project's own settings already cover (``hook_coverage.coverage``), so the guard never
-runs twice. A project-scope call never skips.
+runs twice. Covered means a registration that decides: it runs the guard in the foreground at
+project scope, in a project Claude Code trusts. Anything less (``unknown`` included) and the
+user-level call decides. A project-scope call never skips.
+
+Time. A hook has 10 s. On its decision path the guard starts no subprocess: rule 1 walks to the
+nearest ``.git`` instead of asking git, and the rotation state is resolved from the root rule 1
+found, whose ``.vnx-project-id`` is known to be readable.
 
 Bands (``scripts/lib/t0_context_budget.py``, thresholds from the config registry):
 
@@ -86,13 +93,19 @@ def is_attended(env: Dict[str, str]) -> bool:
     return (env.get("VNX_WORKER_SCOPED") or "").strip().lower() not in _TRUTHY
 
 
-def is_guarded_session(cwd: str, env: Dict[str, str]) -> bool:
-    """Rules 1-3 (module docstring). The cheap env and cwd checks run before the git call."""
+def guarded_root(cwd: str, env: Dict[str, str]) -> Optional[Path]:
+    """The project root when rules 1-3 (module docstring) hold, else None. The cheap env and
+    cwd checks run before the filesystem walk."""
     if not is_attended(env) or not _is_t0_session(cwd, env):
-        return False
+        return None
     if _DISPATCH_WORKTREE_CWD_RE.search((cwd or "").replace("\\", "/")):
-        return False
-    return hook_coverage.t0_project_root(cwd) is not None
+        return None
+    return hook_coverage.t0_project_root(cwd)
+
+
+def is_guarded_session(cwd: str, env: Dict[str, str]) -> bool:
+    """Rules 1-3 (module docstring)."""
+    return guarded_root(cwd, env) is not None
 
 
 def project_covers(event: str, payload: dict, env: Dict[str, str]) -> bool:
@@ -256,13 +269,14 @@ def _emit(obj: dict) -> None:
     sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
 
-def _mark_pending(cwd: str, session_id: str, pane: str, tokens: int, level: str,
+def _mark_pending(root: Path, session_id: str, pane: str, tokens: int, level: str,
                   transcript_path: str) -> bool:
     """Record the pending marker on a transition, ledger first (ADR-005): the receipt is
     appended before the marker changes, and a repeat in the same band touches nothing.
-    Returns the latch state."""
+    Returns the latch state. ``root`` is rule 1's root: its ``.vnx-project-id`` names the
+    project, so resolving the state dir never falls back to asking git."""
     try:
-        sdir = rotation_state.state_dir(cwd)
+        sdir = rotation_state.state_dir(str(root))
         marker = str(rotation_state.pending_path(sdir, pane or "no-pane"))
         rotation_state.write_pending(
             sdir, pane=pane, session_id=session_id, tokens=tokens, level=level,
@@ -281,7 +295,8 @@ def _mark_pending(cwd: str, session_id: str, pane: str, tokens: int, level: str,
 def handle(payload: dict, env: Dict[str, str]) -> Optional[dict]:
     """The hook's decision for ``payload``; None means stay silent."""
     cwd = str(payload.get("cwd") or os.getcwd())
-    if not is_guarded_session(cwd, env):
+    root = guarded_root(cwd, env)
+    if root is None:
         return None
     event = str(payload.get("hook_event_name") or "")
     if project_covers(event, payload, env):
@@ -296,7 +311,7 @@ def handle(payload: dict, env: Dict[str, str]) -> Optional[dict]:
     pending = level in (budget.LEVEL_FORCE, budget.LEVEL_HARD)
     session_id = str(payload.get("session_id") or "")
     pane = env.get("TMUX_PANE", "")
-    latched = _mark_pending(cwd, session_id, pane, tokens, level, transcript_path) if pending else False
+    latched = _mark_pending(root, session_id, pane, tokens, level, transcript_path) if pending else False
 
     if event == "UserPromptSubmit":
         if pending and _is_goal_prompt(str(payload.get("prompt") or "")):

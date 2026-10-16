@@ -2,14 +2,18 @@
 
 One function answers it for the user-level guard and for ``vnx guard check``
 (plan t0-guard-gebruikersniveau, § "Coverage and deduplication: one function"). Every case
-here is a settings file in a tmp project, parsed by the real function.
+here is a settings file in a tmp project, parsed by the real function. A registration covers
+only in a project Claude Code trusts, so ``_cov`` records that trust in a tmp
+``CLAUDE_CONFIG_DIR`` unless a test is about trust.
 """
 from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 from typing import Optional
 
@@ -48,19 +52,33 @@ def _settings(project: Path, hooks, name: str = "settings.json") -> Path:
     return path
 
 
-def _command(command: str) -> dict:
-    return {"type": "command", "command": command, "timeout": 10}
+def _command(command: str, **meta) -> dict:
+    return {"type": "command", "command": command, "timeout": 10, **meta}
 
 
-def _on(event: str, command: str, matcher: Optional[str] = None) -> dict:
-    group = {"hooks": [_command(command)]}
+def _on(event: str, command: str, matcher: Optional[str] = None, **meta) -> dict:
+    group = {"hooks": [_command(command, **meta)]}
     if matcher is not None:
         group["matcher"] = matcher
     return {event: [group]}
 
 
-def _cov(project, event="Stop", tool=None, env=None):
-    return hc.coverage(project, event, tool, env=env if env is not None else {"HOME": "/nonexistent"})
+def _trust_config(config_dir: Path, *projects: Path, trusted: bool = True) -> Path:
+    """``<config dir>/.claude.json`` recording the trust decision for ``projects``, in the shape
+    Claude Code 2.1.301 writes (``projects[<path>].hasTrustDialogAccepted``)."""
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / ".claude.json").write_text(json.dumps({"numStartups": 3, "projects": {
+        str(project): {"allowedTools": [], "hasTrustDialogAccepted": trusted}
+        for project in projects}}), encoding="utf-8")
+    return config_dir
+
+
+def _cov(project, event="Stop", tool=None, env=None, trusted=True):
+    mapping = {"HOME": "/nonexistent"} if env is None else dict(env)
+    if trusted and "CLAUDE_CONFIG_DIR" not in mapping:
+        config = _trust_config(Path(project).parent / ".claude-config", Path(project))
+        mapping["CLAUDE_CONFIG_DIR"] = str(config)
+    return hc.coverage(project, event, tool, env=mapping)
 
 
 # ── the two forms ────────────────────────────────────────────────────────────
@@ -84,11 +102,17 @@ def test_a_direct_entry_to_a_missing_path_does_not_cover(tmp_path):
 
 
 def _shim_home(root: Path) -> Path:
-    """A VNX home with the shim in it."""
-    shim = root / "scripts" / "hooks" / hc.SHIM_NAME
-    shim.parent.mkdir(parents=True, exist_ok=True)
-    shim.write_text("#!/bin/sh\n", encoding="utf-8")
+    """A VNX home with the shim and the guard entry in it."""
+    hooks = root / "scripts" / "hooks"
+    hooks.mkdir(parents=True, exist_ok=True)
+    (hooks / hc.SHIM_NAME).write_text("#!/bin/sh\n", encoding="utf-8")
+    (hooks / GUARD).write_text("", encoding="utf-8")
     return root
+
+
+def _release_env(home: Path, **extra) -> dict:
+    """A project-scope shim call runs the entry from ``VNX_HOME``: point it at ``home``."""
+    return {"HOME": "/nonexistent", "VNX_HOME": str(home), **extra}
 
 
 def test_the_shim_form_covers(tmp_path):
@@ -96,26 +120,28 @@ def test_the_shim_form_covers(tmp_path):
     home = _shim_home(tmp_path / "release")
     source = _settings(project, _on("Stop", hc.registered_command(GUARD, "project",
                                                                    vnx_home=str(home))))
-    result = _cov(project)
+    result = _cov(project, env=_release_env(home))
     assert (result.state, result.form, result.source) == (hc.COVERED, hc.FORM_SHIM, source)
 
 
 @pytest.mark.parametrize("prefix", ["sh ", "bash ", "dash ", ""])
 def test_the_plain_shim_call_covers(tmp_path, prefix):
     project = _project(tmp_path)
-    shim = _shim_home(tmp_path / "release") / "scripts" / "hooks" / hc.SHIM_NAME
+    home = _shim_home(tmp_path / "release")
+    shim = home / "scripts" / "hooks" / hc.SHIM_NAME
     shim.chmod(0o755)
-    for args in (GUARD, f"--scope project {GUARD}"):
+    for args in (GUARD, f"--scope project {GUARD}", f'"--scope" \'project\' "{GUARD}"'):
         _settings(project, _on("Stop", f'{prefix}"{shim}" {args}'))
-        assert _cov(project).form == hc.FORM_SHIM, (prefix, args)
+        assert _cov(project, env=_release_env(home)).form == hc.FORM_SHIM, (prefix, args)
 
 
 def test_a_bare_shim_path_that_cannot_execute_does_not_cover(tmp_path):
     project = _project(tmp_path)
-    shim = _shim_home(tmp_path / "release") / "scripts" / "hooks" / hc.SHIM_NAME
+    home = _shim_home(tmp_path / "release")
+    shim = home / "scripts" / "hooks" / hc.SHIM_NAME
     shim.chmod(0o644)
     _settings(project, _on("Stop", f"{shim} {GUARD}"))
-    assert _cov(project).state == hc.MISSING
+    assert _cov(project, env=_release_env(home)).state == hc.MISSING
 
 
 def test_a_user_scope_shim_entry_in_project_settings_does_not_cover(tmp_path):
@@ -123,7 +149,7 @@ def test_a_user_scope_shim_entry_in_project_settings_does_not_cover(tmp_path):
     project = _project(tmp_path)
     home = _shim_home(tmp_path / "release")
     _settings(project, _on("Stop", hc.registered_command(GUARD, "user", vnx_home=str(home))))
-    assert not _cov(project).covered
+    assert not _cov(project, env=_release_env(home)).covered
 
 
 def test_the_shim_form_for_another_entry_does_not_cover(tmp_path):
@@ -131,7 +157,7 @@ def test_the_shim_form_for_another_entry_does_not_cover(tmp_path):
     home = _shim_home(tmp_path / "release")
     _settings(project, _on("Stop", hc.registered_command("pretooluse_t0_no_subagents.py",
                                                          "project", vnx_home=str(home))))
-    assert not _cov(project).covered
+    assert not _cov(project, env=_release_env(home)).covered
 
 
 # ── a shim registration covers only when its shim can run ───────────────────
@@ -142,10 +168,11 @@ def test_a_shim_registration_to_a_missing_shim_does_not_cover(tmp_path):
     "guard shim missing", so counting it as coverage would leave no guard for the event. It
     reports MISSING, as a direct entry to a missing path does."""
     project = _project(tmp_path)
+    home = _shim_home(tmp_path / "release")
     for command in (hc.registered_command(GUARD, "project", vnx_home=str(tmp_path / "gone")),
                     f"sh {tmp_path / 'gone' / 'scripts' / 'hooks' / hc.SHIM_NAME} {GUARD}"):
         _settings(project, _on("Stop", command))
-        result = _cov(project)
+        result = _cov(project, env=_release_env(home))
         assert (result.covered, result.state) == (False, hc.MISSING), command
 
 
@@ -169,7 +196,7 @@ def test_a_shim_call_the_shim_refuses_does_not_cover(tmp_path):
     home = _shim_home(tmp_path / "release")
     for label, command in _shim_variants(home):
         _settings(project, _on("Stop", command))
-        assert not _cov(project).covered, label
+        assert not _cov(project, env=_release_env(home)).covered, label
 
 
 def test_the_shim_path_expands_home_and_the_project_dir(tmp_path):
@@ -202,6 +229,224 @@ def test_a_shim_path_the_guard_cannot_resolve_does_not_cover(tmp_path):
         assert _cov(project, env=env).state == hc.MISSING, command
 
 
+# ── (b) quoting: what the shell does not expand, coverage does not expand ───
+
+
+def _home_with_current(tmp_path: Path) -> Path:
+    home = tmp_path / "home"
+    _shim_home(home / ".vnx-system" / "current")
+    return home
+
+
+SHIM_UNDER_HOME = f".vnx-system/current/scripts/hooks/{hc.SHIM_NAME}"
+
+
+@pytest.mark.parametrize("command", [
+    f"sh '$HOME/{SHIM_UNDER_HOME}' {GUARD}",
+    f"sh '${{HOME}}/{SHIM_UNDER_HOME}' {GUARD}",
+    f'sh "\\$HOME/{SHIM_UNDER_HOME}" {GUARD}',
+    f"sh \\$HOME/{SHIM_UNDER_HOME} {GUARD}",
+    f"sh '$CLAUDE_PROJECT_DIR'/scripts/hooks/{hc.SHIM_NAME} {GUARD}",
+])
+def test_a_variable_the_shell_keeps_literal_does_not_cover(tmp_path, command):
+    """codex warning 2 on #2075: `shlex.split` dropped the quotes before `$HOME` was expanded,
+    so a single-quoted `$HOME` counted as the home directory. The shell keeps it literal, the
+    project's call exits 127, and the user-level guard skipped: no guard for the event."""
+    project = _project(tmp_path)
+    _shim_home(project)
+    home = _home_with_current(tmp_path)
+    _settings(project, _on("Stop", command))
+    assert _cov(project, env={"HOME": str(home)}).state == hc.MISSING
+
+
+@pytest.mark.parametrize("shell", ["bash", pytest.param("dash", marks=pytest.mark.skipif(
+    shutil.which("dash") is None, reason="dash is not installed"))])
+def test_the_shell_does_keep_a_single_quoted_home_literal(tmp_path, shell):
+    """The measurement behind the case above, on the real shell: the call cannot start (bash
+    exits 127 for the script it cannot open, dash 2)."""
+    home = _home_with_current(tmp_path)
+    proc = subprocess.run([shutil.which(shell), "-c", f"sh '$HOME/{SHIM_UNDER_HOME}' {GUARD}"],
+                          env={"HOME": str(home), "PATH": os.environ["PATH"]}, cwd=tmp_path,
+                          capture_output=True, text=True, timeout=30)
+    assert proc.returncode != 0, proc.stderr
+    assert f"$HOME/{SHIM_UNDER_HOME}" in proc.stderr
+
+
+def test_a_double_quoted_or_bare_home_still_covers(tmp_path):
+    project = _project(tmp_path)
+    home = _home_with_current(tmp_path)
+    for command in (f'sh "$HOME/{SHIM_UNDER_HOME}" {GUARD}',
+                    f"sh $HOME/{SHIM_UNDER_HOME} {GUARD}",
+                    f'sh "${{HOME}}"/{SHIM_UNDER_HOME} "{GUARD}"'):
+        _settings(project, _on("Stop", command))
+        assert _cov(project, env={"HOME": str(home)}).form == hc.FORM_SHIM, command
+
+
+def test_a_bare_home_the_shell_would_split_does_not_cover(tmp_path):
+    project = _project(tmp_path)
+    home = tmp_path / "a home"
+    _shim_home(home / ".vnx-system" / "current")
+    _settings(project, _on("Stop", f"sh $HOME/{SHIM_UNDER_HOME} {GUARD}"))
+    assert _cov(project, env={"HOME": str(home)}).state == hc.MISSING
+    _settings(project, _on("Stop", f'sh "$HOME/{SHIM_UNDER_HOME}" {GUARD}'))
+    assert _cov(project, env={"HOME": str(home)}).form == hc.FORM_SHIM
+
+
+def test_a_plain_shim_call_with_anything_around_it_does_not_cover(tmp_path):
+    project = _project(tmp_path)
+    home = _shim_home(tmp_path / "release")
+    shim = home / "scripts" / "hooks" / hc.SHIM_NAME
+    for command in (f"sh {shim} {GUARD} > /dev/null", f"sh {shim} {GUARD} | cat",
+                    f"sh {shim} {GUARD} &", f"true; sh {shim} {GUARD}",
+                    f'sh {shim} "$ENTRY"', f"sh {shim} '{GUARD}"):
+        _settings(project, _on("Stop", command))
+        assert _cov(project, env=_release_env(home, ENTRY=GUARD)).state == hc.MISSING, command
+
+
+# ── (d) a shim registration covers only when the entry it starts exists ─────
+
+
+def test_a_shim_registration_whose_entry_is_missing_does_not_cover(tmp_path):
+    """deepseek info 3 on #2075: the shim exists, the entry it would start does not. The
+    project's call exits 1 with "hook entry missing", so it is no guard for the event."""
+    project = _project(tmp_path)
+    home = _shim_home(tmp_path / "release")
+    (home / "scripts" / "hooks" / GUARD).unlink()
+    shim = home / "scripts" / "hooks" / hc.SHIM_NAME
+    for command in (hc.registered_command(GUARD, "project", vnx_home=str(home)),
+                    f"sh {shim} --scope project {GUARD}"):
+        _settings(project, _on("Stop", command))
+        result = _cov(project, env=_release_env(home))
+        assert (result.covered, result.state) == (False, hc.MISSING), command
+
+
+def test_the_entry_is_the_one_the_shim_would_start(tmp_path):
+    """A project-scope call takes the entry from ``${VNX_HOME:-$HOME/.vnx-system/current}``,
+    not from beside the shim the registration names."""
+    project = _project(tmp_path)
+    shim_home = _shim_home(tmp_path / "shim-only")
+    (shim_home / "scripts" / "hooks" / GUARD).unlink()
+    pinned = _shim_home(tmp_path / "pinned")
+    _settings(project, _on("Stop", hc.registered_command(GUARD, "project",
+                                                         vnx_home=str(shim_home))))
+    assert _cov(project, env=_release_env(pinned)).covered
+    assert _cov(project, env={"HOME": str(tmp_path / "home")}).state == hc.MISSING
+    _shim_home(tmp_path / "home" / ".vnx-system" / "current")
+    assert _cov(project, env={"HOME": str(tmp_path / "home")}).covered
+
+
+def test_the_registered_fabric_root_entry_counts(tmp_path):
+    fabric = _git_project(tmp_path / "fabric", "vnx-dev")
+    (fabric / ".claude").mkdir(exist_ok=True)
+    _guard_file(fabric)
+    home = tmp_path / "home"
+    _registry(home, ("vnx-dev", fabric))
+    shim_home = _shim_home(tmp_path / "release")
+    (shim_home / "scripts" / "hooks" / GUARD).unlink()
+    _settings(fabric, _on("Stop", hc.registered_command(GUARD, "project",
+                                                        vnx_home=str(shim_home))))
+    assert _cov(fabric, env={"HOME": str(home)}).covered
+    (home / ".vnx" / "projects.json").unlink()
+    assert _cov(fabric, env={"HOME": str(home)}).state == hc.MISSING
+
+
+# ── (a) a direct entry covers only when the command runs it at project scope ─
+
+
+@pytest.mark.parametrize("template", [
+    "test -f {g}", "[ -f {g} ]", "grep -c hooks {g}", "cat {g}", "echo {g}", "ls -l {g}",
+    "true {g}", "python3 -c 'import sys' {g}", "python3 -m py_compile {g}",
+    "python3 -W ignore {g}", "python3 --version {g}", "bash {g}",
+])
+def test_a_command_that_does_not_run_the_guard_does_not_cover(tmp_path, template):
+    """codex warning 1 and deepseek info 3 on #2075: an existing guard path anywhere in the
+    command counted as coverage. `test -f <guard>` decides nothing at 520K tokens."""
+    project = _project(tmp_path)
+    guard = _guard_file(tmp_path / "release")
+    _settings(project, _on("Stop", template.format(g=guard)))
+    assert _cov(project).state == hc.MISSING
+
+
+@pytest.mark.parametrize("template", [
+    "VNX_HOOK_SCOPE=user python3 {g}",
+    "env VNX_HOOK_SCOPE=user python3 {g}",
+    "export VNX_HOOK_SCOPE=user; python3 {g}",
+    "VNX_HOOK_SCOPE=user; export VNX_HOOK_SCOPE; python3 {g}",
+    "bash -c 'VNX_HOOK_SCOPE=user exec python3 \"{g}\"'",
+    "VNX_HOOK_SCOPE=user bash -c 'exec python3 \"{g}\"'",
+    "VNX_HOOK_SCOPE=\"user\" python3 {g}",
+    "unset VNX_HOOK_SCOPE; VNX_HOOK_SCOPE=$X python3 {g}",
+])
+def test_a_direct_entry_at_user_scope_does_not_cover(tmp_path, template):
+    """codex and deepseek on #2075, reproduced end to end: the project's own call runs with
+    scope user and skips because the project covers, and so does the user-level call."""
+    project = _project(tmp_path)
+    guard = _guard_file(tmp_path / "release")
+    _settings(project, _on("Stop", template.format(g=guard)))
+    assert _cov(project).state == hc.MISSING
+
+
+def test_a_direct_entry_at_project_scope_covers(tmp_path):
+    project = _project(tmp_path)
+    guard = _guard_file(tmp_path / "release")
+    for command in (f"VNX_HOOK_SCOPE=project python3 {guard}",
+                    f"export VNX_HOOK_SCOPE=project; exec python3 {guard}"):
+        _settings(project, _on("Stop", command))
+        assert _cov(project).form == hc.FORM_DIRECT, command
+
+
+@pytest.mark.parametrize("template", [
+    "python3 {g} > /dev/null", "python3 {g} >/dev/null", "python3 {g} 1>/tmp/x",
+    "python3 {g} >> /tmp/x", "python3 {g} < /dev/null", "python3 {g} 2>&1",
+    "python3 {g} | cat", "cat | python3 {g}", "python3 {g} &", "! python3 {g}",
+    "python3 {g} <<EOF", "timeout 5 python3 {g}", "nohup python3 {g}",
+])
+def test_a_call_whose_decision_cannot_reach_claude_code_does_not_cover(tmp_path, template):
+    """The decision is JSON on stdout of a foreground call that reads the payload on stdin.
+    A redirect, a pipe, a background job or a negated exit status takes that away."""
+    project = _project(tmp_path)
+    guard = _guard_file(tmp_path / "release")
+    _settings(project, _on("Stop", template.format(g=guard)))
+    assert _cov(project).state == hc.MISSING
+
+
+@pytest.mark.parametrize("template", [
+    "python3 {g}", "python3 {g} 2>/dev/null", "exec python3 {g}", "command python3 {g}",
+    "/usr/bin/env python3 {g}", "env python3 {g}", "python3 -I -S {g}", "python3 -u -- {g}",
+    "python3.12 {g}", "/opt/homebrew/bin/python3 '{g}'", "( python3 {g} )",
+    "cd /tmp && python3 {g}",
+    "if [ -f {g} ]; then python3 {g}; else echo 'missing' >&2; exit 1; fi",
+    "bash -c 'exec python3 \"{g}\"'", "sh -ec 'python3 {g}'",
+])
+def test_a_call_that_runs_the_guard_covers(tmp_path, template):
+    """Among them the forms registered on 2026-10-16: SEOcrawler's `if [ -f ]; then`, the
+    template's `python3 <path>`, and the init template's `bash -c 'exec python3 "<path>"'`."""
+    project = _project(tmp_path)
+    guard = _guard_file(tmp_path / "release")
+    _settings(project, _on("Stop", template.format(g=guard)))
+    assert _cov(project).form == hc.FORM_DIRECT
+
+
+def test_an_executable_entry_in_command_position_covers(tmp_path):
+    project = _project(tmp_path)
+    guard = _guard_file(tmp_path / "release")
+    _settings(project, _on("Stop", str(guard)))
+    guard.chmod(0o644)
+    assert _cov(project).state == hc.MISSING
+    guard.chmod(0o755)
+    assert _cov(project).form == hc.FORM_DIRECT
+
+
+def test_a_command_that_sources_or_evals_does_not_cover(tmp_path):
+    """Neither can be read without running it, and either can set the scope."""
+    project = _project(tmp_path)
+    guard = _guard_file(tmp_path / "release")
+    for command in (f". ./hooks.env; python3 {guard}", f"source x; python3 {guard}",
+                    f"eval \"$X\"; python3 {guard}"):
+        _settings(project, _on("Stop", command))
+        assert _cov(project).state == hc.MISSING, command
+
+
 def test_the_fabric_repo_form_resolves_root_against_the_project(tmp_path):
     """vnx-orchestration registers `$ROOT/scripts/hooks/t0_context_guard.py` with ROOT from
     git; until G3 the user-level call skips vnx-dev per event because of it."""
@@ -212,6 +457,26 @@ def test_the_fabric_repo_form_resolves_root_against_the_project(tmp_path):
     assert not _cov(project).covered
     _guard_file(project)
     assert _cov(project).form == hc.FORM_DIRECT
+
+
+def test_a_leading_variable_resolves_only_from_what_the_command_assigns(tmp_path):
+    """The old rule read any unset leading variable as the project dir, so
+    `python3 "$NOT_SET/scripts/hooks/..."` covered while the shell ran `/scripts/hooks/...`."""
+    project = _project(tmp_path)
+    _guard_file(project)
+    elsewhere = _guard_file(tmp_path / "elsewhere").parents[2]
+    rel = "scripts/hooks/t0_context_guard.py"
+    for command, expected in (
+            (f'python3 "$NOT_SET/{rel}"', hc.MISSING),
+            (f"bash -c 'exec python3 \"$ROOT/{rel}\"'", hc.MISSING),
+            (f"bash -c 'ROOT=$(mktemp -d); exec python3 \"$ROOT/{rel}\"'", hc.MISSING),
+            (f"bash -c 'ROOT={tmp_path / 'gone'}; exec python3 \"$ROOT/{rel}\"'", hc.MISSING),
+            (f"bash -c 'ROOT={elsewhere}; exec python3 \"$ROOT/{rel}\"'", hc.COVERED),
+            (f"ROOT={elsewhere} bash -c 'exec python3 \"$ROOT/{rel}\"'", hc.COVERED),
+            (f'ROOT={elsewhere}; python3 "$ROOT/{rel}"', hc.COVERED),
+            (f'ROOT={elsewhere} python3 "$ROOT/{rel}"', hc.MISSING)):
+        _settings(project, _on("Stop", command))
+        assert _cov(project).state == expected, command
 
 
 def test_claude_project_dir_and_home_expand(tmp_path):
@@ -226,6 +491,10 @@ def test_claude_project_dir_and_home_expand(tmp_path):
         _settings(project, _on("Stop", command))
         assert _cov(project, env={"HOME": str(home)}).covered, command
         assert not _cov(project, env={"HOME": str(tmp_path / "elsewhere")}).covered, command
+    for command in ("python3 '~/.vnx-system/current/scripts/hooks/t0_context_guard.py'",
+                    "python3 '$HOME/.vnx-system/current/scripts/hooks/t0_context_guard.py'"):
+        _settings(project, _on("Stop", command))
+        assert not _cov(project, env={"HOME": str(home)}).covered, command
 
 
 def test_an_unresolvable_variable_inside_the_path_does_not_cover(tmp_path):
@@ -243,6 +512,13 @@ def test_a_relative_path_is_read_from_the_project(tmp_path):
     assert _cov(project).covered
 
 
+def test_a_relative_path_after_a_cd_does_not_cover(tmp_path):
+    project = _project(tmp_path)
+    _guard_file(project)
+    _settings(project, _on("Stop", "cd /tmp && python3 scripts/hooks/t0_context_guard.py"))
+    assert _cov(project).state == hc.MISSING
+
+
 def test_a_name_that_only_ends_in_the_entry_does_not_cover(tmp_path):
     project = _project(tmp_path)
     root = tmp_path / "release"
@@ -253,11 +529,171 @@ def test_a_name_that_only_ends_in_the_entry_does_not_cover(tmp_path):
     assert not _cov(project).covered
 
 
+@pytest.mark.parametrize("command", ["python3 'unterminated", 'python3 "$(echo', "python3 `x",
+                                     "case x in a) python3 g;; esac"])
+def test_an_unreadable_command_does_not_cover(tmp_path, command):
+    project = _project(tmp_path)
+    _guard_file(tmp_path / "release")
+    _settings(project, _on("Stop", command))
+    assert _cov(project).state == hc.MISSING
+
+
 def test_a_non_command_hook_does_not_cover(tmp_path):
     project = _project(tmp_path)
     guard = _guard_file(tmp_path / "release")
     _settings(project, {"Stop": [{"hooks": [{"type": "prompt", "prompt": f"python3 {guard}"}]}]})
     assert not _cov(project).covered
+
+
+# ── (f) a registration covers only when it runs in the foreground every time ─
+
+
+@pytest.mark.parametrize("meta", [
+    {"async": True}, {"asyncRewake": True}, {"once": True}, {"if": "Bash(git *)"},
+    {"args": []}, {"shell": "powershell"}, {"async": "true"}, {"async": 1},
+])
+def test_a_registration_that_cannot_block_every_event_does_not_cover(tmp_path, meta):
+    """codex warning 3 on #2075: an `async` hook runs in the background and cannot block, yet
+    it silenced the synchronous user guard. `asyncRewake` implies async, `once` removes the
+    hook after one run, `if` runs it only when its condition matches, `args` is the exec
+    form this reader does not parse, and another `shell` is not bash."""
+    project = _project(tmp_path)
+    guard = _guard_file(tmp_path / "release")
+    home = _shim_home(tmp_path / "shim-release")
+    for command in (f"python3 {guard}", hc.registered_command(GUARD, "project",
+                                                              vnx_home=str(home))):
+        _settings(project, _on("Stop", command, **meta))
+        assert _cov(project, env=_release_env(home)).state == hc.MISSING, (meta, command)
+
+
+def test_an_explicitly_synchronous_registration_covers(tmp_path):
+    project = _project(tmp_path)
+    guard = _guard_file(tmp_path / "release")
+    _settings(project, _on("Stop", f"python3 {guard}", **{"async": False, "asyncRewake": False,
+                                                          "once": False, "shell": "bash"}))
+    assert _cov(project).covered
+
+
+def test_a_synchronous_sibling_still_covers(tmp_path):
+    project = _project(tmp_path)
+    guard = _guard_file(tmp_path / "release")
+    _settings(project, {"Stop": [{"hooks": [_command(f"python3 {guard}", **{"async": True}),
+                                            _command(f"python3 {guard}")]}]})
+    assert _cov(project).covered
+
+
+# ── (g) a registration covers only in a project Claude Code trusts ───────────
+
+
+def _covering(tmp_path: Path, name: str = "project") -> Path:
+    project = _git_project(tmp_path / name)
+    (project / ".claude").mkdir(exist_ok=True)
+    _settings(project, _on("Stop", f"python3 {_guard_file(tmp_path / 'release')}"))
+    return project
+
+
+def test_a_registration_in_an_untrusted_project_does_not_cover(tmp_path):
+    """deepseek warning on #2075: Claude Code runs a project's hooks only once the operator has
+    trusted the folder. Without recorded trust the project's call may never run."""
+    project = _covering(tmp_path)
+    config = tmp_path / "config"
+    env = {"HOME": "/nonexistent", "CLAUDE_CONFIG_DIR": str(config)}
+    for trusted in (False, None):
+        _trust_config(config, *([project] if trusted is not None else []), trusted=bool(trusted))
+        result = hc.coverage(project, "Stop", env=env)
+        assert (result.covered, result.state) == (False, hc.MISSING), trusted
+    _trust_config(config, project)
+    assert hc.coverage(project, "Stop", env=env).covered
+
+
+@pytest.mark.parametrize("content", [None, "{not json", "[]", '{"projects": []}', "dir"])
+def test_trust_that_cannot_be_read_is_unknown(tmp_path, content):
+    project = _covering(tmp_path)
+    config = tmp_path / "config"
+    config.mkdir()
+    if content == "dir":
+        (config / ".claude.json").mkdir()
+    elif content is not None:
+        (config / ".claude.json").write_text(content, encoding="utf-8")
+    result = hc.coverage(project, "Stop", env={"HOME": "/nonexistent",
+                                               "CLAUDE_CONFIG_DIR": str(config)})
+    assert (result.covered, result.state) == (False, hc.UNKNOWN)
+    assert hc.coverage(project, "Stop", env={}).state == hc.UNKNOWN
+
+
+def test_trust_is_consulted_only_for_a_covering_registration(tmp_path):
+    project = _project(tmp_path)
+    _settings(project, _on("Stop", "echo nothing"))
+    assert hc.coverage(project, "Stop", env={}).state == hc.MISSING
+
+
+def test_trust_follows_claude_codes_walk_up_to_the_git_root(tmp_path):
+    """Measured on 2.1.301 (`OO`/`Wm`/`jm`): the session folder and its parents count, up to
+    and including the git root; a trusted folder above the git root does not."""
+    outer = tmp_path / "outer"
+    project = _covering(outer, "repo")
+    sub = project / "sub"
+    (sub / ".claude").mkdir(parents=True)
+    shutil.copy(project / ".claude" / "settings.json", sub / ".claude" / "settings.json")
+    config = tmp_path / "config"
+    env = {"HOME": "/nonexistent", "CLAUDE_CONFIG_DIR": str(config)}
+    _trust_config(config, project)
+    assert hc.coverage(sub, "Stop", env=env).covered
+    _trust_config(config, outer)
+    assert hc.coverage(project, "Stop", env=env).state == hc.MISSING
+
+
+def test_outside_a_repository_trust_walks_to_the_root(tmp_path):
+    project = _project(tmp_path / "plain")
+    _settings(project, _on("Stop", f"python3 {_guard_file(tmp_path / 'release')}"))
+    config = tmp_path / "config"
+    _trust_config(config, tmp_path)
+    assert hc.coverage(project, "Stop", env={"CLAUDE_CONFIG_DIR": str(config)}).covered
+
+
+def test_the_trust_key_is_compared_in_nfc(tmp_path):
+    """Claude Code normalizes the folder it looks up to NFC (`Nn`)."""
+    decomposed = unicodedata.normalize("NFD", "projé")
+    project = _covering(tmp_path, decomposed)
+    config = tmp_path / "config"
+    config.mkdir()
+    nfc_key = unicodedata.normalize("NFC", str(project))
+    (config / ".claude.json").write_text(json.dumps({"projects": {
+        nfc_key: {"hasTrustDialogAccepted": True}}}), encoding="utf-8")
+    assert hc.coverage(str(project), "Stop", env={"CLAUDE_CONFIG_DIR": str(config)}).covered
+
+
+def test_the_trust_file_follows_the_config_dir_home_and_the_legacy_file(tmp_path):
+    home = tmp_path / "home"
+    config = tmp_path / "config"
+    assert hc.trust_file({"HOME": str(home)}) == home / ".claude.json"
+    assert hc.trust_file({"HOME": str(home), "CLAUDE_CONFIG_DIR": str(config)}) == (
+        config / ".claude.json")
+    assert hc.trust_file({"HOME": str(home), "CLAUDE_CODE_CUSTOM_OAUTH_URL": "https://x"}) == (
+        home / ".claude-custom-oauth.json")
+    assert hc.trust_file({}) is None
+    legacy = home / ".claude" / ".config.json"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("", encoding="utf-8")
+    (home / ".claude.json").write_text("{}", encoding="utf-8")
+    legacy.chmod(0o644)
+    assert hc.trust_file({"HOME": str(home)}) == home / ".claude.json"
+    legacy.write_text("{}", encoding="utf-8")
+    assert hc.trust_file({"HOME": str(home)}) == legacy
+    config.mkdir()
+    (config / ".config.json").write_text("{}", encoding="utf-8")
+    assert hc.trust_file({"HOME": str(home), "CLAUDE_CONFIG_DIR": str(config)}) == (
+        config / ".config.json")
+
+
+def test_the_trust_file_is_read_per_account(tmp_path):
+    project = _covering(tmp_path)
+    home = tmp_path / "home"
+    _trust_config(home, project)
+    other = _trust_config(tmp_path / "salesminds", project, trusted=False)
+    assert hc.coverage(project, "Stop", env={"HOME": str(home)}).covered
+    assert hc.coverage(project, "Stop", env={"HOME": str(home),
+                                             "CLAUDE_CONFIG_DIR": str(other)}).state == hc.MISSING
 
 
 # ── per event and per tool ───────────────────────────────────────────────────
@@ -417,7 +853,29 @@ def test_t0_project_root_refuses_what_rule_1_refuses(tmp_path):
     (plain / ".vnx-project-id").write_text("x\n", encoding="utf-8")
     assert hc.t0_project_root(str(plain)) is None
     assert hc.t0_project_root(str(tmp_path / "does-not-exist")) is None
+    assert hc.t0_project_root(str(plain / ".vnx-project-id")) is None
     assert hc.t0_project_root("") is None
+
+
+def test_a_linked_worktree_and_a_submodule_are_their_own_root(tmp_path):
+    """A `.git` file marks a root as well as a `.git` directory, as `git rev-parse` reads it."""
+    project = _git_project(tmp_path / "project")
+    (project / ".git").rename(tmp_path / "gitdir")
+    (project / ".git").write_text(f"gitdir: {tmp_path / 'gitdir'}\n", encoding="utf-8")
+    assert hc.t0_project_root(str(project / ".claude")) == Path(os.path.realpath(project))
+
+
+def test_rule_1_starts_no_git(tmp_path, monkeypatch):
+    """(h): the hook timeout is 10 s and `git rev-parse` had a 10 s timeout of its own. Rule 1
+    now walks to the nearest `.git` and starts no subprocess at all."""
+    project = _git_project(tmp_path / "project")
+
+    def refuse(*args, **kwargs):
+        raise AssertionError(f"rule 1 started a subprocess: {args}")
+
+    monkeypatch.setattr(subprocess, "run", refuse)
+    monkeypatch.setattr(subprocess, "Popen", refuse)
+    assert hc.t0_project_root(str(project)) == Path(os.path.realpath(project))
 
 
 def test_project_id_is_the_first_line(tmp_path):
@@ -449,6 +907,7 @@ def test_the_registered_fabric_root_runs_its_own_code(tmp_path):
     env = {"HOME": str(home)}
     assert hc.is_fabric_root(fabric, env)
     assert hc.shim_entry_file(fabric, GUARD, env) == own
+    assert hc.shim_entry_file(fabric, GUARD, env, user_shim=tmp_path / "x" / hc.SHIM_NAME) == own
 
 
 def test_the_fabric_root_compares_real_paths(tmp_path):
@@ -510,13 +969,38 @@ def test_an_unreadable_registry_or_no_home_is_not_the_fabric_root(tmp_path):
     assert not hc.is_fabric_root(fabric, {"HOME": ""})
 
 
-def test_the_shim_entry_file_follows_vnx_home(tmp_path):
+def test_a_registry_that_is_not_a_regular_file_is_never_opened(tmp_path):
+    """(h): a FIFO would block the guard's open() until the hook timeout. Run in a child
+    process, so a reader that does open it fails this test instead of hanging the suite."""
+    fabric = _git_project(tmp_path / "fabric", "vnx-dev")
+    home = tmp_path / "home"
+    (home / ".vnx").mkdir(parents=True)
+    os.mkfifo(home / ".vnx" / "projects.json")
+    probe = ("import sys; sys.path.insert(0, sys.argv[1]); import hook_coverage as hc; "
+             "env = {'HOME': sys.argv[2]}; "
+             "print(hc.registered_fabric_root(env), hc.is_fabric_root(sys.argv[3], env))")
+    proc = subprocess.run([sys.executable, "-c", probe, str(REPO_ROOT / "scripts" / "lib"),
+                           str(home), str(fabric)], capture_output=True, text=True, timeout=10)
+    assert (proc.returncode, proc.stdout.split()) == (0, ["None", "False"]), proc.stderr
+
+
+def test_a_project_scope_entry_follows_vnx_home(tmp_path):
     consumer = _git_project(tmp_path / "consumer")
     env = {"HOME": str(tmp_path / "home"), "VNX_HOME": str(tmp_path / "pinned")}
     assert hc.shim_entry_file(consumer, GUARD, env) == tmp_path / "pinned" / "scripts" / "hooks" / GUARD
     env["VNX_HOME"] = ""
     assert hc.shim_entry_file(consumer, GUARD, env) == (
         tmp_path / "home" / ".vnx-system" / "current" / "scripts" / "hooks" / GUARD)
+
+
+def test_a_user_scope_entry_sits_beside_its_shim_whatever_vnx_home_says(tmp_path):
+    """(c): the user-level registration names the shim; an inherited VNX_HOME does not choose
+    the code it starts."""
+    consumer = _git_project(tmp_path / "consumer")
+    shim = tmp_path / "release" / "scripts" / "hooks" / hc.SHIM_NAME
+    env = {"HOME": str(tmp_path / "home"), "VNX_HOME": str(tmp_path / "pinned")}
+    assert hc.shim_entry_file(consumer, GUARD, env, user_shim=shim) == shim.parent / GUARD
+    assert hc.shim_entry_file(consumer, GUARD, env, user_shim=Path(hc.SHIM_NAME)) == Path(GUARD)
 
 
 def test_the_registered_fabric_root_without_the_entry_runs_current(tmp_path):

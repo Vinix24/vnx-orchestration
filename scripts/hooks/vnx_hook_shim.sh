@@ -8,17 +8,26 @@
 # missing script exit 2 (OI-2071). This script never exits 2 itself and maps an entry's 2 to 1,
 # which Claude Code reports as a non-blocking error with stderr shown.
 #
-#   1. The root is `git rev-parse --show-toplevel` from the process cwd. Unless that root has a
-#      `.vnx-project-id` with a non-empty first line and a `.claude/terminals/T0/CLAUDE.md`, and
-#      the cwd is outside `.vnx-data/worktrees/`, it exits 0 without output: only a VNX project
-#      with a T0 is guarded (rule 1 of the T0 guard; the guard checks it again on the payload).
+#   1. The root is the nearest directory, from the physical cwd up, holding a `.git` entry: the
+#      folder `git rev-parse --show-toplevel` names, found without starting git, so nothing here
+#      can outlast the hook's 10 s timeout. Unless that root has a `.vnx-project-id` with a
+#      non-empty first line and a `.claude/terminals/T0/CLAUDE.md`, and the cwd is outside
+#      `.vnx-data/worktrees/`, it exits 0 without output: only a VNX project with a T0 is
+#      guarded (rule 1 of the T0 guard; the guard checks it again on the payload).
 #   2. The fabric repo runs its own `<root>/scripts/hooks/<entry>` when present. Everyone else
-#      runs `${VNX_HOME:-$HOME/.vnx-system/current}/scripts/hooks/<entry>`. The repo writes its
+#      runs the released code: a user-scope call the entry beside this script, in the release
+#      its registered command names; a project-scope call
+#      `${VNX_HOME:-$HOME/.vnx-system/current}/scripts/hooks/<entry>`. A user-scope call
+#      ignores VNX_HOME: `bin/vnx` exports it as the copy that launched the session (a version
+#      directory, a dispatch worktree) and a project's settings `env` block can set it, so it
+#      would let either choose the code a user-level registration starts. The repo writes its
 #      own `.vnx-project-id`, so the id alone never selects repo code: the root's real path must
 #      also be the real path of the first `vnx-dev` entry in the user-owned registry
-#      `$HOME/.vnx/projects.json`. A missing or unreadable registry means `current`. The
+#      `$HOME/.vnx/projects.json`. A missing or unreadable registry means the released code. The
 #      registry is JSON, so `python3 -I -S` reads it: the cwd is the repo, and isolated mode
-#      keeps a module the repo plants there (json.py, site hooks) from being imported.
+#      keeps a module the repo plants there (json.py, site hooks) from being imported. That
+#      read ends itself after 2 s (SIGALRM), so a registry that blocks (a FIFO, a stalled
+#      mount) costs at most 2 s and means the released code.
 #   3. A missing entry: one stderr line naming the path, exit 1.
 #   4. `python3 <entry>` with stdin passed through, not exec'd, so its exit 2 becomes 1. A
 #      shim-routed entry decides through JSON on stdout, never through exit 2.
@@ -55,10 +64,15 @@ case "$entry" in
 esac
 
 # 1. Rule 1: a VNX project with a T0, outside a dispatch worktree.
+#    hook_coverage.t0_project_root is the Python twin of this walk.
 cwd=$(pwd -P 2>/dev/null) || exit 0
 case "$cwd/" in */.vnx-data/worktrees/*) exit 0 ;; esac
-root=$(git rev-parse --show-toplevel 2>/dev/null </dev/null) || exit 0
-[ -n "$root" ] || exit 0
+root=$cwd
+while [ ! -e "$root/.git" ]; do
+  [ -n "$root" ] && [ "$root" != / ] || exit 0
+  root=${root%/*}
+  [ -n "$root" ] || root=/
+done
 case "$root/" in */.vnx-data/worktrees/*) exit 0 ;; esac
 [ -f "$root/.claude/terminals/T0/CLAUDE.md" ] || exit 0
 [ -f "$root/.vnx-project-id" ] && [ -r "$root/.vnx-project-id" ] || exit 0
@@ -69,9 +83,10 @@ id=${id#"${id%%[![:space:]]*}"}
 [ -n "$id" ] || exit 0
 
 # 2. Which code: the registered fabric repo runs its own, everyone else the released one.
-#    hook_coverage.registered_fabric_root is the Python twin of this reader.
+#    hook_coverage.shim_entry_file and registered_fabric_root are the Python twins.
 registered_fabric_root='
-import json, os, sys
+import json, os, signal, sys
+signal.alarm(2)
 root, registry = sys.argv[1], sys.argv[2]
 try:
     with open(registry, encoding="utf-8") as fh:
@@ -86,7 +101,12 @@ for project in projects if isinstance(projects, list) else ():
         sys.exit(0 if ok and os.path.realpath(path) == os.path.realpath(root) else 1)
 sys.exit(1)
 '
-file=${VNX_HOME:-$HOME/.vnx-system/current}/scripts/hooks/$entry
+if [ "$scope" = user ]; then
+  case "$0" in */*) hooks=${0%/*} ;; *) hooks=. ;; esac
+else
+  hooks=${VNX_HOME:-$HOME/.vnx-system/current}/scripts/hooks
+fi
+file=$hooks/$entry
 if [ "$id" = "vnx-dev" ] && [ -f "$root/scripts/hooks/$entry" ] && [ -n "${HOME:-}" ] &&
   python3 -I -S -c "$registered_fabric_root" "$root" "$HOME/.vnx/projects.json" \
     </dev/null >/dev/null 2>&1; then
