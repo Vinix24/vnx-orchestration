@@ -13,7 +13,8 @@
 #      the wrap proof (operator decisions 2026-10-16 a, b): the `wrap:` block that
 #      `t0_rotation_state.py wrap-finish` writes into the handoff frontmatter must bind to this
 #      wrap (wrapped_at fresh, the daily log written inside the wrap's window, every nugget
-#      heading in the bucket). No proof: exit 6, "run /build-log wrap".
+#      heading in the bucket, and the start record it names consumed by exactly this block),
+#      in a frontmatter that parses. No proof: exit 6, "run /build-log wrap".
 #      Emergency path (decision c): `--skip-wrap-reason "<text>"` skips the wrap proof and the
 #      age check, never the first-step check. It needs the predecessor's transcript
 #      (`--transcript`, else the pending marker's `transcript_path`) as a readable JSONL file,

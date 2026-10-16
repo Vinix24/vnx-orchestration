@@ -35,15 +35,30 @@ HANDOFF CONTRACT (docs/operations/T0_CONTEXT_ROTATION.md): numbered next steps u
 ``## Actief /goal`` section with a ``Directive:`` line and the remaining tasks as a list.
 
 WRAP PROOF (operator decisions 2026-10-16 a, b). ``/build-log wrap`` does not type its own
-proof: ``wrap-start`` (first step of the wrap) records the start time and the nugget headings
-already in the month bucket, ``wrap-finish`` (last step) writes a ``wrap:`` block into the
-handoff frontmatter with the system clock. ``compose`` refuses with exit 6 unless that block
-binds to this wrap: the daily log was written inside the wrap's window and every nugget heading
-it lists is in the bucket. Frontmatter is read with a stdlib parser; the fabric has no PyYAML.
+proof: ``wrap-start`` (first step of the wrap) records the start time, a random ``start_id`` and
+the nugget headings already in the month bucket, ``wrap-finish`` (last step) writes a ``wrap:``
+block into the handoff frontmatter with the system clock. ``compose`` refuses with exit 6 unless
+that block binds to this wrap: the daily log was written inside the wrap's window, every nugget
+heading it lists is in the bucket, and the start record it names was consumed by exactly this
+block. Frontmatter is read with a stdlib parser: the skills run this file with whatever python3
+is on PATH, which need not have PyYAML.
 One wrap-start proves one wrap: a ``wrap-finish`` whose block passes the check writes
 ``consumed_at`` into the start record, and a second finish without a new start refuses, so a
-fresh ``wrapped_at`` can never be stamped on old evidence. ``compose`` only reads the handoff
-block and the daily log; it never touches the start record.
+fresh ``wrapped_at`` can never be stamped on old evidence. ``compose`` reads the start record
+and never writes it.
+
+CONSUME, THEN PUBLISH (OI-2116). wrap-finish checks the block before it writes anything, then
+consumes the start record (``consumed_at`` = the block's ``wrapped_at``), then publishes the
+block (which carries the record's ``start_id``). compose accepts a block only when the record
+with that ``start_id`` carries that ``consumed_at``. A crash between the two writes leaves a
+consumed start and no block: a failed wrap that the next ``wrap-start`` repairs, never a
+reusable start beside a valid proof.
+
+HANDOFF FRONTMATTER (OI-2116). The old ``wrap:`` entry goes as a whole: its key line and every
+line up to the next top-level key, blank lines and comments inside it included. The rewritten
+frontmatter is parsed again, strictly, before it is written; a result that would not parse is
+refused and the handoff stays as it was. compose reads the handoff strictly too. Only the daily
+log is read leniently, so one odd line in it never hides its ``handoff: true``.
 
 EMERGENCY PATH (operator decision 2026-10-16 c). ``compose --skip-wrap-reason`` skips the wrap
 proof (never the first-step check), needs the predecessor's transcript as a readable JSONL
@@ -58,6 +73,7 @@ import datetime as dt
 import json
 import os
 import re
+import secrets
 import shlex
 import sys
 import time
@@ -429,6 +445,150 @@ _TOP_KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_-]*)\s*:(.*)$")
 _NESTED_KEY_RE = re.compile(r"^[ \t]+([A-Za-z_][A-Za-z0-9_-]*)\s*:(.*)$")
 _INT_RE = re.compile(r"^-?\d+$")
 _TRAILING_COMMENT_RE = re.compile(r"\s+#.*$")
+# The strict structure check. A mapping key as a frontmatter line carries one: plain or quoted,
+# then a colon followed by a space or the line end (``url:http`` is a scalar, not a key).
+_ANY_KEY_RE = re.compile(
+    r"""^(?P<key>"[^"]*"|'[^']*'|[^\s#'"\[\]{},&*!|>%@`-][^#]*?)\s*:(?:\s+(?P<value>.*))?$""")
+_BLOCK_SCALAR_RE = re.compile(r"^[|>][1-9+-]*$")
+_NODE_PROPERTIES_RE = re.compile(r"^(?:[&!]\S*\s*)+$")
+_MAPPING_INDICATOR_RE = re.compile(r":(?:\s|$)")
+
+
+class FrontmatterError(ValueError):
+    """A frontmatter YAML would not read; the message names the line and why."""
+
+
+def _bad_line(number: int, bare: str, why: str) -> FrontmatterError:
+    return FrontmatterError(f"the frontmatter does not parse at line {number} ({bare.strip()!r}): {why}")
+
+
+@dataclass
+class _Entry:
+    """A top-level key as the structure check follows it. ``kind``: ``collection`` (no value on
+    its line: a list or map follows), ``text`` (a block scalar, or a quoted or flow value still
+    open at the line end), ``closed`` (a quoted or flow value that ended on its line) or
+    ``plain`` (a plain scalar)."""
+    key: str
+    kind: str
+    child_indent: Optional[int] = None
+    child_kind: Optional[str] = None
+    compact_open: bool = False
+
+
+def _closes_on_its_line(text: str) -> bool:
+    """Whether the quoted or flow value that opens ``text`` also ends on this line."""
+    depth, quote, idx = 0, "", 0
+    while idx < len(text):
+        char = text[idx]
+        if quote:
+            if quote == '"' and char == "\\" or quote == "'" and text[idx:idx + 2] == "''":
+                idx += 1
+            elif char == quote:
+                quote = ""
+                if depth == 0:
+                    return True
+        elif char in "\"'":
+            quote = char
+        elif char in "[{":
+            depth += 1
+        elif char in "]}":
+            depth -= 1
+            if depth <= 0:
+                return True
+        idx += 1
+    return False
+
+
+def _without_comment(value: Optional[str]) -> str:
+    return _TRAILING_COMMENT_RE.sub("", " " + (value or "")).strip()
+
+
+def _value_kind(value: Optional[str]) -> str:
+    text = _without_comment(value)
+    if not text or _NODE_PROPERTIES_RE.match(text):
+        return "collection"
+    if _BLOCK_SCALAR_RE.match(text):
+        return "text"
+    if text[0] in "\"'[{":
+        return "closed" if _closes_on_its_line(text) else "text"
+    return "plain"
+
+
+def _key_kind(number: int, bare: str, match: "re.Match[str]") -> str:
+    """The kind of the value on a key line. A plain value may not hold ``: `` or end on a colon:
+    YAML reads that as a second key on the line and refuses the frontmatter."""
+    kind = _value_kind(match.group("value"))
+    if kind == "plain" and _MAPPING_INDICATOR_RE.search(_without_comment(match.group("value"))):
+        raise _bad_line(number, bare, f"the value of '{match.group('key')}' holds a colon YAML reads "
+                        "as a second key: put the value in quotes")
+    return kind
+
+
+def _line_kind(stripped: str) -> Optional[str]:
+    """``item`` for a list item, ``key`` for a mapping key line, None for anything else."""
+    if stripped == "-" or stripped.startswith("- "):
+        return "item"
+    return "key" if _ANY_KEY_RE.match(stripped) else None
+
+
+def _check_collection_line(entry: _Entry, number: int, bare: str, indent: int, stripped: str) -> None:
+    """A line of the list or map below a key with no value on its own line. A key there opens a
+    compact list (items at the key's own indentation, as PyYAML writes them) when it has no value
+    on its line either."""
+    level = entry.child_indent
+    if level is not None and indent > level:
+        return  # deeper: it belongs to the child above it, which this check does not walk
+    if level is not None and indent < level:
+        raise _bad_line(number, bare, f"it is indented less than the lines above it under '{entry.key}'")
+    kind = _line_kind(stripped)
+    if kind is None:
+        raise _bad_line(number, bare, f"it is neither a key nor a list item under '{entry.key}'")
+    if kind == "key":
+        if entry.child_kind == "item":
+            raise _bad_line(number, bare, f"a key among the list items under '{entry.key}'")
+        entry.compact_open = _key_kind(number, bare, _ANY_KEY_RE.match(stripped)) == "collection"
+    elif entry.child_kind == "key" and not entry.compact_open:
+        raise _bad_line(number, bare, f"a list item among the keys under '{entry.key}'")
+    entry.child_indent = indent
+    entry.child_kind = entry.child_kind or kind
+
+
+def _check_child(entry: Optional[_Entry], number: int, bare: str, indent: int, stripped: str) -> None:
+    """An indented line, or a list item at column 0 (YAML's compact list), below ``entry``."""
+    if entry is None:
+        raise _bad_line(number, bare, "an indented line or list item before the first key")
+    if entry.kind == "collection":
+        _check_collection_line(entry, number, bare, indent, stripped)
+    elif indent == 0:
+        raise _bad_line(number, bare, f"a list item under '{entry.key}', which has a value on its line")
+    elif entry.kind == "closed":
+        raise _bad_line(number, bare, f"an indented line under '{entry.key}', whose value already "
+                        "ended on its line")
+    elif entry.kind == "plain" and _line_kind(stripped) == "key":
+        raise _bad_line(number, bare, f"a key under '{entry.key}', which has a value on its line")
+
+
+def _check_structure(lines: List[str]) -> None:
+    """Raise FrontmatterError at the first line YAML would not read as part of the top-level
+    block mapping. One level deep: scalars, block scalars, quoted or flow values that run on,
+    and the list or map below a key; what lies deeper is left to the entry above it. Line
+    numbers count the opening ``---`` as line 1, as an editor does."""
+    entry: Optional[_Entry] = None
+    for number, line in enumerate(lines, start=2):
+        bare = line.rstrip("\r\n")
+        stripped = bare.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(bare) - len(bare.lstrip(" \t"))
+        if "\t" in bare[:indent]:
+            raise _bad_line(number, bare, "a tab in the indentation, which YAML does not allow")
+        if indent == 0 and _line_kind(stripped) != "item":
+            top = _ANY_KEY_RE.match(bare)
+            if top is None:
+                raise _bad_line(number, bare, "a line at column 0 must be a key: value line")
+            entry = _Entry(key=top.group("key"), kind=_key_kind(number, bare, top))
+            continue
+        _check_child(entry, number, bare, indent, stripped)
 
 
 def _split_frontmatter(text: str) -> Tuple[Optional[List[str]], str]:
@@ -472,11 +632,21 @@ def _scalar_or_raw(raw: str) -> Any:
         return raw.strip()
 
 
-def read_frontmatter(path: Path) -> Dict[str, Any]:
+def read_frontmatter(path: Path, *, strict: bool = True) -> Dict[str, Any]:
     """Top-level keys of a markdown file's frontmatter. A key with no inline value gets a dict
     of the ``key: value`` lines indented below it (one level, as the wrap block uses); list
-    items and deeper nesting are skipped. Raises OSError or ValueError (unclosed fence)."""
+    items and deeper nesting are skipped. Raises OSError or ValueError (unclosed fence).
+
+    ``strict`` (the default) first refuses a frontmatter YAML would not read, with
+    FrontmatterError (a ValueError) naming the line. ``strict=False`` reads what it can, so one
+    odd line never hides the keys around it: the daily log is read that way."""
     lines, _ = _split_frontmatter(path.read_text(encoding="utf-8"))
+    return _parse_frontmatter(lines, strict=strict)
+
+
+def _parse_frontmatter(lines: Optional[List[str]], *, strict: bool) -> Dict[str, Any]:
+    if strict:
+        _check_structure(lines or [])
     result: Dict[str, Any] = {}
     current: Optional[Dict[str, Any]] = None
     for line in lines or []:
@@ -499,15 +669,23 @@ def read_frontmatter(path: Path) -> Dict[str, Any]:
     return result
 
 
+def _opens_top_level_entry(bare: str) -> bool:
+    """A column-0 line that starts the next top-level entry. Blank lines, comments and a list
+    item at column 0 (YAML's compact list, which belongs to the key above it) do not."""
+    return bool(bare) and bare[0] not in " \t#" and not (bare[0] == "-" and bare[1:2] in ("", " "))
+
+
 def _without_top_key(lines: List[str], key: str) -> List[str]:
-    """``lines`` minus ``key:`` and the indented lines that belong to it."""
+    """``lines`` minus every ``key:`` entry: its key line and every line up to the next
+    top-level key, blank lines and comments inside it included (OI-2116: stopping at the first
+    blank line left the rest of the entry behind without its key)."""
     kept: List[str] = []
     inside = False
     for line in lines:
-        if inside and line[:1] in (" ", "\t"):
-            continue
-        top = _TOP_KEY_RE.match(line.rstrip("\r\n"))
-        inside = bool(top and top.group(1) == key)
+        bare = line.rstrip("\r\n")
+        if _opens_top_level_entry(bare):
+            top = _TOP_KEY_RE.match(bare)
+            inside = bool(top and top.group(1) == key)
         if not inside:
             kept.append(line)
     return kept
@@ -519,6 +697,7 @@ def _render_wrap_block(block: Dict[str, Any]) -> str:
 
     return (
         "wrap:\n"
+        f"  start_id: {quoted(block['start_id'])}\n"
         f"  started_at: {block['started_at']}\n"
         f"  wrapped_at: {block['wrapped_at']}\n"
         f"  nuggets: {block['nuggets']}\n"
@@ -528,14 +707,25 @@ def _render_wrap_block(block: Dict[str, Any]) -> str:
     )
 
 
-def write_wrap_block(handoff: Path, block: Dict[str, Any]) -> None:
-    """Put ``block`` under ``wrap:`` in the handoff frontmatter. Every other key keeps its line
-    and its place, an earlier ``wrap:`` block is replaced, and the body stays byte for byte. A
-    handoff without frontmatter gets one. Atomic: a per-writer mkstemp name next to the
-    handoff, then ``os.replace`` (``atomic_io.atomic_write_text``)."""
-    lines, body = _split_frontmatter(handoff.read_text(encoding="utf-8"))
+def render_wrap_block(text: str, block: Dict[str, Any]) -> str:
+    """``text`` with ``block`` under ``wrap:`` in its frontmatter. Every other key keeps its lines
+    and its place, an earlier ``wrap:`` entry goes as a whole, and the body stays byte for byte;
+    a text without frontmatter gets one. The result is parsed again, strictly, before it is
+    returned: FrontmatterError when it would not parse or would not read ``block`` back."""
+    lines, body = _split_frontmatter(text)
     kept = _without_top_key(lines or [], "wrap")
-    atomic_write_text(handoff, "---\n" + "".join(kept) + _render_wrap_block(block) + "---\n" + body)
+    result = "---\n" + "".join(kept) + _render_wrap_block(block) + "---\n" + body
+    front, _ = _split_frontmatter(result)
+    if _parse_frontmatter(front, strict=True).get("wrap") != block:
+        raise FrontmatterError("the rewritten wrap: block does not read back as it was written")
+    return result
+
+
+def write_wrap_block(handoff: Path, block: Dict[str, Any]) -> None:
+    """``render_wrap_block`` on the handoff, written atomically: a per-writer mkstemp name next
+    to the handoff, then ``os.replace`` (``atomic_io.atomic_write_text``). A result that would
+    not parse raises FrontmatterError and leaves the handoff untouched."""
+    atomic_write_text(handoff, render_wrap_block(handoff.read_text(encoding="utf-8"), block))
 
 
 # ── wrap proof: wrap-start / wrap-finish (operator decision 2026-10-16 a) ────
@@ -586,10 +776,13 @@ def new_nugget_headings(before: List[str], after: List[str], slug: str) -> List[
 
 def start_wrap(sdir: Path, *, project_root: str, slug: str, bucket: Optional[Path],
                now: Optional[float] = None) -> Dict[str, Any]:
-    """Write ``wrap-start.json``: the start time, the bucket, and the headings in it now. A new
-    record carries no ``consumed_at``, so it proves the next wrap. Written under the record's
-    lock, so it never lands between a finish's read and its consumption."""
+    """Write ``wrap-start.json``: a fresh ``start_id``, the start time, the bucket, and the
+    headings in it now. A new record carries no ``consumed_at``, so it proves the next wrap; the
+    block that wrap-finish publishes names the ``start_id``, so a newer start retires an older
+    block. Written under the record's lock, so it never lands between a finish's read and its
+    consumption."""
     record = {
+        "start_id": secrets.token_hex(8),
         "started_at": _iso_utc(time.time() if now is None else now),
         "project_root": project_root,
         "project_slug": slug,
@@ -616,6 +809,9 @@ def _unconsumed_start(path: Path) -> Dict[str, Any]:
     if not start or not isinstance(start.get("started_at"), str) or not start.get("project_slug"):
         raise WrapHelperError(f"no usable {path}: run wrap-start first, as the first step of "
                               "the wrap")
+    if not isinstance(start.get("start_id"), str) or not start["start_id"]:
+        raise WrapHelperError(f"{path} carries no start_id, so no block could bind to it (an "
+                              "older fabric wrote it): run wrap-start first")
     if start.get("consumed_at") is not None:
         raise WrapHelperError(f"{path} already proved the wrap that finished at "
                               f"{start['consumed_at']}, and one wrap-start proves one wrap: run "
@@ -629,6 +825,7 @@ def _wrap_block_from(start: Dict[str, Any], *, project_root: Path, daily_log: Pa
     headings = new_nugget_headings([h for h in start.get("headings") or [] if isinstance(h, str)],
                                    bucket_headings(bucket), str(start["project_slug"]))
     return {
+        "start_id": start["start_id"],
         "started_at": start["started_at"],
         "wrapped_at": wrapped_at,
         "nuggets": len(headings),
@@ -638,15 +835,53 @@ def _wrap_block_from(start: Dict[str, Any], *, project_root: Path, daily_log: Pa
     }
 
 
+def _require_wrap_files(handoff: Path, daily_log: Path) -> None:
+    if not handoff.is_file():
+        raise WrapHelperError(f"handoff not found: {handoff} (the wrap writes it before "
+                              "wrap-finish)")
+    if not daily_log.is_file():
+        raise WrapHelperError(f"daily log not found: {daily_log} (the wrap writes it before "
+                              "wrap-finish)")
+
+
+def _proof_text(handoff: Path, block: Dict[str, Any]) -> str:
+    try:
+        return render_wrap_block(handoff.read_text(encoding="utf-8"), block)
+    except ValueError as exc:
+        raise WrapHelperError(f"the handoff {handoff} cannot take the wrap block: {exc}; nothing "
+                              "written, the handoff and the start record are unchanged: repair "
+                              "the frontmatter and run wrap-finish again") from exc
+
+
+def _consume_then_publish(path: Path, start: Dict[str, Any], *, handoff: Path,
+                          block: Dict[str, Any], text: str) -> None:
+    """The two writes of a finish, in the order that makes them one step for compose: the start
+    record is consumed by this block first, then the block is published. compose accepts a block
+    only when the record it names was consumed by exactly that block, so a crash between the two
+    leaves a consumed start and no proof, never a reusable start beside a valid one."""
+    try:
+        atomic_write_json(path, {**start, "consumed_at": block["wrapped_at"]})
+    except OSError as exc:
+        raise WrapHelperError(f"cannot consume {path} ({exc}); nothing published, the start "
+                              "stays usable: run wrap-finish again") from exc
+    try:
+        atomic_write_text(handoff, text)
+    except OSError as exc:
+        raise WrapHelperError(f"{path} is consumed but the handoff {handoff} was not written "
+                              f"({exc}), so this wrap has no proof: run wrap-start and finish the "
+                              "wrap again") from exc
+
+
 def finish_wrap(sdir: Path, *, project_root: Path, handoff: Path, daily_log: Path,
                 now: Optional[float] = None) -> Dict[str, Any]:
-    """Compute this wrap's nuggets from ``wrap-start.json``, write the ``wrap:`` block into the
-    handoff, run the spawner's check on it, and consume the start record.
+    """Compute this wrap's nuggets from ``wrap-start.json``, check the ``wrap:`` block it makes,
+    consume the start record, and publish the block in the handoff.
 
     Raises WrapHelperError, with nothing written, when the start record is missing or already
-    consumed, or the handoff or the daily log is missing. Raises WrapProofError when the block is
-    written but the check refuses it; the start record then stays usable, so the wrap repairs
-    what the check names and finishes again.
+    consumed, the handoff or the daily log is missing, or the rewritten handoff would not parse.
+    Raises WrapProofError, with nothing written, when the spawner's check refuses the block; the
+    start record then stays usable, so the wrap repairs what the check names and finishes again.
+    A failed write is a WrapHelperError that says which of the two writes landed.
 
     One wrap-start proves one wrap: only a finish whose block passes the check writes
     ``consumed_at`` into the start record, so a second finish cannot stamp a fresh ``wrapped_at``
@@ -656,18 +891,13 @@ def finish_wrap(sdir: Path, *, project_root: Path, handoff: Path, daily_log: Pat
     path = wrap_start_path(sdir)
     with slot_lock(path):
         start = _unconsumed_start(path)
-        if not handoff.is_file():
-            raise WrapHelperError(f"handoff not found: {handoff} (the wrap writes it before "
-                                  "wrap-finish)")
-        if not daily_log.is_file():
-            raise WrapHelperError(f"daily log not found: {daily_log} (the wrap writes it before "
-                                  "wrap-finish)")
+        _require_wrap_files(handoff, daily_log)
         block = _wrap_block_from(start, project_root=project_root, daily_log=daily_log,
                                  wrapped_at=_iso_utc(finished))
-        write_wrap_block(handoff, block)
-        verify_wrap_proof(handoff, project_root=project_root,
-                          max_age_minutes=DEFAULT_MAX_AGE_MINUTES, now=finished)
-        atomic_write_json(path, {**start, "consumed_at": block["wrapped_at"]})
+        text = _proof_text(handoff, block)
+        check_wrap_block(block, project_root=project_root,
+                         max_age_minutes=DEFAULT_MAX_AGE_MINUTES, now=finished)
+        _consume_then_publish(path, start, handoff=handoff, block=block, text=text)
     return block
 
 
@@ -727,7 +957,7 @@ def _check_daily_log(block: Dict[str, Any], *, project_root: Path, started: floa
     if not path.is_absolute():
         path = project_root / path
     try:
-        flag = read_frontmatter(path).get("handoff")
+        flag = read_frontmatter(path, strict=False).get("handoff")
         mtime = path.stat().st_mtime
     except (OSError, ValueError) as exc:
         raise WrapProofError("daily_log", f"{path} cannot be read ({exc})") from exc
@@ -763,15 +993,43 @@ def _check_nuggets(block: Dict[str, Any]) -> None:
                              f"first: {missing[0]}")
 
 
-def verify_wrap_proof(handoff: Path, *, project_root: Path, max_age_minutes: int,
-                      now: Optional[float] = None) -> Dict[str, Any]:
-    """The checks of the plan, in order. Returns the block; raises WrapProofError naming the
-    first check that fails. The curation step of the wrap is not proven."""
-    block = _wrap_block(handoff)
+def _check_start_binding(block: Dict[str, Any], sdir: Path) -> None:
+    """The block counts only when the start record it names was consumed by exactly this block:
+    the same ``start_id``, and ``consumed_at`` equal to its ``wrapped_at``. wrap-finish consumes
+    before it publishes, so no crash leaves a block that passes here beside a reusable start."""
+    start_id = block.get("start_id")
+    if not isinstance(start_id, str) or not start_id:
+        raise WrapProofError("wrap_start_binding", "the block names no start_id, so no wrap-start "
+                             "backs it")
+    path = wrap_start_path(sdir)
+    record = _read_json(path) or {}
+    if record.get("start_id") != start_id:
+        raise WrapProofError("wrap_start_binding", f"{path} is not the start record this block "
+                             f"names ({start_id}): it is gone, or a newer wrap-start replaced it")
+    if record.get("consumed_at") != block.get("wrapped_at"):
+        raise WrapProofError("wrap_start_binding", f"{path} was not consumed by this block "
+                             f"(consumed_at {record.get('consumed_at')!r}, wrapped_at "
+                             f"{block.get('wrapped_at')!r}): wrap-finish did not complete")
+
+
+def check_wrap_block(block: Dict[str, Any], *, project_root: Path, max_age_minutes: int,
+                     now: Optional[float] = None) -> None:
+    """The checks on the block's content: its window, its daily log, its nuggets. wrap-finish
+    runs them on the block it is about to write, compose on the block it reads."""
     started, wrapped = _wrap_window(block, now=time.time() if now is None else now,
                                     max_age_minutes=max_age_minutes)
     _check_daily_log(block, project_root=project_root, started=started, wrapped=wrapped)
     _check_nuggets(block)
+
+
+def verify_wrap_proof(handoff: Path, *, project_root: Path, sdir: Path, max_age_minutes: int,
+                      now: Optional[float] = None) -> Dict[str, Any]:
+    """The checks of the plan, in order, and last the binding to the start record in ``sdir``.
+    Returns the block; raises WrapProofError naming the first check that fails. The curation
+    step of the wrap is not proven."""
+    block = _wrap_block(handoff)
+    check_wrap_block(block, project_root=project_root, max_age_minutes=max_age_minutes, now=now)
+    _check_start_binding(block, sdir)
     return block
 
 
@@ -945,6 +1203,16 @@ def transcript_digest(path: Path, *, max_bytes: int) -> Tuple[str, Dict[str, Any
 # ── CLI (used by scripts/t0_rotate_spawn.sh) ─────────────────────────────────
 
 
+def _proof_state_dir(root: Path) -> Path:
+    """The state dir wrap-start and wrap-finish resolve for ``root``, where the start record the
+    block names lives. A root whose project cannot be resolved has no start record to bind to."""
+    try:
+        return state_dir(str(root.expanduser().resolve()))
+    except RuntimeError as exc:
+        raise WrapProofError("wrap_start_binding", f"the rotation state dir of {root} cannot be "
+                             f"resolved ({exc})") from exc
+
+
 def _wrap_gate(args: argparse.Namespace, handoff_path: Path) -> Tuple[Optional[str], int]:
     """The wrap proof of a normal run, or the transcript check of a skip run. Returns the
     catch-up step for the prompt (skip run only) and an exit code, 0 to go on."""
@@ -954,7 +1222,8 @@ def _wrap_gate(args: argparse.Namespace, handoff_path: Path) -> Tuple[Optional[s
             return None, 2
         root = Path(args.project_root) if args.project_root else Path.cwd()
         try:
-            verify_wrap_proof(handoff_path, project_root=root, max_age_minutes=args.max_age_minutes)
+            verify_wrap_proof(handoff_path, project_root=root, sdir=_proof_state_dir(root),
+                              max_age_minutes=args.max_age_minutes)
         except WrapProofError as exc:
             sys.stderr.write(exc.refusal(handoff_path) + "\n")
             return None, EXIT_WRAP_PROOF
@@ -1038,9 +1307,10 @@ def _cmd_wrap_finish(args: argparse.Namespace) -> int:
         block = finish_wrap(state_dir(str(root)), project_root=root, handoff=handoff,
                             daily_log=_under_root(args.daily_log, root))
     except WrapProofError as exc:
-        # finish_wrap runs the spawner's check, so the wrap learns about a refusal while it can
-        # still repair it (a daily log without `handoff: true`, written before wrap-start).
-        sys.stderr.write(f"wrap-finish wrote the block, but the spawner will refuse it: "
+        # finish_wrap runs the spawner's check before it writes, so the wrap learns about a
+        # refusal while it can still repair it (a daily log without `handoff: true`, written
+        # before wrap-start).
+        sys.stderr.write(f"wrap-finish wrote nothing: the spawner would refuse this proof: "
                          f"check '{exc.check}': {exc.detail}. The start record stays usable: "
                          "repair this and run wrap-finish again\n")
         return EXIT_WRAP_PROOF

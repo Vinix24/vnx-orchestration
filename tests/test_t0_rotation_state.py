@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import List
 
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
@@ -357,6 +358,7 @@ def test_wrap_start_and_finish_count_exactly_this_slugs_new_headings(tmp_path, m
     assert block["nuggets"] == 2
     assert block["daily_log"] == DAILY and block["bucket"] == str(bucket)
     assert block["started_at"] == start["started_at"]
+    assert block["start_id"] == start["start_id"] and len(start["start_id"]) == 16
     assert rotation_state._parse_utc(block["started_at"]) <= rotation_state._parse_utc(block["wrapped_at"])
     assert _compose(root, handoff, tmp_path / "run") == 0
     assert "wrap-finish:" in capsys.readouterr().out
@@ -448,13 +450,15 @@ def test_wrap_finish_refuses_a_missing_handoff_or_daily_log(tmp_path, monkeypatc
 
 
 def test_wrap_finish_says_when_the_spawner_will_refuse_its_proof(tmp_path, monkeypatch, capsys):
+    """The check runs before anything is written (round 3): a refused block is never published."""
     root = _project(tmp_path, monkeypatch)
     handoff = _write_handoff(root)
     rotation_state.main(["wrap-start", "--project-root", str(root), "--project-slug", SLUG])
     _write_daily(root, flag="false")
     assert rotation_state.main(["wrap-finish", "--project-root", str(root), "--daily-log", DAILY]) == 6
-    assert "'daily_log_handoff'" in capsys.readouterr().err
-    assert "wrap" in rotation_state.read_frontmatter(handoff)
+    err = capsys.readouterr().err
+    assert "'daily_log_handoff'" in err and "wrote nothing" in err
+    assert handoff.read_text(encoding="utf-8") == HANDOFF_BODY
 
 
 @pytest.mark.parametrize("slug", ["", "  ", "a · b"])
@@ -484,7 +488,7 @@ def test_a_wrap_of_twenty_minutes_passes(tmp_path, monkeypatch):
     rotation_state.finish_wrap(sdir, project_root=root, handoff=handoff, daily_log=root / DAILY,
                                now=time.time() - 30)
     assert _compose(root, handoff, tmp_path / "run") == 0
-    block = rotation_state.verify_wrap_proof(handoff, project_root=root, max_age_minutes=15)
+    block = rotation_state.verify_wrap_proof(handoff, project_root=root, sdir=sdir, max_age_minutes=15)
     span = rotation_state._parse_utc(block["wrapped_at"]) - rotation_state._parse_utc(block["started_at"])
     assert span >= 20 * 60
 
@@ -519,7 +523,7 @@ def test_a_second_finish_without_a_new_start_cannot_refresh_an_old_proof(tmp_pat
     rotation_state.finish_wrap(sdir, project_root=root, handoff=handoff, daily_log=root / DAILY,
                                now=now - 7000)
     with pytest.raises(rotation_state.WrapProofError) as old:
-        rotation_state.verify_wrap_proof(handoff, project_root=root, max_age_minutes=15, now=now)
+        rotation_state.verify_wrap_proof(handoff, project_root=root, sdir=sdir, max_age_minutes=15, now=now)
     assert old.value.check == "wrapped_at_age"
     proof = handoff.read_text(encoding="utf-8")
 
@@ -546,6 +550,20 @@ def test_each_new_wrap_start_proves_one_more_wrap(tmp_path, monkeypatch):
         block = rotation_state.read_frontmatter(handoff)["wrap"]
         assert _start_record(tmp_path)["consumed_at"] == block["wrapped_at"]
         assert _compose(root, handoff, tmp_path / f"run-{run}") == 0, run
+
+
+def test_a_start_record_without_a_start_id_proves_nothing(tmp_path, monkeypatch, capsys):
+    """A record an older fabric wrote: no block could bind to it, so the wrap starts again."""
+    root = _project(tmp_path, monkeypatch)
+    handoff = _write_handoff(root)
+    assert rotation_state.main(["wrap-start", "--project-root", str(root), "--project-slug", SLUG]) == 0
+    record = _start_record(tmp_path)
+    del record["start_id"]
+    (tmp_path / "state" / "wrap-start.json").write_text(json.dumps(record), encoding="utf-8")
+    _write_daily(root)
+    assert rotation_state.main(["wrap-finish", "--project-root", str(root), "--daily-log", DAILY]) == 3
+    assert "carries no start_id" in capsys.readouterr().err
+    assert handoff.read_text(encoding="utf-8") == HANDOFF_BODY
 
 
 @pytest.mark.parametrize("failure", ["daily_log_missing", "self_check"])
@@ -592,16 +610,298 @@ def test_two_finishes_racing_on_one_start_let_exactly_one_through(tmp_path, monk
     assert sorted(outcomes) == ["passed", "refused"]
 
 
+# ── the old wrap block goes as a whole, and a rewrite that does not parse is refused ──
+# OI-2116, codex_gate on cd126146.
+
+OLD_WRAP_BLOCK = ("wrap:\n  started_at: 2026-10-01T08:00:00Z\n\n  wrapped_at: 2026-10-01T08:05:00Z\n"
+                  "# een opmerking zonder inspringing\n  nuggets: 0\n  nugget_headings: []\n"
+                  "  daily_log: \"daily-log/2026-10-01.md\"\n  bucket: null\n")
+WRAP_FIELDS = {"started_at", "wrapped_at", "nuggets", "nugget_headings", "daily_log", "bucket"}
+
+
+def _yaml_frontmatter(path: Path):
+    """The frontmatter through PyYAML, the independent judge of "it parses"."""
+    text = path.read_text(encoding="utf-8")
+    assert text.startswith("---\n")
+    return yaml.safe_load(text[len("---\n"):].split("\n---\n", 1)[0])
+
+
+@pytest.mark.parametrize("before, after", [
+    ("context: dev\n", "branch: main\n"),
+    ("context: dev\n", ""),
+    ("", "context: dev\nbranch: main\n"),
+], ids=["middle", "last", "first"])
+def test_wrap_finish_removes_the_old_block_up_to_the_next_key_and_the_yaml_parses(
+        tmp_path, monkeypatch, before, after):
+    """The old block held a blank line and an unindented comment. It was removed only up to the
+    first of them; its remaining fields survived without their key, and wrap-finish and compose
+    both returned 0 on frontmatter that does not parse."""
+    root = _project(tmp_path, monkeypatch)
+    handoff = _write_handoff(root, f"---\n{before}{OLD_WRAP_BLOCK}{after}---\n{HANDOFF_BODY}")
+    assert set(_yaml_frontmatter(handoff)) >= {"wrap"}, "the fixture itself must parse"
+    assert rotation_state.main(["wrap-start", "--project-root", str(root), "--project-slug", SLUG]) == 0
+    _write_daily(root)
+    assert rotation_state.main(["wrap-finish", "--project-root", str(root), "--daily-log", DAILY]) == 0
+
+    front = _yaml_frontmatter(handoff)
+    assert list(front) == [k for k in ("context", "branch") if k in before + after] + ["wrap"]
+    assert set(front["wrap"]) >= WRAP_FIELDS and front["wrap"]["daily_log"] == DAILY
+    text = handoff.read_text(encoding="utf-8")
+    assert "2026-10-01" not in text and "een opmerking" not in text, "the old block left lines behind"
+    assert text.endswith("---\n" + HANDOFF_BODY)
+    assert _compose(root, handoff, tmp_path / "run") == 0
+
+
+BROKEN_FRONTMATTER = {
+    "orphan_under_scalar": "context: dev\n  verdwaald: 1\n",
+    "orphan_after_blank": "context: dev\n\n  verdwaald: 1\n",
+    "orphan_after_quoted": "title: \"klaar\"\n  verdwaald: 1\n",
+    "text_after_quoted": "title: \"klaar\"\n  verder\n",
+    "orphan_after_flow": "tags: [a, b]\n  verdwaald: 1\n",
+    "list_then_key": "tags:\n  - a\n  verdwaald: 1\n",
+    "key_then_list": "meta:\n  a: 1\n  - b\n",
+    "dedent": "meta:\n    a: 1\n  b: 2\n",
+    "indented_first": "  verdwaald: 1\ncontext: dev\n",
+    "not_a_key": "context: dev\nzomaar tekst\n",
+    "tab_indent": "meta:\n\ta: 1\n",
+    "list_after_scalar": "context: dev\n- a\n",
+    "text_at_child_level": "meta:\n  a: 1\n  zomaar\n",
+    "colon_in_plain_value": "note: zie daily-log 2026-09-27: 22,4M tokens\n",
+    "colon_in_child_value": "meta:\n  note: a: b\n",
+    "value_ends_on_colon": "note: waarde:\n",
+}
+VALID_FRONTMATTER = {
+    "compact_list": "tags:\n- rotatie\n- g5a\nbranch: main\n",
+    "nested_list": "tags:\n  - rotatie\n  - g5a\n",
+    "block_scalar": "notes: |\n  stap: een\n\n  stap: twee\nbranch: main\n",
+    "folded_scalar": "notes: >-\n  lang\n  verhaal\n",
+    "multiline_plain": "title: een lange\n  titel\n",
+    "multiline_quoted": "title: \"een: lange\n  titel: ja\"\n",
+    "open_flow": "tags: [rotatie,\n  g5a]\n",
+    "nested_map": "meta:\n  owner: vincent\n  sub:\n    diep: 1\n",
+    "anchor": "base: &b\n  a: 1\n",
+    "comments_and_blanks": "# kop\ncontext: dev\n\n# tussen\nbranch: main  # staart\n",
+    "empty_value": "leeg:\nbranch: main\n",
+    "quoted_and_date_keys": "\"sleutel met spatie\": 1\n2026-10-16: datum\n",
+    "url_continuation": "title: zie\n  https://x.nl/a\n",
+    "colon_without_space": "time: 12:30\nurl: https://x.nl # om: 12 uur\n",
+    "quoted_colon": "note: \"a: b\"\nmeta:\n  note: 'c: d'\n",
+    "compact_list_under_child": "meta:\n  tags:\n  - a\n  - b\n  owner: x\n",
+}
+
+
+@pytest.mark.parametrize("case", sorted(BROKEN_FRONTMATTER))
+def test_a_rewrite_that_would_not_parse_is_refused_and_the_handoff_stays_untouched(
+        tmp_path, monkeypatch, capsys, case):
+    root = _project(tmp_path, monkeypatch)
+    original = f"---\n{BROKEN_FRONTMATTER[case]}---\n{HANDOFF_BODY}"
+    handoff = _write_handoff(root, original)
+    with pytest.raises(yaml.YAMLError):
+        _yaml_frontmatter(handoff)
+    assert rotation_state.main(["wrap-start", "--project-root", str(root), "--project-slug", SLUG]) == 0
+    started = _start_record(tmp_path)
+    _write_daily(root)
+
+    assert rotation_state.main(["wrap-finish", "--project-root", str(root), "--daily-log", DAILY]) == 3
+    err = capsys.readouterr().err
+    assert "does not parse" in err and "nothing written" in err, err
+    assert handoff.read_text(encoding="utf-8") == original
+    assert _start_record(tmp_path) == started, "a refused rewrite consumed the start"
+    with pytest.raises(ValueError, match="does not parse"):
+        rotation_state.write_wrap_block(handoff, _block())
+    assert handoff.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize("case", sorted(VALID_FRONTMATTER))
+def test_a_frontmatter_yaml_reads_is_rewritten_and_keeps_its_keys(tmp_path, monkeypatch, case):
+    """The other side of the refusal: valid YAML that a handoff may carry is never refused."""
+    root = _project(tmp_path, monkeypatch)
+    handoff = _write_handoff(root, f"---\n{VALID_FRONTMATTER[case]}---\n{HANDOFF_BODY}")
+    keys = list(_yaml_frontmatter(handoff))
+    assert rotation_state.main(["wrap-start", "--project-root", str(root), "--project-slug", SLUG]) == 0
+    _write_daily(root)
+    assert rotation_state.main(["wrap-finish", "--project-root", str(root), "--daily-log", DAILY]) == 0
+    front = _yaml_frontmatter(handoff)
+    assert list(front) == keys + ["wrap"]
+    assert _compose(root, handoff, tmp_path / "run") == 0
+
+
+def test_compose_refuses_a_proof_in_frontmatter_that_does_not_parse(tmp_path, monkeypatch, capsys):
+    root = _project(tmp_path, monkeypatch)
+    handoff = _write_handoff(root, f"---\ncontext: dev\n---\n{HANDOFF_BODY}")
+    assert rotation_state.main(["wrap-start", "--project-root", str(root), "--project-slug", SLUG]) == 0
+    _write_daily(root)
+    assert rotation_state.main(["wrap-finish", "--project-root", str(root), "--daily-log", DAILY]) == 0
+    text = handoff.read_text(encoding="utf-8")
+    handoff.write_text(text.replace("context: dev\n", "context: dev\n  verdwaald: 1\n", 1), encoding="utf-8")
+    with pytest.raises(yaml.YAMLError):
+        _yaml_frontmatter(handoff)
+
+    assert _compose(root, handoff, tmp_path / "run") == 6
+    err = capsys.readouterr().err
+    assert "wrap proof check 'wrap_block'" in err and "does not parse" in err
+
+
+def test_a_daily_log_with_an_odd_line_still_shows_its_handoff_flag(tmp_path, monkeypatch):
+    """Only the handoff is read strictly. The daily log stays lenient: one odd line in it never
+    hides the `handoff: true` around it."""
+    root = _project(tmp_path, monkeypatch)
+    handoff = _write_handoff(root)
+    assert rotation_state.main(["wrap-start", "--project-root", str(root), "--project-slug", SLUG]) == 0
+    _write_daily(root, extra="  verdwaald: 1\n")
+    assert rotation_state.main(["wrap-finish", "--project-root", str(root), "--daily-log", DAILY]) == 0
+    assert _compose(root, handoff, tmp_path / "run") == 0
+
+
+# ── consumption and publication are one step (codex_gate advisory on cd126146) ──
+
+
+class _Crash(BaseException):
+    """The process dies mid-finish: nothing in finish_wrap may catch this."""
+
+
+def _inject(monkeypatch, name: str, target: Path, *, when: str):
+    """Make the module's ``name`` (atomic_write_json or atomic_write_text) fail for ``target``:
+    ``before`` raises OSError and writes nothing, ``after`` writes and then dies. Returns the
+    real function, so the test can put it back."""
+    real = getattr(rotation_state, name)
+
+    def write(path, *args, **kwargs):
+        if Path(path) != target:
+            return real(path, *args, **kwargs)
+        if when == "before":
+            raise OSError(28, "No space left on device")
+        real(path, *args, **kwargs)
+        raise _Crash(f"died after writing {path}")
+
+    monkeypatch.setattr(rotation_state, name, write)
+    return real
+
+
+def _wrap_until_finish(tmp_path: Path, monkeypatch):
+    root = _project(tmp_path, monkeypatch)
+    handoff = _write_handoff(root)
+    assert rotation_state.main(["wrap-start", "--project-root", str(root), "--project-slug", SLUG]) == 0
+    _write_daily(root)
+    return root, handoff, tmp_path / "state" / "wrap-start.json"
+
+
+def test_a_failed_consumption_write_publishes_no_proof(tmp_path, monkeypatch, capsys):
+    """codex_gate on cd126146 injected exactly this: the proof was already published when the
+    consumption write failed, so wrap-finish reported a failure while compose accepted the proof,
+    and the start stayed reusable beside it."""
+    root, handoff, record = _wrap_until_finish(tmp_path, monkeypatch)
+    started = _start_record(tmp_path)
+    real = _inject(monkeypatch, "atomic_write_json", record, when="before")
+
+    assert rotation_state.main(["wrap-finish", "--project-root", str(root), "--daily-log", DAILY]) == 3
+    err = capsys.readouterr().err
+    assert _start_record(tmp_path) == started
+    assert _compose(root, handoff, tmp_path / "run-a") == 6, "compose accepted a proof beside an unconsumed start"
+    assert handoff.read_text(encoding="utf-8") == HANDOFF_BODY
+    assert "nothing published" in err
+
+    monkeypatch.setattr(rotation_state, "atomic_write_json", real)
+    assert rotation_state.main(["wrap-finish", "--project-root", str(root), "--daily-log", DAILY]) == 0
+    assert _compose(root, handoff, tmp_path / "run-b") == 0
+    assert rotation_state.main(["wrap-finish", "--project-root", str(root), "--daily-log", DAILY]) == 3
+
+
+@pytest.mark.parametrize("when", ["after", "before"], ids=["crash", "error"])
+def test_between_consumption_and_publication_the_wrap_fails_and_a_new_wrap_start_repairs_it(
+        tmp_path, monkeypatch, capsys, when):
+    """Crash point 1: the start is consumed (first write), the block is not published (the second
+    write died or failed). That is a failed wrap, never a reusable start beside a valid proof."""
+    root, handoff, record = _wrap_until_finish(tmp_path, monkeypatch)
+    if when == "after":
+        _inject(monkeypatch, "atomic_write_json", record, when="after")
+        with pytest.raises(_Crash):
+            rotation_state.finish_wrap(tmp_path / "state", project_root=root.resolve(),
+                                       handoff=handoff, daily_log=root / DAILY)
+        monkeypatch.undo()
+        monkeypatch.setenv(rotation_state.STATE_DIR_ENV, str(tmp_path / "state"))
+    else:
+        real = _inject(monkeypatch, "atomic_write_text", handoff, when="before")
+        assert rotation_state.main(["wrap-finish", "--project-root", str(root), "--daily-log", DAILY]) == 3
+        monkeypatch.setattr(rotation_state, "atomic_write_text", real)
+    err = capsys.readouterr().err
+
+    assert "consumed_at" in _start_record(tmp_path), "the start stayed reusable"
+    assert handoff.read_text(encoding="utf-8") == HANDOFF_BODY
+    assert _compose(root, handoff, tmp_path / "run-a") == 6
+    assert when == "after" or "run wrap-start" in err
+    assert rotation_state.main(["wrap-finish", "--project-root", str(root), "--daily-log", DAILY]) == 3
+    assert "run wrap-start first" in capsys.readouterr().err
+
+    assert rotation_state.main(["wrap-start", "--project-root", str(root), "--project-slug", SLUG]) == 0
+    _write_daily(root)
+    assert rotation_state.main(["wrap-finish", "--project-root", str(root), "--daily-log", DAILY]) == 0
+    assert _compose(root, handoff, tmp_path / "run-b") == 0
+
+
+def test_a_crash_after_publication_leaves_a_valid_proof_and_a_consumed_start(tmp_path, monkeypatch, capsys):
+    """Crash point 2: both writes landed and the process died before it returned."""
+    root, handoff, _ = _wrap_until_finish(tmp_path, monkeypatch)
+    _inject(monkeypatch, "atomic_write_text", handoff, when="after")
+    with pytest.raises(_Crash):
+        rotation_state.finish_wrap(tmp_path / "state", project_root=root.resolve(),
+                                   handoff=handoff, daily_log=root / DAILY)
+    monkeypatch.undo()
+    monkeypatch.setenv(rotation_state.STATE_DIR_ENV, str(tmp_path / "state"))
+
+    block = rotation_state.read_frontmatter(handoff)["wrap"]
+    assert _start_record(tmp_path).get("consumed_at") == block["wrapped_at"]
+    assert _compose(root, handoff, tmp_path / "run") == 0
+    assert rotation_state.main(["wrap-finish", "--project-root", str(root), "--daily-log", DAILY]) == 3
+    assert "run wrap-start first" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("case", ["no_record", "newer_start", "unconsumed", "consumed_by_another",
+                                  "no_start_id"])
+def test_compose_accepts_a_block_only_when_its_start_record_was_consumed_by_it(
+        tmp_path, monkeypatch, capsys, case):
+    root, handoff, record = _wrap_until_finish(tmp_path, monkeypatch)
+    assert rotation_state.main(["wrap-finish", "--project-root", str(root), "--daily-log", DAILY]) == 0
+    data = _start_record(tmp_path)
+    if case == "no_record":
+        record.unlink()
+    elif case == "newer_start":
+        assert rotation_state.main(["wrap-start", "--project-root", str(root), "--project-slug", SLUG]) == 0
+    elif case == "unconsumed":
+        data.pop("consumed_at", None)
+        record.write_text(json.dumps(data), encoding="utf-8")
+    elif case == "consumed_by_another":
+        data["consumed_at"] = rotation_state._iso_utc(time.time() - 100)
+        record.write_text(json.dumps(data), encoding="utf-8")
+    else:
+        text = handoff.read_text(encoding="utf-8")
+        handoff.write_text("".join(ln for ln in text.splitlines(keepends=True)
+                                   if not ln.startswith("  start_id:")), encoding="utf-8")
+    assert _compose(root, handoff, tmp_path / "run") == 6
+    assert "wrap proof check 'wrap_start_binding'" in capsys.readouterr().err
+
+
 # ── wrap proof: compose refuses with 6 per named check ───────────────────────
 
 
 def _block(**overrides) -> dict:
     now = time.time()
-    block = {"started_at": rotation_state._iso_utc(now - 300),
+    block = {"start_id": "0123456789abcdef", "started_at": rotation_state._iso_utc(now - 300),
              "wrapped_at": rotation_state._iso_utc(now - 10), "nuggets": 0,
              "nugget_headings": [], "daily_log": DAILY, "bucket": None}
     block.update(overrides)
     return block
+
+
+def _publish(tmp_path: Path, handoff: Path, block: dict) -> None:
+    """What a completed wrap-finish leaves: the start record the block names, consumed by it,
+    and the block in the handoff. Each case below then fails on its own check only."""
+    record = {"start_id": block["start_id"], "started_at": block["started_at"],
+              "project_root": str(handoff.parent.parent), "project_slug": SLUG, "bucket": block["bucket"],
+              "headings": [], "consumed_at": block["wrapped_at"]}
+    (tmp_path / "state").mkdir(exist_ok=True)
+    (tmp_path / "state" / "wrap-start.json").write_text(json.dumps(record), encoding="utf-8")
+    rotation_state.write_wrap_block(handoff, block)
 
 
 def _proof_case(tmp_path: Path, monkeypatch, case: str):
@@ -627,14 +927,14 @@ def _proof_case(tmp_path: Path, monkeypatch, case: str):
     }
     (tmp_path / "kapot.md").write_bytes(b"\xff\xfe### kapot\n")
     if case in blocks:
-        rotation_state.write_wrap_block(handoff, blocks[case])
+        _publish(tmp_path, handoff, blocks[case])
     elif case == "unclosed":
         handoff.write_text("---\nwrap:\n  nuggets: 0\n" + HANDOFF_BODY, encoding="utf-8")
     elif case == "daily_log_handoff":
-        rotation_state.write_wrap_block(handoff, _block())
+        _publish(tmp_path, handoff, _block())
         _write_daily(root, mtime=now - 60, flag="false")
     elif case in ("before_start", "after_wrap"):
-        rotation_state.write_wrap_block(handoff, _block())
+        _publish(tmp_path, handoff, _block())
         _write_daily(root, mtime=now - 3600 if case == "before_start" else now + 120)
     return root, handoff
 
@@ -671,8 +971,8 @@ def test_compose_honours_max_age_minutes(tmp_path, monkeypatch):
     handoff = _write_handoff(root)
     now = time.time()
     _write_daily(root, mtime=now - 20 * 60 - 30)
-    rotation_state.write_wrap_block(handoff, _block(started_at=rotation_state._iso_utc(now - 21 * 60),
-                                                    wrapped_at=rotation_state._iso_utc(now - 20 * 60)))
+    _publish(tmp_path, handoff, _block(started_at=rotation_state._iso_utc(now - 21 * 60),
+                                       wrapped_at=rotation_state._iso_utc(now - 20 * 60)))
     assert _compose(root, handoff, tmp_path / "a") == 6
     assert _compose(root, handoff, tmp_path / "b", "--max-age-minutes", "30") == 0
 
@@ -951,3 +1251,65 @@ def test_the_digest_cuts_the_oldest_kept_entry_and_keeps_its_end(tmp_path):
 def test_the_digest_of_an_unreadable_transcript_is_exit_3(tmp_path, capsys):
     assert rotation_state.main(["transcript-digest", "--transcript", str(tmp_path / "nope.jsonl")]) == 3
     assert "unreadable" in capsys.readouterr().err
+
+
+# ── the interface the G7a skills call (build-log, kickoff; patched 2026-10-16) ──
+# Each skill block first runs `<cmd> --help` and skips the step when that exits non-zero, so a
+# renamed command or flag would silently skip the proof. These run the CLI the way the skills do.
+
+SKILL_FLAGS = {
+    "wrap-start": ["--project-root", "--project-slug", "--bucket"],
+    "wrap-finish": ["--project-root", "--daily-log"],
+    "transcript-digest": ["--transcript", "--max-bytes"],
+    "skips": ["--since"],
+    "state-dir": ["--project-root"],
+}
+
+
+def _cli(*argv: str, env: dict) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, str(STATE_PY), *argv], capture_output=True, text=True,
+                          env=env, timeout=60)
+
+
+@pytest.mark.parametrize("cmd", sorted(SKILL_FLAGS))
+def test_every_command_a_skill_calls_answers_help_with_the_flags_it_passes(cmd):
+    proc = _cli(cmd, "--help", env=dict(os.environ))
+    assert proc.returncode == 0, proc.stderr
+    for flag in SKILL_FLAGS[cmd]:
+        assert flag in proc.stdout, f"{cmd} --help does not list {flag}"
+
+
+def test_the_skills_argv_runs_a_wrap_a_digest_and_the_skip_list(tmp_path):
+    """Exactly the argv of the patched skills, on fixtures: build-log's wrap-start, wrap-finish
+    (handoff defaulted to <root>/daily-log/handoff.md) and transcript-digest, and kickoff's
+    state-dir and `skips --since 7`, whose lines must carry transcript= and run_dir=<path>."""
+    root = tmp_path / "project"
+    (root / "daily-log").mkdir(parents=True)
+    ledger = tmp_path / "t0_receipts.ndjson"
+    env = {**os.environ, rotation_state.STATE_DIR_ENV: str(tmp_path / "state"),
+           rotation_state.RECEIPTS_FILE_ENV: str(ledger)}
+    bucket = _write_bucket(tmp_path / "bucket" / "2026-10.md", [_h("seocrawler-v2", "ander-project")])
+
+    start = _cli("wrap-start", "--project-root", str(root), "--project-slug", SLUG, "--bucket", str(bucket), env=env)
+    assert start.returncode == 0, start.stderr
+    _append_bucket(bucket, [_h(SLUG, "nieuw-moment")])
+    handoff = _write_handoff(root)
+    _write_daily(root)
+    finish = _cli("wrap-finish", "--project-root", str(root), "--daily-log", DAILY, env=env)
+    assert finish.returncode == 0, finish.stderr
+    assert rotation_state.read_frontmatter(handoff)["wrap"]["nugget_headings"] == [_h(SLUG, "nieuw-moment")]
+
+    state = _cli("state-dir", "--project-root", str(root), env=env)
+    assert state.returncode == 0 and state.stdout.strip() == str(tmp_path / "state")
+
+    transcript = _write_jsonl(tmp_path / "voorganger.jsonl", [_user("wat deed ik net")])
+    digest = _cli("transcript-digest", "--transcript", str(transcript), "--max-bytes", "200000", env=env)
+    assert digest.returncode == 0 and "wat deed ik net" in digest.stdout, digest.stderr
+
+    run_dir = tmp_path / "run-1"
+    ledger.write_text(_ledger_line(rotation_state.WRAP_SKIPPED_TRIGGER, 1, reason="noodrem",
+                                   transcript=str(transcript), run_dir=str(run_dir)), encoding="utf-8")
+    skips = _cli("skips", "--since", "7", env=env)
+    assert skips.returncode == 0, skips.stderr
+    line = skips.stdout.splitlines()[0]
+    assert f"transcript={transcript}" in line and f"run_dir={run_dir}" in line

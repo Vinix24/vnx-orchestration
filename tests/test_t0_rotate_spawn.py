@@ -242,12 +242,20 @@ def _iso(epoch: float) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
 
 
-def _wrap_frontmatter(*, started: float, wrapped: float, headings=(), nuggets=None,
+def _wrap_frontmatter(rig, *, started: float, wrapped: float, headings=(), nuggets=None,
                       daily_log: str = DAILY_LOG, bucket: str = None) -> str:
-    """The frontmatter `wrap-finish` writes, as text."""
+    """The frontmatter `wrap-finish` writes, as text, and the start record it consumed: the
+    block names the record's start_id, and the record's consumed_at is the block's wrapped_at."""
     count = len(headings) if nuggets is None else nuggets
+    start_id = "5eed" + format(int(started), "x")[-12:]
+    rig["state"].mkdir(parents=True, exist_ok=True)
+    (rig["state"] / "wrap-start.json").write_text(json.dumps({
+        "start_id": start_id, "started_at": _iso(started), "project_root": str(rig["project"]),
+        "project_slug": SLUG, "bucket": bucket, "headings": [], "consumed_at": _iso(wrapped),
+    }), encoding="utf-8")
     return (
         "---\ncontext: dev\nproject: vnx-orchestration\nwrap:\n"
+        f"  start_id: {json.dumps(start_id)}\n"
         f"  started_at: {_iso(started)}\n"
         f"  wrapped_at: {_iso(wrapped)}\n"
         f"  nuggets: {count}\n"
@@ -287,7 +295,7 @@ def _handoff(rig, text: str, age_seconds: int = 0, *, wrap: bool = True) -> Path
     if wrap:
         wrapped = time.time() - age_seconds
         _daily_log(rig, wrapped - 60)
-        text = _wrap_frontmatter(started=wrapped - 300, wrapped=wrapped) + text
+        text = _wrap_frontmatter(rig, started=wrapped - 300, wrapped=wrapped) + text
     path.write_text(text, encoding="utf-8")
     if age_seconds:
         old = time.time() - age_seconds
@@ -793,7 +801,7 @@ def test_a_handoff_without_a_wrap_block_is_refused_before_any_window(rig):
 def test_a_wrap_that_finished_two_hours_ago_is_refused_although_the_file_is_fresh(rig):
     now = time.time()
     _daily_log(rig, now - 2 * 3600 - 120)
-    _handoff(rig, _wrap_frontmatter(started=now - 2 * 3600 - 300, wrapped=now - 2 * 3600)
+    _handoff(rig, _wrap_frontmatter(rig, started=now - 2 * 3600 - 300, wrapped=now - 2 * 3600)
              + HANDOFF_BASE, wrap=False)
     proc = _spawn(rig)
     assert proc.returncode == 6, proc.stderr
@@ -805,7 +813,7 @@ def test_a_wrap_that_finished_two_hours_ago_is_refused_although_the_file_is_fres
 def test_a_daily_log_written_before_the_wrap_started_is_refused(rig):
     now = time.time()
     _daily_log(rig, now - 3 * 3600)
-    _handoff(rig, _wrap_frontmatter(started=now - 300, wrapped=now - 10) + HANDOFF_BASE, wrap=False)
+    _handoff(rig, _wrap_frontmatter(rig, started=now - 300, wrapped=now - 10) + HANDOFF_BASE, wrap=False)
     proc = _spawn(rig)
     assert proc.returncode == 6, proc.stderr
     assert "'daily_log_window'" in proc.stderr
@@ -819,11 +827,11 @@ def test_nuggets_that_do_not_match_the_bucket_are_refused(rig, case):
     bucket = _bucket(rig, present)
     _daily_log(rig, now - 60)
     if case == "count":
-        front = _wrap_frontmatter(started=now - 300, wrapped=now - 10, headings=present, nuggets=3,
+        front = _wrap_frontmatter(rig, started=now - 300, wrapped=now - 10, headings=present, nuggets=3,
                                   bucket=str(bucket))
         check = "'nuggets_count'"
     else:
-        front = _wrap_frontmatter(started=now - 300, wrapped=now - 10, bucket=str(bucket),
+        front = _wrap_frontmatter(rig, started=now - 300, wrapped=now - 10, bucket=str(bucket),
                                   headings=present[:1] + [f"### 2026-10-16 · {SLUG} · nooit-geschreven"])
         check = "'nugget_in_bucket'"
     _handoff(rig, front + HANDOFF_BASE, wrap=False)
@@ -838,7 +846,7 @@ def test_a_valid_wrap_with_nuggets_in_the_bucket_spawns(rig):
     headings = [f"### 2026-10-16 · {SLUG} · gate-loopt-vast"]
     bucket = _bucket(rig, headings + ["### 2026-10-16 · seocrawler-v2 · iets-anders"])
     _daily_log(rig, now - 60)
-    _handoff(rig, _wrap_frontmatter(started=now - 300, wrapped=now - 10, headings=headings,
+    _handoff(rig, _wrap_frontmatter(rig, started=now - 300, wrapped=now - 10, headings=headings,
                                     bucket=str(bucket)) + HANDOFF_BASE, wrap=False)
     proc = _spawn(rig)
     assert proc.returncode == 0, proc.stderr
@@ -850,10 +858,60 @@ def test_a_wrap_that_took_twenty_minutes_spawns(rig):
     operator. A wrap of twenty minutes is a normal wrap, not a stale one."""
     now = time.time()
     _daily_log(rig, now - 5 * 60)
-    _handoff(rig, _wrap_frontmatter(started=now - 20 * 60 - 30, wrapped=now - 30) + HANDOFF_BASE,
+    _handoff(rig, _wrap_frontmatter(rig, started=now - 20 * 60 - 30, wrapped=now - 30) + HANDOFF_BASE,
              wrap=False)
     proc = _spawn(rig)
     assert proc.returncode == 0, proc.stderr
+
+
+def _state_cli(rig, *argv: str) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, str(REPO_ROOT / "scripts" / "lib" / "t0_rotation_state.py"),
+                           *argv], capture_output=True, text=True, env=rig["env"], timeout=60)
+
+
+def test_a_wrap_through_wrap_start_and_wrap_finish_spawns(rig):
+    """The whole chain as the build-log skill runs it, over an old wrap: block with a blank line
+    and an unindented comment in it (OI-2116), then the spawner."""
+    old_block = ("wrap:\n  started_at: 2026-10-01T08:00:00Z\n\n# oud\n  nuggets: 0\n"
+                 "  daily_log: \"daily-log/2026-10-01.md\"\n")
+    path = rig["project"] / "daily-log" / "handoff.md"
+    path.write_text(f"---\ncontext: dev\n{old_block}branch: main\n---\n{HANDOFF_BASE}", encoding="utf-8")
+    start = _state_cli(rig, "wrap-start", "--project-root", str(rig["project"]), "--project-slug", SLUG)
+    assert start.returncode == 0, start.stderr
+    _daily_log(rig, time.time())
+    finish = _state_cli(rig, "wrap-finish", "--project-root", str(rig["project"]), "--daily-log", DAILY_LOG)
+    assert finish.returncode == 0, finish.stderr
+    assert "2026-10-01" not in path.read_text(encoding="utf-8")
+
+    proc = _spawn(rig)
+    assert proc.returncode == 0, proc.stderr
+    assert "#1920 mergen" in _typed(rig)[1]
+
+
+@pytest.mark.parametrize("case, check", [
+    ("unconsumed", "'wrap_start_binding'"),
+    ("newer_start", "'wrap_start_binding'"),
+    ("frontmatter_does_not_parse", "'wrap_block'"),
+])
+def test_a_proof_that_does_not_bind_or_parse_is_refused_before_any_window(rig, case, check):
+    now = time.time()
+    _daily_log(rig, now - 60)
+    front = _wrap_frontmatter(rig, started=now - 300, wrapped=now - 10)
+    record = rig["state"] / "wrap-start.json"
+    if case == "unconsumed":
+        data = json.loads(record.read_text(encoding="utf-8"))
+        del data["consumed_at"]
+        record.write_text(json.dumps(data), encoding="utf-8")
+    elif case == "newer_start":
+        assert _state_cli(rig, "wrap-start", "--project-root", str(rig["project"]),
+                          "--project-slug", SLUG).returncode == 0
+    else:
+        front = front.replace("context: dev\n", "context: dev\n  verdwaald: 1\n", 1)
+    _handoff(rig, front + HANDOFF_BASE, wrap=False)
+    proc = _spawn(rig)
+    assert proc.returncode == 6, proc.stderr
+    assert check in proc.stderr
+    _assert_nothing_opened(rig)
 
 
 # ── emergency path (operator decision 2026-10-16 c) ──────────────────────────
