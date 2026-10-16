@@ -107,6 +107,24 @@ def _git_toplevel(path: Path) -> Path | None:
     return Path(output).expanduser().resolve()
 
 
+def _checkout_root(path: Path) -> Path | None:
+    """Return ``path`` when it is the root of a git checkout, else the git toplevel.
+
+    ``git`` is a subprocess and fails in a stripped environment (a launchd job
+    has no shell profile). Without a fallback the caller concludes "not a
+    checkout" and walks to the parent directory, which resolved the heartbeat
+    store to ``~/Development/.vnx-data`` (OI-2042). A ``.git`` entry (directory
+    for a checkout, file for a worktree) is the same fact read from disk.
+    """
+    top = _git_toplevel(path)
+    if top is not None:
+        return top
+    resolved = path.resolve()
+    if (resolved / ".git").exists():
+        return resolved
+    return None
+
+
 def _git_common_root(path: Path) -> Path | None:
     try:
         output = subprocess.check_output(
@@ -152,7 +170,7 @@ def _is_central_install(vnx_home: Path) -> bool:
     (issue #225 / PR-WAVE4-1 CI regression). The marker is unambiguous, so a
     standalone dev checkout or worktree is correctly treated as non-central.
     """
-    if _git_toplevel(vnx_home) != vnx_home:
+    if _checkout_root(vnx_home) != vnx_home:
         return False
     marker = vnx_home / ".vnx-install-mode"
     if marker.is_file():
@@ -172,7 +190,7 @@ def _default_project_root(vnx_home: Path) -> Path:
     if override is not None:
         return override
 
-    git_root = _git_toplevel(vnx_home)
+    git_root = _checkout_root(vnx_home)
     if git_root == vnx_home:
         if _is_central_install(vnx_home):
             cwd_git_root = _git_toplevel(Path.cwd())
@@ -196,7 +214,7 @@ def _default_canonical_root(vnx_home: Path) -> Path:
     if override is not None:
         return _git_toplevel(override) or override
 
-    git_root = _git_toplevel(vnx_home)
+    git_root = _checkout_root(vnx_home)
     if git_root == vnx_home:
         if _is_central_install(vnx_home):
             project_root = _default_project_root(vnx_home)
