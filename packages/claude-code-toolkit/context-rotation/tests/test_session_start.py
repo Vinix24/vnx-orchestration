@@ -1,6 +1,7 @@
 """SessionStart: injection after /clear, listing, recovery and the archive (loop step 8)."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -16,6 +17,7 @@ from conftest import (
 # lib is on sys.path through conftest; the hook entry is imported to run it in-process.
 sys.path.insert(0, str(PKG / "hooks"))
 
+import context_guard
 import hook_runtime
 import rotation_state
 import session_start
@@ -267,11 +269,126 @@ def test_a_crash_between_claim_and_emit_leaves_a_recoverable_handover(tmp_path, 
     assert injections(project)[-1]["via"] == "resume"
 
 
+NEWER = VALID_HANDOVER + "\nWritten again by the origin session.\n"
+
+
+def sha_of(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_recovery_reads_the_archived_snapshot_not_a_changed_original(tmp_path, project, monkeypatch):
+    s = saved_session(tmp_path, project)
+    with monkeypatch.context() as patch:
+        patch.setattr(rotation_state, "log_injection", crash)
+        with pytest.raises(Crash):
+            run_in_process(project, "sess-b")
+    [copy] = archived(project)
+    assert copy.read_text() == VALID_HANDOVER
+    s.write_handover(NEWER)  # the original changes after the crash, with its own marker
+
+    proc = Session(tmp_path, project, "sess-c").expand("resume 1")
+    assert VALID_HANDOVER in context_of(proc)
+    assert "Written again by the origin session." not in context_of(proc)
+    assert copy.read_text() == VALID_HANDOVER
+    [line] = injections(project)
+    assert (line["archive"], line["sha256"]) == (str(copy), sha_of(copy))
+    # The changed original is a newer handover: it stays, with its own marker.
+    assert s.handover.read_text() == NEWER
+    assert markers(project) == ["ready-sess-a.json"]
+
+
+def test_a_claim_without_archive_is_not_recovered_from_a_changed_original(tmp_path, project, monkeypatch):
+    s = saved_session(tmp_path, project)
+    with monkeypatch.context() as patch:
+        patch.setattr(rotation_state, "archive_handover", crash)
+        with pytest.raises(Crash):
+            run_in_process(project, "sess-b")
+    s.handover.write_text(NEWER)  # changed outside the tools: no marker of its own
+
+    proc = Session(tmp_path, project, "sess-c").expand("resume 1")
+    assert "Written again by the origin session." not in (context_of(proc) or "")
+    assert s.handover.read_text() == NEWER
+    assert archived(project) == []
+    assert injections(project) == []
+
+
+def test_a_changed_archive_copy_is_neither_used_nor_overwritten(tmp_path, project, monkeypatch):
+    s = saved_session(tmp_path, project)
+    with monkeypatch.context() as patch:
+        patch.setattr(rotation_state, "log_injection", crash)
+        with pytest.raises(Crash):
+            run_in_process(project, "sess-b")
+    [copy] = archived(project)
+    copy.write_text("edited by hand\n")
+    user = Session(tmp_path, project, "sess-c")
+
+    lines = context_of(user.expand("resume")).splitlines()
+    assert any("not resumable" in line and "claimed-sess-a-sess-b.json" in line
+               and "does not hold the claimed handover" in line for line in lines), "the claim is listed as resumable"
+    assert lines[1].startswith("1. archived")
+    # Number 1 is the edited archive file, offered as what it is; the claim is not touched.
+    assert VALID_HANDOVER not in context_of(user.expand("resume 1"))
+    assert copy.read_text() == "edited by hand\n"
+    assert s.handover.read_text() == VALID_HANDOVER
+    assert [line["handover"] for line in injections(project)] == [None]
+    assert markers(project) == ["claimed-sess-a-sess-b.json"]
+
+
+def test_a_handover_rewritten_between_its_check_and_the_claim_is_not_injected(tmp_path, project, monkeypatch):
+    s = saved_session(tmp_path, project)
+    real_matches = session_start.current_matches
+
+    def matches_then_the_origin_writes(*args):
+        found = real_matches(*args)
+        s.handover.write_text(NEWER)  # the Write tool writes without the project lock
+        return found
+
+    with monkeypatch.context() as patch:
+        patch.setattr(session_start, "current_matches", matches_then_the_origin_writes)
+        run_in_process(project, "sess-b")
+    assert injections(project) == [] and archived(project) == []
+    assert s.handover.read_text() == NEWER
+    assert markers(project) == ["ready-sess-a.json"]
+
+
+@pytest.mark.parametrize("via", ["clear", "resume"])
+def test_a_newer_handover_written_during_delivery_survives_the_cleanup(tmp_path, project, monkeypatch, other_pid, via):
+    pid = os.getpid() if via == "clear" else other_pid
+    s = saved_session(tmp_path, project, pid=pid)
+    real_emit = hook_runtime.emit
+
+    def emit_while_the_origin_writes_again(document):
+        real_emit(document)
+        s.write_handover(NEWER)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(hook_runtime, "emit", emit_while_the_origin_writes_again)
+        if via == "clear":
+            run_in_process(project, "sess-b")
+        else:
+            user = Session(tmp_path, project, "sess-b")
+            context_guard.run(user.payload(
+                "09-UserPromptExpansion-plugin-skill", command_name="context-rotation:rotate",
+                command_args="resume 1"), dict(os.environ, CLAUDE_PID=str(os.getpid())), hook_runtime.HookRun())
+    [copy] = archived(project)
+    assert copy.read_text() == VALID_HANDOVER
+    assert s.handover.exists(), "the cleanup deleted the newer handover"
+    assert s.handover.read_text() == NEWER
+    assert json.loads(s.marker("ready").read_text())["sha256"] == sha_of(s.handover)
+    assert not list(rotation(project).glob("claimed-*.json"))
+    # The newer handover is injected by the next clear of the origin's process.
+    assert "Written again by the origin session." in context_of(start(project, "sess-d", pid=pid))
+
+
 def test_a_failed_cleanup_after_the_emit_keeps_the_injection(tmp_path, project, monkeypatch, capsys):
-    saved_session(tmp_path, project)
+    s = saved_session(tmp_path, project)
+    real_unlink = os.unlink
+    refused = {str(s.handover), str(rotation(project) / "claimed-sess-a-sess-b.json")}
 
     def refuse(path):
-        raise PermissionError("read-only")
+        if str(path) in refused:
+            raise PermissionError("read-only")
+        real_unlink(path)
 
     with monkeypatch.context() as patch:
         patch.setattr(os, "unlink", refuse)

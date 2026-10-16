@@ -155,6 +155,7 @@ def write_instruction(session):
 
 
 def expansion_says(text, user=None):
+    """Context for the model and a line for the user; nothing at all when both are empty."""
     hook_runtime.emit(hook_runtime.context_output("UserPromptExpansion", text, user))
 
 
@@ -162,11 +163,12 @@ def continued(text, archive):
     expansion_says(text, "context-rotation: continued from %s." % archive)
 
 
-def resume(session, words, run):
+def resume(session, words, env, run):
     """The resume action: the numbered list, or the chosen handover itself."""
     run.at("list handovers")
     if not words:
-        expansion_says(handover_injection.resume_list(session.project_dir, session.session_id))
+        identity = rotation_state.process_identity(env)
+        expansion_says(handover_injection.resume_list(session.project_dir, session.session_id, identity))
         return
     if not (words[0].isascii() and words[0].isdigit()):
         expansion_says("Type /%s resume <number> with a number from the list." % handover_injection.SKILL_COMMAND)
@@ -194,7 +196,7 @@ def on_expansion(payload, env, run, session):
         rotation_state.ensure_gitignore(session.project_dir)
         expansion_says(write_instruction(session))
     elif action == "resume":
-        resume(session, words[1:], run)
+        resume(session, words[1:], env, run)
 
 
 # --- PreToolUse ----------------------------------------------------------
@@ -223,7 +225,7 @@ def announce(session, sha, run):
 
 def adopt(payload, env, run, session, data):
     """Stop fallback: a valid handover written outside Write or Edit still gets a marker."""
-    outdated = rotation_state.load_marker(session.marker("outdated"))
+    outdated = rotation_state.load_marker(session.project_dir, session.marker("outdated"))
     if outdated is not None and outdated["sha256"] == rotation_state.sha256_hex(data):
         return
     if handover_contract.problems(data, session.settings["handover_max_chars"]):
@@ -245,7 +247,7 @@ def adopt(payload, env, run, session, data):
 def on_stop(payload, env, run, session):
     run.at("read handover")
     data = rotation_state.read_bytes(session.handover)
-    ready = rotation_state.load_marker(session.marker("ready"))
+    ready = rotation_state.load_marker(session.project_dir, session.marker("ready"))
     if ready is not None:
         run.at("check ready marker")
         reason = rotation_state.outdated_reason(ready, session.settings, data)

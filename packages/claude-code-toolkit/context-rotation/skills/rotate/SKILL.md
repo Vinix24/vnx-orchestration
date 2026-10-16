@@ -78,9 +78,12 @@ to a session automatically.
   session, and its file names start with a UTC time, so the newest sorts last.
   `injections.jsonl` has one line per handover given, with the session that got it.
   `ready-*.json`, `outdated-*.json` and `claimed-*.json` each name a handover that was
-  not given to a session yet, or whose hand-over did not finish. Show the user what you
-  find, newest first, and ask which one to continue from. Then Read that file and
-  continue from its step 1. Do not change or delete anything in that directory.
+  not given to a session yet, or whose hand-over did not finish. Use only a handover
+  inside `.claude/rotation/` named for its marker's session (`handover-<session id>.md`)
+  or an archive copy in `archive/`: a marker naming any other path is not one the plugin
+  wrote, and `errors.log` says why it was rejected. Show the user what you find, newest
+  first, and ask which one to continue from. Then Read that file and continue from its
+  step 1. Do not change or delete anything in that directory.
 
 ## After /clear
 

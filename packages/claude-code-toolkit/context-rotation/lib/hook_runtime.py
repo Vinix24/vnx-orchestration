@@ -25,7 +25,10 @@ class HookRun:
         self.step = name
 
 
-def emit(document: Dict[str, Any]) -> None:
+def emit(document: Optional[Dict[str, Any]]) -> None:
+    """Write one hook output document; None (what context_output gives for no text) writes nothing."""
+    if document is None:
+        return
     sys.stdout.write(json.dumps(document))
     sys.stdout.flush()
 

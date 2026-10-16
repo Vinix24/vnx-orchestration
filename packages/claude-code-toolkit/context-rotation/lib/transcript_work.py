@@ -18,6 +18,7 @@ from datetime import datetime
 from typing import Any, Dict, Iterator, Optional, Set
 
 import context_budget
+import regular_file
 
 READ_ONLY_TOOLS = ("Read", "Glob", "Grep")
 WRITE_TOOLS = ("Write", "Edit")
@@ -49,7 +50,7 @@ def allowed_tool(tool_name: Any, tool_input: Any, handover: str) -> bool:
 
 def _line_end(path: str) -> int:
     """Offset just after the last newline of the file (0 when it has none)."""
-    with open(path, "rb") as handle:
+    with regular_file.open_regular(path) as handle:
         position = handle.seek(0, os.SEEK_END)
         while position > 0:
             step = min(context_budget.BLOCK_SIZE, position)
@@ -104,7 +105,7 @@ def position_holds(pos: Dict[str, Any]) -> bool:
 
 def entries_after(path: str, offset: int) -> Iterator[Dict[str, Any]]:
     """Complete entries after the offset; a line still being written is left out."""
-    with open(path, "rb") as handle:
+    with regular_file.open_regular(path) as handle:
         handle.seek(offset)
         for raw in handle:
             if not raw.endswith(b"\n"):

@@ -10,6 +10,8 @@ import re
 import sys
 from typing import Any, Dict, Iterator, Optional
 
+import regular_file
+
 BLOCK_SIZE = 64 * 1024
 SETTINGS_FILE = "context-rotation.json"
 
@@ -55,8 +57,9 @@ def reversed_lines(path: str, end: Optional[int] = None) -> Iterator[bytes]:
     """Yield the lines of a file from the last to the first, reading 64 KiB blocks.
 
     With `end`, reading starts at that byte offset instead of the end of the file.
+    Only a regular file is read (a FIFO or device raises OSError).
     """
-    with open(path, "rb") as handle:
+    with regular_file.open_regular(path) as handle:
         size = handle.seek(0, os.SEEK_END)
         position = size if end is None else max(0, min(end, size))
         carry = b""

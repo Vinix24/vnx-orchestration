@@ -5,7 +5,9 @@
   (sha256, age, transcript). Exactly one current match is claimed by atomic
   rename, copied to the archive, logged in injections.jsonl and returned as
   additionalContext (or as a pointer to the archive copy above 9,000 characters);
-  the claimed marker is removed last.
+  the original is removed only while it still holds the claimed bytes, and the
+  claimed marker is removed last. A marker that fails the path checks is never
+  used: it is reported once and left on disk.
 - no match, and any source other than "compact": handovers not continued yet are
   listed for the user with the `resume` hint, never dropped silently.
 - any source: the archive is trimmed to archive_keep.
@@ -26,7 +28,7 @@ INJECTED_NOTICE = "context-rotation: continued from the handover of the previous
 
 
 def current_matches(project_dir, session_id, identity, settings):
-    """(path, marker, handover bytes) for each current ready-marker of this `claude` process.
+    """(path, marker) for each current ready-marker of this `claude` process.
 
     A match that is no longer current becomes outdated here. Call under the project lock.
     """
@@ -39,7 +41,7 @@ def current_matches(project_dir, session_id, identity, settings):
         if reason:
             rotation_state.mark_outdated(project_dir, marker["session_id"], reason, True)
             continue
-        found.append((path, marker, data))
+        found.append((path, marker))
     return found
 
 
@@ -61,11 +63,11 @@ def inject_on_clear(env, run_state, project_dir, session_id, settings):
         found = current_matches(project_dir, session_id, identity, settings)
         if len(found) != 1:
             return False
-        path, marker, data = found[0]
-        taken = rotation_state.claim(project_dir, path, session_id)
+        path, _ = found[0]
+        taken = rotation_state.claim(project_dir, path, session_id, as_checked=True)
     if taken is None:
         return False
-    claimed, claimed_marker = taken
+    claimed, claimed_marker, data = taken
     handover_injection.deliver(
         project_dir, claimed, claimed_marker, data, session_id, "clear", emit_handover, run_state.at)
     return True
@@ -91,7 +93,7 @@ def run(payload, env, run_state):
     if source == "clear" and inject_on_clear(env, run_state, project_dir, session_id, settings):
         return
     run_state.at("list handovers")
-    notice = handover_injection.start_notice(project_dir, session_id)
+    notice = handover_injection.start_notice(project_dir, session_id, env)
     if notice:
         hook_runtime.emit({"systemMessage": notice})
 

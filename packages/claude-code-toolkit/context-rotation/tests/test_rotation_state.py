@@ -114,14 +114,15 @@ def test_a_marker_of_another_version_or_shape_is_not_loaded(project, change):
     data = json.loads(path.read_text())
     data.update(change)
     path.write_text(json.dumps(data))
-    assert rs.load_marker(str(path)) is None
+    assert rs.load_marker(str(project), str(path)) is None
+    assert path.exists()
 
 
 def test_a_corrupt_marker_is_not_loaded(project):
     make_marker(project)
     path = rotation(project) / "ready-sess-a.json"
     path.write_text("{not json")
-    assert rs.load_marker(str(path)) is None
+    assert rs.load_marker(str(project), str(path)) is None
 
 
 # --- outdated rules ------------------------------------------------------------------
@@ -176,9 +177,11 @@ def test_a_marker_is_claimed_once(project):
     source = rs.marker_path(str(project), "ready", "sess-a")
     first = rs.claim(str(project), source, "sess-b")
     assert first is not None
-    path, marker = first
+    path, marker, data = first
     assert os.path.basename(path) == "claimed-sess-a-sess-b.json"
     assert marker["claimed_by"] == "sess-b"
+    assert data == VALID_HANDOVER.encode()
+    assert marker["claimed_sha256"] == marker["sha256"] == rs.sha256_hex(data)
     assert marker["archive"].startswith(rs.archive_dir(str(project)))
     assert json.loads(open(path).read())["archive"] == marker["archive"]
     assert rs.claim(str(project), source, "sess-c") is None
