@@ -366,13 +366,17 @@ def observed_gates_for_pr(results_dir: Path, pr_number: int) -> List[str]:
 
     Offline ``test_run`` records are excluded here for the same reason
     ``closure_verifier`` excludes them: a synthetic pr_id must never align
-    with a real PR.
+    with a real PR. The marker is read with the predicate the closure
+    verifier reads it with (``gate_status.is_test_run_record``, OI-2113), so
+    ``"TRUE"`` or ``" true "`` is a test run here too.
 
     An unreadable or malformed result file is skipped rather than raised on:
     unlike an obligation, a result file is not a claim that something is
     owed, so a corrupt one cannot hide an obligation. The declared list —
     which CAN hide one — still fails loud.
     """
+    from gate_status import is_test_run_record
+
     gates: List[str] = []
     if not results_dir.is_dir():
         return gates
@@ -385,7 +389,7 @@ def observed_gates_for_pr(results_dir: Path, pr_number: int) -> List[str]:
             continue
         if str(record.get("pr_id") or "") != str(pr_number):
             continue
-        if record.get("test_run") in (True, "1", "true", "yes"):
+        if is_test_run_record(record):
             continue
         gate = (record.get("gate") or "").strip()
         if gate and gate not in gates:

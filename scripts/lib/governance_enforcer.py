@@ -60,6 +60,11 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _SCRIPT_DIR.parent.parent
 _VNX_DIR = _REPO_ROOT / ".vnx"
 
+# The rejection scan (``review_seat_evaluation.rejections_on_head``) reads the
+# result records with closure_verifier, which lives in scripts/, not scripts/lib.
+if str(_SCRIPT_DIR.parent) not in sys.path:
+    sys.path.append(str(_SCRIPT_DIR.parent))
+
 
 def _resolve_vnx_data_dir() -> Path:
     """Resolve VNX_DATA_DIR via canonical vnx_paths, falling back to repo-relative.
@@ -223,6 +228,20 @@ def _seat_successor(
 
 def _short_sha(sha: str) -> str:
     return sha[:8] if sha else "<geen>"
+
+
+def _rejection_on_head(pr_number: Any, head_sha: str) -> str:
+    """The refusal text when a review peer rejected the head, else ``""`` (OI-2113).
+
+    The merge door's own rejection scan (``review_seat_evaluation.rejections_on_head``):
+    every in-scope record of every review peer on the head, so a seat check
+    never credits a seat on a head the door refuses. A rejection blocks,
+    whatever the seat's own record says.
+    """
+    from review_seat_evaluation import rejections_on_head
+
+    found = rejections_on_head(str(pr_number), GATE_RESULTS_DIR, head_sha=head_sha)
+    return "; ".join(rejection.text() for rejection in found)
 
 
 # ---------------------------------------------------------------------------
@@ -465,6 +484,12 @@ class GovernanceEnforcer:
         ``gate_name`` (a later hop) does not satisfy it either. Before this,
         the check credited a seat from a result's own gate name and from any
         hop of its ``takeover_path``.
+
+        Blocking always blocks (OI-2113): a seat that would pass is not
+        credited while any review peer rejected the head, read with the merge
+        door's own scan over every in-scope record (:func:`_rejection_on_head`).
+        Before this, the check read only ``pr-<n>-<gate>.json`` and credited a
+        seat whose contract-named record carried a FAIL the door refused on.
         """
         pr_number = ctx.get("pr_number")
         if not pr_number:
@@ -502,21 +527,14 @@ class GovernanceEnforcer:
             direct_seat = _record_seat(pr_number, gate_name, direct_data, head_sha)
             if contract_hash and commit_sha and commit_sha == head_sha and direct_seat == gate_name:
                 if gate_status.is_pass(direct_data)[0]:
-                    return EnforcementResult(
-                        check_name=cfg.name, level=cfg.level, passed=True,
-                        message=(
-                            f"{gate_name} passed on head {_short_sha(head_sha)} — "
-                            f"contract_hash: {contract_hash[:12]}..."
-                        ),
-                        override_key=f"VNX_OVERRIDE_{cfg.name.upper()}",
-                    )
+                    return self._seat_credited(cfg, pr_number, head_sha, (
+                        f"{gate_name} passed on head {_short_sha(head_sha)} — "
+                        f"contract_hash: {contract_hash[:12]}..."
+                    ))
 
         takeover_pass, takeover_failure = _seat_successor(gate_name, pr_number, head_sha, result_path)
         if takeover_pass is not None:
-            return EnforcementResult(
-                check_name=cfg.name, level=cfg.level, passed=True, message=takeover_pass,
-                override_key=f"VNX_OVERRIDE_{cfg.name.upper()}",
-            )
+            return self._seat_credited(cfg, pr_number, head_sha, takeover_pass)
 
         if direct_data is not None and direct_seat != gate_name and takeover_failure is None:
             return EnforcementResult(
@@ -566,6 +584,18 @@ class GovernanceEnforcer:
                 f"{gate_name} result not found: {result_path} (no takeover successor found "
                 f"on head {_short_sha(head_sha)})"
             ),
+            override_key=f"VNX_OVERRIDE_{cfg.name.upper()}",
+        )
+
+    def _seat_credited(
+        self, cfg: CheckConfig, pr_number: Any, head_sha: str, message: str,
+    ) -> EnforcementResult:
+        """The seat's pass, unless a review peer rejected the head (:func:`_rejection_on_head`)."""
+        rejected = _rejection_on_head(pr_number, head_sha)
+        if rejected:
+            message = f"head {_short_sha(head_sha)} is rejected, so no seat counts: {rejected}"
+        return EnforcementResult(
+            check_name=cfg.name, level=cfg.level, passed=not rejected, message=message,
             override_key=f"VNX_OVERRIDE_{cfg.name.upper()}",
         )
 

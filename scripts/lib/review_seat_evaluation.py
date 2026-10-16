@@ -14,7 +14,8 @@ its own:
 - track closure of a PR merged under this rule:
   ``closure_verifier._validate_review_evidence``;
 - ``t0_gate_enforcement`` (``gate_enforcement_verify``) and the governance
-  enforcer, through :func:`seat_for`.
+  enforcer, through :func:`seat_for`; the enforcer also asks
+  :func:`rejections_on_head` before it credits a seat.
 
 **Which seats are required.** The project's configured stack: the
 ``review_seats`` that a request on this head recorded with ``source=config``
@@ -50,9 +51,11 @@ it when its decided verdict is FAIL, or when its report on disk carries a FAIL
 verdict or a blocking finding, whatever its JSON says (:func:`report_rejects`:
 invariant 7 of the merge door, read with the door's own reader). That holds for
 every review peer, inside or outside the required seats, the declared gate
-included, and a rejection refuses the merge whatever the other seats say. A
-record that is only incomplete (no report on disk) is no rejection: it fills
-no seat and does not block on its own.
+included, and a rejection refuses the merge whatever the other seats say.
+Every in-scope record of a peer on the head is read for it, not only the one
+that fills a seat (OI-2113: an outage in the contract-named file hid a FAIL in
+the legacy file beside it). A record that is only incomplete (no report on
+disk) is no rejection: it fills no seat and does not block on its own.
 
 BILLING SAFETY: no Anthropic SDK, no network, no subprocess. Only the standard
 library is imported at module level: ``gate_enforcement_verify`` is copied into
@@ -135,10 +138,6 @@ def _load_json(path: Path) -> Optional[Dict[str, Any]]:
     return data if isinstance(data, dict) else None
 
 
-def _is_test_run(record: Dict[str, Any]) -> bool:
-    return record.get("test_run") in (True, "1", "true", "yes")
-
-
 def requests_dir_for(results_dir: Path) -> Path:
     """``review_gates/requests`` beside ``review_gates/results``: the slot the request handler writes."""
     return Path(results_dir).parent / "requests"
@@ -167,12 +166,18 @@ def _request_paths(requests_dir: Path, pr_id: str, gate: str) -> List[Path]:
 
 
 def read_request(requests_dir: Path, pr_id: str, gate: str) -> Optional[Dict[str, Any]]:
-    """The request record of ``gate`` for ``pr_id`` (either file convention), or ``None``."""
+    """The request record of ``gate`` for ``pr_id`` (either file convention), or ``None``.
+
+    An offline test run is no request on this PR, read with the fabric's one
+    test-run predicate (``gate_status.is_test_run_record``, OI-2113).
+    """
+    from gate_status import is_test_run_record
+
     for path in _request_paths(Path(requests_dir), pr_id, gate):
         if not path.is_file():
             continue
         record = _load_json(path)
-        if record is None or _is_test_run(record):
+        if record is None or is_test_run_record(record):
             continue
         if (record.get("gate") or gate) == gate and _pr_matches(record, pr_id):
             return record
@@ -232,13 +237,17 @@ def recorded_config_seats(requests_dir: Path, pr_id: str, head_sha: Optional[str
     """The ``review_seats`` (source ``config``) a request on this head recorded; the latest wins.
 
     ``None`` when no request on this head recorded the project's stack, for
-    instance when every request named its stack explicitly.
+    instance when every request named its stack explicitly. An offline test
+    run records nothing (``gate_status.is_test_run_record``, OI-2113): read
+    with a narrower marker, ``test_run: "TRUE"`` narrowed two seats to one.
     """
+    from gate_status import is_test_run_record
+
     best: Optional[Dict[str, Any]] = None
     best_at = ""
     for path in _pr_request_files(Path(requests_dir), pr_id):
         request = _load_json(path)
-        if request is None or _is_test_run(request) or not on_head(request, head_sha):
+        if request is None or is_test_run_record(request) or not on_head(request, head_sha):
             continue
         record = request.get("review_seats")
         if not _pr_matches(request, pr_id) or not isinstance(record, dict):
@@ -368,20 +377,35 @@ def _seated(gate: str, record: Dict[str, Any], stated: str) -> SeatedRecord:
     return SeatedRecord(gate, gate, HOW_OWN, record)
 
 
-def seated_records(scope: SeatScope, stated: Dict[str, str], gates: Sequence[str]) -> Dict[str, SeatedRecord]:
-    """Every reviewer's in-scope record on the head, keyed by gate, with its one seat.
+def records_on_head(
+    scope: SeatScope, stated: Dict[str, str], gates: Sequence[str],
+) -> Dict[str, Tuple[SeatedRecord, ...]]:
+    """Every reviewer's in-scope records on the head, keyed by gate, each with its one seat.
 
-    The record is the one ``closure_verifier._find_gate_result`` returns for the
-    gate: the slot the merge door has always judged.
+    Read through ``closure_verifier._find_gate_results``, in the order the merge
+    door has always read them (the contract record first). The first record of
+    a gate is the one that may fill a seat (:func:`seated_records`); every one of
+    them can reject the head (:func:`blocking_records`, OI-2113). One reader for
+    both, so the scope rules (this PR, this head, no test run) cannot drift
+    between the record that fills a seat and the records that reject.
     """
     import closure_verifier as cv
 
-    seated: Dict[str, SeatedRecord] = {}
+    found: Dict[str, Tuple[SeatedRecord, ...]] = {}
     for gate in gates:
-        record = cv._find_gate_result(gate, scope.pr_id, scope.results_dir, **scope.kwargs)
-        if record is not None:
-            seated[gate] = _seated(gate, record, stated.get(gate, ""))
-    return seated
+        records = cv._find_gate_results(gate, scope.pr_id, scope.results_dir, **scope.kwargs)
+        if records:
+            found[gate] = tuple(_seated(gate, record, stated.get(gate, "")) for record in records)
+    return found
+
+
+def seated_records(on_head: Dict[str, Tuple[SeatedRecord, ...]]) -> Dict[str, SeatedRecord]:
+    """Per gate, the record that may fill a seat: its first in-scope record.
+
+    That is the record ``closure_verifier._find_gate_result`` returns for the
+    gate: the slot the merge door has always judged.
+    """
+    return {gate: records[0] for gate, records in on_head.items()}
 
 
 @dataclass(frozen=True)
@@ -435,22 +459,57 @@ def report_rejects(record: Dict[str, Any]) -> bool:
     return bool(indicators)
 
 
-def blocking_records(seated: Dict[str, SeatedRecord]) -> Tuple[Rejection, ...]:
-    """Every review peer on the head that rejected it, in its JSON or in its report: blocking always blocks."""
-    from gate_status import canonical_status, decided_verdict
+def blocking_records(on_head: Dict[str, Tuple[SeatedRecord, ...]]) -> Tuple[Rejection, ...]:
+    """Every review peer on the head that rejected it, in its JSON or in its report: blocking always blocks.
+
+    Every in-scope record of a peer is read, not only the one that fills a
+    seat (OI-2113): an outage in ``<n>-<gate>-contract.json`` hid a FAIL in
+    ``pr-<n>-<gate>.json`` beside it, and the door said GO. A peer is named
+    once, by the first of its records that rejects.
+    """
     from review_seats import review_peer_gates
 
     peers = review_peer_gates()
     found: List[Rejection] = []
-    for gate, entry in sorted(seated.items()):
+    for gate, records in sorted(on_head.items()):
         if gate not in peers:
             continue
-        status = canonical_status(entry.record)
-        if decided_verdict(entry.record) == "fail":
-            found.append(Rejection(gate, entry.seat, status))
-        elif report_rejects(entry.record):
-            found.append(Rejection(gate, entry.seat, status, contradicted=True))
+        rejection = next((hit for hit in map(_rejection, records) if hit is not None), None)
+        if rejection is not None:
+            found.append(rejection)
     return tuple(found)
+
+
+def _rejection(entry: SeatedRecord) -> Optional[Rejection]:
+    """How one record rejects the head (its JSON, or its report against its JSON), or ``None``."""
+    from gate_status import canonical_status, decided_verdict
+
+    status = canonical_status(entry.record)
+    if decided_verdict(entry.record) == "fail":
+        return Rejection(entry.gate, entry.seat, status)
+    if report_rejects(entry.record):
+        return Rejection(entry.gate, entry.seat, status, contradicted=True)
+    return None
+
+
+def rejections_on_head(
+    pr_id: str,
+    results_dir: Path,
+    *,
+    branch: Optional[str] = None,
+    project_id: Optional[str] = None,
+    head_sha: Optional[str] = None,
+) -> Tuple[Rejection, ...]:
+    """The rejection scan :func:`evaluate_review_seats` runs, for an evaluator that judges one seat.
+
+    The governance enforcer's ``<gate>_required`` checks judge one seat, not
+    the head. They ask this so they never credit a seat on a head the merge
+    door refuses because a review peer rejected it (OI-2113). Same reader,
+    same scope arguments, same peers as the door.
+    """
+    scope = SeatScope(str(pr_id), Path(results_dir), branch, project_id, head_sha)
+    gates = reviewer_gates(())
+    return blocking_records(records_on_head(scope, stated_seats_on_head(scope, gates), gates))
 
 
 # ---------------------------------------------------------------------------
@@ -839,7 +898,8 @@ def evaluate_review_seats(
     )
     gates = reviewer_gates(required.seats)
     stated = stated_seats_on_head(scope, gates)
-    seated = seated_records(scope, stated, gates)
+    on_head = records_on_head(scope, stated, gates)
+    seated = seated_records(on_head)
     fills = fill_seats(scope, required.seats, seated, stated) if required.seats else ()
     hints = {fill.seat: _unfilled_hint(scope, fill.seat, seated) for fill in fills if not fill.filled}
-    return SeatEvaluation(scope, required, fills, blocking_records(seated), hints)
+    return SeatEvaluation(scope, required, fills, blocking_records(on_head), hints)

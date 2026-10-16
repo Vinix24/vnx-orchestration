@@ -15,7 +15,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
@@ -442,6 +442,10 @@ def _iter_gate_result_candidates(
     Branch/project_id/head_sha scope is NOT applied here — callers decide.
     Offline test-run records ARE excluded unconditionally: never valid
     evidence for a real PR, in or out of scope.
+
+    Every file is yielded at most once: the legacy glob also matches the
+    contract file, which was already read first (OI-2113: the rejection scan
+    reads every candidate, so a file read twice would be judged twice).
     """
     pr_slug = pr_id.lower().replace("-", "")
     # Contract-based results: {pr_slug}-{gate}-contract.json
@@ -455,6 +459,8 @@ def _iter_gate_result_candidates(
             pass
     # Legacy pattern: pr-{number}-{gate}.json — require both pr_id AND gate to match
     for path in results_dir.glob(f"*-{gate}*.json"):
+        if path == contract_path:
+            continue
         try:
             data = json.loads(_read_text(path))
         except (json.JSONDecodeError, OSError):
@@ -482,11 +488,42 @@ def _find_gate_result(
     produced against a different commit is stale evidence for the merge.
     If a result carries a ``report_path``, that file must exist on disk or the
     result is treated as stale and skipped.
+
+    The first of :func:`_find_gate_results`, read by the same generator.
     """
+    return next(_iter_gate_results_in_scope(gate, pr_id, results_dir, branch, project_id, head_sha), None)
+
+
+def _find_gate_results(
+    gate: str,
+    pr_id: str,
+    results_dir: Path,
+    branch: Optional[str] = None,
+    project_id: Optional[str] = None,
+    head_sha: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Every in-scope record of ``gate`` for ``pr_id``, in the order :func:`_find_gate_result` reads them.
+
+    The seat evaluation's rejection scan reads all of them (OI-2113): the
+    first one is the record that may fill a seat, and a FAIL in any of them
+    rejects the head. One generator serves both lookups, so the scope rules
+    (this PR, this branch/project/head, no test run) cannot drift between
+    the record that fills a seat and the records that can reject.
+    """
+    return list(_iter_gate_results_in_scope(gate, pr_id, results_dir, branch, project_id, head_sha))
+
+
+def _iter_gate_results_in_scope(
+    gate: str,
+    pr_id: str,
+    results_dir: Path,
+    branch: Optional[str],
+    project_id: Optional[str],
+    head_sha: Optional[str],
+) -> Iterator[Dict[str, Any]]:
     for data in _iter_gate_result_candidates(gate, pr_id, results_dir):
         if _record_matches_scope(data, pr_id, branch, project_id, head_sha):
-            return data
-    return None
+            yield data
 
 
 def _find_gate_result_ignoring_scope(
