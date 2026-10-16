@@ -20,6 +20,15 @@ Lines that do not describe a real request are skipped:
   - ``message.model == "<synthetic>"`` — harness-written messages (API errors, interrupts)
     that carry an all-zero usage block and would read as an empty context.
 
+AFTER A COMPACTION (OI-2072). The usage before a ``compact_boundary`` entry describes the
+context that was compacted away: measured 270,776 before a boundary against 89,369 after it.
+The backwards scan therefore stops at a non-sidechain ``compact_boundary`` that is newer than
+the last real assistant entry, and returns its ``compactMetadata.postTokens`` when that is a
+non-negative integer, *unknown* otherwise. ``postTokens`` is a LOWER BOUND: the first real
+request after a boundary measures more (on 58c0cf29: boundary 21,789, first request after it
+123,227). That first assistant entry replaces it. ``measure`` says which of the two the number
+came from, and the CLI prints it as ``source`` and ``lower_bound``.
+
 An unreadable, empty, or usage-less transcript yields ``None``, never a crash and never 0:
 "cannot measure" and "empty context" are different facts and the guard treats the first as
 "do nothing".
@@ -61,8 +70,15 @@ LEVEL_WARN = "warn"
 LEVEL_FORCE = "force"
 LEVEL_HARD = "hard"
 
+SOURCE_USAGE = "usage"
+SOURCE_COMPACT_BOUNDARY = "compact_boundary"
+
 _BLOCK_SIZE = 64 * 1024
 _USAGE_FIELDS = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+_LOWER_BOUND_NOTE = (
+    "tokens is compactMetadata.postTokens of the last compact_boundary: a lower bound until "
+    "the next assistant entry (measured: boundary 21789, first request after it 123227)"
+)
 
 
 @dataclass(frozen=True)
@@ -70,6 +86,19 @@ class Thresholds:
     warn: int
     force: int
     hard: int
+
+
+@dataclass(frozen=True)
+class Measurement:
+    """``tokens`` is None when unmeasurable; ``source`` is SOURCE_USAGE, SOURCE_COMPACT_BOUNDARY
+    or None. A compaction's ``postTokens`` is a lower bound."""
+
+    tokens: Optional[int]
+    source: Optional[str]
+
+    @property
+    def lower_bound(self) -> bool:
+        return self.source == SOURCE_COMPACT_BOUNDARY
 
 
 def _read_lines_backwards(path: Path) -> Iterator[bytes]:
@@ -115,10 +144,23 @@ def _usage_total(entry: object) -> Optional[int]:
     return total if seen else None
 
 
-def context_tokens(transcript_path: Union[str, Path, None]) -> Optional[int]:
-    """Current context size of the session behind ``transcript_path``; None if unmeasurable."""
-    if not transcript_path:
+def _is_compact_boundary(entry: object) -> bool:
+    return (isinstance(entry, dict) and entry.get("type") == "system"
+            and entry.get("subtype") == "compact_boundary" and entry.get("isSidechain") is not True)
+
+
+def _post_tokens(entry: dict) -> Optional[int]:
+    meta = entry.get("compactMetadata")
+    value = meta.get("postTokens") if isinstance(meta, dict) else None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return None
+    return value
+
+
+def measure(transcript_path: Union[str, Path, None]) -> Measurement:
+    """Current context size of the session behind ``transcript_path`` and where it came from."""
+    if not transcript_path:
+        return Measurement(None, None)
     path = Path(transcript_path).expanduser()
     try:
         for raw in _read_lines_backwards(path):
@@ -126,12 +168,21 @@ def context_tokens(transcript_path: Union[str, Path, None]) -> Optional[int]:
                 entry = json.loads(raw)
             except (json.JSONDecodeError, UnicodeDecodeError):
                 continue
+            if _is_compact_boundary(entry):
+                post = _post_tokens(entry)
+                return Measurement(post, SOURCE_COMPACT_BOUNDARY if post is not None else None)
             total = _usage_total(entry)
             if total is not None:
-                return total
+                return Measurement(total, SOURCE_USAGE)
     except OSError:
-        return None
-    return None
+        return Measurement(None, None)
+    return Measurement(None, None)
+
+
+def context_tokens(transcript_path: Union[str, Path, None]) -> Optional[int]:
+    """Current context size of the session behind ``transcript_path``; None if unmeasurable.
+    After a compaction this is ``postTokens``, a lower bound (module docstring)."""
+    return measure(transcript_path).tokens
 
 
 def _threshold(key: str) -> int:
@@ -172,14 +223,19 @@ def main(argv: Optional[list] = None) -> int:
         sys.stderr.write("usage: t0_context_budget.py <transcript_path>\n")
         return 2
     th = thresholds()
-    tokens = context_tokens(args[0])
-    sys.stdout.write(json.dumps({
-        "tokens": tokens,
-        "level": level(tokens, th),
+    result = measure(args[0])
+    out = {
+        "tokens": result.tokens,
+        "source": result.source,
+        "lower_bound": result.lower_bound,
+        "level": level(result.tokens, th),
         "warn": th.warn,
         "force": th.force,
         "hard": th.hard,
-    }) + "\n")
+    }
+    if result.lower_bound:
+        out["note"] = _LOWER_BOUND_NOTE
+    sys.stdout.write(json.dumps(out) + "\n")
     return 0
 
 

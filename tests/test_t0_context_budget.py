@@ -2,7 +2,8 @@
 
 The measurement reads the LAST real assistant usage block of a session transcript and sums
 input + cache_read + cache_creation. Sidechain and <synthetic> entries are skipped; an empty
-or unreadable transcript is None, never 0 and never an exception.
+or unreadable transcript is None, never 0 and never an exception. A `compact_boundary` newer
+than that block measures its `compactMetadata.postTokens`, a lower bound (OI-2072).
 """
 from __future__ import annotations
 
@@ -77,6 +78,86 @@ def test_reads_across_block_boundaries(tmp_path):
     transcript = _write(tmp_path / "t.jsonl", entries)
     assert transcript.stat().st_size > 3 * budget._BLOCK_SIZE
     assert budget.context_tokens(transcript) == 123_463
+
+
+# ── after a compaction (OI-2072) ────────────────────────────────────────────
+
+_ABSENT = object()
+
+
+def _boundary(post_tokens=_ABSENT, *, sidechain: bool = False) -> dict:
+    """A `compact_boundary` entry as Claude Code writes it (shape seen in local transcripts)."""
+    meta = {"trigger": "auto", "preTokens": 600_000, "durationMs": 48_451}
+    if post_tokens is not _ABSENT:
+        meta["postTokens"] = post_tokens
+    return {"type": "system", "subtype": "compact_boundary", "isSidechain": sidechain,
+            "isMeta": False, "level": "info", "compactMetadata": meta}
+
+
+def test_a_compaction_after_the_last_request_measures_post_tokens(tmp_path):
+    transcript = _write(tmp_path / "t.jsonl", [
+        _assistant(0, 600_000, 0),
+        _boundary(89_369),
+        {"type": "user", "message": {"role": "user", "content": "This session is being continued"}},
+    ])
+    assert budget.context_tokens(transcript) == 89_369
+    measurement = budget.measure(transcript)
+    assert measurement.source == budget.SOURCE_COMPACT_BOUNDARY
+    assert measurement.lower_bound is True
+
+
+@pytest.mark.parametrize("post_tokens", [_ABSENT, None, "89369", True, -1, 1.5])
+def test_a_compaction_without_an_integer_post_tokens_is_unknown(tmp_path, post_tokens):
+    transcript = _write(tmp_path / "t.jsonl", [_assistant(0, 600_000, 0), _boundary(post_tokens)])
+    assert budget.context_tokens(transcript) is None
+    assert budget.measure(transcript) == budget.Measurement(None, None)
+
+
+def test_the_first_request_after_a_compaction_wins(tmp_path):
+    """Measured on 58c0cf29: boundary 21,789, first real request after it 123,227."""
+    transcript = _write(tmp_path / "t.jsonl", [
+        _assistant(0, 600_000, 0), _boundary(21_789), _assistant(3, 123_224, 0)])
+    assert budget.context_tokens(transcript) == 123_227
+    measurement = budget.measure(transcript)
+    assert measurement.source == budget.SOURCE_USAGE
+    assert measurement.lower_bound is False
+
+
+def test_a_sidechain_compaction_is_not_the_sessions(tmp_path):
+    transcript = _write(tmp_path / "t.jsonl", [_assistant(0, 450_000, 0),
+                                               _boundary(10_000, sidechain=True)])
+    assert budget.context_tokens(transcript) == 450_000
+
+
+def test_only_the_newest_compaction_counts(tmp_path):
+    transcript = _write(tmp_path / "t.jsonl", [
+        _boundary(30_000), _assistant(0, 700_000, 0), _boundary(40_000)])
+    assert budget.context_tokens(transcript) == 40_000
+
+
+def _cli(capsys, transcript) -> dict:
+    assert budget.main([str(transcript)]) == 0
+    return json.loads(capsys.readouterr().out)
+
+
+def test_the_cli_marks_post_tokens_as_a_lower_bound(tmp_path, capsys):
+    out = _cli(capsys, _write(tmp_path / "t.jsonl", [_assistant(0, 600_000, 0), _boundary(89_369)]))
+    assert out["tokens"] == 89_369
+    assert out.get("lower_bound") is True
+    assert out.get("source") == "compact_boundary"
+    assert "lower bound" in out.get("note", "")
+
+
+def test_the_cli_reports_a_request_as_exact(tmp_path, capsys):
+    out = _cli(capsys, _write(tmp_path / "t.jsonl", [_assistant(1, 2, 3)]))
+    assert (out["tokens"], out["source"], out["lower_bound"]) == (6, "usage", False)
+    assert "note" not in out
+
+
+def test_the_cli_reports_unknown(tmp_path, capsys):
+    out = _cli(capsys, tmp_path / "absent.jsonl")
+    assert (out["tokens"], out["source"], out["lower_bound"], out["level"]) == (
+        None, None, False, budget.LEVEL_OK)
 
 
 @pytest.mark.parametrize("content", ["", "\n\n", "not json\n{also not\n",
