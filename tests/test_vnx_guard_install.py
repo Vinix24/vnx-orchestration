@@ -4,7 +4,8 @@ Plan t0-guard-gebruikersniveau, § "User-level registration", deliverable G2. Ev
 tmp ``HOME``: nothing here opens the real ``~/.claude``, ``~/.claude-*`` or ``~/.vnx``. The
 commands are the real functions; the concurrent-write cases use the two seams of
 ``write_settings`` (``on_compare``, ``before_replace``) to drive a write into exactly the place
-the plan names.
+the plan names, or wrap the call that puts the scratch file at the target to land a write right
+before it.
 """
 from __future__ import annotations
 
@@ -22,10 +23,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
+import atomic_swap
 import guard_install as gi
 import hook_coverage as hc
 
 GUARD = hc.GUARD_ENTRY
+# The real call, for the other writer: a test may wrap `os.replace` itself.
+_REAL_REPLACE = os.replace
 EXPECTED_COMMAND = hc.registered_command(GUARD, "user")
 OPERATOR_SETTINGS = {
     "permissions": {"allow": ["Bash(make *)"], "deny": ["Bash(rm -rf*)"]},
@@ -253,6 +257,57 @@ def test_a_malformed_hooks_tree_is_refused_rather_than_guessed(home):
     assert (account / "settings.json").read_bytes() == before
 
 
+# Every node of the hooks tree, with the path the refusal names.
+MALFORMED_TREES = [
+    pytest.param({"hooks": []}, "hooks is not an object", id="hooks-a-list"),
+    pytest.param({"hooks": {"SessionStart": "x"}}, "hooks.SessionStart is not a list", id="event"),
+    pytest.param({"hooks": {"Stop": ["x"]}}, "hooks.Stop[0] is not an object", id="group"),
+    pytest.param({"hooks": {"Stop": [{"hooks": "not a list"}]}}, "hooks.Stop[0].hooks is not a list",
+                 id="group-hooks-a-string"),
+    pytest.param({"hooks": {"Stop": [{"hooks": 17}]}}, "hooks.Stop[0].hooks is not a list",
+                 id="group-hooks-an-integer"),
+    pytest.param({"hooks": {"Stop": [{"matcher": 5, "hooks": []}]}}, "hooks.Stop[0].matcher is not a string",
+                 id="matcher"),
+    pytest.param({"hooks": {"Stop": [{"hooks": [], "matcher": ""}, {"hooks": [3]}]}},
+                 "hooks.Stop[1].hooks[0] is not an object", id="hook"),
+    pytest.param({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": 7}]}]}},
+                 "hooks.Stop[0].hooks[0].command is not a string", id="command"),
+]
+
+
+@pytest.mark.parametrize("settings, where", MALFORMED_TREES)
+def test_a_malformed_node_anywhere_in_the_hooks_tree_refuses_with_its_path(home, settings, where):
+    """codex on #2078: `{"hooks":{"Stop":[{"hooks":"not a list"}]}}` installed as written, and an
+    integer there raised an uncaught TypeError. Every node is validated before the write."""
+    account = _account(home, settings=settings)
+    before = (account / "settings.json").read_bytes()
+    code, out = _install(home)
+    assert code == 1 and "refused" in out and where in out, out
+    assert (account / "settings.json").read_bytes() == before
+    assert _files(account) == ["settings.json"], "a refused file leaves no backup and no scratch"
+
+
+@pytest.mark.parametrize("settings, where", MALFORMED_TREES)
+def test_the_dry_run_refuses_a_malformed_tree_with_the_same_path(home, settings, where):
+    _account(home, settings=settings)
+    code, out = _install(home, dry_run=True)
+    assert code == 1 and where in out
+
+
+@pytest.mark.parametrize("settings", [p.values[0] for p in MALFORMED_TREES] + [
+    {}, {"hooks": {}}, {"hooks": {"Stop": []}}, {"hooks": {"Stop": [{}]}},
+    {"hooks": {"Stop": [{"matcher": None, "hooks": [{"type": "prompt", "prompt": 1}]}]}},
+    OPERATOR_SETTINGS,
+])
+def test_the_tree_rules_agree_with_hook_coverage(tmp_path, settings):
+    """One shape: what the install refuses is what `hook_coverage` cannot load (UNKNOWN)."""
+    project = tmp_path / "project"
+    (project / ".claude").mkdir(parents=True)
+    (project / ".claude" / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
+    unloadable = hc.coverage(project, "Stop", env={"HOME": str(tmp_path)}).state == hc.UNKNOWN
+    assert (gi.hooks_tree_problem(settings) is not None) == unloadable
+
+
 def test_one_bad_account_does_not_stop_the_others_but_fails_the_run(home):
     bad = _account(home, settings=None)
     (bad / "settings.json").write_text("{oops", encoding="utf-8")
@@ -302,7 +357,35 @@ def _write_like_claude_code(path: Path, **extra) -> None:
     data.update(extra)
     scratch = path.with_name(path.name + ".claude-scratch")
     scratch.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    os.replace(scratch, path)
+    _REAL_REPLACE(scratch, path)
+
+
+def _write_in_place(path: Path, **extra) -> None:
+    """An in-place write: open with truncation, then write."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data.update(extra)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(data, indent=2) + "\n")
+
+
+def _just_before_the_replace(monkeypatch, path: Path, write) -> list:
+    """Run ``write`` once, right before the call that puts the scratch file at ``path``,
+    whichever call that is: ``os.replace`` or the exchange of ``atomic_swap``. Returns the
+    calls that fired, so a test can assert the write landed in that window."""
+    target = os.path.realpath(path)
+    fired: list = []
+
+    def wrap(real):
+        def call(src, dst, *args, **kwargs):
+            if not fired and os.path.realpath(dst) == target:
+                fired.append(real.__name__)
+                write()
+            return real(src, dst, *args, **kwargs)
+        return call
+
+    monkeypatch.setattr(os, "replace", wrap(os.replace))
+    monkeypatch.setattr(atomic_swap, "exchange", wrap(atomic_swap.exchange))
+    return fired
 
 
 def test_a_change_before_the_last_comparison_is_re_read_once(home):
@@ -340,9 +423,9 @@ def test_a_second_change_refuses_and_leaves_the_file_as_the_other_writer_left_it
 
 
 def test_a_write_between_the_last_comparison_and_the_replace_is_reported(home):
-    """The residual window of the plan, driven. The write lands after the comparison and before
-    the replace, so the replace overwrites it. The backup holds the pre-state, the replaced
-    inode is kept and the post-check names the difference."""
+    """The write lands after the comparison and before the exchange, so the exchange moves it
+    aside. The backup holds the pre-state, the overwritten file is kept and the post-check names
+    the difference."""
     account = _account(home)
     path = account / "settings.json"
     pre_state = path.read_bytes()
@@ -364,6 +447,125 @@ def test_a_write_between_the_last_comparison_and_the_replace_is_reported(home):
     final = _settings(account)
     assert len(list(_guard_hooks(final))) == 3
     assert "Bash(new grant)" not in final["permissions"]["allow"]
+
+
+def test_a_rename_style_write_right_before_the_replace_is_kept_and_reported(home, monkeypatch):
+    """codex on #2078: another writer renamed a file with a new deny rule onto the target after
+    the hard link and before `os.replace`; the install said `written` and kept nothing of it.
+    The write lands right before the call that puts the scratch file in place. Whatever sat at
+    the target then is the file that gets overwritten: it must be kept and reported."""
+    account = _account(home)
+    path = account / "settings.json"
+    pre_state = path.read_bytes()
+    theirs = {"allow": ["Bash(make *)"], "deny": ["Bash(rm -rf*)", "Bash(dangerous-command)"]}
+    fired = _just_before_the_replace(
+        monkeypatch, path, lambda: _write_like_claude_code(path, permissions=theirs))
+
+    result = gi.write_settings(path)
+
+    assert fired, "the other writer must land in the window"
+    assert result.status == "failed", result.detail
+    assert "a write landed after the backup" in result.detail and "permissions" in result.detail
+    kept = [account / n for n in _files(account) if ".vnx-displaced-" in n]
+    assert len(kept) == 1 and str(kept[0]) in result.detail
+    assert json.loads(kept[0].read_text(encoding="utf-8"))["permissions"] == theirs
+    assert result.backup is not None and result.backup.read_bytes() == pre_state
+    assert len(list(_guard_hooks(_settings(account)))) == 3
+    assert not [n for n in _files(account) if n.endswith(".vnx-tmp")]
+
+
+def test_an_in_place_write_right_before_the_replace_is_kept_and_reported(home, monkeypatch):
+    account = _account(home)
+    path = account / "settings.json"
+    fired = _just_before_the_replace(
+        monkeypatch, path, lambda: _write_in_place(path, extraKnownMarketplaces={"b": 2}))
+    result = gi.write_settings(path)
+    assert fired and result.status == "failed"
+    (kept,) = [account / n for n in _files(account) if ".vnx-displaced-" in n]
+    assert json.loads(kept.read_text(encoding="utf-8"))["extraKnownMarketplaces"] == {"b": 2}
+    assert "extraKnownMarketplaces" in result.detail
+
+
+def test_a_stale_write_after_the_replace_is_reported_by_the_read_back(home, monkeypatch):
+    """Not covered, and said so: a writer that read the file before the exchange and writes
+    after it removes the three entries again. The read-back reports it; nothing is repaired."""
+    account = _account(home)
+    path = account / "settings.json"
+    stale = path.read_bytes()
+    real_exchange = atomic_swap.exchange
+
+    def exchange_then_stale_write(first, second):
+        real_exchange(first, second)
+        other = path.with_name("settings.json.other-writer")
+        other.write_bytes(stale)
+        _REAL_REPLACE(other, path)
+
+    monkeypatch.setattr(atomic_swap, "exchange", exchange_then_stale_write)
+    result = gi.write_settings(path)
+    assert result.status == "failed"
+    assert all(f"after the write, {event} is missing" in result.detail
+               for event in ("UserPromptSubmit", "PreToolUse", "Stop"))
+    assert (account / "settings.json").read_bytes() == stale
+
+
+def test_a_restart_removes_the_backup_of_the_abandoned_attempt(home):
+    """deepseek on #2078: the first attempt's backup stayed next to settings.json when a change
+    made the command start over, and only the second was reported."""
+    account = _account(home)
+    path = account / "settings.json"
+    calls = []
+
+    def concurrent():
+        calls.append(1)
+        if len(calls) == 1:
+            _write_like_claude_code(path, extraKnownMarketplaces={"a": 1})
+
+    result = gi.write_settings(path, on_compare=concurrent)
+    assert result.status == "written" and len(calls) == 2
+    backups = [account / n for n in _files(account) if ".vnx-backup-" in n]
+    assert backups == [result.backup]
+    restored = json.loads(result.backup.read_text(encoding="utf-8"))
+    assert restored["extraKnownMarketplaces"] == {"a": 1}, "the backup is the state the write used"
+
+
+def test_a_refusal_after_two_changes_leaves_no_backup(home):
+    account = _account(home)
+    path = account / "settings.json"
+    counter = iter(range(100))
+    result = gi.write_settings(
+        path, on_compare=lambda: _write_like_claude_code(path, bump=next(counter)))
+    assert result.status == "refused"
+    assert _files(account) == ["settings.json"]
+
+
+def test_install_refuses_on_a_platform_without_an_atomic_exchange(home, monkeypatch):
+    account = _account(home)
+    before = (account / "settings.json").read_bytes()
+    monkeypatch.setattr(atomic_swap, "_bound",
+                        (None, "no atomic exchange call is known for platform 'plan9'"))
+    for dry_run in (False, True):
+        code, out = _install(home, dry_run=dry_run)
+        assert code == 1 and "refused" in out and "plan9" in out
+        assert "without a copy" in out
+    assert (account / "settings.json").read_bytes() == before
+    assert _files(account) == ["settings.json"]
+
+
+def test_a_filesystem_that_refuses_the_exchange_refuses_the_file_and_leaves_nothing(
+        home, monkeypatch):
+    account = _account(home)
+    before = (account / "settings.json").read_bytes()
+
+    def refuse(first, second):
+        raise atomic_swap.ExchangeUnsupported(
+            f"the filesystem holding {second} refuses an atomic exchange (ENOTSUP: not supported)")
+
+    monkeypatch.setattr(atomic_swap, "exchange", refuse)
+    result = gi.write_settings(account / "settings.json")
+    assert result.status == "refused"
+    assert "refuses an atomic exchange" in result.detail and "nothing was written" in result.detail
+    assert (account / "settings.json").read_bytes() == before
+    assert _files(account) == ["settings.json"]
 
 
 def test_a_clean_write_leaves_no_displaced_file_and_no_scratch(home):
@@ -472,7 +674,7 @@ def test_scripts_vnx_guard_runs_install_and_check_end_to_end(home):
     assert dry.returncode == 0 and "nothing was written" in dry.stdout
     done = run("install")
     assert done.returncode == 0, done.stdout + done.stderr
-    assert "Residual window" in done.stdout
+    assert "Concurrent writes" in done.stdout and "atomic exchange" in done.stdout
     checked = run("check")
     assert checked.returncode == 0, checked.stdout
     assert "user entry Stop: ok" in checked.stdout

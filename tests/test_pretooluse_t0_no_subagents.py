@@ -48,11 +48,14 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
 
-import hook_coverage
+import t0_subagent_block
 
 HOOK = REPO_ROOT / "scripts" / "hooks" / "pretooluse_t0_no_subagents.py"
 HOOK_REL = "scripts/hooks/pretooluse_t0_no_subagents.py"
-SHIM_REL = "scripts/hooks/vnx_hook_shim.sh"
+SHIM_NAME = "vnx_hook_shim.sh"
+# What the merge engine imports from scripts/lib to render the template (OI-2117 item e).
+MERGE_LIB_DEPS = ["scripts/lib/hook_coverage.py", "scripts/lib/t0_subagent_block.py"]
+SHELLS = [shell for shell in ("bash", "dash") if shutil.which(shell)]
 TEMPLATES = REPO_ROOT / "templates"
 VNX_KEYS_TMPL = TEMPLATES / "settings_vnx_keys.json.tmpl"
 INIT_DEFAULT_J2 = TEMPLATES / "init" / "default" / "settings.json.j2"
@@ -82,9 +85,11 @@ def _payload(tool: str, cwd: str | None, transcript: str | None) -> str:
 
 
 def _isolated_env(tmp_path: Path) -> dict:
+    """No VNX_* and no PYTHONPATH: a copied install must work on what it ships, not on a
+    checkout an operator's shell happens to put on the import path."""
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
-    env = {k: v for k, v in os.environ.items() if not k.startswith("VNX_")}
+    env = {k: v for k, v in os.environ.items() if not k.startswith("VNX_") and k != "PYTHONPATH"}
     env["HOME"] = str(home)
     return env
 
@@ -264,28 +269,27 @@ def _guard_command(settings: dict) -> str:
     return commands[0]
 
 
-def _vnx_project_with_t0(tmp_path: Path) -> Path:
-    """The kind of project the shim serves: a git root with a project id and a T0 folder."""
-    project = tmp_path / "guarded-project"
-    (project / ".claude" / "terminals" / "T0").mkdir(parents=True, exist_ok=True)
-    (project / ".claude" / "terminals" / "T0" / "CLAUDE.md").write_text("# T0\n", encoding="utf-8")
-    (project / ".vnx-project-id").write_text("consumer\n", encoding="utf-8")
-    subprocess.run(["git", "init", "-q"], cwd=project, check=True)
-    return project
+def _elsewhere(tmp_path: Path) -> Path:
+    """A directory outside any project: where a drifted T0 cwd ends up (the operator's home)."""
+    path = tmp_path / "operator-home"
+    path.mkdir(exist_ok=True)
+    return path
 
 
-def _run_command(command: str, payload: str, tmp_path: Path, engine_root: Path) -> subprocess.CompletedProcess:
-    """Run a registered command the way Claude Code does: inside a VNX project with a T0
-    folder, with the shim's code root (``VNX_HOME``) at the install the command names."""
+def _run_command(command: str, payload: str, tmp_path: Path, *, shell: str = "bash",
+                 path: str | None = None) -> subprocess.CompletedProcess:
+    """Run a registered command the way Claude Code does, from a cwd outside any project:
+    the command must decide on the payload alone."""
     env = _isolated_env(tmp_path)
-    env["VNX_HOME"] = str(engine_root)
+    if path is not None:
+        env["PATH"] = path
     return subprocess.run(
-        ["bash", "-c", command],
+        [shutil.which(shell), "-c", command],
         input=payload,
         capture_output=True,
         text=True,
         env=env,
-        cwd=_vnx_project_with_t0(tmp_path),
+        cwd=_elsewhere(tmp_path),
         timeout=10,
     )
 
@@ -309,11 +313,12 @@ def test_every_template_keeps_the_existing_bash_guard(render, tmp_path):
 
 @pytest.mark.parametrize("render", [r for _, r in SETTINGS_TEMPLATES], ids=TEMPLATE_IDS)
 def test_the_rendered_command_points_at_a_file_that_exists(render, tmp_path):
-    """The block goes through the shim, rendered by ``registered_command`` and by nothing else."""
+    """The block starts the entry itself, in the command ``t0_subagent_block`` renders, and
+    not through the shim: the shim's cwd rule would undo the hook's own T0 detection."""
     command = _guard_command(render(REPO_ROOT, tmp_path / "project"))
-    assert command == hook_coverage.registered_command(HOOK.name, "project", str(REPO_ROOT))
-    assert str(REPO_ROOT / SHIM_REL) in command
-    assert (REPO_ROOT / SHIM_REL).is_file()
+    assert command == t0_subagent_block.registered_command(str(REPO_ROOT))
+    assert SHIM_NAME not in command
+    assert f'f="{REPO_ROOT / HOOK_REL}"' in command
     assert (REPO_ROOT / HOOK_REL).is_file()
     assert "{{" not in command
 
@@ -324,9 +329,80 @@ def test_the_rendered_command_denies_in_t0_and_stays_silent_for_a_worker(render,
     its own quoting, so a template that renders to a dead command is caught."""
     command = _guard_command(render(REPO_ROOT, tmp_path / "project"))
 
-    _assert_denied(_run_command(command, _payload("Agent", T0_CWD, T0_TRANSCRIPT), tmp_path, REPO_ROOT))
-    _assert_untouched(_run_command(command, _payload("Agent", WORKER_CWD, WORKER_TRANSCRIPT), tmp_path, REPO_ROOT))
-    _assert_untouched(_run_command(command, _payload("Bash", T0_CWD, T0_TRANSCRIPT), tmp_path, REPO_ROOT))
+    _assert_denied(_run_command(command, _payload("Agent", T0_CWD, T0_TRANSCRIPT), tmp_path))
+    _assert_untouched(_run_command(command, _payload("Agent", WORKER_CWD, WORKER_TRANSCRIPT), tmp_path))
+    _assert_untouched(_run_command(command, _payload("Bash", T0_CWD, T0_TRANSCRIPT), tmp_path))
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+@pytest.mark.parametrize("render", [r for _, r in SETTINGS_TEMPLATES], ids=TEMPLATE_IDS)
+def test_a_t0_whose_cwd_left_the_project_is_still_denied(render, shell, tmp_path):
+    """codex on #2078: through the shim, a T0 transcript with a cwd outside the project got
+    exit 0 and no output, while the hook itself denied. 3 of 143 real T0 sessions carried the
+    operator's home as cwd. The registered command, run from that cwd, must deny."""
+    command = _guard_command(render(REPO_ROOT, tmp_path / "project"))
+    drifted = str(_elsewhere(tmp_path))
+    for tool in ("Agent", "Task"):
+        _assert_denied(_run_command(command, _payload(tool, drifted, T0_TRANSCRIPT), tmp_path,
+                                    shell=shell))
+    _assert_untouched(_run_command(command, _payload("Agent", drifted, WORKER_TRANSCRIPT),
+                                   tmp_path, shell=shell))
+
+
+def _install_without_the_entry(tmp_path: Path) -> Path:
+    """An install root carrying the template but not the hook entry (a rollback, a bad copy)."""
+    root = tmp_path / "install-without-entry"
+    (root / "templates").mkdir(parents=True)
+    shutil.copy(VNX_KEYS_TMPL, root / "templates" / VNX_KEYS_TMPL.name)
+    return root
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+@pytest.mark.parametrize("render", [r for _, r in SETTINGS_TEMPLATES], ids=TEMPLATE_IDS)
+def test_a_missing_entry_exits_1_and_names_the_path(render, shell, tmp_path):
+    """Exit 2 on PreToolUse would block every Agent call in every session; a missing entry
+    must be a named, non-blocking error."""
+    root = _install_without_the_entry(tmp_path)
+    command = _guard_command(render(root, tmp_path / "project"))
+    result = _run_command(command, _payload("Agent", T0_CWD, T0_TRANSCRIPT), tmp_path, shell=shell)
+    assert result.returncode == 1, (result.returncode, result.stderr)
+    assert f"vnx: hook entry missing: {root / HOOK_REL}" in result.stderr
+    assert result.stdout == ""
+
+
+def _fake_entry(tmp_path: Path, body: str, mode: int = 0o644) -> Path:
+    root = tmp_path / "fake-install"
+    hooks = root / "scripts" / "hooks"
+    hooks.mkdir(parents=True, exist_ok=True)
+    (hooks / HOOK.name).write_text(body, encoding="utf-8")
+    os.chmod(hooks / HOOK.name, mode)
+    return root
+
+
+def _path_without_python(tmp_path: Path) -> str:
+    bin_dir = tmp_path / "bin-without-python"
+    bin_dir.mkdir(exist_ok=True)
+    (bin_dir / "sh").symlink_to(shutil.which("sh"))
+    return str(bin_dir)
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+@pytest.mark.parametrize("case", ["entry-exits-2", "entry-unreadable", "no-python3", "entry-crashes"])
+def test_no_failure_of_the_registered_command_exits_2(case, shell, tmp_path):
+    """Every failure maps to exit 1: an entry that exits 2 itself, one python cannot open
+    (python3 exits 2, as for an entry removed between the test and the start), no python3 on
+    PATH (127), an entry that raises."""
+    if case == "entry-unreadable" and os.geteuid() == 0:
+        pytest.skip("root reads a mode-000 file")
+    bodies = {"entry-exits-2": "import sys; sys.exit(2)\n", "entry-unreadable": "print('x')\n",
+              "no-python3": "print('x')\n", "entry-crashes": "raise RuntimeError('boom')\n"}
+    root = _fake_entry(tmp_path, bodies[case], 0o000 if case == "entry-unreadable" else 0o644)
+    command = t0_subagent_block.registered_command(str(root))
+    path = _path_without_python(tmp_path) if case == "no-python3" else None
+    result = _run_command(command, _payload("Agent", T0_CWD, T0_TRANSCRIPT), tmp_path,
+                          shell=shell, path=path)
+    os.chmod(root / HOOK_REL, 0o644)
+    assert result.returncode == 1, (case, shell, result.returncode, result.stderr)
 
 
 # ── shipping: regen-settings --merge on a tmp project ────────────────────────
@@ -352,9 +428,10 @@ def _make_install(tmp_path: Path, *, with_hook: bool = False) -> Path:
         "scripts/commands/regen_settings.sh",
         "scripts/vnx_settings_merge.py",
         "templates/settings_vnx_keys.json.tmpl",
+        *MERGE_LIB_DEPS,
     ]
     if with_hook:
-        files.extend([HOOK_REL, SHIM_REL])
+        files.append(HOOK_REL)
     for rel in files:
         dest = install / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -402,7 +479,7 @@ def test_regen_merge_writes_the_block_and_keeps_the_projects_own_settings(tmp_pa
     # the block is there, pointing into the install, for both tool names
     (group,) = _guard_groups(merged)
     assert {"Agent", "Task"} <= set(group["matcher"].split("|"))
-    assert str(install / SHIM_REL) in _guard_command(merged)
+    assert _guard_command(merged) == t0_subagent_block.registered_command(str(install))
 
     # the project's own settings survived the merge
     assert merged["model"] == "opus"
@@ -431,5 +508,5 @@ def test_the_generated_settings_command_blocks_t0_and_spares_a_worker(tmp_path):
     command = _guard_command(merged)
 
     t0_cwd = str(project / ".claude" / "terminals" / "T0")
-    _assert_denied(_run_command(command, _payload("Agent", t0_cwd, None), tmp_path, install))
-    _assert_untouched(_run_command(command, _payload("Agent", str(project), None), tmp_path, install))
+    _assert_denied(_run_command(command, _payload("Agent", t0_cwd, None), tmp_path))
+    _assert_untouched(_run_command(command, _payload("Agent", str(project), None), tmp_path))

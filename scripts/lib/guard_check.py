@@ -6,19 +6,23 @@ and the project registry and writes nothing. The report has two layers.
 
 PER ACCOUNT (``~/.claude`` and every ``~/.claude-*`` account): the three user-level entries, the
 shim and the guard in ``~/.vnx-system/current``, and the root the user-owned registry trusts to
-run repo code (shim step 2), including whether that first ``vnx-dev`` entry exists on disk.
+run repo code (shim step 2), including whether that first ``vnx-dev`` entry exists on disk. An
+account whose ``settings.json`` cannot be read, is not a JSON object or holds a malformed
+``hooks`` tree is ``unknown``, with the reason (for the tree: the path to the bad node).
 
 PER PROJECT. The inventory is the registry ``~/.vnx/projects.json`` plus every ``.vnx-project-id``
 under each ``--scan-root`` (depth 3, ``.vnx-data`` skipped); a scan hit the registry does not
 list is marked. A project without ``.claude/terminals/T0/CLAUDE.md`` is ``not guarded (no T0)``.
 For a project with one, each event is answered by ``hook_coverage.coverage`` (the function the
-guard itself uses), PreToolUse once per tool of the user matcher:
+guard itself uses), PreToolUse once per tool of the user matcher. ``coverage`` runs with the
+environment of the account being reported (``account_env``), because what Claude Code records
+per project (the trust decision) lives per account:
 
   ``project (direct|shim)``  the project's own settings run the guard; the user level stays silent
   ``user``                   nothing in the project covers and this account's entry is in place
   ``missing``                nothing in the project covers and this account has no entry
-  ``unknown``                a settings file of the project cannot be loaded; the guard counts it
-                             as not covered
+  ``unknown``                a settings file of the project cannot be loaded (the guard counts it
+                             as not covered), or this account's own settings are ``unknown``
 
 ``check`` exits 0 when every project with a T0 folder is ``user`` or ``project`` on every event
 in every account, and the shim and guard exist; otherwise 1.
@@ -147,14 +151,29 @@ def trusted_root_text(env: Mapping[str, str]) -> str:
     return root
 
 
-def _coverage_text(project: Path, event: str, tool: Optional[str], installed: bool,
+def account_env(home: Path, config_dir: Path, base: Mapping[str, str]) -> Dict[str, str]:
+    """The environment Claude Code runs with for the account in ``config_dir``. The account's
+    global config (where trust is recorded) is ``$CLAUDE_CONFIG_DIR/.claude.json`` when that
+    variable is set, else ``$HOME/.claude.json``. So ``~/.claude`` runs without the variable,
+    which also makes it read ``~/.claude.json`` and not ``~/.claude/.claude.json``, and every
+    other account runs with it set to its own folder."""
+    env = dict(base)
+    env["HOME"] = str(home)
+    if os.path.realpath(config_dir) == os.path.realpath(home / ".claude"):
+        env.pop("CLAUDE_CONFIG_DIR", None)
+    else:
+        env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+    return env
+
+
+def _coverage_text(project: Path, event: str, tool: Optional[str], user_state: Optional[str],
                    env: Mapping[str, str]) -> str:
     cov = hc.coverage(project, event, tool, env=env)
     if cov.covered:
         return f"project ({cov.form})"
-    if cov.state == hc.UNKNOWN:
+    if cov.state == hc.UNKNOWN or user_state == gi.STATE_UNKNOWN:
         return "unknown"
-    return "user" if installed else "missing"
+    return "user" if user_state == gi.STATE_OK else "missing"
 
 
 def _event_keys() -> List[tuple]:
@@ -169,22 +188,21 @@ def _event_keys() -> List[tuple]:
 
 def account_report(config_dir: Path, projects: Sequence[ProjectEntry],
                    env: Mapping[str, str]) -> AccountReport:
+    """The report of one account; ``env`` is that account's own (``account_env``)."""
     report = AccountReport(config_dir, "ok", trusted_root=trusted_root_text(env))
-    path = gi.settings_path(config_dir)
     try:
-        _, settings = gi._read_settings(path)
+        _, settings = gi.read_settings(gi.settings_path(config_dir))
+        report.entries = gi.entry_states(settings)
     except gi.GuardInstallError as exc:
-        report.settings_state = str(exc)
-        settings = {}
-    report.entries = gi.entry_states(settings)
+        report.settings_state = f"unknown, {exc}"
+        report.entries = {event: gi.STATE_UNKNOWN for event, _ in gi.GUARD_EVENTS}
     for project in projects:
         if not project.has_t0:
             continue
         rows: Dict[str, str] = {}
         for event, tool in _event_keys():
             label = event if tool is None else f"{event}:{tool}"
-            installed = report.entries.get(event) == gi.STATE_OK
-            rows[label] = _coverage_text(project.path, event, tool, installed, env)
+            rows[label] = _coverage_text(project.path, event, tool, report.entries.get(event), env)
         report.coverage[str(project.path)] = rows
     return report
 
@@ -204,7 +222,7 @@ def run_check(*, home: Path, config_dirs: Sequence[str] = (), scan_roots: Sequen
         report.problems.append(f"no Claude Code account found under {home}")
     report.projects = build_inventory(home, [Path(r).expanduser() for r in scan_roots])
     for account in accounts:
-        acc = account_report(account, report.projects, mapping)
+        acc = account_report(account, report.projects, account_env(home, account, mapping))
         report.accounts.append(acc)
         report.problems.extend(_account_problems(acc))
     return report
@@ -214,9 +232,9 @@ def _account_problems(acc: AccountReport) -> List[str]:
     problems = []
     if acc.settings_state != "ok":
         problems.append(f"{acc.config_dir}: {acc.settings_state}")
-    for event, state in acc.entries.items():
-        if state != gi.STATE_OK:
-            problems.append(f"{acc.config_dir}: {event} entry is {state}")
+    else:
+        problems.extend(f"{acc.config_dir}: {event} entry is {state}"
+                        for event, state in acc.entries.items() if state != gi.STATE_OK)
     for project, rows in acc.coverage.items():
         bad = sorted(label for label, text in rows.items() if text in ("missing", "unknown"))
         if bad:

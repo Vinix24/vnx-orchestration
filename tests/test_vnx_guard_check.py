@@ -4,12 +4,16 @@ Plan t0-guard-gebruikersniveau, § "User-level registration", deliverable G2. A 
 the accounts, the registry ``~/.vnx/projects.json`` and ``~/.vnx-system/current``; the projects
 are tmp directories whose settings follow the documented rules of ``hook_coverage`` (a direct
 entry needs an existing path, a PreToolUse matcher must match the tool, an unreadable file is
-``unknown``). Nothing here touches the real ``~/.claude``, ``~/.claude-*`` or ``~/.vnx``.
+``unknown``). A registered project is also trusted in every account's global config
+(``~/.claude.json``, ``<account>/.claude.json``), where Claude Code records trust: a
+``hook_coverage`` that reads trust (#2079) then answers as one that does not. Nothing here
+touches the real ``~/.claude``, ``~/.claude-*`` or ``~/.vnx``.
 """
 from __future__ import annotations
 
 import io
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -71,10 +75,25 @@ def _direct(project: Path) -> dict:
     return {"type": "command", "command": f"python3 {script}"}
 
 
-def _register(home: Path, *projects: Path) -> None:
+def _trust_file(home: Path, account: str) -> Path:
+    """Where Claude Code records trust for an account: ``~/.claude.json`` for ``~/.claude``
+    (no CLAUDE_CONFIG_DIR), ``<account>/.claude.json`` for every other one."""
+    return home / ".claude.json" if account == ".claude" else home / account / ".claude.json"
+
+
+def _trust(home: Path, account: str, trusted: dict) -> None:
+    """Record, per project path, whether the account accepted the trust dialog for it."""
+    records = {str(p.resolve()): {"hasTrustDialogAccepted": value} for p, value in trusted.items()}
+    _trust_file(home, account).write_text(json.dumps({"projects": records}), encoding="utf-8")
+
+
+def _register(home: Path, *projects: Path, trust: bool = True) -> None:
     (home / ".vnx").mkdir(exist_ok=True)
     entries = [{"project_id": p.name, "path": str(p)} for p in projects]
     (home / ".vnx" / "projects.json").write_text(json.dumps({"projects": entries}), encoding="utf-8")
+    if trust:
+        for account in [a.name for a in gi.discover_accounts(home)] or [".claude"]:
+            _trust(home, account, {p: True for p in projects})
 
 
 def _rows(report: gc.CheckReport, account: str, project: Path) -> dict:
@@ -252,6 +271,131 @@ def test_a_project_without_a_t0_folder_is_not_guarded(home, tmp_path):
     text = gc.render_report(report)
     assert "not guarded (no T0)" in text
     assert report.accounts[0].coverage == {}
+
+
+# ── an account whose own settings cannot be read ─────────────────────────────
+
+
+@pytest.mark.parametrize("hooks, where", [
+    ({"Stop": [{"hooks": "not a list"}]}, "hooks.Stop[0].hooks is not a list"),
+    ({"Stop": [{"hooks": 17}]}, "hooks.Stop[0].hooks is not a list"),
+    ({"SessionStart": "not a list"}, "hooks.SessionStart is not a list"),
+    ({"Stop": [{"hooks": [{"type": "command", "command": ["x"]}]}]},
+     "hooks.Stop[0].hooks[0].command is not a string"),
+])
+def test_an_account_with_a_malformed_hooks_tree_is_unknown_with_the_path(home, tmp_path, hooks,
+                                                                         where):
+    """codex on #2078: these trees reported OK, and an integer raised an uncaught TypeError."""
+    account = _account(home, installed=False)
+    (account / "settings.json").write_text(json.dumps({"hooks": hooks}), encoding="utf-8")
+    project = _project(tmp_path, "plain")
+    _register(home, project)
+    report = gc.run_check(home=home)
+    (acc,) = report.accounts
+    assert acc.settings_state.startswith("unknown") and where in acc.settings_state
+    assert acc.entries == {event: "unknown" for event in ALL_EVENTS}
+    assert set(_rows(report, ".claude", project).values()) == {"unknown"}
+    assert not report.ok and any(where in problem for problem in report.problems)
+    text = gc.render_report(report)
+    assert "user entry Stop: unknown" in text and where in text
+
+
+def test_an_account_with_invalid_json_is_unknown(home):
+    account = _account(home, installed=False)
+    (account / "settings.json").write_text("{not json", encoding="utf-8")
+    report = gc.run_check(home=home)
+    (acc,) = report.accounts
+    assert acc.settings_state.startswith("unknown") and "not valid JSON" in acc.settings_state
+    assert set(acc.entries.values()) == {"unknown"} and not report.ok
+
+
+def test_a_malformed_account_leaves_the_other_accounts_judged(home, tmp_path):
+    bad = _account(home, installed=False)
+    (bad / "settings.json").write_text(json.dumps({"hooks": {"Stop": [{"hooks": 1}]}}),
+                                       encoding="utf-8")
+    _account(home, ".claude-x")
+    project = _project(tmp_path, "plain")
+    _register(home, project)
+    report = gc.run_check(home=home)
+    assert set(_rows(report, ".claude-x", project).values()) == {"user"}
+    assert set(_rows(report, ".claude", project).values()) == {"unknown"}
+
+
+# ── each account is judged with its own environment ──────────────────────────
+
+
+def test_account_env_unsets_the_config_dir_for_the_default_account_only(home):
+    base = {"HOME": "/elsewhere", "PATH": "/bin", "CLAUDE_CONFIG_DIR": str(home / ".claude-x")}
+    default = gc.account_env(home, home / ".claude", base)
+    assert "CLAUDE_CONFIG_DIR" not in default and default["HOME"] == str(home)
+    other = gc.account_env(home, home / ".claude-x", {"HOME": str(home)})
+    assert other["CLAUDE_CONFIG_DIR"] == str(home / ".claude-x")
+    custom = gc.account_env(home, home / "custom-config", base)
+    assert custom["CLAUDE_CONFIG_DIR"] == str(home / "custom-config")
+    assert base["CLAUDE_CONFIG_DIR"] == str(home / ".claude-x"), "the base env is not changed"
+
+
+def _two_accounts_that_disagree_on_trust(home: Path, tmp_path: Path) -> Path:
+    """`~/.claude` trusts the project, `~/.claude-x` does not; the project runs the guard
+    itself on every event."""
+    _account(home)
+    _account(home, ".claude-x")
+    project = _project(tmp_path, "direct")
+    hook = _direct(project)
+    _settings(project, {"UserPromptSubmit": [{"hooks": [hook]}],
+                        "PreToolUse": [{"matcher": "Bash|Skill|SlashCommand", "hooks": [hook]}],
+                        "Stop": [{"hooks": [hook]}]})
+    _register(home, project, trust=False)
+    _trust(home, ".claude", {project: True})
+    _trust(home, ".claude-x", {project: False})
+    return project
+
+
+def _session_env(home: Path) -> dict:
+    """`vnx guard check` started from a session of the other account."""
+    return {"HOME": str(home), "PATH": os.environ["PATH"],
+            "CLAUDE_CONFIG_DIR": str(home / ".claude-x")}
+
+
+def _trusted_as_claude_code_reads_it(env: dict, project: Path) -> bool:
+    base = env.get("CLAUDE_CONFIG_DIR") or env["HOME"]
+    data = json.loads((Path(base) / ".claude.json").read_text(encoding="utf-8"))
+    record = data["projects"].get(str(project.resolve()), {})
+    return record.get("hasTrustDialogAccepted") is True
+
+
+def test_coverage_reads_each_accounts_own_trust_record(home, tmp_path, monkeypatch):
+    """The trust record is per account: Claude Code reads `$CLAUDE_CONFIG_DIR/.claude.json` when
+    the variable is set, else `$HOME/.claude.json`. Each account's rows must be computed with
+    that account's environment, whatever the environment `check` itself runs in."""
+    project = _two_accounts_that_disagree_on_trust(home, tmp_path)
+    seen: list = []
+    real = hc.coverage
+
+    def spy(project_dir, event, tool_name=None, **kwargs):
+        seen.append(dict(kwargs["env"]))
+        return real(project_dir, event, tool_name, **kwargs)
+
+    monkeypatch.setattr(hc, "coverage", spy)
+    gc.run_check(home=home, env=_session_env(home))
+
+    by_dir: dict = {}
+    for env in seen:
+        by_dir.setdefault(env.get("CLAUDE_CONFIG_DIR"), []).append(env)
+    assert set(by_dir) == {None, str(home / ".claude-x")}, set(by_dir)
+    assert len(by_dir[None]) == len(by_dir[str(home / ".claude-x")]) == 5
+    assert all(env["HOME"] == str(home) for env in seen)
+    assert _trusted_as_claude_code_reads_it(by_dir[None][0], project) is True
+    assert _trusted_as_claude_code_reads_it(by_dir[str(home / ".claude-x")][0], project) is False
+
+
+@pytest.mark.skipif(not hasattr(hc, "project_trusted"),
+                    reason="the hook_coverage on this branch does not read trust yet (#2079)")
+def test_with_a_trust_reading_coverage_the_two_accounts_answer_differently(home, tmp_path):
+    project = _two_accounts_that_disagree_on_trust(home, tmp_path)
+    report = gc.run_check(home=home, env=_session_env(home))
+    assert set(_rows(report, ".claude", project).values()) == {"project (direct)"}
+    assert set(_rows(report, ".claude-x", project).values()) == {"user"}
 
 
 # ── inventory ────────────────────────────────────────────────────────────────

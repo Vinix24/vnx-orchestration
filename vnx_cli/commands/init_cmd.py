@@ -336,14 +336,15 @@ def _assert_engine_root_renderable(engine_root: str) -> None:
     """Refuse an engine root that cannot sit inside a hook command (OI-2117 item e).
 
     ``settings.json.j2`` puts ``engine_root`` into shell source inside double quotes. A quote, a
-    ``$(`` or a backtick in the path would end the string or run code, so the value must pass the
-    allowlist ``hook_coverage.registered_command`` applies to a VNX home; its ValueError names
-    the value. A test pins the template's literal command to that function's output.
+    ``$(`` or a backtick in the path would end the string or run code, so the value is rendered
+    through ``t0_subagent_block.registered_command``, which accepts only the allowlist
+    ``hook_coverage.registered_command`` applies to a VNX home; its ValueError names the value.
+    A test pins the template's literal command to that function's output.
     """
     _engine.ensure_engine_on_path()
-    import hook_coverage
+    import t0_subagent_block
 
-    hook_coverage.registered_command(hook_coverage.GUARD_ENTRY, "project", engine_root)
+    t0_subagent_block.registered_command(engine_root)
 
 
 def _scaffold_claude_dir(project_dir: Path, tmpl_root: Path, ctx: dict, force: bool) -> None:

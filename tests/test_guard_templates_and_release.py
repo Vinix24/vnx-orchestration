@@ -23,6 +23,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
 
 import hook_coverage as hc
+import t0_subagent_block
 import vnx_settings_merge
 from vnx_cli.commands import init_cmd
 
@@ -65,11 +66,14 @@ def test_no_template_registers_the_guard(template, tmp_path):
     assert GUARD not in template.read_text(encoding="utf-8")
 
 
-def test_the_subagent_block_goes_through_the_shim_via_registered_command(template, tmp_path):
+def test_the_subagent_block_is_the_command_g2_renders_without_the_shim(template, tmp_path):
+    """The shim's rule 1 would undo the hook's own T0 detection (a T0 cwd drifts out of the
+    project), so the block starts the entry itself, in the command ``t0_subagent_block``
+    renders and nothing typed by hand."""
     settings = _render(template, tmp_path)
     commands = [h["command"] for _, g, h in _hooks(settings) if NO_SUBAGENTS in h.get("command", "")]
-    assert commands == [hc.registered_command(NO_SUBAGENTS, "project", str(REPO_ROOT))]
-    assert "--scope project" in commands[0]
+    assert commands == [t0_subagent_block.registered_command(str(REPO_ROOT))]
+    assert hc.SHIM_NAME not in commands[0]
 
 
 def test_the_subagent_block_keeps_its_matcher(template, tmp_path):
@@ -144,11 +148,27 @@ def test_init_writes_no_settings_file_for_a_refused_engine_root(tmp_path):
 
 
 @pytest.mark.parametrize("variant", ["default", "minimal"])
-def test_the_init_templates_literal_is_what_registered_command_renders(variant):
+def test_the_init_templates_literal_is_what_g2_renders(variant):
     path = TEMPLATES / "init" / variant / "settings.json.j2"
     rendered = json.loads(init_cmd._render_template(path, {**ENGINE_CTX, "engine_root": "/opt/vnx"}))
     commands = [h["command"] for _, _, h in _hooks(rendered) if NO_SUBAGENTS in h.get("command", "")]
-    assert commands == [hc.registered_command(NO_SUBAGENTS, "project", "/opt/vnx")]
+    assert commands == [t0_subagent_block.registered_command("/opt/vnx")]
+
+
+def test_the_merge_templates_literal_is_what_g2_renders_for_the_placeholder():
+    raw = json.loads((TEMPLATES / "settings_vnx_keys.json.tmpl").read_text(encoding="utf-8"))
+    commands = [h["command"] for _, _, h in _hooks(raw) if NO_SUBAGENTS in h.get("command", "")]
+    assert commands == [t0_subagent_block.registered_command("{{" + "VNX_HOME" + "}}")]
+
+
+@pytest.mark.parametrize("vnx_home", ["/x/a\"b", "/x/$(id)", "/x/`id`", "relative/root", "",
+                                      "~/vnx", "$PWD/vnx"])
+def test_the_renderer_uses_the_registered_command_allowlist(vnx_home):
+    with pytest.raises(ValueError) as raised:
+        t0_subagent_block.registered_command(vnx_home)
+    with pytest.raises(ValueError) as reference:
+        hc.registered_command(NO_SUBAGENTS, "project", vnx_home)
+    assert str(raised.value) == str(reference.value)
 
 
 # ── release check ────────────────────────────────────────────────────────────
@@ -184,7 +204,8 @@ def test_the_shim_is_in_the_wheel_globs():
 def test_the_guard_it_starts_is_in_the_release_tree_too():
     for rel in (f"scripts/hooks/{GUARD}", f"scripts/hooks/{NO_SUBAGENTS}",
                 "scripts/lib/hook_coverage.py", "scripts/vnx_guard.py",
-                "scripts/lib/guard_install.py", "scripts/lib/guard_check.py"):
+                "scripts/lib/guard_install.py", "scripts/lib/guard_check.py",
+                "scripts/lib/atomic_swap.py", "scripts/lib/t0_subagent_block.py"):
         proc = subprocess.run(["git", "ls-files", "--error-unmatch", rel], cwd=REPO_ROOT,
                               capture_output=True, text=True)
         assert proc.returncode == 0, f"{rel} is not tracked by git"

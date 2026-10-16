@@ -211,8 +211,9 @@ timeout, against the checkout the guard's code lives in rather than the project.
 
 **Install.** `vnx guard install [--dry-run] [--config-dir DIR]...` finds the accounts: `~/.claude`
 and every `~/.claude-*` directory holding a `settings.json` or a `.claude.json`. `--config-dir`
-replaces discovery. It refuses when `~/.vnx-system/current` lacks the shim or the guard. In each
-account it writes three entries with `hook_coverage.registered_command(..., "user")` and
+replaces discovery. It refuses when `~/.vnx-system/current` lacks the shim or the guard, and on a
+platform without an atomic exchange (see below), `--dry-run` included. In each account it writes
+three entries with `hook_coverage.registered_command(..., "user")` and
 `"timeout": 10` (seconds):
 
 | Event | Matcher |
@@ -226,23 +227,42 @@ An entry is the install's own when its command names the shim path, the guard en
 of ours in another form is replaced; every other hook stays. `--dry-run` lists the accounts,
 prints a diff per file and writes nothing.
 
-**The write.** Per file: a timestamped backup (`settings.json.vnx-backup-<UTC>`), a fresh read,
-new content that must parse as JSON and keep every top-level key, a `tempfile.mkstemp` scratch
-file in the same directory, and a comparison of size, mtime and hash just before the replace. A
-changed target starts the command over once; a second change refuses and writes nothing. A
-symlinked `settings.json` is written through, so it stays a symlink. Invalid JSON, a document
-that is not an object, or a `hooks` tree of the wrong shape is refused and never written.
+**The write.** Per file: a fresh read, new content that must parse as JSON and keep every
+top-level key, a timestamped backup (`settings.json.vnx-backup-<UTC>`), a `tempfile.mkstemp`
+scratch file in the same directory, and a comparison of size, mtime and hash just before the
+replace. A changed target starts the command over once and removes the backup of the abandoned
+attempt; a second change refuses and leaves no backup. A symlinked `settings.json` is written
+through, so it stays a symlink. Invalid JSON and a document that is not an object are refused
+and never written. So is a `hooks` tree that is not the documented shape anywhere: an event that
+is not a list, a group that is not an object, a group `hooks` that is not a list, a `matcher`
+that is not a string, a hook that is not an object, a `command` that is not a string. The
+refusal names the path to the bad node, for example `hooks.Stop[0].hooks is not a list`. The
+rules are the ones `hook_coverage` loads a project's settings with; a test keeps them equal.
 
-**The residual window.** Claude Code writes this file itself (permission grants) and holds no
-lock the command can join, and a plain file has no conditional replace. Just before
-`os.replace` the target is hard-linked to `settings.json.vnx-displaced-<id>`, so the inode about
-to be replaced stays readable. After the replace the file is read back: the three entries and
-every top-level key of the backup must be there, and the displaced inode must still be the
-content the backup was taken from. A difference is reported with the keys that differ, the
-displaced file is kept next to the settings and the run exits 1. A rename-style write that lands
-between the hard link and the replace is lost and cannot be seen. What such a write carries is a
-permission choice, which Claude Code asks for again. Run the install while no session is
-answering a permission prompt.
+**Concurrent writes.** Claude Code writes this file itself (permission grants) and holds no lock
+the command can join. The replace is therefore an atomic exchange of the scratch file and the
+target, not `os.replace`: `renamex_np(..., RENAME_SWAP)` on macOS, `renameat2(...,
+RENAME_EXCHANGE)` on Linux, through `ctypes` (`scripts/lib/atomic_swap.py`). Measured on
+2026-10-16 on APFS (macOS 27.0.1): the two inodes trade places, and a missing side fails with
+ENOENT and changes nothing. After the exchange the scratch name holds exactly the file that was
+at `settings.json` at that instant. It is compared with the backup. Equal, it is removed.
+Different, it is kept as `settings.json.vnx-displaced-<id>`, the run reports the top-level keys
+that differ and exits 1. Then the file is read back: the three entries and every top-level key
+of the backup must be there.
+
+What this guarantees: a write that landed before the replace, by rename or in place, is never
+lost. It is either in the file the install read, or in the kept displaced file.
+
+What it does not guarantee: a writer that read the file before the replace and writes after it
+removes the three entries again. Nothing of its own is lost, and the read-back reports it when it
+lands first, `vnx guard check` afterwards. A writer that holds the old file open and writes into
+it after the comparison writes into the moved-aside copy, which is gone when it still matched
+the backup. Run the install while no session is answering a permission prompt.
+
+A platform without the call (anything but macOS 10.12+ and Linux with glibc 2.28+) refuses the
+install with that reason, and so does a filesystem that answers the exchange with ENOTSUP,
+EINVAL or ENOSYS: then nothing is written and no backup is left. There is no fallback to
+`os.replace`, because that would drop such a write without a copy.
 
 **Check.** `vnx guard check [--config-dir DIR]... [--scan-root DIR]...` is read-only and exits 0
 only when everything below holds:
@@ -250,7 +270,10 @@ only when everything below holds:
 - per account: the three entries are in the exact form, `vnx_hook_shim.sh` and
   `t0_context_guard.py` exist in `current`, and the report names the root the registry trusts to
   run repo code, which is the first `vnx-dev` entry of `~/.vnx/projects.json` (shim step 2). When
-  that path does not exist on disk it says so: every project then runs `current`;
+  that path does not exist on disk it says so: every project then runs `current`. An account
+  whose `settings.json` cannot be read, is not a JSON object or holds a malformed `hooks` tree is
+  `unknown` with the reason (for the tree, the path to the bad node), and so is every project row
+  of that account that the project itself does not cover;
 - project inventory: the registry plus every `.vnx-project-id` under each `--scan-root` (depth 3,
   `.vnx-data` skipped). A scan hit the registry does not list is marked;
 - a project without `.claude/terminals/T0/CLAUDE.md` prints `not guarded (no T0)` and is never a
@@ -259,6 +282,12 @@ only when everything below holds:
   tool (`Bash`, `Skill`, `SlashCommand`): `project (direct|shim)` when the project's own settings
   run the guard, `user` when nothing in the project covers and this account has the entry,
   `missing` when it has not, `unknown` when a settings file of the project cannot be loaded.
+  `hook_coverage.coverage` runs with the environment of the account it reports, because what
+  Claude Code records per project (the trust decision) lives per account in its global config:
+  `$CLAUDE_CONFIG_DIR/.claude.json` when that variable is set, else `$HOME/.claude.json`. So
+  `~/.claude` is judged without `CLAUDE_CONFIG_DIR` (it reads `~/.claude.json`, not
+  `~/.claude/.claude.json`) and every other account with the variable set to its own folder,
+  whatever the environment `check` itself runs in.
 
 `vnx doctor` runs the same report without scan roots as check `guard:user-level`: PASS when no
 Claude account directory exists or everything is covered, WARN otherwise.
@@ -270,13 +299,19 @@ forward, or put the guard back per project with the template entries of that ver
 `vnx guard check` again.
 
 **Templates.** `templates/settings_vnx_keys.json.tmpl` and `templates/init/{default,minimal}/settings.json.j2`
-register no guard entry. `pretooluse_t0_no_subagents.py` is started through the shim at project
-scope, in the exact form `registered_command` renders, and every `timeout` is in seconds. The
-shim picks the entry from `${VNX_HOME:-$HOME/.vnx-system/current}`, not from the install the
-command names: a project that installs the block needs the shim and the entry in `current` (or
-in `VNX_HOME`). The VNX home that `vnx regen-settings` (`vnx_settings_merge.load_template`) and
-`vnx init` substitute is checked against the `registered_command` allowlist at render time, so a
-path with a quote, a backtick or a `$(` is refused with an error that names the value.
+register no guard entry, and every `timeout` is in seconds. `pretooluse_t0_no_subagents.py` is
+NOT started through the shim. It recognises a T0 session by its cwd or by the launch directory in
+its transcript path, because a T0's cwd drifts (3 of 143 real T0 sessions also carried the
+operator's home as cwd). The shim's rule 1 tests the cwd and exits 0 outside a project with a T0
+folder, which is exactly the moment the transcript test exists for. So the templates register
+the inline command `scripts/lib/t0_subagent_block.py` renders: it tests that the entry exists in
+the install the command names, runs it with `python3` and maps every non-zero exit to 1. A
+missing entry exits 1 with `vnx: hook entry missing: <path>`; no case exits 2, which would block
+every Agent call in every session. A test pins each template's command to that function's output.
+The VNX home that `vnx regen-settings` (`vnx_settings_merge.load_template`) and `vnx init`
+substitute is rendered through the same function at render time, which applies the
+`registered_command` allowlist, so a path with a quote, a backtick or a `$(` is refused with an
+error that names the value.
 
 ## Handoff contract
 

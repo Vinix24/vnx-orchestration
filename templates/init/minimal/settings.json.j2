@@ -50,7 +50,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'f=\"{{ engine_root }}/scripts/hooks/vnx_hook_shim.sh\"; if [ ! -f \"$f\" ]; then echo \"vnx: guard shim missing: $f\" >&2; exit 1; fi; sh \"$f\" --scope project pretooluse_t0_no_subagents.py; rc=$?; [ \"$rc\" -eq 0 ] || rc=1; exit \"$rc\"'"
+            "command": "sh -c 'f=\"{{ engine_root }}/scripts/hooks/pretooluse_t0_no_subagents.py\"; if [ ! -f \"$f\" ]; then echo \"vnx: hook entry missing: $f\" >&2; exit 1; fi; python3 \"$f\"; rc=$?; [ \"$rc\" -eq 0 ] || rc=1; exit \"$rc\"'"
           }
         ]
       }

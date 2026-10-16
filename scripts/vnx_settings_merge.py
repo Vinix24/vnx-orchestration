@@ -127,18 +127,18 @@ def _assert_vnx_home_renderable(vnx_home: str) -> None:
     """Refuse a VNX_HOME that cannot sit inside a hook command (OI-2117 item e).
 
     The template puts the value into shell source, inside double quotes
-    (``f="<VNX_HOME>/scripts/hooks/vnx_hook_shim.sh"``). A quote, a ``$(`` or a backtick in a
-    substituted path would then end the string or run code. ``registered_command`` accepts only
-    an absolute path of plain path characters, and this reuses its allowlist rather than keeping
-    a second copy.
+    (``f="<VNX_HOME>/scripts/hooks/pretooluse_t0_no_subagents.py"``). A quote, a ``$(`` or a
+    backtick in a substituted path would then end the string or run code. The value is rendered
+    through ``t0_subagent_block.registered_command``, the function the template's command is
+    pinned to, which accepts only the allowlist of ``hook_coverage.registered_command``.
     """
     lib_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib")
     if lib_dir not in sys.path:
         sys.path.insert(0, lib_dir)
-    import hook_coverage
+    import t0_subagent_block
 
     try:
-        hook_coverage.registered_command(hook_coverage.GUARD_ENTRY, "project", vnx_home)
+        t0_subagent_block.registered_command(vnx_home)
     except ValueError as exc:
         print(f"ERROR: vnx_home cannot be rendered into hook commands: {exc}", file=sys.stderr)
         sys.exit(1)

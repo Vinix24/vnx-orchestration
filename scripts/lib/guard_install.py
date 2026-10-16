@@ -15,19 +15,27 @@ THE ENTRIES. UserPromptSubmit, PreToolUse (matcher ``Bash|Skill|SlashCommand``) 
 ours when its command names the shim path, the guard entry and ``--scope user``. A second run
 finds them and changes nothing.
 
-THE WRITE. Per file: a timestamped backup, a fresh read, the new content validated as JSON that
-keeps every top-level key, a ``tempfile.mkstemp`` scratch file in the same directory, and a
-comparison (size, mtime, hash) just before the replace. A change starts the command over once;
-a second change refuses. Just before ``os.replace`` the target is hard-linked to a
-``*.vnx-displaced-*`` name, so the inode that is about to be replaced stays readable. After the
-replace the file is re-read and the three entries and every key of the backup are verified, and
-the displaced inode is compared with the backup. A difference is reported, never repaired.
+THE WRITE. Per file: a fresh read, a ``hooks`` tree of the documented shape (a malformed node
+refuses the install and is named by its path), the new content validated as JSON that keeps
+every top-level key, a timestamped backup, a ``tempfile.mkstemp`` scratch file in the same
+directory, and a comparison (size, mtime, hash) just before the replace. A change starts the
+command over once, and the backup of the abandoned attempt is removed; a second change refuses.
 
-THE RESIDUAL WINDOW. Claude Code writes this file itself (permission grants) and holds no lock
-VNX can join, and a plain file has no conditional replace. A rename-style write that lands
-between the hard link and ``os.replace`` is lost and cannot be seen. ``RESIDUAL_WINDOW_NOTICE``
-names it and asks the operator to run the install while no session answers a permission prompt.
-The one thing such a write carries is a permission choice, which Claude Code asks for again.
+THE REPLACE is an atomic exchange of the scratch file and the target (``atomic_swap``):
+afterwards the scratch name holds exactly the file that was at the target at that instant. It is
+compared with the backup. Equal, it is removed. Different, a write landed after the backup: it
+is kept as ``settings.json.vnx-displaced-<id>`` and reported with the top-level keys that
+differ. Then the file is re-read and the three entries and every key of the backup are verified.
+A difference is reported, never repaired. A platform or filesystem without the exchange refuses
+the install: a plain replace would drop such a write without a copy.
+
+WHAT IS NOT COVERED. Claude Code writes this file itself (permission grants) and holds no lock
+VNX can join. A writer that read the file before the exchange and writes after it removes the
+three entries again (nothing of its own is lost): the read-back reports that when it lands
+first, ``vnx guard check`` afterwards. A writer that holds the old file open and writes into it
+after the comparison writes into the moved-aside copy, which is gone when it still matched the
+backup. ``CONCURRENT_WRITE_NOTICE`` says this and asks the operator to run the install while no
+session answers a permission prompt.
 """
 from __future__ import annotations
 
@@ -47,6 +55,7 @@ _LIB_DIR = Path(__file__).resolve().parent
 if str(_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_LIB_DIR))
 
+import atomic_swap
 import hook_coverage as hc
 
 USER_MATCHER = "Bash|Skill|SlashCommand"
@@ -61,14 +70,18 @@ GUARD_EVENTS: Tuple[Tuple[str, str], ...] = (
 STATE_OK = "ok"
 STATE_DIFFERS = "differs"
 STATE_MISSING = "missing"
+STATE_UNKNOWN = "unknown"
 CURRENT_REL = Path(".vnx-system") / "current"
 
-RESIDUAL_WINDOW_NOTICE = (
-    "Residual window: Claude Code writes its settings file itself (permission grants) and holds "
-    "no lock this command can join. A write that lands between the last comparison and the "
-    "replace is lost. The only thing such a write carries is a permission choice, and Claude "
-    "Code asks for it again. Run this while no session is answering a permission prompt. After "
-    "the write the file is read back and checked against its backup."
+CONCURRENT_WRITE_NOTICE = (
+    "Concurrent writes: Claude Code writes its settings file itself (permission grants) and "
+    "holds no lock this command can join. The replace is an atomic exchange. The file at the "
+    "path at that instant is moved aside and compared with the backup. When it differs it is "
+    "kept as settings.json.vnx-displaced-<id> and reported, and the run exits 1. A write that "
+    "landed before the replace is never lost. Not covered: a writer that read the file before "
+    "the replace and writes after it removes the three entries again (the read-back or "
+    "`vnx guard check` reports that), and a writer that holds the old file open and writes into "
+    "it after the comparison. Run this while no session is answering a permission prompt."
 )
 
 
@@ -216,9 +229,10 @@ def _fingerprint(path: Path) -> Optional[Tuple[int, int, str]]:
     return stat.st_size, stat.st_mtime_ns, digest
 
 
-def _read_settings(path: Path) -> Tuple[Optional[bytes], dict]:
-    """(raw bytes or None, parsed object). A missing file reads as an empty object; invalid
-    JSON, or JSON that is not an object, raises."""
+def read_settings(path: Path) -> Tuple[Optional[bytes], dict]:
+    """(raw bytes or None, parsed object). A missing file reads as an empty object. Invalid
+    JSON, JSON that is not an object, or a ``hooks`` tree that is not the documented shape
+    raises GuardInstallError naming the file and, for the tree, the path to the bad node."""
     try:
         raw = path.read_bytes()
     except FileNotFoundError:
@@ -228,10 +242,48 @@ def _read_settings(path: Path) -> Tuple[Optional[bytes], dict]:
     try:
         data = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
-        raise GuardInstallError(f"{path} is not valid JSON ({exc}); nothing was written") from exc
+        raise GuardInstallError(f"{path} is not valid JSON ({exc})") from exc
     if not isinstance(data, dict):
-        raise GuardInstallError(f"{path} is not a JSON object; nothing was written")
+        raise GuardInstallError(f"{path} is not a JSON object")
+    problem = hooks_tree_problem(data)
+    if problem:
+        raise GuardInstallError(f"{path} has a malformed hooks tree: {problem}")
     return raw, data
+
+
+def hooks_tree_problem(settings: Mapping) -> Optional[str]:
+    """The path to the first node where the ``hooks`` tree departs from the documented shape,
+    with what is wrong there (``hooks.Stop[0].hooks is not a list``); None when the tree is well
+    formed or absent. The shape is the one ``hook_coverage`` loads; a test keeps them equal."""
+    if "hooks" not in settings:
+        return None
+    hooks = settings["hooks"]
+    if not isinstance(hooks, dict):
+        return "hooks is not an object"
+    for event, groups in hooks.items():
+        if not isinstance(groups, list):
+            return f"hooks.{event} is not a list"
+        for index, group in enumerate(groups):
+            problem = _group_problem(group, f"hooks.{event}[{index}]")
+            if problem:
+                return problem
+    return None
+
+
+def _group_problem(group: object, where: str) -> Optional[str]:
+    if not isinstance(group, dict):
+        return f"{where} is not an object"
+    if "matcher" in group and not isinstance(group["matcher"], (str, type(None))):
+        return f"{where}.matcher is not a string"
+    inner = group.get("hooks", [])
+    if not isinstance(inner, list):
+        return f"{where}.hooks is not a list"
+    for index, hook in enumerate(inner):
+        if not isinstance(hook, dict):
+            return f"{where}.hooks[{index}] is not an object"
+        if hook.get("type", "command") == "command" and not isinstance(hook.get("command", ""), str):
+            return f"{where}.hooks[{index}].command is not a string"
+    return None
 
 
 def _indent_of(raw: Optional[bytes]) -> int:
@@ -261,7 +313,7 @@ def _validate_new(old: Mapping, new_bytes: bytes) -> dict:
 
 def plan_file(path: Path) -> Tuple[Optional[bytes], bytes, dict]:
     """(old bytes, new bytes, old object) for one settings file."""
-    raw, old = _read_settings(path)
+    raw, old = read_settings(path)
     new = apply_entries(old)
     new_bytes = raw if new == old and raw is not None else render(new, raw)
     _validate_new(old, new_bytes)
@@ -315,7 +367,9 @@ def _scratch(target: Path, new_bytes: bytes, mode: int) -> Path:
     return Path(name)
 
 
-def _discard(path: Path) -> None:
+def _discard(path: Optional[Path]) -> None:
+    if path is None:
+        return
     try:
         path.unlink()
     except FileNotFoundError:
@@ -329,84 +383,113 @@ def _mode_of(target: Path) -> int:
         return 0o600
 
 
-def _swap(target: Path, scratch: Path, existed: bool) -> Optional[Path]:
-    """Put ``scratch`` at ``target``. Returns the displaced hard link of the replaced inode.
-    Raises FileExistsError when the file did not exist at the plan and appeared since."""
-    if not existed:
-        os.link(scratch, target)
-        _discard(scratch)
-        return None
-    displaced = target.with_name(f"{target.name}.vnx-displaced-{uuid.uuid4().hex}")
-    os.link(target, displaced)
-    os.replace(scratch, target)
-    return displaced
+@dataclass
+class _Placed:
+    """A pass that put the new content in place. ``replaced`` is the file the exchange moved
+    out of the target (None when the target was new); ``raw`` is what the backup holds."""
+
+    backup: Optional[Path]
+    old: dict
+    raw: Optional[bytes]
+    replaced: Optional[Path]
+
+
+_UNCHANGED = "unchanged"
+
+
+def _put_in_place(target: Path, scratch: Path, existed: bool) -> bool:
+    """Put ``scratch`` at ``target``. An existing target is exchanged atomically, so afterwards
+    ``scratch`` holds the file that was at ``target`` at that instant. A new target is a hard
+    link, which fails when a file appeared. False when the target appeared or vanished since the
+    plan; GuardInstallError when no atomic exchange is available."""
+    try:
+        if existed:
+            atomic_swap.exchange(scratch, target)
+        else:
+            os.link(scratch, target)
+            _discard(scratch)
+    except (FileExistsError, FileNotFoundError):
+        return False
+    except atomic_swap.ExchangeUnsupported as exc:
+        raise GuardInstallError(f"{exc}; a plain replace would drop a concurrent write "
+                                "without a copy") from exc
+    return True
 
 
 def _attempt(target: Path, on_compare: Optional[Callable[[], None]],
              before_replace: Optional[Callable[[], None]]):
-    """One pass: read, back up, build, scratch, compare, swap. Returns
-    (backup, old_obj, raw, displaced, snapshot) or None when the target changed meanwhile."""
+    """One pass: read, build, back up, scratch, compare, exchange. Returns a _Placed,
+    _UNCHANGED when the entries are already there, or None when the target changed meanwhile.
+    A pass that does not put the content in place leaves neither its backup nor its scratch
+    file behind."""
     snapshot = _fingerprint(target)
     raw, new_bytes, old = plan_file(target)
     if raw is not None and new_bytes == raw:
-        return target, None, old, raw, None, snapshot
-    backup = _write_backup(target, raw)
-    scratch = _scratch(target, new_bytes, _mode_of(target))
+        return _UNCHANGED
+    backup = scratch = None
+    placed = False
     try:
+        backup = _write_backup(target, raw)
+        scratch = _scratch(target, new_bytes, _mode_of(target))
         if on_compare:
             on_compare()
         if _fingerprint(target) != snapshot:
-            _discard(scratch)
             return None
         if before_replace:
             before_replace()
-        try:
-            displaced = _swap(target, scratch, raw is not None)
-        except FileExistsError:
+        placed = _put_in_place(target, scratch, raw is not None)
+    finally:
+        if not placed:
             _discard(scratch)
-            return None
-    except BaseException:
-        _discard(scratch)
-        raise
-    return target, backup, old, raw, displaced, snapshot
+            _discard(backup)
+    if not placed:
+        return None
+    return _Placed(backup, old, raw, scratch if raw is not None else None)
 
 
-def _post_check(target: Path, backup: Optional[Path], old: Mapping, displaced: Optional[Path],
-                snapshot: Optional[Tuple[int, int, str]]) -> List[str]:
-    """Problems found after the replace; an empty list means the file is what was planned."""
+def _post_check(target: Path, placed: _Placed) -> List[str]:
+    """Problems found after the replace; an empty list means the file is what was planned.
+    The replaced file is settled first, so it is kept even when the target cannot be read."""
     problems: List[str] = []
+    if placed.replaced is not None:
+        problems.extend(_replaced_problems(target, placed))
     try:
-        _, final = _read_settings(target)
+        _, final = read_settings(target)
     except GuardInstallError as exc:
-        return [str(exc)]
+        return problems + [str(exc)]
     for event, state in entry_states(final).items():
         if state != STATE_OK:
             problems.append(f"after the write, {event} is {state}")
-    lost = sorted(set(old) - set(final))
+    lost = sorted(set(placed.old) - set(final))
     if lost:
         problems.append(f"after the write, top-level keys of the backup are missing: {lost}")
-    if displaced is not None:
-        problems.extend(_displaced_problems(displaced, backup, old, snapshot))
     return problems
 
 
-def _displaced_problems(displaced: Path, backup: Optional[Path], old: Mapping,
-                        snapshot: Optional[Tuple[int, int, str]]) -> List[str]:
+def _replaced_problems(target: Path, placed: _Placed) -> List[str]:
+    """Compare the file the exchange moved out with the backup. Equal: it is removed.
+    Different: a write landed after the backup; it is kept under a displaced name."""
+    replaced = placed.replaced
     try:
-        replaced = hashlib.sha256(displaced.read_bytes()).hexdigest()
+        content = replaced.read_bytes()
     except OSError as exc:
-        return [f"cannot read the replaced file {displaced}: {exc}"]
-    if snapshot is not None and replaced == snapshot[2]:
-        _discard(displaced)
+        return [f"cannot read the replaced file {replaced}: {exc}"]
+    if content == placed.raw:
+        _discard(replaced)
         return []
+    kept = target.with_name(f"{target.name}.vnx-displaced-{uuid.uuid4().hex}")
     try:
-        current = json.loads(displaced.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        os.rename(replaced, kept)
+    except OSError:
+        kept = replaced
+    try:
+        current = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
         current = None
-    changed = _changed_keys(old, current)
+    changed = _changed_keys(placed.old, current)
     return [f"a write landed after the backup and was overwritten; top-level keys that differ "
-            f"from the backup: {changed}. The replaced content is kept at {displaced}, the "
-            f"pre-state at {backup}. Merge what you need and run the install again."]
+            f"from the backup: {changed}. The overwritten content is kept at {kept}, the "
+            f"pre-state at {placed.backup}. Merge what you need and run the install again."]
 
 
 def _changed_keys(old: Mapping, current: object) -> List[str]:
@@ -422,15 +505,15 @@ _MISSING = object()
 def write_settings(path: Path, *, on_compare: Optional[Callable[[], None]] = None,
                    before_replace: Optional[Callable[[], None]] = None) -> FileResult:
     """Install the three entries in ``path``. ``on_compare`` runs right before the comparison
-    and ``before_replace`` right before the swap; both exist so a test can drive a concurrent
-    write into exactly those places."""
+    and ``before_replace`` right before the exchange; both exist so a test can drive a
+    concurrent write into exactly those places."""
     target = Path(os.path.realpath(path))
     outcome = None
     for _ in range(2):
         try:
             outcome = _attempt(target, on_compare, before_replace)
         except GuardInstallError as exc:
-            return FileResult(path, "refused", str(exc))
+            return FileResult(path, "refused", f"{exc}; nothing was written")
         except OSError as exc:
             return FileResult(path, "failed", f"{type(exc).__name__}: {exc}")
         if outcome is not None:
@@ -438,12 +521,11 @@ def write_settings(path: Path, *, on_compare: Optional[Callable[[], None]] = Non
     if outcome is None:
         return FileResult(path, "refused",
                           f"{target} changed twice while it was being prepared; nothing written")
-    _, backup, old, raw, displaced, snapshot = outcome
-    if backup is None and displaced is None and raw is not None:
+    if outcome is _UNCHANGED:
         return FileResult(path, "unchanged", "the three entries are already there")
-    problems = _post_check(target, backup, old, displaced, snapshot)
+    problems = _post_check(target, outcome)
     status = "failed" if problems else "written"
-    return FileResult(path, status, "; ".join(problems), backup=backup, problems=problems)
+    return FileResult(path, status, "; ".join(problems), backup=outcome.backup, problems=problems)
 
 
 # ── the command ──────────────────────────────────────────────────────────────
@@ -472,6 +554,12 @@ def run_install(*, home: Path, config_dirs: List[str], dry_run: bool, out) -> in
         for line in missing:
             print(f"vnx guard install: refused, {line}", file=out)
         print("Install a release that ships the shim and make it current first.", file=out)
+        return 1
+    no_exchange = atomic_swap.unsupported_reason()
+    if no_exchange:
+        print(f"vnx guard install: refused, {no_exchange}. Without an atomic exchange the "
+              "replace would drop a write Claude Code makes at that instant without a copy, so "
+              "this platform gets no install.", file=out)
         return 1
     try:
         accounts = resolve_accounts(home, config_dirs)
@@ -505,7 +593,7 @@ def _dry_run(accounts: List[Path], out) -> int:
 
 
 def _install(accounts: List[Path], out) -> int:
-    print(RESIDUAL_WINDOW_NOTICE, file=out)
+    print(CONCURRENT_WRITE_NOTICE, file=out)
     code = 0
     for account in accounts:
         result = write_settings(settings_path(account))
