@@ -17,6 +17,8 @@
 | Guard hook | `scripts/hooks/t0_context_guard.py` | UserPromptSubmit / PreToolUse / Stop enforcement |
 | Spawner | `scripts/t0_rotate_spawn.sh` | opens the successor window, types the kickoff, resumes the `/goal` |
 | Shared state | `scripts/lib/t0_rotation_state.py` | pending marker, latch, handoff parser, receipts |
+| Hook shim | `scripts/hooks/vnx_hook_shim.sh` | starts a hook entry so that a missing file never exits 2 |
+| Coverage | `scripts/lib/hook_coverage.py` | the registered command, rule 1, and whether a project runs the guard itself |
 
 The rotate skill (personal, `~/.claude/skills/rotate/SKILL.md`) runs `/build-log wrap` first and
 then calls the spawner. The PreCompact reminder in the personal settings stays as it is; with a
@@ -33,8 +35,18 @@ input_tokens + cache_read_input_tokens + cache_creation_input_tokens
 
 Sidechain entries (`isSidechain: true`) and harness-written `<synthetic>` messages are skipped.
 An empty, unreadable or usage-less transcript measures as *unknown*, and unknown never blocks
-anything. CLI: `python3 scripts/lib/t0_context_budget.py <transcript>` prints size, band and
-thresholds as JSON.
+anything.
+
+**After a compaction** (OI-2072) the last usage describes the context that was compacted away:
+measured 270,776 before a boundary against 89,369 after it. The backwards scan therefore stops
+at a `compact_boundary` entry (not a sidechain one) that is newer than the last real assistant
+entry. It returns that entry's `compactMetadata.postTokens` when it is an integer, and *unknown*
+otherwise. `postTokens` is a **lower bound**: the first real request after a boundary measured
+more (boundary 21,789, first request 123,227). That first assistant entry replaces it.
+
+CLI: `python3 scripts/lib/t0_context_budget.py <transcript>` prints size, band and thresholds as
+JSON, plus `source` (`usage`, `compact_boundary`, or `null` when unknown) and `lower_bound`.
+A lower bound also carries a `note`.
 
 Thresholds live in the config registry (`scripts/lib/config_registry.py`, subsystem
 `t0-context-rotation`), so they follow the usual precedence (`VNX_OVERRIDE_*`, project config,
@@ -75,14 +87,48 @@ Once the spawner started the successor it writes a latch for the session (and fo
 pane); a latched session is not Stop-blocked again. A latch older than 30 minutes no longer
 counts: an old session still alive by then means the successor died during boot.
 
-**Who is guarded.** `session_stop_rotation._is_t0_session` (explicit `VNX_TERMINAL`, else
-no `VNX_DISPATCH_ID`/`VNX_TMUX_SIGNAL_DIR`, else a cwd outside `.claude/terminals/T1-T3`) plus
-a cwd outside `.vnx-data/worktrees/`. Anything else is a silent no-op.
+**Who is guarded.** Three rules, all required: see [Who is guarded](#who-is-guarded). Anything
+else is a silent no-op.
 
 **Registration.** Fabric: `.claude/settings.json`. Consumers: `templates/settings_vnx_keys.json.tmpl`
 (what `vnx regen-settings --merge`, and so `vnx init` / `bootstrap_hooks`, writes) and the
 `vnx init` templates `templates/init/{default,minimal}/settings.json.j2`. The PreToolUse entry
 matches `Bash|Skill|SlashCommand` only.
+
+## Who is guarded
+
+A session is guarded only when all three rules hold (`t0_context_guard.is_guarded_session`).
+
+1. **A VNX project with a T0.** The git toplevel of the payload `cwd` has a `.vnx-project-id`
+   whose first line is not empty, and a `.claude/terminals/T0/CLAUDE.md`. The cwd is not under
+   `.vnx-data/worktrees/`. A folder with only a project id, such as `~/Desktop/BUSINESS/clients`,
+   is not guarded.
+2. **The T0 by convention.** `session_stop_rotation._is_t0_session` says T0: an explicit
+   `VNX_TERMINAL` (or `VNX_TERMINAL_ID`) wins, else no `VNX_DISPATCH_ID`/`VNX_TMUX_SIGNAL_DIR`,
+   else a cwd outside `.claude/terminals/T1-T3`. So an attended session at the project root or
+   in the T0 folder is the orchestrator. **Opt-out:** start a side session there with
+   `VNX_TERMINAL=<name>` (anything but `T0`) and the guard leaves it alone.
+3. **Attended.** Not `CLAUDE_CODE_ENTRYPOINT=sdk-*` and not `VNX_WORKER_SCOPED=1`.
+
+Rule 3 rests on this measurement of 2026-10-16 (Claude Code 2.1.301). The `claude -p` row is
+the environment of a probe hook inside that session; the other two rows were read in the
+session's own shell.
+
+| Session | `CLAUDE_CODE_ENTRYPOINT` | `VNX_WORKER_SCOPED` | `CLAUDE_CODE_SESSION_ATTENDED` | `TMUX_PANE` |
+|---|---|---|---|---|
+| interactive T0 | `cli` | unset | `1` | set |
+| `claude -p` (probe hook) | `sdk-cli` | unset | `0` | set, inherited |
+| headless dispatch worker | `sdk-cli` | unset | `0` | set |
+
+`CLAUDE_CODE_CHILD_SESSION=1` in all three, so it tells them apart no more than the pane does.
+The plan-gate panel sets `VNX_WORKER_SCOPED=1` on its seats.
+
+The shim (`scripts/hooks/vnx_hook_shim.sh`) checks rule 1 itself, from the process cwd, before
+Python starts. Outside a guarded project it exits 0 without output.
+
+**User scope.** Started with `VNX_HOOK_SCOPE=user`, the guard stays silent for an event that
+the project's own settings already cover (`hook_coverage.coverage`, per PreToolUse tool), so it
+never runs twice. A project-scope call never skips.
 
 ## Handoff contract
 

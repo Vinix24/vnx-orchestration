@@ -4,10 +4,24 @@
 Operator decision 2026-09-25: at 500K context a T0 MUST rotate to a fresh session. Work in
 flight may be finished; nothing new is started. A running /goal carries over to the successor.
 
-Registered on UserPromptSubmit, PreToolUse and Stop. T0 only: any other session (T1-T3,
-a dispatch worktree, a headless worker carrying VNX_DISPATCH_ID) is a silent no-op, decided
-by the same identity check the T0 rotation safety net uses
-(``session_stop_rotation._is_t0_session``) plus a dispatch-worktree cwd check.
+Registered on UserPromptSubmit, PreToolUse and Stop. T0 only. A session is guarded when all
+three rules hold (``is_guarded_session``, plan t0-guard-gebruikersniveau), and is a silent
+no-op otherwise:
+
+  1. a VNX project with a T0: the git toplevel of the payload ``cwd`` has a
+     ``.vnx-project-id`` with a non-empty first line and ``.claude/terminals/T0/CLAUDE.md``,
+     and the cwd is not a dispatch worktree (``hook_coverage.t0_project_root``);
+  2. the T0 by convention: the identity check the T0 rotation safety net uses
+     (``session_stop_rotation._is_t0_session``). A side session opts out with
+     ``VNX_TERMINAL=<name>``;
+  3. attended: not ``CLAUDE_CODE_ENTRYPOINT=sdk-*`` and not ``VNX_WORKER_SCOPED=1``. Measured
+     in a hook's own environment on 2026-10-16: a ``claude -p`` started by the T0 carries
+     ``sdk-cli`` (and inherits the T0's ``TMUX_PANE``), the interactive T0 carries ``cli``.
+
+User scope. Registered at user level the guard is started with ``VNX_HOOK_SCOPE=user``
+(``scripts/hooks/vnx_hook_shim.sh``). It then stays silent for an event, or a PreToolUse tool,
+that the project's own settings already cover (``hook_coverage.coverage``), so the guard never
+runs twice. A project-scope call never skips.
 
 Bands (``scripts/lib/t0_context_budget.py``, thresholds from the config registry):
 
@@ -50,11 +64,13 @@ for _p in (str(_LIB_DIR), str(_HOOKS_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+import hook_coverage
 import t0_context_budget as budget
 import t0_rotation_state as rotation_state
 from session_stop_rotation import _is_t0_session
 
 _DISPATCH_WORKTREE_CWD_RE = re.compile(r"(?:^|/)\.vnx-data/worktrees/")
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
 
 ROTATE_HOW = (
     "Rotatie = de rotate-skill: /build-log wrap (schrijft daily-log/handoff.md met genummerde "
@@ -63,11 +79,30 @@ ROTATE_HOW = (
 )
 
 
-def is_guarded_session(cwd: str, env: Dict[str, str]) -> bool:
-    """T0, and not a dispatch worktree. A worker never gets rotation pressure from this hook."""
-    if not _is_t0_session(cwd, env):
+def is_attended(env: Dict[str, str]) -> bool:
+    """Rule 3: not an SDK or ``claude -p`` session, and not a worker-scoped seat."""
+    if (env.get("CLAUDE_CODE_ENTRYPOINT") or "").strip().lower().startswith("sdk-"):
         return False
-    return _DISPATCH_WORKTREE_CWD_RE.search((cwd or "").replace("\\", "/")) is None
+    return (env.get("VNX_WORKER_SCOPED") or "").strip().lower() not in _TRUTHY
+
+
+def is_guarded_session(cwd: str, env: Dict[str, str]) -> bool:
+    """Rules 1-3 (module docstring). The cheap env and cwd checks run before the git call."""
+    if not is_attended(env) or not _is_t0_session(cwd, env):
+        return False
+    if _DISPATCH_WORKTREE_CWD_RE.search((cwd or "").replace("\\", "/")):
+        return False
+    return hook_coverage.t0_project_root(cwd) is not None
+
+
+def project_covers(event: str, payload: dict, env: Dict[str, str]) -> bool:
+    """User scope only: the project's own settings already run the guard for this event (and
+    this PreToolUse tool), so the user-level call stays silent."""
+    if (env.get("VNX_HOOK_SCOPE") or "").strip() != "user":
+        return False
+    tool_name = str(payload.get("tool_name") or "") if event == "PreToolUse" else None
+    return hook_coverage.coverage(env.get("CLAUDE_PROJECT_DIR"), event, tool_name,
+                                  env=env).covered
 
 
 # ── what counts as STARTING new work ─────────────────────────────────────────
@@ -249,6 +284,8 @@ def handle(payload: dict, env: Dict[str, str]) -> Optional[dict]:
     if not is_guarded_session(cwd, env):
         return None
     event = str(payload.get("hook_event_name") or "")
+    if project_covers(event, payload, env):
+        return None
     transcript_path = str(payload.get("transcript_path") or "")
     tokens = budget.context_tokens(transcript_path)
     th = budget.thresholds()
