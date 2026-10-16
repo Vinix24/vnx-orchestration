@@ -33,6 +33,19 @@ nothing at all. The read-decide-write of the marker is one critical section unde
 HANDOFF CONTRACT (docs/operations/T0_CONTEXT_ROTATION.md): numbered next steps under a
 ``## Next steps`` (or ``## Volgende stappen``) heading, and — when a /goal was running — a
 ``## Actief /goal`` section with a ``Directive:`` line and the remaining tasks as a list.
+
+WRAP PROOF (operator decisions 2026-10-16 a, b). ``/build-log wrap`` does not type its own
+proof: ``wrap-start`` (first step of the wrap) records the start time and the nugget headings
+already in the month bucket, ``wrap-finish`` (last step) writes a ``wrap:`` block into the
+handoff frontmatter with the system clock. ``compose`` refuses with exit 6 unless that block
+binds to this wrap: the daily log was written inside the wrap's window and every nugget heading
+it lists is in the bucket. Frontmatter is read with a stdlib parser; the fabric has no PyYAML.
+
+EMERGENCY PATH (operator decision 2026-10-16 c). ``compose --skip-wrap-reason`` skips the wrap
+proof (never the first-step check), needs the predecessor's transcript as a readable JSONL
+file, and puts a catch-up wrap at the head of the prompt. The spawner books a
+``t0_context_rotation_wrap_skipped`` receipt (``record-skip``) before any window opens;
+``skips`` lists them, and ``transcript-digest`` is the bounded read the catch-up wrap uses.
 """
 from __future__ import annotations
 
@@ -41,11 +54,13 @@ import datetime as dt
 import json
 import os
 import re
+import shlex
 import sys
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 _LIB_DIR = Path(__file__).resolve().parent
 _SCRIPTS_DIR = _LIB_DIR.parent
@@ -53,7 +68,7 @@ for _p in (str(_LIB_DIR), str(_SCRIPTS_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from atomic_io import atomic_write_json, slot_lock
+from atomic_io import atomic_write_json, atomic_write_text, slot_lock
 
 STATE_DIR_ENV = "VNX_T0_ROTATION_STATE_DIR"
 RECEIPTS_FILE_ENV = "VNX_T0_ROTATION_RECEIPTS_FILE"
@@ -61,11 +76,36 @@ LATCH_TTL_SECONDS = 30 * 60
 # The hard limit Claude Code puts on a /goal directive (see the goal-prompting skill).
 GOAL_MAX_CHARS = 4000
 
+WRAP_START_FILE = "wrap-start.json"
+WRAP_SKIPPED_TRIGGER = "t0_context_rotation_wrap_skipped"
+# How far wrapped_at may lie in the future, and how long after wrapped_at the daily log may
+# still have been touched: clock jitter and a last save, not a second wrap.
+WRAP_TOLERANCE_SECONDS = 60
+DEFAULT_MAX_AGE_MINUTES = 15
+DIGEST_DEFAULT_MAX_BYTES = 200_000
+EXIT_WRAP_PROOF = 6
+
 _SAFE_KEY_RE = re.compile(r"[^A-Za-z0-9_.-]")
 
 
 def _utc_now_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _iso_utc(epoch: float) -> str:
+    """Whole seconds, UTC, ``Z``: the form the wrap block carries."""
+    return dt.datetime.fromtimestamp(int(epoch), dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _parse_utc(value: Any) -> Optional[float]:
+    """Epoch seconds of an ISO-8601 time that names its zone; None for anything else."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.timestamp() if parsed.tzinfo is not None else None
 
 
 def _safe_key(value: str) -> str:
@@ -360,19 +400,538 @@ def goal_followup_text(goal: ActiveGoal, handoff_path: str) -> str:
             "context-rotatie en werk de resterende taken daar af.")
 
 
-def kickoff_prompt(*, old_window: str, handoff_path: str, first_step: str, has_goal: bool) -> str:
+def kickoff_prompt(*, old_window: str, handoff_path: str, first_step: str, has_goal: bool,
+                   catch_up: Optional[str] = None) -> str:
+    """The one line typed into the successor. A skip run puts ``catch_up`` at its head, so the
+    catch-up wrap comes before everything else, closing the old window included."""
+    order = "Sluit daarna" if catch_up else "Sluit eerst"
     prompt = (
-        "Je bent de verse T0 na een context-rotatie. Sluit eerst het vorige venster met dit "
+        f"Je bent de verse T0 na een context-rotatie. {order} het vorige venster met dit "
         f"commando: tmux kill-window -t {old_window} . Voer daarna de kickoff-skill uit op de "
         f"handoff ({handoff_path}). Pak daarna stap 1 op: {first_step}"
     )
+    if catch_up:
+        prompt = f"{catch_up}. {prompt}"
     if has_goal:
         prompt += (" Na deze beurt stuur ik je automatisch het /goal-vervolg uit de handoff;"
                    " start zelf geen nieuwe /goal.")
     return _one_line(prompt)
 
 
+# ── frontmatter (stdlib only) ────────────────────────────────────────────────
+
+_FENCE_CLOSE = ("---", "...")
+_TOP_KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_-]*)\s*:(.*)$")
+_NESTED_KEY_RE = re.compile(r"^[ \t]+([A-Za-z_][A-Za-z0-9_-]*)\s*:(.*)$")
+_INT_RE = re.compile(r"^-?\d+$")
+_TRAILING_COMMENT_RE = re.compile(r"\s+#.*$")
+
+
+def _split_frontmatter(text: str) -> Tuple[Optional[List[str]], str]:
+    """The frontmatter lines (fences left out, line ends kept) and the body after the closing
+    fence; ``(None, text)`` when the text does not open with a ``---`` line. Raises ValueError
+    for a frontmatter that opens and never closes."""
+    lines = text.splitlines(keepends=True)
+    if not lines or lines[0].rstrip() != "---":
+        return None, text
+    for idx in range(1, len(lines)):
+        if lines[idx].rstrip() in _FENCE_CLOSE:
+            return lines[1:idx], "".join(lines[idx + 1:])
+    raise ValueError("the frontmatter opens with --- and never closes")
+
+
+def _parse_scalar(raw: str) -> Any:
+    """One scalar as the wrap helper writes it: a JSON string or list, an integer, true/false,
+    null, a single-quoted or a plain string. Raises ValueError on a malformed quoted value."""
+    value = raw.strip()
+    if value[:1] in ('"', "["):
+        return json.loads(value)
+    if value[:1] == "'":
+        if len(value) < 2 or not value.endswith("'"):
+            raise ValueError(f"unterminated quoted value {value!r}")
+        return value[1:-1].replace("''", "'")
+    value = _TRAILING_COMMENT_RE.sub("", value)
+    lowered = value.lower()
+    if lowered in ("", "null", "~"):
+        return None
+    if lowered in ("true", "false"):
+        return lowered == "true"
+    return int(value) if _INT_RE.match(value) else value
+
+
+def _scalar_or_raw(raw: str) -> Any:
+    """A value the parser cannot read stays its raw text, so one odd key in a daily log never
+    hides the keys around it. The checks then refuse it by type."""
+    try:
+        return _parse_scalar(raw)
+    except ValueError:
+        return raw.strip()
+
+
+def read_frontmatter(path: Path) -> Dict[str, Any]:
+    """Top-level keys of a markdown file's frontmatter. A key with no inline value gets a dict
+    of the ``key: value`` lines indented below it (one level, as the wrap block uses); list
+    items and deeper nesting are skipped. Raises OSError or ValueError (unclosed fence)."""
+    lines, _ = _split_frontmatter(path.read_text(encoding="utf-8"))
+    result: Dict[str, Any] = {}
+    current: Optional[Dict[str, Any]] = None
+    for line in lines or []:
+        bare = line.rstrip("\r\n")
+        if not bare.strip() or bare.lstrip().startswith("#"):
+            continue
+        nested = _NESTED_KEY_RE.match(bare)
+        if nested:
+            if current is not None:
+                current[nested.group(1)] = _scalar_or_raw(nested.group(2))
+            continue
+        top = _TOP_KEY_RE.match(bare)
+        if top is None:
+            current = None
+        elif top.group(2).strip():
+            result[top.group(1)] = _scalar_or_raw(top.group(2))
+            current = None
+        else:
+            current = result[top.group(1)] = {}
+    return result
+
+
+def _without_top_key(lines: List[str], key: str) -> List[str]:
+    """``lines`` minus ``key:`` and the indented lines that belong to it."""
+    kept: List[str] = []
+    inside = False
+    for line in lines:
+        if inside and line[:1] in (" ", "\t"):
+            continue
+        top = _TOP_KEY_RE.match(line.rstrip("\r\n"))
+        inside = bool(top and top.group(1) == key)
+        if not inside:
+            kept.append(line)
+    return kept
+
+
+def _render_wrap_block(block: Dict[str, Any]) -> str:
+    def quoted(value: Optional[str]) -> str:
+        return "null" if value is None else json.dumps(value, ensure_ascii=False)
+
+    return (
+        "wrap:\n"
+        f"  started_at: {block['started_at']}\n"
+        f"  wrapped_at: {block['wrapped_at']}\n"
+        f"  nuggets: {block['nuggets']}\n"
+        f"  nugget_headings: {json.dumps(block['nugget_headings'], ensure_ascii=False)}\n"
+        f"  daily_log: {quoted(block['daily_log'])}\n"
+        f"  bucket: {quoted(block['bucket'])}\n"
+    )
+
+
+def write_wrap_block(handoff: Path, block: Dict[str, Any]) -> None:
+    """Put ``block`` under ``wrap:`` in the handoff frontmatter. Every other key keeps its line
+    and its place, an earlier ``wrap:`` block is replaced, and the body stays byte for byte. A
+    handoff without frontmatter gets one. Atomic: a per-writer mkstemp name next to the
+    handoff, then ``os.replace`` (``atomic_io.atomic_write_text``)."""
+    lines, body = _split_frontmatter(handoff.read_text(encoding="utf-8"))
+    kept = _without_top_key(lines or [], "wrap")
+    atomic_write_text(handoff, "---\n" + "".join(kept) + _render_wrap_block(block) + "---\n" + body)
+
+
+# ── wrap proof: wrap-start / wrap-finish (operator decision 2026-10-16 a) ────
+
+# ``### <date> · <slug> · <title>``, the bucket entry heading of the build-log skill.
+_BUCKET_HEADING_RE = re.compile(r"^###\s+\d{4}-\d{2}-\d{2}\s+·\s+(.+?)\s+·\s+\S.*$")
+
+
+class WrapHelperError(Exception):
+    """wrap-start / wrap-finish cannot do their part; the message says what is missing."""
+
+
+def wrap_start_path(sdir: Path) -> Path:
+    return sdir / WRAP_START_FILE
+
+
+def bucket_headings(bucket: Optional[Path]) -> List[str]:
+    """Every nugget heading in the bucket, in file order, duplicates kept. A bucket that does
+    not exist yet (the first nugget of a month creates it) has none."""
+    if bucket is None:
+        return []
+    try:
+        text = bucket.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return []
+    return [line.rstrip() for line in text.splitlines() if _BUCKET_HEADING_RE.match(line)]
+
+
+def _heading_slug(heading: str) -> Optional[str]:
+    match = _BUCKET_HEADING_RE.match(heading)
+    return match.group(1).strip() if match else None
+
+
+def new_nugget_headings(before: List[str], after: List[str], slug: str) -> List[str]:
+    """This slug's headings in ``after`` that ``before`` did not hold, in file order. Counted as
+    a multiset: a second nugget under a title that already exists still counts."""
+    seen = Counter(before)
+    fresh: List[str] = []
+    for heading in after:
+        if _heading_slug(heading) != slug:
+            continue
+        if seen[heading] > 0:
+            seen[heading] -= 1
+            continue
+        fresh.append(heading)
+    return fresh
+
+
+def start_wrap(sdir: Path, *, project_root: str, slug: str, bucket: Optional[Path],
+               now: Optional[float] = None) -> Dict[str, Any]:
+    """Write ``wrap-start.json``: the start time, the bucket, and the headings in it now."""
+    record = {
+        "started_at": _iso_utc(time.time() if now is None else now),
+        "project_root": project_root,
+        "project_slug": slug,
+        "bucket": str(bucket) if bucket is not None else None,
+        "headings": bucket_headings(bucket),
+    }
+    atomic_write_json(wrap_start_path(sdir), record)
+    return record
+
+
+def _relative_to_root(path: Path, root: Path) -> str:
+    try:
+        return path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return str(path.resolve())
+
+
+def finish_wrap(sdir: Path, *, project_root: Path, handoff: Path, daily_log: Path,
+                now: Optional[float] = None) -> Dict[str, Any]:
+    """Compute this wrap's nuggets from ``wrap-start.json`` and write the ``wrap:`` block into
+    the handoff. Raises WrapHelperError when the start record, the handoff or the daily log is
+    missing."""
+    start = _read_json(wrap_start_path(sdir))
+    if not start or not isinstance(start.get("started_at"), str) or not start.get("project_slug"):
+        raise WrapHelperError(f"no usable {wrap_start_path(sdir)}: run wrap-start as the first "
+                              "step of the wrap")
+    if not handoff.is_file():
+        raise WrapHelperError(f"handoff not found: {handoff} (the wrap writes it before wrap-finish)")
+    if not daily_log.is_file():
+        raise WrapHelperError(f"daily log not found: {daily_log} (the wrap writes it before "
+                              "wrap-finish)")
+    bucket = Path(start["bucket"]) if start.get("bucket") else None
+    headings = new_nugget_headings([h for h in start.get("headings") or [] if isinstance(h, str)],
+                                   bucket_headings(bucket), str(start["project_slug"]))
+    block = {
+        "started_at": start["started_at"],
+        "wrapped_at": _iso_utc(time.time() if now is None else now),
+        "nuggets": len(headings),
+        "nugget_headings": headings,
+        "daily_log": _relative_to_root(daily_log, project_root),
+        "bucket": str(bucket) if bucket is not None else None,
+    }
+    write_wrap_block(handoff, block)
+    return block
+
+
+# ── wrap proof: the check compose runs (operator decision 2026-10-16 b) ──────
+
+
+class WrapProofError(Exception):
+    """One wrap-proof check failed. ``check`` names it, ``detail`` says what was found."""
+
+    def __init__(self, check: str, detail: str):
+        super().__init__(f"{check}: {detail}")
+        self.check = check
+        self.detail = detail
+
+    def refusal(self, handoff: Path) -> str:
+        return (f"handoff {handoff} fails wrap proof check '{self.check}': {self.detail}. "
+                "The emergency path is t0_rotate_spawn.sh --skip-wrap-reason \"<why>\", recorded "
+                "in the ledger; otherwise run /build-log wrap")
+
+
+def _wrap_block(handoff: Path) -> Dict[str, Any]:
+    try:
+        block = read_frontmatter(handoff).get("wrap")
+    except (OSError, ValueError) as exc:
+        raise WrapProofError("wrap_block", f"the frontmatter cannot be read ({exc})") from exc
+    if not isinstance(block, dict) or not block:
+        raise WrapProofError("wrap_block", "the frontmatter has no wrap: block, so nothing "
+                             "proves that /build-log wrap ran")
+    return block
+
+
+def _wrap_window(block: Dict[str, Any], *, now: float, max_age_minutes: int) -> Tuple[float, float]:
+    started, wrapped = _parse_utc(block.get("started_at")), _parse_utc(block.get("wrapped_at"))
+    if started is None or wrapped is None:
+        raise WrapProofError("wrap_times", "started_at and wrapped_at must both be ISO-8601 times "
+                             "with a zone, as wrap-start and wrap-finish write them")
+    if started > wrapped:
+        raise WrapProofError("wrap_order", f"started_at {block['started_at']} lies after "
+                             f"wrapped_at {block['wrapped_at']}")
+    if wrapped > now + WRAP_TOLERANCE_SECONDS:
+        raise WrapProofError("wrapped_at_future", f"wrapped_at {block['wrapped_at']} lies "
+                             f"{int(wrapped - now)} s in the future (tolerance "
+                             f"{WRAP_TOLERANCE_SECONDS} s)")
+    age = now - wrapped
+    if age > max_age_minutes * 60:
+        raise WrapProofError("wrapped_at_age", f"the wrap finished {int(age // 60)} min ago "
+                             f"(limit {max_age_minutes})")
+    return started, wrapped
+
+
+def _check_daily_log(block: Dict[str, Any], *, project_root: Path, started: float,
+                     wrapped: float) -> None:
+    value = block.get("daily_log")
+    if not isinstance(value, str) or not value.strip():
+        raise WrapProofError("daily_log", "the block names no daily_log")
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = project_root / path
+    try:
+        flag = read_frontmatter(path).get("handoff")
+        mtime = path.stat().st_mtime
+    except (OSError, ValueError) as exc:
+        raise WrapProofError("daily_log", f"{path} cannot be read ({exc})") from exc
+    if flag is not True:
+        raise WrapProofError("daily_log_handoff", f"{path} has no 'handoff: true' in its frontmatter")
+    if not started <= mtime <= wrapped + WRAP_TOLERANCE_SECONDS:
+        raise WrapProofError("daily_log_window", f"{path} was last written at {_iso_utc(mtime)}, "
+                             f"outside this wrap's window [{block['started_at']}, "
+                             f"{block['wrapped_at']} + {WRAP_TOLERANCE_SECONDS} s]")
+
+
+def _check_nuggets(block: Dict[str, Any]) -> None:
+    count, headings = block.get("nuggets"), block.get("nugget_headings")
+    if not isinstance(headings, list) or not all(isinstance(h, str) for h in headings):
+        raise WrapProofError("nuggets_count", "nugget_headings is not a list of headings")
+    if isinstance(count, bool) or not isinstance(count, int) or count != len(headings):
+        raise WrapProofError("nuggets_count", f"nuggets is {count!r} but nugget_headings lists "
+                             f"{len(headings)}")
+    if not headings:
+        return
+    bucket = block.get("bucket")
+    bucket_path = Path(bucket).expanduser() if isinstance(bucket, str) and bucket else None
+    if bucket_path is None or not bucket_path.is_file():
+        raise WrapProofError("nugget_in_bucket", f"the block lists {len(headings)} nugget(s) but "
+                             f"its bucket {bucket!r} is not a file")
+    try:
+        present = set(bucket_headings(bucket_path))
+    except (OSError, ValueError) as exc:
+        raise WrapProofError("nugget_in_bucket", f"{bucket_path} cannot be read ({exc})") from exc
+    missing = [h for h in headings if h not in present]
+    if missing:
+        raise WrapProofError("nugget_in_bucket", f"{len(missing)} heading(s) not in {bucket_path}, "
+                             f"first: {missing[0]}")
+
+
+def verify_wrap_proof(handoff: Path, *, project_root: Path, max_age_minutes: int,
+                      now: Optional[float] = None) -> Dict[str, Any]:
+    """The checks of the plan, in order. Returns the block; raises WrapProofError naming the
+    first check that fails. The curation step of the wrap is not proven."""
+    block = _wrap_block(handoff)
+    started, wrapped = _wrap_window(block, now=time.time() if now is None else now,
+                                    max_age_minutes=max_age_minutes)
+    _check_daily_log(block, project_root=project_root, started=started, wrapped=wrapped)
+    _check_nuggets(block)
+    return block
+
+
+# ── emergency path (operator decision 2026-10-16 c) ──────────────────────────
+
+
+def transcript_problem(path: Path) -> Optional[str]:
+    """Why ``path`` is not a readable JSONL transcript, or None when it is one: a regular file
+    whose first non-empty line is a JSON object."""
+    if not path.is_file():
+        return f"{path} is not a file"
+    try:
+        with path.open("rb") as fh:
+            for raw in fh:
+                if not raw.strip():
+                    continue
+                try:
+                    first = json.loads(raw)
+                except ValueError:
+                    return f"{path} is not JSONL: its first line is not JSON"
+                if not isinstance(first, dict):
+                    return f"{path} is not JSONL: its first line is not a JSON object"
+                return None
+    except OSError as exc:
+        return f"{path} cannot be read ({exc})"
+    return f"{path} is empty"
+
+
+def pending_transcript(sdir: Path, pane: str, session_id: Optional[str] = None) -> Optional[str]:
+    """The transcript the pending marker of ``pane`` records. With ``session_id``, only a
+    marker of that session counts."""
+    data = _read_json(pending_path(sdir, pane)) if pane else None
+    if not data or (session_id and data.get("session_id") != session_id):
+        return None
+    value = data.get("transcript_path")
+    return value if isinstance(value, str) and value else None
+
+
+def catch_up_text(*, reason: str, transcript: str) -> str:
+    """The head of a skip run's prompt: the catch-up wrap from the predecessor's transcript,
+    read only through the bounded digest."""
+    quoted = shlex.quote(transcript)
+    helper = shlex.quote(str(Path(__file__).resolve()))
+    return (
+        f"Eerst een inhaal-wrap: deze rotatie sloeg /build-log wrap over (reden: {reason}). "
+        f"Draai /build-log wrap --from-transcript {quoted} voordat je iets anders doet. Lees het "
+        f"transcript van je voorganger alleen via de digest: python3 {helper} transcript-digest "
+        f"--transcript {quoted}"
+    )
+
+
+def ledger_path() -> Path:
+    """The ledger ``emit_event`` appends to: the override, else append_receipt's own default."""
+    override = os.environ.get(RECEIPTS_FILE_ENV)
+    if override:
+        return Path(override).expanduser()
+    from append_receipt import _resolve_receipts_file
+
+    return _resolve_receipts_file(None).expanduser()
+
+
+def wrap_skips(ledger: Path, *, since_days: int, now: Optional[float] = None) -> List[Dict[str, Any]]:
+    """The ``t0_context_rotation_wrap_skipped`` receipts of the last ``since_days`` days, in
+    ledger order. A ledger that does not exist yet holds none; other read errors raise."""
+    cutoff = (time.time() if now is None else now) - since_days * 86400
+    skips: List[Dict[str, Any]] = []
+    try:
+        fh = ledger.open(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return skips
+    with fh:
+        for line in fh:
+            if WRAP_SKIPPED_TRIGGER not in line:
+                continue
+            try:
+                receipt = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(receipt, dict) or receipt.get("trigger") != WRAP_SKIPPED_TRIGGER:
+                continue
+            stamp = _parse_utc(receipt.get("timestamp"))
+            if stamp is not None and stamp >= cutoff:
+                skips.append(receipt)
+    return skips
+
+
+# ── transcript digest: the catch-up wrap's only read (risk T15) ──────────────
+
+_CUT_MARKER = "[... the start of this entry was cut to fit the budget]\n"
+
+
+def _digest_entry(entry: Dict[str, Any]) -> Optional[Tuple[str, str]]:
+    """(header, text) of a user or assistant entry. None for everything the digest leaves out:
+    tool calls, tool results, thinking, images, attachments, harness-written meta and
+    ``<synthetic>`` messages, and sidechains."""
+    role = entry.get("type")
+    if role not in ("user", "assistant") or entry.get("isSidechain") is True \
+            or entry.get("isMeta") is True:
+        return None
+    message = entry.get("message")
+    if not isinstance(message, dict) or message.get("model") == "<synthetic>":
+        return None
+    content = message.get("content")
+    if isinstance(content, str):
+        parts = [content]
+    elif isinstance(content, list):
+        parts = [block["text"] for block in content if isinstance(block, dict)
+                 and block.get("type") == "text" and isinstance(block.get("text"), str)]
+    else:
+        return None
+    text = "\n\n".join(part.strip() for part in parts if part.strip())
+    if not text:
+        return None
+    return f"## {role} · {entry.get('timestamp') or '?'}\n", text + "\n\n"
+
+
+def _post_boundary_entries(path: Path) -> Tuple[List[Tuple[str, str]], bool]:
+    """The digest entries after the last ``compact_boundary`` (all of them when there is none),
+    and whether a boundary was seen."""
+    entries: List[Tuple[str, str]] = []
+    boundary = False
+    with path.open("rb") as fh:
+        for raw in fh:
+            try:
+                entry = json.loads(raw)
+            except ValueError:
+                continue
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("type") == "system" and entry.get("subtype") == "compact_boundary" \
+                    and entry.get("isSidechain") is not True:
+                entries, boundary = [], True
+                continue
+            picked = _digest_entry(entry)
+            if picked is not None:
+                entries.append(picked)
+    return entries, boundary
+
+
+def _fit_newest(entries: List[Tuple[str, str]], max_bytes: int) -> List[str]:
+    """The newest entries that fit ``max_bytes`` (UTF-8), oldest first. The entry that no longer
+    fits whole keeps its header and the end of its text, so the budget is used up."""
+    kept: List[str] = []
+    used = 0
+    for header, text in reversed(entries):
+        block = header + text
+        size = len(block.encode("utf-8"))
+        if used + size <= max_bytes:
+            kept.append(block)
+            used += size
+            continue
+        room = max_bytes - used - len((header + _CUT_MARKER).encode("utf-8"))
+        if room > 0:
+            tail = text.encode("utf-8")[-room:].decode("utf-8", errors="ignore")
+            kept.append(header + _CUT_MARKER + tail)
+        break
+    kept.reverse()
+    return kept
+
+
+def transcript_digest(path: Path, *, max_bytes: int) -> Tuple[str, Dict[str, Any]]:
+    """The user and assistant text after the last ``compact_boundary`` within ``max_bytes``:
+    the newest entries win the budget, the text runs oldest first. Raises OSError."""
+    entries, boundary = _post_boundary_entries(path)
+    blocks = _fit_newest(entries, max_bytes)
+    text = "".join(blocks)
+    return text, {"entries": len(entries), "kept": len(blocks), "boundary": boundary,
+                  "bytes": len(text.encode("utf-8"))}
+
+
 # ── CLI (used by scripts/t0_rotate_spawn.sh) ─────────────────────────────────
+
+
+def _wrap_gate(args: argparse.Namespace, handoff_path: Path) -> Tuple[Optional[str], int]:
+    """The wrap proof of a normal run, or the transcript check of a skip run. Returns the
+    catch-up step for the prompt (skip run only) and an exit code, 0 to go on."""
+    if args.skip_wrap_reason is None:
+        if args.transcript:
+            sys.stderr.write("--transcript only applies with --skip-wrap-reason\n")
+            return None, 2
+        root = Path(args.project_root) if args.project_root else Path.cwd()
+        try:
+            verify_wrap_proof(handoff_path, project_root=root, max_age_minutes=args.max_age_minutes)
+        except WrapProofError as exc:
+            sys.stderr.write(exc.refusal(handoff_path) + "\n")
+            return None, EXIT_WRAP_PROOF
+        return None, 0
+    reason = _one_line(args.skip_wrap_reason)
+    if not reason:
+        sys.stderr.write("--skip-wrap-reason needs a reason; an empty one is refused\n")
+        return None, 2
+    if not args.transcript:
+        sys.stderr.write("a skip run needs the predecessor's transcript (--transcript) for the "
+                         "catch-up wrap; nothing composed\n")
+        return None, EXIT_WRAP_PROOF
+    problem = transcript_problem(Path(args.transcript))
+    if problem:
+        sys.stderr.write(f"the catch-up wrap needs a readable JSONL transcript: {problem}; "
+                         "nothing composed\n")
+        return None, EXIT_WRAP_PROOF
+    return catch_up_text(reason=reason, transcript=args.transcript), 0
 
 
 def _cmd_compose(args: argparse.Namespace) -> int:
@@ -388,16 +947,127 @@ def _cmd_compose(args: argparse.Namespace) -> int:
             "(or '## Volgende stappen'); refusing to hand over without a first step\n"
         )
         return 4
+    catch_up, rc = _wrap_gate(args, handoff_path)
+    if rc:
+        return rc
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    (out / "prompt.txt").write_text(kickoff_prompt(
+    atomic_write_text(out / "prompt.txt", kickoff_prompt(
         old_window=args.old_window, handoff_path=str(handoff_path),
-        first_step=handoff.first_step, has_goal=handoff.goal is not None,
-    ), encoding="utf-8")
-    (out / "first_step.txt").write_text(handoff.first_step, encoding="utf-8")
+        first_step=handoff.first_step, has_goal=handoff.goal is not None, catch_up=catch_up,
+    ))
+    atomic_write_text(out / "first_step.txt", handoff.first_step)
+    # A re-run into the same run dir (after a catch-up wrap) follows the handoff it reads: a
+    # goal that is gone takes its goal.txt with it.
+    goal_file = out / "goal.txt"
     if handoff.goal is not None:
-        (out / "goal.txt").write_text(goal_followup_text(handoff.goal, str(handoff_path)),
-                                      encoding="utf-8")
+        atomic_write_text(goal_file, goal_followup_text(handoff.goal, str(handoff_path)))
+    else:
+        goal_file.unlink(missing_ok=True)
+    return 0
+
+
+def _cmd_wrap_start(args: argparse.Namespace) -> int:
+    slug = (args.project_slug or "").strip()
+    if not slug or "·" in slug:
+        sys.stderr.write(f"--project-slug must be a non-empty slug without '·', got {args.project_slug!r}\n")
+        return 2
+    root = Path(args.project_root).expanduser().resolve()
+    bucket = Path(os.path.abspath(os.path.expanduser(args.bucket))) if args.bucket else None
+    sdir = state_dir(str(root))
+    try:
+        record = start_wrap(sdir, project_root=str(root), slug=slug, bucket=bucket)
+    except (OSError, ValueError) as exc:
+        sys.stderr.write(f"wrap-start: cannot record the start in {sdir}: {exc}\n")
+        return 3
+    sys.stdout.write(f"wrap-start: {wrap_start_path(sdir)} started_at={record['started_at']} "
+                     f"bucket={record['bucket'] or '-'} headings={len(record['headings'])}\n")
+    return 0
+
+
+def _under_root(value: str, root: Path) -> Path:
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else root / path
+
+
+def _cmd_wrap_finish(args: argparse.Namespace) -> int:
+    root = Path(args.project_root).expanduser().resolve()
+    handoff = _under_root(args.handoff, root) if args.handoff else root / "daily-log" / "handoff.md"
+    try:
+        block = finish_wrap(state_dir(str(root)), project_root=root, handoff=handoff,
+                            daily_log=_under_root(args.daily_log, root))
+    except (WrapHelperError, OSError, ValueError) as exc:
+        sys.stderr.write(f"wrap-finish: {exc}\n")
+        return 3
+    sys.stdout.write(f"wrap-finish: {handoff} wrapped_at={block['wrapped_at']} "
+                     f"nuggets={block['nuggets']} daily_log={block['daily_log']}\n")
+    # The same check the spawner runs, now, so the wrap learns about a refusal while it can
+    # still repair it (a daily log without `handoff: true`, written before wrap-start).
+    try:
+        verify_wrap_proof(handoff, project_root=root, max_age_minutes=DEFAULT_MAX_AGE_MINUTES)
+    except WrapProofError as exc:
+        sys.stderr.write(f"wrap-finish wrote the block, but the spawner will refuse it: "
+                         f"check '{exc.check}': {exc.detail}\n")
+        return EXIT_WRAP_PROOF
+    return 0
+
+
+def _cmd_record_skip(args: argparse.Namespace) -> int:
+    """Ledger first (ADR-005): the skip receipt lands before any window opens. A ledger that
+    refuses it refuses the spawn, so a skip never goes unrecorded (risk T9)."""
+    reason = _one_line(args.reason or "")
+    if not reason:
+        sys.stderr.write("record-skip: an empty reason is refused\n")
+        return 2
+    sdir = state_dir(args.project_root)
+    session_id = args.session_id or pending_session_id(sdir, args.pane) or None
+    if not emit_event(
+        WRAP_SKIPPED_TRIGGER, file=args.run_dir, reason=reason, transcript=args.transcript,
+        handoff=args.handoff, run_dir=args.run_dir, session_id=session_id,
+        pane=args.pane or None, old_window=args.old_window,
+    ):
+        sys.stderr.write(f"record-skip: the ledger did not take {WRAP_SKIPPED_TRIGGER}; an "
+                         "unrecorded skip does not spawn\n")
+        return EXIT_WRAP_PROOF
+    return 0
+
+
+def _cmd_pending_transcript(args: argparse.Namespace) -> int:
+    value = pending_transcript(state_dir(args.project_root), args.pane, args.session_id or None)
+    sys.stdout.write(f"{value or ''}\n")
+    return 0
+
+
+def _cmd_skips(args: argparse.Namespace) -> int:
+    ledger = ledger_path()
+    try:
+        skips = wrap_skips(ledger, since_days=args.since)
+    except OSError as exc:
+        sys.stderr.write(f"skips: ledger {ledger} unreadable: {exc}\n")
+        return 3
+    for receipt in skips:
+        reason = json.dumps(receipt.get("reason") or "", ensure_ascii=False)
+        sys.stdout.write(f"{receipt.get('timestamp')}  reason={reason}  "
+                         f"transcript={receipt.get('transcript') or '-'}  "
+                         f"run_dir={receipt.get('run_dir') or receipt.get('file') or '-'}\n")
+    sys.stdout.write(f"{len(skips)} wrap skip(s) in the last {args.since} day(s) (ledger: {ledger})\n")
+    return 0
+
+
+def _cmd_transcript_digest(args: argparse.Namespace) -> int:
+    path = Path(args.transcript).expanduser()
+    try:
+        text, stats = transcript_digest(path, max_bytes=args.max_bytes)
+    except OSError as exc:
+        sys.stderr.write(f"transcript-digest: transcript unreadable: {path}: {exc}\n")
+        return 3
+    # Bytes, not text: the budget is counted in UTF-8 whatever the locale of stdout is.
+    sys.stdout.flush()
+    sys.stdout.buffer.write(text.encode("utf-8"))
+    sys.stdout.buffer.flush()
+    scope = "after the last compact_boundary" if stats["boundary"] else "from the start (no compact_boundary)"
+    sys.stderr.write(f"transcript-digest: {stats['kept']} of {stats['entries']} user/assistant "
+                     f"entries {scope}, {stats['bytes']} bytes (budget {args.max_bytes})\n")
     return 0
 
 
@@ -445,15 +1115,86 @@ def _cmd_event(args: argparse.Namespace) -> int:
     return 0
 
 
+def _non_negative_int(value: str) -> int:
+    number = int(value)
+    if number < 0:
+        raise argparse.ArgumentTypeError(f"must be 0 or more, got {value}")
+    return number
+
+
+def _positive_int(value: str) -> int:
+    number = int(value)
+    if number <= 0:
+        raise argparse.ArgumentTypeError(f"must be more than 0, got {value}")
+    return number
+
+
+def _add_compose_parser(sub: Any) -> None:
+    compose = sub.add_parser("compose", help="check the handoff and its wrap proof, write "
+                             "prompt.txt/first_step.txt/goal.txt")
+    compose.add_argument("--handoff", required=True)
+    compose.add_argument("--old-window", required=True)
+    compose.add_argument("--out-dir", required=True)
+    compose.add_argument("--max-age-minutes", type=_non_negative_int, default=DEFAULT_MAX_AGE_MINUTES,
+                         help="oldest wrapped_at that still counts (default %(default)s)")
+    compose.add_argument("--project-root", default=None,
+                         help="root a relative daily_log resolves against (default: cwd)")
+    compose.add_argument("--skip-wrap-reason", default=None,
+                         help="emergency path: skip the wrap proof, catch-up wrap first")
+    compose.add_argument("--transcript", default=None,
+                         help="the predecessor's transcript; required with --skip-wrap-reason")
+    compose.set_defaults(func=_cmd_compose)
+
+
+def _add_wrap_parsers(sub: Any) -> None:
+    start = sub.add_parser("wrap-start", help="first step of /build-log wrap: record the start")
+    start.add_argument("--project-root", required=True)
+    start.add_argument("--project-slug", required=True)
+    start.add_argument("--bucket", default=None, help="the month bucket; without it, 0 nuggets")
+    start.set_defaults(func=_cmd_wrap_start)
+
+    finish = sub.add_parser("wrap-finish", help="last step of /build-log wrap: write the wrap: block")
+    finish.add_argument("--project-root", required=True)
+    finish.add_argument("--daily-log", required=True, help="relative paths resolve against the root")
+    finish.add_argument("--handoff", default=None, help="default <root>/daily-log/handoff.md")
+    finish.set_defaults(func=_cmd_wrap_finish)
+
+
+def _add_skip_parsers(sub: Any) -> None:
+    record = sub.add_parser("record-skip", help="book the t0_context_rotation_wrap_skipped receipt")
+    record.add_argument("--project-root", default=None)
+    record.add_argument("--pane", default="")
+    record.add_argument("--session-id", default="")
+    record.add_argument("--reason", required=True)
+    record.add_argument("--transcript", required=True)
+    record.add_argument("--handoff", required=True)
+    record.add_argument("--run-dir", required=True)
+    record.add_argument("--old-window", default=None)
+    record.set_defaults(func=_cmd_record_skip)
+
+    pending = sub.add_parser("pending-transcript", help="print the pending marker's transcript_path")
+    pending.add_argument("--project-root", default=None)
+    pending.add_argument("--pane", required=True)
+    pending.add_argument("--session-id", default="")
+    pending.set_defaults(func=_cmd_pending_transcript)
+
+    skips = sub.add_parser("skips", help="list the wrap-skip receipts")
+    skips.add_argument("--since", type=_non_negative_int, default=7, help="days (default %(default)s)")
+    skips.set_defaults(func=_cmd_skips)
+
+    digest = sub.add_parser("transcript-digest", help="post-boundary user/assistant text in a budget")
+    digest.add_argument("--transcript", required=True)
+    digest.add_argument("--max-bytes", type=_positive_int, default=DIGEST_DEFAULT_MAX_BYTES)
+    digest.set_defaults(func=_cmd_transcript_digest)
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="T0 context-rotation shared state")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    compose = sub.add_parser("compose", help="parse the handoff, write prompt.txt/goal.txt")
-    compose.add_argument("--handoff", required=True)
-    compose.add_argument("--old-window", required=True)
-    compose.add_argument("--out-dir", required=True)
-    compose.set_defaults(func=_cmd_compose)
+    _add_compose_parser(sub)
+    _add_wrap_parsers(sub)
+    _add_skip_parsers(sub)
 
     sdir = sub.add_parser("state-dir", help="print the rotation state dir")
     sdir.add_argument("--project-root", default=None)
