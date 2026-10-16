@@ -126,9 +126,31 @@ The plan-gate panel sets `VNX_WORKER_SCOPED=1` on its seats.
 The shim (`scripts/hooks/vnx_hook_shim.sh`) checks rule 1 itself, from the process cwd, before
 Python starts. Outside a guarded project it exits 0 without output.
 
+**Which code runs.** A consumer runs `${VNX_HOME:-$HOME/.vnx-system/current}/scripts/hooks/<entry>`.
+The fabric repo runs its own `<root>/scripts/hooks/<entry>`, but only when two things hold: its
+`.vnx-project-id` says `vnx-dev`, and its real path is the real path of the first `vnx-dev`
+entry in the user-owned registry `~/.vnx/projects.json`. A repository writes its own
+`.vnx-project-id`, so the id alone never selects repo code. Otherwise a cloned repo that calls
+itself `vnx-dev` would have its own file run by a user-level hook, without the trust prompt
+Claude Code shows for project hooks. A missing or unreadable registry means `current`. The shim
+reads the registry with `python3 -I -S`: the cwd is the repo, and isolated mode keeps a module
+the repo plants there from being imported. `hook_coverage.shim_entry_file` is the Python twin,
+and a test holds the two to the same answer.
+
+**The registered command.** `hook_coverage.registered_command` puts the VNX home into shell
+source, so it accepts only the documented forms: an absolute path of plain path characters, or
+one that starts with `$HOME`, `${HOME}`, `$CLAUDE_PROJECT_DIR`, `${CLAUDE_PROJECT_DIR}` or the
+template placeholder `{{VNX_HOME}}`. Anything else, a command substitution included, is
+refused. The command maps every non-zero exit to 1 (the plan's line maps only 2): bash exits
+127 for a shim removed between the test and the start, and every case must exit 0 or 1.
+
 **User scope.** Started with `VNX_HOOK_SCOPE=user`, the guard stays silent for an event that
 the project's own settings already cover (`hook_coverage.coverage`, per PreToolUse tool), so it
-never runs twice. A project-scope call never skips.
+never runs twice. A project-scope call never skips. A project registration covers only when it
+can run: a direct entry needs an existing path, and a shim registration needs a shim that
+exists at a path the guard can resolve without a shell (only `$HOME` and `$CLAUDE_PROJECT_DIR`
+are expanded), at project scope, with arguments the shim accepts. A registration that cannot
+run reports `missing`, so the user-level guard decides instead of no guard at all.
 
 ## Handoff contract
 

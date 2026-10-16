@@ -83,32 +83,123 @@ def test_a_direct_entry_to_a_missing_path_does_not_cover(tmp_path):
     assert result.state == hc.MISSING
 
 
+def _shim_home(root: Path) -> Path:
+    """A VNX home with the shim in it."""
+    shim = root / "scripts" / "hooks" / hc.SHIM_NAME
+    shim.parent.mkdir(parents=True, exist_ok=True)
+    shim.write_text("#!/bin/sh\n", encoding="utf-8")
+    return root
+
+
 def test_the_shim_form_covers(tmp_path):
     project = _project(tmp_path)
-    command = hc.registered_command(GUARD, "project", vnx_home="/opt/vnx")
-    _settings(project, _on("Stop", command))
+    home = _shim_home(tmp_path / "release")
+    source = _settings(project, _on("Stop", hc.registered_command(GUARD, "project",
+                                                                   vnx_home=str(home))))
     result = _cov(project)
-    assert (result.state, result.form) == (hc.COVERED, hc.FORM_SHIM)
+    assert (result.state, result.form, result.source) == (hc.COVERED, hc.FORM_SHIM, source)
 
 
-def test_the_shim_form_without_a_scope_covers(tmp_path):
+@pytest.mark.parametrize("prefix", ["sh ", "bash ", "dash ", ""])
+def test_the_plain_shim_call_covers(tmp_path, prefix):
     project = _project(tmp_path)
-    _settings(project, _on("Stop", f"sh /opt/vnx/scripts/hooks/vnx_hook_shim.sh {GUARD}"))
-    assert _cov(project).form == hc.FORM_SHIM
+    shim = _shim_home(tmp_path / "release") / "scripts" / "hooks" / hc.SHIM_NAME
+    shim.chmod(0o755)
+    for args in (GUARD, f"--scope project {GUARD}"):
+        _settings(project, _on("Stop", f'{prefix}"{shim}" {args}'))
+        assert _cov(project).form == hc.FORM_SHIM, (prefix, args)
+
+
+def test_a_bare_shim_path_that_cannot_execute_does_not_cover(tmp_path):
+    project = _project(tmp_path)
+    shim = _shim_home(tmp_path / "release") / "scripts" / "hooks" / hc.SHIM_NAME
+    shim.chmod(0o644)
+    _settings(project, _on("Stop", f"{shim} {GUARD}"))
+    assert _cov(project).state == hc.MISSING
 
 
 def test_a_user_scope_shim_entry_in_project_settings_does_not_cover(tmp_path):
     """Both calls would run with scope user and each would skip for the other: no guard at all."""
     project = _project(tmp_path)
-    _settings(project, _on("Stop", hc.registered_command(GUARD, "user")))
+    home = _shim_home(tmp_path / "release")
+    _settings(project, _on("Stop", hc.registered_command(GUARD, "user", vnx_home=str(home))))
     assert not _cov(project).covered
 
 
 def test_the_shim_form_for_another_entry_does_not_cover(tmp_path):
     project = _project(tmp_path)
+    home = _shim_home(tmp_path / "release")
     _settings(project, _on("Stop", hc.registered_command("pretooluse_t0_no_subagents.py",
-                                                         "project", vnx_home="/opt/vnx")))
+                                                         "project", vnx_home=str(home))))
     assert not _cov(project).covered
+
+
+# ── a shim registration covers only when its shim can run ───────────────────
+
+
+def test_a_shim_registration_to_a_missing_shim_does_not_cover(tmp_path):
+    """codex advisory and deepseek warning 1 on #2075: the project's own call exits 1 with
+    "guard shim missing", so counting it as coverage would leave no guard for the event. It
+    reports MISSING, as a direct entry to a missing path does."""
+    project = _project(tmp_path)
+    for command in (hc.registered_command(GUARD, "project", vnx_home=str(tmp_path / "gone")),
+                    f"sh {tmp_path / 'gone' / 'scripts' / 'hooks' / hc.SHIM_NAME} {GUARD}"):
+        _settings(project, _on("Stop", command))
+        result = _cov(project)
+        assert (result.covered, result.state) == (False, hc.MISSING), command
+
+
+def _shim_variants(home: Path):
+    """Shim calls the shim itself refuses with exit 1, in the plain and in the inline form."""
+    shim = home / "scripts" / "hooks" / hc.SHIM_NAME
+    inline = hc.registered_command(GUARD, "project", vnx_home=str(home))
+    yield "unknown scope", f"sh {shim} --scope global {GUARD}"
+    yield "unknown scope, inline", inline.replace("--scope project", "--scope global")
+    yield "--scope=", f"sh {shim} --scope=project {GUARD}"
+    yield "scope after the entry", f"sh {shim} {GUARD} --scope project"
+    yield "two entries", f"sh {shim} --scope project {GUARD} {GUARD}"
+    yield "two entries, inline", inline.replace(f" {GUARD};", f" {GUARD} {GUARD};")
+    yield "scope without a value", f"sh {shim} --scope"
+
+
+def test_a_shim_call_the_shim_refuses_does_not_cover(tmp_path):
+    """deepseek warning 1: an unknown --scope, or an entry the shim would not accept, makes the
+    project's call exit 1. Such a registration is no guard."""
+    project = _project(tmp_path)
+    home = _shim_home(tmp_path / "release")
+    for label, command in _shim_variants(home):
+        _settings(project, _on("Stop", command))
+        assert not _cov(project).covered, label
+
+
+def test_the_shim_path_expands_home_and_the_project_dir(tmp_path):
+    project = _project(tmp_path)
+    _shim_home(project)
+    home = _shim_home(tmp_path / "home" / ".vnx-system" / "current").parents[1]
+    env = {"HOME": str(home)}
+    for vnx_home in ("$HOME/.vnx-system/current", "${HOME}/.vnx-system/current",
+                     "$CLAUDE_PROJECT_DIR", "${CLAUDE_PROJECT_DIR}"):
+        _settings(project, _on("Stop", hc.registered_command(GUARD, "project", vnx_home=vnx_home)))
+        assert _cov(project, env=env).form == hc.FORM_SHIM, vnx_home
+    _settings(project, _on("Stop", hc.registered_command(GUARD, "project",
+                                                         vnx_home="$HOME/.vnx-system/current")))
+    assert not _cov(project, env={"HOME": str(tmp_path / "elsewhere")}).covered
+    assert not _cov(project, env={}).covered
+
+
+def test_a_shim_path_the_guard_cannot_resolve_does_not_cover(tmp_path):
+    """Only $HOME and $CLAUDE_PROJECT_DIR are expanded, and never through a shell. An unrendered
+    template placeholder, any other variable, a tilde and a relative path stay unresolved."""
+    project = _project(tmp_path)
+    release = _shim_home(tmp_path / "release")
+    _shim_home(project)
+    env = {"HOME": str(tmp_path), "VNX_HOME": str(release)}
+    rel = f"scripts/hooks/{hc.SHIM_NAME}"
+    for command in (hc.registered_command(GUARD, "project", vnx_home="{{VNX_HOME}}"),
+                    f'sh "$VNX_HOME/{rel}" {GUARD}', f"sh ~/release/{rel} {GUARD}",
+                    f"sh {rel} {GUARD}", f'sh "$(echo {release})/{rel}" {GUARD}'):
+        _settings(project, _on("Stop", command))
+        assert _cov(project, env=env).state == hc.MISSING, command
 
 
 def test_the_fabric_repo_form_resolves_root_against_the_project(tmp_path):
@@ -335,3 +426,102 @@ def test_project_id_is_the_first_line(tmp_path):
     (tmp_path / ".vnx-project-id").write_text("", encoding="utf-8")
     assert hc.project_id(tmp_path) is None
     assert hc.project_id(tmp_path / "absent") is None
+
+
+# ── which code the shim runs: step 2 ────────────────────────────────────────
+
+
+def _registry(home: Path, *projects) -> Path:
+    """``~/.vnx/projects.json`` in the shape measured on 2026-10-16."""
+    registry = home / ".vnx" / "projects.json"
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    registry.write_text(json.dumps({"projects": [
+        {"name": Path(str(path)).name, "path": str(path), "layout": "unknown", "project_id": pid}
+        for pid, path in projects]}, indent=2), encoding="utf-8")
+    return registry
+
+
+def test_the_registered_fabric_root_runs_its_own_code(tmp_path):
+    fabric = _git_project(tmp_path / "fabric", "vnx-dev")
+    own = _guard_file(fabric)
+    home = tmp_path / "home"
+    _registry(home, ("seocrawler-v2", tmp_path / "other"), ("vnx-dev", fabric))
+    env = {"HOME": str(home)}
+    assert hc.is_fabric_root(fabric, env)
+    assert hc.shim_entry_file(fabric, GUARD, env) == own
+
+
+def test_the_fabric_root_compares_real_paths(tmp_path):
+    fabric = _git_project(tmp_path / "fabric", "vnx-dev")
+    link = tmp_path / "link-to-fabric"
+    link.symlink_to(fabric, target_is_directory=True)
+    home = tmp_path / "home"
+    _registry(home, ("vnx-dev", link))
+    assert hc.is_fabric_root(fabric, {"HOME": str(home)})
+    _registry(home, ("vnx-dev", fabric))
+    assert hc.is_fabric_root(link, {"HOME": str(home)})
+
+
+def _not_the_fabric_root(tmp_path: Path):
+    """deepseek warning 2 on #2075: the repo writes `.vnx-project-id` itself, so the id never
+    selects repo code. Only the user-owned registry does."""
+    spoof = _git_project(tmp_path / "spoof", "vnx-dev")
+    real = _git_project(tmp_path / "real-fabric", "vnx-dev")
+    home = tmp_path / "home"
+    registry = home / ".vnx" / "projects.json"
+    yield "no registry", spoof, lambda: None
+    yield "registry names another root", spoof, lambda: _registry(home, ("vnx-dev", real))
+    yield "root registered under another id", spoof, lambda: _registry(home, ("other", spoof))
+    yield "only a later vnx-dev entry names the root", spoof, lambda: _registry(
+        home, ("vnx-dev", real), ("vnx-dev", spoof))
+    yield "relative registry path", spoof, lambda: _registry(home, ("vnx-dev", "spoof"))
+    yield "invalid JSON", spoof, lambda: registry.write_text('{"projects": [', encoding="utf-8")
+    yield "not a dict", spoof, lambda: registry.write_text("[]", encoding="utf-8")
+    yield "projects not a list", spoof, lambda: registry.write_text(
+        json.dumps({"projects": {"project_id": "vnx-dev", "path": str(spoof)}}), encoding="utf-8")
+    yield "path not a string", spoof, lambda: registry.write_text(
+        json.dumps({"projects": [{"project_id": "vnx-dev", "path": [str(spoof)]}]}),
+        encoding="utf-8")
+    other_id = _git_project(tmp_path / "other-id", "consumer")
+    yield "registered path whose id is not vnx-dev", other_id, lambda: _registry(
+        home, ("vnx-dev", other_id))
+
+
+def test_a_repo_that_names_itself_vnx_dev_is_not_the_fabric_root(tmp_path):
+    home = tmp_path / "home"
+    env = {"HOME": str(home)}
+    for label, root, write_registry in _not_the_fabric_root(tmp_path):
+        own = _guard_file(root)
+        if (home / ".vnx").exists():
+            (home / ".vnx" / "projects.json").unlink()
+        write_registry()
+        assert not hc.is_fabric_root(root, env), label
+        assert hc.shim_entry_file(root, GUARD, env) == (
+            home / ".vnx-system" / "current" / "scripts" / "hooks" / GUARD), label
+        assert hc.shim_entry_file(root, GUARD, env) != own, label
+
+
+def test_an_unreadable_registry_or_no_home_is_not_the_fabric_root(tmp_path):
+    fabric = _git_project(tmp_path / "fabric", "vnx-dev")
+    home = tmp_path / "home"
+    (home / ".vnx" / "projects.json").mkdir(parents=True)
+    assert not hc.is_fabric_root(fabric, {"HOME": str(home)})
+    assert not hc.is_fabric_root(fabric, {})
+    assert not hc.is_fabric_root(fabric, {"HOME": ""})
+
+
+def test_the_shim_entry_file_follows_vnx_home(tmp_path):
+    consumer = _git_project(tmp_path / "consumer")
+    env = {"HOME": str(tmp_path / "home"), "VNX_HOME": str(tmp_path / "pinned")}
+    assert hc.shim_entry_file(consumer, GUARD, env) == tmp_path / "pinned" / "scripts" / "hooks" / GUARD
+    env["VNX_HOME"] = ""
+    assert hc.shim_entry_file(consumer, GUARD, env) == (
+        tmp_path / "home" / ".vnx-system" / "current" / "scripts" / "hooks" / GUARD)
+
+
+def test_the_registered_fabric_root_without_the_entry_runs_current(tmp_path):
+    fabric = _git_project(tmp_path / "fabric", "vnx-dev")
+    home = tmp_path / "home"
+    _registry(home, ("vnx-dev", fabric))
+    assert hc.shim_entry_file(fabric, GUARD, {"HOME": str(home)}) == (
+        home / ".vnx-system" / "current" / "scripts" / "hooks" / GUARD)

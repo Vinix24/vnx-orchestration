@@ -191,18 +191,93 @@ def test_the_t0_folder_resolves_to_the_project(world, shell):
         world["hooks"] / PROBE)
 
 
+def _registry(home: Path, *projects) -> Optional[Path]:
+    """``~/.vnx/projects.json`` in the shape measured on 2026-10-16; no projects removes it."""
+    registry = home / ".vnx" / "projects.json"
+    if not projects:
+        if registry.exists():
+            registry.unlink()
+        return None
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    registry.write_text(json.dumps({"projects": [
+        {"name": Path(str(path)).name, "path": str(path), "layout": "unknown", "project_id": pid}
+        for pid, path in projects]}, indent=2), encoding="utf-8")
+    return registry
+
+
 @pytest.mark.parametrize("shell", SHELLS)
-def test_the_fabric_repo_runs_its_own_code(world, shell):
+def test_the_registered_fabric_repo_runs_its_own_code(world, shell):
     fabric = _vnx_project(world["tmp"] / "fabric", "vnx-dev")
     own = _write_probe(fabric / "scripts" / "hooks")
+    _registry(world["home"], ("consumer", world["project"]), ("vnx-dev", fabric))
     assert _ran(_shim(world, shell, PROBE, cwd=fabric))["ran"] == os.path.realpath(own)
 
 
 @pytest.mark.parametrize("shell", SHELLS)
 def test_the_fabric_repo_without_the_entry_runs_current(world, shell):
     fabric = _vnx_project(world["tmp"] / "fabric", "vnx-dev")
+    _registry(world["home"], ("vnx-dev", fabric))
     assert _ran(_shim(world, shell, PROBE, cwd=fabric))["ran"] == os.path.realpath(
         world["hooks"] / PROBE)
+
+
+def _spoof_repo(tmp: Path, marker: Path) -> Path:
+    """A cloned repo that calls itself vnx-dev, has a T0 folder, and ships its own guard."""
+    spoof = _vnx_project(tmp / "spoof", "vnx-dev")
+    hooks = spoof / "scripts" / "hooks"
+    hooks.mkdir(parents=True, exist_ok=True)
+    (hooks / hook_coverage.GUARD_ENTRY).write_text(
+        f"open({str(marker)!r}, 'w').write('repo code ran')\n", encoding="utf-8")
+    return spoof
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_a_repo_that_names_itself_vnx_dev_runs_current(world, shell):
+    """deepseek warning 2 on #2075: a user-scope hook must never run code the repository
+    selects. Through the user-form command such a repo runs `current`'s guard, whatever the
+    registry says about other roots, and its own file never runs."""
+    marker = world["tmp"] / "marker"
+    spoof = _spoof_repo(world["tmp"], marker)
+    real = _vnx_project(world["tmp"] / "real-fabric", "vnx-dev")
+    command = hook_coverage.registered_command(hook_coverage.GUARD_ENTRY)
+    for projects in ((), (("vnx-dev", real),), (("other", spoof),),
+                     (("vnx-dev", real), ("vnx-dev", spoof))):
+        _registry(world["home"], *projects)
+        proc = _registered(world, shell, command, cwd=spoof)
+        assert not marker.exists(), ("the repo's own guard ran", projects)
+        out = _ran(proc)
+        assert out["ran"] == os.path.realpath(world["hooks"] / hook_coverage.GUARD_ENTRY), projects
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_an_unreadable_registry_runs_current(world, shell):
+    fabric = _vnx_project(world["tmp"] / "fabric", "vnx-dev")
+    _write_probe(fabric / "scripts" / "hooks")
+    registry = world["home"] / ".vnx" / "projects.json"
+    registry.parent.mkdir(parents=True)
+    for content in ('{"projects": [', "[]", json.dumps({"projects": [
+            {"project_id": "vnx-dev", "path": fabric.name}]})):
+        registry.write_text(content, encoding="utf-8")
+        assert _ran(_shim(world, shell, PROBE, cwd=fabric))["ran"] == os.path.realpath(
+            world["hooks"] / PROBE), content
+    registry.unlink()
+    registry.mkdir()
+    assert _ran(_shim(world, shell, PROBE, cwd=fabric))["ran"] == os.path.realpath(
+        world["hooks"] / PROBE)
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_the_registry_check_ignores_a_planted_python_module(world, shell):
+    """The registry is read by `python3 -I`: the repo is the cwd, and a `json.py` it plants
+    must not be imported."""
+    fabric = _vnx_project(world["tmp"] / "fabric", "vnx-dev")
+    own = _write_probe(fabric / "scripts" / "hooks")
+    marker = world["tmp"] / "planted"
+    for name in ("json.py", "os.py", "sitecustomize.py"):
+        (fabric / name).write_text(f"open({str(marker)!r}, 'w').write('x')\n", encoding="utf-8")
+    _registry(world["home"], ("vnx-dev", fabric))
+    assert _ran(_shim(world, shell, PROBE, cwd=fabric))["ran"] == os.path.realpath(own)
+    assert not marker.exists()
 
 
 @pytest.mark.parametrize("shell", SHELLS)
@@ -243,17 +318,52 @@ def test_outside_a_guarded_project_the_shim_is_silent(world, shell):
         assert (proc.returncode, proc.stdout, proc.stderr) == (0, "", ""), label
 
 
+def _code_choice_cases(world, tmp: Path):
+    """(label, cwd, registry projects, extra env) for shim step 2."""
+    fabric = _vnx_project(tmp / "fabric", "vnx-dev")
+    _write_probe(fabric / "scripts" / "hooks")
+    bare_fabric = _vnx_project(tmp / "bare-fabric", "vnx-dev")
+    spoof = _vnx_project(tmp / "spoof", "vnx-dev")
+    _write_probe(spoof / "scripts" / "hooks")
+    link = tmp / "fabric-link"
+    link.symlink_to(fabric, target_is_directory=True)
+    consumer = world["project"]
+    _write_probe(consumer / "scripts" / "hooks")
+    yield "consumer", consumer, (), {}
+    yield "consumer with VNX_HOME", consumer, (), {"VNX_HOME": world["release"]}
+    yield "registered fabric", fabric, (("vnx-dev", fabric),), {}
+    yield "fabric registered through a symlink", fabric, (("vnx-dev", link),), {}
+    yield "fabric from its T0 folder", fabric / ".claude" / "terminals" / "T0", \
+        (("vnx-dev", fabric),), {}
+    yield "registered fabric without the entry", bare_fabric, (("vnx-dev", bare_fabric),), {}
+    yield "fabric without a registry", fabric, (), {}
+    yield "spoof, registry names another root", spoof, (("vnx-dev", fabric),), {}
+    yield "spoof registered under another id", spoof, (("other", spoof),), {}
+    yield "spoof in a later vnx-dev entry", spoof, (("vnx-dev", fabric), ("vnx-dev", spoof)), {}
+    yield "consumer path registered as vnx-dev", consumer, (("vnx-dev", consumer),), {}
+
+
 @pytest.mark.parametrize("shell", SHELLS)
-def test_the_shim_and_hook_coverage_agree_on_rule_1(world, shell, monkeypatch):
-    """Rule 1 exists twice, in sh and in Python. Both must say the same for every case."""
+def test_the_shim_and_hook_coverage_agree_on_rule_1_and_the_code_choice(world, shell,
+                                                                         monkeypatch):
+    """Rule 1 and step 2 exist twice, in sh and in Python. Both must say the same for every
+    case: whether anything runs, and which file."""
     for var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_CEILING_DIRECTORIES"):
         monkeypatch.delenv(var, raising=False)
-    cases = list(_not_guarded_cases(world["tmp"] / f"parity-{shell}"))
-    cases.append(("project root", world["project"]))
-    cases.append(("T0 folder", world["project"] / ".claude" / "terminals" / "T0"))
-    for label, cwd in cases:
-        ran = _shim(world, shell, PROBE, cwd=cwd).stdout != ""
-        assert ran == (hook_coverage.t0_project_root(str(cwd)) is not None), label
+    cases = [(label, cwd, (), {}) for label, cwd in
+             _not_guarded_cases(world["tmp"] / f"parity-{shell}")]
+    cases.append(("project root", world["project"], (), {}))
+    cases.append(("T0 folder", world["project"] / ".claude" / "terminals" / "T0", (), {}))
+    cases.extend(_code_choice_cases(world, world["tmp"] / f"choice-{shell}"))
+    for label, cwd, projects, extra in cases:
+        _registry(world["home"], *projects)
+        env = _env(world, shell, **extra)
+        proc = _shim(world, shell, PROBE, cwd=cwd, **extra)
+        root = hook_coverage.t0_project_root(str(cwd))
+        assert (proc.stdout != "") == (root is not None), label
+        if root is not None:
+            expected = hook_coverage.shim_entry_file(root, PROBE, env)
+            assert _ran(proc)["ran"] == os.path.realpath(expected), label
 
 
 @pytest.mark.parametrize("shell", SHELLS)
@@ -351,6 +461,61 @@ def test_registered_command_refuses_what_it_cannot_quote(kwargs):
     args = {"entry": hook_coverage.GUARD_ENTRY, "scope": "user", **kwargs}
     with pytest.raises(ValueError):
         hook_coverage.registered_command(args.pop("entry"), **args)
+
+
+CODEX_REPRO = "/safe/$(printf VNX_REVIEW_EXECUTED >&2)"
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_a_command_substitution_in_the_home_runs_when_rendered(world, shell):
+    """codex_gate on #2075 (blocking): the home is interpolated into shell source, so a
+    substitution in it runs before the shim is even tested. This pins the hazard on the command
+    text the unvalidated renderer produced."""
+    command = hook_coverage.registered_command(
+        hook_coverage.GUARD_ENTRY, vnx_home="/safe/X").replace("/safe/X", CODEX_REPRO)
+    proc = _registered(world, shell, command)
+    assert "VNX_REVIEW_EXECUTED" in proc.stderr
+    assert proc.returncode == 1
+
+
+@pytest.mark.parametrize("vnx_home", [
+    CODEX_REPRO, "${HOME}$(id)", "$HOME/$(x)", "/x/{{VNX_HOME}}", "{{VNX_HOME}}x",
+    "x{{VNX_HOME}}", "$(id)", "/a/$(id)/b", "/a/${HOME}", "$HOMEX/x", "$HOME_x",
+    "${HOME:-/tmp}", "${HOME}${HOME}", "$VNX_HOME/x", "$PWD", "relative/path", "./x", "~/x",
+    "/a;b", "/a&&b", "/a|b", "/a>b", "/a*", "/a\tb", "/a\rb", "/a\x00b", "/a$", "/{a,b}",
+    "{{VNX_HOME}}{{VNX_HOME}}", "$CLAUDE_PROJECT_DIRX", "${CLAUDE_PROJECT_DIR}x",
+])
+def test_the_home_is_one_of_the_documented_forms(vnx_home):
+    with pytest.raises(ValueError) as caught:
+        hook_coverage.registered_command(hook_coverage.GUARD_ENTRY, "project", vnx_home=vnx_home)
+    assert repr(vnx_home) in str(caught.value)
+
+
+def _allowed_homes(world):
+    release = str(world["release"])
+    yield "absolute", release, {}
+    yield "absolute with spaces and plain marks", str(world["spaced"]), {}
+    yield "$HOME", "$HOME/.vnx-system/current", {}
+    yield "${HOME}", "${HOME}/.vnx-system/current", {}
+    yield "default", hook_coverage.DEFAULT_VNX_HOME, {}
+    yield "$CLAUDE_PROJECT_DIR", "$CLAUDE_PROJECT_DIR", {"CLAUDE_PROJECT_DIR": release}
+    yield "${CLAUDE_PROJECT_DIR}", "${CLAUDE_PROJECT_DIR}/", {"CLAUDE_PROJECT_DIR": release}
+    yield "{{VNX_HOME}}", "{{VNX_HOME}}", {}
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_every_documented_home_form_runs_the_shim(world, shell):
+    """Each allowed form renders, and the rendered command (with the template placeholder
+    substituted the way the template renderer does) runs the shim and its entry."""
+    world["spaced"] = world["tmp"] / "a b+c@d,e:f" / "release-1.7.2"
+    shutil.copytree(world["release"], world["spaced"])
+    for label, vnx_home, extra in _allowed_homes(world):
+        for scope in hook_coverage.SCOPES:
+            command = hook_coverage.registered_command(PROBE, scope, vnx_home=vnx_home)
+            command = command.replace("{{VNX_HOME}}", str(world["release"]))
+            out = _ran(_registered(world, shell, command, **extra))
+            assert out["scope"] == scope, label
+            assert out["ran"] == os.path.realpath(world["hooks"] / PROBE), label
 
 
 def _forms(world):
@@ -482,12 +647,38 @@ def test_the_user_command_is_silent_for_a_claude_p_child(world, shell):
     assert (proc.returncode, proc.stdout) == (0, "")
 
 
-@pytest.mark.parametrize("shell", SHELLS)
-def test_the_user_command_is_silent_where_the_project_covers_the_event(world, shell):
+def _project_stop_hook(world, command: str) -> None:
     settings = world["project"] / ".claude" / "settings.json"
     settings.write_text(json.dumps({"hooks": {"Stop": [{"hooks": [{
-        "type": "command",
-        "command": f'python3 "{REPO_ROOT / "scripts" / "hooks" / hook_coverage.GUARD_ENTRY}"',
-    }]}]}}), encoding="utf-8")
+        "type": "command", "command": command}]}]}}), encoding="utf-8")
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_the_user_command_is_silent_where_the_project_covers_the_event(world, shell):
+    _project_stop_hook(
+        world, f'python3 "{REPO_ROOT / "scripts" / "hooks" / hook_coverage.GUARD_ENTRY}"')
+    proc = _guard_stop(world, shell)
+    assert (proc.returncode, proc.stdout) == (0, ""), proc.stderr
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_the_user_command_decides_where_the_project_shim_is_missing(world, shell):
+    """codex advisory on #2075: the project registers the guard through a shim that is gone.
+    Its own call exits 1, so the user-level guard must decide, not skip."""
+    _project_stop_hook(world, hook_coverage.registered_command(
+        hook_coverage.GUARD_ENTRY, "project", vnx_home=str(world["tmp"] / "pruned-release")))
+    project_call = _registered(world, shell, hook_coverage.registered_command(
+        hook_coverage.GUARD_ENTRY, "project", vnx_home=str(world["tmp"] / "pruned-release")))
+    assert project_call.returncode == 1
+    proc = _guard_stop(world, shell)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout, "no decision: the user-level guard skipped, so no guard ran for Stop"
+    assert json.loads(proc.stdout)["decision"] == "block"
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_the_user_command_is_silent_where_the_project_shim_exists(world, shell):
+    _project_stop_hook(world, hook_coverage.registered_command(
+        hook_coverage.GUARD_ENTRY, "project", vnx_home=str(REPO_ROOT)))
     proc = _guard_stop(world, shell)
     assert (proc.returncode, proc.stdout) == (0, ""), proc.stderr

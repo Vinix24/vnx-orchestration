@@ -12,8 +12,13 @@
 #      `.vnx-project-id` with a non-empty first line and a `.claude/terminals/T0/CLAUDE.md`, and
 #      the cwd is outside `.vnx-data/worktrees/`, it exits 0 without output: only a VNX project
 #      with a T0 is guarded (rule 1 of the T0 guard; the guard checks it again on the payload).
-#   2. The fabric repo (first line `vnx-dev`) runs its own `<root>/scripts/hooks/<entry>` when
-#      present. Everyone else runs `${VNX_HOME:-$HOME/.vnx-system/current}/scripts/hooks/<entry>`.
+#   2. The fabric repo runs its own `<root>/scripts/hooks/<entry>` when present. Everyone else
+#      runs `${VNX_HOME:-$HOME/.vnx-system/current}/scripts/hooks/<entry>`. The repo writes its
+#      own `.vnx-project-id`, so the id alone never selects repo code: the root's real path must
+#      also be the real path of the first `vnx-dev` entry in the user-owned registry
+#      `$HOME/.vnx/projects.json`. A missing or unreadable registry means `current`. The
+#      registry is JSON, so `python3 -I -S` reads it: the cwd is the repo, and isolated mode
+#      keeps a module the repo plants there (json.py, site hooks) from being imported.
 #   3. A missing entry: one stderr line naming the path, exit 1.
 #   4. `python3 <entry>` with stdin passed through, not exec'd, so its exit 2 becomes 1. A
 #      shim-routed entry decides through JSON on stdout, never through exit 2.
@@ -63,11 +68,29 @@ id=${id%"${id##*[![:space:]]}"}
 id=${id#"${id%%[![:space:]]*}"}
 [ -n "$id" ] || exit 0
 
-# 2. Which code: the fabric repo runs its own, everyone else the released one.
-if [ "$id" = "vnx-dev" ] && [ -f "$root/scripts/hooks/$entry" ]; then
+# 2. Which code: the registered fabric repo runs its own, everyone else the released one.
+#    hook_coverage.registered_fabric_root is the Python twin of this reader.
+registered_fabric_root='
+import json, os, sys
+root, registry = sys.argv[1], sys.argv[2]
+try:
+    with open(registry, encoding="utf-8") as fh:
+        data = json.load(fh)
+except (OSError, UnicodeDecodeError, ValueError):
+    sys.exit(1)
+projects = data.get("projects") if isinstance(data, dict) else None
+for project in projects if isinstance(projects, list) else ():
+    if isinstance(project, dict) and project.get("project_id") == "vnx-dev":
+        path = project.get("path")
+        ok = isinstance(path, str) and os.path.isabs(path)
+        sys.exit(0 if ok and os.path.realpath(path) == os.path.realpath(root) else 1)
+sys.exit(1)
+'
+file=${VNX_HOME:-$HOME/.vnx-system/current}/scripts/hooks/$entry
+if [ "$id" = "vnx-dev" ] && [ -f "$root/scripts/hooks/$entry" ] && [ -n "${HOME:-}" ] &&
+  python3 -I -S -c "$registered_fabric_root" "$root" "$HOME/.vnx/projects.json" \
+    </dev/null >/dev/null 2>&1; then
   file=$root/scripts/hooks/$entry
-else
-  file=${VNX_HOME:-$HOME/.vnx-system/current}/scripts/hooks/$entry
 fi
 
 # 3. A missing entry is reported, never blocking.

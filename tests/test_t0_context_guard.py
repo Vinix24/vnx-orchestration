@@ -26,6 +26,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 HOOK = REPO_ROOT / "scripts" / "hooks" / "t0_context_guard.py"
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
 
+import hook_coverage
 import t0_rotation_state as rotation_state
 
 SESSION = "sess-abc-123"
@@ -412,6 +413,23 @@ def test_user_scope_follows_the_pretooluse_matcher(tmp_path, env_base):
 def test_user_scope_runs_when_the_project_entry_points_at_a_missing_file(tmp_path, env_base):
     project = _covering_project(tmp_path, {"Stop": [{"hooks": [_direct(tmp_path / "gone.py")]}]})
     assert _run(tmp_path, _user_env(env_base, project), "Stop", 520_000)["decision"] == "block"
+
+
+def _shim_hook(vnx_home: Path) -> dict:
+    return {"type": "command", "command": hook_coverage.registered_command(
+        hook_coverage.GUARD_ENTRY, "project", vnx_home=str(vnx_home))}
+
+
+def test_user_scope_runs_when_the_project_shim_is_missing(tmp_path, env_base):
+    """codex advisory on #2075: a project registration through a shim that is gone exits 1
+    itself, so the user-level call must decide instead of skipping."""
+    project = _covering_project(tmp_path, {"Stop": [{"hooks": [_shim_hook(tmp_path / "pruned")]}]})
+    assert _run(tmp_path, _user_env(env_base, project), "Stop", 520_000)["decision"] == "block"
+
+
+def test_user_scope_skips_where_the_project_shim_exists(tmp_path, env_base):
+    project = _covering_project(tmp_path, {"Stop": [{"hooks": [_shim_hook(REPO_ROOT)]}]})
+    assert _run(tmp_path, _user_env(env_base, project), "Stop", 520_000) is None
 
 
 def test_user_scope_runs_when_the_project_settings_are_invalid(tmp_path, env_base):
