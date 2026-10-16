@@ -807,6 +807,35 @@ def _check_hook_paths(project_dir: Path) -> Check:
     return _result(PASS, "all referenced hook script paths resolve")
 
 
+def _check_user_guard() -> Check:
+    """The T0 context guard at user level: every account has the three entries, ``current``
+    carries the shim and the guard, and every registry project with a T0 folder is covered.
+
+    Delegates to ``guard_check.run_check`` (the same report ``vnx guard check`` prints) so the
+    two cannot disagree. A machine with no Claude Code account directory has nothing to check.
+    """
+    def _result(status: str, detail: str) -> Check:
+        return Check(name="guard:user-level", status=status, detail=detail)
+
+    try:
+        _engine.ensure_engine_on_path()
+        import guard_check
+        import guard_install
+    except Exception as exc:
+        return _result(WARN, f"could not load guard_check module: {exc}")
+
+    home = Path.home()
+    if not guard_install.discover_accounts(home):
+        return _result(PASS, "no Claude Code account directory; user-level guard not applicable")
+    report = guard_check.run_check(home=home)
+    if report.ok:
+        covered = sum(1 for acc in report.accounts for _ in acc.coverage)
+        return _result(PASS, f"{len(report.accounts)} account(s) covered, "
+                             f"{covered} project/account pair(s) checked")
+    return _result(WARN, f"{report.problems[0]} ({len(report.problems)} finding(s); "
+                         "run `vnx guard check`)")
+
+
 def _ledger_health_job(data_root: Path, project_id: str) -> tuple[str, str]:
     """(launchd Label, err log path) of the job that should write this project's beacon.
 
@@ -1168,6 +1197,7 @@ def vnx_doctor(args) -> int:
     checks.extend(_check_worktree_orphans(project_dir))
     checks.append(_check_active_drain(data_root))
     checks.append(_check_hook_paths(project_dir))
+    checks.append(_check_user_guard())
     checks.append(_check_ledger_health(data_root, _engine.read_marker_project_id(project_dir) or ""))
     checks.extend(_check_launchd_agents(project_dir))
     checks.extend(_check_installed_plist_placeholders())

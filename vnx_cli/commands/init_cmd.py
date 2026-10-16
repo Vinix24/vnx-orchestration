@@ -332,6 +332,20 @@ def _render_template(tmpl_path: Path, ctx: dict) -> str:
     return env.get_template(tmpl_path.name).render(**ctx)
 
 
+def _assert_engine_root_renderable(engine_root: str) -> None:
+    """Refuse an engine root that cannot sit inside a hook command (OI-2117 item e).
+
+    ``settings.json.j2`` puts ``engine_root`` into shell source inside double quotes. A quote, a
+    ``$(`` or a backtick in the path would end the string or run code, so the value must pass the
+    allowlist ``hook_coverage.registered_command`` applies to a VNX home; its ValueError names
+    the value. A test pins the template's literal command to that function's output.
+    """
+    _engine.ensure_engine_on_path()
+    import hook_coverage
+
+    hook_coverage.registered_command(hook_coverage.GUARD_ENTRY, "project", engine_root)
+
+
 def _scaffold_claude_dir(project_dir: Path, tmpl_root: Path, ctx: dict, force: bool) -> None:
     """Create the .claude/ skeleton from templates."""
     claude_dir = project_dir / ".claude"
@@ -357,6 +371,7 @@ def _scaffold_claude_dir(project_dir: Path, tmpl_root: Path, ctx: dict, force: b
     # .vnx-version pin (OI-695). Operators refresh the VNX-owned keys via
     # `vnx regen-settings --merge`, not by clobbering the project file.
     if not settings_path.exists():
+        _assert_engine_root_renderable(ctx["engine_root"])
         _atomic_write(settings_path, _render_template(tmpl_root / "settings.json.j2", ctx), project_dir)
         print(f"  created {settings_path.relative_to(project_dir)}")
     else:

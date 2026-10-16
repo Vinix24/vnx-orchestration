@@ -46,8 +46,13 @@ from typing import Callable, List, Tuple
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+
+import hook_coverage
+
 HOOK = REPO_ROOT / "scripts" / "hooks" / "pretooluse_t0_no_subagents.py"
 HOOK_REL = "scripts/hooks/pretooluse_t0_no_subagents.py"
+SHIM_REL = "scripts/hooks/vnx_hook_shim.sh"
 TEMPLATES = REPO_ROOT / "templates"
 VNX_KEYS_TMPL = TEMPLATES / "settings_vnx_keys.json.tmpl"
 INIT_DEFAULT_J2 = TEMPLATES / "init" / "default" / "settings.json.j2"
@@ -259,13 +264,28 @@ def _guard_command(settings: dict) -> str:
     return commands[0]
 
 
-def _run_command(command: str, payload: str, tmp_path: Path) -> subprocess.CompletedProcess:
+def _vnx_project_with_t0(tmp_path: Path) -> Path:
+    """The kind of project the shim serves: a git root with a project id and a T0 folder."""
+    project = tmp_path / "guarded-project"
+    (project / ".claude" / "terminals" / "T0").mkdir(parents=True, exist_ok=True)
+    (project / ".claude" / "terminals" / "T0" / "CLAUDE.md").write_text("# T0\n", encoding="utf-8")
+    (project / ".vnx-project-id").write_text("consumer\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=project, check=True)
+    return project
+
+
+def _run_command(command: str, payload: str, tmp_path: Path, engine_root: Path) -> subprocess.CompletedProcess:
+    """Run a registered command the way Claude Code does: inside a VNX project with a T0
+    folder, with the shim's code root (``VNX_HOME``) at the install the command names."""
+    env = _isolated_env(tmp_path)
+    env["VNX_HOME"] = str(engine_root)
     return subprocess.run(
         ["bash", "-c", command],
         input=payload,
         capture_output=True,
         text=True,
-        env=_isolated_env(tmp_path),
+        env=env,
+        cwd=_vnx_project_with_t0(tmp_path),
         timeout=10,
     )
 
@@ -289,8 +309,11 @@ def test_every_template_keeps_the_existing_bash_guard(render, tmp_path):
 
 @pytest.mark.parametrize("render", [r for _, r in SETTINGS_TEMPLATES], ids=TEMPLATE_IDS)
 def test_the_rendered_command_points_at_a_file_that_exists(render, tmp_path):
+    """The block goes through the shim, rendered by ``registered_command`` and by nothing else."""
     command = _guard_command(render(REPO_ROOT, tmp_path / "project"))
-    assert str(REPO_ROOT / HOOK_REL) in command
+    assert command == hook_coverage.registered_command(HOOK.name, "project", str(REPO_ROOT))
+    assert str(REPO_ROOT / SHIM_REL) in command
+    assert (REPO_ROOT / SHIM_REL).is_file()
     assert (REPO_ROOT / HOOK_REL).is_file()
     assert "{{" not in command
 
@@ -301,9 +324,9 @@ def test_the_rendered_command_denies_in_t0_and_stays_silent_for_a_worker(render,
     its own quoting, so a template that renders to a dead command is caught."""
     command = _guard_command(render(REPO_ROOT, tmp_path / "project"))
 
-    _assert_denied(_run_command(command, _payload("Agent", T0_CWD, T0_TRANSCRIPT), tmp_path))
-    _assert_untouched(_run_command(command, _payload("Agent", WORKER_CWD, WORKER_TRANSCRIPT), tmp_path))
-    _assert_untouched(_run_command(command, _payload("Bash", T0_CWD, T0_TRANSCRIPT), tmp_path))
+    _assert_denied(_run_command(command, _payload("Agent", T0_CWD, T0_TRANSCRIPT), tmp_path, REPO_ROOT))
+    _assert_untouched(_run_command(command, _payload("Agent", WORKER_CWD, WORKER_TRANSCRIPT), tmp_path, REPO_ROOT))
+    _assert_untouched(_run_command(command, _payload("Bash", T0_CWD, T0_TRANSCRIPT), tmp_path, REPO_ROOT))
 
 
 # ── shipping: regen-settings --merge on a tmp project ────────────────────────
@@ -331,7 +354,7 @@ def _make_install(tmp_path: Path, *, with_hook: bool = False) -> Path:
         "templates/settings_vnx_keys.json.tmpl",
     ]
     if with_hook:
-        files.append(HOOK_REL)
+        files.extend([HOOK_REL, SHIM_REL])
     for rel in files:
         dest = install / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -379,7 +402,7 @@ def test_regen_merge_writes_the_block_and_keeps_the_projects_own_settings(tmp_pa
     # the block is there, pointing into the install, for both tool names
     (group,) = _guard_groups(merged)
     assert {"Agent", "Task"} <= set(group["matcher"].split("|"))
-    assert str(install / HOOK_REL) in _guard_command(merged)
+    assert str(install / SHIM_REL) in _guard_command(merged)
 
     # the project's own settings survived the merge
     assert merged["model"] == "opus"
@@ -408,5 +431,5 @@ def test_the_generated_settings_command_blocks_t0_and_spares_a_worker(tmp_path):
     command = _guard_command(merged)
 
     t0_cwd = str(project / ".claude" / "terminals" / "T0")
-    _assert_denied(_run_command(command, _payload("Agent", t0_cwd, None), tmp_path))
-    _assert_untouched(_run_command(command, _payload("Agent", str(project), None), tmp_path))
+    _assert_denied(_run_command(command, _payload("Agent", t0_cwd, None), tmp_path, install))
+    _assert_untouched(_run_command(command, _payload("Agent", str(project), None), tmp_path, install))

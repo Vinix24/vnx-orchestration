@@ -123,6 +123,27 @@ def _assert_rendered_cleanly(raw: str, rendered: str, vnx_home: str, project_roo
                 sys.exit(1)
 
 
+def _assert_vnx_home_renderable(vnx_home: str) -> None:
+    """Refuse a VNX_HOME that cannot sit inside a hook command (OI-2117 item e).
+
+    The template puts the value into shell source, inside double quotes
+    (``f="<VNX_HOME>/scripts/hooks/vnx_hook_shim.sh"``). A quote, a ``$(`` or a backtick in a
+    substituted path would then end the string or run code. ``registered_command`` accepts only
+    an absolute path of plain path characters, and this reuses its allowlist rather than keeping
+    a second copy.
+    """
+    lib_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib")
+    if lib_dir not in sys.path:
+        sys.path.insert(0, lib_dir)
+    import hook_coverage
+
+    try:
+        hook_coverage.registered_command(hook_coverage.GUARD_ENTRY, "project", vnx_home)
+    except ValueError as exc:
+        print(f"ERROR: vnx_home cannot be rendered into hook commands: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
 def load_template(vnx_home: str, project_root: str) -> dict:
     """Load and render the VNX settings template."""
     if not vnx_home:
@@ -139,6 +160,8 @@ def load_template(vnx_home: str, project_root: str) -> dict:
             file=sys.stderr,
         )
         sys.exit(1)
+
+    _assert_vnx_home_renderable(vnx_home)
 
     template_path = os.path.join(vnx_home, "templates", "settings_vnx_keys.json.tmpl")
     if not os.path.isfile(template_path):

@@ -598,19 +598,19 @@ def test_guard_registered_in_fabric_settings():
     assert _guard_events(settings) == {"UserPromptSubmit", "PreToolUse", "Stop"}
 
 
-def test_guard_registered_in_consumer_template(tmp_path):
+def test_guard_not_registered_in_consumer_template(tmp_path):
     sys.path.insert(0, str(REPO_ROOT / "scripts"))
     import vnx_settings_merge
 
     settings = vnx_settings_merge.load_template(str(REPO_ROOT), str(tmp_path / "project"))
-    assert _guard_events(settings) == {"UserPromptSubmit", "PreToolUse", "Stop"}
+    assert _guard_events(settings) == set()
 
 
 @pytest.mark.parametrize("variant", ["default", "minimal"])
-def test_guard_registered_in_init_templates(variant):
+def test_guard_not_registered_in_init_templates(variant):
     from jinja2 import Environment, FileSystemLoader
 
     path = REPO_ROOT / "templates" / "init" / variant
     rendered = Environment(loader=FileSystemLoader(str(path))).get_template("settings.json.j2").render(
         project_name="p", project_id="p", vnx_version="0", engine_root=str(REPO_ROOT))
-    assert _guard_events(json.loads(rendered)) == {"UserPromptSubmit", "PreToolUse", "Stop"}
+    assert _guard_events(json.loads(rendered)) == set()

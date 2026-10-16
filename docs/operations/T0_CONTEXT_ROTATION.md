@@ -203,6 +203,81 @@ after 2 s. The ledger append on a band transition is outside this bound. With ne
 resolves its state dir through `vnx_paths`: measured on 2026-10-16, five `git` calls without a
 timeout, against the checkout the guard's code lives in rather than the project.
 
+## User-level install and check
+
+`vnx guard install` and `vnx guard check` exist in the pip CLI and in `bin/vnx`. Both run
+`scripts/vnx_guard.py`; the logic is `scripts/lib/guard_install.py` and
+`scripts/lib/guard_check.py`.
+
+**Install.** `vnx guard install [--dry-run] [--config-dir DIR]...` finds the accounts: `~/.claude`
+and every `~/.claude-*` directory holding a `settings.json` or a `.claude.json`. `--config-dir`
+replaces discovery. It refuses when `~/.vnx-system/current` lacks the shim or the guard. In each
+account it writes three entries with `hook_coverage.registered_command(..., "user")` and
+`"timeout": 10` (seconds):
+
+| Event | Matcher |
+|---|---|
+| UserPromptSubmit | `""` |
+| PreToolUse | `Bash\|Skill\|SlashCommand` |
+| Stop | `""` |
+
+An entry is the install's own when its command names the shim path, the guard entry and
+`--scope user`. A second run finds three entries in the exact form and changes nothing. An entry
+of ours in another form is replaced; every other hook stays. `--dry-run` lists the accounts,
+prints a diff per file and writes nothing.
+
+**The write.** Per file: a timestamped backup (`settings.json.vnx-backup-<UTC>`), a fresh read,
+new content that must parse as JSON and keep every top-level key, a `tempfile.mkstemp` scratch
+file in the same directory, and a comparison of size, mtime and hash just before the replace. A
+changed target starts the command over once; a second change refuses and writes nothing. A
+symlinked `settings.json` is written through, so it stays a symlink. Invalid JSON, a document
+that is not an object, or a `hooks` tree of the wrong shape is refused and never written.
+
+**The residual window.** Claude Code writes this file itself (permission grants) and holds no
+lock the command can join, and a plain file has no conditional replace. Just before
+`os.replace` the target is hard-linked to `settings.json.vnx-displaced-<id>`, so the inode about
+to be replaced stays readable. After the replace the file is read back: the three entries and
+every top-level key of the backup must be there, and the displaced inode must still be the
+content the backup was taken from. A difference is reported with the keys that differ, the
+displaced file is kept next to the settings and the run exits 1. A rename-style write that lands
+between the hard link and the replace is lost and cannot be seen. What such a write carries is a
+permission choice, which Claude Code asks for again. Run the install while no session is
+answering a permission prompt.
+
+**Check.** `vnx guard check [--config-dir DIR]... [--scan-root DIR]...` is read-only and exits 0
+only when everything below holds:
+
+- per account: the three entries are in the exact form, `vnx_hook_shim.sh` and
+  `t0_context_guard.py` exist in `current`, and the report names the root the registry trusts to
+  run repo code, which is the first `vnx-dev` entry of `~/.vnx/projects.json` (shim step 2). When
+  that path does not exist on disk it says so: every project then runs `current`;
+- project inventory: the registry plus every `.vnx-project-id` under each `--scan-root` (depth 3,
+  `.vnx-data` skipped). A scan hit the registry does not list is marked;
+- a project without `.claude/terminals/T0/CLAUDE.md` prints `not guarded (no T0)` and is never a
+  finding;
+- a project with one is answered per event through `hook_coverage.coverage`, PreToolUse once per
+  tool (`Bash`, `Skill`, `SlashCommand`): `project (direct|shim)` when the project's own settings
+  run the guard, `user` when nothing in the project covers and this account has the entry,
+  `missing` when it has not, `unknown` when a settings file of the project cannot be loaded.
+
+`vnx doctor` runs the same report without scan roots as check `guard:user-level`: PASS when no
+Claude account directory exists or everything is covered, WARN otherwise.
+
+**Rollback.** Switching `current` to a version without the shim makes the written command exit 1
+with `vnx: guard shim missing: <path>` on every event, under bash and under dash, and `check`
+reports the shim missing. Sessions keep working and the guard is off. Restore it by rolling
+forward, or put the guard back per project with the template entries of that version, then run
+`vnx guard check` again.
+
+**Templates.** `templates/settings_vnx_keys.json.tmpl` and `templates/init/{default,minimal}/settings.json.j2`
+register no guard entry. `pretooluse_t0_no_subagents.py` is started through the shim at project
+scope, in the exact form `registered_command` renders, and every `timeout` is in seconds. The
+shim picks the entry from `${VNX_HOME:-$HOME/.vnx-system/current}`, not from the install the
+command names: a project that installs the block needs the shim and the entry in `current` (or
+in `VNX_HOME`). The VNX home that `vnx regen-settings` (`vnx_settings_merge.load_template`) and
+`vnx init` substitute is checked against the `registered_command` allowlist at render time, so a
+path with a quote, a backtick or a `$(` is refused with an error that names the value.
+
 ## Handoff contract
 
 The spawner reads `daily-log/handoff.md` (default; `--handoff` overrides). `/build-log wrap`

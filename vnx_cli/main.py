@@ -303,6 +303,35 @@ def _register_role_subparser(subparsers: argparse.Action) -> None:
     rs_parser.set_defaults(apply=False)
 
 
+def _register_guard_subparser(subparsers: argparse.Action) -> None:
+    guard_parser = subparsers.add_parser(
+        "guard",
+        help="install and check the user-level T0 context guard",
+    )
+    guard_subs = guard_parser.add_subparsers(dest="guard_command", metavar="SUBCOMMAND")
+    install_parser = guard_subs.add_parser(
+        "install",
+        help="register the guard in the Claude Code settings of every account",
+    )
+    install_parser.add_argument(
+        "--dry-run", action="store_true",
+        help="list the accounts and print the diff per file; write nothing",
+    )
+    check_parser = guard_subs.add_parser(
+        "check",
+        help="report, per account and per VNX project, where the guard runs",
+    )
+    check_parser.add_argument(
+        "--scan-root", action="append", default=[], metavar="DIR",
+        help="also inventory every .vnx-project-id under DIR (depth 3); repeatable",
+    )
+    for sub in (install_parser, check_parser):
+        sub.add_argument(
+            "--config-dir", action="append", default=[], metavar="DIR",
+            help="a Claude config directory instead of discovery; repeatable",
+        )
+
+
 def _register_update_subparser(subparsers: argparse.Action) -> None:
     update_parser = subparsers.add_parser(
         "update",
@@ -1568,6 +1597,10 @@ def _dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
         from vnx_cli.commands.role import vnx_role
         sys.exit(vnx_role(args))
 
+    elif args.command == "guard":
+        from vnx_cli.commands.guard import vnx_guard
+        sys.exit(vnx_guard(args))
+
     elif args.command == "version":
         from vnx_cli.commands.version import vnx_version
         sys.exit(vnx_version(args))
@@ -1658,6 +1691,7 @@ def main() -> None:
     _register_init_subparser(subparsers)
     _register_pool_subparser(subparsers)
     _register_role_subparser(subparsers)
+    _register_guard_subparser(subparsers)
     _register_update_subparser(subparsers)
     _register_release_subparser(subparsers)
     _register_dispatch_agent_subparser(subparsers)
