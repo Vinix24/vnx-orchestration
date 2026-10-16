@@ -99,10 +99,12 @@ matches `Bash|Skill|SlashCommand` only.
 
 A session is guarded only when all three rules hold (`t0_context_guard.is_guarded_session`).
 
-1. **A VNX project with a T0.** The git toplevel of the payload `cwd` has a `.vnx-project-id`
-   whose first line is not empty, and a `.claude/terminals/T0/CLAUDE.md`. The cwd is not under
-   `.vnx-data/worktrees/`. A folder with only a project id, such as `~/Desktop/BUSINESS/clients`,
-   is not guarded.
+1. **A VNX project with a T0.** The root of the payload `cwd` has a `.vnx-project-id` whose
+   first line is not empty, and a `.claude/terminals/T0/CLAUDE.md`. The root is the nearest
+   directory, from the real path of the cwd up, that holds a `.git` entry (directory or file):
+   the folder `git rev-parse --show-toplevel` names, found without starting git. The cwd is not
+   under `.vnx-data/worktrees/`. A folder with only a project id, such as
+   `~/Desktop/BUSINESS/clients`, is not guarded.
 2. **The T0 by convention.** `session_stop_rotation._is_t0_session` says T0: an explicit
    `VNX_TERMINAL` (or `VNX_TERMINAL_ID`) wins, else no `VNX_DISPATCH_ID`/`VNX_TMUX_SIGNAL_DIR`,
    else a cwd outside `.claude/terminals/T1-T3`. So an attended session at the project root or
@@ -126,31 +128,80 @@ The plan-gate panel sets `VNX_WORKER_SCOPED=1` on its seats.
 The shim (`scripts/hooks/vnx_hook_shim.sh`) checks rule 1 itself, from the process cwd, before
 Python starts. Outside a guarded project it exits 0 without output.
 
-**Which code runs.** A consumer runs `${VNX_HOME:-$HOME/.vnx-system/current}/scripts/hooks/<entry>`.
-The fabric repo runs its own `<root>/scripts/hooks/<entry>`, but only when two things hold: its
-`.vnx-project-id` says `vnx-dev`, and its real path is the real path of the first `vnx-dev`
-entry in the user-owned registry `~/.vnx/projects.json`. A repository writes its own
-`.vnx-project-id`, so the id alone never selects repo code. Otherwise a cloned repo that calls
-itself `vnx-dev` would have its own file run by a user-level hook, without the trust prompt
-Claude Code shows for project hooks. A missing or unreadable registry means `current`. The shim
-reads the registry with `python3 -I -S`: the cwd is the repo, and isolated mode keeps a module
-the repo plants there from being imported. `hook_coverage.shim_entry_file` is the Python twin,
-and a test holds the two to the same answer.
+**Which code runs.** The fabric repo runs its own `<root>/scripts/hooks/<entry>`, but only when
+two things hold: its `.vnx-project-id` says `vnx-dev`, and its real path is the real path of the
+first `vnx-dev` entry in the user-owned registry `~/.vnx/projects.json`. A repository writes its
+own `.vnx-project-id`, so the id alone never selects repo code. Otherwise a cloned repo that
+calls itself `vnx-dev` would have its own file run by a user-level hook, without the trust
+prompt Claude Code shows for project hooks. A missing or unreadable registry means the released
+code. The shim reads the registry with `python3 -I -S`: the cwd is the repo, and isolated mode
+keeps a module the repo plants there from being imported. That read ends itself after 2 s.
+
+Everyone else runs the released code, and the scope decides which release:
+
+| Call | Entry it runs |
+|---|---|
+| user scope (`--scope user`, the user-level registration) | the entry beside the shim it was started as: the release its registered command names |
+| project scope (the default) | `${VNX_HOME:-$HOME/.vnx-system/current}/scripts/hooks/<entry>` |
+
+A user-scope call ignores an inherited `VNX_HOME` (fix-forward on #2075, OI-2117). Nobody the
+user-level registration trusts chose that value: `bin/vnx` and `scripts/lib/vnx_paths.sh`
+export it as the location of whichever copy launched the session, a version directory or a
+dispatch worktree, and a project's settings `env` block can set it. Either would choose the code
+a machine-wide hook starts, possibly a release whose guard does not know the user scope and runs
+a second time. `hook_coverage.shim_entry_file` is the Python twin (`user_shim=` for a user-scope
+call), and a test holds the two to the same answer for both scopes.
 
 **The registered command.** `hook_coverage.registered_command` puts the VNX home into shell
 source, so it accepts only the documented forms: an absolute path of plain path characters, or
 one that starts with `$HOME`, `${HOME}`, `$CLAUDE_PROJECT_DIR`, `${CLAUDE_PROJECT_DIR}` or the
 template placeholder `{{VNX_HOME}}`. Anything else, a command substitution included, is
 refused. The command maps every non-zero exit to 1 (the plan's line maps only 2): bash exits
-127 for a shim removed between the test and the start, and every case must exit 0 or 1.
+127 for a shim removed between the test and the start, and every case must exit 0 or 1. The
+home a user-scope command names is also the release whose guard it runs, whatever `VNX_HOME`
+says (see the table above).
 
 **User scope.** Started with `VNX_HOOK_SCOPE=user`, the guard stays silent for an event that
 the project's own settings already cover (`hook_coverage.coverage`, per PreToolUse tool), so it
-never runs twice. A project-scope call never skips. A project registration covers only when it
-can run: a direct entry needs an existing path, and a shim registration needs a shim that
-exists at a path the guard can resolve without a shell (only `$HOME` and `$CLAUDE_PROJECT_DIR`
-are expanded), at project scope, with arguments the shim accepts. A registration that cannot
-run reports `missing`, so the user-level guard decides instead of no guard at all.
+never runs twice. A project-scope call never skips. Covered means a project registration that
+decides; anything `hook_coverage` cannot establish does not cover, because a double run is the
+smaller fault than no guard at all. A registration decides when all of this holds:
+
+- **It is a foreground command hook.** Not `async` or `asyncRewake` (it runs in the background
+  and cannot block), not `once`, no `if` condition, no exec-form `args`, no other `shell`.
+- **It runs the guard at project scope.** Directly: the guard is the script of a `python3` call
+  (after `exec`, `command`, `env` and flags without a value) or stands executable in command
+  position, also inside `if`/`then`, `( )`, a `;`/`&&`/`||` list or `sh -c '...'`. `test -f`,
+  `grep` or `cat` on the guard path decide nothing. A call that is piped, backgrounded, negated
+  or redirects anything but stderr does not deliver its decision. A command that mentions
+  `VNX_HOOK_SCOPE` other than `VNX_HOOK_SCOPE=project`, or runs `.`, `source` or `eval`, does
+  not cover. Through the shim: the inline form or a plain `sh <shim> [--scope project] <entry>`,
+  with arguments the shim accepts.
+- **The paths resolve without a shell and exist.** Variables expand only where the shell
+  expands them: a `$HOME` in single quotes or behind a backslash stays literal (that call exits
+  127, or 2 under dash), and a bare one the shell would split does not resolve. A direct path
+  expands from the environment and from what the command itself assigns before the call
+  (`ROOT=$(git rev-parse --show-toplevel ...)` reads as the project dir); an unknown variable
+  does not resolve. A shim path expands only `$HOME` and `$CLAUDE_PROJECT_DIR`. For a shim
+  registration the entry it would start must exist too.
+- **Claude Code runs the project's hooks.** Measured in the 2.1.301 binary: trust is recorded
+  per account in the global config file (`$CLAUDE_CONFIG_DIR/.claude.json` or
+  `~/.claude.json`, a non-empty legacy `<config home>/.config.json` first) as
+  `projects[<folder>].hasTrustDialogAccepted: true`, for the session folder or a parent up to
+  its git root. In an interactive session without trust 2.1.301 skips every hook, user-level
+  ones included. A registration in a folder without recorded trust reports `missing`; a trust
+  file that cannot be read reports `unknown`.
+
+A registration that cannot decide reports `missing` (or `unknown`), so the user-level guard
+decides instead of no guard at all.
+
+**Time.** Claude Code gives the hook 10 s. Neither the shim nor the guard starts git: rule 1
+walks to the nearest `.git`, and the rotation state is resolved from rule 1's root. The only
+subprocess before the entry is the shim's registry read in the fabric repo, which ends itself
+after 2 s. The ledger append on a band transition is outside this bound. With neither
+`VNX_T0_ROTATION_RECEIPTS_FILE` nor `VNX_STATE_DIR` in the environment, `append_receipt`
+resolves its state dir through `vnx_paths`: measured on 2026-10-16, five `git` calls without a
+timeout, against the checkout the guard's code lives in rather than the project.
 
 ## Handoff contract
 

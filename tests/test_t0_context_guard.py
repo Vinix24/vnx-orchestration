@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -380,7 +381,21 @@ def _covering_project(tmp_path: Path, hooks: dict, name: str = "settings.json") 
     return project
 
 
-def _user_env(env_base, project: Path, scope: Optional[str] = "user") -> Dict[str, str]:
+def _trust(env_base, project: Path, trusted: Optional[bool] = True) -> None:
+    """``$HOME/.claude.json`` with the project's trust decision; None leaves no file at all."""
+    config = Path(env_base["HOME"]) / ".claude.json"
+    if trusted is None:
+        if config.exists():
+            config.unlink()
+        return
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(json.dumps({"projects": {str(project): {
+        "allowedTools": [], "hasTrustDialogAccepted": trusted}}}), encoding="utf-8")
+
+
+def _user_env(env_base, project: Path, scope: Optional[str] = "user",
+              trusted: Optional[bool] = True) -> Dict[str, str]:
+    _trust(env_base, project, trusted)
     env = {**env_base, "CLAUDE_PROJECT_DIR": str(project)}
     if scope is not None:
         env["VNX_HOOK_SCOPE"] = scope
@@ -428,8 +443,10 @@ def test_user_scope_runs_when_the_project_shim_is_missing(tmp_path, env_base):
 
 
 def test_user_scope_skips_where_the_project_shim_exists(tmp_path, env_base):
+    """The project-scope shim call starts the entry from VNX_HOME, so that entry must exist."""
     project = _covering_project(tmp_path, {"Stop": [{"hooks": [_shim_hook(REPO_ROOT)]}]})
-    assert _run(tmp_path, _user_env(env_base, project), "Stop", 520_000) is None
+    env = {**_user_env(env_base, project), "VNX_HOME": str(REPO_ROOT)}
+    assert _run(tmp_path, env, "Stop", 520_000) is None
 
 
 def test_user_scope_runs_when_the_project_settings_are_invalid(tmp_path, env_base):
@@ -461,6 +478,98 @@ def test_user_scope_without_claude_project_dir_runs(tmp_path, env_base):
     _covering_project(tmp_path, {"Stop": [{"hooks": [_direct(HOOK)]}]})
     env = {**env_base, "VNX_HOOK_SCOPE": "user"}
     assert _run(tmp_path, env, "Stop", 520_000)["decision"] == "block"
+
+
+# ── fix-forward on #2075: what does not decide does not cover ───────────────
+
+
+def _home_with_current(tmp_path: Path) -> Path:
+    home = tmp_path / "home-with-current"
+    hooks = home / ".vnx-system" / "current" / "scripts" / "hooks"
+    hooks.mkdir(parents=True)
+    for name in (hook_coverage.SHIM_NAME, hook_coverage.GUARD_ENTRY):
+        shutil.copy2(REPO_ROOT / "scripts" / "hooks" / name, hooks / name)
+    return home
+
+
+def _shim_only_release(tmp_path: Path) -> Path:
+    release = tmp_path / "shim-only-release"
+    (release / "scripts" / "hooks").mkdir(parents=True)
+    shutil.copy2(REPO_ROOT / "scripts" / "hooks" / hook_coverage.SHIM_NAME,
+                 release / "scripts" / "hooks" / hook_coverage.SHIM_NAME)
+    return release
+
+
+def _uncovering(tmp_path: Path):
+    """(label, project hook, extra env, trust) for registrations that decide nothing."""
+    direct = _direct(HOOK)
+    yield "(a) VNX_HOOK_SCOPE=user", {"type": "command",
+                                       "command": f'VNX_HOOK_SCOPE=user python3 "{HOOK}"'}, {}, True
+    yield "(a) test -f", {"type": "command", "command": f'test -f "{HOOK}"'}, {}, True
+    yield "(a) grep", {"type": "command", "command": f'grep -c hooks "{HOOK}"'}, {}, True
+    # $HOME/.vnx-system/current holds the shim and the guard, so only the single quotes keep
+    # this call from running.
+    yield "(b) single-quoted $HOME", {"type": "command", "command": (
+        f"sh '$HOME/.vnx-system/current/scripts/hooks/{hook_coverage.SHIM_NAME}' "
+        f"{hook_coverage.GUARD_ENTRY}")}, {"HOME": str(_home_with_current(tmp_path))}, True
+    yield "(d) entry missing", _shim_hook(REPO_ROOT), {
+        "VNX_HOME": str(_shim_only_release(tmp_path))}, True
+    yield "(f) async", {**direct, "async": True}, {}, True
+    yield "(f) asyncRewake", {**direct, "asyncRewake": True}, {}, True
+    yield "(g) untrusted", direct, {}, False
+    yield "(g) trust unreadable", direct, {}, None
+
+
+def test_user_scope_decides_where_the_project_registration_decides_nothing(tmp_path, env_base):
+    """codex and deepseek on #2075: each of these counted as coverage, so the user-level call
+    skipped while nothing decided at 520K tokens."""
+    for label, hook, extra, trusted in _uncovering(tmp_path):
+        project = _covering_project(tmp_path, {"Stop": [{"hooks": [hook]}]})
+        env = {**_user_env(env_base, project, trusted=trusted), **extra,
+               "CLAUDE_CONFIG_DIR": env_base["HOME"]}
+        decision = _run(tmp_path, env, "Stop", 520_000)
+        assert decision is not None and decision["decision"] == "block", label
+
+
+def test_user_scope_still_skips_for_a_registration_that_decides(tmp_path, env_base):
+    for hook in (_direct(HOOK), {**_direct(HOOK), "async": False},
+                 {"type": "command", "command": f'if [ -f "{HOOK}" ]; then python3 "{HOOK}"; fi'},
+                 {"type": "command", "command": f"bash -c 'exec python3 \"{HOOK}\"'"}):
+        project = _covering_project(tmp_path, {"Stop": [{"hooks": [hook]}]})
+        assert _run(tmp_path, _user_env(env_base, project), "Stop", 520_000) is None, hook
+
+
+def _logging_git(tmp_path: Path) -> tuple:
+    bin_dir = tmp_path / "bin-logging-git"
+    bin_dir.mkdir(exist_ok=True)
+    log = tmp_path / "git.log"
+    (bin_dir / "git").write_text(f'#!/bin/sh\necho "$*" >> "{log}"\nexec "{shutil.which("git")}" "$@"\n',
+                                 encoding="utf-8")
+    (bin_dir / "git").chmod(0o755)
+    return bin_dir, log
+
+
+@pytest.mark.parametrize("scope", ["user", "project"])
+def test_the_guard_starts_no_git_on_its_way_to_a_decision(tmp_path, env_base, scope):
+    """(h): `git rev-parse` had a 10 s timeout inside a hook that has 10 s. Rule 1, coverage and
+    the rotation state now resolve without starting git, through the transition receipt."""
+    bin_dir, log = _logging_git(tmp_path)
+    project = _covering_project(tmp_path, {"Stop": [{"hooks": [_direct(tmp_path / "gone.py")]}]})
+    env = {**_user_env(env_base, project, scope=scope),
+           "PATH": f"{bin_dir}{os.pathsep}{env_base['PATH']}"}
+    assert _run(tmp_path, env, "Stop", 520_000)["decision"] == "block"
+    assert not log.exists(), log.read_text(encoding="utf-8")
+
+
+def test_the_rotation_state_follows_the_root_rule_1_found(tmp_path, env_base):
+    """Without an override the pending marker lands under the project id of rule 1's root,
+    from the T0 folder as from the root."""
+    env = {k: v for k, v in env_base.items() if k != "VNX_T0_ROTATION_STATE_DIR"}
+    project = _vnx_project(tmp_path / "project")
+    t0_dir = project / ".claude" / "terminals" / "T0"
+    assert _run(tmp_path, env, "Stop", 520_000, cwd=t0_dir)["decision"] == "block"
+    sdir = Path(env["HOME"]) / ".vnx-data" / "consumer" / "state" / "t0_rotation"
+    assert rotation_state.pending_session_id(sdir, PANE) == SESSION
 
 
 def test_garbage_stdin_is_silent(tmp_path, env_base):
