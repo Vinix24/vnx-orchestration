@@ -120,7 +120,8 @@ def _glm_pass(report: Path, **overrides) -> dict:
 
 def _check(results_dir: Path, gate: str = "codex_gate", head_sha: str = HEAD_SHA) -> dict:
     return cv.check_review_gate_for_merge(
-        PR_ID, gate, results_dir, branch=BRANCH, head_sha=head_sha
+        PR_ID, gate, results_dir, branch=BRANCH, head_sha=head_sha,
+        seats=[gate],  # one-seat project (OI-2058 R5b: the door needs every seat of the stack)
     )
 
 

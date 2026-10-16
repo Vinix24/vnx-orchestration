@@ -946,10 +946,11 @@ def emit(event):
 
 emit({"type": "system", "subtype": "init", "session_id": "s-r6", "model": "claude-opus-5-5"})
 if spec.get("foreign_event") and not reextract:
-    # A parallel dispatch writing into the same ring buffer (OI-1869, OI-1930):
-    # wait until the lane stored this run's init, then append before this
-    # run's final answer.
-    live = os.path.join(os.environ["VNX_DATA_DIR"], "events", "plan-gate.ndjson")
+    # Another dispatch's event in this run's own stream, written past the
+    # EventStore (which files every event under its own run, OI-2115): wait
+    # until the lane stored this run's init, then append before this run's
+    # final answer.
+    live = os.path.join(os.environ["VNX_DATA_DIR"], "events", "plan-gate", dispatch_id + ".ndjson")
     deadline = time.time() + 10
     while time.time() < deadline:
         if os.path.exists(live) and dispatch_id in open(live, encoding="utf-8").read():
@@ -1079,7 +1080,9 @@ class TestRoundTwoRedRuns:
         events = [json.loads(line) for line in archive.read_text(encoding="utf-8").splitlines()]
         assert {e["dispatch_id"] for e in events} == {did}
         assert [e["type"] for e in events].count("result") == 1
-        assert (data_dir / "events" / f"{TERMINAL}.ndjson").read_text(encoding="utf-8") == ""
+        # The run's own live stream moved into the archive; the shared stream was never used.
+        assert not (data_dir / "events" / TERMINAL / f"{did}.ndjson").exists()
+        assert not (data_dir / "events" / f"{TERMINAL}.ndjson").exists()
 
     def test_a_damaged_gzip_body_is_unavailable_not_a_raise(self, tmp_path):
         """Finding 2: a valid gzip header over a damaged deflate body raised zlib.error."""
@@ -1124,10 +1127,12 @@ class TestClaudeSeatStream:
     def test_a_stream_shared_with_another_dispatch_is_never_read(self, fake_claude, worker_report_kept):
         """OI-1869/OI-1930: another dispatch's result in the live stream is never this seat's answer.
 
-        The shared stream is not archived at the end of the run, so the seat
-        reads as before this round: no archive, no refusal, re-extraction.
-        Archived as a whole, the other dispatch's events under this seat's id
-        would have been refused, and a refused seat is never re-extracted.
+        Since OI-2115 the stream is the run's own, so only a write past the
+        EventStore puts another dispatch's event there. Such a stream is not
+        archived at the end of the run, so the seat reads as before R6: no
+        archive, no refusal, re-extraction. Archived as a whole, the other
+        dispatch's events under this seat's id would have been refused, and a
+        refused seat is never re-extracted.
         """
         foreign = _result_event("plan-gate-other-deepseek-9f8e7d6c", PLAN_BLOCK_ANSWER)
         out = _claude_panel(fake_claude, PLAN_PASS_ANSWER, foreign_event=foreign)
@@ -1163,9 +1168,10 @@ class TestClaudeSeatStream:
         assert len(list(archive.glob("plan-gate-trk-opus-*.ndjson"))) == 1
 
 
-def _live_stream(events_dir: Path, lines) -> Path:
-    events_dir.mkdir(parents=True, exist_ok=True)
-    live = events_dir / f"{TERMINAL}.ndjson"
+def _live_stream(events_dir: Path, lines, dispatch_id: str = "plan-gate-trk-opus-11112222") -> Path:
+    """The run's own live stream, ``events/plan-gate/<dispatch_id>.ndjson`` (OI-2115)."""
+    live = events_dir / TERMINAL / f"{dispatch_id}.ndjson"
+    live.parent.mkdir(parents=True, exist_ok=True)
     live.write_text("".join(line if isinstance(line, str) else json.dumps(line) + "\n" for line in lines),
                     encoding="utf-8")
     return live
@@ -1185,7 +1191,8 @@ class TestEndOfRunArchive:
         dest = store.archive_completed_stream(TERMINAL, self.DID)
         assert dest == events_dir / "archive" / TERMINAL / f"{self.DID}.ndjson"
         assert [json.loads(line) for line in dest.read_text(encoding="utf-8").splitlines()] == events
-        assert live.read_text(encoding="utf-8") == ""
+        # The run's own live stream is removed with the move, not left behind empty.
+        assert not live.exists()
         # No scratch file of any name beside the archive, and the archive keeps
         # the live stream's mode, as archive()'s copy2 gives it (not mkstemp's 0600).
         assert [p.name for p in dest.parent.iterdir()] == [dest.name]
@@ -1207,7 +1214,7 @@ class TestEndOfRunArchive:
         assert not (events_dir / "archive" / TERMINAL / f"{self.DID}.ndjson").exists()
 
     def test_an_archive_the_dispatch_already_has_is_extended_not_replaced(self, tmp_path):
-        """A parallel dispatch's boundary guard archived the head; the tail is appended to it."""
+        """An earlier move archived the head (a late event came after it); the tail is appended."""
         import final_answer_verdict as fav
 
         events = _run_events(self.DID, PLAN_PASS_ANSWER)
@@ -1313,8 +1320,11 @@ class TestEndOfRunArchive:
         store.append(TERMINAL, {"type": "text", "data": {"text": "x"}}, dispatch_id=self.DID)
         assert store.archive_completed_stream(TERMINAL, self.DID) is not None
         store.append(TERMINAL, {"type": "init", "data": {}}, dispatch_id="plan-gate-trk-glm-55556666")
-        live = [json.loads(line) for line in (events_dir / f"{TERMINAL}.ndjson").read_text().splitlines()]
+        own = events_dir / TERMINAL / "plan-gate-trk-glm-55556666.ndjson"
+        live = [json.loads(line) for line in own.read_text().splitlines()]
         assert [(e["dispatch_id"], e["sequence"]) for e in live] == [("plan-gate-trk-glm-55556666", 1)]
+        assert not (events_dir / TERMINAL / f"{self.DID}.ndjson").exists()
+        assert not (events_dir / f"{TERMINAL}.ndjson").exists()
 
 
 class TestArchiveReadErrors:

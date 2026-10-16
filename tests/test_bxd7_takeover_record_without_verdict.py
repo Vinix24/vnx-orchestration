@@ -142,7 +142,8 @@ def _glm_pass(report: Path, **overrides) -> dict:
 
 def _check(results_dir: Path, gate: str = "codex_gate") -> dict:
     return closure_verifier.check_review_gate_for_merge(
-        PR_ID, gate, results_dir, branch=BRANCH, head_sha=HEAD_SHA
+        PR_ID, gate, results_dir, branch=BRANCH, head_sha=HEAD_SHA,
+        seats=[gate],  # one-seat project (OI-2058 R5b: the door needs every seat of the stack)
     )
 
 
@@ -278,7 +279,12 @@ class TestRealRejectionStillBlocks:
 class TestDeclaredGateWithOwnVerdictUnchanged:
     def test_declared_pass_stands_on_its_own(self, tmp_path):
         """A declared gate carrying its own decided verdict never reaches the
-        takeover loop — not even when a failing successor claims it."""
+        takeover loop — not even when a failing successor claims it: codex's
+        own pass fills codex's seat, never kimi's record.
+
+        Since OI-2058 R5b the merge still refuses: kimi's rejection on the same
+        head blocks, whatever the other seats say. The seat is filled; the
+        merge is not."""
         results_dir = tmp_path / "results"
         report = _report_file(tmp_path)
         fail_report = tmp_path / "kimi-fail.md"
@@ -307,9 +313,11 @@ class TestDeclaredGateWithOwnVerdictUnchanged:
 
         verdict = _check(results_dir)
 
-        assert verdict["verdict"] == "GO", verdict["message"]
+        assert verdict["review_seats"]["filled_by"] == {"codex_gate": "codex_gate"}
         assert "evidence_gate" not in verdict
-        assert verdict["message"].startswith("codex_gate resultaat aanwezig en passing")
+        assert verdict["verdict"] == "NO-GO", verdict["message"]
+        assert verdict["review_seats"]["blocking"] == ["kimi_gate"]
+        assert "kimi_gate" in verdict["message"] and "blokkeert" in verdict["message"]
 
     def test_declared_fail_stands_on_its_own(self, tmp_path):
         """Symmetric: a declared gate that rejected the head is never rescued by

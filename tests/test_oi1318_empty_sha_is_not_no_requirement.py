@@ -32,6 +32,7 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 
 import pr_merge
+from review_seat_support import pin_review_stack
 
 HEAD_SHA = "6c925a1b2ee8b0cded8728d4f2c792fcf64be4d4"
 OTHER_SHA = "0f5e881a2b2761f73b7664ee7ea2e03ee4ee63b9"
@@ -118,6 +119,8 @@ def _seed_merge_door(monkeypatch, tmp_path, *, head_oid, record_sha):
     monkeypatch.setattr(pr_merge, "ensure_env",
                         lambda *_a, **_k: {"VNX_STATE_DIR": str(state_dir)})
     monkeypatch.setattr(pr_merge, "_resolve_override_reason", lambda _r: None)
+    # A one-seat project: since OI-2058 R5b the door needs every seat of the stack.
+    pin_review_stack(monkeypatch, "kimi_gate")
 
 
 def test_an_unresolvable_head_does_not_green_light_a_stale_result(monkeypatch, tmp_path):

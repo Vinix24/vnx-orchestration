@@ -98,6 +98,7 @@ assert len(BIG_DIFF) < KIMI_CAP, "BIG_DIFF must sit strictly between the two cap
 def _merge_door(results_dir: Path, pr: str, gate: str, *, branch=BRANCH, head_sha=HEAD_SHA):
     return closure_verifier.check_review_gate_for_merge(
         pr, gate, results_dir, branch=branch, head_sha=head_sha,
+        seats=[gate],  # one-seat project (OI-2058 R5b: the door needs every seat of the stack)
     )
 
 

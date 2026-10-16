@@ -1387,6 +1387,20 @@
       "symbol": "_AdapterResult"
     },
     {
+      "file": "tests/test_oi2115_harness_seat_stream_per_run.py",
+      "line": 363,
+      "mechanism": "direct-call",
+      "module_target": "envelope_govern_support",
+      "symbol": "_archive_dispatch_events"
+    },
+    {
+      "file": "tests/test_oi2115_harness_seat_stream_per_run.py",
+      "line": 364,
+      "mechanism": "direct-call",
+      "module_target": "envelope_govern_support",
+      "symbol": "_clear_dispatch_events"
+    },
+    {
       "file": "tests/test_phantom_guard_branch_fallback.py",
       "line": 122,
       "mechanism": "direct-call",

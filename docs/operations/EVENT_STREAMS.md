@@ -1,7 +1,7 @@
 # Event Streams
 
 **Status**: Active
-**Last Updated**: 2026-07-30
+**Last Updated**: 2026-10-16
 **Purpose**: Explain the lifecycle of per-terminal NDJSON event streams so that operators and future investigators don't misread an empty live file as a broken writer.
 
 ---
@@ -37,6 +37,22 @@ Only **subprocess-routed** terminals emit per-terminal NDJSON.
 - T0 defaults to the tmux adapter and does **not** produce a per-terminal stream unless `VNX_ADAPTER_T0=subprocess` is set.
 - T1 / T2 / T3 use the subprocess adapter by default in current configurations, but this is controlled per-terminal via `VNX_ADAPTER_T{n}=subprocess`.
 - Terminals routed through the tmux adapter produce no per-terminal NDJSON at all. Their activity is observable via `t0_receipts.ndjson`, `governance_audit.ndjson`, and the receipt pipeline.
+
+## Harness seat streams: one live file per run (OI-2115)
+
+Every harness seat run is dispatched on the one terminal `plan-gate`: review-gate seats (`gate_runner`'s harness lane), plan-gate panel seats and deliberation panel seats, the provider lane as well as the claude seat. That terminal is a per-run terminal (`event_store.PER_RUN_TERMINALS`). Each run writes its own live file:
+
+```
+.vnx-data/events/plan-gate/{dispatch_id}.ndjson
+```
+
+The archive path does not change: `.vnx-data/events/archive/plan-gate/{dispatch_id}.ndjson` (or `.ndjson.gz`), so an archive written before this change reads exactly as before. At the end of the run the teardown (`_emit_governance` and the finally safety net in `provider_dispatch`, `archive_completed_stream` for the claude seat) moves the run's stream into that archive. A move extends an archive the run already has and never replaces it. The live file is removed in the same locked step. An append that waited on the lock while its stream moved opens the path again, so the event lands in a fresh stream and the next move adds it to the archive. A dispatch id that is not one file name (empty, or holding a `/`) stays on the shared `events/plan-gate.ndjson`, which then keeps the old ring-buffer rules.
+
+Why: until 2026-10-16 every harness seat wrote the one file `events/plan-gate.ndjson`. Two seats that ran at once destroyed each other's streams. The second run's first append archived and cleared the first run's stream (the boundary guard). Its end-of-run teardown archived the first run's later events under its own id and truncated them. The first run's teardown then replaced its own archive with what it wrote last. Measured on deepseek_gate for #2075 and #2076, started five seconds apart: the archive of #2076 held 412 bytes, only its `provider_teardown_worktree` event, and the R6 final-answer reader (`final_answer_verdict`) booked `unavailable`. With one stream per run, seats can run in parallel and each keeps its own final answer.
+
+A terminal-pinned stream (`T{n}`) is unchanged: one file per terminal, archived and truncated as described above.
+
+The dashboard's live lane list (`EventStore.list_lanes`) and its live tail read `events/{lane}.ndjson` only, so a running harness seat does not show there as a live lane. Its archive is listed and readable as before.
 
 ## Receipt linkage: the `events_path` pointer (PR #843)
 
