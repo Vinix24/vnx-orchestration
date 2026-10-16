@@ -11,10 +11,14 @@ jobs:
     runs-on: ubuntu-latest
     # Bounds a hung job to minutes instead of GitHub's 6-hour hard runner
     # limit. Measured baseline over 6 completed runs (18-08/19-08 2026):
-    # 16-21 min end to end. 45 min is well above that baseline and well
-    # under the 360-min hard limit — this is the vangnet for whatever hangs
-    # next, not a fix for the apt-mirror hang fixed below.
-    timeout-minutes: 45
+    # 16-21 min end to end; by 2026-10-16 the suite had doubled (run
+    # 38911196655 on b39838cf: 35.4 min, pytest 2089 s). 55 min (was 45) for
+    # the shadow period of track ci-profile-a-xdist (risk R9): the job ran at
+    # 35.4 of its 45 minutes and now also writes a JUnit XML and a collection
+    # manifest. The switch to xdist (D4) sets it again from the measured
+    # parallel time. Still the vangnet for whatever hangs next, not a fix for
+    # the apt-mirror hang fixed in the prelude.
+    timeout-minutes: 55
 
     steps:
       - name: Checkout
@@ -28,75 +32,13 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install Python deps
-        run: |
-          python -m pip install --upgrade pip
-          # pytest + pytest-timeout (hanging-test guard) plus the project's
-          # declared runtime deps (watchdog, jinja2, pyyaml, jsonschema, psutil
-          # — all in pyproject.toml [project.dependencies]) and one test-only
-          # dep (hypothesis). Without these, tests that import governed-report
-          # validation, the intelligence daemon monitor, headless_trigger, or
-          # `vnx init` (jinja2) fail to collect with ModuleNotFoundError even
-          # though they pass on main.
-          # networkx is deliberately NOT installed: without numpy/scipy alongside,
-          # repo_map.py leaves its positional fallback for the networkx path and
-          # nx.pagerank crashes on the missing numpy — measured 2026-08-02:
-          # test_repo_map_provider_coverage.py (green on main) fails 2 tests with
-          # networkx present, passes 11/11 without it.
-          # build is required by tests/test_wheel_build.py::test_wheel_builds
-          # (python -m build --wheel); without it that test fails in this image
-          # with "No module named build" (OI-953).
-          # pyjwt[crypto] carries the forge check-run client (golf B, B2a):
-          # scripts/lib/forge_check_run.py signs a GitHub-App JWT with RS256 and
-          # tests/test_forge_check_run_client.py verifies that signature against
-          # a keypair it generates itself. The [crypto] extra is not optional —
-          # bare PyJWT has no asymmetric backend and raises NotImplementedError
-          # on RS256, and the test's keypair fixture imports `cryptography`
-          # directly, so the extra is what makes both halves of that test real
-          # instead of a mock. Measured 2026-09-07 on head 5fd261fd, run
-          # 34143589349: without it the whole file dies at collection with
-          # "No module named 'jwt'" and the gate never runs.
-          pip install pytest pyyaml pytest-timeout jsonschema psutil watchdog hypothesis jinja2 build "pyjwt[crypto]"
-
-      - name: Prepare expected repo layout
-        run: |
-          set -euo pipefail
-          mkdir -p "$GITHUB_WORKSPACE/.claude"
-          rsync -a --exclude '.git' --exclude '.claude' ./ "$GITHUB_WORKSPACE/.claude/vnx-system/"
-          rsync -a ./skills/ "$GITHUB_WORKSPACE/.claude/skills/"
-
-      - name: Install ripgrep
-        run: |
-          set -euo pipefail
-          if command -v rg >/dev/null 2>&1; then
-            echo "ripgrep already present on the runner image, skipping download"
-            exit 0
-          fi
-          # Pinned release + sha256-verified static binary instead of apt-get
-          # (OI-1362): ripgrep ships on NO ubuntu-latest image, so this skip-tak
-          # never fires, and apt-get against azure.archive.ubuntu.com stalls
-          # intermittently and hangs the job even with the timeout+retry from
-          # #1608 — measured 2026-08-18/19: run 32294142912 (PR #1609) and run
-          # 32291338049 (main) both died in this exact step with exit 124, on
-          # different jobs each time. x86_64-unknown-linux-musl is statically
-          # linked — no glibc dependency, so it runs unchanged across any
-          # ubuntu-latest base-image drift.
-          RG_VERSION="15.2.0"
-          RG_SHA256="33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c"
-          RG_ARCHIVE="ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl.tar.gz"
-          RG_URL="https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/${RG_ARCHIVE}"
-          RG_DIR="${RUNNER_TEMP:-/tmp}/ripgrep-install"
-          mkdir -p "$RG_DIR/bin"
-          curl -sSL --retry 3 --fail -o "$RG_DIR/$RG_ARCHIVE" "$RG_URL"
-          echo "${RG_SHA256}  ${RG_DIR}/${RG_ARCHIVE}" | sha256sum -c -
-          tar -xzf "$RG_DIR/$RG_ARCHIVE" -C "$RG_DIR"
-          install -m 755 "$RG_DIR/ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl/rg" "$RG_DIR/bin/rg"
-          echo "$RG_DIR/bin" >> "$GITHUB_PATH"
+      # Python with the pinned test tools, the vendored layout, ripgrep, the
+      # VNX paths, the profile classifier and the doctor: one composite action
+      # shared with the xdist shadow job below, so the shadow never lacks part
+      # of this job's setup. Fatal here, as each of those steps was before.
+      - name: Profile A prelude
+        id: prelude
+        uses: ./.github/actions/profile-a-prelude
 
       - name: Legacy path gate
         run: |
@@ -119,46 +61,20 @@ jobs:
             exit 1
           fi
 
-      - name: Classify CI profile (docs-only vs full sweep)
-        id: classify-profile
-        run: |
-          set -euo pipefail
-          # Same diff-range convention as the lint-patterns job below: the
-          # three-dot range against the base ref for PRs, against the parent
-          # commit for pushes. fetch-depth: 0 above makes origin/<base> available.
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            diff_range="origin/${{ github.base_ref }}...HEAD"
-          else
-            diff_range="HEAD^...HEAD"
-          fi
-          # A diff that fails (e.g. no base ref) yields an empty list, which
-          # classify_ci_profile.py maps to "heavy" — fail closed, never light.
-          git diff --name-only "$diff_range" > "$GITHUB_WORKSPACE/.vnx-ci-changed-paths.txt" 2>/dev/null || true
-          profile="$(python3 "$GITHUB_WORKSPACE/scripts/ci/classify_ci_profile.py" --paths-file "$GITHUB_WORKSPACE/.vnx-ci-changed-paths.txt")"
-          echo "CI profile: ${profile}"
-          echo "Changed paths:"
-          cat "$GITHUB_WORKSPACE/.vnx-ci-changed-paths.txt"
-          echo "profile=${profile}" >> "$GITHUB_OUTPUT"
-
-      - name: Run Profile A (doctor + scope-appropriate suite)
+      - name: Run Profile A (scope-appropriate suite)
         env:
-          VNX_HOME: ${{ github.workspace }}/.claude/vnx-system
-          VNX_DATA_DIR: ${{ github.workspace }}/.vnx-data
+          VNX_HOME: ${{ steps.prelude.outputs.vnx-home }}
+          VNX_DATA_DIR: ${{ steps.prelude.outputs.vnx-data-dir }}
+          CI_PROFILE: ${{ steps.prelude.outputs.profile }}
+          PROFILE_A_EVIDENCE: ${{ runner.temp }}/profile-a-evidence
         run: |
           set -euo pipefail
-          bash "$VNX_HOME/scripts/vnx_doctor.sh"
-          if [ -f "$VNX_DATA_DIR/state/progress_state.yaml" ] && [ -f "$VNX_DATA_DIR/state/progress_state.yaml.sha256" ]; then
-            python3 "$VNX_HOME/scripts/state_integrity.py" verify "$VNX_DATA_DIR/state/progress_state.yaml"
-          else
-            echo "[skip] progress_state checksum not available"
-          fi
-
-          if [ "${{ steps.classify-profile.outputs.profile }}" = "light" ]; then
+          if [ "$CI_PROFILE" = "light" ]; then
             # Light profile — docs-only PR (classify_ci_profile.py returned
-            # "light"). Doctor already ran above; add only the doc link/lint
-            # checks that actually exercise documentation, then stop. Kept
-            # deliberately small and proven rather than a broad "doc-ish" sweep
-            # whose coverage nobody can bound:
+            # "light"). The doctor already ran in the prelude; add only the doc
+            # link/lint checks that actually exercise documentation, then stop.
+            # Kept deliberately small and proven rather than a broad "doc-ish"
+            # sweep whose coverage nobody can bound:
             #   * test_docs_index.py           — DOCS_INDEX.md links resolve and
             #                                    no stale unreachable docs bloat
             #   * test_docs_archive.py         — docs/_archive integrity and the
@@ -194,40 +110,30 @@ jobs:
           # that gap. The 18 pre-existing explicit-file invocations in this
           # workflow deliberately keep their $VNX_HOME paths (green as-is).
           #
-          # The explicit exclusion list lives in scripts/ci/test_exclusions.txt —
-          # each entry is red on main (OI-906) and cites the open item tracking
-          # its repair; nothing is excluded silently. No shared --basetemp: a
-          # suite-wide shared basetemp broke tmp_path fixtures (see memory:
-          # read-only test dirs poison every later test file).
-          IGNORE=()
-          while IFS= read -r line || [ -n "$line" ]; do
-            case "$line" in
-              ''|\#*) continue ;;
-            esac
-            rel="$(printf '%s' "$line" | sed -E 's/[[:space:]]*#.*//' | tr -d '[:space:]')"
-            [ -n "$rel" ] && IGNORE+=(--ignore="$GITHUB_WORKSPACE/$rel")
-          done < "$GITHUB_WORKSPACE/scripts/ci/test_exclusions.txt"
-          # Single-test quarantine (OI-1051 versmald, PR #1434):
-          # test_receipt_mirror_isolation.py::TestGovernEnsureReceiptIsolation::
-          # test_ensure_receipt_does_not_touch_real_store fails ONLY in
-          # full-suite collection order on CI and passes in isolation (also
-          # after the merge of main). Measured on head 9a01f5cc:
-          # 1 failed, 15953 passed — this one test is the 1. The stub-teardown
-          # in tests/test_intelligence_daemon_paths.py already fixed its four
-          # order-dependent sibling tests (plus 13 collateral tests in
-          # test_learning_loop_tz and test_w5b_small_fixes); this last one is
-          # NOT a remnant of that cause. Its root cause is not yet attributed
-          # and a bisect over the collection order was deliberately NOT
-          # attempted (three earlier dispatches sank into that hole). The other
-          # seven tests in the file keep running — that is why this is a -k
-          # name filter, not an entry in test_exclusions.txt (which excludes
-          # whole files).
-          pytest -q \
-            "$GITHUB_WORKSPACE/tests" \
-            -p no:cacheprovider \
-            --timeout=180 \
-            -k "not TestFlagGateClaude and not test_ensure_receipt_does_not_touch_real_store" \
-            "${IGNORE[@]}"
+          # The selection — the --ignore list from scripts/ci/test_exclusions.txt
+          # (each entry red on main, OI-906, with the OI tracking its repair), the
+          # -k quarantine and the per-test timeout — lives in one script that the
+          # xdist shadow job calls too. No shared --basetemp: a suite-wide shared
+          # basetemp broke tmp_path fixtures (see memory: read-only test dirs
+          # poison every later test file). The run also writes a JUnit XML and a
+          # collection manifest, uploaded below for the parity check of track
+          # ci-profile-a-xdist.
+          bash "$GITHUB_WORKSPACE/scripts/ci/profile_a_pytest_args.sh" "$PROFILE_A_EVIDENCE/args"
+          bash "$GITHUB_WORKSPACE/scripts/ci/profile_a_run_phase.sh" full "$PROFILE_A_EVIDENCE"
+
+      # Evidence for the parity check (track ci-profile-a-xdist), also when the
+      # suite is red. Non-fatal: an artifact-service hiccup must not turn this
+      # required job red; missing evidence is the parity check's to record.
+      - name: Upload Profile A evidence (JUnit XML + collection manifest)
+        if: ${{ always() && steps.prelude.outputs.profile != 'light' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v4
+        with:
+          name: profile-a-evidence
+          path: ${{ runner.temp }}/profile-a-evidence/
+          if-no-files-found: warn
+          overwrite: true
 
       - name: Side-door exhaustiveness audit
         env:
@@ -318,6 +224,188 @@ jobs:
             "$GITHUB_WORKSPACE/tests/test_status_vocab_drift.py" \
             -p no:cacheprovider \
             --basetemp=/tmp/vnx_pytest_safe
+
+  # Track ci-profile-a-xdist (D1): Profile A's suite in the shape the switch to
+  # pytest-xdist will run (scripts/ci/serial_tests.txt in one process with
+  # xdist off, then the rest under xdist), next to the serial Profile A, so
+  # the parity check (D2) can compare the two before anything switches.
+  #
+  # NOT a required check, and it must never fail one: closure_verifier
+  # (_rollup_all_green) requires every CheckRun of the PR to be COMPLETED/
+  # SUCCESS, gate_executor.ci_gate blocks on any check in the fail bucket, and
+  # the merge preflight reads the conclusion of the whole VNX CI run. Job-level
+  # continue-on-error would keep the run green but not this job's CheckRun. So:
+  #   * every step that can fail has continue-on-error: true, and later steps
+  #     read steps.<id>.outcome into xdist-shadow.json (prelude_failed,
+  #     selection_failed, shadow_failed);
+  #   * every step has its own timeout-minutes and their sum (73) stays under
+  #     the job's timeout-minutes, so a hang ends in a recorded step timeout,
+  #     never in a cancelled job;
+  #   * the record and the upload run with if: always();
+  #   * a light (docs-only) run stops after the prelude and records
+  #     "verdict": "not_applicable" — success, never skipped.
+  profile-a-xdist-shadow:
+    name: Profile A (xdist shadow)
+    runs-on: ubuntu-latest
+    timeout-minutes: 80
+
+    steps:
+      - name: Checkout
+        id: checkout
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Profile A prelude (non-fatal)
+        id: prelude
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 10
+        uses: ./.github/actions/profile-a-prelude
+
+      - name: Plan the shadow phases
+        id: plan
+        if: ${{ !cancelled() && steps.prelude.outcome == 'success' && steps.prelude.outputs.profile == 'heavy' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          VNX_HOME: ${{ steps.prelude.outputs.vnx-home }}
+          VNX_DATA_DIR: ${{ steps.prelude.outputs.vnx-data-dir }}
+          VNX_CI_XDIST: "1"
+          SHADOW_EVIDENCE: ${{ runner.temp }}/profile-a-xdist-shadow
+        run: |
+          set -euo pipefail
+          mkdir -p "$SHADOW_EVIDENCE"
+          bash "$GITHUB_WORKSPACE/scripts/ci/profile_a_pytest_args.sh" "$SHADOW_EVIDENCE/args"
+          if [ -f "$SHADOW_EVIDENCE/args/serial.args" ]; then
+            echo "serial_active=true" >> "$GITHUB_OUTPUT"
+          else
+            # Empty serial list: the phase is inactive and needs no XML.
+            echo "serial_active=false" >> "$GITHUB_OUTPUT"
+            python3 "$GITHUB_WORKSPACE/scripts/ci/pytest_collection_manifest.py" inactive \
+              --phase serial --output "$SHADOW_EVIDENCE/manifest-serial.json"
+          fi
+
+      - name: Shadow phase 1 (serial list, xdist off)
+        id: serial
+        if: ${{ !cancelled() && steps.plan.outcome == 'success' && steps.plan.outputs.serial_active == 'true' }}
+        continue-on-error: true
+        timeout-minutes: 15
+        env:
+          VNX_HOME: ${{ steps.prelude.outputs.vnx-home }}
+          VNX_DATA_DIR: ${{ steps.prelude.outputs.vnx-data-dir }}
+          SHADOW_EVIDENCE: ${{ runner.temp }}/profile-a-xdist-shadow
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/profile_a_run_phase.sh" serial "$SHADOW_EVIDENCE"
+
+      # Runs whatever the serial phase did: both phases are evidence.
+      - name: Shadow phase 2 (the rest, under pytest-xdist)
+        id: parallel
+        if: ${{ !cancelled() && steps.plan.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 30
+        env:
+          VNX_HOME: ${{ steps.prelude.outputs.vnx-home }}
+          VNX_DATA_DIR: ${{ steps.prelude.outputs.vnx-data-dir }}
+          SHADOW_EVIDENCE: ${{ runner.temp }}/profile-a-xdist-shadow
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/profile_a_run_phase.sh" parallel "$SHADOW_EVIDENCE"
+
+      # Plain bash, no checkout needed: it must also record a run whose
+      # checkout or prelude failed. Every input arrives through env.
+      - name: Record the shadow outcome
+        id: record
+        if: ${{ always() }}
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          SHADOW_EVIDENCE: ${{ runner.temp }}/profile-a-xdist-shadow
+          SHADOW_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          SHADOW_TESTED_SHA: ${{ github.sha }}
+          SHADOW_RUN_ID: ${{ github.run_id }}
+          SHADOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+          SHADOW_EVENT: ${{ github.event_name }}
+          SHADOW_PROFILE: ${{ steps.prelude.outputs.profile }}
+          SHADOW_SERIAL_ACTIVE: ${{ steps.plan.outputs.serial_active }}
+          OUTCOME_CHECKOUT: ${{ steps.checkout.outcome }}
+          OUTCOME_PRELUDE: ${{ steps.prelude.outcome }}
+          OUTCOME_PLAN: ${{ steps.plan.outcome }}
+          OUTCOME_SERIAL: ${{ steps.serial.outcome }}
+          OUTCOME_PARALLEL: ${{ steps.parallel.outcome }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$SHADOW_EVIDENCE"
+          token() { printf '"%s"' "$(printf '%s' "$1" | tr -cd 'A-Za-z0-9_.:/-')"; }
+          int_file() {
+            local v=""
+            if [ -f "$1" ]; then v="$(tr -cd '0-9' < "$1")"; fi
+            if [ -n "$v" ]; then printf '%s' "$v"; else printf 'null'; fi
+          }
+          if [ "$OUTCOME_CHECKOUT" != "success" ] || [ "$OUTCOME_PRELUDE" != "success" ]; then
+            verdict="prelude_failed"
+          elif [ "$SHADOW_PROFILE" = "light" ]; then
+            verdict="not_applicable"
+          elif [ "$SHADOW_PROFILE" != "heavy" ]; then
+            verdict="prelude_failed"
+          elif [ "$OUTCOME_PLAN" != "success" ]; then
+            verdict="selection_failed"
+          elif [ "$OUTCOME_PARALLEL" != "success" ]; then
+            verdict="shadow_failed"
+          elif [ "$SHADOW_SERIAL_ACTIVE" = "true" ] && [ "$OUTCOME_SERIAL" != "success" ]; then
+            verdict="shadow_failed"
+          else
+            verdict="shadow_passed"
+          fi
+          E="$SHADOW_EVIDENCE"
+          {
+            printf '{\n'
+            printf '  "schema": "vnx-xdist-shadow/1",\n'
+            printf '  "head_sha": %s,\n' "$(token "$SHADOW_HEAD_SHA")"
+            printf '  "tested_sha": %s,\n' "$(token "$SHADOW_TESTED_SHA")"
+            printf '  "run_id": %s,\n' "$(token "$SHADOW_RUN_ID")"
+            printf '  "run_attempt": %s,\n' "$(token "$SHADOW_RUN_ATTEMPT")"
+            printf '  "event": %s,\n' "$(token "$SHADOW_EVENT")"
+            printf '  "profile": %s,\n' "$(token "$SHADOW_PROFILE")"
+            printf '  "verdict": "%s",\n' "$verdict"
+            printf '  "serial_phase_active": %s,\n' "$(token "$SHADOW_SERIAL_ACTIVE")"
+            printf '  "steps": {"checkout": %s, "prelude": %s, "plan": %s, "serial": %s, "parallel": %s},\n' \
+              "$(token "$OUTCOME_CHECKOUT")" "$(token "$OUTCOME_PRELUDE")" "$(token "$OUTCOME_PLAN")" \
+              "$(token "$OUTCOME_SERIAL")" "$(token "$OUTCOME_PARALLEL")"
+            printf '  "exit_codes": {"serial": %s, "parallel": %s},\n' \
+              "$(int_file "$E/exit-serial")" "$(int_file "$E/exit-parallel")"
+            printf '  "durations_s": {"serial": %s, "parallel": %s},\n' \
+              "$(int_file "$E/duration-serial-s")" "$(int_file "$E/duration-parallel-s")"
+            printf '  "memory_kb": {"total": %s, "baseline_used_parallel": %s, "peak_used_serial": %s, "peak_used_parallel": %s}\n' \
+              "$(int_file "$E/mem-total-kb")" "$(int_file "$E/mem-baseline-used-kb-parallel")" \
+              "$(int_file "$E/mem-peak-used-kb-serial")" "$(int_file "$E/mem-peak-used-kb-parallel")"
+            printf '}\n'
+          } > "$E/xdist-shadow.json"
+          cat "$E/xdist-shadow.json"
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            {
+              printf '### Profile A (xdist shadow)\n\n'
+              printf 'Not a required check. Verdict: `%s` (profile `%s`).\n\n' "$verdict" "${SHADOW_PROFILE:-unknown}"
+              printf '| step | outcome | exit | seconds | peak used kB |\n|---|---|---|---|---|\n'
+              printf '| checkout | %s | | | |\n' "${OUTCOME_CHECKOUT:-}"
+              printf '| prelude | %s | | | |\n' "${OUTCOME_PRELUDE:-}"
+              printf '| plan | %s | | | |\n' "${OUTCOME_PLAN:-}"
+              printf '| serial | %s | %s | %s | %s |\n' "${OUTCOME_SERIAL:-}" "$(int_file "$E/exit-serial")" \
+                "$(int_file "$E/duration-serial-s")" "$(int_file "$E/mem-peak-used-kb-serial")"
+              printf '| parallel | %s | %s | %s | %s |\n' "${OUTCOME_PARALLEL:-}" "$(int_file "$E/exit-parallel")" \
+                "$(int_file "$E/duration-parallel-s")" "$(int_file "$E/mem-peak-used-kb-parallel")"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload shadow evidence
+        if: ${{ always() }}
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v4
+        with:
+          name: profile-a-xdist-shadow-evidence
+          path: ${{ runner.temp }}/profile-a-xdist-shadow/
+          if-no-files-found: warn
+          overwrite: true
 
   trace-token-check:
     name: Trace Token Validation
