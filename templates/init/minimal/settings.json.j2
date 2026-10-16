@@ -32,16 +32,6 @@
             "command": "bash -c 'exec bash \"{{ engine_root }}/scripts/hooks/stop_report_hook.sh\"'"
           }
         ]
-      },
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash -c 'exec python3 \"{{ engine_root }}/scripts/hooks/t0_context_guard.py\"'",
-            "timeout": 5000
-          }
-        ]
       }
     ],
     "PreToolUse": [
@@ -51,7 +41,7 @@
           {
             "type": "command",
             "command": "bash -c 'exec bash \"{{ engine_root }}/scripts/hooks/pretooluse_block_raw_claude_spawn.sh\"'",
-            "timeout": 5000
+            "timeout": 5
           }
         ]
       },
@@ -60,17 +50,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash -c 'exec python3 \"{{ engine_root }}/scripts/hooks/pretooluse_t0_no_subagents.py\"'"
-          }
-        ]
-      },
-      {
-        "matcher": "Bash|Skill|SlashCommand",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash -c 'exec python3 \"{{ engine_root }}/scripts/hooks/t0_context_guard.py\"'",
-            "timeout": 5000
+            "command": "sh -c 'f=\"{{ engine_root }}/scripts/hooks/pretooluse_t0_no_subagents.py\"; if [ ! -f \"$f\" ]; then echo \"vnx: hook entry missing: $f\" >&2; exit 1; fi; python3 \"$f\"; rc=$?; [ \"$rc\" -eq 0 ] || rc=1; exit \"$rc\"'"
           }
         ]
       }
@@ -82,18 +62,6 @@
           {
             "type": "command",
             "command": "bash -c 'VNX_HOME=\"${VNX_HOME:-{{ engine_root }}}\"; if [ -f \"${VNX_HOME}/scripts/hooks/build_t0_state_hook.sh\" ]; then exec bash \"${VNX_HOME}/scripts/hooks/build_t0_state_hook.sh\"; else printf \"[vnx] build_t0_state_hook artifact MISSING under %s (expected in its scripts/hooks directory); t0_state.json will not refresh\\n\" \"${VNX_HOME}\" >&2; exit 0; fi'"
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash -c 'exec python3 \"{{ engine_root }}/scripts/hooks/t0_context_guard.py\"'",
-            "timeout": 5000
           }
         ]
       }

@@ -123,6 +123,41 @@ def _assert_rendered_cleanly(raw: str, rendered: str, vnx_home: str, project_roo
                 sys.exit(1)
 
 
+def _assert_vnx_home_renderable(vnx_home: str) -> None:
+    """Refuse a VNX_HOME that cannot sit inside a hook command (OI-2117 item e).
+
+    The template puts the value into shell source, inside double quotes
+    (``f="<VNX_HOME>/scripts/hooks/pretooluse_t0_no_subagents.py"``). A quote, a ``$(`` or a
+    backtick in a substituted path would then end the string or run code. The value is rendered
+    through ``t0_subagent_block.registered_command``, the function the template's command is
+    pinned to, which accepts only the allowlist of ``hook_coverage.registered_command``.
+    """
+    lib_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib")
+    if lib_dir not in sys.path:
+        sys.path.insert(0, lib_dir)
+    import t0_subagent_block
+
+    try:
+        t0_subagent_block.registered_command(vnx_home)
+    except ValueError as exc:
+        print(f"ERROR: vnx_home cannot be rendered into hook commands: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _print_done(message: str) -> None:
+    """The closing line of a write, then one line when no account has the user-level T0 guard: the templates no longer register
+    it, so a regenerated project runs T0 without it until `vnx guard install` ran."""
+    print(message)
+    lib_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib")
+    if lib_dir not in sys.path:
+        sys.path.insert(0, lib_dir)
+    import guard_install
+
+    notice = guard_install.missing_guard_notice(guard_install.home_dir())
+    if notice:
+        print(f"[regen-settings] {notice}")
+
+
 def load_template(vnx_home: str, project_root: str) -> dict:
     """Load and render the VNX settings template."""
     if not vnx_home:
@@ -139,6 +174,8 @@ def load_template(vnx_home: str, project_root: str) -> dict:
             file=sys.stderr,
         )
         sys.exit(1)
+
+    _assert_vnx_home_renderable(vnx_home)
 
     template_path = os.path.join(vnx_home, "templates", "settings_vnx_keys.json.tmpl")
     if not os.path.isfile(template_path):
@@ -473,7 +510,7 @@ def main():
 
         os.makedirs(os.path.dirname(settings_path), exist_ok=True)
         write_settings(settings_path, result)
-        print(f"[regen-settings] Created: {settings_path} (full)")
+        _print_done(f"[regen-settings] Created: {settings_path} (full)")
 
     elif args.merge:
         # Merge mode: overlay VNX keys into existing
@@ -518,7 +555,7 @@ def main():
         if summary:
             for line in summary:
                 print(line)
-        print(f"[regen-settings] Updated: {settings_path} (merge)")
+        _print_done(f"[regen-settings] Updated: {settings_path} (merge)")
 
 
 if __name__ == "__main__":
