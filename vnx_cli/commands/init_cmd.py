@@ -347,6 +347,16 @@ def _assert_engine_root_renderable(engine_root: str) -> None:
     t0_subagent_block.registered_command(engine_root)
 
 
+def _print_missing_guard_notice() -> None:
+    """One line when no account has the user-level T0 guard (the templates do not register it)."""
+    _engine.ensure_engine_on_path()
+    import guard_install
+
+    notice = guard_install.missing_guard_notice(guard_install.home_dir())
+    if notice:
+        print(f"  {notice}")
+
+
 def _scaffold_claude_dir(project_dir: Path, tmpl_root: Path, ctx: dict, force: bool) -> None:
     """Create the .claude/ skeleton from templates."""
     claude_dir = project_dir / ".claude"
@@ -375,6 +385,7 @@ def _scaffold_claude_dir(project_dir: Path, tmpl_root: Path, ctx: dict, force: b
         _assert_engine_root_renderable(ctx["engine_root"])
         _atomic_write(settings_path, _render_template(tmpl_root / "settings.json.j2", ctx), project_dir)
         print(f"  created {settings_path.relative_to(project_dir)}")
+        _print_missing_guard_notice()
     else:
         print(f"  exists  {settings_path.relative_to(project_dir)}")
 

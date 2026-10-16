@@ -13,7 +13,10 @@ account whose ``settings.json`` cannot be read, is not a JSON object or holds a 
 PER PROJECT. The inventory is the registry ``~/.vnx/projects.json`` plus every ``.vnx-project-id``
 under each ``--scan-root`` (depth 3, ``.vnx-data`` skipped); a scan hit the registry does not
 list is marked. A project without ``.claude/terminals/T0/CLAUDE.md`` is ``not guarded (no T0)``.
-For a project with one, each event is answered by ``hook_coverage.coverage`` (the function the
+A project with one that fails the rest of the shim's rule 1 (``hook_coverage.t0_project_root``:
+a ``.vnx-project-id`` with a first line, a ``.git`` entry at or above, not a dispatch worktree) is
+``not guarded (<reason>)`` and makes ``check`` exit 1: the installed command exits there without
+running the guard. For a project that passes, each event is answered by ``hook_coverage.coverage`` (the function the
 guard itself uses), PreToolUse once per tool of the user matcher. ``coverage`` runs with the
 environment of the account being reported (``account_env``), because what Claude Code records
 per project (the trust decision) lives per account:
@@ -21,6 +24,7 @@ per project (the trust decision) lives per account:
   ``project (direct|shim)``  the project's own settings run the guard; the user level stays silent
   ``user``                   nothing in the project covers and this account's entry is in place
   ``missing``                nothing in the project covers and this account has no entry
+  ``duplicate``              this account has more than one entry of ours in the event
   ``unknown``                a settings file of the project cannot be loaded (the guard counts it
                              as not covered), or this account's own settings are ``unknown``
 
@@ -48,6 +52,8 @@ SKIPPED_DIRS = frozenset({".vnx-data", ".git"})
 PROJECT_ID_FILE = ".vnx-project-id"
 T0_MARKER = Path(".claude") / "terminals" / "T0" / "CLAUDE.md"
 NO_T0 = "not guarded (no T0)"
+NOT_GUARDED = "not guarded"
+ALL_EVENTS = "all events"
 
 
 @dataclass
@@ -56,6 +62,8 @@ class ProjectEntry:
     project_id: Optional[str]
     in_registry: bool
     has_t0: bool
+    # why the shim's rule 1 turns this project away (None: the shim runs the guard here)
+    rule1_reason: Optional[str] = None
 
 
 @dataclass
@@ -120,6 +128,19 @@ def scan_projects(root: Path, depth: int = SCAN_DEPTH) -> List[Path]:
     return found
 
 
+def rule1_reason(path: Path) -> Optional[str]:
+    """Why the hook shim exits 0 for a session in ``path`` although the folder has a T0 file, or
+    None when rule 1 passes. Rule 1 is ``hook_coverage.t0_project_root``, the function the guard
+    uses; this only names the first failing part."""
+    if hc.t0_project_root(str(path)) is not None:
+        return None
+    if hc.project_id(path) is None:
+        return f"no {PROJECT_ID_FILE} with a non-empty first line, so the shim exits without running the guard"
+    if hc._repo_root(str(path)) is None:
+        return "no .git entry at or above the folder, so the shim finds no repository root"
+    return "the folder lies in a repository root or a dispatch worktree that rule 1 refuses"
+
+
 def build_inventory(home: Path, scan_roots: Sequence[Path]) -> List[ProjectEntry]:
     registered = {os.path.realpath(p) for p in registry_projects(home)}
     ordered: List[Path] = list(registry_projects(home))
@@ -132,8 +153,9 @@ def build_inventory(home: Path, scan_roots: Sequence[Path]) -> List[ProjectEntry
         if real in seen:
             continue
         seen.add(real)
+        has_t0 = (Path(real) / T0_MARKER).is_file()
         inventory.append(ProjectEntry(Path(real), hc.project_id(real), real in registered,
-                                      (Path(real) / T0_MARKER).is_file()))
+                                      has_t0, rule1_reason(Path(real)) if has_t0 else None))
     return inventory
 
 
@@ -173,6 +195,8 @@ def _coverage_text(project: Path, event: str, tool: Optional[str], user_state: O
         return f"project ({cov.form})"
     if cov.state == hc.UNKNOWN or user_state == gi.STATE_UNKNOWN:
         return "unknown"
+    if user_state == gi.STATE_DUPLICATE:
+        return "duplicate"
     return "user" if user_state == gi.STATE_OK else "missing"
 
 
@@ -198,6 +222,10 @@ def account_report(config_dir: Path, projects: Sequence[ProjectEntry],
         report.entries = {event: gi.STATE_UNKNOWN for event, _ in gi.GUARD_EVENTS}
     for project in projects:
         if not project.has_t0:
+            continue
+        if project.rule1_reason:
+            report.coverage[str(project.path)] = {
+                ALL_EVENTS: f"{NOT_GUARDED} ({project.rule1_reason})"}
             continue
         rows: Dict[str, str] = {}
         for event, tool in _event_keys():
@@ -228,14 +256,25 @@ def run_check(*, home: Path, config_dirs: Sequence[str] = (), scan_roots: Sequen
     return report
 
 
+def _entry_problem(config_dir: Path, event: str, state: str) -> str:
+    if state == gi.STATE_DUPLICATE:
+        return (f"{config_dir}: {event} has more than one entry of ours (duplicate); "
+                "run `vnx guard install` to leave exactly one")
+    return f"{config_dir}: {event} entry is {state}"
+
+
 def _account_problems(acc: AccountReport) -> List[str]:
     problems = []
     if acc.settings_state != "ok":
         problems.append(f"{acc.config_dir}: {acc.settings_state}")
     else:
-        problems.extend(f"{acc.config_dir}: {event} entry is {state}"
+        problems.extend(_entry_problem(acc.config_dir, event, state)
                         for event, state in acc.entries.items() if state != gi.STATE_OK)
     for project, rows in acc.coverage.items():
+        unguarded = rows.get(ALL_EVENTS, "")
+        if unguarded.startswith(NOT_GUARDED):
+            problems.append(f"{acc.config_dir}: {project} is {unguarded}")
+            continue
         bad = sorted(label for label, text in rows.items() if text in ("missing", "unknown"))
         if bad:
             problems.append(f"{acc.config_dir}: {project} is not covered on {', '.join(bad)}")

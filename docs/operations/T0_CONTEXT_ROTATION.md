@@ -224,7 +224,9 @@ three entries with `hook_coverage.registered_command(..., "user")` and
 
 An entry is the install's own when its command names the shim path, the guard entry and
 `--scope user`. A second run finds three entries in the exact form and changes nothing. An entry
-of ours in another form is replaced; every other hook stays. `--dry-run` lists the accounts,
+of ours in another form is replaced, and so is every further entry of ours in an event: an event
+ends with exactly one, also when a correct entry sat next to an older registration (for example
+`"timeout": 5000`). Every other hook stays. `--dry-run` lists the accounts,
 prints a diff per file and writes nothing.
 
 **The write.** Per file: a fresh read, new content that must parse as JSON and keep every
@@ -267,7 +269,8 @@ EINVAL or ENOSYS: then nothing is written and no backup is left. There is no fal
 **Check.** `vnx guard check [--config-dir DIR]... [--scan-root DIR]...` is read-only and exits 0
 only when everything below holds:
 
-- per account: the three entries are in the exact form, `vnx_hook_shim.sh` and
+- per account: the three entries are in the exact form and there is one per event (an event with
+  more than one entry of ours is `duplicate` and named in the findings), `vnx_hook_shim.sh` and
   `t0_context_guard.py` exist in `current`, and the report names the root the registry trusts to
   run repo code, which is the first `vnx-dev` entry of `~/.vnx/projects.json` (shim step 2). When
   that path does not exist on disk it says so: every project then runs `current`. An account
@@ -278,7 +281,12 @@ only when everything below holds:
   `.vnx-data` skipped). A scan hit the registry does not list is marked;
 - a project without `.claude/terminals/T0/CLAUDE.md` prints `not guarded (no T0)` and is never a
   finding;
-- a project with one is answered per event through `hook_coverage.coverage`, PreToolUse once per
+- a project with one is first held against the rest of the shim's rule 1,
+  `hook_coverage.t0_project_root`: a `.vnx-project-id` with a non-empty first line, a `.git` entry
+  at or above the folder, and a place outside `.vnx-data/worktrees/`. A project that fails it
+  prints `not guarded (<reason>)` and is a finding, because the installed command exits there
+  without running the guard;
+- a project that passes is answered per event through `hook_coverage.coverage`, PreToolUse once per
   tool (`Bash`, `Skill`, `SlashCommand`): `project (direct|shim)` when the project's own settings
   run the guard, `user` when nothing in the project covers and this account has the entry,
   `missing` when it has not, `unknown` when a settings file of the project cannot be loaded.
@@ -290,7 +298,12 @@ only when everything below holds:
   whatever the environment `check` itself runs in.
 
 `vnx doctor` runs the same report without scan roots as check `guard:user-level`: PASS when no
-Claude account directory exists or everything is covered, WARN otherwise.
+Claude account directory exists or everything is covered, WARN otherwise. It also warns, naming
+`vnx guard install`, when no account has the three entries.
+
+`vnx init` (when it writes `settings.json`) and `vnx regen-settings` (`--full` and `--merge`,
+not `--dry-run`) print one line when no account on the machine has the user-level guard, using
+the install's own account discovery and entry check. Nothing is installed automatically.
 
 **Rollback.** Switching `current` to a version without the shim makes the written command exit 1
 with `vnx: guard shim missing: <path>` on every event, under bash and under dash, and `check`
@@ -299,7 +312,9 @@ forward, or put the guard back per project with the template entries of that ver
 `vnx guard check` again.
 
 **Templates.** `templates/settings_vnx_keys.json.tmpl` and `templates/init/{default,minimal}/settings.json.j2`
-register no guard entry, and every `timeout` is in seconds. `pretooluse_t0_no_subagents.py` is
+register no guard entry, and every `timeout` is in seconds. The 5, 3 and 8 seconds were measured
+on 2026-10-16 (10 runs per hook on a fixture project, at most 0.354 s for the slowest hook), and
+a test keeps each one at or above three times that maximum, rounded up. `pretooluse_t0_no_subagents.py` is
 NOT started through the shim. It recognises a T0 session by its cwd or by the launch directory in
 its transcript path, because a T0's cwd drifts (3 of 143 real T0 sessions also carried the
 operator's home as cwd). The shim's rule 1 tests the cwd and exits 0 outside a project with a T0

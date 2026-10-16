@@ -56,7 +56,9 @@ def _account(home: Path, name: str = ".claude", installed: bool = True) -> Path:
 def _project(root: Path, name: str, *, t0: bool = True, project_id: str = "consumer") -> Path:
     project = root / name
     project.mkdir(parents=True)
-    (project / ".vnx-project-id").write_text(project_id + "\n", encoding="utf-8")
+    (project / ".git").mkdir()
+    if project_id:
+        (project / ".vnx-project-id").write_text(project_id + "\n", encoding="utf-8")
     if t0:
         (project / ".claude" / "terminals" / "T0").mkdir(parents=True)
         (project / ".claude" / "terminals" / "T0" / "CLAUDE.md").write_text("# T0\n", encoding="utf-8")
@@ -484,7 +486,7 @@ def test_doctor_warns_when_an_account_lacks_the_guard_and_passes_once_installed(
     monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
     account = _account(home, installed=False)
     warned = doctor._check_user_guard()
-    assert warned.status == doctor.WARN and "vnx guard check" in warned.detail
+    assert warned.status == doctor.WARN and "vnx guard install" in warned.detail
     assert gi.write_settings(account / "settings.json").status == "written"
     assert doctor._check_user_guard().status == doctor.PASS
 
@@ -500,3 +502,71 @@ def test_doctor_runs_the_guard_check_in_its_full_run(home, monkeypatch, tmp_path
     doctor.vnx_doctor(argparse.Namespace(project_dir=str(project), json=True, strict=False))
     names = [c["name"] for c in json.loads(capsys.readouterr().out)["checks"]]
     assert "guard:user-level" in names
+
+
+# ── the shim's rule 1, a second own entry, the missing-guard notice ──────────
+
+
+def test_a_project_with_a_t0_folder_but_no_project_id_is_not_guarded_with_the_reason(home, tmp_path):
+    _account(home)
+    project = _project(tmp_path, "noid", project_id="")
+    _register(home, project)
+    report = gc.run_check(home=home)
+    assert not report.ok
+    rows = _rows(report, ".claude", project)
+    assert list(rows) == ["all events"] and rows["all events"].startswith("not guarded")
+    assert ".vnx-project-id" in rows["all events"]
+    assert any("not guarded" in p and str(project) in p for p in report.problems)
+    assert "not guarded (no .vnx-project-id" in gc.render_report(report)
+
+
+def test_a_project_without_a_git_entry_is_not_guarded_with_the_reason(home, tmp_path):
+    _account(home)
+    project = _project(tmp_path, "nogit")
+    project.joinpath(".git").rmdir()
+    _register(home, project)
+    report = gc.run_check(home=home)
+    assert not report.ok
+    assert ".git" in _rows(report, ".claude", project)["all events"]
+
+
+def test_a_project_under_dispatch_worktrees_is_not_guarded(home, tmp_path):
+    _account(home)
+    project = _project(tmp_path / ".vnx-data" / "worktrees", "wt")
+    _register(home, project)
+    report = gc.run_check(home=home)
+    assert not report.ok and "not guarded" in _rows(report, ".claude", project)["all events"]
+
+
+def test_check_reports_a_second_own_entry_as_not_ok_by_event_name(home):
+    account = _account(home)
+    path = account / "settings.json"
+    settings = json.loads(path.read_text(encoding="utf-8"))
+    older = dict(gi.guard_hook(), timeout=5000)
+    settings["hooks"]["Stop"].append({"matcher": "", "hooks": [older]})
+    path.write_text(json.dumps(settings), encoding="utf-8")
+    report = gc.run_check(home=home)
+    assert not report.ok
+    assert report.accounts[0].entries["Stop"] == gi.STATE_DUPLICATE
+    assert report.accounts[0].entries["UserPromptSubmit"] == gi.STATE_OK
+    assert any("Stop has more than one entry" in p for p in report.problems)
+
+
+def test_doctor_names_the_install_when_no_account_has_the_guard(home, monkeypatch):
+    from vnx_cli.commands import doctor
+
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+    _account(home, installed=False)
+    check = doctor._check_user_guard()
+    assert check.status == doctor.WARN and "vnx guard install" in check.detail
+
+
+def test_the_notice_is_one_line_only_while_no_account_has_the_guard(home):
+    assert gi.missing_guard_notice(home) is None, "no account: nothing to install into"
+    account = _account(home, installed=False)
+    notice = gi.missing_guard_notice(home)
+    assert notice and "\n" not in notice and "vnx guard install" in notice
+    assert gi.write_settings(account / "settings.json").status == "written"
+    assert gi.missing_guard_notice(home) is None
+    (account / "settings.json").write_text("{not json", encoding="utf-8")
+    assert gi.missing_guard_notice(home) is not None, "an unreadable file is not an install"

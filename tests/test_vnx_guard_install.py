@@ -165,6 +165,38 @@ def test_an_entry_of_ours_in_another_form_is_replaced_not_duplicated(home):
     assert _settings(account)["hooks"]["Stop"][0] == OPERATOR_SETTINGS["hooks"]["Stop"][0]
 
 
+@pytest.mark.parametrize("older", [
+    {"type": "command", "timeout": 5000, "command": EXPECTED_COMMAND},
+    {"type": "command", "timeout": 10, "command": EXPECTED_COMMAND},
+])
+def test_a_second_own_entry_next_to_a_correct_one_is_normalised_to_one(home, older):
+    settings = json.loads(json.dumps(OPERATOR_SETTINGS))
+    settings["hooks"]["Stop"].append({"matcher": "", "hooks": [dict(gi.guard_hook())]})
+    settings["hooks"]["Stop"].append({"matcher": "x", "hooks": [older]})
+    account = _account(home, settings=settings)
+    assert gi.entry_states(settings)["Stop"] == gi.STATE_DUPLICATE
+    code, out = _install(home)
+    assert code == 0 and "unchanged" not in out
+    final = _settings(account)
+    assert [e for e, _, _ in _guard_hooks(final)].count("Stop") == 1
+    assert gi.entry_states(final) == {e: gi.STATE_OK for e, _ in gi.GUARD_EVENTS}
+    assert final["hooks"]["Stop"][0] == OPERATOR_SETTINGS["hooks"]["Stop"][0]
+    assert _install(home)[0] == 0 and _settings(account) == final
+
+
+def test_a_second_own_entry_is_removed_from_a_group_that_keeps_the_operators_hook(home):
+    settings = json.loads(json.dumps(OPERATOR_SETTINGS))
+    settings["hooks"]["Stop"].append({"matcher": "", "hooks": [
+        dict(gi.guard_hook()), {"type": "command", "command": "echo kept"},
+        dict(gi.guard_hook(), timeout=5000)]})
+    account = _account(home, settings=settings)
+    assert _install(home)[0] == 0
+    final = _settings(account)
+    commands = [h["command"] for g in final["hooks"]["Stop"] for h in g["hooks"]]
+    assert "echo kept" in commands and "echo mine" in commands
+    assert len([c for c in commands if GUARD in c]) == 1
+
+
 def test_a_settings_file_without_hooks_gets_them(home):
     account = _account(home, settings={"model": "opus"})
     assert _install(home)[0] == 0

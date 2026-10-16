@@ -144,6 +144,20 @@ def _assert_vnx_home_renderable(vnx_home: str) -> None:
         sys.exit(1)
 
 
+def _print_done(message: str) -> None:
+    """The closing line of a write, then one line when no account has the user-level T0 guard: the templates no longer register
+    it, so a regenerated project runs T0 without it until `vnx guard install` ran."""
+    print(message)
+    lib_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib")
+    if lib_dir not in sys.path:
+        sys.path.insert(0, lib_dir)
+    import guard_install
+
+    notice = guard_install.missing_guard_notice(guard_install.home_dir())
+    if notice:
+        print(f"[regen-settings] {notice}")
+
+
 def load_template(vnx_home: str, project_root: str) -> dict:
     """Load and render the VNX settings template."""
     if not vnx_home:
@@ -496,7 +510,7 @@ def main():
 
         os.makedirs(os.path.dirname(settings_path), exist_ok=True)
         write_settings(settings_path, result)
-        print(f"[regen-settings] Created: {settings_path} (full)")
+        _print_done(f"[regen-settings] Created: {settings_path} (full)")
 
     elif args.merge:
         # Merge mode: overlay VNX keys into existing
@@ -541,7 +555,7 @@ def main():
         if summary:
             for line in summary:
                 print(line)
-        print(f"[regen-settings] Updated: {settings_path} (merge)")
+        _print_done(f"[regen-settings] Updated: {settings_path} (merge)")
 
 
 if __name__ == "__main__":

@@ -31,7 +31,6 @@ if str(_LIB_DIR) not in sys.path:
 import hook_coverage as hc
 
 ENTRY = "pretooluse_t0_no_subagents.py"
-MATCHER = "Agent|Task"
 
 
 def registered_command(vnx_home: str = hc.DEFAULT_VNX_HOME) -> str:

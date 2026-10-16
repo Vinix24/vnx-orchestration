@@ -827,6 +827,9 @@ def _check_user_guard() -> Check:
     home = Path.home()
     if not guard_install.discover_accounts(home):
         return _result(PASS, "no Claude Code account directory; user-level guard not applicable")
+    if not guard_install.guard_installed_anywhere(home):
+        return _result(WARN, "no account has the user-level T0 guard and project settings no "
+                             "longer register it; run `vnx guard install`")
     report = guard_check.run_check(home=home)
     if report.ok:
         covered = sum(1 for acc in report.accounts for _ in acc.coverage)

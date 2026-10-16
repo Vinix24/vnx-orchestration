@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import math
+import os
 import re
 import subprocess
 import sys
@@ -99,6 +101,86 @@ def test_the_other_hooks_of_the_templates_survive(tmp_path):
     joined = " ".join(h.get("command", "") for _, _, h in _hooks(settings))
     for kept in ("pretooluse_block_raw_claude_spawn.sh", "build_t0_state_hook.sh", "hookpin_check.sh"):
         assert kept in joined
+
+
+# ── timeouts ─────────────────────────────────────────────────────────────────
+
+# Worst wall time in seconds over 10 runs on a fixture project (G2 round 3, report table),
+# keyed by the script a template registers with a timeout.
+MEASURED_MAX_SECONDS = {
+    "pretooluse_block_raw_claude_spawn.sh": 0.066,
+    "sessionstart.sh": 0.354,
+    "hookpin_check.sh": 0.077,
+    "userpromptsubmit_intelligence_inject.sh": 0.189,
+}
+
+
+def test_every_timeout_is_at_least_three_times_the_measured_maximum(template, tmp_path):
+    settings = _render(template, tmp_path)
+    seen = set()
+    for _, _, hook in _hooks(settings):
+        if "timeout" not in hook:
+            continue
+        scripts = [name for name in MEASURED_MAX_SECONDS if name in hook["command"]]
+        assert scripts, f"a timeout on a hook that was not measured: {hook['command']}"
+        seen.update(scripts)
+        for name in scripts:
+            assert hook["timeout"] >= math.ceil(3 * MEASURED_MAX_SECONDS[name]), (name, hook)
+    assert seen, "the template sets timeouts, so the test has something to judge"
+
+
+# ── the missing-guard notice ─────────────────────────────────────────────────
+
+
+@pytest.fixture()
+def machine(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
+def test_init_prints_one_line_when_no_account_has_the_guard(machine, tmp_path, capsys):
+    project = tmp_path / "project"
+    project.mkdir()
+    init_cmd._scaffold_claude_dir(project, init_cmd._templates_root("default"), ENGINE_CTX, False)
+    lines = [l for l in capsys.readouterr().out.splitlines() if "vnx guard install" in l]
+    assert len(lines) == 1
+
+
+def test_init_prints_nothing_extra_once_an_account_has_the_guard(machine, tmp_path, capsys):
+    import guard_install
+
+    hooks = machine / ".vnx-system" / "current" / "scripts" / "hooks"
+    hooks.mkdir(parents=True)
+    assert guard_install.write_settings(machine / ".claude" / "settings.json").status == "written"
+    project = tmp_path / "project"
+    project.mkdir()
+    init_cmd._scaffold_claude_dir(project, init_cmd._templates_root("default"), ENGINE_CTX, False)
+    assert "vnx guard install" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("mode", ["--full", "--merge"])
+def test_regen_settings_prints_one_line_when_no_account_has_the_guard(machine, tmp_path, mode):
+    project = tmp_path / "project"
+    project.mkdir()
+    env = {**os.environ, "HOME": str(machine)}
+    proc = subprocess.run([sys.executable, str(REPO_ROOT / "scripts" / "vnx_settings_merge.py"),
+                           mode, "--project-root", str(project), "--vnx-home", str(REPO_ROOT)],
+                          capture_output=True, text=True, env=env)
+    assert proc.returncode == 0, proc.stderr
+    assert len([l for l in proc.stdout.splitlines() if "vnx guard install" in l]) == 1
+
+
+def test_regen_settings_dry_run_stays_quiet(machine, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    env = {**os.environ, "HOME": str(machine)}
+    proc = subprocess.run([sys.executable, str(REPO_ROOT / "scripts" / "vnx_settings_merge.py"),
+                           "--merge", "--dry-run", "--json", "--project-root", str(project),
+                           "--vnx-home", str(REPO_ROOT)], capture_output=True, text=True, env=env)
+    assert proc.returncode == 0, proc.stderr
+    assert "vnx guard install" not in proc.stdout
 
 
 # ── OI-2117 item (e): the rendered value is validated ────────────────────────

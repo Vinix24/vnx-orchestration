@@ -70,6 +70,7 @@ GUARD_EVENTS: Tuple[Tuple[str, str], ...] = (
 STATE_OK = "ok"
 STATE_DIFFERS = "differs"
 STATE_MISSING = "missing"
+STATE_DUPLICATE = "duplicate"
 STATE_UNKNOWN = "unknown"
 CURRENT_REL = Path(".vnx-system") / "current"
 
@@ -162,21 +163,25 @@ def _groups(settings: Mapping, event: str) -> list:
 
 
 def event_state(settings: Mapping, event: str, matcher: str) -> str:
-    """STATE_OK when the exact entry sits in a group with the right matcher, STATE_DIFFERS when
-    an entry of ours exists in another form, STATE_MISSING when there is none."""
+    """STATE_OK when exactly one entry of ours sits in the event and it is the exact one in a
+    group with the right matcher, STATE_DUPLICATE when the event holds more than one entry of
+    ours (whatever their form), STATE_DIFFERS when the single entry is in another form,
+    STATE_MISSING when there is none."""
     wanted = guard_hook()
-    state = STATE_MISSING
+    own = exact = 0
     for group in _groups(settings, event):
         if not isinstance(group, dict):
             continue
         for hook in group.get("hooks") or []:
             if not is_own_hook(hook):
                 continue
-            exact = hook == wanted and (group.get("matcher") or "") == matcher
-            if exact:
-                return STATE_OK
-            state = STATE_DIFFERS
-    return state
+            own += 1
+            exact += hook == wanted and (group.get("matcher") or "") == matcher
+    if own == 0:
+        return STATE_MISSING
+    if own > 1:
+        return STATE_DUPLICATE
+    return STATE_OK if exact else STATE_DIFFERS
 
 
 def entry_states(settings: Mapping) -> Dict[str, str]:
@@ -184,8 +189,9 @@ def entry_states(settings: Mapping) -> Dict[str, str]:
 
 
 def apply_entries(settings: Mapping) -> dict:
-    """A copy of ``settings`` with exactly one guard entry per event. Other hooks stay; a
-    wrong-form entry of ours is replaced. Raises GuardInstallError for a ``hooks`` tree of the
+    """A copy of ``settings`` with exactly one guard entry per event. Other hooks stay; every
+    entry of ours in an event that does not hold exactly the one correct entry is removed and
+    the correct one added, so a second registration of ours never survives next to a correct one. Raises GuardInstallError for a ``hooks`` tree of the
     wrong shape rather than guessing."""
     new = json.loads(json.dumps(settings))
     hooks = new.setdefault("hooks", {})
@@ -545,6 +551,30 @@ def resolve_accounts(home: Path, config_dirs: List[str]) -> List[Path]:
             raise GuardInstallError(f"--config-dir {item} is not a directory")
         accounts.append(directory)
     return accounts
+
+
+def guard_installed_anywhere(home: Path) -> bool:
+    """True when at least one account has all three entries in their exact form (the same
+    discovery and entry check the install uses). An unreadable settings file counts as no."""
+    for account in discover_accounts(home):
+        try:
+            _, settings = read_settings(settings_path(account))
+        except GuardInstallError:
+            continue
+        if all(state == STATE_OK for state in entry_states(settings).values()):
+            return True
+    return False
+
+
+def missing_guard_notice(home: Path) -> Optional[str]:
+    """One line for `vnx init` and `vnx regen-settings`: the templates no longer register the
+    T0 guard, so a machine where no account has the user-level one runs T0 without it. None
+    when an account has it, or when there is no account to install it in."""
+    if not discover_accounts(home) or guard_installed_anywhere(home):
+        return None
+    return ("T0 context guard: no Claude Code account on this machine has the user-level guard, "
+            "and project settings no longer register it. Run `vnx guard install` (check with "
+            "`vnx guard check`).")
 
 
 def run_install(*, home: Path, config_dirs: List[str], dry_run: bool, out) -> int:
