@@ -64,6 +64,13 @@ runs:
           pytest pytest-xdist pytest-timeout \
           pyyaml jsonschema psutil watchdog hypothesis jinja2 build "pyjwt[crypto]"
 
+    - name: Forced prelude failure (red run b, temporary)
+      if: ${{ env.VNX_PRELUDE_FORCE_FAIL == '1' }}
+      shell: bash
+      run: |
+        echo "red run (b): forced prelude failure"
+        exit 1
+
     - name: Prepare expected repo layout
       shell: bash
       run: |
