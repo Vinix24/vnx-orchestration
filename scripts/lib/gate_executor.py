@@ -386,11 +386,7 @@ class GateExecutorMixin:
         ``auto_merge_policy``; only this call's rollup stops reading an
         executed gate through it.
         """
-        gates: List[Dict[str, Any]] = []
-        has_required_failure = False
-
         import gate_recorder as _rec
-        from gate_status import has_complete_evidence, is_pass
 
         # OI-1488: a result record is evidence about the commit it names, and
         # nothing had been checking that this is the commit being merged. The
@@ -407,78 +403,100 @@ class GateExecutorMixin:
         if head_sha is None:
             head_sha = _rec.get_pr_head_sha(pr_number)
 
-        for req in request_result.get("requested", []):
-            gate_name = req.get("gate", "")
-            req_status = req.get("status", "")
+        rows = [
+            self._execute_one_request(req, pr_number, head_sha)
+            for req in request_result.get("requested", [])
+        ]
+        return [entry for entry, _blocks in rows], any(blocks for _entry, blocks in rows)
 
-            if req_status == "requested":
-                exec_result = self.execute_gate(
-                    gate=gate_name,
-                    pr_number=pr_number,
+    def _execute_one_request(
+        self, req: Dict[str, Any], pr_number: int, head_sha: str,
+    ) -> "tuple[Dict[str, Any], bool]":
+        """Run (or read back) one requested gate: ``(report entry, blocks the call)``.
+
+        The rules are :meth:`_execute_requested_gates`'s, one request at a time.
+        The entry carries the ``seat`` its request record states (OI-2058, R5a),
+        so a reader of the report credits the seat this request filled, not one
+        an earlier round's takeover annotation names.
+        """
+        entry, blocks = self._execute_or_read_request(req, pr_number, head_sha)
+        if req.get("seat"):
+            entry["seat"] = req["seat"]
+        return entry, blocks
+
+    def _execute_or_read_request(
+        self, req: Dict[str, Any], pr_number: int, head_sha: str,
+    ) -> "tuple[Dict[str, Any], bool]":
+        """:meth:`_execute_one_request` without the seat stamp."""
+        from gate_status import has_complete_evidence, is_pass
+
+        gate_name = req.get("gate", "")
+        req_status = req.get("status", "")
+
+        if req_status == "requested":
+            exec_result = self.execute_gate(
+                gate=gate_name,
+                pr_number=pr_number,
+            )
+            passed, pass_reason = is_pass(exec_result)
+            # A gate is decided PASS only when it both passed semantically
+            # AND carried a complete evidence trail. An infra failure books
+            # ``unavailable`` (never ``failed``) and carries no contract_hash
+            # or report_path; either missing means "did not run", which must
+            # never sum up to a PASS (OI-1178).
+            decided_pass = bool(passed) and has_complete_evidence(exec_result)
+            result_sha = str(exec_result.get("commit_sha") or "")
+            sha_binding = _classify_sha_binding(head_sha, result_sha)
+            if sha_binding == "mismatch":
+                # Evidence about another commit is not evidence about this
+                # one. Never the reverse: an unknown sha on either side is
+                # an unmeasured binding, not a mismatch, and must not
+                # downgrade a gate that is otherwise decided -- that is the
+                # difference between "we checked and it is wrong" and "we
+                # could not check".
+                decided_pass = False
+                pass_reason = (
+                    f"result records commit {result_sha[:8]} but the PR head "
+                    f"is {head_sha[:8]} — this verdict is about other code"
                 )
-                passed, pass_reason = is_pass(exec_result)
-                # A gate is decided PASS only when it both passed semantically
-                # AND carried a complete evidence trail. An infra failure books
-                # ``unavailable`` (never ``failed``) and carries no contract_hash
-                # or report_path; either missing means "did not run", which must
-                # never sum up to a PASS (OI-1178).
-                decided_pass = bool(passed) and has_complete_evidence(exec_result)
-                result_sha = str(exec_result.get("commit_sha") or "")
-                sha_binding = _classify_sha_binding(head_sha, result_sha)
-                if sha_binding == "mismatch":
-                    # Evidence about another commit is not evidence about this
-                    # one. Never the reverse: an unknown sha on either side is
-                    # an unmeasured binding, not a mismatch, and must not
-                    # downgrade a gate that is otherwise decided -- that is the
-                    # difference between "we checked and it is wrong" and "we
-                    # could not check".
-                    decided_pass = False
-                    pass_reason = (
-                        f"result records commit {result_sha[:8]} but the PR head "
-                        f"is {head_sha[:8]} — this verdict is about other code"
-                    )
-                gates.append({
-                    "gate": gate_name,
-                    "request_status": req_status,
-                    "execution_status": exec_result.get("status", "unknown"),
-                    "passed": decided_pass,
-                    "pass_reason": pass_reason,
-                    "report_path": exec_result.get("report_path", ""),
-                    "contract_hash": exec_result.get("contract_hash", ""),
-                    "sha_binding": sha_binding,
-                    "head_sha": head_sha,
-                    "result_commit_sha": result_sha,
-                    "write_refused": bool(exec_result.get("write_refused")),
-                    "detail": exec_result,
-                })
-                # An executed gate blocks on its verdict, not on the merge
-                # policy's ``required`` flag: the caller asked this seat into
-                # its stack, so a non-PASS it returned is a failure of this
-                # call whatever ``required`` says. ``claude_github_optional``
-                # stays optional by name — it is not a seat this call's
-                # success depends on.
-                if gate_name != "claude_github_optional" and not decided_pass:
-                    has_required_failure = True
-            else:
-                passed, pass_reason = is_pass(req)
-                gates.append({
-                    "gate": gate_name,
-                    "request_status": req_status,
-                    "execution_status": req_status,
-                    "passed": passed,
-                    "pass_reason": pass_reason,
-                    "reason": req.get("reason", ""),
-                    "reason_detail": req.get("reason_detail", ""),
-                    "detail": req,
-                })
-                # OI-1265: count what did NOT pass, not a closed list of known
-                # failing statuses. A required gate pre-booked with any non-pass
-                # status (blocked, an unknown gate, fail, …) must block; a new
-                # status added later must not silently slip past enforcement.
-                if gate_name != "claude_github_optional" and req.get("required", True) and not passed:
-                    has_required_failure = True
+            entry = {
+                "gate": gate_name,
+                "request_status": req_status,
+                "execution_status": exec_result.get("status", "unknown"),
+                "passed": decided_pass,
+                "pass_reason": pass_reason,
+                "report_path": exec_result.get("report_path", ""),
+                "contract_hash": exec_result.get("contract_hash", ""),
+                "sha_binding": sha_binding,
+                "head_sha": head_sha,
+                "result_commit_sha": result_sha,
+                "write_refused": bool(exec_result.get("write_refused")),
+                "detail": exec_result,
+            }
+            # An executed gate blocks on its verdict, not on the merge
+            # policy's ``required`` flag: the caller asked this seat into
+            # its stack, so a non-PASS it returned is a failure of this
+            # call whatever ``required`` says. ``claude_github_optional``
+            # stays optional by name — it is not a seat this call's
+            # success depends on.
+            return entry, gate_name != "claude_github_optional" and not decided_pass
 
-        return gates, has_required_failure
+        passed, pass_reason = is_pass(req)
+        entry = {
+            "gate": gate_name,
+            "request_status": req_status,
+            "execution_status": req_status,
+            "passed": passed,
+            "pass_reason": pass_reason,
+            "reason": req.get("reason", ""),
+            "reason_detail": req.get("reason_detail", ""),
+            "detail": req,
+        }
+        # OI-1265: count what did NOT pass, not a closed list of known
+        # failing statuses. A required gate pre-booked with any non-pass
+        # status (blocked, an unknown gate, fail, …) must block; a new
+        # status added later must not silently slip past enforcement.
+        return entry, bool(gate_name != "claude_github_optional" and req.get("required", True) and not passed)
 
     def request_and_execute(
         self,
@@ -502,11 +520,21 @@ class GateExecutorMixin:
         against it, and the executor binds every result to it. Two separate gh
         round-trips could disagree, and a standing verdict would then be checked
         against a different head than the one this call reports.
+
+        A seat whose reviewer comes back exhausted in this call is handed to the
+        next distinct reviewer in this call (:meth:`_advance_exhausted_seats`,
+        OI-2058 R5a case d). The exhausted entry stays in ``gates`` with
+        ``superseded_by`` naming its successor, and only the seat's final
+        reviewer decides ``has_required_failure``. A reviewer that decided, PASS
+        or FAIL, is never superseded, so a blocking verdict always reaches
+        ``has_required_failure``. ``review_seats`` is the seat list the round
+        requested (``request_reviews``).
         """
         import gate_recorder as _rec
 
         os.environ["VNX_CODEX_HEADLESS_ENABLED"] = "1"
         head_sha = _rec.get_pr_head_sha(pr_number)
+        changed_files = [str(path).strip() for path in changed_files if str(path).strip()]
 
         request_result = self.request_reviews(
             pr_number=pr_number,
@@ -519,16 +547,91 @@ class GateExecutorMixin:
             head_sha=head_sha,
         )
 
-        gates, has_required_failure = self._execute_requested_gates(
-            request_result, pr_number, head_sha=head_sha,
+        requested = list(request_result.get("requested", []))
+        rows = [self._execute_one_request(req, pr_number, head_sha) for req in requested]
+        self._advance_exhausted_seats(
+            requested, rows, pr_number=pr_number, branch=branch, risk_class=risk_class,
+            changed_files=changed_files, mode=mode, dispatch_id=dispatch_id, head_sha=head_sha,
         )
 
         return {
             "pr_number": pr_number,
             "branch": branch,
-            "gates": gates,
-            "has_required_failure": has_required_failure,
+            "gates": [entry for entry, _blocks in rows],
+            "has_required_failure": any(
+                blocks for entry, blocks in rows if not entry.get("superseded_by")
+            ),
+            "review_seats": request_result.get("review_seats"),
         }
+
+    def _advance_exhausted_seats(
+        self,
+        requested: List[Dict[str, Any]],
+        rows: List["tuple[Dict[str, Any], bool]"],
+        *,
+        pr_number: int,
+        branch: str,
+        risk_class: str,
+        changed_files: List[str],
+        mode: str,
+        dispatch_id: str,
+        head_sha: str,
+    ) -> None:
+        """Hand every seat whose reviewer just ran out to its next distinct reviewer, in this call.
+
+        Measured 2026-10-15/16 (#2066, #2072): with kimi at its weekly limit, a
+        ``request-and-execute --review-stack kimi_gate`` ran kimi, booked
+        ``unavailable / lane_exhausted`` and stopped; only a second identical
+        request read that record and gave the seat to deepseek. Here the walk
+        runs again right after the round, over the records the round left
+        (``_advance_seat``), and a seat that moves gets its new reviewer
+        requested and run before the call returns.
+
+        ``requested`` and ``rows`` (``(entry, blocks)`` per request) grow in
+        place: the new request is appended, and the entry it replaces gets
+        ``superseded_by``. Only the reviewers that ran in the previous pass are
+        walked again.
+
+        Only a confirmed exhaustion hands a seat on (codex FAIL on #2073). An
+        entry whose reviewer decided, PASS or FAIL, is the seat's answer: it is
+        never superseded and its seat is never re-requested in this call, or a
+        blocking verdict would vanish from ``has_required_failure`` behind a
+        later reviewer's pass. Every other entry goes to ``_advance_seat``,
+        which moves the seat only on its reviewer's own exhaustion record on
+        this head, and only forward along the chain from that reviewer: an
+        earlier reviewer whose exhaustion record expired meanwhile never gets
+        the seat back. Every move goes strictly further down a chain that
+        names each gate at most once, so the bound below (the number of
+        registered gates) is the termination argument, not a guess.
+        """
+        from dispatch_spec import REGISTERED_GATE_NAMES
+        from gate_status import decided_verdict
+        # At call time: gate_request_handler imports this module at its top.
+        from gate_request_handler import _held_reviewers
+
+        pending = list(range(len(requested)))
+        for _pass in range(len(REGISTERED_GATE_NAMES)):
+            advanced: List[int] = []
+            for index in pending:
+                if not requested[index].get("seat"):
+                    continue  # an extra gate (ci_gate, an optional gate) fills no seat to hand on
+                if decided_verdict(rows[index][0]["detail"]):
+                    continue  # a decided verdict, PASS or FAIL, keeps its seat
+                live = [req for req, (entry, _b) in zip(requested, rows) if not entry.get("superseded_by")]
+                successor = self._advance_seat(
+                    requested[index], _held_reviewers(live), pr_number=pr_number, branch=branch,
+                    risk_class=risk_class, changed_files=changed_files, mode=mode,
+                    dispatch_id=dispatch_id, head_sha=head_sha,
+                )
+                if successor is None:
+                    continue
+                rows[index][0]["superseded_by"] = successor["gate"]
+                requested.append(successor)
+                rows.append(self._execute_one_request(successor, pr_number, head_sha))
+                advanced.append(len(requested) - 1)
+            if not advanced:
+                return
+            pending = advanced
 
     def status(self, pr_number: int) -> Dict[str, Any]:
         results = []

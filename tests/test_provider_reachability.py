@@ -753,9 +753,13 @@ class TestSeatWalkSkipsAnUnreachableSeat:
         assert asked == ["codex_gate"]
 
     def test_a_gate_outside_the_takeover_chain_is_dispatched_as_before(self, manager, state_dir, monkeypatch):
-        pr.record_failure("gemini", "429 exceeded your current quota", source="test", state_dir=state_dir)
-        asked, requested = _walk(manager, monkeypatch, ["gemini_review"], 909)
-        assert asked == ["gemini_review"]
+        """No successor configured for the gate, so nothing to pass the seat to: it is asked.
+        (This used gemini_review, which was never in the chain; it is retired and the seat
+        resolver now refuses it before any walk, OI-2058 R5a.)"""
+        monkeypatch.setenv("VNX_OVERRIDE_REVIEW_GATE_TAKEOVER_CHAIN", "kimi_gate,deepseek_gate")
+        pr.record_failure("codex", _CODEX_QUOTA_TEXT, source="test", state_dir=state_dir)
+        asked, requested = _walk(manager, monkeypatch, ["codex_gate"], 909)
+        assert asked == ["codex_gate"]
         assert "takeover" not in requested[0]
 
 
