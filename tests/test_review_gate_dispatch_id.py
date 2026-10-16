@@ -44,6 +44,17 @@ def review_env(tmp_path, monkeypatch):
     return project_root
 
 
+def _codex_only(monkeypatch) -> None:
+    """codex is the one reachable reviewer, and the PR head lookup never leaves the process."""
+    import gate_request_handler
+
+    monkeypatch.setattr(rgm.shutil, "which", lambda tool: "/usr/bin/fake" if tool == "codex" else None)
+    monkeypatch.setattr(gate_request_handler, "get_pr_head_sha", lambda _pr: "")
+    monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "0")
+    monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "1")
+    monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0")
+
+
 @pytest.fixture(autouse=True)
 def reset_warning_flag():
     """Reset the one-time warning sentinel between tests."""
@@ -64,16 +75,13 @@ def test_request_reviews_propagates_dispatch_id_to_receipt(review_env, monkeypat
         return {"append_status": "appended", "idempotency_key": "k"}
 
     monkeypatch.setattr(rgm, "emit_governance_receipt", fake_emit)
-    monkeypatch.setattr(rgm.shutil, "which", lambda tool: "/usr/bin/fake" if tool == "gemini" else None)
-    monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "1")
-    monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "0")
-    monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0")
+    _codex_only(monkeypatch)
 
     manager = rgm.ReviewGateManager()
     manager.request_reviews(
         pr_number=99,
         branch="fix/test-branch",
-        review_stack=["gemini_review"],
+        review_stack=["codex_gate"],
         risk_class="medium",
         changed_files=["scripts/lib/gate_request_handler.py"],
         mode="per_pr",
@@ -99,17 +107,14 @@ def test_request_reviews_without_dispatch_id_preserves_backwards_compat(review_e
         return {"append_status": "appended", "idempotency_key": "k"}
 
     monkeypatch.setattr(rgm, "emit_governance_receipt", fake_emit)
-    monkeypatch.setattr(rgm.shutil, "which", lambda tool: "/usr/bin/fake" if tool == "gemini" else None)
-    monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "1")
-    monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "0")
-    monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0")
+    _codex_only(monkeypatch)
 
     manager = rgm.ReviewGateManager()
     # Omit dispatch_id entirely (default = "")
     manager.request_reviews(
         pr_number=100,
         branch="fix/no-dispatch-id",
-        review_stack=["gemini_review"],
+        review_stack=["codex_gate"],
         risk_class="low",
         changed_files=["docs/guide.md"],
         mode="per_pr",
@@ -375,42 +380,33 @@ def test_request_reviews_propagates_pr_id_for_codex_gate(review_env, monkeypatch
 
 
 # ---------------------------------------------------------------------------
-# Test 10: OI-915 — pr_id must be set when request_reviews dispatches gemini_review
+# Test 10: OI-2058 R5a — a retired gate in the stack is refused by name, before any receipt
 # ---------------------------------------------------------------------------
 
-def test_request_reviews_propagates_pr_id_for_gemini_review(review_env, monkeypatch):
-    """OI-915: pr_id must land in the review_gate_request receipt for gemini_review."""
+def test_request_reviews_refuses_a_retired_gate_before_any_receipt(review_env, monkeypatch):
+    """gemini_review is retired (operator decision 2026-09-26). It used to be requested and
+    booked ``blocked/retired_review_gate`` with a receipt; the seat resolver now refuses the
+    stack by name, so no request and no receipt is written for a review nobody can run."""
+    from review_seats import ReviewSeatError
+
     captured: List[Dict[str, Any]] = []
-
-    def fake_emit(event_type, **kwargs):
-        captured.append({"event_type": event_type, **kwargs})
-        return {"append_status": "appended", "idempotency_key": "k"}
-
-    monkeypatch.setattr(rgm, "emit_governance_receipt", fake_emit)
-    monkeypatch.setattr(rgm.shutil, "which", lambda tool: "/usr/bin/fake" if tool == "gemini" else None)
-    monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "1")
-    monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "0")
-    monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0")
+    monkeypatch.setattr(rgm, "emit_governance_receipt", lambda event_type, **kw: captured.append(kw))
+    _codex_only(monkeypatch)
 
     manager = rgm.ReviewGateManager()
-    manager.request_reviews(
-        pr_number=1286,
-        branch="dispatch/20260804-102001-gate-receipt-koppeling",
-        review_stack=["gemini_review"],
-        risk_class="medium",
-        changed_files=["scripts/lib/gate_request_handler.py"],
-        mode="per_pr",
-        dispatch_id="20260804-102001-gate-receipt-koppeling",
-    )
+    with pytest.raises(ReviewSeatError, match="gemini_review is a retired gate"):
+        manager.request_reviews(
+            pr_number=1286,
+            branch="dispatch/20260804-102001-gate-receipt-koppeling",
+            review_stack=["gemini_review", "codex_gate"],
+            risk_class="medium",
+            changed_files=["scripts/lib/gate_request_handler.py"],
+            mode="per_pr",
+            dispatch_id="20260804-102001-gate-receipt-koppeling",
+        )
 
-    assert len(captured) == 1
-    receipt = captured[0]
-    assert receipt["event_type"] == "review_gate_request"
-    assert receipt["gate"] == "gemini_review"
-    assert receipt.get("pr_id") == "1286", (
-        "OI-915: pr_id must be present for gemini_review receipts too — "
-        "the fix applies to all gates dispatched through request_reviews()"
-    )
+    assert captured == []
+    assert not list((review_env / ".vnx-data" / "state").rglob("pr-1286-*.json"))
 
 
 # ---------------------------------------------------------------------------
@@ -432,17 +428,14 @@ def test_request_reviews_sets_pr_id_even_when_dispatch_id_absent(review_env, mon
         return {"append_status": "appended", "idempotency_key": "k"}
 
     monkeypatch.setattr(rgm, "emit_governance_receipt", fake_emit)
-    monkeypatch.setattr(rgm.shutil, "which", lambda tool: "/usr/bin/fake" if tool == "gemini" else None)
-    monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "1")
-    monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "0")
-    monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0")
+    _codex_only(monkeypatch)
 
     manager = rgm.ReviewGateManager()
     # No dispatch_id, branch is not dispatch/<id>
     manager.request_reviews(
         pr_number=42,
         branch="fix/some-other-branch",
-        review_stack=["gemini_review"],
+        review_stack=["codex_gate"],
         risk_class="low",
         changed_files=["docs/guide.md"],
         mode="per_pr",

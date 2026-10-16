@@ -24,7 +24,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
 from vnx_paths import ensure_env
-from dispatch_spec import RETIRED_GATE_NAMES
+from dispatch_spec import RETIRED_GATE_NAMES, ReviewGateConfigError
 from governance_receipts import emit_governance_receipt, utc_now_iso
 
 from gate_executor import GateExecutorMixin
@@ -49,8 +49,15 @@ def _build_default_review_stack() -> List[str]:
 
     A retired gate (``dispatch_spec.RETIRED_GATE_NAMES``) named by an older
     project config is dropped with a warning, the same way
-    ``smart_router._primary_review_gate`` ignores names outside the registry:
-    the obligation the door declares and the seats requested here stay one set.
+    ``smart_router._primary_review_gate`` ignores names outside the registry.
+
+    This list no longer decides which seats a review requests (OI-2058, R5a):
+    ``request_reviews`` and the CLI resolve the seats through
+    ``review_seats.resolve_review_seats`` when the request runs, which refuses a
+    retired or unknown name by name instead of dropping it. ``DEFAULT_REVIEW_STACK``
+    below is this function's value at import time, kept for the readers that
+    list the stack the way it was configured when the process started
+    (``gate_enforcement_verify``'s default seats).
     """
     import config_runtime
     raw = config_runtime.get("VNX_DEFAULT_REVIEW_STACK") or ""
@@ -234,6 +241,18 @@ def _compute_changed_files(branch: str, *, strict: bool = False) -> List[str]:
     raise ValueError(f"cannot auto-compute changed_files for branch {branch!r}")
 
 
+def _stack_arg(raw: Optional[str]) -> Optional[List[str]]:
+    """``--review-stack`` as a list, or ``None`` when it was not given.
+
+    ``None`` is not an empty stack: it tells ``request_reviews`` to resolve the
+    project's stack when the request runs (``review_seats``), instead of a value
+    this process froze when it imported.
+    """
+    if raw is None:
+        return None
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser with all subcommands."""
     parser = argparse.ArgumentParser(description="VNX review gate manager")
@@ -242,7 +261,11 @@ def _build_parser() -> argparse.ArgumentParser:
     request_parser = sub.add_parser("request")
     request_parser.add_argument("--pr", type=int, required=True)
     request_parser.add_argument("--branch", required=True)
-    request_parser.add_argument("--review-stack", default=",".join(DEFAULT_REVIEW_STACK))
+    request_parser.add_argument(
+        "--review-stack", default=None,
+        help="Comma-separated stack; omitted = the project's VNX_DEFAULT_REVIEW_STACK, "
+        "resolved when the request runs (review_seats)",
+    )
     request_parser.add_argument("--risk-class", default="medium")
     request_parser.add_argument("--changed-files", default="")
     request_parser.add_argument("--mode", choices=("per_pr", "final"), default="per_pr")
@@ -271,7 +294,11 @@ def _build_parser() -> argparse.ArgumentParser:
     rexec_parser = sub.add_parser("request-and-execute")
     rexec_parser.add_argument("--pr", type=int, required=True)
     rexec_parser.add_argument("--branch", required=True)
-    rexec_parser.add_argument("--review-stack", default=",".join(DEFAULT_REVIEW_STACK))
+    rexec_parser.add_argument(
+        "--review-stack", default=None,
+        help="Comma-separated stack; omitted = the project's VNX_DEFAULT_REVIEW_STACK, "
+        "resolved when the request runs (review_seats)",
+    )
     rexec_parser.add_argument("--risk-class", default="medium")
     rexec_parser.add_argument("--changed-files", default="")
     rexec_parser.add_argument("--mode", choices=("per_pr", "final"), default="per_pr")
@@ -294,15 +321,19 @@ def _handle_request_and_execute(manager: ReviewGateManager, args: argparse.Names
         except (ValueError, RuntimeError) as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 2
-    result = manager.request_and_execute(
-        pr_number=args.pr,
-        branch=args.branch,
-        review_stack=[item.strip() for item in args.review_stack.split(",") if item.strip()],
-        risk_class=args.risk_class,
-        changed_files=changed_files,
-        mode=args.mode,
-        dispatch_id=getattr(args, "dispatch_id", "") or "",
-    )
+    try:
+        result = manager.request_and_execute(
+            pr_number=args.pr,
+            branch=args.branch,
+            review_stack=_stack_arg(args.review_stack),
+            risk_class=args.risk_class,
+            changed_files=changed_files,
+            mode=args.mode,
+            dispatch_id=getattr(args, "dispatch_id", "") or "",
+        )
+    except ReviewGateConfigError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
     print(json.dumps(result, indent=2))
     if result.get("has_required_failure"):
         # OI-1178: surface every gate of this call that did not PASS, not just
@@ -361,15 +392,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             except (ValueError, RuntimeError) as exc:
                 print(f"ERROR: {exc}", file=sys.stderr)
                 return 2
-        result = manager.request_reviews(
-            pr_number=args.pr,
-            branch=args.branch,
-            review_stack=[item.strip() for item in args.review_stack.split(",") if item.strip()],
-            risk_class=args.risk_class,
-            changed_files=changed_files,
-            mode=args.mode,
-            dispatch_id=getattr(args, "dispatch_id", "") or "",
-        )
+        try:
+            result = manager.request_reviews(
+                pr_number=args.pr,
+                branch=args.branch,
+                review_stack=_stack_arg(args.review_stack),
+                risk_class=args.risk_class,
+                changed_files=changed_files,
+                mode=args.mode,
+                dispatch_id=getattr(args, "dispatch_id", "") or "",
+            )
+        except ReviewGateConfigError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
         print(json.dumps(result, indent=2))
         return 0
 

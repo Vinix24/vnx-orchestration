@@ -223,22 +223,39 @@ def test_every_requested_seat_ran(state_dir: Path) -> None:
 
 
 def test_a_takeover_reader_answers_for_the_seat_it_replaced(state_dir: Path) -> None:
-    """codex_gate unavailable -> kimi_gate read in its place; the second, kimi seat
-    was not requested again. No codex_gate artifact exists and none is demanded."""
+    """codex_gate unavailable -> kimi_gate read in its place, and kimi's own seat went to
+    the next distinct reviewer (OI-2058 R5a). No codex_gate artifact exists and none is
+    demanded."""
     _write_artifacts(state_dir, "kimi_gate")
-    report = _report(_entry("kimi_gate", takeover_path=["codex_gate"]))
+    _write_artifacts(state_dir, "deepseek_gate")
+    report = _report(
+        _entry("kimi_gate", takeover_path=["codex_gate"]),
+        _entry("deepseek_gate", takeover_path=["kimi_gate"]),
+    )
 
     outcome = verify_report(report, pr_number=7, seats=DEFAULT_STACK, state_dir=state_dir)
 
     assert outcome.ok, outcome.missing
-    assert outcome.verified == ["kimi_gate"]
+    assert outcome.verified == ["kimi_gate", "deepseek_gate"]
     assert not (state_dir / "review_gates" / "requests" / "pr-7-codex_gate.json").exists()
+
+
+def test_a_takeover_reader_does_not_also_answer_for_its_own_gates_seat(state_dir: Path) -> None:
+    """One reviewer fills one seat (OI-2058): kimi read codex's seat, so kimi's own seat
+    is unanswered unless another entry speaks for it."""
+    _write_artifacts(state_dir, "kimi_gate")
+    outcome = verify_report(
+        _report(_entry("kimi_gate", takeover_path=["codex_gate"])),
+        pr_number=7, seats=DEFAULT_STACK, state_dir=state_dir,
+    )
+    assert [m.split(":")[0] for m in outcome.missing] == ["seat kimi_gate"]
 
 
 def test_the_old_behaviour_would_have_demanded_the_replaced_seats_artifact(state_dir: Path) -> None:
     """The regression, pinned against the raw stack: verifying each seat's own
     artifacts fails for this run although nothing was skipped."""
     _write_artifacts(state_dir, "kimi_gate")
+    _write_artifacts(state_dir, "deepseek_gate")
     missing_for_raw_stack = [
         gate for gate in DEFAULT_STACK
         if not (state_dir / "review_gates" / "requests" / f"pr-7-{gate}.json").is_file()
@@ -246,21 +263,32 @@ def test_the_old_behaviour_would_have_demanded_the_replaced_seats_artifact(state
     assert missing_for_raw_stack == ["codex_gate"]
 
     outcome = verify_report(
-        _report(_entry("kimi_gate", takeover_path=["codex_gate"])),
+        _report(
+            _entry("kimi_gate", takeover_path=["codex_gate"]),
+            _entry("deepseek_gate", takeover_path=["kimi_gate"]),
+        ),
         pr_number=7, seats=DEFAULT_STACK, state_dir=state_dir,
     )
     assert outcome.ok
 
 
-def test_a_multi_hop_takeover_answers_for_every_seat_it_passed_over(state_dir: Path) -> None:
-    """codex and kimi both dead: glm_gate reads for both, requested once."""
+def test_a_multi_hop_takeover_answers_only_for_the_seat_it_started_from(state_dir: Path) -> None:
+    """codex and kimi both dead: deepseek reads codex's seat past kimi. That makes deepseek
+    codex's reviewer, not kimi's (OI-2058): kimi's seat needs an entry of its own."""
+    _write_artifacts(state_dir, "deepseek_gate")
+    alone = _report(_entry("deepseek_gate", takeover_path=["codex_gate", "kimi_gate"]))
+
+    outcome = verify_report(alone, pr_number=7, seats=DEFAULT_STACK, state_dir=state_dir)
+    assert [m.split(":")[0] for m in outcome.missing] == ["seat kimi_gate"]
+
     _write_artifacts(state_dir, "glm_gate")
-    report = _report(_entry("glm_gate", takeover_path=["codex_gate", "kimi_gate"]))
-
-    outcome = verify_report(report, pr_number=7, seats=DEFAULT_STACK, state_dir=state_dir)
-
+    both = _report(
+        _entry("deepseek_gate", takeover_path=["codex_gate", "kimi_gate"]),
+        _entry("glm_gate", takeover_path=["kimi_gate", "deepseek_gate"]),
+    )
+    outcome = verify_report(both, pr_number=7, seats=DEFAULT_STACK, state_dir=state_dir)
     assert outcome.ok, outcome.missing
-    assert outcome.verified == ["glm_gate"]
+    assert outcome.verified == ["deepseek_gate", "glm_gate"]
 
 
 def test_takeover_path_is_read_from_the_request_record_when_the_report_lacks_it(state_dir: Path) -> None:
@@ -268,7 +296,7 @@ def test_takeover_path_is_read_from_the_request_record_when_the_report_lacks_it(
     request record carries."""
     _write_artifacts(state_dir, "kimi_gate", request_takeover_path=["codex_gate"])
     outcome = verify_report(
-        _report(_entry("kimi_gate")), pr_number=7, seats=DEFAULT_STACK, state_dir=state_dir,
+        _report(_entry("kimi_gate")), pr_number=7, seats=["codex_gate"], state_dir=state_dir,
     )
     assert outcome.ok, outcome.missing
 
@@ -390,13 +418,23 @@ def test_a_gate_that_ran_but_did_not_complete_is_reported_not_failed(state_dir: 
 
 
 def test_a_recorded_exhausted_chain_accounts_for_its_seat(state_dir: Path) -> None:
+    """Each seat's walk books its own end-state (OI-2058 R5a): codex's exhausted chain
+    answers for codex's seat and kimi's for kimi's, never one record for both."""
     _write_chain_exhausted(state_dir, "codex_gate")
-    entry = _entry("codex_gate", request_status="chain_exhausted", takeover_path=["codex_gate", "kimi_gate"])
+    _write_chain_exhausted(state_dir, "kimi_gate")
+    codex_seat = _entry("codex_gate", request_status="chain_exhausted", takeover_path=["codex_gate", "kimi_gate"])
+    kimi_seat = _entry("kimi_gate", request_status="chain_exhausted", takeover_path=["kimi_gate", "deepseek_gate"])
+
+    alone = verify_report(
+        _report(codex_seat), pr_number=7, seats=["codex_gate", "kimi_gate"], state_dir=state_dir,
+    )
+    assert [m.split(":")[0] for m in alone.missing] == ["seat kimi_gate"]
+
     outcome = verify_report(
-        _report(entry), pr_number=7, seats=["codex_gate", "kimi_gate"], state_dir=state_dir,
+        _report(codex_seat, kimi_seat), pr_number=7, seats=["codex_gate", "kimi_gate"], state_dir=state_dir,
     )
     assert outcome.ok, outcome.missing
-    assert outcome.not_completed == ["codex_gate status=chain_exhausted"]
+    assert outcome.not_completed == ["codex_gate status=chain_exhausted", "kimi_gate status=chain_exhausted"]
 
 
 def test_a_chain_exhausted_entry_with_non_dict_detail_does_not_crash(state_dir: Path) -> None:
@@ -570,7 +608,7 @@ def test_a_takeover_reader_about_another_commit_does_not_verify(state_dir: Path)
                result_commit_sha=OLD_HEAD, sha_binding="mismatch"),
     )
     outcome = verify_report(
-        report, pr_number=7, seats=DEFAULT_STACK, state_dir=state_dir,
+        report, pr_number=7, seats=["codex_gate"], state_dir=state_dir,
     )
 
     assert not outcome.ok
@@ -582,7 +620,7 @@ def test_chain_exhausted_reporting_is_unchanged_by_the_binding_check(state_dir: 
     _write_chain_exhausted(state_dir, "codex_gate")
     entry = _entry("codex_gate", request_status="chain_exhausted", takeover_path=["codex_gate", "kimi_gate"])
     outcome = verify_report(
-        _report(entry), pr_number=7, seats=["codex_gate", "kimi_gate"], state_dir=state_dir,
+        _report(entry), pr_number=7, seats=["codex_gate"], state_dir=state_dir,
     )
     assert outcome.ok, outcome.missing
     assert outcome.not_completed == ["codex_gate status=chain_exhausted"]
@@ -711,7 +749,7 @@ def test_wrapper_passes_when_a_takeover_reader_ran_in_place_of_a_seat(project: P
     _write_artifacts(_project_state_dir(project), "kimi_gate")
     proc = _run_wrapper(
         project, _report(_entry("kimi_gate", takeover_path=["codex_gate"])),
-        "--pr", "7", "--branch", "feat/x", "--review-stack", "codex_gate,kimi_gate",
+        "--pr", "7", "--branch", "feat/x", "--review-stack", "codex_gate",
     )
     assert proc.returncode == 0, proc.stderr
     assert "GATE_ENFORCEMENT_COMPLETE: all artifacts verified" in proc.stdout
