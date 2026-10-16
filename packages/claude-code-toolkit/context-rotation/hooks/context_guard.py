@@ -1,37 +1,90 @@
-"""UserPromptSubmit entry: warns when the session's context is getting full.
+"""Entry for UserPromptSubmit, UserPromptExpansion, PreToolUse and Stop.
 
-An unexpected failure never blocks the prompt: it leaves one line on stderr and one
-in rotation/errors.log, and the hook exits 1 (non-blocking; never 2). The only
-other effect this hook has is JSON on stdout.
+- UserPromptSubmit: a prompt makes the session's ready-marker outdated; the warn
+  band and above ask for a handover (M); an unmeasurable session is told once (U).
+- UserPromptExpansion: when the user types /context-rotation:rotate, adds the
+  session's handover path (write), the list of handovers (resume), or the chosen
+  handover itself (resume <number>).
+- PreToolUse: any call other than Read, Glob, Grep or a write of the handover
+  makes the ready-marker outdated.
+- Stop: re-checks the ready-marker against the transcript and its age, gives a
+  valid handover written outside Write or Edit its marker, and tells the user
+  once to type /clear (loop step 7, the manual path).
+
+A hook that fires inside a subagent (agent_id set) does nothing. Failures go
+through hook_runtime: one stderr line, errors.log, exit 1, never 2.
 """
 from __future__ import annotations
 
-import json
 import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
 
 import context_budget
+import handover_contract
+import handover_injection
+import hook_runtime
 import rotation_state
+import transcript_work
 
 UNKNOWN_NOTICE_AFTER = 3
 UNKNOWN_NOTICE = (
     "context-rotation cannot measure this session's context, so it cannot warn "
     "before the context fills up. It will not repeat this notice."
 )
+MANUAL_COMPLETION = "Handover saved. Type /clear, then any message, to continue in a fresh context."
 
 
-CONTEXT = {"step": "read payload", "project_dir": None}
+class Session:
+    def __init__(self, project_dir, session_id, settings):
+        self.project_dir = project_dir
+        self.session_id = session_id
+        self.settings = settings
+        self.handover = rotation_state.handover_path(project_dir, session_id)
+
+    def marker(self, kind):
+        return rotation_state.marker_path(self.project_dir, kind, self.session_id)
 
 
-def step(name):
-    CONTEXT["step"] = name
+def open_session(payload, env, run):
+    """The session this hook acts for, or None when it must do nothing."""
+    if payload.get("agent_id"):
+        return None
+    session_id = payload.get("session_id")
+    if not rotation_state.is_safe_session_id(session_id):
+        return None
+    project_dir = rotation_state.project_dir_for(payload, env)
+    run.project_dir = project_dir
+    run.at("load settings")
+    settings = context_budget.load_settings(project_dir)
+    if not settings["enabled"]:
+        return None
+    return Session(project_dir, session_id, settings)
 
 
-def project_dir_for(payload):
-    return os.environ.get("CLAUDE_PROJECT_DIR") or payload.get("cwd") or os.getcwd()
+# --- outdated markers (loop step 6) --------------------------------------
 
+def outdated_note(marker):
+    return (
+        "Note: the handover at %s no longer covers the latest work (%s). It will not be "
+        "used for a clear until it is written again." % (marker["handover"], marker.get("outdated_reason"))
+    )
+
+
+def outdate(session, reason, run):
+    """Make the ready-marker outdated, or pick up an untold one; the note for the model."""
+    marker = None
+    if os.path.exists(session.marker("ready")):
+        run.at("mark outdated")
+        marker = rotation_state.mark_outdated(session.project_dir, session.session_id, reason, notified=True)
+    if marker is None:
+        run.at("outdated notice")
+        marker = rotation_state.take_outdated_notice(session.project_dir, session.session_id)
+    return outdated_note(marker) if marker else None
+
+
+# --- UserPromptSubmit ----------------------------------------------------
 
 def warn_message(size, settings, project_dir, session_id):
     window = settings["window_tokens"]
@@ -44,26 +97,20 @@ def warn_message(size, settings, project_dir, session_id):
     )
 
 
-def emit(document):
-    sys.stdout.write(json.dumps(document))
-    sys.stdout.flush()
-
-
-def handle_known(size, settings, project_dir, session_id, state):
+def handle_known(size, session, state, run):
     if state.get("unknown_count"):
         state["unknown_count"] = 0
-        step("save state")
-        rotation_state.save_state(project_dir, session_id, state)
-    if context_budget.band(size, settings) in ("warn", "force", "hard"):
+        run.at("save state")
+        rotation_state.save_state(session.project_dir, session.session_id, state)
+    if context_budget.band(size, session.settings) in ("warn", "force", "hard"):
         # The handover path is named in the instruction below: protect it first.
-        step("ignore protection")
-        rotation_state.ensure_gitignore(project_dir)
-        step("emit warning")
-        text = warn_message(size, settings, project_dir, session_id)
-        emit({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": text}})
+        run.at("ignore protection")
+        rotation_state.ensure_gitignore(session.project_dir)
+        return warn_message(size, session.settings, session.project_dir, session.session_id)
+    return None
 
 
-def handle_unknown(project_dir, session_id, state):
+def handle_unknown(session, state, run):
     state["unknown_count"] = int(state.get("unknown_count") or 0) + 1
     due = state["unknown_count"] >= UNKNOWN_NOTICE_AFTER and not state.get("notice_sent")
     if due:
@@ -72,60 +119,161 @@ def handle_unknown(project_dir, session_id, state):
         state["notice_sent_band"] = "unknown"
         state["notice_sent_size"] = None
         state["notice_sent_unknown_count"] = state["unknown_count"]
-    step("save state")
-    rotation_state.save_state(project_dir, session_id, state)
-    if due:
-        emit({"systemMessage": UNKNOWN_NOTICE})
+    run.at("save state")
+    rotation_state.save_state(session.project_dir, session.session_id, state)
+    return UNKNOWN_NOTICE if due else None
 
 
-def run(payload):
-    if payload.get("agent_id"):
-        return
-    session_id = payload.get("session_id")
-    if not rotation_state.is_safe_session_id(session_id):
-        return
-    project_dir = project_dir_for(payload)
-    CONTEXT["project_dir"] = project_dir
-    step("load settings")
-    settings = context_budget.load_settings(project_dir)
-    if not settings["enabled"]:
-        return
-    step("measure")
+def on_prompt(payload, env, run, session):
+    notes = []
+    if rotation_state.prompt_outdates(payload.get("prompt")):
+        notes.append(outdate(session, "a prompt after it", run))
+    run.at("measure")
     size = context_budget.measure(payload.get("transcript_path"))
-    step("load state")
-    state = rotation_state.load_state(project_dir, session_id)
+    run.at("load state")
+    state = rotation_state.load_state(session.project_dir, session.session_id)
+    notice = None
     if size is None:
-        handle_unknown(project_dir, session_id, state)
+        notice = handle_unknown(session, state, run)
     else:
-        handle_known(size, settings, project_dir, session_id, state)
+        notes.append(handle_known(size, session, state, run))
+    text = "\n\n".join(n for n in notes if n)
+    document = hook_runtime.context_output("UserPromptSubmit", text, notice)
+    if document:
+        hook_runtime.emit(document)
 
 
-def report_failure(error):
-    line = "context-rotation: %s failed: %s: %s" % (CONTEXT["step"], type(error).__name__, error)
-    line = " ".join(line.split())
+# --- UserPromptExpansion -------------------------------------------------
+
+def write_instruction(session):
+    return (
+        "Write this session's handover to %s with the Write tool, as the rotate skill "
+        'describes: "## Goal", "## Current state", "## Running", "## Next steps" (numbered, '
+        'starting at "1."), "## Files touched", "## Open risks", at most %d characters. '
+        "Make that write your last action." % (session.handover, session.settings["handover_max_chars"])
+    )
+
+
+def expansion_says(text, user=None):
+    hook_runtime.emit(hook_runtime.context_output("UserPromptExpansion", text, user))
+
+
+def continued(text, archive):
+    expansion_says(text, "context-rotation: continued from %s." % archive)
+
+
+def resume(session, words, run):
+    """The resume action: the numbered list, or the chosen handover itself."""
+    run.at("list handovers")
+    if not words:
+        expansion_says(handover_injection.resume_list(session.project_dir, session.session_id))
+        return
+    if not (words[0].isascii() and words[0].isdigit()):
+        expansion_says("Type /%s resume <number> with a number from the list." % handover_injection.SKILL_COMMAND)
+        return
+    entries = handover_injection.resume_entries(session.project_dir, session.session_id)
+    number = int(words[0])
+    if not 1 <= number <= len(entries):
+        expansion_says("There is no handover number %d. %s" % (number, handover_injection.RESUME_HINT))
+        return
+    run.at("resume handover")
+    problem = handover_injection.resume_pick(
+        session.project_dir, session.session_id, entries[number - 1], continued)
+    if problem:
+        expansion_says(problem)
+
+
+def on_expansion(payload, env, run, session):
+    if payload.get("command_source") != "plugin" or payload.get("command_name") != handover_injection.SKILL_COMMAND:
+        return
+    args = payload.get("command_args")
+    words = args.split() if isinstance(args, str) else []
+    action = words[0].lower() if words else "write"
+    if action == "write":
+        run.at("ignore protection")
+        rotation_state.ensure_gitignore(session.project_dir)
+        expansion_says(write_instruction(session))
+    elif action == "resume":
+        resume(session, words[1:], run)
+
+
+# --- PreToolUse ----------------------------------------------------------
+
+def on_tool(payload, env, run, session):
+    tool_name, tool_input = payload.get("tool_name"), payload.get("tool_input")
+    if transcript_work.is_handover_write(tool_name, tool_input, session.handover):
+        # The handover is about to be written: protect it before it exists.
+        run.at("ignore protection")
+        rotation_state.ensure_gitignore(session.project_dir)
+        return
+    if not rotation_state.tool_call_outdates(tool_name, tool_input, session.handover):
+        return
+    note = outdate(session, "a %s call after it" % tool_name, run)
+    if note:
+        hook_runtime.emit(hook_runtime.context_output("PreToolUse", note))
+
+
+# --- Stop ----------------------------------------------------------------
+
+def announce(session, sha, run):
+    run.at("announce")
+    if rotation_state.mark_announced(session.project_dir, session.session_id, sha):
+        hook_runtime.emit({"systemMessage": MANUAL_COMPLETION})
+
+
+def adopt(payload, env, run, session, data):
+    """Stop fallback: a valid handover written outside Write or Edit still gets a marker."""
+    outdated = rotation_state.load_marker(session.marker("outdated"))
+    if outdated is not None and outdated["sha256"] == rotation_state.sha256_hex(data):
+        return
+    if handover_contract.problems(data, session.settings["handover_max_chars"]):
+        return
     try:
-        sys.stderr.write(line + "\n")
-        sys.stderr.flush()
-    except Exception:
-        # stderr may be closed; the log below still gets the line.
-        pass
-    if CONTEXT["project_dir"]:
-        rotation_state.log_error(CONTEXT["project_dir"], "%s %s" % (rotation_state.utc_now(), line))
+        written = os.path.getmtime(session.handover)
+    except OSError:
+        return
+    run.at("check transcript")
+    if transcript_work.work_since(payload.get("transcript_path"), written, session.handover):
+        return
+    run.at("write ready marker")
+    marker = rotation_state.new_marker(
+        session.session_id, session.handover, data, env, payload.get("transcript_path"), None)
+    rotation_state.mark_ready(session.project_dir, marker)
+    announce(session, marker["sha256"], run)
 
 
-def main():
-    try:
-        payload = json.loads(sys.stdin.read())
-    except ValueError:
-        sys.exit(0)  # not our payload: nothing to measure, nothing to report
-    try:
-        if isinstance(payload, dict):
-            run(payload)
-    except Exception as error:
-        report_failure(error)
-        sys.exit(1)
-    sys.exit(0)
+def on_stop(payload, env, run, session):
+    run.at("read handover")
+    data = rotation_state.read_bytes(session.handover)
+    ready = rotation_state.load_marker(session.marker("ready"))
+    if ready is not None:
+        run.at("check ready marker")
+        reason = rotation_state.outdated_reason(ready, session.settings, data)
+        if reason is None:
+            announce(session, ready["sha256"], run)
+            return
+        run.at("mark outdated")
+        rotation_state.mark_outdated(session.project_dir, session.session_id, reason, notified=False)
+    if data is not None:
+        adopt(payload, env, run, session, data)
+
+
+HANDLERS = {
+    "UserPromptSubmit": on_prompt,
+    "UserPromptExpansion": on_expansion,
+    "PreToolUse": on_tool,
+    "Stop": on_stop,
+}
+
+
+def run(payload, env, run_state):
+    handler = HANDLERS.get(payload.get("hook_event_name"))
+    if handler is None:
+        return
+    session = open_session(payload, env, run_state)
+    if session is not None:
+        handler(payload, env, run_state, session)
 
 
 if __name__ == "__main__":
-    main()
+    hook_runtime.main(run)

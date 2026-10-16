@@ -51,10 +51,14 @@ def _warn(message: str) -> None:
 
 # --- measurement ---------------------------------------------------------
 
-def _reversed_lines(path: str) -> Iterator[bytes]:
-    """Yield the lines of a file from the last to the first, reading 64 KiB blocks."""
+def reversed_lines(path: str, end: Optional[int] = None) -> Iterator[bytes]:
+    """Yield the lines of a file from the last to the first, reading 64 KiB blocks.
+
+    With `end`, reading starts at that byte offset instead of the end of the file.
+    """
     with open(path, "rb") as handle:
-        position = handle.seek(0, os.SEEK_END)
+        size = handle.seek(0, os.SEEK_END)
+        position = size if end is None else max(0, min(end, size))
         carry = b""
         while position > 0:
             step = min(BLOCK_SIZE, position)
@@ -97,7 +101,7 @@ def measure(transcript_path: Optional[str]) -> Optional[int]:
     if not transcript_path or not isinstance(transcript_path, str):
         return None
     try:
-        for raw in _reversed_lines(transcript_path):
+        for raw in reversed_lines(transcript_path):
             if not raw.strip():
                 continue
             try:
