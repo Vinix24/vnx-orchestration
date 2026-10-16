@@ -54,7 +54,8 @@ HOOK = REPO_ROOT / "scripts" / "hooks" / "pretooluse_t0_no_subagents.py"
 HOOK_REL = "scripts/hooks/pretooluse_t0_no_subagents.py"
 SHIM_NAME = "vnx_hook_shim.sh"
 # What the merge engine imports from scripts/lib to render the template (OI-2117 item e).
-MERGE_LIB_DEPS = ["scripts/lib/hook_coverage.py", "scripts/lib/t0_subagent_block.py"]
+MERGE_LIB_DEPS = ["scripts/lib/hook_coverage.py", "scripts/lib/t0_subagent_block.py",
+                  "scripts/lib/guard_install.py", "scripts/lib/atomic_swap.py"]
 SHELLS = [shell for shell in ("bash", "dash") if shutil.which(shell)]
 TEMPLATES = REPO_ROOT / "templates"
 VNX_KEYS_TMPL = TEMPLATES / "settings_vnx_keys.json.tmpl"
