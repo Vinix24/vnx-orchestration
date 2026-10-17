@@ -202,6 +202,47 @@ def test_a_multiedit_of_the_own_handover_is_not_kept_out_below_hard(s):
     assert goes_ahead(s.pre_tool("MultiEdit", {"file_path": str(s.handover), "edits": []}))
 
 
+@pytest.mark.parametrize("size", [BELOW, FORCE], ids=["low", "force"])
+def test_the_handover_written_from_the_home_directory_goes_ahead(tmp_path, isolated_env, size):
+    s = Session(tmp_path, isolated_env / "proj", "sess-a")
+    s.project.mkdir()
+    at(s, size)
+    home_relative = "~/proj/.claude/rotation/%s" % s.handover.name
+    for tool in ("Write", "Edit"):
+        assert goes_ahead(s.pre_tool(tool, {"file_path": home_relative, "content": "x"})), tool  # not made yet
+    s.handover.parent.mkdir(parents=True, exist_ok=True)
+    s.handover.write_text("a first draft")
+    for tool in ("Write", "Edit"):
+        assert goes_ahead(s.pre_tool(tool, {"file_path": home_relative, "content": "x"})), tool
+
+
+def test_a_case_variant_of_the_existing_handover_is_that_handover_where_the_file_system_says_so(s):
+    s.handover.parent.mkdir(parents=True)
+    s.handover.write_text("a first draft")
+    at(s, BELOW)
+    variant = s.handover.parent / s.handover.name.upper()
+    proc = s.pre_tool("Write", {"file_path": str(variant), "content": "x"})
+    if variant.exists():  # a case-insensitive file system, the macOS default: the same file
+        assert goes_ahead(proc)
+    else:  # another file in the plugin's directory
+        keeps_out(proc, s)
+
+
+def test_a_case_variant_of_a_handover_not_written_yet_is_kept_out(s):
+    rotation(s.project).mkdir(parents=True)
+    at(s, BELOW)
+    keeps_out(s.pre_tool("Write", {"file_path": str(rotation(s.project) / s.handover.name.upper()), "content": "x"}), s)
+
+
+def test_a_form_of_the_path_that_is_the_handover_does_not_exempt_a_form_that_is_not(s):
+    (rotation(s.project) / "state" / "sub").mkdir(parents=True)
+    (rotation(s.project) / "foo").symlink_to(rotation(s.project) / "state" / "sub")
+    at(s, FORCE)
+    path = rotation(s.project) / "foo" / ".." / s.handover.name  # by name the handover, for the kernel state/<that name>
+    keeps_out(attempt(s, "Write", path), s)
+    assert not (rotation(s.project) / "state" / s.handover.name).exists()
+
+
 @pytest.mark.parametrize("path", [
     ".claude/rotation-notes.md", ".claude/settings.json", ".claude/rotationx/state/sess-a.enforcement.json",
     "rotation/state/sess-a.enforcement.json", "src/rotation/state.py",
@@ -295,6 +336,82 @@ def test_a_name_in_another_case_is_kept_out_before_the_directory_exists(s):
     at(s, BELOW)
     other_case = s.project / ".claude" / "Rotation" / "state" / state_file(s).name
     keeps_out(attempt(s, "Write", other_case), s)  # on a case-insensitive file system it would become the directory
+
+
+# --- `..` after a symlink: where the kernel takes the write ---------------------------------
+
+def forged_release_is_kept_out(s, path, tools=("Write", "Edit")):
+    """A write of the session's state by `path` is denied, the state is unchanged, and the hard band still holds."""
+    stored = plant(s, "force")
+    at(s, FORCE)
+    for tool in tools:
+        keeps_out(attempt(s, tool, path), s)
+    assert state_file(s).read_bytes() == stored
+    at(s, HARD)
+    assert decision(bash(s)) == "deny"
+
+
+def test_dot_dot_after_a_symlink_into_the_state_directory_is_kept_out(s):
+    rotation(s.project).mkdir(parents=True)
+    (s.project / "foo").symlink_to(rotation(s.project) / "state")  # foo/.. is .claude/rotation for the kernel
+    forged_release_is_kept_out(s, s.project / "foo" / ".." / "state" / state_file(s).name)
+
+
+def test_dot_dot_after_a_symlink_to_a_sibling_directory_is_kept_out(s):
+    (s.project / ".claude" / "other").mkdir(parents=True)
+    (s.project / "alias").symlink_to(s.project / ".claude" / "other")  # alias/.. is .claude for the kernel
+    forged_release_is_kept_out(s, s.project / "alias" / ".." / "rotation" / "state" / state_file(s).name, ("Edit",))
+
+
+def test_a_chain_of_two_symlinks_with_dot_dot_between_them_is_kept_out(s):
+    (s.project / "x" / "y").mkdir(parents=True)
+    (s.project / "one").symlink_to(os.path.join("x", "y"))
+    (s.project / "x" / "two").symlink_to(os.path.join("..", ".claude", "rotation"))
+    # one -> x/y, its .. is x, and x/two -> .claude/rotation: by name the path is proj/two/state/...
+    forged_release_is_kept_out(s, s.project / "one" / ".." / "two" / "state" / state_file(s).name)
+
+
+def test_the_path_with_dot_dot_collapsed_by_name_counts_too(tmp_path, s):
+    """A caller that collapses `..` by name before it opens the path (Node's path.resolve does) lands there."""
+    elsewhere = tmp_path / "elsewhere" / "deep"
+    elsewhere.mkdir(parents=True)
+    (s.project / "away").symlink_to(elsewhere)  # for the kernel away/.. is tmp/elsewhere, outside the project
+    plant(s, "force")
+    at(s, FORCE)
+    by_name = s.project / "away" / ".." / ".claude" / "rotation" / "state" / state_file(s).name
+    keeps_out(s.pre_tool("Write", {"file_path": str(by_name), "content": "x"}), s)
+
+
+# --- a file at the plugin's directory, or at `.claude` above it --------------------------------
+
+def writer_input(tool, path):
+    field = "notebook_path" if tool == "NotebookEdit" else "file_path"
+    return {field: path, "content": "x"}
+
+
+@pytest.mark.parametrize("made, name", [
+    ((), ".claude"), ((), ".claude/rotation"), ((".claude",), ".claude/rotation"),
+], ids=["claude-nothing-made", "rotation-nothing-made", "rotation-claude-made"])
+def test_a_file_written_at_the_plugin_directory_below_warn_is_denied_and_the_guard_keeps_working(s, made, name):
+    """A regular file there made the storage gate refuse the project, so no band was enforced after it."""
+    for part in made:
+        (s.project / part).mkdir()
+    at(s, BELOW)
+    keeps_out(attempt(s, "Write", s.project / name), s)
+    assert not (s.project / name).is_file()
+    at(s, HARD)
+    assert decision(bash(s)) == "deny"
+
+
+@pytest.mark.parametrize("size", BANDS, ids=BAND_IDS)
+def test_a_write_of_the_plugin_directory_or_of_claude_itself_is_denied_in_every_band(s, size):
+    rotation(s.project).mkdir(parents=True)
+    at(s, size)
+    for name in (".claude", ".claude/", ".claude/rotation", ".claude/rotation/", ".claude/./rotation",
+                 ".claude/rotation/state/.."):
+        for tool in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
+            keeps_out(s.pre_tool(tool, writer_input(tool, os.path.join(str(s.project), name))), s)
+    assert rotation(s.project).is_dir()
 
 
 # --- a symlinked rotation directory is not followed ------------------------------------------
