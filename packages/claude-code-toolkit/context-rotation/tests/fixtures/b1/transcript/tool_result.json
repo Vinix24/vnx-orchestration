@@ -1,0 +1,30 @@
+{
+ "parentUuid": "<uuid>",
+ "isSidechain": false,
+ "promptId": "<prompt_id>",
+ "type": "user",
+ "message": {
+  "role": "user",
+  "content": [
+   {
+    "tool_use_id": "<tool_use_id>",
+    "type": "tool_result",
+    "content": "<tool_output>",
+    "is_error": false
+   }
+  ]
+ },
+ "toolUseResult": {
+  "type": "create",
+  "filePath": "<file_path>"
+ },
+ "sourceToolAssistantUUID": "<uuid>",
+ "uuid": "<uuid>",
+ "timestamp": "<timestamp>",
+ "userType": "external",
+ "entrypoint": "cli",
+ "cwd": "<project_dir>",
+ "sessionId": "<session_id>",
+ "version": "2.1.300",
+ "gitBranch": "<branch>"
+}
