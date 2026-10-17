@@ -206,6 +206,51 @@ def test_trim_keeps_the_newest(project):
     assert rs.trim_archive(str(project), 2) == 0
 
 
+def archive_n(project, count, first_day=1):
+    return [rs.archive_handover(rs.plan_archive(str(project), "sess-%d" % day, datetime(2026, 9, day, tzinfo=timezone.utc)), b"x")
+            for day in range(first_day, first_day + count)]
+
+
+def claim_naming(project, copy, session_id="sess-old"):
+    """A claimed marker that names `copy` as its archive."""
+    make_marker(project, session_id)
+    path, marker, _ = rs.claim(str(project), rs.marker_path(str(project), "ready", session_id), "sess-new")
+    marker["archive"] = copy
+    rs.write_json(path, marker)
+    return path
+
+
+def test_trim_keeps_every_copy_a_marker_names(project):
+    old = archive_n(project, 3)
+    for number, copy in enumerate(old):
+        claim_naming(project, copy, "sess-claim-%d" % number)
+    newer = archive_n(project, 2, first_day=10)
+    unnamed = archive_n(project, 2, first_day=5)
+    assert rs.trim_archive(str(project), 2) == 2
+    left = sorted(os.listdir(rs.archive_dir(str(project))))
+    assert left == sorted(os.path.basename(p) for p in old + newer)
+    assert not any(os.path.exists(p) for p in unnamed)
+
+
+def test_trim_keeps_a_copy_named_by_a_marker_that_fails_marker_problem(project):
+    old = archive_n(project, 1)[0]
+    path = claim_naming(project, old)
+    data = json.loads(open(path).read())
+    data["claimed_sha256"] = "not a digest"
+    rs.write_json(path, data)
+    assert rs.read_marker(str(project), path)[0] is None
+    archive_n(project, 3, first_day=10)
+    assert rs.trim_archive(str(project), 2) == 1
+    assert os.path.exists(old)
+
+
+def test_trim_ignores_a_marker_that_is_not_json(project):
+    old = archive_n(project, 3)
+    (rotation(project) / "claimed-sess-a-sess-b.json").write_text("{not json")
+    assert rs.trim_archive(str(project), 1) == 2
+    assert [os.path.exists(p) for p in old] == [False, False, True]
+
+
 def test_trim_without_an_archive_creates_nothing(project):
     assert rs.trim_archive(str(project), 3) == 0
     assert not (project / ".claude").exists()

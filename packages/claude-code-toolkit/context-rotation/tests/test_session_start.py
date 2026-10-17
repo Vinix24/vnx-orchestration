@@ -297,6 +297,29 @@ def test_recovery_reads_the_archived_snapshot_not_a_changed_original(tmp_path, p
     assert markers(project) == ["ready-sess-a.json"]
 
 
+def test_a_claims_archive_copy_survives_the_trim_and_resume_injects_it(tmp_path, project, monkeypatch):
+    settings_file(project, archive_keep=2)
+    s = saved_session(tmp_path, project)
+    with monkeypatch.context() as patch:
+        patch.setattr(rotation_state, "log_injection", crash)
+        with pytest.raises(Crash):
+            run_in_process(project, "sess-b")
+    [copy] = archived(project)
+    s.write_handover(NEWER)  # the original no longer matches claimed_sha256
+    for day in range(1, 4):  # archive_keep + 1 newer archived handovers
+        moment = datetime(2099, 1, day, tzinfo=timezone.utc)
+        rotation_state.archive_handover(rotation_state.plan_archive(str(project), "sess-n%d" % day, moment), b"newer")
+    start(project, "sess-last", source="compact")
+    assert copy.exists() and copy.read_text() == VALID_HANDOVER
+    assert len(archived(project)) == 3
+
+    proc = Session(tmp_path, project, "sess-c").expand("resume 1")
+    assert context_of(proc).count(VALID_HANDOVER) == 1
+    assert "Written again by the origin session." not in context_of(proc)
+    last = injections(project)[-1]
+    assert (last["via"], last["archive"], last["sha256"]) == ("resume", str(copy), sha_of(copy))
+
+
 def test_a_claim_without_archive_is_not_recovered_from_a_changed_original(tmp_path, project, monkeypatch):
     s = saved_session(tmp_path, project)
     with monkeypatch.context() as patch:

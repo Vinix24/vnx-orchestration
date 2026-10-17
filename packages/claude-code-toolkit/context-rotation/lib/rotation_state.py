@@ -9,7 +9,8 @@ Everything lives under <project>/.claude/rotation/:
   ready-<session>.json          the handover is valid and covers all work so far
   outdated-<session>.json       work happened after the handover; never injected
   claimed-<origin>-<new>.json   a session took the handover; removed last
-  archive/<time>-<origin>.md    every injected handover, trimmed to archive_keep
+  archive/<time>-<origin>.md    every injected handover, trimmed to the newest archive_keep
+                                plus every copy a marker on disk still names
   injections.jsonl              one line per injection
   errors.log                    the last failures of the hooks, and rejected markers
 
@@ -378,15 +379,22 @@ def marker_problem(project_dir: str, path: str, marker: Any) -> Optional[str]:
     return _position_problem(marker.get("transcript"))
 
 
-def read_marker(project_dir: str, path: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """(marker, None) when usable, (None, why) when it must not be used, (None, None) when absent."""
+def _marker_json(path: str) -> Tuple[Any, Optional[str]]:
+    """(parsed JSON, None), (None, why) for an unusable file, (None, None) when absent. No validation."""
     raw = read_bytes(path)
     if raw is None:
         return None, ("it is not a regular file" if os.path.lexists(path) else None)
     try:
-        marker = json.loads(raw.decode("utf-8"))
+        return json.loads(raw.decode("utf-8")), None
     except ValueError:
         return None, "it is not JSON"
+
+
+def read_marker(project_dir: str, path: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """(marker, None) when usable, (None, why) when it must not be used, (None, None) when absent."""
+    marker, why = _marker_json(path)
+    if marker is None:
+        return None, why
     problem = marker_problem(project_dir, path, marker)
     return (None, problem) if problem else (marker, None)
 
@@ -673,14 +681,43 @@ def _archive_names(directory: str) -> List[str]:
     )
 
 
+def _named_archive_copies(project_dir: str) -> set:
+    """Base names of the archive copies any marker file on disk names, valid or not.
+
+    A marker that fails marker_problem stays on disk for the user, so the copy it
+    names stays too. A file that cannot be read or parsed, or a field that is not a
+    direct child of archive_dir, names nothing.
+    """
+    directory, archive = rotation_dir(project_dir), os.path.realpath(archive_dir(project_dir))
+    named = set()
+    try:
+        files = os.listdir(directory)
+    except OSError:
+        return named
+    for name in files:
+        if marker_kind(name) is None:
+            continue
+        marker, _ = _marker_json(os.path.join(directory, name))
+        field = marker.get("archive") if isinstance(marker, dict) else None
+        if isinstance(field, str) and os.path.dirname(os.path.realpath(field)) == archive:
+            named.add(os.path.basename(field))
+    return named
+
+
 def trim_archive(project_dir: str, keep: int) -> int:
-    """Keep the newest `keep` archived handovers. Returns how many were removed."""
+    """Keep the newest `keep` archived handovers and every copy a marker still names.
+
+    A claimed marker's copy is the recovery record after a crash, so it outlives
+    the newest-`keep` window for as long as the marker is on disk. Returns how many
+    were removed.
+    """
     directory = archive_dir(project_dir)
     if not os.path.isdir(directory):
         return 0
     with project_lock(project_dir):
         names = _archive_names(directory)
-        surplus = names[:-keep] if keep > 0 else names
+        named = _named_archive_copies(project_dir)
+        surplus = [n for n in (names[:-keep] if keep > 0 else names) if n not in named]
         for name in surplus:
             os.unlink(os.path.join(directory, name))
     return len(surplus)
