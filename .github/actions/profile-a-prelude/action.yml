@@ -1,0 +1,147 @@
+name: Profile A prelude
+description: >-
+  Everything the Profile A suite depends on, in one place: Python with the
+  pinned test tools, the vendored repo layout, ripgrep, the VNX paths, the CI
+  profile classifier and the doctor. Profile A calls it as a fatal step; the
+  xdist shadow job calls it as one step with continue-on-error, so a prelude
+  failure there is recorded and never fails a check. The caller checks out the
+  repository first, with fetch-depth 0 (the suite resolves real commit SHAs and
+  the classifier diffs against the base ref).
+
+outputs:
+  profile:
+    description: "light (docs-only diff) or heavy, from scripts/ci/classify_ci_profile.py"
+    value: ${{ steps.classify-profile.outputs.profile }}
+  vnx-home:
+    description: "VNX_HOME of the suite: the vendored copy under .claude/vnx-system"
+    value: ${{ steps.vnx-paths.outputs.vnx-home }}
+  vnx-data-dir:
+    description: "VNX_DATA_DIR of the suite"
+    value: ${{ steps.vnx-paths.outputs.vnx-data-dir }}
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - name: Install Python deps
+      shell: bash
+      run: |
+        python -m pip install --upgrade pip
+        # pytest, pytest-xdist and pytest-timeout (hanging-test guard) at the
+        # exact versions of scripts/ci/profile_a_constraints.txt, plus the
+        # project's declared runtime deps (watchdog, jinja2, pyyaml,
+        # jsonschema, psutil — all in pyproject.toml [project.dependencies])
+        # and one test-only dep (hypothesis). Without these, tests that import
+        # governed-report validation, the intelligence daemon monitor,
+        # headless_trigger, or `vnx init` (jinja2) fail to collect with
+        # ModuleNotFoundError even though they pass on main.
+        # pytest-xdist is installed for every job, also the serial Profile A,
+        # so the shadow and the serial reference run in one environment;
+        # without -n it stays inactive.
+        # networkx is deliberately NOT installed: without numpy/scipy alongside,
+        # repo_map.py leaves its positional fallback for the networkx path and
+        # nx.pagerank crashes on the missing numpy — measured 2026-08-02:
+        # test_repo_map_provider_coverage.py (green on main) fails 2 tests with
+        # networkx present, passes 11/11 without it.
+        # build is required by tests/test_wheel_build.py::test_wheel_builds
+        # (python -m build --wheel); without it that test fails in this image
+        # with "No module named build" (OI-953).
+        # pyjwt[crypto] carries the forge check-run client (golf B, B2a):
+        # scripts/lib/forge_check_run.py signs a GitHub-App JWT with RS256 and
+        # tests/test_forge_check_run_client.py verifies that signature against
+        # a keypair it generates itself. The [crypto] extra is not optional —
+        # bare PyJWT has no asymmetric backend and raises NotImplementedError
+        # on RS256, and the test's keypair fixture imports `cryptography`
+        # directly, so the extra is what makes both halves of that test real
+        # instead of a mock. Measured 2026-09-07 on head 5fd261fd, run
+        # 34143589349: without it the whole file dies at collection with
+        # "No module named 'jwt'" and the gate never runs.
+        pip install -c "$GITHUB_WORKSPACE/scripts/ci/profile_a_constraints.txt" \
+          pytest pytest-xdist pytest-timeout \
+          pyyaml jsonschema psutil watchdog hypothesis jinja2 build "pyjwt[crypto]"
+
+    - name: Prepare expected repo layout
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p "$GITHUB_WORKSPACE/.claude"
+        rsync -a --exclude '.git' --exclude '.claude' ./ "$GITHUB_WORKSPACE/.claude/vnx-system/"
+        rsync -a ./skills/ "$GITHUB_WORKSPACE/.claude/skills/"
+
+    - name: Install ripgrep
+      shell: bash
+      run: |
+        set -euo pipefail
+        if command -v rg >/dev/null 2>&1; then
+          echo "ripgrep already present on the runner image, skipping download"
+          exit 0
+        fi
+        # Pinned release + sha256-verified static binary instead of apt-get
+        # (OI-1362): ripgrep ships on NO ubuntu-latest image, so this skip-tak
+        # never fires, and apt-get against azure.archive.ubuntu.com stalls
+        # intermittently and hangs the job even with the timeout+retry from
+        # #1608 — measured 2026-08-18/19: run 32294142912 (PR #1609) and run
+        # 32291338049 (main) both died in this exact step with exit 124, on
+        # different jobs each time. x86_64-unknown-linux-musl is statically
+        # linked — no glibc dependency, so it runs unchanged across any
+        # ubuntu-latest base-image drift.
+        RG_VERSION="15.2.0"
+        RG_SHA256="33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c"
+        RG_ARCHIVE="ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+        RG_URL="https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/${RG_ARCHIVE}"
+        RG_DIR="${RUNNER_TEMP:-/tmp}/ripgrep-install"
+        mkdir -p "$RG_DIR/bin"
+        curl -sSL --retry 3 --fail -o "$RG_DIR/$RG_ARCHIVE" "$RG_URL"
+        echo "${RG_SHA256}  ${RG_DIR}/${RG_ARCHIVE}" | sha256sum -c -
+        tar -xzf "$RG_DIR/$RG_ARCHIVE" -C "$RG_DIR"
+        install -m 755 "$RG_DIR/ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl/rg" "$RG_DIR/bin/rg"
+        echo "$RG_DIR/bin" >> "$GITHUB_PATH"
+
+    - name: Classify CI profile (docs-only vs full sweep)
+      id: classify-profile
+      shell: bash
+      run: |
+        set -euo pipefail
+        # Same diff-range convention as the lint-patterns job of vnx-ci.yml:
+        # the three-dot range against the base ref for PRs, against the parent
+        # commit for pushes. fetch-depth: 0 in the caller's checkout makes
+        # origin/<base> available.
+        if [ "${{ github.event_name }}" = "pull_request" ]; then
+          diff_range="origin/${{ github.base_ref }}...HEAD"
+        else
+          diff_range="HEAD^...HEAD"
+        fi
+        # A diff that fails (e.g. no base ref) yields an empty list, which
+        # classify_ci_profile.py maps to "heavy" — fail closed, never light.
+        git diff --name-only "$diff_range" > "$GITHUB_WORKSPACE/.vnx-ci-changed-paths.txt" 2>/dev/null || true
+        profile="$(python3 "$GITHUB_WORKSPACE/scripts/ci/classify_ci_profile.py" --paths-file "$GITHUB_WORKSPACE/.vnx-ci-changed-paths.txt")"
+        echo "CI profile: ${profile}"
+        echo "Changed paths:"
+        cat "$GITHUB_WORKSPACE/.vnx-ci-changed-paths.txt"
+        echo "profile=${profile}" >> "$GITHUB_OUTPUT"
+
+    - name: VNX paths
+      id: vnx-paths
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "vnx-home=$GITHUB_WORKSPACE/.claude/vnx-system" >> "$GITHUB_OUTPUT"
+        echo "vnx-data-dir=$GITHUB_WORKSPACE/.vnx-data" >> "$GITHUB_OUTPUT"
+
+    - name: Doctor
+      shell: bash
+      env:
+        VNX_HOME: ${{ steps.vnx-paths.outputs.vnx-home }}
+        VNX_DATA_DIR: ${{ steps.vnx-paths.outputs.vnx-data-dir }}
+      run: |
+        set -euo pipefail
+        bash "$VNX_HOME/scripts/vnx_doctor.sh"
+        if [ -f "$VNX_DATA_DIR/state/progress_state.yaml" ] && [ -f "$VNX_DATA_DIR/state/progress_state.yaml.sha256" ]; then
+          python3 "$VNX_HOME/scripts/state_integrity.py" verify "$VNX_DATA_DIR/state/progress_state.yaml"
+        else
+          echo "[skip] progress_state checksum not available"
+        fi

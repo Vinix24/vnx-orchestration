@@ -1,0 +1,29 @@
+# Serial list of CI Profile A under pytest-xdist (track ci-profile-a-xdist).
+#
+# The xdist shape runs in two phases (scripts/ci/profile_a_pytest_args.sh with
+# VNX_CI_XDIST=1): first every entry below in ONE process with xdist off, then
+# the rest of the selection under xdist. An empty list means the serial phase
+# is inactive: no serial phase is emitted and its manifest records
+# "phase_active": false.
+#
+# ENTRY RULE. An entry is added only for a triaged xdist finding (5 serial
+# reruns, 3 reruns of the whole shape) that cannot be made worker-safe, and it
+# carries an inline reason with its OI: `<entry>  # OI-<n>: <what was measured>`.
+#
+# * A FILE entry (`tests/<path>.py`) is passed to the parallel phase as
+#   --ignore, so no worker imports the file. Only a file entry isolates
+#   import-time state: when the finding is import-time state, the entry must
+#   be the file.
+# * A NODEID entry (`tests/<path>.py::<Class>::<test>[<param>]`) is passed to
+#   the parallel phase as --deselect. Its file is still imported by every
+#   worker, so a nodeid entry isolates the test's run-time state only.
+#
+# Every entry must match exactly, or the args script refuses the list (exit 2):
+# a file entry must exist, must not be excluded in test_exclusions.txt, and
+# must collect at least one test; a nodeid entry must be exactly one collected
+# nodeid and no prefix of another one (--deselect matches by prefix). A
+# duplicate, or a nodeid entry inside a file that is itself an entry, is
+# refused too.
+#
+# Format: one entry per line, relative to the repository root. A line starting
+# with `#` is a comment; an inline comment starts at whitespace followed by `#`.
