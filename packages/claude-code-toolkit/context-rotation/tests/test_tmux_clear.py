@@ -476,6 +476,24 @@ def test_a_stale_lock_is_broken_with_its_line(session, fake, tmux_bin, project):
     assert not lock.exists()
 
 
+def test_the_job_leaves_a_lock_another_job_took_after_its_own(session, fake, tmux_bin, project):
+    args = started(session, tmux_bin)
+    lock = rotation(project) / "clear-7.lock"
+    other = rotation(project) / "other-lock"
+    taken = []
+
+    def another_job_takes_over(tmux):
+        if tmux.typed == "/clear" and not taken:
+            other.mkdir()  # made while the first lock still exists, so it cannot get its inode
+            lock.rmdir()
+            other.rename(lock)
+            taken.append(True)
+
+    fake.on_capture = another_job_takes_over
+    tmux_clear.main(args)
+    assert taken and lock.is_dir()
+
+
 def test_a_file_at_the_lock_name_is_no_lock_and_is_left(session, fake, tmux_bin, project):
     args = started(session, tmux_bin)
     (rotation(project) / "clear-7.lock").write_text("not a lock")

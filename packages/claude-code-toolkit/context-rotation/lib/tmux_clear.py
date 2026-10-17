@@ -53,8 +53,9 @@ import transcript_work
 CLEAR = "/clear"
 CONTINUE = "Continue from the handover in your context, step 1."
 STALE_LOCK_SECONDS = 300
-# The lock must stay fresh for the whole job: the waits below add up to well under STALE_LOCK_SECONDS.
-MAX_ACK_SECONDS = 200
+# The lock must stay fresh for the whole job: its waits, each with its deadline, add up to well
+# under STALE_LOCK_SECONDS (the hook 15, two settles of 15, two read-backs of 3, the ack 120).
+MAX_ACK_SECONDS = 120
 SETTLE_SECONDS = 15.0
 SETTLE_POLL_SECONDS = 0.5
 HOOK_POLL_SECONDS = 0.1
@@ -113,6 +114,11 @@ def alive(pid: int) -> bool:
     return True
 
 
+def lock_stamp(found: os.stat_result) -> Tuple[int, int]:
+    """What tells one lock directory from a later one at the same name: an inode can be reused, with a new ctime."""
+    return found.st_ino, found.st_ctime_ns
+
+
 def descends(table: Dict[int, int], pid: int, ancestor: int) -> bool:
     """`pid` is `ancestor` or runs below it in the process tree."""
     current = pid
@@ -139,6 +145,7 @@ class Job:
         self.record = auto_clear.new_record(document)
         self.reached = "started"
         self.lock = auto_clear.pane_name(self.pane, ".lock")
+        self.lock_made: Optional[Tuple[int, int]] = None
 
     # --- tmux --------------------------------------------------------------------
 
@@ -175,12 +182,15 @@ class Job:
                 os.rmdir(self.lock, dir_fd=directory)
             auto_clear.transition(self.project_dir, self.record, "clear_started")
             os.mkdir(self.lock, 0o700, dir_fd=directory)
+            self.lock_made = lock_stamp(os.lstat(self.lock, dir_fd=directory))
         return True
 
     def release_lock(self) -> None:
+        """Remove the lock this job made; a lock another job made at that name after it is left alone."""
         try:
             with rotation_state.project_lock(self.project_dir), rotation_state.storage(self.project_dir) as directory:
-                os.rmdir(self.lock, dir_fd=directory)
+                if lock_stamp(os.lstat(self.lock, dir_fd=directory)) == self.lock_made:
+                    os.rmdir(self.lock, dir_fd=directory)
         except FileNotFoundError:
             return
         except (OSError, rotation_state.LockTimeout) as error:
