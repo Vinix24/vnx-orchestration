@@ -7,8 +7,9 @@ argument-hint: "[write | release | resume [number | id]]"
 # Rotate: hand this session over to a fresh one
 
 A long session gets worse before it compacts. A handover is a short file that tells a
-fresh session everything it needs to continue. The user then types `/clear`, and the
-plugin gives the handover to the new session.
+fresh session everything it needs to continue. Then `/clear` starts that fresh session:
+inside tmux the plugin types it into this session's own pane once the session is idle,
+elsewhere the user types it. The plugin gives the handover to the new session.
 
 The first word of the arguments picks the action: `write` (also with no arguments),
 `release` or `resume`. For any other first word the plugin puts its usage line in your
@@ -104,7 +105,8 @@ to a session automatically.
   it, so do not either, and tell the user. `archive/*.md` holds every handover given to a
   session, and its file names start with a UTC time, so the newest sorts last.
   `injections.jsonl` has one line per step of a handover (`ready`, `outdated`,
-  `claimed`, `injected`, `kept`); an `injected` line names the session that got it.
+  `claimed`, `injected`, `kept`, and the `clear_*` steps of an automatic /clear in
+  tmux); an `injected` line names the session that got it.
   `ready-*.json`, `outdated-*.json` and `claimed-*.json` each name a handover that was
   not given to a session yet, or whose hand-over did not finish. Use only a handover
   inside `.claude/rotation/` named for its marker's session (`handover-<session id>.md`)
@@ -118,6 +120,8 @@ to a session automatically.
 The plugin's SessionStart hook finds the handover of the session that ran in the same
 `claude` process, checks that it is unchanged and still current, copies it to
 `.claude/rotation/archive/`, and puts it in the new session's context. The user sees one
-line naming the file. When that does not happen (another process, an outdated handover,
+line naming the file. After an automatic /clear in tmux the plugin then types
+`Continue from the handover in your context, step 1.` as the first prompt: continue
+from step 1 as the resume action says. When that does not happen (another process, an outdated handover,
 two handovers at once), the user sees the waiting handovers listed with a hint to type
 `/context-rotation:rotate resume`.
