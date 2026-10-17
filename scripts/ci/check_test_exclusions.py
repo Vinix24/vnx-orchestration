@@ -24,8 +24,9 @@ EXCLUSIONS_REL = Path("scripts/ci/test_exclusions.txt")
 def parse_entries(text: str) -> list[tuple[int, str, str]]:
     """Return ``(lineno, path, reason)`` for every non-comment entry line.
 
-    Comment syntax matches the workflow consumer in vnx-ci.yml, which strips
-    ``[[:space:]]*#.*`` from each line before building the ``--ignore`` list.
+    Comment syntax matches the consumer, scripts/ci/profile_a_pytest_args.sh
+    (called by Profile A in vnx-ci.yml), which strips ``[[:space:]]*#.*`` from
+    each line before building the ``--ignore`` list.
     The first ``#`` (always preceded by optional whitespace) starts the reason;
     test paths never contain ``#``.
     """
