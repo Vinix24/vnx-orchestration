@@ -262,7 +262,7 @@ def test_a_release_the_model_invokes_changes_nothing(s):
 
 def test_release_in_any_band_lasts_for_the_session(s):
     at(s, BELOW)
-    assert s.expand("release").returncode == 0
+    assert message_of(s.expand("release")).startswith("context-rotation: released for this session.")
     at(s, HARD)
     assert goes_ahead(bash(s))
     assert goes_ahead(s.stop())
