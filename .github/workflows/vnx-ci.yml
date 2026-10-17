@@ -407,6 +407,180 @@ jobs:
           if-no-files-found: warn
           overwrite: true
 
+  # Track ci-profile-a-xdist (D2): compares the serial Profile A (reference)
+  # with the xdist shadow (candidate) through scripts/ci/check_xdist_parity.py
+  # and writes xdist-parity-verdict.json: exit 0 parity, 1 differences, 2
+  # invalid evidence, with the difference lists, the step outcomes and the
+  # selection fingerprint. scripts/ci/xdist_parity_history.py reads these
+  # verdicts for the cutover rule of D4.
+  #
+  # NOT a required check, and it must never fail one, by the same rules as the
+  # shadow job above: every step non-fatal, every step bounded with the sum
+  # (48) under the job's timeout, the record and the upload with if: always().
+  # It needs Profile A and the shadow with if: !cancelled(), so a red serial
+  # Profile A or a failed shadow does not skip it: it compares whatever
+  # evidence exists, and missing evidence is exit 2, recorded. A red Profile A
+  # is red on its own; this job never adds a second red. On a light run it
+  # runs its prelude and records "verdict": "not_applicable".
+  xdist-parity:
+    name: xdist parity
+    runs-on: ubuntu-latest
+    needs: [profile-a, profile-a-xdist-shadow]
+    if: ${{ !cancelled() }}
+    timeout-minutes: 55
+
+    steps:
+      - name: Checkout
+        id: checkout
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The same prelude as Profile A and the shadow: the pinned pytest whose
+      # junitxml functions derive the JUnit keys, and the profile classifier.
+      - name: Profile A prelude (non-fatal)
+        id: prelude
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 10
+        uses: ./.github/actions/profile-a-prelude
+
+      # This commit's own xdist-path selection, for the selection fingerprint.
+      - name: Emit the xdist selection
+        id: selection
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.prelude.outputs.profile != 'light' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          VNX_CI_XDIST: "1"
+          PARITY_WORK: ${{ runner.temp }}/xdist-parity
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/profile_a_pytest_args.sh" "$PARITY_WORK/args"
+
+      - name: Download Profile A evidence (reference)
+        id: download_reference
+        if: ${{ !cancelled() && steps.prelude.outputs.profile != 'light' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/download-artifact@v4
+        with:
+          name: profile-a-evidence
+          path: ${{ runner.temp }}/xdist-parity/reference
+
+      - name: Download shadow evidence (candidate)
+        id: download_candidate
+        if: ${{ !cancelled() && steps.prelude.outputs.profile != 'light' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/download-artifact@v4
+        with:
+          name: profile-a-xdist-shadow-evidence
+          path: ${{ runner.temp }}/xdist-parity/candidate
+
+      - name: Check xdist parity
+        id: parity
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 10
+        env:
+          PARITY_WORK: ${{ runner.temp }}/xdist-parity
+          PARITY_PROFILE: ${{ steps.prelude.outputs.profile }}
+          PARITY_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          PARITY_TESTED_SHA: ${{ github.sha }}
+          PARITY_RUN_ID: ${{ github.run_id }}
+          PARITY_RUN_ATTEMPT: ${{ github.run_attempt }}
+          PARITY_EVENT: ${{ github.event_name }}
+          PARITY_REF: ${{ github.head_ref || github.ref_name }}
+          OUTCOME_CHECKOUT: ${{ steps.checkout.outcome }}
+          OUTCOME_PRELUDE: ${{ steps.prelude.outcome }}
+          OUTCOME_SELECTION: ${{ steps.selection.outcome }}
+          OUTCOME_DOWNLOAD_REFERENCE: ${{ steps.download_reference.outcome }}
+          OUTCOME_DOWNLOAD_CANDIDATE: ${{ steps.download_candidate.outcome }}
+          RESULT_PROFILE_A: ${{ needs.profile-a.result }}
+          RESULT_SHADOW: ${{ needs.profile-a-xdist-shadow.result }}
+        run: |
+          set -euo pipefail
+          python3 "$GITHUB_WORKSPACE/scripts/ci/check_xdist_parity.py" compare \
+            --reference "$PARITY_WORK/reference" \
+            --candidate "$PARITY_WORK/candidate" \
+            --constraints "$GITHUB_WORKSPACE/scripts/ci/profile_a_constraints.txt" \
+            --args-dir "$PARITY_WORK/args" \
+            --workspace-root "$GITHUB_WORKSPACE" \
+            --output "$PARITY_WORK/verdict/xdist-parity-verdict.json" \
+            --summary "${GITHUB_STEP_SUMMARY:-/dev/null}" \
+            --profile "$PARITY_PROFILE" \
+            --head-sha "$PARITY_HEAD_SHA" --tested-sha "$PARITY_TESTED_SHA" \
+            --run-id "$PARITY_RUN_ID" --run-attempt "$PARITY_RUN_ATTEMPT" \
+            --event "$PARITY_EVENT" --ref "$PARITY_REF" \
+            --step "checkout=$OUTCOME_CHECKOUT" --step "prelude=$OUTCOME_PRELUDE" \
+            --step "selection=$OUTCOME_SELECTION" \
+            --step "download_reference=$OUTCOME_DOWNLOAD_REFERENCE" \
+            --step "download_candidate=$OUTCOME_DOWNLOAD_CANDIDATE" \
+            --upstream "profile_a=$RESULT_PROFILE_A" --upstream "shadow=$RESULT_SHADOW"
+
+      # Plain bash, no checkout needed: when the parity script wrote no verdict
+      # (failed checkout, a crash), this records exit 2 so the history never
+      # sees a silent gap.
+      - name: Record the parity verdict
+        id: record
+        if: ${{ always() }}
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          PARITY_WORK: ${{ runner.temp }}/xdist-parity
+          PARITY_PROFILE: ${{ steps.prelude.outputs.profile }}
+          PARITY_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          PARITY_TESTED_SHA: ${{ github.sha }}
+          PARITY_RUN_ID: ${{ github.run_id }}
+          PARITY_RUN_ATTEMPT: ${{ github.run_attempt }}
+          PARITY_EVENT: ${{ github.event_name }}
+          PARITY_REF: ${{ github.head_ref || github.ref_name }}
+          OUTCOME_CHECKOUT: ${{ steps.checkout.outcome }}
+          OUTCOME_PARITY: ${{ steps.parity.outcome }}
+        run: |
+          set -euo pipefail
+          V="$PARITY_WORK/verdict/xdist-parity-verdict.json"
+          mkdir -p "$PARITY_WORK/verdict"
+          token() { printf '"%s"' "$(printf '%s' "$1" | tr -cd 'A-Za-z0-9_.:/-')"; }
+          if [ ! -s "$V" ]; then
+            {
+              printf '{\n'
+              printf ' "schema": "vnx-xdist-parity/1",\n'
+              printf ' "head_sha": %s,\n' "$(token "$PARITY_HEAD_SHA")"
+              printf ' "tested_sha": %s,\n' "$(token "$PARITY_TESTED_SHA")"
+              printf ' "run_id": %s,\n' "$(token "$PARITY_RUN_ID")"
+              printf ' "run_attempt": %s,\n' "$(token "$PARITY_RUN_ATTEMPT")"
+              printf ' "event": %s,\n' "$(token "$PARITY_EVENT")"
+              printf ' "ref": %s,\n' "$(token "$PARITY_REF")"
+              printf ' "profile": %s,\n' "$(token "${PARITY_PROFILE:-unknown}")"
+              printf ' "exit": 2,\n'
+              printf ' "verdict": "invalid_evidence",\n'
+              printf ' "invalid_evidence": [{"reason": "no_verdict", "detail": "the parity script wrote no verdict (checkout %s, parity step %s)"}],\n' \
+                "$(printf '%s' "$OUTCOME_CHECKOUT" | tr -cd 'a-z_')" "$(printf '%s' "$OUTCOME_PARITY" | tr -cd 'a-z_')"
+              printf ' "differences": null,\n'
+              printf ' "selection_fingerprint": null,\n'
+              printf ' "step_failures": ["parity.verdict=missing"]\n'
+              printf '}\n'
+            } > "$V"
+            if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+              printf '### xdist parity\n\nNot a required check. Verdict: **invalid_evidence** (exit 2): the parity script wrote no verdict.\n' \
+                >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+          cat "$V"
+
+      - name: Upload parity verdict
+        if: ${{ always() }}
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v4
+        with:
+          name: xdist-parity-verdict
+          path: ${{ runner.temp }}/xdist-parity/verdict/
+          if-no-files-found: warn
+          overwrite: true
+
   trace-token-check:
     name: Trace Token Validation
     runs-on: ubuntu-latest
