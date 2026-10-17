@@ -105,8 +105,9 @@ to a session automatically.
   it, so do not either, and tell the user. `archive/*.md` holds every handover given to a
   session, and its file names start with a UTC time, so the newest sorts last.
   `injections.jsonl` has one line per step of a handover (`ready`, `outdated`,
-  `claimed`, `injected`, `kept`, and the `clear_*` steps of an automatic /clear in
-  tmux); an `injected` line names the session that got it.
+  `claimed`, `injected`, `delivered`, `kept`, and the `clear_*` steps of an automatic
+  /clear in tmux); an `injected` line names the session it was being given to, and a
+  `delivered` line follows only once it was handed over.
   `ready-*.json`, `outdated-*.json` and `claimed-*.json` each name a handover that was
   not given to a session yet, or whose hand-over did not finish. Use only a handover
   inside `.claude/rotation/` named for its marker's session (`handover-<session id>.md`)
@@ -121,7 +122,7 @@ The plugin's SessionStart hook finds the handover of the session that ran in the
 `claude` process, checks that it is unchanged and still current, copies it to
 `.claude/rotation/archive/`, and puts it in the new session's context. The user sees one
 line naming the file. After an automatic /clear in tmux the plugin then types
-`Continue from the handover in your context, step 1.` as the first prompt: continue
-from step 1 as the resume action says. When that does not happen (another process, an outdated handover,
-two handovers at once), the user sees the waiting handovers listed with a hint to type
-`/context-rotation:rotate resume`.
+`Continue from the handover in your context, step 1.` as the first prompt, once the
+handover was handed over: continue from step 1 as the resume action says. When that does
+not happen (another process, an outdated handover, two handovers at once), the user sees
+the waiting handovers listed with a hint to type `/context-rotation:rotate resume`.

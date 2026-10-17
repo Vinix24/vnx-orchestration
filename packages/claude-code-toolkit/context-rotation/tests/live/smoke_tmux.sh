@@ -18,7 +18,8 @@
 #         200x50 pane. Your Claude login is used as it is: CLAUDE_CONFIG_DIR is passed on
 #         only when your shell has it set, and never set to a new directory. Evidence goes
 #         to <project_dir>.evidence/. Needs tmux 3.0 or later (new-session -e).
-# capture saves the pane as <label>.esc.txt (capture-pane -e) and <label>.txt (wrapped lines joined).
+# capture saves the pane as <label>.esc.txt (capture-pane -e) and <label>.txt (wrapped lines joined),
+#         and where tmux has the cursor as <label>.cursor ("<cursor_x> <cursor_y>"), from one tmux call.
 # check   reads .claude/rotation/injections.jsonl, the pane's clear-<n>.json and the
 #         captures, prints PASS or FAIL per check, and exits 1 when one fails.
 #
@@ -29,13 +30,17 @@
 #   input line alone. The model writes the handover; at the end of its turn a line says
 #   /clear is typed for you. /clear appears, the fresh session starts with "continued
 #   from the handover of the previous session", and "Continue from the handover in your
-#   context, step 1." is typed and sent. Then: capture happy, check happy.
+#   context, step 1." is typed and sent once the fresh session's `delivered` line is
+#   there. Then: capture happy, check happy.
 #
 # 2 input: text in the input line, nothing typed.
 #   Type /context-rotation:rotate, and while the model still writes, type hello in the
 #   input line without Enter. When the turn ends the status line says "no automatic
 #   /clear: there is text in the input line", and the input line still reads hello.
-#   Then: capture input, check input.
+#   Then: capture input, check input. The check also reads where tmux has the cursor:
+#   the job removes what it typed only while the cursor stands right after it, so a
+#   FAIL there means Claude Code keeps the terminal cursor elsewhere and the job always
+#   leaves its text in the input line instead (it says so) rather than removing it.
 #
 # 3 keep-working: the user keeps working after an aborted clear, and the old handover
 #   is never used for a clear. Right after run 2, press Enter on hello and let the
@@ -144,9 +149,14 @@ capture() {
     echo "smoke: no evidence dir $evidence; was it started with this project dir?" >&2
     exit 1
   }
-  smoke_tmux capture-pane -p -e -t "$session" > "$evidence/$2.esc.txt" || exit 1
+  # One call, so the cursor and the screen are of the same moment, as the job reads them.
+  smoke_tmux display-message -p -t "$session" '#{cursor_x} #{cursor_y}' \; \
+    capture-pane -p -e -t "$session" > "$evidence/$2.look" || exit 1
+  head -n 1 "$evidence/$2.look" > "$evidence/$2.cursor" || exit 1
+  tail -n +2 "$evidence/$2.look" > "$evidence/$2.esc.txt" || exit 1
+  rm -f "$evidence/$2.look"
   smoke_tmux capture-pane -p -J -t "$session" > "$evidence/$2.txt" || exit 1
-  echo "smoke: saved $evidence/$2.esc.txt and $evidence/$2.txt"
+  echo "smoke: saved $evidence/$2.esc.txt, $evidence/$2.cursor and $evidence/$2.txt"
 }
 
 check() {
@@ -198,12 +208,21 @@ print("newest handover: generation %s of session %s" % (generation, ready[-1]["o
 print("its lines: %s" % ", ".join(names))
 
 
-def typed_in(label):
+def screen_of(label):
     path = os.path.join(evidence, label + ".esc.txt")
     if not os.path.exists(path):
         return None
     with open(path, encoding="utf-8") as handle:
-        return pane_screen.read(handle.read(), context_budget.load_settings(project)).typed
+        return pane_screen.read(handle.read(), context_budget.load_settings(project))
+
+
+def cursor_of(label):
+    path = os.path.join(evidence, label + ".cursor")
+    if not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8") as handle:
+        fields = handle.read().split()
+    return tuple(int(field) for field in fields) if len(fields) == 2 and all(f.isdigit() for f in fields) else None
 
 
 def ordered(*wanted):
@@ -216,8 +235,9 @@ def ordered(*wanted):
 
 
 if run == "happy":
-    verdict(ordered("clear_started", "clear_entered", "injected", "clear_acknowledged", "clear_continued"),
-            "started, /clear entered, injected, acknowledged and continued, in that order")
+    verdict(ordered("clear_started", "clear_entered", "injected", "delivered", "clear_acknowledged",
+                    "clear_continued"),
+            "started, /clear entered, injected, delivered, acknowledged and continued, in that order")
     injected = [line for line in events if line["event"] == "injected"]
     verdict(bool(injected) and injected[-1]["via"] == "clear", "the injection came through /clear")
     if injected:
@@ -229,8 +249,13 @@ elif run == "input":
     aborted = [line for line in events if line["event"] == "clear_aborted"]
     verdict(bool(aborted) and aborted[-1]["abort_reason"] == "input", "the job stopped on text in the input line")
     verdict("clear_entered" not in names, "/clear was never entered")
-    typed = typed_in("input")
+    screen = screen_of("input")
+    typed = screen.typed if screen else None
     verdict(typed == "hello", "the input line still reads hello (it reads %r)" % (typed,))
+    cursor = cursor_of("input")
+    after = (screen.end, screen.row) if screen else None
+    verdict(cursor is not None and cursor == after,
+            "the cursor stands right after the typed text (cursor %r, text ends at %r)" % (cursor, after))
 elif run == "keep-working":
     verdict("clear_aborted" in names and "clear_entered" not in names, "the clear stopped and was never entered")
     verdict(ordered("clear_aborted", "clear_told"), "the next prompt repeated why")

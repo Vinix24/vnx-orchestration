@@ -555,6 +555,8 @@ def run(args):
 args = sys.argv[1:]
 with open(path("calls.jsonl"), "a", encoding="utf-8") as handle:
     handle.write(json.dumps(args) + "\n")
+if args[:1] == ["-L"]:  # a named server (the live smoke's): this fake plays one pane for every server
+    args = args[2:]
 commands, current = [], []
 for arg in args:
     if arg == ";":

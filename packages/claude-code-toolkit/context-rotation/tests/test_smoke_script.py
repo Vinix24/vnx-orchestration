@@ -10,7 +10,7 @@ import subprocess
 
 import pytest
 
-from conftest import IDLE, PKG, load_fixture, pane_text, start, started, with_input
+from conftest import IDLE, PKG, PROMPT, load_fixture, pane_text, start, started, with_input
 
 import auto_clear
 import tmux_clear
@@ -64,16 +64,50 @@ def test_check_fails_where_the_run_did_not_happen(session, fake, tmux_bin, proje
     assert proc.returncode == 1 and "FAIL started, /clear entered" in proc.stdout
 
 
+def captured(project, fake, label):
+    """What `capture` saves of the pane the fake plays: its screen and where it has the cursor."""
+    path = evidence(project)
+    (path / (label + ".esc.txt")).write_text(fake.screen(), encoding="utf-8")
+    (path / (label + ".cursor")).write_text(fake.expand("#{cursor_x} #{cursor_y}") + "\n", encoding="utf-8")
+
+
 def test_check_passes_on_text_in_the_input_line_and_the_work_after_it(session, fake, tmux_bin, project, clock):
     fake.typed = "hello"
     tmux_clear.main(started(session, tmux_bin))
-    (evidence(project) / "input.esc.txt").write_text(with_input(pane_text(IDLE), "hello"), encoding="utf-8")
+    captured(project, fake, "input")
     proc = smoke("check", project, "input")
     assert proc.returncode == 0, proc.stdout
     assert "PASS the input line still reads hello" in proc.stdout
+    assert "PASS the cursor stands right after the typed text" in proc.stdout
     session.prompt("hello")
     proc = smoke("check", project, "keep-working")
     assert proc.returncode == 0, proc.stdout
+
+
+@pytest.mark.parametrize("cursor", ["moved", "absent"])
+def test_check_fails_when_the_cursor_is_not_after_the_typed_text(cursor, session, fake, tmux_bin, project, clock):
+    fake.typed = "hello"
+    tmux_clear.main(started(session, tmux_bin))
+    fake.back = 2
+    captured(project, fake, "input")
+    if cursor == "absent":
+        (evidence(project) / "input.cursor").unlink()
+    proc = smoke("check", project, "input")
+    assert proc.returncode == 1 and "FAIL the cursor stands right after the typed text" in proc.stdout
+
+
+def test_capture_saves_the_screen_and_the_cursor_of_one_moment(tmux_bin, project):
+    tmux_bin.set("typed", "hello")
+    path = evidence(project)
+    proc = smoke("capture", project, "input")
+    assert proc.returncode == 0, proc.stderr
+    screen = with_input(pane_text(IDLE), "hello")
+    assert (path / "input.esc.txt").read_text(encoding="utf-8") == screen
+    row = next(number for number, line in enumerate(screen.split("\n")) if PROMPT in line)
+    assert (path / "input.cursor").read_text() == "%d %d\n" % (len(PROMPT) + len("hello"), row)
+    assert sorted(p.name for p in path.iterdir()) == ["input.cursor", "input.esc.txt", "input.txt", "plugin_dir"]
+    (look,) = [call for call in tmux_bin.calls() if "display-message" in call]
+    assert look[:2] == ["-L", "context-rotation-smoke"] and ";" in look and "capture-pane" in look
 
 
 def test_check_passes_on_a_background_shell(session, tmux_bin, project):
