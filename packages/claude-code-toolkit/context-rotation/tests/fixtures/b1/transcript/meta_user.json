@@ -1,0 +1,24 @@
+{
+ "parentUuid": "<uuid>",
+ "isSidechain": false,
+ "promptId": "<prompt_id>",
+ "type": "user",
+ "message": {
+  "role": "user",
+  "content": [
+   {
+    "type": "text",
+    "text": "<skill_body>"
+   }
+  ]
+ },
+ "isMeta": true,
+ "uuid": "<uuid>",
+ "timestamp": "<timestamp>",
+ "userType": "external",
+ "entrypoint": "cli",
+ "cwd": "<project_dir>",
+ "sessionId": "<session_id>",
+ "version": "2.1.300",
+ "gitBranch": "<branch>"
+}

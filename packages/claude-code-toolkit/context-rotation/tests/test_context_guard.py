@@ -164,7 +164,8 @@ def test_garbage_stdin_exits_zero_silently(raw):
 def test_unwritable_state_never_raises(tmp_path, project):
     (project / ".claude").write_text("a file where the directory should be")
     proc = run_guard(payload_for(project, unknown_transcript(tmp_path)))
-    assert (proc.returncode, proc.stdout) == (1, "")
+    assert (proc.returncode, proc.stdout) == (0, "")
+    assert "%s is not a directory; nothing is read or changed" % (project / ".claude") in proc.stderr
     assert "Traceback" not in proc.stderr
 
 
@@ -181,7 +182,7 @@ def error_log(project):
 
 
 def test_failed_state_write_leaves_a_trace_and_does_not_block(tmp_path, project):
-    (project / ".claude").write_text("a file where the directory should be")
+    (state_dir(project) / "sess-1.json").mkdir(parents=True)  # a directory where the state file belongs
     proc = run_guard(payload_for(project, unknown_transcript(tmp_path)))
     assert proc.returncode == 1
     assert proc.stdout == ""
@@ -189,7 +190,7 @@ def test_failed_state_write_leaves_a_trace_and_does_not_block(tmp_path, project)
     assert len(lines) == 1
     assert "context-rotation" in lines[0]
     assert "save state" in lines[0]
-    assert "OSError" in lines[0] or "FileExistsError" in lines[0] or "NotADirectoryError" in lines[0]
+    assert "IsADirectoryError" in lines[0] or "OSError" in lines[0]
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
@@ -235,9 +236,15 @@ def test_first_measurement_above_warn_protects_the_handover_before_naming_it(tmp
     assert ignore.read_text() == "*\n"
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
 def test_no_handover_instruction_when_protection_cannot_be_made(tmp_path, project):
-    (project / ".claude").write_text("a file where the directory should be")
-    proc = run_guard(payload_for(project, transcript_with(tmp_path, 120000)))
+    rotation_dir = project / ".claude" / "rotation"
+    rotation_dir.mkdir(parents=True)
+    rotation_dir.chmod(0o555)  # no .gitignore, and none can be written
+    try:
+        proc = run_guard(payload_for(project, transcript_with(tmp_path, 120000)))
+    finally:
+        rotation_dir.chmod(0o755)
     assert proc.stdout == ""
     assert proc.returncode == 1
     assert "ignore protection" in proc.stderr

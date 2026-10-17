@@ -130,7 +130,7 @@ Terminal Output → Smart Tap → Dispatcher → Queue → Terminal
 - `intelligence/03_LEARNING_LOOP.md` - Pattern learning
 
 **Implementation**:
-- `CHANGELOG.md` and `FEATURE_PLAN.md` - Current public release status
+- `CHANGELOG.md` and `FEATURE_PLAN.md` - Current public release status (`CHANGELOG.md` is assembled from `changelog.d/` by the release PR; read it, never edit it)
 - `implementation/01_IMPLEMENTATION_ROADMAP.md` - Feature roadmap
 
 ### Documentation Standards
@@ -138,7 +138,7 @@ Terminal Output → Smart Tap → Dispatcher → Queue → Terminal
 **After EVERY implementation**:
 1. Update architecture docs if system design changed
 2. Update operations docs for new processes
-3. Update `CHANGELOG.md` and `FEATURE_PLAN.md` with completion when relevant
+3. Add the CHANGELOG entry as `changelog.d/<dispatch-id>.md` (never edit `CHANGELOG.md`; rule: `changelog.d/README.md`) and update `FEATURE_PLAN.md` with completion when relevant
 4. Archive temporary reports to `archive/{date}/`
 5. Keep DOCS_INDEX.md current
 
@@ -166,7 +166,7 @@ Place in appropriate subdirectory:
 - `architecture/` - System design documents (numbered: `01_`, `02_`, etc.)
 - `operations/` - Process and operational guides
 - `intelligence/` - Intelligence system documentation
-- `CHANGELOG.md` / `FEATURE_PLAN.md` - Public status and roadmap checkpoints
+- `changelog.d/<dispatch-id>.md` / `FEATURE_PLAN.md` - Public status and roadmap checkpoints (a CHANGELOG entry is a fragment the release PR folds into `CHANGELOG.md`; rule: `changelog.d/README.md`)
 
 **For Temporary Analysis**: `.claude/terminals/T-MANAGER/reports/`
 **Format**: `YYYYMMDD-{topic}.md`

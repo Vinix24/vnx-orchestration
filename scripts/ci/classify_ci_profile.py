@@ -15,6 +15,9 @@ Light-profile allowlist (the complete set of things that may be light):
 * ``docs/**``       — anything under ``docs/``
 * ``claudedocs/**`` — anything under ``claudedocs/``
 * ``*.md`` at the repository root — a single path component ending in ``.md``
+* a CHANGELOG fragment, ``changelog.d/<name>.md`` exactly as
+  ``changelog_fragments.is_fragment_path`` defines it, and
+  ``changelog.d/README.md`` — any other path under ``changelog.d/`` is heavy
 
 Everything else is heavy.  ``skills/**`` is deliberately heavy: a skill's
 markdown drives agent behaviour, so a skill change is a code change for CI
@@ -36,6 +39,10 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "release"))
+
+from changelog_fragments import README_PATH, is_fragment_path
 
 PROFILE_LIGHT = "light"
 PROFILE_HEAVY = "heavy"
@@ -65,7 +72,8 @@ def is_docs_only_path(path: str) -> bool:
     # Root-level markdown: no directory component, ends in ".md".
     if "/" not in path and path.endswith(".md"):
         return True
-    return False
+    # A CHANGELOG fragment or the fragment README; nothing else in changelog.d/.
+    return is_fragment_path(path) or path == README_PATH
 
 
 def classify_paths(paths) -> str:

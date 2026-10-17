@@ -1,0 +1,22 @@
+{
+ "parentUuid": "<uuid>",
+ "isSidechain": false,
+ "attachment": {
+  "type": "hook_additional_context",
+  "content": [
+   "<hook_text>"
+  ],
+  "hookName": "PostToolUse:Write",
+  "toolUseID": "<tool_use_id>",
+  "hookEvent": "PostToolUse"
+ },
+ "type": "attachment",
+ "uuid": "<uuid>",
+ "timestamp": "<timestamp>",
+ "userType": "external",
+ "entrypoint": "cli",
+ "cwd": "<project_dir>",
+ "sessionId": "<session_id>",
+ "version": "2.1.300",
+ "gitBranch": "<branch>"
+}
