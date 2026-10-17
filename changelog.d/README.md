@@ -13,9 +13,9 @@ A PR never edits `CHANGELOG.md`. It adds its entry as a file in this directory, 
   - A sub-bullet too.
 ```
 
-The `Changelog fragments` step of the required `Lint Patterns` job refuses a pull request that changes the `## [Unreleased]` section of `CHANGELOG.md` (it adds, removes, changes or reorders a line there; blank lines do not count), a `CHANGELOG.md` with a `## [...]` heading more than once, an invalid or symlinked fragment, a file here whose name is not a fragment name, or the removal of this README. A PR that changes only fragments runs the light CI profile.
+The `Changelog fragments` step of the required `Lint Patterns` job refuses a pull request that is no release PR and changes `CHANGELOG.md` at all: the file stays byte-identical to the merge base, blank lines, the lines above the first heading and every released section included, and the message names each changed section. It also refuses a `CHANGELOG.md` with a `## [...]` heading more than once, an invalid or symlinked fragment, a file here whose name is not a fragment name, the removal of this README, and any file it reads that is not valid UTF-8 (named with its line and byte offset). A PR that changes only fragments runs the light CI profile.
 
-The bullets that were under `## [Unreleased]` before this rule stay there and are folded in first at the next release. `scripts/ci/changelog_legacy_prs.txt` lists the PRs that were open with such a bullet, with a hash of their lines: such a PR passes only while its added lines are unchanged, and it removes, changes or reorders none of the others. The first release PR after the rule deletes that file.
+The bullets that were under `## [Unreleased]` before this rule stay there and are folded in first at the next release. `scripts/ci/changelog_legacy_prs.txt` lists the PRs that were open with such a bullet, with a hash of their lines: such a PR may insert those lines under `## [Unreleased]` (blank lines among them) only while they are unchanged, and it changes nothing else in `CHANGELOG.md`. The first release PR after the rule deletes that file.
 
 ## The release
 
@@ -27,7 +27,7 @@ On the release branch, cut from an up-to-date `origin/main`, before the release 
 4. Write the intro paragraph under the new heading by hand: prose only, before the first bullet. Do not edit the bullets. A wrong bullet is fixed in its fragment, in an earlier PR.
 5. Commit `CHANGELOG.md`, `changelog.d/` and `VERSION`, and open the release PR. The operator tags after it merges.
 
-The CI check recomputes the release PR from its merge base with the same fold. It fails when `CHANGELOG.md` differs beyond the intro, when a consumed fragment is left in place, when a new fragment is added, or when the new heading's version is not `VERSION`. If `main` moves before the release PR merges, cut the branch again from the new `main` and rerun.
+The CI check recomputes the release PR from its merge base with the same fold. It fails when `CHANGELOG.md` differs beyond the intro, when a consumed fragment is left in place, when a new fragment is added, or when the new heading's version is not one `--version` accepts or is not `VERSION`. If `main` moves before the release PR merges, cut the branch again from the new `main` and rerun.
 
 **An interrupted run.** A write or a delete that fails puts the original files back itself. A run that was killed (power loss, SIGKILL) leaves `CHANGELOG.md` and `changelog.d/` dirty, and the next run refuses. Restore with
 

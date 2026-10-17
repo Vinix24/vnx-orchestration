@@ -44,6 +44,36 @@ class ChangelogError(Exception):
     """A refusal: the input cannot be assembled or checked as it stands."""
 
 
+class NotUtf8Error(ChangelogError):
+    """A file that must be UTF-8 holds a byte that is not."""
+
+
+# ---------------------------------------------------------------------------
+# Strict UTF-8 (pure)
+# ---------------------------------------------------------------------------
+
+
+def utf8_error(data: bytes) -> Optional[Tuple[int, int]]:
+    """``(line_no, byte_offset)`` of the first byte of *data* that is not
+    strict UTF-8, or None.  Never a lenient decode: a replaced byte compares
+    equal to U+FFFD and so hides corruption from every later comparison."""
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        return data[: exc.start].count(b"\n") + 1, exc.start
+    return None
+
+
+def decode_utf8(label: str, data: bytes, where: str = "") -> str:
+    """*data* decoded as strict UTF-8.  ``NotUtf8Error`` otherwise, naming
+    *label*, the line and the byte offset, followed by *where*."""
+    error = utf8_error(data)
+    if error:
+        line_no, offset = error
+        raise NotUtf8Error(f"{label}:{line_no}: not valid UTF-8 (byte {offset}){where}")
+    return data.decode("utf-8")
+
+
 # ---------------------------------------------------------------------------
 # The fragment rule (pure)
 # ---------------------------------------------------------------------------
@@ -78,10 +108,9 @@ def validate_fragment(name: str, data: bytes) -> Optional[str]:
     offending line with its number.
     """
     try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        line_no = data[: exc.start].count(b"\n") + 1
-        return f"{name}:{line_no}: not valid UTF-8 (byte {exc.start})"
+        text = decode_utf8(name, data)
+    except NotUtf8Error as exc:
+        return str(exc)
     if not text:
         return f"{name}: is empty; a fragment is at least one '- ' line"
     if not text.endswith("\n"):
@@ -173,11 +202,6 @@ def unreleased_bounds(lines: Sequence[str]) -> Optional[Tuple[int, int]]:
                 end += 1
             return index, end
     return None
-
-
-def has_unreleased(changelog_text: str) -> bool:
-    """True when the changelog has a ``## [Unreleased]`` heading."""
-    return unreleased_bounds(_split_lines(changelog_text)) is not None
 
 
 def unreleased_lines(changelog_text: str) -> List[str]:
@@ -301,7 +325,11 @@ def _trim_trailing_blank(lines: Sequence[str]) -> List[str]:
 
 
 def run_git_bytes(repo: Path, *args: str) -> bytes:
-    """Run git in *repo* and return raw stdout; ``ChangelogError`` on failure."""
+    """Run git in *repo* and return raw stdout; ``ChangelogError`` on failure.
+
+    git's stderr goes into the refusal with undecodable bytes replaced: it is
+    a message for a human, never compared and never written anywhere.
+    """
     try:
         result = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, check=False)
     except OSError as exc:
@@ -313,15 +341,22 @@ def run_git_bytes(repo: Path, *args: str) -> bytes:
 
 
 def run_git(repo: Path, *args: str) -> str:
-    """Run git in *repo* and return stdout as text; ``ChangelogError`` on failure."""
-    return run_git_bytes(repo, *args).decode("utf-8", "replace")
+    """Run git in *repo* and return stdout as strict UTF-8 text.
+
+    ``ChangelogError`` on failure; ``NotUtf8Error`` when the output is not
+    UTF-8 (a path is bytes: read it with ``run_git_bytes``).
+    """
+    return decode_utf8(f"output of git {' '.join(args)}", run_git_bytes(repo, *args))
 
 
 def tree_entries(repo: Path, rev: str, directory: str) -> Dict[str, Tuple[str, str, str]]:
     """``{path: (mode, type, object)}`` for the entries directly in *directory* at *rev*.
 
     Read from git objects, never from a working tree.  A directory that does
-    not exist at *rev* gives an empty mapping.
+    not exist at *rev* gives an empty mapping.  A path is bytes, decoded with
+    ``surrogateescape`` so every byte survives: a path that is not UTF-8 stays
+    distinct, round-trips into git unchanged, and never passes
+    ``is_fragment_path``, whose name pattern is ASCII.
     """
     raw = run_git_bytes(repo, "ls-tree", "-z", rev, "--", f"{directory}/")
     entries = {}

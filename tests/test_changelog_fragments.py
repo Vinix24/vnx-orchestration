@@ -429,6 +429,19 @@ def test_existing_version_heading_is_refused(repo):
     assert snapshot(repo) == before
 
 
+def test_changelog_that_is_not_utf8_is_refused_with_its_byte_offset(repo):
+    corrupt = BASE_CHANGELOG.encode("utf-8").replace(b"- old entry", b"- old \xffentry")
+    commit(repo, {"CHANGELOG.md": corrupt, "changelog.d/one.md": "- one\n"})
+    before = snapshot(repo)
+    result = run_assembler(repo, "--version", "1.1.0")
+    offset = corrupt.index(b"\xff")
+    line_no = corrupt[:offset].count(b"\n") + 1
+    assert result.returncode == 1
+    assert f"refused: CHANGELOG.md:{line_no}: not valid UTF-8 (byte {offset})" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert snapshot(repo) == before
+
+
 def test_invalid_fragment_is_refused_before_any_write(repo):
     commit(repo, {"changelog.d/good.md": "- good\n", "changelog.d/bad.md": "# heading\n"})
     before = snapshot(repo)

@@ -108,6 +108,24 @@ def edit_changelog(repo: Path, old: str, new: str) -> None:
     path.write_text(text.replace(old, new, 1), encoding="utf-8")
 
 
+def first_ff(data: bytes) -> tuple:
+    """``(line_no, byte_offset)`` of the first 0xFF byte in *data*."""
+    offset = data.index(b"\xff")
+    return data[:offset].count(b"\n") + 1, offset
+
+
+def commit_raw_path(repo: Path, raw_path: bytes, content: bytes, message: str) -> None:
+    """Commit one file under a path given as raw bytes, through the index only."""
+    blob = subprocess.run(
+        ["git", "-C", str(repo), "hash-object", "-w", "--stdin"], input=content, capture_output=True, check=True
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "-C", str(repo), "update-index", "--add", "--index-info"],
+        input=b"100644 " + blob + b"\t" + raw_path + b"\n", capture_output=True, check=True,
+    )
+    git(repo, "commit", "-q", "-m", message)
+
+
 # ---------------------------------------------------------------------------
 # Rule 1: no new Unreleased bullet
 # ---------------------------------------------------------------------------
@@ -165,11 +183,51 @@ def test_non_release_pr_that_reorders_unreleased_lines_fails(tmp_path):
     assert "reorders the lines under '## [Unreleased]'" in result.stdout
 
 
-def test_blank_line_change_under_unreleased_passes(repo):
+def test_blank_line_change_under_unreleased_fails(repo):
     pr_branch(repo)
     commit(repo, {"CHANGELOG.md": BASE_CHANGELOG.replace("- legacy bullet\n", "\n- legacy bullet\n")})
     result = run_check(repo)
-    assert result.returncode == 0, result.stdout
+    assert result.returncode == 1
+    assert "changes CHANGELOG.md under '## [Unreleased]':" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "old,new,where,shown",
+    [
+        ("- old entry\n", "- old entry\n\n- direct unfragmented entry\n",
+         "under '## [1.0.0] - 2026-01-01'", "+- direct unfragmented entry"),
+        ("- old entry\n", "- old entry, reworded\n", "under '## [1.0.0] - 2026-01-01'", "+- old entry, reworded"),
+        ("- old entry\n", "", "under '## [1.0.0] - 2026-01-01'", "-- old entry"),
+        ("- old entry\n", "- old entry \n", "under '## [1.0.0] - 2026-01-01'", "+- old entry "),
+        ("# Changelog\n", "# Changelog of VNX\n", "above the first heading", "+# Changelog of VNX"),
+    ],
+    ids=["released-add", "released-change", "released-delete", "released-trailing-space", "above-first-heading"],
+)
+def test_non_release_pr_that_changes_changelog_outside_unreleased_fails(repo, old, new, where, shown):
+    # The kimi reproduction is the first case: a direct bullet under a
+    # released heading, which the Unreleased-only rule never read.
+    pr_branch(repo)
+    commit(repo, {"CHANGELOG.md": BASE_CHANGELOG.replace(old, new, 1)})
+    result = run_check(repo)
+    assert result.returncode == 1
+    assert f"changes CHANGELOG.md {where}:" in result.stdout
+    assert shown in result.stdout
+
+
+def test_non_release_pr_that_removes_the_final_newline_fails(repo):
+    pr_branch(repo)
+    commit(repo, {"CHANGELOG.md": BASE_CHANGELOG[:-1]})
+    result = run_check(repo)
+    assert result.returncode == 1
+    assert "changes CHANGELOG.md under '## [1.0.0] - 2026-01-01':" in result.stdout
+
+
+def test_non_release_pr_that_removes_changelog_fails(repo):
+    pr_branch(repo)
+    commit(repo, {}, "drop CHANGELOG.md", remove=("CHANGELOG.md",))
+    result = run_check(repo)
+    assert result.returncode == 1
+    assert "removes CHANGELOG.md" in result.stdout
 
 
 def test_consumer_without_fragment_directory_passes_and_does_nothing(tmp_path):
@@ -242,6 +300,72 @@ def test_a_duplicate_heading_anywhere_fails(repo, appended, label):
     assert f"CHANGELOG.md has the heading '## [{label}]' 2 times" in result.stdout
 
 
+def test_a_fragment_directory_name_that_is_not_utf8_fails_by_name(repo):
+    pr_branch(repo)
+    commit_raw_path(repo, b"changelog.d/caf\xe9.md", b"- entry\n", "a name that is not UTF-8")
+    result = run_check(repo)
+    assert result.returncode == 1
+    assert "changelog.d/caf\\xe9.md: the name is not valid UTF-8 (byte 15)" in result.stdout
+    assert "Traceback" not in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Every file the check reads is strict UTF-8
+# ---------------------------------------------------------------------------
+
+
+def test_release_pr_with_an_invalid_byte_where_the_fragment_has_u_fffd_fails(repo):
+    # The codex reproduction: a lenient decode turned 0xFF back into U+FFFD,
+    # so the corrupt CHANGELOG.md compared equal to the assembler's output.
+    release_branch(repo, fragments={"a.md": "- entry � a\n"})
+    path = repo / "CHANGELOG.md"
+    corrupt = path.read_bytes().replace("�".encode("utf-8"), b"\xff", 1)
+    path.write_bytes(corrupt)
+    commit(repo, {}, "release with a corrupt byte")
+    result = run_check(repo)
+    line_no, offset = first_ff(corrupt)
+    assert result.returncode == 1
+    assert f"CHANGELOG.md:{line_no}: not valid UTF-8 (byte {offset}) at the head" in result.stdout
+
+
+def test_non_release_pr_with_an_invalid_byte_in_changelog_fails(repo):
+    pr_branch(repo)
+    corrupt = BASE_CHANGELOG.encode("utf-8").replace(b"- old entry", b"- old \xffentry")
+    commit(repo, {"CHANGELOG.md": corrupt})
+    result = run_check(repo)
+    line_no, offset = first_ff(corrupt)
+    assert result.returncode == 1
+    assert f"CHANGELOG.md:{line_no}: not valid UTF-8 (byte {offset}) at the head" in result.stdout
+
+
+def test_an_invalid_byte_in_changelog_at_the_merge_base_fails(tmp_path):
+    corrupt = BASE_CHANGELOG.encode("utf-8").replace(b"- old entry", b"- old \xffentry")
+    repo = init_repo(tmp_path / "corrupt", {"CHANGELOG.md": corrupt, "VERSION": "1.0.0\n", "changelog.d/README.md": "# rule\n"})
+    pr_branch(repo)
+    commit(repo, {"changelog.d/x.md": "- a fragment\n"})
+    result = run_check(repo)
+    line_no, offset = first_ff(corrupt)
+    assert result.returncode == 1
+    assert f"CHANGELOG.md:{line_no}: not valid UTF-8 (byte {offset}) at the merge base" in result.stdout
+
+
+def test_release_pr_with_a_version_file_that_is_not_utf8_fails(repo):
+    release_branch(repo)
+    commit(repo, {"VERSION": b"1.1.0\xff\n"}, "release with a corrupt VERSION")
+    result = run_check(repo)
+    assert result.returncode == 1
+    assert "VERSION:1: not valid UTF-8 (byte 5) at the head" in result.stdout
+
+
+def test_legacy_list_that_is_not_utf8_fails_with_its_byte_offset(tmp_path):
+    entry = check.legacy_entry(77, BASE_CHANGELOG, with_bullets("- open PR bullet"))
+    repo = legacy_repo(tmp_path, b"# measured \xff\n" + entry.encode("utf-8") + b"\n")
+    commit(repo, {"CHANGELOG.md": with_bullets("- open PR bullet")})
+    result = run_check(repo, pr=77)
+    assert result.returncode == 1
+    assert f"{check.LEGACY_LIST_PATH}:1: not valid UTF-8 (byte 11) at the merge base" in result.stdout
+
+
 # ---------------------------------------------------------------------------
 # Rule 3: a release PR matches the assembler
 # ---------------------------------------------------------------------------
@@ -261,6 +385,44 @@ def test_release_pr_with_an_intro_paragraph_passes(repo):
     commit(repo, {}, "release 1.1.0 with intro")
     result = run_check(repo)
     assert result.returncode == 0, result.stdout
+
+
+def test_release_pr_with_a_bold_intro_passes(repo):
+    release_branch(repo)
+    edit_changelog(repo, "## [1.1.0] - 2026-10-17\n\n",
+                   "## [1.1.0] - 2026-10-17\n\n**Highlights:** this release folds fragments.\n\n")
+    commit(repo, {}, "release 1.1.0 with a bold intro")
+    result = run_check(repo)
+    assert result.returncode == 0, result.stdout
+
+
+@pytest.mark.parametrize(
+    "line,expected",
+    [
+        ("**Highlights:** this release folds fragments.", True),
+        ("_Note:_ upgrade first.", True),
+        ("-foo is a flag, not a bullet", True),
+        ("", True),
+        ("* a star bullet", False),
+        ("*\ta tab bullet", False),
+        ("+ a plus bullet", False),
+        ("- a dash bullet", False),
+        ("1. a numbered item", False),
+        ("2) a numbered item", False),
+        ("# a heading", False),
+        ("  an indented line", False),
+        ("***", False),
+        ("- - -", False),
+        ("===", False),
+    ],
+    ids=[
+        "bold-prose", "emphasis-prose", "dash-word-prose", "blank", "star-bullet", "star-tab-bullet",
+        "plus-bullet", "dash-bullet", "numbered-dot", "numbered-paren", "atx-heading", "indented",
+        "thematic-break", "spaced-thematic-break", "setext-underline",
+    ],
+)
+def test_is_prose(line, expected):
+    assert check.is_prose(line) is expected
 
 
 def test_release_pr_with_a_subheading_in_the_intro_fails(repo):
@@ -315,6 +477,30 @@ def test_release_pr_with_a_heading_that_is_not_version_fails(repo):
     assert "'## [1.1.0]' does not match VERSION at the head (1.1.1)" in result.stdout
 
 
+@pytest.mark.parametrize("label", ["not-a-version", "1.1"], ids=["kimi-not-a-version", "codex-two-part-version"])
+def test_release_heading_with_a_version_the_assembler_refuses_fails(repo, label):
+    # The kimi reproduction: VERSION matches the heading and the rest is the
+    # assembler's output, but assemble_changelog.py refuses the label itself.
+    release_branch(repo)
+    edit_changelog(repo, "## [1.1.0] - 2026-10-17", f"## [{label}] - 2026-10-17")
+    commit(repo, {"VERSION": f"{label}\n"}, "release with a label that is no version")
+    refused = subprocess.run(
+        [sys.executable, str(ASSEMBLER), "--version", label, "--check"], cwd=repo, capture_output=True, text=True,
+        check=False,
+    )
+    assert refused.returncode == 2
+    result = run_check(repo)
+    assert result.returncode == 1
+    assert f"the new heading '## [{label}]' is not a release version X.Y.Z" in result.stdout
+
+
+def test_release_pr_with_a_prerelease_version_passes(repo):
+    release_branch(repo, version="1.1.0-rc.1")
+    commit(repo, {}, "release 1.1.0-rc.1")
+    result = run_check(repo)
+    assert result.returncode == 0, result.stdout
+
+
 def test_second_heading_for_an_existing_version_is_a_release_and_fails(repo):
     # The codex reproduction: the version set does not change, the legacy
     # bullet moves under the new heading and Unreleased reads empty.
@@ -364,7 +550,7 @@ def test_deleting_a_fragment_without_a_heading_is_a_release_and_fails(repo):
 # ---------------------------------------------------------------------------
 
 
-def legacy_repo(tmp_path: Path, listed: str | None) -> Path:
+def legacy_repo(tmp_path: Path, listed: str | bytes | None) -> Path:
     files = {"CHANGELOG.md": BASE_CHANGELOG, "VERSION": "1.0.0\n", "changelog.d/README.md": "# rule\n"}
     if listed is not None:
         files[check.LEGACY_LIST_PATH] = listed
@@ -403,6 +589,25 @@ def test_listed_legacy_pr_that_also_drops_a_bullet_fails(tmp_path):
     result = run_check(repo, pr=77)
     assert result.returncode == 1
     assert "removes or changes 1 line(s) under '## [Unreleased]'" in result.stdout
+
+
+def test_listed_legacy_pr_that_also_edits_a_released_section_fails(tmp_path):
+    entry = check.legacy_entry(77, BASE_CHANGELOG, with_bullets("- open PR bullet"))
+    repo = legacy_repo(tmp_path, f"{entry}\n")
+    head = with_bullets("- open PR bullet").replace("- old entry\n", "- old entry, reworded\n")
+    commit(repo, {"CHANGELOG.md": head})
+    result = run_check(repo, pr=77)
+    assert result.returncode == 1
+    assert "changes CHANGELOG.md under '## [1.0.0] - 2026-01-01':" in result.stdout
+
+
+def test_listed_legacy_pr_that_only_inserts_blank_lines_fails(tmp_path):
+    entry = check.legacy_entry(77, BASE_CHANGELOG, with_bullets("- open PR bullet"))
+    repo = legacy_repo(tmp_path, f"{entry}\n")
+    commit(repo, {"CHANGELOG.md": BASE_CHANGELOG.replace("- legacy bullet\n", "\n\n- legacy bullet\n")})
+    result = run_check(repo, pr=77)
+    assert result.returncode == 1
+    assert "changes CHANGELOG.md under '## [Unreleased]':" in result.stdout
 
 
 def test_unlisted_pr_with_a_bullet_fails(tmp_path):

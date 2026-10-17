@@ -14,7 +14,8 @@ ancestor of HEAD).  The fragments are deleted.  The fold itself is
 ``changelog_fragments.assemble``, the same function the CI check runs.
 
 Every precondition is checked before anything is written: a clean
-``CHANGELOG.md`` and ``changelog.d/``, an ``## [Unreleased]`` heading whose
+``CHANGELOG.md`` and ``changelog.d/``, both strict UTF-8 (an invalid byte is
+refused by file, line and byte offset), an ``## [Unreleased]`` heading whose
 lines are bullets only, no ``## [X.Y.Z]`` yet, every fragment valid, present
 at ``--rev`` with the same bytes as in the tree, and on the first-parent
 history of ``--rev``.  A write or a delete that fails puts the original
@@ -99,13 +100,13 @@ def _refuse_rev_not_ancestor(root: Path, rev: str) -> None:
     result = subprocess.run(
         ["git", "-C", str(root), "merge-base", "--is-ancestor", rev, "HEAD"],
         capture_output=True,
-        text=True,
         check=False,
     )
     if result.returncode == 1:
         raise cf.ChangelogError(f"--rev {rev} is not an ancestor of HEAD: merge it first")
     if result.returncode != 0:
-        raise cf.ChangelogError(f"git merge-base --is-ancestor {rev} HEAD failed: {result.stderr.strip()}")
+        stderr = result.stderr.decode("utf-8", "replace").strip()
+        raise cf.ChangelogError(f"git merge-base --is-ancestor {rev} HEAD failed: {stderr}")
 
 
 @contextlib.contextmanager
@@ -116,7 +117,8 @@ def repo_lock(root: Path) -> Iterator[Path]:
     waiting and then working from a tree the first run already changed.
     Closing the descriptor releases the lock, also when the process dies.
     """
-    lock_path = Path(cf.run_git(root, "rev-parse", "--absolute-git-dir").strip()) / LOCK_NAME
+    git_dir = cf.run_git_bytes(root, "rev-parse", "--absolute-git-dir").rstrip(b"\n")
+    lock_path = Path(os.fsdecode(git_dir)) / LOCK_NAME
     try:
         fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
     except OSError as exc:
@@ -184,10 +186,11 @@ def prepare(root: Path, version: str, date: str, rev: str) -> Plan:
     if not changelog.is_file():
         raise cf.ChangelogError(f"{cf.CHANGELOG_PATH} not found in {root}")
     changelog_original = _read_with_mode(changelog)
+    changelog_text = cf.decode_utf8(cf.CHANGELOG_PATH, changelog_original[0])
     originals = _read_fragments(root, rev)
     ordered = cf.introduction_order(root, rev, originals)
-    fragments = [(name, originals[name][0].decode("utf-8")) for name in ordered]
-    new_text, consumed = cf.assemble(changelog_original[0].decode("utf-8"), fragments, version, date)
+    fragments = [(name, cf.decode_utf8(cf.fragment_path(name), originals[name][0])) for name in ordered]
+    new_text, consumed = cf.assemble(changelog_text, fragments, version, date)
     return Plan(
         root=root,
         new_text=new_text,
