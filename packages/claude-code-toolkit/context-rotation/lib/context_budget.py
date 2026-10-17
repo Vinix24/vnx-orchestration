@@ -29,6 +29,8 @@ DEFAULTS = {
     "busy_pattern": r"^\S+ \S+… \(\d+s",
     "prompt_pattern": "^❯ ",
     "ack_timeout_seconds": 20,
+    # Tool names, or fnmatch patterns of them, that the force band denies; none by default.
+    "force_deny_tools": (),
 }
 _BOOLS = ("enabled", "auto_clear")
 _POSITIVE_INTS = (
@@ -36,6 +38,7 @@ _POSITIVE_INTS = (
     "hard_max_denials", "archive_keep", "ack_timeout_seconds",
 )
 _PATTERNS = ("busy_pattern", "prompt_pattern")
+_TOOL_LISTS = ("force_deny_tools",)
 _PCTS = ("warn_pct", "force_pct", "hard_pct")
 
 
@@ -142,6 +145,8 @@ def _valid_value(key: str, value: Any) -> bool:
         return isinstance(value, bool)
     if key in _POSITIVE_INTS:
         return _is_int(value) and value > 0
+    if key in _TOOL_LISTS:
+        return isinstance(value, list) and all(isinstance(item, str) and item and "\0" not in item for item in value)
     if key in _PATTERNS:
         if not isinstance(value, str):
             return False
@@ -165,7 +170,7 @@ def _apply(raw: Dict[str, Any]) -> Dict[str, Any]:
         if key in _PCTS or key not in raw:
             continue
         if _valid_value(key, raw[key]):
-            settings[key] = raw[key]
+            settings[key] = tuple(raw[key]) if key in _TOOL_LISTS else raw[key]
         else:
             _warn("bad value for %s, using the default" % key)
     if any(k in raw for k in _PCTS):

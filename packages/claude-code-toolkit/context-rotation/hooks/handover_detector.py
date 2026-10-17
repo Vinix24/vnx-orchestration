@@ -7,7 +7,9 @@ project lock, with the handover's sha256, the session's process identity, the
 transcript position and the write's tool_use_id. The position is that of the
 write's own transcript entry, taken before the handover is read, so work that
 lands while this hook runs lies after it. Invalid: the model is told exactly what
-is missing (M), and an earlier ready-marker becomes outdated.
+is missing (M), and an earlier ready-marker becomes outdated. Valid or not, the
+write clears the denials the force and hard bands counted toward
+hard_max_denials (band_guard.on_handover_write).
 """
 from __future__ import annotations
 
@@ -16,6 +18,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
 
+import band_guard
 import handover_contract
 import hook_runtime
 import rotation_state
@@ -37,6 +40,7 @@ def run(payload, env, run_state):
     handover = rotation_state.handover_path(project_dir, session_id)
     if not transcript_work.is_handover_write(payload.get("tool_name"), payload.get("tool_input"), handover):
         return
+    band_guard.on_handover_write(hook_runtime.Session(project_dir, session_id, settings), run_state)
     run_state.at("check transcript")
     cursor = transcript_work.write_position(payload.get("transcript_path"), payload.get("tool_use_id"))
     run_state.at("read handover")

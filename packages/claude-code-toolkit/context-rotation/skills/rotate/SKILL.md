@@ -1,7 +1,7 @@
 ---
 name: rotate
 description: Saves this session's state as a handover so a fresh session can continue after /clear, or picks up an earlier handover. Use when the context-rotation guard asks for a handover, when the user types /context-rotation:rotate, or when the user wants to continue from the work of an earlier session.
-argument-hint: "[write | resume [number | id]]"
+argument-hint: "[write | release | resume [number | id]]"
 ---
 
 # Rotate: hand this session over to a fresh one
@@ -10,9 +10,9 @@ A long session gets worse before it compacts. A handover is a short file that te
 fresh session everything it needs to continue. The user then types `/clear`, and the
 plugin gives the handover to the new session.
 
-The first word of the arguments picks the action: `write` (also with no arguments) or
-`resume`. For any other first word the plugin puts its usage line in your context: show
-that line to the user and do nothing else.
+The first word of the arguments picks the action: `write` (also with no arguments),
+`release` or `resume`. For any other first word the plugin puts its usage line in your
+context: show that line to the user and do nothing else.
 
 ## write
 
@@ -61,6 +61,22 @@ that line to the user and do nothing else.
    even a todo update: any call other than Read, Glob or Grep, and any new prompt, marks
    the handover outdated, and an outdated handover is never given to a fresh session.
    End your turn with one short line saying the handover is saved.
+
+## release
+
+Past the force threshold the plugin holds back a stop once per crossing and asks for the
+handover; past the hard threshold it also denies every tool except Read, Glob, Grep,
+Skill, AskUserQuestion, TodoWrite and a Write or Edit of this session's handover. When
+the user types `/context-rotation:rotate release`, the plugin records the release for
+this session before you read this: from then on nothing is denied or held back, and the
+notices about the context size continue.
+
+- **A note about the release is in your context**: do nothing else for this command.
+  Tell the user in one line what the note says: released, or not recorded.
+- **No such note** (you started this skill yourself, with `release`): nothing was
+  released. Only the user can release the guard, by typing the command; invoking this
+  skill, writing a file or any other tool call changes nothing. Tell the user that, and
+  continue with the handover if the plugin asked for one.
 
 ## resume
 

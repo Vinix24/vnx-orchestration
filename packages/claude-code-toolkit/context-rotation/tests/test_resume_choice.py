@@ -113,7 +113,8 @@ def test_a_pick_that_is_neither_a_number_nor_an_id_gets_the_usage(tmp_path, proj
 def test_an_unknown_action_answers_with_the_usage_line(tmp_path, project, args):
     proc = Session(tmp_path, project, "sess-c").expand(args)
     assert proc.returncode == 0, proc.stderr
-    assert message_of(proc) == "context-rotation: usage: /context-rotation:rotate [write | resume [<number> | <id>]]"
+    assert message_of(proc) == (
+        "context-rotation: usage: /context-rotation:rotate [write | release | resume [<number> | <id>]]")
 
 
 # --- the order of the list -------------------------------------------------------------

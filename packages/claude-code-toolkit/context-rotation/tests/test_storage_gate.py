@@ -19,7 +19,8 @@ from pathlib import Path
 
 import pytest
 
-from conftest import PKG, VALID_HANDOVER, Session, context_of, event, rotation, settings_file, start
+from conftest import (PKG, VALID_HANDOVER, Session, context_of, event, gate_lines, refused_once, rotation,
+                      settings_file, snapshot, start)
 
 sys.path.insert(0, str(PKG / "hooks"))
 
@@ -31,21 +32,6 @@ SECRET = "the handover of another project"
 OLD_COPIES = ["2026010%dT120000000000Z-sess-%d.md" % (day, day) for day in range(1, 4)]
 
 
-def snapshot(root):
-    """Every entry below `root` with its bytes (None for a directory or a symlink), so a change shows."""
-    found = {}
-    for directory, dirs, files in os.walk(str(root)):
-        for name in dirs + files:
-            path = os.path.join(directory, name)
-            relative = os.path.relpath(path, str(root))
-            if os.path.islink(path) or os.path.isdir(path):
-                found[relative] = None
-            else:
-                with open(path, "rb") as handle:
-                    found[relative] = handle.read()
-    return found
-
-
 def saved(tmp_path, project, session_id="sess-a"):
     """A session of this `claude` process with a current handover in `project`."""
     origin = Session(tmp_path, project, session_id)
@@ -53,17 +39,6 @@ def saved(tmp_path, project, session_id="sess-a"):
     origin.finish_turn()
     assert origin.marker("ready").exists()
     return origin
-
-
-def gate_lines(proc):
-    return [line for line in proc.stderr.splitlines() if line.startswith("context-rotation:")]
-
-
-def refused_once(proc, place):
-    assert proc.returncode == 0, proc.stderr
-    lines = gate_lines(proc)
-    assert len(lines) == 1, proc.stderr
-    assert "%s is a symlink" % place in lines[0]
 
 
 # --- .claude/rotation is a symlink to another project's -------------------------

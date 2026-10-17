@@ -6,6 +6,9 @@ Everything lives under <project>/.claude/rotation/:
   .lock                         one lock for every marker change and journal line in the project
   .errors.lock                  the lock of errors.log
   state/<session>.json          the guard's per-session counters and the resume list it showed
+  state/<session>.enforcement.json
+                                the force and hard bands of a session (enforcement_state)
+  enforcement.jsonl             one line per change of an enforcement state (enforcement_state)
   handover-<session>.md         the handover a session writes
   ready-<session>.json          the handover is valid and covers all work so far
   outdated-<session>.json       work happened after the handover; never injected automatically
@@ -346,7 +349,7 @@ def _atomic_write(project_dir: str, target: str, data: bytes, prefix: str) -> No
         _replace_in(directory, name, data, prefix)
 
 
-def _append_lines(directory: int, name: str, data: bytes, prefix: str) -> None:
+def append_lines(directory: int, name: str, data: bytes, prefix: str) -> None:
     """Append whole lines to a log in the directory `directory` holds.
 
     One write with O_APPEND, so no line of another writer is lost or torn. Something
@@ -362,7 +365,7 @@ def _append_lines(directory: int, name: str, data: bytes, prefix: str) -> None:
         _replace_in(directory, name, data, prefix)
 
 
-def _keep_last_lines(directory: int, name: str, keep: int, prefix: str) -> None:
+def keep_last_lines(directory: int, name: str, keep: int, prefix: str) -> None:
     """Cut a log down to its last `keep` lines. Call while holding the lock its appenders hold."""
     raw = regular_file.read_tail(name, directory)
     found = _lstat_in(directory, name)
@@ -561,8 +564,8 @@ def log_error(project_dir: str, line: str) -> bool:
     data = (line.replace("\n", " ") + "\n").encode("utf-8")
     try:
         with _locked(project_dir, ".errors.lock", LOCK_TIMEOUT_SECONDS), storage(project_dir) as directory:
-            _append_lines(directory, ERRORS_LOG, data, ".errors-")
-            _keep_last_lines(directory, ERRORS_LOG, ERROR_LOG_MAX_LINES, ".errors-")
+            append_lines(directory, ERRORS_LOG, data, ".errors-")
+            keep_last_lines(directory, ERRORS_LOG, ERROR_LOG_MAX_LINES, ".errors-")
     except Exception:
         # The log is best effort; a failure here must not mask the original error.
         return False
@@ -835,7 +838,7 @@ def append_journal(project_dir: str, record: Dict[str, Any]) -> None:
         raise ValueError("journal line refused: %s" % problem)
     line = (json.dumps(record, sort_keys=True) + "\n").encode("utf-8")
     with project_lock(project_dir), storage(project_dir) as directory:
-        _append_lines(directory, JOURNAL, line, ".journal-")
+        append_lines(directory, JOURNAL, line, ".journal-")
 
 
 def journal(project_dir: str, event: str, **fields: Any) -> None:
@@ -880,7 +883,7 @@ def trim_journal(project_dir: str, archive_keep: int) -> None:
         return
     try:
         with project_lock(project_dir), storage(project_dir) as directory:
-            _keep_last_lines(directory, JOURNAL, JOURNAL_LINES_PER_ARCHIVE_COPY * archive_keep, ".journal-")
+            keep_last_lines(directory, JOURNAL, JOURNAL_LINES_PER_ARCHIVE_COPY * archive_keep, ".journal-")
     except (OSError, LockTimeout) as error:
         log_failure(project_dir, "journal trim", error)
 
