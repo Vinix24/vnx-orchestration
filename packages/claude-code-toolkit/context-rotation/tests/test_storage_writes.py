@@ -17,6 +17,7 @@ import io
 import json
 import os
 import sys
+import tempfile
 
 import pytest
 
@@ -317,15 +318,22 @@ def test_through_a_symlinked_claude_directory_both_paths_are_kept_out(tmp_path, 
 
 
 def case_insensitive(directory):
-    return (directory.parent / directory.name.upper()).exists()
+    """Whether `directory`'s file system folds case, probed with a fresh name that nothing else creates."""
+    probe = tempfile.mkdtemp(prefix="casefold-", dir=directory)
+    try:
+        head, name = os.path.split(probe)
+        return os.path.exists(os.path.join(head, name.upper()))
+    finally:
+        os.rmdir(probe)
 
 
 def test_a_name_in_another_case_is_kept_out_where_it_is_the_same_directory(s):
     stored = plant(s, "force")
     at(s, FORCE)
     other_case = s.project / ".claude" / "ROTATION" / "state" / state_file(s).name
+    folds_case = case_insensitive(rotation(s.project))  # decided before the attempt can create ROTATION
     proc = attempt(s, "Write", other_case)
-    if case_insensitive(rotation(s.project)):
+    if folds_case:
         keeps_out(proc, s)
         assert state_file(s).read_bytes() == stored
     else:  # another directory, which the plugin never reads
