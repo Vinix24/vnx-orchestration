@@ -35,6 +35,8 @@ _GENERATION = re.compile(r"[0-9a-f]{%d}" % GENERATION_HEX)
 MAX_SESSION_ID = 120
 ARCHIVE_NAME = re.compile(r"[0-9]{8}T[0-9]{12}Z-[A-Za-z0-9_-]+\.md")
 HANDOVER_NAME = re.compile(r"handover-[A-Za-z0-9_-]+\.md")
+# A tmux pane id as tmux gives it in TMUX_PANE: "%" and digits, nothing else.
+_PANE = re.compile(r"%[0-9]{1,9}")
 
 # --- the outdated reasons: a closed list --------------------------------------
 
@@ -48,6 +50,34 @@ OUTDATED_REASONS = (
     PROMPT_AFTER, TOOL_CALL_AFTER, REWRITTEN_INVALID, FILE_GONE, FILE_CHANGED, OVER_AGE,
 ) + transcript_work.STALE_REASONS
 REASON_NOT_RECORDED = "reason not recorded"
+
+# --- why an automatic /clear stopped: a closed list (tmux_clear) ----------------------
+
+CLEAR_ABORTS: Dict[str, str] = {
+    "job": "its job file could not be read",
+    "storage": "the project's .claude/rotation is a symlink or not a directory",
+    "lock": "the lock of the pane could not be read or taken",
+    "settle": "the session did not become idle",
+    "not_current": "the handover no longer covers the latest work",
+    "replaced": "a newer handover replaced it",
+    "marker_unreadable": "its marker or the handover could not be read",
+    "transcript_unreadable": "the transcript could not be read",
+    "pane_unreadable": "the pane could not be read",
+    "pane_gone": "the pane is gone",
+    "pane_mode": "the pane is in copy or view mode",
+    "pane_synchronized": "synchronize-panes is on in its window",
+    "no_input_box": "no input box is on the screen, so a dialog or a menu may be open",
+    "busy": "the session is busy",
+    "input": "there is text in the input line",
+    "process": "the claude process of the session is not running in that pane",
+    "process_unreadable": "the process table could not be read",
+    "typed": "the typed text did not read back as typed",
+    "send": "tmux could not send the keys",
+    "journal": "its line in injections.jsonl could not be written",
+    "no_ack": "the fresh session did not take the handover in time",
+    "ack_unreadable": "injections.jsonl could not be read",
+    "error": "an unexpected error stopped it (errors.log says which)",
+}
 
 
 # --- single values ----------------------------------------------------------------
@@ -82,6 +112,14 @@ def is_count(value: Any) -> bool:
 
 def is_reason(value: Any) -> bool:
     return isinstance(value, str) and value in OUTDATED_REASONS
+
+
+def is_pane_id(value: Any) -> bool:
+    return isinstance(value, str) and _PANE.fullmatch(value) is not None
+
+
+def is_clear_abort(value: Any) -> bool:
+    return isinstance(value, str) and value in CLEAR_ABORTS
 
 
 def is_plain_path(value: Any) -> bool:
@@ -130,6 +168,11 @@ def marker_value_problem(kind: str, marker: Dict[str, Any]) -> Optional[str]:
 
 # One line per transition of a handover, written before the transition itself.
 # A "kept" line names a file the cleanup found at the handover path that no marker described: no generation.
+# The clear_* lines are the steps of an automatic /clear in a tmux pane (tmux_clear): the pane's lock
+# taken (clear_started) or a stale one broken (clear_lock_broken), Enter after /clear (clear_entered),
+# the successor's injection seen (clear_acknowledged), Enter after the line that continues
+# (clear_continued), a stop (clear_aborted) and its message repeated to the user (clear_told).
+_CLEAR = ("origin_session_id", "generation", "pane")
 JOURNAL_EVENTS: Dict[str, Tuple[str, ...]] = {
     "ready": ("origin_session_id", "generation", "sha256"),
     "outdated": ("origin_session_id", "generation", "sha256", "reason"),
@@ -137,6 +180,13 @@ JOURNAL_EVENTS: Dict[str, Tuple[str, ...]] = {
     "injected": ("via", "origin_session_id", "generation", "session_id", "handover", "archive", "sha256", "chars",
                  "mode"),
     "kept": ("origin_session_id", "sha256", "archive"),
+    "clear_lock_broken": ("pane",),
+    "clear_started": _CLEAR,
+    "clear_entered": _CLEAR,
+    "clear_acknowledged": _CLEAR + ("session_id",),
+    "clear_continued": _CLEAR + ("session_id",),
+    "clear_aborted": _CLEAR + ("abort_reason",),
+    "clear_told": _CLEAR,
 }
 INJECTION_VIAS = ("clear", "resume")
 INJECTION_MODES = ("inline", "pointer")
@@ -153,6 +203,8 @@ _RECORD_CHECKS: Dict[str, Callable[[Any], bool]] = {
     "via": lambda value: value in INJECTION_VIAS,
     "chars": is_count,
     "mode": lambda value: value in INJECTION_MODES,
+    "pane": is_pane_id,
+    "abort_reason": is_clear_abort,
 }
 
 

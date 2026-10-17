@@ -26,8 +26,10 @@ DEFAULTS = {
     "handover_max_age_minutes": 60,
     "hard_max_denials": 3,
     "archive_keep": 20,
+    # A0 rule 6 (pane_screen): a spinner line above the input box, and the prompt of the input
+    # line, `❯` and a no-break space; a prompt shown in the history above has a plain space.
     "busy_pattern": r"^\S+ \S+… \(\d+s",
-    "prompt_pattern": "^❯ ",
+    "prompt_pattern": "^❯ ",
     "ack_timeout_seconds": 20,
     # Tool names, or fnmatch patterns of them, that the force band denies; none by default.
     "force_deny_tools": (),

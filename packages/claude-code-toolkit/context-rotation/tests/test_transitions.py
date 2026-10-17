@@ -291,7 +291,8 @@ def test_the_journal_is_kept_to_a_bound_tied_to_archive_keep(tmp_path, project):
     rotation(project).mkdir(parents=True)
     (rotation(project) / "injections.jsonl").write_text("\n".join(lines) + "\n")
     assert start(project, "sess-b", source="startup").returncode == 0
-    assert (rotation(project) / "injections.jsonl").read_text().splitlines() == lines[-20:]
+    kept = rotation_state.JOURNAL_LINES_PER_ARCHIVE_COPY * 2
+    assert (rotation(project) / "injections.jsonl").read_text().splitlines() == lines[-kept:]
 
 
 # --- errors.log under concurrent failures ----------------------------------------------
@@ -373,7 +374,7 @@ def test_a_journal_above_the_read_limit_is_trimmed_from_its_end(tmp_path, projec
     assert os.path.getsize(str(rotation(project) / "injections.jsonl")) > 1 << 20  # regular_file.MAX_READ_BYTES
     assert start(project, "sess-b", source="startup").returncode == 0
     kept = (rotation(project) / "injections.jsonl").read_text().splitlines()
-    assert len(kept) == 10 and kept[-3:] == last  # JOURNAL_LINES_PER_ARCHIVE_COPY lines for archive_keep 1
+    assert len(kept) == rotation_state.JOURNAL_LINES_PER_ARCHIVE_COPY and kept[-3:] == last  # archive_keep 1
 
 
 def test_the_cleanup_leaves_a_handover_path_that_is_no_regular_file_alone(tmp_path, project, monkeypatch, capsys):

@@ -18,12 +18,18 @@ sys.path.insert(0, str(PKG / "lib"))
 
 @pytest.fixture(autouse=True)
 def isolated_env(tmp_path, monkeypatch):
-    """No test may read the real ~/.claude or inherit plugin switches."""
+    """No test may read the real ~/.claude, inherit plugin switches, or reach a real tmux server.
+
+    Without TMUX and TMUX_PANE every hook takes the manual path; a test of the
+    automatic path sets them to a pane of its own fake tmux (test_auto_clear).
+    """
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
     monkeypatch.delenv("CLAUDE_CONTEXT_ROTATION", raising=False)
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.delenv("TMUX_PANE", raising=False)
     return home
 
 
