@@ -120,12 +120,12 @@ def test_a_generation_set_aside_while_a_newer_one_appeared_stays_in_the_archive(
     s = saved_session(tmp_path, project)
     planned, real_plan, real_check = [], rotation_state.plan_archive, rotation_state._still_claimed
 
-    def plan_then_an_edit(project_dir, origin, now=None):
+    def plan_then_an_edit(project_dir, origin, now=None, suffix=".md"):
         planned.append(origin)
         if len(planned) == 2:  # the cleanup planned the original's archive name, after it checked the file
             with open(str(s.handover), "a") as handle:
                 handle.write(MIDDLE[len(VALID_HANDOVER):])
-        return real_plan(project_dir, origin, now)
+        return real_plan(project_dir, origin, now, suffix)
 
     def checked_then_a_newer_write(*args):
         result = real_check(*args)
@@ -147,12 +147,12 @@ def test_a_handover_moved_back_to_its_path_also_keeps_its_archive_name(tmp_path,
     s = saved_session(tmp_path, project)
     planned, real_plan = [], rotation_state.plan_archive
 
-    def plan_then_an_edit(project_dir, origin, now=None):
+    def plan_then_an_edit(project_dir, origin, now=None, suffix=".md"):
         planned.append(origin)
         if len(planned) == 2:
             with open(str(s.handover), "a") as handle:
                 handle.write(MIDDLE[len(VALID_HANDOVER):])
-        return real_plan(project_dir, origin, now)
+        return real_plan(project_dir, origin, now, suffix)
 
     with monkeypatch.context() as patch:
         patch.setattr(rotation_state, "plan_archive", plan_then_an_edit)

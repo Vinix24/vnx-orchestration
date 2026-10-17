@@ -161,7 +161,8 @@ def test_a_symlinked_dot_claude_is_followed_once(tmp_path, project):
     proc = start(project, "sess-b")
     assert VALID_HANDOVER in context_of(proc)
     assert gate_lines(proc) == []
-    assert len(list((real / "rotation" / "archive").iterdir())) == 1
+    # The archive copy, and the original moved off the handover path under a name of its own.
+    assert sorted(p.suffix for p in (real / "rotation" / "archive").iterdir()) == [".md", ".original"]
 
 
 # --- no SessionStart path raises ------------------------------------------------------

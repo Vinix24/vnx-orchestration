@@ -102,8 +102,9 @@ def deliver(project_dir: str, claimed: str, marker: Dict[str, Any], data: bytes,
 
     `data` holds the claimed bytes (sha256 equal to the marker's claimed_sha256),
     and the context says whether they are the bytes the marker was checked against.
-    The original moves into the archive before the emit, and when it is the file
-    the claim read it becomes the archive copy the context and the log line name.
+    The context and the log line name the archive copy written from `data`, which
+    nothing writes to afterwards. The original moves into the archive before the
+    emit under a name of its own, and is never what they name.
     None when the archive copy or the log line could not be written (OSError,
     LockTimeout): the failure goes to rotation_state.log_failure, nothing is
     emitted, and the claimed marker stays for `resume`.
@@ -113,7 +114,7 @@ def deliver(project_dir: str, claimed: str, marker: Dict[str, Any], data: bytes,
         at(step)
         rotation_state.archive_handover(project_dir, marker["archive"], data)
         at("retire original")
-        marker = rotation_state.retire_original(project_dir, claimed, marker)
+        rotation_state.retire_original(project_dir, marker)
         archive = marker["archive"]
         context = injection_context(data.decode("utf-8", "replace"), archive, marker.get("outdated_reason"),
                                     marker["claimed_sha256"] == marker["sha256"])
@@ -161,7 +162,8 @@ def resume_pick(project_dir: str, successor: str, entry: Dict[str, Any],
     now, also when it changed after its marker was written: refusing it would leave
     the user only the file itself. The context then says that it no longer holds
     the text that was checked (deliver), and the claim records the bytes it handed
-    over (claimed_sha256).
+    over (claimed_sha256). The claim takes only the generation the entry was found
+    with: one the origin published at the same marker path since is refused.
     """
     if entry["kind"] == "archived":
         return _resume_archived(project_dir, successor, entry, emit)
@@ -174,7 +176,11 @@ def resume_pick(project_dir: str, successor: str, entry: Dict[str, Any],
     else:
         if rotation_state.read_bytes(project_dir, marker["handover"]) is None:
             return "The handover file %s is gone." % marker["handover"]
-        taken = rotation_state.claim(project_dir, entry["marker_path"], successor)
+        try:
+            taken = rotation_state.claim(project_dir, entry["marker_path"], successor,
+                                         generation=marker["generation"])
+        except rotation_state.GenerationChanged as changed:
+            return "That handover was replaced before it could be claimed: %s. %s" % (changed, RESUME_HINT)
         if taken is None:
             return "That handover was taken by another session in the meantime."
         claimed, marker, data = taken
