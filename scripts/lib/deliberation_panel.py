@@ -70,6 +70,12 @@ def default_roster() -> List[Tuple[str, str]]:
     return roster
 
 
+# Seats that may read client and personal content: Claude and codex (the content-boundary
+# allowlist in provider_constraints.yaml, registry keys anthropic and openai). A restricted
+# panel run drops every other seat of ``default_roster()``.
+KERN_ROSTER_SEATS = ("codex", "claude")
+
+
 def _seat_model(model: str) -> str:
     """The model a seat is dispatched with: a registry-default marker is resolved now.
 
@@ -181,6 +187,8 @@ class DeliberationResult:
     seat_measurements: List[Dict[str, Any]] = field(default_factory=list)
     unmeasured_seats: List[Dict[str, str]] = field(default_factory=list)  # {provider, lens, dispatch_id, reason}
     ledger_available: bool = True  # False => legacy frontmatter fallback (UNVERIFIED)
+    # Content-boundary note (F2 part 2): which seats ran and why, rendered in the report header.
+    boundary_note: str = ""
 
     @property
     def ledger_divergences(self) -> List[Dict[str, Any]]:
@@ -223,6 +231,8 @@ class DeliberationResult:
             f"\n**Question:** {self.question}\n",
             f"**Coverage:** {self.coverage}\n",
         ]
+        if self.boundary_note:
+            lines.append(f"**Content boundary:** {self.boundary_note}\n")
         if not self.ledger_available:
             lines.append(
                 "**Ledger:** receipt ledger UNAVAILABLE — coverage measured against the "
