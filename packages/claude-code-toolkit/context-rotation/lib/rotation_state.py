@@ -22,7 +22,8 @@ Everything lives under <project>/.claude/rotation/:
                                 the emit; no claim, delivery or list reads it; trimmed to the
                                 newest archive_keep
   injections.jsonl              one line per transition, written before the transition: ready,
-                                outdated, claimed, injected, kept; kept to
+                                outdated, claimed, injected, kept; and `delivered`, written
+                                after the emit it records; kept to
                                 JOURNAL_LINES_PER_ARCHIVE_COPY lines per archive_keep
   errors.log                    the last failures of the hooks, and rejected markers
 
@@ -96,8 +97,9 @@ ORIGINAL_SUFFIX = ".original"
 ORIGINAL_NAME = re.compile(r"[0-9]{8}T[0-9]{12}Z-[A-Za-z0-9_-]+\.original")
 JOURNAL = "injections.jsonl"
 ERRORS_LOG = "errors.log"
-# A handover goes through ready, maybe outdated and ready again, claimed and injected.
-JOURNAL_LINES_PER_ARCHIVE_COPY = 10
+# A handover goes through ready, maybe outdated and ready again, claimed, injected and delivered; in
+# tmux also the steps of its automatic /clear (started, entered, acknowledged, continued or aborted, told).
+JOURNAL_LINES_PER_ARCHIVE_COPY = 16
 is_safe_session_id = state_fields.is_safe_session_id
 
 
@@ -255,6 +257,26 @@ def read_bytes(project_dir: str, path: Any) -> Optional[bytes]:
             return regular_file.read_regular(name, directory)
     except OSError:
         return None
+
+
+def read_checked(project_dir: str, path: Any) -> Optional[bytes]:
+    """read_bytes for a decision a failed read must not make (the automatic /clear).
+
+    None only when no regular file of at most regular_file.MAX_READ_BYTES is there.
+    OSError when the read itself fails, and StorageRefused for a path stored anywhere
+    else or storage that is refused: such a read says nothing about the file.
+    """
+    parts, name = _place(project_dir, path)
+    try:
+        with storage(project_dir, *parts) as directory:
+            found = os.lstat(name, dir_fd=directory)
+            if not stat.S_ISREG(found.st_mode) or found.st_size > regular_file.MAX_READ_BYTES:
+                return None
+            with regular_file.open_regular(name, directory) as handle:
+                data = handle.read(regular_file.MAX_READ_BYTES + 1)
+    except FileNotFoundError:
+        return None
+    return data if len(data) <= regular_file.MAX_READ_BYTES else None
 
 
 def read_stamped(project_dir: str, path: Any) -> Optional[Tuple[bytes, Dict[str, int]]]:
@@ -619,6 +641,36 @@ def process_start(pid: int) -> Optional[str]:
     return started if started is not None else _ps_start(pid)
 
 
+def process_start_checked(pid: int) -> Optional[str]:
+    """process_start for a decision a failed read must not make: None only when the process is gone.
+
+    The same source and form as process_start: /proc where the system has it, else
+    ps. OSError when neither can tell, so a failed read never reads as a process that
+    is gone, or as one that runs.
+    """
+    if os.path.exists("/proc/self/stat"):
+        try:
+            with open("/proc/%d/stat" % pid, "rb") as handle:
+                data = handle.read().decode("ascii", "replace")
+        except FileNotFoundError:
+            return None
+        fields = data.rsplit(")", 1)[-1].split()
+        if len(fields) < 20:
+            raise OSError(errno.EINVAL, "no start time in /proc/%d/stat" % pid)
+        return "proc:" + fields[19]
+    try:
+        done = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True,
+                              env=dict(os.environ, LC_ALL="C"), timeout=PS_TIMEOUT_SECONDS)
+    except subprocess.SubprocessError as error:
+        raise OSError(errno.ETIMEDOUT, "ps did not answer: %s" % error)
+    text = " ".join(done.stdout.split())
+    if done.returncode == 0 and text:
+        return "ps:" + text
+    if done.returncode == 1 and not text:
+        return None
+    raise OSError(errno.EIO, "ps exited with status %d" % done.returncode)
+
+
 def process_identity(env: Dict[str, str]) -> Optional[Dict[str, Any]]:
     """The session's `claude` process: CLAUDE_PID plus its start time.
 
@@ -759,6 +811,11 @@ def read_marker(project_dir: str, path: str) -> Tuple[Optional[Dict[str, Any]], 
     marker, why = _marker_json(project_dir, path)
     if marker is None:
         return None, why
+    return _usable_marker(project_dir, path, marker)
+
+
+def _usable_marker(project_dir: str, path: str, marker: Any) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """(marker with the plugin's own paths, None) when it passes marker_problem, else (None, why)."""
     problem = marker_problem(project_dir, path, marker)
     if problem:
         return None, problem
@@ -766,6 +823,37 @@ def read_marker(project_dir: str, path: str) -> Tuple[Optional[Dict[str, Any]], 
     if "archive" in marker:
         marker["archive"] = os.path.join(archive_dir(project_dir), os.path.basename(marker["archive"]))
     return marker, None
+
+
+def read_marker_checked(project_dir: str, path: str) -> Optional[Dict[str, Any]]:
+    """read_marker for a decision a failed read must not make: OSError when the read fails.
+
+    None when no usable marker is there (absent, not JSON, or refused by
+    marker_problem); a rejected one is left for the hooks to report.
+    """
+    raw = read_checked(project_dir, path)
+    if raw is None:
+        return None
+    try:
+        marker = json.loads(raw.decode("utf-8"))
+    except ValueError:
+        return None
+    return _usable_marker(project_dir, path, marker)[0]
+
+
+def journal_checked(project_dir: str) -> bytes:
+    """The complete lines at the end of injections.jsonl; b"" while there is none.
+
+    For a decision a failed read must not make: OSError when it cannot be read, also
+    when something other than a regular file is at its name.
+    """
+    try:
+        with storage(project_dir) as directory:
+            os.lstat(JOURNAL, dir_fd=directory)  # FileNotFoundError while there is none
+            with regular_file.open_regular(JOURNAL, directory) as handle:
+                return regular_file.tail_of(handle)
+    except FileNotFoundError:
+        return b""
 
 
 def stderr_line(line: str) -> None:
@@ -859,6 +947,23 @@ def journal(project_dir: str, event: str, **fields: Any) -> None:
 def log_injection(project_dir: str, record: Dict[str, Any]) -> None:
     """The line of an injection (event "injected"), written before the handover is emitted."""
     append_journal(project_dir, record)
+
+
+def log_delivery(project_dir: str, via: str, origin: str, generation: str, successor: str) -> None:
+    """The line that says the emit of a claimed handover returned (event "delivered"). Never raises.
+
+    Written after the emit, so it is the one evidence that the handover went out:
+    "injected" comes before the emit, which can still fail (BrokenPipeError). The
+    injection already happened, and a failing hook would make Claude Code drop the
+    output that carries it, so a failure to write it (OSError, LockTimeout,
+    ValueError) goes to log_failure; whatever waits for this line then acts as if
+    the delivery did not finish.
+    """
+    try:
+        journal(project_dir, "delivered", via=via, origin_session_id=origin, generation=generation,
+                session_id=successor)
+    except (OSError, LockTimeout, ValueError) as error:
+        log_failure(project_dir, "log the delivery of generation %s" % generation, error)
 
 
 def read_injections(project_dir: str) -> List[Dict[str, Any]]:

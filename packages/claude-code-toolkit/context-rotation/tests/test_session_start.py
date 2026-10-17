@@ -435,6 +435,52 @@ def test_a_failed_cleanup_after_the_emit_keeps_the_injection(tmp_path, project, 
     assert "cleanup of" in (rotation(project) / "errors.log").read_text()
 
 
+def journal_events(project):
+    path = rotation(project) / "injections.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+def test_a_finished_delivery_has_its_line_after_the_injection(tmp_path, project):
+    saved_session(tmp_path, project)
+    assert VALID_HANDOVER in context_of(start(project, "sess-b"))
+    lines = journal_events(project)
+    assert [line["event"] for line in lines][-2:] == ["injected", "delivered"]
+    injected, delivered = lines[-2:]
+    assert (delivered["via"], delivered["origin_session_id"], delivered["session_id"]) == ("clear", "sess-a", "sess-b")
+    assert delivered["generation"] == injected["generation"]
+    assert set(delivered) == {"event", "at", "via", "origin_session_id", "generation", "session_id"}
+
+
+def test_an_emit_that_fails_leaves_no_delivery_line_and_the_claim(tmp_path, project, monkeypatch):
+    saved_session(tmp_path, project)
+
+    def broken(document):
+        raise BrokenPipeError(32, "Broken pipe")
+
+    monkeypatch.setattr(hook_runtime, "emit", broken)
+    with pytest.raises(BrokenPipeError):
+        run_in_process(project, "sess-b")
+    assert [line["event"] for line in journal_events(project)][-1] == "injected"
+    assert list(rotation(project).glob("claimed-*.json"))
+
+
+def test_a_delivery_line_that_cannot_be_written_keeps_the_injection(tmp_path, project, monkeypatch, capsys):
+    saved_session(tmp_path, project)
+    real = rotation_state.journal
+
+    def journal(project_dir, event_name, **fields):
+        if event_name == "delivered":
+            raise PermissionError(13, "Permission denied")
+        return real(project_dir, event_name, **fields)
+
+    monkeypatch.setattr(rotation_state, "journal", journal)
+    run_in_process(project, "sess-b")
+    out = json.loads(capsys.readouterr().out)
+    assert VALID_HANDOVER in out["hookSpecificOutput"]["additionalContext"]
+    assert "delivered" not in [line["event"] for line in journal_events(project)]
+    assert "log the delivery" in (rotation(project) / "errors.log").read_text()
+
+
 # --- the archive ---------------------------------------------------------------
 
 def test_the_archive_is_trimmed_at_every_start(tmp_path, project):

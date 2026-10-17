@@ -4,6 +4,8 @@ from __future__ import annotations
 import itertools
 import json
 import os
+import re
+import shlex
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -15,15 +17,24 @@ PKG = Path(__file__).resolve().parents[1]
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "a0"
 sys.path.insert(0, str(PKG / "lib"))
 
+import auto_clear  # the plugin's lib, on the path just above
+import tmux_clear
+
 
 @pytest.fixture(autouse=True)
 def isolated_env(tmp_path, monkeypatch):
-    """No test may read the real ~/.claude or inherit plugin switches."""
+    """No test may read the real ~/.claude, inherit plugin switches, or reach a real tmux server.
+
+    Without TMUX and TMUX_PANE every hook takes the manual path; a test of the
+    automatic path sets them to a pane of its own fake tmux (test_auto_clear).
+    """
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
     monkeypatch.delenv("CLAUDE_CONTEXT_ROTATION", raising=False)
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.delenv("TMUX_PANE", raising=False)
     return home
 
 
@@ -332,3 +343,348 @@ def refused_once(proc, place):
     lines = gate_lines(proc)
     assert len(lines) == 1, proc.stderr
     assert "%s is a symlink" % place in lines[0]
+
+
+# --- C: a tmux that plays one pane from the A0 captures ---------------------------
+
+PANES = FIXTURES / "panes"
+PROMPT = "❯ "  # the input line's prompt (A0 rule 6)
+IDLE = "04-idle-empty-auto.esc.txt"
+AFTER_CLEAR = "07-after-clear-auto.esc.txt"
+
+
+def pane_text(name):
+    return (PANES / name).read_text(encoding="utf-8")
+
+
+def with_input(screen, typed):
+    """The screen with `typed` in its input line: right after the one prompt with a no-break space."""
+    assert screen.count(PROMPT) <= 1
+    return screen.replace(PROMPT, PROMPT + typed, 1)
+
+
+FORMAT = re.compile(r"#\{([a-z_]+)\}")
+
+
+def commands_of(args):
+    """The commands of one tmux call: its arguments split at each ";" (a command sequence)."""
+    commands, current = [], []
+    for arg in args:
+        if arg == ";":
+            commands.append(current)
+            current = []
+        else:
+            current.append(arg)
+    return commands + [current]
+
+
+def input_row(screen):
+    """The row of the input line: the one line that holds the prompt with its no-break space (with_input)."""
+    return next((number for number, line in enumerate(screen.split("\n")) if PROMPT in line), 0)
+
+
+class FakeTmux:
+    """Stands in for auto_clear.run_tmux: records every call and plays one pane.
+
+    The pane shows an A0 capture, with what was typed into its input line. The cursor
+    sits `back` characters before the end of that text: a literal goes in there and a
+    BSpace removes the character before it, as in Claude Code's input line. Enter
+    submits the line: `submitted` keeps it, `on_enter` callbacks get it, and after
+    /clear the pane shows the capture taken right after a /clear. A call with a
+    command sequence (`a ; b`) runs its commands in order and stops at the first that
+    fails, as tmux does; `on_capture` runs once before a call that captures, so what
+    it changes shows in every command of that call.
+    """
+
+    def __init__(self, pane="%7", pane_pid=None, screen=IDLE):
+        self.pane = pane
+        self.pane_pid = os.getpid() if pane_pid is None else pane_pid
+        self.base = pane_text(screen)
+        self.typed = ""
+        self.back = 0
+        self.echo = True
+        self.info = None
+        self.fields = {}
+        self.calls = []
+        self.fail = {}
+        self.submitted = []
+        self.on_enter = []
+        self.on_capture = None
+
+    def __call__(self, args):
+        args = list(args)
+        self.calls.append(args)
+        commands = commands_of(args)
+        if self.on_capture and any(command[0] == "capture-pane" for command in commands):
+            self.on_capture(self)
+        status, out = 0, ""
+        for command in commands:
+            status, text = self.one(command)
+            out += text
+            if status != 0:
+                break
+        return status, out
+
+    def one(self, args):
+        failure = self.fail.get("pane-info" if args[0] == "display-message" and "-p" in args else args[0])
+        if isinstance(failure, BaseException):
+            raise failure
+        if isinstance(failure, int):
+            return failure, ""
+        if args[0] == "capture-pane":
+            return 0, self.screen()
+        if args[0] == "display-message" and "-p" in args:
+            return 0, self.expand(args[-1]) + "\n"
+        if args[0] == "send-keys":
+            self.keys(args[3:])
+        return 0, ""
+
+    def screen(self):
+        return with_input(self.base, self.typed)
+
+    def expand(self, form):
+        """display-message -p: the format with each #{name} filled in; `info` replaces the whole line."""
+        if self.info is not None:
+            return self.info
+        values = {"pane_id": self.pane, "pane_pid": str(self.pane_pid), "pane_dead": "0", "pane_in_mode": "0",
+                  "pane_synchronized": "0", "cursor_x": str(len(PROMPT) + len(self.typed) - self.back),
+                  "cursor_y": str(input_row(self.screen()))}
+        values.update(self.fields)
+        return FORMAT.sub(lambda match: values[match.group(1)], form)
+
+    def keys(self, keys):
+        at = len(self.typed) - self.back
+        if keys[:1] == ["-l"]:
+            if self.echo:
+                self.typed = self.typed[:at] + keys[1] + self.typed[at:]
+            return
+        for key in keys:
+            at = len(self.typed) - self.back
+            if key == "BSpace" and at > 0:
+                self.typed = self.typed[:at - 1] + self.typed[at:]
+            elif key == "Enter":
+                submitted, self.typed, self.back = self.typed, "", 0
+                self.submitted.append(submitted)
+                if submitted == "/clear":
+                    self.base = pane_text(AFTER_CLEAR)
+                for callback in self.on_enter:
+                    callback(submitted)
+
+    def sent(self):
+        """The keys of every send-keys call, in order."""
+        return [call[3:] for call in self.calls if call[0] == "send-keys"]
+
+    def shown(self):
+        """The lines display-message showed to the user."""
+        return [call[-1] for call in self.calls if call[0] == "display-message" and "-p" not in call]
+
+
+FAKE_TMUX_PY = r'''
+import json, os, re, subprocess, sys
+
+state = os.environ["FAKE_TMUX_DIR"]
+PROMPT = "❯ "
+FIELDS = ("pane_id", "pane_pid", "pane_dead", "pane_in_mode", "pane_synchronized")
+
+
+def path(name):
+    return os.path.join(state, name)
+
+
+def read(name, default=""):
+    try:
+        with open(path(name), encoding="utf-8") as handle:
+            return handle.read()
+    except FileNotFoundError:
+        return default
+
+
+def write(name, text):
+    with open(path(name), "w", encoding="utf-8") as handle:
+        handle.write(text)
+
+
+def screen():
+    return read("screen").replace(PROMPT, PROMPT + read("typed"), 1)
+
+
+def expand(form):
+    """The format with each #{name} filled in: the pane's fields from `info`, the cursor after the typed text."""
+    values = dict(zip(FIELDS, read("info").split()))
+    lines = screen().split("\n")
+    values["cursor_y"] = str(next((n for n, line in enumerate(lines) if PROMPT in line), 0))
+    values["cursor_x"] = str(len(PROMPT) + len(read("typed")))
+    return re.sub(r"#\{([a-z_]+)\}", lambda match: values.get(match.group(1), ""), form)
+
+
+def send(keys):
+    typed = read("typed")
+    if keys[:1] == ["-l"]:
+        typed += keys[1]
+    else:
+        for key in keys:
+            if key == "BSpace":
+                typed = typed[:-1]
+            elif key == "Enter":
+                if typed == "/clear" and read("after-clear"):
+                    write("screen", read("after-clear"))
+                    spec = read("on-clear")
+                    if spec:
+                        spec = json.loads(spec)
+                        subprocess.run(spec["argv"], input=spec["input"], env=dict(os.environ, **spec["env"]),
+                                       capture_output=True, text=True, timeout=60)
+                typed = ""
+    write("typed", typed)
+
+
+def run(args):
+    """One command of the call: its exit status (a status-<command> file makes it fail)."""
+    name = args[0] if args else ""
+    status = read("status-" + name).strip()
+    if status:
+        return int(status)
+    if name == "capture-pane":
+        sys.stdout.write(screen())
+    elif name == "display-message" and "-p" in args:
+        sys.stdout.write(expand(args[-1]) + "\n")
+    elif name == "send-keys":
+        send(args[3:])
+    return 0
+
+
+args = sys.argv[1:]
+with open(path("calls.jsonl"), "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(args) + "\n")
+if args[:1] == ["-L"]:  # a named server (the live smoke's): this fake plays one pane for every server
+    args = args[2:]
+commands, current = [], []
+for arg in args:
+    if arg == ";":
+        commands.append(current)
+        current = []
+    else:
+        current.append(arg)
+for command in commands + [current]:
+    status = run(command)
+    if status:
+        sys.exit(status)
+'''
+
+
+class TmuxBinary:
+    """A fake `tmux` executable on PATH for hooks and jobs that run as processes; its state is files in `dir`."""
+
+    def __init__(self, root, pane="%7"):
+        self.dir = root / "fake-tmux"
+        self.bin = root / "fake-bin"
+        self.dir.mkdir()
+        self.bin.mkdir()
+        self.pane = pane
+        (self.dir / "fake_tmux.py").write_text(FAKE_TMUX_PY, encoding="utf-8")
+        executable = self.bin / "tmux"
+        executable.write_text('#!/bin/sh\nexec "%s" "%s" "$@"\n' % (sys.executable, self.dir / "fake_tmux.py"),
+                              encoding="utf-8")
+        executable.chmod(0o755)
+        self.set("screen", pane_text(IDLE))
+        self.set("after-clear", pane_text(AFTER_CLEAR))
+        self.set("info", "%s %d 0 0 0" % (pane, os.getpid()))
+
+    def set(self, name, text):
+        (self.dir / name).write_text(text, encoding="utf-8")
+
+    def calls(self, name=None):
+        path = self.dir / "calls.jsonl"
+        found = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
+        return [call for call in found if name is None or call[0] == name]
+
+    def env(self):
+        return {"FAKE_TMUX_DIR": str(self.dir), "PATH": str(self.bin) + os.pathsep + os.environ.get("PATH", ""),
+                "TMUX": str(self.dir / "no-server,1,0"), "TMUX_PANE": self.pane}
+
+
+@pytest.fixture
+def tmux_bin(tmp_path, monkeypatch):
+    """Inside a fake tmux: every hook of the test runs in pane %7 of a server that does not exist."""
+    fake = TmuxBinary(tmp_path)
+    for key, value in fake.env().items():
+        monkeypatch.setenv(key, value)
+    return fake
+
+
+# What the job reads in each A0 capture: None where it may type, else why not (state_fields.CLEAR_ABORTS).
+# The job reads `capture-pane -e` (.esc.txt); without -e a placeholder or a suggestion looks typed, so a
+# plain capture could only ever make it type less.
+PANE_EXPECTED = {
+    "01-idle-placeholder-auto.esc.txt": None,
+    "01-idle-placeholder-auto.txt": "input",
+    "02-idle-typed-text-auto.txt": "input",
+    "03-busy-auto.esc.txt": "busy",
+    "03-busy-auto.txt": "busy",
+    "04-idle-empty-auto.esc.txt": None,
+    "04-idle-empty-auto.txt": None,
+    "05-idle-suggestion-auto.esc.txt": None,
+    "05-idle-suggestion-auto.txt": "input",
+    "06-idle-typed-text-auto.esc.txt": "input",
+    "06-idle-typed-text-auto.txt": "input",
+    "07-after-clear-auto.esc.txt": None,
+    "07-after-clear-auto.txt": None,
+    "08-idle-empty-mode2.esc.txt": None,
+    "08-idle-empty-mode2.txt": None,
+    "09-idle-typed-mode2.esc.txt": "input",
+    "09-idle-typed-mode2.txt": "input",
+    "10-busy-mode2.esc.txt": "busy",
+    "10-busy-mode2.txt": "busy",
+    "11-permission-dialog-mode2.esc.txt": "no_input_box",
+    "11-permission-dialog-mode2.txt": "no_input_box",
+}
+
+
+def journal_lines(project):
+    path = rotation(project) / "injections.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+def clear_events(project):
+    return [line["event"] for line in journal_lines(project) if line["event"].startswith("clear_")]
+
+
+class Clock:
+    """monotonic and sleep for the job: a sleep moves the time on, nothing waits."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    found = Clock()
+    monkeypatch.setattr(tmux_clear, "monotonic", found.monotonic)
+    monkeypatch.setattr(tmux_clear, "sleep", found.sleep)
+    return found
+
+
+@pytest.fixture
+def fake(monkeypatch, tmux_bin):
+    """The tmux the job talks to in-process; the hooks of the test run in pane %7 of the fake binary (tmux_bin)."""
+    recorder = FakeTmux()
+    monkeypatch.setattr(auto_clear, "run_tmux", recorder)
+    return recorder
+
+
+@pytest.fixture
+def session(tmp_path, project, tmux_bin):
+    return Session(tmp_path, project, "sess-a")
+
+
+def started(session, tmux_bin):
+    """Write the handover and end the turn: the Stop hook starts the job. The job's four arguments."""
+    session.write_handover()
+    assert message_of(session.finish_turn()) == auto_clear.STARTED
+    line = tmux_bin.calls("run-shell")[-1][-1]
+    return shlex.split(line.replace("##", "#"))[2:6]

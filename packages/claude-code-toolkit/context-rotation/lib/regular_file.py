@@ -90,11 +90,16 @@ def read_tail(path: Any, dir_fd: Optional[int] = None, limit: int = MAX_READ_BYT
         return None
     try:
         with open_regular(path, dir_fd) as handle:
-            size = handle.seek(0, os.SEEK_END)
-            handle.seek(max(0, size - limit))
-            data = handle.read(limit)
+            return tail_of(handle, limit)
     except (OSError, ValueError):
         return None
+
+
+def tail_of(handle: BinaryIO, limit: int = MAX_READ_BYTES) -> bytes:
+    """The complete lines in the last `limit` bytes of an open file (read_tail). OSError as the read gives it."""
+    size = handle.seek(0, os.SEEK_END)
+    handle.seek(max(0, size - limit))
+    data = handle.read(limit)
     if size <= limit:
         return data
     cut = data.find(b"\n")
