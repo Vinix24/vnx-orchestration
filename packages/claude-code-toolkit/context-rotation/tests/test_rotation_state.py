@@ -251,6 +251,25 @@ def test_trim_ignores_a_marker_that_is_not_json(project):
     assert [os.path.exists(p) for p in old] == [False, False, True]
 
 
+def test_trim_survives_a_marker_whose_archive_field_holds_a_nul(project):
+    named = archive_n(project, 2)
+    claim_naming(project, named[0])
+    unnamed = archive_n(project, 3, first_day=5)
+    newest = archive_n(project, 2, first_day=10)
+    rs.write_json(str(rotation(project) / "claimed-sess-x-sess-y.json"), {"archive": "x\u0000y"})
+    assert rs.trim_archive(str(project), 2) == 4
+    assert os.path.exists(named[0]) and all(os.path.exists(p) for p in newest)
+    assert not any(os.path.exists(p) for p in unnamed + named[1:])
+
+
+@pytest.mark.parametrize("field", [None, 7, ["a"], "", "relative.md", "/nowhere/20260101T000000000000Z-s.md"])
+def test_trim_survives_any_archive_field(project, field):
+    old = archive_n(project, 3)
+    rs.write_json(str(rotation(project) / "claimed-sess-x-sess-y.json"), {"archive": field})
+    assert rs.trim_archive(str(project), 1) == 2
+    assert [os.path.exists(p) for p in old] == [False, False, True]
+
+
 def test_trim_without_an_archive_creates_nothing(project):
     assert rs.trim_archive(str(project), 3) == 0
     assert not (project / ".claude").exists()

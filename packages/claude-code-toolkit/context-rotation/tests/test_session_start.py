@@ -406,12 +406,12 @@ def test_a_newer_handover_written_during_delivery_survives_the_cleanup(tmp_path,
 def test_a_failed_cleanup_after_the_emit_keeps_the_injection(tmp_path, project, monkeypatch, capsys):
     s = saved_session(tmp_path, project)
     real_unlink = os.unlink
-    refused = {str(s.handover), str(rotation(project) / "claimed-sess-a-sess-b.json")}
+    refused = {s.handover.name, "claimed-sess-a-sess-b.json"}
 
-    def refuse(path):
-        if str(path) in refused:
+    def refuse(path, dir_fd=None):
+        if os.path.basename(str(path)) in refused:
             raise PermissionError("read-only")
-        real_unlink(path)
+        real_unlink(path, dir_fd=dir_fd)
 
     with monkeypatch.context() as patch:
         patch.setattr(os, "unlink", refuse)
@@ -434,6 +434,52 @@ def test_the_archive_is_trimmed_at_every_start(tmp_path, project):
     proc = start(project, "sess-b", source="startup")
     assert proc.returncode == 0
     assert sorted(p.name for p in directory.iterdir()) == sorted(names[2:] + ["notes.txt"])
+
+
+def fill_archive(directory, count):
+    directory.mkdir(parents=True, exist_ok=True)
+    names = ["2026010%dT120000000000Z-sess-%d.md" % (day, day) for day in range(1, count + 1)]
+    for name in names:
+        (directory / name).write_text("old")
+    return names
+
+
+def other_project_archive(tmp_path):
+    other = tmp_path / "other"
+    names = fill_archive(other / ".claude" / "rotation" / "archive", 6)
+    return other, names
+
+
+def test_a_symlinked_archive_directory_is_not_trimmed(tmp_path, project, capfd):
+    settings_file(project, archive_keep=2)
+    other, names = other_project_archive(tmp_path)
+    rotation(project).mkdir(parents=True)
+    (rotation(project) / "archive").symlink_to(other / ".claude" / "rotation" / "archive")
+    proc = start(project, "sess-b", source="startup")
+    assert proc.returncode == 0
+    assert sorted(p.name for p in (other / ".claude" / "rotation" / "archive").iterdir()) == sorted(names)
+    assert proc.stderr.count("archive not trimmed") == 1
+    assert not (rotation(project) / "errors.log").exists()
+
+
+def test_a_symlinked_rotation_directory_is_not_trimmed(tmp_path, project):
+    settings_file(project, archive_keep=2)
+    other, names = other_project_archive(tmp_path)
+    (project / ".claude").mkdir(exist_ok=True)
+    rotation(project).symlink_to(other / ".claude" / "rotation")
+    proc = start(project, "sess-b", source="startup")
+    assert proc.returncode == 0
+    assert sorted(p.name for p in (other / ".claude" / "rotation" / "archive").iterdir()) == sorted(names)
+    assert proc.stderr.count("archive not trimmed") == 1
+
+
+def test_a_symlinked_dot_claude_still_trims_its_real_archive(tmp_path, project):
+    real = tmp_path / "real-claude"
+    names = fill_archive(real / "rotation" / "archive", 5)
+    (real / "context-rotation.json").write_text(json.dumps({"archive_keep": 2}))
+    (project / ".claude").symlink_to(real)
+    assert start(project, "sess-b", source="startup").returncode == 0
+    assert sorted(p.name for p in (real / "rotation" / "archive").iterdir()) == names[3:]
 
 
 def test_injections_keep_only_the_newest_archive_copies(tmp_path, project):

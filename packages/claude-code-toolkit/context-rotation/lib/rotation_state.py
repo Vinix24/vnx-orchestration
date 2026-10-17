@@ -32,6 +32,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -96,6 +97,51 @@ def archive_dir(project_dir: str) -> str:
 
 def injections_path(project_dir: str) -> str:
     return _in_rotation(project_dir, "injections.jsonl")
+
+
+class StorageRefused(OSError):
+    """`.claude/rotation` or a directory below it is a symlink or not a directory."""
+
+
+def open_storage(project_dir: str, *parts: str) -> int:
+    """A descriptor for `.claude/rotation/<parts>`, every directory below `.claude` a real one.
+
+    `.claude` itself may be a symlink: it is resolved once. Each directory below it
+    is opened with O_NOFOLLOW from its parent's descriptor, so a symlink there is
+    refused (StorageRefused) and a swap after this call cannot redirect what is done
+    through the descriptor. FileNotFoundError when a directory is absent. The caller
+    closes the descriptor.
+    """
+    descriptor = os.open(os.path.realpath(os.path.join(project_dir, ".claude")), os.O_RDONLY | os.O_DIRECTORY)
+    walked = os.path.join(project_dir, ".claude")
+    for name in ("rotation",) + parts:
+        walked = os.path.join(walked, name)
+        try:
+            below = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
+        except FileNotFoundError:
+            raise
+        except OSError as error:
+            raise StorageRefused("%s is a symlink or not a directory (%s)" % (walked, error.strerror))
+        finally:
+            os.close(descriptor)
+        descriptor = below
+    return descriptor
+
+
+def remove_in_rotation(project_dir: str, path: str) -> None:
+    """Unlink a file directly inside `.claude/rotation`, anchored to the verified directory.
+
+    StorageRefused when the directory is a symlink or `path` is somewhere else;
+    FileNotFoundError when the file is gone.
+    """
+    directory, name = os.path.split(os.path.abspath(path))
+    if os.path.realpath(directory) != os.path.realpath(rotation_dir(project_dir)):
+        raise StorageRefused("%s is not directly in %s" % (path, rotation_dir(project_dir)))
+    descriptor = open_storage(project_dir)
+    try:
+        os.unlink(name, dir_fd=descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def ensure_gitignore(project_dir: str) -> None:
@@ -461,7 +507,7 @@ def mark_ready(project_dir: str, marker: Dict[str, Any]) -> str:
         write_json(target, marker)
         stale = marker_path(project_dir, "outdated", session_id)
         if load_marker(project_dir, stale) is not None:
-            os.unlink(stale)
+            remove_in_rotation(project_dir, stale)
     return target
 
 
@@ -647,9 +693,11 @@ def read_injections(project_dir: str) -> List[Dict[str, Any]]:
 
 def _unlink_logged(project_dir: str, path: str) -> None:
     try:
-        os.unlink(path)
+        remove_in_rotation(project_dir, path)
     except FileNotFoundError:
         return
+    except StorageRefused as error:
+        _stderr("context-rotation: cleanup of %s refused: %s" % (path, error))
     except OSError as error:
         log_error(project_dir, "%s context-rotation: cleanup of %s failed: %s" % (utc_now(), path, error))
 
@@ -673,12 +721,27 @@ def finish_claim(project_dir: str, claimed: str, marker: Dict[str, Any]) -> None
         log_error(project_dir, "%s context-rotation: cleanup of %s failed: %s" % (utc_now(), claimed, error))
 
 
-def _archive_names(directory: str) -> List[str]:
+def _archive_names(directory: str, dir_fd: Optional[int] = None) -> List[str]:
     """Archive copies by name, oldest first: regular files named like one, nothing else."""
-    return sorted(
-        name for name in os.listdir(directory)
-        if ARCHIVE_NAME.fullmatch(name) and regular_file.is_regular(os.path.join(directory, name))
-    )
+    def regular(name: str) -> bool:
+        try:
+            return stat.S_ISREG(os.lstat(name if dir_fd is not None else os.path.join(directory, name),
+                                         dir_fd=dir_fd).st_mode)
+        except OSError:
+            return False
+
+    return sorted(name for name in os.listdir(directory if dir_fd is None else dir_fd)
+                  if ARCHIVE_NAME.fullmatch(name) and regular(name))
+
+
+def _names_archive_copy(field: Any, archive: str) -> bool:
+    """`field` is a plain absolute path whose real directory is `archive`; anything else names nothing."""
+    if not _plain_absolute(field):
+        return False
+    try:
+        return os.path.dirname(os.path.realpath(field)) == archive
+    except (OSError, ValueError):
+        return False
 
 
 def _named_archive_copies(project_dir: str) -> set:
@@ -686,7 +749,7 @@ def _named_archive_copies(project_dir: str) -> set:
 
     A marker that fails marker_problem stays on disk for the user, so the copy it
     names stays too. A file that cannot be read or parsed, or a field that is not a
-    direct child of archive_dir, names nothing.
+    string path directly in archive_dir, names nothing; no marker can stop the trim.
     """
     directory, archive = rotation_dir(project_dir), os.path.realpath(archive_dir(project_dir))
     named = set()
@@ -699,7 +762,7 @@ def _named_archive_copies(project_dir: str) -> set:
             continue
         marker, _ = _marker_json(os.path.join(directory, name))
         field = marker.get("archive") if isinstance(marker, dict) else None
-        if isinstance(field, str) and os.path.dirname(os.path.realpath(field)) == archive:
+        if _names_archive_copy(field, archive):
             named.add(os.path.basename(field))
     return named
 
@@ -709,18 +772,34 @@ def trim_archive(project_dir: str, keep: int) -> int:
 
     A claimed marker's copy is the recovery record after a crash, so it outlives
     the newest-`keep` window for as long as the marker is on disk. Returns how many
-    were removed.
+    were removed. Runs in the SessionStart hook and never raises. When
+    `.claude/rotation` or its archive is a symlink nothing is removed and the reason
+    goes to stderr once (errors.log lives in the directory that failed the check).
     """
-    directory = archive_dir(project_dir)
-    if not os.path.isdir(directory):
+    try:
+        descriptor = open_storage(project_dir, "archive")
+    except FileNotFoundError:
         return 0
-    with project_lock(project_dir):
-        names = _archive_names(directory)
-        named = _named_archive_copies(project_dir)
-        surplus = [n for n in (names[:-keep] if keep > 0 else names) if n not in named]
-        for name in surplus:
-            os.unlink(os.path.join(directory, name))
-    return len(surplus)
+    except StorageRefused as error:
+        _stderr("context-rotation: archive not trimmed: %s" % error)
+        return 0
+    except OSError:
+        return 0
+    try:
+        with project_lock(project_dir):
+            names = _archive_names(".", descriptor)
+            named = _named_archive_copies(project_dir)
+            surplus = [n for n in (names[:-keep] if keep > 0 else names) if n not in named]
+            removed = 0
+            for name in surplus:
+                try:
+                    os.unlink(name, dir_fd=descriptor)
+                except FileNotFoundError:
+                    continue
+                removed += 1
+    finally:
+        os.close(descriptor)
+    return removed
 
 
 # --- listing -------------------------------------------------------------
