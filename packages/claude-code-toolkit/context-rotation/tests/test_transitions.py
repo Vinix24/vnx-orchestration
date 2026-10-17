@@ -1,8 +1,9 @@
 """What happens to a handover between its write and its removal, and what is recorded.
 
-- The original handover is removed only while it is still the file the claim
-  read: Claude Code's Write tool does not take the project lock, so a write can
-  land at any moment of the cleanup (codex on #2080, OI-2126 item 1).
+- The cleanup moves the original handover off its path only while it is still
+  the file the claim read, and never deletes it: Claude Code's Write tool does
+  not take the project lock, so a write can land at any moment of the cleanup
+  (codex on #2080, OI-2126 item 1, round 7 item 3).
 - The transcript cursor of a ready-marker sits at the handover write itself, so
   work that lands while the hook runs is after it (OI-2126 item 2).
 - Every transition has its line in injections.jsonl before the marker changes
@@ -65,46 +66,47 @@ def crash(*args, **kwargs):
     raise Crash("simulated crash")
 
 
-# --- the original is removed only while it is the file the claim read ----------
+# --- the original moves off its path only while it is the file the claim read ------
 
-def test_a_handover_written_right_after_the_last_read_is_never_deleted(tmp_path, project, monkeypatch, capsys):
+def test_a_handover_written_right_after_the_cleanups_last_read_is_never_deleted(tmp_path, project, monkeypatch, capsys):
     s = saved_session(tmp_path, project)
-    emitted, written = [], []
-    real_emit, real_read = hook_runtime.emit, regular_file.read_regular
+    real_check = rotation_state._still_claimed
 
-    def emit(document):
-        real_emit(document)
-        emitted.append(document)
-
-    def read_then_the_origin_writes(path, dir_fd=None, *args, **kwargs):
-        data = real_read(path, dir_fd, *args, **kwargs)
-        if emitted and not written:
-            written.append(path)
-            s.handover.write_text(NEWER)  # the Write tool, right after the plugin's last read
-        return data
+    def checked_then_the_origin_writes(*args):
+        result = real_check(*args)
+        s.handover.write_text(NEWER)  # the Write tool, right after the plugin's last read of the moved file
+        return result
 
     with monkeypatch.context() as patch:
-        patch.setattr(hook_runtime, "emit", emit)
-        patch.setattr(regular_file, "read_regular", read_then_the_origin_writes)
+        patch.setattr(rotation_state, "_still_claimed", checked_then_the_origin_writes)
         run_clear(project)
-    assert emitted and written
     assert s.handover.exists(), "the cleanup deleted a handover written after its last read"
     assert s.handover.read_text() == NEWER
     assert archived_texts(project) == [VALID_HANDOVER]
 
 
+def after_the_archive_copy(patch, action):
+    """Run `action` right after the claim's archive copy is written, before the original is moved."""
+    real_archive = rotation_state.archive_handover
+
+    def archive_then_act(*args):
+        result = real_archive(*args)
+        action()
+        return result
+
+    patch.setattr(rotation_state, "archive_handover", archive_then_act)
+
+
 def test_a_handover_rewritten_after_the_claim_is_kept_even_with_the_same_bytes(tmp_path, project, monkeypatch, capsys):
     s = saved_session(tmp_path, project)
-    real_emit = hook_runtime.emit
 
-    def emit_while_the_origin_writes_the_same_text(document):
-        real_emit(document)
+    def the_origin_writes_the_same_text():
         s.handover.write_text(VALID_HANDOVER)
         found = os.stat(str(s.handover))
         os.utime(str(s.handover), ns=(found.st_atime_ns, found.st_mtime_ns + 1000000))
 
     with monkeypatch.context() as patch:
-        patch.setattr(hook_runtime, "emit", emit_while_the_origin_writes_the_same_text)
+        after_the_archive_copy(patch, the_origin_writes_the_same_text)
         run_clear(project)
     assert s.handover.exists(), "a handover changed after it was read was deleted"
     assert s.handover.read_text() == VALID_HANDOVER
@@ -116,28 +118,49 @@ def test_a_handover_rewritten_after_the_claim_is_kept_even_with_the_same_bytes(t
 
 def test_a_generation_set_aside_while_a_newer_one_appeared_stays_in_the_archive(tmp_path, project, monkeypatch, capsys):
     s = saved_session(tmp_path, project)
-    armed, written = [], []
-    real_emit, real_read = hook_runtime.emit, regular_file.read_regular
+    planned, real_plan, real_check = [], rotation_state.plan_archive, rotation_state._still_claimed
 
-    def emit_then_an_edit(document):
-        real_emit(document)
-        s.handover.write_text(MIDDLE)
-        armed.append(True)
+    def plan_then_an_edit(project_dir, origin, now=None):
+        planned.append(origin)
+        if len(planned) == 2:  # the cleanup planned the original's archive name, after it checked the file
+            with open(str(s.handover), "a") as handle:
+                handle.write(MIDDLE[len(VALID_HANDOVER):])
+        return real_plan(project_dir, origin, now)
 
-    def read_then_a_newer_write(path, dir_fd=None, *args, **kwargs):
-        data = real_read(path, dir_fd, *args, **kwargs)
-        if armed and not written:
-            written.append(path)
-            s.handover.write_text(NEWER)
-        return data
+    def checked_then_a_newer_write(*args):
+        result = real_check(*args)
+        s.handover.write_text(NEWER)
+        return result
 
     with monkeypatch.context() as patch:
-        patch.setattr(hook_runtime, "emit", emit_then_an_edit)
-        patch.setattr(regular_file, "read_regular", read_then_a_newer_write)
+        patch.setattr(rotation_state, "plan_archive", plan_then_an_edit)
+        patch.setattr(rotation_state, "_still_claimed", checked_then_a_newer_write)
         run_clear(project)
     assert s.handover.read_text() == NEWER
     assert archived_texts(project) == sorted([VALID_HANDOVER, MIDDLE])
-    assert [r.get("event") for r in journal(project)][-1:] == ["kept"]
+    [kept] = [r for r in journal(project) if r.get("event") == "kept"]
+    assert open(kept["archive"]).read() == MIDDLE
+
+
+def test_a_handover_moved_back_to_its_path_also_keeps_its_archive_name(tmp_path, project, monkeypatch, capsys):
+    """Changed between the check and the move, nothing newer at the path: it goes back, and nothing is deleted."""
+    s = saved_session(tmp_path, project)
+    planned, real_plan = [], rotation_state.plan_archive
+
+    def plan_then_an_edit(project_dir, origin, now=None):
+        planned.append(origin)
+        if len(planned) == 2:
+            with open(str(s.handover), "a") as handle:
+                handle.write(MIDDLE[len(VALID_HANDOVER):])
+        return real_plan(project_dir, origin, now)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(rotation_state, "plan_archive", plan_then_an_edit)
+        run_clear(project)
+    assert s.handover.read_text() == MIDDLE
+    assert archived_texts(project) == sorted([VALID_HANDOVER, MIDDLE])
+    assert s.marker("outdated").exists()
+    assert json.loads(s.marker("outdated").read_text())["sha256"] == rotation_state.sha256_hex(MIDDLE.encode())
 
 
 def test_an_unchanged_original_is_still_removed(tmp_path, project, capsys):
@@ -207,8 +230,10 @@ def test_every_transition_has_its_line(tmp_path, project, other_pid):
     lines = journal(project)
     assert [line.get("event") for line in lines] == ["ready", "outdated", "claimed", "injected"]
     assert all(line.get("origin_session_id") == "sess-a" for line in lines)
+    assert len({line.get("generation") for line in lines}) == 1, "one handover, one generation in every line"
     assert lines[1].get("reason") == "a prompt after it"
-    assert (lines[2].get("session_id"), lines[2].get("archive")) == ("sess-c", lines[3].get("archive"))
+    assert (lines[2].get("session_id"), lines[3].get("session_id")) == ("sess-c", "sess-c")
+    assert open(lines[3]["archive"]).read() == VALID_HANDOVER
 
 
 def test_a_crash_right_after_the_claim_leaves_the_claims_line(tmp_path, project, monkeypatch):
@@ -328,7 +353,7 @@ def test_a_line_without_its_transition_changes_nothing(tmp_path, project, monkey
     """A crash between the line and the rename: the marker on disk is the truth, the line is history."""
     saved_session(tmp_path, project)
     with monkeypatch.context() as patch:
-        patch.setattr(rotation_state, "_rename_in_rotation", crash)
+        patch.setattr(rotation_state, "_move_in_rotation", crash)
         with pytest.raises(Crash):
             rotation_state.mark_outdated(str(project), "sess-a", "a prompt after it", notified=False)
     assert [r["event"] for r in journal(project)] == ["ready", "outdated"]
@@ -355,15 +380,13 @@ def test_the_cleanup_leaves_a_handover_path_that_is_no_regular_file_alone(tmp_pa
     s = saved_session(tmp_path, project)
     target = tmp_path / "elsewhere.md"
     target.write_text("not the handover")
-    real_emit = hook_runtime.emit
 
-    def emit_then_a_symlink_takes_the_path(document):
-        real_emit(document)
+    def a_symlink_takes_the_path():
         s.handover.unlink()
         s.handover.symlink_to(target)
 
     with monkeypatch.context() as patch:
-        patch.setattr(hook_runtime, "emit", emit_then_a_symlink_takes_the_path)
+        after_the_archive_copy(patch, a_symlink_takes_the_path)
         run_clear(project)
     assert s.handover.is_symlink() and target.read_text() == "not the handover"
     assert archived_texts(project) == [VALID_HANDOVER]

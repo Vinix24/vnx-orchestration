@@ -1,22 +1,26 @@
 """Handing a handover to a session: the order that makes a crash recoverable.
 
-the claim's line in injections.jsonl -> claim (atomic rename) -> copy to the
-archive -> the injection's line -> emit -> retire the original, then the claimed
-marker last. A crash at any point leaves the claimed marker with the original or
-the archive copy, and `resume` lists it. Automatic injection happens at most
-once; recovery is manual, and reads the archive copy first: the original is used
-only while there is no copy yet and it still holds the claimed bytes. The
-original is removed only while it is the very file the claim read, so a handover
-written meanwhile stays. Every marker here passed rotation_state.marker_problem,
-and every file is read through the verified storage directories. A storage
-failure before the emit (archive copy, log line) is logged and nothing is
-emitted, so the claim stays for `resume`; after the emit nothing raises.
+the claim's line in injections.jsonl -> claim (the marker moves to the claim name
+of its generation) -> copy to the archive -> the original moves into the archive
+(rotation_state.retire_original) -> the injection's line -> emit -> the claimed
+marker removed last. A crash at any point leaves the claimed marker naming an
+archive copy that holds the claimed bytes, or the original, and `resume` lists
+it. Automatic injection happens at most once; recovery is manual, and reads the
+archive copy first: the original is used only while there is no copy yet and it
+still holds the claimed bytes. No file that was ever at the handover path is
+deleted, so a handover written meanwhile stays. Every marker here passed
+rotation_state.marker_problem, and every file is read through the verified
+storage directories. A storage failure before the emit (archive copy, log line)
+is logged and nothing is emitted, so the claim stays for `resume`; after the emit
+nothing raises.
 
 What is shown comes from the plugin, never as text from disk: the paths a marker
 gives are the ones rotation_state.read_marker builds, times and outdated reasons
-passed state_fields, an entry id is a marker or archive file name the plugin
-writes, and a journal line is shown only when state_fields.record_problem
-accepts it. The handover body is the one intended exception. Standard library only.
+passed state_fields, an entry id names a generation or an archive file name the
+plugin writes, and a journal line is shown only when state_fields.record_problem
+accepts it. The handover body is the one intended exception, and the context
+around it says whether it still holds the text its marker was checked against.
+Standard library only.
 """
 from __future__ import annotations
 
@@ -33,16 +37,27 @@ RESUME_HINT = "Type /%s resume to see them and pick one." % SKILL_COMMAND
 PICK_HINT = "Type /%s resume <number> or resume <id> with a number or an id from the list." % SKILL_COMMAND
 USAGE = "usage: /%s [write | resume [<number> | <id>]]" % SKILL_COMMAND
 LISTED_AT_START = 5
-# A marker file name without ".json", or an archive file name without ".md".
-ENTRY_ID = re.compile(r"(?:ready|outdated|claimed)-[A-Za-z0-9_-]{1,%d}|[0-9]{8}T[0-9]{12}Z-[A-Za-z0-9_-]{1,%d}" % (
-    2 * state_fields.MAX_SESSION_ID + 1, state_fields.MAX_SESSION_ID + 8))
+# <kind>-<session>-<generation> for a marker, or an archive file name without ".md".
+ENTRY_ID = re.compile(
+    r"(?:ready|outdated|claimed)-[A-Za-z0-9_-]{1,%d}-[0-9a-f]{%d}|[0-9]{8}T[0-9]{12}Z-[A-Za-z0-9_-]{1,%d}"
+    % (state_fields.MAX_SESSION_ID, state_fields.GENERATION_HEX, state_fields.MAX_SESSION_ID + 8))
+CHECKED = " It holds exactly the text that was checked when it was marked ready."
+NOT_CHECKED = (
+    " It no longer holds the text that was checked when it was marked ready: the file was changed "
+    "afterwards and the change was not checked, so check it against the current state before acting on it."
+)
 
 
-def injection_context(text: str, archive: str, outdated_reason: Optional[str] = None) -> Dict[str, str]:
-    """The additionalContext for a handover: inline up to INLINE_LIMIT, else a pointer."""
-    warning = ""
+def injection_context(text: str, archive: str, outdated_reason: Optional[str] = None,
+                      checked: Optional[bool] = None) -> Dict[str, str]:
+    """The additionalContext for a handover: inline up to INLINE_LIMIT, else a pointer.
+
+    `checked` says whether the text is the one its marker's sha256 was taken of
+    (None for an archive copy resumed without a marker), and the context says so.
+    """
+    warning = "" if checked is None else (CHECKED if checked else NOT_CHECKED)
     if outdated_reason:
-        warning = (
+        warning += (
             " It was marked outdated (%s), so check the current state of the work before "
             "acting on it." % outdated_reason
         )
@@ -60,13 +75,14 @@ def injection_context(text: str, archive: str, outdated_reason: Optional[str] = 
     return {"text": pointer, "mode": "pointer"}
 
 
-def _record(via: str, origin: Optional[str], successor: str, handover: Optional[str], archive: str,
-            data: bytes, mode: str) -> Dict[str, Any]:
+def _record(via: str, origin: Optional[str], generation: Optional[str], successor: str, handover: Optional[str],
+            archive: str, data: bytes, mode: str) -> Dict[str, Any]:
     return {
         "event": "injected",
         "at": rotation_state.utc_now(),
         "via": via,
         "origin_session_id": origin,
+        "generation": generation,
         "session_id": successor,
         "handover": handover,
         "archive": archive,
@@ -84,7 +100,10 @@ def deliver(project_dir: str, claimed: str, marker: Dict[str, Any], data: bytes,
             via: str, emit: Callable[[str, str], None], at: Callable[[str], None] = _no_step) -> Optional[str]:
     """Archive, log, emit and clean up a claimed handover. Returns the archive path.
 
-    `data` holds the claimed bytes (sha256 equal to the marker's claimed_sha256).
+    `data` holds the claimed bytes (sha256 equal to the marker's claimed_sha256),
+    and the context says whether they are the bytes the marker was checked against.
+    The original moves into the archive before the emit, and when it is the file
+    the claim read it becomes the archive copy the context and the log line name.
     None when the archive copy or the log line could not be written (OSError,
     LockTimeout): the failure goes to rotation_state.log_failure, nothing is
     emitted, and the claimed marker stays for `resume`.
@@ -92,18 +111,23 @@ def deliver(project_dir: str, claimed: str, marker: Dict[str, Any], data: bytes,
     step = "archive handover"
     try:
         at(step)
-        archive = rotation_state.archive_handover(project_dir, marker["archive"], data)
-        context = injection_context(data.decode("utf-8", "replace"), archive, marker.get("outdated_reason"))
+        rotation_state.archive_handover(project_dir, marker["archive"], data)
+        at("retire original")
+        marker = rotation_state.retire_original(project_dir, claimed, marker)
+        archive = marker["archive"]
+        context = injection_context(data.decode("utf-8", "replace"), archive, marker.get("outdated_reason"),
+                                    marker["claimed_sha256"] == marker["sha256"])
         step = "log injection"
         at(step)
         rotation_state.log_injection(project_dir, _record(
-            via, marker["session_id"], successor, marker["handover"], archive, data, context["mode"]))
+            via, marker["session_id"], marker["generation"], successor, marker["handover"], archive, data,
+            context["mode"]))
     except (OSError, rotation_state.LockTimeout) as error:
         rotation_state.log_failure(project_dir, "%s for %s" % (step, claimed), error)
         return None
     at("emit handover")
     emit(context["text"], archive)
-    rotation_state.finish_claim(project_dir, claimed, marker)
+    rotation_state.finish_claim(project_dir, claimed)
     return archive
 
 
@@ -113,10 +137,11 @@ def _resume_archived(project_dir: str, successor: str, entry: Dict[str, Any],
     if data is None:
         return "The archived handover %s cannot be read." % entry["path"]
     context = injection_context(data.decode("utf-8", "replace"), entry["path"])
-    origin = (entry.get("injection") or {}).get("origin_session_id")
+    line = entry.get("injection") or {}
     try:
         rotation_state.log_injection(project_dir, _record(
-            "resume", origin, successor, None, entry["path"], data, context["mode"]))
+            "resume", line.get("origin_session_id"), line.get("generation"), successor, None, entry["path"], data,
+            context["mode"]))
     except (OSError, rotation_state.LockTimeout) as error:
         rotation_state.log_failure(project_dir, "log injection for %s" % entry["path"], error)
         return _not_handed_over(project_dir)
@@ -130,7 +155,14 @@ def _not_handed_over(project_dir: str) -> str:
 
 def resume_pick(project_dir: str, successor: str, entry: Dict[str, Any],
                 emit: Callable[[str, str], None]) -> Optional[str]:
-    """Continue from one listed handover. None once it is emitted, else why it cannot be."""
+    """Continue from one listed handover. None once it is emitted, else why it cannot be.
+
+    The user picked it, so a ready or outdated handover is claimed as the file is
+    now, also when it changed after its marker was written: refusing it would leave
+    the user only the file itself. The context then says that it no longer holds
+    the text that was checked (deliver), and the claim records the bytes it handed
+    over (claimed_sha256).
+    """
     if entry["kind"] == "archived":
         return _resume_archived(project_dir, successor, entry, emit)
     marker = entry["marker"]
@@ -154,14 +186,15 @@ def resume_pick(project_dir: str, successor: str, entry: Dict[str, Any],
 # --- what is listed ------------------------------------------------------
 
 def entry_id(entry: Dict[str, Any]) -> str:
-    """The stable id of a listed handover: its marker's file name without ".json", or its archive file name without ".md".
+    """The id of a listed handover: <kind>-<session>-<generation> for a marker, its archive file name without ".md".
 
-    Stable while the entry exists: a claim, a new handover or a trim never gives
-    another entry this id.
+    An id names one generation in one state: a later handover of the same session,
+    a claim taken meanwhile or a trim never gives another entry this id, so a
+    number or id saved from a list picks what the user saw, or nothing.
     """
     if entry["kind"] == "archived":
         return os.path.basename(entry["path"])[:-len(".md")]
-    return os.path.basename(entry["marker_path"])[:-len(".json")]
+    return "%s-%s-%s" % (entry["kind"], entry["marker"]["session_id"], entry["marker"]["generation"])
 
 
 def is_entry_id(word: Any) -> bool:

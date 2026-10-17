@@ -15,6 +15,7 @@ import io
 import json
 import os
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -202,8 +203,9 @@ def test_a_cleanup_that_cannot_open_the_lock_after_the_emit_still_exits_0(tmp_pa
     code = run_main(monkeypatch, clear_payload(project))
     assert code == 0, "the hook failed after it emitted the handover"
     assert VALID_HANDOVER in emitted(capsys)
-    assert (rotation(project) / "claimed-sess-a-sess-b.json").exists(), "the unfinished claim is gone"
-    assert origin.handover.read_text() == VALID_HANDOVER
+    [claimed] = rotation(project).glob("claimed-sess-a-*.json")  # the unfinished claim stays
+    assert not origin.handover.exists()  # it moved into the archive before the emit
+    assert Path(json.loads(claimed.read_text())["archive"]).read_text() == VALID_HANDOVER
     assert "cleanup of" in errors_log(project)
 
 
@@ -223,7 +225,7 @@ def test_a_cleanup_that_times_out_on_the_lock_after_the_emit_still_exits_0(tmp_p
     monkeypatch.setattr(hook_runtime, "emit", emit_then_the_lock_is_held)
     assert run_main(monkeypatch, clear_payload(project)) == 0
     assert VALID_HANDOVER in emitted(capsys)
-    assert (rotation(project) / "claimed-sess-a-sess-b.json").exists()
+    assert list(rotation(project).glob("claimed-sess-a-*.json"))
     assert "cleanup of" in errors_log(project)
 
 
@@ -277,7 +279,9 @@ def test_an_archive_that_cannot_be_written_leaves_the_claim_and_lists_it(tmp_pat
     real_link = os.link
 
     def link(source, target, **kwargs):
-        raise OSError(errno.ENOSPC, "no space left", str(target))
+        if rotation_state.ARCHIVE_NAME.fullmatch(os.path.basename(str(target))):
+            raise OSError(errno.ENOSPC, "no space left", str(target))
+        return real_link(source, target, **kwargs)
 
     monkeypatch.setattr(os, "link", link)
     assert run_main(monkeypatch, clear_payload(project)) == 0
@@ -285,6 +289,6 @@ def test_an_archive_that_cannot_be_written_leaves_the_claim_and_lists_it(tmp_pat
     out = json.loads(capsys.readouterr().out)
     assert "hookSpecificOutput" not in out, "a handover without its archive copy was emitted"
     assert "claim did not finish" in out["systemMessage"]
-    assert (rotation(project) / "claimed-sess-a-sess-b.json").exists()
+    assert list(rotation(project).glob("claimed-sess-a-*.json"))
     assert origin.handover.read_text() == VALID_HANDOVER
     assert "no space left" in errors_log(project)

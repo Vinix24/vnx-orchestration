@@ -22,6 +22,8 @@ import rotation_state
 
 QUICK = 10  # seconds: a hook that blocks on a FIFO runs into this instead of hanging the suite
 SECRET = "secret text of an unrelated file"
+GENERATION = "0123456789abcdef"
+CLAIMED = "claimed-sess-p-%s.json" % GENERATION
 
 
 def sha(text):
@@ -38,7 +40,8 @@ def handover_of(project, session_id="sess-p", text=VALID_HANDOVER):
 def plant(project, name, **fields):
     """A marker written by hand, as any process of the user can."""
     marker = {
-        "version": 1, "session_id": "sess-p", "handover": str(rotation(project) / "handover-sess-p.md"),
+        "version": 1, "session_id": "sess-p", "generation": GENERATION,
+        "handover": str(rotation(project) / "handover-sess-p.md"),
         "sha256": sha(VALID_HANDOVER), "chars": len(VALID_HANDOVER), "process": None, "tmux_pane": None,
         "transcript": None, "tool_use_id": None, "written_at": rotation_state.utc_now(), "announced": False,
     }
@@ -92,7 +95,7 @@ def error_lines(project):
 
 def test_a_claimed_marker_cannot_aim_the_archive_copy_outside_the_project(tmp_path, project, victim):
     handover = handover_of(project)
-    marker = plant(project, "claimed-sess-p-sess-x.json", claimed_by="sess-x", claimed_sha256=sha(VALID_HANDOVER),
+    marker = plant(project, CLAIMED, claimed_by="sess-x", claimed_sha256=sha(VALID_HANDOVER),
                    claimed_at=rotation_state.utc_now(), archive=str(victim))
     proc = resume(tmp_path, project, "resume 1")
     assert victim.read_text() == SECRET
@@ -152,7 +155,7 @@ def test_a_transcript_that_is_a_fifo_does_not_block_the_clear(tmp_path, project)
 @pytest.mark.parametrize("name,fields", [
     ("ready-sess-p.json", {"handover": "VICTIM"}),
     ("ready-dots.json", {"session_id": "../dots"}),
-    ("claimed-sess-p-sess-x.json", {"claimed_by": "sess-x", "claimed_sha256": sha(VALID_HANDOVER),
+    (CLAIMED, {"claimed_by": "sess-x", "claimed_sha256": sha(VALID_HANDOVER),
                                     "archive": "VICTIM"}),
 ], ids=["handover-elsewhere", "session-id-with-separator", "archive-elsewhere"])
 def test_a_rejected_marker_is_reported_once_and_left_on_disk(tmp_path, project, victim, name, fields):
@@ -194,8 +197,10 @@ CLAIM = {"claimed_by": "sess-x", "claimed_sha256": sha(VALID_HANDOVER), "archive
     ("ready-sess-p.json", {"version": 2}, "it is not a version 1 marker"),
     ("ready-sess-p.json", {"session_id": "sess-p\n"}, "its session_id is not a plain file name"),
     ("ready-sess-p.json", {"session_id": "x" * 121}, "its session_id is not a plain file name"),
+    ("ready-sess-p.json", {"generation": "0123456789ABCDEF"}, "its generation is not one the plugin gives"),
+    ("ready-sess-p.json", {"generation": None}, "its generation is not one the plugin gives"),
     ("ready-sess-p.json", {"sha256": "not-a-digest"}, "its sha256 is not a sha256 digest"),
-    ("ready-other.json", {}, "its file name does not match its session_id"),
+    ("ready-other.json", {}, "its file name does not match its session_id and generation"),
     ("ready-sess-p.json", {"handover": "handover-sess-p.md"}, "its handover is not"),
     ("ready-sess-p.json", {"handover": "ROTATION/../handover-sess-p.md"}, "its handover is not"),
     ("ready-sess-p.json", {"tool_use_id": ["a"]}, "its tool_use_id is not a string"),
@@ -203,13 +208,15 @@ CLAIM = {"claimed_by": "sess-x", "claimed_sha256": sha(VALID_HANDOVER), "archive
      "its transcript position is not"),
     ("ready-sess-p.json", {"transcript": {"path": "/t.jsonl", "size": True, "last_uuid": None}},
      "its transcript position is not"),
-    ("claimed-sess-p-sess-x.json", dict(CLAIM, claimed_by="../x"), "its file name does not match"),
-    ("claimed-sess-p-sess-x.json", dict(CLAIM, claimed_sha256=None), "its claimed_sha256 is not a sha256 digest"),
-    ("claimed-sess-p-sess-x.json", dict(CLAIM, archive=None), "its archive is not a plain absolute path"),
-    ("claimed-sess-p-sess-x.json", dict(CLAIM, archive="ARCHIVE/notes.txt"), "its archive is not named like"),
-    ("claimed-sess-p-sess-x.json", dict(CLAIM, archive="ROTATION/20261016T120000000000Z-sess-p.md"),
+    (CLAIMED, dict(CLAIM, claimed_by="../x"), "its claimed_by is not a plain file name"),
+    ("claimed-sess-p-sess-x.json", CLAIM, "its file name does not match its session_id and generation"),
+    ("claimed-sess-p-fedcba9876543210.json", CLAIM, "its file name does not match its session_id and generation"),
+    (CLAIMED, dict(CLAIM, claimed_sha256=None), "its claimed_sha256 is not a sha256 digest"),
+    (CLAIMED, dict(CLAIM, archive=None), "its archive is not a plain absolute path"),
+    (CLAIMED, dict(CLAIM, archive="ARCHIVE/notes.txt"), "its archive is not named like"),
+    (CLAIMED, dict(CLAIM, archive="ROTATION/20261016T120000000000Z-sess-p.md"),
      "its archive is not in"),
-    ("claimed-sess-p-sess-x.json", dict(CLAIM, archive="LINK"), "its archive is a symlink"),
+    (CLAIMED, dict(CLAIM, archive="LINK"), "its archive is a symlink"),
 ])
 def test_each_check_rejects_its_marker(tmp_path, project, victim, name, fields, why):
     handover_of(project)

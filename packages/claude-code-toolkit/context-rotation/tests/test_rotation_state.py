@@ -1,6 +1,7 @@
 """rotation_state: process identity, the project lock, markers, claim, archive and listing."""
 from __future__ import annotations
 
+import glob
 import json
 import os
 import subprocess
@@ -178,7 +179,7 @@ def test_a_marker_is_claimed_once(project):
     first = rs.claim(str(project), source, "sess-b")
     assert first is not None
     path, marker, data = first
-    assert os.path.basename(path) == "claimed-sess-a-sess-b.json"
+    assert os.path.basename(path) == "claimed-sess-a-%s.json" % marker["generation"]
     assert marker["claimed_by"] == "sess-b"
     assert data == VALID_HANDOVER.encode()
     assert marker["claimed_sha256"] == marker["sha256"] == rs.sha256_hex(data)
@@ -278,7 +279,7 @@ def test_trim_without_an_archive_creates_nothing(project):
 
 def injected(project, name):
     return {"event": "injected", "at": "2026-10-17T09:00:00Z", "via": "clear", "origin_session_id": "sess-a",
-            "session_id": "sess-b", "handover": rs.handover_path(str(project), "sess-a"),
+            "generation": "0123456789abcdef", "session_id": "sess-b", "handover": rs.handover_path(str(project), "sess-a"),
             "archive": os.path.join(rs.archive_dir(str(project)), name), "sha256": "0" * 64, "chars": 1,
             "mode": "inline"}
 
@@ -462,7 +463,7 @@ SWAPPED_CALLS = {
 }
 SWAPPED_RESULTS = {
     "rename": ["outdated-sess-a.json"],
-    "claim": ["claimed-sess-a-sess-b.json"],
+    "claim": ["claimed-sess-a-*.json"],
     "archive": [".gitignore", ".lock", "archive", "handover-sess-a.md", "ready-sess-a.json"],
     "append": ["injections.jsonl"],
     "state": ["state"],
@@ -476,8 +477,8 @@ SWAPPED_RESULTS = {
 def test_a_directory_swapped_after_the_check_changes_nothing_outside_it(project, swapped_after_every_check, name):
     SWAPPED_CALLS[name](str(project))
     swapped_after_every_check()
-    left = sorted(os.listdir(str(rotation(project))))
-    assert set(SWAPPED_RESULTS[name]) <= set(left), "the mutation did not land in the verified directory"
+    assert all(glob.glob(os.path.join(str(rotation(project)), expected)) for expected in SWAPPED_RESULTS[name]), (
+        "the mutation did not land in the verified directory")
     if name == "trim":
         assert len(os.listdir(str(rotation(project) / "archive"))) == 1
     if name == "archive":

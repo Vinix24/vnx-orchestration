@@ -70,14 +70,17 @@ to a session automatically.
 - **A numbered list is in your context** (the plugin adds it when the user types
   `/context-rotation:rotate resume`): show it to the user as it is, and tell them to type
   `/context-rotation:rotate resume <number>` or `/context-rotation:rotate resume <id>` to
-  continue from one. Each entry ends with its id in brackets. A number means the entry
-  shown under it in the last list of this session, even when newer handovers arrived
-  since; when that entry is gone, or no list was shown yet, the plugin says so and shows
-  the current list instead.
+  continue from one. Each entry ends with its id in brackets, and the id names that one
+  handover: a later handover of the same session gets another id. A number means the
+  entry shown under it in the last list of this session, even when newer handovers
+  arrived since; when that entry is gone, or no list was shown yet, the plugin says so
+  and shows the current list instead.
 - **A handover is in your context** (after `/context-rotation:rotate resume <number>` or
   `resume <id>`, or after `/clear`): continue from step 1 under `## Next steps`. First
   check that the state it describes still holds (files, branches, running processes)
-  and tell the user when it does not. A handover marked outdated needs that check most.
+  and tell the user when it does not. A handover marked outdated needs that check most,
+  and so does one the plugin says no longer holds the text that was checked: its file
+  was changed after the check, and the change was not checked.
 - **Neither is in your context** (you started this skill yourself): look in the project's
   `.claude/rotation/` with Glob and Read. First check that `.claude/rotation` and
   `.claude/rotation/archive` are directories and not symlinks (for example with

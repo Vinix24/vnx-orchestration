@@ -28,6 +28,11 @@ def saved(tmp_path, project, session_id, pid, text):
     return s
 
 
+def ident(s, kind="ready"):
+    """The id the list shows for a session's marker: <kind>-<session>-<generation>."""
+    return "%s-%s-%s" % (kind, s.session_id, json.loads(s.marker(kind).read_text())["generation"])
+
+
 def written_minutes_ago(path, minutes):
     marker = json.loads(path.read_text())
     moment = datetime.now(timezone.utc) - timedelta(minutes=minutes)
@@ -52,19 +57,19 @@ def test_a_number_picks_the_handover_shown_under_it(tmp_path, project, other_pid
 
 
 def test_the_list_shows_a_stable_id_per_entry(tmp_path, project, other_pid):
-    saved(tmp_path, project, "sess-a", other_pid, HANDOVER_A)
-    Session(tmp_path, project, "sess-b").expand("resume ready-sess-a")  # archives it
-    saved(tmp_path, project, "sess-a2", other_pid, HANDOVER_B)
+    a = saved(tmp_path, project, "sess-a", other_pid, HANDOVER_A)
+    Session(tmp_path, project, "sess-b").expand("resume " + ident(a))  # archives it
+    a2 = saved(tmp_path, project, "sess-a2", other_pid, HANDOVER_B)
     lines = numbered(context_of(Session(tmp_path, project, "sess-c").expand("resume")))
-    assert lines[0].endswith("[id ready-sess-a2]")
+    assert lines[0].endswith("[id %s]" % ident(a2))
     [archive] = (rotation(project) / "archive").glob("*.md")
     assert lines[1].endswith("[id %s]" % archive.name[:-3])
 
 
 def test_an_id_picks_its_handover(tmp_path, project, other_pid):
-    saved(tmp_path, project, "sess-a", other_pid, HANDOVER_A)
+    a = saved(tmp_path, project, "sess-a", other_pid, HANDOVER_A)
     saved(tmp_path, project, "sess-b", other_pid, HANDOVER_B)
-    text = context_of(Session(tmp_path, project, "sess-c").expand("resume ready-sess-a"))
+    text = context_of(Session(tmp_path, project, "sess-c").expand("resume " + ident(a)))
     assert "This is handover A." in text and "This is handover B." not in text
 
 
@@ -79,12 +84,13 @@ def test_a_number_without_a_list_shown_is_refused_with_the_current_list(tmp_path
 
 
 def test_a_number_whose_handover_is_gone_is_refused_with_the_current_list(tmp_path, project, other_pid):
-    saved(tmp_path, project, "sess-a", other_pid, HANDOVER_A)
+    a = saved(tmp_path, project, "sess-a", other_pid, HANDOVER_A)
+    taken = ident(a)
     user = Session(tmp_path, project, "sess-c")
     user.expand("resume")
-    Session(tmp_path, project, "sess-d").expand("resume ready-sess-a")  # another session takes it
+    Session(tmp_path, project, "sess-d").expand("resume " + taken)  # another session takes it
     text = context_of(user.expand("resume 1"))
-    assert "Handover ready-sess-a is no longer there" in text
+    assert "Handover %s is no longer there" % taken in text
     assert "This is handover A." not in text
     assert numbered(text)[0].startswith("1. archived")
 

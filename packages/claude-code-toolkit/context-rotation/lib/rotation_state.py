@@ -9,9 +9,10 @@ Everything lives under <project>/.claude/rotation/:
   handover-<session>.md         the handover a session writes
   ready-<session>.json          the handover is valid and covers all work so far
   outdated-<session>.json       work happened after the handover; never injected automatically
-  claimed-<origin>-<new>.json   a session took the handover; removed last
-  archive/<time>-<origin>.md    every injected handover, and every newer generation the cleanup
-                                had to keep there; trimmed to the newest archive_keep plus every
+  claimed-<origin>-<generation>.json
+                                a session took that generation of the handover; removed last
+  archive/<time>-<origin>.md    every injected handover, and every file the cleanup found at a
+                                handover path; trimmed to the newest archive_keep plus every
                                 copy a marker on disk still names
   injections.jsonl              one line per transition, written before the transition: ready,
                                 outdated, claimed, injected, kept; kept to
@@ -20,6 +21,17 @@ Everything lives under <project>/.claude/rotation/:
 
 Handovers hold a session's working state and must never be committed, hence the
 .gitignore.
+
+A generation is one handover the plugin marked ready: new_marker gives it a random
+`generation` id, which stays with it through outdated and claimed. A claim's file
+name carries it, so two generations of one session never share a claim file and a
+generation is claimed at most once; the `resume` list names it too. Nothing here
+replaces a file by moving another one onto its name. A marker moves by a hard link
+to its new name, which fails when that name exists, and the original handover
+moves into the archive only under a fresh name. A file is rewritten whole only at
+its own name, through a temporary file of its own (_replace_in). The cleanup never
+deletes a file that was ever at a handover path: only the age-based archive trim
+removes one, and never a copy a marker still names.
 
 Every file here is an input, not a fact: any process of the user can write one,
 a cloned repository can ship one, and the origin session can rewrite its handover
@@ -41,6 +53,7 @@ plugin into another directory. Standard library only.
 from __future__ import annotations
 
 import contextlib
+import errno
 import fcntl
 import hashlib
 import json
@@ -98,8 +111,8 @@ def marker_path(project_dir: str, kind: str, session_id: str) -> str:
     return _in_rotation(project_dir, "%s-%s.json" % (kind, session_id))
 
 
-def claimed_path(project_dir: str, origin: str, successor: str) -> str:
-    return _in_rotation(project_dir, "claimed-%s-%s.json" % (origin, successor))
+def claimed_path(project_dir: str, origin: str, generation: str) -> str:
+    return _in_rotation(project_dir, "claimed-%s-%s.json" % (origin, generation))
 
 
 def archive_dir(project_dir: str) -> str:
@@ -339,11 +352,49 @@ def _keep_last_lines(directory: int, name: str, keep: int, prefix: str) -> None:
         _replace_in(directory, name, b"".join(lines[-keep:]), prefix)
 
 
-def _rename_in_rotation(project_dir: str, source: str, target: str) -> None:
-    """Rename one file directly in `.claude/rotation` to another name there, in the verified directory."""
+def _same_file(directory: int, first: str, second: str) -> bool:
+    found = _lstat_in(directory, first), _lstat_in(directory, second)
+    return None not in found and os.path.samestat(*found)
+
+
+def _move_in_rotation(project_dir: str, source: str, target: str) -> bool:
+    """Give a marker in `.claude/rotation` another name there, never replacing anything at that name.
+
+    A hard link to the new name, then the old name removed, in the verified
+    directory: link(2) fails when the target exists, so nothing is replaced. A
+    target that is already the same file is a move that stopped between those two
+    steps, and this one completes it. Anything else at the target refuses the
+    move: it is logged, both files stay, and the result is False. Call under the
+    project lock, which every plugin process that writes a marker holds.
+    FileNotFoundError when the source is gone.
+    """
     old, new = _name_in(project_dir, source, ()), _name_in(project_dir, target, ())
     with storage(project_dir) as directory:
-        os.replace(old, new, src_dir_fd=directory, dst_dir_fd=directory)
+        try:
+            os.link(old, new, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
+        except FileExistsError:
+            if not _same_file(directory, old, new):
+                log_error(project_dir, "%s context-rotation: %s was not renamed to %s: something is already at "
+                          "that name; nothing replaced, both left on disk" % (utc_now(), source, target))
+                return False
+        os.unlink(old, dir_fd=directory)
+    return True
+
+
+def _rename_fresh(source_dir: int, source: str, target_dir: int, target: str) -> None:
+    """Rename `source` to `target`, a name that must not exist. Call under the project lock.
+
+    For the original handover only: a link would leave its old name to remove
+    while Claude Code's Write tool can put a newer file there. The standard library
+    has no rename that refuses an existing target (Linux RENAME_NOREPLACE, macOS
+    RENAME_EXCL), so the target is a fresh archive name from plan_archive, checked
+    absent here under the project lock, which every plugin process that creates a
+    name in the archive holds (archive_handover, this rename). FileExistsError when
+    something is there: nothing is replaced.
+    """
+    if _lstat_in(target_dir, target) is not None:
+        raise FileExistsError(errno.EEXIST, "already in the archive; nothing replaced", target)
+    os.rename(source, target, src_dir_fd=source_dir, dst_dir_fd=target_dir)
 
 
 def remove_in_rotation(project_dir: str, path: str) -> None:
@@ -605,34 +656,40 @@ def marker_kind(path: str) -> Optional[str]:
     return next((k for k in MARKER_KINDS if name.startswith(k + "-") and name.endswith(".json")), None)
 
 
-def _marker_name(kind: str, marker: Dict[str, Any]) -> Optional[str]:
+def _marker_name(kind: str, marker: Dict[str, Any]) -> str:
+    """The file name a marker of this kind has: per session, and per generation for a claim."""
     if kind != "claimed":
         return "%s-%s.json" % (kind, marker["session_id"])
-    successor = marker.get("claimed_by")
-    return "claimed-%s-%s.json" % (marker["session_id"], successor) if is_safe_session_id(successor) else None
+    return "claimed-%s-%s.json" % (marker["session_id"], marker["generation"])
 
 
 def marker_problem(project_dir: str, path: str, marker: Any) -> Optional[str]:
     """Why the marker read from `path` must not be used; None when it may.
 
     The one rule for every reader of marker fields: a marker of this version whose
-    session_id is a plain file name, whose sha256 (and for a claim claimed_sha256)
-    is a digest, whose own file name is the one that id gives for its kind, whose
-    handover is that session's handover path, whose archive (always for a claim)
-    is a direct child of archive_dir, whose transcript position is one of the
-    session's own transcript, and whose times, outdated reason and claimed file
-    are values the plugin writes (state_fields.marker_value_problem).
+    session_id is a plain file name, whose generation is one the plugin gives,
+    whose sha256 (and for a claim claimed_sha256) is a digest, whose claimed_by
+    (for a claim) is a plain file name, whose own file name is the one its
+    session_id (and for a claim its generation) gives for its kind, whose handover
+    is that session's handover path, whose archive (always for a claim) is a direct
+    child of archive_dir, whose transcript position is one of the session's own
+    transcript, and whose times, outdated reason and claimed file are values the
+    plugin writes (state_fields.marker_value_problem).
     """
     if not isinstance(marker, dict) or marker.get("version") != MARKER_VERSION:
         return "it is not a version %d marker" % MARKER_VERSION
     if not is_safe_session_id(marker.get("session_id")):
         return "its session_id is not a plain file name"
+    if not state_fields.is_generation(marker.get("generation")):
+        return "its generation is not one the plugin gives"
     kind = marker_kind(path)
     for field in ("sha256", "claimed_sha256") if kind == "claimed" else ("sha256",):
         if not state_fields.is_sha256(marker.get(field)):
             return "its %s is not a sha256 digest" % field
+    if kind == "claimed" and not is_safe_session_id(marker.get("claimed_by")):
+        return "its claimed_by is not a plain file name"
     if kind is None or os.path.basename(path) != _marker_name(kind, marker):
-        return "its file name does not match its session_id"
+        return "its file name does not match its session_id and generation"
     expected = handover_path(project_dir, marker["session_id"])
     if not _same_place(marker.get("handover"), expected):
         return "its handover is not %s" % expected
@@ -720,12 +777,18 @@ def load_marker(project_dir: str, path: str) -> Optional[Dict[str, Any]]:
     return marker
 
 
+def new_generation() -> str:
+    """The id of a new handover generation: random, so no other marker of the project carries it."""
+    return os.urandom(state_fields.GENERATION_HEX // 2).hex()
+
+
 def new_marker(session_id: str, handover: str, data: bytes, env: Dict[str, str],
                position: Optional[Dict[str, Any]], tool_use_id: Any) -> Dict[str, Any]:
-    """A ready-marker; `position` is the transcript position the caller took before it read `data`."""
+    """A ready-marker of a new generation; `position` is the transcript position taken before `data` was read."""
     return {
         "version": MARKER_VERSION,
         "session_id": session_id,
+        "generation": new_generation(),
         "handover": handover,
         "sha256": sha256_hex(data),
         "chars": len(data.decode("utf-8", "replace")),
@@ -803,31 +866,57 @@ def trim_journal(project_dir: str, archive_keep: int) -> None:
 
 # --- the transitions of a marker ------------------------------------------------
 
+def _same_stored_file(project_dir: str, first: str, second: str) -> bool:
+    """Two names directly in `.claude/rotation` are one file (a move that stopped between its link and its unlink)."""
+    with storage(project_dir) as directory:
+        return _same_file(directory, _name_in(project_dir, first, ()), _name_in(project_dir, second, ()))
+
+
+def _drop_superseded(project_dir: str, session_id: str) -> None:
+    """Remove the session's valid outdated marker while its ready-marker is another file. Call under the project lock.
+
+    The session's handover file holds one generation, and its ready-marker
+    describes it: mark_ready removes the outdated marker right after it writes the
+    ready one, and this completes that step when a crash came in between. An
+    outdated marker that is the same file as the ready one is a move to outdated
+    that stopped halfway, which the next move completes. A rejected outdated marker
+    is reported and left.
+    """
+    ready, stale = marker_path(project_dir, "ready", session_id), marker_path(project_dir, "outdated", session_id)
+    if not stored_exists(project_dir, stale):
+        return
+    if load_marker(project_dir, stale) is not None and not _same_stored_file(project_dir, ready, stale):
+        remove_in_rotation(project_dir, stale)
+
+
 def mark_ready(project_dir: str, marker: Dict[str, Any]) -> str:
     """Write the session's ready-marker, after its line; a valid outdated one of the session goes.
 
-    The ready path is this session's own: a rejected marker there is reported,
-    then replaced. A rejected outdated marker is reported and left.
+    The ready path is this session's own, rewritten whole through its own
+    temporary file: a rejected marker there is reported, then replaced. A rejected
+    outdated marker is reported and left.
     """
     session_id = marker["session_id"]
     target = marker_path(project_dir, "ready", session_id)
     with project_lock(project_dir):
         load_marker(project_dir, target)
-        journal(project_dir, "ready", origin_session_id=session_id, sha256=marker["sha256"])
+        journal(project_dir, "ready", origin_session_id=session_id, generation=marker["generation"],
+                sha256=marker["sha256"])
         write_json(project_dir, target, marker)
-        stale = marker_path(project_dir, "outdated", session_id)
-        if load_marker(project_dir, stale) is not None:
-            remove_in_rotation(project_dir, stale)
+        _drop_superseded(project_dir, session_id)
     return target
 
 
 def mark_outdated(project_dir: str, session_id: str, reason: str, notified: bool) -> Optional[Dict[str, Any]]:
-    """Rename the ready-marker to outdated with the reason, after its line. None when there was none.
+    """Move the ready-marker to outdated with the reason, after its line. None when there was none, or refused.
 
     `reason` is one of state_fields.OUTDATED_REASONS (ValueError otherwise), so the
-    reason a reader shows is always one the plugin wrote. The rename comes before
-    the fields: a crash in between leaves an outdated marker without a reason,
-    which is never injected automatically and is listed as REASON_NOT_RECORDED.
+    reason a reader shows is always one the plugin wrote. The move never replaces a
+    file at the outdated name (_move_in_rotation): a rejected marker there refuses
+    it, logged, and the ready-marker stays, so it is still checked at every clear.
+    The move comes before the fields: a crash in between leaves an outdated marker
+    without a reason, which is never injected automatically and is listed as
+    REASON_NOT_RECORDED.
     """
     if not state_fields.is_reason(reason):
         raise ValueError("%r is not an outdated reason the plugin writes" % (reason,))
@@ -837,8 +926,11 @@ def mark_outdated(project_dir: str, session_id: str, reason: str, notified: bool
         marker = load_marker(project_dir, source)
         if marker is None:
             return None
-        journal(project_dir, "outdated", origin_session_id=session_id, sha256=marker["sha256"], reason=reason)
-        _rename_in_rotation(project_dir, source, target)
+        _drop_superseded(project_dir, session_id)
+        journal(project_dir, "outdated", origin_session_id=session_id, generation=marker["generation"],
+                sha256=marker["sha256"], reason=reason)
+        if not _move_in_rotation(project_dir, source, target):
+            return None
         marker.update(outdated_at=utc_now(), outdated_reason=reason, notified=notified)
         write_json(project_dir, target, marker)
     return marker
@@ -917,6 +1009,15 @@ def plan_archive(project_dir: str, origin: str, now: Optional[datetime] = None) 
     return os.path.join(archive_dir(project_dir), candidate)
 
 
+def _settle_claimed(project_dir: str, source: str, target: str) -> None:
+    """The generation of the marker at `source` has its claim name taken: remove the rest of a claim, or refuse."""
+    if load_marker(project_dir, target) is not None:
+        remove_in_rotation(project_dir, source)
+        return
+    log_error(project_dir, "%s context-rotation: %s was not claimed: %s holds no valid claim; nothing replaced, "
+              "both left on disk" % (utc_now(), source, target))
+
+
 def claim(project_dir: str, source: str, successor: str,
           as_checked: bool = False) -> Optional[Tuple[str, Dict[str, Any], bytes]]:
     """Take a ready or outdated marker for a successor session: (claimed path, marker, bytes).
@@ -925,16 +1026,26 @@ def claim(project_dir: str, source: str, successor: str,
     place with the successor, the time, the archive path the handover is copied to
     next, `claimed_sha256` (the sha256 of exactly the bytes handed over) and
     `claimed_file` (the inode, size and modification time of the file they came
-    from), then renamed to its claimed name; the claim's line in injections.jsonl
-    comes first. A claimed marker is therefore never seen without those fields,
-    and `sha256` keeps meaning the bytes the marker was checked against. With
-    `as_checked`, the handover must still hold those bytes. None when the marker is
+    from), then moved to the claim name of its generation; the claim's line in
+    injections.jsonl comes first. A claimed marker is therefore never seen without
+    those fields, and `sha256` keeps meaning the bytes the marker was checked
+    against. With `as_checked`, the handover must still hold those bytes.
+
+    A generation is claimed at most once: its claim name exists only once, and the
+    move never replaces it (_move_in_rotation). When a valid claim of this
+    generation is there already, the marker at `source` is what is left of it (a
+    claim that stopped between its link and its unlink) and is removed; anything
+    else at that name refuses the claim, logged. None then, and when the marker is
     gone or rejected, or the handover is gone or (with `as_checked`) changed.
     """
     with project_lock(project_dir):
         marker = load_marker(project_dir, source)
         read = read_stamped(project_dir, marker["handover"]) if marker is not None else None
         if read is None or (as_checked and sha256_hex(read[0]) != marker["sha256"]):
+            return None
+        target = claimed_path(project_dir, marker["session_id"], marker["generation"])
+        if stored_exists(project_dir, target):
+            _settle_claimed(project_dir, source, target)
             return None
         data, stamp = read
         now = datetime.now(timezone.utc)
@@ -943,12 +1054,12 @@ def claim(project_dir: str, source: str, successor: str,
             archive=plan_archive(project_dir, marker["session_id"], now), claimed_sha256=sha256_hex(data),
             claimed_file=stamp,
         )
-        journal(project_dir, "claimed", origin_session_id=marker["session_id"], session_id=successor,
-                sha256=marker["claimed_sha256"], archive=marker["archive"])
-        target = claimed_path(project_dir, marker["session_id"], successor)
+        journal(project_dir, "claimed", origin_session_id=marker["session_id"], generation=marker["generation"],
+                session_id=successor, sha256=marker["claimed_sha256"], archive=marker["archive"])
         write_json(project_dir, source, marker)
         try:
-            _rename_in_rotation(project_dir, source, target)
+            if not _move_in_rotation(project_dir, source, target):
+                return None
         except FileNotFoundError:
             return None
     return target, marker, data
@@ -960,12 +1071,13 @@ def archive_handover(project_dir: str, target: str, data: bytes) -> str:
     When the target already holds exactly these bytes (a delivery repeated after a
     crash) it is kept as it is; anything else at the target raises FileExistsError.
     The copy appears whole or not at all: a complete temporary file is hard-linked
-    to the target, which fails when the target exists. Everything happens in the
-    verified archive directory, so a symlinked archive gets no copy (StorageRefused).
+    to the target, which fails when the target exists. Under the project lock, as
+    every plugin process that creates a name in the archive is (_rename_fresh), and
+    in the verified archive directory, so a symlinked archive gets no copy
+    (StorageRefused).
     """
     name = _name_in(project_dir, target, ("archive",))
-    ensure_gitignore(project_dir)
-    with storage(project_dir, "archive", create=True) as directory:
+    with project_lock(project_dir), storage(project_dir, "archive", create=True) as directory:
         if regular_file.read_regular(name, directory) == data:
             return target
         descriptor, temp = _new_temp(directory, ".archive-")
@@ -1008,7 +1120,7 @@ def _unlink_logged(project_dir: str, path: str) -> None:
         log_failure(project_dir, "cleanup of %s" % path, error)
 
 
-# --- removing the original: only the file the claim read ------------------------
+# --- moving the original out of its writer's way ---------------------------------
 
 def _still_claimed(directory: int, name: str, marker: Dict[str, Any]) -> Tuple[bool, Optional[bytes]]:
     """(the file set aside is the one the claim read, its bytes): same stamp before and after the read, same sha256."""
@@ -1022,22 +1134,32 @@ def _still_claimed(directory: int, name: str, marker: Dict[str, Any]) -> Tuple[b
 
 
 def _list_kept(project_dir: str, marker: Dict[str, Any], data: Optional[bytes]) -> None:
-    """A kept original that no ready-marker of its session names gets an outdated one, so `resume` lists it."""
+    """A handover file no marker of its session describes gets an outdated marker of a new generation.
+
+    `resume` lists it through that marker. A ready-marker of the session describes
+    the file, and so does a valid outdated one with its sha256; a rejected outdated
+    marker is reported and left.
+    """
     session_id = marker["session_id"]
     if data is None or stored_exists(project_dir, marker_path(project_dir, "ready", session_id)):
         return
+    stale = marker_path(project_dir, "outdated", session_id)
+    if stored_exists(project_dir, stale):
+        found = load_marker(project_dir, stale)
+        if found is None or found["sha256"] == sha256_hex(data):
+            return
     now = utc_now()
     kept = {field: marker.get(field) for field in ("version", "session_id", "handover", "process", "tmux_pane")}
-    kept.update(sha256=sha256_hex(data), chars=len(data.decode("utf-8", "replace")), transcript=None,
-                tool_use_id=None, written_at=now, announced=False, outdated_at=now,
+    kept.update(generation=new_generation(), sha256=sha256_hex(data), chars=len(data.decode("utf-8", "replace")),
+                transcript=None, tool_use_id=None, written_at=now, announced=False, outdated_at=now,
                 outdated_reason=state_fields.FILE_CHANGED, notified=True)
-    journal(project_dir, "outdated", origin_session_id=session_id, sha256=kept["sha256"],
-            reason=state_fields.FILE_CHANGED)
-    write_json(project_dir, marker_path(project_dir, "outdated", session_id), kept)
+    journal(project_dir, "outdated", origin_session_id=session_id, generation=kept["generation"],
+            sha256=kept["sha256"], reason=state_fields.FILE_CHANGED)
+    write_json(project_dir, stale, kept)
 
 
 def _keep_in_archive(project_dir: str, marker: Dict[str, Any], aside: str, data: Optional[bytes]) -> None:
-    """The set-aside file is a generation between the claimed one and a newer one at the original path."""
+    """The moved file is another generation than the claimed one: it keeps its archive name, with its line."""
     archived = os.path.join(archive_dir(project_dir), aside)
     if data is None:
         log_error(project_dir, "%s context-rotation: kept %s, a handover written during its cleanup" % (
@@ -1046,53 +1168,84 @@ def _keep_in_archive(project_dir: str, marker: Dict[str, Any], aside: str, data:
     journal(project_dir, "kept", origin_session_id=marker["session_id"], sha256=sha256_hex(data), archive=archived)
 
 
-def _retire_original(project_dir: str, marker: Dict[str, Any]) -> None:
-    """Remove the original handover only when it is still the file the claim read. Call under the project lock.
+def _adopt_moved(project_dir: str, claimed: str, marker: Dict[str, Any], archive: int, aside: str) -> Dict[str, Any]:
+    """The moved original holds the claimed bytes: it becomes the claim's archive copy, and the separate copy goes.
 
-    Claude Code's Write tool does not take the project lock, so the original can
-    be written at any moment. It is first renamed into the archive under a new
-    name: from then on a write to the original path makes a new file there, which
-    is never touched. The file set aside is compared with what the claim recorded
-    (inode, size, modification time, sha256); only the very file the claim read is
-    removed. Anything else goes back to the original path, listed through its own
-    ready-marker or an outdated one (_list_kept), or stays in the archive when a
-    newer file took the path meanwhile. A crash in between leaves it in the archive.
+    The claimed marker is rewritten to name it first, so a crash in between leaves
+    the claim naming a copy that holds the claimed bytes. The copy removed is the
+    one archive_handover wrote from those bytes: it was never at the handover path.
     """
+    copy = os.path.basename(marker["archive"])
+    adopted = dict(marker, archive=os.path.join(archive_dir(project_dir), aside))
+    write_json(project_dir, claimed, adopted)
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(copy, dir_fd=archive)
+    return adopted
+
+
+def _retire_original(project_dir: str, claimed: str, marker: Dict[str, Any]) -> Dict[str, Any]:
     name = _name_in(project_dir, marker["handover"], ())
+    found = _stored_stat(project_dir, marker["handover"])
+    if found is None or not stat.S_ISREG(found.st_mode):
+        return marker
+    if regular_file.stamp_of(found) != marker["claimed_file"]:
+        _list_kept(project_dir, marker, read_bytes(project_dir, marker["handover"]))
+        return marker
     aside = os.path.basename(plan_archive(project_dir, marker["session_id"]))
     with storage(project_dir) as rotation, storage(project_dir, "archive", create=True) as archive:
-        found = _lstat_in(rotation, name)
-        if found is None or not stat.S_ISREG(found.st_mode):
-            return
-        os.rename(name, aside, src_dir_fd=rotation, dst_dir_fd=archive)
+        _rename_fresh(rotation, name, archive, aside)
         same, data = _still_claimed(archive, aside, marker)
         if same:
-            os.unlink(aside, dir_fd=archive)
-            return
+            return _adopt_moved(project_dir, claimed, marker, archive, aside)
         try:
             os.link(aside, name, src_dir_fd=archive, dst_dir_fd=rotation, follow_symlinks=False)
+            put_back = True
         except FileExistsError:
-            _keep_in_archive(project_dir, marker, aside, data)
-            return
-        os.unlink(aside, dir_fd=archive)
-    _list_kept(project_dir, marker, data)
+            put_back = False
+    _keep_in_archive(project_dir, marker, aside, data)
+    if put_back:
+        _list_kept(project_dir, marker, data)
+    return marker
 
 
-def finish_claim(project_dir: str, claimed: str, marker: Dict[str, Any]) -> None:
-    """After the emit: retire the original handover (only the file the claim read), then remove the claimed marker.
+def retire_original(project_dir: str, claimed: str, marker: Dict[str, Any]) -> Dict[str, Any]:
+    """Before the emit, move the original handover off its path; the claim's marker as it stands afterwards.
 
-    A newer handover, written while this one was delivered, stays, and so does its
-    ready marker. Never raises: the injection already happened, and a failing hook
-    would make Claude Code drop the output that carries it. A failure to lock,
-    move, read or unlink (OSError, LockTimeout) goes to log_failure, and what was
-    not removed stays: a claim that could not be finished is listed by `resume`.
+    Claude Code's Write tool does not take the project lock, so the original can
+    be written at any moment, also through a descriptor opened before this runs.
+    So the cleanup never deletes a file that was ever at the handover path. A file
+    there that is not the one the claim read (inode, size, modification time) is
+    left alone, listed through its own marker or an outdated one (_list_kept). The
+    file the claim read is renamed into the archive under a fresh name
+    (_rename_fresh), so a write to the handover path from then on makes a new file
+    there. When it still holds the claimed bytes it becomes the claim's archive
+    copy (_adopt_moved), and a write through a descriptor opened earlier lands in
+    that copy. Otherwise it is a newer generation: it goes back to the handover
+    path by a hard link and is listed like a file left alone, or stays only in the
+    archive when a newer file took the path meanwhile; either way it keeps its
+    archive name, with a `kept` line, until the age-based trim. A crash at any
+    point leaves the claim naming a copy that holds the claimed bytes.
+
+    Never raises: a failure to lock, move or read (OSError, LockTimeout) goes to
+    log_failure, and the marker is returned as it was, with its copy in place.
     """
     try:
         with project_lock(project_dir):
-            try:
-                _retire_original(project_dir, marker)
-            except OSError as error:
-                log_failure(project_dir, "cleanup of %s" % marker["handover"], error)
+            return _retire_original(project_dir, claimed, marker)
+    except (OSError, LockTimeout) as error:
+        log_failure(project_dir, "cleanup of %s" % marker["handover"], error)
+        return marker
+
+
+def finish_claim(project_dir: str, claimed: str) -> None:
+    """After the emit: remove the claimed marker. Never raises.
+
+    The injection already happened, and a failing hook would make Claude Code drop
+    the output that carries it: a failure to lock or unlink (OSError, LockTimeout)
+    goes to log_failure, and the claim stays, listed by `resume`.
+    """
+    try:
+        with project_lock(project_dir):
             _unlink_logged(project_dir, claimed)
     except (OSError, LockTimeout) as error:
         log_failure(project_dir, "cleanup of %s" % claimed, error)

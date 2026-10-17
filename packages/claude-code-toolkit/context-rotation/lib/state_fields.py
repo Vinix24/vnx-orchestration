@@ -5,10 +5,15 @@ shipped in a cloned repository, and some of its values reach the model's context
 (additionalContext) or the user's line (systemMessage). So a value read back is
 used only when it has exactly the form the plugin writes: a time in TIME_FORMAT,
 an outdated reason from the closed list OUTDATED_REASONS, a session id of plain
-file-name characters, a digest of 64 hex digits. Paths are checked here for their
-form only; readers show the path the plugin builds itself, never the one read.
-The handover body is the one intended exception: it is injected as the handover,
-and only while it matches the marker's sha256. Standard library only.
+file-name characters, a digest of 64 hex digits, a generation of GENERATION_HEX hex
+digits. Paths are checked here for their form only; readers show the path the
+plugin builds itself, never the one read.
+
+The handover body is the one intended exception: it is injected as the handover.
+After /clear it is injected only while it matches the marker's sha256. When the
+user picks a handover from the `resume` list, the file is injected as it is, and
+the injected context says whether it still holds the text the marker's sha256 was
+taken of (handover_injection.injection_context). Standard library only.
 """
 from __future__ import annotations
 
@@ -23,7 +28,10 @@ TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 _TIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
 _SAFE_ID = re.compile(r"[A-Za-z0-9_-]+")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
-# Two ids share one file name in claimed-<origin>-<successor>.json.
+# One handover the plugin marked ready: its claim, its resume id and its journal lines name it.
+GENERATION_HEX = 16
+_GENERATION = re.compile(r"[0-9a-f]{%d}" % GENERATION_HEX)
+# A session id and a generation share one file name in claimed-<origin>-<generation>.json.
 MAX_SESSION_ID = 120
 ARCHIVE_NAME = re.compile(r"[0-9]{8}T[0-9]{12}Z-[A-Za-z0-9_-]+\.md")
 HANDOVER_NAME = re.compile(r"handover-[A-Za-z0-9_-]+\.md")
@@ -64,6 +72,10 @@ def is_sha256(value: Any) -> bool:
     return isinstance(value, str) and _SHA256.fullmatch(value) is not None
 
 
+def is_generation(value: Any) -> bool:
+    return isinstance(value, str) and _GENERATION.fullmatch(value) is not None
+
+
 def is_count(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
@@ -99,7 +111,7 @@ def marker_value_problem(kind: str, marker: Dict[str, Any]) -> Optional[str]:
 
     written_at always, claimed_at and claimed_file for a claim, outdated_at and
     outdated_reason wherever they are present. An outdated marker may lack the
-    reason: a crash between its rename and its fields leaves it so, and it is then
+    reason: a crash between its move and its fields leaves it so, and it is then
     shown as REASON_NOT_RECORDED.
     """
     times = ("written_at", "claimed_at") if kind == "claimed" else ("written_at",)
@@ -117,11 +129,13 @@ def marker_value_problem(kind: str, marker: Dict[str, Any]) -> Optional[str]:
 # --- the lines of injections.jsonl ------------------------------------------------
 
 # One line per transition of a handover, written before the transition itself.
+# A "kept" line names a file the cleanup found at the handover path that no marker described: no generation.
 JOURNAL_EVENTS: Dict[str, Tuple[str, ...]] = {
-    "ready": ("origin_session_id", "sha256"),
-    "outdated": ("origin_session_id", "sha256", "reason"),
-    "claimed": ("origin_session_id", "session_id", "sha256", "archive"),
-    "injected": ("via", "origin_session_id", "session_id", "handover", "archive", "sha256", "chars", "mode"),
+    "ready": ("origin_session_id", "generation", "sha256"),
+    "outdated": ("origin_session_id", "generation", "sha256", "reason"),
+    "claimed": ("origin_session_id", "generation", "session_id", "sha256", "archive"),
+    "injected": ("via", "origin_session_id", "generation", "session_id", "handover", "archive", "sha256", "chars",
+                 "mode"),
     "kept": ("origin_session_id", "sha256", "archive"),
 }
 INJECTION_VIAS = ("clear", "resume")
@@ -130,6 +144,7 @@ INJECTION_MODES = ("inline", "pointer")
 _RECORD_CHECKS: Dict[str, Callable[[Any], bool]] = {
     "at": is_plugin_time,
     "origin_session_id": is_safe_session_id,
+    "generation": is_generation,
     "session_id": is_safe_session_id,
     "sha256": is_sha256,
     "reason": is_reason,
@@ -142,7 +157,7 @@ _RECORD_CHECKS: Dict[str, Callable[[Any], bool]] = {
 
 
 def _record_value_ok(event: str, field: str, value: Any) -> bool:
-    if event == "injected" and field == "origin_session_id" and value is None:
+    if event == "injected" and field in ("origin_session_id", "generation") and value is None:
         return True  # an archive copy resumed without a line that names its origin
     return _RECORD_CHECKS[field](value)
 

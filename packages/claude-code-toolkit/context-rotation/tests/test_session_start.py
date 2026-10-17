@@ -234,6 +234,11 @@ CRASH_POINTS = {
 }
 
 
+def claim_name(path):
+    """The name a claim has: its origin and the generation of the handover it took."""
+    return "claimed-sess-a-%s.json" % json.loads(path.read_text())["generation"]
+
+
 def run_in_process(project, session_id):
     payload = event("17-SessionStart-clear", project, project / "t.jsonl", session_id)
     env = dict(os.environ, CLAUDE_PID=str(os.getpid()))
@@ -249,9 +254,13 @@ def test_a_crash_between_claim_and_emit_leaves_a_recoverable_handover(tmp_path, 
         with pytest.raises(Crash):
             run_in_process(project, "sess-b")
     [claimed] = rotation(project).glob("claimed-*.json")
-    assert claimed.name == "claimed-sess-a-sess-b.json"
-    assert s.handover.read_text() == VALID_HANDOVER
-    assert len(archived(project)) == (0 if point == "after claim" else 1)
+    assert claimed.name == claim_name(claimed)
+    if point == "after claim":
+        assert s.handover.read_text() == VALID_HANDOVER and archived(project) == []
+    else:  # the original moved into the archive before the emit, as the claim's archive copy
+        assert not s.handover.exists()
+        assert [copy.read_text() for copy in archived(project)] == [VALID_HANDOVER]
+        assert json.loads(claimed.read_text())["archive"] == str(archived(project)[0])
     assert len(injections(project)) == (1 if point == "before emit" else 0)
 
     # At most one automatic injection: a later clear injects nothing and lists the claim.
@@ -347,17 +356,18 @@ def test_a_changed_archive_copy_is_neither_used_nor_overwritten(tmp_path, projec
     [copy] = archived(project)
     copy.write_text("edited by hand\n")
     user = Session(tmp_path, project, "sess-c")
+    [claimed] = rotation(project).glob("claimed-*.json")
 
     lines = context_of(user.expand("resume")).splitlines()
-    assert any("not resumable" in line and "claimed-sess-a-sess-b.json" in line
+    assert any("not resumable" in line and claimed.name in line
                and "does not hold the claimed handover" in line for line in lines), "the claim is listed as resumable"
     assert lines[1].startswith("1. archived")
     # Number 1 is the edited archive file, offered as what it is; the claim is not touched.
     assert VALID_HANDOVER not in context_of(user.expand("resume 1"))
     assert copy.read_text() == "edited by hand\n"
-    assert s.handover.read_text() == VALID_HANDOVER
+    assert not s.handover.exists()  # the original became the archive copy before the crash
     assert [line["handover"] for line in injections(project)] == [None]
-    assert markers(project) == ["claimed-sess-a-sess-b.json"]
+    assert markers(project) == [claimed.name]
 
 
 def test_a_handover_rewritten_between_its_check_and_the_claim_is_not_injected(tmp_path, project, monkeypatch):
@@ -393,9 +403,10 @@ def test_a_newer_handover_written_during_delivery_survives_the_cleanup(tmp_path,
             run_in_process(project, "sess-b")
         else:
             user = Session(tmp_path, project, "sess-b")
+            ident = "ready-sess-a-%s" % json.loads(s.marker("ready").read_text())["generation"]
             context_guard.run(user.payload(
                 "09-UserPromptExpansion-plugin-skill", command_name="context-rotation:rotate",
-                command_args="resume ready-sess-a"), dict(os.environ, CLAUDE_PID=str(os.getpid())),
+                command_args="resume " + ident), dict(os.environ, CLAUDE_PID=str(os.getpid())),
                 hook_runtime.HookRun())
     [copy] = archived(project)
     assert copy.read_text() == VALID_HANDOVER
@@ -410,10 +421,9 @@ def test_a_newer_handover_written_during_delivery_survives_the_cleanup(tmp_path,
 def test_a_failed_cleanup_after_the_emit_keeps_the_injection(tmp_path, project, monkeypatch, capsys):
     s = saved_session(tmp_path, project)
     real_unlink = os.unlink
-    refused = {s.handover.name, "claimed-sess-a-sess-b.json"}
 
     def refuse(path, dir_fd=None):
-        if os.path.basename(str(path)) in refused:
+        if os.path.basename(str(path)) == s.handover.name or os.path.basename(str(path)).startswith("claimed-"):
             raise PermissionError("read-only")
         real_unlink(path, dir_fd=dir_fd)
 
