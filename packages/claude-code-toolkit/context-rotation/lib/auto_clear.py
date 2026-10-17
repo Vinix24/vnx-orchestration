@@ -293,7 +293,7 @@ def start(session: Any, marker: Dict[str, Any]) -> None:
         "generation": generation, "pane": pane, "process": marker["process"], "hook_pid": os.getpid(),
     })
     try:
-        status, _ = run_tmux(["run-shell", "-b", run_shell_line([SCRIPT, pane, origin, generation, job_id])])
+        status, _ = run_tmux(["run-shell", "-b", "-t", pane, run_shell_line([SCRIPT, pane, origin, generation, job_id])])
         if status != 0:
             raise OSError("tmux run-shell exited with status %d" % status)
     except START_FAILURES:

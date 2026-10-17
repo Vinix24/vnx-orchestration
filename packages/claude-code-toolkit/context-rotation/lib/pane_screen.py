@@ -82,7 +82,10 @@ def _sequence_end(line: str, start: int) -> Tuple[int, Optional[str]]:
         return end + 1, None
     if kind == "]":
         return _osc_end(line, start + 2), None
-    return start + 2, None
+    end = start + 1  # intermediate bytes, then one final byte: ESC ( B
+    while end < len(line) and " " <= line[end] <= "/":
+        end += 1
+    return end + 1, None
 
 
 def cells(line: str) -> List[Tuple[str, bool]]:
