@@ -44,14 +44,24 @@ def _valid_lane(lane: str) -> bool:
 _POLL_INTERVAL = 0.5  # seconds between polls for new events
 
 
-def handle_agent_stream(handler: BaseHTTPRequestHandler, terminal: str, since: str | None) -> None:
+def handle_agent_stream(
+    handler: BaseHTTPRequestHandler, terminal: str, since: str | None, dispatch_id: str | None = None,
+) -> None:
     """Stream events for a lane as SSE.
 
     Keeps the connection open, polling every 500ms for new events.
     Stops when the client disconnects (BrokenPipeError / ConnectionResetError).
+
+    Without *dispatch_id* the lane is streamed as ``EventStore.tail_lane``
+    reads it: on a per-run terminal (the headless lane ``ephemeral``,
+    ``plan-gate``) every live run of the lane. With *dispatch_id* only that
+    run's own stream is streamed (``EventStore.tail``).
     """
     if not _valid_lane(terminal):
         _send_json(handler, HTTPStatus.BAD_REQUEST, {"error": f"Invalid lane: {terminal}"})
+        return
+    if dispatch_id is not None and not _LANE_RE.match(dispatch_id):
+        _send_json(handler, HTTPStatus.BAD_REQUEST, {"error": "Invalid dispatch_id"})
         return
 
     # Send SSE headers
@@ -66,7 +76,10 @@ def handle_agent_stream(handler: BaseHTTPRequestHandler, terminal: str, since: s
 
     try:
         while True:
-            events = list(_store.tail(terminal, since=last_timestamp))
+            if dispatch_id is None:
+                events = list(_store.tail_lane(terminal, since=last_timestamp))
+            else:
+                events = list(_store.tail(terminal, since=last_timestamp, dispatch_id=dispatch_id))
             for event in events:
                 line = f"data: {json.dumps(event, separators=(',', ':'))}\n\n"
                 handler.wfile.write(line.encode("utf-8"))
@@ -93,7 +106,9 @@ def handle_agent_stream_status(handler: BaseHTTPRequestHandler) -> None:
     The response keeps the legacy ``terminals`` key (a map of lane id ->
     {event_count, last_timestamp, provider, dispatch_id}) for back-compat, and
     adds ``lanes`` as an ordered list (most-recently-active first) for clients
-    that want deterministic ordering.
+    that want deterministic ordering. A per-run lane's entry in ``lanes`` also
+    carries ``runs``: one entry per live run, whose ``dispatch_id`` a client
+    passes to stream that run alone.
     """
     lanes = _store.list_lanes()
     terminals = {
