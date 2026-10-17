@@ -121,6 +121,27 @@ def test_a_symlink_at_the_state_file_is_replaced_and_its_target_left_alone(tmp_p
     assert "rejected the enforcement state of sess-a" in errors_log(s.project)
 
 
+def test_a_symlink_at_the_handover_path_opens_no_other_file_at_hard(s):
+    target = s.project / "src" / "main.py"
+    target.parent.mkdir()
+    target.write_text("print('kept')\n")
+    rotation(s.project).mkdir(parents=True)
+    s.handover.symlink_to(target)
+    settings_file(s.project, hard_max_denials=20)
+    at(s, HARD)
+    for path in (target, s.handover):  # both writes would land in src/main.py
+        for tool in ("Write", "Edit"):
+            proc = s.pre_tool(tool, {"file_path": str(path), "content": "x"})
+            assert decision(proc) == "deny", (tool, path)
+    assert goes_ahead(s.pre_tool("Read", {"file_path": str(target)}))
+    denials = state_of(s)["denials"]
+    written = s.hook("handover_detector", s.payload(
+        "07-PostToolUse-Write", tool_name="Write", tool_use_id="tool-x",
+        tool_input={"file_path": str(s.handover), "content": "x"}))
+    assert written.returncode == 0, written.stderr
+    assert state_of(s)["denials"] == denials  # a write through the symlink is no handover write
+
+
 # --- 2. no hook path raises, and a failure never denies or holds back ------------------------
 
 def test_a_state_that_cannot_be_written_never_denies_or_holds_back(s):
@@ -349,7 +370,7 @@ def test_the_journal_is_cut_to_its_newest_lines(s, monkeypatch):
     for _ in range(30):
         enforcement_state.update(str(s.project), "sess-a", lambda state: (enforcement_state.deny(state, 1000), None))
     lines = journal(s.project)
-    assert len(lines) <= 30 and lines[-1]["denials"] == 30
+    assert 5 <= len(lines) < 30 and lines[-1]["denials"] == 30
     assert (rotation(s.project) / "enforcement.jsonl").stat().st_size <= 2000 + 200
     assert state_of(s)["denials"] == 30
 

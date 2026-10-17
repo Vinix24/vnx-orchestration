@@ -251,11 +251,12 @@ def on_tool(payload, env, run, session):
         # The handover is about to be written: protect it before it exists.
         run.at("ignore protection")
         rotation_state.ensure_gitignore(session.project_dir)
-        return
     note = None
     if rotation_state.tool_call_outdates(tool_name, tool_input, session.handover):
         note = outdate(session, state_fields.TOOL_CALL_AFTER, run)
-    denial = band_guard.on_tool(payload, session, run)  # decided last: nothing after it can fail the hook
+    # Decided last, so nothing after it can fail the hook; a write of the handover goes ahead
+    # unless a symlink at its path would take it elsewhere (band_guard.writes_handover).
+    denial = band_guard.on_tool(payload, session, run)
     if denial:
         hook_runtime.emit(hook_runtime.deny_output(denial[0], note, denial[1]))
     elif note:

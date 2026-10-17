@@ -9,7 +9,8 @@ write's own transcript entry, taken before the handover is read, so work that
 lands while this hook runs lies after it. Invalid: the model is told exactly what
 is missing (M), and an earlier ready-marker becomes outdated. Valid or not, the
 write clears the denials the force and hard bands counted toward
-hard_max_denials (band_guard.on_handover_write).
+hard_max_denials (band_guard.on_handover_write), unless a symlink at the
+handover path took it to another file (band_guard.writes_handover).
 """
 from __future__ import annotations
 
@@ -40,7 +41,9 @@ def run(payload, env, run_state):
     handover = rotation_state.handover_path(project_dir, session_id)
     if not transcript_work.is_handover_write(payload.get("tool_name"), payload.get("tool_input"), handover):
         return
-    band_guard.on_handover_write(hook_runtime.Session(project_dir, session_id, settings), run_state)
+    session = hook_runtime.Session(project_dir, session_id, settings)
+    if band_guard.writes_handover(payload.get("tool_name"), payload.get("tool_input"), session):
+        band_guard.on_handover_write(session, run_state)
     run_state.at("check transcript")
     cursor = transcript_work.write_position(payload.get("transcript_path"), payload.get("tool_use_id"))
     run_state.at("read handover")

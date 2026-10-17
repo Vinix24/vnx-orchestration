@@ -4,7 +4,8 @@
   force  M: write the handover now  nothing, or a denial of a tool that     held back once per
                                     force_deny_tools names                  crossing (M)
   hard   as force                   denies all but HARD_ALLOWED and a       as force
-                                    Write or Edit of the handover
+                                    Write or Edit of the handover (never
+                                    through a symlink at its path)
 
 M goes to the model (additionalContext, permissionDecisionReason, the Stop
 reason), U to the user (systemMessage). Each crossing gets one user line, at the
@@ -67,9 +68,22 @@ Reply = Optional[Tuple[str, Optional[str]]]
 
 # --- what each level holds back ----------------------------------------------------
 
-def hard_allows(tool_name: Any, tool_input: Any, handover: str) -> bool:
+def writes_handover(tool_name: Any, tool_input: Any, session: hook_runtime.Session) -> bool:
+    """A Write or Edit of the session's handover, while that path holds a regular file or nothing yet.
+
+    transcript_work.is_handover_write compares real paths, so with a symlink at the
+    handover path a write of the file it points to would match too, and so would the
+    write of the handover path, which lands in that file. Neither is a handover write.
+    """
+    if not transcript_work.is_handover_write(tool_name, tool_input, session.handover):
+        return False
+    project_dir, handover = session.project_dir, session.handover
+    return rotation_state.stored_regular(project_dir, handover) or not rotation_state.stored_exists(project_dir, handover)
+
+
+def hard_allows(tool_name: Any, tool_input: Any, session: hook_runtime.Session) -> bool:
     """The calls the hard band lets through: reading, asking, the skill, todos, and writing the handover."""
-    return tool_name in HARD_ALLOWED or transcript_work.is_handover_write(tool_name, tool_input, handover)
+    return tool_name in HARD_ALLOWED or writes_handover(tool_name, tool_input, session)
 
 
 def force_denies(tool_name: Any, settings: Dict[str, Any]) -> bool:
@@ -79,11 +93,9 @@ def force_denies(tool_name: Any, settings: Dict[str, Any]) -> bool:
     return any(fnmatch.fnmatchcase(tool_name, pattern) for pattern in settings["force_deny_tools"])
 
 
-def denies(level: str, tool_name: Any, tool_input: Any, session: hook_runtime.Session) -> bool:
-    """The level holds this call back; the force band never holds back what the hard band allows."""
-    if level not in (FORCE, HARD) or hard_allows(tool_name, tool_input, session.handover):
-        return False
-    return level == HARD or force_denies(tool_name, session.settings)
+def denies(level: str, tool_name: Any, settings: Dict[str, Any]) -> bool:
+    """The level holds back a call the hard band does not allow (on_tool lets those through first)."""
+    return level == HARD or (level == FORCE and force_denies(tool_name, settings))
 
 
 def inform_reason(state: Dict[str, Any], payload: Dict[str, Any]) -> Optional[str]:
@@ -116,14 +128,14 @@ def handover_now(size: int, level: str, session: hook_runtime.Session, why: Opti
 
 def crossing_line(size: int, level: str, session: hook_runtime.Session, why: Optional[str]) -> str:
     """U, once per crossing."""
-    head = "context-rotation: the context is at %.0f%% of the window (%s band)." % (
-        size * 100 / session.settings["window_tokens"], level)
+    head = "context-rotation: the context is at %.0f%% of the window (%s band); the handover goes to %s." % (
+        size * 100 / session.settings["window_tokens"], level, session.handover)
     if why:
         return head + " Nothing is denied or held back: %s." % INFORM_ONLY[why]
     if level == HARD:
-        return head + (" Until the model writes its handover, it may only read and write that handover. "
+        return head + (" Until the model writes it, it may only read and write that handover. "
                        "Type %s to lift this for this session." % RELEASE_COMMAND)
-    return head + " The model is asked to write its handover now; then type /clear to continue in a fresh context."
+    return head + " The model is asked to write it now; then type /clear to continue in a fresh context."
 
 
 def cap_line(state: Dict[str, Any]) -> str:
@@ -193,7 +205,7 @@ def on_prompt(payload: Dict[str, Any], session: hook_runtime.Session, size: int,
 def on_tool(payload: Dict[str, Any], session: hook_runtime.Session, run: hook_runtime.HookRun) -> Reply:
     """(M reason, U line or None) when the band denies this call; None when it goes ahead."""
     tool_name, tool_input = payload.get("tool_name"), payload.get("tool_input")
-    if hard_allows(tool_name, tool_input, session.handover):
+    if hard_allows(tool_name, tool_input, session):
         return None
     size, level = _measured(payload, session, run)
     if level is None:
@@ -201,7 +213,7 @@ def on_tool(payload: Dict[str, Any], session: hook_runtime.Session, run: hook_ru
 
     def change(state):
         events = enforcement_state.observe(state, level)
-        if inform_reason(state, payload) or not denies(level, tool_name, tool_input, session):
+        if inform_reason(state, payload) or not denies(level, tool_name, session.settings):
             return events, None
         events += enforcement_state.deny(state, session.settings["hard_max_denials"])
         told = enforcement_state.tell(state)

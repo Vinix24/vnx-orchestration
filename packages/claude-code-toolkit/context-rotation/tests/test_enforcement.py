@@ -29,6 +29,7 @@ def test_force_asks_for_the_handover_now_and_tells_the_user_once(s):
     assert "Write the handover at %s now" % s.handover in context_of(first)
     assert "in the force band" in context_of(first)
     assert "force band" in message_of(first) and "/clear" in message_of(first)
+    assert "the handover goes to %s." % s.handover in message_of(first)
     second = s.prompt("and more")
     assert "Write the handover at %s now" % s.handover in context_of(second)
     assert "systemMessage" not in output(second)
@@ -64,6 +65,10 @@ def test_hard_lets_reading_asking_the_skill_and_todos_through(s, tool, tool_inpu
 def test_hard_allows_the_handover_write_and_denies_every_other_write(s):
     settings_file(s.project, hard_max_denials=20)
     at(s, HARD)
+    for tool in ("Write", "Edit"):
+        assert goes_ahead(s.pre_tool(tool, {"file_path": str(s.handover), "content": "x"}))
+    s.handover.parent.mkdir(parents=True, exist_ok=True)
+    s.handover.write_text("a first draft")  # once the handover exists, rewriting it goes ahead too
     for tool in ("Write", "Edit"):
         assert goes_ahead(s.pre_tool(tool, {"file_path": str(s.handover), "content": "x"}))
     other_session = rotation(s.project) / "handover-sess-b.md"
