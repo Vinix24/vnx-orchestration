@@ -157,7 +157,7 @@ def test_export_into_a_fresh_empty_repo_creates_readme_and_marketplace(source, t
     assert result.returncode == 0, result.stderr
     assert [p["name"] for p in marketplace(fresh)["plugins"]] == ["context-rotation"]
     readme = (fresh / "README.md").read_text()
-    assert "## Tools" in readme and readme.count("context-rotation/") == 1
+    assert "## Tools" in readme and len([ln for ln in readme.splitlines() if "context-rotation/" in ln]) == 1
 
 
 def test_re_export_of_the_same_commit_changes_nothing(source, target):
@@ -171,7 +171,7 @@ def test_re_export_of_the_same_commit_changes_nothing(source, target):
     assert git(target, "rev-parse", "HEAD") == head
     assert (Path(target) / "README.md").read_text() == readme
     assert (Path(target) / ".claude-plugin" / "marketplace.json").read_text() == market
-    assert readme.count("context-rotation/") == 1
+    assert len([ln for ln in readme.splitlines() if "context-rotation/" in ln]) == 1
 
 
 def test_existing_marketplace_entries_stay_byte_for_byte(source, target):

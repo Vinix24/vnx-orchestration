@@ -144,4 +144,7 @@ vnx_orchestration = [
     ".vnx-data/**",
     "schemas/prep_migrations/**",
     "scripts/*_prep*",
+    # Maintainer tool for exporting the context-rotation plugin to the public
+    # toolkit repo; it has no use inside an installed engine.
+    "scripts/maintenance/export_toolkit_plugin.sh",
 ]
