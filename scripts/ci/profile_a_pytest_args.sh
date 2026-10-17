@@ -218,7 +218,7 @@ emit_xdist_vectors() {
     write_vector "$OUT_DIR/serial.args" -q -p no:xdist -p no:cacheprovider "--timeout=$PER_TEST_TIMEOUT" \
       -k "$QUARANTINE_K" ${IGNORE[@]+"${IGNORE[@]}"} "${positional[@]}"
   fi
-  write_vector "$OUT_DIR/parallel.args" "${BASE_ARGS[@]}" \
+  write_vector "$OUT_DIR/parallel.args" "${BASE_ARGS[@]}" --deselect=tests/test_ci_profile_classification.py \
     ${serial_ignore[@]+"${serial_ignore[@]}"} ${deselect[@]+"${deselect[@]}"} \
     -n "$XDIST_WORKERS" --dist loadfile --no-loadscope-reorder --max-worker-restart=0
 }
@@ -242,6 +242,14 @@ main() {
   rm -f "$OUT_DIR/full.args" "$OUT_DIR/serial.args" "$OUT_DIR/parallel.args"
   build_ignore
   BASE_ARGS=(-q "$ROOT/tests" -p no:cacheprovider "--timeout=$PER_TEST_TIMEOUT" -k "$QUARANTINE_K" ${IGNORE[@]+"${IGNORE[@]}"})
+  # Red runs (d)/(e) of D2 only, on a draft branch that is closed unmerged:
+  # VNX_CI_NARROW replaces the tests directory with a few files.
+  if [ -n "${VNX_CI_NARROW:-}" ]; then
+    local -a narrow=()
+    local p
+    for p in $VNX_CI_NARROW; do narrow+=("$ROOT/$p"); done
+    BASE_ARGS=(-q "${narrow[@]}" -p no:cacheprovider "--timeout=$PER_TEST_TIMEOUT" -k "$QUARANTINE_K" ${IGNORE[@]+"${IGNORE[@]}"})
+  fi
   if [ "$mode" = 0 ]; then
     write_vector "$OUT_DIR/full.args" "${BASE_ARGS[@]}"
     return 0

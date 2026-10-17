@@ -5,6 +5,9 @@ on:
     branches: ["main", "baseline/**"]
   pull_request:
 
+env:
+  VNX_CI_NARROW: "tests/test_ci_contexts.py tests/test_ci_profile_classification.py tests/test_d2_redrun_probe.py"
+
 jobs:
   profile-a:
     name: Profile A (doctor + core tests)
