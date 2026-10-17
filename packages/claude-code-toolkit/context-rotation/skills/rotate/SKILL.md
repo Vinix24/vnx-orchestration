@@ -1,7 +1,7 @@
 ---
 name: rotate
 description: Saves this session's state as a handover so a fresh session can continue after /clear, or picks up an earlier handover. Use when the context-rotation guard asks for a handover, when the user types /context-rotation:rotate, or when the user wants to continue from the work of an earlier session.
-argument-hint: "[write | resume [number]]"
+argument-hint: "[write | resume [number | id]]"
 ---
 
 # Rotate: hand this session over to a fresh one
@@ -11,7 +11,8 @@ fresh session everything it needs to continue. The user then types `/clear`, and
 plugin gives the handover to the new session.
 
 The first word of the arguments picks the action: `write` (also with no arguments) or
-`resume`.
+`resume`. For any other first word the plugin puts its usage line in your context: show
+that line to the user and do nothing else.
 
 ## write
 
@@ -68,18 +69,23 @@ to a session automatically.
 
 - **A numbered list is in your context** (the plugin adds it when the user types
   `/context-rotation:rotate resume`): show it to the user as it is, and tell them to type
-  `/context-rotation:rotate resume <number>` to continue from one.
-- **A handover is in your context** (after `/context-rotation:rotate resume <number>`, or
-  after `/clear`): continue from step 1 under `## Next steps`. First check that the state
-  it describes still holds (files, branches, running processes) and tell the user when
-  it does not. A handover marked outdated needs that check most.
+  `/context-rotation:rotate resume <number>` or `/context-rotation:rotate resume <id>` to
+  continue from one. Each entry ends with its id in brackets. A number means the entry
+  shown under it in the last list of this session, even when newer handovers arrived
+  since; when that entry is gone, or no list was shown yet, the plugin says so and shows
+  the current list instead.
+- **A handover is in your context** (after `/context-rotation:rotate resume <number>` or
+  `resume <id>`, or after `/clear`): continue from step 1 under `## Next steps`. First
+  check that the state it describes still holds (files, branches, running processes)
+  and tell the user when it does not. A handover marked outdated needs that check most.
 - **Neither is in your context** (you started this skill yourself): look in the project's
   `.claude/rotation/` with Glob and Read. First check that `.claude/rotation` and
   `.claude/rotation/archive` are directories and not symlinks (for example with
   `ls -ld`). A symlinked one points outside this project: the plugin uses nothing from
   it, so do not either, and tell the user. `archive/*.md` holds every handover given to a
   session, and its file names start with a UTC time, so the newest sorts last.
-  `injections.jsonl` has one line per handover given, with the session that got it.
+  `injections.jsonl` has one line per step of a handover (`ready`, `outdated`,
+  `claimed`, `injected`, `kept`); an `injected` line names the session that got it.
   `ready-*.json`, `outdated-*.json` and `claimed-*.json` each name a handover that was
   not given to a session yet, or whose hand-over did not finish. Use only a handover
   inside `.claude/rotation/` named for its marker's session (`handover-<session id>.md`)

@@ -3,25 +3,33 @@
 Everything lives under <project>/.claude/rotation/:
 
   .gitignore                    `*`, written before anything else in the directory
-  .lock                         one lock for every marker change in the project
-  state/<session>.json          the guard's per-session counters
+  .lock                         one lock for every marker change and journal line in the project
+  .errors.lock                  the lock of errors.log
+  state/<session>.json          the guard's per-session counters and the resume list it showed
   handover-<session>.md         the handover a session writes
   ready-<session>.json          the handover is valid and covers all work so far
-  outdated-<session>.json       work happened after the handover; never injected
+  outdated-<session>.json       work happened after the handover; never injected automatically
   claimed-<origin>-<new>.json   a session took the handover; removed last
-  archive/<time>-<origin>.md    every injected handover, trimmed to the newest archive_keep
-                                plus every copy a marker on disk still names
-  injections.jsonl              one line per injection
+  archive/<time>-<origin>.md    every injected handover, and every newer generation the cleanup
+                                had to keep there; trimmed to the newest archive_keep plus every
+                                copy a marker on disk still names
+  injections.jsonl              one line per transition, written before the transition: ready,
+                                outdated, claimed, injected, kept; kept to
+                                JOURNAL_LINES_PER_ARCHIVE_COPY lines per archive_keep
   errors.log                    the last failures of the hooks, and rejected markers
 
 Handovers hold a session's working state and must never be committed, hence the
 .gitignore.
 
 Every file here is an input, not a fact: any process of the user can write one,
-and the origin session can rewrite its handover while a successor delivers it.
-So every name and path read from a marker passes marker_problem first, files are
-opened only when they are regular (regular_file), a handover is removed only
-while it still holds the claimed bytes, and an archive copy is never overwritten.
+a cloned repository can ship one, and the origin session can rewrite its handover
+while a successor delivers it. So every name and path read from a marker passes
+marker_problem first, every value that can reach the model's context or the
+user's line passes state_fields, a path is shown as the plugin builds it and
+never as read (read_marker), files are opened only when they are regular and at
+most regular_file.MAX_READ_BYTES long, the original handover is removed only
+while it is still the file the claim read, and an archive copy is never
+overwritten.
 
 The directories are inputs too. `.claude/rotation`, its archive and its state
 directory must each be a real directory: storage_problem is the one gate every
@@ -46,26 +54,24 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import regular_file
+import state_fields
 import transcript_work
 
-_SAFE_ID = re.compile(r"[A-Za-z0-9_-]+")
-_SHA256 = re.compile(r"[0-9a-f]{64}")
 _DIGITS = re.compile(r"^[0-9]+$")
-# Two ids share one file name in claimed-<origin>-<successor>.json.
-MAX_SESSION_ID = 120
+MAX_SESSION_ID = state_fields.MAX_SESSION_ID
 MARKER_VERSION = 1
 MARKER_KINDS = ("ready", "outdated", "claimed")
+MARKER_FILE = re.compile(r"(ready|outdated|claimed)-[A-Za-z0-9_-]+\.json")
 LOCK_TIMEOUT_SECONDS = 5.0
 LOCK_POLL_SECONDS = 0.02
 PS_TIMEOUT_SECONDS = 2.0
-TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
-ARCHIVE_NAME = re.compile(r"[0-9]{8}T[0-9]{12}Z-[A-Za-z0-9_-]+\.md")
-
-
-def is_safe_session_id(session_id: Any) -> bool:
-    """One plain file name: letters, digits, "_" and "-" only, so no separator, dot or NUL."""
-    return (isinstance(session_id, str) and len(session_id) <= MAX_SESSION_ID
-            and _SAFE_ID.fullmatch(session_id) is not None)
+TIME_FORMAT = state_fields.TIME_FORMAT
+ARCHIVE_NAME = state_fields.ARCHIVE_NAME
+JOURNAL = "injections.jsonl"
+ERRORS_LOG = "errors.log"
+# A handover goes through ready, maybe outdated and ready again, claimed and injected.
+JOURNAL_LINES_PER_ARCHIVE_COPY = 10
+is_safe_session_id = state_fields.is_safe_session_id
 
 
 def project_dir_for(payload: Dict[str, Any], env: Dict[str, str]) -> str:
@@ -101,7 +107,7 @@ def archive_dir(project_dir: str) -> str:
 
 
 def injections_path(project_dir: str) -> str:
-    return _in_rotation(project_dir, "injections.jsonl")
+    return _in_rotation(project_dir, JOURNAL)
 
 
 # --- the storage gate and the verified directories ------------------------
@@ -213,13 +219,30 @@ def _name_in(project_dir: str, path: str, parts: Tuple[str, ...]) -> str:
 def read_bytes(project_dir: str, path: Any) -> Optional[bytes]:
     """The bytes of a regular file stored under `.claude/rotation`, read through the verified directory.
 
-    None when absent, unreadable, a symlink, a FIFO or a device, stored anywhere
-    else, or when the storage is refused.
+    None when absent, unreadable, a symlink, a FIFO or a device, above
+    regular_file.MAX_READ_BYTES, stored anywhere else, or when the storage is refused.
     """
     try:
         parts, name = _place(project_dir, path)
         with storage(project_dir, *parts) as directory:
             return regular_file.read_regular(name, directory)
+    except OSError:
+        return None
+
+
+def read_stamped(project_dir: str, path: Any) -> Optional[Tuple[bytes, Dict[str, int]]]:
+    """read_bytes plus regular_file.stamp_of the file those bytes came from; None when read_bytes would be."""
+    try:
+        parts, name = _place(project_dir, path)
+        with storage(project_dir, *parts) as directory:
+            return regular_file.read_stamped(name, directory)
+    except OSError:
+        return None
+
+
+def _lstat_in(directory: int, name: str) -> Optional[os.stat_result]:
+    try:
+        return os.lstat(name, dir_fd=directory)
     except OSError:
         return None
 
@@ -269,19 +292,51 @@ def _new_temp(directory: int, prefix: str) -> Tuple[int, str]:
             continue
 
 
+def _replace_in(directory: int, name: str, data: bytes, prefix: str) -> None:
+    """Replace `name` in the directory `directory` holds whole: a complete temporary file renamed over it."""
+    descriptor, temp = _new_temp(directory, prefix)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+        os.replace(temp, name, src_dir_fd=directory, dst_dir_fd=directory)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temp, dir_fd=directory)
+        raise
+
+
 def _atomic_write(project_dir: str, target: str, data: bytes, prefix: str) -> None:
-    """Replace a stored file whole: a complete temporary file renamed over it, in the verified directory."""
+    """Replace a stored file whole, in the verified directory."""
     parts, name = _place(project_dir, target)
     with storage(project_dir, *parts, create=True) as directory:
-        descriptor, temp = _new_temp(directory, prefix)
-        try:
-            with os.fdopen(descriptor, "wb") as handle:
-                handle.write(data)
-            os.replace(temp, name, src_dir_fd=directory, dst_dir_fd=directory)
-        except BaseException:
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(temp, dir_fd=directory)
+        _replace_in(directory, name, data, prefix)
+
+
+def _append_lines(directory: int, name: str, data: bytes, prefix: str) -> None:
+    """Append whole lines to a log in the directory `directory` holds.
+
+    One write with O_APPEND, so no line of another writer is lost or torn. Something
+    other than a regular file or a directory at the name (a FIFO, a symlink) is not
+    the plugin's log: it is replaced by a log that holds these lines.
+    """
+    try:
+        regular_file.append_regular(name, data, directory)
+    except OSError:
+        found = _lstat_in(directory, name)
+        if found is None or stat.S_ISREG(found.st_mode) or stat.S_ISDIR(found.st_mode):
             raise
+        _replace_in(directory, name, data, prefix)
+
+
+def _keep_last_lines(directory: int, name: str, keep: int, prefix: str) -> None:
+    """Cut a log down to its last `keep` lines. Call while holding the lock its appenders hold."""
+    raw = regular_file.read_tail(name, directory)
+    found = _lstat_in(directory, name)
+    if raw is None or found is None:
+        return
+    lines = raw.splitlines(keepends=True)
+    if len(lines) > keep or found.st_size > len(raw):
+        _replace_in(directory, name, b"".join(lines[-keep:]), prefix)
 
 
 def _rename_in_rotation(project_dir: str, source: str, target: str) -> None:
@@ -347,51 +402,28 @@ def utc_now() -> str:
 
 
 def parse_utc(stamp: Any) -> Optional[datetime]:
-    if not isinstance(stamp, str):
+    if not state_fields.is_plugin_time(stamp):
         return None
-    try:
-        return datetime.strptime(stamp, TIME_FORMAT).replace(tzinfo=timezone.utc)
-    except ValueError:
-        return None
+    return datetime.strptime(stamp, TIME_FORMAT).replace(tzinfo=timezone.utc)
 
 
 def errors_path(project_dir: str) -> str:
-    return _in_rotation(project_dir, "errors.log")
+    return _in_rotation(project_dir, ERRORS_LOG)
 
 
 def error_lines(project_dir: str) -> List[str]:
-    raw = read_bytes(project_dir, errors_path(project_dir))
+    try:
+        with storage(project_dir) as directory:
+            raw = regular_file.read_tail(ERRORS_LOG, directory)
+    except OSError:
+        return []
     return raw.decode("utf-8", "replace").splitlines() if raw is not None else []
 
 
-def log_error(project_dir: str, line: str) -> bool:
-    """Append one line to rotation/errors.log, keeping the last ERROR_LOG_MAX_LINES. True once written.
-
-    Never raises: the log is a courtesy of a hook that already failed. It is written
-    in the verified directory, so storage that is refused gets no log (False).
-    """
-    try:
-        ensure_gitignore(project_dir)
-        target = errors_path(project_dir)
-        lines = (error_lines(project_dir) + [line.replace("\n", " ")])[-ERROR_LOG_MAX_LINES:]
-        _atomic_write(project_dir, target, ("\n".join(lines) + "\n").encode("utf-8"), ".errors-")
-    except Exception:
-        # The log is best effort; a failure here must not mask the original error.
-        return False
-    return True
-
-
-def log_failure(project_dir: str, step: str, error: BaseException) -> None:
-    """A failure a hook caught so it can still exit 0: one line in errors.log, else on stderr."""
-    line = " ".join(("context-rotation: %s failed: %s: %s" % (step, type(error).__name__, error)).split())
-    if not log_error(project_dir, "%s %s" % (utc_now(), line)):
-        stderr_line(line)
-
-
-# --- the project lock ----------------------------------------------------
+# --- the locks -----------------------------------------------------------
 
 class LockTimeout(Exception):
-    """Another hook process held the project lock for longer than the timeout."""
+    """Another hook process held a lock of the project for longer than the timeout."""
 
 
 _HELD: Dict[str, List[int]] = {}
@@ -410,15 +442,14 @@ def _acquire(descriptor: int, path: str, timeout: float) -> None:
 
 
 @contextlib.contextmanager
-def project_lock(project_dir: str, timeout: float = LOCK_TIMEOUT_SECONDS) -> Iterator[None]:
-    """Serialise marker changes across the parallel hook processes of a project.
+def _locked(project_dir: str, name: str, timeout: float) -> Iterator[None]:
+    """Hold the lock file `name` in `.claude/rotation`; re-entrant within one process.
 
-    Re-entrant within one process. Writes the .gitignore first, as the lock file is
-    the first file a marker change creates. The lock file is opened in the verified
-    directory and never through a symlink.
+    Writes the .gitignore first, as a lock file is the first file a change creates.
+    The lock file is opened in the verified directory and never through a symlink.
     """
     ensure_gitignore(project_dir)
-    path = _in_rotation(project_dir, ".lock")
+    path = _in_rotation(project_dir, name)
     held = _HELD.get(path)
     if held is not None:
         held[1] += 1
@@ -428,7 +459,7 @@ def project_lock(project_dir: str, timeout: float = LOCK_TIMEOUT_SECONDS) -> Ite
             held[1] -= 1
         return
     with storage(project_dir) as directory:
-        descriptor = os.open(".lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o644, dir_fd=directory)
+        descriptor = os.open(name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o644, dir_fd=directory)
     try:
         _acquire(descriptor, path, timeout)
         _HELD[path] = [descriptor, 1]
@@ -439,6 +470,38 @@ def project_lock(project_dir: str, timeout: float = LOCK_TIMEOUT_SECONDS) -> Ite
             fcntl.flock(descriptor, fcntl.LOCK_UN)
     finally:
         os.close(descriptor)
+
+
+def project_lock(project_dir: str, timeout: float = LOCK_TIMEOUT_SECONDS):
+    """Serialise marker changes and journal lines across the parallel hook processes of a project."""
+    return _locked(project_dir, ".lock", timeout)
+
+
+def log_error(project_dir: str, line: str) -> bool:
+    """Append one line to rotation/errors.log, keeping the last ERROR_LOG_MAX_LINES. True once written.
+
+    Every writer appends under the lock of errors.log (not the project lock, which
+    may be what failed), and the cut to the last lines happens under it too, so two
+    failures at the same moment both keep their line. Never raises: the log is a
+    courtesy of a hook that already failed. It is written in the verified directory,
+    so storage that is refused gets no log (False).
+    """
+    data = (line.replace("\n", " ") + "\n").encode("utf-8")
+    try:
+        with _locked(project_dir, ".errors.lock", LOCK_TIMEOUT_SECONDS), storage(project_dir) as directory:
+            _append_lines(directory, ERRORS_LOG, data, ".errors-")
+            _keep_last_lines(directory, ERRORS_LOG, ERROR_LOG_MAX_LINES, ".errors-")
+    except Exception:
+        # The log is best effort; a failure here must not mask the original error.
+        return False
+    return True
+
+
+def log_failure(project_dir: str, step: str, error: BaseException) -> None:
+    """A failure a hook caught so it can still exit 0: one line in errors.log, else on stderr."""
+    line = " ".join(("context-rotation: %s failed: %s: %s" % (step, type(error).__name__, error)).split())
+    if not log_error(project_dir, "%s %s" % (utc_now(), line)):
+        stderr_line(line)
 
 
 # --- process identity ----------------------------------------------------
@@ -499,16 +562,16 @@ def _plain_absolute(path: Any) -> bool:
 
 
 def _same_place(path: Any, expected: str) -> bool:
-    """`path` names the file `expected` names: the same name in the same directory."""
-    if not _plain_absolute(path) or os.path.basename(path) != os.path.basename(expected):
+    """`path` names the file `expected` names: the same name in the same directory, in plain form."""
+    if not state_fields.is_plain_path(path) or os.path.basename(path) != os.path.basename(expected):
         return False
     return os.path.realpath(os.path.dirname(path)) == os.path.realpath(os.path.dirname(expected))
 
 
 def archive_problem(project_dir: str, archive: Any) -> Optional[str]:
     """Why `archive` is no place for an archive copy; None when it is a direct child of archive_dir."""
-    if not _plain_absolute(archive):
-        return "its archive is not an absolute path"
+    if not state_fields.is_plain_path(archive):
+        return "its archive is not a plain absolute path"
     if ARCHIVE_NAME.fullmatch(os.path.basename(archive)) is None:
         return "its archive is not named like an archive copy"
     found = _stored_stat(project_dir, archive)
@@ -519,14 +582,21 @@ def archive_problem(project_dir: str, archive: Any) -> Optional[str]:
     return None
 
 
-def _position_problem(position: Any) -> Optional[str]:
+def _position_problem(position: Any, session_id: str) -> Optional[str]:
+    """Why a transcript position is not one of the session's own transcript; None when it is (or absent).
+
+    Claude Code keeps a session's transcript as `<session id>.jsonl`, so a position
+    naming any other file belongs to another session or to no session at all.
+    """
     if position is None:
         return None
+    path = position.get("path") if isinstance(position, dict) else None
     size = position.get("size") if isinstance(position, dict) else None
-    if (not isinstance(position, dict) or not _plain_absolute(position.get("path"))
-            or not isinstance(size, int) or isinstance(size, bool) or size < 0
+    if (not _plain_absolute(path) or os.path.basename(path) != session_id + ".jsonl"
+            or not state_fields.is_count(size)
             or not isinstance(position.get("last_uuid"), (str, type(None)))):
-        return "its transcript position is not a path, a size and an entry id"
+        return ("its transcript position is not the session's own transcript (%s.jsonl), a size and an entry id"
+                % session_id)
     return None
 
 
@@ -549,8 +619,9 @@ def marker_problem(project_dir: str, path: str, marker: Any) -> Optional[str]:
     session_id is a plain file name, whose sha256 (and for a claim claimed_sha256)
     is a digest, whose own file name is the one that id gives for its kind, whose
     handover is that session's handover path, whose archive (always for a claim)
-    is a direct child of archive_dir, and whose transcript position and tool-use
-    id have their shapes.
+    is a direct child of archive_dir, whose transcript position is one of the
+    session's own transcript, and whose times, outdated reason and claimed file
+    are values the plugin writes (state_fields.marker_value_problem).
     """
     if not isinstance(marker, dict) or marker.get("version") != MARKER_VERSION:
         return "it is not a version %d marker" % MARKER_VERSION
@@ -558,7 +629,7 @@ def marker_problem(project_dir: str, path: str, marker: Any) -> Optional[str]:
         return "its session_id is not a plain file name"
     kind = marker_kind(path)
     for field in ("sha256", "claimed_sha256") if kind == "claimed" else ("sha256",):
-        if not isinstance(marker.get(field), str) or _SHA256.fullmatch(marker[field]) is None:
+        if not state_fields.is_sha256(marker.get(field)):
             return "its %s is not a sha256 digest" % field
     if kind is None or os.path.basename(path) != _marker_name(kind, marker):
         return "its file name does not match its session_id"
@@ -571,14 +642,16 @@ def marker_problem(project_dir: str, path: str, marker: Any) -> Optional[str]:
             return problem
     if not isinstance(marker.get("tool_use_id"), (str, type(None))):
         return "its tool_use_id is not a string"
-    return _position_problem(marker.get("transcript"))
+    return (_position_problem(marker.get("transcript"), marker["session_id"])
+            or state_fields.marker_value_problem(kind, marker))
 
 
 def _marker_json(project_dir: str, path: str) -> Tuple[Any, Optional[str]]:
     """(parsed JSON, None), (None, why) for an unusable file, (None, None) when absent. No validation."""
     raw = read_bytes(project_dir, path)
     if raw is None:
-        return None, ("it is not a regular file" if stored_exists(project_dir, path) else None)
+        unusable = "it is not a regular file of at most %d bytes" % regular_file.MAX_READ_BYTES
+        return None, (unusable if stored_exists(project_dir, path) else None)
     try:
         return json.loads(raw.decode("utf-8")), None
     except ValueError:
@@ -586,12 +659,22 @@ def _marker_json(project_dir: str, path: str) -> Tuple[Any, Optional[str]]:
 
 
 def read_marker(project_dir: str, path: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """(marker, None) when usable, (None, why) when it must not be used, (None, None) when absent."""
+    """(marker, None) when usable, (None, why) when it must not be used, (None, None) when absent.
+
+    A usable marker carries the paths the plugin builds itself: its handover and
+    archive name the same files as the ones read (marker_problem checked that), in
+    the form handover_path and archive_dir give, so no path text from disk is shown.
+    """
     marker, why = _marker_json(project_dir, path)
     if marker is None:
         return None, why
     problem = marker_problem(project_dir, path, marker)
-    return (None, problem) if problem else (marker, None)
+    if problem:
+        return None, problem
+    marker["handover"] = handover_path(project_dir, marker["session_id"])
+    if "archive" in marker:
+        marker["archive"] = os.path.join(archive_dir(project_dir), os.path.basename(marker["archive"]))
+    return marker, None
 
 
 def stderr_line(line: str) -> None:
@@ -604,13 +687,23 @@ def stderr_line(line: str) -> None:
         return
 
 
+def shown_marker_path(path: str) -> str:
+    """A marker path as it may be shown: a name the plugin does not write is not shown at all."""
+    if MARKER_FILE.fullmatch(os.path.basename(path)) is None:
+        return "a file whose name the plugin does not write, in %s" % os.path.dirname(path)
+    return path
+
+
 def report_rejected(project_dir: str, path: str, why: str) -> None:
     """One stderr line and one errors.log line for a rejected marker, while that line is in the log.
 
     The key names the file and the sha256 of its bytes, so a marker that changes
-    is reported again. The marker itself is left on disk for the user.
+    is reported again. A file name the plugin does not write is escaped to one
+    plain line. The marker itself is left on disk for the user.
     """
-    key = "rejected %s (sha256 %s)" % (os.path.basename(path), sha256_hex(read_bytes(project_dir, path) or b"")[:12])
+    name = os.path.basename(path)
+    shown = name if MARKER_FILE.fullmatch(name) else ascii(name)
+    key = "rejected %s (sha256 %s)" % (shown, sha256_hex(read_bytes(project_dir, path) or b"")[:12])
     with project_lock(project_dir):
         if any(key in line for line in error_lines(project_dir)):
             return
@@ -628,7 +721,8 @@ def load_marker(project_dir: str, path: str) -> Optional[Dict[str, Any]]:
 
 
 def new_marker(session_id: str, handover: str, data: bytes, env: Dict[str, str],
-               transcript_path: Any, tool_use_id: Any) -> Dict[str, Any]:
+               position: Optional[Dict[str, Any]], tool_use_id: Any) -> Dict[str, Any]:
+    """A ready-marker; `position` is the transcript position the caller took before it read `data`."""
     return {
         "version": MARKER_VERSION,
         "session_id": session_id,
@@ -637,15 +731,80 @@ def new_marker(session_id: str, handover: str, data: bytes, env: Dict[str, str],
         "chars": len(data.decode("utf-8", "replace")),
         "process": process_identity(env),
         "tmux_pane": env.get("TMUX_PANE") or None,
-        "transcript": transcript_work.position(transcript_path),
+        "transcript": position,
         "tool_use_id": tool_use_id if isinstance(tool_use_id, str) and tool_use_id else None,
         "written_at": utc_now(),
         "announced": False,
     }
 
 
+# --- the journal: injections.jsonl ------------------------------------------
+
+def append_journal(project_dir: str, record: Dict[str, Any]) -> None:
+    """One line in injections.jsonl, appended under the project lock in the verified directory.
+
+    The line holds only values the plugin writes: one that state_fields.record_problem
+    would refuse to read back raises ValueError and is not written.
+    """
+    problem = state_fields.record_problem(record)
+    if problem:
+        raise ValueError("journal line refused: %s" % problem)
+    line = (json.dumps(record, sort_keys=True) + "\n").encode("utf-8")
+    with project_lock(project_dir), storage(project_dir) as directory:
+        _append_lines(directory, JOURNAL, line, ".journal-")
+
+
+def journal(project_dir: str, event: str, **fields: Any) -> None:
+    """The line of one transition, stamped now. Written before the transition it records."""
+    append_journal(project_dir, dict(fields, event=event, at=utc_now()))
+
+
+def log_injection(project_dir: str, record: Dict[str, Any]) -> None:
+    """The line of an injection (event "injected"), written before the handover is emitted."""
+    append_journal(project_dir, record)
+
+
+def read_injections(project_dir: str) -> List[Dict[str, Any]]:
+    """The lines of injections.jsonl that state_fields.record_problem accepts, oldest first.
+
+    The journal is history: the markers on disk are the truth of what is waiting,
+    so a line whose transition never happened (a crash in between) changes nothing.
+    """
+    try:
+        with storage(project_dir) as directory:
+            raw = regular_file.read_tail(JOURNAL, directory)
+    except OSError:
+        return []
+    records = []
+    for line in (raw or b"").decode("utf-8", "replace").splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if state_fields.record_problem(record) is None:
+            records.append(record)
+    return records
+
+
+def trim_journal(project_dir: str, archive_keep: int) -> None:
+    """Keep the newest JOURNAL_LINES_PER_ARCHIVE_COPY × archive_keep lines of injections.jsonl.
+
+    Under the project lock every appender holds, in the verified directory. Runs in
+    the SessionStart hook and never raises: a failure goes to log_failure.
+    """
+    if not stored_regular(project_dir, injections_path(project_dir)):
+        return
+    try:
+        with project_lock(project_dir), storage(project_dir) as directory:
+            _keep_last_lines(directory, JOURNAL, JOURNAL_LINES_PER_ARCHIVE_COPY * archive_keep, ".journal-")
+    except (OSError, LockTimeout) as error:
+        log_failure(project_dir, "journal trim", error)
+
+
+# --- the transitions of a marker ------------------------------------------------
+
 def mark_ready(project_dir: str, marker: Dict[str, Any]) -> str:
-    """Write the session's ready-marker; a valid outdated one of the session goes.
+    """Write the session's ready-marker, after its line; a valid outdated one of the session goes.
 
     The ready path is this session's own: a rejected marker there is reported,
     then replaced. A rejected outdated marker is reported and left.
@@ -654,6 +813,7 @@ def mark_ready(project_dir: str, marker: Dict[str, Any]) -> str:
     target = marker_path(project_dir, "ready", session_id)
     with project_lock(project_dir):
         load_marker(project_dir, target)
+        journal(project_dir, "ready", origin_session_id=session_id, sha256=marker["sha256"])
         write_json(project_dir, target, marker)
         stale = marker_path(project_dir, "outdated", session_id)
         if load_marker(project_dir, stale) is not None:
@@ -662,13 +822,22 @@ def mark_ready(project_dir: str, marker: Dict[str, Any]) -> str:
 
 
 def mark_outdated(project_dir: str, session_id: str, reason: str, notified: bool) -> Optional[Dict[str, Any]]:
-    """Rename the ready-marker to outdated with the reason. None when there was none."""
+    """Rename the ready-marker to outdated with the reason, after its line. None when there was none.
+
+    `reason` is one of state_fields.OUTDATED_REASONS (ValueError otherwise), so the
+    reason a reader shows is always one the plugin wrote. The rename comes before
+    the fields: a crash in between leaves an outdated marker without a reason,
+    which is never injected automatically and is listed as REASON_NOT_RECORDED.
+    """
+    if not state_fields.is_reason(reason):
+        raise ValueError("%r is not an outdated reason the plugin writes" % (reason,))
     source = marker_path(project_dir, "ready", session_id)
     target = marker_path(project_dir, "outdated", session_id)
     with project_lock(project_dir):
         marker = load_marker(project_dir, source)
         if marker is None:
             return None
+        journal(project_dir, "outdated", origin_session_id=session_id, sha256=marker["sha256"], reason=reason)
         _rename_in_rotation(project_dir, source, target)
         marker.update(outdated_at=utc_now(), outdated_reason=reason, notified=notified)
         write_json(project_dir, target, marker)
@@ -724,13 +893,13 @@ def over_age(marker: Dict[str, Any], settings: Dict[str, Any], now: Optional[dat
 
 def outdated_reason(marker: Dict[str, Any], settings: Dict[str, Any], data: Optional[bytes],
                     now: Optional[datetime] = None) -> Optional[str]:
-    """Why this ready-marker no longer describes the session's work; None while it does."""
+    """Why this ready-marker no longer describes the session's work (one of OUTDATED_REASONS); None while it does."""
     if data is None:
-        return "the handover file is gone"
+        return state_fields.FILE_GONE
     if sha256_hex(data) != marker["sha256"]:
-        return "the handover file changed after it was checked"
+        return state_fields.FILE_CHANGED
     if over_age(marker, settings, now):
-        return "it is older than %d minutes" % settings["handover_max_age_minutes"]
+        return state_fields.OVER_AGE
     return transcript_work.stale_reason(marker.get("transcript"), marker["handover"], marker.get("tool_use_id"))
 
 
@@ -754,23 +923,28 @@ def claim(project_dir: str, source: str, successor: str,
 
     Under the project lock the handover is read, and the marker is rewritten in
     place with the successor, the time, the archive path the handover is copied to
-    next, and `claimed_sha256`, the sha256 of exactly the bytes handed over (the
-    claimed generation), then renamed to its claimed name. A claimed marker is
-    therefore never seen without those fields, and `sha256` keeps meaning the bytes
-    the marker was checked against. With `as_checked`, the handover must still hold
-    those bytes. None when the marker is gone or rejected, or the handover is gone
-    or (with `as_checked`) changed.
+    next, `claimed_sha256` (the sha256 of exactly the bytes handed over) and
+    `claimed_file` (the inode, size and modification time of the file they came
+    from), then renamed to its claimed name; the claim's line in injections.jsonl
+    comes first. A claimed marker is therefore never seen without those fields,
+    and `sha256` keeps meaning the bytes the marker was checked against. With
+    `as_checked`, the handover must still hold those bytes. None when the marker is
+    gone or rejected, or the handover is gone or (with `as_checked`) changed.
     """
     with project_lock(project_dir):
         marker = load_marker(project_dir, source)
-        data = read_bytes(project_dir, marker["handover"]) if marker is not None else None
-        if data is None or (as_checked and sha256_hex(data) != marker["sha256"]):
+        read = read_stamped(project_dir, marker["handover"]) if marker is not None else None
+        if read is None or (as_checked and sha256_hex(read[0]) != marker["sha256"]):
             return None
+        data, stamp = read
         now = datetime.now(timezone.utc)
         marker.update(
             claimed_by=successor, claimed_at=now.strftime(TIME_FORMAT),
             archive=plan_archive(project_dir, marker["session_id"], now), claimed_sha256=sha256_hex(data),
+            claimed_file=stamp,
         )
+        journal(project_dir, "claimed", origin_session_id=marker["session_id"], session_id=successor,
+                sha256=marker["claimed_sha256"], archive=marker["archive"])
         target = claimed_path(project_dir, marker["session_id"], successor)
         write_json(project_dir, source, marker)
         try:
@@ -825,26 +999,6 @@ def claimed_bytes(project_dir: str, marker: Dict[str, Any]) -> Tuple[Optional[by
     return data, None
 
 
-def log_injection(project_dir: str, record: Dict[str, Any]) -> None:
-    line = json.dumps(record, sort_keys=True) + "\n"
-    name = _name_in(project_dir, injections_path(project_dir), ())
-    with project_lock(project_dir), storage(project_dir) as directory:
-        regular_file.append_regular(name, line.encode("utf-8"), directory)
-
-
-def read_injections(project_dir: str) -> List[Dict[str, Any]]:
-    raw = read_bytes(project_dir, injections_path(project_dir))
-    records = []
-    for line in (raw or b"").decode("utf-8", "replace").splitlines():
-        try:
-            record = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(record, dict):
-            records.append(record)
-    return records
-
-
 def _unlink_logged(project_dir: str, path: str) -> None:
     try:
         remove_in_rotation(project_dir, path)
@@ -854,26 +1008,97 @@ def _unlink_logged(project_dir: str, path: str) -> None:
         log_failure(project_dir, "cleanup of %s" % path, error)
 
 
-def finish_claim(project_dir: str, claimed: str, marker: Dict[str, Any]) -> None:
-    """After the emit: remove the original handover if it still holds the claimed bytes, then the claimed marker.
+# --- removing the original: only the file the claim read ------------------------
 
-    An original with other bytes is a newer handover, written while this one was
-    delivered: it stays, and so does its ready marker. The compare and the unlink
-    run under the project lock, as one step against the other hook processes.
-    Never raises: the injection already happened, and a failing hook would make
-    Claude Code drop the output that carries it. A failure to lock, read or unlink
-    (OSError, LockTimeout) goes to log_failure, and what was not removed stays: a
-    claim that could not be finished is listed by `resume`.
+def _still_claimed(directory: int, name: str, marker: Dict[str, Any]) -> Tuple[bool, Optional[bytes]]:
+    """(the file set aside is the one the claim read, its bytes): same stamp before and after the read, same sha256."""
+    before = _lstat_in(directory, name)
+    data = regular_file.read_regular(name, directory)
+    after = _lstat_in(directory, name)
+    same = (before is not None and after is not None and data is not None
+            and regular_file.stamp_of(before) == regular_file.stamp_of(after) == marker["claimed_file"]
+            and sha256_hex(data) == marker["claimed_sha256"])
+    return same, data
+
+
+def _list_kept(project_dir: str, marker: Dict[str, Any], data: Optional[bytes]) -> None:
+    """A kept original that no ready-marker of its session names gets an outdated one, so `resume` lists it."""
+    session_id = marker["session_id"]
+    if data is None or stored_exists(project_dir, marker_path(project_dir, "ready", session_id)):
+        return
+    now = utc_now()
+    kept = {field: marker.get(field) for field in ("version", "session_id", "handover", "process", "tmux_pane")}
+    kept.update(sha256=sha256_hex(data), chars=len(data.decode("utf-8", "replace")), transcript=None,
+                tool_use_id=None, written_at=now, announced=False, outdated_at=now,
+                outdated_reason=state_fields.FILE_CHANGED, notified=True)
+    journal(project_dir, "outdated", origin_session_id=session_id, sha256=kept["sha256"],
+            reason=state_fields.FILE_CHANGED)
+    write_json(project_dir, marker_path(project_dir, "outdated", session_id), kept)
+
+
+def _keep_in_archive(project_dir: str, marker: Dict[str, Any], aside: str, data: Optional[bytes]) -> None:
+    """The set-aside file is a generation between the claimed one and a newer one at the original path."""
+    archived = os.path.join(archive_dir(project_dir), aside)
+    if data is None:
+        log_error(project_dir, "%s context-rotation: kept %s, a handover written during its cleanup" % (
+            utc_now(), archived))
+        return
+    journal(project_dir, "kept", origin_session_id=marker["session_id"], sha256=sha256_hex(data), archive=archived)
+
+
+def _retire_original(project_dir: str, marker: Dict[str, Any]) -> None:
+    """Remove the original handover only when it is still the file the claim read. Call under the project lock.
+
+    Claude Code's Write tool does not take the project lock, so the original can
+    be written at any moment. It is first renamed into the archive under a new
+    name: from then on a write to the original path makes a new file there, which
+    is never touched. The file set aside is compared with what the claim recorded
+    (inode, size, modification time, sha256); only the very file the claim read is
+    removed. Anything else goes back to the original path, listed through its own
+    ready-marker or an outdated one (_list_kept), or stays in the archive when a
+    newer file took the path meanwhile. A crash in between leaves it in the archive.
+    """
+    name = _name_in(project_dir, marker["handover"], ())
+    aside = os.path.basename(plan_archive(project_dir, marker["session_id"]))
+    with storage(project_dir) as rotation, storage(project_dir, "archive", create=True) as archive:
+        found = _lstat_in(rotation, name)
+        if found is None or not stat.S_ISREG(found.st_mode):
+            return
+        os.rename(name, aside, src_dir_fd=rotation, dst_dir_fd=archive)
+        same, data = _still_claimed(archive, aside, marker)
+        if same:
+            os.unlink(aside, dir_fd=archive)
+            return
+        try:
+            os.link(aside, name, src_dir_fd=archive, dst_dir_fd=rotation, follow_symlinks=False)
+        except FileExistsError:
+            _keep_in_archive(project_dir, marker, aside, data)
+            return
+        os.unlink(aside, dir_fd=archive)
+    _list_kept(project_dir, marker, data)
+
+
+def finish_claim(project_dir: str, claimed: str, marker: Dict[str, Any]) -> None:
+    """After the emit: retire the original handover (only the file the claim read), then remove the claimed marker.
+
+    A newer handover, written while this one was delivered, stays, and so does its
+    ready marker. Never raises: the injection already happened, and a failing hook
+    would make Claude Code drop the output that carries it. A failure to lock,
+    move, read or unlink (OSError, LockTimeout) goes to log_failure, and what was
+    not removed stays: a claim that could not be finished is listed by `resume`.
     """
     try:
         with project_lock(project_dir):
-            data = read_bytes(project_dir, marker["handover"])
-            if data is not None and sha256_hex(data) == marker["claimed_sha256"]:
-                _unlink_logged(project_dir, marker["handover"])
+            try:
+                _retire_original(project_dir, marker)
+            except OSError as error:
+                log_failure(project_dir, "cleanup of %s" % marker["handover"], error)
             _unlink_logged(project_dir, claimed)
     except (OSError, LockTimeout) as error:
         log_failure(project_dir, "cleanup of %s" % claimed, error)
 
+
+# --- trimming the archive ------------------------------------------------------
 
 def _archive_names(directory: int) -> List[str]:
     """Archive copies by name, oldest first: the regular files named like one in the directory `directory` holds."""
@@ -955,14 +1180,18 @@ GONE = "gone"
 def scan_markers(project_dir: str, kind: str) -> Tuple[List[Tuple[str, Dict[str, Any]]], List[Tuple[str, str]]]:
     """([(path, marker)] that pass marker_problem, [(path, why)] that do not), by file name.
 
-    A rejected marker is reported once and left on disk.
+    A file of that kind whose name the plugin does not write (MARKER_FILE) is
+    rejected without being read. A rejected marker is reported once and left on disk.
     """
     found, rejected = [], []
     for name in sorted(_stored_names(project_dir)):
         if not (name.startswith(kind + "-") and name.endswith(".json")):
             continue
         path = _in_rotation(project_dir, name)
-        marker, why = read_marker(project_dir, path)
+        if MARKER_FILE.fullmatch(name) is None:
+            marker, why = None, "its file name is not one the plugin writes"
+        else:
+            marker, why = read_marker(project_dir, path)
         if why:
             report_rejected(project_dir, path, why)
             rejected.append((path, why))
@@ -982,21 +1211,26 @@ def why_not_resumable(project_dir: str, kind: str, marker: Dict[str, Any]) -> Op
         if not (stored_exists(project_dir, marker["archive"]) or stored_exists(project_dir, marker["handover"])):
             return GONE
         return claimed_bytes(project_dir, marker)[1]
-    if not stored_exists(project_dir, marker["handover"]):
+    found = _stored_stat(project_dir, marker["handover"])
+    if found is None:
         return GONE
-    if not stored_regular(project_dir, marker["handover"]):
+    if not stat.S_ISREG(found.st_mode):
         return "its handover %s is not a regular file" % marker["handover"]
+    if found.st_size > regular_file.MAX_READ_BYTES:
+        return "its handover %s is larger than %d bytes" % (marker["handover"], regular_file.MAX_READ_BYTES)
     return None
 
 
 def survey(project_dir: str, exclude_session: Optional[str]) -> Tuple[List[Dict[str, Any]], List[Tuple[str, str]]]:
     """(handovers not continued yet, [(marker path, why it cannot be resumed)]).
 
-    Unfinished claims come first, then ready and outdated markers, newest first
-    within each group. The excluded session's own ready and outdated markers are
-    left out, and so is a marker whose files the user deleted.
+    Three groups in this order, each newest first: unfinished claims (by claimed_at),
+    ready markers, then outdated markers (both by written_at). The excluded
+    session's own ready and outdated markers are left out, and so is a marker whose
+    files the user deleted.
     """
-    claims, waiting, blocked = [], [], []
+    groups: Dict[str, List[Dict[str, Any]]] = {kind: [] for kind in MARKER_KINDS}
+    blocked = []
     for kind in ("claimed", "ready", "outdated"):
         found, rejected = scan_markers(project_dir, kind)
         blocked += rejected
@@ -1005,12 +1239,13 @@ def survey(project_dir: str, exclude_session: Optional[str]) -> Tuple[List[Dict[
                 continue
             why = why_not_resumable(project_dir, kind, marker)
             if why is None:
-                at = marker.get("claimed_at" if kind == "claimed" else "written_at")
-                (claims if kind == "claimed" else waiting).append(
-                    {"kind": kind, "marker_path": path, "marker": marker, "at": at if isinstance(at, str) else ""})
+                at = marker["claimed_at" if kind == "claimed" else "written_at"]
+                groups[kind].append({"kind": kind, "marker_path": path, "marker": marker, "at": at})
             elif why != GONE:
                 blocked.append((path, why))
-    newest = sorted(claims, key=lambda e: e["at"], reverse=True) + sorted(waiting, key=lambda e: e["at"], reverse=True)
+    newest = []
+    for kind in ("claimed", "ready", "outdated"):
+        newest += sorted(groups[kind], key=lambda e: e["at"], reverse=True)
     return newest, sorted(blocked)
 
 
@@ -1020,7 +1255,7 @@ def pending_handovers(project_dir: str, exclude_session: Optional[str]) -> List[
 
 
 def archived_handovers(project_dir: str) -> List[Dict[str, Any]]:
-    """Archived handovers, newest first, each with its last line from injections.jsonl."""
+    """Archived handovers, newest first, each with its last "injected" line from injections.jsonl."""
     try:
         with storage(project_dir, "archive") as directory:
             names = _archive_names(directory)
@@ -1028,7 +1263,7 @@ def archived_handovers(project_dir: str) -> List[Dict[str, Any]]:
         return []
     injected = {}
     for record in read_injections(project_dir):
-        if isinstance(record.get("archive"), str):
+        if record["event"] == "injected":
             injected[record["archive"]] = record
     paths = [os.path.join(archive_dir(project_dir), name) for name in reversed(names)]
     return [{"kind": "archived", "path": path, "injection": injected.get(path)} for path in paths]

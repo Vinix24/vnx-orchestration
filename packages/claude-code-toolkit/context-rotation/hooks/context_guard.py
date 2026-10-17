@@ -4,7 +4,8 @@
   band and above ask for a handover (M); an unmeasurable session is told once (U).
 - UserPromptExpansion: when the user types /context-rotation:rotate, adds the
   session's handover path (write), the list of handovers (resume), or the chosen
-  handover itself (resume <number>).
+  handover itself (resume <id>, or resume <number> for the entry shown under that
+  number in this session's last list); any other action gets the usage line.
 - PreToolUse: any call other than Read, Glob, Grep or a write of the handover
   makes the ready-marker outdated.
 - Stop: re-checks the ready-marker against the transcript and its age, gives a
@@ -27,6 +28,7 @@ import handover_contract
 import handover_injection
 import hook_runtime
 import rotation_state
+import state_fields
 import transcript_work
 
 UNKNOWN_NOTICE_AFTER = 3
@@ -35,6 +37,10 @@ UNKNOWN_NOTICE = (
     "before the context fills up. It will not repeat this notice."
 )
 MANUAL_COMPLETION = "Handover saved. Type /clear, then any message, to continue in a fresh context."
+# The ids of the last list `resume` showed in this session, so a number picks what the user saw.
+LISTING = "resume_listing"
+MAX_LISTED = 1000
+MAX_NUMBER_DIGITS = 6
 
 
 class Session:
@@ -59,7 +65,8 @@ def open_session(payload, env, run):
 def outdated_note(marker):
     return (
         "Note: the handover at %s no longer covers the latest work (%s). It will not be "
-        "used for a clear until it is written again." % (marker["handover"], marker.get("outdated_reason"))
+        "used for a clear until it is written again."
+        % (marker["handover"], marker.get("outdated_reason", state_fields.REASON_NOT_RECORDED))
     )
 
 
@@ -118,7 +125,7 @@ def handle_unknown(session, state, run):
 def on_prompt(payload, env, run, session):
     notes = []
     if rotation_state.prompt_outdates(payload.get("prompt")):
-        notes.append(outdate(session, "a prompt after it", run))
+        notes.append(outdate(session, state_fields.PROMPT_AFTER, run))
     run.at("measure")
     size = context_budget.measure(payload.get("transcript_path"))
     run.at("load state")
@@ -154,26 +161,70 @@ def continued(text, archive):
     expansion_says(text, "context-rotation: continued from %s." % archive)
 
 
+def stored_listing(session):
+    """The ids of the last list shown in this session; None when none was shown (or the state holds no such list)."""
+    listing = rotation_state.load_state(session.project_dir, session.session_id).get(LISTING)
+    if isinstance(listing, list) and len(listing) <= MAX_LISTED and all(map(handover_injection.is_entry_id, listing)):
+        return listing
+    return None
+
+
+def show_list(session, env, run, lead=None):
+    """Show the current list, and remember its ids for a later `resume <number>`."""
+    identity = rotation_state.process_identity(env)
+    text, ids = handover_injection.resume_list(session.project_dir, session.session_id, identity)
+    state = rotation_state.load_state(session.project_dir, session.session_id)
+    if ids or LISTING in state:  # a project without handovers gets no state file for an empty list
+        state[LISTING] = ids
+        run.at("save state")
+        rotation_state.save_state(session.project_dir, session.session_id, state)
+    expansion_says(lead + "\n\n" + text if lead else text)
+
+
+def picked(session, word):
+    """(entry id, None) for a pick, (None, lead) when it is refused with the current list, (None, None) for neither."""
+    if word.isascii() and word.isdigit():
+        listing = stored_listing(session)
+        number = int(word) if len(word) <= MAX_NUMBER_DIGITS else 0
+        if listing and 1 <= number <= len(listing):
+            return listing[number - 1], None
+        shown = "No list was shown in this session yet; this is the current one:" if listing is None else (
+            "This is the current list:")
+        return None, "There is no handover with that number. " + shown
+    if handover_injection.is_entry_id(word):
+        return word, None
+    return None, None
+
+
 def resume(session, words, env, run):
     """The resume action: the numbered list, or the chosen handover itself."""
     run.at("list handovers")
     if not words:
-        identity = rotation_state.process_identity(env)
-        expansion_says(handover_injection.resume_list(session.project_dir, session.session_id, identity))
+        show_list(session, env, run)
         return
-    if not (words[0].isascii() and words[0].isdigit()):
-        expansion_says("Type /%s resume <number> with a number from the list." % handover_injection.SKILL_COMMAND)
+    ident, lead = picked(session, words[0])
+    if lead:
+        show_list(session, env, run, lead)
         return
-    entries = handover_injection.resume_entries(session.project_dir, session.session_id)
-    number = int(words[0])
-    if not 1 <= number <= len(entries):
-        expansion_says("There is no handover number %d. %s" % (number, handover_injection.RESUME_HINT))
+    if ident is None:
+        expansion_says(handover_injection.PICK_HINT)
+        return
+    entry = handover_injection.find_entry(
+        handover_injection.resume_entries(session.project_dir, session.session_id), ident)
+    if entry is None:
+        show_list(session, env, run, "Handover %s is no longer there. This is the current list:" % ident)
         return
     run.at("resume handover")
-    problem = handover_injection.resume_pick(
-        session.project_dir, session.session_id, entries[number - 1], continued)
+    problem = handover_injection.resume_pick(session.project_dir, session.session_id, entry, continued)
     if problem:
         expansion_says(problem)
+
+
+def unknown_action():
+    expansion_says(
+        "The user typed /%s with an action it does not have. Do nothing else; show them this line: %s"
+        % (handover_injection.SKILL_COMMAND, handover_injection.USAGE),
+        "context-rotation: " + handover_injection.USAGE)
 
 
 def on_expansion(payload, env, run, session):
@@ -188,6 +239,8 @@ def on_expansion(payload, env, run, session):
         expansion_says(write_instruction(session))
     elif action == "resume":
         resume(session, words[1:], env, run)
+    else:
+        unknown_action()
 
 
 # --- PreToolUse ----------------------------------------------------------
@@ -201,7 +254,7 @@ def on_tool(payload, env, run, session):
         return
     if not rotation_state.tool_call_outdates(tool_name, tool_input, session.handover):
         return
-    note = outdate(session, "a %s call after it" % tool_name, run)
+    note = outdate(session, state_fields.TOOL_CALL_AFTER, run)
     if note:
         hook_runtime.emit(hook_runtime.context_output("PreToolUse", note))
 
@@ -214,8 +267,12 @@ def announce(session, sha, run):
         hook_runtime.emit({"systemMessage": MANUAL_COMPLETION})
 
 
-def adopt(payload, env, run, session, data):
-    """Stop fallback: a valid handover written outside Write or Edit still gets a marker."""
+def adopt(payload, env, run, session, data, cursor):
+    """Stop fallback: a valid handover written outside Write or Edit still gets a marker.
+
+    `cursor` is the transcript position taken before `data` was read: work after
+    it is judged later, work stamped after the file's write is judged here.
+    """
     outdated = rotation_state.load_marker(session.project_dir, session.marker("outdated"))
     if outdated is not None and outdated["sha256"] == rotation_state.sha256_hex(data):
         return
@@ -228,14 +285,16 @@ def adopt(payload, env, run, session, data):
     if transcript_work.work_since(payload.get("transcript_path"), written, session.handover):
         return
     run.at("write ready marker")
-    marker = rotation_state.new_marker(
-        session.session_id, session.handover, data, env, payload.get("transcript_path"), None)
+    marker = rotation_state.new_marker(session.session_id, session.handover, data, env, cursor, None)
     rotation_state.mark_ready(session.project_dir, marker)
     announce(session, marker["sha256"], run)
 
 
 def on_stop(payload, env, run, session):
     run.at("read handover")
+    cursor = None
+    if rotation_state.stored_exists(session.project_dir, session.handover):
+        cursor = transcript_work.position(payload.get("transcript_path"))  # before the read, for adopt
     data = rotation_state.read_bytes(session.project_dir, session.handover)
     ready = rotation_state.load_marker(session.project_dir, session.marker("ready"))
     if ready is not None:
@@ -247,7 +306,7 @@ def on_stop(payload, env, run, session):
         run.at("mark outdated")
         rotation_state.mark_outdated(session.project_dir, session.session_id, reason, notified=False)
     if data is not None:
-        adopt(payload, env, run, session, data)
+        adopt(payload, env, run, session, data, cursor)
 
 
 HANDLERS = {

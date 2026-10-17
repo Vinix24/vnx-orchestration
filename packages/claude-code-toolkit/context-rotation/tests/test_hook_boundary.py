@@ -88,20 +88,35 @@ def test_every_command_has_the_exact_form():
         assert command.endswith(" || exit 1")
 
 
-def test_registered_events_and_their_entries():
+def registrations(document):
+    """{event: [(matcher, entry), ...]} over every hook of every group: no group hides another."""
     registered = {}
-    for event, groups in HOOKS_JSON["hooks"].items():
+    for event, groups in document["hooks"].items():
         for group in groups:
             for hook in group["hooks"]:
-                registered[event] = (group.get("matcher"), entry_of(hook["command"]))
-    assert registered == {
-        "SessionStart": (None, "session_start"),
-        "UserPromptSubmit": (None, "context_guard"),
-        "UserPromptExpansion": (None, "context_guard"),
-        "PreToolUse": (None, "context_guard"),
-        "PostToolUse": ("Write|Edit", "handover_detector"),
-        "Stop": (None, "context_guard"),
+                registered.setdefault(event, []).append((group.get("matcher"), entry_of(hook["command"])))
+    return registered
+
+
+def test_registered_events_and_their_entries():
+    assert registrations(HOOKS_JSON) == {
+        "SessionStart": [(None, "session_start")],
+        "UserPromptSubmit": [(None, "context_guard")],
+        "UserPromptExpansion": [(None, "context_guard")],
+        "PreToolUse": [(None, "context_guard")],
+        "PostToolUse": [("Write|Edit", "handover_detector")],
+        "Stop": [(None, "context_guard")],
     }
+
+
+def test_every_group_of_an_event_is_collected():
+    """A second group for an event, as an edit of hooks.json could add, is seen next to the first."""
+    hook = {"type": "command", "command": SHIM_PREFIX + "%s || exit 1"}
+    document = {"hooks": {"Stop": [
+        {"hooks": [dict(hook, command=hook["command"] % "context_guard")]},
+        {"matcher": "x", "hooks": [dict(hook, command=hook["command"] % "other_entry")]},
+    ]}}
+    assert registrations(document) == {"Stop": [(None, "context_guard"), ("x", "other_entry")]}
 
 
 def test_every_registered_entry_exists():

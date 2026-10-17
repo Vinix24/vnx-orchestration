@@ -8,14 +8,18 @@ Work is a tool call other than a read-only tool or a write of the handover itsel
 the result of a call that is not one of those, or a prompt that reached the model
 (a typed prompt, a queued prompt, a subagent hand-back, a task notification).
 Assistant text and thinking, hook attachments, local command output, and system
-and bookkeeping entries are not work. Standard library only.
+and bookkeeping entries are not work.
+
+Work is named by its kind only (WORK_KINDS), never by a value from the
+transcript: the reason ends up in a marker, and from there in the model's
+context, so it is one of a closed list (STALE_REASONS). Standard library only.
 """
 from __future__ import annotations
 
 import json
 import os
 from datetime import datetime
-from typing import Any, Dict, Iterator, Optional, Set
+from typing import Any, Dict, Iterator, Optional, Set, Tuple
 
 import context_budget
 import regular_file
@@ -27,6 +31,18 @@ TEXT_BLOCKS = ("text", "thinking", "redacted_thinking")
 # notice, not a prompt that reached the model.
 NOT_A_PROMPT = ("<local-command-", "<command-name>", "[Request interrupted by user")
 LOOKUP_LINES = 2000
+
+A_TOOL_CALL = "a tool call"
+A_RESULT = "the result of a tool call"
+AN_ASSISTANT_BLOCK = "an assistant block that is not text"
+A_PROMPT = "a prompt"
+A_QUEUED_PROMPT = "a queued prompt"
+WORK_KINDS = (A_TOOL_CALL, A_RESULT, AN_ASSISTANT_BLOCK, A_PROMPT, A_QUEUED_PROMPT)
+
+POSITION_UNKNOWN = "its transcript position is unknown"
+POSITION_GONE = "the transcript no longer matches the recorded position"
+UNREADABLE = "the transcript cannot be read"
+STALE_REASONS = (POSITION_UNKNOWN, POSITION_GONE, UNREADABLE) + tuple("work after it (%s)" % k for k in WORK_KINDS)
 
 
 def same_file(left: Any, right: str) -> bool:
@@ -91,6 +107,50 @@ def position(transcript_path: Any) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _lines_ending_before(path: str, end: int) -> Iterator[Tuple[int, bytes]]:
+    """(offset just after the line's newline, line) for the complete lines before `end`, last first.
+
+    `end` is a line end (an offset `position` records), so nothing follows the last newline before it.
+    """
+    lines = context_budget.reversed_lines(path, end)
+    next(lines, None)
+    current = end
+    for raw in lines:
+        yield current, raw
+        current -= len(raw) + 1
+
+
+def _write_entry_end(path: str, end: int, tool_use_id: str) -> Optional[int]:
+    """The offset just after the transcript entry that holds the tool call `tool_use_id`, looked up a bounded way back."""
+    for number, (line_end, raw) in enumerate(_lines_ending_before(path, end)):
+        if number > LOOKUP_LINES:
+            return None
+        if _tool_use_in(raw, tool_use_id) is not None:
+            return line_end
+    return None
+
+
+def write_position(transcript_path: Any, tool_use_id: Any) -> Optional[Dict[str, Any]]:
+    """The position of a handover write: just after the transcript entry of the write itself.
+
+    Anything that lands after that entry, also while the hook that records the
+    position still runs, lies after it and is judged by stale_reason. Without the
+    write's tool_use_id, or when its entry is not found a bounded way back, the
+    position is where the transcript stands now: the caller takes it before it
+    reads the handover.
+    """
+    now = position(transcript_path)
+    if now is None or not isinstance(tool_use_id, str) or not tool_use_id:
+        return now
+    try:
+        end = _write_entry_end(transcript_path, now["size"], tool_use_id)
+        if end is None:
+            return now
+        return {"path": transcript_path, "size": end, "last_uuid": last_uuid_before(transcript_path, end)}
+    except OSError:
+        return now
+
+
 def position_holds(pos: Dict[str, Any]) -> bool:
     """The transcript still has the recorded entry at the recorded offset."""
     path, size = pos.get("path"), pos.get("size")
@@ -142,9 +202,7 @@ def _assistant_work(content: Any, handover: str, allowed: Set[str]) -> Optional[
         if kind == "tool_use" and allowed_tool(block.get("name"), block.get("input"), handover):
             allowed.add(block.get("id"))
             continue
-        if kind == "tool_use":
-            return "a %s call" % block.get("name")
-        return "an assistant %s block" % kind
+        return A_TOOL_CALL if kind == "tool_use" else AN_ASSISTANT_BLOCK
     return None
 
 
@@ -155,16 +213,24 @@ def _results(content: Any) -> Optional[list]:
     return ids if len(ids) == len(content) else None
 
 
+def _tool_use_in(raw: bytes, tool_use_id: str) -> Optional[Dict[str, Any]]:
+    """The tool_use block with this id in one transcript line, when that line is an assistant entry holding it."""
+    entry = _parse(raw) if raw.strip() else None
+    content = _content(entry) if isinstance(entry, dict) and entry.get("type") == "assistant" else None
+    for block in content if isinstance(content, list) else ():
+        if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("id") == tool_use_id:
+            return block
+    return None
+
+
 def find_tool_use(path: str, end: int, tool_use_id: str) -> Optional[Dict[str, Any]]:
     """The tool_use block with this id before byte offset `end`, looked up a bounded way back."""
     for number, raw in enumerate(context_budget.reversed_lines(path, end)):
         if number > LOOKUP_LINES:
             break
-        entry = _parse(raw) if raw.strip() else None
-        content = _content(entry) if isinstance(entry, dict) and entry.get("type") == "assistant" else None
-        for block in content if isinstance(content, list) else ():
-            if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("id") == tool_use_id:
-                return block
+        block = _tool_use_in(raw, tool_use_id)
+        if block is not None:
+            return block
     return None
 
 
@@ -176,7 +242,7 @@ def _result_work(ids: list, handover: str, allowed: Set[str], lookup) -> Optiona
         if block is not None and allowed_tool(block.get("name"), block.get("input"), handover):
             allowed.add(tool_use_id)
             continue
-        return "the result of %s" % ("a %s call" % block.get("name") if block else "an earlier tool call")
+        return A_RESULT
     return None
 
 
@@ -187,7 +253,7 @@ def _user_work(entry: Dict[str, Any], handover: str, allowed: Set[str], lookup) 
     ids = _results(content)
     if ids is not None:
         return _result_work(ids, handover, allowed, lookup) if lookup else None
-    return None if _prompt_text(content) is None else "a prompt"
+    return None if _prompt_text(content) is None else A_PROMPT
 
 
 def entry_work(entry: Dict[str, Any], handover: str, allowed: Set[str], lookup=None) -> Optional[str]:
@@ -207,7 +273,7 @@ def entry_work(entry: Dict[str, Any], handover: str, allowed: Set[str], lookup=N
     if kind == "attachment":
         attachment = entry.get("attachment")
         if isinstance(attachment, dict) and attachment.get("type") == "queued_command":
-            return "a queued prompt"
+            return A_QUEUED_PROMPT
     return None
 
 
@@ -227,15 +293,15 @@ def work_after(pos: Dict[str, Any], handover: str, write_id: Optional[str]) -> O
 
 
 def stale_reason(pos: Any, handover: str, write_id: Optional[str]) -> Optional[str]:
-    """Why the transcript says the handover no longer covers the work, or None."""
+    """Why the transcript says the handover no longer covers the work (one of STALE_REASONS), or None."""
     if not isinstance(pos, dict):
-        return "its transcript position is unknown"
+        return POSITION_UNKNOWN
     try:
         if not position_holds(pos):
-            return "the transcript no longer matches the recorded position"
+            return POSITION_GONE
         found = work_after(pos, handover, write_id)
     except OSError:
-        return "the transcript cannot be read"
+        return UNREADABLE
     return "work after it (%s)" % found if found else None
 
 
@@ -269,5 +335,5 @@ def work_since(transcript_path: Any, since: float, handover: str) -> Optional[st
             if found:
                 return found
     except OSError:
-        return "the transcript cannot be read"
+        return UNREADABLE
     return None

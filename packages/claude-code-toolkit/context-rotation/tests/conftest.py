@@ -231,6 +231,11 @@ class Session:
             prompt="/%s %s" % (command, args))
         return self.hook("context_guard", payload)
 
+    def resume(self, number):
+        """`resume`, then `resume <number>`: a number picks from the list last shown in this session."""
+        self.expand("resume")
+        return self.expand("resume %d" % number)
+
 
 def start(project, session_id, source="clear", pid=None, **kwargs):
     """SessionStart of a session (the successor after /clear, or a new one)."""

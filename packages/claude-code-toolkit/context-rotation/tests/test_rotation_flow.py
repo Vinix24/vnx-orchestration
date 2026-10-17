@@ -98,7 +98,7 @@ def test_the_clear_prompt_does_not_outdate(saved):
 def test_a_tool_call_makes_it_outdated_and_the_model_is_told(saved):
     proc = saved.pre_tool("Bash", {"command": "pytest"})
     assert json.loads(proc.stdout)["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
-    assert "(a Bash call after it)" in context_of(proc)
+    assert "(a tool call after it)" in context_of(proc)
     assert outdated(saved)["notified"] is True
 
 
@@ -132,7 +132,7 @@ def test_a_tool_call_in_the_transcript_after_the_marker_outdates_at_stop(saved):
                  b1_entry("tool_result", tool_use_id=tool_id, file_path="x", tool_output="ok"))
     proc = saved.finish_turn()
     assert proc.stdout == ""
-    assert outdated(saved)["outdated_reason"] == "work after it (a Bash call)"
+    assert outdated(saved)["outdated_reason"] == "work after it (a tool call)"
     assert outdated(saved)["notified"] is False
 
 
@@ -143,7 +143,7 @@ def test_the_result_of_a_parallel_call_outdates_at_stop(tmp_path, project):
     s.write_handover()
     s.append(b1_entry("tool_result", tool_use_id=bash_id, file_path="x", tool_output="built"))
     s.finish_turn()
-    assert outdated(s)["outdated_reason"] == "work after it (the result of a Bash call)"
+    assert outdated(s)["outdated_reason"] == "work after it (the result of a tool call)"
 
 
 def test_the_result_of_a_parallel_read_keeps_it_current(tmp_path, project):
@@ -181,7 +181,7 @@ def test_an_over_age_marker_is_outdated_at_stop(saved):
     marker["written_at"] = old.strftime("%Y-%m-%dT%H:%M:%SZ")
     saved.marker("ready").write_text(json.dumps(marker))
     saved.finish_turn()
-    assert outdated(saved)["outdated_reason"] == "it is older than 60 minutes"
+    assert outdated(saved)["outdated_reason"] == "it is older than handover_max_age_minutes allows"
 
 
 def test_a_handover_changed_outside_the_tools_is_checked_again(saved):
@@ -268,9 +268,10 @@ def test_another_command_is_ignored(tmp_path, project):
     assert not rotation(project).exists()
 
 
-def test_release_is_not_handled_yet(tmp_path, project):
+def test_release_is_not_an_action_yet(tmp_path, project):
+    """B1 has write and resume; release comes with the hard band (B2)."""
     s = Session(tmp_path, project, "sess-a")
-    assert s.expand("release").stdout == ""
+    assert message_of(s.expand("release")).startswith("context-rotation: usage: /context-rotation:rotate")
 
 
 def test_a_project_skill_with_the_same_name_is_ignored(tmp_path, project):

@@ -86,15 +86,15 @@ def test_ready_then_outdated_then_ready(project):
     outdated = rs.mark_outdated(str(project), "sess-a", "a prompt after it", notified=False)
     assert outdated["outdated_reason"] == "a prompt after it"
     assert sorted(p.name for p in rotation(project).glob("*.json")) == ["outdated-sess-a.json"]
-    assert rs.mark_outdated(str(project), "sess-a", "again", notified=True) is None
+    assert rs.mark_outdated(str(project), "sess-a", "a tool call after it", notified=True) is None
     make_marker(project)
     assert sorted(p.name for p in rotation(project).glob("*.json")) == ["ready-sess-a.json"]
 
 
 def test_an_outdated_notice_is_taken_once(project):
     make_marker(project)
-    rs.mark_outdated(str(project), "sess-a", "work after it (a Bash call)", notified=False)
-    assert rs.take_outdated_notice(str(project), "sess-a")["outdated_reason"] == "work after it (a Bash call)"
+    rs.mark_outdated(str(project), "sess-a", "work after it (a tool call)", notified=False)
+    assert rs.take_outdated_notice(str(project), "sess-a")["outdated_reason"] == "work after it (a tool call)"
     assert rs.take_outdated_notice(str(project), "sess-a") is None
 
 
@@ -276,12 +276,38 @@ def test_trim_without_an_archive_creates_nothing(project):
     assert not (project / ".claude").exists()
 
 
+def injected(project, name):
+    return {"event": "injected", "at": "2026-10-17T09:00:00Z", "via": "clear", "origin_session_id": "sess-a",
+            "session_id": "sess-b", "handover": rs.handover_path(str(project), "sess-a"),
+            "archive": os.path.join(rs.archive_dir(str(project)), name), "sha256": "0" * 64, "chars": 1,
+            "mode": "inline"}
+
+
 def test_injection_log_appends_and_skips_bad_lines(project):
-    rs.log_injection(str(project), {"archive": "a"})
+    first, second = "20261017T090000000000Z-sess-a.md", "20261017T090001000000Z-sess-a.md"
+    rs.log_injection(str(project), injected(project, first))
     with open(rs.injections_path(str(project)), "a") as handle:
-        handle.write("not json\n[1]\n")
-    rs.log_injection(str(project), {"archive": "b"})
-    assert [r["archive"] for r in rs.read_injections(str(project))] == ["a", "b"]
+        handle.write("not json\n[1]\n" + json.dumps(dict(injected(project, first), session_id="a b")) + "\n")
+    rs.log_injection(str(project), injected(project, second))
+    assert [os.path.basename(r["archive"]) for r in rs.read_injections(str(project))] == [first, second]
+
+
+@pytest.mark.parametrize("change", [
+    {"event": "deleted"}, {"at": "yesterday"}, {"session_id": "../x"}, {"via": "tmux"}, {"mode": "both"},
+    {"archive": "/tmp/notes.txt"}, {"chars": -1}, {"extra": 1},
+], ids=["event", "at", "session", "via", "mode", "archive", "chars", "extra-field"])
+def test_the_plugin_never_writes_a_journal_line_it_would_refuse_to_read(project, change):
+    record = dict(injected(project, "20261017T090000000000Z-sess-a.md"), **change)
+    with pytest.raises(ValueError):
+        rs.log_injection(str(project), record)
+    assert not os.path.exists(rs.injections_path(str(project)))
+
+
+def test_an_outdated_reason_outside_the_closed_list_is_never_written(project):
+    make_marker(project)
+    with pytest.raises(ValueError):
+        rs.mark_outdated(str(project), "sess-a", "a Bash call after it", notified=False)
+    assert sorted(p.name for p in rotation(project).glob("*.json")) == ["ready-sess-a.json"]
 
 
 def test_pending_lists_claims_first_then_newest_markers(project):
@@ -428,7 +454,7 @@ SWAPPED_CALLS = {
     "rename": lambda p: rs.mark_outdated(p, "sess-a", "a prompt after it", notified=False),
     "claim": lambda p: rs.claim(p, rs.marker_path(p, "ready", "sess-a"), "sess-b"),
     "archive": lambda p: rs.archive_handover(p, rs.plan_archive(p, "sess-z"), b"new copy"),
-    "append": lambda p: rs.log_injection(p, {"archive": "a"}),
+    "append": lambda p: rs.log_injection(p, injected(p, "20261017T090000000000Z-sess-a.md")),
     "state": lambda p: rs.save_state(p, "sess-a", {"unknown_count": 1}),
     "unlink": lambda p: rs.remove_in_rotation(p, rs.handover_path(p, "sess-a")),
     "trim": lambda p: rs.trim_archive(p, 1),

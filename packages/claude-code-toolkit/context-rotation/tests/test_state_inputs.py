@@ -65,10 +65,17 @@ def quick(entry, payload, pid=None):
 
 
 def resume(tmp_path, project, args, session_id="sess-c"):
+    """The resume action; a number is picked from the list, shown first as the user would see it."""
     user = Session(tmp_path, project, session_id)
-    payload = user.payload("09-UserPromptExpansion-plugin-skill", command_name="context-rotation:rotate",
-                           command_args=args, prompt="/context-rotation:rotate " + args)
-    return quick("context_guard", payload)
+
+    def expand(words):
+        return quick("context_guard", user.payload(
+            "09-UserPromptExpansion-plugin-skill", command_name="context-rotation:rotate",
+            command_args=words, prompt="/context-rotation:rotate " + words))
+
+    if args.split()[1:2] and args.split()[1].isdigit():
+        expand("resume")
+    return expand(args)
 
 
 def text_of(proc):
@@ -131,7 +138,7 @@ def test_a_handover_that_is_a_symlink_is_not_followed(tmp_path, project, victim)
 
 def test_a_transcript_that_is_a_fifo_does_not_block_the_clear(tmp_path, project):
     handover_of(project)
-    fifo = tmp_path / "transcript.jsonl"
+    fifo = tmp_path / "sess-p.jsonl"  # the session's own transcript, so the marker passes its checks
     os.mkfifo(str(fifo))
     identity = rotation_state.process_identity({"CLAUDE_PID": str(os.getpid())})
     plant(project, "ready-sess-p.json", process=identity,
@@ -198,7 +205,7 @@ CLAIM = {"claimed_by": "sess-x", "claimed_sha256": sha(VALID_HANDOVER), "archive
      "its transcript position is not"),
     ("claimed-sess-p-sess-x.json", dict(CLAIM, claimed_by="../x"), "its file name does not match"),
     ("claimed-sess-p-sess-x.json", dict(CLAIM, claimed_sha256=None), "its claimed_sha256 is not a sha256 digest"),
-    ("claimed-sess-p-sess-x.json", dict(CLAIM, archive=None), "its archive is not an absolute path"),
+    ("claimed-sess-p-sess-x.json", dict(CLAIM, archive=None), "its archive is not a plain absolute path"),
     ("claimed-sess-p-sess-x.json", dict(CLAIM, archive="ARCHIVE/notes.txt"), "its archive is not named like"),
     ("claimed-sess-p-sess-x.json", dict(CLAIM, archive="ROTATION/20261016T120000000000Z-sess-p.md"),
      "its archive is not in"),

@@ -1,28 +1,41 @@
 """Handing a handover to a session: the order that makes a crash recoverable.
 
-claim (atomic rename) -> copy to the archive -> one line in injections.jsonl ->
-emit -> remove the original, then the claimed marker last. A crash at any point
-leaves the claimed marker with the original or the archive copy, and `resume`
-lists it. Automatic injection happens at most once; recovery is manual, and
-reads the archive copy first: the original is used only while there is no copy
-yet and it still holds the claimed bytes. The original is removed only while it
-holds them, so a newer handover written meanwhile stays. Every marker here passed
-rotation_state.marker_problem, and every file is read through the verified
-storage directories. A storage failure before the emit (archive copy, log line)
-is logged and nothing is emitted, so the claim stays for `resume`; after the emit
-nothing raises. Standard library only.
+the claim's line in injections.jsonl -> claim (atomic rename) -> copy to the
+archive -> the injection's line -> emit -> retire the original, then the claimed
+marker last. A crash at any point leaves the claimed marker with the original or
+the archive copy, and `resume` lists it. Automatic injection happens at most
+once; recovery is manual, and reads the archive copy first: the original is used
+only while there is no copy yet and it still holds the claimed bytes. The
+original is removed only while it is the very file the claim read, so a handover
+written meanwhile stays. Every marker here passed rotation_state.marker_problem,
+and every file is read through the verified storage directories. A storage
+failure before the emit (archive copy, log line) is logged and nothing is
+emitted, so the claim stays for `resume`; after the emit nothing raises.
+
+What is shown comes from the plugin, never as text from disk: the paths a marker
+gives are the ones rotation_state.read_marker builds, times and outdated reasons
+passed state_fields, an entry id is a marker or archive file name the plugin
+writes, and a journal line is shown only when state_fields.record_problem
+accepts it. The handover body is the one intended exception. Standard library only.
 """
 from __future__ import annotations
 
 import os
-from typing import Any, Callable, Dict, List, Optional
+import re
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import rotation_state
+import state_fields
 
 INLINE_LIMIT = 9000
 SKILL_COMMAND = "context-rotation:rotate"
 RESUME_HINT = "Type /%s resume to see them and pick one." % SKILL_COMMAND
+PICK_HINT = "Type /%s resume <number> or resume <id> with a number or an id from the list." % SKILL_COMMAND
+USAGE = "usage: /%s [write | resume [<number> | <id>]]" % SKILL_COMMAND
 LISTED_AT_START = 5
+# A marker file name without ".json", or an archive file name without ".md".
+ENTRY_ID = re.compile(r"(?:ready|outdated|claimed)-[A-Za-z0-9_-]{1,%d}|[0-9]{8}T[0-9]{12}Z-[A-Za-z0-9_-]{1,%d}" % (
+    2 * state_fields.MAX_SESSION_ID + 1, state_fields.MAX_SESSION_ID + 8))
 
 
 def injection_context(text: str, archive: str, outdated_reason: Optional[str] = None) -> Dict[str, str]:
@@ -50,6 +63,7 @@ def injection_context(text: str, archive: str, outdated_reason: Optional[str] = 
 def _record(via: str, origin: Optional[str], successor: str, handover: Optional[str], archive: str,
             data: bytes, mode: str) -> Dict[str, Any]:
     return {
+        "event": "injected",
         "at": rotation_state.utc_now(),
         "via": via,
         "origin_session_id": origin,
@@ -100,7 +114,6 @@ def _resume_archived(project_dir: str, successor: str, entry: Dict[str, Any],
         return "The archived handover %s cannot be read." % entry["path"]
     context = injection_context(data.decode("utf-8", "replace"), entry["path"])
     origin = (entry.get("injection") or {}).get("origin_session_id")
-    origin = origin if rotation_state.is_safe_session_id(origin) else None
     try:
         rotation_state.log_injection(project_dir, _record(
             "resume", origin, successor, None, entry["path"], data, context["mode"]))
@@ -140,6 +153,25 @@ def resume_pick(project_dir: str, successor: str, entry: Dict[str, Any],
 
 # --- what is listed ------------------------------------------------------
 
+def entry_id(entry: Dict[str, Any]) -> str:
+    """The stable id of a listed handover: its marker's file name without ".json", or its archive file name without ".md".
+
+    Stable while the entry exists: a claim, a new handover or a trim never gives
+    another entry this id.
+    """
+    if entry["kind"] == "archived":
+        return os.path.basename(entry["path"])[:-len(".md")]
+    return os.path.basename(entry["marker_path"])[:-len(".json")]
+
+
+def is_entry_id(word: Any) -> bool:
+    return isinstance(word, str) and ENTRY_ID.fullmatch(word) is not None
+
+
+def find_entry(entries: List[Dict[str, Any]], ident: str) -> Optional[Dict[str, Any]]:
+    return next((entry for entry in entries if entry_id(entry) == ident), None)
+
+
 def _origin(marker: Dict[str, Any], identity: Optional[Dict[str, Any]]) -> str:
     """Who wrote it, whose `claude` process that was, and that its paths passed the checks."""
     recorded = marker.get("process")
@@ -154,10 +186,14 @@ def _origin(marker: Dict[str, Any], identity: Optional[Dict[str, Any]]) -> str:
 
 def describe(project_dir: str, entry: Dict[str, Any], identity: Optional[Dict[str, Any]] = None) -> str:
     """One line for a pending or archived handover; `identity` is this session's process."""
+    return "%s [id %s]" % (_description(project_dir, entry, identity), entry_id(entry))
+
+
+def _description(project_dir: str, entry: Dict[str, Any], identity: Optional[Dict[str, Any]]) -> str:
     kind = entry["kind"]
     if kind == "archived":
         record = entry.get("injection") or {}
-        when = "continued in session %s at %s" % (record.get("session_id"), record.get("at")) if record else (
+        when = "continued in session %s at %s" % (record["session_id"], record["at"]) if record else (
             "no line in injections.jsonl")
         return "archived, %s: %s" % (when, entry["path"])
     marker = entry["marker"]
@@ -165,21 +201,24 @@ def describe(project_dir: str, entry: Dict[str, Any], identity: Optional[Dict[st
         copy = marker["archive"]
         extra = " (archive copy: %s)" % copy if rotation_state.read_bytes(project_dir, copy) is not None else ""
         return "claim did not finish, taken at %s from %s: %s%s" % (
-            marker.get("claimed_at"), _origin(marker, identity), marker["handover"], extra)
-    state = "outdated (%s)" % marker.get("outdated_reason", "reason not recorded") if kind == "outdated" else "ready"
+            marker["claimed_at"], _origin(marker, identity), marker["handover"], extra)
+    reason = marker.get("outdated_reason", state_fields.REASON_NOT_RECORDED)
+    state = "outdated (%s)" % reason if kind == "outdated" else "ready"
     return "%s, written at %s by %s: %s" % (
-        state, marker.get("written_at"), _origin(marker, identity), marker["handover"])
+        state, marker["written_at"], _origin(marker, identity), marker["handover"])
 
 
 def resume_entries(project_dir: str, session_id: str) -> List[Dict[str, Any]]:
     return rotation_state.pending_handovers(project_dir, session_id) + rotation_state.archived_handovers(project_dir)
 
 
-def resume_list(project_dir: str, session_id: str, identity: Optional[Dict[str, Any]]) -> str:
-    """The numbered list the `resume` action shows the user (to the model).
+def resume_list(project_dir: str, session_id: str, identity: Optional[Dict[str, Any]]) -> Tuple[str, List[str]]:
+    """(the numbered list the `resume` action shows the user (to the model), the id under each number).
 
-    Markers that cannot be resumed (they failed the path checks, or a claim whose
-    bytes are no longer there) follow unnumbered, so no number can pick them.
+    The groups: unfinished claims, ready, outdated, then archived handovers, each
+    newest first. Markers that cannot be resumed (they failed the checks, or a
+    claim whose bytes are no longer there) follow unnumbered, so no number can
+    pick them; a file whose name the plugin does not write is not named.
     """
     pending, blocked = rotation_state.survey(project_dir, session_id)
     entries = pending + rotation_state.archived_handovers(project_dir)
@@ -187,13 +226,15 @@ def resume_list(project_dir: str, session_id: str, identity: Optional[Dict[str, 
     lines = ["Handovers in %s, newest first within each group:" % directory] if entries else [
         "There are no handovers in %s to resume." % directory]
     lines += ["%d. %s" % (number, describe(project_dir, entry, identity)) for number, entry in enumerate(entries, 1)]
-    lines += ["- not resumable, left on disk for the user to inspect: %s (%s)" % (path, why) for path, why in blocked]
+    lines += ["- not resumable, left on disk for the user to inspect: %s (%s)" % (
+        rotation_state.shown_marker_path(path), why) for path, why in blocked]
     if entries:
         lines.append(
-            "Show this list to the user. To continue from one, the user types /%s resume <number>. "
-            "A handover the user no longer wants can be deleted; it then leaves this list." % SKILL_COMMAND
+            "Show this list to the user. To continue from one, the user types /%s resume <number> or "
+            "resume <id>; a number means the entry shown under it here. A handover the user no longer "
+            "wants can be deleted; it then leaves this list." % SKILL_COMMAND
         )
-    return "\n".join(lines)
+    return "\n".join(lines), [entry_id(entry) for entry in entries]
 
 
 def start_notice(project_dir: str, session_id: str, env: Dict[str, str]) -> Optional[str]:

@@ -32,8 +32,10 @@ def saved_session(tmp_path, project, session_id="sess-a", pid=None, text=VALID_H
 
 
 def injections(project):
+    """The injection lines of injections.jsonl; the other transitions have lines there too."""
     path = rotation(project) / "injections.jsonl"
-    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+    lines = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+    return [line for line in lines if line["event"] == "injected"]
 
 
 def archived(project):
@@ -112,7 +114,7 @@ def test_an_over_age_handover_is_outdated_and_listed(tmp_path, project):
     s.marker("ready").write_text(json.dumps(marker))
     proc = start(project, "sess-b")
     assert context_of(proc) is None
-    assert "outdated (it is older than 60 minutes)" in message_of(proc)
+    assert "outdated (it is older than handover_max_age_minutes allows)" in message_of(proc)
     assert markers(project) == ["outdated-sess-a.json"]
 
 
@@ -286,7 +288,7 @@ def test_recovery_reads_the_archived_snapshot_not_a_changed_original(tmp_path, p
     assert copy.read_text() == VALID_HANDOVER
     s.write_handover(NEWER)  # the original changes after the crash, with its own marker
 
-    proc = Session(tmp_path, project, "sess-c").expand("resume 1")
+    proc = Session(tmp_path, project, "sess-c").resume(1)
     assert VALID_HANDOVER in context_of(proc)
     assert "Written again by the origin session." not in context_of(proc)
     assert copy.read_text() == VALID_HANDOVER
@@ -314,7 +316,7 @@ def test_a_claims_archive_copy_survives_the_trim_and_resume_injects_it(tmp_path,
     assert copy.exists() and copy.read_text() == VALID_HANDOVER
     assert len(archived(project)) == 3
 
-    proc = Session(tmp_path, project, "sess-c").expand("resume 1")
+    proc = Session(tmp_path, project, "sess-c").resume(1)
     assert context_of(proc).count(VALID_HANDOVER) == 1
     assert "Written again by the origin session." not in context_of(proc)
     last = injections(project)[-1]
@@ -329,7 +331,7 @@ def test_a_claim_without_archive_is_not_recovered_from_a_changed_original(tmp_pa
             run_in_process(project, "sess-b")
     s.handover.write_text(NEWER)  # changed outside the tools: no marker of its own
 
-    proc = Session(tmp_path, project, "sess-c").expand("resume 1")
+    proc = Session(tmp_path, project, "sess-c").resume(1)
     assert "Written again by the origin session." not in (context_of(proc) or "")
     assert s.handover.read_text() == NEWER
     assert archived(project) == []
@@ -393,7 +395,8 @@ def test_a_newer_handover_written_during_delivery_survives_the_cleanup(tmp_path,
             user = Session(tmp_path, project, "sess-b")
             context_guard.run(user.payload(
                 "09-UserPromptExpansion-plugin-skill", command_name="context-rotation:rotate",
-                command_args="resume 1"), dict(os.environ, CLAUDE_PID=str(os.getpid())), hook_runtime.HookRun())
+                command_args="resume ready-sess-a"), dict(os.environ, CLAUDE_PID=str(os.getpid())),
+                hook_runtime.HookRun())
     [copy] = archived(project)
     assert copy.read_text() == VALID_HANDOVER
     assert s.handover.exists(), "the cleanup deleted the newer handover"
@@ -511,7 +514,7 @@ def test_resume_lists_pending_and_archived_handovers(tmp_path, project, other_pi
 def test_resume_of_a_pending_handover_claims_it(tmp_path, project, other_pid):
     other = saved_session(tmp_path, project, "sess-other", pid=other_pid)
     user = Session(tmp_path, project, "sess-c")
-    assert VALID_HANDOVER in context_of(user.expand("resume 1"))
+    assert VALID_HANDOVER in context_of(user.resume(1))
     assert markers(project) == []
     assert not other.handover.exists()
     assert injections(project)[0]["origin_session_id"] == "sess-other"
@@ -522,7 +525,7 @@ def test_resume_of_a_pending_handover_claims_it(tmp_path, project, other_pid):
 def test_resume_of_an_archived_handover_injects_it_again(tmp_path, project):
     saved_session(tmp_path, project)
     start(project, "sess-b")
-    proc = Session(tmp_path, project, "sess-c").expand("resume 1")
+    proc = Session(tmp_path, project, "sess-c").resume(1)
     assert VALID_HANDOVER in context_of(proc)
     assert [line["via"] for line in injections(project)] == ["clear", "resume"]
     assert len(archived(project)) == 1
@@ -531,7 +534,7 @@ def test_resume_of_an_archived_handover_injects_it_again(tmp_path, project):
 def test_resume_of_an_outdated_handover_carries_a_warning(tmp_path, project, other_pid):
     s = saved_session(tmp_path, project, "sess-other", pid=other_pid)
     s.prompt("more")
-    context = context_of(Session(tmp_path, project, "sess-c").expand("resume 1"))
+    context = context_of(Session(tmp_path, project, "sess-c").resume(1))
     assert "marked outdated (a prompt after it)" in context
     assert VALID_HANDOVER in context
 
@@ -545,8 +548,8 @@ def test_a_deleted_handover_leaves_the_list(tmp_path, project, other_pid):
 
 
 @pytest.mark.parametrize("args,expected", [
-    ("resume 7", "There is no handover number 7."),
-    ("resume x", "with a number from the list"),
+    ("resume 7", "There is no handover with that number."),
+    ("resume x", "Type /context-rotation:rotate resume <number> or resume <id>"),
     ("resume", "There are no handovers in"),
 ])
 def test_resume_answers_a_bad_pick(tmp_path, project, args, expected):

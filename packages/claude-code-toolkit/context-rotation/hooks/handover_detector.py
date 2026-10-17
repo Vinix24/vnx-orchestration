@@ -4,8 +4,10 @@ When the written file is the session's own handover path, the handover is held
 against the contract (a numbered first step under "## Next steps", a "## Running"
 section, at most handover_max_chars). Valid: the ready-marker is written under the
 project lock, with the handover's sha256, the session's process identity, the
-transcript position and the write's tool_use_id. Invalid: the model is told
-exactly what is missing (M), and an earlier ready-marker becomes outdated.
+transcript position and the write's tool_use_id. The position is that of the
+write's own transcript entry, taken before the handover is read, so work that
+lands while this hook runs lies after it. Invalid: the model is told exactly what
+is missing (M), and an earlier ready-marker becomes outdated.
 """
 from __future__ import annotations
 
@@ -17,6 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import handover_contract
 import hook_runtime
 import rotation_state
+import state_fields
 import transcript_work
 
 SAVED = (
@@ -34,17 +37,19 @@ def run(payload, env, run_state):
     handover = rotation_state.handover_path(project_dir, session_id)
     if not transcript_work.is_handover_write(payload.get("tool_name"), payload.get("tool_input"), handover):
         return
+    run_state.at("check transcript")
+    cursor = transcript_work.write_position(payload.get("transcript_path"), payload.get("tool_use_id"))
     run_state.at("read handover")
-    data = rotation_state.read_bytes(project_dir, handover)
+    with rotation_state.project_lock(project_dir):  # never while a cleanup has the file set aside
+        data = rotation_state.read_bytes(project_dir, handover)
     problems = handover_contract.problems(data, settings["handover_max_chars"])
     if problems:
         run_state.at("mark outdated")
-        rotation_state.mark_outdated(project_dir, session_id, "the handover was rewritten and is not valid", True)
+        rotation_state.mark_outdated(project_dir, session_id, state_fields.REWRITTEN_INVALID, True)
         hook_runtime.emit(hook_runtime.context_output("PostToolUse", NOT_READY % (handover, "; ".join(problems))))
         return
     run_state.at("write ready marker")
-    marker = rotation_state.new_marker(
-        session_id, handover, data, env, payload.get("transcript_path"), payload.get("tool_use_id"))
+    marker = rotation_state.new_marker(session_id, handover, data, env, cursor, payload.get("tool_use_id"))
     rotation_state.mark_ready(project_dir, marker)
     hook_runtime.emit(hook_runtime.context_output("PostToolUse", SAVED % handover))
 

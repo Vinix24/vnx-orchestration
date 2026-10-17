@@ -182,4 +182,4 @@ def test_unwritable_rotation_dir_fails_without_blocking(tmp_path, project):
     proc = s.hook("handover_detector", s.payload("07-PostToolUse-Write", tool_input={"file_path": str(s.handover)}))
     assert proc.returncode == 1
     assert proc.stdout == ""
-    assert "write ready marker failed" in proc.stderr
+    assert "read handover failed" in proc.stderr

@@ -3,14 +3,15 @@
 - source "clear": the ready-markers of the project whose process identity (the
   `claude` process, which survives /clear) matches this session's are checked
   (sha256, age, transcript). Exactly one current match is claimed by atomic
-  rename, copied to the archive, logged in injections.jsonl and returned as
-  additionalContext (or as a pointer to the archive copy above 9,000 characters);
-  the original is removed only while it still holds the claimed bytes, and the
-  claimed marker is removed last. A marker that fails the path checks is never
+  rename (its line in injections.jsonl first), copied to the archive, logged in
+  injections.jsonl and returned as additionalContext (or as a pointer to the
+  archive copy above 9,000 characters); the original is removed only while it is
+  the very file the claim read, and the claimed marker is removed last. A marker that fails the path checks is never
   used: it is reported once and left on disk.
 - no match, and any source other than "compact": handovers not continued yet are
   listed for the user with the `resume` hint, never dropped silently.
-- any source: the archive is trimmed to archive_keep.
+- any source: the archive is trimmed to archive_keep, and injections.jsonl to a
+  bound tied to it (rotation_state.trim_journal).
 
 Nothing happens when the project's storage fails the storage gate
 (hook_runtime.open_project). A storage failure (OSError, LockTimeout) while
@@ -106,6 +107,7 @@ def run(payload, env, run_state):
     project_dir, session_id, settings = opened
     run_state.at("trim archive")
     rotation_state.trim_archive(project_dir, settings["archive_keep"])
+    rotation_state.trim_journal(project_dir, settings["archive_keep"])
     source = payload.get("source")
     if source == "compact":
         return

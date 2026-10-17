@@ -209,9 +209,11 @@ def test_a_cleanup_that_cannot_open_the_lock_after_the_emit_still_exits_0(tmp_pa
 
 def test_a_cleanup_that_times_out_on_the_lock_after_the_emit_still_exits_0(tmp_path, project, monkeypatch, capsys):
     saved(tmp_path, project)
-    real_emit = hook_runtime.emit
+    real_emit, real_acquire = hook_runtime.emit, rotation_state._acquire
 
     def held(descriptor, path, timeout):
+        if os.path.basename(path) != ".lock":  # another process holds the project lock, not the log's
+            return real_acquire(descriptor, path, timeout)
         raise rotation_state.LockTimeout("%s was held" % path)
 
     def emit_then_the_lock_is_held(document):
@@ -249,8 +251,9 @@ def lock_times_out_once(monkeypatch):
     calls = []
 
     def acquire(descriptor, path, timeout):
-        calls.append(path)
-        if len(calls) == 1:
+        if os.path.basename(path) == ".lock":
+            calls.append(path)
+        if len(calls) == 1 and os.path.basename(path) == ".lock":
             raise rotation_state.LockTimeout("%s was held" % path)
         return real_acquire(descriptor, path, timeout)
 
