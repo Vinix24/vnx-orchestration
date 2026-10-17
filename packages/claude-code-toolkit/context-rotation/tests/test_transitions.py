@@ -345,10 +345,10 @@ def test_a_journal_above_the_read_limit_is_trimmed_from_its_end(tmp_path, projec
             handle.write(json.dumps({"filler": filler, "n": number}) + "\n")
         last = [valid_line(number) for number in range(3)]
         handle.write("\n".join(last) + "\n")
-    assert os.path.getsize(str(rotation(project) / "injections.jsonl")) > regular_file.MAX_READ_BYTES
+    assert os.path.getsize(str(rotation(project) / "injections.jsonl")) > 1 << 20  # regular_file.MAX_READ_BYTES
     assert start(project, "sess-b", source="startup").returncode == 0
     kept = (rotation(project) / "injections.jsonl").read_text().splitlines()
-    assert len(kept) == rotation_state.JOURNAL_LINES_PER_ARCHIVE_COPY and kept[-3:] == last
+    assert len(kept) == 10 and kept[-3:] == last  # JOURNAL_LINES_PER_ARCHIVE_COPY lines for archive_keep 1
 
 
 def test_the_cleanup_leaves_a_handover_path_that_is_no_regular_file_alone(tmp_path, project, monkeypatch, capsys):
