@@ -35,7 +35,7 @@ INLINE_LIMIT = 9000
 SKILL_COMMAND = "context-rotation:rotate"
 RESUME_HINT = "Type /%s resume to see them and pick one." % SKILL_COMMAND
 PICK_HINT = "Type /%s resume <number> or resume <id> with a number or an id from the list." % SKILL_COMMAND
-USAGE = "usage: /%s [write | resume [<number> | <id>]]" % SKILL_COMMAND
+USAGE = "usage: /%s [write | release | resume [<number> | <id>]]" % SKILL_COMMAND
 LISTED_AT_START = 5
 # <kind>-<session>-<generation> for a marker, or an archive file name without ".md".
 ENTRY_ID = re.compile(

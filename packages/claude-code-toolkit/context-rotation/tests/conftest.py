@@ -254,3 +254,81 @@ def other_pid():
     finally:
         child.kill()
         child.wait()
+
+
+# --- B2: sizes, the enforcement state, and what a hook decided ----------------
+
+BELOW, WARN, FORCE, HARD = 1000, 120000, 140000, 170000
+ALLOWED = "every tool except Read, Glob, Grep, Skill, AskUserQuestion, TodoWrite and a Write or Edit of %s is denied"
+
+
+def at(session, total):
+    """The session's context now measures `total` tokens."""
+    entry = assistant_entry(total)
+    entry["uuid"] = "size-%05d" % next(_IDS)
+    session.append(entry)
+
+
+def compacted(session, post_tokens):
+    """A compaction: the context measures `post_tokens` after it (A0 rule 2)."""
+    entry = load_fixture("transcript", "compact_boundary.json")
+    entry["compactMetadata"]["postTokens"] = post_tokens
+    entry["uuid"] = "compact-%05d" % next(_IDS)
+    session.append(entry)
+
+
+def state_of(session):
+    path = rotation(session.project) / "state" / ("%s.enforcement.json" % session.session_id)
+    return json.loads(path.read_text()) if path.exists() else None
+
+
+def journal(project):
+    path = rotation(project) / "enforcement.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+def decision(proc):
+    return output(proc).get("hookSpecificOutput", {}).get("permissionDecision")
+
+
+def reason(proc):
+    return output(proc)["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def held_back(proc):
+    return output(proc).get("decision") == "block"
+
+
+def bash(session, **extra):
+    return session.pre_tool("Bash", {"command": "make test"}, **extra)
+
+
+def goes_ahead(proc):
+    assert proc.returncode == 0, proc.stderr
+    return "permissionDecision" not in proc.stdout and '"decision"' not in proc.stdout
+
+
+def snapshot(root):
+    """Every entry below `root` with its bytes (None for a directory or a symlink), so a change shows."""
+    found = {}
+    for directory, dirs, files in os.walk(str(root)):
+        for name in dirs + files:
+            path = os.path.join(directory, name)
+            relative = os.path.relpath(path, str(root))
+            if os.path.islink(path) or os.path.isdir(path):
+                found[relative] = None
+            else:
+                with open(path, "rb") as handle:
+                    found[relative] = handle.read()
+    return found
+
+
+def gate_lines(proc):
+    return [line for line in proc.stderr.splitlines() if line.startswith("context-rotation:")]
+
+
+def refused_once(proc, place):
+    assert proc.returncode == 0, proc.stderr
+    lines = gate_lines(proc)
+    assert len(lines) == 1, proc.stderr
+    assert "%s is a symlink" % place in lines[0]
