@@ -12,7 +12,12 @@ commit of the last merged D3 PR) as an ancestor (``git merge-base
 --is-ancestor``). The rule holds only if:
 
 * every run in the window has verdict exit 0 and no step failure (a failed
-  prelude, shadow phase or download anywhere in the window blocks);
+  prelude, download or shadow phase, or a Profile A run that failed, also
+  one that failed an audit after uploading green evidence, anywhere in the
+  window blocks). The step failures are the verdict's list plus what
+  ``check_xdist_parity.step_failures`` gives on the steps, shadow and
+  reference the verdict records, so a failure the list leaves out still
+  blocks;
 * the window holds at least 10 distinct head SHAs (a re-run of one commit
   counts once), over at least two UTC calendar days, the latest run on main;
 * the shadow's suite wall time is at most 15 minutes on every run in it;
@@ -41,10 +46,13 @@ came from next to the run's latest attempt. That rule is
 ``check_xdist_parity.stale_evidence_reason``, the one the parity job applies
 to each of its own inputs, so a verdict and the evidence under it are current
 by the same test. A verdict with a field of the wrong type (no
-``step_failures`` list, a shadow block that is not an object) is no verdict.
+``step_failures`` list, a shadow or reference block that is not an object, a
+problem without a text reason) is no verdict.
 
-Exit 0 when the rule holds, 1 when it does not, 2 on a usage or tool error
-(also gh output that is not the JSON this tool reads).
+Exit 0 when the rule holds, 1 when it does not, 2 with a reason and never a
+traceback on a usage or tool error: gh output that is not the JSON this tool
+reads, a ``--since-pr`` or ``--limit`` below 1, a window base that is no
+commit in this checkout, git failing while the rule asks for ancestry.
 """
 
 from __future__ import annotations
@@ -63,7 +71,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from check_xdist_parity import VERDICT_FILE, fingerprint_of_args_dir, stale_evidence_reason, stamp_attempt, whole_number
+from check_xdist_parity import (VERDICT_FILE, fingerprint_of_args_dir, stale_evidence_reason, stamp_attempt,
+                                step_failures, whole_number)
 
 VERDICT_ARTIFACT = "xdist-parity-verdict"
 WORKFLOW_NAME = "VNX CI"
@@ -200,15 +209,28 @@ def _shadow_reads(value) -> bool:
     return value.get("suite_wall_s") is None or whole_number(value.get("suite_wall_s")) is not None
 
 
+def _steps_read(value) -> bool:
+    """No steps block, or an object of step name -> outcome text."""
+    return value is None or (isinstance(value, dict) and all(isinstance(o, str) for o in value.values()))
+
+
+def _problems_read(value) -> bool:
+    """No problem list, or a list of objects each naming its reason as text."""
+    return value is None or (isinstance(value, list) and all(isinstance(p, dict) and isinstance(p.get("reason"), str)
+                                                             for p in value))
+
+
 # (field, whether it must be present, the test its value must pass for the rule to read it)
 VERDICT_FIELDS = (
     ("exit", True, lambda v: v is None or whole_number(v) is not None),
     ("step_failures", True, lambda v: isinstance(v, list) and all(isinstance(f, str) for f in v)),
     ("profile", False, _text_or_none),
     ("selection_fingerprint", False, _text_or_none),
+    ("steps", False, _steps_read),
     ("shadow", False, _shadow_reads),
+    ("reference", False, lambda v: v is None or isinstance(v, dict)),
     ("differences", False, lambda v: v is None or (isinstance(v, dict) and all(isinstance(e, list) for e in v.values()))),
-    ("invalid_evidence", False, lambda v: v is None or (isinstance(v, list) and all(isinstance(p, dict) for p in v))),
+    ("invalid_evidence", False, _problems_read),
 )
 
 
@@ -230,13 +252,28 @@ def run_blockers(run: Run) -> list:
     reasons = []
     if verdict.get("exit") != 0:
         reasons.append(f"exit {verdict.get('exit')} ({verdict.get('verdict')}){_difference_note(verdict)}")
-    reasons += [f"step {failure}" for failure in verdict.get("step_failures") or []]
+    reasons += [f"step {failure}" for failure in recorded_step_failures(verdict)]
     wall = suite_wall_s(verdict)
     if wall is None:
         reasons.append("no shadow suite wall time")
     elif wall > MAX_SUITE_WALL_S:
         reasons.append(f"shadow suite {wall} s > {MAX_SUITE_WALL_S} s")
     return reasons
+
+
+def recorded_step_failures(verdict: dict) -> list:
+    """The verdict's step_failures, then each failure its own blocks give under the parity job's step rule.
+
+    The verdict records every outcome its step_failures is computed from (the
+    parity job's steps, the shadow, the reference). Applying
+    check_xdist_parity.step_failures to those blocks again means a failure
+    recorded there (a Profile A job that failed after its evidence was
+    uploaded green) blocks even when the list leaves it out, and a verdict
+    that records no such block is not clean.
+    """
+    listed = list(verdict.get("step_failures") or [])
+    derived = step_failures(verdict.get("steps") or {}, verdict.get("shadow") or {}, verdict.get("reference") or {})
+    return listed + [failure for failure in derived if failure not in listed]
 
 
 def _difference_note(verdict: dict) -> str:
@@ -595,10 +632,21 @@ def default_open_items(repo_root: Path) -> Path:
 # --- CLI ---------------------------------------------------------------------------------------------
 
 
+def _positive_int(value: str) -> int:
+    """A PR number or a run count: a whole number of at least 1 (0 named no PR and took the --since-commit branch)."""
+    try:
+        number = int(value)
+    except ValueError:
+        number = 0
+    if number < 1:
+        raise argparse.ArgumentTypeError(f"{value} is not a whole number of at least 1")
+    return number
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     base = parser.add_mutually_exclusive_group(required=True)
-    base.add_argument("--since-pr", type=int, help="the last merged D3 PR; its merge commit is the window base")
+    base.add_argument("--since-pr", type=_positive_int, help="the last merged D3 PR; its merge commit is the window base")
     base.add_argument("--since-commit", help="the window base commit itself")
     parser.add_argument("--repo", default="", help="owner/name (default: gh repo view)")
     parser.add_argument("--workflow", default=WORKFLOW_NAME)
@@ -607,7 +655,7 @@ def _parser() -> argparse.ArgumentParser:
     watch.add_argument("--watch-list", action="append", metavar="OI", help="a watch-list OI from triage (repeatable)")
     watch.add_argument("--no-watch-list", action="store_true", help="state that triage left no watch-list OI")
     parser.add_argument("--open-items", default="", help="open_items.json (default: this project's ledger)")
-    parser.add_argument("--limit", type=int, default=300, help="how many runs to list (newest first)")
+    parser.add_argument("--limit", type=_positive_int, default=300, help="how many runs to list (newest first)")
     parser.add_argument("--cache-dir", default="", help="keep downloaded verdicts here between calls")
     parser.add_argument("--json", action="store_true", help="print JSON instead of the table")
     return parser
@@ -615,7 +663,7 @@ def _parser() -> argparse.ArgumentParser:
 
 def _inputs(args, repo_root: Path) -> tuple:
     repo = args.repo or default_repo()
-    if args.since_pr:
+    if args.since_pr is not None:
         base, base_source = pr_merge_commit(repo, args.since_pr), f"merge commit of PR #{args.since_pr}"
     else:
         base, base_source = args.since_commit, "given"
@@ -634,10 +682,13 @@ def _inputs(args, repo_root: Path) -> tuple:
 
 def _collect(header: dict, args, repo_root: Path, cache: Path) -> tuple:
     """(runs since the window base with their verdicts, whether the list may be cut off)."""
-    listed = list_runs(header["repo"], header["workflow"], args.limit)
     since = commit_time(repo_root, header["window_base"])
-    runs = [r for r in listed if since is None or _created(r) >= since]
-    truncated = len(listed) >= args.limit and (since is None or len(runs) == len(listed))
+    if since is None:
+        raise ToolError(f"window base {header['window_base']} is not a commit in this checkout: git fetch origin, "
+                        f"or name another base")
+    listed = list_runs(header["repo"], header["workflow"], args.limit)
+    runs = [r for r in listed if _created(r) >= since]
+    truncated = len(listed) >= args.limit and len(runs) == len(listed)
     completed = [r for r in runs if r.status == "completed"]
     with ThreadPoolExecutor(max_workers=8) as pool:
         for run, fetched in zip(completed, pool.map(lambda r: download_verdict(header["repo"], r, cache), completed)):
@@ -655,17 +706,18 @@ def main(argv=None) -> int:
         with tempfile.TemporaryDirectory(prefix="xdist-parity-verdicts-") as tmp:
             cache = Path(args.cache_dir) if args.cache_dir else Path(tmp)
             runs, truncated = _collect(header, args, repo_root, cache)
+        # The rule asks git for each run's ancestry: a git that fails there is a tool error too.
+        evaluation = evaluate(
+            runs,
+            target_fingerprint=header["fingerprint"],
+            is_ancestor=lambda head: git_is_ancestor(repo_root, header["window_base"], head),
+            watch_list=watch_list,
+            oi_status=oi_status,
+            list_truncated=truncated,
+        )
     except (ToolError, OSError) as exc:
         print(f"xdist_parity_history: {exc}", file=sys.stderr)
         return 2
-    evaluation = evaluate(
-        runs,
-        target_fingerprint=header["fingerprint"],
-        is_ancestor=lambda head: git_is_ancestor(repo_root, header["window_base"], head),
-        watch_list=watch_list,
-        oi_status=oi_status,
-        list_truncated=truncated,
-    )
     print(as_json(evaluation, header) if args.json else render(evaluation, header), end="")
     return 0 if evaluation.holds else 1
 

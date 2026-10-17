@@ -39,6 +39,7 @@ def _load(name: str, path: Path):
 
 
 hist = _load("xdist_parity_history", SCRIPT)
+cxp = sys.modules["check_xdist_parity"]  # imported by the history module, which shares its step rule
 
 FP = "f" * 64
 OTHER_FP = "0" * 64
@@ -47,10 +48,14 @@ BEFORE = "b" * 40
 
 def verdict(*, exit_code=0, profile="heavy", fp=FP, failures=(), wall=600, attempt="1", run_id="1000",
             differences=None) -> dict:
+    """A verdict as the parity job writes it, with the outcomes it records: every step, the shadow, the reference."""
     return {
         "schema": "vnx-xdist-parity/1", "profile": profile, "exit": exit_code, "selection_fingerprint": fp,
         "verdict": {0: "parity", 1: "differences", 2: "invalid_evidence"}.get(exit_code, "not_applicable"),
-        "step_failures": list(failures), "run_id": run_id, "run_attempt": attempt, "shadow": {"suite_wall_s": wall},
+        "step_failures": list(failures), "run_id": run_id, "run_attempt": attempt,
+        "steps": {name: "success" for name in cxp.PARITY_STEPS},
+        "shadow": {"record": "present", "verdict": "shadow_passed", "job_result": "success", "suite_wall_s": wall},
+        "reference": {"job_result": "success", "result": "present", "exit": 0, "duration_s": 2110},
         "differences": differences or {}, "invalid_evidence": [],
     }
 
@@ -158,6 +163,46 @@ def test_a_failed_step_with_exit_0_blocks(failure):
     evaluation = evaluate(runs)
     assert failed(evaluation) == {"every_run_clean"}
     assert evaluation.placements[4].reasons == [f"step {failure}"]
+
+
+@pytest.mark.parametrize(("block", "change", "failure"), [
+    ("reference", {"job_result": "failure"}, "reference.job=failure"),
+    ("reference", {"exit": 1}, "reference.exit=1"),
+    ("reference", {"exit": False}, "reference.exit=False"),
+    ("reference", {"result": "missing"}, "reference.result=missing"),
+    ("shadow", {"job_result": "failure"}, "shadow.job=failure"),
+    ("shadow", {"verdict": "shadow_failed"}, "shadow.verdict=shadow_failed"),
+    ("shadow", {"record": "stale"}, "shadow.record=stale"),
+    ("steps", {"download_reference": "failure"}, "parity.download_reference=failure"),
+], ids=["reference-job", "reference-exit", "reference-exit-bool", "reference-result", "shadow-job", "shadow-verdict",
+        "shadow-record", "parity-step"])
+def test_a_failure_the_verdict_records_blocks_even_when_its_step_failures_leave_it_out(block, change, failure):
+    """codex round 3: a failed Profile A sat in the verdict's reference block, absent from step_failures, and held.
+
+    The rule applies the parity job's own step rule (check_xdist_parity.step_failures)
+    to the outcomes the verdict records, so the list cannot leave one out.
+    """
+    runs = clean_window()
+    runs[4].verdict[block].update(change)
+    evaluation = evaluate(runs)
+    assert failed(evaluation) == {"every_run_clean"}
+    assert evaluation.placements[4].reasons == [f"step {failure}"]
+
+
+def test_a_failure_both_listed_and_recorded_is_named_once():
+    runs = clean_window()
+    runs[4].verdict["reference"]["job_result"] = "failure"
+    runs[4].verdict["step_failures"] = ["reference.job=failure"]
+    assert evaluate(runs).placements[4].reasons == ["step reference.job=failure"]
+
+
+@pytest.mark.parametrize("block", ["steps", "shadow", "reference"])
+def test_a_heavy_verdict_that_records_no_outcome_block_does_not_count_as_clean(block):
+    runs = clean_window()
+    del runs[4].verdict[block]
+    evaluation = evaluate(runs)
+    assert "every_run_clean" in failed(evaluation)
+    assert evaluation.placements[4].place == "in_window" and evaluation.placements[4].reasons
 
 
 def test_one_calendar_day_is_not_enough():
@@ -349,8 +394,14 @@ def test_a_verdict_without_a_step_summary_does_not_count_as_clean():
     ("exit", True),
     ("profile", ["heavy"]),
     ("selection_fingerprint", 7),
+    ("invalid_evidence", [{"reason": ["stale_evidence"]}]),
+    ("invalid_evidence", [{"detail": "no reason"}]),
+    ("steps", ["checkout"]),
+    ("steps", {"checkout": 1}),
+    ("reference", "ok"),
 ], ids=["shadow-text", "wall-time-text", "step-failures-text", "differences-list", "problems-text", "exit-text",
-        "exit-bool", "profile-list", "fingerprint-number"])
+        "exit-bool", "profile-list", "fingerprint-number", "problem-reason-list", "problem-without-reason",
+        "steps-list", "step-outcome-number", "reference-text"])
 def test_a_verdict_field_of_the_wrong_type_blocks_without_a_crash(field, value):
     runs = clean_window()
     runs[4].verdict[field] = value
@@ -360,6 +411,15 @@ def test_a_verdict_field_of_the_wrong_type_blocks_without_a_crash(field, value):
     assert failed(evaluation) == {"every_run_has_verdict", "distinct_heads"}
     assert "cutover rule: DOES NOT HOLD" in hist.render(evaluation, HEADER)
     assert json.loads(hist.as_json(evaluation, HEADER))["holds"] is False
+
+
+def test_a_problem_reason_that_is_not_text_never_crashes_the_rule():
+    """The note on an unclean verdict joins its problem reasons: a list-valued reason raised TypeError."""
+    runs = clean_window() + [run(20, day=2, hour=6, exit_code=2)]
+    runs[-1].verdict["invalid_evidence"] = [{"reason": ["stale_evidence"], "detail": "x"}]
+    evaluation = evaluate(runs)
+    assert evaluation.placements[-1].place == "no_verdict"
+    assert "cutover rule: DOES NOT HOLD" in hist.render(evaluation, HEADER)
 
 
 # --- the watch list -----------------------------------------------------------------------------------
@@ -634,6 +694,56 @@ def test_the_cli_exits_2_on_an_unmerged_pr(tmp_path):
     proc = _cli(tmp_path, [], {}, "--since-pr", "7", "--fingerprint", FP, "--no-watch-list")
     assert proc.returncode == 2
     assert "PR #7 is not merged (state OPEN)" in proc.stderr
+
+
+@pytest.mark.parametrize(("flag", "value"), [("--since-pr", "0"), ("--since-pr", "-3"), ("--limit", "0")],
+                         ids=["since-pr-0", "since-pr-negative", "limit-0"])
+def test_a_number_that_names_nothing_is_invalid_input_exit_2(tmp_path, flag, value):
+    """deepseek round 3: --since-pr 0 is falsy, took the --since-commit branch with base None: TypeError, exit 1."""
+    base = [] if flag == "--since-pr" else ["--since-commit", _real_commits()[0]]
+    proc = _cli(tmp_path, [_listed(1, _real_commits()[1], "2099-01-01T00:00:00Z")], {"1": verdict(run_id="1")},
+                *base, flag, value, "--repo", "o/r", "--fingerprint", FP, "--no-watch-list")
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "Traceback" not in proc.stderr
+    assert f"argument {flag}: {value} is not a whole number of at least 1" in proc.stderr, proc.stderr
+
+
+def test_a_window_base_that_is_no_commit_here_is_a_tool_error_exit_2(tmp_path):
+    proc = _cli(tmp_path, [], {}, "--since-commit", "e" * 40, "--repo", "o/r", "--fingerprint", FP, "--no-watch-list")
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert proc.stderr.startswith(f"xdist_parity_history: window base {'e' * 40} is not a commit in this checkout")
+
+
+def test_git_failing_inside_the_rule_is_a_tool_error_exit_2_through_main(tmp_path, monkeypatch, capsys):
+    """deepseek round 3: evaluate() calls git_is_ancestor, whose ToolError escaped main() as a traceback.
+
+    git answers for the window base, then is gone when the rule asks for
+    ancestry: the real _run turns the FileNotFoundError into a ToolError.
+    """
+    base, head = _real_commits()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "gh").write_text(FAKE_GH, encoding="utf-8")
+    (bin_dir / "gh").chmod(0o755)
+    verdict_path = tmp_path / "verdict-1.json"
+    verdict_path.write_text(json.dumps(verdict(run_id="1")), encoding="utf-8")
+    spec = tmp_path / "spec.json"
+    spec.write_text(json.dumps({"runs": [_listed(1, head, "2099-01-01T00:00:00Z")],
+                                "verdicts": {"1": str(verdict_path)}, "pr": {}}), encoding="utf-8")
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("FAKE_GH_SPEC", str(spec))
+    real_run = subprocess.run
+
+    def git_gone_for_ancestry(cmd, *args, **kwargs):
+        if list(cmd[:2]) == ["git", "merge-base"]:
+            raise FileNotFoundError(2, "No such file or directory", "git")
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", git_gone_for_ancestry)
+    code = hist.main(["--since-commit", base, "--repo", "o/r", "--fingerprint", FP, "--no-watch-list",
+                      "--cache-dir", str(tmp_path / "cache")])
+    assert code == 2
+    assert capsys.readouterr().err.startswith("xdist_parity_history: git is not installed")
 
 
 _ROW = {"databaseId": 1001, "headSha": "a" * 40, "headBranch": "main", "event": "push", "status": "completed",

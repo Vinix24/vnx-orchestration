@@ -618,7 +618,10 @@ hist = _load("xdist_parity_history", REPO_ROOT / "scripts" / "ci" / "xdist_parit
 def _clean_verdict(run_id: str, fingerprint: str) -> dict:
     return {"schema": "vnx-xdist-parity/1", "profile": "heavy", "exit": 0, "verdict": "parity",
             "selection_fingerprint": fingerprint, "step_failures": [], "run_id": run_id, "run_attempt": "1",
-            "shadow": {"suite_wall_s": 600}, "differences": {}, "invalid_evidence": []}
+            "steps": {name: "success" for name in cxp.PARITY_STEPS},
+            "shadow": {"record": "present", "verdict": "shadow_passed", "job_result": "success", "suite_wall_s": 600},
+            "reference": {"job_result": "success", "result": "present", "exit": 0, "duration_s": 2110},
+            "differences": {}, "invalid_evidence": []}
 
 
 def _cutover_holds(verdict: dict) -> bool:
@@ -786,6 +789,79 @@ def test_a_non_numeric_worker_count_exits_2_from_the_cli_not_1_with_a_traceback(
     assert {"reason": "malformed_manifest", "detail": "parallel: worker_count 'four' is not a whole number"} in problems
 
 
+_ABSENT = object()
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("nodeid", ["tests/test_mod.py"]),
+    ("nodeid", _ABSENT),
+    ("nodeid", 7),
+    ("outcome", _ABSENT),
+    ("outcome", "passed"),
+    ("outcome", ["skipped"]),
+    ("reason", _ABSENT),
+    ("reason", 3),
+    ("reports", _ABSENT),
+    ("reports", "1"),
+    ("reports", 0),
+    ("reports", True),
+], ids=["nodeid-list", "nodeid-missing", "nodeid-number", "outcome-missing", "outcome-passed", "outcome-list",
+        "reason-missing", "reason-number", "reports-missing", "reports-text", "reports-0", "reports-bool"])
+def test_every_field_of_a_collection_outcome_is_validated_before_any_comparison(ev, field, value):
+    """codex/deepseek round 3: a collection outcome passed validation with any field; the comparison read it raw.
+
+    The same outcome in the reference and the candidate: nothing differs, so
+    only the validation can keep this from being parity.
+    """
+    bad = outcome("tests/test_mod.py", "skipped")
+    if value is _ABSENT:
+        del bad[field]
+    else:
+        bad[field] = value
+    ev.ref_manifest["collection_outcomes"] = [bad]
+    ev.par_manifest["collection_outcomes"] = [bad]
+    verdict = ev.verdict()
+    assert verdict["exit"] == 2 and verdict["differences"] is None, verdict["invalid_evidence"]
+    details = [p["detail"] for p in verdict["invalid_evidence"] if p["reason"] == "malformed_manifest"]
+    assert len(details) == 2 and all(f"collection outcome 0: {field} " in d for d in details), details
+    assert verdict["counts"]["reference"] is None and verdict["counts"]["parallel"] is None
+
+
+def test_a_nodeid_that_is_not_a_string_is_malformed(ev):
+    ev.par_manifest["nodeids"] = [A, B, C, D, ["tests/test_c.py::test_three"]]
+    verdict = ev.verdict()
+    assert verdict["exit"] == 2 and verdict["differences"] is None
+    assert any(p["reason"] == "malformed_manifest" and "nodeid 4" in p["detail"] for p in verdict["invalid_evidence"])
+
+
+def test_a_list_valued_collection_nodeid_exits_2_from_main_with_a_verdict(ev):
+    """codex round 3: a list-valued nodeid raised TypeError in compare_partition: exit 1 and no verdict file."""
+    ev.par_manifest["collection_outcomes"] = [{**outcome("tests/test_mod.py", "skipped"), "nodeid": ["tests/test_mod.py"]}]
+    code, verdict, summary = _cli(ev)
+    assert code == 2 and verdict["exit"] == 2
+    assert "malformed_manifest" in summary
+
+
+def test_a_collection_outcome_without_nodeid_exits_2_from_main_with_a_verdict(ev):
+    """deepseek round 3: no nodeid in both candidate phases put None next to a str in the partition sort: TypeError."""
+    _two_phase(ev)
+    ev.par_manifest = manifest("parallel", [A, B])
+    ev.par_cases = [(A, PASS), (B, PASS)]
+    nameless = {k: v for k, v in outcome("tests/test_mod.py", "skipped").items() if k != "nodeid"}
+    ev.serial_manifest["collection_outcomes"] = [nameless]
+    ev.par_manifest["collection_outcomes"] = [nameless]
+    code, verdict, _ = _cli(ev)
+    assert code == 2 and verdict["exit"] == 2 and verdict["differences"] is None
+    assert {p["reason"] for p in verdict["invalid_evidence"]} == {"malformed_manifest"}
+
+
+def test_constraints_that_are_not_utf8_are_invalid_evidence(ev):
+    ev.write()
+    ev.constraints.write_bytes(b"pytest==9.1.1\n\xff\xfe\n")
+    verdict = cxp.evaluate(ev.inputs())
+    assert verdict["exit"] == 2 and "unreadable_constraints" in _reasons(verdict)
+
+
 @pytest.mark.parametrize(("durations", "wall"), [
     ("fast", None),
     ({"serial": "40", "parallel": 600}, None),
@@ -866,6 +942,30 @@ def test_a_reference_without_a_phase_result_shows_no_exit(ev):
     assert verdict["exit"] == 0
 
 
+@pytest.mark.parametrize(("change", "failure"), [
+    (lambda ev: ev.upstream.update(profile_a="failure"), "reference.job=failure"),
+    (lambda ev: ev.upstream.update(profile_a="cancelled"), "reference.job=cancelled"),
+    (lambda ev: ev.upstream.pop("profile_a"), "reference.job=unknown"),
+    (lambda ev: ev.reference_result.update(exit=1), "reference.exit=1"),
+    (lambda ev: ev.reference_result.update(exit=False), "reference.exit=None"),
+    (lambda ev: setattr(ev, "reference_result", None), "reference.result=missing"),
+], ids=["audit-after-upload", "cancelled", "no-job-result", "suite-red", "exit-bool", "no-phase-result"])
+def test_a_failed_reference_run_is_a_step_failure_and_never_holds_the_cutover(ev, change, failure):
+    """codex round 3: Profile A failed an audit after uploading passing evidence: exit 0, no step failure, cutover held."""
+    change(ev)
+    verdict = ev.verdict()
+    assert verdict["exit"] == 0, "the comparison itself is parity"
+    assert failure in verdict["step_failures"], verdict["step_failures"]
+    assert not _cutover_holds(verdict)
+
+
+def test_a_clean_reference_and_shadow_give_no_step_failure(ev):
+    verdict = ev.verdict()
+    assert verdict["reference"] == {"job_result": "success", "result": "present", "exit": 0, "duration_s": 2110}
+    assert verdict["step_failures"] == []
+    assert _cutover_holds(verdict)
+
+
 # --- the CLI -----------------------------------------------------------------------------------------
 
 
@@ -905,9 +1005,39 @@ def test_the_cli_exits_2_on_invalid_evidence(ev):
     assert code == 2 and "download_failed" in summary
 
 
-def test_the_cli_refuses_a_malformed_step(ev):
-    with pytest.raises(SystemExit):
-        _cli(ev, "--step", "no-equals-sign")
+@pytest.mark.parametrize("flag", ["--step", "--upstream"])
+@pytest.mark.parametrize("value", ["no-equals-sign", "=success"], ids=["no-equals", "no-name"])
+def test_the_cli_refuses_a_malformed_step_or_upstream_with_exit_2(ev, capsys, flag, value):
+    """Invalid input exits 2 with a reason; it was SystemExit(<message>), which exits 1."""
+    with pytest.raises(SystemExit) as exc:
+        _cli(ev, flag, value)
+    assert exc.value.code == 2
+    assert f"argument {flag}: expects NAME=VALUE, got {value!r}" in capsys.readouterr().err
+
+
+def test_the_cli_exits_2_with_a_reason_when_the_verdict_cannot_be_written(ev, capsys):
+    ev.write()
+    blocker = ev.tmp / "not-a-directory"
+    blocker.write_text("", encoding="utf-8")
+    code = cxp.main(["compare", "--reference", str(ev.reference), "--candidate", str(ev.candidate),
+                     "--constraints", str(ev.constraints), "--output", str(blocker / cxp.VERDICT_FILE),
+                     "--workspace-root", WORKSPACE, "--profile", "heavy",
+                     "--run-id", ev.run["run_id"], "--run-attempt", ev.run["run_attempt"]])
+    assert code == 2
+    assert capsys.readouterr().err.startswith("check_xdist_parity: cannot write the verdict")
+
+
+def test_the_cli_exits_2_with_a_reason_when_the_summary_cannot_be_appended(ev, capsys):
+    ev.write()
+    output = ev.tmp / "out" / cxp.VERDICT_FILE
+    code = cxp.main(["compare", "--reference", str(ev.reference), "--candidate", str(ev.candidate),
+                     "--constraints", str(ev.constraints), "--output", str(output),
+                     "--summary", str(ev.tmp / "no-such-dir" / "summary.md"),
+                     "--workspace-root", WORKSPACE, "--profile", "heavy",
+                     "--run-id", ev.run["run_id"], "--run-attempt", ev.run["run_attempt"]])
+    assert code == 2
+    assert capsys.readouterr().err.startswith("check_xdist_parity: cannot append the summary")
+    assert json.loads(output.read_text(encoding="utf-8"))["exit"] == 0, "the verdict itself is written first"
 
 
 # --- the selection fingerprint ---------------------------------------------------------------------------

@@ -30,10 +30,12 @@ The contract (plan "The comparison contract (D2)"):
   with another outcome), the two candidate phases do not partition the
   reference selection.
 * Invalid evidence (exit 2): a manifest or XML missing, empty or unparsable
-  for an active phase; a manifest field of the wrong type; a key collision; a
-  record whose key is in neither the manifest's nodeids nor its collection
-  outcomes; workers that disagree; tool versions that differ from the
-  constraints file.
+  for an active phase; a manifest field of the wrong type (also a nodeid that
+  is not a string, and a collection outcome whose ``nodeid``, ``outcome``,
+  ``reason`` or ``reports`` is missing or of the wrong type: such a phase is
+  not compared); a key collision; a record whose key is in neither the
+  manifest's nodeids nor its collection outcomes; workers that disagree; tool
+  versions that differ from the constraints file.
 * Stale evidence (exit 2, reason ``stale_evidence``): an input whose own
   ``run_id`` and ``run_attempt`` do not prove the run and attempt this job
   runs in. Artifacts upload with ``overwrite: true``, so a re-run that fails
@@ -48,6 +50,12 @@ The contract (plan "The comparison contract (D2)"):
   is ``stale_evidence_reason``, shared with ``xdist_parity_history.py``.
 * Exit 0 only when the candidate executed exactly the reference set with the
   same outcome classes.
+* Step failures (``step_failures``, never part of the exit, always part of the
+  cutover rule): every parity-job step that is not success, Profile A's job
+  result, phase result and pytest exit (an audit step can fail Profile A after
+  its evidence was uploaded green), the shadow's record, verdict and job
+  result. ``step_failures`` is the one rule; xdist_parity_history.py applies
+  it again to the blocks each verdict records.
 
 The skip set is a set of keys; skip reasons are carried in the entries for
 triage but never compared. Measured on run 38951854817 (head 0d74af29): 6 of
@@ -66,7 +74,9 @@ Subcommands: ``compare`` writes ``xdist-parity-verdict.json`` (and a step
 summary); ``fingerprint`` prints the selection fingerprint of an args
 directory written by ``scripts/ci/profile_a_pytest_args.sh`` with
 ``VNX_CI_XDIST=1``. Exit codes of ``compare``: the verdict's exit (0, 1, 2),
-or 0 when the run is not applicable (light profile).
+or 0 when the run is not applicable (light profile); 2 with a reason on stderr,
+never a traceback, when an argument is malformed or the verdict or its
+summary cannot be written.
 """
 
 from __future__ import annotations
@@ -352,6 +362,7 @@ class Phase:
 
 
 def load_manifest(path: Path) -> dict:
+    """A manifest whose nodeids and collection outcomes every comparison may read as they are; EvidenceError if not."""
     if not path.is_file():
         raise EvidenceError("missing_manifest", str(path))
     try:
@@ -367,7 +378,36 @@ def load_manifest(path: Path) -> dict:
         raise EvidenceError("unparsable_manifest", f"{path}: nodeids or collection_outcomes is not a list")
     if not all(isinstance(outcome, dict) for outcome in manifest["collection_outcomes"]):
         raise EvidenceError("unparsable_manifest", f"{path}: a collection outcome is not an object")
+    malformed = nodeid_problems(manifest["nodeids"]) + collection_outcome_problems(manifest["collection_outcomes"])
+    if malformed:
+        raise EvidenceError("malformed_manifest", f"{path}: {'; '.join(malformed[:_SUMMARY_LIMIT])}")
     return manifest
+
+
+# field of a collection outcome (as pytest_collection_manifest.py writes it) -> the test its value must pass
+COLLECTION_OUTCOME_FIELDS = (
+    ("nodeid", lambda v: isinstance(v, str)),
+    ("outcome", lambda v: isinstance(v, str) and v in ("failed", "skipped")),
+    ("reason", lambda v: isinstance(v, str)),
+    ("reports", lambda v: whole_number(v) is not None and v >= 1),
+)
+
+
+def nodeid_problems(nodeids: list) -> list:
+    return [f"nodeid {index} {nodeid!r:.80} is not a string" for index, nodeid in enumerate(nodeids)
+            if not isinstance(nodeid, str)]
+
+
+def collection_outcome_problems(outcomes: list) -> list:
+    """Every field of every collection outcome that is missing or of the wrong type."""
+    problems = []
+    for index, outcome in enumerate(outcomes):
+        for name, valid in COLLECTION_OUTCOME_FIELDS:
+            if name not in outcome:
+                problems.append(f"collection outcome {index}: {name} is missing")
+            elif not valid(outcome[name]):
+                problems.append(f"collection outcome {index}: {name} {outcome[name]!r:.80} is not valid")
+    return problems
 
 
 def load_junit(path: Path):
@@ -430,7 +470,7 @@ def index_keys(phase: Phase, key, known: dict, problems: list) -> None:
     for nodeid in phase.nodeids:
         phase.nodeid_by_key[_claim_key(key(nodeid), nodeid, known, problems)] = nodeid
     for outcome in phase.manifest["collection_outcomes"]:
-        nodeid = str(outcome.get("nodeid", ""))
+        nodeid = outcome["nodeid"]
         k = _claim_key(key(nodeid), nodeid, known, problems)
         if k in phase.nodeid_by_key:
             problems.append(("key_collision", f"{phase.name}: collection outcome {nodeid} shares its key with a test"))
@@ -491,7 +531,7 @@ class PhaseReader:
         if not self.current(manifest_name, manifest):
             return None
         self.problems.extend(manifest_problems(manifest, name, self.pins))
-        phase = Phase(name, manifest, bool(manifest.get("phase_active")), [str(n) for n in manifest["nodeids"]])
+        phase = Phase(name, manifest, bool(manifest.get("phase_active")), list(manifest["nodeids"]))
         index_keys(phase, self.key, self.known, self.problems)
         xml_path = directory / xml_name
         if not phase.active and not xml_path.exists():
@@ -520,8 +560,8 @@ def compare_partition(reference: Phase, serial: Phase, parallel: Phase) -> list:
     entries = [{"nodeid": n, "problem": "in both candidate phases"} for n in ser & par]
     entries += [{"nodeid": n, "problem": "in no candidate phase"} for n in ref - (ser | par)]
     entries += [{"nodeid": n, "problem": "not in the reference selection"} for n in (ser | par) - ref]
-    ser_coll = {o.get("nodeid") for o in serial.manifest["collection_outcomes"]}
-    par_coll = {o.get("nodeid") for o in parallel.manifest["collection_outcomes"]}
+    ser_coll = {o["nodeid"] for o in serial.manifest["collection_outcomes"]}
+    par_coll = {o["nodeid"] for o in parallel.manifest["collection_outcomes"]}
     entries += [{"nodeid": n, "problem": "collection outcome in both candidate phases"} for n in ser_coll & par_coll]
     return sorted(entries, key=lambda e: (e["nodeid"], e["problem"]))
 
@@ -569,7 +609,7 @@ def _collection_form(outcomes: list) -> dict:
     """nodeid -> sorted outcomes ("skipped", "failed") of the files that did not collect cleanly."""
     form = {}
     for outcome in outcomes:
-        form.setdefault(str(outcome.get("nodeid")), set()).add(str(outcome.get("outcome")))
+        form.setdefault(outcome["nodeid"], set()).add(outcome["outcome"])
     return {nodeid: sorted(states) for nodeid, states in form.items()}
 
 
@@ -656,9 +696,23 @@ def reference_block(inputs: CompareInputs, run: tuple) -> tuple:
             "duration_s": whole_number(record.get("duration_s"))}, None
 
 
-def step_failures(steps: dict, shadow: dict) -> list:
-    """Every parity-job step and shadow outcome that is not success, as ``where.what=outcome``."""
+def step_failures(steps: dict, shadow: dict, reference: dict) -> list:
+    """Every parity-job step, reference and shadow outcome that is not success, as ``where.what=outcome``.
+
+    *steps*, *shadow* and *reference* are the verdict's own blocks. The
+    reference is Profile A: its job result (an audit can fail it after its
+    evidence was uploaded green), its phase result and that result's pytest
+    exit. The one step rule: xdist_parity_history.py applies it again to the
+    blocks a verdict records, so a failure recorded there blocks the cutover
+    also when the verdict's list leaves it out.
+    """
     failures = [f"parity.{name}={steps.get(name) or 'unknown'}" for name in PARITY_STEPS if steps.get(name) != "success"]
+    if reference.get("job_result") != "success":
+        failures.append(f"reference.job={reference.get('job_result') or 'unknown'}")
+    if reference.get("result") != "present":
+        failures.append(f"reference.result={reference.get('result')}")
+    elif whole_number(reference.get("exit")) != 0:
+        failures.append(f"reference.exit={reference.get('exit')}")
     if shadow.get("record") != "present":
         failures.append(f"shadow.record={shadow.get('record')}")
     elif shadow.get("verdict") != "shadow_passed":
@@ -763,15 +817,15 @@ def evaluate(inputs: CompareInputs) -> dict:
     has_differences = any(verdict["differences"].values()) if verdict["differences"] else False
     verdict["exit"] = 2 if problems else (1 if has_differences else 0)
     verdict["verdict"] = {0: "parity", 1: "differences", 2: "invalid_evidence"}[verdict["exit"]]
-    verdict["step_failures"] = step_failures(inputs.steps, verdict["shadow"])
+    verdict["step_failures"] = step_failures(inputs.steps, verdict["shadow"], verdict["reference"])
     return verdict
 
 
 def _compare_evidence(inputs: CompareInputs, problems: list) -> dict:
     try:
         pins = read_pins(inputs.constraints)
-    except OSError as exc:
-        problems.append(("unreadable_constraints", str(exc)))
+    except (OSError, ValueError) as exc:
+        problems.append(("unreadable_constraints", f"{inputs.constraints}: {exc}"))
         return {"differences": None, "counts": None, "tool_versions": None}
     own = own_tool_problems(pins)
     problems.extend(own)
@@ -832,14 +886,28 @@ def summary_markdown(verdict: dict) -> str:
 # --- CLI ------------------------------------------------------------------------------------------
 
 
-def _pairs(values: list, flag: str) -> dict:
-    pairs = {}
-    for value in values or []:
-        name, sep, outcome = value.partition("=")
-        if not sep or not name:
-            raise SystemExit(f"check_xdist_parity: {flag} expects NAME=VALUE, got {value!r}")
-        pairs[name] = outcome
-    return pairs
+def _pair(value: str) -> tuple:
+    """NAME=VALUE of ``--step`` and ``--upstream``; argparse turns the error into its usage exit 2."""
+    name, sep, outcome = value.partition("=")
+    if not sep or not name:
+        raise argparse.ArgumentTypeError(f"expects NAME=VALUE, got {value!r}")
+    return name, outcome
+
+
+def _write_outputs(verdict: dict, output: str, summary: str) -> str | None:
+    """Write the verdict, then append its summary; why not, or None when both are written."""
+    try:
+        write_json_atomic(Path(output), verdict)
+    except OSError as exc:
+        return f"cannot write the verdict to {output}: {exc}"
+    if not summary:
+        return None
+    try:
+        with open(summary, "a", encoding="utf-8") as fh:
+            fh.write(summary_markdown(verdict))
+    except OSError as exc:
+        return f"cannot append the summary to {summary}: {exc}"
+    return None
 
 
 def _cmd_compare(args) -> int:
@@ -859,14 +927,14 @@ def _cmd_compare(args) -> int:
         workspace_root=args.workspace_root,
         profile=args.profile,
         meta=meta,
-        steps=_pairs(args.step, "--step"),
-        upstream=_pairs(args.upstream, "--upstream"),
+        steps=dict(args.step or []),
+        upstream=dict(args.upstream or []),
     )
     verdict = evaluate(inputs)
-    write_json_atomic(Path(args.output), verdict)
-    if args.summary:
-        with open(args.summary, "a", encoding="utf-8") as fh:
-            fh.write(summary_markdown(verdict))
+    problem = _write_outputs(verdict, args.output, args.summary)
+    if problem is not None:
+        print(f"check_xdist_parity: {problem}", file=sys.stderr)
+        return 2
     print(f"xdist parity: {verdict['verdict']} (exit {verdict['exit']}), verdict at {args.output}")
     return 0 if verdict["exit"] is None else int(verdict["exit"])
 
@@ -894,8 +962,8 @@ def _parser() -> argparse.ArgumentParser:
     cmp.add_argument("--profile", default="", help="light or heavy, from the CI profile classifier")
     for name in ("head-sha", "tested-sha", "run-id", "run-attempt", "event", "ref"):
         cmp.add_argument(f"--{name}", default="")
-    cmp.add_argument("--step", action="append", help="NAME=OUTCOME of a parity-job step (repeatable)")
-    cmp.add_argument("--upstream", action="append", help="NAME=RESULT of a needed job (repeatable)")
+    cmp.add_argument("--step", action="append", type=_pair, help="NAME=OUTCOME of a parity-job step (repeatable)")
+    cmp.add_argument("--upstream", action="append", type=_pair, help="NAME=RESULT of a needed job (repeatable)")
     cmp.set_defaults(func=_cmd_compare)
     fp = sub.add_parser("fingerprint", help="print the selection fingerprint of an args directory")
     fp.add_argument("--args-dir", required=True)
