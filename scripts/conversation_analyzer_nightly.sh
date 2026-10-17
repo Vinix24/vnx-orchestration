@@ -293,6 +293,18 @@ else
     fi
 fi
 
+# Phase 1.1: Content-boundary measurement over the transcripts of external lanes
+# (harness and kimi), so tonight's analyzer children are included. It writes its
+# own beacon (health/content_boundary.json): `fail` on any restricted content in
+# the window and on an unconfigured boundary. A failing run stays non-fatal; an
+# overrun is recorded by run_phase like every other phase.
+log_msg "Phase 1.1: Measuring the content boundary on external-lane transcripts..."
+if run_phase "Phase 1.1" "$PHASE_TIMEOUT" content_boundary_check.py; then
+    log_msg "Phase 1.1 complete: content_boundary beacon written"
+else
+    log_msg "Phase 1.1 WARNING: content boundary check failed (non-fatal)"
+fi
+
 # Phase 1.5: Cross-reference sessions, dispatches, and receipts
 log_msg "Phase 1.5: Running session-dispatch linkage..."
 if run_phase "Phase 1.5" "$PHASE_TIMEOUT" link_sessions_dispatches.py; then

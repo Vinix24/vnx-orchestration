@@ -38,6 +38,7 @@ _REAL_ANALYZER = _REPO_ROOT / "scripts" / "conversation_analyzer.py"
 _PHASES = (
     "quality_db_init",
     "conversation_analyzer",
+    "content_boundary_check",
     "link_sessions_dispatches",
     "generate_t0_session_brief",
     "governance_aggregator",
@@ -323,10 +324,19 @@ def test_non_fatal_phase_failure_still_completes(tmp_path):
     assert COMPLETE in log
 
 
+def test_content_boundary_phase_failure_still_completes(tmp_path):
+    """C6: a failing content-boundary phase is non-fatal, like a Phase 3 failure."""
+    proc, log = _run(tmp_path, _SCRIPT.read_text(encoding="utf-8"), content_boundary_check=1)
+    assert proc.returncode == 0, proc.stderr
+    assert "Phase 1.1 WARNING" in log
+    _assert_later_phases_ran(log, "Phase 1.1 WARNING")
+    assert COMPLETE in log
+
+
 def test_every_phase_runs_through_the_bounded_function():
     text = _SCRIPT.read_text(encoding="utf-8")
     assert "| tee" not in text
-    for label in ("Phase 0", "Phase 1", "Phase 1.5", "Phase 2", "Phase 2.5",
+    for label in ("Phase 0", "Phase 1", "Phase 1.1", "Phase 1.5", "Phase 2", "Phase 2.5",
                   "Phase 2.6", "Phase 3", "Phase 4"):
         assert f'run_phase "{label}" ' in text, label
 
@@ -416,6 +426,30 @@ def test_quick_phase1_exits_zero_and_keeps_the_ok_beacon(run_script):
     assert "error" not in run.beacon["details"]
     assert "fail beacon" not in run.log
     assert COMPLETE in run.log
+
+
+def test_content_boundary_hang_is_bounded_and_reported(run_script):
+    run = run_script(STUB_MODE_content_boundary_check="block",
+                     STUB_BEACON_conversation_analyzer="ok",
+                     VNX_ANALYZER_PHASE_TIMEOUT=str(LIMIT))
+    rc = run.finish(WINDOW)
+    log = run.log
+    timeout_line = f"Phase 1.1 TIMEOUT: still running after {LIMIT}s"
+    assert timeout_line in log
+    assert "Phase 1.5 complete" in log[log.index(timeout_line):]
+    assert run.beacon["status"] == "fail"
+    assert run.beacon["details"]["error"] == f"Phase 1.1 timed out after {LIMIT}s"
+    assert rc == 124
+    assert FAILED in log and COMPLETE not in log
+
+
+def test_content_boundary_runs_after_a_phase1_overrun(run_script):
+    run = run_script(STUB_MODE_conversation_analyzer="block",
+                     VNX_ANALYZER_PHASE1_TIMEOUT=str(LIMIT))
+    run.finish(WINDOW)
+    log = run.log
+    assert f"Phase 1 TIMEOUT: still running after {LIMIT}s" in log
+    assert "Phase 1.1 complete" in log[log.index("Phase 1 TIMEOUT"):]
 
 
 # 8f
