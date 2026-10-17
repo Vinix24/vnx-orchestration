@@ -30,17 +30,19 @@ class HookRun:
         self.step = name
 
 
-def open_project(payload: Dict[str, Any], env: Dict[str, str],
-                 run: HookRun) -> Optional[Tuple[str, str, Dict[str, Any]]]:
+def open_project(payload: Dict[str, Any], env: Dict[str, str], run: HookRun,
+                 subagents: bool = False) -> Optional[Tuple[str, str, Dict[str, Any]]]:
     """(project dir, session id, settings) for a hook that may act; None when it must do nothing.
 
-    Nothing happens inside a subagent, for an unsafe session id or with the plugin
-    disabled. Nor when the project's rotation storage fails the storage gate: then
+    Nothing happens for an unsafe session id or with the plugin disabled, nor inside
+    a subagent unless the entry asks for that with `subagents` (context_guard, which
+    keeps a subagent's writes out of the plugin's directory). Nor when the project's
+    rotation storage fails the storage gate: then
     the reason goes to stderr once and the hook exits 0, without errors.log, which
     lives in the directory that failed the check. Failures are logged in the
     project only once the gate has passed.
     """
-    if payload.get("agent_id"):
+    if payload.get("agent_id") and not subagents:
         return None
     session_id = payload.get("session_id")
     if not rotation_state.is_safe_session_id(session_id):
@@ -72,9 +74,10 @@ class Session:
         return rotation_state.marker_path(self.project_dir, kind, self.session_id)
 
 
-def open_session(payload: Dict[str, Any], env: Dict[str, str], run: HookRun) -> Optional[Session]:
+def open_session(payload: Dict[str, Any], env: Dict[str, str], run: HookRun,
+                 subagents: bool = False) -> Optional[Session]:
     """The session this hook acts for, or None when it must do nothing (open_project)."""
-    opened = open_project(payload, env, run)
+    opened = open_project(payload, env, run, subagents)
     return Session(*opened) if opened is not None else None
 
 

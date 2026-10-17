@@ -7,6 +7,16 @@
                                     Write or Edit of the handover (never
                                     through a symlink at its path)
 
+Whatever the band, and also below warn, in plan mode, after a release and inside a
+subagent: a Write, Edit, MultiEdit or NotebookEdit that lands in the project's
+`.claude/rotation`, other than of the session's own handover, is denied (M), and
+that denial counts toward no cap (storage_denial). The directory holds the state
+that decides what is denied, so a tool call of the model never writes it. Where a
+write lands is judged by the real directories against the rotation directory that
+rotation_state.storage verifies, so a symlink never redirects the check, and a
+check that fails lets the call through and is logged. A shell command is not
+parsed: it runs with the user's rights, and this module does not see what it changes.
+
 M goes to the model (additionalContext, permissionDecisionReason, the Stop
 reason), U to the user (systemMessage). Each crossing gets one user line, at the
 first UserPromptSubmit, denial or held-back Stop in it. Every message names the
@@ -33,7 +43,7 @@ from __future__ import annotations
 import fnmatch
 import os
 import stat
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import context_budget
 import enforcement_state
@@ -46,6 +56,14 @@ HARD_ALLOWED = ("Read", "Glob", "Grep", "Skill", "AskUserQuestion", "TodoWrite")
 PLAN = "plan"
 FAILURES = (OSError, rotation_state.LockTimeout, ValueError)
 CHECK_HANDOVER = "check handover path"
+# The tools that write the file at a path in their input, and the input fields that hold it.
+FILE_WRITERS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
+PATH_FIELDS = ("file_path", "notebook_path")
+CHECK_STORAGE = "check write into the plugin directory"
+STORAGE_REASON = (
+    "context-rotation denied this tool call: it writes into %s, which the context-rotation plugin keeps for its "
+    "own files. No tool call writes there, in any band, except a write of this session's handover at %s."
+)
 # A prompt whose state could not be read: its message says nothing about what is denied.
 UNREAD = "unread"
 RELEASE_COMMAND = "/context-rotation:rotate release"
@@ -84,14 +102,132 @@ def writes_handover(tool_name: Any, tool_input: Any, session: hook_runtime.Sessi
     write of the handover path, which lands in that file. Neither is a handover write.
     OSError when what is at that path cannot be checked: a failed lstat tells neither.
     """
-    if not transcript_work.is_handover_write(tool_name, tool_input, session.handover):
-        return False
+    return transcript_work.is_handover_write(tool_name, tool_input, session.handover) and _handover_open(session)
+
+
+def _handover_open(session: hook_runtime.Session) -> bool:
+    """The handover path holds a regular file or nothing yet; OSError when a failed lstat tells neither."""
     try:
         with rotation_state.storage(session.project_dir) as directory:
             found = os.lstat(os.path.basename(session.handover), dir_fd=directory)
     except FileNotFoundError:
         return True
     return stat.S_ISREG(found.st_mode)
+
+
+# --- what no band lets through: a write into the plugin's directory -----------------
+
+Identity = Tuple[int, int]
+
+
+def _identity(path: str) -> Optional[Identity]:
+    """(device, inode) of what is at `path`, symlinks followed; None when nothing is.
+
+    OSError for any other failure of the stat: it tells neither.
+    """
+    try:
+        found = os.stat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    return found.st_dev, found.st_ino
+
+
+def _storage_place(project_dir: str) -> Tuple[Identity, Tuple[str, ...]]:
+    """(a directory's identity, the names below it) of where `.claude/rotation` is, or where a write would make it.
+
+    The rotation directory itself when it exists, through the descriptor
+    rotation_state.storage verifies: a symlink there is refused (StorageRefused, an
+    OSError), never followed. Otherwise its nearest existing ancestor, and the names
+    a write would create below that one.
+    """
+    try:
+        with rotation_state.storage(project_dir) as directory:
+            found = os.fstat(directory)
+    except FileNotFoundError:
+        return _where_made(os.path.realpath(rotation_state.rotation_dir(project_dir)))
+    return (found.st_dev, found.st_ino), ()
+
+
+def _where_made(path: str) -> Tuple[Identity, Tuple[str, ...]]:
+    """(identity, names): the nearest existing ancestor of `path`, and the names below it down to `path`."""
+    names: Tuple[str, ...] = ()
+    identity = _identity(path)
+    while identity is None:
+        path, name = os.path.split(path)
+        names = (name,) + names
+        identity = _identity(path)
+    return identity, names
+
+
+def _inside(place: str, directory: Identity, below: Tuple[str, ...]) -> bool:
+    """The real directory `place` (its tail perhaps not made yet) is `directory`/`below`, or lies inside it.
+
+    Every ancestor is compared by identity, so a path that reaches the directory
+    another way still matches. The names `below` compare without case: on a
+    case-insensitive file system, the macOS default, `.claude/Rotation` becomes the
+    plugin's directory once a write makes it.
+    """
+    path, names = place, ()
+    while _identity(path) != directory:
+        parent, name = os.path.split(path)
+        if parent == path:
+            return False
+        path, names = parent, (name,) + names
+    return [name.casefold() for name in names[:len(below)]] == [name.casefold() for name in below]
+
+
+def _write_targets(tool_name: Any, tool_input: Any) -> List[str]:
+    """The paths a Write, Edit, MultiEdit or NotebookEdit writes; none for any other call."""
+    if tool_name not in FILE_WRITERS or not isinstance(tool_input, dict):
+        return []
+    found = (tool_input.get(field) for field in PATH_FIELDS)
+    return [path for path in found if isinstance(path, str) and path and "\0" not in path]
+
+
+def _lands_in(target: str, directory: Identity, below: Tuple[str, ...]) -> bool:
+    """A write of `target` touches the directory, judged at three places.
+
+    Where its name is as written, where that is for real, and where a symlink at the
+    name leads: a symlink, at the name or at a directory above it, never takes a
+    write out of the check. A leading `~` is the home directory, as Claude Code's
+    file tools read it.
+    """
+    absolute = os.path.abspath(os.path.expanduser(target))
+    written = os.path.dirname(absolute)
+    places = (written, os.path.realpath(written), os.path.dirname(os.path.realpath(absolute)))
+    return any(_inside(place, directory, below) for place in places)
+
+
+def writes_into_storage(tool_name: Any, tool_input: Any, session: hook_runtime.Session) -> bool:
+    """A Write, Edit, MultiEdit or NotebookEdit that lands in the project's `.claude/rotation`, other than of the handover.
+
+    Where it lands is judged by the real directories, not by the path as written: a
+    `..`, a symlink elsewhere that leads in, a symlink inside that leads out and a
+    name in another case all count. The handover is exempt while its path holds a
+    regular file or nothing yet (as for writes_handover). OSError when where a
+    write lands cannot be checked.
+    """
+    targets = _write_targets(tool_name, tool_input)
+    if not targets:
+        return False
+    directory, below = _storage_place(session.project_dir)
+    return any(not (transcript_work.same_file(target, session.handover) and _handover_open(session))
+               and _lands_in(target, directory, below) for target in targets)
+
+
+def storage_denial(tool_name: Any, tool_input: Any, session: hook_runtime.Session, run: hook_runtime.HookRun) -> Reply:
+    """(M, None) for a write into the plugin's directory (writes_into_storage); None for any other call.
+
+    None too when where the write lands cannot be checked, after that failure is
+    logged: a failed check never denies.
+    """
+    run.at(CHECK_STORAGE)
+    try:
+        into = writes_into_storage(tool_name, tool_input, session)
+    except OSError as error:
+        rotation_state.log_failure(session.project_dir, CHECK_STORAGE, error)
+        return None
+    return (STORAGE_REASON % (os.path.dirname(session.handover), session.handover), None) if into else None
 
 
 def hard_allows(tool_name: Any, tool_input: Any, session: hook_runtime.Session) -> bool:
@@ -242,13 +378,16 @@ def _stored_reason(payload: Dict[str, Any], session: hook_runtime.Session) -> Op
 def on_tool(payload: Dict[str, Any], session: hook_runtime.Session, run: hook_runtime.HookRun) -> Reply:
     """(M reason, U line or None) when the band denies this call; None when it goes ahead.
 
-    The band is recorded for every call, also one the hard band allows: only the denial depends on that.
+    A write into the plugin's directory is denied in every band, also for an unknown
+    size, and is counted as no denial (storage_denial). The band is recorded for
+    every call, also one the hard band allows: only the denial depends on that.
     """
     tool_name, tool_input = payload.get("tool_name"), payload.get("tool_input")
+    kept = storage_denial(tool_name, tool_input, session, run)
     size, level = _measured(payload, session, run)
     if level is None:
-        return None
-    allowed = _allowed(tool_name, tool_input, session, run)
+        return kept
+    allowed = bool(kept) or _allowed(tool_name, tool_input, session, run)
 
     def change(state):
         events = enforcement_state.observe(state, level)
@@ -261,7 +400,8 @@ def on_tool(payload: Dict[str, Any], session: hook_runtime.Session, run: hook_ru
             lines.append(cap_line(state))
         return events + told, (deny_reason(size, level, session), " ".join(lines) or None)
 
-    return _settle(session, run, "enforcement state at PreToolUse", change)
+    settled = _settle(session, run, "enforcement state at PreToolUse", change)
+    return kept or settled
 
 
 def on_stop(payload: Dict[str, Any], session: hook_runtime.Session, run: hook_runtime.HookRun) -> Reply:
