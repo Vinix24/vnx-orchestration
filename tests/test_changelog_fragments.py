@@ -297,6 +297,18 @@ def test_branch_only_fragment_is_refused_by_name(repo):
     assert snapshot(repo) == before
 
 
+def test_fragment_deleted_on_the_release_branch_is_refused_by_name(repo):
+    commit(repo, {"changelog.d/kept.md": "- kept\n", "changelog.d/dropped.md": "- dropped\n"})
+    git(repo, "checkout", "-q", "-b", "release")
+    git(repo, "rm", "-q", "changelog.d/dropped.md")
+    git(repo, "commit", "-q", "-m", "drop a fragment by hand")
+    before = snapshot(repo)
+    result = run_assembler(repo, "--version", "1.1.0")
+    assert result.returncode == 1
+    assert "present at main but missing from the tree: changelog.d/dropped.md" in result.stderr
+    assert snapshot(repo) == before
+
+
 def test_uncommitted_fragment_is_refused_by_name(repo):
     (repo / "changelog.d" / "loose.md").write_text("- loose\n", encoding="utf-8")
     before = snapshot(repo)
