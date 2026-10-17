@@ -218,7 +218,7 @@ emit_xdist_vectors() {
     write_vector "$OUT_DIR/serial.args" -q -p no:xdist -p no:cacheprovider "--timeout=$PER_TEST_TIMEOUT" \
       -k "$QUARANTINE_K" ${IGNORE[@]+"${IGNORE[@]}"} "${positional[@]}"
   fi
-  write_vector "$OUT_DIR/parallel.args" "${BASE_ARGS[@]}" --deselect=tests/test_ci_profile_classification.py \
+  write_vector "$OUT_DIR/parallel.args" "${BASE_ARGS[@]}" \
     ${serial_ignore[@]+"${serial_ignore[@]}"} ${deselect[@]+"${deselect[@]}"} \
     -n "$XDIST_WORKERS" --dist loadfile --no-loadscope-reorder --max-worker-restart=0
 }
