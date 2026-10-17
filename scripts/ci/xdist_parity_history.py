@@ -21,11 +21,22 @@ commit of the last merged D3 PR) as an ancestor (``git merge-base
 
 Fail closed: a run that cannot be placed (its head commit cannot be found) and
 a run list that may be cut off by ``--limit`` both keep the rule from holding.
-A run without a verdict artifact (in progress, before D2, expired) is listed
-and not counted: profile and fingerprint are properties of the verdict.
+
+Missing evidence never leaves the window. Profile and fingerprint are
+properties of the verdict, so a run without a current verdict cannot be
+excluded on them; only git ancestry, which does not come from the artifact,
+may exclude it (its head does not descend from the window base). Every other
+such run blocks, each under its own condition: a run still running
+(``every_run_completed``), a completed run whose verdict is missing,
+unreadable or failed to download (``every_run_has_verdict``), and a verdict
+that does not prove it is of this run's latest attempt
+(``every_verdict_current``).
 
 Artifacts upload with ``overwrite: true``, so a re-run attempt replaces the
-earlier attempt's verdict. The output names the ``run_attempt`` each verdict
+earlier attempt's verdict, but a re-run that fails before its upload leaves
+the earlier one in place. A verdict counts only when its own ``run_id`` and
+``run_attempt`` are the run's and its latest attempt; a cache entry only when
+its stamp agrees with both. The output names the ``run_attempt`` each verdict
 came from next to the run's latest attempt.
 
 Exit 0 when the rule holds, 1 when it does not, 2 on a usage or tool error.
@@ -73,6 +84,7 @@ class Run:
     status: str
     conclusion: str | None
     verdict: dict | None = None
+    verdict_problem: str = ""
 
 
 @dataclass
@@ -109,17 +121,22 @@ class Evaluation:
 def place_run(run: Run, target_fingerprint: str, is_ancestor) -> Placement:
     """Where one run stands relative to the window; *is_ancestor(head)* is True, False or None.
 
+    A run without a current verdict (still running, none, or one that does not
+    prove this run's latest attempt) is placed on git ancestry alone: outside
+    the window when its head does not descend from the base, otherwise
+    ``pending``, ``no_verdict`` or ``stale_verdict``, each blocking. Nothing
+    read from a missing or stale verdict excludes a run.
+
     A heavy verdict without a fingerprint (the parity script crashed, a
     checkout failed, no selection could be emitted) cannot be matched to a
     selection; when its head descends from the window base it is
     ``unplaceable`` and blocks, so a broken run is never read as another
     selection.
     """
-    if run.status != "completed":
-        return Placement(run, "pending")
+    gap = evidence_gap(run)
+    if gap is not None:
+        return _place_on_ancestry(run, *gap, is_ancestor)
     verdict = run.verdict
-    if verdict is None:
-        return Placement(run, "no_verdict")
     if verdict.get("profile") == "light":
         return Placement(run, "light")
     fingerprint = verdict.get("selection_fingerprint")
@@ -133,6 +150,50 @@ def place_run(run: Run, target_fingerprint: str, is_ancestor) -> Placement:
     if fingerprint is None:
         return Placement(run, "unplaceable", [f"no selection fingerprint, exit {verdict.get('exit')}{_difference_note(verdict)}"])
     return Placement(run, "in_window", run_blockers(run))
+
+
+def evidence_gap(run: Run) -> tuple | None:
+    """``(place, reason)`` when *run* has no current verdict to place it on; None when it has one."""
+    if run.status != "completed":
+        return "pending", f"status {run.status or 'unknown'}: re-run this check when the run completes"
+    if run.verdict is None:
+        return "no_verdict", f"{run.verdict_problem or 'no verdict'} (run conclusion {run.conclusion or 'none'})"
+    stale = stale_reason(run.verdict, run)
+    if stale is not None:
+        return "stale_verdict", stale
+    return None
+
+
+def _place_on_ancestry(run: Run, place: str, reason: str, is_ancestor) -> Placement:
+    """Ancestry is the one exclusion that does not come from the verdict."""
+    descends = is_ancestor(run.head_sha)
+    if descends is None:
+        return Placement(run, "ancestry_unknown", [f"head {run.head_sha} cannot be found", reason])
+    if not descends:
+        return Placement(run, "before_window", [reason])
+    return Placement(run, place, [reason])
+
+
+def stale_reason(verdict: dict, run: Run) -> str | None:
+    """Why *verdict* is not evidence of *run*'s latest attempt; None when its own run_id and run_attempt prove it is."""
+    if str(verdict.get("run_id") or "") != run.run_id:
+        return f"verdict of run {verdict.get('run_id')}, not of run {run.run_id}"
+    attempt = verdict_attempt(verdict)
+    if attempt is None:
+        return "the verdict names no run_attempt"
+    if attempt != run.attempt:
+        return f"verdict of attempt {attempt}, the run's latest attempt is {run.attempt}"
+    return None
+
+
+def verdict_attempt(verdict: dict) -> int | None:
+    """The verdict's own ``run_attempt`` (written as a string by CI), or None when it names none."""
+    value = verdict.get("run_attempt")
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().isdecimal():
+        return int(value.strip())
+    return None
 
 
 def run_blockers(run: Run) -> list:
@@ -166,20 +227,40 @@ def _created(run: Run) -> datetime:
     return datetime.fromisoformat(run.created_at.replace("Z", "+00:00")).astimezone(timezone.utc)
 
 
+# Each kind of run the window cannot do without and cannot place, with its own condition:
+# (condition, the places that block it, what the detail says when none does).
+EVIDENCE_CONDITIONS = (
+    ("every_run_completed", ("pending",), "no run of the window still running"),
+    ("every_run_has_verdict", ("no_verdict",), "every completed run of the window has a readable verdict"),
+    ("every_verdict_current", ("stale_verdict",), "every verdict is of its run's latest attempt"),
+    ("every_run_placed", ("ancestry_unknown", "unplaceable"), "every run placed"),
+)
+
+
+def evidence_conditions(placements: list) -> list:
+    """One blocking condition per kind of run without usable evidence: none is ever just left out."""
+    conditions = []
+    for name, places, clear in EVIDENCE_CONDITIONS:
+        blocked = [p for p in placements if p.place in places]
+        conditions.append(Condition(name, not blocked, _blocked_detail(blocked) or clear))
+    return conditions
+
+
+def _blocked_detail(blocked: list) -> str:
+    return "; ".join(f"run {p.run.run_id}: {', '.join(p.reasons)}" for p in blocked)
+
+
 def window_conditions(window: list, placements: list) -> list:
     """The conditions on the window itself: clean runs, size, spread, latest on main, wall time."""
     dirty = [p for p in placements if p.place == "in_window" and p.reasons]
-    unknown = [p for p in placements if p.place in ("ancestry_unknown", "unplaceable")]
     heads = {run.head_sha for run in window}
     days = sorted({_created(run).date().isoformat() for run in window})
     latest = max(window, key=_created) if window else None
     on_main = latest is not None and latest.event == "push" and latest.head_branch == MAIN_BRANCH
     slow = [r for r in window if suite_wall_s(r.verdict or {}) is None or suite_wall_s(r.verdict) > MAX_SUITE_WALL_S]
     return [
-        Condition("every_run_clean", not dirty,
-                  "; ".join(f"run {p.run.run_id}: {', '.join(p.reasons)}" for p in dirty) or "every run exit 0, every step success"),
-        Condition("every_run_placed", not unknown,
-                  "; ".join(f"run {p.run.run_id}: {', '.join(p.reasons)}" for p in unknown) or "every run placed"),
+        Condition("every_run_clean", not dirty, _blocked_detail(dirty) or "every run exit 0, every step success"),
+        *evidence_conditions(placements),
         Condition("distinct_heads", len(heads) >= MIN_DISTINCT_HEADS,
                   f"{len(heads)} distinct head SHAs in the window, at least {MIN_DISTINCT_HEADS} needed"),
         Condition("calendar_days", len(days) >= MIN_CALENDAR_DAYS,
@@ -315,19 +396,71 @@ def list_runs(repo: str, workflow: str, limit: int) -> list:
     ]
 
 
-def download_verdict(repo: str, run: Run, cache: Path) -> dict | None:
-    """The run's verdict, from *cache* when the cached copy is of the run's latest attempt."""
+def download_verdict(repo: str, run: Run, cache: Path) -> tuple:
+    """``(verdict, problem)`` of *run*: the cached copy when it proves the latest attempt, else a fresh download.
+
+    A cache entry counts only when its stamp, the verdict's own run_id and
+    run_attempt, and the run's latest attempt all agree. A download lands in a
+    scratch directory and is cached only when it proves the latest attempt; an
+    earlier attempt's verdict (a re-run that failed before its upload) is
+    returned uncached, for place_run to name stale. *problem* says why there
+    is no verdict, empty when there is one.
+    """
     target = cache / run.run_id
-    cached = target / VERDICT_FILE
-    stamp = target / ".attempt"
-    if cached.is_file() and stamp.is_file() and stamp.read_text(encoding="utf-8").strip() == str(run.attempt):
-        return _read_verdict(cached)
-    target.mkdir(parents=True, exist_ok=True)
-    proc = _run(["gh", "run", "download", run.run_id, "--repo", repo, "--name", VERDICT_ARTIFACT, "--dir", str(target)])
-    if proc.returncode != 0 or not cached.is_file():
+    cached = _cached_verdict(target, run)
+    if cached is not None:
+        return cached, ""
+    cache.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=cache, prefix=f".download-{run.run_id}-") as scratch:
+        proc = _run(["gh", "run", "download", run.run_id, "--repo", repo, "--name", VERDICT_ARTIFACT, "--dir", scratch])
+        fetched = Path(scratch) / VERDICT_FILE
+        if proc.returncode != 0:
+            return None, f"gh run download exit {proc.returncode}: {_last_line(proc.stderr)}"
+        if not fetched.is_file():
+            return None, f"the {VERDICT_ARTIFACT} artifact holds no {VERDICT_FILE}"
+        verdict = _read_verdict(fetched)
+        if verdict is None:
+            return None, f"{VERDICT_FILE} is not a readable JSON object"
+        if stale_reason(verdict, run) is None:
+            _store(target, fetched, run.attempt)
+        return verdict, ""
+
+
+def _cached_verdict(target: Path, run: Run) -> dict | None:
+    """The cached verdict when stamp, verdict and run agree on the attempt; None otherwise (download again)."""
+    stamp = _read_text(target / ".attempt")
+    if stamp is None or stamp.strip() != str(run.attempt):
         return None
-    stamp.write_text(f"{run.attempt}\n", encoding="utf-8")
-    return _read_verdict(cached)
+    verdict = _read_verdict(target / VERDICT_FILE)
+    if verdict is None or stale_reason(verdict, run) is not None:
+        return None
+    return verdict
+
+
+def _store(target: Path, fetched: Path, attempt: int) -> None:
+    """Cache *fetched* for *attempt*: verdict and stamp each replaced atomically, the verdict first.
+
+    Interrupted between the two, the entry holds a new verdict under an old
+    stamp; _cached_verdict rejects that and the next call downloads again.
+    """
+    target.mkdir(parents=True, exist_ok=True)
+    os.replace(fetched, target / VERDICT_FILE)
+    fd, stamp_tmp = tempfile.mkstemp(dir=target, prefix=".attempt-")
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(f"{attempt}\n")
+    os.replace(stamp_tmp, target / ".attempt")
+
+
+def _last_line(text: str) -> str:
+    lines = (text or "").strip().splitlines()
+    return lines[-1][:300] if lines else "no message"
+
+
+def _read_text(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return None
 
 
 def _read_verdict(path: Path) -> dict | None:
@@ -437,8 +570,8 @@ def _collect(header: dict, args, repo_root: Path, cache: Path) -> tuple:
     truncated = len(listed) >= args.limit and (since is None or len(runs) == len(listed))
     completed = [r for r in runs if r.status == "completed"]
     with ThreadPoolExecutor(max_workers=8) as pool:
-        for run, verdict in zip(completed, pool.map(lambda r: download_verdict(header["repo"], r, cache), completed)):
-            run.verdict = verdict
+        for run, fetched in zip(completed, pool.map(lambda r: download_verdict(header["repo"], r, cache), completed)):
+            run.verdict, run.verdict_problem = fetched
     return runs, truncated
 
 
