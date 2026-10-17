@@ -53,7 +53,7 @@ Terminal Output -> Smart Tap -> Dispatcher -> Queue -> Terminal
 After EVERY implementation:
 1. Update architecture docs if system design changed
 2. Update operations docs for new processes
-3. Update the public release docs (`CHANGELOG.md`, `FEATURE_PLAN.md`) with completion when relevant
+3. Update the public release docs with completion when relevant: the CHANGELOG entry goes in `changelog.d/<dispatch-id>.md` (never edit `CHANGELOG.md`; the release PR folds the fragments in, rule: `changelog.d/README.md`), plus `FEATURE_PLAN.md`
 4. Archive temporary reports to `archive/{date}/`
 5. Keep DOCS_INDEX.md current
 

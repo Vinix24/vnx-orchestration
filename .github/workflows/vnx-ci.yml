@@ -788,6 +788,23 @@ jobs:
           fi
           python3 "$VNX_HOME/scripts/ci/check_function_size_ratchet.py" --base "${base_ref}" --head HEAD
 
+      # Own step, so the early exit of the lint step never skips it. Pull
+      # requests only: it needs the merge base and the PR number, which a push
+      # to main or baseline/** does not have, and a skipped step leaves the
+      # job success. The rules: scripts/ci/check_changelog_fragments.py.
+      - name: Changelog fragments
+        if: github.event_name == 'pull_request'
+        env:
+          VNX_HOME: ${{ github.workspace }}/.claude/vnx-system
+          BASE_REF: ${{ github.base_ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # Needs git, so it runs from the outer checkout, not the rsynced copy.
+          merge_base="$(git merge-base "origin/${BASE_REF}" HEAD)"
+          python3 "$VNX_HOME/scripts/ci/check_changelog_fragments.py" \
+            --base "${merge_base}" --head HEAD --pr "${PR_NUMBER}"
+
   profile-d:
     name: Profile D (pip install smoke)
     runs-on: ubuntu-latest
