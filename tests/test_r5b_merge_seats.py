@@ -32,6 +32,12 @@ family is reported on stderr before its fallback is used; and closure, ``vnx-gat
 lookup of the reviewer's slot (codex's reproduction: a booking to a legacy glm PASS beside an
 unavailable contract-named glm record).
 
+Fix-forward (OI-2113, codex FAIL on ``46b52973``): the rejection scan reads every in-scope
+record of a review peer on the head, so an outage in ``<n>-<gate>-contract.json`` no longer
+hides a FAIL in ``pr-<n>-<gate>.json`` from the door, ``vnx-gate/review``, ``vnx pr-ready``,
+closure and the governance enforcer; and a request whose ``test_run`` marker is ``"TRUE"`` or
+``" true "`` is a test run for the seat evaluation too, so it never narrows the seats.
+
 No real provider, store or GitHub: tmp stores, ``gh`` replaced at the edge (``_query_pr``,
 ``_run_ci_gate``, ``fetch_pr_facts``, ``ci_contexts.evaluate_commit``), and every config value
 resolved with no store behind it (``review_seat_support``).
@@ -1070,6 +1076,45 @@ def _head_rejection_beside_a_filled_seat(store) -> str:
     return "codex_gate"
 
 
+def _contract_record(store, gate: str, record: Dict[str, Any]) -> Path:
+    """The contract-named result file, the one ``closure_verifier._find_gate_result`` reads first."""
+    path = store["results"] / f"{PR_ID}-{gate}-contract.json"
+    path.write_text(json.dumps(record, indent=2), encoding="utf-8")
+    return path
+
+
+def _stray_fail_behind_an_unavailable_contract(store) -> None:
+    """codex's reproduction (OI-2113): both seats pass, glm's contract record is an outage, its legacy record rejects."""
+    _full_house(store)
+    _contract_record(store, "glm_gate", _absent("glm_gate"))
+    _write(store, "glm_gate", _record(store, "glm_gate", status="completed", blocking=True))
+
+
+def _seat_fail_behind_an_unavailable_contract(store) -> None:
+    """kimi's contract record is an outage and its legacy record rejects; deepseek's pass could sign kimi's seat."""
+    _write(store, "codex_gate", _record(store, "codex_gate"))
+    _contract_record(store, "kimi_gate", _absent("kimi_gate"))
+    _write(store, "kimi_gate", _record(store, "kimi_gate", status="completed", blocking=True))
+    _write(store, "deepseek_gate", _record(store, "deepseek_gate"))
+
+
+def _head_stray_fail_behind_an_unavailable_contract(store) -> str:
+    _stray_fail_behind_an_unavailable_contract(store)
+    return "codex_gate"
+
+
+def _head_seat_fail_behind_an_unavailable_contract(store) -> str:
+    _seat_fail_behind_an_unavailable_contract(store)
+    return "codex_gate"
+
+
+def _head_stray_pass_behind_an_unavailable_contract(store) -> str:
+    _full_house(store)
+    _contract_record(store, "glm_gate", _absent("glm_gate"))
+    _write(store, "glm_gate", _record(store, "glm_gate"))
+    return "codex_gate"
+
+
 _HEADS = [
     pytest.param(_head_a_and_d, "NO-GO", id="round1_a_and_d"),
     pytest.param(_head_b, "NO-GO", id="round1_b"),
@@ -1081,6 +1126,9 @@ _HEADS = [
     pytest.param(_head_seat_contradicted, "NO-GO", id="seat_report_contradicts_pass"),
     pytest.param(_head_incomplete_stray, "GO", id="incomplete_stray_record"),
     pytest.param(_head_rejection_beside_a_filled_seat, "NO-GO", id="rejection_beside_a_filled_seat"),
+    pytest.param(_head_stray_fail_behind_an_unavailable_contract, "NO-GO", id="ff_stray_fail_behind_contract"),
+    pytest.param(_head_seat_fail_behind_an_unavailable_contract, "NO-GO", id="ff_seat_fail_behind_contract"),
+    pytest.param(_head_stray_pass_behind_an_unavailable_contract, "GO", id="ff_stray_pass_behind_contract"),
 ]
 
 
@@ -1201,3 +1249,158 @@ class TestClosureChecksTheRecordTheRouteAccepted:
         line = next(gate for gate in _ready(store, monkeypatch).gates if gate.gate == "codex_gate")
         assert (line.verdict, line.evidence_gate, line.record_sha) == ("GO", "glm_gate", HEAD)
         assert line.report_path == str(store["reports"] / "glm_gate.md")
+
+
+# ---------------------------------------------------------------------------
+# Fix-forward (OI-2113, codex FAIL on 46b52973): the rejection scan reads every in-scope record
+# of a reviewer, not only the one that fills a seat; the test-run marker is read one way
+# ---------------------------------------------------------------------------
+
+
+def _enforcer_for(store, monkeypatch):
+    import governance_enforcer
+
+    monkeypatch.setattr(governance_enforcer, "GATE_RESULTS_DIR", store["results"])
+    return TestEveryReaderUsesTheSameSeat()._enforcer(store)
+
+
+_ON_HEAD = {"pr_number": PR, "head_sha": HEAD}
+
+
+class TestEveryRejectionOnTheHeadIsSeen:
+    def test_a_stray_fail_behind_an_unavailable_contract_record_refuses_the_door(self, store):
+        _stray_fail_behind_an_unavailable_contract(store)
+        _obligation(store)
+
+        verdict = _door(store)
+
+        assert verdict["verdict"] == "NO-GO", verdict["message"]
+        assert verdict["review_seats"]["filled_by"] == {"codex_gate": "codex_gate", "kimi_gate": "kimi_gate"}
+        assert verdict["review_seats"]["blocking"] == ["glm_gate"]
+        assert "glm_gate keurde deze kop af" in verdict["message"]
+
+    def test_the_door_cli_the_summary_and_readiness_refuse_the_same_head(self, store, monkeypatch, capsys):
+        _stray_fail_behind_an_unavailable_contract(store)
+        _obligation(store)
+        _stub_door_edges(monkeypatch)
+
+        rc = pr_merge.main(["--pr", PR_ID, "--dry-run", "--json"])
+        payload = _json_out(capsys)
+
+        assert rc == pr_merge.EXIT_ERROR, payload
+        assert payload["refused_by"] == "review"
+        assert "glm_gate keurde deze kop af" in payload["error"]
+        summary = _summary(store)
+        assert summary.conclusion == fgp.CONCLUSION_FAILURE, summary.reason
+        assert "glm_gate" in summary.reason
+        report = _ready(store, monkeypatch)
+        assert report.verdict != pr_readiness.VERDICT_READY, report.to_dict()
+        assert any(line.gate == "glm_gate" and line.verdict == "NO-GO" and line.rejected for line in report.gates)
+
+    def test_a_seat_gates_fail_behind_its_unavailable_contract_record_blocks_the_peer_fill(self, store, monkeypatch):
+        _seat_fail_behind_an_unavailable_contract(store)
+        _obligation(store)
+
+        verdict = _door(store)
+
+        assert verdict["verdict"] == "NO-GO", verdict["message"]
+        assert verdict["review_seats"]["blocking"] == ["kimi_gate"]
+        assert _summary(store).conclusion == fgp.CONCLUSION_FAILURE
+        assert _ready(store, monkeypatch).verdict != pr_readiness.VERDICT_READY
+
+    def test_closure_of_a_merge_under_the_seat_rule_fails_on_the_rejection(self, store):
+        _stray_fail_behind_an_unavailable_contract(store)
+
+        by_name, _checks = _closure_checks(store, _merged(_seat_rule(STACK)))
+
+        blocking = _named(by_name, "review_seats_blocking")
+        assert blocking.status == "FAIL", blocking
+        assert "glm_gate keurde deze kop af" in blocking.detail
+
+    def test_the_enforcer_credits_no_seat_while_a_reviewer_rejects_the_head(self, store, monkeypatch):
+        _stray_fail_behind_an_unavailable_contract(store)
+        enforcer = _enforcer_for(store, monkeypatch)
+
+        for check in ("codex_gate_required", "kimi_gate_required"):
+            result = enforcer.check(check, _ON_HEAD)
+            assert result.passed is False, result.message
+            assert "glm_gate keurde deze kop af" in result.message
+
+    def test_the_enforcer_sees_a_rejection_in_the_contract_record_beside_a_legacy_pass(self, store, monkeypatch):
+        """The door judges the contract record first; the enforcer read only the legacy file."""
+        _write(store, "codex_gate", _record(store, "codex_gate"))
+        _contract_record(store, "kimi_gate", _record(store, "kimi_gate", status="completed", blocking=True))
+        _write(store, "kimi_gate", _record(store, "kimi_gate"))
+        enforcer = _enforcer_for(store, monkeypatch)
+
+        assert _door(store)["verdict"] == "NO-GO"
+        kimi = enforcer.check("kimi_gate_required", _ON_HEAD)
+        assert kimi.passed is False, kimi.message
+        assert "kimi_gate keurde deze kop af" in kimi.message
+
+    def test_a_reviewer_that_rejects_in_two_records_is_named_once(self, store):
+        _full_house(store)
+        _contract_record(store, "glm_gate", _record(store, "glm_gate", status="completed", blocking=True))
+        _write(store, "glm_gate", _record(store, "glm_gate", status="fail", blocking=True))
+
+        verdict = _door(store)
+
+        assert verdict["verdict"] == "NO-GO"
+        assert verdict["review_seats"]["blocking"] == ["glm_gate"]
+
+    @pytest.mark.parametrize("outside", [
+        pytest.param({"commit_sha": OTHER_HEAD}, id="another_head"),
+        pytest.param({"test_run": " TRUE "}, id="test_run"),
+        pytest.param({"pr_id": "2075", "pr_number": 2075}, id="another_pr"),
+    ])
+    def test_a_rejection_outside_the_scope_still_blocks_nothing(self, store, monkeypatch, outside):
+        """The scan takes every candidate, under the scope rules the seat lookup has always used."""
+        _full_house(store)
+        _contract_record(store, "glm_gate", _absent("glm_gate"))
+        _write(store, "glm_gate", _record(store, "glm_gate", status="completed", blocking=True, **outside))
+
+        verdict = _door(store)
+
+        assert verdict["verdict"] == "GO", verdict["message"]
+        assert verdict["review_seats"]["blocking"] == []
+        assert _summary(store).conclusion == fgp.CONCLUSION_SUCCESS
+        assert _enforcer_for(store, monkeypatch).check("codex_gate_required", _ON_HEAD).passed is True
+
+
+@pytest.mark.parametrize("marker", ["TRUE", " true ", "Yes"])
+class TestTheTestRunMarkerIsReadOneWay:
+    def test_a_test_run_request_never_narrows_the_seats(self, store, monkeypatch, capsys, marker):
+        """codex's reproduction: an offline request that recorded codex alone narrowed two seats to one."""
+        _request(store, "codex_gate", seat="codex_gate", seats=["codex_gate"], test_run=marker)
+        _write(store, "codex_gate", _record(store, "codex_gate"))
+        _obligation(store)
+
+        verdict = _door(store)
+
+        assert verdict["verdict"] == "NO-GO", verdict["message"]
+        assert (verdict["review_seats"]["seats"], verdict["review_seats"]["source"]) == (STACK, "config_fresh")
+        assert "kimi_gate" in verdict["message"]
+        assert _summary(store).conclusion == fgp.CONCLUSION_ACTION_REQUIRED
+        assert _ready(store, monkeypatch).verdict != pr_readiness.VERDICT_READY
+        _stub_door_edges(monkeypatch)
+        rc = pr_merge.main(["--pr", PR_ID, "--dry-run", "--json"])
+        payload = _json_out(capsys)
+        assert rc == pr_merge.EXIT_ERROR, payload
+        assert payload["refused_by"] == "review"
+
+    def test_a_test_run_request_states_no_seat(self, store, monkeypatch, marker):
+        """An offline request saying kimi read codex's seat is no request on this PR: kimi keeps its own seat."""
+        _full_house(store)
+        _request(store, "kimi_gate", seat="codex_gate", test_run=marker)
+
+        verdict = _door(store)
+
+        assert verdict["verdict"] == "GO", verdict["message"]
+        assert verdict["review_seats"]["filled_by"] == {"codex_gate": "codex_gate", "kimi_gate": "kimi_gate"}
+        kimi = _enforcer_for(store, monkeypatch).check("kimi_gate_required", _ON_HEAD)
+        assert kimi.passed is True, kimi.message
+
+    def test_readiness_observes_no_test_run_result(self, store, marker):
+        _write(store, "glm_gate", _record(store, "glm_gate", test_run=marker))
+
+        assert pr_readiness.observed_gates_for_pr(store["results"], PR) == []
