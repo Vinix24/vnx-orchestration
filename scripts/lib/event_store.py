@@ -146,6 +146,14 @@ def find_archive_file(directory: Union[str, Path], dispatch_id: str) -> Optional
 # own stream and nothing else. The archive layout does not change
 # (``events/archive/<terminal>/<dispatch_id>.ndjson``), so an archive written
 # before this change reads exactly as before.
+#
+# The headless lane had the same defect (OI-1869, OI-1895, OI-1930): every
+# claude dispatch the door sends to it runs under the one target id
+# ``ephemeral``, so parallel builders shared ``events/ephemeral.ndjson``.
+# Measured 2026-10-16 in the fire logs of three parallel opus builders: the
+# boundary guard archived and cleared a running builder's stream three times
+# (``20261016-cr-b1-r2 -> 20261016-xd-d1-shadow`` and two more). That terminal
+# is a per-run terminal too.
 # ---------------------------------------------------------------------------
 
 # The terminal every harness seat is dispatched under: provider_dispatch gets
@@ -153,9 +161,15 @@ def find_archive_file(directory: Union[str, Path], dispatch_id: str) -> Optional
 # the claude seat runs with plan_gate_panel._PANEL_TERMINAL_ID.
 HARNESS_SEAT_TERMINAL = "plan-gate"
 
+# The terminal every dispatch on the headless claude lane runs under: the
+# door's plan gives the leaseless claude lane this target id
+# (dispatch_plan.compile_plan, D12) and the envelope writes the worker's events
+# under it.
+HEADLESS_LANE_TERMINAL = "ephemeral"
+
 # Terminals whose live stream is one file per run. A terminal-pinned stream
 # (``T{n}``) stays the single per-terminal ring buffer it always was.
-PER_RUN_TERMINALS = frozenset({HARNESS_SEAT_TERMINAL})
+PER_RUN_TERMINALS = frozenset({HARNESS_SEAT_TERMINAL, HEADLESS_LANE_TERMINAL})
 
 # How often an append opens its stream again when it finds the file it holds
 # removed (a per-run stream moved into its archive while the append waited on
@@ -689,6 +703,37 @@ class EventStore:
             finally:
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
+    def run_ids(self, terminal: str) -> List[str]:
+        """Dispatch ids of the runs of per-run terminal *terminal* with a live stream, sorted.
+
+        A run's stream is in this list from its first event until its teardown
+        moves it into its archive. Empty for every other terminal.
+        """
+        if terminal not in PER_RUN_TERMINALS:
+            return []
+        directory = self._events_dir / terminal
+        if not directory.is_dir():
+            return []
+        ids = (archive_id(path) for path in directory.glob(f"*{ARCHIVE_SUFFIX}") if path.is_file())
+        return sorted(run_id for run_id in ids if self._run_id(terminal, run_id) == run_id)
+
+    def tail_lane(self, lane: str, since: Optional[str] = None) -> Iterator[Dict[str, Any]]:
+        """Yield the live events of lane *lane* since a timestamp, as the dashboard shows a lane.
+
+        A terminal-pinned lane is its one stream (``tail``). A per-run
+        terminal's lane is its shared stream and every run's own live stream,
+        in timestamp order: the view the one shared file gave before each run
+        got a stream of its own (OI-2115, OI-1869).
+        """
+        if lane not in PER_RUN_TERMINALS:
+            yield from self.tail(lane, since)
+            return
+        events = list(self.tail(lane, since))
+        for run_id in self.run_ids(lane):
+            events.extend(self.tail(lane, since, dispatch_id=run_id))
+        events.sort(key=lambda event: str(event.get("timestamp") or ""))
+        yield from events
+
     def archive_dir(self, terminal: str) -> Path:
         """Return the archive directory for a terminal."""
         return self._events_dir / "archive" / terminal
@@ -790,8 +835,8 @@ class EventStore:
 
         Only a stream that holds this dispatch's events and no other
         dispatch's is archived. A stream another dispatch writes into as well
-        (OI-1869, OI-1930: parallel dispatches share one ring buffer per
-        terminal) is left untouched for the boundary guard, as before:
+        (OI-1032: parallel dispatches on one terminal-pinned stream share its
+        ring buffer) is left untouched for the boundary guard, as before:
         archiving it would file the other dispatch's events under this id, and
         truncating it would drop that dispatch's live events. A per-run
         stream (OI-2115) holds another dispatch's event only through a write
@@ -984,23 +1029,42 @@ class EventStore:
 
         Domain/system streams (decisions.ndjson, provider_costs.ndjson, ...) are
         skipped via the agent-envelope check.
+
+        A per-run terminal is one lane over its shared stream and every run's
+        own live stream (``tail_lane``): the counts add up, the most recent
+        event names the provider and dispatch, and ``runs`` lists each live
+        run's stream the same way, most recent first, so a reader can follow
+        one run (``tail(terminal, dispatch_id=...)``).
         """
         if not self._events_dir.exists():
             return []
-        lanes: list[Dict[str, Any]] = []
-        for path in self._events_dir.glob("*.ndjson"):
-            lane_id = path.stem
-            last = self.last_event(lane_id)
-            if last is None or not self._is_agent_event(last):
-                continue
-            lanes.append(
-                {
-                    "id": lane_id,
-                    "event_count": self.event_count(lane_id),
-                    "last_timestamp": last.get("timestamp"),
-                    "provider": last.get("provider"),
-                    "dispatch_id": last.get("dispatch_id"),
-                }
-            )
+        lane_ids = {path.stem for path in self._events_dir.glob("*.ndjson")} | PER_RUN_TERMINALS
+        lanes = [lane for lane in map(self._lane_summary, sorted(lane_ids)) if lane is not None]
         lanes.sort(key=lambda x: x.get("last_timestamp") or "", reverse=True)
         return lanes
+
+    def _stream_summary(self, terminal: str, run_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Count and most recent event of one live stream, or None when it holds no agent event."""
+        last = self.last_event(terminal, dispatch_id=run_id)
+        if last is None or not self._is_agent_event(last):
+            return None
+        return {
+            "event_count": self.event_count(terminal, dispatch_id=run_id),
+            "last_timestamp": last.get("timestamp"),
+            "provider": last.get("provider"),
+            "dispatch_id": last.get("dispatch_id"),
+        }
+
+    def _lane_summary(self, lane: str) -> Optional[Dict[str, Any]]:
+        """The ``list_lanes`` entry of *lane*, or None when it has no agent event."""
+        runs = [summary for summary in (self._stream_summary(lane, run_id) for run_id in self.run_ids(lane))
+                if summary is not None]
+        shared = self._stream_summary(lane)
+        streams = runs + ([shared] if shared is not None else [])
+        if not streams:
+            return None
+        latest = max(streams, key=lambda summary: str(summary.get("last_timestamp") or ""))
+        entry: Dict[str, Any] = {"id": lane, **latest, "event_count": sum(s["event_count"] for s in streams)}
+        if lane in PER_RUN_TERMINALS:
+            entry["runs"] = sorted(runs, key=lambda summary: str(summary.get("last_timestamp") or ""), reverse=True)
+        return entry

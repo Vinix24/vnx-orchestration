@@ -42,6 +42,7 @@ from dispatch_spec import (  # noqa: E402
     write_paths,
 )
 from dispatch_plan import (  # noqa: E402
+    HEADLESS_LANE_TERMINAL,
     ConstraintVerdict,
     ExecutionPlan,
     ModelPin,
@@ -2421,8 +2422,8 @@ def build_runtime_snapshot(
         constraint_verdicts = constraint_verdicts + (stop_verdict,)
 
     if is_claude_lane:
-        target_health: dict[str, str] = {"ephemeral": "healthy"}
-        target_capable: dict[str, bool] = {"ephemeral": True}
+        target_health: dict[str, str] = {HEADLESS_LANE_TERMINAL: "healthy"}
+        target_capable: dict[str, bool] = {HEADLESS_LANE_TERMINAL: True}
     else:
         target_id = spec.target_id_override or spec.target_slot
         target_health = {target_id: "healthy"}
