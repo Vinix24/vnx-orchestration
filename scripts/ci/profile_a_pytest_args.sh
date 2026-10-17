@@ -16,6 +16,13 @@
 #                                    parallel.args  the same sweep under
 #                                                   pytest-xdist, without the
 #                                                   serial entries
+#   either mode                      run.json       the run stamp of the
+#                                                   emission: GITHUB_RUN_ID and
+#                                                   GITHUB_RUN_ATTEMPT (null
+#                                                   outside CI), written last,
+#                                                   so the parity check can tell
+#                                                   this attempt's emission from
+#                                                   an earlier attempt's
 #
 # Profile A and the xdist shadow job of .github/workflows/vnx-ci.yml both call
 # this script, so the selection cannot drift between them: a second inline
@@ -190,6 +197,18 @@ match_serial_entries() {
   done
 }
 
+# A JSON string of the digits in $1, or null when it has none.
+json_digits() {
+  local v
+  v="$(printf '%s' "${1:-}" | tr -cd '0-9')"
+  if [ -n "$v" ]; then printf '"%s"' "$v"; else printf 'null'; fi
+}
+
+write_stamp() {
+  printf '{"schema": "vnx-run-stamp/1", "run_id": %s, "run_attempt": %s}\n' \
+    "$(json_digits "${GITHUB_RUN_ID:-}")" "$(json_digits "${GITHUB_RUN_ATTEMPT:-}")" > "$OUT_DIR/run.json"
+}
+
 write_vector() {
   local out="$1"
   shift
@@ -239,19 +258,20 @@ main() {
   fi
   ROOT="$VNX_PROJECT_ROOT"
   mkdir -p "$OUT_DIR"
-  rm -f "$OUT_DIR/full.args" "$OUT_DIR/serial.args" "$OUT_DIR/parallel.args"
+  rm -f "$OUT_DIR/full.args" "$OUT_DIR/serial.args" "$OUT_DIR/parallel.args" "$OUT_DIR/run.json"
   build_ignore
   BASE_ARGS=(-q "$ROOT/tests" -p no:cacheprovider "--timeout=$PER_TEST_TIMEOUT" -k "$QUARANTINE_K" ${IGNORE[@]+"${IGNORE[@]}"})
   if [ "$mode" = 0 ]; then
     write_vector "$OUT_DIR/full.args" "${BASE_ARGS[@]}"
-    return 0
+  else
+    read_serial_entries
+    split_serial_entries
+    if [ "${#SERIAL_ENTRIES[@]}" -gt 0 ]; then
+      check_serial_collection
+    fi
+    emit_xdist_vectors
   fi
-  read_serial_entries
-  split_serial_entries
-  if [ "${#SERIAL_ENTRIES[@]}" -gt 0 ]; then
-    check_serial_collection
-  fi
-  emit_xdist_vectors
+  write_stamp
 }
 
 main "$@"

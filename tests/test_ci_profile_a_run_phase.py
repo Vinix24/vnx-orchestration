@@ -37,8 +37,14 @@ def _write_args(evidence: Path, phase: str, vector: list) -> None:
     (evidence / "args" / f"{phase}.args").write_bytes(b"".join(a.encode() + b"\0" for a in vector))
 
 
-def _run(root: Path, phase: str, evidence: Path) -> subprocess.CompletedProcess:
-    env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_") and k != "PYTHONPATH"}
+RUN = {"GITHUB_RUN_ID": "38939122085", "GITHUB_RUN_ATTEMPT": "2"}
+
+
+def _run(root: Path, phase: str, evidence: Path, run: dict | None = RUN) -> subprocess.CompletedProcess:
+    """The helper in run *run* (the GITHUB_* variables), or outside CI when *run* is None."""
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("PYTEST_") and k not in ("PYTHONPATH", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")}
+    env.update(run or {})
     env["PATH"] = os.pathsep.join([str(Path(sys.executable).parent), env.get("PATH", "")])
     return subprocess.run(
         ["bash", str(HELPER), phase, str(evidence)], cwd=str(root), env=env, capture_output=True, text=True
@@ -58,6 +64,12 @@ def test_a_green_phase_leaves_its_evidence_and_exits_0(tmp_path, phase):
     assert 'name="test_ok"' in junit
     manifest = json.loads((evidence / f"manifest-{phase}.json").read_text(encoding="utf-8"))
     assert manifest["phase"] == phase and manifest["nodeids"] == ["tests/test_x.py::test_ok"]
+    result = json.loads((evidence / f"result-{phase}.json").read_text(encoding="utf-8"))
+    assert result == {"schema": "vnx-phase-result/1", "phase": phase, "run_id": "38939122085", "run_attempt": "2",
+                      "exit": 0, "duration_s": int((evidence / f"duration-{phase}-s").read_text().strip())}
+    assert (manifest["run_id"], manifest["run_attempt"]) == ("38939122085", "2")
+    assert '<property name="vnx_run_id" value="38939122085"' in junit
+    assert '<property name="vnx_run_attempt" value="2"' in junit
     if Path("/proc/meminfo").is_file():
         assert int((evidence / "mem-total-kb").read_text()) > 0
         assert int((evidence / f"mem-baseline-used-kb-{phase}").read_text()) > 0
@@ -71,6 +83,30 @@ def test_a_red_phase_records_and_returns_pytests_exit_code(tmp_path):
     assert proc.returncode == 1
     assert (evidence / "exit-parallel").read_text().strip() == "1"
     assert 'name="test_red"' in (evidence / "junit-parallel.xml").read_text(encoding="utf-8")
+    assert json.loads((evidence / "result-parallel.json").read_text(encoding="utf-8"))["exit"] == 1
+
+
+def test_outside_ci_the_result_names_no_run(tmp_path):
+    root = _suite(tmp_path, failing=False)
+    evidence = tmp_path / "evidence"
+    _write_args(evidence, "full", ["-q", "-p", "no:cacheprovider", "-p", "no:xdist", str(root / "tests")])
+    proc = _run(root, "full", evidence, run=None)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    result = json.loads((evidence / "result-full.json").read_text(encoding="utf-8"))
+    assert result["run_id"] is None and result["run_attempt"] is None
+    assert "vnx_run_id" not in (evidence / "junit-full.xml").read_text(encoding="utf-8")
+
+
+def test_a_rerun_of_the_phase_replaces_the_earlier_result_before_it_runs(tmp_path):
+    root = _suite(tmp_path, failing=False)
+    evidence = tmp_path / "evidence"
+    (evidence / "args").mkdir(parents=True)
+    (evidence / "args" / "full.args").write_bytes(b"-q\0--no-such-pytest-flag\0")
+    (evidence / "result-full.json").write_text('{"run_id": "1", "run_attempt": "1", "exit": 0}', encoding="utf-8")
+    proc = _run(root, "full", evidence)
+    assert proc.returncode == 4
+    result = json.loads((evidence / "result-full.json").read_text(encoding="utf-8"))
+    assert (result["run_attempt"], result["exit"]) == ("2", 4)
 
 
 @pytest.mark.parametrize(("phase", "args_body", "message"), [
@@ -88,3 +124,4 @@ def test_bad_input_is_refused_with_exit_2(tmp_path, phase, args_body, message):
     assert proc.returncode == 2
     assert message in proc.stderr
     assert not (evidence / f"exit-{phase}").exists()
+    assert not (evidence / f"result-{phase}.json").exists()
