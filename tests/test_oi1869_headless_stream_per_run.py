@@ -589,6 +589,32 @@ class TestAgentStreamDashboard:
         assert [e["type"] for e in new_events] == SECOND_TYPES
 
 
+class TestDashboardRouting:
+    """serve_dashboard.do_GET hands the query's dispatch_id to both live readers."""
+
+    @pytest.mark.parametrize("query, expected", [(f"&dispatch_id={FIRST}", FIRST), ("", None)])
+    def test_the_agent_stream_route_forwards_the_dispatch_id(self, query, expected):
+        import serve_dashboard
+
+        captured = []
+        handler = MagicMock()
+        handler.path = f"/api/agent-stream/{TERMINAL}?since=2026-10-16T10:00:00Z{query}"
+        with patch.object(serve_dashboard, "handle_agent_stream", lambda *args: captured.append(args[1:])):
+            serve_dashboard.DashboardHandler.do_GET(handler)
+        assert captured == [(TERMINAL, "2026-10-16T10:00:00Z", expected)]
+
+    @pytest.mark.parametrize("query, expected", [(f"&dispatch_id={FIRST}", FIRST), ("", None)])
+    def test_the_events_stream_route_forwards_the_dispatch_id(self, query, expected):
+        import serve_dashboard
+
+        captured = []
+        handler = MagicMock()
+        handler.path = f"/api/events/stream?terminal={TERMINAL}{query}"
+        with patch.object(serve_dashboard, "handle_events_stream", lambda *args: captured.append(args[1:])):
+            serve_dashboard.DashboardHandler.do_GET(handler)
+        assert captured == [(TERMINAL, expected)]
+
+
 # ---------------------------------------------------------------------------
 # Dashboard reader: api_intelligence.handle_events_stream (raw tail)
 # ---------------------------------------------------------------------------
