@@ -1,0 +1,9 @@
+# PRs that were open with a CHANGELOG.md bullet under "## [Unreleased]" when the
+# fragment rule landed (track changelog-fragmenten, F1). One line per PR:
+#   <pr-number> <sha256 over its added Unreleased lines, sorted, newline-joined>
+# check_changelog_fragments.py reads this file at the merge base and lets a listed
+# PR pass rule 1 only while its lines hash to the listed value; check_changelog_fragments.legacy_entry
+# computes a line. Measured 2026-10-17 on the open PRs (gh pr list --state open).
+# The first release PR after the rule deletes this file.
+2080 d0dde1a73a1fb38090685f783476e5171f22f1ad7ad0ba093131f82128bc7540
+2082 75f13619e70eb3e8d0feb96fe27f8a0db55312d64cbfb09573a21f712ad19d47

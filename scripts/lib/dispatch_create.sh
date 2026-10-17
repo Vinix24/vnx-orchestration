@@ -129,7 +129,7 @@ Your report MUST include this metadata block exactly as shown below. The receipt
    - Conventional commit: \`feat|fix|test|refactor(<scope>): <description>\`
    - Include in commit body: \`Dispatch-ID: ${rid}\`
    - Do NOT commit VNX infrastructure or state directories
-2. If this is a feature or fix: update \`CHANGELOG.md\` with a one-line entry
+2. If this is a feature or fix: add \`changelog.d/${rid}.md\` with your bullet(s), each line starting with \`- \`. Never edit \`CHANGELOG.md\`: the release PR assembles the fragments (rule: \`changelog.d/README.md\`)
 3. Then write your report below
 
 ## Expected Outputs (ALL sections REQUIRED)
