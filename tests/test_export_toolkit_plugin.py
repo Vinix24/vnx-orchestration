@@ -809,6 +809,167 @@ def test_cleanup_that_cannot_finish_exits_3_and_names_what_is_left(source, targe
     assert git(target, "worktree", "list", "--porcelain").count("worktree ") == 1
 
 
+# --- round 4: the export writes exactly its own branch, and only after it won
+
+
+def symbolic_target(repo, ref):
+    """What ref points at when it is a symbolic ref; empty when it is not."""
+    return git(repo, "symbolic-ref", "-q", ref, check=False)
+
+
+@pytest.mark.parametrize("points_at", ["refs/heads/main", "refs/heads/elsewhere", "refs/heads/nowhere"])
+def test_symbolic_export_branch_is_refused_and_nothing_it_points_at_moves(source, target, points_at):
+    """main is the clone's checkout and elsewhere a branch no worktree is on:
+    both read as an existing export branch. nowhere does not exist, so the
+    export branch reads as new and the write would create it."""
+    git(target, "branch", "elsewhere")
+    git(target, "symbolic-ref", "refs/heads/" + BRANCH, points_at)
+    tips = branch_tips(target)
+    before = checkout_state(target)
+    result = export(source, target)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "refs/heads/%s is a symbolic ref to %s" % (BRANCH, points_at) in result.stderr
+    assert checkout_state(target) == before
+    assert branch_tips(target) == tips
+    assert symbolic_target(target, "refs/heads/" + BRANCH) == points_at
+    assert "nowhere" not in branches(target)
+
+
+def test_export_branch_rebased_under_a_symbolic_alias_is_refused(source, target, tmp_path):
+    """git records the alias a rebase was started on, not the branch it points
+    at; finishing that rebase moves the export branch."""
+    assert export(source, target).returncode == 0
+    drop_row_on_branch(target)
+    git(target, "symbolic-ref", "refs/heads/alias", "refs/heads/" + BRANCH)
+    other = tmp_path / "other"
+    git(target, "worktree", "add", "-q", "--detach", str(other), BRANCH)
+    git(other, "rebase", "--exec", "false", "HEAD~1", "alias", check=False)
+    head_name = other / git(other, "rev-parse", "--git-path", "rebase-merge/head-name")
+    assert head_name.read_text(encoding="utf-8").strip() == "refs/heads/alias"
+    tip = git(target, "rev-parse", BRANCH)
+    before = checkout_state(target)
+    result = export(source, target)
+    assert result.returncode == 1, result.stdout
+    assert "being rebased in %s" % os.path.realpath(other) in result.stderr
+    assert git(target, "rev-parse", BRANCH) == tip
+    assert checkout_state(target) == before
+
+
+def test_symbolic_origin_main_in_the_source_is_refused(source, target):
+    """The commit is checked against origin/main itself. A symbolic origin/main
+    checks it against the branch it points at, here the source's own main."""
+    commit_source(source, version="0.2.0", files={"hooks/run.sh": "never pushed\n"})
+    git(source, "update-ref", "-d", "refs/remotes/origin/main")
+    git(source, "symbolic-ref", "refs/remotes/origin/main", "refs/heads/main")
+    before = checkout_state(target)
+    result = export(source, target, tag="context-rotation-v0.2.0")
+    assert result.returncode == 1, result.stdout
+    assert "refs/remotes/origin/main is a symbolic ref to refs/heads/main" in result.stderr
+    assert checkout_state(target) == before and branches(target) == ["main"]
+
+
+# The export branch becomes a symbolic ref at the very update-ref that writes
+# it. TURN=publication: just before the publishing write, pointing at main.
+# Otherwise: the publishing write goes through, the script gets a TERM, and the
+# rollback write finds the branch a symbolic ref to a bystander that holds
+# this run's commit.
+SYMBOLIC_AT_THE_WRITE = """\
+case " $* " in
+    *" update-ref "*"-m "*)
+        if [ "$TURN" = publication ]; then "@GIT@" -C "$2" symbolic-ref "$EXPORT_REF" refs/heads/main; fi
+        "@GIT@" "$@"
+        status=$?
+        if [ "$TURN" != publication ] && [ "$status" = 0 ]; then kill -TERM "$PPID"; fi
+        exit "$status" ;;
+    *" update-ref "*)
+        for new; do :; done
+        "@GIT@" -C "$2" update-ref refs/heads/bystander "$new"
+        "@GIT@" -C "$2" symbolic-ref "$EXPORT_REF" refs/heads/bystander ;;
+esac
+exec "@GIT@" "$@"
+"""
+
+
+@pytest.mark.parametrize("turn", ["publication", "rollback of a new branch", "rollback of an existing branch"])
+def test_a_branch_turned_symbolic_at_the_write_is_never_written_through(source, target, tmp_path, turn):
+    if turn != "rollback of a new branch":
+        assert export(source, target).returncode == 0
+        drop_row_on_branch(target)
+    if turn == "publication":
+        # main at the export branch's tip, so a write through the symbolic ref
+        # passes the compare-and-swap and moves the checked-out main.
+        release(target)
+    main = git(target, "rev-parse", "main")
+    base = git(target, "rev-parse", BRANCH) if BRANCH in branches(target) else main
+    before = checkout_state(target)
+    env = git_in_front(tmp_path, SYMBOLIC_AT_THE_WRITE)
+    env.update({"TURN": turn.split()[0], "EXPORT_REF": "refs/heads/" + BRANCH})
+    result = export(source, target, env=env)
+    assert git(target, "rev-parse", "main") == main
+    assert checkout_state(target) == before
+    assert symbolic_target(target, "refs/heads/" + BRANCH) == ""
+    if turn == "publication":
+        assert result.returncode == 0, result.stderr
+        assert git(target, "rev-parse", BRANCH + "^") == main
+        return
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "stopped with exit status 143" in result.stderr
+    assert git(target, "rev-parse", "bystander^") == base
+    if turn == "rollback of a new branch":
+        assert BRANCH not in branches(target)
+    else:
+        assert git(target, "rev-parse", BRANCH) == base
+
+
+WORKTREE_HEAD_TURNED_SYMBOLIC = """\
+case " $* " in
+    *" commit "* | *" commit-tree "*) "@GIT@" -C "$2" symbolic-ref HEAD refs/heads/main ;;
+esac
+exec "@GIT@" "$@"
+"""
+
+
+def test_the_exports_own_worktree_turned_symbolic_moves_no_branch(source, target, tmp_path):
+    """The export's own worktree HEAD made a symbolic ref to the checked-out
+    main just before the commit is made: the commit goes in without a ref."""
+    main = git(target, "rev-parse", "main")
+    before = checkout_state(target)
+    result = export(source, target, env=git_in_front(tmp_path, WORKTREE_HEAD_TURNED_SYMBOLIC))
+    assert result.returncode == 0, result.stderr
+    assert git(target, "rev-parse", "main") == main
+    assert checkout_state(target) == before
+    assert git(target, "rev-parse", BRANCH + "^") == main
+
+
+# Another export publishes the same commit just before this run's
+# compare-and-swap, which then fails.
+COMPETING_EXPORT_FIRST = """\
+case " $* " in
+    *" update-ref "*"-m "*)
+        ref= new= old=
+        for arg; do ref=$new; new=$old; old=$arg; done
+        "@GIT@" -C "$2" update-ref -m "a competing export" "$ref" "$new" ;;
+esac
+exec "@GIT@" "$@"
+"""
+
+
+@pytest.mark.parametrize("branch_before", ["new", "existing"])
+def test_a_lost_compare_and_swap_leaves_the_winners_branch(source, target, tmp_path, branch_before):
+    if branch_before == "existing":
+        assert export(source, target).returncode == 0
+        drop_row_on_branch(target)
+    base = git(target, "rev-parse", BRANCH if branch_before == "existing" else "main")
+    before = checkout_state(target)
+    result = export(source, target, env=git_in_front(tmp_path, COMPETING_EXPORT_FIRST))
+    assert result.returncode == 1, result.stdout + result.stderr
+    winner = git(target, "rev-parse", BRANCH)
+    assert git(target, "rev-parse", BRANCH + "^") == base
+    assert "could not write %s" % BRANCH in result.stderr and "points at %s" % winner in result.stderr
+    assert "deleted" not in result.stderr and "moved" not in result.stderr
+    assert checkout_state(target) == before
+
+
 # --- refusals before anything is built
 
 
