@@ -1269,7 +1269,7 @@ def retire_original(project_dir: str, marker: Dict[str, Any]) -> None:
     the age-based trim.
 
     Never raises: a failure to lock, move or read (OSError, LockTimeout) goes to
-    log_failure, and what was not moved yet stays where it was.
+    log_failure, and the claim still names its archive copy.
     """
     try:
         with project_lock(project_dir):
@@ -1352,12 +1352,13 @@ def _trim(project_dir: str, keep: int) -> int:
 
 
 def trim_archive(project_dir: str, keep: int) -> int:
-    """Keep the newest `keep` archived handovers and every copy a marker still names, and the newest `keep` originals.
+    """Keep the newest `keep` archived handovers and every copy a marker still names.
 
     A claimed marker's copy is the recovery record after a crash, so it outlives
     the newest-`keep` window for as long as the marker is on disk. The originals
-    the cleanup moved off a handover path (ORIGINAL_NAME) are counted apart, so
-    they never push an archive copy out of the window. Returns how many
+    the cleanup moved off a handover path (ORIGINAL_NAME) are counted apart: the
+    newest `keep` of them stay, and they never push an archive copy out of the
+    window. Returns how many
     were removed; without an archive nothing is created. Runs in the SessionStart
     hook and never raises: a failure to lock, list or unlink (OSError, LockTimeout)
     goes to log_failure, and the next start trims again.

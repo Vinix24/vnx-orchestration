@@ -2,10 +2,10 @@
 
 the claim's line in injections.jsonl -> claim (the marker moves to the claim name
 of its generation) -> copy to the archive -> the original moves into the archive
-under a name of its own (rotation_state.retire_original) -> the injection's line
--> emit -> the claimed marker removed last. A crash at any point leaves the
-claimed marker naming an archive copy that holds the claimed bytes, or the
-original, and `resume` lists it. Automatic injection happens at most once; recovery is manual, and reads the
+(rotation_state.retire_original) -> the injection's line -> emit -> the claimed
+marker removed last. A crash at any point leaves the claimed marker naming an
+archive copy that holds the claimed bytes, or the original, and `resume` lists
+it. Automatic injection happens at most once; recovery is manual, and reads the
 archive copy first: the original is used only while there is no copy yet and it
 still holds the claimed bytes. No file that was ever at the handover path is
 deleted, so a handover written meanwhile stays. Every marker here passed
