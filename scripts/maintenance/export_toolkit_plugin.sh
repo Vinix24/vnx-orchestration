@@ -1,6 +1,6 @@
 #!/bin/sh
 # Export the context-rotation plugin from this repository to a local clone of
-# the public toolkit repo, on a new branch, as one reviewable commit.
+# the public toolkit repo, on a branch, as one reviewable commit.
 #
 # Usage:
 #   export_toolkit_plugin.sh --commit <sha> --target <toolkit-clone> --tag context-rotation-v<version> [--source <repo>]
@@ -14,16 +14,20 @@
 # file running on both. The JSON, README and version work is done by python3
 # (standard library only), which the plugin itself requires anyway.
 #
-# The state of the target is decided, not trusted. The run refuses a clone with
-# any local change, an operation in progress, an ignored file or a link where it
-# writes. Everything it writes is built from the export branch's own base
-# commit, never from the working tree; it commits only its own three paths; and
-# every exit that is not a successful export puts the clone back on the ref,
-# commit and branches it had. What it does and refuses is described in the
-# plugin README, section "Maintainers". It never pushes, never tags and never
-# touches the network: the last thing it prints is the commands the operator
-# runs.
+# The export never checks out, writes into, resets or cleans the clone's
+# working tree or index. It builds its commit in a worktree of its own, in a
+# temp dir outside the clone, on the export branch's base commit, with the
+# exact bytes and modes of the source commit and none of the clone's hooks.
+# The one thing it writes in the clone is the export branch: last, after the
+# leak scan of the committed blobs passed, as a compare-and-swap on the value
+# it read at the start. What it does and refuses is described in the plugin
+# README, section "Maintainers". It never pushes, never tags and never touches
+# the network: the last thing it prints is the commands the operator runs.
 set -eu
+
+# git reads these before -C; inherited from a hook or an alias, they would
+# point every command below at another repository or at the operator's index.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY
 
 OWNED_SRC="packages/claude-code-toolkit/context-rotation"
 OWNED_DST="context-rotation"
@@ -33,6 +37,9 @@ TAG_PREFIX="context-rotation-v"
 
 STATE="check"
 TMP=""
+WT=""
+NEW=""
+KEEP_TMP=0
 
 die() {
     echo "export_toolkit_plugin: $*" >&2
@@ -72,14 +79,14 @@ sys.exit(0 if key(sys.argv[2]) > key(sys.argv[1]) else 1)
 PY
 }
 
-# merge_marketplace <marketplace.json> <plugin.json>: add or update only the
-# context-rotation entry. Every other byte of an existing file stays; a missing
-# file is created. Prints created, updated or unchanged.
+# merge_marketplace <marketplace.json> <plugin.json> <shown as>: add or update
+# only the context-rotation entry. Every other byte of an existing file stays;
+# a missing file is created. Prints created, updated or unchanged.
 merge_marketplace() {
-    python3 -I - "$1" "$2" <<'PY'
+    python3 -I - "$1" "$2" "$3" <<'PY'
 import json, os, sys
 
-market_path, plugin_path = sys.argv[1], sys.argv[2]
+market_path, plugin_path, shown = sys.argv[1], sys.argv[2], sys.argv[3]
 meta = json.load(open(plugin_path, encoding="utf-8"))
 entry = {
     "name": meta["name"],
@@ -164,10 +171,11 @@ def merged(text):
 if os.path.exists(market_path):
     old = open(market_path, encoding="utf-8").read()
     try:
+        json.loads(old)
         new = merged(old)
+        json.loads(new)
     except (ValueError, IndexError) as exc:
-        sys.exit("cannot merge into %s: %s" % (market_path, exc))
-    json.loads(new)
+        sys.exit("cannot merge into %s: %s" % (shown, exc))
     status = "unchanged" if new == old else "updated"
 else:
     doc = {"name": "claude-code-toolkit", "owner": {"name": "Vinix24"}, "plugins": [entry]}
@@ -195,13 +203,28 @@ existed = os.path.exists(readme_path)
 text = open(readme_path, encoding="utf-8").read() if existed else "# claude-code-toolkit\n"
 lines = text.split("\n")
 
-if any(line.lstrip().startswith("|") and "context-rotation/" in line for line in lines):
-    print("unchanged")
-    sys.exit(0)
-
 
 def cells(line):
-    return [c for c in line.strip().strip("|").split("|")]
+    """The cells of a table row; a backslash escapes the character after it, so
+    an escaped pipe stays inside its cell."""
+    found, cell, i, body = [], "", 0, line.strip()
+    while i < len(body):
+        if body[i] == "\\" and i + 1 < len(body):
+            cell += body[i:i + 2]
+            i += 2
+            continue
+        if body[i] == "|":
+            found.append(cell)
+            cell = ""
+        else:
+            cell += body[i]
+        i += 1
+    found.append(cell)
+    if found and found[0] == "":
+        found = found[1:]
+    if found and found[-1] == "":
+        found = found[:-1]
+    return found
 
 
 def build_row(template):
@@ -218,7 +241,11 @@ if heading is None:
     new = body + "\n## Tools\n\n" + "\n".join(HEADER + [build_row(None)]) + "\n"
 else:
     end = next((n for n in range(heading + 1, len(lines)) if lines[n].startswith("## ")), len(lines))
-    first = next((n for n in range(heading + 1, end) if lines[n].lstrip().startswith("|")), None)
+    section = range(heading + 1, end)
+    if any(lines[n].lstrip().startswith("|") and "context-rotation/" in lines[n] for n in section):
+        print("unchanged")
+        sys.exit(0)
+    first = next((n for n in section if lines[n].lstrip().startswith("|")), None)
     if first is None:
         lines[heading + 1:heading + 1] = [""] + HEADER + [build_row(None)]
     else:
@@ -238,11 +265,11 @@ PY
 
 # leak_scrub <exported folder> <base name> [<file> <that file at the base>]...:
 # the plugin's own patterns from its tests/test_isolation.py, applied to every
-# file it exported plus the toolkit-level files. A hit on a toolkit-level line
-# the base already had is marked pre-existing: the export did not bring it, but
-# it still blocks a publish. The test module is imported, not copied; its
-# conftest is replaced by a stub that only names the package folder, so pytest
-# is not needed.
+# file of the exported folder plus the two toolkit-level files. A hit on a line
+# of a toolkit-level file that the base already had is marked pre-existing: the
+# export did not bring it, but it still blocks a publish. The test module is
+# imported, not copied; its conftest is replaced by a stub that only names the
+# package folder, so pytest is not needed.
 leak_scrub() {
     python3 -I - "$@" <<'PY'
 import pathlib, sys, types
@@ -292,58 +319,147 @@ sys.exit(1 if hits else 0)
 PY
 }
 
-# remove_gone <target> <base listing> <new tree>: the listing holds the tracked
-# files under context-rotation/ at the base, NUL-separated as git ls-tree -z
-# prints them, so no name is quoted or split. Removes each one the new export
-# no longer has, then every directory that removal left empty.
-remove_gone() {
-    python3 -I - "$1" "$2" "$3" "$OWNED_DST" <<'PY'
-import os, sys
+# materialize <repo> <rev> <tree path> <dest> [<manifest>]: every file under the
+# tree path at rev, written below dest with its mode (755 for 100755, else
+# 644). The bytes come from git cat-file: no checkout, no filter, no export
+# attribute changes them. The manifest lists each file as "<mode> <name below
+# dest>", NUL-terminated. A link or a submodule refuses.
+materialize() {
+    python3 -I - "$@" <<'PY'
+import os, subprocess, sys
 
-target, listing, new_root, owned = (os.fsencode(arg) for arg in sys.argv[1:5])
-top = os.path.join(target, owned)
-with open(listing, "rb") as handle:
-    tracked = [name for name in handle.read().split(b"\0") if name]
-for name in tracked:
-    if os.path.isfile(os.path.join(new_root, os.path.relpath(name, owned))):
-        continue
-    path = os.path.join(target, name)
-    os.remove(path)
-    parent = os.path.dirname(path)
-    while parent != top and not os.listdir(parent):
-        os.rmdir(parent)
-        parent = os.path.dirname(parent)
+repo, rev, top, dest = sys.argv[1:5]
+manifest = sys.argv[5] if len(sys.argv) > 5 else None
+
+
+def run(*args, data=None):
+    done = subprocess.run(["git", "-C", repo, *args], input=data, capture_output=True)
+    if done.returncode:
+        sys.exit("git %s failed: %s" % (args[0], done.stderr.decode("utf-8", "replace").strip()))
+    return done.stdout
+
+
+prefix = os.fsencode(top) + b"/"
+entries = []
+for record in filter(None, run("ls-tree", "-r", "-z", "--full-tree", rev, "--", top).split(b"\0")):
+    meta, name = record.split(b"\t", 1)
+    mode, _, oid = meta.split(b" ")
+    if mode not in (b"100644", b"100755") or not name.startswith(prefix):
+        sys.exit("%s at %s is not a regular file below %s" % (os.fsdecode(name), rev, top))
+    entries.append((mode, oid, name[len(prefix):]))
+blobs = run("cat-file", "--batch", data=b"".join(oid + b"\n" for _, oid, _ in entries))
+pos, records = 0, []
+for mode, oid, rel in entries:
+    header_end = blobs.index(b"\n", pos)
+    size = int(blobs[pos:header_end].split(b" ")[2])
+    path = os.path.join(os.fsencode(dest), rel)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as handle:
+        handle.write(blobs[header_end + 1:header_end + 1 + size])
+    os.chmod(path, 0o755 if mode == b"100755" else 0o644)
+    pos = header_end + 1 + size + 1
+    records.append(mode + b" " + rel + b"\0")
+if manifest:
+    with open(manifest, "wb") as handle:
+        handle.write(b"".join(records))
+PY
+}
+
+# stage <worktree> <manifest> <folder> [<file> <mode>]...: put exactly these
+# bytes and modes in the worktree's index: every manifest entry under <folder>
+# with the mode the manifest names, and each toolkit-level file with the mode
+# given. hash-object --no-filters, so no filter or attribute of the toolkit
+# changes a byte between the export and the commit, and no core.fileMode
+# setting changes a mode.
+stage() {
+    python3 -I - "$@" <<'PY'
+import os, subprocess, sys
+
+wt, manifest, folder = sys.argv[1:4]
+rest = sys.argv[4:]
+entries = []
+for record in filter(None, open(manifest, "rb").read().split(b"\0")):
+    mode, rel = record.split(b" ", 1)
+    entries.append((mode, os.fsencode(folder) + b"/" + rel))
+entries += [(os.fsencode(rest[i + 1]), os.fsencode(rest[i])) for i in range(0, len(rest), 2)]
+
+
+def run(args, data=None):
+    done = subprocess.run(["git", "-C", wt, "-c", "core.hooksPath=/dev/null", *args], input=data,
+                          capture_output=True)
+    if done.returncode:
+        sys.exit("git %s failed: %s" % (args[0], done.stderr.decode("utf-8", "replace").strip()))
+    return done.stdout
+
+
+ids = run(["hash-object", "-w", "--no-filters", "--", *[name for _, name in entries]]).split()
+run(["update-index", "-z", "--index-info"],
+    b"".join(b"%s blob %s\t%s\0" % (mode, oid, name) for (mode, name), oid in zip(entries, ids)))
+PY
+}
+
+# branch_users <branch>: every worktree of the target's repository that has the
+# branch checked out, or is rebasing or bisecting it. git counts all three as
+# the branch being in use, and moving it under any of them pulls the ground
+# from under that worktree. Prints nothing when the branch is free.
+branch_users() {
+    python3 -I - "$TARGET" "$1" <<'PY'
+import os, subprocess, sys
+
+target, branch = sys.argv[1], sys.argv[2]
+ref = "refs/heads/" + branch
+
+
+def git(*args):
+    return subprocess.run(["git", "-C", target, *args], capture_output=True, text=True, check=True).stdout
+
+
+def read(path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            return handle.read().strip()
+    except OSError:
+        return None
+
+
+users, where = [], None
+paths = []
+for line in git("worktree", "list", "--porcelain").splitlines():
+    if line.startswith("worktree "):
+        where = line[len("worktree "):]
+        paths.append(where)
+    elif line == "branch " + ref:
+        users.append("  checked out in %s" % where)
+common = os.path.join(target, git("rev-parse", "--git-common-dir").strip())
+admin = [(common, paths[0] if paths else target)]
+linked = os.path.join(common, "worktrees")
+for name in sorted(os.listdir(linked)) if os.path.isdir(linked) else []:
+    gitdir = os.path.join(linked, name)
+    dotgit = read(os.path.join(gitdir, "gitdir")) or gitdir
+    admin.append((gitdir, os.path.dirname(os.path.join(gitdir, dotgit))))
+for gitdir, shown in admin:
+    if ref in (read(os.path.join(gitdir, "rebase-merge", "head-name")),
+               read(os.path.join(gitdir, "rebase-apply", "head-name"))):
+        users.append("  being rebased in %s" % os.path.normpath(shown))
+    if read(os.path.join(gitdir, "BISECT_START")) in (branch, ref):
+        users.append("  being bisected in %s" % os.path.normpath(shown))
+print("\n".join(users))
 PY
 }
 
 # ---------------------------------------------------------------------------
-# what the target holds where the export writes
+# the target: read through tgit, built in the export's own worktree through
+# wgit; neither runs a hook of the target
 # ---------------------------------------------------------------------------
 
-tgit() { git -C "$TARGET" "$@"; }
+tgit() { git -C "$TARGET" -c core.hooksPath=/dev/null "$@"; }
+wgit() { git -C "$WT" -c core.hooksPath=/dev/null "$@"; }
 
-# head_ref: the full name of the branch the clone is on, or the commit when
-# HEAD is detached.
-head_ref() {
-    tgit symbolic-ref -q HEAD || tgit rev-parse HEAD
-}
-
-# checkout_ref <ref>: check out what head_ref printed, as a branch or detached.
-checkout_ref() {
-    case "$1" in
-        refs/heads/*) tgit checkout -q "${1#refs/heads/}" ;;
-        *) tgit checkout -q --detach "$1" ;;
-    esac
-}
-
-# branch_tips: every local branch with the commit it points at.
-branch_tips() {
-    tgit for-each-ref --format='%(refname) %(objectname)' refs/heads
-}
-
-# operations: a merge, rebase, cherry-pick, revert or bisect in progress. A
-# stopped rebase or a bisect leaves git status empty, so status alone is not
-# enough.
+# operations: a merge, rebase, cherry-pick, revert or bisect in progress in the
+# clone's checkout. A new export branch is built on the commit that checkout is
+# on, and during a rebase, a bisect or a pick sequence that is a commit in
+# passing. A stopped rebase or a bisect leaves git status empty, so status
+# alone is not enough.
 operations() {
     for marker in MERGE_HEAD:merge rebase-merge:rebase rebase-apply:rebase \
         CHERRY_PICK_HEAD:cherry-pick REVERT_HEAD:revert sequencer:cherry-pick-or-revert BISECT_LOG:bisect; do
@@ -353,106 +469,91 @@ operations() {
     done
 }
 
-# working_links: every path the export writes, and every directory on the way
-# to one, that is a symbolic link in the working tree. A write there lands
-# wherever the link points, inside the clone or outside it.
-working_links() {
-    for rel in "$OWNED_DST" .claude-plugin "$MARKET_REL" "$README_REL"; do
-        if [ -L "$TARGET/$rel" ]; then echo "  $rel"; fi
-    done
-    if [ -d "$TARGET/$OWNED_DST" ] && [ ! -L "$TARGET/$OWNED_DST" ]; then
-        (cd "$TARGET" && find "$OWNED_DST" -type l | sed 's/^/  /')
-    fi
-}
-
-# tree_links <rev>: the same question for a commit: a link or submodule
-# anywhere under the plugin folder or at a toolkit-level path, or a plugin
-# "folder" that is not a folder.
+# tree_links <rev>: a link or submodule anywhere under the plugin folder or at a
+# toolkit-level path of a commit, or a plugin "folder" that is not a folder.
 tree_links() {
     {
-        tgit ls-tree -r "$1" -- "$OWNED_DST"
-        tgit ls-tree "$1" -- .claude-plugin "$MARKET_REL" "$README_REL"
+        tgit ls-tree -r --full-tree "$1" -- "$OWNED_DST"
+        tgit ls-tree --full-tree "$1" -- .claude-plugin "$MARKET_REL" "$README_REL"
     } | awk -F '\t' -v dst="$OWNED_DST" '
         { split($1, meta, " ") }
         meta[1] == "120000" || meta[1] == "160000" || $2 == dst { print "  " $2 }'
 }
 
-# ignored_here: ignored files where the export writes. The run would overwrite
-# or commit them, and a rollback could not tell them from its own files.
-ignored_here() {
-    tgit status --porcelain --ignored --untracked-files=all -- "$OWNED_DST" "$MARKET_REL" "$README_REL" |
-        sed 's/^/  /'
+# base_mode <path>: the mode the base gives a toolkit-level file, so the export
+# changes its bytes and never its mode; 100644 for a file the base lacks.
+base_mode() {
+    tgit ls-tree --full-tree "$BASE_SHA" -- "$1" | awk '$1 == "100755" { m = $1 } END { print m ? m : "100644" }'
+}
+
+# stray_paths: every path the export's tree changes outside its own three.
+stray_paths() {
+    tgit diff-tree -r --name-only "$BASE_SHA" "$NEW_TREE" | awk -v d="$OWNED_DST/" -v m="$MARKET_REL" -v r="$README_REL" '
+        index($0, d) == 1 || index($0, "\"" d) == 1 || $0 == m || $0 == r { next }
+        { print "  " $0 }'
+}
+
+# scan <rev>: the leak scan over what rev holds at the three paths, read from
+# the commit's own blobs and never from a working tree. Prints the hits.
+scan() {
+    rm -rf "$TMP/scan" && mkdir -p "$TMP/scan/.claude-plugin" || return 2
+    materialize "$TARGET" "$1" "$OWNED_DST" "$TMP/scan/$OWNED_DST" || return 2
+    for rel in "$MARKET_REL" "$README_REL"; do
+        if tgit cat-file -e "$1:$rel" 2>/dev/null; then
+            tgit cat-file blob "$1:$rel" >"$TMP/scan/$rel" || return 2
+        fi
+    done
+    leak_scrub "$TMP/scan/$OWNED_DST" "$BASE_NAME" \
+        "$TMP/scan/$MARKET_REL" "$TMP/base-marketplace.json" "$TMP/scan/$README_REL" "$TMP/base-README.md"
 }
 
 # ---------------------------------------------------------------------------
 # putting the target back
 # ---------------------------------------------------------------------------
 
-# restore_owned: the three owned paths back to HEAD in the index and the
-# working tree, and every file the run created there removed. Only those paths
-# are touched: the clone was clean when the run started, so nothing in them can
-# be anyone else's work.
-restore_owned() {
-    tgit reset -q -- "$OWNED_DST" "$MARKET_REL" "$README_REL" || return 1
-    for rel in "$OWNED_DST" "$MARKET_REL" "$README_REL"; do
-        if tgit cat-file -e "HEAD:$rel" 2>/dev/null; then
-            tgit checkout -q -- "$rel" || return 1
-        fi
-    done
-    tgit clean -fdqx -- "$OWNED_DST" "$MARKET_REL" "$README_REL"
+worktree_registered() {
+    [ -n "$WT" ] && tgit worktree list --porcelain | grep -Fqx "worktree $WT"
 }
 
-# remove_new_dirs: the two directories the run may have created, removed again
-# when they did not exist before it and are empty now.
-remove_new_dirs() {
-    if [ "$OWNED_DIR_BEFORE" = 0 ] && [ -d "$TARGET/$OWNED_DST" ]; then
-        rmdir "$TARGET/$OWNED_DST" 2>/dev/null || return 1
-    fi
-    if [ "$PLUGIN_DIR_BEFORE" = 0 ] && [ -d "$TARGET/.claude-plugin" ]; then
-        rmdir "$TARGET/.claude-plugin" 2>/dev/null || return 1
+# drop_worktree: remove the export's own worktree, files and registration.
+drop_worktree() {
+    if worktree_registered; then
+        tgit worktree remove --force "$WT" || return 1
     fi
 }
 
-# what_is_left: every way the target differs from what was recorded before
-# the first write; prints nothing when it is back as it was found.
+# what_is_left: what this run wrote in the target and could not take back;
+# prints nothing when the target is as it was found.
 what_is_left() {
-    changes=$(tgit status --porcelain --untracked-files=all)
-    if [ -n "$changes" ]; then printf '  local changes:\n%s\n' "$changes"; fi
-    ignored=$(ignored_here)
-    if [ -n "$ignored" ]; then printf '  files under the paths the export writes:\n%s\n' "$ignored"; fi
-    now=$(head_ref)
-    if [ "$now" != "$PREV_REF" ] || [ "$(tgit rev-parse HEAD)" != "$PREV_SHA" ]; then
-        echo "  the clone is on ${now#refs/heads/} at $(tgit rev-parse --short HEAD), not on ${PREV_REF#refs/heads/}"
+    if [ -n "$NEW" ] && [ "$(tgit rev-parse -q --verify "refs/heads/$BRANCH" || true)" = "$NEW" ]; then
+        echo "  $BRANCH points at $NEW, the export commit this run wrote; it was at ${TIP_BEFORE:-nothing (the branch did not exist)}"
     fi
-    tips=$(branch_tips)
-    if [ "$tips" != "$TIPS_BEFORE" ]; then
-        printf '  the branches differ. Before the run:\n%s\n  now:\n%s\n' "$TIPS_BEFORE" "$tips"
-    fi
-    if [ "$OWNED_DIR_BEFORE" = 0 ] && [ -e "$TARGET/$OWNED_DST" ]; then
-        echo "  the directory $OWNED_DST/, which the run created"
-    fi
-    if [ "$PLUGIN_DIR_BEFORE" = 0 ] && [ -e "$TARGET/.claude-plugin" ]; then
-        echo "  the directory .claude-plugin/, which the run created"
+    if worktree_registered; then
+        echo "  the export's own worktree, still registered; remove it with:"
+        echo "    git -C \"$TARGET\" worktree remove --force \"$WT\""
     fi
 }
 
-# undo_export: put the clone back exactly as the run found it, and say only
-# what happened. Each step that took effect prints one line. Fails, listing
-# what is left, when the target does not end up as it was found.
+# undo_export: take back what this run wrote, and say only what happened: the
+# branch swapped back when it holds this run's commit, then the worktree
+# removed. Fails, listing what is left, when the target does not end up as it
+# was found.
 undo_export() {
-    if [ "$(head_ref)" = "refs/heads/$BRANCH" ] && [ "$(tgit rev-parse HEAD)" != "$TIP_BEFORE" ]; then
-        if tgit reset -q --soft "$TIP_BEFORE"; then echo "  removed the export commit from $BRANCH" >&2; fi
+    if [ -n "$NEW" ] && [ "$(tgit rev-parse -q --verify "refs/heads/$BRANCH" || true)" = "$NEW" ]; then
+        if [ "$CREATED" = 1 ]; then
+            if tgit update-ref -d "refs/heads/$BRANCH" "$NEW"; then
+                echo "  deleted $BRANCH, which this run created" >&2
+            fi
+        elif tgit update-ref "refs/heads/$BRANCH" "$TIP_BEFORE" "$NEW"; then
+            echo "  moved $BRANCH back to $TIP_BEFORE" >&2
+        fi
     fi
-    if [ -n "$(tgit status --porcelain --ignored --untracked-files=all -- "$OWNED_DST" "$MARKET_REL" "$README_REL")" ]; then
-        if restore_owned; then echo "  undid the writes to $OWNED_DST/, $MARKET_REL and $README_REL" >&2; fi
+    if worktree_registered && drop_worktree; then
+        echo "  removed the export's own worktree" >&2
     fi
-    if [ "$(head_ref)" != "$PREV_REF" ]; then
-        if checkout_ref "$PREV_REF"; then echo "  checked out ${PREV_REF#refs/heads/} again" >&2; fi
-    fi
-    if [ "$CREATED" = 1 ] && tgit show-ref --verify -q "refs/heads/$BRANCH"; then
-        if tgit branch -q -D "$BRANCH"; then echo "  deleted $BRANCH, which this run created" >&2; fi
-    fi
-    remove_new_dirs || true
+    # A worktree that stays registered keeps its directory, so the command
+    # what_is_left prints still works.
+    if worktree_registered; then KEEP_TMP=1; fi
     left=$(what_is_left)
     [ -n "$left" ] || return 0
     printf 'export_toolkit_plugin: the cleanup did not complete; still in %s:\n%s\n' "$TARGET" "$left" >&2
@@ -485,7 +586,7 @@ on_exit() {
             status=3
         fi
     fi
-    if [ -n "$TMP" ]; then rm -rf "$TMP"; fi
+    if [ -n "$TMP" ] && [ "$KEEP_TMP" = 0 ]; then rm -rf "$TMP"; fi
     exit "$status"
 }
 trap on_exit EXIT
@@ -537,15 +638,15 @@ git -C "$SRC" rev-parse --verify -q refs/remotes/origin/main >/dev/null ||
     die "the source has no origin/main to check the commit against"
 git -C "$SRC" merge-base --is-ancestor "$SHA" refs/remotes/origin/main ||
     die "commit $SHA is not an ancestor of origin/main; export a merged commit"
-SRC_LINKS=$(git -C "$SRC" ls-tree -r "$SHA" -- "$OWNED_SRC" | awk -F '\t' '
+git -C "$SRC" cat-file -e "$SHA:$OWNED_SRC" 2>/dev/null || die "$OWNED_SRC does not exist at commit $SHA"
+SRC_LINKS=$(git -C "$SRC" ls-tree -r --full-tree "$SHA" -- "$OWNED_SRC" | awk -F '\t' '
     { split($1, meta, " ") }
     meta[1] == "120000" || meta[1] == "160000" { print "  " $2 }')
 [ -z "$SRC_LINKS" ] || die "the plugin ships regular files only, but at $SHA it has a link or submodule:
 $SRC_LINKS"
 
 # ---------------------------------------------------------------------------
-# target: a clean git repo root, nothing in progress, no link or ignored file
-# where the export writes
+# target: a git repo root with a commit, nothing in progress in its checkout
 # ---------------------------------------------------------------------------
 
 [ -d "$TARGET" ] || die "target is not a directory: $TARGET"
@@ -553,40 +654,25 @@ TARGET=$(CDPATH='' cd -- "$TARGET" && pwd -P)
 TOP=$(git -C "$TARGET" rev-parse --show-toplevel 2>/dev/null) || die "target is not a git repo: $TARGET"
 [ "$(CDPATH='' cd -- "$TOP" && pwd -P)" = "$TARGET" ] || die "target is not the root of its git repo: $TARGET"
 tgit rev-parse --verify -q HEAD >/dev/null || die "target has no commits yet; make an initial commit first"
-
-DIRTY=$(tgit status --porcelain --untracked-files=all)
-[ -z "$DIRTY" ] || die "the target has local changes; the export only writes into a clean clone. Commit, stash or discard them first:
-$DIRTY"
 BUSY=$(operations)
 [ -z "$BUSY" ] || die "the target has an operation in progress; finish or abort it first:
 $BUSY"
-LINKS=$(working_links)
-[ -z "$LINKS" ] || die "the target has a link where the export writes, and the export never writes through a link:
-$LINKS"
-IGNORED=$(ignored_here)
-[ -z "$IGNORED" ] || die "the target has ignored files where the export writes; remove them first:
-$IGNORED"
-
-# What every exit that is not a successful export must leave as it is.
-PREV_REF=$(head_ref)
-PREV_SHA=$(tgit rev-parse HEAD)
-TIPS_BEFORE=$(branch_tips)
-if [ -e "$TARGET/$OWNED_DST" ]; then OWNED_DIR_BEFORE=1; else OWNED_DIR_BEFORE=0; fi
-if [ -e "$TARGET/.claude-plugin" ]; then PLUGIN_DIR_BEFORE=1; else PLUGIN_DIR_BEFORE=0; fi
-
-# ---------------------------------------------------------------------------
-# stage the export outside the target
-# ---------------------------------------------------------------------------
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/export-toolkit-plugin.XXXXXX") || die "cannot create a temp dir"
-mkdir "$TMP/new" "$TMP/base"
+TMP=$(CDPATH='' cd -- "$TMP" && pwd -P)
+case "$TMP/" in
+    "$TARGET"/*) die "the temp dir $TMP is inside the target, and the export builds outside it; set TMPDIR elsewhere" ;;
+esac
+WT="$TMP/wt"
 
-git -C "$SRC" archive --format=tar -o "$TMP/new.tar" "$SHA" "$OWNED_SRC" 2>/dev/null ||
-    die "$OWNED_SRC does not exist at commit $SHA"
-tar -xf "$TMP/new.tar" -C "$TMP/new" --strip-components=3 || die "cannot unpack the export"
-PLUGIN_JSON="$TMP/new/.claude-plugin/plugin.json"
-[ -f "$PLUGIN_JSON" ] || die "the export has no .claude-plugin/plugin.json"
+# ---------------------------------------------------------------------------
+# what the export will be: read from the source commit and the base, merged
+# on copies in the temp dir
+# ---------------------------------------------------------------------------
 
+PLUGIN_JSON="$TMP/plugin.json"
+git -C "$SRC" cat-file blob "$SHA:$OWNED_SRC/.claude-plugin/plugin.json" >"$PLUGIN_JSON" 2>/dev/null ||
+    die "the export has no .claude-plugin/plugin.json"
 NAME=$(pj_get "$PLUGIN_JSON" name) || die "plugin.json has no name"
 PLUGIN_VERSION=$(pj_get "$PLUGIN_JSON" version) || die "plugin.json has no version"
 pj_get "$PLUGIN_JSON" description >/dev/null || die "plugin.json has no description"
@@ -594,53 +680,45 @@ pj_get "$PLUGIN_JSON" description >/dev/null || die "plugin.json has no descript
 [ "$PLUGIN_VERSION" = "$VERSION" ] ||
     die "version mismatch: plugin.json says $PLUGIN_VERSION, the tag says $VERSION"
 
-# BASE_REV is the commit the export branch is built on: the existing export
-# branch, else the commit the clone is on. Everything the export writes is
-# derived from it, never from the working tree.
+# The base is the commit the export is built on: the existing export branch,
+# else the commit the clone's checkout is on. Both are read once, here; the
+# branch is later written only if it still holds TIP_BEFORE.
 BRANCH="export/context-rotation-$VERSION"
 git check-ref-format --branch "$BRANCH" >/dev/null 2>&1 || die "not a valid branch name: $BRANCH"
-if tgit show-ref --verify -q "refs/heads/$BRANCH"; then
-    BRANCH_EXISTS=1
-    BASE_REV="refs/heads/$BRANCH"
+if TIP_BEFORE=$(tgit rev-parse -q --verify "refs/heads/$BRANCH^{commit}"); then
+    CREATED=0
+    BASE_SHA=$TIP_BEFORE
     BASE_NAME=$BRANCH
 else
-    BRANCH_EXISTS=0
-    BASE_REV=HEAD
-    BASE_NAME=${PREV_REF#refs/heads/}
+    CREATED=1
+    TIP_BEFORE=""
+    BASE_SHA=$(tgit rev-parse --verify HEAD)
+    BASE_NAME=$(tgit symbolic-ref -q --short HEAD || tgit rev-parse --short HEAD)
 fi
-BASE_LINKS=$(tree_links "$BASE_REV")
+USERS=$(branch_users "$BRANCH") || die "cannot list the worktrees of the target"
+[ -z "$USERS" ] || die "$BRANCH is in use, and the export only moves a branch no worktree is on; check out another branch there, or finish the operation, first:
+$USERS"
+BASE_LINKS=$(tree_links "$BASE_SHA")
 [ -z "$BASE_LINKS" ] || die "$BASE_NAME tracks a link or submodule where the export writes, and the export never writes through a link:
 $BASE_LINKS"
 
-# What the base already has for the plugin: the version, and whether the
-# content differs. A content change needs a higher version.
-if tgit cat-file -e "$BASE_REV:$OWNED_DST" 2>/dev/null; then
-    tgit archive --format=tar -o "$TMP/base.tar" "$BASE_REV" "$OWNED_DST"
-    tar -xf "$TMP/base.tar" -C "$TMP/base" --strip-components=1 || die "cannot unpack $OWNED_DST from $BASE_NAME"
-fi
-if ! diff -r -q "$TMP/base" "$TMP/new" >/dev/null 2>&1; then
-    OLD_VERSION=""
-    if [ -f "$TMP/base/.claude-plugin/plugin.json" ]; then
-        OLD_VERSION=$(pj_get "$TMP/base/.claude-plugin/plugin.json" version) || OLD_VERSION=""
-    fi
-    if [ -n "$OLD_VERSION" ] && ! version_newer "$OLD_VERSION" "$VERSION"; then
-        die "the content changed but the version did not go up ($BASE_NAME has $OLD_VERSION, this export is $VERSION); bump the version in plugin.json"
-    fi
+OLD_VERSION=""
+if tgit cat-file blob "$BASE_SHA:$OWNED_DST/.claude-plugin/plugin.json" >"$TMP/base-plugin.json" 2>/dev/null; then
+    OLD_VERSION=$(pj_get "$TMP/base-plugin.json" version) || OLD_VERSION=""
 fi
 
-# The two toolkit-level files are read from the base with git cat-file and
-# merged on copies, so a malformed marketplace file refuses before anything in
-# the target is touched. The unmerged copies stay for the leak scrub, which
-# names a hit the base already had as pre-existing.
-if tgit cat-file -e "$BASE_REV:$MARKET_REL" 2>/dev/null; then
-    tgit cat-file blob "$BASE_REV:$MARKET_REL" >"$TMP/base-marketplace.json"
-    cp "$TMP/base-marketplace.json" "$TMP/marketplace.json"
-fi
-if tgit cat-file -e "$BASE_REV:$README_REL" 2>/dev/null; then
-    tgit cat-file blob "$BASE_REV:$README_REL" >"$TMP/base-README.md"
-    cp "$TMP/base-README.md" "$TMP/README.md"
-fi
-merge_marketplace "$TMP/marketplace.json" "$PLUGIN_JSON" >"$TMP/market.status" ||
+# The two toolkit-level files are read from the base and merged on copies, so a
+# malformed marketplace file refuses before the export's worktree exists. The
+# unmerged copies stay for the leak scan, which names a hit the base already
+# had as pre-existing.
+for rel in "$MARKET_REL" "$README_REL"; do
+    copy="$TMP/$(basename "$rel")"
+    if [ "$(tgit cat-file -t "$BASE_SHA:$rel" 2>/dev/null || true)" = blob ]; then
+        tgit cat-file blob "$BASE_SHA:$rel" >"$copy" || die "cannot read $rel on $BASE_NAME"
+        cp "$copy" "$TMP/base-$(basename "$rel")"
+    fi
+done
+merge_marketplace "$TMP/marketplace.json" "$PLUGIN_JSON" "$MARKET_REL on $BASE_NAME" >"$TMP/market.status" ||
     die "could not merge the marketplace entry"
 add_readme_row "$TMP/README.md" "$PLUGIN_JSON" >"$TMP/readme.status" || die "could not add the README row"
 ENTRY_VERSION=$(python3 -I -c '
@@ -652,47 +730,51 @@ print(next(p["version"] for p in plugins if p.get("name") == "context-rotation")
     die "version mismatch: marketplace entry says $ENTRY_VERSION, the tag says $VERSION"
 
 # ---------------------------------------------------------------------------
-# write into the target on the export branch
+# build the commit in the export's own worktree
 # ---------------------------------------------------------------------------
 
-if [ "$BRANCH_EXISTS" = 1 ]; then
-    CREATED=0
-    TIP_BEFORE=$(tgit rev-parse "refs/heads/$BRANCH")
-else
-    CREATED=1
-    TIP_BEFORE=$PREV_SHA
-fi
+# --no-checkout: the worktree holds the base's index and only the three paths
+# the export writes. Checking out the rest of the toolkit would run its filters
+# for nothing and put the base's tracked links on disk.
+#
+# From here on no command in this shell redirects stderr: a signal's trap runs
+# inside the redirection of the command it interrupted (bash 3.2), and the
+# undo report would land in that file instead of on the terminal.
 STATE="write"
-if [ "$CREATED" = 1 ]; then
-    tgit checkout -q -b "$BRANCH" || fail "cannot create $BRANCH in the target"
-elif [ "$PREV_REF" != "refs/heads/$BRANCH" ]; then
-    tgit checkout -q "$BRANCH" || fail "cannot check out $BRANCH in the target"
+tgit worktree add -q --detach --no-checkout "$WT" "$BASE_SHA" ||
+    fail "could not create the export's own worktree (git's message above)"
+wgit read-tree "$BASE_SHA" || fail "could not read $BASE_NAME into the export's worktree"
+materialize "$SRC" "$SHA" "$OWNED_SRC" "$WT/$OWNED_DST" "$TMP/new.manifest" ||
+    fail "could not write $OWNED_DST from $SHA"
+mkdir -p "$WT/.claude-plugin"
+cp "$TMP/marketplace.json" "$WT/$MARKET_REL" || fail "could not write $MARKET_REL"
+cp "$TMP/README.md" "$WT/$README_REL" || fail "could not write $README_REL"
+wgit rm -r -q -f --cached --ignore-unmatch -- "$OWNED_DST" || fail "could not clear $OWNED_DST in the export's index"
+stage "$WT" "$TMP/new.manifest" "$OWNED_DST" \
+    "$MARKET_REL" "$(base_mode "$MARKET_REL")" "$README_REL" "$(base_mode "$README_REL")" ||
+    fail "could not stage the export"
+NEW_TREE=$(wgit write-tree) || fail "could not write the export's tree"
+STRAY=$(stray_paths)
+[ -z "$STRAY" ] || fail "the export's tree changes paths it does not own:
+$STRAY"
+
+if [ "$NEW_TREE" = "$(tgit rev-parse "$BASE_SHA^{tree}")" ]; then
+    if ! HITS=$(scan "$BASE_SHA"); then
+        fail "nothing to export, but the leak scan failed on what $BASE_NAME already carries:
+$HITS"
+    fi
+    drop_worktree || fail "could not remove the export's own worktree"
+    STATE="done"
+    echo "Nothing to export: $OWNED_DST $VERSION from $SHA is already in $TARGET on $BASE_NAME."
+    exit 0
 fi
 
-# Again right before the copy, now that the export branch is checked out.
-LINKS=$(working_links)
-[ -z "$LINKS" ] || fail "the target has a link where the export writes, and the export never writes through a link:
-$LINKS"
-
-tgit ls-tree -r -z --name-only "$BASE_REV" -- "$OWNED_DST" >"$TMP/base.lst" ||
-    fail "cannot list $OWNED_DST on $BASE_NAME"
-remove_gone "$TARGET" "$TMP/base.lst" "$TMP/new" || fail "could not remove the files the source no longer has"
-mkdir -p "$TARGET/$OWNED_DST" "$TARGET/.claude-plugin"
-cp -R "$TMP/new/." "$TARGET/$OWNED_DST/" || fail "could not copy $OWNED_DST into the target"
-cp "$TMP/marketplace.json" "$TARGET/$MARKET_REL" || fail "could not write $MARKET_REL"
-cp "$TMP/README.md" "$TARGET/$README_REL" || fail "could not write $README_REL"
-
-# -f: the export's own files are committed even when the toolkit's ignore rules
-# match one of them. No other ignored file can be under these paths; the
-# preflight refused that.
-tgit add -A -f -- "$OWNED_DST" "$MARKET_REL" "$README_REL" || fail "git add failed in the target"
-if tgit diff --cached --quiet -- "$OWNED_DST" "$MARKET_REL" "$README_REL"; then
-    STATE="undo"
-    if undo_export; then
-        echo "Nothing to export: $OWNED_DST $VERSION from $SHA is already in $TARGET on $BASE_NAME."
-        exit 0
-    fi
-    exit 3
+# A content change needs a higher version. Content is every path, blob id and
+# mode under the folder, so a mode-only change counts.
+if [ -n "$OLD_VERSION" ] &&
+    [ "$(tgit ls-tree -r --full-tree "$BASE_SHA" -- "$OWNED_DST")" != "$(tgit ls-tree -r --full-tree "$NEW_TREE" -- "$OWNED_DST")" ] &&
+    ! version_newer "$OLD_VERSION" "$VERSION"; then
+    fail "the content changed but the version did not go up ($BASE_NAME has $OLD_VERSION, this export is $VERSION); bump the version in plugin.json"
 fi
 
 {
@@ -701,32 +783,38 @@ fi
     echo "Source-Commit: $SHA"
     echo "Intended-Tag: $TAG"
 } >"$TMP/message"
-if [ -n "$(tgit config user.name 2>/dev/null || true)" ] && [ -n "$(tgit config user.email 2>/dev/null || true)" ]; then
-    tgit commit -q -F "$TMP/message" -- "$OWNED_DST" "$MARKET_REL" "$README_REL" ||
-        fail "git commit failed in the target"
+if [ -n "$(wgit config user.name 2>/dev/null || true)" ] && [ -n "$(wgit config user.email 2>/dev/null || true)" ]; then
+    wgit commit -q -F "$TMP/message" || fail "git commit failed in the export's worktree"
 else
-    tgit -c user.name="context-rotation export" -c user.email="export@localhost" \
-        commit -q -F "$TMP/message" -- "$OWNED_DST" "$MARKET_REL" "$README_REL" ||
-        fail "git commit failed in the target"
+    wgit -c user.name="context-rotation export" -c user.email="export@localhost" \
+        commit -q -F "$TMP/message" || fail "git commit failed in the export's worktree"
 fi
+CANDIDATE=$(wgit rev-parse HEAD) || fail "cannot read the export commit"
+[ "$(wgit rev-parse "$CANDIDATE^{tree}")" = "$NEW_TREE" ] || fail "the export commit is not the tree that was staged"
 
-# ---------------------------------------------------------------------------
-# leak scrub on what was written
-# ---------------------------------------------------------------------------
-
-if ! HITS=$(leak_scrub "$TARGET/$OWNED_DST" "$BASE_NAME" \
-    "$TARGET/$MARKET_REL" "$TMP/base-marketplace.json" "$TARGET/$README_REL" "$TMP/base-README.md"); then
-    fail "leak scrub failed on what the export wrote:
+if ! HITS=$(scan "$CANDIDATE"); then
+    fail "leak scan failed on the export commit:
 $HITS"
 fi
+drop_worktree || fail "could not remove the export's own worktree"
+
+# The one write in the clone: the branch, compare-and-swap on the value read at
+# the start (empty: it must still not exist).
+USERS=$(branch_users "$BRANCH") || fail "cannot list the worktrees of the target"
+[ -z "$USERS" ] || fail "$BRANCH came into use during the export:
+$USERS"
+NEW=$CANDIDATE
+tgit update-ref -m "export_toolkit_plugin: $OWNED_DST $VERSION from $SHA" \
+    "refs/heads/$BRANCH" "$NEW" "$TIP_BEFORE" ||
+    fail "could not write $BRANCH, which changed during the export (git's message above)"
 STATE="done"
 
 echo "Exported $OWNED_DST $VERSION from $SHA."
 echo "  marketplace entry: $(cat "$TMP/market.status"), README row: $(cat "$TMP/readme.status")"
-echo "  branch $BRANCH, commit $(tgit rev-parse --short HEAD)"
+echo "  branch $BRANCH at $(tgit rev-parse --short "$NEW"), on $BASE_NAME; the clone's checkout was not touched"
 echo
 echo "Nothing was pushed or tagged. Review, push, merge, then tag:"
-echo "  git -C \"$TARGET\" show --stat HEAD"
+echo "  git -C \"$TARGET\" show --stat $BRANCH"
 echo "  git -C \"$TARGET\" push -u origin $BRANCH"
 echo "  # after the branch is merged into main in the toolkit:"
 echo "  git -C \"$TARGET\" checkout main && git -C \"$TARGET\" pull"

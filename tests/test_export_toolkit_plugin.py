@@ -127,7 +127,7 @@ def export(source, target, sha=None, tag="context-rotation-v0.1.0", env=None):
 
 
 def branches(target):
-    return git(target, "branch", "--format=%(refname:short)").split()
+    return git(target, "for-each-ref", "--format=%(refname:short)", "refs/heads").split()
 
 
 def branch_tips(target):
@@ -585,6 +585,18 @@ def test_file_mode_follows_the_source_both_ways(source, target):
     result = export(source, target, tag="context-rotation-v0.1.2")
     assert result.returncode == 0, result.stderr
     assert mode_of(target, "context-rotation/hooks/run.sh", "export/context-rotation-0.1.2") == "100755"
+
+
+def test_toolkit_filters_and_file_mode_setting_change_no_byte_and_no_mode(source, target):
+    git(target, "config", "core.fileMode", "false")
+    git(target, "config", "filter.shout.clean", "tr a-z A-Z")
+    write(target, ".gitattributes", "*.sh filter=shout\n*.md text eol=crlf\n")
+    commit_all(target, "a clean filter and eol rules")
+    result = export(source, target)
+    assert result.returncode == 0, result.stderr
+    assert blob(target, "context-rotation/hooks/run.sh") == RUN_SH
+    assert mode_of(target, "context-rotation/hooks/run.sh") == "100755"
+    assert mode_of(target, "context-rotation/skills/x.md") == "100644"
 
 
 def test_mode_only_change_without_a_version_bump_is_refused(source, target):
