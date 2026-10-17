@@ -420,8 +420,10 @@ jobs:
   # It needs Profile A and the shadow with if: !cancelled(), so a red serial
   # Profile A or a failed shadow does not skip it: it compares whatever
   # evidence exists, and missing evidence is exit 2, recorded. A red Profile A
-  # is red on its own; this job never adds a second red. On a light run it
-  # runs its prelude and records "verdict": "not_applicable".
+  # is red on its own; this job never adds a second red, and its verdict lists
+  # it as a step failure (reference.job, also when an audit failed after the
+  # evidence upload), so that run never counts toward the cutover. On a light
+  # run it runs its prelude and records "verdict": "not_applicable".
   xdist-parity:
     name: xdist parity
     runs-on: ubuntu-latest
