@@ -272,7 +272,7 @@ def test_an_earlier_attempts_verdict_is_stale_evidence():
     evaluation = evaluate(runs)
     assert not evaluation.holds
     assert evaluation.placements[0].place == "stale_verdict"
-    assert evaluation.placements[0].reasons == ["verdict of attempt 1, the run's latest attempt is 2"]
+    assert evaluation.placements[0].reasons == ["verdict of attempt 1, not of attempt 2"]
     assert "every_verdict_current" in failed(evaluation)
 
 
@@ -316,6 +316,52 @@ def test_a_stale_verdict_before_the_window_is_ignored():
     assert evaluation.placements[-1].place == "before_window"
 
 
+def test_the_history_and_the_parity_job_share_one_rule_for_current_evidence():
+    import check_xdist_parity as cxp
+
+    current = run(20, day=2, hour=5, attempt=2)
+    assert hist.stale_reason(current.verdict, current) is None
+    current.verdict["run_attempt"] = "1"
+    assert hist.stale_reason(current.verdict, current) == cxp.stale_evidence_reason("verdict", current.verdict, "1020", 2)
+
+
+# --- a verdict that does not read as one is no verdict --------------------------------------------------------
+
+
+def test_a_verdict_without_a_step_summary_does_not_count_as_clean():
+    """A verdict that leaves step_failures out proves nothing about its steps; it held with a failed shadow phase."""
+    runs = clean_window()
+    del runs[4].verdict["step_failures"]
+    runs[4].verdict["shadow"]["steps"] = {"parallel": "failure"}
+    evaluation = evaluate(runs)
+    assert not evaluation.holds
+    assert evaluation.placements[4].place == "no_verdict"
+    assert evaluation.placements[4].reasons == ["malformed verdict: step_failures is missing"]
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("shadow", "fast"),
+    ("shadow", {"suite_wall_s": "600"}),
+    ("step_failures", "parity.prelude=failure"),
+    ("differences", ["outcome_class_differs"]),
+    ("invalid_evidence", ["stale_evidence"]),
+    ("exit", "0"),
+    ("exit", True),
+    ("profile", ["heavy"]),
+    ("selection_fingerprint", 7),
+], ids=["shadow-text", "wall-time-text", "step-failures-text", "differences-list", "problems-text", "exit-text",
+        "exit-bool", "profile-list", "fingerprint-number"])
+def test_a_verdict_field_of_the_wrong_type_blocks_without_a_crash(field, value):
+    runs = clean_window()
+    runs[4].verdict[field] = value
+    evaluation = evaluate(runs)
+    assert evaluation.placements[4].place == "no_verdict"
+    assert evaluation.placements[4].reasons[0].startswith(f"malformed verdict: {field} ")
+    assert failed(evaluation) == {"every_run_has_verdict", "distinct_heads"}
+    assert "cutover rule: DOES NOT HOLD" in hist.render(evaluation, HEADER)
+    assert json.loads(hist.as_json(evaluation, HEADER))["holds"] is False
+
+
 # --- the watch list -----------------------------------------------------------------------------------
 
 
@@ -346,6 +392,8 @@ def test_read_oi_status_reads_the_ledger_shape(tmp_path):
                                                                      {"id": "OI-2", "status": "open"}]}), encoding="utf-8")
     assert hist.read_oi_status(ledger) == {"OI-1": "done", "OI-2": "open"}
     assert hist.read_oi_status(tmp_path / "missing.json") is None
+    ledger.write_text(json.dumps({"items": 7}), encoding="utf-8")
+    assert hist.read_oi_status(ledger) is None, "a ledger whose items are not a list cannot be read"
 
 
 # --- output -------------------------------------------------------------------------------------------
@@ -361,7 +409,7 @@ def test_the_table_names_the_attempt_of_each_verdict_and_the_outcome():
     runs[0].verdict["run_attempt"] = "2"
     text = hist.render(evaluate(runs), HEADER)
     assert "2 (of 2)" in text and "1 (of 3)" in text
-    assert "[x] every_verdict_current: run 1020: verdict of attempt 1, the run's latest attempt is 3" in text
+    assert "[x] every_verdict_current: run 1020: verdict of attempt 1, not of attempt 3" in text
     assert text.rstrip().endswith("cutover rule: DOES NOT HOLD")
 
 
@@ -426,7 +474,9 @@ FAKE_GH = r'''#!/usr/bin/env python3
 import json, os, shutil, sys
 spec = json.load(open(os.environ["FAKE_GH_SPEC"]))
 args = sys.argv[1:]
-if args[:2] == ["repo", "view"]:
+if " ".join(args[:2]) in spec.get("raw", {}):
+    print(spec["raw"][" ".join(args[:2])])
+elif args[:2] == ["repo", "view"]:
     print(json.dumps({"nameWithOwner": "o/r"}))
 elif args[:2] == ["pr", "view"]:
     print(json.dumps(spec["pr"][args[2]]))
@@ -457,7 +507,8 @@ def _real_commits() -> tuple:
     return base, head
 
 
-def _cli(tmp_path: Path, runs: list, verdicts: dict, *args: str) -> subprocess.CompletedProcess:
+def _cli(tmp_path: Path, runs: list, verdicts: dict, *args: str, raw: dict | None = None) -> subprocess.CompletedProcess:
+    """The CLI against the gh stand-in; *raw* maps a gh command ("run list") to the exact text it prints."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "gh").write_text(FAKE_GH, encoding="utf-8")
@@ -468,7 +519,7 @@ def _cli(tmp_path: Path, runs: list, verdicts: dict, *args: str) -> subprocess.C
         Path(paths[run_id]).write_text(json.dumps(document), encoding="utf-8")
     spec = tmp_path / "spec.json"
     base, _ = _real_commits()
-    spec.write_text(json.dumps({"runs": runs, "verdicts": paths,
+    spec.write_text(json.dumps({"runs": runs, "verdicts": paths, "raw": raw or {},
                                 "pr": {"2082": {"state": "MERGED", "mergeCommit": {"oid": base}},
                                        "7": {"state": "OPEN", "mergeCommit": None}}}), encoding="utf-8")
     env = {**{k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")},
@@ -583,6 +634,39 @@ def test_the_cli_exits_2_on_an_unmerged_pr(tmp_path):
     proc = _cli(tmp_path, [], {}, "--since-pr", "7", "--fingerprint", FP, "--no-watch-list")
     assert proc.returncode == 2
     assert "PR #7 is not merged (state OPEN)" in proc.stderr
+
+
+_ROW = {"databaseId": 1001, "headSha": "a" * 40, "headBranch": "main", "event": "push", "status": "completed",
+        "conclusion": "success", "createdAt": "2099-01-01T00:00:00Z", "attempt": 1}
+
+
+def _row(**change) -> dict:
+    row = {**_ROW, **change}
+    return {k: v for k, v in row.items() if v is not None}
+
+
+@pytest.mark.parametrize(("command", "payload", "needle"), [
+    ("run list", "not json at all", "gh run list"),
+    ("run list", json.dumps({"runs": []}), "not a list"),
+    ("run list", json.dumps(["1001"]), "not an object"),
+    ("run list", json.dumps([_row(createdAt=None)]), "createdAt"),
+    ("run list", json.dumps([_row(createdAt="yesterday")]), "createdAt"),
+    ("run list", json.dumps([_row(attempt="x")]), "attempt"),
+    ("run list", json.dumps([_row(attempt=None)]), "attempt"),
+    ("run list", json.dumps([_row(databaseId="1001x")]), "databaseId"),
+    ("run list", json.dumps([_row(headSha=None)]), "headSha"),
+    ("pr view", json.dumps([]), "gh pr view"),
+    ("repo view", json.dumps({"name": "r"}), "nameWithOwner"),
+], ids=["runs-not-json", "runs-not-a-list", "run-not-an-object", "no-created-at", "created-at-text", "attempt-text",
+        "no-attempt", "run-id-text", "no-head", "pr-not-an-object", "repo-without-name"])
+def test_a_malformed_gh_payload_is_a_tool_error_exit_2(tmp_path, command, payload, needle):
+    """deepseek round 2: json.loads, int() and the createdAt parse raised out of main: exit 1 and a traceback."""
+    base = ["--since-pr", "2082"] if command == "pr view" else ["--since-commit", _real_commits()[0]]
+    repo = [] if command == "repo view" else ["--repo", "o/r"]
+    proc = _cli(tmp_path, [], {}, *base, *repo, "--fingerprint", FP, "--no-watch-list", raw={command: payload})
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "Traceback" not in proc.stderr
+    assert proc.stderr.startswith("xdist_parity_history: ") and needle in proc.stderr, proc.stderr
 
 
 # --- the CLI on a window that holds, then the two codex round-1 cases end to end ------------------------------

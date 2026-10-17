@@ -20,7 +20,11 @@ What the pinned tools write, measured with them and pinned here:
 * with a collection error the serial run stops before any test (exit 2), the
   xdist run runs every other file (exit 1);
 * a skip reason that holds tmp_path differs between the shapes (the worker's
-  basetemp has a popen-gw<N> level).
+  basetemp has a popen-gw<N> level);
+* every run carries the run stamp of its step (GITHUB_RUN_ID and
+  GITHUB_RUN_ATTEMPT) in its manifest and, through the plugin, in its XML,
+  also the XML the xdist controller writes, so a candidate from an earlier
+  attempt is stale evidence.
 """
 
 from __future__ import annotations
@@ -116,33 +120,40 @@ def _write_suite(root: Path, files: dict) -> Path:
     return root
 
 
-def _env() -> dict:
+RUN = {"run_id": "38939122085", "run_attempt": "2"}
+
+
+def _env(attempt: str = RUN["run_attempt"]) -> dict:
+    """The environment of a step in attempt *attempt* of run RUN."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")}
-    env["PYTHONPATH"] = str(PLUGIN_DIR)
+    env.update(PYTHONPATH=str(PLUGIN_DIR), GITHUB_RUN_ID=RUN["run_id"], GITHUB_RUN_ATTEMPT=attempt)
     return env
 
 
-def _phase(root: Path, out: Path, phase: str, *args: str) -> int:
+def _phase(root: Path, out: Path, phase: str, *args: str, attempt: str = RUN["run_attempt"]) -> int:
     """One real pytest run of *phase* that writes junit-<phase>.xml and manifest-<phase>.json into *out*."""
     out.mkdir(parents=True, exist_ok=True)
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *args,
          f"--junitxml={out / f'junit-{phase}.xml'}", "-p", "pytest_collection_manifest",
          f"--collection-manifest={out / f'manifest-{phase}.json'}", f"--collection-manifest-phase={phase}"],
-        cwd=str(root), env=_env(), capture_output=True, text=True,
+        cwd=str(root), env=_env(attempt), capture_output=True, text=True,
     )
     assert (out / f"manifest-{phase}.json").is_file(), proc.stdout + proc.stderr
     return proc.returncode
 
 
-def _inactive_serial(out: Path) -> None:
+def _inactive_serial(out: Path, attempt: str = RUN["run_attempt"]) -> None:
     subprocess.run([sys.executable, str(PLUGIN), "inactive", "--phase", "serial", "--output", str(out / "manifest-serial.json")],
-                   env=_env(), check=True)
+                   env=_env(attempt), check=True)
 
 
-def _args(out: Path, vector: list) -> None:
+def _args(out: Path, vector: list, attempt: str = RUN["run_attempt"]) -> None:
+    """The shadow's emission with its run.json, as profile_a_pytest_args.sh writes them."""
     (out / "args").mkdir(parents=True, exist_ok=True)
     (out / "args" / "parallel.args").write_bytes(b"".join(a.encode() + b"\0" for a in vector))
+    (out / "args" / "run.json").write_text(json.dumps({"schema": "vnx-run-stamp/1", "run_id": RUN["run_id"],
+                                                       "run_attempt": attempt}), encoding="utf-8")
 
 
 @pytest.fixture(scope="module")
@@ -165,6 +176,9 @@ def runs(tmp_path_factory) -> dict:
     exits["broken_shadow"] = _phase(broken, base / "broken-shadow", "parallel", *XDIST, "tests")
     _inactive_serial(base / "broken-shadow")
     _args(base / "broken-shadow", [*XDIST, "tests"])
+    exits["attempt_1_shadow"] = _phase(suite, base / "attempt-1-shadow", "parallel", *XDIST, "tests", attempt="1")
+    _inactive_serial(base / "attempt-1-shadow", attempt="1")
+    _args(base / "attempt-1-shadow", [*XDIST, "tests"], attempt="1")
     return {"base": base, "exits": exits}
 
 
@@ -172,7 +186,7 @@ def _verdict(runs: dict, reference: str, candidate: str) -> dict:
     base = runs["base"]
     return cxp.evaluate(cxp.CompareInputs(
         reference_dir=base / reference, candidate_dir=base / candidate, constraints=CONSTRAINTS, args_dir=None,
-        workspace_root=str(base), profile="heavy", meta={}, steps={}, upstream={},
+        workspace_root=str(base), profile="heavy", meta=dict(RUN), steps={}, upstream={},
     ))
 
 
@@ -188,7 +202,7 @@ def _manifest(path: Path) -> dict:
 def test_the_runs_end_as_the_pinned_tools_end_them(runs):
     assert runs["exits"] == {
         "reference": 1, "shadow": 1, "two_phase_serial": 1, "two_phase_parallel": 0, "dropped": 1,
-        "broken_reference": 2, "broken_shadow": 1,
+        "broken_reference": 2, "broken_shadow": 1, "attempt_1_shadow": 1,
     }
 
 
@@ -276,3 +290,24 @@ def test_with_a_collection_error_serial_runs_nothing_and_xdist_runs_the_rest(run
     assert verdict["counts"]["parallel"]["executed"] == 11
     assert verdict["exit"] == 1
     assert len(verdict["differences"]["extra_in_candidate"]) == 11
+
+
+def test_every_real_run_carries_the_run_stamp_of_its_step(runs):
+    base = runs["base"]
+    for directory, phase in (("reference", "full"), ("shadow", "parallel"), ("two-phase", "serial")):
+        manifest = _manifest(base / directory / f"manifest-{phase}.json")
+        assert (manifest["run_id"], manifest["run_attempt"]) == (RUN["run_id"], RUN["run_attempt"])
+        root = ET.parse(str(base / directory / f"junit-{phase}.xml")).getroot()
+        assert cxp.junit_stamp(root) == RUN, f"{directory}/junit-{phase}.xml"
+
+
+def test_a_real_shadow_of_an_earlier_attempt_is_stale_evidence(runs):
+    """The same suite, the same commit, run in attempt 1: in attempt 2 it is not this attempt's candidate."""
+    verdict = _verdict(runs, "reference", "attempt-1-shadow")
+    assert verdict["exit"] == 2 and verdict["differences"] is None
+    stale = sorted(p["detail"] for p in verdict["invalid_evidence"] if p["reason"] == "stale_evidence")
+    assert stale == [
+        "manifest-parallel.json of attempt 1, not of attempt 2",
+        "manifest-serial.json of attempt 1, not of attempt 2",
+        "shadow args/run.json of attempt 1, not of attempt 2",
+    ]

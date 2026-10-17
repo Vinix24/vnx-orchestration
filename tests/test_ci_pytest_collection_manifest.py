@@ -21,6 +21,7 @@ import json
 import os
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import pytest
@@ -62,19 +63,25 @@ def _suite(tmp_path: Path, broken: bool) -> Path:
     return root
 
 
-def _env() -> dict:
-    env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")}
+RUN = {"GITHUB_RUN_ID": "38939122085", "GITHUB_RUN_ATTEMPT": "2"}
+
+
+def _env(run: dict | None = RUN) -> dict:
+    """The environment of a step in run *run* (the GITHUB_* variables), or outside CI when *run* is None."""
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("PYTEST_") and k not in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")}
+    env.update(run or {})
     env["PYTHONPATH"] = str(PLUGIN_DIR)
     return env
 
 
-def _run(root: Path, *extra: str, phase: str = "t") -> tuple:
+def _run(root: Path, *extra: str, phase: str = "t", run: dict | None = RUN) -> tuple:
     manifest = root / f"manifest-{phase}.json"
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "pytest_collection_manifest",
          f"--collection-manifest={manifest}", f"--collection-manifest-phase={phase}", *extra, "tests"],
         cwd=str(root),
-        env=_env(),
+        env=_env(run),
         capture_output=True,
         text=True,
     )
@@ -175,6 +182,44 @@ def test_the_plugin_without_a_path_writes_nothing(tmp_path):
     assert not list(root.rglob("*.json"))
 
 
+def _junit_stamp(path: Path) -> dict:
+    """The vnx_* testsuite properties of a JUnit XML."""
+    root = ET.parse(str(path)).getroot()
+    return {prop.get("name"): prop.get("value") for suite in root.iter("testsuite")
+            for prop in suite.findall("properties/property") if (prop.get("name") or "").startswith("vnx_")}
+
+
+def test_the_manifest_and_the_xml_of_a_run_carry_its_run_stamp(tmp_path):
+    root = _suite(tmp_path, broken=False)
+    proc, manifest = _run(root, "-p", "no:xdist", f"--junitxml={root / 'junit-t.xml'}")
+    assert proc.returncode == 0, proc.stdout
+    assert (manifest["run_id"], manifest["run_attempt"]) == ("38939122085", "2")
+    assert _junit_stamp(root / "junit-t.xml") == {"vnx_run_id": "38939122085", "vnx_run_attempt": "2"}
+
+
+def test_under_xdist_the_controller_stamps_the_xml_it_writes(tmp_path):
+    pytest.importorskip("xdist")
+    root = _suite(tmp_path, broken=False)
+    proc, manifest = _run(root, "-n", "2", f"--junitxml={root / 'junit-t.xml'}")
+    assert proc.returncode == 0, proc.stdout
+    assert manifest["mode"] == "xdist" and manifest["run_attempt"] == "2"
+    assert _junit_stamp(root / "junit-t.xml") == {"vnx_run_id": "38939122085", "vnx_run_attempt": "2"}
+
+
+def test_outside_ci_neither_the_manifest_nor_the_xml_names_a_run(tmp_path):
+    root = _suite(tmp_path, broken=False)
+    proc, manifest = _run(root, "-p", "no:xdist", f"--junitxml={root / 'junit-t.xml'}", run=None)
+    assert proc.returncode == 0, proc.stdout
+    assert manifest["run_id"] is None and manifest["run_attempt"] is None
+    assert _junit_stamp(root / "junit-t.xml") == {}
+
+
+def test_a_run_without_junitxml_still_writes_its_stamped_manifest(tmp_path):
+    proc, manifest = _run(_suite(tmp_path, broken=False), "-p", "no:xdist")
+    assert proc.returncode == 0, proc.stdout
+    assert manifest["run_attempt"] == "2"
+
+
 def test_inactive_cli_writes_an_inactive_manifest(tmp_path):
     out = tmp_path / "evidence" / "manifest-serial.json"
     assert pcm.main(["inactive", "--phase", "serial", "--output", str(out)]) == 0
@@ -183,6 +228,14 @@ def test_inactive_cli_writes_an_inactive_manifest(tmp_path):
     assert manifest["nodeids"] == [] and manifest["collection_outcomes"] == []
     assert set(manifest["tool_versions"]) == set(pcm.PINNED_TOOLS)
     assert not [p for p in out.parent.iterdir() if p.name != out.name], "temp file left behind"
+
+
+def test_the_inactive_manifest_carries_the_run_stamp_of_its_step(tmp_path):
+    out = tmp_path / "manifest-serial.json"
+    subprocess.run([sys.executable, str(PLUGIN), "inactive", "--phase", "serial", "--output", str(out)],
+                   env=_env(), check=True)
+    manifest = json.loads(out.read_text(encoding="utf-8"))
+    assert (manifest["run_id"], manifest["run_attempt"]) == ("38939122085", "2")
 
 
 def test_nodeids_cli_prints_one_per_line(tmp_path, capsys):

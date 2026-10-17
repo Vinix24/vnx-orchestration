@@ -37,9 +37,14 @@ earlier attempt's verdict, but a re-run that fails before its upload leaves
 the earlier one in place. A verdict counts only when its own ``run_id`` and
 ``run_attempt`` are the run's and its latest attempt; a cache entry only when
 its stamp agrees with both. The output names the ``run_attempt`` each verdict
-came from next to the run's latest attempt.
+came from next to the run's latest attempt. That rule is
+``check_xdist_parity.stale_evidence_reason``, the one the parity job applies
+to each of its own inputs, so a verdict and the evidence under it are current
+by the same test. A verdict with a field of the wrong type (no
+``step_failures`` list, a shadow block that is not an object) is no verdict.
 
-Exit 0 when the rule holds, 1 when it does not, 2 on a usage or tool error.
+Exit 0 when the rule holds, 1 when it does not, 2 on a usage or tool error
+(also gh output that is not the JSON this tool reads).
 """
 
 from __future__ import annotations
@@ -58,7 +63,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from check_xdist_parity import VERDICT_FILE, fingerprint_of_args_dir
+from check_xdist_parity import VERDICT_FILE, fingerprint_of_args_dir, stale_evidence_reason, stamp_attempt, whole_number
 
 VERDICT_ARTIFACT = "xdist-parity-verdict"
 WORKFLOW_NAME = "VNX CI"
@@ -161,6 +166,9 @@ def evidence_gap(run: Run) -> tuple | None:
     stale = stale_reason(run.verdict, run)
     if stale is not None:
         return "stale_verdict", stale
+    malformed = verdict_shape_problem(run.verdict)
+    if malformed is not None:
+        return "no_verdict", f"malformed verdict: {malformed}"
     return None
 
 
@@ -176,23 +184,43 @@ def _place_on_ancestry(run: Run, place: str, reason: str, is_ancestor) -> Placem
 
 def stale_reason(verdict: dict, run: Run) -> str | None:
     """Why *verdict* is not evidence of *run*'s latest attempt; None when its own run_id and run_attempt prove it is."""
-    if str(verdict.get("run_id") or "") != run.run_id:
-        return f"verdict of run {verdict.get('run_id')}, not of run {run.run_id}"
-    attempt = verdict_attempt(verdict)
-    if attempt is None:
-        return "the verdict names no run_attempt"
-    if attempt != run.attempt:
-        return f"verdict of attempt {attempt}, the run's latest attempt is {run.attempt}"
-    return None
+    return stale_evidence_reason("verdict", verdict, run.run_id, run.attempt)
 
 
-def verdict_attempt(verdict: dict) -> int | None:
-    """The verdict's own ``run_attempt`` (written as a string by CI), or None when it names none."""
-    value = verdict.get("run_attempt")
-    if isinstance(value, int) and not isinstance(value, bool):
-        return value
-    if isinstance(value, str) and value.strip().isdecimal():
-        return int(value.strip())
+def _text_or_none(value) -> bool:
+    return value is None or isinstance(value, str)
+
+
+def _shadow_reads(value) -> bool:
+    """No shadow block, or an object whose suite_wall_s, when given, is a whole number."""
+    if value is None:
+        return True
+    if not isinstance(value, dict):
+        return False
+    return value.get("suite_wall_s") is None or whole_number(value.get("suite_wall_s")) is not None
+
+
+# (field, whether it must be present, the test its value must pass for the rule to read it)
+VERDICT_FIELDS = (
+    ("exit", True, lambda v: v is None or whole_number(v) is not None),
+    ("step_failures", True, lambda v: isinstance(v, list) and all(isinstance(f, str) for f in v)),
+    ("profile", False, _text_or_none),
+    ("selection_fingerprint", False, _text_or_none),
+    ("shadow", False, _shadow_reads),
+    ("differences", False, lambda v: v is None or (isinstance(v, dict) and all(isinstance(e, list) for e in v.values()))),
+    ("invalid_evidence", False, lambda v: v is None or (isinstance(v, list) and all(isinstance(p, dict) for p in v))),
+)
+
+
+def verdict_shape_problem(verdict: dict) -> str | None:
+    """Which field keeps *verdict* from being read by the rule (missing or of the wrong type); None when it reads."""
+    for name, required, reads in VERDICT_FIELDS:
+        if name not in verdict:
+            if required:
+                return f"{name} is missing"
+            continue
+        if not reads(verdict[name]):
+            return f"{name} is {verdict[name]!r:.80}"
     return None
 
 
@@ -220,7 +248,8 @@ def _difference_note(verdict: dict) -> str:
 
 
 def suite_wall_s(verdict: dict) -> int | None:
-    return (verdict.get("shadow") or {}).get("suite_wall_s")
+    shadow = verdict.get("shadow")
+    return whole_number(shadow.get("suite_wall_s")) if isinstance(shadow, dict) else None
 
 
 def _created(run: Run) -> datetime:
@@ -367,33 +396,69 @@ def _run(cmd: list, cwd: Path | None = None) -> subprocess.CompletedProcess:
         raise ToolError(f"{cmd[0]} is not installed: {exc}") from exc
 
 
-def _gh_json(args: list):
+def _gh_json(args: list, shape: type):
+    """gh's JSON output of *args*; ToolError when gh fails or prints anything but JSON of *shape*."""
+    command = f"gh {' '.join(args[:2])}"
     proc = _run(["gh", *args])
     if proc.returncode != 0:
         raise ToolError(f"gh {' '.join(args)}: {proc.stderr.strip()}")
-    return json.loads(proc.stdout)
+    try:
+        data = json.loads(proc.stdout)
+    except ValueError as exc:
+        raise ToolError(f"{command} printed no JSON ({exc}): {proc.stdout.strip()[:200]!r}") from exc
+    if not isinstance(data, shape):
+        raise ToolError(f"{command} printed {type(data).__name__}, not a {shape.__name__}: {proc.stdout.strip()[:200]!r}")
+    return data
 
 
 def default_repo() -> str:
-    return str(_gh_json(["repo", "view", "--json", "nameWithOwner"])["nameWithOwner"])
+    name = _gh_json(["repo", "view", "--json", "nameWithOwner"], dict).get("nameWithOwner")
+    if not isinstance(name, str) or not name:
+        raise ToolError(f"gh repo view gave no nameWithOwner: {name!r}")
+    return name
 
 
 def pr_merge_commit(repo: str, pr: int) -> str:
-    data = _gh_json(["pr", "view", str(pr), "--repo", repo, "--json", "state,mergeCommit"])
-    commit = (data.get("mergeCommit") or {}).get("oid")
-    if data.get("state") != "MERGED" or not commit:
+    data = _gh_json(["pr", "view", str(pr), "--repo", repo, "--json", "state,mergeCommit"], dict)
+    merge = data.get("mergeCommit")
+    commit = merge.get("oid") if isinstance(merge, dict) else None
+    if data.get("state") != "MERGED" or not isinstance(commit, str) or not commit:
         raise ToolError(f"PR #{pr} is not merged (state {data.get('state')})")
-    return str(commit)
+    return commit
 
 
 def list_runs(repo: str, workflow: str, limit: int) -> list:
     fields = "databaseId,headSha,headBranch,event,status,conclusion,createdAt,attempt"
-    rows = _gh_json(["run", "list", "--repo", repo, "--workflow", workflow, "--limit", str(limit), "--json", fields])
-    return [
-        Run(str(r["databaseId"]), int(r.get("attempt") or 1), r["headSha"], r.get("headBranch") or "",
-            r.get("event") or "", r["createdAt"], r.get("status") or "", r.get("conclusion"))
-        for r in rows
-    ]
+    rows = _gh_json(["run", "list", "--repo", repo, "--workflow", workflow, "--limit", str(limit), "--json", fields], list)
+    return [run_of_row(row) for row in rows]
+
+
+def run_of_row(row) -> Run:
+    """One row of ``gh run list`` as a Run; ToolError when a field the rule reads is missing or malformed."""
+    if not isinstance(row, dict):
+        raise ToolError(f"gh run list: a run is not an object: {row!r:.200}")
+    checks = (
+        ("databaseId", whole_number(row.get("databaseId")) is not None),
+        ("attempt", stamp_attempt(row.get("attempt")) is not None),
+        ("headSha", isinstance(row.get("headSha"), str) and bool(row.get("headSha"))),
+        ("createdAt", _is_timestamp(row.get("createdAt"))),
+    )
+    bad = [name for name, ok in checks if not ok]
+    if bad:
+        shown = ", ".join(f"{name} {row.get(name)!r}" for name in bad)
+        raise ToolError(f"gh run list: run {row.get('databaseId')!r} has a missing or malformed {shown}")
+    return Run(str(row["databaseId"]), stamp_attempt(row["attempt"]), row["headSha"], str(row.get("headBranch") or ""),
+               str(row.get("event") or ""), row["createdAt"], str(row.get("status") or ""), row.get("conclusion"))
+
+
+def _is_timestamp(value) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return True
 
 
 def download_verdict(repo: str, run: Run, cache: Path) -> tuple:
@@ -499,8 +564,11 @@ def local_fingerprint(repo_root: Path) -> str:
         )
         if proc.returncode != 0:
             raise ToolError(f"profile_a_pytest_args.sh exit {proc.returncode}: {proc.stderr.strip()[-400:]}")
-        return fingerprint_of_args_dir(Path(tmp) / "args", repo_root / "scripts" / "ci" / "profile_a_constraints.txt",
-                                       str(repo_root))
+        try:
+            return fingerprint_of_args_dir(Path(tmp) / "args", repo_root / "scripts" / "ci" / "profile_a_constraints.txt",
+                                           str(repo_root))
+        except (OSError, ValueError) as exc:
+            raise ToolError(f"the emitted args cannot be fingerprinted: {exc}") from exc
 
 
 def _clean_env() -> dict:
@@ -513,7 +581,9 @@ def read_oi_status(path: Path) -> dict | None:
     except (OSError, ValueError):
         return None
     items = data.get("items") if isinstance(data, dict) else data
-    return {str(i.get("id")): str(i.get("status")) for i in items or [] if isinstance(i, dict)}
+    if not isinstance(items, list):
+        return None
+    return {str(i.get("id")): str(i.get("status")) for i in items if isinstance(i, dict)}
 
 
 def default_open_items(repo_root: Path) -> Path:
@@ -585,7 +655,7 @@ def main(argv=None) -> int:
         with tempfile.TemporaryDirectory(prefix="xdist-parity-verdicts-") as tmp:
             cache = Path(args.cache_dir) if args.cache_dir else Path(tmp)
             runs, truncated = _collect(header, args, repo_root, cache)
-    except ToolError as exc:
+    except (ToolError, OSError) as exc:
         print(f"xdist_parity_history: {exc}", file=sys.stderr)
         return 2
     evaluation = evaluate(

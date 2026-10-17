@@ -80,8 +80,14 @@ def _testcase(nodeid: str, children: tuple) -> ET.Element:
     return element
 
 
-def write_xml(path: Path, testcases: list, suite_attrs: dict | None = None) -> None:
+def write_xml(path: Path, testcases: list, suite_attrs: dict | None = None, stamp: dict | None = None) -> None:
+    """A JUnit XML; *stamp* becomes the testsuite properties the manifest plugin writes (vnx_run_id, vnx_run_attempt)."""
     suite = ET.Element("testsuite", name="pytest", **(suite_attrs or {"tests": str(len(testcases))}))
+    properties = {f"vnx_{k}": v for k, v in (stamp or {}).items() if v is not None}
+    if properties:
+        props = ET.SubElement(suite, "properties")
+        for name, value in properties.items():
+            ET.SubElement(props, "property", name=name, value=str(value))
     for nodeid, children in testcases:
         suite.append(_testcase(nodeid, children))
     root = ET.Element("testsuites", name="pytest tests")
@@ -113,19 +119,23 @@ def outcome(nodeid: str, state: str, reason: str = "r", reports: int = 1) -> dic
     return {"nodeid": nodeid, "outcome": state, "reason": reason, "reports": reports}
 
 
-def write_phase(directory: Path, phase: str, doc: dict | None, testcases: list | None) -> None:
+def write_phase(directory: Path, phase: str, doc: dict | None, testcases: list | None, stamps) -> None:
+    """One phase's manifest and XML, each with the run stamp *stamps(name)* gives it."""
     directory.mkdir(parents=True, exist_ok=True)
     if doc is not None:
-        (directory / f"manifest-{phase}.json").write_text(json.dumps(doc), encoding="utf-8")
+        (directory / f"manifest-{phase}.json").write_text(json.dumps({**doc, **stamps(f"manifest-{phase}")}), encoding="utf-8")
     if testcases is not None:
-        write_xml(directory / f"junit-{phase}.xml", testcases)
+        write_xml(directory / f"junit-{phase}.xml", testcases, stamp=stamps(f"junit-{phase}"))
 
 
-def write_args(directory: Path, parallel: list, serial: list | None = None) -> None:
+def write_args(directory: Path, parallel: list, serial: list | None = None, stamp: dict | None = None) -> None:
+    """An args emission as profile_a_pytest_args.sh writes it, with its run.json when *stamp* is given."""
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "parallel.args").write_bytes(b"".join(a.encode() + b"\0" for a in parallel))
     if serial is not None:
         (directory / "serial.args").write_bytes(b"".join(a.encode() + b"\0" for a in serial))
+    if stamp is not None:
+        (directory / "run.json").write_text(json.dumps({"schema": "vnx-run-stamp/1", **stamp}), encoding="utf-8")
 
 
 PARALLEL_ARGS = ["-q", f"{WORKSPACE}/tests", "-n", "4", "--dist", "loadfile"]
@@ -136,7 +146,14 @@ def baseline() -> list:
 
 
 class Evidence:
-    """A reference and a candidate directory, written from the parts a test changes."""
+    """A reference and a candidate directory, written from the parts a test changes.
+
+    Every input carries the run stamp of the run the parity job runs in
+    (``self.run``), as the writers in CI give it: the manifests and the phase
+    result as fields, the XML as testsuite properties, the args emission as
+    ``args/run.json``, the shadow record as fields. ``self.stamp[name]``
+    overrides the stamp of one input.
+    """
 
     def __init__(self, tmp_path: Path) -> None:
         self.tmp = tmp_path
@@ -153,23 +170,41 @@ class Evidence:
         self.steps = {name: "success" for name in cxp.PARITY_STEPS}
         self.upstream = {"profile_a": "success", "shadow": "success"}
         self.profile = "heavy"
-        self.shadow_record = {"verdict": "shadow_passed", "profile": "heavy", "run_attempt": "1",
+        self.shadow_record = {"verdict": "shadow_passed", "profile": "heavy",
                               "durations_s": {"serial": None, "parallel": 612}, "steps": {}}
+        self.reference_result = {"schema": "vnx-phase-result/1", "phase": "full", "exit": 0, "duration_s": 2110}
+        self.run = {"run_id": "99", "run_attempt": "1"}
+        self.stamp = {}
+
+    def stamp_of(self, name: str) -> dict:
+        return {**self.run, **self.stamp.get(name, {})}
+
+    def attempt(self, value: str) -> None:
+        """The parity job and, unless a test overrides one, every input run in attempt *value*."""
+        self.run["run_attempt"] = value
 
     def write(self) -> None:
-        write_phase(self.reference, "full", self.ref_manifest, self.ref_cases)
-        write_phase(self.candidate, "serial", self.serial_manifest, self.serial_cases)
-        write_phase(self.candidate, "parallel", self.par_manifest, self.par_cases)
-        write_args(self.candidate / "args", PARALLEL_ARGS)
+        write_phase(self.reference, "full", self.ref_manifest, self.ref_cases, self.stamp_of)
+        write_phase(self.candidate, "serial", self.serial_manifest, self.serial_cases, self.stamp_of)
+        write_phase(self.candidate, "parallel", self.par_manifest, self.par_cases, self.stamp_of)
+        write_args(self.candidate / "args", PARALLEL_ARGS, stamp=self.stamp_of("args"))
+        if self.reference_result is not None:
+            (self.reference / "result-full.json").write_text(
+                json.dumps({**self.reference_result, **self.stamp_of("result-full")}), encoding="utf-8")
         if self.shadow_record is not None:
-            (self.candidate / "xdist-shadow.json").write_text(json.dumps(self.shadow_record), encoding="utf-8")
+            (self.candidate / "xdist-shadow.json").write_text(
+                json.dumps({**self.shadow_record, **self.stamp_of("shadow")}), encoding="utf-8")
+
+    def own_args(self, directory: Path, vector: list = PARALLEL_ARGS) -> Path:
+        """The parity job's own emission, stamped like the rest."""
+        write_args(directory, vector, stamp=self.stamp_of("own-args"))
+        return directory
 
     def inputs(self, **overrides):
         values = dict(
             reference_dir=self.reference, candidate_dir=self.candidate, constraints=self.constraints,
             args_dir=None, workspace_root=WORKSPACE, profile=self.profile,
-            meta={"head_sha": "abc123", "tested_sha": "def456", "run_id": "99", "run_attempt": "1",
-                  "event": "pull_request", "ref": "dispatch/x"},
+            meta={"head_sha": "abc123", "tested_sha": "def456", **self.run, "event": "pull_request", "ref": "dispatch/x"},
             steps=self.steps, upstream=self.upstream,
         )
         values.update(overrides)
@@ -216,7 +251,7 @@ def test_a_red_test_red_in_both_sets_is_parity(ev):
 def test_the_summary_attributes_of_the_xml_are_never_read(ev):
     ev.write()
     write_xml(ev.candidate / "junit-parallel.xml", ev.par_cases,
-              {"tests": "26145", "skipped": "0", "errors": "7", "failures": "3"})
+              {"tests": "26145", "skipped": "0", "errors": "7", "failures": "3"}, stamp=ev.stamp_of("junit-parallel"))
     assert cxp.evaluate(ev.inputs())["exit"] == 0
 
 
@@ -570,17 +605,203 @@ def test_without_any_emitted_args_the_fingerprint_is_unavailable(ev):
 
 
 def test_the_shadow_ran_another_selection_than_this_commit_emits(ev, tmp_path):
-    write_args(tmp_path / "own-args", PARALLEL_ARGS + ["--deselect=tests/test_c.py"])
-    verdict = ev.verdict(args_dir=tmp_path / "own-args")
+    verdict = ev.verdict(args_dir=ev.own_args(tmp_path / "own-args", PARALLEL_ARGS + ["--deselect=tests/test_c.py"]))
     assert "fingerprint_mismatch" in _reasons(verdict)
+
+
+# --- stale evidence: every input proves the run and attempt it is counted for -----------------------------------
+
+
+hist = _load("xdist_parity_history", REPO_ROOT / "scripts" / "ci" / "xdist_parity_history.py")
+
+
+def _clean_verdict(run_id: str, fingerprint: str) -> dict:
+    return {"schema": "vnx-xdist-parity/1", "profile": "heavy", "exit": 0, "verdict": "parity",
+            "selection_fingerprint": fingerprint, "step_failures": [], "run_id": run_id, "run_attempt": "1",
+            "shadow": {"suite_wall_s": 600}, "differences": {}, "invalid_evidence": []}
+
+
+def _cutover_holds(verdict: dict) -> bool:
+    """The cutover rule over ten runs on ten heads over two days, the latest on main: *verdict*'s run plus nine clean ones."""
+    fingerprint = verdict.get("selection_fingerprint") or "f" * 64
+    runs = [hist.Run(verdict["run_id"], int(verdict["run_attempt"]), f"{0:040x}", "dispatch/x", "pull_request",
+                     "2026-11-01T00:00:00Z", "completed", "success", verdict)]
+    for n in range(1, 10):
+        on_main = n == 9
+        runs.append(hist.Run(str(5000 + n), 1, f"{n:040x}", "main" if on_main else "dispatch/x",
+                             "push" if on_main else "pull_request", f"2026-11-0{1 if n < 5 else 2}T{n:02d}:00:00Z",
+                             "completed", "success", _clean_verdict(str(5000 + n), fingerprint)))
+    return hist.evaluate(runs, target_fingerprint=fingerprint, is_ancestor=lambda head: True, watch_list=[],
+                         oi_status=None, list_truncated=False).holds
+
+
+def _stale_details(verdict: dict) -> list:
+    return [p["detail"] for p in verdict["invalid_evidence"] if p["reason"] == "stale_evidence"]
+
+
+def test_evidence_that_proves_attempt_2_holds_the_cutover(ev, tmp_path):
+    ev.attempt("2")
+    verdict = ev.verdict(args_dir=ev.own_args(tmp_path / "own-args"))
+    assert verdict["exit"] == 0 and verdict["invalid_evidence"] == [] and verdict["step_failures"] == []
+    assert _cutover_holds(verdict)
+
+
+def test_a_shadow_record_of_an_earlier_attempt_is_stale_evidence(ev):
+    """codex round 2: parity attempt 2 with the shadow record of attempt 1 gave exit 0 and cutover_holds=true."""
+    ev.attempt("2")
+    ev.stamp["shadow"] = {"run_attempt": "1"}
+    verdict = ev.verdict()
+    assert verdict["exit"] == 2 and verdict["verdict"] == "invalid_evidence"
+    assert _stale_details(verdict) == ["shadow record xdist-shadow.json of attempt 1, not of attempt 2"]
+    assert "shadow.record=stale" in verdict["step_failures"]
+    assert verdict["shadow"].get("suite_wall_s") is None, "nothing is read from a stale shadow record"
+    assert not _cutover_holds(verdict)
+
+
+# input -> the name its stale_evidence detail carries
+STAMPED_INPUTS = {
+    "shadow": "shadow record xdist-shadow.json",
+    "result-full": "result-full.json",
+    "manifest-full": "manifest-full.json",
+    "junit-full": "junit-full.xml",
+    "manifest-serial": "manifest-serial.json",
+    "junit-serial": "junit-serial.xml",
+    "manifest-parallel": "manifest-parallel.json",
+    "junit-parallel": "junit-parallel.xml",
+    "args": "shadow args/run.json",
+    "own-args": "parity-job args/run.json",
+}
+STALE_STAMPS = {
+    "earlier-attempt": ({"run_attempt": "1"}, "of attempt 1, not of attempt 2"),
+    "no-attempt": ({"run_attempt": None}, "names no run_attempt"),
+    "other-run": ({"run_id": "98"}, "of run 98, not of run 99"),
+}
+
+
+def _two_phase(ev: Evidence) -> None:
+    """An active serial phase, so all six phase files are evidence."""
+    ev.serial_manifest = manifest("serial", [C, D])
+    ev.serial_cases = [(C, PASS), (D, skip("not here"))]
+    ev.par_manifest = manifest("parallel", [A, B, E])
+    ev.par_cases = [(A, PASS), (B, PASS), (E, PASS)]
+
+
+@pytest.mark.parametrize("stale", list(STALE_STAMPS))
+@pytest.mark.parametrize("name", list(STAMPED_INPUTS))
+def test_every_input_must_prove_its_run_and_attempt(ev, tmp_path, name, stale):
+    _two_phase(ev)
+    ev.attempt("2")
+    stamp, phrase = STALE_STAMPS[stale]
+    ev.stamp[name] = stamp
+    verdict = ev.verdict(args_dir=ev.own_args(tmp_path / "own-args"))
+    assert verdict["exit"] == 2 and verdict["verdict"] == "invalid_evidence", verdict["invalid_evidence"]
+    [detail] = _stale_details(verdict)
+    assert STAMPED_INPUTS[name] in detail and phrase in detail, detail
+    assert not _cutover_holds(verdict)
+
+
+def test_the_two_phase_shape_proves_attempt_2_when_every_input_does(ev, tmp_path):
+    _two_phase(ev)
+    ev.attempt("2")
+    verdict = ev.verdict(args_dir=ev.own_args(tmp_path / "own-args"))
+    assert verdict["exit"] == 0, verdict["invalid_evidence"]
+
+
+def test_a_stale_phase_is_not_compared(ev):
+    ev.attempt("2")
+    ev.stamp["manifest-parallel"] = {"run_attempt": "1"}
+    ev.par_cases[0] = (A, FAIL)
+    verdict = ev.verdict()
+    assert verdict["differences"] is None and verdict["counts"]["parallel"] is None
+
+
+def test_a_stale_shadow_record_is_not_read_for_the_profile(ev):
+    """Without its own profile the job takes the shadow's, but only from a shadow record of this attempt."""
+    ev.profile = ""
+    ev.attempt("2")
+    ev.shadow_record["profile"] = "light"
+    ev.stamp["shadow"] = {"run_attempt": "1"}
+    verdict = ev.verdict()
+    assert verdict["verdict"] != "not_applicable" and verdict["profile"] == "unknown"
+    assert verdict["exit"] == 2
+
+
+def test_a_stale_reference_result_shows_no_exit(ev):
+    ev.attempt("2")
+    ev.stamp["result-full"] = {"run_attempt": "1"}
+    ev.reference_result["exit"] = 1
+    verdict = ev.verdict()
+    assert verdict["reference"] == {"job_result": "success", "result": "stale", "exit": None, "duration_s": None}
+
+
+def test_a_stale_shadow_emission_does_not_give_the_fingerprint(ev):
+    ev.attempt("2")
+    ev.stamp["args"] = {"run_attempt": "1"}
+    verdict = ev.verdict()
+    assert verdict["selection_fingerprint"] is None and verdict["selection_fingerprint_source"] is None
+    assert "fingerprint_unavailable" in _reasons(verdict)
+
+
+@pytest.mark.parametrize("own", [{"run_attempt": ""}, {"run_id": ""}, {"run_attempt": "0"}],
+                         ids=["no-attempt", "no-run-id", "attempt-0"])
+def test_a_parity_job_that_names_no_run_proves_no_evidence_current(ev, own):
+    verdict = ev.verdict(meta={"head_sha": "abc123", **ev.run, **own})
+    assert verdict["exit"] == 2
+    details = _stale_details(verdict)
+    assert details and all(d.startswith("no run to hold") for d in details), details
+
+
+# --- malformed evidence is exit 2 with a reason, never a crash -------------------------------------------------------
+
+
+@pytest.mark.parametrize(("field", "value", "reason"), [
+    ("worker_count", "four", "malformed_manifest"),
+    ("worker_count", None, "malformed_manifest"),
+    ("worker_count", True, "malformed_manifest"),
+    ("xdist", ["gw0", "gw1"], "malformed_manifest"),
+    ("tool_versions", ["pytest"], "malformed_manifest"),
+    ("collection_outcomes", ["tests/test_mod.py"], "unparsable_manifest"),
+], ids=["worker-count-text", "worker-count-null", "worker-count-bool", "xdist-list", "versions-list", "outcome-text"])
+def test_a_malformed_manifest_field_is_invalid_evidence(ev, field, value, reason):
+    ev.par_manifest[field] = value
+    verdict = ev.verdict()
+    assert verdict["exit"] == 2
+    assert reason in _reasons(verdict), verdict["invalid_evidence"]
+
+
+def test_a_non_numeric_worker_count_exits_2_from_the_cli_not_1_with_a_traceback(ev):
+    """deepseek round 2: int(worker_count) raised ValueError out of _xdist_problems: exit 1, a traceback, no verdict."""
+    ev.par_manifest["worker_count"] = "four"
+    ev.write()
+    output = ev.tmp / "out" / cxp.VERDICT_FILE
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT), "compare", "--reference", str(ev.reference), "--candidate", str(ev.candidate),
+         "--constraints", str(ev.constraints), "--output", str(output), "--workspace-root", WORKSPACE,
+         "--profile", "heavy", "--run-id", ev.run["run_id"], "--run-attempt", ev.run["run_attempt"]],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 2, proc.stderr
+    assert "Traceback" not in proc.stderr
+    problems = json.loads(output.read_text(encoding="utf-8"))["invalid_evidence"]
+    assert {"reason": "malformed_manifest", "detail": "parallel: worker_count 'four' is not a whole number"} in problems
+
+
+@pytest.mark.parametrize(("durations", "wall"), [
+    ("fast", None),
+    ({"serial": "40", "parallel": 600}, None),
+    ({"serial": None, "parallel": "600"}, None),
+    ({"serial": 40, "parallel": 600}, 640),
+], ids=["not-an-object", "serial-text", "parallel-text", "whole-numbers"])
+def test_shadow_durations_of_the_wrong_type_give_no_wall_time(ev, durations, wall):
+    ev.shadow_record["durations_s"] = durations
+    assert ev.verdict()["shadow"]["suite_wall_s"] == wall
 
 
 # --- the verdict -----------------------------------------------------------------------------------
 
 
 def test_the_verdict_carries_the_run_and_the_selection(ev, tmp_path):
-    write_args(tmp_path / "own-args", PARALLEL_ARGS)
-    verdict = ev.verdict(args_dir=tmp_path / "own-args")
+    verdict = ev.verdict(args_dir=ev.own_args(tmp_path / "own-args"))
     assert verdict["schema"] == "vnx-xdist-parity/1"
     for key, value in {"head_sha": "abc123", "tested_sha": "def456", "run_id": "99", "run_attempt": "1",
                        "event": "pull_request", "ref": "dispatch/x", "profile": "heavy"}.items():
@@ -632,12 +853,17 @@ def test_without_any_profile_the_comparison_still_runs(ev):
     assert verdict["profile"] == "unknown" and verdict["exit"] == 0
 
 
-def test_the_reference_block_reads_profile_as_exit_and_duration(ev):
-    ev.write()
-    (ev.reference / "exit-full").write_text("1\n", encoding="utf-8")
-    (ev.reference / "duration-full-s").write_text("2110\n", encoding="utf-8")
-    verdict = cxp.evaluate(ev.inputs())
-    assert verdict["reference"] == {"job_result": "success", "exit": 1, "duration_s": 2110}
+def test_the_reference_block_reads_profile_as_exit_and_duration_from_its_phase_result(ev):
+    ev.reference_result["exit"] = 1
+    verdict = ev.verdict()
+    assert verdict["reference"] == {"job_result": "success", "result": "present", "exit": 1, "duration_s": 2110}
+
+
+def test_a_reference_without_a_phase_result_shows_no_exit(ev):
+    ev.reference_result = None
+    verdict = ev.verdict()
+    assert verdict["reference"] == {"job_result": "success", "result": "missing", "exit": None, "duration_s": None}
+    assert verdict["exit"] == 0
 
 
 # --- the CLI -----------------------------------------------------------------------------------------
@@ -650,7 +876,8 @@ def _cli(ev: Evidence, *extra: str) -> tuple:
     code = cxp.main([
         "compare", "--reference", str(ev.reference), "--candidate", str(ev.candidate),
         "--constraints", str(ev.constraints), "--output", str(output), "--summary", str(summary),
-        "--workspace-root", WORKSPACE, "--profile", ev.profile, "--head-sha", "abc123", "--run-id", "7",
+        "--workspace-root", WORKSPACE, "--profile", ev.profile, "--head-sha", "abc123",
+        "--run-id", ev.run["run_id"], "--run-attempt", ev.run["run_attempt"],
         "--step", "checkout=success", "--upstream", "shadow=success", *extra,
     ])
     return code, json.loads(output.read_text(encoding="utf-8")), summary.read_text(encoding="utf-8")

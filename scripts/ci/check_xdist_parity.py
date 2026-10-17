@@ -30,9 +30,22 @@ The contract (plan "The comparison contract (D2)"):
   with another outcome), the two candidate phases do not partition the
   reference selection.
 * Invalid evidence (exit 2): a manifest or XML missing, empty or unparsable
-  for an active phase; a key collision; a record whose key is in neither the
-  manifest's nodeids nor its collection outcomes; workers that disagree; tool
-  versions that differ from the constraints file.
+  for an active phase; a manifest field of the wrong type; a key collision; a
+  record whose key is in neither the manifest's nodeids nor its collection
+  outcomes; workers that disagree; tool versions that differ from the
+  constraints file.
+* Stale evidence (exit 2, reason ``stale_evidence``): an input whose own
+  ``run_id`` and ``run_attempt`` do not prove the run and attempt this job
+  runs in. Artifacts upload with ``overwrite: true``, so a re-run that fails
+  before its upload leaves the earlier attempt's artifact in the run, and
+  download-artifact hands it over. Every input carries its stamp from where
+  it is written: the manifests and ``result-full.json`` as fields, each JUnit
+  XML as the testsuite properties ``vnx_run_id`` and ``vnx_run_attempt`` (the
+  manifest plugin adds them in the run that writes the XML), each args
+  emission as ``args/run.json``, the shadow record as fields. Nothing is read
+  from a stale input: a stale phase is not compared, a stale shadow record
+  gives no profile and no wall time, stale args give no fingerprint. The rule
+  is ``stale_evidence_reason``, shared with ``xdist_parity_history.py``.
 * Exit 0 only when the candidate executed exactly the reference set with the
   same outcome classes.
 
@@ -74,6 +87,12 @@ VERDICT_SCHEMA = "vnx-xdist-parity/1"
 MANIFEST_SCHEMA = "vnx-collection-manifest/1"
 FINGERPRINT_SCHEMA = "vnx-selection-fingerprint/1"
 VERDICT_FILE = "xdist-parity-verdict.json"
+SHADOW_RECORD_FILE = "xdist-shadow.json"
+SHADOW_WHAT = f"shadow record {SHADOW_RECORD_FILE}"
+REFERENCE_RESULT_FILE = "result-full.json"
+ARGS_STAMP_FILE = "run.json"
+# testsuite property -> stamp field, written into the JUnit XML by pytest_collection_manifest.py
+JUNIT_STAMP_PROPERTIES = {"vnx_run_id": "run_id", "vnx_run_attempt": "run_attempt"}
 ROOT_PLACEHOLDER = "<workspace>"
 DIFFERENCE_KINDS = (
     "not_run_in_candidate",
@@ -101,6 +120,68 @@ class EvidenceError(Exception):
         super().__init__(f"{reason}: {detail}")
         self.reason = reason
         self.detail = detail
+
+
+# --- current evidence: the one rule ------------------------------------------------------
+
+
+def whole_number(value) -> int | None:
+    """*value* when it is an int (a bool is not), else None."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def stamp_attempt(value) -> int | None:
+    """A run_attempt as evidence carries it (a decimal string from CI, an int from gh); None when it names none."""
+    if isinstance(value, str) and value.strip().isdecimal():
+        value = int(value.strip())
+    attempt = whole_number(value)
+    return attempt if attempt is not None and attempt >= 1 else None
+
+
+def stale_evidence_reason(what: str, stamp, run_id, run_attempt) -> str | None:
+    """Why *what* is not evidence of run *run_id*, attempt *run_attempt*; None when its own stamp proves it is.
+
+    *stamp* holds the ``run_id`` and ``run_attempt`` the evidence carries
+    itself. Evidence counts only for the run and attempt it names: not for
+    another run, not for another attempt of the same run, and not when it names
+    none. A caller without a run to hold the evidence against proves nothing
+    current either. The one rule for current evidence, shared by the parity
+    job (every input it counts) and xdist_parity_history.py (every verdict it
+    counts).
+    """
+    expected_id, expected_attempt = str(run_id or "").strip(), stamp_attempt(run_attempt)
+    if not expected_id or expected_attempt is None:
+        return f"no run to hold {what} against (run_id {run_id!r}, run_attempt {run_attempt!r})"
+    stamp = stamp if isinstance(stamp, dict) else {}
+    carried = stamp.get("run_id")
+    if str(carried if carried is not None else "").strip() != expected_id:
+        return f"{what} of run {carried}, not of run {expected_id}"
+    attempt = stamp_attempt(stamp.get("run_attempt"))
+    if attempt is None:
+        return f"the {what} names no run_attempt"
+    if attempt != expected_attempt:
+        return f"{what} of attempt {attempt}, not of attempt {expected_attempt}"
+    return None
+
+
+def read_json_object(path: Path) -> dict | None:
+    """The JSON object at *path*; None when it is absent, unreadable or not an object."""
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return document if isinstance(document, dict) else None
+
+
+def junit_stamp(root) -> dict:
+    """The run stamp a JUnit XML carries: its testsuite properties (a field written twice, differently, is None)."""
+    values = {}
+    for suite in root.iter("testsuite"):
+        for prop in suite.findall("properties/property"):
+            field_name = JUNIT_STAMP_PROPERTIES.get(prop.get("name") or "")
+            if field_name is not None:
+                values.setdefault(field_name, set()).add(prop.get("value"))
+    return {name: next(iter(found)) if len(found) == 1 else None for name, found in values.items()}
 
 
 # --- the selection fingerprint ---------------------------------------------------
@@ -284,20 +365,21 @@ def load_manifest(path: Path) -> dict:
         raise EvidenceError("unparsable_manifest", f"{path}: not a {MANIFEST_SCHEMA} document")
     if not isinstance(manifest.get("nodeids"), list) or not isinstance(manifest.get("collection_outcomes"), list):
         raise EvidenceError("unparsable_manifest", f"{path}: nodeids or collection_outcomes is not a list")
+    if not all(isinstance(outcome, dict) for outcome in manifest["collection_outcomes"]):
+        raise EvidenceError("unparsable_manifest", f"{path}: a collection outcome is not an object")
     return manifest
 
 
-def load_testcases(path: Path) -> list:
-    """The ``<testcase>`` elements of a JUnit XML, in document order."""
+def load_junit(path: Path):
+    """The root element of a JUnit XML."""
     if not path.is_file():
         raise EvidenceError("missing_xml", str(path))
     if path.stat().st_size == 0:
         raise EvidenceError("empty_xml", str(path))
     try:
-        root = ET.parse(str(path)).getroot()
+        return ET.parse(str(path)).getroot()
     except (OSError, ET.ParseError) as exc:
         raise EvidenceError("unparsable_xml", f"{path}: {exc}") from exc
-    return list(root.iter("testcase"))
 
 
 def manifest_problems(manifest: dict, phase: str, pins: dict) -> list:
@@ -305,7 +387,10 @@ def manifest_problems(manifest: dict, phase: str, pins: dict) -> list:
     problems = []
     if manifest.get("phase") != phase:
         problems.append(("manifest_phase_mismatch", f"manifest of phase {phase} records phase {manifest.get('phase')!r}"))
-    versions = manifest.get("tool_versions") or {}
+    versions = manifest.get("tool_versions")
+    if not isinstance(versions, dict):
+        problems.append(("malformed_manifest", f"{phase}: tool_versions {versions!r} is not an object"))
+        versions = {}
     for dist, pinned in sorted(pins.items()):
         if versions.get(dist) != pinned:
             problems.append(("tool_version_mismatch", f"{phase}: {dist} {versions.get(dist)!r}, constraints pin {pinned!r}"))
@@ -323,11 +408,16 @@ def manifest_problems(manifest: dict, phase: str, pins: dict) -> list:
 
 
 def _xdist_problems(manifest: dict, phase: str) -> list:
-    block = manifest.get("xdist") or {}
+    block, workers = manifest.get("xdist"), whole_number(manifest.get("worker_count"))
     problems = []
+    if not isinstance(block, dict):
+        problems.append(("malformed_manifest", f"{phase}: the xdist block {block!r} is not an object"))
+        block = {}
+    if workers is None:
+        problems.append(("malformed_manifest", f"{phase}: worker_count {manifest.get('worker_count')!r} is not a whole number"))
+        return problems
     if block.get("workers_agree") is not True:
         problems.append(("workers_disagree", f"{phase}: the workers did not collect the same nodeids"))
-    workers = int(manifest.get("worker_count") or 0)
     if workers < 1 or block.get("workers_reported") != workers:
         problems.append(("workers_missing", f"{phase}: {block.get('workers_reported')} of {workers} workers reported a collection"))
     return problems
@@ -373,25 +463,48 @@ def attach_records(phase: Phase, testcases: list, problems: list) -> None:
         problems.append(("record_outside_manifest", f"{phase.name}: {len(outside)} record(s) not in the manifest: {shown}"))
 
 
-def load_phase(directory: Path, name: str, pins: dict, key, known: dict, problems: list) -> Phase | None:
-    """Read and check one phase; ``None`` (with the reason in *problems*) when unreadable."""
-    try:
-        manifest = load_manifest(directory / f"manifest-{name}.json")
-    except EvidenceError as exc:
-        problems.append((exc.reason, exc.detail))
-        return None
-    problems.extend(manifest_problems(manifest, name, pins))
-    phase = Phase(name, manifest, bool(manifest.get("phase_active")), [str(n) for n in manifest["nodeids"]])
-    index_keys(phase, key, known, problems)
-    xml_path = directory / f"junit-{name}.xml"
-    if not phase.active and not xml_path.exists():
+@dataclass
+class PhaseReader:
+    """What every phase is read with: the pins, the key function, the run it must prove, the keys seen so far."""
+
+    pins: dict
+    key: object
+    run: tuple
+    problems: list
+    known: dict = field(default_factory=dict)
+
+    def current(self, what: str, stamp) -> bool:
+        """True when *stamp* proves this run and attempt; else a ``stale_evidence`` problem and False."""
+        reason = stale_evidence_reason(what, stamp, *self.run)
+        if reason is not None:
+            self.problems.append(("stale_evidence", reason))
+        return reason is None
+
+    def load(self, directory: Path, name: str) -> Phase | None:
+        """Read and check one phase; ``None`` (with the reason in *problems*) when unreadable or stale."""
+        manifest_name, xml_name = f"manifest-{name}.json", f"junit-{name}.xml"
+        try:
+            manifest = load_manifest(directory / manifest_name)
+        except EvidenceError as exc:
+            self.problems.append((exc.reason, exc.detail))
+            return None
+        if not self.current(manifest_name, manifest):
+            return None
+        self.problems.extend(manifest_problems(manifest, name, self.pins))
+        phase = Phase(name, manifest, bool(manifest.get("phase_active")), [str(n) for n in manifest["nodeids"]])
+        index_keys(phase, self.key, self.known, self.problems)
+        xml_path = directory / xml_name
+        if not phase.active and not xml_path.exists():
+            return phase
+        try:
+            root = load_junit(xml_path)
+        except EvidenceError as exc:
+            self.problems.append((exc.reason, exc.detail))
+            return None
+        if not self.current(xml_name, junit_stamp(root)):
+            return None
+        attach_records(phase, list(root.iter("testcase")), self.problems)
         return phase
-    try:
-        attach_records(phase, load_testcases(xml_path), problems)
-    except EvidenceError as exc:
-        problems.append((exc.reason, exc.detail))
-        return None
-    return phase
 
 
 # --- the comparison -----------------------------------------------------------------------
@@ -501,45 +614,53 @@ def phase_counts(phase: Phase | None) -> dict | None:
 # --- the verdict ----------------------------------------------------------------------------
 
 
-def read_int(path: Path) -> int | None:
-    try:
-        digits = "".join(ch for ch in path.read_text(encoding="utf-8") if ch.isdigit())
-    except OSError:
+def suite_wall_s(durations) -> int | None:
+    """Parallel plus serial seconds of the shadow; None when either is there but not a whole number."""
+    durations = durations if isinstance(durations, dict) else {}
+    parallel, serial = whole_number(durations.get("parallel")), durations.get("serial")
+    if parallel is None or (serial is not None and whole_number(serial) is None):
         return None
-    return int(digits) if digits else None
+    return parallel + (serial or 0)
 
 
-def read_shadow_record(candidate_dir: Path) -> dict | None:
-    try:
-        record = json.loads((candidate_dir / "xdist-shadow.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    return record if isinstance(record, dict) else None
-
-
-def shadow_block(record: dict | None, job_result: str | None) -> dict:
+def shadow_block(record: dict | None, job_result: str | None, stale: str | None) -> dict:
+    """The shadow as the verdict shows it; a stale record shows only whose it is, nothing it says."""
     if record is None:
         return {"record": "missing", "job_result": job_result}
-    durations = record.get("durations_s") or {}
-    parallel = durations.get("parallel")
-    wall = None if parallel is None else parallel + (durations.get("serial") or 0)
+    if stale is not None:
+        return {"record": "stale", "job_result": job_result, "stale": stale,
+                "run_id": record.get("run_id"), "run_attempt": record.get("run_attempt")}
     return {
         "record": "present",
         "job_result": job_result,
         "verdict": record.get("verdict"),
+        "run_id": record.get("run_id"),
         "run_attempt": record.get("run_attempt"),
         "steps": record.get("steps"),
         "exit_codes": record.get("exit_codes"),
-        "durations_s": durations,
-        "suite_wall_s": wall,
+        "durations_s": record.get("durations_s"),
+        "suite_wall_s": suite_wall_s(record.get("durations_s")),
     }
+
+
+def reference_block(inputs: CompareInputs, run: tuple) -> tuple:
+    """(Profile A's job result and phase result as the verdict shows them, the result's stale reason or None)."""
+    block = {"job_result": inputs.upstream.get("profile_a"), "result": "missing", "exit": None, "duration_s": None}
+    record = read_json_object(inputs.reference_dir / REFERENCE_RESULT_FILE)
+    if record is None:
+        return block, None
+    stale = stale_evidence_reason(REFERENCE_RESULT_FILE, record, *run)
+    if stale is not None:
+        return {**block, "result": "stale"}, stale
+    return {**block, "result": "present", "exit": whole_number(record.get("exit")),
+            "duration_s": whole_number(record.get("duration_s"))}, None
 
 
 def step_failures(steps: dict, shadow: dict) -> list:
     """Every parity-job step and shadow outcome that is not success, as ``where.what=outcome``."""
     failures = [f"parity.{name}={steps.get(name) or 'unknown'}" for name in PARITY_STEPS if steps.get(name) != "success"]
     if shadow.get("record") != "present":
-        failures.append("shadow.record=missing")
+        failures.append(f"shadow.record={shadow.get('record')}")
     elif shadow.get("verdict") != "shadow_passed":
         failures.append(f"shadow.verdict={shadow.get('verdict')}")
     if shadow.get("job_result") != "success":
@@ -560,8 +681,13 @@ class CompareInputs:
     upstream: dict
 
 
+def run_of(inputs: CompareInputs) -> tuple:
+    """(run_id, run_attempt) of the run this job runs in: what every input must prove."""
+    return inputs.meta.get("run_id"), inputs.meta.get("run_attempt")
+
+
 def resolve_profile(inputs: CompareInputs, shadow: dict | None) -> str:
-    """The parity job's own classification; the shadow's when the parity prelude gave none."""
+    """The parity job's own classification; a current shadow record's when the parity prelude gave none."""
     if inputs.profile:
         return inputs.profile
     if shadow and shadow.get("profile") in ("light", "heavy"):
@@ -582,16 +708,28 @@ def own_tool_problems(pins: dict) -> list:
 
 
 def fingerprint_block(inputs: CompareInputs, problems: list) -> tuple:
-    """(fingerprint, source): this job's own emission first, the shadow's emitted args second."""
+    """(fingerprint, source): this job's own emission first, the shadow's emitted args second.
+
+    An emission counts only when its ``args/run.json`` proves this run and
+    attempt; one without args is no emission, one with stale args is a
+    ``stale_evidence`` problem and gives no fingerprint.
+    """
     constraints = inputs.constraints
     fingerprints = {}
-    for source, directory in (("parity_job", inputs.args_dir), ("shadow", inputs.candidate_dir / "args")):
+    sources = (("parity_job", "parity-job", inputs.args_dir), ("shadow", "shadow", inputs.candidate_dir / "args"))
+    for source, label, directory in sources:
         if directory is None:
             continue
         try:
-            fingerprints[source] = fingerprint_of_args_dir(directory, constraints, inputs.workspace_root)
+            fingerprint = fingerprint_of_args_dir(directory, constraints, inputs.workspace_root)
         except (OSError, ValueError, UnicodeDecodeError):
             continue
+        stale = stale_evidence_reason(f"{label} args/{ARGS_STAMP_FILE}", read_json_object(directory / ARGS_STAMP_FILE),
+                                      *run_of(inputs))
+        if stale is not None:
+            problems.append(("stale_evidence", stale))
+            continue
+        fingerprints[source] = fingerprint
     if len(set(fingerprints.values())) > 1:
         problems.append(("fingerprint_mismatch", f"the shadow ran another selection than this commit emits: {fingerprints}"))
     for source in ("parity_job", "shadow"):
@@ -603,15 +741,13 @@ def fingerprint_block(inputs: CompareInputs, problems: list) -> tuple:
 
 def evaluate(inputs: CompareInputs) -> dict:
     """The full verdict for one run (also when the evidence is unusable)."""
-    shadow_record = read_shadow_record(inputs.candidate_dir)
-    profile = resolve_profile(inputs, shadow_record)
+    run = run_of(inputs)
+    shadow_record = read_json_object(inputs.candidate_dir / SHADOW_RECORD_FILE)
+    shadow_stale = None if shadow_record is None else stale_evidence_reason(SHADOW_WHAT, shadow_record, *run)
+    profile = resolve_profile(inputs, None if shadow_stale else shadow_record)
     verdict = {"schema": VERDICT_SCHEMA, **inputs.meta, "profile": profile, "steps": inputs.steps}
-    verdict["shadow"] = shadow_block(shadow_record, inputs.upstream.get("shadow"))
-    verdict["reference"] = {
-        "job_result": inputs.upstream.get("profile_a"),
-        "exit": read_int(inputs.reference_dir / "exit-full"),
-        "duration_s": read_int(inputs.reference_dir / "duration-full-s"),
-    }
+    verdict["shadow"] = shadow_block(shadow_record, inputs.upstream.get("shadow"), shadow_stale)
+    verdict["reference"], reference_stale = reference_block(inputs, run)
     if profile == "light":
         verdict.update(exit=None, verdict="not_applicable", invalid_evidence=[], differences=None, counts=None,
                        tool_versions=None, selection_fingerprint=None, selection_fingerprint_source=None,
@@ -620,6 +756,7 @@ def evaluate(inputs: CompareInputs) -> dict:
     problems = [("download_failed", f"{name}={inputs.steps[name]}")
                 for name in ("download_reference", "download_candidate")
                 if name in inputs.steps and inputs.steps[name] != "success"]
+    problems += [("stale_evidence", reason) for reason in (shadow_stale, reference_stale) if reason is not None]
     verdict["selection_fingerprint"], verdict["selection_fingerprint_source"] = fingerprint_block(inputs, problems)
     verdict.update(_compare_evidence(inputs, problems))
     verdict["invalid_evidence"] = [{"reason": r, "detail": d} for r, d in problems]
@@ -640,10 +777,10 @@ def _compare_evidence(inputs: CompareInputs, problems: list) -> dict:
     problems.extend(own)
     if own and own[0][0] == "pytest_unavailable":
         return {"differences": None, "counts": None, "tool_versions": pins}
-    key, known = junit_key_function(), {}
-    reference = load_phase(inputs.reference_dir, "full", pins, key, known, problems)
-    serial = load_phase(inputs.candidate_dir, "serial", pins, key, known, problems)
-    parallel = load_phase(inputs.candidate_dir, "parallel", pins, key, known, problems)
+    reader = PhaseReader(pins, junit_key_function(), run_of(inputs), problems)
+    reference = reader.load(inputs.reference_dir, "full")
+    serial = reader.load(inputs.candidate_dir, "serial")
+    parallel = reader.load(inputs.candidate_dir, "parallel")
     counts = {"reference": phase_counts(reference), "serial": phase_counts(serial), "parallel": phase_counts(parallel)}
     if None in (reference, serial, parallel):
         return {"differences": None, "counts": counts, "tool_versions": pins}
