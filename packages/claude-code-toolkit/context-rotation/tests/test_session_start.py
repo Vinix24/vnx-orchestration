@@ -308,7 +308,8 @@ def test_a_claims_archive_copy_survives_the_trim_and_resume_injects_it(tmp_path,
     s.write_handover(NEWER)  # the original no longer matches claimed_sha256
     for day in range(1, 4):  # archive_keep + 1 newer archived handovers
         moment = datetime(2099, 1, day, tzinfo=timezone.utc)
-        rotation_state.archive_handover(rotation_state.plan_archive(str(project), "sess-n%d" % day, moment), b"newer")
+        rotation_state.archive_handover(
+            str(project), rotation_state.plan_archive(str(project), "sess-n%d" % day, moment), b"newer")
     start(project, "sess-last", source="compact")
     assert copy.exists() and copy.read_text() == VALID_HANDOVER
     assert len(archived(project)) == 3
@@ -458,7 +459,7 @@ def test_a_symlinked_archive_directory_is_not_trimmed(tmp_path, project, capfd):
     proc = start(project, "sess-b", source="startup")
     assert proc.returncode == 0
     assert sorted(p.name for p in (other / ".claude" / "rotation" / "archive").iterdir()) == sorted(names)
-    assert proc.stderr.count("archive not trimmed") == 1
+    assert proc.stderr.count("%s is a symlink; nothing is read or changed" % (rotation(project) / "archive")) == 1
     assert not (rotation(project) / "errors.log").exists()
 
 
@@ -470,7 +471,7 @@ def test_a_symlinked_rotation_directory_is_not_trimmed(tmp_path, project):
     proc = start(project, "sess-b", source="startup")
     assert proc.returncode == 0
     assert sorted(p.name for p in (other / ".claude" / "rotation" / "archive").iterdir()) == sorted(names)
-    assert proc.stderr.count("archive not trimmed") == 1
+    assert proc.stderr.count("%s is a symlink; nothing is read or changed" % rotation(project)) == 1
 
 
 def test_a_symlinked_dot_claude_still_trims_its_real_archive(tmp_path, project):

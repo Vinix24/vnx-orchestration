@@ -189,7 +189,7 @@ def test_a_marker_is_claimed_once(project):
 
 def test_archive_paths_never_collide(project):
     moment = datetime(2026, 10, 16, 12, 0, tzinfo=timezone.utc)
-    first = rs.archive_handover(rs.plan_archive(str(project), "sess-a", moment), b"one")
+    first = rs.archive_handover(str(project), rs.plan_archive(str(project), "sess-a", moment), b"one")
     second = rs.plan_archive(str(project), "sess-a", moment)
     assert second != first and second.endswith("-sess-a-1.md")
     assert rs.ARCHIVE_NAME.match(os.path.basename(first))
@@ -199,7 +199,7 @@ def test_archive_paths_never_collide(project):
 def test_trim_keeps_the_newest(project):
     for day in range(1, 6):
         moment = datetime(2026, 10, day, tzinfo=timezone.utc)
-        rs.archive_handover(rs.plan_archive(str(project), "sess-%d" % day, moment), b"x")
+        rs.archive_handover(str(project), rs.plan_archive(str(project), "sess-%d" % day, moment), b"x")
     assert rs.trim_archive(str(project), 2) == 3
     names = sorted(os.listdir(rs.archive_dir(str(project))))
     assert [n.split("Z-")[1] for n in names] == ["sess-4.md", "sess-5.md"]
@@ -207,7 +207,8 @@ def test_trim_keeps_the_newest(project):
 
 
 def archive_n(project, count, first_day=1):
-    return [rs.archive_handover(rs.plan_archive(str(project), "sess-%d" % day, datetime(2026, 9, day, tzinfo=timezone.utc)), b"x")
+    return [rs.archive_handover(str(project), rs.plan_archive(str(project), "sess-%d" % day,
+                                                           datetime(2026, 9, day, tzinfo=timezone.utc)), b"x")
             for day in range(first_day, first_day + count)]
 
 
@@ -216,7 +217,7 @@ def claim_naming(project, copy, session_id="sess-old"):
     make_marker(project, session_id)
     path, marker, _ = rs.claim(str(project), rs.marker_path(str(project), "ready", session_id), "sess-new")
     marker["archive"] = copy
-    rs.write_json(path, marker)
+    rs.write_json(str(project), path, marker)
     return path
 
 
@@ -237,7 +238,7 @@ def test_trim_keeps_a_copy_named_by_a_marker_that_fails_marker_problem(project):
     path = claim_naming(project, old)
     data = json.loads(open(path).read())
     data["claimed_sha256"] = "not a digest"
-    rs.write_json(path, data)
+    rs.write_json(str(project), path, data)
     assert rs.read_marker(str(project), path)[0] is None
     archive_n(project, 3, first_day=10)
     assert rs.trim_archive(str(project), 2) == 1
@@ -256,7 +257,7 @@ def test_trim_survives_a_marker_whose_archive_field_holds_a_nul(project):
     claim_naming(project, named[0])
     unnamed = archive_n(project, 3, first_day=5)
     newest = archive_n(project, 2, first_day=10)
-    rs.write_json(str(rotation(project) / "claimed-sess-x-sess-y.json"), {"archive": "x\u0000y"})
+    rs.write_json(str(project), str(rotation(project) / "claimed-sess-x-sess-y.json"), {"archive": "x\u0000y"})
     assert rs.trim_archive(str(project), 2) == 4
     assert os.path.exists(named[0]) and all(os.path.exists(p) for p in newest)
     assert not any(os.path.exists(p) for p in unnamed + named[1:])
@@ -265,7 +266,7 @@ def test_trim_survives_a_marker_whose_archive_field_holds_a_nul(project):
 @pytest.mark.parametrize("field", [None, 7, ["a"], "", "relative.md", "/nowhere/20260101T000000000000Z-s.md"])
 def test_trim_survives_any_archive_field(project, field):
     old = archive_n(project, 3)
-    rs.write_json(str(rotation(project) / "claimed-sess-x-sess-y.json"), {"archive": field})
+    rs.write_json(str(project), str(rotation(project) / "claimed-sess-x-sess-y.json"), {"archive": field})
     assert rs.trim_archive(str(project), 1) == 2
     assert [os.path.exists(p) for p in old] == [False, False, True]
 
@@ -288,10 +289,170 @@ def test_pending_lists_claims_first_then_newest_markers(project):
     path = rs.marker_path(str(project), "ready", "sess-old")
     data = json.loads(open(path).read())
     data["written_at"] = "2026-01-01T00:00:00Z"
-    rs.write_json(path, data)
+    rs.write_json(str(project), path, data)
     make_marker(project, "sess-new")
     make_marker(project, "sess-taken")
     rs.claim(str(project), rs.marker_path(str(project), "ready", "sess-taken"), "sess-x")
     kinds = [(e["kind"], e["marker"]["session_id"]) for e in rs.pending_handovers(str(project), None)]
     assert kinds == [("claimed", "sess-taken"), ("ready", "sess-new"), ("ready", "sess-old")]
     assert all(e["marker"]["session_id"] != "sess-new" for e in rs.pending_handovers(str(project), "sess-new"))
+
+
+# --- the storage gate and the verified directories -----------------------------------
+
+def test_storage_that_is_absent_or_real_passes_the_gate(tmp_path, project):
+    assert rs.storage_problem(str(project)) is None
+    assert rs.storage_problem(str(tmp_path / "no-such-project")) is None
+    for parts in rs.STORAGE_DIRS:
+        project.joinpath(".claude", *parts).mkdir(parents=True, exist_ok=True)
+    assert rs.storage_problem(str(project)) is None
+
+
+def test_a_symlinked_dot_claude_passes_the_gate(tmp_path, project):
+    real = tmp_path / "real-claude"
+    (real / "rotation" / "archive").mkdir(parents=True)
+    (project / ".claude").symlink_to(real)
+    assert rs.storage_problem(str(project)) is None
+
+
+@pytest.mark.parametrize("parts,kind", [
+    (("rotation",), "symlink"), (("rotation", "archive"), "symlink"), (("rotation", "state"), "symlink"),
+    (("rotation",), "file"), (("rotation", "archive"), "file"), ((), "file"),
+], ids=["rotation-link", "archive-link", "state-link", "rotation-file", "archive-file", "dot-claude-file"])
+def test_the_gate_refuses_a_symlink_or_a_file_where_a_directory_belongs(tmp_path, project, parts, kind):
+    target = project.joinpath(".claude", *parts)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if kind == "symlink":
+        (tmp_path / "elsewhere").mkdir()
+        target.symlink_to(tmp_path / "elsewhere")
+    else:
+        target.write_text("not a directory")
+    problem = rs.storage_problem(str(project))
+    assert problem == "%s is %s" % (target, "a symlink" if kind == "symlink" else "not a directory")
+
+
+def test_open_storage_makes_real_directories_and_refuses_a_symlink(tmp_path, project):
+    descriptor = rs.open_storage(str(project), "state", create=True)
+    os.close(descriptor)
+    assert (rotation(project) / "state").is_dir() and not (rotation(project) / "state").is_symlink()
+    (tmp_path / "elsewhere").mkdir()
+    (rotation(project) / "archive").symlink_to(tmp_path / "elsewhere")
+    with pytest.raises(rs.StorageRefused):
+        rs.open_storage(str(project), "archive", create=True)
+    with pytest.raises(FileNotFoundError):
+        rs.open_storage(str(tmp_path / "no-such-project"))
+
+
+def test_archive_handover_writes_nothing_through_a_symlinked_archive(tmp_path, project):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    rotation(project).mkdir(parents=True)
+    (rotation(project) / "archive").symlink_to(elsewhere)
+    with pytest.raises(rs.StorageRefused):
+        rs.archive_handover(str(project), rs.plan_archive(str(project), "sess-a"), b"handover")
+    assert list(elsewhere.iterdir()) == []
+
+
+@pytest.mark.parametrize("call", [
+    lambda project, outside: rs.write_json(project, outside, {"version": 1}),
+    lambda project, outside: rs.remove_in_rotation(project, outside),
+    lambda project, outside: rs.archive_handover(project, outside, b"x"),
+], ids=["write", "unlink", "archive"])
+def test_a_path_outside_the_storage_is_refused(tmp_path, project, call):
+    outside = tmp_path / "elsewhere" / "20260101T000000000000Z-sess-a.md"
+    outside.parent.mkdir()
+    outside.write_text("not ours")
+    rotation(project).mkdir(parents=True)
+    with pytest.raises(rs.StorageRefused):
+        call(str(project), str(outside))
+    assert outside.read_text() == "not ours"
+    assert rs.read_bytes(str(project), str(outside)) is None
+
+
+def test_the_log_is_not_written_into_refused_storage(tmp_path, project):
+    other = tmp_path / "other-rotation"
+    other.mkdir()
+    (project / ".claude").mkdir()
+    rotation(project).symlink_to(other)
+    assert rs.log_error(str(project), "a line") is False
+    assert list(other.iterdir()) == []
+
+
+def tree(root):
+    found = {}
+    for directory, _, files in os.walk(str(root)):
+        for name in files:
+            with open(os.path.join(directory, name), "rb") as handle:
+                found[os.path.relpath(os.path.join(directory, name), str(root))] = handle.read()
+    return found
+
+
+@pytest.fixture
+def swapped_after_every_check(tmp_path, project, monkeypatch):
+    """After each verified open, `.claude/rotation` is moved away and a symlink to another directory takes its place.
+
+    That is a swap between the check and the mutation at every step: whatever the
+    plugin does by path then lands in the other directory, and only what it does
+    through the descriptor lands in the real one. The other directory starts as a
+    copy of the real one, so a misdirected rename, unlink or write shows.
+    """
+    make_marker(project)
+    archive_n(project, 3)
+    real, moved, other = rotation(project), project / ".claude" / "rotation-moved", tmp_path / "other"
+    os.makedirs(str(other))
+    for name, data in tree(real).items():
+        os.makedirs(os.path.dirname(str(other / name)), exist_ok=True)
+        (other / name).write_bytes(data)
+    real_open = rs.open_storage
+
+    def settle():
+        if real.is_symlink():
+            real.unlink()
+            moved.rename(real)
+
+    def open_then_swap(project_dir, *parts, create=False):
+        settle()
+        descriptor = real_open(project_dir, *parts, create=create)
+        real.rename(moved)
+        real.symlink_to(other)
+        return descriptor
+
+    monkeypatch.setattr(rs, "open_storage", open_then_swap)
+    before = tree(other)
+    yield settle
+    settle()
+    assert tree(other) == before, "a mutation went through the swapped-in symlink"
+
+
+SWAPPED_CALLS = {
+    "rename": lambda p: rs.mark_outdated(p, "sess-a", "a prompt after it", notified=False),
+    "claim": lambda p: rs.claim(p, rs.marker_path(p, "ready", "sess-a"), "sess-b"),
+    "archive": lambda p: rs.archive_handover(p, rs.plan_archive(p, "sess-z"), b"new copy"),
+    "append": lambda p: rs.log_injection(p, {"archive": "a"}),
+    "state": lambda p: rs.save_state(p, "sess-a", {"unknown_count": 1}),
+    "unlink": lambda p: rs.remove_in_rotation(p, rs.handover_path(p, "sess-a")),
+    "trim": lambda p: rs.trim_archive(p, 1),
+    "log": lambda p: rs.log_error(p, "a line"),
+}
+SWAPPED_RESULTS = {
+    "rename": ["outdated-sess-a.json"],
+    "claim": ["claimed-sess-a-sess-b.json"],
+    "archive": [".gitignore", ".lock", "archive", "handover-sess-a.md", "ready-sess-a.json"],
+    "append": ["injections.jsonl"],
+    "state": ["state"],
+    "unlink": [".gitignore", ".lock", "archive", "ready-sess-a.json"],
+    "trim": [".gitignore", ".lock", "archive", "handover-sess-a.md", "ready-sess-a.json"],
+    "log": ["errors.log"],
+}
+
+
+@pytest.mark.parametrize("name", sorted(SWAPPED_CALLS))
+def test_a_directory_swapped_after_the_check_changes_nothing_outside_it(project, swapped_after_every_check, name):
+    SWAPPED_CALLS[name](str(project))
+    swapped_after_every_check()
+    left = sorted(os.listdir(str(rotation(project))))
+    assert set(SWAPPED_RESULTS[name]) <= set(left), "the mutation did not land in the verified directory"
+    if name == "trim":
+        assert len(os.listdir(str(rotation(project) / "archive"))) == 1
+    if name == "archive":
+        assert any(n.endswith("-sess-z.md") for n in os.listdir(str(rotation(project) / "archive")))

@@ -74,7 +74,10 @@ to a session automatically.
   it describes still holds (files, branches, running processes) and tell the user when
   it does not. A handover marked outdated needs that check most.
 - **Neither is in your context** (you started this skill yourself): look in the project's
-  `.claude/rotation/` with Glob and Read. `archive/*.md` holds every handover given to a
+  `.claude/rotation/` with Glob and Read. First check that `.claude/rotation` and
+  `.claude/rotation/archive` are directories and not symlinks (for example with
+  `ls -ld`). A symlinked one points outside this project: the plugin uses nothing from
+  it, so do not either, and tell the user. `archive/*.md` holds every handover given to a
   session, and its file names start with a UTC time, so the newest sorts last.
   `injections.jsonl` has one line per handover given, with the session that got it.
   `ready-*.json`, `outdated-*.json` and `claimed-*.json` each name a handover that was

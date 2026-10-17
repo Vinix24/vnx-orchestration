@@ -3,8 +3,9 @@
 Markers, handovers, archive copies and the transcript a marker names are plain
 files that any process of the user can replace. A FIFO would block the hook on
 open and a device can be read without end, so a path is opened only when it is a
-regular file and not a symlink, and the open itself never blocks. Standard
-library only.
+regular file and not a symlink, and the open itself never blocks. With `dir_fd`
+a name is opened in the directory that descriptor holds, so a swap of a directory
+above it changes nothing. Standard library only.
 """
 from __future__ import annotations
 
@@ -14,10 +15,10 @@ import stat
 from typing import Any, BinaryIO, Optional
 
 
-def is_regular(path: Any) -> bool:
+def is_regular(path: Any, dir_fd: Optional[int] = None) -> bool:
     """True for a regular file that is not a symlink."""
     try:
-        return stat.S_ISREG(os.lstat(path).st_mode)
+        return stat.S_ISREG(os.lstat(path, dir_fd=dir_fd).st_mode)
     except (OSError, TypeError, ValueError):
         return False
 
@@ -26,16 +27,16 @@ def _not_regular(path: str) -> OSError:
     return OSError(errno.EINVAL, "not a regular file", path)
 
 
-def open_regular(path: str) -> BinaryIO:
+def open_regular(path: str, dir_fd: Optional[int] = None) -> BinaryIO:
     """A binary file object for reading `path`; OSError when it is not a regular file.
 
     lstat refuses a symlink, FIFO or device before the open; O_NOFOLLOW and
     O_NONBLOCK keep a swap between the two from following a link or blocking, and
     fstat checks what was opened.
     """
-    if not is_regular(path):
+    if not is_regular(path, dir_fd):
         raise _not_regular(path)
-    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=dir_fd)
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             raise _not_regular(path)
@@ -45,21 +46,21 @@ def open_regular(path: str) -> BinaryIO:
         raise
 
 
-def read_regular(path: Any) -> Optional[bytes]:
+def read_regular(path: Any, dir_fd: Optional[int] = None) -> Optional[bytes]:
     """The bytes of a regular file, or None when it is absent, unreadable or not a regular file."""
     if not isinstance(path, str) or not path:
         return None
     try:
-        with open_regular(path) as handle:
+        with open_regular(path, dir_fd) as handle:
             return handle.read()
     except (OSError, ValueError):
         return None
 
 
-def append_regular(path: str, data: bytes) -> None:
+def append_regular(path: str, data: bytes, dir_fd: Optional[int] = None) -> None:
     """Append to a regular file, creating it; OSError when something else is at `path`."""
     flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NONBLOCK | os.O_NOFOLLOW
-    descriptor = os.open(path, flags, 0o644)
+    descriptor = os.open(path, flags, 0o644, dir_fd=dir_fd)
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             raise _not_regular(path)

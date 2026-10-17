@@ -14,7 +14,6 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
 
-import context_budget
 import handover_contract
 import hook_runtime
 import rotation_state
@@ -28,22 +27,15 @@ NOT_READY = "The handover at %s is not ready yet: %s. Fix it with another Write 
 
 
 def run(payload, env, run_state):
-    if payload.get("agent_id"):
+    opened = hook_runtime.open_project(payload, env, run_state)
+    if opened is None:
         return
-    session_id = payload.get("session_id")
-    if not rotation_state.is_safe_session_id(session_id):
-        return
-    project_dir = rotation_state.project_dir_for(payload, env)
-    run_state.project_dir = project_dir
-    run_state.at("load settings")
-    settings = context_budget.load_settings(project_dir)
-    if not settings["enabled"]:
-        return
+    project_dir, session_id, settings = opened
     handover = rotation_state.handover_path(project_dir, session_id)
     if not transcript_work.is_handover_write(payload.get("tool_name"), payload.get("tool_input"), handover):
         return
     run_state.at("read handover")
-    data = rotation_state.read_bytes(handover)
+    data = rotation_state.read_bytes(project_dir, handover)
     problems = handover_contract.problems(data, settings["handover_max_chars"])
     if problems:
         run_state.at("mark outdated")

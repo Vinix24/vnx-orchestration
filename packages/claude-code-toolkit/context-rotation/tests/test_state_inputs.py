@@ -237,8 +237,7 @@ def test_an_injection_log_that_is_a_fifo_does_not_block_the_list(tmp_path, proje
 
 
 def test_an_errors_log_that_is_a_fifo_does_not_block_a_failure_report(tmp_path, project):
-    rotation(project).mkdir(parents=True)
-    (rotation(project) / "state").write_text("a file where the state directory belongs")
+    (rotation(project) / "state" / "sess-c.json").mkdir(parents=True)  # a directory where the state file belongs
     os.mkfifo(str(rotation(project) / "errors.log"))
     payload = event("02-UserPromptSubmit", project, tmp_path / "no-transcript.jsonl", "sess-c", prompt="go on")
     proc = quick("context_guard", payload)

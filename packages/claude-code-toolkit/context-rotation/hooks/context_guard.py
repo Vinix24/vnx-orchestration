@@ -11,8 +11,9 @@
   valid handover written outside Write or Edit its marker, and tells the user
   once to type /clear (loop step 7, the manual path).
 
-A hook that fires inside a subagent (agent_id set) does nothing. Failures go
-through hook_runtime: one stderr line, errors.log, exit 1, never 2.
+A hook that fires inside a subagent (agent_id set) does nothing, and so does one
+whose project storage fails the storage gate (hook_runtime.open_project). Failures
+go through hook_runtime: one stderr line, errors.log, exit 1, never 2.
 """
 from __future__ import annotations
 
@@ -48,19 +49,9 @@ class Session:
 
 
 def open_session(payload, env, run):
-    """The session this hook acts for, or None when it must do nothing."""
-    if payload.get("agent_id"):
-        return None
-    session_id = payload.get("session_id")
-    if not rotation_state.is_safe_session_id(session_id):
-        return None
-    project_dir = rotation_state.project_dir_for(payload, env)
-    run.project_dir = project_dir
-    run.at("load settings")
-    settings = context_budget.load_settings(project_dir)
-    if not settings["enabled"]:
-        return None
-    return Session(project_dir, session_id, settings)
+    """The session this hook acts for, or None when it must do nothing (hook_runtime.open_project)."""
+    opened = hook_runtime.open_project(payload, env, run)
+    return Session(*opened) if opened is not None else None
 
 
 # --- outdated markers (loop step 6) --------------------------------------
@@ -75,7 +66,7 @@ def outdated_note(marker):
 def outdate(session, reason, run):
     """Make the ready-marker outdated, or pick up an untold one; the note for the model."""
     marker = None
-    if os.path.exists(session.marker("ready")):
+    if rotation_state.stored_exists(session.project_dir, session.marker("ready")):
         run.at("mark outdated")
         marker = rotation_state.mark_outdated(session.project_dir, session.session_id, reason, notified=True)
     if marker is None:
@@ -230,9 +221,8 @@ def adopt(payload, env, run, session, data):
         return
     if handover_contract.problems(data, session.settings["handover_max_chars"]):
         return
-    try:
-        written = os.path.getmtime(session.handover)
-    except OSError:
+    written = rotation_state.stored_mtime(session.project_dir, session.handover)
+    if written is None:
         return
     run.at("check transcript")
     if transcript_work.work_since(payload.get("transcript_path"), written, session.handover):
@@ -246,7 +236,7 @@ def adopt(payload, env, run, session, data):
 
 def on_stop(payload, env, run, session):
     run.at("read handover")
-    data = rotation_state.read_bytes(session.handover)
+    data = rotation_state.read_bytes(session.project_dir, session.handover)
     ready = rotation_state.load_marker(session.project_dir, session.marker("ready"))
     if ready is not None:
         run.at("check ready marker")

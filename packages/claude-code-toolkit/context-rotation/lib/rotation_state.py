@@ -22,7 +22,13 @@ and the origin session can rewrite its handover while a successor delivers it.
 So every name and path read from a marker passes marker_problem first, files are
 opened only when they are regular (regular_file), a handover is removed only
 while it still holds the claimed bytes, and an archive copy is never overwritten.
-Standard library only.
+
+The directories are inputs too. `.claude/rotation`, its archive and its state
+directory must each be a real directory: storage_problem is the one gate every
+hook entry passes before it touches anything here, and every read, listing,
+rename, unlink and new file goes through a descriptor of the verified directory
+(open_storage), so a symlink there, or one swapped in later, never leads the
+plugin into another directory. Standard library only.
 """
 from __future__ import annotations
 
@@ -35,7 +41,6 @@ import re
 import stat
 import subprocess
 import sys
-import tempfile
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterator, List, Optional, Tuple
@@ -99,33 +104,191 @@ def injections_path(project_dir: str) -> str:
     return _in_rotation(project_dir, "injections.jsonl")
 
 
+# --- the storage gate and the verified directories ------------------------
+
+# The directories below `.claude` that hold the plugin's files, each a real directory or absent.
+STORAGE_DIRS = (("rotation",), ("rotation", "archive"), ("rotation", "state"))
+_STORED_IN = ((), ("archive",), ("state",))
+_DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+_NEW_FILE = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+
+
 class StorageRefused(OSError):
     """`.claude/rotation` or a directory below it is a symlink or not a directory."""
 
 
-def open_storage(project_dir: str, *parts: str) -> int:
+def storage_problem(project_dir: str) -> Optional[str]:
+    """Why the project's rotation storage must not be used; None when it may.
+
+    The one gate every hook entry passes before it reads or changes anything under
+    `.claude/rotation`: that directory, its archive and its state directory are each
+    a real directory (os.lstat: not a symlink) or absent, so the plugin creates it as
+    one. `.claude` itself may be a symlink: it is resolved once, and what it resolves
+    to must be a directory too.
+    """
+    claude = os.path.realpath(os.path.join(project_dir, ".claude"))
+    for parts in ((),) + STORAGE_DIRS:
+        shown = os.path.join(project_dir, ".claude", *parts)
+        try:
+            mode = os.lstat(os.path.join(claude, *parts)).st_mode
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            return "%s cannot be checked (%s)" % (shown, error.strerror)
+        if stat.S_ISLNK(mode):
+            return "%s is a symlink" % shown
+        if not stat.S_ISDIR(mode):
+            return "%s is not a directory" % shown
+    return None
+
+
+def _open_below(parent: int, name: str, shown: str, create: bool) -> int:
+    if create:
+        with contextlib.suppress(FileExistsError):
+            os.mkdir(name, 0o755, dir_fd=parent)
+    try:
+        return os.open(name, _DIRECTORY, dir_fd=parent)
+    except FileNotFoundError:
+        raise
+    except OSError as error:
+        raise StorageRefused("%s is a symlink or not a directory (%s)" % (shown, error.strerror))
+
+
+def open_storage(project_dir: str, *parts: str, create: bool = False) -> int:
     """A descriptor for `.claude/rotation/<parts>`, every directory below `.claude` a real one.
 
     `.claude` itself may be a symlink: it is resolved once. Each directory below it
     is opened with O_NOFOLLOW from its parent's descriptor, so a symlink there is
     refused (StorageRefused) and a swap after this call cannot redirect what is done
-    through the descriptor. FileNotFoundError when a directory is absent. The caller
-    closes the descriptor.
+    through the descriptor. A directory that is absent is made from its parent's
+    descriptor with `create`, else FileNotFoundError. The caller closes the descriptor.
     """
-    descriptor = os.open(os.path.realpath(os.path.join(project_dir, ".claude")), os.O_RDONLY | os.O_DIRECTORY)
-    walked = os.path.join(project_dir, ".claude")
+    claude = os.path.join(project_dir, ".claude")
+    if create:
+        os.makedirs(claude, exist_ok=True)
+    descriptor = os.open(os.path.realpath(claude), os.O_RDONLY | os.O_DIRECTORY)
+    walked = claude
     for name in ("rotation",) + parts:
         walked = os.path.join(walked, name)
         try:
-            below = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
-        except FileNotFoundError:
-            raise
-        except OSError as error:
-            raise StorageRefused("%s is a symlink or not a directory (%s)" % (walked, error.strerror))
+            below = _open_below(descriptor, name, walked, create)
         finally:
             os.close(descriptor)
         descriptor = below
     return descriptor
+
+
+@contextlib.contextmanager
+def storage(project_dir: str, *parts: str, create: bool = False) -> Iterator[int]:
+    """open_storage for the length of a with-block."""
+    descriptor = open_storage(project_dir, *parts, create=create)
+    try:
+        yield descriptor
+    finally:
+        os.close(descriptor)
+
+
+def _place(project_dir: str, path: Any) -> Tuple[Tuple[str, ...], str]:
+    """(directories below `.claude/rotation`, file name) of a file stored directly in one of them.
+
+    StorageRefused for any other path, and for something that is not a path.
+    """
+    if isinstance(path, str) and path and "\0" not in path:
+        directory, name = os.path.split(os.path.abspath(path))
+        real = os.path.realpath(directory)
+        for parts in _STORED_IN:
+            if real == os.path.realpath(os.path.join(rotation_dir(project_dir), *parts)):
+                return parts, name
+    raise StorageRefused("%r is not a file in %s" % (path, rotation_dir(project_dir)))
+
+
+def _name_in(project_dir: str, path: str, parts: Tuple[str, ...]) -> str:
+    """The file name of `path` when it is stored directly in `.claude/rotation/<parts>`."""
+    found, name = _place(project_dir, path)
+    if found != parts:
+        raise StorageRefused("%s is not directly in %s" % (path, os.path.join(rotation_dir(project_dir), *parts)))
+    return name
+
+
+def read_bytes(project_dir: str, path: Any) -> Optional[bytes]:
+    """The bytes of a regular file stored under `.claude/rotation`, read through the verified directory.
+
+    None when absent, unreadable, a symlink, a FIFO or a device, stored anywhere
+    else, or when the storage is refused.
+    """
+    try:
+        parts, name = _place(project_dir, path)
+        with storage(project_dir, *parts) as directory:
+            return regular_file.read_regular(name, directory)
+    except OSError:
+        return None
+
+
+def _stored_stat(project_dir: str, path: Any) -> Optional[os.stat_result]:
+    """lstat of a stored file through the verified directory; None when it cannot be had."""
+    try:
+        parts, name = _place(project_dir, path)
+        with storage(project_dir, *parts) as directory:
+            return os.lstat(name, dir_fd=directory)
+    except OSError:
+        return None
+
+
+def stored_exists(project_dir: str, path: Any) -> bool:
+    """Something, of any type, is at a stored path (os.path.lexists through the verified directory)."""
+    return _stored_stat(project_dir, path) is not None
+
+
+def stored_regular(project_dir: str, path: Any) -> bool:
+    found = _stored_stat(project_dir, path)
+    return found is not None and stat.S_ISREG(found.st_mode)
+
+
+def stored_mtime(project_dir: str, path: Any) -> Optional[float]:
+    """When a stored regular file was last written; None when it is not one."""
+    found = _stored_stat(project_dir, path)
+    return found.st_mtime if found is not None and stat.S_ISREG(found.st_mode) else None
+
+
+def _stored_names(project_dir: str, *parts: str) -> List[str]:
+    """The names in `.claude/rotation/<parts>`, listed through the verified directory; [] when there are none."""
+    try:
+        with storage(project_dir, *parts) as directory:
+            return os.listdir(directory)
+    except OSError:
+        return []
+
+
+def _new_temp(directory: int, prefix: str) -> Tuple[int, str]:
+    """A new, empty file in the directory `directory` holds: (write descriptor, name)."""
+    while True:
+        name = "%s%s.tmp" % (prefix, os.urandom(8).hex())
+        try:
+            return os.open(name, _NEW_FILE, 0o600, dir_fd=directory), name
+        except FileExistsError:
+            continue
+
+
+def _atomic_write(project_dir: str, target: str, data: bytes, prefix: str) -> None:
+    """Replace a stored file whole: a complete temporary file renamed over it, in the verified directory."""
+    parts, name = _place(project_dir, target)
+    with storage(project_dir, *parts, create=True) as directory:
+        descriptor, temp = _new_temp(directory, prefix)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(data)
+            os.replace(temp, name, src_dir_fd=directory, dst_dir_fd=directory)
+        except BaseException:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(temp, dir_fd=directory)
+            raise
+
+
+def _rename_in_rotation(project_dir: str, source: str, target: str) -> None:
+    """Rename one file directly in `.claude/rotation` to another name there, in the verified directory."""
+    old, new = _name_in(project_dir, source, ()), _name_in(project_dir, target, ())
+    with storage(project_dir) as directory:
+        os.replace(old, new, src_dir_fd=directory, dst_dir_fd=directory)
 
 
 def remove_in_rotation(project_dir: str, path: str) -> None:
@@ -134,52 +297,31 @@ def remove_in_rotation(project_dir: str, path: str) -> None:
     StorageRefused when the directory is a symlink or `path` is somewhere else;
     FileNotFoundError when the file is gone.
     """
-    directory, name = os.path.split(os.path.abspath(path))
-    if os.path.realpath(directory) != os.path.realpath(rotation_dir(project_dir)):
-        raise StorageRefused("%s is not directly in %s" % (path, rotation_dir(project_dir)))
-    descriptor = open_storage(project_dir)
-    try:
-        os.unlink(name, dir_fd=descriptor)
-    finally:
-        os.close(descriptor)
+    name = _name_in(project_dir, path, ())
+    with storage(project_dir) as directory:
+        os.unlink(name, dir_fd=directory)
 
 
 def ensure_gitignore(project_dir: str) -> None:
-    """Create rotation/.gitignore once. An existing file is never touched."""
-    directory = rotation_dir(project_dir)
-    os.makedirs(directory, exist_ok=True)
-    target = os.path.join(directory, ".gitignore")
-    try:
-        descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-    except FileExistsError:
-        return
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        handle.write("*\n")
+    """Create rotation/.gitignore once, in the verified directory. An existing file is never touched."""
+    with storage(project_dir, create=True) as directory:
+        try:
+            descriptor = os.open(".gitignore", _NEW_FILE, 0o644, dir_fd=directory)
+        except FileExistsError:
+            return
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write("*\n")
 
 
-def _atomic_write(target: str, data: bytes, prefix: str) -> None:
-    directory = os.path.dirname(target)
-    os.makedirs(directory, exist_ok=True)
-    descriptor, temp = tempfile.mkstemp(dir=directory, prefix=prefix, suffix=".tmp")
-    try:
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(data)
-        os.replace(temp, target)
-    except BaseException:
-        if os.path.exists(temp):
-            os.unlink(temp)
-        raise
-
-
-def write_json(target: str, document: Dict[str, Any]) -> None:
-    _atomic_write(target, json.dumps(document, indent=1).encode("utf-8"), ".marker-")
+def write_json(project_dir: str, target: str, document: Dict[str, Any]) -> None:
+    _atomic_write(project_dir, target, json.dumps(document, indent=1).encode("utf-8"), ".marker-")
 
 
 def load_state(project_dir: str, session_id: str) -> Dict[str, Any]:
     """The session's state, or an empty dict when absent or unreadable."""
     if not is_safe_session_id(session_id):
         return {}
-    raw = read_bytes(state_path(project_dir, session_id))
+    raw = read_bytes(project_dir, state_path(project_dir, session_id))
     try:
         data = json.loads(raw.decode("utf-8")) if raw is not None else None
     except ValueError:
@@ -193,7 +335,7 @@ def save_state(project_dir: str, session_id: str, state: Dict[str, Any]) -> Opti
         raise ValueError("unsafe session id")
     ensure_gitignore(project_dir)
     target = state_path(project_dir, session_id)
-    _atomic_write(target, json.dumps(state).encode("utf-8"), ".state-")
+    _atomic_write(project_dir, target, json.dumps(state).encode("utf-8"), ".state-")
     return target
 
 
@@ -218,23 +360,32 @@ def errors_path(project_dir: str) -> str:
 
 
 def error_lines(project_dir: str) -> List[str]:
-    raw = read_bytes(errors_path(project_dir))
+    raw = read_bytes(project_dir, errors_path(project_dir))
     return raw.decode("utf-8", "replace").splitlines() if raw is not None else []
 
 
-def log_error(project_dir: str, line: str) -> None:
-    """Append one line to rotation/errors.log, keeping the last ERROR_LOG_MAX_LINES.
+def log_error(project_dir: str, line: str) -> bool:
+    """Append one line to rotation/errors.log, keeping the last ERROR_LOG_MAX_LINES. True once written.
 
-    Never raises: the log is a courtesy of a hook that already failed.
+    Never raises: the log is a courtesy of a hook that already failed. It is written
+    in the verified directory, so storage that is refused gets no log (False).
     """
     try:
         ensure_gitignore(project_dir)
         target = errors_path(project_dir)
         lines = (error_lines(project_dir) + [line.replace("\n", " ")])[-ERROR_LOG_MAX_LINES:]
-        _atomic_write(target, ("\n".join(lines) + "\n").encode("utf-8"), ".errors-")
+        _atomic_write(project_dir, target, ("\n".join(lines) + "\n").encode("utf-8"), ".errors-")
     except Exception:
         # The log is best effort; a failure here must not mask the original error.
-        return
+        return False
+    return True
+
+
+def log_failure(project_dir: str, step: str, error: BaseException) -> None:
+    """A failure a hook caught so it can still exit 0: one line in errors.log, else on stderr."""
+    line = " ".join(("context-rotation: %s failed: %s: %s" % (step, type(error).__name__, error)).split())
+    if not log_error(project_dir, "%s %s" % (utc_now(), line)):
+        stderr_line(line)
 
 
 # --- the project lock ----------------------------------------------------
@@ -263,7 +414,8 @@ def project_lock(project_dir: str, timeout: float = LOCK_TIMEOUT_SECONDS) -> Ite
     """Serialise marker changes across the parallel hook processes of a project.
 
     Re-entrant within one process. Writes the .gitignore first, as the lock file is
-    the first file a marker change creates.
+    the first file a marker change creates. The lock file is opened in the verified
+    directory and never through a symlink.
     """
     ensure_gitignore(project_dir)
     path = _in_rotation(project_dir, ".lock")
@@ -275,7 +427,8 @@ def project_lock(project_dir: str, timeout: float = LOCK_TIMEOUT_SECONDS) -> Ite
         finally:
             held[1] -= 1
         return
-    descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    with storage(project_dir) as directory:
+        descriptor = os.open(".lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o644, dir_fd=directory)
     try:
         _acquire(descriptor, path, timeout)
         _HELD[path] = [descriptor, 1]
@@ -339,11 +492,6 @@ def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def read_bytes(path: Any) -> Optional[bytes]:
-    """The bytes of a regular file; None when absent, unreadable, a symlink, a FIFO or a device."""
-    return regular_file.read_regular(path)
-
-
 # --- what a marker may say ---------------------------------------------------
 
 def _plain_absolute(path: Any) -> bool:
@@ -363,7 +511,8 @@ def archive_problem(project_dir: str, archive: Any) -> Optional[str]:
         return "its archive is not an absolute path"
     if ARCHIVE_NAME.fullmatch(os.path.basename(archive)) is None:
         return "its archive is not named like an archive copy"
-    if os.path.islink(archive):
+    found = _stored_stat(project_dir, archive)
+    if found is not None and stat.S_ISLNK(found.st_mode):
         return "its archive is a symlink"
     if os.path.dirname(os.path.realpath(archive)) != os.path.realpath(archive_dir(project_dir)):
         return "its archive is not in %s" % archive_dir(project_dir)
@@ -425,11 +574,11 @@ def marker_problem(project_dir: str, path: str, marker: Any) -> Optional[str]:
     return _position_problem(marker.get("transcript"))
 
 
-def _marker_json(path: str) -> Tuple[Any, Optional[str]]:
+def _marker_json(project_dir: str, path: str) -> Tuple[Any, Optional[str]]:
     """(parsed JSON, None), (None, why) for an unusable file, (None, None) when absent. No validation."""
-    raw = read_bytes(path)
+    raw = read_bytes(project_dir, path)
     if raw is None:
-        return None, ("it is not a regular file" if os.path.lexists(path) else None)
+        return None, ("it is not a regular file" if stored_exists(project_dir, path) else None)
     try:
         return json.loads(raw.decode("utf-8")), None
     except ValueError:
@@ -438,14 +587,15 @@ def _marker_json(path: str) -> Tuple[Any, Optional[str]]:
 
 def read_marker(project_dir: str, path: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """(marker, None) when usable, (None, why) when it must not be used, (None, None) when absent."""
-    marker, why = _marker_json(path)
+    marker, why = _marker_json(project_dir, path)
     if marker is None:
         return None, why
     problem = marker_problem(project_dir, path, marker)
     return (None, problem) if problem else (marker, None)
 
 
-def _stderr(line: str) -> None:
+def stderr_line(line: str) -> None:
+    """One line on stderr; nothing when stderr is closed."""
     try:
         sys.stderr.write(line + "\n")
         sys.stderr.flush()
@@ -460,12 +610,12 @@ def report_rejected(project_dir: str, path: str, why: str) -> None:
     The key names the file and the sha256 of its bytes, so a marker that changes
     is reported again. The marker itself is left on disk for the user.
     """
-    key = "rejected %s (sha256 %s)" % (os.path.basename(path), sha256_hex(read_bytes(path) or b"")[:12])
+    key = "rejected %s (sha256 %s)" % (os.path.basename(path), sha256_hex(read_bytes(project_dir, path) or b"")[:12])
     with project_lock(project_dir):
         if any(key in line for line in error_lines(project_dir)):
             return
         line = "context-rotation: %s: %s; not used, left on disk" % (key, why)
-        _stderr(line)
+        stderr_line(line)
         log_error(project_dir, "%s %s" % (utc_now(), line))
 
 
@@ -504,7 +654,7 @@ def mark_ready(project_dir: str, marker: Dict[str, Any]) -> str:
     target = marker_path(project_dir, "ready", session_id)
     with project_lock(project_dir):
         load_marker(project_dir, target)
-        write_json(target, marker)
+        write_json(project_dir, target, marker)
         stale = marker_path(project_dir, "outdated", session_id)
         if load_marker(project_dir, stale) is not None:
             remove_in_rotation(project_dir, stale)
@@ -519,23 +669,23 @@ def mark_outdated(project_dir: str, session_id: str, reason: str, notified: bool
         marker = load_marker(project_dir, source)
         if marker is None:
             return None
-        os.replace(source, target)
+        _rename_in_rotation(project_dir, source, target)
         marker.update(outdated_at=utc_now(), outdated_reason=reason, notified=notified)
-        write_json(target, marker)
+        write_json(project_dir, target, marker)
     return marker
 
 
 def take_outdated_notice(project_dir: str, session_id: str) -> Optional[Dict[str, Any]]:
     """An outdated marker the model was not told about yet; it counts as told after this."""
     target = marker_path(project_dir, "outdated", session_id)
-    if not os.path.exists(target):
+    if not stored_exists(project_dir, target):
         return None
     with project_lock(project_dir):
         marker = load_marker(project_dir, target)
         if marker is None or marker.get("notified", True):
             return None
         marker["notified"] = True
-        write_json(target, marker)
+        write_json(project_dir, target, marker)
     return marker
 
 
@@ -547,7 +697,7 @@ def mark_announced(project_dir: str, session_id: str, sha: str) -> bool:
         if marker is None or marker["sha256"] != sha or marker.get("announced"):
             return False
         marker["announced"] = True
-        write_json(target, marker)
+        write_json(project_dir, target, marker)
     return True
 
 
@@ -589,12 +739,13 @@ def outdated_reason(marker: Dict[str, Any], settings: Dict[str, Any], data: Opti
 def plan_archive(project_dir: str, origin: str, now: Optional[datetime] = None) -> str:
     """A free archive path for a handover of `origin`; names sort by time."""
     stamp = (now or datetime.now(timezone.utc)).strftime("%Y%m%dT%H%M%S%fZ")
-    base = os.path.join(archive_dir(project_dir), "%s-%s" % (stamp, origin))
+    taken = set(_stored_names(project_dir, "archive"))
+    base = "%s-%s" % (stamp, origin)
     candidate, number = base + ".md", 1
-    while os.path.lexists(candidate):
+    while candidate in taken:
         candidate = "%s-%d.md" % (base, number)
         number += 1
-    return candidate
+    return os.path.join(archive_dir(project_dir), candidate)
 
 
 def claim(project_dir: str, source: str, successor: str,
@@ -612,7 +763,7 @@ def claim(project_dir: str, source: str, successor: str,
     """
     with project_lock(project_dir):
         marker = load_marker(project_dir, source)
-        data = read_bytes(marker["handover"]) if marker is not None else None
+        data = read_bytes(project_dir, marker["handover"]) if marker is not None else None
         if data is None or (as_checked and sha256_hex(data) != marker["sha256"]):
             return None
         now = datetime.now(timezone.utc)
@@ -621,37 +772,39 @@ def claim(project_dir: str, source: str, successor: str,
             archive=plan_archive(project_dir, marker["session_id"], now), claimed_sha256=sha256_hex(data),
         )
         target = claimed_path(project_dir, marker["session_id"], successor)
-        write_json(source, marker)
+        write_json(project_dir, source, marker)
         try:
-            os.rename(source, target)
+            _rename_in_rotation(project_dir, source, target)
         except FileNotFoundError:
             return None
     return target, marker, data
 
 
-def archive_handover(target: str, data: bytes) -> str:
+def archive_handover(project_dir: str, target: str, data: bytes) -> str:
     """Copy a handover to its planned archive path. An existing archive copy is never overwritten.
 
     When the target already holds exactly these bytes (a delivery repeated after a
     crash) it is kept as it is; anything else at the target raises FileExistsError.
     The copy appears whole or not at all: a complete temporary file is hard-linked
-    to the target, which fails when the target exists.
+    to the target, which fails when the target exists. Everything happens in the
+    verified archive directory, so a symlinked archive gets no copy (StorageRefused).
     """
-    if read_bytes(target) == data:
-        return target
-    directory = os.path.dirname(target)
-    os.makedirs(directory, exist_ok=True)
-    descriptor, temp = tempfile.mkstemp(dir=directory, prefix=".archive-", suffix=".tmp")
-    try:
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(data)
-        os.link(temp, target)
-    finally:
-        os.unlink(temp)
+    name = _name_in(project_dir, target, ("archive",))
+    ensure_gitignore(project_dir)
+    with storage(project_dir, "archive", create=True) as directory:
+        if regular_file.read_regular(name, directory) == data:
+            return target
+        descriptor, temp = _new_temp(directory, ".archive-")
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(data)
+            os.link(temp, name, src_dir_fd=directory, dst_dir_fd=directory)
+        finally:
+            os.unlink(temp, dir_fd=directory)
     return target
 
 
-def claimed_bytes(marker: Dict[str, Any]) -> Tuple[Optional[bytes], Optional[str]]:
+def claimed_bytes(project_dir: str, marker: Dict[str, Any]) -> Tuple[Optional[bytes], Optional[str]]:
     """The bytes a claim stands for, or (None, why not), for recovery after a crash.
 
     The archive copy first, when it exists and matches `claimed_sha256`. The
@@ -659,12 +812,12 @@ def claimed_bytes(marker: Dict[str, Any]) -> Tuple[Optional[bytes], Optional[str
     original that changed is a newer handover, not the claimed one.
     """
     archive, handover = marker["archive"], marker["handover"]
-    if os.path.lexists(archive):
-        data = read_bytes(archive)
+    if stored_exists(project_dir, archive):
+        data = read_bytes(project_dir, archive)
         if data is not None and sha256_hex(data) == marker["claimed_sha256"]:
             return data, None
         return None, "its archive copy %s does not hold the claimed handover" % archive
-    data = read_bytes(handover)
+    data = read_bytes(project_dir, handover)
     if data is None:
         return None, "it has no archive copy and its handover %s is gone" % handover
     if sha256_hex(data) != marker["claimed_sha256"]:
@@ -674,12 +827,13 @@ def claimed_bytes(marker: Dict[str, Any]) -> Tuple[Optional[bytes], Optional[str
 
 def log_injection(project_dir: str, record: Dict[str, Any]) -> None:
     line = json.dumps(record, sort_keys=True) + "\n"
-    with project_lock(project_dir):
-        regular_file.append_regular(injections_path(project_dir), line.encode("utf-8"))
+    name = _name_in(project_dir, injections_path(project_dir), ())
+    with project_lock(project_dir), storage(project_dir) as directory:
+        regular_file.append_regular(name, line.encode("utf-8"), directory)
 
 
 def read_injections(project_dir: str) -> List[Dict[str, Any]]:
-    raw = read_bytes(injections_path(project_dir))
+    raw = read_bytes(project_dir, injections_path(project_dir))
     records = []
     for line in (raw or b"").decode("utf-8", "replace").splitlines():
         try:
@@ -696,10 +850,8 @@ def _unlink_logged(project_dir: str, path: str) -> None:
         remove_in_rotation(project_dir, path)
     except FileNotFoundError:
         return
-    except StorageRefused as error:
-        _stderr("context-rotation: cleanup of %s refused: %s" % (path, error))
     except OSError as error:
-        log_error(project_dir, "%s context-rotation: cleanup of %s failed: %s" % (utc_now(), path, error))
+        log_failure(project_dir, "cleanup of %s" % path, error)
 
 
 def finish_claim(project_dir: str, claimed: str, marker: Dict[str, Any]) -> None:
@@ -709,29 +861,29 @@ def finish_claim(project_dir: str, claimed: str, marker: Dict[str, Any]) -> None
     delivered: it stays, and so does its ready marker. The compare and the unlink
     run under the project lock, as one step against the other hook processes.
     Never raises: the injection already happened, and a failing hook would make
-    Claude Code drop the output that carries it. A leftover is listed by `resume`.
+    Claude Code drop the output that carries it. A failure to lock, read or unlink
+    (OSError, LockTimeout) goes to log_failure, and what was not removed stays: a
+    claim that could not be finished is listed by `resume`.
     """
     try:
         with project_lock(project_dir):
-            data = read_bytes(marker["handover"])
+            data = read_bytes(project_dir, marker["handover"])
             if data is not None and sha256_hex(data) == marker["claimed_sha256"]:
                 _unlink_logged(project_dir, marker["handover"])
             _unlink_logged(project_dir, claimed)
-    except LockTimeout as error:
-        log_error(project_dir, "%s context-rotation: cleanup of %s failed: %s" % (utc_now(), claimed, error))
+    except (OSError, LockTimeout) as error:
+        log_failure(project_dir, "cleanup of %s" % claimed, error)
 
 
-def _archive_names(directory: str, dir_fd: Optional[int] = None) -> List[str]:
-    """Archive copies by name, oldest first: regular files named like one, nothing else."""
+def _archive_names(directory: int) -> List[str]:
+    """Archive copies by name, oldest first: the regular files named like one in the directory `directory` holds."""
     def regular(name: str) -> bool:
         try:
-            return stat.S_ISREG(os.lstat(name if dir_fd is not None else os.path.join(directory, name),
-                                         dir_fd=dir_fd).st_mode)
+            return stat.S_ISREG(os.lstat(name, dir_fd=directory).st_mode)
         except OSError:
             return False
 
-    return sorted(name for name in os.listdir(directory if dir_fd is None else dir_fd)
-                  if ARCHIVE_NAME.fullmatch(name) and regular(name))
+    return sorted(name for name in os.listdir(directory) if ARCHIVE_NAME.fullmatch(name) and regular(name))
 
 
 def _names_archive_copy(field: Any, archive: str) -> bool:
@@ -751,20 +903,30 @@ def _named_archive_copies(project_dir: str) -> set:
     names stays too. A file that cannot be read or parsed, or a field that is not a
     string path directly in archive_dir, names nothing; no marker can stop the trim.
     """
-    directory, archive = rotation_dir(project_dir), os.path.realpath(archive_dir(project_dir))
+    archive = os.path.realpath(archive_dir(project_dir))
     named = set()
-    try:
-        files = os.listdir(directory)
-    except OSError:
-        return named
-    for name in files:
+    for name in _stored_names(project_dir):
         if marker_kind(name) is None:
             continue
-        marker, _ = _marker_json(os.path.join(directory, name))
+        marker, _ = _marker_json(project_dir, _in_rotation(project_dir, name))
         field = marker.get("archive") if isinstance(marker, dict) else None
         if _names_archive_copy(field, archive):
             named.add(os.path.basename(field))
     return named
+
+
+def _trim(project_dir: str, keep: int) -> int:
+    with storage(project_dir, "archive") as directory, project_lock(project_dir):
+        names = _archive_names(directory)
+        named = _named_archive_copies(project_dir)
+        removed = 0
+        for name in [n for n in (names[:-keep] if keep > 0 else names) if n not in named]:
+            try:
+                os.unlink(name, dir_fd=directory)
+            except FileNotFoundError:
+                continue
+            removed += 1
+    return removed
 
 
 def trim_archive(project_dir: str, keep: int) -> int:
@@ -772,34 +934,17 @@ def trim_archive(project_dir: str, keep: int) -> int:
 
     A claimed marker's copy is the recovery record after a crash, so it outlives
     the newest-`keep` window for as long as the marker is on disk. Returns how many
-    were removed. Runs in the SessionStart hook and never raises. When
-    `.claude/rotation` or its archive is a symlink nothing is removed and the reason
-    goes to stderr once (errors.log lives in the directory that failed the check).
+    were removed; without an archive nothing is created. Runs in the SessionStart
+    hook and never raises: a failure to lock, list or unlink (OSError, LockTimeout)
+    goes to log_failure, and the next start trims again.
     """
     try:
-        descriptor = open_storage(project_dir, "archive")
+        return _trim(project_dir, keep)
     except FileNotFoundError:
         return 0
-    except StorageRefused as error:
-        _stderr("context-rotation: archive not trimmed: %s" % error)
+    except (OSError, LockTimeout) as error:
+        log_failure(project_dir, "archive trim", error)
         return 0
-    except OSError:
-        return 0
-    try:
-        with project_lock(project_dir):
-            names = _archive_names(".", descriptor)
-            named = _named_archive_copies(project_dir)
-            surplus = [n for n in (names[:-keep] if keep > 0 else names) if n not in named]
-            removed = 0
-            for name in surplus:
-                try:
-                    os.unlink(name, dir_fd=descriptor)
-                except FileNotFoundError:
-                    continue
-                removed += 1
-    finally:
-        os.close(descriptor)
-    return removed
 
 
 # --- listing -------------------------------------------------------------
@@ -812,11 +957,8 @@ def scan_markers(project_dir: str, kind: str) -> Tuple[List[Tuple[str, Dict[str,
 
     A rejected marker is reported once and left on disk.
     """
-    directory = rotation_dir(project_dir)
-    if not os.path.isdir(directory):
-        return [], []
     found, rejected = [], []
-    for name in sorted(os.listdir(directory)):
+    for name in sorted(_stored_names(project_dir)):
         if not (name.startswith(kind + "-") and name.endswith(".json")):
             continue
         path = _in_rotation(project_dir, name)
@@ -834,15 +976,15 @@ def markers_of_kind(project_dir: str, kind: str) -> List[Tuple[str, Dict[str, An
     return scan_markers(project_dir, kind)[0]
 
 
-def why_not_resumable(kind: str, marker: Dict[str, Any]) -> Optional[str]:
+def why_not_resumable(project_dir: str, kind: str, marker: Dict[str, Any]) -> Optional[str]:
     """None when there is something to continue from; GONE when the user deleted it; else why not."""
     if kind == "claimed":
-        if not (os.path.lexists(marker["archive"]) or os.path.lexists(marker["handover"])):
+        if not (stored_exists(project_dir, marker["archive"]) or stored_exists(project_dir, marker["handover"])):
             return GONE
-        return claimed_bytes(marker)[1]
-    if not os.path.lexists(marker["handover"]):
+        return claimed_bytes(project_dir, marker)[1]
+    if not stored_exists(project_dir, marker["handover"]):
         return GONE
-    if not regular_file.is_regular(marker["handover"]):
+    if not stored_regular(project_dir, marker["handover"]):
         return "its handover %s is not a regular file" % marker["handover"]
     return None
 
@@ -861,7 +1003,7 @@ def survey(project_dir: str, exclude_session: Optional[str]) -> Tuple[List[Dict[
         for path, marker in found:
             if kind != "claimed" and marker["session_id"] == exclude_session:
                 continue
-            why = why_not_resumable(kind, marker)
+            why = why_not_resumable(project_dir, kind, marker)
             if why is None:
                 at = marker.get("claimed_at" if kind == "claimed" else "written_at")
                 (claims if kind == "claimed" else waiting).append(
@@ -879,12 +1021,14 @@ def pending_handovers(project_dir: str, exclude_session: Optional[str]) -> List[
 
 def archived_handovers(project_dir: str) -> List[Dict[str, Any]]:
     """Archived handovers, newest first, each with its last line from injections.jsonl."""
-    directory = archive_dir(project_dir)
-    if not os.path.isdir(directory):
+    try:
+        with storage(project_dir, "archive") as directory:
+            names = _archive_names(directory)
+    except OSError:
         return []
     injected = {}
     for record in read_injections(project_dir):
         if isinstance(record.get("archive"), str):
             injected[record["archive"]] = record
-    paths = [os.path.join(directory, name) for name in reversed(_archive_names(directory))]
+    paths = [os.path.join(archive_dir(project_dir), name) for name in reversed(names)]
     return [{"kind": "archived", "path": path, "injection": injected.get(path)} for path in paths]
