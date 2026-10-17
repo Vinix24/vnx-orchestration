@@ -354,10 +354,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             _json_response(self, HTTPStatus(status_int), payload)
             return
 
-        # Events SSE stream — /api/events/stream?terminal=T1
+        # Events SSE stream — /api/events/stream?terminal=T1[&dispatch_id=<id>]
         if path == "/api/events/stream":
             terminal = params.get("terminal", [None])[0] or ""
-            handle_events_stream(self, terminal)
+            handle_events_stream(self, terminal, params.get("dispatch_id", [None])[0])
             return
 
         # Operator Dashboard API
@@ -492,7 +492,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         if path.startswith("/api/agent-stream/"):
             terminal = path[len("/api/agent-stream/"):]
             since = params.get("since", [None])[0]
-            handle_agent_stream(self, terminal, since)
+            handle_agent_stream(self, terminal, since, params.get("dispatch_id", [None])[0])
             return
 
         # Intelligence API
