@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Classify a set of changed paths into a CI profile: ``light`` or ``heavy``.
 
-Profile A in ``.github/workflows/vnx-ci.yml`` calls this to decide how much of
-the test sweep a PR must run.  The rule is an ALLOWLIST, not a blocklist: only
+The Profile A prelude (``.github/actions/profile-a-prelude/action.yml``, used by
+Profile A and its xdist shadow in ``.github/workflows/vnx-ci.yml``) calls this
+to decide how much of the test sweep a PR must run.  The rule is an ALLOWLIST, not a blocklist: only
 paths that are unambiguously documentation get the light profile, and
 everything else — code, unclassifiable paths, empty input, malformed paths —
 falls through to the heavy profile.  An unknown path must never produce a
