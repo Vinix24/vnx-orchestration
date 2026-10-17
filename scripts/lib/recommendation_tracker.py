@@ -33,6 +33,8 @@ from runtime_coordination import (
     _append_event,
     _now_utc,
     get_connection,
+    project_id_stamp,
+    upsert_conflict_target,
 )
 from recommendation_metrics import (
     COMPARISON_COMPUTED,
@@ -187,6 +189,15 @@ def _new_id() -> str:
     return str(uuid.uuid4())
 
 
+def _outcome_conflict_target(conn) -> str:
+    """The upsert key of recommendation_outcomes on the store *conn* is open on:
+    one row per (store, recommendation, metric). (project_id, recommendation_id,
+    metric_name) where the store carries that key, which migration 0034 and
+    tenant stamping guarantee; (recommendation_id, metric_name) before 0034
+    (OI-2026)."""
+    return upsert_conflict_target(conn, "recommendation_outcomes", ("recommendation_id", "metric_name"))
+
+
 def _validate_acceptance_transition(from_state: str, to_state: str) -> None:
     allowed = ACCEPTANCE_TRANSITIONS.get(from_state, frozenset())
     if to_state not in allowed:
@@ -242,16 +253,18 @@ class RecommendationTracker:
                     f"Recommendation already exists: {rec_id!r}"
                 )
 
+            stamp = project_id_stamp(conn, "recommendations")
             conn.execute(
-                """
+                f"""
                 INSERT INTO recommendations
                     (recommendation_id, recommendation_class, title, description,
                      evidence_summary, confidence, scope_tags_json,
-                     acceptance_state, proposed_at, metadata_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'proposed', ?, ?)
+                     acceptance_state, proposed_at, metadata_json{stamp.column})
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'proposed', ?, ?{stamp.placeholder})
                 """,
                 (rec_id, recommendation_class, title, description,
-                 evidence_summary, confidence, scope_json, now, meta_json),
+                 evidence_summary, confidence, scope_json, now, meta_json,
+                 *stamp.values),
             )
 
             _append_event(
@@ -315,14 +328,15 @@ class RecommendationTracker:
             )
 
             # Initialize outcome metric rows for all tracked metrics
+            stamp = project_id_stamp(conn, "recommendation_outcomes")
             for metric_name in sorted(METRIC_NAMES):
                 conn.execute(
-                    """
+                    f"""
                     INSERT OR IGNORE INTO recommendation_outcomes
-                        (recommendation_id, metric_name, comparison_status)
-                    VALUES (?, ?, ?)
+                        (recommendation_id, metric_name, comparison_status{stamp.column})
+                    VALUES (?, ?, ?{stamp.placeholder})
                     """,
-                    (recommendation_id, metric_name, COMPARISON_PENDING),
+                    (recommendation_id, metric_name, COMPARISON_PENDING, *stamp.values),
                 )
 
             _append_event(
@@ -586,19 +600,21 @@ class RecommendationTracker:
                     f"Recommendation not found: {recommendation_id!r}"
                 )
 
+            stamp = project_id_stamp(conn, "recommendation_outcomes")
             conn.execute(
-                """
+                f"""
                 INSERT INTO recommendation_outcomes
                     (recommendation_id, metric_name, baseline_value,
-                     baseline_sample_size, comparison_status)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(recommendation_id, metric_name)
+                     baseline_sample_size, comparison_status{stamp.column})
+                VALUES (?, ?, ?, ?, ?{stamp.placeholder})
+                ON CONFLICT({_outcome_conflict_target(conn)})
                 DO UPDATE SET
                     baseline_value = excluded.baseline_value,
                     baseline_sample_size = excluded.baseline_sample_size,
                     computed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                 """,
-                (recommendation_id, metric_name, value, sample_size, COMPARISON_PENDING),
+                (recommendation_id, metric_name, value, sample_size, COMPARISON_PENDING,
+                 *stamp.values),
             )
             conn.commit()
 
@@ -650,14 +666,15 @@ class RecommendationTracker:
             else:
                 status = COMPARISON_INSUFFICIENT
 
+            stamp = project_id_stamp(conn, "recommendation_outcomes")
             conn.execute(
-                """
+                f"""
                 INSERT INTO recommendation_outcomes
                     (recommendation_id, metric_name, outcome_value,
                      outcome_sample_size, delta, direction,
-                     comparison_status, computed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(recommendation_id, metric_name)
+                     comparison_status, computed_at{stamp.column})
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?{stamp.placeholder})
+                ON CONFLICT({_outcome_conflict_target(conn)})
                 DO UPDATE SET
                     outcome_value = excluded.outcome_value,
                     outcome_sample_size = excluded.outcome_sample_size,
@@ -667,7 +684,7 @@ class RecommendationTracker:
                     computed_at = excluded.computed_at
                 """,
                 (recommendation_id, metric_name, value, sample_size,
-                 delta, direction, status, now),
+                 delta, direction, status, now, *stamp.values),
             )
             conn.commit()
 

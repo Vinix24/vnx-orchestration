@@ -9,7 +9,7 @@ v30 but is physically v27) SKIPS every migration and never trips them — leavin
 migrations silently un-applied (synthesis E-F, repro-confirmed).
 
 This module replaces that fragile, scattered mechanism with ONE declarative
-INVARIANT MANIFEST per schema version (v22-v33) plus a single reconciler engine:
+INVARIANT MANIFEST per schema version (v22-v34) plus a single reconciler engine:
 
   * The manifest declares, per version, the FULL expected shape: required tables;
     columns (name + affinity + nullability); PK column ordinals; composite UNIQUE
@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Tuple
 
 
@@ -499,6 +499,62 @@ def _track_pr_delivery() -> TableInvariant:
     )
 
 
+# v34 (OI-2026, schemas/migrations/0034_runtime_project_id_completion.sql): the
+# seven tables of 0015's runtime partition carry project_id + idx_<table>_project,
+# and every table of coordination_db._RC_COMPOSITE_KEYS carries the ADR-007
+# composite UNIQUE ux_<table>_pid over (project_id, id). recommendation_outcomes
+# also carries ux_recommendation_outcomes_pid_rec_metric, the per-project key the
+# upserts of recommendation_tracker name as their conflict target. Only the
+# columns 0034 guarantees are declared: the store shapes differ in natural keys
+# (sales-copilot carries composite ones) and defaults, so neither is an invariant
+# here.
+_V34_COLUMN_TABLES: Tuple[str, ...] = (
+    "retry_budgets", "retry_state", "escalation_log", "execution_targets",
+    "inbound_inbox", "recommendations", "recommendation_outcomes",
+)
+_V34_UX_ONLY_TABLES: Tuple[str, ...] = (
+    "coordination_events", "incident_log", "intelligence_injections",
+)
+# 0034 adds columns and indexes, never tables: a store without one of these is
+# valid at v34 (partial fixtures, stores that never had the table).
+_CONDITIONAL_V34_TABLES = frozenset(_V34_COLUMN_TABLES + _V34_UX_ONLY_TABLES)
+_V34_ID_PID_COLS = _cols(("id", "INTEGER", False), ("project_id", "TEXT", True))
+_V34_UPSERT_KEYS: Dict[str, Tuple[IndexInvariant, ...]] = {
+    "recommendation_outcomes": (
+        IndexInvariant("ux_recommendation_outcomes_pid_rec_metric",
+                       ("project_id", "recommendation_id", "metric_name"), unique=True),
+    ),
+}
+
+
+def _composite_pid_index(table: str) -> IndexInvariant:
+    return IndexInvariant(f"ux_{table}_pid", ("project_id", "id"), unique=True)
+
+
+def _runtime_tables_v34() -> Tuple[TableInvariant, ...]:
+    """The v31 runtime family with worker_pool_membership's ux index, plus the
+    ten 0034 tables outside that family."""
+    family = tuple(
+        replace(tbl, indexes=(*tbl.indexes, _composite_pid_index(tbl.name)))
+        if tbl.name == "worker_pool_membership" else tbl
+        for tbl in _runtime_tables_v31()
+    )
+    column_tables = tuple(
+        TableInvariant(
+            name=table, columns=_V34_ID_PID_COLS, pk=("id",),
+            indexes=(IndexInvariant(f"idx_{table}_project", ("project_id",)),
+                     _composite_pid_index(table), *_V34_UPSERT_KEYS.get(table, ())),
+        )
+        for table in _V34_COLUMN_TABLES
+    )
+    ux_tables = tuple(
+        TableInvariant(name=table, columns=_V34_ID_PID_COLS, pk=("id",),
+                       indexes=(_composite_pid_index(table),))
+        for table in _V34_UX_ONLY_TABLES
+    )
+    return (*family, *column_tables, *ux_tables)
+
+
 def _build_manifest() -> Dict[int, VersionManifest]:
     base_children_v24 = (_tph_v24(), _td_v24())
     return {
@@ -545,6 +601,12 @@ def _build_manifest() -> Dict[int, VersionManifest]:
             _tracks_composite(_TRACKS_COLS_V33, _TRACKS_IDX_V29),
             *base_children_v24, _toi_composite(_TOI_COLS_V30, _OI_BLOCKER_IDX),
             *_runtime_tables_v31(), _track_pr_delivery()),
+            (_DELIVERABLES_VIEW,)),
+        34: VersionManifest(34, (
+            _dispatches(_DISPATCH_COLS_V27),
+            _tracks_composite(_TRACKS_COLS_V33, _TRACKS_IDX_V29),
+            *base_children_v24, _toi_composite(_TOI_COLS_V30, _OI_BLOCKER_IDX),
+            *_runtime_tables_v34(), _track_pr_delivery()),
             (_DELIVERABLES_VIEW,)),
     }
 
@@ -733,6 +795,10 @@ def validate_db_at_version(conn: sqlite3.Connection, version: int) -> List[str]:
       - ALL absent: skip_runtime=True → skip the entire conditional family.
       - SOME absent (partial-runtime, e.g. MC's headless_runs-only shape): each absent
         conditional table is skipped individually; present tables are still validated.
+
+    For v34+: each table 0034 touches outside that family is optional the same way
+    (``_CONDITIONAL_V34_TABLES``): 0034 adds columns and indexes, never tables, so a
+    store without one of them is checked on the tables it has.
     """
     manifest = SCHEMA_MANIFEST[version]
     skip_runtime = (
@@ -751,6 +817,8 @@ def validate_db_at_version(conn: sqlite3.Connection, version: int) -> List[str]:
         if skip_runtime and tbl.name in _CONDITIONAL_V31_RUNTIME_TABLES:
             continue
         if tbl.name in partial_skip_tables:
+            continue
+        if tbl.name in _CONDITIONAL_V34_TABLES and not _table_exists(conn, tbl.name):
             continue
         out += validate_table(conn, tbl)
     for view in manifest.views:

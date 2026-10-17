@@ -52,6 +52,7 @@ from runtime_coordination import (
     get_connection,
     get_dispatch,
     init_schema,
+    project_id_stamp,
     transition_dispatch,
 )
 from workflow_incident_handler import (
@@ -541,13 +542,14 @@ class WorkflowSupervisor:
             return dict(row)
 
         now = _now_iso()
+        stamp = project_id_stamp(conn, "retry_state")
         conn.execute(
-            """
+            f"""
             INSERT INTO retry_state
-                (dispatch_id, incident_class, attempts_used, created_at, updated_at)
-            VALUES (?, ?, 0, ?, ?)
+                (dispatch_id, incident_class, attempts_used, created_at, updated_at{stamp.column})
+            VALUES (?, ?, 0, ?, ?{stamp.placeholder})
             """,
-            (dispatch_id, incident_class.value, now, now),
+            (dispatch_id, incident_class.value, now, now, *stamp.values),
         )
         return {
             "dispatch_id": dispatch_id,

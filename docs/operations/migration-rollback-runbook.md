@@ -1,7 +1,7 @@
 # Migration Rollback Runbook
 
 Wave 2a safety companion. Covers the rollback chain for migrations 0010
-through 0021 only. The schema has since grown to 0033 (13 further migrations,
+through 0021 only. The schema has since grown to 0034 (14 further migrations,
 2 with their own `_down.sql`), which this runbook does not cover. Use when one
 of the 0010-0021 migrations must be reversed, or after an accidental apply of
 one of them.

@@ -27,7 +27,7 @@ import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from incident_taxonomy import (
     RECOVERY_CONTRACTS,
@@ -38,7 +38,7 @@ from incident_taxonomy import (
     should_escalate,
     validate_incident_class,
 )
-from runtime_coordination import get_connection
+from runtime_coordination import get_connection, project_id_stamp
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -95,6 +95,25 @@ def is_shadow_mode() -> bool:
 # Incident creation
 # ---------------------------------------------------------------------------
 
+def _insert_open_incident_row(conn, row: Tuple[Any, ...]) -> None:
+    """INSERT one incident_log row in state 'open' with zeroed counters. *row*
+    holds incident_id to component_name, then failure_detail, actor, occurred_at
+    and metadata_json. project_id is stamped explicitly: five of the six measured
+    stores carry it NOT NULL without a default (OI-2026)."""
+    stamp = project_id_stamp(conn, "incident_log")
+    conn.execute(
+        f"""
+        INSERT INTO incident_log
+            (incident_id, incident_class, severity, entity_type, entity_id,
+             dispatch_id, terminal_id, component_name, state, attempt_count,
+             budget_exhausted, escalated, auto_recovery_halted,
+             failure_detail, actor, occurred_at, metadata_json{stamp.column})
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', 0, 0, 0, 0, ?, ?, ?, ?{stamp.placeholder})
+        """,
+        (*row, *stamp.values),
+    )
+
+
 def create_incident(
     state_dir: str | Path,
     *,
@@ -144,30 +163,11 @@ def create_incident(
     now = _now_utc()
 
     with get_connection(state_dir) as conn:
-        conn.execute(
-            """
-            INSERT INTO incident_log
-                (incident_id, incident_class, severity, entity_type, entity_id,
-                 dispatch_id, terminal_id, component_name, state, attempt_count,
-                 budget_exhausted, escalated, auto_recovery_halted,
-                 failure_detail, actor, occurred_at, metadata_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', 0, 0, 0, 0, ?, ?, ?, ?)
-            """,
-            (
-                incident_id,
-                ic.value,
-                severity,
-                entity_type,
-                entity_id,
-                dispatch_id,
-                terminal_id,
-                component_name,
-                failure_detail,
-                actor,
-                now,
-                _dump(metadata),
-            ),
-        )
+        _insert_open_incident_row(conn, (
+            incident_id, ic.value, severity, entity_type, entity_id,
+            dispatch_id, terminal_id, component_name,
+            failure_detail, actor, now, _dump(metadata),
+        ))
         conn.commit()
 
         row = conn.execute(
@@ -211,13 +211,14 @@ def get_budget(
             return dict(existing)
 
         # Create from contract defaults
+        stamp = project_id_stamp(conn, "retry_budgets")
         conn.execute(
-            """
+            f"""
             INSERT OR IGNORE INTO retry_budgets
                 (budget_key, entity_type, entity_id, incident_class,
                  attempts_used, max_retries, cooldown_seconds, backoff_factor,
-                 max_cooldown_seconds, created_at, updated_at)
-            VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
+                 max_cooldown_seconds, created_at, updated_at{stamp.column})
+            VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?{stamp.placeholder})
             """,
             (
                 key,
@@ -230,6 +231,7 @@ def get_budget(
                 budget.max_cooldown_seconds,
                 now,
                 now,
+                *stamp.values,
             ),
         )
         conn.commit()
