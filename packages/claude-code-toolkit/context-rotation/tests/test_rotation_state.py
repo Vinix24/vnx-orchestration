@@ -70,6 +70,38 @@ def test_a_held_lock_times_out_another_process(project):
         pass
 
 
+def lock_creates_racing(monkeypatch, failures):
+    """The first `failures` opens of a lock file fail with ENOENT, as macOS does while another process creates it."""
+    real_open, calls = os.open, []
+
+    def racing_open(path, flags, mode=0o777, *, dir_fd=None):
+        if str(path).endswith(".lock") and flags & os.O_CREAT and len(calls) < failures:
+            calls.append(path)
+            raise FileNotFoundError(2, "No such file or directory", path)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", racing_open)
+    return calls
+
+
+def test_a_lock_whose_create_races_is_opened_again(project, monkeypatch):
+    rotation(project).mkdir(parents=True)
+    calls = lock_creates_racing(monkeypatch, failures=1)
+    with rs.project_lock(str(project)):
+        pass
+    assert len(calls) == 1
+    assert rs.log_error(str(project), "a line")
+
+
+def test_a_lock_that_cannot_be_created_still_fails(project, monkeypatch):
+    rotation(project).mkdir(parents=True)
+    calls = lock_creates_racing(monkeypatch, failures=rs.CREATE_ATTEMPTS)
+    with pytest.raises(FileNotFoundError):
+        with rs.project_lock(str(project)):
+            pass
+    assert len(calls) == rs.CREATE_ATTEMPTS
+
+
 # --- markers -----------------------------------------------------------------------
 
 def make_marker(project, session_id="sess-a", data=VALID_HANDOVER.encode()):

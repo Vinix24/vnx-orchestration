@@ -77,6 +77,7 @@ MARKER_KINDS = ("ready", "outdated", "claimed")
 MARKER_FILE = re.compile(r"(ready|outdated|claimed)-[A-Za-z0-9_-]+\.json")
 LOCK_TIMEOUT_SECONDS = 5.0
 LOCK_POLL_SECONDS = 0.02
+CREATE_ATTEMPTS = 5
 PS_TIMEOUT_SECONDS = 2.0
 TIME_FORMAT = state_fields.TIME_FORMAT
 ARCHIVE_NAME = state_fields.ARCHIVE_NAME
@@ -305,6 +306,26 @@ def _new_temp(directory: int, prefix: str) -> Tuple[int, str]:
             continue
 
 
+def _open_shared(directory: int, name: str, flags: int, mode: int) -> int:
+    """os.open with O_CREAT of a name several processes may create at the same moment, in `directory`.
+
+    On macOS an open that creates a file can fail with ENOENT while another process
+    creates the same name, though the directory is there (measured: one of six
+    parallel hook processes, in 1 of about 60 runs, on the first lock of a
+    project). The name exists by then, so the open is tried again, at most
+    CREATE_ATTEMPTS times.
+    """
+    attempt = 1
+    while True:
+        try:
+            return os.open(name, flags, mode, dir_fd=directory)
+        except FileNotFoundError:
+            if attempt >= CREATE_ATTEMPTS:
+                raise
+            attempt += 1
+            time.sleep(LOCK_POLL_SECONDS)
+
+
 def _replace_in(directory: int, name: str, data: bytes, prefix: str) -> None:
     """Replace `name` in the directory `directory` holds whole: a complete temporary file renamed over it."""
     descriptor, temp = _new_temp(directory, prefix)
@@ -412,7 +433,7 @@ def ensure_gitignore(project_dir: str) -> None:
     """Create rotation/.gitignore once, in the verified directory. An existing file is never touched."""
     with storage(project_dir, create=True) as directory:
         try:
-            descriptor = os.open(".gitignore", _NEW_FILE, 0o644, dir_fd=directory)
+            descriptor = _open_shared(directory, ".gitignore", _NEW_FILE, 0o644)
         except FileExistsError:
             return
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
@@ -510,7 +531,7 @@ def _locked(project_dir: str, name: str, timeout: float) -> Iterator[None]:
             held[1] -= 1
         return
     with storage(project_dir) as directory:
-        descriptor = os.open(name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o644, dir_fd=directory)
+        descriptor = _open_shared(directory, name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o644)
     try:
         _acquire(descriptor, path, timeout)
         _HELD[path] = [descriptor, 1]
