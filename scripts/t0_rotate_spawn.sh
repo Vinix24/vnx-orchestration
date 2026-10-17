@@ -9,7 +9,19 @@
 #   1. Refuses unless it runs inside tmux and the handoff was written in the last N minutes
 #      (default 15). Handing over a stale handoff is the worst case: the successor would
 #      confidently resume the wrong state.
-#   2. Reads the first numbered next step and an optional `## Actief /goal` section.
+#   2. Reads the first numbered next step and an optional `## Actief /goal` section, and checks
+#      the wrap proof (operator decisions 2026-10-16 a, b): the `wrap:` block that
+#      `t0_rotation_state.py wrap-finish` writes into the handoff frontmatter must bind to this
+#      wrap (wrapped_at fresh, the daily log written inside the wrap's window, every nugget
+#      heading in the bucket, and the start record it names consumed by exactly this block),
+#      in a frontmatter that parses. No proof: exit 6, "run /build-log wrap".
+#      Emergency path (decision c): `--skip-wrap-reason "<text>"` skips the wrap proof and the
+#      age check, never the first-step check. It needs the predecessor's transcript
+#      (`--transcript`, else the pending marker's `transcript_path`) as a readable JSONL file,
+#      books a `t0_context_rotation_wrap_skipped` receipt before any window opens (ledger first,
+#      ADR-005; a refusing ledger refuses the spawn), and puts a catch-up wrap from that
+#      transcript at the head of the prompt. A relative transcript path is made absolute against
+#      the caller's folder first, because the successor starts in another folder.
 #   3. Opens a new window next to the current one, with the current window's name, and types
 #      `claude --model opus` (plus `--remote-control "<name>"` when this session is bridged,
 #      and CLAUDE_CONFIG_DIR when set: tmux does not carry a bare export into the pane).
@@ -32,6 +44,7 @@
 # Usage:
 #   t0_rotate_spawn.sh [--handoff PATH] [--max-age-minutes N] [--session-id ID]
 #                      [--project-root DIR] [--rc | --no-rc]
+#                      [--skip-wrap-reason "<text>" [--transcript PATH]]
 #
 # Timing knobs (env, seconds): VNX_T0_ROTATE_FOOTER_TIMEOUT (60), VNX_T0_ROTATE_POLL_SECONDS (1),
 # VNX_T0_ROTATE_SETTLE_SECONDS (2), VNX_T0_ROTATE_TURN_TIMEOUT (1800),
@@ -47,9 +60,12 @@
 # Last stdout line: new_window=@N old_window=@N goal_followup=0|1 run_dir=PATH start_dir=PATH
 # (start_dir is shell-quoted with %q and is the last field).
 #
-# Exit codes: 0 spawned, 2 usage / invalid VNX_T0_ROTATE_START_DIR, 3 not in tmux / handoff missing
-# or stale, 4 handoff without a first step, 5 successor did not come up or started in another
-# folder than the start folder (the old window is left untouched).
+# Exit codes: 0 spawned, 2 usage / invalid VNX_T0_ROTATE_START_DIR / empty --skip-wrap-reason,
+# 3 not in tmux / handoff missing or stale, 4 handoff without a first step, 5 successor did not
+# come up or started in another folder than the start folder (the old window is left untouched),
+# 6 no valid wrap proof ("run /build-log wrap"), or a skip run without a readable JSONL
+# transcript, with a transcript path that cannot be made absolute, or whose receipt the ledger
+# refused (no window opened in any of these).
 
 set -euo pipefail
 
@@ -168,6 +184,9 @@ MAX_AGE_MIN=15
 SESSION_ID=""
 PROJECT_ROOT_ARG=""
 RC_MODE="auto"
+SKIP_WRAP=0
+SKIP_REASON=""
+TRANSCRIPT_ARG=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --handoff) HANDOFF="$2"; shift 2 ;;
@@ -176,11 +195,45 @@ while [ $# -gt 0 ]; do
     --project-root) PROJECT_ROOT_ARG="$2"; shift 2 ;;
     --rc) RC_MODE="on"; shift ;;
     --no-rc) RC_MODE="off"; shift ;;
-    -h|--help) sed -n '2,60p' "$SCRIPT_PATH"; exit 0 ;;
+    --skip-wrap-reason)
+      [ $# -ge 2 ] || die 2 "--skip-wrap-reason needs a reason"
+      SKIP_WRAP=1; SKIP_REASON="$2"; shift 2 ;;
+    --transcript)
+      [ $# -ge 2 ] || die 2 "--transcript needs a path"
+      TRANSCRIPT_ARG="$2"; shift 2 ;;
+    -h|--help) sed -n '2,67p' "$SCRIPT_PATH"; exit 0 ;;
     *) die 2 "unknown argument: $1" ;;
   esac
 done
 [[ "$MAX_AGE_MIN" =~ ^[0-9]+$ ]] || die 2 "--max-age-minutes must be a whole number, got '$MAX_AGE_MIN'"
+if [ "$SKIP_WRAP" -eq 1 ] && [ -z "${SKIP_REASON//[[:space:]]/}" ]; then
+  die 2 "--skip-wrap-reason needs a reason; an empty one is refused (the reason goes into the ledger)"
+fi
+if [ -n "$TRANSCRIPT_ARG" ] && [ "$SKIP_WRAP" -eq 0 ]; then
+  die 2 "--transcript only applies with --skip-wrap-reason"
+fi
+
+# A relative transcript path names a file in the folder this was called from, but the successor
+# starts in another one (the T0 folder). Prefix the physical folder (`pwd -P`: the folder the
+# kernel resolves the relative path against, so a `..` keeps its meaning); an absolute path stays
+# byte for byte. Fails when that folder is gone.
+absolute_path() {
+  local here
+  case "$1" in
+    /*) printf '%s\n' "$1" ;;
+    *)
+      here="$(pwd -P 2>/dev/null)" && [ -n "$here" ] || return 1
+      printf '%s/%s\n' "$here" "$1" ;;
+  esac
+}
+
+# Resolved now, before anything else runs: the check, the receipt and the prompt all see the path
+# the caller meant.
+if [ -n "$TRANSCRIPT_ARG" ]; then
+  transcript_abs="$(absolute_path "$TRANSCRIPT_ARG")" \
+    || die 6 "cannot resolve --transcript $TRANSCRIPT_ARG to an absolute path: the folder it is relative to is gone; nothing opened"
+  TRANSCRIPT_ARG="$transcript_abs"
+fi
 
 [ -n "${TMUX:-}" ] && [ -n "${TMUX_PANE:-}" ] || die 3 "not running inside tmux (TMUX/TMUX_PANE unset); rotation needs a tmux window to hand over"
 
@@ -211,13 +264,16 @@ fi
 HANDOFF="${HANDOFF:-$PROJECT_ROOT/daily-log/handoff.md}"
 
 [ -f "$HANDOFF" ] || die 3 "handoff not found: $HANDOFF (run /build-log wrap first)"
-# Age via python, not stat: `stat -f %m` is BSD, but GNU stat reads -f as "filesystem status" and
-# prints a block on stdout before failing, which then lands in the arithmetic (`File: unbound
-# variable` under set -u on Linux).
-age="$("$PYTHON" -c 'import os, sys, time; print(int(time.time() - os.stat(sys.argv[1]).st_mtime))' "$HANDOFF")" \
-  || die 3 "cannot read the modification time of $HANDOFF"
-if [ "$age" -gt $((MAX_AGE_MIN * 60)) ]; then
-  die 3 "handoff $HANDOFF is $((age / 60)) min old (limit $MAX_AGE_MIN); run /build-log wrap again so the successor gets the current state"
+# A skip run hands over without a fresh wrap by definition, so only a normal run checks the age.
+if [ "$SKIP_WRAP" -eq 0 ]; then
+  # Age via python, not stat: `stat -f %m` is BSD, but GNU stat reads -f as "filesystem status"
+  # and prints a block on stdout before failing, which then lands in the arithmetic (`File:
+  # unbound variable` under set -u on Linux).
+  age="$("$PYTHON" -c 'import os, sys, time; print(int(time.time() - os.stat(sys.argv[1]).st_mtime))' "$HANDOFF")" \
+    || die 3 "cannot read the modification time of $HANDOFF"
+  if [ "$age" -gt $((MAX_AGE_MIN * 60)) ]; then
+    die 3 "handoff $HANDOFF is $((age / 60)) min old (limit $MAX_AGE_MIN); run /build-log wrap again so the successor gets the current state"
+  fi
 fi
 
 OLD_WIN="$(tmux display-message -p -t "$TMUX_PANE" '#{window_id}')"
@@ -228,11 +284,52 @@ STATE_DIR="$("$PYTHON" "$STATE_PY" state-dir --project-root "$PROJECT_ROOT")"
 RUN_DIR="$STATE_DIR/rotation-$(date +%Y%m%d-%H%M%S)-$$"
 mkdir -p "$RUN_DIR"
 
+# The predecessor's transcript of a skip run: --transcript (already absolute), else the pending
+# marker the guard wrote for this pane, made absolute the same way. compose refuses (6) when it is
+# not a readable JSONL file.
+TRANSCRIPT=""
+if [ "$SKIP_WRAP" -eq 1 ]; then
+  if [ -n "$TRANSCRIPT_ARG" ]; then
+    TRANSCRIPT="$TRANSCRIPT_ARG"
+  else
+    pending_args=(pending-transcript --project-root "$PROJECT_ROOT" --pane "$TMUX_PANE")
+    [ -n "$SESSION_ID" ] && pending_args+=(--session-id "$SESSION_ID")
+    TRANSCRIPT="$("$PYTHON" "$STATE_PY" "${pending_args[@]}")" || TRANSCRIPT=""
+    if [ -n "$TRANSCRIPT" ]; then
+      transcript_abs="$(absolute_path "$TRANSCRIPT")" \
+        || die 6 "cannot resolve the pending marker's transcript $TRANSCRIPT to an absolute path: the folder it is relative to is gone; nothing opened"
+      TRANSCRIPT="$transcript_abs"
+    fi
+  fi
+  [ -n "$TRANSCRIPT" ] || die 6 "--skip-wrap-reason needs the predecessor's transcript for the catch-up wrap: no --transcript and no transcript_path in the pending marker of pane $TMUX_PANE; nothing opened"
+fi
+
+compose_args=(compose --handoff "$HANDOFF" --old-window "$OLD_WIN" --out-dir "$RUN_DIR"
+              --max-age-minutes "$MAX_AGE_MIN" --project-root "$PROJECT_ROOT")
+[ "$SKIP_WRAP" -eq 1 ] && compose_args+=(--skip-wrap-reason "$SKIP_REASON" --transcript "$TRANSCRIPT")
 set +e
-"$PYTHON" "$STATE_PY" compose --handoff "$HANDOFF" --old-window "$OLD_WIN" --out-dir "$RUN_DIR"
+"$PYTHON" "$STATE_PY" "${compose_args[@]}"
 rc=$?
 set -e
-[ "$rc" -eq 0 ] || die "$rc" "handoff $HANDOFF does not meet the contract (docs/operations/T0_CONTEXT_ROTATION.md)"
+case "$rc" in
+  0) ;;
+  6)
+    if [ "$SKIP_WRAP" -eq 1 ]; then
+      die 6 "the transcript $TRANSCRIPT is not a readable JSONL file (see above); nothing opened"
+    fi
+    die 6 "handoff $HANDOFF carries no valid wrap proof (see above); nothing opened. Emergency path: --skip-wrap-reason \"<why>\"; run /build-log wrap" ;;
+  *) die "$rc" "handoff $HANDOFF does not meet the contract (docs/operations/T0_CONTEXT_ROTATION.md)" ;;
+esac
+
+# Ledger first (ADR-005): the skip is on record before any window opens, or nothing opens.
+if [ "$SKIP_WRAP" -eq 1 ]; then
+  skip_args=(record-skip --project-root "$PROJECT_ROOT" --pane "$TMUX_PANE" --reason "$SKIP_REASON"
+             --transcript "$TRANSCRIPT" --handoff "$HANDOFF" --run-dir "$RUN_DIR" --old-window "$OLD_WIN")
+  [ -n "$SESSION_ID" ] && skip_args+=(--session-id "$SESSION_ID")
+  "$PYTHON" "$STATE_PY" "${skip_args[@]}" \
+    || die 6 "the ledger refused the t0_context_rotation_wrap_skipped receipt; an unrecorded skip does not spawn, nothing opened"
+  log "wrap skipped (reason: $SKIP_REASON), receipt booked; the successor first runs the catch-up wrap from $TRANSCRIPT"
+fi
 PROMPT="$(cat "$RUN_DIR/prompt.txt")"
 HAS_GOAL=0
 [ -f "$RUN_DIR/goal.txt" ] && HAS_GOAL=1

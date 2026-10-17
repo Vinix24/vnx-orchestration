@@ -349,10 +349,134 @@ must write:
    `**Directive**:` and `**Resterend**: a; b` (semicolon-separated on one line) are accepted
    too, as is a bare `/goal ...` line as directive. A section that says `geen`, is empty, or
    has no directive counts as no goal.
+3. **The wrap proof**, a `wrap:` block in the frontmatter. The wrap never types it itself: a
+   helper writes it, with the system clock (operator decisions 2026-10-16 a and b).
 
 The handoff must be fresh: older than 15 minutes (`--max-age-minutes`) and the spawner refuses.
 Handing over a stale handoff is the worst case, because the successor would resume the wrong
 state with full confidence.
+
+### The wrap proof
+
+A hand-written handoff used to pass: the spawner only checked that the file existed, was
+fresh and had a first step. Now `/build-log wrap` runs two helper steps around its own work:
+
+| Step | Command | What it records |
+|---|---|---|
+| first | `t0_rotation_state.py wrap-start --project-root R --project-slug S [--bucket PATH]` | `wrap-start.json` in the project's rotation state dir: a random `start_id`, `started_at`, the bucket path, and every bucket heading `### <date> · <slug> · <title>` that exists at that moment |
+| last, after the curation | `t0_rotation_state.py wrap-finish --project-root R --daily-log PATH [--handoff PATH]` | the `wrap:` block in the handoff frontmatter |
+
+`wrap-finish` counts as nuggets the headings of the slug from `wrap-start` that appeared since
+then, so the shared month bucket only counts this project's new entries. It keeps every other
+frontmatter key and the body byte for byte, and gives a handoff without frontmatter one. An
+earlier `wrap:` entry goes as a whole: its key line and every line up to the next top-level key,
+blank lines and comments inside it included (OI-2116; round 2 stopped at the first blank line and
+left the rest of the entry behind without its key). The rewritten frontmatter is parsed again,
+strictly, before anything is written. A result that would not parse is refused with exit 3 and a
+message that names the line; the handoff and the start record stay as they were. Both helpers
+write atomically (a per-writer `mkstemp` name in the destination's directory, then
+`os.replace`). A relative `--daily-log` or `--handoff` resolves against the project root. A wrap
+without `--bucket` records `nuggets: 0`, no headings and `bucket: null`. Before it writes,
+`wrap-finish` runs the same content checks as the spawner and exits 6, with nothing written,
+when they would refuse, so the wrap can still repair the cause.
+
+**One wrap-start proves one wrap.** A `wrap-finish` whose block passes that check writes
+`consumed_at` (its `wrapped_at`) into `wrap-start.json`. A second `wrap-finish` without a new
+`wrap-start` refuses with exit 3 and "run wrap-start first", and writes nothing, so a fresh
+`wrapped_at` can never be stamped on the daily log and nuggets of an older wrap. A finish that
+fails (a missing daily log: exit 3; a block the check refuses: exit 6) leaves the start record
+usable, so the wrap repairs the cause and finishes again. The read, the block, the check and the
+two writes hold one lock on the start record (`atomic_io.slot_lock`, the sibling
+`.wrap-start.json.lock`), and `wrap-start` takes the same lock: of two finishes on one start,
+exactly one passes.
+
+**Consume, then publish (OI-2116).** The two writes of a finish are one step for the spawner.
+`wrap-finish` first consumes the start record, then publishes the block, and the block carries
+the record's `start_id`. `compose` accepts a block only when the record with that `start_id`
+carries `consumed_at` equal to the block's `wrapped_at`. The crash points:
+
+| Crash or failure | State left behind | What happens next |
+|---|---|---|
+| the consumption write fails | nothing changed | exit 3, "nothing published"; `wrap-finish` again |
+| after the consumption, before the block | a consumed start, no block | exit 3 (or a dead process); `compose` refuses, a second `wrap-finish` says "run wrap-start first": run the wrap again from `wrap-start` |
+| after both writes | a consumed start and its block | a valid proof |
+
+Round 2 published first and consumed second. When the consumption write failed there, the
+spawner accepted the proof while the start stayed reusable, and a later finish could stamp a
+fresh `wrapped_at` on the same evidence. `compose` reads the start record and never writes it.
+
+```yaml
+wrap:
+  start_id: "9f2c4e1a07b3d815"
+  started_at: 2026-10-16T09:31:02Z
+  wrapped_at: 2026-10-16T09:40:12Z
+  nuggets: 2
+  nugget_headings: ["### 2026-10-16 · vnx-orchestration · ...", "### 2026-10-16 · vnx-orchestration · ..."]
+  daily_log: "daily-log/2026-10-16.md"
+  bucket: "/Users/<user>/Desktop/BUSINESS/Content/build-log-bucket/2026-10.md"
+```
+
+`compose` (called by the spawner with `--max-age-minutes` and `--project-root`) reads the block
+with a stdlib parser (the skills run the helper with whatever `python3` is on `PATH`, which need
+not have PyYAML) and refuses with exit 6 at the first check that fails. It reads the handoff
+frontmatter strictly: one level of YAML block-mapping structure, so an orphaned indented line, a
+list mixed with keys, or a plain value holding `: ` is refused. The daily log is read leniently,
+so one odd line in it never hides its `handoff: true`. The message names the check and ends
+with "run /build-log wrap":
+
+| Check | Holds when |
+|---|---|
+| `wrap_block` | the frontmatter parses and has a `wrap:` block |
+| `wrap_times` | `started_at` and `wrapped_at` are ISO-8601 times with a zone |
+| `wrap_order` | `started_at <= wrapped_at` |
+| `wrapped_at_future` | `wrapped_at` lies at most 60 s in the future |
+| `wrapped_at_age` | `wrapped_at` is not older than `--max-age-minutes` (default 15) |
+| `daily_log` | the `daily_log` file exists (relative to the project root) |
+| `daily_log_handoff` | its frontmatter carries `handoff: true` |
+| `daily_log_window` | its mtime lies in `[started_at, wrapped_at + 60 s]` |
+| `nuggets_count` | `nuggets` equals the number of `nugget_headings` |
+| `nugget_in_bucket` | every listed heading exists in `bucket` |
+| `wrap_start_binding` | the start record in the project's rotation state dir has the block's `start_id` and was consumed by this block (`consumed_at` equals `wrapped_at`) |
+
+**The window.** It follows the wrap's real order (nuggets, handoff, daily log, curation), so the
+operator's wait in the curation step is inside it and a wrap of twenty minutes passes. It binds
+the proof to this wrap: a daily log from an earlier session that day falls outside it. The
+curation step itself is not proven.
+
+### Emergency path
+
+`t0_rotate_spawn.sh --skip-wrap-reason "<text>" [--transcript PATH]` (operator decision
+2026-10-16 c) is for a rotation that cannot wait for a wrap.
+
+- It skips the wrap proof and the handoff age check, never the first-step check. An empty
+  reason is exit 2, and so is `--transcript` without `--skip-wrap-reason`.
+- The predecessor's transcript is `--transcript`, else the `transcript_path` in the pending
+  marker the guard wrote for this pane (only the marker of `--session-id` when that is given).
+  With neither, or when that file is not a readable JSONL file (a regular file whose first
+  non-empty line is a JSON object), the spawner refuses with exit 6 before any window opens.
+- A relative transcript path (from `--transcript` or from the marker) is made absolute first,
+  against the physical folder the spawner was called from (`pwd -P`), because the successor
+  starts in another folder. The JSONL check, the receipt, the prompt and the digest command all
+  carry that absolute path. An absolute path stays byte for byte. A relative path whose folder
+  is gone is exit 6, before any window.
+- Ledger first (ADR-005): `record-skip` books a `t0_context_rotation_wrap_skipped` receipt
+  with the reason and the transcript before the first window opens. A ledger that refuses it
+  refuses the spawn, exit 6: a skip never goes unrecorded.
+- The prompt starts with the catch-up step: run `/build-log wrap --from-transcript <path>`
+  before anything else, and read the transcript only through
+  `t0_rotation_state.py transcript-digest --transcript <path>`. Closing the old window comes
+  after that step.
+- `transcript-digest --transcript PATH [--max-bytes 200000]` prints the user and assistant text
+  after the last `compact_boundary`: no tool calls, no tool results, no thinking, no images or
+  attachments, no harness-written `isMeta` or `<synthetic>` messages, no sidechains. The newest
+  entries win the byte budget (UTF-8), and the output runs oldest first. The entry that no
+  longer fits whole keeps its header and the end of its text.
+- `t0_rotation_state.py skips [--since DAYS]` lists the skip receipts of the last 7 days
+  (default), one line each, then a count. The kickoff shows them, so the emergency path cannot
+  quietly become the normal path.
+
+`compose` re-run into an existing run dir follows the handoff it reads: it rewrites
+`first_step.txt` and writes `goal.txt`, or removes it when the handoff has no `## Actief /goal`.
 
 ## What the spawner types
 
@@ -423,10 +547,11 @@ Every run leaves `prompt.txt`, `first_step.txt`, `goal.txt` and `goal_followup.l
 | Code | Meaning |
 |---|---|
 | 0 | successor started (and the goal follow-up handed to the tmux server, if any) |
-| 2 | usage error, or an invalid `VNX_T0_ROTATE_START_DIR` (valid: `t0`, `root`) |
+| 2 | usage error, an invalid `VNX_T0_ROTATE_START_DIR` (valid: `t0`, `root`), an empty `--skip-wrap-reason`, or `--transcript` without it |
 | 3 | not in tmux, project root unresolvable, handoff missing or stale |
 | 4 | handoff has no numbered next step |
 | 5 | the successor never showed its footer, or started in another folder than the T0 folder; nothing was typed, the old window keeps running |
+| 6 | no valid wrap proof (the message names the check and ends with "run /build-log wrap"); in a skip run: no readable JSONL transcript, a relative transcript path whose folder is gone, or the ledger refused the skip receipt. No window was opened |
 
 ## Receipts
 
@@ -435,6 +560,7 @@ All `state_mutation`, `source: t0_context_rotation`:
 | Trigger | When |
 |---|---|
 | `t0_context_rotation_pending` | a T0 session first crosses force, and again when it crosses hard |
+| `t0_context_rotation_wrap_skipped` | a `--skip-wrap-reason` run, before any window opens: `reason`, `transcript`, `handoff`, `run_dir` (also `file`), `old_window`, `pane`, `session_id` |
 | `t0_context_rotation_started` | the successor window is up and the kickoff was typed |
 | `t0_context_rotation_goal_followup` | the `/goal` follow-up ended: `outcome` = `confirmed`, `unconfirmed` or `turn_timeout` |
 
@@ -456,6 +582,10 @@ wins: a crash between the two can duplicate an event on the retry and cannot los
 - **Latch**: receipt first, then the latch. The latch is written even when the ledger refuses,
   because the successor is already up: withholding it would only make the old session nag, and
   nothing can retry that transition. The refusal is reported on stderr.
+- **Wrap skip**: receipt first, then the spawn. Here a refusal does stop it: nothing is up yet,
+  and an unrecorded skip is exactly what the receipt exists to prevent (risk T9). The spawner
+  exits 6 and opens no window. `skips` reads these receipts back from the same ledger
+  (`VNX_T0_ROTATION_RECEIPTS_FILE`, else `append_receipt`'s default).
 - **Why not `.vnx-data/events/`:** `events/T{n}.ndjson` is the per-dispatch ring buffer of
   subprocess-routed terminals, truncated after every dispatch (ADR-005, Reasoning 5, and
   CLAUDE.md "Event Streams"). T0 is tmux-routed and produces no such stream, and a rotation
