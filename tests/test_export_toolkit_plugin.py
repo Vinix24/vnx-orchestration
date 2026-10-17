@@ -40,6 +40,24 @@ TOOLKIT_MARKETPLACE = (
     '{\n    "name": "claude-code-toolkit",\n    "owner": {"name": "Someone"},\n'
     '    "plugins": [\n      %s\n    ]\n}\n' % TIMEKEEPER_ENTRY
 )
+EXPORTED_ENTRY = {
+    "name": "context-rotation", "source": "./context-rotation",
+    "version": "0.1.0", "description": "Guards session context.",
+}
+BRANCH = "export/context-rotation-0.1.0"
+LEAK = "/Us" + "ers/someone/project"
+CONTACT = "Contact: someone" + "@" + "example.org"
+# A git hook that refuses to delete an export branch: the one way to make the
+# script's own cleanup fail on demand without touching the script.
+REFUSE_BRANCH_DELETE = """#!/bin/sh
+[ "$1" = prepared ] || exit 0
+while read -r old new ref; do
+    case "$ref:$new" in
+        refs/heads/export/*:0000000000000000000000000000000000000000) exit 1 ;;
+    esac
+done
+exit 0
+"""
 
 
 def git(cwd, *args, check=True):
@@ -61,7 +79,9 @@ def commit_source(src, version="0.1.0", files=None, remove=(), message="source")
     write(base, ".claude-plugin/plugin.json", json.dumps(
         {"name": "context-rotation", "version": version, "description": "Guards session context."}, indent=2) + "\n")
     for rel, text in (files or {}).items():
-        write(base, rel, text)
+        path = write(base, rel, text)
+        if rel.endswith(".sh"):
+            path.chmod(0o755)
     for rel in remove:
         (base / rel).unlink()
     git(src, "add", "-A")
@@ -109,11 +129,26 @@ def branches(target):
     return git(target, "branch", "--format=%(refname:short)").split()
 
 
+def state(target):
+    """What a failed or refused run must leave exactly as it was."""
+    return {
+        "head": git(target, "rev-parse", "HEAD"),
+        "ref": git(target, "symbolic-ref", "-q", "--short", "HEAD", check=False),
+        "branches": git(target, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads"),
+        "status": git(target, "status", "--porcelain", "--untracked-files=all"),
+    }
+
+
 def assert_untouched(target, head):
     assert git(target, "rev-parse", "HEAD") == head
     assert branches(target) == ["main"]
     assert git(target, "status", "--porcelain", "--untracked-files=all") == ""
     assert not (Path(target) / "context-rotation").exists()
+
+
+def commit_all(repo, message):
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", message)
 
 
 def marketplace(target):
@@ -124,20 +159,18 @@ def test_first_export_creates_folder_marketplace_and_readme_row(source, target):
     sha = git(source, "rev-parse", "HEAD")
     result = export(source, target)
     assert result.returncode == 0, result.stderr
-    assert git(target, "branch", "--show-current") == "export/context-rotation-0.1.0"
+    assert git(target, "branch", "--show-current") == BRANCH
     root = Path(target) / "context-rotation"
     assert (root / ".claude-plugin" / "plugin.json").is_file()
     assert (root / "hooks" / "run.sh").read_text() == "#!/bin/sh\nexit 0\n"
-    assert os.access(root / "hooks" / "run.sh", os.R_OK)
+    assert os.access(root / "hooks" / "run.sh", os.X_OK)
+    assert git(target, "ls-files", "-s", "context-rotation/hooks/run.sh").startswith("100755 ")
     assert not (Path(target) / "unrelated.txt").exists()
     assert not (Path(target) / "packages").exists()
     doc = marketplace(target)
     assert doc["name"] == "claude-code-toolkit"
     assert doc["owner"]["name"]
-    assert doc["plugins"] == [{
-        "name": "context-rotation", "source": "./context-rotation",
-        "version": "0.1.0", "description": "Guards session context.",
-    }] or [p["name"] for p in doc["plugins"]] == ["context-rotation"]
+    assert doc["plugins"] == [EXPORTED_ENTRY]
     readme = (Path(target) / "README.md").read_text()
     rows = [line for line in readme.splitlines() if "context-rotation/" in line]
     assert len(rows) == 1 and rows[0].startswith("| ") and "Guards session context." in rows[0]
@@ -155,7 +188,7 @@ def test_export_into_a_fresh_empty_repo_creates_readme_and_marketplace(source, t
     git(fresh, "commit", "-q", "--allow-empty", "-m", "init")
     result = export(source, fresh)
     assert result.returncode == 0, result.stderr
-    assert [p["name"] for p in marketplace(fresh)["plugins"]] == ["context-rotation"]
+    assert marketplace(fresh)["plugins"] == [EXPORTED_ENTRY]
     readme = (fresh / "README.md").read_text()
     assert "## Tools" in readme and len([ln for ln in readme.splitlines() if "context-rotation/" in ln]) == 1
 
@@ -197,14 +230,33 @@ def test_removed_source_file_is_removed_and_outside_files_survive(source, target
     assert export(source, target).returncode == 0
     assert (Path(target) / "context-rotation" / "hooks" / "old.sh").exists()
     commit_source(source, version="0.1.1", remove=["hooks/old.sh"])
-    write(target, "scratch-outside.txt", "untracked, not ours\n")
     result = export(source, target, tag="context-rotation-v0.1.1")
     assert result.returncode == 0, result.stderr
     assert not (Path(target) / "context-rotation" / "hooks" / "old.sh").exists()
     assert (Path(target) / "context-rotation" / "hooks" / "run.sh").exists()
     assert (Path(target) / "timekeeper" / "tk.txt").read_text() == "tk\n"
     assert (Path(target) / "docs" / "keep.md").read_text() == "keep\n"
-    assert (Path(target) / "scratch-outside.txt").read_text() == "untracked, not ours\n"
+    changed = git(target, "show", "--name-only", "--format=", "HEAD").splitlines()
+    assert "context-rotation/hooks/old.sh" in changed
+    assert all(
+        p.startswith("context-rotation/") or p in (".claude-plugin/marketplace.json", "README.md") for p in changed
+    )
+
+
+def test_removed_file_with_a_quoted_name_is_removed(source, target):
+    odd = 'skills/a "b"\\é.md'
+    commit_source(source, files={odd: "odd name\n"})
+    assert export(source, target).returncode == 0
+    root = Path(target) / "context-rotation"
+    assert (root / odd).read_text() == "odd name\n"
+    commit_source(source, version="0.1.1", remove=[odd])
+    result = export(source, target, tag="context-rotation-v0.1.1")
+    assert result.returncode == 0, result.stderr
+    assert not (root / odd).exists()
+    assert (root / "skills" / "x.md").exists()
+    tracked = git(target, "ls-files", "-z", "--", "context-rotation").split("\0")
+    assert "context-rotation/" + odd not in tracked
+    assert git(target, "status", "--porcelain", "--untracked-files=all") == ""
 
 
 def test_local_changes_under_the_owned_paths_are_refused(source, target):
@@ -230,6 +282,296 @@ def test_local_changes_to_the_readme_are_refused(source, target):
     result = export(source, target)
     assert result.returncode != 0 and "local changes" in result.stderr
     assert git(target, "rev-parse", "HEAD") == head and branches(target) == ["main"]
+
+
+# --- finding 1: only the export's own changes, and a rollback to a known clean start
+
+
+def test_staged_change_outside_the_owned_paths_is_refused_and_stays_staged(source, target):
+    write(target, "docs/keep.md", "keep, edited\n")
+    git(target, "add", "docs/keep.md")
+    before = state(target)
+    result = export(source, target)
+    assert result.returncode == 1, result.stdout
+    assert "local changes" in result.stderr and "docs/keep.md" in result.stderr
+    assert state(target) == before
+    assert git(target, "diff", "--cached", "--name-only") == "docs/keep.md"
+    assert (Path(target) / "docs" / "keep.md").read_text() == "keep, edited\n"
+    assert not (Path(target) / "context-rotation").exists()
+
+
+def test_staged_change_is_not_lost_when_the_export_fails(source, target):
+    write(target, "docs/keep.md", "keep, edited\n")
+    git(target, "add", "docs/keep.md")
+    before = state(target)
+    commit_source(source, files={"hooks/leaky.txt": "path %s\n" % LEAK})
+    result = export(source, target)
+    assert result.returncode == 1
+    assert state(target) == before
+    assert git(target, "diff", "--cached", "--name-only") == "docs/keep.md"
+    assert (Path(target) / "docs" / "keep.md").read_text() == "keep, edited\n"
+
+
+@pytest.mark.parametrize("change", ["unstaged", "untracked"])
+def test_any_local_change_in_the_clone_is_refused(source, target, change):
+    if change == "unstaged":
+        name = "docs/keep.md"
+        write(target, name, "edited, not staged\n")
+    else:
+        name = "notes/scratch.txt"
+        write(target, name, "mine\n")
+    before = state(target)
+    result = export(source, target)
+    assert result.returncode == 1, result.stdout
+    assert "local changes" in result.stderr and name in result.stderr
+    assert state(target) == before
+    assert not (Path(target) / "context-rotation").exists()
+
+
+@pytest.mark.parametrize("operation", ["bisect", "rebase"])
+def test_an_operation_in_progress_is_refused(source, target, operation):
+    if operation == "bisect":
+        git(target, "bisect", "start")
+    else:
+        write(target, "docs/second.md", "second\n")
+        commit_all(target, "second")
+        git(target, "rebase", "--exec", "false", "HEAD~1", check=False)
+    assert git(target, "status", "--porcelain", "--untracked-files=all") == ""
+    before = state(target)
+    result = export(source, target)
+    assert result.returncode == 1, result.stdout
+    assert operation in result.stderr
+    assert state(target) == before
+    assert not (Path(target) / "context-rotation").exists()
+
+
+def test_file_the_toolkit_ignores_is_still_committed(source, target):
+    write(target, ".gitignore", "*.md\n")
+    commit_all(target, "ignore markdown")
+    result = export(source, target)
+    assert result.returncode == 0, result.stderr
+    committed = git(target, "ls-tree", "-r", "--name-only", "HEAD", "--", "context-rotation").splitlines()
+    assert "context-rotation/skills/x.md" in committed
+    assert git(target, "status", "--porcelain", "--untracked-files=all", "--ignored") == ""
+
+
+def test_rollback_also_removes_exported_files_the_toolkit_ignores(source, target):
+    write(target, ".gitignore", "*.md\n")
+    commit_all(target, "ignore markdown")
+    head = git(target, "rev-parse", "HEAD")
+    before = state(target)
+    commit_source(source, files={"hooks/leaky.txt": "path %s\n" % LEAK})
+    result = export(source, target)
+    assert result.returncode == 1, result.stdout
+    assert_untouched(target, head)
+    assert state(target) == before
+    assert git(target, "status", "--porcelain", "--untracked-files=all", "--ignored") == ""
+
+
+def test_ignored_file_under_the_plugin_folder_is_refused(source, target):
+    write(target, ".gitignore", "__pycache__/\n")
+    commit_all(target, "ignore caches")
+    assert export(source, target).returncode == 0
+    write(target, "context-rotation/hooks/__pycache__/run.cpython-312.pyc", "cache\n")
+    commit_source(source, version="0.1.1", files={"hooks/run.sh": "#!/bin/sh\nexit 1\n"})
+    before = state(target)
+    result = export(source, target, tag="context-rotation-v0.1.1")
+    assert result.returncode == 1, result.stdout
+    assert "context-rotation/hooks/__pycache__" in result.stderr
+    assert state(target) == before
+    assert (Path(target) / "context-rotation/hooks/__pycache__/run.cpython-312.pyc").read_text() == "cache\n"
+
+
+# --- finding 2: everything the export writes is built from the export branch's own base
+
+
+def test_re_export_from_main_keeps_what_the_export_branch_already_carries(source, target):
+    assert export(source, target).returncode == 0
+    market = Path(target) / ".claude-plugin" / "marketplace.json"
+    doc = json.loads(market.read_text(encoding="utf-8"))
+    doc["plugins"].append({"name": "timekeeper", "source": "./timekeeper", "description": "Tracks time."})
+    market.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    readme = Path(target) / "README.md"
+    kept = [ln for ln in readme.read_text(encoding="utf-8").splitlines() if "context-rotation/" not in ln]
+    readme.write_text("\n".join(kept + ["", "Notes kept on the export branch."]) + "\n", encoding="utf-8")
+    commit_all(target, "operator edits on the export branch")
+    git(target, "checkout", "-q", "main")
+    result = export(source, target)
+    assert result.returncode == 0, result.stderr
+    assert git(target, "branch", "--show-current") == BRANCH
+    assert git(target, "rev-parse", "main") == git(target, "rev-parse", "HEAD~3")
+    plugins = json.loads(git(target, "show", "HEAD:.claude-plugin/marketplace.json"))["plugins"]
+    assert [p["name"] for p in plugins] == ["context-rotation", "timekeeper"]
+    assert plugins[0] == EXPORTED_ENTRY
+    text = git(target, "show", "HEAD:README.md")
+    assert "Notes kept on the export branch." in text
+    assert len([ln for ln in text.splitlines() if "context-rotation/" in ln]) == 1
+    assert git(target, "status", "--porcelain", "--untracked-files=all") == ""
+
+
+# --- finding 3: no write through a link
+
+
+def _link_readme(target, outside):
+    outside.write_text("theirs\n", encoding="utf-8")
+    (Path(target) / "README.md").unlink()
+    os.symlink(outside, Path(target) / "README.md")
+
+
+def _link_plugin_dir(target, outside):
+    outside.mkdir()
+    (outside / "marketplace.json").write_text("theirs\n", encoding="utf-8")
+    os.symlink(outside, Path(target) / ".claude-plugin")
+
+
+def _link_plugin_file(target, outside):
+    outside.write_text("theirs\n", encoding="utf-8")
+    (Path(target) / "context-rotation" / "hooks").mkdir(parents=True)
+    os.symlink(outside, Path(target) / "context-rotation" / "hooks" / "run.sh")
+
+
+@pytest.mark.parametrize("link, shown", [
+    (_link_readme, "README.md"),
+    (_link_plugin_dir, ".claude-plugin"),
+    (_link_plugin_file, "context-rotation/hooks/run.sh"),
+])
+def test_tracked_link_where_the_export_writes_is_refused(source, target, tmp_path, link, shown):
+    outside = tmp_path / "outside"
+    link(target, outside)
+    commit_all(target, "a link")
+    before = state(target)
+    result = export(source, target)
+    assert result.returncode == 1, result.stdout
+    assert "link" in result.stderr and shown in result.stderr
+    assert state(target) == before
+    written = outside / "marketplace.json" if outside.is_dir() else outside
+    assert written.read_text(encoding="utf-8") == "theirs\n"
+
+
+def test_linked_directory_under_the_plugin_folder_is_refused(source, target, tmp_path):
+    outside = tmp_path / "outside-hooks"
+    outside.mkdir()
+    (outside / "run.sh").write_text("theirs\n", encoding="utf-8")
+    write(target, ".gitignore", "context-rotation/hooks\n")
+    commit_all(target, "ignore a hooks link")
+    (Path(target) / "context-rotation").mkdir()
+    os.symlink(outside, Path(target) / "context-rotation" / "hooks")
+    before = state(target)
+    assert before["status"] == ""
+    result = export(source, target)
+    assert result.returncode == 1, result.stdout
+    assert "link" in result.stderr and "context-rotation/hooks" in result.stderr
+    assert sorted(os.listdir(outside)) == ["run.sh"]
+    assert (outside / "run.sh").read_text(encoding="utf-8") == "theirs\n"
+    assert state(target) == before
+
+
+def test_link_tracked_only_on_the_export_branch_is_refused(source, target, tmp_path):
+    assert export(source, target).returncode == 0
+    outside = tmp_path / "outside-readme.md"
+    _link_readme(target, outside)
+    commit_all(target, "a link on the export branch")
+    tip = git(target, "rev-parse", "HEAD")
+    git(target, "checkout", "-q", "main")
+    before = state(target)
+    result = export(source, target)
+    assert result.returncode == 1, result.stdout
+    assert "link" in result.stderr and "README.md" in result.stderr
+    assert outside.read_text(encoding="utf-8") == "theirs\n"
+    assert state(target) == before
+    assert git(target, "rev-parse", BRANCH) == tip
+
+
+def test_source_folder_with_a_link_is_refused(source, target):
+    os.symlink("run.sh", Path(source) / OWNED / "hooks" / "alias.sh")
+    commit_all(source, "a link in the plugin")
+    git(source, "update-ref", "refs/remotes/origin/main", git(source, "rev-parse", "HEAD"))
+    before = state(target)
+    result = export(source, target)
+    assert result.returncode == 1, result.stdout
+    assert "hooks/alias.sh" in result.stderr
+    assert state(target) == before
+    assert not (Path(target) / "context-rotation").exists()
+
+
+# --- finding 5: leave the target exactly as found, and say only what is true
+
+
+def test_nothing_to_export_returns_to_the_ref_the_clone_was_on(source, target):
+    assert export(source, target).returncode == 0
+    git(target, "checkout", "-q", "main")
+    before = state(target)
+    result = export(source, target)
+    assert result.returncode == 0, result.stderr
+    assert "nothing" in result.stdout.lower()
+    assert state(target) == before
+
+
+def test_failed_export_onto_an_existing_branch_returns_to_the_ref_the_clone_was_on(source, target):
+    assert export(source, target).returncode == 0
+    readme = Path(target) / "README.md"
+    kept = [ln for ln in readme.read_text(encoding="utf-8").splitlines() if "context-rotation/" not in ln]
+    readme.write_text("\n".join(kept + [CONTACT]) + "\n", encoding="utf-8")
+    commit_all(target, "a contact line on the export branch")
+    tip = git(target, "rev-parse", "HEAD")
+    base_line = len(kept) + 1
+    git(target, "checkout", "-q", "main")
+    before = state(target)
+    result = export(source, target)
+    assert result.returncode == 1, result.stdout
+    assert "pre-existing" in result.stderr and "README.md:%d" % base_line in result.stderr
+    assert state(target) == before
+    assert git(target, "rev-parse", BRANCH) == tip
+
+
+def test_leak_already_in_the_toolkit_readme_is_named_pre_existing(source, target):
+    write(target, "README.md", TOOLKIT_README + "\n" + CONTACT + "\n")
+    commit_all(target, "contact line")
+    head = git(target, "rev-parse", "HEAD")
+    result = export(source, target)
+    assert result.returncode == 1, result.stdout
+    assert "email" in result.stderr and "pre-existing" in result.stderr
+    assert_untouched(target, head)
+
+
+def test_failed_export_from_a_detached_head_returns_to_that_commit(source, target):
+    git(target, "checkout", "-q", "--detach", "HEAD")
+    before = state(target)
+    assert before["ref"] == ""
+    commit_source(source, files={"hooks/leaky.txt": "path %s\n" % LEAK})
+    result = export(source, target)
+    assert result.returncode == 1, result.stdout
+    assert state(target) == before
+    assert git(target, "for-each-ref", "--format=%(refname:short)", "refs/heads") == "main"
+
+
+def test_a_signal_while_writing_undoes_the_export(source, target):
+    # The pre-commit hook sends TERM to the script's shell (its grandparent:
+    # hook -> git -> script) and lets the commit finish, so the stop lands
+    # after the export commit exists and no check in the script foresaw it.
+    hook = Path(target) / ".git" / "hooks" / "pre-commit"
+    hook.write_text('#!/bin/sh\nkill -TERM "$(ps -o ppid= -p "$PPID" | tr -d " ")"\nexit 0\n', encoding="utf-8")
+    hook.chmod(0o755)
+    before = state(target)
+    result = export(source, target)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "stopped with exit status 143" in result.stderr
+    assert "removed the export commit" in result.stderr and "as it was found" in result.stderr
+    assert state(target) == before
+    assert not (Path(target) / "context-rotation").exists()
+    assert not (Path(target) / ".claude-plugin").exists()
+
+
+def test_cleanup_that_cannot_finish_exits_3_and_names_what_is_left(source, target):
+    hook = Path(target) / ".git" / "hooks" / "reference-transaction"
+    hook.write_text(REFUSE_BRANCH_DELETE, encoding="utf-8")
+    hook.chmod(0o755)
+    commit_source(source, files={"hooks/leaky.txt": "path %s\n" % LEAK})
+    result = export(source, target)
+    assert result.returncode == 3, result.stderr
+    assert BRANCH in result.stderr
+    assert "as it was found" not in result.stderr
+    assert branches(target) == [BRANCH, "main"]
 
 
 def test_target_that_is_not_a_git_repo_is_refused(source, tmp_path):
@@ -287,12 +629,14 @@ def test_changed_content_with_a_lower_version_is_refused(source, target):
 
 def test_planted_leak_removes_the_export_commit(source, target):
     head = git(target, "rev-parse", "HEAD")
-    leak = "/Us" + "ers/someone/project"
-    commit_source(source, version="0.1.0", files={"hooks/leaky.txt": "path %s\n" % leak})
+    before = state(target)
+    commit_source(source, version="0.1.0", files={"hooks/leaky.txt": "path %s\n" % LEAK})
     result = export(source, target)
-    assert result.returncode != 0
+    assert result.returncode == 1
     assert "leak" in result.stderr.lower() and "hooks/leaky.txt" in result.stderr
+    assert "pre-existing" not in result.stderr
     assert_untouched(target, head)
+    assert state(target) == before
 
 
 def test_leak_in_the_toolkit_readme_row_is_caught(source, target):
@@ -304,18 +648,20 @@ def test_leak_in_the_toolkit_readme_row_is_caught(source, target):
     git(source, "update-ref", "refs/remotes/origin/main", git(source, "rev-parse", "HEAD"))
     result = export(source, target)
     assert result.returncode != 0 and "leak" in result.stderr.lower()
+    assert "pre-existing" not in result.stderr
     assert_untouched(target, head)
 
 
 def test_leak_on_an_existing_export_branch_resets_only_to_the_previous_tip(source, target):
     assert export(source, target).returncode == 0
     tip = git(target, "rev-parse", "HEAD")
-    leak = "/Us" + "ers/someone"
-    commit_source(source, version="0.1.1", files={"hooks/leaky.txt": leak + "\n"})
+    before = state(target)
+    commit_source(source, version="0.1.1", files={"hooks/leaky.txt": LEAK + "\n"})
     result = export(source, target, tag="context-rotation-v0.1.1")
-    assert result.returncode != 0
+    assert result.returncode == 1
+    assert "removed the export commit" in result.stderr and "as it was found" in result.stderr
     assert git(target, "rev-parse", "HEAD") == tip
-    assert git(target, "status", "--porcelain", "--untracked-files=all") == ""
+    assert state(target) == before
     assert not (Path(target) / "context-rotation" / "hooks" / "leaky.txt").exists()
 
 
