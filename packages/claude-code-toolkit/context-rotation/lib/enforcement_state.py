@@ -30,7 +30,9 @@ Nothing is renamed or linked onto another name.
 The state file is an input, not a fact: any process of the user can write one,
 and a cloned repository can ship one. A state that is not exactly what this
 module writes (state_problem) counts as a fresh one and is replaced at the next
-change, with one errors.log line. Only values this module checked leave it:
+change, with one errors.log line. A read that fails (an OSError of the lstat, the
+open or the read) is not such a state: load and update raise it, so nothing is
+decided or written on it (band_guard). Only values this module checked leave it:
 counts, and names from the closed lists LEVELS and INFORM_REASONS. Every read,
 write and append goes through a descriptor of the verified directory
 (rotation_state.storage). Standard library only.
@@ -39,6 +41,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import regular_file
@@ -107,13 +110,30 @@ def state_problem(state: Any) -> Optional[str]:
     return None
 
 
+def _read_in(directory: int, name: str) -> Optional[bytes]:
+    """At most MAX_READ_BYTES + 1 bytes of the regular file `name` in `directory`; None when something else is there.
+
+    FileNotFoundError when nothing is there, and any other OSError of the lstat,
+    the open or the read as it comes: a failed read says nothing about the file.
+    """
+    if not stat.S_ISREG(os.lstat(name, dir_fd=directory).st_mode):
+        return None
+    with regular_file.open_regular(name, directory) as handle:
+        return handle.read(regular_file.MAX_READ_BYTES + 1)
+
+
 def _read(project_dir: str, session_id: str) -> Tuple[Dict[str, Any], Optional[str]]:
-    """(stored state, None); (fresh state, why the stored one is not used); (fresh state, None) when there is none."""
-    path = state_path(project_dir, session_id)
-    raw = rotation_state.read_bytes(project_dir, path)
-    if raw is None:
-        unusable = "it is not a regular file of at most %d bytes" % regular_file.MAX_READ_BYTES
-        return fresh(), (unusable if rotation_state.stored_exists(project_dir, path) else None)
+    """(stored state, None); (fresh state, why the stored one is not used); (fresh state, None) when there is none.
+
+    OSError when the state cannot be read: a read that fails is no reason to replace what is stored.
+    """
+    try:
+        with rotation_state.storage(project_dir, "state") as directory:
+            raw = _read_in(directory, session_id + SUFFIX)
+    except FileNotFoundError:
+        return fresh(), None
+    if raw is None or len(raw) > regular_file.MAX_READ_BYTES:
+        return fresh(), "it is not a regular file of at most %d bytes" % regular_file.MAX_READ_BYTES
     try:
         state = json.loads(raw.decode("utf-8"))
     except ValueError:
@@ -125,7 +145,7 @@ def _read(project_dir: str, session_id: str) -> Tuple[Dict[str, Any], Optional[s
 def load(project_dir: str, session_id: str) -> Dict[str, Any]:
     """The session's state as stored, or a fresh one when there is none or it is not one this module writes.
 
-    Never raises: a state that cannot be read is a fresh one.
+    OSError when it cannot be read: the caller decides nothing on a read that failed.
     """
     return _read(project_dir, session_id)[0]
 
@@ -191,7 +211,7 @@ def update(project_dir: str, session_id: str, change: Change) -> Any:
     events being (event, fields) pairs of JOURNAL_EVENTS. Every event gets its line
     in enforcement.jsonl, then the state file is rewritten; with no events nothing
     is written. Raises OSError or rotation_state.LockTimeout when the lock, a line
-    or the state cannot be had or written, and ValueError when `change` makes a
+    or the state cannot be had, read or written, and ValueError when `change` makes a
     state or a line this module would refuse to read back; the state on disk is then
     the one before, possibly with its lines already in the journal.
     """
@@ -216,7 +236,7 @@ def apply(project_dir: str, session_id: str, change: Change) -> Any:
     """`change`'s result: a dry run on the state as read, and `update` only when that run changes something.
 
     `change` must depend on the state alone, so the run under the lock decides
-    again on the state it reads there.
+    again on the state it reads there. Raises what load and update raise.
     """
     events, result = change(load(project_dir, session_id))
     if not events:

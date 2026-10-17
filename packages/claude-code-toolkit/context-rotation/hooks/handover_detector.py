@@ -42,8 +42,7 @@ def run(payload, env, run_state):
     if not transcript_work.is_handover_write(payload.get("tool_name"), payload.get("tool_input"), handover):
         return
     session = hook_runtime.Session(project_dir, session_id, settings)
-    if band_guard.writes_handover(payload.get("tool_name"), payload.get("tool_input"), session):
-        band_guard.on_handover_write(session, run_state)
+    band_guard.on_handover_write(payload, session, run_state)
     run_state.at("check transcript")
     cursor = transcript_work.write_position(payload.get("transcript_path"), payload.get("tool_use_id"))
     run_state.at("read handover")

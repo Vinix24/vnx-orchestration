@@ -176,6 +176,19 @@ def test_falling_back_and_rising_again_is_a_new_crossing(s):
     assert state_of(s)["crossing"] == 2
 
 
+def test_a_call_the_hard_band_allows_still_records_the_band(s):
+    at(s, HARD)
+    assert held_back(s.stop())
+    compacted(s, 20000)
+    assert goes_ahead(s.pre_tool("Read", {"file_path": "/etc/hosts"}))  # the only hook below force
+    assert state_of(s)["level"] == "low"
+    at(s, HARD)
+    assert held_back(s.stop())  # a second crossing into hard, so its Stop is held back once more
+    assert goes_ahead(s.stop())
+    assert [line["event"] for line in journal(s.project)] == [
+        "crossing", "stop_block", "told", "fall", "crossing", "stop_block", "told"]
+
+
 def test_a_current_handover_is_not_held_back(s):
     at(s, HARD)
     s.prompt("go on")

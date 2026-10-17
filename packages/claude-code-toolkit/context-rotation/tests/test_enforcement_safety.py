@@ -3,7 +3,8 @@
 1. Storage outside the project: a symlinked `.claude/rotation` or `state` holding
    enforcement state is neither read nor changed, and nothing is denied or held back.
 2. A hook path that raises: an OSError or a lock timeout in the enforcement state
-   is logged, the hook exits 0, and nothing is denied or held back.
+   is logged, the hook exits 0, and nothing is denied or held back. A read that
+   fails is such a failure, never a state to replace, so a release survives it.
 3. Text from disk into the model's context: a planted state with free text reaches
    no model-facing field and no user line.
 4. Exit codes: a denial and a held-back Stop are JSON with exit 0, never exit 2.
@@ -14,6 +15,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 import errno
 import io
 import json
@@ -31,7 +33,9 @@ sys.path.insert(0, str(PKG / "hooks"))
 
 import context_guard
 import enforcement_state
+import handover_detector
 import hook_runtime
+import regular_file
 import rotation_state
 
 
@@ -52,12 +56,12 @@ def errors_log(project):
     return path.read_text() if path.exists() else ""
 
 
-def in_process(monkeypatch, session, payload):
-    """context_guard as Claude Code runs it, in this process: (exit status, stdout document)."""
+def in_process(monkeypatch, session, payload, handler=context_guard.run):
+    """A hook entry (context_guard unless `handler` names another) as Claude Code runs it, in this process: its exit status."""
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
     monkeypatch.setenv("CLAUDE_PID", str(session.pid))
     with pytest.raises(SystemExit) as done:
-        hook_runtime.main(context_guard.run)
+        hook_runtime.main(handler)
     return done.value.code
 
 
@@ -221,6 +225,116 @@ def test_an_oserror_in_the_state_write_never_denies_or_holds_back(s, monkeypatch
     assert state_of(s) is None
 
 
+class FailingRead:
+    """An opened state file whose read fails, as a disk error does."""
+
+    def __init__(self, handle):
+        self.handle = handle
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.handle.close()
+
+    def read(self, *args):
+        raise OSError(errno.EIO, "injected read failure")
+
+    def fileno(self):
+        return self.handle.fileno()
+
+
+def failing_lstat(monkeypatch, suffix):
+    """Every lstat of a name ending in `suffix` fails with EIO."""
+    real_lstat = os.lstat
+
+    def lstat(path, *args, **kwargs):
+        if str(path).endswith(suffix):
+            raise OSError(errno.EIO, "injected lstat failure", path)
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "lstat", lstat)
+
+
+def failing_state_reads(monkeypatch, where):
+    """Every read of an enforcement state fails with EIO `where`: at its lstat, its open or the read itself."""
+    if where == "lstat":
+        failing_lstat(monkeypatch, enforcement_state.SUFFIX)
+        return
+    real_open = regular_file.open_regular
+
+    def open_regular(path, dir_fd=None):
+        if not str(path).endswith(enforcement_state.SUFFIX):
+            return real_open(path, dir_fd)
+        if where == "open":
+            raise OSError(errno.EIO, "injected open failure", path)
+        return FailingRead(real_open(path, dir_fd))
+
+    monkeypatch.setattr(regular_file, "open_regular", open_regular)
+
+
+def released_at_hard(session):
+    """A session at hard that the user released: (its state file's bytes, its journal lines)."""
+    at(session, HARD)
+    assert session.expand("release").returncode == 0
+    assert state_of(session)["inform_only"] == "release"
+    return state_file(session).read_bytes(), journal(session.project)
+
+
+READ_FAILURES = ["lstat", "open", "read"]
+
+
+@pytest.mark.parametrize("where", READ_FAILURES)
+@pytest.mark.parametrize("payload", [tool_payload, stop_payload], ids=["PreToolUse", "Stop"])
+def test_a_state_that_cannot_be_read_never_denies_and_keeps_the_release(s, monkeypatch, capsys, payload, where):
+    stored, lines = released_at_hard(s)
+    failing_state_reads(monkeypatch, where)
+    assert in_process(monkeypatch, s, payload(s)) == 0
+    assert printed(capsys) == {}  # nothing denied, nothing held back
+    assert state_file(s).read_bytes() == stored  # inform_only is still release
+    assert journal(s.project) == lines
+    assert "injected %s failure" % where in errors_log(s.project)
+
+
+@pytest.mark.parametrize("where", READ_FAILURES)
+def test_a_prompt_whose_state_cannot_be_read_claims_no_denial_and_keeps_the_release(s, monkeypatch, capsys, where):
+    stored, lines = released_at_hard(s)
+    failing_state_reads(monkeypatch, where)
+    assert in_process(monkeypatch, s, s.payload("02-UserPromptSubmit", prompt="go on")) == 0
+    document = printed(capsys)
+    text = document["hookSpecificOutput"]["additionalContext"]
+    assert "Write the handover at %s now" % s.handover in text
+    assert "denied" not in text and "systemMessage" not in document
+    assert (state_file(s).read_bytes(), journal(s.project)) == (stored, lines)
+    assert "injected %s failure" % where in errors_log(s.project)
+
+
+def test_a_handover_path_that_cannot_be_checked_clears_no_denials(s, monkeypatch, capsys):
+    settings_file(s.project, hard_max_denials=20)
+    at(s, HARD)
+    for _ in range(2):
+        assert decision(bash(s)) == "deny"
+    s.handover.write_text("a draft")
+    failing_lstat(monkeypatch, s.handover.name)
+    written = s.payload("07-PostToolUse-Write", tool_name="Write", tool_use_id=s.tool_id(),
+                        tool_input={"file_path": str(s.handover), "content": "a draft"})
+    assert in_process(monkeypatch, s, written, handover_detector.run) == 0
+    capsys.readouterr()
+    assert state_of(s)["denials"] == 2  # a failed check is no handover write
+    assert "check handover path failed" in errors_log(s.project)
+
+
+def test_a_handover_write_whose_path_cannot_be_checked_goes_ahead_and_records_the_band(s, monkeypatch, capsys):
+    at(s, HARD)
+    failing_lstat(monkeypatch, s.handover.name)
+    payload = s.payload("04-PreToolUse-Bash", tool_name="Write",
+                        tool_input={"file_path": str(s.handover), "content": "x"})
+    assert in_process(monkeypatch, s, payload) == 0
+    assert decision_of(printed(capsys)) is None  # a failure never denies
+    assert "check handover path failed" in errors_log(s.project)
+    assert state_of(s)["crossing"] == 1 and state_of(s)["denials"] == 0
+
+
 # --- 3. no free text from disk reaches the model or the user -----------------------------------
 
 FIELDS = enforcement_state.fresh()
@@ -376,23 +490,47 @@ def test_the_journal_is_cut_to_its_newest_lines(s, monkeypatch):
     assert state_of(s)["denials"] == 30
 
 
-def at_once(session, count):
-    """`count` PreToolUse hooks of one session released at the same moment: their outputs."""
-    payload = json.dumps(tool_payload(session))
-    env = dict(os.environ, CLAUDE_PID=str(session.pid))
-    procs = [subprocess.Popen([sys.executable, str(HOOKS / "context_guard.py")], stdin=subprocess.PIPE,
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
-             for _ in range(count)]
-    time.sleep(1.0)  # every process has started and waits for its payload
-    for proc in procs:
+def deliver(proc, payload):
+    """Write the payload to a hook and close its stdin; why that failed (a hook that exited already), else None."""
+    try:
         proc.stdin.write(payload)
         proc.stdin.close()
-    results = []
-    for proc in procs:
-        results.append((proc.wait(timeout=60), proc.stdout.read(), proc.stderr.read()))
-        proc.stdout.close()
-        proc.stderr.close()
-    return results
+    except OSError as error:  # BrokenPipeError
+        return "%s: %s" % (type(error).__name__, error)
+    return None
+
+
+def reap(proc):
+    """End a hook that still runs, wait for it and close its pipes."""
+    with contextlib.suppress(OSError):  # its stdin may still hold a payload the hook never read
+        proc.stdin.close()
+    if proc.poll() is None:
+        proc.kill()
+    proc.wait()
+    proc.stdout.close()
+    proc.stderr.close()
+
+
+def at_once(session, count):
+    """`count` PreToolUse hooks of one session released at the same moment: (exit status, stdout, stderr, failure).
+
+    The failure is why the payload did not reach that hook (deliver), None when it did. Every hook
+    is reaped, also when another one fails.
+    """
+    payload = json.dumps(tool_payload(session))
+    env = dict(os.environ, CLAUDE_PID=str(session.pid))
+    procs = []
+    try:
+        for _ in range(count):
+            procs.append(subprocess.Popen([sys.executable, str(HOOKS / "context_guard.py")], stdin=subprocess.PIPE,
+                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env))
+        time.sleep(1.0)  # every process has started and waits for its payload
+        failures = [deliver(proc, payload) for proc in procs]
+        return [(proc.wait(timeout=60), proc.stdout.read(), proc.stderr.read(), failure)
+                for proc, failure in zip(procs, failures)]
+    finally:
+        for proc in procs:
+            reap(proc)
 
 
 @pytest.mark.parametrize("count", [2, 8])
@@ -400,10 +538,32 @@ def test_denials_at_the_same_moment_lose_no_count(s, count):
     settings_file(s.project, hard_max_denials=100)
     at(s, HARD)
     results = at_once(s, count)
-    for code, out, err in results:
-        assert code == 0, err
+    for code, out, err, failure in results:
+        assert (code, failure) == (0, None), err
         assert decision_of(json.loads(out) if out else {}) == "deny"
     assert state_of(s)["denials"] == count
     denials = sorted(line["denials"] for line in journal(s.project) if line["event"] == "denial")
     assert denials == list(range(1, count + 1))
     assert [line["event"] for line in journal(s.project)].count("crossing") == 1
+
+
+def test_a_hook_that_exits_before_its_payload_is_reported_and_every_hook_is_reaped(s, monkeypatch):
+    settings_file(s.project, hard_max_denials=100)
+    at(s, HARD)
+    started, real_popen = [], subprocess.Popen
+
+    def popen(command, **kwargs):
+        early = not started
+        started.append(real_popen([sys.executable, "-c", "pass"] if early else command, **kwargs))
+        if early:
+            started[0].wait()  # the first hook is gone before its payload is written
+        return started[-1]
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    results = at_once(s, 3)
+    assert results[0][3] is not None and results[0][3].startswith("BrokenPipeError")
+    for code, out, err, failure in results[1:]:
+        assert (code, failure) == (0, None), err
+        assert decision_of(json.loads(out)) == "deny"
+    assert len(started) == 3
+    assert all(proc.returncode is not None and proc.stdin.closed and proc.stdout.closed for proc in started)

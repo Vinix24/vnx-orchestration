@@ -23,11 +23,16 @@ An unknown size never acts, nor does a hook inside a subagent
 (hook_runtime.open_project). A failure of the enforcement state (OSError,
 LockTimeout, ValueError) is logged (errors.log, else stderr) and the call goes
 ahead as in a session that only informs: a failure never denies or holds back.
-Standard library only.
+A read of that state that fails is such a failure, never a state to replace, so
+nothing is written on it either; a handover path that cannot be checked lets the
+call through and resets no denials. The band is recorded at every PreToolUse,
+also for a call the hard band allows. Standard library only.
 """
 from __future__ import annotations
 
 import fnmatch
+import os
+import stat
 from typing import Any, Dict, Optional, Tuple
 
 import context_budget
@@ -40,6 +45,9 @@ LOW, FORCE, HARD = enforcement_state.LOW, enforcement_state.FORCE, enforcement_s
 HARD_ALLOWED = ("Read", "Glob", "Grep", "Skill", "AskUserQuestion", "TodoWrite")
 PLAN = "plan"
 FAILURES = (OSError, rotation_state.LockTimeout, ValueError)
+CHECK_HANDOVER = "check handover path"
+# A prompt whose state could not be read: its message says nothing about what is denied.
+UNREAD = "unread"
 RELEASE_COMMAND = "/context-rotation:rotate release"
 ALLOWED_AT_HARD = "Read, Glob, Grep, Skill, AskUserQuestion, TodoWrite and a Write or Edit of %s"
 INFORM_ONLY = {
@@ -74,16 +82,34 @@ def writes_handover(tool_name: Any, tool_input: Any, session: hook_runtime.Sessi
     transcript_work.is_handover_write compares real paths, so with a symlink at the
     handover path a write of the file it points to would match too, and so would the
     write of the handover path, which lands in that file. Neither is a handover write.
+    OSError when what is at that path cannot be checked: a failed lstat tells neither.
     """
     if not transcript_work.is_handover_write(tool_name, tool_input, session.handover):
         return False
-    project_dir, handover = session.project_dir, session.handover
-    return rotation_state.stored_regular(project_dir, handover) or not rotation_state.stored_exists(project_dir, handover)
+    try:
+        with rotation_state.storage(session.project_dir) as directory:
+            found = os.lstat(os.path.basename(session.handover), dir_fd=directory)
+    except FileNotFoundError:
+        return True
+    return stat.S_ISREG(found.st_mode)
 
 
 def hard_allows(tool_name: Any, tool_input: Any, session: hook_runtime.Session) -> bool:
-    """The calls the hard band lets through: reading, asking, the skill, todos, and writing the handover."""
+    """The calls the hard band lets through: reading, asking, the skill, todos, and writing the handover.
+
+    OSError when the handover path cannot be checked (writes_handover).
+    """
     return tool_name in HARD_ALLOWED or writes_handover(tool_name, tool_input, session)
+
+
+def _allowed(tool_name: Any, tool_input: Any, session: hook_runtime.Session, run: hook_runtime.HookRun) -> bool:
+    """hard_allows; True when the handover path cannot be checked, after that failure is logged."""
+    run.at(CHECK_HANDOVER)
+    try:
+        return hard_allows(tool_name, tool_input, session)
+    except OSError as error:
+        rotation_state.log_failure(session.project_dir, CHECK_HANDOVER, error)
+        return True
 
 
 def force_denies(tool_name: Any, settings: Dict[str, Any]) -> bool:
@@ -117,6 +143,8 @@ def handover_now(size: int, level: str, session: hook_runtime.Session, why: Opti
     text = ("Context is %s, in the %s band. Write the handover at %s now with the rotate skill "
             "(/context-rotation:rotate), and make that write your last action."
             % (size_text(size, session.settings), level, session.handover))
+    if why == UNREAD:
+        return text
     if why == PLAN:
         return text + " Plan mode is on, so nothing is denied; write it as soon as plan mode ends."
     if why:
@@ -195,25 +223,36 @@ def on_prompt(payload: Dict[str, Any], session: hook_runtime.Session, size: int,
 
     settled = _settle(session, run, "enforcement state at UserPromptSubmit", change)
     if settled is None:  # the state failed: inform as the stored state says, without the user line
-        settled = inform_reason(enforcement_state.load(session.project_dir, session.session_id), payload), None
+        settled = _stored_reason(payload, session), None
     if level == LOW:
         return None, None
     why, line = settled
     return handover_now(size, level, session, why), line
 
 
+def _stored_reason(payload: Dict[str, Any], session: hook_runtime.Session) -> Optional[str]:
+    """inform_reason of the stored state; UNREAD, after that failure is logged, when it cannot be read."""
+    try:
+        return inform_reason(enforcement_state.load(session.project_dir, session.session_id), payload)
+    except FAILURES as error:
+        rotation_state.log_failure(session.project_dir, "read enforcement state at UserPromptSubmit", error)
+        return UNREAD
+
+
 def on_tool(payload: Dict[str, Any], session: hook_runtime.Session, run: hook_runtime.HookRun) -> Reply:
-    """(M reason, U line or None) when the band denies this call; None when it goes ahead."""
+    """(M reason, U line or None) when the band denies this call; None when it goes ahead.
+
+    The band is recorded for every call, also one the hard band allows: only the denial depends on that.
+    """
     tool_name, tool_input = payload.get("tool_name"), payload.get("tool_input")
-    if hard_allows(tool_name, tool_input, session):
-        return None
     size, level = _measured(payload, session, run)
     if level is None:
         return None
+    allowed = _allowed(tool_name, tool_input, session, run)
 
     def change(state):
         events = enforcement_state.observe(state, level)
-        if inform_reason(state, payload) or not denies(level, tool_name, session.settings):
+        if allowed or inform_reason(state, payload) or not denies(level, tool_name, session.settings):
             return events, None
         events += enforcement_state.deny(state, session.settings["hard_max_denials"])
         told = enforcement_state.tell(state)
@@ -257,9 +296,20 @@ def _released(state: Dict[str, Any]) -> Tuple[enforcement_state.Events, bool]:
     return enforcement_state.release(state), True
 
 
-def on_handover_write(session: hook_runtime.Session, run: hook_runtime.HookRun) -> None:
-    """A write of the session's handover: the denials so far no longer count toward hard_max_denials."""
-    _settle(session, run, "reset denials", _reset)
+def on_handover_write(payload: Dict[str, Any], session: hook_runtime.Session, run: hook_runtime.HookRun) -> None:
+    """A write of the session's handover: the denials so far no longer count toward hard_max_denials.
+
+    Not for a write a symlink at the handover path took elsewhere (writes_handover),
+    nor when that path cannot be checked: then the failure is logged and nothing is written.
+    """
+    run.at(CHECK_HANDOVER)
+    try:
+        written = writes_handover(payload.get("tool_name"), payload.get("tool_input"), session)
+    except OSError as error:
+        rotation_state.log_failure(session.project_dir, CHECK_HANDOVER, error)
+        return
+    if written:
+        _settle(session, run, "reset denials", _reset)
 
 
 def _reset(state: Dict[str, Any]) -> Tuple[enforcement_state.Events, None]:
