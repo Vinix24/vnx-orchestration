@@ -1352,6 +1352,20 @@
       "symbol": "_enforce_push_pr"
     },
     {
+      "file": "tests/test_oi1869_headless_stream_per_run.py",
+      "line": 131,
+      "mechanism": "direct-call",
+      "module_target": "envelope_govern_support",
+      "symbol": "_archive_dispatch_events"
+    },
+    {
+      "file": "tests/test_oi1869_headless_stream_per_run.py",
+      "line": 132,
+      "mechanism": "direct-call",
+      "module_target": "envelope_govern_support",
+      "symbol": "_clear_dispatch_events"
+    },
+    {
       "file": "tests/test_oi1886_dispatch_paths_zetter.py",
       "line": 43,
       "mechanism": "direct-call",
@@ -1388,14 +1402,14 @@
     },
     {
       "file": "tests/test_oi2115_harness_seat_stream_per_run.py",
-      "line": 363,
+      "line": 368,
       "mechanism": "direct-call",
       "module_target": "envelope_govern_support",
       "symbol": "_archive_dispatch_events"
     },
     {
       "file": "tests/test_oi2115_harness_seat_stream_per_run.py",
-      "line": 364,
+      "line": 369,
       "mechanism": "direct-call",
       "module_target": "envelope_govern_support",
       "symbol": "_clear_dispatch_events"
@@ -1563,14 +1577,14 @@
     },
     {
       "file": "tests/test_provider_deadline_passthrough.py",
-      "line": 183,
+      "line": 184,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "ClaudeSubprocessAdapter"
     },
     {
       "file": "tests/test_provider_deadline_passthrough.py",
-      "line": 183,
+      "line": 184,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "EnvelopeSpec"
@@ -1787,7 +1801,7 @@
     },
     {
       "file": "tests/test_sonnet_5_5_registry_and_model_resolved.py",
-      "line": 259,
+      "line": 262,
       "mechanism": "patch.object-attr",
       "module_target": "dispatch_envelope",
       "symbol": "ClaudeSubprocessAdapter.run"
@@ -1831,6 +1845,7 @@
     "dispatch_envelope::run_envelope_plan",
     "envelope_adapters_claude.ClaudeSubprocessAdapter::run",
     "envelope_adapters_claude.CodexAdapter::run",
+    "envelope_adapters_provider.ProviderAdapter::_run_codex",
     "envelope_adapters_provider.ProviderAdapter::_run_kimi",
     "envelope_adapters_provider.ProviderAdapter::run",
     "envelope_adapters_provider::_fail_loud_on_empty_success",

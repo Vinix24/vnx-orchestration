@@ -1,7 +1,7 @@
 # Event Streams
 
 **Status**: Active
-**Last Updated**: 2026-10-16
+**Last Updated**: 2026-10-17
 **Purpose**: Explain the lifecycle of per-terminal NDJSON event streams so that operators and future investigators don't misread an empty live file as a broken writer.
 
 ---
@@ -38,7 +38,9 @@ Only **subprocess-routed** terminals emit per-terminal NDJSON.
 - T1 / T2 / T3 use the subprocess adapter by default in current configurations, but this is controlled per-terminal via `VNX_ADAPTER_T{n}=subprocess`.
 - Terminals routed through the tmux adapter produce no per-terminal NDJSON at all. Their activity is observable via `t0_receipts.ndjson`, `governance_audit.ndjson`, and the receipt pipeline.
 
-## Harness seat streams: one live file per run (OI-2115)
+## Per-run streams: harness seats and headless builders (OI-2115, OI-1869)
+
+Two terminals keep one live file per run instead of one per terminal (`event_store.PER_RUN_TERMINALS`): `plan-gate`, the terminal of every harness seat, and `ephemeral`, the terminal of every headless builder. Everything below holds for both.
 
 Every harness seat run is dispatched on the one terminal `plan-gate`: review-gate seats (`gate_runner`'s harness lane), plan-gate panel seats and deliberation panel seats, the provider lane as well as the claude seat. That terminal is a per-run terminal (`event_store.PER_RUN_TERMINALS`). Each run writes its own live file:
 
@@ -50,9 +52,19 @@ The archive path does not change: `.vnx-data/events/archive/plan-gate/{dispatch_
 
 Why: until 2026-10-16 every harness seat wrote the one file `events/plan-gate.ndjson`. Two seats that ran at once destroyed each other's streams. The second run's first append archived and cleared the first run's stream (the boundary guard). Its end-of-run teardown archived the first run's later events under its own id and truncated them. The first run's teardown then replaced its own archive with what it wrote last. Measured on deepseek_gate for #2075 and #2076, started five seconds apart: the archive of #2076 held 412 bytes, only its `provider_teardown_worktree` event, and the R6 final-answer reader (`final_answer_verdict`) booked `unavailable`. With one stream per run, seats can run in parallel and each keeps its own final answer.
 
+Every claude dispatch the door sends to the headless lane runs under the one target id `ephemeral` (`dispatch_plan.compile_plan`, D12; the name is `event_store.HEADLESS_LANE_TERMINAL`). Each builder writes its own live file:
+
+```
+.vnx-data/events/ephemeral/{dispatch_id}.ndjson
+```
+
+and its envelope teardown (`envelope_govern_support._archive_dispatch_events` and `_clear_dispatch_events`, called from `envelope_govern._govern`) moves it into the unchanged archive path `.vnx-data/events/archive/ephemeral/{dispatch_id}.ndjson`, extending an archive the run already has. Why: until 2026-10-17 every builder appended to `events/ephemeral.ndjson`. A builder's start (`SubprocessAdapter.deliver`), its first append and its teardown event each archived and emptied the stream of a builder that was still running (OI-1869, OI-1895, OI-1930). Measured 2026-10-16 in the fire logs of three parallel opus builders: `event_store: dispatch boundary 20261016-cr-b1-r2 -> 20261016-xd-d1-shadow — archived previous dispatch events and cleared live file (end-teardown had not run)`, and twice more.
+
+The old live file `events/ephemeral.ndjson` can still hold events written before this change. No run appends to it or truncates it any more; only an event whose dispatch id is not one file name would land there. No reader needs it: the archives of those runs are where they always were. It is left in place for the operator to remove.
+
 A terminal-pinned stream (`T{n}`) is unchanged: one file per terminal, archived and truncated as described above.
 
-The dashboard's live lane list (`EventStore.list_lanes`) and its live tail read `events/{lane}.ndjson` only, so a running harness seat does not show there as a live lane. Its archive is listed and readable as before.
+The dashboard reads a per-run terminal as one lane. `EventStore.list_lanes` adds up the terminal's shared stream and every live run's own stream, and lists each live run under `runs`. The live tail `/api/agent-stream/{lane}` streams all of them in timestamp order (`EventStore.tail_lane`), or one run with `?dispatch_id={id}`. The raw tail `/api/events/stream?terminal={lane}` needs `&dispatch_id={id}` on a per-run terminal and refuses the request without it, because no run writes the shared file. Archives are listed and readable as before.
 
 ## Receipt linkage: the `events_path` pointer (PR #843)
 
