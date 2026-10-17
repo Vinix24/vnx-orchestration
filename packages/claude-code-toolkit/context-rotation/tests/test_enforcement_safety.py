@@ -245,7 +245,8 @@ def test_free_text_in_a_planted_state_reaches_no_model_facing_field(s, planted):
         assert PLANTED not in proc.stdout
         assert PLANTED not in proc.stderr
     assert PLANTED not in errors_log(s.project)
-    assert enforcement_state.state_problem(state_of(s)) is None  # replaced by a state the plugin writes
+    assert state_of(s) != planted  # replaced by a state the plugin writes
+    assert enforcement_state.state_problem(state_of(s)) is None
 
 
 def test_a_planted_state_does_not_release_the_session_with_a_lookalike_value(s):
@@ -289,7 +290,7 @@ def test_a_denial_and_a_hold_back_are_json_with_exit_0(s):
     at(s, HARD)
     for proc in (bash(s), s.stop()):
         assert proc.returncode == 0
-        assert json.loads(proc.stdout)
+        assert proc.stdout and json.loads(proc.stdout)
     assert decision(bash(s)) == "deny"
 
 
@@ -401,7 +402,7 @@ def test_denials_at_the_same_moment_lose_no_count(s, count):
     results = at_once(s, count)
     for code, out, err in results:
         assert code == 0, err
-        assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert decision_of(json.loads(out) if out else {}) == "deny"
     assert state_of(s)["denials"] == count
     denials = sorted(line["denials"] for line in journal(s.project) if line["event"] == "denial")
     assert denials == list(range(1, count + 1))

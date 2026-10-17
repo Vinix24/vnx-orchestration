@@ -184,7 +184,9 @@ def test_a_current_handover_is_not_held_back(s):
     proc = s.stop()
     assert message_of(proc).startswith("Handover saved. Type /clear")
     assert "decision" not in output(proc)
-    assert state_of(s)["level"] == "hard" and state_of(s)["blocked"] == 0
+    state = state_of(s)
+    assert state is not None, "the crossing into hard was not recorded"
+    assert state["level"] == "hard" and state["blocked"] == 0
     s.prompt("one more thing")  # work after the handover: it is outdated, and the stop is held back
     assert held_back(s.stop())
 
@@ -271,10 +273,10 @@ def test_release_in_any_band_lasts_for_the_session(s):
 @pytest.mark.parametrize("value", ["Bash", [1], [""], ["a\0b"], {"Bash": True}])
 def test_a_bad_force_deny_tools_falls_back_to_none(project, value, capsys):
     settings_file(project, force_deny_tools=value)
-    assert context_budget.load_settings(str(project))["force_deny_tools"] == ()
+    assert context_budget.load_settings(str(project)).get("force_deny_tools") == ()
     assert "force_deny_tools" in capsys.readouterr().err
 
 
 def test_force_deny_tools_is_read_as_given(project):
     settings_file(project, force_deny_tools=["Bash", "mcp__*"])
-    assert context_budget.load_settings(str(project))["force_deny_tools"] == ("Bash", "mcp__*")
+    assert context_budget.load_settings(str(project)).get("force_deny_tools") == ("Bash", "mcp__*")
