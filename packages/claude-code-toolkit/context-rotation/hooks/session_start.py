@@ -8,11 +8,14 @@
   bytes the claim read; the original moves into the archive under a name of its
   own (`<time>-<origin>.original`) and never becomes that copy. The injection is
   logged in injections.jsonl and returned as additionalContext (or as a pointer to
-  the archive copy above 9,000 characters), and the claimed marker is removed
-  last. The user gets one line naming the archive copy; when the pane's automatic
-  /clear typed this clear (auto_clear.typed_by_job) and it is the first one for
-  this user, that line also says how to turn auto_clear off. A marker that fails
-  the path checks is never used: it is reported once and left on disk.
+  the archive copy above 9,000 characters); once that output is written a
+  `delivered` line follows, and the claimed marker is removed last. An output that
+  cannot be written leaves the claim and no `delivered` line, so the automatic
+  /clear types nothing after it. The user gets one line naming the archive copy;
+  when the pane's automatic /clear typed this clear (auto_clear.typed_by_job) and
+  it is the first one for this user, that line also says how to turn auto_clear
+  off. A marker that fails the path checks is never used: it is reported once and
+  left on disk.
 - no match, and any source other than "compact": handovers not continued yet are
   listed for the user with the `resume` hint, never dropped silently.
 - any source: the archive is trimmed to archive_keep, and injections.jsonl to a

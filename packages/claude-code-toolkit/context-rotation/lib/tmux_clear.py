@@ -17,13 +17,23 @@ the project path is in the job file. In this order:
    synchronized; its screen shows the input box, empty, with no spinner above it
    (pane_screen); the session's `claude` (CLAUDE_PID and its start time from the
    marker) runs in the process tree of `#{pane_pid}`;
-5. `/clear` is typed with `send-keys -l` and read back from the input line. Enter
-   goes as a separate call only when the line reads exactly `/clear`; otherwise six
-   BSpace remove it and the job stops;
+5. `/clear` is typed with `send-keys -l` and read back from the input line, which
+   must read exactly `/clear`; then the step's line and record are written, and a
+   fresh look decides Enter (enter);
 6. it waits up to ack_timeout_seconds (at most MAX_ACK_SECONDS) for the successor's
-   `injected` line via `clear` for this generation in injections.jsonl;
+   `delivered` line via `clear` for this generation in injections.jsonl, written once
+   the handover's emit returned;
 7. after the turn settles again and the pane checks pass, `Continue from the handover
-   in your context, step 1.` is typed, read back, and Enter sent separately.
+   in your context, step 1.` is typed and read back, and Enter goes the same way.
+
+Enter goes only on a look taken after the step's journal line, with nothing between
+that look and the key: the session's `claude` still runs below the pane, then one tmux
+call shows the pane's state and its screen at one moment (look), and the input line
+must read exactly the typed line, with no spinner above it. The job types into the
+user's terminal, so when it is not certain it sends nothing. It removes what it typed
+only from a line that a look shows holds exactly that, with the cursor right after it
+(take_back): every character those BSpace remove is its own. Any other line is left
+as it is, and the user's lines say so.
 
 Nothing read from a file or a screen is ever typed: only those two fixed lines, BSpace
 and Enter, into the pane the marker names. Any failed check, and any read that fails
@@ -41,7 +51,7 @@ import stat
 import subprocess
 import sys
 import time
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 import auto_clear
 import context_budget
@@ -62,7 +72,7 @@ HOOK_POLL_SECONDS = 0.1
 VERIFY_SECONDS = 3.0
 VERIFY_POLL_SECONDS = 0.1
 ACK_POLL_SECONDS = 0.25
-PANE_FORMAT = "#{pane_id} #{pane_pid} #{pane_dead} #{pane_in_mode} #{pane_synchronized}"
+PANE_FORMAT = "#{pane_id} #{pane_pid} #{pane_dead} #{pane_in_mode} #{pane_synchronized} #{cursor_x} #{cursor_y}"
 MAX_ANCESTORS = 256
 DIGITS = re.compile(r"[0-9]+")
 FAILURES = (OSError, rotation_state.LockTimeout, ValueError)
@@ -119,6 +129,23 @@ def lock_stamp(found: os.stat_result) -> Tuple[int, int]:
     return found.st_ino, found.st_ctime_ns
 
 
+class View(NamedTuple):
+    """One look at the pane: the pid of its first process, its screen, and the cursor as (column, row)."""
+
+    pane_pid: int
+    screen: pane_screen.Screen
+    cursor: Tuple[int, int]
+
+
+def enter_problem(screen: pane_screen.Screen, literal: str) -> Optional[str]:
+    """Why Enter must not go on this screen; None for an input box that holds exactly `literal`, nothing busy."""
+    if not screen.box:
+        return "no_input_box"
+    if screen.busy:
+        return "busy"
+    return None if screen.typed == literal else "typed"
+
+
 def descends(table: Dict[int, int], pid: int, ancestor: int) -> bool:
     """`pid` is `ancestor` or runs below it in the process tree."""
     current = pid
@@ -146,6 +173,10 @@ class Job:
         self.reached = "started"
         self.lock = auto_clear.pane_name(self.pane, ".lock")
         self.lock_made: Optional[Tuple[int, int]] = None
+        # The pane's first process as check_pane saw it, and the line the job typed that may still be
+        # in the input line: set before its keys go out, cleared once Enter or take_back sent it away.
+        self.pane_pid: Optional[int] = None
+        self.typing: Optional[str] = None
 
     # --- tmux --------------------------------------------------------------------
 
@@ -252,23 +283,52 @@ class Job:
             return "transcript_unreadable"
         return "not_current" if reason else None
 
+    def look(self) -> Tuple[Optional[str], Optional[View]]:
+        """The pane's state and its screen from one tmux call: (None, view), or (why not, None).
+
+        tmux runs the commands of one call one after the other, without reading the
+        pane or a key in between, so the cursor and the screen are of the same moment.
+        Measured on tmux 3.7: for a pane that is gone display-message prints an empty
+        line, then capture-pane fails with status 1 and ends the call. Why not: the
+        pane is not the marker's, alive, in no mode and not synchronized.
+        """
+        status, out = self.tmux("display-message", "-p", "-t", self.pane, PANE_FORMAT, ";",
+                                "capture-pane", "-p", "-e", "-t", self.pane)
+        if status < 0:
+            return "pane_unreadable", None
+        info, _, text = out.partition("\n")
+        fields = info.split()
+        if status != 0 or len(fields) != 7 or fields[0] != self.pane or fields[2] != "0" \
+                or not all(DIGITS.fullmatch(field) for field in fields[1:2] + fields[5:]):
+            return "pane_gone", None
+        if fields[3] != "0":
+            return "pane_mode", None
+        if fields[4] != "0":
+            return "pane_synchronized", None
+        return None, View(int(fields[1]), pane_screen.read(text, self.settings), (int(fields[5]), int(fields[6])))
+
     def check_pane(self) -> Optional[str]:
         """The pane is the marker's and idle, and the session's `claude` runs in it."""
-        status, out = self.tmux("display-message", "-p", "-t", self.pane, PANE_FORMAT)
-        if status < 0:
-            return "pane_unreadable"
-        fields = out.split()
-        if status != 0 or len(fields) != 5 or fields[0] != self.pane or not DIGITS.fullmatch(fields[1]) \
-                or fields[2] != "0":
-            return "pane_gone"
-        if fields[3] != "0":
-            return "pane_mode"
-        if fields[4] != "0":
-            return "pane_synchronized"
-        text = self.capture()
-        if text is None:
-            return "pane_unreadable"
-        return pane_screen.idle_problem(pane_screen.read(text, self.settings)) or self.check_process(int(fields[1]))
+        problem, view = self.look()
+        if view is None:
+            return problem
+        self.pane_pid = view.pane_pid
+        return pane_screen.idle_problem(view.screen) or self.check_process(view.pane_pid)
+
+    def fresh_look(self) -> Tuple[Optional[str], Optional[View]]:
+        """The read a key is decided on: the session's `claude` still runs below the pane, then one look.
+
+        The look is the last read: what follows is decided on it alone and sent at
+        once. (why not, None) when the process or the pane fails its check, also when
+        the pane's first process is no longer the one check_pane saw.
+        """
+        problem = self.check_process(self.pane_pid)
+        if problem:
+            return problem, None
+        problem, view = self.look()
+        if view is not None and view.pane_pid != self.pane_pid:
+            return "process", None
+        return problem, view
 
     def check_process(self, pane_pid: int) -> Optional[str]:
         pid = self.process["pid"]
@@ -281,23 +341,25 @@ class Job:
         return None if descends(table, pid, pane_pid) else "process"
 
     def type_line(self, literal: str) -> Optional[str]:
-        """Type `literal` and read it back from the input line; on any mismatch remove it again.
+        """Type `literal` and read it back until the input line holds exactly that. No other key goes here.
 
-        Enter is never sent here. The line is removed with one BSpace per character
-        typed, never with a key that clears more than that.
+        A line that reads otherwise (more text, other text, part of it, no line at
+        all) may hold what the user typed, so nothing removes it: the job stops and
+        leaves it as it is.
         """
+        self.typing = literal
         if not self.keys("-l", literal):
             return "send"
         deadline = monotonic() + VERIFY_SECONDS
         while True:
             text = self.capture()
-            typed = pane_screen.read(text, self.settings).typed if text is not None else None
+            if text is None:
+                return "pane_unreadable"
+            typed = pane_screen.read(text, self.settings).typed
             if typed == literal:
                 return None
-            wrong = typed is not None and not literal.startswith(typed)
-            if text is None or wrong or monotonic() >= deadline:
-                self.keys(*["BSpace"] * len(literal))
-                return "pane_unreadable" if text is None else "typed"
+            if (typed is not None and not literal.startswith(typed)) or monotonic() >= deadline:
+                return "typed"
             sleep(VERIFY_POLL_SECONDS)
 
     def type_clear(self) -> Optional[str]:
@@ -307,14 +369,46 @@ class Job:
         return self.type_line(CONTINUE)
 
     def enter(self, literal: str, event: str, step: str) -> Optional[str]:
-        """The step's line and record first, then Enter as a call of its own."""
+        """The step's line and record, then a fresh look, then Enter as a call of its own.
+
+        The line and the record come before the key because the fresh session's
+        SessionStart runs as soon as /clear is entered and reads the record to tell a
+        clear the job typed from one the user typed (auto_clear.typed_by_job): it must
+        already say "entered". That write can wait up to rotation_state.LOCK_TIMEOUT_SECONDS
+        for the project lock, so the look Enter is decided on is taken after it, and nothing
+        comes between that look and the key: no lock, no sleep, no other read.
+        """
         try:
             auto_clear.transition(self.project_dir, self.record, event, step=step)
         except FAILURES as error:
             rotation_state.log_failure(self.project_dir, "record %s in pane %s" % (step, self.pane), error)
-            self.keys(*["BSpace"] * len(literal))
-            return "journal"
-        return None if self.keys("Enter") else "send"
+            return self.take_back(literal, "journal", self.fresh_look()[1])
+        problem, view = self.fresh_look()
+        if view is None:
+            return problem
+        problem = enter_problem(view.screen, literal)
+        if problem:
+            return self.take_back(literal, problem, view)
+        if not self.keys("Enter"):
+            return "send"
+        self.typing = None
+        return None
+
+    def take_back(self, literal: str, reason: str, view: Optional[View]) -> str:
+        """Remove `literal` from the input line when the line is certainly the job's own; `reason` either way.
+
+        `view` is the look just taken (fresh_look), None when the process or the pane
+        failed it. One BSpace per character goes, at once, only when that look shows
+        exactly `literal` in the input line with the cursor right after it: then every
+        character they remove is one the job typed. Any other line (more text, other
+        text, the cursor elsewhere, no line that could be read) gets no key at all and
+        stays as it is, which the user's lines then say (abort).
+        """
+        screen = view.screen if view is not None else None
+        if screen is not None and screen.typed == literal and view.cursor == (screen.end, screen.row):
+            if self.keys(*["BSpace"] * len(literal)):
+                self.typing = None
+        return reason
 
     def enter_clear(self) -> Optional[str]:
         reason = self.enter(CLEAR, "clear_entered", "entered")
@@ -350,13 +444,17 @@ class Job:
         return None
 
     def abort(self, reason: str) -> None:
-        """Stop: the reason's line and record, then the user's line in the pane. Nothing more is typed."""
+        """Stop: the reason's line and record, then the user's line in the pane. Nothing more is typed.
+
+        Both say whether what the job typed may still be in the input line (left_in_line).
+        """
+        left = self.typing is not None
         try:
             auto_clear.transition(self.project_dir, self.record, "clear_aborted", step="aborted",
-                                  at_step=self.reached, reason=reason)
+                                  at_step=self.reached, reason=reason, left_in_line=left)
         except FAILURES as error:
             rotation_state.log_failure(self.project_dir, "record the stopped clear in pane %s" % self.pane, error)
-        auto_clear.display(self.pane, auto_clear.display_text(self.reached, reason))
+        auto_clear.display(self.pane, auto_clear.display_text(self.reached, reason, left))
 
 
 def open_job(pane: str, origin: str, generation: str, job_id: str) -> Optional[Job]:

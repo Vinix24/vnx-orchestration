@@ -22,7 +22,8 @@ Everything lives under <project>/.claude/rotation/:
                                 the emit; no claim, delivery or list reads it; trimmed to the
                                 newest archive_keep
   injections.jsonl              one line per transition, written before the transition: ready,
-                                outdated, claimed, injected, kept; kept to
+                                outdated, claimed, injected, kept; and `delivered`, written
+                                after the emit it records; kept to
                                 JOURNAL_LINES_PER_ARCHIVE_COPY lines per archive_keep
   errors.log                    the last failures of the hooks, and rejected markers
 
@@ -96,8 +97,8 @@ ORIGINAL_SUFFIX = ".original"
 ORIGINAL_NAME = re.compile(r"[0-9]{8}T[0-9]{12}Z-[A-Za-z0-9_-]+\.original")
 JOURNAL = "injections.jsonl"
 ERRORS_LOG = "errors.log"
-# A handover goes through ready, maybe outdated and ready again, claimed and injected; in tmux
-# also the steps of its automatic /clear (started, entered, acknowledged, continued or aborted, told).
+# A handover goes through ready, maybe outdated and ready again, claimed, injected and delivered; in
+# tmux also the steps of its automatic /clear (started, entered, acknowledged, continued or aborted, told).
 JOURNAL_LINES_PER_ARCHIVE_COPY = 16
 is_safe_session_id = state_fields.is_safe_session_id
 
@@ -946,6 +947,23 @@ def journal(project_dir: str, event: str, **fields: Any) -> None:
 def log_injection(project_dir: str, record: Dict[str, Any]) -> None:
     """The line of an injection (event "injected"), written before the handover is emitted."""
     append_journal(project_dir, record)
+
+
+def log_delivery(project_dir: str, via: str, origin: str, generation: str, successor: str) -> None:
+    """The line that says the emit of a claimed handover returned (event "delivered"). Never raises.
+
+    Written after the emit, so it is the one evidence that the handover went out:
+    "injected" comes before the emit, which can still fail (BrokenPipeError). The
+    injection already happened, and a failing hook would make Claude Code drop the
+    output that carries it, so a failure to write it (OSError, LockTimeout,
+    ValueError) goes to log_failure; whatever waits for this line then acts as if
+    the delivery did not finish.
+    """
+    try:
+        journal(project_dir, "delivered", via=via, origin_session_id=origin, generation=generation,
+                session_id=successor)
+    except (OSError, LockTimeout, ValueError) as error:
+        log_failure(project_dir, "log the delivery of generation %s" % generation, error)
 
 
 def read_injections(project_dir: str) -> List[Dict[str, Any]]:

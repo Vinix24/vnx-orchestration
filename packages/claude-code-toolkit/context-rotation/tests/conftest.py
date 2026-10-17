@@ -4,6 +4,7 @@ from __future__ import annotations
 import itertools
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -362,12 +363,37 @@ def with_input(screen, typed):
     return screen.replace(PROMPT, PROMPT + typed, 1)
 
 
+FORMAT = re.compile(r"#\{([a-z_]+)\}")
+
+
+def commands_of(args):
+    """The commands of one tmux call: its arguments split at each ";" (a command sequence)."""
+    commands, current = [], []
+    for arg in args:
+        if arg == ";":
+            commands.append(current)
+            current = []
+        else:
+            current.append(arg)
+    return commands + [current]
+
+
+def input_row(screen):
+    """The row of the input line: the one line that holds the prompt with its no-break space (with_input)."""
+    return next((number for number, line in enumerate(screen.split("\n")) if PROMPT in line), 0)
+
+
 class FakeTmux:
     """Stands in for auto_clear.run_tmux: records every call and plays one pane.
 
-    The pane shows an A0 capture, with what was typed into its input line. Enter
-    submits that line: `on_enter` callbacks get it, and after /clear the pane shows
-    the capture taken right after a /clear.
+    The pane shows an A0 capture, with what was typed into its input line. The cursor
+    sits `back` characters before the end of that text: a literal goes in there and a
+    BSpace removes the character before it, as in Claude Code's input line. Enter
+    submits the line: `submitted` keeps it, `on_enter` callbacks get it, and after
+    /clear the pane shows the capture taken right after a /clear. A call with a
+    command sequence (`a ; b`) runs its commands in order and stops at the first that
+    fails, as tmux does; `on_capture` runs once before a call that captures, so what
+    it changes shows in every command of that call.
     """
 
     def __init__(self, pane="%7", pane_pid=None, screen=IDLE):
@@ -375,41 +401,70 @@ class FakeTmux:
         self.pane_pid = os.getpid() if pane_pid is None else pane_pid
         self.base = pane_text(screen)
         self.typed = ""
+        self.back = 0
         self.echo = True
         self.info = None
+        self.fields = {}
         self.calls = []
         self.fail = {}
+        self.submitted = []
         self.on_enter = []
         self.on_capture = None
 
     def __call__(self, args):
         args = list(args)
         self.calls.append(args)
-        if args[0] == "capture-pane" and self.on_capture:
+        commands = commands_of(args)
+        if self.on_capture and any(command[0] == "capture-pane" for command in commands):
             self.on_capture(self)
+        status, out = 0, ""
+        for command in commands:
+            status, text = self.one(command)
+            out += text
+            if status != 0:
+                break
+        return status, out
+
+    def one(self, args):
         failure = self.fail.get("pane-info" if args[0] == "display-message" and "-p" in args else args[0])
         if isinstance(failure, BaseException):
             raise failure
         if isinstance(failure, int):
             return failure, ""
         if args[0] == "capture-pane":
-            return 0, with_input(self.base, self.typed)
+            return 0, self.screen()
         if args[0] == "display-message" and "-p" in args:
-            return 0, (self.info if self.info is not None else "%s %d 0 0 0" % (self.pane, self.pane_pid)) + "\n"
+            return 0, self.expand(args[-1]) + "\n"
         if args[0] == "send-keys":
             self.keys(args[3:])
         return 0, ""
 
+    def screen(self):
+        return with_input(self.base, self.typed)
+
+    def expand(self, form):
+        """display-message -p: the format with each #{name} filled in; `info` replaces the whole line."""
+        if self.info is not None:
+            return self.info
+        values = {"pane_id": self.pane, "pane_pid": str(self.pane_pid), "pane_dead": "0", "pane_in_mode": "0",
+                  "pane_synchronized": "0", "cursor_x": str(len(PROMPT) + len(self.typed) - self.back),
+                  "cursor_y": str(input_row(self.screen()))}
+        values.update(self.fields)
+        return FORMAT.sub(lambda match: values[match.group(1)], form)
+
     def keys(self, keys):
+        at = len(self.typed) - self.back
         if keys[:1] == ["-l"]:
             if self.echo:
-                self.typed += keys[1]
+                self.typed = self.typed[:at] + keys[1] + self.typed[at:]
             return
         for key in keys:
-            if key == "BSpace":
-                self.typed = self.typed[:-1]
+            at = len(self.typed) - self.back
+            if key == "BSpace" and at > 0:
+                self.typed = self.typed[:at - 1] + self.typed[at:]
             elif key == "Enter":
-                submitted, self.typed = self.typed, ""
+                submitted, self.typed, self.back = self.typed, "", 0
+                self.submitted.append(submitted)
                 if submitted == "/clear":
                     self.base = pane_text(AFTER_CLEAR)
                 for callback in self.on_enter:
@@ -425,10 +480,11 @@ class FakeTmux:
 
 
 FAKE_TMUX_PY = r'''
-import json, os, subprocess, sys
+import json, os, re, subprocess, sys
 
 state = os.environ["FAKE_TMUX_DIR"]
 PROMPT = "❯ "
+FIELDS = ("pane_id", "pane_pid", "pane_dead", "pane_in_mode", "pane_synchronized")
 
 
 def path(name):
@@ -448,19 +504,21 @@ def write(name, text):
         handle.write(text)
 
 
-args = sys.argv[1:]
-with open(path("calls.jsonl"), "a", encoding="utf-8") as handle:
-    handle.write(json.dumps(args) + "\n")
-name = args[0] if args else ""
-status = read("status-" + name).strip()
-if status:
-    sys.exit(int(status))
-if name == "capture-pane":
-    sys.stdout.write(read("screen").replace(PROMPT, PROMPT + read("typed"), 1))
-elif name == "display-message" and "-p" in args:
-    sys.stdout.write(read("info") + "\n")
-elif name == "send-keys":
-    keys, typed = args[3:], read("typed")
+def screen():
+    return read("screen").replace(PROMPT, PROMPT + read("typed"), 1)
+
+
+def expand(form):
+    """The format with each #{name} filled in: the pane's fields from `info`, the cursor after the typed text."""
+    values = dict(zip(FIELDS, read("info").split()))
+    lines = screen().split("\n")
+    values["cursor_y"] = str(next((n for n, line in enumerate(lines) if PROMPT in line), 0))
+    values["cursor_x"] = str(len(PROMPT) + len(read("typed")))
+    return re.sub(r"#\{([a-z_]+)\}", lambda match: values.get(match.group(1), ""), form)
+
+
+def send(keys):
+    typed = read("typed")
     if keys[:1] == ["-l"]:
         typed += keys[1]
     else:
@@ -477,6 +535,37 @@ elif name == "send-keys":
                                        capture_output=True, text=True, timeout=60)
                 typed = ""
     write("typed", typed)
+
+
+def run(args):
+    """One command of the call: its exit status (a status-<command> file makes it fail)."""
+    name = args[0] if args else ""
+    status = read("status-" + name).strip()
+    if status:
+        return int(status)
+    if name == "capture-pane":
+        sys.stdout.write(screen())
+    elif name == "display-message" and "-p" in args:
+        sys.stdout.write(expand(args[-1]) + "\n")
+    elif name == "send-keys":
+        send(args[3:])
+    return 0
+
+
+args = sys.argv[1:]
+with open(path("calls.jsonl"), "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(args) + "\n")
+commands, current = [], []
+for arg in args:
+    if arg == ";":
+        commands.append(current)
+        current = []
+    else:
+        current.append(arg)
+for command in commands + [current]:
+    status = run(command)
+    if status:
+        sys.exit(status)
 '''
 
 

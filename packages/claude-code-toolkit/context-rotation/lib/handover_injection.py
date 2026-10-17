@@ -2,17 +2,17 @@
 
 the claim's line in injections.jsonl -> claim (the marker moves to the claim name
 of its generation) -> copy to the archive -> the original moves into the archive
-(rotation_state.retire_original) -> the injection's line -> emit -> the claimed
-marker removed last. A crash at any point leaves the claimed marker naming an
-archive copy that holds the claimed bytes, or the original, and `resume` lists
-it. Automatic injection happens at most once; recovery is manual, and reads the
-archive copy first: the original is used only while there is no copy yet and it
-still holds the claimed bytes. No file that was ever at the handover path is
-deleted, so a handover written meanwhile stays. Every marker here passed
-rotation_state.marker_problem, and every file is read through the verified
-storage directories. A storage failure before the emit (archive copy, log line)
-is logged and nothing is emitted, so the claim stays for `resume`; after the emit
-nothing raises.
+(rotation_state.retire_original) -> the injection's line -> emit -> the delivery's
+line, once the emit returned -> the claimed marker removed last. A crash at any
+point leaves the claimed marker naming an archive copy that holds the claimed
+bytes, or the original, and `resume` lists it. Automatic injection happens at
+most once; recovery is manual, and reads the archive copy first: the original is
+used only while there is no copy yet and it still holds the claimed bytes. No
+file that was ever at the handover path is deleted, so a handover written
+meanwhile stays. Every marker here passed rotation_state.marker_problem, and
+every file is read through the verified storage directories. A storage failure
+before the emit (archive copy, log line) is logged and nothing is emitted, so the
+claim stays for `resume`; after the emit nothing raises.
 
 What is shown comes from the plugin, never as text from disk: the paths a marker
 gives are the ones rotation_state.read_marker builds, times and outdated reasons
@@ -107,7 +107,9 @@ def deliver(project_dir: str, claimed: str, marker: Dict[str, Any], data: bytes,
     emit under a name of its own, and is never what they name.
     None when the archive copy or the log line could not be written (OSError,
     LockTimeout): the failure goes to rotation_state.log_failure, nothing is
-    emitted, and the claimed marker stays for `resume`.
+    emitted, and the claimed marker stays for `resume`. An emit that raises
+    leaves the claim too, and no `delivered` line: only an emit that returned
+    gets one (rotation_state.log_delivery), which the automatic /clear waits for.
     """
     step = "archive handover"
     try:
@@ -128,6 +130,7 @@ def deliver(project_dir: str, claimed: str, marker: Dict[str, Any], data: bytes,
         return None
     at("emit handover")
     emit(context["text"], archive)
+    rotation_state.log_delivery(project_dir, via, marker["session_id"], marker["generation"], successor)
     rotation_state.finish_claim(project_dir, claimed)
     return archive
 

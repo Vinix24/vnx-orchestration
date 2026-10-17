@@ -74,7 +74,7 @@ CLEAR_ABORTS: Dict[str, str] = {
     "typed": "the typed text did not read back as typed",
     "send": "tmux could not send the keys",
     "journal": "its line in injections.jsonl could not be written",
-    "no_ack": "the fresh session did not take the handover in time",
+    "no_ack": "the delivery of the handover to the fresh session was not confirmed in time",
     "ack_unreadable": "injections.jsonl could not be read",
     "error": "an unexpected error stopped it (errors.log says which)",
 }
@@ -168,10 +168,13 @@ def marker_value_problem(kind: str, marker: Dict[str, Any]) -> Optional[str]:
 
 # One line per transition of a handover, written before the transition itself.
 # A "kept" line names a file the cleanup found at the handover path that no marker described: no generation.
+# A "delivered" line is the one line written after its step rather than before: the emit of a
+# claimed handover returned (handover_injection.deliver); "injected" only says it is about to go out.
 # The clear_* lines are the steps of an automatic /clear in a tmux pane (tmux_clear): the pane's lock
 # taken (clear_started) or a stale one broken (clear_lock_broken), Enter after /clear (clear_entered),
-# the successor's injection seen (clear_acknowledged), Enter after the line that continues
-# (clear_continued), a stop (clear_aborted) and its message repeated to the user (clear_told).
+# the successor's delivery seen (clear_acknowledged), Enter after the line that continues
+# (clear_continued), a stop (clear_aborted, which says whether the job left what it typed in the
+# input line) and its message repeated to the user (clear_told).
 _CLEAR = ("origin_session_id", "generation", "pane")
 JOURNAL_EVENTS: Dict[str, Tuple[str, ...]] = {
     "ready": ("origin_session_id", "generation", "sha256"),
@@ -179,13 +182,14 @@ JOURNAL_EVENTS: Dict[str, Tuple[str, ...]] = {
     "claimed": ("origin_session_id", "generation", "session_id", "sha256", "archive"),
     "injected": ("via", "origin_session_id", "generation", "session_id", "handover", "archive", "sha256", "chars",
                  "mode"),
+    "delivered": ("via", "origin_session_id", "generation", "session_id"),
     "kept": ("origin_session_id", "sha256", "archive"),
     "clear_lock_broken": ("pane",),
     "clear_started": _CLEAR,
     "clear_entered": _CLEAR,
     "clear_acknowledged": _CLEAR + ("session_id",),
     "clear_continued": _CLEAR + ("session_id",),
-    "clear_aborted": _CLEAR + ("abort_reason",),
+    "clear_aborted": _CLEAR + ("abort_reason", "left_in_line"),
     "clear_told": _CLEAR,
 }
 INJECTION_VIAS = ("clear", "resume")
@@ -205,6 +209,7 @@ _RECORD_CHECKS: Dict[str, Callable[[Any], bool]] = {
     "mode": lambda value: value in INJECTION_MODES,
     "pane": is_pane_id,
     "abort_reason": is_clear_abort,
+    "left_in_line": lambda value: isinstance(value, bool),
 }
 
 

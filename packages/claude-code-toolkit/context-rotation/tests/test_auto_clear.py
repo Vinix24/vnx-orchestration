@@ -274,7 +274,8 @@ def test_the_fresh_session_hears_when_no_one_took_the_handover(tmp_path, session
     assert fake.sent() == [["-l", "/clear"], ["Enter"]]
     fresh = Session(tmp_path, project, "sess-b")
     message = message_of(fresh.prompt("hello"))
-    assert message == auto_clear.ENTERED % "the fresh session did not take the handover in time"
+    assert message == auto_clear.ENTERED % (
+        "the delivery of the handover to the fresh session was not confirmed in time")
 
 
 def test_a_record_that_cannot_be_written_shows_nothing_and_is_logged(stopped_job, project, monkeypatch):
@@ -304,6 +305,7 @@ def a_record(**changes):
     {"process": None}, {"step": "typed"}, {"step": "aborted"}, {"step": "aborted", "reason": "busy"},
     {"step": "aborted", "reason": "nonsense", "at_step": "started"}, {"at_step": "started"},
     {"successor": "../x"}, {"at": "yesterday"}, {"told": 1}, {"extra": 1},
+    {"left_in_line": 1}, {"left_in_line": None}, {"left_in_line": True},
 ])
 def test_a_record_the_job_did_not_write_is_refused(changes):
     assert auto_clear.record_problem(a_record(), "%7") is None
@@ -312,6 +314,16 @@ def test_a_record_the_job_did_not_write_is_refused(changes):
 
 def test_an_aborted_record_needs_its_step_and_reason():
     assert auto_clear.record_problem(a_record(step="aborted", reason="busy", at_step="entered"), "%7") is None
+    assert auto_clear.record_problem(a_record(step="aborted", reason="typed", at_step="started",
+                                              left_in_line=True), "%7") is None
+
+
+def test_a_line_left_in_place_is_named_in_both_of_the_users_lines():
+    left = a_record(step="aborted", reason="typed", at_step="started", left_in_line=True)
+    assert auto_clear.repeat_text(left).endswith(auto_clear.LEFT)
+    assert not auto_clear.repeat_text(dict(left, left_in_line=False)).endswith(auto_clear.LEFT)
+    assert auto_clear.display_text("acknowledged", "typed", True).endswith(auto_clear.LEFT)
+    assert auto_clear.LEFT not in auto_clear.display_text("acknowledged", "typed")
 
 
 def test_a_record_change_that_would_be_refused_writes_nothing(project):
@@ -334,7 +346,7 @@ def test_the_clear_lines_are_journal_lines_the_plugin_reads_back(project):
     rotation(project).mkdir(parents=True)
     for event, extra in [("clear_started", {}), ("clear_entered", {}), ("clear_told", {}),
                          ("clear_acknowledged", {"session_id": "sess-b"}), ("clear_continued", {"session_id": "b"}),
-                         ("clear_aborted", {"abort_reason": "busy"})]:
+                         ("clear_aborted", {"abort_reason": "busy", "left_in_line": False})]:
         rotation_state.journal(str(project), event, origin_session_id="sess-a", generation="0" * 16, pane="%7",
                                **extra)
     rotation_state.journal(str(project), "clear_lock_broken", pane="%7")
@@ -344,7 +356,13 @@ def test_the_clear_lines_are_journal_lines_the_plugin_reads_back(project):
                                pane="%7 ; x")
     with pytest.raises(ValueError):
         rotation_state.journal(str(project), "clear_aborted", origin_session_id="sess-a", generation="0" * 16,
-                               pane="%7", abort_reason="free text")
+                               pane="%7", abort_reason="free text", left_in_line=False)
+    with pytest.raises(ValueError):
+        rotation_state.journal(str(project), "clear_aborted", origin_session_id="sess-a", generation="0" * 16,
+                               pane="%7", abort_reason="busy", left_in_line="yes")
+    with pytest.raises(ValueError):
+        rotation_state.journal(str(project), "delivered", via="clear", origin_session_id="sess-a",
+                               generation="0" * 16, session_id="../b")
 
 
 def test_a_session_start_outside_tmux_reads_no_record(session, project, monkeypatch, tmux_bin):

@@ -61,8 +61,9 @@ START_FAILURES = (OSError, ValueError, subprocess.SubprocessError)
 
 RECORD_VERSION = 1
 RECORD_FIELDS = ("version", "pane", "origin_session_id", "generation", "process", "step", "at_step", "reason",
-                 "successor", "at", "told")
-# A job goes started -> entered -> acknowledged -> continued; "aborted" records where it stopped (at_step).
+                 "successor", "at", "told", "left_in_line")
+# A job goes started -> entered -> acknowledged -> continued; "aborted" records where it stopped (at_step),
+# and left_in_line whether what it typed may still be in the input line, which it then did not touch.
 STEPS = ("started", "entered", "acknowledged", "continued", "aborted")
 REACHED = ("started", "entered", "acknowledged")
 FINISHED_TASK = ("completed", "failed", "killed", "stopped")
@@ -88,7 +89,7 @@ ENTERED = (
 )
 ACKNOWLEDGED = (
     "context-rotation: this session continues from the handover of the previous one, but the line that starts it "
-    "was not typed: %s. Type any message to continue."
+    "was not sent: %s. Type any message to continue."
 )
 REPEAT_BEFORE = (
     "context-rotation: the automatic /clear did not happen: %s. This prompt is new work after the handover, so the "
@@ -96,8 +97,9 @@ REPEAT_BEFORE = (
 )
 REPEAT_ACKNOWLEDGED = (
     "context-rotation: this session continued from the handover of the previous one; the line that starts it was "
-    "not typed: %s."
+    "not sent: %s."
 )
+LEFT = " The text it typed was left in the input line as it is, with anything you typed there."
 OFF_HINT = (
     "context-rotation typed this /clear for you. To type it yourself instead, set \"auto_clear\": false in "
     ".claude/context-rotation.json (this project) or ~/.claude/context-rotation.json (every project)."
@@ -334,7 +336,8 @@ def new_record(document: Dict[str, Any]) -> Dict[str, Any]:
     """The record of a job that starts, from its job file."""
     return {"version": RECORD_VERSION, "pane": document["pane"], "origin_session_id": document["session_id"],
             "generation": document["generation"], "process": document["process"], "step": "started",
-            "at_step": None, "reason": None, "successor": None, "at": rotation_state.utc_now(), "told": False}
+            "at_step": None, "reason": None, "successor": None, "at": rotation_state.utc_now(), "told": False,
+            "left_in_line": False}
 
 
 def record_problem(record: Any, pane: str) -> Optional[str]:
@@ -352,6 +355,8 @@ def record_problem(record: Any, pane: str) -> Optional[str]:
         return "its step and reason are not ones the plugin writes"
     if (record["at_step"] in REACHED) != aborted or (not aborted and record["at_step"] is not None):
         return "its at_step is not one the plugin writes"
+    if not isinstance(record["left_in_line"], bool) or (record["left_in_line"] and not aborted):
+        return "its left_in_line is not one the plugin writes"
     successor = record["successor"]
     if successor is not None and not state_fields.is_safe_session_id(successor):
         return "its successor is not a plain file name"
@@ -376,7 +381,7 @@ def _line_of(event: str, record: Dict[str, Any]) -> Dict[str, Any]:
     if event in ("clear_acknowledged", "clear_continued"):
         line["session_id"] = record["successor"]
     if event == "clear_aborted":
-        line["abort_reason"] = record["reason"]
+        line.update(abort_reason=record["reason"], left_in_line=record["left_in_line"])
     return line
 
 
@@ -399,24 +404,28 @@ def transition(project_dir: str, record: Dict[str, Any], event: str, **changes: 
 
 # --- the user's lines after a job stopped ------------------------------------------------
 
-def display_text(reached: str, reason: str) -> str:
-    """The line display-message shows when a job stops after `reached` for `reason`."""
+def display_text(reached: str, reason: str, left: bool = False) -> str:
+    """The line display-message shows when a job stops after `reached` for `reason`; `left`: LEFT follows."""
     why = state_fields.CLEAR_ABORTS[reason]
     if reached == "entered":
-        return ENTERED % why
-    if reached == "acknowledged":
-        return ACKNOWLEDGED % why
-    return (NOT_CURRENT if reason == "not_current" else BEFORE) % why
+        text = ENTERED % why
+    elif reached == "acknowledged":
+        text = ACKNOWLEDGED % why
+    else:
+        text = (NOT_CURRENT if reason == "not_current" else BEFORE) % why
+    return text + (LEFT if left else "")
 
 
 def repeat_text(record: Dict[str, Any]) -> str:
     """The same message at the next prompt of the session's `claude` process (U)."""
     why = state_fields.CLEAR_ABORTS[record["reason"]]
     if record["at_step"] == "entered":
-        return ENTERED % why
-    if record["at_step"] == "acknowledged":
-        return REPEAT_ACKNOWLEDGED % why
-    return REPEAT_BEFORE % why
+        text = ENTERED % why
+    elif record["at_step"] == "acknowledged":
+        text = REPEAT_ACKNOWLEDGED % why
+    else:
+        text = REPEAT_BEFORE % why
+    return text + (LEFT if record["left_in_line"] else "")
 
 
 def _take_notice(project_dir: str, pane: str, identity: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -477,16 +486,18 @@ def first_on_machine() -> bool:
 
 
 def find_ack(project_dir: str, origin: str, generation: str) -> Optional[str]:
-    """The session that took this generation after /clear: an `injected` line via `clear` for it, newest first.
+    """The session this generation was delivered to after /clear: a `delivered` line via `clear` for it.
 
-    OSError when injections.jsonl cannot be read.
+    Only that line counts: it is written once the emit returned, while `injected`
+    comes before the emit, which can still fail and leave the claim unfinished
+    (handover_injection.deliver). OSError when injections.jsonl cannot be read.
     """
     for raw in reversed(rotation_state.journal_checked(project_dir).splitlines()):
         try:
             line = json.loads(raw.decode("utf-8"))
         except ValueError:
             continue
-        if (state_fields.record_problem(line) is None and line["event"] == "injected" and line["via"] == "clear"
+        if (state_fields.record_problem(line) is None and line["event"] == "delivered" and line["via"] == "clear"
                 and line["origin_session_id"] == origin and line["generation"] == generation):
             return line["session_id"]
     return None

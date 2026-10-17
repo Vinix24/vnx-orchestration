@@ -9,13 +9,14 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import time
 
 import pytest
 
 from conftest import (
-    PANE_EXPECTED, VALID_HANDOVER, FakeTmux, Session, b1_entry, clear_events, journal_lines, message_of, rotation,
-    settings_file, start, started,
+    HOOKS, PANE_EXPECTED, VALID_HANDOVER, FakeTmux, Session, b1_entry, clear_events, event, journal_lines, message_of,
+    pane_text, rotation, settings_file, start, started,
 )
 
 import auto_clear
@@ -67,7 +68,8 @@ def test_the_job_clears_and_continues_in_the_fresh_session(session, fake, tmux_b
     assert fake.shown() == []
     assert clear_events(project) == ["clear_started", "clear_entered", "clear_acknowledged", "clear_continued"]
     events = [line["event"] for line in journal_lines(project)]
-    assert events.index("clear_entered") < events.index("injected") < events.index("clear_acknowledged")
+    assert (events.index("clear_entered") < events.index("injected") < events.index("delivered")
+            < events.index("clear_acknowledged"))
     found = record(project)
     assert (found["step"], found["successor"], found["origin_session_id"]) == ("continued", "sess-b", "sess-a")
     assert not (rotation(project) / "clear-7.lock").exists()
@@ -110,18 +112,63 @@ def test_each_capture_decides_whether_clear_is_typed(name, session, fake, tmux_b
         stopped(project, fake, reason)
 
 
-# --- verify before Enter ---------------------------------------------------------
+# --- verify before Enter, and never remove what is not the job's own ------------------
 
-def test_a_line_that_never_reads_clear_gets_six_bspace_and_nothing_else(session, fake, tmux_bin, project):
+def left_alone(session, project, fake, reason, reached="started"):
+    """Stopped for `reason` with the input line left as it is: the record, its line and both user lines say so."""
+    assert clear_events(project)[-1] == "clear_aborted"
+    assert journal_lines(project)[-1]["left_in_line"] is True
+    found = record(project)
+    assert (found["step"], found["at_step"], found["reason"], found["left_in_line"]) == (
+        "aborted", reached, reason, True)
+    (shown,) = fake.shown()
+    assert shown == auto_clear.display_text(reached, reason, True) and shown.endswith(auto_clear.LEFT)
+    assert auto_clear.LEFT in message_of(session.prompt("my own prompt"))
+
+
+def fail_journal_at(monkeypatch, wanted, then=None):
+    """The journal line of event `wanted` fails; `then(fake)` runs first, while the project lock is held."""
+    real = rotation_state.journal
+
+    def journal(project_dir, event, **fields):
+        if event == wanted:
+            if then:
+                then()
+            raise PermissionError(13, "Permission denied")
+        return real(project_dir, event, **fields)
+
+    monkeypatch.setattr(rotation_state, "journal", journal)
+
+
+def during_journal_of(monkeypatch, wanted, change):
+    """`change()` runs right after the line of event `wanted` is written, with the project lock still held."""
+    real = rotation_state.journal
+
+    def journal(project_dir, event, **fields):
+        real(project_dir, event, **fields)
+        if event == wanted:
+            change()
+
+    monkeypatch.setattr(rotation_state, "journal", journal)
+
+
+def test_text_the_user_adds_after_the_typed_clear_is_never_removed(session, fake, tmux_bin, project):
+    """Codex on 450a7683: the user appends hello after /clear; the cleanup took hello and the r, leaving /clea."""
     args = started(session, tmux_bin)
-    fake.echo = False  # the keys land, but the input line never shows them
+
+    def user_appends(tmux):
+        if tmux.typed == "/clear":
+            tmux.typed = "/clearhello"
+
+    fake.on_capture = user_appends
     tmux_clear.main(args)
-    assert fake.sent() == [CLEAR, SIX]
-    stopped(project, fake, "typed")
-    assert "clear_entered" not in clear_events(project)
+    assert fake.sent() == [CLEAR]
+    assert fake.typed == "/clearhello"
+    assert fake.submitted == []
+    left_alone(session, project, fake, "typed")
 
 
-def test_a_key_of_the_user_between_check_and_typing_is_kept(session, fake, tmux_bin, project):
+def test_text_the_user_typed_before_the_clear_is_left_as_it_is(session, fake, tmux_bin, project):
     args = started(session, tmux_bin)
 
     def user_types(tmux):
@@ -130,12 +177,36 @@ def test_a_key_of_the_user_between_check_and_typing_is_kept(session, fake, tmux_
 
     fake.on_capture = user_types
     tmux_clear.main(args)
-    assert fake.sent() == [CLEAR, SIX]
-    assert fake.typed == "x"
-    stopped(project, fake, "typed")
+    assert fake.sent() == [CLEAR]
+    assert fake.typed == "x/clear"
+    left_alone(session, project, fake, "typed")
 
 
-def test_a_pane_that_cannot_be_read_after_typing_gets_six_bspace(session, fake, tmux_bin, project):
+def test_a_line_that_never_reads_back_gets_no_key(session, fake, tmux_bin, project):
+    args = started(session, tmux_bin)
+    fake.echo = False  # the keys may land later, but the input line never shows them
+    tmux_clear.main(args)
+    assert fake.sent() == [CLEAR]
+    assert "clear_entered" not in clear_events(project)
+    left_alone(session, project, fake, "typed")
+
+
+def test_a_line_that_reads_back_only_in_part_gets_no_key(session, fake, tmux_bin, project):
+    args = started(session, tmux_bin)
+
+    def in_part(tmux):
+        if CLEAR in tmux.sent() and tmux.typed == "":
+            tmux.typed = "/cl"
+
+    fake.echo = False
+    fake.on_capture = in_part
+    tmux_clear.main(args)
+    assert fake.sent() == [CLEAR]
+    assert fake.typed == "/cl"
+    left_alone(session, project, fake, "typed")
+
+
+def test_a_pane_that_cannot_be_read_after_typing_gets_no_key(session, fake, tmux_bin, project):
     args = started(session, tmux_bin)
 
     def gone(tmux):
@@ -144,8 +215,39 @@ def test_a_pane_that_cannot_be_read_after_typing_gets_six_bspace(session, fake, 
 
     fake.on_capture = gone
     tmux_clear.main(args)
+    assert fake.sent() == [CLEAR]
+    assert fake.typed == "/clear"
+    left_alone(session, project, fake, "pane_unreadable")
+
+
+def test_a_cursor_moved_off_the_end_gets_no_key(session, fake, tmux_bin, project, monkeypatch):
+    """The line reads exactly /clear, but the cursor is not after it: BSpace would leave part of it behind."""
+    args = started(session, tmux_bin)
+    fail_journal_at(monkeypatch, "clear_entered", lambda: setattr(fake, "back", 2))
+    tmux_clear.main(args)
+    assert fake.sent() == [CLEAR]
+    assert fake.typed == "/clear"
+    left_alone(session, project, fake, "journal")
+
+
+def test_text_added_while_the_journal_line_failed_is_left_as_it_is(session, fake, tmux_bin, project, monkeypatch):
+    args = started(session, tmux_bin)
+    fail_journal_at(monkeypatch, "clear_entered", lambda: setattr(fake, "typed", fake.typed + " and more"))
+    tmux_clear.main(args)
+    assert fake.sent() == [CLEAR]
+    assert fake.typed == "/clear and more"
+    left_alone(session, project, fake, "journal")
+
+
+def test_a_journal_line_that_cannot_be_written_sends_no_enter(session, fake, tmux_bin, project, monkeypatch):
+    """The line is exactly the job's /clear with the cursor after it: six BSpace remove only what it typed."""
+    args = started(session, tmux_bin)
+    fail_journal_at(monkeypatch, "clear_entered")
+    tmux_clear.main(args)
     assert fake.sent() == [CLEAR, SIX]
-    stopped(project, fake, "pane_unreadable")
+    assert fake.typed == "" and fake.submitted == []
+    stopped(project, fake, "journal")
+    assert record(project)["left_in_line"] is False and auto_clear.LEFT not in fake.shown()[0]
 
 
 def test_the_continuation_line_is_verified_too(session, fake, tmux_bin, project):
@@ -159,8 +261,82 @@ def test_the_continuation_line_is_verified_too(session, fake, tmux_bin, project)
 
     fake.on_enter.append(silent_after_clear)
     tmux_clear.main(args)
-    assert fake.sent() == [CLEAR, ["Enter"], CONTINUE, ["BSpace"] * len(tmux_clear.CONTINUE)]
-    stopped(project, fake, "typed", "acknowledged")
+    assert fake.sent() == [CLEAR, ["Enter"], CONTINUE]
+    left_alone(session, project, fake, "typed", "acknowledged")
+
+
+# --- Enter goes on a look taken after the journal line ------------------------------------
+
+def test_a_line_replaced_during_the_journal_write_gets_no_enter(session, fake, tmux_bin, project, monkeypatch):
+    """Codex on 450a7683: the input is replaced while the line is written; Enter submitted the user's draft."""
+    args = started(session, tmux_bin)
+    during_journal_of(monkeypatch, "clear_entered", lambda: setattr(fake, "typed", "my draft"))
+    tmux_clear.main(args)
+    assert fake.submitted == []
+    assert fake.sent() == [CLEAR]
+    assert fake.typed == "my draft"
+    left_alone(session, project, fake, "typed")
+
+
+def test_a_session_busy_after_the_journal_write_gets_no_enter(session, fake, tmux_bin, project, monkeypatch):
+    args = started(session, tmux_bin)
+    during_journal_of(monkeypatch, "clear_entered", lambda: setattr(fake, "base", pane_text("03-busy-auto.esc.txt")))
+    tmux_clear.main(args)
+    assert fake.submitted == []
+    assert fake.sent() == [CLEAR, SIX], "the line was exactly the job's /clear, so it was taken back"
+    stopped(project, fake, "busy")
+
+
+def test_claude_gone_after_the_journal_write_gets_no_enter(session, fake, tmux_bin, project, monkeypatch):
+    args = started(session, tmux_bin)
+    during_journal_of(monkeypatch, "clear_entered",
+                      lambda: monkeypatch.setattr(rotation_state, "process_start_checked", lambda pid: None))
+    tmux_clear.main(args)
+    assert fake.submitted == []
+    assert fake.sent() == [CLEAR]
+    found = record(project)
+    assert (found["reason"], found["left_in_line"]) == ("process", True)
+    assert fake.shown() == [auto_clear.display_text("started", "process", True)]
+
+
+def test_a_continuation_replaced_during_its_journal_write_gets_no_enter(session, fake, tmux_bin, project,
+                                                                         monkeypatch):
+    args = started(session, tmux_bin)
+    results = []
+    fake.on_enter.append(successor(project, results))
+    during_journal_of(monkeypatch, "clear_continued", lambda: setattr(fake, "typed", "my draft"))
+    tmux_clear.main(args)
+    assert fake.submitted == ["/clear"]
+    assert fake.sent() == [CLEAR, ["Enter"], CONTINUE]
+    assert fake.typed == "my draft"
+    found = record(project)
+    assert (found["at_step"], found["reason"], found["left_in_line"]) == ("acknowledged", "typed", True)
+
+
+def test_each_enter_follows_its_line_and_a_look_with_nothing_in_between(session, fake, tmux_bin, project,
+                                                                         monkeypatch):
+    """The last call before each Enter is a capture of the pane, taken after the step's journal line."""
+    args = started(session, tmux_bin)
+    results = []
+    fake.on_enter.append(successor(project, results))
+
+    def noted(name, real):
+        def call(*args, **kwargs):
+            fake.calls.append([name] + [arg for arg in args[1:2] if name == "journal"])
+            return real(*args, **kwargs)
+        return call
+
+    monkeypatch.setattr(rotation_state, "journal", noted("journal", rotation_state.journal))
+    monkeypatch.setattr(tmux_clear, "sleep", noted("sleep", tmux_clear.sleep))
+    monkeypatch.setattr(tmux_clear, "process_table", noted("ps", tmux_clear.process_table))
+    monkeypatch.setattr(rotation_state, "process_start_checked", noted("ps", rotation_state.process_start_checked))
+    tmux_clear.main(args)
+    enters = [number for number, call in enumerate(fake.calls) if call == ["send-keys", "-t", "%7", "Enter"]]
+    assert len(enters) == 2 and fake.submitted == ["/clear", tmux_clear.CONTINUE]
+    for number, event in zip(enters, ("clear_entered", "clear_continued")):
+        before = fake.calls[:number]
+        assert "capture-pane" in before[-1], "the call right before Enter is not a look at the pane"
+        assert before.index(["journal", event]) < number - 1, "the look is older than the journal line"
 
 
 # --- the successor's acknowledgement ---------------------------------------------------
@@ -183,20 +359,73 @@ def test_the_ack_wait_is_capped_below_the_lock_age(session, fake, tmux_bin, proj
     assert tmux_clear.MAX_ACK_SECONDS <= clock.now - begin < tmux_clear.STALE_LOCK_SECONDS
 
 
-def test_an_injection_of_another_generation_is_no_ack(session, fake, tmux_bin, project):
+def injected_line(session, project, generation):
+    rotation_state.journal(str(project), "injected", via="clear", origin_session_id="sess-a",
+                           generation=generation, session_id="sess-b", handover=str(session.handover),
+                           archive=str(rotation(project) / "archive" / "20261017T000000000000Z-sess-a.md"),
+                           sha256="0" * 64, chars=1, mode="inline")
+
+
+def test_a_delivery_of_another_generation_is_no_ack(session, fake, tmux_bin, project):
     args = started(session, tmux_bin)
 
     def other_generation(submitted):
-        rotation_state.journal(str(project), "injected", via="clear", origin_session_id="sess-a",
-                               generation="0" * 16, session_id="sess-b",
-                               handover=str(session.handover), archive=str(rotation(project) / "archive" /
-                                                                           "20261017T000000000000Z-sess-a.md"),
-                               sha256="0" * 64, chars=1, mode="inline")
+        injected_line(session, project, "0" * 16)
+        rotation_state.journal(str(project), "delivered", via="clear", origin_session_id="sess-a",
+                               generation="0" * 16, session_id="sess-b")
 
     fake.on_enter.append(other_generation)
     tmux_clear.main(args)
     assert fake.sent() == [CLEAR, ["Enter"]]
     stopped(project, fake, "no_ack", "entered")
+
+
+def test_an_injected_line_without_its_delivery_is_no_ack(session, fake, tmux_bin, project):
+    """The `injected` line is written before the emit: it says a delivery began, not that it finished."""
+    args = started(session, tmux_bin)
+    generation = json.loads(session.marker("ready").read_text())["generation"]
+    fake.on_enter.append(lambda submitted: injected_line(session, project, generation))
+    tmux_clear.main(args)
+    assert fake.sent() == [CLEAR, ["Enter"]]
+    stopped(project, fake, "no_ack", "entered")
+
+
+def broken_successor(project, results, session_id="sess-b"):
+    """On Enter after /clear: the fresh session's SessionStart, with nobody reading its output any more.
+
+    Its stdout is a pipe whose read end is closed before the hook starts, so the emit
+    of the handover fails with EPIPE (BrokenPipeError) after the `injected` line.
+    """
+    def on_enter(submitted):
+        if submitted != "/clear":
+            return
+        payload = event("17-SessionStart-clear", project, project / "none.jsonl", session_id, source="clear")
+        proc = subprocess.Popen([sys.executable, str(HOOKS / "session_start.py")], stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                env=dict(os.environ, CLAUDE_PID=str(os.getpid())))
+        proc.stdout.close()
+        proc.stdout = None
+        _, err = proc.communicate(json.dumps(payload), timeout=60)
+        results.append((proc.returncode, err))
+    return on_enter
+
+
+def test_a_handover_whose_emit_failed_gets_no_continuation(session, fake, tmux_bin, project):
+    """Codex on 450a7683: the emit raises BrokenPipeError, the claim stays, and the job still typed the line."""
+    args = started(session, tmux_bin)
+    results = []
+    fake.on_enter.append(broken_successor(project, results))
+    tmux_clear.main(args)
+    assert fake.sent() == [CLEAR, ["Enter"]]
+    assert fake.submitted == ["/clear"]
+    ((status, err),) = results
+    # 1 from the hook, or 120 when Python cannot flush stdout at exit either; never 2, which would block.
+    assert status in (1, 120) and "emit handover failed: BrokenPipeError" in err
+    events = [line["event"] for line in journal_lines(project)]
+    assert "injected" in events and "delivered" not in events
+    assert list(rotation(project).glob("claimed-sess-a-*.json")), "the claim that did not finish stays for resume"
+    stopped(project, fake, "no_ack", "entered")
+    assert "/context-rotation:rotate resume" in fake.shown()[0]
 
 
 # --- the marker is read again ---------------------------------------------------------
@@ -328,20 +557,29 @@ def test_an_unexpected_error_stops_the_job_with_its_reason(session, fake, tmux_b
 
 # --- the pane and the process ---------------------------------------------------------------
 
-@pytest.mark.parametrize("info, reason", [
-    ("%7 {pid} 0 1 0", "pane_mode"),
-    ("%7 {pid} 0 0 1", "pane_synchronized"),
-    ("%7 {pid} 1 0 0", "pane_gone"),
-    ("%8 {pid} 0 0 0", "pane_gone"),
-    ("", "pane_gone"),
-    ("%7 x 0 0 0", "pane_gone"),
+@pytest.mark.parametrize("fields, reason", [
+    ({"pane_in_mode": "1"}, "pane_mode"),
+    ({"pane_synchronized": "1"}, "pane_synchronized"),
+    ({"pane_dead": "1"}, "pane_gone"),
+    ({"pane_id": "%8"}, "pane_gone"),
+    ({"pane_id": ""}, "pane_gone"),  # what tmux prints for a pane that is gone (measured, tmux 3.7)
+    ({"pane_pid": "x"}, "pane_gone"),
+    ({"cursor_y": ""}, "pane_gone"),
 ])
-def test_a_pane_that_is_not_plain_and_alive_types_nothing(info, reason, session, fake, tmux_bin, project):
+def test_a_pane_that_is_not_plain_and_alive_types_nothing(fields, reason, session, fake, tmux_bin, project):
     args = started(session, tmux_bin)
-    fake.info = info.format(pid=os.getpid())
+    fake.fields = fields
     tmux_clear.main(args)
     assert fake.sent() == []
     stopped(project, fake, reason)
+
+
+def test_a_pane_that_prints_no_state_types_nothing(session, fake, tmux_bin, project):
+    args = started(session, tmux_bin)
+    fake.info = ""
+    tmux_clear.main(args)
+    assert fake.sent() == []
+    stopped(project, fake, "pane_gone")
 
 
 def test_a_pane_tmux_cannot_find_types_nothing(session, fake, tmux_bin, project):

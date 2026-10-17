@@ -13,11 +13,15 @@ Measured on Claude Code 2.1.300 (tests/fixtures/a0/panes):
   approves): no input box means not idle.
 
 Only SGR sequences (`ESC[...m`) change what is read here, and of them only the dim
-flag; other escape sequences (OSC hyperlinks) are skipped. Standard library only.
+flag; other escape sequences (OSC hyperlinks) are skipped. A row is a line of the
+capture counted from 0, as tmux counts `cursor_y`, and a column counts what a
+character takes on the screen (2 for a wide one, 0 for a combining one), as tmux
+counts `cursor_x`. Standard library only.
 """
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 ESC = "\x1b"
@@ -29,11 +33,25 @@ EXTENDED_COLOURS = (38, 48, 58)
 
 
 class Screen(NamedTuple):
-    """What the job needs to know of a screen: `typed` is None without an input box."""
+    """What the job needs to know of a screen: `typed` is None without an input box.
+
+    `row` is the input line's row and `end` the column right after its last typed
+    character, where the cursor stands when nothing moved it; both None without an
+    input box.
+    """
 
     box: bool
     typed: Optional[str]
     busy: bool
+    row: Optional[int] = None
+    end: Optional[int] = None
+
+
+def width(char: str) -> int:
+    """The columns a character takes on the screen."""
+    if unicodedata.combining(char):
+        return 0
+    return 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
 
 
 def _dim_after(params: str, dim: bool) -> bool:
@@ -127,7 +145,10 @@ def read(text: str, settings: Dict[str, Any]) -> Screen:
     if prompt is None:
         return Screen(False, None, busy)
     typed = "".join(char for char, dim in input_cells[prompt.end():] if not dim).rstrip(" ")
-    return Screen(True, typed, busy)
+    shown = [index for index in range(prompt.end(), len(input_cells))
+             if not input_cells[index][1] and input_cells[index][0] != " "]
+    last = shown[-1] + 1 if shown else prompt.end()
+    return Screen(True, typed, busy, top + 1, sum(width(char) for char, _ in input_cells[:last]))
 
 
 def idle_problem(screen: Screen) -> Optional[str]:

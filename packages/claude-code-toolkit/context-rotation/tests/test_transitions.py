@@ -228,11 +228,12 @@ def test_every_transition_has_its_line(tmp_path, project, other_pid):
     user.expand("resume")
     user.expand("resume 1")
     lines = journal(project)
-    assert [line.get("event") for line in lines] == ["ready", "outdated", "claimed", "injected"]
+    assert [line.get("event") for line in lines] == ["ready", "outdated", "claimed", "injected", "delivered"]
     assert all(line.get("origin_session_id") == "sess-a" for line in lines)
     assert len({line.get("generation") for line in lines}) == 1, "one handover, one generation in every line"
     assert lines[1].get("reason") == "a prompt after it"
-    assert (lines[2].get("session_id"), lines[3].get("session_id")) == ("sess-c", "sess-c")
+    assert [line.get("session_id") for line in lines[2:]] == ["sess-c"] * 3
+    assert lines[4]["via"] == "resume"
     assert open(lines[3]["archive"]).read() == VALID_HANDOVER
 
 

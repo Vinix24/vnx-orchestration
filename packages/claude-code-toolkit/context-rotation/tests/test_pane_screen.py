@@ -39,6 +39,35 @@ def test_dim_text_after_typed_text_is_left_out():
     assert pane_screen.read(text, SETTINGS).typed == "/clear"
 
 
+@pytest.mark.parametrize("name", ["04-idle-empty-auto.esc.txt", "08-idle-empty-mode2.esc.txt",
+                                  "07-after-clear-auto.esc.txt", "01-idle-placeholder-auto.esc.txt"])
+def test_the_row_and_the_end_of_the_typed_text_are_where_tmux_puts_the_cursor(name):
+    """tmux counts cursor_y from the first line of the capture and cursor_x in screen columns (measured, 3.7)."""
+    text = with_input(pane_text(name), "/clear")
+    row = next(number for number, line in enumerate(text.split("\n")) if PROMPT in line)
+    screen = pane_screen.read(text, SETTINGS)
+    assert (screen.typed, screen.row, screen.end) == ("/clear", row, len(PROMPT) + len("/clear"))
+
+
+def test_an_empty_input_line_ends_right_after_the_prompt():
+    assert pane_screen.read(pane_text("04-idle-empty-auto.esc.txt"), SETTINGS).end == len(PROMPT)
+    assert pane_screen.read(pane_text("05-idle-suggestion-auto.esc.txt"), SETTINGS).end == len(PROMPT)
+
+
+def test_the_end_counts_screen_columns_not_characters():
+    base = pane_text("04-idle-empty-auto.esc.txt")
+    assert pane_screen.read(with_input(base, "/clear\x1b[2m <args>\x1b[0m"), SETTINGS).end == len(PROMPT) + 6
+    assert pane_screen.read(with_input(base, "日本"), SETTINGS).end == len(PROMPT) + 4
+    assert pane_screen.read(with_input(base, "é"), SETTINGS).end == len(PROMPT) + 1
+    assert pane_screen.read(with_input(base, "a\x1b]8;;file://x\x1b\\b"), SETTINGS).end == len(PROMPT) + 2
+    assert pane_screen.read(with_input(base, "a b  "), SETTINGS).end == len(PROMPT) + 3
+
+
+def test_no_input_box_has_no_row_or_end():
+    screen = pane_screen.read(pane_text("11-permission-dialog-mode2.esc.txt"), SETTINGS)
+    assert (screen.row, screen.end) == (None, None)
+
+
 def test_a_prompt_in_the_history_is_not_the_input_line():
     """History prompts have a plain space after `❯`; only the input line has the no-break space."""
     text = pane_text("04-idle-empty-auto.txt")
