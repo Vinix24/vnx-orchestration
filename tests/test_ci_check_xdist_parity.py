@@ -612,45 +612,18 @@ def test_the_shadow_ran_another_selection_than_this_commit_emits(ev, tmp_path):
 # --- stale evidence: every input proves the run and attempt it is counted for -----------------------------------
 
 
-hist = _load("xdist_parity_history", REPO_ROOT / "scripts" / "ci" / "xdist_parity_history.py")
-
-
-def _clean_verdict(run_id: str, fingerprint: str) -> dict:
-    return {"schema": "vnx-xdist-parity/1", "profile": "heavy", "exit": 0, "verdict": "parity",
-            "selection_fingerprint": fingerprint, "step_failures": [], "run_id": run_id, "run_attempt": "1",
-            "steps": {name: "success" for name in cxp.PARITY_STEPS},
-            "shadow": {"record": "present", "verdict": "shadow_passed", "job_result": "success", "suite_wall_s": 600},
-            "reference": {"job_result": "success", "result": "present", "exit": 0, "duration_s": 2110},
-            "differences": {}, "invalid_evidence": []}
-
-
-def _cutover_holds(verdict: dict) -> bool:
-    """The cutover rule over ten runs on ten heads over two days, the latest on main: *verdict*'s run plus nine clean ones."""
-    fingerprint = verdict.get("selection_fingerprint") or "f" * 64
-    runs = [hist.Run(verdict["run_id"], int(verdict["run_attempt"]), f"{0:040x}", "dispatch/x", "pull_request",
-                     "2026-11-01T00:00:00Z", "completed", "success", verdict)]
-    for n in range(1, 10):
-        on_main = n == 9
-        runs.append(hist.Run(str(5000 + n), 1, f"{n:040x}", "main" if on_main else "dispatch/x",
-                             "push" if on_main else "pull_request", f"2026-11-0{1 if n < 5 else 2}T{n:02d}:00:00Z",
-                             "completed", "success", _clean_verdict(str(5000 + n), fingerprint)))
-    return hist.evaluate(runs, target_fingerprint=fingerprint, is_ancestor=lambda head: True, watch_list=[],
-                         oi_status=None, list_truncated=False).holds
-
-
 def _stale_details(verdict: dict) -> list:
     return [p["detail"] for p in verdict["invalid_evidence"] if p["reason"] == "stale_evidence"]
 
 
-def test_evidence_that_proves_attempt_2_holds_the_cutover(ev, tmp_path):
+def test_evidence_that_proves_attempt_2_is_parity(ev, tmp_path):
     ev.attempt("2")
     verdict = ev.verdict(args_dir=ev.own_args(tmp_path / "own-args"))
     assert verdict["exit"] == 0 and verdict["invalid_evidence"] == [] and verdict["step_failures"] == []
-    assert _cutover_holds(verdict)
 
 
 def test_a_shadow_record_of_an_earlier_attempt_is_stale_evidence(ev):
-    """codex round 2: parity attempt 2 with the shadow record of attempt 1 gave exit 0 and cutover_holds=true."""
+    """codex round 2: parity attempt 2 with the shadow record of attempt 1 gave exit 0."""
     ev.attempt("2")
     ev.stamp["shadow"] = {"run_attempt": "1"}
     verdict = ev.verdict()
@@ -658,7 +631,6 @@ def test_a_shadow_record_of_an_earlier_attempt_is_stale_evidence(ev):
     assert _stale_details(verdict) == ["shadow record xdist-shadow.json of attempt 1, not of attempt 2"]
     assert "shadow.record=stale" in verdict["step_failures"]
     assert verdict["shadow"].get("suite_wall_s") is None, "nothing is read from a stale shadow record"
-    assert not _cutover_holds(verdict)
 
 
 # input -> the name its stale_evidence detail carries
@@ -700,7 +672,6 @@ def test_every_input_must_prove_its_run_and_attempt(ev, tmp_path, name, stale):
     assert verdict["exit"] == 2 and verdict["verdict"] == "invalid_evidence", verdict["invalid_evidence"]
     [detail] = _stale_details(verdict)
     assert STAMPED_INPUTS[name] in detail and phrase in detail, detail
-    assert not _cutover_holds(verdict)
 
 
 def test_the_two_phase_shape_proves_attempt_2_when_every_input_does(ev, tmp_path):
@@ -950,20 +921,18 @@ def test_a_reference_without_a_phase_result_shows_no_exit(ev):
     (lambda ev: ev.reference_result.update(exit=False), "reference.exit=None"),
     (lambda ev: setattr(ev, "reference_result", None), "reference.result=missing"),
 ], ids=["audit-after-upload", "cancelled", "no-job-result", "suite-red", "exit-bool", "no-phase-result"])
-def test_a_failed_reference_run_is_a_step_failure_and_never_holds_the_cutover(ev, change, failure):
-    """codex round 3: Profile A failed an audit after uploading passing evidence: exit 0, no step failure, cutover held."""
+def test_a_failed_reference_run_is_a_step_failure(ev, change, failure):
+    """codex round 3: Profile A failed an audit after uploading passing evidence: exit 0 and no step failure."""
     change(ev)
     verdict = ev.verdict()
     assert verdict["exit"] == 0, "the comparison itself is parity"
     assert failure in verdict["step_failures"], verdict["step_failures"]
-    assert not _cutover_holds(verdict)
 
 
 def test_a_clean_reference_and_shadow_give_no_step_failure(ev):
     verdict = ev.verdict()
     assert verdict["reference"] == {"job_result": "success", "result": "present", "exit": 0, "duration_s": 2110}
     assert verdict["step_failures"] == []
-    assert _cutover_holds(verdict)
 
 
 # --- the CLI -----------------------------------------------------------------------------------------

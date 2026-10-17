@@ -47,15 +47,15 @@ The contract (plan "The comparison contract (D2)"):
   emission as ``args/run.json``, the shadow record as fields. Nothing is read
   from a stale input: a stale phase is not compared, a stale shadow record
   gives no profile and no wall time, stale args give no fingerprint. The rule
-  is ``stale_evidence_reason``, shared with ``xdist_parity_history.py``.
+  is ``stale_evidence_reason``.
 * Exit 0 only when the candidate executed exactly the reference set with the
   same outcome classes.
-* Step failures (``step_failures``, never part of the exit, always part of the
-  cutover rule): every parity-job step that is not success, Profile A's job
-  result, phase result and pytest exit (an audit step can fail Profile A after
-  its evidence was uploaded green), the shadow's record, verdict and job
-  result. ``step_failures`` is the one rule; xdist_parity_history.py applies
-  it again to the blocks each verdict records.
+* Step failures (``step_failures``, recorded in the verdict, never part of the
+  exit): every parity-job step that is not success, Profile A's job result,
+  phase result and pytest exit (an audit step can fail Profile A after its
+  evidence was uploaded green), the shadow's record, verdict and job result.
+  The verdict also records the blocks they are derived from (``steps``,
+  ``reference``, ``shadow``).
 
 The skip set is a set of keys; skip reasons are carried in the entries for
 triage but never compared. Measured on run 38951854817 (head 0d74af29): 6 of
@@ -155,9 +155,8 @@ def stale_evidence_reason(what: str, stamp, run_id, run_attempt) -> str | None:
     itself. Evidence counts only for the run and attempt it names: not for
     another run, not for another attempt of the same run, and not when it names
     none. A caller without a run to hold the evidence against proves nothing
-    current either. The one rule for current evidence, shared by the parity
-    job (every input it counts) and xdist_parity_history.py (every verdict it
-    counts).
+    current either. The one rule for current evidence: the parity job applies
+    it to every input it counts.
     """
     expected_id, expected_attempt = str(run_id or "").strip(), stamp_attempt(run_attempt)
     if not expected_id or expected_attempt is None:
@@ -702,9 +701,7 @@ def step_failures(steps: dict, shadow: dict, reference: dict) -> list:
     *steps*, *shadow* and *reference* are the verdict's own blocks. The
     reference is Profile A: its job result (an audit can fail it after its
     evidence was uploaded green), its phase result and that result's pytest
-    exit. The one step rule: xdist_parity_history.py applies it again to the
-    blocks a verdict records, so a failure recorded there blocks the cutover
-    also when the verdict's list leaves it out.
+    exit. The verdict records this list next to the blocks it is derived from.
     """
     failures = [f"parity.{name}={steps.get(name) or 'unknown'}" for name in PARITY_STEPS if steps.get(name) != "success"]
     if reference.get("job_result") != "success":

@@ -411,8 +411,7 @@ jobs:
   # with the xdist shadow (candidate) through scripts/ci/check_xdist_parity.py
   # and writes xdist-parity-verdict.json: exit 0 parity, 1 differences, 2
   # invalid evidence, with the difference lists, the step outcomes and the
-  # selection fingerprint. scripts/ci/xdist_parity_history.py reads these
-  # verdicts for the cutover rule of D4.
+  # selection fingerprint.
   #
   # NOT a required check, and it must never fail one, by the same rules as the
   # shadow job above: every step non-fatal, every step bounded with the sum
@@ -422,8 +421,8 @@ jobs:
   # evidence exists, and missing evidence is exit 2, recorded. A red Profile A
   # is red on its own; this job never adds a second red, and its verdict lists
   # it as a step failure (reference.job, also when an audit failed after the
-  # evidence upload), so that run never counts toward the cutover. On a light
-  # run it runs its prelude and records "verdict": "not_applicable".
+  # evidence upload). On a light run it runs its prelude and records
+  # "verdict": "not_applicable".
   xdist-parity:
     name: xdist parity
     runs-on: ubuntu-latest
@@ -522,8 +521,11 @@ jobs:
             --upstream "profile_a=$RESULT_PROFILE_A" --upstream "shadow=$RESULT_SHADOW"
 
       # Plain bash, no checkout needed: when the parity script wrote no verdict
-      # (failed checkout, a crash), this records exit 2 so the history never
-      # sees a silent gap.
+      # (failed checkout, a crash), this writes an exit-2 verdict, so no run is
+      # left without one. A verdict that exists is kept as the parity script
+      # wrote it, also when the parity step failed after writing it: that
+      # step's outcome is not added to the verdict. No reader uses the verdict
+      # for a decision until OI-2145 is closed.
       - name: Record the parity verdict
         id: record
         if: ${{ always() }}
