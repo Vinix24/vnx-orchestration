@@ -1,0 +1,35 @@
+{
+ "parentUuid": "<uuid>",
+ "isSidechain": false,
+ "message": {
+  "model": "claude-sonnet-5-5",
+  "id": "<message_id>",
+  "type": "message",
+  "role": "assistant",
+  "content": [
+   {
+    "type": "thinking",
+    "thinking": "<thinking>",
+    "signature": "<signature>"
+   }
+  ],
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "usage": {
+   "input_tokens": 4,
+   "cache_creation_input_tokens": 468,
+   "cache_read_input_tokens": 76157,
+   "output_tokens": 71
+  }
+ },
+ "requestId": "<request_id>",
+ "type": "assistant",
+ "uuid": "<uuid>",
+ "timestamp": "<timestamp>",
+ "userType": "external",
+ "entrypoint": "cli",
+ "cwd": "<project_dir>",
+ "sessionId": "<session_id>",
+ "version": "2.1.300",
+ "gitBranch": "<branch>"
+}

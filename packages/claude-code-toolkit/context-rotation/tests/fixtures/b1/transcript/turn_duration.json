@@ -1,0 +1,15 @@
+{
+ "parentUuid": "<uuid>",
+ "isSidechain": false,
+ "type": "system",
+ "subtype": "turn_duration",
+ "durationMs": 1234,
+ "uuid": "<uuid>",
+ "timestamp": "<timestamp>",
+ "userType": "external",
+ "entrypoint": "cli",
+ "cwd": "<project_dir>",
+ "sessionId": "<session_id>",
+ "version": "2.1.300",
+ "gitBranch": "<branch>"
+}
