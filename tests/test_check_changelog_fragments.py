@@ -138,6 +138,40 @@ def test_removing_the_unreleased_heading_fails(repo):
     assert "lost its '## [Unreleased]' heading" in result.stdout
 
 
+@pytest.mark.parametrize(
+    "old,new,needle",
+    [
+        ("- legacy bullet\n\n", "", "removes or changes 1 line(s) under '## [Unreleased]'"),
+        ("- legacy bullet\n", "- legacy bullet, reworded\n", "removes or changes 1 line(s) under '## [Unreleased]'"),
+    ],
+    ids=["dropped-bullet", "reworded-bullet"],
+)
+def test_non_release_pr_that_drops_or_changes_an_unreleased_line_fails(repo, old, new, needle):
+    pr_branch(repo)
+    commit(repo, {"CHANGELOG.md": BASE_CHANGELOG.replace(old, new, 1)})
+    result = run_check(repo)
+    assert result.returncode == 1
+    assert needle in result.stdout
+    assert "    - legacy bullet\n" in result.stdout
+
+
+def test_non_release_pr_that_reorders_unreleased_lines_fails(tmp_path):
+    two = BASE_CHANGELOG.replace("- legacy bullet\n", "- first\n\n- second\n")
+    repo = init_repo(tmp_path / "two", {"CHANGELOG.md": two, "VERSION": "1.0.0\n", "changelog.d/README.md": "# rule\n"})
+    pr_branch(repo)
+    commit(repo, {"CHANGELOG.md": two.replace("- first\n\n- second\n", "- second\n\n- first\n")})
+    result = run_check(repo)
+    assert result.returncode == 1
+    assert "reorders the lines under '## [Unreleased]'" in result.stdout
+
+
+def test_blank_line_change_under_unreleased_passes(repo):
+    pr_branch(repo)
+    commit(repo, {"CHANGELOG.md": BASE_CHANGELOG.replace("- legacy bullet\n", "\n- legacy bullet\n")})
+    result = run_check(repo)
+    assert result.returncode == 0, result.stdout
+
+
 def test_consumer_without_fragment_directory_passes_and_does_nothing(tmp_path):
     repo = init_repo(tmp_path / "consumer", {"CHANGELOG.md": BASE_CHANGELOG})
     pr_branch(repo)
@@ -190,6 +224,22 @@ def test_editing_the_readme_passes(repo):
     pr_branch(repo)
     commit(repo, {"changelog.d/README.md": "# rule, reworded\n"})
     assert run_check(repo).returncode == 0
+
+
+@pytest.mark.parametrize(
+    "appended,label",
+    [
+        ("\n## [1.0.0] - 2026-01-01\n\n- old entry, a second time\n", "1.0.0"),
+        ("\n## [Unreleased]\n\n- a bullet below the first Unreleased\n", "Unreleased"),
+    ],
+    ids=["released-version", "unreleased"],
+)
+def test_a_duplicate_heading_anywhere_fails(repo, appended, label):
+    pr_branch(repo)
+    commit(repo, {"CHANGELOG.md": BASE_CHANGELOG + appended})
+    result = run_check(repo)
+    assert result.returncode == 1
+    assert f"CHANGELOG.md has the heading '## [{label}]' 2 times" in result.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +315,41 @@ def test_release_pr_with_a_heading_that_is_not_version_fails(repo):
     assert "'## [1.1.0]' does not match VERSION at the head (1.1.1)" in result.stdout
 
 
+def test_second_heading_for_an_existing_version_is_a_release_and_fails(repo):
+    # The codex reproduction: the version set does not change, the legacy
+    # bullet moves under the new heading and Unreleased reads empty.
+    commit(repo, {"changelog.d/a.md": "- entry a\n"}, "add a")
+    pr_branch(repo)
+    commit(repo, {"CHANGELOG.md": BASE_CHANGELOG.replace(
+        "## [Unreleased]\n\n", "## [Unreleased]\n\n## [1.0.0] - 2026-10-17\n\n- slipped past the check\n\n", 1
+    )})
+    result = run_check(repo)
+    assert result.returncode == 1
+    assert "release PR: compared with the assembler" in result.stdout
+    assert "CHANGELOG.md has the heading '## [1.0.0]' 2 times" in result.stdout
+    assert "changelog.d/a.md: a consumed fragment is left in place" in result.stdout
+
+
+def test_release_pr_that_drops_prose_from_the_merge_base_unreleased_fails(tmp_path):
+    # The old comparison stripped the prose from the expected side as release
+    # intro, so a release PR could drop it unseen.  The fold now refuses it.
+    base_cl = BASE_CHANGELOG.replace("- legacy bullet\n", "Pending note, not a bullet.\n\n- legacy bullet\n")
+    repo = init_repo(tmp_path / "prose", {"CHANGELOG.md": base_cl, "VERSION": "1.0.0\n", "changelog.d/README.md": "# rule\n"})
+    commit(repo, {"changelog.d/a.md": "- entry a\n"}, "add a")
+    git(repo, "checkout", "-q", "-b", "release")
+    released = base_cl.replace(
+        "## [Unreleased]\n\nPending note, not a bullet.\n\n- legacy bullet\n\n",
+        "## [Unreleased]\n\n## [1.1.0] - 2026-10-17\n\n- legacy bullet\n\n- entry a\n\n",
+    )
+    assert released != base_cl
+    commit(repo, {"CHANGELOG.md": released, "VERSION": "1.1.0\n"}, "release without the note",
+           remove=("changelog.d/a.md",))
+    result = run_check(repo)
+    assert result.returncode == 1
+    assert "the merge base cannot be assembled" in result.stdout
+    assert "'Pending note, not a bullet.'" in result.stdout
+
+
 def test_deleting_a_fragment_without_a_heading_is_a_release_and_fails(repo):
     commit(repo, {"changelog.d/a.md": "- entry a\n"}, "add a")
     pr_branch(repo)
@@ -309,6 +394,15 @@ def test_listed_legacy_pr_with_one_more_bullet_fails(tmp_path):
     result = run_check(repo, pr=77)
     assert result.returncode == 1
     assert "PR #77 is grandfathered for the CHANGELOG.md lines" in result.stdout
+
+
+def test_listed_legacy_pr_that_also_drops_a_bullet_fails(tmp_path):
+    entry = check.legacy_entry(77, BASE_CHANGELOG, with_bullets("- open PR bullet"))
+    repo = legacy_repo(tmp_path, f"{entry}\n")
+    commit(repo, {"CHANGELOG.md": with_bullets("- open PR bullet").replace("- legacy bullet\n\n", "")})
+    result = run_check(repo, pr=77)
+    assert result.returncode == 1
+    assert "removes or changes 1 line(s) under '## [Unreleased]'" in result.stdout
 
 
 def test_unlisted_pr_with_a_bullet_fails(tmp_path):

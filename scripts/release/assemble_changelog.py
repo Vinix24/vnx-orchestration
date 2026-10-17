@@ -14,13 +14,20 @@ ancestor of HEAD).  The fragments are deleted.  The fold itself is
 ``changelog_fragments.assemble``, the same function the CI check runs.
 
 Every precondition is checked before anything is written: a clean
-``CHANGELOG.md`` and ``changelog.d/``, an ``## [Unreleased]`` heading, no
-``## [X.Y.Z]`` yet, every fragment valid and on the first-parent history of
-``--rev``.  A write or a delete that fails puts the original ``CHANGELOG.md``
-and every deleted fragment back, byte for byte.  A run killed between the
-steps cannot restore itself: the next run refuses the dirty tree and names
-``git checkout -- CHANGELOG.md changelog.d``, after which a rerun gives the
-same output.  There is no partial-rerun mode.
+``CHANGELOG.md`` and ``changelog.d/``, an ``## [Unreleased]`` heading whose
+lines are bullets only, no ``## [X.Y.Z]`` yet, every fragment valid, present
+at ``--rev`` with the same bytes as in the tree, and on the first-parent
+history of ``--rev``.  A write or a delete that fails puts the original
+``CHANGELOG.md`` and every deleted fragment back, byte for byte.  A run killed
+between the steps cannot restore itself: the next run refuses the dirty tree
+and names ``git checkout -- CHANGELOG.md changelog.d``, after which a rerun
+gives the same output.  There is no partial-rerun mode.
+
+One run at a time: preparation, application and rollback happen under an
+exclusive lock on ``<git-dir>/vnx-assemble-changelog.lock``.  A second run on
+the same working tree refuses at once and names the lock; without it, a run
+that prepared before the first one applied would meet the deleted fragments
+and restore the old ``CHANGELOG.md`` over the first run's result.
 
 ``--check`` prints the section it would write and the files it would delete,
 and changes nothing.  Without a ``changelog.d/`` directory it does nothing.
@@ -33,6 +40,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import datetime
+import fcntl
 import os
 import stat
 import subprocess
@@ -40,13 +48,15 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, Iterator, List, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
 import changelog_fragments as cf
 from project_root import resolve_project_root
+
+LOCK_NAME = "vnx-assemble-changelog.lock"
 
 
 @dataclass
@@ -98,6 +108,58 @@ def _refuse_rev_not_ancestor(root: Path, rev: str) -> None:
         raise cf.ChangelogError(f"git merge-base --is-ancestor {rev} HEAD failed: {result.stderr.strip()}")
 
 
+@contextlib.contextmanager
+def repo_lock(root: Path) -> Iterator[Path]:
+    """Hold the exclusive assembler lock in the git dir of *root* for one run.
+
+    Non-blocking: a second run refuses at once and names the lock rather than
+    waiting and then working from a tree the first run already changed.
+    Closing the descriptor releases the lock, also when the process dies.
+    """
+    lock_path = Path(cf.run_git(root, "rev-parse", "--absolute-git-dir").strip()) / LOCK_NAME
+    try:
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+    except OSError as exc:
+        raise cf.ChangelogError(f"cannot open the assembler lock {lock_path}: {exc}") from exc
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise cf.ChangelogError(
+                f"another assemble_changelog.py run holds the lock {lock_path}; "
+                "let it finish, then check the tree and run again"
+            ) from None
+        yield lock_path
+    finally:
+        os.close(fd)
+
+
+def _refuse_not_at_rev(root: Path, rev: str, originals: Dict[str, Tuple[bytes, int]]) -> None:
+    """Refuse every fragment whose tree bytes are not the blob at *rev*.
+
+    A name that once landed on *rev* says nothing about these bytes: a merged
+    fragment deleted on *rev* and recreated on the release branch, or one
+    edited there, is found in the history but never landed as it reads now.
+    """
+    entries = cf.tree_entries(root, rev, cf.FRAGMENT_DIR)
+    absent, differs = [], []
+    for name, (data, _mode) in sorted(originals.items()):
+        entry = entries.get(cf.fragment_path(name))
+        if entry is None or not cf.is_regular_blob(entry):
+            absent.append(cf.fragment_path(name))
+        elif cf.run_git_bytes(root, "cat-file", "blob", entry[2]) != data:
+            differs.append(cf.fragment_path(name))
+    problems = []
+    if absent:
+        problems.append(f"not in {rev}: {', '.join(absent)} "
+                        f"(a fragment must be merged into {rev} before a release assembles it)")
+    if differs:
+        problems.append(f"differs from the blob at {rev}: {', '.join(differs)} "
+                        "(a release assembles a fragment as it landed; change it in its own PR)")
+    if problems:
+        raise cf.ChangelogError("\n".join(problems))
+
+
 def _read_fragments(root: Path, rev: str) -> Dict[str, Tuple[bytes, int]]:
     names = cf.select_fragments(root)
     in_rev = cf.fragment_names_at(root, rev)
@@ -106,6 +168,7 @@ def _read_fragments(root: Path, rev: str) -> Dict[str, Tuple[bytes, int]]:
         listed = ", ".join(cf.fragment_path(name) for name in lost)
         raise cf.ChangelogError(f"present at {rev} but missing from the tree: {listed}")
     originals = {name: _read_with_mode(root / cf.fragment_path(name)) for name in names}
+    _refuse_not_at_rev(root, rev, originals)
     reasons = [cf.validate_fragment(name, data) for name, (data, _mode) in originals.items()]
     reasons = [reason for reason in reasons if reason]
     if reasons:
@@ -217,16 +280,14 @@ def main(argv: List[str] | None = None) -> int:
         print(f"no {cf.FRAGMENT_DIR}/ directory: nothing to assemble")
         return 0
     try:
-        plan = prepare(root, args.version, args.date, args.rev)
+        with repo_lock(root):
+            plan = prepare(root, args.version, args.date, args.rev)
+            status = 0 if args.check else apply(plan)
     except cf.ChangelogError as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 1
-    if args.check:
-        _report(plan, check=True)
-        return 0
-    status = apply(plan)
     if status == 0:
-        _report(plan, check=False)
+        _report(plan, check=args.check)
     return status
 
 

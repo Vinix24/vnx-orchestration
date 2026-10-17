@@ -8,6 +8,7 @@ failure, which needs the real ``main`` in-process with one failing call.
 
 from __future__ import annotations
 
+import fcntl
 import os
 import subprocess
 import sys
@@ -241,6 +242,25 @@ def test_assemble_refuses_existing_version():
         cf.assemble(BASE_CHANGELOG, [], "1.0.0", "2026-10-17")
 
 
+@pytest.mark.parametrize(
+    "body,needle",
+    [
+        ("Pending note.\n\n- legacy\n", "CHANGELOG.md:5: under '## [Unreleased]' the first non-blank line must start with '- ': 'Pending note.'"),
+        ("  indented first\n- legacy\n", "CHANGELOG.md:5: under '## [Unreleased]' the first non-blank line must start with '- '"),
+        ("- legacy\n### Added\n", "CHANGELOG.md:6: under '## [Unreleased]' a heading line"),
+        ("- legacy\nprose after a bullet\n", "CHANGELOG.md:6: under '## [Unreleased]' a line must start with '- ' or with at least two spaces"),
+    ],
+    ids=["prose-first", "continuation-first", "subheading", "prose-after-bullet"],
+)
+def test_assemble_refuses_an_unreleased_line_that_is_no_bullet(body, needle):
+    # Such a line would land between the new heading and its first bullet,
+    # where the CI check reads the release intro and compares nothing.
+    text = f"# C\n\n## [Unreleased]\n\n{body}\n## [1.0.0] - 2026-01-01\n\n- old\n"
+    with pytest.raises(cf.ChangelogError) as refused:
+        cf.assemble(text, [("a.md", "- a\n")], "1.1.0", "2026-10-17")
+    assert needle in str(refused.value)
+
+
 # ---------------------------------------------------------------------------
 # The assembler: order
 # ---------------------------------------------------------------------------
@@ -306,6 +326,34 @@ def test_fragment_deleted_on_the_release_branch_is_refused_by_name(repo):
     result = run_assembler(repo, "--version", "1.1.0")
     assert result.returncode == 1
     assert "present at main but missing from the tree: changelog.d/dropped.md" in result.stderr
+    assert snapshot(repo) == before
+
+
+def test_fragment_deleted_on_main_and_recreated_on_the_release_branch_is_refused(repo):
+    # The name landed on main once, so its newest addition is in the history;
+    # the bytes on the release branch never landed there.
+    commit(repo, {"changelog.d/again.md": "- first life\n"}, "add again")
+    commit(repo, {}, "drop again on main", remove=("changelog.d/again.md",))
+    commit(repo, {"changelog.d/kept.md": "- kept\n"}, "add kept")
+    git(repo, "checkout", "-q", "-b", "release")
+    commit(repo, {"changelog.d/again.md": "- second life, branch only\n"}, "recreate again")
+    before = snapshot(repo)
+    result = run_assembler(repo, "--version", "1.1.0")
+    assert result.returncode == 1
+    assert "not in main: changelog.d/again.md" in result.stderr
+    assert "kept.md" not in result.stderr
+    assert snapshot(repo) == before
+
+
+def test_fragment_edited_on_the_release_branch_is_refused(repo):
+    commit(repo, {"changelog.d/edited.md": "- as merged\n", "changelog.d/kept.md": "- kept\n"})
+    git(repo, "checkout", "-q", "-b", "release")
+    commit(repo, {"changelog.d/edited.md": "- rewritten on the release branch\n"}, "edit a fragment")
+    before = snapshot(repo)
+    result = run_assembler(repo, "--version", "1.1.0")
+    assert result.returncode == 1
+    assert "differs from the blob at main: changelog.d/edited.md" in result.stderr
+    assert "kept.md" not in result.stderr
     assert snapshot(repo) == before
 
 
@@ -428,6 +476,101 @@ def test_rollback_after_a_killed_run_then_rerun_is_byte_identical(repo):
     rerun = run_assembler(repo, "--version", "1.1.0")
     assert rerun.returncode == 0, rerun.stderr
     assert snapshot(repo) == clean_output
+
+
+# ---------------------------------------------------------------------------
+# The assembler: one run at a time
+# ---------------------------------------------------------------------------
+
+LOCK_NAME = "vnx-assemble-changelog.lock"
+
+# One assembler run in its own process.  It reports "ready" and waits for "go"
+# on stdin: the start barrier.  After its preparation it reports "prepared" and
+# waits for "apply", so the test decides when a prepared run may write.
+CONTENDER = r"""
+import sys
+sys.path.insert(0, sys.argv[1])
+import assemble_changelog
+
+
+def wait_for(word):
+    if sys.stdin.readline().strip() != word:
+        sys.exit(f"contender: expected {word!r} on stdin")
+
+
+real_prepare = assemble_changelog.prepare
+
+
+def held_prepare(*args, **kwargs):
+    plan = real_prepare(*args, **kwargs)
+    print("prepared", flush=True)
+    wait_for("apply")
+    return plan
+
+
+assemble_changelog.prepare = held_prepare
+print("ready", flush=True)
+wait_for("go")
+sys.exit(assemble_changelog.main(sys.argv[2:]))
+"""
+
+
+def tell(proc: subprocess.Popen, word: str) -> None:
+    proc.stdin.write(f"{word}\n")
+    proc.stdin.flush()
+
+
+def test_two_runs_released_by_one_barrier_one_assembles_and_the_other_refuses(repo):
+    commit(repo, {"changelog.d/a.md": "- a\n", "changelog.d/b.md": "- b\n"})
+    assembled, _ = cf.assemble(BASE_CHANGELOG, [("a.md", "- a\n"), ("b.md", "- b\n")], "1.1.0", "2026-10-17")
+    argv = [sys.executable, "-c", CONTENDER, str(ASSEMBLER.parent),
+            "--version", "1.1.0", "--date", "2026-10-17", "--rev", "main"]
+    procs = [
+        subprocess.Popen(argv, cwd=repo, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, text=True)
+        for _ in range(2)
+    ]
+    try:
+        assert [proc.stdout.readline() for proc in procs] == ["ready\n", "ready\n"]
+        for proc in procs:
+            tell(proc, "go")
+        # A run that got through its preparation waits there; a refused run
+        # exits, which ends its stdout.  Only then does any prepared run write,
+        # one after the other: on a tree without the lock both prepare first.
+        prepared = [proc for proc in procs if proc.stdout.readline() == "prepared\n"]
+        for proc in prepared:
+            tell(proc, "apply")
+            proc.wait(timeout=60)
+        outcomes = [(proc.wait(timeout=60), proc.communicate(timeout=60)[1]) for proc in procs]
+    finally:
+        for proc in procs:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+    assert sorted(code for code, _err in outcomes) == [0, 1], outcomes
+    refusal = next(err for code, err in outcomes if code == 1)
+    assert "another assemble_changelog.py run holds the lock" in refusal
+    assert LOCK_NAME in refusal
+    assert changelog(repo) == assembled
+    assert sorted(p.name for p in (repo / "changelog.d").iterdir()) == ["README.md"]
+
+
+def test_a_run_refuses_while_another_holds_the_lock_and_runs_once_it_is_released(repo):
+    commit(repo, {"changelog.d/a.md": "- a\n"})
+    before = snapshot(repo)
+    fd = os.open(repo / ".git" / LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        held = run_assembler(repo, "--version", "1.1.0")
+    finally:
+        os.close(fd)
+    assert held.returncode == 1
+    assert "another assemble_changelog.py run holds the lock" in held.stderr
+    assert LOCK_NAME in held.stderr
+    assert snapshot(repo) == before
+    released = run_assembler(repo, "--version", "1.1.0")
+    assert released.returncode == 0, released.stderr
+    assert release_body(repo) == ["- legacy one", "- legacy two", "  continued", "- a"]
 
 
 def test_identical_fragments_both_appear(repo):

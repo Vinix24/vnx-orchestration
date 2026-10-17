@@ -105,7 +105,7 @@ def _line_refusal(line: str, seen_entry: bool) -> Optional[str]:
     if "\r" in line:
         return "carriage return (use LF line endings)"
     if line.startswith("#"):
-        return "a heading line is not allowed in a fragment"
+        return "a heading line is not allowed in a bullet block"
     if not line.strip():
         return None
     if line.startswith("- "):
@@ -204,7 +204,9 @@ def assemble(
     were under ``## [Unreleased]`` (unchanged, in their order), then each
     fragment's bullet block, in the given order, one blank line between blocks.
     Returns ``(new_text, consumed_names)``.  Raises ``ChangelogError`` when the
-    changelog has no ``## [Unreleased]`` or already has ``## [version]``.
+    changelog has no ``## [Unreleased]``, already has ``## [version]``, or holds
+    a line under ``## [Unreleased]`` that breaks the fragment's line rule
+    (``unreleased_body_refusal``).
     """
     lines = _split_lines(changelog_text)
     bounds = unreleased_bounds(lines)
@@ -215,6 +217,9 @@ def assemble(
         if parsed and parsed[0] == version:
             raise ChangelogError(f"{CHANGELOG_PATH} already has a '## [{version}]' heading")
     start, end = bounds
+    refusal = unreleased_body_refusal(lines[start + 1 : end], first_line_no=start + 2)
+    if refusal:
+        raise ChangelogError(refusal)
     blocks = []
     legacy = _trim_blank(lines[start + 1 : end])
     if legacy:
@@ -233,6 +238,26 @@ def assemble(
     else:
         out = _trim_trailing_blank(out)
     return "\n".join(out) + "\n", [name for name, _text in fragments]
+
+
+def unreleased_body_refusal(body: Sequence[str], first_line_no: int) -> Optional[str]:
+    """Why the ``## [Unreleased]`` *body* cannot be folded, or None.
+
+    The body follows a fragment's line rule: blank, a ``- `` bullet, or after
+    the first bullet a continuation of at least two spaces.  Prose there would
+    land between the new heading and its first bullet, where the CI check
+    reads the hand-written release intro and compares nothing.  *first_line_no*
+    is the ``CHANGELOG.md`` line number of ``body[0]``.
+    """
+    seen_entry = False
+    for offset, line in enumerate(body):
+        reason = _line_refusal(line, seen_entry)
+        if reason:
+            return (f"{CHANGELOG_PATH}:{first_line_no + offset}: under '{UNRELEASED_HEADING}' "
+                    f"{reason}: {line!r}; only bullets fold into a release")
+        if line.strip():
+            seen_entry = True
+    return None
 
 
 def release_section(changelog_text: str, version: str) -> str:

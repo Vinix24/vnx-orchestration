@@ -7,20 +7,25 @@ Runs as its own pull-request-only step in the ``Lint Patterns`` job, with
 ``--base`` the merge base of the PR.  Both trees are read from git objects
 (``git ls-tree``, ``git cat-file``), never from a working tree.  It fails when:
 
-1. the PR adds a line under ``## [Unreleased]`` in ``CHANGELOG.md`` (unless
-   rule 3 or rule 4 applies), or removes that heading;
+1. the PR changes the ``## [Unreleased]`` section of ``CHANGELOG.md`` at all
+   (unless rule 3 applies): it adds a line (unless rule 4 applies), removes or
+   changes one, reorders them, or removes the heading.  Blank lines never
+   count;
 2. a path the PR adds or changes under ``changelog.d/`` is an invalid
    fragment, a symlink, or no fragment name at all; or the PR removes
-   ``changelog.d/README.md``;
-3. a release PR (one that adds a ``## [X.Y.Z]`` heading or deletes a
+   ``changelog.d/README.md``; or ``CHANGELOG.md`` at the head has a
+   ``## [label]`` heading more than once;
+3. a release PR (one that adds an occurrence of a ``## [X.Y.Z]`` heading,
+   counted per occurrence so a second ``## [1.0.0]`` is one, or deletes a
    fragment) does not match the assembler: exactly one heading, its version
    equal to the head's ``VERSION``, ``CHANGELOG.md`` equal to
    ``changelog_fragments.assemble`` run on the merge base (only prose may
    precede the first bullet under the new heading), and no fragment left at
    the head;
 4. (grandfathering) a PR listed in ``scripts/ci/changelog_legacy_prs.txt`` at
-   the merge base passes rule 1 only while its added ``## [Unreleased]`` lines
-   hash to the listed value.  A missing list is an empty list.
+   the merge base may add ``## [Unreleased]`` lines only while they hash to
+   the listed value; it removes, changes or reorders none.  A missing list is
+   an empty list.
 
 The branch name is never read.  Without ``changelog.d/`` at both the merge base
 and the head (a consumer project) the check passes and does nothing.
@@ -37,7 +42,7 @@ import re
 import sys
 from collections import Counter
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "release"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
@@ -69,12 +74,32 @@ class _Parser(argparse.ArgumentParser):
 # ---------------------------------------------------------------------------
 
 
+def _unreleased_entries(text: Optional[str]) -> List[str]:
+    """The non-blank lines under ``## [Unreleased]``, in order."""
+    return [line for line in cf.unreleased_lines(text or "") if line.strip()]
+
+
 def added_unreleased_lines(base_text: Optional[str], head_text: Optional[str]) -> List[str]:
     """The non-blank lines under ``## [Unreleased]`` at the head that the base
     did not have, counted as a multiset and sorted.  Blank lines never count."""
-    base = Counter(line for line in cf.unreleased_lines(base_text or "") if line.strip())
-    head = Counter(line for line in cf.unreleased_lines(head_text or "") if line.strip())
+    base = Counter(_unreleased_entries(base_text))
+    head = Counter(_unreleased_entries(head_text))
     return sorted((head - base).elements())
+
+
+def removed_unreleased_lines(base_text: Optional[str], head_text: Optional[str]) -> List[str]:
+    """The non-blank lines under ``## [Unreleased]`` at the base that the head
+    no longer has, counted as a multiset and sorted: a changed line is one."""
+    base = Counter(_unreleased_entries(base_text))
+    head = Counter(_unreleased_entries(head_text))
+    return sorted((base - head).elements())
+
+
+def keeps_unreleased_order(base_text: Optional[str], head_text: Optional[str]) -> bool:
+    """True when the base's non-blank ``## [Unreleased]`` lines occur at the
+    head in the same order (other lines may sit between them)."""
+    head = iter(_unreleased_entries(head_text))
+    return all(line in head for line in _unreleased_entries(base_text))
 
 
 def legacy_digest(lines: Iterable[str]) -> str:
@@ -143,7 +168,10 @@ def compare_release(expected: str, actual: str, version: str) -> Optional[str]:
     """Why *actual* differs from the assembler's *expected*, or None.
 
     The only allowed difference is prose between the new heading and its
-    first bullet: the hand-written release intro.
+    first bullet: the hand-written release intro.  On the *expected* side
+    that region holds blank lines only, because ``assemble`` refuses an
+    ``## [Unreleased]`` body with a line that is no bullet, continuation or
+    blank; so stripping it there drops nothing that should be compared.
     """
     expected_rest, _ = _strip_intro(expected.split("\n"), version)
     actual_rest, intro = _strip_intro(actual.split("\n"), version)
@@ -163,14 +191,28 @@ def compare_release(expected: str, actual: str, version: str) -> Optional[str]:
             f"(edit a fragment in an earlier PR instead):\n    {shown}{more}")
 
 
-def heading_versions(text: Optional[str]) -> Set[str]:
-    """The version labels of every ``## [label]`` heading except Unreleased."""
-    labels = set()
-    for line in (text or "").split("\n"):
-        parsed = cf.parse_heading(line)
-        if parsed and parsed[0] != "Unreleased":
-            labels.add(parsed[0])
-    return labels
+def heading_counts(text: Optional[str]) -> Counter:
+    """How often each ``## [label]`` heading occurs, Unreleased included."""
+    return Counter(
+        parsed[0] for parsed in (cf.parse_heading(line) for line in (text or "").split("\n")) if parsed
+    )
+
+
+def added_versions(base_text: Optional[str], head_text: Optional[str]) -> List[str]:
+    """The version headings the head has more often than the base, one entry
+    per added occurrence, sorted: a second ``## [1.0.0]`` counts."""
+    added = heading_counts(head_text) - heading_counts(base_text)
+    return sorted(label for label in added.elements() if label != "Unreleased")
+
+
+def duplicate_headings(text: Optional[str]) -> List[str]:
+    """Rule 2: one violation per ``## [label]`` heading that occurs more than once."""
+    return [
+        f"CHANGELOG.md has the heading '## [{label}]' {count} times; every '## [...]' "
+        "heading appears once (a second one hides a release from this check)"
+        for label, count in sorted(heading_counts(text).items())
+        if count > 1
+    ]
 
 
 def heading_date(text: str, version: str) -> Optional[str]:
@@ -221,12 +263,27 @@ def _check_paths(repo: Path, head: str, base_entries: Entries, head_entries: Ent
     return violations
 
 
+def _check_unreleased_kept(base_cl: Optional[str], head_cl: Optional[str]) -> List[str]:
+    """Rule 1 outside the added lines: nothing under Unreleased is removed,
+    changed or reordered, and the heading stays."""
+    if cf.has_unreleased(base_cl or "") and not cf.has_unreleased(head_cl or ""):
+        return [f"CHANGELOG.md lost its '{cf.UNRELEASED_HEADING}' heading; the release assembler needs it"]
+    removed = removed_unreleased_lines(base_cl, head_cl)
+    if removed:
+        shown = "\n    ".join(removed[:5]) + ("\n    ..." if len(removed) > 5 else "")
+        return [f"removes or changes {len(removed)} line(s) under '{cf.UNRELEASED_HEADING}' in "
+                f"CHANGELOG.md:\n    {shown}\n  outside a release PR that section does not change; "
+                f"the release PR folds it. Rule: {cf.README_PATH}"]
+    if not keeps_unreleased_order(base_cl, head_cl):
+        return [f"reorders the lines under '{cf.UNRELEASED_HEADING}' in CHANGELOG.md; outside a "
+                f"release PR that section does not change. Rule: {cf.README_PATH}"]
+    return []
+
+
 def _check_unreleased(repo: Path, base: str, base_cl: Optional[str], head_cl: Optional[str],
                       pr: Optional[int]) -> Tuple[List[str], List[str]]:
     """Rule 1 with rule 4: ``(violations, notes)``."""
-    violations: List[str] = []
-    if cf.has_unreleased(base_cl or "") and not cf.has_unreleased(head_cl or ""):
-        violations.append(f"CHANGELOG.md lost its '{cf.UNRELEASED_HEADING}' heading; the release assembler needs it")
+    violations = _check_unreleased_kept(base_cl, head_cl)
     added = added_unreleased_lines(base_cl, head_cl)
     if not added:
         return violations, []
@@ -279,7 +336,7 @@ def _check_inventory(base_entries: Entries, head_entries: Entries) -> List[str]:
 def _check_release(repo: Path, base: str, head: str, base_cl: Optional[str], head_cl: Optional[str],
                    base_entries: Entries, head_entries: Entries) -> List[str]:
     """Rule 3: the release PR equals the assembler's output from the merge base."""
-    added = sorted(heading_versions(head_cl) - heading_versions(base_cl))
+    added = added_versions(base_cl, head_cl)
     if len(added) != 1:
         return [f"a release PR adds exactly one version heading to CHANGELOG.md; this one adds "
                 f"{len(added)}{': ' + ', '.join(added) if added else ''}"]
@@ -314,8 +371,9 @@ def check(repo: Path, base: str, head: str, pr: Optional[int]) -> Tuple[List[str
     violations = _check_paths(repo, head, base_entries, head_entries)
     base_cl = _text(cf.read_blob(repo, base, cf.CHANGELOG_PATH))
     head_cl = _text(cf.read_blob(repo, head, cf.CHANGELOG_PATH))
+    violations += duplicate_headings(head_cl)
     deleted = [p for p in base_entries if cf.is_fragment_path(p) and p not in head_entries]
-    if deleted or heading_versions(head_cl) - heading_versions(base_cl):
+    if deleted or added_versions(base_cl, head_cl):
         violations += _check_release(repo, base, head, base_cl, head_cl, base_entries, head_entries)
         return violations, ["release PR: compared with the assembler on the merge base"]
     unreleased_violations, notes = _check_unreleased(repo, base, base_cl, head_cl, pr)
