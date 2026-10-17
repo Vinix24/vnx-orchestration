@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
 import subprocess
 import time
 
@@ -16,7 +15,7 @@ import pytest
 
 from conftest import (
     PANE_EXPECTED, VALID_HANDOVER, FakeTmux, Session, b1_entry, clear_events, journal_lines, message_of, rotation,
-    settings_file, start,
+    settings_file, start, started,
 )
 
 import auto_clear
@@ -30,46 +29,9 @@ CONTINUE = ["-l", tmux_clear.CONTINUE]
 SIX = ["BSpace"] * 6
 
 
-class Clock:
-    """monotonic and sleep for the job: a sleep moves the time on, nothing waits."""
-
-    def __init__(self):
-        self.now = 1000.0
-
-    def monotonic(self):
-        return self.now
-
-    def sleep(self, seconds):
-        self.now += seconds
-
-
 @pytest.fixture(autouse=True)
-def clock(monkeypatch):
-    found = Clock()
-    monkeypatch.setattr(tmux_clear, "monotonic", found.monotonic)
-    monkeypatch.setattr(tmux_clear, "sleep", found.sleep)
-    return found
-
-
-@pytest.fixture
-def fake(monkeypatch, tmux_bin):
-    """The tmux the job talks to; the hooks of the test run in pane %7 of the fake binary (tmux_bin)."""
-    recorder = FakeTmux()
-    monkeypatch.setattr(auto_clear, "run_tmux", recorder)
-    return recorder
-
-
-@pytest.fixture
-def session(tmp_path, project, tmux_bin):
-    return Session(tmp_path, project, "sess-a")
-
-
-def started(session, tmux_bin):
-    """Write the handover and end the turn: the Stop hook starts the job. The job's arguments."""
-    session.write_handover()
-    assert message_of(session.finish_turn()) == auto_clear.STARTED
-    line = tmux_bin.calls("run-shell")[-1][-1]
-    return shlex.split(line.replace("##", "#"))[2:6]
+def fast(clock):
+    return clock
 
 
 def successor(project, results, session_id="sess-b"):

@@ -4,6 +4,7 @@ from __future__ import annotations
 import itertools
 import json
 import os
+import shlex
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -14,6 +15,9 @@ import pytest
 PKG = Path(__file__).resolve().parents[1]
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "a0"
 sys.path.insert(0, str(PKG / "lib"))
+
+import auto_clear  # the plugin's lib, on the path just above
+import tmux_clear
 
 
 @pytest.fixture(autouse=True)
@@ -551,3 +555,45 @@ def journal_lines(project):
 
 def clear_events(project):
     return [line["event"] for line in journal_lines(project) if line["event"].startswith("clear_")]
+
+
+class Clock:
+    """monotonic and sleep for the job: a sleep moves the time on, nothing waits."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    found = Clock()
+    monkeypatch.setattr(tmux_clear, "monotonic", found.monotonic)
+    monkeypatch.setattr(tmux_clear, "sleep", found.sleep)
+    return found
+
+
+@pytest.fixture
+def fake(monkeypatch, tmux_bin):
+    """The tmux the job talks to in-process; the hooks of the test run in pane %7 of the fake binary (tmux_bin)."""
+    recorder = FakeTmux()
+    monkeypatch.setattr(auto_clear, "run_tmux", recorder)
+    return recorder
+
+
+@pytest.fixture
+def session(tmp_path, project, tmux_bin):
+    return Session(tmp_path, project, "sess-a")
+
+
+def started(session, tmux_bin):
+    """Write the handover and end the turn: the Stop hook starts the job. The job's four arguments."""
+    session.write_handover()
+    assert message_of(session.finish_turn()) == auto_clear.STARTED
+    line = tmux_bin.calls("run-shell")[-1][-1]
+    return shlex.split(line.replace("##", "#"))[2:6]
