@@ -18,9 +18,11 @@
 # working tree or index. It builds its commit in a worktree of its own, in a
 # temp dir outside the clone, on the export branch's base commit, with the
 # exact bytes and modes of the source commit and none of the clone's hooks.
-# The one thing it writes in the clone is the export branch: last, after the
-# leak scan of the committed blobs passed, as a compare-and-swap on the value
-# it read at the start. What it does and refuses is described in the plugin
+# The commit is written without a ref. The one ref it writes in the clone is
+# the export branch itself, never a branch a symbolic ref would send it to:
+# last, after the leak scan of the committed blobs passed, as a compare-and-swap
+# on the value it read at the start. The branch is the run's own only once
+# that swap succeeded. What it does and refuses is described in the plugin
 # README, section "Maintainers". It never pushes, never tags and never touches
 # the network: the last thing it prints is the commands the operator runs.
 set -eu
@@ -401,7 +403,10 @@ PY
 # branch_users <branch>: every worktree of the target's repository that has the
 # branch checked out, or is rebasing or bisecting it. git counts all three as
 # the branch being in use, and moving it under any of them pulls the ground
-# from under that worktree. Prints nothing when the branch is free.
+# from under that worktree. A symbolic ref that ends at the branch counts as
+# the branch: git lists a checkout under the branch a symbolic ref ends at, but
+# records a rebase under the name it was started on. Prints nothing when the
+# branch is free.
 branch_users() {
     python3 -I - "$TARGET" "$1" <<'PY'
 import os, subprocess, sys
@@ -422,6 +427,15 @@ def read(path):
         return None
 
 
+def resolved(name):
+    """The ref a recorded branch name ends at, past any symbolic ref."""
+    if not name:
+        return name
+    full = name if name.startswith("refs/") else "refs/heads/" + name
+    done = subprocess.run(["git", "-C", target, "symbolic-ref", "-q", full], capture_output=True, text=True)
+    return done.stdout.strip() if done.returncode == 0 else full
+
+
 users, where = [], None
 paths = []
 for line in git("worktree", "list", "--porcelain").splitlines():
@@ -438,10 +452,10 @@ for name in sorted(os.listdir(linked)) if os.path.isdir(linked) else []:
     dotgit = read(os.path.join(gitdir, "gitdir")) or gitdir
     admin.append((gitdir, os.path.dirname(os.path.join(gitdir, dotgit))))
 for gitdir, shown in admin:
-    if ref in (read(os.path.join(gitdir, "rebase-merge", "head-name")),
-               read(os.path.join(gitdir, "rebase-apply", "head-name"))):
+    if ref in (resolved(read(os.path.join(gitdir, "rebase-merge", "head-name"))),
+               resolved(read(os.path.join(gitdir, "rebase-apply", "head-name")))):
         users.append("  being rebased in %s" % os.path.normpath(shown))
-    if read(os.path.join(gitdir, "BISECT_START")) in (branch, ref):
+    if resolved(read(os.path.join(gitdir, "BISECT_START"))) == ref:
         users.append("  being bisected in %s" % os.path.normpath(shown))
 print("\n".join(users))
 PY
@@ -454,6 +468,33 @@ PY
 
 tgit() { git -C "$TARGET" -c core.hooksPath=/dev/null "$@"; }
 wgit() { git -C "$WT" -c core.hooksPath=/dev/null "$@"; }
+
+# symref_target <repo> <ref>: the ref a symbolic ref ends at; nothing for a
+# plain ref or a missing one. Any other answer of git fails, so a ref that
+# cannot be read is never taken for a plain one.
+symref_target() {
+    git -C "$1" symbolic-ref -q "$2" && return 0
+    [ $? = 1 ]
+}
+
+# branch_tip: the commit the export branch itself holds. Nothing when it is
+# missing, or a symbolic ref, which rev-parse would follow.
+branch_tip() {
+    [ -z "$(symref_target "$TARGET" "refs/heads/$BRANCH" || true)" ] || return 0
+    tgit rev-parse -q --verify "refs/heads/$BRANCH" || true
+}
+
+# branch_now: what the export branch is now, in words, read the same way.
+branch_now() {
+    now_to=$(symref_target "$TARGET" "refs/heads/$BRANCH" || true)
+    if [ -n "$now_to" ]; then
+        echo "is a symbolic ref to $now_to"
+    elif now_tip=$(tgit rev-parse -q --verify "refs/heads/$BRANCH"); then
+        echo "points at $now_tip"
+    else
+        echo "does not exist"
+    fi
+}
 
 # operations: a merge, rebase, cherry-pick, revert or bisect in progress in the
 # clone's checkout. A new export branch is built on the commit that checkout is
@@ -525,7 +566,7 @@ drop_worktree() {
 # what_is_left: what this run wrote in the target and could not take back;
 # prints nothing when the target is as it was found.
 what_is_left() {
-    if [ -n "$NEW" ] && [ "$(tgit rev-parse -q --verify "refs/heads/$BRANCH" || true)" = "$NEW" ]; then
+    if [ -n "$NEW" ] && [ "$(branch_tip)" = "$NEW" ]; then
         echo "  $BRANCH points at $NEW, the export commit this run wrote; it was at ${TIP_BEFORE:-nothing (the branch did not exist)}"
     fi
     if worktree_registered; then
@@ -535,16 +576,17 @@ what_is_left() {
 }
 
 # undo_export: take back what this run wrote, and say only what happened: the
-# branch swapped back when it holds this run's commit, then the worktree
-# removed. Fails, listing what is left, when the target does not end up as it
-# was found.
+# branch swapped back when this run's own swap wrote it and the branch itself
+# still holds that commit, then the worktree removed. Like the write, the swap
+# back is on the branch itself, never on one a symbolic ref sends it to. Fails,
+# listing what is left, when the target does not end up as it was found.
 undo_export() {
-    if [ -n "$NEW" ] && [ "$(tgit rev-parse -q --verify "refs/heads/$BRANCH" || true)" = "$NEW" ]; then
+    if [ -n "$NEW" ] && [ "$(branch_tip)" = "$NEW" ]; then
         if [ "$CREATED" = 1 ]; then
-            if tgit update-ref -d "refs/heads/$BRANCH" "$NEW"; then
+            if tgit update-ref --no-deref -d "refs/heads/$BRANCH" "$NEW"; then
                 echo "  deleted $BRANCH, which this run created" >&2
             fi
-        elif tgit update-ref "refs/heads/$BRANCH" "$TIP_BEFORE" "$NEW"; then
+        elif tgit update-ref --no-deref "refs/heads/$BRANCH" "$TIP_BEFORE" "$NEW"; then
             echo "  moved $BRANCH back to $TIP_BEFORE" >&2
         fi
     fi
@@ -634,6 +676,12 @@ git -C "$SRC" rev-parse --git-dir >/dev/null 2>&1 || die "source is not a git re
 # ---------------------------------------------------------------------------
 
 SHA=$(git -C "$SRC" rev-parse --verify -q "$COMMIT^{commit}") || die "unknown commit: $COMMIT"
+# The commit is checked against origin/main itself; a symbolic ref there would
+# check it against the branch it points at.
+ORIGIN_TO=$(symref_target "$SRC" refs/remotes/origin/main) ||
+    die "cannot read refs/remotes/origin/main in the source"
+[ -z "$ORIGIN_TO" ] ||
+    die "refs/remotes/origin/main is a symbolic ref to $ORIGIN_TO in the source, and the commit is checked against origin/main itself"
 git -C "$SRC" rev-parse --verify -q refs/remotes/origin/main >/dev/null ||
     die "the source has no origin/main to check the commit against"
 git -C "$SRC" merge-base --is-ancestor "$SHA" refs/remotes/origin/main ||
@@ -685,6 +733,12 @@ pj_get "$PLUGIN_JSON" description >/dev/null || die "plugin.json has no descript
 # branch is later written only if it still holds TIP_BEFORE.
 BRANCH="export/context-rotation-$VERSION"
 git check-ref-format --branch "$BRANCH" >/dev/null 2>&1 || die "not a valid branch name: $BRANCH"
+# The branch is read and written as itself. A symbolic ref there would send
+# both to the branch it points at: the export built on that branch, and moved
+# onto it under the checkout of whoever has it out.
+POINTS_AT=$(symref_target "$TARGET" "refs/heads/$BRANCH") || die "cannot read refs/heads/$BRANCH in the target"
+[ -z "$POINTS_AT" ] ||
+    die "refs/heads/$BRANCH is a symbolic ref to $POINTS_AT, and the export writes only the branch itself; remove the symbolic ref first: git -C \"$TARGET\" symbolic-ref --delete refs/heads/$BRANCH (leaves $POINTS_AT as it is)"
 if TIP_BEFORE=$(tgit rev-parse -q --verify "refs/heads/$BRANCH^{commit}"); then
     CREATED=0
     BASE_SHA=$TIP_BEFORE
@@ -783,13 +837,16 @@ fi
     echo "Source-Commit: $SHA"
     echo "Intended-Tag: $TAG"
 } >"$TMP/message"
+# commit-tree writes the commit and no ref, not even the worktree's own HEAD:
+# a symbolic ref made there during the run has nothing to move.
 if [ -n "$(wgit config user.name 2>/dev/null || true)" ] && [ -n "$(wgit config user.email 2>/dev/null || true)" ]; then
-    wgit commit -q -F "$TMP/message" || fail "git commit failed in the export's worktree"
+    CANDIDATE=$(wgit commit-tree -p "$BASE_SHA" -F "$TMP/message" "$NEW_TREE") ||
+        fail "git commit-tree failed in the export's worktree"
 else
-    wgit -c user.name="context-rotation export" -c user.email="export@localhost" \
-        commit -q -F "$TMP/message" || fail "git commit failed in the export's worktree"
+    CANDIDATE=$(wgit -c user.name="context-rotation export" -c user.email="export@localhost" \
+        commit-tree -p "$BASE_SHA" -F "$TMP/message" "$NEW_TREE") ||
+        fail "git commit-tree failed in the export's worktree"
 fi
-CANDIDATE=$(wgit rev-parse HEAD) || fail "cannot read the export commit"
 [ "$(wgit rev-parse "$CANDIDATE^{tree}")" = "$NEW_TREE" ] || fail "the export commit is not the tree that was staged"
 
 if ! HITS=$(scan "$CANDIDATE"); then
@@ -798,15 +855,27 @@ $HITS"
 fi
 drop_worktree || fail "could not remove the export's own worktree"
 
-# The one write in the clone: the branch, compare-and-swap on the value read at
-# the start (empty: it must still not exist).
+# The one write in the clone: the branch itself, never one a symbolic ref sends
+# it to, as a compare-and-swap on the value read at the start (empty: it must
+# still not exist). The branch is this run's only once that swap succeeded: a
+# lost swap means another writer's commit is there, and the undo leaves it
+# alone. A signal during the swap is held until its outcome is known, so the
+# undo takes back exactly what this run wrote.
 USERS=$(branch_users "$BRANCH") || fail "cannot list the worktrees of the target"
 [ -z "$USERS" ] || fail "$BRANCH came into use during the export:
 $USERS"
-NEW=$CANDIDATE
-tgit update-ref -m "export_toolkit_plugin: $OWNED_DST $VERSION from $SHA" \
-    "refs/heads/$BRANCH" "$NEW" "$TIP_BEFORE" ||
-    fail "could not write $BRANCH, which changed during the export (git's message above)"
+HELD=""
+trap 'HELD=130' INT
+trap 'HELD=143' TERM
+if tgit update-ref --no-deref -m "export_toolkit_plugin: $OWNED_DST $VERSION from $SHA" \
+    "refs/heads/$BRANCH" "$CANDIDATE" "$TIP_BEFORE"; then
+    NEW=$CANDIDATE
+fi
+trap 'exit 130' INT
+trap 'exit 143' TERM
+[ -z "$HELD" ] || exit "$HELD"
+[ -n "$NEW" ] ||
+    fail "could not write $BRANCH, which another writer changed during the export (git's message above); it now $(branch_now). This run wrote nothing to it and leaves it as it is"
 STATE="done"
 
 echo "Exported $OWNED_DST $VERSION from $SHA."

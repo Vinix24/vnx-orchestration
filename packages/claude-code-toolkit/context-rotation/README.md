@@ -25,17 +25,19 @@ The commit changes three things against the base:
 
 The commit message carries the source commit sha. Running the script again on the same commit and clone changes nothing and exits 0.
 
-The branch is the only thing the script writes in the clone, and it writes it last: after the leak scan, as a compare-and-swap on the value it read at the start. A branch that moved during the run is left alone, and the run fails.
+The branch is the only ref the script writes in the clone, and it writes it last: after the leak scan, as a compare-and-swap on the value it read at the start. It writes the branch itself, never the branch a symbolic ref points at, and the commit is written without a ref. The run counts the branch as its own only once its own write succeeded. A branch that moved during the run, for instance because another export got there first, is left as that writer left it. The run then fails, and the message says what the branch holds now.
 
 ### What it refuses
 
 The script stops, with the branch untouched, when:
 
 - the commit is not an ancestor of `origin/main` in the source repository;
+- `refs/remotes/origin/main` in the source repository is a symbolic ref. The commit is checked against `origin/main` itself, not against the branch a symbolic ref points at;
 - the plugin folder at that commit contains a symbolic link or a submodule (the plugin ships regular files only);
 - the target is not the root of a git repository, or has no commit yet;
 - the clone's checkout has a merge, rebase, cherry-pick, revert or bisect in progress. A new export branch starts on the commit that checkout is on, and during those operations that is a commit in passing;
-- the export branch is checked out in the clone or in any other worktree, or a worktree is rebasing or bisecting it. The message names the worktree;
+- the export branch `export/context-rotation-<version>` is a symbolic ref. The message names the branch it points at, and the command that removes the symbolic ref and leaves that branch as it is;
+- the export branch is checked out in the clone or in any other worktree, or a worktree is rebasing or bisecting it, also under a symbolic ref that points at it. The message names the worktree;
 - the base tracks a symbolic link or a submodule at `context-rotation/` or anything under it, at `.claude-plugin/`, `.claude-plugin/marketplace.json` or `README.md`, or tracks `context-rotation` as a file;
 - `.claude-plugin/marketplace.json` on the base is not valid JSON with a `plugins` list;
 - `plugin.json` and `--tag` carry different versions;
@@ -46,12 +48,12 @@ Before the branch is written, the script runs the leak scan of `tests/test_isola
 
 ### When it fails
 
-Every exit that is not a successful export leaves the clone as it was found. The temporary worktree is removed. If the branch was already written, it is moved back to where it was, or deleted when the run created it, as a compare-and-swap on the commit the run wrote. The clone's checkout was never touched, so there is nothing to restore there.
+Every exit that is not a successful export leaves the clone as it was found, apart from what another writer changed in the meantime. The temporary worktree is removed. If this run wrote the branch, it is moved back to where it was, or deleted when the run created it, as a compare-and-swap on the commit the run wrote, on the branch itself. A branch this run did not write, because another writer changed it first, is left alone. The clone's checkout was never touched, so there is nothing to restore there.
 
 | Exit | Meaning |
 |---|---|
 | 0 | exported, or nothing to export |
-| 1 | refused or failed; the clone is back as it was found |
+| 1 | refused for any reason under "What it refuses", a symbolic export branch included, or failed; the clone is back as it was found |
 | 2 | usage error |
 | 3 | failed, and the clone could not be put back; the message lists what is left and the command that removes it |
 
