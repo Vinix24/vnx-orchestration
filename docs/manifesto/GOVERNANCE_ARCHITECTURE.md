@@ -1,7 +1,7 @@
 # VNX Governance Architecture
 
-**Status**: Current Reference — April 2026, refreshed 2026-07-05 (§3/§5/§7/§8 updated for the D1-D5 attestation gate)
-**Scope**: Decision framework, gate enforcement, trigger system, skill architecture
+**Status**: Current Reference, checked against `main` on 2026-10-18
+**Scope**: Decision framework, gate enforcement, trigger system, skill architecture, the merge door, review seats and open outcomes
 **Audience**: Contributors, operators, and evaluators of headless T0 behavior
 
 > This document covers T0's decision framework and the **dispatch-level** gate-lock mechanism.
@@ -15,7 +15,7 @@
 
 VNX governance is a layered system that separates what code enforces from what LLM decides. The core design principle: **hard constraints are not negotiable and must not pass through the LLM at all**. Soft decisions — where multiple outcomes are valid — are where LLM reasoning adds value.
 
-This document describes the current architecture as of F39.
+The decision framework in §1 to §4 comes from the F39 benchmark work. The chain that runs on `main` today (merge door, review seats, takeover, open outcomes, plan-gate) is summarised in §10. Mechanism lives in `docs/core/`; this file summarises and links.
 
 ---
 
@@ -49,7 +49,7 @@ These are handled by the pre-filter before the LLM is ever invoked:
 - **Context too stale** → output `ESCALATE`. Force human review.
 - **Dispatch already active** → output `WAIT`. Prevent double-dispatch.
 
-The pre-filter handles approximately 70% of real cycles without LLM invocation.
+**Correction (2026-10-18): where this lives.** The deterministic pre-filter is `_code_prefilter` in the F39 replay harness (`scripts/f39/replay_harness/prefilter.py`), which the benchmark replays against recorded scenarios. It is not a gate in front of the interactive T0 session. Its rules are not the list above: it returns `WAIT` for an unknown dispatch id, a dispatch already in the recent receipts, no ready terminal, a required review gate that has not passed, or blocked PRs, and it reads gate state from `t0_state`, not from lock files. The "about 70% without an LLM" figure was a benchmark result and is not a production measurement, so it is no longer stated here.
 
 ### Soft decisions (LLM-assisted)
 
@@ -68,7 +68,7 @@ The LLM receives a constrained prompt with 5 structured rules and is required to
 
 **Correction (2026-09-27): this section describes a design that was never wired in.** `scripts/f39/gate_locks.py` implements `create_lock`/`release_lock`/`get_pending_locks`/`has_pending_locks` exactly as below, but nothing in the codebase calls it — there is no T0 pre-filter step that checks `.vnx-data/state/gate_locks/` before deciding `WAIT` vs `COMPLETE`. Sections 1 and 4 of this document describe "gate lock present → WAIT" as a hard, code-enforced pre-filter check; that check does not exist at runtime. Treat the mechanism below as designed, not shipped, until a caller is added.
 
-What actually blocks a merge today is `scripts/pr_merge.py`: a fail-closed sequence of preflight checks run at merge time (not at T0's decision point) — a CI gate (`merge_preflight_ci_check.check_ci_run_for_head`), a review gate (`closure_verifier.check_review_gate_for_merge`, requiring a passing, fully-evidenced review-gate result for the PR), a `contract_invalid` gate on the latest DELIVERABLE-OUTCOME receipt, and a branch-protection gate. Any of these returning NO-GO refuses the merge; `pr_merge.py --dispatch-id` is the only path that writes a `pr_merged` receipt (see [[merge-alleen-via-de-deur]]). This is a third, independent mechanism from both the (unwired) gate-lock design below and the D1-D5 attestation pipeline described next.
+What actually blocks a merge today is `scripts/pr_merge.py`, described in §10: five preflights in a fixed order, a merge pinned to the approved head, and a binding `pr_merged` receipt. This is a third, independent mechanism from both the (unwired) gate-lock design below and the D1-D5 attestation pipeline described next.
 
 Gate locks are file-based hard constraints that, if wired in, would prevent `COMPLETE` until specific conditions are externally verified. This mechanism, as designed, governs **dispatch-level** review gates (codex, kimi, CI) — it is one of several gate mechanisms in the system, not the only one.
 
@@ -141,7 +141,7 @@ Input: current T0 context snapshot
 → else: route to LLM decision
 ```
 
-Each check is a pure Python function against the context snapshot. No file I/O, no network calls. The pipeline completes in under 5ms.
+The ordered list above is the design as first written. The code in the replay harness checks the conditions named in the correction under §2, in its own order.
 
 ---
 
@@ -150,7 +150,7 @@ Each check is a pure Python function against the context snapshot. No file I/O, 
 The 3-layer trigger system is implemented in `scripts/headless_trigger.py` (F41) — a long-running
 process that wakes a **headless** T0 when new work appears or when the system goes quiet:
 
-- **Layer 1 — file watcher** (`ReportWatcher`, `scripts/headless_trigger.py:492`): a `watchdog`
+- **Layer 1 — file watcher** (`ReportWatcher`, `scripts/headless_trigger.py:499`): a `watchdog`
   `Observer` fires on new `.md` reports in `unified_reports/`, debounced to at most one T0 trigger
   per 30s.
 - **Layer 2 — silence watchdog** (`silence_watchdog`, `scripts/headless_trigger.py:306`): a
@@ -222,7 +222,7 @@ For subprocess-adapter terminals, the skill content is inlined directly into the
 
 ## 7. Review Gate Lifecycle
 
-**Correction (2026-09-27): the "lock release" stage below is unwired** — see §3. Steps 1-4 (request, execute, report, result record) describe real mechanisms (`scripts/gate_request_handler.py`, `scripts/gate_executor.py`, `scripts/lib/gate_report_generator.py`, `scripts/lib/gate_recorder.py`). Step 5 ("lock release") and the "pre-filter finds no locks" framing of step 6 do not happen in the running system, because nothing calls `scripts/f39/gate_locks.py`. What actually gates completion is `scripts/pr_merge.py` reading the review-gate result record directly at merge time (`closure_verifier.check_review_gate_for_merge`) — a merge-time check, not a T0-decision-time lock. This lifecycle applies to **headless review gates** (codex, kimi). The D3 attestation gate follows a **completely different lifecycle** — no request file, no lock file, no result-record stage. It runs as a GitHub Action on `pull_request`, classifies the diff, resolves a trust anchor from the base branch, and returns a pass/fail signal as the check's exit code (`0` = PASS, EXEMPT, or a validly-signed OVERRIDE; `1` = FAIL; `2` = CONFIG ERROR). A recorded override therefore exits `0` just like a PASS — the PASS-vs-OVERRIDE distinction is carried in the textual verdict message, not the exit code. See `docs/governance/ATTESTATION_ENFORCEMENT.md` for that flow.
+**Correction (2026-09-27): the "lock release" stage below is unwired** — see §3. Steps 1-4 (request, execute, report, result record) describe real mechanisms (`scripts/lib/gate_request_handler.py`, `scripts/lib/gate_executor.py`, `scripts/lib/gate_report_generator.py`, `scripts/lib/gate_recorder.py`). Step 5 ("lock release") and the "pre-filter finds no locks" framing of step 6 do not happen in the running system, because nothing calls `scripts/f39/gate_locks.py`. What actually gates completion is `scripts/pr_merge.py`, which at merge time asks `closure_verifier.check_review_gate_for_merge` whether every review seat is filled on the PR head (§10). That is a merge-time check, not a T0-decision-time lock. This lifecycle applies to **headless review gates** (codex, kimi). The D3 attestation gate follows a **completely different lifecycle** — no request file, no lock file, no result-record stage. It runs as a GitHub Action on `pull_request`, classifies the diff, resolves a trust anchor from the base branch, and returns a pass/fail signal as the check's exit code (`0` = PASS, EXEMPT, or a validly-signed OVERRIDE; `1` = FAIL; `2` = CONFIG ERROR). A recorded override therefore exits `0` just like a PASS — the PASS-vs-OVERRIDE distinction is carried in the textual verdict message, not the exit code. See `docs/governance/ATTESTATION_ENFORCEMENT.md` for that flow.
 
 ```
 request → execute → report → result record → (lock release, as designed) → merge-time check
@@ -249,7 +249,7 @@ request → execute → report → result record → (lock release, as designed)
    ```
    Contains: verdict (`pass`/`fail`/`warn`), findings, score, tool version.
 
-5. **Merge-time check**: `scripts/pr_merge.py` reads this result record directly when the merge is attempted (`closure_verifier.check_review_gate_for_merge`). A missing, stale, or failing result blocks the merge. There is no separate "lock release" step in the running system.
+5. **Merge-time check**: `scripts/pr_merge.py` evaluates the result records for the PR head when the merge is attempted (`closure_verifier.check_review_gate_for_merge`, built on `review_seat_evaluation.evaluate_review_seats`). A missing, stale, or failing result, or an unfilled seat, blocks the merge. There is no separate "lock release" step in the running system.
 
 ### Why both report and result record are required
 
@@ -336,4 +336,30 @@ the lifecycle diagram, see `docs/core/00_VNX_ARCHITECTURE.md`
 
 ---
 
-*Last updated: April 2026 — F39 Headless T0 Benchmark; §9 added 2026-06-14 for the 1.0.1 future-state reconciliation; §3/§5/§7/§8 refreshed 2026-07-05 for the D1-D5 signed-attestation gate (`docs/governance/ATTESTATION_ENFORCEMENT.md`, ADR-027) and the unified-supervisor tick system.*
+## 10. The Governance Chain on Main
+
+Checked against `origin/main` on 2026-10-18. Everything in this section is on `main`; what was merged after the last release (`VERSION`, tag `v1.7.1`) is on main and not yet released. The mechanism is described once, in the linked file.
+
+**The merge door.** `scripts/pr_merge.py` runs five preflights in the order of `PREFLIGHT_ORDER`: CI on the head, the review gate, the ADR number check, `contract_invalid` and branch protection. It stops at the first refusal, writes a `pr_merge_refused` receipt and exits non-zero. A merge runs pinned to the approved head (`--match-head-commit`), GitHub must report `MERGED`, and only then does the binding `pr_merged` receipt land. A raw `gh pr merge` runs none of this. Checks, releases and exit codes: `docs/core/DISPATCH_RULES.md` §2.1 and §2.2. Every release of the door and what it leaves behind: `docs/core/LOCKS_AND_RELEASES.md`. `vnx pr-ready <PR>` shows the evidence per PR before the door is called.
+
+**Review seats.** Each entry of the project's review stack is a seat, and each seat is filled by its own reviewer: one reviewer gate fills at most one seat of a request. A rejection by any review peer blocks the merge, whatever the other seats say. A reviewer that is missing or failed is absence, not a vote: the seat stays unfilled and neither signs nor rejects ([ADR-037](../governance/decisions/ADR-037-gate-uitval-is-afwezigheid-niet-tegenstem.md)). Every consumer of the verdict (the door, `vnx-gate/review`, `vnx pr-ready`, track closure) calls `review_seat_evaluation.evaluate_review_seats`, so no evaluator derives a seat of its own. Described in `docs/core/00_VNX_ARCHITECTURE.md` ("Review Seats"). The seat rule is on main, not yet released.
+
+**The takeover chain.** The default stack is `codex_gate,kimi_gate`, both on a subscription. When a reviewer is out, the next gate in the chain `codex_gate,kimi_gate,deepseek_gate` reads its seat. `glm_gate` left the default chain on 2026-10-17 and remains a registered gate that an explicit chain can name. With every subscription reviewer out, deepseek reads one seat and the other ends as `chain_exhausted`: no merge, no silent re-dispatch. The receipt of a taken-over seat carries `takeover_from`. See `docs/core/PROVIDER_LANES.md` ("Takeover chain") and `docs/core/DISPATCH_RULES.md` §2.
+
+**The provider switch.** `vnx providers` is the operator's switch per provider family. It exists, and `vnx providers list` shows the state. It does not switch anything yet: `vnx providers list` prints `Enforcement: NOT enforced yet. 25 of 28 launch functions do not call provider_switch.require; the write verbs refuse until they do`. The write verbs stay refused until every launch function calls `provider_switch.require`. `claude` and `codex` are never switchable. Where it is read: `docs/core/PROVIDER_LANES.md` ("Provider switch"). The content boundary (`content_class`) is enforced in two places only, the conversation analyzer and the dream consolidation. It is not enforced in the receipt classifier, the tagger or the scout (OI-2172), so this document does not claim that restricted content never reaches a non-claude provider.
+
+**Open outcomes.** A dispatch is finished only with an outcome, accept or reject (operator decision 2026-09-29). `python3 scripts/receipt_query.py open-outcomes --state-dir <state-dir> --json` is step 0 of every T0 cycle and lists every dispatch without an outcome a T0 decided on. `receipt_query.py decide <dispatch_id> accept|reject --reason "<why>"` appends the decision to `t0_decision_log.jsonl` and removes the dispatch from the list. `--recount` shows a fresh reading of the evidence, read-only. Mechanism: `docs/core/DISPATCH_RULES.md` §13; fields: `docs/core/11_RECEIPT_FORMAT.md`; identity rule: [ADR-038](../governance/decisions/ADR-038-receipt-outcome-identity.md).
+
+**The plan-gate with one seat.** The plan-first gate runs one default seat (codex). A BLOCK brings an escalation seat (opus) in on the same plan in the same run, and a REVISE does not escalate. Rounds count per plan version. The seats are named in `configs/plan_gate_panel.yaml`. The enforcement decision is [ADR-030](../governance/decisions/ADR-030-plan-first-gate-enforcement.md); the one-seat rule is behaviour of the code and is described in `docs/core/HORIZON_PLANNING.md` ("Plan-gate composition") and `docs/core/HORIZON_LIFECYCLE.md`. The passed gate leaves hash-chained evidence in `.vnx-attest/plan-gates.ndjson`.
+
+**The T0 guard and rotation.** `vnx guard install` registers a hook in the Claude Code settings of every account, through a shim that exits 0 outside a VNX project and in a dispatch worktree; `vnx guard check` reports per account and per project where the guard runs. The rotation spawner `scripts/t0_rotate_spawn.sh` refuses a rotation without proof that the wrap finished, and an emergency path leaves an audit line.
+
+**The context-rotation plugin.** `packages/claude-code-toolkit/context-rotation/` is a Claude Code plugin that measures how full the context is, asks for a handover note at set bands, checks the note and gives it to the fresh session after `/clear`. Its README names the limits: tmux for the automatic clear, and the bands are a share of a configured `window_tokens`.
+
+**Changelog fragments.** A PR never edits `CHANGELOG.md`. It adds one file under `changelog.d/`, and the release PR folds the fragments into the changelog (`changelog.d/README.md`, OI-2118).
+
+**The hash chain is not a tamper-evidence claim on its own.** The append-only NDJSON ledger can carry a hash chain ([ADR-023](../governance/decisions/ADR-023-receipt-hash-chain.md)). It is available per project and off by default. Read "audit trail" in this document as an append-only record, not as a tamper-evident one.
+
+---
+
+*Last updated: 2026-10-18 against `main`. §9 added 2026-06-14 (1.0.1 future-state reconciliation); §3/§5/§7/§8 refreshed 2026-07-05 for the D1-D5 signed-attestation gate (`docs/governance/ATTESTATION_ENFORCEMENT.md`, ADR-027); §2/§4 corrected and §10 added 2026-10-18.*

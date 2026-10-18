@@ -1,7 +1,7 @@
 # VNX Evolution Timeline (Condensed)
 
 **Status**: Public summary for readers  
-**Scope**: Architectural evolution over ~6 months  
+**Scope**: Architectural evolution through 2026-10-18  
 **Audience**: People evaluating VNX concept and build quality
 
 ---
@@ -143,7 +143,7 @@ This timeline is a concise reconstruction of the technical evolution, without pr
 
 ## Language Evolution: Why Python Now Dominates
 
-VNX started as tmux `send-keys` scripts — the most direct way to control terminal panes programmatically. This means the codebase grew organically from bash, not as a planned language choice. It has since shifted heavily toward Python: a line count under `scripts/` (`.py`) against `scripts/`+`bin/` (`.sh`) puts the split at roughly 93%/7% Python/Bash, not the ~60/40 Bash/Python this section originally claimed.
+VNX started as tmux `send-keys` scripts — the most direct way to control terminal panes programmatically. This means the codebase grew organically from bash, not as a planned language choice. It has since shifted heavily toward Python: a line count under `scripts/` (`.py`) against `scripts/`+`bin/` (`.sh`) puts the split at roughly 92%/8% Python/Bash (line count of tracked `scripts/**/*.py` against `scripts/**/*.sh` plus `bin/*`, measured 2026-10-18), not the ~60/40 Bash/Python this section originally claimed.
 
 **Why bash persists in its remaining 7%:**
 - Tmux orchestration (`send-keys`, pane management, session control) is inherently shell-native.
@@ -251,41 +251,39 @@ Skills are just prompts. Worker skills and manager skills use the identical mech
 
 **Gate locks**
 - File-based locks at `.vnx-data/state/gate_locks/<gate-id>.lock`.
-- Code pre-filter unconditionally blocks `COMPLETE` when any lock file exists.
-- LLM never receives gate state — it cannot argue, reason around, or override a lock.
-- Domain-agnostic: same mechanism works for `codex_review`, `gemini_review`, CI green, and future business compliance gates.
+- Designed so that a pre-filter blocks `COMPLETE` while any lock file exists and the LLM never receives gate state. **Correction (2026-10-18): this was not wired into a running caller.** `scripts/f39/gate_locks.py` has no caller outside the benchmark; the deterministic block on completion is the merge door (Phase 15 below).
+- Domain-agnostic by design: the same mechanism would work for review gates, CI green and future business compliance gates.
 
 **Benchmark harness**
 - Context assembler builds ~5K token snapshots from 8 state files.
 - Replay harness executes scenarios at three complexity levels.
-- Benchmark scores: Level-1 100%, Level-2 73–87%, Level-3 67–78%.
+- Replay scenarios at three complexity levels; the scores of April 2026 are not restated because they have not been re-measured on `main`.
 - Fixture-mode tagging separates benchmark runs from production execution.
 
 **Representative components**
 - T0 decision pre-filter + taxonomy (the deterministic pre-LLM filter)
-- Gate locks: `.vnx-data/state/gate_locks/<gate-id>.lock`, enforced by the closure/gate machinery (`scripts/closure_verifier.py`)
+- Gate locks: `scripts/f39/gate_locks.py` (benchmark harness, no production caller)
 - Context assembler: `scripts/lib/context_assembler.py`
 - F39 replay harness: `scripts/f39/replay_harness/`
 
 **Outcome**
-- T0 can make correct decisions autonomously in the majority of cases.
-- Gates are enforced deterministically — human override is possible, but agent bypass is not.
-- Benchmark baseline established for future headless T0 production cutover.
+- A benchmark baseline exists for a future headless T0 cutover, which has not happened.
+- The decision taxonomy stayed; gates are enforced deterministically at the merge door, not through lock files.
 
 ---
 
 ## Phase 11: Governance Hardening Chain and Intelligence Closure (v0.10.0)
 
 **Problem**
-- Headless audit trail still had gaps (~40% parity): tokens uncounted, STUCK events not archived, no cryptographic reproducibility.
+- Headless audit trail still had gaps in parity with the interactive path: tokens uncounted, STUCK events not archived, no cryptographic reproducibility.
 - Supervisor daemons (dispatcher, receipt processor) would die silently under load — no auto-respawn.
 - The intelligence loop was open-circuit: pattern confidence stores for the selector and learner diverged independently, and `dispatch_id` was never stamped at injection time, so failure decay never propagated.
 - Frontend regressions were caught manually — no automated visual baseline.
 - Codex gate severity was too noisy (100% blocking rate on chain regate).
 
-**What changed (27 PRs, 2026-04-28 → 2026-04-30)**
+**What changed (2026-04-28 → 2026-04-30)**
 
-**Headless audit parity (40% → 90%)**
+**Headless audit parity**
 - `instruction_sha256` stamped in manifest + receipt: dispatches are cryptographically reproducible.
 - `WorkerHealthMonitor` STUCK events archived to `EventStore` + `stuck_event_count` in receipt.
 - Cross-provider token tracking (`codex_adapter`, `gemini_adapter`) via `adapter.get_token_usage()`.
@@ -313,10 +311,10 @@ Skills are just prompts. Worker skills and manager skills use the identical mech
 - `dashboard/api_register_stream.py`
 
 **Outcome**
-- Headless audit trail approaches interactive parity.
+- The headless audit trail moved toward interactive parity.
 - Daemons self-heal without operator intervention.
 - Intelligence loop is closed: patterns can actually learn from failures.
-- Codex gate noise reduced ~75%, making gate enforcement sustainable at scale.
+- Codex gate severity was tightened, which made gate enforcement sustainable at scale.
 
 ---
 
@@ -338,6 +336,82 @@ Skills are just prompts. Worker skills and manager skills use the identical mech
 **Outcome**
 - `VERSION` is `1.0.0`, published to PyPI on 2026-07-02 (`pip install vnx-orchestration`), tagged `v1.0.0` with a GitHub release.
 - The audit trail now records routing through one door; multitenancy is enforced fail-closed; the self-learning proposal tier produces operator-gated proposals from the real receipt stream.
+
+---
+
+## Phase 13: Outcomes Instead of End States (2026-09-28 to 2026-10-04)
+
+**Problem**
+- A dispatch could end in a silent state (killed worker, abandoned bundle, a receipt without a verdict) and drop off every list. The byte cursor that handed a receipt to one reader took it away from every other reader.
+
+**What changed**
+- One outcome per dispatch, with its own identity rule ([ADR-038](../governance/decisions/ADR-038-receipt-outcome-identity.md)): `receipt_outcome` module (#1980), digest counting one outcome per dispatch (#1990), three readers on it (#1992).
+- Open outcomes replace the byte cursor (#2008). A dispatch is finished only with an outcome, accept or reject; no end state without one (#2010). Abandoned bundles and failed worker exits stay open (#2018).
+- `receipt_query.py open-outcomes --recount` shows a fresh, read-only reading of the test evidence (#2038). Verification counts the last green run, not the first red one (#2000, #2012). The report parser reads `## Verification` (#1975). The dispatch role reaches the receipt (#2028).
+
+**Outcome**
+- A T0 cannot lose a dispatch: it stays on the open list until a decision is written to the decision log. Mechanism: `docs/core/DISPATCH_RULES.md` §13, fields in `docs/core/11_RECEIPT_FORMAT.md`. Released: #1980 to #2010, #2018 and #2028. On main, not yet released: `--recount` (#2038).
+
+---
+
+## Phase 14: The T0 View of the Fabric (2026-09-28 to 2026-10-07)
+
+**What changed**
+- Live work in the T0 state comes from the dispatches table and the occupancy lock (#1984). Dead and bloated sections left the state file (#1999). The open-PR row carries head, conflict state and CI on the head (#2041).
+- Gate bundles leave `dispatches/pending/` (#1979). Health checks expect only headless-era daemons (#1983). `parent_dispatch` is derived from `work_ref` on stage (#1962).
+- The reconciler counts only hard dependency edges as blocking (#1981) and no longer completes a stub from track-level evidence (#2048, on main, not yet released).
+- The T0 folder works for a T0: the role fallback reads the playbook (#2037). The rotation spawner starts the successor in that folder (#2042).
+- The register of every lock between a dispatch and a merge, and every way each opens (#2039): `docs/core/LOCKS_AND_RELEASES.md`.
+
+---
+
+## Phase 15: Review Seats and the Merge Door (2026-09-28 to 2026-10-18)
+
+**Problem**
+- A review gate could pass on an older head, a reviewer outage could leave a seat silently empty, and two evaluators could read the same PR differently.
+
+**What changed**
+- Gates bind to the PR head: the gate-required check (#1956), no verdict about an older head (#2019), verified results bound to the head (#2021), a review-gate check requires a PASS by the shared rule (#2016). REVISE counts as fail (#2025). Reviewer prompts carry no intelligence or repo map (#1964).
+- The takeover chain `codex_gate,kimi_gate,deepseek_gate`, with deepseek signing at the merge door (#2040). A seat resolver and one reviewer per seat (#2073, R5a). Every evaluator counts seats one way and blocking always blocks (#2074, #2084, R5b, [ADR-037](../governance/decisions/ADR-037-gate-uitval-is-afwezigheid-niet-tegenstem.md)). `glm_gate` left the default chain (#2100).
+- Harness reviewer seats keep their final answer in parallel runs (#2081) and a weekly-limit refusal counts as an exhausted lane (#2077).
+- A raw-file dispatch is refused under the door default ([ADR-025](../governance/decisions/ADR-025-raw-file-dispatch-deprecation.md), #1954, released). The harness lanes for glm and deepseek run on a clean `CLAUDE_CONFIG_DIR` (#2026, released). Every headless builder run gets its own event stream (#2086).
+- The plan-gate runs one seat, a second seat on BLOCK, and counts rounds per plan version (#2104).
+
+**Outcome**
+- The merge door (`scripts/pr_merge.py`) runs five preflights and writes a `pr_merged` receipt that records who filled which seat. The seat rule, the takeover chain and the one-seat plan-gate are on main, not yet released. Summary: `docs/manifesto/GOVERNANCE_ARCHITECTURE.md` §10.
+
+---
+
+## Phase 16: Provider Switch and Content Boundary (2026-10-14 to 2026-10-15)
+
+**What changed**
+- `vnx providers`: the switch core, the CLI and a coverage guard (#2055). Review gates honor it (#2058). The intelligence tagger, scout, classifier and analyzer honor it, and the dream consolidation also honors the content boundary (#2057).
+- Deep analysis is routed by content, and the session origin is labelled (#2032). The codex model comes from the registry in every launch path (#2059). Sonnet 5.5 entered the registry, and receipts record the model that actually ran (#1973).
+- The learning loop: natural key on pattern tables (#1965), the nightly analyzer fails on an error instead of logging complete (#1966), a nightly shadow phase with a beacon (#1968), the analyzer on deepseek-flash with a balance pre-flight (#1969), open items as a second signal (#1972), project scoping of failure patterns (#2023).
+
+**Outcome**
+- The switch exists and does not enforce yet: its write verbs refuse until every launch function calls `provider_switch.require` (`vnx providers list`). The content boundary is read by the conversation analyzer and the dream consolidation only (OI-2172). `docs/core/PROVIDER_LANES.md`, "Provider switch".
+
+---
+
+## Phase 17: T0 Guard, Rotation and the Context-Rotation Plugin (2026-10-15 to 2026-10-18)
+
+**What changed**
+- The T0 guard: a hook shim that cannot wedge a session (#2075, #2079) and `vnx guard install` and `vnx guard check` (#2078). The rotation spawner refuses a rotation without wrap proof and has an emergency path that leaves an audit line (#2076).
+- The context-rotation plugin in `packages/claude-code-toolkit/context-rotation/`: skeleton, hook boundary and warn band (#2064), state, detector, injection and the rotate skill (#2080), force and hard bands (#2090), the automatic `/clear` in tmux (#2093), documentation and install test (#2095), with fix-forwards (#2091, #2092, #2094, #2096).
+
+**Outcome**
+- A long session rotates on a handover note that is checked, not on auto-compaction. On main, not yet released.
+
+---
+
+## Phase 18: CI Cost and Release Mechanics (2026-10-03 to 2026-10-18)
+
+**What changed**
+- A function-size ratchet in CI (#2036). One profile prelude, a collection manifest and an xdist shadow job that never fails a check (#2082), the parity check (#2087) and a cutover history that counts only verdicts a failed parity step cannot leave clean (#2105). Worker-safe fixes in the tests and the subprocess adapter that the parallel run exposed (#2101, #2102, #2103).
+- One CHANGELOG fragment per PR under `changelog.d/`, folded into `CHANGELOG.md` by the release PR (#2085, #2097, #2099).
+- Three point releases were cut in this period (#1960, #2011, #2035). The project `CLAUDE.md` carries four build rules (#2031).
+- The architecture documents under `docs/core/` were brought up to main (#2108, #2109).
 
 ---
 
@@ -370,13 +444,13 @@ Debugging got harder. When a headless worker stalled or failed, the operator had
 ### Phase C — Headless Review Gates
 
 **What changed**
-Codex and Gemini review gates moved from "operator reads the review output and decides" to headless `codex exec` / `gemini` subprocesses running autonomously. Triple-gate enforcement (codex pass + gemini pass + CI green = merge) became machine-enforced rather than human-remembered.
+Codex and Gemini review gates moved from "operator reads the review output and decides" to headless `codex exec` / `gemini` subprocesses running autonomously. Triple-gate enforcement (codex pass + gemini pass + CI green = merge) became machine-enforced rather than human-remembered. Gemini has since left the review stack; the current merge door is Phase 15.
 
 **The experience**
 The operator's role shifted from decision-maker to exception handler. Gates ran without prompting; the operator only intervened on failures. A chain of 10 PRs could land while the operator was doing other work.
 
 **The cost**
-Gate false positives became a real problem. When codex flagged everything as `error`-severity, the operator had to manually override or retune prompts. The #323/#324 severity tightening in v0.10.0 was a direct response to this: blocking rates dropped ~75%.
+Gate false positives became a real problem. When codex flagged everything as `error`-severity, the operator had to manually override or retune prompts. The #323/#324 severity tightening in v0.10.0 was a direct response to this: blocking rates dropped.
 
 ### Phase D — Self-Improvement Loop Attempt
 
@@ -399,13 +473,13 @@ The operator no longer needs to check "is the receipt processor still running?" 
 **The cost**
 More moving parts. Diagnosing *why* a supervisor restarted requires reading the supervisor log, not just the dispatcher log. The operational surface area is wider even though the operator burden is lower.
 
-### Phase F — Cryptographic Audit Chain (v0.10.0)
+### Phase F: Reproducible Audit Evidence (v0.10.0)
 
 **What changed**
-`instruction_sha256` stamps the dispatch instruction hash in the manifest and receipt. Token usage (codex, gemini) is tracked per gate invocation. The audit trail is now cryptographically complete: every dispatch can be reproduced, every gate invocation costed, every worker event counted.
+`instruction_sha256` stamps the dispatch instruction hash in the manifest and receipt. Token usage (codex, gemini) is tracked per gate invocation. Every dispatch can be reproduced from its recorded instruction, every gate invocation costed, every worker event counted.
 
 **The experience**
-The operator can answer questions that previously required guesswork: "Did this receipt come from this exact instruction?" and "How many tokens did the codex gate consume on this chain?". The audit trail transitioned from "good enough for debugging" to "good enough for billing and compliance audit".
+The operator can answer questions that previously required guesswork: "Did this receipt come from this exact instruction?" and "How many tokens did the codex gate consume on this chain?". The audit trail moved from "good enough for debugging" to evidence an auditor can query. That is not tamper-evidence: the hash chain over the ledger is available per project and off by default.
 
 ---
 
@@ -416,13 +490,14 @@ The operator can answer questions that previously required guesswork: "Did this 
 - Headless worker execution via SubprocessAdapter (T1/T2 fully headless)
 - Auto-report pipeline: stop hook → extraction → haiku classification → markdown
 - Unified T0 state builder: 0.2s startup, single source of truth
-- Merge-time fail-closed gates (`scripts/pr_merge.py`): CI, review-gate result, contract-validity, and branch-protection checks all run in code before a merge is allowed (the file-lock-based gate design in `scripts/f39/gate_locks.py` remains unwired — see `GOVERNANCE_ARCHITECTURE.md` §3)
-- T0 decision framework benchmarked at 73–100% accuracy by scenario tier
+- Merge-time fail-closed gates (`scripts/pr_merge.py`): CI, review gate with one reviewer per seat, ADR numbering, contract validity and branch protection all run in code before a merge is allowed (the file-lock-based gate design in `scripts/f39/gate_locks.py` remains unwired, see `GOVERNANCE_ARCHITECTURE.md` §3 and §10)
+- Open outcomes: no dispatch ends without an accepted or rejected outcome
+- T0 decision framework with a replayable benchmark harness
 - Dashboard with unified domain visibility and reports browser
 - Multi-model operation with model-agnostic orchestration core
 - Supervisor pack: daemons auto-respawn, state auto-rotates nightly
-- Cryptographic audit trail: instruction_sha256, token tracking, canonical gate schema
-- Headless audit parity at ~90% (was 40% at v0.9.0)
+- Audit evidence per dispatch: `instruction_sha256`, token tracking, canonical gate schema. The hash chain over the ledger is available per project and off by default
+- Headless audit trail close to interactive parity
 - Intelligence loop closed: selector-learner reconciled, T0 decision log active; the self-learning proposal tier produces operator-gated proposals from the receipt stream
 - Multitenancy enforced fail-closed (ADR-007 composite `project_id` keys) — one machine governs many projects without bleed
 - Single-entry dispatch door default-ON (ADR-024): every dispatch funnels through one validated, permitted, phantom-guarded entry point
