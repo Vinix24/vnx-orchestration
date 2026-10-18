@@ -547,7 +547,7 @@ class GateExecutorMixin:
             mode=mode,
             dispatch_id=dispatch_id,
             head_sha=head_sha,
-            override_b3=override_b3,
+            **({"override_b3": override_b3} if override_b3 else {}),
         )
 
         requested = list(request_result.get("requested", []))

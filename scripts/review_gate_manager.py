@@ -281,6 +281,11 @@ def _override_b3_reason(args: argparse.Namespace) -> Optional[str]:
     return reason
 
 
+def _override_b3_kwargs(reason: str) -> Dict[str, str]:
+    """``override_b3`` for the manager call, only when one was given: the call is unchanged without it."""
+    return {"override_b3": reason} if reason else {}
+
+
 def _print_round_refusals(result: Dict[str, Any]) -> None:
     """Name every seat the round ledger refused (R1), with its own reason text, on stderr."""
     refused = (review_rounds.REFUSED_B3_CAP, review_rounds.REFUSED_VERDICT_ON_HEAD,
@@ -375,7 +380,7 @@ def _handle_request_and_execute(manager: ReviewGateManager, args: argparse.Names
             changed_files=changed_files,
             mode=args.mode,
             dispatch_id=getattr(args, "dispatch_id", "") or "",
-            override_b3=override_b3,
+            **_override_b3_kwargs(override_b3),
         )
     except ReviewGateConfigError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -451,7 +456,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 changed_files=changed_files,
                 mode=args.mode,
                 dispatch_id=getattr(args, "dispatch_id", "") or "",
-                override_b3=override_b3,
+                **_override_b3_kwargs(override_b3),
             )
         except ReviewGateConfigError as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
