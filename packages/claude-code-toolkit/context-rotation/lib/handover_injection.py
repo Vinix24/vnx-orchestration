@@ -3,7 +3,8 @@
 the claim's line in injections.jsonl -> claim (the marker moves to the claim name
 of its generation) -> copy to the archive -> the original moves into the archive
 (rotation_state.retire_original) -> the injection's line -> emit -> the delivery's
-line, once the emit returned -> the claimed marker removed last. A crash at any
+line, once the emit returned -> the claimed marker removed last, only once that
+line is written. A crash at any
 point leaves the claimed marker naming an archive copy that holds the claimed
 bytes, or the original, and `resume` lists it. Automatic injection happens at
 most once; recovery is manual, and reads the archive copy first: the original is
@@ -110,6 +111,9 @@ def deliver(project_dir: str, claimed: str, marker: Dict[str, Any], data: bytes,
     emitted, and the claimed marker stays for `resume`. An emit that raises
     leaves the claim too, and no `delivered` line: only an emit that returned
     gets one (rotation_state.log_delivery), which the automatic /clear waits for.
+    The claimed marker is removed only once that line is written, so the claim
+    never ends without its line: when the line cannot be written, the claim stays
+    for `resume` as well.
     """
     step = "archive handover"
     try:
@@ -130,8 +134,8 @@ def deliver(project_dir: str, claimed: str, marker: Dict[str, Any], data: bytes,
         return None
     at("emit handover")
     emit(context["text"], archive)
-    rotation_state.log_delivery(project_dir, via, marker["session_id"], marker["generation"], successor)
-    rotation_state.finish_claim(project_dir, claimed)
+    if rotation_state.log_delivery(project_dir, via, marker["session_id"], marker["generation"], successor):
+        rotation_state.finish_claim(project_dir, claimed)
     return archive
 
 

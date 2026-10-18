@@ -39,6 +39,9 @@ _POSITIVE_INTS = (
     "window_tokens", "handover_max_chars", "handover_max_age_minutes",
     "hard_max_denials", "archive_keep", "ack_timeout_seconds",
 )
+# UTF-8 takes at most four bytes per character, so every handover the contract accepts can be read.
+MAX_HANDOVER_CHARS = regular_file.MAX_READ_BYTES // 4
+_MAXIMA = {"handover_max_chars": MAX_HANDOVER_CHARS}
 _PATTERNS = ("busy_pattern", "prompt_pattern")
 _TOOL_LISTS = ("force_deny_tools",)
 _PCTS = ("warn_pct", "force_pct", "hard_pct")
@@ -151,7 +154,7 @@ def _valid_value(key: str, value: Any) -> bool:
     if key in _BOOLS:
         return isinstance(value, bool)
     if key in _POSITIVE_INTS:
-        return _is_int(value) and value > 0
+        return _is_int(value) and 0 < value <= _MAXIMA.get(key, value)
     if key in _TOOL_LISTS:
         return isinstance(value, list) and all(isinstance(item, str) and item and "\0" not in item for item in value)
     if key in _PATTERNS:

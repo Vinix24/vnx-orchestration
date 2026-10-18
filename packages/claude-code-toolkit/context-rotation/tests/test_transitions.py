@@ -20,7 +20,8 @@ import sys
 
 import pytest
 
-from conftest import PKG, VALID_HANDOVER, Session, b1_entry, event, message_of, rotation, settings_file, start
+from conftest import (PKG, VALID_HANDOVER, Session, b1_entry, context_of, event, message_of, rotation, settings_file,
+                      start)
 
 sys.path.insert(0, str(PKG / "hooks"))
 
@@ -247,6 +248,44 @@ def test_a_crash_right_after_the_claim_leaves_the_claims_line(tmp_path, project,
     [*_, last] = journal(project) or [{}]
     assert (last.get("event"), last.get("origin_session_id"), last.get("session_id")) == ("claimed", "sess-a", "sess-b")
     assert last.get("archive") == json.loads(claimed.read_text())["archive"]
+
+
+def without_the_delivered_line(patch):
+    """The journal refuses the `delivered` line only: the emit before it returned (OI-2126 item 4)."""
+    real_append = rotation_state.append_journal
+
+    def append(project_dir, record):
+        if record.get("event") == "delivered":
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_append(project_dir, record)
+
+    patch.setattr(rotation_state, "append_journal", append)
+
+
+def test_a_claim_leaves_only_after_its_delivered_line(tmp_path, project, monkeypatch, capsys):
+    saved_session(tmp_path, project)
+    with monkeypatch.context() as patch:
+        without_the_delivered_line(patch)
+        run_clear(project)
+    assert VALID_HANDOVER in json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+    assert [line.get("event") for line in journal(project)] == ["ready", "claimed", "injected"]
+    claims = list(rotation(project).glob("claimed-*.json"))
+    assert len(claims) == 1, "the claim was removed without a line in injections.jsonl"
+    assert "claim did not finish" in message_of(start(project, "sess-c", source="startup"))
+    assert any("log the delivery of generation" in line
+               for line in (rotation(project) / "errors.log").read_text().splitlines())
+
+
+def test_a_claim_resumed_once_its_delivered_line_can_be_written_leaves(tmp_path, project, monkeypatch, capsys):
+    saved_session(tmp_path, project)
+    with monkeypatch.context() as patch:
+        without_the_delivered_line(patch)
+        run_clear(project)
+    user = Session(tmp_path, project, "sess-c")
+    user.expand("resume")
+    assert VALID_HANDOVER in context_of(user.expand("resume 1"))
+    assert [line.get("event") for line in journal(project)][-2:] == ["injected", "delivered"]
+    assert not list(rotation(project).glob("claimed-*.json"))
 
 
 def make_ready(project, session_id="sess-a"):

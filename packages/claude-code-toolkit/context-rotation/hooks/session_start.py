@@ -9,9 +9,10 @@
   own (`<time>-<origin>.original`) and never becomes that copy. The injection is
   logged in injections.jsonl and returned as additionalContext (or as a pointer to
   the archive copy above 9,000 characters); once that output is written a
-  `delivered` line follows, and the claimed marker is removed last. An output that
-  cannot be written leaves the claim and no `delivered` line, so the automatic
-  /clear types nothing after it. The user gets one line naming the archive copy;
+  `delivered` line follows, and the claimed marker is removed last, only after that
+  line. An output that cannot be written leaves the claim and no `delivered` line,
+  so the automatic /clear types nothing after it; a `delivered` line that cannot be
+  written leaves the claim too. The user gets one line naming the archive copy;
   when the pane's automatic /clear typed this clear (auto_clear.typed_by_job) and
   it is the first one for this user, that line also says how to turn auto_clear
   off. A marker that fails the path checks is never used: it is reported once and

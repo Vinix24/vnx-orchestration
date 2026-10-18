@@ -165,44 +165,62 @@ def errors_log(project):
     return path.read_text() if path.exists() else ""
 
 
-def test_a_cleanup_that_cannot_open_the_lock_after_the_emit_still_exits_0(tmp_path, project, monkeypatch, capsys):
+def after(monkeypatch, moment, action):
+    """Run `action` right after the handover is emitted, or right after its `delivered` line is written."""
+    owner, name = (hook_runtime, "emit") if moment == "emit" else (rotation_state, "log_delivery")
+    real = getattr(owner, name)
+
+    def then_act(*args):
+        result = real(*args)
+        action()
+        return result
+
+    monkeypatch.setattr(owner, name, then_act)
+
+
+# After the emit the `delivered` line fails first, and the claim then stays without a cleanup;
+# after that line the cleanup of the claim is what fails.
+MOMENTS = pytest.mark.parametrize("moment,logged", [
+    ("emit", "log the delivery of generation"), ("delivered", "cleanup of"),
+], ids=["after-the-emit", "after-the-delivered-line"])
+
+
+@MOMENTS
+def test_a_cleanup_that_cannot_open_the_lock_after_the_emit_still_exits_0(tmp_path, project, monkeypatch, capsys,
+                                                                        moment, logged):
     origin = saved(tmp_path, project)
     lock = rotation(project) / ".lock"
-    real_emit = hook_runtime.emit
 
-    def emit_then_the_lock_becomes_a_directory(document):
-        real_emit(document)
+    def the_lock_becomes_a_directory():
         lock.unlink()
         lock.mkdir()
 
-    monkeypatch.setattr(hook_runtime, "emit", emit_then_the_lock_becomes_a_directory)
+    after(monkeypatch, moment, the_lock_becomes_a_directory)
     code = run_main(monkeypatch, clear_payload(project))
     assert code == 0, "the hook failed after it emitted the handover"
     assert VALID_HANDOVER in emitted(capsys)
     [claimed] = rotation(project).glob("claimed-sess-a-*.json")  # the unfinished claim stays
     assert not origin.handover.exists()  # it moved into the archive before the emit
     assert Path(json.loads(claimed.read_text())["archive"]).read_text() == VALID_HANDOVER
-    assert "cleanup of" in errors_log(project)
+    assert logged in errors_log(project)
 
 
-def test_a_cleanup_that_times_out_on_the_lock_after_the_emit_still_exits_0(tmp_path, project, monkeypatch, capsys):
+@MOMENTS
+def test_a_cleanup_that_times_out_on_the_lock_after_the_emit_still_exits_0(tmp_path, project, monkeypatch, capsys,
+                                                                         moment, logged):
     saved(tmp_path, project)
-    real_emit, real_acquire = hook_runtime.emit, rotation_state._acquire
+    real_acquire = rotation_state._acquire
 
     def held(descriptor, path, timeout):
         if os.path.basename(path) != ".lock":  # another process holds the project lock, not the log's
             return real_acquire(descriptor, path, timeout)
         raise rotation_state.LockTimeout("%s was held" % path)
 
-    def emit_then_the_lock_is_held(document):
-        real_emit(document)
-        monkeypatch.setattr(rotation_state, "_acquire", held)
-
-    monkeypatch.setattr(hook_runtime, "emit", emit_then_the_lock_is_held)
+    after(monkeypatch, moment, lambda: monkeypatch.setattr(rotation_state, "_acquire", held))
     assert run_main(monkeypatch, clear_payload(project)) == 0
     assert VALID_HANDOVER in emitted(capsys)
     assert list(rotation(project).glob("claimed-sess-a-*.json"))
-    assert "cleanup of" in errors_log(project)
+    assert logged in errors_log(project)
 
 
 def fill_old_copies(project):
