@@ -61,9 +61,10 @@ disk) is no rejection: it fills no seat and does not block on its own.
 :func:`counted_fill`). In a store that keeps ``review_gates/rounds.ndjson``, a
 filled seat stays filled only when its PASS has its line there, for this head
 and the seat it was given in. A PR that is not opened in the ledger (reviewed
-before R1, or verdicts booked without a gate request), a ledger that is
-unreadable for it, and a ledger path that is no regular file fill no seat until
-``vnx review rounds rebuild --pr N``; the codex seat of a PR at the B3 cap is not filled unless the
+before R1, or verdicts booked without a gate request) fills no seat until
+``vnx review rounds open --pr N --reason``; a ledger that is unreadable for it,
+and a ledger path that is no regular file, fill no seat until the operator sets
+the file aside. The codex seat of a PR at the B3 cap is not filled unless the
 door's ``--override-b3`` gives a reason. Rejections are not counted against the
 ledger: blocking always blocks.
 
@@ -760,7 +761,7 @@ class DoorRounds:
     ``refusal`` is set when no PASS of this PR can be counted: the ledger is
     no regular file or is unreadable for it, or the PR is not opened in it (a
     PR reviewed before R1, or one whose verdicts were booked without a gate
-    request, until ``vnx review rounds rebuild --pr N``). ``cap`` is the B3
+    request, until ``vnx review rounds open --pr N --reason``). ``cap`` is the B3
     count over the codex seat, ``override`` the reason of the door's
     ``--override-b3``.
     """
@@ -804,13 +805,12 @@ def door_rounds(scope: SeatScope, b3_override: str = "") -> Optional[DoorRounds]
     if path is None or not scope.pr_id.isdigit():
         return None
     pr_number = int(scope.pr_id)
-    rebuild = review_rounds.rebuild_command(pr_number)
     try:
         if review_rounds.ledger_state(path) == "absent":
             return None
         ledger = review_rounds.read_ledger(path)
     except review_rounds.RoundLedgerError as exc:
-        return DoorRounds(str(path), pr_number, refusal=f"het rondegrootboek is onleesbaar ({exc}): herbouw het met `{rebuild}`")
+        return DoorRounds(str(path), pr_number, refusal=f"het rondegrootboek is onleesbaar: {exc}")
     unreadable = review_rounds.unreadable_text(ledger, pr_number)
     if unreadable:
         return DoorRounds(str(path), pr_number, refusal=f"het rondegrootboek telt deze PR niet: {unreadable}")
@@ -818,10 +818,9 @@ def door_rounds(scope: SeatScope, b3_override: str = "") -> Optional[DoorRounds]
     lines = ledger.for_pr(project_id, pr_number)
     if not ledger.is_opened(project_id, pr_number):
         return DoorRounds(str(path), pr_number, lines, refusal=(
-            f"PR #{pr_number} is niet geopend in het rondegrootboek {path}: niet vastgelegd dat de "
-            f"review-historie van deze PR compleet is, dus geen PASS van deze PR telt aan de deur. Is er vóór "
-            f"R1 gereviewd, of is een uitspraak geboekt zonder gate-aanvraag, herbouw de historie dan met "
-            f"`{rebuild}`; daarna geldt de gewone regel"
+            f"PR #{pr_number} is niet geopend in het rondegrootboek {path}, dus geen PASS van deze PR telt aan "
+            f"de deur. Is er vóór R1 gereviewd, of is een uitspraak geboekt zonder gate-aanvraag, dan opent de "
+            f"operator de PR met `{review_rounds.open_command(pr_number)}`; de cap begint bij die regel op nul"
         ))
     return DoorRounds(str(path), pr_number, lines, cap=review_rounds.cap_state(lines, pr_number), override=b3_override.strip())
 
@@ -856,8 +855,6 @@ def counted_fill(fill: SeatFill, rounds: DoorRounds, scope: SeatScope, stated: D
     gate), by that reviewer, with that report, and a PASS. A PASS put in
     ``results/`` outside the gate has no line and fills nothing.
     """
-    import review_rounds
-
     if not fill.filled:
         return fill
     if rounds.refusal:
@@ -878,8 +875,7 @@ def counted_fill(fill: SeatFill, rounds: DoorRounds, scope: SeatScope, stated: D
         return fill
     return _uncounted(fill, (
         f"de PASS van {gate} (seat {seat}) op kop {head_sha[:12] or 'onbekend'} staat niet in het "
-        f"rondegrootboek {rounds.path}: een uitspraak die niet geteld is, telt aan de deur niet als PASS. "
-        f"Is de run van vóór R1, herbouw dan met `{review_rounds.rebuild_command(rounds.pr_number)}`"
+        f"rondegrootboek {rounds.path}: een uitspraak die niet geteld is, telt aan de deur niet als PASS"
     ))
 
 

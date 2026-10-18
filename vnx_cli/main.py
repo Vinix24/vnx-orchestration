@@ -1548,7 +1548,7 @@ def _register_pr_ready_subparser(subparsers: argparse.Action) -> None:
 
 
 def _register_review_subparser(subparsers: argparse.Action) -> None:
-    """`vnx review rounds rebuild --pr N` — the round ledger (scripts/review_rounds_cli.py, R1)."""
+    """`vnx review rounds open --pr N --reason` — the round ledger (scripts/review_rounds_cli.py, R1)."""
     from vnx_cli.commands.review import register_review_subparser
     register_review_subparser(subparsers)
 

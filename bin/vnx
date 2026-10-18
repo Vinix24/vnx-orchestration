@@ -363,9 +363,10 @@ Gate commands (pre-merge verification):
   gate-reanchor --pr <N> --gate <G>
                         Move an existing gate verdict onto the PR's current head when
                         the reviewed input is provably identical (read-only; --apply writes)
-  review rounds rebuild --pr <N>
-                        Rebuild PR N's lines in the round ledger (review_gates/rounds.ndjson)
-                        from its reports and receipts; idempotent; prints the B3 count
+  review rounds open --pr <N> --reason "..."
+                        Open PR N, reviewed before the round ledger, as the operator:
+                        an attested line in review_gates/rounds.ndjson plus a receipt;
+                        the B3 cap starts at zero there; idempotent
   roadmap <sub>       Roadmap orchestration and auto-next feature loading
 
 Planning commands (strategic-layer read surface):

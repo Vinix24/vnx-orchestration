@@ -371,10 +371,10 @@ class _PrRounds:
     """The round ledger as one request round sees it for one PR (R1): read once, judged per seat.
 
     ``unreadable`` is the refusal text when the ledger cannot be read for this
-    PR (it names the rebuild command); ``history_missing`` the refusal text for
-    a PR that is not opened in the ledger while earlier reviews of it are on
-    disk; ``lines`` are the PR's verdicts in order, and ``cap`` the B3 count
-    over its codex seat (``review_rounds.cap_state``).
+    PR (it names the way out); ``history_missing`` the refusal text for a PR
+    that is not opened in the ledger while any earlier review of it is found;
+    ``lines`` are the PR's verdicts in order, and ``cap`` the B3 count over its
+    codex seat (``review_rounds.cap_state``).
     """
 
     def __init__(
@@ -392,10 +392,11 @@ class _PrRounds:
     def read(cls, review_gates_dir: Path, pr_number: int) -> "_PrRounds":
         """Read the ledger for one PR, and open the PR when the ledger holds its whole history.
 
-        A PR that is not opened is checked for earlier reviews on disk
-        (``review_rounds.prior_evidence``): with any, every seat is refused
-        until the rebuild opened it; without any, the PR is new and is opened
-        here (``basis`` ``new``) before its first run.
+        A PR that is not opened is checked for earlier reviews
+        (``review_rounds.prior_evidence``, which fails closed): with any, every
+        seat is refused until the operator opened it with ``vnx review rounds
+        open``; without any, the PR is new and is opened here (``basis``
+        ``new``) before its first run.
         """
         import review_rounds
 
@@ -412,7 +413,7 @@ class _PrRounds:
                     return cls(pr_number, history_missing=review_rounds.history_missing_text(pr_number, evidence))
                 review_rounds.open_pr(path, project_id, pr_number, basis=review_rounds.BASIS_NEW, evidence=0)
         except review_rounds.RoundLedgerError as exc:
-            return cls(pr_number, unreadable=f"{exc}. Rebuild it with `{review_rounds.rebuild_command(pr_number)}`")
+            return cls(pr_number, unreadable=str(exc))
         return cls(pr_number, ledger.for_pr(project_id, pr_number))
 
     def line_on_head(self, seat: str, head: _PrHead) -> Optional[Any]:
@@ -1674,12 +1675,12 @@ class GateRequestHandlerMixin:
         Four refusals, checked in this order, and only for a seat (an extra gate
         such as ``ci_gate`` is no seat and is never refused here):
 
-        - the ledger is unreadable for this PR: every seat is refused until
-          ``vnx review rounds rebuild --pr N`` has rebuilt it;
+        - the ledger is unreadable for this PR: every seat is refused until the
+          operator has set the file aside and reopened the PR;
         - the PR was reviewed before the ledger counted it and is not opened in
           it (``round_history_missing``): every seat is refused until the
-          rebuild has put its earlier verdicts in; ``override_b3`` does not
-          lift this, it is about the cap;
+          operator opens it with ``vnx review rounds open --pr N --reason``;
+          ``override_b3`` does not lift this, it is about the cap;
         - the seat already has a verdict on this head: no second run on a head
           with a verdict, in any seat (:meth:`_standing_round_payload`);
         - the codex seat of a PR at the B3 cap, on every head, unless a

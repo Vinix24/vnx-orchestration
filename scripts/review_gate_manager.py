@@ -103,7 +103,7 @@ class ReviewGateManager(
         self.results_dir.mkdir(parents=True, exist_ok=True)
         # R1: a store the gate runs in counts rounds from now on. The merge door
         # enforces the round ledger for every store that has one, so the open PRs
-        # of a store reviewed before R1 are refused with the rebuild command
+        # of a store reviewed before R1 are refused until the operator opens them
         # instead of passing on records the ledger never saw.
         review_rounds.ensure_ledger(self.results_dir.parent)
 

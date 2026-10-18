@@ -2070,7 +2070,7 @@ def _check_b3_cap_verdict(spec: DispatchSpec, *, state_dir: Path) -> Optional[Co
     and the merge door refuses the PASS. This stops a builder from spending a
     round on a PR the review will not take. It reads the round ledger only (its
     lines carry the branch of every verdict), never GitHub. An unreadable ledger
-    is a warning here: the gate refuses the run itself, with the rebuild command.
+    is a warning here: the gate refuses the run itself, naming the way out.
     ``VNX_OVERRIDE_B3_REASON`` (set by ``--override-b3 --reason``) turns the
     refusal into an audited warning.
     """
