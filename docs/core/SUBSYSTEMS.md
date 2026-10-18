@@ -13,14 +13,14 @@ This document is the single source of truth for which VNX subsystems are live, p
 | zero-llm-injection | No prompt injection via environment or receipts; strict input boundaries. | — | LIVE | works — red-team tests pass |
 | dispatch-plan | Single-entry dispatch door, dispatch-plan reconciliation. | — | LIVE | works — dispatch tests pass |
 | test-suite | Pytest + integration coverage for kernel and cockpit. | — | LIVE | works — CI green |
-| migration-mechanisms | Schema-evolution surfaces (42 SQL files + 6 appliers). Consolidation PARKed pending inventory-lock. | `VNX_MIGRATION_SYSTEM` | PARK-with-trigger | degraded — 42 SQL files + 6 appliers; consolidation PARKed pending inventory-lock (`scripts/lib/migration_inventory.py`, PR-8) |
+| migration-mechanisms | Schema-evolution surfaces (42 SQL files + 6 appliers). Consolidation PARKed pending inventory-lock. | `VNX_MIGRATION_SYSTEM` | PARK-with-trigger | degraded — consolidation PARKed pending inventory-lock (`scripts/lib/migration_inventory.py`) |
 | within-db-tenancy | Composite (project_id, id) keys inside per-project DBs. Removal PARKed pending per-table central-DB safety proof. | — | PARK-with-trigger | degraded — keys present; drop deferred (central-store/dual-write/ADR-026 interaction) |
-| docs-bloat | Comparisons, stale archive, marketing docs inflating docs/ count. | — | CUT | degraded — ~288 markdown files, large `_archive/` |
-| governance-enforcement-stack | Receipt hash-chain + signed attestation + evidence-bound merge gate. SURFACED here; enforcement wiring deferred. | `VNX_GOVERNANCE_ENFORCED` | PARK-with-trigger | produces-crap — 15,577 receipts, 0 `prev_hash` |
+| docs-bloat | Comparisons, stale archive, marketing docs inflating docs/ count. | — | CUT | degraded — large `_archive/` |
+| governance-enforcement-stack | Receipt hash-chain + signed attestation + evidence-bound merge gate. SURFACED here; enforcement wiring deferred. | `VNX_GOVERNANCE_ENFORCED` | PARK-with-trigger | produces-crap — receipts are unchained (no `prev_hash`) |
 | receipt-hash-chain | Tamper-evident NDJSON hash-chain (ADR-029). | `VNX_HASH_CHAIN_REQUIRED` | PARK-with-trigger | produces-crap — unchained receipts |
-| signed-attestation | SSH-signed PR attestation manifests (ADR-027). | `VNX_ATTESTATION_REQUIRED` | PARK-with-trigger | produces-crap — 0 signed attestations in active use |
+| signed-attestation | SSH-signed PR attestation manifests (ADR-027). | `VNX_ATTESTATION_REQUIRED` | PARK-with-trigger | produces-crap — the mechanism works, no signed attestation is in active use |
 | evidence-bound-gate | D3 evidence-bound merge gate. | `VNX_EVIDENCE_BOUND_GATE` | PARK-with-trigger | produces-crap — advisory only, enforces nothing |
-| intelligence-self-learning-loop | Daily pattern learning, skill refinements, confidence updates. | `VNX_LEARNING_LOOP_ENABLED` | ACTIVATE-and-measure | produces-crap — 98% injection ignore rate, 0 dream cycles |
+| intelligence-self-learning-loop | Daily pattern learning, skill refinements, confidence updates. | `VNX_LEARNING_LOOP_ENABLED` | ACTIVATE-and-measure | produces-crap — last committed reading, not re-measured |
 | dream-consolidation | Nightly memory consolidation + pending review dispatch. | `VNX_DREAM_SCHEDULER_ENABLED` | ACTIVATE-and-measure | unknown — no cycles run |
 | injection-effectiveness-eval-loop | Instrument WHY patterns are ignored before tuning generation. | `VNX_INJECTION_WHY_ENABLED` | ACTIVATE-and-measure | unknown — probe not built yet |
 | cross-project-federation | Cross-project intelligence federation (not yet implemented). | `VNX_USE_FEDERATION` | ACTIVATE-and-measure | unknown — no probe yet |
@@ -45,3 +45,33 @@ This document is the single source of truth for which VNX subsystems are live, p
 - `ACTIVATE-and-measure` — dormant, gated on a probe/loop, then turned on with measurement.
 - `SCOPE` — stays on, but restricted to a narrower class of work.
 - `COCKPIT` — meta-subsystems that implement this very audit surface.
+
+## CI guards that are not flags
+
+The rows above are feature flags. Two CI guards are not, and are described here
+because they are subsystems an operator has to know the state of. Both are on `main`,
+not yet released, and in `.github/workflows/vnx-ci.yml`. This is code behaviour; no ADR records them.
+
+**xdist shadow and parity check.** Profile A (the core test job) still runs
+its suite serially. Next to it the job `profile-a-xdist-shadow` runs the same suite in
+the shape a switch to pytest-xdist would use: the tests listed in
+`scripts/ci/serial_tests.txt` in one process with xdist off, then the rest under
+xdist. The shadow is not a required check and must never fail one: every step that can
+fail has `continue-on-error`, each step has its own timeout, the record and upload run
+`if: always()`, and a docs-only run records `not_applicable`. The job `xdist-parity`
+(`scripts/ci/check_xdist_parity.py`) then compares the serial run's JUnit XML and
+collection manifest (`scripts/ci/pytest_collection_manifest.py`) with the shadow's. It
+exits 1 on a test that was not run, ran extra or ran more than once, on a different
+outcome, on a different skip set or collection outcome, and when the two shadow phases
+do not partition the serial selection. It exits 2 on invalid or stale evidence. The
+verdict is uploaded as the `xdist-parity-verdict` artifact
+(`scripts/ci/record_xdist_parity_verdict.py`). `scripts/ci/xdist_parity_history.py`
+applies the cutover rule to the recorded verdicts and counts only a verdict that a
+failed parity step cannot leave clean. Nothing has switched Profile A to xdist.
+
+**Function-size ratchet.** `scripts/ci/check_function_size_ratchet.py` (the
+`Function size ratchet` step of the `Lint Patterns` job) fails a pull request that
+makes a function cross or grow past `function_size_gate.FUNCTION_SIZE_LIMIT`
+executable lines. It looks at `scripts/`, `vnx_cli/` and `dashboard/`, compares the
+head with the merge base, and exits 0 clean, 1 on violations, 2 on a usage or git
+error. The size rule is no longer in the reviewer prompt: CI carries it.
