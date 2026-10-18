@@ -10,7 +10,6 @@ Dispatch-ID: 20260529-161912-smartrouter-complete
 """
 from __future__ import annotations
 
-import shutil
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -221,70 +220,55 @@ class TestG7SingleDecisionPath:
 class TestG6NonClaudeDispatch:
     """auto-route → non-Claude model → dispatches via provider_dispatch, not deliver_with_recovery."""
 
-    def _swap_recommendations(self, src_yaml):
+    def _swap_recommendations(self, src_yaml, monkeypatch):
         import smart_router as _sr
-        _real = _sr._RECOMMENDATIONS_PATH
-        _bak = _real.with_suffix(".yaml._test_bak")
-        shutil.copy2(_real, _bak)
-        shutil.copy2(src_yaml, _real)
-        return _real, _bak
-
-    def _restore_recommendations(self, real_path, bak_path):
-        shutil.move(str(bak_path), str(real_path))
+        monkeypatch.setattr(_sr, "_RECOMMENDATIONS_PATH", Path(src_yaml))
 
     def test_kimi_auto_route_calls_dispatch_kimi(self, recs_kimi_wins, state_dir, monkeypatch):
         """When smart_router selects kimi, provider_dispatch._dispatch_kimi is called."""
         import provider_dispatch
 
         monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
-        _real, _bak = self._swap_recommendations(recs_kimi_wins)
+        self._swap_recommendations(recs_kimi_wins, monkeypatch)
+        deliver_calls: list = []
 
-        try:
-            deliver_calls: list = []
+        with patch("subprocess_dispatch.deliver_with_recovery",
+                   side_effect=lambda **kw: deliver_calls.append(kw) or True), \
+             patch("provider_dispatch._dispatch_kimi", return_value=0) as mock_kimi:
+            result = provider_dispatch.main([
+                "--provider", "claude",
+                "--terminal-id", "T1",
+                "--dispatch-id", "g6-kimi-test",
+                "--instruction", "implement new feature",
+                "--model", "sonnet",
+                "--auto-route",
+            ])
 
-            with patch("subprocess_dispatch.deliver_with_recovery",
-                       side_effect=lambda **kw: deliver_calls.append(kw) or True), \
-                 patch("provider_dispatch._dispatch_kimi", return_value=0) as mock_kimi:
-                result = provider_dispatch.main([
-                    "--provider", "claude",
-                    "--terminal-id", "T1",
-                    "--dispatch-id", "g6-kimi-test",
-                    "--instruction", "implement new feature",
-                    "--model", "sonnet",
-                    "--auto-route",
-                ])
-
-            assert mock_kimi.called, "_dispatch_kimi must be called for kimi route"
-            assert not deliver_calls, "deliver_with_recovery must NOT be called for non-Claude route"
-            assert result == 0
-        finally:
-            self._restore_recommendations(_real, _bak)
+        assert mock_kimi.called, "_dispatch_kimi must be called for kimi route"
+        assert not deliver_calls, "deliver_with_recovery must NOT be called for non-Claude route"
+        assert result == 0
 
     def test_non_claude_auto_route_no_claude_fallback(self, recs_kimi_wins, state_dir, monkeypatch):
         """G6 regression guard: deliver_with_recovery never invoked on non-Claude path."""
         import provider_dispatch
 
         monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
-        _real, _bak = self._swap_recommendations(recs_kimi_wins)
+        self._swap_recommendations(recs_kimi_wins, monkeypatch)
+        deliver_was_called: list = []
 
-        try:
-            deliver_was_called: list = []
+        with patch("subprocess_dispatch.deliver_with_recovery",
+                   side_effect=lambda **kw: deliver_was_called.append(True) or True), \
+             patch("provider_dispatch._dispatch_kimi", return_value=0):
+            provider_dispatch.main([
+                "--provider", "claude",
+                "--terminal-id", "T1",
+                "--dispatch-id", "g6-regression",
+                "--instruction", "implement feature",
+                "--model", "sonnet",
+                "--auto-route",
+            ])
 
-            with patch("subprocess_dispatch.deliver_with_recovery",
-                       side_effect=lambda **kw: deliver_was_called.append(True) or True), \
-                 patch("provider_dispatch._dispatch_kimi", return_value=0):
-                provider_dispatch.main([
-                    "--provider", "claude",
-                    "--terminal-id", "T1",
-                    "--dispatch-id", "g6-regression",
-                    "--instruction", "implement feature",
-                    "--model", "sonnet",
-                    "--auto-route",
-                ])
-
-            assert not deliver_was_called
-        finally:
-            self._restore_recommendations(_real, _bak)
+        assert not deliver_was_called
 
 
 class TestG6CheapLaneArgv:
