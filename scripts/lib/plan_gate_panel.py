@@ -19,9 +19,11 @@ blocker on PASS, which — via ``track_reconciler`` — flips the track's
 
 Panel composition (operator decision 2026-10-17, P2): ONE seat reads the plan,
 the configured ``default_seat`` (codex). A second seat, ``escalation_seat``
-(opus), reads the same plan in the same run only when the first returns BLOCK.
-Both labels live in ``configs/plan_gate_panel.yaml``; ``--panel-seats``
-replaces the composition for one run (``compose_panel``).
+(opus), reads the same plan in the same run when the first returns BLOCK, or
+from the start when the plan's dispatch paths fall in the schema or security
+class (P1, ``second_seat_from_start``). Both labels live in
+``configs/plan_gate_panel.yaml``; ``--panel-seats`` replaces the composition for
+one run (``compose_panel``).
 
 Every lane routes through ``provider_dispatch.py``, so the provider constraints are
 enforced by construction (kimi-via-cli-only, zai-via-openrouter-only,
@@ -452,12 +454,18 @@ class PanelComposition:
     readable verdicts a PASS needs: 1 for the default composition, so one
     readable PASS certifies even when a BLOCK brought a second seat in, and
     ``min(2, len(seats))`` for an override, the quorum the rule always had.
+
+    ``second_seat`` (P1) names why the escalation seat sits from the start: a
+    schema or security path (``second_seat_from_start``). Both seats are then
+    in ``seats``, ``escalation`` is None, and the quorum is 2, because the
+    second voice is the point.
     """
     seats: List[Dict[str, str]]
     escalation: Optional[Dict[str, str]]
     quorum: int
     chosen_by: str        # "default" | "operator"
     default_label: str    # the configured default seat, named in an override's trace
+    second_seat: Optional[str] = None
 
 
 def load_seat_roles(config_path: Optional[Path] = None) -> Dict[str, str]:
@@ -494,12 +502,17 @@ def load_seat_roles(config_path: Optional[Path] = None) -> Dict[str, str]:
 
 
 def compose_panel(
-    requested_labels: Optional[List[str]] = None, *, config_path: Optional[Path] = None,
+    requested_labels: Optional[List[str]] = None,
+    *,
+    config_path: Optional[Path] = None,
+    dispatch_paths: Optional[List[str]] = None,
 ) -> PanelComposition:
     """The composition of one plan-gate run.
 
     Without ``requested_labels`` (no ``--panel-seats``): the default seat, the
-    escalation seat for a BLOCK, quorum 1. With them: exactly those seats in
+    escalation seat for a BLOCK, quorum 1. When ``dispatch_paths`` fall in the
+    schema or security class (``second_seat_from_start``), both seats sit from
+    the start, quorum 2. With ``requested_labels``: exactly those seats in
     configured order, no escalation, quorum ``min(2, n)``. Both roles must name
     a configured seat whichever way the run goes, so a broken config surfaces on
     the next run, not on the first BLOCK.
@@ -519,9 +532,16 @@ def compose_panel(
             seats=chosen, escalation=None, quorum=min(2, len(chosen)),
             chosen_by="operator", default_label=roles["default"],
         )
+    default = filter_panel_seats(seats, [roles["default"]])[0]
+    escalation = filter_panel_seats(seats, [roles["escalation"]])[0]
+    reason = second_seat_from_start(dispatch_paths)
+    if reason:
+        return PanelComposition(
+            seats=[default, escalation], escalation=None, quorum=2,
+            chosen_by="default", default_label=roles["default"], second_seat=reason,
+        )
     return PanelComposition(
-        seats=filter_panel_seats(seats, [roles["default"]]),
-        escalation=filter_panel_seats(seats, [roles["escalation"]])[0],
+        seats=[default], escalation=escalation,
         quorum=1, chosen_by="default", default_label=roles["default"],
     )
 
@@ -2080,6 +2100,24 @@ def _run_seat(
 def _blocked(results: List[PanelistResult]) -> bool:
     """True when a seat that scored returned BLOCK: the one verdict that escalates (P2)."""
     return any(is_scoring(r) and r.verdict == "block" for r in results)
+
+
+def second_seat_from_start(dispatch_paths: Optional[List[str]]) -> Optional[str]:
+    """Why the escalation seat reads a plan from the start, or None.
+
+    The second case for the second seat, next to a BLOCK (``_blocked``): a plan
+    whose dispatch paths fall in the schema or security class
+    (``smart_router.plan_scope_path_category``) gets both seats in its first
+    round. Returns the class and the first path that put it there.
+    """
+    import smart_router
+
+    classes = {smart_router.PLAN_SCOPE_SCHEMA, smart_router.PLAN_SCOPE_SECURITY}
+    for path in dispatch_paths or []:
+        category = smart_router.plan_scope_path_category(path)
+        if category in classes:
+            return f"{category} path {path}"
+    return None
 
 
 def run_panel(

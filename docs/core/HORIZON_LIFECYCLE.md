@@ -48,6 +48,24 @@ and `resolved_at IS NULL`. `reconcile_track` derives `derived_status='blocked'` 
 that unresolved blocker. The track is now **plan-gated**: nothing should proceed until
 the plan passes.
 
+**Plan scope (since P1 of `plan-gate-alleen-voor-architectuur`).** Only an
+`architecture` track is born plan-gated. Every track carries `plan_scope` in
+`tracks.metadata_json`, next to `lane_hint`: `architecture` (it gets `OI-PLAN-<track>`)
+or `light` (no plan-gate). `vnx horizon add` requires `--plan-scope architecture|light`
+and refuses without it. The scope moves **up by itself, never down**: the fourth
+deliverable on a light track (`deliverable add`), or a build dispatch at the door whose
+paths fall in the schema, security, gate/merge or store-resolution class, whose
+variant is `coding-strict`, or that names no paths at all (`plan_scope.dispatch_rule`,
+path classes in `smart_router.plan_scope_path_category`). An upward move seeds
+`OI-PLAN-<track>` unless the track already has a plan-gate record; a resolved one is
+never reopened. The door refuses nothing for this in P1: it writes the scope, seeds the
+blocker, prints one line, and the dispatch goes on. Down only by hand:
+`vnx horizon set-plan-scope <track> light --reason "..."`, which leaves `OI-PLAN` as it
+is. Every change writes one `track_plan_scope_set` line (old, new, reason, rule) to
+`track_events.ndjson`, and `vnx horizon show` names the scope and the rule that set it.
+A track from before P1 has no `plan_scope`: it reads as `architecture` with an open
+`OI-PLAN` and as `light` without one, and reading writes nothing.
+
 ### 2. Plan gate — pass the plan before the work
 
 Two ways to resolve the `OI-PLAN` blocker (both call `_resolve_plan_blocker`, which

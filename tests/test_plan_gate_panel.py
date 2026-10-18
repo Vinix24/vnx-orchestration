@@ -765,7 +765,8 @@ def test_objective_add_auto_seeds_blocker_and_blocks(tmp_path):
     import argparse
     args = argparse.Namespace(
         track_id="feat-pg", title="t", goal_state="shipped", horizon="now",
-        priority=None, project_id="p1", state_dir=str(state_dir), json=False,
+        priority=None, plan_scope="architecture", project_id="p1",
+        state_dir=str(state_dir), json=False,
     )
     assert planning_cli.cmd_objective_add(args) == 0
     # born plan-gated: an open OI-PLAN blocker -> derived_status blocked

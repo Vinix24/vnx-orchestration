@@ -1588,6 +1588,49 @@ def _persist_track_id(spec: DispatchSpec, *, state_dir: Path) -> None:
         )
 
 
+def _raise_plan_scope_at_door(spec: DispatchSpec, *, state_dir: Path) -> None:
+    """Move a light track up to architecture when this build dispatch says so (P1).
+
+    Track plan-gate-alleen-voor-architectuur: a build dispatch on a light track
+    whose paths fall in an architecture class (``plan_scope.dispatch_rule``:
+    schema, security, gate or merge logic, store resolution, a coding-strict
+    variant, or no paths at all) makes the track architecture and seeds
+    ``OI-PLAN-<track>``. The door refuses nothing here: it writes the scope,
+    seeds the blocker, prints one line, and the dispatch goes on. Refusing is P3.
+
+    Best-effort like the rest of the door's bookkeeping: a failure is recorded
+    (``_record_bookkeeping_failure``) and never blocks the fire.
+    """
+    track_id = (spec.track_id or "").strip()
+    if not track_id or not _spec_is_writing(spec):
+        return
+    try:
+        import plan_scope
+
+        rule = plan_scope.dispatch_rule(
+            [str(dp.path) for dp in spec.dispatch_paths],
+            task_class=spec.task_class, irreversible=spec.irreversible,
+        )
+        if rule is None:
+            return
+        change = plan_scope.raise_to_architecture(
+            state_dir, track_id, spec.project_id,
+            rule=f"door, dispatch {spec.dispatch_id}: {rule}",
+        )
+        if change is not None:
+            print(f"[dispatch_cli] {change.line()}. The dispatch continues.", file=sys.stderr)
+    except Exception as exc:  # vnx-silent-except: plan-scope bookkeeping is best-effort; the door refuses nothing in P1
+        _record_bookkeeping_failure(
+            "_raise_plan_scope_at_door", spec.dispatch_id, exc, state_dir=state_dir,
+        )
+
+
+def _door_track_bookkeeping(spec: DispatchSpec, *, state_dir: Path) -> None:
+    """The door's track bookkeeping on a real fire: the track link, then the plan scope."""
+    _persist_track_id(spec, state_dir=state_dir)
+    _raise_plan_scope_at_door(spec, state_dir=state_dir)
+
+
 # ---------------------------------------------------------------------------
 # build_runtime_snapshot — all I/O lives here
 # ---------------------------------------------------------------------------
@@ -3381,10 +3424,11 @@ def run_dispatch(
 
             # TL-D1: export the resolved track_id alongside VNX_CURRENT_DISPATCH_ID and
             # persist it onto the dispatch tracker row so D2 can propagate it to
-            # track.pr_ref on merge. Best-effort — never blocks the door.
+            # track.pr_ref on merge; then the plan scope may move up (P1).
+            # Best-effort — never blocks the door.
             if vspec.spec.track_id:
                 os.environ["VNX_CURRENT_TRACK_ID"] = vspec.spec.track_id
-                _persist_track_id(vspec.spec, state_dir=state_dir)
+                _door_track_bookkeeping(vspec.spec, state_dir=state_dir)
 
             # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): export the
             # resolved fields so the worker (and any worker-authored

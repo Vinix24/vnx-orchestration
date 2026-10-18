@@ -26,9 +26,10 @@ the tracks DB, reached through `vnx horizon`, not a hand-maintained file.
 
 | Verb | Purpose |
 |---|---|
-| `add` | Register a new objective (track). |
-| `list` | List objectives with phase/horizon/blocked state. |
-| `show` | Show one objective in detail. |
+| `add` | Register a new objective (track). `--plan-scope architecture\|light` is required: `architecture` seeds `OI-PLAN-<track>` (born plan-gated), `light` seeds nothing. Without the flag the command refuses and creates nothing. |
+| `list` | List objectives with phase/horizon/blocked state, plus a short `scope:` tag (`arch`/`light`) at the end of each line. |
+| `show` | Show one objective in detail, including `plan_scope` and the rule that set it. |
+| `set-plan-scope` | Set a track's `plan_scope` by hand; `--reason` is required. The only way down to `light`, and it never closes or attests `OI-PLAN` (see `docs/core/HORIZON_LIFECYCLE.md` stage 1). |
 | `sync` | Reconcile track rows against their declared source. |
 | `drift` | Advisory drift report; the reconciler persists `tracks.derived_status` + a `planning_drift.json` summary (never `tracks.phase`). |
 | `reconcile` | Close/advance tracks against merged-PR evidence (`--apply` to write). |
@@ -44,11 +45,11 @@ top-level alias `vnx deliverable <verb>`:
 
 | Verb | Purpose |
 |---|---|
-| `add` | Add a deliverable to a track (optional `--task-class`/`--routing-floor`). |
+| `add` | Add a deliverable to a track (optional `--task-class`/`--routing-floor`/`--dispatch-paths`). The fourth deliverable on a `light` track makes it `architecture` and seeds `OI-PLAN-<track>`; the output says so in one line. |
 | `list` | List a track's deliverables, incl. `task_class`/`routing_floor` (explicit "not set" when absent). |
 | `promote` | Promote a deliverable (proposed → ready; human gate). Not the only way out of `proposed`: the reconciler completes a deliverable of a track whose real work is done without a promote (see `docs/core/HORIZON_LIFECYCLE.md` stage 6). |
 | `close` | afboeken (done): close a ready deliverable → completed (operator-attested PR evidence). The reconciler can also complete a deliverable by itself (`deliverable_auto_completed`, stage 6 of the lifecycle). |
-| `set` | Tag an EXISTING deliverable with `task_class`/`routing_floor` — the rubric fields the plan-gate reads (see `_format_deliverable_for_plan`). |
+| `set` | Tag an EXISTING deliverable with `task_class`/`routing_floor`/`dispatch_paths` — the rubric fields the plan-gate reads (see `_format_deliverable_for_plan`), and the paths a plan-gate run reads when it names none. |
 
 ### Plan-gate verbs
 
@@ -128,6 +129,12 @@ outcome in 35 of 36 runs.
 - **A second seat on BLOCK.** When the default seat returns BLOCK, the
   escalation seat reads the same plan in the same run, and `apply_panel_rule`
   decides over both verdicts. A REVISE does not escalate.
+- **Both seats from the start for schema and security (since P1).** When the
+  run's `--dispatch-paths` (or, when the run names none, the `dispatch_paths` of
+  the track's deliverables) fall in the schema or security class
+  (`plan_gate_panel.second_seat_from_start`), both seats read the plan in its
+  first round and a PASS needs both readable verdicts (quorum 2). The trace says
+  `both seats from the start (<class> path <path>)`.
 - **An operator override** (`--panel-seats <labels>`) runs exactly the seats it
   names, without escalation, under the quorum of two for several seats. The
   trace logs it as `plan-gate override:` and names the default seat it replaced.
