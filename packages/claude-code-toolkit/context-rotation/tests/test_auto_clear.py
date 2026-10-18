@@ -272,7 +272,7 @@ def test_the_fresh_session_hears_when_no_one_took_the_handover(tmp_path, session
     settings_file(project, ack_timeout_seconds=2)
     tmux_clear.main(started(session, tmux_bin))
     assert fake.sent() == [["-l", "/clear"], ["Enter"]]
-    fresh = Session(tmp_path, project, "sess-b")
+    fresh = Session(tmp_path, project, "sess-b", pid=session.pid)
     message = message_of(fresh.prompt("hello"))
     assert message == auto_clear.ENTERED % (
         "the delivery of the handover to the fresh session was not confirmed in time")
@@ -284,7 +284,7 @@ def test_a_record_that_cannot_be_written_shows_nothing_and_is_logged(stopped_job
 
     monkeypatch.setattr(rotation_state, "journal", refused)
     session = hook_runtime.Session(str(project), "sess-a", context_budget.load_settings(str(project)))
-    env = {"CLAUDE_PID": str(os.getpid()), "TMUX_PANE": "%7"}
+    env = {"CLAUDE_PID": str(stopped_job.pid), "TMUX_PANE": "%7"}
     assert auto_clear.prompt_notice({"prompt": "hello"}, env, hook_runtime.HookRun(), session) is None
     assert json.loads((rotation(project) / "clear-7.json").read_text())["told"] is False
     assert any("repeat the stopped clear failed: PermissionError" in line
@@ -370,7 +370,7 @@ def test_a_session_start_outside_tmux_reads_no_record(session, project, monkeypa
     session.finish_turn()
     monkeypatch.delenv("TMUX_PANE")
     assert auto_clear.typed_by_job({}, str(project), json.loads(session.marker("ready").read_text())) is False
-    proc = start(project, "sess-b", source="clear")
+    proc = start(project, "sess-b", source="clear", pid=session.pid)
     assert auto_clear.OFF_HINT not in message_of(proc)
 
 

@@ -48,7 +48,8 @@ def test_the_refusals_start_nothing(args, says):
 
 
 def test_check_passes_on_a_clear_that_went_all_the_way(session, fake, tmux_bin, project, clock):
-    fake.on_enter.append(lambda line: start(project, "sess-b", source="clear") if line == "/clear" else None)
+    fake.on_enter.append(
+        lambda line: start(project, "sess-b", source="clear", pid=session.pid) if line == "/clear" else None)
     tmux_clear.main(started(session, tmux_bin))
     evidence(project)
     proc = smoke("check", project, "happy")

@@ -70,6 +70,8 @@ CLEAR_ABORTS: Dict[str, str] = {
     "busy": "the session is busy",
     "input": "there is text in the input line",
     "process": "the claude process of the session is not running in that pane",
+    "process_background": "the claude process of the session is not in the foreground of the pane's terminal",
+    "process_stopped": "the claude process of the session is stopped",
     "process_unreadable": "the process table could not be read",
     "typed": "the typed text did not read back as typed",
     "send": "tmux could not send the keys",

@@ -16,10 +16,12 @@ the project path is in the job file. In this order:
 4. the pane checks: the pane is the marker's, alive, in no mode and not
    synchronized; its screen shows the input box, empty, with no spinner above it
    (pane_screen); the session's `claude` (CLAUDE_PID and its start time from the
-   marker) runs in the process tree of `#{pane_pid}`;
+   marker) runs in the process tree of `#{pane_pid}` and owns the input of the
+   pane's terminal: `#{pane_tty}` is its controlling terminal, its process group is
+   that terminal's foreground group, and it is not stopped (ps);
 5. `/clear` is typed with `send-keys -l` and read back from the input line, which
-   must read exactly `/clear`; then the step's line and record are written, and a
-   fresh look decides Enter (enter);
+   must read exactly `/clear`; then the step's line and record are written, the
+   ready-marker is read again as in step 3, and a fresh look decides Enter (enter);
 6. it waits up to ack_timeout_seconds (at most MAX_ACK_SECONDS) for the successor's
    `delivered` line via `clear` for this generation in injections.jsonl, written once
    the handover's emit returned;
@@ -27,9 +29,10 @@ the project path is in the job file. In this order:
    in your context, step 1.` is typed and read back, and Enter goes the same way.
 
 Enter goes only on a look taken after the step's journal line, with nothing between
-that look and the key: the session's `claude` still runs below the pane, then one tmux
-call shows the pane's state and its screen at one moment (look), and the input line
-must read exactly the typed line, with no spinner above it. The job types into the
+that look and the key: the session's `claude` still runs below the pane and owns its
+terminal's input, then one tmux call shows the pane's state and its screen at one
+moment (look), and the input line must read exactly the typed line, with no spinner
+above it. The job types into the
 user's terminal, so when it is not certain it sends nothing. It removes what it typed
 only from a line that a look shows holds exactly that, with the cursor right after it
 (take_back): every character those BSpace remove is its own. Any other line is left
@@ -72,9 +75,12 @@ HOOK_POLL_SECONDS = 0.1
 VERIFY_SECONDS = 3.0
 VERIFY_POLL_SECONDS = 0.1
 ACK_POLL_SECONDS = 0.25
-PANE_FORMAT = "#{pane_id} #{pane_pid} #{pane_dead} #{pane_in_mode} #{pane_synchronized} #{cursor_x} #{cursor_y}"
+PANE_FORMAT = ("#{pane_id} #{pane_pid} #{pane_dead} #{pane_in_mode} #{pane_synchronized} #{cursor_x} #{cursor_y} "
+               "#{pane_tty}")
 MAX_ANCESTORS = 256
 DIGITS = re.compile(r"[0-9]+")
+# ps -o pid=,pgid=,tpgid=,stat=,tty= for one process: BSD ps (macOS) and procps (Linux) print the same columns.
+TERMINAL_LINE = re.compile(r"\s*([0-9]+)\s+([0-9]+)\s+(-?[0-9]+)\s+(\S+)\s+(\S+)\s*")
 FAILURES = (OSError, rotation_state.LockTimeout, ValueError)
 REFUSED = "context-rotation: no automatic /clear: its job was started with ids it does not accept."
 
@@ -94,23 +100,60 @@ def parse_args(argv: Sequence[str]) -> Optional[Tuple[str, str, str, str]]:
     return None
 
 
-def process_table() -> Dict[int, int]:
-    """{pid: parent pid} of every process, from ps. OSError when ps cannot tell."""
+def run_ps(args: Sequence[str]) -> str:
+    """What `ps <args>` prints. OSError when ps cannot tell."""
     try:
-        done = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True,
-                              env=dict(os.environ, LC_ALL="C"), timeout=rotation_state.PS_TIMEOUT_SECONDS)
+        done = subprocess.run(["ps"] + list(args), capture_output=True, env=dict(os.environ, LC_ALL="C"),
+                              timeout=rotation_state.PS_TIMEOUT_SECONDS)
     except subprocess.SubprocessError as error:
         raise OSError("ps did not answer: %s" % error)
     if done.returncode != 0:
         raise OSError("ps exited with status %d" % done.returncode)
+    return done.stdout.decode("ascii", "replace")
+
+
+def process_table() -> Dict[int, int]:
+    """{pid: parent pid} of every process, from ps. OSError when ps cannot tell."""
     table = {}
-    for line in done.stdout.decode("ascii", "replace").splitlines():
+    for line in run_ps(["-A", "-o", "pid=,ppid="]).splitlines():
         fields = line.split()
         if len(fields) == 2 and all(DIGITS.fullmatch(field) for field in fields):
             table[int(fields[0])] = int(fields[1])
     if not table:
         raise OSError("ps listed no process")
     return table
+
+
+class Terminal(NamedTuple):
+    """A process at its controlling terminal, as ps tells it."""
+
+    pgid: int
+    tpgid: int  # the terminal's foreground process group; without a terminal 0 (macOS) or -1 (Linux)
+    state: str  # ps `stat`: it starts with T when stopped (t on Linux: stopped by a tracer)
+    tty: str  # the terminal without /dev/: ttys003 (macOS), pts/3 (Linux); ?? or ? without one
+
+
+def terminal_of(pid: int) -> Terminal:
+    """Where `pid` stands at its terminal, from ps. OSError when ps cannot tell, or tells of no such line."""
+    found = TERMINAL_LINE.fullmatch(run_ps(["-o", "pid=,pgid=,tpgid=,stat=,tty=", "-p", str(pid)]))
+    if found is None or int(found.group(1)) != pid:
+        raise OSError("ps told no terminal of process %d" % pid)
+    return Terminal(int(found.group(2)), int(found.group(3)), found.group(4), found.group(5))
+
+
+def terminal_problem(terminal: Terminal, pane_tty: str) -> Optional[str]:
+    """Why the process does not own the input of the terminal `pane_tty`; None when it does.
+
+    It owns it when it is not stopped, the terminal is its controlling terminal, and
+    its process group is the terminal's foreground group. A `claude` stopped (Ctrl-Z,
+    SIGSTOP) or in a background group can run below the pane while another program
+    reads the keys.
+    """
+    if terminal.state[:1] in ("T", "t"):
+        return "process_stopped"
+    if "/dev/" + terminal.tty != pane_tty or terminal.pgid != terminal.tpgid:
+        return "process_background"
+    return None
 
 
 def alive(pid: int) -> bool:
@@ -130,9 +173,10 @@ def lock_stamp(found: os.stat_result) -> Tuple[int, int]:
 
 
 class View(NamedTuple):
-    """One look at the pane: the pid of its first process, its screen, and the cursor as (column, row)."""
+    """One look at the pane: the pid of its first process, its terminal, its screen, and the cursor as (column, row)."""
 
     pane_pid: int
+    tty: str
     screen: pane_screen.Screen
     cursor: Tuple[int, int]
 
@@ -173,9 +217,10 @@ class Job:
         self.reached = "started"
         self.lock = auto_clear.pane_name(self.pane, ".lock")
         self.lock_made: Optional[Tuple[int, int]] = None
-        # The pane's first process as check_pane saw it, and the line the job typed that may still be
-        # in the input line: set before its keys go out, cleared once Enter or take_back sent it away.
+        # The pane's first process and its terminal as check_pane saw them, and the line the job typed that
+        # may still be in the input line: set before its keys go out, cleared once Enter or take_back sent it away.
         self.pane_pid: Optional[int] = None
+        self.pane_tty: Optional[str] = None
         self.typing: Optional[str] = None
 
     # --- tmux --------------------------------------------------------------------
@@ -289,8 +334,11 @@ class Job:
         tmux runs the commands of one call one after the other, without reading the
         pane or a key in between, so the cursor and the screen are of the same moment.
         Measured on tmux 3.7: for a pane that is gone display-message prints an empty
-        line, then capture-pane fails with status 1 and ends the call. Why not: the
-        pane is not the marker's, alive, in no mode and not synchronized.
+        line, then capture-pane fails with status 1 and ends the call. The line holds
+        the eight fields of PANE_FORMAT; the last, `#{pane_tty}`, is the pane's terminal
+        as a path below /dev/. Why not: the pane is not the marker's, alive (all eight
+        fields, the numbers numbers and the terminal a /dev/ path), in no mode and not
+        synchronized.
         """
         status, out = self.tmux("display-message", "-p", "-t", self.pane, PANE_FORMAT, ";",
                                 "capture-pane", "-p", "-e", "-t", self.pane)
@@ -298,47 +346,56 @@ class Job:
             return "pane_unreadable", None
         info, _, text = out.partition("\n")
         fields = info.split()
-        if status != 0 or len(fields) != 7 or fields[0] != self.pane or fields[2] != "0" \
-                or not all(DIGITS.fullmatch(field) for field in fields[1:2] + fields[5:]):
+        if status != 0 or len(fields) != 8 or fields[0] != self.pane or fields[2] != "0" \
+                or not all(DIGITS.fullmatch(field) for field in fields[1:2] + fields[5:7]) \
+                or not fields[7].startswith("/dev/"):
             return "pane_gone", None
         if fields[3] != "0":
             return "pane_mode", None
         if fields[4] != "0":
             return "pane_synchronized", None
-        return None, View(int(fields[1]), pane_screen.read(text, self.settings), (int(fields[5]), int(fields[6])))
+        return None, View(int(fields[1]), fields[7], pane_screen.read(text, self.settings),
+                          (int(fields[5]), int(fields[6])))
 
     def check_pane(self) -> Optional[str]:
-        """The pane is the marker's and idle, and the session's `claude` runs in it."""
+        """The pane is the marker's and idle, and the session's `claude` runs in it and owns its terminal's input."""
         problem, view = self.look()
         if view is None:
             return problem
-        self.pane_pid = view.pane_pid
-        return pane_screen.idle_problem(view.screen) or self.check_process(view.pane_pid)
+        self.pane_pid, self.pane_tty = view.pane_pid, view.tty
+        return pane_screen.idle_problem(view.screen) or self.check_process(view.pane_pid, view.tty)
 
     def fresh_look(self) -> Tuple[Optional[str], Optional[View]]:
-        """The read a key is decided on: the session's `claude` still runs below the pane, then one look.
+        """The read a key is decided on: the session's `claude` still runs below the pane and owns its input, one look.
 
         The look is the last read: what follows is decided on it alone and sent at
         once. (why not, None) when the process or the pane fails its check, also when
-        the pane's first process is no longer the one check_pane saw.
+        the pane's first process or its terminal is no longer the one check_pane saw.
         """
-        problem = self.check_process(self.pane_pid)
+        problem = self.check_process(self.pane_pid, self.pane_tty)
         if problem:
             return problem, None
         problem, view = self.look()
-        if view is not None and view.pane_pid != self.pane_pid:
+        if view is not None and (view.pane_pid, view.tty) != (self.pane_pid, self.pane_tty):
             return "process", None
         return problem, view
 
-    def check_process(self, pane_pid: int) -> Optional[str]:
+    def check_process(self, pane_pid: int, pane_tty: str) -> Optional[str]:
+        """The session's `claude` runs below the pane's first process and owns the input of the pane's terminal.
+
+        Running below the pane is not enough: stopped, or in a background group, it
+        leaves the keys to another program in that terminal (terminal_problem).
+        """
         pid = self.process["pid"]
         try:
             if rotation_state.process_start_checked(pid) != self.process["start"]:
                 return "process"
-            table = process_table()
+            if not descends(process_table(), pid, pane_pid):
+                return "process"
+            terminal = terminal_of(pid)
         except OSError:
             return "process_unreadable"
-        return None if descends(table, pid, pane_pid) else "process"
+        return terminal_problem(terminal, pane_tty)
 
     def type_line(self, literal: str) -> Optional[str]:
         """Type `literal` and read it back until the input line holds exactly that. No other key goes here.
@@ -368,21 +425,31 @@ class Job:
     def type_continue(self) -> Optional[str]:
         return self.type_line(CONTINUE)
 
-    def enter(self, literal: str, event: str, step: str) -> Optional[str]:
-        """The step's line and record, then a fresh look, then Enter as a call of its own.
+    def enter(self, literal: str, event: str, step: str, handover: bool = False) -> Optional[str]:
+        """The step's line and record, for /clear the marker again, then a fresh look, then Enter as a call of its own.
 
         The line and the record come before the key because the fresh session's
         SessionStart runs as soon as /clear is entered and reads the record to tell a
         clear the job typed from one the user typed (auto_clear.typed_by_job): it must
         already say "entered". That write can wait up to rotation_state.LOCK_TIMEOUT_SECONDS
-        for the project lock, so the look Enter is decided on is taken after it, and nothing
-        comes between that look and the key: no lock, no sleep, no other read.
+        for the project lock, and a prompt in that wait can make the handover outdated:
+        new work after the marker, or a newer handover with a generation of its own.
+        SessionStart would then refuse it, and /clear would empty the context with no
+        successor to take the handover. So for /clear (`handover`) the marker is read
+        again after the write, as recheck reads it; when it fails, no Enter goes and
+        take_back decides on a fresh look whether the typed line is removed. The
+        continuation needs no such read: the successor has taken the generation by then.
+        The look Enter is decided on comes last, and nothing comes between that look and
+        the key: no lock, no sleep, no other read.
         """
         try:
             auto_clear.transition(self.project_dir, self.record, event, step=step)
         except FAILURES as error:
             rotation_state.log_failure(self.project_dir, "record %s in pane %s" % (step, self.pane), error)
             return self.take_back(literal, "journal", self.fresh_look()[1])
+        reason = self.recheck() if handover else None
+        if reason:
+            return self.take_back(literal, reason, self.fresh_look()[1])
         problem, view = self.fresh_look()
         if view is None:
             return problem
@@ -411,7 +478,7 @@ class Job:
         return reason
 
     def enter_clear(self) -> Optional[str]:
-        reason = self.enter(CLEAR, "clear_entered", "entered")
+        reason = self.enter(CLEAR, "clear_entered", "entered", handover=True)
         if reason is None:
             self.reached = "entered"
         return reason

@@ -108,8 +108,11 @@ def test_no_python3_tells_the_pane_and_types_nothing(shell, tmux_bin, tmp_path):
 
 # --- the whole chain with a hostile project dir and plugin dir ----------------------------------
 
-def hostile_chain(tmp_path, tmux_bin):
-    """A project and a plugin copy whose paths hold a space, a quote, $(...) and #{...}: (session, Stop line)."""
+def hostile_chain(tmp_path, tmux_bin, claude):
+    """A project and a plugin copy whose paths hold a space, a quote, $(...) and #{...}: (session, Stop line).
+
+    The session's `claude` is the stand-in, and the fake pane's terminal is its pty.
+    """
     project = tmp_path / HOSTILE
     project.mkdir()
     plugin = tmp_path / ("plug in'$(x)#{pane_id}")
@@ -117,11 +120,12 @@ def hostile_chain(tmp_path, tmux_bin):
     canary = tmp_path / "canary"
     (tmux_bin.bin / "x").write_text("#!/bin/sh\ntouch '%s'\n" % canary, encoding="utf-8")
     (tmux_bin.bin / "x").chmod(0o755)
-    session = Session(tmp_path, project, "sess-a")
+    tmux_bin.set("info", "%s %d 0 0 0 %s" % (tmux_bin.pane, os.getpid(), claude.tty))
+    session = Session(tmp_path, project, "sess-a", pid=claude.pid)
     session.write_handover()
     session.append(b1_entry("assistant_text", assistant_text="Saved."), b1_entry("stop_hook_summary", text="x"))
     payload = event("03-Stop-idle", project, session.transcript, "sess-a")
-    env = dict(os.environ, CLAUDE_PID=str(os.getpid()))
+    env = dict(os.environ, CLAUDE_PID=str(claude.pid))
     stop = subprocess.run([sys.executable, str(plugin / "hooks" / "context_guard.py")], input=json.dumps(payload),
                           capture_output=True, text=True, env=env, timeout=60)
     assert stop.returncode == 0, stop.stderr
@@ -130,7 +134,7 @@ def hostile_chain(tmp_path, tmux_bin):
     successor = event("17-SessionStart-clear", project, project / "none.jsonl", "sess-b")
     tmux_bin.set("on-clear", json.dumps({"argv": [sys.executable, str(HOOKS / "session_start.py")],
                                          "input": json.dumps(successor),
-                                         "env": {"CLAUDE_PID": str(os.getpid())}}))
+                                         "env": {"CLAUDE_PID": str(claude.pid)}}))
     return session, call[-1], canary
 
 
@@ -144,8 +148,8 @@ def assert_cleared(session, tmux_bin, canary):
     assert not canary.exists(), "a $(...) in a path ran"
 
 
-def test_a_hostile_project_dir_survives_tmux_expansion_and_sh(tmp_path, tmux_bin):
-    session, line, canary = hostile_chain(tmp_path, tmux_bin)
+def test_a_hostile_project_dir_survives_tmux_expansion_and_sh(tmp_path, tmux_bin, claude):
+    session, line, canary = hostile_chain(tmp_path, tmux_bin, claude)
     assert "#" not in line.replace("##", ""), "a single # would start a tmux format"
     expanded = line.replace("##", "#")  # what tmux makes of it (measured: test below with a real server)
     proc = subprocess.run(["/bin/sh", "-c", expanded], capture_output=True, text=True, timeout=120)
@@ -161,9 +165,9 @@ def real_tmux():
     return found
 
 
-def test_a_hostile_project_dir_survives_a_real_tmux_run_shell(tmp_path, tmux_bin, real_tmux):
+def test_a_hostile_project_dir_survives_a_real_tmux_run_shell(tmp_path, tmux_bin, real_tmux, claude):
     """A private tmux server of this test runs the line; the job it starts talks to the fake binary only."""
-    session, line, canary = hostile_chain(tmp_path, tmux_bin)
+    session, line, canary = hostile_chain(tmp_path, tmux_bin, claude)
     socket_dir = tempfile.mkdtemp(prefix="crt", dir="/tmp")
     socket = os.path.join(socket_dir, "s")
     env = dict(os.environ)

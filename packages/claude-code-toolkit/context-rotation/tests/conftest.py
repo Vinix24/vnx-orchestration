@@ -6,10 +6,13 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
@@ -267,6 +270,75 @@ def other_pid():
         child.wait()
 
 
+# A `claude` stand-in on a pty of its own: argv is <ready file> foreground|background. It makes the
+# pty its controlling terminal (it runs as a session leader, so its process group becomes the
+# terminal's foreground group), writes the pid a test records, then becomes `sleep`.
+STAND_IN = r'''
+import fcntl, os, sys, termios, time
+fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+pid = os.getpid()
+if sys.argv[2] == "background":
+    pid = os.fork()
+    if pid == 0:
+        os.setpgid(0, 0)
+        os.execvp("sleep", ["sleep", "300"])
+    while os.getpgid(pid) != pid:
+        time.sleep(0.01)
+with open(sys.argv[1] + ".tmp", "w") as handle:
+    handle.write("%d" % pid)
+os.rename(sys.argv[1] + ".tmp", sys.argv[1])
+os.execvp("sleep", ["sleep", "300"])
+'''
+
+
+class StandIn(NamedTuple):
+    """A process a test records as the session's `claude`, and its controlling terminal as tmux names it."""
+
+    pid: int
+    tty: str
+
+
+@pytest.fixture
+def stand_in(tmp_path):
+    """Start `claude` stand-ins on terminals of their own: ptys the test opens, never a real claude.
+
+    `stand_in()` gives the session leader of a new pty, in the terminal's foreground
+    process group: it owns the terminal's input. `stand_in("background")` gives a child
+    of such a leader in a process group of its own, on the same terminal, while the
+    leader's group stays in the foreground. Each runs below this process and is killed
+    at the end of the test.
+    """
+    started = []
+
+    def start(mode="foreground"):
+        master, slave = os.openpty()
+        tty = os.ttyname(slave)
+        ready = tmp_path / ("stand-in-%d" % len(started))
+        leader = subprocess.Popen([sys.executable, "-c", STAND_IN, str(ready), mode], stdin=slave, stdout=slave,
+                                  stderr=slave, start_new_session=True)
+        os.close(slave)
+        started.append((leader, master, ready))
+        deadline = time.monotonic() + 30
+        while not ready.exists():
+            assert leader.poll() is None and time.monotonic() < deadline, "the stand-in did not start"
+            time.sleep(0.01)
+        return StandIn(int(ready.read_text()), tty)
+
+    yield start
+    for leader, master, ready in started:
+        if ready.exists() and int(ready.read_text()) != leader.pid:
+            os.kill(int(ready.read_text()), signal.SIGKILL)  # the leader's child: at worst its zombie, never gone
+        leader.kill()
+        leader.wait()
+        os.close(master)
+
+
+@pytest.fixture
+def claude(stand_in):
+    """The session's `claude`: a stand-in that owns the input of its terminal, which the fake pane names."""
+    return stand_in()
+
+
 # --- B2: sizes, the enforcement state, and what a hook decided ----------------
 
 BELOW, WARN, FORCE, HARD = 1000, 120000, 140000, 170000
@@ -393,12 +465,14 @@ class FakeTmux:
     /clear the pane shows the capture taken right after a /clear. A call with a
     command sequence (`a ; b`) runs its commands in order and stops at the first that
     fails, as tmux does; `on_capture` runs once before a call that captures, so what
-    it changes shows in every command of that call.
+    it changes shows in every command of that call. `pane_tty` is the pane's terminal:
+    a pty of a stand-in `claude` (stand_in), whose first process runs below this one.
     """
 
-    def __init__(self, pane="%7", pane_pid=None, screen=IDLE):
+    def __init__(self, pane="%7", pane_pid=None, screen=IDLE, pane_tty=""):
         self.pane = pane
         self.pane_pid = os.getpid() if pane_pid is None else pane_pid
+        self.pane_tty = pane_tty
         self.base = pane_text(screen)
         self.typed = ""
         self.back = 0
@@ -448,7 +522,7 @@ class FakeTmux:
             return self.info
         values = {"pane_id": self.pane, "pane_pid": str(self.pane_pid), "pane_dead": "0", "pane_in_mode": "0",
                   "pane_synchronized": "0", "cursor_x": str(len(PROMPT) + len(self.typed) - self.back),
-                  "cursor_y": str(input_row(self.screen()))}
+                  "cursor_y": str(input_row(self.screen())), "pane_tty": self.pane_tty}
         values.update(self.fields)
         return FORMAT.sub(lambda match: values[match.group(1)], form)
 
@@ -484,7 +558,7 @@ import json, os, re, subprocess, sys
 
 state = os.environ["FAKE_TMUX_DIR"]
 PROMPT = "❯ "
-FIELDS = ("pane_id", "pane_pid", "pane_dead", "pane_in_mode", "pane_synchronized")
+FIELDS = ("pane_id", "pane_pid", "pane_dead", "pane_in_mode", "pane_synchronized", "pane_tty")
 
 
 def path(name):
@@ -670,16 +744,20 @@ def clock(monkeypatch):
 
 
 @pytest.fixture
-def fake(monkeypatch, tmux_bin):
-    """The tmux the job talks to in-process; the hooks of the test run in pane %7 of the fake binary (tmux_bin)."""
-    recorder = FakeTmux()
+def fake(monkeypatch, tmux_bin, claude):
+    """The tmux the job talks to in-process; the hooks of the test run in pane %7 of the fake binary (tmux_bin).
+
+    The pane's terminal is the stand-in `claude`'s pty, so that `claude` owns its input.
+    """
+    recorder = FakeTmux(pane_tty=claude.tty)
     monkeypatch.setattr(auto_clear, "run_tmux", recorder)
     return recorder
 
 
 @pytest.fixture
-def session(tmp_path, project, tmux_bin):
-    return Session(tmp_path, project, "sess-a")
+def session(tmp_path, project, tmux_bin, claude):
+    """Session sess-a, run by the stand-in `claude`: the process its hooks record and the job checks."""
+    return Session(tmp_path, project, "sess-a", pid=claude.pid)
 
 
 def started(session, tmux_bin):

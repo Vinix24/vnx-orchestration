@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -35,11 +38,11 @@ def fast(clock):
     return clock
 
 
-def successor(project, results, session_id="sess-b"):
+def successor(session, results, session_id="sess-b"):
     """On Enter after /clear: the SessionStart of the fresh session, in the same claude process and pane."""
     def on_enter(submitted):
         if submitted == "/clear":
-            results.append(start(project, session_id, source="clear"))
+            results.append(start(session.project, session_id, source="clear", pid=session.pid))
     return on_enter
 
 
@@ -62,7 +65,7 @@ def stopped(project, fake, reason, reached="started"):
 def test_the_job_clears_and_continues_in_the_fresh_session(session, fake, tmux_bin, project):
     args = started(session, tmux_bin)
     results = []
-    fake.on_enter.append(successor(project, results))
+    fake.on_enter.append(successor(session, results))
     assert tmux_clear.main(args) == 0
     assert fake.sent() == [CLEAR, ["Enter"], CONTINUE, ["Enter"]]
     assert fake.shown() == []
@@ -80,11 +83,11 @@ def test_the_job_clears_and_continues_in_the_fresh_session(session, fake, tmux_b
 def test_the_first_automatic_clear_says_how_to_turn_it_off_and_the_next_does_not(
         tmp_path, session, fake, tmux_bin, project):
     results = []
-    fake.on_enter.append(successor(project, results))
+    fake.on_enter.append(successor(session, results))
     tmux_clear.main(started(session, tmux_bin))
     assert auto_clear.OFF_HINT in message_of(results[0])
-    nxt = Session(tmp_path, project, "sess-b")
-    fake.on_enter[:] = [successor(project, results, "sess-c")]
+    nxt = Session(tmp_path, project, "sess-b", pid=session.pid)
+    fake.on_enter[:] = [successor(session, results, "sess-c")]
     tmux_clear.main(started(nxt, tmux_bin))
     assert message_of(results[1]).startswith("context-rotation: continued from")
     assert auto_clear.OFF_HINT not in message_of(results[1])
@@ -93,7 +96,7 @@ def test_the_first_automatic_clear_says_how_to_turn_it_off_and_the_next_does_not
 def test_a_clear_the_user_typed_gets_no_hint(session, project, tmux_bin):
     session.write_handover()
     session.finish_turn()
-    proc = start(project, "sess-b", source="clear")
+    proc = start(project, "sess-b", source="clear", pid=session.pid)
     assert auto_clear.OFF_HINT not in message_of(proc)
 
 
@@ -253,7 +256,7 @@ def test_a_journal_line_that_cannot_be_written_sends_no_enter(session, fake, tmu
 def test_the_continuation_line_is_verified_too(session, fake, tmux_bin, project):
     args = started(session, tmux_bin)
     results = []
-    fake.on_enter.append(successor(project, results))
+    fake.on_enter.append(successor(session, results))
 
     def silent_after_clear(submitted):
         if submitted == "/clear":
@@ -303,7 +306,7 @@ def test_a_continuation_replaced_during_its_journal_write_gets_no_enter(session,
                                                                          monkeypatch):
     args = started(session, tmux_bin)
     results = []
-    fake.on_enter.append(successor(project, results))
+    fake.on_enter.append(successor(session, results))
     during_journal_of(monkeypatch, "clear_continued", lambda: setattr(fake, "typed", "my draft"))
     tmux_clear.main(args)
     assert fake.submitted == ["/clear"]
@@ -318,7 +321,7 @@ def test_each_enter_follows_its_line_and_a_look_with_nothing_in_between(session,
     """The last call before each Enter is a capture of the pane, taken after the step's journal line."""
     args = started(session, tmux_bin)
     results = []
-    fake.on_enter.append(successor(project, results))
+    fake.on_enter.append(successor(session, results))
 
     def noted(name, real):
         def call(*args, **kwargs):
@@ -390,7 +393,7 @@ def test_an_injected_line_without_its_delivery_is_no_ack(session, fake, tmux_bin
     stopped(project, fake, "no_ack", "entered")
 
 
-def broken_successor(project, results, session_id="sess-b"):
+def broken_successor(session, results, session_id="sess-b"):
     """On Enter after /clear: the fresh session's SessionStart, with nobody reading its output any more.
 
     Its stdout is a pipe whose read end is closed before the hook starts, so the emit
@@ -399,10 +402,11 @@ def broken_successor(project, results, session_id="sess-b"):
     def on_enter(submitted):
         if submitted != "/clear":
             return
+        project = session.project
         payload = event("17-SessionStart-clear", project, project / "none.jsonl", session_id, source="clear")
         proc = subprocess.Popen([sys.executable, str(HOOKS / "session_start.py")], stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                                env=dict(os.environ, CLAUDE_PID=str(os.getpid())))
+                                env=dict(os.environ, CLAUDE_PID=str(session.pid)))
         proc.stdout.close()
         proc.stdout = None
         _, err = proc.communicate(json.dumps(payload), timeout=60)
@@ -414,7 +418,7 @@ def test_a_handover_whose_emit_failed_gets_no_continuation(session, fake, tmux_b
     """Codex on 450a7683: the emit raises BrokenPipeError, the claim stays, and the job still typed the line."""
     args = started(session, tmux_bin)
     results = []
-    fake.on_enter.append(broken_successor(project, results))
+    fake.on_enter.append(broken_successor(session, results))
     tmux_clear.main(args)
     assert fake.sent() == [CLEAR, ["Enter"]]
     assert fake.submitted == ["/clear"]
@@ -473,6 +477,111 @@ def test_a_marker_of_another_pane_makes_the_job_type_nothing(session, fake, tmux
     stopped(project, fake, "not_current")
 
 
+# --- and once more right before Enter ----------------------------------------------------------
+
+def after_first_recheck(monkeypatch, change):
+    """`change()` runs once, right after the job's first read of the marker (Job.recheck) found it current."""
+    real = tmux_clear.Job.recheck
+    found = []
+
+    def recheck(job):
+        reason = real(job)
+        if not found:
+            found.append(reason)
+            change()
+        return reason
+
+    monkeypatch.setattr(tmux_clear.Job, "recheck", recheck)
+    return found
+
+
+def after_record_of(monkeypatch, wanted, change):
+    """`change()` runs right after the line and record of event `wanted` are written, the project lock released."""
+    real = auto_clear.transition
+
+    def transition(project_dir, record, event, **changes):
+        real(project_dir, record, event, **changes)
+        if event == wanted:
+            change()
+
+    monkeypatch.setattr(auto_clear, "transition", transition)
+
+
+def outdate(session, change):
+    if change == "prompt":
+        assert session.prompt("One more thing after the handover.").returncode == 0
+        assert not session.marker("ready").exists()
+    else:
+        session.write_handover(VALID_HANDOVER + "\nNewer.\n")
+
+
+@pytest.mark.parametrize("change, reason", [("prompt", "not_current"), ("newer handover", "replaced")])
+@pytest.mark.parametrize("window", ["after the first read of the marker", "after the journal line of Enter"])
+def test_a_handover_outdated_before_enter_gets_no_enter(window, change, reason, session, fake, tmux_bin, project,
+                                                       monkeypatch):
+    """Codex on e51a3929: a prompt made the handover outdated after the job read the marker; /clear still went.
+
+    SessionStart then refuses the handover, and the context is gone without a successor.
+    """
+    args = started(session, tmux_bin)
+    first = [None]
+    if window == "after the first read of the marker":
+        first = after_first_recheck(monkeypatch, lambda: outdate(session, change))
+    else:
+        after_record_of(monkeypatch, "clear_entered", lambda: outdate(session, change))
+    tmux_clear.main(args)
+    assert first == [None], "the first read of the marker found it current"
+    assert fake.submitted == []
+    assert fake.sent() == [CLEAR, SIX], "the line was exactly the job's /clear, so it was taken back"
+    stopped(project, fake, reason)
+    assert record(project)["left_in_line"] is False
+
+
+def test_a_handover_outdated_while_the_line_holds_more_is_left_as_it_is(session, fake, tmux_bin, project,
+                                                                         monkeypatch):
+    """The recheck fails and the user has added text: no Enter, and no BSpace either."""
+    args = started(session, tmux_bin)
+
+    def prompt_and_type():
+        outdate(session, "prompt")
+        fake.typed += " and more"
+
+    after_record_of(monkeypatch, "clear_entered", prompt_and_type)
+    tmux_clear.main(args)
+    assert fake.submitted == [] and fake.sent() == [CLEAR]
+    assert fake.typed == "/clear and more"
+    left_alone(session, project, fake, "not_current")
+
+
+def test_the_marker_is_read_again_between_the_journal_line_and_the_look(session, fake, tmux_bin, project,
+                                                                        monkeypatch):
+    """For /clear: its journal line, the marker read again, then the look Enter goes on. The continuation reads none."""
+    args = started(session, tmux_bin)
+    results = []
+    fake.on_enter.append(successor(session, results))
+    real_journal, real_marker = rotation_state.journal, rotation_state.read_marker_checked
+
+    def journal(project_dir, event, **fields):
+        fake.calls.append(["journal", event])
+        return real_journal(project_dir, event, **fields)
+
+    def read_marker(*args, **kwargs):
+        fake.calls.append(["marker"])
+        return real_marker(*args, **kwargs)
+
+    monkeypatch.setattr(rotation_state, "journal", journal)
+    monkeypatch.setattr(rotation_state, "read_marker_checked", read_marker)
+    tmux_clear.main(args)
+    assert fake.submitted == ["/clear", tmux_clear.CONTINUE]
+    calls = fake.calls
+    clear_enter, continue_enter = [number for number, call in enumerate(calls)
+                                   if call == ["send-keys", "-t", "%7", "Enter"]]
+    last_read = max(number for number, call in enumerate(calls[:clear_enter]) if call == ["marker"])
+    assert calls.index(["journal", "clear_entered"]) < last_read < clear_enter - 1
+    assert "capture-pane" in calls[clear_enter - 1]
+    assert ["marker"] not in calls[calls.index(["journal", "clear_continued"]):continue_enter]
+
+
 # --- a read that fails decides nothing ---------------------------------------------------
 
 def denied(*args, **kwargs):
@@ -485,6 +594,7 @@ def denied(*args, **kwargs):
     ((transcript_work, "position_holds"), "transcript_unreadable"),
     ((tmux_clear, "process_table"), "process_unreadable"),
     ((rotation_state, "process_start_checked"), "process_unreadable"),
+    ((tmux_clear, "terminal_of"), "process_unreadable"),
 ])
 def test_a_failed_read_before_typing_types_nothing(target, reason, session, fake, tmux_bin, project, monkeypatch):
     args = started(session, tmux_bin)
@@ -612,6 +722,124 @@ def test_the_pane_pid_of_an_ancestor_counts(session, fake, tmux_bin, project):
     fake.pane_pid = os.getppid()
     tmux_clear.main(args)
     assert fake.sent()[:2] == [CLEAR, ["Enter"]]
+
+
+# --- the session's claude owns the input of the pane's terminal ---------------------------------------
+
+@pytest.fixture
+def no_terminal():
+    """A process in a session of its own, with no controlling terminal."""
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"], start_new_session=True)
+    try:
+        yield child.pid
+    finally:
+        child.kill()
+        child.wait()
+
+
+def stop(pid):
+    """SIGSTOP a child of this process and wait until it is stopped."""
+    os.kill(pid, signal.SIGSTOP)
+    _, status = os.waitpid(pid, os.WUNTRACED)
+    assert os.WIFSTOPPED(status)
+
+
+@pytest.mark.parametrize("place", ["on the pane's terminal", "without a terminal"])
+def test_a_stopped_claude_gets_no_key(place, tmp_path, project, fake, tmux_bin, claude, no_terminal):
+    """Codex on e51a3929: the recorded claude was SIGSTOPed (as by Ctrl-Z), and /clear still went into the pane."""
+    pid = claude.pid if place == "on the pane's terminal" else no_terminal
+    args = started(Session(tmp_path, project, "sess-a", pid=pid), tmux_bin)
+    stop(pid)
+    tmux_clear.main(args)
+    assert fake.sent() == []
+    stopped(project, fake, "process_stopped")
+
+
+def test_a_claude_stopped_after_typing_gets_no_enter(session, fake, tmux_bin, project, monkeypatch, claude):
+    """The check before Enter reads the terminal again: a claude stopped since /clear was typed gets no key."""
+    args = started(session, tmux_bin)
+    after_record_of(monkeypatch, "clear_entered", lambda: stop(claude.pid))
+    tmux_clear.main(args)
+    assert fake.submitted == [] and fake.sent() == [CLEAR]
+    left_alone(session, project, fake, "process_stopped")
+
+
+@pytest.mark.parametrize("place", ["in a background group", "on another terminal", "without a terminal"])
+def test_a_claude_that_does_not_own_the_terminal_input_gets_no_key(place, tmp_path, project, fake, tmux_bin, claude,
+                                                                   stand_in, no_terminal):
+    """It runs below the pane, but another program reads the keys: they would go to that program."""
+    if place == "in a background group":
+        background = stand_in("background")
+        pid, fake.pane_tty = background.pid, background.tty
+    elif place == "on another terminal":
+        pid, fake.pane_tty = claude.pid, stand_in().tty
+    else:
+        pid = no_terminal
+    tmux_clear.main(started(Session(tmp_path, project, "sess-a", pid=pid), tmux_bin))
+    assert fake.sent() == []
+    stopped(project, fake, "process_background")
+
+
+def ps_answering(tmp_path, monkeypatch, answer):
+    """`ps` on PATH that runs the real one, except for the read of a process's terminal (tpgid): `answer` there."""
+    folder = tmp_path / "ps-bin"
+    folder.mkdir()
+    script = folder / "ps"
+    script.write_text('#!/bin/sh\ncase "$*" in\n  *tpgid*)\n    %s\n    exit ;;\nesac\nexec %s "$@"\n' % (
+        answer, shlex.quote(shutil.which("ps"))), encoding="utf-8")
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", str(folder) + os.pathsep + os.environ["PATH"])
+
+
+# What ps prints for the terminal read, the pane's tty, and why no key goes (None: the keys go). The lines
+# are those of BSD ps (macOS: tpgid 0 and tty ?? without a terminal) and procps (Linux: -1 and ?), so
+# both systems are decided here, whichever one runs the test.
+PS_ANSWERS = [
+    pytest.param("echo '{p} {p} {p} Ss+  ttys035 '", "/dev/ttys035", None, id="macos-foreground"),
+    pytest.param("echo '  {p}  {p}  {p} Ss+  pts/3'", "/dev/pts/3", None, id="linux-foreground"),
+    pytest.param("echo '{p} {p} {p} R+ pts/3'", "/dev/pts/3", None, id="linux-foreground-running"),
+    pytest.param("echo '{p} {p} 0 Ss ??'", "/dev/ttys035", "process_background", id="macos-no-terminal"),
+    pytest.param("echo '{p} {p} -1 Ss ?'", "/dev/pts/3", "process_background", id="linux-no-terminal"),
+    pytest.param("echo '{p} {p} 4242 S ttys035'", "/dev/ttys035", "process_background", id="background-group"),
+    pytest.param("echo '{p} {p} {p} Ss+ ttys036'", "/dev/ttys035", "process_background", id="other-terminal"),
+    pytest.param("echo '{p} {p} {p} T+ ttys035'", "/dev/ttys035", "process_stopped", id="macos-stopped"),
+    pytest.param("echo '{p} {p} {p} t+ pts/3'", "/dev/pts/3", "process_stopped", id="linux-tracing-stop"),
+    pytest.param("exit 1", "/dev/pts/3", "process_unreadable", id="ps-fails"),
+    pytest.param("exit 0", "/dev/pts/3", "process_unreadable", id="ps-prints-nothing"),
+    pytest.param("echo garbage", "/dev/pts/3", "process_unreadable", id="ps-prints-garbage"),
+    pytest.param("echo '1 1 1 Ss+ pts/3'", "/dev/pts/3", "process_unreadable", id="ps-tells-of-another-process"),
+    pytest.param("echo '{p} {p} {p} Ss+ pts/3'; echo '{p} {p} {p} Ss+ pts/3'", "/dev/pts/3", "process_unreadable",
+                 id="ps-prints-two-lines"),
+]
+
+
+@pytest.mark.parametrize("answer, tty, reason", PS_ANSWERS)
+def test_what_ps_tells_of_the_terminal_decides_the_keys(answer, tty, reason, session, fake, tmux_bin, project,
+                                                        tmp_path, monkeypatch):
+    args = started(session, tmux_bin)
+    ps_answering(tmp_path, monkeypatch, answer.format(p=session.pid))
+    fake.pane_tty = tty
+    tmux_clear.main(args)
+    if reason is None:
+        assert fake.sent()[:2] == [CLEAR, ["Enter"]]
+    else:
+        assert fake.sent() == []
+        stopped(project, fake, reason)
+
+
+def test_ps_tells_the_terminal_of_each_stand_in(stand_in, no_terminal):
+    owner = stand_in()
+    facts = tmux_clear.terminal_of(owner.pid)
+    assert ("/dev/" + facts.tty, facts.pgid, facts.tpgid) == (owner.tty, owner.pid, owner.pid)
+    assert tmux_clear.terminal_problem(facts, owner.tty) is None
+    background = stand_in("background")
+    facts = tmux_clear.terminal_of(background.pid)
+    assert ("/dev/" + facts.tty, facts.pgid) == (background.tty, background.pid) and facts.tpgid != background.pid
+    assert tmux_clear.terminal_problem(facts, background.tty) == "process_background"
+    facts = tmux_clear.terminal_of(no_terminal)
+    assert facts.tty in ("?", "??") and facts.tpgid in (0, -1)
+    stop(owner.pid)
+    assert tmux_clear.terminal_problem(tmux_clear.terminal_of(owner.pid), owner.tty) == "process_stopped"
 
 
 def test_descends_walks_up_only():
