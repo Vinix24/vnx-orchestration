@@ -647,3 +647,51 @@ def test_added_lines_ignore_blank_lines_and_count_duplicates():
     head = with_bullets("- dup", "- dup")
     assert check.added_unreleased_lines(BASE_CHANGELOG, head) == ["- dup", "- dup"]
     assert check.added_unreleased_lines(BASE_CHANGELOG, BASE_CHANGELOG.replace("\n\n", "\n\n\n")) == []
+
+
+# ---------------------------------------------------------------------------
+# Rule 5: the release PR removes the grandfathering list (OI-2141)
+# ---------------------------------------------------------------------------
+
+
+def test_release_pr_that_keeps_the_legacy_list_fails(tmp_path):
+    repo = init_repo(tmp_path / "keeps", {
+        "CHANGELOG.md": BASE_CHANGELOG, "VERSION": "1.0.0\n", "changelog.d/README.md": "# rule\n",
+        check.LEGACY_LIST_PATH: "# list\n",
+    })
+    release_branch(repo)
+    git(repo, "checkout", "-q", "release", "--", check.LEGACY_LIST_PATH)
+    commit(repo, {check.LEGACY_LIST_PATH: "# list\n"}, "put the list back")
+    result = run_check(repo)
+    assert result.returncode == 1, result.stdout
+    assert check.LEGACY_LIST_PATH in result.stdout
+    assert "assemble_changelog.py --version X.Y.Z" in result.stdout
+
+
+def test_release_pr_built_by_the_assembler_removes_the_list_and_passes(tmp_path):
+    repo = init_repo(tmp_path / "removes", {
+        "CHANGELOG.md": BASE_CHANGELOG, "VERSION": "1.0.0\n", "changelog.d/README.md": "# rule\n",
+        check.LEGACY_LIST_PATH: "# list\n",
+    })
+    release_branch(repo)
+    assert not (repo / check.LEGACY_LIST_PATH).exists()
+    commit(repo, {}, "release 1.1.0")
+    result = run_check(repo)
+    assert result.returncode == 0, result.stdout
+
+
+def test_non_release_pr_passes_when_the_legacy_list_is_absent(tmp_path):
+    repo = legacy_repo(tmp_path, None)
+    commit(repo, {"changelog.d/x.md": "- x\n"})
+    result = run_check(repo, pr=99)
+    assert result.returncode == 0, result.stdout
+    assert "Traceback" not in result.stderr
+
+
+def test_non_release_pr_with_a_bullet_and_no_list_fails_as_a_plain_violation(tmp_path):
+    repo = legacy_repo(tmp_path, None)
+    commit(repo, {"CHANGELOG.md": with_bullets("- sneaked in")})
+    result = run_check(repo, pr=99)
+    assert result.returncode == 1
+    assert "Traceback" not in result.stderr
+    assert "adds 1 line(s) under" in result.stdout
