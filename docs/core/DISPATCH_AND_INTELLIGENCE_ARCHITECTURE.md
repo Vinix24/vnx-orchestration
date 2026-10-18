@@ -1,7 +1,7 @@
 # Dispatch & Intelligence Architecture (current)
 
-**Status:** current as of 2026-09-27 (post single-entry-door flip PR #896; N-slot concurrency #1017; scoped-permissions-default flip 2026-08-14; tmux-spawn lane removed 2026-09-18 #1868; `sonnet` build-worker default reaffirmed PR #1890, 2026-09-23).
-**Scope:** how a dispatch flows from T0's intent to a governed receipt, and how intelligence is injected and learned. This is the end-to-end picture; the enforced ruleset T0 follows is `DISPATCH_RULES.md`, the lane detail is `PROVIDER_LANES.md`, the receipt shape is `11_RECEIPT_FORMAT.md`.
+**Status:** describes `main` as of 2026-10-18 (single-entry door default, ADR-024; N-slot concurrency #1017; scoped worker permissions by default since 2026-08-14; tmux-spawn lane removed 2026-09-18 #1868; `sonnet` build-worker default reaffirmed #1890). What is on `main` and in no release yet is marked "on main, not yet released".
+**Scope:** how a dispatch flows from T0's intent to a governed receipt, and how intelligence is injected and learned. This is the end-to-end picture; the enforced ruleset T0 follows is `DISPATCH_RULES.md`, the lane detail is `PROVIDER_LANES.md`, the receipt shape is `11_RECEIPT_FORMAT.md`. The review gates that read a finished PR (seats, takeover chain, merge door) are in `DISPATCH_RULES.md` section 2; the provider switch is in `PROVIDER_LANES.md`.
 
 ---
 
@@ -67,6 +67,8 @@ A dispatch is not "paste text into a worker." It is: **stage an intent → route
 | `claude` (terminal-pinned, opt-in) | **subprocess** (`subprocess_dispatch.py`) | `claude -p` headless, lease + Wave-5 smart-context + triple-gate | subscription |
 | `kimi` / `glm`(harness) / `deepseek`(harness) | **provider dispatch** (`scripts/lib/provider_dispatch.py`) | provider CLI / harness spawn | provider-metered |
 
+The review gates (`kimi_gate`, `deepseek_gate`, `glm_gate`) run the same harness lanes through `gate_runner`; `codex_gate` runs `codex exec`. Which gate fills which seat, and who takes over when a seat's reviewer is out, is not repeated here: `PROVIDER_LANES.md` ("Takeover chain") and `DISPATCH_RULES.md` section 2.
+
 Hard rules: **claude workers route via the headless lane, never `provider_dispatch`.** `glm` always via the claude-CLI harness (`:4141` litellm→OpenRouter proxy), never plain `litellm:zai`. Everything dispatches through the single door (`vnx dispatch`); calling a lane script directly is a side door (the `dispatch_sidedoor_audit.py` gate enforces this).
 
 The headless lane is the default for parallel/independent feature work (the tmux-spawn lane was removed on 2026-09-18). The subprocess lane is opt-in (`VNX_ADAPTER_T{n}=subprocess`) for terminal-pinned PRs, >30-min workers, and burn-in measurement — it uniquely carries Wave-5 smart-context, lease management, triple-gate `contract_hash` binding, and prior-round findings.
@@ -78,6 +80,8 @@ Assembly runs in the lane **before** delivery (`_assemble_context` → `dispatch
 - **Skill body** — the role's `SKILL.md` (the specialist's operating instructions).
 - **Intelligence injection** — `## Relevant Intelligence (from past dispatches)` + `### Antipatterns to avoid`, selected per-dispatch from the quality-intelligence store (§7).
 - **Report-contract footer** — the mandatory `## Summary / ## Changes / ## Verification / ## Open Items` headings + the `<!-- VNX-END-OF-INSTRUCTION -->` sentinel. This is *why* the worker writes a report — and the report is what becomes a receipt.
+
+**Reviewers are not enriched.** The `review-gate` and `plan-reviewer` roles receive neither the repo-map, nor the skill or role `CLAUDE.md`, nor intelligence patterns. `reviewer_roles.enrichment_allowed(role)` is the one decision place, and every lane that enriches a prompt (`provider_dispatch._enrich_instruction`, `envelope_prepare._prepare`, `skill_context._inject_skill_context`, the direct-CLI path of `subprocess_dispatch.py`) asks it. A reviewer fed patterns from past dispatches is no longer independent, and any later measurement of what injection does to quality would be contaminated by an injected gate. The raw review instruction and the report-contract directive are not stripped. This is code behaviour; no ADR records it.
 
 **Consequence:** a hand-delivered raw instruction (bypassing the lane) skips assembly entirely → no intelligence, no report-contract → the worker may write no report → no receipt → the work is invisible to governance, and the phantom-guard has nothing to check. Delivery problems must be fixed in the lane, never worked around by raw delivery.
 
@@ -119,6 +123,10 @@ The quality-intelligence store (`quality_intelligence.db`, per-project under `~/
 - **Injection (read path, per dispatch):** `IntelligenceSelector.select()` chooses the most relevant patterns/antipatterns for the dispatch's role + paths + pr_id and `_build_intelligence_section` renders them into the assembled body (§4). Prior-round findings (`prior_round_injector.py`, Wave-5) carry a `contract_hash` so a re-dispatch sees what the last round found.
 - **Learning (write path):** the intelligence daemon (`intelligence_daemon.py` + `learning_loop.py`) runs two tiers. Tier-1 auto-tunes pattern *confidence* from receipt outcomes. Tier-2 proposes new rules into an operator-gated `pending_rules.json` — the system proposes, the human approves. Nothing self-promotes a rule without a gate.
 
+The success-pattern and antipattern tables carry the natural key `(project_id, pattern_type, title)`. An import writes them through `pattern_upsert` (`scripts/intelligence_import.py`), so it merges into the local row and never deletes one on an id match.
+
+**Intelligence follows the provider switch and the content boundary (on main, not yet released).** Every intelligence caller that sends text to a model provider asks `provider_switch` first and treats a refusal as `provider_switched_off`, not as an outage: the receipt classifier and its classifier providers, the tagger, the scout pre-pass, the conversation analyzer's deep pass and the nightly dream consolidation. The dream cycle also reads the operator's content boundary (`scripts/lib/content_class.py`, the file `~/.vnx/content_boundary.json`, which lives outside the repository). Restricted content (class `client` or `personal`) may go to Claude, codex and local models and never to GLM, DeepSeek, kimi or an openrouter/litellm lane, unless a project is named in `provider_exceptions` for content that is restricted through that project id alone. A missing or unreadable boundary file is an explicit `unconfigured` state, and the analyzer then treats every session as restricted. The switch itself is described in `PROVIDER_LANES.md`. This is code behaviour; no ADR records it.
+
 Tenant isolation (ADR-007): every intelligence table is keyed by a composite over `project_id`; the store resolves its owning project fail-closed (`.vnx-project-id` marker → `VNX_PROJECT_ID` → the `~/.vnx-data/<pid>/` path), so a fresh store never silently inherits another tenant's rows.
 
 ## 8. Where the evidence lives
@@ -127,7 +135,7 @@ Tenant isolation (ADR-007): every intelligence table is keyed by a composite ove
 - Reports: `$VNX_DATA_DIR/unified_reports/<dispatch-id>.md` (interactive), `…/headless/` (review gates)
 - Receipts (the audit trail): `t0_receipts.ndjson`
 - Review-gate results: `.vnx-data/state/review_gates/results/`
-- Per-dispatch event ring buffer (subprocess lanes only): `.vnx-data/events/T{n}.ndjson` → archived per dispatch
+- Per-dispatch event ring buffer (subprocess lanes only): `.vnx-data/events/T{n}.ndjson` → archived per dispatch. The harness review seats and the headless lane are per-run terminals (`event_store.PER_RUN_TERMINALS`): each run writes its own stream, so parallel seats keep their final answer (`docs/operations/EVENT_STREAMS.md`).
 
 Without a report there is no receipt, and without a receipt the work is invisible to governance. The report contract (`scripts/lib/report_body_contract.py`) is the bridge.
 

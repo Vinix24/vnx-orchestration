@@ -11,7 +11,7 @@ modules (linked below); this is the map.
 |---|---|---|---|
 | **Past** | What actually happened? | `t0_receipts.ndjson` + the NDJSON event ledgers | Append-only, immutable (ADR-005) |
 | **Current** | What is true right now? | `runtime_coordination.db` (tracks, dispatches, events) | Mutable, single-writer DAL |
-| **Future** | What do we intend to do? | `ROADMAP.yaml` (hand-authored) | Hand-edited; views generated from it |
+| **Future** | What do we intend to do? | the tracks database, reached through `vnx horizon` (`docs/core/HORIZON_PLANNING.md`) | Operator-edited through the verbs; `ROADMAP.yaml` is an optional file input, views are generated from it |
 
 ### Past — the audit trail
 Every dispatch leaves an immutable receipt in `t0_receipts.ndjson`; every track
@@ -91,17 +91,25 @@ The section itself carries `available` and `reason`. When `gh pr list` for the o
 `t0_index.json` (schema `t0_index/1.3`) shows `queue.open_prs` as `null`, not `0`, when the section is unavailable, plus a top-level `pr_queue_unavailable` holding the reason. The key is absent when the read succeeded. `PROJECT_STATUS.md` prints `Open PRs: unknown (<reason>)` for the `null`.
 
 ### Future — authored intent
-`ROADMAP.yaml` is the only hand-edited planning surface. `FEATURE_PLAN.md` and
-`PR_QUEUE.md` are **generated** from it (`scripts/build_feature_plan.py`,
-`scripts/build_pr_queue.py`) and CI fails the build if either drifts
-(`tests/test_roadmap_consistency.py`). A feature entry carries `feature_id`,
-`status`, `milestone`, `pr_queue[]`, and `depends_on[]`.
+The roadmap is the tracks database: `vnx horizon` (alias `vnx objective`) adds,
+lists, closes and reopens tracks, and `docs/core/HORIZON_PLANNING.md` is the
+command reference. A track is born plan-gated: an `OI-PLAN-<track>` blocker keeps
+it out of `done` until its plan passes the plan gate
+(`docs/core/HORIZON_LIFECYCLE.md`, ADR-030).
+
+`ROADMAP.yaml` is a file format that projects into that database in one direction.
+The file shipped in the repository is an illustrative example of the format.
+`FEATURE_PLAN.md` and `PR_QUEUE.md` are **generated** from it
+(`scripts/build_feature_plan.py`, `scripts/build_pr_queue.py`) and CI fails the
+build if either drifts (`tests/test_roadmap_consistency.py`). A feature entry
+carries `feature_id`, `status`, `milestone`, `pr_queue[]`, and `depends_on[]`.
 
 ## The flow — idea to closure, drift-free
 
-1. **Author.** You add (or edit) a feature in `ROADMAP.yaml`:
-   `feature_id`, `status: planned`, `milestone`, `pr_queue: []`, `depends_on: []`.
-2. **Seed (PM).** `scripts/seed_tracks_from_roadmap.py --apply` projects each
+1. **Author.** You add a track with `vnx horizon add`, or add (or edit) a feature in
+   a `ROADMAP.yaml`: `feature_id`, `status: planned`, `milestone`, `pr_queue: []`,
+   `depends_on: []`.
+2. **Seed (roadmap file only).** `scripts/seed_tracks_from_roadmap.py --apply` projects each
    feature into a track (one direction: ROADMAP → tracks). It maps
    `status → phase`, `milestone → horizon`, `depends_on → track_dependencies`.
    It never writes ROADMAP and never advances a phase. Status≠phase drift is
@@ -201,8 +209,11 @@ subset check) require every PR in `pr_ref` to be MERGED before deriving or closi
 
 - Track DAL + phase state machine: `scripts/lib/tracks.py`
 - Derived-status reconciler + 4-source merge detection: `scripts/lib/track_reconciler.py`
+- Closing a track against merge evidence (`close_track_if_done`): `scripts/lib/track_reconciler_closure.py`
 - Batch auto-close reconcile loop: `scripts/lib/objective_reconcile.py`
-- `vnx objective list|show|sync|drift|close|reconcile|reopen`: `scripts/planning_cli.py`
+- `vnx horizon` / `vnx objective` verbs (`list`, `show`, `sync`, `drift`, `reconcile`, `close`, `reopen`, `link-pr` and the rest): `scripts/planning_cli.py`, reference in `docs/core/HORIZON_PLANNING.md`
+- Track lifecycle narrative (plan gate, close, auto-close): `docs/core/HORIZON_LIFECYCLE.md`
+- `t0_state.json` builder, including `live_work` and `pr_queue`: `scripts/build_t0_state.py`, `scripts/lib/pr_queue_state.py`
 - ROADMAP → tracks projection: `scripts/seed_tracks_from_roadmap.py`
 - Generated views: `scripts/build_feature_plan.py`, `scripts/build_pr_queue.py`
 - Operational guide + known behaviours: `docs/operations/OBJECTIVE_RECONCILE.md`
