@@ -76,7 +76,7 @@ The full pip-vs-bash command list and the two-binary split live in one place:
 
 A T0 session that crosses 500K tokens of context must rotate to a fresh session. Two parts
 make that work: a guard hook that blocks new work, and a spawner that opens the successor.
-Both are on main, not yet released. The full contract, with the bands and every exit code, is
+Both shipped in a release (#1923). Two later changes are on main and not yet released: `vnx guard install|check` (#2078) and the wrap-proof check in the spawner (#2076). The full contract, with the bands and every exit code, is
 [`../operations/T0_CONTEXT_ROTATION.md`](../operations/T0_CONTEXT_ROTATION.md).
 
 The guard is `scripts/hooks/t0_context_guard.py`. Under the warn band it does nothing, and in the warn

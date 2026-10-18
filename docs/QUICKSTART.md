@@ -52,11 +52,14 @@ its receipt in `$VNX_DATA_DIR/state/t0_receipts.ndjson`. Query the receipt inste
 of reading the file:
 
 ```bash
-VNX_DATA_DIR=$(python3 scripts/lib/vnx_paths.py | sed -n 's/^VNX_DATA_DIR=//p')
-python3 scripts/receipt_query.py by-dispatch <dispatch-id> --state-dir $VNX_DATA_DIR/state
+DATA=$(vnx doctor | sed -n 's/.*state:location.*: //p')
+python3 <path-to-checkout>/scripts/receipt_query.py by-dispatch <dispatch-id> --state-dir $DATA/state
 ```
 
-`receipt_query.py` and `vnx_paths.py` run from a checkout of this repository; run them from your project directory so the path resolves to that project's runtime directory. The walkthrough with
+Run both from your project directory. `vnx doctor` prints this project's runtime directory on its
+`state:location` line, so `$DATA` is the project's own store. `receipt_query.py` ships in a
+checkout of this repository, not in the pip package, so the second line points at one.
+The walkthrough with
 real output is in the [README](../README.md#your-first-dispatch).
 
 ## Step 5: Check Status

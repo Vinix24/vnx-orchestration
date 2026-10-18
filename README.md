@@ -183,7 +183,7 @@ $ python3 scripts/receipt_query.py by-dispatch D-4d7b2a30 --state-dir $VNX_DATA_
 
 That receipt reads `[failed]`, and it is correct: I pointed `origin` at a local bare repository instead of a real GitHub remote, `gh pr create` had nothing to talk to, and the receipt records exactly that (`autopr_reason: "gh pr create failed for branch ... (no open PR found on retry)"`). The worker's report, commit, and `findings.md` are real and complete; the receipt still refuses to call the dispatch done without a PR in front of it. That refusal is the governance model working, not a bug I hit while writing this. Point `origin` at a real GitHub remote and this same sequence ends with `status: done`.
 
-After a dispatch the T0 still has to record whether the outcome is accepted: `receipt_query.py open-outcomes` lists the dispatches that have none and `receipt_query.py decide <dispatch-id> accept|reject --reason ...` records it. Before merging, `vnx pr-ready <PR>` shows what the merge door will check on the PR head, and the merge itself goes through `scripts/pr_merge.py` ([DISPATCH_RULES.md](docs/core/DISPATCH_RULES.md) §2.1 and §13).
+After a dispatch the T0 still has to record whether the outcome is accepted: `receipt_query.py open-outcomes` lists the dispatches that have none and `receipt_query.py decide <dispatch-id> accept|reject --reason ... --state-dir <state-dir>` records it. Before merging, `vnx pr-ready <PR>` shows what the merge door will check on the PR head, and the merge itself goes through `scripts/pr_merge.py` ([DISPATCH_RULES.md](docs/core/DISPATCH_RULES.md) §2.1 and §13).
 
 ## Architecture
 
@@ -248,7 +248,7 @@ For how the architecture got here, [docs/manifesto/EVOLUTION_TIMELINE.md](docs/m
 
 VNX is not a thin "supports many models" wrapper. The provider layer is governed by [`provider_constraints.yaml`](scripts/lib/providers/provider_constraints.yaml), a machine-readable source of truth for constraints such as `kimi-via-cli-only`, `no-anthropic-sdk`, and `deepseek-harness-subscription-blocked`.
 
-The default review stack picks a subscription reader first: `codex_gate` and `kimi_gate`. `deepseek_gate` runs only as a takeover-chain fallback when a subscription reviewer is unavailable, since it bills API credit rather than a subscription. `glm_gate` stays a registered gate but is not in the default takeover chain. `vnx providers` switches a provider family on or off ([PROVIDER_LANES.md](docs/core/PROVIDER_LANES.md)). Gemini is retired as a reviewer everywhere a review gate is selected; the gemini CLI still runs as a worker lane.
+The default review stack picks a subscription reader first: `codex_gate` and `kimi_gate`. `deepseek_gate` runs only as a takeover-chain fallback when a subscription reviewer is unavailable, since it bills API credit rather than a subscription. `glm_gate` stays a registered gate but is not in the default takeover chain. `vnx providers list` shows the state of each provider family. The write verbs refuse until every launch function calls `provider_switch.require`, so nothing can be switched yet ([PROVIDER_LANES.md](docs/core/PROVIDER_LANES.md#provider-switch)). Gemini is retired as a reviewer everywhere a review gate is selected; the gemini CLI still runs as a worker lane.
 
 | Provider | How VNX drives it | Billing / constraint |
 |---|---|---|
