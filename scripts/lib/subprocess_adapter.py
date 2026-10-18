@@ -142,6 +142,24 @@ def _build_worker_scope_args(role: Optional[str], requires_mcp: bool = False) ->
 # StreamEvent dataclass
 # ---------------------------------------------------------------------------
 
+# stdout reaches EOF when the worker closes it, which is a moment before the
+# worker is reapable: its exit is still in flight. A bare poll() there returns
+# None under CPU load and the run reads as returncode 1 although the worker
+# exited 0. A worker that closes stdout and keeps running is given this long.
+_EOF_REAP_TIMEOUT_SECONDS = 5.0
+
+
+def _reap_at_eof(process: "subprocess.Popen") -> Optional[int]:
+    """The worker's returncode once its stdout reached EOF, None if it keeps running."""
+    rc = process.poll()
+    if rc is not None:
+        return rc
+    try:
+        return process.wait(timeout=_EOF_REAP_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        return None
+
+
 @dataclass
 class StreamEvent:
     """A single parsed event from --output-format stream-json stdout."""
@@ -674,7 +692,7 @@ class SubprocessAdapter:
         # Cache returncode at EOF (mirrors read_events_with_timeout OI-1120 fix):
         # stop() may not be called if the caller simply exhausts the iterator, so
         # we capture the returncode here to ensure get_returncode() is consistent.
-        rc = process.poll()
+        rc = _reap_at_eof(process)
         if rc is not None:
             self._returncode_cache[terminal_id] = rc
 
@@ -749,7 +767,7 @@ class SubprocessAdapter:
 
             if not chunk:
                 # EOF: process exited; cache returncode (OI-1120)
-                rc = process.poll()
+                rc = _reap_at_eof(process)
                 if rc is not None:
                     self._returncode_cache[terminal_id] = rc
                 break
