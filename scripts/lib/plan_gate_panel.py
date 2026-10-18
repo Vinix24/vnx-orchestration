@@ -1,26 +1,27 @@
 #!/usr/bin/env python3
 """plan_gate_panel.py — the PM-skill plan-first gate (governed worker path).
 
-A feature's PLAN (not its code) is reviewed by a diverse-family panel BEFORE any
-implementation. This module runs that panel:
+A feature's PLAN (not its code) is reviewed BEFORE any implementation. This
+module runs that review:
 
-    plan doc + rubric  ->  N panelist lanes (opus / kimi / glm-5.2-harness)
-                            each via provider_dispatch (governed: report -> receipt)
-                       ->  parse each panelist's structured verdict
+    plan doc + rubric  ->  the default seat (codex), via its governed lane
+                       ->  BLOCK? the escalation seat (opus) reads the same plan
+                       ->  parse each seat's structured verdict
                        ->  a seat that reviewed in PROSE gets one cheap second
                            extraction on the same lane before any re-dispatch
                        ->  apply the panel pass/fail rule (PM-SKILL)
-                       ->  PASS | REVISE | BLOCK | INFRA_FAIL (0 readable verdicts —
+                       ->  PASS | REVISE | INFRA_FAIL (0 readable verdicts —
                            an infrastructure outcome, never a plan judgment)
 
 The caller (``planning_cli plan-gate run``) resolves the ``OI-PLAN-<track>``
 blocker on PASS, which — via ``track_reconciler`` — flips the track's
 ``derived_status`` away from ``blocked`` and lets ``deliverable promote`` proceed.
 
-Panel composition (PM-SKILL "always multi-model"): Opus + Kimi + GLM-5.2-harness,
-three families so real disagreement surfaces. DeepSeek (own-key) is a legal third
-but stays off the default panel; Codex is reserved for security/schema/governance
-plans, never a default panelist.
+Panel composition (operator decision 2026-10-17, P2): ONE seat reads the plan,
+the configured ``default_seat`` (codex). A second seat, ``escalation_seat``
+(opus), reads the same plan in the same run only when the first returns BLOCK.
+Both labels live in ``configs/plan_gate_panel.yaml``; ``--panel-seats``
+replaces the composition for one run (``compose_panel``).
 
 Every lane routes through ``provider_dispatch.py``, so the provider constraints are
 enforced by construction (kimi-via-cli-only, zai-via-openrouter-only,
@@ -128,9 +129,10 @@ _HEADLESS_LANE = "claude_headless"
 # (OI-2115), so seats running at the same time never share one stream.
 _PANEL_TERMINAL_ID = event_store.HARNESS_SEAT_TERMINAL
 
-# Full diverse-family assurance panel: (label, provider string, model_arg).
-# One panelist per provider family (Anthropic / Moonshot / Zhipu / DeepSeek / OpenAI) so a
-# plan is reviewed from five independent vantage points before any code is written.
+# The seat roster a run picks from: (label, provider string, model_arg), one per provider
+# family (Anthropic / Moonshot / Zhipu / DeepSeek / OpenAI). A plan-gate run uses the
+# default seat and, on BLOCK, the escalation seat (compose_panel); an operator names any
+# other seats with --panel-seats.
 # NOTE: a panelist that flakes (a down proxy, an uninstalled CLI, or an unparseable verdict) is
 # RETRIED once (VNX_PANEL_RETRY, see run_panel) and, if it still yields no readable verdict,
 # ABSTAINS as a non-scoring lane instead of vetoing — so a single down lane no longer forces a
@@ -176,7 +178,7 @@ def resolve_codex_seat_models(seats: List[Dict[str, str]]) -> List[Dict[str, str
 
 
 def default_panel() -> List[Dict[str, str]]:
-    """The shipped five-seat panel, with the codex model resolved from the registry."""
+    """The shipped five-seat roster, with the codex model resolved from the registry."""
     return resolve_codex_seat_models(_DEFAULT_PANEL_SEATS)
 
 VERDICT_FENCE = "vnx-plan-verdict"
@@ -426,71 +428,102 @@ def filter_panel_seats(
 
 
 # ---------------------------------------------------------------------------
-# Governance-variant seat ladder (operator ladder, 2026-08-15). The panel SIZE
-# derives from the governance variant, not a flat "every plan gets the full
-# panel". The ladder, from lightest to heaviest:
-#   minimal (docs, reversible)           -> 0 seats (no panel runs at all)
-#   business-light / light               -> 1 seat  (opus)
-#   default (code)                       -> 2 seats (opus, kimi)
-#   coding-strict (core / irreversible)  -> 3 seats (opus, kimi, glm-5.2-harness)
-#   new feature (task_class 01_code_generation) -> full panel, regardless of variant
-# Labels are ordered to match the default panel so filter_panel_seats keeps the
-# configured (auditable) order; the tuple length IS the seat count, so there is
-# no second count dict to drift.
+# Panel composition (operator decision 2026-10-17, P2): one seat, a second on BLOCK.
+#
+# Until P2 the governance variant sized the panel (0 to 3 seats) and every new
+# feature got all five. The 17-10 measurement: codex alone landed on the panel's
+# outcome in 35 of 36 runs, and codex does not draw on the Claude session limit.
+# So a run has ONE default seat. The escalation seat reads the same plan only
+# when the default seat returns BLOCK, the one verdict that says the plan is
+# unsafe to build as written. The variant still lands in the trace and the
+# round record; it no longer decides how many seats sit.
 # ---------------------------------------------------------------------------
-GOVERNANCE_VARIANT_SEAT_LABELS: Dict[str, tuple[str, ...]] = {
-    "minimal": (),
-    "business-light": ("opus",),
-    "light": ("opus",),
-    "default": ("opus", "kimi"),
-    "coding-strict": ("opus", "kimi", "glm-5.2-harness"),
-}
+DEFAULT_SEAT_LABEL = "codex"
+ESCALATION_SEAT_LABEL = "opus"
 
 
-def seat_labels_for_governance_variant(
-    seats: List[Dict[str, str]], variant: str, *, is_new_feature: bool = False
-) -> List[str]:
-    """The seat labels a governance variant entitles a plan to, for one run.
+@dataclass(frozen=True)
+class PanelComposition:
+    """The seats ONE plan-gate run uses, and the quorum its PASS needs.
 
-    A new feature (``is_new_feature``) always gets every configured seat — the
-    full diverse-family panel — because a new feature is the highest
-    blast-radius code change and must never be sized down by a coincidentally
-    light path. Otherwise the variant selects an ordered prefix of the
-    configured panel (``minimal`` selects none). Fail-loud on an unknown
-    variant: a variant the ladder does not know must never silently shrink to
-    zero seats.
+    ``seats`` run first. ``escalation`` reads the same plan when a seat returns
+    BLOCK; it is set only for the default composition, because an operator
+    override runs exactly the seats it names. ``quorum`` is the number of
+    readable verdicts a PASS needs: 1 for the default composition, so one
+    readable PASS certifies even when a BLOCK brought a second seat in, and
+    ``min(2, len(seats))`` for an override, the quorum the rule always had.
     """
-    if is_new_feature:
-        return [s["label"] for s in seats]
-    labels = GOVERNANCE_VARIANT_SEAT_LABELS.get(variant)
-    if labels is None:
+    seats: List[Dict[str, str]]
+    escalation: Optional[Dict[str, str]]
+    quorum: int
+    chosen_by: str        # "default" | "operator"
+    default_label: str    # the configured default seat, named in an override's trace
+
+
+def load_seat_roles(config_path: Optional[Path] = None) -> Dict[str, str]:
+    """The ``default_seat`` and ``escalation_seat`` labels from ``configs/plan_gate_panel.yaml``.
+
+    Same file and path resolution as ``load_panel_seats``. An absent file or key
+    falls back to codex and opus. A present value that is not a non-empty
+    string, or two roles naming the same seat, fails LOUD: a run that silently
+    lost its escalation seat would let a BLOCK stand on one voice.
+    """
+    path = Path(config_path) if config_path is not None else _default_panel_config_path()
+    loaded: Any = None
+    if path.is_file():
+        try:
+            import yaml  # noqa: PLC0415
+            loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError):
+            loaded = None
+    block = loaded if isinstance(loaded, dict) else {}
+    roles: Dict[str, str] = {}
+    for role, fallback in (("default", DEFAULT_SEAT_LABEL), ("escalation", ESCALATION_SEAT_LABEL)):
+        raw = block.get(f"{role}_seat", fallback)
+        if not isinstance(raw, str) or not raw.strip():
+            raise ValueError(
+                f"plan_gate_panel: {path} {role}_seat must be a seat label, got {raw!r}"
+            )
+        roles[role] = raw.strip()
+    if roles["default"] == roles["escalation"]:
         raise ValueError(
-            f"plan-gate panel: unknown governance variant {variant!r}; "
-            f"known variants: {sorted(GOVERNANCE_VARIANT_SEAT_LABELS)}"
+            f"plan_gate_panel: {path} default_seat and escalation_seat must be different "
+            f"seats, both are {roles['default']!r}"
         )
-    return list(labels)
+    return roles
 
 
-def seat_override_direction(
-    derived_variant: str, derived_count: int, chosen_count: int,
-) -> str:
-    """Direction of an operator seat override vs the variant-derived seat count.
+def compose_panel(
+    requested_labels: Optional[List[str]] = None, *, config_path: Optional[Path] = None,
+) -> PanelComposition:
+    """The composition of one plan-gate run.
 
-    Returns "" when the counts match (no override), "upgrade" when the operator
-    added seats, "downgrade" when they removed seats, or "strict-downgrade" when
-    they removed seats from a coding-strict derivation — the heaviest variant
-    class, where a lighter panel must be findable by a later sweep. Mirrors
-    ``smart_router``'s gate override direction on the seat-count axis: the seat
-    COUNT is the override axis, not the label set (a same-count relabel is not
-    an override).
+    Without ``requested_labels`` (no ``--panel-seats``): the default seat, the
+    escalation seat for a BLOCK, quorum 1. With them: exactly those seats in
+    configured order, no escalation, quorum ``min(2, n)``. Both roles must name
+    a configured seat whichever way the run goes, so a broken config surfaces on
+    the next run, not on the first BLOCK.
     """
-    if chosen_count == derived_count:
-        return ""
-    if chosen_count > derived_count:
-        return "upgrade"
-    if derived_variant == "coding-strict":
-        return "strict-downgrade"
-    return "downgrade"
+    seats = load_panel_seats(config_path)
+    roles = load_seat_roles(config_path)
+    configured = [s["label"] for s in seats]
+    for role, label in roles.items():
+        if label not in configured:
+            raise ValueError(
+                f"plan-gate panel: {role}_seat {label!r} is not a configured seat. "
+                f"Configured labels: {configured}"
+            )
+    if requested_labels:
+        chosen = filter_panel_seats(seats, requested_labels)
+        return PanelComposition(
+            seats=chosen, escalation=None, quorum=min(2, len(chosen)),
+            chosen_by="operator", default_label=roles["default"],
+        )
+    return PanelComposition(
+        seats=filter_panel_seats(seats, [roles["default"]]),
+        escalation=filter_panel_seats(seats, [roles["escalation"]])[0],
+        quorum=1, chosen_by="default", default_label=roles["default"],
+    )
 
 
 _OPEN_FENCE = "```" + VERDICT_FENCE
@@ -589,14 +622,22 @@ def _doc_truncation_info(doc_text: str) -> Dict[str, Any]:
     }
 
 
+# P2 (operator decision 2026-10-17): the plan-gate judges the architecture of the
+# plan. Line-level and test-level review belongs to the builder and to codex in
+# the PR review, where the code exists to check it against.
 _RUBRIC = (
-    "Judge the plan on:\n"
-    "1. Problem: is the problem stated, and is it real?\n"
-    "2. Approach: is it sound, or are there unaddressed failure modes?\n"
-    "3. Deliverables: each scoped, independently shippable, task_class tagged?\n"
-    "4. Risks: are the real risks named, each with a mitigation?\n"
-    "5. Model-routing plan: a sane quality FLOOR per deliverable (not a hand-picked lane)?\n"
-    "6. ADR-007: if it touches a central-DB table, does it carry a composite key over project_id?\n\n"
+    "Judge the plan on four things:\n"
+    "1. Scope: is the problem real and stated, and does the plan solve that problem "
+    "and no more?\n"
+    "2. PR split: is each deliverable a small, independently shippable PR, task_class "
+    "tagged, in an order that works?\n"
+    "3. Decisions and ADRs: are the design decisions named, does each decision that "
+    "needs an ADR get one, and does a change to a central-DB table carry a composite "
+    "key over project_id (ADR-007)?\n"
+    "4. Feasibility: can it be built as written, are the real risks named with a "
+    "mitigation, and is the quality floor per deliverable sane?\n\n"
+    "Do not review line numbers or test details: the builder and codex check those in "
+    "the PR review.\n"
     "Be a skeptic. Surface concrete, fixable gaps. Do not rubber-stamp.\n"
 )
 
@@ -966,15 +1007,43 @@ def count_scoring_seats(panelists: List[Dict[str, Any]]) -> int:
     (OI-1280). A seat dict without a status falls back to the three flags, the
     same way ``is_scoring`` does.
     """
-    total = 0
+    return sum(1 for p in panelists if _panelist_scores(p))
+
+
+def _panelist_scores(panelist: Dict[str, Any]) -> bool:
+    """``is_scoring`` for a seat in its ``PanelistResult.__dict__`` form."""
+    status = str(panelist.get("seat_status") or "")
+    if status:
+        return status in SCORING_SEAT_STATUSES
+    return bool(
+        panelist.get("dispatched")
+        and not panelist.get("parse_error")
+        and not panelist.get("no_verdict")
+    )
+
+
+def seat_verdicts_of(panelists: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Each seat's verdict on the plan it read, in the form a round record keeps (P2).
+
+    Takes ``run_panel``'s ``panelists`` list. ``verdict`` is the seat's own verdict
+    when it scored, ``no-verdict`` when its lane never delivered and ``abstain``
+    otherwise: the words the seat ledger uses. The round record carries this so a
+    later run on the same plan version can hand the tiebreaker the seat's verdict
+    without running the seat again.
+    """
+    verdicts: List[Dict[str, Any]] = []
     for p in panelists:
-        status = str(p.get("seat_status") or "")
-        if status:
-            if status in SCORING_SEAT_STATUSES:
-                total += 1
-        elif p.get("dispatched") and not p.get("parse_error") and not p.get("no_verdict"):
-            total += 1
-    return total
+        if _panelist_scores(p):
+            verdict = str(p.get("verdict") or "")
+        else:
+            verdict = "no-verdict" if p.get("no_verdict") else "abstain"
+        verdicts.append({
+            "seat": str(p.get("label") or ""),
+            "verdict": verdict,
+            "findings": [str(f) for f in p.get("blocking_findings") or []],
+            "rationale": str(p.get("rationale") or ""),
+        })
+    return verdicts
 
 
 def _decision(decision: str, block: int, revise: int, passes: int, rationale: str) -> Dict[str, Any]:
@@ -987,7 +1056,9 @@ def _decision(decision: str, block: int, revise: int, passes: int, rationale: st
     }
 
 
-def apply_panel_rule(results: List[PanelistResult]) -> Dict[str, Any]:
+def apply_panel_rule(
+    results: List[PanelistResult], *, quorum: Optional[int] = None,
+) -> Dict[str, Any]:
     """The PM-SKILL pass/fail rule, with NON-SCORING lanes + a liveness quorum.
 
     A lane with no readable verdict (undispatched, or a report whose verdict block did not
@@ -1027,7 +1098,10 @@ def apply_panel_rule(results: List[PanelistResult]) -> Dict[str, Any]:
       reviewed. That returns INFRA_FAIL (an infrastructure outcome, distinct from every
       content verdict) so a fleet-wide lane breakage can never read as an inhoudelijk
       REVISE ("revise the plan") for a plan no lane ever saw.
-    - quorum: require >= 2 readable verdicts to certify (a single voice can't fold to PASS).
+    - quorum: the readable verdicts a PASS needs. ``quorum`` when the caller passes one
+      (P2: the default composition passes 1, so one readable PASS certifies even when a
+      BLOCK brought the escalation seat in), else ``min(2, len(results))``: a multi-seat
+      panel keeps two voices, a deliberate one-seat panel needs its one.
     - any BLOCK -> REVISE.
     - >= 2 REVISE -> REVISE.
     - <= 1 REVISE and no BLOCK, with passes OUTnumbering the dissent -> PASS (the lone dissent
@@ -1084,8 +1158,9 @@ def apply_panel_rule(results: List[PanelistResult]) -> Dict[str, Any]:
 
     # Liveness quorum: a multi-member panel must keep >= 2 readable voices to certify, so a
     # degraded 3-panel with only one readable lane can't pass on a single voice. A DELIBERATE
-    # 1-member panel (a smoke) needs only its one voice. quorum = min(2, panel size).
-    required = min(2, len(results))
+    # 1-member panel needs only its one voice. The caller's composition decides when it
+    # knows better than the result count (P2's default seat plus its escalation seat).
+    required = quorum if quorum is not None else min(2, len(results))
     if len(scoring) < required:
         return _decision(
             "REVISE", block, revise, passes,
@@ -1958,6 +2033,55 @@ def _with_truncation_note(summary: Dict[str, Any], doc_truncation: Dict[str, Any
     }
 
 
+def _run_seat(
+    member: Dict[str, str],
+    *,
+    dispatcher: DispatcherFn,
+    extraction_lane: Callable[[], DispatcherFn],
+    instruction: str,
+    track_id: str,
+    archive_base: Optional[Path],
+    retries: int,
+) -> PanelistResult:
+    """One seat's verdict: dispatch, re-extract a prose review, retry a flake.
+
+    One dispatch, plus up to ``retries`` retries when the lane flakes (a dispatch
+    failure or an unparseable verdict). The first SCORING verdict wins and
+    short-circuits; if a retry also flakes its (still non-scoring) result is kept,
+    which then abstains via apply_panel_rule. Each attempt is a fresh governed
+    dispatch id so it lands its own report -> receipt.
+
+    OI-1434: in FRONT of that retry sits the cheap step. A seat whose report is
+    prose_no_fence has already done the review; only the block is missing.
+    Re-extracting it costs one small call at a 120s deadline, where the retry
+    costs a whole second review at the full seat deadline. So: dispatch ->
+    (prose? re-extract) -> retry. The re-extraction budget is per SEAT per ROUND,
+    not per attempt — the retry does not refill it (REEXTRACTION_BUDGET_PER_SEAT).
+    """
+    result: PanelistResult
+    reextractions_left = REEXTRACTION_BUDGET_PER_SEAT
+    for _ in range(retries + 1):
+        did = f"plan-gate-{track_id}-{member['label']}-{uuid.uuid4().hex[:8]}"
+        result = _dispatch_one(dispatcher, member, instruction, did, archive_base)
+        # OI-1066: a no-verdict seat (lane timed out / governance-synthesized) is
+        # retryable too — the lane may deliver on a fresh dispatch id.
+        if is_scoring(result):
+            break
+        # R6: a seat whose run the final-answer fallback refused is not re-extracted.
+        if (result.seat_status == SEAT_PROSE_NO_FENCE and reextractions_left > 0
+                and not result.final_answer_refused):
+            reextractions_left -= 1
+            result = _reextract_verdict(extraction_lane(), member, result, f"{did}-reextract")
+            if is_scoring(result):
+                break  # the review was readable after all — the retry never fires
+    return result
+
+
+def _blocked(results: List[PanelistResult]) -> bool:
+    """True when a seat that scored returned BLOCK: the one verdict that escalates (P2)."""
+    return any(is_scoring(r) and r.verdict == "block" for r in results)
+
+
 def run_panel(
     doc_path: str | Path | None = None,
     *,
@@ -1970,6 +2094,8 @@ def run_panel(
     timeout_seconds: Optional[int] = None,
     seat_ledger_path: Optional[Path] = None,
     reextract_dispatcher: Optional[DispatcherFn] = None,
+    escalation_seat: Optional[Dict[str, str]] = None,
+    quorum: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Run the plan-first panel over ``doc_path`` (or ``doc_text``) and return the verdict.
 
@@ -2000,6 +2126,13 @@ def run_panel(
     a separate one is passed: a test double has no deadline, and the two calls are
     told apart by their instruction and their dispatch id (``<seat-id>-reextract``),
     never by which lane object served them.
+
+    ``escalation_seat`` and ``quorum`` (P2): ``planning_cli`` passes them from
+    ``compose_panel``. When a seat in ``panel`` returns BLOCK, the escalation seat
+    reads the same plan in the same run, before anything is decided, and the rule
+    then decides over every verdict with ``quorum``. A REVISE does not escalate.
+    Without them the run is exactly the seats in ``panel`` under the rule's own
+    quorum, as before.
     """
     panel = panel or default_panel()
     resolved_timeout = _seat_timeout(timeout_seconds)
@@ -2033,44 +2166,18 @@ def run_panel(
     # Only an explicit one: the governed caller (planning_cli) always passes it.
     archive_base = Path(data_dir) if data_dir else None
 
-    results: List[PanelistResult] = []
-    for member in panel:
-        # One dispatch, plus up to `retries` retries when the lane flakes (a dispatch failure
-        # or an unparseable verdict). The first SCORING verdict wins and short-circuits; if a
-        # retry also flakes we keep its (still non-scoring) result, which then abstains via
-        # apply_panel_rule. Never more than `retries` extra attempts — each is a fresh governed
-        # dispatch id so the retry lands its own report -> receipt.
-        #
-        # OI-1434: in FRONT of that retry sits the cheap step. A seat whose report is
-        # prose_no_fence has already done the review; only the block is missing. Re-extracting
-        # it costs one small call at a 120s deadline, where the retry costs a whole second
-        # review at the full seat deadline. So: dispatch -> (prose? re-extract) -> retry.
-        # The re-extraction budget is per SEAT per ROUND, not per attempt — the retry does not
-        # refill it (REEXTRACTION_BUDGET_PER_SEAT).
-        result: PanelistResult
-        reextractions_left = REEXTRACTION_BUDGET_PER_SEAT
-        for _ in range(retries + 1):
-            did = f"plan-gate-{track_id}-{member['label']}-{uuid.uuid4().hex[:8]}"
-            result = _dispatch_one(dispatcher, member, instruction, did, archive_base)
-            # A SCORING verdict: dispatched, no parse error, and NOT a no-verdict
-            # synthesized report. OI-1066: a no-verdict seat (lane timed out /
-            # governance-synthesized) is retryable too — the lane may deliver on
-            # a fresh dispatch id — so the retry continues past it just as it
-            # continues past a parse_error or a raised dispatch.
-            if is_scoring(result):
-                break  # readable verdict — no retry needed
-            # R6: a seat whose run the final-answer fallback refused is not re-extracted.
-            if (result.seat_status == SEAT_PROSE_NO_FENCE and reextractions_left > 0
-                    and not result.final_answer_refused):
-                reextractions_left -= 1
-                result = _reextract_verdict(
-                    _extraction_lane(), member, result, f"{did}-reextract",
-                )
-                if is_scoring(result):
-                    break  # the review was readable after all — the retry never fires
-        results.append(result)
+    def _seat(member: Dict[str, str]) -> PanelistResult:
+        return _run_seat(
+            member, dispatcher=dispatcher, extraction_lane=_extraction_lane,
+            instruction=instruction, track_id=track_id,
+            archive_base=archive_base, retries=retries,
+        )
 
-    summary = apply_panel_rule(results)
+    results = [_seat(member) for member in panel]
+    if escalation_seat is not None and _blocked(results):
+        results.append(_seat(escalation_seat))
+
+    summary = apply_panel_rule(results, quorum=quorum)
     if seat_ledger_path is None:
         seat_ledger_path = _resolve_seat_ledger_path(data_dir)
     _emit_seat_records(

@@ -11,11 +11,12 @@ open OI-PLAN blocker. This proves, against a real store (no live model):
     remaining tracks (read back, not trusted from a return value);
   - ``--restart`` re-runs every selected track;
   - ``--dry-run`` shows class + seat count WITHOUT calling any model;
-  - the seat count in the output matches the governance ladder.
+  - every run gets the one default seat, whatever its governance class (P2).
 
 Real model dispatch is out of scope (as in test_plan_gate_panel.py):
 ``pgp.run_panel`` is stubbed, but selection, the resume store, the thin-goal
 refusal, the dry-run preview, and the seat derivation are the real code.
+No test here may reach a real seat or tiebreaker lane (``_no_real_lane``).
 """
 
 from __future__ import annotations
@@ -45,6 +46,20 @@ from fixtures.dispatches_schema_fixture import ensure_dispatches_columns  # noqa
 
 
 _THICK_GOAL = "Ship a coherent plan for the widget. " * 10  # 390 chars
+
+
+@pytest.fixture(autouse=True)
+def _no_real_lane(monkeypatch):
+    """Reaching the real plan-gate lane factory fails the test: no live model."""
+    reached: list = []
+
+    def _refuse(*args, **kwargs):
+        reached.append(args)
+        raise AssertionError("a test reached the real plan-gate lane")
+
+    monkeypatch.setattr(pgp, "_make_default_dispatcher", _refuse)
+    yield
+    assert not reached, "a test reached the real plan-gate lane: stub run_panel or the lane"
 
 
 def _bootstrap(tmp_path: Path) -> Path:
@@ -352,9 +367,10 @@ def test_dry_run_calls_no_model_and_shows_class_and_seats(tmp_path, monkeypatch,
     assert not (state_dir / planning_cli._BATCH_PROGRESS_FILENAME).exists()
 
 
-def test_seat_count_matches_ladder(tmp_path, monkeypatch):
-    """The derived seat count matches the governance ladder: default=2, a new
-    feature (task_class 01_code_generation)=all seats."""
+def test_every_class_gets_the_one_default_seat(tmp_path, monkeypatch):
+    """P2: the governance class no longer sizes the panel. A code plan and a new
+    feature (task_class 01_code_generation) both run the one default seat, with
+    the escalation seat handed along for a BLOCK."""
     state_dir = _bootstrap(tmp_path)
 
     captured: list = []
@@ -366,24 +382,18 @@ def test_seat_count_matches_ladder(tmp_path, monkeypatch):
     _seed_blocker(state_dir, "feat-new")
 
     summary = planning_cli._execute_batch(
-        ["feat-default", "feat-new"], state_dir=str(state_dir), project_id="p1",
+        ["feat-default"], state_dir=str(state_dir), project_id="p1",
         run_kwargs={}, restart=False, min_goal_chars=200,
     )
-    by_track = {r["track_id"]: r for r in summary["results"]}
-    assert by_track["feat-default"]["seats"] == 2, "default variant -> opus + kimi = 2 seats"
-    assert len(captured[0]["panel"]) == 2
-
-    captured2: list = []
-    _stub_panel(monkeypatch, tmp_path, captured2)
     summary2 = planning_cli._execute_batch(
         ["feat-new"], state_dir=str(state_dir), project_id="p1",
         run_kwargs={"task_class": "01_code_generation"}, restart=True,
         min_goal_chars=200,
     )
-    assert summary2["results"][0]["seats"] == len(pgp.default_panel()), (
-        "new feature always runs the full panel"
-    )
-    assert len(captured2[0]["panel"]) == len(pgp.default_panel())
+    for result in (summary["results"][0], summary2["results"][0]):
+        assert result["seats"] == 1
+    for call in captured:
+        assert [s["label"] for s in call["panel"]] == ["codex"]
 
 
 # ---------------------------------------------------------------------------
@@ -391,54 +401,51 @@ def test_seat_count_matches_ladder(tmp_path, monkeypatch):
 # the round threshold gets the tiebreaker, not a third full panel.
 # ---------------------------------------------------------------------------
 
-def test_batch_inherits_tiebreaker_after_two_panel_rounds(tmp_path, monkeypatch):
-    """A track that already has two panel rounds gets the tiebreaker in the
-    batch, NOT a third full panel.
-
-    The batch calls ``run_plan_gate_for_track`` (the single shared path the
-    interactive ``plan-gate run`` also drives). That path carries the stop-rule
-    from #1520, so a track at the threshold routes to ``run_tiebreaker`` — the
-    batch does not grow a second panel call that would skip the stop-rule. This
-    asserts on WHICH function ran (tiebreaker vs panel), not a log line.
+def test_batch_inherits_the_tiebreaker_after_the_seat_round(tmp_path, monkeypatch):
+    """The batch drives the SAME shared path as ``plan-gate run``, so it inherits
+    the stop-rule over plan versions (P2): two older read versions, this version
+    gets its seat round, the seat does not pass, and the tiebreaker decides in
+    the same run. Asserts on WHICH functions ran, in which order, not a log line.
     """
     monkeypatch.setattr(pgp, "_default_panel_config_path", lambda: tmp_path / "absent.yaml")
     state_dir = _bootstrap(tmp_path)
     _make_track(state_dir, "feat-tb", _THICK_GOAL)
     _seed_blocker(state_dir, "feat-tb")
 
-    # Force two completed panel rounds into an isolated seat ledger so the next
-    # gate run hits the stop-rule threshold (read back from disk, not a return
-    # value — the same "meet de state" discipline as the tiebreaker suite).
+    # Two older plan versions, both READ (``scored_seats=1``, OI-1280), in an
+    # isolated seat ledger read back from disk. Written before P2: no hash, so
+    # each is one version of its own and neither is the plan the batch gates.
     ledger = tmp_path / ".vnx-attest" / "plan-gate-seats.ndjson"
     monkeypatch.setattr(pgp, "_resolve_seat_ledger_path", lambda data_dir: ledger)
-    # OI-1280: the forced rounds are recorded as READ (``scored_seats=1``).
-    # The stop-rule now also requires that at least one round produced a
-    # readable verdict — without the flag these two rounds would be rounds
-    # nobody read, and the tiebreaker this test is about would correctly
-    # refuse to run.
     pgt.record_round(ledger, track_id="feat-tb", project_id="p1",
                      round_number=1, outcome="panel", scored_seats=1)
     pgt.record_round(ledger, track_id="feat-tb", project_id="p1",
                      round_number=2, outcome="panel", scored_seats=1)
-    assert pgt.read_round_count(ledger, "feat-tb", "p1") == 2
-    assert pgt.readable_round_count(ledger, "feat-tb", "p1") == 2
+    assert [v.read for v in pgt.plan_versions(ledger, "feat-tb", "p1")] == [True, True]
 
-    panel_calls = {"n": 0}
-    tb_calls = {"n": 0}
+    order: list = []
 
-    def _no_panel(doc_path, *, doc_text=None, track_id, project_id, panel, data_dir, **kw):
-        panel_calls["n"] += 1
-        return _pass_result(track_id, project_id, panel)
+    def _revise(doc_path, *, doc_text=None, track_id, project_id, panel, data_dir, **kw):
+        order.append("seat")
+        return {
+            "track_id": track_id, "project_id": project_id, "decision": "REVISE",
+            "summary": {"decision": "REVISE", "pass_count": 0, "revise_count": 1,
+                        "block_count": 0, "rationale": "gaps"},
+            "panelists": [{"label": "codex", "seat_status": pgp.SEAT_SCORED,
+                           "dispatched": True, "verdict": "revise",
+                           "blocking_findings": ["split it"], "rationale": "big"}],
+            "doc_truncation": {"truncated": False},
+        }
 
     def _tiebreaker(doc_path, *, doc_text=None, track_id, project_id, round_number,
-                    last_round_findings, data_dir, timeout_seconds, config, model_arg=None):
-        tb_calls["n"] += 1
+                    seat_verdicts, data_dir, timeout_seconds, config, model_arg=None):
+        order.append(("tiebreaker", round_number, seat_verdicts[0]["findings"]))
         return pgt.TiebreakerResult(
             outcome="START", model="fable-5", round=round_number,
             required_change="", rationale="good enough",
         )
 
-    monkeypatch.setattr(pgp, "run_panel", _no_panel)
+    monkeypatch.setattr(pgp, "run_panel", _revise)
     monkeypatch.setattr(pgt, "run_tiebreaker", _tiebreaker)
     monkeypatch.setattr(planning_cli, "_emit_plan_gate_pass_record", lambda **kw: True)
 
@@ -451,9 +458,7 @@ def test_batch_inherits_tiebreaker_after_two_panel_rounds(tmp_path, monkeypatch)
 
     assert summary["interrupted"] is False
     assert summary["skipped"] == []
-    # Exactly ONE tiebreaker, zero full-panel runs: the stop-rule inherited.
-    assert tb_calls["n"] == 1
-    assert panel_calls["n"] == 0
+    assert order == ["seat", ("tiebreaker", 4, ["split it"])]
 
     rec = summary["results"][0]
     assert rec["outcome"] == "PASS"
@@ -516,7 +521,7 @@ def test_panel_round_records_governance_variant_and_trace_to_seat_ledger(tmp_pat
     assert "weight=default" in rec["gov_trace"], (
         "the gov_trace must carry the derived weight"
     )
-    assert "seat(s) by derived" in rec["gov_trace"], (
+    assert "1 seat(s) by default (codex)" in rec["gov_trace"], (
         "the gov_trace must carry the seat count + chosen-by"
     )
 
@@ -542,7 +547,7 @@ def test_batch_renders_tally_line_and_outcome_labels(tmp_path, monkeypatch, caps
     assert "PASS=1" in out
     assert "GEWEIGERD-te-dun=1" in out
     assert "2 processed" in out
-    assert "2 seat(s)" in out  # the PASS track carried the default 2-seat ladder
+    assert "1 seat(s)" in out  # the PASS track ran the one default seat
 
 
 if __name__ == "__main__":

@@ -60,6 +60,26 @@ def _stub_reconciler(monkeypatch):
     monkeypatch.setattr(track_reconciler, "reconcile_track", lambda *a, **k: None)
 
 
+@pytest.fixture(autouse=True)
+def _no_real_lane(monkeypatch):
+    """No test in this file may reach a real seat or tiebreaker lane.
+
+    Since P2 a run on a plan version without a read seat round runs its seat
+    first, so a cmd-level test that stubs only the tiebreaker would spawn a real
+    codex seat. Every lane here is a stub; reaching the factory fails the test.
+    A test that stubs the lane itself patches over this.
+    """
+    reached: list = []
+
+    def _refuse(*args, **kwargs):
+        reached.append(args)
+        raise AssertionError("a test reached the real plan-gate lane")
+
+    monkeypatch.setattr(pgp, "_make_default_dispatcher", _refuse)
+    yield
+    assert not reached, "a test reached the real plan-gate lane: stub run_panel or the lane"
+
+
 def _bootstrap(tmp_path: Path) -> Path:
     state_dir = tmp_path / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -199,30 +219,32 @@ def test_record_round_always_writes_governance_fields_even_when_empty(tmp_path):
     assert rec["gov_trace"] == ""
 
 
-def test_should_run_tiebreaker_threshold(tmp_path):
-    """Below the threshold the full panel runs; at/above it the tiebreaker runs.
-    Default threshold is 2 (read from the code default when no config overrides).
+def test_route_threshold_counts_read_plan_versions(tmp_path):
+    """P2: the threshold counts plan VERSIONS a seat read, not rounds per track.
 
-    OI-1280: the rounds here are recorded as READ (``scored_seats=1``) because
-    the subject of this test is the ROUND-COUNT threshold. The second condition
-    — at least one round a seat actually read — has its own tests below; without
-    the flag here this test would silently be measuring that one instead.
+    A version without a read seat round always gets its seat round first; a read
+    version below the threshold must change; at the threshold the tiebreaker
+    decides, for the latest version and an older one alike. A tiebreaker round is
+    no plan version.
     """
     ledger = tmp_path / "plan-gate-seats.ndjson"
-    # 0 rounds -> full panel
-    assert pgt.should_run_tiebreaker(ledger, "trk", "p1", max_rounds=2) is False
+
+    def _route(digest):
+        return pgt.route_plan_gate(pgt.plan_versions(ledger, "trk", "p1"), digest, max_rounds=2)
+
+    assert _route("v1").action == pgt.ROUTE_SEAT_ROUND
     pgt.record_round(ledger, track_id="trk", project_id="p1", round_number=1,
-                     outcome="panel", scored_seats=1)
-    # 1 round -> full panel
-    assert pgt.should_run_tiebreaker(ledger, "trk", "p1", max_rounds=2) is False
+                     outcome="panel", scored_seats=1, plan_sha256="v1")
+    assert _route("v1").action == pgt.ROUTE_PLAN_UNCHANGED
+    assert _route("v2").action == pgt.ROUTE_SEAT_ROUND
     pgt.record_round(ledger, track_id="trk", project_id="p1", round_number=2,
-                     outcome="panel", scored_seats=1)
-    # 2 rounds -> tiebreaker (at threshold)
-    assert pgt.should_run_tiebreaker(ledger, "trk", "p1", max_rounds=2) is True
+                     outcome="panel", scored_seats=1, plan_sha256="v2")
+    assert _route("v2").action == pgt.ROUTE_TIEBREAKER
+    assert _route("v1").action == pgt.ROUTE_TIEBREAKER
+    assert _route("v3").action == pgt.ROUTE_SEAT_ROUND
     pgt.record_round(ledger, track_id="trk", project_id="p1", round_number=3,
-                     outcome="panel", scored_seats=1)
-    # 3 rounds -> still tiebreaker (above threshold)
-    assert pgt.should_run_tiebreaker(ledger, "trk", "p1", max_rounds=2) is True
+                     outcome="tiebreak:START", plan_sha256="v2")
+    assert _route("v2").versions_read == 2
 
 
 # --------------------------------------------------------------------------
@@ -596,6 +618,25 @@ def _isolate_seat_ledger(monkeypatch, tmp_path):
     return ledger
 
 
+# The plan every cmd-level test below hands the gate.
+_PLAN = "## Problem\n## Approach\n"
+
+
+def _read_rounds(ledger, track_id, *, seat_verdicts=(), count=2):
+    """``count`` seat rounds a seat READ on ``_PLAN`` (P2: the same plan hash).
+
+    A version that already had its read seat round goes straight to the
+    tiebreaker at the threshold, so these tests exercise the tiebreaker path
+    without a seat round in front of it.
+    """
+    for number in range(1, count + 1):
+        pgt.record_round(
+            ledger, track_id=track_id, project_id="p1", round_number=number,
+            outcome="panel", scored_seats=1, plan_sha256=pgt.plan_sha256(_PLAN),
+            seat_verdicts=list(seat_verdicts),
+        )
+
+
 def _gate_args(state_dir, doc, track_id="feat-tb", panel_seats=None):
     return argparse.Namespace(
         track_id=track_id, project_id="p1", state_dir=str(state_dir),
@@ -645,8 +686,9 @@ def test_cmd_plan_gate_run_full_panel_below_threshold(tmp_path, monkeypatch):
 
 
 def test_cmd_plan_gate_run_tiebreaker_at_threshold(tmp_path, monkeypatch):
-    """At/above the threshold the tiebreaker runs (exactly ONE), NOT the full
-    panel. Asserts on which function was called and how many times."""
+    """A plan version its seat already read, at the threshold: the tiebreaker
+    runs (exactly ONE), no seat round in front of it (P2). Asserts on which
+    function was called and how many times, and on what the tiebreaker got."""
     monkeypatch.setattr(pgp, "_default_panel_config_path", lambda: tmp_path / "absent.yaml")
     state_dir = _bootstrap(tmp_path)
     tracks.create_track(state_dir, "feat-tb", "p1", "t", "shipped", phase="queued")
@@ -654,15 +696,13 @@ def test_cmd_plan_gate_run_tiebreaker_at_threshold(tmp_path, monkeypatch):
     doc = tmp_path / "plan.md"
     doc.write_text("## Problem\n## Approach\n", encoding="utf-8")
 
-    # Force two completed panel rounds into the seat ledger so the next run
-    # hits the threshold. The ledger path must match what cmd_plan_gate_run
-    # resolves from data_dir.
+    # Read seat rounds on THIS plan version, so the next run is at the
+    # threshold with nothing left for a seat to read. The ledger path must
+    # match what cmd_plan_gate_run resolves from data_dir.
     ledger = _isolate_seat_ledger(monkeypatch, tmp_path)
     assert ledger is not None
-    pgt.record_round(ledger, track_id="feat-tb", project_id="p1",
-                     round_number=1, outcome="panel", scored_seats=1)
-    pgt.record_round(ledger, track_id="feat-tb", project_id="p1",
-                     round_number=2, outcome="panel", scored_seats=1)
+    verdict = {"seat": "codex", "verdict": "revise", "findings": ["split it"], "rationale": "big"}
+    _read_rounds(ledger, "feat-tb", seat_verdicts=[verdict])
 
     panel_calls = {"n": 0}
     tb_calls = {"n": 0}
@@ -672,8 +712,9 @@ def test_cmd_plan_gate_run_tiebreaker_at_threshold(tmp_path, monkeypatch):
         return {"decision": "PASS", "summary": {}, "panelists": [], "doc_truncation": {}}
 
     def _fake_run_tiebreaker(doc_path, *, doc_text=None, track_id, project_id, round_number,
-                             last_round_findings, data_dir, timeout_seconds, config, model_arg=None):
+                             seat_verdicts, data_dir, timeout_seconds, config, model_arg=None):
         tb_calls["n"] += 1
+        tb_calls["seat_verdicts"] = seat_verdicts
         return pgt.TiebreakerResult(
             outcome="START", model="fable-5", round=round_number,
             required_change="", rationale="ok",
@@ -686,9 +727,10 @@ def test_cmd_plan_gate_run_tiebreaker_at_threshold(tmp_path, monkeypatch):
 
     rc = planning_cli.cmd_plan_gate_run(_gate_args(state_dir, doc))
     assert rc == 0
-    # Exactly ONE tiebreaker, zero full-panel runs.
+    # Exactly ONE tiebreaker, zero seat rounds, and it read the recorded verdict.
     assert tb_calls["n"] == 1
     assert panel_calls["n"] == 0
+    assert tb_calls["seat_verdicts"] == [verdict]
 
 
 def test_cmd_plan_gate_run_records_panel_round_on_revise(tmp_path, monkeypatch):
@@ -732,24 +774,16 @@ def test_cmd_plan_gate_run_stop_creates_open_items_and_names_model(tmp_path, mon
     doc.write_text("## Problem\n## Approach\n", encoding="utf-8")
     ledger = _isolate_seat_ledger(monkeypatch, tmp_path)
 
-    # Seed a prior round WITH seat findings so the STOP aftermath has something
-    # to carry forward. The seat ledger does not store findings, only the
-    # effective verdict + rationale; _last_round_findings reads the rationale.
-    pgt.record_round(ledger, track_id="feat-stop", project_id="p1",
-                     round_number=1, outcome="panel", scored_seats=1)
-    pgt.record_round(ledger, track_id="feat-stop", project_id="p1",
-                     round_number=2, outcome="panel", scored_seats=1)
-    # Append a seat record with a rationale so _last_round_findings returns it.
-    from ndjson_hash_chain import append_chained_entry
-    append_chained_entry(ledger, {
-        "type": pgp.SEAT_RECORD_TYPE, "track_id": "feat-stop", "project_id": "p1",
-        "panelist_id": "opus", "model": "opus", "verdict": "revise",
-        "responded": True, "parse_error": False, "no_verdict": False,
-        "rationale": "plan lacks a rollback section", "run_at": "2026-08-15T00:00:00Z",
-    })
+    # Seed the seat's verdict on this plan version WITH a finding, on the round
+    # record where the seat round writes it (P2), so the STOP aftermath has
+    # something to carry forward.
+    _read_rounds(ledger, "feat-stop", seat_verdicts=[{
+        "seat": "codex", "verdict": "revise",
+        "findings": ["plan lacks a rollback section"], "rationale": "gaps",
+    }])
 
     def _stop_tiebreaker(doc_path, *, doc_text=None, track_id, project_id, round_number,
-                         last_round_findings, data_dir, timeout_seconds, config, model_arg=None):
+                         seat_verdicts, data_dir, timeout_seconds, config, model_arg=None):
         return pgt.TiebreakerResult(
             outcome="STOP", model="fable-5", round=round_number,
             required_change="", rationale="not converging",
@@ -789,13 +823,10 @@ def test_cmd_plan_gate_run_start_names_model_in_resolution_reason(tmp_path, monk
     doc = tmp_path / "plan.md"
     doc.write_text("## Problem\n## Approach\n", encoding="utf-8")
     ledger = _isolate_seat_ledger(monkeypatch, tmp_path)
-    pgt.record_round(ledger, track_id="feat-start", project_id="p1",
-                     round_number=1, outcome="panel", scored_seats=1)
-    pgt.record_round(ledger, track_id="feat-start", project_id="p1",
-                     round_number=2, outcome="panel", scored_seats=1)
+    _read_rounds(ledger, "feat-start")
 
     def _start_tiebreaker(doc_path, *, doc_text=None, track_id, project_id, round_number,
-                          last_round_findings, data_dir, timeout_seconds, config, model_arg=None):
+                          seat_verdicts, data_dir, timeout_seconds, config, model_arg=None):
         return pgt.TiebreakerResult(
             outcome="START", model="fable-5", round=round_number,
             required_change="", rationale="good enough",
@@ -821,17 +852,14 @@ def test_cmd_plan_gate_run_tiebreaker_parse_failure_stays_blocked(tmp_path, monk
     doc = tmp_path / "plan.md"
     doc.write_text("## Problem\n## Approach\n", encoding="utf-8")
     ledger = _isolate_seat_ledger(monkeypatch, tmp_path)
-    pgt.record_round(ledger, track_id="feat-fail", project_id="p1",
-                     round_number=1, outcome="panel", scored_seats=1)
-    pgt.record_round(ledger, track_id="feat-fail", project_id="p1",
-                     round_number=2, outcome="panel", scored_seats=1)
+    _read_rounds(ledger, "feat-fail")
 
     # The real behavior when the model returns a findings list: run_tiebreaker
     # raises TiebreakerParseError (parse_tiebreaker rejects a findings list).
     # Make run_tiebreaker raise it directly so the cmd handler's loud-failure
     # path is exercised.
     def _raising_tiebreaker(doc_path, *, doc_text=None, track_id, project_id, round_number,
-                            last_round_findings, data_dir, timeout_seconds, config, model_arg=None):
+                            seat_verdicts, data_dir, timeout_seconds, config, model_arg=None):
         raise pgt.TiebreakerParseError(
             "tiebreaker returned a 'findings' list — a seat returns findings; "
             "the tiebreaker returns a decision (START/STOP). Refusing to fill in a decision.",
@@ -861,10 +889,7 @@ def test_cmd_plan_gate_run_synthesized_tiebreaker_stays_blocked_no_answer_reason
     doc = tmp_path / "plan.md"
     doc.write_text("## Problem\n## Approach\n", encoding="utf-8")
     ledger = _isolate_seat_ledger(monkeypatch, tmp_path)
-    pgt.record_round(ledger, track_id="feat-synth", project_id="p1",
-                     round_number=1, outcome="panel", scored_seats=1)
-    pgt.record_round(ledger, track_id="feat-synth", project_id="p1",
-                     round_number=2, outcome="panel", scored_seats=1)
+    _read_rounds(ledger, "feat-synth")
 
     def _synth_factory(data_dir, timeout_seconds):
         def _disp(provider, model_arg, instruction, dispatch_id):
@@ -903,10 +928,7 @@ def test_cmd_plan_gate_run_empty_completion_stays_blocked_not_pass_or_revise(
     doc = tmp_path / "plan.md"
     doc.write_text("## Problem\n## Approach\n", encoding="utf-8")
     ledger = _isolate_seat_ledger(monkeypatch, tmp_path)
-    pgt.record_round(ledger, track_id="feat-empty", project_id="p1",
-                     round_number=1, outcome="panel", scored_seats=1)
-    pgt.record_round(ledger, track_id="feat-empty", project_id="p1",
-                     round_number=2, outcome="panel", scored_seats=1)
+    _read_rounds(ledger, "feat-empty")
 
     def _empty_factory(data_dir, timeout_seconds):
         def _disp(provider, model_arg, instruction, dispatch_id):
@@ -951,10 +973,11 @@ def test_load_tiebreaker_config_rejects_max_rounds_below_one(tmp_path):
 
 def test_load_tiebreaker_config_reads_real_repo_file():
     """The shipped configs/plan_gate_panel.yaml carries the tiebreaker block
-    with max_rounds=2 and the registry-named provider/model (OI-1219: the
+    with max_rounds=1 (operator decision 17-10: one seat, one round, then the
+    tiebreaker) and the registry-named provider/model (OI-1219: the
     deepseek-harness lane, not the claude/tmux lane)."""
     cfg = pgt.load_tiebreaker_config()
-    assert cfg["max_rounds"] == 2
+    assert cfg["max_rounds"] == 1
     assert cfg["provider"] == "deepseek_harness"
     assert cfg["model"] == "deepseek-v4-pro"
 
@@ -1026,54 +1049,56 @@ def test_remaining_findings_skips_acceptance_criterion_phrasing(tmp_path):
 # have had their say" — and START clears the gate on a plan nobody had read.
 # --------------------------------------------------------------------------
 
-def test_readable_round_count_is_zero_when_no_seat_scored(tmp_path):
+def _versions(ledger, track_id="trk"):
+    return pgt.plan_versions(ledger, track_id, "p1")
+
+
+def test_a_version_no_seat_scored_on_is_not_read(tmp_path):
     ledger = tmp_path / "plan-gate-seats.ndjson"
-    pgt.record_round(
-        ledger, track_id="trk", project_id="p1", round_number=1,
-        outcome="panel", scored_seats=0,
-    )
-    pgt.record_round(
-        ledger, track_id="trk", project_id="p1", round_number=2,
-        outcome="panel", scored_seats=0,
-    )
+    for rnd in (1, 2):
+        pgt.record_round(
+            ledger, track_id="trk", project_id="p1", round_number=rnd,
+            outcome="panel", scored_seats=0, plan_sha256="v1",
+        )
     # Two rounds RAN...
     assert pgt.read_round_count(ledger, "trk", "p1") == 2
     # ...and nobody read the plan in either of them.
-    assert pgt.readable_round_count(ledger, "trk", "p1") == 0
+    assert [v.read for v in _versions(ledger)] == [False, False]
+    assert pgt.route_plan_gate(_versions(ledger), "v1", max_rounds=1).versions_read == 0
 
 
-def test_readable_round_count_counts_only_rounds_with_a_scoring_seat(tmp_path):
+def test_a_version_counts_as_read_once_a_seat_scored_on_it(tmp_path):
     ledger = tmp_path / "plan-gate-seats.ndjson"
     pgt.record_round(
         ledger, track_id="trk", project_id="p1", round_number=1,
-        outcome="panel", scored_seats=0,
+        outcome="panel", scored_seats=0, plan_sha256="v1",
     )
     pgt.record_round(
         ledger, track_id="trk", project_id="p1", round_number=2,
-        outcome="panel", scored_seats=3,
+        outcome="panel", scored_seats=3, plan_sha256="v1",
     )
-    assert pgt.read_round_count(ledger, "trk", "p1") == 2
-    assert pgt.readable_round_count(ledger, "trk", "p1") == 1
+    assert [v.read for v in _versions(ledger)] == [False, True]
+    assert pgt.route_plan_gate(_versions(ledger), "v1", max_rounds=2).versions_read == 1
 
 
-def test_readable_round_count_is_per_track(tmp_path):
+def test_plan_versions_are_per_track(tmp_path):
     ledger = tmp_path / "plan-gate-seats.ndjson"
     pgt.record_round(
         ledger, track_id="trk-a", project_id="p1", round_number=1,
-        outcome="panel", scored_seats=2,
+        outcome="panel", scored_seats=2, plan_sha256="v1",
     )
-    assert pgt.readable_round_count(ledger, "trk-a", "p1") == 1
-    assert pgt.readable_round_count(ledger, "trk-b", "p1") == 0
+    assert len(_versions(ledger, "trk-a")) == 1
+    assert _versions(ledger, "trk-b") == []
 
 
-def test_readable_round_count_treats_a_missing_field_as_unknown(tmp_path):
+def test_a_record_missing_scored_seats_is_unknown_not_read(tmp_path):
     """A record written before 2026-09-06 has no ``scored_seats``. That absence
     is UNKNOWN, not a recorded zero — and unknown does not buy a tiebreaker.
 
     The consequence is deliberate and self-healing: a track whose only rounds
-    predate the field runs one more full panel, which writes the field. The
-    reverse default (grandfathering old records as readable) would let exactly
-    the unreviewed plans this guard exists for slip through on a missing key.
+    predate the field gets one more seat round, which writes the field. The
+    reverse default (grandfathering old records as read) would let exactly the
+    unreviewed plans this guard exists for slip through on a missing key.
     """
     ledger = tmp_path / "plan-gate-seats.ndjson"
     legacy = {
@@ -1085,13 +1110,14 @@ def test_readable_round_count_treats_a_missing_field_as_unknown(tmp_path):
     ledger.write_text(json.dumps(legacy) + "\n", encoding="utf-8")
     assert pgt.SCORED_SEATS_KEY not in legacy
     assert pgt.read_round_count(ledger, "trk", "p1") == 1
-    assert pgt.readable_round_count(ledger, "trk", "p1") == 0
+    assert [v.read for v in _versions(ledger)] == [False]
 
 
 def test_record_round_always_writes_scored_seats(tmp_path):
     """Same always-present contract as the governance fields: a same-schema 0 is
     a recorded fact ("this round was run and nobody read the plan"), distinct
-    from a MISSING field (an older-schema record)."""
+    from a MISSING field (an older-schema record). The plan hash and the seat
+    verdicts (P2) follow the same contract."""
     ledger = tmp_path / "plan-gate-seats.ndjson"
     assert pgt.record_round(
         ledger, track_id="trk", project_id="p1", round_number=1, outcome="panel",
@@ -1103,105 +1129,86 @@ def test_record_round_always_writes_scored_seats(tmp_path):
     assert len(rounds) == 1
     assert pgt.SCORED_SEATS_KEY in rounds[0], "scored_seats must always be written"
     assert rounds[0][pgt.SCORED_SEATS_KEY] == 0
+    assert rounds[0]["plan_sha256"] == ""
+    assert rounds[0]["seat_verdicts"] == []
 
 
-def test_should_run_tiebreaker_is_false_after_two_unread_rounds(tmp_path):
-    """The OI-1280 defect: at the threshold, with zero readable rounds, there is
-    no tie to break."""
+def test_two_unread_versions_buy_no_tiebreaker(tmp_path):
+    """The OI-1280 defect, per plan version: with zero read versions there is no
+    tie to break, whatever the number of rounds that ran."""
+    ledger = tmp_path / "plan-gate-seats.ndjson"
+    for rnd, digest in ((1, "v1"), (2, "v2")):
+        pgt.record_round(
+            ledger, track_id="trk", project_id="p1", round_number=rnd,
+            outcome="panel", scored_seats=0, plan_sha256=digest,
+        )
+    for digest in ("v1", "v2", "v3"):
+        route = pgt.route_plan_gate(_versions(ledger), digest, max_rounds=1)
+        assert route.action == pgt.ROUTE_SEAT_ROUND
+        assert route.versions_read == 0
+
+
+def test_one_read_version_at_the_threshold_brings_the_tiebreaker(tmp_path):
     ledger = tmp_path / "plan-gate-seats.ndjson"
     pgt.record_round(
         ledger, track_id="trk", project_id="p1", round_number=1,
-        outcome="panel", scored_seats=0,
+        outcome="panel", scored_seats=1, plan_sha256="v1",
     )
     pgt.record_round(
         ledger, track_id="trk", project_id="p1", round_number=2,
-        outcome="panel", scored_seats=0,
+        outcome="panel", scored_seats=0, plan_sha256="v2",
     )
-    assert pgt.read_round_count(ledger, "trk", "p1") == 2  # threshold reached
-    assert pgt.should_run_tiebreaker(ledger, "trk", "p1", max_rounds=2) is False
+    assert pgt.route_plan_gate(_versions(ledger), "v1", max_rounds=1).action == pgt.ROUTE_TIEBREAKER
+    # v2 was not read: its seat reads it first, the threshold notwithstanding.
+    assert pgt.route_plan_gate(_versions(ledger), "v2", max_rounds=1).action == pgt.ROUTE_SEAT_ROUND
 
 
-def test_should_run_tiebreaker_is_true_when_one_round_was_read(tmp_path):
-    """The same two rounds, one of which a seat actually read: the tiebreaker is
-    doing what it was built for."""
+def test_one_read_version_below_the_threshold_must_change(tmp_path):
+    """The read-version condition is a count, not a switch: one read version is
+    still one version when the threshold is two."""
     ledger = tmp_path / "plan-gate-seats.ndjson"
     pgt.record_round(
         ledger, track_id="trk", project_id="p1", round_number=1,
-        outcome="panel", scored_seats=1,
+        outcome="panel", scored_seats=3, plan_sha256="v1",
     )
-    pgt.record_round(
-        ledger, track_id="trk", project_id="p1", round_number=2,
-        outcome="panel", scored_seats=0,
-    )
-    assert pgt.should_run_tiebreaker(ledger, "trk", "p1", max_rounds=2) is True
+    route = pgt.route_plan_gate(_versions(ledger), "v1", max_rounds=2)
+    assert route.action == pgt.ROUTE_PLAN_UNCHANGED
+    assert "change the plan" in route.rationale
+    assert "below the threshold 2" in route.rationale
 
 
-def test_should_run_tiebreaker_stays_false_below_the_threshold_even_when_read(tmp_path):
-    """The readable-round condition is additional, not a replacement: one read
-    round is still one round."""
+def test_route_rationale_names_the_counts(tmp_path):
+    """A silent fall-through reads like a bug: every route says why."""
     ledger = tmp_path / "plan-gate-seats.ndjson"
-    pgt.record_round(
-        ledger, track_id="trk", project_id="p1", round_number=1,
-        outcome="panel", scored_seats=3,
-    )
-    assert pgt.should_run_tiebreaker(ledger, "trk", "p1", max_rounds=2) is False
-
-
-def test_tiebreaker_gate_status_says_why_it_held_back(tmp_path):
-    """A silent fall-through to the full panel at round 3 looks like a bug. The
-    rationale has to name the reason."""
-    ledger = tmp_path / "plan-gate-seats.ndjson"
-    for rnd in (1, 2):
+    first = pgt.route_plan_gate(_versions(ledger), "v1", max_rounds=2)
+    assert "has no read seat round yet" in first.rationale
+    assert "threshold 2" in first.rationale
+    for rnd, digest in ((1, "v1"), (2, "v2")):
         pgt.record_round(
             ledger, track_id="trk", project_id="p1", round_number=rnd,
-            outcome="panel", scored_seats=0,
+            outcome="panel", scored_seats=2, plan_sha256=digest,
         )
-    status = pgt.tiebreaker_gate_status(ledger, "trk", "p1", max_rounds=2)
-    assert status["should_run"] is False
-    assert status["rounds_done"] == 2
-    assert status["readable_rounds"] == 0
-    assert status["threshold"] == 2
-    assert "ZERO" in status["rationale"]
-    assert "no tie to break" in status["rationale"]
-
-
-def test_tiebreaker_gate_status_below_threshold_names_the_threshold(tmp_path):
-    ledger = tmp_path / "plan-gate-seats.ndjson"
-    status = pgt.tiebreaker_gate_status(ledger, "trk", "p1", max_rounds=2)
-    assert status["should_run"] is False
-    assert status["rounds_done"] == 0
-    assert "below the stop-rule threshold" in status["rationale"]
-
-
-def test_tiebreaker_gate_status_running_names_the_readable_rounds(tmp_path):
-    ledger = tmp_path / "plan-gate-seats.ndjson"
-    for rnd in (1, 2):
-        pgt.record_round(
-            ledger, track_id="trk", project_id="p1", round_number=rnd,
-            outcome="panel", scored_seats=2,
-        )
-    status = pgt.tiebreaker_gate_status(ledger, "trk", "p1", max_rounds=2)
-    assert status["should_run"] is True
-    assert status["readable_rounds"] == 2
-    assert "the tiebreaker decides" in status["rationale"]
+    route = pgt.route_plan_gate(_versions(ledger), "v2", max_rounds=2)
+    assert route.versions_read == 2
+    assert "the tiebreaker decides" in route.rationale
 
 
 def test_cmd_plan_gate_run_holds_the_tiebreaker_when_no_round_was_read(tmp_path, monkeypatch, capsys):
-    """End to end through the CLI: two rounds at the threshold where no seat ever
-    scored must run the PANEL again, not the tiebreaker — and say why."""
+    """End to end through the CLI: rounds where no seat ever scored, on this very
+    plan version, run the SEAT again, not the tiebreaker — and say why."""
     monkeypatch.setattr(pgp, "_default_panel_config_path", lambda: tmp_path / "absent.yaml")
     state_dir = _bootstrap(tmp_path)
     tracks.create_track(state_dir, "feat-unread", "p1", "t", "shipped", phase="queued")
     planning_cli._seed_plan_blocker(state_dir, "feat-unread", "p1")
     doc = tmp_path / "plan.md"
-    doc.write_text("## Problem\n## Approach\n", encoding="utf-8")
+    doc.write_text(_PLAN, encoding="utf-8")
 
     ledger = _isolate_seat_ledger(monkeypatch, tmp_path)
     assert ledger is not None
     for rnd in (1, 2):
         pgt.record_round(
             ledger, track_id="feat-unread", project_id="p1", round_number=rnd,
-            outcome="panel", scored_seats=0,
+            outcome="panel", scored_seats=0, plan_sha256=pgt.plan_sha256(_PLAN),
         )
 
     panel_calls = {"n": 0}
@@ -1227,7 +1234,7 @@ def test_cmd_plan_gate_run_holds_the_tiebreaker_when_no_round_was_read(tmp_path,
     assert tb_calls["n"] == 0
     assert panel_calls["n"] == 1
     err = capsys.readouterr().err
-    assert "no tie to break" in err
+    assert "has no read seat round yet" in err
     # The new round is recorded with its own (still zero) readable-seat count.
     rounds = [
         rec for _ln, rec, _h in walk_chain(ledger)
@@ -1238,8 +1245,12 @@ def test_cmd_plan_gate_run_holds_the_tiebreaker_when_no_round_was_read(tmp_path,
 
 def test_cmd_plan_gate_run_records_the_scoring_seat_count_of_the_round(tmp_path, monkeypatch):
     """The count written to the ledger is the count of seats that actually
-    scored — including the ones rescued by the second extraction (OI-1434)."""
+    scored — including the ones rescued by the second extraction (OI-1434).
+    The threshold is two plan versions here, so this one round stays a REVISE."""
     monkeypatch.setattr(pgp, "_default_panel_config_path", lambda: tmp_path / "absent.yaml")
+    monkeypatch.setattr(pgt, "load_tiebreaker_config", lambda *a, **k: {
+        "max_rounds": 2, "provider": "deepseek_harness", "model": "deepseek-v4-pro",
+    })
     state_dir = _bootstrap(tmp_path)
     tracks.create_track(state_dir, "feat-count", "p1", "t", "shipped", phase="queued")
     planning_cli._seed_plan_blocker(state_dir, "feat-count", "p1")
@@ -1274,8 +1285,8 @@ def test_cmd_plan_gate_run_records_the_scoring_seat_count_of_the_round(tmp_path,
     ]
     assert len(rounds) == 1
     assert rounds[0][pgt.SCORED_SEATS_KEY] == 2
-    # And that round now counts as READ, so the stop-rule can engage later.
-    assert pgt.readable_round_count(ledger, "feat-count", "p1") == 1
+    # And that plan version now counts as READ, so the stop-rule can engage later.
+    assert [v.read for v in pgt.plan_versions(ledger, "feat-count", "p1")] == [True]
 
 
 # --------------------------------------------------------------------------
@@ -1328,15 +1339,12 @@ def test_cmd_plan_gate_run_tiebreaker_start_writes_tiebreak_decision_ref(tmp_pat
     doc = tmp_path / "plan.md"
     doc.write_text("## Problem\n## Approach\n", encoding="utf-8")
     ledger = _isolate_seat_ledger(monkeypatch, tmp_path)
-    pgt.record_round(ledger, track_id="feat-tbref", project_id="p1",
-                     round_number=1, outcome="panel", scored_seats=1)
-    pgt.record_round(ledger, track_id="feat-tbref", project_id="p1",
-                     round_number=2, outcome="panel", scored_seats=1)
+    _read_rounds(ledger, "feat-tbref")
 
     previous_payload = _seed_previous_decision_ref(state_dir, "feat-tbref", "p1")
 
     def _start_tiebreaker(doc_path, *, doc_text=None, track_id, project_id, round_number,
-                          last_round_findings, data_dir, timeout_seconds, config, model_arg=None):
+                          seat_verdicts, data_dir, timeout_seconds, config, model_arg=None):
         _write_tiebreak_report(track_id, "04990c59")
         return pgt.TiebreakerResult(
             outcome="START", model="deepseek-v4-pro", round=round_number,
@@ -1376,15 +1384,12 @@ def test_cmd_plan_gate_run_tiebreaker_stop_writes_tiebreak_decision_ref(tmp_path
     doc = tmp_path / "plan.md"
     doc.write_text("## Problem\n## Approach\n", encoding="utf-8")
     ledger = _isolate_seat_ledger(monkeypatch, tmp_path)
-    pgt.record_round(ledger, track_id="feat-tbstop", project_id="p1",
-                     round_number=1, outcome="panel", scored_seats=1)
-    pgt.record_round(ledger, track_id="feat-tbstop", project_id="p1",
-                     round_number=2, outcome="panel", scored_seats=1)
+    _read_rounds(ledger, "feat-tbstop")
 
     _seed_previous_decision_ref(state_dir, "feat-tbstop", "p1")
 
     def _stop_tiebreaker(doc_path, *, doc_text=None, track_id, project_id, round_number,
-                         last_round_findings, data_dir, timeout_seconds, config, model_arg=None):
+                         seat_verdicts, data_dir, timeout_seconds, config, model_arg=None):
         _write_tiebreak_report(track_id, "deadbeef")
         return pgt.TiebreakerResult(
             outcome="STOP", model="deepseek-v4-pro", round=round_number,

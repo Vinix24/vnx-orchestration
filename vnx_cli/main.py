@@ -955,8 +955,8 @@ def _register_plan_gate_verbs(subs: argparse.Action) -> None:
         "--panel-seats",
         dest="panel_seats",
         default="",
-        help="comma-separated seat labels to run (subset of the configured panel); "
-             "unknown labels fail loud. Defaults to the full configured panel.",
+        help="comma-separated seat labels to run instead of the default seat; "
+             "logged as an override, unknown labels fail loud. Default: default_seat.",
     )
     p_prun.add_argument(
         "--seat-timeout",
@@ -971,24 +971,24 @@ def _register_plan_gate_verbs(subs: argparse.Action) -> None:
         "--dispatch-paths",
         dest="dispatch_paths",
         default=None,
-        help="comma-separated repo paths the plan touches; drives the governance "
-             "weight (variant) that sizes the panel (operator ladder). Default: no "
-             "paths (task_class or the code baseline).",
+        help="comma-separated repo paths the plan touches; they derive the governance "
+             "weight (variant) in the trace. The seat count does not follow it: one "
+             "default seat, a second on BLOCK.",
     )
     p_prun.add_argument(
         "--task-class",
         dest="task_class",
         default=None,
-        help="task class for the plan from the smart-router closed set "
-             "(e.g. 01_code_generation marks a NEW FEATURE, which always runs the "
-             "full panel).",
+        help="task class for the plan from the smart-router closed set; it feeds "
+             "the governance weight in the trace. A new feature no longer gets "
+             "more seats.",
     )
     p_prun.add_argument(
         "--irreversible",
         dest="irreversible",
         action="store_true",
         help="declare the change irreversible (deletion/rename/big architecture "
-             "refactor); forces coding-strict (3 seats).",
+             "refactor); forces coding-strict in the trace, not more seats.",
     )
 
     p_pstat = subs.add_parser(
@@ -1063,8 +1063,8 @@ def _register_plan_gate_verbs(subs: argparse.Action) -> None:
         "--panel-seats",
         dest="panel_seats",
         default="",
-        help="comma-separated seat labels to run (subset of the configured panel); "
-             "unknown labels fail loud. Defaults to the governance-derived ladder.",
+        help="comma-separated seat labels to run instead of the default seat; "
+             "logged as an override, unknown labels fail loud. Default: default_seat.",
     )
     p_pbatch.add_argument(
         "--seat-timeout",
@@ -1078,23 +1078,23 @@ def _register_plan_gate_verbs(subs: argparse.Action) -> None:
         "--dispatch-paths",
         dest="dispatch_paths",
         default=None,
-        help="comma-separated repo paths the plan touches; drives the governance "
-             "weight (variant) that sizes the panel (operator ladder).",
+        help="comma-separated repo paths the plan touches; they derive the governance "
+             "weight (variant) in the trace, not the seat count.",
     )
     p_pbatch.add_argument(
         "--task-class",
         dest="task_class",
         default=None,
-        help="task class for the plan from the smart-router closed set "
-             "(e.g. 01_code_generation marks a NEW FEATURE, which always runs the "
-             "full panel).",
+        help="task class for the plan from the smart-router closed set; it feeds "
+             "the governance weight in the trace. A new feature no longer gets "
+             "more seats.",
     )
     p_pbatch.add_argument(
         "--irreversible",
         dest="irreversible",
         action="store_true",
         help="declare the change irreversible (deletion/rename/big architecture "
-             "refactor); forces coding-strict (3 seats).",
+             "refactor); forces coding-strict in the trace, not more seats.",
     )
 
 
