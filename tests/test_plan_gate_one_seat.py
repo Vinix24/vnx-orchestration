@@ -25,13 +25,13 @@ for _p in (str(_REPO / "scripts" / "lib"), str(_REPO / "scripts")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-import schema_migration  # noqa: E402
-import tracks  # noqa: E402
-import track_reconciler  # noqa: E402
-import planning_cli  # noqa: E402
-import plan_gate_panel as pgp  # noqa: E402
-import plan_gate_tiebreaker as pgt  # noqa: E402
-from ndjson_hash_chain import walk_chain  # noqa: E402
+import schema_migration
+import tracks
+import track_reconciler
+import planning_cli
+import plan_gate_panel as pgp
+import plan_gate_tiebreaker as pgt
+from ndjson_hash_chain import walk_chain
 
 _MIGRATIONS = _REPO / "schemas" / "migrations"
 _TIEBREAK_PREFIX = "plan-tiebreak-"

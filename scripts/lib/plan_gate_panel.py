@@ -472,7 +472,7 @@ def load_seat_roles(config_path: Optional[Path] = None) -> Dict[str, str]:
     loaded: Any = None
     if path.is_file():
         try:
-            import yaml  # noqa: PLC0415
+            import yaml
             loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
         except (OSError, yaml.YAMLError):
             loaded = None

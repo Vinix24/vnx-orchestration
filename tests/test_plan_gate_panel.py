@@ -29,7 +29,7 @@ import tracks  # noqa: E402
 import track_reconciler  # noqa: E402
 import planning_cli  # noqa: E402
 import plan_gate_panel as pgp  # noqa: E402
-import plan_gate_tiebreaker as pgt  # noqa: E402
+import plan_gate_tiebreaker as pgt
 import envelope_adapters_claude  # noqa: E402
 from envelope_types import _AdapterResult  # noqa: E402
 from ndjson_hash_chain import walk_chain  # noqa: E402
