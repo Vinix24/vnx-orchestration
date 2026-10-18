@@ -887,6 +887,26 @@ def test_a_light_profile_is_not_applicable(ev):
     assert verdict["differences"] is None and verdict["invalid_evidence"] == []
 
 
+def test_a_light_verdict_names_every_step_that_did_not_succeed(ev):
+    """deepseek round 5 on #2087 (OI-2147): step_failures was [] on a light run beside three skipped steps."""
+    ev.profile = "light"
+    ev.steps.update(selection="skipped", download_reference="skipped", download_candidate="skipped")
+    verdict = ev.verdict()
+    assert verdict["step_failures"] == ["parity.selection=skipped", "parity.download_reference=skipped",
+                                        "parity.download_candidate=skipped"]
+    assert verdict["step_failures"] == cxp.step_failures(verdict["steps"], verdict["shadow"], verdict["reference"])
+
+
+def test_a_recorded_verdict_without_the_comparison_steps_outcome_is_not_clean(ev):
+    """The comparison cannot record its own outcome; a reader of a recorded verdict asks for it (OI-2145)."""
+    verdict = ev.verdict()
+    assert verdict["step_failures"] == []
+    recorded_rule = cxp.step_failures(verdict["steps"], verdict["shadow"], verdict["reference"], cxp.RECORDED_STEPS)
+    assert recorded_rule == [f"parity.{cxp.COMPARE_STEP}=unknown"]
+    steps = {**verdict["steps"], cxp.COMPARE_STEP: "success"}
+    assert cxp.step_failures(steps, verdict["shadow"], verdict["reference"], cxp.RECORDED_STEPS) == []
+
+
 def test_without_its_own_profile_the_job_takes_the_shadows(ev):
     ev.profile = ""
     ev.shadow_record["profile"] = "light"

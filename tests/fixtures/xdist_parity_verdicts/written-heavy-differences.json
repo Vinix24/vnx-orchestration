@@ -1,0 +1,131 @@
+{
+ "counts": {
+  "parallel": {
+   "active": true,
+   "classes": {
+    "fail": 2,
+    "pass": 26607,
+    "skip": 50,
+    "xfail": 1
+   },
+   "collected": 26660,
+   "collection_outcomes": 0,
+   "collection_records": 0,
+   "executed": 26660,
+   "records": 26660
+  },
+  "reference": {
+   "active": true,
+   "classes": {
+    "fail": 0,
+    "pass": 26609,
+    "skip": 50,
+    "xfail": 1
+   },
+   "collected": 26660,
+   "collection_outcomes": 0,
+   "collection_records": 0,
+   "executed": 26660,
+   "records": 26660
+  },
+  "serial": {
+   "active": false,
+   "classes": {
+    "fail": 0,
+    "pass": 0,
+    "skip": 0,
+    "xfail": 0
+   },
+   "collected": 0,
+   "collection_outcomes": 0,
+   "collection_records": 0,
+   "executed": 0,
+   "records": 0
+  }
+ },
+ "differences": {
+  "collection_outcome_differs": [],
+  "extra_in_candidate": [],
+  "not_run_in_candidate": [],
+  "outcome_class_differs": [
+   {
+    "candidate": "fail",
+    "key": [
+     "tests.test_oi1869_headless_stream_per_run.TestEnvelopeRunsStartedTogether",
+     "test_two_envelopes_started_in_the_same_second_each_keep_their_stream"
+    ],
+    "nodeid": "tests/test_oi1869_headless_stream_per_run.py::TestEnvelopeRunsStartedTogether::test_two_envelopes_started_in_the_same_second_each_keep_their_stream",
+    "reference": "pass"
+   },
+   {
+    "candidate": "fail",
+    "key": [
+     "tests.test_smart_router.TestRecommend",
+     "test_valid_task_classes_matches_real_registry"
+    ],
+    "nodeid": "tests/test_smart_router.py::TestRecommend::test_valid_task_classes_matches_real_registry",
+    "reference": "pass"
+   }
+  ],
+  "partition": [],
+  "run_more_than_once": [],
+  "skip_set_differs": []
+ },
+ "event": "push",
+ "exit": 1,
+ "head_sha": "a7f9750f3a96de01f6c0fe59dc36ccd267c43c03",
+ "invalid_evidence": [],
+ "profile": "heavy",
+ "ref": "main",
+ "reference": {
+  "duration_s": 1965,
+  "exit": 0,
+  "job_result": "success",
+  "result": "present"
+ },
+ "run_attempt": "1",
+ "run_id": "39121916675",
+ "schema": "vnx-xdist-parity/1",
+ "selection_fingerprint": "e2a6074d6d9a3bb0987739c32a3b26749ddbff7634718ad7e7610cf7b7d3db58",
+ "selection_fingerprint_source": "parity_job",
+ "shadow": {
+  "durations_s": {
+   "parallel": 500,
+   "serial": null
+  },
+  "exit_codes": {
+   "parallel": 1,
+   "serial": null
+  },
+  "job_result": "success",
+  "record": "present",
+  "run_attempt": "1",
+  "run_id": "39121916675",
+  "steps": {
+   "checkout": "success",
+   "parallel": "failure",
+   "plan": "success",
+   "prelude": "success",
+   "serial": "skipped"
+  },
+  "suite_wall_s": 500,
+  "verdict": "shadow_failed"
+ },
+ "step_failures": [
+  "shadow.verdict=shadow_failed"
+ ],
+ "steps": {
+  "checkout": "success",
+  "download_candidate": "success",
+  "download_reference": "success",
+  "prelude": "success",
+  "selection": "success"
+ },
+ "tested_sha": "a7f9750f3a96de01f6c0fe59dc36ccd267c43c03",
+ "tool_versions": {
+  "pytest": "9.1.1",
+  "pytest-timeout": "2.4.0",
+  "pytest-xdist": "3.8.0"
+ },
+ "verdict": "differences"
+}

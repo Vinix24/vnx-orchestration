@@ -1,0 +1,47 @@
+{
+ "counts": null,
+ "differences": null,
+ "event": "pull_request",
+ "exit": 2,
+ "head_sha": "a8b5100802ccb0a3d371806c271eaf2b47db3499",
+ "invalid_evidence": [
+  {
+   "detail": "the parity script wrote no verdict (checkout success, parity step failure)",
+   "reason": "no_verdict"
+  }
+ ],
+ "profile": "heavy",
+ "ref": "dispatch/x",
+ "reference": {
+  "duration_s": null,
+  "exit": null,
+  "job_result": "success",
+  "result": "not_read"
+ },
+ "run_attempt": "2",
+ "run_id": "38939122085",
+ "schema": "vnx-xdist-parity/1",
+ "selection_fingerprint": null,
+ "selection_fingerprint_source": null,
+ "shadow": {
+  "job_result": "success",
+  "record": "not_read"
+ },
+ "step_failures": [
+  "parity.verdict=missing",
+  "parity.parity=failure",
+  "reference.result=not_read",
+  "shadow.record=not_read"
+ ],
+ "steps": {
+  "checkout": "success",
+  "download_candidate": "success",
+  "download_reference": "success",
+  "parity": "failure",
+  "prelude": "success",
+  "selection": "success"
+ },
+ "tested_sha": "b39838cf709922fde46c1109c9909134bde9e1a4",
+ "tool_versions": null,
+ "verdict": "invalid_evidence"
+}
