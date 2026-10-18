@@ -12,10 +12,13 @@
 # context-rotation@claude-code-toolkit with --scope project and checks that the plugin is
 # listed for that project and for no other scope. Only `claude plugin` subcommands run: no
 # session starts. CLAUDE_CONFIG_DIR is never set, so your own login is used as it is. On
-# exit, also on failure, the plugin is uninstalled and the marketplace is removed again.
+# exit, also on failure, it removes what this run added and nothing else: the plugin only
+# after its install exited 0, the marketplace only after its add exited 0 and a fresh
+# listing shows it pointing at this run's own throwaway clone.
 #
 # A marketplace named claude-code-toolkit that already exists makes the test refuse before
-# it changes anything, because removing the test's copy would remove yours.
+# it changes anything, because removing the test's copy would remove yours. A listing that
+# fails or cannot be read stops the test just the same.
 #
 # Exit status: 0 passed, 1 failed, 2 usage.
 set -u
@@ -85,7 +88,9 @@ command -v claude >/dev/null 2>&1 || fail "claude is not on PATH"
 command -v git >/dev/null 2>&1 || fail "git is not on PATH"
 command -v python3 >/dev/null 2>&1 || fail "python3 is not on PATH"
 
-if claude plugin marketplace list 2>/dev/null | grep -q "$MARKETPLACE"; then
+listing=$(claude plugin marketplace list 2>/dev/null) \
+    || fail "claude plugin marketplace list failed, so it is not known whether $MARKETPLACE is already configured; nothing was changed"
+if printf '%s\n' "$listing" | grep -q "$MARKETPLACE"; then
     fail "a marketplace named $MARKETPLACE is already configured; remove it first (claude plugin marketplace remove $MARKETPLACE)"
 fi
 
@@ -116,12 +121,18 @@ git -C "$project" init -q || fail "git init of the project failed"
 git -C "$project" -c user.name=install-test -c "user.email=install-test@$mail_host" \
     commit -q --allow-empty -m "initial commit" || fail "initial commit of the project failed"
 cd "$project" || fail "cannot enter the project"
-added=1
-claude plugin marketplace add "$target" || fail "claude plugin marketplace add failed"
+claude plugin marketplace add "$target" || fail "claude plugin marketplace add failed; nothing of this run is left to remove"
+listing=$(claude plugin marketplace list 2>/dev/null) \
+    || fail "claude plugin marketplace list failed after the add; the marketplace may be registered, check: claude plugin marketplace list"
+if printf '%s\n' "$listing" | grep -A3 "$MARKETPLACE" | grep -qF "$target"; then
+    added=1
+else
+    fail "$MARKETPLACE is listed but does not point at $target; it is not this run's, so it is left alone"
+fi
 
 echo "4. install with --scope project"
-installed=1
 claude plugin install "$PLUGIN_ID" --scope project || fail "claude plugin install failed"
+installed=1
 
 echo "5. the plugin is listed for this project only"
 claude plugin list --json > "$work/list.json" || fail "claude plugin list --json failed"
