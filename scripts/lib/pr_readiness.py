@@ -278,7 +278,8 @@ class Readiness:
             # about a PR it had just called NOT READY.
             # Subscription reviewers first (operator decision 2026-09-26): codex and
             # kimi cost nothing per run. deepseek bills API credit and is the first
-            # fallback, glm the last (chain codex > kimi > deepseek > glm, OI-1984).
+            # fallback (chain codex > kimi > deepseek, OI-1984; glm left the default chain,
+            # operator decision 2026-10-17).
             choices = " or ".join(
                 f"{name} ({GATE_COST[name].usd})"
                 for name in (Gate.CODEX_GATE.value, Gate.KIMI_GATE.value)

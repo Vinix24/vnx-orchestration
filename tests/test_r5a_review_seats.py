@@ -271,7 +271,23 @@ class TestEverySeatGetsItsOwnReviewer:
         assert "kimi_gate reads another seat" in kimi_seat["failure_reason"]
         assert [r["gate"] for r in env["receipts"]] == ["kimi_gate", "deepseek_gate"]
 
-    def test_both_subscription_seats_exhausted_give_deepseek_and_glm(self, env):
+    def test_both_subscription_seats_exhausted_on_the_default_chain_leave_the_second_seat_chain_exhausted(self, env):
+        """R4 (operator decision 2026-10-17): glm_gate is not in the default chain, so with codex and
+        kimi both out deepseek reads one seat and the other ends as chain_exhausted, never a silent re-dispatch."""
+        _write_result(env, "codex_gate", _CODEX_LIMIT_RECORD)
+        _write_result(env, "kimi_gate", _KIMI_WEEKLY_LIMIT_RECORD)
+
+        result = _request(None)
+
+        assert _gates(result) == ["deepseek_gate", "kimi_gate"]
+        assert [p["seat"] for p in result["requested"]] == ["codex_gate", "kimi_gate"]
+        second = result["requested"][1]
+        assert second["status"] == "chain_exhausted"
+        assert "glm_gate" not in [p["gate"] for p in result["requested"]]
+        assert not (env["requests_dir"] / f"pr-{PR}-glm_gate.json").exists()
+
+    def test_both_subscription_seats_exhausted_give_deepseek_and_glm(self, env, monkeypatch):
+        monkeypatch.setenv("VNX_OVERRIDE_REVIEW_GATE_TAKEOVER_CHAIN", "codex_gate,kimi_gate,deepseek_gate,glm_gate")
         _write_result(env, "codex_gate", _CODEX_LIMIT_RECORD)
         _write_result(env, "kimi_gate", _KIMI_WEEKLY_LIMIT_RECORD)
 
@@ -388,7 +404,8 @@ class TestASwitchedOffSeatIsNeverFilled:
         assert [(h["gate"], h["reason"]) for h in deepseek["takeover_path"]] == [("kimi_gate", "provider_switched_off")]
         assert not (env["requests_dir"] / f"pr-{PR}-kimi_gate.json").exists()
 
-    def test_codex_exhausted_and_kimi_off_both_seats_move_and_kimi_fills_neither(self, env):
+    def test_codex_exhausted_and_kimi_off_both_seats_move_and_kimi_fills_neither(self, env, monkeypatch):
+        monkeypatch.setenv("VNX_OVERRIDE_REVIEW_GATE_TAKEOVER_CHAIN", "codex_gate,kimi_gate,deepseek_gate,glm_gate")
         _set_switches(kimi=False)
         _write_result(env, "codex_gate", _CODEX_LIMIT_RECORD)
 
@@ -474,7 +491,8 @@ class TestAReviewerThatRunsOutDuringTheRequest:
         assert record["seat"] == "kimi_gate"
         assert [(h["gate"], h["reason"]) for h in record["takeover_path"]] == [("kimi_gate", "lane_exhausted")]
 
-    def test_the_handed_on_seat_skips_reviewers_other_seats_hold(self, env, runs):
+    def test_the_handed_on_seat_skips_reviewers_other_seats_hold(self, env, runs, monkeypatch):
+        monkeypatch.setenv("VNX_OVERRIDE_REVIEW_GATE_TAKEOVER_CHAIN", "codex_gate,kimi_gate,deepseek_gate,glm_gate")
         runs["outcomes"]["kimi_gate"] = _KIMI_WEEKLY_LIMIT_RECORD
         _write_result(env, "codex_gate", _CODEX_LIMIT_RECORD)
 

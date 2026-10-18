@@ -140,13 +140,14 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         subsystem="governance-enforcement-stack", status="LIVE"),
     "VNX_REVIEW_GATE_TAKEOVER_CHAIN": _e(
         "VNX_REVIEW_GATE_TAKEOVER_CHAIN", "string",
-        "codex_gate,kimi_gate,deepseek_gate,glm_gate", "gate",
+        "codex_gate,kimi_gate,deepseek_gate", "gate",
         "Ordered review-gate takeover chain (BETA3-E1, 26-08 operator decision; order "
         "changed 2026-10-04, OI-1984). On lane_exhausted a seat rolls over to the NEXT gate "
         "named here. The order is subscription reviewers first (codex_gate, kimi_gate), "
-        "then the API-credit reviewers: deepseek_gate is the fallback after kimi_gate and "
-        "glm_gate is the last link. Both API-credit gates stay behind both subscription "
-        "gates and are a fallback only, never a project default reviewer; a guard test fails "
+        "then deepseek_gate (API credit), the last link of the default chain. glm_gate left "
+        "the default chain on 2026-10-17 (operator decision); it stays registered and can "
+        "still be named explicitly here, always behind both subscription gates. The API-credit "
+        "gates are a fallback only, never a project default reviewer; a guard test fails "
         "when an API-credit gate is placed before a subscription gate. Since "
         "OI-1714/OI-1838 deepseek_gate is a real harness-lane gate (available by "
         "registration, requested via gate_request_handler._request_deepseek), and since "

@@ -756,7 +756,6 @@ def test_absent_config_falls_back_to_standard_chain(manager_env, monkeypatch):
     assert chain == {
         "codex_gate": "kimi_gate",
         "kimi_gate": "deepseek_gate",
-        "deepseek_gate": "glm_gate",
     }
 
 
@@ -815,8 +814,19 @@ def test_codex_gate_added_with_kimi_gate_as_first_fallback():
     assert chain["kimi_gate"] == "deepseek_gate", (
         "OI-1984 (operator decision 2026-10-04): deepseek_gate follows kimi_gate"
     )
+    assert "deepseek_gate" not in chain, (
+        "R4 (operator decision 2026-10-17): deepseek_gate is the last link of the default chain"
+    )
+    assert "glm_gate" not in chain and "glm_gate" not in chain.values(), (
+        "R4 (operator decision 2026-10-17): glm_gate is not in the default chain"
+    )
+
+
+def test_an_explicit_chain_that_names_glm_gate_still_reaches_it():
+    from gate_request_handler import _parse_review_gate_takeover_chain
+    chain = _parse_review_gate_takeover_chain("codex_gate,kimi_gate,deepseek_gate,glm_gate")
     assert chain["deepseek_gate"] == "glm_gate"
-    assert "glm_gate" not in chain, "glm_gate is the last link: no successor"
+    assert "glm_gate" not in chain
 
 
 # ---------------------------------------------------------------------------

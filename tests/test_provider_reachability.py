@@ -691,7 +691,17 @@ class TestSeatWalkSkipsAnUnreachableSeat:
         assert "gate_result:codex_gate" in seat["failure_reason"]
         assert "kimi_gate substituted as reader" in seat["failure_reason"]
 
+    def test_the_default_chain_ends_when_all_three_of_its_seats_are_unreachable(self, manager, state_dir, monkeypatch):
+        pr.record_failure("codex", _CODEX_QUOTA_TEXT, source="test", state_dir=state_dir)
+        pr.record_failure("kimi", "403 access_terminated_error: reached your usage limit", source="test",
+                          state_dir=state_dir)
+        pr.record_failure("deepseek-harness", _DEEPSEEK_402_TEXT, source="test", state_dir=state_dir)
+        asked, requested = _walk(manager, monkeypatch, ["codex_gate"], 913)
+        assert asked == [], "glm_gate left the default chain (R4, operator decision 2026-10-17)"
+        assert requested[0]["status"] == "chain_exhausted"
+
     def test_the_walk_keeps_going_past_every_seat_known_unreachable(self, manager, state_dir, monkeypatch):
+        monkeypatch.setenv("VNX_REVIEW_GATE_TAKEOVER_CHAIN", "codex_gate,kimi_gate,deepseek_gate,glm_gate")
         pr.record_failure("codex", _CODEX_QUOTA_TEXT, source="test", state_dir=state_dir)
         pr.record_failure("kimi", "403 access_terminated_error: reached your usage limit", source="test",
                           state_dir=state_dir)
@@ -707,6 +717,7 @@ class TestSeatWalkSkipsAnUnreachableSeat:
         assert requested[0]["takeover_path"][0]["reason"] == pr.REASON_AUTH_401
 
     def test_when_every_seat_is_unreachable_the_chain_ends_named_and_asks_nobody(self, manager, state_dir, monkeypatch):
+        monkeypatch.setenv("VNX_REVIEW_GATE_TAKEOVER_CHAIN", "codex_gate,kimi_gate,deepseek_gate,glm_gate")
         pr.record_failure("codex", _CODEX_QUOTA_TEXT, source="test", state_dir=state_dir)
         pr.record_failure("kimi", "Error code: 401 - invalid api key", source="test", state_dir=state_dir)
         pr.record_failure("glm-harness", "402 requires more credits", source="test", state_dir=state_dir)

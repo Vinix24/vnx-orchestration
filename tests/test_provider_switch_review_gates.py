@@ -206,7 +206,21 @@ def test_kimi_off_codex_plus_deepseek_takeover_and_no_kimi_launch(store, launche
     assert request_receipt["takeover_from"] == "kimi_gate" and SWITCHED_OFF in request_receipt["failure_reason"]
 
 
-def test_kimi_deepseek_glm_off_codex_plus_chain_exhausted(store, launches):
+def test_kimi_deepseek_off_codex_plus_chain_exhausted_on_the_default_chain(store, launches, monkeypatch):
+    monkeypatch.delenv("VNX_REVIEW_GATE_TAKEOVER_CHAIN", raising=False)
+    set_switches(kimi=False, deepseek=False)
+
+    result = request(["codex_gate", "kimi_gate"])
+
+    assert launches == ["codex_gate"]
+    exhausted = seats(result)["kimi_gate"]
+    assert exhausted["status"] == "chain_exhausted"
+    assert [hop["gate"] for hop in exhausted["takeover_path"]] == ["kimi_gate", "deepseek_gate"]
+
+
+def test_kimi_deepseek_glm_off_codex_plus_chain_exhausted(store, launches, monkeypatch):
+    # glm_gate left the default chain (R4, operator decision 2026-10-17): name it explicitly.
+    monkeypatch.setenv("VNX_REVIEW_GATE_TAKEOVER_CHAIN", "codex_gate,kimi_gate,deepseek_gate,glm_gate")
     set_switches(kimi=False, deepseek=False, glm=False)
 
     result = request(["codex_gate", "kimi_gate"])
