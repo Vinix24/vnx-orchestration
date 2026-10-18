@@ -622,6 +622,7 @@ _HORIZON_CHOICES = ("now", "next", "later")
 _PHASE_CHOICES = ("queued", "active", "parked", "done")
 _OUTPUT_KIND_CHOICES = ("pr", "post", "deal", "doc")
 _LANE_HINT_CHOICES = ("direct", "governed", "unset")
+_PLAN_SCOPE_CHOICES = ("architecture", "light")
 
 
 def _common_horizon_args(p: argparse.ArgumentParser) -> None:
@@ -639,18 +640,7 @@ def _common_horizon_args(p: argparse.ArgumentParser) -> None:
 def _register_objective_verbs(subs: argparse.Action) -> None:
     """Register the objective-domain verbs shared by `vnx horizon` and the
     `vnx objective` backward-compat alias — same flags, same handlers."""
-    p_add = subs.add_parser("add", help="add an ad-hoc objective/track (no ROADMAP edit)")
-    _common_horizon_args(p_add)
-    p_add.add_argument("track_id", metavar="TRACK_ID")
-    p_add.add_argument("title", metavar="TITLE")
-    p_add.add_argument("goal_state", metavar="GOAL_STATE", help="what 'done' looks like")
-    p_add.add_argument("--horizon", choices=_HORIZON_CHOICES, default=None)
-    p_add.add_argument("--priority", default=None)
-    p_add.add_argument(
-        "--lane-hint", choices=_LANE_HINT_CHOICES, default=None, dest="lane_hint",
-        metavar="LANE_HINT",
-        help="descriptive dispatch-routing hint (governed|direct|unset); default unset",
-    )
+    _register_objective_add(subs)
 
     p_list = subs.add_parser("list", help="list objectives grouped by horizon")
     _common_horizon_args(p_list)
@@ -841,6 +831,33 @@ def _register_objective_verbs(subs: argparse.Action) -> None:
              "(audited; no silent bypass — an empty reason is refused)",
     )
 
+    _register_objective_set_verbs(subs)
+
+
+def _register_objective_add(subs: argparse.Action) -> None:
+    """`add`: an ad-hoc objective/track, born with its plan scope (P1)."""
+    p_add = subs.add_parser("add", help="add an ad-hoc objective/track (no ROADMAP edit)")
+    _common_horizon_args(p_add)
+    p_add.add_argument("track_id", metavar="TRACK_ID")
+    p_add.add_argument("title", metavar="TITLE")
+    p_add.add_argument("goal_state", metavar="GOAL_STATE", help="what 'done' looks like")
+    p_add.add_argument("--horizon", choices=_HORIZON_CHOICES, default=None)
+    p_add.add_argument("--priority", default=None)
+    p_add.add_argument(
+        "--lane-hint", choices=_LANE_HINT_CHOICES, default=None, dest="lane_hint",
+        metavar="LANE_HINT",
+        help="descriptive dispatch-routing hint (governed|direct|unset); default unset",
+    )
+    p_add.add_argument(
+        "--plan-scope", choices=_PLAN_SCOPE_CHOICES, default=None, dest="plan_scope",
+        metavar="PLAN_SCOPE",
+        help="REQUIRED for a new track: architecture (OI-PLAN-<track> is seeded, the "
+             "plan-gate runs) or light (no plan-gate)",
+    )
+
+
+def _register_objective_set_verbs(subs: argparse.Action) -> None:
+    """The `set-*` verbs that patch one field of an existing track."""
     p_lane_hint = subs.add_parser(
         "set-lane-hint",
         help="set the descriptive dispatch lane_hint (governed|direct|unset) on a track",
@@ -851,6 +868,18 @@ def _register_objective_verbs(subs: argparse.Action) -> None:
         "lane_hint", choices=_LANE_HINT_CHOICES, metavar="LANE_HINT",
         help="descriptive dispatch-routing hint (governed|direct|unset)",
     )
+
+    p_plan_scope = subs.add_parser(
+        "set-plan-scope",
+        help="set a track's plan_scope by hand (the only way down to light); --reason required",
+    )
+    _common_horizon_args(p_plan_scope)
+    p_plan_scope.add_argument("track_id", metavar="TRACK_ID")
+    p_plan_scope.add_argument(
+        "plan_scope", choices=_PLAN_SCOPE_CHOICES, metavar="PLAN_SCOPE",
+        help="architecture or light",
+    )
+    p_plan_scope.add_argument("--reason", default="", help="REQUIRED: why the scope changes")
 
     p_set_goal = subs.add_parser(
         "set-goal",
@@ -885,6 +914,11 @@ def _register_deliverable_verbs(subs: argparse.Action) -> None:
         "--routing-floor", dest="routing_floor", default=None, metavar="FLOOR",
         help="optional model-routing quality floor for this deliverable "
              "(free text, e.g. a model name) — the plan-gate's rubric axis 5.",
+    )
+    p_dadd.add_argument(
+        "--dispatch-paths", dest="dispatch_paths", default=None, metavar="P1,P2",
+        help="optional comma-separated repo paths this deliverable will touch; a "
+             "plan-gate run without --dispatch-paths reads them",
     )
 
     p_dlist = subs.add_parser("list", help="list deliverables grouped by objective")
@@ -922,13 +956,18 @@ def _register_deliverable_verbs(subs: argparse.Action) -> None:
         "--task-class", dest="task_class", default=None, metavar="CLASS",
         help="task class from the smart-router closed set (01_code_generation "
              ".. 07_translation). Unknown values are refused. At least one of "
-             "--task-class/--routing-floor is required.",
+             "--task-class/--routing-floor/--dispatch-paths is required.",
     )
     p_dset.add_argument(
         "--routing-floor", dest="routing_floor", default=None, metavar="FLOOR",
         help="model-routing quality floor for this deliverable (free text, "
-             "e.g. a model name). At least one of --task-class/--routing-floor "
-             "is required.",
+             "e.g. a model name). At least one of "
+             "--task-class/--routing-floor/--dispatch-paths is required.",
+    )
+    p_dset.add_argument(
+        "--dispatch-paths", dest="dispatch_paths", default=None, metavar="P1,P2",
+        help="comma-separated repo paths this deliverable will touch (replaces "
+             "the stored list)",
     )
 
 

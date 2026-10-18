@@ -82,7 +82,7 @@ def _bootstrap(tmp_path: Path) -> Path:
 def _add_args(state_dir: Path, **over) -> argparse.Namespace:
     base = dict(
         track_id="feat-lane-001", title="Lane hint track", goal_state="shipped",
-        horizon="now", priority=None, lane_hint=None,
+        horizon="now", priority=None, lane_hint=None, plan_scope="architecture",
         project_id="vnx-dev", state_dir=str(state_dir), json=False,
     )
     base.update(over)

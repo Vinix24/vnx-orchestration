@@ -323,6 +323,7 @@ _OBJECTIVE_ARGV = {
     "unmark-delivery": ["delegate-track", "#1234", "#1235", "--reason", "back to unmarked"],
     "remove-dependency": ["delegate-track", "other-track", "--reason", "overlap, not a dependency"],
     "set-lane-hint": ["delegate-track", "governed"],
+    "set-plan-scope": ["delegate-track", "light", "--reason", "parity check"],
     "set-goal": ["delegate-track", "Delegate goal state"],
 }
 _DELIVERABLE_ARGV = {
@@ -515,7 +516,7 @@ def test_two_distinct_central_stores_do_not_leak(tmp_path, isolated_env, monkeyp
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
     monkeypatch.setenv("VNX_DATA_DIR", str(data_root_a))
     rc, _, err = _run(monkeypatch, capsys, [
-        "horizon", "add", "leak-check", "Leak check", "shipped",
+        "horizon", "add", "leak-check", "Leak check", "shipped", "--plan-scope", "architecture",
         "--project-id", "tenant-a", "--project-dir", str(project_a),
     ])
     assert rc == 0, err
@@ -568,7 +569,7 @@ def test_stray_unguarded_vnx_data_dir_does_not_redirect_the_write(tmp_path, isol
     monkeypatch.setenv("VNX_DATA_HOME", str(real_data_home))
 
     rc, _, err = _run(monkeypatch, capsys, [
-        "horizon", "add", "feat-guard", "Guard feature", "shipped",
+        "horizon", "add", "feat-guard", "Guard feature", "shipped", "--plan-scope", "architecture",
         "--project-id", "stray-guard-tenant", "--project-dir", str(project_dir),
     ])
     assert rc == 0, err
@@ -610,7 +611,7 @@ def test_negative_control_regressed_resolver_would_be_caught(tmp_path, isolated_
     monkeypatch.setattr(horizon_mod, "resolve_state_dir", _regressed_resolve_state_dir)
 
     _run(monkeypatch, capsys, [
-        "horizon", "add", "feat-neg", "Negative control", "shipped",
+        "horizon", "add", "feat-neg", "Negative control", "shipped", "--plan-scope", "architecture",
         "--project-id", "neg-tenant", "--project-dir", str(project_dir),
     ])
 
@@ -631,7 +632,7 @@ def test_stray_vnx_project_id_env_does_not_override_explicit_project_id_flag(pro
     monkeypatch.setenv("VNX_PROJECT_ID", "stray-tenant")
 
     rc, _, err = _run(monkeypatch, capsys, [
-        "horizon", "add", "feat-explicit", "Explicit wins", "shipped",
+        "horizon", "add", "feat-explicit", "Explicit wins", "shipped", "--plan-scope", "architecture",
         "--project-id", "explicit-tenant", "--project-dir", str(project_dir),
     ])
     assert rc == 0, err
@@ -658,7 +659,7 @@ def test_objective_and_deliverable_alias_read_same_store_under_stray_env_conflic
     monkeypatch.setenv("VNX_PROJECT_ID", "stray-tenant")
 
     rc, _, err = _run(monkeypatch, capsys, [
-        "horizon", "add", "feat-alias-conflict", "Alias under conflict", "shipped",
+        "horizon", "add", "feat-alias-conflict", "Alias under conflict", "shipped", "--plan-scope", "architecture",
         "--project-id", "conflict-tenant", "--project-dir", str(project_dir),
     ])
     assert rc == 0, err

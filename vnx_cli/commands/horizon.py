@@ -255,6 +255,12 @@ def _cmd_set_lane_hint(args: Any) -> int:
     return pc.cmd_objective_set_lane_hint(args)
 
 
+def _cmd_set_plan_scope(args: Any) -> int:
+    pc = _require_planning_cli()
+    _prep(args)
+    return pc.cmd_objective_set_plan_scope(args)
+
+
 def _cmd_set_goal(args: Any) -> int:
     pc = _require_planning_cli()
     _prep(args)
@@ -277,6 +283,7 @@ _VERB_DISPATCH: dict[str, Callable[[Any], int]] = {
     "remove-dependency": _cmd_remove_dependency,
     "unmark-delivery": _cmd_unmark_delivery,
     "set-lane-hint": _cmd_set_lane_hint,
+    "set-plan-scope": _cmd_set_plan_scope,
     "set-goal": _cmd_set_goal,
 }
 
