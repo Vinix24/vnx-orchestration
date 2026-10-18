@@ -33,6 +33,7 @@ README_PATH = f"{FRAGMENT_DIR}/{README_NAME}"
 CHANGELOG_PATH = "CHANGELOG.md"
 UNRELEASED_HEADING = "## [Unreleased]"
 ROLLBACK_COMMAND = f"git checkout -- {CHANGELOG_PATH} {FRAGMENT_DIR}"
+LEGACY_LIST_PATH = "scripts/ci/changelog_legacy_prs.txt"
 
 _NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _VERSION_RE = re.compile(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?")

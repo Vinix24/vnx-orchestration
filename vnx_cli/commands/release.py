@@ -185,19 +185,27 @@ def _set_origin_remote(version_dir: Path) -> None:
 
 
 def _release_notes_hint(tag: str) -> str:
-    """Release-note fragment for a release that moved ``current`` (OI-1183).
+    """Release-notes steps for a release that moved ``current`` (OI-1183, OI-2141).
 
-    Release notes are written by hand into ``CHANGELOG.md`` (keep-a-changelog);
-    there is no automated generator. A publish that flips ``current`` is a
-    release that moves ``current``, so it must state the pin consequence in its
-    release notes instead of letting operators assume every consumer followed.
-    Returns a paste-ready block naming the mandatory pin-update line.
+    ``CHANGELOG.md`` is assembled from the ``changelog.d/`` fragments by
+    ``scripts/release/assemble_changelog.py`` on the release PR's branch; bullets
+    come only from fragments, and the one thing written by hand is a prose intro
+    under the new heading (``changelog.d/README.md``, "The release"). A publish
+    that flips ``current`` must state the pin consequence in that intro instead
+    of letting operators assume every consumer followed. Returns the assembler
+    steps and the intro text naming the mandatory pin-update line, no bullets.
     """
+    version = _strip_leading_v(tag)
     return (
-        f"Release notes (add to CHANGELOG.md under [{tag}]):\n"
-        f"  - {tag} is now the active `current`.\n"
-        f"  - Consumers with a tracked `.vnx-version` pin are NOT moved by this "
-        f"flip and must update their pin to {tag} explicitly:\n"
+        f"Release notes for {tag}: assemble CHANGELOG.md from the fragments "
+        f"(changelog.d/README.md, \"The release\"):\n"
+        f"  python3 scripts/release/assemble_changelog.py --version {version} --check\n"
+        f"  python3 scripts/release/assemble_changelog.py --version {version}\n"
+        f"Then write this as the intro paragraph under the new heading "
+        f"(prose before the first bullet; never a bullet):\n"
+        f"  {tag} is now the active `current`. Consumers with a tracked "
+        f"`.vnx-version` pin are NOT moved by this flip and must update their "
+        f"pin to {tag} explicitly:\n"
         f"      echo '{tag}' > <project>/.vnx-version\n"
     )
 

@@ -615,3 +615,85 @@ def test_usage_errors_exit_two(repo, args, needle):
     )
     assert result.returncode == 2
     assert needle in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# The assembler removes the grandfathering list (OI-2141)
+# ---------------------------------------------------------------------------
+
+LEGACY_LIST = "scripts/ci/changelog_legacy_prs.txt"
+LEGACY_TEXT = "# list\n77 " + "a" * 64 + "\n"
+
+
+def test_assembler_deletes_the_legacy_list(repo):
+    commit(repo, {"changelog.d/a.md": "- a\n", LEGACY_LIST: LEGACY_TEXT})
+    result = run_assembler(repo, "--version", "1.1.0")
+    assert result.returncode == 0, result.stderr
+    assert not (repo / LEGACY_LIST).exists()
+    assert f"  {LEGACY_LIST}" in result.stdout
+    assert not (repo / "changelog.d" / "a.md").exists()
+
+
+def test_check_lists_the_legacy_list_and_changes_nothing(repo):
+    commit(repo, {"changelog.d/a.md": "- a\n", LEGACY_LIST: LEGACY_TEXT})
+    result = run_assembler(repo, "--version", "1.1.0", "--check")
+    assert result.returncode == 0, result.stderr
+    assert "would delete:" in result.stdout
+    assert f"  {LEGACY_LIST}" in result.stdout
+    assert (repo / LEGACY_LIST).read_text() == LEGACY_TEXT
+    assert git(repo, "status", "--porcelain") == ""
+
+
+def test_assembler_without_a_legacy_list_does_not_mention_it(repo):
+    commit(repo, {"changelog.d/a.md": "- a\n"})
+    result = run_assembler(repo, "--version", "1.1.0")
+    assert result.returncode == 0, result.stderr
+    assert LEGACY_LIST not in result.stdout
+
+
+def test_failing_legacy_delete_restores_the_list_changelog_and_fragments(repo, monkeypatch, capsys):
+    commit(repo, {"changelog.d/a.md": "- a\n", LEGACY_LIST: LEGACY_TEXT})
+    before = snapshot(repo)
+    real_remove = os.remove
+
+    def remove_failing_on_the_list(path, *args, **kwargs):
+        if str(path).endswith("changelog_legacy_prs.txt"):
+            raise PermissionError(13, "injected failure", str(path))
+        return real_remove(path, *args, **kwargs)
+
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(assemble_changelog.os, "remove", remove_failing_on_the_list)
+    status = assemble_changelog.main(["--version", "1.1.0", "--date", "2026-10-17", "--rev", "main"])
+    monkeypatch.undo()
+    assert status == 1
+    assert "restored the original files" in capsys.readouterr().err
+    assert snapshot(repo) == before
+    assert (repo / LEGACY_LIST).read_text() == LEGACY_TEXT
+    assert git(repo, "status", "--porcelain") == ""
+
+
+def test_failing_fragment_delete_after_nothing_else_still_keeps_the_list(repo, monkeypatch, capsys):
+    commit(repo, {"changelog.d/a.md": "- a\n", LEGACY_LIST: LEGACY_TEXT})
+    real_remove = os.remove
+
+    def remove_failing_on_the_fragment(path, *args, **kwargs):
+        if str(path).endswith("a.md"):
+            raise PermissionError(13, "injected failure", str(path))
+        return real_remove(path, *args, **kwargs)
+
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(assemble_changelog.os, "remove", remove_failing_on_the_fragment)
+    status = assemble_changelog.main(["--version", "1.1.0", "--date", "2026-10-17", "--rev", "main"])
+    monkeypatch.undo()
+    assert status == 1
+    capsys.readouterr()
+    assert (repo / LEGACY_LIST).read_text() == LEGACY_TEXT
+    assert git(repo, "status", "--porcelain") == ""
+
+
+def test_a_run_killed_after_the_list_was_deleted_is_refused_and_names_the_list(repo):
+    commit(repo, {"changelog.d/a.md": "- a\n", LEGACY_LIST: LEGACY_TEXT})
+    (repo / LEGACY_LIST).unlink()
+    refused = run_assembler(repo, "--version", "1.1.0")
+    assert refused.returncode == 1
+    assert f"git checkout -- CHANGELOG.md changelog.d {LEGACY_LIST}" in refused.stderr

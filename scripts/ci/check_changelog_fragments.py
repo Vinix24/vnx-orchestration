@@ -29,6 +29,9 @@ Runs as its own pull-request-only step in the ``Lint Patterns`` job, with
    among them) only while the non-blank ones hash to the listed value; it
    removes, changes or reorders no line there.  A missing list is an empty
    list.
+5. a release PR whose head still contains ``scripts/ci/changelog_legacy_prs.txt``:
+   the release step (``assemble_changelog.py``) deletes that list, so a release
+   PR that keeps it was not cut with the assembler.
 
 Every file the check reads (``CHANGELOG.md`` at both revisions, a fragment,
 ``VERSION``, the legacy list) is decoded as strict UTF-8, and so is a path in
@@ -58,7 +61,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 import changelog_fragments as cf
 from project_root import resolve_project_root
 
-LEGACY_LIST_PATH = "scripts/ci/changelog_legacy_prs.txt"
+LEGACY_LIST_PATH = cf.LEGACY_LIST_PATH
 VERSION_PATH = "VERSION"
 FRAGMENT_HINT = (
     "add the entry as changelog.d/<dispatch-id>.md instead "
@@ -450,6 +453,15 @@ def _check_inventory(base_entries: Entries, head_entries: Entries) -> List[str]:
     return violations
 
 
+def _check_legacy_list_removed(repo: Path, head: str) -> List[str]:
+    """Rule 5: a release PR deletes the grandfathering list; an absent list passes."""
+    if cf.read_blob(repo, head, LEGACY_LIST_PATH) is None:
+        return []
+    return [f"{LEGACY_LIST_PATH}: the release PR must delete the grandfathering list; "
+            "`python3 scripts/release/assemble_changelog.py --version X.Y.Z` removes it "
+            "(or `git rm scripts/ci/changelog_legacy_prs.txt`)"]
+
+
 def _check_release(repo: Path, base: str, head: str, base_cl: Optional[str], head_cl: Optional[str],
                    base_entries: Entries, head_entries: Entries) -> List[str]:
     """Rule 3: the release PR equals the assembler's output from the merge base."""
@@ -468,7 +480,7 @@ def _check_release(repo: Path, base: str, head: str, base_cl: Optional[str], hea
     head_version = (_read_text(repo, head, VERSION_PATH, "head") or "").strip()
     if version != head_version:
         return [f"the new heading '## [{version}]' does not match {VERSION_PATH} at the head ({head_version or 'missing'})"]
-    violations = _check_inventory(base_entries, head_entries)
+    violations = _check_inventory(base_entries, head_entries) + _check_legacy_list_removed(repo, head)
     date = heading_date(head_cl or "", version)
     if date is None:
         violations.append(f"the new heading must read '## [{version}] - YYYY-MM-DD'")

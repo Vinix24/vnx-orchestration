@@ -10,7 +10,9 @@ A new ``## [X.Y.Z] - <date>`` heading lands directly under ``## [Unreleased]``,
 which stays and is left empty.  Under it come the lines that were under
 ``## [Unreleased]`` (unchanged), then the fragments in the order they entered
 the first-parent history of ``--rev`` (default ``origin/main``, which must be an
-ancestor of HEAD).  The fragments are deleted.  The fold itself is
+ancestor of HEAD).  The fragments are deleted, and so is the grandfathering
+list ``scripts/ci/changelog_legacy_prs.txt`` when it exists: the first release
+PR after the fragment rule removes it.  The fold itself is
 ``changelog_fragments.assemble``, the same function the CI check runs.
 
 Every precondition is checked before anything is written: a clean
@@ -19,7 +21,7 @@ refused by file, line and byte offset), an ``## [Unreleased]`` heading whose
 lines are bullets only, no ``## [X.Y.Z]`` yet, every fragment valid, present
 at ``--rev`` with the same bytes as in the tree, and on the first-parent
 history of ``--rev``.  A write or a delete that fails puts the original
-``CHANGELOG.md`` and every deleted fragment back, byte for byte.  A run killed
+``CHANGELOG.md``, every deleted fragment and the deleted list back, byte for byte.  A run killed
 between the steps cannot restore itself: the next run refuses the dirty tree
 and names ``git checkout -- CHANGELOG.md changelog.d``, after which a rerun
 gives the same output.  There is no partial-rerun mode.
@@ -49,7 +51,7 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterator, List, Tuple
+from typing import Dict, Iterator, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
@@ -70,6 +72,7 @@ class Plan:
     names: List[str]
     changelog_original: Tuple[bytes, int]
     fragment_originals: Dict[str, Tuple[bytes, int]] = field(default_factory=dict)
+    legacy_original: Optional[Tuple[bytes, int]] = None
 
 
 class _Parser(argparse.ArgumentParser):
@@ -82,14 +85,22 @@ def _read_with_mode(path: Path) -> Tuple[bytes, int]:
 
 
 def _refuse_dirty_tree(root: Path) -> None:
-    status = cf.run_git(root, "status", "--porcelain", "--", cf.CHANGELOG_PATH, cf.FRAGMENT_DIR)
+    status = cf.run_git(root, "status", "--porcelain", "--", cf.CHANGELOG_PATH, cf.FRAGMENT_DIR,
+                        cf.LEGACY_LIST_PATH)
     if status.strip():
         raise cf.ChangelogError(
-            f"uncommitted changes in {cf.CHANGELOG_PATH} or {cf.FRAGMENT_DIR}/:\n{status.rstrip()}\n"
+            f"uncommitted changes in {cf.CHANGELOG_PATH}, {cf.FRAGMENT_DIR}/ or {cf.LEGACY_LIST_PATH}:"
+            f"\n{status.rstrip()}\n"
             "The assembler reads only the committed tree. If an earlier run was "
-            f"interrupted, restore it with `{cf.ROLLBACK_COMMAND}` and run again; "
+            f"interrupted, restore it with `{_rollback_command(root)}` and run again; "
             "commit or remove an untracked file first."
         )
+
+
+def _rollback_command(root: Path) -> str:
+    """The restore command, naming the legacy list only when the tree tracks it."""
+    tracked = cf.run_git(root, "ls-files", "--", cf.LEGACY_LIST_PATH).strip()
+    return f"{cf.ROLLBACK_COMMAND} {cf.LEGACY_LIST_PATH}" if tracked else cf.ROLLBACK_COMMAND
 
 
 def _refuse_rev_not_ancestor(root: Path, rev: str) -> None:
@@ -191,6 +202,7 @@ def prepare(root: Path, version: str, date: str, rev: str) -> Plan:
     ordered = cf.introduction_order(root, rev, originals)
     fragments = [(name, cf.decode_utf8(cf.fragment_path(name), originals[name][0])) for name in ordered]
     new_text, consumed = cf.assemble(changelog_text, fragments, version, date)
+    legacy = root / cf.LEGACY_LIST_PATH
     return Plan(
         root=root,
         new_text=new_text,
@@ -198,6 +210,7 @@ def prepare(root: Path, version: str, date: str, rev: str) -> Plan:
         names=consumed,
         changelog_original=changelog_original,
         fragment_originals=originals,
+        legacy_original=_read_with_mode(legacy) if legacy.is_file() else None,
     )
 
 
@@ -216,8 +229,9 @@ def _atomic_write(path: Path, data: bytes, mode: int) -> None:
         raise
 
 
-def _restore(plan: Plan, changelog_written: bool, deleted: List[str]) -> bool:
-    """Put back the original CHANGELOG.md and every deleted fragment; True on success."""
+def _restore(plan: Plan, changelog_written: bool, deleted: List[str], legacy_deleted: bool = False) -> bool:
+    """Put back the original CHANGELOG.md, every deleted fragment and the deleted
+    legacy list; True on success."""
     try:
         if changelog_written:
             data, mode = plan.changelog_original
@@ -225,15 +239,19 @@ def _restore(plan: Plan, changelog_written: bool, deleted: List[str]) -> bool:
         for name in deleted:
             data, mode = plan.fragment_originals[name]
             _atomic_write(plan.root / cf.fragment_path(name), data, mode)
+        if legacy_deleted and plan.legacy_original is not None:
+            data, mode = plan.legacy_original
+            _atomic_write(plan.root / cf.LEGACY_LIST_PATH, data, mode)
     except OSError as exc:
-        print(f"error: restore failed: {exc}; run `{cf.ROLLBACK_COMMAND}`", file=sys.stderr)
+        print(f"error: restore failed: {exc}; run `{_rollback_command(plan.root)}`", file=sys.stderr)
         return False
     return True
 
 
 def apply(plan: Plan) -> int:
-    """Write the new CHANGELOG.md, then delete the fragments; all or nothing."""
+    """Write the new CHANGELOG.md, then delete the fragments and the legacy list; all or nothing."""
     changelog_written = False
+    legacy_deleted = False
     deleted: List[str] = []
     try:
         _atomic_write(plan.root / cf.CHANGELOG_PATH, plan.new_text.encode("utf-8"), plan.changelog_original[1])
@@ -241,8 +259,11 @@ def apply(plan: Plan) -> int:
         for name in plan.names:
             os.remove(plan.root / cf.fragment_path(name))
             deleted.append(name)
+        if plan.legacy_original is not None:
+            os.remove(plan.root / cf.LEGACY_LIST_PATH)
+            legacy_deleted = True
     except BaseException as exc:
-        restored = _restore(plan, changelog_written, deleted)
+        restored = _restore(plan, changelog_written, deleted, legacy_deleted)
         if not isinstance(exc, OSError):
             raise
         state = "restored the original files" if restored else "could not restore"
@@ -255,12 +276,14 @@ def _report(plan: Plan, check: bool) -> None:
     verb = "would write" if check else "wrote"
     print(f"{verb} to {cf.CHANGELOG_PATH}:\n{plan.section}")
     deleted = [cf.fragment_path(name) for name in plan.names]
+    if plan.legacy_original is not None:
+        deleted.append(cf.LEGACY_LIST_PATH)
     print(("would delete:" if check else "deleted:") + ("" if deleted else " nothing"))
     for path in deleted:
         print(f"  {path}")
     if not check:
         print("next: write the intro paragraph under the new heading (prose, no bullets), "
-              f"then commit {cf.CHANGELOG_PATH} and {cf.FRAGMENT_DIR}/")
+              f"then commit {cf.CHANGELOG_PATH}, {cf.FRAGMENT_DIR}/ and the removed files")
 
 
 def main(argv: List[str] | None = None) -> int:
