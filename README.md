@@ -25,7 +25,7 @@ VNX runs AI coding CLI workers in isolated git worktrees, through review gates, 
 
 It is a local control plane for the AI coding CLIs that already sit on your machine. One orchestrator dispatches work to ephemeral workers; each worker runs in its own git worktree; review gates decide what merges; every dispatch leaves a receipt. VNX drives `claude`, `codex`, `gemini`, `kimi`, and local `ollama` with no vendor SDK. It calls the CLIs as subprocesses and never imports a provider library.
 
-That has two distinct payoffs. First, governance: every dispatch is reconstructable, from what was assigned to what was reviewed to what merged and what each gate cost. Second, billing: because the workers are the CLIs themselves, the claude, codex and kimi lanes bill the subscriptions already on the machine, not per-call API credit. That is measured, not assumed: `cost=$0.0000` receipts under a `subscriptionType: max` auth state (see "Billing follows auth, not the lane"). It does not hold for every lane. GLM, DeepSeek and any OpenRouter-routed model bill API credit, and only run where a project chose them or as a fallback when the subscription reviewers are unavailable (see "Multi-provider architecture" below).
+That has two distinct payoffs. First, governance: every dispatch is reconstructable, from what was assigned to what was reviewed to what merged and what each gate cost. Second, billing: because the workers are the CLIs themselves, the claude, codex and kimi lanes bill the subscriptions already on the machine, not per-call API credit. That is measured, not assumed: `cost=$0.0000` receipts under a `subscriptionType: max` auth state (see "Billing follows auth, not the lane"). It does not hold for every lane. GLM, DeepSeek and any OpenRouter-routed model bill API credit, and only run where a project chose them or, for DeepSeek, as a review fallback when the subscription reviewers are unavailable (see "Multi-provider architecture" below).
 
 Most agent projects build SDK-native agents. I orchestrate the binaries instead.
 
@@ -33,18 +33,28 @@ I built this for my own work, an estimated 3,000+ hours of development since Feb
 
 This is not a security sandbox; it isolates work with git worktrees. It is not compliance certification; it produces a local, append-only, inspectable audit trail. It is optimized for human-gated coding workflows, not fully autonomous merges.
 
-## What's new in 1.6
+## What changed recently
 
-Seven releases on the 1.6 line so far (1.6.0 through 1.6.6, August 20 to September 27, 2026), all documented in the [CHANGELOG](CHANGELOG.md). The headlines:
+The released version is in [`VERSION`](VERSION) and every release has its entry in the [CHANGELOG](CHANGELOG.md). Headlines of recent releases:
 
-- **The review stack picks a subscription reader first** (1.6.6, #1928): the default is `codex_gate,kimi_gate`; `glm_gate` (OpenRouter credit) and `deepseek_gate` (own key) run only as a takeover-chain fallback when both subscription reviewers are unavailable.
-- **Gemini is retired as a reviewer** (1.6.6, #1932, #1934, #1935, #1936): the name is refused everywhere a review gate is selected, in defaults, profiles, enforcement YAML, the dashboard toggle and the docs. An existing `gemini_review` result in history still reads as a verdict, and the gemini CLI stays in use as a worker lane, just not as a reviewer.
-- **A partial read no longer books a pass** (1.6.6, OI-1851, #1920, #1937): a PASS on a diff a harness-lane gate could not fully read is `partial_review`, not a pass, and the merge door refuses it. Each harness-lane gate also got its own diff-char cap instead of one shared constant (kimi 400,000; glm and deepseek 50,000).
-- **T0 context rotation is enforced, not just recommended** (1.6.6, #1923): crossing 500K tokens in a T0 session now blocks new work until rotation runs.
-- **Build workers default to sonnet, T0 is pinned to Opus 5.5** (1.6.3, #1890): a claude-lane build-worker dispatch with no explicit model resolves to sonnet; before it resolved to kimi-k3 and was rejected. The pin is a default a dispatch spec can override, not a hard lock.
-- **Branch protection strictness is set per project** (1.6.5, OI-1849, #1917): `enforce`, `warn` or `off` in `branch_protection.yaml`, with the CI check as the floor under every setting, and the merge door judges the repo it is merging into rather than the repo it is installed from.
-- **The interactive tmux dispatch lane was retired** (1.6.2, #1845; removed outright in #1868): `claude_headless` is the only Claude lane and `force_tmux` is refused. Tmux session management itself is untouched: see [TMUX_SPAWN_LANE.md](docs/operations/TMUX_SPAWN_LANE.md).
-- **A review gate can no longer be skipped** (1.6.0, #1588–#1591): an ungated write or an ungated merge is refused outright, and a merge is pinned to the exact head SHA the gates approved.
+- **The review stack picks a subscription reader first** (#1928): the default is `codex_gate,kimi_gate`; `deepseek_gate` (own key) reads a seat only through the takeover chain `codex_gate,kimi_gate,deepseek_gate` when a subscription reviewer is unavailable. Rules: [DISPATCH_RULES.md](docs/core/DISPATCH_RULES.md) §2.
+- **Gemini is retired as a reviewer** (#1932, #1934, #1935, #1936): the name is refused everywhere a review gate is selected, in defaults, profiles, enforcement YAML, the dashboard toggle and the docs. An existing `gemini_review` result in history still reads as a verdict, and the gemini CLI stays in use as a worker lane, just not as a reviewer.
+- **A partial read no longer books a pass** (OI-1851, #1920, #1937): a PASS on a diff a harness-lane gate could not fully read is `partial_review`, not a pass, and the merge door refuses it. Each harness-lane gate has its own diff-char cap, resolved by `gate_lane_contract.max_diff_chars` (see [DISPATCH_RULES.md](docs/core/DISPATCH_RULES.md) §2 for the current default).
+- **T0 context rotation is enforced, not just recommended** (#1923): crossing 500K tokens in a T0 session blocks new work until rotation runs. The guard, its install command and the rotation spawner are in [00_GETTING_STARTED.md](docs/core/00_GETTING_STARTED.md).
+- **Build workers default to sonnet, T0 is pinned to Opus 5.5** (#1890): a claude-lane build-worker dispatch with no explicit model resolves to sonnet; before it resolved to kimi-k3 and was rejected. The pin is a default a dispatch spec can override, not a hard lock.
+- **Branch protection strictness is set per project** (OI-1849, #1917): `enforce`, `warn` or `off` in `branch_protection.yaml`, with the CI check as the floor under every setting, and the merge door judges the repo it is merging into rather than the repo it is installed from.
+- **The interactive tmux dispatch lane was retired** (#1845; removed outright in #1868): `claude_headless` is the only Claude lane, and a spec that still carries `force_tmux: true` is run on it with a warning on stderr. Tmux session management itself is untouched: see [TMUX_SPAWN_LANE.md](docs/operations/TMUX_SPAWN_LANE.md).
+- **A review gate can no longer be skipped** (#1588–#1591): an ungated write or an ungated merge is refused outright, and a merge is pinned to the exact head SHA the gates approved.
+
+On main, not yet released. Each line points at the document that owns the subject:
+
+- **Provider switch**: `vnx providers` turns a model provider family on and off, per machine or per project ([PROVIDER_LANES.md](docs/core/PROVIDER_LANES.md)).
+- **Review seats**: one distinct reviewer per seat, and a rejection on the head always blocks ([00_VNX_ARCHITECTURE.md](docs/core/00_VNX_ARCHITECTURE.md)). `glm_gate` left the default takeover chain.
+- **Merge readiness**: `vnx pr-ready <PR>` shows the required contexts and the gate evidence on the current head before the merge door is called ([DISPATCH_RULES.md](docs/core/DISPATCH_RULES.md) §2.2).
+- **Plan-gate**: one seat reads the plan and a second seat reads it only on a BLOCK ([HORIZON_LIFECYCLE.md](docs/core/HORIZON_LIFECYCLE.md)).
+- **Open outcomes**: `receipt_query.py open-outcomes` and `decide` record the T0's accept or reject of a dispatch outcome ([DISPATCH_RULES.md](docs/core/DISPATCH_RULES.md) §13).
+- **CHANGELOG fragments**: a PR adds `changelog.d/<name>.md` and never edits `CHANGELOG.md`; the release PR folds the fragments in ([changelog.d/README.md](changelog.d/README.md)).
+- **Context-rotation plugin** for Claude Code, in `packages/claude-code-toolkit/` (see "Context rotation for any Claude Code session" below).
 
 Full history for every minor and patch back to 0.1.0 is in the [CHANGELOG](CHANGELOG.md).
 
@@ -78,13 +88,13 @@ I wrote the architecture down as I built it. The full series is on [vincentvande
 
 ## What works today vs what is opt-in
 
-The audit trail is the whole point, so this section states maturity per feature. Verified against code on 2026-09-27, version 1.6.6.
+The audit trail is the whole point, so this section states maturity per feature. Verified against `origin/main` at `58b9723d` on 2026-10-18.
 
-**Tier 1: in production.** Append-only NDJSON receipts, with hash-chain verification tooling (`audit_chain`) available but opt-in per project (`VNX_CHAIN_RECEIPTS`, off by default) and designed as epoch-rotation ([ADR-029](docs/governance/decisions/ADR-029-hashchain-epoch-rotation.md)); the main ledger is unchained today. Multi-CLI provider hub, no vendor SDK. Review gates pick a subscription reader first (codex + kimi), with GLM and DeepSeek as an API-credit takeover fallback, and deterministic CI as the third gate. The single-entry dispatch door (`dispatch_cli.py`), default-on since 2026-06-24 (ADR-024), normalizing every lane and running a phantom-guard that rejects evidence-free GATE-GREEN receipts. Per-worker git worktree isolation, default-on since #1449, unconditional for the provider and subprocess lanes, with teardown classification for clean, committed, or dirty state. Headless `claude -p` is the only Claude lane since the interactive tmux dispatch lane was removed on 2026-09-18 (#1868); it bills the subscription, not API credits (see "Billing" below). Zero-LLM context injection and repo map. Cost tracking per gate. Governed memory (past + current).
+**Tier 1: in production.** Append-only NDJSON receipts, with hash-chain verification tooling (`audit_chain`) available but opt-in per project (`VNX_CHAIN_RECEIPTS`, off by default) and designed as epoch-rotation ([ADR-029](docs/governance/decisions/ADR-029-hashchain-epoch-rotation.md)); the main ledger is unchained today. Multi-CLI provider hub, no vendor SDK. Review gates pick a subscription reader first (codex + kimi), with DeepSeek as an API-credit takeover fallback, and deterministic CI as the third gate. The single-entry dispatch door (`dispatch_cli.py`), default-on since 2026-06-24 ([ADR-024](docs/governance/decisions/ADR-024-single-entry-door-default-dispatch-lane.md)), normalizing every lane and running a phantom-guard that rejects evidence-free GATE-GREEN receipts. Per-worker git worktree isolation, default-on since #1449, unconditional for the provider and subprocess lanes, with teardown classification for clean, committed, or dirty state. Headless `claude -p` is the only Claude lane since the interactive tmux dispatch lane was removed on 2026-09-18 (#1868); it bills the subscription, not API credits (see "Billing" below). Zero-LLM context injection and repo map. Cost tracking per gate. Governed memory (past + current).
 
-**Tier 2: shipped, opt-in, burning in.** Smart routing (`VNX_AUTO_ROUTE`), elastic worker pool (`bin/vnx pool`), track layer + roadmap autopilot (`VNX_ROADMAP_AUTOPILOT=1`), auto-dream consolidation, and an operator-gated self-learning proposal tier that mines the receipt stream for recurring failures into `pending_rules.json` for a human to accept (G-L1; nothing auto-activates). These default off and are not yet proven at the Tier 1 bar. Roll back the dispatch door per terminal with `VNX_DISPATCH_LEGACY=1`.
+**Tier 2: shipped, opt-in, burning in.** Smart routing (`VNX_AUTO_ROUTE`, honoured only on the raw-file legacy path and ignored by the single-entry door), elastic worker pool (`bin/vnx pool`), track layer + roadmap autopilot (`VNX_ROADMAP_AUTOPILOT=1`), auto-dream consolidation, and an operator-gated self-learning proposal tier that mines the receipt stream for recurring failures into `pending_rules.json` for a human to accept (G-L1; nothing auto-activates). These default off and are not yet proven at the Tier 1 bar. Roll back the dispatch door per terminal with `VNX_DISPATCH_LEGACY=1`.
 
-**Tier 3: designed, not built.** Parallel multi-track execution, wave scheduler, merge lock, file-scope derivation. This is architecture, not a shipped feature: worktree isolation is not yet guaranteed race-free under parallel dispatch.
+**Tier 3: designed, not built.** Parallel multi-track execution, wave scheduler, merge lock, file-scope derivation. This is architecture, not a shipped feature ([ADR-020](docs/governance/decisions/ADR-020-parallel-track-execution.md)): worktree isolation is not yet guaranteed race-free under parallel dispatch.
 
 ## Install
 
@@ -106,7 +116,7 @@ usage. `vnx dispatch-agent` fails at spawn if no worker CLI is present; `vnx doc
 a `tool:worker-cli` warning. (Zero-key exploration of the governance flow is not currently shipped;
 the old replay demo was retired.)
 
-There are two binaries on purpose. The pip `vnx` covers the essentials: `init`, `migrate`, `doctor`, `status`, `dispatch-agent`, `track`, `pool`, `dream`, and as of `#1462` also `gate-check`, the same deterministic pre-merge GO/HOLD check the fabric's own CI runs, now usable without a checkout. It also covers `horizon`/`objective`, `deliverable`, `attest`, `handoff`, `role`, `update`, `release`, `learning`, `fabric-audit`, `subsystems`, `version` and `pr-ready`. Checkout-only operator commands still live behind `./bin/vnx`: `new-worktree` and the rest of the operator surface (worktree lifecycle, snapshot/restore, staging). For those, clone the repository and run `pip install -e .` from the checkout.
+There are two binaries on purpose. The pip `vnx` covers the essentials: `init`, `migrate`, `doctor`, `status`, `dispatch-agent`, `track`, `pool`, `dream`, and as of `#1462` also `gate-check`, the same deterministic pre-merge GO/HOLD check the fabric's own CI runs, now usable without a checkout. It also covers `horizon`/`objective`, `deliverable`, `attest`, `handoff`, `role`, `update`, `release`, `learning`, `fabric-audit`, `subsystems`, `version`, `pr-ready`, `providers`, `guard` and `worktree-release`. Checkout-only operator commands still live behind `./bin/vnx`: `new-worktree` and the rest of the operator surface (worktree lifecycle, snapshot/restore, staging). For those, clone the repository and run `pip install -e .` from the checkout.
 
 ## Your first dispatch
 
@@ -173,6 +183,8 @@ $ python3 scripts/receipt_query.py by-dispatch D-4d7b2a30 --state-dir $VNX_DATA_
 
 That receipt reads `[failed]`, and it is correct: I pointed `origin` at a local bare repository instead of a real GitHub remote, `gh pr create` had nothing to talk to, and the receipt records exactly that (`autopr_reason: "gh pr create failed for branch ... (no open PR found on retry)"`). The worker's report, commit, and `findings.md` are real and complete; the receipt still refuses to call the dispatch done without a PR in front of it. That refusal is the governance model working, not a bug I hit while writing this. Point `origin` at a real GitHub remote and this same sequence ends with `status: done`.
 
+After a dispatch the T0 still has to record whether the outcome is accepted: `receipt_query.py open-outcomes` lists the dispatches that have none and `receipt_query.py decide <dispatch-id> accept|reject --reason ...` records it. Before merging, `vnx pr-ready <PR>` shows what the merge door will check on the PR head, and the merge itself goes through `scripts/pr_merge.py` ([DISPATCH_RULES.md](docs/core/DISPATCH_RULES.md) §2.1 and §13).
+
 ## Architecture
 
 VNX uses a T0 orchestrator and ephemeral workers. The old fixed T1-T3 mental model is no longer the core; workers spawn per dispatch and leave behind receipts, reports, and worktree state. (A fixed, terminal-pinned T0-T3 model still exists for the opt-in subprocess lane; the ephemeral-per-dispatch model is the default.)
@@ -209,9 +221,9 @@ Memory is where most agent systems are weakest. Most bolt a vector store onto a 
 
 The PAST is append-only NDJSON receipts: a forensic ledger of every dispatch, gate, and merge, with hash-chain verification tooling (`audit_chain`) available over it. The chain is opt-in per project (`VNX_CHAIN_RECEIPTS`) and off by default; the main ledger is unchained today, designed for epoch rotation once enabled ([ADR-029](docs/governance/decisions/ADR-029-hashchain-epoch-rotation.md)). The ledger itself is forensic, not lossy, and is in production now.
 
-The CURRENT is `runtime_coordination.db` (SQLite WAL): real-time orchestration state, leases, tracks, and dispatch status that any terminal can read for situational awareness. As of 1.1.0 the `dispatches` table is ADR-007 tenant-scoped on a composite `UNIQUE(dispatch_id, project_id)`, rebuilt in place by a crash-safe migration (#859).
+The CURRENT is `runtime_coordination.db` (SQLite WAL): real-time orchestration state, leases, tracks, and dispatch status that any terminal can read for situational awareness. The `dispatches` table is ADR-007 tenant-scoped on a composite `UNIQUE(dispatch_id, project_id)`, rebuilt in place by a crash-safe migration (#859).
 
-The FUTURE is the track layer and roadmap autopilot: planned features modeled as project-scoped tracks with a dependency graph, which the system can advance under human approval gates. The FUT-1 track schema, DAL, and CLI and the FUT-2 ADR-007 tenant-scoping have shipped, and the tracks layer is now activated for forward-state planning. The 1.1.0 future-state reconciliation keeps it consistent automatically: an open-item → track bridge syncs `track_open_items` through the single-writer `tracks.py` primitives, then a reconciler derives each track's status. A track is `done` only when it has no unresolved blocking open-items, every dependency track is done, all of its dispatches are in terminal states, and any linked PR is confirmed merged. Both run inside the autopilot tick, which refuses to advance on a failed sync. The autopilot stays opt-in: it plans, but a human still approves the last step.
+The FUTURE is the track layer and roadmap autopilot: planned features modeled as project-scoped tracks with a dependency graph, which the system can advance under human approval gates. The FUT-1 track schema, DAL, and CLI and the FUT-2 ADR-007 tenant-scoping have shipped, and the tracks layer is now activated for forward-state planning. The future-state reconciliation keeps it consistent automatically: an open-item → track bridge syncs `track_open_items` through the single-writer `tracks.py` primitives, then a reconciler derives each track's status. A track is `done` only when it has no unresolved blocking open-items, every dependency track is done, all of its dispatches are in terminal states, and any linked PR is confirmed merged. Both run inside the autopilot tick, which refuses to advance on a failed sync. The autopilot stays opt-in: it plans, but a human still approves the last step. A deliverable is promoted and closed by a human (`vnx deliverable promote` and `close`), and a PR is linked to a track with `vnx objective link-pr` ([HORIZON_LIFECYCLE.md](docs/core/HORIZON_LIFECYCLE.md)).
 
 A learning layer (`quality_intelligence.db`) consolidates the past into patterns and antipatterns that get injected into future dispatch context. The consolidation loop (auto-dream) is shipped and opt-in. It is burning in, not yet on by default.
 
@@ -236,7 +248,7 @@ For how the architecture got here, [docs/manifesto/EVOLUTION_TIMELINE.md](docs/m
 
 VNX is not a thin "supports many models" wrapper. The provider layer is governed by [`provider_constraints.yaml`](scripts/lib/providers/provider_constraints.yaml), a machine-readable source of truth for constraints such as `kimi-via-cli-only`, `no-anthropic-sdk`, and `deepseek-harness-subscription-blocked`.
 
-The default review stack picks a subscription reader first: `codex_gate` and `kimi_gate`. `glm_gate` and `deepseek_gate` run only as a takeover-chain fallback when both are unavailable, since they bill API credit rather than a subscription. Gemini is retired as a reviewer everywhere a review gate is selected; the gemini CLI still runs as a worker lane.
+The default review stack picks a subscription reader first: `codex_gate` and `kimi_gate`. `deepseek_gate` runs only as a takeover-chain fallback when a subscription reviewer is unavailable, since it bills API credit rather than a subscription. `glm_gate` stays a registered gate but is not in the default takeover chain. `vnx providers` switches a provider family on or off ([PROVIDER_LANES.md](docs/core/PROVIDER_LANES.md)). Gemini is retired as a reviewer everywhere a review gate is selected; the gemini CLI still runs as a worker lane.
 
 | Provider | How VNX drives it | Billing / constraint |
 |---|---|---|
@@ -244,7 +256,7 @@ The default review stack picks a subscription reader first: `codex_gate` and `ki
 | **codex** | CLI subprocess | subscription · review gate + worker |
 | **gemini** | CLI subprocess | provider sub/credits · worker (not a reviewer) |
 | **kimi** | Kimi CLI over OAuth | subscription · review gate + worker · `kimi-via-cli-only`, no Moonshot SDK |
-| **GLM** (Zhipu, default `glm-5.2`; `glm-5.3`/`glm-5.3-flash` admitted) | OpenRouter (`litellm:zai`) or the `glm-harness` proxy | API credit · review-gate fallback · `zai-via-openrouter-only` |
+| **GLM** (Zhipu, default `glm-5.2`; `glm-5.3`/`glm-5.3-flash` admitted) | OpenRouter (`litellm:zai`) or the `glm-harness` proxy | API credit · registered gate, not in the default takeover chain · `zai-via-openrouter-only` |
 | **any OpenRouter / OpenAI-compatible model** | claude-CLI harness or the local litellm proxy lane | API credit · routed generically via harness/proxy |
 | **DeepSeek v4** | Claude harness + your own DeepSeek key, hardened | API credit (own key) · review-gate fallback · `deepseek-harness-subscription-blocked` |
 | **ollama** (local, e.g. Gemma 4 E4B) | local runtime, no network | free/local · resolver + privacy-sensitive work |
@@ -259,13 +271,17 @@ VNX treats AI coding tools as interactive CLI workers, not SDK calls, and that c
 
 An earlier version of this README assumed a June 15, 2026 Anthropic billing change that would push headless usage to API credits by default. That change was never carried out. The headless lane was opened by direct operator decision (#1455) once subscription billing was confirmed by measurement, not by reading vendor announcements. This describes what this repository measures today; Anthropic's billing terms are the vendor's to change, and I have verified nothing beyond what a `cost=$0.0000` receipt tells me.
 
+## Context rotation for any Claude Code session
+
+`packages/claude-code-toolkit/context-rotation/` is a Claude Code plugin, separate from the VNX runtime and on main, not yet released. It measures how full the context is, asks Claude for a handover note at set points, checks that note, and gives it to the fresh session after `/clear`. Inside tmux it types the `/clear` itself. The bands are a share of `window_tokens`, which defaults to 200,000, so on a larger window set it in `.claude/context-rotation.json`. Install, settings and the hook layout are in the [plugin README](packages/claude-code-toolkit/context-rotation/README.md). The T0 rotation VNX enforces for its own orchestrator is a different mechanism: [T0_CONTEXT_ROTATION.md](docs/operations/T0_CONTEXT_ROTATION.md).
+
 ## Compared to dmux
 
 The closest spiritual cousin is [dmux](https://github.com/standardagents/dmux), which also pairs tmux with per-pane git worktrees. My choices differ on ephemeral-per-dispatch workers instead of long-lived panes, NDJSON receipts instead of interactive merge as the main record, and a teardown classifier that preserves dirty or pushed work instead of treating cleanup as one state.
 
 ## Status
 
-1.6.6 (September 27, 2026): `VERSION` is `1.6.6`, tagged `v1.6.6`. This feature release makes the review stack subscription-first (`codex_gate,kimi_gate`, with `glm_gate`/`deepseek_gate` as API-credit takeover fallback, #1928), retires gemini as a reviewer everywhere one is selected (#1932, #1934, #1935, #1936), gives each harness-lane gate its own diff-char cap and refuses a partial-read pass as a pass (OI-1874, OI-1851, #1937, #1920), and enforces T0 context rotation at 500K instead of only recommending it (#1923). Full entry, and every release back to 0.1.0, in [CHANGELOG.md](CHANGELOG.md). Open governance and release items are tracked in [ROADMAP.md](ROADMAP.md) and the open-items tooling under [scripts/open_items_manager.py](scripts/open_items_manager.py).
+The released version is in [`VERSION`](VERSION), tagged with a `v` in front of it. Changes merged to main after the last release are under `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md) and in `changelog.d/`, and are described above as on main, not yet released. Every release back to 0.1.0 is in the CHANGELOG. Open governance and release items are tracked in [ROADMAP.md](ROADMAP.md) and the open-items tooling under [scripts/open_items_manager.py](scripts/open_items_manager.py).
 
 I built this for my own work. Use at your own discretion.
 

@@ -1,7 +1,7 @@
 # VNX Documentation
 
 **Status**: Active
-**Last Updated**: 2026-09-27
+**Last Updated**: 2026-10-18
 **Owner**: VNX Maintainer
 **Purpose**: Describe how VNX documentation is organized and where to find the current source of truth.
 
@@ -14,9 +14,11 @@ Use `DOCS_INDEX.md` for the canonical "one place to look" navigation.
 **Most Used**:
 - Index: `DOCS_INDEX.md`
 - Architecture: `core/00_VNX_ARCHITECTURE.md`
+- Quickstart: `QUICKSTART.md`
 - Getting started: `core/00_GETTING_STARTED.md`
 - Dispatch workflow: `DISPATCH_GUIDE.md`
 - Monitoring: `operations/README.md`
+- Scripts: `SCRIPTS_INDEX.md`
 - Product modes: `contracts/PRODUCTIZATION_CONTRACT.md`
 - Roadmap: `../ROADMAP.md` (current state); architecture principles and wave history: `manifesto/ROADMAP.md`
 
