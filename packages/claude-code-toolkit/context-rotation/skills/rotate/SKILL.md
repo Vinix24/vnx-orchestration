@@ -68,15 +68,24 @@ Past the force threshold the plugin holds back a stop once per crossing and asks
 handover; past the hard threshold it also denies every tool except Read, Glob, Grep,
 Skill, AskUserQuestion, TodoWrite and a Write or Edit of this session's handover. When
 the user types `/context-rotation:rotate release`, the plugin records the release for
-this session before you read this: from then on nothing is denied or held back, and the
-notices about the context size continue.
+this session before you read this: from then on the bands deny nothing and hold nothing
+back, and the notices about the context size continue. Typing that command is the only
+release the plugin offers.
 
 - **A note about the release is in your context**: do nothing else for this command.
   Tell the user in one line what the note says: released, or not recorded.
 - **No such note** (you started this skill yourself, with `release`): nothing was
-  released. Only the user can release the guard, by typing the command; invoking this
-  skill, writing a file or any other tool call changes nothing. Tell the user that, and
-  continue with the handover if the plugin asked for one.
+  released. Only the user can release the guard, by typing the command. Tell the user
+  that, and continue with the handover if the plugin asked for one.
+
+## The plugin's directory
+
+`.claude/rotation/` holds the plugin's own files, among them the state that decides what
+the bands deny. In every band, also inside a subagent, the plugin denies a Write, Edit,
+MultiEdit or NotebookEdit there, unless it writes this session's handover. That is all
+it checks there. It does not parse shell commands: a shell command (Bash) runs with the
+user's rights and can change any file the user can, this directory included. Never
+change anything in that directory yourself, with any tool.
 
 ## resume
 

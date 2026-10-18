@@ -7,6 +7,20 @@
                                     Write or Edit of the handover (never
                                     through a symlink at its path)
 
+Whatever the band, and also below warn, in plan mode, after a release and inside a
+subagent: a Write, Edit, MultiEdit or NotebookEdit that lands in the project's
+`.claude/rotation`, other than of the session's own handover, is denied (M), and
+that denial counts toward no cap (storage_denial). The directory holds the state
+that decides what is denied, so a tool call of the model never writes it. A write
+at that directory itself or at the `.claude` above it is denied the same way: a
+file there makes the storage gate refuse the project. Where a write lands is
+judged by the real directories against the rotation directory that
+rotation_state.storage verifies, both as the kernel opens the path (a symlink
+followed before a `..` after it) and with `..` collapsed by name, so neither a
+symlink nor a `..` redirects the check, and a check that fails lets the call
+through and is logged. A shell command is not parsed: it runs with the user's
+rights, and this module does not see what it changes.
+
 M goes to the model (additionalContext, permissionDecisionReason, the Stop
 reason), U to the user (systemMessage). Each crossing gets one user line, at the
 first UserPromptSubmit, denial or held-back Stop in it. Every message names the
@@ -19,8 +33,9 @@ A session only informs, so nothing is denied or held back: in plan mode
 release`, which the UserPromptExpansion hook records and which only a typed
 command fires; and after hard_max_denials denials without a handover write,
 which the user is told once. No Stop is held back while stop_hook_active is set.
-An unknown size never acts, nor does a hook inside a subagent
-(hook_runtime.open_project). A failure of the enforcement state (OSError,
+Apart from that denial nothing acts at an unknown size, and inside a subagent
+(hook_runtime.open_project) a hook denies a write into `.claude/rotation` and does
+nothing else. A failure of the enforcement state (OSError,
 LockTimeout, ValueError) is logged (errors.log, else stderr) and the call goes
 ahead as in a session that only informs: a failure never denies or holds back.
 A read of that state that fails is such a failure, never a state to replace, so
@@ -33,7 +48,7 @@ from __future__ import annotations
 import fnmatch
 import os
 import stat
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import context_budget
 import enforcement_state
@@ -46,6 +61,14 @@ HARD_ALLOWED = ("Read", "Glob", "Grep", "Skill", "AskUserQuestion", "TodoWrite")
 PLAN = "plan"
 FAILURES = (OSError, rotation_state.LockTimeout, ValueError)
 CHECK_HANDOVER = "check handover path"
+# The tools that write the file at a path in their input, and the input fields that hold it.
+FILE_WRITERS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
+PATH_FIELDS = ("file_path", "notebook_path")
+CHECK_STORAGE = "check write into the plugin directory"
+STORAGE_REASON = (
+    "context-rotation denied this tool call: it writes into %s, which the context-rotation plugin keeps for its "
+    "own files. No tool call writes there, in any band, except a write of this session's handover at %s."
+)
 # A prompt whose state could not be read: its message says nothing about what is denied.
 UNREAD = "unread"
 RELEASE_COMMAND = "/context-rotation:rotate release"
@@ -84,14 +107,169 @@ def writes_handover(tool_name: Any, tool_input: Any, session: hook_runtime.Sessi
     write of the handover path, which lands in that file. Neither is a handover write.
     OSError when what is at that path cannot be checked: a failed lstat tells neither.
     """
-    if not transcript_work.is_handover_write(tool_name, tool_input, session.handover):
-        return False
+    return transcript_work.is_handover_write(tool_name, tool_input, session.handover) and _handover_open(session)
+
+
+def _handover_open(session: hook_runtime.Session) -> bool:
+    """The handover path holds a regular file or nothing yet; OSError when a failed lstat tells neither."""
     try:
         with rotation_state.storage(session.project_dir) as directory:
             found = os.lstat(os.path.basename(session.handover), dir_fd=directory)
     except FileNotFoundError:
         return True
     return stat.S_ISREG(found.st_mode)
+
+
+# --- what no band lets through: a write into the plugin's directory -----------------
+
+Identity = Tuple[int, int]
+
+
+def _identity(path: str) -> Optional[Identity]:
+    """(device, inode) of what is at `path`, symlinks followed; None when nothing is.
+
+    OSError for any other failure of the stat: it tells neither.
+    """
+    try:
+        found = os.stat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    return found.st_dev, found.st_ino
+
+
+# (an existing directory's identity, the names below it): a path, perhaps not made yet.
+Place = Tuple[Identity, Tuple[str, ...]]
+
+
+def _storage_place(project_dir: str) -> Place:
+    """Where `.claude/rotation` is, or where a write would make it.
+
+    The rotation directory itself when it exists, through the descriptor
+    rotation_state.storage verifies: a symlink there is refused (StorageRefused, an
+    OSError), never followed. Otherwise its nearest existing ancestor, and the names
+    a write would create below that one.
+    """
+    try:
+        with rotation_state.storage(project_dir) as directory:
+            found = os.fstat(directory)
+    except FileNotFoundError:
+        return _where_made(os.path.realpath(rotation_state.rotation_dir(project_dir)))
+    return (found.st_dev, found.st_ino), ()
+
+
+def _claude_place(project_dir: str) -> Place:
+    """Where `.claude` is, as the storage gate resolves it, or where a write would make it."""
+    return _where_made(os.path.realpath(os.path.join(project_dir, ".claude")))
+
+
+def _where_made(path: str) -> Place:
+    """The nearest existing ancestor of `path` (`path` itself when it exists), and the names below it down to `path`."""
+    names: Tuple[str, ...] = ()
+    identity = _identity(path)
+    while identity is None:
+        path, name = os.path.split(path)
+        names = (name,) + names
+        identity = _identity(path)
+    return identity, names
+
+
+def _names_below(place: str, directory: Identity) -> Optional[Tuple[str, ...]]:
+    """The names from `directory` down to `place`, without case; None when `place` is neither it nor below it.
+
+    Every ancestor is compared by identity, so a path that reaches the directory
+    another way still matches. The names compare without case: on a
+    case-insensitive file system, the macOS default, `.claude/Rotation` becomes the
+    plugin's directory once a write makes it.
+    """
+    path, names = place, ()
+    while _identity(path) != directory:
+        parent, name = os.path.split(path)
+        if parent == path:
+            return None
+        path, names = parent, (name,) + names
+    return tuple(name.casefold() for name in names)
+
+
+def _guarded(place: str, storage: Place, claude: Place) -> bool:
+    """`place` is the rotation directory, lies in it, or is the `.claude` directory it is made in.
+
+    A file at either directory makes the storage gate refuse the project
+    (rotation_state.storage_problem), and then no hook enforces anything.
+    """
+    (directory, below), (above, name) = storage, claude
+    found = _names_below(place, directory)
+    if found is not None and found[:len(below)] == tuple(part.casefold() for part in below):
+        return True
+    return _names_below(place, above) == tuple(part.casefold() for part in name)
+
+
+def _write_targets(tool_name: Any, tool_input: Any) -> List[str]:
+    """The paths a Write, Edit, MultiEdit or NotebookEdit writes; none for any other call."""
+    if tool_name not in FILE_WRITERS or not isinstance(tool_input, dict):
+        return []
+    found = (tool_input.get(field) for field in PATH_FIELDS)
+    return [path for path in found if isinstance(path, str) and path and "\0" not in path]
+
+
+def _places(target: str) -> List[str]:
+    """The paths that say where a write of `target` can land.
+
+    Two forms of the path: as the kernel opens it, where a symlink is followed before
+    a `..` after it applies, and with `..` collapsed by name first, as a caller that
+    normalises a path before it opens it does (Node's path.resolve). Of each form:
+    the path as written, whose directories _names_below compares by identity, so a
+    symlink inside the directory that leads out still passes through it; the name
+    below its real directory; and where a symlink at the name leads. A leading `~`
+    is the home directory, as Claude Code's file tools read it; a relative path
+    starts at the working directory.
+    """
+    path = os.path.join(os.getcwd(), os.path.expanduser(target))
+    places = []
+    for form in (path, os.path.normpath(path)):
+        parent, name = os.path.split(form)
+        if name in ("", os.curdir, os.pardir):  # the path names a directory: the place is where it resolves
+            named = os.path.realpath(form)
+        else:
+            named = os.path.join(os.path.realpath(parent), name)
+        places += [form, named, os.path.realpath(form)]
+    return places
+
+
+def writes_into_storage(tool_name: Any, tool_input: Any, session: hook_runtime.Session) -> bool:
+    """A Write, Edit, MultiEdit or NotebookEdit that lands in `.claude/rotation`, or at it or `.claude`, but not the handover.
+
+    Where it lands is judged by the real directories, not by the path as written
+    (_places): a `..` after a symlink, a symlink elsewhere that leads in, a symlink
+    inside that leads out, a `~` and a name in another case all count. A place that
+    is the handover is exempt while the handover path holds a regular file or
+    nothing yet (as for writes_handover); the handover's path is judged as the
+    target's, by identity where the file exists. OSError when where a write lands
+    cannot be checked.
+    """
+    targets = _write_targets(tool_name, tool_input)
+    if not targets:
+        return False
+    storage, claude = _storage_place(session.project_dir), _claude_place(session.project_dir)
+    guarded = [place for target in targets for place in _places(target) if _guarded(place, storage, claude)]
+    if not guarded:
+        return False
+    own = {_where_made(place) for place in _places(session.handover)} if _handover_open(session) else set()
+    return any(_where_made(place) not in own for place in guarded)
+
+
+def storage_denial(tool_name: Any, tool_input: Any, session: hook_runtime.Session, run: hook_runtime.HookRun) -> Reply:
+    """(M, None) for a write into the plugin's directory (writes_into_storage); None for any other call.
+
+    None too when where the write lands cannot be checked, after that failure is
+    logged: a failed check never denies.
+    """
+    run.at(CHECK_STORAGE)
+    try:
+        into = writes_into_storage(tool_name, tool_input, session)
+    except OSError as error:
+        rotation_state.log_failure(session.project_dir, CHECK_STORAGE, error)
+        return None
+    return (STORAGE_REASON % (os.path.dirname(session.handover), session.handover), None) if into else None
 
 
 def hard_allows(tool_name: Any, tool_input: Any, session: hook_runtime.Session) -> bool:
@@ -242,13 +420,16 @@ def _stored_reason(payload: Dict[str, Any], session: hook_runtime.Session) -> Op
 def on_tool(payload: Dict[str, Any], session: hook_runtime.Session, run: hook_runtime.HookRun) -> Reply:
     """(M reason, U line or None) when the band denies this call; None when it goes ahead.
 
-    The band is recorded for every call, also one the hard band allows: only the denial depends on that.
+    A write into the plugin's directory is denied in every band, also for an unknown
+    size, and is counted as no denial (storage_denial). The band is recorded for
+    every call, also one the hard band allows: only the denial depends on that.
     """
     tool_name, tool_input = payload.get("tool_name"), payload.get("tool_input")
+    kept = storage_denial(tool_name, tool_input, session, run)
     size, level = _measured(payload, session, run)
     if level is None:
-        return None
-    allowed = _allowed(tool_name, tool_input, session, run)
+        return kept
+    allowed = bool(kept) or _allowed(tool_name, tool_input, session, run)
 
     def change(state):
         events = enforcement_state.observe(state, level)
@@ -261,7 +442,8 @@ def on_tool(payload: Dict[str, Any], session: hook_runtime.Session, run: hook_ru
             lines.append(cap_line(state))
         return events + told, (deny_reason(size, level, session), " ".join(lines) or None)
 
-    return _settle(session, run, "enforcement state at PreToolUse", change)
+    settled = _settle(session, run, "enforcement state at PreToolUse", change)
+    return kept or settled
 
 
 def on_stop(payload: Dict[str, Any], session: hook_runtime.Session, run: hook_runtime.HookRun) -> Reply:
