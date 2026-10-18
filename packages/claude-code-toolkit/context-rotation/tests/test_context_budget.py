@@ -4,7 +4,9 @@ from __future__ import annotations
 import json
 
 import context_budget as cb
-from conftest import assistant_entry, load_fixture, write_transcript
+import handover_contract
+import regular_file
+from conftest import VALID_HANDOVER, assistant_entry, load_fixture, write_transcript
 
 
 def test_assistant_entry_sums_three_fields(tmp_path):
@@ -162,6 +164,27 @@ def test_one_bad_value_only_resets_that_key(project, capsys):
     assert s["window_tokens"] == 200000
     assert s["archive_keep"] == 5
     assert len(capsys.readouterr().err.strip().splitlines()) == 1
+
+
+def test_every_handover_the_configured_limit_accepts_can_be_read(project, tmp_path):
+    """handover_max_chars cannot be set so high that a valid handover is above the read limit (OI-2136 item 3)."""
+    write_settings(project / ".claude", {"handover_max_chars": regular_file.MAX_READ_BYTES})
+    limit = cb.load_settings(str(project))["handover_max_chars"]
+    text = VALID_HANDOVER + "\U0001d11e" * (limit - len(VALID_HANDOVER))  # four bytes per character in UTF-8
+    data = text.encode("utf-8")
+    assert handover_contract.problems(data, limit) == []
+    (tmp_path / "handover.md").write_bytes(data)
+    assert regular_file.read_regular(str(tmp_path / "handover.md")) == data, (
+        "a handover of %d characters is valid under the configured limit but above the read limit" % limit)
+
+
+def test_handover_max_chars_up_to_a_quarter_of_the_read_limit(project, capsys):
+    write_settings(project / ".claude", {"handover_max_chars": cb.MAX_HANDOVER_CHARS})
+    assert cb.load_settings(str(project))["handover_max_chars"] == cb.MAX_HANDOVER_CHARS
+    assert cb.MAX_HANDOVER_CHARS * 4 <= regular_file.MAX_READ_BYTES
+    write_settings(project / ".claude", {"handover_max_chars": cb.MAX_HANDOVER_CHARS + 1})
+    assert cb.load_settings(str(project))["handover_max_chars"] == 8000
+    assert "bad value for handover_max_chars" in capsys.readouterr().err
 
 
 def test_bool_is_not_an_int(project):

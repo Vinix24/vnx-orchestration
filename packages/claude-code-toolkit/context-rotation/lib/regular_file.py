@@ -16,7 +16,8 @@ import os
 import stat
 from typing import Any, BinaryIO, Dict, Optional, Tuple
 
-# A handover is at most handover_max_chars (8,000 by default); markers and the logs are smaller still.
+# A handover is at most handover_max_chars (8,000 by default, at most a quarter of this in characters:
+# context_budget.MAX_HANDOVER_CHARS); markers and the logs are smaller still.
 MAX_READ_BYTES = 1 << 20
 
 

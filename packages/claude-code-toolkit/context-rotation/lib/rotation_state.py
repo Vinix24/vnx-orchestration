@@ -23,8 +23,9 @@ Everything lives under <project>/.claude/rotation/:
                                 newest archive_keep
   injections.jsonl              one line per transition, written before the transition: ready,
                                 outdated, claimed, injected, kept; and `delivered`, written
-                                after the emit it records; kept to
-                                JOURNAL_LINES_PER_ARCHIVE_COPY lines per archive_keep
+                                after the emit it records and before the claimed marker
+                                goes; kept to JOURNAL_LINES_PER_ARCHIVE_COPY lines per
+                                archive_keep
   errors.log                    the last failures of the hooks, and rejected markers
 
 Handovers hold a session's working state and must never be committed, hence the
@@ -949,21 +950,25 @@ def log_injection(project_dir: str, record: Dict[str, Any]) -> None:
     append_journal(project_dir, record)
 
 
-def log_delivery(project_dir: str, via: str, origin: str, generation: str, successor: str) -> None:
-    """The line that says the emit of a claimed handover returned (event "delivered"). Never raises.
+def log_delivery(project_dir: str, via: str, origin: str, generation: str, successor: str) -> bool:
+    """The line that says the emit of a claimed handover returned (event "delivered"). True once written.
 
     Written after the emit, so it is the one evidence that the handover went out:
-    "injected" comes before the emit, which can still fail (BrokenPipeError). The
-    injection already happened, and a failing hook would make Claude Code drop the
-    output that carries it, so a failure to write it (OSError, LockTimeout,
-    ValueError) goes to log_failure; whatever waits for this line then acts as if
-    the delivery did not finish.
+    "injected" comes before the emit, which can still fail (BrokenPipeError). It is
+    also the line of the claim's last transition: the claimed marker is removed
+    only after it (handover_injection.deliver). The injection already happened,
+    and a failing hook would make Claude Code drop the output that carries it, so
+    this never raises: a failure to write it (OSError, LockTimeout, ValueError)
+    goes to log_failure and gives False. The claim then stays, listed by `resume`,
+    and whatever waits for this line acts as if the delivery did not finish.
     """
     try:
         journal(project_dir, "delivered", via=via, origin_session_id=origin, generation=generation,
                 session_id=successor)
     except (OSError, LockTimeout, ValueError) as error:
         log_failure(project_dir, "log the delivery of generation %s" % generation, error)
+        return False
+    return True
 
 
 def read_injections(project_dir: str) -> List[Dict[str, Any]]:
@@ -1033,7 +1038,10 @@ def mark_ready(project_dir: str, marker: Dict[str, Any]) -> str:
 
     The ready path is this session's own, rewritten whole through its own
     temporary file: a rejected marker there is reported, then replaced. A rejected
-    outdated marker is reported and left.
+    outdated marker is reported and left. The session's handover file holds one
+    generation, so this line also records the end of the generation it replaces,
+    ready or outdated: the marker that goes (here, or in _drop_superseded after a
+    crash) has no line of its own.
     """
     session_id = marker["session_id"]
     target = marker_path(project_dir, "ready", session_id)
@@ -1387,7 +1395,7 @@ def retire_original(project_dir: str, marker: Dict[str, Any]) -> None:
 
 
 def finish_claim(project_dir: str, claimed: str) -> None:
-    """After the emit: remove the claimed marker. Never raises.
+    """After the emit and its `delivered` line (log_delivery): remove the claimed marker. Never raises.
 
     The injection already happened, and a failing hook would make Claude Code drop
     the output that carries it: a failure to lock or unlink (OSError, LockTimeout)
