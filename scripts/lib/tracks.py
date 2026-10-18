@@ -35,6 +35,14 @@ VALID_HORIZONS = frozenset({"now", "next", "later"})
 # architectuur): an architecture track carries a plan-gate, a light track does not.
 VALID_PLAN_SCOPES = frozenset({"architecture", "light"})
 
+# A track's descriptive dispatch-routing hint (lane_hint in metadata_json).
+VALID_LANE_HINTS = frozenset({"governed", "direct", "unset"})
+
+# The keys the planning layer keeps in tracks.metadata_json. Only set_plan_scope
+# and set_lane_hint write them; update_authored_fields, the writer for a source
+# that rebuilds metadata_json wholesale (the ROADMAP seeder), keeps them as stored.
+PLANNING_METADATA_KEYS = ("lane_hint", "plan_scope", "plan_scope_rule")
+
 
 class InvalidHorizonError(ValueError):
     pass
@@ -279,6 +287,48 @@ def _row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
+def _metadata_dict(metadata_json: Optional[str]) -> dict[str, Any]:
+    """metadata_json as a dict; unparseable or non-object metadata reads as empty."""
+    try:
+        meta = json.loads(metadata_json or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def _initial_plan_scope(metadata_json: Optional[str]) -> Optional[str]:
+    """The plan_scope a new track is born with, or None when it carries none.
+
+    Raises ValueError on a value that is not a plan scope, so no track is born
+    with a scope only the reader's closed-on-doubt rule can interpret.
+    """
+    meta = _metadata_dict(metadata_json)
+    if "plan_scope" not in meta:
+        return None
+    if meta["plan_scope"] not in VALID_PLAN_SCOPES:
+        raise ValueError(
+            f"Invalid plan_scope: {meta['plan_scope']!r}. Must be one of {sorted(VALID_PLAN_SCOPES)}"
+        )
+    return meta["plan_scope"]
+
+
+def _keep_planning_keys(stored_metadata_json: Optional[str], metadata_json: str) -> str:
+    """``metadata_json`` with every planning-owned key exactly as it is stored.
+
+    A key the stored row has keeps its stored value; a key it lacks is not
+    written. Raises ValueError when ``metadata_json`` is not a JSON object,
+    because the merge would otherwise replace it with an empty one.
+    """
+    try:
+        parsed = json.loads(metadata_json)
+    except (TypeError, ValueError):
+        parsed = None
+    if not isinstance(parsed, dict):
+        raise ValueError(f"metadata_json must be a JSON object, got {metadata_json!r}")
+    stored = _metadata_dict(stored_metadata_json)
+    return metadata_json_with(metadata_json, {key: stored.get(key) for key in PLANNING_METADATA_KEYS})
+
+
 # ---------------------------------------------------------------------------
 # CRUD
 # ---------------------------------------------------------------------------
@@ -300,13 +350,22 @@ def create_track(
     trigger_condition: Optional[str] = None,
     metadata_json: Optional[str] = None,
     horizon: Optional[str] = None,
+    scope_origin: str = "create_track",
 ) -> dict[str, Any]:
+    """Insert a new track.
+
+    A ``plan_scope`` in ``metadata_json`` is a decision too: it is recorded as a
+    ``track_plan_scope_set`` event (old ``none``, rule ``scope_origin``) next to
+    ``track_created``, before the row is written (ADR-005). An unknown scope
+    raises ValueError before anything is written.
+    """
     if phase not in VALID_PHASES:
         raise InvalidPhaseError(f"Invalid phase: {phase!r}. Must be one of {sorted(VALID_PHASES)}")
     if horizon is not None and horizon not in VALID_HORIZONS:
         raise InvalidHorizonError(
             f"Invalid horizon: {horizon!r}. Must be one of {sorted(VALID_HORIZONS)} or None"
         )
+    initial_scope = _initial_plan_scope(metadata_json)
 
     now = _now_utc()
     conn = _get_conn(state_dir)
@@ -326,40 +385,31 @@ def create_track(
             )
         _emit_track_event(
             state_dir, "track_created", track_id, project_id, "system", {"title": title})
+        if initial_scope is not None:
+            _emit_track_event(
+                state_dir, "track_plan_scope_set", track_id, project_id, "system",
+                {"old": "none", "new": initial_scope,
+                 "reason": f"set at creation by {scope_origin}", "rule": scope_origin},
+            )
+        columns = [
+            "track_id", "project_id", "title", "goal_state", "phase", "next_up", "sort_order",
+            "priority", "requires_operator_promotion", "instruction_template",
+            "context_composer_rules", "pr_ref", "trigger_condition", "created_at",
+            "phase_changed_at", "metadata_json",
+        ]
+        values = [
+            track_id, project_id, title, goal_state, phase, 0, sort_order,
+            priority, requires_operator_promotion, instruction_template,
+            context_composer_rules, pr_ref, trigger_condition, now,
+            now, metadata_json or "{}",
+        ]
         if has_horizon:
-            conn.execute(
-                """
-                INSERT INTO tracks (
-                    track_id, project_id, title, goal_state, phase, next_up, sort_order, priority,
-                    requires_operator_promotion, instruction_template, context_composer_rules,
-                    pr_ref, trigger_condition, created_at, phase_changed_at,
-                    metadata_json, horizon
-                ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    track_id, project_id, title, goal_state, phase, sort_order, priority,
-                    requires_operator_promotion, instruction_template, context_composer_rules,
-                    pr_ref, trigger_condition, now, now,
-                    metadata_json or "{}", horizon,
-                ),
-            )
-        else:
-            conn.execute(
-                """
-                INSERT INTO tracks (
-                    track_id, project_id, title, goal_state, phase, next_up, sort_order, priority,
-                    requires_operator_promotion, instruction_template, context_composer_rules,
-                    pr_ref, trigger_condition, created_at, phase_changed_at,
-                    metadata_json
-                ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    track_id, project_id, title, goal_state, phase, sort_order, priority,
-                    requires_operator_promotion, instruction_template, context_composer_rules,
-                    pr_ref, trigger_condition, now, now,
-                    metadata_json or "{}",
-                ),
-            )
+            columns.append("horizon")
+            values.append(horizon)
+        conn.execute(
+            f"INSERT INTO tracks ({', '.join(columns)}) VALUES ({', '.join('?' * len(columns))})",
+            values,
+        )
         conn.commit()
         row = conn.execute(
             "SELECT * FROM tracks WHERE track_id = ? AND project_id = ?",
@@ -392,7 +442,15 @@ def update_authored_fields(
     `next_up`. Only the fields passed (non-None) are written. Emits a
     `track_authored_synced` audit event listing the changed columns.
 
-    Raises TrackNotFoundError if the track does not exist.
+    ``metadata_json`` replaces the stored blob except for the planning-owned
+    keys (``PLANNING_METADATA_KEYS``): those keep the value the row has at write
+    time and are never written here, whatever the passed blob says. The read and
+    the write run in one IMMEDIATE transaction, so a plan_scope or lane_hint
+    written by another process while the caller built its blob is not lost.
+    Write them with ``set_plan_scope`` or ``set_lane_hint``.
+
+    Raises TrackNotFoundError if the track does not exist, and ValueError when
+    ``metadata_json`` is not a JSON object.
     """
     if horizon is not None and horizon not in VALID_HORIZONS:
         raise InvalidHorizonError(
@@ -417,12 +475,15 @@ def update_authored_fields(
 
     conn = _get_conn(state_dir)
     try:
+        conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             "SELECT * FROM tracks WHERE track_id = ? AND project_id = ?",
             (track_id, project_id),
         ).fetchone()
         if not row:
             raise TrackNotFoundError(f"Track not found: ({track_id!r}, {project_id!r})")
+        if "metadata_json" in updates:
+            updates["metadata_json"] = _keep_planning_keys(row["metadata_json"], updates["metadata_json"])
 
         # D5 fail-closed: refuse a horizon write when the column is absent (pre-0027
         # store) rather than crashing with an opaque "no such column: horizon". The
@@ -445,7 +506,7 @@ def update_authored_fields(
                 f"UPDATE tracks SET {set_clause} WHERE track_id = ? AND project_id = ?",
                 (*updates.values(), track_id, project_id),
             )
-            conn.commit()
+        conn.commit()
 
         updated = conn.execute(
             "SELECT * FROM tracks WHERE track_id = ? AND project_id = ?",
@@ -453,6 +514,7 @@ def update_authored_fields(
         ).fetchone()
         return dict(updated)
     finally:
+        # Closing without a commit discards the IMMEDIATE transaction on any raise.
         conn.close()
 
 
@@ -530,12 +592,7 @@ def metadata_json_with(existing_metadata_json: Optional[str], updates: dict[str,
     Unparseable or non-object metadata reads as empty, as the lane_hint reader
     always did.
     """
-    try:
-        meta = json.loads(existing_metadata_json or "{}")
-    except (TypeError, ValueError):
-        meta = {}
-    if not isinstance(meta, dict):
-        meta = {}
+    meta = _metadata_dict(existing_metadata_json)
     for key, value in updates.items():
         if value is None:
             meta.pop(key, None)
@@ -554,6 +611,7 @@ def set_plan_scope(
     reason: str,
     rule: Optional[str] = None,
     actor: str = "operator",
+    conn: Optional[sqlite3.Connection] = None,
 ) -> dict[str, Any]:
     """Write a track's ``plan_scope`` and emit one ``track_plan_scope_set`` event.
 
@@ -565,7 +623,15 @@ def set_plan_scope(
     carries old, new, reason and rule (ADR-005).
 
     The read-merge-write runs inside one IMMEDIATE transaction, so a
-    ``lane_hint`` written at the same time cannot be lost.
+    ``lane_hint`` written at the same time cannot be lost. Pass ``conn`` to
+    write inside a transaction the CALLER holds (``plan_scope`` seeds
+    ``OI-PLAN`` in the same one): then nothing is committed here, and the
+    caller read ``old_scope`` under that same lock. The conn must target the
+    state_dir DB (C3-N2).
+
+    The ledger line is written after the UPDATE and before the commit, in both
+    forms: no scope commits without its line, and a write that fails before it
+    (this UPDATE, or a seed the caller ran first) leaves no line behind.
 
     Raises ValueError on an unknown scope or an empty reason, and
     TrackNotFoundError when the track does not exist.
@@ -577,6 +643,70 @@ def set_plan_scope(
     if not (reason or "").strip():
         raise ValueError(f"set_plan_scope on {track_id!r} requires a non-empty reason")
 
+    owns = conn is None
+    if not owns:
+        _assert_conn_targets_db(conn, state_dir, "set_plan_scope")
+    _conn = _get_conn(state_dir) if owns else conn
+    try:
+        if owns:
+            _conn.execute("BEGIN IMMEDIATE")
+        row = _conn.execute(
+            "SELECT metadata_json FROM tracks WHERE track_id = ? AND project_id = ?",
+            (track_id, project_id),
+        ).fetchone()
+        if not row:
+            raise TrackNotFoundError(f"Track not found: ({track_id!r}, {project_id!r})")
+
+        new_metadata_json = metadata_json_with(
+            row["metadata_json"], {"plan_scope": scope, "plan_scope_rule": rule},
+        )
+        _conn.execute(
+            "UPDATE tracks SET metadata_json = ? WHERE track_id = ? AND project_id = ?",
+            (new_metadata_json, track_id, project_id),
+        )
+        _emit_track_event(
+            state_dir, "track_plan_scope_set", track_id, project_id, actor,
+            {"old": old_scope, "new": scope, "reason": reason.strip(), "rule": rule},
+        )
+        if owns:
+            _conn.commit()
+
+        updated = _conn.execute(
+            "SELECT * FROM tracks WHERE track_id = ? AND project_id = ?",
+            (track_id, project_id),
+        ).fetchone()
+        return dict(updated)
+    except Exception:
+        if owns:
+            _conn.rollback()
+        raise
+    finally:
+        if owns:
+            _conn.close()
+
+
+def set_lane_hint(
+    state_dir: str | Path,
+    track_id: str,
+    project_id: str,
+    lane_hint: str,
+    *,
+    actor: str = "operator",
+) -> dict[str, Any]:
+    """Write a track's ``lane_hint``; every other metadata key stays as stored.
+
+    Descriptive only: the door still decides the lane. The read-merge-write runs
+    inside one IMMEDIATE transaction with the same merge rule as
+    ``set_plan_scope``, so a plan_scope written while the caller decided on the
+    hint is never put back to an older value. Emits the ``track_authored_synced``
+    event set-lane-hint always wrote, now with the old and the new hint.
+
+    Raises ValueError on an unknown hint and TrackNotFoundError when the track
+    does not exist.
+    """
+    if lane_hint not in VALID_LANE_HINTS:
+        raise ValueError(f"Invalid lane_hint: {lane_hint!r}. Must be one of {sorted(VALID_LANE_HINTS)}")
+
     conn = _get_conn(state_dir)
     try:
         conn.execute("BEGIN IMMEDIATE")
@@ -587,16 +717,15 @@ def set_plan_scope(
         if not row:
             raise TrackNotFoundError(f"Track not found: ({track_id!r}, {project_id!r})")
 
-        new_metadata_json = metadata_json_with(
-            row["metadata_json"], {"plan_scope": scope, "plan_scope_rule": rule},
-        )
-        _emit_track_event(
-            state_dir, "track_plan_scope_set", track_id, project_id, actor,
-            {"old": old_scope, "new": scope, "reason": reason.strip(), "rule": rule},
-        )
         conn.execute(
             "UPDATE tracks SET metadata_json = ? WHERE track_id = ? AND project_id = ?",
-            (new_metadata_json, track_id, project_id),
+            (metadata_json_with(row["metadata_json"], {"lane_hint": lane_hint}), track_id, project_id),
+        )
+        _emit_track_event(
+            state_dir, "track_authored_synced", track_id, project_id, actor,
+            {"fields": ["metadata_json"],
+             "old_lane_hint": _metadata_dict(row["metadata_json"]).get("lane_hint"),
+             "new_lane_hint": lane_hint},
         )
         conn.commit()
 
@@ -605,6 +734,9 @@ def set_plan_scope(
             (track_id, project_id),
         ).fetchone()
         return dict(updated)
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 

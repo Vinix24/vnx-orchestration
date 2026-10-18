@@ -1595,14 +1595,19 @@ def _raise_plan_scope_at_door(spec: DispatchSpec, *, state_dir: Path) -> None:
     whose paths fall in an architecture class (``plan_scope.dispatch_rule``:
     schema, security, gate or merge logic, store resolution, a coding-strict
     variant, or no paths at all) makes the track architecture and seeds
-    ``OI-PLAN-<track>``. The door refuses nothing here: it writes the scope,
-    seeds the blocker, prints one line, and the dispatch goes on. Refusing is P3.
+    ``OI-PLAN-<track>`` in the same transaction. Any build dispatch on a stored
+    architecture track that has no OI-PLAN row of any status seeds one. The
+    door refuses nothing here: it writes the scope, seeds the blocker, prints
+    one line, and the dispatch goes on. Refusing is P3.
 
     Best-effort like the rest of the door's bookkeeping: a failure is recorded
-    (``_record_bookkeeping_failure``) and never blocks the fire.
+    (``_record_bookkeeping_failure``) and never blocks the fire. A failed seed
+    rolls the raise back, so the next fire on the track tries again.
     """
     track_id = (spec.track_id or "").strip()
     if not track_id or not _spec_is_writing(spec):
+        return
+    if not _tracks_db_path(state_dir).exists():
         return
     try:
         import plan_scope
@@ -1612,11 +1617,12 @@ def _raise_plan_scope_at_door(spec: DispatchSpec, *, state_dir: Path) -> None:
             task_class=spec.task_class, irreversible=spec.irreversible,
         )
         if rule is None:
-            return
-        change = plan_scope.raise_to_architecture(
-            state_dir, track_id, spec.project_id,
-            rule=f"door, dispatch {spec.dispatch_id}: {rule}",
-        )
+            change = plan_scope.ensure_plan_blocker(state_dir, track_id, spec.project_id)
+        else:
+            change = plan_scope.raise_to_architecture(
+                state_dir, track_id, spec.project_id,
+                rule=f"door, dispatch {spec.dispatch_id}: {rule}",
+            )
         if change is not None:
             print(f"[dispatch_cli] {change.line()}. The dispatch continues.", file=sys.stderr)
     except Exception as exc:  # vnx-silent-except: plan-scope bookkeeping is best-effort; the door refuses nothing in P1

@@ -81,7 +81,7 @@ _HORIZON_LABEL = {"now": "NOW", "next": "NEXT", "later": "LATER", None: "UNSCHED
 # that have not (yet) earned a first-class column (see
 # seed_tracks_from_roadmap.py's metadata.pr_queue). Descriptive only: it never
 # changes dispatch routing — the door still decides the lane.
-_VALID_LANE_HINTS = frozenset({"governed", "direct", "unset"})
+_VALID_LANE_HINTS = tracks_lib.VALID_LANE_HINTS
 _LANE_HINT_DEFAULT = "unset"
 
 
@@ -198,59 +198,6 @@ def _lane_hint_of(track: dict[str, Any]) -> str:
         meta = {}
     value = meta.get("lane_hint")
     return value if value in _VALID_LANE_HINTS else _LANE_HINT_DEFAULT
-
-
-def _metadata_json_with_lane_hint(existing_metadata_json: Optional[str], lane_hint: str) -> str:
-    """Return metadata_json with lane_hint set, preserving any other keys (plan_scope too)."""
-    return tracks_lib.metadata_json_with(existing_metadata_json, {"lane_hint": lane_hint})
-
-
-# The keys planning_cli keeps in tracks.metadata_json next to the seeder's own.
-_PLANNING_OWNED_KEYS = ("lane_hint", plan_scope.SCOPE_KEY, plan_scope.RULE_KEY)
-
-
-def _planning_keys_of(track: dict[str, Any]) -> dict[str, Any]:
-    try:
-        meta = json.loads(track.get("metadata_json") or "{}")
-    except (TypeError, ValueError):
-        return {}
-    if not isinstance(meta, dict):
-        return {}
-    return {key: meta[key] for key in _PLANNING_OWNED_KEYS if key in meta}
-
-
-def _snapshot_planning_keys(state_dir: Path, project_id: str) -> dict[str, dict[str, Any]]:
-    """{track_id: {key: value}} for every track carrying a planning-owned key."""
-    return {
-        t["track_id"]: keys
-        for t in tracks_lib.list_tracks(state_dir, project_id)
-        if (keys := _planning_keys_of(t))
-    }
-
-
-def _restore_planning_keys(
-    state_dir: Path, project_id: str, snapshot: dict[str, dict[str, Any]],
-) -> None:
-    """Re-apply lane_hint, plan_scope and plan_scope_rule after `seeder.seed(apply=True)` runs.
-
-    The ROADMAP seeder (seed_tracks_from_roadmap.py) owns milestone/roadmap_status/
-    risk_class/pr_queue inside metadata_json and rebuilds that blob wholesale on
-    every authored-field change; it has no notion of the planning_cli-owned keys
-    in the same column, so syncing a track that also has other authored drift
-    would otherwise silently drop lane_hint back to 'unset' and plan_scope back
-    to the transition reading. Restoring them here — the CLI layer that
-    orchestrates the seeder call — keeps the seeder itself unaware of them, at
-    the cost of the sync report occasionally listing a track as "updated" for a
-    metadata-only round-trip even when no ROADMAP-authored field actually changed.
-    """
-    for track_id, keys in snapshot.items():
-        track = tracks_lib.get_track(state_dir, track_id, project_id)
-        if track is None or _planning_keys_of(track) == keys:
-            continue
-        new_metadata_json = tracks_lib.metadata_json_with(track.get("metadata_json"), keys)
-        tracks_lib.update_authored_fields(
-            state_dir, track_id, project_id, metadata_json=new_metadata_json,
-        )
 
 
 def _objective_list_json_row(
@@ -459,13 +406,11 @@ def cmd_objective_sync(args: argparse.Namespace) -> int:
         return 1
 
     # Pure reuse: the seeder owns all projection logic. Dry-run writes nothing.
-    # Snapshot/restore lane_hint and plan_scope around the call: the seeder
-    # rebuilds metadata_json wholesale and has no notion of them (see
-    # _restore_planning_keys for why this lives here rather than in the seeder).
-    keys_before = _snapshot_planning_keys(state_dir, project_id) if args.apply else {}
+    # The seeder rebuilds metadata_json wholesale and has no notion of lane_hint
+    # or plan_scope; tracks.update_authored_fields keeps those keys as they are
+    # stored at write time, in the transaction it writes in, so a scope raised
+    # while the sync runs is never put back to an older value.
     report = seeder.seed(state_dir, roadmap_path, project_id, apply=args.apply)
-    if args.apply and keys_before:
-        _restore_planning_keys(state_dir, project_id, keys_before)
 
     if args.json:
         print(json.dumps(report, indent=2, default=str))
@@ -2511,6 +2456,7 @@ def cmd_objective_add(args: argparse.Namespace) -> int:
             horizon=args.horizon,
             priority=args.priority,
             metadata_json=metadata_json,
+            scope_origin="horizon add",
         )
     except Exception as exc:  # duplicate id, invalid horizon/priority, etc.
         print(f"objective add failed: {exc}", file=sys.stderr)
@@ -2521,13 +2467,21 @@ def cmd_objective_add(args: argparse.Namespace) -> int:
     # Plan-first for an architecture track: seed the synthetic OI-PLAN blocker so
     # the track is born blocked. Nothing promotes until the plan gate passes
     # (PM-SKILL). Graceful no-op on DBs that predate the plan-gate schema. A light
-    # track gets no plan-gate.
+    # track gets no plan-gate. A failed seed leaves a stored architecture track
+    # without OI-PLAN; the next door pass or set-plan-scope seeds it
+    # (plan_scope._recover_in).
     plan_gated = False
     if scope == plan_scope.ARCHITECTURE:
         try:
             plan_gated = _seed_plan_blocker(state_dir, tid, args.project_id)
         except Exception as exc:  # never let gate-seeding break track creation
-            print(f"warning: could not seed plan-first blocker for {tid}: {exc}", file=sys.stderr)
+            print(
+                f"warning: could not seed plan-first blocker for {tid}: {exc}. Without "
+                f"{_plan_blocker_oi(tid)} this architecture track gets it on the next build "
+                f"dispatch at the door, or now with `vnx horizon set-plan-scope {tid} "
+                "architecture --reason \"...\"`.",
+                file=sys.stderr,
+            )
 
     gate_note = " — plan-gated (blocked until the plan panel passes)" if plan_gated else ""
     print(
@@ -2543,8 +2497,8 @@ def cmd_objective_set_lane_hint(args: argparse.Namespace) -> int:
     Descriptive only: this never changes dispatch routing — the door still
     decides the lane. It exists so a cold-start T0 can read how a track is
     MEANT to be dispatched without relying on judgment carried over from a
-    prior session. Writes via tracks_lib.update_authored_fields, the existing
-    single-writer path for track-authored fields.
+    prior session. Writes via tracks_lib.set_lane_hint, which merges the hint
+    into the metadata stored at write time, so plan_scope is never touched.
     """
     state_dir = _resolve_state_dir(args.state_dir)
     project_id = args.project_id
@@ -2559,12 +2513,8 @@ def cmd_objective_set_lane_hint(args: argparse.Namespace) -> int:
         )
         return 2
 
-    new_metadata_json = _metadata_json_with_lane_hint(track.get("metadata_json"), args.lane_hint)
     try:
-        tracks_lib.update_authored_fields(
-            state_dir, track_id, project_id,
-            metadata_json=new_metadata_json,
-        )
+        tracks_lib.set_lane_hint(state_dir, track_id, project_id, args.lane_hint)
     except Exception as exc:
         print(f"objective set-lane-hint failed: {exc}", file=sys.stderr)
         return 1

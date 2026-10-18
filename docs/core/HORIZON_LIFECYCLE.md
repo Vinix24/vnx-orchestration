@@ -58,13 +58,20 @@ paths fall in the schema, security, gate/merge or store-resolution class, whose
 variant is `coding-strict`, or that names no paths at all (`plan_scope.dispatch_rule`,
 path classes in `smart_router.plan_scope_path_category`). An upward move seeds
 `OI-PLAN-<track>` unless the track already has a plan-gate record; a resolved one is
-never reopened. The door refuses nothing for this in P1: it writes the scope, seeds the
-blocker, prints one line, and the dispatch goes on. Down only by hand:
+never reopened. The scope and the seed commit in one transaction, so a failed seed
+leaves the track `light` and the next attempt tries again. A stored `architecture`
+track with no `OI-PLAN` row of any status (a `horizon add` whose seed failed) gets one
+on the next build dispatch at the door or `set-plan-scope ... architecture`. The door
+refuses nothing for this in P1: it writes the scope, seeds the blocker, prints one
+line, and the dispatch goes on. Down only by hand:
 `vnx horizon set-plan-scope <track> light --reason "..."`, which leaves `OI-PLAN` as it
 is. Every change writes one `track_plan_scope_set` line (old, new, reason, rule) to
-`track_events.ndjson`, and `vnx horizon show` names the scope and the rule that set it.
-A track from before P1 has no `plan_scope`: it reads as `architecture` with an open
-`OI-PLAN` and as `light` without one, and reading writes nothing.
+`track_events.ndjson`, the scope chosen at `horizon add` included (old `none`, rule
+`horizon add`), and `vnx horizon show` names the scope and the rule that set it.
+`objective sync` never touches `plan_scope` or `lane_hint`: the ROADMAP seeder's write
+keeps them as stored at write time. A track from before P1 has no `plan_scope`: it
+reads as `architecture` with an open `OI-PLAN` and as `light` without one, and reading
+writes nothing.
 
 ### 2. Plan gate — pass the plan before the work
 

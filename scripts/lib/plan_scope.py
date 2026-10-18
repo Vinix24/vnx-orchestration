@@ -12,12 +12,16 @@ How the value moves:
 - It goes UP by itself, never down: the fourth deliverable on a light track
   (``deliverable add``), or a build dispatch at the door whose paths fall in an
   architecture class (``dispatch_rule``). Going up seeds ``OI-PLAN-<track>``
-  unless the track already has a plan-gate record.
+  unless the track already has a plan-gate record, in the same transaction as
+  the scope: both commit or neither does.
 - It goes DOWN only by hand: ``vnx horizon set-plan-scope <track> light
   --reason "..."``. That never closes or attests ``OI-PLAN``.
+- A stored architecture track with no OI-PLAN row of any status gets one on the
+  next door pass or ``set-plan-scope ... architecture``.
 
 Every change writes one ``track_plan_scope_set`` line to track_events.ndjson
-(``tracks.set_plan_scope``). P1 refuses nothing: it writes, seeds and says so.
+(``tracks.set_plan_scope``; a scope set at birth by ``tracks.create_track``).
+P1 refuses nothing: it writes, seeds and says so.
 
 Old tracks carry no ``plan_scope``. Reading one gives ``architecture`` when it
 has an open ``OI-PLAN`` and ``light`` when it has none; reading writes nothing.
@@ -26,9 +30,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Iterator, Optional, Sequence
 
 import track_reconciler
 import tracks as tracks_lib
@@ -190,57 +195,75 @@ def seed_plan_blocker(
     return True
 
 
-def _plan_blocker_rows(state_dir: Path, track_id: str, project_id: str) -> list[dict]:
+def _plan_rows_in(conn: sqlite3.Connection, track_id: str, project_id: str) -> list[dict]:
     """Every OI-PLAN-<track> 'blocks' row, resolved or not. A store without the
     open-items table has none; one without resolved_at reads every row as open."""
+    if not _has_table(conn, "track_open_items"):
+        return []
+    resolved = "resolved_at" if _has_col(conn, "track_open_items", "resolved_at") else "NULL"
+    rows = conn.execute(
+        f"SELECT oi_id, {resolved} AS resolved_at FROM track_open_items "
+        "WHERE track_id = ? AND project_id = ? AND oi_id = ? AND link_type = 'blocks'",
+        (track_id, project_id, plan_blocker_oi(track_id)),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _any_open(rows: list[dict]) -> bool:
+    return any(row.get("resolved_at") is None for row in rows)
+
+
+@contextmanager
+def _write_transaction(state_dir: Path) -> Iterator[sqlite3.Connection]:
+    """One IMMEDIATE transaction on the track store: everything in it commits, or nothing."""
     conn = _connect(state_dir)
     try:
-        if not _has_table(conn, "track_open_items"):
-            return []
-        resolved = "resolved_at" if _has_col(conn, "track_open_items", "resolved_at") else "NULL"
-        rows = conn.execute(
-            f"SELECT oi_id, {resolved} AS resolved_at FROM track_open_items "
-            "WHERE track_id = ? AND project_id = ? AND oi_id = ? AND link_type = 'blocks'",
-            (track_id, project_id, plan_blocker_oi(track_id)),
-        ).fetchall()
-        return [dict(row) for row in rows]
+        conn.execute("BEGIN IMMEDIATE")
+        yield conn
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
 
-def has_open_plan_blocker(state_dir: Path, track_id: str, project_id: str) -> bool:
-    """True when OI-PLAN-<track> is linked and not resolved. Read-only."""
-    return any(row.get("resolved_at") is None for row in _plan_blocker_rows(state_dir, track_id, project_id))
+def _locked_reading(
+    conn: sqlite3.Connection, track_id: str, project_id: str,
+) -> tuple[Optional[ScopeReading], list[dict]]:
+    """The scope and the OI-PLAN rows as they are under the caller's write lock.
+    (None, []) when the track does not exist."""
+    row = conn.execute(
+        "SELECT metadata_json FROM tracks WHERE track_id = ? AND project_id = ?",
+        (track_id, project_id),
+    ).fetchone()
+    if row is None:
+        return None, []
+    rows = _plan_rows_in(conn, track_id, project_id)
+    return read_scope(row["metadata_json"], open_plan_blocker=_any_open(rows)), rows
 
 
-def read_track_scope(
-    state_dir: Path, track_id: str, project_id: str, *, track: Optional[dict] = None,
-) -> Optional[ScopeReading]:
-    """The scope of one track in the store, or None when the track does not exist."""
-    if track is None:
-        track = tracks_lib.get_track(state_dir, track_id, project_id)
-    if track is None:
-        return None
-    return read_scope(
-        track.get("metadata_json"),
-        open_plan_blocker=has_open_plan_blocker(state_dir, track_id, project_id),
-    )
-
-
-def _seed_unless_recorded(state_dir: Path, track_id: str, project_id: str) -> str:
-    """Seed OI-PLAN-<track> for a track that just became architecture.
+def _seed_in(conn: sqlite3.Connection, track_id: str, project_id: str, rows: list[dict]) -> str:
+    """Seed OI-PLAN-<track> inside the caller's transaction, unless a row exists.
 
     A track that already has an OI-PLAN row keeps it as it is: an open row is
     the gate still to run, a resolved row is a gate already passed or attested.
     Seeding over a resolved row would reopen a passed gate, which no upward
-    move may do.
+    move may do. ``rows`` were read under the same lock, so none can appear
+    between that read and this insert.
     """
-    rows = _plan_blocker_rows(state_dir, track_id, project_id)
-    if any(row.get("resolved_at") is None for row in rows):
+    if _any_open(rows):
         return ALREADY_OPEN
     if rows:
         return ALREADY_RESOLVED
-    return SEEDED if seed_plan_blocker(state_dir, track_id, project_id) else UNSUPPORTED
+    if not plan_gate_supported(conn):
+        return UNSUPPORTED
+    conn.execute(
+        "INSERT INTO track_open_items (track_id, project_id, oi_id, link_type, link_source) "
+        "VALUES (?, ?, ?, 'blocks', 'manual')",
+        (track_id, project_id, plan_blocker_oi(track_id)),
+    )
+    return SEEDED
 
 
 _GATE_NOTES = {
@@ -264,29 +287,85 @@ class ScopeChange:
         note = ""
         if self.gate:
             note = "; " + _GATE_NOTES[self.gate].format(oi=plan_blocker_oi(self.track_id))
-        return f"plan-scope: {self.track_id} {self.old} -> {self.new} ({self.why}){note}"
+        move = f"stays {self.new}" if self.old == self.new else f"{self.old} -> {self.new}"
+        return f"plan-scope: {self.track_id} {move} ({self.why}){note}"
+
+
+def _reconciled(state_dir: Path, project_id: str, change: Optional[ScopeChange]) -> Optional[ScopeChange]:
+    """Re-derive the track's status after the commit when OI-PLAN was seeded.
+
+    derived_status is a projection of the committed rows (the promote-lock reads
+    it), so it is computed once they are durable, as ``seed_plan_blocker`` does.
+    """
+    if change is not None and change.gate == SEEDED:
+        track_reconciler.reconcile_track(state_dir, change.track_id, project_id)
+    return change
+
+
+def _recover_in(
+    conn: sqlite3.Connection, track_id: str, project_id: str,
+    reading: ScopeReading, rows: list[dict],
+) -> Optional[ScopeChange]:
+    """Seed OI-PLAN for a stored architecture track that has no OI-PLAN row at all.
+
+    ``horizon add --plan-scope architecture`` writes the track and seeds its
+    blocker in two steps, and a store can gain the plan-gate schema after a
+    track was set architecture: both can leave a stored architecture track
+    without a blocker. A row of any status means the gate was seeded once and
+    is left as it is. Only a stored value counts: a track read as architecture
+    from an open OI-PLAN has one, and an unreadable value is architecture by
+    doubt, not by a decision anyone made.
+    """
+    if reading.source != SOURCE_STORED or reading.scope != ARCHITECTURE or rows:
+        return None
+    if _seed_in(conn, track_id, project_id, rows) != SEEDED:
+        return None
+    return ScopeChange(track_id, ARCHITECTURE, ARCHITECTURE, "stored, without an OI-PLAN row", SEEDED)
 
 
 def raise_to_architecture(
     state_dir: Path, track_id: str, project_id: str, *, rule: str, actor: str = "system",
 ) -> Optional[ScopeChange]:
-    """Move a light track up to architecture by ``rule``; None when it is not light.
+    """Move a light track up to architecture by ``rule``; None when nothing was written.
+
+    Reading the scope, seeding ``OI-PLAN-<track>`` and writing the scope run in
+    one IMMEDIATE transaction on runtime_coordination.db, where both rows live:
+    a seed that fails rolls the raise back, so a track is never architecture by
+    rule without its blocker, and the next attempt finds it light and tries
+    again. The scope is read under the write lock, so a value written by
+    another process in the meantime is what this decides on.
 
     Only upward: a track already architecture (stored, read from an open
-    OI-PLAN, or unreadable) is left alone. Never refuses anything.
+    OI-PLAN, or unreadable) keeps its scope. A stored architecture track with
+    no OI-PLAN row of any status gets one (``_recover_in``). Never refuses
+    anything.
     """
-    track = tracks_lib.get_track(state_dir, track_id, project_id)
-    if track is None:
-        return None
-    reading = read_track_scope(state_dir, track_id, project_id, track=track)
-    if reading.scope != LIGHT:
-        return None
-    tracks_lib.set_plan_scope(
-        state_dir, track_id, project_id, ARCHITECTURE,
-        old_scope=LIGHT, reason=rule, rule=rule, actor=actor,
-    )
-    gate = _seed_unless_recorded(state_dir, track_id, project_id)
-    return ScopeChange(track_id, LIGHT, ARCHITECTURE, f"rule: {rule}", gate)
+    with _write_transaction(state_dir) as conn:
+        reading, rows = _locked_reading(conn, track_id, project_id)
+        if reading is None:
+            return None
+        if reading.scope != LIGHT:
+            change = _recover_in(conn, track_id, project_id, reading, rows)
+        else:
+            gate = _seed_in(conn, track_id, project_id, rows)
+            tracks_lib.set_plan_scope(
+                state_dir, track_id, project_id, ARCHITECTURE,
+                old_scope=LIGHT, reason=rule, rule=rule, actor=actor, conn=conn,
+            )
+            change = ScopeChange(track_id, LIGHT, ARCHITECTURE, f"rule: {rule}", gate)
+    return _reconciled(state_dir, project_id, change)
+
+
+def ensure_plan_blocker(state_dir: Path, track_id: str, project_id: str) -> Optional[ScopeChange]:
+    """The door's pass on a build dispatch that names no architecture rule.
+
+    The scope stays as it is; only a stored architecture track without any
+    OI-PLAN row gets one seeded (``_recover_in``). None when nothing was written.
+    """
+    with _write_transaction(state_dir) as conn:
+        reading, rows = _locked_reading(conn, track_id, project_id)
+        change = None if reading is None else _recover_in(conn, track_id, project_id, reading, rows)
+    return _reconciled(state_dir, project_id, change)
 
 
 def set_by_hand(
@@ -295,8 +374,9 @@ def set_by_hand(
     """The operator's ``set-plan-scope``: either direction, always with a reason.
 
     Down to light writes the value and leaves OI-PLAN as it is: closing or
-    attesting it stays with the plan-gate or the operator. Up to architecture
-    seeds OI-PLAN the same way an automatic move does.
+    attesting it stays with the plan-gate or the operator. Up to architecture,
+    or architecture again, seeds OI-PLAN when the track has no OI-PLAN row of
+    any status, in the same transaction as the scope, as an automatic move does.
 
     Raises ValueError on an empty reason or an unknown scope, and
     tracks.TrackNotFoundError when the track does not exist.
@@ -305,15 +385,17 @@ def set_by_hand(
         raise ValueError("set-plan-scope requires --reason: say why the scope changes")
     if scope not in PLAN_SCOPES:
         raise ValueError(f"unknown plan scope {scope!r}; use {' or '.join(PLAN_SCOPES)}")
-    reading = read_track_scope(state_dir, track_id, project_id)
-    if reading is None:
-        raise tracks_lib.TrackNotFoundError(f"Track not found: ({track_id!r}, {project_id!r})")
-    tracks_lib.set_plan_scope(
-        state_dir, track_id, project_id, scope,
-        old_scope=reading.scope, reason=reason, rule=None, actor="operator",
-    )
-    gate = _seed_unless_recorded(state_dir, track_id, project_id) if scope == ARCHITECTURE else None
-    return ScopeChange(track_id, reading.scope, scope, f"by hand: {reason.strip()}", gate)
+    with _write_transaction(state_dir) as conn:
+        reading, rows = _locked_reading(conn, track_id, project_id)
+        if reading is None:
+            raise tracks_lib.TrackNotFoundError(f"Track not found: ({track_id!r}, {project_id!r})")
+        gate = _seed_in(conn, track_id, project_id, rows) if scope == ARCHITECTURE else None
+        tracks_lib.set_plan_scope(
+            state_dir, track_id, project_id, scope,
+            old_scope=reading.scope, reason=reason, rule=None, actor="operator", conn=conn,
+        )
+        change = ScopeChange(track_id, reading.scope, scope, f"by hand: {reason.strip()}", gate)
+    return _reconciled(state_dir, project_id, change)
 
 
 def deliverable_rule(deliverable_count: int) -> Optional[str]:

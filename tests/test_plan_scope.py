@@ -172,6 +172,30 @@ def _scope_events(state_dir: Path, track_id: str) -> list[dict]:
     return [e for e in events if e["event_type"] == "track_plan_scope_set" and e["track_id"] == track_id]
 
 
+def _scope_changes(state_dir: Path, track_id: str) -> list[dict]:
+    """The scope events after birth: a track born with a scope records it as old 'none'."""
+    return [e for e in _scope_events(state_dir, track_id) if e["details"]["old"] != "none"]
+
+
+def _fail_plan_seeds(state_dir: Path) -> None:
+    """Make every OI-PLAN seed write fail at the storage level, whichever code writes it."""
+    conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+    conn.execute(
+        "CREATE TRIGGER fail_plan_seed BEFORE INSERT ON track_open_items "
+        "WHEN NEW.oi_id LIKE 'OI-PLAN-%' "
+        "BEGIN SELECT RAISE(ABORT, 'injected: the OI-PLAN seed write fails'); END"
+    )
+    conn.commit()
+    conn.close()
+
+
+def _heal_plan_seeds(state_dir: Path) -> None:
+    conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+    conn.execute("DROP TRIGGER fail_plan_seed")
+    conn.commit()
+    conn.close()
+
+
 def _show(state_dir: Path, track_id: str) -> dict:
     rc, out, err = _cli(state_dir, "horizon", "show", track_id, "--json")
     assert rc == 0, err
@@ -249,28 +273,28 @@ def test_fourth_deliverable_leaves_an_architecture_track_alone(state_dir):
         assert rc == 0, err
         assert "plan-scope" not in out
     assert _meta(state_dir, "feat-a4")["plan_scope"] == "architecture"
-    assert _scope_events(state_dir, "feat-a4") == []
+    assert _scope_changes(state_dir, "feat-a4") == []
 
 
 # --------------------------------------------------------------------------
 # Upward by itself: the dispatch door, through a real fire
 # --------------------------------------------------------------------------
 
-def _fire(tmp_path: Path, monkeypatch, paths: list[str], *, meta: dict | None, seed=False,
-          resolve=False, dispatch_id="20261018-fire") -> tuple[int, Path, object]:
-    """One real run_dispatch on a promoted bundle; the worker itself is a mock."""
-    import dispatch_cli
-
+def _door_store(tmp_path: Path, monkeypatch) -> Path:
+    """The store a real door fire writes to, with no track in it yet."""
     data_dir = tmp_path / "vnx-data"
     sd = _bootstrap(data_dir / "state")
-    _make_track(sd, "feat-door", meta, seed=seed)
-    if resolve:
-        _resolve_plan_blocker(sd, "feat-door")
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
     monkeypatch.setenv("VNX_PLAN_GATE_ENFORCE", "advisory")
+    return sd
 
-    bundle = data_dir / "dispatches" / "pending" / f"stage-{dispatch_id}"
+
+def _fire_at(sd: Path, paths: list[str], dispatch_id: str, track_id: str = "feat-door") -> tuple[int, object]:
+    """One real run_dispatch on a promoted bundle; the worker itself is a mock."""
+    import dispatch_cli
+
+    bundle = sd.parent / "dispatches" / "pending" / f"stage-{dispatch_id}"
     bundle.mkdir(parents=True)
     instruction = bundle / "instruction.md"
     instruction.write_text("# Dispatch\n\nChange the code.\n", encoding="utf-8")
@@ -281,11 +305,22 @@ def _fire(tmp_path: Path, monkeypatch, paths: list[str], *, meta: dict | None, s
         "role": "backend-developer", "target_slot": "T0", "gate": "codex_gate",
         "dispatch_paths": [{"path": p, "access": "read_write"} for p in paths],
         "provider": "claude", "model": None, "deadline_seconds": 3600,
-        "isolation": "worktree", "track_id": "feat-door",
+        "isolation": "worktree", "track_id": track_id,
     }), encoding="utf-8")
 
     with patch("dispatch_cli._execute_claude_headless", return_value=0) as worker:
         rc = dispatch_cli.run_dispatch(spec_file)
+    return rc, worker
+
+
+def _fire(tmp_path: Path, monkeypatch, paths: list[str], *, meta: dict | None, seed=False,
+          resolve=False, dispatch_id="20261018-fire") -> tuple[int, Path, object]:
+    """One track, then one real fire on it."""
+    sd = _door_store(tmp_path, monkeypatch)
+    _make_track(sd, "feat-door", meta, seed=seed)
+    if resolve:
+        _resolve_plan_blocker(sd, "feat-door")
+    rc, worker = _fire_at(sd, paths, dispatch_id)
     return rc, sd, worker
 
 
@@ -337,7 +372,7 @@ def test_door_moves_an_old_track_up_without_reopening_its_passed_gate(tmp_path, 
 def test_door_upward_move_writes_one_event_with_old_new_and_reason(tmp_path, monkeypatch):
     rc, sd, _ = _fire(tmp_path, monkeypatch, [".github/workflows/vnx-ci.yml"], meta={"plan_scope": "light"})
     assert rc == 0
-    events = _scope_events(sd, "feat-door")
+    events = _scope_changes(sd, "feat-door")
     assert len(events) == 1
     details = events[0]["details"]
     assert (details["old"], details["new"]) == ("light", "architecture")
@@ -350,7 +385,7 @@ def test_door_leaves_an_architecture_track_alone(tmp_path, monkeypatch):
                       meta={"plan_scope": "architecture"}, seed=True)
     assert rc == 0
     assert _meta(sd, "feat-door")["plan_scope"] == "architecture"
-    assert _scope_events(sd, "feat-door") == []
+    assert _scope_changes(sd, "feat-door") == []
 
 
 # --------------------------------------------------------------------------
@@ -363,7 +398,7 @@ def test_set_plan_scope_down_without_reason_is_refused(state_dir):
     assert rc == 2
     assert "--reason is required" in err
     assert _meta(state_dir, "feat-down")["plan_scope"] == "architecture"
-    assert _scope_events(state_dir, "feat-down") == []
+    assert _scope_changes(state_dir, "feat-down") == []
 
 
 def test_set_plan_scope_down_with_reason_is_written_and_leaves_oi_plan(state_dir):
@@ -376,7 +411,7 @@ def test_set_plan_scope_down_with_reason_is_written_and_leaves_oi_plan(state_dir
     assert meta["plan_scope"] == "light"
     assert "plan_scope_rule" not in meta
     assert _open_plan_blocker(state_dir, "feat-down"), "lowering never closes or attests OI-PLAN"
-    events = _scope_events(state_dir, "feat-down")
+    events = _scope_changes(state_dir, "feat-down")
     assert len(events) == 1
     assert events[0]["details"] == {
         "old": "architecture", "new": "light",
@@ -420,7 +455,13 @@ def test_old_track_without_open_oi_plan_reads_light_and_nothing_is_written(state
 
 
 def test_an_unknown_stored_scope_reads_architecture(state_dir):
-    _make_track(state_dir, "feat-odd", {"plan_scope": "heavy"})
+    """No writer stores an unknown value, so the test puts one in the row itself."""
+    _make_track(state_dir, "feat-odd", None)
+    conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+    conn.execute("UPDATE tracks SET metadata_json = ? WHERE track_id = ?",
+                 (json.dumps({"plan_scope": "heavy"}), "feat-odd"))
+    conn.commit()
+    conn.close()
     shown = _show(state_dir, "feat-odd")
     assert (shown.get("plan_scope"), shown.get("plan_scope_source")) == ("architecture", "unreadable")
 
@@ -492,17 +533,17 @@ features:
 """
 
 
-def test_objective_sync_restores_plan_scope_after_the_seeder_rewrites_metadata(state_dir, tmp_path):
+def test_objective_sync_keeps_plan_scope_when_the_seeder_rewrites_metadata(state_dir, tmp_path):
     """The ROADMAP seeder rebuilds metadata_json wholesale on an authored change
-    (risk_class here); plan_scope, its rule and lane_hint must come back."""
+    (risk_class here); plan_scope, its rule and lane_hint stay as they are."""
+    import plan_scope
+
     roadmap = tmp_path / "ROADMAP.yaml"
     roadmap.write_text(_ROADMAP.format(risk="high"), encoding="utf-8")
     rc, _, err = _cli(state_dir, "horizon", "sync", "--apply", "--roadmap", str(roadmap))
     assert rc == 0, err
-    meta = _meta(state_dir, "feat-sync")
-    meta.update({"plan_scope": "architecture", "plan_scope_rule": "door, dispatch d1: schema path x",
-                 "lane_hint": "governed"})
-    tracks.update_authored_fields(state_dir, "feat-sync", PID, metadata_json=json.dumps(meta))
+    assert _cli(state_dir, "horizon", "set-lane-hint", "feat-sync", "governed")[0] == 0
+    plan_scope.raise_to_architecture(state_dir, "feat-sync", PID, rule="door, dispatch d1: schema path x")
 
     roadmap.write_text(_ROADMAP.format(risk="low"), encoding="utf-8")
     rc, _, err = _cli(state_dir, "horizon", "sync", "--apply", "--roadmap", str(roadmap))
@@ -721,3 +762,265 @@ def test_the_second_scope_classifier_is_gone():
 
     assert not hasattr(plan_gate_enforcement, "plan_gate_scope")
     assert not hasattr(plan_gate_enforcement, "LIGHT_PANEL_LABELS")
+
+
+# --------------------------------------------------------------------------
+# Raising the scope and seeding OI-PLAN are one step
+# --------------------------------------------------------------------------
+
+_ARCH_PATH = ["scripts/lib/provider_spawns/kimi_spawn.py"]
+
+
+def test_a_failed_seed_never_leaves_architecture_by_rule_without_oi_plan(tmp_path, monkeypatch):
+    sd = _door_store(tmp_path, monkeypatch)
+    _make_track(sd, "feat-door", {"plan_scope": "light"})
+    _fail_plan_seeds(sd)
+
+    rc, worker = _fire_at(sd, _ARCH_PATH, "20261018-fail")
+
+    assert rc == 0, "the door refuses nothing in P1, a failed seed included"
+    worker.assert_called_once()
+    meta = _meta(sd, "feat-door")
+    assert _plan_rows(sd, "feat-door") == []
+    assert meta.get("plan_scope") == "light", "the raise rolled back with the seed"
+    assert "plan_scope_rule" not in meta
+    assert _scope_changes(sd, "feat-door") == [], "no ledger line for a raise that did not happen"
+
+
+def test_a_failed_ledger_write_leaves_neither_the_scope_nor_the_blocker(state_dir, monkeypatch):
+    import plan_scope
+    import state_writer
+
+    _make_track(state_dir, "feat-ledger", {"plan_scope": "light"})
+
+    def refuse(*_args, **_kwargs):
+        raise OSError("injected: the ledger write fails")
+
+    monkeypatch.setattr(state_writer, "append_locked", refuse)
+    with pytest.raises(OSError, match="injected"):
+        plan_scope.raise_to_architecture(state_dir, "feat-ledger", PID, rule="4 deliverables (limit 4)")
+    monkeypatch.undo()
+
+    assert _meta(state_dir, "feat-ledger") == {"plan_scope": "light"}
+    assert _plan_rows(state_dir, "feat-ledger") == []
+
+
+def test_door_retry_after_a_failed_seed_ends_with_an_open_oi_plan(tmp_path, monkeypatch):
+    sd = _door_store(tmp_path, monkeypatch)
+    _make_track(sd, "feat-door", {"plan_scope": "light"})
+    _fail_plan_seeds(sd)
+    assert _fire_at(sd, _ARCH_PATH, "20261018-fail")[0] == 0
+    _heal_plan_seeds(sd)
+
+    rc, _ = _fire_at(sd, _ARCH_PATH, "20261018-retry")
+
+    assert rc == 0
+    assert _meta(sd, "feat-door")["plan_scope"] == "architecture"
+    assert _open_plan_blocker(sd, "feat-door")
+
+
+def test_set_plan_scope_retry_after_a_failed_seed_ends_with_an_open_oi_plan(tmp_path, monkeypatch):
+    sd = _door_store(tmp_path, monkeypatch)
+    _make_track(sd, "feat-door", {"plan_scope": "light"})
+    _fail_plan_seeds(sd)
+    assert _fire_at(sd, _ARCH_PATH, "20261018-fail")[0] == 0
+    _heal_plan_seeds(sd)
+
+    rc, out, err = _cli(sd, "horizon", "set-plan-scope", "feat-door", "architecture",
+                        "--reason", "spawn code changes")
+
+    assert rc == 0, err
+    assert _meta(sd, "feat-door")["plan_scope"] == "architecture"
+    assert _open_plan_blocker(sd, "feat-door")
+
+
+def _born_architecture_without_oi_plan(sd: Path, track_id: str) -> None:
+    """``horizon add --plan-scope architecture`` whose seed write failed."""
+    _fail_plan_seeds(sd)
+    rc, _, err = _cli(sd, "horizon", "add", track_id, "Born", "shipped", "--plan-scope", "architecture")
+    assert rc == 0, err
+    _heal_plan_seeds(sd)
+    assert _meta(sd, track_id)["plan_scope"] == "architecture"
+    assert _plan_rows(sd, track_id) == []
+
+
+@pytest.mark.parametrize("paths", [_ARCH_PATH, ["docs/core/HORIZON_LIFECYCLE.md"]],
+                         ids=["architecture-change", "light-change"])
+def test_next_door_pass_seeds_oi_plan_on_an_architecture_track_that_has_none(
+    tmp_path, monkeypatch, capsys, paths,
+):
+    sd = _door_store(tmp_path, monkeypatch)
+    _born_architecture_without_oi_plan(sd, "feat-born")
+    capsys.readouterr()
+
+    rc, worker = _fire_at(sd, paths, "20261018-recover", track_id="feat-born")
+
+    assert rc == 0
+    worker.assert_called_once()
+    assert _open_plan_blocker(sd, "feat-born")
+    lines = [ln for ln in capsys.readouterr().err.splitlines() if "plan-scope:" in ln]
+    assert len(lines) == 1
+    assert "OI-PLAN-feat-born seeded" in lines[0]
+
+    rc, _ = _fire_at(sd, paths, "20261018-again", track_id="feat-born")
+    assert rc == 0
+    assert len(_plan_rows(sd, "feat-born")) == 1, "seeding a missing blocker is idempotent"
+    assert "plan-scope:" not in capsys.readouterr().err
+
+
+def test_set_plan_scope_seeds_oi_plan_on_an_architecture_track_that_has_none(state_dir):
+    _born_architecture_without_oi_plan(state_dir, "feat-born")
+
+    rc, out, err = _cli(state_dir, "horizon", "set-plan-scope", "feat-born", "architecture",
+                        "--reason", "confirm the scope")
+
+    assert rc == 0, err
+    assert _open_plan_blocker(state_dir, "feat-born")
+    assert "OI-PLAN-feat-born seeded" in out
+
+
+def test_a_resolved_oi_plan_on_an_architecture_track_stays_resolved(tmp_path, monkeypatch):
+    sd = _door_store(tmp_path, monkeypatch)
+    _make_track(sd, "feat-door", {"plan_scope": "architecture"}, seed=True)
+    _resolve_plan_blocker(sd, "feat-door")
+
+    assert _fire_at(sd, _ARCH_PATH, "20261018-pass")[0] == 0
+    rc, _, err = _cli(sd, "horizon", "set-plan-scope", "feat-door", "architecture",
+                      "--reason", "still architecture")
+    assert rc == 0, err
+
+    rows = _plan_rows(sd, "feat-door")
+    assert len(rows) == 1
+    assert rows[0][1] is not None, "a resolved OI-PLAN is never reopened"
+
+
+# --------------------------------------------------------------------------
+# objective sync and set-lane-hint never put back a stale scope or lane_hint
+# --------------------------------------------------------------------------
+
+_RAISE_RULE = "door, dispatch d-concurrent: schema path schemas/migrations/0099_x.sql"
+
+
+def _synced_track(state_dir: Path, roadmap: Path) -> None:
+    """feat-sync from the ROADMAP, then a stored light scope and lane_hint governed."""
+    roadmap.write_text(_ROADMAP.format(risk="high"), encoding="utf-8")
+    assert _cli(state_dir, "horizon", "sync", "--apply", "--roadmap", str(roadmap))[0] == 0
+    assert _cli(state_dir, "horizon", "set-plan-scope", "feat-sync", "light",
+                "--reason", "one small PR")[0] == 0
+    assert _cli(state_dir, "horizon", "set-lane-hint", "feat-sync", "governed")[0] == 0
+    roadmap.write_text(_ROADMAP.format(risk="low"), encoding="utf-8")
+
+
+def _concurrent(state_dir: Path, write: str):
+    import plan_scope
+
+    def raise_scope():
+        plan_scope.raise_to_architecture(state_dir, "feat-sync", PID, rule=_RAISE_RULE)
+
+    def set_lane():
+        assert _cli(state_dir, "horizon", "set-lane-hint", "feat-sync", "direct")[0] == 0
+
+    return {"scope": raise_scope, "lane": set_lane}[write]
+
+
+def _hook_once(monkeypatch, owner, attr: str, before) -> None:
+    """Run ``before`` once, right before the first call to ``owner.attr``."""
+    real = getattr(owner, attr)
+    fired: list[bool] = []
+
+    def hooked(*args, **kwargs):
+        if not fired:
+            fired.append(True)
+            before()
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(owner, attr, hooked)
+
+
+@pytest.mark.parametrize("write", ["scope", "lane"])
+@pytest.mark.parametrize("hook_point", ["before-the-seeder-runs", "between-the-seeders-read-and-write"])
+def test_objective_sync_keeps_a_planning_key_written_while_it_runs(
+    state_dir, tmp_path, monkeypatch, write, hook_point,
+):
+    roadmap = tmp_path / "ROADMAP.yaml"
+    _synced_track(state_dir, roadmap)
+    other = _concurrent(state_dir, write)
+    if hook_point == "before-the-seeder-runs":
+        _hook_once(monkeypatch, planning_cli.seeder, "seed", other)
+    else:
+        _hook_once(monkeypatch, tracks, "update_authored_fields", other)
+
+    rc, _, err = _cli(state_dir, "horizon", "sync", "--apply", "--roadmap", str(roadmap))
+
+    assert rc == 0, err
+    meta = _meta(state_dir, "feat-sync")
+    assert meta["risk_class"] == "low", "the seeder did rewrite metadata_json"
+    latest = _scope_events(state_dir, "feat-sync")[-1]["details"]["new"]
+    if write == "scope":
+        assert meta.get("plan_scope") == "architecture"
+        assert meta.get("plan_scope_rule") == _RAISE_RULE
+        assert latest == "architecture", "store and ledger agree"
+    else:
+        assert meta.get("lane_hint") == "direct"
+        assert (meta.get("plan_scope"), latest) == ("light", "light")
+
+
+def test_set_lane_hint_keeps_a_scope_raised_after_it_read_the_track(state_dir, monkeypatch):
+    import plan_scope
+
+    _make_track(state_dir, "feat-race", {"plan_scope": "light", "lane_hint": "governed"})
+    real_get = tracks.get_track
+    fired: list[bool] = []
+
+    def read_then_raise(*args, **kwargs):
+        row = real_get(*args, **kwargs)
+        if not fired:
+            fired.append(True)
+            plan_scope.raise_to_architecture(state_dir, "feat-race", PID, rule=_RAISE_RULE)
+        return row
+
+    monkeypatch.setattr(tracks, "get_track", read_then_raise)
+    rc, _, err = _cli(state_dir, "horizon", "set-lane-hint", "feat-race", "direct")
+
+    assert rc == 0, err
+    assert fired
+    meta = _meta(state_dir, "feat-race")
+    assert meta.get("lane_hint") == "direct"
+    assert meta.get("plan_scope") == "architecture", "a lane_hint write never lowers the scope"
+
+
+def test_update_authored_fields_never_writes_the_planning_keys(state_dir):
+    _make_track(state_dir, "feat-auth", {"plan_scope": "architecture", "lane_hint": "governed",
+                                         "risk_class": "high"})
+
+    tracks.update_authored_fields(state_dir, "feat-auth", PID, metadata_json=json.dumps(
+        {"risk_class": "low", "plan_scope": "light", "lane_hint": "direct"}))
+
+    assert _meta(state_dir, "feat-auth") == {
+        "risk_class": "low", "plan_scope": "architecture", "lane_hint": "governed",
+    }
+
+
+# --------------------------------------------------------------------------
+# The initial scope is a decision in the ledger (ADR-005)
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("scope", ["light", "architecture"])
+def test_horizon_add_records_the_initial_scope_as_one_event(state_dir, scope):
+    rc, _, err = _cli(state_dir, "horizon", "add", "feat-born", "Born", "shipped", "--plan-scope", scope)
+
+    assert rc == 0, err
+    events = _scope_events(state_dir, "feat-born")
+    assert len(events) == 1
+    details = events[0]["details"]
+    assert (details["old"], details["new"], details["rule"]) == ("none", scope, "horizon add")
+    assert details["reason"].strip()
+
+
+def test_create_track_refuses_an_unknown_plan_scope_and_writes_nothing(state_dir):
+    with pytest.raises(ValueError, match="plan_scope"):
+        tracks.create_track(state_dir, "feat-odd", PID, "Odd", "shipped",
+                            metadata_json=json.dumps({"plan_scope": "heavy"}))
+
+    assert tracks.get_track(state_dir, "feat-odd", PID) is None
+    assert _scope_events(state_dir, "feat-odd") == []
