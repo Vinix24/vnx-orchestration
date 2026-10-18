@@ -25,14 +25,14 @@ On the release branch, cut from an up-to-date `origin/main`, before the release 
 2. `python3 scripts/release/assemble_changelog.py --version X.Y.Z --check` prints the section it would write and the fragments it would delete. It changes nothing.
 3. `python3 scripts/release/assemble_changelog.py --version X.Y.Z` writes it. A new `## [X.Y.Z] - <date>` heading lands directly under `## [Unreleased]`, which stays and is left empty. Under it come the bullets that were already under `## [Unreleased]`, then every fragment in the order it landed on the first-parent history of `main`. The fragments are deleted, and so is `scripts/ci/changelog_legacy_prs.txt` when it exists (`--check` lists it among what it would delete). `--date YYYY-MM-DD` overrides today. `--rev REV` overrides `origin/main` and must be an ancestor of `HEAD`. Every fragment in the tree must be in `--rev` with the same bytes, and every line under `## [Unreleased]` must be a bullet, a continuation (two or more spaces) or blank; anything else is refused before a byte is written. One run at a time: a second run on the same working tree refuses at once and names its lock, `vnx-assemble-changelog.lock` in the git dir.
 4. Write the intro paragraph under the new heading by hand: prose only, before the first bullet. Do not edit the bullets. A wrong bullet is fixed in its fragment, in an earlier PR.
-5. Commit `CHANGELOG.md`, `changelog.d/` and `VERSION`, and open the release PR. The operator tags after it merges.
+5. Commit `CHANGELOG.md`, `changelog.d/`, `VERSION` and the deletion of `scripts/ci/changelog_legacy_prs.txt` (when step 3 deleted it: `git add -A scripts/ci/changelog_legacy_prs.txt` stages a deletion), and open the release PR. The operator tags after it merges.
 
 The CI check recomputes the release PR from its merge base with the same fold. It fails when `CHANGELOG.md` differs beyond the intro, when a consumed fragment is left in place, when a new fragment is added, or when the new heading's version is not one `--version` accepts or is not `VERSION`. If `main` moves before the release PR merges, cut the branch again from the new `main` and rerun.
 
-**An interrupted run.** A write or a delete that fails puts the original files back itself. A run that was killed (power loss, SIGKILL) leaves `CHANGELOG.md` and `changelog.d/` dirty, and the next run refuses. Restore with
+**An interrupted run.** A write or a delete that fails puts the original files back itself. A run that was killed (power loss, SIGKILL) can leave `CHANGELOG.md` rewritten, some or all fragments deleted and the legacy list deleted, in that order, because it writes `CHANGELOG.md` first and deletes after. The next run refuses on the dirty tree. Restore with
 
 ```
-git checkout -- CHANGELOG.md changelog.d
+git checkout -- CHANGELOG.md changelog.d scripts/ci/changelog_legacy_prs.txt
 ```
 
-and run again. The output is the same, because the assembler commits nothing and reads only the committed tree. There is no partial-rerun mode.
+and run again. Leave the legacy list out of that command once `git ls-files scripts/ci/changelog_legacy_prs.txt` prints nothing: git refuses a path it does not track, so the command fails once the list is gone from the index. The refusal message of the assembler names the list only when it is tracked. The output is the same on the rerun, because the assembler commits nothing and reads only the committed tree. There is no partial-rerun mode.

@@ -201,12 +201,11 @@ def _release_notes_hint(tag: str) -> str:
         f"(changelog.d/README.md, \"The release\"):\n"
         f"  python3 scripts/release/assemble_changelog.py --version {version} --check\n"
         f"  python3 scripts/release/assemble_changelog.py --version {version}\n"
-        f"Then write this as the intro paragraph under the new heading "
-        f"(prose before the first bullet; never a bullet):\n"
-        f"  {tag} is now the active `current`. Consumers with a tracked "
+        f"Then paste the paragraph on the line below, and nothing else, under the new "
+        f"heading (prose before the first bullet; never a bullet):\n"
+        f"{tag} is now the active `current`. Consumers with a tracked "
         f"`.vnx-version` pin are NOT moved by this flip and must update their "
-        f"pin to {tag} explicitly:\n"
-        f"      echo '{tag}' > <project>/.vnx-version\n"
+        f"pin to {tag} explicitly with `echo '{tag}' > <project>/.vnx-version`.\n"
     )
 
 
