@@ -2,7 +2,7 @@
 
 > **This file is the architecture-principles + wave-history roadmap.** Live, per-feature status lives in the maintainer's tracks database (the `vnx objective` CLI); the repo-root [`ROADMAP.yaml`](../../ROADMAP.yaml) is a generic example of the machine-readable roadmap format, not the live plan. Some milestone stamps below are historical (written April–May 2026) and may lag the current tree; trust [`ROADMAP.md`](../../ROADMAP.md) and the README for what is actually shipped.
 
-**Status**: Public roadmap  
+**Status**: Public roadmap, statuses checked against `main` on 2026-10-18  
 **Planning Horizon**: 2026 (rolling)  
 **Principle**: Governance-first, model-agnostic, local-first
 
@@ -26,7 +26,7 @@ VNX remains a governance-first system. Features that reduce human oversight are 
 
 Stop hook → deterministic extraction → haiku classification → markdown report. Workers no longer manually assemble reports. `VNX_AUTO_REPORT=1` activates the pipeline.
 
-Key deliverables: `stop_hook.py`, `report_assembler.py`, `haiku_classifier.py`, `VNX_AUTO_REPORT` feature flag.
+Key deliverables: `scripts/hooks/stop_report_hook.sh`, `scripts/lib/report_assembler.py`, `scripts/lib/classifier_providers/haiku_provider.py`, `VNX_AUTO_REPORT` feature flag.
 
 ### F38: Dashboard Unified
 **Status**: `Completed` — April 2026
@@ -38,9 +38,9 @@ Key deliverables: unified dashboard UI, domain tabs, session history, agent name
 ### F39: Headless T0 Benchmark
 **Status**: `Completed` — April 2026
 
-Decision framework rewrite + gate locks + replay harness. Deterministic pre-filter handles ~70% of decisions without LLM. Benchmark baseline: Level-1 100%, Level-2 73–87%, Level-3 67–78%.
+Decision framework rewrite + gate locks + replay harness. A deterministic pre-filter runs in the replay harness before any LLM call. The benchmark scores of 2026-04 are not restated here: they were measured on recorded scenarios and have not been re-measured on `main`.
 
-Key deliverables: `t0_decision_framework.py`, `t0_gate_locks.py`, `t0_context_assembler.py`, `t0_replay_harness.py`. Taxonomy simplified to DISPATCH/COMPLETE/WAIT/REJECT/ESCALATE.
+Key deliverables: `scripts/f39/replay_harness/` (including `prefilter.py`), `scripts/f39/gate_locks.py` (no production caller), `scripts/lib/context_assembler.py`. Taxonomy simplified to DISPATCH/COMPLETE/WAIT/REJECT/ESCALATE.
 
 ---
 
@@ -51,52 +51,52 @@ Wave-based planning tracks major capability milestones across the 2026 roadmap. 
 ### Wave 1 — Shadow Read Cutover
 **Status**: `Completed` — April 2026
 
-Central VNX state shadow-mode validation. `shadow_verifier.py` computes 6 zero-tolerance metrics (wrong-project rows, scoping/blocking-finding mismatch, top-3 divergence, count drift, lease-key collisions, p95-latency ratio). NDJSON divergence records under flock with timestamp-suffix rotation. All production T0 + IntelligenceSelector read sites wired through `VNX_USE_CENTRAL_DB` flag.
+Central VNX state shadow-mode validation. `scripts/lib/shadow_verifier.py` computes zero-tolerance divergence metrics (wrong-project rows, scoping/blocking-finding mismatch, top-3 divergence, count drift, lease-key collisions, p95-latency ratio). NDJSON divergence records under flock with timestamp-suffix rotation. All production T0 + IntelligenceSelector read sites wired through `VNX_USE_CENTRAL_DB` flag.
 
 ### Wave 2 — Package Extraction Foundation
 **Status**: `Completed` — April 2026
 
-`pyproject.toml` + `vnx_core` + `vnx_cli` package skeleton with smoke tests. First module migration: `function_size_gate.py` → `vnx_core`. Pipx-installable wheel foundation (`vnx` console_script entry-point).
+`pyproject.toml` + `vnx_cli` package skeleton with smoke tests. Pipx-installable wheel foundation (`vnx` console_script entry-point). The package layout is now `vnx_cli` and `vnx_orchestration` (`pyproject.toml`); `function_size_gate.py` lives in `scripts/lib/`.
 
 ### Wave 4 / 4.5 / 4.6 — Provider Generalization
 **Status**: `Completed` — April/May 2026
 
-OTel observability foundation (opt-in via `OTEL_EXPORTER_OTLP_ENDPOINT`). `PromptAssembler` provider-agnostic methods for Claude/Codex/Gemini/LiteLLM. `provider_dispatch.py` entry-point with per-provider spawn handlers (`claude_spawn`, `codex_spawn`, `gemini_spawn`, `litellm_spawn`). `CanonicalEvent` unified event shape via `EventStore` enforcement.
+OTel observability foundation (opt-in via `OTEL_EXPORTER_OTLP_ENDPOINT`). `PromptAssembler` provider-agnostic methods for Claude/Codex/Gemini/LiteLLM. `provider_dispatch.py` entry-point with per-provider spawn handlers (`scripts/lib/provider_spawns/`). `CanonicalEvent` unified event shape via `EventStore` enforcement.
 
 ### Wave 5 — Control Centre + Multi-Project
 **Status**: `Completed` — SHIPPED 2026-05-16
 
 Single supervisor session managing N per-project T0 orchestrators. Multi-project state aggregator, per-project T0 lifecycle (spawn/heartbeat/kill/reap), multi-tenant lease isolation (schema v12), cross-project intelligence aggregator, hybrid dispatch routing, operator demo runbook.
 
-Key deliverables: `multi_project_aggregator.py`, `control_centre_skill.md`, `CONTROL_CENTRE.md`, ADR-017.
+Key deliverables: `docs/operations/CONTROL_CENTRE.md`, ADR-017.
 
 ### Wave 6 — Workers=N Elastic Pool
 **Status**: `Completed` — SHIPPED 2026-05-16
 
 Configurable worker pool with queue-aware + cost-aware scaling policies, dead-worker reap, and `vnx pool` CLI. PoolManager core (schema v14), pluggable scaling policies (`queue_depth_v1` + `cost_aware_v1`), provider-mix per pool, health monitoring + dead-worker reap tick cycle.
 
-Key deliverables: `pool_manager.py`, `vnx_workers.yaml`, ADR-018.
+Key deliverables: `scripts/lib/pool_manager.py`, `.vnx/vnx_workers.default.yaml`, ADR-018.
 
 ### Wave 7 — Multi-Provider via LiteLLM
 **Status**: `Completed` — SHIPPED 2026-05-17
 
-Five providers in production: Claude, Codex CLI, Gemini CLI, Kimi CLI (OAuth), LiteLLM bridge (DeepSeek V4-Pro/V4-Flash, GLM-5.2 via OpenRouter). Uniform receipt + report shape across all 5 providers. Intelligence injection, token + cost tracking, and quality gates equal first-class for every provider. Reproducible benchmark suite: 9 models × 7 tasks with routing recommendations.
+Five providers in production: Claude, Codex CLI, Gemini CLI, Kimi CLI (OAuth), LiteLLM bridge (DeepSeek, GLM via OpenRouter). Uniform receipt + report shape across the providers. Intelligence injection, token + cost tracking, and quality gates equal first-class for every provider. Reproducible benchmark suite with routing recommendations (`scripts/benchmark/`).
 
-This is the historical shipped-state at the time of Wave 7. It has since moved: Gemini CLI is a worker lane only, no longer a review gate (`RETIRED_GATE_NAMES`, operator decision 2026-09-26); the GLM allowlist is `glm-5.2`/`glm-5.3`/`glm-5.3-flash` (`glm-5.2` still the default).
+This is the historical shipped-state at the time of Wave 7. It has since moved: Gemini CLI is a worker lane only, no longer a review gate (`RETIRED_GATE_NAMES`, operator decision 2026-09-26); the GLM allowlist is `glm-5.2`/`glm-5.3`/`glm-5.3-flash` (`glm-5.2` still the default); `deepseek_gate` defaults to `deepseek-flash` (#2025, released in v1.7.1). The `vnx providers` switch for provider families exists on main but does not enforce yet: its write verbs refuse until every launch function calls `provider_switch.require` (`vnx providers list` prints the state; `docs/core/PROVIDER_LANES.md`, "Provider switch").
 
-Key deliverables: `litellm_spawn.py`, `provider_governance.py`, `vnx.env`, `routing_recommendations.yaml`, ADR-015.
+Key deliverables: `scripts/lib/provider_spawns/litellm_spawn.py`, `scripts/lib/providers/routing_recommendations.yaml`, ADR-015.
 
 ### Wave 8 — Smart Router + Schema Enforcement
 **Status**: `Completed` — SHIPPED 2026-05-17
 
-Task-class-aware model routing (`smart_router.py`), hard provider constraint enforcement (`HardConstraintViolation` on policy breach), YAML frontmatter guardrails for uniform report schema, weekly drift + monthly benchmark cadence, self-learning `route_decisions_watcher.py` auto-adjusting `routing_recommendations.yaml` on production failure patterns.
+Task-class-aware model routing (`smart_router.py`), hard provider constraint enforcement (`HardConstraintViolation` on policy breach), YAML frontmatter guardrails for uniform report schema, weekly drift + monthly benchmark cadence.
 
-Key deliverables: `smart_router.py`, `hard_constraints.py`, `route_decisions_watcher.py`.
+Key deliverables: `scripts/lib/smart_router.py`, `scripts/lib/constraint_enforcer.py`.
 
 ### 1.0 Sprint — Roadmap Autopilot, N-Scaling Foundation, Auto-Dream
 **Status**: `Completed` — SHIPPED 2026-05-29
 
-~40 PRs completing the 1.0 capability surface. Major additions:
+The PRs that completed the 1.0 capability surface. Major additions:
 
 **Roadmap Autopilot (RA-1..6 + RA-3b)**
 Gate-enforced autopilot primitives for the roadmap advance flow. RA-1 stamps `project_id` on `roadmap_state.json` and receipts (ADR-007 compliance). RA-2 provisions branch + worktree on `load_feature`. RA-3 enforces review-gate evidence in reconcile/advance. RA-3b closes 4 advance-gate bypass holes. RA-4 adds a human-approval gate primitive. RA-5 adds a `step` subcommand driving the active feature PR queue. RA-6 wires `autopilot_tick` + scheduler — ships dark (default off), gated by `VNX_ROADMAP_AUTOPILOT=1`.
@@ -105,7 +105,7 @@ Gate-enforced autopilot primitives for the roadmap advance flow. RA-1 stamps `pr
 N-1: atomic `claim_next_queued_dispatch` + migration 0026 for race-free queue consumption. N-2: `pool_worker_runner` single-claim entrypoint. N-3: `VNX_POOL_TASK_CONSUMER` wiring from pool worker spawn. Full pool-task-consumer path is opt-in; single-worker default unchanged.
 
 **Auto-Dream Self-Learning Loop (runnable, not fully-active)**
-ADR-019 `auto_dream` consolidator core: quality DB consolidation, CLI + scheduler, GAP-7 receipt preflight, T0 review-gate, kimi timeout guard, canonical vnx_paths I/O routing. The loop is runnable on-demand. Nightly cron trigger and central-path unification are pending before routine activation. Do not claim as "active" — it is runnable.
+ADR-019 consolidator core (`scripts/dream/`): quality DB consolidation, CLI + scheduler, GAP-7 receipt preflight, T0 review-gate, kimi timeout guard, canonical vnx_paths I/O routing. At the time of the sprint the loop was runnable on-demand and not routinely active. On main the dream consolidation and the nightly conversation analyzer honor the provider switch, and the dream consolidation reads `content_class` (#2057). Do not claim the loop as "active" without checking the scheduler on the machine in question.
 
 **GOV-1 PreToolUse Hook**
 Blocks raw `claude` worker spawns at the Claude Code hook layer, enforcing the `subprocess_dispatch` path.
@@ -125,11 +125,13 @@ Repo-map enrichment extended to all providers (#712). Kimi intelligence injectio
 **Hygiene**
 Vulture dead-code detection wired; 100%-confidence dead-code cleared. Universal cost tracking across all 5 providers. Wheel packaging hardened (exclude pycache/tests/benchmarks, remove stale dist/).
 
-Key deliverables: `autopilot_tick.py`, `pool_worker_runner.py`, `auto_dream` package, `GOV-1` hook, `tracks` table + DAL, migration 0026.
+Key deliverables: `autopilot_tick` in `scripts/roadmap_manager.py`, `scripts/lib/pool_worker_runner.py`, `scripts/dream/`, the `GOV-1` hook, `tracks` table + DAL, migration 0026.
 
 ---
 
 ## Milestones
+
+Releases after 1.0.0 are listed in [`CHANGELOG.md`](../../CHANGELOG.md) and tagged in git. `VERSION` is the last release. A change that is only on `main` is "on main, not yet released".
 
 ### 1.0.0 Public Release
 **Status**: `Released` — 2026-07-02. Published to PyPI (`pip install vnx-orchestration`); source tagged `v1.0.0`.
@@ -139,7 +141,7 @@ pip-installable, 5-provider production, governance receipts, elastic pool, smart
 ### Headless T0 Production
 **Status**: `Planned`
 
-Cutover from interactive T0 to autonomous headless T0 for standard feature chains. Requires benchmark scores above 85% at Level-3, plus 3-Layer Trigger System operational, plus RA-6 autopilot-tick promoted from dark.
+Cutover from interactive T0 to autonomous headless T0 for standard feature chains. Not done: on main the T0 is an interactive session, guarded by `vnx guard` and rotated by `scripts/t0_rotate_spawn.sh`. Requires benchmark scores above 85% at Level-3, plus 3-Layer Trigger System operational, plus RA-6 autopilot-tick promoted from dark.
 
 Success criteria: T0 makes correct dispatch/complete/wait decisions autonomously across 10 consecutive real feature chains without operator override.
 
@@ -214,22 +216,16 @@ Success criteria: T0 makes correct dispatch/complete/wait decisions autonomously
 ## Next (After Committed Scope)
 
 ## Centralization Rollout
-**Status**: Data centralization `Completed` for all 4 projects; runtime cutover ongoing.
-**Why**: Wave 8 shipped; the multi-tenant central corpus is validated. All four projects' governance history now lives in the shared multi-tenant DB (`~/.vnx-data/state/`, `project_id`-stamped).
+**Status**: Data centralization `Completed`; the per-project store model is decided in ADR-026.
+**Why**: The multi-tenant central corpus is validated. Governance history of every project lives in a `project_id`-stamped store, and the live runtime writes to a per-project central dir resolved by `resolve_central_data_dir`. The shared corpus is the federation and analytics layer ([ADR-026](../governance/decisions/ADR-026-per-project-store-with-governance-federation.md)).
 
-**Model**: the live runtime writes to the per-project central dir (`~/.vnx-data/<project_id>/`, resolved by `resolve_central_data_dir`); the shared corpus is the federation/analytics layer. ADR-007 composite-key compliance is enforced — the `nightly_digests` cross-tenant `digest_date` collision was the last gap, fixed 2026-06-20 (composite `UNIQUE(project_id, digest_date)` + the audit pattern now flags `*_date`).
-
-**Rollout status (2026-06-20)**
-1. vnx-orchestration (`vnx-dev`) — data migrated + verified (356,301 rows, non-destructive, `--verify-only` clean).
-2. SEOcrawler_v2 — data migrated (727,101 code_snippets); runtime cutover to 1.0 + per-project central dir IN PROGRESS (selective-relocate plan, multi-LLM reviewed).
-3. mission-control — data migrated (14,152 rows); runtime cutover queued (#2, all-providers gate).
-4. sales-copilot — data migrated (37,652 rows); runtime cutover queued.
+ADR-007 composite-key compliance is enforced: every central table keys over `project_id`. Per-project row counts and runtime-cutover status per consumer project change continuously and are not kept in this document.
 
 ---
 
 ## 4-Gate Enforcement Framework
 **Status**: `Next`
-**Why**: The review-gate stack that this item builds on has since changed: the default is `codex_gate,kimi_gate` (both subscription reviewers), with `glm_gate`/`deepseek_gate` as API-credit fallback only; Gemini is no longer a review gate. Extending to a 4th deterministic gate with shift-left enforcement remains open.
+**Why**: The review-gate stack that this item builds on has since changed: the default stack is `codex_gate,kimi_gate` (both subscription reviewers). When one is out, the takeover chain `codex_gate,kimi_gate,deepseek_gate` reads its seat, with each seat filled by its own reviewer. `glm_gate` left the default chain on 2026-10-17 (#2100). Gemini is no longer a review gate. Extending to a 4th deterministic gate with shift-left enforcement remains open.
 
 **Goals**
 - Specify and implement the 4th gate (shift-left pre-dispatch quality signal)
@@ -261,23 +257,11 @@ Success criteria: T0 makes correct dispatch/complete/wait decisions autonomously
 
 ---
 
-## Recommended Next Hardening Chain
-**Status**: `Next`
-**Why**: The first four-feature autonomous run proved substantive delivery, but repeated governance gaps showed that formal closure and dispatch integrity still need a focused hardening lane before the next broad autonomous rollout.
+## Governance Hardening Chain (first part shipped)
+**Status**: Partly `Completed`
+**Why**: The first four-feature autonomous run proved substantive delivery, but repeated governance gaps showed that formal closure and dispatch integrity needed a focused hardening lane.
 
-**Recommended order**
-1. Deterministic Headless Gate Evidence Enforcement
-2. Terminal Input-Ready Mode Guard
-3. Queue And Runtime Projection Consistency Hardening
-4. Fine-Grained Delivery Rejection Logging
-5. Residual Governance Bugfix Sweep
-
-**Intent**
-- First remove the repeated false-green closure path around headless gates.
-- Then close the tmux input-mode corruption path for slash-prefixed dispatches.
-- Then reconcile operator-visible queue/projected state with active runtime truth.
-- Then make delivery failures diagnostically precise instead of generic rejects.
-- Finally sweep the remaining warn-level governance bugs into a clean baseline for the next multi-feature autonomous chain.
+Shipped on main: deterministic headless gate evidence enforcement (request, result and report must all exist, `docs/core/DISPATCH_RULES.md` §2 and `docs/core/45_HEADLESS_REVIEW_EVIDENCE_CONTRACT.md`) and the terminal input-ready mode guard (item 10 below). Later hardening is tracked in the tracks database, not here.
 
 ---
 
@@ -331,6 +315,8 @@ Receipts carry `schema_version: 2` with `verdict{}`, `verification{}`, and `warn
 - Remove leftover legacy wrappers and dead paths where safe.
 - Keep CLI behavior stable while improving maintainability.
 
+A function-size ratchet runs in CI (`scripts/lib/function_size_gate.py`, #2036: on main, not yet released).
+
 ## 10) Terminal Input-Ready Mode Guard
 **Status**: `Completed`
 **Why**: Mouse-enabled tmux environments can leave a pane in copy/search mode, and slash-prefixed dispatches can then be swallowed by tmux itself.
@@ -351,19 +337,21 @@ Receipts carry `schema_version: 2` with `verdict{}`, `verification{}`, and `warn
 - Lock expiry: time-bounded locks for gates that need periodic re-verification.
 
 ### 3-Layer Trigger System
-**Status**: `Next`
-**Why**: Headless T0 currently requires a polling loop. A proper trigger system allows event-driven wakeup with silent periods handled safely.
+**Status**: `Completed`: `scripts/headless_trigger.py` (F41)
+**Why**: A headless T0 needs event-driven wakeup with silent periods handled safely.
 
-**Design**
-- Layer 1: File watcher on `unified_reports/` — immediate trigger on new report arrival.
-- Layer 2: Silence watchdog — cron every 10 min, deterministic checks (queue non-empty? receipts pending?).
-- Layer 3: LLM triage — haiku invoked only when anomaly detected (stale dispatch, ambiguous receipt state).
+**Design as built**
+- Layer 1: File watcher on `unified_reports/`, immediate trigger on new report arrival (`ReportWatcher`).
+- Layer 2: Silence watchdog, every 10 min, deterministic checks for stale leases and stuck dispatches (`silence_watchdog`).
+- Layer 3: LLM triage, haiku invoked only when an anomaly is detected, opt-in via `VNX_HAIKU_CLASSIFY` (`llm_triage`).
 
-**Why layered**: Layer 1 covers the normal case instantly. Layer 2 catches silent failures without burning LLM tokens. Layer 3 reserves expensive inference for genuine ambiguity.
+It wakes a headless T0 only. An interactive T0 is not woken by it (`docs/manifesto/GOVERNANCE_ARCHITECTURE.md` §5).
 
 ### F40: Business Agent Integration
 **Status**: `Next`
 **Why**: Replace fragile n8n → SSH → MacBook → claude -p pipeline for VNX Digital workers.
+
+**On main**: agent directories exist under `agents/` (for example `agents/blog-writer/`). The goals below are not on main.
 
 **Goals**
 - SubprocessAdapter on GCP VM for business-domain agents.
@@ -399,7 +387,7 @@ Receipts carry `schema_version: 2` with `verdict{}`, `verification{}`, and `warn
 ---
 
 ## 12) Additional Model Integrations (e.g., Kimi)
-**Status**: `Exploring`  
+**Status**: `Completed` for Kimi, DeepSeek and GLM, shipped via Wave 7 (provider lanes in `docs/core/PROVIDER_LANES.md`). New providers remain an open-ended exploration.
 **Why**: Further validate model-agnostic orchestration design.
 
 **Goals**
@@ -426,7 +414,7 @@ Receipts carry `schema_version: 2` with `verdict{}`, `verification{}`, and `warn
 
 ## 14) Provider-Launch Layer as a Standalone Package
 **Status**: `Exploring`
-**Why**: The hardened multi-provider launch layer (`provider_dispatch` + `provider_spawns/*` + `adapters/*` + provider config, ~50 files with a clean `DispatchResult` contract) is the most reusable, self-contained part of VNX. Could ship as a slim standalone project for those who want only the orchestrator + provider lanes.
+**Why**: The hardened multi-provider launch layer (`provider_dispatch` + `provider_spawns/*` + `adapters/*` + provider config, with a clean `DispatchResult` contract) is the most reusable, self-contained part of VNX. Could ship as a slim standalone project for those who want only the orchestrator + provider lanes.
 
 **Scope**
 - Sever coupling to `project_root`, `canonical_event`, the report/receipt contract, and `provider_constraints`.
@@ -462,7 +450,7 @@ Receipts carry `schema_version: 2` with `verdict{}`, `verification{}`, and `warn
 
 The active feature roadmap is the tracks database, operated through the `vnx objective` CLI (tracks, horizons, plan gates, deliverables). The repo-root `ROADMAP.yaml` is a generic example of the machine-readable roadmap format; `FEATURE_PLAN.md` and `PR_QUEUE.md` are views generated from it by `scripts/build_feature_plan.py` / `scripts/build_pr_queue.py`. The document you are reading captures the architecture principles and wave history; the public per-release summary is [`ROADMAP.md`](../../ROADMAP.md).
 
-The per-milestone forward plan (what ships in the next point release) lives in the tracks database, not in this document — it moves too often to keep in sync here. Check `vnx objective` for the current state.
+Review seats, the takeover chain, the plan-gate with one seat, open outcomes and the merge door are summarised in `docs/manifesto/GOVERNANCE_ARCHITECTURE.md` §10. The per-milestone forward plan (what ships in the next point release) lives in the tracks database, not in this document — it moves too often to keep in sync here. Check `vnx objective` for the current state.
 
 ## Roadmap Guardrails
 
