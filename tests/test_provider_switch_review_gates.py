@@ -84,6 +84,11 @@ def store(tmp_path, monkeypatch):
     }.items():
         monkeypatch.setenv(key, value)
     monkeypatch.chdir(project_root)
+    # R1: these tests put standing verdicts on disk without a request; the request that
+    # produced them opened the PR in the round ledger.
+    from review_seat_support import open_pr_in_ledger
+
+    open_pr_in_ledger(state_dir, PR)
 
     import gate_recorder
     import gate_request_handler

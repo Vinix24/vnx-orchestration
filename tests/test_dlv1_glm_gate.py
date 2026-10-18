@@ -53,6 +53,7 @@ import closure_verifier
 import gate_artifacts
 import gate_lane_contract
 from gate_status import has_complete_evidence, is_terminal
+from review_seat_support import open_pr_in_ledger
 
 
 @pytest.fixture
@@ -116,6 +117,8 @@ def _run_glm_gate_for_real_pr(glm_gate, tmp_path, monkeypatch, report_text, *, p
     monkeypatch.setattr(glm_gate, "get_pr_head_branch", lambda pr_number: "feature/dlv1-test")
     monkeypatch.setattr(glm_gate, "get_pr_head_sha", lambda pr_number: "cafedeadbeef")
 
+    # R1: the gate request that starts a governed run opens the PR in the round ledger.
+    open_pr_in_ledger(data_dir / "state", pr)
     rc = glm_gate.main(["--pr", pr, "--data-dir", str(data_dir)])
     out = data_dir / "state" / "review_gates" / "results" / f"pr-{pr}-glm_gate.json"
     record = json.loads(out.read_text(encoding="utf-8"))
@@ -497,6 +500,8 @@ def _run_glm_gate_capturing_prompt(glm_gate, tmp_path, monkeypatch, diff, report
     monkeypatch.setattr(glm_gate, "get_pr_head_branch", lambda pr_number: "feature/oi-1442")
     monkeypatch.setattr(glm_gate, "get_pr_head_sha", lambda pr_number: "cafedeadbeef")
 
+    # R1: the gate request that starts a governed run opens the PR in the round ledger.
+    open_pr_in_ledger(data_dir / "state", pr)
     rc = glm_gate.main(["--pr", pr, "--data-dir", str(data_dir)])
     out = data_dir / "state" / "review_gates" / "results" / f"pr-{pr}-glm_gate.json"
     record = json.loads(out.read_text(encoding="utf-8"))
