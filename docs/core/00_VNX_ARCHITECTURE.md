@@ -1167,9 +1167,9 @@ described it as a current component; nothing since has regenerated it.
 
 **T0 receives** quality advisory signal with top-10 findings (severity, file, symbol, message).
 
-**Thresholds** (Python files):
-- Warning: 500 lines
-- Blocker: 800 lines
+**Thresholds** (`scripts/lib/quality_advisory.py`, a hard ceiling for the blocker; grandfathered files stay a standing advisory):
+- Python: warning at 500 lines, blocker at 1200
+- Shell: warning at 300 lines, blocker at 600
 
 ---
 
