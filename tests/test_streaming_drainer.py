@@ -20,6 +20,7 @@ SCRIPTS_LIB = Path(__file__).resolve().parent.parent / "scripts" / "lib"
 sys.path.insert(0, str(SCRIPTS_LIB))
 
 from canonical_event import CanonicalEvent
+import _streaming_drainer
 from _streaming_drainer import (
     StreamingDrainerMixin,
     _make_error_event,
@@ -269,6 +270,108 @@ class TestCrashSafety:
         # complete event seen — no synthetic error should be appended
         error_events = [e for e in events if e.event_type == "error"]
         assert error_events == []
+
+
+def _spawn_closing_stdout_first(lines: list[str], after_close: str) -> subprocess.Popen:
+    """Spawn a child that writes *lines*, closes its stdout, then runs *after_close*.
+
+    The drainer sees EOF while the child is still alive: the OI-2128 window
+    between a closed stdout and the exit code, held open on purpose instead
+    of left to CPU load. Own session, so the drainer's process-group kill
+    reaches only this child.
+    """
+    ndjson = "".join(l.rstrip("\n") + "\n" for l in lines)
+    script = (
+        "import os, sys, time\n"
+        f"sys.stdout.write({ndjson!r})\n"
+        "sys.stdout.flush()\n"
+        "os.close(1)\n"
+        f"{after_close}\n"
+    )
+    return subprocess.Popen(
+        [sys.executable, "-c", script],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+
+
+def _reap(proc: subprocess.Popen) -> None:
+    if proc.poll() is None:
+        proc.kill()
+        proc.wait(timeout=10)
+
+
+class TestExitCodeAfterEof:
+    """OI-2128: EOF on stdout is not the exit; the drainer waits for the code.
+
+    The old drainer read ``process.poll()`` right after EOF. A child that had
+    closed its stdout but was not yet reapable gave None there, and a crash
+    without a complete event ended without an error event.
+    """
+
+    def test_nonzero_exit_after_stdout_closed_emits_synthetic_error(self):
+        proc = _spawn_closing_stdout_first(
+            [json.dumps({"type": "text", "data": {"msg": "partial"}})],
+            "time.sleep(1.0)\nos._exit(3)",
+        )
+        try:
+            events = list(_EchoNormalizer().drain_stream(proc, "T1", "d-001", event_store=None))
+        finally:
+            _reap(proc)
+
+        assert [e.event_type for e in events] == ["text", "error"]
+        assert events[-1].data["reason"] == "subprocess exited with code 3 before complete event"
+
+    def test_zero_exit_after_stdout_closed_is_reaped_without_error(self):
+        proc = _spawn_closing_stdout_first(
+            [json.dumps({"type": "text", "data": {}})],
+            "time.sleep(0.5)\nos._exit(0)",
+        )
+        try:
+            events = list(_EchoNormalizer().drain_stream(proc, "T1", "d-001", event_store=None))
+            returncode_after_drain = proc.returncode
+        finally:
+            _reap(proc)
+
+        assert [e.event_type for e in events] == ["text"]
+        assert returncode_after_drain == 0
+
+    def test_child_still_running_after_the_wait_is_killed_with_an_error(self, monkeypatch):
+        # raising=False: on the old drainer the name does not exist, and the
+        # red run must fail on behaviour. The last assert pins the name.
+        monkeypatch.setattr(_streaming_drainer, "_EXIT_CODE_WAIT_SECONDS", 0.5, raising=False)
+        proc = _spawn_closing_stdout_first(
+            [json.dumps({"type": "text", "data": {}})],
+            "time.sleep(120)",
+        )
+        try:
+            events = list(_EchoNormalizer().drain_stream(proc, "T1", "d-001", event_store=None))
+            returncode_after_drain = proc.poll()
+        finally:
+            _reap(proc)
+
+        assert [e.event_type for e in events] == ["text", "error"]
+        reason = events[-1].data["reason"]
+        assert "still running" in reason and "killed" in reason
+        # The spawns read these words as a stall or deadline kill.
+        assert "timeout" not in reason.lower() and "deadline" not in reason.lower()
+        assert returncode_after_drain is not None and returncode_after_drain < 0
+        assert _streaming_drainer._EXIT_CODE_WAIT_SECONDS == 0.5
+
+    def test_child_that_reported_complete_is_not_waited_for_or_killed(self):
+        proc = _spawn_closing_stdout_first(
+            [json.dumps({"type": "complete", "data": {}})],
+            "time.sleep(120)",
+        )
+        try:
+            events = list(_EchoNormalizer().drain_stream(proc, "T1", "d-001", event_store=None))
+            still_running = proc.poll() is None
+        finally:
+            _reap(proc)
+
+        assert [e.event_type for e in events] == ["complete"]
+        assert still_running
 
 
 # ---------------------------------------------------------------------------

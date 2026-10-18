@@ -69,6 +69,25 @@ _STALL_FLOOR_FRACTION = 0.5
 DEADLINE_EXCEEDED_KEY = "deadline_exceeded"
 DEADLINE_SECONDS_KEY = "deadline_seconds"
 
+# OI-2128: how long the post-drain check waits for the child's exit code once
+# its stream ended without a complete event.
+#
+# The kernel closes a dying child's stdout BEFORE the child becomes reapable, so
+# EOF on the pipe does not mean the exit code is there yet. A bare poll() at
+# that moment returns None, and the old check read None as "nothing to report":
+# a provider that crashed (SIGKILL, exit 1) without a complete event ended in
+# silence. Measured 2026-10-18: under CPU load the poll at EOF saw None in 9 of
+# 100 SIGKILLed children; in the xdist shadow the post-drain poll saw it too
+# and the crash produced no error event. The check now waits for the code.
+#
+# A child that is still running when the wait runs out closed its output and
+# kept going: that is not a clean end either. The drainer kills it (the same
+# process-group kill as its stall and deadline paths, so the caller is never
+# left holding a live child behind a finished stream) and emits an error event.
+# The reason deliberately carries neither "timeout" nor "deadline": the spawns
+# read those words as a stall or deadline kill, and this is neither.
+_EXIT_CODE_WAIT_SECONDS = 5.0
+
 
 def deadline_exceeded_seconds(event_data: Any) -> Optional[float]:
     """The deadline a drainer error event says stopped the run, or None.
@@ -164,7 +183,9 @@ class StreamingDrainerMixin:
         the process is killed and a synthetic error CanonicalEvent is emitted.
 
         If the process exits non-zero without emitting a complete/result event,
-        a synthetic error CanonicalEvent is appended to the stream.
+        a synthetic error CanonicalEvent is appended to the stream. Its exit code
+        is waited for after EOF (OI-2128); a process still running when that
+        wait ends is killed and gets a synthetic error event as well.
 
         Args:
             process: Running subprocess with stdout=PIPE.
@@ -257,18 +278,18 @@ class StreamingDrainerMixin:
 
         producer.join(timeout=5.0)
 
-        # If process exited non-zero without a complete event, emit synthetic error
-        rc = process.poll()
-        if not seen_complete.is_set() and rc is not None and rc != 0:
-            err = _make_error_event(
+        # A stream that ended without a complete event is an error unless the
+        # child exited 0 (OI-2128: wait for the code, never read EOF as exit).
+        if not seen_complete.is_set():
+            err = _exit_error_event(
+                process=process,
                 terminal_id=terminal_id,
                 dispatch_id=dispatch_id,
                 provider=self.provider_name,
-                raw=None,
-                reason=f"subprocess exited with code {rc} before complete event",
             )
-            _append_to_store(event_store, terminal_id, err, dispatch_id)
-            yield err
+            if err is not None:
+                _append_to_store(event_store, terminal_id, err, dispatch_id)
+                yield err
 
 
 # ---------------------------------------------------------------------------
@@ -383,9 +404,8 @@ def _run_producer(
                 break  # fd closed (process killed)
 
             if not chunk:
-                # EOF — process finished cleanly; reap the returncode for the
-                # post-drain check.
-                process.poll()
+                # EOF: the child closed its stdout. That is not yet its exit
+                # (OI-2128); the post-drain check waits for the code.
                 break
 
             if tee_fh is not None:
@@ -499,6 +519,48 @@ def _make_error_event(
         event_type="error",
         data=data,
         observability_tier=_STREAMING_TIER,
+    )
+
+
+def _exit_error_event(
+    *,
+    process: subprocess.Popen,
+    terminal_id: str,
+    dispatch_id: str,
+    provider: str,
+) -> Optional[CanonicalEvent]:
+    """The error event for a stream that ended without a complete event, or None.
+
+    None only for a child that exited 0. The exit code is waited for, bounded
+    by ``_EXIT_CODE_WAIT_SECONDS``, because EOF on stdout comes before the
+    code (OI-2128). A child still running after that wait is killed and gets
+    an error event of its own; see the constant for why.
+    """
+    rc = process.poll()
+    if rc is None:
+        try:
+            rc = process.wait(timeout=_EXIT_CODE_WAIT_SECONDS)
+        except subprocess.TimeoutExpired:
+            _kill_process(process)
+            return _make_error_event(
+                terminal_id=terminal_id,
+                dispatch_id=dispatch_id,
+                provider=provider,
+                raw=None,
+                reason=(
+                    f"subprocess closed its output without a complete event and was "
+                    f"still running {_EXIT_CODE_WAIT_SECONDS:.0f}s later; killed "
+                    f"(exit code {process.poll()})"
+                ),
+            )
+    if rc == 0:
+        return None
+    return _make_error_event(
+        terminal_id=terminal_id,
+        dispatch_id=dispatch_id,
+        provider=provider,
+        raw=None,
+        reason=f"subprocess exited with code {rc} before complete event",
     )
 
 
