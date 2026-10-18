@@ -120,12 +120,12 @@ def test_a_generation_set_aside_while_a_newer_one_appeared_stays_in_the_archive(
     s = saved_session(tmp_path, project)
     planned, real_plan, real_check = [], rotation_state.plan_archive, rotation_state._still_claimed
 
-    def plan_then_an_edit(project_dir, origin, now=None):
+    def plan_then_an_edit(project_dir, origin, now=None, suffix=".md"):
         planned.append(origin)
         if len(planned) == 2:  # the cleanup planned the original's archive name, after it checked the file
             with open(str(s.handover), "a") as handle:
                 handle.write(MIDDLE[len(VALID_HANDOVER):])
-        return real_plan(project_dir, origin, now)
+        return real_plan(project_dir, origin, now, suffix)
 
     def checked_then_a_newer_write(*args):
         result = real_check(*args)
@@ -147,12 +147,12 @@ def test_a_handover_moved_back_to_its_path_also_keeps_its_archive_name(tmp_path,
     s = saved_session(tmp_path, project)
     planned, real_plan = [], rotation_state.plan_archive
 
-    def plan_then_an_edit(project_dir, origin, now=None):
+    def plan_then_an_edit(project_dir, origin, now=None, suffix=".md"):
         planned.append(origin)
         if len(planned) == 2:
             with open(str(s.handover), "a") as handle:
                 handle.write(MIDDLE[len(VALID_HANDOVER):])
-        return real_plan(project_dir, origin, now)
+        return real_plan(project_dir, origin, now, suffix)
 
     with monkeypatch.context() as patch:
         patch.setattr(rotation_state, "plan_archive", plan_then_an_edit)
@@ -228,11 +228,12 @@ def test_every_transition_has_its_line(tmp_path, project, other_pid):
     user.expand("resume")
     user.expand("resume 1")
     lines = journal(project)
-    assert [line.get("event") for line in lines] == ["ready", "outdated", "claimed", "injected"]
+    assert [line.get("event") for line in lines] == ["ready", "outdated", "claimed", "injected", "delivered"]
     assert all(line.get("origin_session_id") == "sess-a" for line in lines)
     assert len({line.get("generation") for line in lines}) == 1, "one handover, one generation in every line"
     assert lines[1].get("reason") == "a prompt after it"
-    assert (lines[2].get("session_id"), lines[3].get("session_id")) == ("sess-c", "sess-c")
+    assert [line.get("session_id") for line in lines[2:]] == ["sess-c"] * 3
+    assert lines[4]["via"] == "resume"
     assert open(lines[3]["archive"]).read() == VALID_HANDOVER
 
 
@@ -291,7 +292,8 @@ def test_the_journal_is_kept_to_a_bound_tied_to_archive_keep(tmp_path, project):
     rotation(project).mkdir(parents=True)
     (rotation(project) / "injections.jsonl").write_text("\n".join(lines) + "\n")
     assert start(project, "sess-b", source="startup").returncode == 0
-    assert (rotation(project) / "injections.jsonl").read_text().splitlines() == lines[-20:]
+    kept = rotation_state.JOURNAL_LINES_PER_ARCHIVE_COPY * 2
+    assert (rotation(project) / "injections.jsonl").read_text().splitlines() == lines[-kept:]
 
 
 # --- errors.log under concurrent failures ----------------------------------------------
@@ -373,7 +375,7 @@ def test_a_journal_above_the_read_limit_is_trimmed_from_its_end(tmp_path, projec
     assert os.path.getsize(str(rotation(project) / "injections.jsonl")) > 1 << 20  # regular_file.MAX_READ_BYTES
     assert start(project, "sess-b", source="startup").returncode == 0
     kept = (rotation(project) / "injections.jsonl").read_text().splitlines()
-    assert len(kept) == 10 and kept[-3:] == last  # JOURNAL_LINES_PER_ARCHIVE_COPY lines for archive_keep 1
+    assert len(kept) == rotation_state.JOURNAL_LINES_PER_ARCHIVE_COPY and kept[-3:] == last  # archive_keep 1
 
 
 def test_the_cleanup_leaves_a_handover_path_that_is_no_regular_file_alone(tmp_path, project, monkeypatch, capsys):

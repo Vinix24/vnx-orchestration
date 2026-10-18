@@ -268,10 +268,10 @@ def test_another_command_is_ignored(tmp_path, project):
     assert not rotation(project).exists()
 
 
-def test_release_is_not_an_action_yet(tmp_path, project):
-    """B1 has write and resume; release comes with the hard band (B2)."""
+def test_release_is_an_action(tmp_path, project):
+    """B2 records the release; its effect on the force and hard bands is in test_enforcement.py."""
     s = Session(tmp_path, project, "sess-a")
-    assert message_of(s.expand("release")).startswith("context-rotation: usage: /context-rotation:rotate")
+    assert message_of(s.expand("release")).startswith("context-rotation: released for this session.")
 
 
 def test_a_project_skill_with_the_same_name_is_ignored(tmp_path, project):

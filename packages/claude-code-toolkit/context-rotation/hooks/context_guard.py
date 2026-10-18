@@ -1,20 +1,34 @@
 """Entry for UserPromptSubmit, UserPromptExpansion, PreToolUse and Stop.
 
 - UserPromptSubmit: a prompt makes the session's ready-marker outdated; the warn
-  band and above ask for a handover (M); an unmeasurable session is told once (U).
+  band asks for a handover (M), the force and hard bands ask for it now (M) and
+  tell the user once per crossing (U, band_guard); an unmeasurable session is
+  told once (U); an automatic /clear that stopped in this pane is repeated once to
+  the user of its `claude` process (U, auto_clear).
 - UserPromptExpansion: when the user types /context-rotation:rotate, adds the
-  session's handover path (write), the list of handovers (resume), or the chosen
-  handover itself (resume <id>, or resume <number> for the entry shown under that
-  number in this session's last list); any other action gets the usage line.
-- PreToolUse: any call other than Read, Glob, Grep or a write of the handover
-  makes the ready-marker outdated.
+  session's handover path (write), records the release of the force and hard
+  bands for the session (release), adds the list of handovers (resume), or the
+  chosen handover itself (resume <id>, or resume <number> for the entry shown
+  under that number in this session's last list); any other action gets the
+  usage line.
+- PreToolUse: a write into `.claude/rotation` other than of the handover is
+  denied in every band, also inside a subagent (band_guard.storage_denial).
+  Any call other than Read, Glob, Grep or a write of the handover
+  makes the ready-marker outdated; the force and hard bands may deny the call
+  (band_guard), never a write of the handover.
 - Stop: re-checks the ready-marker against the transcript and its age, gives a
   valid handover written outside Write or Edit its marker, and tells the user
-  once to type /clear (loop step 7, the manual path).
+  once per marker (loop step 7): to type /clear (the manual path), or, inside
+  tmux with auto_clear on, that /clear is typed for them by a detached job, or
+  why not (auto_clear). Without a current handover, the force and hard bands
+  hold the Stop back once per crossing (band_guard).
 
-A hook that fires inside a subagent (agent_id set) does nothing, and so does one
-whose project storage fails the storage gate (hook_runtime.open_project). Failures
-go through hook_runtime: one stderr line, errors.log, exit 1, never 2.
+A hook that fires inside a subagent (agent_id set) does nothing but deny a write
+into `.claude/rotation` (SUBAGENT_HANDLERS), and one whose project storage fails
+the storage gate does nothing at all (hook_runtime.open_project). Failures
+go through hook_runtime: one stderr line, errors.log, exit 1, never 2. A denial and
+a held-back Stop are JSON with exit 0, decided last, and a failure of the
+enforcement state never leads to either (band_guard).
 """
 from __future__ import annotations
 
@@ -23,6 +37,8 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
 
+import auto_clear
+import band_guard
 import context_budget
 import handover_contract
 import handover_injection
@@ -36,28 +52,10 @@ UNKNOWN_NOTICE = (
     "context-rotation cannot measure this session's context, so it cannot warn "
     "before the context fills up. It will not repeat this notice."
 )
-MANUAL_COMPLETION = "Handover saved. Type /clear, then any message, to continue in a fresh context."
 # The ids of the last list `resume` showed in this session, so a number picks what the user saw.
 LISTING = "resume_listing"
 MAX_LISTED = 1000
 MAX_NUMBER_DIGITS = 6
-
-
-class Session:
-    def __init__(self, project_dir, session_id, settings):
-        self.project_dir = project_dir
-        self.session_id = session_id
-        self.settings = settings
-        self.handover = rotation_state.handover_path(project_dir, session_id)
-
-    def marker(self, kind):
-        return rotation_state.marker_path(self.project_dir, kind, self.session_id)
-
-
-def open_session(payload, env, run):
-    """The session this hook acts for, or None when it must do nothing (hook_runtime.open_project)."""
-    opened = hook_runtime.open_project(payload, env, run)
-    return Session(*opened) if opened is not None else None
 
 
 # --- outdated markers (loop step 6) --------------------------------------
@@ -95,17 +93,21 @@ def warn_message(size, settings, project_dir, session_id):
     )
 
 
-def handle_known(size, session, state, run):
+def handle_known(payload, size, session, state, run):
+    """(M, U) for a measured size: the warn message, or the force and hard bands' (band_guard)."""
     if state.get("unknown_count"):
         state["unknown_count"] = 0
         run.at("save state")
         rotation_state.save_state(session.project_dir, session.session_id, state)
-    if context_budget.band(size, session.settings) in ("warn", "force", "hard"):
+    band = context_budget.band(size, session.settings)
+    if band in ("warn", "force", "hard"):
         # The handover path is named in the instruction below: protect it first.
         run.at("ignore protection")
         rotation_state.ensure_gitignore(session.project_dir)
-        return warn_message(size, session.settings, session.project_dir, session.session_id)
-    return None
+    text, line = band_guard.on_prompt(payload, session, size, run)
+    if band == "warn":
+        text = warn_message(size, session.settings, session.project_dir, session.session_id)
+    return text, line
 
 
 def handle_unknown(session, state, run):
@@ -126,6 +128,7 @@ def on_prompt(payload, env, run, session):
     notes = []
     if rotation_state.prompt_outdates(payload.get("prompt")):
         notes.append(outdate(session, state_fields.PROMPT_AFTER, run))
+    repeat = auto_clear.prompt_notice(payload, env, run, session)
     run.at("measure")
     size = context_budget.measure(payload.get("transcript_path"))
     run.at("load state")
@@ -134,9 +137,11 @@ def on_prompt(payload, env, run, session):
     if size is None:
         notice = handle_unknown(session, state, run)
     else:
-        notes.append(handle_known(size, session, state, run))
+        text, notice = handle_known(payload, size, session, state, run)
+        notes.append(text)
     text = "\n\n".join(n for n in notes if n)
-    document = hook_runtime.context_output("UserPromptSubmit", text, notice)
+    user = "\n".join(line for line in (repeat, notice) if line)
+    document = hook_runtime.context_output("UserPromptSubmit", text, user)
     if document:
         hook_runtime.emit(document)
 
@@ -237,6 +242,8 @@ def on_expansion(payload, env, run, session):
         run.at("ignore protection")
         rotation_state.ensure_gitignore(session.project_dir)
         expansion_says(write_instruction(session))
+    elif action == "release":
+        expansion_says(*band_guard.on_release(session, run))
     elif action == "resume":
         resume(session, words[1:], env, run)
     else:
@@ -251,46 +258,52 @@ def on_tool(payload, env, run, session):
         # The handover is about to be written: protect it before it exists.
         run.at("ignore protection")
         rotation_state.ensure_gitignore(session.project_dir)
-        return
-    if not rotation_state.tool_call_outdates(tool_name, tool_input, session.handover):
-        return
-    note = outdate(session, state_fields.TOOL_CALL_AFTER, run)
-    if note:
+    note = None
+    if rotation_state.tool_call_outdates(tool_name, tool_input, session.handover):
+        note = outdate(session, state_fields.TOOL_CALL_AFTER, run)
+    # Decided last, so nothing after it can fail the hook; a write of the handover goes ahead
+    # unless a symlink at its path would take it elsewhere (band_guard.writes_handover).
+    denial = band_guard.on_tool(payload, session, run)
+    if denial:
+        hook_runtime.emit(hook_runtime.deny_output(denial[0], note, denial[1]))
+    elif note:
         hook_runtime.emit(hook_runtime.context_output("PreToolUse", note))
 
 
 # --- Stop ----------------------------------------------------------------
 
-def announce(session, sha, run):
+def announce(payload, env, run, session, marker):
+    """The user's line for a current handover, once per marker: the manual path or the automatic one (auto_clear)."""
     run.at("announce")
-    if rotation_state.mark_announced(session.project_dir, session.session_id, sha):
-        hook_runtime.emit({"systemMessage": MANUAL_COMPLETION})
+    if rotation_state.mark_announced(session.project_dir, session.session_id, marker["sha256"]):
+        hook_runtime.emit({"systemMessage": auto_clear.at_stop(payload, session, marker, env, run)})
 
 
 def adopt(payload, env, run, session, data, cursor):
-    """Stop fallback: a valid handover written outside Write or Edit still gets a marker.
+    """Stop fallback: a valid handover written outside Write or Edit still gets a marker, which it returns.
 
     `cursor` is the transcript position taken before `data` was read: work after
     it is judged later, work stamped after the file's write is judged here.
     """
     outdated = rotation_state.load_marker(session.project_dir, session.marker("outdated"))
     if outdated is not None and outdated["sha256"] == rotation_state.sha256_hex(data):
-        return
+        return None
     if handover_contract.problems(data, session.settings["handover_max_chars"]):
-        return
+        return None
     written = rotation_state.stored_mtime(session.project_dir, session.handover)
     if written is None:
-        return
+        return None
     run.at("check transcript")
     if transcript_work.work_since(payload.get("transcript_path"), written, session.handover):
-        return
+        return None
     run.at("write ready marker")
     marker = rotation_state.new_marker(session.session_id, session.handover, data, env, cursor, None)
     rotation_state.mark_ready(session.project_dir, marker)
-    announce(session, marker["sha256"], run)
+    return marker
 
 
-def on_stop(payload, env, run, session):
+def current_handover(payload, env, run, session):
+    """The session's ready-marker when its handover is current, after the Stop fallback; None otherwise."""
     run.at("read handover")
     cursor = None
     if rotation_state.stored_exists(session.project_dir, session.handover):
@@ -301,12 +314,20 @@ def on_stop(payload, env, run, session):
         run.at("check ready marker")
         reason = rotation_state.outdated_reason(ready, session.settings, data)
         if reason is None:
-            announce(session, ready["sha256"], run)
-            return
+            return ready
         run.at("mark outdated")
         rotation_state.mark_outdated(session.project_dir, session.session_id, reason, notified=False)
-    if data is not None:
-        adopt(payload, env, run, session, data, cursor)
+    return adopt(payload, env, run, session, data, cursor) if data is not None else None
+
+
+def on_stop(payload, env, run, session):
+    marker = current_handover(payload, env, run, session)
+    if marker is not None:
+        announce(payload, env, run, session, marker)
+        return
+    block = band_guard.on_stop(payload, session, run)
+    if block:
+        hook_runtime.emit(hook_runtime.block_output(*block))
 
 
 HANDLERS = {
@@ -317,11 +338,22 @@ HANDLERS = {
 }
 
 
+def on_subagent_tool(payload, env, run, session):
+    """PreToolUse inside a subagent: only a write into the plugin's directory is denied; no band, marker or state."""
+    denial = band_guard.storage_denial(payload.get("tool_name"), payload.get("tool_input"), session, run)
+    if denial:
+        hook_runtime.emit(hook_runtime.deny_output(denial[0]))
+
+
+SUBAGENT_HANDLERS = {"PreToolUse": on_subagent_tool}
+
+
 def run(payload, env, run_state):
-    handler = HANDLERS.get(payload.get("hook_event_name"))
+    handlers = SUBAGENT_HANDLERS if payload.get("agent_id") else HANDLERS
+    handler = handlers.get(payload.get("hook_event_name"))
     if handler is None:
         return
-    session = open_session(payload, env, run_state)
+    session = hook_runtime.open_session(payload, env, run_state, subagents=True)
     if session is not None:
         handler(payload, env, run_state, session)
 

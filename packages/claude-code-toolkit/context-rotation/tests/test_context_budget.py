@@ -133,7 +133,7 @@ def test_defaults_when_no_file(project, isolated_env):
     assert s["hard_max_denials"] == 3
     assert s["archive_keep"] == 20
     assert s["busy_pattern"] == r"^\S+ \S+… \(\d+s"
-    assert s["prompt_pattern"] == "^❯ "
+    assert s["prompt_pattern"] == "^❯ "
     assert s["ack_timeout_seconds"] == 20
 
 

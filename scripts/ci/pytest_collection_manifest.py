@@ -12,7 +12,14 @@ phase from the same run that writes the JUnit XML:
   skipped at collection, such as a module-level ``pytest.importorskip``, or a
   file erroring at collection), keyed by the report's nodeid (the file);
 * the phase, whether it was active, the versions of the pinned tools, and the
-  worker count.
+  worker count;
+* ``run_id`` and ``run_attempt``, the run stamp: ``GITHUB_RUN_ID`` and
+  ``GITHUB_RUN_ATTEMPT`` as GitHub Actions sets them in every step, ``null``
+  outside CI. The same run's JUnit XML gets the stamp as the testsuite
+  properties ``vnx_run_id`` and ``vnx_run_attempt``. The parity check
+  (``check_xdist_parity.py``) counts a manifest or an XML only for the run and
+  attempt its own stamp names, so an earlier attempt's artifact that a failed
+  re-run left in place is stale evidence, not this attempt's.
 
 A separate ``pytest --collect-only`` cannot give this: it disables xdist, and a
 module-level skip leaves no nodeid in its output.
@@ -50,10 +57,27 @@ from importlib import metadata
 from pathlib import Path
 
 import pytest
+from _pytest.junitxml import xml_key
 
 SCHEMA = "vnx-collection-manifest/1"
 PINNED_TOOLS = ("pytest", "pytest-xdist", "pytest-timeout")
 _PLUGIN_NAME = "vnx-collection-manifest-recorder"
+
+
+def run_stamp() -> dict:
+    """The run and attempt this process runs in, from the GitHub Actions environment; None outside CI."""
+    return {"run_id": os.environ.get("GITHUB_RUN_ID") or None,
+            "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT") or None}
+
+
+def stamp_junit_xml(config, stamp: dict) -> None:
+    """Give the JUnit XML this run writes (if any) the run stamp, as testsuite properties ``vnx_<field>``."""
+    xml = config.stash.get(xml_key, None)
+    if xml is None:
+        return
+    for name, value in stamp.items():
+        if value is not None:
+            xml.add_global_property(f"vnx_{name}", value)
 
 
 def tool_versions() -> dict:
@@ -88,6 +112,7 @@ def inactive_manifest(phase: str) -> dict:
         "schema": SCHEMA,
         "phase": phase,
         "phase_active": False,
+        **run_stamp(),
         "tool_versions": tool_versions(),
         "worker_count": 0,
         "nodeid_count": 0,
@@ -116,9 +141,14 @@ class ManifestRecorder:
         self._config = config
         self._path = path
         self._phase = phase
+        self._stamp = run_stamp()
         self._session_nodeids = None
         self._worker_nodeids = {}
         self._outcomes = {}
+
+    def pytest_sessionstart(self, session) -> None:
+        # After every pytest_configure, so the junitxml plugin has set up its writer.
+        stamp_junit_xml(self._config, self._stamp)
 
     def pytest_collectreport(self, report) -> None:
         if report.passed:
@@ -153,6 +183,7 @@ class ManifestRecorder:
             "schema": SCHEMA,
             "phase": self._phase,
             "phase_active": True,
+            **self._stamp,
             "mode": "xdist" if xdist_active else "serial",
             "tool_versions": tool_versions(),
             "worker_count": self._worker_count(xdist_active),

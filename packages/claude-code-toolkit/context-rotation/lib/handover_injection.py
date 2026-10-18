@@ -2,17 +2,17 @@
 
 the claim's line in injections.jsonl -> claim (the marker moves to the claim name
 of its generation) -> copy to the archive -> the original moves into the archive
-(rotation_state.retire_original) -> the injection's line -> emit -> the claimed
-marker removed last. A crash at any point leaves the claimed marker naming an
-archive copy that holds the claimed bytes, or the original, and `resume` lists
-it. Automatic injection happens at most once; recovery is manual, and reads the
-archive copy first: the original is used only while there is no copy yet and it
-still holds the claimed bytes. No file that was ever at the handover path is
-deleted, so a handover written meanwhile stays. Every marker here passed
-rotation_state.marker_problem, and every file is read through the verified
-storage directories. A storage failure before the emit (archive copy, log line)
-is logged and nothing is emitted, so the claim stays for `resume`; after the emit
-nothing raises.
+(rotation_state.retire_original) -> the injection's line -> emit -> the delivery's
+line, once the emit returned -> the claimed marker removed last. A crash at any
+point leaves the claimed marker naming an archive copy that holds the claimed
+bytes, or the original, and `resume` lists it. Automatic injection happens at
+most once; recovery is manual, and reads the archive copy first: the original is
+used only while there is no copy yet and it still holds the claimed bytes. No
+file that was ever at the handover path is deleted, so a handover written
+meanwhile stays. Every marker here passed rotation_state.marker_problem, and
+every file is read through the verified storage directories. A storage failure
+before the emit (archive copy, log line) is logged and nothing is emitted, so the
+claim stays for `resume`; after the emit nothing raises.
 
 What is shown comes from the plugin, never as text from disk: the paths a marker
 gives are the ones rotation_state.read_marker builds, times and outdated reasons
@@ -35,7 +35,7 @@ INLINE_LIMIT = 9000
 SKILL_COMMAND = "context-rotation:rotate"
 RESUME_HINT = "Type /%s resume to see them and pick one." % SKILL_COMMAND
 PICK_HINT = "Type /%s resume <number> or resume <id> with a number or an id from the list." % SKILL_COMMAND
-USAGE = "usage: /%s [write | resume [<number> | <id>]]" % SKILL_COMMAND
+USAGE = "usage: /%s [write | release | resume [<number> | <id>]]" % SKILL_COMMAND
 LISTED_AT_START = 5
 # <kind>-<session>-<generation> for a marker, or an archive file name without ".md".
 ENTRY_ID = re.compile(
@@ -102,18 +102,21 @@ def deliver(project_dir: str, claimed: str, marker: Dict[str, Any], data: bytes,
 
     `data` holds the claimed bytes (sha256 equal to the marker's claimed_sha256),
     and the context says whether they are the bytes the marker was checked against.
-    The original moves into the archive before the emit, and when it is the file
-    the claim read it becomes the archive copy the context and the log line name.
+    The context and the log line name the archive copy written from `data`, which
+    nothing writes to afterwards. The original moves into the archive before the
+    emit under a name of its own, and is never what they name.
     None when the archive copy or the log line could not be written (OSError,
     LockTimeout): the failure goes to rotation_state.log_failure, nothing is
-    emitted, and the claimed marker stays for `resume`.
+    emitted, and the claimed marker stays for `resume`. An emit that raises
+    leaves the claim too, and no `delivered` line: only an emit that returned
+    gets one (rotation_state.log_delivery), which the automatic /clear waits for.
     """
     step = "archive handover"
     try:
         at(step)
         rotation_state.archive_handover(project_dir, marker["archive"], data)
         at("retire original")
-        marker = rotation_state.retire_original(project_dir, claimed, marker)
+        rotation_state.retire_original(project_dir, marker)
         archive = marker["archive"]
         context = injection_context(data.decode("utf-8", "replace"), archive, marker.get("outdated_reason"),
                                     marker["claimed_sha256"] == marker["sha256"])
@@ -127,6 +130,7 @@ def deliver(project_dir: str, claimed: str, marker: Dict[str, Any], data: bytes,
         return None
     at("emit handover")
     emit(context["text"], archive)
+    rotation_state.log_delivery(project_dir, via, marker["session_id"], marker["generation"], successor)
     rotation_state.finish_claim(project_dir, claimed)
     return archive
 
@@ -161,7 +165,8 @@ def resume_pick(project_dir: str, successor: str, entry: Dict[str, Any],
     now, also when it changed after its marker was written: refusing it would leave
     the user only the file itself. The context then says that it no longer holds
     the text that was checked (deliver), and the claim records the bytes it handed
-    over (claimed_sha256).
+    over (claimed_sha256). The claim takes only the generation the entry was found
+    with: one the origin published at the same marker path since is refused.
     """
     if entry["kind"] == "archived":
         return _resume_archived(project_dir, successor, entry, emit)
@@ -174,7 +179,11 @@ def resume_pick(project_dir: str, successor: str, entry: Dict[str, Any],
     else:
         if rotation_state.read_bytes(project_dir, marker["handover"]) is None:
             return "The handover file %s is gone." % marker["handover"]
-        taken = rotation_state.claim(project_dir, entry["marker_path"], successor)
+        try:
+            taken = rotation_state.claim(project_dir, entry["marker_path"], successor,
+                                         generation=marker["generation"])
+        except rotation_state.GenerationChanged as changed:
+            return "That handover was replaced before it could be claimed: %s. %s" % (changed, RESUME_HINT)
         if taken is None:
             return "That handover was taken by another session in the meantime."
         claimed, marker, data = taken

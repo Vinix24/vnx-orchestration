@@ -131,11 +131,13 @@ def _run_inline(workspace: Path) -> list:
     return proc.stdout[:-1].decode("utf-8").split("\0")
 
 
-def _run_script(script: Path, out_dir: Path, xdist: str | None = None) -> subprocess.CompletedProcess:
+def _run_script(script: Path, out_dir: Path, xdist: str | None = None, run: dict | None = None) -> subprocess.CompletedProcess:
+    """The script with *run* (GITHUB_* variables) as its run, or none when *run* is None (outside CI)."""
     extra = {} if xdist is None else {"VNX_CI_XDIST": xdist}
+    env = {k: v for k, v in _clean_env(**extra).items() if k not in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")}
     return subprocess.run(
         ["bash", str(script), str(out_dir)],
-        env=_clean_env(**extra),
+        env={**env, **(run or {})},
         capture_output=True,
         text=True,
         cwd=str(script.parents[2]),
@@ -209,7 +211,32 @@ def test_serial_mode_writes_only_the_full_vector(tmp_path, xdist):
     (stale / "serial.args").write_bytes(b"stale\0")
     proc = _run_script(SCRIPT, stale, xdist)
     assert proc.returncode == 0, proc.stderr
-    assert sorted(p.name for p in stale.iterdir()) == ["full.args"]
+    assert sorted(p.name for p in stale.iterdir()) == ["full.args", "run.json"]
+
+
+@pytest.mark.parametrize("xdist", [None, "1"], ids=["serial-mode", "xdist-mode"])
+def test_the_emission_carries_the_run_stamp_of_its_run(tmp_path, xdist):
+    proc = _run_script(SCRIPT, tmp_path / "out", xdist, run={"GITHUB_RUN_ID": "38939122085", "GITHUB_RUN_ATTEMPT": "2"})
+    assert proc.returncode == 0, proc.stderr
+    stamp = json.loads((tmp_path / "out" / "run.json").read_text(encoding="utf-8"))
+    assert stamp == {"schema": "vnx-run-stamp/1", "run_id": "38939122085", "run_attempt": "2"}
+
+
+def test_outside_ci_the_emission_stamp_names_no_run(tmp_path):
+    proc = _run_script(SCRIPT, tmp_path / "out", "1")
+    assert proc.returncode == 0, proc.stderr
+    stamp = json.loads((tmp_path / "out" / "run.json").read_text(encoding="utf-8"))
+    assert stamp["run_id"] is None and stamp["run_attempt"] is None
+
+
+def test_a_refused_emission_leaves_no_stamp_of_an_earlier_one(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "run.json").write_text('{"run_id": "1", "run_attempt": "1"}', encoding="utf-8")
+    root = _suite_root(tmp_path, "tests/test_missing.py\n")
+    proc = _run_script(root / "scripts" / "ci" / SCRIPT.name, out, "1")
+    assert proc.returncode == 2
+    assert not (out / "run.json").exists()
 
 
 @pytest.mark.parametrize("xdist", ["2", "true", "yes", "1 "])
@@ -241,7 +268,7 @@ def test_the_committed_serial_list_is_empty_and_states_the_entry_rule():
 def test_empty_serial_list_emits_no_serial_phase(tmp_path):
     proc = _run_script(SCRIPT, tmp_path / "out", "1")
     assert proc.returncode == 0, proc.stderr
-    assert sorted(p.name for p in (tmp_path / "out").iterdir()) == ["parallel.args"]
+    assert sorted(p.name for p in (tmp_path / "out").iterdir()) == ["parallel.args", "run.json"]
     full = _read_vector(_run_full(tmp_path))
     assert _read_vector(tmp_path / "out" / "parallel.args") == full + XDIST_FLAGS
 

@@ -4,12 +4,18 @@
   `claude` process, which survives /clear) matches this session's are checked
   (sha256, age, transcript). Exactly one current match is claimed: its marker
   moves to the claim name of its generation, which never replaces a file (its
-  line in injections.jsonl first). The handover is copied to the archive, the
-  original moves into the archive and becomes that copy while it is the very file
-  the claim read, the injection is logged in injections.jsonl and returned as
-  additionalContext (or as a pointer to the archive copy above 9,000 characters),
-  and the claimed marker is removed last. A marker that fails the path checks is
-  never used: it is reported once and left on disk.
+  line in injections.jsonl first). The handover is copied to the archive from the
+  bytes the claim read; the original moves into the archive under a name of its
+  own (`<time>-<origin>.original`) and never becomes that copy. The injection is
+  logged in injections.jsonl and returned as additionalContext (or as a pointer to
+  the archive copy above 9,000 characters); once that output is written a
+  `delivered` line follows, and the claimed marker is removed last. An output that
+  cannot be written leaves the claim and no `delivered` line, so the automatic
+  /clear types nothing after it. The user gets one line naming the archive copy;
+  when the pane's automatic /clear typed this clear (auto_clear.typed_by_job) and
+  it is the first one for this user, that line also says how to turn auto_clear
+  off. A marker that fails the path checks is never used: it is reported once and
+  left on disk.
 - no match, and any source other than "compact": handovers not continued yet are
   listed for the user with the `resume` hint, never dropped silently.
 - any source: the archive is trimmed to archive_keep, and injections.jsonl to a
@@ -28,6 +34,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
 
+import auto_clear
 import handover_injection
 import hook_runtime
 import rotation_state
@@ -53,8 +60,12 @@ def current_matches(project_dir, session_id, identity, settings):
     return found
 
 
-def emit_handover(text, archive):
-    hook_runtime.emit(hook_runtime.context_output("SessionStart", text, INJECTED_NOTICE % archive))
+def emit_handover(text, archive, typed_by_job=False):
+    """The handover for the model (M) and one line for the user (U); after the first automatic clear, how to stop it."""
+    line = INJECTED_NOTICE % archive
+    if typed_by_job and auto_clear.first_on_machine():
+        line += " " + auto_clear.OFF_HINT
+    hook_runtime.emit(hook_runtime.context_output("SessionStart", text, line))
 
 
 def take_current(env, run_state, project_dir, session_id, settings):
@@ -88,8 +99,13 @@ def inject_on_clear(env, run_state, project_dir, session_id, settings):
     if taken is None:
         return False
     claimed, claimed_marker, data = taken
+    typed = auto_clear.typed_by_job(env, project_dir, claimed_marker)
+
+    def emit(text, archive):
+        emit_handover(text, archive, typed)
+
     return handover_injection.deliver(
-        project_dir, claimed, claimed_marker, data, session_id, "clear", emit_handover, run_state.at) is not None
+        project_dir, claimed, claimed_marker, data, session_id, "clear", emit, run_state.at) is not None
 
 
 def waiting_notice(env, run_state, project_dir, session_id):

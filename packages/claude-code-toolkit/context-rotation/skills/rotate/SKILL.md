@@ -1,18 +1,19 @@
 ---
 name: rotate
 description: Saves this session's state as a handover so a fresh session can continue after /clear, or picks up an earlier handover. Use when the context-rotation guard asks for a handover, when the user types /context-rotation:rotate, or when the user wants to continue from the work of an earlier session.
-argument-hint: "[write | resume [number | id]]"
+argument-hint: "[write | release | resume [number | id]]"
 ---
 
 # Rotate: hand this session over to a fresh one
 
 A long session gets worse before it compacts. A handover is a short file that tells a
-fresh session everything it needs to continue. The user then types `/clear`, and the
-plugin gives the handover to the new session.
+fresh session everything it needs to continue. Then `/clear` starts that fresh session:
+inside tmux the plugin types it into this session's own pane once the session is idle,
+elsewhere the user types it. The plugin gives the handover to the new session.
 
-The first word of the arguments picks the action: `write` (also with no arguments) or
-`resume`. For any other first word the plugin puts its usage line in your context: show
-that line to the user and do nothing else.
+The first word of the arguments picks the action: `write` (also with no arguments),
+`release` or `resume`. For any other first word the plugin puts its usage line in your
+context: show that line to the user and do nothing else.
 
 ## write
 
@@ -62,6 +63,35 @@ that line to the user and do nothing else.
    the handover outdated, and an outdated handover is never given to a fresh session.
    End your turn with one short line saying the handover is saved.
 
+## release
+
+Past the force threshold the plugin holds back a stop once per crossing and asks for the
+handover; past the hard threshold it also denies every tool except Read, Glob, Grep,
+Skill, AskUserQuestion, TodoWrite and a Write or Edit of this session's handover. When
+the user types `/context-rotation:rotate release`, the plugin records the release for
+this session before you read this: from then on the bands deny nothing and hold nothing
+back, and the notices about the context size continue. Typing that command is the only
+release the plugin itself offers. The user can also change the plugin's settings file;
+that is theirs to do, never yours.
+
+- **A note about the release is in your context**: do nothing else for this command.
+  Tell the user in one line what the note says: released, or not recorded.
+- **No such note** (you started this skill yourself, with `release`): nothing was
+  released. Only the user can release the guard, by typing the command. Tell the user
+  that, and continue with the handover if the plugin asked for one.
+
+## The plugin's own files
+
+`.claude/rotation/` holds the plugin's own files, among them the state that decides what
+the bands deny. Its settings are in `.claude/context-rotation.json` in the project and
+in `~/.claude/context-rotation.json`. In every band, also inside a subagent, the plugin
+denies a Write, Edit, MultiEdit or NotebookEdit of any of these, unless it writes this
+session's handover. That stops a direct write by those tools and nothing more. A shell
+command (Bash) or a script runs with the user's rights and can change these files, a
+change to Claude Code's own settings can remove the plugin's hooks, and the tools of an
+MCP server are not looked at. Never change any of these files or those settings
+yourself, with any tool: switching the plugin off is the user's decision.
+
 ## resume
 
 The user wants to continue from an earlier handover, for example one that was not given
@@ -88,7 +118,9 @@ to a session automatically.
   it, so do not either, and tell the user. `archive/*.md` holds every handover given to a
   session, and its file names start with a UTC time, so the newest sorts last.
   `injections.jsonl` has one line per step of a handover (`ready`, `outdated`,
-  `claimed`, `injected`, `kept`); an `injected` line names the session that got it.
+  `claimed`, `injected`, `delivered`, `kept`, and the `clear_*` steps of an automatic
+  /clear in tmux); an `injected` line names the session it was being given to, and a
+  `delivered` line follows only once it was handed over.
   `ready-*.json`, `outdated-*.json` and `claimed-*.json` each name a handover that was
   not given to a session yet, or whose hand-over did not finish. Use only a handover
   inside `.claude/rotation/` named for its marker's session (`handover-<session id>.md`)
@@ -102,6 +134,8 @@ to a session automatically.
 The plugin's SessionStart hook finds the handover of the session that ran in the same
 `claude` process, checks that it is unchanged and still current, copies it to
 `.claude/rotation/archive/`, and puts it in the new session's context. The user sees one
-line naming the file. When that does not happen (another process, an outdated handover,
-two handovers at once), the user sees the waiting handovers listed with a hint to type
-`/context-rotation:rotate resume`.
+line naming the file. After an automatic /clear in tmux the plugin then types
+`Continue from the handover in your context, step 1.` as the first prompt, once the
+handover was handed over: continue from step 1 as the resume action says. When that does
+not happen (another process, an outdated handover, two handovers at once), the user sees
+the waiting handovers listed with a hint to type `/context-rotation:rotate resume`.

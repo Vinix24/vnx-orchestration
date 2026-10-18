@@ -12,6 +12,10 @@
 #   manifest-PHASE.json          collection manifest (scripts/ci/pytest_collection_manifest.py)
 #   exit-PHASE                   pytest's exit code (absent when the step was killed)
 #   duration-PHASE-s             wall time of the pytest process in seconds
+#   result-PHASE.json            exit code and wall time with the run stamp
+#                                (GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT; null outside
+#                                CI), so the parity check can tell this attempt's
+#                                result from an earlier attempt's
 #   mem-total-kb                 MemTotal of the runner        (Linux only)
 #   mem-baseline-used-kb-PHASE   MemTotal - MemAvailable before the run
 #   mem-peak-used-kb-PHASE       the highest MemTotal - MemAvailable seen during
@@ -86,7 +90,21 @@ if [ "${#PYTEST_ARGS[@]}" -eq 0 ]; then
   exit 2
 fi
 
-rm -f "$EVIDENCE/exit-$PHASE" "$EVIDENCE/duration-$PHASE-s"
+# A JSON string of the digits in $1, or null when it has none.
+json_digits() {
+  local v
+  v="$(printf '%s' "${1:-}" | tr -cd '0-9')"
+  if [ -n "$v" ]; then printf '"%s"' "$v"; else printf 'null'; fi
+}
+
+write_result() {
+  local tmp="$EVIDENCE/.result-$PHASE.json.tmp"
+  printf '{"schema": "vnx-phase-result/1", "phase": "%s", "run_id": %s, "run_attempt": %s, "exit": %s, "duration_s": %s}\n' \
+    "$PHASE" "$(json_digits "${GITHUB_RUN_ID:-}")" "$(json_digits "${GITHUB_RUN_ATTEMPT:-}")" "$1" "$2" > "$tmp"
+  mv -f "$tmp" "$EVIDENCE/result-$PHASE.json"
+}
+
+rm -f "$EVIDENCE/exit-$PHASE" "$EVIDENCE/duration-$PHASE-s" "$EVIDENCE/result-$PHASE.json"
 start_memory_sampler
 started="$(date +%s)"
 rc=0
@@ -95,7 +113,9 @@ PYTHONPATH="$PLUGIN_DIR${PYTHONPATH:+:$PYTHONPATH}" pytest "${PYTEST_ARGS[@]}" \
   -p pytest_collection_manifest \
   --collection-manifest="$EVIDENCE/manifest-$PHASE.json" \
   --collection-manifest-phase="$PHASE" || rc=$?
-printf '%s\n' "$(( $(date +%s) - started ))" > "$EVIDENCE/duration-$PHASE-s"
+duration="$(( $(date +%s) - started ))"
+printf '%s\n' "$duration" > "$EVIDENCE/duration-$PHASE-s"
 printf '%s\n' "$rc" > "$EVIDENCE/exit-$PHASE"
+write_result "$rc" "$duration"
 stop_memory_sampler
 exit "$rc"

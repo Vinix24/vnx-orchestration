@@ -8,7 +8,7 @@ import json
 import os
 import re
 import sys
-from typing import Any, Dict, Iterator, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 import regular_file
 
@@ -26,9 +26,13 @@ DEFAULTS = {
     "handover_max_age_minutes": 60,
     "hard_max_denials": 3,
     "archive_keep": 20,
+    # A0 rule 6 (pane_screen): a spinner line above the input box, and the prompt of the input
+    # line, `❯` and a no-break space; a prompt shown in the history above has a plain space.
     "busy_pattern": r"^\S+ \S+… \(\d+s",
-    "prompt_pattern": "^❯ ",
+    "prompt_pattern": "^❯ ",
     "ack_timeout_seconds": 20,
+    # Tool names, or fnmatch patterns of them, that the force band denies; none by default.
+    "force_deny_tools": (),
 }
 _BOOLS = ("enabled", "auto_clear")
 _POSITIVE_INTS = (
@@ -36,6 +40,7 @@ _POSITIVE_INTS = (
     "hard_max_denials", "archive_keep", "ack_timeout_seconds",
 )
 _PATTERNS = ("busy_pattern", "prompt_pattern")
+_TOOL_LISTS = ("force_deny_tools",)
 _PCTS = ("warn_pct", "force_pct", "hard_pct")
 
 
@@ -121,8 +126,13 @@ def measure(transcript_path: Optional[str]) -> Optional[int]:
 
 # --- settings ------------------------------------------------------------
 
-def _read_settings_file(directory: str) -> Optional[Dict[str, Any]]:
-    path = os.path.join(directory, ".claude", SETTINGS_FILE)
+def settings_paths(project_dir: Optional[str], home: Optional[str] = None) -> List[str]:
+    """The settings files load_settings reads, in its order: the project's, then the user's in the home directory."""
+    user_home = home if home is not None else os.path.expanduser("~")
+    return [os.path.join(directory, ".claude", SETTINGS_FILE) for directory in (project_dir, user_home) if directory]
+
+
+def _read_settings_file(path: str) -> Optional[Dict[str, Any]]:
     if not os.path.isfile(path):
         return None
     try:
@@ -142,6 +152,8 @@ def _valid_value(key: str, value: Any) -> bool:
         return isinstance(value, bool)
     if key in _POSITIVE_INTS:
         return _is_int(value) and value > 0
+    if key in _TOOL_LISTS:
+        return isinstance(value, list) and all(isinstance(item, str) and item and "\0" not in item for item in value)
     if key in _PATTERNS:
         if not isinstance(value, str):
             return False
@@ -165,7 +177,7 @@ def _apply(raw: Dict[str, Any]) -> Dict[str, Any]:
         if key in _PCTS or key not in raw:
             continue
         if _valid_value(key, raw[key]):
-            settings[key] = raw[key]
+            settings[key] = tuple(raw[key]) if key in _TOOL_LISTS else raw[key]
         else:
             _warn("bad value for %s, using the default" % key)
     if any(k in raw for k in _PCTS):
@@ -178,12 +190,9 @@ def _apply(raw: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def load_settings(project_dir: Optional[str], home: Optional[str] = None) -> Dict[str, Any]:
-    """Project file, else user file, else defaults. Bad keys fall back one by one."""
-    user_home = home if home is not None else os.path.expanduser("~")
-    for directory in (project_dir, user_home):
-        if not directory:
-            continue
-        raw = _read_settings_file(directory)
+    """Project file, else user file, else defaults (settings_paths). Bad keys fall back one by one."""
+    for path in settings_paths(project_dir, home):
+        raw = _read_settings_file(path)
         if raw is not None:
             return _apply(raw)
     return dict(DEFAULTS)

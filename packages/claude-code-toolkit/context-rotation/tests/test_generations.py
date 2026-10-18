@@ -10,6 +10,13 @@ the same session never takes its place (codex and deepseek on #2080, round 7):
 - a file that was ever at the handover path is never deleted by the cleanup, also
   when it is written through a descriptor opened before the cleanup moved it;
 - an explicit pick says whether the file still holds the text that was checked.
+
+The fix-forward (OI-2144, codex on #2080's last head) adds two rules:
+
+- the archive copy a claim names is the one written from the claimed bytes and
+  never changes; the original moved off the handover path is kept apart under its
+  own name, and no claim and no delivery reads it;
+- a pick claims only the generation it found: one published in between is refused.
 """
 from __future__ import annotations
 
@@ -21,10 +28,12 @@ from datetime import datetime, timezone
 
 import pytest
 
-from conftest import PKG, VALID_HANDOVER, Session, context_of, event, rotation
+from conftest import PKG, VALID_HANDOVER, Session, context_of, event, rotation, settings_file, start
 
 sys.path.insert(0, str(PKG / "hooks"))
 
+import context_guard
+import handover_injection
 import hook_runtime
 import rotation_state
 import session_start
@@ -63,9 +72,14 @@ def ready_handover(project, data, session_id="sess-a"):
 
 
 def stored_texts(project):
-    """Every handover text on disk: the archive copies and the handover files."""
-    found = [p.read_bytes() for p in (rotation(project) / "archive").glob("*.md")]
+    """Every handover text on disk: every file in the archive, and the handover files."""
+    found = [p.read_bytes() for p in (rotation(project) / "archive").iterdir() if p.is_file()]
     return found + [p.read_bytes() for p in rotation(project).glob("handover-*.md")]
+
+
+def injected_lines(project):
+    lines = (rotation(project) / "injections.jsonl").read_text().splitlines()
+    return [record for record in map(json.loads, lines) if record["event"] == "injected"]
 
 
 def numbered(text):
@@ -108,8 +122,8 @@ def test_moving_the_original_never_replaces_a_file_in_the_archive(tmp_path, proj
     s = saved_session(tmp_path, project)
     planned, real_plan = [], rotation_state.plan_archive
 
-    def plan_then_taken(project_dir, origin, now=None):
-        path = real_plan(project_dir, origin, now)
+    def plan_then_taken(project_dir, origin, now=None, suffix=".md"):
+        path = real_plan(project_dir, origin, now, suffix)
         planned.append(path)
         if len(planned) == 2:  # the claim plans the archive copy, the cleanup the name for the original
             with open(path, "w") as handle:
@@ -140,6 +154,37 @@ def test_a_saved_number_never_picks_a_later_handover_of_the_same_session(tmp_pat
     assert numbered(text)[0].startswith("1. ready")
 
 
+def test_a_pick_never_claims_a_generation_published_after_it_was_found(tmp_path, project, other_pid,
+                                                                       monkeypatch, capsys):
+    """The origin marks a new generation ready between the lookup of the pick and its claim (codex on #2080)."""
+    origin = saved_session(tmp_path, project, pid=other_pid, text=FIRST)
+    first = json.loads(origin.marker("ready").read_text())["generation"]
+    reader = Session(tmp_path, project, "sess-r")
+    real_find, published = handover_injection.find_entry, []
+
+    def found_then_the_origin_writes_again(entries, ident):
+        entry = real_find(entries, ident)
+        origin.write_handover(SECOND)
+        origin.finish_turn()
+        published.append(json.loads(origin.marker("ready").read_text())["generation"])
+        return entry
+
+    with monkeypatch.context() as patch:
+        patch.setattr(handover_injection, "find_entry", found_then_the_origin_writes_again)
+        context_guard.run(reader.payload(
+            "09-UserPromptExpansion-plugin-skill", command_name="context-rotation:rotate",
+            command_args="resume ready-sess-a-" + first), dict(os.environ, CLAUDE_PID=str(os.getpid())),
+            hook_runtime.HookRun())
+    text = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+    [second] = published
+    assert second != first
+    assert "The second handover" not in text, "the pick claimed a generation published after it was found"
+    assert "generation %s" % first in text and "generation %s" % second in text
+    assert json.loads(origin.marker("ready").read_text())["generation"] == second
+    assert not list(rotation(project).glob("claimed-*.json"))
+    assert not injected_lines(project)
+
+
 # --- the cleanup never deletes a file that was at the handover path ------------------
 
 def test_a_write_through_a_descriptor_opened_before_the_cleanup_is_kept(tmp_path, project, monkeypatch, capsys):
@@ -160,6 +205,78 @@ def test_a_write_through_a_descriptor_opened_before_the_cleanup_is_kept(tmp_path
     finally:
         os.close(writer)
     assert LATE.encode() in stored_texts(project), "the cleanup deleted bytes written through an open descriptor"
+
+
+# --- the archive copy of a claim never changes ------------------------------------------
+
+def test_a_write_after_the_claim_never_changes_the_archive_a_pointer_names(tmp_path, project):
+    """The origin keeps the original open and writes after the claim (codex on #2080, OI-2144)."""
+    settings_file(project, handover_max_chars=20000)
+    text = FIRST + "detail line\n" * 900
+    s = saved_session(tmp_path, project, text=text)
+    writer = os.open(str(s.handover), os.O_WRONLY)  # opened before the claim, without O_TRUNC
+    try:
+        context = context_of(start(project, "sess-b"))
+        os.write(writer, LATE.encode())
+        os.ftruncate(writer, len(LATE.encode()))
+    finally:
+        os.close(writer)
+    [line] = injected_lines(project)
+    assert line["mode"] == "pointer" and "Read this file first" in context and line["archive"] in context
+    assert "holds exactly the text that was checked" in context
+    with open(line["archive"], "rb") as handle:
+        assert handle.read() == text.encode(), "the archive copy the pointer names changed after the claim"
+    assert LATE.encode() in stored_texts(project), "the write through the open descriptor was lost"
+
+
+def test_a_crash_before_the_emit_leaves_the_claimed_bytes_to_resume(tmp_path, project):
+    """The origin writes after the claim, and the delivery dies between its archive step and its emit."""
+    source = ready_handover(project, FIRST.encode())
+    writer = os.open(rotation_state.handover_path(str(project), "sess-a"), os.O_WRONLY)
+    claimed, marker, data = rotation_state.claim(str(project), source, "sess-b", as_checked=True)
+
+    def written_then_crash(step):
+        if step == "emit handover":
+            os.write(writer, LATE.encode())
+            os.ftruncate(writer, len(LATE.encode()))
+            raise Crash("simulated crash before the emit")
+
+    try:
+        with pytest.raises(Crash):
+            handover_injection.deliver(str(project), claimed, marker, data, "sess-b", "clear",
+                                       lambda text, archive: None, written_then_crash)
+    finally:
+        os.close(writer)
+    left = rotation_state.load_marker(str(project), claimed)
+    assert rotation_state.claimed_bytes(str(project), left) == (FIRST.encode(), None)
+    text = context_of(Session(tmp_path, project, "sess-r").resume(1))
+    assert "The first handover" in text
+    assert "Written through a descriptor" not in text, "resume handed over bytes written after the claim"
+
+
+def test_the_moved_original_is_never_listed_or_named_by_a_claim(tmp_path, project):
+    s = saved_session(tmp_path, project)
+    run_clear(project)
+    archive = rotation(project) / "archive"
+    [copy] = [p for p in archive.iterdir() if rotation_state.ARCHIVE_NAME.fullmatch(p.name)]
+    [original] = [p for p in archive.iterdir() if p != copy]
+    assert original.name.endswith(rotation_state.ORIGINAL_SUFFIX) and not s.handover.exists()
+    assert copy.read_text() == original.read_text() == VALID_HANDOVER
+    assert [line["archive"] for line in injected_lines(project)] == [str(copy)]
+    assert [e["path"] for e in rotation_state.archived_handovers(str(project))] == [str(copy)]
+
+
+def test_the_trim_keeps_the_newest_moved_originals_too(tmp_path, project):
+    for day in range(1, 5):
+        moment = datetime(2099, 1, day, tzinfo=timezone.utc)
+        for suffix in (".md", rotation_state.ORIGINAL_SUFFIX):
+            path = rotation_state.plan_archive(str(project), "sess-%d" % day, moment, suffix)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as handle:
+                handle.write("day %d\n" % day)
+    assert rotation_state.trim_archive(str(project), 2) == 4
+    left = sorted(p.name.split("Z-", 1)[1] for p in (rotation(project) / "archive").iterdir())
+    assert left == sorted(["sess-3.md", "sess-4.md", "sess-3.original", "sess-4.original"])
 
 
 # --- an explicit pick says what it injects --------------------------------------------------
