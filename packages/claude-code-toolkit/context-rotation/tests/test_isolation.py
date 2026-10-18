@@ -13,7 +13,7 @@ FALLBACK_STDLIB = {
     "__future__", "argparse", "ast", "collections", "contextlib", "dataclasses", "datetime",
     "errno", "fcntl", "fnmatch", "functools", "glob", "hashlib", "io", "itertools", "json", "os", "pathlib", "re",
     "shlex", "shutil", "signal", "stat", "subprocess", "sys", "tempfile", "textwrap", "time",
-    "typing", "uuid",
+    "typing", "unicodedata", "uuid",
 }
 STDLIB = set(getattr(sys, "stdlib_module_names", ())) | FALLBACK_STDLIB
 
