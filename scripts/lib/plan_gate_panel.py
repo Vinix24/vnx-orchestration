@@ -2108,15 +2108,20 @@ def second_seat_from_start(dispatch_paths: Optional[List[str]]) -> Optional[str]
     The second case for the second seat, next to a BLOCK (``_blocked``): a plan
     whose dispatch paths fall in the schema or security class
     (``smart_router.plan_scope_path_category``) gets both seats in its first
-    round. Returns the class and the first path that put it there.
+    round, and so does one with a path that leaves the repository, which no
+    class can clear. Returns the class and the first path that put it there,
+    normalised as it was classified.
     """
     import smart_router
 
-    classes = {smart_router.PLAN_SCOPE_SCHEMA, smart_router.PLAN_SCOPE_SECURITY}
+    classes = {
+        smart_router.PLAN_SCOPE_SCHEMA, smart_router.PLAN_SCOPE_SECURITY,
+        smart_router.PLAN_SCOPE_OUTSIDE_REPO,
+    }
     for path in dispatch_paths or []:
         category = smart_router.plan_scope_path_category(path)
         if category in classes:
-            return f"{category} path {path}"
+            return f"{category} path {smart_router.normalize_dispatch_path(path)}"
     return None
 
 

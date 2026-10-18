@@ -647,6 +647,15 @@ class _Lanes:
         return self.seats[provider]
 
 
+_PANEL_CFG = (
+    "version: 1\ndefault_seat: codex\nescalation_seat: opus\n"
+    "tiebreaker:\n  max_rounds: 2\n  provider: deepseek_harness\n  model: deepseek-v4-pro\n"
+    "seats:\n"
+    "  - {label: opus, provider: claude, model_arg: opus}\n"
+    "  - {label: codex, provider: codex, model_arg: gpt-test}\n"
+)
+
+
 @pytest.fixture
 def gate(tmp_path, monkeypatch, state_dir):
     import plan_gate_panel as pgp
@@ -656,14 +665,7 @@ def gate(tmp_path, monkeypatch, state_dir):
     monkeypatch.delenv("VNX_PANEL_RETRY", raising=False)
     monkeypatch.setattr(track_reconciler, "reconcile_track", lambda *a, **k: None)
     cfg = tmp_path / "plan_gate_panel.yaml"
-    cfg.write_text(
-        "version: 1\ndefault_seat: codex\nescalation_seat: opus\n"
-        "tiebreaker:\n  max_rounds: 2\n  provider: deepseek_harness\n  model: deepseek-v4-pro\n"
-        "seats:\n"
-        "  - {label: opus, provider: claude, model_arg: opus}\n"
-        "  - {label: codex, provider: codex, model_arg: gpt-test}\n",
-        encoding="utf-8",
-    )
+    cfg.write_text(_PANEL_CFG, encoding="utf-8")
     monkeypatch.setattr(pgp, "_default_panel_config_path", lambda: cfg)
     ledger = tmp_path / ".vnx-attest" / "plan-gate-seats.ndjson"
     monkeypatch.setattr(pgp, "_resolve_seat_ledger_path", lambda data_dir: ledger)
@@ -1024,3 +1026,99 @@ def test_create_track_refuses_an_unknown_plan_scope_and_writes_nothing(state_dir
 
     assert tracks.get_track(state_dir, "feat-odd", PID) is None
     assert _scope_events(state_dir, "feat-odd") == []
+
+
+# --------------------------------------------------------------------------
+# One normalisation before every classification (round 3)
+# --------------------------------------------------------------------------
+
+# An unclean spelling of a path and the clean path it names: an internal "./",
+# a repeated separator, a leading "./", a ".." segment and backslashes.
+_UNCLEAN_SECOND_SEAT_PATHS = [
+    (".github/./workflows/vnx-ci.yml", ".github/workflows/vnx-ci.yml"),
+    (".github//workflows/vnx-ci.yml", ".github/workflows/vnx-ci.yml"),
+    ("./.github/workflows/vnx-ci.yml", ".github/workflows/vnx-ci.yml"),
+    ("scripts/lib/../lib/provider_spawns/kimi_spawn.py", "scripts/lib/provider_spawns/kimi_spawn.py"),
+    (".claude/./settings.json", ".claude/settings.json"),
+    ("schemas//migrations/0041_y.sql", "schemas/migrations/0041_y.sql"),
+    ("scripts\\migrations\\0040_x.sql", "scripts/migrations/0040_x.sql"),
+]
+_UNCLEAN_PATHS = _UNCLEAN_SECOND_SEAT_PATHS + [
+    ("scripts/lib/./dispatch_cli.py", "scripts/lib/dispatch_cli.py"),
+]
+_OUTSIDE_PATHS = ["../outside/x.py", "scripts/../../outside/x.py", "..", "/tmp/outside/x.py",
+                  "C:\\outside\\x.py"]
+
+
+@pytest.mark.parametrize("unclean, clean", _UNCLEAN_PATHS, ids=[u for u, _ in _UNCLEAN_PATHS])
+def test_an_unclean_path_classifies_as_its_clean_path(tmp_path, unclean, clean):
+    import plan_gate_panel as pgp
+
+    dispatch_rule = _new("plan_scope", "dispatch_rule")
+    category_of = _new("smart_router", "plan_scope_path_category")
+    kind_of = _new("smart_router", "security_path_kind")
+    cfg = tmp_path / "plan_gate_panel.yaml"
+    cfg.write_text(_PANEL_CFG, encoding="utf-8")
+
+    assert dispatch_rule([clean]) is not None, "the clean path is an architecture path"
+    assert dispatch_rule([unclean]) == dispatch_rule([clean])
+    assert category_of(unclean) == category_of(clean)
+    assert kind_of(unclean) == kind_of(clean)
+    assert pgp.compose_panel(dispatch_paths=[unclean], config_path=cfg) == (
+        pgp.compose_panel(dispatch_paths=[clean], config_path=cfg)
+    )
+
+
+@pytest.mark.parametrize("unclean, clean", _UNCLEAN_SECOND_SEAT_PATHS,
+                         ids=[u for u, _ in _UNCLEAN_SECOND_SEAT_PATHS])
+def test_plan_gate_on_an_unclean_path_runs_both_seats_and_one_voice_clears_nothing(
+    gate, state_dir, unclean, clean,
+):
+    lanes = _Lanes({"codex": _seat_report("pass"), "claude": "a prose review with no verdict"})
+    result = gate(lanes, dispatch_paths=unclean)
+
+    assert lanes.providers[:2] == ["codex", "claude"], "both seats read the plan from the start"
+    assert result.decision != "PASS", "one readable voice does not pass this plan"
+    assert _open_plan_blocker(state_dir, "feat-gate"), "OI-PLAN stays open"
+    assert "both seats from the start (" in result.gov_trace
+    assert f" path {clean})" in result.gov_trace
+
+
+@pytest.mark.parametrize("unclean, clean", _UNCLEAN_SECOND_SEAT_PATHS[:3] + _UNCLEAN_SECOND_SEAT_PATHS[4:5],
+                         ids=["internal-dot", "double-slash", "leading-dot", "claude-settings"])
+def test_door_reads_an_unclean_path_as_its_clean_path(tmp_path, monkeypatch, unclean, clean):
+    rc, sd, worker = _fire(tmp_path, monkeypatch, [unclean], meta={"plan_scope": "light"})
+
+    assert rc == 0
+    worker.assert_called_once()
+    meta = _meta(sd, "feat-door")
+    assert meta["plan_scope"] == "architecture"
+    assert f"security path {clean}" in meta["plan_scope_rule"]
+    assert _open_plan_blocker(sd, "feat-door")
+
+
+@pytest.mark.parametrize("outside", _OUTSIDE_PATHS)
+def test_a_path_that_leaves_the_repository_classifies_as_architecture(tmp_path, outside):
+    import plan_gate_panel as pgp
+
+    dispatch_rule = _new("plan_scope", "dispatch_rule")
+    category_of = _new("smart_router", "plan_scope_path_category")
+    cfg = tmp_path / "plan_gate_panel.yaml"
+    cfg.write_text(_PANEL_CFG, encoding="utf-8")
+
+    assert category_of(outside) == "outside-repo"
+    assert (dispatch_rule([outside]) or "").startswith("outside-repo path ")
+    assert dispatch_rule(["docs/core/HORIZON_PLANNING.md", outside]) is not None
+    composition = pgp.compose_panel(dispatch_paths=[outside], config_path=cfg)
+    assert [s["label"] for s in composition.seats] == ["codex", "opus"]
+    assert composition.quorum == 2
+
+
+@pytest.mark.parametrize("outside", ["../outside/x.py", "/tmp/outside/x.py"])
+def test_plan_gate_on_a_path_outside_the_repository_runs_both_seats(gate, state_dir, outside):
+    lanes = _Lanes({"codex": _seat_report("pass"), "claude": "a prose review with no verdict"})
+    result = gate(lanes, dispatch_paths=outside)
+
+    assert lanes.providers[:2] == ["codex", "claude"]
+    assert result.decision != "PASS"
+    assert _open_plan_blocker(state_dir, "feat-gate")

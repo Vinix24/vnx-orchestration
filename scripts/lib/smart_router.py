@@ -10,6 +10,8 @@ route_decisions.ndjson via state_writer (fcntl-locked).
 """
 from __future__ import annotations
 
+import ntpath
+import posixpath
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -944,10 +946,12 @@ def _matches_prefix(path: str, prefix: str) -> bool:
 # security are also the two classes that bring the plan-gate's second seat in
 # from the start (plan_gate_panel.second_seat_from_start). The door and the
 # plan-gate read this one table, so they cannot classify a path differently.
+# A path that leaves the repository is outside-repo: classified up, never plain.
 PLAN_SCOPE_SCHEMA = "schema"
 PLAN_SCOPE_SECURITY = "security"
 PLAN_SCOPE_GATE_MERGE = "gate-merge"
 PLAN_SCOPE_STORE_RESOLUTION = "store-resolution"
+PLAN_SCOPE_OUTSIDE_REPO = "outside-repo"
 
 # Security, by kind. Prefixes are repo-relative; ".claude/settings" covers
 # settings.json and settings.local.json.
@@ -993,15 +997,38 @@ _PLAN_SCOPE_PREFIXES: tuple[tuple[str, str], ...] = (
 )
 
 
-def _repo_relative(path: str) -> str:
-    """A dispatch path as written in the repo: no leading "./" or "/".
+def normalize_dispatch_path(path: str) -> str:
+    """One dispatch path in the form every plan-scope classification reads.
 
-    Not ``lstrip("./")``: that strips the dot of ".claude" and ".github" too.
+    Backslashes become "/", then ``posixpath.normpath`` folds "./" segments,
+    repeated separators and ".." segments, so ".github/./workflows/x.yml"
+    classifies as ".github/workflows/x.yml". normpath drops a leading "./"
+    too; the repository itself (".") becomes "". Not ``lstrip("./")``: that
+    strips the dot of ".claude" and ".github" too. The result can still leave
+    the repository (``_leaves_repo``).
     """
-    p = str(path).strip().replace("\\", "/")
-    while p.startswith("./"):
-        p = p[2:]
-    return p.lstrip("/")
+    p = posixpath.normpath(str(path).strip().replace("\\", "/"))
+    return "" if p == "." else p
+
+
+def _leaves_repo(normalized: str) -> bool:
+    """True for a normalised path outside the repository: absolute (a root or a
+    drive) or starting with "..". Dispatch paths are repo-relative by contract
+    (dispatch_spec rejects absolute and ".." paths), so an absolute path is
+    never read as one inside the repository."""
+    return (
+        normalized.startswith("/")
+        or bool(ntpath.splitdrive(normalized)[0])
+        or normalized == ".."
+        or normalized.startswith("../")
+    )
+
+
+def _repo_relative(path: str) -> Optional[str]:
+    """A dispatch path as the repo names it (``normalize_dispatch_path``), or
+    None when it leaves the repository."""
+    p = normalize_dispatch_path(path)
+    return None if _leaves_repo(p) else p
 
 
 def security_path_kind(path: str) -> Optional[str]:
@@ -1024,13 +1051,16 @@ def security_path_kind(path: str) -> Optional[str]:
 
 
 def plan_scope_path_category(path: str) -> Optional[str]:
-    """The plan-scope category of one path: schema, security, gate-merge,
-    store-resolution, or None. First match wins, in that order."""
-    if _irreversible_path_category(path) == "schema-migration":
-        return PLAN_SCOPE_SCHEMA
-    if security_path_kind(path):
-        return PLAN_SCOPE_SECURITY
+    """The plan-scope category of one path: outside-repo, schema, security,
+    gate-merge, store-resolution, or None. First match wins, in that order,
+    on the normalised path (``normalize_dispatch_path``)."""
     p = _repo_relative(path)
+    if p is None:
+        return PLAN_SCOPE_OUTSIDE_REPO
+    if _irreversible_path_category(p) == "schema-migration":
+        return PLAN_SCOPE_SCHEMA
+    if security_path_kind(p):
+        return PLAN_SCOPE_SECURITY
     for prefix, category in _PLAN_SCOPE_PREFIXES:
         if _matches_prefix(p, prefix):
             return category

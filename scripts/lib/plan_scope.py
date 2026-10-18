@@ -413,15 +413,18 @@ def dispatch_rule(
 ) -> Optional[str]:
     """The rule a build dispatch triggers on its track, or None for a light change.
 
+    Every path is normalised first (``smart_router.normalize_dispatch_path``),
+    so both checks below and the rule's text read the path the repo names.
     No paths at all counts as architecture: a dispatch that names nothing cannot
     be judged, and nothing may escape the classification by naming nothing.
-    Then the path categories (schema, security, gate-merge, store-resolution),
-    then ``derive_variant`` giving coding-strict.
+    Then the path categories (outside-repo, schema, security, gate-merge,
+    store-resolution), then ``derive_variant`` giving coding-strict.
     """
     # Lazy, so importing this module (planning_cli does) pulls in no router.
     import smart_router
 
-    paths = [str(p).strip() for p in (dispatch_paths or []) if p and str(p).strip()]
+    normalized = (smart_router.normalize_dispatch_path(p) for p in (dispatch_paths or []) if p)
+    paths = [p for p in normalized if p]
     if not paths:
         return "build dispatch without dispatch_paths (closed on doubt)"
     for path in paths:
