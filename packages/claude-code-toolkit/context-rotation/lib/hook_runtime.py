@@ -36,7 +36,7 @@ def open_project(payload: Dict[str, Any], env: Dict[str, str], run: HookRun,
 
     Nothing happens for an unsafe session id or with the plugin disabled, nor inside
     a subagent unless the entry asks for that with `subagents` (context_guard, which
-    keeps a subagent's writes out of the plugin's directory). Nor when the project's
+    keeps a subagent's writes off the plugin's own files). Nor when the project's
     rotation storage fails the storage gate: then
     the reason goes to stderr once and the hook exits 0, without errors.log, which
     lives in the directory that failed the check. Failures are logged in the

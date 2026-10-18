@@ -8,18 +8,20 @@
                                     through a symlink at its path)
 
 Whatever the band, and also below warn, in plan mode, after a release and inside a
-subagent: a Write, Edit, MultiEdit or NotebookEdit that lands in the project's
-`.claude/rotation`, other than of the session's own handover, is denied (M), and
-that denial counts toward no cap (storage_denial). The directory holds the state
-that decides what is denied, so a tool call of the model never writes it. A write
-at that directory itself or at the `.claude` above it is denied the same way: a
-file there makes the storage gate refuse the project. Where a write lands is
-judged by the real directories against the rotation directory that
-rotation_state.storage verifies, both as the kernel opens the path (a symlink
-followed before a `..` after it) and with `..` collapsed by name, so neither a
-symlink nor a `..` redirects the check, and a check that fails lets the call
-through and is logged. A shell command is not parsed: it runs with the user's
-rights, and this module does not see what it changes.
+subagent: a Write, Edit, MultiEdit or NotebookEdit that lands on the plugin's own
+files is denied (M), and that denial counts toward no cap (storage_denial). Those
+are the project's `.claude/rotation`, other than the session's own handover, which
+holds the state that decides what is denied; the `.claude` above it, where a file
+makes the storage gate refuse the project; and either settings file
+(context_budget.settings_paths), existing or not, whose `"enabled": false` switches
+every hook off. Where a write lands is judged by the real directories against the
+rotation directory that rotation_state.storage verifies, both as the kernel opens
+the path (a symlink followed before a `..` after it) and with `..` collapsed by
+name, so neither a symlink nor a `..` redirects the check. Each spelling is judged
+on its own: one that lands on such a file denies, and only when none does and one
+could not be judged is that failure logged and the call let through. A shell
+command is not parsed: it runs with the user's rights, and this module does not
+see what it changes, nor what an MCP tool writes.
 
 M goes to the model (additionalContext, permissionDecisionReason, the Stop
 reason), U to the user (systemMessage). Each crossing gets one user line, at the
@@ -34,7 +36,7 @@ release`, which the UserPromptExpansion hook records and which only a typed
 command fires; and after hard_max_denials denials without a handover write,
 which the user is told once. No Stop is held back while stop_hook_active is set.
 Apart from that denial nothing acts at an unknown size, and inside a subagent
-(hook_runtime.open_project) a hook denies a write into `.claude/rotation` and does
+(hook_runtime.open_project) a hook denies a write of the plugin's own files and does
 nothing else. A failure of the enforcement state (OSError,
 LockTimeout, ValueError) is logged (errors.log, else stderr) and the call goes
 ahead as in a session that only informs: a failure never denies or holds back.
@@ -48,7 +50,7 @@ from __future__ import annotations
 import fnmatch
 import os
 import stat
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, Union
 
 import context_budget
 import enforcement_state
@@ -64,10 +66,14 @@ CHECK_HANDOVER = "check handover path"
 # The tools that write the file at a path in their input, and the input fields that hold it.
 FILE_WRITERS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
 PATH_FIELDS = ("file_path", "notebook_path")
-CHECK_STORAGE = "check write into the plugin directory"
+CHECK_STORAGE = "check write of the plugin's own files"
 STORAGE_REASON = (
     "context-rotation denied this tool call: it writes into %s, which the context-rotation plugin keeps for its "
     "own files. No tool call writes there, in any band, except a write of this session's handover at %s."
+)
+SETTINGS_REASON = (
+    "context-rotation denied this tool call: it writes %s, the context-rotation plugin's settings file. No tool "
+    "call writes it, in any band: the user changes it themselves."
 )
 # A prompt whose state could not be read: its message says nothing about what is denied.
 UNREAD = "unread"
@@ -120,7 +126,7 @@ def _handover_open(session: hook_runtime.Session) -> bool:
     return stat.S_ISREG(found.st_mode)
 
 
-# --- what no band lets through: a write into the plugin's directory -----------------
+# --- what no band lets through: a write of the plugin's own files ------------------
 
 Identity = Tuple[int, int]
 
@@ -190,17 +196,67 @@ def _names_below(place: str, directory: Identity) -> Optional[Tuple[str, ...]]:
     return tuple(name.casefold() for name in names)
 
 
-def _guarded(place: str, storage: Place, claude: Place) -> bool:
-    """`place` is the rotation directory, lies in it, or is the `.claude` directory it is made in.
+Told = TypeVar("Told")
 
-    A file at either directory makes the storage gate refuse the project
-    (rotation_state.storage_problem), and then no hook enforces anything.
+
+def _told(tell: Callable[[], Told]) -> Union[Told, OSError]:
+    """What `tell` returns, or the OSError that says it cannot be told, kept to raise where it is needed."""
+    try:
+        return tell()
+    except OSError as error:
+        return error
+
+
+def _known(told: Union[Told, OSError]) -> Told:
+    """The value _told kept; its OSError raised."""
+    if isinstance(told, OSError):
+        raise told
+    return told
+
+
+def _lands(place: str, kept: Union[Place, OSError], inside: bool) -> bool:
+    """`place` is the kept place, or with `inside` lies in it; OSError when either cannot be told.
+
+    A file at the rotation directory or at the `.claude` it is made in makes the
+    storage gate refuse the project (rotation_state.storage_problem), and then no
+    hook enforces anything; so both are kept, and the rotation directory with
+    everything inside it.
     """
-    (directory, below), (above, name) = storage, claude
+    directory, names = _known(kept)
     found = _names_below(place, directory)
-    if found is not None and found[:len(below)] == tuple(part.casefold() for part in below):
-        return True
-    return _names_below(place, above) == tuple(part.casefold() for part in name)
+    wanted = tuple(name.casefold() for name in names)
+    return found is not None and (found[:len(wanted)] == wanted if inside else found == wanted)
+
+
+# A check of one place a write can land: the denial when it lands on what the check keeps, else None.
+Check = Callable[[str], Optional[str]]
+
+
+def _settings_check(path: str) -> Check:
+    """Keeps the settings file at `path` (context_budget.settings_paths), whether it exists or not."""
+    kept = _told(lambda: _where_made(os.path.realpath(path)))
+    return lambda place: SETTINGS_REASON % path if _lands(place, kept, inside=False) else None
+
+
+def _storage_checks(session: hook_runtime.Session) -> List[Check]:
+    """Keep `.claude` and `.claude/rotation` with everything in it, but for the session's own handover.
+
+    A place is that handover when it lands where one of the handover's own places
+    lands, while the handover path holds a regular file or nothing yet (as for
+    writes_handover). Each part is told on its own: one that fails raises only
+    where it decides.
+    """
+    reason = STORAGE_REASON % (os.path.dirname(session.handover), session.handover)
+    claude = _told(lambda: _claude_place(session.project_dir))
+    storage = _told(lambda: _storage_place(session.project_dir))
+    own =_told(lambda: {_where_made(place) for place in _places(session.handover)})
+    handover_open = _told(lambda: _handover_open(session))
+
+    def exempt(place: str) -> bool:
+        return _where_made(place) in _known(own) and _known(handover_open)
+
+    return [lambda place: reason if _lands(place, claude, inside=False) else None,
+            lambda place: reason if _lands(place, storage, inside=True) and not exempt(place) else None]
 
 
 def _write_targets(tool_name: Any, tool_input: Any) -> List[str]:
@@ -235,41 +291,63 @@ def _places(target: str) -> List[str]:
     return places
 
 
-def writes_into_storage(tool_name: Any, tool_input: Any, session: hook_runtime.Session) -> bool:
-    """A Write, Edit, MultiEdit or NotebookEdit that lands in `.claude/rotation`, or at it or `.claude`, but not the handover.
+def _spellings(target: str, failures: List[OSError]) -> List[str]:
+    """The places of `target` (_places); none when they cannot be told, after that failure is added to `failures`."""
+    try:
+        return _places(target)
+    except OSError as error:
+        failures.append(error)
+        return []
 
-    Where it lands is judged by the real directories, not by the path as written
-    (_places): a `..` after a symlink, a symlink elsewhere that leads in, a symlink
-    inside that leads out, a `~` and a name in another case all count. A place that
-    is the handover is exempt while the handover path holds a regular file or
-    nothing yet (as for writes_handover); the handover's path is judged as the
-    target's, by identity where the file exists. OSError when where a write lands
-    cannot be checked.
+
+def writes_into_storage(tool_name: Any, tool_input: Any, session: hook_runtime.Session) -> Optional[str]:
+    """The denial for a Write, Edit, MultiEdit or NotebookEdit of the plugin's own files; None for any other call.
+
+    Those are either settings file, existing or not, the files load_settings reads
+    (context_budget.settings_paths); `.claude/rotation` and everything in it, but the
+    session's own handover; and the `.claude` above it. Where a write lands is judged
+    by the real directories, not by the path as written (_places): a `..` after a
+    symlink, a symlink elsewhere that leads in, a symlink inside that leads out, a `~`
+    and a name in another case all count. A settings file is checked first, so the
+    denial names what the write would change.
+
+    Each spelling is judged on its own, against each kept place on its own: one that
+    lands on a kept place denies, also when another cannot be judged. OSError, the
+    first such failure, only when none lands on one and some could not be judged.
     """
     targets = _write_targets(tool_name, tool_input)
     if not targets:
-        return False
-    storage, claude = _storage_place(session.project_dir), _claude_place(session.project_dir)
-    guarded = [place for target in targets for place in _places(target) if _guarded(place, storage, claude)]
-    if not guarded:
-        return False
-    own = {_where_made(place) for place in _places(session.handover)} if _handover_open(session) else set()
-    return any(_where_made(place) not in own for place in guarded)
+        return None
+    failures: List[OSError] = []
+    places = [place for target in targets for place in _spellings(target, failures)]
+    checks = [_settings_check(path) for path in context_budget.settings_paths(session.project_dir)]
+    for check in checks + _storage_checks(session):
+        for place in places:
+            try:
+                denial = check(place)
+            except OSError as error:
+                failures.append(error)
+                continue
+            if denial:
+                return denial
+    if failures:
+        raise failures[0]
+    return None
 
 
 def storage_denial(tool_name: Any, tool_input: Any, session: hook_runtime.Session, run: hook_runtime.HookRun) -> Reply:
-    """(M, None) for a write into the plugin's directory (writes_into_storage); None for any other call.
+    """(M, None) for a write of the plugin's own files (writes_into_storage); None for any other call.
 
-    None too when where the write lands cannot be checked, after that failure is
-    logged: a failed check never denies.
+    None too when no spelling of the path lands on one and some could not be judged,
+    after that failure is logged: a failed check never denies.
     """
     run.at(CHECK_STORAGE)
     try:
-        into = writes_into_storage(tool_name, tool_input, session)
+        denial = writes_into_storage(tool_name, tool_input, session)
     except OSError as error:
         rotation_state.log_failure(session.project_dir, CHECK_STORAGE, error)
         return None
-    return (STORAGE_REASON % (os.path.dirname(session.handover), session.handover), None) if into else None
+    return (denial, None) if denial else None
 
 
 def hard_allows(tool_name: Any, tool_input: Any, session: hook_runtime.Session) -> bool:
@@ -420,7 +498,7 @@ def _stored_reason(payload: Dict[str, Any], session: hook_runtime.Session) -> Op
 def on_tool(payload: Dict[str, Any], session: hook_runtime.Session, run: hook_runtime.HookRun) -> Reply:
     """(M reason, U line or None) when the band denies this call; None when it goes ahead.
 
-    A write into the plugin's directory is denied in every band, also for an unknown
+    A write of the plugin's own files is denied in every band, also for an unknown
     size, and is counted as no denial (storage_denial). The band is recorded for
     every call, also one the hard band allows: only the denial depends on that.
     """

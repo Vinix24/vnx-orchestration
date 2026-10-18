@@ -465,7 +465,7 @@ def test_a_rotation_directory_swapped_for_a_symlink_after_the_gate_is_not_follow
     assert in_process(monkeypatch, s, payload) == 0
     captured = capsys.readouterr()
     assert "permissionDecision" not in captured.out  # a failed check never denies
-    assert "check write into the plugin directory failed: StorageRefused" in captured.err  # no log in refused storage
+    assert "check write of the plugin's own files failed: StorageRefused" in captured.err  # no log in refused storage
     assert list((elsewhere / "state").iterdir()) == []
 
 
@@ -494,7 +494,7 @@ def test_an_oserror_in_the_check_lets_the_call_through_and_is_logged(s, monkeypa
     assert in_process(monkeypatch, s, payload) == 0
     assert printed(capsys).get("hookSpecificOutput", {}).get("permissionDecision") is None
     logged = errors_log(s.project)
-    assert "check write into the plugin directory failed" in logged and "injected stat failure" in logged
+    assert "check write of the plugin's own files failed" in logged and "injected stat failure" in logged
     assert state_file(s).read_bytes() == stored
 
 
@@ -509,7 +509,49 @@ def test_a_directory_that_cannot_be_searched_lets_the_call_through_and_is_logged
     finally:
         os.chmod(str(locked), 0o700)
     assert goes_ahead(proc)
-    assert "check write into the plugin directory failed" in errors_log(s.project)
+    assert "check write of the plugin's own files failed" in errors_log(s.project)
+
+
+# --- one spelling that cannot be judged hides no denial (codex on #2092) ------------------------
+
+LONG = "x" * 300  # longer than any file system allows a name to be: a stat of a path through it fails
+
+
+def through_a_long_name(project, *parts):
+    """`<project>/<LONG>/../<parts>`: the kernel fails on it, a writer that collapses `..` first does not."""
+    return os.path.join(str(project), LONG, "..", *parts)
+
+
+def test_a_spelling_that_cannot_be_judged_does_not_hide_a_write_into_the_state(s):
+    stored = plant(s, "force")
+    at(s, FORCE)
+    path = through_a_long_name(s.project, ".claude", "rotation", "state", state_file(s).name)
+    proc = s.pre_tool("Write", tool_input("Write", path, forged(state_file(s))))
+    if goes_ahead(proc):  # a writer that collapses `..` by name first (Node's path.resolve) lands in the state
+        carry_out("Write", state_file(s), forged(state_file(s)))
+    assert state_file(s).read_bytes() == stored
+    at(s, HARD)
+    assert decision(bash(s)) == "deny"  # the hard band still holds
+    keeps_out(proc, s)
+
+
+def test_a_spelling_that_cannot_be_judged_and_lands_outside_goes_ahead_and_is_logged(s):
+    rotation(s.project).mkdir(parents=True)
+    at(s, FORCE)
+    proc = s.pre_tool("Write", {"file_path": through_a_long_name(s.project, "src", "main.py"), "content": "x"})
+    assert goes_ahead(proc)
+    logged = errors_log(s.project)
+    assert "check write of the plugin's own files failed" in logged and "File name too long" in logged
+
+
+@pytest.mark.parametrize("size", [BELOW, FORCE, HARD], ids=["low", "force", "hard"])
+def test_the_handover_under_a_spelling_that_cannot_be_judged_still_goes_ahead(s, size):
+    rotation(s.project).mkdir(parents=True)
+    at(s, size)
+    path = through_a_long_name(s.project, ".claude", "rotation", s.handover.name)
+    for tool in ("Write", "Edit"):
+        assert goes_ahead(s.pre_tool(tool, {"file_path": path, "content": "x"})), tool
+    assert "File name too long" in errors_log(s.project)
 
 
 # --- inside a subagent ---------------------------------------------------------------------------

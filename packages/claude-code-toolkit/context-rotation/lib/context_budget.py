@@ -8,7 +8,7 @@ import json
 import os
 import re
 import sys
-from typing import Any, Dict, Iterator, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 import regular_file
 
@@ -124,8 +124,13 @@ def measure(transcript_path: Optional[str]) -> Optional[int]:
 
 # --- settings ------------------------------------------------------------
 
-def _read_settings_file(directory: str) -> Optional[Dict[str, Any]]:
-    path = os.path.join(directory, ".claude", SETTINGS_FILE)
+def settings_paths(project_dir: Optional[str], home: Optional[str] = None) -> List[str]:
+    """The settings files load_settings reads, in its order: the project's, then the user's in the home directory."""
+    user_home = home if home is not None else os.path.expanduser("~")
+    return [os.path.join(directory, ".claude", SETTINGS_FILE) for directory in (project_dir, user_home) if directory]
+
+
+def _read_settings_file(path: str) -> Optional[Dict[str, Any]]:
     if not os.path.isfile(path):
         return None
     try:
@@ -183,12 +188,9 @@ def _apply(raw: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def load_settings(project_dir: Optional[str], home: Optional[str] = None) -> Dict[str, Any]:
-    """Project file, else user file, else defaults. Bad keys fall back one by one."""
-    user_home = home if home is not None else os.path.expanduser("~")
-    for directory in (project_dir, user_home):
-        if not directory:
-            continue
-        raw = _read_settings_file(directory)
+    """Project file, else user file, else defaults (settings_paths). Bad keys fall back one by one."""
+    for path in settings_paths(project_dir, home):
+        raw = _read_settings_file(path)
         if raw is not None:
             return _apply(raw)
     return dict(DEFAULTS)
