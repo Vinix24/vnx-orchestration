@@ -11,8 +11,9 @@
   chosen handover itself (resume <id>, or resume <number> for the entry shown
   under that number in this session's last list); any other action gets the
   usage line.
-- PreToolUse: a write into `.claude/rotation` other than of the handover is
-  denied in every band, also inside a subagent (band_guard.storage_denial).
+- PreToolUse: a write into `.claude/rotation` other than of the handover, or into
+  either settings file, is denied in every band, also inside a subagent
+  (band_guard.storage_denial).
   Any call other than Read, Glob, Grep or a write of the handover
   makes the ready-marker outdated; the force and hard bands may deny the call
   (band_guard), never a write of the handover.
@@ -24,7 +25,7 @@
   hold the Stop back once per crossing (band_guard).
 
 A hook that fires inside a subagent (agent_id set) does nothing but deny a write
-into `.claude/rotation` (SUBAGENT_HANDLERS), and one whose project storage fails
+into `.claude/rotation` or either settings file (SUBAGENT_HANDLERS), and one whose project storage fails
 the storage gate does nothing at all (hook_runtime.open_project). Failures
 go through hook_runtime: one stderr line, errors.log, exit 1, never 2. A denial and
 a held-back Stop are JSON with exit 0, decided last, and a failure of the
@@ -339,7 +340,7 @@ HANDLERS = {
 
 
 def on_subagent_tool(payload, env, run, session):
-    """PreToolUse inside a subagent: only a write into the plugin's directory is denied; no band, marker or state."""
+    """PreToolUse inside a subagent: only a write into `.claude/rotation` or a settings file is denied; no band, marker or state."""
     denial = band_guard.storage_denial(payload.get("tool_name"), payload.get("tool_input"), session, run)
     if denial:
         hook_runtime.emit(hook_runtime.deny_output(denial[0]))
