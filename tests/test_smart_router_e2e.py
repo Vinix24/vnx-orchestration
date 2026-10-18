@@ -158,6 +158,9 @@ class TestProviderDispatchAutoRouteIntegration:
         at the same moment (D3b).
         """
         import smart_router as _sr
+        # decide() reads the path from its own globals. Under tests/smart_router the
+        # shim in sys.modules is not that module, so patch decide.__globals__ too.
+        monkeypatch.setitem(_sr.decide.__globals__, "_RECOMMENDATIONS_PATH", Path(src_yaml))
         monkeypatch.setattr(_sr, "_RECOMMENDATIONS_PATH", Path(src_yaml))
 
     def test_main_auto_route_writes_ndjson_for_kimi(self, recommendations_yaml, state_dir, monkeypatch):
@@ -239,6 +242,9 @@ class TestProviderDispatchAutoRouteIntegration:
         monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
 
         # Point the registry at a path that does not exist (simulates a missing file).
+        # decide() reads the path from its own globals. Under tests/smart_router the
+        # shim in sys.modules is not that module, so patch decide.__globals__ too.
+        monkeypatch.setitem(_sr.decide.__globals__, "_RECOMMENDATIONS_PATH", tmp_path / "absent.yaml")
         monkeypatch.setattr(_sr, "_RECOMMENDATIONS_PATH", tmp_path / "absent.yaml")
 
         with patch("provider_dispatch._dispatch_kimi", return_value=0):

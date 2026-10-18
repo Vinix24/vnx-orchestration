@@ -222,6 +222,9 @@ class TestG6NonClaudeDispatch:
 
     def _swap_recommendations(self, src_yaml, monkeypatch):
         import smart_router as _sr
+        # decide() reads the path from its own globals. Under tests/smart_router the
+        # shim in sys.modules is not that module, so patch decide.__globals__ too.
+        monkeypatch.setitem(_sr.decide.__globals__, "_RECOMMENDATIONS_PATH", Path(src_yaml))
         monkeypatch.setattr(_sr, "_RECOMMENDATIONS_PATH", Path(src_yaml))
 
     def test_kimi_auto_route_calls_dispatch_kimi(self, recs_kimi_wins, state_dir, monkeypatch):
