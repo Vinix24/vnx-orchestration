@@ -55,7 +55,11 @@ The contract (plan "The comparison contract (D2)"):
   phase result and pytest exit (an audit step can fail Profile A after its
   evidence was uploaded green), the shadow's record, verdict and job result.
   The verdict also records the blocks they are derived from (``steps``,
-  ``reference``, ``shadow``).
+  ``reference``, ``shadow``). A light run is named by the same rule: its
+  skipped steps and its unread evidence are in the list, so the list never
+  claims more than the steps show. The comparison step itself (``parity``)
+  cannot record its own outcome: ``record_xdist_parity_verdict.py`` adds it
+  after this script exits (OI-2145).
 
 The skip set is a set of keys; skip reasons are carried in the entries for
 triage but never compared. Measured on run 38951854817 (head 0d74af29): 6 of
@@ -117,6 +121,10 @@ DIFFERENCE_KINDS = (
 # active manifest of that phase must record
 PHASE_MODES = {"full": "serial", "serial": "serial", "parallel": "xdist"}
 PARITY_STEPS = ("checkout", "prelude", "selection", "download_reference", "download_candidate")
+# The comparison step (id ``parity``) exits after writing the verdict, so only
+# the record step after it can add its outcome; a recorded verdict carries all six.
+COMPARE_STEP = "parity"
+RECORDED_STEPS = PARITY_STEPS + (COMPARE_STEP,)
 CLASS_ORDER = ("fail", "xfail", "skip", "pass")
 _TEARDOWN_PREFIX = "failed on teardown with"
 _XPASS_AS_SKIPPED = "xfail-marked test passes unexpectedly"
@@ -695,15 +703,18 @@ def reference_block(inputs: CompareInputs, run: tuple) -> tuple:
             "duration_s": whole_number(record.get("duration_s"))}, None
 
 
-def step_failures(steps: dict, shadow: dict, reference: dict) -> list:
+def step_failures(steps: dict, shadow: dict, reference: dict, names: tuple = PARITY_STEPS) -> list:
     """Every parity-job step, reference and shadow outcome that is not success, as ``where.what=outcome``.
 
     *steps*, *shadow* and *reference* are the verdict's own blocks. The
     reference is Profile A: its job result (an audit can fail it after its
     evidence was uploaded green), its phase result and that result's pytest
     exit. The verdict records this list next to the blocks it is derived from.
+    *names* are the steps that must be success: this script's own
+    ``PARITY_STEPS``; a reader of a recorded verdict passes ``RECORDED_STEPS``,
+    so a verdict without the comparison step's outcome is not clean.
     """
-    failures = [f"parity.{name}={steps.get(name) or 'unknown'}" for name in PARITY_STEPS if steps.get(name) != "success"]
+    failures = [f"parity.{name}={steps.get(name) or 'unknown'}" for name in names if steps.get(name) != "success"]
     if reference.get("job_result") != "success":
         failures.append(f"reference.job={reference.get('job_result') or 'unknown'}")
     if reference.get("result") != "present":
@@ -802,7 +813,7 @@ def evaluate(inputs: CompareInputs) -> dict:
     if profile == "light":
         verdict.update(exit=None, verdict="not_applicable", invalid_evidence=[], differences=None, counts=None,
                        tool_versions=None, selection_fingerprint=None, selection_fingerprint_source=None,
-                       step_failures=[])
+                       step_failures=step_failures(inputs.steps, verdict["shadow"], verdict["reference"]))
         return verdict
     problems = [("download_failed", f"{name}={inputs.steps[name]}")
                 for name in ("download_reference", "download_candidate")

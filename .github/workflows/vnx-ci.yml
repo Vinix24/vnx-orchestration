@@ -411,7 +411,8 @@ jobs:
   # with the xdist shadow (candidate) through scripts/ci/check_xdist_parity.py
   # and writes xdist-parity-verdict.json: exit 0 parity, 1 differences, 2
   # invalid evidence, with the difference lists, the step outcomes and the
-  # selection fingerprint.
+  # selection fingerprint. scripts/ci/xdist_parity_history.py reads these
+  # verdicts for the cutover rule of D4.
   #
   # NOT a required check, and it must never fail one, by the same rules as the
   # shadow job above: every step non-fatal, every step bounded with the sum
@@ -421,8 +422,8 @@ jobs:
   # evidence exists, and missing evidence is exit 2, recorded. A red Profile A
   # is red on its own; this job never adds a second red, and its verdict lists
   # it as a step failure (reference.job, also when an audit failed after the
-  # evidence upload). On a light run it runs its prelude and records
-  # "verdict": "not_applicable".
+  # evidence upload), so that run never counts toward the cutover. On a light
+  # run it runs its prelude and records "verdict": "not_applicable".
   xdist-parity:
     name: xdist parity
     runs-on: ubuntu-latest
@@ -449,12 +450,17 @@ jobs:
         uses: ./.github/actions/profile-a-prelude
 
       # This commit's own xdist-path selection, for the selection fingerprint.
+      # Same environment as the shadow's emission: with entries in
+      # serial_tests.txt the args script collects them, which imports the
+      # suite's conftest.
       - name: Emit the xdist selection
         id: selection
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.prelude.outputs.profile != 'light' }}
         continue-on-error: true
         timeout-minutes: 5
         env:
+          VNX_HOME: ${{ steps.prelude.outputs.vnx-home }}
+          VNX_DATA_DIR: ${{ steps.prelude.outputs.vnx-data-dir }}
           VNX_CI_XDIST: "1"
           PARITY_WORK: ${{ runner.temp }}/xdist-parity
         run: bash "$GITHUB_WORKSPACE/scripts/ci/profile_a_pytest_args.sh" "$PARITY_WORK/args"
@@ -520,12 +526,13 @@ jobs:
             --step "download_candidate=$OUTCOME_DOWNLOAD_CANDIDATE" \
             --upstream "profile_a=$RESULT_PROFILE_A" --upstream "shadow=$RESULT_SHADOW"
 
-      # Plain bash, no checkout needed: when the parity script wrote no verdict
-      # (failed checkout, a crash), this writes an exit-2 verdict, so no run is
-      # left without one. A verdict that exists is kept as the parity script
-      # wrote it, also when the parity step failed after writing it: that
-      # step's outcome is not added to the verdict. No reader uses the verdict
-      # for a decision until OI-2145 is closed.
+      # Adds the parity step's own outcome to the verdict it wrote, so a step
+      # that failed after writing exit 0 never leaves a clean verdict
+      # (OI-2145); when it wrote none (a crash), writes an exit-2 verdict with
+      # every field of a normal one (OI-2147). The decision is
+      # scripts/ci/record_xdist_parity_verdict.py. Without a checkout that
+      # script is absent, and the bash below writes the same exit-2 verdict;
+      # tests/test_ci_xdist_parity_workflow.py holds the two equal.
       - name: Record the parity verdict
         id: record
         if: ${{ always() }}
@@ -541,13 +548,51 @@ jobs:
           PARITY_EVENT: ${{ github.event_name }}
           PARITY_REF: ${{ github.head_ref || github.ref_name }}
           OUTCOME_CHECKOUT: ${{ steps.checkout.outcome }}
+          OUTCOME_PRELUDE: ${{ steps.prelude.outcome }}
+          OUTCOME_SELECTION: ${{ steps.selection.outcome }}
+          OUTCOME_DOWNLOAD_REFERENCE: ${{ steps.download_reference.outcome }}
+          OUTCOME_DOWNLOAD_CANDIDATE: ${{ steps.download_candidate.outcome }}
           OUTCOME_PARITY: ${{ steps.parity.outcome }}
+          RESULT_PROFILE_A: ${{ needs.profile-a.result }}
+          RESULT_SHADOW: ${{ needs.profile-a-xdist-shadow.result }}
         run: |
           set -euo pipefail
           V="$PARITY_WORK/verdict/xdist-parity-verdict.json"
+          RECORD="$GITHUB_WORKSPACE/scripts/ci/record_xdist_parity_verdict.py"
           mkdir -p "$PARITY_WORK/verdict"
-          token() { printf '"%s"' "$(printf '%s' "$1" | tr -cd 'A-Za-z0-9_.:/-')"; }
-          if [ ! -s "$V" ]; then
+          rc=0
+          if [ -f "$RECORD" ]; then
+            python3 "$RECORD" --verdict "$V" --summary "${GITHUB_STEP_SUMMARY:-}" \
+              --profile "$PARITY_PROFILE" \
+              --head-sha "$PARITY_HEAD_SHA" --tested-sha "$PARITY_TESTED_SHA" \
+              --run-id "$PARITY_RUN_ID" --run-attempt "$PARITY_RUN_ATTEMPT" \
+              --event "$PARITY_EVENT" --ref "$PARITY_REF" \
+              --step "checkout=$OUTCOME_CHECKOUT" --step "prelude=$OUTCOME_PRELUDE" \
+              --step "selection=$OUTCOME_SELECTION" \
+              --step "download_reference=$OUTCOME_DOWNLOAD_REFERENCE" \
+              --step "download_candidate=$OUTCOME_DOWNLOAD_CANDIDATE" \
+              --step "parity=$OUTCOME_PARITY" \
+              --upstream "profile_a=$RESULT_PROFILE_A" --upstream "shadow=$RESULT_SHADOW" || rc=$?
+          else
+            clean() { printf '%s' "$1" | tr -cd 'A-Za-z0-9_.:/-'; }
+            token() { printf '"%s"' "$(clean "$1")"; }
+            result() { if [ -n "$1" ]; then token "$1"; else printf 'null'; fi; }
+            failures='"parity.verdict=missing"'
+            for pair in "checkout=$OUTCOME_CHECKOUT" "prelude=$OUTCOME_PRELUDE" "selection=$OUTCOME_SELECTION" \
+                        "download_reference=$OUTCOME_DOWNLOAD_REFERENCE" \
+                        "download_candidate=$OUTCOME_DOWNLOAD_CANDIDATE" "parity=$OUTCOME_PARITY"; do
+              outcome="${pair#*=}"
+              if [ "$outcome" != success ]; then
+                failures="$failures, \"parity.${pair%%=*}=$(clean "${outcome:-unknown}")\""
+              fi
+            done
+            if [ "$RESULT_PROFILE_A" != success ]; then
+              failures="$failures, \"reference.job=$(clean "${RESULT_PROFILE_A:-unknown}")\""
+            fi
+            failures="$failures, \"reference.result=not_read\", \"shadow.record=not_read\""
+            if [ "$RESULT_SHADOW" != success ]; then
+              failures="$failures, \"shadow.job=$(clean "${RESULT_SHADOW:-unknown}")\""
+            fi
             {
               printf '{\n'
               printf ' "schema": "vnx-xdist-parity/1",\n'
@@ -558,13 +603,22 @@ jobs:
               printf ' "event": %s,\n' "$(token "$PARITY_EVENT")"
               printf ' "ref": %s,\n' "$(token "$PARITY_REF")"
               printf ' "profile": %s,\n' "$(token "${PARITY_PROFILE:-unknown}")"
+              printf ' "steps": {"checkout": %s, "prelude": %s, "selection": %s, "download_reference": %s, "download_candidate": %s, "parity": %s},\n' \
+                "$(token "$OUTCOME_CHECKOUT")" "$(token "$OUTCOME_PRELUDE")" "$(token "$OUTCOME_SELECTION")" \
+                "$(token "$OUTCOME_DOWNLOAD_REFERENCE")" "$(token "$OUTCOME_DOWNLOAD_CANDIDATE")" "$(token "$OUTCOME_PARITY")"
+              printf ' "shadow": {"record": "not_read", "job_result": %s},\n' "$(result "$RESULT_SHADOW")"
+              printf ' "reference": {"job_result": %s, "result": "not_read", "exit": null, "duration_s": null},\n' \
+                "$(result "$RESULT_PROFILE_A")"
+              printf ' "selection_fingerprint": null,\n'
+              printf ' "selection_fingerprint_source": null,\n'
+              printf ' "differences": null,\n'
+              printf ' "counts": null,\n'
+              printf ' "tool_versions": null,\n'
+              printf ' "invalid_evidence": [{"reason": "no_verdict", "detail": "the parity script wrote no verdict (checkout %s, parity step %s)"}],\n' \
+                "$(clean "$OUTCOME_CHECKOUT")" "$(clean "$OUTCOME_PARITY")"
               printf ' "exit": 2,\n'
               printf ' "verdict": "invalid_evidence",\n'
-              printf ' "invalid_evidence": [{"reason": "no_verdict", "detail": "the parity script wrote no verdict (checkout %s, parity step %s)"}],\n' \
-                "$(printf '%s' "$OUTCOME_CHECKOUT" | tr -cd 'a-z_')" "$(printf '%s' "$OUTCOME_PARITY" | tr -cd 'a-z_')"
-              printf ' "differences": null,\n'
-              printf ' "selection_fingerprint": null,\n'
-              printf ' "step_failures": ["parity.verdict=missing"]\n'
+              printf ' "step_failures": [%s]\n' "$failures"
               printf '}\n'
             } > "$V"
             if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
@@ -573,6 +627,7 @@ jobs:
             fi
           fi
           cat "$V"
+          exit "$rc"
 
       - name: Upload parity verdict
         if: ${{ always() }}
