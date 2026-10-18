@@ -36,7 +36,7 @@ VNX is a file-based orchestration system enabling parallel development across mu
 - **File-Based Communication**: NDJSON receipts + Markdown dispatches
 - **Deliverable-Based Governance**: T0 is sole authority for declaring work done; workers attach evidence, receipt processor tracks but does not close
 - **Native Skill Architecture**: skills invoke natively (`/skill-name` in Claude Code, `$skill-name` in Codex, `@skill-name` in Gemini) instead of a compiled prompt template
-- **Multi-Provider Dispatch**: every provider runs as a CLI subprocess, never an imported SDK (`no-anthropic-sdk` in `scripts/lib/providers/provider_constraints.yaml`); full lane map, takeover chain and the `vnx providers` switch in `docs/core/PROVIDER_LANES.md`
+- **Multi-Provider Dispatch**: every provider runs as a CLI subprocess, never an imported SDK (`no-anthropic-sdk` in `scripts/lib/providers/provider_constraints.yaml`); full lane map, takeover chain and the `vnx providers` switch in `docs/core/PROVIDER_LANES.md` (the switch exists but does not enforce yet, see "Provider switch" there)
 - **Project-Scoped Process Isolation**: `VNX_KILL_SCOPE` prevents cross-project process interference
 - **Singleton Process Enforcement**: Bulletproof duplicate prevention
 - **Progressive Intelligence**: Token-efficient context aggregation
@@ -176,7 +176,7 @@ terminal, in priority order):
 vnx jump T2              # Switch tmux focus to T2
 vnx jump --attention     # Focus the highest-priority attention terminal
 ```
-The dashboard "Jump" action calls `POST /api/jump/{terminal}` which executes `vnx jump`.
+The dashboard "Jump" action calls `POST /api/jump/{terminal}`. It does not run `vnx jump`: `_jump_terminal` in `dashboard/api_operator.py` runs `tmux select-window` and `tmux select-pane` on the terminal's pane.
 
 ---
 
@@ -257,7 +257,7 @@ which is the checkable source): `t0_context_guard.py` (PreToolUse/Stop/UserPromp
 that actually ships, is `docs/operations/T0_CONTEXT_ROTATION.md`
 (`scripts/hooks/t0_context_guard.py`, `scripts/t0_rotate_spawn.sh`). `vnx guard install|check`
 registers the guard at user level and reports where it runs (`vnx_cli/commands/guard.py`);
-the setup steps are in `docs/core/00_GETTING_STARTED.md`. A separate
+the install and check steps are in `docs/operations/T0_CONTEXT_ROTATION.md`. A separate
 worker-side rotation design (`vnx_context_monitor.sh` / `vnx_handover_detector.sh`
 / `vnx_rotate.sh`) is documented in the archived
 `docs/_archive/core/technical/CONTEXT_ROTATION_SYSTEM.md`; those hook scripts
@@ -951,7 +951,8 @@ An unknown or retired gate name in a stack is refused by name, never dropped qui
 
 Each seat gets its own reviewer: one reviewer gate fills at most one seat of a request.
 When a seat's reviewer is out, the next gate in the takeover chain reads it
-(`docs/core/PROVIDER_LANES.md`, "Takeover chain"). With the default chain and both
+(`docs/core/PROVIDER_LANES.md`, "Takeover chain"; the seat rule itself is
+`docs/core/DISPATCH_RULES.md` section 2). With the default chain and both
 subscription reviewers out, deepseek reads one seat and the other seat ends as
 `chain_exhausted`.
 
@@ -965,8 +966,10 @@ peer on the head, in its JSON or in its report on disk, refuses the merge whatev
 other seats say. A missing or failed reviewer is absence, not a vote (ADR-037): the seat
 stays unfilled and neither signs nor rejects.
 
-Reviewer prompts carry no repo map, skill or intelligence
-(`DISPATCH_AND_INTELLIGENCE_ARCHITECTURE.md`, section 4). The merge-door checks are in
+Reviewer prompts carry no repo map or intelligence and skip the base worker layer:
+`scripts/gate_runner.py` assembles them with `PromptAssembler().assemble(dispatch_metadata={"role": "reviewer"}, ...)`
+(lines 1249 and 1288, no `repo_map` or `intelligence` key) and `scripts/lib/prompt_assembler.py`
+skips L1 for `role == "reviewer"` (line 147). The merge-door checks are in
 `DISPATCH_RULES.md` sections 2.1 and 2.2, the evidence rules in
 `docs/core/45_HEADLESS_REVIEW_EVIDENCE_CONTRACT.md`, the reviewer split in ADR-008. The
 seat rule and the per-seat reviewer are on main, not yet released.
@@ -996,8 +999,10 @@ local-gemma) route through `scripts/lib/provider_dispatch.py`. Kimi is CLI-OAuth
 only (`kimi-via-cli-only`); GLM (glm-5.2 default, plus glm-5.3/glm-5.3-flash — see
 `deprecated-glm-models` in `provider_constraints.yaml`) routes via OpenRouter (`zai-via-openrouter-only`);
 DeepSeek runs through the Claude harness with an own key (`deepseek-harness-subscription-blocked`
-gates the subscription variant). The operator turns a provider family on or off with
-`vnx providers` (on main, not yet released). Full lane map, takeover chain and switch:
+gates the subscription variant). A provider switch exists (`vnx providers list` shows the
+families), but it does not enforce yet: every write verb (`on`, `off`, `reset`) refuses until
+every launch function calls `provider_switch.require`. Full lane map, takeover chain and
+the switch ("Provider switch"):
 `docs/core/PROVIDER_LANES.md`; dispatch decision rules: `docs/core/DISPATCH_RULES.md`.
 
 **Single-entry door (merged, default-ON).** Lane selection runs behind
@@ -1062,27 +1067,28 @@ The VNX operator dashboard is a projection over `.vnx-data/state/`.
   4173. `dashboard/launch-dashboard.sh` sets `PORT` to 4174 by default, because the
   Next.js proxy targets that port.
 - Frontend: `dashboard/index.html` (vanilla HTML/JS, no build step) and the token-usage
-  app under `dashboard/token-dashboard/` (Next.js, its own `npm` build; see its README).
+  app under `dashboard/token-dashboard/` (Next.js, its own `npm` build; setup in `dashboard/README.md`).
 - State source: `.vnx-data/state/` files, polled from the page (a 7-second refresh in
   `index.html`).
 
 ### Write actions
 
 Reads are `GET`. The mutating `POST` routes are guarded against cross-site requests
-(a token is required on a non-loopback bind) and are limited to:
+(a token is required on a non-loopback bind). The routes of `do_POST` in `dashboard/serve_dashboard.py` are:
 
 | Route | Effect |
 |-------|--------|
-| `/api/jump/{terminal}` | tmux focus switch (`vnx jump`) |
+| `/api/jump/{terminal}` | tmux focus switch (`tmux select-window`/`select-pane`) |
 | `/api/restart-process`, `/api/unlock-terminal` | restart a supervised process, clear a terminal lock |
 | `/api/conversations/resume` | validate a session and return its resume command |
 | `/api/operator/*` actions (session start/stop, terminal attach, projections refresh, reconcile, open-item inspect, gate toggle, config set) | operator controls |
-| `/api/intelligence/proposals/*` | apply or accept an intelligence proposal |
+| `/api/intelligence/proposals/apply`, `/api/intelligence/proposals/{id}/accept`, `/api/intelligence/proposals/{id}/reject` | apply, accept or reject an intelligence proposal |
+| `/api/intelligence/weekly-digest/generate` | generate the weekly intelligence digest |
 
 No route creates or promotes a dispatch. The route table is the `do_GET`/`do_POST`
-handlers in `dashboard/serve_dashboard.py`; read-only groups are `/api/health`,
-`/api/events`, `/api/token-stats`, `/api/conversations`, `/api/dispatches` and
-`/api/operator/*`.
+handlers in `dashboard/serve_dashboard.py`; the `GET` side is read-only, including
+the `GET /api/operator/*` views. Only the `POST` actions in the table above under
+`/api/operator/` mutate.
 
 ### Startup
 
