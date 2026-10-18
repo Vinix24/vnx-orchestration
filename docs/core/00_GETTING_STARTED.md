@@ -45,7 +45,7 @@ vnx status
 # Merge readiness of a PR: required contexts and gate evidence on its head
 vnx pr-ready <PR>
 
-# Model providers switched on or off (see PROVIDER_LANES.md)
+# Model provider state; the write verbs (on/off/reset) refuse until every launch function calls provider_switch.require (see PROVIDER_LANES.md, "Provider switch")
 vnx providers list
 ```
 
@@ -102,7 +102,7 @@ handoff older than 15 minutes, or without a wrap proof in the handoff. When it r
 new tmux window next to the current one, starts `claude --model opus` there, and types one line
 that closes the old window, runs the kickoff on the handoff and takes up its first numbered
 next step. A rotation that cannot wait for a wrap uses `--skip-wrap-reason "<text>"`, which
-leaves an audit receipt. `vnx handoff show` prints the resume briefing parsed from the handoff.
+leaves an audit receipt. `vnx handoff show` is a different handoff: it reads `handoff.md` from the rotation directory (`rotation_handovers/T0` under the project's runtime directory, or the directory given with `--logdir`) and prints "No handoff found" when that file is absent. It does not read `daily-log/handoff.md`.
 
 ### Key Bindings (in tmux)
 - `Ctrl+G` — Open dispatch queue popup

@@ -43,7 +43,7 @@ Core dispatch/runtime orchestration:
 - `scripts/pr_merge.py` — the only sanctioned merge path (writes the `pr_merged` receipt; a bare `gh pr merge` does not); the checks it runs are in `docs/core/DISPATCH_RULES.md` §2.2
 - `scripts/pr_ready.py` + `scripts/lib/pr_readiness.py` — `vnx pr-ready <PR>`: required contexts and gate evidence on the PR head, before the merge door is called
 - `scripts/planning_cli.py` — the planning layer behind `vnx horizon`: objectives, deliverables, plan-gate
-- `scripts/providers_cli.py` — `vnx providers`: turn a model provider family on or off, per machine or per project (`docs/core/PROVIDER_LANES.md`)
+- `scripts/providers_cli.py` — `vnx providers`: `list` shows the state of each model provider family; the write verbs refuse until every launch function calls `provider_switch.require` (`docs/core/PROVIDER_LANES.md`, section "Provider switch")
 - `scripts/runtime_core_cli.py` — runtime-core operator tooling
 - `scripts/runtime_cutover_check.py` — runtime-core certification/validation checks
 - `scripts/rollback_runtime_core.py` — runtime-core rollback helper

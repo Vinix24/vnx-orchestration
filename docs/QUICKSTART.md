@@ -31,7 +31,7 @@ branch is opened as a PR before the receipt can read `done`). It also needs an
 authenticated `claude` CLI on your PATH. `vnx doctor` flags a missing worker CLI.
 
 ```bash
-git init -q && git add -A && git commit -q -m "initial scaffold"
+git init -q -b main && git add -A && git commit -q -m "initial scaffold"
 git remote add origin git@github.com:<you>/<repo>.git && git push -u origin main
 vnx migrate
 ```
@@ -52,10 +52,11 @@ its receipt in `$VNX_DATA_DIR/state/t0_receipts.ndjson`. Query the receipt inste
 of reading the file:
 
 ```bash
+VNX_DATA_DIR=$(python3 scripts/lib/vnx_paths.py | sed -n 's/^VNX_DATA_DIR=//p')
 python3 scripts/receipt_query.py by-dispatch <dispatch-id> --state-dir $VNX_DATA_DIR/state
 ```
 
-`receipt_query.py` runs from a checkout of this repository. The walkthrough with
+`receipt_query.py` and `vnx_paths.py` run from a checkout of this repository; run them from your project directory so the path resolves to that project's runtime directory. The walkthrough with
 real output is in the [README](../README.md#your-first-dispatch).
 
 ## Step 5: Check Status

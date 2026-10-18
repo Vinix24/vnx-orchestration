@@ -48,10 +48,10 @@ The released version is in [`VERSION`](VERSION) and every release has its entry 
 
 On main, not yet released. Each line points at the document that owns the subject:
 
-- **Provider switch**: `vnx providers` turns a model provider family on and off, per machine or per project ([PROVIDER_LANES.md](docs/core/PROVIDER_LANES.md)).
-- **Review seats**: one distinct reviewer per seat, and a rejection on the head always blocks ([00_VNX_ARCHITECTURE.md](docs/core/00_VNX_ARCHITECTURE.md)). `glm_gate` left the default takeover chain.
+- **Provider switch**: `vnx providers list` shows the state of each model provider family. The write verbs (`on`, `off`, `reset`) refuse until every launch function calls `provider_switch.require`, so nothing can be switched yet ([PROVIDER_LANES.md](docs/core/PROVIDER_LANES.md#provider-switch)).
+- **Review seats**: one distinct reviewer per seat, and a rejection on the head always blocks ([DISPATCH_RULES.md](docs/core/DISPATCH_RULES.md) §2, evidence side in [45_HEADLESS_REVIEW_EVIDENCE_CONTRACT.md](docs/core/45_HEADLESS_REVIEW_EVIDENCE_CONTRACT.md)). `glm_gate` left the default takeover chain.
 - **Merge readiness**: `vnx pr-ready <PR>` shows the required contexts and the gate evidence on the current head before the merge door is called ([DISPATCH_RULES.md](docs/core/DISPATCH_RULES.md) §2.2).
-- **Plan-gate**: one seat reads the plan and a second seat reads it only on a BLOCK ([HORIZON_LIFECYCLE.md](docs/core/HORIZON_LIFECYCLE.md)).
+- **Plan-gate**: one seat reads the plan and a second seat reads it only on a BLOCK ([HORIZON_PLANNING.md](docs/core/HORIZON_PLANNING.md), "Plan-gate composition").
 - **Open outcomes**: `receipt_query.py open-outcomes` and `decide` record the T0's accept or reject of a dispatch outcome ([DISPATCH_RULES.md](docs/core/DISPATCH_RULES.md) §13).
 - **CHANGELOG fragments**: a PR adds `changelog.d/<name>.md` and never edits `CHANGELOG.md`; the release PR folds the fragments in ([changelog.d/README.md](changelog.d/README.md)).
 - **Context-rotation plugin** for Claude Code, in `packages/claude-code-toolkit/` (see "Context rotation for any Claude Code session" below).
@@ -116,7 +116,7 @@ usage. `vnx dispatch-agent` fails at spawn if no worker CLI is present; `vnx doc
 a `tool:worker-cli` warning. (Zero-key exploration of the governance flow is not currently shipped;
 the old replay demo was retired.)
 
-There are two binaries on purpose. The pip `vnx` covers the essentials: `init`, `migrate`, `doctor`, `status`, `dispatch-agent`, `track`, `pool`, `dream`, and as of `#1462` also `gate-check`, the same deterministic pre-merge GO/HOLD check the fabric's own CI runs, now usable without a checkout. It also covers `horizon`/`objective`, `deliverable`, `attest`, `handoff`, `role`, `update`, `release`, `learning`, `fabric-audit`, `subsystems`, `version`, `pr-ready`, `providers`, `guard` and `worktree-release`. Checkout-only operator commands still live behind `./bin/vnx`: `new-worktree` and the rest of the operator surface (worktree lifecycle, snapshot/restore, staging). For those, clone the repository and run `pip install -e .` from the checkout.
+There are two binaries on purpose. The pip `vnx` covers the essentials: `init`, `migrate`, `doctor`, `status`, `dispatch-agent`, `track`, `pool`, `dream`, and as of `#1462` also `gate-check`, the same deterministic pre-merge GO/HOLD check the fabric's own CI runs, now usable without a checkout. It also covers `horizon`/`objective`, `deliverable`, `attest`, `handoff`, `role`, `update`, `release`, `learning`, `fabric-audit`, `subsystems`, `version`, `pr-ready` and `worktree-release`. `providers` and `guard` are on main, not yet released. Checkout-only operator commands still live behind `./bin/vnx`: `new-worktree` and the rest of the operator surface (worktree lifecycle, snapshot/restore, staging). For those, clone the repository and run `pip install -e .` from the checkout.
 
 ## Your first dispatch
 

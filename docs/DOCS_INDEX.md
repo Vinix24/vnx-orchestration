@@ -6,7 +6,7 @@
 |----------|------|-------------|
 | README | `README.md` | Project overview and quickstart |
 | Quickstart | `docs/QUICKSTART.md` | The condensed pip-CLI path: install, init, a first dispatch, read the receipt |
-| Onboarding Guide | `docs/onboarding/ONBOARDING_GUIDE.md` | The full walkthrough: pip install, first dispatch, the repo-local operator path (`./bin/vnx`), feature worktrees, troubleshooting |
+| Onboarding Guide | `docs/onboarding/ONBOARDING_GUIDE.md` | Pip install, the repo-local operator path (`./bin/vnx`), feature worktrees, troubleshooting. The first-dispatch walkthrough is `docs/QUICKSTART.md` |
 | Getting Started | `docs/core/00_GETTING_STARTED.md` | Orientation, the CLI quick reference, and the T0 context guard and rotation spawner |
 | Architecture | `docs/manifesto/ARCHITECTURE.md` | Glass Box Governance architecture story |
 | Dispatch Guide | `docs/DISPATCH_GUIDE.md` | How dispatches work |
