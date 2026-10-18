@@ -13,29 +13,43 @@ What a line needs and where it comes from, all in the project's own store:
   head the run was requested against (``request.commit_sha``), the seat it
   filled (``request.seat``) and the takeover it was (``takeover_from``);
 - the ``review_gate_result`` receipts: whether a verdict was published, PASS
-  (``completed``) or FAIL (``failed``), and its ``blocking_count``;
+  (``completed``) or FAIL (``failed``), and its ``blocking_count``; since R1
+  also its ``head_sha``, ``seat``, ``takeover_from`` and ``override_b3``;
 - the result records ``review_gates/results/pr-N-<gate>.json``: the same facts
   for the latest run of each gate, for a run whose receipts never landed.
 
+Each fact is taken from the first source that has it, in this order: the head
+from the result receipt, then the request, then the record; the seat from the
+request, then the result receipt, then the record; the takeover from the
+request, then the result receipt; the override from the request, then the
+result receipt, then the record. The first receipt per report counts: a later
+re-anchor writes a receipt for the same report with a new head, and that does
+not move the line.
+
 A report gets no line when no verdict was published for it (a write the guard
-refused, a degenerate run), when its head cannot be established, and when its
-seat already has an earlier verdict on that head: the first verdict on a head
-stands, exactly as the gate now refuses the second run. Every report left out
-is named with its reason.
+refused, a degenerate run), and when its seat already has an earlier verdict
+on that head: the first verdict on a head stands, exactly as the gate now
+refuses the second run. A published codex-seat verdict whose head cannot be
+established is never dropped: it is booked on the head
+``unresolved:<report name>``, so its blockers count toward B3 as a round of
+their own, while it can never fill a seat or block a rerun, because no real
+head matches it. A second-seat verdict without a head neither counts nor
+fills, so it gets no line. Every report left out is named with its reason.
 
 Idempotent: a line already in the ledger is kept as it is (a live line knows
 more than a rebuild can, such as an override), only keys that are missing are
-added, so a second rebuild adds nothing. A line that does not parse and names
-this PR is dropped; one that names no PR is moved to
-``rounds.ndjson.quarantine`` beside the ledger, so it stops refusing every PR
-and stays on disk as evidence.
+added, so a second rebuild adds nothing. Every line that does not parse and
+may belong to this PR (its own, and every line that names no PR) is removed
+from the ledger and moved to ``rounds.ndjson.quarantine`` beside it, so it
+stops refusing and stays on disk as evidence. Last, the PR is opened in the
+ledger (``basis`` ``rebuild``): from then on the gate and the merge door count
+it.
 
 BILLING SAFETY: no Anthropic SDK, no network, no subprocess.
 """
 from __future__ import annotations
 
 import json
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -81,6 +95,10 @@ class StoreSources:
 
 @dataclass(frozen=True)
 class RebuildResult:
+    """What a rebuild did. ``dropped`` counts this PR's own bad lines, ``quarantined`` the ones
+    that named no PR; both were removed from the ledger and moved to the quarantine file.
+    ``opened`` is ``"opened"`` when the rebuild opened the PR, ``"present"`` when it already was."""
+
     pr_number: int
     ledger: Path
     added: Tuple[RoundLine, ...]
@@ -89,6 +107,7 @@ class RebuildResult:
     dropped: int
     quarantined: int
     cap: review_rounds.CapState
+    opened: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -96,6 +115,7 @@ class RebuildResult:
             "added": [line.to_dict() for line in self.added], "kept": self.kept,
             "skipped": [{"report": item.report, "reason": item.reason} for item in self.skipped],
             "dropped_bad_lines": self.dropped, "quarantined_lines": self.quarantined,
+            "opened": self.opened,
             "cap": {**self.cap.to_record(), "summary": self.cap.summary()},
         }
 
@@ -215,29 +235,60 @@ def _published_verdict(run: ReportRun, result: Dict[str, Any], record: Dict[str,
     return "", None, ""
 
 
-def _seat_and_takeover(run: ReportRun, request: Dict[str, Any], record: Dict[str, Any]) -> Tuple[str, str]:
+def _first_text(*values: Any) -> str:
+    """The first value that is a non-empty text, stripped; ``""`` when none is."""
+    return next((str(value).strip() for value in values if isinstance(value, str) and value.strip()), "")
+
+
+def _takeover_from(source: Dict[str, Any]) -> str:
+    """The seat a request or record took over, only when it says it is a takeover."""
+    return str(source.get("takeover_from") or "") if source.get("takeover") is True else ""
+
+
+def _seat_and_takeover(
+    run: ReportRun, request: Dict[str, Any], result: Dict[str, Any], record: Dict[str, Any],
+) -> Tuple[str, str]:
+    """The seat (request, result receipt, record) and the takeover origin (request, result receipt, record)."""
     from review_seat_evaluation import seat_for
 
     source = request or record
-    stated = str(request.get("seat") or record.get("seat") or "")
+    stated = _first_text(request.get("seat"), result.get("seat"), record.get("seat"))
     seat = seat_for(run.gate, stated=stated, takeover_path=source.get("takeover_path"))
-    takeover_from = str(source.get("takeover_from") or "") if source.get("takeover") is True else ""
+    takeover_from = _first_text(_takeover_from(request), result.get("takeover_from"), _takeover_from(record))
     return seat, takeover_from
 
 
+def _override(*sources: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The first ``override_b3`` record among ``sources`` (request, result receipt, record)."""
+    return next(
+        (source["override_b3"] for source in sources if isinstance(source.get("override_b3"), dict) and source["override_b3"]),
+        None,
+    )
+
+
 def line_for_run(run: ReportRun, sources: StoreSources, *, project_id: str) -> Tuple[Optional[RoundLine], str]:
-    """The ledger line of one report, or ``(None, why)`` when it gets none."""
+    """The ledger line of one report, or ``(None, why)`` when it gets none.
+
+    A published codex-seat verdict always gets a line: without an established
+    head it is booked on ``unresolved:<report name>`` (it counts toward B3 and
+    never fills a seat). A second-seat verdict without a head gets none.
+    """
     request = sources.requests.get(run.name, {})
     result = sources.results.get(run.name, {})
     record = sources.records.get(run.name, {})
     verdict, blocking, recorded_at = _published_verdict(run, result, record)
     if not verdict:
         return None, "no verdict was published for this report (no review_gate_result receipt, no result record)"
-    head_sha = str(request.get("commit_sha") or record.get("commit_sha") or "").strip()
+    seat, takeover_from = _seat_and_takeover(run, request, result, record)
+    head_sha = _first_text(result.get("head_sha"), request.get("commit_sha"), record.get("commit_sha"))
     if not head_sha:
-        return None, "its head cannot be established (no review_gate_request receipt or result record names it)"
-    seat, takeover_from = _seat_and_takeover(run, request, record)
-    override = request.get("override_b3") or record.get("override_b3")
+        if seat != review_rounds.CODEX_SEAT:
+            return None, (
+                f"its head cannot be established (no review_gate_result or review_gate_request receipt or result "
+                f"record names it) and it sat in seat {seat}: a second-seat verdict without a head neither counts nor fills"
+            )
+        head_sha = review_rounds.unresolved_head(run.name)
+    override = _override(request, result, record)
     return RoundLine(
         project_id=project_id, pr_number=run.pr_number, head_sha=head_sha, seat=seat, reviewer=run.gate,
         takeover_from=takeover_from, verdict=verdict,
@@ -245,7 +296,7 @@ def line_for_run(run: ReportRun, sources: StoreSources, *, project_id: str) -> T
         report_path=str(result.get("report_path") or record.get("report_path") or request.get("report_path") or run.name),
         dispatch_id=str(request.get("dispatch_id") or result.get("dispatch_id") or record.get("dispatch_id") or ""),
         recorded_at=recorded_at or run.generated, branch=str(request.get("branch") or run.branch),
-        source=review_rounds.SOURCE_REBUILD, override=override if isinstance(override, dict) and override else None,
+        source=review_rounds.SOURCE_REBUILD, override=override,
     ), ""
 
 
@@ -266,8 +317,8 @@ def rebuilt_lines(sources: StoreSources, *, project_id: str) -> Tuple[Tuple[Roun
             lines[line.key] = line
             continue
         skipped.append(Skipped(name, (
-            f"seat {line.seat} already has a verdict on head {line.head_sha[:12]} ({first.report_name}): "
-            "the first verdict on a head stands"
+            f"seat {line.seat} already has a verdict on head {review_rounds.short_head(line.head_sha)} "
+            f"({first.report_name}): the first verdict on a head stands"
         )))
     return tuple(lines.values()), tuple(skipped)
 
@@ -277,54 +328,61 @@ def rebuilt_lines(sources: StoreSources, *, project_id: str) -> Tuple[Tuple[Roun
 # ---------------------------------------------------------------------------
 
 
+def quarantine_path(path: Path) -> Path:
+    """``rounds.ndjson.quarantine`` beside the ledger: where every bad line the rebuild removes goes."""
+    return Path(path).with_name(Path(path).name + QUARANTINE_SUFFIX)
+
+
 def merge_into_ledger(path: Path, pr_number: int, project_id: str, lines: Iterable[RoundLine]) -> Tuple[Tuple[RoundLine, ...], int, int, int]:
     """Add the missing ``lines`` under the ledger lock: ``(added, kept, dropped, quarantined)``.
 
-    Without a bad line the new lines are appended; with one, the ledger is
-    rewritten atomically without it (this PR's bad lines dropped, lines that
-    name no PR moved to the quarantine file).
+    A line is missing when neither its key nor its report is in the ledger yet:
+    one report is one verdict, so a report the gate already booked on its real
+    head is never booked a second time (on ``unresolved:<report>``, when the
+    receipt that names its head never landed).
+
+    Without a bad line for this PR the new lines are appended at a record
+    boundary (``review_rounds._append_text``); with one, every bad line that
+    may belong to this PR (its own and every line that names no PR) is moved
+    to the quarantine file first, and the ledger is rewritten atomically
+    without them. ``dropped`` counts the PR's own, ``quarantined`` the ones
+    that named no PR; both are in the quarantine file.
     """
     from atomic_io import atomic_write_text, slot_lock
 
     path = Path(path)
     with slot_lock(path):
-        text = path.read_text(encoding="utf-8") if path.is_file() else ""
+        text = review_rounds._ledger_text(path)
         ledger = review_rounds.parse_ledger(path, text)
         present = {line.key for line in ledger.lines}
-        added = tuple(line for line in lines if line.key not in present)
+        booked = {line.report_name for line in ledger.for_pr(project_id, pr_number) if line.report_name}
+        added = tuple(line for line in lines if line.key not in present and line.report_name not in booked)
         kept = len(ledger.for_pr(project_id, pr_number))
         bad = ledger.unreadable_for(pr_number)
+        new_text = "".join(review_rounds.ndjson(line.to_dict()) for line in added)
         if not bad:
-            with path.open("a", encoding="utf-8") as handle:
-                handle.write("".join(_ndjson(line) for line in added))
-                handle.flush()
-                os.fsync(handle.fileno())
+            review_rounds._append_text(path, new_text)
             return added, kept, 0, 0
         raw = text.splitlines()
-        dropped = {item.number for item in bad}
-        orphans = [raw[item.number - 1] for item in bad if item.pr_number is None]
-        if orphans:
-            quarantine = path.with_name(path.name + QUARANTINE_SUFFIX)
-            with quarantine.open("a", encoding="utf-8") as handle:
-                handle.write("".join(f"{line}\n" for line in orphans))
-                handle.flush()
-                os.fsync(handle.fileno())
-        kept_text = "".join(f"{line}\n" for number, line in enumerate(raw, start=1) if number not in dropped and line.strip())
-        atomic_write_text(path, kept_text + "".join(_ndjson(line) for line in added))
-    return added, kept, len(dropped) - len(orphans), len(orphans)
-
-
-def _ndjson(line: RoundLine) -> str:
-    return json.dumps(line.to_dict(), separators=(",", ":")) + "\n"
+        removed = {item.number for item in bad}
+        review_rounds._append_text(quarantine_path(path), "".join(f"{raw[number - 1]}\n" for number in sorted(removed)))
+        kept_text = "".join(f"{line}\n" for number, line in enumerate(raw, start=1) if number not in removed and line.strip())
+        atomic_write_text(path, kept_text + new_text)
+    orphans = sum(1 for item in bad if item.pr_number is None)
+    return added, kept, len(removed) - orphans, orphans
 
 
 def rebuild(pr_number: int, *, data_dir: Path) -> RebuildResult:
-    """Rebuild ``pr_number``'s lines in the ledger of the store at ``data_dir`` (its ``.vnx-data``)."""
+    """Rebuild ``pr_number``'s lines in the ledger of the store at ``data_dir`` (its ``.vnx-data``), then open the PR."""
     review_gates = Path(data_dir) / "state" / "review_gates"
     path = review_rounds.ledger_path(review_gates)
     project_id = review_rounds.store_project_id(review_gates)
-    lines, skipped = rebuilt_lines(read_sources(data_dir, pr_number), project_id=project_id)
+    sources = read_sources(data_dir, pr_number)
+    lines, skipped = rebuilt_lines(sources, project_id=project_id)
     added, kept, dropped, quarantined = merge_into_ledger(path, pr_number, project_id, lines)
+    opened = review_rounds.open_pr(
+        path, project_id, pr_number, basis=review_rounds.BASIS_REBUILD, evidence=len(sources.reports),
+    )
     ledger = review_rounds.read_ledger(path)
     cap = review_rounds.cap_state(ledger.for_pr(project_id, pr_number), pr_number)
-    return RebuildResult(pr_number, path, added, kept, skipped, dropped, quarantined, cap)
+    return RebuildResult(pr_number, path, added, kept, skipped, dropped, quarantined, cap, opened)

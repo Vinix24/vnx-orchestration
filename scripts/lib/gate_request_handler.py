@@ -371,30 +371,49 @@ class _PrRounds:
     """The round ledger as one request round sees it for one PR (R1): read once, judged per seat.
 
     ``unreadable`` is the refusal text when the ledger cannot be read for this
-    PR (it names the rebuild command); ``lines`` are the PR's verdicts in order,
-    and ``cap`` the B3 count over its codex seat (``review_rounds.cap_state``).
+    PR (it names the rebuild command); ``history_missing`` the refusal text for
+    a PR that is not opened in the ledger while earlier reviews of it are on
+    disk; ``lines`` are the PR's verdicts in order, and ``cap`` the B3 count
+    over its codex seat (``review_rounds.cap_state``).
     """
 
-    def __init__(self, pr_number: int, lines: Iterable[Any] = (), unreadable: str = "") -> None:
+    def __init__(
+        self, pr_number: int, lines: Iterable[Any] = (), unreadable: str = "", history_missing: str = "",
+    ) -> None:
         import review_rounds
 
         self.pr_number = pr_number
         self.lines = tuple(lines)
         self.unreadable = unreadable
+        self.history_missing = history_missing
         self.cap = review_rounds.cap_state(self.lines, pr_number)
 
     @classmethod
     def read(cls, review_gates_dir: Path, pr_number: int) -> "_PrRounds":
+        """Read the ledger for one PR, and open the PR when the ledger holds its whole history.
+
+        A PR that is not opened is checked for earlier reviews on disk
+        (``review_rounds.prior_evidence``): with any, every seat is refused
+        until the rebuild opened it; without any, the PR is new and is opened
+        here (``basis`` ``new``) before its first run.
+        """
         import review_rounds
 
+        path = review_rounds.ledger_path(review_gates_dir)
+        project_id = review_rounds.store_project_id(review_gates_dir)
         try:
-            ledger = review_rounds.read_ledger(review_rounds.ledger_path(review_gates_dir))
+            ledger = review_rounds.read_ledger(path)
+            text = review_rounds.unreadable_text(ledger, pr_number)
+            if text:
+                return cls(pr_number, unreadable=text)
+            if not ledger.is_opened(project_id, pr_number):
+                evidence = review_rounds.prior_evidence(review_rounds.store_data_dir(review_gates_dir), pr_number)
+                if evidence:
+                    return cls(pr_number, history_missing=review_rounds.history_missing_text(pr_number, evidence))
+                review_rounds.open_pr(path, project_id, pr_number, basis=review_rounds.BASIS_NEW, evidence=0)
         except review_rounds.RoundLedgerError as exc:
             return cls(pr_number, unreadable=f"{exc}. Rebuild it with `{review_rounds.rebuild_command(pr_number)}`")
-        text = review_rounds.unreadable_text(ledger, pr_number)
-        if text:
-            return cls(pr_number, unreadable=text)
-        return cls(pr_number, ledger.for_pr(review_rounds.store_project_id(review_gates_dir), pr_number))
+        return cls(pr_number, ledger.for_pr(project_id, pr_number))
 
     def line_on_head(self, seat: str, head: _PrHead) -> Optional[Any]:
         """The verdict ``seat`` already has on the round's head; looks the head up only when there are lines."""
@@ -1652,11 +1671,15 @@ class GateRequestHandlerMixin:
     ) -> Optional[Dict[str, Any]]:
         """The seat's payload when the round ledger refuses its run (R1), else ``None``.
 
-        Three refusals, checked in this order, and only for a seat (an extra gate
+        Four refusals, checked in this order, and only for a seat (an extra gate
         such as ``ci_gate`` is no seat and is never refused here):
 
         - the ledger is unreadable for this PR: every seat is refused until
           ``vnx review rounds rebuild --pr N`` has rebuilt it;
+        - the PR was reviewed before the ledger counted it and is not opened in
+          it (``round_history_missing``): every seat is refused until the
+          rebuild has put its earlier verdicts in; ``override_b3`` does not
+          lift this, it is about the cap;
         - the seat already has a verdict on this head: no second run on a head
           with a verdict, in any seat (:meth:`_standing_round_payload`);
         - the codex seat of a PR at the B3 cap, on every head, unless a
@@ -1674,6 +1697,12 @@ class GateRequestHandlerMixin:
             return _round_refused_payload(
                 seat, pr_number=pr_number, branch=branch, head_sha="",
                 reason=review_rounds.REFUSED_LEDGER_UNREADABLE, detail=rounds.unreadable, seat_fields=seat_fields,
+            )
+        if rounds.history_missing:
+            logger.warning("gate_request_handler: seat %s refused -- %s", seat, rounds.history_missing)
+            return _round_refused_payload(
+                seat, pr_number=pr_number, branch=branch, head_sha="",
+                reason=review_rounds.REFUSED_HISTORY_MISSING, detail=rounds.history_missing, seat_fields=seat_fields,
             )
         standing = rounds.line_on_head(seat, head)
         if standing is not None:

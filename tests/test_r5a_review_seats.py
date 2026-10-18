@@ -654,9 +654,17 @@ class TestAnEntrysOwnSeatWins:
         carries the codex takeover of the round in which kimi read codex's seat. A request for
         kimi's own seat reports that PASS. Red on 7f70286e: verification credited it to codex's
         seat and reported kimi's seat missing."""
+        import review_rounds
+
         _set_switches(kimi=False)
         codex_hop = {"gate": "codex_gate", "reason": "exit_nonzero", "status": "unavailable",
                      "detail": "You've hit your usage limit."}
+        # R1: the earlier round's request opened the PR in the round ledger; without that, a
+        # PASS on disk is history the ledger never counted and every seat is refused.
+        review_rounds.open_pr(
+            review_rounds.ledger_path(env["state_dir"] / "review_gates"), "", PR,
+            basis=review_rounds.BASIS_NEW, evidence=0,
+        )
         _write_result(env, "kimi_gate", {
             **_pass_record(env, "kimi_gate"), "status": "completed", "takeover_path": [codex_hop],
         })

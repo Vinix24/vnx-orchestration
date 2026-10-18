@@ -19,6 +19,14 @@ Plan: ``claudedocs/specs/review-stopregel-en-lichte-stoelen/plan.md``, section 1
   from the vnx-dev store with only what the rebuild reads: the report headers and findings, the
   PRs' ``review_gate_request``/``review_gate_result`` receipts and their result records): #2080 falls under B3.2
   in round 5 (sum 6), #2089 under B3.1 in round 1; a second rebuild adds nothing.
+- round 2 (dispatch 20261018-rs-r1-r2b, the four codex blockers on 4cf2399d, design in the
+  architect report 20261018-rs-r1-arch section 2): the ledger is a regular file or absent at
+  every reader and writer, and every append starts on a record boundary (G1); a PR counts only
+  once an ``opened`` line says the ledger holds its whole history, and a PR with earlier reviews
+  on disk is refused at the gate until it is rebuilt (G2); the rebuild takes the head from the
+  result receipt, keeps a codex-seat verdict without a head on ``unresolved:<report>`` and
+  quarantines every bad line it removes (G3). Each codex reproduction calls an entry point that
+  exists on 4cf2399d and fails there on behaviour.
 
 No provider lane is ever reached: the request round requests and never runs, and where a
 call runs its seats, ``execute_gate`` is the edge and is replaced (a refused seat that
@@ -102,15 +110,39 @@ def _codex_rounds(*blockers: int, pr: int = PR, reviewer: str = "codex_gate") ->
     ]
 
 
+def _opened(pr: int = PR, *, basis: str = "new", project_id: str = "") -> Dict[str, Any]:
+    """The line that says the ledger holds a PR's whole review history."""
+    return {
+        "kind": "opened", "project_id": project_id, "pr_number": pr, "basis": basis, "evidence": 0,
+        "recorded_at": "2026-10-17T00:00:00Z", "source": "gate" if basis == "new" else "rebuild",
+    }
+
+
 def _write_ledger(path: Path, lines: List[Dict[str, Any]], *, extra: str = "") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(json.dumps(line) + "\n" for line in lines) + extra, encoding="utf-8")
 
 
-def _ledger_lines(path: Path) -> List[Dict[str, Any]]:
+def _all_lines(path: Path) -> List[Dict[str, Any]]:
+    """Every line that parses (a torn fragment does not)."""
     if not path.exists():
         return []
-    return [json.loads(raw) for raw in path.read_text(encoding="utf-8").splitlines() if raw.strip()]
+    lines = []
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        try:
+            lines.append(json.loads(raw))
+        except ValueError:
+            continue
+    return [line for line in lines if isinstance(line, dict)]
+
+
+def _ledger_lines(path: Path) -> List[Dict[str, Any]]:
+    """The verdict lines (no ``kind``)."""
+    return [line for line in _all_lines(path) if "kind" not in line]
+
+
+def _opened_lines(path: Path) -> List[Dict[str, Any]]:
+    return [line for line in _all_lines(path) if line.get("kind") == "opened"]
 
 
 def _report(directory: Path, gate: str, *, tag: str, pr: int = PR, text: str = CLEAN_REPORT) -> Path:
@@ -200,6 +232,7 @@ class TestRefusalWhereARunStarts:
         import gate_executor
         import review_gate_manager
 
+        assert _request(env, ["codex_gate"])["codex_gate"]["status"] == "requested", "the request opens the PR"
         payload = _verdict(env, "codex_gate")
         _write_result(env, "codex_gate", payload)
 
@@ -479,7 +512,7 @@ def _stub_door_edges(monkeypatch, door) -> None:
 class TestTheMergeDoor:
     def test_two_passes_in_the_ledger_pass_the_door(self, door):
         codex, kimi = _door_pass(door, "codex_gate", tag="01"), _door_pass(door, "kimi_gate", tag="02")
-        _write_ledger(door["ledger"], [_line_for(codex, at=1), _line_for(kimi, at=2)])
+        _write_ledger(door["ledger"], [_opened(), _line_for(codex, at=1), _line_for(kimi, at=2)])
 
         verdict = _check(door)
 
@@ -489,7 +522,7 @@ class TestTheMergeDoor:
     def test_a_pass_that_is_not_in_the_ledger_does_not_count(self, door):
         _door_pass(door, "codex_gate", tag="01")
         kimi = _door_pass(door, "kimi_gate", tag="02")
-        _write_ledger(door["ledger"], [_line_for(kimi, at=2)])
+        _write_ledger(door["ledger"], [_opened(), _line_for(kimi, at=2)])
 
         verdict = _check(door)
 
@@ -514,7 +547,7 @@ class TestTheMergeDoor:
 
     def test_the_codex_seat_of_a_pr_at_the_cap_is_not_filled(self, door):
         codex, kimi = _door_pass(door, "codex_gate", tag="01"), _door_pass(door, "kimi_gate", tag="02")
-        _write_ledger(door["ledger"], _codex_rounds(2, 1, 1, 1, 1) + [_line_for(codex, at=20), _line_for(kimi, at=21)])
+        _write_ledger(door["ledger"], [_opened()] + _codex_rounds(2, 1, 1, 1, 1) + [_line_for(codex, at=20), _line_for(kimi, at=21)])
 
         verdict = _check(door)
 
@@ -537,7 +570,7 @@ class TestTheMergeDoor:
         import pr_merge
 
         codex, kimi = _door_pass(door, "codex_gate", tag="01"), _door_pass(door, "kimi_gate", tag="02")
-        _write_ledger(door["ledger"], _codex_rounds(3) + [_line_for(codex, at=20), _line_for(kimi, at=21)])
+        _write_ledger(door["ledger"], [_opened()] + _codex_rounds(3) + [_line_for(codex, at=20), _line_for(kimi, at=21)])
         _stub_door_edges(monkeypatch, door)
 
         refused = _rc(pr_merge.main, ["--pr", str(PR), "--dispatch-id", "20261018-rs-r1-door"])
@@ -716,18 +749,333 @@ class TestTheRebuildOnRealReports:
         payload = json.loads(capsys.readouterr().out)
         assert rc == 0 and payload["cap"]["rule"] == "B3.1" and len(payload["added"]) == 6
 
-    def test_unreadable_lines_are_dropped_or_quarantined_and_the_pr_is_counted_again(self, real_store):
+    def test_every_removed_bad_line_is_quarantined_and_the_pr_is_counted_again(self, real_store):
         import review_rounds
         import review_rounds_rebuild
 
         ledger = real_store / "state" / "review_gates" / "rounds.ndjson"
-        ledger.write_text('{"project_id":"vnx-dev","pr_number":2089,"head_sh\nnot json at all\n', encoding="utf-8")
+        own = '{"project_id":"vnx-dev","pr_number":2089,"head_sh'
+        ledger.write_text(f"{own}\nnot json at all\n", encoding="utf-8")
 
         result = review_rounds_rebuild.rebuild(2089, data_dir=real_store)
 
         assert (result.dropped, result.quarantined) == (1, 1)
-        assert (ledger.parent / "rounds.ndjson.quarantine").read_text(encoding="utf-8") == "not json at all\n"
+        quarantine = (ledger.parent / "rounds.ndjson.quarantine").read_text(encoding="utf-8").splitlines()
+        assert quarantine == [own, "not json at all"], "the PR's own bad line is kept on disk too"
+        assert own not in ledger.read_text(encoding="utf-8").splitlines()
         assert review_rounds.read_ledger(ledger).bad == ()
+        assert result.cap.rule == "B3.1"
+
+
+# ---------------------------------------------------------------------------
+# Round 2, G1: the ledger is one regular file, and every record is framed
+# ---------------------------------------------------------------------------
+
+NEW_HEAD = "9" * 40
+H1 = OLD_HEADS[0]
+
+
+def _env_door(env, monkeypatch, *, head: str = HEAD_SHA, **kwargs: Any) -> Dict[str, Any]:
+    """The merge door's review-seat verdict on the env store (codex and kimi seats)."""
+    import closure_verifier
+
+    pin_review_stack(monkeypatch, "codex_gate,kimi_gate")
+    monkeypatch.setenv("VNX_OVERRIDE_CI_GATE_REQUIRED", "0")
+    return closure_verifier.check_review_gate_for_merge(
+        str(PR), "codex_gate", env["results_dir"], branch=BRANCH, head_sha=head, **kwargs,
+    )
+
+
+def _not_a_file(ledger: Path, kind: str, target_lines: List[Dict[str, Any]]) -> None:
+    """Put a directory or a symlink (to a ledger the old reader accepts) at the ledger path."""
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    if kind == "directory":
+        ledger.mkdir()
+        return
+    target = ledger.parent.parent / "elsewhere.ndjson"
+    _write_ledger(target, target_lines)
+    ledger.symlink_to(target)
+
+
+class TestLedgerIntegrity:
+    def test_a_torn_line_of_another_pr_does_not_swallow_the_next_verdict(self, env, monkeypatch):
+        """Codex blocker 1: a FAIL(3) appended onto a torn PR-101 fragment vanished from its count."""
+        assert _request(env, ["codex_gate"])["codex_gate"]["status"] == "requested"
+        with env["ledger"].open("a", encoding="utf-8") as handle:
+            handle.write('{"project_id":"","pr_number":101,"head_sha":"' + "1" * 20)
+
+        _fail, landed = _write_result(env, "codex_gate", _verdict(env, "codex_gate", tag="01", blocking=3))
+        assert landed is True
+        _on_disk, landed = _write_result(env, "codex_gate", _verdict(env, "codex_gate", tag="02", head=NEW_HEAD))
+
+        assert landed is False, "a PASS on a new head of a PR at B3.1 is not booked"
+        codex = [(line["head_sha"], line["blocking_count"]) for line in _ledger_lines(env["ledger"])]
+        assert codex == [(HEAD_SHA, 3)], "the FAIL kept a line of its own"
+        verdict = _env_door(env, monkeypatch, head=NEW_HEAD)
+        assert verdict["verdict"] == "NO-GO"
+        assert verdict["review_seats"]["round_ledger"].get("cap", {}).get("rule") == "B3.1", verdict["review_seats"]
+        raw = env["ledger"].read_text(encoding="utf-8").splitlines()
+        assert raw[-2] == '{"project_id":"","pr_number":101,"head_sha":"' + "1" * 20, "the fragment is a line of its own"
+
+    @pytest.mark.parametrize("kind", ["directory", "symlink"])
+    def test_a_ledger_path_that_is_no_file_refuses_the_door(self, door, kind):
+        """Codex blocker 3: a non-file ledger was read as absent, and two PASSes merged."""
+        codex, kimi = _door_pass(door, "codex_gate", tag="01"), _door_pass(door, "kimi_gate", tag="02")
+        _not_a_file(door["ledger"], kind, [_line_for(codex, at=1), _line_for(kimi, at=2)])
+
+        verdict = _check(door)
+
+        assert verdict["verdict"] == "NO-GO", verdict["message"]
+        refusal = verdict["review_seats"].get("round_ledger", {}).get("refusal", "")
+        assert f"is not a regular file ({kind})" in refusal and "vnx review rounds rebuild" in refusal
+
+    @pytest.mark.parametrize("kind", ["directory", "symlink"])
+    def test_a_ledger_path_that_is_no_file_refuses_every_seat(self, env, kind):
+        _not_a_file(env["ledger"], kind, _codex_rounds(1))
+
+        seats = _request(env, ["codex_gate", "kimi_gate"])
+
+        for seat in ("codex_gate", "kimi_gate"):
+            assert seats[seat]["status"] == "blocked", seats[seat]
+            assert seats[seat]["reason"] == "round_ledger_unreadable"
+            assert f"is not a regular file ({kind})" in seats[seat]["reason_detail"]
+            assert not (env["requests_dir"] / f"pr-{PR}-{seat}.json").exists(), "no lane is reached"
+
+
+# ---------------------------------------------------------------------------
+# Round 2, G2: a PR's review history is recorded (the ``opened`` line)
+# ---------------------------------------------------------------------------
+
+
+def _append_receipt(state_dir: Path, receipt: Dict[str, Any]) -> None:
+    with (state_dir / "t0_receipts.ndjson").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(receipt) + "\n")
+
+
+def _legacy_codex_fail(env, *, head: str = H1, blockers: int = 3, tag: str = "00") -> Path:
+    """A codex FAIL from before R1: its report, its record and its two receipts, no ledger line."""
+    text = f"## Findings\n\nBlocking count: {blockers}\nAdvisory count: 0\n"
+    report = _report(env["headless"], "codex_gate", tag=tag, text=text)
+    record = {
+        "gate": "codex_gate", "pr_id": str(PR), "pr_number": PR, "status": "completed", "commit_sha": head,
+        "branch": BRANCH, "contract_hash": "sha256:legacy", "report_path": str(report),
+        "blocking_findings": [{"severity": "blocking", "message": f"defect {n}"} for n in range(blockers)],
+        "advisory_findings": [], "dispatch_id": "20261017-legacy", "recorded_at": "2026-10-17T09:00:00Z",
+    }
+    (env["results_dir"] / f"pr-{PR}-codex_gate.json").write_text(json.dumps(record), encoding="utf-8")
+    _append_receipt(env["state_dir"], {
+        "event_type": "review_gate_request", "timestamp": "2026-10-17T08:55:00Z", "gate": "codex_gate",
+        "status": "requested", "pr_number": PR, "request": {
+            "commit_sha": head, "seat": "codex_gate", "report_path": str(report), "branch": BRANCH, "gate": "codex_gate",
+        },
+    })
+    _append_receipt(env["state_dir"], {
+        "event_type": "review_gate_result", "timestamp": "2026-10-17T09:00:00Z", "gate": "codex_gate",
+        "status": "failed", "gate_status": "completed", "blocking_count": blockers, "report_path": str(report),
+        "pr_number": PR,
+    })
+    return report
+
+
+def _backstop_passes(env) -> None:
+    """PASSes on the current head written by the writer alone: the path without a request."""
+    for gate, tag in (("codex_gate", "02"), ("kimi_gate", "03")):
+        _payload, landed = _write_result(env, gate, _verdict(env, gate, tag=tag))
+        assert landed is True, gate
+
+
+class TestTheOpenedLine:
+    def test_a_legacy_pr_is_refused_in_every_seat_until_it_is_rebuilt(self, env):
+        """Codex blocker 2 (a): a request on a new head admitted a PR whose pre-R1 FAIL was never counted."""
+        report = _legacy_codex_fail(env)
+        env["ledger"].write_text("", encoding="utf-8")
+
+        seats = _request(env, ["codex_gate", "kimi_gate"])
+        overridden = _request(env, ["codex_gate"], override_b3="operator: try anyway")
+
+        for payload in (seats["codex_gate"], seats["kimi_gate"], overridden["codex_gate"]):
+            assert payload["status"] == "blocked", payload
+            assert payload["reason"] == "round_history_missing", payload
+            assert f"first: {report.name}" in payload["reason_detail"]
+            assert f"vnx review rounds rebuild --pr {PR}" in payload["reason_detail"]
+        for seat in ("codex_gate", "kimi_gate"):
+            assert not (env["requests_dir"] / f"pr-{PR}-{seat}.json").exists(), "no lane is reached"
+        assert _opened_lines(env["ledger"]) == []
+
+    def test_backstop_passes_of_a_legacy_pr_land_but_do_not_pass_the_door(self, env, monkeypatch):
+        """Codex blocker 2 (b): fresh PASSes booked without a request merged past the pre-R1 FAIL."""
+        _legacy_codex_fail(env)
+        env["ledger"].write_text("", encoding="utf-8")
+
+        _backstop_passes(env)
+        verdict = _env_door(env, monkeypatch)
+
+        assert [line["verdict"] for line in _ledger_lines(env["ledger"])] == ["pass", "pass"], "no verdict is lost"
+        assert verdict["verdict"] == "NO-GO", verdict["message"]
+        assert "niet geopend in het rondegrootboek" in verdict["message"]
+        assert f"vnx review rounds rebuild --pr {PR}" in verdict["message"]
+
+    def test_the_rebuild_opens_the_pr_and_the_door_counts_its_legacy_fail(self, env, monkeypatch):
+        """Codex blocker 2 (c): after the rebuild the pre-R1 FAIL holds the cap, the override passes it."""
+        import review_rounds_rebuild
+
+        _legacy_codex_fail(env)
+        env["ledger"].write_text("", encoding="utf-8")
+        _backstop_passes(env)
+
+        result = review_rounds_rebuild.rebuild(PR, data_dir=env["data_dir"])
+        refused = _env_door(env, monkeypatch)
+        overridden = _env_door(env, monkeypatch, b3_override="operator: the last blocker was one line")
+
+        assert [(line.head_sha, line.verdict, line.blocking_count) for line in result.added] == [(H1, "fail", 3)]
+        assert [(line["basis"], line["evidence"]) for line in _opened_lines(env["ledger"])] == [("rebuild", 3)]
+        assert refused["verdict"] == "NO-GO" and "B3-cap" in refused["message"] and "B3.1" in refused["message"]
+        assert overridden["verdict"] == "GO", overridden["message"]
+        override = overridden["review_seats"]["round_ledger"]["override"]
+        assert override == {"flag": "--override-b3", "reason": "operator: the last blocker was one line", "applied": True}
+
+    def test_a_new_pr_is_opened_by_its_first_request_and_its_pass_counts(self, env, monkeypatch):
+        """Codex blocker 2 (d): a PR without earlier reviews runs, and the door counts its PASS."""
+        seats = _request(env, ["codex_gate", "kimi_gate"])
+        assert {seat: payload["status"] for seat, payload in seats.items()} == {
+            "codex_gate": "requested", "kimi_gate": "requested",
+        }
+        _backstop_passes(env)
+
+        verdict = _env_door(env, monkeypatch)
+
+        assert [(line["basis"], line["evidence"], line["source"]) for line in _opened_lines(env["ledger"])] == [
+            ("new", 0, "gate"),
+        ]
+        assert verdict["verdict"] == "GO", verdict["message"]
+
+    def test_a_second_request_does_not_open_the_pr_twice(self, env):
+        _request(env, ["codex_gate"])
+        _request(env, ["codex_gate"])
+
+        assert len(_opened_lines(env["ledger"])) == 1
+
+    @pytest.mark.parametrize("broken", [{"basis": "maybe"}, {"evidence": -1}, {"pr_number": "1926"}, {"recorded_at": ""}])
+    def test_a_bad_opened_line_refuses_its_own_pr(self, broken):
+        """A pin: an ``opened`` line is parsed as strictly as a verdict line, never half-trusted."""
+        import review_rounds
+
+        ledger = review_rounds.parse_ledger(Path("rounds.ndjson"), json.dumps({**_opened(), **broken}) + "\n")
+
+        assert f"Rebuild it with `vnx review rounds rebuild --pr {PR}`" in review_rounds.unreadable_text(ledger, PR)
+        assert ledger.lines == ()
+
+    def test_an_unknown_line_kind_is_a_bad_line(self):
+        import review_rounds
+
+        ledger = review_rounds.parse_ledger(Path("rounds.ndjson"), json.dumps({**_opened(), "kind": "closed"}) + "\n")
+
+        assert [(bad.pr_number, bad.error) for bad in ledger.bad] == [(PR, "unknown line kind 'closed'")]
+
+
+# ---------------------------------------------------------------------------
+# Round 2, G3: the rebuild never drops a published codex-seat verdict
+# ---------------------------------------------------------------------------
+
+
+def _store(tmp_path) -> Dict[str, Path]:
+    data = tmp_path / "store"
+    for directory in (data / "unified_reports" / "headless", data / "state" / "review_gates" / "results"):
+        directory.mkdir(parents=True)
+    return {
+        "data": data, "headless": data / "unified_reports" / "headless", "state": data / "state",
+        "results": data / "state" / "review_gates" / "results",
+    }
+
+
+def _published(store, gate: str, *, tag: str, blockers: int, head: str = "", seat: str = "") -> Path:
+    """A report and its result receipt, without a request receipt; ``head`` lands in the receipt only when given."""
+    text = f"## Findings\n\nBlocking count: {blockers}\nAdvisory count: 0\n"
+    report = _report(store["headless"], gate, tag=tag, text=text)
+    receipt: Dict[str, Any] = {
+        "event_type": "review_gate_result", "timestamp": f"2026-10-17T09:00:{tag}Z", "gate": gate,
+        "status": "failed" if blockers else "completed", "gate_status": "completed", "blocking_count": blockers,
+        "report_path": str(report), "pr_number": PR,
+    }
+    if head:
+        receipt["head_sha"] = head
+    if seat:
+        receipt["seat"] = seat
+    _append_receipt(store["state"], receipt)
+    return report
+
+
+def _newer_record(store, gate: str, *, tag: str) -> None:
+    """A newer run of ``gate`` whose PASS record replaced the record of every earlier run."""
+    report = _published(store, gate, tag=tag, blockers=0)
+    record = {
+        "gate": gate, "pr_id": str(PR), "pr_number": PR, "status": "completed", "commit_sha": HEAD_SHA,
+        "branch": BRANCH, "contract_hash": f"sha256:{gate}", "report_path": str(report), "blocking_findings": [],
+        "advisory_findings": [], "recorded_at": f"2026-10-17T09:00:{tag}Z", "seat": gate,
+    }
+    (store["results"] / f"pr-{PR}-{gate}.json").write_text(json.dumps(record), encoding="utf-8")
+
+
+class TestTheRebuildKeepsEveryPublishedVerdict:
+    def test_the_head_comes_from_the_result_receipt(self, tmp_path):
+        """Codex blocker 4: no request receipt and an overwritten record dropped a FAIL(3) that its receipt placed."""
+        import review_rounds_rebuild
+
+        store = _store(tmp_path)
+        _published(store, "codex_gate", tag="01", blockers=3, head=H1, seat="codex_gate")
+        _newer_record(store, "codex_gate", tag="02")
+
+        result = review_rounds_rebuild.rebuild(PR, data_dir=store["data"])
+
+        assert [(line.head_sha, line.blocking_count) for line in result.added] == [(H1, 3), (HEAD_SHA, 0)]
+        assert (result.cap.rule, result.cap.cap_round, result.cap.blockers) == ("B3.1", 1, (3, 0))
+        assert result.skipped == ()
+
+    def test_a_codex_verdict_without_a_head_counts_on_an_unresolved_head(self, tmp_path):
+        """The pre-R1 shape: no head anywhere, the record overwritten. The FAIL still holds the cap."""
+        import review_rounds_rebuild
+
+        store = _store(tmp_path)
+        lost = _published(store, "codex_gate", tag="01", blockers=3)
+        second_seat = _published(store, "kimi_gate", tag="03", blockers=2)
+        _newer_record(store, "codex_gate", tag="02")
+
+        result = review_rounds_rebuild.rebuild(PR, data_dir=store["data"])
+
+        assert [(line.head_sha, line.seat) for line in result.added] == [
+            (f"unresolved:{lost.name}", "codex_gate"), (HEAD_SHA, "codex_gate"),
+        ]
+        assert (result.cap.rule, result.cap.blockers) == ("B3.1", (3, 0))
+        assert f"cap fell on head unresolved:{lost.name}" in result.cap.summary()
+        assert [item.report for item in result.skipped] == [second_seat.name]
+        assert "a second-seat verdict without a head neither counts nor fills" in result.skipped[0].reason
+
+    def test_a_report_the_gate_already_booked_is_not_booked_again_on_an_unresolved_head(self, tmp_path):
+        """One report is one verdict: a lost head receipt does not make the rebuild count it twice."""
+        import review_rounds_rebuild
+
+        store = _store(tmp_path)
+        booked = _published(store, "codex_gate", tag="01", blockers=1)
+        _newer_record(store, "codex_gate", tag="02")
+        _write_ledger(store["state"] / "review_gates" / "rounds.ndjson", [
+            _line("codex_gate", H1, "fail", 1, at=1, report=str(booked)),
+        ])
+
+        result = review_rounds_rebuild.rebuild(PR, data_dir=store["data"])
+
+        assert [line.head_sha for line in result.added] == [HEAD_SHA], "only the newer run is added"
+        assert result.cap.blockers == (1, 0)
+
+    def test_an_unresolved_head_never_fills_a_seat_or_blocks_a_rerun(self, env):
+        import review_rounds_rebuild
+
+        _published({"headless": env["headless"], "state": env["state_dir"]}, "codex_gate", tag="01", blockers=1)
+        review_rounds_rebuild.rebuild(PR, data_dir=env["data_dir"])
+
+        seats = _request(env, ["codex_gate"])
+
+        assert seats["codex_gate"]["status"] == "requested", seats["codex_gate"]
+        assert [line["head_sha"][:11] for line in _ledger_lines(env["ledger"])] == ["unresolved:"]
 
 
 # ---------------------------------------------------------------------------

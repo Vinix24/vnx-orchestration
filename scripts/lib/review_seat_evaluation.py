@@ -60,9 +60,10 @@ disk) is no rejection: it fills no seat and does not block on its own.
 **A PASS counts only when the round ledger counted it** (R1,
 :func:`counted_fill`). In a store that keeps ``review_gates/rounds.ndjson``, a
 filled seat stays filled only when its PASS has its line there, for this head
-and the seat it was given in. A PR without any line (reviewed before R1) or a
-ledger that is unreadable for it fills no seat until ``vnx review rounds
-rebuild --pr N``; the codex seat of a PR at the B3 cap is not filled unless the
+and the seat it was given in. A PR that is not opened in the ledger (reviewed
+before R1, or verdicts booked without a gate request), a ledger that is
+unreadable for it, and a ledger path that is no regular file fill no seat until
+``vnx review rounds rebuild --pr N``; the codex seat of a PR at the B3 cap is not filled unless the
 door's ``--override-b3`` gives a reason. Rejections are not counted against the
 ledger: blocking always blocks.
 
@@ -757,9 +758,11 @@ class DoorRounds:
     """The round ledger as the door reads it for one PR (``review_rounds``).
 
     ``refusal`` is set when no PASS of this PR can be counted: the ledger is
-    unreadable for it, or it has no line at all (a PR reviewed before R1, until
-    ``vnx review rounds rebuild --pr N``). ``cap`` is the B3 count over the
-    codex seat, ``override`` the reason of the door's ``--override-b3``.
+    no regular file or is unreadable for it, or the PR is not opened in it (a
+    PR reviewed before R1, or one whose verdicts were booked without a gate
+    request, until ``vnx review rounds rebuild --pr N``). ``cap`` is the B3
+    count over the codex seat, ``override`` the reason of the door's
+    ``--override-b3``.
     """
 
     path: str
@@ -788,28 +791,36 @@ def door_rounds(scope: SeatScope, b3_override: str = "") -> Optional[DoorRounds]
 
     A store without ``review_gates/rounds.ndjson`` predates R1: the gate creates
     the ledger the first time it runs in a store (``ReviewGateManager``), and
-    from then on every PASS of every PR of that store must be in it. A PR id
-    that is no number has no line in a ledger keyed by PR number.
+    from then on every PASS of every PR of that store must be in it. A ledger
+    path that is not a regular file is not an absent ledger: it is refused
+    (``review_rounds.ledger_state``). The door counts a PR only when the ledger
+    holds its whole review history (its ``opened`` line), so a PR that only has
+    lines booked after R1 is refused as well. A PR id that is no number has no
+    line in a ledger keyed by PR number.
     """
     import review_rounds
 
     path = review_rounds.ledger_path_for_results(scope.results_dir)
-    if path is None or not path.is_file() or not scope.pr_id.isdigit():
+    if path is None or not scope.pr_id.isdigit():
         return None
     pr_number = int(scope.pr_id)
     rebuild = review_rounds.rebuild_command(pr_number)
     try:
+        if review_rounds.ledger_state(path) == "absent":
+            return None
         ledger = review_rounds.read_ledger(path)
     except review_rounds.RoundLedgerError as exc:
         return DoorRounds(str(path), pr_number, refusal=f"het rondegrootboek is onleesbaar ({exc}): herbouw het met `{rebuild}`")
     unreadable = review_rounds.unreadable_text(ledger, pr_number)
     if unreadable:
         return DoorRounds(str(path), pr_number, refusal=f"het rondegrootboek telt deze PR niet: {unreadable}")
-    lines = ledger.for_pr(review_rounds.store_project_id(path.parent), pr_number)
-    if not lines:
-        return DoorRounds(str(path), pr_number, refusal=(
-            f"PR #{pr_number} heeft geen enkele regel in het rondegrootboek {path}: geen PASS van deze PR "
-            f"is geteld, dus geen telt er aan de deur. Is er vóór R1 gereviewd, herbouw de regels dan met "
+    project_id = review_rounds.store_project_id(path.parent)
+    lines = ledger.for_pr(project_id, pr_number)
+    if not ledger.is_opened(project_id, pr_number):
+        return DoorRounds(str(path), pr_number, lines, refusal=(
+            f"PR #{pr_number} is niet geopend in het rondegrootboek {path}: niet vastgelegd dat de "
+            f"review-historie van deze PR compleet is, dus geen PASS van deze PR telt aan de deur. Is er vóór "
+            f"R1 gereviewd, of is een uitspraak geboekt zonder gate-aanvraag, herbouw de historie dan met "
             f"`{rebuild}`; daarna geldt de gewone regel"
         ))
     return DoorRounds(str(path), pr_number, lines, cap=review_rounds.cap_state(lines, pr_number), override=b3_override.strip())

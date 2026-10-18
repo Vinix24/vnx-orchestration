@@ -289,7 +289,7 @@ def _override_b3_kwargs(reason: str) -> Dict[str, str]:
 def _print_round_refusals(result: Dict[str, Any]) -> None:
     """Name every seat the round ledger refused (R1), with its own reason text, on stderr."""
     refused = (review_rounds.REFUSED_B3_CAP, review_rounds.REFUSED_VERDICT_ON_HEAD,
-               review_rounds.REFUSED_LEDGER_UNREADABLE)
+               review_rounds.REFUSED_LEDGER_UNREADABLE, review_rounds.REFUSED_HISTORY_MISSING)
     for gate in result.get("gates", []):
         detail = gate.get("detail") or {}
         reason = detail.get("reason") or detail.get("round_refusal")

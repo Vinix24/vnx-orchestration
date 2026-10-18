@@ -5,9 +5,10 @@
 round ledger (``state/review_gates/rounds.ndjson``) from its headless reports,
 its review-gate receipts and its result records
 (``scripts/lib/review_rounds_rebuild.py``). Run it for a PR reviewed before the
-ledger existed (the merge door refuses its PASS until then) and after the gate
-or the door reported the ledger unreadable for a PR. Idempotent: a second run
-adds nothing.
+ledger existed (the gate refuses its seats and the merge door its PASS until
+then, because the PR is not opened in the ledger) and after the gate or the
+door reported the ledger unreadable for a PR. The rebuild opens the PR in the
+ledger. Idempotent: a second run adds nothing.
 
 Exit codes:
   0  rebuilt (the summary names what was added, kept and left out, and the B3 count)
@@ -72,9 +73,11 @@ def _summary(result) -> List[str]:
         lines.append(f"  left out {item.report}: {item.reason}")
     if result.dropped or result.quarantined:
         lines.append(
-            f"  unreadable lines: {result.dropped} of this PR dropped, {result.quarantined} naming no PR "
-            f"moved to {result.ledger.name}{QUARANTINE_SUFFIX}"
+            f"  unreadable lines moved to {result.ledger.name}{QUARANTINE_SUFFIX}: {result.dropped} of this PR, "
+            f"{result.quarantined} naming no PR"
         )
+    opened = "opened it" if result.opened == "opened" else "it was already opened"
+    lines.append(f"  the ledger holds PR #{result.pr_number}'s review history: the rebuild {opened}")
     lines.append(f"  {result.cap.summary()}")
     return lines
 

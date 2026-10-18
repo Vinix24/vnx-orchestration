@@ -28,6 +28,19 @@ enforceable:
   (``gate_request_handler``); the writer refuses a second, different verdict on
   the same key as the backstop for every path that starts a run without a
   request.
+- **A PR's history is recorded, not inferred.** A second line kind,
+  ``{"kind": "opened", ...}``, says the ledger holds this PR's whole review
+  history: written by the gate for a PR that has no earlier review on disk
+  (``basis`` ``new``) and by the rebuild for one that has (``basis``
+  ``rebuild``). The gate refuses every seat of a PR that is not opened while
+  earlier reviews are on disk (:func:`prior_evidence`, ``round_history_missing``),
+  and the merge door counts no PASS of a PR that is not opened. The writer
+  books every verdict either way: no verdict is lost, the door decides
+  whether the PR counts.
+- **One file, framed records.** The ledger is a regular file or absent
+  (:func:`ledger_state`); anything else is refused by every reader and writer.
+  Every append starts on a record boundary (:func:`_append_text`), so a torn
+  line of one writer never swallows the next record.
 
 Readers: ``gate_request_handler`` (refusal where a run starts),
 ``review_seat_evaluation`` (the merge door, ``vnx-gate/review``,
@@ -42,6 +55,7 @@ import json
 import logging
 import os
 import re
+import stat
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -64,10 +78,21 @@ REBUILD_COMMAND = "vnx review rounds rebuild --pr {pr}"
 SOURCE_GATE = "gate"
 SOURCE_REBUILD = "rebuild"
 
+# The ``opened`` line: the ledger holds this PR's whole review history.
+KIND_OPENED = "opened"
+BASIS_NEW = "new"
+BASIS_REBUILD = "rebuild"
+_BASES = (BASIS_NEW, BASIS_REBUILD)
+
+# The head of a published codex-seat verdict whose head the rebuild cannot
+# establish: it counts as a round of its own, and never matches a real head.
+UNRESOLVED_HEAD_PREFIX = "unresolved:"
+
 # Request-time refusal reasons (gate_request_handler books them on the seat's payload).
 REFUSED_VERDICT_ON_HEAD = "verdict_on_head"
 REFUSED_B3_CAP = "b3_cap"
 REFUSED_LEDGER_UNREADABLE = "round_ledger_unreadable"
+REFUSED_HISTORY_MISSING = "round_history_missing"
 
 _VERDICTS = ("pass", "fail")
 _STRING_FIELDS = (
@@ -117,6 +142,43 @@ def ledger_path_for_results(results_dir: Path) -> Optional[Path]:
     if results_dir.name != "results" or results_dir.parent.name != "review_gates":
         return None
     return ledger_path(results_dir.parent)
+
+
+def store_data_dir(review_gates_dir: Path) -> Path:
+    """The project store (``.vnx-data``) a ``state/review_gates`` dir belongs to: what the rebuild reads."""
+    return Path(review_gates_dir).parent.parent
+
+
+_FILE_KINDS = (
+    (stat.S_ISDIR, "directory"), (stat.S_ISLNK, "symlink"), (stat.S_ISFIFO, "fifo"),
+    (stat.S_ISSOCK, "socket"), (stat.S_ISCHR, "character device"), (stat.S_ISBLK, "block device"),
+)
+
+
+def ledger_state(path: Path) -> str:
+    """``"absent"`` or ``"file"``: the one answer every reader and writer gives for the ledger path.
+
+    ``os.lstat``, so a symlink is never followed. Anything that is not a
+    regular file (a directory, a symlink, a fifo), and a path that cannot be
+    inspected, raises :class:`RoundLedgerError`: an existing ledger nobody can
+    read is never taken for an absent one, which would drop the count.
+    """
+    path = Path(path)
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError:
+        return "absent"
+    except OSError as exc:
+        raise RoundLedgerError(
+            f"round ledger {path} cannot be inspected ({exc}): move it aside and run `{rebuild_command('N')}` per open PR"
+        ) from exc
+    if stat.S_ISREG(mode):
+        return "file"
+    kind = next((name for test, name in _FILE_KINDS if test(mode)), "unknown file type")
+    raise RoundLedgerError(
+        f"round ledger {path} is not a regular file ({kind}): move it aside and run "
+        f"`{rebuild_command('N')}` per open PR"
+    )
 
 
 def store_project_id(review_gates_dir: Path) -> str:
@@ -211,6 +273,58 @@ class RoundLine:
         return cls(pr_number=pr_number, blocking_count=blocking, override=override, **values)
 
 
+@dataclass(frozen=True)
+class OpenedLine:
+    """The ledger holds this PR's whole review history from here on (``kind`` ``opened``).
+
+    ``basis`` ``new``: the gate found no earlier review of the PR on disk.
+    ``basis`` ``rebuild``: the rebuild put the earlier reviews in, ``evidence``
+    is the number of reports it read.
+    """
+
+    project_id: str
+    pr_number: int
+    basis: str
+    evidence: int
+    recorded_at: str
+    source: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": KIND_OPENED, "project_id": self.project_id, "pr_number": self.pr_number,
+            "basis": self.basis, "evidence": self.evidence, "recorded_at": self.recorded_at,
+            "source": self.source,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "OpenedLine":
+        """As strict as a verdict line: a missing or wrong field is no line."""
+        if not isinstance(data, dict):
+            raise ValueError("a ledger line is a JSON object")
+        values: Dict[str, Any] = {}
+        for name in ("project_id", "basis", "recorded_at", "source"):
+            value = data.get(name, "")
+            if not isinstance(value, str):
+                raise ValueError(f"field {name!r} is not a string")
+            values[name] = value
+        pr_number, evidence = data.get("pr_number"), data.get("evidence")
+        if not _is_int(pr_number) or not _is_int(evidence) or pr_number < 0 or evidence < 0:
+            raise ValueError("pr_number and evidence must be non-negative integers")
+        if values["basis"] not in _BASES or not values["recorded_at"] or not values["source"]:
+            raise ValueError("basis must be new or rebuild, recorded_at and source must be set")
+        return cls(pr_number=pr_number, evidence=evidence, **values)
+
+
+def unresolved_head(report_name: str) -> str:
+    """The head of a published codex-seat verdict the rebuild cannot place: one round, no fill."""
+    return f"{UNRESOLVED_HEAD_PREFIX}{report_name}"
+
+
+def short_head(head_sha: str) -> str:
+    """A head as a message names it: twelve characters of a sha, an unresolved head in full."""
+    return head_sha if head_sha.startswith(UNRESOLVED_HEAD_PREFIX) else head_sha[:12]
+
+
 def _is_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
@@ -235,12 +349,17 @@ class BadLine:
 
 @dataclass(frozen=True)
 class Ledger:
-    """The ledger as read: its lines in file order, and every line that did not parse."""
+    """The ledger as read: its verdict lines and ``opened`` lines in file order, and every line that did not parse."""
 
     path: Path
     exists: bool
     lines: Tuple[RoundLine, ...] = ()
     bad: Tuple[BadLine, ...] = ()
+    opened: Tuple[OpenedLine, ...] = ()
+
+    def is_opened(self, project_id: str, pr_number: int) -> bool:
+        """Does the ledger hold this PR's whole review history (an ``opened`` line)?"""
+        return any(line.project_id == project_id and line.pr_number == pr_number for line in self.opened)
 
     def for_pr(self, project_id: str, pr_number: int) -> Tuple[RoundLine, ...]:
         """This PR's lines in verdict order (``recorded_at``, then file order)."""
@@ -259,7 +378,9 @@ class Ledger:
 
 
 def parse_ledger(path: Path, text: str) -> Ledger:
+    """Every line by its ``kind``: none is a verdict, ``opened`` an opened PR, anything else a bad line."""
     lines: List[RoundLine] = []
+    opened: List[OpenedLine] = []
     bad: List[BadLine] = []
     for number, raw in enumerate(text.splitlines(), start=1):
         if not raw.strip():
@@ -267,10 +388,16 @@ def parse_ledger(path: Path, text: str) -> Ledger:
         data: Any = None
         try:
             data = json.loads(raw)
-            lines.append(RoundLine.from_dict(data))
+            kind = data.get("kind") if isinstance(data, dict) else None
+            if kind == KIND_OPENED:
+                opened.append(OpenedLine.from_dict(data))
+            elif kind is None:
+                lines.append(RoundLine.from_dict(data))
+            else:
+                raise ValueError(f"unknown line kind {kind!r}")
         except ValueError as exc:
             bad.append(BadLine(number, _pr_named(data, raw), str(exc)))
-    return Ledger(Path(path), True, tuple(lines), tuple(bad))
+    return Ledger(Path(path), True, tuple(lines), tuple(bad), tuple(opened))
 
 
 _PR_NUMBER_IN_TEXT = re.compile(r'"pr_number"\s*:\s*(\d+)\s*[,}]')
@@ -291,19 +418,27 @@ def _pr_named(data: Any, raw: str) -> Optional[int]:
 def read_ledger(path: Path) -> Ledger:
     """The ledger at ``path``, read under its lock. Absent is a ledger that does not exist yet.
 
-    Raises :class:`RoundLedgerError` when the file exists and cannot be read.
+    Raises :class:`RoundLedgerError` when the path is not a regular file
+    (:func:`ledger_state`) or the file cannot be read.
     """
     from atomic_io import slot_lock
 
     path = Path(path)
-    if not path.is_file():
+    if ledger_state(path) == "absent":
         return Ledger(path, False)
     try:
         with slot_lock(path):
-            text = path.read_text(encoding="utf-8")
+            text = _ledger_text(path)
+    except RoundLedgerError:
+        raise
     except (OSError, UnicodeDecodeError) as exc:
         raise RoundLedgerError(f"round ledger {path} could not be read: {exc}") from exc
     return parse_ledger(path, text)
+
+
+def _ledger_text(path: Path) -> str:
+    """The ledger's text, ``""`` when it is absent; the caller holds the lock. A non-file raises."""
+    return path.read_text(encoding="utf-8") if ledger_state(path) == "file" else ""
 
 
 def unreadable_text(ledger: Ledger, pr_number: int) -> str:
@@ -363,7 +498,7 @@ class CapState:
         return (
             f"PR #{self.pr_number} is at the cap under {self.rule}: {why}; codex-seat blockers per "
             f"round {_counts(self.blockers)} on {len(self.rounds)} head(s), cap fell on head "
-            f"{line.head_sha[:12]}"
+            f"{short_head(line.head_sha)}"
         )
 
     def to_record(self) -> Dict[str, Any]:
@@ -451,12 +586,11 @@ def append_verdict(path: Path, line: RoundLine) -> str:
     path = Path(path)
     try:
         with slot_lock(path):
-            created = not path.exists()
-            ledger = parse_ledger(path, path.read_text(encoding="utf-8") if not created else "")
+            ledger = parse_ledger(path, _ledger_text(path))
             _check_append(ledger, line)
             if ledger.line_for(line.key) is not None:
                 return "present"
-            _append_line(path, line, created=created)
+            _append_line(path, line)
     except RoundLedgerError:
         raise
     except (OSError, UnicodeDecodeError) as exc:
@@ -484,14 +618,50 @@ def _check_append(ledger: Ledger, line: RoundLine) -> None:
         raise RoundRefusal(REFUSED_B3_CAP, cap_refusal_text(cap, where="verdict not booked"))
 
 
-def _append_line(path: Path, line: RoundLine, *, created: bool) -> None:
-    data = json.dumps(line.to_dict(), sort_keys=False, separators=(",", ":")) + "\n"
-    with path.open("a", encoding="utf-8") as handle:
+def ndjson(record: Dict[str, Any]) -> str:
+    """One ledger record as one NDJSON line."""
+    return json.dumps(record, separators=(",", ":")) + "\n"
+
+
+def _append_line(path: Path, line: RoundLine) -> None:
+    _append_text(path, ndjson(line.to_dict()))
+
+
+_TORN_TAIL_BYTES = 160
+
+
+def _append_text(path: Path, text: str) -> None:
+    """Append ``text`` at a record boundary, fsynced; the caller holds the ledger lock.
+
+    A file that does not end in a newline ends in a torn line: a writer died
+    in the middle of its record. Appending onto it would make the next record
+    part of that line, and it would vanish from its PR's count while the file
+    reads clean afterwards. So the text starts on a line of its own, and the
+    torn fragment stays one bad line, refusing the PR it names (every PR when
+    it names none) until a rebuild removes it. A torn fragment is never a
+    published verdict: its writer died before the record landed.
+    """
+    if not text:
+        return
+    created = ledger_state(path) == "absent"
+    data = text.encode("utf-8")
+    with Path(path).open("a+b") as handle:
+        size = handle.seek(0, os.SEEK_END)
+        if size:
+            handle.seek(max(0, size - _TORN_TAIL_BYTES))
+            tail = handle.read()
+            if not tail.endswith(b"\n"):
+                logger.warning(
+                    "review_rounds: %s ends in a torn line (%r); the next record starts on a line of its own, "
+                    "the fragment stays a bad line until `%s`", path,
+                    tail.rsplit(b"\n", 1)[-1].decode("utf-8", errors="replace"), rebuild_command("N"),
+                )
+                data = b"\n" + data
         handle.write(data)
         handle.flush()
         os.fsync(handle.fileno())
     if created:
-        _fsync_dir(path.parent)
+        _fsync_dir(Path(path).parent)
 
 
 def _fsync_dir(directory: Path) -> None:
@@ -503,17 +673,109 @@ def _fsync_dir(directory: Path) -> None:
 
 
 def ensure_ledger(review_gates_dir: Path) -> Path:
-    """Create an empty ledger when the store has none, so the store counts rounds from now on."""
+    """Create an empty ledger when the store has none, so the store counts rounds from now on.
+
+    A ledger path that is no regular file is logged and left alone: the gate
+    and the door refuse every PR on it with the way out, so one bad path does
+    not stop the manager for every other command.
+    """
     from atomic_io import slot_lock
 
     path = ledger_path(review_gates_dir)
-    if path.exists():
-        return path
-    with slot_lock(path):
-        if not path.exists():
-            path.touch()
-            _fsync_dir(path.parent)
+    try:
+        if ledger_state(path) == "file":
+            return path
+        with slot_lock(path):
+            if ledger_state(path) == "absent":
+                path.touch()
+                _fsync_dir(path.parent)
+    except RoundLedgerError as exc:
+        logger.error("review_rounds: %s", exc)
     return path
+
+
+# ---------------------------------------------------------------------------
+# Opening a PR: its review history is in the ledger
+# ---------------------------------------------------------------------------
+
+
+def open_pr(path: Path, project_id: str, pr_number: int, *, basis: str, evidence: int) -> str:
+    """Write PR ``pr_number``'s ``opened`` line under the ledger lock: ``"opened"`` or ``"present"``.
+
+    Idempotent: the ledger is re-read under the lock and a PR that is already
+    opened gets no second line. ``basis`` ``new`` is the gate's, ``rebuild``
+    the rebuild's. Raises :class:`RoundLedgerError` when the line cannot be
+    written.
+    """
+    from atomic_io import slot_lock
+
+    if basis not in _BASES:
+        raise ValueError(f"basis must be one of {_BASES}, not {basis!r}")
+    path = Path(path)
+    line = OpenedLine(
+        project_id=project_id, pr_number=pr_number, basis=basis, evidence=evidence, recorded_at=_utc_now(),
+        source=SOURCE_GATE if basis == BASIS_NEW else SOURCE_REBUILD,
+    )
+    try:
+        with slot_lock(path):
+            if parse_ledger(path, _ledger_text(path)).is_opened(project_id, pr_number):
+                return "present"
+            _append_text(path, ndjson(line.to_dict()))
+    except RoundLedgerError:
+        raise
+    except (OSError, UnicodeDecodeError) as exc:
+        raise RoundLedgerError(f"round ledger {path} could not be written: {exc}") from exc
+    return "opened"
+
+
+def prior_evidence(data_dir: Path, pr_number: int) -> Tuple[str, ...]:
+    """What shows that PR ``pr_number`` was reviewed before the ledger counted it: file names, oldest report first.
+
+    The headless reports of the seat gates
+    (``unified_reports/headless/*-HEADLESS-<gate>-pr-N-*.md``), then the result
+    records of the seat gates that hold a decided verdict, under both names the
+    merge door reads (``state/review_gates/results/pr-N-<gate>.json`` and
+    ``N-<gate>-contract.json``), in the store at ``data_dir`` (its
+    ``.vnx-data``). No receipts scan: reports persist, and a record stands for
+    the latest run of its gate.
+    """
+    from gate_status import decided_verdict, is_test_run_record
+
+    data_dir = Path(data_dir)
+    headless = data_dir / "unified_reports" / "headless"
+    results = data_dir / "state" / "review_gates" / "results"
+    gates = sorted(ledger_seat_gates())
+    reports = sorted(
+        path.name for gate in gates for path in headless.glob(f"*-HEADLESS-{gate}-pr-{pr_number}-*.md")
+    )
+    records = []
+    for name in (f"{prefix}{gate}{suffix}" for gate in gates for prefix, suffix in (
+        (f"pr-{pr_number}-", ".json"), (f"{pr_number}-", "-contract.json"),
+    )):
+        record = _json_record(results / name)
+        if record and not is_test_run_record(record) and decided_verdict(record) in _VERDICTS:
+            records.append(name)
+    return tuple(reports) + tuple(records)
+
+
+def _json_record(path: Path) -> Optional[Dict[str, Any]]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        logger.warning("review_rounds: result record %s could not be read (%s): not counted as evidence", path, exc)
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def history_missing_text(pr_number: int, evidence: Sequence[str]) -> str:
+    """The refusal of a PR that was reviewed before the ledger counted it, naming the rebuild."""
+    return (
+        f"PR #{pr_number} was reviewed before the round ledger counted it ({len(evidence)} earlier "
+        f"report(s) or result record(s), first: {evidence[0]}). Its earlier verdicts are not counted. "
+        f"Run `{rebuild_command(pr_number)}`, then request again; --override-b3 does not lift this"
+    )
 
 
 # ---------------------------------------------------------------------------
