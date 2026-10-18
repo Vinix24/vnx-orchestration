@@ -1,0 +1,13 @@
+{
+  "gate": "kimi_gate",
+  "pr_id": "2080",
+  "pr_number": 2080,
+  "status": "unavailable",
+  "commit_sha": "7bf4024b3122ca535f06bcbe361a44506730a134",
+  "branch": "dispatch/20261016-cr-b1-state-inject",
+  "contract_hash": "",
+  "report_path": "",
+  "blocking_findings": [],
+  "recorded_at": "2026-10-17T13:13:09Z",
+  "reason": "lane_exhausted"
+}

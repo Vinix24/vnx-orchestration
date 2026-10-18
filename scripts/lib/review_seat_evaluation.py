@@ -57,6 +57,15 @@ that fills a seat (OI-2113: an outage in the contract-named file hid a FAIL in
 the legacy file beside it). A record that is only incomplete (no report on
 disk) is no rejection: it fills no seat and does not block on its own.
 
+**A PASS counts only when the round ledger counted it** (R1,
+:func:`counted_fill`). In a store that keeps ``review_gates/rounds.ndjson``, a
+filled seat stays filled only when its PASS has its line there, for this head
+and the seat it was given in. A PR without any line (reviewed before R1) or a
+ledger that is unreadable for it fills no seat until ``vnx review rounds
+rebuild --pr N``; the codex seat of a PR at the B3 cap is not filled unless the
+door's ``--override-b3`` gives a reason. Rejections are not counted against the
+ledger: blocking always blocks.
+
 BILLING SAFETY: no Anthropic SDK, no network, no subprocess. Only the standard
 library is imported at module level: ``gate_enforcement_verify`` is copied into
 the enforcement sandbox with this one module beside it. Everything the merge
@@ -739,19 +748,150 @@ def could_fill(seat: str, excluded: frozenset) -> Tuple[str, ...]:
 
 
 # ---------------------------------------------------------------------------
+# The round ledger (R1, track review-stopregel-en-lichte-stoelen)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DoorRounds:
+    """The round ledger as the door reads it for one PR (``review_rounds``).
+
+    ``refusal`` is set when no PASS of this PR can be counted: the ledger is
+    unreadable for it, or it has no line at all (a PR reviewed before R1, until
+    ``vnx review rounds rebuild --pr N``). ``cap`` is the B3 count over the
+    codex seat, ``override`` the reason of the door's ``--override-b3``.
+    """
+
+    path: str
+    pr_number: int
+    lines: Tuple[Any, ...] = ()
+    refusal: str = ""
+    cap: Any = None
+    override: str = ""
+
+    @property
+    def capped(self) -> bool:
+        return self.cap is not None and self.cap.capped
+
+    def to_record(self) -> Dict[str, Any]:
+        """What the merge record (``pr_merged``) carries about the ledger and the override."""
+        record: Dict[str, Any] = {"path": self.path, "lines": len(self.lines), "refusal": self.refusal}
+        if self.cap is not None:
+            record["cap"] = self.cap.to_record()
+        if self.override:
+            record["override"] = {"flag": "--override-b3", "reason": self.override, "applied": self.capped}
+        return record
+
+
+def door_rounds(scope: SeatScope, b3_override: str = "") -> Optional[DoorRounds]:
+    """The round ledger for this PR, or ``None`` when the store keeps none.
+
+    A store without ``review_gates/rounds.ndjson`` predates R1: the gate creates
+    the ledger the first time it runs in a store (``ReviewGateManager``), and
+    from then on every PASS of every PR of that store must be in it. A PR id
+    that is no number has no line in a ledger keyed by PR number.
+    """
+    import review_rounds
+
+    path = review_rounds.ledger_path_for_results(scope.results_dir)
+    if path is None or not path.is_file() or not scope.pr_id.isdigit():
+        return None
+    pr_number = int(scope.pr_id)
+    rebuild = review_rounds.rebuild_command(pr_number)
+    try:
+        ledger = review_rounds.read_ledger(path)
+    except review_rounds.RoundLedgerError as exc:
+        return DoorRounds(str(path), pr_number, refusal=f"het rondegrootboek is onleesbaar ({exc}): herbouw het met `{rebuild}`")
+    unreadable = review_rounds.unreadable_text(ledger, pr_number)
+    if unreadable:
+        return DoorRounds(str(path), pr_number, refusal=f"het rondegrootboek telt deze PR niet: {unreadable}")
+    lines = ledger.for_pr(review_rounds.store_project_id(path.parent), pr_number)
+    if not lines:
+        return DoorRounds(str(path), pr_number, refusal=(
+            f"PR #{pr_number} heeft geen enkele regel in het rondegrootboek {path}: geen PASS van deze PR "
+            f"is geteld, dus geen telt er aan de deur. Is er vóór R1 gereviewd, herbouw de regels dan met "
+            f"`{rebuild}`; daarna geldt de gewone regel"
+        ))
+    return DoorRounds(str(path), pr_number, lines, cap=review_rounds.cap_state(lines, pr_number), override=b3_override.strip())
+
+
+def _uncounted(fill: SeatFill, message: str) -> SeatFill:
+    """A seat whose PASS the round ledger does not count: judged, and it did not hold."""
+    from dataclasses import replace
+
+    return replace(fill, filled=False, reviewer="", route="", message=message, spoke=True, could_fill=(), evidence_via="")
+
+
+def _cap_refusal(fill: SeatFill, rounds: DoorRounds, head_sha: str) -> str:
+    """Why the codex seat of a PR at the B3 cap is not filled; ``""`` when the cap does not hold it."""
+    import review_rounds
+
+    if fill.seat != review_rounds.CODEX_SEAT or not rounds.capped or rounds.override:
+        return ""
+    if review_rounds.round_granted_past_cap(rounds.cap, head_sha=head_sha):
+        return ""
+    return (
+        f"PR #{rounds.pr_number} staat op de B3-cap ({rounds.cap.summary()}): een PASS in de codex-seat "
+        f"telt dan niet. De tiebreaker die de volgende stap kiest komt met R2; doorgaan kan alleen met "
+        f'{review_rounds.OVERRIDE_USAGE}, dat met zijn reden in het merge-record komt'
+    )
+
+
+def counted_fill(fill: SeatFill, rounds: DoorRounds, scope: SeatScope, stated: Dict[str, str]) -> SeatFill:
+    """``fill`` as the round ledger counts it: a PASS fills its seat only when its line is in the ledger.
+
+    The line must be for the head under review, in the seat the verdict was
+    given in (the seat its request stated, else the takeover origin, else its
+    gate), by that reviewer, with that report, and a PASS. A PASS put in
+    ``results/`` outside the gate has no line and fills nothing.
+    """
+    import review_rounds
+
+    if not fill.filled:
+        return fill
+    if rounds.refusal:
+        return _uncounted(fill, rounds.refusal)
+    record = fill.record or {}
+    head_sha = scope.head_sha or str(record.get("commit_sha") or "")
+    cap_text = _cap_refusal(fill, rounds, head_sha)
+    if cap_text:
+        return _uncounted(fill, cap_text)
+    gate = str(record.get("gate") or fill.reviewer)
+    seat = seat_for(gate, stated=str(record.get("seat") or stated.get(gate, "")), takeover_path=record.get("takeover_path"))
+    report = Path(str(record.get("report_path") or "")).name
+    if any(
+        line.head_sha == head_sha and line.seat == seat and line.reviewer == gate
+        and line.verdict == "pass" and line.report_name == report
+        for line in rounds.lines
+    ):
+        return fill
+    return _uncounted(fill, (
+        f"de PASS van {gate} (seat {seat}) op kop {head_sha[:12] or 'onbekend'} staat niet in het "
+        f"rondegrootboek {rounds.path}: een uitspraak die niet geteld is, telt aan de deur niet als PASS. "
+        f"Is de run van vóór R1, herbouw dan met `{review_rounds.rebuild_command(rounds.pr_number)}`"
+    ))
+
+
+# ---------------------------------------------------------------------------
 # The evaluation
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class SeatEvaluation:
-    """The seat answer for one PR head: required seats, their fills, and what blocks."""
+    """The seat answer for one PR head: required seats, their fills, and what blocks.
+
+    ``rounds`` is the round ledger the fills were counted against (R1), or
+    ``None`` when none was read (a store without one, or track closure, which
+    judges a merge under the rule it was merged under).
+    """
 
     scope: SeatScope
     required: RequiredSeats
     fills: Tuple[SeatFill, ...]
     blocking: Tuple[Rejection, ...]
     hints: Dict[str, str]
+    rounds: Optional[DoorRounds] = None
 
     @property
     def seats(self) -> Tuple[str, ...]:
@@ -777,11 +917,13 @@ class SeatEvaluation:
             parts = [_filled_text(self)]
         if self.required.note:
             parts.append(self.required.note)
+        if self.rounds is not None and self.rounds.override and self.rounds.capped:
+            parts.append(f"OVERRIDE B3: de cap ({self.rounds.cap.rule}) is overruled, reden: {self.rounds.override}")
         return "; ".join(parts)
 
     def to_record(self) -> Dict[str, Any]:
         """The shape the merge record carries (``review_seats`` on the ``pr_merged`` receipt)."""
-        return {
+        record = {
             "rule": SEAT_RULE,
             "pr_id": self.scope.pr_id,
             "head_sha": self.scope.head_sha or "",
@@ -796,6 +938,9 @@ class SeatEvaluation:
             "blocking": [rejection.gate for rejection in self.blocking],
             "verdict": "GO" if self.go else "NO-GO",
         }
+        if self.rounds is not None:
+            record["round_ledger"] = self.rounds.to_record()
+        return record
 
 
 def _unfilled_text(fill: SeatFill, hint: str) -> str:
@@ -884,6 +1029,8 @@ def evaluate_review_seats(
     head_sha: Optional[str] = None,
     seats: Optional[Sequence[str]] = None,
     seats_source: str = SOURCE_EXPLICIT,
+    b3_override: str = "",
+    round_ledger: bool = True,
 ) -> SeatEvaluation:
     """The seat answer for ``pr_id`` on ``head_sha``: the one function every evaluator calls.
 
@@ -891,6 +1038,12 @@ def evaluate_review_seats(
     record's list, ``seats_source`` says where it came from); ``None`` resolves
     them as the module docstring describes. ``branch``/``project_id``/``head_sha``
     are the closure verifier's scope arguments, with the same three-way meaning.
+
+    Every fill is then counted against the round ledger (R1, :func:`counted_fill`)
+    when the store keeps one: a PASS fills its seat only when its line is there,
+    and the codex seat of a PR at the B3 cap is not filled unless ``b3_override``
+    (the door's ``--override-b3`` reason) says why. ``round_ledger=False`` skips
+    that count: track closure judges a merged PR under the rule it merged under.
     """
     scope = SeatScope(str(pr_id), Path(results_dir), branch, project_id, head_sha)
     required = required_seats(
@@ -901,5 +1054,8 @@ def evaluate_review_seats(
     on_head = records_on_head(scope, stated, gates)
     seated = seated_records(on_head)
     fills = fill_seats(scope, required.seats, seated, stated) if required.seats else ()
+    rounds = door_rounds(scope, b3_override) if round_ledger else None
+    if rounds is not None:
+        fills = tuple(counted_fill(fill, rounds, scope, stated) for fill in fills)
     hints = {fill.seat: _unfilled_hint(scope, fill.seat, seated) for fill in fills if not fill.filled}
-    return SeatEvaluation(scope, required, fills, blocking_records(on_head), hints)
+    return SeatEvaluation(scope, required, fills, blocking_records(on_head), hints, rounds)

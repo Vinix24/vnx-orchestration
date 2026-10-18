@@ -1,0 +1,23 @@
+{
+  "gate": "deepseek_gate",
+  "pr_id": "2080",
+  "pr_number": 2080,
+  "status": "completed",
+  "commit_sha": "7bf4024b3122ca535f06bcbe361a44506730a134",
+  "branch": "dispatch/20261016-cr-b1-state-inject",
+  "contract_hash": "35e53e5c0f3a3fe2",
+  "report_path": "/Users/vincentvandeth/.vnx-data/vnx-dev/unified_reports/headless/20261017-131311-HEADLESS-deepseek_gate-pr-2080-420115.md",
+  "blocking_findings": [],
+  "dispatch_id": "deepseek-gate-pr2080-1792242795",
+  "recorded_at": "2026-10-17T13:18:25Z",
+  "takeover": true,
+  "takeover_from": "kimi_gate",
+  "takeover_path": [
+    {
+      "gate": "kimi_gate",
+      "reason": "lane_exhausted",
+      "detail": "son=quota_or_auth msg='Expecting value: line 1 column 1 (char 0)' raw='e limit. Your quota will reset when the current 7-day window ends. To continue n' Expecting value: line 1 column 1 (char 0) [quota_or_auth] provider=kimi reason=quota_or_auth msg='Expecting value: line 1 column 1 (char 0)' raw='u\u2026",
+      "status": "unavailable"
+    }
+  ]
+}

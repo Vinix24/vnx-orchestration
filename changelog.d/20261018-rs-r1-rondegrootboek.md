@@ -1,0 +1,6 @@
+- Review gates (R1, track review-stopregel-en-lichte-stoelen): B3.1 and B3.2 are enforced in code.
+  Every PASS and FAIL of every review seat is a line in `state/review_gates/rounds.ndjson`, keyed by project, PR, head and seat, written with fsync before the result record; when that write fails, the run fails and no verdict is published.
+  The gate refuses a second run on a head that has a verdict in that seat, and every codex-seat run on a PR at the cap (three or more codex-seat blockers in one round, or a blocking latest round with six or more in total; a takeover in the codex seat counts, the second seat does not).
+  The merge door counts a PASS only when its line is in the ledger and never a codex-seat PASS at the cap; the dispatch door refuses a build on the branch of a capped PR.
+  `--override-b3 --reason "..."` on the gate run, `pr_merge.py` and `dispatch_cli.py` wins over the cap and is recorded in the ledger line, the `review_gate_result` receipt (which now also carries `head_sha`) and the `pr_merged` receipt.
+  A store the gate has run in keeps a ledger from then on: an open PR reviewed before R1 is refused at the door until `vnx review rounds rebuild --pr N` rebuilds its lines from its headless reports and review-gate receipts.

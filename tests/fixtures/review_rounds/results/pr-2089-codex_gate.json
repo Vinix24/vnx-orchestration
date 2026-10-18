@@ -1,0 +1,20 @@
+{
+  "gate": "codex_gate",
+  "pr_id": "2089",
+  "pr_number": 2089,
+  "status": "completed",
+  "commit_sha": "e732b6ba1dba51264ec944b86919ebdc6b85365d",
+  "branch": "dispatch/20261017-cr-e-export",
+  "contract_hash": "7a8b7be7c350c952",
+  "report_path": "/Users/vincentvandeth/.vnx-data/vnx-dev/unified_reports/headless/20261017-181410-HEADLESS-codex_gate-pr-2089-cfc1a5.md",
+  "blocking_findings": [
+    {
+      "severity": "error",
+      "message": "The exclusion `skip_parts = {\"__pycache__\", \".pytest_cache\"}` skips tracked files that the exporter still publishes. Reproduced: committing hooks/__pycache__/identity.txt containing /Users/someone/project produces a successful export with that forbidden content intact. Scan every exported blob, or reject excluded artifacts before publication.",
+      "file_path": "scripts/maintenance/export_toolkit_plugin.sh",
+      "line": 300
+    }
+  ],
+  "dispatch_id": "20261017-cr-e-r4",
+  "recorded_at": "2026-10-17T18:17:54Z"
+}

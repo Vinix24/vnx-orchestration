@@ -508,6 +508,7 @@ class GateExecutorMixin:
         changed_files: Iterable[str],
         mode: str,
         dispatch_id: str = "",
+        override_b3: str = "",
     ) -> Dict[str, Any]:
         """Request and immediately execute all gates atomically.
 
@@ -528,7 +529,8 @@ class GateExecutorMixin:
         reviewer decides ``has_required_failure``. A reviewer that decided, PASS
         or FAIL, is never superseded, so a blocking verdict always reaches
         ``has_required_failure``. ``review_seats`` is the seat list the round
-        requested (``request_reviews``).
+        requested (``request_reviews``). ``override_b3`` goes to the request
+        round, where the round ledger judges every seat (R1).
         """
         import gate_recorder as _rec
 
@@ -545,6 +547,7 @@ class GateExecutorMixin:
             mode=mode,
             dispatch_id=dispatch_id,
             head_sha=head_sha,
+            override_b3=override_b3,
         )
 
         requested = list(request_result.get("requested", []))

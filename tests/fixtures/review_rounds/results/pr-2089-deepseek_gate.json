@@ -1,0 +1,24 @@
+{
+  "gate": "deepseek_gate",
+  "pr_id": "2089",
+  "pr_number": 2089,
+  "status": "completed",
+  "commit_sha": "6a5bb781f5edce2e1055b43689c83792af66ce04",
+  "branch": "dispatch/20261017-cr-e-export",
+  "contract_hash": "c786131c354b57c2",
+  "report_path": "/Users/vincentvandeth/.vnx-data/vnx-dev/unified_reports/headless/20261017-100106-HEADLESS-deepseek_gate-pr-2089-ccb9bf.md",
+  "blocking_findings": [],
+  "dispatch_id": "deepseek-gate-pr2089-1792231270",
+  "recorded_at": "2026-10-17T10:06:54Z",
+  "takeover": true,
+  "takeover_from": "kimi_gate",
+  "takeover_path": [
+    {
+      "gate": "kimi_gate",
+      "reason": "quota_exhausted",
+      "detail": "kimi unreachable (quota_exhausted): sg='Expecting value: line 1 column 1 (char 0)' raw='ion?tab=quota\", \\'type\\': \\'access_terminated_error\\'}}' subprocess exited with code 1 before complete event; source gate_result:kimi_gate; measured 2026-10-17T09:25:17Z; expires 2026-10-17T10:25:17Z",
+      "status": "unreachable"
+    }
+  ],
+  "evidence_source": "live"
+}

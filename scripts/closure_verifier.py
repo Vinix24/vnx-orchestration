@@ -1247,6 +1247,7 @@ def check_review_gate_for_merge(
     head_sha: Optional[str] = None,
     seats: Optional[Sequence[str]] = None,
     seats_source: Optional[str] = None,
+    b3_override: str = "",
 ) -> Dict[str, Any]:
     """GO/NO-GO merge verdict: every review seat of the project is filled on this head.
 
@@ -1307,12 +1308,17 @@ def check_review_gate_for_merge(
     mirroring how the CI gate keeps its override in ``check_ci_run_for_head``.
     The returned dict carries ``review_seats``: the effective seat list, its
     source and who filled what, the shape the merge record stores.
+
+    R1: every filled seat is counted against the round ledger
+    (``review_seat_evaluation.counted_fill``). ``b3_override`` is the reason of
+    the door's ``--override-b3``: it lets the codex seat of a PR at the B3 cap
+    count, and lands in ``review_seats.round_ledger``.
     """
     from review_seat_evaluation import SOURCE_EXPLICIT, evaluate_review_seats
 
     evaluation = evaluate_review_seats(
         pr_id, results_dir, branch=branch, project_id=project_id, head_sha=head_sha,
-        seats=seats, seats_source=seats_source or SOURCE_EXPLICIT,
+        seats=seats, seats_source=seats_source or SOURCE_EXPLICIT, b3_override=b3_override,
     )
     verdict: Dict[str, Any] = {
         "verdict": "GO" if evaluation.go else "NO-GO",
@@ -2069,10 +2075,12 @@ def _seat_rule_checks(
     from review_seat_evaluation import SOURCE_MERGE_RECORD, evaluate_review_seats
 
     seats = [str(seat) for seat in seat_record.get("seats") or [] if str(seat).strip()]
+    # round_ledger=False: the door counted the round ledger when it merged (R1);
+    # closure judges the merge under the rule it merged under, as for the seats.
     evaluation = evaluate_review_seats(
         str(seat_record.get("pr_id") or contract.pr_id), results_dir,
         branch=contract.branch or None, head_sha=str(seat_record.get("head_sha") or ""),
-        seats=seats or None, seats_source=SOURCE_MERGE_RECORD,
+        seats=seats or None, seats_source=SOURCE_MERGE_RECORD, round_ledger=False,
     )
     checks: List[CheckResult] = []
     if evaluation.required.error:

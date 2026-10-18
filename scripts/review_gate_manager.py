@@ -26,6 +26,7 @@ sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 from vnx_paths import ensure_env
 from dispatch_spec import RETIRED_GATE_NAMES, ReviewGateConfigError
 from governance_receipts import emit_governance_receipt, utc_now_iso
+import review_rounds
 
 from gate_executor import GateExecutorMixin
 from gate_request_handler import GateRequestHandlerMixin
@@ -100,6 +101,11 @@ class ReviewGateManager(
         self.headless_reports_dir.mkdir(parents=True, exist_ok=True)
         self.requests_dir.mkdir(parents=True, exist_ok=True)
         self.results_dir.mkdir(parents=True, exist_ok=True)
+        # R1: a store the gate runs in counts rounds from now on. The merge door
+        # enforces the round ledger for every store that has one, so the open PRs
+        # of a store reviewed before R1 are refused with the rebuild command
+        # instead of passing on records the ledger never saw.
+        review_rounds.ensure_ledger(self.results_dir.parent)
 
     def _canonical_report_path(self, report_path: str) -> str:
         if not report_path:
@@ -253,6 +259,40 @@ def _stack_arg(raw: Optional[str]) -> Optional[List[str]]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+def _add_override_b3_arguments(parser: argparse.ArgumentParser) -> None:
+    """``--override-b3 --reason "..."``: run the codex seat of a PR at the B3 cap anyway (R1)."""
+    parser.add_argument(
+        "--override-b3", action="store_true",
+        help="Run the codex seat of a PR at the B3 cap anyway; requires --reason. "
+        "Recorded in the round ledger line and the review_gate_result receipt",
+    )
+    parser.add_argument("--reason", default=None, help="The reason for --override-b3 (required with it)")
+
+
+def _override_b3_reason(args: argparse.Namespace) -> Optional[str]:
+    """The ``--override-b3`` reason, ``""`` for none, or ``None`` after printing why the flags are refused."""
+    reason = (getattr(args, "reason", None) or "").strip()
+    if getattr(args, "override_b3", False) and not reason:
+        print('ERROR: --override-b3 needs a non-empty --reason "..." (no silent bypass)', file=sys.stderr)
+        return None
+    if reason and not getattr(args, "override_b3", False):
+        print("ERROR: --reason only applies to --override-b3", file=sys.stderr)
+        return None
+    return reason
+
+
+def _print_round_refusals(result: Dict[str, Any]) -> None:
+    """Name every seat the round ledger refused (R1), with its own reason text, on stderr."""
+    refused = (review_rounds.REFUSED_B3_CAP, review_rounds.REFUSED_VERDICT_ON_HEAD,
+               review_rounds.REFUSED_LEDGER_UNREADABLE)
+    for gate in result.get("gates", []):
+        detail = gate.get("detail") or {}
+        reason = detail.get("reason") or detail.get("round_refusal")
+        if reason in refused:
+            text = detail.get("reason_detail") or detail.get("redispatch_refused") or ""
+            print(f"REFUSED ({reason}) seat {detail.get('seat') or gate.get('gate')}: {text}", file=sys.stderr)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser with all subcommands."""
     parser = argparse.ArgumentParser(description="VNX review gate manager")
@@ -271,6 +311,7 @@ def _build_parser() -> argparse.ArgumentParser:
     request_parser.add_argument("--mode", choices=("per_pr", "final"), default="per_pr")
     request_parser.add_argument("--dispatch-id", default="")
     request_parser.add_argument("--json", action="store_true")
+    _add_override_b3_arguments(request_parser)
 
     result_parser = sub.add_parser("record-result")
     result_parser.add_argument("--gate", required=True)
@@ -304,6 +345,7 @@ def _build_parser() -> argparse.ArgumentParser:
     rexec_parser.add_argument("--mode", choices=("per_pr", "final"), default="per_pr")
     rexec_parser.add_argument("--dispatch-id", default="")
     rexec_parser.add_argument("--json", action="store_true")
+    _add_override_b3_arguments(rexec_parser)
 
     status_parser = sub.add_parser("status")
     status_parser.add_argument("--pr", type=int, required=True)
@@ -314,6 +356,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _handle_request_and_execute(manager: ReviewGateManager, args: argparse.Namespace) -> int:
     """Handle request-and-execute subcommand."""
+    override_b3 = _override_b3_reason(args)
+    if override_b3 is None:
+        return 2
     changed_files = _parse_changed_files(args.changed_files)
     if not changed_files and args.branch:
         try:
@@ -330,11 +375,13 @@ def _handle_request_and_execute(manager: ReviewGateManager, args: argparse.Names
             changed_files=changed_files,
             mode=args.mode,
             dispatch_id=getattr(args, "dispatch_id", "") or "",
+            override_b3=override_b3,
         )
     except ReviewGateConfigError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
     print(json.dumps(result, indent=2))
+    _print_round_refusals(result)
     if result.get("has_required_failure"):
         # OI-1178: surface every gate of this call that did not PASS, not just
         # the not_executable/not_configured ones. An executed gate that booked
@@ -385,6 +432,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     manager = ReviewGateManager()
 
     if args.command == "request":
+        override_b3 = _override_b3_reason(args)
+        if override_b3 is None:
+            return 2
         changed_files = _parse_changed_files(args.changed_files)
         if not changed_files and args.branch:
             try:
@@ -401,6 +451,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 changed_files=changed_files,
                 mode=args.mode,
                 dispatch_id=getattr(args, "dispatch_id", "") or "",
+                override_b3=override_b3,
             )
         except ReviewGateConfigError as exc:
             print(f"ERROR: {exc}", file=sys.stderr)

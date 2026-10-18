@@ -1547,6 +1547,12 @@ def _register_pr_ready_subparser(subparsers: argparse.Action) -> None:
     register_pr_ready_subparser(subparsers)
 
 
+def _register_review_subparser(subparsers: argparse.Action) -> None:
+    """`vnx review rounds rebuild --pr N` — the round ledger (scripts/review_rounds_cli.py, R1)."""
+    from vnx_cli.commands.review import register_review_subparser
+    register_review_subparser(subparsers)
+
+
 def _register_worktree_release_subparser(subparsers: argparse.Action) -> None:
     """`vnx worktree-release` — same engine as the fabric repo's `bin/vnx
     worktree-release` (scripts/lib/worktree_release.py), exposed on the pip
@@ -1698,6 +1704,7 @@ def main() -> None:
     _register_deliverable_subparser(subparsers)
     _register_gate_check_subparser(subparsers)
     _register_pr_ready_subparser(subparsers)
+    _register_review_subparser(subparsers)
     _register_worktree_release_subparser(subparsers)
     _register_providers_subparser(subparsers)
 

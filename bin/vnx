@@ -363,6 +363,9 @@ Gate commands (pre-merge verification):
   gate-reanchor --pr <N> --gate <G>
                         Move an existing gate verdict onto the PR's current head when
                         the reviewed input is provably identical (read-only; --apply writes)
+  review rounds rebuild --pr <N>
+                        Rebuild PR N's lines in the round ledger (review_gates/rounds.ndjson)
+                        from its reports and receipts; idempotent; prints the B3 count
   roadmap <sub>       Roadmap orchestration and auto-next feature loading
 
 Planning commands (strategic-layer read surface):
@@ -2564,6 +2567,9 @@ main() {
       ;;
     gate-reanchor)
       "$VNX_PYTHON" "$VNX_HOME/scripts/gate_reanchor_cli.py" "$@"
+      ;;
+    review)
+      "$VNX_PYTHON" "$VNX_HOME/scripts/review_rounds_cli.py" "$@"
       ;;
     dispatch)
       cmd_dispatch "$@"
