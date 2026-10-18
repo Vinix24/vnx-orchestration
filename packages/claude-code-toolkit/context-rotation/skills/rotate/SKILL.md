@@ -70,7 +70,8 @@ Skill, AskUserQuestion, TodoWrite and a Write or Edit of this session's handover
 the user types `/context-rotation:rotate release`, the plugin records the release for
 this session before you read this: from then on the bands deny nothing and hold nothing
 back, and the notices about the context size continue. Typing that command is the only
-release the plugin offers.
+release the plugin itself offers. The user can also change the plugin's settings file;
+that is theirs to do, never yours.
 
 - **A note about the release is in your context**: do nothing else for this command.
   Tell the user in one line what the note says: released, or not recorded.
@@ -78,14 +79,17 @@ release the plugin offers.
   released. Only the user can release the guard, by typing the command. Tell the user
   that, and continue with the handover if the plugin asked for one.
 
-## The plugin's directory
+## The plugin's own files
 
 `.claude/rotation/` holds the plugin's own files, among them the state that decides what
-the bands deny. In every band, also inside a subagent, the plugin denies a Write, Edit,
-MultiEdit or NotebookEdit there, unless it writes this session's handover. That is all
-it checks there. It does not parse shell commands: a shell command (Bash) runs with the
-user's rights and can change any file the user can, this directory included. Never
-change anything in that directory yourself, with any tool.
+the bands deny. Its settings are in `.claude/context-rotation.json` in the project and
+in `~/.claude/context-rotation.json`. In every band, also inside a subagent, the plugin
+denies a Write, Edit, MultiEdit or NotebookEdit of any of these, unless it writes this
+session's handover. That stops a direct write by those tools and nothing more. A shell
+command (Bash) or a script runs with the user's rights and can change these files, a
+change to Claude Code's own settings can remove the plugin's hooks, and the tools of an
+MCP server are not looked at. Never change any of these files or those settings
+yourself, with any tool: switching the plugin off is the user's decision.
 
 ## resume
 
