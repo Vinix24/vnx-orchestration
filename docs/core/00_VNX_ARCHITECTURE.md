@@ -1,7 +1,7 @@
 # VNX Orchestration System - Complete Architecture
 
 **Status**: Active
-**Last Updated**: 2026-09-27
+**Last Updated**: 2026-10-18
 **Owner**: T-MANAGER
 **Purpose**: Single source of truth for VNX system architecture, components, and data flow.
 
@@ -21,9 +21,10 @@ This document does not stamp a product version. The running version is `VERSION`
 8. [Open Items System](#open-items-system)
 9. [Future-State Reconciliation: Open-Item → Track → Dispatch](#future-state-reconciliation-open-item--track--dispatch)
 10. [Staging Workflow](#staging-workflow)
-11. [Multi-Provider Dispatch](#multi-provider-dispatch)
-12. [Unified Dashboard](#unified-dashboard)
-13. [Demo & Distribution](#demo--distribution)
+11. [Review Seats](#review-seats)
+12. [Multi-Provider Dispatch](#multi-provider-dispatch)
+13. [Unified Dashboard](#unified-dashboard)
+14. [Demo & Distribution](#demo--distribution)
 
 ---
 
@@ -35,28 +36,30 @@ VNX is a file-based orchestration system enabling parallel development across mu
 - **File-Based Communication**: NDJSON receipts + Markdown dispatches
 - **Deliverable-Based Governance**: T0 is sole authority for declaring work done; workers attach evidence, receipt processor tracks but does not close
 - **Native Skill Architecture**: skills invoke natively (`/skill-name` in Claude Code, `$skill-name` in Codex, `@skill-name` in Gemini) instead of a compiled prompt template
-- **Multi-Provider Dispatch**: every provider runs as a CLI subprocess, never an imported SDK (`no-anthropic-sdk` in `scripts/lib/providers/provider_constraints.yaml`); full lane map in `docs/core/PROVIDER_LANES.md`
+- **Multi-Provider Dispatch**: every provider runs as a CLI subprocess, never an imported SDK (`no-anthropic-sdk` in `scripts/lib/providers/provider_constraints.yaml`); full lane map, takeover chain and the `vnx providers` switch in `docs/core/PROVIDER_LANES.md` (the switch exists but does not enforce yet, see "Provider switch" there)
 - **Project-Scoped Process Isolation**: `VNX_KILL_SCOPE` prevents cross-project process interference
 - **Singleton Process Enforcement**: Bulletproof duplicate prevention
 - **Progressive Intelligence**: Token-efficient context aggregation
 - **Quality Advisory Pipeline**: Automatic file size/complexity warnings on every completion
 - **Track-Agnostic Workers**: T1-T3 are role labels on ephemeral, headless build-worker dispatches, not persistent terminals; T0 dispatches the next role to the lane the door selects
 - **Multi-Model Coordination**: T0 runs Opus 5.5 (`t0-opus-only`, a floor); T1-T3 build-workers default to Sonnet (`workers-kimi-pinned`, advisory — a dispatch spec's own model wins)
-- **Git Worktree Isolation**: One worktree per feature plan; all agents share it, auto-commit per task, provenance in every receipt
+- **Review Seats**: every seat of the project's review stack is filled by its own reviewer, and a rejection by any review peer blocks the merge (see *Review Seats*)
+- **Git Worktree Isolation**: every headless dispatch runs in its own worktree under `.vnx-data/worktrees/`, provenance in every receipt
 
 ### Worktree Model
 
-VNX uses **one feature worktree per feature/fix** as the standard development model. Each worktree gets:
-- Isolated `.vnx-data/` directory (not shared with main repo)
-- Intelligence snapshot from main repo
-- Full bootstrap: skills, terminals, hooks, settings
+Each headless dispatch gets its own isolated git worktree under
+`.vnx-data/worktrees/dispatch-<id>/`, cut from `origin/main` by
+`scripts/lib/dispatch_worktree_isolation.py` and torn down when the dispatch ends.
+For operator-driven feature work, `vnx new-worktree <name>` creates a git worktree
+and bootstraps it in one step: an isolated `.vnx-data/` with an intelligence
+snapshot, skills, terminals, hooks, settings and the plan files
+(`scripts/commands/new_worktree.sh`).
 
 **Commands**:
 - `vnx new-worktree <name>` -- creates git worktree + full bootstrap in one step
 - `vnx merge-preflight <name>` -- governance GO/NO-GO verdict
 - `vnx finish-worktree <name>` -- governance-gated closure with intelligence merge-back
-
-> **Deprecated**: Per-terminal worktrees (`VNX_WORKTREES=true`) are deprecated since VNX V8.
 
 ### Architecture Diagram
 
@@ -135,16 +138,11 @@ selects the CLI: `claude` (the only Claude lane, `claude-headless`), `codex`,
 
 ### Terminal Status Detection
 
-**Multi-Signal Activity Detection**:
-1. **Receipt-Based**: Last 5 receipts in `t0_receipts.ndjson` (primary)
-2. **State-Based**: Between `task_ack` and `task_complete` receipts = working
-3. **Log-Based**: Terminal log activity (future: post-completion conversations)
-
-**Status Classifications**:
-- `working`: Active task processing (receipt activity detected)
-- `idle`: Available, no current tasks
-- `offline`: Cannot determine status
-- `missing`: Terminal pane not found
+`terminal_state.json` is built from receipts and events: a dispatch or acknowledgement
+event marks a terminal `working`, a completion event `idle`, a failure or timeout event
+`blocked`. When the primary view is stale (180 seconds), the fallback reconciler
+`scripts/lib/terminal_state_reconciler.py` rebuilds it from receipts, tmux activity
+and process health, and only rewrites the file in repair mode.
 
 ### Attention Model (`terminal_state.json`)
 
@@ -159,23 +157,26 @@ Each terminal entry carries three attention fields:
 **`attention` object structure**:
 ```json
 {
+  "type": "context-pressure",
   "reason": "T2 context window at 87% capacity",
-  "priority": "high",
-  "action": "rotate_context"
+  "since": "2026-10-18T09:30:00+00:00",
+  "jump_target": "T2"
 }
 ```
 
-**Attention triggers** (computed per terminal):
-- `stale_working` — terminal marked working but no receipt update in >180s
-- `context_pressure` — `context_usage_pct` > 80%
-- `blocked` — terminal status is blocked/error/timeout
+**Attention triggers** (`scripts/lib/canonical_state_views.py`, computed per worker
+terminal, in priority order):
+- `blocked`: the terminal status is blocked
+- `stale`: the terminal is `working` but has reported nothing for more than 180 seconds
+  (`STALE_WORKING_SECONDS`)
+- `context-pressure`: `context_usage_pct` is above 80 (`CONTEXT_PRESSURE_THRESHOLD`)
 
 **`vnx jump` command** (`scripts/commands/jump.sh`):
 ```bash
 vnx jump T2              # Switch tmux focus to T2
 vnx jump --attention     # Focus the highest-priority attention terminal
 ```
-The dashboard "Jump" button calls `POST /api/jump/{terminal}` which executes `vnx jump`.
+The dashboard "Jump" action calls `POST /api/jump/{terminal}`. It does not run `vnx jump`: `_jump_terminal` in `dashboard/api_operator.py` runs `tmux select-window` and `tmux select-pane` on the terminal's pane.
 
 ---
 
@@ -195,7 +196,7 @@ not this doc).
 
 **Functionality**:
 - Maps dispatch roles to native Claude Code skills
-- Hybrid dispatch: skill via `send-keys` (triggers slash-command detection) + instruction via `paste-buffer`
+- Hybrid dispatch through tmux (`scripts/lib/dispatch_deliver.sh`): skill via `send-keys` (triggers slash-command detection) + instruction via `paste-buffer`
 - No template compilation needed (skills load via `/skill-name args` invocation)
 - Multi-provider skill invocation: `/skill-name` (Claude), `$skill-name` (Codex), `@skill-name` (Gemini)
 - PR-ID included in dispatch prompt for receipt correlation
@@ -248,16 +249,18 @@ not this doc).
 
 ### 5. Context Rotation Hooks
 
-**Purpose**: Optional context-rotation automation for long-running sessions.
+**Purpose**: Context-rotation automation for long-running T0 sessions.
 
 **Hooks actually wired** (see the generated *Hooks Wired* table further down,
 which is the checkable source): `t0_context_guard.py` (PreToolUse/Stop/UserPromptSubmit),
-`session_stop_rotation.py` (Stop). T0's own rotation flow — the mechanism
-that actually ships — is `docs/operations/T0_CONTEXT_ROTATION.md`
-(`scripts/hooks/t0_context_guard.py`, `scripts/t0_rotate_spawn.sh`). A separate
+`session_stop_rotation.py` (Stop). T0's own rotation flow, the mechanism
+that actually ships, is `docs/operations/T0_CONTEXT_ROTATION.md`
+(`scripts/hooks/t0_context_guard.py`, `scripts/t0_rotate_spawn.sh`). `vnx guard install|check`
+registers the guard at user level and reports where it runs (`vnx_cli/commands/guard.py`);
+the install and check steps are in `docs/operations/T0_CONTEXT_ROTATION.md`. A separate
 worker-side rotation design (`vnx_context_monitor.sh` / `vnx_handover_detector.sh`
 / `vnx_rotate.sh`) is documented in the archived
-`docs/_archive/core/technical/CONTEXT_ROTATION_SYSTEM.md` — those hook scripts
+`docs/_archive/core/technical/CONTEXT_ROTATION_SYSTEM.md`; those hook scripts
 are not present in the tree and are not wired into `.claude/settings.json`.
 
 **Receipts**:
@@ -265,16 +268,16 @@ are not present in the tree and are not wired into `.claude/settings.json`.
 
 ### 6. T0 Intelligence Aggregator (`t0_intelligence_aggregator.py`)
 
-**Purpose**: Progressive context management for T0 orchestration
+**Purpose**: Context aggregation for T0 orchestration
 
 **Functionality**:
-- Aggregates all system state into single NDJSON
-- Progressive reading: 5 levels (1K → 20K+ tokens)
+- Imported by `unified_state_manager.py` (a supervised daemon), not a process of its own
 - Receipt correlation and warnings
 - Terminal insights and patterns
 - Tag-based report lookup
+- Rolling window, archived after 1000 events (`ARCHIVE_THRESHOLD`)
 
-**Output**: `state/t0_intelligence.ndjson` (rolling window, last 1000 events)
+**Output**: `state/t0_intelligence.ndjson`
 
 ### 7. VNX Supervisor (`vnx_supervisor_simple.sh`)
 
@@ -284,7 +287,7 @@ are not present in the tree and are not wired into `.claude/settings.json`.
 - Monitors all core processes
 - Auto-restart on failure
 - PID tracking in `state/pids/`
-- Health checks every 10 seconds
+- Health checks every 5 seconds (`CHECK_INTERVAL`)
 
 ### 8. Dashboard Generator (`generate_valid_dashboard.sh`)
 
@@ -295,7 +298,7 @@ are not present in the tree and are not wired into `.claude/settings.json`.
 - Terminal status aggregation
 - Process health tracking
 - Queue depth monitoring
-- Performance metrics
+- Dispatch throughput counted from `dispatcher.log` (the `successRate` and `avgProcessTime` fields are fixed strings, not measurements)
 
 **Output**: `state/dashboard_status.json`
 
@@ -324,185 +327,57 @@ are not present in the tree and are not wired into `.claude/settings.json`.
 │     ├─► claude → claude-headless lane (ephemeral worktree)        │
 │     └─► kimi/glm/deepseek → provider_dispatch.py lane             │
 │                                                                  │
-│  5. Worker Receives Task                                        │
-│     ├─► Loads the assembled prompt                               │
-│     ├─► Sends ACK receipt (task_ack)                           │
-│     └─► Begins execution                                        │
+│  4. Worker Executes Task                                        │
+│     ├─► Performs the requested work in its isolated worktree    │
+│     └─► Writes a markdown report in unified_reports/            │
 │                                                                  │
-│  6. Heartbeat ACK Monitor Processes Acknowledgment              │
-│     ├─► Detects task_ack receipt                               │
-│     ├─► Updates dispatch status                                │
-│     ├─► Starts timeout tracking                                │
-│     └─► Updates terminal state                                  │
-│                                                                  │
-│  7. Worker Executes Task                                        │
-│     ├─► Performs requested work                                │
-│     ├─► Creates markdown report                                │
-│     └─► Writes completion receipt (task_complete)              │
-│                                                                  │
-│  8. Receipt Processor Handles Report                            │
+│  5. Receipt Processor Handles Report                            │
 │     ├─► Detects new report in unified_reports/                 │
 │     ├─► Parses structured data via report_parser.py            │
 │     ├─► Attaches evidence to open items (does NOT close)       │
-│     ├─► Appends to t0_receipts.ndjson                          │
-│     └─► T0 sees it in open_outcomes until it decides (§13)      │
+│     └─► Appends to t0_receipts.ndjson                          │
 │                                                                  │
-│  10. Intelligence Aggregator Updates Context                    │
-│      ├─► Consolidates all system state                         │
-│      ├─► Generates progressive context layers                  │
-│      └─► Updates t0_intelligence.ndjson                         │
+│  6. Govern                                                      │
+│     └─► phantom-guard checks the receipt against the diff       │
 │                                                                  │
-│  11. T0 Reviews Feedback                                        │
-│      ├─► Reads progressive intelligence                        │
-│      ├─► Assesses terminal status                              │
-│      ├─► Makes routing decisions                               │
-│      └─► Creates next manager block [Loop Continues]           │
+│  7. Intelligence Aggregator Updates Context                     │
+│     └─► Consolidates system state into t0_intelligence.ndjson   │
+│                                                                  │
+│  8. T0 Reviews                                                  │
+│     ├─► Sees the dispatch in open_outcomes until it decides     │
+│     │    (DISPATCH_RULES §13)                                    │
+│     ├─► Reads review-gate evidence and advances gates           │
+│     └─► Creates the next dispatch [Loop Continues]              │
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+The heartbeat ACK monitor (`heartbeat_ack_monitor.py`) is a supervised daemon that
+processes acknowledgement events and timeouts for lanes that emit them. The full
+end-to-end picture, with the governance step in detail, is
+`docs/core/DISPATCH_AND_INTELLIGENCE_ARCHITECTURE.md`.
 
 ---
 
 ## File Formats
 
-### 1. Dispatch Format (JSON/Markdown)
+Each format has one owner document. This section names where it lives.
 
-**JSON Dispatch** (`dispatches/queue/.json/{timestamp}-{track}.json`):
-```json
-{
-  "dispatch_format": "json",
-  "dispatch_id": "20250930-083312-58562bb1",
-  "metadata": {
-    "track": "C",
-    "role": "architect",
-    "workflow": "[[@.claude/skills/architect/SKILL.md]]",
-    "gate": "validation",
-    "priority": "P0",
-    "cognition": "deep"
-  },
-  "title": "Investigate terminal status detection logic",
-  "instructions": "Detailed task instructions...",
-  "context_files": [
-    "@scripts/generate_valid_dashboard.sh",
-    "@state/terminal_status.ndjson"
-  ],
-  "constraints": [
-    "Read-only investigation",
-    "Document findings in report"
-  ]
-}
-```
-
-**Markdown Dispatch** (`dispatches/queue/{timestamp}-{track}.md`):
-```markdown
-# Task: Investigate terminal status detection logic
-
-**Track**: C (T3 - Deep Investigation)
-**Priority**: P0
-**Cognition**: deep
-**Role**: architect
-
-## Instructions
-Detailed task instructions...
-
-## Context Files
-- @scripts/generate_valid_dashboard.sh
-- @state/terminal_status.ndjson
-
-## Constraints
-- Read-only investigation
-- Document findings in report
-```
-
-### 2. Receipt Format (NDJSON)
-
-**ACK Receipt** (`task_ack`):
-```json
-{
-  "event_type": "task_ack",
-  "dispatch_id": "20250930-083312-58562bb1",
-  "track": "C",
-  "terminal": "T3",
-  "timestamp": "2025-09-30T08:33:15Z",
-  "model": "opus",
-  "estimated_duration": "15m"
-}
-```
-
-**Completion Receipt** (`task_complete`):
-```json
-{
-  "event_type": "task_complete",
-  "dispatch_id": "20250930-083312-58562bb1",
-  "track": "C",
-  "terminal": "T3",
-  "timestamp": "2025-09-30T08:48:22Z",
-  "status": "success",
-  "summary": "Completed terminal status investigation",
-  "report_path": "reports/C/20250930-083312-investigation-report.md",
-  "metrics": {
-    "duration_seconds": 907,
-    "lines_changed": 0,
-    "files_modified": 0
-  }
-}
-```
-
-### 3. Intelligence Format (NDJSON)
-
-**Unified Intelligence** (`state/t0_intelligence.ndjson`):
-```json
-{
-  "event_type": "task_complete",
-  "dispatch_id": "20250930-083312-58562bb1",
-  "track": "C",
-  "terminal": "T3",
-  "timestamp": "2025-09-30T08:48:22Z",
-  "status": "success",
-  "summary": "Terminal status uses receipt-based detection",
-  "report_path": "reports/C/20250930-083312-investigation-report.md",
-  "tags": ["terminal", "status", "monitoring"]
-}
-```
-
-**Progressive Reading Levels**:
-1. **Quick (1K tokens)**: Last 10 events
-2. **Standard (3K tokens)**: Last 25 events
-3. **Detailed (5K tokens)**: Last 50 events + terminal insights
-4. **Full context (10K tokens)**: Last 100 events + patterns + warnings
-5. **Full (20K+ tokens)**: Last 200 events + complete context
-
-### 4. Report Format (Markdown)
-
-**Structured Report** (`reports/{track}/{timestamp}-{title}.md`):
-```markdown
-# Investigation Report: Terminal Status Detection
-
-**Dispatch ID**: 20250930-083312-58562bb1
-**PR-ID**: PR-3
-**Session**: a1b2c3d4-e5f6-7890-abcd-ef1234567890
-**Track**: C
-**Terminal**: T3
-**Gate**: investigation
-**Timestamp**: 2025-09-30T08:48:22Z
-**Status**: success
-**Confidence**: 0.95
-
-## Summary
-Terminal status is determined by receipt-based activity detection.
-
-## Findings
-1. Status script checks last 5 receipts in t0_receipts.ndjson
-2. Track B and C show "working" due to shadow receipts
-3. Heartbeat system correctly detects activity
-
-## Recommendations
-- Add log-based activity monitoring
-- Enhance post-completion conversation detection
-- Document multi-signal detection strategy
-```
-
-**Note**: Session field enables cost tracking via session transcript resolution (see COST_TRACKING_GUIDE.md)
+- **Dispatch.** A staged bundle in the central pending dir:
+  `<data_dir>/dispatches/pending/<dispatch-id>/instruction.md` plus
+  `dispatch-spec.json`. The fields and the staging flow are in
+  `docs/core/DISPATCH_RULES.md` section 12. The older PR-queue path writes markdown
+  dispatches (see *Staging Workflow* below).
+- **Receipt.** One NDJSON line per record in `state/t0_receipts.ndjson`. The shape is in
+  `docs/core/11_RECEIPT_FORMAT.md`; the receipt v2 decision is ADR-035.
+- **Report.** Markdown at `$VNX_DATA_DIR/unified_reports/<dispatch-id>.md` with the
+  headings `## Summary`, `## Changes`, `## Verification`, `## Open Items` and a
+  Dispatch-ID, Model and Provider identity block. The contract is
+  `scripts/lib/report_body_contract.py`, summarised in `DISPATCH_RULES.md` section 8.
+  A session field in the report lets cost tracking resolve the session transcript
+  (see COST_TRACKING_GUIDE.md).
+- **Intelligence stream.** `state/t0_intelligence.ndjson`, written through the T0
+  intelligence aggregator (Core Components 6).
 
 ---
 
@@ -516,16 +391,12 @@ Terminal status is determined by receipt-based activity detection.
 - Validates process is actually running
 - Cleans up stale PID files
 
-**Core Processes** (managed by supervisor):
-- `dispatcher.pid` — `dispatcher_minimal.sh`
-- `receipt_processor.pid` — `receipt_processor.sh`
-- `heartbeat_ack_monitor.pid` — `heartbeat_ack_monitor.py`
-- `dashboard.pid` — `generate_valid_dashboard.sh`
-- `intelligence_daemon.pid` — `intelligence_daemon.py`
-- `recommendations_engine.pid` — `recommendations_engine_daemon.sh`
-- `vnx_supervisor.pid` — self
+**Core Processes** (managed by supervisor): one `{name}.pid` per daemon that
+`start_all()` starts. The list is the generated *Supervised Components* section
+below, never a copy of it here. The supervisor itself is tracked by
+`vnx_supervisor.pid`.
 
-### Project-Scoped Process Isolation (shipped VNX 1.0.0)
+### Project-Scoped Process Isolation
 
 **Problem**: `vnx_proc_find_pids_by_fingerprint()` used bare script names in `grep -F`, matching processes from all VNX projects system-wide.
 
@@ -544,16 +415,10 @@ ps -axo pid=,command= | grep -F "$VNX_KILL_SCOPE" | grep -F "$fingerprint" | ...
 
 **Purpose**: Full process cleanup on `vnx stop` or `vnx start` (restart).
 
-**Fingerprints killed** (active process types):
-- `dispatcher_minimal.sh`
-- `receipt_processor.sh`
-- `generate_t0_recommendations.py`
-- `generate_valid_dashboard.sh`
-- `vnx_supervisor_simple.sh`
-- `t0_intelligence_aggregator.py`
-- `intelligence_daemon.py`
-- `heartbeat_ack_monitor.py`
-- `report_watcher.sh`
+**Fingerprints killed**: the script names in the `for fp in ...` loop of
+`vnx_kill_all_orchestration()` in `bin/vnx`. It is a superset of the supervised daemons:
+it also covers scripts that earlier versions started, so a leftover process from an
+older install is stopped too.
 
 Also cleans orphan `fswatch` processes watching `.vnx-data/`.
 
@@ -592,22 +457,26 @@ what ships and where the evidence for "it actually runs" lives.
   `scripts/gather_intelligence.py` (`record_pattern_offer`,
   `record_adoption_from_receipt`). Verify liveness directly rather than trust a
   checkmark here: `sqlite3 "$VNX_STATE_DIR/quality_intelligence.db" "SELECT COUNT(*) FROM pattern_usage; SELECT COUNT(*) FROM tag_combinations;"`.
-- **Worker Intelligence Injection** (`userpromptsubmit_worker_intelligence_inject.sh`) —
-  delivers up to 3 relevant patterns + prevention rules per prompt, budget
-  <400 tokens, degrades gracefully with no dispatch or empty intelligence.
+- **Intelligence Injection** — happens at dispatch assembly in the lane, not in a hook:
+  `docs/core/DISPATCH_AND_INTELLIGENCE_ARCHITECTURE.md` sections 4 and 7. Reviewer roles
+  are not enriched. `userpromptsubmit_worker_intelligence_inject.sh` exists on disk but no
+  hook references it (see below).
 - **Quality Digest** (`build_t0_quality_digest.py`) — 3-section append-only
   NDJSON to `state/` (G-L6): Operational Defects, Prompt/Config Tuning,
   Governance Health, each recommendation carrying `evidence_ids` (G-L2).
-- **Nightly Intelligence Pipeline** (`nightly_intelligence_pipeline.sh`, 02:00) —
-  ordered run: `conversation_analyzer.py` → `tag_intelligence.py` →
-  `build_t0_quality_digest.py` → `generate_t0_recommendations.py`. Each phase
-  has its own health check; one phase failing does not suppress the rest.
-- **T0 Intelligence Aggregator** — progressive context read in 5 levels (1K to
-  20K+ tokens, last 10 to last 200 events), rolling window capped at 1000
-  events. Receipt correlation, warning detection, terminal insights, tag-based
-  report lookup.
+- **Nightly Intelligence Pipeline** (`nightly_intelligence_pipeline.sh`, cron at 04:00
+  through `scripts/install_nightly_crons.sh`) — phases run in dependency order: schema
+  init, code-quality scan and snippet/doc extraction, conversation analysis,
+  session-dispatch linking, event analysis and pattern extraction, the learning cycle
+  (`learning_loop.py run`), memory and dream consolidation, weekly digest, stale-edit
+  scan, session brief, governance aggregation, suggested edits, the quality digest
+  (`build_t0_quality_digest.py`) and `generate_t0_recommendations.py`. A failing phase is
+  logged and does not block the next. The authoritative order is the `run_phase` list in
+  the script.
+- **T0 Intelligence Aggregator** — receipt correlation, warning detection, terminal
+  insights and tag-based report lookup; rolling window archived after 1000 events.
 - **State Manager Integration** — `state/unified_state.ndjson`, 5-second
-  consolidation cycle over dispatches + receipts + terminal status, feeding the
+  cycle in `unified_state_manager.py` over dispatches + receipts + terminal status, feeding the
   aggregator above.
 - **Governance Measurement System** — SPC-based quality scoring
   (`scripts/lib/cqs_calculator.py` per-dispatch CQS; `scripts/governance_aggregator.py`
@@ -727,8 +596,8 @@ going stale here.
 
 Running/absent state is deliberately **not** stored in this file — it
 changes by the minute, and a committed "Active" checkmark is exactly the
-claim that drifted (measured 2026-08-30: 0 of these 9 processes were running
-while all 15 old checklist items still said "Active"). Check current
+claim that drifted (measured 2026-08-30: none of the supervised processes was
+running while every item of the old checklist still said "Active"). Check current
 liveness with `bash scripts/vnx_supervisor_simple.sh status` or
 `python3 -c "import sys; sys.path.insert(0,'scripts/lib'); import daemon_register as d; print(d.measure_daemon_liveness())"`.
 
@@ -843,7 +712,7 @@ Check open items digest
 ## Future-State Reconciliation: Open-Item → Track → Dispatch
 
 The future state (the track layer + roadmap autopilot) only earns trust if it
-mirrors reality without a human re-stating it. The 1.0.1 future-state
+mirrors reality without a human re-stating it. The future-state
 reconciliation batch (PRD kept in the local, gitignored `claudedocs/` scratch
 space -- not part of the shipped repo, so it has no citable in-tree path)
 makes that linkage automatic and tenant-safe. Three pieces: a **lifecycle**
@@ -885,7 +754,7 @@ open_items.json  ──(bridge)──▶  track_open_items  ──(reconciler)�
    events are **at-most-once, never orphaned**; a post-commit emit failure is
    logged loudly, is non-fatal (the reconciler re-derives status from the rows),
    and surfaces as CLI exit 4. Exactly-once via a transactional outbox is
-   deferred to 1.x (#867). See ADR-005.
+   deferred (#867). See ADR-005.
 
 ### The derived_status rule (precise)
 
@@ -914,7 +783,7 @@ Otherwise the status is one of:
 - **`queued`** — only planned/proposed dispatches (or none) and no merged PR.
 
 This rule is deterministic. It is the truth the optional PM-gate automation
-(#873, 1.x) sits on top of: deterministic closes auto-apply, judgment cases
+(#873) sits on top of: deterministic closes auto-apply, judgment cases
 escalate to a human gate.
 
 ### The autopilot loop (the tick)
@@ -941,7 +810,7 @@ governance receipt, so the gated path is auditable in the ledger.
 ### Multi-tenancy: ADR-007 composite keys
 
 All of the above is tenant-scoped. The `dispatches` table was brought into the
-ADR-007 pattern in 1.0.1 (PR-A1 #859): a schema-preserving, in-place,
+ADR-007 pattern (PR-A1 #859): a schema-preserving, in-place,
 crash-safe 12-step rebuild swaps any uniqueness keyed solely on `dispatch_id`
 for a composite `UNIQUE(dispatch_id, project_id)`, and removes every single-key
 variant (inline, table-level, standalone, partial, and `lower(dispatch_id)`
@@ -1072,6 +941,41 @@ STAGING_READY recommendation (new file in staging/)
 
 ---
 
+## Review Seats
+
+A review seat is an entry of the project's review stack (`VNX_DEFAULT_REVIEW_STACK`,
+default `codex_gate,kimi_gate`) that names a review peer and is not optional
+(`scripts/lib/review_seats.py`). `ci_gate` checks CI, `wiring_gate` is not a review
+peer and `claude_github_optional` is optional by name, so none of the three is a seat.
+An unknown or retired gate name in a stack is refused by name, never dropped quietly.
+
+Each seat gets its own reviewer: one reviewer gate fills at most one seat of a request.
+When a seat's reviewer is out, the next gate in the takeover chain reads it
+(`docs/core/PROVIDER_LANES.md`, "Takeover chain"; the seat rule itself is
+`docs/core/DISPATCH_RULES.md` section 2). With the default chain and both
+subscription reviewers out, deepseek reads one seat and the other seat ends as
+`chain_exhausted`.
+
+The merge side asks one module which record fills which seat on a PR head:
+`review_seat_evaluation.evaluate_review_seats`. The merge door (`scripts/pr_merge.py`),
+the `vnx-gate/review` summary check, `vnx pr-ready`, track closure and
+`t0_gate_enforcement` all read it, so no evaluator derives a seat of its own. A seat is
+filled by a completed record on this exact head with zero blocking findings and complete
+evidence. Blocking always blocks: a FAIL verdict or a blocking finding from any review
+peer on the head, in its JSON or in its report on disk, refuses the merge whatever the
+other seats say. A missing or failed reviewer is absence, not a vote (ADR-037): the seat
+stays unfilled and neither signs nor rejects.
+
+Reviewer prompts carry no repo map or intelligence and skip the base worker layer:
+`scripts/gate_runner.py` assembles them with `PromptAssembler().assemble(dispatch_metadata={"role": "reviewer"}, ...)`
+(lines 1249 and 1288, no `repo_map` or `intelligence` key) and `scripts/lib/prompt_assembler.py`
+skips L1 for `role == "reviewer"` (line 147). The merge-door checks are in
+`DISPATCH_RULES.md` sections 2.1 and 2.2, the evidence rules in
+`docs/core/45_HEADLESS_REVIEW_EVIDENCE_CONTRACT.md`, the reviewer split in ADR-008. The
+seat rule and the per-seat reviewer are on main, not yet released.
+
+---
+
 ## Multi-Provider Dispatch
 
 ### Dispatch lanes and provider routing
@@ -1095,8 +999,11 @@ local-gemma) route through `scripts/lib/provider_dispatch.py`. Kimi is CLI-OAuth
 only (`kimi-via-cli-only`); GLM (glm-5.2 default, plus glm-5.3/glm-5.3-flash — see
 `deprecated-glm-models` in `provider_constraints.yaml`) routes via OpenRouter (`zai-via-openrouter-only`);
 DeepSeek runs through the Claude harness with an own key (`deepseek-harness-subscription-blocked`
-gates the subscription variant). Full lane map: `docs/core/PROVIDER_LANES.md`;
-dispatch decision rules: `docs/core/DISPATCH_RULES.md`.
+gates the subscription variant). A provider switch exists (`vnx providers list` shows the
+families), but it does not enforce yet: every write verb (`on`, `off`, `reset`) refuses until
+every launch function calls `provider_switch.require`. Full lane map, takeover chain and
+the switch ("Provider switch"):
+`docs/core/PROVIDER_LANES.md`; dispatch decision rules: `docs/core/DISPATCH_RULES.md`.
 
 **Single-entry door (merged, default-ON).** Lane selection runs behind
 one entry point (`scripts/lib/dispatch_cli.py`): validate → snapshot →
@@ -1152,51 +1059,42 @@ Each skill has a `SKILL.md` with YAML frontmatter (required for Codex CLI discov
 
 ### Architecture
 
-The VNX operator dashboard is a read-only projection over `.vnx-data/state/`. No React, no build toolchain.
+The VNX operator dashboard is a projection over `.vnx-data/state/`.
 
 **Stack**:
-- Frontend: `dashboard/index.html` — vanilla HTML/JS with Alpine.js/htmx (no build step)
-- Backend: `dashboard/serve_dashboard.py` — Python stdlib HTTP server (port 4173)
-- State source: `.vnx-data/state/` files
-- Polling: 5-second auto-refresh
+- Server: `dashboard/serve_dashboard.py`, a Python stdlib HTTP server with API modules
+  under `dashboard/api_*.py`. It reads `PORT` from the environment and falls back to
+  4173. `dashboard/launch-dashboard.sh` sets `PORT` to 4174 by default, because the
+  Next.js proxy targets that port.
+- Frontend: `dashboard/index.html` (vanilla HTML/JS, no build step) and the token-usage
+  app under `dashboard/token-dashboard/` (Next.js, its own `npm` build; setup in `dashboard/README.md`).
+- State source: `.vnx-data/state/` files, polled from the page (a 7-second refresh in
+  `index.html`).
 
-### Design Constraints (Hard Rules)
-- Dashboard is **read-only** — it never creates, promotes, or modifies dispatches (G-D1, G-D2)
-- `vnx jump` is the only write action (tmux focus switch, fully reversible) (G-D3)
-- No AI assistant that executes VNX commands (G-D4)
-- No new build toolchain (A-4)
-- `serve_dashboard.py` is the only HTTP server (A-5)
+### Write actions
 
-### UI Components
+Reads are `GET`. The mutating `POST` routes are guarded against cross-site requests
+(a token is required on a non-loopback bind). The routes of `do_POST` in `dashboard/serve_dashboard.py` are:
 
-| Component | Description |
-|-----------|-------------|
-| **Attention bar** | Top banner — highlights terminals with `needs_human=true` with priority and reason |
-| **Terminal cards** | Status, `context_usage_pct` progress bar, staleness indicator, Jump button |
-| **Dispatch Kanban** | Read-only view: staging / queue / active / completed columns |
-| **Event timeline** | Chronological list from receipts + dispatches with filter controls |
-| **Health indicator** | System-wide health: process count, queue depth, supervisor status |
-| **Confirmation gates** | Dialogs on dangerous actions (restart process, unlock terminal) |
+| Route | Effect |
+|-------|--------|
+| `/api/jump/{terminal}` | tmux focus switch (`tmux select-window`/`select-pane`) |
+| `/api/restart-process`, `/api/unlock-terminal` | restart a supervised process, clear a terminal lock |
+| `/api/conversations/resume` | validate a session and return its resume command |
+| `/api/operator/*` actions (session start/stop, terminal attach, projections refresh, reconcile, open-item inspect, gate toggle, config set) | operator controls |
+| `/api/intelligence/proposals/apply`, `/api/intelligence/proposals/{id}/accept`, `/api/intelligence/proposals/{id}/reject` | apply, accept or reject an intelligence proposal |
+| `/api/intelligence/weekly-digest/generate` | generate the weekly intelligence digest |
 
-### API Endpoints
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/` | Serve `dashboard/index.html` |
-| GET | `/api/events` | Event timeline from receipts + dispatch activity |
-| GET | `/api/dispatches` | Dispatch Kanban state (staging/queue/active/completed) |
-| GET | `/api/token-stats` | Token usage summary per terminal |
-| GET | `/api/token-stats/sessions` | Per-session token breakdown |
-| POST | `/api/jump/{terminal}` | Switch tmux focus to terminal (only write action) |
-| POST | `/api/restart-process` | Restart a supervised process (confirmation required) |
-| POST | `/api/unlock-terminal` | Clear terminal lock (confirmation required) |
+No route creates or promotes a dispatch. The route table is the `do_GET`/`do_POST`
+handlers in `dashboard/serve_dashboard.py`; the `GET` side is read-only, including
+the `GET /api/operator/*` views. Only the `POST` actions in the table above under
+`/api/operator/` mutate.
 
 ### Startup
 
 ```bash
-# Start dashboard server (port 4173)
-python dashboard/serve_dashboard.py &
-# Open http://localhost:4173
+# Start the dashboard server (PORT overrides the default)
+bash dashboard/launch-dashboard.sh
 ```
 
 ---
@@ -1275,14 +1173,14 @@ described it as a current component; nothing since has regenerated it.
 
 **T0 receives** quality advisory signal with top-10 findings (severity, file, symbol, message).
 
-**Thresholds** (Python files):
-- Warning: 500 lines
-- Blocker: 800 lines
+**Thresholds** (`scripts/lib/quality_advisory.py`, a hard ceiling for the blocker; grandfathered files stay a standing advisory):
+- Python: warning at 500 lines, blocker at 1200
+- Shell: warning at 300 lines, blocker at 600
 
 ---
 
 **Document Status**: Active. The consolidation/self-learning loop ships but is opt-in and currently dormant: existing patterns inject into dispatch context, but the pool does not grow on its own yet.
-**Last Major Update**: 2026-09-27 (docs-refresh sweep to current `main`: single-entry door as the primary dispatch path, ephemeral headless workers instead of a fixed T0-T3 terminal grid, receipt pull instead of tmux push, removed hardcoded version/token-reduction claims). Prior: 2026-06-22 (dispatch lanes + single-entry door section; June-15 billing-default correction); 2026-03-28 (Attention model, jump command, worker intelligence injection, adoption tracking, nightly pipeline, 3-section quality digest).
-**Dashboard**: Vanilla HTML/JS + Python HTTP server (port 4173, read-only, attention model)
+**Last Major Update**: 2026-10-18 (checked against `main`: review seats, provider switch pointer, corrected attention model, supervisor interval, nightly pipeline, dashboard routes). Prior: 2026-09-27 (docs-refresh sweep: single-entry door as the primary dispatch path, ephemeral headless workers, receipt pull instead of tmux push, removed hardcoded version and token-reduction claims).
+**Dashboard**: Vanilla HTML/JS + Python HTTP server, plus a Next.js token-usage app (guarded write actions, attention model)
 **Governance Model**: Deliverable-based (T0 sole authority, evidence tracking, no auto-completion, G-L1–G-L8 enforced)
 **Maintainer**: T-MANAGER (VNX Orchestration Expert)
