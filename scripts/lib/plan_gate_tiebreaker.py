@@ -1,4 +1,4 @@
-"""plan_gate_tiebreaker.py — the plan-gate stop-rule and tiebreaker (punten 7-9).
+"""plan_gate_tiebreaker.py — the plan-gate stop-rule and tiebreaker (punten 7-9, P2).
 
 The plan-first gate used to run the full panel every round with no stop-rule: a
 track that got REVISE twice ran a third full panel. The ijkmeting over 820
@@ -6,19 +6,23 @@ reports showed a five-seat panel converges with the first seat in 89.4% of
 cases; seats 4 and 5 each moved the outcome 1.7%. A third full round buys
 ~nothing and keeps the track blocked. This module implements the stop-rule:
 
-  1. Rondeteller (punt 7) — the gate counts how many panel rounds a track has
-     had. The counter lives in the EXISTING plan-gate state (the same append-only
-     seat ledger as the per-seat verdicts, ``.vnx-attest/plan-gate-seats.ndjson``)
-     — a ``plan_gate_round`` record is appended per round, and the counter is the
-     highest ``round`` for the track read back from that ledger. No second store.
-     Above ``max_rounds`` (default 2, configurable in
-     ``configs/plan_gate_panel.yaml``) the gate runs NO full panel — PROVIDED at
-     least one of those rounds was actually read by a seat (``scored_seats >= 1``
-     on the round record). Rounds that ran with every lane down do not buy a
-     tiebreaker: there is no tie to break on a plan nobody read (OI-1280).
+  1. Rondeteller (punt 7, per plan version since P2) — every seat round appends
+     a ``plan_gate_round`` record to the EXISTING plan-gate state (the same
+     append-only seat ledger as the per-seat verdicts,
+     ``.vnx-attest/plan-gate-seats.ndjson``), carrying the sha256 of the plan the
+     seat read and the seat's verdict on it. No second store. Rounds count per
+     plan VERSION, not per track: a plan whose hash has no read seat round yet
+     always gets its seat round first, so a revised plan is never handed to the
+     tiebreaker unread. The tiebreaker runs once ``max_rounds`` (default 1,
+     configurable in ``configs/plan_gate_panel.yaml``) versions were read
+     without a PASS. Only a READ round counts (``scored_seats >= 1``): rounds that
+     ran with every lane down do not buy a tiebreaker, there is no tie to break
+     on a plan nobody read (OI-1280). A record written before P2 has no hash and
+     counts as one plan version of its own.
 
-  2. Tiebreaker (punt 8) — at the threshold ONE tiebreaker decides instead of the
-     seats. It has a deliberately different brief than a panel seat:
+  2. Tiebreaker (punt 8) — at the threshold ONE tiebreaker decides. It reads the
+     latest plan version and the seat's verdict on it, and has a deliberately
+     different brief than a seat:
        - Binary outcome: START or STOP. No third option.
        - At most ONE required change. Not zero, not three.
        - NEVER a findings list. A seat returns findings; the tiebreaker returns a
@@ -28,9 +32,9 @@ cases; seats 4 and 5 each moved the outcome 1.7%. A third full round buys
          ``fable-5``. No model literal in Python (ADR-036): the router reads
          models from the registry, an unknown provider fails loud.
 
-  3. Sporen (punt 9) — on STOP the remaining findings from the last round become
-     open items via ``open_items_manager.add_item_programmatic`` (not a loose
-     note). The blocker clears with a ``resolution_reason`` that names the
+  3. Sporen (punt 9) — on STOP the seat's findings on the latest plan version
+     become open items via ``open_items_manager.add_item_programmatic`` (not a
+     loose note). The blocker clears with a ``resolution_reason`` that names the
      tiebreaker (which model, which round, which outcome). A blocker may not
      vanish without a reason since #1511; this path respects that.
 
@@ -40,6 +44,7 @@ the SAME injection contract ``plan_gate_panel.run_panel`` uses.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -47,7 +52,7 @@ import warnings
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 # Reuse the panel's dispatcher contract + ledger constants so the stop-rule and
 # the panel never drift on what a "dispatcher" is or where the seat ledger lives.
@@ -56,14 +61,15 @@ import final_answer_verdict  # noqa: PLC0415  (sibling module, on sys.path)
 
 # The round-counter record type, appended to the SAME seat ledger as the
 # per-seat verdicts (SEAT_LEDGER_RELPATH). One ``plan_gate_round`` record per
-# panel round per track; the counter is the highest ``round`` read back. This is
-# the "existing plan-gate state" the dispatch names — no second store.
+# round per track; the round number is the highest ``round`` read back, and the
+# plan versions are the seat rounds grouped by ``plan_sha256``. This is the
+# "existing plan-gate state" the dispatch names — no second store.
 ROUND_RECORD_TYPE = "plan_gate_round"
 
 # The per-round count of seats that actually produced a readable verdict
 # (OI-1280). Written on every round record from 2026-09-06 on; ABSENT on every
 # record written before that. The absence is meaningful and is treated as
-# "unknown", never as zero-with-confidence — see readable_round_count.
+# "unknown", never as zero-with-confidence — see PlanVersion.
 SCORED_SEATS_KEY = "scored_seats"
 
 # The tiebreaker verdict fence. Distinct from VERDICT_FENCE so a panel seat's
@@ -76,10 +82,20 @@ START = "START"
 STOP = "STOP"
 _VALID_OUTCOMES = {"START", "STOP"}
 
-# Default max-rounds threshold. A malformed config value falls back to this.
-# 2 means: rounds 1 and 2 run the full panel; round 3 (and any further) is the
-# tiebreaker. Configurable via configs/plan_gate_panel.yaml -> tiebreaker.max_rounds.
-DEFAULT_MAX_ROUNDS = 2
+# Default threshold: the number of plan versions a seat read without a PASS before
+# the tiebreaker decides. 1 is the operator decision of 2026-10-17 (P2): one seat,
+# one round, then the tiebreaker, in the same run. Configurable via
+# configs/plan_gate_panel.yaml -> tiebreaker.max_rounds; the shipped file says 1 too.
+DEFAULT_MAX_ROUNDS = 1
+
+# The ``outcome`` a seat round's record carries. A tiebreaker round carries
+# ``tiebreak:START`` / ``tiebreak:STOP`` and is never a plan version's seat round.
+SEAT_ROUND_OUTCOME = "panel"
+
+# What a run on a plan version does first (``route_plan_gate``).
+ROUTE_SEAT_ROUND = "seat_round"          # no read seat round on this version yet
+ROUTE_TIEBREAKER = "tiebreaker"          # read, no PASS, threshold reached
+ROUTE_PLAN_UNCHANGED = "plan_unchanged"  # read, no PASS, below the threshold: change the plan
 
 # Config keys read from configs/plan_gate_panel.yaml -> tiebreaker.
 _TIEBREAKER_CONFIG_KEYS = ("max_rounds", "provider", "model")
@@ -381,8 +397,8 @@ def _iter_round_records(
     """Yield the ``plan_gate_round`` records for ``(track_id, project_id)``.
 
     The one reader of the round ledger. ``read_round_count`` and
-    ``readable_round_count`` both go through it so they can never disagree on
-    which records belong to a track. Read-only and non-raising: a corrupt line
+    ``plan_versions`` both go through it so they can never disagree on which
+    records belong to a track. Read-only and non-raising: a corrupt line
     is skipped (mirroring ``walk_chain``'s tolerance, so a damaged tail never
     blocks the gate), an unreadable file yields nothing.
     """
@@ -424,10 +440,8 @@ def read_round_count(
     gate). This is the value the dispatch's persistence test reads back: write,
     discard the writer, read again, believe the file — not the return value.
 
-    This counts rounds that RAN. It cannot tell whether any of them was read —
-    a round in which every lane was down leaves exactly the same trace as a
-    round three seats reviewed. ``readable_round_count`` is the counter that
-    makes that distinction, and the stop-rule needs BOTH (OI-1280).
+    This counts rounds that RAN and numbers the next one. Whether the plan was
+    READ, and which plan, is ``plan_versions``' question (P2).
     """
     highest = 0
     for rec in _iter_round_records(seat_ledger_path, track_id, project_id):
@@ -440,39 +454,126 @@ def read_round_count(
     return highest
 
 
-def readable_round_count(
-    seat_ledger_path: Optional[Path], track_id: str, project_id: str,
-) -> int:
-    """How many of this track's rounds were actually READ by at least one seat (OI-1280).
+def plan_sha256(plan_text: str) -> str:
+    """The sha256 of the plan text a seat reads: the identity of one plan version (P2)."""
+    return hashlib.sha256(plan_text.encode("utf-8")).hexdigest()
 
-    A round counts as readable when its record carries ``scored_seats >= 1``: at
-    least one panelist produced a verdict the gate could read. This is the
-    distinction ``read_round_count`` cannot make — it counts rounds that RAN,
-    and a round in which every lane was down runs exactly as visibly as a round
-    three seats reviewed. Two rounds of total lane breakage used to satisfy the
-    stop-rule and hand the plan to a tiebreaker that was deciding on a document
-    nobody had read.
 
-    A record MISSING ``scored_seats`` (written before 2026-09-06) is UNKNOWN, not
-    zero: it is not counted. The consequence is deliberate and self-healing — a
-    track whose only rounds predate the field runs one more full panel, which
-    writes the field, and the stop-rule applies from there. The reverse default
-    (grandfathering old records as readable) would let exactly the unreviewed
-    plans this guard exists for slip through on the strength of a missing field.
+@dataclass(frozen=True)
+class PlanVersion:
+    """One seat round on one plan version, as ``plan_versions`` reads it back.
 
-    Read-only; never raises.
+    ``key`` is the plan's sha256, or ``legacy:<n>`` for a record written before
+    P2 (no hash): such a record is a plan version of its own. ``read`` is True
+    when a seat produced a readable verdict in that round (``scored_seats >= 1``);
+    a record MISSING ``scored_seats`` (written before 2026-09-06) is unknown, not
+    read (OI-1280). ``seat_verdicts`` is what the seats said on it.
     """
-    total = 0
-    for rec in _iter_round_records(seat_ledger_path, track_id, project_id):
-        if SCORED_SEATS_KEY not in rec:
-            continue  # older-schema record: unknown, not zero — and not readable
-        try:
-            scored = int(rec.get(SCORED_SEATS_KEY) or 0)
-        except (TypeError, ValueError):
+    key: str
+    plan_sha256: str
+    read: bool
+    seat_verdicts: List[Dict[str, Any]] = field(default_factory=list)
+
+
+def _round_was_read(rec: Mapping[str, Any]) -> bool:
+    if SCORED_SEATS_KEY not in rec:
+        return False  # older-schema record: unknown, not zero — and not read
+    try:
+        return int(rec.get(SCORED_SEATS_KEY) or 0) >= 1
+    except (TypeError, ValueError):
+        return False
+
+
+def plan_versions(
+    seat_ledger_path: Optional[Path], track_id: str, project_id: str,
+) -> List[PlanVersion]:
+    """Every seat round of ``(track_id, project_id)``, in ledger order (P2).
+
+    A tiebreaker round is skipped: it is no seat reading a plan. Read-only;
+    never raises (``_iter_round_records``' tolerance).
+    """
+    versions: List[PlanVersion] = []
+    for index, rec in enumerate(_iter_round_records(seat_ledger_path, track_id, project_id)):
+        if rec.get("outcome") != SEAT_ROUND_OUTCOME:
             continue
-        if scored >= 1:
-            total += 1
-    return total
+        digest = str(rec.get("plan_sha256") or "")
+        verdicts = rec.get("seat_verdicts")
+        versions.append(PlanVersion(
+            key=digest or f"legacy:{index}", plan_sha256=digest,
+            read=_round_was_read(rec),
+            seat_verdicts=list(verdicts) if isinstance(verdicts, list) else [],
+        ))
+    return versions
+
+
+def with_seat_round(
+    versions: Sequence[PlanVersion], digest: str, *,
+    scored_seats: int, seat_verdicts: List[Dict[str, Any]],
+) -> List[PlanVersion]:
+    """``versions`` plus the seat round this run just held on plan ``digest``.
+
+    The routing after a seat round is decided on this list, not on a re-read of
+    the ledger: ``record_round`` is best-effort, and a record that failed to land
+    must not make the gate forget the seat it just ran.
+    """
+    return [*versions, PlanVersion(
+        key=digest, plan_sha256=digest, read=scored_seats >= 1,
+        seat_verdicts=list(seat_verdicts),
+    )]
+
+
+@dataclass(frozen=True)
+class PlanGateRoute:
+    """What a run on one plan version does, and why (``route_plan_gate``)."""
+    action: str                 # ROUTE_SEAT_ROUND | ROUTE_TIEBREAKER | ROUTE_PLAN_UNCHANGED
+    versions_read: int          # distinct plan versions a seat read without a PASS
+    threshold: int
+    seat_verdicts: List[Dict[str, Any]]  # the seats' verdicts on THIS version, when read
+    rationale: str
+
+
+def route_plan_gate(
+    versions: Sequence[PlanVersion], digest: str, *, max_rounds: Optional[int] = None,
+) -> PlanGateRoute:
+    """The stop-rule over plan versions (P2, OI-1280).
+
+    Only READ seat rounds count, each distinct plan version once; a round is
+    recorded only when it did not PASS, so every version here is one without a
+    PASS. Then, for the plan ``digest`` this run is about:
+
+      - not read yet: its seat reads it first (``ROUTE_SEAT_ROUND``), whatever
+        the count. Every plan version is read before a tiebreaker sees it.
+      - read, and ``max_rounds`` or more versions read: ``ROUTE_TIEBREAKER``,
+        carrying the seats' verdicts on this version from its latest read round.
+      - read, below the threshold: ``ROUTE_PLAN_UNCHANGED``. The plan must change
+        first; nothing runs, because the same seat on the same plan says the
+        same thing.
+
+    ``max_rounds < 1`` is treated as the default (``load_tiebreaker_config``
+    already rejects it at load; this keeps the runtime path safe too).
+    """
+    threshold = max_rounds if max_rounds is not None and max_rounds >= 1 else DEFAULT_MAX_ROUNDS
+    read = {v.key: v for v in versions if v.read}  # a later read round of a version wins
+    current = read.get(digest)
+    short = digest[:12]
+    if current is None:
+        return PlanGateRoute(
+            ROUTE_SEAT_ROUND, len(read), threshold, [],
+            f"plan version {short} has no read seat round yet, so its seat reads it "
+            f"first ({len(read)} earlier version(s) read without a PASS, threshold {threshold})",
+        )
+    if len(read) >= threshold:
+        return PlanGateRoute(
+            ROUTE_TIEBREAKER, len(read), threshold, list(current.seat_verdicts),
+            f"{len(read)} plan version(s) read by a seat without a PASS (threshold "
+            f"{threshold}): the tiebreaker decides on version {short} and its seat's verdict",
+        )
+    return PlanGateRoute(
+        ROUTE_PLAN_UNCHANGED, len(read), threshold, list(current.seat_verdicts),
+        f"plan version {short} was already read by its seat without a PASS and "
+        f"{len(read)} version(s) is below the threshold {threshold}: change the plan "
+        "before the next run. No seat ran",
+    )
 
 
 def record_round(
@@ -487,6 +588,8 @@ def record_round(
     governance_variant: str = "",
     gov_trace: str = "",
     scored_seats: int = 0,
+    plan_sha256: str = "",
+    seat_verdicts: Optional[List[Dict[str, Any]]] = None,
 ) -> bool:
     """Append a ``plan_gate_round`` record to the seat ledger.
 
@@ -515,8 +618,15 @@ def record_round(
     real, recorded fact — "this round was run and nobody read the plan" — and it
     is what stops the tiebreaker from breaking a tie nobody voted in. A
     tiebreaker round records ``0``: no seats sat in it. The field is absent on
-    every record written before 2026-09-06, and ``readable_round_count`` treats
-    that absence as unknown rather than as a recorded zero.
+    every record written before 2026-09-06, and ``plan_versions`` treats that
+    absence as unknown rather than as a recorded zero.
+
+    ``plan_sha256`` and ``seat_verdicts`` (P2) follow the same always-present
+    contract: the hash of the plan the round read (``plan_sha256()``), and each
+    seat's verdict on it (``plan_gate_panel.seat_verdicts_of``; an empty list on
+    a tiebreaker round). The hash is what rounds are counted by; the verdicts are
+    what a later tiebreaker on the same plan version reads. A record MISSING the
+    hash was written before P2 and counts as one plan version of its own.
 
     Append-only and hash-chained via ``append_chained_entry`` (the same
     primitive the seat records use), so the round history is tamper-evident
@@ -543,6 +653,8 @@ def record_round(
             "governance_variant": governance_variant,
             "gov_trace": gov_trace,
             SCORED_SEATS_KEY: max(0, int(scored_seats)),
+            "plan_sha256": plan_sha256,
+            "seat_verdicts": list(seat_verdicts or []),
             "recorded_at": timestamp or datetime.now(timezone.utc).isoformat(),
         }
         append_chained_entry(ledger, record)
@@ -551,103 +663,13 @@ def record_round(
         return False
 
 
-def tiebreaker_gate_status(
-    seat_ledger_path: Optional[Path],
-    track_id: str,
-    project_id: str,
-    *,
-    max_rounds: Optional[int] = None,
-) -> Dict[str, Any]:
-    """Whether the tiebreaker may run for this track, WITH the reason either way.
-
-    TWO conditions, both required (OI-1280):
-
-      1. ``read_round_count >= threshold`` — the track has had enough rounds.
-      2. ``readable_round_count >= 1`` — at least one of those rounds was
-         actually READ: some seat, in some round, produced a verdict the gate
-         could parse.
-
-    Condition 2 is the one that was missing. The counter the stop-rule used
-    counts rounds that RAN. Two rounds in which every lane was down — a dead
-    litellm proxy, an expired kimi quota, a claude lane refusing to spawn —
-    advanced that counter exactly as fast as two rounds of real review, and the
-    gate then handed the plan to a single tiebreaker with the instruction "the
-    seats have had their say". They had not. The tiebreaker decided START or
-    STOP on a plan that no model had read, and START clears the gate.
-
-    So: zero readable rounds means no tiebreaker. The panel keeps running, which
-    is the pre-stop-rule behaviour and the correct one here — a panel with no
-    readable verdicts already returns INFRA_FAIL, the loud signal that the lanes
-    are broken. An infrastructure failure must not be resolved by promoting one
-    model to sole judge.
-
-    Returns the decision plus everything needed to explain it:
-    ``should_run``, ``rounds_done``, ``readable_rounds``, ``threshold``,
-    ``rationale``. ``max_rounds < 1`` is treated as the default (a guard against
-    a malformed runtime override; ``load_tiebreaker_config`` already rejects it
-    at load, but this keeps the runtime path safe too).
-    """
-    threshold = max_rounds if max_rounds is not None and max_rounds >= 1 else DEFAULT_MAX_ROUNDS
-    rounds_done = read_round_count(seat_ledger_path, track_id, project_id)
-    readable = readable_round_count(seat_ledger_path, track_id, project_id)
-
-    if rounds_done < threshold:
-        return {
-            "should_run": False, "rounds_done": rounds_done,
-            "readable_rounds": readable, "threshold": threshold,
-            "rationale": (
-                f"{rounds_done} panel round(s) done, threshold {threshold} — "
-                "below the stop-rule threshold; the full panel runs"
-            ),
-        }
-    if readable < 1:
-        return {
-            "should_run": False, "rounds_done": rounds_done,
-            "readable_rounds": readable, "threshold": threshold,
-            "rationale": (
-                f"{rounds_done} panel round(s) done (threshold {threshold}) but ZERO of "
-                "them produced a readable verdict from any seat — no tiebreaker. A "
-                "tiebreaker breaks a tie between seats that reviewed the plan; here no "
-                "seat has read it yet, so there is no tie to break. This is a lane "
-                "failure, not a plan judgment: fix the lanes and re-run the panel"
-            ),
-        }
-    return {
-        "should_run": True, "rounds_done": rounds_done,
-        "readable_rounds": readable, "threshold": threshold,
-        "rationale": (
-            f"{rounds_done} panel round(s) done (threshold {threshold}), "
-            f"{readable} of them read by at least one seat — the tiebreaker decides"
-        ),
-    }
-
-
-def should_run_tiebreaker(
-    seat_ledger_path: Optional[Path],
-    track_id: str,
-    project_id: str,
-    *,
-    max_rounds: Optional[int] = None,
-) -> bool:
-    """True when the track has reached the round threshold AND a round was read.
-
-    Thin boolean over ``tiebreaker_gate_status`` — one rule, two callers, no
-    second copy of the condition. See that function for the reasoning; a caller
-    that needs to TELL the operator why the tiebreaker did or did not fire
-    should call it directly and use its ``rationale``.
-    """
-    return tiebreaker_gate_status(
-        seat_ledger_path, track_id, project_id, max_rounds=max_rounds,
-    )["should_run"]
-
-
 # ---------------------------------------------------------------------------
 # Tiebreaker verdict parsing (punt 8)
 # ---------------------------------------------------------------------------
 
 _TIEBREAKER_CONTRACT = (
-    "You are the tiebreaker for a plan-gate that has already run its full panel "
-    "rounds without a PASS. The seats have had their say. Your job is NOT to "
+    "You are the tiebreaker for a plan-gate whose seat rounds ended without a "
+    "PASS. The seat has had its say on the plan below. Your job is NOT to "
     "review the plan again as a seat — it is to DECIDE whether to keep going.\n\n"
     "Return EXACTLY ONE decision. Binary. No third option:\n"
     "  START  — the plan is good enough to build; clear the gate.\n"
@@ -669,32 +691,70 @@ _TIEBREAKER_CONTRACT = (
 )
 
 
+def _disarm_fences(text: str) -> str:
+    """Seat output inlined into the tiebreaker brief, with both verdict fences broken.
+
+    A seat's finding or rationale is model output. Echoed into the tiebreaker's
+    own report, an intact fence in it could be read back as the tiebreaker's
+    decision; a space after the backticks breaks the exact opener both parsers match.
+    """
+    for fence in (TIEBREAKER_FENCE, pgp.VERDICT_FENCE):
+        text = text.replace("```" + fence, "``` " + fence)
+    return text
+
+
+def _seat_verdicts_block(seat_verdicts: Sequence[Mapping[str, Any]]) -> str:
+    """The seats' verdicts on the plan version below, as context for the tiebreaker (P2)."""
+    if not seat_verdicts:
+        return ""
+    lines = ["", "The seat's verdict on THIS plan version (context, not your output):"]
+    for verdict in seat_verdicts:
+        rationale = _disarm_fences(str(verdict.get("rationale") or "")).strip()
+        lines.append(
+            f"  - {verdict.get('seat', '?')}: {str(verdict.get('verdict', '')).upper()}"
+            + (f" — {rationale}" if rationale else "")
+        )
+        for finding in verdict.get("findings") or []:
+            lines.append(f"      · {_disarm_fences(str(finding))}")
+    return "\n".join(lines) + "\n"
+
+
+def seat_findings(seat_verdicts: Sequence[Mapping[str, Any]]) -> List[str]:
+    """The gaps the seats named on a plan version: the open items a STOP leaves (punt 9).
+
+    A block or revise seat's findings, or its rationale when it named none, so a
+    track always carries something concrete forward. A passing or silent seat
+    named no gap.
+    """
+    found: List[str] = []
+    for verdict in seat_verdicts:
+        if verdict.get("verdict") not in ("block", "revise"):
+            continue
+        named = [str(f).strip() for f in verdict.get("findings") or [] if str(f).strip()]
+        rationale = str(verdict.get("rationale") or "").strip()
+        found.extend(named or ([rationale] if rationale else []))
+    return found
+
+
 def build_tiebreaker_instruction(
-    doc_text: str, track_id: str, *, rounds_done: int, last_round_findings: List[str],
+    doc_text: str, track_id: str, *, rounds_done: int,
+    seat_verdicts: Sequence[Mapping[str, Any]] = (),
 ) -> str:
     """Render the tiebreaker instruction (inline-doc form).
 
     Deliberately a DIFFERENT brief than a panel seat (see ``_TIEBREAKER_CONTRACT``):
     binary START/STOP, at most one change, no findings list. The plan doc is
     sanitized the same way a seat's is (embedded fence neutralized, length
-    capped) so a plan cannot spoof the tiebreaker fence or blow ARG_MAX. The
-    last round's findings are passed as CONTEXT (what the seats raised), not as
-    a list the tiebreaker is asked to return — the tiebreaker decides in light
-    of them.
+    capped) so it cannot blow ARG_MAX. The plan is the LATEST version, and
+    ``seat_verdicts`` is what its seat said about it (P2): context the tiebreaker
+    decides in light of, never a list it is asked to return.
     """
     safe = pgp._sanitize_doc(doc_text)
-    findings_block = ""
-    if last_round_findings:
-        bullets = "\n".join(f"  - {f}" for f in last_round_findings)
-        findings_block = (
-            f"\nThe seats raised these findings in the last round (context, not "
-            f"your output):\n{bullets}\n"
-        )
     return (
         f"You are the tiebreaker for track {track_id}. The plan-gate has run "
-        f"{rounds_done} full panel round(s) without a PASS.\n\n"
+        f"{rounds_done} seat round(s) without a PASS.\n\n"
         + _TIEBREAKER_CONTRACT
-        + findings_block
+        + _seat_verdicts_block(seat_verdicts)
         + "\n----- PLAN UNDER REVIEW -----\n"
         f"{safe}\n"
         "----- END PLAN -----\n"
@@ -878,7 +938,7 @@ def run_tiebreaker(
     track_id: str,
     project_id: str = "vnx-dev",
     round_number: int,
-    last_round_findings: Optional[List[str]] = None,
+    seat_verdicts: Optional[List[Dict[str, Any]]] = None,
     dispatcher: Optional[DispatcherFn] = None,
     data_dir: Optional[str] = None,
     timeout_seconds: Optional[int] = None,
@@ -894,6 +954,8 @@ def run_tiebreaker(
     given — the SAME contract ``plan_gate_panel.run_panel`` uses, so the batch
     (which gates a track's goal_state directly) and the single-track command
     (which may pass a ``--doc`` file) resolve the plan identically.
+    ``seat_verdicts`` is what the seat said about this plan version (P2); the
+    tiebreaker reads it as context (``build_tiebreaker_instruction``).
 
     The model is resolved from the registry (``resolve_tiebreaker_model``),
     never a Python literal. ``dispatcher`` is injectable; when omitted the
@@ -939,7 +1001,7 @@ def run_tiebreaker(
     instruction = build_tiebreaker_instruction(
         doc_text, track_id,
         rounds_done=max(round_number - 1, 0),
-        last_round_findings=list(last_round_findings or []),
+        seat_verdicts=list(seat_verdicts or []),
     )
     did = f"plan-tiebreak-{track_id}-{uuid.uuid4().hex[:8]}"
     try:

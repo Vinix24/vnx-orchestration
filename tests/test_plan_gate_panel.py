@@ -29,6 +29,7 @@ import tracks  # noqa: E402
 import track_reconciler  # noqa: E402
 import planning_cli  # noqa: E402
 import plan_gate_panel as pgp  # noqa: E402
+import plan_gate_tiebreaker as pgt
 import envelope_adapters_claude  # noqa: E402
 from envelope_types import _AdapterResult  # noqa: E402
 from ndjson_hash_chain import walk_chain  # noqa: E402
@@ -60,6 +61,27 @@ def _isolate_seat_ledger(monkeypatch, tmp_path):
         pgp, "_resolve_seat_ledger_path",
         lambda data_dir: tmp_path / ".vnx-attest" / "plan-gate-seats.ndjson",
     )
+
+
+@pytest.fixture(autouse=True)
+def _no_real_tiebreaker_lane(monkeypatch):
+    """No cmd-level test here may reach a real tiebreaker lane.
+
+    Since P2 one non-passing seat round reaches the tiebreaker in the same run
+    (max_rounds 1). A test about the seat round that forgets this would spawn a
+    real tiebreaker; this makes it fail instead. The seat lane is not guarded
+    here: tests below build ``_make_default_dispatcher`` on purpose, with the
+    subprocess patched.
+    """
+    reached: list = []
+
+    def _refuse(*args, **kwargs):
+        reached.append(args)
+        raise AssertionError("a test reached the real tiebreaker lane")
+
+    monkeypatch.setattr(pgt, "_default_tiebreaker_dispatcher", _refuse)
+    yield
+    assert not reached, "a test reached the real tiebreaker lane"
 
 
 # --------------------------------------------------------------------------
@@ -2309,60 +2331,6 @@ def test_filter_panel_seats_rejects_unknown_label_listing_configured():
         assert lbl in msg
 
 
-# --------------------------------------------------------------------------
-# Governance-variant seat ladder (operator ladder, 2026-08-15): the panel size
-# derives from the variant, not a flat full panel. Asserts on the ordered label
-# prefix per rung and on the full-panel behaviour for a new feature.
-# --------------------------------------------------------------------------
-
-def test_seat_labels_minimal_is_empty():
-    assert pgp.seat_labels_for_governance_variant(pgp.default_panel(), "minimal") == []
-
-
-def test_seat_labels_default_is_opus_kimi():
-    labels = pgp.seat_labels_for_governance_variant(pgp.default_panel(), "default")
-    assert labels == ["opus", "kimi"]
-
-
-def test_seat_labels_coding_strict_is_three_families():
-    labels = pgp.seat_labels_for_governance_variant(pgp.default_panel(), "coding-strict")
-    assert labels == ["opus", "kimi", "glm-5.2-harness"]
-
-
-def test_seat_labels_light_is_single_opus_seat():
-    assert pgp.seat_labels_for_governance_variant(pgp.default_panel(), "light") == ["opus"]
-    assert pgp.seat_labels_for_governance_variant(pgp.default_panel(), "business-light") == ["opus"]
-
-
-def test_seat_labels_new_feature_is_full_panel_regardless_of_variant():
-    labels = pgp.seat_labels_for_governance_variant(
-        pgp.default_panel(), "minimal", is_new_feature=True,
-    )
-    assert labels == [s["label"] for s in pgp.default_panel()]
-
-
-def test_seat_labels_unknown_variant_fails_loud():
-    with pytest.raises(ValueError, match="unknown governance variant"):
-        pgp.seat_labels_for_governance_variant(pgp.default_panel(), "not-a-variant")
-
-
-def test_seat_override_direction_upgrade_when_operator_adds_seats():
-    assert pgp.seat_override_direction("minimal", 0, 2) == "upgrade"
-
-
-def test_seat_override_direction_downgrade_when_operator_removes_seats():
-    assert pgp.seat_override_direction("default", 2, 1) == "downgrade"
-
-
-def test_seat_override_direction_strict_downgrade_from_coding_strict():
-    assert pgp.seat_override_direction("coding-strict", 3, 1) == "strict-downgrade"
-
-
-def test_seat_override_direction_empty_when_counts_match():
-    assert pgp.seat_override_direction("coding-strict", 3, 3) == ""
-    assert pgp.seat_override_direction("minimal", 0, 0) == ""
-
-
 def test_cmd_plan_gate_run_passes_filtered_panel_to_run_panel(tmp_path, monkeypatch):
     """--panel-seats filters the configured panel and run_panel receives exactly
     those seats. Asserts on the dispatcher mock's calls (the seats it was
@@ -2451,19 +2419,18 @@ def _fake_pass_run_panel(doc_path, *, track_id, project_id, panel, data_dir, **k
     }
 
 
-def test_cmd_plan_gate_run_ladder_sizes_panel_from_variant(tmp_path, monkeypatch):
-    """The governance variant sizes the panel: default (code) -> 2 seats
-    (opus+kimi), coding-strict (core) -> 3 seats (opus, kimi, glm-5.2-harness),
-    and a new feature (task_class 01_code_generation) -> the full 5-seat panel
-    even on a docs path. Asserts on the actual providers dispatched, not just
-    the seat count."""
+def test_cmd_plan_gate_run_every_variant_runs_the_one_default_seat(tmp_path, monkeypatch):
+    """P2: the governance variant no longer sizes the panel. A code plan, a core
+    plan and a new feature (task_class 01_code_generation) all hand run_panel the
+    one default seat, the escalation seat for a BLOCK, and quorum 1. Asserts on
+    what run_panel was called with, not on a log line."""
     import argparse
 
     monkeypatch.setattr(pgp, "_default_panel_config_path", lambda: tmp_path / "absent.yaml")
-    seen_panels: list = []
+    seen: list = []
 
     def _capturing_run_panel(doc_path, *, track_id, project_id, panel, data_dir, **kw):
-        seen_panels.append(panel)
+        seen.append({"panel": panel, **kw})
         return _fake_pass_run_panel(doc_path, track_id=track_id, project_id=project_id,
                                     panel=panel, data_dir=data_dir, **kw)
 
@@ -2472,38 +2439,26 @@ def test_cmd_plan_gate_run_ladder_sizes_panel_from_variant(tmp_path, monkeypatch
     monkeypatch.setattr(planning_cli, "_emit_plan_gate_pass_record", lambda **kw: True)
 
     state_dir = _bootstrap(tmp_path)
-    tracks.create_track(state_dir, "feat-default", "p1", "t", "shipped", phase="queued")
-    tracks.create_track(state_dir, "feat-core", "p1", "t", "shipped", phase="queued")
-    tracks.create_track(state_dir, "feat-new", "p1", "t", "shipped", phase="queued")
-
     doc = tmp_path / "plan.md"
     doc.write_text("## Approach\nGeneric widget fix.\n", encoding="utf-8")
-
-    rc = planning_cli.cmd_plan_gate_run(argparse.Namespace(
-        track_id="feat-default", project_id="p1", state_dir=str(state_dir),
-        doc=str(doc), json=False, panel_seats=None,
-        dispatch_paths="scripts/lib/some_utility.py",
-    ))
-    assert rc == 0
-    assert [s["provider"] for s in seen_panels[0]] == ["claude", "kimi"]
-
-    rc = planning_cli.cmd_plan_gate_run(argparse.Namespace(
-        track_id="feat-core", project_id="p1", state_dir=str(state_dir),
-        doc=str(doc), json=False, panel_seats=None,
-        dispatch_paths="scripts/lib/dispatch_cli.py",
-    ))
-    assert rc == 0
-    assert [s["provider"] for s in seen_panels[1]] == ["claude", "kimi", "glm-harness"]
-
-    rc = planning_cli.cmd_plan_gate_run(argparse.Namespace(
-        track_id="feat-new", project_id="p1", state_dir=str(state_dir),
-        doc=str(doc), json=False, panel_seats=None,
-        dispatch_paths="docs/operations/foo.md", task_class="01_code_generation",
-    ))
-    assert rc == 0
-    assert [s["provider"] for s in seen_panels[2]] == [
-        "claude", "kimi", "glm-harness", "deepseek-harness", "codex",
+    runs = [
+        ("feat-default", "scripts/lib/some_utility.py", None),
+        ("feat-core", "scripts/lib/dispatch_cli.py", None),
+        ("feat-new", "docs/operations/foo.md", "01_code_generation"),
     ]
+    for track_id, paths, task_class in runs:
+        tracks.create_track(state_dir, track_id, "p1", "t", "shipped", phase="queued")
+        rc = planning_cli.cmd_plan_gate_run(argparse.Namespace(
+            track_id=track_id, project_id="p1", state_dir=str(state_dir),
+            doc=str(doc), json=False, panel_seats=None,
+            dispatch_paths=paths, task_class=task_class,
+        ))
+        assert rc == 0
+
+    for call in seen:
+        assert [s["provider"] for s in call["panel"]] == ["codex"]
+        assert call["escalation_seat"]["label"] == "opus"
+        assert call["quorum"] == 1
 
 
 def test_cmd_plan_gate_run_operator_override_wins_both_directions(tmp_path, monkeypatch):
@@ -2549,14 +2504,21 @@ def test_cmd_plan_gate_run_operator_override_wins_both_directions(tmp_path, monk
     assert [s["provider"] for s in seen_panels[1]] == ["claude"]
 
 
-def test_cmd_plan_gate_run_minimal_variant_resolves_without_panel(tmp_path, monkeypatch):
-    """A minimal (docs) plan derives 0 seats: no panel runs, and the blocker is
-    resolved with a non-empty reason naming the derived weight/category."""
+def test_cmd_plan_gate_run_minimal_variant_still_runs_the_seat(tmp_path, monkeypatch):
+    """A minimal (docs) plan no longer clears the gate without a seat (P2): the
+    default seat reads it, and its PASS resolves the blocker as a panel pass.
+    The variant stays in the trace and the evidence scope."""
     import argparse
 
     monkeypatch.setattr(pgp, "_default_panel_config_path", lambda: tmp_path / "absent.yaml")
-    run_called = {"n": 0}
-    monkeypatch.setattr(pgp, "run_panel", lambda *a, **k: run_called.__setitem__("n", run_called["n"] + 1))
+    seen: list = []
+
+    def _capturing_run_panel(doc_path, *, track_id, project_id, panel, data_dir, **kw):
+        seen.append(panel)
+        return _fake_pass_run_panel(doc_path, track_id=track_id, project_id=project_id,
+                                    panel=panel, data_dir=data_dir, **kw)
+
+    monkeypatch.setattr(pgp, "run_panel", _capturing_run_panel)
 
     state_dir = _bootstrap(tmp_path)
     tracks.create_track(state_dir, "feat-docs", "p1", "t", "shipped", phase="queued")
@@ -2570,8 +2532,10 @@ def test_cmd_plan_gate_run_minimal_variant_resolves_without_panel(tmp_path, monk
         captured["resolver"] = resolver
         return True
 
+    emitted = {}
     monkeypatch.setattr(planning_cli, "_resolve_plan_blocker", _fake_resolve)
-    monkeypatch.setattr(planning_cli, "_emit_plan_gate_pass_record", lambda **kw: True)
+    monkeypatch.setattr(planning_cli, "_emit_plan_gate_pass_record",
+                        lambda **kw: emitted.update(kw) or True)
 
     args = argparse.Namespace(
         track_id="feat-docs", project_id="p1", state_dir=str(state_dir),
@@ -2580,9 +2544,10 @@ def test_cmd_plan_gate_run_minimal_variant_resolves_without_panel(tmp_path, monk
     )
     rc = planning_cli.cmd_plan_gate_run(args)
     assert rc == 0
-    assert run_called["n"] == 0  # no panel ran
-    assert captured["resolver"] == "derived"
-    assert "minimal" in captured["reason"]
+    assert [[s["label"] for s in panel] for panel in seen] == [["codex"]]
+    assert captured["resolver"] == "panel"
+    assert emitted["scope"] == "minimal"
+    assert "weight=minimal" in emitted["gov_trace"]
 
 
 def test_cmd_plan_gate_run_passes_seat_timeout_flag_to_run_panel(tmp_path, monkeypatch):
@@ -2678,7 +2643,7 @@ def test_cmd_plan_gate_run_pass_writes_run_evidence_with_derived_weight(tmp_path
     assert rec["type"] == "plan_gate_pass"
     assert rec["track_id"] == "feat-default"
     assert rec["resolver"] == "run"
-    assert rec["seats"] == 2
+    assert rec["seats"] == 1
     assert rec["scope"] == "default"
 
 
@@ -2781,6 +2746,15 @@ def test_build_decision_ref_honors_source_and_set_at_overrides():
 # matchable unified_reports/ files, unreachable from the track).
 # --------------------------------------------------------------------------
 
+def _threshold_two_versions(monkeypatch):
+    """Keep a REVISE round a REVISE: with the shipped threshold of one plan version
+    the tiebreaker would decide in the same run (P2), which is not what these
+    tests are about."""
+    monkeypatch.setattr(pgt, "load_tiebreaker_config", lambda *a, **k: {
+        "max_rounds": 2, "provider": "deepseek_harness", "model": "deepseek-v4-pro",
+    })
+
+
 def _dref_run_panel(doc_path, *, track_id, project_id, panel, data_dir, **kw):
     return {
         "track_id": track_id, "project_id": project_id, "decision": "REVISE",
@@ -2817,6 +2791,7 @@ def test_cmd_plan_gate_run_writes_decision_ref_to_track(tmp_path, monkeypatch):
 
     monkeypatch.setattr(pgp, "run_panel", _dref_run_panel)
     monkeypatch.setattr(pgp, "_default_panel_config_path", lambda: tmp_path / "absent.yaml")
+    _threshold_two_versions(monkeypatch)
 
     doc = tmp_path / "plan.md"
     doc.write_text("## Approach\nGeneric widget fix.\n", encoding="utf-8")
@@ -2856,6 +2831,7 @@ def test_cmd_plan_gate_run_decision_ref_write_failure_does_not_break_gate(tmp_pa
     monkeypatch.setattr(tracks, "set_decision_ref", _raise)
     monkeypatch.setattr(pgp, "run_panel", _dref_run_panel)
     monkeypatch.setattr(pgp, "_default_panel_config_path", lambda: tmp_path / "absent.yaml")
+    _threshold_two_versions(monkeypatch)
 
     doc = tmp_path / "plan.md"
     doc.write_text("## Approach\nGeneric widget fix.\n", encoding="utf-8")

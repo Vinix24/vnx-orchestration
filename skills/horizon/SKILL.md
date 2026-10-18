@@ -7,8 +7,8 @@ description: >
   into now/next/later horizons, break a feature into deliverables, set the routing FLOOR, or
   run the plan-gate on a feature. The tracks DB (`vnx horizon`, alias `vnx objective`) is the
   source of truth; the repo ROADMAP.yaml is a generic example, not the SSOT. Plans and gates
-  only: never dispatches, never closes open-items. The plan-gate panel is proportional (0-5
-  seats, by governance weight) and runs only on an explicit plan-gate step. (Renamed from
+  only: never dispatches, never closes open-items. The plan-gate runs one seat, a second on
+  BLOCK, and runs only on an explicit plan-gate step. (Renamed from
   `pm` 2026-07-05 — `/pm`/`@pm` still resolve via the backward-compat alias in
   `.claude/skills/pm/SKILL.md`.)
 user-invocable: true
@@ -46,8 +46,8 @@ trust the silent `vnx-dev` default in a multi-project context).
    launch) — do NOT `vnx horizon sync` against it; sync would seed example data into the live
    store. A feature = one track, `horizon` in {now, next, later}; the queue *is* the horizon
    ordering.
-2. **Plan-first GATE (hard, see below)** — produce the plan doc, run the plan panel (size
-   derived from the governance weight), revise until pass. No deliverable promotes until
+2. **Plan-first GATE (hard, see below)** — produce the plan doc, run the plan-gate (one
+   seat, a second on BLOCK, then the tiebreaker). No deliverable promotes until
    this passes.
 3. **Deliverables** — `vnx horizon deliverable add --objective <track> --output-kind
    {pr,doc,...} --title "..."` (alias: `vnx deliverable add`) per planned output. Each lands
@@ -61,21 +61,24 @@ trust the silent `vnx-dev` default in a multi-project context).
 5. **Drift watch** — `vnx horizon drift` (alias: `vnx objective drift`, advisory) is your live
    "is this actually done" signal before closeout.
 
-## The plan-first gate (proportional panel)
+## The plan-first gate (one seat, a second on BLOCK)
 
 Every feature is preceded by an architect/plan phase. The PLAN (not the code) is reviewed by
-a diverse-family panel BEFORE any implementation, sized to the plan's governance weight.
+one seat BEFORE any implementation, on scope, PR split, decisions and ADRs, and feasibility.
+Line numbers and test details belong to the builder and codex in the PR review.
 
 - **Plan doc** (linked from the track, output_kind `doc`): `## Problem`, `## Approach`,
   `## Deliverables` (each tagged task_class + complexity), `## Risks`, `## Model-routing plan`
   (the FLOOR per deliverable, not a hand-picked lane), `## Open questions`.
-- **Panel size is derived, not flat.** The governance weight (`derive_governance_variant` in
-  `scripts/lib/smart_router.py`) maps the touched paths to a variant; the variant sizes the
-  panel via `GOVERNANCE_VARIANT_SEAT_LABELS` in `scripts/lib/plan_gate_panel.py`: 0 seats
-  (docs, reversible) up to 3 (core / irreversible); a new feature
-  (`task_class 01_code_generation`) gets the full 5 seats regardless of paths. The exact
-  ladder lives in `docs/core/HORIZON_PLANNING.md`; do not copy it here (a second copy drifts
-  the moment the ladder changes). A lane lands in one of THREE outcomes, not
+- **One seat, a second on BLOCK** (operator decision 2026-10-17, P2; `configs/plan_gate_panel.yaml`,
+  `compose_panel` in `scripts/lib/plan_gate_panel.py`). A run has ONE seat, `default_seat`
+  (codex). When it returns BLOCK, `escalation_seat` (opus) reads the same plan in the same run
+  and the rule decides over both verdicts; a REVISE does not escalate. One readable PASS from
+  the default seat certifies the gate. The governance variant of the touched paths no longer
+  sizes the panel, and a new feature no longer gets every seat: the variant stays in the trace
+  and the round record. `--panel-seats <labels>` replaces the composition for one run, runs
+  exactly those seats, and is logged as an override. Measured on 17-10: codex alone landed on
+  the five-seat panel's outcome in 35 of 36 runs. A lane lands in one of THREE outcomes, not
   two-plus-abstain (#910, OI-1519): it SCORES (a real, parseable verdict), it ABSTAINS
   (the model answered but its verdict JSON would not parse — retried once, then
   non-scoring), or it is NO-VERDICT (timeout, governance-synthesized report, or no
@@ -85,10 +88,10 @@ a diverse-family panel BEFORE any implementation, sized to the plan's governance
   deliberation panel's coverage tally enforces the same three-branch rule by
   reconciling every seat's dispatch-id against the t0 receipt ledger — the ledger wins
   over the seat's self-reported `exit_code`, and the divergence itself is reported
-  (OI-1519; see the `/panel` skill). liveness-quorum = min(2, panel size), so one
-  flake never forces REVISE. Operational
-  preconditions for the heavier seats: the glm litellm proxy on :4141, `DEEPSEEK_API_KEY`,
-  kimi + codex CLIs.
+  (OI-1519; see the `/panel` skill). Quorum: 1 for the default seat, min(2, panel size) for
+  an override, so one flake among several seats never forces REVISE. Operational
+  preconditions: the codex CLI, a claude login for the escalation seat, `DEEPSEEK_API_KEY`
+  for the tiebreaker.
 - **Run it**: `vnx horizon plan-gate run <track> --doc <plan.md> --project-id <pid>`. The
   panel runs on the **governed worker path**, and each panelist routes by its lane (the
   single-entry dispatch door decides this; until PR-12 wires/flips that door, the engine calls
@@ -98,36 +101,33 @@ a diverse-family panel BEFORE any implementation, sized to the plan's governance
     "Dispatch lanes"). NEVER `provider_dispatch` (it refuses claude — claude is not a
     provider-lane provider). The tmux-spawn lane this section used to name was removed on
     2026-09-18.
-  - **kimi / glm / deepseek → `provider_dispatch.py`** (constraint-safe per provider).
+  - **codex / kimi / glm / deepseek → `provider_dispatch.py`** (constraint-safe per provider).
 
   Every panelist emits a report -> receipt (the gate that gates everything is in the audit
   trail). Each appends a fenced `vnx-plan-verdict` JSON block; the runner parses it (a
   missing/garbled verdict fails safe to REVISE, never a silent PASS). Engine:
   `scripts/lib/plan_gate_panel.py`.
-- **Pass/fail**: any BLOCK -> revise the blocking sections, re-run the delta only; >=2 REVISE
-  -> one revise round; <=1 REVISE no BLOCK -> PASS, fold the lone dissent in as a tracked
-  note (do NOT re-loop for one voice). Tie -> safety-first REVISE. CAP at 2 rounds, then
-  operator. A mid-flight plan change re-runs the panel on the DELTA only.
+- **Pass/fail and rounds**: one readable PASS from the default seat -> PASS. BLOCK or REVISE
+  -> not cleared (an override with several seats needs two readable verdicts, more passes than
+  revises and no BLOCK). Rounds count per plan VERSION, by the plan's sha256 on the round
+  record: a revised plan always gets its own seat round first. Once `max_rounds` (1) versions
+  were read without a PASS, the tiebreaker decides in the same run, on the latest version and
+  the seat's verdict on it: START or STOP, both clear the blocker, and STOP files the seat's
+  findings as open items. A version already read below the threshold must change first.
 - **Structural enforcement** (not prose): seed a synthetic blocker OI `OI-PLAN-<track>` linked
   to the track. While it is open the reconciler shows `derived_status: blocked` and
   `vnx horizon deliverable promote` refuses. The panel-pass closes it. A worker that never
   loaded this skill still cannot promote — the CLI rejects it.
 
-### When a heavy panel is worth it
+### Why one seat
 
-Panel size tracks ambiguity, not risk or size. The 2026-08-15 measurement
-(`scripts/analysis/plan_gate_panel_effectiveness.py`, repeatable) over 104 complete rounds:
-
-- the full panel agreed with the first seat alone in 89.4% of rounds;
-- seat 2 changed the decision in 11.7% of rounds, seat 3 in 5.1%, seat 4 and seat 5 each in
-  1.7%.
-
-When the facts determine the answer, one model with good context beats five that vote.
-Reserve the full panel for genuinely ambiguous plans: open judgment calls, competing
-architectural readings, novel blast radius. For a plan whose answer follows from the facts,
-a heavy panel burns five model calls to reproduce the first seat's verdict. The seat ladder
-encodes this in the default weight; override UP only when the plan is ambiguous, not merely
-large or risky.
+Two measurements, both repeatable. On 2026-08-15
+(`scripts/analysis/plan_gate_panel_effectiveness.py`, 104 complete rounds) the full panel
+agreed with the first seat alone in 89.4% of rounds; seat 4 and seat 5 each changed the
+decision in 1.7%. On 2026-10-17 codex alone landed on the panel's outcome in 35 of 36 runs.
+When the facts determine the answer, one model with good context beats five that vote. The
+second seat is kept for the verdict that says the plan is unsafe to build: BLOCK. Name more
+seats with `--panel-seats` only when a plan is genuinely ambiguous, not merely large.
 
 ## Routing FLOOR, not overrides (model selection)
 

@@ -1,15 +1,14 @@
-# VNX plan-gate panel composition — the ordered seat list the PM plan-first
-# gate dispatches before any implementation begins.
+# VNX plan-gate panel composition — the seat roster the PM plan-first gate picks
+# from before any implementation begins, and which seats a run uses.
 #
-# See scripts/lib/plan_gate_panel.py (load_panel_seats) for the loader. Every
-# field here mirrors the keys the code default panel used historically so this file is a
-# behaviour-neutral externalisation of that constant on the day it shipped:
-# edit this file to change which seats run, leave it and the code falls back to
-# the code default panel.
+# See scripts/lib/plan_gate_panel.py (load_panel_seats, compose_panel) for the
+# loader. Every seat field mirrors the keys of the in-code roster so this file is
+# a behaviour-neutral externalisation of that constant: edit this file to change
+# the seats, leave it and the code falls back to the code roster.
 #
-# Each seat has the SAME three keys the in-code the code default panel uses:
-#   label      — the panelist identifier (stable, used by --panel-seats filtering
-#                and the per-seat verdict ledger)
+# Each seat has the SAME three keys the in-code roster uses:
+#   label      — the panelist identifier (stable, used by default_seat,
+#                escalation_seat, --panel-seats and the per-seat verdict ledger)
 #   provider   — a member of the closed Provider enum in
 #                scripts/lib/dispatch_spec.py (claude, kimi, glm-harness,
 #                deepseek-harness, codex, ...). An unknown value fails loud at
@@ -17,32 +16,45 @@
 #   model_arg  — the model string handed to the lane (opus, kimi-k3, glm-5.2,
 #                ...). Not validated here; the lane rejects an unrunnable model.
 #
-# One panelist per provider family (Anthropic / Moonshot / Zhipu / DeepSeek /
-# OpenAI) so a plan is reviewed from five independent vantage points before any
-# code is written. A panelist that flakes (a down proxy, an uninstalled CLI,
-# an unparseable verdict) is RETRIED once and then ABSTAINS as a non-scoring
-# lane instead of vetoing — see apply_panel_rule's liveness quorum. Keep every
-# provider here runnable anyway; the retry only rescues transient flakes.
-# glm-harness requires the local litellm proxy on :4141.
+# One seat per provider family (Anthropic / Moonshot / Zhipu / DeepSeek /
+# OpenAI). A run does not use them all: see default_seat below. A seat that
+# flakes (a down proxy, an uninstalled CLI, an unparseable verdict) is RETRIED
+# once and then ABSTAINS as a non-scoring lane instead of vetoing — see
+# apply_panel_rule's liveness quorum. Keep every provider here runnable anyway;
+# the retry only rescues transient flakes. glm-harness requires the local
+# litellm proxy on :4141.
 #
 # NOTE: gemini is intentionally omitted until the `gemini` CLI is installed —
-# an unrunnable panelist emits no verdict, which the fail-safe rule turns into an
-# unconditional REVISE. Adding a seat here is an operator decision, not a code
-# change; the default composition is whatever this file declares.
+# an unrunnable panelist emits no verdict. Adding a seat here is an operator
+# decision, not a code change.
 
 version: 1
 
-# Stop-rule (operator ladder, 2026-08-15, punten 7-9 OPSCHALING-cluster).
-# After ``max_rounds`` panel rounds that do not certify a PASS, the gate stops
-# running the full panel and decides via a SINGLE tiebreaker instead. The
-# measurement over 820 reports showed a five-seat panel converges with the
-# first seat in 89.4% of cases; seats 4 and 5 each moved the outcome 1.7%.
-# A third full round buys ~nothing and keeps the track blocked, so above the
-# threshold the gate asks one model a binary question and records the result.
+# Panel composition (operator decision 2026-10-17, P2): ONE seat reads the plan.
+# default_seat is the seat every run uses; one readable PASS from it certifies
+# the gate. escalation_seat reads the same plan in the same run only when the
+# default seat returns BLOCK, and the rule then decides over both verdicts. A
+# REVISE does not escalate. Both must name a seat below and differ; a bad value
+# fails loud. `--panel-seats` replaces the composition for one run: it runs
+# exactly the seats it names, with the quorum of two for several seats, and the
+# trace logs it as an override. The governance variant of the touched paths is
+# still derived and recorded, but it no longer sizes the panel.
+# The 17-10 measurement: codex alone landed on the panel's outcome in 35 of 36
+# runs, and codex does not draw on the Claude session limit.
+default_seat: codex
+escalation_seat: opus
+
+# Stop-rule (operator ladder 2026-08-15, per plan version since P2 2026-10-17).
+# Rounds count per plan VERSION: every seat round's record carries the sha256 of
+# the plan it read. A version without a read seat round always gets its seat
+# round first, so a revised plan is never handed to the tiebreaker unread. Once
+# ``max_rounds`` versions were read without a PASS, the tiebreaker decides, in
+# the same run as the seat round that reached the threshold, on that latest
+# version and the seat's verdict on it. A version already read below the
+# threshold must change before the next run; nothing runs on it.
 #
-# max_rounds: the panel-round threshold. At/above this count the tiebreaker
-#   runs INSTEAD of the full panel. Default 2 (a third round is the tiebreaker).
-#   Configurable here; a malformed value falls back to the code default.
+# max_rounds: the plan-version threshold. 1 is the operator decision of 17-10:
+#   one seat, one round, then the tiebreaker. A malformed value fails loud.
 #
 # The tiebreaker model comes from the registry (ADR-036), never a Python
 # literal. ``provider`` + ``model`` below name a wave7_models.yaml entry; the
@@ -59,7 +71,7 @@ version: 1
 # reported as "parse failure". deepseek-harness / deepseek-v4-pro delivered
 # 100% of its dispatches that same day, so the tiebreaker now runs there.
 tiebreaker:
-  max_rounds: 2
+  max_rounds: 1
   provider: deepseek_harness
   model: deepseek-v4-pro
 # Minimum meaningful characters (whitespace-stripped) a track's goal_state must
@@ -75,7 +87,8 @@ goal_min_chars: 200
 # count the coverage line already shows (OI-1150) — never its own tally. The
 # operator can consciously proceed below the floor with `vnx panel --allow-degraded`.
 # Read by scripts/lib/plan_gate_panel.py::load_synthesis_min_seats.
-# Default 3: a majority of the five-seat deliberation roster.
+# Default 3: a majority of the five-seat deliberation roster. It does not apply
+# to the plan-gate, which runs one seat (default_seat above).
 synthesis_min_seats: 3
 
 seats:

@@ -70,13 +70,12 @@ class VariantDerivation:
     """The variant half of a derivation: what the change IS, no gate attached.
 
     Carries no review gate, so producing it never reads project configuration.
-    A caller that sizes something from the variant alone (the plan-gate panel)
+    A caller that needs the variant alone (the plan-gate trace and round record)
     uses this and cannot be broken by an unreadable VNX_DEFAULT_REVIEW_STACK it
     never asked about.
     """
     variant: str       # one of GOVERNANCE_MIN_TIERS keys
     reason: str        # why this variant was chosen (deterministic rule fired)
-    is_new_feature: bool  # task_class is 01_code_generation (independent axis)
 
 
 @dataclass(frozen=True)
@@ -86,10 +85,6 @@ class GovernanceVariantResult:
     reason: str        # why this variant was chosen (deterministic rule fired)
     gate: str          # the review-gate weight this variant resolves to
     direction: str     # "up" | "unchanged" | "down" vs the full-diff review rung
-    # Independent axis (plan-gate weight ladder): True when task_class is
-    # 01_code_generation. A new feature runs the full panel regardless of the
-    # path-derived variant, so the plan-gate needs this carried alongside.
-    is_new_feature: bool = False
 
 
 @dataclass(frozen=True)
@@ -1040,15 +1035,11 @@ def derive_variant(
     Irreversibility overrides the reversible ladder: an explicit ``irreversible``
     flag, or any path under an irreversible category (schema migrations, fleet
     defaults, the append-only receipt/ledger format), forces coding-strict — a
-    change that cannot be walked back never gets a lighter gate. ``is_new_feature``
-    is an INDEPENDENT axis (task_class == 01_code_generation) carried on the
-    result so the plan-gate can size its panel to the full seat set for a new
-    feature regardless of the path-derived variant.
+    change that cannot be walked back never gets a lighter gate.
 
     Reads no configuration and resolves no gate: see ``derive_governance_variant``
     for the variant plus the gate it maps to in this project.
     """
-    is_new_feature = task_class == "01_code_generation"
     paths = [p for p in (dispatch_paths or []) if p and str(p).strip()]
 
     irreversible_hit: Optional[str] = None
@@ -1064,9 +1055,7 @@ def derive_variant(
                 reason += f"; also path-derived {irreversible_hit}"
         else:
             reason = f"irreversible path category={irreversible_hit!r}"
-        return VariantDerivation(
-            variant="coding-strict", reason=reason, is_new_feature=is_new_feature,
-        )
+        return VariantDerivation(variant="coding-strict", reason=reason)
 
     if paths:
         category = max(
@@ -1080,11 +1069,7 @@ def derive_variant(
         category = _category_from_task_class(task_class)
         reason = f"no dispatch paths; task_class={task_class or 'none'} -> {category!r}"
 
-    return VariantDerivation(
-        variant=_CATEGORY_TO_VARIANT[category],
-        reason=reason,
-        is_new_feature=is_new_feature,
-    )
+    return VariantDerivation(variant=_CATEGORY_TO_VARIANT[category], reason=reason)
 
 
 def derive_governance_variant(
@@ -1109,7 +1094,6 @@ def derive_governance_variant(
         reason=derived.reason,
         gate=gate,
         direction=_direction_for(gate),
-        is_new_feature=derived.is_new_feature,
     )
 
 
