@@ -21,22 +21,35 @@ _Completion is evidence-based: warnings are surfaced and tracked before closure.
 - Turns agent activity into an auditable receipt ledger (`NDJSON`), not opaque chat state.
 - Enforces human approval gates between dispatch proposal and execution.
 - Stays model/provider-agnostic through watcher-based observation (hooks optional).
-- Adds async quality advisories (size, dead code, hygiene) before final closure.
+- Adds async quality advisories (file and function size, lint, dead code, missing test changes) before final closure.
 - Keeps a clear chain-of-custody from dispatch to deliverable.
 
 ## What Readers Can Verify In 5 Minutes
 
-- Governance gates exist between proposal and execution (`staging -> queue` + human confirmation).
-- Receipts form an auditable event trail (`dispatch`, `ack`, `completion`, `quality advisory`).
+- Governance gates exist between proposal and execution: `vnx dispatch stage` writes a staged bundle and never fires, and a human fires it (ADR-006).
+- Receipts form an auditable event trail (`dispatch`, `ack`, `completion`, `quality advisory`). A hash chain over the ledger is available per project and is off by default (ADR-023), so the ledger is append-only by design but not tamper-evident unless a project turns the chain on.
 - Every dispatch funnels through one entry point (`vnx dispatch`), spawning an ephemeral per-dispatch worker rather than a fixed terminal grid — the old fixed T0/T1/T2/T3 layout is opt-in (`VNX_ADAPTER_T{n}=subprocess`), not the default.
 - Quality checks run as async advisories and can force structured follow-up work.
 - Provider coupling is reduced through watcher-based observation.
 
 ## Who This Is For
 
-- Engineers running Claude/Codex/Kimi across ephemeral dispatch workers.
+- Engineers running Claude, Codex, Kimi, DeepSeek or GLM lanes across ephemeral dispatch workers.
 - Builders who need governance and traceability, not just “agent swarms”.
 - Teams experimenting with local-first, file-based orchestration patterns.
+
+## What Changed Recently (on main, not yet released)
+
+Each item is summarised in one line. The canonical file owns the mechanism.
+
+- **Review seats.** A pull request needs one reviewer per seat of the review stack, and any rejection blocks. `docs/core/00_VNX_ARCHITECTURE.md` (Review Seats), ADR-008, ADR-037.
+- **Takeover chain.** A seat whose reviewer is out passes to the next gate: `codex_gate`, `kimi_gate`, `deepseek_gate`. `glm_gate` left the default chain. `docs/core/PROVIDER_LANES.md` (Takeover chain).
+- **Provider switch.** `vnx providers list` shows one switch per provider family. The write verbs refuse until every launch function calls `provider_switch.require`; the enforcement line of `vnx providers list` says how many do not yet. `docs/core/PROVIDER_LANES.md` (Provider switch).
+- **Plan-gate with one seat.** One seat reads the plan and a second reads it only on BLOCK; a PASS leaves a hash-chained record. `docs/core/HORIZON_LIFECYCLE.md`.
+- **Open outcomes.** A dispatch is finished only when a T0 records accept or reject. `docs/core/DISPATCH_RULES.md` section 13.
+- **T0 guard and rotation.** `vnx guard install` registers the context guard per Claude Code account, and a spawner hands a T0 over to a fresh one. `docs/operations/T0_CONTEXT_ROTATION.md`.
+- **Context-rotation plugin.** A Claude Code plugin in `packages/claude-code-toolkit/context-rotation/` that writes a handover and restores it after `/clear`. Its README is the reference.
+- **Changelog fragments.** Each PR adds one file under `changelog.d/`. `docs/core/LOCKS_AND_RELEASES.md`.
 
 ## Quick Start (Docs-First)
 
@@ -78,8 +91,9 @@ Screenshots are managed in one place:
 
 ## Current Status
 
-- Validated in local multi-terminal workflows.
-- Governance primitives are in place (receipts, gates, advisories).
+- Validated in local workflows with ephemeral per-dispatch workers.
+- Governance primitives are in place (receipts, review seats, gates, advisories).
+- What is released and what is only on main: `CHANGELOG.md` (`[Unreleased]` is main, not yet released).
 - Public history starts at repo separation from a private incubator project.
 
 For implementation detail, see the main repository scripts and docs outside this manifesto folder.
@@ -88,7 +102,7 @@ For implementation detail, see the main repository scripts and docs outside this
 
 - Runtime scripts and orchestration logic: `scripts/`
 - Main CLI entrypoint: `bin/vnx`
-- Terminal and skills configuration: `.claude/terminals/` and `.claude/skills/`
+- Terminal role files and skills: `.claude/terminals/` and `.claude/skills/`
 - Local runtime state (queues, receipts, snapshots, logs): `.vnx-data/`
 - Dashboard assets and serving logic: `dashboard/`
 
