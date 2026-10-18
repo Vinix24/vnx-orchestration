@@ -15,6 +15,19 @@ These lanes authenticate with ``ANTHROPIC_AUTH_TOKEN`` / ``ANTHROPIC_API_KEY``,
 never the keychain item bound to a config-dir path, so a fresh dir does not
 break their login. The ``claude_headless`` subscription lane must NOT use this
 helper: its keychain login is bound to its config-dir path.
+
+``plugins`` is a forbidden top-level entry, with one exception: a plain directory whose
+entries are all plain files from ``PLUGIN_CACHE_ALLOWLIST``. On 2026-10-18 at 07:58Z,
+during a long deepseek_gate run, claude 2.1.302 wrote ``plugins/plugin-catalog-cache.json``
+and ``plugins/plugin-directory-cache-v2.json`` into the lane dir although nothing was
+installed and ``CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`` was set; the next spawn then
+refused and closed every deepseek and glm seat (OI-2163). Both files are the CLI's own
+listing of the official marketplace (install counts, token costs), read only by the
+``/plugin`` browser and the org-blocked-plugin lookup. They enable nothing and reach no
+session context; a plugin needs ``installed_plugins.json`` or an enabled entry in
+settings. No env variable stops the fetch (measured in the 2.1.302 binary), and a CLI
+update can start writing more files, so the list stays closed: any other entry under
+``plugins/`` keeps the refusal and is named in the message.
 """
 
 from __future__ import annotations
@@ -62,6 +75,12 @@ FORBIDDEN_ENTRIES = (
     "commands",
     "hooks",
     "plugins",
+)
+
+# The CLI's own plugin listing caches, the only files allowed under ``plugins/``.
+PLUGIN_CACHE_ALLOWLIST = (
+    "plugin-catalog-cache.json",
+    "plugin-directory-cache-v2.json",
 )
 
 # Env pair that every harness spawn overlays last.
@@ -119,6 +138,23 @@ def _has_symlink_component(path: Path, stop: Path) -> bool:
         current = current.parent
 
 
+def _check_plugins_entry(plugins_dir: Path, lane_dir: Path) -> None:
+    """Allow ``plugins/`` only as a plain dir holding nothing but the CLI's cache files."""
+    refusal = "harness config dir holds user-level context (plugins)"
+    if plugins_dir.is_symlink() or not plugins_dir.is_dir():
+        raise HarnessConfigDirError(f"{refusal}: {plugins_dir} is not a plain directory")
+    try:
+        children = list(plugins_dir.iterdir())
+    except OSError as exc:
+        raise HarnessConfigDirError(f"cannot read {plugins_dir}: {exc}") from exc
+    for child in children:
+        plain_file = child.is_file() and not child.is_symlink()
+        if child.name not in PLUGIN_CACHE_ALLOWLIST or not plain_file:
+            raise HarnessConfigDirError(
+                f"{refusal}: plugins/{child.name} is not an allowed CLI cache file: {lane_dir}"
+            )
+
+
 def ensure_harness_config_dir(lane: str) -> Path:
     """Create (if needed) and validate the config dir for ``lane``; return its path."""
     name = _safe_lane_name(lane)
@@ -151,7 +187,9 @@ def ensure_harness_config_dir(lane: str) -> Path:
     for entry in entries:
         if entry.is_symlink():
             raise HarnessConfigDirError(f"harness config dir holds a symlink: {entry}")
-        if entry.name in FORBIDDEN_ENTRIES:
+        if entry.name == "plugins":
+            _check_plugins_entry(entry, lane_dir)
+        elif entry.name in FORBIDDEN_ENTRIES:
             raise HarnessConfigDirError(
                 f"harness config dir holds user-level context ({entry.name}): {lane_dir}"
             )
