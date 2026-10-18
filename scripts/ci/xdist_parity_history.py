@@ -36,10 +36,18 @@ of the comparison names its skipped steps (OI-2147), and a light run is
 outside the window either way. A profile that is not ``light`` (``heavy``, or
 ``unknown`` when the prelude gave none) is never excluded on profile.
 
-Fail closed: a run that cannot be placed (its head commit cannot be found, or
-a heavy verdict without a fingerprint, such as the record step's exit-2
-emergency verdict) and a run list that may be cut off by ``--limit`` both keep
-the rule from holding.
+Fail closed: a run that cannot be placed (a heavy verdict without a
+fingerprint, such as the record step's exit-2 emergency verdict) and a run
+list that may be cut off by ``--limit`` both keep the rule from holding.
+
+Ancestry is read only from history that can prove it. ``git merge-base
+--is-ancestor`` exit 1 means "not an ancestor" only in a complete repository
+that holds both commits: a shallow clone cuts the path from a head to the
+base and answers 1 for a descendant, which would move a failed run out of the
+window. So before any run is placed, a shallow clone, and a window base or
+run head that does not resolve with ``^{commit}``, is a tool error that
+names the fetch (``git fetch --unshallow``, or ``git fetch origin`` with the
+missing commits). The tool never fetches; the operator decides that.
 
 Missing evidence never leaves the window. Profile and fingerprint are
 properties of the verdict, so a run without a current verdict cannot be
@@ -67,9 +75,9 @@ made, that time is GitHub's own clock, the clock of the run times.
 
 Exit 0 when the rule holds, 1 when it does not, 2 with a reason and never a
 traceback on a usage or tool error: gh output that is not the JSON this tool
-reads, a ``--limit`` below 1, a window base that is no commit in this
-checkout, an OI id that is not ``OI-<n>``, git failing while the rule asks
-for ancestry, no project root.
+reads, a ``--limit`` below 1, a shallow checkout, a window base or run head
+that is no commit in this checkout, an OI id that is not ``OI-<n>``, git
+failing while the rule asks for ancestry, no project root.
 """
 
 from __future__ import annotations
@@ -606,15 +614,64 @@ def _read_verdict(path: Path) -> dict | None:
     return verdict if isinstance(verdict, dict) else None
 
 
-def git_is_ancestor(repo_root: Path, base: str, head: str) -> bool | None:
-    """True/False from ``git merge-base --is-ancestor``; fetches a missing commit once; None if unknown."""
-    for attempt in range(2):
-        proc = _run(["git", "merge-base", "--is-ancestor", base, head], cwd=repo_root)
-        if proc.returncode in (0, 1):
-            return proc.returncode == 0
-        if attempt == 0:
-            _run(["git", "fetch", "--no-tags", "--quiet", "origin", head], cwd=repo_root)
-    return None
+SHALLOW_HISTORY = (
+    "this checkout is a shallow clone: git answers 'not an ancestor' for a descendant whose path to the window "
+    "base the clone cut off, so no run can be placed on it; run git fetch --unshallow, then this check again"
+)
+
+
+def git_is_ancestor(repo_root: Path, base: str, head: str) -> bool:
+    """True when *head* descends from *base* (``git merge-base --is-ancestor``); ToolError when git cannot say.
+
+    Exit 0 is proof in any history: the path git walked exists. Exit 1 is
+    proof of the opposite only in a complete history that holds both commits:
+    a shallow clone cuts the path at its boundary and git answers 1 for a
+    descendant (codex round 2 on #2105). Nothing is fetched here.
+    """
+    proc = _run(["git", "merge-base", "--is-ancestor", base, head], cwd=repo_root)
+    if proc.returncode == 0:
+        return True
+    problem = history_problem(repo_root, {base: "window base", head: "head"})
+    if problem is not None:
+        raise ToolError(problem)
+    if proc.returncode == 1:
+        return False
+    raise ToolError(f"git merge-base --is-ancestor {base} {head}: exit {proc.returncode}: {_last_line(proc.stderr)}")
+
+
+def history_problem(repo_root: Path, commits: dict) -> str | None:
+    """Why this checkout cannot prove ancestry for *commits* (commit -> what it is); None when it can."""
+    if is_shallow(repo_root):
+        return SHALLOW_HISTORY
+    return missing_commits(repo_root, commits)
+
+
+def is_shallow(repo_root: Path) -> bool:
+    proc = _run(["git", "rev-parse", "--is-shallow-repository"], cwd=repo_root)
+    answer = proc.stdout.strip()
+    if proc.returncode != 0 or answer not in ("true", "false"):
+        raise ToolError(f"git rev-parse --is-shallow-repository: exit {proc.returncode}, {answer!r}: "
+                        f"{_last_line(proc.stderr)}")
+    return answer == "true"
+
+
+def missing_commits(repo_root: Path, commits: dict) -> str | None:
+    """The commits of *commits* that do not resolve with ``^{commit}``, named with the fetch that brings them."""
+    missing = [commit for commit in commits
+               if _run(["git", "rev-parse", "--verify", "--quiet", f"{commit}^{{commit}}"], cwd=repo_root).returncode]
+    if not missing:
+        return None
+    named = ", ".join(f"{commits[commit]} {commit}" for commit in missing)
+    return (f"{len(missing)} commit(s) the rule needs are not in this checkout: {named}; "
+            f"run git fetch origin {' '.join(missing)}, then this check again")
+
+
+def run_heads(runs: list) -> dict:
+    """Each head commit of *runs* -> the runs it is the head of, as missing_commits names it."""
+    heads = {}
+    for run in runs:
+        heads.setdefault(run.head_sha, []).append(run.run_id)
+    return {head: f"head of run {', '.join(ids)}" for head, ids in heads.items()}
 
 
 def commit_time(repo_root: Path, commit: str) -> datetime | None:
@@ -736,13 +793,23 @@ def _inputs(args, repo_root: Path) -> tuple:
 
 
 def _collect(header: dict, args, repo_root: Path, cache: Path) -> tuple:
-    """(runs since the window base with their verdicts, whether the list may be cut off)."""
+    """(runs since the window base with their verdicts, whether the list may be cut off).
+
+    Before any run is placed, the history must be able to answer ancestry
+    for each: ToolError on a shallow clone, and on a window base or run head
+    that is no commit in this checkout.
+    """
+    if is_shallow(repo_root):
+        raise ToolError(SHALLOW_HISTORY)
     since = commit_time(repo_root, header["window_base"])
     if since is None:
         raise ToolError(f"window base {header['window_base']} is not a commit in this checkout: git fetch origin, "
                         f"or name another base")
     listed = list_runs(header["repo"], header["workflow"], args.limit)
     runs = [r for r in listed if _created(r) >= since]
+    missing = missing_commits(repo_root, run_heads(runs))
+    if missing is not None:
+        raise ToolError(missing)
     truncated = len(listed) >= args.limit and len(runs) == len(listed)
     completed = [r for r in runs if r.status == "completed"]
     with ThreadPoolExecutor(max_workers=8) as pool:

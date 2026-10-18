@@ -27,10 +27,17 @@ merge, one exit-1 run in the window, a comparison step that failed after
 writing exit 0, an emergency verdict. git ancestry runs on a real throwaway
 repository; the CLI runs end to end against a gh stand-in on PATH (an
 external process, replaced only inside tests/), so no test calls GitHub.
+
+History that cannot prove ancestry is a tool error, never a placement
+(codex round 2 on #2105): a shallow clone answers "not an ancestor" for a
+descendant whose path to the base it cut off, so a failed run left the window
+and the rule held. A shallow clone and a head that is no commit here exit 2
+and name the fetch; the tool never fetches itself.
 """
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import json
 import os
@@ -620,11 +627,12 @@ def history_repo(tmp_path) -> tuple:
     return repo, shas
 
 
-def test_git_ancestry_answers_true_false_and_unknown(history_repo):
+def test_git_ancestry_answers_true_false_and_a_missing_commit_is_a_tool_error(history_repo):
     repo, (first, base, head) = history_repo
     assert hist.git_is_ancestor(repo, base, head) is True
     assert hist.git_is_ancestor(repo, base, first) is False
-    assert hist.git_is_ancestor(repo, base, "e" * 40) is None
+    with pytest.raises(hist.ToolError, match=f"head {'e' * 40}.*git fetch origin {'e' * 40}"):
+        hist.git_is_ancestor(repo, base, "e" * 40)
 
 
 def test_commit_time_is_utc(history_repo):
@@ -995,3 +1003,133 @@ def test_a_cache_entry_that_proves_the_latest_attempt_is_used_without_a_download
     code, document, places = _cli_window(tmp_path, runs, verdicts, base, cache)
     assert code == 0, document["conditions"]
     assert places["11"]["place"] == "in_window"
+
+
+# --- codex round 2 on #2105: ancestry only from complete history -----------------------------------------------
+
+
+def _commit(repo: Path, text: str) -> str:
+    (repo / "f.txt").write_text(text, encoding="utf-8")
+    _git(repo, "add", "f.txt")
+    _git(repo, "commit", "-q", "-m", text)
+    return _git(repo, "rev-parse", "HEAD")
+
+
+@pytest.fixture
+def split_history(tmp_path) -> tuple:
+    """(complete, shallow, base, ten heads newest first, failed): one history, once whole and once shallow.
+
+    main is base -> h1..h10; branch failed continues h10 -> s1 -> s2 -> s3.
+    The shallow clone holds main eleven deep (base included) and failed one
+    deep: every commit is present, but the path from s3 to base is cut.
+    """
+    complete = tmp_path / "complete"
+    complete.mkdir()
+    _git(complete, "init", "-q", "-b", "main")
+    _commit(complete, "before")
+    base = _commit(complete, "base")
+    heads = [_commit(complete, f"h{n}") for n in range(1, 11)][::-1]
+    _git(complete, "checkout", "-q", "-b", "failed")
+    failed = [_commit(complete, f"s{n}") for n in range(1, 4)][-1]
+    _git(complete, "checkout", "-q", "main")
+    shallow = tmp_path / "shallow"
+    _git(tmp_path, "clone", "-q", "--depth", "11", "--branch", "main", f"file://{complete}", str(shallow))
+    _git(shallow, "fetch", "-q", "--depth", "1", "origin", "failed")
+    return complete, shallow, base, heads, failed
+
+
+def _with_failed_descendant(heads: list, failed: str) -> tuple:
+    """Ten clean runs that hold, plus run 11: an exit-1 verdict on *failed*, a descendant of the window base."""
+    runs, verdicts = _holding_runs(heads)
+    runs.append(_listed(11, failed, "2099-01-02T08:30:00Z", branch="dispatch/y", event="pull_request"))
+    verdicts["11"] = verdict("heavy-differences", run_id="11")
+    return runs, verdicts
+
+
+def _main_on(repo: Path, base: str, runs: list, verdicts: dict, tmp_path: Path, monkeypatch, capsys) -> tuple:
+    """(exit, stdout, stderr, every command run) of main() in process with *repo* as the checkout.
+
+    The script resolves its checkout from its own path; here that resolution
+    is pointed at *repo*, and gh is the stand-in on PATH.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "gh").write_text(FAKE_GH, encoding="utf-8")
+    (bin_dir / "gh").chmod(0o755)
+    paths = {}
+    for run_id, document in verdicts.items():
+        paths[run_id] = str(tmp_path / f"verdict-{run_id}.json")
+        Path(paths[run_id]).write_text(json.dumps(document), encoding="utf-8")
+    spec = tmp_path / "spec.json"
+    spec.write_text(json.dumps({"runs": runs, "verdicts": paths}), encoding="utf-8")
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("FAKE_GH_SPEC", str(spec))
+    monkeypatch.setattr(importlib.import_module("project_root"), "resolve_project_root", lambda _caller: repo)
+    commands = []
+    real_run = subprocess.run
+
+    def recorded(cmd, *args, **kwargs):
+        commands.append(list(cmd))
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", recorded)
+    code = hist.main(["--last-d3-merge", base, "--repo", "o/r", "--fingerprint", FP, "--no-watch-list",
+                      "--cache-dir", str(tmp_path / "cache"), "--json"])
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err, commands
+
+
+def _fetches(commands: list) -> list:
+    return [c for c in commands if c[:2] == ["git", "fetch"]]
+
+
+def test_a_shallow_clone_is_refused_not_read_as_a_window_that_holds(split_history, tmp_path, monkeypatch, capsys):
+    """codex round 2, its reproduction: ten clean runs and one failed descendant, in a shallow clone.
+
+    git answers exit 1 for the failed run's head although it descends from
+    the base, so the old reading placed it before_window and printed HOLDS.
+    """
+    _, shallow, base, heads, failed = split_history
+    assert subprocess.run(["git", "-C", str(shallow), "merge-base", "--is-ancestor", base, failed]).returncode == 1
+    runs, verdicts = _with_failed_descendant(heads, failed)
+    code, out, err, commands = _main_on(shallow, base, runs, verdicts, tmp_path, monkeypatch, capsys)
+    assert code == 2, out
+    assert out == ""
+    assert err.startswith("xdist_parity_history: this checkout is a shallow clone"), err
+    assert "git fetch --unshallow" in err and "Traceback" not in err
+    assert _fetches(commands) == []
+
+
+def test_the_same_runs_on_complete_history_block_on_the_failed_descendant(split_history, tmp_path, monkeypatch,
+                                                                          capsys):
+    complete, _, base, heads, failed = split_history
+    runs, verdicts = _with_failed_descendant(heads, failed)
+    code, out, err, _ = _main_on(complete, base, runs, verdicts, tmp_path, monkeypatch, capsys)
+    assert code == 1, err
+    document = json.loads(out)
+    assert _failed_names(document) == {"every_run_clean"}
+    places = {r["run_id"]: r for r in document["runs"]}
+    assert places["11"]["place"] == "in_window" and places["11"]["reasons"][0].startswith("exit 1")
+
+
+def test_a_run_head_that_is_no_commit_here_is_a_tool_error_exit_2(split_history, tmp_path, monkeypatch, capsys):
+    """A head the checkout lacks is named with the fetch that brings it; the tool does not fetch it."""
+    complete, _, base, heads, _ = split_history
+    runs, verdicts = _holding_runs(heads)
+    runs.append(_listed(11, "e" * 40, "2099-01-02T08:30:00Z", branch="dispatch/y", event="pull_request"))
+    verdicts["11"] = verdict(run_id="11")
+    code, out, err, commands = _main_on(complete, base, runs, verdicts, tmp_path, monkeypatch, capsys)
+    assert code == 2, out
+    assert out == ""
+    assert err.startswith("xdist_parity_history: 1 commit(s) the rule needs are not in this checkout: "
+                          f"head of run 11 {'e' * 40}"), err
+    assert f"git fetch origin {'e' * 40}" in err and "Traceback" not in err
+    assert _fetches(commands) == []
+
+
+def test_git_ancestry_does_not_read_exit_1_of_a_shallow_clone_as_not_an_ancestor(split_history):
+    """Exit 0 proves descent in any history; exit 1 proves nothing when the path can be cut."""
+    _, shallow, base, heads, failed = split_history
+    assert hist.git_is_ancestor(shallow, base, heads[0]) is True
+    with pytest.raises(hist.ToolError, match="shallow clone.*git fetch --unshallow"):
+        hist.git_is_ancestor(shallow, base, failed)
