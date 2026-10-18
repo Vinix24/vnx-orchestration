@@ -277,19 +277,3 @@ class TestIrreversibility:
         assert result.governance_variant == "coding-strict"
 
 
-class TestNewFeatureAxis:
-    def test_code_generation_task_class_is_new_feature(self):
-        result = derive_governance_variant(task_class="01_code_generation")
-        assert result.is_new_feature is True
-
-    def test_new_feature_axis_is_independent_of_path_variant(self):
-        result = derive_governance_variant(
-            dispatch_paths=["docs/operations/foo.md"],
-            task_class="01_code_generation",
-        )
-        assert result.variant == "minimal"
-        assert result.is_new_feature is True
-
-    def test_non_code_generation_is_not_new_feature(self):
-        result = derive_governance_variant(task_class="04_documentation")
-        assert result.is_new_feature is False

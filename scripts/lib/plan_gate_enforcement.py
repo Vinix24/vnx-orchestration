@@ -92,8 +92,8 @@ HEAVY = "heavy"
 LIGHT = "light"
 
 # The reduced panel a LIGHT-scope plan runs when VNX_PLAN_GATE_COMPLEX_ONLY is
-# on: two diverse families (Anthropic + Moonshot), the smallest panel that can
-# still certify a pass (apply_panel_rule needs >= 2 readable verdicts). Matches
+# on: two diverse families (Anthropic + Moonshot), named as an override, so
+# apply_panel_rule wants 2 readable verdicts to certify a pass. Matches
 # the observed 2-seat convergences on main; an unknown label fails LOUD in
 # filter_panel_seats, so a config drift can never silently shrink the panel.
 LIGHT_PANEL_LABELS: tuple[str, ...] = ("opus", "kimi")

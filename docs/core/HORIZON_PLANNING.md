@@ -114,44 +114,47 @@ Example:
 vnx deliverable set dlv-abc123 --task-class 01_code_generation --routing-floor sonnet
 ```
 
-## Plan-gate weight — the seat ladder (since #1507)
+## Plan-gate composition — one seat, a second on BLOCK (since P2)
 
-The plan-gate does not run the full panel on every plan. The panel SIZE derives
-from a governance variant, which is a deterministic function of which paths the
-work touches, not a model judgment about how risky the plan "feels". Two
-functions define the ladder, both recomputable from the code:
+Operator decision 2026-10-17 (track `plan-gate-alleen-voor-architectuur`, P2).
+Until then the governance variant sized the panel (#1507): zero seats for docs,
+up to three for core paths, and all five for a new feature. That ladder is gone.
+The measurement behind the change: codex alone landed on the five-seat panel's
+outcome in 35 of 36 runs.
 
-- **`scripts/lib/smart_router.py::derive_governance_variant`** classifies each
-  dispatch path into `core` / `code` / `business` / `docs`, and the STRICTEST
-  category across all touched paths wins (`_CATEGORY_RANK`). Irreversibility
-  forces the heaviest class no matter what the paths say: a schema migration
-  (`scripts/migrations/`, `schemas/migrations/`), a fleet default
-  (`.claude/terminals/`, `.claude/skills/`, `agents/`, `skills/`), the
-  append-only receipt/ledger format, or an explicit `irreversible` flag on the
-  spec all resolve to `coding-strict`. A new feature
-  (`task_class == 01_code_generation`) is an INDEPENDENT axis: it is carried as
-  `is_new_feature` and always gets the full panel, regardless of the
-  path-derived variant.
-- **`scripts/lib/plan_gate_panel.py::GOVERNANCE_VARIANT_SEAT_LABELS`** maps the
-  variant to an ordered seat prefix of `configs/plan_gate_panel.yaml`:
+- **One default seat.** `configs/plan_gate_panel.yaml` names `default_seat`
+  (codex) and `escalation_seat` (opus); `plan_gate_panel.compose_panel` builds a
+  run from them. One readable PASS from the default seat certifies the gate.
+- **A second seat on BLOCK.** When the default seat returns BLOCK, the
+  escalation seat reads the same plan in the same run, and `apply_panel_rule`
+  decides over both verdicts. A REVISE does not escalate.
+- **An operator override** (`--panel-seats <labels>`) runs exactly the seats it
+  names, without escalation, under the quorum of two for several seats. The
+  trace logs it as `plan-gate override:` and names the default seat it replaced.
+- **The variant stays on the record.** `smart_router.derive_variant` still
+  classifies the touched paths (`core` / `code` / `business` / `docs`, strictest
+  wins, irreversible work is `coding-strict`). The result lands in the trace and
+  on the round record as `governance_variant`, so the history stays readable. It
+  no longer decides how many seats sit.
 
-  | variant | derived from | seats |
-  |---|---|---|
-  | `minimal` | docs content, reversible | 0 (no panel runs) |
-  | `business-light` / `light` | non-code deliverables | 1 (`opus`) |
-  | `default` | code | 2 (`opus`, `kimi`) |
-  | `coding-strict` | core paths / irreversible | 3 (`opus`, `kimi`, `glm-5.2-harness`) |
-  | new feature | `task_class 01_code_generation` | full panel (5 seats), regardless of variant |
+### Rounds per plan version
 
-The derived weight, the chosen weight, and the direction of an operator override
-all land in the trace, so an override is never silent. On the review-gate axis
-(`smart_router.resolve_gate`) the result is a `GateWeightResolution` carrying
-`governance_variant` (derived), `gate` (chosen), and `override_direction`
-(`""` | `upgrade` | `downgrade` | `strict-downgrade`). The plan-gate panel
-mirrors this on the seat-count axis (`plan_gate_panel.seat_override_direction`).
-`strict-downgrade` is the one separately-marked move: lightening a
-`coding-strict` derivation, chosen exactly at irreversible work. It is marked,
-not blocked, so a later sweep can find the most dangerous override.
+Every seat round that does not PASS appends a `plan_gate_round` record to the
+seat ledger, carrying the sha256 of the plan the seat read (`plan_sha256`) and
+each seat's verdict on it (`seat_verdicts`). `plan_gate_tiebreaker.route_plan_gate`
+decides what a run does first:
+
+| The plan version (its sha256) | Read versions without a PASS | The run |
+|---|---|---|
+| has no read seat round | any | its seat round; after a non-PASS, the tiebreaker in the same run when the threshold now holds |
+| was read by its seat | `max_rounds` or more | straight to the tiebreaker, with the seat's recorded verdict |
+| was read by its seat | below `max_rounds` | nothing; the plan must change first |
+
+`max_rounds` is 1 (one seat, one round, then the tiebreaker). Only a READ round
+counts: `scored_seats >= 1`, so rounds in which every lane was down buy no
+tiebreaker (OI-1280). A record written before P2 has no hash and counts as one
+plan version of its own. The tiebreaker reads the latest plan version and the
+seat's verdict on it; on STOP the seat's findings become open items.
 
 ## Plan source without --doc: goal_state plus deliverables, two refusal kinds (since #1560)
 

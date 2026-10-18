@@ -7,8 +7,8 @@ description: >
   into now/next/later horizons, break a feature into deliverables, set the routing FLOOR, or
   run the plan-gate on a feature. The tracks DB (`vnx horizon`, alias `vnx objective`) is the
   source of truth; the repo ROADMAP.yaml is a generic example, not the SSOT. Plans and gates
-  only: never dispatches, never closes open-items. The heavy multi-model plan-gate panel runs
-  only on an explicit plan-gate step. (Renamed from `pm` 2026-07-05 — `/pm`/`@pm` still resolve
+  only: never dispatches, never closes open-items. The plan-gate (one seat, a second on BLOCK)
+  runs only on an explicit plan-gate step. (Renamed from `pm` 2026-07-05 — `/pm`/`@pm` still resolve
   via the backward-compat alias in `.claude/skills/pm/SKILL.md`.)
 user-invocable: true
 allowed-tools: [Read, Grep, Glob, Bash]
@@ -45,8 +45,8 @@ trust the silent `vnx-dev` default in a multi-project context).
    launch) — do NOT `vnx horizon sync` against it; sync would seed example data into the live
    store. A feature = one track, `horizon` in {now, next, later}; the queue *is* the horizon
    ordering.
-2. **Plan-first GATE (hard, see below)** — produce the plan doc, run the 5-family panel,
-   revise until pass. No deliverable promotes until this passes.
+2. **Plan-first GATE (hard, see below)** — produce the plan doc, run the plan-gate (one
+   seat, a second on BLOCK, then the tiebreaker). No deliverable promotes until this passes.
 3. **Deliverables** — `vnx horizon deliverable add --objective <track> --output-kind
    {pr,doc,...} --title "..."` (alias: `vnx deliverable add`) per planned output. Each lands
    `proposed`. The human gate `vnx horizon deliverable promote` is the only path to `ready` —
@@ -59,17 +59,24 @@ trust the silent `vnx-dev` default in a multi-project context).
 5. **Drift watch** — `vnx horizon drift` (alias: `vnx objective drift`, advisory) is your live
    "is this actually done" signal before closeout.
 
-## The plan-first gate (always multi-model)
+## The plan-first gate (one seat, a second on BLOCK)
 
 Every feature is preceded by an architect/plan phase. The PLAN (not the code) is reviewed by
-a diverse-family panel BEFORE any implementation.
+one seat BEFORE any implementation, on scope, PR split, decisions and ADRs, and feasibility.
+Line numbers and test details belong to the builder and codex in the PR review.
 
 - **Plan doc** (linked from the track, output_kind `doc`): `## Problem`, `## Approach`,
   `## Deliverables` (each tagged task_class + complexity), `## Risks`, `## Model-routing plan`
   (the FLOOR per deliverable, not a hand-picked lane), `## Open questions`.
-- **Panel = the full 5-family DEFAULT_PANEL: opus + kimi + glm-harness + deepseek-harness +
-  codex** (`scripts/lib/plan_gate_panel.py`, #991; gemini omitted until a CLI exists — five
-  families -> real disagreement). A lane lands in one of THREE outcomes, not
+- **One seat, a second on BLOCK** (operator decision 2026-10-17, P2; `configs/plan_gate_panel.yaml`,
+  `compose_panel` in `scripts/lib/plan_gate_panel.py`). A run has ONE seat, `default_seat`
+  (codex). When it returns BLOCK, `escalation_seat` (opus) reads the same plan in the same run
+  and the rule decides over both verdicts; a REVISE does not escalate. One readable PASS from
+  the default seat certifies the gate. The governance variant of the touched paths no longer
+  sizes the panel, and a new feature no longer gets every seat: the variant stays in the trace
+  and the round record. `--panel-seats <labels>` replaces the composition for one run, runs
+  exactly those seats, and is logged as an override. Measured on 17-10: codex alone landed on
+  the five-seat panel's outcome in 35 of 36 runs. A lane lands in one of THREE outcomes, not
   two-plus-abstain (#910, OI-1519): it SCORES (a real, parseable verdict), it ABSTAINS
   (the model answered but its verdict JSON would not parse — retried once, then
   non-scoring), or it is NO-VERDICT (timeout, governance-synthesized report, or no
@@ -79,9 +86,10 @@ a diverse-family panel BEFORE any implementation.
   deliberation panel's coverage tally enforces the same three-branch rule by
   reconciling every seat's dispatch-id against the t0 receipt ledger — the ledger wins
   over the seat's self-reported `exit_code`, and the divergence itself is reported
-  (OI-1519; see the `/panel` skill). liveness-quorum = min(2, panel size), so one
-  flake never forces REVISE. Operational
-  preconditions: the glm litellm proxy on :4141, `DEEPSEEK_API_KEY`, kimi + codex CLIs.
+  (OI-1519; see the `/panel` skill). Quorum: 1 for the default seat, min(2, panel size) for
+  an override, so one flake among several seats never forces REVISE. Operational
+  preconditions: the codex CLI, a claude login for the escalation seat, `DEEPSEEK_API_KEY`
+  for the tiebreaker.
 - **Run it**: `vnx horizon plan-gate run <track> --doc <plan.md> --project-id <pid>`. The
   panel runs on the **governed worker path**, and each panelist routes by its lane (the
   single-entry dispatch door decides this; until PR-12 wires/flips that door, the engine calls
@@ -91,16 +99,19 @@ a diverse-family panel BEFORE any implementation.
     "Dispatch lanes"). NEVER `provider_dispatch` (it refuses claude — claude is not a
     provider-lane provider). The tmux-spawn lane this section used to name was removed on
     2026-09-18.
-  - **kimi / glm / deepseek → `provider_dispatch.py`** (constraint-safe per provider).
+  - **codex / kimi / glm / deepseek → `provider_dispatch.py`** (constraint-safe per provider).
 
   Every panelist emits a report -> receipt (the gate that gates everything is in the audit
   trail). Each appends a fenced `vnx-plan-verdict` JSON block; the runner parses it (a
   missing/garbled verdict fails safe to REVISE, never a silent PASS). Engine:
   `scripts/lib/plan_gate_panel.py`.
-- **Pass/fail**: any BLOCK -> revise the blocking sections, re-run the delta only; >=2 REVISE
-  -> one revise round; <=1 REVISE no BLOCK -> PASS, fold the lone dissent in as a tracked
-  note (do NOT re-loop for one voice). Tie -> safety-first REVISE. CAP at 2 rounds, then
-  operator. A mid-flight plan change re-runs the panel on the DELTA only.
+- **Pass/fail and rounds**: one readable PASS from the default seat -> PASS. BLOCK or REVISE
+  -> not cleared (an override with several seats needs two readable verdicts, more passes than
+  revises and no BLOCK). Rounds count per plan VERSION, by the plan's sha256 on the round
+  record: a revised plan always gets its own seat round first. Once `max_rounds` (1) versions
+  were read without a PASS, the tiebreaker decides in the same run, on the latest version and
+  the seat's verdict on it: START or STOP, both clear the blocker, and STOP files the seat's
+  findings as open items. A version already read below the threshold must change first.
 - **Structural enforcement** (not prose): seed a synthetic blocker OI `OI-PLAN-<track>` linked
   to the track. While it is open the reconciler shows `derived_status: blocked` and
   `vnx horizon deliverable promote` refuses. The panel-pass closes it. A worker that never

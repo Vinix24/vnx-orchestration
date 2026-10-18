@@ -406,7 +406,6 @@ def test_variant_only_derivation_agrees_with_the_full_derivation(
 
     assert variant_only.variant == full.variant
     assert variant_only.reason == full.reason
-    assert variant_only.is_new_feature == full.is_new_feature
 
 
 @pytest.mark.parametrize("stack", ["", "mijn_eigen_poort"])
