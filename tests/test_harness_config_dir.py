@@ -29,7 +29,8 @@ from provider_spawns.harness_config_dir import (  # noqa: E402
 )
 
 _KEY = "sk-deepseek-test-key-1234567890abcd"
-_FORBIDDEN = ("CLAUDE.md", "CLAUDE.local.md", "skills", "agents", "commands", "hooks", "plugins")
+_FORBIDDEN = ("CLAUDE.md", "CLAUDE.local.md", "skills", "agents", "commands", "hooks")
+_CACHE_FILES = ("plugin-catalog-cache.json", "plugin-directory-cache-v2.json")
 
 
 @pytest.fixture
@@ -214,6 +215,61 @@ def test_forbidden_entry_fails_closed(data_dir, entry):
     lane = data_dir / "harness-config" / "glm-harness"
     lane.mkdir(parents=True)
     (lane / entry).mkdir()
+    with pytest.raises(HarnessConfigDirError):
+        ensure_harness_config_dir("glm-harness")
+
+
+def _plugins_dir(data_dir):
+    plugins = data_dir / "harness-config" / "glm-harness" / "plugins"
+    plugins.mkdir(parents=True)
+    return plugins
+
+
+def test_plugins_dir_with_only_cli_cache_files_passes(data_dir):
+    plugins = _plugins_dir(data_dir)
+    for name in _CACHE_FILES:
+        (plugins / name).write_text("{}", encoding="utf-8")
+    lane = ensure_harness_config_dir("glm-harness")
+    assert sorted(p.name for p in (lane / "plugins").iterdir()) == sorted(_CACHE_FILES)
+
+
+def test_plugin_cache_allowlist_is_closed():
+    from provider_spawns import harness_config_dir as hcd
+
+    assert hcd.PLUGIN_CACHE_ALLOWLIST == _CACHE_FILES
+
+
+@pytest.mark.parametrize("kind", ["third_file", "subdir", "installed", "known_marketplaces"])
+def test_plugins_dir_with_other_entry_is_refused_and_named(data_dir, kind):
+    plugins = _plugins_dir(data_dir)
+    (plugins / _CACHE_FILES[0]).write_text("{}", encoding="utf-8")
+    if kind == "subdir":
+        (plugins / "marketplaces").mkdir()
+        named = "marketplaces"
+    else:
+        named = {
+            "third_file": "notes.json",
+            "installed": "installed_plugins.json",
+            "known_marketplaces": "known_marketplaces.json",
+        }[kind]
+        (plugins / named).write_text("{}", encoding="utf-8")
+    with pytest.raises(HarnessConfigDirError, match=f"plugins/{named}"):
+        ensure_harness_config_dir("glm-harness")
+
+
+def test_plugins_dir_with_symlinked_cache_file_is_refused(data_dir, tmp_path):
+    plugins = _plugins_dir(data_dir)
+    target = tmp_path / "elsewhere.json"
+    target.write_text("{}", encoding="utf-8")
+    (plugins / _CACHE_FILES[0]).symlink_to(target)
+    with pytest.raises(HarnessConfigDirError, match=f"plugins/{_CACHE_FILES[0]}"):
+        ensure_harness_config_dir("glm-harness")
+
+
+def test_plugins_symlink_is_refused(data_dir, tmp_path):
+    lane = data_dir / "harness-config" / "glm-harness"
+    lane.mkdir(parents=True)
+    (lane / "plugins").symlink_to(tmp_path)
     with pytest.raises(HarnessConfigDirError):
         ensure_harness_config_dir("glm-harness")
 
