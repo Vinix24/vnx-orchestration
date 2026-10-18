@@ -31,7 +31,11 @@
 #   /clear is typed for you. /clear appears, the fresh session starts with "continued
 #   from the handover of the previous session", and "Continue from the handover in your
 #   context, step 1." is typed and sent once the fresh session's `delivered` line is
-#   there. Then: capture happy, check happy.
+#   there. Then: capture happy, check happy. This run is also the live proof of the
+#   job's terminal check: the real `claude` (CLAUDE_PID) must have the pane's tty as its
+#   controlling terminal and be in its foreground process group. A FAIL whose
+#   clear-<n>.json says process_background or process_stopped means that check does not
+#   hold for this Claude Code, and no automatic clear will ever happen with it.
 #
 # 2 input: text in the input line, nothing typed.
 #   Type /context-rotation:rotate, and while the model still writes, type hello in the

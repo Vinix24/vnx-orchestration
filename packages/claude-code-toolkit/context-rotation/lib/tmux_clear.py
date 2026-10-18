@@ -32,11 +32,10 @@ Enter goes only on a look taken after the step's journal line, with nothing betw
 that look and the key: the session's `claude` still runs below the pane and owns its
 terminal's input, then one tmux call shows the pane's state and its screen at one
 moment (look), and the input line must read exactly the typed line, with no spinner
-above it. The job types into the
-user's terminal, so when it is not certain it sends nothing. It removes what it typed
-only from a line that a look shows holds exactly that, with the cursor right after it
-(take_back): every character those BSpace remove is its own. Any other line is left
-as it is, and the user's lines say so.
+above it. The job types into the user's terminal, so when it is not certain it sends
+nothing. It removes what it typed only from a line that a look shows holds exactly
+that, with the cursor right after it (take_back): every character those BSpace remove
+is its own. Any other line is left as it is, and the user's lines say so.
 
 Nothing read from a file or a screen is ever typed: only those two fixed lines, BSpace
 and Enter, into the pane the marker names. Any failed check, and any read that fails
@@ -337,7 +336,7 @@ class Job:
         line, then capture-pane fails with status 1 and ends the call. The line holds
         the eight fields of PANE_FORMAT; the last, `#{pane_tty}`, is the pane's terminal
         as a path below /dev/. Why not: the pane is not the marker's, alive (all eight
-        fields, the numbers numbers and the terminal a /dev/ path), in no mode and not
+        fields, the numbers in digits and the terminal a /dev/ path), in no mode and not
         synchronized.
         """
         status, out = self.tmux("display-message", "-p", "-t", self.pane, PANE_FORMAT, ";",
@@ -366,7 +365,7 @@ class Job:
         return pane_screen.idle_problem(view.screen) or self.check_process(view.pane_pid, view.tty)
 
     def fresh_look(self) -> Tuple[Optional[str], Optional[View]]:
-        """The read a key is decided on: the session's `claude` still runs below the pane and owns its input, one look.
+        """The read a key is decided on: the session's `claude` still runs below the pane and owns its input; one look.
 
         The look is the last read: what follows is decided on it alone and sent at
         once. (why not, None) when the process or the pane fails its check, also when
