@@ -1,7 +1,8 @@
 """OI-1984: a deepseek takeover that took over from kimi signs at the merge door.
 
-The review takeover chain is codex > kimi > deepseek > glm (operator decision
-2026-10-04). Before this change deepseek was outside the ``Gate`` enum, so the
+The review takeover chain is codex > kimi > deepseek; glm left the default chain on
+2026-10-17 (R4, operator decision), and it was codex > kimi > deepseek > glm
+before (operator decision 2026-10-04). Before this change deepseek was outside the ``Gate`` enum, so the
 closure verifier dropped its takeover record (not in ``_REVIEW_PEER_GATES``) and
 the kimi seat stayed unsigned even with a clean deepseek pass on the head.
 

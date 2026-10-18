@@ -301,8 +301,12 @@ class TestKimiTakeoverToDeepseek:
         assert recorded.get("failure_reason", "").strip() != ""
 
     def test_kimi_and_deepseek_exhausted_walk_lands_on_glm(self, manager_env, monkeypatch):
-        """glm is the last link: with kimi and deepseek both exhausted the
-        walk continues to glm_gate, and that seat is never a pass either."""
+        """glm is reached only through an explicit chain since R4 (operator
+        decision 2026-10-17): with kimi and deepseek both exhausted the walk
+        continues to glm_gate, and that seat is never a pass either."""
+        monkeypatch.setenv(
+            "VNX_REVIEW_GATE_TAKEOVER_CHAIN", "codex_gate,kimi_gate,deepseek_gate,glm_gate"
+        )
         monkeypatch.chdir(manager_env["project_root"])
         manager = _make_manager()
         pr_number = 504
@@ -333,6 +337,45 @@ class TestKimiTakeoverToDeepseek:
         assert seat["gate"] == "glm_gate", "glm is the last link of the chain"
         assert seat["status"] != "pass"
         assert seat["status"] == "not_executable"
+
+    def test_kimi_and_deepseek_exhausted_default_chain_ends_exhausted(self, manager_env, monkeypatch):
+        """On the default chain (codex, kimi, deepseek; R4, operator decision
+        2026-10-17) kimi and deepseek exhausted leave no successor: the seat is
+        booked chain_exhausted, never a pass and never re-dispatched to glm."""
+        monkeypatch.delenv("VNX_REVIEW_GATE_TAKEOVER_CHAIN", raising=False)
+        monkeypatch.delenv("VNX_OVERRIDE_VNX_REVIEW_GATE_TAKEOVER_CHAIN", raising=False)
+        monkeypatch.chdir(manager_env["project_root"])
+        manager = _make_manager()
+        pr_number = 504
+
+        _write_result(manager_env["results_dir"], pr_number, "kimi_gate", {
+            **_KIMI_LANE_EXHAUSTED_RESULT, "pr_id": "504", "pr_number": 504,
+        })
+        _write_result(manager_env["results_dir"], pr_number, "deepseek_gate", {
+            **_KIMI_LANE_EXHAUSTED_RESULT, "pr_id": "504", "pr_number": 504,
+            "gate": "deepseek_gate", "provider": "deepseek", "model": "deepseek-flash",
+            "dispatch_id": "deepseek-gate-pr504-1755852660",
+            "residual_risk": "governed deepseek dispatch failed: Error code: 402 - Insufficient Balance",
+        })
+        monkeypatch.setattr(manager, "_glm_gate_available", lambda: False)
+
+        with patch("governance_receipts.emit_governance_receipt"):
+            result = manager.request_reviews(
+                pr_number=pr_number,
+                branch="fix/control-walk-to-glm",
+                review_stack=["kimi_gate"],
+                risk_class="medium",
+                changed_files=["scripts/foo.py"],
+                mode="per_pr",
+                dispatch_id="dlv5-control-walk-to-glm",
+            )
+
+        seat = result["requested"][0]
+        assert seat["status"] == "chain_exhausted"
+        assert seat["reason"] == "takeover_chain_exhausted"
+        assert seat["status"] != "pass"
+        assert seat["gate"] != "glm_gate"
+        assert "glm_gate" not in seat["reviewers_tried"]
 
 
 class TestMarkGateUnavailableStampsCanonicalFailureReason:
