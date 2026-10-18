@@ -264,15 +264,25 @@ def test_off_on_reset_and_consequences(live, capsys):
         "set", "set", "clear"]
 
 
-def test_consequence_no_second_review_seat(live, capsys):
+def test_consequence_no_second_review_seat(live, capsys, monkeypatch):
+    monkeypatch.delenv("VNX_REVIEW_GATE_TAKEOVER_CHAIN", raising=False)
+    assert run_main(capsys, "off", "kimi")[0] == 0
+    code, out, _ = run_main(capsys, "off", "deepseek")
+    assert code == 0
+    assert ("no second review seat: every gate after codex_gate in the takeover chain "
+            "(kimi_gate, deepseek_gate) is switched off, so a PR gets codex alone") in out
+    code, out, _ = run_main(capsys, "list")
+    assert "no second review seat" in out
+
+
+def test_consequence_no_second_review_seat_with_glm_in_an_explicit_chain(live, capsys, monkeypatch):
+    monkeypatch.setenv("VNX_REVIEW_GATE_TAKEOVER_CHAIN", "codex_gate,kimi_gate,deepseek_gate,glm_gate")
     for family in ("kimi", "glm"):
         assert run_main(capsys, "off", family)[0] == 0
     code, out, _ = run_main(capsys, "off", "deepseek")
     assert code == 0
     assert ("no second review seat: every gate after codex_gate in the takeover chain "
             "(kimi_gate, deepseek_gate, glm_gate) is switched off, so a PR gets codex alone") in out
-    code, out, _ = run_main(capsys, "list")
-    assert "no second review seat" in out
 
 
 def test_consequence_plan_gate_cannot_certify(live, capsys, monkeypatch):

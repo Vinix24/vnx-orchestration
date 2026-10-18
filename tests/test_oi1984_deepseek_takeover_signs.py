@@ -34,7 +34,7 @@ PR_ID = str(PR_NUMBER)
 BRANCH = "dispatch/20261004-keten-codex-kimi-deepseek"
 HEAD = "a" * 40
 OTHER_HEAD = "b" * 40
-NEW_CHAIN = "codex_gate,kimi_gate,deepseek_gate,glm_gate"
+NEW_CHAIN = "codex_gate,kimi_gate,deepseek_gate"
 CLEAN_REPORT = "# Gate report\n\nAll findings reviewed, nothing blocking.\n"
 
 

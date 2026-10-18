@@ -770,7 +770,13 @@ class TestShaBindingBlocksStaleEvidence:
     def test_kruis_poort_matching_sha_still_fulfills(self, tmp_path, monkeypatch):
         """Control for (a): the exact same shape, but the successor's
         commit_sha matches the PR head -- must still fulfil via takeover
-        (never a false negative introduced by the sha check)."""
+        (never a false negative introduced by the sha check).
+
+        glm_gate left the default takeover chain (R4, operator decision
+        2026-10-17); the chain is explicit here so glm is still the successor."""
+        monkeypatch.setenv(
+            "VNX_REVIEW_GATE_TAKEOVER_CHAIN", "codex_gate,kimi_gate,deepseek_gate,glm_gate"
+        )
         state_dir = _make_state_dir(tmp_path)
         register_obligation(
             state_dir, dispatch_id="20260830-oi1571-kruis-poort-match", gate="codex_gate",

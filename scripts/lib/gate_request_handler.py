@@ -73,16 +73,20 @@ class ReviewGateTakeoverConfigError(ValueError):
 # question 1); this mapping stays a choice under uncertainty until that
 # lands.
 #
-# glm_gate is the chain's END-LINK since 2026-10-04 (OI-1984): no gate is
-# configured after it, so a takeover walk stops there. deepseek_gate sits one
-# link earlier, right after kimi_gate. Since OI-1714/OI-1838 deepseek_gate is a
+# glm_gate left the DEFAULT chain on 2026-10-17 (operator decision, R4: 101 runs
+# in the 11 Sep to 17 Oct baseline, not one FAIL). It stays a registered gate
+# and an explicit VNX_REVIEW_GATE_TAKEOVER_CHAIN that names it still reaches it.
+# deepseek_gate is the default chain's END-LINK (it follows kimi_gate since
+# 2026-10-04, OI-1984): no gate is configured after it, so a takeover walk
+# stops there. With codex and kimi both out, deepseek reads one seat and the
+# other ends as chain_exhausted. Since OI-1714/OI-1838 deepseek_gate is a
 # real harness-lane gate (gate_recorder.GATE_PROVIDERS, "deepseek-harness"), available by
 # REGISTRATION -- `gate_is_available("deepseek_gate")` is True and
 # `_request_deepseek` (below) actually requests it, the same as any other
 # harness-lane gate. It no longer resolves not_executable/gate_runner_missing
 # by design; that was the pre-OI-1714 defect (a script-runner registration
 # pointing at a file that never existed), not the current end-link behaviour.
-_DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN = "codex_gate,kimi_gate,deepseek_gate,glm_gate"
+_DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN = "codex_gate,kimi_gate,deepseek_gate"
 
 
 def _parse_review_gate_takeover_chain(raw: str) -> Dict[str, str]:

@@ -414,7 +414,21 @@ class TestCodexAtItsLimitGoesToKimi:
         )
         assert len(providers) == 2, f"one run per seat, two seats: {providers}"
 
-    def test_both_subscription_seats_at_their_limit_go_to_deepseek_and_glm(self, env, default_stack):
+    def test_both_subscription_seats_at_their_limit_on_the_default_chain_end_the_second_seat(self, env, default_stack):
+        """R4 (operator decision 2026-10-17): the default chain has no glm_gate, so kimi's seat ends as
+        chain_exhausted: no merge until a subscription reviewer is back."""
+        _write_result(env, "codex_gate", _CODEX_LIMIT_RECORD)
+        _write_result(env, "kimi_gate", _KIMI_LIMIT_RECORD)
+
+        result = _request(_manager(), None)
+
+        codex_seat, kimi_seat = result["requested"]
+        assert codex_seat["gate"] == "deepseek_gate"
+        assert kimi_seat["status"] == "chain_exhausted"
+        assert "glm_gate" not in _requested_gates(result)
+
+    def test_both_subscription_seats_at_their_limit_go_to_deepseek_and_glm(self, env, default_stack, monkeypatch):
+        monkeypatch.setenv("VNX_REVIEW_GATE_TAKEOVER_CHAIN", "codex_gate,kimi_gate,deepseek_gate,glm_gate")
         _write_result(env, "codex_gate", _CODEX_LIMIT_RECORD)
         _write_result(env, "kimi_gate", _KIMI_LIMIT_RECORD)
 
