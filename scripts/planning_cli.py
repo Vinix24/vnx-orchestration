@@ -2945,6 +2945,39 @@ def cmd_deliverable_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def _track_blocks_promotion(
+    state_dir: Path, project_id: str, dispatch_id: str, track_id: str,
+) -> bool:
+    """True when a deliverable's track still blocks its promotion (PM plan-first lock).
+
+    Two signals, either of which refuses: derived_status (the reconciler's
+    projection — the promote-lock's usual read) and the open-items store itself,
+    the source of truth. P1e (OI-2178): the projection can lag after a failed
+    reconcile, so an open OI-PLAN-<track> must refuse promotion even when
+    derived_status reads stale. Prints the refusal and returns True; False when
+    nothing blocks.
+    """
+    trk = tracks_lib.get_track(state_dir, track_id, project_id)
+    stale_projection = (
+        trk and (trk.get("derived_status") if isinstance(trk, dict) else None) == "blocked"
+    )
+    plan_open = (
+        plan_gate_enforcement.plan_gate_state(
+            state_dir / tracks_lib.DB_FILENAME, track_id, project_id
+        )
+        == plan_gate_enforcement.UNRESOLVED
+    )
+    if not (stale_projection or plan_open):
+        return False
+    print(
+        f"Cannot promote {dispatch_id!r}: track {track_id!r} is blocked "
+        "(plan-first gate not passed, or a hard dependency is open). "
+        "Close the blocking open-items first, then re-run promote.",
+        file=sys.stderr,
+    )
+    return True
+
+
 def cmd_deliverable_promote(args: argparse.Namespace) -> int:
     state_dir = _resolve_state_dir(args.state_dir)
     project_id = args.project_id
@@ -2974,23 +3007,11 @@ def cmd_deliverable_promote(args: argparse.Namespace) -> int:
             return 1
 
         # PM plan-first lock (PM-SKILL-DESIGN-2026-06-20 step 3): refuse promotion
-        # while the deliverable's track is blocked — e.g. an open synthetic
-        # OI-PLAN-<track> gate (plan-first panel not passed) or an unmet hard
-        # dependency. The reconciler writes derived_status; the PM seeds/closes the
-        # blocker. The CLI itself rejects, so a worker that never loaded the PM skill
-        # still cannot bypass the gate. Graceful: a deliverable with no track, or a
-        # track whose derived_status is unset, is not gated here.
+        # while the deliverable's track is blocked. Graceful: a deliverable with
+        # no track, or a track whose gate is clear, is not gated here.
         track_id = row["track"] if _has_col(conn, "dispatches", "track") else None
-        if track_id:
-            trk = tracks_lib.get_track(state_dir, track_id, project_id)
-            if trk and (trk.get("derived_status") if isinstance(trk, dict) else None) == "blocked":
-                print(
-                    f"Cannot promote {dispatch_id!r}: track {track_id!r} is blocked "
-                    "(plan-first gate not passed, or a hard dependency is open). "
-                    "Close the blocking open-items first, then re-run promote.",
-                    file=sys.stderr,
-                )
-                return 1
+        if track_id and _track_blocks_promotion(state_dir, project_id, dispatch_id, track_id):
+            return 1
 
         now = _now_utc()
         has_oaa = _has_col(conn, "dispatches", "operator_approved_at")

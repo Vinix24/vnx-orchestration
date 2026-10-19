@@ -1159,3 +1159,89 @@ def test_plan_gate_on_a_path_outside_the_repository_runs_both_seats(gate, state_
     assert lanes.providers[:2] == ["codex", "claude"]
     assert result.decision != "PASS"
     assert _open_plan_blocker(state_dir, "feat-gate")
+
+
+# --------------------------------------------------------------------------
+# P1e: a repeated scope change reconciles too (OI-2178)
+# --------------------------------------------------------------------------
+
+def test_a_repeat_scope_change_reconciles_after_the_first_reconcile_failed(state_dir, monkeypatch):
+    """If the reconcile after the scope/blocker commit fails once, the rows are
+    committed but derived_status is not. A repeat of the scope change (a retry
+    that changed nothing) must reconcile again and repair the projection."""
+    import plan_scope
+
+    _make_track(state_dir, "feat-retry", {"plan_scope": "light"})
+    real = plan_scope.track_reconciler.reconcile_track
+    calls: list[tuple] = []
+
+    def fail_first(*args, **kwargs):
+        calls.append(args)
+        if len(calls) == 1:
+            raise RuntimeError("injected: the first reconcile fails")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(plan_scope.track_reconciler, "reconcile_track", fail_first)
+
+    with pytest.raises(RuntimeError, match="injected"):
+        plan_scope.raise_to_architecture(state_dir, "feat-retry", PID, rule="4 deliverables (limit 4)")
+
+    assert _meta(state_dir, "feat-retry")["plan_scope"] == "architecture"
+    assert _open_plan_blocker(state_dir, "feat-retry")
+    assert tracks.get_track(state_dir, "feat-retry", PID)["derived_status"] != "blocked"
+
+    change = plan_scope.raise_to_architecture(state_dir, "feat-retry", PID, rule="4 deliverables (limit 4)")
+    assert change is None
+    assert tracks.get_track(state_dir, "feat-retry", PID)["derived_status"] == "blocked"
+
+
+def test_set_plan_scope_retry_reconciles_after_the_first_reconcile_failed(state_dir, monkeypatch):
+    """The same defect through the operator path: the retry finds the blocker
+    already open and must still reconcile, not skip it."""
+    import plan_scope
+
+    _make_track(state_dir, "feat-op", {"plan_scope": "light"})
+    real = plan_scope.track_reconciler.reconcile_track
+    calls: list[tuple] = []
+
+    def fail_first(*args, **kwargs):
+        calls.append(args)
+        if len(calls) == 1:
+            raise RuntimeError("injected: the first reconcile fails")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(plan_scope.track_reconciler, "reconcile_track", fail_first)
+
+    with pytest.raises(RuntimeError, match="injected"):
+        plan_scope.raise_to_architecture(state_dir, "feat-op", PID, rule="4 deliverables (limit 4)")
+    assert tracks.get_track(state_dir, "feat-op", PID)["derived_status"] != "blocked"
+
+    rc, out, err = _cli(state_dir, "horizon", "set-plan-scope", "feat-op", "architecture",
+                        "--reason", "confirm the architecture scope")
+    assert rc == 0, err
+    assert tracks.get_track(state_dir, "feat-op", PID)["derived_status"] == "blocked"
+
+
+def test_promote_refuses_an_open_oi_plan_with_a_stale_derived_status(state_dir):
+    """The promote lock must hold on the open-items store, not only on the
+    derived_status projection: an open OI-PLAN with a stale projection still
+    refuses promotion."""
+    _make_track(state_dir, "feat-stale", {"plan_scope": "architecture"}, seed=True)
+    rc, out, err = _add_deliverable(state_dir, "feat-stale", "Stale gate PR")
+    assert rc == 0, err
+    dispatch_id = out.split("Deliverable created: ", 1)[1].split()[0]
+
+    conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+    conn.execute("UPDATE tracks SET derived_status = 'queued' WHERE track_id = ?", ("feat-stale",))
+    conn.commit()
+    conn.close()
+    assert _open_plan_blocker(state_dir, "feat-stale")
+    assert tracks.get_track(state_dir, "feat-stale", PID)["derived_status"] == "queued"
+
+    rc, out, err = _cli(state_dir, "deliverable", "promote", dispatch_id)
+    assert rc == 1
+    assert "is blocked" in err
+    conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+    state = conn.execute("SELECT state FROM dispatches WHERE dispatch_id = ?", (dispatch_id,)).fetchone()[0]
+    conn.close()
+    assert state == "proposed"
