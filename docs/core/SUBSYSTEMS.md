@@ -34,7 +34,7 @@ This document is the single source of truth for which VNX subsystems are live, p
 | t0-context-rotation | T0 must rotate at 500K context: measured from the transcript, the guard hook stops new work and blocks the turn end until the rotate flow starts a successor. | `VNX_T0_ROTATE_FORCE_TOKENS` | ACTIVATE-and-measure | unknown — no probe yet |
 | harness-lane-review-gates | Diff-char cap for the harness-lane review gates (glm_gate/kimi_gate/deepseek_gate): one shared default of 800000, bounded by the argv ceiling (OI-1961), configurable per gate, read at runtime by gate_lane_contract.max_diff_chars() (OI-1874). | `VNX_KIMI_GATE_MAX_DIFF_CHARS` | ACTIVATE-and-measure | unknown — no probe yet |
 | plan-gate-panel | 5-model deliberation panel for plan-first enforcement. | `VNX_PLAN_GATE_ENFORCE` | SCOPE | works — panel runs, verdicts recorded |
-| plan-gate-task-class-scope | Restrict panel to complex features; run trivial tracks on a reduced 2-seat panel (scope read-site: plan_gate_enforcement.plan_gate_scope). | `VNX_PLAN_GATE_COMPLEX_ONLY` | SCOPE | works — scope read-site present (light plans run 2 seats) |
+| plan-gate-task-class-scope | Flag with no effect since P1: VNX_PLAN_GATE_COMPLEX_ONLY is read by complex_only_active() but changes no plan-gate run; kept until P4 reworks the effectiveness probe. | `VNX_PLAN_GATE_COMPLEX_ONLY` | SCOPE | no effect — flag read but changes no plan-gate run (P1) |
 | subsystem-cockpit | SUBSYSTEMS.md + config_registry + vnx subsystems + dashboard tile. | — | COCKPIT | degraded — SSOT exists, probes partial |
 | effectiveness-probe-framework | Generic "does it produce crap?" probes per subsystem. | — | COCKPIT | unknown — framework not built yet |
 
