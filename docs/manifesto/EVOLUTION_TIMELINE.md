@@ -145,7 +145,7 @@ This timeline is a concise reconstruction of the technical evolution, without pr
 
 VNX started as tmux `send-keys` scripts — the most direct way to control terminal panes programmatically. This means the codebase grew organically from bash, not as a planned language choice. It has since shifted heavily toward Python: a line count under `scripts/` (`.py`) against `scripts/`+`bin/` (`.sh`) puts the split at roughly 92%/8% Python/Bash (line count of tracked `scripts/**/*.py` against `scripts/**/*.sh` plus `bin/*`, measured 2026-10-18), not the ~60/40 Bash/Python this section originally claimed.
 
-**Why bash persists in its remaining 7%:**
+**Why bash persists in its remaining 8%:**
 - Tmux orchestration (`send-keys`, pane management, session control) is inherently shell-native.
 - File-bus operations (watch, move, append) are one-liners in bash but verbose in Python.
 - Supervisor, dispatcher, and smart-tap were written first and work reliably.
@@ -382,7 +382,7 @@ Skills are just prompts. Worker skills and manager skills use the identical mech
 
 ---
 
-## Phase 16: Provider Switch and Content Boundary (2026-10-14 to 2026-10-15)
+## Phase 16: Provider Switch and Content Boundary (2026-09-28 to 2026-10-15)
 
 **What changed**
 - `vnx providers`: the switch core, the CLI and a coverage guard (#2055). Review gates honor it (#2058). The intelligence tagger, scout, classifier and analyzer honor it, and the dream consolidation also honors the content boundary (#2057).
@@ -391,6 +391,7 @@ Skills are just prompts. Worker skills and manager skills use the identical mech
 
 **Outcome**
 - The switch exists and does not enforce yet: its write verbs refuse until every launch function calls `provider_switch.require` (`vnx providers list`). The content boundary is read by the conversation analyzer and the dream consolidation only (OI-2172). `docs/core/PROVIDER_LANES.md`, "Provider switch".
+- The learning-loop, registry and content-routing work (#1965, #1966, #1968, #1969, #1972, #1973, #2023, #2032) shipped in v1.7.0/v1.7.1; the switch and the codex registry launch (#2055, #2057, #2058, #2059) are on main, not yet released.
 
 ---
 
@@ -410,7 +411,7 @@ Skills are just prompts. Worker skills and manager skills use the identical mech
 **What changed**
 - A function-size ratchet in CI (#2036). One profile prelude, a collection manifest and an xdist shadow job that never fails a check (#2082), the parity check (#2087) and a cutover history that counts only verdicts a failed parity step cannot leave clean (#2105). Worker-safe fixes in the tests and the subprocess adapter that the parallel run exposed (#2101, #2102, #2103).
 - One CHANGELOG fragment per PR under `changelog.d/`, folded into `CHANGELOG.md` by the release PR (#2085, #2097, #2099).
-- Three point releases were cut in this period (#1960, #2011, #2035). The project `CLAUDE.md` carries four build rules (#2031).
+- Three point releases were cut across the period boundary: v1.6.7 (#1960) on 28 September, v1.7.0 (#2011) on 30 September and v1.7.1 (#2035) on 3 October. The project `CLAUDE.md` carries four build rules (#2031).
 - The architecture documents under `docs/core/` were brought up to main (#2108, #2109).
 
 ---

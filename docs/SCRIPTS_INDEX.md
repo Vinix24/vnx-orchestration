@@ -30,8 +30,11 @@ These files implement the main `bin/vnx` command surface:
 - `scripts/commands/registry.sh` — inspect or manage local registry state
 - `scripts/commands/roadmap.sh` — roadmap-related CLI helpers
 - `scripts/commands/gate.sh` — run the required review gates for a PR (`vnx gate <pr>`)
-- `scripts/commands/dispatch-agent.sh` — dispatch a task to a named agent (`vnx dispatch-agent`)
 - `scripts/commands/worktree_release.sh` — governed release path for locked worktrees (`vnx worktree-release`)
+
+`vnx dispatch-agent` is a pip CLI command (`vnx_cli/commands/dispatch_agent.py`), not a
+`bin/vnx` subcommand; `scripts/commands/dispatch-agent.sh` is a standalone repo-local
+wrapper (see `docs/guides/AGENT_CREATION_GUIDE.md`).
 
 ## Runtime And Dispatch
 

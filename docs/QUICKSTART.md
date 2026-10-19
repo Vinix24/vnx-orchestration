@@ -47,20 +47,20 @@ vnx dispatch-agent --agent research-analyst \
 
 ## Step 4: Read the Result
 
-The worker's report lands in `$VNX_DATA_DIR/unified_reports/<dispatch-id>.md` and
-its receipt in `$VNX_DATA_DIR/state/t0_receipts.ndjson`. Query the receipt instead
-of reading the file:
+The worker's report lands in the store's `unified_reports/<dispatch-id>.md` and
+its receipt in `state/t0_receipts.ndjson`. `vnx doctor` prints this project's
+store root on its `state:location` line, so derive `$DATA` from it and use that
+path in every command you copy. Query the receipt instead of reading the file:
 
 ```bash
 DATA=$(vnx doctor | sed -n 's/.*state:location.*: //p')
 python3 <path-to-checkout>/scripts/receipt_query.py by-dispatch <dispatch-id> --state-dir $DATA/state
 ```
 
-Run both from your project directory. `vnx doctor` prints this project's runtime directory on its
-`state:location` line, so `$DATA` is the project's own store. `receipt_query.py` ships in a
-checkout of this repository, not in the pip package, so the second line points at one.
-The walkthrough with
-real output is in the [README](../README.md#your-first-dispatch).
+Run both from your project directory. `receipt_query.py` ships in the pip package
+(`pyproject.toml` ships `scripts/**/*`) but has no console entry point, so run it
+as a Python file; `<path-to-checkout>` above is one place it lives. The walkthrough
+with real output is in the [README](../README.md#your-first-dispatch).
 
 ## Step 5: Check Status
 
