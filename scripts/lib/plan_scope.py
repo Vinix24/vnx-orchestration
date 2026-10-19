@@ -294,14 +294,32 @@ class ScopeChange:
         return f"plan-scope: {self.track_id} {move} ({self.why}){note}"
 
 
-def _reconciled(state_dir: Path, project_id: str, change: Optional[ScopeChange]) -> Optional[ScopeChange]:
-    """Re-derive the track's status after the commit when OI-PLAN was seeded.
+def _has_open_plan_blocker(state_dir: Path, project_id: str, track_id: str) -> bool:
+    """Whether OI-PLAN-<track> is open in the store as it stands after the commit."""
+    conn = _connect(state_dir)
+    try:
+        return _any_open(_plan_rows_in(conn, track_id, project_id))
+    finally:
+        conn.close()
+
+
+def _reconciled(
+    state_dir: Path, project_id: str, track_id: str, change: Optional[ScopeChange],
+) -> Optional[ScopeChange]:
+    """Re-derive the track's status after the commit when OI-PLAN is open.
 
     derived_status is a projection of the committed rows (the promote-lock reads
     it), so it is computed once they are durable, as ``seed_plan_blocker`` does.
+    It must re-derive whenever the store has an open OI-PLAN — newly seeded,
+    already open, or a retry that changed nothing — because a failed reconcile
+    (the rows committed, the projection did not) is repaired by no other path,
+    and until it is, ``deliverable promote`` would read a stale status and could
+    promote while the blocker is open. A reconcile that raises is not swallowed:
+    it propagates so the command reports it and exits non-zero, and a later
+    repeat repairs the projection.
     """
-    if change is not None and change.gate == SEEDED:
-        track_reconciler.reconcile_track(state_dir, change.track_id, project_id)
+    if _has_open_plan_blocker(state_dir, project_id, track_id):
+        track_reconciler.reconcile_track(state_dir, track_id, project_id)
     return change
 
 
@@ -356,7 +374,7 @@ def raise_to_architecture(
                 old_scope=LIGHT, reason=rule, rule=rule, actor=actor, conn=conn,
             )
             change = ScopeChange(track_id, LIGHT, ARCHITECTURE, f"rule: {rule}", gate)
-    return _reconciled(state_dir, project_id, change)
+    return _reconciled(state_dir, project_id, track_id, change)
 
 
 def ensure_plan_blocker(state_dir: Path, track_id: str, project_id: str) -> Optional[ScopeChange]:
@@ -368,7 +386,7 @@ def ensure_plan_blocker(state_dir: Path, track_id: str, project_id: str) -> Opti
     with _write_transaction(state_dir) as conn:
         reading, rows = _locked_reading(conn, track_id, project_id)
         change = None if reading is None else _recover_in(conn, track_id, project_id, reading, rows)
-    return _reconciled(state_dir, project_id, change)
+    return _reconciled(state_dir, project_id, track_id, change)
 
 
 def set_by_hand(
@@ -398,7 +416,7 @@ def set_by_hand(
             old_scope=reading.scope, reason=reason, rule=None, actor="operator", conn=conn,
         )
         change = ScopeChange(track_id, reading.scope, scope, f"by hand: {reason.strip()}", gate)
-    return _reconciled(state_dir, project_id, change)
+    return _reconciled(state_dir, project_id, track_id, change)
 
 
 def deliverable_rule(deliverable_count: int) -> Optional[str]:
