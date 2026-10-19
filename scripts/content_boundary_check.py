@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import logging
 import os
 import re
 import sys
@@ -88,6 +89,31 @@ KIMI_CONTEXT = re.compile(r"context(?:_\d+)?\.jsonl")
 # ``"key": "value"`` in a line that is no JSON object; the value may be cut off at the end.
 _RAW_PAIR = {key: re.compile(r'"%s"\s*:\s*"((?:[^"\\]|\\.)*)' % key)
              for key in ("model", "cwd", "path", "role")}
+
+
+class _PathFreeFilter(logging.Filter):
+    """Rewrites ``content_class`` marker warnings so no path reaches a handler.
+
+    ``content_class.classify_path`` warns when a project marker cannot be read and passes the
+    directory path as a logging argument. This scanner promises path-free output, and the
+    nightly runner captures stderr, so the filter replaces the whole record with a fixed,
+    path-free text and counts it; the count lets the run still report that a marker was
+    unreadable.
+    """
+
+    _REWRITTEN = "content_class: a project marker was unreadable; the scan counted it"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.unreadable_markers = 0
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = str(record.msg)
+        if "project marker" in message and "unreadable" in message:
+            record.msg = self._REWRITTEN
+            record.args = ()
+            self.unreadable_markers += 1
+        return True
 
 
 def _model_lane(model: Any) -> Optional[str]:
@@ -330,6 +356,34 @@ def scan_claude_transcript(path: Path, ctx: Context) -> Transcript:
     return result
 
 
+def _decoded_tool_arguments(record: Dict[str, Any]) -> Iterator[str]:
+    """Strings inside a kimi record's JSON-encoded tool-call arguments, keys included.
+
+    A kimi assistant record carries ``tool_calls[].function.arguments`` as a JSON-encoded
+    string. ``_strings`` yields that string raw, so a restricted path whose non-ASCII
+    characters ``json.dumps`` escaped (``é`` becomes ``\\u00e9``) would not match. Decode each
+    arguments field and yield the decoded strings; a field that does not parse yields nothing
+    here and still counts through its raw form in ``_strings``.
+    """
+    tool_calls = record.get("tool_calls")
+    if not isinstance(tool_calls, list):
+        return
+    for call in tool_calls:
+        if not isinstance(call, dict):
+            continue
+        function = call.get("function")
+        if not isinstance(function, dict):
+            continue
+        arguments = function.get("arguments")
+        if not isinstance(arguments, str):
+            continue
+        try:
+            decoded = json.loads(arguments)
+        except (ValueError, TypeError):
+            continue
+        yield from _strings(decoded)
+
+
 def _inspect_kimi_record(record: Dict[str, Any], result: Transcript, ctx: Context) -> None:
     role = record.get("role")
     if role == "_system_prompt":
@@ -341,7 +395,8 @@ def _inspect_kimi_record(record: Dict[str, Any], result: Transcript, ctx: Contex
     # one this check does not know yet included.
     if role == "tool" or "restricted_access" in result.signals:
         return
-    if _names_restricted_path("\n".join(_strings(record)), ctx):
+    text = "\n".join(_strings(record)) + "\n" + "\n".join(_decoded_tool_arguments(record))
+    if _names_restricted_path(text, ctx):
         result.signals.add("restricted_access")
 
 
@@ -628,7 +683,8 @@ def _incomplete_reasons(boundary: content_class.Boundary, cov: Coverage) -> List
 
 
 def _build_details(boundary: content_class.Boundary, tally: Tally, cov: Coverage,
-                   since: float, since_source: str, now: float) -> Tuple[str, Dict[str, Any]]:
+                   since: float, since_source: str, now: float,
+                   marker_unreadable: int = 0) -> Tuple[str, Dict[str, Any]]:
     armed, armed_reason = _armed(boundary)
     gating = sum(sum(per_lane.values()) for per_lane in tally.counts.values())
     reasons = _incomplete_reasons(boundary, cov)
@@ -643,6 +699,7 @@ def _build_details(boundary: content_class.Boundary, tally: Tally, cov: Coverage
         "unreadable_files": cov.unreadable_files,
         "traversal_errors": cov.traversal_errors,
         "non_regular_files": cov.non_regular_files,
+        "marker_unreadable": marker_unreadable,
         "malformed_records": tally.malformed_records,
         "malformed_sessions": tally.malformed_sessions,
         "kimi_system_prompt_reported": tally.kimi_system_reported,
@@ -684,12 +741,34 @@ def run_check(*, home: Path, stores_root: Path, data_dir: Path, state_dir: Path,
         config_roots=_config_roots(home, cov),
     )
     files = discover(home, Path(stores_root), Path(data_dir), cov)
-    tally = _scan(files, ctx, since, cov)
-    status, details = _build_details(boundary, tally, cov, since, since_source, now)
+    marker_filter = _PathFreeFilter()
+    content_class.logger.addFilter(marker_filter)
+    try:
+        tally = _scan(files, ctx, since, cov)
+    finally:
+        content_class.logger.removeFilter(marker_filter)
+    status, details = _build_details(boundary, tally, cov, since, since_source, now,
+                                     marker_unreadable=marker_filter.unreadable_markers)
 
     if write:
         _write_outputs(data_dir, state_dir, status, details, now)
     return {"status": status, "details": details}
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    """Append every byte of ``data``; a write that returns 0 is an ``OSError``.
+
+    ``os.write`` may write fewer bytes than asked. A single write that ignores the returned
+    count leaves a truncated ledger record while the beacon checkpoint still moves. Write in a
+    loop until nothing is left, and refuse a write that returns 0 (nothing written but no
+    error): continuing would loop forever.
+    """
+    view = memoryview(data)
+    while len(view):
+        written = os.write(fd, view)
+        if written <= 0:
+            raise OSError(f"os.write returned {written} with {len(view)} bytes remaining")
+        view = view[written:]
 
 
 def _write_outputs(data_dir: Path, state_dir: Path, status: str, details: Dict[str, Any], now: float) -> None:
@@ -699,12 +778,12 @@ def _write_outputs(data_dir: Path, state_dir: Path, status: str, details: Dict[s
     line = json.dumps({"ts": int(now), "status": status, "details": details}, sort_keys=True) + "\n"
     fd = os.open(str(ledger), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
     try:
-        os.write(fd, line.encode("utf-8"))
+        _write_all(fd, line.encode("utf-8"))
     finally:
         os.close(fd)
     # The ledger is primary (ADR-005): the beacon, and the checkpoint it carries, only move
-    # after the append succeeded. A failed append raises, the run exits non-zero and the old
-    # checkpoint stays, so the next run re-scans the same window.
+    # after the complete record is on disk. A failed write raises, the run exits non-zero and
+    # the old checkpoint stays, so the next run re-scans the same window.
     HealthBeacon(Path(data_dir), "content_boundary",
                  expected_interval_seconds=BEACON_INTERVAL_SECONDS).heartbeat_strict(status, details)
 

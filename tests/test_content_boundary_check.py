@@ -7,6 +7,7 @@ a tmp client root and a tmp personal root. No real store, no real transcript is 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -861,3 +862,81 @@ def test_doctor_fails_on_an_ok_beacon_that_reports_traversal_errors(world):
     (check,) = vnx_doctor.check_content_boundary_beacon(_doctor_paths(world))
     assert check.status == vnx_doctor.FAIL
     assert "traversal_errors" in check.message
+
+
+# ---------------------------------------------------------------------------
+# Fix round 4 (PR #2061): a complete ledger record before the checkpoint moves,
+# kimi tool arguments decoded, path-free warnings
+# ---------------------------------------------------------------------------
+
+def test_a_short_write_never_truncates_the_ledger_and_a_zero_write_never_moves_the_beacon(world, monkeypatch):
+    boundary = world.write_boundary()
+    world.claude("ds-leak", [assistant("deepseek-v4-pro"), user_text(f"leak {TOKEN}")])
+    real_write = os.write
+
+    # A write that makes at most 10 bytes per call must still leave a complete, parseable line.
+    def short_write(fd, data):
+        return real_write(fd, data[:10])
+
+    monkeypatch.setattr(os, "write", short_write)
+    result = world.run(boundary)
+    monkeypatch.setattr(os, "write", real_write)
+    lines = world.ledger_path().read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    record = json.loads(lines[0])
+    assert record["status"] == "fail"
+    assert record["details"]["gating_total"] == 1
+    assert record["ts"] == int(NOW)
+
+    # A write that returns 0 raises, and the beacon checkpoint stays where the last run left it.
+    checkpoint = cbc.read_previous_scanned_through(world.data)
+    assert checkpoint == int(NOW)
+    monkeypatch.setattr(os, "write", lambda fd, data: 0)
+    with pytest.raises(OSError):
+        world.run(boundary)
+    monkeypatch.setattr(os, "write", real_write)
+    assert cbc.read_previous_scanned_through(world.data) == checkpoint
+    assert len(world.ledger_path().read_text(encoding="utf-8").splitlines()) == 1
+
+
+def test_kimi_tool_arguments_are_decoded_before_the_path_check(world):
+    accent_root = world.client_root / "clients-é"
+    boundary = world.write_boundary(client_roots=[str(accent_root)])
+    path = str(accent_root / "group" / "notes.md")
+    world.kimi("literal", [
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"function": {"arguments": json.dumps({"path": path}, ensure_ascii=False)}}]},
+    ])
+    world.kimi("escaped", [
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"function": {"arguments": json.dumps({"path": path})}}]},
+    ])
+    result = world.run(boundary)
+    assert result["details"]["counts"]["restricted_access"] == {"kimi": 2}
+    assert sorted(result["details"]["sessions"]["restricted_access"]) == ["escaped", "literal"]
+
+
+def test_an_unreadable_project_marker_is_reported_path_free(world, caplog):
+    boundary = world.write_boundary()
+    cwd = world.home / "work" / "nested"
+    cwd.mkdir(parents=True)
+    (cwd / content_class.PROJECT_MARKER).write_bytes(b"\xff\xfe invalid utf-8")
+    world.claude("ds-marker", [assistant("deepseek-v4-pro", cwd=str(cwd))])
+
+    with caplog.at_level(logging.WARNING):
+        result = world.run(boundary)
+
+    # The run still reports the unreadable marker, without naming its directory.
+    assert result["details"]["marker_unreadable"] == 1
+    assert any("unreadable" in r.getMessage() for r in caplog.records)
+    assert str(cwd) not in caplog.text
+
+    # The nightly runner captures stderr: a CLI run must not leak the path there either.
+    proc = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "content_boundary_check.py"),
+         "--home", str(world.home), "--stores-root", str(world.stores),
+         "--data-dir", str(world.data), "--state-dir", str(world.state),
+         "--boundary-file", str(world.boundary_file), "--since", "0"],
+        capture_output=True, text=True, timeout=120, cwd=str(world.home.parent),
+    )
+    assert str(cwd) not in proc.stderr
