@@ -179,7 +179,8 @@ The switch is read fresh on every decision, so a change reaches the next call in
 every process. It governs calls, never evidence: a refusal is booked as
 `provider_switched_off`, never as an auth, credit or quota failure. Every function
 that launches a non-claude provider process must call `provider_switch.require`
-first; `ENFORCED` and `PENDING_B` in `provider_switch.py` list which ones do. The
+first. `ENFORCED` in `provider_switch.py` lists the launch functions that already
+call it; `PENDING_B` lists the ones that do not call it yet. The
 write verbs refuse while any launch function is still pending, and refuse from a
 linked worktree or from inside a dispatch. `vnx providers list` prints the current
 enforcement state and the pending functions. Review gates and the intelligence
