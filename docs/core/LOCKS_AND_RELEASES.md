@@ -188,7 +188,7 @@ door stops at the first refusal. The account of the whole door is `docs/core/DIS
 
 A dry run (`--dry-run`) prints one line per preflight that went through, in this order: `CI gate:`, `Review gate:`,
 `ADR gate:`, `contract_invalid gate:`, `Branch-protection gate:` (an overridden preflight prints `OVERRIDE:` instead).
-It ends in `OK: PR #N (dry-run) via <method>` and writes no merge and no receipt. A refusal prints
+It ends in `OK: PR #N (dry-run) via <method>` and writes no merge and no receipt — but only without `--json`: with `--json` the JSON result is printed and no `OK:` line appears (the `if args.json` / `elif args.dry_run` branches in `scripts/pr_merge.py` main). A refusal prints
 `NO-GO: <message>` on stderr, names the preflight in `refused_by` with `--json`, and exits non-zero.
 
 | Lock | Code | Opens with | Who | Trail | Test |
