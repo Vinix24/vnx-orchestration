@@ -29,6 +29,7 @@ reaches it fails the test). Nothing leaves ``tmp_path``.
 from __future__ import annotations
 
 import json
+from argparse import Namespace
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -1040,6 +1041,73 @@ class TestRoundsOpen:
         ledger = review_rounds.parse_ledger(Path("rounds.ndjson"), json.dumps({**_opened(), **broken}) + "\n")
 
         assert ledger.opened == () and [bad.pr_number for bad in ledger.bad] == [PR]
+
+    def test_rounds_open_follows_vnx_state_dir_outside_the_data_dir(self, tmp_path, monkeypatch):
+        """OI-2181 (1): ``rounds open`` writes the ledger the gate reads, honoring ``VNX_STATE_DIR``.
+
+        With a state dir outside ``<VNX_DATA_DIR>/state`` the old command wrote the
+        ``opened`` line and its receipt into a ledger nobody read and reported success.
+        """
+        import gate_request_handler
+        import review_rounds_cli
+
+        data_dir = tmp_path / "data"
+        state_dir = tmp_path / "external" / "state"
+        reports_dir = data_dir / "unified_reports"
+        for directory in (
+            state_dir / "review_gates" / "results",
+            state_dir / "review_gates" / "requests",
+            reports_dir / "headless",
+            # The old store (``<VNX_DATA_DIR>/state``) exists too, so the old command
+            # writes there and reports success — exactly the bug this test pins.
+            data_dir / "state" / "review_gates",
+        ):
+            directory.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("VNX_HOME", str(review_stack_support.VNX_ROOT))
+        monkeypatch.setenv("PROJECT_ROOT", str(tmp_path))
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+        monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
+        monkeypatch.setenv("VNX_REPORTS_DIR", str(reports_dir))
+        monkeypatch.setenv("VNX_DISPATCH_DIR", str(data_dir / "dispatches"))
+        monkeypatch.setenv("VNX_LOGS_DIR", str(data_dir / "logs"))
+        monkeypatch.setenv("VNX_PIDS_DIR", str(data_dir / "pids"))
+        monkeypatch.setenv("VNX_LOCKS_DIR", str(data_dir / "locks"))
+        monkeypatch.setenv("VNX_DB_DIR", str(data_dir / "database"))
+        monkeypatch.chdir(tmp_path)
+
+        rc = review_rounds_cli.main(["rounds", "open", "--pr", str(PR), "--reason", OPEN_REASON])
+
+        assert rc == 0
+        ledger = state_dir / "review_gates" / "rounds.ndjson"
+        assert [(line["basis"], line["pr_number"]) for line in _opened_lines(ledger)] == [("attested", PR)]
+        # The gate's reader resolves the same ledger: the PR is opened, not refused.
+        rounds = gate_request_handler._PrRounds.read(state_dir / "review_gates", PR)
+        assert not rounds.unreadable and rounds.history_missing == ""
+        assert rounds.cap.pr_number == PR
+        # The receipt lands in the same store the gate reads, not under <VNX_DATA_DIR>/state.
+        assert '"review_round_opened"' in (state_dir / "t0_receipts.ndjson").read_text(encoding="utf-8")
+        assert not (data_dir / "state" / "review_gates" / "rounds.ndjson").exists()
+
+
+class TestReviewCliSpawnFailure:
+    def test_a_spawn_failure_is_a_defined_error(self, tmp_path, monkeypatch, capsys):
+        """OI-2180 (4): an ``OSError`` from process creation is caught, named and returned as an error code."""
+        import vnx_cli.commands.review as review_cli
+
+        script = tmp_path / "review_rounds_cli.py"
+        script.write_text("", encoding="utf-8")
+        monkeypatch.setattr(review_cli, "resolve_review_script", lambda root=None: script)
+
+        def broken(*_args, **_kwargs):
+            raise OSError("spawn failed")
+
+        monkeypatch.setattr(review_cli.subprocess, "run", broken)
+
+        rc = review_cli.vnx_review(Namespace(review_args=["rounds", "open", "--pr", str(PR), "--reason", "x"]))
+
+        assert rc == review_cli._EXIT_ERROR
+        assert f"could not start {script}" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------

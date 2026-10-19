@@ -44,4 +44,8 @@ def vnx_review(args) -> int:
             file=sys.stderr,
         )
         return _EXIT_ERROR
-    return subprocess.run([sys.executable, str(script), *args.review_args]).returncode
+    try:
+        return subprocess.run([sys.executable, str(script), *args.review_args]).returncode
+    except OSError as exc:
+        print(f"vnx review: could not start {script}: {exc}", file=sys.stderr)
+        return _EXIT_ERROR

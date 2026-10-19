@@ -67,13 +67,13 @@ def _data_dir(explicit: Optional[str]) -> Path:
     return Path(ensure_env()["VNX_DATA_DIR"])
 
 
-def _emit_receipt(data_dir: Path, line, *, ledger: Path, evidence) -> None:
+def _emit_receipt(state_dir: Path, line, *, ledger: Path, evidence) -> None:
     """One ``review_round_opened`` receipt through the receipt API, into this store's receipt ledger."""
     from governance_receipts import emit_governance_receipt
     from review_rounds import RECEIPTS_NAME
 
     emit_governance_receipt(
-        RECEIPT_EVENT, receipt_kind="state_mutation", receipts_file=str(data_dir / "state" / RECEIPTS_NAME),
+        RECEIPT_EVENT, receipt_kind="state_mutation", receipts_file=str(state_dir / RECEIPTS_NAME),
         pr_number=line.pr_number, basis=line.basis, actor=line.actor, reason=line.reason,
         ledger=str(ledger), evidence=list(evidence), opened_at=line.recorded_at,
         **({"project_id": line.project_id} if line.project_id else {}),
@@ -91,10 +91,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         print('vnx review rounds open: --pr must be a positive PR number and --reason "..." must say why', file=sys.stderr)
         return EXIT_ERROR
     data_dir = _data_dir(args.data_dir)
-    review_gates = data_dir / "state" / "review_gates"
+    state_dir = review_rounds.store_state_dir(data_dir if args.data_dir else None)
+    review_gates = state_dir / "review_gates"
     ledger = review_rounds.ledger_path(review_gates)
     try:
-        evidence = review_rounds.prior_evidence(data_dir, args.pr)
+        evidence = review_rounds.prior_evidence(data_dir, args.pr, state_dir=state_dir)
         status, line = review_rounds.open_pr(
             ledger, review_rounds.store_project_id(review_gates), args.pr, basis=review_rounds.BASIS_ATTESTED,
             evidence=len(evidence), actor=getpass.getuser(), reason=reason,
@@ -109,7 +110,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
         return EXIT_OK
     try:
-        _emit_receipt(data_dir, line, ledger=ledger, evidence=evidence)
+        _emit_receipt(state_dir, line, ledger=ledger, evidence=evidence)
     except (AppendReceiptError, OSError, ValueError) as exc:
         print(
             f"vnx review rounds open: PR #{args.pr} is opened and the ledger line stands, but the "
