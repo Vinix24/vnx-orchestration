@@ -47,6 +47,7 @@ def test_seats_filters_to_requested_roster(tmp_path, monkeypatch):
         "audit src/",
         "--seats",
         "codex,claude",
+        "--allow-degraded",
         "--out",
         str(tmp_path / "report.md"),
     ])
@@ -80,6 +81,42 @@ def test_unknown_seat_errors_without_dispatch(tmp_path, monkeypatch, capsys):
     assert rc == 2
     assert "panel: unknown --seats value(s): bogus" in captured.err
     assert "known seats:" in captured.err
+
+
+def test_seats_below_synthesis_minimum_refuses_early(tmp_path, monkeypatch, capsys):
+    """A roster that cannot reach the synthesis minimum is refused before any seat
+    runs: rc 2, the synthesis-minimum message, and no dispatcher / deliberation call."""
+    panel = _load_panel_cli()
+    calls = {}
+
+    def fake_dispatcher_factory(data_dir, timeout, role=None):
+        calls["dispatcher_factory"] = True
+        return lambda provider, model, prompt, dispatch_id: "ok"
+
+    def fake_run_deliberation(*args, **kwargs):
+        calls["run_deliberation"] = True
+        return _FakeResult()
+
+    monkeypatch.setattr("plan_gate_panel._make_default_dispatcher", fake_dispatcher_factory)
+    monkeypatch.setattr("plan_gate_panel.load_synthesis_min_seats", lambda config_path=None: 3)
+    monkeypatch.setattr(panel, "run_deliberation", fake_run_deliberation)
+
+    rc = panel.main([
+        "sweep",
+        "audit src/",
+        "--seats",
+        "codex,claude",
+        "--out",
+        str(tmp_path / "report.md"),
+    ])
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "cannot reach the synthesis minimum" in captured.err
+    assert "nothing was dispatched" in captured.err
+    assert "--allow-degraded" in captured.err
+    assert "dispatcher_factory" not in calls
+    assert "run_deliberation" not in calls
 
 
 def test_default_omits_roster_kwarg_to_preserve_full_fleet_path(tmp_path, monkeypatch):
