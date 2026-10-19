@@ -1,7 +1,7 @@
 # NDJSON Receipt Format
 
 **Version**: 2.0.0
-**Last Updated**: 2026-07-22
+**Last Updated**: 2026-10-19
 **Status**: Active
 **Purpose**: Canonical schema for receipt lines in `.vnx-data/state/t0_receipts.ndjson`.
 
@@ -122,6 +122,16 @@ Measured 29-09 on the same 13,018 reports: outside an explicit red label, no wor
 - **Envelope sub-path** (`dispatch_envelope.py`): the report already exists on disk by receipt-write time, so `dispatch_envelope.py::_verification_from_report` threads it through the same `report_parser.py::extract_validation` extractor and `verification_runs.verification_record` builder Path 2 uses, and passes the result to `emit_dispatch_receipt(verification=...)`.
 - **Multi-provider sub-path** (`provider_dispatch.py`): `report_path` is a precomputed string; the file doesn't exist yet at receipt-write time. `provider_dispatch.py` passes `verification={"method": "pending-report", ...}` explicitly — never a silent blank. This is never backfilled (ADR-005 append-only forbids rewriting the line): `compute_verdict` reads it as `investigate`, `evidence_complete: false`, permanently.
 
+## Open outcomes and `receipt_query.py decide`
+
+A receipt is not the end of a dispatch. The reader folds a dispatch's receipts into one outcome (`accept`, `investigate`, `reject`, `unknown`, `superseded`), and a T0 reads what is still open with `receipt_query.py open-outcomes`. The rule and the T0 cycle are in `docs/core/DISPATCH_RULES.md` section 13. What matters for a ledger reader:
+
+- **What is listed.** `scripts/lib/open_outcomes.py` lists, per project, a dispatch whose outcome is `reject`, `investigate` or `unknown` and for which no outcome decision exists, if it has a receipt at or after `OPEN_OUTCOMES_EPOCH` (2026-09-29). An `accept` and a `superseded` dispatch are never listed, with or without a T0 decision. Dispatches in `dispatches/active/`, `dispatches/rejected/<reason>/` and `dispatches/abandoned/` are listed as their own kinds (`active_dispatch`, `abandoned_dispatch`) when nothing closes them. The list does not hold every dispatch that lacks an explicit accept.
+- **Deciding.** `python3 scripts/receipt_query.py decide <dispatch_id> accept|reject --reason "<why>" --state-dir <state-dir>` appends one `outcome_decision` line to `t0_decision_log.jsonl` in the same state dir (append under `flock`, the last decision per dispatch counts, scoped by `project_id`). `--reason` must not be blank. The receipt ledger itself is not touched.
+- **`dead_letter/`.** The active-dispatch drain moves a dispatch to `dead_letter/` only on a T0 `reject`. Two writers do it without a decision, both after a failed receipt: `crash_recovery_sweep.py` and the subprocess lane's final failure (`docs/core/DISPATCH_RULES.md` section 13). The dispatch stays an open `reject` until a T0 decides.
+
+Tests: `tests/test_open_outcomes.py`.
+
 ## Fresh reading: `open-outcomes --recount`
 
 The ledger is append-only, so the `verification{}` of a receipt is the reading of the reader as it was the day the receipt was written. A receipt from before a reader repair keeps its old reading for good, and the `outcome` of an open item is decided on it. `--recount` puts the reading of today next to it:
@@ -217,6 +227,12 @@ Two independent checks close this, composed so `{severity: "blocker", destinatio
 `session{}` (the live `session_resolver.py` resolution of which terminal/session is running — `session_id`, `terminal`, `model`, `provider`, `captured_at`) is removed. v2 keeps exactly one field: `session_id`, a stable pointer resolved once via the existing priority chain (report-provided → per-terminal file → env var → provider file → `"unknown"`). The rest of what `session{}` used to carry — `model`, `provider`, `token_usage`, `instruction_sha256` — is promoted to top-level receipt fields directly (they were never session *state*, just nested under it). Anything needing session liveness/heartbeat looks it up in `runtime_coordination.db` by `session_id` at read time.
 
 **Path asymmetry, grep-verified:** this resolution (`append_receipt_internals/enrichment.py::_enrich_session_metadata`) only runs on Path 2, via `_enrich_completion_receipt`. `governance_emit.py::emit_dispatch_receipt` (Path 1) has no `session_id` parameter and never calls it — a Path-1 receipt (subprocess/multi-provider lane) carries no `session_id` key at all, not even `"unknown"`. Path 2 receipts always get one (`setdefault`, so a caller-supplied value is never overwritten).
+
+## `takeover_from` on a taken-over review seat
+
+A review seat that another reviewer filled (the takeover chain, `docs/core/PROVIDER_LANES.md`) carries `takeover_from` next to `takeover`, `takeover_reason`, `takeover_source_status` and `takeover_path`. The field is on the request and result records of the seat and, copied to the top level, on the `review_gate_request` receipt together with `failure_reason` (`scripts/lib/gate_request_handler.py` `_emit_review_request_receipt`; `scripts/lib/gate_recorder.py` `_TAKEOVER_FIELDS`).
+
+Read it, not the gate name. A result whose last report line says `kimi_gate: PASS` can be a seat that took over. `takeover_from` is the gate of the last hop in `takeover_path`, the seat passed over directly before the signer, so in a chain of several hops it is not the first seat. It is also not the seat the record fills: that is the `seat` stamped on its request, else `takeover_path[0]` (`scripts/lib/review_seat_evaluation.py` `seat_for`). In a `chain_exhausted` result `takeover_from` is the gate originally requested. Field table and the merge door's use of it: `docs/core/45_HEADLESS_REVIEW_EVIDENCE_CONTRACT.md` section 3.5.
 
 ## Fields kept, unchanged
 

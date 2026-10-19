@@ -54,7 +54,7 @@ the plan passes.
 or `light` (no plan-gate). `vnx horizon add` requires `--plan-scope architecture|light`
 and refuses without it. The scope moves **up by itself, never down**: the fourth
 deliverable on a light track (`deliverable add`), or a build dispatch at the door whose
-paths fall in the schema, security, gate/merge or store-resolution class, whose
+paths fall in the schema, security, gate/merge, store-resolution or `outside-repo` class (a path that leaves the repository), whose
 variant is `coding-strict`, or that names no paths at all (`plan_scope.dispatch_rule`,
 path classes in `smart_router.plan_scope_path_category`). An upward move seeds
 `OI-PLAN-<track>` unless the track already has a plan-gate record; a resolved one is
@@ -90,6 +90,12 @@ stamps `resolved_at` and reconciles):
   escape-hatch: attest the gate as passed without re-running the panel. Human-gated
   (reason + approval-id both required); the deviation is recorded, never silent.
 
+How many seats read the plan: one (codex) by default, and a second (opus) in the same
+run when the first returns BLOCK. Both read from the start when a dispatch path is in the
+schema, security or `outside-repo` class. The run prints the composition as a
+`plan-gate seats: ...` line on stderr. Rule, trace lines and rounds per plan version:
+`docs/core/HORIZON_PLANNING.md`, section "Plan-gate composition".
+
 After either, `derived_status` returns to `queued` (unblocked).
 
 ### 3. Enforcement — the gate has teeth (ADR-030)
@@ -120,7 +126,19 @@ prints a warning and the blocker stays resolved. A companion file,
 `.vnx-attest/plan-gate-seats.ndjson`, holds one `plan_gate_seat` record per panelist per
 run. The writer is `scripts/lib/plan_gate_evidence.py` `emit_plan_gate_pass`;
 `verify_plan_gate_pass` reads the chain back and answers verified, present-unsigned or
-absent. No production code calls `verify_plan_gate_pass` yet; the merge gate above is still in progress. Every lock in this chain and every way to open it:
+absent. No production code calls `verify_plan_gate_pass` yet; the merge gate above is still in progress.
+
+What is on and what is not. The chain on this file is always on: `emit_plan_gate_pass`
+appends through `ndjson_hash_chain.append_chained_entry`, so the per-project switch that
+the receipt ledger needs does not apply here. Signing is off, because the planning CLI
+passes no key. Nothing refuses a merge on a missing or broken record today. To check the
+chain by hand, run `python3 scripts/audit_chain.py verify .vnx-attest/plan-gates.ndjson`
+from the repo root: exit 0 `verified`, exit 1 `broken` with the violations, exit 2
+`unchained` when no line carries `prev_hash`. A verified chain shows that no earlier line was
+changed or removed after a later one was written. It does not show who wrote a line.
+The receipt ledger is different: its chain is available
+per project and off by default (`docs/core/11_RECEIPT_FORMAT.md`, "Optional hash-chain
+field"). Every lock in this chain and every way to open it:
 `docs/core/LOCKS_AND_RELEASES.md`.
 
 ### 4. Work — dispatch → PR

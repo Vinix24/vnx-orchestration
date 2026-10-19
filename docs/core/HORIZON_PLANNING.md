@@ -26,7 +26,7 @@ the tracks DB, reached through `vnx horizon`, not a hand-maintained file.
 
 | Verb | Purpose |
 |---|---|
-| `add` | Register a new objective (track). `--plan-scope architecture\|light` is required: `architecture` seeds `OI-PLAN-<track>` (born plan-gated), `light` seeds nothing. Without the flag the command refuses and creates nothing. |
+| `add` | Register a new objective (track). `--plan-scope architecture\|light` is required: `architecture` seeds `OI-PLAN-<track>` (born plan-gated), `light` seeds nothing. Without the flag the command refuses and creates nothing. The scope moves up by itself, never down (see "Plan scope" below). |
 | `list` | List objectives with phase/horizon/blocked state, plus a short `scope:` tag (`arch`/`light`) at the end of each line. |
 | `show` | Show one objective in detail, including `plan_scope` and the rule that set it. |
 | `set-plan-scope` | Set a track's `plan_scope` by hand; `--reason` is required. The only way down to `light`, and it never closes or attests `OI-PLAN` (see `docs/core/HORIZON_LIFECYCLE.md` stage 1). |
@@ -50,6 +50,18 @@ top-level alias `vnx deliverable <verb>`:
 | `promote` | Promote a deliverable (proposed → ready; human gate). Not the only way out of `proposed`: the reconciler completes a deliverable of a track whose real work is done without a promote (see `docs/core/HORIZON_LIFECYCLE.md` stage 6). |
 | `close` | afboeken (done): close a ready deliverable → completed (operator-attested PR evidence). The reconciler can also complete a deliverable by itself (`deliverable_auto_completed`, stage 6 of the lifecycle). |
 | `set` | Tag an EXISTING deliverable with `task_class`/`routing_floor`/`dispatch_paths` — the rubric fields the plan-gate reads (see `_format_deliverable_for_plan`), and the paths a plan-gate run reads when it names none. |
+
+A deliverable has more than one way to `completed`. `deliverable close` is the human path. The reconciler is the other: `track_reconciler._reconcile_deliverable_dispatches` (OI-840, #2048) completes every deliverable of a track whose real work is done and records a `coordination_events` row `deliverable_auto_completed` with actor `reconciler`, with no promote and no close by a person. It runs inside every `reconcile_track` call, `vnx horizon reconcile` in check mode included. The evidence it requires is in `docs/core/HORIZON_LIFECYCLE.md` stage 6.
+
+### Plan scope
+
+Every track carries one `plan_scope` in `tracks.metadata_json` (`scripts/lib/plan_scope.py`, since #2110): `architecture` (the track has a plan-gate, `OI-PLAN-<track>`) or `light` (it has none).
+
+- **One scope per track.** `vnx horizon add` requires `--plan-scope`; `bin/vnx horizon add --help` lists it as REQUIRED for a new track.
+- **Up by itself, down only by hand.** The fourth deliverable on a light track, or a build dispatch at the door whose paths fall in a plan-scope class, makes the track `architecture` and seeds `OI-PLAN-<track>`. Only `vnx horizon set-plan-scope <track> light --reason "..."` goes down, and it does not close `OI-PLAN`.
+- **The path classes** are one table, `smart_router.plan_scope_path_category`: `schema`, `security`, `gate-merge`, `store-resolution` and `outside-repo`. `outside-repo` (`smart_router.PLAN_SCOPE_OUTSIDE_REPO`) is a path that leaves the repository: it is classified upward, never as plain code. A dispatch that names no path at all counts as architecture too.
+
+Birth, the transaction and the event line: `docs/core/HORIZON_LIFECYCLE.md` stage 1.
 
 ### Plan-gate verbs
 
@@ -129,9 +141,10 @@ outcome in 35 of 36 runs.
 - **A second seat on BLOCK.** When the default seat returns BLOCK, the
   escalation seat reads the same plan in the same run, and `apply_panel_rule`
   decides over both verdicts. A REVISE does not escalate.
-- **Both seats from the start for schema and security (since P1).** When the
-  run's `--dispatch-paths` (or, when the run names none, the `dispatch_paths` of
-  the track's deliverables) fall in the schema or security class
+- **Both seats from the start for schema, security and outside-repo paths
+  (since P1, #2110).** When the run's `--dispatch-paths` (or, when the run
+  names none, the `dispatch_paths` of the track's deliverables) fall in the
+  schema, security or `outside-repo` class
   (`plan_gate_panel.second_seat_from_start`), both seats read the plan in its
   first round and a PASS needs both readable verdicts (quorum 2). The trace says
   `both seats from the start (<class> path <path>)`.
@@ -143,6 +156,13 @@ outcome in 35 of 36 runs.
   wins, irreversible work is `coding-strict`). The result lands in the trace and
   on the round record as `governance_variant`, so the history stays readable. It
   no longer decides how many seats sit.
+
+Every run prints its composition on stderr before the seats read. One seat:
+`plan-gate seats: weight=default -> 1 seat(s) by default (codex); opus reads on BLOCK.`
+Both seats from the start:
+`plan-gate seats: weight=default -> 2 seat(s) by default (codex, opus); both seats from the start (security path hooks/x.sh).`
+An operator override starts `plan-gate override:` instead (`scripts/planning_cli.py`
+`_derive_panel_weight`).
 
 ### Rounds per plan version
 
