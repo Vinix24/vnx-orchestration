@@ -7,9 +7,12 @@ and loads the user CLAUDE.md with its imports, the user memory and the personal
 skills, all of which then go to the provider.
 
 ``ensure_harness_config_dir(lane)`` returns ``<VNX_DATA_DIR>/harness-config/<lane>/``
-(mode 0700). The only file the fabric writes there is ``settings.json`` with the
-destructive Bash ``ask`` rules. It FAILS CLOSED (raises ``HarnessConfigDirError``)
-rather than falling back to inheritance.
+(mode 0700). The only file the fabric writes there is ``settings.json``, which
+carries the destructive Bash ``ask`` rules plus ``cleanupPeriodDays: 365``. The
+retention is pinned to a year because the session transcripts under
+``<lane>/projects/`` are the only source for the cost backfill (K6); the Claude
+Code default of 30 days would start deleting the oldest of them. It FAILS CLOSED
+(raises ``HarnessConfigDirError``) rather than falling back to inheritance.
 
 These lanes authenticate with ``ANTHROPIC_AUTH_TOKEN`` / ``ANTHROPIC_API_KEY``,
 never the keychain item bound to a config-dir path, so a fresh dir does not
@@ -66,6 +69,13 @@ DESTRUCTIVE_BASH_ASK_RULES: List[str] = [
     "Bash(mkfs:*)",
 ]
 
+# The Claude Code default transcript retention is 30 days; the operator's own
+# config dirs carry ``cleanupPeriodDays: 365``. The harness transcripts under
+# ``<lane>/projects/`` are the only source for the cost backfill (K6), so the
+# lanes must keep them for a year too. Fabric constant, never read from the
+# operator's settings at runtime.
+HARNESS_TRANSCRIPT_RETENTION_DAYS: int = 365
+
 # Top-level entries that would feed user-level context back into the child.
 FORBIDDEN_ENTRIES = (
     "CLAUDE.md",
@@ -92,7 +102,13 @@ class HarnessConfigDirError(RuntimeError):
 
 
 def _settings_payload() -> str:
-    return json.dumps({"permissions": {"ask": list(DESTRUCTIVE_BASH_ASK_RULES)}}, indent=2) + "\n"
+    return json.dumps(
+        {
+            "permissions": {"ask": list(DESTRUCTIVE_BASH_ASK_RULES)},
+            "cleanupPeriodDays": HARNESS_TRANSCRIPT_RETENTION_DAYS,
+        },
+        indent=2,
+    ) + "\n"
 
 
 def _resolve_data_dir() -> Path:
