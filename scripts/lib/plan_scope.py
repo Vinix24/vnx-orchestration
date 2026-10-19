@@ -3,8 +3,9 @@
 Track plan-gate-alleen-voor-architectuur, operator decision 2026-10-17. A track
 is ``architecture`` (it carries a plan-gate, ``OI-PLAN-<track>``) or ``light``
 (it does not). The value lives in ``tracks.metadata_json`` as ``plan_scope``,
-next to ``lane_hint``; ``plan_scope_rule`` names the automatic rule that set it.
-No migration and no new column.
+next to ``lane_hint``; ``plan_scope_rule`` names the automatic rule that set it,
+or the marker ``tracks.CREATED_SCOPE_RULE`` when the scope was decided at
+creation. No migration and no new column.
 
 How the value moves:
 
@@ -80,6 +81,8 @@ class ScopeReading:
             return f"{self.scope} (not stored; read from {basis} OI-PLAN)"
         if self.source == SOURCE_UNREADABLE:
             return f"{self.scope} (stored value {self.raw!r} unreadable; read as architecture)"
+        if self.rule == tracks_lib.CREATED_SCOPE_RULE:
+            return f"{self.scope} (set at creation)"
         if self.rule:
             return f"{self.scope} (rule: {self.rule})"
         return f"{self.scope} (set by hand)"
