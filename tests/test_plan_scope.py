@@ -276,6 +276,22 @@ def test_fourth_deliverable_leaves_an_architecture_track_alone(state_dir):
     assert _scope_changes(state_dir, "feat-a4") == []
 
 
+def test_deliverable_add_returns_0_when_the_scope_rule_cannot_run(state_dir):
+    """The deliverable row is committed before the scope rule runs, so a failed
+    scope-raise is a warning, not a failed add: the exit code must stay 0."""
+    _make_track(state_dir, "feat-four", {"plan_scope": "light"})
+    _fail_plan_seeds(state_dir)
+    for n in range(1, 4):
+        rc, _, err = _add_deliverable(state_dir, "feat-four", f"PR {n}")
+        assert rc == 0, err
+    rc, out, err = _add_deliverable(state_dir, "feat-four", "PR 4")
+    assert rc == 0, err
+    assert "the deliverable was created, but the plan-scope rule" in err
+    assert "set-plan-scope feat-four architecture" in err
+    assert len(planning_cli._fetch_deliverable_records(state_dir, PID, "feat-four")) == 4
+    assert _meta(state_dir, "feat-four").get("plan_scope") == "light", "the failed raise wrote nothing"
+
+
 # --------------------------------------------------------------------------
 # Upward by itself: the dispatch door, through a real fire
 # --------------------------------------------------------------------------
@@ -484,8 +500,22 @@ def test_show_names_the_scope_and_the_rule_that_set_it(state_dir):
     assert "architecture (rule: deliverable add: 4 deliverables" in lines[0]
 
 
+def test_show_says_set_at_creation_for_a_track_born_with_a_scope(state_dir):
+    rc, _, err = _cli(state_dir, "horizon", "add", "feat-born", "Born", "shipped",
+                      "--plan-scope", "light")
+    assert rc == 0, err
+    rc, out, _ = _cli(state_dir, "horizon", "show", "feat-born")
+    assert rc == 0
+    lines = [ln for ln in out.splitlines() if "plan_scope:" in ln]
+    assert len(lines) == 1
+    assert "plan_scope: light (set at creation)" in lines[0]
+
+
 def test_show_says_set_by_hand_and_list_keeps_its_columns_with_a_tag(state_dir):
-    _make_track(state_dir, "feat-tag", {"plan_scope": "light"})
+    _make_track(state_dir, "feat-tag", {"plan_scope": "architecture"}, seed=True)
+    rc, _, err = _cli(state_dir, "horizon", "set-plan-scope", "feat-tag", "light",
+                      "--reason", "one small PR")
+    assert rc == 0, err
     rc, out, _ = _cli(state_dir, "horizon", "show", "feat-tag")
     assert "plan_scope: light (set by hand)" in out
     rc, out, _ = _cli(state_dir, "horizon", "list")
@@ -505,7 +535,9 @@ def test_plan_scope_and_lane_hint_survive_each_others_writes(state_dir):
 
     rc, _, err = _cli(state_dir, "horizon", "set-lane-hint", "feat-both", "direct")
     assert rc == 0, err
-    assert _meta(state_dir, "feat-both") == {"lane_hint": "direct", "plan_scope": "light"}
+    assert _meta(state_dir, "feat-both") == {
+        "lane_hint": "direct", "plan_scope": "light", "plan_scope_rule": tracks.CREATED_SCOPE_RULE,
+    }
 
     rc, _, err = _cli(state_dir, "horizon", "set-plan-scope", "feat-both", "architecture",
                       "--reason", "touches the merge gate")
@@ -517,7 +549,9 @@ def test_add_with_both_flags_stores_both(state_dir):
     rc, _, err = _cli(state_dir, "horizon", "add", "feat-flags", "Flags", "shipped",
                       "--plan-scope", "light", "--lane-hint", "governed")
     assert rc == 0, err
-    assert _meta(state_dir, "feat-flags") == {"lane_hint": "governed", "plan_scope": "light"}
+    assert _meta(state_dir, "feat-flags") == {
+        "lane_hint": "governed", "plan_scope": "light", "plan_scope_rule": tracks.CREATED_SCOPE_RULE,
+    }
 
 
 _ROADMAP = """
@@ -785,7 +819,7 @@ def test_a_failed_seed_never_leaves_architecture_by_rule_without_oi_plan(tmp_pat
     meta = _meta(sd, "feat-door")
     assert _plan_rows(sd, "feat-door") == []
     assert meta.get("plan_scope") == "light", "the raise rolled back with the seed"
-    assert "plan_scope_rule" not in meta
+    assert meta.get("plan_scope_rule") == tracks.CREATED_SCOPE_RULE, "the failed raise did not change the creation rule"
     assert _scope_changes(sd, "feat-door") == [], "no ledger line for a raise that did not happen"
 
 
@@ -803,7 +837,9 @@ def test_a_failed_ledger_write_leaves_neither_the_scope_nor_the_blocker(state_di
         plan_scope.raise_to_architecture(state_dir, "feat-ledger", PID, rule="4 deliverables (limit 4)")
     monkeypatch.undo()
 
-    assert _meta(state_dir, "feat-ledger") == {"plan_scope": "light"}
+    assert _meta(state_dir, "feat-ledger") == {
+        "plan_scope": "light", "plan_scope_rule": tracks.CREATED_SCOPE_RULE,
+    }
     assert _plan_rows(state_dir, "feat-ledger") == []
 
 
@@ -1000,6 +1036,7 @@ def test_update_authored_fields_never_writes_the_planning_keys(state_dir):
 
     assert _meta(state_dir, "feat-auth") == {
         "risk_class": "low", "plan_scope": "architecture", "lane_hint": "governed",
+        "plan_scope_rule": tracks.CREATED_SCOPE_RULE,
     }
 
 

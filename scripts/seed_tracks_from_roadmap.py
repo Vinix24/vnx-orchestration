@@ -179,6 +179,24 @@ def _desired_row(feature: dict[str, Any], index: int) -> dict[str, Any]:
     }
 
 
+def _authored_metadata(metadata_json: Optional[str]) -> dict[str, Any]:
+    """``metadata_json`` as a dict with the planning-owned keys removed.
+
+    The seeder authors only milestone/roadmap_status/risk_class/pr_queue; the
+    planning layer keeps lane_hint/plan_scope/plan_scope_rule next to them and
+    ``update_authored_fields`` preserves those keys on write. A raw-string
+    comparison would read their presence as an authored change, so this strips
+    them before comparing.
+    """
+    try:
+        meta = json.loads(metadata_json or "{}")
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(meta, dict):
+        return {}
+    return {k: v for k, v in meta.items() if k not in tracks_lib.PLANNING_METADATA_KEYS}
+
+
 def _row_matches(existing: dict[str, Any], desired: dict[str, Any]) -> bool:
     """True if the existing track already reflects the authored fields.
 
@@ -188,10 +206,15 @@ def _row_matches(existing: dict[str, Any], desired: dict[str, Any]) -> bool:
     reconciled unconditionally (via _seed_dependencies), even for rows that
     are otherwise unchanged. This prevents dependency-only changes from being
     silently ignored.
+
+    ``metadata_json`` is compared on its authored keys only (planning-owned keys
+    stripped), matching the merge ``update_authored_fields`` applies on write.
     """
-    for col in ("title", "goal_state", "priority", "sort_order", "horizon", "pr_ref", "metadata_json"):
+    for col in ("title", "goal_state", "priority", "sort_order", "horizon", "pr_ref"):
         if (existing.get(col) or None) != (desired.get(col) or None):
             return False
+    if _authored_metadata(existing.get("metadata_json")) != _authored_metadata(desired.get("metadata_json")):
+        return False
     return True
 
 

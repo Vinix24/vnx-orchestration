@@ -43,6 +43,12 @@ VALID_LANE_HINTS = frozenset({"governed", "direct", "unset"})
 # that rebuilds metadata_json wholesale (the ROADMAP seeder), keeps them as stored.
 PLANNING_METADATA_KEYS = ("lane_hint", "plan_scope", "plan_scope_rule")
 
+# The plan_scope_rule a track carries when its scope was decided at creation
+# (horizon add --plan-scope) rather than by an automatic rule or by hand.
+# create_track stores it next to the scope it writes at birth; plan_scope's
+# reader renders it as "set at creation" instead of "set by hand".
+CREATED_SCOPE_RULE = "set at creation"
+
 
 class InvalidHorizonError(ValueError):
     pass
@@ -391,6 +397,16 @@ def create_track(
                 {"old": "none", "new": initial_scope,
                  "reason": f"set at creation by {scope_origin}", "rule": scope_origin},
             )
+        # A scope set at birth records why it was set: the reader must be able to
+        # tell "set at creation" from "set by hand" and "set by an automatic
+        # rule". The event carries ``scope_origin``; the stored row carries the
+        # marker the reader renders, so the decision survives without reading the
+        # event file.
+        stored_metadata = metadata_json or "{}"
+        if initial_scope is not None:
+            stored_metadata = metadata_json_with(
+                stored_metadata, {"plan_scope_rule": CREATED_SCOPE_RULE}
+            )
         columns = [
             "track_id", "project_id", "title", "goal_state", "phase", "next_up", "sort_order",
             "priority", "requires_operator_promotion", "instruction_template",
@@ -401,7 +417,7 @@ def create_track(
             track_id, project_id, title, goal_state, phase, 0, sort_order,
             priority, requires_operator_promotion, instruction_template,
             context_composer_rules, pr_ref, trigger_condition, now,
-            now, metadata_json or "{}",
+            now, stored_metadata,
         ]
         if has_horizon:
             columns.append("horizon")

@@ -2672,8 +2672,12 @@ def _print_deliverable_created(
 def _apply_deliverable_scope_rule(state_dir: Path, project_id: str, track_id: str) -> bool:
     """The fourth deliverable makes a light track architecture (P1); one line says so.
 
-    Returns False when the rule could not be applied: the deliverable exists by
-    then, and the caller says so instead of reporting a clean add.
+    The deliverable row is already committed when this runs, so a rule that
+    cannot be applied is printed as a warning naming ``vnx horizon
+    set-plan-scope`` as the way out — it is NOT a failed add. The bool return is
+    informational only (True when the rule was applied or none was due);
+    ``cmd_deliverable_add`` always returns 0 after this, because the store does
+    hold the deliverable.
     """
     count = len(_fetch_deliverable_records(state_dir, project_id, track_id))
     rule = plan_scope.deliverable_rule(count)
@@ -2763,7 +2767,12 @@ def cmd_deliverable_add(args: argparse.Namespace) -> int:
         conn.close()
 
     _print_deliverable_created(dispatch_id, track_id, output_kind, output_ref, metadata_dict)
-    return 0 if _apply_deliverable_scope_rule(state_dir, project_id, track_id) else 1
+    # The deliverable is committed, so the add succeeded whatever the scope rule
+    # did: a scope-raise that could not run is a warning (the way out is named),
+    # never a non-zero exit that misstates the store. No caller relies on a
+    # distinct code here, so the add returns 0.
+    _apply_deliverable_scope_rule(state_dir, project_id, track_id)
+    return 0
 
 
 def _fetch_deliverable_records(
