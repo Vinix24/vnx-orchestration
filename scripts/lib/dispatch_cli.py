@@ -2127,6 +2127,41 @@ def _book_b3_override_records(
         )
 
 
+def _book_b3_override_at_fire(snapshot: RuntimeSnapshot, *, state_dir: Path) -> Optional[ConstraintVerdict]:
+    """Book the snapshot's B3 override decision; return a refusal verdict on failure.
+
+    This is the commit-to-fire booking point (run_dispatch): the decision was
+    computed during snapshot build (``_check_b3_cap_verdict``) and carried forward
+    in memory. Here — after stop-conditions, lane reachability, the gate obligation
+    and the permit check all passed, and before the lane is invoked — the override
+    line(s) land. Fail-closed: any :class:`RoundLedgerError` refuses the fire with
+    ``b3-override-ledger-error`` and nothing is dispatched. Returns None when there
+    is nothing to book or the lines landed.
+    """
+    import review_rounds
+
+    caps = ()
+    reason = None
+    for verdict in snapshot.constraint_verdicts:
+        if verdict.code == "b3-cap-override-applied":
+            caps = tuple(verdict.b3_override_caps or ())
+            reason = verdict.b3_override_reason
+            break
+    if not caps or not (reason or "").strip():
+        return None
+    try:
+        _book_b3_override_records(list(caps), reason=reason, state_dir=state_dir)
+    except review_rounds.RoundLedgerError as exc:
+        return ConstraintVerdict(
+            code="b3-override-ledger-error", severity="blocking",
+            message=(
+                f"b3 override refused: the override could not be booked in the round ledger "
+                f"(the dispatch is not let through): {exc}"
+            ),
+        )
+    return None
+
+
 def _b3_override_for_plan(plan) -> Optional[dict]:
     """The build-door B3 override this dispatch's receipt carries, or None.
 
@@ -2149,10 +2184,16 @@ def _check_b3_cap_verdict(spec: DispatchSpec, *, state_dir: Path) -> Optional[Co
     round on a PR the review will not take. It reads the round ledger only (its
     lines carry the branch of every verdict), never GitHub. An unreadable ledger
     is a warning here: the gate refuses the run itself, naming the way out.
+
     ``VNX_OVERRIDE_B3_REASON`` (set by ``--override-b3 --reason``) turns the
-    refusal into an audited warning AND books one ``override`` line per capped PR
-    in the round ledger (R1d): a failure to write that line refuses the override
-    (fail-closed), it never silently proceeds.
+    refusal into an audited warning. This function only DECIDES: it writes nothing
+    durable. The decision — which capped PRs to book (the ``CapState`` objects the
+    verdict was computed from) and the reason — is carried on the returned
+    ``b3-cap-override-applied`` verdict (``b3_override_caps`` /
+    ``b3_override_reason``) and booked at the door's commit-to-fire point by
+    ``_book_b3_override_at_fire``. A ``--dry-run`` or a later refusal (stop-
+    conditions, lane reachability, …) therefore leaves the append-only ledger
+    untouched.
     """
     import review_rounds
 
@@ -2168,20 +2209,11 @@ def _check_b3_cap_verdict(spec: DispatchSpec, *, state_dir: Path) -> Optional[Co
     text = "; ".join(review_rounds.cap_refusal_text(cap, where=f"work_ref {work_ref}") for cap in capped)
     reason = (os.environ.get(B3_OVERRIDE_REASON_ENV) or "").strip()
     if reason:
-        try:
-            _book_b3_override_records(capped, reason=reason, state_dir=state_dir)
-        except review_rounds.RoundLedgerError as exc:
-            return ConstraintVerdict(
-                code="b3-override-ledger-error", severity="blocking",
-                message=(
-                    f"b3 override refused: the override could not be booked in the round ledger "
-                    f"(the dispatch is not let through): {exc}"
-                ),
-            )
         logger.warning("[dispatch_cli] AUDIT b3-cap-override-applied work_ref=%s reason=%s", work_ref, reason)
         return ConstraintVerdict(
             code="b3-cap-override-applied", severity="warn",
             message=f"{text}. Overridden for this build dispatch: {reason}", override_applied=True,
+            b3_override_caps=tuple(capped), b3_override_reason=reason,
         )
     return ConstraintVerdict(
         code="b3-cap-reached", severity="blocking",
@@ -2565,7 +2597,9 @@ def build_runtime_snapshot(
 
     # TL-D1: track_id door validation (fail-closed on invalid/nonexistent/done;
     # staged advisory->required WARN/Reject when absent). R1: a build on the
-    # branch of a PR at the B3 cap is refused early (_check_b3_cap_verdict).
+    # branch of a PR at the B3 cap is refused early (_check_b3_cap_verdict). The
+    # B3 override DECISION rides the ``b3-cap-override-applied`` verdict and is
+    # booked only at the commit-to-fire point (R1d), never here.
     constraint_verdicts = constraint_verdicts + _project_state_verdicts(spec, state_dir=data_dir / "state")
 
     # golf 2A: T0 autonomous-chain stop-conditions, measured live on every fire.
@@ -2867,6 +2901,38 @@ def _persist_route_decision(
             plan.dispatch_id,
             exc,
         )
+
+
+def _commit_fire(
+    plan: ExecutionPlan,
+    permit: ExecutionPermit,
+    spec: DispatchSpec,
+    snapshot: RuntimeSnapshot,
+    *,
+    state_dir: Path,
+    headless_isolation_warning: "Optional[str]",
+) -> int:
+    """The door's commit-to-fire point: book the B3 override, then record the fire.
+
+    Every real (non-dry-run) fire funnels through here after stop-conditions, lane
+    reachability, the gate obligation and the permit check have all passed. Two
+    things happen, in order:
+
+    1. The B3 override decision computed during snapshot build is booked
+       fail-closed (``_book_b3_override_at_fire``). A ledger write failure refuses
+       the fire with ``b3-override-ledger-error`` and nothing is dispatched.
+    2. The canonical route decision and the ``dispatch_created`` event are recorded
+       best-effort (never blocks).
+
+    Returns 0 on success, 1 when the override booking refused the fire.
+    """
+    refusal = _book_b3_override_at_fire(snapshot, state_dir=state_dir)
+    if refusal is not None:
+        _emit_reject(Reject(refusal.code, refusal.message))
+        return 1
+    _persist_route_decision(plan, permit, state_dir=state_dir, isolation_note=headless_isolation_warning)
+    _register_dispatch_created(plan, permit, spec, state_dir=state_dir)
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -3601,12 +3667,16 @@ def run_dispatch(
         # answerable after the fact. Best-effort — never blocks the door.
         # OI-1120 part 2: fill the register's dispatch_created event here too —
         # same "door commits to firing" moment, one write site for every lane.
+        # R1d: the B3 override line(s) are booked at this commit-to-fire point —
+        # after stop-conditions, lane reachability, the gate obligation and the
+        # permit check all passed, and before the lane is invoked. Fail-closed:
+        # a ledger write failure refuses the fire here with nothing dispatched.
         if not dry_run:
-            _persist_route_decision(
-                plan, permit, state_dir=state_dir,
-                isolation_note=headless_isolation_warning,
-            )
-            _register_dispatch_created(plan, permit, vspec.spec, state_dir=state_dir)
+            if _commit_fire(
+                plan, permit, vspec.spec, snapshot, state_dir=state_dir,
+                headless_isolation_warning=headless_isolation_warning,
+            ):
+                return 1
 
         if dry_run:
             _print_plan(plan, fp, spec=vspec.spec)

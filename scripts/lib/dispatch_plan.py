@@ -61,6 +61,13 @@ class ConstraintVerdict:
     severity: str        # "blocking" | "warn"
     message: str
     override_applied: bool = False
+    # R1d: the build-door B3 override DECISION carried forward in memory — which
+    # capped PRs (review_rounds.CapState, carried as-is: this pure module takes no
+    # review_rounds import) and the reason — so the door books the override line(s)
+    # at the commit-to-fire point, never during snapshot build. Only the
+    # ``b3-cap-override-applied`` verdict carries them; empty tuple + None = none.
+    b3_override_caps: tuple = ()
+    b3_override_reason: Optional[str] = None
 
 
 @dataclass(frozen=True)
