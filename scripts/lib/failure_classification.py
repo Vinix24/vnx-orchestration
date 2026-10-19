@@ -247,6 +247,32 @@ def _extract_detail(text: Optional[str], max_len: int = _MAX_DETAIL_LEN) -> str:
     return detail or "(empty)"
 
 
+def _classify_marker_failures(
+    signal_text: str, error: Optional[str], completion: str
+) -> Optional[Dict[str, Optional[str]]]:
+    """Classify the narrow marker refusal classes, in priority order.
+
+    completion_without_execution, no_verdict, tool_missing and
+    local_key_missing are matched here — before the broader auth/model keyword
+    bags — because each carries a specific, non-overlapping phrase that a
+    generic keyword must never swallow.  Most importantly, local_key_missing
+    (OI-2182) refusal text also contains "api_key"/"forbidden", so it is
+    matched before the auth bag and never reclassified as auth_rejected (which
+    would cool the lane down for everyone).
+    """
+    marker_classes = (
+        ((_COMPLETION_WITHOUT_EXECUTION_MARKER,), "completion_without_execution"),
+        (_NO_VERDICT_MARKERS, "no_verdict"),
+        ((_TOOL_MISSING_MARKER,), "tool_missing"),
+        ((_LOCAL_KEY_MISSING_MARKER,), "local_key_missing"),
+    )
+    for markers, failure_class in marker_classes:
+        if all(marker in signal_text for marker in markers):
+            detail = error if error else _extract_detail(completion)
+            return {"failure_class": failure_class, "failure_reason": detail}
+    return None
+
+
 def classify_failure(
     *,
     status: str,
@@ -312,33 +338,14 @@ def classify_failure(
             "failure_reason": f"{source}: credit/balance exhausted — {detail}",
         }
 
-    # ── completion without execution (kimi fabrication guard) ────────────
-    # Checked before the auth/model keyword bags below: this marker is a
-    # narrow, specific phrase that does not overlap any of them, and a
-    # fabricated completion deserves its own class rather than falling
-    # through to `unknown`.
-    if _COMPLETION_WITHOUT_EXECUTION_MARKER in signal_text:
-        detail = error if error else _extract_detail(completion)
-        return {"failure_class": "completion_without_execution", "failure_reason": detail}
-
-    # ── no parseable verdict (gate-runner CLI flake, e.g. codex) ──────────
-    if all(marker in signal_text for marker in _NO_VERDICT_MARKERS):
-        detail = error if error else _extract_detail(completion)
-        return {"failure_class": "no_verdict", "failure_reason": detail}
-
-    # ── provider CLI binary not found ─────────────────────────────────────
-    if _TOOL_MISSING_MARKER in signal_text:
-        detail = error if error else _extract_detail(completion)
-        return {"failure_class": "tool_missing", "failure_reason": detail}
-
-    # ── local key missing (config error, not a provider refusal) ─────────
-    # OI-2182: checked BEFORE the auth keyword bag below — the refusal text
-    # also carries "api_key"/"key-auth"/"forbidden", which would otherwise
-    # reclassify a local config error as auth_rejected and cool the lane down
-    # for everyone.
-    if _LOCAL_KEY_MISSING_MARKER in signal_text:
-        detail = error if error else _extract_detail(completion)
-        return {"failure_class": "local_key_missing", "failure_reason": detail}
+    # ── narrow marker failures (checked before the auth/model keyword bags) ─
+    # completion_without_execution / no_verdict / tool_missing / local_key_missing.
+    # local_key_missing (OI-2182) must win over the auth bag below: its refusal
+    # text also carries "api_key"/"forbidden", which would otherwise reclassify
+    # a local config error as auth_rejected and cool the lane down for everyone.
+    marker_failure = _classify_marker_failures(signal_text, error, completion)
+    if marker_failure is not None:
+        return marker_failure
 
     # ── auth rejection ───────────────────────────────────────────────────
     auth_keywords = (

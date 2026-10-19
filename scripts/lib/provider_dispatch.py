@@ -3240,6 +3240,58 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
         _event_store_safety_net(event_store, args)
 
 
+def _block_deepseek_harness_on_missing_key(
+    args: argparse.Namespace, start_time: datetime
+) -> Optional[int]:
+    """Fail closed (return _EX_USAGE) when the own DeepSeek key is absent, else None.
+
+    OI-2182: the key is resolved from the environment then the provider env file
+    (load_deepseek_key). A missing key is a LOCAL config error — the blocked
+    result carries the ``local key missing`` failure_reason text and is emitted
+    as "blocked" (never "failure"), so the lane is never marked known-rejected.
+    """
+    from provider_spawns.deepseek_harness_spawn import (
+        DEFAULT_DEEPSEEK_HARNESS_MODEL,
+        DEEPSEEK_API_KEY_ENV,
+        DeepSeekHarnessSpawnResult,
+    )
+    from load_deepseek_key import resolve_deepseek_api_key
+
+    if resolve_deepseek_api_key():
+        return None
+    print(
+        f"deepseek-harness requires {DEEPSEEK_API_KEY_ENV} in the environment "
+        "or the provider env file "
+        "(own-key key-auth; OAuth subscription is forbidden for this lane)",
+        file=sys.stderr,
+    )
+    end_time = datetime.now(timezone.utc)
+    blocked_result = DeepSeekHarnessSpawnResult(
+        returncode=_EX_USAGE,
+        completion={},
+        events_written=0,
+        session_id=None,
+        timed_out=False,
+        model=DEFAULT_DEEPSEEK_HARNESS_MODEL,
+        error=(
+            f"local key missing: {DEEPSEEK_API_KEY_ENV} absent from the "
+            f"environment and the provider env file — blocked before spawn"
+        ),
+        token_usage=None,
+    )
+    try:
+        _emit_governance(
+            args, "deepseek-harness", DEFAULT_DEEPSEEK_HARNESS_MODEL,
+            blocked_result, start_time, end_time, "blocked",
+        )
+    except Exception as _eg_exc:
+        logger.error(
+            "_dispatch_deepseek_harness: emit_governance for blocked dispatch failed: %s",
+            _eg_exc,
+        )
+    return _EX_USAGE
+
+
 def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
     """Route to spawn_deepseek_harness for the governed DeepSeek-harness lane.
 
@@ -3256,48 +3308,15 @@ def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
     it never marks the lane known-rejected (OI-2182).
     """
     from provider_spawns.deepseek_harness_spawn import (
-        DEFAULT_DEEPSEEK_HARNESS_MODEL,
-        DEEPSEEK_API_KEY_ENV,
-        DeepSeekHarnessSpawnResult,
         resolve_harness_model,
         spawn_deepseek_harness,
     )
-    from load_deepseek_key import resolve_deepseek_api_key
 
     start_time = datetime.now(timezone.utc)
 
-    if not resolve_deepseek_api_key():
-        print(
-            f"deepseek-harness requires {DEEPSEEK_API_KEY_ENV} in the environment "
-            "or the provider env file "
-            "(own-key key-auth; OAuth subscription is forbidden for this lane)",
-            file=sys.stderr,
-        )
-        end_time = datetime.now(timezone.utc)
-        _blocked_result = DeepSeekHarnessSpawnResult(
-            returncode=_EX_USAGE,
-            completion={},
-            events_written=0,
-            session_id=None,
-            timed_out=False,
-            model=DEFAULT_DEEPSEEK_HARNESS_MODEL,
-            error=(
-                f"local key missing: {DEEPSEEK_API_KEY_ENV} absent from the "
-                f"environment and the provider env file — blocked before spawn"
-            ),
-            token_usage=None,
-        )
-        try:
-            _emit_governance(
-                args, "deepseek-harness", DEFAULT_DEEPSEEK_HARNESS_MODEL,
-                _blocked_result, start_time, end_time, "blocked",
-            )
-        except Exception as _eg_exc:
-            logger.error(
-                "_dispatch_deepseek_harness: emit_governance for blocked dispatch failed: %s",
-                _eg_exc,
-            )
-        return _EX_USAGE
+    blocked = _block_deepseek_harness_on_missing_key(args, start_time)
+    if blocked is not None:
+        return blocked
 
     event_store = None
     try:

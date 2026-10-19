@@ -246,6 +246,34 @@ def _prepare_harness_env(
     return merged_env, None
 
 
+def _refuse_without_own_key(
+    resolved_key: str, model: Optional[str]
+) -> Optional[DeepSeekHarnessSpawnResult]:
+    """Return the fail-closed refusal when ``resolved_key`` is empty, else None.
+
+    Account safety: the lane must never ride the OAuth subscription, so a spawn
+    with no own key (arg, env, or provider env file) is refused before any
+    ``claude`` subprocess.
+    """
+    if (resolved_key or "").strip():
+        return None
+    logger.error(
+        "spawn_deepseek_harness: %s is absent from the environment and the "
+        "provider env file; refusing to spawn (account safety — the lane must "
+        "use the own DeepSeek key in key-auth mode, never the OAuth subscription).",
+        DEEPSEEK_API_KEY_ENV,
+    )
+    return DeepSeekHarnessSpawnResult(
+        returncode=1, completion={}, events_written=0, session_id=None,
+        timed_out=False, model=resolve_harness_model(model),
+        error=(
+            f"local key missing: {DEEPSEEK_API_KEY_ENV} absent from the "
+            f"environment and the provider env file — key-auth required, "
+            f"OAuth fallback forbidden"
+        ),
+    )
+
+
 def spawn_deepseek_harness(
     prompt: str,
     model: Optional[str],
@@ -274,23 +302,9 @@ def spawn_deepseek_harness(
     overridden by a caller.
     """
     resolved_key = api_key if api_key is not None else resolve_deepseek_api_key()
-    if not (resolved_key or "").strip():
-        # Fail closed — never spawn the redirect without an own key (would ride OAuth).
-        logger.error(
-            "spawn_deepseek_harness: %s is absent from the environment and the "
-            "provider env file; refusing to spawn (account safety — the lane must "
-            "use the own DeepSeek key in key-auth mode, never the OAuth subscription).",
-            DEEPSEEK_API_KEY_ENV,
-        )
-        return DeepSeekHarnessSpawnResult(
-            returncode=1, completion={}, events_written=0, session_id=None,
-            timed_out=False, model=resolve_harness_model(model),
-            error=(
-                f"local key missing: {DEEPSEEK_API_KEY_ENV} absent from the "
-                f"environment and the provider env file — key-auth required, "
-                f"OAuth fallback forbidden"
-            ),
-        )
+    missing_key = _refuse_without_own_key(resolved_key, model)
+    if missing_key is not None:
+        return missing_key
 
     resolved_model = resolve_harness_model(model)
 
