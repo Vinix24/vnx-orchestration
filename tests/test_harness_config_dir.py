@@ -290,6 +290,23 @@ def test_settings_with_hooks_fails_closed(data_dir):
         ensure_harness_config_dir("glm-harness")
 
 
+def test_settings_payload_carries_year_retention():
+    from provider_spawns import harness_config_dir as hcd
+
+    payload = json.loads(hcd._settings_payload())
+    assert payload["cleanupPeriodDays"] == 365
+
+
+def test_existing_settings_without_retention_gains_year_retention(data_dir):
+    lane = data_dir / "harness-config" / "glm-harness"
+    lane.mkdir(parents=True)
+    (lane / "settings.json").write_text(json.dumps({"permissions": {"ask": []}}))
+    ensure_harness_config_dir("glm-harness")
+    settings = json.loads((lane / "settings.json").read_text())
+    assert settings["cleanupPeriodDays"] == 365
+    assert settings["permissions"]["ask"] == DESTRUCTIVE_BASH_ASK_RULES
+
+
 def test_dir_under_personal_config_fails_closed(tmp_path, monkeypatch):
     fake_home = tmp_path / "home"
     (fake_home / ".claude-salesminds").mkdir(parents=True)
