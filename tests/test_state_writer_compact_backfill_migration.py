@@ -16,7 +16,8 @@ import compact_state as cs  # noqa: E402
 import state_writer  # noqa: E402
 
 
-def _probe_lock(lock_path: str, ready: multiprocessing.synchronize.Event, result_queue: multiprocessing.queues.Queue) -> None:
+def _probe_lock(lock_path: str, ready: multiprocessing.synchronize.Event, started: multiprocessing.synchronize.Event, result_queue: multiprocessing.queues.Queue) -> None:
+    started.set()
     ready.wait(timeout=5)
     with Path(lock_path).open("a+", encoding="utf-8") as fh:
         try:
@@ -84,8 +85,9 @@ def test_rewrite_locked_atomic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     sentinel = state_writer._sentinel_path(path)
     ctx = multiprocessing.get_context("spawn")
     ready = ctx.Event()
+    started = ctx.Event()
     result_queue = ctx.Queue()
-    process = ctx.Process(target=_probe_lock, args=(str(sentinel), ready, result_queue))
+    process = ctx.Process(target=_probe_lock, args=(str(sentinel), ready, started, result_queue))
     original_replace = state_writer.os.replace
 
     def _replace(src: str | bytes | Path, dst: str | bytes | Path) -> None:
@@ -97,6 +99,10 @@ def test_rewrite_locked_atomic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
 
     process.start()
     try:
+        # OI-2130: a spawn child can take 3-5s to start on CI. Wait for it to
+        # report it started (generous timeout) before timing the lock steps,
+        # so the short 5s timeouts below only measure lock behaviour.
+        assert started.wait(timeout=60), "spawn child did not start within 60s"
         state_writer.rewrite_locked(path, b"new\n")
         process.join(timeout=5)
         assert process.exitcode == 0
