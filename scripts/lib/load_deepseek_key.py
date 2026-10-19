@@ -46,30 +46,41 @@ def _strip_quotes(value: str) -> str:
 def load_deepseek_api_key_from_file(env_file: "Optional[Path]" = None) -> str:
     """Parse DEEPSEEK_API_KEY out of the provider env file (never source it).
 
-    Returns "" when the file is absent, has no DEEPSEEK_API_KEY line, or the
-    value is empty. Only that one variable is ever read.
+    Returns "" when the file is absent, cannot be decoded as UTF-8, has no
+    DEEPSEEK_API_KEY line, or the last matching line's value is empty. Only
+    that one variable is ever read.
     """
     path = Path(env_file) if env_file is not None else provider_env_file_path()
     try:
         lines = path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return ""
     for line in reversed(lines.splitlines()):
         match = _DEEPSEEK_KEY_LINE_RE.match(line)
         if not match:
             continue
-        value = _strip_quotes(match.group(1)).strip()
-        if value:
-            return value
+        # The last matching assignment wins even when empty (the bash loader's
+        # ``tail -n 1``): an empty final ``DEEPSEEK_API_KEY=`` must not
+        # resurrect an earlier key (OI-2187).
+        return _strip_quotes(match.group(1)).strip()
     return ""
 
 
-def resolve_deepseek_api_key(*, env_file: "Optional[Path]" = None) -> str:
+def resolve_deepseek_api_key(
+    *, env_file: "Optional[Path]" = None, env: "Optional[dict]" = None
+) -> str:
     """Resolve the own DeepSeek key: environment first, then the provider env file.
+
+    ``env`` overrides the process environment for the KEY lookup only, so the
+    smart router can pass its decision-time env view and a lane check never
+    reads an ambient DEEPSEEK_API_KEY the caller chose not to model. The
+    provider env file path still comes from the process environment
+    (``VNX_PROVIDER_ENV_FILE``), exactly as in every other call site.
 
     Never prints or logs the value. Returns "" when neither source carries one.
     """
-    env_value = (os.environ.get(DEEPSEEK_API_KEY_ENV) or "").strip()
+    _env = env if env is not None else os.environ
+    env_value = (_env.get(DEEPSEEK_API_KEY_ENV) or "").strip()
     if env_value:
         return env_value
     return load_deepseek_api_key_from_file(env_file)

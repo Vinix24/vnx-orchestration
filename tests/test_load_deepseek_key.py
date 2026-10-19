@@ -6,6 +6,8 @@ only ``DEEPSEEK_API_KEY``, never print or log the value.
 
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -19,12 +21,44 @@ from load_deepseek_key import (  # (path-setup above: scripts/lib injected into 
 )
 
 _SECRET = "sk-test-0123456789abcdef"
+_LOADER_SH = Path(__file__).parent.parent / "scripts" / "lib" / "load_deepseek_key.sh"
 
 
 def _write(tmp_path, text):
     env_file = tmp_path / "provider-usage.env"
     env_file.write_text(text)
     return env_file
+
+
+def _write_bytes(tmp_path, data):
+    env_file = tmp_path / "provider-usage.env"
+    env_file.write_bytes(data)
+    return env_file
+
+
+def _run_shell_loader(tmp_path, env_file):
+    """Run the bash loader against an env file, returning the exported value.
+
+    Mirrors scripts/lib/load_deepseek_key.sh exactly (parse, never source) and
+    returns "" both when the key is absent/empty and when the loader refuses.
+    The value itself is never printed to the test's stdout/stderr beyond the
+    captured export below.
+    """
+    out = subprocess.run(
+        [
+            "bash", "-c",
+            f'source "{_LOADER_SH}"; vnx_load_deepseek_key; printf "%s" "$DEEPSEEK_API_KEY"',
+        ],
+        env={
+            "PATH": os.environ["PATH"],
+            "HOME": str(tmp_path),
+            "VNX_PROVIDER_ENV_FILE": str(env_file),
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return out.stdout
 
 
 class TestLoadDeepSeekKeyFromFile:
@@ -59,6 +93,38 @@ class TestLoadDeepSeekKeyFromFile:
     def test_empty_value_returns_empty(self, tmp_path):
         env_file = _write(tmp_path, "DEEPSEEK_API_KEY=\n")
         assert load_deepseek_api_key_from_file(env_file) == ""
+
+    def test_last_assignment_wins_even_when_empty(self, tmp_path):
+        """OI-2187: an empty final ``DEEPSEEK_API_KEY=`` must not resurrect an
+        earlier key — the last matching assignment wins, empty means no key."""
+        env_file = _write(tmp_path, "DEEPSEEK_API_KEY=sk-old\nDEEPSEEK_API_KEY=\n")
+        assert load_deepseek_api_key_from_file(env_file) == ""
+
+    def test_non_utf8_env_file_reads_as_missing_key(self, tmp_path):
+        """OI-2182: an undecodable provider env file is a missing key, not a
+        UnicodeDecodeError out of the resolver."""
+        env_file = _write_bytes(tmp_path, b"DEEPSEEK_API_KEY=sk-\xff\xfe\n")
+        assert load_deepseek_api_key_from_file(env_file) == ""
+
+    def test_python_loader_agrees_with_shell_loader(self, tmp_path):
+        """The Python resolver and scripts/lib/load_deepseek_key.sh must agree
+        on the same env-file bytes (OI-2182/OI-2187), including the case where
+        the last assignment is empty."""
+        cases = {
+            "quoted": f'export DEEPSEEK_API_KEY="{_SECRET}"\n',
+            "unquoted": f"DEEPSEEK_API_KEY={_SECRET}\n",
+            "last-wins-value": f"DEEPSEEK_API_KEY=sk-old\nDEEPSEEK_API_KEY={_SECRET}\n",
+            "last-wins-empty": "DEEPSEEK_API_KEY=sk-old\nDEEPSEEK_API_KEY=\n",
+            "missing": "OPENROUTER_API_KEY=or-should-not-load\n",
+        }
+        for name, text in cases.items():
+            env_file = _write(tmp_path, text)
+            py_value = load_deepseek_api_key_from_file(env_file)
+            sh_value = _run_shell_loader(tmp_path, env_file)
+            assert py_value == sh_value, (
+                f"{name}: python loader returned {py_value!r} but the bash "
+                f"loader returned {sh_value!r} for the same bytes"
+            )
 
 
 class TestResolveDeepSeekApiKey:
