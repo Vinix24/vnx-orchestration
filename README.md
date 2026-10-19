@@ -45,6 +45,7 @@ The released version is in [`VERSION`](VERSION) and every release has its entry 
 - **Branch protection strictness is set per project** (OI-1849, #1917): `enforce`, `warn` or `off` in `branch_protection.yaml`, with the CI check as the floor under every setting, and the merge door judges the repo it is merging into rather than the repo it is installed from.
 - **The interactive tmux dispatch lane was retired** (#1845; removed outright in #1868): `claude_headless` is the only Claude lane, and a spec that still carries `force_tmux: true` is run on it with a warning on stderr. Tmux session management itself is untouched: see [TMUX_SPAWN_LANE.md](docs/operations/TMUX_SPAWN_LANE.md).
 - **A review gate can no longer be skipped** (#1588–#1591): an ungated write or an ungated merge is refused outright, and a merge is pinned to the exact head SHA the gates approved.
+- **The context-rotation plugin for Claude Code is released** in the public toolkit repository. Install it with `claude plugin marketplace add Vinix24/claude-code-toolkit`, then `claude plugin install context-rotation@claude-code-toolkit`. The bands are a share of `window_tokens`, or the absolute thresholds `warn_tokens`, `force_tokens` and `hard_tokens`. See the [plugin README](packages/claude-code-toolkit/context-rotation/README.md) and "Context rotation for any Claude Code session" below.
 
 On main, not yet released. Each line points at the document that owns the subject:
 
@@ -54,7 +55,6 @@ On main, not yet released. Each line points at the document that owns the subjec
 - **Plan-gate**: one seat reads the plan and a second seat reads it only on a BLOCK ([HORIZON_PLANNING.md](docs/core/HORIZON_PLANNING.md), "Plan-gate composition").
 - **Open outcomes**: `receipt_query.py open-outcomes` and `decide` record the T0's accept or reject of a dispatch outcome ([DISPATCH_RULES.md](docs/core/DISPATCH_RULES.md) §13).
 - **CHANGELOG fragments**: a PR adds `changelog.d/<name>.md` and never edits `CHANGELOG.md`; the release PR folds the fragments in ([changelog.d/README.md](changelog.d/README.md)).
-- **Context-rotation plugin** for Claude Code, in `packages/claude-code-toolkit/` (see "Context rotation for any Claude Code session" below).
 
 Full history for every minor and patch back to 0.1.0 is in the [CHANGELOG](CHANGELOG.md).
 
@@ -273,7 +273,7 @@ An earlier version of this README assumed a June 15, 2026 Anthropic billing chan
 
 ## Context rotation for any Claude Code session
 
-`packages/claude-code-toolkit/context-rotation/` is a Claude Code plugin, separate from the VNX runtime and on main, not yet released. It measures how full the context is, asks Claude for a handover note at set points, checks that note, and gives it to the fresh session after `/clear`. Inside tmux it types the `/clear` itself. The bands are a share of `window_tokens`, which defaults to 200,000, so on a larger window set it in `.claude/context-rotation.json`. Install, settings and the hook layout are in the [plugin README](packages/claude-code-toolkit/context-rotation/README.md). The T0 rotation VNX enforces for its own orchestrator is a different mechanism: [T0_CONTEXT_ROTATION.md](docs/operations/T0_CONTEXT_ROTATION.md).
+`packages/claude-code-toolkit/context-rotation/` is a Claude Code plugin, separate from the VNX runtime and released in the public toolkit repository ([Vinix24/claude-code-toolkit](https://github.com/Vinix24/claude-code-toolkit)). Install it with `claude plugin marketplace add Vinix24/claude-code-toolkit`, then `claude plugin install context-rotation@claude-code-toolkit`. It measures how full the context is, asks Claude for a handover note at set points, checks that note, and gives it to the fresh session after `/clear`. Inside tmux it types the `/clear` itself. The bands are a share of `window_tokens`, which defaults to 200,000, or the absolute thresholds `warn_tokens`, `force_tokens` and `hard_tokens`; on a larger window set them in `.claude/context-rotation.json`. Install, settings and the hook layout are in the [plugin README](packages/claude-code-toolkit/context-rotation/README.md). The T0 rotation VNX enforces for its own orchestrator is a different mechanism: [T0_CONTEXT_ROTATION.md](docs/operations/T0_CONTEXT_ROTATION.md).
 
 ## Compared to dmux
 
