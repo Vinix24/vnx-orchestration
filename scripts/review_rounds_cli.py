@@ -16,10 +16,15 @@ An unreadable ledger is refused with the same error the gate gives. Nothing
 removes, moves or rewrites a ledger line: the way out is to set the file
 aside, then reopen every open PR with a reason.
 
+``--data-dir`` opens the PR in ``<data-dir>/state``. When ``VNX_STATE_DIR``
+overrides the state dir with another one, the gate reads that ledger instead,
+so the command refuses and names both paths rather than writing a line nobody
+reads (``review_rounds.store_state_dir``).
+
 Exit codes:
   0  opened, or already opened (the message names the basis and recorded_at that stand)
   1  opened, but the receipt could not be written: the ledger line stands
-  2  bad input, or the ledger could not be read or written
+  2  bad input, --data-dir and VNX_STATE_DIR name two ledgers, or the ledger could not be read or written
 
 Usage:
   python3 scripts/review_rounds_cli.py rounds open --pr 2089 --reason "reviewed before R1: B3.1 in round 1, operator merged"
@@ -91,7 +96,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         print('vnx review rounds open: --pr must be a positive PR number and --reason "..." must say why', file=sys.stderr)
         return EXIT_ERROR
     data_dir = _data_dir(args.data_dir)
-    state_dir = review_rounds.store_state_dir(data_dir if args.data_dir else None)
+    try:
+        state_dir = review_rounds.store_state_dir(data_dir if args.data_dir else None)
+    except review_rounds.StoreConflict as exc:
+        print(f"vnx review rounds open: refused: {exc}", file=sys.stderr)
+        return EXIT_ERROR
     review_gates = state_dir / "review_gates"
     ledger = review_rounds.ledger_path(review_gates)
     try:

@@ -396,7 +396,9 @@ class _PrRounds:
         (``review_rounds.prior_evidence``, which fails closed): with any, every
         seat is refused until the operator opened it with ``vnx review rounds
         open``; without any, the PR is new and is opened here (``basis``
-        ``new``) before its first run.
+        ``new``) before its first run. The records and receipts it checks are
+        those of the store the ledger lives in (``review_gates_dir.parent``),
+        never of the store the environment names.
         """
         import review_rounds
 
@@ -408,7 +410,9 @@ class _PrRounds:
             if text:
                 return cls(pr_number, unreadable=text)
             if not ledger.is_opened(project_id, pr_number):
-                evidence = review_rounds.prior_evidence(review_rounds.store_data_dir(review_gates_dir), pr_number)
+                evidence = review_rounds.prior_evidence(
+                    review_rounds.store_data_dir(), pr_number, state_dir=Path(review_gates_dir).parent,
+                )
                 if evidence:
                     return cls(pr_number, history_missing=review_rounds.history_missing_text(pr_number, evidence))
                 review_rounds.open_pr(path, project_id, pr_number, basis=review_rounds.BASIS_NEW, evidence=0)
@@ -1823,6 +1827,12 @@ class GateRequestHandlerMixin:
         the answer it has, and the next round books the end-state. ``payload``
         is a seat's payload (it carries ``seat``); a booked end-state has no
         reviewer to replace.
+
+        The successor passes the round ledger first, read again and judged by
+        :meth:`_round_refusal` exactly as the seat's first request was (R1c,
+        OI-2181): while the reviewer ran, a verdict may have landed on this
+        head, the cap may have fallen, or the ledger may have turned
+        unreadable. A refused advance books nothing and spends no run.
         """
         seat, reviewer = payload["seat"], payload["gate"]
         if payload.get("status") == "chain_exhausted":
@@ -1841,15 +1851,24 @@ class GateRequestHandlerMixin:
         )
         if reader is None or refusal is not None:
             return None
+        # An --override-b3 the seat's request carried goes with the seat (R1).
+        seat_fields = {"seat": seat, "review_seats": payload.get("review_seats")}
+        override = payload.get("override_b3") if isinstance(payload.get("override_b3"), dict) else {}
+        refused = self._round_refusal(
+            _PrRounds.read(self.results_dir.parent, pr_number), head, pr_number=pr_number, branch=branch,
+            seat_fields=seat_fields, override_b3=str(override.get("reason") or ""),
+        )
+        if refused is not None:
+            logger.warning(
+                "gate_request_handler: seat %s for pr=%s is not handed from %s to %s -- the round ledger "
+                "refuses it (%s)", seat, pr_number, reviewer, reader, refused.get("round_refusal") or refused.get("reason"),
+            )
+            return None
         path = list(payload.get("takeover_path") or []) + [ran_out] + walked
         logger.info(
             "gate_request_handler: seat %s for pr=%s moves from %s to %s in the same call -- "
             "%s left a record that passes it over", seat, pr_number, reviewer, reader, reviewer,
         )
-        # An --override-b3 the seat's request carried goes with the seat (R1).
-        seat_fields = {"seat": seat, "review_seats": payload.get("review_seats")}
-        if payload.get("override_b3"):
-            seat_fields["override_b3"] = payload["override_b3"]
         advanced = self._request_seat_reader(
             reader, None, path, pr_number=pr_number, branch=branch, risk_class=risk_class,
             changed_files=changed_files, mode=mode, dispatch_id=dispatch_id, head=head,

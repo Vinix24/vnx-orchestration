@@ -646,6 +646,105 @@ class TestADecidedVerdictIsNeverHandedOn:
 
 
 # ---------------------------------------------------------------------------
+# R1c, OI-2181 (2): the advance path passes the round ledger like the first request
+# ---------------------------------------------------------------------------
+
+def _book_codex_seat_line(env, *, head: str, reviewer: str, verdict: str, blockers: int) -> None:
+    """A codex-seat verdict line in the store's round ledger, as the result writer books it."""
+    with (env["state_dir"] / "review_gates" / "rounds.ndjson").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            "project_id": "", "pr_number": PR, "head_sha": head, "seat": "codex_gate", "reviewer": reviewer,
+            "takeover_from": "codex_gate" if reviewer != "codex_gate" else "", "verdict": verdict,
+            "blocking_count": blockers, "report_path": f"/r/20261018-HEADLESS-{reviewer}-pr-{PR}-{head[:2]}.md",
+            "dispatch_id": "d-1", "recorded_at": "2026-10-18T09:00:00Z", "branch": BRANCH, "source": "gate",
+        }) + "\n")
+
+
+def _capped_ledger(env) -> str:
+    """The PR is opened and its codex seat sits at B3.1 after one FAIL(3) on an earlier head."""
+    open_pr_in_ledger(env["state_dir"], PR)
+    _book_codex_seat_line(env, head="a" * 40, reviewer="codex_gate", verdict="fail", blockers=3)
+    return "b3_cap"
+
+
+def _history_on_disk(env) -> str:
+    """The PR is not opened and an earlier headless report of the codex seat is on disk."""
+    headless = env["reports_dir"] / "headless"
+    headless.mkdir(parents=True, exist_ok=True)
+    (headless / f"20261017-090000-HEADLESS-codex_gate-pr-{PR}-c0ffee.md").write_text("FAIL\n", encoding="utf-8")
+    return "round_history_missing"
+
+
+def _unreadable_ledger(env) -> str:
+    """A line of the ledger does not parse and names no PR, so it touches every PR."""
+    (env["state_dir"] / "review_gates" / "rounds.ndjson").write_text("not json at all\n", encoding="utf-8")
+    return "round_ledger_unreadable"
+
+
+_DURING_THE_RUN = {
+    # A parallel takeover in the codex seat booked its PASS on this head while codex ran.
+    "verdict_on_head": lambda env: _book_codex_seat_line(env, head=HEAD_SHA, reviewer="kimi_gate", verdict="pass", blockers=0),
+    # A slow review of the previous head finished with FAIL(3) while codex ran: B3.1 now holds.
+    "b3_cap": lambda env: _book_codex_seat_line(env, head="b" * 40, reviewer="codex_gate", verdict="fail", blockers=3),
+    # A writer died in the middle of its record, which names no PR.
+    "round_ledger_unreadable": lambda env: _unreadable_ledger(env),
+}
+
+
+class TestTheAdvancePathIsRefusedLikeTheFirstRequest:
+    @pytest.mark.parametrize("reason", sorted(_DURING_THE_RUN))
+    def test_a_ledger_that_refuses_the_seat_by_the_advance_stops_the_successor(self, env, runs, reason):
+        """OI-2181 (2). Red on 2b9da5c5: the seat's first request passed the round ledger, codex ran
+        and ran out, and the ledger refused the seat by then; the advance requested kimi without
+        reading the ledger, and kimi ran."""
+        runs["outcomes"]["codex_gate"] = _CODEX_LIMIT_RECORD
+        runs["during"]["codex_gate"] = lambda: _DURING_THE_RUN[reason](env)
+
+        result = _request_and_execute(["codex_gate"])
+
+        assert runs["ran"] == ["codex_gate"], "a refused advance spends no provider run"
+        assert [g["gate"] for g in result["gates"]] == ["codex_gate"]
+        assert "superseded_by" not in result["gates"][0]
+        assert result["has_required_failure"] is True
+        assert [r["gate"] for r in env["receipts"]] == ["codex_gate"], "a refused advance books nothing"
+        assert not (env["requests_dir"] / f"pr-{PR}-kimi_gate.json").exists()
+
+    @pytest.mark.parametrize("ledger", [_capped_ledger, _history_on_disk, _unreadable_ledger],
+                             ids=["b3-cap", "round-history-missing", "ledger-unreadable"])
+    def test_a_seat_refused_at_its_first_request_is_never_handed_on(self, env, runs, ledger):
+        """A pin, green on 2b9da5c5 as well: the refusal is booked ``blocked``, which is a decided
+        answer (``decided_verdict`` reads it as ``fail``), so ``_advance_exhausted_seats`` keeps the
+        seat even with codex's own fresh limit record on this head."""
+        reason = ledger(env)
+        _write_result(env, "codex_gate", _CODEX_LIMIT_RECORD)
+
+        result = _request_and_execute(["codex_gate"])
+
+        assert runs["ran"] == [], "a refused advance spends no provider run"
+        assert [(g["gate"], g["request_status"]) for g in result["gates"]] == [("codex_gate", "blocked")]
+        assert "superseded_by" not in result["gates"][0]
+        assert result["has_required_failure"] is True
+        assert [r["request"].get("reason") for r in env["receipts"]] == [reason], "the refusal, and nothing else"
+        assert not (env["requests_dir"] / f"pr-{PR}-kimi_gate.json").exists()
+        assert not (env["requests_dir"] / f"pr-{PR}-codex_gate.json").exists()
+
+    def test_an_override_still_travels_with_an_advanced_seat(self, env, runs):
+        """The one advance the cap lets through: ``--override-b3`` on the request goes with the seat."""
+        _capped_ledger(env)
+        runs["outcomes"]["codex_gate"] = _CODEX_LIMIT_RECORD
+
+        result = _manager().request_and_execute(
+            pr_number=PR, branch=BRANCH, review_stack=["codex_gate"], risk_class="medium",
+            changed_files=["scripts/lib/example.py"], mode="per_pr", dispatch_id="20261019-rs-r1c-grootboek",
+            override_b3="operator: one-line fix after B3.1",
+        )
+
+        assert runs["ran"] == ["codex_gate", "kimi_gate"]
+        assert result["gates"][0]["superseded_by"] == "kimi_gate"
+        assert _request_record(env, "kimi_gate")["override_b3"]["reason"] == "operator: one-line fix after B3.1"
+
+
+# ---------------------------------------------------------------------------
 # Round 2, codex WARNING on #2073: an entry's own seat beats its takeover history
 # ---------------------------------------------------------------------------
 

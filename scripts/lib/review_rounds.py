@@ -13,18 +13,22 @@ enforceable:
   the ledger lock, with fsync: when the line cannot be written, the run fails
   and no verdict is published. A run without a verdict (unavailable, quota,
   crash, ``chain_exhausted``, a partial review) writes no line, and neither
-  does a rewrite of a record that already carries its verdict (a takeover
-  annotation, a re-anchor): that is no new verdict.
+  does a rewrite of a record that already carries its verdict on its head (a
+  takeover annotation): that is no new verdict. A re-anchor
+  (``gate_reanchor_cli``) carries a counted verdict to a new head: it gets a
+  line for that head that names the head it came from (``reanchored_from``).
 - **The count.** A round is a verdict in the codex seat on its own head. The
   seat counts, not the vendor: a takeover in the codex seat counts as codex. A
-  blocker of the second seat does not count (plan, open question 2). B3.1 (three
+  blocker of the second seat does not count (plan, open question 2), and a
+  re-anchored line is no round: its verdict was counted on the head it came
+  from. B3.1 (three
   or more blockers in one round) is checked first, then B3.2 (the latest round
   has a blocker and the sum over all rounds is six or more). The cap is sticky:
   it falls at the first round where either rule holds, and only R2's tiebreaker
   (:func:`round_granted_past_cap`) or ``--override-b3`` gets a codex-seat round
   past it. No fingerprint: a returning blocker counts again.
-- **No second verdict on a head.** A key holds one verdict. The request side
-  refuses a run in a seat that already has a verdict on the head
+- **No second verdict on a head.** A key holds one counted verdict. The request
+  side refuses a run in a seat that already has a verdict on the head
   (``gate_request_handler``); the writer refuses a second, different verdict on
   the same key as the backstop for every path that starts a run without a
   request.
@@ -34,7 +38,9 @@ enforceable:
   (``basis`` ``new``), and by the operator for one that has (``basis``
   ``attested``, ``vnx review rounds open --pr N --reason "..."``, with actor
   and reason). Nothing reconstructs earlier verdicts: after an attested line
-  the cap starts at zero. The gate refuses every seat of a PR that is not
+  the cap starts at zero, and every reader (:meth:`Ledger.for_pr`,
+  :meth:`Ledger.line_for`) leaves out what was booked for the PR before it.
+  The gate refuses every seat of a PR that is not
   opened while any earlier review is found (:func:`prior_evidence`,
   ``round_history_missing``), and the merge door counts no PASS of a PR that
   is not opened. The writer books every verdict either way: no verdict is
@@ -98,11 +104,15 @@ REFUSED_VERDICT_ON_HEAD = "verdict_on_head"
 REFUSED_B3_CAP = "b3_cap"
 REFUSED_LEDGER_UNREADABLE = "round_ledger_unreadable"
 REFUSED_HISTORY_MISSING = "round_history_missing"
+# Write-time only: a re-anchor of a verdict the ledger does not count.
+REFUSED_REANCHOR_UNCOUNTED = "reanchor_origin_uncounted"
+
+EVIDENCE_REANCHORED = "reanchored"
 
 _VERDICTS = ("pass", "fail")
 _STRING_FIELDS = (
     "project_id", "head_sha", "seat", "reviewer", "takeover_from", "verdict",
-    "report_path", "dispatch_id", "recorded_at", "branch", "source",
+    "report_path", "dispatch_id", "recorded_at", "branch", "source", "reanchored_from",
 )
 
 
@@ -115,11 +125,15 @@ class RoundLedgerUnreadable(RoundLedgerError):
 
 
 class RoundRefusal(ValueError):
-    """A verdict the ledger may not take: the key already holds another one, or the cap holds."""
+    """A verdict the ledger may not take: the key already holds another one, the cap holds, or a re-anchor carries nothing counted."""
 
     def __init__(self, reason: str, message: str) -> None:
         super().__init__(message)
         self.reason = reason
+
+
+class StoreConflict(ValueError):
+    """``--data-dir`` and ``VNX_STATE_DIR`` name two different round ledgers: the command cannot tell which one is meant."""
 
 
 def open_command(pr_number: Any) -> str:
@@ -157,25 +171,59 @@ def ledger_path_for_results(results_dir: Path) -> Optional[Path]:
 def store_state_dir(data_dir: Optional[Path] = None) -> Path:
     """The state dir the round ledger lives in, resolved the way the gate does.
 
-    ``<data_dir>/state`` when a data dir is named (``vnx review rounds open
-    --data-dir``), else ``ensure_env()['VNX_STATE_DIR']`` — the same resolution
+    Without a data dir: ``ensure_env()['VNX_STATE_DIR']``, the same resolution
     :class:`ReviewGateManager` and the merge door use for ``state/review_gates``.
     The state dir may sit outside ``<VNX_DATA_DIR>/state`` (``VNX_STATE_DIR``),
     so it is never reconstructed from the data dir.
+
+    With a data dir (``vnx review rounds open --data-dir``): ``<data_dir>/state``,
+    unless ``VNX_STATE_DIR`` overrides the state dir with another one. Then the
+    command has two ledgers: the gate of this environment reads the one
+    ``VNX_STATE_DIR`` names, ``--data-dir`` names the other. An ``opened`` line
+    in the wrong one is read by nobody or opens a PR of another store, and no
+    line is ever removed, so :class:`StoreConflict` names both and nothing is
+    written. ``VNX_STATE_DIR`` equal to ``<VNX_DATA_DIR>/state`` is no override:
+    ``bin/vnx`` exports exactly that for the project it runs in, and it says
+    nothing about the store ``--data-dir`` names.
     """
-    if data_dir is not None:
-        return Path(data_dir).expanduser() / "state"
-    from vnx_paths import ensure_env
+    if data_dir is None:
+        from vnx_paths import ensure_env
 
-    return Path(ensure_env()["VNX_STATE_DIR"])
+        return Path(ensure_env()["VNX_STATE_DIR"])
+    named = Path(data_dir).expanduser() / "state"
+    override = _state_dir_override()
+    if override is None or _same_dir(override, named):
+        return named
+    raise StoreConflict(
+        f"--data-dir names the round ledger under {named}, but VNX_STATE_DIR names another state dir, "
+        f"{override}, and the gate of this environment reads the ledger there. Drop --data-dir to open the "
+        f"PR under {override}, or unset VNX_STATE_DIR to open it under {named}"
+    )
 
 
-def store_data_dir(review_gates_dir: Path) -> Path:
-    """The data dir (``ensure_env()['VNX_DATA_DIR']``) a ``state/review_gates`` dir belongs to: what :func:`prior_evidence` reads for reports.
+def _state_dir_override() -> Optional[Path]:
+    """``VNX_STATE_DIR`` when it departs from ``<VNX_DATA_DIR>/state``, else ``None``."""
+    raw = (os.environ.get("VNX_STATE_DIR") or "").strip()
+    if not raw:
+        return None
+    state = Path(raw).expanduser()
+    data = (os.environ.get("VNX_DATA_DIR") or "").strip()
+    if data and _same_dir(state, Path(data).expanduser() / "state"):
+        return None
+    return state
 
-    The state dir can sit outside ``<VNX_DATA_DIR>/state`` (``VNX_STATE_DIR``),
-    so the data dir is resolved the way the gate does rather than by walking up
-    from the review_gates dir (which would land beside an overridden state dir).
+
+def _same_dir(left: Path, right: Path) -> bool:
+    return os.path.realpath(left) == os.path.realpath(right)
+
+
+def store_data_dir() -> Path:
+    """The data dir (``ensure_env()['VNX_DATA_DIR']``) whose reports :func:`prior_evidence` reads for the gate.
+
+    Resolved the way the gate does, never by walking up from a state dir: the
+    state dir can sit outside ``<VNX_DATA_DIR>/state`` (``VNX_STATE_DIR``), and
+    walking up from it would land beside it. The state dir itself is the
+    caller's to name (``prior_evidence(..., state_dir=)``).
     """
     from vnx_paths import ensure_env
 
@@ -250,6 +298,8 @@ class RoundLine:
     branch: str = ""
     source: str = SOURCE_GATE
     override: Optional[Dict[str, Any]] = None
+    # A re-anchored verdict: the head it was given on, where it was counted.
+    reanchored_from: str = ""
 
     @property
     def key(self) -> Tuple[str, int, str, str]:
@@ -277,6 +327,8 @@ class RoundLine:
         }
         if self.override:
             record["override"] = dict(self.override)
+        if self.reanchored_from:
+            record["reanchored_from"] = self.reanchored_from
         return record
 
     @classmethod
@@ -376,13 +428,19 @@ class BadLine:
 
 @dataclass(frozen=True)
 class Ledger:
-    """The ledger as read: its verdict lines and ``opened`` lines in file order, and every line that did not parse."""
+    """The ledger as read: its verdict lines and ``opened`` lines in file order, and every line that did not parse.
+
+    ``opened_after`` holds, per ``opened`` line, how many verdict lines came
+    before it in the file. Appends are serialized under the ledger lock, so
+    file order is booking order.
+    """
 
     path: Path
     exists: bool
     lines: Tuple[RoundLine, ...] = ()
     bad: Tuple[BadLine, ...] = ()
     opened: Tuple[OpenedLine, ...] = ()
+    opened_after: Tuple[int, ...] = ()
 
     def opened_line(self, project_id: str, pr_number: int) -> Optional[OpenedLine]:
         """This PR's ``opened`` line: from there on the ledger holds its review history."""
@@ -393,22 +451,49 @@ class Ledger:
     def is_opened(self, project_id: str, pr_number: int) -> bool:
         return self.opened_line(project_id, pr_number) is not None
 
+    def counted_from(self, project_id: str, pr_number: int) -> int:
+        """The first verdict line (an index into ``lines``) that counts for this PR.
+
+        An attested ``opened`` line is the boundary (plan section 1): what was
+        booked for the PR before ``vnx review rounds open`` counts for nothing,
+        no blocker, no FAIL and no PASS, and the cap starts there at zero. A
+        ``new`` line has nothing before it, and a PR that is not opened is
+        counted whole: the gate and the door refuse it on its own grounds.
+        """
+        for line, after in zip(self.opened, self.opened_after):
+            if line.project_id == project_id and line.pr_number == pr_number:
+                return after if line.basis == BASIS_ATTESTED else 0
+        return 0
+
     def for_pr(self, project_id: str, pr_number: int) -> Tuple[RoundLine, ...]:
-        """This PR's lines in verdict order (``recorded_at``, then file order)."""
+        """This PR's counted lines in verdict order (``recorded_at``, then file order).
+
+        Every reader of the count goes through here (the gate's cap and
+        standing-verdict checks, the writer's cap check, the merge door, the
+        dispatch door), so they all draw the boundary of :meth:`counted_from`.
+        """
+        start = self.counted_from(project_id, pr_number)
         found = [
             (line.recorded_at, index, line) for index, line in enumerate(self.lines)
-            if line.project_id == project_id and line.pr_number == pr_number
+            if index >= start and line.project_id == project_id and line.pr_number == pr_number
         ]
         return tuple(line for _at, _index, line in sorted(found, key=lambda item: item[:2]))
 
     def line_for(self, key: Tuple[str, int, str, str]) -> Optional[RoundLine]:
-        return next((line for line in self.lines if line.key == key), None)
+        """The counted verdict on ``key``: a line before the PR's boundary holds no key."""
+        start = self.counted_from(key[0], key[1])
+        return next((line for line in self.lines[start:] if line.key == key), None)
+
+    def booked(self, line: RoundLine) -> bool:
+        """Is this very verdict in the file already, before or after the boundary (a retried write)?"""
+        return any(existing.same_verdict(line) for existing in self.lines)
 
 
 def parse_ledger(path: Path, text: str) -> Ledger:
     """Every line by its ``kind``: none is a verdict, ``opened`` an opened PR, anything else a bad line."""
     lines: List[RoundLine] = []
     opened: List[OpenedLine] = []
+    opened_after: List[int] = []
     bad: List[BadLine] = []
     for number, raw in enumerate(text.splitlines(), start=1):
         if not raw.strip():
@@ -419,13 +504,14 @@ def parse_ledger(path: Path, text: str) -> Ledger:
             kind = data.get("kind") if isinstance(data, dict) else None
             if kind == KIND_OPENED:
                 opened.append(OpenedLine.from_dict(data))
+                opened_after.append(len(lines))
             elif kind is None:
                 lines.append(RoundLine.from_dict(data))
             else:
                 raise ValueError(f"unknown line kind {kind!r}")
         except ValueError as exc:
             bad.append(BadLine(number, _pr_named(data, raw), str(exc)))
-    return Ledger(Path(path), True, tuple(lines), tuple(bad), tuple(opened))
+    return Ledger(Path(path), True, tuple(lines), tuple(bad), tuple(opened), tuple(opened_after))
 
 
 _PR_NUMBER_IN_TEXT = re.compile(r'"pr_number"\s*:\s*(\d+)\s*[,}]')
@@ -544,11 +630,15 @@ def _counts(blockers: Sequence[int]) -> str:
 
 
 def codex_rounds(lines: Iterable[RoundLine]) -> Tuple[RoundLine, ...]:
-    """The rounds: codex-seat verdicts in verdict order, one per head (the first)."""
+    """The rounds: codex-seat verdicts in verdict order, one per head (the first).
+
+    A re-anchored line is no round: it is the verdict already counted on the
+    head it came from, carried to an identical diff on a new head.
+    """
     seen: set = set()
     rounds: List[RoundLine] = []
     for line in lines:
-        if line.seat != CODEX_SEAT or line.head_sha in seen:
+        if line.seat != CODEX_SEAT or line.reanchored_from or line.head_sha in seen:
             continue
         seen.add(line.head_sha)
         rounds.append(line)
@@ -606,10 +696,13 @@ def override_record(reason: str, cap: CapState) -> Dict[str, Any]:
 def append_verdict(path: Path, line: RoundLine) -> str:
     """Append ``line`` under the ledger lock, fsynced: ``"appended"`` or ``"present"``.
 
-    ``"present"`` is the same verdict booked again (a retried write). A key that
-    holds another verdict raises :class:`RoundRefusal` (``verdict_on_head``); a
-    codex-seat verdict on a PR at the cap without an override or a granted round
-    raises it too (``b3_cap``). A ledger that is unreadable for this PR raises
+    ``"present"`` is the same verdict booked again (a retried write), also when
+    its first booking lies before the PR's attested ``opened`` line: it stays
+    there, uncounted. A key that holds another counted verdict raises
+    :class:`RoundRefusal` (``verdict_on_head``); so does a re-anchor of a verdict
+    the ledger does not count (``reanchor_origin_uncounted``), and a codex-seat
+    verdict on a PR at the cap without an override or a granted round
+    (``b3_cap``). A ledger that is unreadable for this PR raises
     :class:`RoundLedgerUnreadable`, any I/O failure :class:`RoundLedgerError`.
     """
     from atomic_io import slot_lock
@@ -618,8 +711,7 @@ def append_verdict(path: Path, line: RoundLine) -> str:
     try:
         with slot_lock(path):
             ledger = parse_ledger(path, _ledger_text(path))
-            _check_append(ledger, line)
-            if ledger.line_for(line.key) is not None:
+            if _check_append(ledger, line):
                 return "present"
             _append_line(path, line)
     except RoundLedgerError:
@@ -629,24 +721,49 @@ def append_verdict(path: Path, line: RoundLine) -> str:
     return "appended"
 
 
-def _check_append(ledger: Ledger, line: RoundLine) -> None:
+def _check_append(ledger: Ledger, line: RoundLine) -> bool:
+    """Judge ``line`` against the ledger read under its lock: ``True`` when this verdict is booked already.
+
+    Raises what :func:`append_verdict` names; ``False`` lets the line be appended.
+    """
     text = unreadable_text(ledger, line.pr_number)
     if text:
         raise RoundLedgerUnreadable(text)
     existing = ledger.line_for(line.key)
-    if existing is not None:
-        if existing.same_verdict(line):
-            return
+    if existing is not None and not existing.same_verdict(line):
         raise RoundRefusal(REFUSED_VERDICT_ON_HEAD, (
             f"seat {line.seat} of PR #{line.pr_number} already has a {existing.verdict.upper()} "
             f"on head {line.head_sha[:12]} ({existing.reviewer}, {existing.report_name}); a second "
             f"verdict on the same head is refused"
         ))
+    if ledger.booked(line):
+        return True
+    if line.reanchored_from:
+        _check_reanchor_origin(ledger, line)
     if line.seat != CODEX_SEAT or line.override:
-        return
+        return False
     cap = cap_state(ledger.for_pr(line.project_id, line.pr_number), line.pr_number)
     if cap.capped and not round_granted_past_cap(cap, head_sha=line.head_sha):
         raise RoundRefusal(REFUSED_B3_CAP, cap_refusal_text(cap, where="verdict not booked"))
+    return False
+
+
+def _check_reanchor_origin(ledger: Ledger, line: RoundLine) -> None:
+    """A re-anchor carries a counted verdict or nothing: the line it came from is counted, same reviewer, report and verdict.
+
+    A verdict booked before the PR's attested ``opened`` line, or never booked
+    at all, is not counted; carrying it to a new head would make it count there.
+    """
+    origin = ledger.line_for((line.project_id, line.pr_number, line.reanchored_from, line.seat))
+    if origin is not None and (origin.reviewer, origin.verdict, origin.report_name) == (
+        line.reviewer, line.verdict, line.report_name,
+    ):
+        return
+    raise RoundRefusal(REFUSED_REANCHOR_UNCOUNTED, (
+        f"the {line.verdict.upper()} of {line.reviewer} (seat {line.seat}) on head {line.reanchored_from[:12]} "
+        f"that this re-anchor carries to {line.head_sha[:12]} is no counted line of PR #{line.pr_number} in the "
+        f"round ledger, so there is nothing to carry: run the gate on {line.head_sha[:12]}"
+    ))
 
 
 def ndjson(record: Dict[str, Any]) -> str:
@@ -790,9 +907,10 @@ def prior_evidence(data_dir: Path, pr_number: int, *, state_dir: Optional[Path] 
       ``receipt_query.py`` reads), on ``pr_number`` or ``pr_id``, any status:
       a report can be gone and a record overwritten, the receipt stays.
 
-    ``state_dir`` is the state dir the ledger lives in, resolved the way the
-    gate does (:func:`store_state_dir`, ``ensure_env()['VNX_STATE_DIR']``)
-    unless the caller names one (``vnx review rounds open --data-dir``).
+    ``state_dir`` is the state dir the ledger lives in. Every caller names it:
+    the gate the parent of the ``review_gates`` dir it reads the ledger from,
+    ``vnx review rounds open`` the one :func:`store_state_dir` resolved. Without
+    one it is resolved the way the gate does (``ensure_env()['VNX_STATE_DIR']``).
 
     Fails closed. A source that exists but cannot be read is evidence, named
     ``unreadable:<path>`` and listed first: a reports dir that cannot be
@@ -957,17 +1075,43 @@ def line_from_payload(payload: Dict[str, Any], *, gate: str, project_id: str) ->
         recorded_at=str(payload.get("recorded_at") or "") or _utc_now(),
         branch=str(payload.get("branch") or ""),
         override=override if isinstance(override, dict) and override else None,
+        reanchored_from=reanchored_from(payload),
     )
 
 
+def reanchored_from(payload: Dict[str, Any]) -> str:
+    """The head a re-anchored verdict came from (``gate_reanchor_cli``); ``""`` for a verdict given on its own head."""
+    if payload.get("evidence_source") != EVIDENCE_REANCHORED:
+        return ""
+    return str(payload.get("reanchored_from_commit_sha") or "").strip()
+
+
+def _head(record: Dict[str, Any]) -> str:
+    return str(record.get("commit_sha") or "").strip()
+
+
+def _is_reanchor(payload: Dict[str, Any], on_disk: Dict[str, Any]) -> bool:
+    """Does ``payload`` carry the verdict ``on_disk`` holds to a new head (``gate_reanchor_cli``)?"""
+    origin = reanchored_from(payload)
+    return bool(origin) and origin == _head(on_disk) and origin != _head(payload)
+
+
 def _is_rewrite(payload: Dict[str, Any], on_disk: Optional[Dict[str, Any]]) -> bool:
-    """A rewrite of the record that already carries this verdict: same report, same verdict."""
+    """A rewrite of the record that already carries this verdict: same report, same verdict, no re-anchor.
+
+    A re-anchor carries the verdict on disk to a new head with its provenance
+    (``evidence_source`` ``reanchored``, ``reanchored_from_commit_sha`` naming the
+    head on disk): that is a verdict for a head the ledger has no line for yet,
+    and it is booked. The same report on the same head stays a rewrite. So does
+    the same report moved to another head without that provenance: it gets no
+    line, and the door does not count it.
+    """
     if not isinstance(on_disk, dict):
         return False
     report = str(payload.get("report_path") or "")
     return bool(report) and str(on_disk.get("report_path") or "") == report and (
         ledger_verdict(on_disk) == ledger_verdict(payload)
-    )
+    ) and not _is_reanchor(payload, on_disk)
 
 
 def book_result_verdict(
@@ -979,7 +1123,9 @@ def book_result_verdict(
     overwrite guard and before the record is written. Raises
     :class:`RoundRefusal` (the writer refuses the record) or
     :class:`RoundLedgerError` (the run fails); anything else is booked or
-    skipped with the reason in the returned :class:`VerdictBooking`.
+    skipped with the reason in the returned :class:`VerdictBooking`. A
+    re-anchor is booked as a line for its new head that names the head it came
+    from (:func:`reanchored_from`), and only when that head's line is counted.
     """
     path = ledger_path_for_results(Path(result_path).parent)
     if path is None:
@@ -989,6 +1135,9 @@ def book_result_verdict(
         return VerdictBooking("skipped", "no review-seat verdict")
     if _is_rewrite(payload, on_disk):
         return VerdictBooking("skipped", "a rewrite of a record that already carries this verdict")
+    if reanchored_from(payload) and ledger_state(path) == "absent":
+        # A store that keeps no ledger yet: the door reads none, and a first line would start one.
+        return VerdictBooking("skipped", "a re-anchor in a store that keeps no round ledger")
     line = line_from_payload(payload, gate=gate, project_id=store_project_id(path.parent))
     if line is None:
         logger.warning(

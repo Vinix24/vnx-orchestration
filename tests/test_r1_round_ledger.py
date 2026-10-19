@@ -931,7 +931,8 @@ class TestEarlierHistoryFailsClosed:
         assert evidence in review_rounds.prior_evidence(env["data_dir"], PR)
 
         assert _open_cli(env) == 0
-        reopened = _request(env, ["codex_gate", "kimi_gate"], head_sha="8" * 40)
+        reopened_head = "8" * 40
+        reopened = _request(env, ["codex_gate", "kimi_gate"], head_sha=reopened_head)
 
         assert {seat: payload["status"] for seat, payload in reopened.items()} == {
             "codex_gate": "requested", "kimi_gate": "requested",
@@ -939,7 +940,11 @@ class TestEarlierHistoryFailsClosed:
         assert [(line["basis"], line["source"], line["reason"]) for line in _opened_lines(env["ledger"])] == [
             ("attested", "operator", OPEN_REASON),
         ]
-        assert _env_door(env, monkeypatch, head=NEW_HEAD)["verdict"] == "GO", "the cap starts at zero from that line"
+        # R1c: what was booked before the attested line counts for nothing, the PASSes included.
+        assert _env_door(env, monkeypatch, head=NEW_HEAD)["verdict"] == "NO-GO"
+        for gate, tag in (("codex_gate", "04"), ("kimi_gate", "05")):
+            assert _write_result(env, gate, _verdict(env, gate, tag=tag, head=reopened_head))[1] is True, gate
+        assert _env_door(env, monkeypatch, head=reopened_head)["verdict"] == "GO", "the cap starts at zero from that line"
 
     @pytest.mark.parametrize("break_it", ["record-does-not-parse", "receipt-ledger-cannot-be-opened"])
     def test_a_source_that_cannot_be_read_is_evidence(self, env, break_it):
@@ -1108,6 +1113,165 @@ class TestReviewCliSpawnFailure:
 
         assert rc == review_cli._EXIT_ERROR
         assert f"could not start {script}" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# R1c (OI-2180, OI-2185): a re-anchor, the opened boundary, one store per command
+# ---------------------------------------------------------------------------
+
+KIMI_ID = f"kimi-gate-pr{PR}-20261019100002"
+
+
+def _reanchor(env, monkeypatch, gate: str, *, new_head: str) -> int:
+    """``gate_reanchor_cli --apply`` onto ``new_head``. gh, the contract hash and the symbol analysis are
+    the edge and allow it; the write goes through the real guarded recorder and the round ledger."""
+    import gate_reanchor
+    import gate_reanchor_cli
+
+    record = json.loads((env["results_dir"] / f"pr-{PR}-{gate}.json").read_text(encoding="utf-8"))
+    view = {"headRefOid": new_head, "headRefName": BRANCH, "files": [{"path": "scripts/lib/example.py"}]}
+    monkeypatch.setattr(gate_reanchor_cli, "_gh", lambda args, timeout=30: json.dumps(view))
+    monkeypatch.setattr(gate_reanchor_cli, "current_contract_hash", lambda _gate, _pr: record["contract_hash"])
+    monkeypatch.setattr(gate_reanchor, "can_reanchor", lambda _root, **kw: gate_reanchor.ReanchorDecision(
+        allowed=True, reason="identical diff on a moved base", contract_hash_matches=True,
+        old_sha=kw["old_sha"], new_sha=kw["new_sha"],
+    ))
+    return gate_reanchor_cli.main(["--pr", str(PR), "--gate", gate, "--apply", "--project-root", str(env["project_root"])])
+
+
+def _seat_lines(ledger: Path, seat: str) -> List[Any]:
+    return [(line["head_sha"], line.get("reanchored_from", "")) for line in _ledger_lines(ledger) if line["seat"] == seat]
+
+
+class TestAReanchorIsBooked:
+    def test_a_reanchored_pass_gets_a_line_for_its_new_head_and_counts_at_the_door(self, env, monkeypatch):
+        """OI-2180 (1). Red on 2b9da5c5: the re-anchored record was taken for a rewrite of the record
+        it replaced, no line was booked for the new head, and two valid PASSes on it were NO-GO."""
+        _request(env, ["codex_gate", "kimi_gate"])
+        assert _write_result(env, "kimi_gate", _verdict(env, "kimi_gate", tag="02", dispatch_id=KIMI_ID))[1] is True
+        assert _write_result(env, "codex_gate", _verdict(env, "codex_gate", tag="03", head=NEW_HEAD))[1] is True
+
+        rc = _reanchor(env, monkeypatch, "kimi_gate", new_head=NEW_HEAD)
+        verdict = _env_door(env, monkeypatch, head=NEW_HEAD)
+
+        assert rc == 0
+        assert verdict["verdict"] == "GO", verdict["message"]
+        assert _seat_lines(env["ledger"], "kimi_gate") == [(HEAD_SHA, ""), (NEW_HEAD, HEAD_SHA)]
+
+    def test_a_reanchored_codex_seat_verdict_is_no_second_round(self, env, monkeypatch):
+        """The relocated verdict is the one already counted on its own head: its blockers count once."""
+        import review_rounds
+
+        _request(env, ["codex_gate"])
+        takeover = {"takeover": True, "takeover_from": "codex_gate", "dispatch_id": KIMI_ID}
+        fail = _verdict(env, "kimi_gate", tag="02", blocking=2, seat="codex_gate", **takeover)
+        assert _write_result(env, "kimi_gate", fail)[1] is True
+
+        assert _reanchor(env, monkeypatch, "kimi_gate", new_head=NEW_HEAD) == 0
+
+        assert _seat_lines(env["ledger"], "codex_gate") == [(HEAD_SHA, ""), (NEW_HEAD, HEAD_SHA)]
+        ledger = review_rounds.read_ledger(env["ledger"])
+        assert review_rounds.cap_state(ledger.for_pr("", PR), PR).blockers == (2,)
+
+    def test_a_reanchor_of_a_verdict_the_ledger_does_not_count_is_refused(self, env, monkeypatch):
+        """A verdict booked before an attested ``opened`` line is not counted; carrying it to a new head
+        would make it count there. The write is refused and the record stays on its own head."""
+        assert _write_result(env, "kimi_gate", _verdict(env, "kimi_gate", tag="02", dispatch_id=KIMI_ID))[1] is True
+        assert _open_cli(env) == 0
+
+        rc = _reanchor(env, monkeypatch, "kimi_gate", new_head=NEW_HEAD)
+
+        assert rc == 20, "the guarded write refused"
+        assert _seat_lines(env["ledger"], "kimi_gate") == [(HEAD_SHA, "")]
+        record = json.loads((env["results_dir"] / f"pr-{PR}-kimi_gate.json").read_text(encoding="utf-8"))
+        assert record["commit_sha"] == HEAD_SHA
+
+
+class TestTheOpenedBoundary:
+    def test_the_cap_starts_at_zero_at_an_attested_opened_line(self, env, monkeypatch):
+        """OI-2180 (2). Red on 2b9da5c5: a FAIL(3) booked before ``rounds open`` still counted. The open
+        message said the cap starts at zero there; the next request refused the codex seat anyway."""
+        import dispatch_cli
+
+        assert _write_result(env, "codex_gate", _verdict(env, "codex_gate", tag="01", blocking=3))[1] is True
+        assert _open_cli(env) == 0
+
+        seats = _request(env, ["codex_gate", "kimi_gate"])
+
+        assert {seat: payload["status"] for seat, payload in seats.items()} == {
+            "codex_gate": "requested", "kimi_gate": "requested",
+        }, "neither the cap nor the FAIL on this head is counted from before the line"
+        for gate, tag in (("codex_gate", "02"), ("kimi_gate", "03")):
+            assert _write_result(env, gate, _verdict(env, gate, tag=tag))[1] is True, gate
+        verdict = _env_door(env, monkeypatch)
+        assert verdict["verdict"] == "GO", verdict["message"]
+        assert verdict["review_seats"]["round_ledger"]["cap"]["blockers"] == [0]
+        assert dispatch_cli._capped_prs_on_branch(env["state_dir"], BRANCH) == []
+
+    def test_a_new_opened_line_draws_no_boundary(self, env):
+        """Only ``basis`` ``attested`` draws the line: a ``new`` line has nothing before it to leave out."""
+        import review_rounds
+
+        _write_ledger(env["ledger"], _codex_rounds(3) + [_opened()])
+
+        ledger = review_rounds.read_ledger(env["ledger"])
+
+        assert review_rounds.cap_state(ledger.for_pr("", PR), PR).rule == "B3.1"
+
+
+class TestTheGateReadsItsOwnStore:
+    def test_the_history_check_reads_the_store_of_the_ledger_it_opens(self, env, tmp_path):
+        """OI-2185 (2). Red on 2b9da5c5: the history check read the store VNX_STATE_DIR names, not the
+        one the ledger lives in, and opened a PR with an earlier FAIL as new."""
+        import gate_request_handler
+
+        review_gates = tmp_path / "other" / "state" / "review_gates"
+        (review_gates / "results").mkdir(parents=True)
+        legacy = _verdict(env, "codex_gate", tag="01", blocking=3)
+        Path(legacy["report_path"]).unlink()  # the earlier review is in the other store only
+        (review_gates / "results" / f"pr-{PR}-codex_gate.json").write_text(json.dumps(legacy), encoding="utf-8")
+
+        rounds = gate_request_handler._PrRounds.read(review_gates, PR)
+
+        assert f"first: pr-{PR}-codex_gate.json" in rounds.history_missing, rounds.history_missing
+        assert _opened_lines(review_gates / "rounds.ndjson") == []
+
+
+class TestRoundsOpenNamesOneStore:
+    def test_data_dir_and_a_state_dir_outside_it_are_refused_naming_both(self, env, tmp_path, monkeypatch, capsys):
+        """OI-2185 (1). Red on 2b9da5c5: ``--data-dir`` won, the opened line went into
+        ``<data-dir>/state`` while the gate reads VNX_STATE_DIR, and the command exited 0."""
+        state_dir = tmp_path / "external" / "state"
+        (state_dir / "review_gates").mkdir(parents=True)
+        monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
+
+        rc = _open_cli(env)
+
+        err = capsys.readouterr().err
+        assert rc == 2, err
+        assert str(env["state_dir"]) in err and str(state_dir) in err
+        assert _opened_lines(env["ledger"]) == []
+        assert _opened_lines(state_dir / "review_gates" / "rounds.ndjson") == []
+
+    def test_data_dir_alone_opens_the_pr_in_its_own_store(self, env, monkeypatch):
+        monkeypatch.delenv("VNX_STATE_DIR")
+
+        assert _open_cli(env) == 0
+        assert [line["basis"] for line in _opened_lines(env["ledger"])] == ["attested"]
+
+    def test_the_derived_state_dir_of_another_project_does_not_overrule_data_dir(self, env, tmp_path):
+        """``bin/vnx`` exports VNX_STATE_DIR as ``<VNX_DATA_DIR>/state`` of the project it runs in; that
+        derived value says nothing about the store ``--data-dir`` names."""
+        import review_rounds_cli
+
+        other = tmp_path / "other" / ".vnx-data"
+        (other / "state" / "review_gates").mkdir(parents=True)
+
+        rc = _rc(review_rounds_cli.main, ["rounds", "open", "--pr", str(PR), "--reason", OPEN_REASON, "--data-dir", str(other)])
+
+        assert rc == 0
+        assert [line["basis"] for line in _opened_lines(other / "state" / "review_gates" / "rounds.ndjson")] == ["attested"]
+        assert _opened_lines(env["ledger"]) == []
 
 
 # ---------------------------------------------------------------------------
