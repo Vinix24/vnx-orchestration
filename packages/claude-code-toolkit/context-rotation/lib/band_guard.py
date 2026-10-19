@@ -27,8 +27,8 @@ M goes to the model (additionalContext, permissionDecisionReason, the Stop
 reason), U to the user (systemMessage). Each crossing gets one user line, at the
 first UserPromptSubmit, denial or held-back Stop in it. Every message names the
 session's handover path as the plugin builds it; its other values are the
-measured size, the window from the settings, counts from a checked state and
-fixed names.
+measured size and the band's threshold, both in tokens, counts from a checked
+state and fixed names.
 
 A session only informs, so nothing is denied or held back: in plan mode
 (`permission_mode: plan`); after the user typed `/context-rotation:rotate
@@ -389,16 +389,18 @@ def inform_reason(state: Dict[str, Any], payload: Dict[str, Any]) -> Optional[st
 
 # --- the messages ---------------------------------------------------------------------
 
-def size_text(size: int, settings: Dict[str, Any]) -> str:
-    window = settings["window_tokens"]
-    return "%d of %d tokens (%.0f%%)" % (size, window, size * 100 / window)
+def size_phrase(size: int, level: str, settings: Dict[str, Any]) -> str:
+    """The size and the band's threshold, in tokens, for a message the model or the user sees."""
+    threshold = context_budget.threshold_for(settings, level)
+    return "at %s tokens, in the %s band (threshold %s tokens)" % (
+        context_budget.token_text(size), level, context_budget.token_text(threshold))
 
 
 def handover_now(size: int, level: str, session: hook_runtime.Session, why: Optional[str]) -> str:
     """M at UserPromptSubmit in the force and hard bands."""
-    text = ("Context is %s, in the %s band. Write the handover at %s now with the rotate skill "
+    text = ("Context is %s. Write the handover at %s now with the rotate skill "
             "(/context-rotation:rotate), and make that write your last action."
-            % (size_text(size, session.settings), level, session.handover))
+            % (size_phrase(size, level, session.settings), session.handover))
     if why == UNREAD:
         return text
     if why == PLAN:
@@ -412,8 +414,8 @@ def handover_now(size: int, level: str, session: hook_runtime.Session, why: Opti
 
 def crossing_line(size: int, level: str, session: hook_runtime.Session, why: Optional[str]) -> str:
     """U, once per crossing."""
-    head = "context-rotation: the context is at %.0f%% of the window (%s band); the handover goes to %s." % (
-        size * 100 / session.settings["window_tokens"], level, session.handover)
+    head = "context-rotation: the context is %s; the handover goes to %s." % (
+        size_phrase(size, level, session.settings), session.handover)
     if why:
         return head + " Nothing is denied or held back: %s." % INFORM_ONLY[why]
     if level == HARD:
@@ -437,13 +439,13 @@ def deny_reason(size: int, level: str, session: hook_runtime.Session) -> str:
         why = "in the force band this project's force_deny_tools setting holds this tool back until it is written"
     return ("context-rotation denied this tool call: the context is %s, and %s. Write the handover at %s now "
             "with the rotate skill, as your last action, then end your turn."
-            % (size_text(size, session.settings), why, session.handover))
+            % (size_phrase(size, level, session.settings), why, session.handover))
 
 
 def stop_reason(size: int, level: str, session: hook_runtime.Session) -> str:
     """M for a held-back Stop."""
-    return ("Context is %s, in the %s band. Write the handover at %s with the rotate skill as your last action, "
-            "then stop." % (size_text(size, session.settings), level, session.handover))
+    return ("Context is %s. Write the handover at %s with the rotate skill as your last action, "
+            "then stop." % (size_phrase(size, level, session.settings), session.handover))
 
 
 # --- the hooks ----------------------------------------------------------------------
@@ -460,30 +462,83 @@ def _settle(session: hook_runtime.Session, run: hook_runtime.HookRun, step: str,
 
 
 def _measured(payload: Dict[str, Any], session: hook_runtime.Session,
-              run: hook_runtime.HookRun) -> Tuple[Optional[int], Optional[str]]:
+              run: hook_runtime.HookRun) -> Tuple[Optional[int], bool]:
     run.at("measure")
     size = context_budget.measure(payload.get("transcript_path"))
-    return size, enforcement_state.level_of(context_budget.band(size, session.settings))
+    return size, rotation_state.injected_on_clear(session.project_dir, session.session_id)
+
+
+def _record_and_level(state: Dict[str, Any], size: Optional[int], settings: Dict[str, Any],
+                      injected: bool) -> Tuple[enforcement_state.Events, Optional[str]]:
+    """(events, level) for a measured size: record an injected session's start size, then its level.
+
+    The start size is the first known measurement and is never overwritten, so a
+    compaction or a fall below it does not reset it. Unknown sizes stay unknown.
+    """
+    events: enforcement_state.Events = []
+    if injected and state["start_size"] is None and size is not None:
+        events += enforcement_state.record_start(state, size)
+    return events, _loop_level(state, size, settings)
+
+
+def _loop_level(state: Dict[str, Any], size: Optional[int], settings: Dict[str, Any]) -> Optional[str]:
+    """The level of a measured size, holding an injected session below force and hard until it did real work.
+
+    A session that started from a handover injection reaches force or hard only when
+    the size is at or above the threshold AND at least min_work_tokens above its start
+    size. The warn band is unchanged, and every other session keeps the plain level.
+    """
+    if size is None:
+        return None
+    band = context_budget.band(size, settings)
+    start = state["start_size"]
+    if start is not None and band in (FORCE, HARD) and size - start < settings["min_work_tokens"]:
+        return LOW
+    return enforcement_state.level_of(band)
+
+
+def _loop_line_due(state: Dict[str, Any], settings: Dict[str, Any]) -> bool:
+    """True when the one-time loop line is due: the start size and min work already reach the force threshold."""
+    if state["loop_warned"] or state["start_size"] is None:
+        return False
+    return state["start_size"] + settings["min_work_tokens"] >= context_budget.threshold_for(settings, "force")
+
+
+def loop_line(start: int, settings: Dict[str, Any]) -> str:
+    """U, once per session: the start is so close to the force threshold that rotating will not help."""
+    force = context_budget.threshold_for(settings, "force")
+    return ("context-rotation: this session started at %s tokens, and its force threshold is %s tokens; %s work "
+            "tokens bring it there, so rotating will not make the next session smaller. Raise the force "
+            "threshold, or start with a smaller context (fewer CLAUDE.md imports), to stop the loop."
+            % (context_budget.token_text(start), context_budget.token_text(force),
+               context_budget.token_text(settings["min_work_tokens"])))
 
 
 def on_prompt(payload: Dict[str, Any], session: hook_runtime.Session, size: int,
               run: hook_runtime.HookRun) -> Tuple[Optional[str], Optional[str]]:
-    """(M, U) for a measured prompt, both None below force; a fall below force is recorded."""
-    level = enforcement_state.level_of(context_budget.band(size, session.settings))
+    """(M, U) for a measured prompt, both None below force but for the loop line; a fall below force is recorded."""
+    injected = rotation_state.injected_on_clear(session.project_dir, session.session_id)
+    raw_level = enforcement_state.level_of(context_budget.band(size, session.settings))
 
     def change(state):
-        events = enforcement_state.observe(state, level)
+        events, level = _record_and_level(state, size, session.settings, injected)
+        events += enforcement_state.observe(state, level)
         why = inform_reason(state, payload)
         told = enforcement_state.tell(state) if level != LOW else []
-        return events + told, (why, crossing_line(size, level, session, why) if told else None)
+        lines = [crossing_line(size, level, session, why)] if told else []
+        if _loop_line_due(state, session.settings):
+            events += enforcement_state.loop_warn(state)
+            lines.append(loop_line(state["start_size"], session.settings))
+        text = handover_now(size, level, session, why) if level != LOW else None
+        return events + told, (why, text, "\n".join(lines) or None)
 
     settled = _settle(session, run, "enforcement state at UserPromptSubmit", change)
     if settled is None:  # the state failed: inform as the stored state says, without the user line
-        settled = _stored_reason(payload, session), None
-    if level == LOW:
-        return None, None
-    why, line = settled
-    return handover_now(size, level, session, why), line
+        why = _stored_reason(payload, session)
+        text = handover_now(size, raw_level, session, why) if raw_level != LOW else None
+        return text, None
+    why, text, line = settled
+    return text, line
 
 
 def _stored_reason(payload: Dict[str, Any], session: hook_runtime.Session) -> Optional[str]:
@@ -504,13 +559,14 @@ def on_tool(payload: Dict[str, Any], session: hook_runtime.Session, run: hook_ru
     """
     tool_name, tool_input = payload.get("tool_name"), payload.get("tool_input")
     kept = storage_denial(tool_name, tool_input, session, run)
-    size, level = _measured(payload, session, run)
-    if level is None:
+    size, injected = _measured(payload, session, run)
+    if size is None:
         return kept
     allowed = bool(kept) or _allowed(tool_name, tool_input, session, run)
 
     def change(state):
-        events = enforcement_state.observe(state, level)
+        events, level = _record_and_level(state, size, session.settings, injected)
+        events += enforcement_state.observe(state, level)
         if allowed or inform_reason(state, payload) or not denies(level, tool_name, session.settings):
             return events, None
         events += enforcement_state.deny(state, session.settings["hard_max_denials"])
@@ -526,13 +582,14 @@ def on_tool(payload: Dict[str, Any], session: hook_runtime.Session, run: hook_ru
 
 def on_stop(payload: Dict[str, Any], session: hook_runtime.Session, run: hook_runtime.HookRun) -> Reply:
     """(M reason, U line or None) when this Stop is held back for the handover; None when it goes ahead."""
-    size, level = _measured(payload, session, run)
-    if level is None:
+    size, injected = _measured(payload, session, run)
+    if size is None:
         return None
     active = bool(payload.get("stop_hook_active"))
 
     def change(state):
-        events = enforcement_state.observe(state, level)
+        events, level = _record_and_level(state, size, session.settings, injected)
+        events += enforcement_state.observe(state, level)
         if level == LOW or active or inform_reason(state, payload):
             return events, None
         blocked = enforcement_state.block_stop(state)

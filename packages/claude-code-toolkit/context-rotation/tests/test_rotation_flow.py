@@ -297,4 +297,4 @@ def test_warn_band_and_outdated_note_share_one_context(saved):
     saved.append(entry)
     text = context_of(saved.prompt("go on"))
     assert "no longer covers the latest work" in text
-    assert "Context is 130000 of 200000 tokens" in text
+    assert "Context is at 130000 tokens, in the force band (threshold 130000 tokens)" in text

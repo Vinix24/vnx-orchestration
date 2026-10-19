@@ -371,10 +371,10 @@ def test_a_planted_state_does_not_release_the_session_with_a_lookalike_value(s):
 
 
 @pytest.mark.parametrize("state", [
-    dict(FIELDS, blocked=1), dict(FIELDS, told=1), dict(FIELDS, version=True), dict(FIELDS, version=2),
+    dict(FIELDS, blocked=1), dict(FIELDS, told=1), dict(FIELDS, version=True), dict(FIELDS, version=3),
     dict(FIELDS, level=["hard"]), dict(FIELDS, denials=-1), dict(FIELDS, crossing=1.0), dict(FIELDS, denials=False),
     dict(FIELDS, inform_only="plan"), {k: v for k, v in FIELDS.items() if k != "told"},
-], ids=["blocked-ahead", "told-ahead", "version-bool", "version-2", "level-list", "negative", "float", "bool",
+], ids=["blocked-ahead", "told-ahead", "version-bool", "version-3", "level-list", "negative", "float", "bool",
         "inform-plan", "missing-field"])
 def test_a_state_the_plugin_does_not_write_is_refused(state):
     assert enforcement_state.state_problem(state) is not None

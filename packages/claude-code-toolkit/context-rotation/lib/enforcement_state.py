@@ -48,14 +48,14 @@ import regular_file
 import rotation_state
 import state_fields
 
-VERSION = 1
+VERSION = 2
 LOW, FORCE, HARD = "low", "force", "hard"
 LEVELS = (LOW, FORCE, HARD)
 # Why a session only informs: the user typed release, or the denial cap was reached.
 RELEASE = "release"
 DENIAL_CAP = "denial_cap"
 INFORM_REASONS = (RELEASE, DENIAL_CAP)
-FIELDS = ("version", "level", "crossing", "blocked", "told", "denials", "inform_only")
+FIELDS = ("version", "level", "crossing", "blocked", "told", "denials", "inform_only", "start_size", "loop_warned")
 COUNTS = ("crossing", "blocked", "told", "denials")
 SUFFIX = ".enforcement.json"
 JOURNAL = "enforcement.jsonl"
@@ -68,7 +68,7 @@ Change = Callable[[Dict[str, Any]], Tuple[Events, Any]]
 
 def fresh() -> Dict[str, Any]:
     return {"version": VERSION, "level": LOW, "crossing": 0, "blocked": 0, "told": 0, "denials": 0,
-            "inform_only": None}
+            "inform_only": None, "start_size": None, "loop_warned": False}
 
 
 def state_path(project_dir: str, session_id: str) -> str:
@@ -107,6 +107,10 @@ def state_problem(state: Any) -> Optional[str]:
         return "it gives a Stop block or a user line to a crossing that did not happen"
     if state["inform_only"] is not None and not _one_of(state["inform_only"], INFORM_REASONS):
         return "its inform_only is not one the plugin writes"
+    if state["start_size"] is not None and not state_fields.is_count(state["start_size"]):
+        return "its start_size is not a count"
+    if not isinstance(state["loop_warned"], bool):
+        return "its loop_warned is not a boolean"
     return None
 
 
@@ -161,6 +165,8 @@ JOURNAL_EVENTS: Dict[str, Tuple[str, ...]] = {
     "denial": ("session_id", "level", "denials"),
     "inform_only": ("session_id", "reason", "denials"),
     "reset": ("session_id", "denials"),
+    "start": ("session_id", "start_size"),
+    "loop_warned": ("session_id",),
 }
 _RECORD_CHECKS: Dict[str, Callable[[Any], bool]] = {
     "at": state_fields.is_plugin_time,
@@ -169,6 +175,7 @@ _RECORD_CHECKS: Dict[str, Callable[[Any], bool]] = {
     "crossing": state_fields.is_count,
     "denials": state_fields.is_count,
     "reason": lambda value: _one_of(value, INFORM_REASONS),
+    "start_size": state_fields.is_count,
 }
 
 
@@ -298,3 +305,19 @@ def reset_denials(state: Dict[str, Any]) -> Events:
         return []
     cleared, state["denials"] = state["denials"], 0
     return [("reset", {"denials": cleared})]
+
+
+def record_start(state: Dict[str, Any], size: int) -> Events:
+    """Record the start size of an injected session: the first known measurement, never overwritten."""
+    if state["start_size"] is not None:
+        return []
+    state["start_size"] = size
+    return [("start", {"start_size": size})]
+
+
+def loop_warn(state: Dict[str, Any]) -> Events:
+    """The loop line, at most once per session: [] when it was given already."""
+    if state["loop_warned"]:
+        return []
+    state["loop_warned"] = True
+    return [("loop_warned", {})]

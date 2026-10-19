@@ -84,13 +84,13 @@ def outdate(session, reason, run):
 # --- UserPromptSubmit ----------------------------------------------------
 
 def warn_message(size, settings, project_dir, session_id):
-    window = settings["window_tokens"]
-    percent = size * 100 / window
+    threshold = context_budget.threshold_for(settings, "warn")
     return (
-        "Context is %d of %d tokens (%.0f%%). Wrap up the current work and prepare a "
+        "Context is at %s tokens, at or above the warn threshold of %s tokens. Wrap up the current work and prepare a "
         "handover: write the state of this session (goal, decisions, what is done, "
         "what is next) to %s so a fresh session can continue from it."
-        % (size, window, percent, rotation_state.handover_path(project_dir, session_id))
+        % (context_budget.token_text(size), context_budget.token_text(threshold),
+           rotation_state.handover_path(project_dir, session_id))
     )
 
 
