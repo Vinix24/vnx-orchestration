@@ -1,4 +1,0 @@
-- Round ledger (OI-2180 point 3, R1d): an applied `--override-b3` on the build door (`dispatch_cli.py`) now books one `override` line per capped PR in `state/review_gates/rounds.ndjson`, instead of only a `logger.warning` and a plan warning outside the canonical dict.
-  The line carries the project, PR number, the head the cap fell on, the override reason, the env var that carried it (`VNX_OVERRIDE_B3_REASON`) and the cumulative blocker count. A failure to write the line refuses the override (fail-closed, `b3-override-ledger-error`); it never silently proceeds.
-  The dispatch receipt (the `dispatch_created` register event and the `route_decisions` record) carries the override as an `override_b3` field with its reason; a dispatch without an override has no such field.
-  `vnx review rounds show --pr N` lists a PR's ledger, including its `override` lines.
