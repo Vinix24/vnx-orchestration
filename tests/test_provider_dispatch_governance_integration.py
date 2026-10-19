@@ -365,7 +365,7 @@ def test_compute_cost_uses_yaml_pricing():
     """_compute_cost reads wave7_models.yaml and returns a non-zero float for valid tokens."""
     token_usage = {"input": 1_000_000, "output": 1_000_000, "cache_hit": 0}
     cost = provider_dispatch._compute_cost("litellm:deepseek", "deepseek/deepseek-v4-pro", token_usage)
-    # deepseek-v4-pro: input $0.435/Mtok + output $0.87/Mtok = $1.305 for 1M+1M
+    # deepseek-v4-pro peak: input $1.32/Mtok + output $3.96/Mtok = $5.28 for 1M+1M
     assert cost is not None
     assert cost > 0
 

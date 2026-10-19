@@ -115,7 +115,7 @@ def test_compute_cost_resolves_nonzero_for_api_lanes():
     tu = {"input": 10000, "output": 5000, "cache_hit": 0}
     for provider, model in [
         ("claude", "opus"),
-        ("codex", "gpt-5.2-codex"),
+        ("codex", "gpt-5.5"),
         ("gemini", "gemini-2.5-pro"),
         ("litellm:deepseek", "deepseek/deepseek-v4-pro"),
     ]:
@@ -123,12 +123,14 @@ def test_compute_cost_resolves_nonzero_for_api_lanes():
         assert cost is not None and cost > 0, f"{provider}/{model} resolved {cost}"
 
 
-def test_compute_cost_rate_table_fallback_on_registry_miss():
-    """When the registry has no entry, the provider_costs rate table resolves it."""
-    from provider_costs import resolve_cost_usd
-    # litellm:zai is in the rate table but not necessarily resolvable via registry
-    cost = resolve_cost_usd("litellm:zai", "glm-5.2", 1_000_000, 1_000_000)
+def test_compute_cost_price_run_resolves_zai_lane():
+    """litellm:zai models resolve through price_run against the registry (ADR-040)."""
+    from provider_costs import price_run
+    cost, source = price_run(
+        "litellm:zai", "glm-5.2", [{"input": 1_000_000, "output": 1_000_000}]
+    )
     assert cost is not None and cost > 0
+    assert source == "glm-5.2@2026-09-14"
 
 
 def test_compute_cost_none_when_zero_tokens():
@@ -141,7 +143,7 @@ def test_compute_cost_none_when_zero_tokens():
     proves the None is specifically the zero-token guard, not a broken lookup,
     so the provider cost path is genuinely tested.
     """
-    provider, model = "codex", "gpt-5.2-codex"
+    provider, model = "codex", "gpt-5.5"
     assert provider_dispatch._compute_cost(
         provider, model, {"input": 0, "output": 0, "cache_hit": 0}
     ) is None

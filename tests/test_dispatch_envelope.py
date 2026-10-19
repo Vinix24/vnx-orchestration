@@ -1003,8 +1003,8 @@ class TestEnvelopeCostUsd:
         assert mock_receipt.call_args[1]["model"] == "deepseek-v4-pro"
         cost_usd = mock_receipt.call_args[1]["cost_usd"]
         assert cost_usd is not None
-        # pro = 0.435/0.87 per MTok; 1000 input + 500 output
-        assert abs(cost_usd - (0.435 * 0.001 + 0.87 * 0.0005)) < 1e-9
+        # pro = 1.32/3.96 per MTok (peak); 1000 input + 500 output
+        assert abs(cost_usd - (1.32 * 0.001 + 3.96 * 0.0005)) < 1e-9
 
     def test_claude_lane_cost_usd_computed(self, spec_claude):
         """The claude lane through the envelope now carries a list-price estimate."""

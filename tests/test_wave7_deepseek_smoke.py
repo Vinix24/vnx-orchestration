@@ -152,10 +152,10 @@ class TestWave7ModelsYamlValid:
         assert model.litellm_name == "deepseek/deepseek-v4-pro", (
             f"unexpected litellm_name: {model.litellm_name!r}"
         )
-        assert model.cost_input_per_mtok == pytest.approx(0.435), (
+        assert model.cost_input_per_mtok == pytest.approx(1.32), (
             f"unexpected input cost: {model.cost_input_per_mtok}"
         )
-        assert model.cost_output_per_mtok == pytest.approx(0.87), (
+        assert model.cost_output_per_mtok == pytest.approx(3.96), (
             f"unexpected output cost: {model.cost_output_per_mtok}"
         )
         assert model.max_tokens == 384000, f"unexpected max_tokens: {model.max_tokens}"

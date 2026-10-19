@@ -356,8 +356,17 @@ def test_registry_entry_carries_the_official_flash_tariff_and_source():
     assert flash["cost_input_per_mtok"] == 0.30
     assert flash["cost_output_per_mtok"] == 1.20
     assert flash["cost_cache_read_per_mtok"] == 0.006
-    assert flash["price_source"] == "https://api-docs.deepseek.com/quick_start/pricing"
-    assert str(flash["price_checked_at"]) == "2026-09-28"
+    assert flash["price_source"] == (
+        "measured (~/.claude/rules/provider-constraints.md); cache-read "
+        "https://api-docs.deepseek.com/quick_start/pricing"
+    )
+    assert str(flash["price_checked_at"]) == "2026-09-14"
+    # ADR-040: the measured peak/off-peak split is carried as a dated version.
+    version = flash["price_versions"][0]
+    assert version["input_per_mtok"] == 0.30
+    assert version["output_per_mtok"] == 1.20
+    assert version["off_peak_input_per_mtok"] == 0.15
+    assert version["off_peak_output_per_mtok"] == 0.60
     # the gates keep their phased-out alias untouched
     legacy = raw["providers"]["deepseek_harness"]["models"]["deepseek-v4-flash"]
     assert (legacy["cost_input_per_mtok"], legacy["cost_output_per_mtok"]) == (0.14, 0.28)

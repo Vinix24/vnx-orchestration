@@ -25,107 +25,138 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Rate table
+# Price resolution (ADR-040)
 # ---------------------------------------------------------------------------
-# (provider, model) -> (input_per_mtok_usd, output_per_mtok_usd, is_subscription_flat)
-# is_subscription_flat=True means the model is billed as a flat subscription;
-# cost_usd_estimate=None is emitted in that case.
+# The hardcoded _PROVIDER_RATES table is gone. Every price now comes from the
+# model registry (scripts/lib/providers/wave7_models.yaml), read through
+# price_run(). A model without a price returns "unavailable:no_price:<model>"
+# as the cost_source — never a silent 0.
 
-_PROVIDER_RATES: dict[tuple[str, str], tuple[float, float, bool]] = {
-    # Anthropic Claude (metered via API / OAuth dispatch)
-    ("claude", "claude-sonnet-4-6"):           (3.0,   15.0,  False),
-    ("claude", "claude-sonnet-4-5"):           (3.0,   15.0,  False),
-    ("claude", "claude-opus-4-8"):             (15.0,  75.0,  False),
-    ("claude", "claude-opus-4-7"):             (15.0,  75.0,  False),
-    ("claude", "claude-haiku-4-5"):            (0.8,   4.0,   False),
-    ("claude", "claude-haiku-4-5-20251001"):   (0.8,   4.0,   False),
-    # Short model aliases used internally
-    ("claude", "sonnet"):                      (3.0,   15.0,  False),
-    ("claude", "opus"):                        (15.0,  75.0,  False),
-    ("claude", "haiku"):                       (0.8,   4.0,   False),
-    # OpenAI via Codex CLI
-    ("codex", "gpt-5.5"):                      (0.25,  1.00,  False),
-    ("codex", "gpt-5.2-codex"):                (0.25,  1.00,  False),
-    ("codex", "gpt-4o"):                       (2.5,   10.0,  False),
-    ("codex", "gpt-4.1"):                      (2.0,   8.0,   False),
-    # Google Gemini CLI
-    ("gemini", "gemini-2.5-pro"):              (0.25,  0.75,  False),
-    ("gemini", "gemini-2.5-flash"):            (0.075, 0.30,  False),
-    ("gemini", "gemini-2.0-flash"):            (0.075, 0.30,  False),
-    ("gemini", "gemini-1.5-pro"):              (1.25,  5.0,   False),
-    # Kimi CLI — OAuth subscription, no per-token pricing
-    ("kimi", "kimi-k2.6"):                     (0.0,   0.0,   True),
-    ("kimi", "kimi-k2-0905-default"):          (0.0,   0.0,   True),
-    ("kimi", "kimi-k2-0905-preview"):          (0.0,   0.0,   True),
-    ("kimi", "kimi-default"):                  (0.0,   0.0,   True),
-    # LiteLLM sub-providers
-    ("litellm:deepseek", "deepseek-v4-pro"):   (0.14,  0.28,  False),
-    ("litellm:moonshot", "kimi-k2-0905-default"): (0.0, 0.0,  True),
-    ("litellm:moonshot", "kimi-k2-0905-preview"):  (0.0, 0.0,  True),
-    ("litellm:zai", "glm-5.2"):        (0.683, 2.147, False),  # re-measured 2026-09-14 against live OpenRouter /api/v1/models
-    ("litellm:zai", "glm-5.3"):        (1.40,  4.40,  False),  # verified 2026-09-14 against live OpenRouter /api/v1/models
-    ("litellm:zai", "glm-5.3-flash"):  (0.15,  0.50,  False),  # verified 2026-09-14 against live OpenRouter /api/v1/models
-    ("litellm:ollama", "llama3"):              (0.0,   0.0,   True),
-    # openrouter-arbitrary lane (PR-1 skeleton) — the one proven model
-    # (openrouter/openai/gpt-4o-mini); OpenRouter pass-through pricing.
-    ("litellm:openrouter", "gpt-4o-mini"):     (0.15,  0.60,  False),
+# Maps VNX provider literals to wave7_models.yaml registry section keys.
+# litellm:<sub> providers are resolved separately (see price_run).
+_PROVIDER_TO_REGISTRY_KEY: dict[str, str] = {
+    "claude": "anthropic",
+    "codex": "openai",
+    "gemini": "google",
+    "kimi": "kimi_cli",
+    "deepseek-harness": "deepseek_harness",
+    "glm-harness": "zai",
+    "local-gemma": "local_gemma",
 }
 
-
-def _lookup_rate(provider: str, model: str) -> tuple[float, float, bool] | None:
-    """Look up (provider, model) rate, with path-prefix normalization fallback."""
-    key = (provider, model)
-    if key in _PROVIDER_RATES:
-        return _PROVIDER_RATES[key]
-    # Normalize: 'anthropic/claude-sonnet-4-6' -> 'claude-sonnet-4-6'
-    normalized = model.split("/")[-1] if "/" in model else model
-    key2 = (provider, normalized)
-    if key2 in _PROVIDER_RATES:
-        return _PROVIDER_RATES[key2]
-    return None
+# Provider literals billed as a flat subscription/OAuth lane rather than per
+# token. This is a LANE property (kimi CLI OAuth, local ollama), not a price —
+# it exists so emit_provider_cost can still label the billing_mode after the
+# rate table was removed. Everything metered goes through price_run.
+_SUBSCRIPTION_FLAT_PROVIDERS = frozenset({"kimi", "litellm:moonshot", "litellm:ollama"})
 
 
-def _compute_cost_from_rates(
-    provider: str,
-    model: str,
-    input_tokens: int | None,
-    output_tokens: int | None,
-) -> tuple[float | None, bool]:
-    """Compute cost from rate table.
+def _is_peak(ts: object) -> bool:
+    """Classify a timestamp against the DeepSeek peak window (ADR-040).
 
-    Returns (cost_usd, is_subscription_flat):
-    - (None, True)  for subscription-flat models
-    - (cost, False) for metered models with tokens
-    - (None, False) when provider+model not in rate table
+    Peak is 01:00-04:00 and 06:00-10:00 UTC on weekdays; off-peak (dal) is the
+    rest and bills at half the peak rate. A weekend or an out-of-window weekday
+    hour is off-peak.
     """
-    rate = _lookup_rate(provider, model)
-    if rate is None:
-        return None, False
-    input_per_mtok, output_per_mtok, is_flat = rate
-    if is_flat:
-        return None, True
-    in_t = input_tokens or 0
-    out_t = output_tokens or 0
-    cost = (in_t / 1_000_000) * input_per_mtok + (out_t / 1_000_000) * output_per_mtok
-    return round(cost, 8), False
+    if isinstance(ts, datetime):
+        dt = ts
+    else:
+        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc)
+    if dt.weekday() >= 5:  # Saturday / Sunday
+        return False
+    hour = dt.hour + dt.minute / 60.0 + dt.second / 3600.0
+    return (1.0 <= hour < 4.0) or (6.0 <= hour < 10.0)
 
 
-def resolve_cost_usd(
-    provider: str,
-    model: str,
-    input_tokens: int | None,
-    output_tokens: int | None,
-) -> float | None:
-    """Public cost resolver from the rate table.
+def _segment_is_peak(segment: dict, has_split: bool) -> bool:
+    """Decide whether a segment bills at the peak or off-peak rate.
 
-    Returns the metered cost in USD, or ``None`` for subscription/OAuth flat
-    lanes (legitimately $0) AND for provider+model pairs absent from the rate
-    table. Used as the fallback when the wave7 provider-registry lookup misses,
-    so cost_usd resolves to real dollars for API lanes (deepseek/openrouter/
-    codex-API) instead of silently landing at 0.
+    ``has_split`` is whether the resolved price version carries an off-peak
+    split at all. When it does, the segment's explicit ``peak`` flag wins, then
+    its ``ts`` timestamp (classified via :func:`_is_peak`), then the peak
+    default — the upper bound, never an under-report.
     """
-    cost, _is_flat = _compute_cost_from_rates(provider, model, input_tokens, output_tokens)
-    return cost
+    if not has_split:
+        return True
+    if "peak" in segment:
+        return bool(segment["peak"])
+    ts = segment.get("ts")
+    if ts is not None:
+        return _is_peak(ts)
+    return True
+
+
+def price_run(provider: str, model: str, segments) -> tuple[float | None, str]:
+    """Price one run, split into segments at a price boundary (ADR-040).
+
+    The single entry point for pricing. Resolves ``(provider, model)`` against
+    the model registry and applies the latest dated price version per segment,
+    so a run that crosses a price boundary (DeepSeek's peak window) is priced
+    with two rates.
+
+    Args:
+        provider: VNX provider literal (``"claude"``, ``"codex"``, ``"gemini"``,
+            ``"kimi"``, ``"deepseek-harness"``, ``"glm-harness"``,
+            ``"local-gemma"``) or a litellm sub-provider (``"litellm:deepseek"``,
+            ``"litellm:zai"``, ``"litellm:moonshot"``).
+        model: model name as carried by the caller (bare registry key,
+            provider-prefixed slug, or slash-qualified litellm name).
+        segments: iterable of segment mappings. Each segment carries token
+            counts — ``input``, ``output``, ``cache_read``, ``cache_write``
+            (all optional, default 0) — and optionally a rate-class selector
+            ``peak`` (bool) or ``ts`` (datetime / ISO-8601) for providers with
+            a peak/off-peak split. A segment with neither defaults to peak.
+
+    Returns:
+        ``(cost_usd, cost_source)``. ``cost_usd`` is the total USD cost, or
+        ``None`` when the model has no price. ``cost_source`` is a provenance
+        string: ``"<model>@<version-date>"`` for a priced run, or
+        ``"unavailable:no_price:<model>"`` for a model without a price — never
+        a silent 0.
+    """
+    from providers import provider_registry  # noqa: PLC0415 — lazy, cycle-safe
+
+    registry_key = _PROVIDER_TO_REGISTRY_KEY.get(provider)
+    if registry_key is None and provider.startswith("litellm:") and ":" in provider:
+        registry_key = provider.split(":", 1)[1].split(":", 1)[0]
+    if not registry_key:
+        return None, f"unavailable:no_price:{model}"
+
+    versions = provider_registry.resolve_price_versions(registry_key, model)
+    if not versions:
+        return None, f"unavailable:no_price:{model}"
+
+    version = versions[-1]  # latest by date
+    has_split = (
+        version.off_peak_input_per_mtok is not None
+        and version.off_peak_output_per_mtok is not None
+    )
+
+    total = 0.0
+    for segment in segments or []:
+        if not isinstance(segment, dict):
+            continue
+        peak = _segment_is_peak(segment, has_split)
+        in_rate = (
+            version.off_peak_input_per_mtok if (has_split and not peak) else version.input_per_mtok
+        )
+        out_rate = (
+            version.off_peak_output_per_mtok if (has_split and not peak) else version.output_per_mtok
+        )
+        in_t = int(segment.get("input") or 0)
+        out_t = int(segment.get("output") or 0)
+        cache_read_t = int(segment.get("cache_read") or 0)
+        cache_write_t = int(segment.get("cache_write") or 0)
+        total += (in_t / 1_000_000) * in_rate
+        total += (out_t / 1_000_000) * out_rate
+        if version.cache_read_per_mtok:
+            total += (cache_read_t / 1_000_000) * version.cache_read_per_mtok
+        if version.cache_write_per_mtok:
+            total += (cache_write_t / 1_000_000) * version.cache_write_per_mtok
+
+    return round(total, 8), f"{model}@{version.date}"
 
 
 def _make_record_id(
@@ -209,12 +240,14 @@ def emit_provider_cost(
         output_tokens=output_tokens,
     )
 
-    # Determine billing mode from cost_usd_estimate and rate table
+    # Determine billing mode from cost_usd_estimate and the subscription-flat
+    # lane set (the rate table that used to carry the flat flag is gone).
     if cost_usd_estimate is not None:
         billing_mode = "metered"
+    elif provider in _SUBSCRIPTION_FLAT_PROVIDERS:
+        billing_mode = "subscription"
     else:
-        rate = _lookup_rate(provider, model)
-        billing_mode = "subscription" if (rate and rate[2]) else "unmetered"
+        billing_mode = "unmetered"
 
     event: dict = {
         "record_id": record_id,

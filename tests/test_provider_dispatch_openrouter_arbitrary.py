@@ -257,24 +257,26 @@ class TestDispatchLitellmRouting:
 
 
 # ---------------------------------------------------------------------------
-# Cost rate table — the one proven model resolves real pricing
+# Cost resolution — an unpriced openrouter lane resolves to unavailable (ADR-040)
 # ---------------------------------------------------------------------------
 
 class TestCostResolution:
-    def test_proven_default_resolves_pricing(self):
-        from provider_costs import resolve_cost_usd
+    def test_unpriced_openrouter_model_is_unavailable_not_zero(self):
+        """gpt-4o-mini was priced only by the removed _PROVIDER_RATES table; with
+        no measured registry price it must resolve to unavailable, never a silent 0."""
+        from provider_costs import price_run
 
-        cost = resolve_cost_usd(
+        cost, source = price_run(
             "litellm:openrouter", "openrouter/openai/gpt-4o-mini",
-            input_tokens=1_000_000, output_tokens=1_000_000,
+            [{"input": 1_000_000, "output": 1_000_000}],
         )
-        assert cost == pytest.approx(0.75)
+        assert cost is None
+        assert source == "unavailable:no_price:openrouter/openai/gpt-4o-mini"
 
-    def test_compute_cost_end_to_end_via_rate_table_fallback(self):
-        """_compute_cost falls back to the rate table when the wave7 registry has
-        no 'openrouter' section (by design — this lane is not registry-curated)."""
+    def test_compute_cost_returns_none_for_unpriced_lane(self):
+        """_compute_cost falls through price_run, so an unpriced lane lands at None."""
         cost = pd._compute_cost(
             "litellm:openrouter", "openrouter/openai/gpt-4o-mini",
             {"input": 1_000_000, "output": 1_000_000},
         )
-        assert cost == pytest.approx(0.75)
+        assert cost is None

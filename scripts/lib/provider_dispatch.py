@@ -706,17 +706,26 @@ def _compute_cost(provider: str, model: str, token_usage: Dict[str, Any]) -> Opt
         # price. Only models whose registry entry carries that price bill them.
         cost_cache = (token_usage.get("cache_hit", 0) / 1_000_000) * pricing.get("cache_read", 0.0)
         return round(cost_in + cost_cache + cost_out, 8)
-    # Registry miss — fall back to the provider_costs rate table so API lanes
-    # (litellm:deepseek/zai, codex-API, gemini) still resolve to real dollars
-    # rather than silently landing at 0. The rate table returns None for
-    # subscription/OAuth flat lanes, which is the correct documented-$0 result.
+    # Registry miss — fall back to price_run so API lanes (litellm:deepseek/zai,
+    # codex-API, gemini) still resolve to real dollars rather than silently
+    # landing at 0. price_run returns (None, "unavailable:no_price:<model>") for
+    # a model without a price, which is the correct documented-$0 result.
     try:
-        from provider_costs import resolve_cost_usd  # noqa: PLC0415
-        return resolve_cost_usd(
-            provider, model, token_usage.get("input", 0), token_usage.get("output", 0)
+        from provider_costs import price_run  # noqa: PLC0415
+        cost_usd, _cost_source = price_run(
+            provider,
+            model,
+            [
+                {
+                    "input": token_usage.get("input", 0),
+                    "output": token_usage.get("output", 0),
+                    "cache_read": token_usage.get("cache_hit", 0),
+                }
+            ],
         )
+        return cost_usd
     except Exception as exc:  # noqa: BLE001
-        logger.debug("_compute_cost: rate-table fallback failed for %s/%s: %s", provider, model, exc)
+        logger.debug("_compute_cost: price_run fallback failed for %s/%s: %s", provider, model, exc)
         return None
 
 

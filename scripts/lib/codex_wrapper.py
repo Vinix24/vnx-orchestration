@@ -66,7 +66,7 @@ def codex_exec(
     Raises subprocess.TimeoutExpired on timeout.
     Raises RuntimeError on non-zero exit.
     """
-    from provider_costs import emit_provider_cost, _compute_cost_from_rates  # noqa: PLC0415
+    from provider_costs import emit_provider_cost, price_run  # noqa: PLC0415
     from providers import provider_registry
 
     model = provider_registry.resolve_codex_model(explicit=model)
@@ -95,9 +95,11 @@ def codex_exec(
     input_tokens = token_usage.get("input_tokens") if token_usage else None
     output_tokens = token_usage.get("output_tokens") if token_usage else None
 
-    cost_usd, is_flat = _compute_cost_from_rates("codex", model, input_tokens, output_tokens)
-    if is_flat:
-        cost_usd = None
+    cost_usd, _cost_source = price_run(
+        "codex",
+        model,
+        [{"input": input_tokens or 0, "output": output_tokens or 0}],
+    )
 
     emit_provider_cost(
         provider="codex",
@@ -107,7 +109,6 @@ def codex_exec(
         cost_usd_estimate=cost_usd,
         dispatch_id=dispatch_id,
         project_id=project_id,  # forward caller pid; emit resolves env fallback (best-effort)
-        metadata={"billing_mode": "subscription"} if is_flat else None,
     )
 
     if result.returncode != 0:
