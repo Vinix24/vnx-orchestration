@@ -220,6 +220,85 @@ class TestDeepSeekCreditExhaustionWritesRealLaneCooldown:
         assert availability.lane_cooldown_remaining("deepseek-harness", state_dir=state_dir) > 0
 
 
+class TestLocalKeyMissingWritesNoCooldown:
+    """OI-2182: a missing own key is a LOCAL config error (``local_key_missing``),
+    never ``auth_rejected``, so it must NOT write a router-lane cooldown. The
+    bug it pins: the old refusal text carried "api_key"/"forbidden", which
+    ``failure_classification`` mapped to ``auth_rejected`` and cooled the lane
+    down for everyone until an operator reopened it."""
+
+    def _local_key_missing_result(self):
+        from provider_spawns.deepseek_harness_spawn import DeepSeekHarnessSpawnResult
+
+        return DeepSeekHarnessSpawnResult(
+            returncode=1,
+            completion={},
+            events_written=0,
+            session_id=None,
+            timed_out=False,
+            error=(
+                "local key missing: DEEPSEEK_API_KEY absent from the environment "
+                "and the provider env file — key-auth required, OAuth fallback forbidden"
+            ),
+        )
+
+    def test_local_key_missing_writes_no_cooldown(self):
+        import provider_dispatch as pd
+        from providers.smart_router import availability
+
+        _emit_failure(
+            "deepseek-harness", "deepseek-v4-pro",
+            self._local_key_missing_result(), "d-deepseek-local-key",
+        )
+
+        state_dir = pd._resolve_state_dir()
+        cooldown_path = availability._cooldown_file(state_dir, "deepseek-harness")
+        assert not cooldown_path.exists(), (
+            f"a missing local key must not cool the lane down, found {cooldown_path}"
+        )
+        assert availability.lane_cooldown_remaining("deepseek-harness", state_dir=state_dir) == 0.0
+
+
+class TestDeepSeek401AuthRejectedWritesCooldown:
+    """OI-2182: a REAL 401 from the DeepSeek API stays ``auth_rejected`` and must
+    still cool the lane down — the fix only reclassifies the local key-missing
+    refusal, never a genuine provider auth rejection."""
+
+    def _deepseek_401_result(self):
+        from provider_spawns.deepseek_harness_spawn import DeepSeekHarnessSpawnResult
+
+        return DeepSeekHarnessSpawnResult(
+            returncode=1,
+            completion={},
+            events_written=0,
+            session_id=None,
+            timed_out=False,
+            error="API Error: 401 Unauthorized",
+        )
+
+    def test_deepseek_401_still_marks_lane_unavailable(self):
+        import json
+
+        import provider_dispatch as pd
+        from incident_taxonomy import IncidentClass
+        from providers.smart_router import availability
+
+        _emit_failure(
+            "deepseek-harness", "deepseek-v4-pro",
+            self._deepseek_401_result(), "d-deepseek-401",
+        )
+
+        state_dir = pd._resolve_state_dir()
+        cooldown_path = availability._cooldown_file(state_dir, "deepseek-harness")
+        assert cooldown_path.is_file(), (
+            f"a real 401 must still write a cooldown file at {cooldown_path}"
+        )
+        data = json.loads(cooldown_path.read_text(encoding="utf-8"))
+        assert data["lane"] == "deepseek-harness"
+        assert data["failure_class"] == IncidentClass.PROVIDER_AUTH_FAILURE.value
+        assert availability.lane_cooldown_remaining("deepseek-harness", state_dir=state_dir) > 0
+
+
 class TestNonProviderFailureWritesNoCooldown:
     """A failure that is NOT a provider quota/auth/credit signal (a plain
     non-zero exit with no recognizable reason — ``failure_classification``

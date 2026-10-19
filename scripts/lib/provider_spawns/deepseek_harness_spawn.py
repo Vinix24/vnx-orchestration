@@ -47,6 +47,8 @@ if _LIB_DIR not in sys.path:
 
 from provider_spawns.claude_spawn import spawn_claude  # noqa: E402 (path-setup above)
 
+from load_deepseek_key import resolve_deepseek_api_key  # (path-setup above: scripts/lib injected into sys.path)
+
 from provider_spawns.harness_config_dir import (
     HarnessConfigDirError,
     bare_harness_cli_args,
@@ -260,29 +262,34 @@ def spawn_deepseek_harness(
 ) -> DeepSeekHarnessSpawnResult:
     """Spawn ``claude -p`` driving DeepSeek via the measured-safe key-auth recipe.
 
-    Resolves the own DeepSeek key (``api_key`` arg or ``DEEPSEEK_API_KEY`` env),
-    overlays the harness env + MCP-off CLI flags, and delegates transport to the
-    governed ``spawn_claude`` path.  Fails closed (no spawn) when no own key is
-    available — the lane must never ride the OAuth subscription.
+    Resolves the own DeepSeek key (``api_key`` arg, then ``DEEPSEEK_API_KEY``
+    env, then the provider env file via ``load_deepseek_key``), overlays the
+    harness env + MCP-off CLI flags, and delegates transport to the governed
+    ``spawn_claude`` path.  Fails closed (no spawn) when no own key is available
+    in any source — the lane must never ride the OAuth subscription.
 
     Parameters mirror ``spawn_claude``; ``model`` resolves to the v4-pro default
     when None/empty.  ``extra_env`` (e.g. VNX identity propagation) is merged
     UNDER the mandatory harness env so the account-safety vars cannot be
     overridden by a caller.
     """
-    resolved_key = api_key if api_key is not None else os.environ.get(DEEPSEEK_API_KEY_ENV, "")
+    resolved_key = api_key if api_key is not None else resolve_deepseek_api_key()
     if not (resolved_key or "").strip():
         # Fail closed — never spawn the redirect without an own key (would ride OAuth).
         logger.error(
-            "spawn_deepseek_harness: %s is unset; refusing to spawn (account safety — "
-            "the lane must use the own DeepSeek key in key-auth mode, never the OAuth "
-            "subscription).",
+            "spawn_deepseek_harness: %s is absent from the environment and the "
+            "provider env file; refusing to spawn (account safety — the lane must "
+            "use the own DeepSeek key in key-auth mode, never the OAuth subscription).",
             DEEPSEEK_API_KEY_ENV,
         )
         return DeepSeekHarnessSpawnResult(
             returncode=1, completion={}, events_written=0, session_id=None,
             timed_out=False, model=resolve_harness_model(model),
-            error=f"{DEEPSEEK_API_KEY_ENV} unset — key-auth required, OAuth fallback forbidden",
+            error=(
+                f"local key missing: {DEEPSEEK_API_KEY_ENV} absent from the "
+                f"environment and the provider env file — key-auth required, "
+                f"OAuth fallback forbidden"
+            ),
         )
 
     resolved_model = resolve_harness_model(model)

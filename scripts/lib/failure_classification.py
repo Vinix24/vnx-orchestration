@@ -37,6 +37,11 @@ no_verdict       — the gate-runner CLI (e.g. codex) exited without producing
 tool_missing     — the provider CLI binary itself could not be found on the
                     host (e.g. resolved relative to the repo instead of
                     PATH). P3, dispatch 20260821-q3-failure-class-split.
+local_key_missing — the own provider key is absent from both the environment
+                    and the provider env file, so the spawn refused BEFORE any
+                    API call. A LOCAL config error, not a provider auth
+                    rejection: it must never map to auth_rejected, which cools
+                    the lane down for everyone. OI-2182.
 unknown          — everything else; should be rare after OI-866
 
 Vocabulary note (P3, dispatch 20260821-q3-failure-class-split): this module's
@@ -84,6 +89,7 @@ FAILURE_CLASSES = frozenset({
     "completion_without_execution",
     "no_verdict",
     "tool_missing",
+    "local_key_missing",
     "unknown",
 })
 
@@ -159,6 +165,16 @@ CREDIT_EXHAUSTED_KEYWORDS = (
 _COMPLETION_WITHOUT_EXECUTION_MARKER = "completion without execution"
 _NO_VERDICT_MARKERS = ("codex stderr tail", "reading prompt from stdin")
 _TOOL_MISSING_MARKER = "cli not found"
+
+# OI-2182: a DeepSeek spawn's own fail-closed refusal when the own key is in
+# neither the environment nor the provider env file. This is a LOCAL config
+# error (the key may simply not be exported into this shell), not a provider
+# auth rejection — booking it as auth_rejected would cool the lane down for
+# everyone. The marker is part of the refusal error text emitted by
+# provider_spawns.deepseek_harness_spawn and provider_dispatch, and is matched
+# BEFORE the auth keyword bag so "api_key"/"forbidden" in the same sentence
+# cannot steal the classification back to auth_rejected.
+_LOCAL_KEY_MISSING_MARKER = "local key missing"
 
 # Provider gateways (observed: glm-harness's litellm/OpenRouter proxy) can wrap
 # the real one-line reason inside a multi-KB nested JSON blob carrying dozens
@@ -314,6 +330,15 @@ def classify_failure(
     if _TOOL_MISSING_MARKER in signal_text:
         detail = error if error else _extract_detail(completion)
         return {"failure_class": "tool_missing", "failure_reason": detail}
+
+    # ── local key missing (config error, not a provider refusal) ─────────
+    # OI-2182: checked BEFORE the auth keyword bag below — the refusal text
+    # also carries "api_key"/"key-auth"/"forbidden", which would otherwise
+    # reclassify a local config error as auth_rejected and cool the lane down
+    # for everyone.
+    if _LOCAL_KEY_MISSING_MARKER in signal_text:
+        detail = error if error else _extract_detail(completion)
+        return {"failure_class": "local_key_missing", "failure_reason": detail}
 
     # ── auth rejection ───────────────────────────────────────────────────
     auth_keywords = (

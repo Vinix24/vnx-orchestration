@@ -887,5 +887,71 @@ class TestP3VocabularySeparation(unittest.TestCase):
         self.assertEqual(exit_classifier_constants & FAILURE_CLASSES, set())
 
 
+# ---------------------------------------------------------------------------
+# TestLocalKeyMissing — OI-2182
+#
+# The deepseek-harness spawn's own fail-closed refusal when the own key is in
+# neither the environment nor the provider env file must classify as
+# local_key_missing (a LOCAL config error), never auth_rejected — auth_rejected
+# cools the lane down for everyone via _PROVIDER_LANE_COOLDOWN_FAILURE_CLASSES.
+# ---------------------------------------------------------------------------
+
+class TestLocalKeyMissing(unittest.TestCase):
+    """OI-2182: local key-missing is its own class, distinct from auth_rejected."""
+
+    _LOCAL_KEY_MISSING_REASON = (
+        "local key missing: DEEPSEEK_API_KEY absent from the environment "
+        "and the provider env file — key-auth required, OAuth fallback forbidden"
+    )
+
+    def test_local_key_missing_recognized(self):
+        from failure_classification import classify_failure
+
+        result = classify_failure(
+            status="failure",
+            error=self._LOCAL_KEY_MISSING_REASON,
+            completion_text=None,
+            provider="deepseek-harness",
+            returncode=1,
+        )
+        self.assertEqual(result["failure_class"], "local_key_missing")
+
+    def test_local_key_missing_wins_over_auth_keywords(self):
+        """The refusal text also carries api_key/key-auth/forbidden; the local
+        key-missing marker must win over the auth keyword bag."""
+        from failure_classification import classify_failure
+
+        result = classify_failure(
+            status="failure",
+            error=self._LOCAL_KEY_MISSING_REASON,
+            completion_text=None,
+            provider="deepseek-harness",
+            returncode=1,
+        )
+        self.assertNotEqual(result["failure_class"], "auth_rejected")
+
+    def test_real_401_stays_auth_rejected(self):
+        from failure_classification import classify_failure
+
+        result = classify_failure(
+            status="failure",
+            error="API Error: 401 Unauthorized",
+            completion_text=None,
+            provider="deepseek-harness",
+            returncode=1,
+        )
+        self.assertEqual(result["failure_class"], "auth_rejected")
+
+    def test_local_key_missing_escalates_no_climb(self):
+        from providers.smart_router.tier_routing import escalate_tier
+
+        escalation = escalate_tier(
+            "tier-mid", "parent-dispatch-oi2182-lkm",
+            failure_class="local_key_missing",
+        )
+        self.assertEqual(escalation.action, "no_climb")
+        self.assertIsNone(escalation.tier_to)
+
+
 if __name__ == "__main__":
     unittest.main()

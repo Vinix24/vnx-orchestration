@@ -3249,8 +3249,11 @@ def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
     the governed claude spawn path (SubprocessAdapter) so it emits a receipt and
     is not the raw ``claude -p`` receipt-bypass the GOV-1 guard targets.
 
-    Fast-fails before any subprocess spawn when DEEPSEEK_API_KEY is absent —
-    the lane must never ride the production OAuth account.
+    Fast-fails before any subprocess spawn when DEEPSEEK_API_KEY is absent from
+    both the environment and the provider env file (load_deepseek_key) — the
+    lane must never ride the production OAuth account. A missing key is a LOCAL
+    config error (failure_class=local_key_missing), never an auth_rejected, so
+    it never marks the lane known-rejected (OI-2182).
     """
     from provider_spawns.deepseek_harness_spawn import (
         DEFAULT_DEEPSEEK_HARNESS_MODEL,
@@ -3259,12 +3262,14 @@ def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
         resolve_harness_model,
         spawn_deepseek_harness,
     )
+    from load_deepseek_key import resolve_deepseek_api_key
 
     start_time = datetime.now(timezone.utc)
 
-    if not os.environ.get(DEEPSEEK_API_KEY_ENV):
+    if not resolve_deepseek_api_key():
         print(
-            f"deepseek-harness requires {DEEPSEEK_API_KEY_ENV} env var "
+            f"deepseek-harness requires {DEEPSEEK_API_KEY_ENV} in the environment "
+            "or the provider env file "
             "(own-key key-auth; OAuth subscription is forbidden for this lane)",
             file=sys.stderr,
         )
@@ -3276,7 +3281,10 @@ def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
             session_id=None,
             timed_out=False,
             model=DEFAULT_DEEPSEEK_HARNESS_MODEL,
-            error=f"missing {DEEPSEEK_API_KEY_ENV} — blocked before spawn",
+            error=(
+                f"local key missing: {DEEPSEEK_API_KEY_ENV} absent from the "
+                f"environment and the provider env file — blocked before spawn"
+            ),
             token_usage=None,
         )
         try:
