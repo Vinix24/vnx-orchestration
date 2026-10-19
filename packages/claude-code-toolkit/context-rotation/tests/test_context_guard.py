@@ -59,14 +59,37 @@ def test_warn_outputs_additional_context_with_handover_path(tmp_path, project):
     handover = str(project / ".claude" / "rotation" / "handover-abc_1-2.md")
     assert handover in text
     assert "120000" in text or "120,000" in text
-    assert "200000" in text or "200,000" in text
-    assert "60%" in text
+    assert "warn threshold" in text
+    assert "110000" in text or "110,000" in text
 
 
 def test_force_and_hard_get_the_same_message_shape(tmp_path, project):
     for total in (140000, 170000):
         out = json.loads(run_guard(payload_for(project, transcript_with(tmp_path, total))).stdout)
         assert "additionalContext" in out["hookSpecificOutput"]
+
+
+def test_warn_names_the_absolute_threshold_not_a_window(tmp_path, project):
+    (project / ".claude").mkdir(parents=True)
+    (project / ".claude" / "context-rotation.json").write_text(
+        json.dumps({"warn_tokens": 400000, "force_tokens": 500000, "hard_tokens": 600000}))
+    proc = run_guard(payload_for(project, transcript_with(tmp_path, 450000), session_id="abc_1-2"))
+    assert proc.returncode == 0
+    text = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "450000" in text
+    assert "warn threshold of 400000 tokens" in text
+    assert "%" not in text
+
+
+def test_force_names_the_absolute_threshold_not_a_window(tmp_path, project):
+    (project / ".claude").mkdir(parents=True)
+    (project / ".claude" / "context-rotation.json").write_text(
+        json.dumps({"warn_tokens": 400000, "force_tokens": 500000, "hard_tokens": 600000}))
+    proc = run_guard(payload_for(project, transcript_with(tmp_path, 520000), session_id="abc_1-2"))
+    assert proc.returncode == 0
+    text = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "in the force band (threshold 500000 tokens)" in text
+    assert "%" not in text
 
 
 def test_project_dir_env_wins_over_cwd(tmp_path, project):

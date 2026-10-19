@@ -993,6 +993,19 @@ def read_injections(project_dir: str) -> List[Dict[str, Any]]:
     return records
 
 
+def injected_on_clear(project_dir: str, session_id: str) -> bool:
+    """True when this session was continued from a handover by the SessionStart path.
+
+    That is the one injection the loop guard covers: an "injected" line in
+    injections.jsonl with `via: "clear"` naming this session as its successor. A
+    fresh `startup`, a `/resume` pick and every other session return False.
+    """
+    for record in read_injections(project_dir):
+        if record["event"] == "injected" and record["via"] == "clear" and record["session_id"] == session_id:
+            return True
+    return False
+
+
 def trim_journal(project_dir: str, archive_keep: int) -> None:
     """Keep the newest JOURNAL_LINES_PER_ARCHIVE_COPY × archive_keep lines of injections.jsonl.
 

@@ -239,3 +239,64 @@ def test_band_thresholds():
     assert cb.band(650, s) == "force"
     assert cb.band(750, s) == "hard"
     assert cb.band(5000, s) == "hard"
+
+
+# --- absolute thresholds ---------------------------------------------------------
+
+def test_tokens_all_set_valid_switches_to_absolute_mode(project):
+    write_settings(project / ".claude", {"warn_tokens": 400000, "force_tokens": 500000, "hard_tokens": 600000})
+    s = cb.load_settings(str(project))
+    assert (s["warn_tokens"], s["force_tokens"], s["hard_tokens"]) == (400000, 500000, 600000)
+    assert cb.thresholds(s) == (400000, 500000, 600000)
+
+
+def test_tokens_none_set_is_percentage_mode(project):
+    s = cb.load_settings(str(project))
+    assert "warn_tokens" not in s
+    assert cb.thresholds(s) == (110000.0, 130000.0, 150000.0)
+
+
+def test_tokens_one_missing_falls_back_with_one_line(project, capsys):
+    write_settings(project / ".claude", {"warn_tokens": 100, "force_tokens": 200})
+    s = cb.load_settings(str(project))
+    assert "warn_tokens" not in s and "force_tokens" not in s
+    assert cb.thresholds(s) == (110000.0, 130000.0, 150000.0)
+    err = capsys.readouterr().err.strip().splitlines()
+    assert len(err) == 1
+    assert "warn_tokens/force_tokens/hard_tokens" in err[0]
+
+
+def test_tokens_wrong_order_falls_back(project, capsys):
+    write_settings(project / ".claude", {"warn_tokens": 300, "force_tokens": 200, "hard_tokens": 400})
+    s = cb.load_settings(str(project))
+    assert "warn_tokens" not in s
+    assert cb.thresholds(s) == (110000.0, 130000.0, 150000.0)
+    assert len(capsys.readouterr().err.strip().splitlines()) == 1
+
+
+def test_tokens_bad_value_falls_back(project, capsys):
+    write_settings(project / ".claude", {"warn_tokens": 0, "force_tokens": 200, "hard_tokens": 400})
+    s = cb.load_settings(str(project))
+    assert "warn_tokens" not in s
+    assert cb.thresholds(s) == (110000.0, 130000.0, 150000.0)
+    assert len(capsys.readouterr().err.strip().splitlines()) == 1
+
+
+def test_tokens_win_over_valid_percentages(project):
+    write_settings(project / ".claude", {"warn_pct": 40, "force_pct": 50, "hard_pct": 60,
+                                          "warn_tokens": 400000, "force_tokens": 500000, "hard_tokens": 600000})
+    s = cb.load_settings(str(project))
+    assert (s["warn_pct"], s["force_pct"], s["hard_pct"]) == (40, 50, 60)
+    assert cb.thresholds(s) == (400000, 500000, 600000)
+
+
+def test_band_absolute_thresholds_at_each_edge():
+    s = {"warn_tokens": 550, "force_tokens": 650, "hard_tokens": 750}
+    assert cb.band(None, s) is None
+    assert cb.band(549, s) == "below"
+    assert cb.band(550, s) == "warn"
+    assert cb.band(649, s) == "warn"
+    assert cb.band(650, s) == "force"
+    assert cb.band(749, s) == "force"
+    assert cb.band(750, s) == "hard"
+    assert cb.band(5000, s) == "hard"

@@ -8,7 +8,7 @@ import json
 import os
 import re
 import sys
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import regular_file
 
@@ -26,6 +26,7 @@ DEFAULTS = {
     "handover_max_age_minutes": 60,
     "hard_max_denials": 3,
     "archive_keep": 20,
+    "min_work_tokens": 20000,
     # A0 rule 6 (pane_screen): a spinner line above the input box, and the prompt of the input
     # line, `❯` and a no-break space; a prompt shown in the history above has a plain space.
     "busy_pattern": r"^\S+ \S+… \(\d+s",
@@ -37,7 +38,7 @@ DEFAULTS = {
 _BOOLS = ("enabled", "auto_clear")
 _POSITIVE_INTS = (
     "window_tokens", "handover_max_chars", "handover_max_age_minutes",
-    "hard_max_denials", "archive_keep", "ack_timeout_seconds",
+    "hard_max_denials", "archive_keep", "ack_timeout_seconds", "min_work_tokens",
 )
 # UTF-8 takes at most four bytes per character, so every handover the contract accepts can be read.
 MAX_HANDOVER_CHARS = regular_file.MAX_READ_BYTES // 4
@@ -45,6 +46,9 @@ _MAXIMA = {"handover_max_chars": MAX_HANDOVER_CHARS}
 _PATTERNS = ("busy_pattern", "prompt_pattern")
 _TOOL_LISTS = ("force_deny_tools",)
 _PCTS = ("warn_pct", "force_pct", "hard_pct")
+# Absolute thresholds in tokens: all three set to positive integers in ascending order, else percentage mode.
+_TOKENS = ("warn_tokens", "force_tokens", "hard_tokens")
+_THRESHOLD_NAMES = ("warn", "force", "hard")
 
 
 def _is_int(value: Any) -> bool:
@@ -189,6 +193,13 @@ def _apply(raw: Dict[str, Any]) -> Dict[str, Any]:
             settings.update(zip(_PCTS, triple))
         else:
             _warn("warn_pct/force_pct/hard_pct must satisfy 0 < warn < force < hard <= 100, using the defaults")
+    if any(k in raw for k in _TOKENS):
+        triple = [raw.get(k) for k in _TOKENS]
+        if all(_is_int(v) and v > 0 for v in triple) and triple[0] < triple[1] < triple[2]:
+            settings.update(zip(_TOKENS, triple))
+        else:
+            _warn("warn_tokens/force_tokens/hard_tokens must all be set to positive integers with "
+                  "0 < warn < force < hard, using the percentages")
     return settings
 
 
@@ -201,12 +212,39 @@ def load_settings(project_dir: Optional[str], home: Optional[str] = None) -> Dic
     return dict(DEFAULTS)
 
 
+def thresholds(settings: Dict[str, Any]) -> Tuple[float, float, float]:
+    """The warn, force and hard thresholds in tokens, as (warn, force, hard).
+
+    The absolute values when all three are set (and thus valid), else the share of
+    `window_tokens` the percentages give. When both are configured and valid the
+    absolute values win: this is the one place percentages become tokens.
+    """
+    if all(key in settings for key in _TOKENS):
+        return (settings["warn_tokens"], settings["force_tokens"], settings["hard_tokens"])
+    window = settings["window_tokens"]
+    return (window * settings["warn_pct"] / 100,
+            window * settings["force_pct"] / 100,
+            window * settings["hard_pct"] / 100)
+
+
+def threshold_for(settings: Dict[str, Any], name: str) -> float:
+    """The threshold of one band (warn, force or hard) in tokens."""
+    warn, force, hard = thresholds(settings)
+    return {"warn": warn, "force": force, "hard": hard}[name]
+
+
+def token_text(number: float) -> str:
+    """A token count as a message shows it: a whole number without a fraction."""
+    whole = int(number)
+    return str(whole) if whole == number else str(number)
+
+
 def band(size: Optional[int], settings: Dict[str, Any]) -> Optional[str]:
     """below, warn, force or hard for a measured size. None for an unknown size."""
     if size is None:
         return None
-    window = settings["window_tokens"]
-    for name in ("hard", "force", "warn"):
-        if size >= window * settings[name + "_pct"] / 100:
+    warn, force, hard = thresholds(settings)
+    for name, threshold in (("hard", hard), ("force", force), ("warn", warn)):
+        if size >= threshold:
             return name
     return "below"

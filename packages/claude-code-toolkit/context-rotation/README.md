@@ -49,6 +49,10 @@ Settings are read from `.claude/context-rotation.json` in the project, else `~/.
 | `warn_pct` | `55` | Share of the window where Claude is told to prepare a handover. |
 | `force_pct` | `65` | Share where Claude is told to write it now and the turn is held back once. |
 | `hard_pct` | `75` | Share where tools other than the allowed few are denied. Needs `0 < warn < force < hard <= 100`, else all three fall back. |
+| `warn_tokens` | — | Absolute token count for the warn band. When `warn_tokens`, `force_tokens` and `hard_tokens` are all set to positive integers with `0 < warn < force < hard`, they decide the bands instead of the percentages. |
+| `force_tokens` | — | Absolute token count for the force band (see `warn_tokens`). |
+| `hard_tokens` | — | Absolute token count for the hard band (see `warn_tokens`). |
+| `min_work_tokens` | `20000` | For a session continued from an injected handover, how much its context must grow past the start size before the force and hard bands apply. |
 | `auto_clear` | `true` | Type `/clear` for you inside tmux. `false` leaves it to you. |
 | `handover_max_chars` | `8000` | Longest handover the check accepts. |
 | `handover_max_age_minutes` | `60` | A marker older than this is outdated, whatever happened since. |
@@ -64,6 +68,19 @@ To switch the plugin off in one project, put this in `.claude/context-rotation.j
 ```
 {"enabled": false}
 ```
+
+## Large windows
+
+The percentages are a share of `window_tokens`, which defaults to 200,000. On a 1M-token window the warn band then starts at 110,000 tokens, about 11% of the real window, so the plugin rotates early. Two ways to move the bands up:
+
+- Set `window_tokens` to the real window and keep the percentages, for example `{"window_tokens": 1000000}`.
+- Or set the bands directly in tokens. On a 1M window:
+
+```json
+{"warn_tokens": 400000, "force_tokens": 500000, "hard_tokens": 600000}
+```
+
+When all three token settings are set (and in ascending order) the percentages and `window_tokens` no longer decide a band; when both the percentages and the tokens are configured and valid, the tokens win.
 
 ## The automatic clear
 
@@ -85,7 +102,7 @@ If anything is in the input line, the job types nothing. It shows the reason in 
 - Windows is not supported.
 - `/resume` brings back the old session, not the rotated one. The handover of the old session stays in `.claude/rotation/archive/`.
 - Do not run it next to another rotation guard. Two guards hold back the same turn and clear the same pane. Switch this one off in a project with `"enabled": false` in `.claude/context-rotation.json`.
-- A fresh session does not start empty. Your CLAUDE.md files, tools and the handover are already in its context, about 60K tokens on a setup with large CLAUDE.md imports. If that start is close to the force band (`window_tokens` x `force_pct` / 100), the fresh session crosses the band after one turn and rotates again, and nothing stops that loop yet. Keep the force band well above your start context. Run `/context` in a fresh Claude Code session to see it.
+- A fresh session does not start empty. Your CLAUDE.md files, tools and the handover are already in its context, about 60K tokens on a setup with large CLAUDE.md imports. The session that continues from an injected handover after `/clear` records that start size and does not reach the force or hard band until it has grown at least `min_work_tokens` past it, so the rotation cannot loop. A session started fresh, or continued with `/resume`, is enforced as before. When the injected start is so close to force that rotating will not make the next session smaller, the user is told once, with the two remedies: raise the force threshold, or start with a smaller context (fewer CLAUDE.md imports). Keep the force band well above your start context. Run `/context` in a fresh Claude Code session to see it.
 - What the write guard does and does not stop is in the next section.
 
 ## Files the plugin writes
