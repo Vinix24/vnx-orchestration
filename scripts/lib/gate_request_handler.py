@@ -367,6 +367,84 @@ class _PrHead:
         return self._sha
 
 
+class _PrRounds:
+    """The round ledger as one request round sees it for one PR (R1): read once, judged per seat.
+
+    ``unreadable`` is the refusal text when the ledger cannot be read for this
+    PR (it names the way out); ``history_missing`` the refusal text for a PR
+    that is not opened in the ledger while any earlier review of it is found;
+    ``lines`` are the PR's verdicts in order, and ``cap`` the B3 count over its
+    codex seat (``review_rounds.cap_state``).
+    """
+
+    def __init__(
+        self, pr_number: int, lines: Iterable[Any] = (), unreadable: str = "", history_missing: str = "",
+    ) -> None:
+        import review_rounds
+
+        self.pr_number = pr_number
+        self.lines = tuple(lines)
+        self.unreadable = unreadable
+        self.history_missing = history_missing
+        self.cap = review_rounds.cap_state(self.lines, pr_number)
+
+    @classmethod
+    def read(cls, review_gates_dir: Path, pr_number: int) -> "_PrRounds":
+        """Read the ledger for one PR, and open the PR when the ledger holds its whole history.
+
+        A PR that is not opened is checked for earlier reviews
+        (``review_rounds.prior_evidence``, which fails closed): with any, every
+        seat is refused until the operator opened it with ``vnx review rounds
+        open``; without any, the PR is new and is opened here (``basis``
+        ``new``) before its first run.
+        """
+        import review_rounds
+
+        path = review_rounds.ledger_path(review_gates_dir)
+        project_id = review_rounds.store_project_id(review_gates_dir)
+        try:
+            ledger = review_rounds.read_ledger(path)
+            text = review_rounds.unreadable_text(ledger, pr_number)
+            if text:
+                return cls(pr_number, unreadable=text)
+            if not ledger.is_opened(project_id, pr_number):
+                evidence = review_rounds.prior_evidence(review_rounds.store_data_dir(review_gates_dir), pr_number)
+                if evidence:
+                    return cls(pr_number, history_missing=review_rounds.history_missing_text(pr_number, evidence))
+                review_rounds.open_pr(path, project_id, pr_number, basis=review_rounds.BASIS_NEW, evidence=0)
+        except review_rounds.RoundLedgerError as exc:
+            return cls(pr_number, unreadable=str(exc))
+        return cls(pr_number, ledger.for_pr(project_id, pr_number))
+
+    def line_on_head(self, seat: str, head: _PrHead) -> Optional[Any]:
+        """The verdict ``seat`` already has on the round's head; looks the head up only when there are lines."""
+        if not self.lines:
+            return None
+        head_sha = head.sha()
+        if not head_sha:
+            return None
+        return next((line for line in self.lines if line.seat == seat and line.head_sha == head_sha), None)
+
+
+def _round_refused_payload(
+    gate: str, *, pr_number: int, branch: str, head_sha: str, reason: str, detail: str,
+    seat_fields: Dict[str, Any],
+) -> Dict[str, Any]:
+    """A seat the round ledger refuses (R1): nothing is requested, nothing is written.
+
+    ``blocked`` is a refusal status (``_REVIEW_REQUEST_REFUSED_STATUSES``), so the
+    gate holds no seat, and a non-pass, so the call that asked for the seat fails.
+    """
+    from review_gate_manager import _utc_now
+
+    now = _utc_now()
+    return {
+        "gate": gate, "status": "blocked", "reason": reason, "reason_detail": detail,
+        "failure_reason": detail, "branch": branch, "pr_number": pr_number,
+        "commit_sha": head_sha, "requested_at": now, "resolved_at": now, **seat_fields,
+    }
+
+
 def _verdict_stands(existing: Optional[Dict[str, Any]], head_sha: str) -> bool:
     """Does ``existing`` hold a decided pass or fail about ``head_sha``?
 
@@ -1521,6 +1599,7 @@ class GateRequestHandlerMixin:
         mode: str,
         dispatch_id: str = "",
         head_sha: Optional[str] = None,
+        override_b3: str = "",
     ) -> Dict[str, Any]:
         """Request every seat of the review stack for ``pr_number``, each from its own reviewer.
 
@@ -1543,6 +1622,12 @@ class GateRequestHandlerMixin:
         ``head_sha`` is the PR head the caller already observed
         (``request_and_execute``), shared by every seat of the round; ``None``
         resolves it lazily, at most once per round (``_PrHead``).
+
+        Every seat passes the round ledger first (R1, :meth:`_round_refusal`),
+        before its takeover walk: this is where every run starts (the CLI, the
+        obligation runner, ``vnx gate``, a takeover), so no entry runs past it.
+        ``override_b3`` is the reason of an ``--override-b3``: it wins over the
+        B3 cap for the codex seat and travels on that seat's request.
         """
         from review_seats import resolve_review_seats
 
@@ -1557,10 +1642,14 @@ class GateRequestHandlerMixin:
         # cycle is enough operator visibility without repeating it per gate.
         chain = _build_review_gate_takeover_chain()
         head = _PrHead(pr_number, head_sha)
+        rounds = _PrRounds.read(self.results_dir.parent, pr_number)
 
         for gate in seats.stack:
             seat_fields = {"seat": gate, "review_seats": seat_record} if gate in seats.seats else {}
-            payload = self._dispatch_review_seat(
+            payload = self._round_refusal(
+                rounds, head, pr_number=pr_number, branch=branch, seat_fields=seat_fields,
+                override_b3=override_b3,
+            ) or self._dispatch_review_seat(
                 gate, pr_number, branch, risk_class, changed_files, mode, dispatch_id, chain=chain,
                 held=_held_reviewers(requested), head=head, seat_fields=seat_fields,
             )
@@ -1576,6 +1665,102 @@ class GateRequestHandlerMixin:
             "requested": requested,
             "review_seats": seat_record,
         }
+
+    def _round_refusal(
+        self, rounds: _PrRounds, head: _PrHead, *, pr_number: int, branch: str,
+        seat_fields: Dict[str, Any], override_b3: str,
+    ) -> Optional[Dict[str, Any]]:
+        """The seat's payload when the round ledger refuses its run (R1), else ``None``.
+
+        Four refusals, checked in this order, and only for a seat (an extra gate
+        such as ``ci_gate`` is no seat and is never refused here):
+
+        - the ledger is unreadable for this PR: every seat is refused until the
+          operator has set the file aside and reopened the PR;
+        - the PR was reviewed before the ledger counted it and is not opened in
+          it (``round_history_missing``): every seat is refused until the
+          operator opens it with ``vnx review rounds open --pr N --reason``;
+          ``override_b3`` does not lift this, it is about the cap;
+        - the seat already has a verdict on this head: no second run on a head
+          with a verdict, in any seat (:meth:`_standing_round_payload`);
+        - the codex seat of a PR at the B3 cap, on every head, unless a
+          tiebreaker granted the round (``review_rounds.round_granted_past_cap``,
+          R2) or ``override_b3`` carries a reason. An applied override is put on
+          ``seat_fields``, so it travels on the request into the verdict, the
+          ledger line and the receipt.
+        """
+        import review_rounds
+
+        seat = str(seat_fields.get("seat") or "")
+        if not seat:
+            return None
+        if rounds.unreadable:
+            return _round_refused_payload(
+                seat, pr_number=pr_number, branch=branch, head_sha="",
+                reason=review_rounds.REFUSED_LEDGER_UNREADABLE, detail=rounds.unreadable, seat_fields=seat_fields,
+            )
+        if rounds.history_missing:
+            logger.warning("gate_request_handler: seat %s refused -- %s", seat, rounds.history_missing)
+            return _round_refused_payload(
+                seat, pr_number=pr_number, branch=branch, head_sha="",
+                reason=review_rounds.REFUSED_HISTORY_MISSING, detail=rounds.history_missing, seat_fields=seat_fields,
+            )
+        standing = rounds.line_on_head(seat, head)
+        if standing is not None:
+            return self._standing_round_payload(standing, pr_number=pr_number, branch=branch, seat_fields=seat_fields)
+        cap = rounds.cap
+        if seat != review_rounds.CODEX_SEAT or not cap.capped:
+            return None
+        if review_rounds.round_granted_past_cap(cap, head_sha=head.sha()):
+            return None
+        if override_b3.strip():
+            seat_fields["override_b3"] = review_rounds.override_record(override_b3.strip(), cap)
+            logger.warning(
+                "gate_request_handler: --override-b3 applied for pr=%s seat %s -- %s; reason: %s",
+                pr_number, seat, cap.summary(), override_b3.strip(),
+            )
+            return None
+        detail = review_rounds.cap_refusal_text(cap, where=f"codex-seat run refused for PR #{pr_number}")
+        logger.warning("gate_request_handler: %s", detail)
+        return _round_refused_payload(
+            seat, pr_number=pr_number, branch=branch, head_sha=head.sha(),
+            reason=review_rounds.REFUSED_B3_CAP, detail=detail, seat_fields=seat_fields,
+        )
+
+    def _standing_round_payload(
+        self, line: Any, *, pr_number: int, branch: str, seat_fields: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """A seat that already has a verdict on this head: reported, never run again (R1).
+
+        When the reviewer's result record is that very verdict (this head, its
+        report, its verdict), the record is reported as the seat's answer, so a
+        PASS reads as a pass and a FAIL as a fail, and nothing is written. Any
+        other record on disk does not carry the ledger's verdict: the seat is
+        then refused as ``blocked``, which never counts as a pass.
+        """
+        import review_rounds
+
+        detail = (
+            f"seat {line.seat} of PR #{pr_number} already has a {line.verdict.upper()} on head "
+            f"{line.head_sha[:12]} ({line.reviewer}, {line.report_name}): a second run on a head with a "
+            "verdict is refused (R1). Push a new head to have it reviewed again"
+        )
+        logger.info("gate_request_handler: %s", detail)
+        record = self._read_existing_gate_result(line.reviewer, pr_number)
+        if (
+            record is not None and str(record.get("commit_sha") or "") == line.head_sha
+            and Path(str(record.get("report_path") or "")).name == line.report_name
+            and review_rounds.ledger_verdict(record) == line.verdict
+        ):
+            payload = dict(record)
+            payload.update(seat_fields)
+            payload.update({"redispatch_refused": detail, "round_refusal": review_rounds.REFUSED_VERDICT_ON_HEAD})
+            return payload
+        return _round_refused_payload(
+            line.reviewer, pr_number=pr_number, branch=branch, head_sha=line.head_sha,
+            reason=review_rounds.REFUSED_VERDICT_ON_HEAD, detail=detail,
+            seat_fields={**seat_fields, "ledger_verdict": line.verdict},
+        )
 
     def _emit_review_request_receipt(
         self, payload: Dict[str, Any], *, pr_number: int, branch: str, mode: str,
@@ -1661,10 +1846,14 @@ class GateRequestHandlerMixin:
             "gate_request_handler: seat %s for pr=%s moves from %s to %s in the same call -- "
             "%s left a record that passes it over", seat, pr_number, reviewer, reader, reviewer,
         )
+        # An --override-b3 the seat's request carried goes with the seat (R1).
+        seat_fields = {"seat": seat, "review_seats": payload.get("review_seats")}
+        if payload.get("override_b3"):
+            seat_fields["override_b3"] = payload["override_b3"]
         advanced = self._request_seat_reader(
             reader, None, path, pr_number=pr_number, branch=branch, risk_class=risk_class,
             changed_files=changed_files, mode=mode, dispatch_id=dispatch_id, head=head,
-            seat_fields={"seat": seat, "review_seats": payload.get("review_seats")},
+            seat_fields=seat_fields,
         )
         self._emit_review_request_receipt(
             advanced, pr_number=pr_number, branch=branch, mode=mode, risk_class=risk_class,

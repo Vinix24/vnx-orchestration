@@ -750,6 +750,10 @@ class TestSeatWalkSkipsAnUnreachableSeat:
                   "commit_sha": head, "recorded_at": "2026-09-26T10:00:00Z"}
         (state_dir / "review_gates" / "results" / "pr-907-codex_gate.json").write_text(
             json.dumps(result), encoding="utf-8")
+        # R1: the request that produced this verdict opened PR 907 in the round ledger.
+        from review_seat_support import open_pr_in_ledger
+
+        open_pr_in_ledger(state_dir, 907)
         pr.record_failure("codex", _CODEX_QUOTA_TEXT, source="test", state_dir=state_dir)
         monkeypatch.setattr("gate_request_handler.get_pr_head_sha", lambda _pr: head)
 

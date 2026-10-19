@@ -45,6 +45,7 @@ import closure_verifier
 import gate_artifacts
 import gate_lane_contract
 from gate_status import has_complete_evidence, is_terminal
+from review_seat_support import open_pr_in_ledger
 
 
 _REAL_PASS_REPORT = (
@@ -98,6 +99,8 @@ def _run_kimi_gate_for_real_pr(tmp_path, monkeypatch, report_text, *, pr="4242")
     monkeypatch.setattr(kimi_gate, "get_pr_head_branch", lambda pr_number: "feature/dlv2-test")
     monkeypatch.setattr(kimi_gate, "get_pr_head_sha", lambda pr_number: "deadbeefcafe")
 
+    # R1: the gate request that starts a governed run opens the PR in the round ledger.
+    open_pr_in_ledger(data_dir / "state", pr)
     rc = kimi_gate.main(["--pr", pr, "--data-dir", str(data_dir)])
     out = data_dir / "state" / "review_gates" / "results" / f"pr-{pr}-kimi_gate.json"
     record = json.loads(out.read_text(encoding="utf-8"))
@@ -274,6 +277,8 @@ def _run_kimi_gate_capturing_prompt(tmp_path, monkeypatch, diff, report_text, *,
     monkeypatch.setattr(kimi_gate, "get_pr_head_branch", lambda pr_number: "feature/oi-1442")
     monkeypatch.setattr(kimi_gate, "get_pr_head_sha", lambda pr_number: "deadbeefcafe")
 
+    # R1: the gate request that starts a governed run opens the PR in the round ledger.
+    open_pr_in_ledger(data_dir / "state", pr)
     rc = kimi_gate.main(["--pr", pr, "--data-dir", str(data_dir)])
     out = data_dir / "state" / "review_gates" / "results" / f"pr-{pr}-kimi_gate.json"
     record = json.loads(out.read_text(encoding="utf-8"))

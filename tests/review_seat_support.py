@@ -41,3 +41,20 @@ def pin_review_stack(monkeypatch, stack: str) -> None:
     """The project's review stack is ``stack`` for this test, and no store is read."""
     no_config_store(monkeypatch)
     monkeypatch.setenv(REVIEW_STACK_OVERRIDE, stack)
+
+
+def open_pr_in_ledger(state_dir: Path, pr) -> None:
+    """Open PR ``pr`` in the store's round ledger, as the gate request that starts its first run does (R1).
+
+    For a test that writes a verdict without going through ``request_reviews``
+    (a record put on disk, a standalone gate CLI): since R1 the gate refuses a
+    PR with earlier verdicts on disk that is not opened, and the merge door
+    counts no PASS of it. Opening it here is the state the request leaves behind.
+    """
+    import review_rounds
+
+    review_gates = Path(state_dir) / "review_gates"
+    review_rounds.open_pr(
+        review_rounds.ledger_path(review_gates), review_rounds.store_project_id(review_gates), int(pr),
+        basis=review_rounds.BASIS_NEW, evidence=0,
+    )

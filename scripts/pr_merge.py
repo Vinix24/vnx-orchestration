@@ -633,10 +633,32 @@ def _unjudged_seats_record(pr_number: int, head_sha: str, verdict: str, reason: 
     return record
 
 
+def _b3_override_refusal(b3_override: Optional[str]) -> Optional[Dict[str, Any]]:
+    """NO-GO for an ``--override-b3`` without a reason; ``None`` when there is none or it has one."""
+    if b3_override is None or b3_override.strip():
+        return None
+    return {
+        "verdict": "NO-GO",
+        "message": (
+            '--override-b3 zonder reden geweigerd: geef --reason "..." mee; de override komt met '
+            "zijn reden in het merge-record (geen stille bypass van de B3-cap)"
+        ),
+        "overridden": False,
+        "override_reason": None,
+        "gate": None,
+    }
+
+
+def _b3_override_arg(args: argparse.Namespace) -> Optional[str]:
+    """The ``--override-b3`` reason for the review gate: ``None`` without the flag, ``""`` without a reason."""
+    return (args.reason or "") if getattr(args, "override_b3", False) else None
+
+
 def _run_review_gate(
     pr_number: int,
     *,
     override_reason: Optional[str] = None,
+    b3_override: Optional[str] = None,
 ) -> tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
     """Fail-closed review-gate check: every review seat of the project is filled
     on this PR head before merge (OI-2058, R5b).
@@ -658,6 +680,12 @@ def _run_review_gate(
     state is a refusal, never a silent pass. ``override_reason`` is the escape
     hatch with the same semantics as the CI gate: non-empty skips the check
     visibly, empty is refused.
+
+    ``b3_override`` (R1) is the reason of ``--override-b3``: ``None`` when the
+    flag was not given, and an empty reason is refused. It skips nothing: the
+    seats are still judged and every PASS must still be in the round ledger; it
+    only lets the codex seat of a PR at the B3 cap count, and the merge record
+    carries it with its reason (``review_seats.round_ledger.override``).
     """
     pr_data = _query_pr(pr_number)
     if pr_data is None:
@@ -730,12 +758,30 @@ def _run_review_gate(
             "gate": None,
         }, pr_data
 
+    return _review_seats_verdict(
+        pr_number, gate_name, state_dir, branch=branch, head_sha=head_sha, b3_override=b3_override,
+    ), pr_data
+
+
+def _review_seats_verdict(
+    pr_number: int, gate_name: str, state_dir: Path, *, branch: str, head_sha: str, b3_override: Optional[str],
+) -> Dict[str, Any]:
+    """The seat evaluation of the review gate, with the ``--override-b3`` reason when one was given (R1).
+
+    An ``--override-b3`` without a reason is refused (:func:`_b3_override_refusal`).
+    The reason is passed only when given: the evaluation reads the round ledger
+    either way, and an evaluator that predates the override is called as before.
+    """
+    refusal = _b3_override_refusal(b3_override)
+    if refusal is not None:
+        return refusal
     from closure_verifier import check_review_gate_for_merge
 
-    gate = check_review_gate_for_merge(
+    override_b3 = {"b3_override": b3_override.strip()} if b3_override else {}
+    return check_review_gate_for_merge(
         str(pr_number), gate_name, state_dir / "review_gates" / "results", branch=branch, head_sha=head_sha,
+        **override_b3,
     )
-    return gate, pr_data
 
 
 def _run_adr_gate(pr_number: int, *, pr_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -1940,8 +1986,17 @@ def main(argv: Optional[list[str]] = None) -> int:
              "enforcement), with this required reason (empty is refused). No other "
              "override applies to this gate.",
     )
+    parser.add_argument(
+        "--override-b3", action="store_true",
+        help="R1: let the codex seat of a PR at the B3 cap count at this merge, with --reason "
+             "(empty is refused). Every PASS must still be in the round ledger; the reason "
+             "lands in the pr_merged receipt.",
+    )
+    parser.add_argument("--reason", default=None, help="The reason for --override-b3 (required with it)")
     parser.add_argument("--json", action="store_true", help="Output result as JSON")
     args = parser.parse_args(argv)
+    if args.reason is not None and not args.override_b3:
+        parser.error("--reason only applies to --override-b3")
     return _run_with_target(args)
 
 
@@ -2025,7 +2080,7 @@ def _run_door(args: argparse.Namespace) -> int:
         print(f"CI gate: {gate['message']}")
 
     # ── Review gate: a passing, evidenced review-gate result must exist ────
-    review_gate, _ = _run_review_gate(args.pr, override_reason=args.override_reason)
+    review_gate, _ = _run_review_gate(args.pr, override_reason=args.override_reason, b3_override=_b3_override_arg(args))
     evaluated.append(_preflight_record("review", review_gate, head_sha))
     if review_gate["verdict"] != "GO":
         return refuse("review", review_gate, "review_gate")

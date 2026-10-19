@@ -34,6 +34,7 @@ import pytest
 
 import review_stack_support  # noqa: F401  (puts scripts/ and scripts/lib on sys.path)
 from review_stack_support import BRANCH, HEAD_SHA, PR, build_project_store, isolate_config_registry
+from review_seat_support import open_pr_in_ledger
 
 _FRESH = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 # Two hours back: past the one-hour lane-exhaustion TTL (OI-1569), so the record no longer holds.
@@ -657,6 +658,9 @@ class TestAnEntrysOwnSeatWins:
         _set_switches(kimi=False)
         codex_hop = {"gate": "codex_gate", "reason": "exit_nonzero", "status": "unavailable",
                      "detail": "You've hit your usage limit."}
+        # R1: the earlier round's request opened the PR in the round ledger; without that, a
+        # PASS on disk is history the ledger never counted and every seat is refused.
+        open_pr_in_ledger(env["state_dir"], PR)
         _write_result(env, "kimi_gate", {
             **_pass_record(env, "kimi_gate"), "status": "completed", "takeover_path": [codex_hop],
         })

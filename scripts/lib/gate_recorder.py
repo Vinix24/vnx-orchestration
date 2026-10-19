@@ -698,6 +698,10 @@ _TAKEOVER_FIELDS: Tuple[str, ...] = (
     "takeover_path",
 )
 
+# The request fields the round ledger (R1, ``review_rounds``) reads off a verdict:
+# the seat the request filled, and an ``--override-b3`` the request applied.
+_ROUND_FIELDS: Tuple[str, ...] = ("seat", "override_b3")
+
 
 def stamp_request_identity(
     result_payload: Dict[str, Any],
@@ -761,12 +765,54 @@ def stamp_request_identity(
     if request_payload.get("takeover") is True:
         for field in _TAKEOVER_FIELDS:
             result_payload[field] = request_payload.get(field)
+    # R1: the seat the request filled and an applied --override-b3 travel with the
+    # verdict, so the round ledger books it in that seat, with that override.
+    for field in _ROUND_FIELDS:
+        if request_payload.get(field):
+            result_payload[field] = request_payload[field]
     return result_payload
 
 
 class ResultOverwriteRefused(ValueError):
     """A write would replace a terminal, evidenced gate result with a less
     decided one (OI-1469/OI-1470)."""
+
+
+class RoundRefused(ResultOverwriteRefused):
+    """The round ledger refuses this verdict (R1): its seat already has a verdict
+    on this head, or the codex seat of a PR at the B3 cap has no override.
+
+    A :class:`ResultOverwriteRefused`, so every writer's existing refusal path
+    handles it: the record is not written and nothing is published.
+    ``reason`` is ``review_rounds.REFUSED_VERDICT_ON_HEAD`` or ``REFUSED_B3_CAP``.
+    """
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
+def _book_round(result_path: Path, payload: Dict[str, Any], *, gate: str) -> None:
+    """Book a review-seat verdict in the round ledger before its result record lands (R1).
+
+    Runs inside the result slot's lock, after the overwrite guard admitted the
+    write and before ``_write_result_atomic``. A refusal raises
+    :class:`RoundRefused`; a ledger that cannot be read or written raises
+    ``review_rounds.RoundLedgerError`` (an ``OSError``), so the run fails and no
+    verdict is published. Anything that is no review-seat verdict passes
+    through untouched (``review_rounds.book_result_verdict``).
+    """
+    # Deferred: review_rounds reads review_seats (and closure_verifier) at call time.
+    import review_rounds
+
+    existing = _read_existing_result(result_path)
+    try:
+        review_rounds.book_result_verdict(
+            result_path, payload, gate=gate, on_disk=existing if isinstance(existing, dict) else None,
+        )
+    except review_rounds.RoundRefusal as exc:
+        logger.warning("gate_recorder: round ledger refuses %s verdict pr=%s — %s", gate, payload.get("pr_number"), exc)
+        raise RoundRefused(str(exc), reason=exc.reason) from exc
 
 
 def result_is_for_head(result: Dict[str, Any], head_sha: str) -> bool:
@@ -1647,10 +1693,15 @@ def _emit_terminal_result_receipt(
         "blocking_count": blocking_count,
         "verification": verification,
     }
-    for key in ("dispatch_id", "provider", "model", "pr_id", "final_prompt_sha256"):
+    for key in ("dispatch_id", "provider", "model", "pr_id", "final_prompt_sha256", "seat", "takeover_from"):
         value = str(payload.get(key) or "").strip()
         if value:
             fields[key] = value
+    # R1: the head the verdict is about (the round ledger's key), and an applied
+    # --override-b3 with its reason, so the audit copy carries both.
+    fields["head_sha"] = str(payload.get("commit_sha") or "").strip()
+    if isinstance(payload.get("override_b3"), dict):
+        fields["override_b3"] = payload["override_b3"]
     pr_number = payload.get("pr_number")
     if isinstance(pr_number, int) and not isinstance(pr_number, bool):
         fields["pr_number"] = pr_number
@@ -1859,6 +1910,7 @@ def write_result_guarded(
     with slot_lock(result_path):
         try:
             _check_overwrite_guard(result_path, payload, gate=gate, pr_ref=pr_ref)
+            _book_round(result_path, payload, gate=gate)
         except ResultOverwriteRefused:
             if audit_refusal:
                 _audit_write_refusal(result_path, gate, pr_ref, payload)
@@ -1987,6 +2039,7 @@ def record_terminal_result(
     with slot_lock(result_path):
         try:
             _check_overwrite_guard(result_path, payload, gate=gate, pr_ref=pr_id)
+            _book_round(result_path, payload, gate=gate)
         except ResultOverwriteRefused:
             _audit_write_refusal(result_path, gate, pr_id, payload)
             _archive_finished_gate_bundle(payload, gate=gate, result_path=result_path)

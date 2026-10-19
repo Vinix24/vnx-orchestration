@@ -30,6 +30,7 @@ import gate_lane_contract
 import gate_runner
 from gate_runner import GateRunner
 from gate_status import has_complete_evidence, is_pass
+from review_seat_support import open_pr_in_ledger
 
 TESTS_DIR = Path(__file__).resolve().parent
 if str(TESTS_DIR) not in sys.path:
@@ -120,6 +121,8 @@ def _run_standalone(module, gate: str, tmp_path, monkeypatch, *, diff: str, repo
     monkeypatch.setattr(module, "_make_default_dispatcher", _make)
     monkeypatch.setattr(module, "get_pr_head_branch", lambda pr_number: BRANCH)
     monkeypatch.setattr(module, "get_pr_head_sha", lambda pr_number: HEAD_SHA)
+    # R1: the gate request that starts a governed run opens the PR in the round ledger.
+    open_pr_in_ledger(data_dir / "state", pr)
     rc = module.main(["--pr", pr, "--data-dir", str(data_dir)])
     results_dir = data_dir / "state" / "review_gates" / "results"
     record = json.loads((results_dir / f"pr-{pr}-{gate}.json").read_text(encoding="utf-8"))

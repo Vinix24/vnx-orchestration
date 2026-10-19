@@ -2085,6 +2085,78 @@ def _resolve_stop_conditions_scope(spec: DispatchSpec) -> "tuple[Optional[Set[st
     return relevant_spec_providers, relevant_gates
 
 
+# R1 (track review-stopregel-en-lichte-stoelen): the reason of a dispatch-door
+# --override-b3, carried in this process's env the way the worker-claude override
+# is (the door runs one process per dispatch). main() sets it from the flags.
+B3_OVERRIDE_REASON_ENV = "VNX_OVERRIDE_B3_REASON"
+
+
+def _work_ref_branch(work_ref: str) -> str:
+    """The branch a ``work_ref`` names: ``origin/x`` and ``refs/heads/x`` are branch ``x``."""
+    branch = work_ref.strip()
+    for prefix in ("refs/heads/", "refs/remotes/origin/", "origin/"):
+        if branch.startswith(prefix):
+            return branch[len(prefix):]
+    return branch
+
+
+def _capped_prs_on_branch(state_dir: Path, branch: str) -> "list":
+    """The B3 cap of every PR whose ledger lines name ``branch`` and that is at the cap."""
+    import review_rounds
+
+    review_gates = state_dir / "review_gates"
+    ledger = review_rounds.read_ledger(review_rounds.ledger_path(review_gates))
+    project_id = review_rounds.store_project_id(review_gates)
+    prs = sorted({line.pr_number for line in ledger.lines if line.branch == branch and line.project_id == project_id})
+    caps = [review_rounds.cap_state(ledger.for_pr(project_id, pr), pr) for pr in prs]
+    return [cap for cap in caps if cap.capped]
+
+
+def _check_b3_cap_verdict(spec: DispatchSpec, *, state_dir: Path) -> Optional[ConstraintVerdict]:
+    """R1 early warning: refuse a build dispatch whose ``work_ref`` is the branch of a PR at the B3 cap.
+
+    Not the guard: the gate refuses the codex-seat run (``gate_request_handler``)
+    and the merge door refuses the PASS. This stops a builder from spending a
+    round on a PR the review will not take. It reads the round ledger only (its
+    lines carry the branch of every verdict), never GitHub. An unreadable ledger
+    is a warning here: the gate refuses the run itself, naming the way out.
+    ``VNX_OVERRIDE_B3_REASON`` (set by ``--override-b3 --reason``) turns the
+    refusal into an audited warning.
+    """
+    import review_rounds
+
+    work_ref = (spec.work_ref or "").strip()
+    if not work_ref or not _spec_is_writing(spec):
+        return None
+    try:
+        capped = _capped_prs_on_branch(state_dir, _work_ref_branch(work_ref))
+    except review_rounds.RoundLedgerError as exc:
+        return ConstraintVerdict(code="b3-ledger-unreadable", severity="warn", message=f"B3 early warning not measured: {exc}")
+    if not capped:
+        return None
+    text = "; ".join(review_rounds.cap_refusal_text(cap, where=f"work_ref {work_ref}") for cap in capped)
+    reason = (os.environ.get(B3_OVERRIDE_REASON_ENV) or "").strip()
+    if reason:
+        logger.warning("[dispatch_cli] AUDIT b3-cap-override-applied work_ref=%s reason=%s", work_ref, reason)
+        return ConstraintVerdict(
+            code="b3-cap-override-applied", severity="warn",
+            message=f"{text}. Overridden for this build dispatch: {reason}", override_applied=True,
+        )
+    return ConstraintVerdict(
+        code="b3-cap-reached", severity="blocking",
+        message=f"build dispatch refused, the review will not take another round: {text}",
+    )
+
+
+def _project_state_verdicts(spec: DispatchSpec, *, state_dir: Path) -> "tuple[ConstraintVerdict, ...]":
+    """The door's checks against this project's own state: the track link (TL-D1) and the B3 cap (R1)."""
+    verdicts = (
+        _check_track_link_verdict(spec, state_dir=state_dir),
+        _check_b3_cap_verdict(spec, state_dir=state_dir),
+    )
+    return tuple(verdict for verdict in verdicts if verdict is not None)
+
+
 def _check_stop_conditions_verdict(
     *,
     state_dir: Path,
@@ -2451,10 +2523,9 @@ def build_runtime_snapshot(
             constraint_verdicts = constraint_verdicts + (binding_verdict,)
 
     # TL-D1: track_id door validation (fail-closed on invalid/nonexistent/done;
-    # staged advisory->required WARN/Reject when absent).
-    track_verdict = _check_track_link_verdict(spec, state_dir=data_dir / "state")
-    if track_verdict is not None:
-        constraint_verdicts = constraint_verdicts + (track_verdict,)
+    # staged advisory->required WARN/Reject when absent). R1: a build on the
+    # branch of a PR at the B3 cap is refused early (_check_b3_cap_verdict).
+    constraint_verdicts = constraint_verdicts + _project_state_verdicts(spec, state_dir=data_dir / "state")
 
     # golf 2A: T0 autonomous-chain stop-conditions, measured live on every fire.
     # OI-1694: scoped to THIS dispatch's own provider/gate — see
@@ -3630,6 +3701,28 @@ def reopen_lane(provider_val: str, reason: str, *, state_dir: Path) -> int:
     return 0
 
 
+def _add_b3_override_arguments(parser) -> None:
+    """``--override-b3 --reason "..."``: build on the branch of a PR at the B3 cap anyway (R1)."""
+    parser.add_argument(
+        "--override-b3", dest="override_b3", action="store_true",
+        help="Fire a build dispatch on the branch of a PR at the B3 cap anyway; requires --reason. "
+             "Sets VNX_OVERRIDE_B3_REASON for this fire; recorded as an audited warning",
+    )
+    parser.add_argument("--reason", dest="b3_reason", metavar="REASON", default=None,
+                        help="The reason for --override-b3 (required with it)")
+
+
+def _apply_b3_override(parser, args) -> None:
+    """Refuse ``--override-b3`` without a reason (and ``--reason`` alone); carry the reason in the env."""
+    reason = (args.b3_reason or "").strip()
+    if args.override_b3 and not reason:
+        parser.error('--override-b3 needs a non-empty --reason "..." (no silent bypass)')
+    if args.b3_reason is not None and not args.override_b3:
+        parser.error("--reason only applies to --override-b3")
+    if reason:
+        os.environ[B3_OVERRIDE_REASON_ENV] = reason
+
+
 def main(argv: Optional[list] = None) -> int:
     import argparse
 
@@ -3680,7 +3773,9 @@ def main(argv: Optional[list] = None) -> int:
              "TRACK_ID that does not reference a live track for this project is a "
              "blocking reject, exactly as if the staged spec had carried it.",
     )
+    _add_b3_override_arguments(parser)
     args = parser.parse_args(argv)
+    _apply_b3_override(parser, args)
 
     if args.force_release_class is not None:
         force_release(args.force_release_class)
