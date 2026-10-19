@@ -109,6 +109,28 @@ def _tracks_has_decision_ref(conn: sqlite3.Connection) -> bool:
     """True when the tracks table carries the decision_ref column (migration 0033)."""
     return any(row[1] == "decision_ref" for row in conn.execute("PRAGMA table_info('tracks')"))
 
+
+def _ensure_horizon_column(
+    conn: sqlite3.Connection, horizon: Optional[str], track_id: str
+) -> bool:
+    """Whether the tracks table carries the horizon column, refusing a requested one.
+
+    Horizon (migration 0027) is optional: only reference the column when it
+    exists, so the DAL stays compatible with pre-0027 (v24-era) databases.
+    D5 fail-closed: if a horizon was REQUESTED but the column is absent, refuse
+    loudly rather than silently drop it (the pre-fix silent no-op that hid the
+    stuck-store gap). A pre-0027 store that requests NO horizon still works.
+    """
+    has_horizon = _tracks_has_horizon(conn)
+    if horizon is not None and not has_horizon:
+        raise HorizonColumnMissingError(
+            f"Cannot set horizon={horizon!r} on track {track_id!r}: the tracks "
+            "table has no 'horizon' column (store predates migration 0027). "
+            "Run `vnx migrate` to add the Horizon schema, then retry."
+        )
+    return has_horizon
+
+
 ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     "queued":  frozenset({"active", "parked"}),
     "active":  frozenset({"done", "parked"}),
@@ -318,6 +340,24 @@ def _initial_plan_scope(metadata_json: Optional[str]) -> Optional[str]:
     return meta["plan_scope"]
 
 
+def _stored_metadata_at_creation(
+    metadata_json: Optional[str], initial_scope: Optional[str]
+) -> str:
+    """The ``metadata_json`` a new track stores at birth.
+
+    A scope set at birth records why it was set: the reader must be able to tell
+    "set at creation" from "set by hand" and "set by an automatic rule". The
+    event carries ``scope_origin``; the stored row carries the marker the reader
+    renders, so the decision survives without reading the event file.
+    """
+    stored_metadata = metadata_json or "{}"
+    if initial_scope is not None:
+        stored_metadata = metadata_json_with(
+            stored_metadata, {"plan_scope_rule": CREATED_SCOPE_RULE}
+        )
+    return stored_metadata
+
+
 def _keep_planning_keys(stored_metadata_json: Optional[str], metadata_json: str) -> str:
     """``metadata_json`` with every planning-owned key exactly as it is stored.
 
@@ -376,19 +416,8 @@ def create_track(
     now = _now_utc()
     conn = _get_conn(state_dir)
     try:
-        # horizon (migration 0027) is optional: only reference the column when it
-        # exists, so the DAL stays compatible with pre-0027 (v24-era) databases.
-        # D5 fail-closed: if a horizon was REQUESTED but the column is absent, refuse
-        # loudly rather than silently drop it (the pre-fix silent no-op that hid the
-        # stuck-store gap). A pre-0027 store that requests NO horizon still works.
         # Checked BEFORE the audit event so a refused create emits no track_created.
-        has_horizon = _tracks_has_horizon(conn)
-        if horizon is not None and not has_horizon:
-            raise HorizonColumnMissingError(
-                f"Cannot set horizon={horizon!r} on track {track_id!r}: the tracks "
-                "table has no 'horizon' column (store predates migration 0027). "
-                "Run `vnx migrate` to add the Horizon schema, then retry."
-            )
+        has_horizon = _ensure_horizon_column(conn, horizon, track_id)
         _emit_track_event(
             state_dir, "track_created", track_id, project_id, "system", {"title": title})
         if initial_scope is not None:
@@ -397,16 +426,7 @@ def create_track(
                 {"old": "none", "new": initial_scope,
                  "reason": f"set at creation by {scope_origin}", "rule": scope_origin},
             )
-        # A scope set at birth records why it was set: the reader must be able to
-        # tell "set at creation" from "set by hand" and "set by an automatic
-        # rule". The event carries ``scope_origin``; the stored row carries the
-        # marker the reader renders, so the decision survives without reading the
-        # event file.
-        stored_metadata = metadata_json or "{}"
-        if initial_scope is not None:
-            stored_metadata = metadata_json_with(
-                stored_metadata, {"plan_scope_rule": CREATED_SCOPE_RULE}
-            )
+        stored_metadata = _stored_metadata_at_creation(metadata_json, initial_scope)
         columns = [
             "track_id", "project_id", "title", "goal_state", "phase", "next_up", "sort_order",
             "priority", "requires_operator_promotion", "instruction_template",
