@@ -1,4 +1,0 @@
-- Round ledger (OI-2180/OI-2181/OI-2185): an attested `opened` line (`vnx review rounds open`) is now the boundary every reader draws. What was booked for the PR before it counts for nothing at the gate, the writer, the merge door and the dispatch door, so the cap really starts at zero there.
-  A re-anchored verdict (`gate_reanchor_cli.py --apply`) gets a ledger line for its new head that names the head it came from, instead of being taken for a rewrite and leaving the door NO-GO. It is booked only when that head's line is counted, and it is no new round.
-  A seat handed to the next reviewer in the same call passes the round ledger again before the successor is requested; a refused advance books nothing and spends no run.
-  The gate's history check reads the store the ledger lives in, not the one the environment names. `vnx review rounds open --data-dir` refuses with both paths when `VNX_STATE_DIR` overrides the state dir with another one.

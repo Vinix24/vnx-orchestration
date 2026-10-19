@@ -1,2 +1,0 @@
-- CI xdist shadow (D3b): `test_smart_router_e2e.py` and `test_smart_router_multiprovider.py` no longer overwrite or rename the shipped `routing_recommendations.yaml` on disk to swap a fixture registry in.
-  They patch `smart_router._RECOMMENDATIONS_PATH` per test instead, so a parallel worker reading the real registry (`test_valid_task_classes_matches_real_registry` and its neighbours) can no longer see a fixture or a missing file.
