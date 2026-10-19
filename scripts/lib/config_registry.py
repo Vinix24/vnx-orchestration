@@ -244,9 +244,10 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         cockpit_canonical=True),
     "VNX_PLAN_GATE_COMPLEX_ONLY": _e(
         "VNX_PLAN_GATE_COMPLEX_ONLY", "bool", "0", "gate",
-        "Restrict the plan-gate panel to complex features: a LIGHT-scope plan "
-        "(read-site in plan_gate_enforcement.plan_gate_scope) runs the reduced "
-        "2-seat panel; HEAVY plans keep the full 5-seat panel.",
+        "Flag with no effect since P1: plan_gate_enforcement.complex_only_active() "
+        "still reads it, but nothing consults that result to change a plan-gate run "
+        "(the LIGHT/HEAVY scope-skip and its reduced 2-seat panel were removed). "
+        "Kept until P4 reworks the effectiveness probe.",
         # subsystem matches the docs/core/SUBSYSTEMS.md seed row
         # "plan-gate-task-class-scope" (framework-status-audit-and-cockpit PR-3
         # fix) — distinct from "plan-gate-panel" (VNX_PLAN_GATE_ENFORCE), so the

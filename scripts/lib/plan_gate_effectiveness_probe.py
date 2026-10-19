@@ -38,11 +38,12 @@ DB cannot be queried — the probe reports ``oi_plan_source: "unreadable"``, lea
 the three blocker counters as ``None`` (never 0), says so in the signal, and
 classifies ``degraded`` (see ``health()`` for why ``degraded`` over ``unknown``).
 
-Scope-skip signal (OI-888): the ``VNX_PLAN_GATE_COMPLEX_ONLY`` read-site now
-exists in ``plan_gate_enforcement.plan_gate_scope`` + ``complex_only_active``
-(2026-08-08 dispatch) — a LIGHT-scope plan under the flag runs the reduced
-2-seat panel. The probe reports that explicitly (``scope_skip_read_site:
-"present"``) instead of staying silent about the signal.
+Scope-skip signal (OI-888): ``VNX_PLAN_GATE_COMPLEX_ONLY`` is still read by
+``plan_gate_enforcement.complex_only_active()``, but since P1 (track
+plan-gate-alleen-voor-architectuur) nothing consults that result to change a
+plan-gate run — the LIGHT/HEAVY scope-skip (``plan_gate_enforcement.plan_gate_scope``)
+and its reduced 2-seat panel were removed. The probe reports that explicitly
+(``scope_skip_read_site: "absent"``) instead of staying silent about the signal.
 """
 from __future__ import annotations
 
@@ -215,7 +216,7 @@ class PlanGateEffectivenessProbe(EffectivenessProbe):
             "seat_pass": seat_pass,
             "seat_revise": seat_revise,
             "seat_block": seat_block,
-            "scope_skip_read_site": "present",
+            "scope_skip_read_site": "absent",
         }
 
     def signal(self, raw: Dict[str, Any]) -> str:
@@ -245,7 +246,10 @@ class PlanGateEffectivenessProbe(EffectivenessProbe):
                 f"({raw['seat_responded']} responded, {raw['seat_abstain']} abstained, "
                 f"{raw['seat_pass']} pass/{raw['seat_revise']} revise/{raw['seat_block']} block)"
             )
-        parts.append("VNX_PLAN_GATE_COMPLEX_ONLY scope-skip read-site present (light plans run a reduced panel)")
+        parts.append(
+            "VNX_PLAN_GATE_COMPLEX_ONLY has no effect (scope-skip read-site absent: "
+            "nothing that changes a plan-gate run reads it since P1)"
+        )
         return "; ".join(parts)
 
     def health(self, raw: Dict[str, Any]) -> str:

@@ -10,8 +10,9 @@ Gap 2 (readability): the probe now reads the per-seat verdict ledger
 ``.vnx-attest/plan-gate-seats.ndjson`` (persisted by plan_gate_panel.run_panel).
 
 Gap 3 (visibility): the probe reports the ``VNX_PLAN_GATE_COMPLEX_ONLY``
-scope-skip read-site state instead of staying silent. Once the read-site exists
-(plan_gate_enforcement.plan_gate_scope, 2026-08-08) it reports ``present``.
+scope-skip read-site state instead of staying silent. The flag is still read by
+``plan_gate_enforcement.complex_only_active()`` but changes no plan-gate run
+since P1 removed the scope-skip and its reduced panel, so it reports ``absent``.
 """
 from __future__ import annotations
 
@@ -166,20 +167,22 @@ def test_probe_signal_includes_seat_counts_when_present(tmp_path):
 # Gap 3 — the scope-skip read-site state is reported, not silent
 # ---------------------------------------------------------------------------
 
-def test_probe_reports_scope_skip_read_site_present_in_detail(tmp_path):
+def test_probe_reports_scope_skip_read_site_absent_in_detail(tmp_path):
     result = PlanGateEffectivenessProbe(repo_root=tmp_path, state_dir=tmp_path / "state").run()
 
-    assert result.detail.get("scope_skip_read_site") == "present"
+    assert result.detail.get("scope_skip_read_site") == "absent"
 
 
-def test_probe_signal_mentions_scope_skip_read_site_present(tmp_path):
+def test_probe_signal_mentions_scope_skip_read_site_absent(tmp_path):
     append_chained_entry(_ledger_path(tmp_path), {
         "type": "plan_gate_pass", "track_id": "t1", "resolver": "run",
     })
 
     result = PlanGateEffectivenessProbe(repo_root=tmp_path, state_dir=tmp_path / "state").run()
 
-    assert "VNX_PLAN_GATE_COMPLEX_ONLY scope-skip read-site present" in result.signal
+    assert "VNX_PLAN_GATE_COMPLEX_ONLY has no effect" in result.signal
+    assert "scope-skip read-site absent" in result.signal
+    assert "reduced panel" not in result.signal
 
 
 def test_unknown_state_still_reported_when_nothing_exists(tmp_path):
