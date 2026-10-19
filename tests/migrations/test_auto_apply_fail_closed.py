@@ -36,7 +36,7 @@ from migrations.auto_apply import auto_apply
 
 _MIGRATIONS_DIR = _REPO_ROOT / "schemas" / "migrations"
 _RUNNERS_DIR = _REPO_ROOT / "scripts" / "lib" / "migrations"
-_TERMINAL = 33
+_TERMINAL = 34
 
 #: The seven runtime tables 0015 gives project_id (its runtime partition).
 _P4_RUNTIME_TABLES = (
@@ -199,7 +199,7 @@ def test_fresh_store_0015_columns_default_to_the_path_tenant(tmp_path):
         conn.close()
 
 
-def test_fresh_store_holds_the_v33_manifest_and_fk_check(tmp_path):
+def test_fresh_store_holds_the_terminal_manifest_and_fk_check(tmp_path):
     import schema_manifest
 
     state_dir = _central_state_dir(tmp_path, "proj-a")
@@ -387,7 +387,7 @@ def test_highest_auto_applicable_counts_pure_sql(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Fleet protection: a store already at 33 is left byte-for-byte alone
+# Fleet protection: a store at the terminal version is left byte-for-byte alone
 # ---------------------------------------------------------------------------
 
 class _CountingConnection(sqlite3.Connection):
@@ -412,8 +412,9 @@ _WRITE_RE = re.compile(
 
 
 def _vnx_migrate_route_store(tmp_path: Path, pid: str) -> Path:
-    """A store at 33 built the way `vnx migrate` builds it: the bootstrap chain,
-    then migrate_future_system.run() (repair, reconcile, walk, sweep)."""
+    """A store at the terminal version built the way `vnx migrate` builds it: the
+    bootstrap chain, then migrate_future_system.run() (repair, reconcile, walk,
+    sweep)."""
     from vnx_cli.commands.init_cmd import _bootstrap_runtime_dbs
     import migrate_future_system
 
@@ -426,24 +427,33 @@ def _vnx_migrate_route_store(tmp_path: Path, pid: str) -> Path:
 
 def _strip_0015_runtime_columns(db_path: Path) -> None:
     """The shape measured on vnx-dev, mission-control and seocrawler-v2 at 33
-    (2026-09-30): no project_id on the seven 0015 runtime tables."""
+    (2026-09-30, again 2026-10-15): no project_id on the seven 0015 runtime
+    tables, and so no index over it. The store goes back to 33, where 0034
+    finds it."""
     conn = sqlite3.connect(str(db_path))
     try:
+        conn.execute("DROP INDEX IF EXISTS ux_recommendation_outcomes_pid_rec_metric")
         for table in _P4_RUNTIME_TABLES:
             conn.execute(f"DROP INDEX IF EXISTS idx_{table}_project")
+            conn.execute(f"DROP INDEX IF EXISTS ux_{table}_pid")
             conn.execute(f"ALTER TABLE {table} DROP COLUMN project_id")
+        conn.execute("PRAGMA user_version = 33")
         conn.commit()
     finally:
         conn.close()
 
 
 @pytest.mark.parametrize("fleet_shape", ["vnx-migrate-route", "without-0015-columns"])
-def test_store_at_33_is_not_touched(tmp_path, monkeypatch, fleet_shape):
+def test_store_at_terminal_is_not_touched(tmp_path, monkeypatch, fleet_shape):
+    """A store at the terminal version is left alone. The fleet shape without the
+    0015 columns sits at 33 first; 0034 brings it to the terminal version, and
+    from there it is left alone too."""
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
     monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path / "guard"))
     db_path = _vnx_migrate_route_store(tmp_path, "proj-a")
     if fleet_shape == "without-0015-columns":
         _strip_0015_runtime_columns(db_path)
+        assert auto_apply(db_path) == [34]
     conn = sqlite3.connect(str(db_path))
     for pid in ("proj-a", "proj-b"):
         conn.execute(
@@ -539,7 +549,8 @@ def test_second_fresh_store_in_one_process_reaches_terminal(tmp_path, monkeypatc
 def test_fresh_stores_after_mfs_was_imported_reach_terminal(tmp_path, monkeypatch):
     """`vnx migrate` over several stores imports migrate_future_system per store
     (_run_future_system_pipeline), outside auto_apply, which arms the v22 hook in
-    the caller's registry. The next fresh store's auto_apply still reaches 33.
+    the caller's registry. The next fresh store's auto_apply still reaches the
+    terminal version.
 
     Red on the old code: (15, 'dispatches missing UNIQUE(dispatch_id, project_id) ...').
     """

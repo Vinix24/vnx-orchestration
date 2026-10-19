@@ -30,13 +30,14 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from project_scope import current_project_id as _current_project_id
 from runtime_coordination import (
     _append_event,
     _now_utc,
     get_connection,
+    project_id_stamp,
     register_dispatch,
 )
 
@@ -188,6 +189,22 @@ def generate_dedupe_key(channel_id: str, payload: Dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
 
 
+def _insert_inbox_row(conn: sqlite3.Connection, row: Tuple[Any, ...]) -> None:
+    """INSERT one received inbound_inbox row. *row* is (event_id, channel_id,
+    dedupe_key, payload_json, routing_hints_json, max_retries, metadata_json);
+    project_id is stamped explicitly (OI-2026). An IntegrityError propagates."""
+    stamp = project_id_stamp(conn, "inbound_inbox")
+    conn.execute(
+        f"""
+        INSERT INTO inbound_inbox
+            (event_id, channel_id, dedupe_key, state, payload_json,
+             routing_hints_json, max_retries, metadata_json{stamp.column})
+        VALUES (?, ?, ?, 'received', ?, ?, ?, ?{stamp.placeholder})
+        """,
+        (*row, *stamp.values),
+    )
+
+
 # ---------------------------------------------------------------------------
 # InboundInbox
 # ---------------------------------------------------------------------------
@@ -266,16 +283,8 @@ class InboundInbox:
                 return ReceiveResult(event=event, already_existed=True)
 
             try:
-                conn.execute(
-                    """
-                    INSERT INTO inbound_inbox
-                        (event_id, channel_id, dedupe_key, state, payload_json,
-                         routing_hints_json, max_retries, metadata_json)
-                    VALUES (?, ?, ?, 'received', ?, ?, ?, ?)
-                    """,
-                    (event_id, channel_id, dedupe_key, payload_json,
-                     hints_json, max_retries, meta_json),
-                )
+                _insert_inbox_row(conn, (event_id, channel_id, dedupe_key, payload_json,
+                                         hints_json, max_retries, meta_json))
             except sqlite3.IntegrityError:
                 # Race condition: another process inserted between our check and insert
                 existing = conn.execute(

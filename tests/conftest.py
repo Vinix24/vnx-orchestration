@@ -237,6 +237,24 @@ def pin_vnx_data_dir(monkeypatch: pytest.MonkeyPatch, data_dir: Path) -> None:
     monkeypatch.setenv("VNX_DATA_HOME", str(data_dir.parent / "_vnx_account_home"))
 
 
+@pytest.fixture
+def restore_project_scope():
+    """Undo ``importlib.reload(project_scope)`` after the test.
+
+    A reload rebinds ``TenantUnresolved`` (and every other name) in the module in
+    place. Modules that bound the class at import (coordination_db, test modules)
+    then raise and catch two different classes for the rest of the session. Putting
+    the original namespace back keeps one class identity across test files.
+    """
+    module = sys.modules.get("project_scope")
+    saved = dict(vars(module)) if module is not None else None
+    yield
+    module = sys.modules.get("project_scope")
+    if module is not None and saved is not None:
+        vars(module).clear()
+        vars(module).update(saved)
+
+
 @pytest.fixture(autouse=True)
 def _vnx_data_dir_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Redirect VNX_DATA_DIR (+ subsystem dirs) so EventStore() without an

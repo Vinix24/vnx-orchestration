@@ -111,7 +111,7 @@ def test_unknown_when_claimed_version_predates_manifest_floor(tmp_path):
     assert result.detail["effective_version"] is None
 
 
-def test_genuine_terminal_version_db_is_ok(tmp_path):
+def test_genuine_terminal_version_db_is_ok(tmp_path, monkeypatch):
     """A DB genuinely walked to TERMINAL_VERSION reports ok with zero violations.
 
     _APPLY_CHAIN's fixed per-version apply functions top out at 31 (0032+ is applied
@@ -122,7 +122,10 @@ def test_genuine_terminal_version_db_is_ok(tmp_path):
     must be genuinely AT the terminal, whatever that resolves to, not stuck at 31).
     Uses auto_apply() directly rather than the full mfs.run() pipeline — the ADR-007
     repair + W1 tenant-stamping steps need a resolvable project_id this test's
-    minimal fixture does not provide, and are orthogonal to what's under test here."""
+    minimal fixture does not provide, and are orthogonal to what's under test here.
+    The sweep's 0034 refuses a store without an owner, and this fixture sits
+    outside a .vnx-data/<project>/state layout, so the env names it."""
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
     proj = _build_db_at(tmp_path, 31)
     auto_apply(_state_dir(proj) / COORDINATION_DB_FILENAME)
 

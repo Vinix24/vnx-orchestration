@@ -8,21 +8,26 @@ import logging
 import sqlite3
 import uuid
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Generator, List, Optional
+from typing import Any, Dict, Generator, List, Optional, Tuple
 
 import schema_migration
 
 try:
+    from project_scope import TenantUnresolved
     from project_scope import current_project_id as _current_project_id
     from project_scope import project_filter_enabled as _project_filter_enabled
+    from project_scope import resolve_stamp_project_id as _resolve_stamp_project_id
 except ImportError:
     import sys as _sys
     from pathlib import Path as _Path
     _sys.path.insert(0, str(_Path(__file__).resolve().parent))
+    from project_scope import TenantUnresolved  # type: ignore[no-redef]
     from project_scope import current_project_id as _current_project_id  # type: ignore[no-redef]
     from project_scope import project_filter_enabled as _project_filter_enabled  # type: ignore[no-redef]
+    from project_scope import resolve_stamp_project_id as _resolve_stamp_project_id  # type: ignore[no-redef]
 
 logger = logging.getLogger(__name__)
 
@@ -167,6 +172,89 @@ def _dump(obj: Any) -> str:
     return json.dumps(obj) if obj is not None else "{}"
 
 
+def stamp_project_id(conn: sqlite3.Connection) -> str:
+    """The project id an INSERT stamps on a row of the store *conn* is open on.
+
+    Resolved from the store's own file, with the resolver migration 0034 uses
+    for the column default (``project_scope.resolve_stamp_project_id`` →
+    ``project_id_migration.resolve_init_project_id(strict=True)``): DB-path
+    layout, ``.vnx-project-id`` marker and ``VNX_PROJECT_ID`` must agree. So an
+    explicit stamp and the default never name two projects.
+
+    Raises ``TenantUnresolved`` when nothing resolves, when the sources
+    disagree, or when the main database has no file. Never a guessed default: on
+    the sales-copilot shape project_id is NOT NULL without a default, so a
+    writer has to supply it (OI-2026).
+    """
+    path = ""
+    for row in conn.execute("PRAGMA database_list").fetchall():
+        if row[1] == "main":
+            path = row[2] or ""
+            break
+    if not path:
+        raise TenantUnresolved(
+            "stamp_project_id: the connection's main database has no file, so it "
+            "is no project store; refusing to stamp a guessed project_id"
+        )
+    return _resolve_stamp_project_id(db_path=path)
+
+
+@dataclass(frozen=True)
+class ProjectIdStamp:
+    """The project_id part of an INSERT: ``column`` and ``placeholder`` go at the
+    end of the column list and the VALUES list, ``values`` at the end of the
+    parameters. All three are empty for a table without the column."""
+
+    column: str
+    placeholder: str
+    values: Tuple[str, ...]
+
+
+def project_id_stamp(conn: sqlite3.Connection, table: str) -> ProjectIdStamp:
+    """How an INSERT into *table* carries project_id on the store *conn* is open on.
+
+    A table with the column gets the store's id from :func:`stamp_project_id`,
+    explicitly: the sales-copilot shape has no default to fall back on. A table
+    without it (a store before migration 0034, or one init_schema built without
+    the numbered migrations) gets nothing, and the INSERT keeps the column list
+    it had before 0034.
+    """
+    if not _has_project_id_col(conn, table):
+        return ProjectIdStamp("", "", ())
+    return ProjectIdStamp(", project_id", ", ?", (stamp_project_id(conn),))
+
+
+def upsert_conflict_target(
+    conn: sqlite3.Connection, table: str, natural_key: Tuple[str, ...]
+) -> str:
+    """The ON CONFLICT target of an upsert on *table* keyed by *natural_key*, as
+    the store *conn* is open on carries it (OI-2026).
+
+    SQLite accepts a conflict target only when a full (not partial) UNIQUE index
+    or PRIMARY KEY covers exactly its columns, in any order. The store carries
+    one of two keys:
+      - ``(project_id, *natural_key)``: migration 0034 creates it wherever the
+        table has project_id, and the sales-copilot shape and tenant stamping
+        build it into the table itself. It wins when present: a row of another
+        project then fails on a single-store key instead of updating that
+        project's row;
+      - *natural_key* alone: a store before 0034, with or without the column.
+    Raises sqlite3.OperationalError naming the table when the store carries
+    neither, which is what the statement itself would raise.
+    """
+    keys = set()
+    for row in conn.execute(f"PRAGMA index_list('{table}')").fetchall():
+        if row[2] and not row[4]:
+            keys.add(frozenset(r[2] for r in conn.execute(f"PRAGMA index_info('{row[1]}')")))
+    for candidate in (("project_id", *natural_key), tuple(natural_key)):
+        if frozenset(candidate) in keys:
+            return ", ".join(candidate)
+    raise sqlite3.OperationalError(
+        f"upsert_conflict_target: {table} carries no full UNIQUE index over "
+        f"{natural_key}, with or without project_id"
+    )
+
+
 def _has_project_id_col(conn: sqlite3.Connection, table: str) -> bool:
     """True if `table` has a project_id column (post-migration-0010)."""
     try:
@@ -251,11 +339,20 @@ def _needs_initial_migration(conn: sqlite3.Connection) -> bool:
 
 # ADR-007: composite UNIQUE indexes over project_id for RC tables that historically
 # carried only a single-column PK/UNIQUE. Each entry is (table, [columns]).
+# The last seven are the runtime tables of migration 0015's runtime partition; 0034
+# gives them project_id where a store missed it and creates every index below (OI-2026).
 _RC_COMPOSITE_KEYS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("coordination_events", ("project_id", "id")),
     ("incident_log", ("project_id", "id")),
     ("intelligence_injections", ("project_id", "id")),
     ("worker_pool_membership", ("project_id", "id")),
+    ("retry_budgets", ("project_id", "id")),
+    ("retry_state", ("project_id", "id")),
+    ("escalation_log", ("project_id", "id")),
+    ("execution_targets", ("project_id", "id")),
+    ("inbound_inbox", ("project_id", "id")),
+    ("recommendations", ("project_id", "id")),
+    ("recommendation_outcomes", ("project_id", "id")),
 )
 
 # Durable record of tables whose ux_<table>_pid index could not be created due to

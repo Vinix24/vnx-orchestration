@@ -67,10 +67,19 @@ CENTRAL_DB_TABLES: Dict[str, bool] = {
 # name via the statement parser below (a documentation-only migration whose SQL
 # is fully commented out; a DROP-INDEX-only down-migration whose index names
 # encode the table by naming convention, not a parseable `ON <table>` clause).
-# Hand-verified against the file text 2026-07-12.
+# Hand-verified against the file text 2026-10-15.
 _MANUAL_TABLE_OVERRIDES: Dict[str, Tuple[str, ...]] = {
     "0016_rebuild_fts5.sql": ("code_snippets",),
     "2026_05_task_subclass_down.sql": ("success_patterns", "antipatterns"),
+    # 0034's SQL file is comments only; the work is scripts/lib/migrations/apply_0034.py.
+    # Union of its COLUMN_TABLES, the tables of coordination_db._RC_COMPOSITE_KEYS
+    # (the composite ux_<table>_pid indexes) and its UPSERT_KEYS tables.
+    "0034_runtime_project_id_completion.sql": (
+        "coordination_events", "incident_log", "intelligence_injections",
+        "worker_pool_membership", "retry_budgets", "retry_state", "escalation_log",
+        "execution_targets", "inbound_inbox", "recommendations",
+        "recommendation_outcomes",
+    ),
 }
 
 _COMMENT_RE = re.compile(r"--.*?$", re.MULTILINE)
