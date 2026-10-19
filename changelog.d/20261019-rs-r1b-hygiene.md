@@ -1,0 +1,2 @@
+- Round ledger (OI-2180/OI-2181): `vnx review rounds open` now resolves its store from `VNX_STATE_DIR` the way the gate and the merge door do, through one helper both sites share, so with a state dir outside `<VNX_DATA_DIR>/state` the command writes the `opened` line and its receipt into the ledger the gate actually reads instead of one nobody sees.
+  A spawn failure when the pip CLI starts `review_rounds_cli.py` is now caught, printed to stderr and returned as the module's error exit code, not an escaping `OSError`.

@@ -154,9 +154,32 @@ def ledger_path_for_results(results_dir: Path) -> Optional[Path]:
     return ledger_path(results_dir.parent)
 
 
+def store_state_dir(data_dir: Optional[Path] = None) -> Path:
+    """The state dir the round ledger lives in, resolved the way the gate does.
+
+    ``<data_dir>/state`` when a data dir is named (``vnx review rounds open
+    --data-dir``), else ``ensure_env()['VNX_STATE_DIR']`` — the same resolution
+    :class:`ReviewGateManager` and the merge door use for ``state/review_gates``.
+    The state dir may sit outside ``<VNX_DATA_DIR>/state`` (``VNX_STATE_DIR``),
+    so it is never reconstructed from the data dir.
+    """
+    if data_dir is not None:
+        return Path(data_dir).expanduser() / "state"
+    from vnx_paths import ensure_env
+
+    return Path(ensure_env()["VNX_STATE_DIR"])
+
+
 def store_data_dir(review_gates_dir: Path) -> Path:
-    """The project store (``.vnx-data``) a ``state/review_gates`` dir belongs to: what :func:`prior_evidence` reads."""
-    return Path(review_gates_dir).parent.parent
+    """The data dir (``ensure_env()['VNX_DATA_DIR']``) a ``state/review_gates`` dir belongs to: what :func:`prior_evidence` reads for reports.
+
+    The state dir can sit outside ``<VNX_DATA_DIR>/state`` (``VNX_STATE_DIR``),
+    so the data dir is resolved the way the gate does rather than by walking up
+    from the review_gates dir (which would land beside an overridden state dir).
+    """
+    from vnx_paths import ensure_env
+
+    return Path(ensure_env()["VNX_DATA_DIR"])
 
 
 _FILE_KINDS = (
@@ -751,13 +774,13 @@ RECEIPTS_NAME = "t0_receipts.ndjson"
 _RESULT_EVENT = "review_gate_result"
 
 
-def prior_evidence(data_dir: Path, pr_number: int) -> Tuple[str, ...]:
+def prior_evidence(data_dir: Path, pr_number: int, *, state_dir: Optional[Path] = None) -> Tuple[str, ...]:
     """What shows that PR ``pr_number`` was reviewed before the ledger counted it; ``()`` only when nothing does.
 
-    Three sources in the store at ``data_dir`` (its ``.vnx-data``); any one
-    entry is enough for the gate to refuse the PR as ``round_history_missing``:
+    Three sources; any one entry is enough for the gate to refuse the PR as
+    ``round_history_missing``:
 
-    - the headless reports of the seat gates
+    - the headless reports of the seat gates, under the data dir ``data_dir``
       (``unified_reports/headless/*-HEADLESS-<gate>-pr-N-*.md``);
     - the result records of the seat gates that hold a decided verdict, under
       both names the merge door reads (``state/review_gates/results/pr-N-<gate>.json``
@@ -766,6 +789,10 @@ def prior_evidence(data_dir: Path, pr_number: int) -> Tuple[str, ...]:
       project's receipt ledger (``state/t0_receipts.ndjson``, the file
       ``receipt_query.py`` reads), on ``pr_number`` or ``pr_id``, any status:
       a report can be gone and a record overwritten, the receipt stays.
+
+    ``state_dir`` is the state dir the ledger lives in, resolved the way the
+    gate does (:func:`store_state_dir`, ``ensure_env()['VNX_STATE_DIR']``)
+    unless the caller names one (``vnx review rounds open --data-dir``).
 
     Fails closed. A source that exists but cannot be read is evidence, named
     ``unreadable:<path>`` and listed first: a reports dir that cannot be
@@ -776,11 +803,12 @@ def prior_evidence(data_dir: Path, pr_number: int) -> Tuple[str, ...]:
     that does not parse and matches ``pr_id`` only.
     """
     data_dir = Path(data_dir)
+    state = Path(state_dir) if state_dir is not None else store_state_dir()
     gates = sorted(ledger_seat_gates())
     found = list(dict.fromkeys(
         _report_evidence(data_dir / "unified_reports" / "headless", pr_number, gates)
-        + _record_evidence(data_dir / "state" / "review_gates" / "results", pr_number, gates)
-        + _receipt_evidence(data_dir / "state" / RECEIPTS_NAME, pr_number, gates)
+        + _record_evidence(state / "review_gates" / "results", pr_number, gates)
+        + _receipt_evidence(state / RECEIPTS_NAME, pr_number, gates)
     ))
     unreadable = [entry for entry in found if entry.startswith(UNREADABLE_PREFIX)]
     return tuple(unreadable) + tuple(entry for entry in found if entry not in unreadable)
