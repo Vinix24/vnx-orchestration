@@ -45,6 +45,12 @@ enforceable:
   ``round_history_missing``), and the merge door counts no PASS of a PR that
   is not opened. The writer books every verdict either way: no verdict is
   lost, the door decides whether the PR counts.
+- **An override is recorded, not just logged.** A third line kind,
+  ``{"kind": "override", ...}``, books a build-door ``--override-b3`` that let
+  a build dispatch out on a capped PR's branch (:func:`book_b3_override`): the
+  PR, the head the cap fell on, the reason, what carried it (the env var), and
+  the cumulative blocker count. It is not a verdict and never counts toward the
+  cap. The door refuses the override when the line cannot be written.
 - **One file, framed records, and a bad line is a stop.** The ledger is a
   regular file or absent (:func:`ledger_state`); anything else is refused by
   every reader and writer. Every append starts on a record boundary
@@ -95,6 +101,10 @@ KIND_OPENED = "opened"
 BASIS_NEW = "new"
 BASIS_ATTESTED = "attested"
 _BASES = (BASIS_NEW, BASIS_ATTESTED)
+
+# The ``override`` line: a build-door ``--override-b3`` let a build dispatch out
+# on the branch of a PR at the B3 cap (R1d, OI-2180 point 3).
+KIND_OVERRIDE = "override"
 
 # An evidence entry for a source that exists but cannot be read (prior_evidence).
 UNREADABLE_PREFIX = "unreadable:"
@@ -408,6 +418,55 @@ def _is_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+@dataclass(frozen=True)
+class OverrideLine:
+    """A build-door ``--override-b3``: a build dispatch went out on a PR at the B3 cap anyway.
+
+    ``set_by`` names what carried the reason (the env var ``VNX_OVERRIDE_B3_REASON``),
+    ``total`` the cumulative codex-seat blocker count the cap stood at, and
+    ``head_sha`` the head the cap fell on. Not a verdict: it never counts toward
+    the cap, and it is not subject to the ``opened`` boundary.
+    """
+
+    project_id: str
+    pr_number: int
+    head_sha: str
+    reason: str
+    set_by: str
+    total: int
+    source: str = SOURCE_OPERATOR
+    rule: str = ""
+    recorded_at: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        record: Dict[str, Any] = {
+            "kind": KIND_OVERRIDE, "project_id": self.project_id, "pr_number": self.pr_number,
+            "head_sha": self.head_sha, "reason": self.reason, "set_by": self.set_by,
+            "total": self.total, "source": self.source, "recorded_at": self.recorded_at,
+        }
+        if self.rule:
+            record["rule"] = self.rule
+        return record
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "OverrideLine":
+        """As strict as a verdict line: a missing or wrong field is no line, and so is an override without its reason, head or setter."""
+        if not isinstance(data, dict):
+            raise ValueError("a ledger line is a JSON object")
+        values: Dict[str, Any] = {}
+        for name in ("project_id", "head_sha", "reason", "set_by", "source", "recorded_at", "rule"):
+            value = data.get(name, "")
+            if not isinstance(value, str):
+                raise ValueError(f"field {name!r} is not a string")
+            values[name] = value
+        pr_number, total = data.get("pr_number"), data.get("total")
+        if not _is_int(pr_number) or not _is_int(total) or pr_number < 0 or total < 0:
+            raise ValueError("pr_number and total must be non-negative integers")
+        if not values["reason"].strip() or not values["head_sha"] or not values["set_by"] or not values["recorded_at"]:
+            raise ValueError("reason, head_sha, set_by and recorded_at must be set")
+        return cls(pr_number=pr_number, total=total, **values)
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -441,6 +500,7 @@ class Ledger:
     bad: Tuple[BadLine, ...] = ()
     opened: Tuple[OpenedLine, ...] = ()
     opened_after: Tuple[int, ...] = ()
+    overrides: Tuple[OverrideLine, ...] = ()
 
     def opened_line(self, project_id: str, pr_number: int) -> Optional[OpenedLine]:
         """This PR's ``opened`` line: from there on the ledger holds its review history."""
@@ -488,12 +548,19 @@ class Ledger:
         """Is this very verdict in the file already, before or after the boundary (a retried write)?"""
         return any(existing.same_verdict(line) for existing in self.lines)
 
+    def overrides_for(self, project_id: str, pr_number: int) -> Tuple[OverrideLine, ...]:
+        """This PR's build-door override lines, in file order. Not counted, so no ``opened`` boundary."""
+        return tuple(
+            line for line in self.overrides if line.project_id == project_id and line.pr_number == pr_number
+        )
+
 
 def parse_ledger(path: Path, text: str) -> Ledger:
-    """Every line by its ``kind``: none is a verdict, ``opened`` an opened PR, anything else a bad line."""
+    """Every line by its ``kind``: none is a verdict, ``opened`` an opened PR, ``override`` a build-door override, anything else a bad line."""
     lines: List[RoundLine] = []
     opened: List[OpenedLine] = []
     opened_after: List[int] = []
+    overrides: List[OverrideLine] = []
     bad: List[BadLine] = []
     for number, raw in enumerate(text.splitlines(), start=1):
         if not raw.strip():
@@ -505,13 +572,15 @@ def parse_ledger(path: Path, text: str) -> Ledger:
             if kind == KIND_OPENED:
                 opened.append(OpenedLine.from_dict(data))
                 opened_after.append(len(lines))
+            elif kind == KIND_OVERRIDE:
+                overrides.append(OverrideLine.from_dict(data))
             elif kind is None:
                 lines.append(RoundLine.from_dict(data))
             else:
                 raise ValueError(f"unknown line kind {kind!r}")
         except ValueError as exc:
             bad.append(BadLine(number, _pr_named(data, raw), str(exc)))
-    return Ledger(Path(path), True, tuple(lines), tuple(bad), tuple(opened), tuple(opened_after))
+    return Ledger(Path(path), True, tuple(lines), tuple(bad), tuple(opened), tuple(opened_after), tuple(overrides))
 
 
 _PR_NUMBER_IN_TEXT = re.compile(r'"pr_number"\s*:\s*(\d+)\s*[,}]')
@@ -595,6 +664,13 @@ class CapState:
     @property
     def total(self) -> int:
         return sum(self.blockers)
+
+    @property
+    def head(self) -> str:
+        """The head the cap fell on; ``""`` below the cap (there is no cap head)."""
+        if not self.capped:
+            return ""
+        return self.rounds[self.cap_round - 1].head_sha
 
     def summary(self) -> str:
         """The rule, the round it fell in and the counts it fell on."""
@@ -686,6 +762,38 @@ def cap_refusal_text(cap: CapState, *, where: str) -> str:
 def override_record(reason: str, cap: CapState) -> Dict[str, Any]:
     """What an applied ``--override-b3`` records: the flag, the reason and the cap it won over."""
     return {"flag": OVERRIDE_FLAG, "reason": reason, **cap.to_record()}
+
+
+def book_b3_override(path: Path, *, project_id: str, cap: CapState, reason: str, set_by: str) -> str:
+    """Book one build-door ``--override-b3``: an ``override`` line for the PR the cap names.
+
+    ``set_by`` is what carried the reason (the env var ``VNX_OVERRIDE_B3_REASON``);
+    the line names the head the cap fell on (``cap.head``) and the cumulative
+    blocker count (``cap.total``). Same lock, same framing, same validation and
+    same refusal contract as a verdict or ``opened`` line: an unreadable ledger
+    raises :class:`RoundLedgerUnreadable`, any other failure to write the line
+    :class:`RoundLedgerError`. The caller refuses the override on either.
+    """
+    from atomic_io import slot_lock
+
+    line = OverrideLine(
+        project_id=project_id, pr_number=cap.pr_number, head_sha=cap.head,
+        reason=reason, set_by=set_by, total=cap.total, source=SOURCE_OPERATOR,
+        rule=cap.rule, recorded_at=_utc_now(),
+    )
+    path = Path(path)
+    try:
+        with slot_lock(path):
+            ledger = parse_ledger(path, _ledger_text(path))
+            text = unreadable_text(ledger, line.pr_number)
+            if text:
+                raise RoundLedgerUnreadable(text)
+            _append_text(path, ndjson(line.to_dict()))
+    except RoundLedgerError:
+        raise
+    except (OSError, UnicodeDecodeError) as exc:
+        raise RoundLedgerError(f"round ledger {path} could not be written: {exc}") from exc
+    return "appended"
 
 
 # ---------------------------------------------------------------------------

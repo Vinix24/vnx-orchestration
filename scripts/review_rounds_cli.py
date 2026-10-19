@@ -26,9 +26,14 @@ Exit codes:
   1  opened, but the receipt could not be written: the ledger line stands
   2  bad input, --data-dir and VNX_STATE_DIR name two ledgers, or the ledger could not be read or written
 
+``rounds show --pr N`` lists a PR's ledger: its ``opened`` line, its counted
+verdicts, and every build-door ``--override-b3`` (``override`` line) recorded
+against it.
+
 Usage:
   python3 scripts/review_rounds_cli.py rounds open --pr 2089 --reason "reviewed before R1: B3.1 in round 1, operator merged"
   python3 scripts/review_rounds_cli.py rounds open --pr 2089 --reason "..." --data-dir /path/to/.vnx-data --json
+  python3 scripts/review_rounds_cli.py rounds show --pr 2089 [--data-dir /path/to/.vnx-data] [--json]
 """
 from __future__ import annotations
 
@@ -61,6 +66,10 @@ def _build_parser() -> argparse.ArgumentParser:
     opener.add_argument("--reason", required=True, help="why this PR opens without its earlier verdicts counted")
     opener.add_argument("--data-dir", default=None, help="the project's .vnx-data (default: this project's)")
     opener.add_argument("--json", action="store_true", help="machine-readable output")
+    show = verbs.add_parser("show", help="show a PR's round ledger: verdicts, its opened line and any build-door override")
+    show.add_argument("--pr", type=int, required=True, help="GitHub PR number")
+    show.add_argument("--data-dir", default=None, help="the project's .vnx-data (default: this project's)")
+    show.add_argument("--json", action="store_true", help="machine-readable output")
     return parser
 
 
@@ -85,12 +94,65 @@ def _emit_receipt(state_dir: Path, line, *, ledger: Path, evidence) -> None:
     )
 
 
+def _show(args) -> int:
+    """``rounds show``: a PR's ledger in file order — its ``opened`` line, its verdicts, its build-door overrides."""
+    import review_rounds
+
+    if args.pr <= 0:
+        print("vnx review rounds show: --pr must be a positive PR number", file=sys.stderr)
+        return EXIT_ERROR
+    data_dir = _data_dir(args.data_dir)
+    try:
+        state_dir = review_rounds.store_state_dir(data_dir if args.data_dir else None)
+    except review_rounds.StoreConflict as exc:
+        print(f"vnx review rounds show: refused: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    review_gates = state_dir / "review_gates"
+    ledger_path = review_rounds.ledger_path(review_gates)
+    try:
+        ledger = review_rounds.read_ledger(ledger_path)
+    except review_rounds.RoundLedgerError as exc:
+        print(f"vnx review rounds show: refused: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    project_id = review_rounds.store_project_id(review_gates)
+    opened = ledger.opened_line(project_id, args.pr)
+    overrides = ledger.overrides_for(project_id, args.pr)
+    lines = ledger.for_pr(project_id, args.pr)
+    if args.json:
+        print(json.dumps({
+            "pr": args.pr,
+            "ledger": str(ledger_path),
+            "opened": opened.to_dict() if opened is not None else None,
+            "overrides": [line.to_dict() for line in overrides],
+            "lines": [line.to_dict() for line in lines],
+        }, indent=2))
+        return EXIT_OK
+    print(f"PR #{args.pr} round ledger {ledger_path}:")
+    if opened is None:
+        print("  opened: none")
+    else:
+        print(f"  opened: basis {opened.basis}, recorded_at {opened.recorded_at}, source {opened.source}")
+    for line in overrides:
+        print(
+            f"  override: head {line.head_sha[:12]} reason {line.reason!r} set_by {line.set_by} "
+            f"total {line.total}" + (f" rule {line.rule}" if line.rule else "")
+        )
+    for line in lines:
+        print(
+            f"  {line.seat} {line.verdict.upper()}({line.blocking_count}) on {line.head_sha[:12]} "
+            f"reviewer {line.reviewer}"
+        )
+    return EXIT_OK
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     # After the sys.path bootstrap above: review_rounds lives in scripts/lib.
     import review_rounds
     from governance_receipts import AppendReceiptError
 
     args = _build_parser().parse_args(argv)
+    if args.verb == "show":
+        return _show(args)
     reason = args.reason.strip()
     if args.pr <= 0 or not reason:
         print('vnx review rounds open: --pr must be a positive PR number and --reason "..." must say why', file=sys.stderr)
