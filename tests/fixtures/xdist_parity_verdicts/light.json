@@ -1,0 +1,43 @@
+{
+ "counts": null,
+ "differences": null,
+ "event": "pull_request",
+ "exit": null,
+ "head_sha": "a8b5100802ccb0a3d371806c271eaf2b47db3499",
+ "invalid_evidence": [],
+ "profile": "light",
+ "ref": "dispatch/x",
+ "reference": {
+  "duration_s": null,
+  "exit": null,
+  "job_result": "success",
+  "result": "missing"
+ },
+ "run_attempt": "2",
+ "run_id": "38939122085",
+ "schema": "vnx-xdist-parity/1",
+ "selection_fingerprint": null,
+ "selection_fingerprint_source": null,
+ "shadow": {
+  "job_result": "success",
+  "record": "missing"
+ },
+ "step_failures": [
+  "parity.selection=skipped",
+  "parity.download_reference=skipped",
+  "parity.download_candidate=skipped",
+  "reference.result=missing",
+  "shadow.record=missing"
+ ],
+ "steps": {
+  "checkout": "success",
+  "download_candidate": "skipped",
+  "download_reference": "skipped",
+  "parity": "success",
+  "prelude": "success",
+  "selection": "skipped"
+ },
+ "tested_sha": "b39838cf709922fde46c1109c9909134bde9e1a4",
+ "tool_versions": null,
+ "verdict": "not_applicable"
+}

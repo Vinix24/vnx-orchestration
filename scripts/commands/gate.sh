@@ -101,6 +101,132 @@ print(','.join(result) if result else '$default_stack')
 "
 }
 
+_g_normalize_gate() {
+  # Short names to the gate names review_gate_manager knows: codex -> codex_gate,
+  # ci -> ci_gate (OI-1265), and the kimi/glm/deepseek reviewers by the same rule.
+  case "$1" in
+    codex)    printf 'codex_gate' ;;
+    ci)       printf 'ci_gate' ;;
+    kimi)     printf 'kimi_gate' ;;
+    glm)      printf 'glm_gate' ;;
+    deepseek) printf 'deepseek_gate' ;;
+    *)        printf '%s' "$1" ;;
+  esac
+}
+
+_g_gate_known() {
+  # An `--only` name must be a live gate: one gate_recorder registers
+  # (GATE_PROVIDERS) and dispatch_spec has not retired (RETIRED_GATE_NAMES),
+  # checked before the provider switch is asked. An unregistered name has no
+  # provider and a retired one is no reviewer, so neither is ever a switch
+  # refusal: each is refused by name with the live gates, exit 2, and writes no
+  # GATE-9 line. Before this, `providers check` refused a name its family map
+  # does not know with exit 4 and this command reported a typo as "switched
+  # off" with a provider_switched_off line (OI-2070); a name the map does know
+  # (`gemini`, `kimi_cli`) passed the switch and reached the gate manager
+  # unregistered. A retired name (`gemini_review`) is still in GATE_PROVIDERS,
+  # so registration alone let it through to a manager that refuses it as
+  # retired_review_gate. A check that cannot run refuses fail-closed with exit 1.
+  local gate="$1"
+  local pythonpath="$VNX_HOME/scripts/lib:${VNX_HOME}/scripts:${PYTHONPATH:-}"
+  local names_rc=0
+  local names_out
+  names_out=$(PYTHONPATH="$pythonpath" python3 -c '
+import sys
+
+from dispatch_spec import RETIRED_GATE_NAMES
+from gate_recorder import GATE_PROVIDERS, resolve_gate_provider
+
+gate = sys.argv[1]
+live = ", ".join(sorted(set(GATE_PROVIDERS) - RETIRED_GATE_NAMES))
+if gate in RETIRED_GATE_NAMES:
+    print(live)
+    sys.exit(5)
+if resolve_gate_provider(gate) is not None:
+    sys.exit(0)
+print(live)
+sys.exit(3)
+' "$gate") || names_rc=$?
+  if [ "$names_rc" -eq 0 ]; then
+    return 0
+  fi
+  if [ "$names_rc" -eq 3 ]; then
+    err "[gate] unknown gate '$gate': not a registered gate; nothing was requested or launched"
+    err "[gate] Live gates: $names_out (short names: codex, ci, kimi, glm, deepseek)"
+    return 2
+  fi
+  if [ "$names_rc" -eq 5 ]; then
+    err "[gate] retired gate '$gate': it is retired and no longer a reviewer; nothing was requested or launched"
+    err "[gate] Live gates: $names_out (short names: codex, ci, kimi, glm, deepseek)"
+    return 2
+  fi
+  err "[gate] Could not check the gate name '$gate' (exit $names_rc); refusing"
+  return 1
+}
+
+_g_record_switch_refusal() {
+  # A switched-off gate is a gate decision, so it lands in a canonical ledger
+  # before `--only` returns (ADR-005): one GATE-9 skip-rationale line in
+  # $VNX_STATE_DIR/gate_execution_audit.ndjson, through
+  # gate_recorder.write_skip_rationale, the writer every other not_executable
+  # gate refusal already uses (the provider_switched_off bookings of the seat
+  # walk and the runner included). reason_detail is the decision line
+  # `providers check` printed, which names the gate, family, source, scope and
+  # consumer. No commit_sha: the refusal comes before the PR is looked up, so
+  # nothing here calls gh.
+  local gate="$1" pr="$2" check_out="$3"
+  local pythonpath="$VNX_HOME/scripts/lib:${VNX_HOME}/scripts:${PYTHONPATH:-}"
+  PYTHONPATH="$pythonpath" python3 -c '
+import sys
+from pathlib import Path
+
+from gate_recorder import PROVIDER_SWITCHED_OFF_REASON, write_skip_rationale
+
+state_dir, gate, pr_id, check_out = sys.argv[1:5]
+if not state_dir:
+    sys.exit("VNX_STATE_DIR is not set")
+lines = [line.strip() for line in check_out.splitlines() if line.strip()]
+detail = next((line for line in lines if line.startswith(PROVIDER_SWITCHED_OFF_REASON + ":")), " ".join(lines))
+write_skip_rationale(
+    Path(state_dir), gate, pr_id=pr_id, reason=PROVIDER_SWITCHED_OFF_REASON, reason_detail=detail,
+)
+' "${VNX_STATE_DIR:-}" "$gate" "$pr" "$check_out"
+}
+
+_g_switch_allows() {
+  # The operator's provider switch decides before anything is requested
+  # (provider-schakelaar C). Runs the module behind `vnx providers check`:
+  # exit 0 allowed, 4 switched off. A refusal is recorded first
+  # (_g_record_switch_refusal); a refusal that cannot be recorded returns 1, so
+  # an unrecorded decision never reads as an ordinary switch refusal. Any other
+  # check exit means the switch could not be consulted, and that refuses too:
+  # fail-closed, with no switch decision to record.
+  local gate="$1" pr="$2"
+  local pythonpath="$VNX_HOME/scripts/lib:${VNX_HOME}/scripts:${PYTHONPATH:-}"
+  local check_rc=0
+  local check_out
+  check_out=$(PYTHONPATH="$pythonpath" python3 "$VNX_HOME/scripts/providers_cli.py" \
+    check "$gate" --consumer "vnx gate --only" 2>&1) || check_rc=$?
+  if [ "$check_rc" -eq 0 ]; then
+    return 0
+  fi
+  if [ "$check_rc" -eq 4 ]; then
+    local record_rc=0
+    local record_out
+    record_out=$(_g_record_switch_refusal "$gate" "$pr" "$check_out" 2>&1) || record_rc=$?
+    err "[gate] '$gate' is switched off by the provider switch; nothing was requested or launched"
+    err "[gate] $check_out"
+    err "[gate] Re-enable with: vnx providers on <family>"
+    if [ "$record_rc" -ne 0 ]; then
+      err "[gate] Could not record the refusal in the gate audit ledger (exit $record_rc): $record_out"
+      return 1
+    fi
+    return 4
+  fi
+  err "[gate] Could not consult the provider switch for '$gate' (exit $check_rc); refusing: $check_out"
+  return 1
+}
+
 _g_print_seat_lines() {
   # Read "TAG<TAB>line" pairs (gate_seat_line.py's stdout) and print each with
   # log()/err() styling, keyed off the tag rather than re-parsing the line
@@ -237,6 +363,10 @@ Gate names:
   deepseek_gate         DeepSeek review gate (API credit, fallback when codex and kimi are unavailable)
   ci_gate               CI green check
 
+Exit codes:
+  0 gates passed, 1 a gate failed or an error, 2 unknown or retired --only gate
+  name, 4 the --only gate is switched off by the provider switch
+
 Examples:
   vnx gate 221
   vnx gate 221 --only codex
@@ -265,6 +395,23 @@ HELP
     log "[gate] Gate results for PR $pr_number:"
     _g_show_results "$pr_number"
     return 0
+  fi
+
+  # --only <gate>: an unknown or retired gate name (exit 2) and a switched-off
+  # provider (exit 4) are refused here, in that order, before the PR branch is
+  # resolved and before anything is requested or launched.
+  if [ -n "$only_gate" ]; then
+    only_gate="$(_g_normalize_gate "$only_gate")"
+    local name_rc=0
+    _g_gate_known "$only_gate" || name_rc=$?
+    if [ "$name_rc" -ne 0 ]; then
+      return "$name_rc"
+    fi
+    local switch_rc=0
+    _g_switch_allows "$only_gate" "$pr_number" || switch_rc=$?
+    if [ "$switch_rc" -ne 0 ]; then
+      return "$switch_rc"
+    fi
   fi
 
   # Auto-detect branch. The PR's head ref (gh pr view headRefName) is the only
@@ -311,18 +458,8 @@ HELP
   local pythonpath="$VNX_HOME/scripts/lib:${VNX_HOME}/scripts:${PYTHONPATH:-}"
 
   if [ -n "$only_gate" ]; then
-    # Run a specific gate
-    # Normalize short names: codex -> codex_gate, ci -> ci_gate
-    # (the name review_gate_manager knows; OI-1265), and the
-    # kimi/glm/deepseek reviewers by the same rule.
-    case "$only_gate" in
-      codex)    only_gate="codex_gate" ;;
-      ci)       only_gate="ci_gate" ;;
-      kimi)     only_gate="kimi_gate" ;;
-      glm)      only_gate="glm_gate" ;;
-      deepseek) only_gate="deepseek_gate" ;;
-    esac
-
+    # Run a specific gate (its name was normalized and cleared by the provider
+    # switch above, before the branch was resolved).
     log "[gate] Running gate '$only_gate' for PR $pr_number (branch: $branch)"
 
     local exit_code=0

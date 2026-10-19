@@ -6,12 +6,16 @@ Delegated from `bin/vnx`:
   vnx objective show <track_id> [--json]
   vnx objective sync [--apply] [--roadmap PATH] [--json]
   vnx objective drift [--json]
+  vnx objective add <track_id> <title> <goal> --plan-scope architecture|light
+  vnx objective set-plan-scope <track_id> architecture|light --reason "..."
   vnx deliverable add --objective <track_id> --output-kind <kind> --title "..."
                        [--task-class <class>] [--routing-floor <floor>]
+                       [--dispatch-paths <p1,p2>]
   vnx deliverable list [--objective <track_id>] [--json]
   vnx deliverable promote <dispatch_id>
   vnx deliverable close <dispatch_id> --evidence <pr>
   vnx deliverable set <dispatch_id> [--task-class <class>] [--routing-floor <floor>]
+                       [--dispatch-paths <p1,p2>]
 
 NO-NODE model: a deliverable is a proposed dispatch row with output_kind.
 `vnx deliverable promote` is the human gate (proposed -> ready).
@@ -64,6 +68,7 @@ import seed_tracks_from_roadmap as seeder  # noqa: E402
 import track_reconciler  # noqa: E402
 import objective_reconcile  # noqa: E402
 import plan_gate_enforcement  # noqa: E402
+import plan_scope
 
 _HORIZON_ORDER = ["now", "next", "later"]
 _HORIZON_LABEL = {"now": "NOW", "next": "NEXT", "later": "LATER", None: "UNSCHEDULED"}
@@ -76,7 +81,7 @@ _HORIZON_LABEL = {"now": "NOW", "next": "NEXT", "later": "LATER", None: "UNSCHED
 # that have not (yet) earned a first-class column (see
 # seed_tracks_from_roadmap.py's metadata.pr_queue). Descriptive only: it never
 # changes dispatch routing — the door still decides the lane.
-_VALID_LANE_HINTS = frozenset({"governed", "direct", "unset"})
+_VALID_LANE_HINTS = tracks_lib.VALID_LANE_HINTS
 _LANE_HINT_DEFAULT = "unset"
 
 
@@ -195,50 +200,23 @@ def _lane_hint_of(track: dict[str, Any]) -> str:
     return value if value in _VALID_LANE_HINTS else _LANE_HINT_DEFAULT
 
 
-def _metadata_json_with_lane_hint(existing_metadata_json: Optional[str], lane_hint: str) -> str:
-    """Return metadata_json with lane_hint set, preserving any other keys."""
-    try:
-        meta = json.loads(existing_metadata_json or "{}")
-    except (TypeError, ValueError):
-        meta = {}
-    if not isinstance(meta, dict):
-        meta = {}
-    meta["lane_hint"] = lane_hint
-    return json.dumps(meta, sort_keys=True)
-
-
-def _snapshot_lane_hints(state_dir: Path, project_id: str) -> dict[str, str]:
-    """{track_id: lane_hint} for every track with a non-default lane_hint set."""
+def _objective_list_json_row(
+    t: dict[str, Any], review: str, scope: "plan_scope.ScopeReading", depends_on: list[str],
+) -> dict[str, Any]:
+    """One track in ``objective list --json``."""
     return {
-        t["track_id"]: hint
-        for t in tracks_lib.list_tracks(state_dir, project_id)
-        if (hint := _lane_hint_of(t)) != _LANE_HINT_DEFAULT
+        "track_id": t["track_id"],
+        "title": t["title"],
+        "phase": t["phase"],
+        "derived_status": t.get("derived_status"),
+        "horizon": t.get("horizon"),
+        "priority": t.get("priority"),
+        "pr_ref": t.get("pr_ref"),
+        "next_up": bool(t.get("next_up")),
+        "plan_gate_review": review,
+        "plan_scope": scope.scope,
+        "depends_on": depends_on,
     }
-
-
-def _restore_lane_hints(state_dir: Path, project_id: str, snapshot: dict[str, str]) -> None:
-    """Re-apply lane_hint after `seeder.seed(apply=True)` runs.
-
-    The ROADMAP seeder (seed_tracks_from_roadmap.py) owns milestone/roadmap_status/
-    risk_class/pr_queue inside metadata_json and rebuilds that blob wholesale on
-    every authored-field change; it has no notion of lane_hint (a planning_cli-owned
-    extension of the same column), so syncing a track that also has other authored
-    drift would otherwise silently drop lane_hint back to 'unset'. Restoring it here
-    — the CLI layer that orchestrates the seeder call — keeps the seeder itself
-    unaware of lane_hint, at the cost of the sync report occasionally listing a
-    track as "updated" for a metadata-only round-trip even when no ROADMAP-authored
-    field actually changed.
-    """
-    for track_id, hint in snapshot.items():
-        track = tracks_lib.get_track(state_dir, track_id, project_id)
-        if track is None:
-            continue
-        if _lane_hint_of(track) == hint:
-            continue
-        new_metadata_json = _metadata_json_with_lane_hint(track.get("metadata_json"), hint)
-        tracks_lib.update_authored_fields(
-            state_dir, track_id, project_id, metadata_json=new_metadata_json,
-        )
 
 
 def cmd_objective_list(args: argparse.Namespace) -> int:
@@ -273,21 +251,20 @@ def cmd_objective_list(args: argparse.Namespace) -> int:
         )
         for t in tracks
     }
+    # Plan scope (P1), from the same open-blocker set: no per-track read.
+    scope_by_track = {
+        t["track_id"]: plan_scope.read_scope(
+            t.get("metadata_json"), open_plan_blocker=t["track_id"] in plan_blocked_ids,
+        )
+        for t in tracks
+    }
 
     if args.json:
         out = [
-            {
-                "track_id": t["track_id"],
-                "title": t["title"],
-                "phase": t["phase"],
-                "derived_status": t.get("derived_status"),
-                "horizon": t.get("horizon"),
-                "priority": t.get("priority"),
-                "pr_ref": t.get("pr_ref"),
-                "next_up": bool(t.get("next_up")),
-                "plan_gate_review": review_by_track[t["track_id"]],
-                "depends_on": _dependencies_for(state_dir, t["track_id"], project_id),
-            }
+            _objective_list_json_row(
+                t, review_by_track[t["track_id"]], scope_by_track[t["track_id"]],
+                _dependencies_for(state_dir, t["track_id"], project_id),
+            )
             for t in tracks
         ]
         print(json.dumps(out, indent=2))
@@ -319,6 +296,7 @@ def cmd_objective_list(args: argparse.Namespace) -> int:
             marker = "*" if t.get("next_up") else " "
             dep_str = f"  deps: {_format_dependency_edges(dep_edges)}" if dep_edges else ""
             pr_str = f"  pr: {t['pr_ref']}" if t.get("pr_ref") else ""
+            scope_str = f"  scope: {scope_by_track[t['track_id']].tag()}"
             review = review_by_track[t["track_id"]]
             if review in (plan_gate_enforcement.UNREAD, plan_gate_enforcement.REFUSED):
                 drift_badge = f" ~blocked:{review}"
@@ -327,7 +305,7 @@ def cmd_objective_list(args: argparse.Namespace) -> int:
                 drift_badge = f" ~{derived}" if derived and derived != t["phase"] else ""
             print(
                 f" {marker} {t['track_id']:<28} [{t['phase']:<7}]{drift_badge} "
-                f"{t.get('priority') or '-':<3} {t['title']}{pr_str}{dep_str}"
+                f"{t.get('priority') or '-':<3} {t['title']}{pr_str}{dep_str}{scope_str}"
             )
         print()
     unread = sum(1 for t in tracks if review_by_track[t["track_id"]] == plan_gate_enforcement.UNREAD)
@@ -365,6 +343,7 @@ def cmd_objective_show(args: argparse.Namespace) -> int:
         open_plan_blocker=open_plan_blocker,
         decision_ref=track.get("decision_ref"),
     )
+    scope = plan_scope.read_scope(track.get("metadata_json"), open_plan_blocker=open_plan_blocker)
 
     conn = _db_conn(state_dir)
     try:
@@ -380,6 +359,9 @@ def cmd_objective_show(args: argparse.Namespace) -> int:
         out["open_items"] = open_items
         out["lane_hint"] = _lane_hint_of(track)
         out["plan_gate_review"] = review
+        out["plan_scope"] = scope.scope
+        out["plan_scope_rule"] = scope.rule
+        out["plan_scope_source"] = scope.source
         out["pr_delivery"] = delivery_entries
         print(json.dumps(out, indent=2, default=str))
         return 0
@@ -395,6 +377,7 @@ def cmd_objective_show(args: argparse.Namespace) -> int:
     print(f"  delivery : {_format_pr_delivery(delivery_entries)}")
     print(f"  decision_ref: {_format_decision_ref(track.get('decision_ref'))}")
     print(f"  plan-gate: {review}")
+    print(f"  plan_scope: {scope.describe()}")
     print(f"  goal     : {track.get('goal_state') or '-'}")
     print(f"  depends  : {_format_dependency_edges(dep_edges) if dep_edges else '(none)'}")
     if open_items:
@@ -423,13 +406,11 @@ def cmd_objective_sync(args: argparse.Namespace) -> int:
         return 1
 
     # Pure reuse: the seeder owns all projection logic. Dry-run writes nothing.
-    # Snapshot/restore lane_hint around the call: the seeder rebuilds
-    # metadata_json wholesale and has no notion of lane_hint (see
-    # _restore_lane_hints for why this lives here rather than in the seeder).
-    lane_hints_before = _snapshot_lane_hints(state_dir, project_id) if args.apply else {}
+    # The seeder rebuilds metadata_json wholesale and has no notion of lane_hint
+    # or plan_scope; tracks.update_authored_fields keeps those keys as they are
+    # stored at write time, in the transaction it writes in, so a scope raised
+    # while the sync runs is never put back to an older value.
     report = seeder.seed(state_dir, roadmap_path, project_id, apply=args.apply)
-    if args.apply and lane_hints_before:
-        _restore_lane_hints(state_dir, project_id, lane_hints_before)
 
     if args.json:
         print(json.dumps(report, indent=2, default=str))
@@ -2283,68 +2264,16 @@ def _plan_blocker_oi(track_id: str) -> str:
     return f"{_PLAN_OI_PREFIX}{track_id}"
 
 
-def _plan_gate_supported(conn: sqlite3.Connection) -> bool:
-    """True when the DB can both BLOCK and later CLEAR a plan-gate: track_open_items
-    with resolved_at (clearable) + tracks.derived_status (the promote-lock's signal).
-
-    resolved_at (migration 0030) is required at SEED time too — without it the
-    reconciler counts any 'blocks' row forever, so seeding would create a blocker
-    this same gate could never resolve (a permanently stuck track)."""
-    return (
-        _has_table(conn, "track_open_items")
-        and _has_col(conn, "track_open_items", "resolved_at")
-        and _has_col(conn, "tracks", "derived_status")
-    )
-
-
 def _seed_plan_blocker(
     state_dir: Path, track_id: str, project_id: str, reason: Optional[str] = None
 ) -> bool:
-    """Seed the synthetic OI-PLAN-<track> blocker so the track is born plan-gated.
+    """Seed (or, with ``reason``, re-block) the OI-PLAN-<track> blocker.
 
-    Idempotent (INSERT OR IGNORE on the track_open_items PK). Returns True once the
-    blocker exists and the track reconciles to blocked; False on a DB that predates
-    the plan-gate schema (graceful no-op).
-
-    ``reason`` turns this into the RE-BLOCK form (plan-gate reblock): the existing
-    resolved row's ``resolved_at`` is cleared in the SAME UPDATE that records the
-    reversal ``resolution_reason``, so the history that the gate was once lifted
-    is preserved on the row instead of being silently wiped. Same path as ``seed``
-    — reblock must not grow a second write path to ``track_open_items``.
+    The write lives in ``plan_scope.seed_plan_blocker`` so the dispatch door seeds
+    through the same path when a track moves up to architecture; reblock must not
+    grow a second write path to ``track_open_items`` either.
     """
-    conn = _db_conn(state_dir)
-    try:
-        # _plan_gate_supported requires resolved_at (0030), which implies project_id
-        # (0024) — both are present here by migration ordering.
-        if not _plan_gate_supported(conn):
-            return False
-        oi = _plan_blocker_oi(track_id)
-        conn.execute(
-            "INSERT OR IGNORE INTO track_open_items "
-            "(track_id, project_id, oi_id, link_type, link_source) "
-            "VALUES (?, ?, ?, 'blocks', 'manual')",
-            (track_id, project_id, oi),
-        )
-        # Re-seed must RE-block: clear resolved_at so a track whose plan gate
-        # previously passed is gated again (e.g. a mid-flight plan change). Without
-        # this, INSERT OR IGNORE silently no-ops on the resolved row.
-        if reason is None:
-            conn.execute(
-                "UPDATE track_open_items SET resolved_at = NULL "
-                "WHERE track_id = ? AND project_id = ? AND oi_id = ? AND link_type = 'blocks'",
-                (track_id, project_id, oi),
-            )
-        else:
-            conn.execute(
-                "UPDATE track_open_items SET resolved_at = NULL, resolution_reason = ? "
-                "WHERE track_id = ? AND project_id = ? AND oi_id = ? AND link_type = 'blocks'",
-                (reason, track_id, project_id, oi),
-            )
-        conn.commit()
-    finally:
-        conn.close()
-    track_reconciler.reconcile_track(state_dir, track_id, project_id)
-    return True
+    return plan_scope.seed_plan_blocker(state_dir, track_id, project_id, reason=reason)
 
 
 def _compose_plan_resolution_reason(
@@ -2415,7 +2344,7 @@ def _resolve_plan_blocker(
         )
     conn = _db_conn(state_dir)
     try:
-        if not _plan_gate_supported(conn):
+        if not plan_scope.plan_gate_supported(conn):
             return False
         oi = _plan_blocker_oi(track_id)
         row = conn.execute(
@@ -2495,12 +2424,27 @@ def cmd_objective_add(args: argparse.Namespace) -> int:
     can queue a feature directly while keeping tracks.py the only writer of
     track-authored fields. The ROADMAP seeder remains the path for
     ROADMAP-authored tracks; this is for ad-hoc PM-driven features. New tracks
-    start ``queued`` — the plan-first gate must pass before any deliverable
-    promotes (see cmd_deliverable_promote).
+    start ``queued``.
+
+    ``--plan-scope`` is required (P1): ``architecture`` seeds ``OI-PLAN-<track>``,
+    so the plan-first gate must pass before any deliverable promotes (see
+    cmd_deliverable_promote); ``light`` seeds nothing. Without it nothing is
+    created.
     """
+    scope = getattr(args, "plan_scope", None)
+    if scope not in plan_scope.PLAN_SCOPES:
+        print(
+            "objective add: --plan-scope is required for a new track: "
+            "--plan-scope architecture (OI-PLAN-<track> is seeded, the plan-gate runs "
+            "before the track is built) or --plan-scope light (no plan-gate). "
+            "No track created.",
+            file=sys.stderr,
+        )
+        return 2
     state_dir = _resolve_state_dir(args.state_dir)
-    lane_hint = getattr(args, "lane_hint", None)
-    metadata_json = json.dumps({"lane_hint": lane_hint}) if lane_hint else None
+    metadata_json = tracks_lib.metadata_json_with(
+        None, {"lane_hint": getattr(args, "lane_hint", None), plan_scope.SCOPE_KEY: scope},
+    )
     try:
         track = tracks_lib.create_track(
             state_dir,
@@ -2512,6 +2456,7 @@ def cmd_objective_add(args: argparse.Namespace) -> int:
             horizon=args.horizon,
             priority=args.priority,
             metadata_json=metadata_json,
+            scope_origin="horizon add",
         )
     except Exception as exc:  # duplicate id, invalid horizon/priority, etc.
         print(f"objective add failed: {exc}", file=sys.stderr)
@@ -2519,17 +2464,30 @@ def cmd_objective_add(args: argparse.Namespace) -> int:
 
     tid = track.get("track_id", args.track_id) if isinstance(track, dict) else args.track_id
 
-    # Plan-first: seed the synthetic OI-PLAN blocker so the track is born blocked.
-    # Nothing promotes until the plan gate passes (PM-SKILL). Graceful no-op on DBs
-    # that predate the plan-gate schema.
+    # Plan-first for an architecture track: seed the synthetic OI-PLAN blocker so
+    # the track is born blocked. Nothing promotes until the plan gate passes
+    # (PM-SKILL). Graceful no-op on DBs that predate the plan-gate schema. A light
+    # track gets no plan-gate. A failed seed leaves a stored architecture track
+    # without OI-PLAN; the next door pass or set-plan-scope seeds it
+    # (plan_scope._recover_in).
     plan_gated = False
-    try:
-        plan_gated = _seed_plan_blocker(state_dir, tid, args.project_id)
-    except Exception as exc:  # never let gate-seeding break track creation
-        print(f"warning: could not seed plan-first blocker for {tid}: {exc}", file=sys.stderr)
+    if scope == plan_scope.ARCHITECTURE:
+        try:
+            plan_gated = _seed_plan_blocker(state_dir, tid, args.project_id)
+        except Exception as exc:  # never let gate-seeding break track creation
+            print(
+                f"warning: could not seed plan-first blocker for {tid}: {exc}. Without "
+                f"{_plan_blocker_oi(tid)} this architecture track gets it on the next build "
+                f"dispatch at the door, or now with `vnx horizon set-plan-scope {tid} "
+                "architecture --reason \"...\"`.",
+                file=sys.stderr,
+            )
 
     gate_note = " — plan-gated (blocked until the plan panel passes)" if plan_gated else ""
-    print(f"Added objective {tid} (phase=queued, horizon={args.horizon or 'unset'}){gate_note}")
+    print(
+        f"Added objective {tid} (phase=queued, horizon={args.horizon or 'unset'}, "
+        f"plan_scope={scope}){gate_note}"
+    )
     return 0
 
 
@@ -2539,8 +2497,8 @@ def cmd_objective_set_lane_hint(args: argparse.Namespace) -> int:
     Descriptive only: this never changes dispatch routing — the door still
     decides the lane. It exists so a cold-start T0 can read how a track is
     MEANT to be dispatched without relying on judgment carried over from a
-    prior session. Writes via tracks_lib.update_authored_fields, the existing
-    single-writer path for track-authored fields.
+    prior session. Writes via tracks_lib.set_lane_hint, which merges the hint
+    into the metadata stored at write time, so plan_scope is never touched.
     """
     state_dir = _resolve_state_dir(args.state_dir)
     project_id = args.project_id
@@ -2555,17 +2513,46 @@ def cmd_objective_set_lane_hint(args: argparse.Namespace) -> int:
         )
         return 2
 
-    new_metadata_json = _metadata_json_with_lane_hint(track.get("metadata_json"), args.lane_hint)
     try:
-        tracks_lib.update_authored_fields(
-            state_dir, track_id, project_id,
-            metadata_json=new_metadata_json,
-        )
+        tracks_lib.set_lane_hint(state_dir, track_id, project_id, args.lane_hint)
     except Exception as exc:
         print(f"objective set-lane-hint failed: {exc}", file=sys.stderr)
         return 1
 
     print(f"Set lane_hint={args.lane_hint} on {track_id}")
+    return 0
+
+
+def cmd_objective_set_plan_scope(args: argparse.Namespace) -> int:
+    """Set a track's plan_scope by hand (architecture|light), always with ``--reason``.
+
+    The only way DOWN to light (P1): the automatic rules only move a track up.
+    Writes one ``track_plan_scope_set`` event with the old value, the new value
+    and the reason. Going down never closes or attests ``OI-PLAN-<track>``: that
+    stays with the plan-gate or the operator. Going up seeds it, as the
+    automatic rules do.
+    """
+    state_dir = _resolve_state_dir(args.state_dir)
+    reason = (getattr(args, "reason", None) or "").strip()
+    if not reason:
+        print(
+            f"objective set-plan-scope: --reason is required: say why {args.track_id} "
+            f"becomes {args.plan_scope}. No change made.",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        change = plan_scope.set_by_hand(
+            state_dir, args.track_id, args.project_id, args.plan_scope, reason=reason,
+        )
+    except tracks_lib.TrackNotFoundError:
+        print(
+            f"objective set-plan-scope: track not found: {args.track_id!r} "
+            f"(project {args.project_id!r}). No change made.",
+            file=sys.stderr,
+        )
+        return 2
+    print(change.line())
     return 0
 
 
@@ -2645,6 +2632,74 @@ def _validate_task_class(task_class: Optional[str]) -> None:
         )
 
 
+def _split_dispatch_paths(raw: Optional[str]) -> list[str]:
+    """``--dispatch-paths a,b`` as a list: the comma form ``plan-gate run`` takes too."""
+    return [p.strip() for p in (raw or "").split(",") if p.strip()]
+
+
+def _deliverable_metadata(args: argparse.Namespace) -> dict[str, Any]:
+    """What a new deliverable carries: its title, the marker, and the optional fields.
+
+    ``dispatch_paths`` is what a plan-gate run on the track reads when the run
+    itself names no paths (the schema/security case for the second seat, P1).
+    """
+    meta: dict[str, Any] = {"title": args.title, "deliverable": True}
+    for key in ("task_class", "routing_floor"):
+        if getattr(args, key, None):
+            meta[key] = getattr(args, key)
+    paths = _split_dispatch_paths(getattr(args, "dispatch_paths", None))
+    if paths:
+        meta["dispatch_paths"] = paths
+    return meta
+
+
+def _print_deliverable_created(
+    dispatch_id: str, track_id: str, output_kind: str, output_ref: str, meta: dict[str, Any],
+) -> None:
+    print(f"Deliverable created: {dispatch_id}")
+    print(f"  objective    : {track_id}")
+    print(f"  output_kind  : {output_kind}")
+    print(f"  output_ref   : {output_ref}")
+    print("  state        : proposed")
+    print(f"  title        : {meta['title']}")
+    print(f"  task_class   : {meta.get('task_class') or '(not set)'}")
+    print(f"  routing_floor: {meta.get('routing_floor') or '(not set)'}")
+    if meta.get("dispatch_paths"):
+        print(f"  dispatch_paths: {', '.join(meta['dispatch_paths'])}")
+    print(f"  next         : vnx deliverable promote {dispatch_id}")
+
+
+def _apply_deliverable_scope_rule(state_dir: Path, project_id: str, track_id: str) -> bool:
+    """The fourth deliverable makes a light track architecture (P1); one line says so.
+
+    The deliverable row is already committed when this runs, so a rule that
+    cannot be applied is printed as a warning naming ``vnx horizon
+    set-plan-scope`` as the way out — it is NOT a failed add. The bool return is
+    informational only (True when the rule was applied or none was due);
+    ``cmd_deliverable_add`` always returns 0 after this, because the store does
+    hold the deliverable.
+    """
+    count = len(_fetch_deliverable_records(state_dir, project_id, track_id))
+    rule = plan_scope.deliverable_rule(count)
+    if rule is None:
+        return True
+    try:
+        change = plan_scope.raise_to_architecture(
+            state_dir, track_id, project_id, rule=f"deliverable add: {rule}",
+        )
+    except Exception as exc:  # the deliverable is already committed: say what is missing
+        print(
+            f"deliverable add: the deliverable was created, but the plan-scope rule "
+            f"({rule}) could not be applied to {track_id}: {exc}. Set it by hand with "
+            f"`vnx horizon set-plan-scope {track_id} architecture --reason \"...\"`.",
+            file=sys.stderr,
+        )
+        return False
+    if change is not None:
+        print(change.line())
+    return True
+
+
 def cmd_deliverable_add(args: argparse.Namespace) -> int:
     state_dir = _resolve_state_dir(args.state_dir)
     project_id = args.project_id
@@ -2652,7 +2707,6 @@ def cmd_deliverable_add(args: argparse.Namespace) -> int:
     output_kind = args.output_kind
     title = args.title
     task_class = getattr(args, "task_class", None)
-    routing_floor = getattr(args, "routing_floor", None)
 
     try:
         _validate_task_class(task_class)
@@ -2671,11 +2725,7 @@ def cmd_deliverable_add(args: argparse.Namespace) -> int:
 
     dispatch_id = f"dlv-{uuid.uuid4().hex[:12]}"
     output_ref = f"{output_kind}:{dispatch_id}"
-    metadata_dict: dict[str, Any] = {"title": title, "deliverable": True}
-    if task_class:
-        metadata_dict["task_class"] = task_class
-    if routing_floor:
-        metadata_dict["routing_floor"] = routing_floor
+    metadata_dict = _deliverable_metadata(args)
     metadata = json.dumps(metadata_dict)
     now = _now_utc()
 
@@ -2716,15 +2766,12 @@ def cmd_deliverable_add(args: argparse.Namespace) -> int:
     finally:
         conn.close()
 
-    print(f"Deliverable created: {dispatch_id}")
-    print(f"  objective    : {track_id}")
-    print(f"  output_kind  : {output_kind}")
-    print(f"  output_ref   : {output_ref}")
-    print("  state        : proposed")
-    print(f"  title        : {title}")
-    print(f"  task_class   : {task_class or '(not set)'}")
-    print(f"  routing_floor: {routing_floor or '(not set)'}")
-    print(f"  next         : vnx deliverable promote {dispatch_id}")
+    _print_deliverable_created(dispatch_id, track_id, output_kind, output_ref, metadata_dict)
+    # The deliverable is committed, so the add succeeded whatever the scope rule
+    # did: a scope-raise that could not run is a warning (the way out is named),
+    # never a non-zero exit that misstates the store. No caller relies on a
+    # distinct code here, so the add returns 0.
+    _apply_deliverable_scope_rule(state_dir, project_id, track_id)
     return 0
 
 
@@ -3119,8 +3166,19 @@ def cmd_deliverable_close(args: argparse.Namespace) -> int:
     return 0
 
 
+def _deliverable_set_fields(args: argparse.Namespace) -> dict[str, Any]:
+    """The metadata fields ``deliverable set`` patches, only those given."""
+    fields: dict[str, Any] = {
+        key: getattr(args, key) for key in ("task_class", "routing_floor") if getattr(args, key, None)
+    }
+    paths = _split_dispatch_paths(getattr(args, "dispatch_paths", None))
+    if paths:
+        fields["dispatch_paths"] = paths
+    return fields
+
+
 def cmd_deliverable_set(args: argparse.Namespace) -> int:
-    """Set task_class and/or routing_floor metadata on an EXISTING deliverable.
+    """Set task_class, routing_floor and/or dispatch_paths metadata on an EXISTING deliverable.
 
     The write-side half of what PR #1560 shipped read-only:
     `_format_deliverable_for_plan` has rendered task_class/routing_floor from
@@ -3149,12 +3207,12 @@ def cmd_deliverable_set(args: argparse.Namespace) -> int:
     project_id = args.project_id
     dispatch_id = args.dispatch_id
     task_class = getattr(args, "task_class", None)
-    routing_floor = getattr(args, "routing_floor", None)
+    fields = _deliverable_set_fields(args)
 
-    if not task_class and not routing_floor:
+    if not fields:
         print(
-            "deliverable set: nothing to set — pass --task-class and/or "
-            "--routing-floor. No change made.",
+            "deliverable set: nothing to set — pass --task-class, --routing-floor "
+            "and/or --dispatch-paths. No change made.",
             file=sys.stderr,
         )
         return 2
@@ -3181,10 +3239,7 @@ def cmd_deliverable_set(args: argparse.Namespace) -> int:
             return 1
 
         meta = json.loads(row["metadata_json"] or "{}")
-        if task_class:
-            meta["task_class"] = task_class
-        if routing_floor:
-            meta["routing_floor"] = routing_floor
+        meta.update(fields)
         new_metadata_json = json.dumps(meta)
 
         now = _now_utc()
@@ -3203,23 +3258,18 @@ def cmd_deliverable_set(args: argparse.Namespace) -> int:
             from_state=row["state"],
             to_state=row["state"],
             actor="operator",
-            reason="deliverable set: task_class/routing_floor",
+            reason="deliverable set: " + "/".join(fields),
             project_id=project_id,
-            metadata={
-                k: v
-                for k, v in {"task_class": task_class, "routing_floor": routing_floor}.items()
-                if v
-            },
+            metadata=fields,
         )
         conn.commit()
     finally:
         conn.close()
 
-    parts = []
-    if task_class:
-        parts.append(f"task_class={task_class}")
-    if routing_floor:
-        parts.append(f"routing_floor={routing_floor}")
+    parts = [
+        f"{key}={','.join(value) if isinstance(value, list) else value}"
+        for key, value in fields.items()
+    ]
     print(f"Set {', '.join(parts)} on {dispatch_id} (project {project_id!r})")
     return 0
 
@@ -3422,9 +3472,7 @@ class PlanGateRunResult:
     decision: str = ""
     seats: int = 0
     variant: str = ""
-    is_new_feature: bool = False
     chosen_by: str = ""
-    override_direction: str = ""
     gov_trace: str = ""
     plan_source: str = ""
     plan_source_info: dict = field(default_factory=dict)
@@ -3435,56 +3483,10 @@ class PlanGateRunResult:
     thin_length: Optional[int] = None
     thin_threshold: Optional[int] = None
     error: str = ""
-    no_panel: bool = False
-    no_panel_reason: str = ""
     result: Optional[dict] = None
     stderr_lines: list = field(default_factory=list)
     stdout_text: list = field(default_factory=list)
     stdout_json: Optional[str] = None
-
-
-def _last_round_findings(seat_ledger_path, track_id: str, project_id: str) -> list:
-    """The blocking findings the seats raised in the last panel round.
-
-    Read back from the seat ledger (the same store the round counter lives in)
-    so the STOP aftermath records what the seats ACTUALLY said, not an
-    in-memory copy. Returns the ``blocking_findings`` from the last round's
-    block/revise seats. Empty when the ledger is absent or no findings were
-    recorded. Read-only; never raises.
-    """
-    if seat_ledger_path is None or not Path(seat_ledger_path).exists():
-        return []
-    findings: list = []
-    try:
-        from ndjson_hash_chain import walk_chain  # noqa: PLC0415
-        for _ln, rec, _h in walk_chain(Path(seat_ledger_path)):
-            if not isinstance(rec, dict):
-                continue
-            if rec.get("type") != pgp_seat_record_type():
-                continue
-            if rec.get("track_id") != track_id:
-                continue
-            if rec.get("project_id") not in (None, project_id):
-                continue
-            if rec.get("verdict") not in ("block", "revise"):
-                continue
-            # The seat ledger does not carry findings (only the effective
-            # verdict + model). The findings live in the report files named in
-            # the decision_ref; for the STOP aftermath we carry the seat's
-            # rationale as the open-item text when no findings list is
-            # available, so a track always has SOMETHING concrete recorded.
-            rationale = (rec.get("rationale") or "").strip()
-            if rationale:
-                findings.append(rationale)
-    except Exception:  # vnx-silent-except: STOP aftermath must not crash the gate
-        return findings
-    return findings
-
-
-def pgp_seat_record_type() -> str:
-    """The seat-ledger record type (lazy import to avoid a circular at load)."""
-    import plan_gate_panel  # noqa: PLC0415
-    return plan_gate_panel.SEAT_RECORD_TYPE
 
 
 def _run_tiebreaker_for_track(
@@ -3504,18 +3506,28 @@ def _run_tiebreaker_for_track(
     plan_source,
     plan_source_info,
     ignored_goal,
+    plan_hash,
+    seat_verdicts,
+    seat_round,
+    stderr_lines,
+    stdout_text,
 ) -> PlanGateRunResult:
     """Run the single tiebreaker round and resolve the blocker either way.
 
     Called by ``run_plan_gate_for_track`` — the ONE shared path both the
     single-track command and the batch loop drive — once the stop-rule
-    threshold is reached. The tiebreaker's outcome is binary:
+    threshold is reached over plan versions (P2). It reads the latest plan
+    version (``doc_text``, sha256 ``plan_hash``) and the seat's verdict on it
+    (``seat_verdicts``). ``seat_round`` is that seat round's result when it ran
+    in this same invocation, else None; ``stderr_lines`` and ``stdout_text`` are
+    the caller's, so the seat round's output and this round's land in one run.
+    The tiebreaker's outcome is binary:
       START -> clear the gate (the plan is good enough to build), with a
                ``resolution_reason`` that names the tiebreaker model + round.
-      STOP  -> record the last round's findings as open items (punt 9), then
-               clear the blocker with a ``resolution_reason`` that names the
-               tiebreaker model + round + outcome. A blocker may not vanish
-               without a reason since #1511; both outcomes carry one.
+      STOP  -> record the seat's findings on this plan version as open items
+               (punt 9), then clear the blocker with a ``resolution_reason``
+               that names the tiebreaker model + round + outcome. A blocker may
+               not vanish without a reason since #1511; both outcomes carry one.
 
     A ``TiebreakerParseError`` (no fence, wrong outcome, a findings list, more
     than one change) is a loud failure: exit 1, the track stays blocked, the
@@ -3524,8 +3536,6 @@ def _run_tiebreaker_for_track(
     import plan_gate_panel
     import plan_gate_tiebreaker
 
-    stderr_lines: list = []
-    stdout_text: list = []
     stdout_json: Optional[str] = None
 
     # Captured BEFORE the tiebreaker touches anything: the panel round's
@@ -3560,17 +3570,14 @@ def _run_tiebreaker_for_track(
             suffix = p.stem[len(prefix):]
             if len(suffix) == 8 and set(suffix) <= hexdigits:
                 candidates.append(p)
-        if not candidates:
-            return None
-        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        return candidates[0].stem
+        return max(candidates, key=lambda p: p.stat().st_mtime).stem if candidates else None
 
     def _result(**kw) -> PlanGateRunResult:
         return PlanGateRunResult(
             track_id=track_id, project_id=project_id, seats=0,
             variant="tiebreaker", gov_trace=gov_trace,
             plan_source=plan_source, plan_source_info=plan_source_info,
-            ignored_goal=ignored_goal,
+            ignored_goal=ignored_goal, result=seat_round,
             stderr_lines=stderr_lines, stdout_text=stdout_text,
             stdout_json=stdout_json, **kw,
         )
@@ -3581,9 +3588,7 @@ def _run_tiebreaker_for_track(
             doc_text=doc_text,
             track_id=track_id, project_id=project_id,
             round_number=round_number,
-            last_round_findings=_last_round_findings(
-                seat_ledger_path, track_id, project_id,
-            ),
+            seat_verdicts=seat_verdicts,
             data_dir=data_dir,
             timeout_seconds=seat_timeout,
             config=tb_cfg,
@@ -3634,7 +3639,7 @@ def _run_tiebreaker_for_track(
         round_number=round_number,
         outcome=f"tiebreak:{result.outcome}", model=result.model,
         governance_variant="tiebreaker", gov_trace=gov_trace,
-        scored_seats=0,
+        scored_seats=0, plan_sha256=plan_hash,
     )
 
     # Persist the durable half of the tiebreak decision onto the track — the
@@ -3668,20 +3673,20 @@ def _run_tiebreaker_for_track(
         )
 
     if result.outcome == plan_gate_tiebreaker.STOP:
-        # Punt 9: the last round's findings become open items via the existing
-        # open-items path (not a loose note). Best-effort: a failed recording
-        # must not block the STOP resolution, but it IS surfaced.
+        # Punt 9: the seat's findings on this plan version become open items via
+        # the existing open-items path (not a loose note). Best-effort: a failed
+        # recording must not block the STOP resolution, but it IS surfaced.
         oi_state_dir = plan_gate_tiebreaker.open_items_state_dir_for(seat_ledger_path)
         recorded = plan_gate_tiebreaker.remaining_findings_to_open_items(
             track_id=track_id, project_id=project_id,
-            findings=_last_round_findings(seat_ledger_path, track_id, project_id),
+            findings=plan_gate_tiebreaker.seat_findings(seat_verdicts),
             dispatch_id=f"plan-tiebreak-{track_id}-{round_number}",
             state_dir=oi_state_dir,
         )
         if recorded:
             stderr_lines.append(
-                f"  STOP: recorded {len(recorded)} open item(s) from the last "
-                f"round's findings."
+                f"  STOP: recorded {len(recorded)} open item(s) from the seat's "
+                f"findings on this plan version."
             )
 
     # Both START and STOP clear the blocker, with a resolution_reason that
@@ -3750,7 +3755,7 @@ def _run_tiebreaker_for_track(
             "round": result.round, "required_change": result.required_change,
             "rationale": result.rationale,
         },
-        "resolved": resolved, "derived_status": derived,
+        "resolved": resolved, "derived_status": derived, "seat_round": seat_round,
     }, indent=2)
     stdout_text.append(
         f"tiebreaker {result.outcome} — plan gate cleared by {result.model} "
@@ -3763,65 +3768,82 @@ def _run_tiebreaker_for_track(
     )
 
 
-def _derive_panel_weight(*, panel_seats, dispatch_paths, task_class, irreversible):
-    """Derive the governance variant + panel composition (operator seat ladder).
+def _deliverable_dispatch_paths(state_dir, project_id: str, track_id: str) -> list[str]:
+    """The ``dispatch_paths`` the track's deliverables carry, in order, without repeats.
+
+    Both read paths of the deliverable plane (the view and its fallback) need
+    ``dispatches.output_ref``; a store without that column predates the plane
+    and holds no deliverable to read paths from.
+    """
+    conn = _db_conn(state_dir)
+    try:
+        if not _has_col(conn, "dispatches", "output_ref"):
+            return []
+    finally:
+        conn.close()
+    paths: list[str] = []
+    for record in _fetch_deliverable_records(state_dir, project_id, track_id, include_metadata=True):
+        for path in (record.get("metadata") or {}).get("dispatch_paths") or []:
+            if isinstance(path, str) and path.strip() and path.strip() not in paths:
+                paths.append(path.strip())
+    return paths
+
+
+def _derive_panel_weight(
+    *, panel_seats, dispatch_paths, task_class, irreversible, deliverable_paths=None,
+):
+    """Derive the panel composition for one run, and the governance variant for its trace.
 
     Shared by ``run_plan_gate_for_track`` (the real gate) and the batch
-    ``--dry-run`` preview so the two read the SAME ladder and can never disagree
-    about the seat count. Returns a dict (panel, variant, is_new_feature,
-    chosen_by, override_direction, gov_trace). Raises on an invalid config or an
-    unknown seat label — fail-loud, the same contract as the single-run path.
+    ``--dry-run`` preview so the two can never disagree about the seats. Since
+    P2 (operator decision 2026-10-17) the variant no longer sizes the panel: a
+    run uses the configured default seat, plus the escalation seat on a BLOCK,
+    or exactly the seats an operator names with ``--panel-seats``
+    (``plan_gate_panel.compose_panel``). Since P1 the escalation seat also sits
+    from the start when the paths fall in the schema or security class: the
+    run's ``--dispatch-paths``, or, when the run names none, what the
+    ``deliverable_paths`` callable returns (read only then). The variant stays in the trace and the round record so the
+    history stays readable. Returns a dict (panel, escalation, quorum, variant,
+    chosen_by, gov_trace, seats). Raises on an invalid config or an unknown
+    seat label — fail-loud, the same contract as the single-run path.
     """
     import plan_gate_panel
     import smart_router
 
-    paths = None
-    if dispatch_paths:
-        paths = [p.strip() for p in dispatch_paths.split(",") if p.strip()]
-    # The panel is sized from the variant alone. derive_variant reads no
-    # configuration, so an unreadable VNX_DEFAULT_REVIEW_STACK (a review-gate
-    # setting this path never uses) cannot fail a plan-gate.
+    paths = _split_dispatch_paths(dispatch_paths) or None
+    # derive_variant reads no configuration, so an unreadable
+    # VNX_DEFAULT_REVIEW_STACK (a review-gate setting this path never uses)
+    # cannot fail a plan-gate.
     gov = smart_router.derive_variant(
         dispatch_paths=paths,
         task_class=task_class,
         irreversible=bool(irreversible),
     )
-
-    panel = plan_gate_panel.load_panel_seats()
-    derived_labels = plan_gate_panel.seat_labels_for_governance_variant(
-        panel, gov.variant, is_new_feature=gov.is_new_feature,
-    )
-    if panel_seats:
-        requested = [s.strip() for s in panel_seats.split(",") if s.strip()]
-        panel = plan_gate_panel.filter_panel_seats(panel, requested)
-        chosen_by = "operator"
+    requested = [s.strip() for s in (panel_seats or "").split(",") if s.strip()]
+    if not paths and deliverable_paths is not None:
+        second_seat_paths = list(deliverable_paths())
     else:
-        panel = plan_gate_panel.filter_panel_seats(panel, derived_labels)
-        chosen_by = "derived"
-
-    override_direction = ""
-    if chosen_by == "operator":
-        override_direction = plan_gate_panel.seat_override_direction(
-            gov.variant, len(derived_labels), len(panel),
-        )
-
+        second_seat_paths = paths or []
+    composition = plan_gate_panel.compose_panel(requested or None, dispatch_paths=second_seat_paths)
+    labels = ", ".join(s["label"] for s in composition.seats)
     gov_trace = (
-        f"weight={gov.variant} new_feature={gov.is_new_feature} "
-        f"-> {len(panel)} seat(s) by {chosen_by}"
+        f"weight={gov.variant} -> {len(composition.seats)} seat(s) by "
+        f"{composition.chosen_by} ({labels})"
     )
-    if override_direction:
-        gov_trace += (
-            f"; OVERRIDES derived {len(derived_labels)} seat(s) "
-            f"({gov.variant}) - {override_direction.upper()}"
-        )
+    if composition.chosen_by == "operator":
+        gov_trace += f"; OVERRIDES the default seat {composition.default_label}"
+    elif composition.second_seat:
+        gov_trace += f"; both seats from the start ({composition.second_seat})"
+    else:
+        gov_trace += f"; {composition.escalation['label']} reads on BLOCK"
     return {
-        "panel": panel,
+        "panel": composition.seats,
+        "escalation": composition.escalation,
+        "quorum": composition.quorum,
         "variant": gov.variant,
-        "is_new_feature": gov.is_new_feature,
-        "chosen_by": chosen_by,
-        "override_direction": override_direction,
+        "chosen_by": composition.chosen_by,
         "gov_trace": gov_trace,
-        "seats": len(panel),
+        "seats": len(composition.seats),
     }
 
 
@@ -3847,6 +3869,12 @@ def run_plan_gate_for_track(
     drift from the single command within a week. Rendering (stderr lines, stdout
     text, stdout json) is built here so ``cmd_plan_gate_run`` stays a thin
     renderer and the batch reads the same result object.
+
+    One run (P2): a plan version without a read seat round gets its seat round;
+    when that round does not PASS and ``max_rounds`` versions are now read, the
+    tiebreaker decides in the same run. A version already read goes straight to
+    the tiebreaker at the threshold and, below it, must change first
+    (``plan_gate_tiebreaker.route_plan_gate``).
     """
     import plan_gate_panel
 
@@ -3934,167 +3962,93 @@ def run_plan_gate_for_track(
 
     try:
         weight = _derive_panel_weight(
-            panel_seats=panel_seats,
-            dispatch_paths=dispatch_paths,
-            task_class=task_class,
-            irreversible=irreversible,
+            panel_seats=panel_seats, dispatch_paths=dispatch_paths,
+            task_class=task_class, irreversible=irreversible,
+            deliverable_paths=lambda: _deliverable_dispatch_paths(state_dir, project_id, track_id),
         )
     except Exception as exc:
         return _error(f"plan-gate run failed: {exc}")
 
     panel = weight["panel"]
     variant = weight["variant"]
+    seats_label = "override" if weight["chosen_by"] == "operator" else "seats"
+    stderr_lines.append(f"plan-gate {seats_label}: {weight['gov_trace']}.")
 
-    if weight["override_direction"]:
-        stderr_lines.append(f"plan-gate override: {weight['gov_trace']}.")
-    else:
-        stderr_lines.append(f"plan-gate seats: {weight['gov_trace']}.")
-
-    # 0 seats: the derived weight requires no panel. Resolve the blocker with a
-    # reason that names the category — a plan-gate blocker is never cleared
-    # silently, and "no gate needed" is itself a recorded decision.
-    if not panel:
-        reason = (
-            f"derived weight={variant} requires no panel "
-            f"(category not gated); no panel ran"
-        )
-        try:
-            resolved = _resolve_plan_blocker(
-                state_dir, track_id, project_id,
-                reason=reason, resolver="derived",
-            )
-            post = tracks_lib.get_track(state_dir, track_id, project_id)
-        except Exception as exc:
-            return _error(
-                f"derived no-panel pass, but unblocking track {track_id} failed: {exc}. "
-                "Track state unchanged — investigate before promoting.",
-            )
-        derived = post.get("derived_status") if isinstance(post, dict) else None
-        if derived == "blocked":
-            stderr_lines.append(
-                f"derived no-panel pass, but track {track_id} is STILL blocked "
-                f"(plan blocker resolved={resolved}; another blocker or hard dependency "
-                "remains). Promote stays refused — clear the remaining blocker first."
-            )
-            return PlanGateRunResult(
-                track_id=track_id, project_id=project_id, exit_code=2,
-                outcome="PASS", decision="PASS", seats=0, variant=variant,
-                is_new_feature=weight["is_new_feature"],
-                chosen_by=weight["chosen_by"],
-                override_direction=weight["override_direction"],
-                gov_trace=weight["gov_trace"],
-                plan_source=source, plan_source_info=plan_source_info,
-                ignored_goal=ignored_goal, resolved=resolved,
-                derived_status=derived, still_blocked=True,
-                no_panel=True, no_panel_reason=reason,
-                stderr_lines=stderr_lines,
-            )
-        if resolved:
-            _emit_plan_gate_pass_record(
-                repo_root=repo_root, track_id=track_id, project_id=project_id,
-                resolver="run", seats=0, scope=variant, reason=weight["gov_trace"],
-                governance_variant=variant, gov_trace=weight["gov_trace"],
-            )
-        stdout_json = json.dumps({
-            "decision": "PASS",
-            "derived_weight": variant,
-            "seats": 0,
-            "summary": {
-                "pass_count": 0, "revise_count": 0, "block_count": 0,
-                "rationale": reason,
-            },
-            "panelists": [],
-            "plan_source": plan_source_info,
-        }, indent=2)
-        stdout_text.append(
-            f"PASS — plan gate cleared (derived weight={variant} needs no panel). "
-            f"{_plan_blocker_oi(track_id)} resolved={resolved}; "
-            f"track derived_status={derived}."
-        )
+    def _run_result(**kw) -> PlanGateRunResult:
         return PlanGateRunResult(
-            track_id=track_id, project_id=project_id, exit_code=0,
-            outcome="PASS", decision="PASS", seats=0, variant=variant,
-            is_new_feature=weight["is_new_feature"],
-            chosen_by=weight["chosen_by"],
-            override_direction=weight["override_direction"],
-            gov_trace=weight["gov_trace"],
+            track_id=track_id, project_id=project_id, seats=len(panel),
+            variant=variant, chosen_by=weight["chosen_by"], gov_trace=weight["gov_trace"],
             plan_source=source, plan_source_info=plan_source_info,
-            ignored_goal=ignored_goal, resolved=resolved,
-            derived_status=derived, no_panel=True, no_panel_reason=reason,
-            stderr_lines=stderr_lines, stdout_text=stdout_text,
-            stdout_json=stdout_json,
+            ignored_goal=ignored_goal, stderr_lines=stderr_lines,
+            stdout_text=stdout_text, stdout_json=stdout_json, **kw,
         )
 
-    # Stop-rule (operator ladder, 2026-08-15, punten 7-9). After max_rounds
-    # panel rounds that do not certify a PASS, the gate stops running the full
-    # panel and decides via a SINGLE tiebreaker instead. The round counter
-    # lives in the seat ledger (the existing plan-gate state) — read back from
-    # disk, not an in-memory counter, so a restart still sees the threshold.
-    # The ijkmeting over 820 reports showed a 5-seat panel converges with the
-    # first seat in 89.4% of cases; a third full round buys ~nothing. This is
-    # the SAME shared path the single-track command drives, so the batch
-    # inherits the stop-rule — not a second implementation.
+    # Stop-rule over plan versions (punten 7-9, P2). Rounds count per plan
+    # version: the sha256 of the plan text on each round record, read back from
+    # the seat ledger (the existing plan-gate state), so a restart still sees
+    # them. A version with no read seat round gets its seat round first; the
+    # tiebreaker decides once max_rounds versions were read without a PASS, in
+    # the same run as the seat round that reached the threshold. The batch drives
+    # this same path, so it inherits the rule — not a second implementation.
     import plan_gate_tiebreaker
 
     seat_ledger_path = plan_gate_panel._resolve_seat_ledger_path(data_dir)
     tb_cfg = plan_gate_tiebreaker.load_tiebreaker_config()
-    # OI-1280: the stop-rule now needs BOTH the round count and whether any of
-    # those rounds was read by a seat. One call answers both and carries the
-    # reason, so the operator is told why the tiebreaker did NOT fire — a silent
-    # fall-through to the full panel at round 3+ would look like a bug.
-    tb_gate = plan_gate_tiebreaker.tiebreaker_gate_status(
-        seat_ledger_path, track_id, project_id,
-        max_rounds=tb_cfg["max_rounds"],
+    plan_hash = plan_gate_tiebreaker.plan_sha256(plan_text)
+    versions = plan_gate_tiebreaker.plan_versions(seat_ledger_path, track_id, project_id)
+    route = plan_gate_tiebreaker.route_plan_gate(
+        versions, plan_hash, max_rounds=tb_cfg["max_rounds"],
     )
-    rounds_done = tb_gate["rounds_done"]
-    if tb_gate["should_run"]:
-        stderr_lines.append(
-            f"plan-gate stop-rule: {tb_gate['rationale']} "
-            f"(model={tb_cfg['model']})."
-        )
+    rounds_done = plan_gate_tiebreaker.read_round_count(seat_ledger_path, track_id, project_id)
+    stderr_lines.append(f"plan-gate rounds: {route.rationale}.")
+
+    def _tiebreaker(round_number, seat_verdicts, seat_round=None) -> PlanGateRunResult:
+        stderr_lines.append(f"plan-gate stop-rule: the tiebreaker decides (model={tb_cfg['model']}).")
         return _run_tiebreaker_for_track(
             state_dir=state_dir, track_id=track_id, project_id=project_id,
             doc_path=doc_path, doc_text=plan_text, data_dir=data_dir,
             seat_ledger_path=seat_ledger_path, tb_cfg=tb_cfg,
-            round_number=rounds_done + 1, seat_timeout=seat_timeout,
+            round_number=round_number, seat_timeout=seat_timeout,
             repo_root=repo_root, gov_trace=weight["gov_trace"],
             plan_source=source, plan_source_info=plan_source_info,
-            ignored_goal=ignored_goal,
+            ignored_goal=ignored_goal, plan_hash=plan_hash,
+            seat_verdicts=seat_verdicts, seat_round=seat_round,
+            stderr_lines=stderr_lines, stdout_text=stdout_text,
         )
-    elif rounds_done >= tb_gate["threshold"]:
-        # At/above the threshold but held back: say so out loud. The full panel
-        # below is the deliberate fallback, not a missed branch.
-        stderr_lines.append(f"plan-gate stop-rule: {tb_gate['rationale']}.")
+
+    if route.action == plan_gate_tiebreaker.ROUTE_TIEBREAKER:
+        return _tiebreaker(rounds_done + 1, route.seat_verdicts)
+    if route.action == plan_gate_tiebreaker.ROUTE_PLAN_UNCHANGED:
+        return _run_result(
+            exit_code=2, outcome="REVISE", decision="PLAN_UNCHANGED", error=route.rationale,
+        )
 
     try:
         result = plan_gate_panel.run_panel(
             doc_path=doc_path,
             doc_text=plan_text,
             track_id=track_id, project_id=project_id, data_dir=data_dir,
-            panel=panel,
+            panel=panel, escalation_seat=weight["escalation"], quorum=weight["quorum"],
             timeout_seconds=seat_timeout,
         )
     except Exception as exc:
         return _error(f"plan-gate run failed: {exc}")
 
-    # Record this panel round in the seat ledger so the stop-rule's counter
-    # persists across restarts. Recorded for EVERY non-PASS outcome (a PASS
-    # clears the gate; no further round is needed). Best-effort: a failed
+    # Record this seat round in the seat ledger for EVERY non-PASS outcome (a
+    # PASS clears the gate; no further round is needed). Best-effort: a failed
     # record must never break the gate (same contract as the seat records).
-    #
-    # OI-1280: the record carries how many seats actually READ the plan this
-    # round, not just that a round happened. That number is what
-    # tiebreaker_gate_status reads back to decide whether there is a tie worth
-    # breaking at all.
+    # The record carries the plan's hash and what the seats said (P2), and how
+    # many seats actually READ the plan (OI-1280): a round nobody read is no
+    # plan version for the stop-rule.
+    seat_verdicts = plan_gate_panel.seat_verdicts_of(result.get("panelists") or [])
+    scored_seats = plan_gate_panel.count_scoring_seats(result.get("panelists") or [])
     if result["decision"] != "PASS":
         plan_gate_tiebreaker.record_round(
             seat_ledger_path,
             track_id=track_id, project_id=project_id,
-            round_number=rounds_done + 1, outcome="panel",
+            round_number=rounds_done + 1, outcome=plan_gate_tiebreaker.SEAT_ROUND_OUTCOME,
             governance_variant=variant, gov_trace=weight["gov_trace"],
-            scored_seats=plan_gate_panel.count_scoring_seats(
-                result.get("panelists") or []
-            ),
+            scored_seats=scored_seats, plan_sha256=plan_hash, seat_verdicts=seat_verdicts,
         )
 
     # OI-1190: persist the durable half of the plan decision onto the track — the
@@ -4173,18 +4127,9 @@ def run_plan_gate_for_track(
                 f"(plan blocker resolved={resolved}; another blocker or hard dependency "
                 "remains). Promote stays refused — clear the remaining blocker first."
             )
-            return PlanGateRunResult(
-                track_id=track_id, project_id=project_id, exit_code=2,
-                outcome="PASS", decision=result["decision"], seats=len(panel),
-                variant=variant, is_new_feature=weight["is_new_feature"],
-                chosen_by=weight["chosen_by"],
-                override_direction=weight["override_direction"],
-                gov_trace=weight["gov_trace"],
-                plan_source=source, plan_source_info=plan_source_info,
-                ignored_goal=ignored_goal, resolved=resolved,
-                derived_status=derived, still_blocked=True,
-                result=result, stderr_lines=stderr_lines,
-                stdout_text=stdout_text, stdout_json=stdout_json,
+            return _run_result(
+                exit_code=2, outcome="PASS", decision=result["decision"],
+                resolved=resolved, derived_status=derived, still_blocked=True, result=result,
             )
         if resolved:
             # A PASS that CLEARS the gate is a real pass: write the durable,
@@ -4210,58 +4155,46 @@ def run_plan_gate_for_track(
             f"PASS — plan gate cleared. {_plan_blocker_oi(track_id)} "
             f"resolved={resolved}; track derived_status={derived}."
         )
-        return PlanGateRunResult(
-            track_id=track_id, project_id=project_id, exit_code=0,
-            outcome="PASS", decision=result["decision"], seats=len(panel),
-            variant=variant, is_new_feature=weight["is_new_feature"],
-            chosen_by=weight["chosen_by"],
-            override_direction=weight["override_direction"],
-            gov_trace=weight["gov_trace"],
-            plan_source=source, plan_source_info=plan_source_info,
-            ignored_goal=ignored_goal, resolved=resolved,
-            derived_status=derived, result=result,
-            stderr_lines=stderr_lines, stdout_text=stdout_text,
-            stdout_json=stdout_json,
+        return _run_result(
+            exit_code=0, outcome="PASS", decision=result["decision"],
+            resolved=resolved, derived_status=derived, result=result,
         )
 
     if result["decision"] == "INFRA_FAIL":
         # 0 readable verdicts: no lane reviewed the plan, so there is no plan
         # judgment to act on. This is an infrastructure failure (exit 1, like the
         # other infra errors above) — NOT a content REVISE. "Revise the plan and
-        # re-run" would send the operator to fix a plan no lane ever saw.
+        # re-run" would send the operator to fix a plan no lane ever saw. The
+        # version stays unread, so the next run gives it its seat round again.
         stderr_lines.append(
             "INFRA_FAIL — plan gate could not run: no lane produced a readable "
             "verdict, so the plan was NOT reviewed. Fix the lanes (see the "
             "per-panelist errors above) and re-run the gate. Track stays blocked."
         )
-        return PlanGateRunResult(
-            track_id=track_id, project_id=project_id, exit_code=1,
-            outcome="ERROR", decision=result["decision"], seats=len(panel),
-            variant=variant, is_new_feature=weight["is_new_feature"],
-            chosen_by=weight["chosen_by"],
-            override_direction=weight["override_direction"],
-            gov_trace=weight["gov_trace"],
-            plan_source=source, plan_source_info=plan_source_info,
-            ignored_goal=ignored_goal, error="INFRA_FAIL: no readable verdict",
-            result=result, stderr_lines=stderr_lines,
-            stdout_text=stdout_text, stdout_json=stdout_json,
+        return _run_result(
+            exit_code=1, outcome="ERROR", decision=result["decision"],
+            error="INFRA_FAIL: no readable verdict", result=result,
         )
+
+    # The seat read this plan version without a PASS. When that brings the
+    # read versions to max_rounds, the tiebreaker decides now, on this version
+    # and this seat's verdict, in the same run (P2).
+    after = plan_gate_tiebreaker.route_plan_gate(
+        plan_gate_tiebreaker.with_seat_round(
+            versions, plan_hash, scored_seats=scored_seats, seat_verdicts=seat_verdicts,
+        ),
+        plan_hash, max_rounds=tb_cfg["max_rounds"],
+    )
+    if after.action == plan_gate_tiebreaker.ROUTE_TIEBREAKER:
+        stderr_lines.append(f"plan-gate rounds: {after.rationale}.")
+        return _tiebreaker(rounds_done + 2, seat_verdicts, seat_round=out)
 
     stderr_lines.append(
         f"{result['decision']} — plan gate NOT cleared; track stays blocked. "
         "Revise the plan and re-run."
     )
-    return PlanGateRunResult(
-        track_id=track_id, project_id=project_id, exit_code=2,
-        outcome="REVISE", decision=result["decision"], seats=len(panel),
-        variant=variant, is_new_feature=weight["is_new_feature"],
-        chosen_by=weight["chosen_by"],
-        override_direction=weight["override_direction"],
-        gov_trace=weight["gov_trace"],
-        plan_source=source, plan_source_info=plan_source_info,
-        ignored_goal=ignored_goal, result=result,
-        stderr_lines=stderr_lines, stdout_text=stdout_text,
-        stdout_json=stdout_json,
+    return _run_result(
+        exit_code=2, outcome="REVISE", decision=result["decision"], result=result,
     )
 
 
@@ -4565,7 +4498,7 @@ def cmd_plan_gate_backfill_reason(args: argparse.Namespace) -> int:
 
     conn = _db_conn(state_dir)
     try:
-        if not _plan_gate_supported(conn):
+        if not plan_scope.plan_gate_supported(conn):
             print(
                 "plan-gate backfill-reason: plan-gate schema absent "
                 "(need track_open_items + tracks.derived_status); apply migrations "
@@ -4679,7 +4612,7 @@ def cmd_plan_gate_reblock(args: argparse.Namespace) -> int:
 
     conn = _db_conn(state_dir)
     try:
-        if not _plan_gate_supported(conn):
+        if not plan_scope.plan_gate_supported(conn):
             print(
                 "plan-gate reblock: plan-gate schema absent "
                 "(need track_open_items + tracks.derived_status); apply migrations "
@@ -4803,7 +4736,7 @@ def list_plan_blocked_tracks(state_dir, project_id) -> list:
     """
     conn = _db_conn(state_dir)
     try:
-        if not _plan_gate_supported(conn):
+        if not plan_scope.plan_gate_supported(conn):
             return []
         rows = conn.execute(
             "SELECT track_id FROM track_open_items "
@@ -4891,6 +4824,7 @@ def _dry_run_track(state_dir, track_id, project_id, *, run_kwargs, min_goal_char
         dispatch_paths=run_kwargs.get("dispatch_paths"),
         task_class=run_kwargs.get("task_class"),
         irreversible=run_kwargs.get("irreversible", False),
+        deliverable_paths=lambda: _deliverable_dispatch_paths(state_dir, project_id, track_id),
     )
     goal = (track.get("goal_state") or "") if isinstance(track, dict) else ""
     goal_chars = len(goal.strip())
@@ -4923,8 +4857,6 @@ def _batch_detail(outcome: PlanGateRunResult) -> str:
     if outcome.outcome == "PASS":
         if outcome.still_blocked:
             return "gate passed but track STILL blocked by another open item"
-        if outcome.no_panel:
-            return outcome.no_panel_reason
         if outcome.variant == "tiebreaker":
             if outcome.decision == "STOP":
                 return "tiebreaker STOP — gate cleared; findings recorded as open items"
@@ -5128,6 +5060,97 @@ def cmd_plan_gate_batch(args: argparse.Namespace) -> int:
         )
         return 130
     return 0
+
+
+def _add_deliverable_add_parser(dlv_sub: Any, common: Any) -> None:
+    """``deliverable add``: plan a deliverable (a proposed dispatch)."""
+    p_dadd = dlv_sub.add_parser("add", help="plan a deliverable (proposed dispatch)")
+    common(p_dadd)
+    p_dadd.add_argument("--objective", required=True, metavar="TRACK_ID",
+                        help="track/objective this deliverable belongs to")
+    p_dadd.add_argument("--output-kind", required=True, choices=_VALID_OUTPUT_KINDS,
+                        metavar="KIND", dest="output_kind")
+    p_dadd.add_argument("--title", required=True)
+    p_dadd.add_argument(
+        "--task-class", dest="task_class", default=None, metavar="CLASS",
+        help="optional task class from the smart-router closed set "
+             "(01_code_generation .. 07_translation) — the same rubric axis "
+             "the plan-gate reads. Unknown values are refused.",
+    )
+    p_dadd.add_argument(
+        "--routing-floor", dest="routing_floor", default=None, metavar="FLOOR",
+        help="optional model-routing quality floor for this deliverable "
+             "(free text, e.g. a model name) — the plan-gate's rubric axis 5.",
+    )
+    p_dadd.add_argument(
+        "--dispatch-paths", dest="dispatch_paths", default=None, metavar="P1,P2",
+        help="optional comma-separated repo paths this deliverable will touch. "
+             "A plan-gate run without --dispatch-paths reads them: a schema or "
+             "security path brings the second seat in from the start.",
+    )
+    p_dadd.set_defaults(func=cmd_deliverable_add)
+
+
+def _add_deliverable_parsers(sub: Any, common: Any) -> None:
+    """The ``deliverable`` subcommand (Phase 2): the deliverable plane (proposed dispatches)."""
+    dlv = sub.add_parser("deliverable", help="deliverable plane (proposed dispatches)")
+    dlv_sub = dlv.add_subparsers(dest="action", required=True)
+
+    _add_deliverable_add_parser(dlv_sub, common)
+
+    p_dlist = dlv_sub.add_parser("list", help="list deliverables grouped by objective")
+    common(p_dlist)
+    p_dlist.add_argument("--objective", default=None, metavar="TRACK_ID")
+    p_dlist.set_defaults(func=cmd_deliverable_list)
+
+    p_dpromote = dlv_sub.add_parser(
+        "promote",
+        help="human gate: promote deliverable from proposed -> ready",
+    )
+    common(p_dpromote)
+    p_dpromote.add_argument("dispatch_id")
+    p_dpromote.set_defaults(func=cmd_deliverable_promote)
+
+    p_dclose = dlv_sub.add_parser(
+        "close",
+        help="afboeken (done): close a ready deliverable -> completed "
+             "(operator-attested PR evidence)",
+    )
+    common(p_dclose)
+    p_dclose.add_argument("dispatch_id")
+    p_dclose.add_argument(
+        "--evidence", required=True, metavar="PR",
+        help="delivering PR as #NNN or NNN (REQUIRED). Records an operator "
+             "attestation of what delivered the work; VNX does not verify the "
+             "merge state at close time.",
+    )
+    p_dclose.set_defaults(func=cmd_deliverable_close)
+
+    p_dset = dlv_sub.add_parser(
+        "set",
+        help="tag an EXISTING deliverable with task_class/routing_floor "
+             "(the rubric fields the plan-gate reads)",
+    )
+    common(p_dset)
+    p_dset.add_argument("dispatch_id")
+    p_dset.add_argument(
+        "--task-class", dest="task_class", default=None, metavar="CLASS",
+        help="task class from the smart-router closed set (01_code_generation "
+             ".. 07_translation). Unknown values are refused. At least one of "
+             "--task-class/--routing-floor/--dispatch-paths is required.",
+    )
+    p_dset.add_argument(
+        "--routing-floor", dest="routing_floor", default=None, metavar="FLOOR",
+        help="model-routing quality floor for this deliverable (free text, "
+             "e.g. a model name). At least one of "
+             "--task-class/--routing-floor/--dispatch-paths is required.",
+    )
+    p_dset.add_argument(
+        "--dispatch-paths", dest="dispatch_paths", default=None, metavar="P1,P2",
+        help="comma-separated repo paths this deliverable will touch (replaces "
+             "the stored list). Read by a plan-gate run that names no paths.",
+    )
+    p_dset.set_defaults(func=cmd_deliverable_set)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -5350,6 +5373,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--lane-hint", choices=sorted(_VALID_LANE_HINTS), default=None, dest="lane_hint",
         help="descriptive dispatch-routing hint (governed|direct|unset); default unset",
     )
+    p_add.add_argument(
+        "--plan-scope", choices=plan_scope.PLAN_SCOPES, default=None, dest="plan_scope",
+        help="REQUIRED for a new track: architecture (OI-PLAN-<track> is seeded, the "
+             "plan-gate runs) or light (no plan-gate)",
+    )
     p_add.set_defaults(func=cmd_objective_add)
 
     p_set_goal = obj_sub.add_parser(
@@ -5374,6 +5402,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p_lane_hint.add_argument("lane_hint", choices=sorted(_VALID_LANE_HINTS))
     p_lane_hint.set_defaults(func=cmd_objective_set_lane_hint)
 
+    p_plan_scope = obj_sub.add_parser(
+        "set-plan-scope",
+        help="set a track's plan_scope by hand (the only way down to light); --reason required",
+    )
+    _common(p_plan_scope)
+    p_plan_scope.add_argument("track_id")
+    p_plan_scope.add_argument("plan_scope", choices=plan_scope.PLAN_SCOPES)
+    p_plan_scope.add_argument("--reason", default="", help="REQUIRED: why the scope changes")
+    p_plan_scope.set_defaults(func=cmd_objective_set_plan_scope)
+
     p_rec_review = obj_sub.add_parser(
         "reconcile-review",
         help="record an operator review of a reconcile run (ok or false-candidate)",
@@ -5396,80 +5434,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _common(p_rec_streak)
     p_rec_streak.set_defaults(func=cmd_objective_reconcile_streak)
 
-    # ------------------------------------------------------------------
-    # deliverable subcommand (Phase 2)
-    # ------------------------------------------------------------------
-    dlv = sub.add_parser("deliverable", help="deliverable plane (proposed dispatches)")
-    dlv_sub = dlv.add_subparsers(dest="action", required=True)
-
-    p_dadd = dlv_sub.add_parser("add", help="plan a deliverable (proposed dispatch)")
-    _common(p_dadd)
-    p_dadd.add_argument("--objective", required=True, metavar="TRACK_ID",
-                        help="track/objective this deliverable belongs to")
-    p_dadd.add_argument("--output-kind", required=True, choices=_VALID_OUTPUT_KINDS,
-                        metavar="KIND", dest="output_kind")
-    p_dadd.add_argument("--title", required=True)
-    p_dadd.add_argument(
-        "--task-class", dest="task_class", default=None, metavar="CLASS",
-        help="optional task class from the smart-router closed set "
-             "(01_code_generation .. 07_translation) — the same rubric axis "
-             "the plan-gate reads. Unknown values are refused.",
-    )
-    p_dadd.add_argument(
-        "--routing-floor", dest="routing_floor", default=None, metavar="FLOOR",
-        help="optional model-routing quality floor for this deliverable "
-             "(free text, e.g. a model name) — the plan-gate's rubric axis 5.",
-    )
-    p_dadd.set_defaults(func=cmd_deliverable_add)
-
-    p_dlist = dlv_sub.add_parser("list", help="list deliverables grouped by objective")
-    _common(p_dlist)
-    p_dlist.add_argument("--objective", default=None, metavar="TRACK_ID")
-    p_dlist.set_defaults(func=cmd_deliverable_list)
-
-    p_dpromote = dlv_sub.add_parser(
-        "promote",
-        help="human gate: promote deliverable from proposed -> ready",
-    )
-    _common(p_dpromote)
-    p_dpromote.add_argument("dispatch_id")
-    p_dpromote.set_defaults(func=cmd_deliverable_promote)
-
-    p_dclose = dlv_sub.add_parser(
-        "close",
-        help="afboeken (done): close a ready deliverable -> completed "
-             "(operator-attested PR evidence)",
-    )
-    _common(p_dclose)
-    p_dclose.add_argument("dispatch_id")
-    p_dclose.add_argument(
-        "--evidence", required=True, metavar="PR",
-        help="delivering PR as #NNN or NNN (REQUIRED). Records an operator "
-             "attestation of what delivered the work; VNX does not verify the "
-             "merge state at close time.",
-    )
-    p_dclose.set_defaults(func=cmd_deliverable_close)
-
-    p_dset = dlv_sub.add_parser(
-        "set",
-        help="tag an EXISTING deliverable with task_class/routing_floor "
-             "(the rubric fields the plan-gate reads)",
-    )
-    _common(p_dset)
-    p_dset.add_argument("dispatch_id")
-    p_dset.add_argument(
-        "--task-class", dest="task_class", default=None, metavar="CLASS",
-        help="task class from the smart-router closed set (01_code_generation "
-             ".. 07_translation). Unknown values are refused. At least one of "
-             "--task-class/--routing-floor is required.",
-    )
-    p_dset.add_argument(
-        "--routing-floor", dest="routing_floor", default=None, metavar="FLOOR",
-        help="model-routing quality floor for this deliverable (free text, "
-             "e.g. a model name). At least one of --task-class/--routing-floor "
-             "is required.",
-    )
-    p_dset.set_defaults(func=cmd_deliverable_set)
+    _add_deliverable_parsers(sub, _common)
 
     # ------------------------------------------------------------------
     # plan-gate subcommand (PM plan-first gate)
@@ -5502,8 +5467,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--panel-seats",
         dest="panel_seats",
         default="",
-        help="comma-separated seat labels to run (subset of the configured panel); "
-             "unknown labels fail loud. Defaults to the full configured panel.",
+        help="comma-separated seat labels to run instead of the default seat; "
+             "logged as an override, unknown labels fail loud. Default: default_seat.",
     )
     p_prun.add_argument(
         "--seat-timeout",
@@ -5518,24 +5483,24 @@ def _build_parser() -> argparse.ArgumentParser:
         "--dispatch-paths",
         dest="dispatch_paths",
         default=None,
-        help="comma-separated repo paths the plan touches; drives the governance "
-             "weight (variant) that sizes the panel (operator ladder). Default: no "
-             "paths (task_class or the code baseline).",
+        help="comma-separated repo paths the plan touches; they derive the governance "
+             "weight (variant) in the trace. The seat count does not follow it: one "
+             "default seat, a second on BLOCK.",
     )
     p_prun.add_argument(
         "--task-class",
         dest="task_class",
         default=None,
-        help="task class for the plan from the smart-router closed set "
-             "(e.g. 01_code_generation marks a NEW FEATURE, which always runs the "
-             "full panel).",
+        help="task class for the plan from the smart-router closed set; it feeds "
+             "the governance weight in the trace. A new feature no longer gets "
+             "more seats.",
     )
     p_prun.add_argument(
         "--irreversible",
         dest="irreversible",
         action="store_true",
         help="declare the change irreversible (deletion/rename/big architecture "
-             "refactor); forces coding-strict (3 seats).",
+             "refactor); forces coding-strict in the trace, not more seats.",
     )
     p_prun.set_defaults(func=cmd_plan_gate_run)
 
@@ -5621,8 +5586,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--panel-seats",
         dest="panel_seats",
         default="",
-        help="comma-separated seat labels to run (subset of the configured panel); "
-             "unknown labels fail loud. Defaults to the governance-derived ladder.",
+        help="comma-separated seat labels to run instead of the default seat; "
+             "logged as an override, unknown labels fail loud. Default: default_seat.",
     )
     p_pbatch.add_argument(
         "--seat-timeout",
@@ -5636,23 +5601,23 @@ def _build_parser() -> argparse.ArgumentParser:
         "--dispatch-paths",
         dest="dispatch_paths",
         default=None,
-        help="comma-separated repo paths the plan touches; drives the governance "
-             "weight (variant) that sizes the panel (operator ladder).",
+        help="comma-separated repo paths the plan touches; they derive the governance "
+             "weight (variant) in the trace, not the seat count.",
     )
     p_pbatch.add_argument(
         "--task-class",
         dest="task_class",
         default=None,
-        help="task class for the plan from the smart-router closed set "
-             "(e.g. 01_code_generation marks a NEW FEATURE, which always runs the "
-             "full panel).",
+        help="task class for the plan from the smart-router closed set; it feeds "
+             "the governance weight in the trace. A new feature no longer gets "
+             "more seats.",
     )
     p_pbatch.add_argument(
         "--irreversible",
         dest="irreversible",
         action="store_true",
         help="declare the change irreversible (deletion/rename/big architecture "
-             "refactor); forces coding-strict (3 seats).",
+             "refactor); forces coding-strict in the trace, not more seats.",
     )
     p_pbatch.set_defaults(func=cmd_plan_gate_batch)
 

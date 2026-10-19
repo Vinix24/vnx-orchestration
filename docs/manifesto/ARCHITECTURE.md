@@ -59,28 +59,25 @@ The ledger is the single source of truth. Runtime state files exist for performa
 
 Screenshot pointer: `SCREENSHOTS.md` (S2: Chain of Custody).
 
-### 2. Governance Gates: Two Dispatch Paths, One Rule
+### 2. Governance Gates: One Door, One Human Step
 
-VNX enforces human approval on **every** dispatch — but through two distinct paths:
+VNX enforces human approval on **every** dispatch through one entry point, `vnx dispatch` (ADR-024):
 
-**Path A: Feature Plan Dispatches (Staging → Promote)**
+1. **Stage**: `vnx dispatch stage` writes a staged bundle (instruction plus dispatch spec) into the central pending directory. It never fires.
+2. **Review**: A human reads the compiled plan and permit with `vnx dispatch <dispatch-id> --dry-run`, which spawns nothing.
+3. **Fire**: `vnx dispatch <dispatch-id>` starts one ephemeral worker in its own git worktree. The door picks the lane from the provider (`docs/core/DISPATCH_RULES.md` section 5).
 
-For structured feature work, VNX introduces an explicit staging gate:
+The staged bundle is the staging gate (ADR-006). An older PR-queue path (`FEATURE_PLAN.md` to staging to promote) is still live for the roadmap autopilot; `docs/core/00_VNX_ARCHITECTURE.md` (Staging Workflow) describes both paths.
 
-1. **Draft**: The orchestrator (T0) generates a dispatch plan in `dispatches/staging/`, often containing multiple tracks (e.g., Track A for implementation, Track B for testing).
-2. **Review**: A human reviews the file paths, complexity, and scope.
-3. **Promote**: Only after approval does the dispatch move to `dispatches/queue/`.
-4. **Claim**: A worker terminal (T1/T2/T3) claims the task and emits a `task_ack` receipt.
+Both paths enforce the same principle: **nothing executes without human approval**. The gate prevents the **"Cascade of Doom"**: one hallucinated output triggering a chain of downstream agent actions, each compounding the error.
 
-**Path B: Ad-Hoc Dispatches (Popup Confirmation)**
+Review is gated the same way. A pull request needs one distinct reviewer per **review seat** of the project's review stack (default `codex_gate,kimi_gate`), and a rejection from any reviewer blocks the merge. A reviewer that is out is absence, not a vote (ADR-037), and the seat passes along the takeover chain (`codex_gate,kimi_gate,deepseek_gate`). The merge happens only through `scripts/pr_merge.py`. See `docs/core/00_VNX_ARCHITECTURE.md` (Review Seats) and `docs/core/PROVIDER_LANES.md` (Takeover chain). The seat rule and the takeover chain are on main, not yet released.
 
-For operational tasks — quick questions, hotpatch instructions, one-off commands — T0 can propose a dispatch directly. But every ad-hoc dispatch triggers an **explicit human confirmation popup** before anything is sent to a worker terminal. There is no silent dispatch path.
-
-Both paths enforce the same principle: **nothing executes without human approval**. The staging gate catches architectural errors in complex plans; the popup catches drift in day-to-day operations. Together they prevent the **"Cascade of Doom"** — the failure mode where one hallucinated output triggers a chain of downstream agent actions, each compounding the error.
-
-**A critical design constraint**: T0 (the orchestrator) **cannot write files directly**. It operates through hooks that restrict write actions, limiting T0 to coordination, planning, and dispatch creation. All file modifications happen in worker terminals (T1/T2/T3) under the governance layer's oversight. This separation of concerns ensures the orchestrator cannot bypass its own governance gates.
+**A critical design constraint**: T0 (the orchestrator) plans, reviews and dispatches, and does not write code. Workers (T1/T2/T3 are role labels on dispatches) do the file changes in isolated worktrees under the governance layer's oversight. A hook also blocks T0 from spawning subagents, and `vnx guard install` registers a context guard for T0 sessions (`docs/operations/T0_CONTEXT_ROTATION.md`). This separation keeps the orchestrator from bypassing its own gates.
 
 Screenshot pointer: `SCREENSHOTS.md` (S3: Queue Manager UI, S4: Worker Refusal).
+
+---
 
 ### 3. Decoupled Observability: The External Watcher Pattern
 
@@ -91,23 +88,25 @@ VNX uses a **dual-input bridge**:
 - **Push (Optional Hooks)**: If a provider supports hooks, they can emit receipts directly.
 - **Pull (External Watcher)**: For providers without hooks (Codex, Gemini, future models), VNX watches the filesystem for agent output reports and generates receipts from them.
 
-This **External Watcher Pattern** means that even if an agent process crashes, the orchestration layer remains alive and aware. It also means you can swap models per-task — use Claude for architecture, Codex for implementation, Gemini for review — without changing any orchestration logic. Kimi runs as a first-class production worker lane via its CLI OAuth path (the `kimi-via-cli-only` constraint), one of several providers the watcher pattern already validates across ecosystems.
+This **External Watcher Pattern** means that even if an agent process crashes, the orchestration layer remains alive and aware. It also means you can swap models per task, for example Claude for architecture and Codex for review, without changing any orchestration logic. Kimi runs through its CLI OAuth path (the `kimi-via-cli-only` constraint). Which provider may serve which lane is one machine-readable file, `scripts/lib/providers/provider_constraints.yaml`, and `vnx providers list` shows the operator's provider switches. The switch cannot turn a provider off yet: its write verbs refuse until every launch function calls `provider_switch.require` (`docs/core/PROVIDER_LANES.md`, Provider switch).
 
 Intelligence and usage signals are derived from receipts and watchers, not from provider hooks. Hooks can optionally enrich metadata, but they are never dependencies.
 
 ### 4. Quality Gates: The Strict Tech Lead
 
-VNX enforces engineering thresholds that AI agents routinely ignore. These run as an **async intelligence layer** — post-ingestion from receipts, not as blocking hooks:
+VNX measures engineering thresholds that AI agents routinely ignore. These run as an **async intelligence layer** (`scripts/lib/quality_advisory.py`), post-ingestion from receipts, not as blocking hooks:
 
 | Check | Warning | Blocking | Tool |
 | :--- | :--- | :--- | :--- |
-| File size (Python) | >500 lines | >800 lines | `wc -l` |
-| File size (Shell) | >200 lines | >300 lines | `wc -l` |
-| Function size | >40 lines | >70 lines | `radon` / AST |
-| Dead code | `vulture` signals | Unused imports/vars | `ruff` |
-| Secrets | — | Any detection | `gitleaks` |
-| Risk patterns | `\|\| true` usage | Broad `kill` patterns | Regex |
-| Test hygiene | — | src/ changes without tests | Git diff |
+| File size (Python) | >500 lines | >1200 lines | line count |
+| File size (Shell) | >300 lines | >600 lines | line count |
+| Function size (Python) | >40 lines | >70 lines | AST |
+| Function size (Shell) | >30 lines | >60 lines | line count |
+| Lint | `ruff` findings | `E`/`F` codes | `ruff` |
+| Dead code | `vulture` findings | none | `vulture` |
+| Test hygiene | src changes without test changes | none | git diff |
+
+Secret scanning is a separate CI job (`gitleaks`, `.github/workflows/public-ci.yml`), not part of the advisory. In CI a function-size ratchet fails a pull request that makes a function larger (`docs/core/SUBSYSTEMS.md`).
 
 **Why async?** Running `vulture` or `gitleaks` inside a terminal hook adds latency and increases provider coupling. VNX captures the event via receipts, then runs validation in the background. If a gate fails, the orchestrator issues a **Refactor Dispatch** — not a rollback, but a structured follow-up task.
 
@@ -153,7 +152,7 @@ For the precise rule, the lifecycle diagram, and the loop, see
 | Feature | Native Agent Teams | Aura | SafeClaw | Camunda | **VNX** |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **State Format** | Chat context (opaque) | JSONL events | JSONL + SHA-256 chain | BPMN audit logs | **NDJSON ledger** |
-| **Governance Gates** | None (lead-agent model) | Approval policies | Deny-by-default gating | BPMN/DMN gateways | **Staging → Promote** |
+| **Governance Gates** | None (lead-agent model) | Approval policies | Deny-by-default gating | BPMN/DMN gateways | **Staged bundle, human fires** |
 | **Model-Agnostic** | No (provider-locked) | Yes (via Agno) | Limited (OpenClaw) | Yes | **Yes (watcher pattern)** |
 | **Quality Gates** | None | Not documented | Not documented | DMN rules | **Lint/size/dead code** |
 | **External Watcher** | No | No | No | Service tasks | **Yes (first-class)** |
@@ -178,14 +177,16 @@ For the precise rule, the lifecycle diagram, and the loop, see
 
 ### Known Limitations
 
-- The interactive tmux-spawn worker lane was removed on 2026-09-18; `claude_headless` (`claude -p` via envelope) is now the only Claude worker lane, and it runs on the Max subscription, not API credits. Tmux remains in use only as an injection path for interactive kimi/codex/gemini terminals, not for Claude workers.
-- Gemini is a worker-provider lane, not a review gate: `gemini_review` was retired from the review stack. Kimi runs as a first-class production worker lane via its CLI OAuth path, with `kimi-k3` as the default model (`kimi-k2-6` is disabled).
-- **T0 orchestrator runs on Claude Opus** (via Claude Code). Other models may work as T0, but this is less tested.
-- Per-dispatch git worktree isolation is unconditional in the headless envelope lane (`claude_headless`, the only Claude worker lane); the older subprocess-adapter lane still gates it behind `VNX_ISOLATED_WORKTREE=1`. Parallel multi-track execution is Tier 3 — designed, not shipped (ADR-020).
-- File-based, local-first — not designed for distributed networks
-- Tmux dependency for terminal management
-- Python/Bash prototype — a production deployment would benefit from Rust/Go
-- Public git history starts at repo separation point (earlier work was in a private product repo)
+- The tmux-spawn worker lane was removed on 2026-09-18; `claude_headless` (`claude -p` via envelope) is the only Claude worker lane and runs on the Max subscription, not API credits. Tmux remains only as an injection path for interactive codex/kimi/gemini terminals.
+- Gemini is a non-review provider lane: `gemini_review` was retired from the review stack. Build workers default to Sonnet (`workers-kimi-pinned` in `provider_constraints.yaml`); a dispatch spec that names a model, kimi-k3 for example, wins over that default.
+- **T0 runs on Claude Opus** (via Claude Code). Other models may work as T0, but this is less tested.
+- Per-dispatch git worktree isolation is unconditional in the headless envelope lane; the older subprocess-adapter lane gates it behind `VNX_ISOLATED_WORKTREE=1`. Parallel multi-track execution is Tier 3, designed and not shipped (ADR-020).
+- The receipt hash chain is available per project and off by default (ADR-023), so the ledger is append-only but not tamper-evident unless a project turns the chain on.
+- The content boundary is read by the conversation analyzer and the dream consolidation only, not by the receipt classifier, the tagger or the scout (OI-2172), so it is not a general guarantee about what reaches a non-claude provider.
+- File-based, local-first: not designed for distributed networks.
+- Tmux dependency for terminal management.
+- Python/Bash prototype: a production deployment would benefit from Rust/Go.
+- Public git history starts at repo separation point (earlier work was in a private product repo).
 
 See `LIMITATIONS.md` for the full scope declaration.
 

@@ -29,7 +29,8 @@ from provider_spawns.harness_config_dir import (  # noqa: E402
 )
 
 _KEY = "sk-deepseek-test-key-1234567890abcd"
-_FORBIDDEN = ("CLAUDE.md", "CLAUDE.local.md", "skills", "agents", "commands", "hooks", "plugins")
+_FORBIDDEN = ("CLAUDE.md", "CLAUDE.local.md", "skills", "agents", "commands", "hooks")
+_CACHE_FILES = ("plugin-catalog-cache.json", "plugin-directory-cache-v2.json")
 
 
 @pytest.fixture
@@ -218,6 +219,61 @@ def test_forbidden_entry_fails_closed(data_dir, entry):
         ensure_harness_config_dir("glm-harness")
 
 
+def _plugins_dir(data_dir):
+    plugins = data_dir / "harness-config" / "glm-harness" / "plugins"
+    plugins.mkdir(parents=True)
+    return plugins
+
+
+def test_plugins_dir_with_only_cli_cache_files_passes(data_dir):
+    plugins = _plugins_dir(data_dir)
+    for name in _CACHE_FILES:
+        (plugins / name).write_text("{}", encoding="utf-8")
+    lane = ensure_harness_config_dir("glm-harness")
+    assert sorted(p.name for p in (lane / "plugins").iterdir()) == sorted(_CACHE_FILES)
+
+
+def test_plugin_cache_allowlist_is_closed():
+    from provider_spawns import harness_config_dir as hcd
+
+    assert hcd.PLUGIN_CACHE_ALLOWLIST == _CACHE_FILES
+
+
+@pytest.mark.parametrize("kind", ["third_file", "subdir", "installed", "known_marketplaces"])
+def test_plugins_dir_with_other_entry_is_refused_and_named(data_dir, kind):
+    plugins = _plugins_dir(data_dir)
+    (plugins / _CACHE_FILES[0]).write_text("{}", encoding="utf-8")
+    if kind == "subdir":
+        (plugins / "marketplaces").mkdir()
+        named = "marketplaces"
+    else:
+        named = {
+            "third_file": "notes.json",
+            "installed": "installed_plugins.json",
+            "known_marketplaces": "known_marketplaces.json",
+        }[kind]
+        (plugins / named).write_text("{}", encoding="utf-8")
+    with pytest.raises(HarnessConfigDirError, match=f"plugins/{named}"):
+        ensure_harness_config_dir("glm-harness")
+
+
+def test_plugins_dir_with_symlinked_cache_file_is_refused(data_dir, tmp_path):
+    plugins = _plugins_dir(data_dir)
+    target = tmp_path / "elsewhere.json"
+    target.write_text("{}", encoding="utf-8")
+    (plugins / _CACHE_FILES[0]).symlink_to(target)
+    with pytest.raises(HarnessConfigDirError, match=f"plugins/{_CACHE_FILES[0]}"):
+        ensure_harness_config_dir("glm-harness")
+
+
+def test_plugins_symlink_is_refused(data_dir, tmp_path):
+    lane = data_dir / "harness-config" / "glm-harness"
+    lane.mkdir(parents=True)
+    (lane / "plugins").symlink_to(tmp_path)
+    with pytest.raises(HarnessConfigDirError):
+        ensure_harness_config_dir("glm-harness")
+
+
 def test_symlink_entry_fails_closed(data_dir, tmp_path):
     lane = data_dir / "harness-config" / "glm-harness"
     lane.mkdir(parents=True)
@@ -232,6 +288,23 @@ def test_settings_with_hooks_fails_closed(data_dir):
     (lane / "settings.json").write_text(json.dumps({"hooks": {"Stop": []}}))
     with pytest.raises(HarnessConfigDirError):
         ensure_harness_config_dir("glm-harness")
+
+
+def test_settings_payload_carries_year_retention():
+    from provider_spawns import harness_config_dir as hcd
+
+    payload = json.loads(hcd._settings_payload())
+    assert payload["cleanupPeriodDays"] == 365
+
+
+def test_existing_settings_without_retention_gains_year_retention(data_dir):
+    lane = data_dir / "harness-config" / "glm-harness"
+    lane.mkdir(parents=True)
+    (lane / "settings.json").write_text(json.dumps({"permissions": {"ask": []}}))
+    ensure_harness_config_dir("glm-harness")
+    settings = json.loads((lane / "settings.json").read_text())
+    assert settings["cleanupPeriodDays"] == 365
+    assert settings["permissions"]["ask"] == DESTRUCTIVE_BASH_ASK_RULES
 
 
 def test_dir_under_personal_config_fails_closed(tmp_path, monkeypatch):

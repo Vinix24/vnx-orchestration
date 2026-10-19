@@ -48,6 +48,31 @@ and `resolved_at IS NULL`. `reconcile_track` derives `derived_status='blocked'` 
 that unresolved blocker. The track is now **plan-gated**: nothing should proceed until
 the plan passes.
 
+**Plan scope (since P1 of `plan-gate-alleen-voor-architectuur`).** Only an
+`architecture` track is born plan-gated. A track created since P1 carries
+`plan_scope` in `tracks.metadata_json`, next to `lane_hint`: `architecture` (it gets
+`OI-PLAN-<track>`) or `light` (no plan-gate). `vnx horizon add` requires `--plan-scope architecture|light`
+and refuses without it. The scope moves **up by itself, never down**: the fourth
+deliverable on a light track (`deliverable add`), or a build dispatch at the door whose
+paths fall in the schema, security, gate/merge, store-resolution or `outside-repo` class (a path that leaves the repository), whose
+variant is `coding-strict`, or that names no paths at all (`plan_scope.dispatch_rule`,
+path classes in `smart_router.plan_scope_path_category`). An upward move seeds
+`OI-PLAN-<track>` unless the track already has a plan-gate record; a resolved one is
+never reopened. The scope and the seed commit in one transaction, so a failed seed
+leaves the track `light` and the next attempt tries again. A stored `architecture`
+track with no `OI-PLAN` row of any status (a `horizon add` whose seed failed) gets one
+on the next build dispatch at the door or `set-plan-scope ... architecture`. The door
+refuses nothing for this in P1: it writes the scope, seeds the blocker, prints one
+line, and the dispatch goes on. Down only by hand:
+`vnx horizon set-plan-scope <track> light --reason "..."`, which leaves `OI-PLAN` as it
+is. Every change writes one `track_plan_scope_set` line (old, new, reason, rule) to
+`track_events.ndjson`, the scope chosen at `horizon add` included (old `none`, rule
+`horizon add`), and `vnx horizon show` names the scope and the rule that set it.
+`objective sync` never touches `plan_scope` or `lane_hint`: the ROADMAP seeder's write
+keeps them as stored at write time. A track from before P1 has no `plan_scope`: it
+reads as `architecture` with an open `OI-PLAN` and as `light` without one, and reading
+writes nothing.
+
 ### 2. Plan gate — pass the plan before the work
 
 Two ways to resolve the `OI-PLAN` blocker (both call `_resolve_plan_blocker`, which
@@ -64,6 +89,12 @@ stamps `resolved_at` and reconciles):
 - **`vnx horizon plan-gate attest <track> --reason R --approval-id T`** — the operator
   escape-hatch: attest the gate as passed without re-running the panel. Human-gated
   (reason + approval-id both required); the deviation is recorded, never silent.
+
+How many seats read the plan: one (codex) by default, and a second (opus) in the same
+run when the first returns BLOCK. Both read from the start when a dispatch path is in the
+schema, security or `outside-repo` class. The run prints the composition as a
+`plan-gate seats: ...` line on stderr. Rule, trace lines and rounds per plan version:
+`docs/core/HORIZON_PLANNING.md`, section "Plan-gate composition".
 
 After either, `derived_status` returns to `queued` (unblocked).
 
@@ -95,7 +126,24 @@ prints a warning and the blocker stays resolved. A companion file,
 `.vnx-attest/plan-gate-seats.ndjson`, holds one `plan_gate_seat` record per panelist per
 run. The writer is `scripts/lib/plan_gate_evidence.py` `emit_plan_gate_pass`;
 `verify_plan_gate_pass` reads the chain back and answers verified, present-unsigned or
-absent. No production code calls `verify_plan_gate_pass` yet; the merge gate above is still in progress. Every lock in this chain and every way to open it:
+absent. No production code calls `verify_plan_gate_pass` yet; the merge gate above is still in progress.
+
+What is on and what is not. The chain on `plan-gates.ndjson` is always on: `emit_plan_gate_pass`
+appends through `ndjson_hash_chain.append_chained_entry`, so the per-project switch that
+the receipt ledger needs does not apply here. Signing is off, because the planning CLI
+passes no key. Nothing refuses a merge on a missing or broken record today. To check the
+chain by hand, run `python3 scripts/audit_chain.py verify .vnx-attest/plan-gates.ndjson`
+from the repo root: exit 0 `verified`, exit 1 `broken` with the violations, exit 2
+`unchained` when no line carries `prev_hash`. A verified chain checks internal hash
+consistency only — each chained line's `prev_hash` matches the hash of the line before
+it. It does not establish that no earlier line was changed or removed: rewriting an
+earlier line and recomputing its successor's `prev_hash` (or removing a line and
+re-anchoring the rest) still verifies with exit 0, because the check trusts whatever the
+file itself holds. Without a trusted anchor outside the file, the chain cannot show that
+history was never rewritten. It does not show who wrote a line.
+The receipt ledger is different: its chain is available
+per project and off by default (`docs/core/11_RECEIPT_FORMAT.md`, "Optional hash-chain
+field"). Every lock in this chain and every way to open it:
 `docs/core/LOCKS_AND_RELEASES.md`.
 
 ### 4. Work — dispatch → PR
@@ -119,24 +167,27 @@ nominates CONFIRMED tracks for close. `--apply` writes; without it, it is adviso
 (CHECK) and only reports. `reconcile-review` records a post-run verdict; `reconcile-
 streak` reports the clean-run streak (now observability-only — see auto-close).
 
-Reconcile also completes deliverable stubs. In `scripts/lib/track_reconciler.py`,
-`_reconcile_deliverable_dispatches` (OI-840) runs inside `reconcile_track` before the
-derived status is computed. A deliverable is a `dispatches` row of the track with a
-non-empty `output_ref`. When the track has real dispatches (rows without `output_ref`),
-all of them must be in a terminal state (`completed`, `expired`, `dead_letter`), or
-nothing happens. Evidence is then a `pr_merged` event on one of the real dispatches, or
-track-level evidence: the track's phase is `done`, or every PR number in its `pr_ref` is
-in the merged-PR set (NDJSON, ROADMAP and by default `gh pr list`; `VNX_RECONCILE_GIT=0`
-turns the `gh` source off). With evidence, every deliverable of the track that is not yet
-`completed`, `expired` or `dead_letter` moves to `completed`, whatever its state was:
-`proposed`, `ready` and the in-flight states included. Each one gets a `coordination_events`
-row `deliverable_auto_completed` with actor `reconciler`. The function does not ask GitHub
-itself, does not set `pr_ref` or `operator_approved_at`, does not look at the plan gate,
-an `OI-PLAN` blocker or the promote state, and writes no receipt. It runs on every
-`reconcile_track` or `reconcile_all_tracks` call, so a check-mode `vnx horizon reconcile`
-writes these completions too. It is idempotent. It bit on 2026-10-04 (OI-1969): a
-follow-up deliverable proposed on a track with merged PRs was completed within minutes,
-without a promote.
+Reconcile also ends the deliverable stubs of a track a human declared done. In
+`scripts/lib/track_reconciler.py`, `_reconcile_deliverable_dispatches` (OI-840, OI-1969)
+runs inside `reconcile_track` before the derived status is computed. A deliverable is a
+`dispatches` row of the track with a non-empty `output_ref`. The function writes nothing
+unless the track's `phase` is `done` and every non-deliverable dispatch of the track is
+in a terminal state (`completed`, `expired`, `dead_letter`); zero real dispatches is
+terminal by definition. Only then, for each deliverable of the track that is not yet
+`completed`, `expired` or `dead_letter`: a `proposed` stub moves to `expired` with a
+`coordination_events` row `deliverable_expired_on_done` (nothing was built), and every
+other non-terminal stub (`ready` and the in-flight states) moves to `completed` with a
+row `deliverable_auto_completed`, both with actor `reconciler`. Merged-PR or track-level
+evidence never completes a stub: nothing links a worker dispatch to the deliverable it
+implements, so the reconciler only reports such stubs as close candidates
+(`deliverable_close_candidates`) for `vnx deliverable close --evidence`. The function
+does not ask GitHub itself, does not set `pr_ref` or `operator_approved_at`, does not
+look at the plan gate, an `OI-PLAN` blocker or the promote state, and writes no receipt.
+It runs on every `reconcile_track` or `reconcile_all_tracks` call, so a check-mode
+`vnx horizon reconcile` writes these transitions too. It is idempotent. #2048
+(`6de7fdbc8`) landed this rule after OI-1969: on 2026-10-04 a follow-up deliverable
+proposed on a track with merged PRs was completed within minutes, without a promote;
+today that stub expires instead.
 
 ### 7. Close — evidence + revalidation
 

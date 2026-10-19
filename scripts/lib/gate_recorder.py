@@ -35,6 +35,7 @@ from governance_emit import _classify_lane_log_text  # the fabric's single quota
 from governance_receipts import emit_governance_receipt, utc_now_iso
 import gate_depth
 import provider_reachability
+import provider_switch
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +119,60 @@ def resolve_gate_provider(gate: str) -> Optional[Tuple[str, str]]:
     return GATE_PROVIDERS.get(gate)
 
 
+# The reason a review gate is booked under when the operator's provider switch refuses its
+# provider family (provider-schakelaar C). Never a reachability fact: a record with this
+# reason is ``not_executable``, which neither the reachability feed nor the takeover walk's
+# exhaustion check reads as quota, credit or auth.
+PROVIDER_SWITCHED_OFF_REASON = provider_switch.REASON_SWITCHED_OFF
+
+
+def switch_project_id(state_dir: Optional[Path]) -> Optional[str]:
+    """The project a gate's switch decisions are for: the one its own state dir names.
+
+    The state dir is the explicit statement of whose gate this is, so it is passed to the
+    switch as the explicit project. ``None`` when it names no project; the switch then
+    resolves one itself (``VNX_PROJECT_ID``, then the process's state dir).
+    """
+    if state_dir is None:
+        return None
+    import vnx_paths  # deferred import: pulls in data_dir_guard / project_root
+
+    return vnx_paths.project_id_from_state_dir(Path(state_dir)) or None
+
+
+def gate_never_switched(gate: str) -> bool:
+    """True when ``gate``'s family is a class the switch never refuses (decision 2b).
+
+    ``codex_gate`` is codex, the claude gates are claude and the ``gh`` gates are tooling:
+    answered from the gate name alone, without reading the switch or resolving a project. A
+    gate the family map does not know is not answered here; the switch decides it, and so
+    refuses it (fail-closed).
+    """
+    try:
+        family = provider_switch.family_of(gate)
+    except provider_switch.UnknownProviderError:
+        return False
+    return family in provider_switch.NON_SWITCHABLE_CLASSES
+
+
+def gate_switch_refusal(
+    gate: str, *, consumer: str = "review_gate", state_dir: Optional[Path] = None,
+) -> Optional[provider_switch.SwitchDecision]:
+    """The provider switch's refusal for ``gate``, or ``None`` when it may be called.
+
+    The gate name is the identifier: ``kimi_gate`` decides the ``kimi`` family. A class the
+    switch never refuses is answered by :func:`gate_never_switched`. An unregistered gate
+    returns ``None``: it has no provider to call, and the caller's own
+    ``unsupported_gate_type`` answer stays the one that names it. A registered gate the family
+    map does not know is decided, and so refused (fail-closed). Read fresh on every call, so a
+    switch change takes effect on the next request.
+    """
+    if resolve_gate_provider(gate) is None or gate_never_switched(gate):
+        return None
+    decision = provider_switch.decide(gate, consumer=consumer, project_id=switch_project_id(state_dir))
+    return None if decision.allowed else decision
+
+
 def harness_lane_dispatch_prefix(gate: str) -> str:
     """Return the gate-eigen dispatch-id prefix for a harness-lane gate.
 
@@ -176,7 +231,9 @@ def gate_dispatch_identity_error(gate: str, dispatch_id: Optional[str]) -> Optio
     )
 
 
-def gate_is_available(gate: str, *, repo_root: Optional[Path] = None) -> bool:
+def gate_is_available(
+    gate: str, *, repo_root: Optional[Path] = None, state_dir: Optional[Path] = None,
+) -> bool:
     """Availability by REGISTRATION plus lane executability, never path existence.
 
     dispatch 20260911-c6 step 2. The previous rule — ``<runner_path>.exists()``
@@ -199,7 +256,12 @@ def gate_is_available(gate: str, *, repo_root: Optional[Path] = None) -> bool:
     - ``script_runner`` the gate IS a repo script: available when the script
       file is on disk. A gate that still needs a file keeps that check.
     - ``harness_lane``  the gate is config-based: available by registration
-      alone. There is no file to look for, and none is expected.
+      and the operator's provider switch. There is no file to look for, and
+      none is expected. A harness-lane gate whose family is switched off is
+      not available, so the request-time helpers (``_kimi_gate_available``
+      and friends) and every other caller see the same answer; ``state_dir``
+      names the project the switch decides for (provider-schakelaar C). A
+      switch refusal is not a reachability fact and is never booked as one.
 
     An unregistered gate raises :class:`UnknownGateProvider` — never ``False``,
     never a fallback to a binary name invented from the gate's own name.
@@ -221,7 +283,9 @@ def gate_is_available(gate: str, *, repo_root: Optional[Path] = None) -> bool:
     if kind == GATE_PROVIDER_SCRIPT_RUNNER:
         return ((repo_root or _repo_root()) / name).exists()
     if kind == GATE_PROVIDER_HARNESS_LANE:
-        return True
+        return gate_switch_refusal(
+            gate, consumer="gate_recorder.gate_is_available", state_dir=state_dir,
+        ) is None
     raise UnknownGateProvider(
         f"{gate} has an unknown provider kind {kind!r} — cannot determine availability"
     )
@@ -634,6 +698,10 @@ _TAKEOVER_FIELDS: Tuple[str, ...] = (
     "takeover_path",
 )
 
+# The request fields the round ledger (R1, ``review_rounds``) reads off a verdict:
+# the seat the request filled, and an ``--override-b3`` the request applied.
+_ROUND_FIELDS: Tuple[str, ...] = ("seat", "override_b3")
+
 
 def stamp_request_identity(
     result_payload: Dict[str, Any],
@@ -697,12 +765,54 @@ def stamp_request_identity(
     if request_payload.get("takeover") is True:
         for field in _TAKEOVER_FIELDS:
             result_payload[field] = request_payload.get(field)
+    # R1: the seat the request filled and an applied --override-b3 travel with the
+    # verdict, so the round ledger books it in that seat, with that override.
+    for field in _ROUND_FIELDS:
+        if request_payload.get(field):
+            result_payload[field] = request_payload[field]
     return result_payload
 
 
 class ResultOverwriteRefused(ValueError):
     """A write would replace a terminal, evidenced gate result with a less
     decided one (OI-1469/OI-1470)."""
+
+
+class RoundRefused(ResultOverwriteRefused):
+    """The round ledger refuses this verdict (R1): its seat already has a verdict
+    on this head, or the codex seat of a PR at the B3 cap has no override.
+
+    A :class:`ResultOverwriteRefused`, so every writer's existing refusal path
+    handles it: the record is not written and nothing is published.
+    ``reason`` is ``review_rounds.REFUSED_VERDICT_ON_HEAD`` or ``REFUSED_B3_CAP``.
+    """
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
+def _book_round(result_path: Path, payload: Dict[str, Any], *, gate: str) -> None:
+    """Book a review-seat verdict in the round ledger before its result record lands (R1).
+
+    Runs inside the result slot's lock, after the overwrite guard admitted the
+    write and before ``_write_result_atomic``. A refusal raises
+    :class:`RoundRefused`; a ledger that cannot be read or written raises
+    ``review_rounds.RoundLedgerError`` (an ``OSError``), so the run fails and no
+    verdict is published. Anything that is no review-seat verdict passes
+    through untouched (``review_rounds.book_result_verdict``).
+    """
+    # Deferred: review_rounds reads review_seats (and closure_verifier) at call time.
+    import review_rounds
+
+    existing = _read_existing_result(result_path)
+    try:
+        review_rounds.book_result_verdict(
+            result_path, payload, gate=gate, on_disk=existing if isinstance(existing, dict) else None,
+        )
+    except review_rounds.RoundRefusal as exc:
+        logger.warning("gate_recorder: round ledger refuses %s verdict pr=%s — %s", gate, payload.get("pr_number"), exc)
+        raise RoundRefused(str(exc), reason=exc.reason) from exc
 
 
 def result_is_for_head(result: Dict[str, Any], head_sha: str) -> bool:
@@ -771,8 +881,14 @@ def result_is_for_head(result: Dict[str, Any], head_sha: str) -> bool:
 # over either of them anyway (no runner on disk; no route to one), so widening
 # the hole for them buys nothing and costs the protection. A reason enters
 # this set on a measurement, not on a resemblance.
+#
+# ``provider_switched_off`` (provider-schakelaar C) is the operator's switch
+# saying the gate may not be called right now: a statement about this process's
+# permission, not about the PR or the provider. Once the family is switched back
+# on, the gate's own result for the same head replaces it whatever its status.
 NON_VERDICT_NOT_EXECUTABLE_REASONS: frozenset = frozenset({
     "gate_not_subprocess_routable",
+    PROVIDER_SWITCHED_OFF_REASON,
 })
 
 
@@ -817,10 +933,16 @@ def is_routing_announcement(result: Dict[str, Any]) -> bool:
 # reasons are the runner describing itself — a missing runner or an
 # unregistered gate is no more a verdict about the PR than a refused routing
 # is. A reason enters this set on a measurement, not on a resemblance.
+#
+# ``provider_switched_off`` belongs here too: the switch governs calls, never
+# evidence (provider-schakelaar C). Switching a family off must not erase what
+# its provider already did on this head, an ``unavailable`` outage included, so
+# a switch note lands only on an empty slot or over another runner-refusal note.
 RUNNER_REFUSAL_NOT_EXECUTABLE_REASONS: frozenset = frozenset({
     "gate_not_subprocess_routable",
     "gate_runner_missing",
     "unsupported_gate_type",
+    PROVIDER_SWITCHED_OFF_REASON,
 })
 
 
@@ -1571,10 +1693,15 @@ def _emit_terminal_result_receipt(
         "blocking_count": blocking_count,
         "verification": verification,
     }
-    for key in ("dispatch_id", "provider", "model", "pr_id", "final_prompt_sha256"):
+    for key in ("dispatch_id", "provider", "model", "pr_id", "final_prompt_sha256", "seat", "takeover_from"):
         value = str(payload.get(key) or "").strip()
         if value:
             fields[key] = value
+    # R1: the head the verdict is about (the round ledger's key), and an applied
+    # --override-b3 with its reason, so the audit copy carries both.
+    fields["head_sha"] = str(payload.get("commit_sha") or "").strip()
+    if isinstance(payload.get("override_b3"), dict):
+        fields["override_b3"] = payload["override_b3"]
     pr_number = payload.get("pr_number")
     if isinstance(pr_number, int) and not isinstance(pr_number, bool):
         fields["pr_number"] = pr_number
@@ -1783,6 +1910,7 @@ def write_result_guarded(
     with slot_lock(result_path):
         try:
             _check_overwrite_guard(result_path, payload, gate=gate, pr_ref=pr_ref)
+            _book_round(result_path, payload, gate=gate)
         except ResultOverwriteRefused:
             if audit_refusal:
                 _audit_write_refusal(result_path, gate, pr_ref, payload)
@@ -1911,6 +2039,7 @@ def record_terminal_result(
     with slot_lock(result_path):
         try:
             _check_overwrite_guard(result_path, payload, gate=gate, pr_ref=pr_id)
+            _book_round(result_path, payload, gate=gate)
         except ResultOverwriteRefused:
             _audit_write_refusal(result_path, gate, pr_id, payload)
             _archive_finished_gate_bundle(payload, gate=gate, result_path=result_path)

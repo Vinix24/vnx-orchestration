@@ -38,6 +38,7 @@ import glm_gate
 import kimi_gate
 import plan_gate_panel as pgp
 import plan_gate_tiebreaker as pgt
+from review_seat_support import open_pr_in_ledger
 
 _PR = "2060"
 _HEAD_SHA = "4ac2669a145d38087058b886a2b8bafc30fc8a03"
@@ -135,6 +136,8 @@ def _run_live(module, tmp_path, monkeypatch, report_for):
         return dispatch
 
     monkeypatch.setattr(module, "_make_default_dispatcher", factory)
+    # R1: the gate request that starts a governed run opens the PR in the round ledger.
+    open_pr_in_ledger(data_dir / "state", _PR)
     rc = module.main(["--pr", _PR, "--data-dir", str(data_dir)])
     record = json.loads(_result_path(data_dir, module.__name__).read_text(encoding="utf-8"))
     return rc, record, data_dir
@@ -179,6 +182,7 @@ class TestStandaloneGateRefusesACutOffReport:
         )
         door = closure_verifier.check_review_gate_for_merge(
             _PR, gate, data_dir / "state" / "review_gates" / "results",
+            seats=[gate],  # one-seat project (OI-2058 R5b: the door needs every seat of the stack)
         )
         assert door["verdict"] != "GO", door["message"]
 
@@ -208,6 +212,7 @@ class TestStandaloneGateRefusesACutOffReport:
         assert (rc, record["status"], record["reason"]) == (0, "pass", "verdict")
         door = closure_verifier.check_review_gate_for_merge(
             _PR, module.__name__, data_dir / "state" / "review_gates" / "results",
+            seats=[module.__name__],  # one-seat project (OI-2058 R5b: the door needs every seat of the stack)
         )
         assert door["verdict"] == "GO", door["message"]
 

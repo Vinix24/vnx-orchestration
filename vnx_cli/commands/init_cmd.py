@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from xml.parsers.expat import ExpatError
 
 from vnx_cli import _engine, __version__
 
@@ -331,6 +332,31 @@ def _render_template(tmpl_path: Path, ctx: dict) -> str:
     return env.get_template(tmpl_path.name).render(**ctx)
 
 
+def _assert_engine_root_renderable(engine_root: str) -> None:
+    """Refuse an engine root that cannot sit inside a hook command (OI-2117 item e).
+
+    ``settings.json.j2`` puts ``engine_root`` into shell source inside double quotes. A quote, a
+    ``$(`` or a backtick in the path would end the string or run code, so the value is rendered
+    through ``t0_subagent_block.registered_command``, which accepts only the allowlist
+    ``hook_coverage.registered_command`` applies to a VNX home; its ValueError names the value.
+    A test pins the template's literal command to that function's output.
+    """
+    _engine.ensure_engine_on_path()
+    import t0_subagent_block
+
+    t0_subagent_block.registered_command(engine_root)
+
+
+def _print_missing_guard_notice() -> None:
+    """One line when no account has the user-level T0 guard (the templates do not register it)."""
+    _engine.ensure_engine_on_path()
+    import guard_install
+
+    notice = guard_install.missing_guard_notice(guard_install.home_dir())
+    if notice:
+        print(f"  {notice}")
+
+
 def _scaffold_claude_dir(project_dir: Path, tmpl_root: Path, ctx: dict, force: bool) -> None:
     """Create the .claude/ skeleton from templates."""
     claude_dir = project_dir / ".claude"
@@ -356,8 +382,10 @@ def _scaffold_claude_dir(project_dir: Path, tmpl_root: Path, ctx: dict, force: b
     # .vnx-version pin (OI-695). Operators refresh the VNX-owned keys via
     # `vnx regen-settings --merge`, not by clobbering the project file.
     if not settings_path.exists():
+        _assert_engine_root_renderable(ctx["engine_root"])
         _atomic_write(settings_path, _render_template(tmpl_root / "settings.json.j2", ctx), project_dir)
         print(f"  created {settings_path.relative_to(project_dir)}")
+        _print_missing_guard_notice()
     else:
         print(f"  exists  {settings_path.relative_to(project_dir)}")
 
@@ -861,7 +889,7 @@ def _install_launchd_agent(
     # plist_name argument — see the docstring above.
     try:
         resolved_label = plistlib.loads(content.encode("utf-8")).get("Label")
-    except (plistlib.InvalidFileException, ValueError):
+    except (plistlib.InvalidFileException, ExpatError, ValueError):
         resolved_label = None
     if not isinstance(resolved_label, str) or not resolved_label:
         raise RuntimeError(
@@ -970,7 +998,9 @@ def _install_receipt_processor_runner(vnx_home: str, project_id: str = "") -> bo
     )
 
 
-def _install_cleanup_reviewed_worktrees_runner(vnx_home: str, project_id: str = "") -> bool:
+def _install_cleanup_reviewed_worktrees_runner(
+    vnx_home: str, project_id: str = "", *, project_root: str
+) -> bool:
     """Install the cleanup-reviewed-worktrees launchd plist (OI-1629 deel c).
 
     Thin wrapper over ``_install_launchd_agent``, mirroring
@@ -980,14 +1010,17 @@ def _install_cleanup_reviewed_worktrees_runner(vnx_home: str, project_id: str = 
     even though ``scripts/cleanup_reviewed_worktrees.py`` has a ``--repo-root``
     flag, so every other repo's ``.vnx-data/worktrees/`` grew unchecked.
 
-    The one thing this wrapper adds over the other runners is which checkout
-    to sweep. The worktrees live under each project's own checkout, not under
-    the engine root, and a central install shares one engine across many
-    projects. ``VNX_PROJECT_ROOT`` is the central shim's export for "the
-    project checkout vnx init is running inside"; a standalone dev checkout
-    has no shim, and there VNX_HOME IS the checkout, so fall back to it.
+    The worktrees live under each project's own checkout, not under the engine
+    root, and a central install shares one engine across many projects. The
+    caller names the checkout (``vnx init`` passes the directory it initialises);
+    there is no fallback to the engine root, so a job can never sweep the
+    engine install (OI-1629 B).
     """
-    project_root = os.environ.get("VNX_PROJECT_ROOT") or vnx_home
+    if not (project_root or "").strip():
+        raise RuntimeError(
+            "cleanup-reviewed-worktrees needs the project checkout (project_root); "
+            "refusing to fall back to the engine root"
+        )
     return _install_launchd_agent(
         vnx_home,
         "com.vnx.cleanup-reviewed-worktrees",
@@ -1146,7 +1179,7 @@ def _vnx_init_scaffold(project_dir, template, force, set_version, project_id) ->
     # --- OI-1629 deel c: install cleanup-reviewed-worktrees launchd agent ------
     try:
         installed = _install_cleanup_reviewed_worktrees_runner(
-            str(_engine.engine_root()), project_id=project_id
+            str(_engine.engine_root()), project_id=project_id, project_root=str(project_dir)
         )
         if not installed:
             print("  skipped cleanup-reviewed-worktrees (plist template not found or install root refused, see above)")

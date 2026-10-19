@@ -7,14 +7,14 @@
 
 ## 1) Receipts Are the Canonical Audit Trail
 **Context**: Chat transcripts are not queryable, replayable, or auditable.  
-**Decision**: Append-only NDJSON receipts are the source of truth.  
-**Tradeoff**: File-based state requires careful tooling and housekeeping.
+**Decision**: Append-only NDJSON receipts are the source of truth (ADR-005).  
+**Tradeoff**: File-based state requires careful tooling and housekeeping. A hash chain over the ledger exists per project and is off by default (ADR-023), so the ledger is append-only but not tamper-evident until a project turns the chain on.
 
 ---
 
 ## 2) Governance Gates Are Default (Human-in-the-Loop)
 **Context**: Autonomous agent cascades cause silent failures.  
-**Decision**: Staging → promote and popup confirmation are default paths.  
+**Decision**: A staged bundle that a human fires is the default path (ADR-006, ADR-024); `vnx dispatch stage` never fires. The older PR-queue path still uses staging and promote.  
 **Tradeoff**: Slower throughput, but much higher safety and auditability.
 
 ---
@@ -26,39 +26,53 @@
 
 ---
 
+## 3b) One Reviewer Per Seat, Rejection Always Blocks
+**Context**: A merge that one reviewer passed while another rejected is a silent hole in review.  
+**Decision**: Every seat of the review stack (default `codex_gate,kimi_gate`) is filled by a distinct reviewer, any review peer's rejection on the head blocks, and a reviewer that is out is absence, not a vote (ADR-008, ADR-037). A seat whose reviewer is out passes along the takeover chain `codex_gate,kimi_gate,deepseek_gate`; `glm_gate` is no longer in the default chain. Seats and chain: `docs/core/00_VNX_ARCHITECTURE.md` (Review Seats), `docs/core/PROVIDER_LANES.md` (Takeover chain). On main, not yet released.  
+**Tradeoff**: A PR can wait on a seat that has no distinct reviewer left, and the seat then ends as `chain_exhausted`.
+
+---
+
+## 3c) Plan Before Build, With One Seat
+**Context**: A track could be dispatched and merged with its plan never gated (ADR-030).  
+**Decision**: A track is born plan-gated. One seat reads the plan and a second reads it only when the first returns BLOCK. A pass leaves a hash-chained record in `.vnx-attest/plan-gates.ndjson`, unsigned, so it shows tampering and does not prove authorship. Detail: `docs/core/HORIZON_LIFECYCLE.md`.  
+**Tradeoff**: One seat is cheaper and was measured to match the panel in 35 of 36 runs (`configs/plan_gate_panel.yaml`), but it is one reader.
+
+---
+
 ## 4) `tmux send-keys` for Dispatch Delivery
 **Status**: Superseded for Claude dispatches (2026-09-18).
 **Context**: REPL terminals do not provide stable IPC or reliable polling signals.  
 **Decision**: Deliver dispatches via `tmux send-keys` and paste-buffer flow.  
-**Tradeoff**: Brittle in theory. It was superseded for Claude workers: the tmux-spawn lane was removed on 2026-09-18, and `claude_headless` (`claude -p` via envelope) is now the only Claude dispatch lane. `tmux send-keys` remains the injection path for interactive codex/kimi/gemini terminals.
+**Tradeoff**: Brittle in theory. It was superseded for Claude workers: the tmux-spawn lane was removed on 2026-09-18, and `claude_headless` (`claude -p` via envelope) is now the only Claude dispatch lane (`docs/core/DISPATCH_RULES.md` section 5). `tmux send-keys` remains the injection path for interactive codex/kimi/gemini terminals and for the T0 rotation spawner.
 
 ---
 
-## 5) No Terminal Restart, Prefer `/clear`
-**Context**: Restarting terminals can break pane locks and orphan state.  
-**Decision**: Clear/refresh sessions in-place rather than restart when possible.  
-**Tradeoff**: Manual discipline required; avoids state corruption and lock storms.
+## 5) Hand Over, Do Not Restart In Place
+**Context**: A T0 session loses quality as its context fills, and restarting a terminal can break pane locks and orphan state.  
+**Decision**: A guard measures T0's context and a handover moves the work to a fresh session, through the rotation spawner (`docs/operations/T0_CONTEXT_ROTATION.md`) or the context-rotation plugin in `packages/claude-code-toolkit/context-rotation/`, where the user types `/clear` and the handover is restored.  
+**Tradeoff**: A handover is written text, so what it omits is lost; the wrap proof refuses a handover that was not written.
 
 ---
 
 ## 6) No “Skip Permissions” Default
 **Context**: Agent write freedom is the highest risk vector.  
-**Decision**: Permissions are explicit and scoped; no global skip by default.  
-**Tradeoff**: Slightly more friction, far fewer irreversible mistakes.
+**Decision**: Permissions are explicit and scoped per role (`docs/operations/WORKER_PERMISSIONS.md`); a detached worker runs scoped (`--permission-mode acceptEdits`, no ambient MCP servers, a role allow/deny list) unless an operator opts into blanket skip.  
+**Tradeoff**: Slightly more friction, far fewer irreversible mistakes. A detached worker has no terminal to answer a prompt, so its role profile has to be right.
 
 ---
 
 ## 7) Track-Agnostic Terminals (Legacy Track Mapping)
 **Context**: Track A/B/C originally mapped to T1/T2/T3 for simplicity.  
-**Decision**: Terminals are now track-agnostic; mapping exists only for legacy compatibility.  
+**Decision**: T1/T2/T3 are role labels on dispatches, not standing panes; a worker is ephemeral and per dispatch (ADR-024). Terminal-pinned workers remain opt-in (`VNX_ADAPTER_T{n}=subprocess`).  
 **Tradeoff**: Requires clearer dispatch metadata, but supports scale and flexibility.
 
 ---
 
-## 8) `progress_state.yaml` as Runtime State Ledger
+## 8) One Reconciled State, Not Several Ledgers
 **Context**: Multiple state files drifted in early versions.  
-**Decision**: One canonical progress ledger updated by dispatcher + receipt processor.  
-**Tradeoff**: Requires correct terminal detection to avoid stale status.
+**Decision**: State is derived from receipts and a per-project store and reconciled, not hand-edited (ADR-026, `docs/core/STATE_FABRIC.md`). `progress_state.yaml` is read by the T0 state builder as one input among others. A dispatch is finished only when a T0 records accept or reject, so open outcomes stay listed (`docs/core/DISPATCH_RULES.md` section 13).  
+**Tradeoff**: Several readers must agree; `vnx pr-ready` and the merge door read one seat evaluation for that reason.
 
 ---
 

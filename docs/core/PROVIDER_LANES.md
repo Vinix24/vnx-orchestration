@@ -27,8 +27,8 @@ do not yet behave identically.
 | codex | `codex exec` CLI | OpenAI CLI auth | strict diff-mode review | `scripts/lib/provider_dispatch.py` (`_dispatch_codex`) |
 | gemini | gemini CLI | Google CLI auth | analysis / non-review work (not a reviewer) | `scripts/lib/provider_dispatch.py` (`_dispatch_gemini`) |
 | kimi | Kimi CLI (`kimi login` OAuth) | Kimi CLI OAuth | synthesis / operational review | `scripts/lib/provider_dispatch.py` (`_dispatch_kimi`) |
-| deepseek-harness | `claude` CLI pointed at DeepSeek's Anthropic-compatible endpoint | own `DEEPSEEK_API_KEY`, key-auth | analysis / implementation on a non-Claude model | `scripts/lib/provider_dispatch.py` (`_dispatch_deepseek_harness`) |
-| glm-harness | `claude` CLI pointed at a local litellm proxy (`:4141`) fronting OpenRouter | own OpenRouter key, key-auth (`zai-via-openrouter-only`, `glm-via-harness-only`) | review takeover fallback (glm_gate, standing seat unavailable) | `scripts/lib/provider_dispatch.py` (`_dispatch_glm_harness`) |
+| deepseek-harness | `claude` CLI pointed at DeepSeek's Anthropic-compatible endpoint | own `DEEPSEEK_API_KEY`, key-auth | analysis / implementation on a non-Claude model; takeover reviewer (`deepseek_gate`) | `scripts/lib/provider_dispatch.py` (`_dispatch_deepseek_harness`) |
+| glm-harness | `claude` CLI pointed at a local litellm proxy (`:4141`) fronting OpenRouter | own OpenRouter key, key-auth (`zai-via-openrouter-only`, `glm-via-harness-only`) | review seat reached through an explicit takeover chain or stack (not in the default chain) | `scripts/lib/provider_dispatch.py` (`_dispatch_glm_harness`) |
 | ollama | local Ollama resolver | none (local) | privacy-sensitive work, resolver layer | routed via litellm `ollama` sub-provider |
 
 ### claude-headless
@@ -76,8 +76,8 @@ dispatch leaves the same NDJSON trail as a Claude dispatch.
 A provider lane for non-review work. Gemini is not a reviewer: the operator
 retired it as one on 2026-09-26, after a measurement of one `gemini_review`
 record ever and no verdict among them (its binary was never on PATH). The
-review stack is codex plus kimi on subscription, with glm and deepseek only as
-takeover fallback. `gemini_review` is no longer a registered gate name
+review stack is codex plus kimi on subscription, with deepseek as takeover
+fallback and glm outside the default chain (see "Takeover chain" below). `gemini_review` is no longer a registered gate name
 (`dispatch_spec.RETIRED_GATE_NAMES`): a `VNX_DEFAULT_REVIEW_STACK` that still
 carries it drops the name with a warning, while a takeover chain or a
 dispatch spec's declared gate that names it is refused outright. Existing
@@ -113,10 +113,79 @@ Measured on Claude Code 2.1.150 (2026-05-26): with the hardening above, zero
 calls reached `api.anthropic.com` and all inference went to the DeepSeek
 endpoint. That measurement is the basis for allowing the keyed lane at all.
 
+### Harness lanes: a fabric-owned config dir
+
+The glm and deepseek harness lanes start a `claude` child against a redirected
+endpoint. Left alone the child would inherit the operator's `CLAUDE_CONFIG_DIR`
+and send the user `CLAUDE.md` with its imports, the user memory and the personal
+skills to a third-party provider. `ensure_harness_config_dir(lane)`
+(`scripts/lib/provider_spawns/harness_config_dir.py`) gives each lane its own
+directory, `<VNX_DATA_DIR>/harness-config/<lane>/` (mode 0700). The only file the
+fabric writes there is a `settings.json` with the destructive Bash `ask` rules.
+The overlay is applied last in the glm and deepseek spawns, together with
+`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, and every harness child carries `--bare` so it
+does not walk up the tree for ancestor `CLAUDE.md` files. The helper fails closed
+(`HarnessConfigDirError`): it never falls back to inheritance. A `plugins/`
+directory may hold exactly the two plugin-catalog cache files the CLI writes on
+its own (`PLUGIN_CACHE_ALLOWLIST`); any other entry keeps the refusal.
+
+These lanes authenticate by key, so a fresh directory costs them no login. The
+claude-headless lane does not use this helper: its subscription login is bound to
+its config-dir path, so it keeps the `CLAUDE_CONFIG_DIR` of the process that fires
+it. This is code behaviour; no ADR records it.
+
 ### ollama
 
 Local Ollama for the resolver layer and privacy-sensitive work, where no data
 leaves the machine. Routed through the litellm `ollama` sub-provider.
+
+## Takeover chain
+
+A review seat that cannot read a PR hands it to the next gate in the takeover
+chain. The default is `codex_gate,kimi_gate,deepseek_gate`
+(`gate_request_handler._DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN`). Both subscription
+gates come first and the API-credit gate follows. `glm_gate` is not in the default
+chain: it stays a registered gate, and an explicit `VNX_REVIEW_GATE_TAKEOVER_CHAIN`
+or review stack that names it still reaches it. A takeover record of
+`deepseek_gate` signs the seat it took over at the merge door, because
+`deepseek_gate` is a `Gate` enum member and a review peer in the closure verifier.
+A chain that runs out ends as `chain_exhausted`, never as a silent re-dispatch.
+The default chain and the removal of `glm_gate` from it are on main, not yet released.
+The chain, the seat rule and the merge-door checks are described once, in
+`DISPATCH_RULES.md` (section 2 and the review-stack bullet) and
+`docs/core/45_HEADLESS_REVIEW_EVIDENCE_CONTRACT.md`. The decisions behind them:
+ADR-008 (amended 2026-09-26) and ADR-037.
+
+## Provider switch
+
+`vnx providers` is the operator's one place to turn model providers on and off
+(`scripts/providers_cli.py`, `scripts/lib/provider_switch.py`). One file,
+`~/.vnx/providers.json` (`VNX_PROVIDER_SWITCH_FILE` moves it), holds a switch per
+provider family, globally and per project. Families are `deepseek`, `glm`, `kimi`,
+`gemini`, `local` and `openrouter`; one family covers every route to the same
+model maker, so `deepseek` covers deepseek-harness, `deepseek_gate`, the
+classifier provider and DeepSeek through OpenRouter. `claude`, `codex` and the
+`gh`-based tooling gates are never switchable.
+
+```
+vnx providers list [--json]
+vnx providers off|on <family> [--project <pid>] [--reason <text>]
+vnx providers reset <family> --project <pid>
+vnx providers repair [--empty]
+vnx providers check <identifier>      # exit 0 allowed, 4 switched off
+```
+
+The switch is read fresh on every decision, so a change reaches the next call in
+every process. It governs calls, never evidence: a refusal is booked as
+`provider_switched_off`, never as an auth, credit or quota failure. Every function
+that launches a non-claude provider process must call `provider_switch.require`
+first. `ENFORCED` in `provider_switch.py` lists the launch functions that already
+call it; `PENDING_B` lists the ones that do not call it yet. The
+write verbs refuse while any launch function is still pending, and refuse from a
+linked worktree or from inside a dispatch. `vnx providers list` prints the current
+enforcement state and the pending functions. Review gates and the intelligence
+callers honor the switch (see `DISPATCH_AND_INTELLIGENCE_ARCHITECTURE.md`). On
+main, not yet released. This is code behaviour; no ADR records it.
 
 ## Report-writing divergence
 
@@ -148,8 +217,9 @@ report is synthesized.** These lanes do not author a report. `_emit_governance`
 builds the unified report from the captured `completion_text` of the spawn
 result. The report body is a synthesis of what the process printed, not a
 document the worker chose to write. This lane (and the `claude_headless` lane
-in `dispatch_envelope.py`, which still has its own local `_prepare()`/`_govern()`
-rather than the shared `dispatch_prepare`/`dispatch_govern` modules) remain
+in `dispatch_envelope.py`, which prepares and governs through `envelope_prepare.py`
+and `envelope_govern.py` rather than the shared `dispatch_prepare`/`dispatch_govern`
+modules) remain
 un-migrated — tracked as follow-up slices of the same Option B parity work.
 
 **The known gap.** An analysis-only dispatch on a provider_dispatch lane (review,
@@ -158,8 +228,7 @@ built from `completion_text`, and for some lanes the substantive output lands in
 the event stream rather than in a single completion string. When that happens the
 text is recoverable from `.vnx-data/events/` (live or archived under
 `.vnx-data/events/archive/`), but the unified report itself reads thin. This is a
-real gap, not a feature. Closing it is the Option B report-parity work targeted
-for 1.1: bring the synthesized-report path up to the same evidence quality as the
+real gap, not a feature. Closing it is the Option B report-parity work, still open: bring the synthesized-report path up to the same evidence quality as the
 worker-authored path.
 
 If you are debugging a thin report on a review lane, look in the event stream
@@ -179,7 +248,7 @@ before concluding the dispatch did nothing.
 Code-and-commit work goes to a Claude lane because that is where report
 authorship and receipt quality are strongest. The only Claude lane is
 claude-headless (subscription-billed). Review work goes to codex-exec or
-kimi (the harness lanes only as takeover fallback), and analysis work also to
+kimi (deepseek-harness only as takeover fallback), and analysis work also to
 gemini, with the report-divergence caveat above in mind for analysis-only
 dispatches.
 
@@ -193,7 +262,7 @@ I do not claim parity that is not measured.
   report-gate status is in `DISPATCH_RULES.md` §8.
 - **codex / kimi** are the review lanes. **gemini** is a non-review provider lane.
   They emit receipts, reports, and an event trail. The synthesized-report
-  thinness on analysis-only dispatches is the open gap (1.1).
+  thinness on analysis-only dispatches is the open gap.
 - **deepseek-harness** is governed and account-safe with the own key. Its
   effectiveness was operator-measured on coding and tool tasks; that measurement
   is internal, not a published benchmark.
@@ -202,7 +271,7 @@ I do not claim parity that is not measured.
 The receipt format and the intelligence layer are uniform across all lanes
 today. Per-lane parity on the full PREPARE/GOVERN envelope, and the synthesized-
 report parity for analysis-only dispatches, is the dispatch-unification work
-targeted for the 1.x release.
+that is still open.
 
 ## Single-entry door (default lane)
 

@@ -46,6 +46,7 @@ sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 
 import closure_verifier
 from pr_readiness import collect_gate_evidence
+from review_seat_support import pin_review_stack
 
 # Mirrored from the live vnx-dev store for PR #1836.
 PR_ID = "1836"
@@ -124,7 +125,8 @@ def _booked_setup(tmp_path: Path, **result_overrides):
 
 def _check(root: Path, gate: str = "codex_gate", head_sha=HEAD_SHA) -> dict:
     return closure_verifier.check_review_gate_for_merge(
-        PR_ID, gate, root / "results", branch=BRANCH, head_sha=head_sha
+        PR_ID, gate, root / "results", branch=BRANCH, head_sha=head_sha,
+        seats=[gate],  # one-seat project (OI-2058 R5b: the door needs every seat of the stack)
     )
 
 
@@ -362,7 +364,8 @@ class TestReadinessReadsTheSameSource:
     from the SAME source as the merge door — including where the evidence came
     from, so a reader never thinks codex itself looked."""
 
-    def test_collect_gate_evidence_carries_the_booking_provenance(self, tmp_path):
+    def test_collect_gate_evidence_carries_the_booking_provenance(self, tmp_path, monkeypatch):
+        pin_review_stack(monkeypatch, "codex_gate")  # one-seat project (OI-2058 R5b)
         state_dir = tmp_path / "state"
         results_dir = state_dir / "review_gates" / "results"
         report = _report_file(tmp_path)

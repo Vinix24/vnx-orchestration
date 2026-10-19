@@ -118,8 +118,11 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "Comma-separated default review-gate stack. Operator decision 2026-09-26: a review "
         "gate always chooses a SUBSCRIPTION reviewer first (codex_gate on the codex CLI, "
         "kimi_gate on the kimi CLI OAuth). glm_gate (OpenRouter credit) and deepseek_gate "
-        "(API credit) are not standing seats: they only read a PR when both subscription "
-        "seats are unavailable, which is what VNX_REVIEW_GATE_TAKEOVER_CHAIN does. Do not "
+        "(API credit) are not standing seats: they read a seat only when a subscription "
+        "reviewer is out, through VNX_REVIEW_GATE_TAKEOVER_CHAIN. Since OI-2058 (R5a) every "
+        "seat gets its own reviewer: when kimi_gate takes codex_gate's seat, kimi_gate's own "
+        "seat walks on to the next distinct gate in the chain. Since R5b the merge door "
+        "requires every seat of this stack, each filled by a distinct reviewer. Do not "
         "put an API-credit gate before a subscription gate here or in the chain "
         "(gate_billing_table.GATE_BILLING classifies every gate; a guard test pins both). "
         "History: the default was gemini_review,codex_gate,claude_github_optional until "
@@ -137,13 +140,14 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         subsystem="governance-enforcement-stack", status="LIVE"),
     "VNX_REVIEW_GATE_TAKEOVER_CHAIN": _e(
         "VNX_REVIEW_GATE_TAKEOVER_CHAIN", "string",
-        "codex_gate,kimi_gate,deepseek_gate,glm_gate", "gate",
+        "codex_gate,kimi_gate,deepseek_gate", "gate",
         "Ordered review-gate takeover chain (BETA3-E1, 26-08 operator decision; order "
         "changed 2026-10-04, OI-1984). On lane_exhausted a seat rolls over to the NEXT gate "
         "named here. The order is subscription reviewers first (codex_gate, kimi_gate), "
-        "then the API-credit reviewers: deepseek_gate is the fallback after kimi_gate and "
-        "glm_gate is the last link. Both API-credit gates stay behind both subscription "
-        "gates and are a fallback only, never a project default reviewer; a guard test fails "
+        "then deepseek_gate (API credit), the last link of the default chain. glm_gate left "
+        "the default chain on 2026-10-17 (operator decision); it stays registered and can "
+        "still be named explicitly here, always behind both subscription gates. The API-credit "
+        "gates are a fallback only, never a project default reviewer; a guard test fails "
         "when an API-credit gate is placed before a subscription gate. Since "
         "OI-1714/OI-1838 deepseek_gate is a real harness-lane gate (available by "
         "registration, requested via gate_request_handler._request_deepseek), and since "
@@ -240,9 +244,10 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         cockpit_canonical=True),
     "VNX_PLAN_GATE_COMPLEX_ONLY": _e(
         "VNX_PLAN_GATE_COMPLEX_ONLY", "bool", "0", "gate",
-        "Restrict the plan-gate panel to complex features: a LIGHT-scope plan "
-        "(read-site in plan_gate_enforcement.plan_gate_scope) runs the reduced "
-        "2-seat panel; HEAVY plans keep the full 5-seat panel.",
+        "Flag with no effect since P1: plan_gate_enforcement.complex_only_active() "
+        "still reads it, but nothing consults that result to change a plan-gate run "
+        "(the LIGHT/HEAVY scope-skip and its reduced 2-seat panel were removed). "
+        "Kept until P4 reworks the effectiveness probe.",
         # subsystem matches the docs/core/SUBSYSTEMS.md seed row
         # "plan-gate-task-class-scope" (framework-status-audit-and-cockpit PR-3
         # fix) — distinct from "plan-gate-panel" (VNX_PLAN_GATE_ENFORCE), so the

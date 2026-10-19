@@ -1,0 +1,113 @@
+{
+ "counts": {
+  "parallel": {
+   "active": true,
+   "classes": {
+    "fail": 0,
+    "pass": 26629,
+    "skip": 50,
+    "xfail": 1
+   },
+   "collected": 26680,
+   "collection_outcomes": 0,
+   "collection_records": 0,
+   "executed": 26680,
+   "records": 26680
+  },
+  "reference": {
+   "active": true,
+   "classes": {
+    "fail": 0,
+    "pass": 26629,
+    "skip": 50,
+    "xfail": 1
+   },
+   "collected": 26680,
+   "collection_outcomes": 0,
+   "collection_records": 0,
+   "executed": 26680,
+   "records": 26680
+  },
+  "serial": {
+   "active": false,
+   "classes": {
+    "fail": 0,
+    "pass": 0,
+    "skip": 0,
+    "xfail": 0
+   },
+   "collected": 0,
+   "collection_outcomes": 0,
+   "collection_records": 0,
+   "executed": 0,
+   "records": 0
+  }
+ },
+ "differences": {
+  "collection_outcome_differs": [],
+  "extra_in_candidate": [],
+  "not_run_in_candidate": [],
+  "outcome_class_differs": [],
+  "partition": [],
+  "run_more_than_once": [],
+  "skip_set_differs": []
+ },
+ "event": "pull_request",
+ "exit": 0,
+ "head_sha": "a48d5bc5d14dc628372f0a535f55032f763c1cde",
+ "invalid_evidence": [],
+ "profile": "heavy",
+ "ref": "dispatch/20261018-pg-p2-een-stoel",
+ "reference": {
+  "duration_s": 1773,
+  "exit": 0,
+  "job_result": "success",
+  "result": "present"
+ },
+ "run_attempt": "1",
+ "run_id": "39122740681",
+ "schema": "vnx-xdist-parity/1",
+ "selection_fingerprint": "e2a6074d6d9a3bb0987739c32a3b26749ddbff7634718ad7e7610cf7b7d3db58",
+ "selection_fingerprint_source": "parity_job",
+ "shadow": {
+  "durations_s": {
+   "parallel": 536,
+   "serial": null
+  },
+  "exit_codes": {
+   "parallel": 0,
+   "serial": null
+  },
+  "job_result": "success",
+  "record": "present",
+  "run_attempt": "1",
+  "run_id": "39122740681",
+  "steps": {
+   "checkout": "success",
+   "parallel": "success",
+   "plan": "success",
+   "prelude": "success",
+   "serial": "skipped"
+  },
+  "suite_wall_s": 536,
+  "verdict": "shadow_passed"
+ },
+ "step_failures": [
+  "parity.parity=failure"
+ ],
+ "steps": {
+  "checkout": "success",
+  "download_candidate": "success",
+  "download_reference": "success",
+  "parity": "failure",
+  "prelude": "success",
+  "selection": "success"
+ },
+ "tested_sha": "0728e73311aba7318e35257a6c7df17e853cfaf1",
+ "tool_versions": {
+  "pytest": "9.1.1",
+  "pytest-timeout": "2.4.0",
+  "pytest-xdist": "3.8.0"
+ },
+ "verdict": "parity"
+}

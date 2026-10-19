@@ -158,6 +158,7 @@ class RunStats:
     deep_attempts: int = 0
     deep_failures: int = 0
     deep_failure_reasons: Dict[str, int] = field(default_factory=dict)
+    deep_failure_causes: Dict[str, int] = field(default_factory=dict)
     deep_config_skips: int = 0
     deep_disabled_skips: int = 0
     deep_open_sessions: int = 0
@@ -181,6 +182,19 @@ def deep_all_skipped_by_switch(stats: "RunStats | None") -> bool:
         return False
     return (stats.deep_attempts == 0 and stats.deep_config_skips == 0
             and stats.deep_disabled_skips == stats.deep_open_sessions)
+
+
+def deep_none_attempted(stats: "RunStats | None") -> bool:
+    """True when sessions were due for deep analysis, none was attempted and none ran for nothing.
+
+    Deferred restricted sessions, config gaps and switched-off lanes all leave
+    ``deep_attempts`` at 0 without a failure; the run analysed nothing it was asked to
+    (OI-2043). Not a failure (``fail`` stays for all-failed runs) but not ``ok`` either.
+    """
+    if stats is None or stats.deep_attempts > 0:
+        return False
+    return (stats.deep_restricted_deferred + stats.deep_config_skips
+            + stats.deep_disabled_skips) > 0
 
 
 def format_failure_reasons(reasons: Dict[str, int]) -> str:

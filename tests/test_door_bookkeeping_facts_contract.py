@@ -65,6 +65,7 @@ _KNOWN_SITES = frozenset({
     "_persist_dispatch_row",
     "_register_gate_obligation",
     "_persist_track_id",
+    "_raise_plan_scope_at_door",
     "checkout_lag_resolution",
     "scout_prepass",
 })

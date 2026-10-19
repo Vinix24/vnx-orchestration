@@ -516,3 +516,69 @@ class TestReadEventsReturncode:
 
         list(adapter.read_events("T1"))
         assert adapter._returncode_cache.get("T1") == 1
+
+
+# ---------------------------------------------------------------------------
+# EOF before exit: the returncode of a worker that closes stdout and is still exiting
+# ---------------------------------------------------------------------------
+
+_CLOSES_STDOUT_THEN_EXITS = (
+    "import os, sys, time\n"
+    "sys.stdout.write('{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"done\"}\\n')\n"
+    "sys.stdout.flush()\n"
+    "os.close(1)\n"
+    "time.sleep(0.5)\n"
+    "sys.exit(int(sys.argv[1]))\n"
+)
+
+
+class TestReturncodeWhenStdoutClosesBeforeTheWorkerExits:
+    """stdout EOF comes before the worker is reapable; a bare poll() there read None and the run as rc 1.
+
+    Seen in CI under four xdist workers on a loaded runner: a fake claude that
+    exited 0 came back from spawn_claude as returncode 1 with no error, so a
+    two-run envelope test failed in 3 of 4 runs while it passed serially.
+    """
+
+    @staticmethod
+    def _adapter_with_worker(exit_code: int) -> SubprocessAdapter:
+        adapter = SubprocessAdapter()
+        adapter._processes["T1"] = subprocess.Popen(
+            [sys.executable, "-c", _CLOSES_STDOUT_THEN_EXITS, str(exit_code)],
+            stdout=subprocess.PIPE, stdin=subprocess.DEVNULL,
+        )
+        adapter._dispatch_ids["T1"] = "dispatch-eof-001"
+        return adapter
+
+    @pytest.mark.parametrize("exit_code", [0, 3])
+    def test_read_events_with_timeout_caches_the_real_returncode(self, exit_code):
+        adapter = self._adapter_with_worker(exit_code)
+        events = list(adapter.read_events_with_timeout("T1", chunk_timeout=30.0, total_deadline=60.0))
+        assert [e.type for e in events] == ["result"]
+        assert adapter._returncode_cache.get("T1") == exit_code
+        assert adapter.observe("T1").transport_state["returncode"] == exit_code
+
+    @pytest.mark.parametrize("exit_code", [0, 3])
+    def test_read_events_caches_the_real_returncode(self, exit_code):
+        adapter = self._adapter_with_worker(exit_code)
+        events = list(adapter.read_events("T1"))
+        assert [e.type for e in events] == ["result"]
+        assert adapter._returncode_cache.get("T1") == exit_code
+
+    def test_a_worker_that_closes_stdout_and_keeps_running_is_not_waited_for_forever(self):
+        import subprocess_adapter
+
+        adapter = SubprocessAdapter()
+        adapter._processes["T1"] = subprocess.Popen(
+            [sys.executable, "-c",
+             "import os, time; os.close(1); time.sleep(30)"],
+            stdout=subprocess.PIPE, stdin=subprocess.DEVNULL,
+        )
+        adapter._dispatch_ids["T1"] = "dispatch-eof-002"
+        try:
+            with patch.object(subprocess_adapter, "_EOF_REAP_TIMEOUT_SECONDS", 0.2):
+                list(adapter.read_events_with_timeout("T1", chunk_timeout=30.0, total_deadline=60.0))
+            assert "T1" not in adapter._returncode_cache
+        finally:
+            adapter._processes["T1"].kill()
+            adapter._processes["T1"].wait()

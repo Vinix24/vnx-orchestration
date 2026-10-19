@@ -64,7 +64,8 @@ def _bootstrap(tmp_path: Path) -> Path:
 def _args(state_dir: Path, **over) -> argparse.Namespace:
     base = dict(
         track_id="feat-pm-001", title="PM skill", goal_state="shipped",
-        horizon="now", priority=None, project_id="vnx-dev", state_dir=str(state_dir),
+        horizon="now", priority=None, plan_scope="architecture",
+        project_id="vnx-dev", state_dir=str(state_dir),
         json=False,
     )
     base.update(over)

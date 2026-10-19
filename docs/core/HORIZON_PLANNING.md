@@ -26,9 +26,10 @@ the tracks DB, reached through `vnx horizon`, not a hand-maintained file.
 
 | Verb | Purpose |
 |---|---|
-| `add` | Register a new objective (track). |
-| `list` | List objectives with phase/horizon/blocked state. |
-| `show` | Show one objective in detail. |
+| `add` | Register a new objective (track). `--plan-scope architecture\|light` is required: `architecture` seeds `OI-PLAN-<track>` (born plan-gated), `light` seeds nothing. Without the flag the command refuses and creates nothing. The scope moves up by itself, never down (see "Plan scope" below). |
+| `list` | List objectives with phase/horizon/blocked state, plus a short `scope:` tag (`arch`/`light`) at the end of each line. |
+| `show` | Show one objective in detail, including `plan_scope` and the rule that set it. |
+| `set-plan-scope` | Set a track's `plan_scope` by hand; `--reason` is required. The only way down to `light`, and it never closes or attests `OI-PLAN` (see `docs/core/HORIZON_LIFECYCLE.md` stage 1). |
 | `sync` | Reconcile track rows against their declared source. |
 | `drift` | Advisory drift report; the reconciler persists `tracks.derived_status` + a `planning_drift.json` summary (never `tracks.phase`). |
 | `reconcile` | Close/advance tracks against merged-PR evidence (`--apply` to write). |
@@ -44,11 +45,23 @@ top-level alias `vnx deliverable <verb>`:
 
 | Verb | Purpose |
 |---|---|
-| `add` | Add a deliverable to a track (optional `--task-class`/`--routing-floor`). |
+| `add` | Add a deliverable to a track (optional `--task-class`/`--routing-floor`/`--dispatch-paths`). The fourth deliverable on a `light` track makes it `architecture` and seeds `OI-PLAN-<track>`; the output says so in one line. |
 | `list` | List a track's deliverables, incl. `task_class`/`routing_floor` (explicit "not set" when absent). |
 | `promote` | Promote a deliverable (proposed → ready; human gate). Not the only way out of `proposed`: the reconciler completes a deliverable of a track whose real work is done without a promote (see `docs/core/HORIZON_LIFECYCLE.md` stage 6). |
 | `close` | afboeken (done): close a ready deliverable → completed (operator-attested PR evidence). The reconciler can also complete a deliverable by itself (`deliverable_auto_completed`, stage 6 of the lifecycle). |
-| `set` | Tag an EXISTING deliverable with `task_class`/`routing_floor` — the rubric fields the plan-gate reads (see `_format_deliverable_for_plan`). |
+| `set` | Tag an EXISTING deliverable with `task_class`/`routing_floor`/`dispatch_paths` — the rubric fields the plan-gate reads (see `_format_deliverable_for_plan`), and the paths a plan-gate run reads when it names none. |
+
+A deliverable has more than one way to `completed`. `deliverable close` is the human path. The reconciler is the other: `track_reconciler._reconcile_deliverable_dispatches` (OI-840, OI-1969) ends the deliverable stubs of a track a human declared done. It writes nothing unless `tracks.phase == 'done'` and every non-deliverable dispatch of the track is terminal (`completed`, `expired` or `dead_letter`); then a `proposed` stub becomes `expired` (event `deliverable_expired_on_done`: nothing was built) and every other non-terminal stub becomes `completed` (event `deliverable_auto_completed`, actor `reconciler`), with no promote and no close by a person. Merged-PR or track-level evidence alone never completes a stub. It runs inside every `reconcile_track` call, `vnx horizon reconcile` in check mode included. The full rule is in `docs/core/HORIZON_LIFECYCLE.md` stage 6.
+
+### Plan scope
+
+Since #2110 a new track carries one `plan_scope` in `tracks.metadata_json` (`scripts/lib/plan_scope.py`): `architecture` (the track has a plan-gate, `OI-PLAN-<track>`) or `light` (it has none). A track created before P1 carries no `plan_scope` key; it reads as `architecture` with an open `OI-PLAN` and as `light` without one, and reading writes nothing.
+
+- **One scope per track.** `vnx horizon add` requires `--plan-scope`; `bin/vnx horizon add --help` lists it as REQUIRED for a new track.
+- **Up by itself, down only by hand.** The fourth deliverable on a light track, or a build dispatch at the door whose paths fall in a plan-scope class, makes the track `architecture` and seeds `OI-PLAN-<track>`. Only `vnx horizon set-plan-scope <track> light --reason "..."` goes down, and it does not close `OI-PLAN`.
+- **The path classes** are one table, `smart_router.plan_scope_path_category`: `schema`, `security`, `gate-merge`, `store-resolution` and `outside-repo`. `outside-repo` (`smart_router.PLAN_SCOPE_OUTSIDE_REPO`) is a path that leaves the repository: it is classified upward, never as plain code. A dispatch that names no path at all counts as architecture too.
+
+Birth, the transaction and the event line: `docs/core/HORIZON_LIFECYCLE.md` stage 1.
 
 ### Plan-gate verbs
 
@@ -114,44 +127,61 @@ Example:
 vnx deliverable set dlv-abc123 --task-class 01_code_generation --routing-floor sonnet
 ```
 
-## Plan-gate weight — the seat ladder (since #1507)
+## Plan-gate composition — one seat, a second on BLOCK (since P2)
 
-The plan-gate does not run the full panel on every plan. The panel SIZE derives
-from a governance variant, which is a deterministic function of which paths the
-work touches, not a model judgment about how risky the plan "feels". Two
-functions define the ladder, both recomputable from the code:
+Operator decision 2026-10-17 (track `plan-gate-alleen-voor-architectuur`, P2).
+Until then the governance variant sized the panel (#1507): zero seats for docs,
+up to three for core paths, and all five for a new feature. That ladder is gone.
+The measurement behind the change: codex alone landed on the five-seat panel's
+outcome in 35 of 36 runs.
 
-- **`scripts/lib/smart_router.py::derive_governance_variant`** classifies each
-  dispatch path into `core` / `code` / `business` / `docs`, and the STRICTEST
-  category across all touched paths wins (`_CATEGORY_RANK`). Irreversibility
-  forces the heaviest class no matter what the paths say: a schema migration
-  (`scripts/migrations/`, `schemas/migrations/`), a fleet default
-  (`.claude/terminals/`, `.claude/skills/`, `agents/`, `skills/`), the
-  append-only receipt/ledger format, or an explicit `irreversible` flag on the
-  spec all resolve to `coding-strict`. A new feature
-  (`task_class == 01_code_generation`) is an INDEPENDENT axis: it is carried as
-  `is_new_feature` and always gets the full panel, regardless of the
-  path-derived variant.
-- **`scripts/lib/plan_gate_panel.py::GOVERNANCE_VARIANT_SEAT_LABELS`** maps the
-  variant to an ordered seat prefix of `configs/plan_gate_panel.yaml`:
+- **One default seat.** `configs/plan_gate_panel.yaml` names `default_seat`
+  (codex) and `escalation_seat` (opus); `plan_gate_panel.compose_panel` builds a
+  run from them. One readable PASS from the default seat certifies the gate.
+- **A second seat on BLOCK.** When the default seat returns BLOCK, the
+  escalation seat reads the same plan in the same run, and `apply_panel_rule`
+  decides over both verdicts. A REVISE does not escalate.
+- **Both seats from the start for schema, security and outside-repo paths
+  (since P1, #2110).** When the run's `--dispatch-paths` (or, when the run
+  names none, the `dispatch_paths` of the track's deliverables) fall in the
+  schema, security or `outside-repo` class
+  (`plan_gate_panel.second_seat_from_start`), both seats read the plan in its
+  first round and a PASS needs both readable verdicts (quorum 2). The trace says
+  `both seats from the start (<class> path <path>)`.
+- **An operator override** (`--panel-seats <labels>`) runs exactly the seats it
+  names, without escalation, under the quorum of two for several seats. The
+  trace logs it as `plan-gate override:` and names the default seat it replaced.
+- **The variant stays on the record.** `smart_router.derive_variant` still
+  classifies the touched paths (`core` / `code` / `business` / `docs`, strictest
+  wins, irreversible work is `coding-strict`). The result lands in the trace and
+  on the round record as `governance_variant`, so the history stays readable. It
+  no longer decides how many seats sit.
 
-  | variant | derived from | seats |
-  |---|---|---|
-  | `minimal` | docs content, reversible | 0 (no panel runs) |
-  | `business-light` / `light` | non-code deliverables | 1 (`opus`) |
-  | `default` | code | 2 (`opus`, `kimi`) |
-  | `coding-strict` | core paths / irreversible | 3 (`opus`, `kimi`, `glm-5.2-harness`) |
-  | new feature | `task_class 01_code_generation` | full panel (5 seats), regardless of variant |
+Every run prints its composition on stderr before the seats read. One seat:
+`plan-gate seats: weight=default -> 1 seat(s) by default (codex); opus reads on BLOCK.`
+Both seats from the start:
+`plan-gate seats: weight=default -> 2 seat(s) by default (codex, opus); both seats from the start (security path hooks/x.sh).`
+An operator override starts `plan-gate override:` instead (`scripts/planning_cli.py`
+`_derive_panel_weight`).
 
-The derived weight, the chosen weight, and the direction of an operator override
-all land in the trace, so an override is never silent. On the review-gate axis
-(`smart_router.resolve_gate`) the result is a `GateWeightResolution` carrying
-`governance_variant` (derived), `gate` (chosen), and `override_direction`
-(`""` | `upgrade` | `downgrade` | `strict-downgrade`). The plan-gate panel
-mirrors this on the seat-count axis (`plan_gate_panel.seat_override_direction`).
-`strict-downgrade` is the one separately-marked move: lightening a
-`coding-strict` derivation, chosen exactly at irreversible work. It is marked,
-not blocked, so a later sweep can find the most dangerous override.
+### Rounds per plan version
+
+Every seat round that does not PASS appends a `plan_gate_round` record to the
+seat ledger, carrying the sha256 of the plan the seat read (`plan_sha256`) and
+each seat's verdict on it (`seat_verdicts`). `plan_gate_tiebreaker.route_plan_gate`
+decides what a run does first:
+
+| The plan version (its sha256) | Read versions without a PASS | The run |
+|---|---|---|
+| has no read seat round | any | its seat round; after a non-PASS, the tiebreaker in the same run when the threshold now holds |
+| was read by its seat | `max_rounds` or more | straight to the tiebreaker, with the seat's recorded verdict |
+| was read by its seat | below `max_rounds` | nothing; the plan must change first |
+
+`max_rounds` is 1 (one seat, one round, then the tiebreaker). Only a READ round
+counts: `scored_seats >= 1`, so rounds in which every lane was down buy no
+tiebreaker (OI-1280). A record written before P2 has no hash and counts as one
+plan version of its own. The tiebreaker reads the latest plan version and the
+seat's verdict on it; on STOP the seat's findings become open items.
 
 ## Plan source without --doc: goal_state plus deliverables, two refusal kinds (since #1560)
 

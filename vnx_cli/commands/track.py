@@ -10,9 +10,26 @@ from typing import Any
 from vnx_cli import _engine
 
 
-def _resolve_state_dir(project_dir: str | Path) -> Path:
-    # Use canonical data-root chain so pip installs work without .vnx-data/ inside the project.
-    return _engine.resolve_data_root(Path(project_dir).resolve()) / "state"
+def _resolve_state_dir(
+    project_dir: str | Path,
+    project_id: str | None = None,
+    project_dir_explicit: bool = False,
+) -> Path:
+    # Canonical data-root chain, so pip installs work without .vnx-data/ inside the
+    # project. An explicit project_id selects that project's store (ADR-007).
+    try:
+        return _engine.resolve_project_state_dir(project_dir, project_id, project_dir_explicit)
+    except _engine.ProjectStoreError as exc:
+        print(f"  Error: {exc}", file=sys.stderr)
+        sys.exit(2)
+
+
+def _state_dir_for(args) -> Path:
+    return _resolve_state_dir(
+        args.project_dir,
+        getattr(args, "project_id", None),
+        project_dir_explicit=args.project_dir != ".",
+    )
 
 
 def _require_tracks_lib(state_dir: Path) -> Any:
@@ -65,7 +82,7 @@ def _format_table(rows: list[dict[str, Any]]) -> str:
 
 def _cmd_new(args) -> int:
     project_id = args.project_id
-    state_dir = _resolve_state_dir(args.project_dir)
+    state_dir = _state_dir_for(args)
     tracks_lib = _require_tracks_lib(state_dir)
 
     try:
@@ -86,7 +103,7 @@ def _cmd_new(args) -> int:
 
 def _cmd_activate(args) -> int:
     project_id = args.project_id
-    state_dir = _resolve_state_dir(args.project_dir)
+    state_dir = _state_dir_for(args)
     tracks_lib = _require_tracks_lib(state_dir)
 
     reason = getattr(args, "reason", None)
@@ -106,7 +123,7 @@ def _cmd_activate(args) -> int:
 
 def _cmd_park(args) -> int:
     project_id = args.project_id
-    state_dir = _resolve_state_dir(args.project_dir)
+    state_dir = _state_dir_for(args)
     tracks_lib = _require_tracks_lib(state_dir)
 
     reason = getattr(args, "reason", None)
@@ -126,7 +143,7 @@ def _cmd_park(args) -> int:
 
 def _cmd_unpark(args) -> int:
     project_id = args.project_id
-    state_dir = _resolve_state_dir(args.project_dir)
+    state_dir = _state_dir_for(args)
     tracks_lib = _require_tracks_lib(state_dir)
 
     reason = getattr(args, "reason", None)
@@ -147,7 +164,7 @@ def _cmd_unpark(args) -> int:
 def _cmd_done(args) -> int:
     """Transition a track to phase=done. --reason is required."""
     project_id = args.project_id
-    state_dir = _resolve_state_dir(args.project_dir)
+    state_dir = _state_dir_for(args)
     tracks_lib = _require_tracks_lib(state_dir)
 
     try:
@@ -170,7 +187,7 @@ def _cmd_done(args) -> int:
 def _cmd_oi_close(args) -> int:
     """Non-destructively close a track open-item (sets resolved_at)."""
     project_id = args.project_id
-    state_dir = _resolve_state_dir(args.project_dir)
+    state_dir = _state_dir_for(args)
     tracks_lib = _require_tracks_lib(state_dir)
 
     try:
@@ -198,7 +215,7 @@ def _cmd_dispatch(args) -> int:
     from datetime import datetime, timezone
 
     project_id = args.project_id
-    state_dir = _resolve_state_dir(args.project_dir)
+    state_dir = _state_dir_for(args)
     tracks_lib = _require_tracks_lib(state_dir)
 
     track = tracks_lib.get_track(state_dir, args.track_id, project_id)
@@ -231,7 +248,7 @@ def _cmd_list(args) -> int:
     else:
         project_id = _resolve_project_id_for_read(args)
 
-    state_dir = _resolve_state_dir(args.project_dir)
+    state_dir = _state_dir_for(args)
     tracks_lib = _require_tracks_lib(state_dir)
 
     phase = getattr(args, "phase", None)
@@ -249,7 +266,7 @@ def _cmd_list(args) -> int:
 
 def _cmd_show(args) -> int:
     project_id = _resolve_project_id_for_read(args)
-    state_dir = _resolve_state_dir(args.project_dir)
+    state_dir = _state_dir_for(args)
     tracks_lib = _require_tracks_lib(state_dir)
 
     track = tracks_lib.get_track(state_dir, args.track_id, project_id)
@@ -293,7 +310,7 @@ def _cmd_set_goal(args) -> int:
     threshold comes from the plan-gate's own source so the two never drift.
     """
     project_id = args.project_id
-    state_dir = _resolve_state_dir(args.project_dir)
+    state_dir = _state_dir_for(args)
     tracks_lib = _require_tracks_lib(state_dir)
 
     import plan_gate_panel

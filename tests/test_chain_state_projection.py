@@ -51,6 +51,16 @@ from chain_state_projection import (
 # Fixtures
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def explicit_chain_naming_glm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """glm_gate left the DEFAULT takeover chain (R4, operator decision 2026-10-17).
+    These tests use it as a signer, so they name it in an explicit chain; the
+    default is pinned by ``test_required_signer_gates_reads_the_default_chain``."""
+    monkeypatch.setenv(
+        "VNX_REVIEW_GATE_TAKEOVER_CHAIN", "codex_gate,kimi_gate,deepseek_gate,glm_gate"
+    )
+
+
 @pytest.fixture()
 def state_dir(tmp_path: Path) -> Path:
     """Return a state directory pre-populated with a minimal pr_queue_state.json."""
@@ -472,6 +482,13 @@ class TestAtLeastOneSigner:
         gates = required_signer_gates()
         assert "gemini_review" not in gates
         assert set(gates) == {"codex_gate", "kimi_gate", "glm_gate", "deepseek_gate"}
+
+    def test_required_signer_gates_reads_the_default_chain(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("VNX_REVIEW_GATE_TAKEOVER_CHAIN", raising=False)
+        monkeypatch.delenv("VNX_OVERRIDE_VNX_REVIEW_GATE_TAKEOVER_CHAIN", raising=False)
+        assert set(required_signer_gates()) == {"codex_gate", "kimi_gate", "deepseek_gate"}
 
 
 # ---------------------------------------------------------------------------

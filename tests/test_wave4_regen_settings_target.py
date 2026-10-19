@@ -21,6 +21,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 import sys
 from pathlib import Path
 
@@ -55,7 +56,12 @@ def _git_init(path: Path) -> Path:
 
 
 def _clean_env(extra: dict | None = None) -> dict:
-    env = {k: v for k, v in os.environ.items() if k not in _VNX_ENV_KEYS}
+    # PYTHONPATH goes too: the install must work on what it ships, not on a checkout the
+    # operator's shell happens to put on the import path.
+    env = {k: v for k, v in os.environ.items() if k not in _VNX_ENV_KEYS and k != "PYTHONPATH"}
+    # A home without accounts: the guard notice reads the account folders and must not read the
+    # operator's real ones.
+    env["HOME"] = os.path.join(tempfile.gettempdir(), "vnx-wave4-no-home")
     if extra:
         env.update(extra)
     return env
@@ -65,7 +71,8 @@ def _make_central_install(tmp_path: Path) -> Path:
     """A standalone git repo standing in for ~/.vnx-system/versions/<v>.
 
     Ships exactly the pieces ``vnx regen-settings`` touches: the CLI, the path
-    resolver, the regen command, the merge engine, and the settings template.
+    resolver, the regen command, the merge engine with the two modules it imports to
+    render the template, and the settings template.
     """
     install = _git_init(tmp_path / "vnx-install")
 
@@ -74,10 +81,9 @@ def _make_central_install(tmp_path: Path) -> Path:
     os.chmod(install / "bin" / "vnx", 0o755)
 
     (install / "scripts" / "lib").mkdir(parents=True)
-    shutil.copy(
-        _REPO_ROOT / "scripts" / "lib" / "vnx_paths.sh",
-        install / "scripts" / "lib" / "vnx_paths.sh",
-    )
+    for name in ("vnx_paths.sh", "hook_coverage.py", "t0_subagent_block.py", "guard_install.py",
+                 "atomic_swap.py"):
+        shutil.copy(_REPO_ROOT / "scripts" / "lib" / name, install / "scripts" / "lib" / name)
 
     (install / "scripts" / "commands").mkdir(parents=True)
     shutil.copy(

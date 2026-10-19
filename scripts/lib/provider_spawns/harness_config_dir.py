@@ -7,14 +7,30 @@ and loads the user CLAUDE.md with its imports, the user memory and the personal
 skills, all of which then go to the provider.
 
 ``ensure_harness_config_dir(lane)`` returns ``<VNX_DATA_DIR>/harness-config/<lane>/``
-(mode 0700). The only file the fabric writes there is ``settings.json`` with the
-destructive Bash ``ask`` rules. It FAILS CLOSED (raises ``HarnessConfigDirError``)
-rather than falling back to inheritance.
+(mode 0700). The only file the fabric writes there is ``settings.json``, which
+carries the destructive Bash ``ask`` rules plus ``cleanupPeriodDays: 365``. The
+retention is pinned to a year because the session transcripts under
+``<lane>/projects/`` are the only source for the cost backfill (K6); the Claude
+Code default of 30 days would start deleting the oldest of them. It FAILS CLOSED
+(raises ``HarnessConfigDirError``) rather than falling back to inheritance.
 
 These lanes authenticate with ``ANTHROPIC_AUTH_TOKEN`` / ``ANTHROPIC_API_KEY``,
 never the keychain item bound to a config-dir path, so a fresh dir does not
 break their login. The ``claude_headless`` subscription lane must NOT use this
 helper: its keychain login is bound to its config-dir path.
+
+``plugins`` is a forbidden top-level entry, with one exception: a plain directory whose
+entries are all plain files from ``PLUGIN_CACHE_ALLOWLIST``. On 2026-10-18 at 07:58Z,
+during a long deepseek_gate run, claude 2.1.302 wrote ``plugins/plugin-catalog-cache.json``
+and ``plugins/plugin-directory-cache-v2.json`` into the lane dir although nothing was
+installed and ``CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`` was set; the next spawn then
+refused and closed every deepseek and glm seat (OI-2163). Both files are the CLI's own
+listing of the official marketplace (install counts, token costs), read only by the
+``/plugin`` browser and the org-blocked-plugin lookup. They enable nothing and reach no
+session context; a plugin needs ``installed_plugins.json`` or an enabled entry in
+settings. No env variable stops the fetch (measured in the 2.1.302 binary), and a CLI
+update can start writing more files, so the list stays closed: any other entry under
+``plugins/`` keeps the refusal and is named in the message.
 """
 
 from __future__ import annotations
@@ -53,6 +69,13 @@ DESTRUCTIVE_BASH_ASK_RULES: List[str] = [
     "Bash(mkfs:*)",
 ]
 
+# The Claude Code default transcript retention is 30 days; the operator's own
+# config dirs carry ``cleanupPeriodDays: 365``. The harness transcripts under
+# ``<lane>/projects/`` are the only source for the cost backfill (K6), so the
+# lanes must keep them for a year too. Fabric constant, never read from the
+# operator's settings at runtime.
+HARNESS_TRANSCRIPT_RETENTION_DAYS: int = 365
+
 # Top-level entries that would feed user-level context back into the child.
 FORBIDDEN_ENTRIES = (
     "CLAUDE.md",
@@ -64,6 +87,12 @@ FORBIDDEN_ENTRIES = (
     "plugins",
 )
 
+# The CLI's own plugin listing caches, the only files allowed under ``plugins/``.
+PLUGIN_CACHE_ALLOWLIST = (
+    "plugin-catalog-cache.json",
+    "plugin-directory-cache-v2.json",
+)
+
 # Env pair that every harness spawn overlays last.
 AUTO_MEMORY_OFF_ENV = "CLAUDE_CODE_DISABLE_AUTO_MEMORY"
 
@@ -73,7 +102,13 @@ class HarnessConfigDirError(RuntimeError):
 
 
 def _settings_payload() -> str:
-    return json.dumps({"permissions": {"ask": list(DESTRUCTIVE_BASH_ASK_RULES)}}, indent=2) + "\n"
+    return json.dumps(
+        {
+            "permissions": {"ask": list(DESTRUCTIVE_BASH_ASK_RULES)},
+            "cleanupPeriodDays": HARNESS_TRANSCRIPT_RETENTION_DAYS,
+        },
+        indent=2,
+    ) + "\n"
 
 
 def _resolve_data_dir() -> Path:
@@ -119,6 +154,23 @@ def _has_symlink_component(path: Path, stop: Path) -> bool:
         current = current.parent
 
 
+def _check_plugins_entry(plugins_dir: Path, lane_dir: Path) -> None:
+    """Allow ``plugins/`` only as a plain dir holding nothing but the CLI's cache files."""
+    refusal = "harness config dir holds user-level context (plugins)"
+    if plugins_dir.is_symlink() or not plugins_dir.is_dir():
+        raise HarnessConfigDirError(f"{refusal}: {plugins_dir} is not a plain directory")
+    try:
+        children = list(plugins_dir.iterdir())
+    except OSError as exc:
+        raise HarnessConfigDirError(f"cannot read {plugins_dir}: {exc}") from exc
+    for child in children:
+        plain_file = child.is_file() and not child.is_symlink()
+        if child.name not in PLUGIN_CACHE_ALLOWLIST or not plain_file:
+            raise HarnessConfigDirError(
+                f"{refusal}: plugins/{child.name} is not an allowed CLI cache file: {lane_dir}"
+            )
+
+
 def ensure_harness_config_dir(lane: str) -> Path:
     """Create (if needed) and validate the config dir for ``lane``; return its path."""
     name = _safe_lane_name(lane)
@@ -151,7 +203,9 @@ def ensure_harness_config_dir(lane: str) -> Path:
     for entry in entries:
         if entry.is_symlink():
             raise HarnessConfigDirError(f"harness config dir holds a symlink: {entry}")
-        if entry.name in FORBIDDEN_ENTRIES:
+        if entry.name == "plugins":
+            _check_plugins_entry(entry, lane_dir)
+        elif entry.name in FORBIDDEN_ENTRIES:
             raise HarnessConfigDirError(
                 f"harness config dir holds user-level context ({entry.name}): {lane_dir}"
             )

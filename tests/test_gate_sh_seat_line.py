@@ -109,6 +109,8 @@ def _run(harness, report: Dict[str, Any], *, rc: int = 0) -> subprocess.Complete
     report_file.write_text(json.dumps(report, indent=2), encoding="utf-8")
     env = {k: v for k, v in os.environ.items() if not k.startswith("VNX_")}
     env["PATH"] = f"{harness['bin_dir']}:{env['PATH']}"
+    # `--only` asks the provider switch first; keep it on a tmp file, never ~/.vnx.
+    env["VNX_PROVIDER_SWITCH_FILE"] = str(harness["vnx_home"].parent / "switch" / "providers.json")
     env.update(STUB_REPORT=str(report_file), STUB_RC=str(rc))
     return subprocess.run(
         ["bash", str(harness["driver"])],

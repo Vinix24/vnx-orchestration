@@ -13,7 +13,16 @@ dashboard/) escalates the whole dispatch to the full gate stack.
 Safety invariant: scripts/ and dashboard/ always map to "default" in
 governance_profiles.yaml, so this resolver can never weaken gates for those
 paths.  On any failure (missing YAML, import error) it returns None so the
-caller falls back to DEFAULT_REVIEW_STACK unchanged.
+caller falls back to the project's configured stack unchanged.
+
+A profile adds no review seat and removes none (OI-2058, R5a). The stack
+returned here is read by exactly one caller, ``review_seats.
+resolve_review_seats``, which keeps the seats at the project's
+``VNX_DEFAULT_REVIEW_STACK`` and takes only the profile's non-seat entries
+(``ci_gate``) as extra gates. The built-in profiles name a fixed reviewer pair
+(``codex_gate, kimi_gate``) or none at all (``light``, ``minimal``), so a profile
+that decided seats would review a project with other reviewers than its stack
+names, or with none while the merge door still requires them.
 
 BILLING SAFETY: No Anthropic SDK. No network calls.
 """
@@ -40,7 +49,7 @@ def resolve_gate_stack(
     """Resolve required_gates for the most-restrictive profile across changed_files.
 
     Returns None when:
-      - VNX_PROFILE_SELECTOR != "1" (flag off — caller uses DEFAULT_REVIEW_STACK)
+      - VNX_PROFILE_SELECTOR != "1" (flag off — the caller uses the configured stack)
       - changed_files is empty (no scope to resolve)
       - any error occurs (YAML missing, import failure, etc.)
 

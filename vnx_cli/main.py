@@ -303,6 +303,35 @@ def _register_role_subparser(subparsers: argparse.Action) -> None:
     rs_parser.set_defaults(apply=False)
 
 
+def _register_guard_subparser(subparsers: argparse.Action) -> None:
+    guard_parser = subparsers.add_parser(
+        "guard",
+        help="install and check the user-level T0 context guard",
+    )
+    guard_subs = guard_parser.add_subparsers(dest="guard_command", metavar="SUBCOMMAND")
+    install_parser = guard_subs.add_parser(
+        "install",
+        help="register the guard in the Claude Code settings of every account",
+    )
+    install_parser.add_argument(
+        "--dry-run", action="store_true",
+        help="list the accounts and print the diff per file; write nothing",
+    )
+    check_parser = guard_subs.add_parser(
+        "check",
+        help="report, per account and per VNX project, where the guard runs",
+    )
+    check_parser.add_argument(
+        "--scan-root", action="append", default=[], metavar="DIR",
+        help="also inventory every .vnx-project-id under DIR (depth 3); repeatable",
+    )
+    for sub in (install_parser, check_parser):
+        sub.add_argument(
+            "--config-dir", action="append", default=[], metavar="DIR",
+            help="a Claude config directory instead of discovery; repeatable",
+        )
+
+
 def _register_update_subparser(subparsers: argparse.Action) -> None:
     update_parser = subparsers.add_parser(
         "update",
@@ -593,6 +622,7 @@ _HORIZON_CHOICES = ("now", "next", "later")
 _PHASE_CHOICES = ("queued", "active", "parked", "done")
 _OUTPUT_KIND_CHOICES = ("pr", "post", "deal", "doc")
 _LANE_HINT_CHOICES = ("direct", "governed", "unset")
+_PLAN_SCOPE_CHOICES = ("architecture", "light")
 
 
 def _common_horizon_args(p: argparse.ArgumentParser) -> None:
@@ -610,18 +640,7 @@ def _common_horizon_args(p: argparse.ArgumentParser) -> None:
 def _register_objective_verbs(subs: argparse.Action) -> None:
     """Register the objective-domain verbs shared by `vnx horizon` and the
     `vnx objective` backward-compat alias — same flags, same handlers."""
-    p_add = subs.add_parser("add", help="add an ad-hoc objective/track (no ROADMAP edit)")
-    _common_horizon_args(p_add)
-    p_add.add_argument("track_id", metavar="TRACK_ID")
-    p_add.add_argument("title", metavar="TITLE")
-    p_add.add_argument("goal_state", metavar="GOAL_STATE", help="what 'done' looks like")
-    p_add.add_argument("--horizon", choices=_HORIZON_CHOICES, default=None)
-    p_add.add_argument("--priority", default=None)
-    p_add.add_argument(
-        "--lane-hint", choices=_LANE_HINT_CHOICES, default=None, dest="lane_hint",
-        metavar="LANE_HINT",
-        help="descriptive dispatch-routing hint (governed|direct|unset); default unset",
-    )
+    _register_objective_add(subs)
 
     p_list = subs.add_parser("list", help="list objectives grouped by horizon")
     _common_horizon_args(p_list)
@@ -812,6 +831,33 @@ def _register_objective_verbs(subs: argparse.Action) -> None:
              "(audited; no silent bypass — an empty reason is refused)",
     )
 
+    _register_objective_set_verbs(subs)
+
+
+def _register_objective_add(subs: argparse.Action) -> None:
+    """`add`: an ad-hoc objective/track, born with its plan scope (P1)."""
+    p_add = subs.add_parser("add", help="add an ad-hoc objective/track (no ROADMAP edit)")
+    _common_horizon_args(p_add)
+    p_add.add_argument("track_id", metavar="TRACK_ID")
+    p_add.add_argument("title", metavar="TITLE")
+    p_add.add_argument("goal_state", metavar="GOAL_STATE", help="what 'done' looks like")
+    p_add.add_argument("--horizon", choices=_HORIZON_CHOICES, default=None)
+    p_add.add_argument("--priority", default=None)
+    p_add.add_argument(
+        "--lane-hint", choices=_LANE_HINT_CHOICES, default=None, dest="lane_hint",
+        metavar="LANE_HINT",
+        help="descriptive dispatch-routing hint (governed|direct|unset); default unset",
+    )
+    p_add.add_argument(
+        "--plan-scope", choices=_PLAN_SCOPE_CHOICES, default=None, dest="plan_scope",
+        metavar="PLAN_SCOPE",
+        help="REQUIRED for a new track: architecture (OI-PLAN-<track> is seeded, the "
+             "plan-gate runs) or light (no plan-gate)",
+    )
+
+
+def _register_objective_set_verbs(subs: argparse.Action) -> None:
+    """The `set-*` verbs that patch one field of an existing track."""
     p_lane_hint = subs.add_parser(
         "set-lane-hint",
         help="set the descriptive dispatch lane_hint (governed|direct|unset) on a track",
@@ -822,6 +868,18 @@ def _register_objective_verbs(subs: argparse.Action) -> None:
         "lane_hint", choices=_LANE_HINT_CHOICES, metavar="LANE_HINT",
         help="descriptive dispatch-routing hint (governed|direct|unset)",
     )
+
+    p_plan_scope = subs.add_parser(
+        "set-plan-scope",
+        help="set a track's plan_scope by hand (the only way down to light); --reason required",
+    )
+    _common_horizon_args(p_plan_scope)
+    p_plan_scope.add_argument("track_id", metavar="TRACK_ID")
+    p_plan_scope.add_argument(
+        "plan_scope", choices=_PLAN_SCOPE_CHOICES, metavar="PLAN_SCOPE",
+        help="architecture or light",
+    )
+    p_plan_scope.add_argument("--reason", default="", help="REQUIRED: why the scope changes")
 
     p_set_goal = subs.add_parser(
         "set-goal",
@@ -856,6 +914,11 @@ def _register_deliverable_verbs(subs: argparse.Action) -> None:
         "--routing-floor", dest="routing_floor", default=None, metavar="FLOOR",
         help="optional model-routing quality floor for this deliverable "
              "(free text, e.g. a model name) — the plan-gate's rubric axis 5.",
+    )
+    p_dadd.add_argument(
+        "--dispatch-paths", dest="dispatch_paths", default=None, metavar="P1,P2",
+        help="optional comma-separated repo paths this deliverable will touch; a "
+             "plan-gate run without --dispatch-paths reads them",
     )
 
     p_dlist = subs.add_parser("list", help="list deliverables grouped by objective")
@@ -893,13 +956,18 @@ def _register_deliverable_verbs(subs: argparse.Action) -> None:
         "--task-class", dest="task_class", default=None, metavar="CLASS",
         help="task class from the smart-router closed set (01_code_generation "
              ".. 07_translation). Unknown values are refused. At least one of "
-             "--task-class/--routing-floor is required.",
+             "--task-class/--routing-floor/--dispatch-paths is required.",
     )
     p_dset.add_argument(
         "--routing-floor", dest="routing_floor", default=None, metavar="FLOOR",
         help="model-routing quality floor for this deliverable (free text, "
-             "e.g. a model name). At least one of --task-class/--routing-floor "
-             "is required.",
+             "e.g. a model name). At least one of "
+             "--task-class/--routing-floor/--dispatch-paths is required.",
+    )
+    p_dset.add_argument(
+        "--dispatch-paths", dest="dispatch_paths", default=None, metavar="P1,P2",
+        help="comma-separated repo paths this deliverable will touch (replaces "
+             "the stored list)",
     )
 
 
@@ -926,8 +994,8 @@ def _register_plan_gate_verbs(subs: argparse.Action) -> None:
         "--panel-seats",
         dest="panel_seats",
         default="",
-        help="comma-separated seat labels to run (subset of the configured panel); "
-             "unknown labels fail loud. Defaults to the full configured panel.",
+        help="comma-separated seat labels to run instead of the default seat; "
+             "logged as an override, unknown labels fail loud. Default: default_seat.",
     )
     p_prun.add_argument(
         "--seat-timeout",
@@ -942,24 +1010,24 @@ def _register_plan_gate_verbs(subs: argparse.Action) -> None:
         "--dispatch-paths",
         dest="dispatch_paths",
         default=None,
-        help="comma-separated repo paths the plan touches; drives the governance "
-             "weight (variant) that sizes the panel (operator ladder). Default: no "
-             "paths (task_class or the code baseline).",
+        help="comma-separated repo paths the plan touches; they derive the governance "
+             "weight (variant) in the trace. The seat count does not follow it: one "
+             "default seat, a second on BLOCK.",
     )
     p_prun.add_argument(
         "--task-class",
         dest="task_class",
         default=None,
-        help="task class for the plan from the smart-router closed set "
-             "(e.g. 01_code_generation marks a NEW FEATURE, which always runs the "
-             "full panel).",
+        help="task class for the plan from the smart-router closed set; it feeds "
+             "the governance weight in the trace. A new feature no longer gets "
+             "more seats.",
     )
     p_prun.add_argument(
         "--irreversible",
         dest="irreversible",
         action="store_true",
         help="declare the change irreversible (deletion/rename/big architecture "
-             "refactor); forces coding-strict (3 seats).",
+             "refactor); forces coding-strict in the trace, not more seats.",
     )
 
     p_pstat = subs.add_parser(
@@ -1034,8 +1102,8 @@ def _register_plan_gate_verbs(subs: argparse.Action) -> None:
         "--panel-seats",
         dest="panel_seats",
         default="",
-        help="comma-separated seat labels to run (subset of the configured panel); "
-             "unknown labels fail loud. Defaults to the governance-derived ladder.",
+        help="comma-separated seat labels to run instead of the default seat; "
+             "logged as an override, unknown labels fail loud. Default: default_seat.",
     )
     p_pbatch.add_argument(
         "--seat-timeout",
@@ -1049,23 +1117,23 @@ def _register_plan_gate_verbs(subs: argparse.Action) -> None:
         "--dispatch-paths",
         dest="dispatch_paths",
         default=None,
-        help="comma-separated repo paths the plan touches; drives the governance "
-             "weight (variant) that sizes the panel (operator ladder).",
+        help="comma-separated repo paths the plan touches; they derive the governance "
+             "weight (variant) in the trace, not the seat count.",
     )
     p_pbatch.add_argument(
         "--task-class",
         dest="task_class",
         default=None,
-        help="task class for the plan from the smart-router closed set "
-             "(e.g. 01_code_generation marks a NEW FEATURE, which always runs the "
-             "full panel).",
+        help="task class for the plan from the smart-router closed set; it feeds "
+             "the governance weight in the trace. A new feature no longer gets "
+             "more seats.",
     )
     p_pbatch.add_argument(
         "--irreversible",
         dest="irreversible",
         action="store_true",
         help="declare the change irreversible (deletion/rename/big architecture "
-             "refactor); forces coding-strict (3 seats).",
+             "refactor); forces coding-strict in the trace, not more seats.",
     )
 
 
@@ -1518,6 +1586,12 @@ def _register_pr_ready_subparser(subparsers: argparse.Action) -> None:
     register_pr_ready_subparser(subparsers)
 
 
+def _register_review_subparser(subparsers: argparse.Action) -> None:
+    """`vnx review rounds open --pr N --reason` — the round ledger (scripts/review_rounds_cli.py, R1)."""
+    from vnx_cli.commands.review import register_review_subparser
+    register_review_subparser(subparsers)
+
+
 def _register_worktree_release_subparser(subparsers: argparse.Action) -> None:
     """`vnx worktree-release` — same engine as the fabric repo's `bin/vnx
     worktree-release` (scripts/lib/worktree_release.py), exposed on the pip
@@ -1568,6 +1642,10 @@ def _dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
         from vnx_cli.commands.role import vnx_role
         sys.exit(vnx_role(args))
 
+    elif args.command == "guard":
+        from vnx_cli.commands.guard import vnx_guard
+        sys.exit(vnx_guard(args))
+
     elif args.command == "version":
         from vnx_cli.commands.version import vnx_version
         sys.exit(vnx_version(args))
@@ -1604,17 +1682,9 @@ def _dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
         from vnx_cli.commands.attest import vnx_attest
         sys.exit(vnx_attest(args))
 
-    elif args.command == "horizon":
-        from vnx_cli.commands.horizon import vnx_horizon
-        sys.exit(vnx_horizon(args))
-
-    elif args.command == "objective":
-        from vnx_cli.commands.horizon import vnx_objective
-        sys.exit(vnx_objective(args))
-
-    elif args.command == "deliverable":
-        from vnx_cli.commands.horizon import vnx_deliverable
-        sys.exit(vnx_deliverable(args))
+    elif args.command in ("horizon", "objective", "deliverable"):
+        from vnx_cli.commands import horizon as horizon_commands
+        sys.exit(getattr(horizon_commands, f"vnx_{args.command}")(args))
 
     elif args.command == "gate-check":
         from vnx_cli.commands.gate_check import vnx_gate_check
@@ -1658,6 +1728,7 @@ def main() -> None:
     _register_init_subparser(subparsers)
     _register_pool_subparser(subparsers)
     _register_role_subparser(subparsers)
+    _register_guard_subparser(subparsers)
     _register_update_subparser(subparsers)
     _register_release_subparser(subparsers)
     _register_dispatch_agent_subparser(subparsers)
@@ -1672,6 +1743,7 @@ def main() -> None:
     _register_deliverable_subparser(subparsers)
     _register_gate_check_subparser(subparsers)
     _register_pr_ready_subparser(subparsers)
+    _register_review_subparser(subparsers)
     _register_worktree_release_subparser(subparsers)
     _register_providers_subparser(subparsers)
 

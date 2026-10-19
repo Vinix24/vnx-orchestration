@@ -2,7 +2,10 @@
 
 Operator decision 2026-09-26: a review gate ALWAYS chooses codex or kimi first,
 because both run on a subscription (codex CLI, kimi CLI OAuth). glm (OpenRouter
-credit) and deepseek (API credit) read a PR only when both are unavailable.
+credit) and deepseek (API credit) read a seat only when a subscription reviewer
+is out. Every seat gets its own reviewer (OI-2058, R5a): with codex alone out,
+kimi reads codex's seat and deepseek reads kimi's; with both out, deepseek and
+glm read them.
 
 Two things are pinned here, each against the real code. Nothing starts a kimi,
 codex, glm or deepseek process.

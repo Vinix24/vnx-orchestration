@@ -484,7 +484,17 @@ _LANE_EXHAUSTED_MARKERS = (
     "openrouter_credits",                   # GEMETEN: glm/openrouter 402, pr-1691-glm_gate.json real record 26-08 (metadata.limit_source field)
     "usage limit for this billing cycle",   # GEMETEN: kimi 403 prose, OI-1433 22-08
     "reached your usage limit",             # GEMETEN: kimi 403 prose, OI-1433 22-08
-    "insufficient_quota",                   # AANGENOMEN: codex/openai 429 quota (error `type`/`code`), OpenAI API JSON-vorm — geen live codex-record bestond op 26-08 ochtend (61ebb567)
+    # kimi's WEEKLY refusal (OI-2114) words it differently, and kimi wraps the
+    # 403 body at the terminal width, one `raw=` line per wrapped line. Two
+    # widths are measured: 80 columns (pr-1890 to pr-2073-kimi_gate.json,
+    # 23-09 to 16-10 06:44Z) and 145 (pr-2074-kimi_gate.json, 16-10 10:46Z).
+    # At 80 the first sentence breaks inside "usage"; at 145 the break cuts
+    # "access_terminated_error" in two, which is why pr-2074 matched nothing.
+    # The reset sentence is the one quota sentence that is whole at both
+    # widths. It contains no "usage limit" at all, so prose about usage limits
+    # does not match it; only kimi's own sentence, or a verbatim quote of it.
+    "your quota will reset when the current 7-day window ends",  # GEMETEN: kimi 403 weekly prose, pr-2074-kimi_gate.json 16-10 — "You've reached your weekly (7-day) usage limit. Your quota will reset when the current 7-day window ends"
+    "insufficient_quota",                  # AANGENOMEN: codex/openai 429 quota (error `type`/`code`), OpenAI API JSON-vorm — geen live codex-record bestond op 26-08 ochtend (61ebb567)
     "exceeded your current quota",          # AANGENOMEN: codex/openai quota prose, idem
     "hit your usage limit",                 # GEMETEN: codex CLI-prose, pr-1696-codex_gate.json (ook pr-1691/1692-codex_gate.json, identieke tekst) 26-08 — "Subprocess exited with code 1: You've hit your usage limit..."
 )

@@ -160,6 +160,32 @@ class TestSpawnContract:
             )
         assert captured["extra_env"]["ANTHROPIC_AUTH_TOKEN"] == _FAKE_KEY
 
+    def test_api_key_resolved_from_provider_env_file(self, tmp_path):
+        """OI-2182: a key that lives ONLY in the provider env file reaches the
+        spawn when DEEPSEEK_API_KEY is absent from the environment."""
+        import os
+
+        captured = {}
+
+        def _fake_spawn_claude(**kwargs):
+            captured.update(kwargs)
+            return _fake_claude_result()
+
+        env_file = tmp_path / "provider-usage.env"
+        env_file.write_text(f'export DEEPSEEK_API_KEY="{_FAKE_KEY}"\n')
+
+        with patch.dict("os.environ", {}, clear=False), \
+                patch.object(dh, "spawn_claude", _fake_spawn_claude):
+            os.environ.pop("DEEPSEEK_API_KEY", None)
+            os.environ["VNX_PROVIDER_ENV_FILE"] = str(env_file)
+            result = spawn_deepseek_harness(
+                prompt="x", model=None, dispatch_id="d-1", terminal_id="T1",
+            )
+
+        # Assert on the child env handed to the spawn, never on a printed value.
+        assert captured["extra_env"]["ANTHROPIC_AUTH_TOKEN"] == _FAKE_KEY
+        assert result.returncode == 0
+
     def test_caller_extra_env_cannot_override_account_safety(self):
         """Mandatory harness env wins over caller-supplied extra_env."""
         captured = {}
@@ -233,7 +259,7 @@ class TestSpawnContract:
 # ---------------------------------------------------------------------------
 
 class TestFailClosedNoKey:
-    def test_missing_key_does_not_spawn(self):
+    def test_missing_key_does_not_spawn(self, tmp_path):
         spawn_called = {"count": 0}
 
         def _fake_spawn_claude(**kwargs):
@@ -244,6 +270,9 @@ class TestFailClosedNoKey:
                 patch.object(dh, "spawn_claude", _fake_spawn_claude):
             import os
             os.environ.pop("DEEPSEEK_API_KEY", None)
+            # Point the provider env file somewhere absent so the fail-closed
+            # path is what is exercised (the operator's real file may exist).
+            os.environ["VNX_PROVIDER_ENV_FILE"] = str(tmp_path / "absent.env")
             result = spawn_deepseek_harness(
                 prompt="x", model=None, dispatch_id="d-1", terminal_id="T1",
                 api_key=None,
@@ -253,6 +282,7 @@ class TestFailClosedNoKey:
         assert result.returncode == 1
         assert result.error is not None
         assert "DEEPSEEK_API_KEY" in result.error
+        assert "local key missing" in result.error
 
     def test_empty_key_does_not_spawn(self):
         spawn_called = {"count": 0}

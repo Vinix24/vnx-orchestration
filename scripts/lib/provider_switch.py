@@ -630,7 +630,7 @@ def linked_worktree_root(start: Path) -> Optional[Path]:
 
 def pending_launch_functions() -> Dict[str, Tuple[str, ...]]:
     """Launch functions that do not call :func:`require` yet, per deliverable."""
-    return {"B": tuple(PENDING_B), "C": tuple(PENDING_C)}
+    return {"B": tuple(PENDING_B)}
 
 
 def write_refusals() -> List[str]:
@@ -1072,15 +1072,12 @@ UNDETECTED_LAUNCH_FUNCTIONS: Dict[str, str] = {
         "for the detector to see",
 }
 
-PENDING_C: Tuple[str, ...] = (
-    "scripts/gate_runner.py:GateRunner._run_with_stall_detection",
-)
-
 # Census entries that call require() before their first launch call. They stay in
 # LAUNCH_FUNCTIONS: the coverage guard asserts that each one still does.
 ENFORCED: Tuple[str, ...] = (
     "scripts/conversation_analyzer/deep_analyzer.py:DeepAnalyzer._try_deepseek_harness",
     "scripts/conversation_analyzer/deep_analyzer.py:DeepAnalyzer._try_ollama",
+    "scripts/gate_runner.py:GateRunner._run_with_stall_detection",
 )
 
 PENDING_B: Tuple[str, ...] = (
@@ -1102,7 +1099,7 @@ PENDING_B: Tuple[str, ...] = (
     *UNDETECTED_LAUNCH_FUNCTIONS,
 )
 
-LAUNCH_FUNCTIONS: Tuple[str, ...] = tuple(sorted({*ENFORCED, *PENDING_C, *PENDING_B}))
+LAUNCH_FUNCTIONS: Tuple[str, ...] = tuple(sorted({*ENFORCED, *PENDING_B}))
 
 # Flagged by the detector or named by the plan, and deliberately outside layer 1. An entry is a
 # function (``path:qualname``), a file or a directory (trailing slash).

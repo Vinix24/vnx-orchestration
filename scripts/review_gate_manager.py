@@ -24,8 +24,9 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
 from vnx_paths import ensure_env
-from dispatch_spec import RETIRED_GATE_NAMES
+from dispatch_spec import RETIRED_GATE_NAMES, ReviewGateConfigError
 from governance_receipts import emit_governance_receipt, utc_now_iso
+import review_rounds
 
 from gate_executor import GateExecutorMixin
 from gate_request_handler import GateRequestHandlerMixin
@@ -49,8 +50,15 @@ def _build_default_review_stack() -> List[str]:
 
     A retired gate (``dispatch_spec.RETIRED_GATE_NAMES``) named by an older
     project config is dropped with a warning, the same way
-    ``smart_router._primary_review_gate`` ignores names outside the registry:
-    the obligation the door declares and the seats requested here stay one set.
+    ``smart_router._primary_review_gate`` ignores names outside the registry.
+
+    This list no longer decides which seats a review requests (OI-2058, R5a):
+    ``request_reviews`` and the CLI resolve the seats through
+    ``review_seats.resolve_review_seats`` when the request runs, which refuses a
+    retired or unknown name by name instead of dropping it. ``DEFAULT_REVIEW_STACK``
+    below is this function's value at import time, kept for the readers that
+    list the stack the way it was configured when the process started
+    (``gate_enforcement_verify``'s default seats).
     """
     import config_runtime
     raw = config_runtime.get("VNX_DEFAULT_REVIEW_STACK") or ""
@@ -93,6 +101,11 @@ class ReviewGateManager(
         self.headless_reports_dir.mkdir(parents=True, exist_ok=True)
         self.requests_dir.mkdir(parents=True, exist_ok=True)
         self.results_dir.mkdir(parents=True, exist_ok=True)
+        # R1: a store the gate runs in counts rounds from now on. The merge door
+        # enforces the round ledger for every store that has one, so the open PRs
+        # of a store reviewed before R1 are refused until the operator opens them
+        # instead of passing on records the ledger never saw.
+        review_rounds.ensure_ledger(self.results_dir.parent)
 
     def _canonical_report_path(self, report_path: str) -> str:
         if not report_path:
@@ -234,6 +247,57 @@ def _compute_changed_files(branch: str, *, strict: bool = False) -> List[str]:
     raise ValueError(f"cannot auto-compute changed_files for branch {branch!r}")
 
 
+def _stack_arg(raw: Optional[str]) -> Optional[List[str]]:
+    """``--review-stack`` as a list, or ``None`` when it was not given.
+
+    ``None`` is not an empty stack: it tells ``request_reviews`` to resolve the
+    project's stack when the request runs (``review_seats``), instead of a value
+    this process froze when it imported.
+    """
+    if raw is None:
+        return None
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def _add_override_b3_arguments(parser: argparse.ArgumentParser) -> None:
+    """``--override-b3 --reason "..."``: run the codex seat of a PR at the B3 cap anyway (R1)."""
+    parser.add_argument(
+        "--override-b3", action="store_true",
+        help="Run the codex seat of a PR at the B3 cap anyway; requires --reason. "
+        "Recorded in the round ledger line and the review_gate_result receipt",
+    )
+    parser.add_argument("--reason", default=None, help="The reason for --override-b3 (required with it)")
+
+
+def _override_b3_reason(args: argparse.Namespace) -> Optional[str]:
+    """The ``--override-b3`` reason, ``""`` for none, or ``None`` after printing why the flags are refused."""
+    reason = (getattr(args, "reason", None) or "").strip()
+    if getattr(args, "override_b3", False) and not reason:
+        print('ERROR: --override-b3 needs a non-empty --reason "..." (no silent bypass)', file=sys.stderr)
+        return None
+    if reason and not getattr(args, "override_b3", False):
+        print("ERROR: --reason only applies to --override-b3", file=sys.stderr)
+        return None
+    return reason
+
+
+def _override_b3_kwargs(reason: str) -> Dict[str, str]:
+    """``override_b3`` for the manager call, only when one was given: the call is unchanged without it."""
+    return {"override_b3": reason} if reason else {}
+
+
+def _print_round_refusals(result: Dict[str, Any]) -> None:
+    """Name every seat the round ledger refused (R1), with its own reason text, on stderr."""
+    refused = (review_rounds.REFUSED_B3_CAP, review_rounds.REFUSED_VERDICT_ON_HEAD,
+               review_rounds.REFUSED_LEDGER_UNREADABLE, review_rounds.REFUSED_HISTORY_MISSING)
+    for gate in result.get("gates", []):
+        detail = gate.get("detail") or {}
+        reason = detail.get("reason") or detail.get("round_refusal")
+        if reason in refused:
+            text = detail.get("reason_detail") or detail.get("redispatch_refused") or ""
+            print(f"REFUSED ({reason}) seat {detail.get('seat') or gate.get('gate')}: {text}", file=sys.stderr)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser with all subcommands."""
     parser = argparse.ArgumentParser(description="VNX review gate manager")
@@ -242,12 +306,17 @@ def _build_parser() -> argparse.ArgumentParser:
     request_parser = sub.add_parser("request")
     request_parser.add_argument("--pr", type=int, required=True)
     request_parser.add_argument("--branch", required=True)
-    request_parser.add_argument("--review-stack", default=",".join(DEFAULT_REVIEW_STACK))
+    request_parser.add_argument(
+        "--review-stack", default=None,
+        help="Comma-separated stack; omitted = the project's VNX_DEFAULT_REVIEW_STACK, "
+        "resolved when the request runs (review_seats)",
+    )
     request_parser.add_argument("--risk-class", default="medium")
     request_parser.add_argument("--changed-files", default="")
     request_parser.add_argument("--mode", choices=("per_pr", "final"), default="per_pr")
     request_parser.add_argument("--dispatch-id", default="")
     request_parser.add_argument("--json", action="store_true")
+    _add_override_b3_arguments(request_parser)
 
     result_parser = sub.add_parser("record-result")
     result_parser.add_argument("--gate", required=True)
@@ -271,12 +340,17 @@ def _build_parser() -> argparse.ArgumentParser:
     rexec_parser = sub.add_parser("request-and-execute")
     rexec_parser.add_argument("--pr", type=int, required=True)
     rexec_parser.add_argument("--branch", required=True)
-    rexec_parser.add_argument("--review-stack", default=",".join(DEFAULT_REVIEW_STACK))
+    rexec_parser.add_argument(
+        "--review-stack", default=None,
+        help="Comma-separated stack; omitted = the project's VNX_DEFAULT_REVIEW_STACK, "
+        "resolved when the request runs (review_seats)",
+    )
     rexec_parser.add_argument("--risk-class", default="medium")
     rexec_parser.add_argument("--changed-files", default="")
     rexec_parser.add_argument("--mode", choices=("per_pr", "final"), default="per_pr")
     rexec_parser.add_argument("--dispatch-id", default="")
     rexec_parser.add_argument("--json", action="store_true")
+    _add_override_b3_arguments(rexec_parser)
 
     status_parser = sub.add_parser("status")
     status_parser.add_argument("--pr", type=int, required=True)
@@ -287,6 +361,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _handle_request_and_execute(manager: ReviewGateManager, args: argparse.Namespace) -> int:
     """Handle request-and-execute subcommand."""
+    override_b3 = _override_b3_reason(args)
+    if override_b3 is None:
+        return 2
     changed_files = _parse_changed_files(args.changed_files)
     if not changed_files and args.branch:
         try:
@@ -294,16 +371,22 @@ def _handle_request_and_execute(manager: ReviewGateManager, args: argparse.Names
         except (ValueError, RuntimeError) as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 2
-    result = manager.request_and_execute(
-        pr_number=args.pr,
-        branch=args.branch,
-        review_stack=[item.strip() for item in args.review_stack.split(",") if item.strip()],
-        risk_class=args.risk_class,
-        changed_files=changed_files,
-        mode=args.mode,
-        dispatch_id=getattr(args, "dispatch_id", "") or "",
-    )
+    try:
+        result = manager.request_and_execute(
+            pr_number=args.pr,
+            branch=args.branch,
+            review_stack=_stack_arg(args.review_stack),
+            risk_class=args.risk_class,
+            changed_files=changed_files,
+            mode=args.mode,
+            dispatch_id=getattr(args, "dispatch_id", "") or "",
+            **_override_b3_kwargs(override_b3),
+        )
+    except ReviewGateConfigError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
     print(json.dumps(result, indent=2))
+    _print_round_refusals(result)
     if result.get("has_required_failure"):
         # OI-1178: surface every gate of this call that did not PASS, not just
         # the not_executable/not_configured ones. An executed gate that booked
@@ -354,6 +437,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     manager = ReviewGateManager()
 
     if args.command == "request":
+        override_b3 = _override_b3_reason(args)
+        if override_b3 is None:
+            return 2
         changed_files = _parse_changed_files(args.changed_files)
         if not changed_files and args.branch:
             try:
@@ -361,15 +447,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             except (ValueError, RuntimeError) as exc:
                 print(f"ERROR: {exc}", file=sys.stderr)
                 return 2
-        result = manager.request_reviews(
-            pr_number=args.pr,
-            branch=args.branch,
-            review_stack=[item.strip() for item in args.review_stack.split(",") if item.strip()],
-            risk_class=args.risk_class,
-            changed_files=changed_files,
-            mode=args.mode,
-            dispatch_id=getattr(args, "dispatch_id", "") or "",
-        )
+        try:
+            result = manager.request_reviews(
+                pr_number=args.pr,
+                branch=args.branch,
+                review_stack=_stack_arg(args.review_stack),
+                risk_class=args.risk_class,
+                changed_files=changed_files,
+                mode=args.mode,
+                dispatch_id=getattr(args, "dispatch_id", "") or "",
+                **_override_b3_kwargs(override_b3),
+            )
+        except ReviewGateConfigError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
         print(json.dumps(result, indent=2))
         return 0
 

@@ -107,6 +107,24 @@ def _git_toplevel(path: Path) -> Path | None:
     return Path(output).expanduser().resolve()
 
 
+def _checkout_root(path: Path) -> Path | None:
+    """Return ``path`` when it is the root of a git checkout, else the git toplevel.
+
+    ``git`` is a subprocess and fails in a stripped environment (a launchd job
+    has no shell profile). Without a fallback the caller concludes "not a
+    checkout" and walks to the parent directory, which resolved the heartbeat
+    store to ``~/Development/.vnx-data`` (OI-2042). A ``.git`` entry (directory
+    for a checkout, file for a worktree) is the same fact read from disk.
+    """
+    top = _git_toplevel(path)
+    if top is not None:
+        return top
+    resolved = path.resolve()
+    if (resolved / ".git").exists():
+        return resolved
+    return None
+
+
 def _git_common_root(path: Path) -> Path | None:
     try:
         output = subprocess.check_output(
@@ -152,7 +170,7 @@ def _is_central_install(vnx_home: Path) -> bool:
     (issue #225 / PR-WAVE4-1 CI regression). The marker is unambiguous, so a
     standalone dev checkout or worktree is correctly treated as non-central.
     """
-    if _git_toplevel(vnx_home) != vnx_home:
+    if _checkout_root(vnx_home) != vnx_home:
         return False
     marker = vnx_home / ".vnx-install-mode"
     if marker.is_file():
@@ -172,7 +190,7 @@ def _default_project_root(vnx_home: Path) -> Path:
     if override is not None:
         return override
 
-    git_root = _git_toplevel(vnx_home)
+    git_root = _checkout_root(vnx_home)
     if git_root == vnx_home:
         if _is_central_install(vnx_home):
             cwd_git_root = _git_toplevel(Path.cwd())
@@ -196,7 +214,7 @@ def _default_canonical_root(vnx_home: Path) -> Path:
     if override is not None:
         return _git_toplevel(override) or override
 
-    git_root = _git_toplevel(vnx_home)
+    git_root = _checkout_root(vnx_home)
     if git_root == vnx_home:
         if _is_central_install(vnx_home):
             project_root = _default_project_root(vnx_home)
@@ -532,7 +550,7 @@ def refuse_real_launchctl_under_test_runner() -> None:
     )
 
 
-def _resolve_state_root(project_id: Optional[str], project_root: Path) -> Path:
+def _resolve_state_root(project_id: Optional[str], project_root: Optional[Path]) -> Path:
     """Resolve the VNX runtime data root (the ``.vnx-data`` equivalent).
 
     Ordered resolution — first applicable wins:
@@ -567,7 +585,7 @@ def _resolve_state_root(project_id: Optional[str], project_root: Path) -> Path:
         return Path(explicit_val).expanduser().resolve()
 
     pid = project_id if (project_id and _PROJECT_ID_RE.match(project_id)) else None
-    local = project_root / ".vnx-data"
+    local = project_root / ".vnx-data" if project_root is not None else None
 
     # 2. VNX_DATA_HOME — operator-chosen data home, per-project subdir.
     data_home = os.environ.get("VNX_DATA_HOME")
@@ -581,12 +599,14 @@ def _resolve_state_root(project_id: Optional[str], project_root: Path) -> Path:
             return central.resolve()
 
     # 4. Existing dev checkout / pre-migration install — keep project-local dir.
-    if local.is_dir():
+    if local is not None and local.is_dir():
         return local.resolve()
 
     # 5. Fresh install: central per-project data directory.
     if pid:
         return (Path.home() / ".vnx-data" / pid).resolve()
+    if local is None:
+        raise ValueError("a project_id or a project_root is required to resolve a data root")
 
     # Collision-safety: no resolvable project_id and no existing layout — never
     # guess a shared id. Stay project-local rather than collide projects.
@@ -612,6 +632,23 @@ def resolve_data_root(project_root) -> Path:
     data_dir = _resolve_state_root(pid, project_root)
     data_dir_guard.check_data_dir_project_id_guard(data_dir, pid)
     return data_dir
+
+
+def resolve_project_data_root(project_id: str, project_root=None) -> Path:
+    """Public: the data root of ONE named project, through the ordered chain.
+
+    Same order as :func:`resolve_data_root` (explicit override > ``VNX_DATA_HOME``
+    > existing ``~/.vnx-data/<id>`` > project-local ``.vnx-data`` > fresh central
+    default), but the project_id is GIVEN, not derived from ``project_root``.
+    The project-local step only applies when ``project_root`` is passed: the
+    caller does that only when that root belongs to ``project_id``, so a
+    ``.vnx-data`` of another project (or the shared pre-ADR-026 store under
+    ``$HOME``) is never picked up for it.
+    """
+    if not project_id or not _PROJECT_ID_RE.match(project_id):
+        raise ValueError(f"project_id must match {_PROJECT_ID_RE.pattern}: {project_id!r}")
+    root = Path(project_root).expanduser().resolve() if project_root is not None else None
+    return _resolve_state_root(project_id, root)
 
 
 def resolve_paths() -> Dict[str, str]:

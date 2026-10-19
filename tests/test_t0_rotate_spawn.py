@@ -10,12 +10,17 @@ No real tmux server or claude session is ever touched:
     command synchronously so the tmux-server follow-up is observable in the test.
   - stub claude only records that it was executed; the spawner must never run claude itself,
     it types the launch line into the new pane.
+
+The wrap-proof fixtures (dispatch 20261016b-tg-g5a-wrap-proof) write the handoff frontmatter, the
+daily log and the bucket as plain text, without the helper's own symbols, so a run of these tests
+on the old spawner fails on what the spawner does and never on a missing name.
 """
 from __future__ import annotations
 
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -96,6 +101,10 @@ elif cmd == "show-environment":
 elif cmd == "new-window":
     if "-c" in args:
         open(os.path.join(stub, "new_window_cwd"), "w").write(args[args.index("-c") + 1])
+    # What the ledger held the moment the first window opened: ledger first (ADR-005).
+    ledger = os.environ.get("VNX_T0_ROTATION_RECEIPTS_FILE", "")
+    held = open(ledger).read() if ledger and os.path.isfile(ledger) else ""
+    open(os.path.join(stub, "ledger_at_new_window"), "w").write(held)
     print("@7")
 elif cmd == "capture-pane":
     subs, typed = submitted()
@@ -106,7 +115,8 @@ elif cmd == "capture-pane":
     launched = any(s.startswith(("claude ", "CLAUDE_CONFIG_DIR=")) for s in bare)
     if launched and not os.environ.get("STUB_NO_FOOTER"):
         screen = "> \n  ⏵⏵ auto mode on (shift+tab to cycle)"
-        if any(s and s.startswith("Je bent de verse T0") for s in subs):
+        # A skip run puts the catch-up wrap in front of the kickoff sentence.
+        if any(s and "Je bent de verse T0" in s for s in subs):
             n = int(open(counter).read()) if os.path.exists(counter) else 0
             open(counter, "w").write(str(n + 1))
             if n < 2:
@@ -220,8 +230,72 @@ def rig(tmp_path):
     return {"tmp": tmp_path, "stub": stub, "project": project, "state": state, "env": env}
 
 
-def _handoff(rig, text: str, age_seconds: int = 0) -> Path:
+DAILY_LOG = "daily-log/2026-10-16.md"
+SLUG = "vnx-orchestration"
+TRANSCRIPT_LINES = [
+    {"type": "user", "message": {"role": "user", "content": "rotate please"}},
+    {"type": "assistant", "message": {"content": [{"type": "text", "text": "on it"}]}},
+]
+
+
+def _iso(epoch: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+def _wrap_frontmatter(rig, *, started: float, wrapped: float, headings=(), nuggets=None,
+                      daily_log: str = DAILY_LOG, bucket: str = None) -> str:
+    """The frontmatter `wrap-finish` writes, as text, and the start record it consumed: the
+    block names the record's start_id, and the record's consumed_at is the block's wrapped_at."""
+    count = len(headings) if nuggets is None else nuggets
+    start_id = "5eed" + format(int(started), "x")[-12:]
+    rig["state"].mkdir(parents=True, exist_ok=True)
+    (rig["state"] / "wrap-start.json").write_text(json.dumps({
+        "start_id": start_id, "started_at": _iso(started), "project_root": str(rig["project"]),
+        "project_slug": SLUG, "bucket": bucket, "headings": [], "consumed_at": _iso(wrapped),
+    }), encoding="utf-8")
+    return (
+        "---\ncontext: dev\nproject: vnx-orchestration\nwrap:\n"
+        f"  start_id: {json.dumps(start_id)}\n"
+        f"  started_at: {_iso(started)}\n"
+        f"  wrapped_at: {_iso(wrapped)}\n"
+        f"  nuggets: {count}\n"
+        f"  nugget_headings: {json.dumps(list(headings), ensure_ascii=False)}\n"
+        f"  daily_log: {json.dumps(daily_log)}\n"
+        f"  bucket: {json.dumps(bucket) if bucket else 'null'}\n"
+        "---\n\n"
+    )
+
+
+def _daily_log(rig, mtime: float, *, flag: str = "true") -> Path:
+    path = rig["project"] / DAILY_LOG
+    path.write_text(f"---\ndate: 2026-10-16\nhandoff: {flag}\n---\n\n# Daily log\n", encoding="utf-8")
+    os.utime(path, (mtime, mtime))
+    return path
+
+
+def _bucket(rig, headings) -> Path:
+    path = rig["tmp"] / "bucket" / "2026-10.md"
+    path.parent.mkdir(exist_ok=True)
+    body = "".join(f"{h}\n- **wat:** iets\n\n" for h in headings)
+    path.write_text(f"# Build-Log Bucket — 2026-10\n\n---\n\n{body}", encoding="utf-8")
+    return path
+
+
+def _transcript(rig, lines=None) -> Path:
+    path = rig["tmp"] / "transcripts" / "predecessor.jsonl"
+    path.parent.mkdir(exist_ok=True)
+    path.write_text("".join(json.dumps(e) + "\n" for e in (lines or TRANSCRIPT_LINES)), encoding="utf-8")
+    return path
+
+
+def _handoff(rig, text: str, age_seconds: int = 0, *, wrap: bool = True) -> Path:
+    """The handoff. With ``wrap`` it carries the proof of a five-minute wrap that finished
+    ``age_seconds`` ago, with its daily log written inside the wrap's window."""
     path = rig["project"] / "daily-log" / "handoff.md"
+    if wrap:
+        wrapped = time.time() - age_seconds
+        _daily_log(rig, wrapped - 60)
+        text = _wrap_frontmatter(rig, started=wrapped - 300, wrapped=wrapped) + text
     path.write_text(text, encoding="utf-8")
     if age_seconds:
         old = time.time() - age_seconds
@@ -229,10 +303,12 @@ def _handoff(rig, text: str, age_seconds: int = 0) -> Path:
     return path
 
 
-def _spawn(rig, *args: str, env_extra: Dict[str, str] = None) -> subprocess.CompletedProcess:
+def _spawn(rig, *args: str, env_extra: Dict[str, str] = None,
+           cwd: Path = None) -> subprocess.CompletedProcess:
     env = {**rig["env"], **(env_extra or {})}
     return subprocess.run(["bash", str(SPAWN), "--project-root", str(rig["project"]), *args],
-                          env=env, cwd=rig["project"], capture_output=True, text=True, timeout=120)
+                          env=env, cwd=cwd or rig["project"], capture_output=True, text=True,
+                          timeout=120)
 
 
 def _calls(rig) -> List[list]:
@@ -251,6 +327,13 @@ def _receipts(rig) -> list:
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def _assert_nothing_opened(rig) -> None:
+    calls = _calls(rig)
+    assert not any(c[0] == "new-window" for c in calls), calls
+    assert _typed(rig) == []
+    assert not list(rig["state"].glob("latch-*"))
 
 
 def _assert_enter_always_separate(rig) -> None:
@@ -695,3 +778,329 @@ def test_b9_start_dir_is_the_last_field_and_decodes_with_a_space_in_the_root(rig
     decoded = subprocess.run(["bash", "-c", 'eval "printf %s $1"', "_", encoded],
                              capture_output=True, text=True).stdout
     assert decoded == str(t0)
+
+
+# ── wrap proof (operator decisions 2026-10-16 a, b; dispatch 20261016b-tg-g5a-wrap-proof) ──
+
+
+def _refusal(proc) -> str:
+    return [ln for ln in proc.stderr.splitlines() if "REFUSED" in ln][-1]
+
+
+def test_a_handoff_without_a_wrap_block_is_refused_before_any_window(rig):
+    _handoff(rig, HANDOFF_BASE, wrap=False)
+    proc = _spawn(rig)
+    assert proc.returncode == 6, proc.stderr
+    assert "'wrap_block'" in proc.stderr
+    assert _refusal(proc).endswith("run /build-log wrap")
+    assert "--skip-wrap-reason" in _refusal(proc)
+    _assert_nothing_opened(rig)
+    assert _receipts(rig) == []
+
+
+def test_a_wrap_that_finished_two_hours_ago_is_refused_although_the_file_is_fresh(rig):
+    now = time.time()
+    _daily_log(rig, now - 2 * 3600 - 120)
+    _handoff(rig, _wrap_frontmatter(rig, started=now - 2 * 3600 - 300, wrapped=now - 2 * 3600)
+             + HANDOFF_BASE, wrap=False)
+    proc = _spawn(rig)
+    assert proc.returncode == 6, proc.stderr
+    assert "'wrapped_at_age'" in proc.stderr and "120 min ago" in proc.stderr
+    assert _refusal(proc).endswith("run /build-log wrap")
+    _assert_nothing_opened(rig)
+
+
+def test_a_daily_log_written_before_the_wrap_started_is_refused(rig):
+    now = time.time()
+    _daily_log(rig, now - 3 * 3600)
+    _handoff(rig, _wrap_frontmatter(rig, started=now - 300, wrapped=now - 10) + HANDOFF_BASE, wrap=False)
+    proc = _spawn(rig)
+    assert proc.returncode == 6, proc.stderr
+    assert "'daily_log_window'" in proc.stderr
+    _assert_nothing_opened(rig)
+
+
+@pytest.mark.parametrize("case", ["count", "missing_heading"])
+def test_nuggets_that_do_not_match_the_bucket_are_refused(rig, case):
+    now = time.time()
+    present = [f"### 2026-10-16 · {SLUG} · gate-loopt-vast", f"### 2026-10-16 · {SLUG} · ledger-eerst"]
+    bucket = _bucket(rig, present)
+    _daily_log(rig, now - 60)
+    if case == "count":
+        front = _wrap_frontmatter(rig, started=now - 300, wrapped=now - 10, headings=present, nuggets=3,
+                                  bucket=str(bucket))
+        check = "'nuggets_count'"
+    else:
+        front = _wrap_frontmatter(rig, started=now - 300, wrapped=now - 10, bucket=str(bucket),
+                                  headings=present[:1] + [f"### 2026-10-16 · {SLUG} · nooit-geschreven"])
+        check = "'nugget_in_bucket'"
+    _handoff(rig, front + HANDOFF_BASE, wrap=False)
+    proc = _spawn(rig)
+    assert proc.returncode == 6, proc.stderr
+    assert check in proc.stderr
+    _assert_nothing_opened(rig)
+
+
+def test_a_valid_wrap_with_nuggets_in_the_bucket_spawns(rig):
+    now = time.time()
+    headings = [f"### 2026-10-16 · {SLUG} · gate-loopt-vast"]
+    bucket = _bucket(rig, headings + ["### 2026-10-16 · seocrawler-v2 · iets-anders"])
+    _daily_log(rig, now - 60)
+    _handoff(rig, _wrap_frontmatter(rig, started=now - 300, wrapped=now - 10, headings=headings,
+                                    bucket=str(bucket)) + HANDOFF_BASE, wrap=False)
+    proc = _spawn(rig)
+    assert proc.returncode == 0, proc.stderr
+    assert "#1920 mergen" in _typed(rig)[1]
+
+
+def test_a_wrap_that_took_twenty_minutes_spawns(rig):
+    """The wrap's order is nuggets, handoff, daily log, curation, and the curation waits for the
+    operator. A wrap of twenty minutes is a normal wrap, not a stale one."""
+    now = time.time()
+    _daily_log(rig, now - 5 * 60)
+    _handoff(rig, _wrap_frontmatter(rig, started=now - 20 * 60 - 30, wrapped=now - 30) + HANDOFF_BASE,
+             wrap=False)
+    proc = _spawn(rig)
+    assert proc.returncode == 0, proc.stderr
+
+
+def _state_cli(rig, *argv: str) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, str(REPO_ROOT / "scripts" / "lib" / "t0_rotation_state.py"),
+                           *argv], capture_output=True, text=True, env=rig["env"], timeout=60)
+
+
+def test_a_wrap_through_wrap_start_and_wrap_finish_spawns(rig):
+    """The whole chain as the build-log skill runs it, over an old wrap: block with a blank line
+    and an unindented comment in it (OI-2116), then the spawner."""
+    old_block = ("wrap:\n  started_at: 2026-10-01T08:00:00Z\n\n# oud\n  nuggets: 0\n"
+                 "  daily_log: \"daily-log/2026-10-01.md\"\n")
+    path = rig["project"] / "daily-log" / "handoff.md"
+    path.write_text(f"---\ncontext: dev\n{old_block}branch: main\n---\n{HANDOFF_BASE}", encoding="utf-8")
+    start = _state_cli(rig, "wrap-start", "--project-root", str(rig["project"]), "--project-slug", SLUG)
+    assert start.returncode == 0, start.stderr
+    _daily_log(rig, time.time())
+    finish = _state_cli(rig, "wrap-finish", "--project-root", str(rig["project"]), "--daily-log", DAILY_LOG)
+    assert finish.returncode == 0, finish.stderr
+    assert "2026-10-01" not in path.read_text(encoding="utf-8")
+
+    proc = _spawn(rig)
+    assert proc.returncode == 0, proc.stderr
+    assert "#1920 mergen" in _typed(rig)[1]
+
+
+@pytest.mark.parametrize("case, check", [
+    ("unconsumed", "'wrap_start_binding'"),
+    ("newer_start", "'wrap_start_binding'"),
+    ("frontmatter_does_not_parse", "'wrap_block'"),
+])
+def test_a_proof_that_does_not_bind_or_parse_is_refused_before_any_window(rig, case, check):
+    now = time.time()
+    _daily_log(rig, now - 60)
+    front = _wrap_frontmatter(rig, started=now - 300, wrapped=now - 10)
+    record = rig["state"] / "wrap-start.json"
+    if case == "unconsumed":
+        data = json.loads(record.read_text(encoding="utf-8"))
+        del data["consumed_at"]
+        record.write_text(json.dumps(data), encoding="utf-8")
+    elif case == "newer_start":
+        assert _state_cli(rig, "wrap-start", "--project-root", str(rig["project"]),
+                          "--project-slug", SLUG).returncode == 0
+    else:
+        front = front.replace("context: dev\n", "context: dev\n  verdwaald: 1\n", 1)
+    _handoff(rig, front + HANDOFF_BASE, wrap=False)
+    proc = _spawn(rig)
+    assert proc.returncode == 6, proc.stderr
+    assert check in proc.stderr
+    _assert_nothing_opened(rig)
+
+
+# ── emergency path (operator decision 2026-10-16 c) ──────────────────────────
+
+
+def _skipped(rig) -> list:
+    return [r for r in _receipts(rig) if r.get("trigger") == "t0_context_rotation_wrap_skipped"]
+
+
+def test_skip_wrap_reason_spawns_with_a_receipt_and_the_catch_up_first(rig):
+    transcript = _transcript(rig)
+    _handoff(rig, HANDOFF_BASE, age_seconds=2 * 3600, wrap=False)
+    proc = _spawn(rig, "--skip-wrap-reason", "context op 610K, geen ruimte voor een wrap",
+                  "--transcript", str(transcript))
+    assert proc.returncode == 0, proc.stderr
+
+    [receipt] = _skipped(rig)
+    assert receipt["reason"] == "context op 610K, geen ruimte voor een wrap"
+    assert receipt["transcript"] == str(transcript)
+    assert receipt["old_window"] == OLD_WIN
+    run_dir = next(rig["state"].glob("rotation-*"))
+    assert receipt["run_dir"] == str(run_dir)
+    held = (rig["stub"] / "ledger_at_new_window").read_text()
+    assert "t0_context_rotation_wrap_skipped" in held, "the window opened before the ledger held the skip"
+
+    prompt = _typed(rig)[1]
+    assert prompt.startswith("Eerst een inhaal-wrap")
+    assert prompt.index(str(transcript)) < prompt.index("tmux kill-window -t @1")
+    assert f"/build-log wrap --from-transcript {transcript}" in prompt
+    assert f"transcript-digest --transcript {transcript}" in prompt
+    assert "Pak daarna stap 1 op: **#1920 mergen**" in prompt
+    assert (run_dir / "prompt.txt").read_text(encoding="utf-8") == prompt
+    assert [r["trigger"] for r in _receipts(rig)] == ["t0_context_rotation_wrap_skipped",
+                                                      "t0_context_rotation_started"]
+
+
+def test_skip_takes_the_transcript_from_the_pending_marker(rig):
+    transcript = _transcript(rig)
+    rotation_state.write_pending(rig["state"], pane=PANE, session_id=SESSION, tokens=612_000,
+                                 level="hard", transcript_path=str(transcript))
+    _handoff(rig, HANDOFF_BASE, wrap=False)
+    proc = _spawn(rig, "--skip-wrap-reason", "noodrem")
+    assert proc.returncode == 0, proc.stderr
+    assert str(transcript) in _typed(rig)[1]
+    [receipt] = _skipped(rig)
+    assert receipt["transcript"] == str(transcript) and receipt["session_id"] == SESSION
+
+
+def test_a_skip_without_a_transcript_refuses_before_any_window(rig):
+    _handoff(rig, HANDOFF_BASE, wrap=False)
+    proc = _spawn(rig, "--skip-wrap-reason", "noodrem")
+    assert proc.returncode == 6, proc.stderr
+    assert "transcript" in _refusal(proc)
+    _assert_nothing_opened(rig)
+    assert _receipts(rig) == []
+
+
+def test_a_pending_marker_of_another_session_gives_no_transcript(rig):
+    transcript = _transcript(rig)
+    rotation_state.write_pending(rig["state"], pane=PANE, session_id="sess-older", tokens=612_000,
+                                 level="hard", transcript_path=str(transcript))
+    _handoff(rig, HANDOFF_BASE, wrap=False)
+    proc = _spawn(rig, "--skip-wrap-reason", "noodrem", "--session-id", SESSION)
+    assert proc.returncode == 6, proc.stderr
+    _assert_nothing_opened(rig)
+
+
+@pytest.mark.parametrize("source", ["explicit", "marker"])
+@pytest.mark.parametrize("content", ["# not a transcript\n", "", "[1, 2]\n"])
+def test_a_transcript_that_is_not_jsonl_refuses_before_any_window(rig, source, content):
+    bad = rig["tmp"] / "bad.jsonl"
+    bad.write_text(content, encoding="utf-8")
+    args = ["--skip-wrap-reason", "noodrem"]
+    if source == "explicit":
+        args += ["--transcript", str(bad)]
+    else:
+        rotation_state.write_pending(rig["state"], pane=PANE, session_id=SESSION, tokens=612_000,
+                                     level="hard", transcript_path=str(bad))
+    _handoff(rig, HANDOFF_BASE, wrap=False)
+    proc = _spawn(rig, *args)
+    assert proc.returncode == 6, proc.stderr
+    assert "readable JSONL" in proc.stderr
+    _assert_nothing_opened(rig)
+    assert _skipped(rig) == []
+
+
+_DIGEST_RE = re.compile(r"via de digest: (python3 \S+ transcript-digest --transcript \S+?)\. Je bent")
+
+
+def test_a_relative_transcript_is_absolute_in_receipt_prompt_and_digest(rig):
+    """codex_gate on 3c2bdd24: `--transcript predecessor.jsonl` passed the check from the caller's
+    folder, then the successor, started in the T0 folder, could not find the file."""
+    successor_dir = _t0_folder(rig)
+    transcript = _transcript(rig)
+    caller_dir = transcript.parent
+    absolute = os.path.join(os.path.realpath(caller_dir), transcript.name)
+    _handoff(rig, HANDOFF_BASE, wrap=False)
+    proc = _spawn(rig, "--skip-wrap-reason", "noodrem", "--transcript", transcript.name, cwd=caller_dir)
+    assert proc.returncode == 0, proc.stderr
+    assert _new_window_dir(rig) == str(successor_dir)
+
+    [receipt] = _skipped(rig)
+    assert receipt["transcript"] == absolute
+    prompt = _typed(rig)[1]
+    assert f"/build-log wrap --from-transcript {absolute}" in prompt
+    digest = _DIGEST_RE.search(prompt)
+    assert digest, prompt
+    argv = shlex.split(digest.group(1))
+    assert argv[-1] == absolute
+    read = subprocess.run([sys.executable, *argv[1:]], cwd=successor_dir, env=rig["env"],
+                          capture_output=True, text=True, timeout=60)
+    assert read.returncode == 0, read.stderr
+    assert "rotate please" in read.stdout and "on it" in read.stdout
+
+
+def test_a_relative_transcript_from_the_pending_marker_is_made_absolute(rig):
+    transcript = _transcript(rig)
+    rotation_state.write_pending(rig["state"], pane=PANE, session_id=SESSION, tokens=612_000,
+                                 level="hard", transcript_path=transcript.name)
+    _handoff(rig, HANDOFF_BASE, wrap=False)
+    proc = _spawn(rig, "--skip-wrap-reason", "noodrem", cwd=transcript.parent)
+    assert proc.returncode == 0, proc.stderr
+    absolute = os.path.join(os.path.realpath(transcript.parent), transcript.name)
+    [receipt] = _skipped(rig)
+    assert receipt["transcript"] == absolute
+    assert f"transcript-digest --transcript {absolute}" in _typed(rig)[1]
+
+
+def test_a_transcript_that_cannot_be_resolved_refuses_before_any_window(rig):
+    """A relative path from a folder that is gone names no file anyone can find again."""
+    _transcript(rig)
+    _handoff(rig, HANDOFF_BASE, wrap=False)
+    gone = rig["tmp"] / "gone"
+    gone.mkdir()
+    proc = subprocess.run(
+        ["bash", "-c", 'cd "$1" && rmdir "$1" && shift && exec bash "$@"', "_", str(gone),
+         str(SPAWN), "--project-root", str(rig["project"]), "--skip-wrap-reason", "noodrem",
+         "--transcript", "predecessor.jsonl"],
+        env=rig["env"], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 6, proc.stderr
+    assert "cannot resolve" in _refusal(proc)
+    _assert_nothing_opened(rig)
+    assert _receipts(rig) == []
+
+
+def test_a_refusing_ledger_refuses_the_skip_spawn(rig):
+    transcript = _transcript(rig)
+    blocker = rig["tmp"] / "not-a-dir"
+    blocker.write_text("a file where the ledger's directory should be", encoding="utf-8")
+    _handoff(rig, HANDOFF_BASE, wrap=False)
+    proc = _spawn(rig, "--skip-wrap-reason", "noodrem", "--transcript", str(transcript),
+                  env_extra={"VNX_T0_ROTATION_RECEIPTS_FILE": str(blocker / "t0_receipts.ndjson")})
+    assert proc.returncode == 6, proc.stderr
+    assert "ledger" in _refusal(proc)
+    _assert_nothing_opened(rig)
+
+
+@pytest.mark.parametrize("reason", ["", "   "])
+def test_an_empty_skip_reason_is_a_usage_error(rig, reason):
+    _handoff(rig, HANDOFF_BASE, wrap=False)
+    proc = _spawn(rig, "--skip-wrap-reason", reason, "--transcript", str(_transcript(rig)))
+    assert proc.returncode == 2, proc.stderr
+    _assert_nothing_opened(rig)
+    assert _receipts(rig) == []
+
+
+def test_a_transcript_without_a_skip_is_a_usage_error(rig):
+    _handoff(rig, HANDOFF_BASE)
+    proc = _spawn(rig, "--transcript", str(_transcript(rig)))
+    assert proc.returncode == 2, proc.stderr
+    _assert_nothing_opened(rig)
+
+
+def test_a_skip_never_skips_the_first_step_check(rig):
+    _handoff(rig, "# Handoff\n\n## State\nniets\n", wrap=False)
+    proc = _spawn(rig, "--skip-wrap-reason", "noodrem", "--transcript", str(_transcript(rig)))
+    assert proc.returncode == 4, proc.stderr
+    _assert_nothing_opened(rig)
+    assert _skipped(rig) == []
+
+
+def test_skips_lists_the_receipt_the_spawner_booked(rig):
+    _handoff(rig, HANDOFF_BASE, wrap=False)
+    assert _spawn(rig, "--skip-wrap-reason", "noodrem op 610K",
+                  "--transcript", str(_transcript(rig))).returncode == 0
+    proc = subprocess.run([sys.executable, str(REPO_ROOT / "scripts" / "lib" / "t0_rotation_state.py"),
+                           "skips", "--since", "7"], env=rig["env"], capture_output=True, text=True,
+                          timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    lines = proc.stdout.strip().splitlines()
+    assert 'reason="noodrem op 610K"' in lines[0]
+    assert lines[-1].startswith("1 wrap skip(s) in the last 7 day(s)")

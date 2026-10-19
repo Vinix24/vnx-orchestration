@@ -35,13 +35,23 @@ from typing import Any, Callable
 from vnx_cli import _engine
 
 
-def resolve_state_dir(project_dir: str | Path) -> Path:
+def resolve_state_dir(
+    project_dir: str | Path,
+    project_id: str | None = None,
+    project_dir_explicit: bool = False,
+) -> Path:
     """Central data root for planning state — matches ``vnx track``/``vnx status``.
 
     NOT ``planning_cli._resolve_state_dir`` (that resolves the repo-local
-    ``.vnx-data/state`` degraded path).
+    ``.vnx-data/state`` degraded path). An explicit ``project_id`` selects that
+    project's store (see ``_engine.resolve_project_state_dir``); a store that
+    would belong to another project exits 2 naming both.
     """
-    return _engine.resolve_data_root(Path(project_dir).resolve()) / "state"
+    try:
+        return _engine.resolve_project_state_dir(project_dir, project_id, project_dir_explicit)
+    except _engine.ProjectStoreError as exc:
+        print(f"  Error: {exc}", file=sys.stderr)
+        sys.exit(2)
 
 
 def resolve_project_id(args: Any) -> str:
@@ -75,7 +85,13 @@ def _require_planning_cli():
 
 def _prep(args: Any) -> None:
     """Bind the tenant-safe state_dir + resolved project_id onto args, in place."""
-    args.state_dir = str(resolve_state_dir(args.project_dir))
+    args.state_dir = str(
+        resolve_state_dir(
+            args.project_dir,
+            getattr(args, "project_id", None),
+            project_dir_explicit=args.project_dir != ".",
+        )
+    )
     args.project_id = resolve_project_id(args)
 
 
@@ -115,6 +131,36 @@ def _default_roadmap(args: Any) -> None:
     args.roadmap = str(Path(args.project_dir).resolve() / "ROADMAP.yaml")
 
 
+def _prep_repo(args: Any, default: str | None = "repo_root") -> None:
+    """``_prep`` plus the repository defaults, for a verb that reads the repository.
+
+    Repository-dependent verbs: ``sync`` (ROADMAP.yaml), ``drift``, ``reconcile``,
+    ``close`` (git/gh evidence under ``--repo-root``) and ``plan-gate run`` /
+    ``attest`` / ``batch`` (``--repo-root``, checked but not defaulted). With an explicit ``--project-id`` the
+    SOURCE must be that project too: the project dir (also the default ``.``), the
+    ``--repo-root`` and the roadmap location must not belong to another project.
+    A source whose identity cannot be established passes, because the operator's
+    explicit ``--project-id`` is then the only signal there is.
+    """
+    explicit = bool(getattr(args, "project_id", None))
+    _prep(args)
+    if default == "roadmap":
+        _default_roadmap(args)
+    elif default == "repo_root":
+        _default_repo_root(args)
+    if not explicit:
+        return
+    sources = [Path(args.project_dir), Path(getattr(args, "repo_root", None) or args.project_dir)]
+    roadmap = getattr(args, "roadmap", None) or os.environ.get("VNX_ROADMAP_PATH")
+    if roadmap:
+        sources.append(Path(roadmap).expanduser().resolve().parent)
+    try:
+        _engine.require_source_project(args.project_id, sources)
+    except _engine.ProjectStoreError as exc:
+        print(f"  Error: {exc}", file=sys.stderr)
+        sys.exit(2)
+
+
 # ---------------------------------------------------------------------------
 # objective-domain verbs
 # ---------------------------------------------------------------------------
@@ -139,22 +185,19 @@ def _cmd_show(args: Any) -> int:
 
 def _cmd_sync(args: Any) -> int:
     pc = _require_planning_cli()
-    _prep(args)
-    _default_roadmap(args)
+    _prep_repo(args, default="roadmap")
     return pc.cmd_objective_sync(args)
 
 
 def _cmd_drift(args: Any) -> int:
     pc = _require_planning_cli()
-    _prep(args)
-    _default_repo_root(args)
+    _prep_repo(args)
     return pc.cmd_objective_drift(args)
 
 
 def _cmd_reconcile(args: Any) -> int:
     pc = _require_planning_cli()
-    _prep(args)
-    _default_repo_root(args)
+    _prep_repo(args)
     return pc.cmd_objective_reconcile(args)
 
 
@@ -172,8 +215,7 @@ def _cmd_reconcile_streak(args: Any) -> int:
 
 def _cmd_close(args: Any) -> int:
     pc = _require_planning_cli()
-    _prep(args)
-    _default_repo_root(args)
+    _prep_repo(args)
     return pc.cmd_objective_close(args)
 
 
@@ -213,6 +255,12 @@ def _cmd_set_lane_hint(args: Any) -> int:
     return pc.cmd_objective_set_lane_hint(args)
 
 
+def _cmd_set_plan_scope(args: Any) -> int:
+    pc = _require_planning_cli()
+    _prep(args)
+    return pc.cmd_objective_set_plan_scope(args)
+
+
 def _cmd_set_goal(args: Any) -> int:
     pc = _require_planning_cli()
     _prep(args)
@@ -235,6 +283,7 @@ _VERB_DISPATCH: dict[str, Callable[[Any], int]] = {
     "remove-dependency": _cmd_remove_dependency,
     "unmark-delivery": _cmd_unmark_delivery,
     "set-lane-hint": _cmd_set_lane_hint,
+    "set-plan-scope": _cmd_set_plan_scope,
     "set-goal": _cmd_set_goal,
 }
 
@@ -294,7 +343,7 @@ def _cmd_plan_gate_seed(args: Any) -> int:
 
 def _cmd_plan_gate_run(args: Any) -> int:
     pc = _require_planning_cli()
-    _prep(args)
+    _prep_repo(args, default=None)
     return pc.cmd_plan_gate_run(args)
 
 
@@ -306,7 +355,7 @@ def _cmd_plan_gate_status(args: Any) -> int:
 
 def _cmd_plan_gate_attest(args: Any) -> int:
     pc = _require_planning_cli()
-    _prep(args)
+    _prep_repo(args, default=None)
     return pc.cmd_plan_gate_attest(args)
 
 
@@ -330,7 +379,7 @@ def _cmd_plan_gate_reblock(args: Any) -> int:
 
 def _cmd_plan_gate_batch(args: Any) -> int:
     pc = _require_planning_cli()
-    _prep(args)
+    _prep_repo(args, default=None)
     return pc.cmd_plan_gate_batch(args)
 
 

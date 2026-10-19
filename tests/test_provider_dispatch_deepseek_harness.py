@@ -49,17 +49,19 @@ class TestRegistration:
 
 class TestRouting:
     def _args(self):
-        ns = MagicMock()
-        ns.provider = "deepseek-harness"
-        ns.terminal_id = "T1"
-        ns.dispatch_id = "d-routing"
-        ns.instruction = "Reply OK."
-        ns.model = "sonnet"
-        ns.role = "backend-developer"
-        ns.dispatch_paths = ""
-        ns.auto_route = False
-        ns.pr_id = None
-        return ns
+        import argparse
+        return argparse.Namespace(
+            provider="deepseek-harness",
+            terminal_id="T1",
+            dispatch_id="d-routing",
+            instruction="Reply OK.",
+            model="sonnet",
+            role="backend-developer",
+            dispatch_paths="",
+            auto_route=False,
+            pr_id=None,
+            deadline_seconds=3600,
+        )
 
     def test_main_routes_to_deepseek_harness_handler(self):
         called = {"hit": False}
@@ -78,21 +80,74 @@ class TestRouting:
         assert called["hit"] is True
         assert rc == 0
 
-    def test_handler_fast_fails_without_key(self):
+    def test_handler_fast_fails_without_key(self, tmp_path):
         import os
         args = self._args()
         with patch.dict("os.environ", {}, clear=False):
             os.environ.pop("DEEPSEEK_API_KEY", None)
+            os.environ["VNX_PROVIDER_ENV_FILE"] = str(tmp_path / "absent.env")
             with patch.object(pd, "_emit_governance", return_value=None):
                 rc = pd._dispatch_deepseek_harness(args)
         assert rc == pd._EX_USAGE
+
+    def test_handler_proceeds_with_key_only_in_provider_env_file(self, tmp_path):
+        """OI-2182: the dispatch guard must NOT fast-fail when the own key lives
+        only in the provider env file — it resolves it via load_deepseek_key."""
+        import os
+
+        env_file = tmp_path / "provider-usage.env"
+        env_file.write_text(f'export DEEPSEEK_API_KEY="{_FAKE_KEY}"\n')
+        args = self._args()
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        called = {"spawn": False}
+
+        def _fake_spawn_deepseek_harness(**kwargs):
+            called["spawn"] = True
+            from provider_spawns.deepseek_harness_spawn import DeepSeekHarnessSpawnResult
+            return DeepSeekHarnessSpawnResult(
+                returncode=0,
+                completion={"text": "OK", "subtype": "success"},
+                events_written=0,
+                session_id=None,
+                timed_out=False,
+            )
+
+        with patch.dict(
+            "os.environ",
+            {
+                "VNX_STATE_DIR": str(state_dir),
+                "VNX_DATA_DIR": str(tmp_path),
+                "VNX_DATA_DIR_EXPLICIT": "1",
+                "VNX_PROVIDER_ENV_FILE": str(env_file),
+            },
+            clear=False,
+        ):
+            os.environ.pop("DEEPSEEK_API_KEY", None)
+            with patch("event_store.EventStore", MagicMock), \
+                 patch.object(pd, "_prepare_provider_workdir", return_value=(MagicMock(), str(tmp_path))), \
+                 patch.object(pd, "_finish_provider_worktree", return_value=None), \
+                 patch.object(pd, "_enrich_instruction", return_value=args.instruction), \
+                 patch.object(pd, "_emit_governance", return_value=None), \
+                 patch("provider_spawns.deepseek_harness_spawn.spawn_deepseek_harness",
+                       _fake_spawn_deepseek_harness), \
+                 patch("provider_costs.emit_provider_cost", return_value=None):
+                rc = pd._dispatch_deepseek_harness(args)
+
+        assert called["spawn"] is True, (
+            "the guard must not fast-fail when the key is in the provider env file"
+        )
+        assert rc == 0
 
     def test_handler_missing_key_emits_governance_receipt(self, tmp_path):
         """Missing DEEPSEEK_API_KEY must write a real governance receipt (not a mock call).
 
         Does NOT mock _emit_governance. Points the receipt sink at tmp_path and asserts
         that t0_receipts.ndjson contains a record with dispatch_id, provider=deepseek-harness,
-        and status=blocked — proving the audit trail is written before the non-zero exit.
+        status=blocked, and failure_class=local_key_missing (OI-2182: never auth_rejected),
+        and that no router-lane cooldown file is written — a local config error must not
+        mark the lane known-rejected.
         """
         import os
 
@@ -110,6 +165,7 @@ class TestRouting:
             clear=False,
         ):
             os.environ.pop("DEEPSEEK_API_KEY", None)
+            os.environ["VNX_PROVIDER_ENV_FILE"] = str(tmp_path / "absent.env")
             # emit_provider_cost uses project_root.resolve_data_dir (ignores env vars)
             # and is fail-loud — mock only this so the test stays isolated.
             with patch("provider_costs.emit_provider_cost", return_value=None):
@@ -134,6 +190,18 @@ class TestRouting:
         assert r["status"] == "blocked", f"expected status=blocked, got {r['status']!r}"
         assert r["provider"] == "deepseek-harness"
         assert r["completion_pct"] == 0
+        assert r["failure_class"] == "local_key_missing", (
+            f"expected failure_class=local_key_missing, got {r['failure_class']!r}"
+        )
+
+        # A local key-missing failure must NEVER mark the lane known-rejected.
+        from providers.smart_router import availability
+
+        cooldown_path = availability._cooldown_file(state_dir, "deepseek-harness")
+        assert not cooldown_path.exists(), (
+            f"a missing local key must not write a lane cooldown, found {cooldown_path}"
+        )
+        assert availability.lane_cooldown_remaining("deepseek-harness", state_dir=state_dir) == 0.0
 
 
 # ---------------------------------------------------------------------------

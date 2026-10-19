@@ -1,0 +1,19 @@
+# Exact pins of the test tools of CI Profile A (track ci-profile-a-xdist).
+#
+# Profile A, the xdist shadow job and every later job of the track install
+# with `pip install -c scripts/ci/profile_a_constraints.txt ...` through the
+# prelude action (.github/actions/profile-a-prelude/action.yml), so every job
+# runs the same pytest. The collection manifest records these three versions
+# (scripts/ci/pytest_collection_manifest.py PINNED_TOOLS), and the parity
+# check reads JUnit keys with the functions of this exact pytest.
+#
+# pytest and pytest-timeout: the versions the runner installed unpinned on
+# main before this file existed (run 38911196655, head b39838cf, 2026-10-16:
+# "Successfully installed ... pytest-9.1.1 pytest-timeout-2.4.0").
+# pytest-xdist: the latest release on 2026-10-16, which declares pytest>=7.0.0.
+#
+# A bump is a deliberate change of this file: it changes the selection
+# fingerprint, so earlier shadow runs stop counting toward the cutover.
+pytest==9.1.1
+pytest-xdist==3.8.0
+pytest-timeout==2.4.0

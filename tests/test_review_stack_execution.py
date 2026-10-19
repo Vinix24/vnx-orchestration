@@ -10,9 +10,10 @@ deepseek process.
    governed lane and books a record with the same evidence a codex pass carries.
 2. The merge door accepts that kimi pass, declared as kimi_gate and declared as
    codex_gate (kimi took the codex seat).
-3. With codex at its limit the default stack goes to kimi, exactly once, before
-   any API-credit gate is asked; only when kimi is exhausted too does glm read.
-4. The dedupe counts only the requests that went out.
+3. With codex at its limit the codex seat goes to kimi, exactly once, before any
+   API-credit gate is asked for it; kimi's own seat then gets the next distinct
+   reviewer (deepseek, then glm), because one reviewer fills one seat (OI-2058 R5a).
+4. A gate is requested once per round, and only a request that went out holds it.
 
 The shared project-store setup is in ``tests/review_stack_support.py``.
 """
@@ -270,7 +271,9 @@ class TestMergeDoorAcceptsKimi:
         gate, _pr_data = pr_merge._run_review_gate(PR)
         return gate
 
-    def test_a_kimi_pass_opens_the_door_when_kimi_is_the_declared_gate(self, env, lane, monkeypatch):
+    def test_a_kimi_pass_opens_the_door_of_a_project_whose_stack_is_kimi(self, env, lane, monkeypatch):
+        """The door holds a merge to the project's stack, never to the declared gate (OI-2058, R5b)."""
+        monkeypatch.setenv("VNX_DEFAULT_REVIEW_STACK", "kimi_gate")
         _manager().request_and_execute(
             pr_number=PR, branch=BRANCH, review_stack=["kimi_gate"], risk_class="medium",
             changed_files=["scripts/lib/example.py"], mode="final", dispatch_id=self.DISPATCH,
@@ -280,10 +283,15 @@ class TestMergeDoorAcceptsKimi:
 
         assert gate["verdict"] == "GO", gate["message"]
         assert gate["overridden"] is False
+        assert gate["review_seats"]["seats"] == ["kimi_gate"]
 
-    def test_a_kimi_pass_opens_the_door_for_a_codex_obligation_when_kimi_took_the_seat(
-        self, env, lane, monkeypatch,
-    ):
+    def test_a_kimi_pass_for_codexs_seat_fills_that_seat_and_no_other(self, env, lane, monkeypatch):
+        """kimi took codex's seat: it fills codex's seat only (OI-2058, R5b).
+
+        Under the default stack ``codex_gate,kimi_gate`` kimi's own seat is then
+        still open, and the door says so by name. In a codex-only project the
+        same evidence opens the door.
+        """
         _write_result(env, "codex_gate", _CODEX_LIMIT_RECORD)
         _manager().request_and_execute(
             pr_number=PR, branch=BRANCH, review_stack=["codex_gate"], risk_class="medium",
@@ -293,6 +301,16 @@ class TestMergeDoorAcceptsKimi:
         assert record["takeover_from"] == "codex_gate", "kimi must carry the takeover it was booked under"
 
         gate = self._door(env, monkeypatch, "codex_gate")
+
+        assert gate["verdict"] == "NO-GO", gate["message"]
+        assert gate["review_seats"]["filled_by"] == {"codex_gate": "kimi_gate"}
+        assert gate["review_seats"]["unfilled"] == ["kimi_gate"]
+        assert "seat kimi_gate" in gate["message"]
+
+        import pr_merge
+
+        monkeypatch.setenv("VNX_DEFAULT_REVIEW_STACK", "codex_gate")
+        gate, _pr_data = pr_merge._run_review_gate(PR)
 
         assert gate["verdict"] == "GO", gate["message"]
         assert gate.get("evidence_gate") == "kimi_gate"
@@ -319,7 +337,7 @@ class TestMergeDoorAcceptsKimi:
 
 
 # ---------------------------------------------------------------------------
-# 5. Codex at its limit: kimi reads next, exactly once, before any API-credit gate
+# 5. Codex at its limit: kimi reads codex's seat, exactly once; kimi's seat goes on
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
@@ -358,15 +376,16 @@ class TestCodexAtItsLimitGoesToKimi:
 
         result = _request(_manager(), None)
 
-        assert _requested_gates(result) == ["kimi_gate"], (
-            "codex is exhausted: kimi takes its seat, and kimi's own standing seat must not "
-            f"request kimi a second time. requested={_requested_gates(result)}"
+        assert _requested_gates(result) == ["kimi_gate", "deepseek_gate"], (
+            "codex is exhausted: kimi takes its seat, and kimi's own seat goes to the next "
+            f"distinct reviewer, never to kimi a second time. requested={_requested_gates(result)}"
         )
-        seat = result["requested"][0]
-        assert seat["takeover_from"] == "codex_gate"
-        assert "usage limit" in seat["failure_reason"].lower()
-        for gate in ("glm_gate", "deepseek_gate"):
-            assert not (env["requests_dir"] / f"pr-{PR}-{gate}.json").exists()
+        codex_seat, kimi_seat = result["requested"]
+        assert (codex_seat["seat"], codex_seat["takeover_from"]) == ("codex_gate", "codex_gate")
+        assert "usage limit" in codex_seat["failure_reason"].lower()
+        assert (kimi_seat["seat"], kimi_seat["takeover_from"]) == ("kimi_gate", "kimi_gate")
+        assert kimi_seat["takeover_path"][0]["reason"] == "reads_another_seat"
+        assert not (env["requests_dir"] / f"pr-{PR}-glm_gate.json").exists()
 
     def test_the_takeover_annotation_survives_on_the_kimi_request_record(self, env, default_stack):
         _write_result(env, "codex_gate", _CODEX_LIMIT_RECORD)
@@ -387,24 +406,43 @@ class TestCodexAtItsLimitGoesToKimi:
             dispatch_id="20260926-review-stack-subscription-first",
         )
 
-        assert [g["gate"] for g in result["gates"]] == ["kimi_gate"]
-        assert result["gates"][0]["passed"] is True
-        assert [call["provider"] for call in lane] == ["kimi"], (
-            f"kimi is a real, minutes-long provider call: it ran {len(lane)} times"
+        assert [g["gate"] for g in result["gates"]] == ["kimi_gate", "deepseek_gate"]
+        assert [g["passed"] for g in result["gates"]] == [True, True]
+        providers = [call["provider"] for call in lane]
+        assert providers.count("kimi") == 1, (
+            f"kimi is a real, minutes-long provider call: it ran {providers.count('kimi')} times"
         )
+        assert len(providers) == 2, f"one run per seat, two seats: {providers}"
 
-    def test_deepseek_reads_only_when_codex_and_kimi_are_both_at_their_limit(self, env, default_stack):
+    def test_both_subscription_seats_at_their_limit_on_the_default_chain_end_the_second_seat(self, env, default_stack):
+        """R4 (operator decision 2026-10-17): the default chain has no glm_gate, so kimi's seat ends as
+        chain_exhausted: no merge until a subscription reviewer is back."""
         _write_result(env, "codex_gate", _CODEX_LIMIT_RECORD)
         _write_result(env, "kimi_gate", _KIMI_LIMIT_RECORD)
 
         result = _request(_manager(), None)
 
-        assert _requested_gates(result) == ["deepseek_gate"], (
-            f"both subscription seats are exhausted: deepseek reads, once. requested={_requested_gates(result)}"
+        codex_seat, kimi_seat = result["requested"]
+        assert codex_seat["gate"] == "deepseek_gate"
+        assert kimi_seat["status"] == "chain_exhausted"
+        assert "glm_gate" not in _requested_gates(result)
+
+    def test_both_subscription_seats_at_their_limit_go_to_deepseek_and_glm(self, env, default_stack, monkeypatch):
+        monkeypatch.setenv("VNX_REVIEW_GATE_TAKEOVER_CHAIN", "codex_gate,kimi_gate,deepseek_gate,glm_gate")
+        _write_result(env, "codex_gate", _CODEX_LIMIT_RECORD)
+        _write_result(env, "kimi_gate", _KIMI_LIMIT_RECORD)
+
+        result = _request(_manager(), None)
+
+        assert _requested_gates(result) == ["deepseek_gate", "glm_gate"], (
+            "both subscription seats are exhausted: deepseek reads codex's seat, and kimi's seat "
+            f"goes to the next distinct reviewer, glm. requested={_requested_gates(result)}"
         )
-        seat = result["requested"][0]
-        assert [hop["gate"] for hop in seat["takeover_path"]] == ["codex_gate", "kimi_gate"]
-        assert not (env["requests_dir"] / f"pr-{PR}-glm_gate.json").exists()
+        codex_seat, kimi_seat = result["requested"]
+        assert [hop["gate"] for hop in codex_seat["takeover_path"]] == ["codex_gate", "kimi_gate"]
+        assert [(hop["gate"], hop["status"]) for hop in kimi_seat["takeover_path"]] == [
+            ("kimi_gate", "unavailable"), ("deepseek_gate", "held"),
+        ]
 
     def test_a_stack_that_names_the_same_gate_twice_requests_it_once(self, env, default_stack):
         result = _request(_manager(), ["kimi_gate", "kimi_gate"])
@@ -465,16 +503,16 @@ class TestOneRequestPerGateCountsOnlyRequestsThatWentOut:
         assert len(kimi_requests) == 1
         assert [(seat["gate"], seat["status"]) for seat in result["requested"]] == [("kimi_gate", "requested")]
 
-    def test_a_repeat_of_a_refused_request_is_attempted(self, kimi_requests, monkeypatch):
+    def test_a_seat_named_twice_is_one_seat_also_when_its_request_is_refused(self, kimi_requests, monkeypatch):
+        """A seat is a name (OI-2058 R5a): naming kimi twice asks for one kimi review, so kimi
+        is asked once whether that request goes out or is refused. That a refusal never holds a
+        gate is pinned by the takeover case below, where two DIFFERENT seats meet in kimi."""
         self._kimi_available(monkeypatch, False)
 
         result = _request(_manager(), ["kimi_gate", "kimi_gate"])
 
-        assert len(kimi_requests) == 2, (
-            "the first kimi request was refused at request time (not_executable): it asked no "
-            f"reader anything, so the second seat must try kimi itself. requests={len(kimi_requests)}"
-        )
-        assert [seat["status"] for seat in result["requested"]] == ["not_executable", "not_executable"]
+        assert len(kimi_requests) == 1
+        assert [seat["status"] for seat in result["requested"]] == ["not_executable"]
 
     @staticmethod
     def _kimi_stub(monkeypatch, statuses: list) -> list:
@@ -505,40 +543,47 @@ class TestOneRequestPerGateCountsOnlyRequestsThatWentOut:
         assert [seat["status"] for seat in result["requested"]] == ["not_executable", "requested"]
         assert result["requested"][1]["takeover_from"] == "codex_gate"
 
-    def test_a_seat_taken_over_to_a_gate_whose_earlier_request_was_accepted_is_skipped(
+    def test_a_seat_taken_over_to_a_gate_whose_earlier_request_was_accepted_walks_on(
         self, env, default_stack, monkeypatch,
     ):
+        """kimi went out for its own seat, so the codex seat may not reuse it: it walks on to
+        the next distinct reviewer, and kimi is still asked only once (OI-2058 R5a)."""
         _write_result(env, "codex_gate", _CODEX_LIMIT_RECORD)
         calls = self._kimi_stub(monkeypatch, ["requested", "requested"])
 
         result = _request(_manager(), ["kimi_gate", "codex_gate"])
 
         assert len(calls) == 1
-        assert _requested_gates(result) == ["kimi_gate"]
+        assert _requested_gates(result) == ["kimi_gate", "deepseek_gate"]
+        assert [(hop["gate"], hop["reason"]) for hop in result["requested"][1]["takeover_path"]] == [
+            ("codex_gate", "exit_nonzero"), ("kimi_gate", "reads_another_seat"),
+        ]
 
     @pytest.mark.parametrize("status", [
         "not_executable", "unavailable", "blocked", "not_configured", "chain_exhausted",
     ])
     def test_a_refused_status_never_counts_as_requested(self, status):
-        from gate_request_handler import _gates_with_accepted_request
+        from gate_request_handler import _held_reviewers
 
-        assert _gates_with_accepted_request([{"gate": "kimi_gate", "status": status}]) == []
+        assert _held_reviewers([{"gate": "kimi_gate", "status": status}]) == {}
 
     @pytest.mark.parametrize("status", [
         "requested", "queued", "configured_dry_run", "pass", "fail", "advisory",
     ])
     def test_any_other_status_counts_as_requested(self, status):
-        from gate_request_handler import _gates_with_accepted_request
+        from gate_request_handler import _held_reviewers
 
-        assert _gates_with_accepted_request([{"gate": "kimi_gate", "status": status}]) == ["kimi_gate"]
+        assert _held_reviewers([{"gate": "kimi_gate", "status": status}]) == {"kimi_gate": "kimi_gate"}
 
     def test_a_payload_without_a_status_counts_as_requested_and_keeps_its_gate(self):
-        from gate_request_handler import _gates_with_accepted_request
+        from gate_request_handler import _held_reviewers
 
         payloads = [
             {"gate": "codex_gate", "status": "not_executable"},
             {"gate": "kimi_gate"},
-            {"gate": "glm_gate", "status": "requested"},
+            {"gate": "glm_gate", "status": "requested", "seat": "kimi_gate"},
         ]
 
-        assert _gates_with_accepted_request(payloads) == ["kimi_gate", "glm_gate"]
+        assert _held_reviewers(payloads) == {"kimi_gate": "kimi_gate", "glm_gate": "kimi_gate"}, (
+            "a held gate maps to the seat it reads: its own name when the payload names no seat"
+        )

@@ -135,7 +135,7 @@ def test_horizon_add_list_round_trip(project, monkeypatch, capsys):
     project_dir, state_dir = project
 
     rc, out, err = _run(monkeypatch, capsys, [
-        "horizon", "add", "feat-h1", "Feature H1", "shipped",
+        "horizon", "add", "feat-h1", "Feature H1", "shipped", "--plan-scope", "architecture",
         "--project-id", "horizon-test", "--project-dir", str(project_dir),
     ])
     assert rc == 0, err
@@ -158,7 +158,7 @@ def test_horizon_list_hides_done_by_default(project, monkeypatch, capsys):
 
     for tid in ("feat-open", "feat-shipped"):
         rc, _, err = _run(monkeypatch, capsys, [
-            "horizon", "add", tid, f"Title {tid}", "shipped",
+            "horizon", "add", tid, f"Title {tid}", "shipped", "--plan-scope", "architecture",
             "--project-id", pid, "--project-dir", str(project_dir),
         ])
         assert rc == 0, err
@@ -194,7 +194,7 @@ def test_horizon_resolves_central_store_not_repo_local(project, monkeypatch, cap
     assert expected_state_dir == state_dir
 
     rc, _, err = _run(monkeypatch, capsys, [
-        "horizon", "add", "feat-h2", "Feature H2", "shipped",
+        "horizon", "add", "feat-h2", "Feature H2", "shipped", "--plan-scope", "architecture",
         "--project-id", "horizon-test", "--project-dir", str(project_dir),
     ])
     assert rc == 0, err
@@ -244,7 +244,7 @@ def test_horizon_resolves_project_id_from_marker_when_unambiguous(project, monke
     (project_dir / ".vnx-project-id").write_text("marker-proj\n", encoding="utf-8")
 
     rc, out, err = _run(monkeypatch, capsys, [
-        "horizon", "add", "feat-marker", "Marker Feature", "shipped",
+        "horizon", "add", "feat-marker", "Marker Feature", "shipped", "--plan-scope", "architecture",
         "--project-dir", str(project_dir),
     ])
     assert rc == 0, err
@@ -268,7 +268,7 @@ def test_objective_alias_reads_same_store_as_horizon(project, monkeypatch, capsy
     project_dir, state_dir = project
 
     rc, _, err = _run(monkeypatch, capsys, [
-        "horizon", "add", "feat-alias1", "Alias via horizon", "shipped",
+        "horizon", "add", "feat-alias1", "Alias via horizon", "shipped", "--plan-scope", "architecture",
         "--project-id", "horizon-test", "--project-dir", str(project_dir),
     ])
     assert rc == 0, err
@@ -281,7 +281,7 @@ def test_objective_alias_reads_same_store_as_horizon(project, monkeypatch, capsy
     assert "feat-alias1" in {d["track_id"] for d in json.loads(out)}
 
     rc, _, err = _run(monkeypatch, capsys, [
-        "objective", "add", "feat-alias2", "Alias via objective", "shipped",
+        "objective", "add", "feat-alias2", "Alias via objective", "shipped", "--plan-scope", "architecture",
         "--project-id", "horizon-test", "--project-dir", str(project_dir),
     ])
     assert rc == 0, err
@@ -299,7 +299,7 @@ def test_deliverable_alias_reads_same_store_as_horizon_deliverable(project, monk
     project_dir, state_dir = project
 
     rc, _, err = _run(monkeypatch, capsys, [
-        "horizon", "add", "feat-dlv", "Deliverable host", "shipped",
+        "horizon", "add", "feat-dlv", "Deliverable host", "shipped", "--plan-scope", "architecture",
         "--project-id", "horizon-test", "--project-dir", str(project_dir),
     ])
     assert rc == 0, err
@@ -467,7 +467,7 @@ def test_horizon_sync_reads_project_roadmap_not_central_template(project, monkey
 
     # Seed one real track into the central store.
     rc, _, err = _run(monkeypatch, capsys, [
-        "horizon", "add", "real-track", "Real Track", "shipped",
+        "horizon", "add", "real-track", "Real Track", "shipped", "--plan-scope", "architecture",
         "--project-id", pid, "--project-dir", str(project_dir),
     ])
     assert rc == 0, err

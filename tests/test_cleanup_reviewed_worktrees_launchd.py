@@ -35,7 +35,7 @@ sys.path.insert(0, str(LAUNCHD_DIR))
 
 from vnx_cli.commands import init_cmd  # noqa: E402
 import launchd_project_scope as lps  # noqa: E402
-from launchd_test_support import make_central_engine  # noqa: E402
+from launchd_test_support import make_central_engine, recording_launchctl, register_engine  # noqa: E402
 
 CLEANUP_WORKTREES = "com.vnx.cleanup-reviewed-worktrees"
 
@@ -96,10 +96,11 @@ class TestCleanupWorktreesTemplateAndPerProjectInstall:
         # destination files, and neither carries the other project's id.
         fake_engine_root = _fake_engine_root(tmp_path)
         monkeypatch.setattr(init_cmd._engine, "engine_root", lambda: fake_engine_root)
-        # Standalone-install semantics: no central shim -> project root falls
-        # back to VNX_HOME. Clear any ambient VNX_PROJECT_ROOT so the test does
-        # not measure whichever host happens to run it.
-        monkeypatch.delenv("VNX_PROJECT_ROOT", raising=False)
+        # The root is the caller's, never ambient: an exported VNX_PROJECT_ROOT
+        # must not leak into the plist (OI-1629 B).
+        monkeypatch.setenv("VNX_PROJECT_ROOT", str(tmp_path / "ambient-root"))
+        alpha_root = tmp_path / "alpha-checkout"
+        beta_root = tmp_path / "beta-checkout"
 
         fake_home = tmp_path / "fake-home"
         fake_home.mkdir()
@@ -107,10 +108,10 @@ class TestCleanupWorktreesTemplateAndPerProjectInstall:
         _patch_launchctl(monkeypatch, set())
 
         assert init_cmd._install_cleanup_reviewed_worktrees_runner(
-            str(fake_engine_root), project_id="project-alpha"
+            str(fake_engine_root), project_id="project-alpha", project_root=str(alpha_root)
         )
         assert init_cmd._install_cleanup_reviewed_worktrees_runner(
-            str(fake_engine_root), project_id="project-beta"
+            str(fake_engine_root), project_id="project-beta", project_root=str(beta_root)
         )
 
         la_dir = fake_home / "Library" / "LaunchAgents"
@@ -144,7 +145,6 @@ class TestCleanupWorktreesRunsAgainstTheProject:
         monkeypatch.setattr(init_cmd._engine, "engine_root", lambda: fake_engine_root)
         project_checkout = tmp_path / "project-checkout"
         project_checkout.mkdir()
-        monkeypatch.setenv("VNX_PROJECT_ROOT", str(project_checkout))
 
         fake_home = tmp_path / "fake-home"
         fake_home.mkdir()
@@ -152,7 +152,7 @@ class TestCleanupWorktreesRunsAgainstTheProject:
         _patch_launchctl(monkeypatch, set())
 
         init_cmd._install_cleanup_reviewed_worktrees_runner(
-            str(fake_engine_root), project_id="project-alpha"
+            str(fake_engine_root), project_id="project-alpha", project_root=str(project_checkout)
         )
 
         import plistlib
@@ -197,7 +197,128 @@ class TestCleanupWorktreesInstalled:
         assert rc == 0
         assert spy.called, "vnx init did not call _install_cleanup_reviewed_worktrees_runner"
         _, kwargs = spy.call_args
+        assert kwargs.get("project_root") == str(tmp_path.resolve())
         assert kwargs.get("project_id"), (
             f"_install_cleanup_reviewed_worktrees_runner called without a project_id: "
             f"{spy.call_args}"
         )
+
+
+def _read_install(home: Path, project_id: str) -> dict:
+    import plistlib
+
+    dest = home / "Library" / "LaunchAgents" / f"{CLEANUP_WORKTREES}.{project_id}.plist"
+    assert dest.is_file(), f"{dest} was not written"
+    return plistlib.loads(dest.read_bytes())
+
+
+class TestVnxInitSweepsTheProject:
+    """W1: ``vnx init`` in project P installs a sweeper aimed at P, never at the engine."""
+
+    def test_installed_plist_targets_the_project_not_the_engine(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: home)
+        engine = register_engine(home, tmp_path / "engine", "engine")
+        for name in ("scripts", "templates"):
+            (engine / name).symlink_to(
+                init_cmd._engine.engine_root() / name, target_is_directory=True
+            )
+        monkeypatch.setattr(init_cmd._engine, "engine_root", lambda: engine)
+        monkeypatch.delenv("VNX_PROJECT_ROOT", raising=False)
+        monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
+        monkeypatch.setattr(init_cmd, "_bootstrap_runtime_dbs", MagicMock(return_value=None))
+        recording_launchctl(tmp_path / "bin", monkeypatch)
+
+        project = tmp_path / "project"
+        project.mkdir()
+        ns = argparse.Namespace(
+            project_path=None, project_dir=str(project), project_id="alpha", template="minimal",
+            force=False, non_interactive=False, set_version=None,
+        )
+        assert init_cmd.vnx_init(ns) == 0
+
+        data = _read_install(home, "alpha")
+        command = data["ProgramArguments"][-1]
+        assert f"--repo-root {project.resolve()} " in command + " "
+        assert str(engine) not in command.split("--repo-root", 1)[1]
+        assert data["EnvironmentVariables"]["VNX_PROJECT_ROOT"] == str(project.resolve())
+
+    def test_installer_without_project_root_refuses(self, tmp_path):
+        import pytest
+
+        with pytest.raises(RuntimeError, match="project checkout"):
+            init_cmd._install_cleanup_reviewed_worktrees_runner(
+                str(tmp_path), project_id="alpha", project_root=""
+            )
+
+
+RELOAD = LAUNCHD_DIR / "reload_plist.sh"
+
+
+class TestReloadPlistResolvesTheRootFromTheRegistry:
+    """W2: ``reload_plist.sh`` takes the checkout from the registry for the project id."""
+
+    def _setup(self, tmp_path: Path, monkeypatch):
+        home = tmp_path / "home"
+        (home / "Library" / "LaunchAgents").mkdir(parents=True)
+        engine = register_engine(home, tmp_path / "engine", "engine")
+        (engine / "scripts").symlink_to(
+            init_cmd._engine.engine_root() / "scripts", target_is_directory=True
+        )
+        alpha = register_engine(home, tmp_path / "alpha-checkout", "alpha")
+        beta = tmp_path / "beta-checkout"
+        beta.mkdir()
+        (beta / ".vnx-project-id").write_text("beta\n", encoding="utf-8")
+        log = recording_launchctl(tmp_path / "bin", monkeypatch)
+        return home, engine, alpha, beta, log
+
+    def _run(self, home: Path, engine: Path, project: str, extra: "dict | None" = None):
+        import os
+        import subprocess
+
+        env = {
+            "HOME": str(home),
+            "PATH": os.environ["PATH"],
+            "VNX_HOME": str(engine),
+            "VNX_TEST_LAUNCHCTL_SHIM": os.environ["VNX_TEST_LAUNCHCTL_SHIM"],
+            **(extra or {}),
+        }
+        return subprocess.run(
+            ["bash", str(RELOAD), CLEANUP_WORKTREES, project],
+            capture_output=True, text=True, env=env, timeout=60,
+        )
+
+    def test_root_comes_from_the_registry_not_vnx_home(self, tmp_path, monkeypatch):
+        home, engine, alpha, _beta, _log = self._setup(tmp_path, monkeypatch)
+        result = self._run(home, engine, "alpha")
+        assert result.returncode == 0, result.stdout + result.stderr
+        data = _read_install(home, "alpha")
+        assert f"--repo-root {alpha.resolve()} " in data["ProgramArguments"][-1] + " "
+        assert data["EnvironmentVariables"]["VNX_PROJECT_ROOT"] == str(alpha.resolve())
+
+    def test_explicit_root_of_another_project_is_refused_and_nothing_is_written(
+        self, tmp_path, monkeypatch
+    ):
+        home, engine, _alpha, beta, log = self._setup(tmp_path, monkeypatch)
+        result = self._run(home, engine, "alpha", {"VNX_PROJECT_ROOT": str(beta)})
+        assert result.returncode != 0
+        assert "beta" in result.stderr and "alpha" in result.stderr
+        assert list((home / "Library" / "LaunchAgents").iterdir()) == []
+        assert log.read_text(encoding="utf-8") == ""
+
+    def test_explicit_root_with_the_same_project_id_is_accepted(self, tmp_path, monkeypatch):
+        home, engine, alpha, _beta, _log = self._setup(tmp_path, monkeypatch)
+        result = self._run(home, engine, "alpha", {"VNX_PROJECT_ROOT": str(alpha)})
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    def test_unregistered_project_names_project_and_registry_and_writes_nothing(
+        self, tmp_path, monkeypatch
+    ):
+        home, engine, _alpha, _beta, log = self._setup(tmp_path, monkeypatch)
+        result = self._run(home, engine, "gamma")
+        assert result.returncode != 0
+        assert "gamma" in result.stderr
+        assert str(home / ".vnx" / "projects.json") in result.stderr
+        assert list((home / "Library" / "LaunchAgents").iterdir()) == []
+        assert log.read_text(encoding="utf-8") == ""

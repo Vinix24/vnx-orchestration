@@ -20,6 +20,8 @@ import subprocess
 import time
 from typing import Optional
 
+from load_deepseek_key import resolve_deepseek_api_key
+
 from provider_spawns.harness_config_dir import (
     HarnessConfigDirError,
     bare_harness_cli_args,
@@ -65,12 +67,20 @@ class DeepSeekProvider(ClassifierProvider):
     def is_present(self) -> bool:
         # Requires the claude CLI AND the operator's own DeepSeek key (never the
         # production OAuth subscription — constraint deepseek-harness-subscription-blocked).
-        return shutil.which("claude") is not None and bool(os.environ.get("DEEPSEEK_API_KEY"))
+        # OI-2182: the key may live in the provider env file, not this shell's env.
+        return shutil.which("claude") is not None and bool(resolve_deepseek_api_key())
 
     def _harness_env(self) -> dict:
         env = dict(os.environ)
+        # OI-2182: the only credential this path may carry is the freshly resolved
+        # key (ANTHROPIC_API_KEY below). Scrub an inherited ANTHROPIC_AUTH_TOKEN
+        # (e.g. a prior deepseek-harness shell) so require_harness_credential
+        # refuses a key-less child instead of silently riding a stale token, and
+        # scrub the OAuth token so the key-auth path can never fall back to OAuth.
+        env.pop("ANTHROPIC_AUTH_TOKEN", None)
+        env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
         env["ANTHROPIC_BASE_URL"] = _DEEPSEEK_ANTHROPIC_BASE_URL
-        env["ANTHROPIC_API_KEY"] = os.environ.get("DEEPSEEK_API_KEY", "")
+        env["ANTHROPIC_API_KEY"] = resolve_deepseek_api_key()
         # Hardening: kill non-essential traffic + telemetry so 0 calls reach
         # api.anthropic.com (the measured-safe configuration in the constraint doc).
         env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"

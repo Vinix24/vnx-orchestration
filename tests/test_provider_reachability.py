@@ -409,6 +409,8 @@ class TestClassifierProvidersReadTheSharedRecord:
         from classifier_providers.deepseek_provider import DeepSeekProvider
 
         monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        # Isolate the provider env file so the operator's real key never leaks in.
+        monkeypatch.setenv("VNX_PROVIDER_ENV_FILE", str(state_dir / "absent-provider-usage.env"))
         with patch("classifier_providers.deepseek_provider.shutil.which", return_value="/usr/bin/claude"):
             assert DeepSeekProvider().is_available() is False
 
@@ -691,7 +693,17 @@ class TestSeatWalkSkipsAnUnreachableSeat:
         assert "gate_result:codex_gate" in seat["failure_reason"]
         assert "kimi_gate substituted as reader" in seat["failure_reason"]
 
+    def test_the_default_chain_ends_when_all_three_of_its_seats_are_unreachable(self, manager, state_dir, monkeypatch):
+        pr.record_failure("codex", _CODEX_QUOTA_TEXT, source="test", state_dir=state_dir)
+        pr.record_failure("kimi", "403 access_terminated_error: reached your usage limit", source="test",
+                          state_dir=state_dir)
+        pr.record_failure("deepseek-harness", _DEEPSEEK_402_TEXT, source="test", state_dir=state_dir)
+        asked, requested = _walk(manager, monkeypatch, ["codex_gate"], 913)
+        assert asked == [], "glm_gate left the default chain (R4, operator decision 2026-10-17)"
+        assert requested[0]["status"] == "chain_exhausted"
+
     def test_the_walk_keeps_going_past_every_seat_known_unreachable(self, manager, state_dir, monkeypatch):
+        monkeypatch.setenv("VNX_REVIEW_GATE_TAKEOVER_CHAIN", "codex_gate,kimi_gate,deepseek_gate,glm_gate")
         pr.record_failure("codex", _CODEX_QUOTA_TEXT, source="test", state_dir=state_dir)
         pr.record_failure("kimi", "403 access_terminated_error: reached your usage limit", source="test",
                           state_dir=state_dir)
@@ -707,6 +719,7 @@ class TestSeatWalkSkipsAnUnreachableSeat:
         assert requested[0]["takeover_path"][0]["reason"] == pr.REASON_AUTH_401
 
     def test_when_every_seat_is_unreachable_the_chain_ends_named_and_asks_nobody(self, manager, state_dir, monkeypatch):
+        monkeypatch.setenv("VNX_REVIEW_GATE_TAKEOVER_CHAIN", "codex_gate,kimi_gate,deepseek_gate,glm_gate")
         pr.record_failure("codex", _CODEX_QUOTA_TEXT, source="test", state_dir=state_dir)
         pr.record_failure("kimi", "Error code: 401 - invalid api key", source="test", state_dir=state_dir)
         pr.record_failure("glm-harness", "402 requires more credits", source="test", state_dir=state_dir)
@@ -739,6 +752,10 @@ class TestSeatWalkSkipsAnUnreachableSeat:
                   "commit_sha": head, "recorded_at": "2026-09-26T10:00:00Z"}
         (state_dir / "review_gates" / "results" / "pr-907-codex_gate.json").write_text(
             json.dumps(result), encoding="utf-8")
+        # R1: the request that produced this verdict opened PR 907 in the round ledger.
+        from review_seat_support import open_pr_in_ledger
+
+        open_pr_in_ledger(state_dir, 907)
         pr.record_failure("codex", _CODEX_QUOTA_TEXT, source="test", state_dir=state_dir)
         monkeypatch.setattr("gate_request_handler.get_pr_head_sha", lambda _pr: head)
 
@@ -753,9 +770,13 @@ class TestSeatWalkSkipsAnUnreachableSeat:
         assert asked == ["codex_gate"]
 
     def test_a_gate_outside_the_takeover_chain_is_dispatched_as_before(self, manager, state_dir, monkeypatch):
-        pr.record_failure("gemini", "429 exceeded your current quota", source="test", state_dir=state_dir)
-        asked, requested = _walk(manager, monkeypatch, ["gemini_review"], 909)
-        assert asked == ["gemini_review"]
+        """No successor configured for the gate, so nothing to pass the seat to: it is asked.
+        (This used gemini_review, which was never in the chain; it is retired and the seat
+        resolver now refuses it before any walk, OI-2058 R5a.)"""
+        monkeypatch.setenv("VNX_OVERRIDE_REVIEW_GATE_TAKEOVER_CHAIN", "kimi_gate,deepseek_gate")
+        pr.record_failure("codex", _CODEX_QUOTA_TEXT, source="test", state_dir=state_dir)
+        asked, requested = _walk(manager, monkeypatch, ["codex_gate"], 909)
+        assert asked == ["codex_gate"]
         assert "takeover" not in requested[0]
 
 

@@ -13,9 +13,11 @@ unverifiable state is a refusal — never a silent pass. ``--override-reason``
 skips the check visibly with a mandatory reason.
 
 Review gate (20260816-gate-never-skippable): a second fail-closed check runs
-after the CI gate — a passing, fully-evidenced review-gate result must exist
-for this PR (see ``_run_review_gate`` ->
-``closure_verifier.check_review_gate_for_merge``). A missing result, an empty
+after the CI gate — every seat of the project's review stack must be filled by
+a distinct reviewer with a passing, fully-evidenced result on this head, and no
+review peer may carry a blocking finding on it (OI-2058, R5b; see
+``_run_review_gate`` -> ``closure_verifier.check_review_gate_for_merge`` ->
+``review_seat_evaluation``). A missing seat, an empty
 ``contract_hash``/``report_path``, or a verdict contradicting its report is a
 refusal. The same ``--override-reason`` valve applies with a mandatory reason.
 
@@ -88,6 +90,14 @@ Receipt written to t0_receipts.ndjson:
     branch      : <from gh api>
     preflight_gates: <list of 5 dicts — every preflight's own verdict; see
                                  "Preflight ledger" below>
+    review_seats: <dict — the seat rule the merge was judged under (OI-2058,
+                                 R5b): rule, pr_id, head_sha, the effective
+                                 seats and their source, who filled which
+                                 seat; ``seats`` empty with ``verdict``
+                                 ``overridden`` or ``not_evaluated`` when the
+                                 review gate did not judge. Always written,
+                                 so track closure tells a merge under the
+                                 seat rule from one before it>
     contract_invalid_override: <dict, optional — {"flag", "reason"}, only
                                  present when --override-contract-invalid
                                  was used to bypass a contract_invalid latest
@@ -600,20 +610,68 @@ def _resolve_declared_gate(pr_number: int, *, state_dir: Path) -> str:
     return ""
 
 
+def _unjudged_seats_record(pr_number: int, head_sha: str, verdict: str, reason: str = "") -> Dict[str, Any]:
+    """The ``review_seats`` a merge record carries when the review gate did not judge the seats.
+
+    ``verdict`` is ``overridden`` (``--override-reason``) or ``not_evaluated``
+    (a caller of ``merge_pr`` that ran no preflight). ``seats`` stays empty:
+    nobody established them, and track closure then resolves them the way the
+    door does instead of reading this merge as one from before the seat rule.
+    """
+    from review_seat_evaluation import SEAT_RULE
+
+    record: Dict[str, Any] = {
+        "rule": SEAT_RULE,
+        "pr_id": str(pr_number),
+        "head_sha": head_sha or "",
+        "seats": [],
+        "source": "",
+        "verdict": verdict,
+    }
+    if reason:
+        record["override_reason"] = reason
+    return record
+
+
+def _b3_override_refusal(b3_override: Optional[str]) -> Optional[Dict[str, Any]]:
+    """NO-GO for an ``--override-b3`` without a reason; ``None`` when there is none or it has one."""
+    if b3_override is None or b3_override.strip():
+        return None
+    return {
+        "verdict": "NO-GO",
+        "message": (
+            '--override-b3 zonder reden geweigerd: geef --reason "..." mee; de override komt met '
+            "zijn reden in het merge-record (geen stille bypass van de B3-cap)"
+        ),
+        "overridden": False,
+        "override_reason": None,
+        "gate": None,
+    }
+
+
+def _b3_override_arg(args: argparse.Namespace) -> Optional[str]:
+    """The ``--override-b3`` reason for the review gate: ``None`` without the flag, ``""`` without a reason."""
+    return (args.reason or "") if getattr(args, "override_b3", False) else None
+
+
 def _run_review_gate(
     pr_number: int,
     *,
     override_reason: Optional[str] = None,
+    b3_override: Optional[str] = None,
 ) -> tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
-    """Fail-closed review-gate check: a passing, evidenced review-gate result
-    must exist for this PR before merge.
+    """Fail-closed review-gate check: every review seat of the project is filled
+    on this PR head before merge (OI-2058, R5b).
 
-    Resolves the PR branch via ``gh pr view``, resolves the declared gate from
-    the door's obligation record (joined on the GitHub PR number), then
-    delegates result validation to
-    ``closure_verifier.check_review_gate_for_merge`` — the SAME truth the
-    closure verifier uses. Returns ``(gate, pr_data)``; the caller merges only
-    when ``gate["verdict"] == "GO"``.
+    Resolves the PR branch via ``gh pr view``, requires the door's obligation
+    record (joined on the GitHub PR number), then delegates the seat
+    evaluation to ``closure_verifier.check_review_gate_for_merge`` — the SAME
+    truth ``vnx-gate/review``, ``vnx pr-ready`` and track closure use. Which
+    seats: the project's review stack as a request on this head recorded it,
+    else resolved fresh; the obligation's declared gate decides no seat.
+    Returns ``(gate, pr_data)``; the caller merges only when
+    ``gate["verdict"] == "GO"``. ``gate["review_seats"]`` is the seat record
+    the ``pr_merged`` receipt carries.
 
     The result key is the bare PR number string (``str(pr_number)``): the
     governed obligation runner records gate results under that key regardless
@@ -622,6 +680,12 @@ def _run_review_gate(
     state is a refusal, never a silent pass. ``override_reason`` is the escape
     hatch with the same semantics as the CI gate: non-empty skips the check
     visibly, empty is refused.
+
+    ``b3_override`` (R1) is the reason of ``--override-b3``: ``None`` when the
+    flag was not given, and an empty reason is refused. It skips nothing: the
+    seats are still judged and every PASS must still be in the round ledger; it
+    only lets the codex seat of a PR at the B3 cap count, and the merge record
+    carries it with its reason (``review_seats.round_ledger.override``).
     """
     pr_data = _query_pr(pr_number)
     if pr_data is None:
@@ -675,6 +739,7 @@ def _run_review_gate(
             "overridden": True,
             "override_reason": reason,
             "gate": None,
+            "review_seats": _unjudged_seats_record(pr_number, head_sha, "overridden", reason),
         }, pr_data
 
     # ── Declared gate from the door's obligation ──────────────────────────
@@ -693,17 +758,30 @@ def _run_review_gate(
             "gate": None,
         }, pr_data
 
+    return _review_seats_verdict(
+        pr_number, gate_name, state_dir, branch=branch, head_sha=head_sha, b3_override=b3_override,
+    ), pr_data
+
+
+def _review_seats_verdict(
+    pr_number: int, gate_name: str, state_dir: Path, *, branch: str, head_sha: str, b3_override: Optional[str],
+) -> Dict[str, Any]:
+    """The seat evaluation of the review gate, with the ``--override-b3`` reason when one was given (R1).
+
+    An ``--override-b3`` without a reason is refused (:func:`_b3_override_refusal`).
+    The reason is passed only when given: the evaluation reads the round ledger
+    either way, and an evaluator that predates the override is called as before.
+    """
+    refusal = _b3_override_refusal(b3_override)
+    if refusal is not None:
+        return refusal
     from closure_verifier import check_review_gate_for_merge
 
-    results_dir = state_dir / "review_gates" / "results"
-    gate = check_review_gate_for_merge(
-        str(pr_number),
-        gate_name,
-        results_dir,
-        branch=branch,
-        head_sha=head_sha,
+    override_b3 = {"b3_override": b3_override.strip()} if b3_override else {}
+    return check_review_gate_for_merge(
+        str(pr_number), gate_name, state_dir / "review_gates" / "results", branch=branch, head_sha=head_sha,
+        **override_b3,
     )
-    return gate, pr_data
 
 
 def _run_adr_gate(pr_number: int, *, pr_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -1479,6 +1557,7 @@ def _emit_receipt(
     receipts_file: Optional[str] = None,
     contract_invalid_override: Optional[Dict[str, Any]] = None,
     preflight_gates: Optional[list[Dict[str, Any]]] = None,
+    review_seats: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Write pr_merged receipt to t0_receipts.ndjson with dual-scheme linkage.
 
@@ -1503,6 +1582,12 @@ def _emit_receipt(
     the full five-record ledger with every verdict ``not_evaluated`` and
     ``GATES_NOT_RUN_MESSAGE`` as the reason, so a reader sees one uniform shape
     and field-presence alone separates a post-D3 receipt from a pre-D3 one.
+
+    ``review_seats`` (OI-2058, R5b) is the seat rule the review preflight
+    judged the merge under. Written always, for the same reason: track closure
+    reads its presence to tell a merge under the seat rule from one before it,
+    so a caller that ran no gate records ``verdict: not_evaluated`` and no
+    seats rather than nothing.
     """
     kwargs: Dict[str, Any] = {
         "pr_number": pr_number,
@@ -1522,6 +1607,7 @@ def _emit_receipt(
     kwargs["preflight_gates"] = preflight_gates or _preflight_ledger(
         [], unevaluated_message=GATES_NOT_RUN_MESSAGE,
     )
+    kwargs["review_seats"] = review_seats or _unjudged_seats_record(pr_number, "", "not_evaluated")
     return emit_governance_receipt(
         "pr_merged",
         receipt_kind="state_mutation",
@@ -1720,6 +1806,7 @@ def merge_pr(
     pr_data: Optional[Dict[str, Any]] = None,
     contract_invalid_override: Optional[Dict[str, Any]] = None,
     preflight_gates: Optional[list[Dict[str, Any]]] = None,
+    review_seats: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Merge a PR and emit audit trail.
 
@@ -1732,6 +1819,10 @@ def merge_pr(
     ``preflight_gates`` (Golf Bx, D3): the five preflight verdicts ``main()``
     collected on the way here, forwarded onto the ``pr_merged`` receipt.
     ``None`` (default) omits the field for callers that never ran the gates.
+
+    ``review_seats`` (OI-2058, R5b): the seat record the review preflight
+    returned, forwarded onto the ``pr_merged`` receipt. ``None`` records
+    ``verdict: not_evaluated`` for the head merged.
 
     ``head_sha`` is the exact commit the gates approved; it is threaded into
     ``gh pr merge --match-head-commit`` so the merge refuses any other commit.
@@ -1822,16 +1913,13 @@ def merge_pr(
     # best-effort and is not touched.
     try:
         receipt = _emit_receipt(
-            pr_number=pr_number,
-            dispatch_id=dispatch_id,
-            merge_method=merge_method,
-            pr_title=result["pr_title"],
-            branch=result["branch"],
-            pr_id=pr_id or "",
-            pr_id_resolution="" if pr_id else "unmatched",
+            pr_number=pr_number, dispatch_id=dispatch_id, merge_method=merge_method,
+            pr_title=result["pr_title"], branch=result["branch"],
+            pr_id=pr_id or "", pr_id_resolution="" if pr_id else "unmatched",
             receipts_file=receipts_file,
             contract_invalid_override=contract_invalid_override,
             preflight_gates=preflight_gates,
+            review_seats=review_seats or _unjudged_seats_record(pr_number, head_sha, "not_evaluated"),
         )
         append_status = (receipt or {}).get("append_status", "unknown")
         result["receipt_status"] = append_status
@@ -1898,8 +1986,17 @@ def main(argv: Optional[list[str]] = None) -> int:
              "enforcement), with this required reason (empty is refused). No other "
              "override applies to this gate.",
     )
+    parser.add_argument(
+        "--override-b3", action="store_true",
+        help="R1: let the codex seat of a PR at the B3 cap count at this merge, with --reason "
+             "(empty is refused). Every PASS must still be in the round ledger; the reason "
+             "lands in the pr_merged receipt.",
+    )
+    parser.add_argument("--reason", default=None, help="The reason for --override-b3 (required with it)")
     parser.add_argument("--json", action="store_true", help="Output result as JSON")
     args = parser.parse_args(argv)
+    if args.reason is not None and not args.override_b3:
+        parser.error("--reason only applies to --override-b3")
     return _run_with_target(args)
 
 
@@ -1983,7 +2080,7 @@ def _run_door(args: argparse.Namespace) -> int:
         print(f"CI gate: {gate['message']}")
 
     # ── Review gate: a passing, evidenced review-gate result must exist ────
-    review_gate, _ = _run_review_gate(args.pr, override_reason=args.override_reason)
+    review_gate, _ = _run_review_gate(args.pr, override_reason=args.override_reason, b3_override=_b3_override_arg(args))
     evaluated.append(_preflight_record("review", review_gate, head_sha))
     if review_gate["verdict"] != "GO":
         return refuse("review", review_gate, "review_gate")
@@ -2044,14 +2141,11 @@ def _run_door(args: argparse.Namespace) -> int:
     )
 
     result = merge_pr(
-        pr_number=args.pr,
-        dispatch_id=args.dispatch_id or "",
-        merge_method=method,
-        dry_run=args.dry_run,
-        head_sha=head_sha,
-        pr_data=pr_data,
+        pr_number=args.pr, dispatch_id=args.dispatch_id or "", merge_method=method,
+        dry_run=args.dry_run, head_sha=head_sha, pr_data=pr_data,
         contract_invalid_override=contract_invalid_override,
         preflight_gates=preflight_gates,
+        review_seats=review_gate.get("review_seats"),
     )
 
     result["target_repo"] = _ACTIVE_TARGET.repo if _ACTIVE_TARGET is not None else ""

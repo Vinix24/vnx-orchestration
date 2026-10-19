@@ -51,6 +51,18 @@ class TestLaneGates:
         )
         assert ok is True
 
+    def test_deepseek_available_when_key_only_in_provider_env_file(
+        self, tmp_path, state_dir, monkeypatch,
+    ):
+        """OI-2182: the lane gate resolves the key through the shared loader,
+        so auto-route/escalation select deepseek-harness when the key lives only
+        in the provider env file, not in the env view."""
+        env_file = tmp_path / "provider-usage.env"
+        env_file.write_text("DEEPSEEK_API_KEY=sk-test\n")
+        monkeypatch.setenv("VNX_PROVIDER_ENV_FILE", str(env_file))
+        ok, reason = lane_available("deepseek-harness", env={}, state_dir=state_dir)
+        assert ok is True, reason
+
     def test_kimi_requires_cli_on_path(self, state_dir, monkeypatch):
         import shutil
 

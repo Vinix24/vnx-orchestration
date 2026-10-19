@@ -22,8 +22,8 @@ import provider_switch
 from .detector import HeuristicDetector
 from claude_cli import resolve_claude_cli
 from provider_spawns.deepseek_harness_spawn import (
+    build_harness_argv,
     build_harness_child_env,
-    build_harness_cli_args,
     DEEPSEEK_API_KEY_ENV,
 )
 from provider_spawns.harness_config_dir import HarnessConfigDirError
@@ -31,6 +31,48 @@ from provider_spawns.harness_config_dir import HarnessConfigDirError
 DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
 
 STATUS_SWITCHED_OFF = provider_switch.REASON_SWITCHED_OFF
+
+# OI-2061: stderr kept on a failed CLI call. The old 200 characters cut the real cause off
+# behind the CLI's own start-up notices.
+CLI_STDERR_LOG_LIMIT = 4000
+# Length of the one-line cause that goes into the beacon.
+CLI_CAUSE_LIMIT = 200
+# Start-up notice of the claude CLI that appears on every call to a non-Anthropic model name,
+# successful or not (measured against a stub endpoint, claude 2.1.301). It is never the cause.
+_NON_CAUSE_PREFIXES = ("[claude-code:unrecognized_model]",)
+
+
+def describe_cli_failure(returncode: int, stdout: str, stderr: str) -> "tuple[str, str]":
+    """Return ``(log_detail, cause)`` for a claude call that exited non-zero.
+
+    ``log_detail`` carries the stderr (bounded at ``CLI_STDERR_LOG_LIMIT``) and, when the
+    stdout JSON parses, its ``is_error`` and ``result``. ``cause`` is one line for the
+    beacon: the first line of ``result`` when the JSON names one, else the first stderr line
+    that is not a known start-up notice.
+    """
+    err = (stderr or "").strip()
+    parts = [f"stderr={err[:CLI_STDERR_LOG_LIMIT]!r}"]
+    result_text = ""
+    try:
+        payload = json.loads(stdout or "")
+    except (json.JSONDecodeError, TypeError):
+        payload = None
+    if isinstance(payload, dict):
+        raw = payload.get("result")
+        result_text = raw.strip() if isinstance(raw, str) else ""
+        parts.append(f"is_error={payload.get('is_error')!r}")
+        parts.append(f"result={result_text[:CLI_STDERR_LOG_LIMIT]!r}")
+    cause = ""
+    if result_text:
+        cause = result_text.splitlines()[0]
+    else:
+        for line in err.splitlines():
+            line = line.strip()
+            if line and not line.startswith(_NON_CAUSE_PREFIXES):
+                cause = line
+                break
+    cause = (cause or f"exit code {returncode} without a message")[:CLI_CAUSE_LIMIT]
+    return "; ".join(parts), cause
 
 
 @dataclass(frozen=True)
@@ -77,6 +119,8 @@ class LLMOutcome:
     text: Optional[str] = None
     returncode: Optional[int] = None
     stderr: str = ""
+    # One-line reason a failed call ended (OI-2061); empty when the status says it all.
+    cause: str = ""
 
     @property
     def attempted(self) -> bool:
@@ -127,6 +171,8 @@ class DeepAnalyzer:
         # (``cli_failed``, ``timeout``, ``empty``, ``unparseable`` ...). A bare
         # count says something broke; the reason says what to fix.
         self.deep_failure_reasons: Dict[str, int] = {}
+        # OI-2061: the first-line cause behind ``cli_failed``, counted per distinct text.
+        self.deep_failure_causes: Dict[str, int] = {}
         self.reset_restricted_run()
         # Outcome of the last analyze_session call: ``ok``, ``failed`` or
         # ``restricted_deferred``. The runner reads it to tell a deferred session
@@ -149,9 +195,14 @@ class DeepAnalyzer:
         return (not self._restricted_claude_down
                 and self.restricted_claude_calls < restricted_claude_cap())
 
-    def _record_failure(self, reason: str) -> None:
+    def _record_failure(self, reason: str, cause: str = "") -> None:
         self.deep_failures += 1
         self.deep_failure_reasons[reason] = self.deep_failure_reasons.get(reason, 0) + 1
+        self._note_cause(cause)
+
+    def _note_cause(self, cause: str) -> None:
+        if cause:
+            self.deep_failure_causes[cause] = self.deep_failure_causes.get(cause, 0) + 1
 
     SYSTEM_PROMPT = """You are a VNX orchestration system analyst. Analyze this Claude Code session summary and extract actionable improvement suggestions.
 
@@ -261,69 +312,8 @@ Respond with valid JSON:
 
         self.deep_open_sessions += 1
         project_id = self._switch_project(origin)
-        disabled_lanes: List[str] = []
-
-        result_text = None
-        # Lane that produced ``result_text``; stamped into the result as ``_model``.
-        lane = "unknown"
-        # ``any_attempted`` records whether an LLM was actually invoked this
-        # session — derived from each candidate's own LLMOutcome.attempted,
-        # not from which branch was merely tried. A config gap (missing
-        # DEEPSEEK_API_KEY, no usable Ollama model/server) refuses before any
-        # subprocess starts, so it must never flip this to True (fix1585-r2).
-        any_attempted = False
-        # Status of the last candidate that actually fired: the reason a
-        # session ends up without a usable result (OI-1258).
-        last_attempted_status = "error"
-
-        # deepseek-harness: own-key auth via the claude CLI driving DeepSeek's
-        # Anthropic-compatible endpoint.  Fails closed when DEEPSEEK_API_KEY is
-        # unset — never falls back to the OAuth subscription (constraint
-        # deepseek-harness-subscription-blocked).
-        if LLM_STRATEGY == "deepseek-harness":
-            outcome = self._launch_lane(self._try_deepseek_harness, prompt, project_id)
-            if outcome.status == STATUS_SWITCHED_OFF:
-                disabled_lanes.append("deepseek-harness")
-            any_attempted = any_attempted or outcome.attempted
-            if outcome.attempted:
-                last_attempted_status = outcome.status
-            result_text = outcome.text if outcome.status == "ok" else None
-            lane = f"deepseek-harness:{DEEPSEEK_HARNESS_MODEL}"
-        # Billing guard: in "auto" mode, refuse the claude path when the
-        # session backlog exceeds the threshold. "claude-only" bypasses
-        # the guard — the operator explicitly opted in to metered spend.
-        elif LLM_STRATEGY == "claude-only":
-            outcome = self._try_claude_max(prompt)
-            any_attempted = any_attempted or outcome.attempted
-            if outcome.attempted:
-                last_attempted_status = outcome.status
-            result_text = outcome.text if outcome.status == "ok" else None
-            lane = "claude-max"
-        elif LLM_STRATEGY == "auto":
-            if self._session_backlog <= AUTO_CLAUSE_MAX_SESSIONS:
-                outcome = self._try_claude_max(prompt)
-                any_attempted = any_attempted or outcome.attempted
-                if outcome.attempted:
-                    last_attempted_status = outcome.status
-                result_text = outcome.text if outcome.status == "ok" else None
-                lane = "claude-max"
-            else:
-                if self._session_backlog > 0:
-                    log("WARNING",
-                        f"auto: skipping claude path — {self._session_backlog} "
-                        f"session backlog exceeds AUTO_CLAUSE_MAX_SESSIONS "
-                        f"({AUTO_CLAUSE_MAX_SESSIONS}). "
-                        f"Use VNX_ANALYZER_LLM=claude-only to override.")
-
-        if result_text is None and LLM_STRATEGY in ("auto", "ollama-only"):
-            outcome = self._launch_lane(self._try_ollama, prompt, project_id)
-            if outcome.status == STATUS_SWITCHED_OFF:
-                disabled_lanes.append("ollama")
-            any_attempted = any_attempted or outcome.attempted
-            if outcome.attempted:
-                last_attempted_status = outcome.status
-            result_text = outcome.text if outcome.status == "ok" else None
-            lane = f"ollama:{OLLAMA_MODEL}"
+        result_text, lane, any_attempted, last_status, last_cause, disabled_lanes = \
+            self._run_lanes(prompt, project_id)
 
         if any_attempted:
             self.deep_attempts += 1
@@ -338,11 +328,68 @@ Respond with valid JSON:
         self.last_status = "failed"
         if result_text is None:
             if any_attempted:
-                self._record_failure(last_attempted_status)
-                log("ERROR", f"Deep analysis failed: {last_attempted_status}")
+                self._record_failure(last_status, last_cause)
+                log("ERROR", f"Deep analysis failed: {last_status}"
+                             + (f" ({last_cause})" if last_cause else ""))
             return None
 
         return self._finish_result(result_text, lane)
+
+    def _run_lanes(self, prompt: str, project_id: str):
+        """Try the lanes the strategy allows, in order, until one yields text.
+
+        Returns ``(result_text, lane, any_attempted, last_status, last_cause,
+        disabled_lanes)``. ``any_attempted`` is derived from each candidate's own
+        LLMOutcome.attempted, not from which branch was merely tried: a config gap
+        (missing DEEPSEEK_API_KEY, no usable Ollama model/server) refuses before any
+        subprocess starts and never flips it (fix1585-r2). ``last_status`` and
+        ``last_cause`` belong to the last candidate that actually fired: the reason a
+        session ends up without a usable result (OI-1258).
+        """
+        disabled_lanes: List[str] = []
+        state = {"text": None, "lane": "unknown", "attempted": False,
+                 "status": "error", "cause": ""}
+
+        def absorb(outcome: LLMOutcome, lane: str) -> None:
+            state["attempted"] = state["attempted"] or outcome.attempted
+            if outcome.attempted:
+                state["status"] = outcome.status
+                state["cause"] = outcome.cause
+            state["text"] = outcome.text if outcome.status == "ok" else None
+            state["lane"] = lane
+
+        # deepseek-harness: own-key auth via the claude CLI driving DeepSeek's
+        # Anthropic-compatible endpoint.  Fails closed when DEEPSEEK_API_KEY is
+        # unset, never falls back to the OAuth subscription (constraint
+        # deepseek-harness-subscription-blocked).
+        if LLM_STRATEGY == "deepseek-harness":
+            outcome = self._launch_lane(self._try_deepseek_harness, prompt, project_id)
+            if outcome.status == STATUS_SWITCHED_OFF:
+                disabled_lanes.append("deepseek-harness")
+            absorb(outcome, f"deepseek-harness:{DEEPSEEK_HARNESS_MODEL}")
+        # Billing guard: in "auto" mode, refuse the claude path when the
+        # session backlog exceeds the threshold. "claude-only" bypasses
+        # the guard: the operator explicitly opted in to metered spend.
+        elif LLM_STRATEGY == "claude-only":
+            absorb(self._try_claude_max(prompt), "claude-max")
+        elif LLM_STRATEGY == "auto":
+            if self._session_backlog <= AUTO_CLAUSE_MAX_SESSIONS:
+                absorb(self._try_claude_max(prompt), "claude-max")
+            elif self._session_backlog > 0:
+                log("WARNING",
+                    f"auto: skipping claude path — {self._session_backlog} "
+                    f"session backlog exceeds AUTO_CLAUSE_MAX_SESSIONS "
+                    f"({AUTO_CLAUSE_MAX_SESSIONS}). "
+                    f"Use VNX_ANALYZER_LLM=claude-only to override.")
+
+        if state["text"] is None and LLM_STRATEGY in ("auto", "ollama-only"):
+            outcome = self._launch_lane(self._try_ollama, prompt, project_id)
+            if outcome.status == STATUS_SWITCHED_OFF:
+                disabled_lanes.append("ollama")
+            absorb(outcome, f"ollama:{OLLAMA_MODEL}")
+
+        return (state["text"], state["lane"], state["attempted"],
+                state["status"], state["cause"], disabled_lanes)
 
     @staticmethod
     def _launch_lane(lane_fn, prompt: str, project_id: str) -> LLMOutcome:
@@ -414,7 +461,8 @@ Respond with valid JSON:
             self._defer_restricted("claude returned empty output", "claude_empty")
             return None
         self._restricted_claude_down = True
-        self._defer_restricted(f"claude {outcome.status}")
+        self._defer_restricted(f"claude {outcome.status}"
+                               + (f" ({outcome.cause})" if outcome.cause else ""))
         return None
 
     @classmethod
@@ -605,11 +653,11 @@ Respond with valid JSON:
             return LLMOutcome("error", stderr=str(e))
 
         if result.returncode != 0:
-            snippet = (result.stderr or "").strip()[:200]
-            log("ERROR",
-                f"Claude CLI failed (rc={result.returncode}): {snippet}")
-            return LLMOutcome("cli_failed",
-                              returncode=result.returncode, stderr=snippet)
+            detail, cause = describe_cli_failure(result.returncode, result.stdout, result.stderr)
+            log("ERROR", f"Claude CLI failed (rc={result.returncode}): {detail}")
+            return LLMOutcome("cli_failed", returncode=result.returncode,
+                              stderr=(result.stderr or "").strip()[:CLI_STDERR_LOG_LIMIT],
+                              cause=cause)
 
         try:
             output = json.loads(result.stdout)
@@ -736,9 +784,8 @@ Respond with valid JSON:
             return preflight
 
         claude_bin = resolve_claude_cli() or "claude"
-        cli_args = [claude_bin, "-p", "--output-format", "json", "--max-turns", "1",
-                    "--model", DEEPSEEK_HARNESS_MODEL]
-        cli_args.extend(build_harness_cli_args())
+        cli_args = build_harness_argv(claude_bin, DEEPSEEK_HARNESS_MODEL,
+                                      output_format="json", print_flags=["--max-turns", "1"])
 
         try:
             child_env = build_harness_child_env(api_key)
@@ -756,11 +803,12 @@ Respond with valid JSON:
                 env=child_env,
             )
             if result.returncode != 0:
-                snippet = (result.stderr or "").strip()[:200]
-                log("ERROR", f"DeepSeek harness failed (rc={result.returncode}): "
-                               f"{snippet}")
-                return LLMOutcome("cli_failed",
-                                  returncode=result.returncode, stderr=snippet)
+                detail, cause = describe_cli_failure(
+                    result.returncode, result.stdout, result.stderr)
+                log("ERROR", f"DeepSeek harness failed (rc={result.returncode}): {detail}")
+                return LLMOutcome("cli_failed", returncode=result.returncode,
+                                  stderr=(result.stderr or "").strip()[:CLI_STDERR_LOG_LIMIT],
+                                  cause=cause)
             try:
                 output = json.loads(result.stdout)
                 text = output.get("result", result.stdout)

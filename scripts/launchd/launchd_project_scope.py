@@ -42,6 +42,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+from xml.parsers.expat import ExpatError
 
 _SCRIPTS_LIB = Path(__file__).resolve().parent.parent / "lib"
 if str(_SCRIPTS_LIB) not in sys.path:
@@ -91,7 +92,7 @@ def _read_template_label(plist_path: Path) -> Optional[str]:
     try:
         with open(plist_path, "rb") as fh:
             data = plistlib.load(fh)
-    except (plistlib.InvalidFileException, OSError, ValueError):
+    except (plistlib.InvalidFileException, ExpatError, OSError, ValueError):
         # vnx-silent-except: unreadable/malformed template surfaces as a
         # template_unreadable violation in check_template_contract, not a crash
         return None

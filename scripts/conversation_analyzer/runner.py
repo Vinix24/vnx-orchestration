@@ -409,6 +409,7 @@ class ConversationAnalyzer:
         stats.deep_attempts = self.deep.deep_attempts
         stats.deep_failures = self.deep.deep_failures
         stats.deep_failure_reasons = dict(self.deep.deep_failure_reasons)
+        stats.deep_failure_causes = dict(self.deep.deep_failure_causes)
         stats.deep_config_skips = self.deep.deep_config_skips
         stats.deep_disabled_skips = self.deep.deep_disabled_skips
         stats.deep_open_sessions = self.deep.deep_open_sessions

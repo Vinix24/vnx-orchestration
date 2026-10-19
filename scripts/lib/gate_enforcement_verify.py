@@ -27,10 +27,12 @@ non-passing status. Only a readable object whose ``status`` is not
 ``completed``/``passed`` is reported-but-not-failed (``GATE_NOT_COMPLETED``), the
 "let T0 decide" case.
 
-A seat is accounted for when a reported gate is that seat, when the seat appears
-in a reported gate's ``takeover_path`` (it was passed over and that gate read in
-its place), or when its takeover chain was recorded as exhausted. A seat with none
-of these has no request, no result and no takeover record: MISSING_ARTIFACT.
+A seat is accounted for by the reported entry whose request states it as its
+``seat`` (since OI-2058 R5a). An entry from before R5a states none; it accounts
+for its own gate's seat, for the first seat of its ``takeover_path`` (it was
+passed over and that gate read in its place), or, for a recorded exhausted
+takeover chain, for the seat the chain started from. A seat with none of these
+has no request, no result and no takeover record: MISSING_ARTIFACT.
 
 Commit binding
 --------------
@@ -49,7 +51,15 @@ exactly as the verifier behaved before this check existed.
 The requested stack is parsed from the same arguments the manager received, with
 argparse, so ``--review-stack a,b`` and ``--review-stack=a,b`` and a quoted
 ``"a, b"`` all resolve to the seats the manager saw. Without ``--review-stack`` it
-is the manager's ``DEFAULT_REVIEW_STACK``.
+is the seat list the manager's own report says it requested (``review_seats``,
+since OI-2058 R5a), else a fresh ``review_seats.resolve_review_seats()``. Never
+the manager's import-time ``DEFAULT_REVIEW_STACK`` (OI-2058, R5b): that list was
+frozen when the process started and has not decided the seats since R5a.
+
+Which seat an entry answers for is ``review_seat_evaluation.seat_for``, the
+function the merge door, ``vnx-gate/review`` and ``vnx pr-ready`` read too.
+That module imports only the standard library at module level, so this verifier
+still runs from a copy with that one module beside it.
 
 BILLING SAFETY: No Anthropic SDK. No network calls.
 """
@@ -62,6 +72,8 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
+
+from review_seat_evaluation import seat_for
 
 _GATE_NAME = re.compile(r"^[A-Za-z0-9_]+$")
 _COMPLETED_STATUSES = ("completed", "passed")
@@ -140,23 +152,17 @@ def _load_json(path: Path) -> Optional[Dict[str, Any]]:
     return loaded if isinstance(loaded, dict) else None
 
 
-def _hop_gates(path: Any) -> List[str]:
-    if not isinstance(path, list):
-        return []
-    return [str(hop["gate"]) for hop in path if isinstance(hop, dict) and hop.get("gate")]
-
-
 def _raw_takeover_path(entry: Dict[str, Any], request_file: Path) -> List[Dict[str, Any]]:
     """The full takeover-path hop list for ``entry``: from the report's own
     ``detail``, else from the on-disk request record (a guarded result write
     can leave the result without the annotation the request holds).
 
     Each hop is the raw dict (``gate``/``reason``/``detail``/``status``), not
-    just the gate name — :func:`_takeover_hops` narrows this to names for the
-    artifact-verification walk, while a display line (``gate_seat_line.py``)
-    needs the hop's own ``reason`` too. One extraction, two views, so the
-    display line and the verification walk can never read one takeover two
-    different ways.
+    just the gate name: :func:`_entry_seat` hands it to
+    ``review_seat_evaluation.seat_for`` (the first hop names the seat), while a
+    display line (``gate_seat_line.py``) needs the hop's own ``reason`` too. One
+    extraction, two views, so the display line and the seat reading can never
+    read one takeover two different ways.
     """
     detail = entry.get("detail")
     path = detail.get("takeover_path") if isinstance(detail, dict) else None
@@ -168,11 +174,32 @@ def _raw_takeover_path(entry: Dict[str, Any], request_file: Path) -> List[Dict[s
     return [hop for hop in path if isinstance(hop, dict) and hop.get("gate")] if isinstance(path, list) else []
 
 
-def _takeover_hops(entry: Dict[str, Any], request_file: Path) -> List[str]:
-    """The seats ``entry``'s gate read in place of: the takeover path the report
-    carries, else the one on the request record (a guarded result write can leave
-    the result without the annotation the request holds)."""
-    return [str(hop["gate"]) for hop in _raw_takeover_path(entry, request_file)]
+def _entry_seat(entry: Dict[str, Any], gate: str, request_file: Path) -> Optional[str]:
+    """The one seat ``entry`` answers for, or ``None`` (OI-2058, R5a).
+
+    A reviewer fills at most one seat, and the seat its request record states
+    wins: ``seat``, stamped on every seat's request since R5a and carried onto
+    the report entry by the executor. A takeover annotation is history, not
+    identity: a switched-off kimi whose standing PASS still carries an earlier
+    round's codex ``takeover_path`` reads kimi's own seat when this request asked
+    it for kimi's seat (codex WARNING on #2073).
+
+    Only an entry without a stated seat (written before R5a) falls back: a
+    recorded chain-exhausted (or unfillable) seat answers for its own gate, a
+    takeover for the seat its walk started from (``takeover_path[0]``), never
+    also for its own gate's seat or for a seat it was walked past, and anything
+    else for its own gate. An entry the same call handed on (``superseded_by``:
+    its reviewer ran out and the seat went to the next one) answers for
+    nothing; its successor does.
+    """
+    if entry.get("superseded_by"):
+        return None
+    stated = entry.get("seat")
+    if stated:
+        return _check_gate_name(str(stated))
+    if entry.get("request_status") == _CHAIN_EXHAUSTED:
+        return gate
+    return seat_for(gate, takeover_path=_raw_takeover_path(entry, request_file))
 
 
 def _classify_binding(head_sha: str, result_sha: str) -> str:
@@ -180,9 +207,10 @@ def _classify_binding(head_sha: str, result_sha: str) -> str:
 
     Mirrors ``gate_executor._classify_sha_binding`` (the classifier the manager
     stamped the entry's ``sha_binding`` with). It is duplicated rather than
-    imported because this verifier is copied standalone into the enforcement
-    sandbox (see ``tests/test_t0_gate_enforcement.py``) and must not drag in the
-    executor's import graph. Either sha absent is ``unknown``: it says nothing
+    imported because this verifier is copied into the enforcement sandbox with
+    only ``review_seat_evaluation`` beside it (see
+    ``tests/test_t0_gate_enforcement.py``) and must not drag in the executor's
+    import graph. Either sha absent is ``unknown``: it says nothing
     about the code and never fails a run.
     """
     if not head_sha or not result_sha:
@@ -246,10 +274,6 @@ def verify_report(
             else:
                 outcome.verified.append(gate)
                 outcome.not_completed.append(f"{gate} status={_CHAIN_EXHAUSTED}")
-            chain_detail = entry.get("detail")
-            hops: List[str] = _hop_gates(
-                chain_detail.get("takeover_path") if isinstance(chain_detail, dict) else None
-            )
         else:
             result_file = results_dir / f"pr-{pr_number}-{gate}.json"
             result = _load_json(result_file) if result_file.is_file() else None
@@ -280,9 +304,9 @@ def verify_report(
                     outcome.verified.append(gate)
                 if status not in _COMPLETED_STATUSES:
                     outcome.not_completed.append(f"{gate} status={status}")
-            hops = _takeover_hops(entry, request_file)
 
-        for seat in [gate, *hops]:
+        seat = _entry_seat(entry, gate, request_file)
+        if seat:
             answered_by.setdefault(seat, []).append(gate)
 
     for seat in seats:
@@ -300,15 +324,17 @@ def resolve_seat_entries(
     pr_number: int,
     state_dir: Path,
 ) -> Dict[str, Dict[str, Any]]:
-    """Map every seat named in ``report`` -- requested directly, or passed
-    over via a takeover -- to the ``gates`` entry that accounts for it.
+    """Map every seat named in ``report`` -- requested directly, or taken over
+    -- to the ``gates`` entry that accounts for it.
 
     Shared seat/takeover resolution for two readers that must never disagree:
     this module's own :func:`verify_report` (artifact enforcement) and
     ``gate_seat_line.py`` (the ``vnx gate`` slot-line, OI-1888). Both need the
-    same answer to "which entry speaks for seat X" -- one entry itself when
-    there was no takeover, or the entry of whichever gate took the seat over,
-    including every intermediate hop of a multi-step chain.
+    same answer to "which entry speaks for seat X", and both get it from
+    :func:`_entry_seat`: an entry speaks for the seat its request states, and
+    without one for its own gate's seat when there was no takeover and for the
+    seat its walk started from when there was one -- one seat per entry, never
+    the seats a takeover was walked past (OI-2058).
 
     A seat with no entry in the returned mapping was neither answered,
     taken over, nor recorded as chain-exhausted -- exactly the
@@ -323,29 +349,43 @@ def resolve_seat_entries(
         if not (isinstance(entry, dict) and entry.get("gate")):
             continue
         gate = _check_gate_name(str(entry["gate"]))
-
-        if entry.get("request_status") == _CHAIN_EXHAUSTED:
-            chain_detail = entry.get("detail")
-            hops = _hop_gates(
-                chain_detail.get("takeover_path") if isinstance(chain_detail, dict) else None
-            )
-        else:
-            request_file = requests_dir / f"pr-{pr_number}-{gate}.json"
-            hops = _takeover_hops(entry, request_file)
-
-        for seat in [gate, *hops]:
+        seat = _entry_seat(entry, gate, requests_dir / f"pr-{pr_number}-{gate}.json")
+        if seat:
             answered_by.setdefault(seat, entry)
 
     return answered_by
 
 
 def _default_stack() -> Sequence[str]:
-    """The manager's own default stack, resolved the way the manager resolves it."""
+    """The project's review seats, resolved fresh the way the request side resolves them.
+
+    ``review_seats.resolve_review_seats()`` reads ``VNX_DEFAULT_REVIEW_STACK``
+    through ``config_runtime`` on every call. The manager's
+    ``DEFAULT_REVIEW_STACK`` is computed once at import and no longer decides
+    the seats (OI-2058, R5a), so verifying against it could demand a seat the
+    request never asked for, or miss one it did.
+    """
     scripts_dir = str(Path(__file__).resolve().parent.parent)
     if scripts_dir not in sys.path:
         sys.path.insert(0, scripts_dir)
-    import review_gate_manager
-    return list(review_gate_manager.DEFAULT_REVIEW_STACK)
+    from review_seats import resolve_review_seats
+
+    return list(resolve_review_seats().seats)
+
+
+def requested_stack(report: Dict[str, Any], fallback: Callable[[], Sequence[str]]) -> Callable[[], Sequence[str]]:
+    """The default seats for a report: the seats it says it requested, else ``fallback``.
+
+    ``request-and-execute`` reports the seat list its round resolved
+    (``review_seats.seats``). Verifying against exactly that list is verifying
+    the request that ran, even when the config changed between the request
+    and this check.
+    """
+    record = report.get("review_seats")
+    seats = record.get("seats") if isinstance(record, dict) else None
+    if isinstance(seats, list) and any(str(seat).strip() for seat in seats):
+        return lambda: [str(seat) for seat in seats]
+    return fallback
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -361,8 +401,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     state_dir = Path(parser.parse_args(own).state_dir)
 
     try:
-        pr_number, seats = parse_request_args(manager_args, _default_stack)
         report = extract_report(sys.stdin.read())
+        pr_number, seats = parse_request_args(manager_args, requested_stack(report, _default_stack))
         outcome = verify_report(report, pr_number=pr_number, seats=seats, state_dir=state_dir)
     except VerificationError as exc:
         print(f"GATE_ENFORCEMENT_FAILED: {exc}", file=sys.stderr)

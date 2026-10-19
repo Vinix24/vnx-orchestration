@@ -225,7 +225,7 @@ class TestGovernEnsureReceiptIsolation:
     """End-to-end over the exact culprit flow: dispatch_govern.ensure_receipt
     appends a lane-synthesized receipt pinned to the test's own state dir."""
 
-    # QUARANTINED ON CI (Profile A, .github/workflows/vnx-ci.yml -k filter,
+    # QUARANTINED ON CI (Profile A, -k filter in scripts/ci/profile_a_pytest_args.sh,
     # OI-1051 versmald, PR #1434): fails ONLY in full-suite collection order
     # on CI; passes in isolation, including after the merge of main. Measured
     # on head 9a01f5cc: 1 failed, 15953 passed — this test is the 1. The

@@ -1545,21 +1545,40 @@ _SSE_KEEPALIVE_INTERVAL = 15  # seconds
 _SSE_POLL_INTERVAL = 0.5       # seconds
 
 
-def handle_events_stream(handler: "BaseHTTPRequestHandler", terminal: str) -> None:
-    """Stream raw NDJSON events from .vnx-data/events/{terminal}.ndjson as SSE.
+def _live_events_file(terminal: str, dispatch_id: "str | None") -> "tuple[Path | None, str]":
+    """The live stream file ``handle_events_stream`` tails, or None and the reason it has none.
 
-    Seeks to end of file on connect, then tails new lines.
-    Sends a keep-alive comment every 15 seconds.
+    Resolved through ``EventStore.live_path``: ``events/{terminal}.ndjson`` on
+    a terminal-pinned lane, ``events/{terminal}/{dispatch_id}.ndjson`` for one
+    run of a per-run terminal (the headless lane ``ephemeral``, ``plan-gate``).
+    A per-run terminal's shared file receives no run's events, so tailing it
+    without a dispatch id would wait forever: that request is refused.
     """
-    # Lane-aware: lanes are discovered from the events directory, not pinned to
-    # T0-T3. Mirror api_agent_stream._LANE_RE — the regex is the path-safety
-    # boundary (the lane name lands in a filename below).
+    # The regex is the path-safety boundary for both names (they land in a
+    # filename); it mirrors api_agent_stream._LANE_RE.
     if not re.fullmatch(r"[A-Za-z0-9_-]+", terminal):
-        _send_sse_error(handler, f"invalid lane: {terminal}")
-        return
+        return None, f"invalid lane: {terminal}"
+    if dispatch_id is not None and not re.fullmatch(r"[A-Za-z0-9_-]+", dispatch_id):
+        return None, f"invalid dispatch_id: {dispatch_id}"
+    event_store = _event_store()
+    if dispatch_id is None and terminal in event_store.PER_RUN_TERMINALS:
+        return None, f"lane {terminal} keeps one live stream per run: pass dispatch_id"
+    store = event_store.EventStore(events_dir=_sd().VNX_DATA_DIR / "events")
+    return store.live_path(terminal, dispatch_id), ""
 
-    sd = _sd()
-    events_file = sd.VNX_DATA_DIR / "events" / f"{terminal}.ndjson"
+
+def handle_events_stream(handler: "BaseHTTPRequestHandler", terminal: str, dispatch_id: "str | None" = None) -> None:
+    """Stream raw NDJSON events from a lane's live stream as SSE.
+
+    The stream is ``events/{terminal}.ndjson``, or one run's own
+    ``events/{terminal}/{dispatch_id}.ndjson`` on a per-run terminal
+    (``_live_events_file``). Seeks to end of file on connect, then tails new
+    lines. Sends a keep-alive comment every 15 seconds.
+    """
+    events_file, refusal = _live_events_file(terminal, dispatch_id)
+    if events_file is None:
+        _send_sse_error(handler, refusal)
+        return
 
     if not events_file.exists():
         _send_sse_error(handler, f"events file not found: {events_file.name}")

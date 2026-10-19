@@ -285,6 +285,21 @@ def _provider_switch_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
 
 
 @pytest.fixture(autouse=True)
+def _vnx_provider_env_file_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """OI-2182: keep every test off the operator's real provider env file.
+
+    ``load_deepseek_key.provider_env_file_path`` defaults to
+    ``~/.config/vnx/provider-usage.env``; on a host where that file carries a
+    DEEPSEEK_API_KEY, any test that asserts "no own key => unavailable" (the
+    account-safety property) would read the real key and fail. Point
+    VNX_PROVIDER_ENV_FILE at an absent path for every test so the default
+    fallback is empty; a test that needs a real file sets the var itself
+    (same function-scoped monkeypatch, later call wins).
+    """
+    monkeypatch.setenv("VNX_PROVIDER_ENV_FILE", str(tmp_path / "absent-provider-usage.env"))
+
+
+@pytest.fixture(autouse=True)
 def _content_boundary_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep every test off the operator's real ~/.vnx/content_boundary.json.
 

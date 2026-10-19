@@ -54,6 +54,11 @@ def gate_env(tmp_path, monkeypatch):
     (state_dir / "review_gates" / "requests").mkdir(parents=True)
     (state_dir / "review_gates" / "results").mkdir(parents=True)
     reports_dir.mkdir(parents=True)
+    # The runner decides the provider switch for the project its own state dir names
+    # (provider-schakelaar C). A repo-local store names it in .vnx-project-id; without one
+    # the switch falls back to the git-based resolver, whose subprocess the Popen mocks
+    # below would count as a gate launch.
+    (tmp_path / ".vnx-project-id").write_text("vertex-test\n", encoding="utf-8")
 
     monkeypatch.setenv("VNX_HOME", str(VNX_ROOT))
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))

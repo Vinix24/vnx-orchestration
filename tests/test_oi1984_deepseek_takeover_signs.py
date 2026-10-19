@@ -1,7 +1,8 @@
 """OI-1984: a deepseek takeover that took over from kimi signs at the merge door.
 
-The review takeover chain is codex > kimi > deepseek > glm (operator decision
-2026-10-04). Before this change deepseek was outside the ``Gate`` enum, so the
+The review takeover chain is codex > kimi > deepseek; glm left the default chain on
+2026-10-17 (R4, operator decision), and it was codex > kimi > deepseek > glm
+before (operator decision 2026-10-04). Before this change deepseek was outside the ``Gate`` enum, so the
 closure verifier dropped its takeover record (not in ``_REVIEW_PEER_GATES``) and
 the kimi seat stayed unsigned even with a clean deepseek pass on the head.
 
@@ -27,13 +28,14 @@ import closure_verifier  # noqa: E402
 import config_registry  # noqa: E402
 import forge_gate_publisher as fgp  # noqa: E402
 import gate_request_handler  # noqa: E402
+from review_seat_support import pin_review_stack  # noqa: E402
 
 PR_NUMBER = 4984
 PR_ID = str(PR_NUMBER)
 BRANCH = "dispatch/20261004-keten-codex-kimi-deepseek"
 HEAD = "a" * 40
 OTHER_HEAD = "b" * 40
-NEW_CHAIN = "codex_gate,kimi_gate,deepseek_gate,glm_gate"
+NEW_CHAIN = "codex_gate,kimi_gate,deepseek_gate"
 CLEAN_REPORT = "# Gate report\n\nAll findings reviewed, nothing blocking.\n"
 
 
@@ -94,7 +96,8 @@ def _deepseek_takeover(report: str, **overrides: Any) -> Dict[str, Any]:
 
 def _door(results_dir: Path, gate: str = "kimi_gate") -> Dict[str, Any]:
     return closure_verifier.check_review_gate_for_merge(
-        PR_ID, gate, results_dir, branch=BRANCH, head_sha=HEAD
+        PR_ID, gate, results_dir, branch=BRANCH, head_sha=HEAD,
+        seats=[gate],  # one-seat project (OI-2058 R5b: the door needs every seat of the stack)
     )
 
 
@@ -116,7 +119,14 @@ class TestDeepseekTakeoverSignsTheKimiSeat:
         assert _door(seats)["verdict"] == "NO-GO"
 
     def test_deepseek_pass_that_took_over_from_kimi_signs(self, tmp_path, seats):
-        _write(seats, "deepseek_gate", _deepseek_takeover(_report(tmp_path)))
+        """kimi's seat walk started at kimi: ``takeover_path[0]`` is the seat (OI-2058, R5b).
+
+        A path that starts at codex (codex, then kimi passed over) answers
+        codex's seat, not kimi's: ``takeover_from`` names the last hop only.
+        """
+        _write(seats, "deepseek_gate", _deepseek_takeover(
+            _report(tmp_path), takeover_path=[{"gate": "kimi_gate", "status": "unavailable"}],
+        ))
 
         verdict = _door(seats)
 
@@ -152,7 +162,8 @@ class TestDeepseekTakeoverSignsTheKimiSeat:
 
 
 class TestReviewSummaryCountsDeepseek:
-    def test_deepseek_takeover_is_a_peer_in_the_summary(self, tmp_path):
+    def test_deepseek_takeover_is_a_peer_in_the_summary(self, tmp_path, monkeypatch):
+        pin_review_stack(monkeypatch, "codex_gate")
         results_dir = tmp_path / "results"
         report = _report(tmp_path)
         _write(

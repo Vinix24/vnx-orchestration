@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -151,83 +150,71 @@ class TestProviderDispatchAutoRouteIntegration:
     deliver_with_recovery).
     """
 
-    def _swap_recommendations(self, src_yaml):
-        """Replace routing_recommendations.yaml with a test fixture, restore after test.
+    def _swap_recommendations(self, src_yaml, monkeypatch):
+        """Point smart_router at a fixture registry for this test only.
 
-        Module-level attribute patching (monkeypatch.setattr / unittest.mock.patch)
-        fails to propagate inside provider_dispatch.main() in CI (pytest 9.x).
-        Filesystem replacement is deterministic across all environments.
+        The module attribute is patched, never the shipped YAML on disk: a
+        file swap is visible to every xdist worker reading the real registry
+        at the same moment (D3b).
         """
         import smart_router as _sr
-        _real = _sr._RECOMMENDATIONS_PATH
-        _bak = _real.with_suffix(".yaml._test_bak")
-        shutil.copy2(_real, _bak)
-        shutil.copy2(src_yaml, _real)
-        return _real, _bak
-
-    def _restore_recommendations(self, real_path, bak_path):
-        shutil.move(str(bak_path), str(real_path))
+        # decide() reads the path from its own globals. Under tests/smart_router the
+        # shim in sys.modules is not that module, so patch decide.__globals__ too.
+        monkeypatch.setitem(_sr.decide.__globals__, "_RECOMMENDATIONS_PATH", Path(src_yaml))
+        monkeypatch.setattr(_sr, "_RECOMMENDATIONS_PATH", Path(src_yaml))
 
     def test_main_auto_route_writes_ndjson_for_kimi(self, recommendations_yaml, state_dir, monkeypatch):
         import provider_dispatch
 
         monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
-        _real, _bak = self._swap_recommendations(recommendations_yaml)
+        self._swap_recommendations(recommendations_yaml, monkeypatch)
+        captured_model = {}
 
-        try:
-            captured_model = {}
+        def _fake_dispatch(args, **kwargs):
+            captured_model["model"] = args.model
+            return 0
 
-            def _fake_dispatch(args, **kwargs):
-                captured_model["model"] = args.model
-                return 0
+        with patch("provider_dispatch._dispatch_kimi", side_effect=_fake_dispatch):
+            result = provider_dispatch.main([
+                "--provider", "kimi",
+                "--terminal-id", "T1",
+                "--dispatch-id", "e2e-kimi-auto-route",
+                "--instruction", "implement feature X",
+                "--model", "sonnet",
+                "--auto-route",
+            ])
 
-            with patch("provider_dispatch._dispatch_kimi", side_effect=_fake_dispatch):
-                result = provider_dispatch.main([
-                    "--provider", "kimi",
-                    "--terminal-id", "T1",
-                    "--dispatch-id", "e2e-kimi-auto-route",
-                    "--instruction", "implement feature X",
-                    "--model", "sonnet",
-                    "--auto-route",
-                ])
-
-            assert result == 0
-            ndjson_path = state_dir / "route_decisions.ndjson"
-            assert ndjson_path.exists(), "auto-route MUST produce route_decisions.ndjson entry"
-            record = json.loads(ndjson_path.read_text(encoding="utf-8").strip())
-            assert record["dispatch_id"] == "e2e-kimi-auto-route"
-            assert record["task_class"] == "01_code_generation"
-            # Cost-aware routing: kimi-k3 (explicit cost 0.02) beats claude-sonnet-4-6
-            # (enriched ~0.045); the routed model must override the --model sonnet seed.
-            assert record["chosen_route"]["model_id"] == "kimi-k3"
-            assert captured_model["model"] == "kimi-k3"
-        finally:
-            self._restore_recommendations(_real, _bak)
+        assert result == 0
+        ndjson_path = state_dir / "route_decisions.ndjson"
+        assert ndjson_path.exists(), "auto-route MUST produce route_decisions.ndjson entry"
+        record = json.loads(ndjson_path.read_text(encoding="utf-8").strip())
+        assert record["dispatch_id"] == "e2e-kimi-auto-route"
+        assert record["task_class"] == "01_code_generation"
+        # Cost-aware routing: kimi-k3 (explicit cost 0.02) beats claude-sonnet-4-6
+        # (enriched ~0.045); the routed model must override the --model sonnet seed.
+        assert record["chosen_route"]["model_id"] == "kimi-k3"
+        assert captured_model["model"] == "kimi-k3"
 
     def test_main_auto_route_review_decides_claude_rejected_at_door(self, recommendations_yaml, state_dir, monkeypatch):
         import provider_dispatch
 
         monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
-        _real, _bak = self._swap_recommendations(recommendations_yaml)
+        self._swap_recommendations(recommendations_yaml, monkeypatch)
+        with patch("provider_dispatch._dispatch_kimi", return_value=0), \
+             patch("provider_dispatch._dispatch_litellm", return_value=0):
+            result = provider_dispatch.main([
+                "--provider", "kimi",
+                "--terminal-id", "T1",
+                "--dispatch-id", "e2e-review-route",
+                "--instruction", "review the code changes for security",
+                "--model", "sonnet",
+                "--role", "reviewer",
+                "--auto-route",
+            ])
 
-        try:
-            with patch("provider_dispatch._dispatch_kimi", return_value=0), \
-                 patch("provider_dispatch._dispatch_litellm", return_value=0):
-                result = provider_dispatch.main([
-                    "--provider", "kimi",
-                    "--terminal-id", "T1",
-                    "--dispatch-id", "e2e-review-route",
-                    "--instruction", "review the code changes for security",
-                    "--model", "sonnet",
-                    "--role", "reviewer",
-                    "--auto-route",
-                ])
-
-            # A review task auto-routes to claude-opus; claude is owned by the single-entry
-            # door, so provider_dispatch must reject with EX_USAGE instead of dispatching.
-            assert result == provider_dispatch._EX_USAGE
-        finally:
-            self._restore_recommendations(_real, _bak)
+        # A review task auto-routes to claude-opus; claude is owned by the single-entry
+        # door, so provider_dispatch must reject with EX_USAGE instead of dispatching.
+        assert result == provider_dispatch._EX_USAGE
 
     def test_main_without_auto_route_no_ndjson(self, state_dir, monkeypatch):
         import provider_dispatch
@@ -254,25 +241,23 @@ class TestProviderDispatchAutoRouteIntegration:
         state_dir.mkdir()
         monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
 
-        # Rename the real YAML so it doesn't exist (simulates missing file).
-        _real = _sr._RECOMMENDATIONS_PATH
-        _bak = _real.with_suffix(".yaml._test_bak")
-        shutil.move(str(_real), str(_bak))
+        # Point the registry at a path that does not exist (simulates a missing file).
+        # decide() reads the path from its own globals. Under tests/smart_router the
+        # shim in sys.modules is not that module, so patch decide.__globals__ too.
+        monkeypatch.setitem(_sr.decide.__globals__, "_RECOMMENDATIONS_PATH", tmp_path / "absent.yaml")
+        monkeypatch.setattr(_sr, "_RECOMMENDATIONS_PATH", tmp_path / "absent.yaml")
 
-        try:
-            with patch("provider_dispatch._dispatch_kimi", return_value=0):
-                result = provider_dispatch.main([
-                    "--provider", "kimi",
-                    "--terminal-id", "T1",
-                    "--dispatch-id", "e2e-fallback",
-                    "--instruction", "implement feature",
-                    "--model", "kimi-k3",
-                    "--auto-route",
-                ])
+        with patch("provider_dispatch._dispatch_kimi", return_value=0):
+            result = provider_dispatch.main([
+                "--provider", "kimi",
+                "--terminal-id", "T1",
+                "--dispatch-id", "e2e-fallback",
+                "--instruction", "implement feature",
+                "--model", "kimi-k3",
+                "--auto-route",
+            ])
 
-            assert result == 0
-        finally:
-            shutil.move(str(_bak), str(_real))
+        assert result == 0
 
 
 class TestParseRouteModelIdAllProviders:

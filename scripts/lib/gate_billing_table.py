@@ -5,6 +5,9 @@ reviewer (codex, kimi) first and an API-credit reviewer (glm, deepseek) only
 when both subscription seats are unavailable. The order of a review stack and
 of the takeover chain is that decision written down, so "which side of the line
 is this gate" needs exactly one answer, and this module is where it is kept.
+Since OI-2058 (R5a) a reviewer fills one seat: when kimi takes codex's seat,
+kimi's own seat walks on down the chain, so an API-credit reviewer also reads
+when one subscription reviewer is out. The order this table guards is unchanged.
 
 It lives in its own module, apart from ``gate_recorder`` and its registry
 ``GATE_PROVIDERS``, because the dispatch door reads it. The door runs with only

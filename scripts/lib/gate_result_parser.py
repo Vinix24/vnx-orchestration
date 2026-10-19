@@ -17,6 +17,24 @@ from claude_github_receipt import ClaudeGitHubReviewReceipt
 from gate_recorder import get_pr_head_sha, stamp_request_identity
 
 
+def evidence_error(payload: Dict[str, Any]) -> str:
+    """Why ``payload`` lacks the evidence a pass/fail gate result must carry, or ``""``.
+
+    The result writer's own bar (``_validate_and_persist_result``): a
+    ``contract_hash``, a ``report_path``, and a report file on disk at that
+    path. A standing verdict a switched-off seat reports clears the same bar
+    (``gate_request_handler._standing_verdict_gap``), so the two can never
+    disagree about what a decided result needs.
+    """
+    if not payload.get("contract_hash"):
+        return "contract_hash is required for pass/fail gate results"
+    if not payload.get("report_path"):
+        return "report_path is required for pass/fail gate results"
+    if not Path(payload["report_path"]).exists():
+        return f"report_path file does not exist: {payload['report_path']}"
+    return ""
+
+
 class GateResultParserMixin:
     """Mixin providing result recording and finding classification for ReviewGateManager."""
 
@@ -201,13 +219,9 @@ class GateResultParserMixin:
     ) -> None:
         """Validate pass/fail constraints and write result file to disk."""
         if status in {"pass", "fail"}:
-            if not payload["contract_hash"]:
-                raise ValueError("contract_hash is required for pass/fail gate results")
-            if not payload["report_path"]:
-                raise ValueError("report_path is required for pass/fail gate results")
-            report_file = Path(payload["report_path"])
-            if not report_file.exists():
-                raise ValueError(f"report_path file does not exist: {payload['report_path']}")
+            error = evidence_error(payload)
+            if error:
+                raise ValueError(error)
         self._result_path(gate, pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     def _emit_result_receipt(
@@ -243,10 +257,15 @@ class GateResultParserMixin:
         ``gate_runner``'s, on the other of the two paths; fixing one and
         leaving the other is a promise the code does not keep.
 
-        Four answers, matching gate_runner's:
+        Five answers, matching gate_runner's:
 
         * unregistered gate -> ``unsupported_gate_type``; a routing bug, not an
           environment complaint.
+        * a gate whose provider family the operator switched off ->
+          ``provider_switched_off``, with the switch decision as the detail.
+          Named before every kind-specific branch below, so a switched-off
+          harness-lane gate is never booked ``gate_runner_missing`` and never
+          looks like a missing binary (provider-schakelaar C).
         * script-runner gate -> ``gate_runner_missing``. Reaching here means
           the caller's own availability check (``_kimi_gate_available`` and
           friends, which test for the runner FILE) already said no, so the
@@ -263,6 +282,8 @@ class GateResultParserMixin:
         from gate_recorder import (  # noqa: PLC0415
             GATE_PROVIDER_HARNESS_LANE,
             GATE_PROVIDER_SCRIPT_RUNNER,
+            PROVIDER_SWITCHED_OFF_REASON,
+            gate_switch_refusal,
             resolve_gate_provider,
         )
 
@@ -274,6 +295,12 @@ class GateResultParserMixin:
                 f"binary, a script runner, or a harness lane; no binary name is guessed "
                 f"from the gate name",
             )
+        refusal = gate_switch_refusal(
+            gate, consumer="gate_result_parser._classify_unavailable",
+            state_dir=getattr(self, "state_dir", None),
+        )
+        if refusal is not None:
+            return (PROVIDER_SWITCHED_OFF_REASON, refusal.detail())
         provider_kind, binary_name = provider
         if provider_kind == GATE_PROVIDER_SCRIPT_RUNNER:
             return (

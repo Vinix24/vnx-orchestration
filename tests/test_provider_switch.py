@@ -55,8 +55,7 @@ def no_project(monkeypatch):
 def writable(monkeypatch, tmp_path):
     """The live write path: pending tuples empty in this process, no dispatch marker, and a
     working directory outside any repo."""
-    for name in ("PENDING_B", "PENDING_C"):
-        monkeypatch.setattr(ps, name, ())
+    monkeypatch.setattr(ps, "PENDING_B", ())
     for marker in ps.DISPATCH_MARKER_ENV:
         monkeypatch.delenv(marker, raising=False)
     strip_ambient_overrides(monkeypatch)
@@ -628,7 +627,7 @@ _WRITER = textwrap.dedent("""
     import sys
     sys.path.insert(0, sys.argv[1])
     import provider_switch as ps
-    ps.PENDING_B = ps.PENDING_C = ()
+    ps.PENDING_B = ()
     scope, rounds = sys.argv[2], int(sys.argv[3])
     for i in range(rounds):
         for family in ps.SWITCHABLE_FAMILIES:

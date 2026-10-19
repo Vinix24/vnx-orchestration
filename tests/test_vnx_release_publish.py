@@ -283,7 +283,7 @@ def test_publish_set_current_emits_release_notes_hint(
     out, rc = _capture(_publish_args(repo=str(repo), set_current=True))
 
     assert rc == 0
-    assert "Release notes (add to CHANGELOG.md under [v1.3.1])" in out
+    assert "assemble_changelog.py --version 1.3.1 --check" in out
     assert ".vnx-version" in out
     assert "must update their pin to v1.3.1" in out
 

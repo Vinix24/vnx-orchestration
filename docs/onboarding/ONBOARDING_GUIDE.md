@@ -25,7 +25,7 @@ For the repo-local operator surface (Part 2), clone the repository and run
 **Prerequisites.** VNX drives existing coding CLIs as subprocesses — it does not run models itself.
 The default dispatch lane needs an **installed + authenticated `claude` CLI** on your PATH (other
 lanes: `codex`, `gemini`, `kimi`), and using it incurs that provider's subscription/credit usage.
-`vnx dispatch-agent` (Step 4) fails at spawn without one; `vnx doctor` flags this as a
+`vnx dispatch-agent` (Step 3) fails at spawn without one; `vnx doctor` flags this as a
 `tool:worker-cli` warning.
 
 ### Step 2: Initialize a Project
@@ -41,35 +41,20 @@ vnx status
 `vnx init` creates `.vnx/`, `.vnx-project-id`, an `agents/` scaffold, and a
 resolved runtime state directory.
 
-### Step 3: Create the Hello-World Agent
+### Step 3: Dispatch a Built-In Role
 
-`vnx dispatch-agent` accepts either `agents/<name>/CLAUDE.md` or
-`examples/<name>/CLAUDE.md`.
-
-```bash
-mkdir -p examples/hello-world
-cat > examples/hello-world/CLAUDE.md <<'EOF'
-# Hello World Agent
-
-Write a friendly, professional greeting for a new VNX user.
-
-Create a file called greeting.md in the current directory with:
-- A welcoming header
-- 2-3 sentences about VNX
-- Today's date
-- A sign-off
-EOF
-```
-
-### Step 4: Dispatch
+The single-entry door checks the role against the `agents/` registry, so use a
+role name from it (`research-analyst` here), not `examples/hello-world`.
 
 ```bash
-vnx dispatch-agent --agent hello-world --instruction "Write a greeting for a new VNX user"
+vnx dispatch-agent --agent research-analyst \
+  --instruction "Quick depth research: what does 'orchestration' mean in software systems? 3 bullet points."
 vnx status
 ```
 
-This is the literal pip happy path: install, initialize, define an example
-agent, and dispatch it through the stable Python CLI.
+This is the literal pip happy path: install, initialize, and dispatch a
+built-in role through the stable Python CLI. To define your own agent, see the
+[Agent Creation Guide](../guides/AGENT_CREATION_GUIDE.md).
 
 ### Step 5: Learn the Pip Surface
 

@@ -181,6 +181,24 @@ def test_idempotent_reapply(tmp_path, roadmap):
     assert len(tracks_lib.list_tracks(state_dir, "vnx-dev")) == 3
 
 
+def test_reapply_is_unchanged_despite_planning_metadata_keys(tmp_path, roadmap):
+    """A track that gains plan_scope/lane_hint between applies is not reported
+    updated: those keys are not authored by the ROADMAP, only kept by the merge."""
+    state_dir = _make_db(tmp_path)
+    seeder.seed(state_dir, roadmap, "vnx-dev", apply=True)
+
+    tracks_lib.set_plan_scope(state_dir, "feat-a", "vnx-dev", "architecture",
+                              old_scope="light", reason="plan gate applies")
+    tracks_lib.set_lane_hint(state_dir, "feat-a", "vnx-dev", "governed")
+
+    report = seeder.seed(state_dir, roadmap, "vnx-dev", apply=True)
+    assert report["summary"]["updated"] == 0
+    assert "feat-a" in report["unchanged"]
+    meta = json.loads(tracks_lib.get_track(state_dir, "feat-a", "vnx-dev")["metadata_json"])
+    assert meta["plan_scope"] == "architecture"
+    assert meta["lane_hint"] == "governed"
+
+
 def test_phase_drift_reported_not_synced(tmp_path, roadmap):
     state_dir = _make_db(tmp_path)
     seeder.seed(state_dir, roadmap, "vnx-dev", apply=True)

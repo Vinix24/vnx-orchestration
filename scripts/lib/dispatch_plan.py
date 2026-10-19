@@ -24,6 +24,7 @@ from dispatch_spec import (
     Reject,
     ValidatedSpec,
 )
+from event_store import HEADLESS_LANE_TERMINAL
 
 
 def resolve_claude_lane(spec: DispatchSpec) -> tuple[str, str, "str | None"]:
@@ -137,7 +138,7 @@ class ExecutionPlan:
     model: str
     lane: str                           # "claude_headless" | "provider"
     adapter: str                        # "claude_subprocess" | "provider"
-    target_id: str                      # "ephemeral" for the leaseless claude lane
+    target_id: str                      # HEADLESS_LANE_TERMINAL for the leaseless claude lane
     billing: str                        # "subscription" | "api_metered" | "provider_metered" | "local"
     serialization_class: Optional[str]  # "claude-tmux" | None
     isolation: Isolation                # always Isolation.WORKTREE
@@ -425,9 +426,10 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
     warmup = "n/a"
     fired.append("D10")
 
-    # D12 — target resolution; claude lane is leaseless (ephemeral), skip health checks
+    # D12 — target resolution; claude lane is leaseless (ephemeral), skip health checks.
+    # The one target id is a per-run event-stream terminal (event_store, OI-1869).
     if is_claude_lane:
-        target_id = "ephemeral"
+        target_id = HEADLESS_LANE_TERMINAL
     else:
         target_id = spec.target_id_override or spec.target_slot
         health = snapshot.target_health.get(target_id)

@@ -87,6 +87,38 @@ def test_workflow_yaml_is_heavy():
 
 
 # ---------------------------------------------------------------------------
+# CHANGELOG fragments: exactly the fragment rule plus the README are light
+# ---------------------------------------------------------------------------
+
+
+def test_changelog_fragment_alone_is_light():
+    assert classifier.classify_paths(["changelog.d/20261017-clf-f1.md"]) == LIGHT
+
+
+def test_changelog_fragment_readme_alone_is_light():
+    assert classifier.classify_paths(["changelog.d/README.md"]) == LIGHT
+
+
+def test_fragments_with_docs_are_light():
+    assert classifier.classify_paths(["changelog.d/a.md", "changelog.d/README.md", "docs/a.md"]) == LIGHT
+
+
+def test_non_markdown_file_in_changelog_dir_is_heavy():
+    assert classifier.classify_paths(["changelog.d/notes.txt"]) == HEAVY
+
+
+def test_non_fragment_markdown_in_changelog_dir_is_heavy():
+    # Nested, hidden or a name outside the rule: the classifier fails closed.
+    assert classifier.classify_paths(["changelog.d/sub/a.md"]) == HEAVY
+    assert classifier.classify_paths(["changelog.d/.hidden.md"]) == HEAVY
+    assert classifier.classify_paths(["changelog.d/-dash.md"]) == HEAVY
+
+
+def test_fragment_plus_code_is_heavy():
+    assert classifier.classify_paths(["changelog.d/a.md", "scripts/foo.py"]) == HEAVY
+
+
+# ---------------------------------------------------------------------------
 # Malformed paths: heavy, never a crash
 # ---------------------------------------------------------------------------
 

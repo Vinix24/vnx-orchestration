@@ -164,8 +164,10 @@ def test_import_lines_stay_literal_in_the_passed_file(worktree):
     assert _IMPORT_LINE in Path(path).read_text()
 
 
-def test_deepseek_spawn_without_key_refuses_before_any_process(data_dir, worktree, monkeypatch):
+def test_deepseek_spawn_without_key_refuses_before_any_process(data_dir, worktree, monkeypatch, tmp_path):
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    # Isolate the provider env file so the operator's real key never leaks in.
+    monkeypatch.setenv("VNX_PROVIDER_ENV_FILE", str(tmp_path / "absent-provider-usage.env"))
     result, argv = _argv_of(_ds(worktree))
     assert argv is None
     assert result.returncode == 1
@@ -206,8 +208,10 @@ def test_classifier_provider_is_bare(data_dir):
     assert "--bare" in run.mock.call_args.args[0]
 
 
-def test_classifier_provider_without_key_does_not_run(data_dir, monkeypatch):
+def test_classifier_provider_without_key_does_not_run(data_dir, monkeypatch, tmp_path):
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    # Isolate the provider env file so the operator's real key never leaks in.
+    monkeypatch.setenv("VNX_PROVIDER_ENV_FILE", str(tmp_path / "absent-provider-usage.env"))
     with patch("subprocess.run", _fake_run(MagicMock(returncode=1, stdout="", stderr=""))) as run:
         result = DeepSeekProvider().classify("prompt")
     run.mock.assert_not_called()

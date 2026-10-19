@@ -10,6 +10,8 @@ route_decisions.ndjson via state_writer (fcntl-locked).
 """
 from __future__ import annotations
 
+import ntpath
+import posixpath
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -70,13 +72,12 @@ class VariantDerivation:
     """The variant half of a derivation: what the change IS, no gate attached.
 
     Carries no review gate, so producing it never reads project configuration.
-    A caller that sizes something from the variant alone (the plan-gate panel)
+    A caller that needs the variant alone (the plan-gate trace and round record)
     uses this and cannot be broken by an unreadable VNX_DEFAULT_REVIEW_STACK it
     never asked about.
     """
     variant: str       # one of GOVERNANCE_MIN_TIERS keys
     reason: str        # why this variant was chosen (deterministic rule fired)
-    is_new_feature: bool  # task_class is 01_code_generation (independent axis)
 
 
 @dataclass(frozen=True)
@@ -86,10 +87,6 @@ class GovernanceVariantResult:
     reason: str        # why this variant was chosen (deterministic rule fired)
     gate: str          # the review-gate weight this variant resolves to
     direction: str     # "up" | "unchanged" | "down" vs the full-diff review rung
-    # Independent axis (plan-gate weight ladder): True when task_class is
-    # 01_code_generation. A new feature runs the full panel regardless of the
-    # path-derived variant, so the plan-gate needs this carried alongside.
-    is_new_feature: bool = False
 
 
 @dataclass(frozen=True)
@@ -940,6 +937,136 @@ def _matches_prefix(path: str, prefix: str) -> bool:
     return path == prefix.rstrip("/") or path.startswith(prefix)
 
 
+# Plan-scope path categories (track plan-gate-alleen-voor-architectuur, P1).
+#
+# A build dispatch on a light track makes that track architecture when one of
+# its paths falls in a category below, or when derive_variant gives
+# coding-strict (which already covers the dispatch lane and the review gates
+# through _GOVERNANCE_CORE_PREFIXES, so those are not listed twice). Schema and
+# security are also the two classes that bring the plan-gate's second seat in
+# from the start (plan_gate_panel.second_seat_from_start). The door and the
+# plan-gate read this one table, so they cannot classify a path differently.
+# A path that leaves the repository is outside-repo: classified up, never plain.
+PLAN_SCOPE_SCHEMA = "schema"
+PLAN_SCOPE_SECURITY = "security"
+PLAN_SCOPE_GATE_MERGE = "gate-merge"
+PLAN_SCOPE_STORE_RESOLUTION = "store-resolution"
+PLAN_SCOPE_OUTSIDE_REPO = "outside-repo"
+
+# Security, by kind. Prefixes are repo-relative; ".claude/settings" covers
+# settings.json and settings.local.json.
+_SECURITY_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("scripts/lib/provider_spawns/", "provider-spawns"),
+    (".claude/settings", "claude-settings"),
+    (".github/workflows/", "ci-workflows"),
+)
+# A directory named hooks anywhere in the path (hooks/, .claude/hooks/, ...).
+_SECURITY_DIR_NAMES: tuple[tuple[str, str], ...] = (("hooks", "hooks"),)
+# Substrings of the path, case-insensitive. Deliberately literal, as the plan
+# names them: a path such as "authority" also matches "auth". That is an upward
+# move only, a light track becoming architecture, never a gate skipped.
+_SECURITY_NAME_MARKERS: tuple[tuple[str, str], ...] = (
+    ("permission", "permission-module"),
+    ("sandbox", "sandbox-module"),
+    ("auth", "credential-name"),
+    ("secret", "credential-name"),
+    ("token", "credential-name"),
+    ("credential", "credential-name"),
+)
+
+# Gate/merge logic and store resolution that _GOVERNANCE_CORE_PREFIXES does not
+# already make coding-strict.
+_PLAN_SCOPE_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("scripts/lib/plan_gate", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/lib/evidence_bound_gate.py", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/lib/phantom_guard.py", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/lib/required_contexts_gate.py", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/lib/review_", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/lib/verify_pr.py", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/lib/auto_merge_policy.py", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/lib/merge_", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/pr_merge.py", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/pre_merge_gate.py", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/commands/merge_preflight.sh", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/lib/vnx_paths", PLAN_SCOPE_STORE_RESOLUTION),
+    ("scripts/lib/project_root.py", PLAN_SCOPE_STORE_RESOLUTION),
+    ("scripts/lib/launchd_project_root.py", PLAN_SCOPE_STORE_RESOLUTION),
+    ("scripts/lib/vnx_resolve_root.sh", PLAN_SCOPE_STORE_RESOLUTION),
+    ("scripts/lib/data_dir_", PLAN_SCOPE_STORE_RESOLUTION),
+    ("vnx_cli/_engine.py", PLAN_SCOPE_STORE_RESOLUTION),
+)
+
+
+def normalize_dispatch_path(path: str) -> str:
+    """One dispatch path in the form every plan-scope classification reads.
+
+    Backslashes become "/", then ``posixpath.normpath`` folds "./" segments,
+    repeated separators and ".." segments, so ".github/./workflows/x.yml"
+    classifies as ".github/workflows/x.yml". normpath drops a leading "./"
+    too; the repository itself (".") becomes "". Not ``lstrip("./")``: that
+    strips the dot of ".claude" and ".github" too. The result can still leave
+    the repository (``_leaves_repo``).
+    """
+    p = posixpath.normpath(str(path).strip().replace("\\", "/"))
+    return "" if p == "." else p
+
+
+def _leaves_repo(normalized: str) -> bool:
+    """True for a normalised path outside the repository: absolute (a root or a
+    drive) or starting with "..". Dispatch paths are repo-relative by contract
+    (dispatch_spec rejects absolute and ".." paths), so an absolute path is
+    never read as one inside the repository."""
+    return (
+        normalized.startswith("/")
+        or bool(ntpath.splitdrive(normalized)[0])
+        or normalized == ".."
+        or normalized.startswith("../")
+    )
+
+
+def _repo_relative(path: str) -> Optional[str]:
+    """A dispatch path as the repo names it (``normalize_dispatch_path``), or
+    None when it leaves the repository."""
+    p = normalize_dispatch_path(path)
+    return None if _leaves_repo(p) else p
+
+
+def security_path_kind(path: str) -> Optional[str]:
+    """The security kind a path falls under, else None. First match wins."""
+    p = _repo_relative(path)
+    if not p:
+        return None
+    for prefix, kind in _SECURITY_PREFIXES:
+        if _matches_prefix(p, prefix):
+            return kind
+    segments = p.split("/")
+    for name, kind in _SECURITY_DIR_NAMES:
+        if name in segments:
+            return kind
+    lowered = p.lower()
+    for marker, kind in _SECURITY_NAME_MARKERS:
+        if marker in lowered:
+            return kind
+    return None
+
+
+def plan_scope_path_category(path: str) -> Optional[str]:
+    """The plan-scope category of one path: outside-repo, schema, security,
+    gate-merge, store-resolution, or None. First match wins, in that order,
+    on the normalised path (``normalize_dispatch_path``)."""
+    p = _repo_relative(path)
+    if p is None:
+        return PLAN_SCOPE_OUTSIDE_REPO
+    if _irreversible_path_category(p) == "schema-migration":
+        return PLAN_SCOPE_SCHEMA
+    if security_path_kind(p):
+        return PLAN_SCOPE_SECURITY
+    for prefix, category in _PLAN_SCOPE_PREFIXES:
+        if _matches_prefix(p, prefix):
+            return category
+    return None
+
+
 def _path_category(path: str) -> str:
     """Classify one dispatch path into 'core' | 'docs' | 'code' | 'business'.
 
@@ -1040,15 +1167,11 @@ def derive_variant(
     Irreversibility overrides the reversible ladder: an explicit ``irreversible``
     flag, or any path under an irreversible category (schema migrations, fleet
     defaults, the append-only receipt/ledger format), forces coding-strict — a
-    change that cannot be walked back never gets a lighter gate. ``is_new_feature``
-    is an INDEPENDENT axis (task_class == 01_code_generation) carried on the
-    result so the plan-gate can size its panel to the full seat set for a new
-    feature regardless of the path-derived variant.
+    change that cannot be walked back never gets a lighter gate.
 
     Reads no configuration and resolves no gate: see ``derive_governance_variant``
     for the variant plus the gate it maps to in this project.
     """
-    is_new_feature = task_class == "01_code_generation"
     paths = [p for p in (dispatch_paths or []) if p and str(p).strip()]
 
     irreversible_hit: Optional[str] = None
@@ -1064,9 +1187,7 @@ def derive_variant(
                 reason += f"; also path-derived {irreversible_hit}"
         else:
             reason = f"irreversible path category={irreversible_hit!r}"
-        return VariantDerivation(
-            variant="coding-strict", reason=reason, is_new_feature=is_new_feature,
-        )
+        return VariantDerivation(variant="coding-strict", reason=reason)
 
     if paths:
         category = max(
@@ -1080,11 +1201,7 @@ def derive_variant(
         category = _category_from_task_class(task_class)
         reason = f"no dispatch paths; task_class={task_class or 'none'} -> {category!r}"
 
-    return VariantDerivation(
-        variant=_CATEGORY_TO_VARIANT[category],
-        reason=reason,
-        is_new_feature=is_new_feature,
-    )
+    return VariantDerivation(variant=_CATEGORY_TO_VARIANT[category], reason=reason)
 
 
 def derive_governance_variant(
@@ -1109,7 +1226,6 @@ def derive_governance_variant(
         reason=derived.reason,
         gate=gate,
         direction=_direction_for(gate),
-        is_new_feature=derived.is_new_feature,
     )
 
 

@@ -11,9 +11,10 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from governance_receipts import utc_now_iso
+import final_answer_verdict
 import gate_depth
 import gate_recorder
 from gate_lane_contract import canonical_review_verdict
@@ -241,6 +242,235 @@ def _verdict_is_required(gate: str) -> bool:
     return kind == gate_recorder.GATE_PROVIDER_PATH_BINARY and binary in VERDICT_READABLE_BINARIES
 
 
+class _Verdict(NamedTuple):
+    """What one gate run's output says, read with the gate's own reader."""
+
+    findings: List[Dict[str, Any]]
+    residual_risk: str
+    parsed: bool
+    raw_verdict: Any
+
+
+def _verdict_from_block(verdict_block: Dict[str, Any]) -> _Verdict:
+    """The booking fields of a verdict object ``extract_verdict_block`` returned."""
+    if not verdict_block:
+        return _Verdict([], "", False, None)
+    return _Verdict(
+        _normalize_findings(verdict_block.get("findings") or []),
+        verdict_block.get("residual_risk") or "",
+        True,
+        verdict_block.get("verdict"),
+    )
+
+
+def _read_verdict(gate: str, stdout: str) -> _Verdict:
+    """Read the verdict a gate run wrote, with the reader every gate shares.
+
+    OI-1763: every gate contract asks for the SAME shared shape: a JSON object
+    with a "verdict" key, asked for in a fenced ```json block (VERDICT_CONTRACT
+    for glm_gate/kimi_gate/deepseek_gate, _REVIEWER_VERDICT_TEMPLATE for
+    codex_gate/gemini_review, both in gate_lane_contract.py/gate_runner.py) and
+    read fenced or bare. Before that fix, ONLY codex_gate's branch ever set
+    findings_parsed=True — glm_gate/kimi_gate/deepseek_gate booked
+    findings=[]/residual_risk="" unconditionally, even when their report carried
+    a real verdict block, because their result was gated on the gate's NAME
+    rather than on whether it actually produced the contract's shape.
+    extract_verdict_block is the poort-agnostic reader of that shared shape
+    (codex_parser.py), used for every gate so a verdict lands in the result
+    record whenever a gate's output actually carries one.
+
+    codex_gate goes through parse_codex_findings, which reads the verdict with
+    extract_verdict_block: the SAME reader the OI-1770 guard asks whether the run
+    wrote one (OI-1786). Booking and guard used to read the stream with two
+    different rules and could disagree about the verdict, so a `fail` could land
+    in the record as a `completed` run with no blockers. What stays
+    codex-specific is the fallback for a run in which that reader finds no
+    verdict: the markdown-bullet heuristic (_extract_findings_from_text) for a
+    model that skips the JSON. That is a genuine per-provider parsing quirk, not
+    a contract property, so it stays scoped to codex and never fires for another
+    gate (repeating it elsewhere would be a new instance of the defect OI-1763
+    removed). It does not rescue a run that wrote no verdict at all: the OI-1770
+    guard refuses that run before anything is booked.
+    """
+    if gate != "codex_gate":
+        return _verdict_from_block(extract_verdict_block(stdout))
+    parsed = parse_codex_findings(stdout)
+    verdict_obj = parsed.get("verdict")
+    return _Verdict(
+        parsed["findings"],
+        parsed.get("residual_risk", "") or "",
+        True,
+        verdict_obj.get("verdict") if isinstance(verdict_obj, dict) else None,
+    )
+
+
+def _recover_from_final_answer(
+    stdout: str, request_payload: Dict[str, Any], final_answer_dir: Path,
+) -> final_answer_verdict.FinalAnswerVerdict:
+    """The verdict of a harness-lane run's final answer, when its report carries none (R6, OI-2039).
+
+    Read with ``extract_verdict_block``, the reader this surface uses for the
+    report itself, and bound to the run's own dispatch id and head sha (the
+    request's ``commit_sha``). ``final_answer_verdict.recover_verdict`` applies
+    the failed-run precedence: *stdout* is the lane's own report, so its
+    deadline mark, ``failure_reason`` and ``exit_code`` are read from it.
+    """
+    return final_answer_verdict.recover_verdict(
+        final_answer_dir,
+        str(request_payload.get("dispatch_id") or ""),
+        report_text=stdout,
+        parse=_final_answer_review_verdict,
+        head_sha=str(request_payload.get("commit_sha") or ""),
+    )
+
+
+def _final_answer_review_verdict(text: str) -> Optional[Dict[str, Any]]:
+    """A PR-review verdict in a final answer, or None.
+
+    ``extract_verdict_block`` reads a written object anywhere, also inside a
+    ``vnx-plan-verdict`` fence, whose ``"verdict": "pass"`` it would take for a
+    review verdict. Fences labelled anything but json are left out first, so a
+    PR-review seat never books a plan verdict
+    (``final_answer_verdict.without_foreign_fences``).
+    """
+    return extract_verdict_block(final_answer_verdict.without_foreign_fences(text)) or None
+
+
+def _refuse_without_verdict(
+    gate: str, pr_number: Optional[int], pr_id: str, stdout: str,
+    duration_seconds: float, request_payload: Dict[str, Any],
+    requests_dir: Path, results_dir: Path,
+    recovery: Optional[final_answer_verdict.FinalAnswerVerdict],
+) -> Dict[str, Any]:
+    """Book a run that wrote no verdict as ``unavailable`` (OI-1767, OI-1770).
+
+    "validation_failed" (not a bespoke "no_verdict_block" reason): the new
+    reason would need registering in gate_recorder.EXECUTION_FAILURE_REASONS to
+    book `unavailable` instead of `failed`. "validation_failed" is already
+    registered there and already covers "the gate's output failed a validation
+    check", so it lands on `unavailable`, never `failed`. The specific cause
+    lives in reason_detail, greppable via its "no_verdict_block:" prefix.
+
+    R6: when the final answer was consulted and gave no verdict, the detail
+    says why after the original text, so an operator sees whether the run was
+    refused, carried none, or left nothing to read.
+    """
+    logger.warning(
+        "gate_artifacts: REFUSING a %s run with no parseable verdict block "
+        "pr=%s — model produced %d char(s) of output but never wrote a "
+        "structured verdict",
+        gate, pr_id or pr_number, len(stdout),
+    )
+    detail = (
+        "no_verdict_block: gate output has no JSON object with a "
+        '"verdict" of pass, fail or blocked, fenced or bare: the '
+        "model produced text but never wrote a structured verdict "
+        f"({len(stdout)} char(s) of output)"
+    )
+    if recovery is not None:
+        detail = f"{detail}; {recovery.note()}"
+    return gate_recorder.record_failure(
+        gate=gate, pr_number=pr_number, pr_id=pr_id,
+        result={
+            "reason": "validation_failed",
+            "reason_detail": detail,
+            "duration_seconds": duration_seconds,
+            "partial_output_lines": len(stdout.splitlines()),
+            "runner_pid": os.getpid(),
+        },
+        request_payload=request_payload,
+        requests_dir=requests_dir,
+        results_dir=results_dir,
+    )
+
+
+def _stamp_verdict_source(
+    result_payload: Dict[str, Any], raw_verdict: Any,
+    recovery: Optional[final_answer_verdict.FinalAnswerVerdict],
+) -> None:
+    """Record where the booked verdict came from (R6): the report, or the final answer.
+
+    A verdict recovered from the final answer is still a live run's verdict, so
+    ``evidence_source`` stays ``live``: the forge publisher reads any other
+    value as a verdict not produced by a run against this head.
+    """
+    if recovery is not None and recovery.recovered:
+        result_payload["verdict_source"] = final_answer_verdict.VERDICT_SOURCE_FINAL_ANSWER
+        result_payload["evidence_source"] = "live"
+    elif raw_verdict is not None:
+        result_payload["verdict_source"] = final_answer_verdict.VERDICT_SOURCE_REPORT
+
+
+def _write_pipeline_sidecar(
+    reports_dir: Path, result_payload: Dict[str, Any], real_dispatch_id: str,
+    gate: str, pr_number: Optional[int], pr_id: str,
+) -> None:
+    """Write the JSON sidecar to report_pipeline/ for intelligence DB ingestion (OI-1066)."""
+    try:
+        sidecar = {
+            "dispatch_id": real_dispatch_id or f"gate-{gate}-pr-{pr_number if pr_number is not None else pr_id}",
+            "gate": gate,
+            "pr_id": pr_id,
+            "pr_number": pr_number,
+            "status": result_payload["status"],
+            "findings": result_payload["findings"],
+            "blocking_findings": result_payload["blocking_findings"],
+            "advisory_findings": result_payload["advisory_findings"],
+            "contract_hash": result_payload["contract_hash"],
+            "report_path": result_payload["report_path"],
+            "duration_seconds": result_payload["duration_seconds"],
+            "source": "gate_runner",
+            "recorded_at": result_payload["recorded_at"],
+        }
+        sidecar_dir = reports_dir.parent / "state" / "report_pipeline"
+        sidecar_dir.mkdir(parents=True, exist_ok=True)
+        sidecar_path = sidecar_dir / f"gate-{gate}-pr-{pr_number or pr_id}.json"
+        sidecar_path.write_text(json.dumps(sidecar, indent=2), encoding="utf-8")
+    except Exception as _exc:
+        logger.warning("materialize_artifacts: sidecar write failed: %s", _exc)
+
+
+def _emit_register_event(
+    gate: str, canonical_verdict: str, blocking: List[Dict[str, Any]],
+    real_dispatch_id: str, pr_number: Optional[int], pr_id: str,
+) -> None:
+    """Emit to the dispatch register (codex_gate only — best-effort).
+
+    Prefer the explicit JSON verdict from codex output; fall back to
+    severity-derivation.
+
+    OI-1763 note: this name-check is NOT the same defect fixed in
+    :func:`_read_verdict`. The dispatch register is a separate, codex-specific
+    downstream system (emit_codex_gate_to_register has no equivalent for
+    glm_gate/kimi_gate/deepseek_gate today — the elif below defers
+    gemini_review/claude_github_optional register classification too),
+    unrelated to findings/residual_risk landing in the result record.
+    """
+    if gate == "codex_gate":
+        try:
+            from gate_register_emit import emit_codex_gate_to_register
+            # Trimmed and lowercased the way extract_verdict_block checks the
+            # value: the dict it returns keeps the raw text, so " FAIL " clears
+            # the guard as a fail and must register as one (OI-1786).
+            if canonical_verdict == "pass":
+                register_event = "gate_passed"
+            elif canonical_verdict in ("fail", "blocked"):
+                register_event = "gate_failed"
+            else:
+                register_event = "gate_passed" if not blocking else "gate_failed"
+            emit_codex_gate_to_register(
+                register_event,
+                dispatch_id=real_dispatch_id,
+                pr_number=pr_number,
+                pr_id=pr_id,
+                gate=gate,
+            )
+        except (ImportError, OSError) as e:
+            logger.debug("Failed to emit gate register event: %s", e)
+    elif gate in ("gemini_review", "claude_github_optional"):
+        logger.info("materialize_artifacts: register classification deferred for gate=%s", gate)
+
+
 def _cleanup_orphan_report(report_file: Path) -> None:
     """Best-effort removal of a report whose result record never landed."""
     try:
@@ -345,11 +575,20 @@ def materialize_artifacts(
     requests_dir: Path,
     results_dir: Path,
     reports_dir: Path,
+    final_answer_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Atomic artifact materialization (GATE-11/12).
 
     Sequence: write report → verify → compute hash → write result → verify.
     On any failure, transitions to failed via gate_recorder.
+
+    ``final_answer_dir`` (R6, OI-2039): the data dir whose event archive holds
+    this run's final answer. Only the harness lane passes it
+    (``gate_runner._run_harness_lane_path``, after it has booked every failed,
+    cut-off and timed-out run). When the output carries no verdict block, the
+    verdict of the run's final answer is booked instead, appended to the report
+    at ``report_path`` and marked ``verdict_source: final_answer``. The vertex
+    and subprocess strategies pass nothing and keep their behaviour.
     """
     _fail = dict(
         gate=gate, pr_number=pr_number, pr_id=pr_id,
@@ -387,68 +626,39 @@ def materialize_artifacts(
 
     # Parsed ahead of the report write (not after, as previously) so the
     # normalized findings section can be embedded in the report itself,
-    # separate from the raw tool-output dump (OI-1394).
-    #
-    # OI-1763: every gate contract asks for the SAME shared shape: a JSON
-    # object with a "verdict" key, asked for in a fenced ```json block
-    # (VERDICT_CONTRACT for glm_gate/kimi_gate/deepseek_gate,
-    # _REVIEWER_VERDICT_TEMPLATE for codex_gate/gemini_review, both in
-    # gate_lane_contract.py/gate_runner.py) and read fenced or bare. Before
-    # this fix, ONLY codex_gate's branch below ever set findings_parsed=True
-    # — glm_gate/kimi_gate/deepseek_gate booked findings=[]/residual_risk=""
-    # unconditionally, even when their report carried a real verdict block,
-    # because their result was gated on the gate's NAME rather than on
-    # whether it actually produced the contract's shape. extract_verdict_block
-    # is the poort-agnostic reader of that shared shape (codex_parser.py) —
-    # used here for every gate so a verdict lands in the result record
-    # whenever a gate's output actually carries one.
-    findings: List[Dict[str, Any]] = []
-    residual_risk = ""
-    findings_parsed = False
-    raw_verdict: Any = None
-    if gate == "codex_gate":
-        # codex_gate goes through parse_codex_findings, which reads the verdict
-        # with extract_verdict_block: the SAME reader the OI-1770 guard below
-        # asks whether the run wrote one (OI-1786). Booking and guard used to
-        # read the stream with two different rules and could disagree about
-        # the verdict, so a `fail` could land in the record as a `completed`
-        # run with no blockers. What stays codex-specific is the fallback for
-        # a run in which that reader finds no verdict: the markdown-bullet
-        # heuristic (_extract_findings_from_text) for a model that skips the
-        # JSON. That is a genuine per-provider parsing quirk, not a contract
-        # property, so it stays scoped to codex and never fires for another
-        # gate (repeating it elsewhere would be a new instance of the defect
-        # OI-1763 removed). It does not rescue a run that wrote no verdict at
-        # all: the OI-1770 guard below refuses that run before anything is
-        # booked.
-        parsed = parse_codex_findings(stdout)
-        findings = parsed["findings"]
-        residual_risk = parsed.get("residual_risk", "") or ""
-        findings_parsed = True
-        verdict_obj = parsed.get("verdict")
-        raw_verdict = verdict_obj.get("verdict") if isinstance(verdict_obj, dict) else None
-    else:
-        verdict_block = extract_verdict_block(stdout)
-        if verdict_block:
-            findings = _normalize_findings(verdict_block.get("findings") or [])
-            residual_risk = verdict_block.get("residual_risk") or ""
-            findings_parsed = True
-            raw_verdict = verdict_block.get("verdict")
+    # separate from the raw tool-output dump (OI-1394). _read_verdict says
+    # which reader each gate uses (OI-1763, OI-1786).
+    verdict = _read_verdict(gate, stdout)
+    # R6 (OI-2039): a harness-lane report without a verdict block may still
+    # have its verdict in the run's final answer. Only a run that ended
+    # normally gets it, read with this surface's own reader and bound to the
+    # run's dispatch id and head (final_answer_verdict.recover_verdict).
+    recovery = None
+    if final_answer_dir is not None and not extract_verdict_block(stdout):
+        recovery = _recover_from_final_answer(stdout, request_payload, final_answer_dir)
+        if recovery.recovered:
+            verdict = _verdict_from_block(recovery.verdict)
+    findings, residual_risk, findings_parsed, raw_verdict = verdict
     canonical_verdict = canonical_review_verdict(raw_verdict)
     findings = _with_verdict_entry(findings, canonical_verdict, raw_verdict)
     blocking, advisory = _classify_findings(findings)
 
     report_file = Path(report_path)
+    report_text = format_report(
+        gate, stdout, request_payload,
+        blocking=blocking if findings_parsed else None,
+        advisory=advisory if findings_parsed else None,
+    )
+    if recovery is not None and recovery.recovered:
+        # One truth on disk: the door's agreement check (invariant 7) and the
+        # forge publisher re-read this report. Composed before the one write,
+        # so the report never exists without the verdict the record books.
+        report_text = final_answer_verdict.with_recovered_section(
+            report_text, final_answer_verdict.recovered_section(recovery, recovery.verdict),
+        )
     try:
         report_file.parent.mkdir(parents=True, exist_ok=True)
-        report_file.write_text(
-            format_report(
-                gate, stdout, request_payload,
-                blocking=blocking if findings_parsed else None,
-                advisory=advisory if findings_parsed else None,
-            ),
-            encoding="utf-8",
-        )
+        report_file.write_text(report_text, encoding="utf-8")
     except OSError as exc:
         return gate_recorder.record_failure_simple(
             **_fail, reason="artifact_materialization_failed",
@@ -542,40 +752,14 @@ def materialize_artifacts(
     # covered; _verdict_is_required says why for each. For gemini_review the
     # cause is that its output is not one this reader can unwrap, so widening
     # onto it means teaching the reader first.
-    if _verdict_is_required(gate) and not extract_verdict_block(stdout):
-        logger.warning(
-            "gate_artifacts: REFUSING a %s run with no parseable verdict block "
-            "pr=%s — model produced %d char(s) of output but never wrote a "
-            "structured verdict",
-            gate, pr_id or pr_number, len(stdout),
-        )
-        # "validation_failed" (not a bespoke "no_verdict_block" reason): the
-        # new reason would need registering in
-        # gate_recorder.EXECUTION_FAILURE_REASONS to book `unavailable`
-        # instead of `failed`, and this dispatch is explicitly scoped away
-        # from gate_recorder.py (a concurrent PR touches it). "validation_failed"
-        # is already registered there, already covers "the gate's output
-        # failed a validation check", and carries zero production callers
-        # today (grepped) — reusing it costs no gate_recorder.py edit while
-        # still landing on `unavailable`, never `failed`. The specific cause
-        # lives in reason_detail, greppable via its "no_verdict_block:" prefix.
-        return gate_recorder.record_failure(
-            gate=gate, pr_number=pr_number, pr_id=pr_id,
-            result={
-                "reason": "validation_failed",
-                "reason_detail": (
-                    "no_verdict_block: gate output has no JSON object with a "
-                    '"verdict" of pass, fail or blocked, fenced or bare: the '
-                    "model produced text but never wrote a structured verdict "
-                    f"({len(stdout)} char(s) of output)"
-                ),
-                "duration_seconds": duration_seconds,
-                "partial_output_lines": len(stdout.splitlines()),
-                "runner_pid": os.getpid(),
-            },
-            request_payload=request_payload,
-            requests_dir=requests_dir,
-            results_dir=results_dir,
+    #
+    # R6 (OI-2039): a verdict recovered from the run's final answer counts as
+    # written; the report on disk already carries it (see above).
+    recovered = recovery is not None and recovery.recovered
+    if _verdict_is_required(gate) and not extract_verdict_block(stdout) and not recovered:
+        return _refuse_without_verdict(
+            gate, pr_number, pr_id, stdout, duration_seconds, request_payload,
+            requests_dir, results_dir, recovery,
         )
 
     contract_hash = _compute_contract_hash(request_payload, gate)
@@ -647,6 +831,7 @@ def materialize_artifacts(
     if real_dispatch_id:
         result_payload["dispatch_id"] = real_dispatch_id
     _stamp_harness_lane_run(result_payload, request_payload, gate)
+    _stamp_verdict_source(result_payload, raw_verdict, recovery)
 
     if (write_err := _write_result_record(results_dir, gate, pr_number, pr_id, result_payload, report_file)):
         return gate_recorder.record_failure_simple(
@@ -657,66 +842,8 @@ def materialize_artifacts(
     request_payload["completed_at"] = now
     gate_recorder.persist_request(requests_dir, gate, request_payload, pr_number=pr_number, pr_id=pr_id)
 
-    # Write JSON sidecar to report_pipeline/ for intelligence DB ingestion (OI-1066)
-    try:
-        sidecar = {
-            "dispatch_id": real_dispatch_id or f"gate-{gate}-pr-{pr_number if pr_number is not None else pr_id}",
-            "gate": gate,
-            "pr_id": pr_id,
-            "pr_number": pr_number,
-            "status": result_payload["status"],
-            "findings": findings,
-            "blocking_findings": blocking,
-            "advisory_findings": advisory,
-            "contract_hash": contract_hash,
-            "report_path": str(report_file),
-            "duration_seconds": duration_seconds,
-            "source": "gate_runner",
-            "recorded_at": now,
-        }
-        sidecar_dir = reports_dir.parent / "state" / "report_pipeline"
-        sidecar_dir.mkdir(parents=True, exist_ok=True)
-        sidecar_path = sidecar_dir / f"gate-{gate}-pr-{pr_number or pr_id}.json"
-        sidecar_path.write_text(json.dumps(sidecar, indent=2), encoding="utf-8")
-    except Exception as _exc:
-        logger.warning("materialize_artifacts: sidecar write failed: %s", _exc)
-
-    # Emit to dispatch register (codex_gate only — best-effort).
-    # Prefer explicit JSON verdict from codex output; fall back to severity-derivation.
-    #
-    # OI-1763 note: this name-check is NOT the same defect fixed above. The
-    # dispatch register is a separate, codex-specific downstream system
-    # (emit_codex_gate_to_register has no equivalent for glm_gate/kimi_gate/
-    # deepseek_gate today — the elif below defers gemini_review/
-    # claude_github_optional register classification too), unrelated to
-    # findings/residual_risk landing in the result record. `parsed` here is
-    # the SAME variable the codex_gate branch above assigns; it is only ever
-    # read when gate == "codex_gate" is also true here.
-    if gate == "codex_gate":
-        try:
-            from gate_register_emit import emit_codex_gate_to_register
-            # Trimmed and lowercased the way extract_verdict_block checks the
-            # value: the dict it returns keeps the raw text, so " FAIL " clears
-            # the guard as a fail and must register as one (OI-1786).
-            verdict_str = canonical_verdict
-            if verdict_str == "pass":
-                register_event = "gate_passed"
-            elif verdict_str in ("fail", "blocked"):
-                register_event = "gate_failed"
-            else:
-                register_event = "gate_passed" if not blocking else "gate_failed"
-            emit_codex_gate_to_register(
-                register_event,
-                dispatch_id=real_dispatch_id,
-                pr_number=pr_number,
-                pr_id=pr_id,
-                gate=gate,
-            )
-        except (ImportError, OSError) as e:
-            logger.debug("Failed to emit gate register event: %s", e)
-    elif gate in ("gemini_review", "claude_github_optional"):
-        logger.info("materialize_artifacts: register classification deferred for gate=%s", gate)
-
+    _write_pipeline_sidecar(reports_dir, result_payload, real_dispatch_id, gate, pr_number, pr_id)
+    _emit_register_event(gate, canonical_verdict, blocking, real_dispatch_id, pr_number, pr_id)
     return result_payload
 
 
