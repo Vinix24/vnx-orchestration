@@ -138,6 +138,10 @@ def _opened_lines(path: Path) -> List[Dict[str, Any]]:
     return [line for line in _all_lines(path) if line.get("kind") == "opened"]
 
 
+def _override_lines(path: Path) -> List[Dict[str, Any]]:
+    return [line for line in _all_lines(path) if line.get("kind") == "override"]
+
+
 def _report(directory: Path, gate: str, *, tag: str, pr: int = PR, text: str = CLEAN_REPORT) -> Path:
     path = directory / f"20261018-1000{tag}-HEADLESS-{gate}-pr-{pr}-{tag}ab.md"
     path.write_text(
@@ -677,6 +681,105 @@ class TestTheDispatchDoor:
         import dispatch_cli
 
         assert _rc(dispatch_cli.main, ["--spec-file", "/nonexistent.json", "--override-b3"]) == 2
+
+    def test_the_cli_refuses_a_whitespace_only_override_reason(self):
+        import dispatch_cli
+
+        assert _rc(dispatch_cli.main, [
+            "--spec-file", "/nonexistent.json", "--override-b3", "--reason", "   ",
+        ]) == 2
+
+    def test_the_override_books_a_ledger_record_with_all_fields(self, tmp_path, monkeypatch):
+        """R1d (OI-2180 point 3): an applied --override-b3 books one ``override`` line per capped PR."""
+        import dispatch_cli
+
+        monkeypatch.setenv("VNX_PROJECT_ROOT", str(tmp_path))
+        monkeypatch.setenv("VNX_OVERRIDE_B3_REASON", "operator: one-line fix")
+        data_dir, vspec, spec_file, build = _build_snapshot(tmp_path, work_ref=BRANCH)
+        ledger = data_dir / "state" / "review_gates" / "rounds.ndjson"
+        _write_ledger(ledger, _codex_rounds(2, 1, 1, 1, 1))
+
+        snapshot = build(vspec, data_dir=data_dir, spec_file=spec_file)
+
+        (applied,) = [v for v in snapshot.constraint_verdicts if v.code == "b3-cap-override-applied"]
+        assert applied.override_applied
+        (override,) = _override_lines(ledger)
+        assert override["project_id"] == ""
+        assert override["pr_number"] == PR
+        assert override["head_sha"] == OLD_HEADS[4], "B3.2 fell on round 5"
+        assert override["reason"] == "operator: one-line fix"
+        assert override["set_by"] == dispatch_cli.B3_OVERRIDE_REASON_ENV
+        assert override["total"] == 6
+        assert override["rule"] == "B3.2"
+
+    def test_a_ledger_write_failure_refuses_the_override(self, tmp_path, monkeypatch):
+        """A failure to book the override line refuses the override (fail-closed), never silently proceeds."""
+        import review_rounds
+
+        monkeypatch.setenv("VNX_PROJECT_ROOT", str(tmp_path))
+        monkeypatch.setenv("VNX_OVERRIDE_B3_REASON", "operator: one-line fix")
+        data_dir, vspec, spec_file, build = _build_snapshot(tmp_path, work_ref=BRANCH)
+        _write_ledger(data_dir / "state" / "review_gates" / "rounds.ndjson", _codex_rounds(3))
+
+        def refuse_write(*_args, **_kwargs):
+            raise review_rounds.RoundLedgerError("round ledger could not be written: io")
+
+        monkeypatch.setattr(review_rounds, "book_b3_override", refuse_write)
+
+        snapshot = build(vspec, data_dir=data_dir, spec_file=spec_file)
+
+        (refused,) = [v for v in snapshot.constraint_verdicts if v.code == "b3-override-ledger-error"]
+        assert refused.severity == "blocking"
+        assert "could not be booked" in refused.message
+        assert not [v for v in snapshot.constraint_verdicts if v.code == "b3-cap-override-applied"]
+        assert _override_lines(data_dir / "state" / "review_gates" / "rounds.ndjson") == []
+
+    def test_the_receipt_field_is_present_with_an_override_and_absent_without(self, tmp_path, monkeypatch):
+        """The dispatch receipt carries the override only when it was applied; never a stale field."""
+        import dispatch_cli
+        import dispatch_register
+        from dispatch_internal import issue_permit
+        from dispatch_plan import compile_plan
+
+        monkeypatch.setenv("VNX_PROJECT_ROOT", str(tmp_path))
+        data_dir, vspec, spec_file, build = _build_snapshot(tmp_path, work_ref=BRANCH)
+        _write_ledger(data_dir / "state" / "review_gates" / "rounds.ndjson", _codex_rounds(2, 1, 1, 1, 1))
+
+        monkeypatch.delenv("VNX_OVERRIDE_B3_REASON", raising=False)
+        without = build(vspec, data_dir=data_dir, spec_file=spec_file)
+        assert dispatch_cli._b3_override_for_plan(compile_plan(vspec, without)) is None
+
+        monkeypatch.setenv("VNX_OVERRIDE_B3_REASON", "operator: one-line fix")
+        with_override = build(vspec, data_dir=data_dir, spec_file=spec_file)
+        plan = compile_plan(vspec, with_override)
+        assert dispatch_cli._b3_override_for_plan(plan) == {
+            "flag": "--override-b3", "reason": "operator: one-line fix", "applied": True,
+        }
+
+        captured = {}
+        monkeypatch.setattr(dispatch_register, "append_event_idempotent", lambda event, **fields: captured.update(fields))
+        dispatch_cli._register_dispatch_created(plan, issue_permit(plan), vspec.spec, state_dir=data_dir / "state")
+        assert captured["extra"]["override_b3"] == {
+            "flag": "--override-b3", "reason": "operator: one-line fix", "applied": True,
+        }
+
+    def test_the_read_side_shows_the_override_record(self, tmp_path, monkeypatch, capsys):
+        """``vnx review rounds show`` lists a build-door override record for the PR."""
+        import review_rounds_cli
+
+        monkeypatch.setenv("VNX_PROJECT_ROOT", str(tmp_path))
+        monkeypatch.setenv("VNX_OVERRIDE_B3_REASON", "operator: one-line fix")
+        data_dir, vspec, spec_file, build = _build_snapshot(tmp_path, work_ref=BRANCH)
+        _write_ledger(data_dir / "state" / "review_gates" / "rounds.ndjson", _codex_rounds(2, 1, 1, 1, 1))
+        build(vspec, data_dir=data_dir, spec_file=spec_file)
+
+        rc = _rc(review_rounds_cli.main, ["rounds", "show", "--pr", str(PR), "--data-dir", str(data_dir)])
+
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "override" in out
+        assert "operator: one-line fix" in out
+        assert "VNX_OVERRIDE_B3_REASON" in out
 
 
 # ---------------------------------------------------------------------------

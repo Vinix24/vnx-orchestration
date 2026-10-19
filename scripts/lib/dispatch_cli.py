@@ -2112,6 +2112,35 @@ def _capped_prs_on_branch(state_dir: Path, branch: str) -> "list":
     return [cap for cap in caps if cap.capped]
 
 
+def _book_b3_override_records(
+    capped: list, *, reason: str, state_dir: Path,
+) -> None:
+    """Book one ``override`` line per capped PR; a write failure propagates (fail-closed)."""
+    import review_rounds
+
+    review_gates = state_dir / "review_gates"
+    ledger = review_rounds.ledger_path(review_gates)
+    project_id = review_rounds.store_project_id(review_gates)
+    for cap in capped:
+        review_rounds.book_b3_override(
+            ledger, project_id=project_id, cap=cap, reason=reason, set_by=B3_OVERRIDE_REASON_ENV,
+        )
+
+
+def _b3_override_for_plan(plan) -> Optional[dict]:
+    """The build-door B3 override this dispatch's receipt carries, or None.
+
+    Present only when the override was actually applied — the plan carries the
+    ``b3-cap-override-applied`` warn — AND a reason was set. Never a stale field:
+    a dispatch with a reason in the env but no applied override (no capped PR on
+    the branch) gets None, not a leftover override.
+    """
+    reason = (os.environ.get(B3_OVERRIDE_REASON_ENV) or "").strip()
+    if not reason or not any("b3-cap-override-applied" in warning for warning in plan.warnings):
+        return None
+    return {"flag": "--override-b3", "reason": reason, "applied": True}
+
+
 def _check_b3_cap_verdict(spec: DispatchSpec, *, state_dir: Path) -> Optional[ConstraintVerdict]:
     """R1 early warning: refuse a build dispatch whose ``work_ref`` is the branch of a PR at the B3 cap.
 
@@ -2121,7 +2150,9 @@ def _check_b3_cap_verdict(spec: DispatchSpec, *, state_dir: Path) -> Optional[Co
     lines carry the branch of every verdict), never GitHub. An unreadable ledger
     is a warning here: the gate refuses the run itself, naming the way out.
     ``VNX_OVERRIDE_B3_REASON`` (set by ``--override-b3 --reason``) turns the
-    refusal into an audited warning.
+    refusal into an audited warning AND books one ``override`` line per capped PR
+    in the round ledger (R1d): a failure to write that line refuses the override
+    (fail-closed), it never silently proceeds.
     """
     import review_rounds
 
@@ -2137,6 +2168,16 @@ def _check_b3_cap_verdict(spec: DispatchSpec, *, state_dir: Path) -> Optional[Co
     text = "; ".join(review_rounds.cap_refusal_text(cap, where=f"work_ref {work_ref}") for cap in capped)
     reason = (os.environ.get(B3_OVERRIDE_REASON_ENV) or "").strip()
     if reason:
+        try:
+            _book_b3_override_records(capped, reason=reason, state_dir=state_dir)
+        except review_rounds.RoundLedgerError as exc:
+            return ConstraintVerdict(
+                code="b3-override-ledger-error", severity="blocking",
+                message=(
+                    f"b3 override refused: the override could not be booked in the round ledger "
+                    f"(the dispatch is not let through): {exc}"
+                ),
+            )
         logger.warning("[dispatch_cli] AUDIT b3-cap-override-applied work_ref=%s reason=%s", work_ref, reason)
         return ConstraintVerdict(
             code="b3-cap-override-applied", severity="warn",
@@ -2725,6 +2766,7 @@ def _register_dispatch_created(
     try:
         import dispatch_register  # noqa: PLC0415
         from gate_obligations import pr_number_from_pr_id  # noqa: PLC0415
+        b3_override = _b3_override_for_plan(plan)
         dispatch_register.append_event_idempotent(
             "dispatch_created",
             dispatch_id=plan.dispatch_id,
@@ -2736,6 +2778,7 @@ def _register_dispatch_created(
                 "provider": plan.provider.value,
                 "model": plan.model,
                 "permit_fingerprint": f"{permit.plan_digest[:12]}-{permit.dispatch_id}",
+                **({"override_b3": b3_override} if b3_override else {}),
             },
             state_dir=state_dir,
         )
@@ -2796,6 +2839,9 @@ def _persist_route_decision(
         }
         if isolation_note:
             record["isolation_warning"] = isolation_note
+        b3_override = _b3_override_for_plan(plan)
+        if b3_override:
+            record["override_b3"] = b3_override
 
         # 1. Append to shared NDJSON under the sentinel + data-file locks.
         ndjson_path = state_dir / "route_decisions.ndjson"
