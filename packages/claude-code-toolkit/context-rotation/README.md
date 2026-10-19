@@ -2,7 +2,7 @@
 
 A Claude Code plugin that rotates a long session before it degrades. It measures how full the context is, asks Claude for a handover note at set points, checks that note, and gives it to the fresh session after `/clear`.
 
-**Check your window first.** The bands are a share of `window_tokens`, which defaults to 200,000. Claude Code does not tell a hook the real window size, so it is a setting. On a 1M window with the defaults the plugin rotates early, never late: the warn band starts at 110,000 tokens, about 11% of the real window. Set `"window_tokens": 1000000` in `.claude/context-rotation.json` to move the bands up.
+**Check your window first.** The bands are a share of `window_tokens`, which defaults to 200,000. Claude Code does not tell a hook the real window size, so it is a setting. On a 1M window with the defaults the plugin rotates early, never late: the warn band starts at 110,000 tokens, about 11% of the real window. Set `"window_tokens": 1000000` in `.claude/context-rotation.json` to move the bands up, or set the bands directly in tokens with `warn_tokens`, `force_tokens` and `hard_tokens` (see "Large windows").
 
 ## The problem
 
@@ -30,7 +30,7 @@ The plugin is on from the moment it is installed. It needs `python3` (3.9 or new
 ## How it works
 
 1. **Measure.** Before each prompt and tool call, and at Stop, `lib/context_budget.py` reads the transcript backwards and takes the input, cache-read and cache-creation tokens of the last assistant message. After a compaction it uses the size Claude Code records for it. A size it cannot read is unknown, and an unknown size never warns or blocks.
-2. **Warn.** At `warn_pct` of the window Claude is told to wrap up and prepare a handover. At `force_pct` it is told to write it now, and the turn is held back once so it can. At `hard_pct` every tool except reads, questions, the todo list and the handover write itself is denied. Typing `/context-rotation:rotate release` ends the enforcement for that session.
+2. **Warn.** At `warn_pct` of the window — or at `warn_tokens` when the three token thresholds are set — Claude is told to wrap up and prepare a handover. At `force_pct` (or `force_tokens`) it is told to write it now, and the turn is held back once so it can. At `hard_pct` (or `hard_tokens`) every tool except reads, questions, the todo list and the handover write itself is denied. Typing `/context-rotation:rotate release` ends the enforcement for that session.
 3. **Hand over.** Claude writes `.claude/rotation/handover-<session id>.md` with the `rotate` skill (`skills/rotate/SKILL.md`): goal, current state, what still runs, numbered next steps, files touched, open risks. At most `handover_max_chars` characters.
 4. **Check.** `hooks/handover_detector.py` validates the file after each Write or Edit. A valid one gets a ready-marker. Any later prompt or work that changes the picture makes the marker outdated, and an outdated handover is never injected.
 5. **Clear.** At Stop with a current marker, inside tmux and with `auto_clear` on, `scripts/tmux_clear.sh` types `/clear` into the session's own pane once it is idle. Anywhere else the plugin tells you to type `/clear` yourself.
@@ -40,7 +40,7 @@ The hook entries are `hooks/context_guard.py` (prompt, tool call, Stop), `hooks/
 
 ## Settings
 
-Settings are read from `.claude/context-rotation.json` in the project, else `~/.claude/context-rotation.json`, else the defaults. A bad value falls back to its own default with a message on stderr. The environment variable `CLAUDE_CONTEXT_ROTATION=off` switches the hooks off for a shell.
+Settings are read from `.claude/context-rotation.json` in the project, else `~/.claude/context-rotation.json`, else the defaults. The user settings file is always `~/.claude/context-rotation.json` in the home directory, also when `CLAUDE_CONFIG_DIR` points Claude Code at another config directory, so one file serves several accounts. A bad value falls back to its own default with a message on stderr. The environment variable `CLAUDE_CONTEXT_ROTATION=off` switches the hooks off for a shell.
 
 | Key | Default | What it does |
 |---|---|---|
@@ -102,6 +102,7 @@ If anything is in the input line, the job types nothing. It shows the reason in 
 - Windows is not supported.
 - `/resume` brings back the old session, not the rotated one. The handover of the old session stays in `.claude/rotation/archive/`.
 - Do not run it next to another rotation guard. Two guards hold back the same turn and clear the same pane. Switch this one off in a project with `"enabled": false` in `.claude/context-rotation.json`.
+- The plugin is untested in non-interactive `claude -p` runs. A user-scope install also reaches automated runs started on that account (CI, scripts, agent harnesses), so install with `--scope project` where you work interactively.
 - A fresh session does not start empty. Your CLAUDE.md files, tools and the handover are already in its context, about 60K tokens on a setup with large CLAUDE.md imports. The session that continues from an injected handover after `/clear` records that start size and does not reach the force or hard band until it has grown at least `min_work_tokens` past it, so the rotation cannot loop. A session started fresh, or continued with `/resume`, is enforced as before. When the injected start is so close to force that rotating will not make the next session smaller, the user is told once, with the two remedies: raise the force threshold, or start with a smaller context (fewer CLAUDE.md imports). Keep the force band well above your start context. Run `/context` in a fresh Claude Code session to see it.
 - What the write guard does and does not stop is in the next section.
 
@@ -122,7 +123,7 @@ In `~/.claude/context-rotation/`: the job files of the automatic clear (in `jobs
 
 ## Claude Code versions
 
-The hook payloads and pane screens the plugin relies on were measured on Claude Code 2.1.300. The live smoke of the automatic clear passed on 2.1.302. `tests/live/smoke_tmux.sh` repeats that smoke in a throwaway tmux session.
+The hook payloads and pane screens the plugin relies on were measured on Claude Code 2.1.300. The live smoke of the automatic clear passed on 2.1.302. The live smoke of 1.0.0 (run 1, the automatic clear, 5 of 5 checks) passed on 2.1.303 against a copy installed from the public marketplace. `tests/live/smoke_tmux.sh` repeats that smoke in a throwaway tmux session.
 
 Credits: the rotation mechanism comes from the context rotation that VNX Orchestration runs for its orchestrator terminal.
 

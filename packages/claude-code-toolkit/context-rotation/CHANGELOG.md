@@ -2,6 +2,12 @@
 
 All notable changes to this plugin are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the plugin follows [Semantic Versioning](https://semver.org/).
 
+## [1.0.1] - 2026-10-20
+
+### Changed
+
+- Documentation: the README names the absolute thresholds (`warn_tokens`, `force_tokens`, `hard_tokens`) next to `window_tokens`, says the bands are the percentages or the three token thresholds, warns that a user-scope install also reaches automated `claude -p` runs, notes that the user settings file is always `~/.claude/context-rotation.json` in the home directory, and records the 1.0.0 live smoke on Claude Code 2.1.303.
+
 ## [1.0.0] - 2026-10-19
 
 ### Added
