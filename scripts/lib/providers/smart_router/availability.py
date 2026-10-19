@@ -64,6 +64,7 @@ from typing import Optional, Tuple
 
 import provider_reachability
 from incident_taxonomy import IncidentClass
+from load_deepseek_key import resolve_deepseek_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +136,20 @@ def lane_env_vars(lane: str) -> tuple:
     if check is None:
         return ()
     return check.env_vars
+
+
+def _lane_requirement_met(var: str, env: dict) -> bool:
+    """Whether one required env var is satisfied for a lane.
+
+    The deepseek key may live in the provider env file, not the shell's own env
+    (OI-2182): resolve it through the shared ``load_deepseek_key`` resolver so
+    the decision-time gate reads the same source as every other deepseek
+    consumer (auto-route and tier escalation included). Any other requirement
+    is a plain env lookup.
+    """
+    if var == "DEEPSEEK_API_KEY":
+        return bool(resolve_deepseek_api_key(env=env))
+    return bool(env.get(var))
 
 
 def _cooldown_dir(state_dir: Path) -> Path:
@@ -323,7 +338,7 @@ def lane_available(
         if check.disabled_reason is not None:
             return False, check.disabled_reason
         for var in check.env_vars:
-            if not _env.get(var):
+            if not _lane_requirement_met(var, _env):
                 return False, f"missing required env var {var}"
         for cli in check.cli_names:
             if shutil.which(cli) is None:

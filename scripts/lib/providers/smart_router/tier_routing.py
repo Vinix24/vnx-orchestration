@@ -123,6 +123,8 @@ _ESCALATION_ORDER = load_escalation_order()
 #                       error, so it is a flake exactly like timeout)
 #   tool_missing     -> no climb (a missing CLI binary on this host is not
 #                       fixed by picking a different model on the same host)
+#   local_key_missing -> no climb (a missing own key on this host is a local
+#                       config error, never fixed by another model)
 #   unknown          -> no climb, report the unknown class loudly (the
 #                       vangnetklasse — kept as the catch-all; do not remove)
 _ESCALATION_TABLE = {
@@ -134,6 +136,7 @@ _ESCALATION_TABLE = {
     "completion_without_execution": "climb",
     "no_verdict": "retry_same_tier",
     "tool_missing": "no_climb",
+    "local_key_missing": "no_climb",
     "unknown": "no_climb",
 }
 

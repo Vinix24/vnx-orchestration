@@ -409,6 +409,8 @@ class TestClassifierProvidersReadTheSharedRecord:
         from classifier_providers.deepseek_provider import DeepSeekProvider
 
         monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        # Isolate the provider env file so the operator's real key never leaks in.
+        monkeypatch.setenv("VNX_PROVIDER_ENV_FILE", str(state_dir / "absent-provider-usage.env"))
         with patch("classifier_providers.deepseek_provider.shutil.which", return_value="/usr/bin/claude"):
             assert DeepSeekProvider().is_available() is False
 
