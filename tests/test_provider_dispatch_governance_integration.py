@@ -355,19 +355,21 @@ def test_claude_dispatch_extracts_token_usage(tmp_path):
 
 def test_compute_cost_returns_none_when_tokens_zero():
     """_compute_cost returns None when both input and output are 0."""
-    cost = provider_dispatch._compute_cost(
+    cost, cost_source = provider_dispatch._compute_cost(
         "litellm:deepseek", "deepseek/deepseek-v4-pro", {"input": 0, "output": 0, "cache_hit": 0}
     )
     assert cost is None
+    assert cost_source == ""
 
 
 def test_compute_cost_uses_yaml_pricing():
     """_compute_cost reads wave7_models.yaml and returns a non-zero float for valid tokens."""
     token_usage = {"input": 1_000_000, "output": 1_000_000, "cache_hit": 0}
-    cost = provider_dispatch._compute_cost("litellm:deepseek", "deepseek/deepseek-v4-pro", token_usage)
+    cost, cost_source = provider_dispatch._compute_cost("litellm:deepseek", "deepseek/deepseek-v4-pro", token_usage)
     # deepseek-v4-pro peak: input $1.32/Mtok + output $3.96/Mtok = $5.28 for 1M+1M
     assert cost is not None
     assert cost > 0
+    assert not cost_source.startswith("unavailable:")
 
 
 def test_litellm_dispatch_cost_usd_in_receipt(tmp_path, monkeypatch):
@@ -410,8 +412,9 @@ def test_unavailable_token_usage_is_not_billable():
         type("_NullResult", (), {"token_usage": None})(), "kimi"
     )
     assert usage["unavailable"] is True
-    cost = provider_dispatch._compute_cost("kimi", "kimi-default", usage)
+    cost, cost_source = provider_dispatch._compute_cost("kimi", "kimi-default", usage)
     assert cost is None
+    assert cost_source == ""
 
 
 # ---------------------------------------------------------------------------

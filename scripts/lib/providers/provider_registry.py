@@ -9,6 +9,7 @@ BILLING SAFETY: read-only data loader; no Anthropic SDK, no API calls.
 from __future__ import annotations
 
 import logging
+import math
 import os
 from dataclasses import dataclass, field
 from datetime import date
@@ -158,12 +159,27 @@ def _validate_price_checked_at(model_key: str, price_checked_at: str) -> None:
         ) from e
 
 
+def _validate_rate(value: float, field_name: str, model_key: Optional[str]) -> None:
+    """Reject a NaN, infinite, or negative rate before it becomes a price.
+
+    The advisory fix for ADR-040: ``float(...)`` alone accepts ``nan``,
+    ``inf`` and negatives, which would then flow through ``price_run`` as a
+    fabricated (or silently swallowed) cost. A rate must be finite and
+    nonnegative to be a price at all.
+    """
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(
+            f"model {model_key!r} has a {field_name} rate {value!r} in its "
+            f"price_version: expected a finite, nonnegative number"
+        )
+
+
 def _parse_price_version(data: dict, model_key: Optional[str] = None) -> PriceVersion:
     """Parse one dated price version entry (ADR-040).
 
-    Fails loud (naming the model) on a malformed date or a missing/NaN rate —
-    a price version without a date is unversioned, and a version without a rate
-    is not a price.
+    Fails loud (naming the model) on a malformed date, a missing/NaN rate, or
+    a negative/infinite rate — a price version without a date is unversioned,
+    and a rate that is not a finite nonnegative number is not a price.
     """
     date_raw = data.get("date")
     date_str = str(date_raw) if date_raw is not None else ""
@@ -184,6 +200,8 @@ def _parse_price_version(data: dict, model_key: Optional[str] = None) -> PriceVe
             f"model {model_key!r} has a price_version with an invalid rate "
             f"({e}); expected numeric input_per_mtok/output_per_mtok"
         ) from e
+    _validate_rate(input_per_mtok, "input_per_mtok", model_key)
+    _validate_rate(output_per_mtok, "output_per_mtok", model_key)
     cache_read_raw = data.get("cache_read_per_mtok")
     cache_write_raw = data.get("cache_write_per_mtok")
     off_peak_in_raw = data.get("off_peak_input_per_mtok")
@@ -193,12 +211,14 @@ def _parse_price_version(data: dict, model_key: Optional[str] = None) -> PriceVe
         if raw is None:
             return None
         try:
-            return float(raw)
+            value = float(raw)
         except (TypeError, ValueError) as e:
             raise ValueError(
                 f"model {model_key!r} has an invalid {field_name} "
                 f"{raw!r} in its price_version: {e}"
             ) from e
+        _validate_rate(value, field_name, model_key)
+        return value
 
     return PriceVersion(
         date=date_str,

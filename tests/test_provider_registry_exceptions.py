@@ -64,3 +64,42 @@ class TestProviderRegistryHappyPath:
         )
         result = provider_registry.get_default_model("nonexistent", registry_path=registry_yaml)
         assert result is None
+
+
+class TestProviderRegistryRejectsNonFiniteRates:
+    """A price_version rate must be finite and nonnegative before it becomes a price."""
+
+    def _registry(self, tmp_path, input_rate: str) -> Path:
+        registry_yaml = tmp_path / "models.yaml"
+        registry_yaml.write_text(
+            "providers:\n"
+            "  acme:\n"
+            "    enabled: true\n"
+            "    api_key_env: \"\"\n"
+            "    models:\n"
+            "      acme-flagship:\n"
+            "        litellm_name: acme-flagship\n"
+            "        cost_input_per_mtok: 1.0\n"
+            "        cost_output_per_mtok: 2.0\n"
+            "        max_tokens: 4096\n"
+            "        supports_streaming: false\n"
+            "        supports_tool_calls: false\n"
+            "        price_checked_at: '2026-08-18'\n"
+            "        price_versions:\n"
+            "          - date: '2026-08-18'\n"
+            "            source: 'unverified: registry-authored'\n"
+            f"            input_per_mtok: {input_rate}\n"
+            "            output_per_mtok: 2.0\n",
+            encoding="utf-8",
+        )
+        return registry_yaml
+
+    @pytest.mark.parametrize("bad_rate", [".nan", ".inf", "-.inf", "-1.0"])
+    def test_nonfinite_or_negative_rate_is_refused(self, tmp_path, bad_rate):
+        path = self._registry(tmp_path, bad_rate)
+        with pytest.raises(ValueError) as excinfo:
+            provider_registry.load(registry_path=path)
+        message = str(excinfo.value)
+        assert "acme-flagship" in message, f"must name the model — got: {message!r}"
+        assert "input_per_mtok" in message, f"must name the field — got: {message!r}"
+        assert "finite" in message, f"must state the finite-nonnegative expectation — got: {message!r}"

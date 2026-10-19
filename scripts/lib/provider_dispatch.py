@@ -615,10 +615,21 @@ def _kimi_entry_from_cli_arg(cfg: Any, model: Optional[str]) -> Optional[Any]:
     return matches[0][1] if matches else None
 
 
-def _compute_kimi_cost(model: Optional[str], token_usage: Dict[str, Any]) -> Optional[float]:
-    """Compute cost via wave7_models.yaml kimi_cli section for kimi provider.
+def _entry_price_date(entry: Any) -> str:
+    """Latest price-version date for a registry entry, else its checked-at date."""
+    versions = getattr(entry, "price_versions", None)
+    if versions:
+        return versions[-1].date or ""
+    return getattr(entry, "price_checked_at", "") or ""
 
-    A model the registry does not know returns None — never a price (OI-1361). This
+
+def _compute_kimi_cost(
+    model: Optional[str], token_usage: Dict[str, Any]
+) -> tuple[Optional[float], str]:
+    """Compute (cost_usd, cost_source) via wave7_models.yaml kimi_cli section.
+
+    A model the registry does not know returns ``(None, "unavailable:no_price:"
+    <model>)`` — never a price, and never a silent 0 (OI-1361). This
     used to end on ``next(iter(cfg.models.values()), None)``, so an unknown model name
     inherited whichever entry happened to sit FIRST in the kimi_cli section (today
     kimi-k3 at 3.00 in / 15.00 out), and that invented number reached the receipt as a
@@ -656,13 +667,13 @@ def _compute_kimi_cost(model: Optional[str], token_usage: Dict[str, Any]) -> Opt
     if not token_usage or token_usage.get("unavailable") or (
         token_usage.get("input", 0) == 0 and token_usage.get("output", 0) == 0
     ):
-        return None
+        return None, ""
     try:
         from providers import provider_registry as _reg
         registry = _reg.load()
         cfg = registry.get("kimi_cli")
         if cfg is None or not cfg.models:
-            return None
+            return None, f"unavailable:no_price:{model or ''}"
         target_key = _kimi_resolve_requested_key(model)
         entry = _resolve_registry_model_entry(cfg, "kimi_cli", target_key)
         if entry is None:
@@ -680,21 +691,57 @@ def _compute_kimi_cost(model: Optional[str], token_usage: Dict[str, Any]) -> Opt
                 "fabricated price",
                 model, target_key, len(cfg.models),
             )
-            return None
+            return None, f"unavailable:no_price:{target_key}"
         cost_in = (token_usage.get("input", 0) / 1_000_000) * entry.cost_input_per_mtok
         cost_out = (token_usage.get("output", 0) / 1_000_000) * entry.cost_output_per_mtok
-        return round(cost_in + cost_out, 8)
+        entry_date = _entry_price_date(entry)
+        source = f"{target_key}@{entry_date}" if entry_date else target_key
+        return round(cost_in + cost_out, 8), source
     except Exception as exc:
         logger.debug("_compute_kimi_cost failed: %s", exc)
-        return None
+        return None, ""
 
 
-def _compute_cost(provider: str, model: str, token_usage: Dict[str, Any]) -> Optional[float]:
-    """Compute cost_usd from wave7_models.yaml pricing. Returns None on lookup miss or unavailable usage."""
+def _registry_price_source(provider: str, model: str) -> str:
+    """Provenance string for a registry-resolved price (ADR-040).
+
+    ``<model>@<latest-version-date>`` for a priced model, or the
+    ``unavailable:no_price:<model>`` sentinel for a model with no price. Reads
+    the same ``resolve_price_versions`` resolution point ``price_run`` uses, so
+    the flat-field fast path and the price_run fallback never disagree about
+    which price was applied.
+    """
+    from providers import provider_registry as _reg
+
+    registry_key = _PROVIDER_TO_REGISTRY_KEY.get(provider)
+    if registry_key is None and provider.startswith("litellm:") and ":" in provider:
+        registry_key = provider.split(":", 1)[1].split(":", 1)[0]
+    if not registry_key:
+        return f"unavailable:no_price:{model}"
+    try:
+        versions = _reg.resolve_price_versions(registry_key, model)
+    except Exception:
+        return f"unavailable:no_price:{model}"
+    if not versions:
+        return f"unavailable:no_price:{model}"
+    date = versions[-1].date
+    return f"{model}@{date}" if date else model
+
+
+def _compute_cost(
+    provider: str, model: str, token_usage: Dict[str, Any]
+) -> tuple[Optional[float], str]:
+    """Compute (cost_usd, cost_source) from wave7_models.yaml pricing (ADR-040).
+
+    Returns ``(None, "")`` on unavailable/zero usage; ``(None, "unavailable:
+    no_price:<model>")`` on a lookup miss; and ``(cost, "<model>@<version-date>")``
+    when priced — never a silent 0, so a missing price is distinguishable from a
+    genuinely free run.
+    """
     if not token_usage or token_usage.get("unavailable") or (
         token_usage.get("input", 0) == 0 and token_usage.get("output", 0) == 0
     ):
-        return None
+        return None, ""
     if provider == "kimi":
         return _compute_kimi_cost(model, token_usage)
     pricing = _load_pricing_from_registry(provider, model)
@@ -705,14 +752,14 @@ def _compute_cost(provider: str, model: str, token_usage: Dict[str, Any]) -> Opt
         # event's input_tokens excludes them), so they add to the bill at their own
         # price. Only models whose registry entry carries that price bill them.
         cost_cache = (token_usage.get("cache_hit", 0) / 1_000_000) * pricing.get("cache_read", 0.0)
-        return round(cost_in + cost_cache + cost_out, 8)
+        return round(cost_in + cost_cache + cost_out, 8), _registry_price_source(provider, model)
     # Registry miss — fall back to price_run so API lanes (litellm:deepseek/zai,
     # codex-API, gemini) still resolve to real dollars rather than silently
     # landing at 0. price_run returns (None, "unavailable:no_price:<model>") for
     # a model without a price, which is the correct documented-$0 result.
     try:
         from provider_costs import price_run  # noqa: PLC0415
-        cost_usd, _cost_source = price_run(
+        return price_run(
             provider,
             model,
             [
@@ -723,10 +770,9 @@ def _compute_cost(provider: str, model: str, token_usage: Dict[str, Any]) -> Opt
                 }
             ],
         )
-        return cost_usd
     except Exception as exc:  # noqa: BLE001
         logger.debug("_compute_cost: price_run fallback failed for %s/%s: %s", provider, model, exc)
-        return None
+        return None, ""
 
 
 def _build_frontmatter(
@@ -737,6 +783,7 @@ def _build_frontmatter(
     duration: float,
     token_usage: Dict[str, int],
     cost_usd: Optional[float],
+    cost_source: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build unified_report_v1 frontmatter from dispatch context + spawn result."""
     from unified_report_schema import SCHEMA_VERSION
@@ -768,7 +815,7 @@ def _build_frontmatter(
             "output": token_usage.get("output", 0),
             "cache_read": token_usage.get("cache_hit", 0),
         }),
-        "cost_usd": cost_usd if cost_usd is not None else 0.0,
+        "cost_usd": cost_usd,
         "route_decision": {
             "strategy": os.environ.get("VNX_ROUTE_STRATEGY", "default"),
             "selected_provider": provider,
@@ -786,6 +833,13 @@ def _build_frontmatter(
 
     # OI-2066: the lane's own statement that its deadline stopped the run.
     frontmatter.update(_deadline_frontmatter(result))
+
+    # Provenance of the price that produced cost_usd: ``<model>@<version-date>``
+    # for a priced run, ``unavailable:no_price:<model>`` for a documented miss.
+    # Only written when a source exists, so a measured-free run (source "") keeps
+    # its own non-unavailable provenance rather than inheriting a miss sentinel.
+    if cost_source:
+        frontmatter["cost_source"] = cost_source
 
     return frontmatter
 
@@ -1361,7 +1415,7 @@ def _emit_governance(
     data_dir = _resolve_data_dir()
     duration = (end_time - start_time).total_seconds()
     token_usage = _extract_token_usage(result, provider)
-    cost_usd = _compute_cost(provider, model_used, token_usage)
+    cost_usd, cost_source = _compute_cost(provider, model_used, token_usage)
 
     # Deterministic report path — emitted below by emit_unified_report. Computed
     # up front so the receipt can carry the linkage even though the report write
@@ -1402,7 +1456,7 @@ def _emit_governance(
         output_tokens=token_usage.get("output") if token_usage else None,
         cost_usd_estimate=cost_usd,
         dispatch_id=args.dispatch_id,
-        project_id=_cost_pid,
+        project_id=_cost_pid, cost_source=cost_source,
     )
 
     # Provider-aware self-learning: stamp a dispatch_metadata row so EVERY governed
@@ -1550,7 +1604,7 @@ def _emit_governance(
                 findings=[],
                 duration_seconds=duration,
                 token_usage=token_usage,
-                cost_usd=cost_usd,
+                cost_usd=cost_usd, cost_source=cost_source,
                 state_dir=state_dir,
                 report_path=str(report_path),
                 events_path=events_path,
@@ -1687,7 +1741,7 @@ def _emit_governance(
             )
 
     frontmatter = _build_frontmatter(
-        args, provider, model_used, result, duration, token_usage, cost_usd,
+        args, provider, model_used, result, duration, token_usage, cost_usd, cost_source,
     )
 
     def _write_report(report_frontmatter: Dict[str, Any]) -> Path:

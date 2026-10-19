@@ -212,6 +212,7 @@ def _write_receipt(
     stuck_event_count: int = 0,
     token_usage: dict | None = None,
     cost_usd: float | None = None,
+    cost_source: str | None = None,
     pr_id: str | None = None,
     provider: str | None = None,
     sub_provider: str | None = None,
@@ -248,6 +249,8 @@ def _write_receipt(
         mandate_id=mandate_id,
         role=role,
     )
+    if cost_source:
+        receipt["cost_source"] = cost_source
     return _persist_receipt(receipt, dispatch_id, terminal_id, status)
 
 

@@ -119,8 +119,9 @@ def test_compute_cost_resolves_nonzero_for_api_lanes():
         ("gemini", "gemini-2.5-pro"),
         ("litellm:deepseek", "deepseek/deepseek-v4-pro"),
     ]:
-        cost = provider_dispatch._compute_cost(provider, model, tu)
+        cost, cost_source = provider_dispatch._compute_cost(provider, model, tu)
         assert cost is not None and cost > 0, f"{provider}/{model} resolved {cost}"
+        assert not cost_source.startswith("unavailable:")
 
 
 def test_compute_cost_price_run_resolves_zai_lane():
@@ -146,10 +147,10 @@ def test_compute_cost_none_when_zero_tokens():
     provider, model = "codex", "gpt-5.5"
     assert provider_dispatch._compute_cost(
         provider, model, {"input": 0, "output": 0, "cache_hit": 0}
-    ) is None
+    )[0] is None
     nonzero = provider_dispatch._compute_cost(
         provider, model, {"input": 10_000, "output": 5_000, "cache_hit": 0}
-    )
+    )[0]
     assert nonzero is not None and nonzero > 0
 
 

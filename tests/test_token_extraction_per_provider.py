@@ -347,7 +347,7 @@ class TestComputeCost:
         })
         with patch("provider_dispatch._load_pricing_from_registry",
                    return_value={"input": 15.0, "output": 75.0}):
-            cost = pd._compute_cost("claude", "opus", {"input": 1_000_000, "output": 0, "cache_hit": 0})
+            cost, _ = pd._compute_cost("claude", "opus", {"input": 1_000_000, "output": 0, "cache_hit": 0})
         assert cost is not None
         assert abs(cost - 15.0) < 1e-6
 
@@ -355,7 +355,7 @@ class TestComputeCost:
         import provider_dispatch as pd
         with patch("provider_dispatch._load_pricing_from_registry",
                    return_value={"input": 3.0, "output": 15.0}):
-            cost = pd._compute_cost("claude", "sonnet", {"input": 0, "output": 1_000_000, "cache_hit": 0})
+            cost, _ = pd._compute_cost("claude", "sonnet", {"input": 0, "output": 1_000_000, "cache_hit": 0})
         assert cost is not None
         assert abs(cost - 15.0) < 1e-6
 
@@ -363,7 +363,7 @@ class TestComputeCost:
         import provider_dispatch as pd
         with patch("provider_dispatch._load_pricing_from_registry",
                    return_value={"input": 1.25, "output": 10.0}):
-            cost = pd._compute_cost("codex", "gpt-5.2-codex", {"input": 1_000_000, "output": 1_000_000, "cache_hit": 0})
+            cost, _ = pd._compute_cost("codex", "gpt-5.2-codex", {"input": 1_000_000, "output": 1_000_000, "cache_hit": 0})
         assert cost is not None
         assert abs(cost - 11.25) < 1e-4
 
@@ -382,13 +382,15 @@ class TestComputeCost:
     def test_compute_cost_returns_none_when_pricing_missing(self):
         import provider_dispatch as pd
         with patch("provider_dispatch._load_pricing_from_registry", return_value=None):
-            cost = pd._compute_cost("unknown-provider", "unknown-model", {"input": 100, "output": 50, "cache_hit": 0})
+            cost, cost_source = pd._compute_cost("unknown-provider", "unknown-model", {"input": 100, "output": 50, "cache_hit": 0})
         assert cost is None
+        assert cost_source.startswith("unavailable:")
 
     def test_zero_usage_returns_none_cost(self):
         import provider_dispatch as pd
-        cost = pd._compute_cost("claude", "sonnet", {"input": 0, "output": 0, "cache_hit": 0})
+        cost, cost_source = pd._compute_cost("claude", "sonnet", {"input": 0, "output": 0, "cache_hit": 0})
         assert cost is None
+        assert cost_source == ""
 
     def test_load_pricing_registry_anthropic_sonnet(self):
         """Registry lookup for claude -> anthropic -> sonnet returns correct pricing."""

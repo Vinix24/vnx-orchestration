@@ -174,11 +174,11 @@ def _govern(
     # provider_dispatch._emit_governance does, using the actual model the spawn
     # resolved (falling back to the spec model). Non-fatal: an unresolvable
     # price leaves cost_usd None instead of failing the receipt.
-    cost_usd: Optional[float] = None
+    cost_usd, cost_source = None, None
     _cost_model = getattr(adapter_result, "model", None) or spec.model
     try:
         from provider_dispatch import _compute_cost  # noqa: PLC0415
-        cost_usd = _compute_cost(spec.provider, _cost_model, adapter_result.token_usage)
+        cost_usd, cost_source = _compute_cost(spec.provider, _cost_model, adapter_result.token_usage)
     except Exception as _cost_exc:  # noqa: BLE001 — cost must never break receipt emission
         logger.debug(
             "envelope._govern: cost compute failed dispatch=%s provider=%s (non-fatal): %s",
@@ -432,7 +432,7 @@ def _govern(
                         ),
                         cost_usd_estimate=cost_usd,
                         dispatch_id=spec.dispatch_id,
-                        project_id=_cost_pid,
+                        project_id=_cost_pid, cost_source=cost_source,
                     )
                 except Exception as _cost_event_exc:  # noqa: BLE001 — cost event must not break receipt
                     logger.warning(
@@ -490,7 +490,7 @@ def _govern(
                     findings=[],
                     duration_seconds=duration,
                     token_usage=adapter_result.token_usage,
-                    cost_usd=cost_usd,
+                    cost_usd=cost_usd, cost_source=cost_source,
                     state_dir=spec.state_dir,
                     report_path=str(report_path) if report_path else None,
                     events_path=events_path,

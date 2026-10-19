@@ -275,8 +275,9 @@ class TestCostResolution:
 
     def test_compute_cost_returns_none_for_unpriced_lane(self):
         """_compute_cost falls through price_run, so an unpriced lane lands at None."""
-        cost = pd._compute_cost(
+        cost, cost_source = pd._compute_cost(
             "litellm:openrouter", "openrouter/openai/gpt-4o-mini",
             {"input": 1_000_000, "output": 1_000_000},
         )
         assert cost is None
+        assert cost_source.startswith("unavailable:")

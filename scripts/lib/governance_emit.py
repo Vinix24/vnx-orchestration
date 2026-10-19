@@ -88,7 +88,7 @@ def emit_dispatch_receipt(
     duration_seconds: float,
     token_usage: Dict[str, int],
     cost_usd: Optional[float],
-    state_dir: Path,
+    state_dir: Path, cost_source: Optional[str] = None,
     report_path: Optional[str] = None,
     events_path: Optional[str] = None,
     permission_enforcement: Optional[str] = None,
@@ -162,6 +162,12 @@ def emit_dispatch_receipt(
     not yet a real file at call time on that sub-path. Only stamped when
     provided, so callers that do not yet compute it keep a byte-identical
     receipt shape.
+
+    ``cost_source``: ADR-040 price provenance — ``<model>@<version-date>`` for
+    a priced run, ``unavailable:no_price:<model>`` for a missing price. Stamped
+    only when provided (omitted otherwise), so a missing price is recorded with
+    its ``unavailable:`` source alongside ``cost_usd=None`` instead of being
+    indistinguishable from a genuinely free run.
 
     ``role`` / ``receipt_kind``: receipt-quality track — dispatch identity
     propagated from ``dispatch_metadata`` (via
@@ -294,7 +300,7 @@ def emit_dispatch_receipt(
         findings=findings,
         duration_seconds=duration_seconds,
         token_usage=token_usage,
-        cost_usd=cost_usd,
+        cost_usd=cost_usd, cost_source=cost_source,
         pr_id=pr_id,
         role=role,
         receipt_kind=receipt_kind,

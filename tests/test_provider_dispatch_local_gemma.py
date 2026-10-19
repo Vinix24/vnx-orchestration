@@ -123,9 +123,10 @@ class TestExtractTokenUsageLocalGemma(unittest.TestCase):
         import provider_dispatch as pd
 
         # Local gemma should always compute $0 cost
-        cost = pd._compute_cost("local-gemma", "gemma-4b-local", {"input": 100, "output": 50})
-        # Either None (registry miss + provider_costs miss) or 0.0
-        self.assertIn(cost, (None, 0.0))
+        cost, cost_source = pd._compute_cost("local-gemma", "gemma-4b-local", {"input": 100, "output": 50})
+        # Measured $0 (the registry carries 0.0/0.0 rates), never unavailable.
+        self.assertEqual(cost, 0.0)
+        self.assertFalse(cost_source.startswith("unavailable:"))
 
 
 class TestDispatchPassesCanonicalMlxId(unittest.TestCase):

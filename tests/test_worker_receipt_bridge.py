@@ -273,14 +273,15 @@ class TestResolveTokenUsageAndCost:
 
         with patch(
             "subprocess_dispatch_internals.recovery._compute_cost",
-            return_value=0.05,
+            return_value=(0.05, "claude-sonnet-4-6@2026-01-01"),
         ):
-            token_usage, cost_usd = _resolve_token_usage_and_cost(
+            token_usage, cost_usd, cost_source = _resolve_token_usage_and_cost(
                 "test-side-001", sub_result, "claude-sonnet-4-6"
             )
 
         assert token_usage == {"input": 2000, "output": 900, "cache_hit": 150}
         assert cost_usd == 0.05
+        assert cost_source == "claude-sonnet-4-6@2026-01-01"
         # .get() leaves entry for _dispatch_claude governance receipt; clean up
         assert "test-side-001" in _dispatch_token_usage
         _dispatch_token_usage.pop("test-side-001", None)
@@ -299,9 +300,9 @@ class TestResolveTokenUsageAndCost:
 
         with patch(
             "subprocess_dispatch_internals.recovery._compute_cost",
-            return_value=0.02,
+            return_value=(0.02, "claude-opus-4-6@2026-01-01"),
         ):
-            token_usage, cost_usd = _resolve_token_usage_and_cost(
+            token_usage, cost_usd, cost_source = _resolve_token_usage_and_cost(
                 "test-fallback-001", sub_result, "claude-opus-4-6"
             )
 
@@ -315,9 +316,10 @@ class TestResolveTokenUsageAndCost:
         _dispatch_token_usage.pop("test-none-001", None)
         sub_result = SimpleNamespace(token_usage=None)
 
-        token_usage, cost_usd = _resolve_token_usage_and_cost(
+        token_usage, cost_usd, cost_source = _resolve_token_usage_and_cost(
             "test-none-001", sub_result, "claude-sonnet-4-6"
         )
 
         assert token_usage is None
         assert cost_usd is None
+        assert cost_source == ""

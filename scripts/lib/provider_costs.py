@@ -213,6 +213,7 @@ def emit_provider_cost(
     dispatch_id: str | None = None,
     project_id: str = "",
     metadata: dict | None = None,
+    cost_source: str | None = None,
 ) -> None:
     """Append a provider cost NDJSON event to .vnx-data/events/provider_costs.ndjson.
 
@@ -228,6 +229,11 @@ def emit_provider_cost(
     recovery) pass a store-derived pid explicitly; absent that, this falls back
     to the env (then ``vnx-dev``). The ``if not project_id`` trigger treats
     ``None`` and ``""`` identically.
+
+    ``cost_source`` carries the price provenance from ``price_run`` (``<model>@
+    <version-date>`` or ``unavailable:no_price:<model>``), so a missing price
+    is never recorded as a free run — ``cost_usd_estimate`` stays ``None`` and
+    the source names why.
     """
     effective_project_id = project_id or os.environ.get("VNX_PROJECT_ID", "vnx-dev")
     timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -257,6 +263,7 @@ def emit_provider_cost(
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "cost_usd_estimate": cost_usd_estimate,
+        "cost_source": cost_source,
         "billing_mode": billing_mode,
         "dispatch_id": dispatch_id,
         "timestamp": timestamp,

@@ -107,7 +107,7 @@ def gemini_exec(
     input_tokens = token_usage.get("input_tokens") if token_usage else None
     output_tokens = token_usage.get("output_tokens") if token_usage else None
 
-    cost_usd, _cost_source = price_run(
+    cost_usd, cost_source = price_run(
         "gemini",
         model,
         [{"input": input_tokens or 0, "output": output_tokens or 0}],
@@ -121,6 +121,7 @@ def gemini_exec(
         cost_usd_estimate=cost_usd,
         dispatch_id=dispatch_id,
         project_id=project_id,  # forward caller pid; emit resolves env fallback (best-effort)
+        cost_source=cost_source,
     )
 
     if result.returncode != 0:

@@ -196,15 +196,19 @@ class TestComputeKimiCost(unittest.TestCase):
         token_usage = {"input": 1_000_000, "output": 500_000, "cache_hit": 0}
         # Without registry (isolated): returns None gracefully
         with patch("provider_dispatch._compute_kimi_cost") as mock_cost:
-            mock_cost.return_value = 0.00185
-            cost = pd._compute_cost("kimi", "kimi-default", token_usage)
+            mock_cost.return_value = (0.00185, "kimi-default@2026-01-01")
+            cost, cost_source = pd._compute_cost("kimi", "kimi-default", token_usage)
         self.assertEqual(cost, 0.00185)
+        self.assertEqual(cost_source, "kimi-default@2026-01-01")
 
     def test_compute_kimi_cost_returns_none_on_zero_usage(self):
         import provider_dispatch as pd
 
-        cost = pd._compute_kimi_cost("kimi-default", {"input": 0, "output": 0, "cache_hit": 0})
+        cost, cost_source = pd._compute_kimi_cost(
+            "kimi-default", {"input": 0, "output": 0, "cache_hit": 0}
+        )
         self.assertIsNone(cost)
+        self.assertEqual(cost_source, "")
 
     def test_compute_kimi_cost_returns_none_when_registry_missing(self):
         import provider_dispatch as pd
@@ -212,8 +216,11 @@ class TestComputeKimiCost(unittest.TestCase):
         with patch("provider_dispatch._compute_kimi_cost", wraps=pd._compute_kimi_cost):
             # Patch load to raise FileNotFoundError
             with patch("providers.provider_registry.load", side_effect=FileNotFoundError):
-                cost = pd._compute_kimi_cost("kimi-default", {"input": 100, "output": 50, "cache_hit": 0})
+                cost, cost_source = pd._compute_kimi_cost(
+                    "kimi-default", {"input": 100, "output": 50, "cache_hit": 0}
+                )
         self.assertIsNone(cost)
+        self.assertEqual(cost_source, "")
 
     def test_extract_token_usage_kimi_uses_input_output_keys(self):
         import provider_dispatch as pd
@@ -254,7 +261,7 @@ class TestComputeKimiCost(unittest.TestCase):
         self.assertEqual(usage["output"], 0)
         self.assertTrue(usage["unavailable"])
         # Cost computation must treat unavailable as not-billable, not $0-confirmed.
-        self.assertIsNone(pd._compute_cost("kimi", "kimi-default", usage))
+        self.assertIsNone(pd._compute_cost("kimi", "kimi-default", usage)[0])
 
 
 
@@ -279,7 +286,7 @@ class TestComputeKimiCostRefusesToGuess(unittest.TestCase):
         import provider_dispatch as pd
 
         # kimi-k3 is first in the section (3.00 + 15.00), so the old guess was 18.0.
-        self.assertIsNone(pd._compute_kimi_cost("kimi-k9-does-not-exist", self.ONE_MTOK))
+        self.assertIsNone(pd._compute_kimi_cost("kimi-k9-does-not-exist", self.ONE_MTOK)[0])
 
     def test_unknown_model_is_not_priced_as_any_registry_entry(self):
         """Stronger than the previous test: the miss must not equal ANY known price,
@@ -292,9 +299,10 @@ class TestComputeKimiCostRefusesToGuess(unittest.TestCase):
             round(m.cost_input_per_mtok + m.cost_output_per_mtok, 8)
             for m in cfg.models.values()
         }
-        cost = pd._compute_kimi_cost("totally-not-a-kimi-model", self.ONE_MTOK)
+        cost, cost_source = pd._compute_kimi_cost("totally-not-a-kimi-model", self.ONE_MTOK)
         self.assertIsNone(cost)
         self.assertNotIn(cost, every_price)
+        self.assertTrue(cost_source.startswith("unavailable:"))
 
     def test_known_models_keep_pricing_exactly(self):
         """Every registry key that names a real model prices as itself.
@@ -311,7 +319,7 @@ class TestComputeKimiCostRefusesToGuess(unittest.TestCase):
                 continue  # alias, not a selectable model
             expected = round(entry.cost_input_per_mtok + entry.cost_output_per_mtok, 8)
             with self.subTest(model=key):
-                self.assertEqual(pd._compute_kimi_cost(key, self.ONE_MTOK), expected)
+                self.assertEqual(pd._compute_kimi_cost(key, self.ONE_MTOK)[0], expected)
 
     def test_alias_key_prices_as_the_model_it_aliases(self):
         """"kimi-default" is a bare alias for the K3 default (_KIMI_BARE_ALIASES), and
@@ -328,7 +336,7 @@ class TestComputeKimiCostRefusesToGuess(unittest.TestCase):
 
         aliased_to = cfg.models[pd._kimi_resolve_requested_key("kimi-default")]
         expected = round(aliased_to.cost_input_per_mtok + aliased_to.cost_output_per_mtok, 8)
-        self.assertEqual(pd._compute_kimi_cost("kimi-default", self.ONE_MTOK), expected)
+        self.assertEqual(pd._compute_kimi_cost("kimi-default", self.ONE_MTOK)[0], expected)
 
     def test_absent_model_is_priced_as_the_model_that_actually_runs(self):
         """An absent model name must be priced as the model the spawn seam will really
@@ -360,7 +368,7 @@ class TestComputeKimiCostRefusesToGuess(unittest.TestCase):
             for placeholder in ("", None, "default", "sonnet", "kimi", "kimi_cli"):
                 with self.subTest(model=placeholder):
                     self.assertEqual(
-                        pd._compute_kimi_cost(placeholder, self.ONE_MTOK), expected
+                        pd._compute_kimi_cost(placeholder, self.ONE_MTOK)[0], expected
                     )
 
     def test_pricing_key_agrees_with_the_canonical_resolver(self):
@@ -378,7 +386,7 @@ class TestComputeKimiCostRefusesToGuess(unittest.TestCase):
                 continue
             expected = round(entry.cost_input_per_mtok + entry.cost_output_per_mtok, 8)
             with self.subTest(model=raw, resolved=key):
-                self.assertEqual(pd._compute_kimi_cost(raw, self.ONE_MTOK), expected)
+                self.assertEqual(pd._compute_kimi_cost(raw, self.ONE_MTOK)[0], expected)
 
     def test_dated_suffix_resolves_to_its_base_model(self):
         """A real dated model id must still resolve — refusing to guess is not the same
@@ -393,7 +401,7 @@ class TestComputeKimiCostRefusesToGuess(unittest.TestCase):
 
         k26 = _reg.load().get("kimi_cli").models["kimi-k2-6"]
         expected = round(k26.cost_input_per_mtok + k26.cost_output_per_mtok, 8)
-        self.assertEqual(pd._compute_kimi_cost("kimi-k2-6-20260901", self.ONE_MTOK), expected)
+        self.assertEqual(pd._compute_kimi_cost("kimi-k2-6-20260901", self.ONE_MTOK)[0], expected)
 
     def test_miss_is_logged_as_a_miss(self):
         import logging
@@ -424,14 +432,14 @@ class TestComputeKimiCostRefusesToGuess(unittest.TestCase):
                 continue
             expected = round(entry.cost_input_per_mtok + entry.cost_output_per_mtok, 8)
             with self.subTest(cli_arg=arg, registry_key=key):
-                self.assertEqual(pd._compute_kimi_cost(arg, self.ONE_MTOK), expected)
+                self.assertEqual(pd._compute_kimi_cost(arg, self.ONE_MTOK)[0], expected)
             priced += 1
         self.assertGreaterEqual(priced, 2, "fixture expects at least two mapped CLI args")
 
     def test_cli_arg_form_that_maps_to_nothing_is_still_a_miss(self):
         import provider_dispatch as pd
 
-        self.assertIsNone(pd._compute_kimi_cost("kimi-code/not-a-real-arg", self.ONE_MTOK))
+        self.assertIsNone(pd._compute_kimi_cost("kimi-code/not-a-real-arg", self.ONE_MTOK)[0])
 
     def test_ambiguous_cli_arg_refuses_to_pick(self):
         """Two registry entries sharing one CLI arg is drift. Picking one would put
@@ -461,8 +469,8 @@ class TestComputeKimiCostRefusesToGuess(unittest.TestCase):
 
         with patch.dict(os.environ, {"VNX_KIMI_MODEL": "kimi-code/k3"}):
             self.assertEqual(pd._kimi_resolve_requested_key(None), "kimi-code/k3")
-            expected = pd._compute_kimi_cost("kimi-k3", self.ONE_MTOK)
-            self.assertEqual(pd._compute_kimi_cost(None, self.ONE_MTOK), expected)
+            expected = pd._compute_kimi_cost("kimi-k3", self.ONE_MTOK)[0]
+            self.assertEqual(pd._compute_kimi_cost(None, self.ONE_MTOK)[0], expected)
 
     def test_cli_arg_match_is_case_insensitive_like_the_spawn_side(self):
         """_kimi_resolve_cli_model_arg compares cli_model_arg case-insensitively. A
@@ -475,8 +483,8 @@ class TestComputeKimiCostRefusesToGuess(unittest.TestCase):
             m.cli_model_arg for m in cfg.models.values() if getattr(m, "cli_model_arg", None)
         )
         self.assertEqual(
-            pd._compute_kimi_cost(arg.upper(), self.ONE_MTOK),
-            pd._compute_kimi_cost(arg, self.ONE_MTOK),
+            pd._compute_kimi_cost(arg.upper(), self.ONE_MTOK)[0],
+            pd._compute_kimi_cost(arg, self.ONE_MTOK)[0],
         )
 
     def test_disabled_models_are_still_priceable(self):
@@ -494,7 +502,7 @@ class TestComputeKimiCostRefusesToGuess(unittest.TestCase):
         for key, entry in disabled:
             expected = round(entry.cost_input_per_mtok + entry.cost_output_per_mtok, 8)
             with self.subTest(model=key):
-                self.assertEqual(pd._compute_kimi_cost(key, self.ONE_MTOK), expected)
+                self.assertEqual(pd._compute_kimi_cost(key, self.ONE_MTOK)[0], expected)
 
     def test_the_miss_warning_names_the_raw_input_too(self):
         """The forensic value of the miss log is the string that actually arrived, not
