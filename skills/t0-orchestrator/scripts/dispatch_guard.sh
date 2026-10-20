@@ -72,7 +72,9 @@ _fetch_status_json() {
     local bin
     bin="$(_resolve_vnx)"
     [ -n "$bin" ] || return 1
-    "$bin" status --json 2>/dev/null
+    # Bound to REPO_ROOT: `vnx status` resolves the project from the cwd, so an
+    # unbound call answers for whatever directory the caller happens to be in.
+    (cd "$REPO_ROOT" && "$bin" status --json 2>/dev/null)
 }
 
 # Best-effort pool info for the human view. Never gates the decision.
@@ -80,7 +82,7 @@ _fetch_pool_json() {
     local bin
     bin="$(_resolve_vnx)"
     [ -n "$bin" ] || return 1
-    "$bin" pool status --json --project-dir "$REPO_ROOT" 2>/dev/null
+    (cd "$REPO_ROOT" && "$bin" pool status --json --project-dir "$REPO_ROOT" 2>/dev/null)
 }
 
 _LIVE_BUCKETS_JQ='[.live_work.live, .live_work.starting, .live_work.stale, .live_work.unmeasured]'

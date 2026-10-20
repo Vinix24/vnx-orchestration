@@ -32,11 +32,10 @@ parallel path:
   `dispatch_cli.py --spec-file`). The door runs `compile_plan` + an ExecutionPermit
   for every lane. Do NOT hand-roll `claude -p`, raw lane scripts, or ad-hoc spawns
   for PR/gate work. Routing/lanes/constraints: `docs/core/DISPATCH_RULES.md`.
-  Lane rule the door enforces: **`claude`/Opus → tmux-spawn lane** (subscription, default;
-  never `provider_dispatch`); headless `claude -p` is opened as of 2026-08-11 (operator
-  directive) — it runs on the subscription too, not API credits (isolation/report-gate status:
-  DISPATCH_RULES §8). `kimi`/`glm`/`deepseek`
-  → `provider_dispatch`. Known interim side door being consolidated by PR-12: the PM
+  Lane rule the door enforces: **`claude`/Opus/Sonnet → `claude_headless`** (`claude -p`,
+  subscription, isolated worktree per dispatch), the only claude lane since the tmux-spawn
+  lane was removed on 2026-09-18; never `provider_dispatch`. `kimi`/`glm`/`deepseek`
+  → `provider_dispatch`. Mechanism and failure modes: DISPATCH_RULES §8. Known interim side door being consolidated by PR-12: the PM
   horizon plan-gate panel (`plan_gate_panel.py`) calls lanes directly until the door is wired.
 - **Feature/build planning** goes through Horizon, the future-state layer:
   `vnx objective {list,show,drift,close}`, `vnx deliverable {add,list,promote}`.
