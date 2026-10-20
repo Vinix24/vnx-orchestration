@@ -8,19 +8,49 @@ INTEL_SCRIPT="scripts/gather_intelligence.py"
 _INTEL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _INTEL_REPO_ROOT="$(git -C "$_INTEL_DIR" rev-parse --show-toplevel 2>/dev/null || echo "$(cd "$_INTEL_DIR/../../../.." && pwd)")"
 
-# Central state/dispatch dirs (ADR-026), via the shared resolver when the repo
-# carries it, else the environment. Never a path relative to the cwd.
-STATE_DIR="${VNX_STATE_DIR:-}"
-DISPATCH_DIR="${VNX_DISPATCH_DIR:-}"
-if [ -f "$_INTEL_REPO_ROOT/scripts/lib/vnx_resolve_root.sh" ]; then
-    # shellcheck disable=SC1091
-    source "$_INTEL_REPO_ROOT/scripts/lib/vnx_resolve_root.sh"
-    vnx_resolve_project_root "$_INTEL_DIR/intelligence.sh" >/dev/null 2>&1 || true
-    vnx_resolve_state_dir >/dev/null 2>&1 || true
-    vnx_resolve_dispatch_dir >/dev/null 2>&1 || true
-    STATE_DIR="${VNX_STATE_DIR:-$STATE_DIR}"
-    DISPATCH_DIR="${VNX_DISPATCH_DIR:-$DISPATCH_DIR}"
-fi
+# Central state/dispatch dirs (ADR-026). An explicit VNX_STATE_DIR / VNX_DISPATCH_DIR
+# wins and is never overwritten. Otherwise the central resolver (vnx_paths.py) runs with
+# the repo root as cwd and its KEY=VALUE lines are parsed, never eval'd. Unresolvable
+# leaves both empty; the functions that need them refuse (_require_dirs).
+_intel_resolver() {
+    local candidate
+    for candidate in \
+        "$_INTEL_REPO_ROOT/scripts/lib/vnx_paths.py" \
+        "${VNX_HOME:-}/scripts/lib/vnx_paths.py" \
+        "${HOME:-}/.vnx-system/current/scripts/lib/vnx_paths.py"; do
+        if [ -f "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+_intel_resolve_dirs() {
+    local resolver line
+    STATE_DIR="${VNX_STATE_DIR:-}"
+    DISPATCH_DIR="${VNX_DISPATCH_DIR:-}"
+    if [ -n "$STATE_DIR" ] && [ -n "$DISPATCH_DIR" ]; then
+        return 0
+    fi
+    resolver="$(_intel_resolver)" || return 0
+    while IFS= read -r line; do
+        case "$line" in
+            VNX_STATE_DIR=*) [ -n "$STATE_DIR" ] || STATE_DIR="${line#VNX_STATE_DIR=}" ;;
+            VNX_DISPATCH_DIR=*) [ -n "$DISPATCH_DIR" ] || DISPATCH_DIR="${line#VNX_DISPATCH_DIR=}" ;;
+        esac
+    done < <(cd "$_INTEL_REPO_ROOT" && python3 "$resolver" 2>/dev/null || true)
+    return 0
+}
+_intel_resolve_dirs
+
+_require_state_dir() {
+    [ -n "$STATE_DIR" ] || { echo "Error: VNX state dir unresolved"; return 1; }
+}
+
+_require_dispatch_dir() {
+    [ -n "$DISPATCH_DIR" ] || { echo "Error: VNX state dir unresolved"; return 1; }
+}
 
 # ============================================
 # LIVE STATE QUERIES
@@ -57,6 +87,7 @@ check_open_items() {
 
 # Get orchestration recommendations
 check_recommendations() {
+    _require_state_dir || return 1
     if [ -f "$STATE_DIR/t0_recommendations.json" ]; then
         cat "$STATE_DIR/t0_recommendations.json" | jq -r '.recommendations[] | "[\(.priority)] \(.action): \(.reason)"'
     else
@@ -66,6 +97,7 @@ check_recommendations() {
 
 # Get recent receipts
 recent_receipts() {
+    _require_state_dir || return 1
     if [ -f "$STATE_DIR/t0_receipts.ndjson" ]; then
         tail -n 5 "$STATE_DIR/t0_receipts.ndjson" | jq -r '"[\(.timestamp)] \(.track) \(.status): \(.dispatch_id // "unknown")"'
     else
@@ -75,11 +107,13 @@ recent_receipts() {
 
 # Check active dispatches
 active_dispatches() {
+    _require_dispatch_dir || return 1
     ls -la "$DISPATCH_DIR/active/" 2>/dev/null | grep -E "\.dispatch$" | awk '{print $9}' | sed 's/\.dispatch$//'
 }
 
 # Check queued dispatches
 queued_dispatches() {
+    _require_dispatch_dir || return 1
     ls -la "$DISPATCH_DIR/queue/" 2>/dev/null | grep -E "\.dispatch$" | awk '{print $9}' | sed 's/\.dispatch$//'
 }
 
