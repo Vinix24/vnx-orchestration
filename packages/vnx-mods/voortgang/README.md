@@ -1,6 +1,6 @@
 # voortgang
 
-A Claude Code mod that shows the progress of several VNX projects in one pane and one status line. Per project it shows the live work, the outcomes that wait on a decision, the open PRs with their review seats, the tracks on the `now` horizon with their deliverables, and how many deliverables wait on a promote.
+A VNX mod for Claude Code. It shows the progress of every VNX project on the machine in one pane and one status line, and it needs VNX: the project stores under `~/.vnx-data` and the `vnx` CLI. It ships with a VNX release and lives in this repository under `packages/vnx-mods/`. Per project it shows the live work, the outcomes that wait on a decision, the open PRs with their review seats, the tracks on the `now` horizon with their deliverables, and how many deliverables wait on a promote.
 
 It reads metadata only: ids, counts, statuses and PR titles. It never reads a transcript, a report, a receipt or the body of an open item, so it is safe to load in a session that holds client work.
 
@@ -23,10 +23,10 @@ voortgang · 1 live · 2 PR · 20 open · 1 onleesbaar · 1 verouderd
 
 ### The pane
 
-`/voortgang` refreshes and opens the pane `Voortgang`. The pane never opens by itself. One block per project:
+`/voortgang` refreshes and opens the pane `Voortgang`. The pane never opens by itself. One block per project, in id order:
 
 ```
-vnx-dev · index 3 min
+project-a · index 3 min
   werk: 1 live · 0 start · 10 stale · 0 ongemeten
   live: 20261020-vg-1-voortgang-mod
   uitkomsten: 20 open (investigate 20)
@@ -53,7 +53,7 @@ The pane draws with `Box`, `Text` and `Button` only, the elements every surface 
 Where no surface places the pane, as in a headless `claude --print "/voortgang"` run, the command answers with one summary line per project instead:
 
 ```
-vnx-dev: 1 live · 2 PR · 20 open · now ci-profile-a-xdist, provider-schakelaar, voortgang-mod · next 20 · later 109 · 105 te promoveren
+project-a: 1 live · 2 PR · 20 open · now ci-profile-a-xdist, provider-schakelaar, voortgang-mod · next 20 · later 109 · 105 te promoveren
 ```
 
 ### Absence is loud
@@ -62,7 +62,8 @@ A read that failed is never shown as zero or as an empty list.
 
 | Situation | What the project shows |
 |---|---|
-| The store directory is missing | `geen store` |
+| The data root cannot be listed | the whole pane and the status line: `onbeschikbaar: <reason>`, never an empty list |
+| The store directory vanished between the listing and the read | `geen store` |
 | The project id is not one directory name (letters, digits, `.`, `_` and `-`, starting with a letter or digit) | `ongeldige project-id`, and nothing is read for it |
 | A file is missing, unreadable or not JSON | that part: `onbeschikbaar: <reason>` |
 | A block says `available` is anything but `true` | that part: `onbeschikbaar: <the block's own reason>`, else `available: <value>` |
@@ -73,19 +74,26 @@ The age always shows (`index 3 min`). A stale index can say `0 live` while a wor
 
 ## Install
 
-From the toolkit marketplace, inside Claude Code:
+The mod is part of a VNX release: a release copies `packages/` into `~/.vnx-system/versions/<version>/`, and `~/.vnx-system/current` points at the installed one. Install it from there on each Claude account you use:
 
 ```
-/plugin marketplace add Vinix24/claude-code-toolkit
-/plugin install voortgang@claude-code-toolkit
+claude plugin marketplace add ~/.vnx-system/current/packages/vnx-mods
+claude plugin install voortgang@vnx-mods
 ```
 
-The same from a terminal: `claude plugin marketplace add Vinix24/claude-code-toolkit`, then `claude plugin install voortgang@claude-code-toolkit`.
-
-Until the mod is exported to that marketplace, load it from a checkout of this repository:
+For a second account, the same with its config directory in front:
 
 ```
-claude --plugin-dir packages/claude-code-toolkit/voortgang
+CLAUDE_CONFIG_DIR=~/.claude-salesminds claude plugin marketplace add ~/.vnx-system/current/packages/vnx-mods
+CLAUDE_CONFIG_DIR=~/.claude-salesminds claude plugin install voortgang@vnx-mods
+```
+
+The marketplace is a folder, so an update of VNX that rewrites `current` reaches the mod after `/reload-plugins`.
+
+For development from a checkout of this repository:
+
+```
+claude --plugin-dir packages/vnx-mods/voortgang
 ```
 
 It needs the `vnx` binary (VNX 1.7.2 or newer) and the project stores under the data root.
@@ -96,7 +104,7 @@ Set them in `/config`, where each one is a row, or in settings under `pluginConf
 
 | Option | Default | What it does |
 |---|---|---|
-| `projects` | `vnx-dev,mission-control,seocrawler-v2,sales-copilot` | Comma-separated project ids. Each one is read from `<data_root>/<id>/state`. |
+| `exclude` | empty | Comma-separated project ids to leave out. |
 | `data_root` | `~/.vnx-data` | The directory that holds one store per project. A leading `~` is the `HOME` of the session. |
 | `vnx_bin` | `~/.vnx-system/current/bin/vnx` | The `vnx` executable that lists tracks and deliverables. |
 | `refresh_seconds` | `120` | How often the status line and the pane refresh. 15 seconds at least. |
@@ -104,6 +112,8 @@ Set them in `/config`, where each one is a row, or in settings under `pluginConf
 When `HOME` is unknown and a path starts with `~`, the mod reads nothing and shows `onbeschikbaar: HOME onbekend, ~ niet op te lossen`.
 
 ## What it reads
+
+The mod finds the projects itself. It lists `<data_root>` once and takes every direct child `<id>` that holds `state/t0_index.json` or `state/t0_state.json`, minus the ids in `exclude`, ordered by id. A name that is not one directory name is skipped. Nothing deeper than `<id>/state/` is checked for existence.
 
 Per project `p`, with the store `S = <data_root>/<p>/state`:
 
@@ -119,7 +129,7 @@ The projects are read in parallel, the reads and runs of one project one after t
 
 ## What it never does
 
-- It reads no other file: no other file under the data root, no transcript, report, receipt, open-item body, outcome reason, track title or deliverable title.
+- It reads no other file and lists no other directory than the data root: no other file under the data root, no transcript, report, receipt, open-item body, outcome reason, track title or deliverable title.
 - It runs no other command: no `gh`, no `git`, no shell, never `build_t0_state.py` or anything else that writes state.
 - It writes nothing: no file and no `$.store`. It keeps its model in the session's `$.state` and pins its status line, nothing more.
 - It does not open the pane unasked.
@@ -128,19 +138,21 @@ The projects are read in parallel, the reads and runs of one project one after t
 
 - The numbers are as fresh as the last refresh and as the index itself. The mod never rebuilds an index.
 - The tests ran on Claude Code 2.1.304 with `claude plugin test`. The manual run against real stores was headless, so the pane was checked through the test kit on the terminal and the mobile table, not on a live screen.
-- The mod names VNX by design. The toolkit export script (`scripts/maintenance/export_toolkit_plugin.sh`) handles context-rotation only, and its leak scan refuses the product name, so publishing this mod to the marketplace needs its own export path.
+- The mod is not a stand-alone tool: it reads VNX data only, so it is not published to a public marketplace.
 
 ## Development
 
 ```
-claude plugin validate packages/claude-code-toolkit/voortgang
-claude plugin test packages/claude-code-toolkit/voortgang
+claude plugin validate packages/vnx-mods
+claude plugin validate packages/vnx-mods/voortgang
+claude plugin test packages/vnx-mods/voortgang
+bash packages/vnx-mods/voortgang/tests/no-operator-names.sh
 ```
 
 - `hooks/register.tsx`: the hooks module (`session.start`, `command.run`, `ui.render`, the timer).
 - `hooks/collect.ts`: the collector. Pure functions over parsed JSON, and one function that reads a project through a narrow `Io` that `$` provides in a session and an object in memory provides in a test.
 - `hooks/view.ts`: the pane rows, cut to the pane's size.
 - `types/index.d.ts`: the `PluginState` contract for the two `$.state` values.
-- `tests/`: the engine-driven pane, command, timer and boundary tests, and the collector's tests.
+- `tests/`: the engine-driven pane, command, timer and boundary tests, and the collector's tests. `tests/no-operator-names.sh` greps the package for the operator's own project names, because the engine's test runner cannot read files from disk. Fixtures and examples use `project-a` and `project-b`.
 
 Type-check it with the `tsconfig.json` from the header of the `claude-code.d.ts` the engine writes, kept outside this folder, with `include` naming that file and this folder's `hooks`, `types` and `tests`. The engine writes `.claude-plugin/types/` when it hot-reloads the folder; that folder carries its own `.gitignore` and is never committed.

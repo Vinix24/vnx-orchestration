@@ -136,14 +136,23 @@ export const healthyRun = (argv: readonly string[]): RunAnswer => {
   return { deny: `unexpected argv ${argv.join(' ')}` }
 }
 
+/** The first path segment under `dir` of every file and directory that lives below it, in listing order. */
+export const childNames = (dir: string, files: Record<string, string>, dirs: string[]): string[] => {
+  const prefix = `${dir.replace(/\/+$/, '')}/`
+  const below = [...Object.keys(files), ...dirs].filter(path => path.startsWith(prefix))
+
+  return [...new Set(below.map(path => path.slice(prefix.length).split('/')[0] ?? ''))]
+}
+
 export type World = {
   reads: string[]
   exists: string[]
+  lists: string[]
   runs: { argv: string[]; cwd: string | undefined; timeoutMs: number | undefined }[]
   statuses: (string | undefined)[]
   opened: { id: string; title: string | undefined }[]
   commands: string[]
-  /** Every call the mod must never make: a write, a listing, a stat, the store. */
+  /** Every call the mod must never make: a write, a listing of anything but the data root, a stat, the store. */
   forbidden: string[]
 }
 
@@ -151,6 +160,8 @@ export type WorldSetup = {
   files: Record<string, string>
   /** Store directories that exist without the files in them. */
   dirs?: string[]
+  /** The reason listing the data root fails; it lists fine when absent. */
+  unlistable?: string
   run?: (argv: readonly string[]) => RunAnswer
   env?: Record<string, string>
   /** The reason `$.ui.open` gives when it does not place the pane; placed when absent. */
@@ -159,7 +170,7 @@ export type WorldSetup = {
 
 /** The engine beneath the mod, in memory: the file tree, `vnx`, the display, and a record of each call. */
 export function worldOf(on: On, setup: WorldSetup): World {
-  const world: World = { reads: [], exists: [], runs: [], statuses: [], opened: [], commands: [], forbidden: [] }
+  const world: World = { reads: [], exists: [], lists: [], runs: [], statuses: [], opened: [], commands: [], forbidden: [] }
   const env = setup.env ?? { HOME }
   const run = setup.run ?? healthyRun
   const isDir = (path: string) =>
@@ -185,9 +196,21 @@ export function worldOf(on: On, setup: WorldSetup): World {
   })
 
   on('fs.list', ($, e) => {
-    world.forbidden.push(`list ${e.path}`)
+    if (e.path !== ROOT) {
+      world.forbidden.push(`list ${e.path}`)
 
-    return { deny: 'the mod lists nothing' }
+      return { deny: 'the mod lists only the data root' }
+    }
+
+    world.lists.push(e.path)
+
+    if (setup.unlistable !== undefined) {
+      return { deny: setup.unlistable }
+    }
+
+    return {
+      value: childNames(ROOT, setup.files, setup.dirs ?? []).map(name => ({ name, kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false })),
+    }
   })
 
   on('fs.stat', ($, e) => {

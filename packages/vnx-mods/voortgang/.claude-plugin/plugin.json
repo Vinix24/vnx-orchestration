@@ -1,14 +1,14 @@
 {
   "name": "voortgang",
   "version": "0.1.0",
-  "description": "Shows VNX progress per project in a pane and a status line: live work, open outcomes, open PRs with their review seats, now-tracks and deliverables waiting on a promote.",
+  "description": "A VNX mod: shows VNX progress per project in a pane and a status line: live work, open outcomes, open PRs with their review seats, now-tracks and deliverables waiting on a promote.",
   "types": "./types/index.d.ts",
   "userConfig": {
-    "projects": {
+    "exclude": {
       "type": "string",
-      "title": "Projects",
-      "description": "Comma-separated VNX project ids; each one is read from <data_root>/<id>/state.",
-      "default": "vnx-dev,mission-control,seocrawler-v2,sales-copilot"
+      "title": "Exclude",
+      "description": "Comma-separated project ids to leave out. Every other project store under the data root is shown.",
+      "default": ""
     },
     "data_root": {
       "type": "string",
@@ -28,5 +28,8 @@
       "description": "How often the pane and the status line are refreshed; 15 seconds at least.",
       "default": 120
     }
+  },
+  "author": {
+    "name": "Vincent van Deth"
   }
 }

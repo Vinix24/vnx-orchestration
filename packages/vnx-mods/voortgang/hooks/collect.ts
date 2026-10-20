@@ -14,14 +14,16 @@ import type {
   TrackView,
 } from '../types'
 
-/** The three things the collector needs from the engine; `$` in a session, an object in memory in a test. */
+/** The four things the collector needs from the engine; `$` in a session, an object in memory in a test. */
 export type Io = {
+  /** The names of the entries of a directory. */
+  list: (path: string) => Promise<string[]>
   exists: (path: string) => Promise<boolean>
   read: (path: string) => Promise<string>
   run: (argv: readonly string[], init: ProcessRunInit) => Promise<ProcessRunResult>
 }
 
-export type Config = { projects: string[]; dataRoot: string; vnxBin: string; refreshSeconds: number }
+export type Config = { exclude: string[]; dataRoot: string; vnxBin: string; refreshSeconds: number }
 
 export const STALE_MINUTES = 60
 export const RUN_TIMEOUT_MS = 10_000
@@ -29,7 +31,6 @@ export const MIN_REFRESH_SECONDS = 15
 export const INDEX_FILE = 't0_index.json'
 export const STATE_FILE = 't0_state.json'
 
-const DEFAULT_PROJECTS = 'vnx-dev,mission-control,seocrawler-v2,sales-copilot'
 const DEFAULT_DATA_ROOT = '~/.vnx-data'
 const DEFAULT_VNX_BIN = '~/.vnx-system/current/bin/vnx'
 const DEFAULT_REFRESH_SECONDS = 120
@@ -67,7 +68,7 @@ export function configOf(options: PluginOptions): Config {
   const seconds = options.refresh_seconds
 
   return {
-    projects: projectsOf(typeof options.projects === 'string' ? options.projects : DEFAULT_PROJECTS),
+    exclude: projectsOf(typeof options.exclude === 'string' ? options.exclude : ''),
     dataRoot: pathOf(options.data_root, DEFAULT_DATA_ROOT),
     vnxBin: pathOf(options.vnx_bin, DEFAULT_VNX_BIN),
     refreshSeconds: isCount(seconds) ? Math.max(MIN_REFRESH_SECONDS, seconds) : DEFAULT_REFRESH_SECONDS,
@@ -373,6 +374,31 @@ export async function collectProject(io: Io, id: string, root: string, bin: stri
   return { id, hasStore: true, index, state, tracks, deliverables }
 }
 
+/**
+ * The ids of the project stores: each direct child of the data root that holds
+ * `state/t0_index.json` or `state/t0_state.json`, in id order. One listing of the
+ * root, then existence checks no deeper than `<id>/state/`.
+ */
+export async function discoverIds(io: Io, root: string, exclude: readonly string[]): Promise<Part<string[]>> {
+  let names: string[]
+
+  try {
+    names = await io.list(root)
+  } catch (error) {
+    return fail(messageOf(error) || 'map niet te lezen')
+  }
+
+  const candidates = [...new Set(names)].filter(name => isProjectId(name) && !exclude.includes(name)).sort()
+  const isStore = async (id: string) => {
+    const store = storeOf(root, id)
+
+    return (await io.exists(`${store}/${INDEX_FILE}`)) || (await io.exists(`${store}/${STATE_FILE}`))
+  }
+  const found = await Promise.all(candidates.map(async id => ((await isStore(id)) ? [id] : [])))
+
+  return ok(found.flat())
+}
+
 export async function collectModel(io: Io, config: Config, home: string | undefined, now: number): Promise<Model> {
   const root = expandHome(config.dataRoot, home)
   const bin = expandHome(config.vnxBin, home)
@@ -381,7 +407,13 @@ export async function collectModel(io: Io, config: Config, home: string | undefi
     return { collectedAt: now, rootError: HOME_UNKNOWN, projects: [] }
   }
 
-  const projects = await Promise.all(config.projects.map(id => collectProject(io, id, root, bin, now)))
+  const ids = await discoverIds(io, root, config.exclude)
+
+  if (!ids.isOk) {
+    return { collectedAt: now, rootError: ids.reason, projects: [] }
+  }
+
+  const projects = await Promise.all(ids.value.map(id => collectProject(io, id, root, bin, now)))
 
   return { collectedAt: now, rootError: null, projects }
 }

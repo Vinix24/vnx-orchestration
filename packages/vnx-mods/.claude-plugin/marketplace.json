@@ -1,0 +1,14 @@
+{
+  "name": "vnx-mods",
+  "description": "Mods for Claude Code that read VNX data and ship with a VNX release.",
+  "owner": {
+    "name": "Vincent van Deth"
+  },
+  "plugins": [
+    {
+      "name": "voortgang",
+      "source": "./voortgang",
+      "description": "VNX progress per project in a pane and a status line."
+    }
+  ]
+}

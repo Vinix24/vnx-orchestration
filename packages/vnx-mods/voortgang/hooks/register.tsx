@@ -19,6 +19,7 @@ let running: Promise<Model> | null = null
 
 function ioOf($: EngineInterface): Io {
   return {
+    list: async path => (await $.fs.list(path)).map(entry => entry.name),
     exists: path => $.fs.exists(path),
     read: path => $.fs.read(path),
     run: (argv, init) => $.process.run(argv, init),

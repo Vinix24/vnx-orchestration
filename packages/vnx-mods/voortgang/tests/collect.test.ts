@@ -29,6 +29,7 @@ import type { Model, ProjectModel } from '../types'
 import {
   BIN,
   CONTENT,
+  childNames,
   DELIVERABLES,
   HOME,
   NOW,
@@ -51,7 +52,15 @@ const ioOf = (
   files: Record<string, string>,
   dirs: string[],
   run: (argv: readonly string[]) => { exitCode: number; stdout: string } | Error,
+  unlistable?: string,
 ): Io => ({
+  list: async path => {
+    if (unlistable !== undefined) {
+      throw new Error(unlistable)
+    }
+
+    return childNames(path, files, dirs)
+  },
   exists: async path => path in files || dirs.includes(path) || Object.keys(files).some(file => file.startsWith(`${path}/`)),
   read: async path => {
     const text = files[path]
@@ -79,17 +88,18 @@ const healthyAnswer = (argv: readonly string[]) =>
     : { exitCode: 0, stdout: JSON.stringify(DELIVERABLES) }
 
 describe('the options', () => {
-  test('defaults to the four projects, the data root and the vnx binary', () => {
+  test('defaults to no exclusions, the data root and the vnx binary', () => {
     expect(configOf({})).toEqual({
-      projects: ['vnx-dev', 'mission-control', 'seocrawler-v2', 'sales-copilot'],
+      exclude: [],
       dataRoot: '~/.vnx-data',
       vnxBin: '~/.vnx-system/current/bin/vnx',
       refreshSeconds: 120,
     })
   })
 
-  test('takes a project list with spaces and doubles, and an interval no shorter than 15 s', () => {
+  test('takes an exclude list with spaces and doubles, and an interval no shorter than 15 s', () => {
     expect(projectsOf(' a, b,,a ,c ')).toEqual(['a', 'b', 'c'])
+    expect(configOf({ exclude: ' x, y ,x' }).exclude).toEqual(['x', 'y'])
     expect(configOf({ refresh_seconds: 2 }).refreshSeconds).toBe(15)
     expect(configOf({ refresh_seconds: 300 }).refreshSeconds).toBe(300)
   })
@@ -102,8 +112,8 @@ describe('the options', () => {
   })
 
   test('accepts a project id only when it stays one directory under the data root', () => {
-    expect(isProjectId('vnx-dev')).toBe(true)
-    expect(isProjectId('seocrawler-v2')).toBe(true)
+    expect(isProjectId('project-a')).toBe(true)
+    expect(isProjectId('project-b.v2')).toBe(true)
     expect(isProjectId('..')).toBe(false)
     expect(isProjectId('../etc')).toBe(false)
     expect(isProjectId('a/b')).toBe(false)
@@ -111,10 +121,20 @@ describe('the options', () => {
   })
 
   test('builds the two vnx argv shapes with --state-dir', () => {
-    const store = storeOf('alpha')
+    const store = storeOf('project-a')
 
-    expect(objectiveArgv(BIN, 'alpha', store)).toEqual([BIN, 'objective', 'list', '--json', '--project-id', 'alpha', '--state-dir', store])
-    expect(deliverableArgv(BIN, 'alpha', store)).toEqual([BIN, 'deliverable', 'list', '--json', '--project-id', 'alpha', '--state-dir', store])
+    expect(objectiveArgv(BIN, 'project-a', store)).toEqual([BIN, 'objective', 'list', '--json', '--project-id', 'project-a', '--state-dir', store])
+    expect(deliverableArgv(BIN, 'project-a', store)).toEqual([BIN, 'deliverable', 'list', '--json', '--project-id', 'project-a', '--state-dir', store])
+  })
+})
+
+describe('the defaults', () => {
+  test('carry no project id of the operator', () => {
+    const spelled = JSON.stringify(configOf({})).toLowerCase()
+
+    for (const parts of [['vnx', 'dev'], ['mission', 'control'], ['seocrawler', 'v2'], ['sales', 'copilot'], ['pacompany', 'engine']]) {
+      expect(spelled.includes(parts.join('-'))).toBe(false)
+    }
   })
 })
 
@@ -247,7 +267,7 @@ describe('vnx objective list and deliverable list', () => {
 
 describe('one project', () => {
   test('reads both files and runs both commands for a healthy store', async () => {
-    const project = await collectProject(ioOf(healthyFiles('alpha'), [], healthyAnswer), 'alpha', ROOT, BIN, NOW)
+    const project = await collectProject(ioOf(healthyFiles('project-a'), [], healthyAnswer), 'project-a', ROOT, BIN, NOW)
 
     expect(project.hasStore).toBe(true)
     expect(project.hasStore && project.index.isOk && project.index.value.liveWork.isOk).toBe(true)
@@ -265,7 +285,7 @@ describe('one project', () => {
       return healthyAnswer(argv)
     })
 
-    expect(await collectProject(io, 'ghost', ROOT, BIN, NOW)).toEqual({ id: 'ghost', hasStore: false, reason: 'geen store' })
+    expect(await collectProject(io, 'project-c', ROOT, BIN, NOW)).toEqual({ id: 'project-c', hasStore: false, reason: 'geen store' })
     expect(asked).toEqual([])
   })
 
@@ -278,8 +298,8 @@ describe('one project', () => {
   })
 
   test('says which file is missing or not JSON', async () => {
-    const io = ioOf({ [indexOf('alpha')]: '{"broken' }, [storeOf('alpha')], healthyAnswer)
-    const project = await collectProject(io, 'alpha', ROOT, BIN, NOW)
+    const io = ioOf({ [indexOf('project-a')]: '{"broken' }, [storeOf('project-a')], healthyAnswer)
+    const project = await collectProject(io, 'project-a', ROOT, BIN, NOW)
 
     expect(project.hasStore && project.index).toEqual({ isOk: false, reason: 'ongeldige JSON' })
     expect(project.hasStore && project.state).toEqual({ isOk: false, reason: 't0_state.json ontbreekt' })
@@ -296,7 +316,7 @@ describe('one project', () => {
     ]
 
     for (const [run, reason] of cases) {
-      const project = await collectProject(ioOf(healthyFiles('alpha'), [], run), 'alpha', ROOT, BIN, NOW)
+      const project = await collectProject(ioOf(healthyFiles('project-a'), [], run), 'project-a', ROOT, BIN, NOW)
 
       expect(project.hasStore && project.tracks, reason).toEqual({ isOk: false, reason })
       expect(project.hasStore && project.deliverables, reason).toEqual({ isOk: false, reason })
@@ -306,11 +326,65 @@ describe('one project', () => {
   })
 
   test('calls a project with a two-hour-old index outdated', async () => {
-    const files = { [indexOf('alpha')]: indexJson({ ageMinutes: 120 }), [stateOf('alpha')]: stateJson() }
-    const project = await collectProject(ioOf(files, [], healthyAnswer), 'alpha', ROOT, BIN, NOW)
+    const files = { [indexOf('project-a')]: indexJson({ ageMinutes: 120 }), [stateOf('project-a')]: stateJson() }
+    const project = await collectProject(ioOf(files, [], healthyAnswer), 'project-a', ROOT, BIN, NOW)
 
     expect(isOutdated(project)).toBe(true)
     expect(isUnreadable(project)).toBe(false)
+  })
+})
+
+describe('store discovery', () => {
+  const discover = (files: Record<string, string>, dirs: string[], options: Record<string, string | number | boolean> = {}, unlistable?: string) =>
+    collectModel(ioOf(files, dirs, healthyAnswer, unlistable), configOf(options), HOME, NOW)
+
+  test('finds exactly the child directories with a store, in id order', async () => {
+    const files = { ...healthyFiles('project-b'), [stateOf('project-a')]: stateJson() }
+    const model = await discover(files, [`${ROOT}/project-z`, `${ROOT}/project-z/logs`, `${ROOT}/project-y/state`])
+
+    expect(model.rootError).toBeNull()
+    expect(model.projects.map(project => project.id)).toEqual(['project-a', 'project-b'])
+  })
+
+  test('leaves out the excluded ids', async () => {
+    const files = { ...healthyFiles('project-a'), ...healthyFiles('project-b'), ...healthyFiles('project-c') }
+    const model = await discover(files, [], { exclude: 'project-b, project-x' })
+
+    expect(model.projects.map(project => project.id)).toEqual(['project-a', 'project-c'])
+  })
+
+  test('says onbeschikbaar for the whole model when the data root cannot be listed, never an empty list', async () => {
+    const model = await discover(healthyFiles('project-a'), [], {}, 'EACCES: permission denied')
+
+    expect(model.rootError).toBe('EACCES: permission denied')
+    expect(model.projects).toEqual([])
+    expect(statusLine(model)).toBe('voortgang · onbeschikbaar: EACCES: permission denied')
+    expect(summaryLines(model)).toEqual(['onbeschikbaar: EACCES: permission denied'])
+  })
+
+  test('shows geen projecten, not an error, for a data root that holds no store', async () => {
+    const model = await discover({}, [`${ROOT}/scratch`])
+
+    expect(model.rootError).toBeNull()
+    expect(model.projects).toEqual([])
+  })
+
+  test('never lets a listed name that is not one directory name reach a path', async () => {
+    const asked: string[] = []
+    const io: Io = {
+      list: async () => ['..', '.hidden', 'a b/c', 'project-a'],
+      exists: async path => {
+        asked.push(path)
+
+        return true
+      },
+      read: async () => '',
+      run: async () => ({ exitCode: 0, stdout: '[]', stderr: '', isStdoutTruncated: false, isStderrTruncated: false }),
+    }
+    const model = await collectModel(io, configOf({}), HOME, NOW)
+
+    expect(model.projects.map(project => project.id)).toEqual(['project-a'])
+    expect(asked.every(path => path.startsWith(`${ROOT}/project-a/`))).toBe(true)
   })
 })
 
@@ -322,7 +396,7 @@ describe('the status line', () => {
     const model: Model = {
       collectedAt: NOW,
       rootError: null,
-      projects: [await healthy('alpha'), { id: 'ghost', hasStore: false, reason: 'geen store' }],
+      projects: [await healthy('project-a'), { id: 'project-c', hasStore: false, reason: 'geen store' }],
     }
 
     expect(statusLine(model)).toBe('voortgang · 1 live · 1 PR · 2 open · 1 onleesbaar')
@@ -330,15 +404,15 @@ describe('the status line', () => {
 
   test('adds the outdated projects, and writes ? where no project could be read', async () => {
     const stale = await collectProject(
-      ioOf({ [indexOf('alpha')]: indexJson({ ageMinutes: 120 }), [stateOf('alpha')]: stateJson() }, [], healthyAnswer),
-      'alpha',
+      ioOf({ [indexOf('project-a')]: indexJson({ ageMinutes: 120 }), [stateOf('project-a')]: stateJson() }, [], healthyAnswer),
+      'project-a',
       ROOT,
       BIN,
       NOW,
     )
 
     expect(statusLine({ collectedAt: NOW, rootError: null, projects: [stale] })).toBe('voortgang · 1 live · 1 PR · 2 open · 1 verouderd')
-    expect(statusLine({ collectedAt: NOW, rootError: null, projects: [{ id: 'ghost', hasStore: false, reason: 'geen store' }] })).toBe(
+    expect(statusLine({ collectedAt: NOW, rootError: null, projects: [{ id: 'project-c', hasStore: false, reason: 'geen store' }] })).toBe(
       'voortgang · ? live · ? PR · ? open · 1 onleesbaar',
     )
     expect(statusLine({ collectedAt: NOW, rootError: 'HOME onbekend', projects: [] })).toBe('voortgang · onbeschikbaar: HOME onbekend')
@@ -348,6 +422,11 @@ describe('the status line', () => {
   test('reads no file at all when HOME is unknown and a path starts with ~', async () => {
     const asked: string[] = []
     const io: Io = {
+      list: async path => {
+        asked.push(path)
+
+        return ['project-a']
+      },
       exists: async path => {
         asked.push(path)
 
@@ -364,7 +443,7 @@ describe('the status line', () => {
         return { exitCode: 0, stdout: '[]', stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
       },
     }
-    const model = await collectModel(io, configOf({ projects: 'alpha' }), undefined, NOW)
+    const model = await collectModel(io, configOf({}), undefined, NOW)
 
     expect(model.rootError).toBe('HOME onbekend, ~ niet op te lossen')
     expect(model.projects).toEqual([])
@@ -377,12 +456,12 @@ describe('the summary and the pane rows', () => {
     const model: Model = {
       collectedAt: NOW,
       rootError: null,
-      projects: [await healthy('alpha'), { id: 'ghost', hasStore: false, reason: 'geen store' }],
+      projects: [await healthy('project-a'), { id: 'project-c', hasStore: false, reason: 'geen store' }],
     }
 
     expect(summaryLines(model)).toEqual([
-      'alpha: 1 live · 1 PR · 2 open · now ci-profile, docs · next 2 · later 3 · 3 te promoveren',
-      'ghost: geen store',
+      'project-a: 1 live · 1 PR · 2 open · now ci-profile, docs · next 2 · later 3 · 3 te promoveren',
+      'project-c: geen store',
     ])
   })
 
@@ -394,10 +473,10 @@ describe('the summary and the pane rows', () => {
 
   test('fits every row to the pane, shows no content, and cuts a long list with +N meer', async () => {
     const many = Array.from({ length: 12 }, (_, n) => ({ track_id: `t${n}`, priority: 'P1', phase: 'queued', derived_status: 'queued', horizon: 'now' }))
-    const io = ioOf(healthyFiles('alpha'), [], argv =>
+    const io = ioOf(healthyFiles('project-a'), [], argv =>
       argv[1] === 'objective' ? { exitCode: 0, stdout: JSON.stringify(many) } : { exitCode: 0, stdout: '[]' },
     )
-    const model = await collectModel(io, configOf({ projects: 'alpha' }), HOME, NOW)
+    const model = await collectModel(io, configOf({}), HOME, NOW)
     const view = paneRows(model, { columns: 30, headerColumns: 17, rows: 12, isRefreshing: false })
     const texts = view.lines.map(line => line.text)
 
