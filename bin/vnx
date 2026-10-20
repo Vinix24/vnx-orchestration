@@ -299,6 +299,8 @@ Commands:
   guard install|check  Register the T0 context guard in every Claude account (user level) / report where it runs
   smoke              Run one-shot local receipt pipeline smoke test
   cost-report        Aggregate model usage + estimated cost from receipts
+  costs replay [--json]  Move spooled cost records into the cost ledger, once per record
+                         (exit 0 spool empty, 1 unreadable spool files remain, 2 failed)
   package-check      Fail if runtime artifacts exist inside dist
   update [url] [branch]  Pull latest VNX from origin and re-install
   update --pin <tag>     Pin VNX version (respects lock on future updates)
@@ -2571,6 +2573,9 @@ main() {
       ;;
     review)
       "$VNX_PYTHON" "$VNX_HOME/scripts/review_rounds_cli.py" "$@"
+      ;;
+    costs)
+      "$VNX_PYTHON" "$VNX_HOME/scripts/costs_cli.py" "$@"
       ;;
     dispatch)
       cmd_dispatch "$@"

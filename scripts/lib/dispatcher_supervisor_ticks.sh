@@ -18,6 +18,8 @@
 #   VNX_LEARNING_ENABLED           — "1" enables the daily learning cycle tick; default 0 (off)
 #   VNX_LEARNING_CYCLE_INTERVAL    — seconds between learning cycle runs; default 86400 (daily)
 #   VNX_OI_BRIDGE_INTERVAL         — seconds between OI→track bridge runs; default 900 (D1)
+#   VNX_COST_LEDGER_REPLAY_INTERVAL_SEC — seconds between cost-ledger spool replays;
+#                                    default 30 (the lease_sweep cadence; ADR-043)
 
 # _maybe_runtime_supervise — throttled RuntimeSupervisor.supervise_all() tick (SUP-PR3).
 # Invokes scripts/lib/runtime_supervise.py at most once per
@@ -220,4 +222,35 @@ _unified_supervisor_lease_sweep_tick() {
             >> "$VNX_LOGS_DIR/lease_sweep.log" 2>&1 || true
         printf '%s' "$now" > "$state_file.tmp.$$" && mv -f "$state_file.tmp.$$" "$state_file"
     fi
+}
+
+# _maybe_cost_ledger_replay — throttled cost-ledger spool replay (ADR-043, K2a-1).
+# Runs `scripts/costs_cli.py replay` (the same command as `vnx costs replay`) at
+# most once per VNX_COST_LEDGER_REPLAY_INTERVAL_SEC seconds, with the
+# lease_sweep tick's throttle. Not gated on VNX_SUPERVISOR_MODE: the spool is the
+# recovery path of the cost ledger, not a supervision feature, and a record that
+# waits there is missing from every sum until it is replayed. With an empty
+# spool the replay writes nothing. A failing replay never stops the prelude: it
+# is logged, and the spool stays for the next tick.
+_maybe_cost_ledger_replay() {
+    local state_file="$VNX_DATA_DIR/state/.last_cost_ledger_replay_ts"
+    local interval="${VNX_COST_LEDGER_REPLAY_INTERVAL_SEC:-30}"
+    local now last
+    now=$(date +%s)
+    last=0
+    if [[ -f "$state_file" ]]; then
+        last=$(cat "$state_file" 2>/dev/null || echo 0)
+        [[ "$last" =~ ^[0-9]+$ ]] || last=0
+    fi
+    if (( now - last < interval )); then
+        return 0
+    fi
+    local log_file="$VNX_LOGS_DIR/cost_ledger_replay.log"
+    mkdir -p "$VNX_LOGS_DIR" "$(dirname "$state_file")"
+    local rc=0
+    python3 "$SCRIPT_DIR/costs_cli.py" replay >> "$log_file" 2>&1 || rc=$?
+    if [[ "$rc" != "0" ]]; then
+        log "V-COST-LEDGER WARN: cost-ledger replay failed (exit $rc); the spool stays for the next tick, see $log_file"
+    fi
+    printf '%s' "$now" > "$state_file.tmp.$$" && mv -f "$state_file.tmp.$$" "$state_file"
 }

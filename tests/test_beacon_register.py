@@ -335,10 +335,17 @@ def test_real_scripts_tree_gives_the_nine_measured_writers() -> None:
     does not carry. This is the same category of deliberate addition the
     D3a/D3b fix-forwards already bumped this measurement for — not a name
     accidentally picked up by the scan.
+
+    K2a-1 (ADR-043) adds the 11th: scripts/lib/cost_ledger.py writes the
+    "cost-ledger" beacon when a cost record goes to the spool (degraded) and
+    when a replay empties it (ok). It is event-driven
+    (``expected_interval_seconds=None``), so its silence is not ``absent``.
     """
     reg = br.read_beacon_register()
     names = {s.name for s in reg}
+    assert "cost-ledger" not in br.expected_component_names(reg)
     assert names == {
+        "cost-ledger",
         "t0_state_builder",
         "conversation_analyzer",
         "fleet_role_drift",

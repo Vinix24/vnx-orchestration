@@ -1,0 +1,1 @@
+- Added: the cost ledger per run (ADR-043, K2a-1): `cost_ledger.record_run` writes one `provider_cost_run/1` line per run and refuses an amount without a source, `aggregate_runs` counts the last line per run and never sums `unavailable` as 0, and a failed append goes to a spool that `vnx costs replay` (and the dispatcher prelude) brings back once per record.

@@ -601,6 +601,7 @@ process_dispatches() {
     _maybe_runtime_supervise
     _cleanup_stuck_dispatches
     _unified_supervisor_lease_sweep_tick
+    _maybe_cost_ledger_replay
     _maybe_auto_seed_tracks
     _maybe_oi_bridge_tick
     _maybe_objective_reconcile

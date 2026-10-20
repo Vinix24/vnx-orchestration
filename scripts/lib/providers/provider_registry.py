@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -362,6 +363,65 @@ def _resolve_model_key(
     if candidates:
         return candidates[0]
     return None
+
+
+# A dated snapshot suffix a provider appends to a model id, e.g.
+# "claude-opus-4-8-20260801". Only this suffix is stripped by the identity
+# resolver below; any other remainder is a different model, not a variant.
+_SNAPSHOT_SUFFIX = re.compile(r"^(?P<base>.+)-(?:\d{8}|\d{4}-\d{2}-\d{2})$")
+
+
+def resolve_model_identity(
+    registry_key: str,
+    model: str,
+    registry_path: Optional[Path] = None,
+) -> str:
+    """Resolve a model string to its registry model key, or fail loud (ADR-036, ADR-043).
+
+    Stricter than :func:`_resolve_model_key`, whose longest hyphen-bounded
+    prefix match books ``sonnet-6`` as ``sonnet``: an identity that lands in the
+    cost ledger must not be a guess. Four steps, the first hit wins:
+
+    1. the exact key, on the slash-stripped name (``z-ai/glm-5.2`` -> ``glm-5.2``);
+    2. the exact key after the section's known name prefix (``claude-opus-5-5``
+       -> ``opus-5-5``);
+    3. the one model whose ``cli_model_arg`` is the full string
+       (``kimi-code/k3`` -> ``kimi-k3``); two such models are ambiguous;
+    4. steps 1 and 2 again after a dated snapshot suffix
+       (``claude-opus-4-8-20260801`` -> ``opus-4-8``).
+
+    Raises :class:`RegistryLookupError` naming the model, the section and the
+    registry path when none of them hits.
+    """
+    path = Path(registry_path) if registry_path is not None else _REGISTRY_PATH
+    cfg = load(registry_path).get(registry_key)
+    if cfg is None or not cfg.models:
+        raise RegistryLookupError(f"registry section {registry_key!r} not found in {path}")
+    key = _exact_model_key(cfg, registry_key, model) or _cli_arg_model_key(cfg, model)
+    if key is None:
+        snapshot = _SNAPSHOT_SUFFIX.match(model.split("/")[-1])
+        if snapshot:
+            key = _exact_model_key(cfg, registry_key, snapshot.group("base"))
+    if key is None:
+        raise RegistryLookupError(
+            f"model {model!r} not found in registry section {registry_key!r} of {path}"
+        )
+    return key
+
+
+def _exact_model_key(cfg: ProviderConfig, registry_key: str, model: str) -> Optional[str]:
+    model_key = model.split("/")[-1]
+    if model_key in cfg.models:
+        return model_key
+    prefix = _REGISTRY_KEY_MODEL_PREFIX.get(registry_key)
+    if prefix and model_key.startswith(prefix) and model_key[len(prefix):] in cfg.models:
+        return model_key[len(prefix):]
+    return None
+
+
+def _cli_arg_model_key(cfg: ProviderConfig, model: str) -> Optional[str]:
+    matches = [key for key, entry in cfg.models.items() if entry.cli_model_arg == model]
+    return matches[0] if len(matches) == 1 else None
 
 
 def resolve_price_versions(
