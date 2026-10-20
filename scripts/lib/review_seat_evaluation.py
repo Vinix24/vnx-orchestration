@@ -761,7 +761,8 @@ class DoorRounds:
     ``refusal`` is set when no PASS of this PR can be counted: the ledger is
     no regular file or is unreadable for it, or the PR is not opened in it (a
     PR reviewed before R1, or one whose verdicts were booked without a gate
-    request, until ``vnx review rounds open --pr N --reason``). ``cap`` is the B3
+    request, until ``vnx review rounds open --pr N --reason``), or a tiebreaker
+    sent the capped PR back to plan (R2b, ``terug-naar-plan``). ``cap`` is the B3
     count over the codex seat, ``override`` the reason of the door's
     ``--override-b3``, and ``grant`` the extra round a tiebreaker's
     ``verkleinen`` granted past the cap (R2a): only the codex-seat verdict
@@ -828,14 +829,46 @@ def door_rounds(scope: SeatScope, b3_override: str = "") -> Optional[DoorRounds]
             f"operator de PR met `{review_rounds.open_command(pr_number)}`; de cap begint bij die regel op nul"
         ))
     cap = review_rounds.cap_state(lines, pr_number)
-    grant = _door_grant(path.parent.parent, cap, ledger.since(project_id, pr_number)) if cap.capped else None
-    return DoorRounds(str(path), pr_number, lines, cap=cap, override=b3_override.strip(), grant=grant)
+    since = ledger.since(project_id, pr_number)
+    grant = _door_grant(path.parent.parent, cap, since) if cap.capped else None
+    returned = _returned_to_plan(path.parent.parent, cap, since) if cap.capped else ""
+    return DoorRounds(
+        str(path), pr_number, lines, refusal=returned, cap=cap, override=b3_override.strip(), grant=grant,
+    )
 
 
 def _door_grant(state_dir: Path, cap: Any, since: str) -> Any:
     import review_cap_verdicts
 
     return review_cap_verdicts.door_grant(state_dir, cap, since=since)
+
+
+def _returned_to_plan(state_dir: Path, cap: Any, since: str) -> str:
+    """Why no PASS of a capped PR counts because the tiebreaker sent it back to plan (R2b); ``""`` when it did not.
+
+    A ``terug-naar-plan`` verdict that stands closes the PR at the door: no
+    seat counts, on no head, and ``--override-b3`` does not lift it (it lifts
+    the cap, not a verdict). A verdict store that cannot be read refuses too:
+    whether the PR went back cannot be told.
+    """
+    import review_cap_verdicts
+    import review_rounds
+
+    try:
+        verdict = review_cap_verdicts.door_return(state_dir, cap, since=since)
+    except review_cap_verdicts.CapVerdictError as exc:
+        return (
+            f"PR #{cap.pr_number} staat op de B3-cap en de uitspraken van de tiebreaker zijn onleesbaar ({exc}): "
+            f"of de PR terug naar plan ging is niet vast te stellen, dus geen PASS telt"
+        )
+    if verdict is None:
+        return ""
+    return (
+        f"PR #{cap.pr_number} is door de tiebreaker terug naar plan gestuurd ({verdict.verdict_id}, "
+        f"{verdict.cap_rule} -> terug-naar-plan op kop {verdict.head_sha[:12]}): geen PASS van welke seat ook "
+        f"telt nog, op geen enkele kop, ook niet met {review_rounds.OVERRIDE_FLAG}. De deliverable gaat opnieuw "
+        f"door de promotie; het werk komt in een nieuwe PR"
+    )
 
 
 def _uncounted(fill: SeatFill, message: str) -> SeatFill:

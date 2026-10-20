@@ -437,8 +437,9 @@ class TestTheMergeDoor:
         assert before["verdict"] == after["verdict"] == "NO-GO"
         verdict = decision.verdict
         assert decision.status == "recorded" and verdict.verdict_id == _vid(HEAD)
+        # R2b carries terug-naar-plan out, so the rule's only outcome is stored as itself.
         assert (verdict.cap_rule, verdict.outcome, verdict.chosen_outcome) == (
-            "B3.1", review_cap_verdicts.UNAVAILABLE, review_cap_verdicts.TERUG_NAAR_PLAN,
+            "B3.1", review_cap_verdicts.TERUG_NAAR_PLAN, review_cap_verdicts.TERUG_NAAR_PLAN,
         )
         assert verdict.tiebreaker_model == "", "one outcome left: the rule decides, no model is asked"
 
@@ -616,18 +617,24 @@ class TestTheCapVerdictCli:
         assert (_cli("--for-dispatch", X), _cli("--for-dispatch", X)) == (2, 2)
         assert review_cap_verdicts.read_verdicts(env["state_dir"], PR) == ()
 
-    def test_the_other_outcome_is_recorded_unavailable_and_the_cap_stays_closed(self, env, model):
+    def test_the_other_outcome_is_recorded_unavailable_and_the_cap_stays_closed(self, env, model, capsys):
+        # mergen-met-OI (B3.2) stays closed until R2c; terug-naar-plan (B3.1) is R2b's, see
+        # tests/test_r2b_terug_naar_plan.py.
         import review_cap_verdicts
 
         x1 = _commit(env["repo"], "fix1.txt", f"fix: one\n\nDispatch-ID: {X}")
-        _capped(env)
-        model["answers"].append(_answer("terug-naar-plan"))
+        _write_ledger(env["ledger"], [
+            _opened(), _line("codex_gate", "1" * 40, "fail", 2, at=1), _line("codex_gate", "2" * 40, "fail", 2, at=2),
+            _line("codex_gate", env["cap_head"], "fail", 2, at=3),
+        ])
+        model["answers"].append(_answer("mergen-met-OI"))
 
         assert _cli("--for-dispatch", X) == 0
         (verdict,) = review_cap_verdicts.read_verdicts(env["state_dir"], PR)
-        assert (verdict.outcome, verdict.chosen_outcome, verdict.granted_dispatch_id) == (
-            review_cap_verdicts.UNAVAILABLE, "terug-naar-plan", "",
+        assert (verdict.cap_rule, verdict.outcome, verdict.chosen_outcome, verdict.granted_dispatch_id) == (
+            "B3.2", review_cap_verdicts.UNAVAILABLE, "mergen-met-OI", "",
         )
+        assert "the cap stays closed, defer with an OI by hand" in capsys.readouterr().out
         assert _codex_request(env, x1)["reason"] == "b3_cap"
 
     def test_nothing_is_decided_below_the_cap_or_without_the_dispatch_to_bind(self, env, model):

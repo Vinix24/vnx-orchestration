@@ -37,16 +37,26 @@ verdicts, and every build-door ``--override-b3`` (``override`` line) recorded
 against it.
 
 ``cap-verdict --pr N --for-dispatch <id>`` asks the tiebreaker at the B3 cap
-(R2a, ADR-041) for the next step and records it in ``review_cap_verdicts``: one
-outcome, never a findings list. ``verkleinen`` grants one extra codex-seat
-round to the dispatch ``--for-dispatch`` names. A verdict that already stands
-is shown, and no model is asked again. The verdict's ``review_cap_verdict``
-receipt is written first and its row only after it landed (ADR-005, OI-2201):
-a verdict without a receipt grants nothing. A receipt that landed while its row
-did not is booked from the receipt (``restored``). Exit 0 with a verdict (also
-one R2a cannot carry out, ``outcome_unavailable_in_r2a``: the cap stays closed),
-1 when the receipt could not be written (no row, no granted round: run it
-again), 2 when nothing can be decided.
+(R2a, R2b, ADR-041) for the next step and records it in ``review_cap_verdicts``:
+one outcome, never a findings list. ``verkleinen`` grants one extra codex-seat
+round to the dispatch ``--for-dispatch`` names. ``terug-naar-plan`` (B3.1) is
+carried out after its row stands (``review_cap_aftermath``): one open item per
+remaining codex blocker, the deliverable back to ``proposed`` and the PR
+closed with a comment; a PR that links to no deliverable is said loudly on
+stderr and the other steps still run. A verdict that already stands is shown,
+no model is asked again, and for ``terug-naar-plan`` only the missing steps of
+its aftermath run. The verdict's ``review_cap_verdict`` receipt is written
+first and its row only after it landed (ADR-005, OI-2201): a verdict without a
+receipt grants nothing. A receipt that landed while its row did not is booked
+from the receipt (``restored``).
+
+``cap-verdict`` exit codes:
+  0  a verdict stands, and for terug-naar-plan its whole aftermath is done (also
+     ``outcome_unavailable_in_r2a`` for mergen-met-OI: the cap stays closed)
+  1  the receipt could not be written: no row, no granted round, run it again
+  2  nothing can be decided
+  3  the verdict stands, its aftermath is incomplete (a step names what did not
+     finish): run it again, it does only the missing steps
 
 Usage:
   python3 scripts/review_rounds_cli.py rounds open --pr 2089 --reason "reviewed before R1: B3.1 in round 1, operator merged"
@@ -71,6 +81,7 @@ for _p in (str(SCRIPT_DIR / "lib"), str(SCRIPT_DIR)):
 EXIT_OK = 0
 EXIT_RECEIPT_FAILED = 1
 EXIT_ERROR = 2
+EXIT_AFTERMATH_INCOMPLETE = 3
 
 RECEIPT_EVENT = "review_round_opened"
 
@@ -130,7 +141,8 @@ def _state_dir(args, command: str) -> Optional[Path]:
 
 
 def _cap_verdict(args) -> int:
-    """``cap-verdict``: the tiebreaker's verdict on a capped PR, booked once: its receipt, then its row."""
+    """``cap-verdict``: the tiebreaker's verdict on a capped PR, booked once (receipt, then row), then carried out."""
+    import review_cap_aftermath
     import review_cap_tiebreaker
     import review_cap_verdicts
 
@@ -152,17 +164,62 @@ def _cap_verdict(args) -> int:
             review_cap_verdicts.CapVerdictRefused) as exc:
         print(f"vnx review cap-verdict: no verdict recorded for PR #{args.pr}: {exc}", file=sys.stderr)
         return EXIT_ERROR
-    verdict = decision.verdict
+    verdict, aftermath = decision.verdict, None
+    if verdict.outcome == review_cap_verdicts.TERUG_NAAR_PLAN:
+        aftermath = review_cap_aftermath.carry_out(state_dir, verdict)
+        verdict = aftermath.verdict
     if args.json:
-        print(json.dumps({"status": decision.status, **verdict.to_dict()}, indent=2))
+        extra = {"aftermath": aftermath.to_dict()} if aftermath is not None else {}
+        print(json.dumps({"status": decision.status, **verdict.to_dict(), **extra}, indent=2))
+    else:
+        _print_cap_verdict(args.pr, decision.status, verdict, aftermath)
+    if aftermath is None:
         return EXIT_OK
-    granted = f", one extra codex-seat round for dispatch {verdict.granted_dispatch_id}: {verdict.intervention}"
+    _warn_unreturned(args.pr, aftermath)
+    if aftermath.complete:
+        return EXIT_OK
     print(
-        f"PR #{args.pr} {decision.status} {verdict.verdict_id}: {verdict.cap_rule} -> {verdict.outcome}"
-        + (granted if verdict.outcome == review_cap_verdicts.VERKLEINEN else
-           f" (chosen {verdict.chosen_outcome}; the cap stays closed, defer with an OI by hand)")
+        f"vnx review cap-verdict: PR #{args.pr}: {verdict.verdict_id} stands, its aftermath is incomplete: "
+        f"{aftermath.failed}. Run it again: only the missing steps run", file=sys.stderr,
     )
-    return EXIT_OK
+    return EXIT_AFTERMATH_INCOMPLETE
+
+
+def _print_cap_verdict(pr: int, status: str, verdict, aftermath) -> None:
+    """The verdict in one line; for ``terug-naar-plan`` one more line per aftermath step."""
+    import review_cap_aftermath
+    import review_cap_verdicts
+
+    head = f"PR #{pr} {status} {verdict.verdict_id}: {verdict.cap_rule} -> {verdict.outcome}"
+    if verdict.outcome == review_cap_verdicts.VERKLEINEN:
+        print(f"{head}, one extra codex-seat round for dispatch {verdict.granted_dispatch_id}: {verdict.intervention}")
+        return
+    if aftermath is None:
+        print(f"{head} (chosen {verdict.chosen_outcome}; the cap stays closed, defer with an OI by hand)")
+        return
+    print(f"{head}: the PR goes back to plan; aftermath {'complete' if aftermath.complete else 'INCOMPLETE'}")
+    for step in aftermath.steps:
+        ids = step.fields.get("oi_ids") if step.step == review_cap_aftermath.STEP_OPEN_ITEMS else None
+        listed = f" {', '.join(ids)}" if ids else ""
+        notes = "; ".join(filter(None, (step.detail, "booked by an earlier run" if step.restored else "")))
+        print(f"  {step.step}: {step.result}{listed}" + (f" ({notes})" if notes else ""))
+    if not aftermath.complete:
+        print(f"  not done: {aftermath.failed}")
+
+
+def _warn_unreturned(pr: int, aftermath) -> None:
+    """Say loudly on stderr when the PR's deliverable did not go back to plan."""
+    import review_cap_aftermath
+
+    step = aftermath.step(review_cap_aftermath.STEP_DELIVERABLE)
+    if step is None or step.result in ("returned", "already_proposed"):
+        return
+    what = "links to no deliverable" if step.result == review_cap_aftermath.NO_LINKED_DELIVERABLE else (
+        f"has deliverable {step.fields.get('deliverable')}, which did not go back to plan"
+    )
+    print(
+        f"vnx review cap-verdict: WARNING: PR #{pr} {what}: {step.detail}. Move the deliverable by hand", file=sys.stderr,
+    )
 
 
 def _show(args) -> int:

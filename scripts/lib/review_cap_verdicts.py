@@ -1,4 +1,4 @@
-"""The tiebreaker's verdicts at the B3 cap, and the one extra round ``verkleinen`` grants (R2a).
+"""The tiebreaker's verdicts at the B3 cap, and the one extra round ``verkleinen`` grants (R2a, R2b).
 
 Track ``review-stopregel-en-lichte-stoelen``, plan section 2, ADR-041. R1
 (``review_rounds``) counts the codex-seat rounds and puts a PR at the cap under
@@ -15,10 +15,20 @@ means for the gate, the writer and the doors:
   the grant a ``verkleinen`` row carries exists only once its receipt landed.
   The receipt is the canonical record and the row its projection, so a
   receipt whose row did not land is booked from the receipt, never decided again.
+  Only a receipt of this store's project (ADR-007) and of the PR's current
+  count (at or after ``since``) is such a record (OI-2207).
 - **The outcomes.** B3.1 is ``verkleinen`` or ``terug-naar-plan``, B3.2 is
-  ``verkleinen`` or ``mergen-met-OI``. R2a carries out ``verkleinen`` only. The
-  other outcome of a rule is recorded as ``outcome_unavailable_in_r2a`` with the
-  model's choice beside it, and the cap stays closed.
+  ``verkleinen`` or ``mergen-met-OI``. R2a carries out ``verkleinen``, R2b
+  ``terug-naar-plan`` (``review_cap_aftermath``: the remaining codex blockers
+  become open items, whose ids the row carries, the deliverable goes back to
+  ``proposed`` and the PR closes). ``mergen-met-OI`` is recorded as
+  ``outcome_unavailable_in_r2a`` with the model's choice beside it, and the cap
+  stays closed.
+- **Sent back to plan.** A ``terug-naar-plan`` verdict that stands closes the
+  PR at the merge door: no PASS of any seat counts on any head, an
+  ``--override-b3`` included (:func:`door_return`). It stands as a row or as
+  a receipt of this project and count whose row did not land
+  (:func:`standing_verdicts`): an interrupted projection does not erase it.
 - **The grant.** A ``verkleinen`` verdict grants one codex-seat round, bound to
   the dispatch the T0 named. A head qualifies when it carries a commit of that
   dispatch (a ``Dispatch-ID: <id>`` trailer) that the head the verdict decided on
@@ -44,7 +54,7 @@ import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import review_rounds
 
@@ -61,6 +71,8 @@ RULE_OUTCOMES = {
     review_rounds.B3_1: (VERKLEINEN, TERUG_NAAR_PLAN),
     review_rounds.B3_2: (VERKLEINEN, MERGEN_MET_OI),
 }
+# The outcomes that are carried out; any other choice is stored as UNAVAILABLE.
+CARRIED_OUT = (VERKLEINEN, TERUG_NAAR_PLAN)
 
 # What the CLI does next (next_step).
 BELOW_CAP = "below_cap"
@@ -138,6 +150,11 @@ def verdict_id_for(pr_number: int, head_sha: str) -> str:
     return f"cap-pr{pr_number}-{head_sha}"
 
 
+def stored_outcome(chosen: str) -> str:
+    """The outcome a verdict is stored with: the choice when it is carried out, else UNAVAILABLE."""
+    return chosen if chosen in CARRIED_OUT else UNAVAILABLE
+
+
 def utc_now() -> str:
     """The ledger's timestamp format, so a verdict compares with ``Ledger.since``."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -185,7 +202,24 @@ def read_verdicts(state_dir: Path, pr_number: int) -> Tuple[CapVerdict, ...]:
         raise CapVerdictError(f"{TABLE} in {path} could not be read: {exc}") from exc
 
 
-def record_verdict(state_dir: Path, verdict: CapVerdict) -> Tuple[str, CapVerdict]:
+def store_project_id(state_dir: Path) -> str:
+    """The project id this store stamps on its rows (ADR-007); raises :class:`CapVerdictError` without one."""
+    from coordination_db import stamp_project_id
+
+    path = _db_path(state_dir)
+    if not path.is_file():
+        raise CapVerdictError(f"no runtime store at {path}: it names no project")
+    try:
+        conn = sqlite3.connect(str(path), timeout=10.0)
+        try:
+            return stamp_project_id(conn)
+        finally:
+            conn.close()
+    except (sqlite3.Error, RuntimeError) as exc:
+        raise CapVerdictError(f"the project of {path} cannot be resolved: {exc}") from exc
+
+
+def record_verdict(state_dir: Path, verdict: CapVerdict, *, since: str = "") -> Tuple[str, CapVerdict]:
     """Book ``verdict``, receipt first: ``("recorded" | "restored" | "present", verdict that stands)``.
 
     ADR-005, OI-2201. Under the store's booking lock, from the check to the
@@ -194,8 +228,10 @@ def record_verdict(state_dir: Path, verdict: CapVerdict) -> Tuple[str, CapVerdic
     the store's receipt ledger, and only once it landed is the row committed;
     a ``verkleinen`` grants its round from that commit on. A receipt that does
     not land raises :class:`CapVerdictReceiptError` and leaves no row. A receipt
-    that landed for this ``verdict_id`` while its row did not is the verdict:
-    its row is booked from it, ``"restored"``, and ``verdict`` is dropped.
+    of this store's project that landed for this ``verdict_id`` at or after
+    ``since`` (the PR's last attested ``opened`` line) while its row did not is
+    the verdict: its row is booked from it, ``"restored"``, and ``verdict`` is
+    dropped (OI-2207).
 
     The insert is tried and rolled back before the receipt, so a row the table
     refuses never gets one. A second ``verkleinen`` on one PR raises
@@ -209,7 +245,9 @@ def record_verdict(state_dir: Path, verdict: CapVerdict) -> Tuple[str, CapVerdic
     if not path.is_file():
         raise CapVerdictError(f"no runtime store at {path}: the verdict has nowhere to go")
     with slot_lock(Path(state_dir) / TABLE):
-        landed = receipted_verdict(state_dir, verdict.pr_number, verdict.verdict_id)
+        landed = receipted_verdict(
+            state_dir, verdict.pr_number, verdict.verdict_id, project_id=store_project_id(state_dir), since=since,
+        )
         status, standing = _book_row(path, landed or verdict, commit=False)
         if status == "present":
             return status, standing
@@ -264,40 +302,113 @@ def _emit_receipt(state_dir: Path, verdict: CapVerdict) -> None:
         ) from exc
 
 
-def receipted_verdict(state_dir: Path, pr_number: int, verdict_id: str) -> Optional[CapVerdict]:
-    """The verdict the store's receipt ledger holds for ``verdict_id``: the first that landed; ``None`` without one.
+def receipts_naming(state_dir: Path, event_type: str, key: str) -> List[Dict[str, Any]]:
+    """Every ``event_type`` receipt in the store's receipt ledger whose line names ``key``, in file order.
 
-    A receipt is the canonical record of a verdict (ADR-005). A ledger that
-    cannot be read raises :class:`CapVerdictError`: whether the verdict was
-    decided cannot be told, so nothing is decided. A line that names the
-    verdict and does not parse is a torn append, logged and skipped.
+    A ledger that cannot be read raises :class:`CapVerdictError`: whether
+    something was booked cannot be told. A line that names both and does not
+    parse is a torn append, logged and skipped.
     """
     receipts = Path(state_dir) / review_rounds.RECEIPTS_NAME
-    event, key = RECEIPT_EVENT.encode(), verdict_id.encode()
+    event, needle = event_type.encode(), key.encode()
+    found: List[Dict[str, Any]] = []
     try:
         with receipts.open("rb") as handle:
             for raw in handle:
-                if event in raw and key in raw:
-                    found = _verdict_in_receipt(raw, pr_number, verdict_id)
-                    if found is not None:
-                        return found
+                if event in raw and needle in raw:
+                    receipt = _parsed_receipt(raw, event_type, key)
+                    if receipt is not None and receipt.get("event_type") == event_type:
+                        found.append(receipt)
     except FileNotFoundError:
-        return None
+        return []
     except OSError as exc:
         raise CapVerdictError(f"the receipt ledger {receipts} could not be read: {exc}") from exc
-    return None
+    return found
 
 
-def _verdict_in_receipt(raw: bytes, pr_number: int, verdict_id: str) -> Optional[CapVerdict]:
+def _parsed_receipt(raw: bytes, event_type: str, key: str) -> Optional[Dict[str, Any]]:
     try:
         receipt = json.loads(raw)
     except ValueError as exc:
-        logger.warning("review_cap_verdicts: a %s line of %s does not parse (%s): skipped", RECEIPT_EVENT, verdict_id, exc)
+        logger.warning("review_cap_verdicts: a %s line of %s does not parse (%s): skipped", event_type, key, exc)
         return None
-    if not isinstance(receipt, dict):
-        return None
-    if (receipt.get("event_type"), receipt.get("verdict_id"), receipt.get("pr_number")) != (
-        RECEIPT_EVENT, verdict_id, pr_number,
+    return receipt if isinstance(receipt, dict) else None
+
+
+def receipted_verdict(
+    state_dir: Path, pr_number: int, verdict_id: str, *, project_id: str, since: str = "",
+) -> Optional[CapVerdict]:
+    """The verdict the store's receipt ledger holds for ``verdict_id``: the first that landed; ``None`` without one.
+
+    A receipt is the canonical record of a verdict (ADR-005), but only for its
+    own project and its own count (OI-2207, :func:`_current_receipts`). A
+    ledger that cannot be read raises :class:`CapVerdictError`: whether the
+    verdict was decided cannot be told, so nothing is decided.
+    """
+    found = _current_receipts(
+        receipts_naming(state_dir, RECEIPT_EVENT, verdict_id), pr_number, project_id=project_id, since=since,
+        verdict_id=verdict_id,
+    )
+    return found[0] if found else None
+
+
+def receipted_verdicts(state_dir: Path, pr_number: int, *, since: str = "") -> Tuple[CapVerdict, ...]:
+    """Every verdict on PR ``pr_number`` the receipt ledger holds for this store's project and current count.
+
+    The first receipt per verdict id, in file order, under the rule of
+    :func:`receipted_verdict`. A ledger with such receipts while the store
+    cannot name its project raises :class:`CapVerdictError`: whose verdicts
+    they are cannot be told. So does a ledger that cannot be read.
+    """
+    receipts = receipts_naming(state_dir, RECEIPT_EVENT, verdict_id_for(pr_number, ""))
+    if not receipts:
+        return ()
+    first: Dict[str, CapVerdict] = {}
+    for verdict in _current_receipts(receipts, pr_number, project_id=store_project_id(state_dir), since=since):
+        first.setdefault(verdict.verdict_id, verdict)
+    return tuple(first.values())
+
+
+def standing_verdicts(state_dir: Path, pr_number: int, *, since: str = "") -> Tuple[CapVerdict, ...]:
+    """The verdicts that stand on PR ``pr_number``: the store's rows and every receipt whose row did not land.
+
+    For a reader that refuses on a verdict (:func:`door_return`). The receipt
+    is the canonical record and the row its projection (ADR-005): a booking
+    whose receipt landed and whose row commit did not still decided the PR, and
+    an interrupted projection never erases that. Where both stand, the row is
+    returned (it carries the aftermath's ``oi_ids``). Oldest first. Raises
+    :class:`CapVerdictError` as :func:`read_verdicts` and
+    :func:`receipted_verdicts` do.
+    """
+    rows = read_verdicts(state_dir, pr_number)
+    booked = {verdict.verdict_id for verdict in rows}
+    landed = [verdict for verdict in receipted_verdicts(state_dir, pr_number, since=since) if verdict.verdict_id not in booked]
+    return tuple(sorted((*rows, *landed), key=lambda verdict: (verdict.created_at, verdict.verdict_id)))
+
+
+def _current_receipts(
+    receipts: Iterable[Dict[str, Any]], pr_number: int, *, project_id: str, since: str, verdict_id: str = "",
+) -> List[CapVerdict]:
+    """The verdicts in ``receipts`` of this project and this count: the one rule every receipt reader keys on.
+
+    OI-2207: a receipt of another project with the same PR and verdict id is
+    not this store's verdict (ADR-007), and one created before ``since`` (the
+    PR's last attested ``opened`` line) belongs to a count that no longer
+    stands, as in :func:`next_step`. Without ``verdict_id``, any verdict of PR
+    ``pr_number`` whose id is the one its head gives.
+    """
+    found: List[CapVerdict] = []
+    for receipt in receipts:
+        verdict = _verdict_in_receipt(receipt, pr_number, verdict_id, project_id)
+        if verdict is not None and verdict.created_at >= since:
+            found.append(verdict)
+    return found
+
+
+def _verdict_in_receipt(receipt: Dict[str, Any], pr_number: int, verdict_id: str, project_id: str) -> Optional[CapVerdict]:
+    wanted = verdict_id or verdict_id_for(pr_number, str(receipt.get("head_sha") or ""))
+    if (receipt.get("verdict_id"), receipt.get("pr_number"), receipt.get("project_id")) != (
+        wanted, pr_number, project_id,
     ):
         return None
     missing = [name for name in _COLUMNS if name not in receipt]
@@ -305,7 +416,42 @@ def _verdict_in_receipt(raw: bytes, pr_number: int, verdict_id: str) -> Optional
         logger.warning("review_cap_verdicts: the %s receipt of %s lacks %s: skipped", RECEIPT_EVENT, verdict_id, missing)
         return None
     values = {name: receipt[name] for name in _COLUMNS}
+    if not isinstance(values["created_at"], str):
+        logger.warning("review_cap_verdicts: the %s receipt of %s has no created_at: skipped", RECEIPT_EVENT, verdict_id)
+        return None
     return CapVerdict(**{**values, "oi_ids": tuple(values["oi_ids"] or ())})
+
+
+def set_oi_ids(state_dir: Path, verdict: CapVerdict, oi_ids: Sequence[str]) -> None:
+    """Write ``oi_ids`` onto the stored ``terug-naar-plan`` row of ``verdict`` (R2b); idempotent.
+
+    Under the store's booking lock. The row must stand: a verdict whose row is
+    gone (the receipt books it again on the next run) raises
+    :class:`CapVerdictError`, as does a store that cannot be written.
+    """
+    from atomic_io import slot_lock
+
+    path = _db_path(state_dir)
+    value = json.dumps(list(oi_ids))
+    with slot_lock(Path(state_dir) / TABLE):
+        try:
+            conn = sqlite3.connect(str(path), timeout=10.0)
+            try:
+                with conn:
+                    changed = conn.execute(
+                        f"UPDATE {TABLE} SET oi_ids = ? WHERE project_id = ? AND pr_number = ? AND verdict_id = ? "
+                        "AND outcome = ?",
+                        (value, verdict.project_id, verdict.pr_number, verdict.verdict_id, TERUG_NAAR_PLAN),
+                    ).rowcount
+            finally:
+                conn.close()
+        except sqlite3.Error as exc:
+            raise CapVerdictError(f"{TABLE} in {path} could not be written: {exc}") from exc
+    if changed != 1:
+        raise CapVerdictError(
+            f"{TABLE} in {path} holds no terug-naar-plan row {verdict.verdict_id} of project {verdict.project_id}: "
+            f"its open items are not on the row"
+        )
 
 
 def _insert_once(conn: sqlite3.Connection, verdict: CapVerdict, path: Path) -> Tuple[str, CapVerdict]:
@@ -400,6 +546,36 @@ def standing_grant(
     return first.grant() if first is not None else None
 
 
+def standing_return(
+    cap: review_rounds.CapState, verdicts: Iterable[CapVerdict], *, since: str = "",
+) -> Optional[CapVerdict]:
+    """The ``terug-naar-plan`` verdict that sent this capped PR back to plan, ``None`` without one (R2b).
+
+    Any head: the first verdict decides on the cap head, the forced one after
+    the extra round on that round's head. A verdict before ``since`` belongs to
+    a count that no longer stands.
+    """
+    if not cap.capped:
+        return None
+    return next(
+        (verdict for verdict in verdicts if verdict.created_at >= since and verdict.outcome == TERUG_NAAR_PLAN), None,
+    )
+
+
+def door_return(state_dir: Path, cap: review_rounds.CapState, *, since: str = "") -> Optional[CapVerdict]:
+    """The ``terug-naar-plan`` verdict the merge door refuses this PR on; ``None`` when none stands.
+
+    Read from :func:`standing_verdicts`: a ``terug-naar-plan`` receipt of this
+    project and count whose row did not land refuses exactly like its row. A
+    store or receipt ledger that cannot be read raises :class:`CapVerdictError`:
+    whether the PR was sent back cannot be told, so the door counts no PASS of
+    a capped PR.
+    """
+    if not cap.capped:
+        return None
+    return standing_return(cap, standing_verdicts(state_dir, cap.pr_number, since=since), since=since)
+
+
 # ---------------------------------------------------------------------------
 # Does a head carry a commit of the dispatch?
 # ---------------------------------------------------------------------------
@@ -418,7 +594,8 @@ def _git(repo: Path, args: Sequence[str], deadline: float) -> Optional[subproces
         return subprocess.run(
             ["git", "-C", str(repo), *args], capture_output=True, text=True, timeout=left, check=False,
         )
-    except (OSError, subprocess.SubprocessError) as exc:
+    except (OSError, subprocess.SubprocessError, UnicodeDecodeError) as exc:
+        # OI-2207: a commit message that is no UTF-8 is no answer either.
         logger.warning(
             "review_cap_verdicts: git %s in %s failed (%s): no granted round on that head", args[0], repo, exc,
         )
@@ -473,14 +650,17 @@ def head_carries_dispatch(repo: Path, since_head: str, head_sha: str, dispatch_i
     return text is not None and marker.search(text) is not None
 
 
-def resolved_carries(state_dir: Path, pr_number: int, head_sha: str, *, repo: Optional[Path] = None) -> CarriesFn:
+def resolved_carries(
+    state_dir: Path, pr_number: int, head_sha: str, *, since: str = "", repo: Optional[Path] = None,
+) -> CarriesFn:
     """The git facts a booking of ``head_sha`` can need, resolved now: before the writer takes the ledger lock.
 
-    OI-2202. One fact per ``verkleinen`` verdict of the PR (one at most). The
-    writer's grant check reads these under the round ledger's lock and runs no
-    git there: a grant the facts do not cover (recorded while the writer
-    waited for the lock) qualifies no head, logged. A store that cannot be read
-    gives no facts; the check under the lock reads it again and grants nothing.
+    OI-2202. One fact per ``verkleinen`` verdict of the PR's current count
+    (created at or after ``since``, OI-2207; one at most). The writer's grant
+    check reads these under the round ledger's lock and runs no git there: a
+    grant the facts do not cover (recorded while the writer waited for the
+    lock) qualifies no head, logged. A store that cannot be read gives no
+    facts; the check under the lock reads it again and grants nothing.
     """
     try:
         verdicts = read_verdicts(state_dir, pr_number)
@@ -488,7 +668,8 @@ def resolved_carries(state_dir: Path, pr_number: int, head_sha: str, *, repo: Op
         logger.warning("review_cap_verdicts: no git facts for PR #%s: %s", pr_number, exc)
         verdicts = ()
     known: Dict[Tuple[str, str, str], bool] = {}
-    for grant in filter(None, (verdict.grant() for verdict in verdicts)):
+    current = (verdict for verdict in verdicts if verdict.created_at >= since)
+    for grant in filter(None, (verdict.grant() for verdict in current)):
         key = (grant.since_head, head_sha, grant.dispatch_id)
         known[key] = head_carries_dispatch(repo or _repo(), *key)
 
