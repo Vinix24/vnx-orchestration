@@ -33,13 +33,10 @@ LIB_DIR = REPO_ROOT / "scripts" / "lib"
 SCRIPTS_DIR = REPO_ROOT / "scripts"
 sys.path.insert(0, str(LIB_DIR))
 
+import health_beacon
 import state_writer
 import vnx_paths
 from health_beacon import HealthBeacon
-
-# Aliased: imported into a test module, the class would otherwise be
-# collected as a test class (name starts with "Test").
-IsolationGuardError = vnx_paths.TestIsolationGuardError
 
 PROJECT_ID = "vnx-dev"
 CHILD_TIMEOUT_SECONDS = 180
@@ -77,6 +74,21 @@ def work(tmp_path: Path) -> Path:
 
 def _store_file(home: Path, relative: str) -> Path:
     return home / ".vnx-data" / PROJECT_ID / relative
+
+
+def _guard_error_raised_by(module) -> type[BaseException]:
+    """The isolation-guard class that code in ``module`` raises, resolved now.
+
+    Looked up at assertion time in the namespace of the guard function
+    ``module`` calls, which is where its ``raise`` resolves the name. A class
+    bound once at import goes stale: ``importlib.reload(vnx_paths)`` elsewhere
+    in the process re-executes ``class TestIsolationGuardError`` in place, and
+    a ``vnx_paths`` re-imported after a ``sys.modules`` pop holds a class of its
+    own (xdist triage 2026-10-20, D3-1). Returned, not bound to a module-level
+    name: a ``Test*`` name in a test module is collected as a test class.
+    """
+    guard = module.refuse_real_central_store_write_under_test_runner
+    return guard.__globals__["TestIsolationGuardError"]
 
 
 def _run_unittest(work: Path, home: Path, source: str) -> subprocess.CompletedProcess:
@@ -360,9 +372,9 @@ class TestSurfaceGuardsInProcess:
         monkeypatch.setenv("HOME", str(fake_home))
         target = fake_home / ".vnx-data" / PROJECT_ID / "state" / "dispatch_register.ndjson"
 
-        with pytest.raises(IsolationGuardError):
+        with pytest.raises(_guard_error_raised_by(state_writer)):
             state_writer.append_locked(target, {"event": "worker_exited"})
-        with pytest.raises(IsolationGuardError):
+        with pytest.raises(_guard_error_raised_by(state_writer)):
             state_writer.rewrite_locked(target, b"{}\n")
 
         assert not (fake_home / ".vnx-data").exists(), "the guard must refuse before any mkdir"
@@ -380,7 +392,7 @@ class TestSurfaceGuardsInProcess:
         beacon = HealthBeacon(fake_home / ".vnx-data" / PROJECT_ID, "guard_probe")
         monkeypatch.setenv("HOME", str(fake_home))
 
-        with pytest.raises(IsolationGuardError):
+        with pytest.raises(_guard_error_raised_by(health_beacon)):
             beacon.heartbeat()
 
         assert not beacon.path.exists()

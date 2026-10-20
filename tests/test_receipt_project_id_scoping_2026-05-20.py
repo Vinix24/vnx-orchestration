@@ -66,11 +66,37 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# Name fragments of the modules test 1 imports from scratch.
+_FRESH_IMPORT_FRAGMENTS = ("append_receipt", "vnx_identity", "vnx_paths")
+
+
+@pytest.fixture
+def fresh_receipt_modules(monkeypatch):
+    """Import append_receipt and its identity/path modules from scratch, and
+    put the originals back afterwards.
+
+    The fresh ``vnx_paths`` defines a second ``TestIsolationGuardError``. Left
+    in ``sys.modules`` it splits the store guard for every later test in the
+    process: code that imports ``vnx_paths`` lazily raises the new class, while
+    tests and modules bound at import catch the old one (xdist triage
+    2026-10-20, D3-1). ``monkeypatch`` restores each original module object;
+    a module this test imported for the first time is dropped, so none keeps
+    the fresh copy alive.
+    """
+    before = set(sys.modules)
+    for name in list(sys.modules):
+        if any(fragment in name for fragment in _FRESH_IMPORT_FRAGMENTS):
+            monkeypatch.delitem(sys.modules, name)
+    yield
+    for name in set(sys.modules) - before:
+        del sys.modules[name]
+
+
 # ---------------------------------------------------------------------------
 # Test 1: append_receipt_payload stamps project_id via _stamp_identity
 # ---------------------------------------------------------------------------
 
-def test_append_receipt_stamps_project_id_from_env(tmp_path):
+def test_append_receipt_stamps_project_id_from_env(tmp_path, fresh_receipt_modules):
     """append_receipt_payload stamps project_id when VNX_PROJECT_ID is set."""
     state_dir = tmp_path / "state"
     state_dir.mkdir(parents=True)
@@ -82,11 +108,6 @@ def test_append_receipt_stamps_project_id_from_env(tmp_path):
     assert "project_id" not in receipt
 
     with patch.dict(os.environ, env, clear=True):
-        # Reset cached module state between tests
-        for mod_name in list(sys.modules.keys()):
-            if "append_receipt" in mod_name or "vnx_identity" in mod_name or "vnx_paths" in mod_name:
-                sys.modules.pop(mod_name, None)
-
         sys.path.insert(0, str(SCRIPTS_LIB))
         sys.path.insert(0, str(SCRIPTS_DIR))
         import append_receipt as ar

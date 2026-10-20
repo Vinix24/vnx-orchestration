@@ -455,11 +455,14 @@ class TestResolveProjectId:
         )
 
     def test_resolve_project_id_with_env_override(self, monkeypatch):
-        """VNX_PROJECT_ID env var is honored by resolve_project_id()."""
+        """VNX_PROJECT_ID env var is honored by resolve_project_id().
+
+        No reload: the function reads VNX_PROJECT_ID at call time. Reloading
+        vnx_paths re-executed ``class TestIsolationGuardError`` and left a new
+        class for every later test in the process (xdist triage 2026-10-20, D3-1).
+        """
         monkeypatch.setenv("VNX_PROJECT_ID", "test-proj")
         import vnx_paths
-        import importlib
-        importlib.reload(vnx_paths)
 
         result = vnx_paths.resolve_project_id()
         assert result == "test-proj", (
