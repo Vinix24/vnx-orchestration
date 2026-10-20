@@ -5,9 +5,9 @@
 ``events/provider_costs.spool/`` into the ledger
 (``events/provider_costs.ndjson``). A record whose ``run_id`` + ``record_id``
 already stands in the ledger is not written a second time, and a spool file is
-removed only after its lines landed. An unreadable spool file stays where it is
-and is named. The dispatcher prelude runs this on its tick; the T0 can run it by
-hand.
+removed only after its records read back from the ledger as their own lines. An
+unreadable spool file stays where it is and is named. The dispatcher prelude
+runs this on its tick; the T0 can run it by hand.
 
 The ledger is the one ``provider_costs._resolve_costs_path`` resolves, the same
 file every writer appends to.
@@ -15,7 +15,8 @@ file every writer appends to.
 Exit codes:
   0  the spool is empty after the replay (or there was none)
   1  spool files remain: unreadable ones, named on stdout
-  2  the replay failed: the ledger could not be read or written; the spool stays
+  2  the replay failed: the ledger could not be read or written, or a replayed
+     record did not read back (``CostLedgerReplayError``); the spool stays
 
 Usage:
   python3 scripts/costs_cli.py replay [--json]

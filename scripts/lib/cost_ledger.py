@@ -30,8 +30,16 @@ cost-ledger.json``) reports degraded. A failing spool write raises
 :class:`CostLedgerSpoolError`: never silent. While a record of a run waits in the
 spool, a later record of the same run queues behind it in the spool rather than
 landing in the ledger first, so "last line wins" still means "last written".
-The replay writes each record once per ``run_id`` + ``record_id`` and removes a
-spool file only after its lines landed (flushed and fsynced).
+
+Every append, in :func:`record_run` and in the replay, first ends a torn last
+line (an append that failed halfway) with ``\\n``, under the ledger lock, so a
+new line always starts on its own. No byte is ever removed: the torn prefix
+stays and counts as one unreadable line. The replay writes each record once per
+``run_id`` + ``record_id``, fsyncs, and reads the ledger back. It removes a
+spool file only when every record in it stands there as its own line, equal to
+what was spooled, and the newest record of each of its runs is that run's last
+line. A file that does not read back stays, and the replay raises
+:class:`CostLedgerReplayError`.
 
 The old writer ``provider_costs.emit_provider_cost`` and its callers are
 untouched; the harness lanes move onto :func:`record_run` in K2a-2.
@@ -106,6 +114,19 @@ class InvalidRecord(CostLedgerRefusal):
 
 class CostLedgerSpoolError(RuntimeError):
     """The record could not be spooled. The run has no line anywhere: the caller's call fails."""
+
+
+class CostLedgerReplayError(OSError):
+    """A replayed record did not read back from the ledger as its own line. Its spool file stays.
+
+    An ``OSError``, so every caller that treats a failed replay as one treats
+    this as one too: ``vnx costs replay`` exits 2, the prelude tick logs it.
+    ``result`` is what the replay did, ``result.unconfirmed`` the files kept.
+    """
+
+    def __init__(self, message: str, result: "ReplayResult"):
+        super().__init__(message)
+        self.result = result
 
 
 class _UnreadableSpool(Exception):
@@ -505,7 +526,9 @@ def _beacon_path(ledger_path: Path) -> Path:
     return Path(ledger_path).parent.parent / "health" / f"{_HEALTH_COMPONENT}.json"
 
 
-def _report_health(ledger_path: Path, reason: str, unreadable: Sequence[str] = ()) -> None:
+def _report_health(
+    ledger_path: Path, reason: str, unreadable: Sequence[str] = (), unconfirmed: Sequence[str] = (),
+) -> None:
     """Write the ``cost-ledger`` beacon: degraded while the spool is not empty.
 
     The beacon vocabulary is the probe framework's: ``degraded`` is written as
@@ -517,10 +540,11 @@ def _report_health(ledger_path: Path, reason: str, unreadable: Sequence[str] = (
 
     spool_dir = spool_dir_for(ledger_path)
     pending = len(_spool_files(spool_dir))
-    state = "degraded" if pending or unreadable else "ok"
+    state = "degraded" if pending or unreadable or unconfirmed else "ok"
     details = {
         "state": state, "spool_pending": pending, "unreadable": list(unreadable),
-        "reason": reason, "spool_dir": str(spool_dir), "ledger": str(ledger_path),
+        "unconfirmed": list(unconfirmed), "reason": reason, "spool_dir": str(spool_dir),
+        "ledger": str(ledger_path),
     }
     try:
         beacon = HealthBeacon(Path(ledger_path).parent.parent, _HEALTH_COMPONENT, expected_interval_seconds=None)
@@ -534,16 +558,34 @@ def _report_health(ledger_path: Path, reason: str, unreadable: Sequence[str] = (
 # ---------------------------------------------------------------------------
 
 
+def _end_a_torn_tail(fh) -> None:
+    """End a last line without ``\\n`` (a torn append), so the next line starts on its own.
+
+    The caller holds the ledger lock and opened the ledger for reading too.
+    Append-only: the torn bytes stay and become one unreadable line.
+    """
+    fh.flush()
+    size = os.fstat(fh.fileno()).st_size
+    if size and os.pread(fh.fileno(), 1, size - 1) != b"\n":
+        fh.write("\n")
+
+
+def _append_record(fh, record: Mapping[str, Any]) -> None:
+    """Append ``record`` as its own line, on a valid NDJSON boundary. The caller holds the ledger lock."""
+    _end_a_torn_tail(fh)
+    fh.write(_line(record))
+
+
 def _append_unless_queued(ledger_path: Path, spool_dir: Path, record: Mapping[str, Any]) -> bool:
     """Append under the ledger lock; False when the record queued behind its run's spooled ones."""
     ledger_path.parent.mkdir(parents=True, exist_ok=True)
-    with ledger_path.open("a", encoding="utf-8") as fh:
+    with ledger_path.open("a+", encoding="utf-8") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
         try:
             if spool_file_for(spool_dir, record["run_id"]).exists():
                 _spool_record(spool_dir, record)
                 return False
-            fh.write(_line(record))
+            _append_record(fh, record)
             fh.flush()
             return True
         finally:
@@ -581,32 +623,69 @@ def record_run(run: RunCost, *, ledger_path: Optional[Path] = None) -> Dict[str,
 
 @dataclass(frozen=True)
 class ReplayResult:
-    """What one replay did. ``pending`` counts the spool files left afterwards."""
+    """What one replay did. ``pending`` counts the spool files left afterwards.
+
+    ``unconfirmed`` names the spool files kept because their records did not
+    read back from the ledger; a replay with any raises :class:`CostLedgerReplayError`.
+    """
 
     written: int = 0
     already_present: int = 0
     removed: Tuple[str, ...] = ()
     unreadable: Tuple[str, ...] = ()
     pending: int = 0
+    unconfirmed: Tuple[str, ...] = ()
 
 
-def _landed_keys(text: str) -> set:
-    keys = set()
-    for line in text.splitlines():
-        try:
-            record = json.loads(line)
-        except ValueError:
+def _canonical(record: Mapping[str, Any]) -> str:
+    return json.dumps(record, sort_keys=True, separators=(",", ":"))
+
+
+def _read_ledger(fh) -> List[Dict[str, Any]]:
+    fh.seek(0)
+    return _parse_lines(fh.read())[0]
+
+
+def _landed_keys(records: Sequence[Mapping[str, Any]]) -> set:
+    return {(record["run_id"], record["record_id"]) for record in records if _is_run_record(record)}
+
+
+def _write_missing(fh, records: Sequence[Mapping[str, Any]], landed: set) -> Tuple[int, int]:
+    """Append the records whose ``run_id`` + ``record_id`` is not in the ledger: ``(written, already)``."""
+    written = already = 0
+    for record in records:
+        key = (record["run_id"], record["record_id"])
+        if key in landed:
+            already += 1
             continue
-        if _is_run_record(record):
-            keys.add((record["run_id"], record["record_id"]))
-    return keys
+        _append_record(fh, record)
+        landed.add(key)
+        written += 1
+    return written, already
+
+
+def _read_back(fh) -> Tuple[set, Dict[str, str]]:
+    """The ledger as the aggregation reads it: every run record as canonical JSON, and each run's last line."""
+    lines = [(record["run_id"], _canonical(record)) for record in _read_ledger(fh)]
+    return {line for _run_id, line in lines}, dict(lines)
+
+
+def _reads_back(spooled: Sequence[Mapping[str, Any]], present: set, last: Mapping[str, str]) -> bool:
+    """Every spooled record is its own ledger line, equal to the spool, and each run's newest is its last line.
+
+    ``present`` and ``last`` come from :func:`_read_back`, the aggregation's
+    reading, so a record that reads back here is a run the aggregation counts.
+    """
+    newest = {record["run_id"]: _canonical(record) for record in spooled}
+    return all(_canonical(record) in present for record in spooled) and all(
+        last.get(run_id) == line for run_id, line in newest.items()
+    )
 
 
 def _replay_files(fh, spool_dir: Path) -> ReplayResult:
-    fh.seek(0)
-    landed = _landed_keys(fh.read())
+    landed = _landed_keys(_read_ledger(fh))
     written = already = 0
-    removed: List[str] = []
+    replayed: List[Tuple[Path, List[Dict[str, Any]]]] = []
     unreadable: List[str] = []
     for target in _spool_files(spool_dir):
         try:
@@ -615,20 +694,24 @@ def _replay_files(fh, spool_dir: Path) -> ReplayResult:
             logger.warning("cost_ledger: unreadable spool file left in place: %s", exc)
             unreadable.append(target.name)
             continue
-        for record in records:
-            key = (record["run_id"], record["record_id"])
-            if key in landed:
-                already += 1
-                continue
-            fh.write(_line(record))
-            landed.add(key)
-            written += 1
-        fh.flush()
-        os.fsync(fh.fileno())
-        target.unlink()
-        removed.append(target.name)
+        added, present = _write_missing(fh, records, landed)
+        written += added
+        already += present
+        replayed.append((target, records))
+    fh.flush()
+    os.fsync(fh.fileno())
+    present, last = _read_back(fh)
+    removed: List[str] = []
+    unconfirmed: List[str] = []
+    for target, records in replayed:
+        if _reads_back(records, present, last):
+            target.unlink()
+            removed.append(target.name)
+        else:
+            logger.warning("cost_ledger: %s did not read back from the ledger; the spool file stays", target.name)
+            unconfirmed.append(target.name)
     pending = len(_spool_files(spool_dir))
-    return ReplayResult(written, already, tuple(removed), tuple(unreadable), pending)
+    return ReplayResult(written, already, tuple(removed), tuple(unreadable), pending, tuple(unconfirmed))
 
 
 def _clear_a_stale_degraded(ledger_path: Path) -> None:
@@ -645,10 +728,14 @@ def replay_spool(ledger_path: Optional[Path] = None) -> ReplayResult:
     """Move every readable spool file into the ledger, once per ``run_id`` + ``record_id``.
 
     Holds the ledger lock and then the spool lock (the writer's order), so no
-    record lands between the replay's read of the ledger and its append. A
-    spool file is removed only after its lines are flushed and fsynced. An
+    record lands between the replay's read of the ledger and its append. Each
+    append starts on a valid NDJSON boundary. After the appends are flushed and
+    fsynced, still under the lock, the replay reads the ledger back; a spool
+    file is removed only when its records read back (:func:`_reads_back`). An
     unreadable spool file stays and is named in the result. Raises ``OSError``
-    when the ledger cannot be opened or written; the spool stays.
+    when the ledger cannot be opened or written, and
+    :class:`CostLedgerReplayError` when a record does not read back; in both
+    cases the spool stays.
     """
     path = Path(ledger_path) if ledger_path is not None else provider_costs._resolve_costs_path()
     spool_dir = spool_dir_for(path)
@@ -657,15 +744,19 @@ def replay_spool(ledger_path: Optional[Path] = None) -> ReplayResult:
         return ReplayResult()
     refuse_real_central_store_write_under_test_runner(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a+", encoding="utf-8") as fh:
+    with path.open("a+", encoding="utf-8", errors="replace") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
         try:
             with slot_lock(spool_dir):
                 result = _replay_files(fh, spool_dir)
         finally:
             fcntl.flock(fh, fcntl.LOCK_UN)
-    _report_health(path, reason="replay", unreadable=result.unreadable)
-    return result
+    if not result.unconfirmed:
+        _report_health(path, reason="replay", unreadable=result.unreadable)
+        return result
+    reason = f"replay: {', '.join(result.unconfirmed)} did not read back from {path} as their own lines"
+    _report_health(path, reason=reason, unreadable=result.unreadable, unconfirmed=result.unconfirmed)
+    raise CostLedgerReplayError(f"{len(result.unconfirmed)} spool file(s) kept: {reason}", result)
 
 
 # ---------------------------------------------------------------------------
@@ -705,16 +796,9 @@ class LedgerTotals:
         return f"onvolledig: {self.spool_pending} runs wachten op replay"
 
 
-def _last_line_per_run(ledger_path: Path) -> Tuple[Dict[str, Dict[str, Any]], int, int]:
-    if not ledger_path.is_file():
-        return {}, 0, 0
-    with ledger_path.open("r", encoding="utf-8", errors="replace") as fh:
-        fcntl.flock(fh, fcntl.LOCK_SH)
-        try:
-            text = fh.read()
-        finally:
-            fcntl.flock(fh, fcntl.LOCK_UN)
-    last: Dict[str, Dict[str, Any]] = {}
+def _parse_lines(text: str) -> Tuple[List[Dict[str, Any]], int, int]:
+    """``(run records in ledger order, legacy_lines, unreadable_lines)``: the one reading of the ledger text."""
+    records: List[Dict[str, Any]] = []
     legacy = unreadable = 0
     for line in text.splitlines():
         if not line.strip():
@@ -728,10 +812,23 @@ def _last_line_per_run(ledger_path: Path) -> Tuple[Dict[str, Dict[str, Any]], in
             legacy += 1
         elif isinstance(record, dict) and record["schema"] == RUN_SCHEMA and isinstance(record.get("run_id"), str) \
                 and record["run_id"]:
-            last[record["run_id"]] = record
+            records.append(record)
         else:
             unreadable += 1
-    return last, legacy, unreadable
+    return records, legacy, unreadable
+
+
+def _last_line_per_run(ledger_path: Path) -> Tuple[Dict[str, Dict[str, Any]], int, int]:
+    if not ledger_path.is_file():
+        return {}, 0, 0
+    with ledger_path.open("r", encoding="utf-8", errors="replace") as fh:
+        fcntl.flock(fh, fcntl.LOCK_SH)
+        try:
+            text = fh.read()
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+    records, legacy, unreadable = _parse_lines(text)
+    return {record["run_id"]: record for record in records}, legacy, unreadable
 
 
 def _number(value: object) -> Optional[float]:
@@ -795,7 +892,7 @@ __all__ = [
     "RUN_SCHEMA", "TOKEN_FIELDS", "ROLES", "KINDS", "BILLINGS", "SPOOL_DIR_NAME",
     "CostLedgerRefusal", "CostWithoutSource", "UnavailableWithAmount", "CorrectionWithoutSupersedes",
     "IncompleteUsageMarkedComplete", "RunIdProjectMismatch", "UnknownModel", "InvalidRecord",
-    "CostLedgerSpoolError", "RunCost", "LedgerTotals", "ReplayResult",
+    "CostLedgerSpoolError", "CostLedgerReplayError", "RunCost", "LedgerTotals", "ReplayResult",
     "split_run_id", "run_id_for", "build_record", "record_run", "replay_spool", "aggregate_runs",
     "spool_dir_for", "spool_file_for",
 ]

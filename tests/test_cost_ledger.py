@@ -15,15 +15,21 @@ Track ``kosten-per-model-in-het-grootboek``, deliverable K2a, first PR. Covers
 - spool and replay: a failing append spools the record and reports the
   ``cost-ledger`` beacon degraded, replay is idempotent per ``run_id`` +
   ``record_id``, an unreadable spool file stays and is reported;
+- a torn append: every append starts on a valid NDJSON boundary, and the replay
+  keeps a spool file until its records read back as their own lines;
 - ``vnx costs replay`` (script, pip CLI) and the dispatcher prelude tick;
 - ``emit_provider_cost`` writes the same line as before (golden).
 
 Failures are injected for real: a ledger path that is a directory makes the
-append fail with ``IsADirectoryError``, exactly as an unwritable store would.
+append fail with ``IsADirectoryError``, exactly as an unwritable store would. A
+torn append (half a line on disk, then ``ENOSPC``) and a lost write are injected
+at the ledger's file handle, so the code under test runs unchanged.
 """
 
 from __future__ import annotations
 
+import errno
+import importlib.util
 import json
 import os
 import re
@@ -562,6 +568,224 @@ class TestSpoolAndReplay:
         result = cost_ledger.replay_spool(ledger)
         assert (result.written, result.removed, result.unreadable, result.pending) == (0, (), (), 0)
         assert not ledger.exists()
+
+
+# ---------------------------------------------------------------------------
+# A torn append: the NDJSON boundary and the read-back (round 2)
+# ---------------------------------------------------------------------------
+
+class _LedgerFault:
+    """One fault on the next ledger line written through an append handle.
+
+    ``torn`` puts the first half of the line on disk and raises ``ENOSPC``, as
+    a full disk does halfway through a write. ``lost`` reports the write as done
+    and puts nothing on disk. Only a JSON line triggers it; a bare newline and
+    every write after the fault pass through.
+    """
+
+    def __init__(self, ledger_path: Path, kind: str):
+        self.ledger_path = ledger_path
+        self.kind = kind
+        self.armed = True
+
+
+class _FaultyHandle:
+    def __init__(self, fh, fault: _LedgerFault):
+        self._fh = fh
+        self._fault = fault
+
+    def __getattr__(self, name):
+        return getattr(self._fh, name)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return self._fh.__exit__(*exc_info)
+
+    def write(self, text):
+        if not (self._fault.armed and text.startswith("{")):
+            return self._fh.write(text)
+        self._fault.armed = False
+        if self._fault.kind == "lost":
+            return len(text)
+        self._fh.write(text[: len(text) // 2])
+        self._fh.flush()
+        raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+
+@pytest.fixture
+def inject(monkeypatch):
+    """``inject(ledger_path, kind)`` arms one fault on every append handle of that ledger."""
+    real_open = Path.open
+
+    def arm(ledger_path: Path, kind: str) -> _LedgerFault:
+        fault = _LedgerFault(ledger_path, kind)
+
+        def faulty_open(self, mode="r", *args, **kwargs):
+            fh = real_open(self, mode, *args, **kwargs)
+            if "a" in mode and self == fault.ledger_path:
+                return _FaultyHandle(fh, fault)
+            return fh
+
+        monkeypatch.setattr(Path, "open", faulty_open)
+        return fault
+
+    return arm
+
+
+def _line_bytes(record: dict) -> bytes:
+    return (json.dumps(record, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def _readable_lines(ledger_path: Path) -> list:
+    """The ledger's lines that parse, in order; the torn ones are skipped."""
+    readable = []
+    for line in ledger_path.read_text(encoding="utf-8").splitlines():
+        try:
+            readable.append(json.loads(line))
+        except ValueError:
+            continue
+    return readable
+
+
+def _spool_one_run(ledger_path: Path) -> dict:
+    _break_the_ledger(ledger_path)
+    record = cost_ledger.record_run(_run(), ledger_path=ledger_path)
+    _repair_the_ledger(ledger_path)
+    return record
+
+
+def _load_costs_cli():
+    spec = importlib.util.spec_from_file_location("costs_cli_under_test", COSTS_CLI)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class TestATornAppend:
+    def test_a_replay_after_a_torn_append_lands_the_record_on_its_own_line(self, ledger, inject):
+        inject(ledger, "torn")
+        record = cost_ledger.record_run(_run(), ledger_path=ledger)
+        torn = ledger.read_bytes()
+        assert torn and not torn.endswith(b"\n")
+        assert [p.name for p in _spool_dir(ledger).glob("*.json")] == [f"{RUN_A1}.json"]
+
+        result = cost_ledger.replay_spool(ledger)
+        assert (result.written, result.removed, result.pending) == (1, (f"{RUN_A1}.json",), 0)
+        totals = cost_ledger.aggregate_runs(ledger)
+        assert totals.runs == {RUN_A1: record}
+        assert totals.unreadable_lines == 1
+        assert ledger.read_bytes() == torn + b"\n" + _line_bytes(record)
+        assert not any(_spool_dir(ledger).glob("*.json"))
+        assert _beacon(ledger)["status"] == "ok"
+
+    def test_a_record_after_a_torn_append_starts_on_its_own_line(self, ledger, inject):
+        inject(ledger, "torn")
+        cost_ledger.record_run(_run(), ledger_path=ledger)
+        torn = ledger.read_bytes()
+
+        other = cost_ledger.record_run(_run(run_id=RUN_B1), ledger_path=ledger)
+        totals = cost_ledger.aggregate_runs(ledger)
+        assert totals.runs == {RUN_B1: other}
+        assert totals.unreadable_lines == 1
+        assert totals.spool_pending == 1
+        assert ledger.read_bytes() == torn + b"\n" + _line_bytes(other)
+
+    def test_a_correction_queued_behind_a_torn_charge_still_wins(self, ledger, inject):
+        inject(ledger, "torn")
+        charge = cost_ledger.record_run(_run(cost_usd=0.5), ledger_path=ledger)
+        correction = cost_ledger.record_run(
+            _run(kind="correction", supersedes=charge["record_id"], reason="corrected", cost_usd=2.0),
+            ledger_path=ledger,
+        )
+        torn = ledger.read_bytes()
+        assert json.loads((_spool_dir(ledger) / f"{RUN_A1}.json").read_text(encoding="utf-8")) == [
+            charge, correction,
+        ]
+
+        result = cost_ledger.replay_spool(ledger)
+        assert (result.written, result.pending) == (2, 0)
+        assert [line["record_id"] for line in _readable_lines(ledger)] == [
+            charge["record_id"], correction["record_id"],
+        ]
+        assert ledger.read_bytes() == torn + b"\n" + _line_bytes(charge) + _line_bytes(correction)
+        totals = cost_ledger.aggregate_runs(ledger)
+        assert totals.runs == {RUN_A1: correction}
+        assert totals.cost_usd == pytest.approx(2.0)
+        assert totals.unreadable_lines == 1
+
+    def test_a_torn_append_during_the_replay_keeps_the_spool_for_the_next(self, ledger, inject):
+        record = _spool_one_run(ledger)
+        inject(ledger, "torn")
+        with pytest.raises(OSError) as excinfo:
+            cost_ledger.replay_spool(ledger)
+        assert excinfo.value.errno == errno.ENOSPC
+        assert [p.name for p in _spool_dir(ledger).glob("*.json")] == [f"{RUN_A1}.json"]
+        torn = ledger.read_bytes()
+        assert torn and not torn.endswith(b"\n")
+
+        result = cost_ledger.replay_spool(ledger)
+        assert (result.written, result.pending) == (1, 0)
+        totals = cost_ledger.aggregate_runs(ledger)
+        assert totals.runs == {RUN_A1: record}
+        assert totals.unreadable_lines == 1
+        assert ledger.read_bytes() == torn + b"\n" + _line_bytes(record)
+
+    def test_a_whole_ledger_gets_no_extra_newline(self, ledger):
+        first = cost_ledger.record_run(_run(), ledger_path=ledger)
+        second = cost_ledger.record_run(_run(run_id=RUN_B1), ledger_path=ledger)
+        assert ledger.read_bytes() == _line_bytes(first) + _line_bytes(second)
+
+    def test_a_replayed_record_that_does_not_read_back_keeps_the_spool(self, ledger, inject):
+        record = _spool_one_run(ledger)
+        spool_file = _spool_dir(ledger) / f"{RUN_A1}.json"
+        spooled = spool_file.read_text(encoding="utf-8")
+
+        inject(ledger, "lost")
+        with pytest.raises(OSError, match="did not read back") as excinfo:
+            cost_ledger.replay_spool(ledger)
+        assert isinstance(excinfo.value, cost_ledger.CostLedgerReplayError)
+        assert excinfo.value.result.unconfirmed == (spool_file.name,)
+        assert excinfo.value.result.removed == ()
+        assert spool_file.read_text(encoding="utf-8") == spooled
+        beacon = _beacon(ledger)
+        assert beacon["details"]["state"] == "degraded"
+        assert beacon["details"]["unconfirmed"] == [spool_file.name]
+        assert cost_ledger.aggregate_runs(ledger).spool_pending == 1
+
+        retry = cost_ledger.replay_spool(ledger)
+        assert (retry.written, retry.removed, retry.pending) == (1, (spool_file.name,), 0)
+        assert _lines(ledger) == [record]
+        assert _beacon(ledger)["status"] == "ok"
+
+    def test_a_charge_landing_after_its_correction_keeps_the_spool(self, ledger):
+        """Last written wins: the spool stays while the run's last line is not its newest record."""
+        _break_the_ledger(ledger)
+        charge = cost_ledger.record_run(_run(cost_usd=0.5), ledger_path=ledger)
+        _repair_the_ledger(ledger)
+        correction = cost_ledger.record_run(
+            _run(kind="correction", supersedes=charge["record_id"], reason="corrected", cost_usd=2.0),
+            ledger_path=ledger,
+        )
+        ledger.write_bytes(_line_bytes(correction))
+
+        with pytest.raises(OSError, match="did not read back"):
+            cost_ledger.replay_spool(ledger)
+        assert json.loads((_spool_dir(ledger) / f"{RUN_A1}.json").read_text(encoding="utf-8")) == [
+            charge, correction,
+        ]
+        assert _beacon(ledger)["details"]["state"] == "degraded"
+
+    def test_the_command_exits_two_when_a_record_does_not_read_back(self, inject, capsys):
+        default = provider_costs._resolve_costs_path()
+        _spool_one_run(default)
+        inject(default, "lost")
+
+        costs_cli = _load_costs_cli()
+        assert costs_cli.main(["replay"]) == costs_cli.EXIT_FAILED
+        assert "replay failed, the spool stays" in capsys.readouterr().err
+        assert [p.name for p in _spool_dir(default).glob("*.json")] == [f"{RUN_A1}.json"]
 
 
 # ---------------------------------------------------------------------------

@@ -82,7 +82,7 @@ Mislukt het schrijven, dan gaat dezelfde regel naar `events/provider_costs.spool
 
 Wacht er een regel van een run in de spool, dan gaat een latere regel van dezelfde run er ook in. Zo komt een correctie nooit vóór de regel die ze vervangt in het grootboek, en betekent "laatste regel" ook "laatst geschreven".
 
-`vnx costs replay` brengt de spool in het grootboek: één keer per `run_id` + `record_id`. Een spoolbestand verdwijnt pas als zijn regels geschreven en gesynchroniseerd zijn. Een onleesbaar spoolbestand blijft staan en wordt gemeld. De dispatcher-prelude roept de replay elke tik aan, met dezelfde drempel als `lease_sweep` (`VNX_COST_LEDGER_REPLAY_INTERVAL_SEC`, standaard 30 seconden). Een mislukte replay stopt de prelude niet. Hij wordt gelogd en de spool blijft.
+`vnx costs replay` brengt de spool in het grootboek: één keer per `run_id` + `record_id`. Elke append, in `record_run` en in de replay, sluit onder de `flock` eerst een afgebroken laatste regel af met `\n`. Er verdwijnt geen byte: het afgebroken stuk telt als één onleesbare regel. Een spoolbestand verdwijnt pas als de replay het grootboek na de fsync terugleest en elke regel eruit terugvindt als eigen regel, met de nieuwste regel van elke run als laatste. Anders blijft het bestand staan, blijft het beacon degraded en eindigt `vnx costs replay` met exit 2. Een onleesbaar spoolbestand blijft staan en wordt gemeld. De dispatcher-prelude roept de replay elke tik aan, met dezelfde drempel als `lease_sweep` (`VNX_COST_LEDGER_REPLAY_INTERVAL_SEC`, standaard 30 seconden). Een mislukte replay stopt de prelude niet. Hij wordt gelogd en de spool blijft.
 
 De tik hangt niet aan `VNX_SUPERVISOR_MODE`. De spool is het herstelpad van het grootboek en geen supervisie. Een regel in de spool ontbreekt in elke som tot hij is teruggezet.
 
@@ -104,5 +104,5 @@ Het grootboek is een NDJSON-bestand per project-store. Komt er ooit een projecti
 - Het oude formaat blijft bestaan tot de lanes over zijn. `emit_provider_cost` en zijn aanroepers zijn ongewijzigd. De harness-lanes gaan in K2a-2 over op `record_run`; codex en kimi in K2b.
 - De identiteit is strenger dan de prijsopzoeking. Een model dat het register niet kent, levert geen regel op maar een fout. Een lane die zo'n model draait, moet eerst in het register. Dat is de bedoeling: een geraden identiteit is precies de fout van OI-2186.
 - Een run zonder segmenten op een lane met piek en dal wordt tegen het piektarief geboekt. Dat is een bovengrens. K2a-2 levert de segmenten uit het transcript.
-- De replay leest het hele grootboek om te zien wat al geland is. Dat gebeurt alleen als er iets in de spool staat.
+- De replay leest het hele grootboek twee keer: vooraf om te zien wat al geland is, achteraf om terug te lezen wat hij schreef. Dat gebeurt alleen als er iets in de spool staat.
 - De prelude start elke 30 seconden een Python-proces voor de replay, ook in legacy-modus. Met een lege spool schrijft dat proces niets.
