@@ -160,11 +160,11 @@ def read_verdicts(state_dir: Path, pr_number: int) -> Tuple[CapVerdict, ...]:
                 f"SELECT {', '.join(_COLUMNS)} FROM {TABLE} WHERE project_id = ? AND pr_number = ? "
                 "ORDER BY created_at, verdict_id", (stamp_project_id(conn), pr_number),
             ).fetchall()
+            return tuple(CapVerdict.from_row(row) for row in rows)
         finally:
             conn.close()
-    except (sqlite3.Error, RuntimeError, ValueError) as exc:
+    except (sqlite3.Error, RuntimeError, ValueError, TypeError) as exc:
         raise CapVerdictError(f"{TABLE} in {path} could not be read: {exc}") from exc
-    return tuple(CapVerdict.from_row(row) for row in rows)
 
 
 def record_verdict(state_dir: Path, verdict: CapVerdict) -> Tuple[str, CapVerdict]:

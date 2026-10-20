@@ -267,6 +267,42 @@ class TestTheGrantedRound:
         assert landed is False, "the writer refuses it too: it is the backstop for a run without a request"
         assert _granted(env["ledger"]) == []
 
+    def test_a_reanchored_verdict_never_uses_the_granted_round(self, tmp_path):
+        import review_rounds
+
+        ledger = tmp_path / "rounds.ndjson"
+        _write_ledger(ledger, [_opened(), _line("codex_gate", CAP, "fail", 3, at=1)])
+        reanchor = review_rounds.RoundLine.from_dict(
+            {**_line("codex_gate", HEAD, "fail", 3, at=1), "reanchored_from": CAP},
+        )
+
+        def qualified(_cap, _lines, _since):
+            return review_rounds.Grant(_vid(CAP), X, CAP, qualified_head=HEAD)
+
+        with pytest.raises(review_rounds.RoundRefusal) as refused:
+            review_rounds.append_verdict(ledger, reanchor, grant_for=qualified)
+
+        assert refused.value.reason == "b3_cap"
+        assert [line for line in _ledger_lines(ledger) if line.get("granted_by")] == []
+
+    def test_a_verdict_row_that_does_not_parse_grants_nothing(self, tmp_path):
+        import review_cap_verdicts
+        import review_rounds
+
+        state = tmp_path / ".vnx-data" / PID / "state"
+        state.mkdir(parents=True)
+        _create_verdicts_table(state)
+        _store_verkleinen(state, CAP)
+        conn = sqlite3.connect(str(state / "runtime_coordination.db"))
+        conn.execute("UPDATE review_cap_verdicts SET oi_ids = 'not json'")
+        conn.commit()
+        conn.close()
+        cap = review_rounds.cap_state([review_rounds.RoundLine.from_dict(_line("codex_gate", CAP, "fail", 3, at=1))], PR)
+
+        with pytest.raises(review_cap_verdicts.CapVerdictError):
+            review_cap_verdicts.read_verdicts(state, PR)
+        assert review_cap_verdicts.door_grant(state, cap) is None
+
     def test_the_raw_table_here_is_the_migration_table(self, tmp_path):
         from migrations import apply_0035
 

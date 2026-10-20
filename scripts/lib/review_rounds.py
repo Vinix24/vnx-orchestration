@@ -927,7 +927,10 @@ def _check_append(ledger: Ledger, line: RoundLine, grant_for: Optional[GrantReso
     cap = cap_state(lines, line.pr_number)
     if not cap.capped:
         return line
-    grant = grant_for(cap, lines, ledger.since(line.project_id, line.pr_number)) if grant_for else None
+    # A re-anchor carries a verdict given on another head; it never uses the granted round.
+    grant = None if line.reanchored_from or grant_for is None else grant_for(
+        cap, lines, ledger.since(line.project_id, line.pr_number),
+    )
     if grant is not None and round_granted_past_cap(cap, head_sha=line.head_sha, grant=grant, lines=lines):
         return replace(line, granted_by=grant.verdict_id)
     raise RoundRefusal(REFUSED_B3_CAP, cap_refusal_text(cap, where="verdict not booked"))
