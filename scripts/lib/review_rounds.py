@@ -70,7 +70,7 @@ PR's branch), and ``review_rounds_cli`` (``vnx review rounds open``).
 
 BILLING SAFETY: no Anthropic SDK, no network, no subprocess in this module.
 The writer's grant check (``review_cap_verdicts``) reads commit messages with
-``git``.
+``git``, before it takes the ledger lock: no git runs under it (OI-2202).
 """
 from __future__ import annotations
 
@@ -1366,15 +1366,26 @@ def book_result_verdict(
             gate, payload.get("pr_number") or payload.get("pr_id"),
         )
         return VerdictBooking("headless", "the verdict names no head")
-    grant_for = _grant_resolver(path.parent.parent, line.head_sha) if line.seat == CODEX_SEAT else None
+    # Only a codex-seat verdict of its own, without an override, can use a granted round (_check_append).
+    uses_grant = line.seat == CODEX_SEAT and not line.override and not line.reanchored_from
+    grant_for = _grant_resolver(path.parent.parent, line) if uses_grant else None
     return VerdictBooking(append_verdict(path, line, grant_for=grant_for), line=line)
 
 
-def _grant_resolver(state_dir: Path, head_sha: str) -> GrantResolver:
-    """The writer's backstop: the grant standing on the cap, qualified for this verdict's head (R2a)."""
-    def resolve(cap: CapState, lines: Tuple[RoundLine, ...], since: str) -> Optional[Grant]:
-        import review_cap_verdicts
+def _grant_resolver(state_dir: Path, line: RoundLine) -> GrantResolver:
+    """The writer's backstop: the grant standing on the cap, qualified for this verdict's head (R2a).
 
-        return review_cap_verdicts.grant_or_none(state_dir, cap, lines, head_sha=head_sha, since=since)
+    The git facts are resolved here, before :func:`append_verdict` takes the
+    ledger lock (OI-2202): under the lock the resolver reads the verdict store
+    and those facts, and runs no git.
+    """
+    import review_cap_verdicts
+
+    carries = review_cap_verdicts.resolved_carries(state_dir, line.pr_number, line.head_sha)
+
+    def resolve(cap: CapState, lines: Tuple[RoundLine, ...], since: str) -> Optional[Grant]:
+        return review_cap_verdicts.grant_or_none(
+            state_dir, cap, lines, head_sha=line.head_sha, since=since, carries=carries,
+        )
 
     return resolve

@@ -18,8 +18,12 @@ at the cap (``review_rounds.cap_state``), ``vnx review cap-verdict --pr N
   exactly one named intervention. A findings list, a second intervention or an
   outcome the rule does not allow fails loud (``TiebreakerParseError``); a lane
   without an answer is ``TiebreakerNoAnswerError``. Neither records anything.
+- **The input is not the answer.** Every text the brief embeds (the diff
+  stat's file paths, the ledger rows) has its answer fences disarmed, so a
+  block that came from the input never parses as the decision (OI-2203).
 - **No second question.** A verdict on the head that is due is looked up
-  first; a repeat after a crash returns it and calls no model. When only one
+  first, in the store and then in the receipt ledger (a receipt whose row did
+  not land, OI-2201); a repeat after a crash returns it and calls no model. When only one
   outcome is left (after the extra round), no model is asked either: the rule
   decides, and the record says so (``tiebreaker_model`` empty).
 
@@ -76,7 +80,7 @@ class CapAnswer:
 
 @dataclass(frozen=True)
 class CapDecision:
-    """What ``decide`` did: ``recorded`` a new verdict, or found one ``present``."""
+    """What ``decide`` did: ``recorded`` a new verdict, ``restored`` one from its receipt, or found one ``present``."""
 
     status: str
     verdict: rcv.CapVerdict
@@ -130,6 +134,17 @@ def _default_dispatcher(data_dir: Optional[str], timeout_seconds: int) -> Dispat
 # ---------------------------------------------------------------------------
 
 
+def _disarm_fences(text: str) -> str:
+    """Input embedded in the brief, with this brief's answer fence and the plan gate's broken (OI-2203).
+
+    A file path in the diff stat or a text from the ledger is not the model's
+    answer. Quoted back in its report, an intact ``vnx-review-cap-tiebreak``
+    fence would be read by :func:`parse_answer` as the decision; a space after
+    the backticks breaks the exact opener it matches.
+    """
+    return pgt._disarm_fences(text).replace("```" + FENCE, "``` " + FENCE)
+
+
 def _blockers_block(cap: review_rounds.CapState) -> str:
     rows = [
         f"  round {index}: head {line.head_sha[:12]}, {line.verdict.upper()} with {line.blocking_count} blocker(s)"
@@ -142,13 +157,17 @@ def _blockers_block(cap: review_rounds.CapState) -> str:
 def build_instruction(
     pr_number: int, step: rcv.CapStep, cap: review_rounds.CapState, diff_stat: str,
 ) -> str:
-    """The tiebreaker's brief: the rule, the blockers per head, the diff stat, the allowed outcomes."""
+    """The tiebreaker's brief: the rule, the blockers per head, the diff stat, the allowed outcomes.
+
+    Every text the brief embeds is disarmed (:func:`_disarm_fences`): the only
+    armed answer fence in it is the brief's own template.
+    """
     choices = "\n".join(f"  - {outcome}: {_OUTCOME_BRIEF[outcome]}" for outcome in step.allowed)
     return (
         f"You are the tiebreaker at the B3 review cap of PR #{pr_number}. The cap rule is {step.rule}: "
         f"{_MEANING[step.rule]}. The review loop has stopped; you decide the next step, you do not review.\n\n"
-        f"Codex-seat blockers per head (round ledger):\n{_blockers_block(cap)}\n\n"
-        f"Diff stat of the PR:\n{pgt._disarm_fences(diff_stat)}\n\n"
+        f"Codex-seat blockers per head (round ledger):\n{_disarm_fences(_blockers_block(cap))}\n\n"
+        f"Diff stat of the PR:\n{_disarm_fences(diff_stat)}\n\n"
         f"Choose exactly ONE outcome:\n{choices}\n\n"
         "Rules: never return findings or a list of problems. For verkleinen name exactly ONE intervention, "
         "a single concrete change that makes the PR smaller. Answer with one fenced block and nothing after it:\n"
@@ -296,9 +315,11 @@ def decide(
 ) -> CapDecision:
     """The verdict on the cap of PR ``pr_number``: the one that stands, or a new one.
 
-    Raises :class:`CapTiebreakerError` (below the cap, no dispatch to bind, no
-    diff stat, the ledger), the two tiebreaker errors (no verdict recorded),
-    and what ``record_verdict`` raises.
+    A verdict whose receipt landed and whose row did not (OI-2201) is booked
+    from that receipt, ``"restored"``: the receipt decided, no model is asked
+    again. Raises :class:`CapTiebreakerError` (below the cap, no dispatch to
+    bind, no diff stat, the ledger), the two tiebreaker errors (no verdict
+    recorded), and what ``record_verdict`` raises.
     """
     lines, since = _ledger_view(state_dir, pr_number)
     cap = review_rounds.cap_state(lines, pr_number)
@@ -307,6 +328,10 @@ def decide(
         raise CapTiebreakerError(f"{cap.summary()}: there is nothing for the tiebreaker to decide")
     if step.kind != rcv.DECIDE:
         return CapDecision("present", step.verdict, step)
+    landed = rcv.receipted_verdict(state_dir, pr_number, rcv.verdict_id_for(pr_number, step.head_sha))
+    if landed is not None:
+        status, verdict = rcv.record_verdict(state_dir, landed)
+        return CapDecision(status, verdict, step)
     if len(step.allowed) == 1:
         status, verdict = rcv.record_verdict(state_dir, _forced(pr_number, step))
         return CapDecision(status, verdict, step)
