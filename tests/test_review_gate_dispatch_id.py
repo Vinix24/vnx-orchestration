@@ -55,12 +55,35 @@ def _codex_only(monkeypatch) -> None:
     monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0")
 
 
+_SENTINEL = "_warned_review_gate_no_dispatch_id"
+
+
+def _sentinel_holders() -> list:
+    """Every module object `_warn_if_review_gate_missing_dispatch_id` consults.
+
+    Mirrors the candidate list in append_receipt_internals/validation.py: the
+    canonical `sys.modules["append_receipt"]` plus the active facade module.
+    """
+    from append_receipt_internals.common import get_facade_module
+
+    holders: list = []
+    for mod in (sys.modules.get("append_receipt"), get_facade_module()):
+        if mod is not None and not any(mod is seen for seen in holders):
+            holders.append(mod)
+    return holders
+
+
+def _reset_sentinels(monkeypatch) -> None:
+    for mod in _sentinel_holders():
+        monkeypatch.setattr(mod, _SENTINEL, False, raising=False)
+
+
 @pytest.fixture(autouse=True)
-def reset_warning_flag():
-    """Reset the one-time warning sentinel between tests."""
-    append_receipt._warned_review_gate_no_dispatch_id = False
+def reset_warning_flag(monkeypatch):
+    """Reset the one-time warning sentinel on every module object, before and after each test."""
+    _reset_sentinels(monkeypatch)
     yield
-    append_receipt._warned_review_gate_no_dispatch_id = False
+    _reset_sentinels(monkeypatch)
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +190,36 @@ def test_append_receipt_warns_once_on_review_gate_request_missing_dispatch_id():
     assert len(warn_calls) == 1, "Warning should fire exactly once per process run"
     assert warn_calls[0]["level"] == "WARN"
     assert warn_calls[0]["code"] == "review_gate_request_missing_dispatch_id"
+
+
+def test_sentinel_reset_covers_a_second_facade_module(monkeypatch):
+    """A sentinel left True on the facade object (not `append_receipt`) must not suppress the warning."""
+    import types
+
+    from append_receipt_internals import common
+
+    other_facade = types.ModuleType("append_receipt_other_worker_facade")
+    setattr(other_facade, _SENTINEL, True)
+    monkeypatch.setattr(common, "_facade_modules", [*common._facade_modules, other_facade])
+
+    _reset_sentinels(monkeypatch)
+
+    assert any(mod is other_facade for mod in _sentinel_holders())
+    assert all(getattr(mod, _SENTINEL) is False for mod in _sentinel_holders())
+
+    warn_calls: List[str] = []
+    original_emit = append_receipt._emit
+
+    def capturing_emit(level, code, **fields):
+        warn_calls.append(code)
+        original_emit(level, code, **fields)
+
+    with patch.object(append_receipt, "_emit", side_effect=capturing_emit):
+        append_receipt._warn_if_review_gate_missing_dispatch_id(
+            "review_gate_request", {"event_type": "review_gate_request", "dispatch_id": ""}
+        )
+
+    assert warn_calls.count("review_gate_request_missing_dispatch_id") == 1
 
 
 # ---------------------------------------------------------------------------

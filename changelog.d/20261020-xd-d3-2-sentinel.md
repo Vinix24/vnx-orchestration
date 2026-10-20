@@ -1,0 +1,1 @@
+- Tests (xdist triage D3-2): the once-per-process review-gate warning test now resets its sentinel on every module object the validation consults, so it no longer fails on a worker where another test left it set on the facade.
