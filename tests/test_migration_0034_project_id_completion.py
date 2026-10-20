@@ -358,7 +358,7 @@ def _make_store_and_migrate(make_store, shape: str, pid: str) -> Path:
 @pytest.mark.parametrize("shape", SHAPES)
 def test_composite_index_audit_reports_nothing_missing(make_store, shape):
     db = _make_store_and_migrate(make_store, shape, "proj-a")
-    assert _user_version(db) == 34
+    assert _user_version(db) == 35
     conn = sqlite3.connect(str(db))
     try:
         audit = composite_index_audit(conn)
@@ -391,7 +391,8 @@ def test_execution_targets_rows_survive_with_the_store_id(make_store):
 
 def test_sales_copilot_shape_gains_only_ux_indexes(make_store):
     """The ux_<table>_pid indexes and the upsert's per-project key are the only
-    new objects; the table SQL and the rows stay as they were."""
+    new objects of 0034 (0035 adds review_cap_verdicts and its two indexes); the
+    table SQL and the rows stay as they were."""
     db = make_store("sales-copilot", "sales-copilot")
     schema_before = _schema(db)
     rows_before = {t: _rows_hash(db, t, ["*"]) for t in SEVEN}
@@ -402,6 +403,9 @@ def test_sales_copilot_shape_gains_only_ux_indexes(make_store):
     added = set(schema_after) - set(schema_before)
     assert added == {("index", f"ux_{t}_pid") for t in SEVEN + UX_OUTSIDE_THE_SEVEN} | {
         ("index", UPSERT_INDEX)
+    } | {
+        ("table", "review_cap_verdicts"), ("index", "sqlite_autoindex_review_cap_verdicts_1"),
+        ("index", "ux_review_cap_verdicts_one_verkleinen"),
     }
     assert set(schema_before) <= set(schema_after)
     for key, value in schema_before.items():
@@ -415,12 +419,12 @@ def test_sales_copilot_shape_gains_only_ux_indexes(make_store):
 @pytest.mark.parametrize("shape", SHAPES)
 def test_second_run_is_a_noop(make_store, shape):
     db = _make_store_and_migrate(make_store, shape, "proj-a")
-    assert _user_version(db) == 34
+    assert _user_version(db) == 35
     schema_first, hash_first = _schema(db), _file_hash(db)
 
     assert auto_apply(db) == []
 
-    assert _user_version(db) == 34
+    assert _user_version(db) == 35
     assert _schema(db) == schema_first
     assert _file_hash(db) == hash_first
 
@@ -492,7 +496,7 @@ def test_a_store_of_another_project_keeps_its_own_id(make_store):
 
 
 def test_manifest_v34_holds_after_0034_and_heals_a_lost_index(make_store):
-    assert schema_manifest.TERMINAL_VERSION == 34
+    assert schema_manifest.TERMINAL_VERSION == 35
     unmigrated = make_store("vnx-dev", "vnx-dev")
     conn = sqlite3.connect(str(unmigrated))
     try:
@@ -512,7 +516,7 @@ def test_manifest_v34_holds_after_0034_and_heals_a_lost_index(make_store):
         conn.close()
     assert (result.reconciled, result.corrected) == (True, 33)
 
-    assert auto_apply(unmigrated) == [34]
+    assert auto_apply(unmigrated) == [34, 35]
     conn = sqlite3.connect(str(unmigrated))
     try:
         assert composite_index_audit(conn)["missing"] == []
@@ -901,15 +905,16 @@ def test_a_shape_the_manifest_rejects_is_refused_and_left_untouched(make_store, 
 @pytest.mark.parametrize("shape", ["vnx-dev", "website", "fresh", "sales-copilot", "stamped"])
 def test_every_store_0034_stamps_holds_the_v34_manifest(make_store, templates, tmp_path, shape):
     """The other side: what 0034 does stamp 34, the manifest accepts, also after
-    tenant stamping, so reconcile_user_version leaves it at 34."""
+    tenant stamping; 0035 then stamps 35 and reconcile_user_version leaves it there."""
     db = _upsert_store(make_store, templates, tmp_path, shape, "proj-a")
     conn = sqlite3.connect(str(db))
     try:
         assert schema_manifest.validate_db_at_version(conn, 34) == []
+        assert schema_manifest.validate_db_at_version(conn, 35) == []
         result = schema_manifest.reconcile_user_version(conn)
     finally:
         conn.close()
-    assert (result.reconciled, result.corrected) == (False, 34)
+    assert (result.reconciled, result.corrected) == (False, 35)
 
 
 # ---------------------------------------------------------------------------

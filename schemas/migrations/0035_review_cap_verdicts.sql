@@ -1,0 +1,51 @@
+-- 0035_review_cap_verdicts.sql
+-- Track review-stopregel-en-lichte-stoelen, R2a: the tiebreaker at the B3 cap (ADR-041).
+--
+-- Purpose: store the verdict one registry model gives on a PR at the B3 review
+--          cap (review_rounds.cap_state, R1). B3.1 is decided as verkleinen or
+--          terug-naar-plan, B3.2 as verkleinen or mergen-met-OI. R2a carries
+--          out verkleinen only; the other outcome is recorded as
+--          outcome_unavailable_in_r2a with the model's choice in chosen_outcome.
+--
+-- Target shape:
+--   CREATE TABLE IF NOT EXISTS review_cap_verdicts (
+--       project_id          TEXT    NOT NULL DEFAULT '<store id>',
+--       pr_number           INTEGER NOT NULL,
+--       verdict_id          TEXT    NOT NULL,      -- cap-pr<N>-<head>: one per decided head
+--       head_sha            TEXT    NOT NULL,      -- the head the verdict decides on
+--       cap_rule            TEXT    NOT NULL CHECK (cap_rule IN ('B3.1', 'B3.2')),
+--       outcome             TEXT    NOT NULL CHECK (outcome IN (
+--           'verkleinen', 'terug-naar-plan', 'mergen-met-OI', 'outcome_unavailable_in_r2a')),
+--       chosen_outcome      TEXT    NOT NULL,      -- what the tiebreaker chose
+--       intervention        TEXT    NOT NULL DEFAULT '',   -- the one named intervention
+--       oi_ids              TEXT    NOT NULL DEFAULT '[]', -- JSON list of OI ids
+--       granted_dispatch_id TEXT    NOT NULL DEFAULT '',   -- the dispatch of the granted round
+--       tiebreaker_model    TEXT    NOT NULL DEFAULT '',   -- registry model id, '' when no model chose
+--       rationale           TEXT    NOT NULL DEFAULT '',
+--       created_at          TEXT    NOT NULL,
+--       PRIMARY KEY (project_id, pr_number, verdict_id),
+--       CHECK (outcome <> 'verkleinen' OR (intervention <> '' AND granted_dispatch_id <> ''))
+--   );
+--   CREATE UNIQUE INDEX IF NOT EXISTS ux_review_cap_verdicts_one_verkleinen
+--       ON review_cap_verdicts (project_id, pr_number) WHERE outcome = 'verkleinen';
+--
+-- ADR-007 binding: the composite PRIMARY KEY over (project_id, pr_number,
+--          verdict_id) is the tenant key. The partial UNIQUE refuses a second
+--          verkleinen on one PR inside the store.
+--
+-- Post-condition: the v35 schema manifest (scripts/lib/schema_manifest.py)
+-- holds for the table and composite_index_audit reports nothing missing. A
+-- table or index of one of these names in another shape turns IF NOT EXISTS
+-- into a silent no-op; the runner refuses that store instead of stamping 35.
+--
+-- This file is not executed as-is. The default is the store's id, resolved
+-- fail-closed from the DB path (resolve_init_project_id, strict), as in 0034.
+-- The runner creates this shape inside one SAVEPOINT, checks it, and only then
+-- stamps user_version 35. An unresolvable store, a source conflict or a failed
+-- post-condition rolls back and leaves user_version at 34.
+--
+-- No down migration: the table is additive and nothing before it reads it.
+--
+-- Target DB:  runtime_coordination.db
+-- Applied by: scripts/lib/migrations/apply_0035.py (via auto_apply.py)
+-- Tested by:  tests/test_migration_0035_review_cap_verdicts.py

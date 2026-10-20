@@ -36,7 +36,7 @@ from migrations.auto_apply import auto_apply
 
 _MIGRATIONS_DIR = _REPO_ROOT / "schemas" / "migrations"
 _RUNNERS_DIR = _REPO_ROOT / "scripts" / "lib" / "migrations"
-_TERMINAL = 34
+_TERMINAL = 35
 
 #: The seven runtime tables 0015 gives project_id (its runtime partition).
 _P4_RUNTIME_TABLES = (
@@ -453,7 +453,7 @@ def test_store_at_terminal_is_not_touched(tmp_path, monkeypatch, fleet_shape):
     db_path = _vnx_migrate_route_store(tmp_path, "proj-a")
     if fleet_shape == "without-0015-columns":
         _strip_0015_runtime_columns(db_path)
-        assert auto_apply(db_path) == [34]
+        assert auto_apply(db_path) == [34, 35]
     conn = sqlite3.connect(str(db_path))
     for pid in ("proj-a", "proj-b"):
         conn.execute(
