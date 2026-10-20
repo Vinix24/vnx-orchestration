@@ -40,9 +40,13 @@ against it.
 (R2a, ADR-041) for the next step and records it in ``review_cap_verdicts``: one
 outcome, never a findings list. ``verkleinen`` grants one extra codex-seat
 round to the dispatch ``--for-dispatch`` names. A verdict that already stands
-is shown, and no model is asked again. Exit 0 with a verdict (also one R2a
-cannot carry out, ``outcome_unavailable_in_r2a``: the cap stays closed), 2 when
-nothing can be decided.
+is shown, and no model is asked again. The verdict's ``review_cap_verdict``
+receipt is written first and its row only after it landed (ADR-005, OI-2201):
+a verdict without a receipt grants nothing. A receipt that landed while its row
+did not is booked from the receipt (``restored``). Exit 0 with a verdict (also
+one R2a cannot carry out, ``outcome_unavailable_in_r2a``: the cap stays closed),
+1 when the receipt could not be written (no row, no granted round: run it
+again), 2 when nothing can be decided.
 
 Usage:
   python3 scripts/review_rounds_cli.py rounds open --pr 2089 --reason "reviewed before R1: B3.1 in round 1, operator merged"
@@ -69,7 +73,6 @@ EXIT_RECEIPT_FAILED = 1
 EXIT_ERROR = 2
 
 RECEIPT_EVENT = "review_round_opened"
-CAP_VERDICT_EVENT = "review_cap_verdict"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -127,11 +130,9 @@ def _state_dir(args, command: str) -> Optional[Path]:
 
 
 def _cap_verdict(args) -> int:
-    """``cap-verdict``: the tiebreaker's verdict on a capped PR, recorded once; one receipt for a new one."""
+    """``cap-verdict``: the tiebreaker's verdict on a capped PR, booked once: its receipt, then its row."""
     import review_cap_tiebreaker
     import review_cap_verdicts
-    from governance_receipts import AppendReceiptError, emit_governance_receipt
-    from review_rounds import RECEIPTS_NAME
 
     if args.pr <= 0:
         print("vnx review cap-verdict: --pr must be a positive PR number", file=sys.stderr)
@@ -143,20 +144,15 @@ def _cap_verdict(args) -> int:
         decision = review_cap_tiebreaker.decide(
             state_dir, args.pr, for_dispatch=args.for_dispatch.strip(), data_dir=str(_data_dir(args.data_dir)),
         )
+    except review_cap_verdicts.CapVerdictReceiptError as exc:
+        print(f"vnx review cap-verdict: PR #{args.pr}: {exc}. Run it again", file=sys.stderr)
+        return EXIT_RECEIPT_FAILED
     except (review_cap_tiebreaker.CapTiebreakerError, review_cap_tiebreaker.TiebreakerParseError,
             review_cap_tiebreaker.TiebreakerNoAnswerError, review_cap_verdicts.CapVerdictError,
             review_cap_verdicts.CapVerdictRefused) as exc:
         print(f"vnx review cap-verdict: no verdict recorded for PR #{args.pr}: {exc}", file=sys.stderr)
         return EXIT_ERROR
     verdict = decision.verdict
-    if decision.status == "recorded":
-        try:
-            emit_governance_receipt(
-                CAP_VERDICT_EVENT, receipt_kind="state_mutation", receipts_file=str(state_dir / RECEIPTS_NAME),
-                **verdict.to_dict(),
-            )
-        except (AppendReceiptError, OSError, ValueError) as exc:
-            print(f"vnx review cap-verdict: the verdict stands, the receipt was not written: {exc}", file=sys.stderr)
     if args.json:
         print(json.dumps({"status": decision.status, **verdict.to_dict()}, indent=2))
         return EXIT_OK

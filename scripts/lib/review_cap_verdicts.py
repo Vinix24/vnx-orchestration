@@ -10,6 +10,11 @@ means for the gate, the writer and the doors:
   (migration 0035), keyed by (``project_id``, ``pr_number``, ``verdict_id``)
   per ADR-007. ``verdict_id`` is ``cap-pr<N>-<head>``: one verdict per head the
   cap is decided on, so a repeat after a crash finds the row and writes nothing.
+- **The receipt first** (ADR-005, OI-2201). A verdict is booked as its
+  ``review_cap_verdict`` receipt in the store's receipt ledger, then its row:
+  the grant a ``verkleinen`` row carries exists only once its receipt landed.
+  The receipt is the canonical record and the row its projection, so a
+  receipt whose row did not land is booked from the receipt, never decided again.
 - **The outcomes.** B3.1 is ``verkleinen`` or ``terug-naar-plan``, B3.2 is
   ``verkleinen`` or ``mergen-met-OI``. R2a carries out ``verkleinen`` only. The
   other outcome of a rule is recorded as ``outcome_unavailable_in_r2a`` with the
@@ -35,16 +40,18 @@ import logging
 import re
 import sqlite3
 import subprocess
+import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, Optional, Sequence, Tuple
 
 import review_rounds
 
 logger = logging.getLogger(__name__)
 
 TABLE = "review_cap_verdicts"
+RECEIPT_EVENT = "review_cap_verdict"
 
 VERKLEINEN = "verkleinen"
 TERUG_NAAR_PLAN = "terug-naar-plan"
@@ -66,7 +73,14 @@ _COLUMNS = (
     "project_id", "pr_number", "verdict_id", "head_sha", "cap_rule", "outcome", "chosen_outcome",
     "intervention", "oi_ids", "granted_dispatch_id", "tiebreaker_model", "rationale", "created_at",
 )
-_GIT_TIMEOUT = 30
+# Seconds for one grant lookup in git: the log, the fetch it may need and the log again share it.
+_GIT_BUDGET = 30
+# A commit SHA as the store and the ledger hold it; nothing else goes to git.
+_SHA = re.compile(r"[0-9a-f]{7,40}")
+
+#: Does ``head_sha`` carry a commit of ``dispatch_id`` that ``since_head`` does
+#: not carry? Called as ``carries(since_head, head_sha, dispatch_id)``.
+CarriesFn = Callable[[str, str, str], bool]
 
 
 class CapVerdictError(RuntimeError):
@@ -75,6 +89,10 @@ class CapVerdictError(RuntimeError):
 
 class CapVerdictRefused(ValueError):
     """A verdict the store may not take: a second ``verkleinen`` on one PR."""
+
+
+class CapVerdictReceiptError(RuntimeError):
+    """The verdict's receipt did not land: no row was written, so no grant stands (ADR-005)."""
 
 
 @dataclass(frozen=True)
@@ -168,18 +186,49 @@ def read_verdicts(state_dir: Path, pr_number: int) -> Tuple[CapVerdict, ...]:
 
 
 def record_verdict(state_dir: Path, verdict: CapVerdict) -> Tuple[str, CapVerdict]:
-    """Insert ``verdict`` with the store's project id: ``("recorded" | "present", verdict that stands)``.
+    """Book ``verdict``, receipt first: ``("recorded" | "restored" | "present", verdict that stands)``.
 
-    Idempotent on the key: a verdict that is already there is returned as it
-    stands and nothing is written. A second ``verkleinen`` on one PR raises
+    ADR-005, OI-2201. Under the store's booking lock, from the check to the
+    commit: a verdict whose row is already there is returned as it stands and
+    nothing is written. Otherwise the ``review_cap_verdict`` receipt goes into
+    the store's receipt ledger, and only once it landed is the row committed;
+    a ``verkleinen`` grants its round from that commit on. A receipt that does
+    not land raises :class:`CapVerdictReceiptError` and leaves no row. A receipt
+    that landed for this ``verdict_id`` while its row did not is the verdict:
+    its row is booked from it, ``"restored"``, and ``verdict`` is dropped.
+
+    The insert is tried and rolled back before the receipt, so a row the table
+    refuses never gets one. A second ``verkleinen`` on one PR raises
     :class:`CapVerdictRefused`. A store without the table (migration 0035 not
-    applied) or one that cannot be written raises :class:`CapVerdictError`.
+    applied), one that cannot be written, or a receipt ledger that cannot be
+    read raises :class:`CapVerdictError`.
     """
-    from coordination_db import stamp_project_id
+    from atomic_io import slot_lock
 
     path = _db_path(state_dir)
     if not path.is_file():
         raise CapVerdictError(f"no runtime store at {path}: the verdict has nowhere to go")
+    with slot_lock(Path(state_dir) / TABLE):
+        landed = receipted_verdict(state_dir, verdict.pr_number, verdict.verdict_id)
+        status, standing = _book_row(path, landed or verdict, commit=False)
+        if status == "present":
+            return status, standing
+        if landed is None:
+            _emit_receipt(state_dir, standing)
+        try:
+            _book_row(path, standing, commit=True)
+        except CapVerdictError as exc:
+            raise CapVerdictError(
+                f"{exc}. The {RECEIPT_EVENT} receipt of {standing.verdict_id} stands: the next run books the row "
+                f"from it"
+            ) from exc
+    return ("restored" if landed is not None else "recorded"), standing
+
+
+def _book_row(path: Path, verdict: CapVerdict, *, commit: bool) -> Tuple[str, CapVerdict]:
+    """Insert ``verdict`` with the store's project id in one transaction; committed only with ``commit``."""
+    from coordination_db import stamp_project_id
+
     try:
         conn = sqlite3.connect(str(path), timeout=10.0)
         conn.isolation_level = None
@@ -190,7 +239,7 @@ def record_verdict(state_dir: Path, verdict: CapVerdict) -> Tuple[str, CapVerdic
             except BaseException:
                 conn.execute("ROLLBACK")
                 raise
-            conn.execute("COMMIT")
+            conn.execute("COMMIT" if commit else "ROLLBACK")
         finally:
             conn.close()
     except CapVerdictError:
@@ -198,6 +247,65 @@ def record_verdict(state_dir: Path, verdict: CapVerdict) -> Tuple[str, CapVerdic
     except (sqlite3.Error, RuntimeError) as exc:
         raise CapVerdictError(f"{TABLE} in {path} could not be written: {exc}") from exc
     return result
+
+
+def _emit_receipt(state_dir: Path, verdict: CapVerdict) -> None:
+    """The verdict's ``review_cap_verdict`` receipt in the store's receipt ledger; raises when it did not land."""
+    from governance_receipts import AppendReceiptError, emit_governance_receipt
+
+    try:
+        emit_governance_receipt(
+            RECEIPT_EVENT, receipt_kind="state_mutation",
+            receipts_file=str(Path(state_dir) / review_rounds.RECEIPTS_NAME), **verdict.to_dict(),
+        )
+    except (AppendReceiptError, OSError, ValueError) as exc:
+        raise CapVerdictReceiptError(
+            f"the {RECEIPT_EVENT} receipt of {verdict.verdict_id} was not written ({exc}): no row, no granted round"
+        ) from exc
+
+
+def receipted_verdict(state_dir: Path, pr_number: int, verdict_id: str) -> Optional[CapVerdict]:
+    """The verdict the store's receipt ledger holds for ``verdict_id``: the first that landed; ``None`` without one.
+
+    A receipt is the canonical record of a verdict (ADR-005). A ledger that
+    cannot be read raises :class:`CapVerdictError`: whether the verdict was
+    decided cannot be told, so nothing is decided. A line that names the
+    verdict and does not parse is a torn append, logged and skipped.
+    """
+    receipts = Path(state_dir) / review_rounds.RECEIPTS_NAME
+    event, key = RECEIPT_EVENT.encode(), verdict_id.encode()
+    try:
+        with receipts.open("rb") as handle:
+            for raw in handle:
+                if event in raw and key in raw:
+                    found = _verdict_in_receipt(raw, pr_number, verdict_id)
+                    if found is not None:
+                        return found
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise CapVerdictError(f"the receipt ledger {receipts} could not be read: {exc}") from exc
+    return None
+
+
+def _verdict_in_receipt(raw: bytes, pr_number: int, verdict_id: str) -> Optional[CapVerdict]:
+    try:
+        receipt = json.loads(raw)
+    except ValueError as exc:
+        logger.warning("review_cap_verdicts: a %s line of %s does not parse (%s): skipped", RECEIPT_EVENT, verdict_id, exc)
+        return None
+    if not isinstance(receipt, dict):
+        return None
+    if (receipt.get("event_type"), receipt.get("verdict_id"), receipt.get("pr_number")) != (
+        RECEIPT_EVENT, verdict_id, pr_number,
+    ):
+        return None
+    missing = [name for name in _COLUMNS if name not in receipt]
+    if missing:
+        logger.warning("review_cap_verdicts: the %s receipt of %s lacks %s: skipped", RECEIPT_EVENT, verdict_id, missing)
+        return None
+    values = {name: receipt[name] for name in _COLUMNS}
+    return CapVerdict(**{**values, "oi_ids": tuple(values["oi_ids"] or ())})
 
 
 def _insert_once(conn: sqlite3.Connection, verdict: CapVerdict, path: Path) -> Tuple[str, CapVerdict]:
@@ -297,21 +405,45 @@ def standing_grant(
 # ---------------------------------------------------------------------------
 
 
+def _git(repo: Path, args: Sequence[str], deadline: float) -> Optional[subprocess.CompletedProcess]:
+    """One git call in what is left of the lookup's budget; ``None``, logged, when it cannot run or finish."""
+    left = deadline - time.monotonic()
+    if left <= 0:
+        logger.warning(
+            "review_cap_verdicts: the %ss git budget of this lookup is spent before git %s in %s: no granted round "
+            "on that head", _GIT_BUDGET, args[0], repo,
+        )
+        return None
+    try:
+        return subprocess.run(
+            ["git", "-C", str(repo), *args], capture_output=True, text=True, timeout=left, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning(
+            "review_cap_verdicts: git %s in %s failed (%s): no granted round on that head", args[0], repo, exc,
+        )
+        return None
+
+
 def _log_bodies(repo: Path, since_head: str, head_sha: str) -> Optional[str]:
-    args = ["git", "-C", str(repo), "log", "--format=%B%x00", f"{since_head}..{head_sha}"]
-    for attempt in range(2):
-        try:
-            proc = subprocess.run(args, capture_output=True, text=True, timeout=_GIT_TIMEOUT, check=False)
-        except (OSError, subprocess.SubprocessError) as exc:
-            logger.warning("review_cap_verdicts: git log in %s failed: %s", repo, exc)
+    """The commit messages of ``since_head..head_sha``, with one fetch from ``origin`` when git cannot read them.
+
+    OI-2202: the three calls share one budget (``_GIT_BUDGET``), and a git that
+    cannot run, fails or times out is ``None`` with the reason logged. OI-2203:
+    the SHAs come validated and still stand after ``--end-of-options`` (a
+    revision cannot follow ``--`` in ``git log``) and after ``--`` in the fetch.
+    """
+    deadline = time.monotonic() + _GIT_BUDGET
+    log = ("log", "--format=%B%x00", "--end-of-options", f"{since_head}..{head_sha}", "--")
+    proc = _git(repo, log, deadline)
+    if proc is not None and proc.returncode != 0:
+        if _git(repo, ("fetch", "--quiet", "--no-tags", "--", "origin", head_sha, since_head), deadline) is None:
             return None
-        if proc.returncode == 0:
-            return proc.stdout
-        if attempt == 0:
-            subprocess.run(
-                ["git", "-C", str(repo), "fetch", "--quiet", "--no-tags", "origin", head_sha, since_head],
-                capture_output=True, text=True, timeout=_GIT_TIMEOUT * 4, check=False,
-            )
+        proc = _git(repo, log, deadline)
+    if proc is None:
+        return None
+    if proc.returncode == 0:
+        return proc.stdout
     logger.warning(
         "review_cap_verdicts: %s..%s cannot be read in %s (%s): no granted round on that head",
         since_head[:12], head_sha[:12], repo, (proc.stderr or "").strip()[:200],
@@ -325,13 +457,51 @@ def head_carries_dispatch(repo: Path, since_head: str, head_sha: str, dispatch_i
     A commit of a dispatch has the trailer ``Dispatch-ID: <id>`` in its message
     (the commit convention every worker follows). A head or base git cannot
     read, after one fetch from ``origin``, carries nothing: no grant on a head
-    nobody could read.
+    nobody could read. Neither does a value that is no commit SHA
+    (``[0-9a-f]{7,40}``, OI-2203): it never reaches git, the reason is logged.
     """
     if not (since_head and head_sha and dispatch_id) or head_sha == since_head:
         return False
+    for name, value in (("the head the verdict decided on", since_head), ("the head", head_sha)):
+        if not _SHA.fullmatch(value):
+            logger.warning(
+                "review_cap_verdicts: %s, %r, is no commit SHA: no git call, no granted round on it", name, value[:80],
+            )
+            return False
     text = _log_bodies(Path(repo), since_head, head_sha)
     marker = re.compile(rf"^Dispatch-ID:\s+{re.escape(dispatch_id)}\s*$", re.MULTILINE)
     return text is not None and marker.search(text) is not None
+
+
+def resolved_carries(state_dir: Path, pr_number: int, head_sha: str, *, repo: Optional[Path] = None) -> CarriesFn:
+    """The git facts a booking of ``head_sha`` can need, resolved now: before the writer takes the ledger lock.
+
+    OI-2202. One fact per ``verkleinen`` verdict of the PR (one at most). The
+    writer's grant check reads these under the round ledger's lock and runs no
+    git there: a grant the facts do not cover (recorded while the writer
+    waited for the lock) qualifies no head, logged. A store that cannot be read
+    gives no facts; the check under the lock reads it again and grants nothing.
+    """
+    try:
+        verdicts = read_verdicts(state_dir, pr_number)
+    except CapVerdictError as exc:
+        logger.warning("review_cap_verdicts: no git facts for PR #%s: %s", pr_number, exc)
+        verdicts = ()
+    known: Dict[Tuple[str, str, str], bool] = {}
+    for grant in filter(None, (verdict.grant() for verdict in verdicts)):
+        key = (grant.since_head, head_sha, grant.dispatch_id)
+        known[key] = head_carries_dispatch(repo or _repo(), *key)
+
+    def carries(since_head: str, head: str, dispatch_id: str) -> bool:
+        if (since_head, head, dispatch_id) in known:
+            return known[(since_head, head, dispatch_id)]
+        logger.warning(
+            "review_cap_verdicts: the round granted on %s to dispatch %s was not looked up before the ledger lock, "
+            "and no git runs under it: no granted round on head %s", since_head[:12], dispatch_id, head[:12],
+        )
+        return False
+
+    return carries
 
 
 def _repo() -> Path:
@@ -342,14 +512,16 @@ def _repo() -> Path:
 
 def grant_or_none(
     state_dir: Path, cap: review_rounds.CapState, lines: Sequence[review_rounds.RoundLine], *,
-    head_sha: str, since: str = "", repo: Optional[Path] = None,
+    head_sha: str, since: str = "", repo: Optional[Path] = None, carries: Optional[CarriesFn] = None,
 ) -> Optional[review_rounds.Grant]:
     """The grant standing on this cap, qualified for ``head_sha`` when the head carries the dispatch.
 
     For the gate before a codex-seat run and the writer before a booking. A
     store that cannot be read grants nothing (logged): the cap stays closed.
     A round that is already used is returned unqualified; it is never granted
-    to another head (``review_rounds.round_granted_past_cap``).
+    to another head (``review_rounds.round_granted_past_cap``). ``carries``
+    answers the git question; without it git is asked now (the gate, which
+    holds no ledger lock). The writer passes :func:`resolved_carries`.
     """
     try:
         grant = standing_grant(cap, read_verdicts(state_dir, cap.pr_number), since=since)
@@ -358,9 +530,11 @@ def grant_or_none(
         return None
     if grant is None or review_rounds.consumed_by(grant, lines) is not None:
         return grant
-    if head_carries_dispatch(repo or _repo(), grant.since_head, head_sha, grant.dispatch_id):
-        return replace(grant, qualified_head=head_sha)
-    return grant
+    if carries is None:
+        carried = head_carries_dispatch(repo or _repo(), grant.since_head, head_sha, grant.dispatch_id)
+    else:
+        carried = carries(grant.since_head, head_sha, grant.dispatch_id)
+    return replace(grant, qualified_head=head_sha) if carried else grant
 
 
 def door_grant(state_dir: Path, cap: review_rounds.CapState, *, since: str = "") -> Optional[review_rounds.Grant]:
