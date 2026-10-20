@@ -34,6 +34,7 @@ import tempfile
 import threading
 import time
 import unittest
+import uuid
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -63,7 +64,52 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
-class TestResolveHeartbeatLogPath(unittest.TestCase):
+_DATA_SUBDIR_ENV_KEYS = (
+    "VNX_STATE_DIR", "VNX_DISPATCH_DIR", "VNX_LOGS_DIR", "VNX_PIDS_DIR",
+    "VNX_LOCKS_DIR", "VNX_SOCKETS_DIR", "VNX_REPORTS_DIR", "VNX_DB_DIR",
+)
+
+
+def _unique_id(prefix: str) -> str:
+    """Dispatch id that no other test, worker or earlier run can share."""
+    return f"{prefix}-{uuid.uuid4().hex[:12]}"
+
+
+def _wait_for_file(path: Path, timeout: float = 5.0, interval: float = 0.02) -> bool:
+    """Bounded poll on the real condition: the file exists."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists():
+            return True
+        time.sleep(interval)
+    return path.exists()
+
+
+class _IsolatedDataDirCase(unittest.TestCase):
+    """Every test writes under its own temp data dir, never the real one.
+
+    Also holds when the file runs under ``python -m unittest``, where the
+    pytest conftest fixtures are absent. ``self.data_dir`` is what
+    ``resolve_paths()["VNX_DATA_DIR"]`` resolves to for the test's duration.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.data_dir = Path(self._tmpdir.name) / "vnx-data"
+        self.data_dir.mkdir()
+        env_patch = patch.dict(os.environ, {
+            "VNX_DATA_DIR": str(self.data_dir),
+            "VNX_DATA_DIR_EXPLICIT": "1",
+        })
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
+        for key in _DATA_SUBDIR_ENV_KEYS:
+            os.environ.pop(key, None)
+
+
+class TestResolveHeartbeatLogPath(_IsolatedDataDirCase):
     """Per-dispatch path resolution + the same path-safety guard the tmux
     lane applies to its pipe-pane capture path (_start_pipe_pane)."""
 
@@ -101,15 +147,17 @@ class TestResolveHeartbeatLogPath(unittest.TestCase):
         self.assertNotEqual(path_a, path_b)
 
 
-class TestWriteHeartbeatReport(unittest.TestCase):
+class TestWriteHeartbeatReport(_IsolatedDataDirCase):
     def test_report_written_atomically_no_tmp_left_behind(self):
         from provider_spawns.kimi_spawn import _write_heartbeat_report
         from vnx_paths import resolve_paths
 
-        _write_heartbeat_report("dispatch-atomic-001", "## Summary\ncontent\n")
+        dispatch_id = _unique_id("dispatch-atomic")
+        _write_heartbeat_report(dispatch_id, "## Summary\ncontent\n")
 
         data_dir = Path(resolve_paths()["VNX_DATA_DIR"])
-        report_path = data_dir / "unified_reports" / "dispatch-atomic-001.md"
+        self.assertEqual(data_dir, self.data_dir.resolve())
+        report_path = data_dir / "unified_reports" / f"{dispatch_id}.md"
         tmp_path = report_path.with_suffix(report_path.suffix + ".tmp")
 
         self.assertTrue(report_path.exists())
@@ -125,19 +173,20 @@ class TestWriteHeartbeatReport(unittest.TestCase):
         from worker_heartbeat import SilenceVerdict, build_heartbeat_failure_report
 
         verdict = SilenceVerdict(is_silent=True, silence_seconds=650.0, threshold_seconds=600.0)
+        dispatch_id = _unique_id("dispatch-contract")
         report = build_heartbeat_failure_report(
-            "dispatch-contract-001", verdict, model="kimi-k2.6", provider="kimi", terminal_id="T1",
+            dispatch_id, verdict, model="kimi-k2.6", provider="kimi", terminal_id="T1",
         )
-        _write_heartbeat_report("dispatch-contract-001", report)
+        _write_heartbeat_report(dispatch_id, report)
 
         from vnx_paths import resolve_paths
         data_dir = Path(resolve_paths()["VNX_DATA_DIR"])
-        report_path = data_dir / "unified_reports" / "dispatch-contract-001.md"
+        report_path = data_dir / "unified_reports" / f"{dispatch_id}.md"
         result = validate_body(report_path.read_text(encoding="utf-8"))
         self.assertTrue(result.valid, f"heartbeat report failed contract: {result}")
 
 
-class TestDrainStreamRawTee(unittest.TestCase):
+class TestDrainStreamRawTee(_IsolatedDataDirCase):
     """drain_stream's raw_tee_path mirrors subprocess stdout bytes to a file —
     the same interception point the tmux lane's pipe-pane capture uses, but
     for the provider lane's raw Popen pipe instead of a tmux pane."""
@@ -214,28 +263,21 @@ class TestDrainStreamRawTee(unittest.TestCase):
         self.assertEqual(len(events), 1)
 
 
-class TestHeartbeatMonitorLoopKillsSilentWorker(unittest.TestCase):
+class TestHeartbeatMonitorLoopKillsSilentWorker(_IsolatedDataDirCase):
     """The core OI-1044 scenario: a stuck provider-lane worker gets detected
     and killed within the threshold, by a signal external to the process."""
 
     def setUp(self):
-        self._tmpdir = tempfile.TemporaryDirectory()
-        self._env_patch = {"VNX_WORKER_HEARTBEAT_SILENCE_SECONDS": "0.2"}
-        self._saved_env = {k: os.environ.get(k) for k in self._env_patch}
-        os.environ.update(self._env_patch)
-
-    def tearDown(self):
-        self._tmpdir.cleanup()
-        for k, v in self._saved_env.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
+        super().setUp()
+        env_patch = patch.dict(os.environ, {"VNX_WORKER_HEARTBEAT_SILENCE_SECONDS": "0.2"})
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
 
     def test_silent_worker_killed_and_reported_within_threshold(self):
         from provider_spawns.kimi_spawn import _heartbeat_monitor_loop
         from vnx_paths import resolve_paths
 
+        dispatch_id = _unique_id("dispatch-silent")
         proc = _spawn_real_sleeper()
         pid = proc.pid
         self.assertTrue(_pid_alive(pid), "precondition: sleeper must start alive")
@@ -248,7 +290,7 @@ class TestHeartbeatMonitorLoopKillsSilentWorker(unittest.TestCase):
         killed_event = threading.Event()
         thread = threading.Thread(
             target=_heartbeat_monitor_loop,
-            args=(proc, log_path, "dispatch-silent-001", "T1", "kimi-k2.6", stop_event, killed_event),
+            args=(proc, log_path, dispatch_id, "T1", "kimi-k2.6", stop_event, killed_event),
             kwargs={"poll_interval": 0.05},
             daemon=True,
         )
@@ -264,15 +306,18 @@ class TestHeartbeatMonitorLoopKillsSilentWorker(unittest.TestCase):
                 time.sleep(0.05)
             self.assertFalse(_pid_alive(pid), "worker process must actually be dead, not just flagged")
 
+            # The monitor kills first and writes the report after, so the dead
+            # pid does not imply the report exists yet: poll on the file.
             data_dir = Path(resolve_paths()["VNX_DATA_DIR"])
-            report_path = data_dir / "unified_reports" / "dispatch-silent-001.md"
-            self.assertTrue(report_path.exists(), "heartbeat must write the failure report directly")
+            self.assertEqual(data_dir, self.data_dir.resolve())
+            report_path = data_dir / "unified_reports" / f"{dispatch_id}.md"
+            self.assertTrue(_wait_for_file(report_path), "heartbeat must write the failure report directly")
             report_text = report_path.read_text(encoding="utf-8")
             self.assertIn("## Summary", report_text)
             self.assertIn("## Changes", report_text)
             self.assertIn("## Verification", report_text)
             self.assertIn("## Open Items", report_text)
-            self.assertIn("dispatch-silent-001", report_text)
+            self.assertIn(dispatch_id, report_text)
             self.assertIn("kimi", report_text)
         finally:
             stop_event.set()
@@ -282,7 +327,7 @@ class TestHeartbeatMonitorLoopKillsSilentWorker(unittest.TestCase):
                 proc.wait(timeout=2.0)
 
 
-class TestHeartbeatKilledEventSetAtKillDecision(unittest.TestCase):
+class TestHeartbeatKilledEventSetAtKillDecision(_IsolatedDataDirCase):
     """OI-1082: killed_event must be set at the kill DECISION, before
     _kill_process (worst-case ~10s SIGTERM+SIGKILL waits) and the report
     write. spawn_kimi joins the monitor thread with a 5s cap and then reads
@@ -291,18 +336,10 @@ class TestHeartbeatKilledEventSetAtKillDecision(unittest.TestCase):
     'kimi exited with code -9'."""
 
     def setUp(self):
-        self._env_patch = {"VNX_WORKER_HEARTBEAT_SILENCE_SECONDS": "0.2"}
-        self._saved_env = {k: os.environ.get(k) for k in self._env_patch}
-        os.environ.update(self._env_patch)
-        self._tmpdir = tempfile.TemporaryDirectory()
-
-    def tearDown(self):
-        self._tmpdir.cleanup()
-        for k, v in self._saved_env.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
+        super().setUp()
+        env_patch = patch.dict(os.environ, {"VNX_WORKER_HEARTBEAT_SILENCE_SECONDS": "0.2"})
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
 
     def test_killed_event_visible_while_kill_still_in_flight(self):
         import provider_spawns.kimi_spawn as kimi_spawn_mod
@@ -328,7 +365,7 @@ class TestHeartbeatKilledEventSetAtKillDecision(unittest.TestCase):
              patch.object(kimi_spawn_mod, "_write_heartbeat_report"):
             thread = threading.Thread(
                 target=kimi_spawn_mod._heartbeat_monitor_loop,
-                args=(proc, log_path, "dispatch-oi1082-race", "T1", "kimi-k3",
+                args=(proc, log_path, _unique_id("dispatch-oi1082-race"), "T1", "kimi-k3",
                       stop_event, killed_event),
                 kwargs={"poll_interval": 0.05},
                 daemon=True,
@@ -353,7 +390,7 @@ class TestHeartbeatKilledEventSetAtKillDecision(unittest.TestCase):
                 thread.join(timeout=3.0)
 
 
-class TestHeartbeatMonitorLoopFalsePositiveGuard(unittest.TestCase):
+class TestHeartbeatMonitorLoopFalsePositiveGuard(_IsolatedDataDirCase):
     """The calibration finding that MUST NOT regress: a worker producing
     periodic read-only tool-call activity (no file writes, but a steady
     trickle of stdout bytes — Read/Grep/Bash tool_call+tool_result pairs)
@@ -361,18 +398,10 @@ class TestHeartbeatMonitorLoopFalsePositiveGuard(unittest.TestCase):
     worktree-mutation-only check would tolerate."""
 
     def setUp(self):
-        self._tmpdir = tempfile.TemporaryDirectory()
-        self._env_patch = {"VNX_WORKER_HEARTBEAT_SILENCE_SECONDS": "0.3"}
-        self._saved_env = {k: os.environ.get(k) for k in self._env_patch}
-        os.environ.update(self._env_patch)
-
-    def tearDown(self):
-        self._tmpdir.cleanup()
-        for k, v in self._saved_env.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
+        super().setUp()
+        env_patch = patch.dict(os.environ, {"VNX_WORKER_HEARTBEAT_SILENCE_SECONDS": "0.6"})
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
 
     def test_periodic_activity_within_threshold_never_killed(self):
         from provider_spawns.kimi_spawn import _heartbeat_monitor_loop
@@ -385,20 +414,23 @@ class TestHeartbeatMonitorLoopFalsePositiveGuard(unittest.TestCase):
         killed_event = threading.Event()
         thread = threading.Thread(
             target=_heartbeat_monitor_loop,
-            args=(proc, log_path, "dispatch-active-001", "T1", "kimi-k2.6", stop_event, killed_event),
-            kwargs={"poll_interval": 0.05},
+            args=(proc, log_path, _unique_id("dispatch-active"), "T1", "kimi-k2.6", stop_event, killed_event),
+            kwargs={"poll_interval": 0.02},
             daemon=True,
         )
         thread.start()
         try:
-            # Simulate a worker whose gaps between tool calls (0.1s) stay well
-            # under the 0.3s threshold — the scaled-down analogue of kimi's
-            # measured <=209s inter-step gaps against the 600s default.
-            deadline = time.monotonic() + 1.0
+            # Simulate a worker whose gaps between tool calls (0.05s) stay far
+            # under the 0.6s threshold — the scaled-down analogue of kimi's
+            # measured <=209s inter-step gaps against the 600s default. The
+            # headroom (0.55s) is 27x the 0.02s poll, so a scheduler stall on
+            # a loaded runner has to exceed half a second to fake a silence.
+            # The run spans over three thresholds.
+            deadline = time.monotonic() + 2.0
             with open(log_path, "ab", buffering=0) as fh:
                 while time.monotonic() < deadline:
                     fh.write(b'{"type":"tool_call"}\n')
-                    time.sleep(0.1)
+                    time.sleep(0.05)
 
             self.assertFalse(
                 killed_event.is_set(),
@@ -413,23 +445,15 @@ class TestHeartbeatMonitorLoopFalsePositiveGuard(unittest.TestCase):
                 proc.wait(timeout=2.0)
 
 
-class TestHeartbeatConcurrencyIsolation(unittest.TestCase):
+class TestHeartbeatConcurrencyIsolation(_IsolatedDataDirCase):
     """Two concurrent dispatches must never mask each other's liveness — the
     exact failure mode of the shared ~/.kimi/logs/kimi.log this design avoids."""
 
     def setUp(self):
-        self._tmpdir = tempfile.TemporaryDirectory()
-        self._env_patch = {"VNX_WORKER_HEARTBEAT_SILENCE_SECONDS": "0.2"}
-        self._saved_env = {k: os.environ.get(k) for k in self._env_patch}
-        os.environ.update(self._env_patch)
-
-    def tearDown(self):
-        self._tmpdir.cleanup()
-        for k, v in self._saved_env.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
+        super().setUp()
+        env_patch = patch.dict(os.environ, {"VNX_WORKER_HEARTBEAT_SILENCE_SECONDS": "0.6"})
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
 
     def test_dead_dispatch_does_not_mask_live_dispatch(self):
         from provider_spawns.kimi_spawn import _heartbeat_monitor_loop
@@ -447,14 +471,14 @@ class TestHeartbeatConcurrencyIsolation(unittest.TestCase):
 
         t_dead = threading.Thread(
             target=_heartbeat_monitor_loop,
-            args=(proc_dead, log_dead, "dispatch-dead-001", "T1", "kimi-k2.6", stop_dead, killed_dead),
-            kwargs={"poll_interval": 0.05},
+            args=(proc_dead, log_dead, _unique_id("dispatch-dead"), "T1", "kimi-k2.6", stop_dead, killed_dead),
+            kwargs={"poll_interval": 0.02},
             daemon=True,
         )
         t_alive = threading.Thread(
             target=_heartbeat_monitor_loop,
-            args=(proc_alive, log_alive, "dispatch-alive-001", "T2", "kimi-k2.6", stop_alive, killed_alive),
-            kwargs={"poll_interval": 0.05},
+            args=(proc_alive, log_alive, _unique_id("dispatch-alive"), "T2", "kimi-k2.6", stop_alive, killed_alive),
+            kwargs={"poll_interval": 0.02},
             daemon=True,
         )
         t_dead.start()
@@ -466,7 +490,7 @@ class TestHeartbeatConcurrencyIsolation(unittest.TestCase):
                     fh.write(b'{"type":"tool_call"}\n')
                     time.sleep(0.05)
 
-            self.assertTrue(killed_dead.wait(timeout=3.0), "the genuinely stuck dispatch must still be killed")
+            self.assertTrue(killed_dead.wait(timeout=5.0), "the genuinely stuck dispatch must still be killed")
             self.assertFalse(
                 killed_alive.is_set(),
                 "a live, concurrently-running dispatch must not be killed by another dispatch's silence",
@@ -484,7 +508,7 @@ class TestHeartbeatConcurrencyIsolation(unittest.TestCase):
                     p.wait(timeout=2.0)
 
 
-class TestSpawnKimiHeartbeatWiring(unittest.TestCase):
+class TestSpawnKimiHeartbeatWiring(_IsolatedDataDirCase):
     """spawn_kimi() itself starts/stops the monitor thread and surfaces a
     heartbeat kill as a diagnosable result.error — without needing to wait
     out the real 30s poll interval in a test."""
@@ -522,7 +546,7 @@ class TestSpawnKimiHeartbeatWiring(unittest.TestCase):
 
         with patch.object(kimi_spawn, "_start_kimi_subprocess", return_value=(fake_proc, None)), \
              patch("threading.Thread", _RecordingThread):
-            kimi_spawn.spawn_kimi("prompt", dispatch_id="dispatch-wiring-001", terminal_id="T1")
+            kimi_spawn.spawn_kimi("prompt", dispatch_id=_unique_id("dispatch-wiring"), terminal_id="T1")
 
         self.assertEqual(len(heartbeat_threads), 1, "exactly one heartbeat monitor thread must be started")
         self.assertFalse(heartbeat_threads[0].is_alive(), "heartbeat thread must be stopped+joined before spawn_kimi returns")
@@ -551,6 +575,7 @@ class TestSpawnKimiHeartbeatWiring(unittest.TestCase):
         heartbeat and points at the report the monitor already wrote."""
         from provider_spawns import kimi_spawn
 
+        dispatch_id = _unique_id("dispatch-hbkill")
         fake_proc = MagicMock()
         fake_proc.returncode = -9
         fake_proc.poll.return_value = -9
@@ -565,11 +590,11 @@ class TestSpawnKimiHeartbeatWiring(unittest.TestCase):
 
         with patch.object(kimi_spawn, "_start_kimi_subprocess", return_value=(fake_proc, None)), \
              patch.object(kimi_spawn, "_heartbeat_monitor_loop", _fake_monitor_loop):
-            result = kimi_spawn.spawn_kimi("prompt", dispatch_id="dispatch-hbkill-001", terminal_id="T1")
+            result = kimi_spawn.spawn_kimi("prompt", dispatch_id=dispatch_id, terminal_id="T1")
 
         self.assertIsNotNone(result.error)
         self.assertIn("heartbeat", result.error)
-        self.assertIn("dispatch-hbkill-001", result.error)
+        self.assertIn(dispatch_id, result.error)
         self.assertNotEqual(result.returncode, 0)
 
 
