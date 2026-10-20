@@ -26,7 +26,9 @@ means for the gate, the writer and the doors:
   stays closed.
 - **Sent back to plan.** A ``terug-naar-plan`` verdict that stands closes the
   PR at the merge door: no PASS of any seat counts on any head, an
-  ``--override-b3`` included (:func:`door_return`).
+  ``--override-b3`` included (:func:`door_return`). It stands as a row or as
+  a receipt of this project and count whose row did not land
+  (:func:`standing_verdicts`): an interrupted projection does not erase it.
 - **The grant.** A ``verkleinen`` verdict grants one codex-seat round, bound to
   the dispatch the T0 named. A head qualifies when it carries a commit of that
   dispatch (a ``Dispatch-ID: <id>`` trailer) that the head the verdict decided on
@@ -339,23 +341,74 @@ def receipted_verdict(
     """The verdict the store's receipt ledger holds for ``verdict_id``: the first that landed; ``None`` without one.
 
     A receipt is the canonical record of a verdict (ADR-005), but only for its
-    own project and its own count (OI-2207): a receipt of another project with
-    the same PR and verdict id is not this store's verdict (ADR-007), and one
-    created before ``since`` belongs to a count that no longer stands, as in
-    :func:`next_step`. Neither is booked. A ledger that cannot be read raises
-    :class:`CapVerdictError`: whether the verdict was decided cannot be told,
-    so nothing is decided.
+    own project and its own count (OI-2207, :func:`_current_receipts`). A
+    ledger that cannot be read raises :class:`CapVerdictError`: whether the
+    verdict was decided cannot be told, so nothing is decided.
     """
-    for receipt in receipts_naming(state_dir, RECEIPT_EVENT, verdict_id):
-        found = _verdict_in_receipt(receipt, pr_number, verdict_id, project_id)
-        if found is not None and found.created_at >= since:
-            return found
-    return None
+    found = _current_receipts(
+        receipts_naming(state_dir, RECEIPT_EVENT, verdict_id), pr_number, project_id=project_id, since=since,
+        verdict_id=verdict_id,
+    )
+    return found[0] if found else None
+
+
+def receipted_verdicts(state_dir: Path, pr_number: int, *, since: str = "") -> Tuple[CapVerdict, ...]:
+    """Every verdict on PR ``pr_number`` the receipt ledger holds for this store's project and current count.
+
+    The first receipt per verdict id, in file order, under the rule of
+    :func:`receipted_verdict`. A ledger with such receipts while the store
+    cannot name its project raises :class:`CapVerdictError`: whose verdicts
+    they are cannot be told. So does a ledger that cannot be read.
+    """
+    receipts = receipts_naming(state_dir, RECEIPT_EVENT, verdict_id_for(pr_number, ""))
+    if not receipts:
+        return ()
+    first: Dict[str, CapVerdict] = {}
+    for verdict in _current_receipts(receipts, pr_number, project_id=store_project_id(state_dir), since=since):
+        first.setdefault(verdict.verdict_id, verdict)
+    return tuple(first.values())
+
+
+def standing_verdicts(state_dir: Path, pr_number: int, *, since: str = "") -> Tuple[CapVerdict, ...]:
+    """The verdicts that stand on PR ``pr_number``: the store's rows and every receipt whose row did not land.
+
+    For a reader that refuses on a verdict (:func:`door_return`). The receipt
+    is the canonical record and the row its projection (ADR-005): a booking
+    whose receipt landed and whose row commit did not still decided the PR, and
+    an interrupted projection never erases that. Where both stand, the row is
+    returned (it carries the aftermath's ``oi_ids``). Oldest first. Raises
+    :class:`CapVerdictError` as :func:`read_verdicts` and
+    :func:`receipted_verdicts` do.
+    """
+    rows = read_verdicts(state_dir, pr_number)
+    booked = {verdict.verdict_id for verdict in rows}
+    landed = [verdict for verdict in receipted_verdicts(state_dir, pr_number, since=since) if verdict.verdict_id not in booked]
+    return tuple(sorted((*rows, *landed), key=lambda verdict: (verdict.created_at, verdict.verdict_id)))
+
+
+def _current_receipts(
+    receipts: Iterable[Dict[str, Any]], pr_number: int, *, project_id: str, since: str, verdict_id: str = "",
+) -> List[CapVerdict]:
+    """The verdicts in ``receipts`` of this project and this count: the one rule every receipt reader keys on.
+
+    OI-2207: a receipt of another project with the same PR and verdict id is
+    not this store's verdict (ADR-007), and one created before ``since`` (the
+    PR's last attested ``opened`` line) belongs to a count that no longer
+    stands, as in :func:`next_step`. Without ``verdict_id``, any verdict of PR
+    ``pr_number`` whose id is the one its head gives.
+    """
+    found: List[CapVerdict] = []
+    for receipt in receipts:
+        verdict = _verdict_in_receipt(receipt, pr_number, verdict_id, project_id)
+        if verdict is not None and verdict.created_at >= since:
+            found.append(verdict)
+    return found
 
 
 def _verdict_in_receipt(receipt: Dict[str, Any], pr_number: int, verdict_id: str, project_id: str) -> Optional[CapVerdict]:
+    wanted = verdict_id or verdict_id_for(pr_number, str(receipt.get("head_sha") or ""))
     if (receipt.get("verdict_id"), receipt.get("pr_number"), receipt.get("project_id")) != (
-        verdict_id, pr_number, project_id,
+        wanted, pr_number, project_id,
     ):
         return None
     missing = [name for name in _COLUMNS if name not in receipt]
@@ -512,12 +565,15 @@ def standing_return(
 def door_return(state_dir: Path, cap: review_rounds.CapState, *, since: str = "") -> Optional[CapVerdict]:
     """The ``terug-naar-plan`` verdict the merge door refuses this PR on; ``None`` when none stands.
 
-    A store that cannot be read raises :class:`CapVerdictError`: whether the PR
-    was sent back cannot be told, so the door counts no PASS of a capped PR.
+    Read from :func:`standing_verdicts`: a ``terug-naar-plan`` receipt of this
+    project and count whose row did not land refuses exactly like its row. A
+    store or receipt ledger that cannot be read raises :class:`CapVerdictError`:
+    whether the PR was sent back cannot be told, so the door counts no PASS of
+    a capped PR.
     """
     if not cap.capped:
         return None
-    return standing_return(cap, read_verdicts(state_dir, cap.pr_number), since=since)
+    return standing_return(cap, standing_verdicts(state_dir, cap.pr_number, since=since), since=since)
 
 
 # ---------------------------------------------------------------------------

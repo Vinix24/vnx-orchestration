@@ -201,7 +201,8 @@ def _print_cap_verdict(pr: int, status: str, verdict, aftermath) -> None:
     for step in aftermath.steps:
         ids = step.fields.get("oi_ids") if step.step == review_cap_aftermath.STEP_OPEN_ITEMS else None
         listed = f" {', '.join(ids)}" if ids else ""
-        print(f"  {step.step}: {step.result}{listed}" + (f" ({step.detail})" if step.detail else ""))
+        notes = "; ".join(filter(None, (step.detail, "booked by an earlier run" if step.restored else "")))
+        print(f"  {step.step}: {step.result}{listed}" + (f" ({notes})" if notes else ""))
     if not aftermath.complete:
         print(f"  not done: {aftermath.failed}")
 

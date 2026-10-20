@@ -53,7 +53,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -3272,7 +3272,7 @@ def _unlinked_reason(conn: sqlite3.Connection, project_id: str, dispatch_id: str
 
 def return_deliverable_to_plan(
     state_dir: Path, project_id: str, dispatch_id: str, *, actor: str, reason: str,
-    metadata: Optional[dict] = None,
+    metadata: Optional[dict] = None, journal: Optional[Callable[[str, str], None]] = None,
 ) -> tuple[str, str]:
     """Send a ``ready`` deliverable back to ``proposed``: ``(status, from_state)``.
 
@@ -3283,6 +3283,11 @@ def return_deliverable_to_plan(
     transaction with a ``deliverable_returned_to_plan`` coordination event
     (from-state, to-state, ``actor``, ``reason``), and idempotent on ``actor``:
     an event of this actor on this deliverable means it went back already.
+
+    ``journal(status, from_state)`` runs inside that transaction, after the
+    change is made and before it is committed (ADR-005: the canonical record
+    first, the derived write after it). The caller writes the transition's
+    receipt there; a journal that raises rolls the change back.
 
     Status: ``returned`` (moved now), ``already_returned`` (an earlier call of
     this actor moved it; nothing written), ``already_proposed`` (it stood
@@ -3295,6 +3300,8 @@ def return_deliverable_to_plan(
         conn.execute("BEGIN IMMEDIATE")
         try:
             result = _return_to_plan(conn, project_id, dispatch_id, actor, reason, metadata)
+            if journal is not None:
+                journal(*result)
         except BaseException:
             conn.rollback()
             raise

@@ -23,19 +23,28 @@ steps run, in this order:
    open items and where the deliverable went (``gate_recorder.close_pr``). A
    PR that is closed or merged already is left as it is.
 
-**Every step is idempotent on the verdict id**, so a repeat of ``vnx review
-cap-verdict`` after a crash only does what is missing: an open item's
-``dedup_key`` is ``review-cap:<project>:<verdict id>:blocker-<n>``, with ``n``
-the finding's place in the result record of that head (the record of one
-counted verdict, so the order does not move); the deliverable's event names
-the verdict as its actor; the PR's state is read before it is closed.
-
 **One receipt per step** (``review_cap_aftermath``, field ``step``), written
-once the step's change stands and only when the ledger holds none for that
-step of this verdict and project. Per step and not one for the whole
+only when the ledger holds none for that step of this verdict and project, and
+before the step's write to derived state (ADR-005): step 1's receipt names the
+open-item ids before they go onto the verdict's row, and step 2's receipt is
+written inside the deliverable's transaction, before it commits. A receipt
+that does not land leaves no derived write. Step 3 closes the PR on GitHub
+first and books the receipt after it. Per step and not one for the whole
 aftermath: a crash between two steps then leaves every change that was made
 with its receipt, and a step that keeps failing (the PR cannot be closed) does
 not keep the receipts of the steps before it back.
+
+**A receipted step is never run again.** A repeat of ``vnx review
+cap-verdict`` restores it from its receipt and runs only the missing steps:
+step 1's open-item ids go onto the row when they are not there yet, and the
+result record is not read again (a later gate run replaces it); step 2's
+journaled move is applied when its commit did not land; step 3 is done. A step
+without a receipt runs, idempotent on the verdict id: an open item's
+``dedup_key`` is ``review-cap:<project>:<verdict id>:blocker-<n>``, with ``n``
+the finding's place in the result record of the counted verdict (a record of
+another head or report is refused, never read as the source); the
+deliverable's event names the verdict as its actor; the PR's state is read
+before it is closed.
 
 The whole aftermath runs under one store lock, so two runs of the command do
 not both close the PR. A step that does not finish raises
@@ -61,6 +70,13 @@ STEP_DELIVERABLE = "deliverable"
 STEP_PR_CLOSE = "pr_close"
 OI_SOURCE = "review_cap_tiebreaker"
 NO_LINKED_DELIVERABLE = "no_linked_deliverable"
+NOT_APPLIED = "not_applied"
+# What a step's receipt carries of its result, read back when a later run restores the step.
+_STEP_FIELDS = {
+    STEP_OPEN_ITEMS: ("oi_ids", "result_record"),
+    STEP_DELIVERABLE: ("deliverable", "output_ref", "pr_dispatch_id", "from_state", "to_state", "branch", "track"),
+    STEP_PR_CLOSE: ("pr_state",),
+}
 _DISPATCH_BRANCH = "dispatch/"
 _BRANCH_PREFIXES = ("refs/heads/", "origin/")
 _SUMMARY_CHARS = 140
@@ -82,15 +98,20 @@ class AftermathError(RuntimeError):
 
 @dataclass(frozen=True)
 class StepResult:
-    """What one step did: ``result`` names it, ``fields`` go into the step's receipt."""
+    """What one step did: ``result`` names it, ``fields`` go into the step's receipt.
+
+    ``restored`` marks a step this run did not execute: its receipt stood, and
+    the result is read back from it.
+    """
 
     step: str
     result: str
     detail: str = ""
     fields: Dict[str, Any] = field(default_factory=dict)
+    restored: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
-        return {"step": self.step, "result": self.result, "detail": self.detail, **self.fields}
+        return {"step": self.step, "result": self.result, "detail": self.detail, "restored": self.restored, **self.fields}
 
 
 @dataclass(frozen=True)
@@ -140,11 +161,24 @@ def carry_out(
     done: List[StepResult] = []
     with slot_lock(Path(state_dir) / AFTERMATH_EVENT):
         try:
-            line = _counted_round(state_dir, verdict)
-            done.append(_open_items_step(state_dir, verdict, line))
+            booked = _booked_steps(state_dir, verdict)
+            counted = _CountedRound(state_dir, verdict)
+            items = booked.get(STEP_OPEN_ITEMS)
+            done.append(
+                _restore_open_items(state_dir, verdict, items) if items
+                else _open_items_step(state_dir, verdict, counted.line())
+            )
             verdict = replace(verdict, oi_ids=tuple(done[-1].fields["oi_ids"]))
-            done.append(_deliverable_step(state_dir, verdict, line))
-            done.append(_pr_close_step(state_dir, verdict, done[-1], pr_state=pr_state, close_pr=close_pr))
+            moved = booked.get(STEP_DELIVERABLE)
+            done.append(
+                _restore_deliverable(state_dir, verdict, moved) if moved
+                else _deliverable_step(state_dir, verdict, counted.line())
+            )
+            closed = booked.get(STEP_PR_CLOSE)
+            done.append(
+                _restored(closed) if closed
+                else _pr_close_step(state_dir, verdict, done[-1], pr_state=pr_state, close_pr=close_pr)
+            )
         except AftermathError as exc:
             return Aftermath(verdict, tuple(done), failed=str(exc))
     return Aftermath(verdict, tuple(done))
@@ -153,6 +187,19 @@ def carry_out(
 # ---------------------------------------------------------------------------
 # The counted verdict the aftermath reads from
 # ---------------------------------------------------------------------------
+
+
+class _CountedRound:
+    """The counted round of :func:`_counted_round`, read once and only when a step that runs needs it."""
+
+    def __init__(self, state_dir: Path, verdict: rcv.CapVerdict) -> None:
+        self._state_dir, self._verdict = state_dir, verdict
+        self._line: Optional[review_rounds.RoundLine] = None
+
+    def line(self) -> review_rounds.RoundLine:
+        if self._line is None:
+            self._line = _counted_round(self._state_dir, self._verdict)
+        return self._line
 
 
 def _counted_round(state_dir: Path, verdict: rcv.CapVerdict) -> review_rounds.RoundLine:
@@ -245,7 +292,7 @@ def _add_open_item(oim: Any, verdict: rcv.CapVerdict, line: review_rounds.RoundL
 
 
 def _open_items_step(state_dir: Path, verdict: rcv.CapVerdict, line: review_rounds.RoundLine) -> StepResult:
-    """Step 1: the open items, their ids on the verdict's row, then the step's receipt."""
+    """Step 1: the open items, the step's receipt naming their ids, then the ids on the verdict's row (ADR-005)."""
     import open_items_manager as oim
     from plan_gate_tiebreaker import _open_items_store_override
 
@@ -261,10 +308,6 @@ def _open_items_step(state_dir: Path, verdict: rcv.CapVerdict, line: review_roun
             f"the ones before it stand and are found again by their key"
         ) from exc
     oi_ids = [item_id for item_id, _created in added]
-    try:
-        rcv.set_oi_ids(state_dir, verdict, oi_ids)
-    except rcv.CapVerdictError as exc:
-        raise AftermathError(str(exc)) from exc
     created = sum(1 for _item_id, was_new in added if was_new)
     result = StepResult(
         STEP_OPEN_ITEMS, "created",
@@ -273,7 +316,33 @@ def _open_items_step(state_dir: Path, verdict: rcv.CapVerdict, line: review_roun
         fields={"oi_ids": oi_ids, "result_record": f"pr-{verdict.pr_number}-{line.reviewer}.json"},
     )
     _receipt_once(state_dir, verdict, result)
+    _oi_ids_on_row(state_dir, verdict, oi_ids)
     return result
+
+
+def _restore_open_items(state_dir: Path, verdict: rcv.CapVerdict, receipt: Dict[str, Any]) -> StepResult:
+    """Step 1 as its receipt booked it: the ids it names, onto the row when they are not there yet.
+
+    The result record is not read again: a later gate run on the PR replaces
+    it, and the open items stand already under the ids the receipt names.
+    """
+    result = _restored(receipt)
+    oi_ids = result.fields.get("oi_ids")
+    if not isinstance(oi_ids, list) or not all(isinstance(item_id, str) for item_id in oi_ids):
+        raise AftermathError(
+            f"the {AFTERMATH_EVENT} receipt of step {STEP_OPEN_ITEMS} of {verdict.verdict_id} names no list of "
+            f"open-item ids ({oi_ids!r}): the row cannot be booked from it"
+        )
+    if tuple(oi_ids) != verdict.oi_ids:
+        _oi_ids_on_row(state_dir, verdict, oi_ids)
+    return result
+
+
+def _oi_ids_on_row(state_dir: Path, verdict: rcv.CapVerdict, oi_ids: Sequence[str]) -> None:
+    try:
+        rcv.set_oi_ids(state_dir, verdict, oi_ids)
+    except rcv.CapVerdictError as exc:
+        raise AftermathError(str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -291,43 +360,94 @@ def branch_dispatch(branch: str) -> str:
 
 
 def _deliverable_step(state_dir: Path, verdict: rcv.CapVerdict, line: review_rounds.RoundLine) -> StepResult:
-    """Step 2: the PR's deliverable back to ``proposed``, or loudly none, then the step's receipt."""
+    """Step 2: the PR's deliverable back to ``proposed``, its receipt before the move commits; or loudly none."""
     import planning_cli
 
     dispatch_id = branch_dispatch(line.branch)
+    if not dispatch_id:
+        return _booked(state_dir, verdict, StepResult(
+            STEP_DELIVERABLE, NO_LINKED_DELIVERABLE,
+            detail=f"the PR's branch {line.branch!r} is no dispatch/<id> branch, so it names no dispatch",
+            fields={"branch": line.branch},
+        ))
     try:
-        if not dispatch_id:
-            result = StepResult(
-                STEP_DELIVERABLE, NO_LINKED_DELIVERABLE,
-                detail=f"the PR's branch {line.branch!r} is no dispatch/<id> branch, so it names no dispatch",
-                fields={"branch": line.branch},
-            )
-        else:
-            result = _return(state_dir, verdict, dispatch_id, planning_cli)
+        link = planning_cli.linked_deliverable(state_dir, verdict.project_id, dispatch_id)
+        if not link.dispatch_id:
+            return _booked(state_dir, verdict, StepResult(
+                STEP_DELIVERABLE, NO_LINKED_DELIVERABLE, detail=link.reason,
+                fields={"pr_dispatch_id": dispatch_id, "track": link.track},
+            ))
+        return _return(state_dir, verdict, link, dispatch_id, planning_cli)
     except sqlite3.Error as exc:
         raise AftermathError(f"the deliverable of PR #{verdict.pr_number} could not be read or moved: {exc}") from exc
-    _receipt_once(state_dir, verdict, result)
-    return result
 
 
-def _return(state_dir: Path, verdict: rcv.CapVerdict, dispatch_id: str, planning_cli: Any) -> StepResult:
-    link = planning_cli.linked_deliverable(state_dir, verdict.project_id, dispatch_id)
-    if not link.dispatch_id:
-        return StepResult(
-            STEP_DELIVERABLE, NO_LINKED_DELIVERABLE, detail=link.reason,
-            fields={"pr_dispatch_id": dispatch_id, "track": link.track},
-        )
-    status, from_state = planning_cli.return_deliverable_to_plan(
-        state_dir, verdict.project_id, link.dispatch_id, actor=verdict.verdict_id,
-        reason=(
-            f"review-cap tiebreaker {verdict.cap_rule} -> terug-naar-plan on PR #{verdict.pr_number} "
-            f"(verdict {verdict.verdict_id}): back to plan, it needs the operator's promote again"
-        ),
-        metadata={
-            "verdict_id": verdict.verdict_id, "pr_number": verdict.pr_number, "cap_rule": verdict.cap_rule,
-            "head_sha": verdict.head_sha, "pr_dispatch_id": dispatch_id, "oi_ids": list(verdict.oi_ids),
-        },
+def _return(state_dir: Path, verdict: rcv.CapVerdict, link: Any, dispatch_id: str, planning_cli: Any) -> StepResult:
+    """The move back to plan, journaled: the step's receipt lands inside the move's transaction, before its commit.
+
+    ADR-005. A receipt that does not land rolls the move back; a commit that
+    does not land after it leaves the receipt, and the next run applies the
+    move it journals (:func:`_restore_deliverable`).
+    """
+    journaled: List[StepResult] = []
+
+    def journal(status: str, from_state: str) -> None:
+        journaled.append(_returned_result(link, dispatch_id, status, from_state))
+        _receipt_once(state_dir, verdict, journaled[-1])
+
+    planning_cli.return_deliverable_to_plan(
+        state_dir, verdict.project_id, link.dispatch_id, actor=verdict.verdict_id, reason=_return_reason(verdict),
+        metadata=_return_metadata(verdict, dispatch_id), journal=journal,
     )
+    return journaled[-1]
+
+
+def _return_reason(verdict: rcv.CapVerdict) -> str:
+    return (
+        f"review-cap tiebreaker {verdict.cap_rule} -> terug-naar-plan on PR #{verdict.pr_number} "
+        f"(verdict {verdict.verdict_id}): back to plan, it needs the operator's promote again"
+    )
+
+
+def _return_metadata(verdict: rcv.CapVerdict, dispatch_id: str) -> Dict[str, Any]:
+    return {
+        "verdict_id": verdict.verdict_id, "pr_number": verdict.pr_number, "cap_rule": verdict.cap_rule,
+        "head_sha": verdict.head_sha, "pr_dispatch_id": dispatch_id, "oi_ids": list(verdict.oi_ids),
+    }
+
+
+def _restore_deliverable(state_dir: Path, verdict: rcv.CapVerdict, receipt: Dict[str, Any]) -> StepResult:
+    """Step 2 as its receipt journaled it; a move whose commit did not land is applied from the receipt.
+
+    Never decided again: only the deliverable the receipt names moves, and
+    only when the receipt journals a move. A deliverable that no longer stands
+    where the receipt left it is not moved, and the step says so (result
+    ``not_applied``), loudly in the CLI and in the PR's comment.
+    """
+    import planning_cli
+
+    result = _restored(receipt)
+    deliverable = str(result.fields.get("deliverable") or "")
+    if result.result != "returned" or not deliverable:
+        return result
+    try:
+        status, now = planning_cli.return_deliverable_to_plan(
+            state_dir, verdict.project_id, deliverable, actor=verdict.verdict_id, reason=_return_reason(verdict),
+            metadata=_return_metadata(verdict, str(result.fields.get("pr_dispatch_id") or "")),
+        )
+    except sqlite3.Error as exc:
+        raise AftermathError(
+            f"deliverable {deliverable} could not be moved as the receipt of {verdict.verdict_id} journals: {exc}"
+        ) from exc
+    if status in ("returned", "already_returned", "already_proposed"):
+        return result
+    return replace(result, result=NOT_APPLIED, detail=(
+        f"the receipt of {verdict.verdict_id} journals ready -> proposed, but the move did not commit and the "
+        f"deliverable stands {now or 'nowhere'} now ({status}): not moved"
+    ))
+
+
+def _returned_result(link: Any, dispatch_id: str, status: str, from_state: str) -> StepResult:
     moved = status in ("returned", "already_returned")
     detail = {
         "returned": "ready -> proposed",
@@ -411,6 +531,34 @@ def step_receipts(state_dir: Path, verdict: rcv.CapVerdict) -> List[Dict[str, An
         if (receipt.get("verdict_id"), receipt.get("project_id"), receipt.get("pr_number"))
         == (verdict.verdict_id, verdict.project_id, verdict.pr_number)
     ]
+
+
+def _booked_steps(state_dir: Path, verdict: rcv.CapVerdict) -> Dict[str, Dict[str, Any]]:
+    """The first receipt of each step of ``verdict`` that the ledger holds: those steps are not run again."""
+    try:
+        receipts = step_receipts(state_dir, verdict)
+    except rcv.CapVerdictError as exc:
+        raise AftermathError(str(exc)) from exc
+    booked: Dict[str, Dict[str, Any]] = {}
+    for receipt in receipts:
+        if receipt.get("step") in _STEP_FIELDS:
+            booked.setdefault(receipt["step"], receipt)
+    return booked
+
+
+def _restored(receipt: Dict[str, Any]) -> StepResult:
+    """A step's result as its receipt booked it."""
+    step = receipt["step"]
+    return StepResult(
+        step, str(receipt.get("result") or ""), detail=str(receipt.get("detail") or ""),
+        fields={name: receipt[name] for name in _STEP_FIELDS[step] if name in receipt}, restored=True,
+    )
+
+
+def _booked(state_dir: Path, verdict: rcv.CapVerdict, result: StepResult) -> StepResult:
+    """``result`` once its receipt stands: for a step whose result writes no derived state."""
+    _receipt_once(state_dir, verdict, result)
+    return result
 
 
 def _receipt_once(state_dir: Path, verdict: rcv.CapVerdict, result: StepResult) -> None:

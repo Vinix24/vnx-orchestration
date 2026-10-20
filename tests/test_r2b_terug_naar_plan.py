@@ -572,3 +572,205 @@ class TestGitAndStaleGrants:
 
         assert landed is False, "the verkleinen is from before the release: the cap stays closed"
         assert verbs == [], "no git for a grant that no longer stands"
+
+
+# ---------------------------------------------------------------------------
+# Round 2 (dispatch 20261020-rs-r2b-r2): the codex findings on 28a186a8
+# ---------------------------------------------------------------------------
+
+
+def _returned(head: str, **fields: Any):
+    """A ``terug-naar-plan`` verdict on ``head`` as the tiebreaker books it."""
+    import review_cap_verdicts
+
+    values = {
+        "project_id": "", "pr_number": PR, "verdict_id": _vid(head), "head_sha": head, "cap_rule": "B3.1",
+        "outcome": review_cap_verdicts.TERUG_NAAR_PLAN, "chosen_outcome": review_cap_verdicts.TERUG_NAAR_PLAN,
+        "tiebreaker_model": "deepseek-v4-pro", "rationale": "a design problem", "created_at": "2026-10-20T09:00:00Z",
+        **fields,
+    }
+    return review_cap_verdicts.CapVerdict(**values)
+
+
+def _receipt_without_row(state_dir: Path, verdict) -> None:
+    """Book ``verdict`` as the tiebreaker does, with the row's commit failing after its receipt landed."""
+    import review_cap_verdicts
+
+    real = review_cap_verdicts._book_row
+
+    def commit_fails(path, booked, *, commit):
+        if commit:
+            raise review_cap_verdicts.CapVerdictError("database or disk is full")
+        return real(path, booked, commit=commit)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(review_cap_verdicts, "_book_row", commit_fails)
+        with pytest.raises(review_cap_verdicts.CapVerdictError, match="receipt of .* stands"):
+            review_cap_verdicts.record_verdict(state_dir, verdict)
+
+
+def _returned_receipt(state_dir: Path, head: str, **fields: Any) -> None:
+    _emit_cap_receipt(
+        state_dir, verdict_id=_vid(head), head_sha=head, outcome="terug-naar-plan", chosen_outcome="terug-naar-plan",
+        intervention="", granted_dispatch_id="", **fields,
+    )
+
+
+class TestAReceiptWhoseRowDidNotLandStillSendsThePrBack:
+    """BLOCKING: the door read only SQLite, so an interrupted projection erased the terminal decision."""
+
+    @pytest.mark.parametrize("on", [CAP, HEAD], ids=["receipt-on-the-cap-head", "receipt-on-the-merged-head"])
+    def test_a_terug_naar_plan_receipt_without_its_row_refuses_like_its_row_override_included(self, door, on):
+        import review_cap_verdicts
+
+        _receipt_without_row(door["state"], _returned(on))
+
+        verdict = _overridden_door(door)
+
+        assert review_cap_verdicts.read_verdicts(door["state"], PR) == (), "the row did not land"
+        assert [r["verdict_id"] for r in _cap_receipts(door["state"])] == [_vid(on)], "its receipt did"
+        assert verdict["verdict"] == "NO-GO", verdict["message"]
+        assert "terug naar plan" in verdict["message"] and _vid(on) in verdict["message"]
+        assert verdict["review_seats"]["filled_by"] == {}, "no seat counts, the second seat neither"
+
+    def test_only_a_receipt_of_this_project_and_the_current_count_refuses(self, door):
+        import review_cap_verdicts
+        import review_rounds
+
+        _returned_receipt(door["state"], CAP, project_id="another-project")
+        _returned_receipt(door["state"], HEAD, created_at="2026-10-20T08:10:00Z")
+        cap = review_rounds.cap_state([review_rounds.RoundLine.from_dict(_line("codex_gate", CAP, "fail", 3, at=1))], PR)
+
+        assert review_cap_verdicts.door_return(door["state"], cap, since="2026-10-20T08:30:00Z") is None
+        assert review_cap_verdicts.door_return(door["state"], cap, since="2026-10-20T08:00:00Z").verdict_id == _vid(HEAD)
+
+    def test_a_receipt_in_a_store_that_names_no_project_counts_no_pass(self, tmp_path):
+        import review_cap_verdicts
+        import review_rounds
+
+        state = tmp_path / "no-store" / "state"
+        state.mkdir(parents=True)
+        cap = review_rounds.cap_state([review_rounds.RoundLine.from_dict(_line("codex_gate", CAP, "fail", 3, at=1))], PR)
+
+        assert review_cap_verdicts.door_return(state, cap) is None, "no store and no receipt: nothing stands"
+        _returned_receipt(state, CAP)
+        with pytest.raises(review_cap_verdicts.CapVerdictError, match="names no project"):
+            review_cap_verdicts.door_return(state, cap)
+
+
+class TestTheDeliverableMoveIsJournaledBeforeItCommits:
+    """ADVISORY 1 (ADR-005): the move back to plan committed before its receipt."""
+
+    def test_a_deliverable_receipt_that_does_not_land_leaves_the_deliverable_where_it_stood(
+        self, env, model, gh, monkeypatch,
+    ):
+        import governance_receipts
+
+        _aftermath_world(env, gh)
+        model["answers"].append(_answer("terug-naar-plan"))
+        real = governance_receipts.emit_governance_receipt
+
+        def full_disk_on_the_deliverable(event, **fields):
+            if fields.get("step") == "deliverable":
+                raise OSError(28, "No space left on device")
+            return real(event, **fields)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(governance_receipts, "emit_governance_receipt", full_disk_on_the_deliverable)
+            failed = _cli("--for-dispatch", X)
+        after_failure = (
+            _deliverable_row(env["state_dir"]), _returned_events(env["state_dir"]),
+            [r["step"] for r in _step_receipts(env["state_dir"])],
+        )
+        finished = _cli("--for-dispatch", X)
+
+        assert failed == 3
+        assert after_failure == (("ready", "2026-10-20T07:00:00Z"), [], ["open_items"]), (
+            "no receipt, no move: the deliverable stands ready, approved, without an event"
+        )
+        assert finished == 0
+        assert _deliverable_row(env["state_dir"]) == ("proposed", None) and len(_returned_events(env["state_dir"])) == 1
+        assert [r["step"] for r in _step_receipts(env["state_dir"])] == ["open_items", "deliverable", "pr_close"]
+
+    def test_a_move_whose_commit_did_not_land_is_applied_from_its_receipt_on_the_next_run(
+        self, env, model, gh, monkeypatch, capsys,
+    ):
+        import review_cap_aftermath
+
+        _aftermath_world(env, gh)
+        model["answers"].append(_answer("terug-naar-plan"))
+        real = review_cap_aftermath._receipt_once
+
+        def dies_after_the_deliverable_receipt(state_dir, verdict, result):
+            real(state_dir, verdict, result)
+            if result.step == "deliverable":
+                raise _Crash("the process dies between the receipt and the commit")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(review_cap_aftermath, "_receipt_once", dies_after_the_deliverable_receipt)
+            with pytest.raises(_Crash):
+                _cli("--for-dispatch", X)
+        after_crash = (_deliverable_row(env["state_dir"]), _returned_events(env["state_dir"]))
+        capsys.readouterr()
+        finished = _cli("--for-dispatch", X, "--json")
+
+        assert after_crash == (("ready", "2026-10-20T07:00:00Z"), []), "the receipt landed first, the move did not"
+        assert finished == 0
+        steps = {step["step"]: step for step in json.loads(capsys.readouterr().out)["aftermath"]["steps"]}
+        assert (steps["deliverable"]["result"], steps["deliverable"]["restored"]) == ("returned", True)
+        assert steps["pr_close"]["restored"] is False
+        assert _deliverable_row(env["state_dir"]) == ("proposed", None)
+        ((entity, from_state, to_state, actor, _reason, _project),) = _returned_events(env["state_dir"])
+        assert (entity, from_state, to_state, actor) == (DELIVERABLE, "ready", "proposed", _vid(env["cap_head"]))
+        assert [r["step"] for r in _step_receipts(env["state_dir"])] == ["open_items", "deliverable", "pr_close"]
+
+
+class TestAReceiptedStepIsNotRunAgain:
+    """ADVISORY 2: a retry re-ran receipted steps and reread a result record that a later gate run replaced."""
+
+    def test_a_retry_after_a_failed_close_closes_without_reading_the_replaced_result_record(self, env, model, gh):
+        import review_cap_verdicts
+
+        _aftermath_world(env, gh)
+        model["answers"].append(_answer("terug-naar-plan"))
+        (gh / "close_fails").write_text("", encoding="utf-8")
+        failed = _cli("--for-dispatch", X)
+        (before,) = review_cap_verdicts.read_verdicts(env["state_dir"], PR)
+        _cap_record(env, "e" * 40, findings=[{"severity": "error", "message": "a finding on another head"}])
+        (gh / "close_fails").unlink()
+
+        retried = _cli("--for-dispatch", X)
+
+        assert failed == 3 and retried == 0
+        assert (gh / "pr_state").read_text() == "CLOSED"
+        (after,) = review_cap_verdicts.read_verdicts(env["state_dir"], PR)
+        assert after.oi_ids == before.oi_ids and len(after.oi_ids) == 3
+        assert len(_open_items(env["state_dir"])) == 3 and len(_returned_events(env["state_dir"])) == 1
+        assert [r["step"] for r in _step_receipts(env["state_dir"])] == ["open_items", "deliverable", "pr_close"]
+
+    def test_a_crash_after_the_open_items_receipt_books_its_ids_from_the_receipt(self, env, model, gh, monkeypatch):
+        import review_cap_aftermath
+        import review_cap_verdicts
+
+        _aftermath_world(env, gh)
+        model["answers"].append(_answer("terug-naar-plan"))
+        real = review_cap_aftermath._receipt_once
+
+        def dies_after_the_open_items_receipt(state_dir, verdict, result):
+            real(state_dir, verdict, result)
+            if result.step == "open_items":
+                raise _Crash("the process dies after the receipt")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(review_cap_aftermath, "_receipt_once", dies_after_the_open_items_receipt)
+            with pytest.raises(_Crash):
+                _cli("--for-dispatch", X)
+        (receipt,) = _step_receipts(env["state_dir"])
+        _cap_record(env, "e" * 40, findings=[{"severity": "error", "message": "a finding on another head"}])
+
+        assert _cli("--for-dispatch", X) == 0
+
+        (verdict,) = review_cap_verdicts.read_verdicts(env["state_dir"], PR)
+        assert list(verdict.oi_ids) == receipt["oi_ids"] and len(verdict.oi_ids) == 3
+        assert len(_open_items(env["state_dir"])) == 3 and len(_gh_calls(gh, "close")) == 1
+        assert [r["step"] for r in _step_receipts(env["state_dir"])] == ["open_items", "deliverable", "pr_close"]
