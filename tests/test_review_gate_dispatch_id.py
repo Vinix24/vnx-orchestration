@@ -55,12 +55,52 @@ def _codex_only(monkeypatch) -> None:
     monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0")
 
 
+_SENTINEL = "_warned_review_gate_no_dispatch_id"
+
+
+def _warn_path_globals() -> Dict[str, Any]:
+    """Namespace of the validation module that the warn calls in this file execute.
+
+    ``append_receipt`` is bound when this file is collected. A test that runs
+    earlier may pop ``append_receipt_internals`` from ``sys.modules`` and import
+    it again (tests/test_receipt_project_id_scoping_2026-05-20.py does). The
+    bound facade keeps calling the validation function of collection time, which
+    reads the ``common`` module of that time, so the names come from the function
+    itself and never from a fresh import.
+    """
+    return append_receipt._warn_if_review_gate_missing_dispatch_id.__globals__
+
+
+def _warn_path_common() -> Dict[str, Any]:
+    """Namespace of the common module that the warn path reads its facade from."""
+    return _warn_path_globals()["get_facade_module"].__globals__
+
+
+def _sentinel_modules() -> List[Any]:
+    """Every module object the production warn-once check reads and sets.
+
+    Mirrors the candidates in validation._warn_if_review_gate_missing_dispatch_id:
+    sys.modules["append_receipt"] and the facade its own common module returns.
+    """
+    found: List[Any] = []
+    for module in (sys.modules.get("append_receipt"), _warn_path_globals()["get_facade_module"]()):
+        if module is not None and not any(module is seen for seen in found):
+            found.append(module)
+    return found
+
+
+def _reset_sentinels(monkeypatch) -> None:
+    for module in _sentinel_modules():
+        monkeypatch.setattr(module, _SENTINEL, False, raising=False)
+
+
 @pytest.fixture(autouse=True)
-def reset_warning_flag():
-    """Reset the one-time warning sentinel between tests."""
-    append_receipt._warned_review_gate_no_dispatch_id = False
-    yield
-    append_receipt._warned_review_gate_no_dispatch_id = False
+def reset_warning_flag(monkeypatch):
+    """Reset the one-time warning sentinel on every module the check consults.
+
+    monkeypatch puts the original values back at teardown.
+    """
+    _reset_sentinels(monkeypatch)
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +207,32 @@ def test_append_receipt_warns_once_on_review_gate_request_missing_dispatch_id():
     assert len(warn_calls) == 1, "Warning should fire exactly once per process run"
     assert warn_calls[0]["level"] == "WARN"
     assert warn_calls[0]["code"] == "review_gate_request_missing_dispatch_id"
+
+
+def test_reset_clears_sentinel_left_on_a_second_facade_object(monkeypatch):
+    """A sentinel left True on a facade object other than append_receipt must be reset."""
+    import types
+
+    emitted: List[str] = []
+    second = types.ModuleType("append_receipt_second_facade")
+    setattr(second, _SENTINEL, True)
+    monkeypatch.setitem(_warn_path_common(), "_facade_modules", [append_receipt, second])
+    # The warn path emits through its own ``facade`` name; capture exactly there.
+    monkeypatch.setitem(
+        _warn_path_globals(),
+        "facade",
+        types.SimpleNamespace(_emit=lambda level, code, **fields: emitted.append(code)),
+    )
+    receipt = {"event_type": "review_gate_request", "gate": "gemini_review", "dispatch_id": ""}
+
+    append_receipt._warn_if_review_gate_missing_dispatch_id("review_gate_request", receipt)
+    assert emitted == [], "the True sentinel on the second facade must suppress the warning"
+
+    _reset_sentinels(monkeypatch)
+
+    assert getattr(second, _SENTINEL) is False
+    append_receipt._warn_if_review_gate_missing_dispatch_id("review_gate_request", receipt)
+    assert emitted == ["review_gate_request_missing_dispatch_id"]
 
 
 # ---------------------------------------------------------------------------
