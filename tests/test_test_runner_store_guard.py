@@ -19,6 +19,7 @@ reason), and no ``claude`` on ``PATH``.
 
 from __future__ import annotations
 
+import importlib
 import os
 import subprocess
 import sys
@@ -33,16 +34,43 @@ LIB_DIR = REPO_ROOT / "scripts" / "lib"
 SCRIPTS_DIR = REPO_ROOT / "scripts"
 sys.path.insert(0, str(LIB_DIR))
 
+import health_beacon
 import state_writer
 import vnx_paths
-from health_beacon import HealthBeacon
-
-# Aliased: imported into a test module, the class would otherwise be
-# collected as a test class (name starts with "Test").
-IsolationGuardError = vnx_paths.TestIsolationGuardError
 
 PROJECT_ID = "vnx-dev"
 CHILD_TIMEOUT_SECONDS = 180
+
+
+def _guard_error_raised_by(writer) -> type[RuntimeError]:
+    """The isolation-guard class ``writer`` raises, looked up when asserting.
+
+    Not an import-time alias: a test earlier in the same worker that reloads
+    ``vnx_paths`` re-executes ``class TestIsolationGuardError``, and the guard
+    then raises the new class, which an alias bound at import no longer matches
+    (xdist triage D3-1). The lookup goes through the guard function the writer
+    imported, so it reads the namespace the ``raise`` runs in. A function and
+    not a module-level name: a ``Test*`` name here is collected as a test class.
+    """
+    guard = writer.refuse_real_central_store_write_under_test_runner
+    return guard.__globals__["TestIsolationGuardError"]
+
+
+@pytest.fixture
+def stale_guard_error():
+    """Reload ``vnx_paths`` in place for one test, then put the original back.
+
+    Yields the guard class from before the reload: what an import-time alias
+    would still hold. Restoring the saved namespace returns the original class
+    to every module that calls the guard, so nothing leaks to later tests.
+    """
+    saved = dict(vars(vnx_paths))
+    try:
+        importlib.reload(vnx_paths)
+        yield saved["TestIsolationGuardError"]
+    finally:
+        vars(vnx_paths).clear()
+        vars(vnx_paths).update(saved)
 
 
 def _child_env(home: Path, **extra: str) -> dict[str, str]:
@@ -360,11 +388,28 @@ class TestSurfaceGuardsInProcess:
         monkeypatch.setenv("HOME", str(fake_home))
         target = fake_home / ".vnx-data" / PROJECT_ID / "state" / "dispatch_register.ndjson"
 
-        with pytest.raises(IsolationGuardError):
+        with pytest.raises(_guard_error_raised_by(state_writer)):
             state_writer.append_locked(target, {"event": "worker_exited"})
-        with pytest.raises(IsolationGuardError):
+        with pytest.raises(_guard_error_raised_by(state_writer)):
             state_writer.rewrite_locked(target, b"{}\n")
 
+        assert not (fake_home / ".vnx-data").exists(), "the guard must refuse before any mkdir"
+
+    def test_refusal_is_matched_after_vnx_paths_was_reloaded(
+        self, tmp_path, monkeypatch, stale_guard_error
+    ):
+        # The xdist failure (triage D3-1): a reload earlier in the worker gives
+        # the guard a new class, and the class bound at import misses it.
+        fake_home = tmp_path / "home"
+        monkeypatch.setenv("HOME", str(fake_home))
+        target = fake_home / ".vnx-data" / PROJECT_ID / "state" / "dispatch_register.ndjson"
+        guard_error = _guard_error_raised_by(state_writer)
+        assert guard_error is not stale_guard_error, "the reload must re-create the class"
+
+        with pytest.raises(guard_error) as refused:
+            state_writer.append_locked(target, {"event": "worker_exited"})
+
+        assert not isinstance(refused.value, stale_guard_error)
         assert not (fake_home / ".vnx-data").exists(), "the guard must refuse before any mkdir"
 
     def test_state_writer_still_writes_outside_the_real_store(self, tmp_path, monkeypatch):
@@ -377,17 +422,17 @@ class TestSurfaceGuardsInProcess:
 
     def test_heartbeat_refuses_on_its_own_not_only_the_constructor(self, tmp_path, monkeypatch):
         fake_home = tmp_path / "home"
-        beacon = HealthBeacon(fake_home / ".vnx-data" / PROJECT_ID, "guard_probe")
+        beacon = health_beacon.HealthBeacon(fake_home / ".vnx-data" / PROJECT_ID, "guard_probe")
         monkeypatch.setenv("HOME", str(fake_home))
 
-        with pytest.raises(IsolationGuardError):
+        with pytest.raises(_guard_error_raised_by(health_beacon)):
             beacon.heartbeat()
 
         assert not beacon.path.exists()
 
     def test_heartbeat_outside_the_real_store_still_writes(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path / "home"))
-        beacon = HealthBeacon(tmp_path / "pinned", "guard_probe")
+        beacon = health_beacon.HealthBeacon(tmp_path / "pinned", "guard_probe")
 
         beacon.heartbeat()
 
