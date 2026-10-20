@@ -77,11 +77,12 @@ export type DeliverableView = {
 
 /**
  * One project, as the last refresh read it. Without a store nothing of it was
- * read: its store directory is missing (`geen store`), or its id would name a
- * path outside the data root (`ongeldige project-id`).
+ * read: its store directory is missing (`geen store`), the check for it
+ * rejected (`onbeschikbaar: <reason>`), or its id would name a path outside
+ * the data root (`ongeldige project-id`).
  */
 export type ProjectModel =
-  | { id: string; hasStore: false; reason: 'geen store' | 'ongeldige project-id' }
+  | { id: string; hasStore: false; reason: 'geen store' | 'ongeldige project-id' | `onbeschikbaar: ${string}` }
   | {
       id: string
       hasStore: true

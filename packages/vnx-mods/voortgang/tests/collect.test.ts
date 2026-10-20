@@ -263,6 +263,37 @@ describe('vnx objective list and deliverable list', () => {
     })
     expect(deliverableViewOf('x')).toEqual({ isOk: false, reason: 'vnx gaf geen lijst' })
   })
+
+  test('counts a track or status named like an Object.prototype member as any other', () => {
+    const result = deliverableViewOf([
+      { track: '__proto__', derived_status: 'proposed' },
+      { track: '__proto__', derived_status: 'proposed' },
+      { track: 'constructor', derived_status: 'done' },
+      { track: 'toString', derived_status: 'constructor' },
+      { track: 'docs', derived_status: '__proto__' },
+    ])
+
+    expect(result.isOk).toBe(true)
+
+    if (result.isOk) {
+      const { byTrack, proposed } = result.value
+
+      expect(proposed).toBe(2)
+      expect(byTrack['__proto__']?.proposed).toBe(2)
+      expect(byTrack['constructor']?.['done']).toBe(1)
+      expect(byTrack['toString']?.['constructor']).toBe(1)
+      expect(byTrack.docs?.['__proto__']).toBe(1)
+      expect(Object.keys(byTrack).sort()).toEqual(['__proto__', 'constructor', 'docs', 'toString'])
+      expect(({} as Record<string, unknown>).proposed).toBeUndefined()
+    }
+  })
+
+  test('keeps an outcome named __proto__ among the open outcomes', () => {
+    const block = { available: true, total: 3, by_outcome: JSON.parse('{"__proto__": 2, "constructor": 1}'), items: [] }
+    const result = indexViewOf({ timestamp: stampMinutesAgo(1), live_work: null, open_outcomes: block }, NOW)
+
+    expect(result.isOk && result.value.outcomes.isOk && Object.keys(result.value.outcomes.value.byOutcome).sort()).toEqual(['__proto__', 'constructor'])
+  })
 })
 
 describe('one project', () => {
@@ -287,6 +318,40 @@ describe('one project', () => {
 
     expect(await collectProject(io, 'project-c', ROOT, BIN, NOW)).toEqual({ id: 'project-c', hasStore: false, reason: 'geen store' })
     expect(asked).toEqual([])
+  })
+
+  test('turns a rejecting exists, read or list into onbeschikbaar for that part only', async () => {
+    const base = ioOf(healthyFiles('project-a'), [], healthyAnswer)
+    const noStore = await collectProject({ ...base, exists: async () => Promise.reject(new Error('EIO: store')) }, 'project-a', ROOT, BIN, NOW)
+
+    expect(noStore).toEqual({ id: 'project-a', hasStore: false, reason: 'onbeschikbaar: EIO: store' })
+
+    const noIndex = await collectProject(
+      { ...base, exists: async path => (path.endsWith('t0_index.json') ? Promise.reject(new Error('EIO: index')) : base.exists(path)) },
+      'project-a',
+      ROOT,
+      BIN,
+      NOW,
+    )
+
+    expect(noIndex.hasStore && !noIndex.index.isOk && noIndex.index.reason).toBe('onbeschikbaar: EIO: index')
+    expect(noIndex.hasStore && noIndex.state.isOk && noIndex.tracks.isOk && noIndex.deliverables.isOk).toBe(true)
+  })
+
+  test('refreshes the healthy projects when one project rejects, and when a store check rejects during discovery', async () => {
+    const files = { ...healthyFiles('project-a'), ...healthyFiles('project-b'), ...healthyFiles('project-c') }
+    const base = ioOf(files, [], healthyAnswer)
+    const io: Io = {
+      ...base,
+      exists: async path => (path.includes('/project-b/') ? Promise.reject(new Error('EIO: project-b')) : base.exists(path)),
+    }
+    const model = await collectModel(io, configOf({}), HOME, NOW)
+
+    expect(model.rootError).toBeNull()
+    expect(model.projects.map(project => project.id)).toEqual(['project-a', 'project-b', 'project-c'])
+    expect(model.projects[1]).toEqual({ id: 'project-b', hasStore: false, reason: 'onbeschikbaar: EIO: project-b' })
+    expect([model.projects[0], model.projects[2]].every(project => project !== undefined && !isUnreadable(project))).toBe(true)
+    expect(statusLine(model)).toBe('voortgang · 2 live · 2 PR · 4 open · 1 onleesbaar')
   })
 
   test('refuses a project id that would leave the data root', async () => {

@@ -47,8 +47,21 @@ const isCount = (value: unknown): value is number => typeof value === 'number' &
 const textOr = (value: unknown, fallback: string): string => (typeof value === 'string' && value !== '' ? value : fallback)
 const stringsOf = (value: unknown): string[] | null =>
   Array.isArray(value) ? value.filter((one): one is string => typeof one === 'string') : null
+/** A dictionary whose keys come from data: no prototype, so `__proto__` or `constructor` is a key like any other. */
+const dictionaryOf = <T>(entries: Iterable<readonly [string, T]> = []): Record<string, T> => {
+  const dictionary = Object.create(null) as Record<string, T>
+
+  for (const [key, value] of entries) {
+    dictionary[key] = value
+  }
+
+  return dictionary
+}
 const idsOf = (value: unknown): string[] =>
   Array.isArray(value) ? value.flatMap(one => (isRecord(one) && typeof one.dispatch_id === 'string' ? [one.dispatch_id] : [])) : []
+
+/** The reason a rejected `exists`, `read`, `list` or `run` is shown with. */
+const unavailableOf = (error: unknown): `onbeschikbaar: ${string}` => `onbeschikbaar: ${messageOf(error)}`
 
 function messageOf(error: unknown): string {
   const text = error instanceof Error ? error.message : String(error)
@@ -192,7 +205,7 @@ function outcomesOf(value: unknown): Part<Outcomes> {
 
   return ok({
     total,
-    byOutcome: isRecord(byOutcome) ? Object.fromEntries(Object.entries(byOutcome).filter(([, count]) => isCount(count))) as Record<string, number> : {},
+    byOutcome: dictionaryOf(isRecord(byOutcome) ? Object.entries(byOutcome).flatMap(([name, count]) => (isCount(count) ? [[name, count] as const] : [])) : []),
     ids: idsOf(block.value.items),
   })
 }
@@ -293,12 +306,12 @@ export function deliverableViewOf(json: unknown): Part<DeliverableView> {
     return fail('vnx gaf geen lijst')
   }
 
-  const view: DeliverableView = { byTrack: {}, proposed: 0 }
+  const view: DeliverableView = { byTrack: dictionaryOf(), proposed: 0 }
 
   for (const deliverable of json.filter(isRecord)) {
     const track = textOr(deliverable.track, '?')
     const status = textOr(deliverable.derived_status, 'onbekend')
-    const counts = view.byTrack[track] ?? {}
+    const counts = view.byTrack[track] ?? dictionaryOf<number>()
 
     counts[status] = (counts[status] ?? 0) + 1
     view.byTrack[track] = counts
@@ -316,8 +329,12 @@ const andThen = <A, B>(part: Part<A>, next: (value: A) => Part<B>): Part<B> => (
 async function readJson(io: Io, store: string, name: string): Promise<Part<unknown>> {
   const path = `${store}/${name}`
 
-  if (!(await io.exists(path))) {
-    return fail(`${name} ontbreekt`)
+  try {
+    if (!(await io.exists(path))) {
+      return fail(`${name} ontbreekt`)
+    }
+  } catch (error) {
+    return fail(unavailableOf(error))
   }
 
   let text: string
@@ -325,7 +342,7 @@ async function readJson(io: Io, store: string, name: string): Promise<Part<unkno
   try {
     text = await io.read(path)
   } catch (error) {
-    return fail(`${name} onleesbaar: ${messageOf(error)}`)
+    return fail(`${name} ${unavailableOf(error)}`)
   }
 
   return parseJson(text)
@@ -362,8 +379,12 @@ export async function collectProject(io: Io, id: string, root: string, bin: stri
 
   const store = storeOf(root, id)
 
-  if (!(await io.exists(store))) {
-    return { id, hasStore: false, reason: 'geen store' }
+  try {
+    if (!(await io.exists(store))) {
+      return { id, hasStore: false, reason: 'geen store' }
+    }
+  } catch (error) {
+    return { id, hasStore: false, reason: unavailableOf(error) }
   }
 
   const index = andThen(await readJson(io, store, INDEX_FILE), json => indexViewOf(json, now))
@@ -392,7 +413,12 @@ export async function discoverIds(io: Io, root: string, exclude: readonly string
   const isStore = async (id: string) => {
     const store = storeOf(root, id)
 
-    return (await io.exists(`${store}/${INDEX_FILE}`)) || (await io.exists(`${store}/${STATE_FILE}`))
+    try {
+      return (await io.exists(`${store}/${INDEX_FILE}`)) || (await io.exists(`${store}/${STATE_FILE}`))
+    } catch {
+      // A check that fails cannot rule the project out: it is listed and collectProject shows why it is unavailable.
+      return true
+    }
   }
   const found = await Promise.all(candidates.map(async id => ((await isStore(id)) ? [id] : [])))
 
