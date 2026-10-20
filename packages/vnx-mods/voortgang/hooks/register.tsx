@@ -3,7 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { Model, Row } from '../types'
 
-import { collectModel, commandText, configOf, statusLine } from './collect'
+import { collectModel, commandText, configOf, messageOf, statusLine } from './collect'
 import type { Config, Io } from './collect'
 import { paneRows } from './view'
 
@@ -12,6 +12,7 @@ const BUTTON_COLUMNS = 13
 
 const model = atom({ plugin: 'voortgang', key: 'model' } as const, null)
 const isRefreshing = atom({ plugin: 'voortgang', key: 'isRefreshing' } as const, false)
+const failure = atom({ plugin: 'voortgang', key: 'failure' } as const, null)
 
 // Joins a refresh asked while one runs (the timer, the button, the command). Never drawn from:
 // a reload starts it over at null, which only means the next ask starts a fresh refresh.
@@ -34,6 +35,7 @@ async function collectInto($: EngineInterface, config: Config): Promise<Model> {
     const now = await $.clock.now()
     const next = await collectModel(ioOf($), config, home, now)
     await update($, model, () => next)
+    await update($, failure, () => null)
     $.ui.status(statusLine(next))
 
     return next
@@ -49,6 +51,23 @@ function refresh($: EngineInterface, config: Config): Promise<Model> {
   }
 
   return running
+}
+
+/** A refresh that rejected is shown in the status line and in the pane; the model of the last good refresh stays. */
+async function showFailure($: EngineInterface, error: unknown): Promise<void> {
+  const reason = messageOf(error)
+
+  await update($, failure, () => reason)
+  $.ui.status(`voortgang · verversen mislukt: ${reason}`)
+}
+
+/** A refresh nobody awaits: the timer, the button and the start of a session. */
+async function refreshShown($: EngineInterface, config: Config): Promise<void> {
+  try {
+    await refresh($, config)
+  } catch (error) {
+    await showFailure($, error)
+  }
 }
 
 const toneOf = (tone: Row['tone']) => {
@@ -79,20 +98,29 @@ export const register: Register = (on, options) => {
       name: 'voortgang',
       description: 'Toont de VNX-voortgang per project',
     })
-    void refresh($, config)
+    void refreshShown($, config)
     $.clock.every(config.refreshSeconds * 1000, () => {
-      void refresh($, config)
+      void refreshShown($, config)
     })
 
     return next(e)
   })
 
   on('command.run', { command: 'voortgang' }, async $ => {
-    const latest = await refresh($, config)
+    let latest: Model
+
+    try {
+      latest = await refresh($, config)
+    } catch (error) {
+      await showFailure($, error)
+
+      return { text: `Voortgang: verversen mislukt (${messageOf(error)}), het paneel is niet geopend.` }
+    }
+
     const opened = await $.ui.open({ id: PANE, title: 'Voortgang' })
 
     return { text: commandText(latest, opened.isPlaced ? null : opened.reason) }
-  }).catch(() => ({ text: 'Voortgang: verversen mislukt, het paneel is niet geopend.' }))
+  })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Button, Text } = $.ui.resolve(e)
@@ -102,6 +130,7 @@ export const register: Register = (on, options) => {
       headerColumns: Math.max(1, e.props.bodyColumns - BUTTON_COLUMNS),
       rows,
       isRefreshing: await read($, isRefreshing),
+      failure: await read($, failure),
     })
 
     return (
@@ -113,7 +142,7 @@ export const register: Register = (on, options) => {
             label="ververs"
             hotkey="r"
             onPress={() => {
-              void refresh($, config)
+              void refreshShown($, config)
             }}
           />
         </Box>

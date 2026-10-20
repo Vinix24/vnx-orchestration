@@ -30,6 +30,7 @@ import {
   BIN,
   CONTENT,
   childNames,
+  dbOf,
   DELIVERABLES,
   HOME,
   NOW,
@@ -39,6 +40,9 @@ import {
   healthyFiles,
   indexJson,
   indexOf,
+  instructionOf,
+  instructionText,
+  specOf,
   stampMinutesAgo,
   stateJson,
   stateOf,
@@ -171,7 +175,17 @@ describe('t0_index.json', () => {
       isOk: true,
       value: {
         ageMinutes: 3,
-        liveWork: { isOk: true, value: { live: 1, starting: 0, stale: 4, unmeasured: 0, liveIds: ['d-live-1'] } },
+        liveWork: {
+          isOk: true,
+          value: {
+            live: 1,
+            starting: 0,
+            stale: 4,
+            unmeasured: 0,
+            liveIds: ['d-live-1'],
+            running: { isOk: true, value: [{ dispatchId: 'd-live-1', ageSeconds: 725 }] },
+          },
+        },
         outcomes: {
           isOk: true,
           value: { total: 2, byOutcome: { reject: 0, investigate: 2, unknown: 0 }, ids: ['d-out-1', 'd-out-2'] },
@@ -351,7 +365,7 @@ describe('one project', () => {
     expect(model.projects.map(project => project.id)).toEqual(['project-a', 'project-b', 'project-c'])
     expect(model.projects[1]).toEqual({ id: 'project-b', hasStore: false, reason: 'onbeschikbaar: EIO: project-b' })
     expect([model.projects[0], model.projects[2]].every(project => project !== undefined && !isUnreadable(project))).toBe(true)
-    expect(statusLine(model)).toBe('voortgang · 2 live · 2 PR · 4 open · 1 onleesbaar')
+    expect(statusLine(model)).toBe('voortgang · 2 live · 2 PR · 4 open · 2 bouwers · 1 onleesbaar')
   })
 
   test('refuses a project id that would leave the data root', async () => {
@@ -391,7 +405,7 @@ describe('one project', () => {
   })
 
   test('calls a project with a two-hour-old index outdated', async () => {
-    const files = { [indexOf('project-a')]: indexJson({ ageMinutes: 120 }), [stateOf('project-a')]: stateJson() }
+    const files = { [indexOf('project-a')]: indexJson({ ageMinutes: 120 }), [stateOf('project-a')]: stateJson(), [dbOf('project-a')]: '' }
     const project = await collectProject(ioOf(files, [], healthyAnswer), 'project-a', ROOT, BIN, NOW)
 
     expect(isOutdated(project)).toBe(true)
@@ -464,21 +478,21 @@ describe('the status line', () => {
       projects: [await healthy('project-a'), { id: 'project-c', hasStore: false, reason: 'geen store' }],
     }
 
-    expect(statusLine(model)).toBe('voortgang · 1 live · 1 PR · 2 open · 1 onleesbaar')
+    expect(statusLine(model)).toBe('voortgang · 1 live · 1 PR · 2 open · 1 bouwers · 1 onleesbaar')
   })
 
   test('adds the outdated projects, and writes ? where no project could be read', async () => {
     const stale = await collectProject(
-      ioOf({ [indexOf('project-a')]: indexJson({ ageMinutes: 120 }), [stateOf('project-a')]: stateJson() }, [], healthyAnswer),
+      ioOf({ [indexOf('project-a')]: indexJson({ ageMinutes: 120 }), [stateOf('project-a')]: stateJson(), [dbOf('project-a')]: '' }, [], healthyAnswer),
       'project-a',
       ROOT,
       BIN,
       NOW,
     )
 
-    expect(statusLine({ collectedAt: NOW, rootError: null, projects: [stale] })).toBe('voortgang · 1 live · 1 PR · 2 open · 1 verouderd')
+    expect(statusLine({ collectedAt: NOW, rootError: null, projects: [stale] })).toBe('voortgang · 1 live · 1 PR · 2 open · 1 bouwers · 1 verouderd')
     expect(statusLine({ collectedAt: NOW, rootError: null, projects: [{ id: 'project-c', hasStore: false, reason: 'geen store' }] })).toBe(
-      'voortgang · ? live · ? PR · ? open · 1 onleesbaar',
+      'voortgang · ? live · ? PR · ? open · ? bouwers · 1 onleesbaar',
     )
     expect(statusLine({ collectedAt: NOW, rootError: 'HOME onbekend', projects: [] })).toBe('voortgang · onbeschikbaar: HOME onbekend')
     expect(statusLine({ collectedAt: NOW, rootError: null, projects: [] })).toBe('voortgang · geen projecten')
@@ -525,7 +539,7 @@ describe('the summary and the pane rows', () => {
     }
 
     expect(summaryLines(model)).toEqual([
-      'project-a: 1 live · 1 PR · 2 open · now ci-profile, docs · next 2 · later 3 · 3 te promoveren',
+      'project-a: 1 live · 1 PR · 2 open · now ci-profile, docs · next 2 · later 3 · 1 bouwers · 3 te promoveren',
       'project-c: geen store',
     ])
   })
@@ -549,5 +563,187 @@ describe('the summary and the pane rows', () => {
     expect(Array.from(view.header).length).toBeLessThanOrEqual(17)
     expect(texts.some(text => /^ {2}\+\d+ meer$/.test(text))).toBe(true)
     expect(texts.join('\n')).not.toContain(CONTENT)
+  })
+})
+
+describe('malformed entries in a vnx list', () => {
+  test('make the track part onbeschikbaar instead of dropping the entry', () => {
+    expect(trackViewOf([null])).toEqual({ isOk: false, reason: 'vnx gaf geen object op plaats 1' })
+    expect(trackViewOf([{ track_id: 'a', horizon: 'now' }, 'x'])).toEqual({ isOk: false, reason: 'vnx gaf geen object op plaats 2' })
+    expect(trackViewOf([[]]).isOk).toBe(false)
+    expect(trackViewOf([]).isOk).toBe(true)
+  })
+
+  test('make the deliverable part onbeschikbaar instead of dropping the entry', () => {
+    expect(deliverableViewOf([null])).toEqual({ isOk: false, reason: 'vnx gaf geen object op plaats 1' })
+    expect(deliverableViewOf([{ track: 'a', derived_status: 'done' }, 3])).toEqual({ isOk: false, reason: 'vnx gaf geen object op plaats 2' })
+  })
+
+  test('show up in a project as onbeschikbaar for that part only', async () => {
+    const run = (argv: readonly string[]) => (argv[1] === 'objective' ? { exitCode: 0, stdout: '[null]' } : healthyAnswer(argv))
+    const project = await collectProject(ioOf(healthyFiles('project-a'), [], run), 'project-a', ROOT, BIN, NOW)
+
+    expect(project.hasStore && project.tracks).toEqual({ isOk: false, reason: 'vnx gaf geen object op plaats 1' })
+    expect(project.hasStore && project.deliverables.isOk).toBe(true)
+    expect(isUnreadable(project)).toBe(true)
+  })
+})
+
+describe('the builders of a project', () => {
+  const builders = async (liveWork: unknown, extra: Record<string, string> = {}, asked: string[] = []) => {
+    const files = { ...healthyFiles('project-a'), [indexOf('project-a')]: indexJson({ liveWork }), ...extra }
+    const base = ioOf(files, [], healthyAnswer)
+    const io: Io = {
+      ...base,
+      read: async path => {
+        asked.push(path)
+
+        return base.read(path)
+      },
+    }
+    const project = await collectProject(io, 'project-a', ROOT, BIN, NOW)
+
+    return project.hasStore ? project.builders : null
+  }
+  const running = (counts: Record<string, number>, lists: Record<string, unknown[]>) => ({ available: true, counts: { live: 0, starting: 0, stale: 0, unmeasured: 0, ...counts }, ...lists })
+
+  test('reads role and model, the first # line and the minutes of a live dispatch', async () => {
+    const result = await builders(running({ live: 1 }, { live: [{ dispatch_id: 'd-live-1', age_seconds: 725 }] }))
+
+    expect(result).toEqual({
+      isOk: true,
+      value: [{ who: { isOk: true, value: { role: 'backend-developer', model: 'sonnet' } }, task: { isOk: true, value: 'Invented task: add the block' }, minutes: { isOk: true, value: 12 } }],
+    })
+  })
+
+  test('takes live then starting, and no stale or unmeasured entry, and reads no file of those', async () => {
+    const asked: string[] = []
+    const result = await builders(
+      running(
+        { live: 1, starting: 1, stale: 1, unmeasured: 1 },
+        {
+          live: [{ dispatch_id: 'd-live-1', age_seconds: 119 }],
+          starting: [{ dispatch_id: 'd-start-1', age_seconds: 5 }],
+          stale: [{ dispatch_id: 'd-stale-1', age_seconds: 9000 }],
+          unmeasured: [{ dispatch_id: 'd-unmeasured-1' }],
+        },
+      ),
+      {},
+      asked,
+    )
+
+    expect(result?.isOk && result.value.map(one => one.minutes)).toEqual([{ isOk: true, value: 1 }, { isOk: true, value: 0 }])
+    expect(asked.some(path => path.includes('d-stale-1') || path.includes('d-unmeasured-1'))).toBe(false)
+  })
+
+  test('names the field that cannot be read, for that dispatch only', async () => {
+    const files = { [instructionOf('project-a', 'd-live-1')]: 'Only a body', [specOf('project-a', 'd-live-1')]: JSON.stringify({ role: 'r' }) }
+    const result = await builders(running({ live: 1 }, { live: [{ dispatch_id: 'd-live-1' }] }), files)
+
+    expect(result).toEqual({
+      isOk: true,
+      value: [
+        {
+          who: { isOk: false, reason: 'model ontbreekt' },
+          task: { isOk: false, reason: 'geen titelregel' },
+          minutes: { isOk: false, reason: 'age_seconds ontbreekt' },
+        },
+      ],
+    })
+  })
+
+  test('stops at the first # line and at the byte budget, and says which', async () => {
+    const early = await builders(running({ live: 1 }, { live: [{ dispatch_id: 'd-live-1', age_seconds: 0 }] }), {
+      [instructionOf('project-a', 'd-live-1')]: `intro\n# First\n# Second\n${'x'.repeat(9000)}`,
+    })
+    const late = await builders(running({ live: 1 }, { live: [{ dispatch_id: 'd-live-1', age_seconds: 0 }] }), {
+      [instructionOf('project-a', 'd-live-1')]: `${'x'.repeat(5000)}\n# Too late`,
+    })
+    const cut = await builders(running({ live: 1 }, { live: [{ dispatch_id: 'd-live-1', age_seconds: 0 }] }), {
+      [instructionOf('project-a', 'd-live-1')]: `${'x'.repeat(4090)}\n# Cut in half ${'y'.repeat(100)}`,
+    })
+
+    expect(early?.isOk && early.value[0]?.task).toEqual({ isOk: true, value: 'First' })
+    expect(late?.isOk && late.value[0]?.task).toEqual({ isOk: false, reason: 'geen titelregel in de eerste 4096 tekens' })
+    expect(cut?.isOk && cut.value[0]?.task.isOk).toBe(false)
+  })
+
+  test('is onbeschikbaar when the live work is, and when an entry has no dispatch_id or a list is missing', async () => {
+    expect(await builders({ available: false, reason: 'lease store unreadable' })).toEqual({ isOk: false, reason: 'lease store unreadable' })
+    expect(await builders(running({ live: 1 }, { live: [null] }))).toEqual({ isOk: false, reason: 'live: bouwer zonder dispatch_id' })
+    expect(await builders(running({ live: 1 }, {}))).toEqual({ isOk: false, reason: 'live ontbreekt' })
+    expect(await builders(running({ starting: 1 }, { live: [] }))).toEqual({ isOk: false, reason: 'starting ontbreekt' })
+    expect(await builders(running({}, {}))).toEqual({ isOk: true, value: [] })
+  })
+
+  test('refuses a dispatch id that is not one directory name, and reads nothing for it', async () => {
+    const asked: string[] = []
+    const result = await builders(running({ live: 1 }, { live: [{ dispatch_id: '../../state', age_seconds: 60 }] }), {}, asked)
+
+    expect(result?.isOk && result.value[0]).toEqual({
+      who: { isOk: false, reason: 'ongeldige dispatch-id' },
+      task: { isOk: false, reason: 'ongeldige dispatch-id' },
+      minutes: { isOk: true, value: 1 },
+    })
+    expect(asked.some(path => path.includes('..'))).toBe(false)
+  })
+
+  test('turns the instruction text of a title into one line without control characters', async () => {
+    const result = await builders(running({ live: 1 }, { live: [{ dispatch_id: 'd-live-1', age_seconds: 0 }] }), {
+      [instructionOf('project-a', 'd-live-1')]: instructionText('Title\u001b[31m red'),
+    })
+
+    expect(result?.isOk && result.value[0]?.task).toEqual({ isOk: true, value: 'Title [31m red' })
+  })
+})
+
+describe('a store without runtime_coordination.db', () => {
+  test('runs no vnx command and creates no file, with tracks and deliverables onbeschikbaar', async () => {
+    const files = healthyFiles('project-a')
+    delete files[`${storeOf('project-a')}/runtime_coordination.db`]
+    const before = Object.keys(files).sort()
+    const asked: string[] = []
+    const io = ioOf(files, [], argv => {
+      asked.push(argv.join(' '))
+      files[`${storeOf('project-a')}/runtime_coordination.db`] = ''
+
+      return healthyAnswer(argv)
+    })
+    const project = await collectProject(io, 'project-a', ROOT, BIN, NOW)
+
+    expect(asked).toEqual([])
+    expect(Object.keys(files).sort()).toEqual(before)
+    expect(project.hasStore && project.tracks).toEqual({ isOk: false, reason: 'runtime_coordination.db ontbreekt' })
+    expect(project.hasStore && project.deliverables).toEqual({ isOk: false, reason: 'runtime_coordination.db ontbreekt' })
+    expect(project.hasStore && project.index.isOk).toBe(true)
+  })
+
+  test('says why when the check for the database rejects', async () => {
+    const base = ioOf(healthyFiles('project-a'), [], healthyAnswer)
+    const io: Io = { ...base, exists: async path => (path.endsWith('runtime_coordination.db') ? Promise.reject(new Error('EIO: db')) : base.exists(path)) }
+    const project = await collectProject(io, 'project-a', ROOT, BIN, NOW)
+
+    expect(project.hasStore && project.tracks).toEqual({ isOk: false, reason: 'onbeschikbaar: EIO: db' })
+  })
+})
+
+describe('the pane header and rows', () => {
+  const size = { columns: 40, headerColumns: 27, rows: 30, isRefreshing: false }
+
+  test('says the count is unknown when discovery failed', () => {
+    const view = paneRows({ collectedAt: NOW, rootError: 'EACCES', projects: [] }, size)
+
+    expect(view.header).toBe('Voortgang · aantal onbekend')
+    expect(paneRows({ collectedAt: NOW, rootError: null, projects: [] }, { ...size, columns: 100 }).lines[0]?.text).toContain('exclude, data_root')
+  })
+
+  test('cuts on display cells: wide characters count two and combining marks none', () => {
+    expect(fit('日本語日本語', 7)).toBe('日本語…')
+    expect(fit('日本語日本語', 8)).toBe('日本語…')
+    expect(fit('日本語', 6)).toBe('日本語')
+    expect(fit('e\u0301e\u0301e\u0301e\u0301', 4)).toBe('e\u0301e\u0301e\u0301e\u0301')
+    expect(fit('e\u0301e\u0301e\u0301e\u0301e\u0301', 4)).toBe('e\u0301e\u0301e\u0301…')
+    expect(fit('😀😀😀', 5)).toBe('😀😀…')
+    expect(fit('a日', 2)).toBe('a…')
   })
 })
