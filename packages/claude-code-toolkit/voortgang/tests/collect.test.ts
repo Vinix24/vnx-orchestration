@@ -46,13 +46,13 @@ import {
 
 const json = (text: string): unknown => JSON.parse(text)
 
-/** An in-memory `Io`: the two files of each store, and what `vnx` answers or throws. */
+/** An in-memory `Io`: the two files of each store (a directory holding a file exists), and what `vnx` answers or throws. */
 const ioOf = (
   files: Record<string, string>,
   dirs: string[],
   run: (argv: readonly string[]) => { exitCode: number; stdout: string } | Error,
 ): Io => ({
-  exists: async path => path in files || dirs.includes(path),
+  exists: async path => path in files || dirs.includes(path) || Object.keys(files).some(file => file.startsWith(`${path}/`)),
   read: async path => {
     const text = files[path]
 
@@ -366,7 +366,7 @@ describe('the status line', () => {
     }
     const model = await collectModel(io, configOf({ projects: 'alpha' }), undefined, NOW)
 
-    expect(model.rootError).toBe('HOME onbekend, ~ in data_root of vnx_bin is niet op te lossen')
+    expect(model.rootError).toBe('HOME onbekend, ~ niet op te lossen')
     expect(model.projects).toEqual([])
     expect(asked).toEqual([])
   })

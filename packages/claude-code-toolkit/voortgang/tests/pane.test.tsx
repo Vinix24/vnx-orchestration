@@ -197,10 +197,10 @@ describe('the session', () => {
     const { world } = await started($, on, { files: healthyFiles('alpha'), env: {} })
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
 
-    expect(await linesOf(ui)).toContain('onbeschikbaar: HOME onbekend, ~ in data_root of vnx_bin is niet op te lossen')
+    expect(await linesOf(ui)).toContain('onbeschikbaar: HOME onbekend, ~ niet op te lossen')
     expect(world.reads).toEqual([])
     expect(world.runs).toEqual([])
-    expect(world.statuses.at(-1)).toBe('voortgang · onbeschikbaar: HOME onbekend, ~ in data_root of vnx_bin is niet op te lossen')
+    expect(world.statuses.at(-1)).toBe('voortgang · onbeschikbaar: HOME onbekend, ~ niet op te lossen')
     await ui.unmount()
   })
 })
