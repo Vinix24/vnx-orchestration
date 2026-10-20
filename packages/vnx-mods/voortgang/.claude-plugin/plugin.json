@@ -1,0 +1,35 @@
+{
+  "name": "voortgang",
+  "version": "0.1.0",
+  "description": "A VNX mod: shows VNX progress per project in a pane and a status line: live work, open outcomes, open PRs with their review seats, now-tracks and deliverables waiting on a promote.",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "exclude": {
+      "type": "string",
+      "title": "Exclude",
+      "description": "Comma-separated project ids to leave out. Every other project store under the data root is shown.",
+      "default": ""
+    },
+    "data_root": {
+      "type": "string",
+      "title": "Data root",
+      "description": "The directory that holds one VNX store per project. A leading ~ is your home directory.",
+      "default": "~/.vnx-data"
+    },
+    "vnx_bin": {
+      "type": "string",
+      "title": "vnx binary",
+      "description": "The vnx executable that lists tracks and deliverables. A leading ~ is your home directory.",
+      "default": "~/.vnx-system/current/bin/vnx"
+    },
+    "refresh_seconds": {
+      "type": "number",
+      "title": "Refresh interval (seconds)",
+      "description": "How often the pane and the status line are refreshed; 15 seconds at least.",
+      "default": 120
+    }
+  },
+  "author": {
+    "name": "Vincent van Deth"
+  }
+}
