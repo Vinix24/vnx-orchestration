@@ -85,6 +85,27 @@ def _run(script: str, timeout: int = 20, env: dict[str, str] | None = None) -> s
     )
 
 
+# Positive cases poll for the marker the backgrounded stub writes (bounded, 10 s).
+# Skip cases assert an absence, which no poll can prove: they hold an explicit
+# fixed window instead, long enough for a wrongly started stub to have run.
+_SKIP_WINDOW_SECONDS = 1.0
+_POLL_DEADLINE_SECONDS = 10
+
+
+def _settle(marker: Path | None) -> str:
+    """Shell snippet run after the helper under test returns.
+
+    With a marker: poll until it exists or the deadline passes (the caller's
+    assertion then reports the miss). Without: the fixed absence window.
+    """
+    if marker is None:
+        return f"sleep {_SKIP_WINDOW_SECONDS}"
+    return (
+        f'_deadline=$((SECONDS + {_POLL_DEADLINE_SECONDS}))\n'
+        f'while [ ! -e "{marker}" ] && [ "$SECONDS" -lt "$_deadline" ]; do sleep 0.05; done'
+    )
+
+
 def _write_stub(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
     path.chmod(0o755)
@@ -257,7 +278,7 @@ err() {{ echo "[err] $*" >&2; }}
 source "{START_SH}"
 {fake_body}
 _vnx_maybe_start_receipt_processor "{scripts_dir}" "{log_dir}" "started"
-sleep 0.3
+{_settle(None if loaded else scripts_dir / "receipt_processor.ran")}
 """
         env = {"VNX_LAUNCHD_GUARD_PLATFORM": "Darwin", "VNX_LAUNCHCTL_LIST_CMD": fake_fn}
         return script, scripts_dir, env
@@ -342,7 +363,7 @@ err() {{ echo "[err] $*" >&2; }}
 source "{RESUME_SH}"
 {fake_body}
 _vnx_resume_start_daemons "{scripts_dir}" "{logs_dir}"
-sleep 0.3
+{_settle(None if loaded else scripts_dir / "receipt_processor_supervisor.ran")}
 echo "RECEIPT_PID=[$_resume_receipt_pid]"
 _vnx_resume_verify_readiness
 echo "READINESS_RC=$?"
