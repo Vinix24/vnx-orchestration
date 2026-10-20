@@ -1377,11 +1377,14 @@ def _grant_resolver(state_dir: Path, line: RoundLine) -> GrantResolver:
 
     The git facts are resolved here, before :func:`append_verdict` takes the
     ledger lock (OI-2202): under the lock the resolver reads the verdict store
-    and those facts, and runs no git.
+    and those facts, and runs no git. Only the verdicts of the PR's current
+    count are looked up (OI-2207): ``since`` as the ledger reads now.
     """
     import review_cap_verdicts
 
-    carries = review_cap_verdicts.resolved_carries(state_dir, line.pr_number, line.head_sha)
+    carries = review_cap_verdicts.resolved_carries(
+        state_dir, line.pr_number, line.head_sha, since=_since_before_lock(state_dir, line),
+    )
 
     def resolve(cap: CapState, lines: Tuple[RoundLine, ...], since: str) -> Optional[Grant]:
         return review_cap_verdicts.grant_or_none(
@@ -1389,3 +1392,16 @@ def _grant_resolver(state_dir: Path, line: RoundLine) -> GrantResolver:
         )
 
     return resolve
+
+
+def _since_before_lock(state_dir: Path, line: RoundLine) -> str:
+    """The PR's count boundary as the ledger stands before the writer locks it; ``""`` when it cannot be read.
+
+    An unreadable ledger is refused by :func:`append_verdict` under the lock;
+    ``""`` here only widens the git facts looked up, it grants nothing.
+    """
+    try:
+        ledger = read_ledger(ledger_path(Path(state_dir) / "review_gates"))
+    except RoundLedgerError:
+        return ""
+    return ledger.since(line.project_id, line.pr_number)

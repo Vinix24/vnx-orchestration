@@ -677,6 +677,32 @@ def get_pr_head_branch(pr_number: Optional[int]) -> str:
     return _gh_pr_view_field(pr_number, "headRefName")
 
 
+def get_pr_state(pr_number: Optional[int]) -> str:
+    """Return the PR state via ``gh pr view --json state``: ``OPEN``, ``CLOSED`` or ``MERGED``; "" on any failure."""
+    return _gh_pr_view_field(pr_number, "state")
+
+
+def close_pr(pr_number: int, comment: str) -> Tuple[bool, str]:
+    """Close PR ``pr_number`` with one comment (``gh pr close --comment``): ``(closed, why not)``.
+
+    The review-cap tiebreaker's ``terug-naar-plan`` (R2b) closes a PR this
+    way. A ``gh`` that is missing, times out or exits non-zero is
+    ``(False, reason)``, never an exception.
+    """
+    if shutil.which("gh") is None:
+        return False, "gh is not on PATH"
+    try:
+        proc = subprocess.run(
+            ["gh", "pr", "close", str(pr_number), "--comment", comment],
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+    if proc.returncode != 0:
+        return False, (proc.stderr or proc.stdout or "").strip()[:300] or f"gh exited {proc.returncode}"
+    return True, ""
+
+
 # ---------------------------------------------------------------------------
 # Result records
 # ---------------------------------------------------------------------------

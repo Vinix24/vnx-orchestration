@@ -1,9 +1,11 @@
-"""The tiebreaker at the B3 review cap: one registry model picks one outcome (R2a, ADR-041).
+"""The tiebreaker at the B3 review cap: one registry model picks one outcome (R2a, R2b, ADR-041).
 
 Track ``review-stopregel-en-lichte-stoelen``, plan section 2. When R1 puts a PR
 at the cap (``review_rounds.cap_state``), ``vnx review cap-verdict --pr N
 --for-dispatch <id>`` asks one model for the next step and records it in
-``review_cap_verdicts`` (``review_cap_verdicts.record_verdict``).
+``review_cap_verdicts`` (``review_cap_verdicts.record_verdict``). A
+``terug-naar-plan`` is stored as that outcome and carried out by
+``review_cap_aftermath``; ``mergen-met-OI`` stays ``outcome_unavailable_in_r2a``.
 
 - **The model** comes from the registry (ADR-036), through the mechanism the
   plan-gate tiebreaker uses (``plan_gate_tiebreaker.resolve_tiebreaker_model``
@@ -273,12 +275,17 @@ def pr_diff_stat(pr_number: int) -> str:
 def _forced(pr_number: int, step: rcv.CapStep) -> rcv.CapVerdict:
     """The verdict when one outcome is left: the rule decides, no model is asked."""
     (outcome,) = step.allowed
+    stored = rcv.stored_outcome(outcome)
+    then = (
+        "the PR goes back to plan" if stored == rcv.TERUG_NAAR_PLAN
+        else "not available in R2a: the cap stays closed"
+    )
     return rcv.CapVerdict(
         project_id="", pr_number=pr_number, verdict_id=rcv.verdict_id_for(pr_number, step.head_sha),
-        head_sha=step.head_sha, cap_rule=step.rule, outcome=rcv.UNAVAILABLE, chosen_outcome=outcome,
+        head_sha=step.head_sha, cap_rule=step.rule, outcome=stored, chosen_outcome=outcome,
         rationale=(
             f"the extra round of {step.round_line.granted_by} ended without a mergeable PASS; one verkleinen per "
-            f"PR, so only {outcome} is left under {step.rule}. Not available in R2a: the cap stays closed"
+            f"PR, so only {outcome} is left under {step.rule}: {then}"
         ),
         created_at=rcv.utc_now(),
     )
@@ -288,7 +295,7 @@ def _asked(pr_number: int, step: rcv.CapStep, answer: CapAnswer, model: str, for
     granted = answer.outcome == rcv.VERKLEINEN
     return rcv.CapVerdict(
         project_id="", pr_number=pr_number, verdict_id=rcv.verdict_id_for(pr_number, step.head_sha),
-        head_sha=step.head_sha, cap_rule=step.rule, outcome=answer.outcome if granted else rcv.UNAVAILABLE,
+        head_sha=step.head_sha, cap_rule=step.rule, outcome=rcv.stored_outcome(answer.outcome),
         chosen_outcome=answer.outcome, intervention=answer.intervention if granted else "",
         granted_dispatch_id=for_dispatch if granted else "", tiebreaker_model=model,
         rationale=answer.rationale, created_at=rcv.utc_now(),
@@ -328,12 +335,15 @@ def decide(
         raise CapTiebreakerError(f"{cap.summary()}: there is nothing for the tiebreaker to decide")
     if step.kind != rcv.DECIDE:
         return CapDecision("present", step.verdict, step)
-    landed = rcv.receipted_verdict(state_dir, pr_number, rcv.verdict_id_for(pr_number, step.head_sha))
+    landed = rcv.receipted_verdict(
+        state_dir, pr_number, rcv.verdict_id_for(pr_number, step.head_sha),
+        project_id=rcv.store_project_id(state_dir), since=since,
+    )
     if landed is not None:
-        status, verdict = rcv.record_verdict(state_dir, landed)
+        status, verdict = rcv.record_verdict(state_dir, landed, since=since)
         return CapDecision(status, verdict, step)
     if len(step.allowed) == 1:
-        status, verdict = rcv.record_verdict(state_dir, _forced(pr_number, step))
+        status, verdict = rcv.record_verdict(state_dir, _forced(pr_number, step), since=since)
         return CapDecision(status, verdict, step)
     if not _DISPATCH_ID_RE.match(for_dispatch or ""):
         raise CapTiebreakerError(
@@ -345,5 +355,5 @@ def decide(
         build_instruction(pr_number, step, cap, stat), step.allowed,
         dispatcher=dispatcher, config=config, data_dir=data_dir,
     )
-    status, verdict = rcv.record_verdict(state_dir, _asked(pr_number, step, answer, model, for_dispatch))
+    status, verdict = rcv.record_verdict(state_dir, _asked(pr_number, step, answer, model, for_dispatch), since=since)
     return CapDecision(status, verdict, step)

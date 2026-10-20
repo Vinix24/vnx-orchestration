@@ -3187,6 +3187,161 @@ def cmd_deliverable_close(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# Back to plan: ready -> proposed (R2b, ADR-041)
+# ---------------------------------------------------------------------------
+
+RETURNED_TO_PLAN_EVENT = "deliverable_returned_to_plan"
+_ENDED_STATES = ("completed", "expired", "dead_letter")
+
+
+@dataclass(frozen=True)
+class DeliverableLink:
+    """The deliverable a dispatch builds, or why the store names none.
+
+    The link is the dispatch's ``output_ref``: the key the ``deliverables``
+    view groups on, so the dispatch counts in that deliverable's
+    ``dispatch_count`` and ``derived_status``. ``dispatch_id`` is the
+    deliverable's own row (``metadata_json.deliverable``), the row ``promote``
+    and ``close`` act on; ``""`` with ``reason`` when there is none. Nothing
+    is inferred from the track (OI-1969): ``track`` and ``reason`` only name
+    what the operator can look at.
+    """
+
+    dispatch_id: str = ""
+    output_ref: str = ""
+    state: str = ""
+    track: str = ""
+    reason: str = ""
+
+
+def _is_deliverable_row(metadata_json: Optional[str]) -> bool:
+    try:
+        meta = json.loads(metadata_json or "{}")
+    except (TypeError, ValueError):
+        return False
+    return isinstance(meta, dict) and meta.get("deliverable") is True
+
+
+def linked_deliverable(state_dir: Path, project_id: str, dispatch_id: str) -> DeliverableLink:
+    """The deliverable ``dispatch_id`` builds in project ``project_id`` (ADR-007), through its ``output_ref``."""
+    conn = _db_conn(state_dir)
+    try:
+        if not (_has_table(conn, "dispatches") and _has_col(conn, "dispatches", "output_ref")):
+            return DeliverableLink(reason=f"the store {state_dir} keeps no deliverable plane (no dispatches.output_ref)")
+        row = conn.execute(
+            "SELECT track, output_ref FROM dispatches WHERE dispatch_id = ? AND project_id = ?",
+            (dispatch_id, project_id),
+        ).fetchone()
+        if row is None:
+            return DeliverableLink(reason=f"dispatch {dispatch_id!r} is not in the store of project {project_id!r}")
+        ref, track = (row["output_ref"] or "").strip(), row["track"] or ""
+        if not ref:
+            return DeliverableLink(track=track, reason=_unlinked_reason(conn, project_id, dispatch_id, track))
+        anchors = [
+            found for found in conn.execute(
+                "SELECT dispatch_id, state, track, metadata_json FROM dispatches WHERE project_id = ? AND output_ref = ?",
+                (project_id, ref),
+            ).fetchall() if _is_deliverable_row(found["metadata_json"])
+        ]
+        if len(anchors) != 1:
+            return DeliverableLink(
+                output_ref=ref, track=track,
+                reason=f"output_ref {ref} of dispatch {dispatch_id!r} has {len(anchors)} deliverable rows, not one",
+            )
+        anchor = anchors[0]
+        return DeliverableLink(anchor["dispatch_id"], ref, anchor["state"], anchor["track"] or track)
+    finally:
+        conn.close()
+
+
+def _unlinked_reason(conn: sqlite3.Connection, project_id: str, dispatch_id: str, track: str) -> str:
+    """Why a dispatch without ``output_ref`` links to no deliverable, naming the open ones on its track."""
+    text = f"dispatch {dispatch_id!r} carries no output_ref, so it builds no deliverable the store can name (OI-1969)"
+    if not track:
+        return text
+    open_refs = [
+        f"{found['dispatch_id']} ({found['state']})" for found in conn.execute(
+            "SELECT dispatch_id, state, metadata_json FROM dispatches WHERE project_id = ? AND track = ? "
+            f"AND output_ref IS NOT NULL AND output_ref != '' AND state NOT IN ({', '.join('?' for _ in _ENDED_STATES)})",
+            (project_id, track, *_ENDED_STATES),
+        ).fetchall() if _is_deliverable_row(found["metadata_json"])
+    ]
+    return f"{text}; open deliverables on track {track}: {', '.join(open_refs) or 'none'}"
+
+
+def return_deliverable_to_plan(
+    state_dir: Path, project_id: str, dispatch_id: str, *, actor: str, reason: str,
+    metadata: Optional[dict] = None,
+) -> tuple[str, str]:
+    """Send a ``ready`` deliverable back to ``proposed``: ``(status, from_state)``.
+
+    The one way back in the lifecycle (``promote`` is proposed -> ready,
+    ``close`` ready -> completed). A tiebreaker's ``terug-naar-plan`` at the
+    B3 review cap sends the deliverable back, so it needs the operator's
+    promote again: its ``operator_approved_at`` is cleared. In one
+    transaction with a ``deliverable_returned_to_plan`` coordination event
+    (from-state, to-state, ``actor``, ``reason``), and idempotent on ``actor``:
+    an event of this actor on this deliverable means it went back already.
+
+    Status: ``returned`` (moved now), ``already_returned`` (an earlier call of
+    this actor moved it; nothing written), ``already_proposed`` (it stood
+    proposed; nothing to move), ``not_returnable`` (any other state, which
+    ``from_state`` names; not moved) or ``not_found``. ADR-007: the row and the
+    event are keyed on ``project_id``.
+    """
+    conn = _db_conn(state_dir)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            result = _return_to_plan(conn, project_id, dispatch_id, actor, reason, metadata)
+        except BaseException:
+            conn.rollback()
+            raise
+        conn.commit()
+    finally:
+        conn.close()
+    return result
+
+
+def _returned_by(conn: sqlite3.Connection, project_id: str, dispatch_id: str, actor: str) -> Optional[sqlite3.Row]:
+    if not _has_table(conn, "coordination_events"):
+        return None
+    scoped = _has_col(conn, "coordination_events", "project_id")
+    return conn.execute(
+        "SELECT from_state FROM coordination_events WHERE event_type = ? AND entity_id = ? AND actor = ?"
+        + (" AND project_id = ?" if scoped else "") + " LIMIT 1",
+        (RETURNED_TO_PLAN_EVENT, dispatch_id, actor, *((project_id,) if scoped else ())),
+    ).fetchone()
+
+
+def _return_to_plan(
+    conn: sqlite3.Connection, project_id: str, dispatch_id: str, actor: str, reason: str,
+    metadata: Optional[dict],
+) -> tuple[str, str]:
+    earlier = _returned_by(conn, project_id, dispatch_id, actor)
+    if earlier is not None:
+        return "already_returned", earlier["from_state"] or ""
+    row = conn.execute(
+        "SELECT state FROM dispatches WHERE dispatch_id = ? AND project_id = ?", (dispatch_id, project_id),
+    ).fetchone()
+    if row is None:
+        return "not_found", ""
+    if row["state"] != "ready":
+        return ("already_proposed" if row["state"] == "proposed" else "not_returnable"), row["state"]
+    approval = ", operator_approved_at = NULL" if _has_col(conn, "dispatches", "operator_approved_at") else ""
+    conn.execute(
+        f"UPDATE dispatches SET state = 'proposed', updated_at = ?{approval} "
+        "WHERE dispatch_id = ? AND project_id = ? AND state = 'ready'",
+        (_now_utc(), dispatch_id, project_id),
+    )
+    _append_coordination_event(
+        conn, event_type=RETURNED_TO_PLAN_EVENT, dispatch_id=dispatch_id, from_state="ready",
+        to_state="proposed", actor=actor, reason=reason, project_id=project_id, metadata=metadata,
+    )
+    return "returned", "ready"
+
+
 def _deliverable_set_fields(args: argparse.Namespace) -> dict[str, Any]:
     """The metadata fields ``deliverable set`` patches, only those given."""
     fields: dict[str, Any] = {
