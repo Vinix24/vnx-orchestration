@@ -13,7 +13,7 @@ import shutil
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from atomic_io import atomic_write_json, slot_lock
 from failure_classification import GATE_QUOTA_REFUSAL_REASON
@@ -633,14 +633,14 @@ def write_skip_rationale(
 # ---------------------------------------------------------------------------
 
 
-def _gh_pr_view_field(pr_number: Optional[int], field: str, repo: Optional[str] = None) -> str:
-    """Fetch one ``gh pr view --json <field>`` value. Returns "" on any failure.
+def _gh_pr_view_json(pr_number: Optional[int], field: str, repo: Optional[str] = None) -> Any:
+    """The raw ``gh pr view --json <field>`` value; None on any failure.
 
     ``repo`` (``owner/repo``) pins the lookup to that repo; without it ``gh``
     infers the repo from the cwd.
     """
     if not pr_number or shutil.which("gh") is None:
-        return ""
+        return None
     repo_args = ["--repo", repo] if repo else []
     try:
         proc = subprocess.run(
@@ -648,15 +648,19 @@ def _gh_pr_view_field(pr_number: Optional[int], field: str, repo: Optional[str] 
             capture_output=True, text=True, timeout=10, check=False,
         )
     except (subprocess.TimeoutExpired, OSError):
-        return ""
+        return None
     if proc.returncode != 0 or not proc.stdout.strip():
-        return ""
+        return None
     try:
         data = json.loads(proc.stdout)
     except json.JSONDecodeError:
-        return ""
-    value = data.get(field) if isinstance(data, dict) else None
-    return str(value or "").strip()
+        return None
+    return data.get(field) if isinstance(data, dict) else None
+
+
+def _gh_pr_view_field(pr_number: Optional[int], field: str, repo: Optional[str] = None) -> str:
+    """Fetch one ``gh pr view --json <field>`` value as text. Returns "" on any failure."""
+    return str(_gh_pr_view_json(pr_number, field, repo) or "").strip()
 
 
 def get_pr_head_sha(pr_number: Optional[int], repo: Optional[str] = None) -> str:
@@ -677,23 +681,42 @@ def get_pr_head_branch(pr_number: Optional[int]) -> str:
     return _gh_pr_view_field(pr_number, "headRefName")
 
 
-def get_pr_state(pr_number: Optional[int]) -> str:
-    """Return the PR state via ``gh pr view --json state``: ``OPEN``, ``CLOSED`` or ``MERGED``; "" on any failure."""
-    return _gh_pr_view_field(pr_number, "state")
+def get_pr_state(pr_number: Optional[int], *, repo: str) -> str:
+    """The state of PR ``pr_number`` in ``repo`` (``owner/name``) via ``gh pr view --json state``.
+
+    ``OPEN``, ``CLOSED`` or ``MERGED``; "" on any failure, and without a repo:
+    a PR number names a PR only together with its repo, never the cwd's.
+    """
+    return _gh_pr_view_field(pr_number, "state", repo) if repo else ""
 
 
-def close_pr(pr_number: int, comment: str) -> Tuple[bool, str]:
-    """Close PR ``pr_number`` with one comment (``gh pr close --comment``): ``(closed, why not)``.
+def get_pr_comment_bodies(pr_number: Optional[int], *, repo: str) -> Optional[List[str]]:
+    """The bodies of the comments on PR ``pr_number`` in ``repo`` (``gh pr view --json comments``).
+
+    None when they cannot be read, and without a repo.
+    """
+    comments = _gh_pr_view_json(pr_number, "comments", repo) if repo else None
+    if not isinstance(comments, list):
+        return None
+    return [str(comment.get("body") or "") for comment in comments if isinstance(comment, dict)]
+
+
+def close_pr(pr_number: int, comment: str, *, repo: str) -> Tuple[bool, str]:
+    """Close PR ``pr_number`` in ``repo`` (``gh pr close --repo``), with ``comment`` unless it is "": ``(closed, why not)``.
 
     The review-cap tiebreaker's ``terug-naar-plan`` (R2b) closes a PR this
-    way. A ``gh`` that is missing, times out or exits non-zero is
+    way. ``gh`` posts the comment before it closes, so a close that fails can
+    leave the comment behind. Without a repo nothing is closed: ``gh`` would
+    take the cwd's. A ``gh`` that is missing, times out or exits non-zero is
     ``(False, reason)``, never an exception.
     """
+    if not repo:
+        return False, "no repo given: a PR is never closed in the repo of the cwd"
     if shutil.which("gh") is None:
         return False, "gh is not on PATH"
     try:
         proc = subprocess.run(
-            ["gh", "pr", "close", str(pr_number), "--comment", comment],
+            ["gh", "pr", "close", str(pr_number), "--repo", repo, *(["--comment", comment] if comment else [])],
             capture_output=True, text=True, timeout=60, check=False,
         )
     except (subprocess.TimeoutExpired, OSError) as exc:

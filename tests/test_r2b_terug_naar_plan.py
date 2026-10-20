@@ -14,10 +14,13 @@ Dispatch 20261020-rs-r2b-terug-naar-plan. Pinned here:
 - OI-2207: a receipt of another project, or of a count before the last attested opening, is
   never booked; a commit message that is no UTF-8 is a logged "no grant"; the writer looks up
   no git facts for a ``verkleinen`` of a count that no longer stands;
-- ``mergen-met-OI`` still lands as ``outcome_unavailable_in_r2a`` (``test_r2a_cap_tiebreaker``).
+- ``mergen-met-OI`` still lands as ``outcome_unavailable_in_r2a`` (``test_r2a_cap_tiebreaker``);
+- round 3: the PR is looked up and closed in the repo of the store's project, never the cwd's,
+  and a store whose repo cannot be established closes nothing; one comment per verdict id, also
+  when a close failed after its comment and is retried.
 
 No provider lane and no network: the tiebreaker's lane is injected, and ``gh`` is a fake
-binary on ``PATH`` that records every call.
+binary on ``PATH`` that knows one PR per repo and records every call.
 """
 from __future__ import annotations
 
@@ -36,7 +39,7 @@ import pytest
 from review_stack_support import BRANCH, PR, isolate_config_registry
 # The R2a world, reused as it is; ``door``, ``env`` and ``model`` are fixtures, found by name.
 from test_r2a_cap_tiebreaker import (
-    CAP, HEAD, PID, X, _answer, _cap_receipts, _capped, _commit, _door_record, _git_spy, _line, _opened,
+    CAP, HEAD, PID, X, _answer, _cap_receipts, _capped, _commit, _door_record, _git, _git_spy, _line, _opened,
     _store_verkleinen, _vid, _write_ledger, _write_result, _verdict, door, env, model,
 )
 
@@ -63,17 +66,43 @@ def _clean_config_registry(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+# Like the real gh: a PR number names a PR within one repo, ``--repo`` picks the repo and
+# without it the repo is the one of the cwd's origin; ``pr close --comment`` posts the
+# comment before it closes, so a close that fails leaves the comment behind.
 _FAKE_GH = '''
-import json, pathlib, sys
+import json, pathlib, re, subprocess, sys
 here = pathlib.Path(__file__).resolve().parent
 args = sys.argv[1:]
 with open(here / "calls.ndjson", "a", encoding="utf-8") as log:
     log.write(json.dumps(args) + "\\n")
-state = here / "pr_state"
-if args[:2] == ["pr", "view"] and args[args.index("--json") + 1] == "state":
-    print(json.dumps({"state": state.read_text().strip() if state.exists() else "OPEN"}))
-    sys.exit(0)
+if "--repo" in args:
+    repo = args[args.index("--repo") + 1]
+else:
+    url = subprocess.run(["git", "remote", "get-url", "origin"], capture_output=True, text=True).stdout.strip()
+    found = re.search(r"github[.]com[:/]+([^/]+/[^/]+?)(?:[.]git)?$", url)
+    if not found:
+        print("failed to determine base repo: no git remotes found", file=sys.stderr)
+        sys.exit(1)
+    repo = found.group(1)
+pr = here / "repos" / repo.replace("/", "__")
+pr.mkdir(parents=True, exist_ok=True)
+state, comments = pr / "pr_state", pr / "comments.ndjson"
+if args[:2] == ["pr", "view"]:
+    field = args[args.index("--json") + 1]
+    if field == "state":
+        print(json.dumps({"state": state.read_text().strip() if state.exists() else "OPEN"}))
+        sys.exit(0)
+    if field == "comments" and not (here / "comments_unreadable").exists():
+        bodies = [json.loads(raw) for raw in comments.read_text().splitlines()] if comments.exists() else []
+        print(json.dumps({"comments": [{"author": {"login": "vnx"}, "body": body} for body in bodies]}))
+        sys.exit(0)
 if args[:2] == ["pr", "close"]:
+    if (here / "comment_fails").exists():
+        print("GraphQL: could not add the comment", file=sys.stderr)
+        sys.exit(1)
+    if "--comment" in args:
+        with comments.open("a", encoding="utf-8") as out:
+            out.write(json.dumps(args[args.index("--comment") + 1]) + "\\n")
     if (here / "close_fails").exists():
         print("GraphQL: could not close", file=sys.stderr)
         sys.exit(1)
@@ -83,10 +112,18 @@ print("unexpected gh call", file=sys.stderr)
 sys.exit(1)
 '''
 
+REPO_A = "acme/project-a"
+REPO_B = "acme/project-b"
+
 
 @pytest.fixture
 def gh(tmp_path, monkeypatch):
-    """A fake ``gh`` first on PATH: ``pr view --json state`` and ``pr close``, every call logged."""
+    """A fake ``gh`` first on PATH, repo-aware: ``pr view --json state|comments`` and ``pr close``, every call logged.
+
+    And a home without a project registry (``Path.home``, not the HOME env, as
+    ``test_forge_project_target`` does): the PR's repo comes from the store's own
+    checkout, never from this machine's ``~/.vnx/projects.json``.
+    """
     bin_dir = tmp_path / "fake-gh"
     bin_dir.mkdir()
     (bin_dir / "gh_fake.py").write_text(_FAKE_GH, encoding="utf-8")
@@ -94,6 +131,9 @@ def gh(tmp_path, monkeypatch):
     script.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{bin_dir / "gh_fake.py"}" "$@"\n', encoding="utf-8")
     script.chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     return bin_dir
 
 
@@ -101,6 +141,37 @@ def _gh_calls(gh_dir: Path, verb: str) -> List[List[str]]:
     log = gh_dir / "calls.ndjson"
     calls = [json.loads(raw) for raw in log.read_text(encoding="utf-8").splitlines()] if log.exists() else []
     return [call for call in calls if call[:2] == ["pr", verb]]
+
+
+def _flag(call: List[str], name: str) -> Any:
+    """The value of ``name`` in one logged call, None when the call does not carry it."""
+    return call[call.index(name) + 1] if name in call else None
+
+
+def _close_calls(gh_dir: Path) -> List[Dict[str, Any]]:
+    return [
+        {"number": call[2], "repo": _flag(call, "--repo"), "comment": _flag(call, "--comment")}
+        for call in _gh_calls(gh_dir, "close")
+    ]
+
+
+def _repo_dir(gh_dir: Path, repo: str) -> Path:
+    return gh_dir / "repos" / repo.replace("/", "__")
+
+
+def _pr_state(gh_dir: Path, repo: str = REPO_A) -> str:
+    path = _repo_dir(gh_dir, repo) / "pr_state"
+    return path.read_text(encoding="utf-8").strip() if path.exists() else "OPEN"
+
+
+def _set_pr_state(gh_dir: Path, state: str, repo: str = REPO_A) -> None:
+    _repo_dir(gh_dir, repo).mkdir(parents=True, exist_ok=True)
+    (_repo_dir(gh_dir, repo) / "pr_state").write_text(state, encoding="utf-8")
+
+
+def _comments(gh_dir: Path, repo: str = REPO_A) -> List[str]:
+    path = _repo_dir(gh_dir, repo) / "comments.ndjson"
+    return [json.loads(raw) for raw in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
 
 
 def _view_sql() -> str:
@@ -155,8 +226,21 @@ def _cap_record(store, head: str, findings: List[Dict[str, Any]] = _FINDINGS) ->
     (store["results_dir"] / f"pr-{PR}-codex_gate.json").write_text(json.dumps(record), encoding="utf-8")
 
 
+def _project_a(env) -> None:
+    """The store is project A's: its checkout carries the project's marker and a GitHub origin."""
+    (env["project_root"] / ".vnx-project-id").write_text(PID + "\n", encoding="utf-8")
+    _git(env["repo"], "remote", "add", "origin", f"https://github.com/{REPO_A}.git")
+
+
+def _capped_a(env, *extra: Dict[str, Any]) -> None:
+    """``_capped`` in a store that names its project: the gate stamps the project on every ledger line."""
+    lines = [_opened(), _line("codex_gate", env["cap_head"], "fail", 3, at=1), *extra]
+    _write_ledger(env["ledger"], [{**line, "project_id": PID} for line in lines])
+
+
 def _aftermath_world(env, gh, **plane: Any) -> None:
-    _capped(env)
+    _project_a(env)
+    _capped_a(env)
     _cap_record(env, env["cap_head"])
     _deliverable_plane(env["state_dir"], **plane)
 
@@ -235,10 +319,12 @@ class TestTerugNaarPlanIsCarriedOut:
         ((entity, from_state, to_state, actor, reason, project),) = _returned_events(env["state_dir"])
         assert (entity, from_state, to_state, actor, project) == (DELIVERABLE, "ready", "proposed", verdict.verdict_id, PID)
         assert "B3.1" in reason
-        ((_pr, _close, number, _flag, comment),) = _gh_calls(gh, "close")
-        assert number == str(PR)
+        (close,) = _close_calls(gh)
+        assert (close["number"], close["repo"]) == (str(PR), REPO_A)
+        comment = close["comment"]
         for part in (verdict.verdict_id, "B3.1", *verdict.oi_ids, DELIVERABLE):
             assert part in comment
+        assert _comments(gh) == [comment]
         assert [(r["step"], r["result"]) for r in _step_receipts(env["state_dir"])] == [
             ("open_items", "created"), ("deliverable", "returned"), ("pr_close", "closed"),
         ]
@@ -250,8 +336,9 @@ class TestTerugNaarPlanIsCarriedOut:
 
         x1 = _commit(env["repo"], "fix1.txt", f"fix: one\n\nDispatch-ID: {X}")
         vid = _store_verkleinen(env["state_dir"], env["cap_head"])
-        _capped(env, _line("codex_gate", x1, "fail", 1, at=5, granted_by=vid,
-                           report=f"/r/20261020-000005-HEADLESS-codex_gate-pr-{PR}-x.md"))
+        _project_a(env)
+        _capped_a(env, _line("codex_gate", x1, "fail", 1, at=5, granted_by=vid,
+                             report=f"/r/20261020-000005-HEADLESS-codex_gate-pr-{PR}-x.md"))
         record = {"commit_sha": x1, "report_path": f"/r/20261020-000005-HEADLESS-codex_gate-pr-{PR}-x.md",
                   "blocking_findings": [_FINDINGS[1]]}
         (env["results_dir"] / f"pr-{PR}-codex_gate.json").write_text(json.dumps(record), encoding="utf-8")
@@ -324,18 +411,18 @@ class TestTheAftermathIsIdempotent:
         assert "aftermath is incomplete" in err and "gh pr close" in err
         assert steps_after_failure == ["open_items", "deliverable"], "the steps before it stand, receipted"
         assert finished == 0
-        assert (gh / "pr_state").read_text() == "CLOSED" and len(_gh_calls(gh, "close")) == 2
+        assert _pr_state(gh) == "CLOSED" and len(_gh_calls(gh, "close")) == 2
         assert [r["step"] for r in _step_receipts(env["state_dir"])] == ["open_items", "deliverable", "pr_close"]
         assert len(_returned_events(env["state_dir"])) == 1 and len(_open_items(env["state_dir"])) == 3
 
     def test_a_pr_that_is_closed_already_is_left_as_it_is(self, env, model, gh):
         _aftermath_world(env, gh)
         model["answers"].append(_answer("terug-naar-plan"))
-        (gh / "pr_state").write_text("CLOSED", encoding="utf-8")
+        _set_pr_state(gh, "CLOSED")
 
         assert _cli("--for-dispatch", X) == 0
 
-        assert _gh_calls(gh, "close") == []
+        assert _gh_calls(gh, "close") == [] and _comments(gh) == []
         (receipt,) = [r for r in _step_receipts(env["state_dir"]) if r["step"] == "pr_close"]
         assert (receipt["result"], receipt["pr_state"]) == ("already_closed", "CLOSED")
 
@@ -360,8 +447,8 @@ class TestNoLinkedDeliverable:
         assert _returned_events(env["state_dir"]) == []
         (receipt,) = [r for r in _step_receipts(env["state_dir"]) if r["step"] == "deliverable"]
         assert receipt["result"] == "no_linked_deliverable" and "OI-1969" in receipt["detail"]
-        ((*_args, comment),) = _gh_calls(gh, "close")
-        assert "No deliverable is linked to this PR" in comment
+        (close,) = _close_calls(gh)
+        assert "No deliverable is linked to this PR" in close["comment"]
         assert len(_open_items(env["state_dir"])) == 3
 
     def test_a_deliverable_that_is_not_ready_is_not_moved(self, env, model, gh, capsys):
@@ -742,7 +829,7 @@ class TestAReceiptedStepIsNotRunAgain:
         retried = _cli("--for-dispatch", X)
 
         assert failed == 3 and retried == 0
-        assert (gh / "pr_state").read_text() == "CLOSED"
+        assert _pr_state(gh) == "CLOSED"
         (after,) = review_cap_verdicts.read_verdicts(env["state_dir"], PR)
         assert after.oi_ids == before.oi_ids and len(after.oi_ids) == 3
         assert len(_open_items(env["state_dir"])) == 3 and len(_returned_events(env["state_dir"])) == 1
@@ -774,3 +861,154 @@ class TestAReceiptedStepIsNotRunAgain:
         assert list(verdict.oi_ids) == receipt["oi_ids"] and len(verdict.oi_ids) == 3
         assert len(_open_items(env["state_dir"])) == 3 and len(_gh_calls(gh, "close")) == 1
         assert [r["step"] for r in _step_receipts(env["state_dir"])] == ["open_items", "deliverable", "pr_close"]
+
+
+# ---------------------------------------------------------------------------
+# Round 3 (dispatch 20261020-rs-r2b-r3): the codex findings on 533c1b51
+# ---------------------------------------------------------------------------
+
+
+def _checkout_b(tmp_path: Path) -> Path:
+    """Another project's checkout: its origin is repo B, where a PR with the same number is open."""
+    repo = tmp_path / "project-b"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "remote", "add", "origin", f"git@github.com:{REPO_B}.git")
+    return repo
+
+
+def _pr_close_receipt(state_dir: Path) -> Dict[str, Any]:
+    (receipt,) = [r for r in _step_receipts(state_dir) if r["step"] == "pr_close"]
+    return receipt
+
+
+class TestThePrIsClosedInTheRepoOfTheStore:
+    """BLOCKING: ``gh pr view`` and ``gh pr close`` took the repo of the cwd, not the store's."""
+
+    def test_from_a_cwd_in_another_repo_the_lookup_and_the_close_go_to_the_stores_repo(
+        self, env, model, gh, tmp_path, monkeypatch,
+    ):
+        _aftermath_world(env, gh)
+        model["answers"].append(_answer("terug-naar-plan"))
+        monkeypatch.chdir(_checkout_b(tmp_path))
+
+        code = _cli("--for-dispatch", X, "--data-dir", str(env["data_dir"]))
+
+        assert (_pr_state(gh, REPO_B), _comments(gh, REPO_B)) == ("OPEN", []), "B's PR of that number is not touched"
+        assert code == 0
+        assert _pr_state(gh, REPO_A) == "CLOSED" and len(_comments(gh, REPO_A)) == 1
+        views = _gh_calls(gh, "view")
+        assert views and {_flag(call, "--repo") for call in views} == {REPO_A}, "the state and the comments: A's"
+        assert [close["repo"] for close in _close_calls(gh)] == [REPO_A]
+        assert (_pr_close_receipt(env["state_dir"])["result"], _pr_close_receipt(env["state_dir"])["repo"]) == (
+            "closed", REPO_A,
+        )
+
+    @pytest.mark.parametrize("origin", ["", "https://gitlab.example.invalid/acme/project-a.git"],
+                             ids=["no-origin", "origin-is-no-github-remote"])
+    def test_a_store_whose_repo_cannot_be_established_closes_nothing_and_says_why(
+        self, env, model, gh, capsys, origin,
+    ):
+        _aftermath_world(env, gh)
+        if origin:
+            _git(env["repo"], "remote", "set-url", "origin", origin)
+        else:
+            _git(env["repo"], "remote", "remove", "origin")
+        model["answers"].append(_answer("terug-naar-plan"))
+
+        refused = _cli("--for-dispatch", X)
+        err = capsys.readouterr().err
+        calls_after_refusal = (_gh_calls(gh, "view"), _gh_calls(gh, "close"))
+        if origin:
+            _git(env["repo"], "remote", "set-url", "origin", f"https://github.com/{REPO_A}.git")
+        else:
+            _git(env["repo"], "remote", "add", "origin", f"https://github.com/{REPO_A}.git")
+        finished = _cli("--for-dispatch", X)
+
+        assert refused == 3
+        assert "cannot be established from the store" in err and "geen GitHub-remote" in err, err
+        assert calls_after_refusal == ([], []), "no lookup and no close in a repo that is not the store's"
+        assert finished == 0 and _pr_state(gh) == "CLOSED" and len(_comments(gh)) == 1
+        assert [r["step"] for r in _step_receipts(env["state_dir"])] == ["open_items", "deliverable", "pr_close"]
+
+    def test_without_a_repo_gate_recorder_asks_and_closes_nothing(self, gh):
+        import gate_recorder
+
+        assert gate_recorder.get_pr_state(PR, repo="") == ""
+        assert gate_recorder.get_pr_comment_bodies(PR, repo="") is None
+        closed, why = gate_recorder.close_pr(PR, "a comment", repo="")
+        assert (closed, "never closed in the repo of the cwd" in why) == (False, True)
+        assert not (gh / "calls.ndjson").exists(), "gh is not called at all"
+
+
+class TestOneCommentPerVerdict:
+    """ADVISORY: ``gh`` posts the comment before it closes, so the retry of a failed close posted it twice."""
+
+    def test_a_close_that_fails_after_its_comment_is_retried_without_a_second_comment(self, env, model, gh):
+        import review_cap_aftermath
+        import review_cap_verdicts
+
+        _aftermath_world(env, gh)
+        model["answers"].append(_answer("terug-naar-plan"))
+        (gh / "close_fails").write_text("", encoding="utf-8")
+        failed = _cli("--for-dispatch", X)
+        after_failure = (_pr_state(gh), _comments(gh))
+        (gh / "close_fails").unlink()
+
+        retried = _cli("--for-dispatch", X)
+
+        assert failed == 3 and after_failure[0] == "OPEN" and len(after_failure[1]) == 1, "the comment stood, open"
+        assert _comments(gh) == after_failure[1], "one comment per verdict id, also after the retry"
+        assert retried == 0 and _pr_state(gh) == "CLOSED"
+        assert [bool(close["comment"]) for close in _close_calls(gh)] == [True, False]
+        (verdict,) = review_cap_verdicts.read_verdicts(env["state_dir"], PR)
+        assert review_cap_aftermath.comment_marker(verdict) in after_failure[1][0].splitlines()
+        assert (_pr_close_receipt(env["state_dir"])["result"], _pr_close_receipt(env["state_dir"])["comment"]) == (
+            "closed", "already_posted",
+        )
+
+    def test_a_close_whose_comment_did_not_post_posts_it_once_on_the_retry(self, env, model, gh):
+        _aftermath_world(env, gh)
+        model["answers"].append(_answer("terug-naar-plan"))
+        (gh / "comment_fails").write_text("", encoding="utf-8")
+        failed = _cli("--for-dispatch", X)
+        after_failure = (_pr_state(gh), _comments(gh))
+        (gh / "comment_fails").unlink()
+
+        retried = _cli("--for-dispatch", X)
+
+        assert (failed, after_failure) == (3, ("OPEN", []))
+        assert retried == 0 and _pr_state(gh) == "CLOSED" and len(_comments(gh)) == 1
+        assert [bool(close["comment"]) for close in _close_calls(gh)] == [True, True]
+        assert _pr_close_receipt(env["state_dir"])["comment"] == "posted"
+
+    def test_only_a_comment_with_the_marker_of_this_verdict_counts(self, env, model, gh):
+        import review_cap_aftermath
+        import review_cap_verdicts
+
+        _aftermath_world(env, gh)
+        model["answers"].append(_answer("terug-naar-plan"))
+        earlier = review_cap_aftermath.comment_marker(_returned("e" * 40))
+        quoted = f"T0: the tiebreaker decides {_vid(env['cap_head'])} next"
+        _repo_dir(gh, REPO_A).mkdir(parents=True)
+        (_repo_dir(gh, REPO_A) / "comments.ndjson").write_text(
+            "".join(json.dumps(body) + "\n" for body in (f"An earlier verdict.\n\n{earlier}", quoted)),
+            encoding="utf-8",
+        )
+
+        assert _cli("--for-dispatch", X) == 0
+
+        (verdict,) = review_cap_verdicts.read_verdicts(env["state_dir"], PR)
+        (posted,) = [body for body in _comments(gh) if review_cap_aftermath.comment_marker(verdict) in body]
+        assert len(_comments(gh)) == 3 and _close_calls(gh)[0]["comment"] == posted
+
+    def test_comments_that_cannot_be_read_close_nothing_and_post_nothing(self, env, model, gh, capsys):
+        _aftermath_world(env, gh)
+        model["answers"].append(_answer("terug-naar-plan"))
+        (gh / "comments_unreadable").write_text("", encoding="utf-8")
+
+        failed = _cli("--for-dispatch", X)
+
+        assert failed == 3 and "comments of PR" in capsys.readouterr().err
+        assert (_gh_calls(gh, "close"), _comments(gh), _pr_state(gh)) == ([], [], "OPEN")
+        assert [r["step"] for r in _step_receipts(env["state_dir"])] == ["open_items", "deliverable"]

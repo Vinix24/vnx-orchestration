@@ -21,7 +21,16 @@ steps run, in this order:
    step still runs.
 3. **The PR closes** with one comment naming the verdict, the cap rule, the
    open items and where the deliverable went (``gate_recorder.close_pr``). A
-   PR that is closed or merged already is left as it is.
+   PR that is closed or merged already is left as it is. The PR is looked up
+   and closed in the repo of the store's project
+   (``forge_project_target.resolve_forge_target``: store, project id,
+   registered checkout, origin), never in the cwd's: a PR number names a PR
+   only together with its repo. When that repo cannot be established nothing
+   is closed and the step says why. The comment carries the verdict id in a
+   marker line (:func:`comment_marker`), and the PR's comments are read
+   before it is closed: ``gh`` posts the comment before it closes, so a close
+   that failed can leave the comment behind, and the retry then closes
+   without a second one.
 
 **One receipt per step** (``review_cap_aftermath``, field ``step``), written
 only when the ledger holds none for that step of this verdict and project, and
@@ -43,8 +52,8 @@ without a receipt runs, idempotent on the verdict id: an open item's
 ``dedup_key`` is ``review-cap:<project>:<verdict id>:blocker-<n>``, with ``n``
 the finding's place in the result record of the counted verdict (a record of
 another head or report is refused, never read as the source); the
-deliverable's event names the verdict as its actor; the PR's state is read
-before it is closed.
+deliverable's event names the verdict as its actor; the PR's state and its
+comments are read before it is closed.
 
 The whole aftermath runs under one store lock, so two runs of the command do
 not both close the PR. A step that does not finish raises
@@ -59,7 +68,7 @@ import json
 import sqlite3
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import review_cap_verdicts as rcv
 import review_rounds
@@ -75,7 +84,7 @@ NOT_APPLIED = "not_applied"
 _STEP_FIELDS = {
     STEP_OPEN_ITEMS: ("oi_ids", "result_record"),
     STEP_DELIVERABLE: ("deliverable", "output_ref", "pr_dispatch_id", "from_state", "to_state", "branch", "track"),
-    STEP_PR_CLOSE: ("pr_state",),
+    STEP_PR_CLOSE: ("pr_state", "repo", "comment"),
 }
 _DISPATCH_BRANCH = "dispatch/"
 _BRANCH_PREFIXES = ("refs/heads/", "origin/")
@@ -87,10 +96,6 @@ _OI_SEVERITY = {
     "warn": "warn", "warning": "warn", "medium": "warn",
     "info": "info", "low": "info", "minor": "info", "note": "info",
 }
-
-PrStateFn = Callable[[int], str]
-ClosePrFn = Callable[[int, str], Tuple[bool, str]]
-
 
 class AftermathError(RuntimeError):
     """A step of the aftermath did not finish: the verdict and the steps before it stand, run it again."""
@@ -143,16 +148,12 @@ def dedup_key(verdict: rcv.CapVerdict, index: int) -> str:
     return f"review-cap:{verdict.project_id}:{verdict.verdict_id}:blocker-{index}"
 
 
-def carry_out(
-    state_dir: Path, verdict: rcv.CapVerdict, *, pr_state: Optional[PrStateFn] = None,
-    close_pr: Optional[ClosePrFn] = None,
-) -> Aftermath:
+def carry_out(state_dir: Path, verdict: rcv.CapVerdict) -> Aftermath:
     """Run what is missing of the aftermath of ``verdict``, a stored ``terug-naar-plan``.
 
-    ``pr_state`` and ``close_pr`` answer the two ``gh`` questions; without them
-    ``gate_recorder`` asks ``gh``. Returns the :class:`Aftermath`, with
-    ``failed`` set when a step did not finish. Raises ``ValueError`` for a
-    verdict of another outcome: nothing else has an aftermath.
+    Returns the :class:`Aftermath`, with ``failed`` set when a step did not
+    finish. Raises ``ValueError`` for a verdict of another outcome: nothing
+    else has an aftermath.
     """
     from atomic_io import slot_lock
 
@@ -177,7 +178,7 @@ def carry_out(
             closed = booked.get(STEP_PR_CLOSE)
             done.append(
                 _restored(closed) if closed
-                else _pr_close_step(state_dir, verdict, done[-1], pr_state=pr_state, close_pr=close_pr)
+                else _pr_close_step(state_dir, verdict, done[-1])
             )
         except AftermathError as exc:
             return Aftermath(verdict, tuple(done), failed=str(exc))
@@ -485,38 +486,76 @@ def close_comment(verdict: rcv.CapVerdict, deliverable: StepResult) -> str:
     return (
         f"Closed by the B3 review-cap tiebreaker: verdict {verdict.verdict_id} ({verdict.cap_rule} -> "
         f"terug-naar-plan). The remaining codex blockers on head {verdict.head_sha[:12]} are open items: {items}. "
-        f"{where}"
+        f"{where}\n\n{comment_marker(verdict)}"
     )
 
 
-def _pr_close_step(
-    state_dir: Path, verdict: rcv.CapVerdict, deliverable: StepResult, *,
-    pr_state: Optional[PrStateFn], close_pr: Optional[ClosePrFn],
-) -> StepResult:
-    """Step 3: close the PR with its comment unless it is closed already, then the step's receipt."""
+def comment_marker(verdict: rcv.CapVerdict) -> str:
+    """The line of the close comment that names its verdict: one comment per verdict id, found again by it."""
+    return f"<!-- vnx-review-cap-verdict: {verdict.verdict_id} -->"
+
+
+def _pr_close_step(state_dir: Path, verdict: rcv.CapVerdict, deliverable: StepResult) -> StepResult:
+    """Step 3: in the store's repo, close the PR with its comment unless it is closed already, then the receipt."""
     import gate_recorder
 
-    state = (pr_state or gate_recorder.get_pr_state)(verdict.pr_number)
+    repo = _store_repo(state_dir, verdict)
+    state = gate_recorder.get_pr_state(verdict.pr_number, repo=repo)
     if state in ("CLOSED", "MERGED"):
         result = StepResult(
-            STEP_PR_CLOSE, f"already_{state.lower()}", detail=f"PR #{verdict.pr_number} stands {state}: left as it is",
-            fields={"pr_state": state},
+            STEP_PR_CLOSE, f"already_{state.lower()}",
+            detail=f"PR #{verdict.pr_number} in {repo} stands {state}: left as it is",
+            fields={"pr_state": state, "repo": repo},
         )
     elif state != "OPEN":
         raise AftermathError(
-            f"the state of PR #{verdict.pr_number} cannot be read from GitHub ({state or 'no answer'}): it is not "
-            f"closed"
+            f"the state of PR #{verdict.pr_number} in {repo} cannot be read from GitHub ({state or 'no answer'}): "
+            f"it is not closed"
         )
     else:
-        closed, why = (close_pr or gate_recorder.close_pr)(verdict.pr_number, close_comment(verdict, deliverable))
-        if not closed:
-            raise AftermathError(f"gh pr close {verdict.pr_number} failed: {why}")
-        result = StepResult(
-            STEP_PR_CLOSE, "closed", detail=f"PR #{verdict.pr_number} closed with a comment naming {verdict.verdict_id}",
-            fields={"pr_state": "CLOSED"},
-        )
+        result = _close(verdict, deliverable, repo)
     _receipt_once(state_dir, verdict, result)
     return result
+
+
+def _store_repo(state_dir: Path, verdict: rcv.CapVerdict) -> str:
+    """The ``owner/name`` of the store's project: the repo the PR is looked up and closed in, never the cwd's."""
+    from forge_check_run import ForgePublishRefused
+    from forge_project_target import resolve_forge_target
+
+    try:
+        return resolve_forge_target(Path(state_dir) / "review_gates" / "results").owner_repo
+    except ForgePublishRefused as exc:
+        raise AftermathError(
+            f"the repo of PR #{verdict.pr_number} cannot be established from the store {state_dir}, so it is "
+            f"not looked up and not closed: {exc}"
+        ) from exc
+
+
+def _close(verdict: rcv.CapVerdict, deliverable: StepResult, repo: str) -> StepResult:
+    """Close the open PR, with the comment only when no comment of this verdict stands on it yet."""
+    import gate_recorder
+
+    bodies = gate_recorder.get_pr_comment_bodies(verdict.pr_number, repo=repo)
+    if bodies is None:
+        raise AftermathError(
+            f"the comments of PR #{verdict.pr_number} in {repo} cannot be read from GitHub: it is not closed, "
+            f"so no second comment of {verdict.verdict_id} is posted"
+        )
+    marker = comment_marker(verdict)
+    posted = any(line.strip() == marker for body in bodies for line in body.splitlines())
+    closed, why = gate_recorder.close_pr(
+        verdict.pr_number, "" if posted else close_comment(verdict, deliverable), repo=repo,
+    )
+    if not closed:
+        raise AftermathError(f"gh pr close {verdict.pr_number} --repo {repo} failed: {why}")
+    detail = f"PR #{verdict.pr_number} in {repo} closed with a comment naming {verdict.verdict_id}"
+    if posted:
+        detail += ", posted by an earlier close that failed after it: not posted again"
+    return StepResult(
+        STEP_PR_CLOSE, "closed", detail=detail,
+        fields={"pr_state": "CLOSED", "repo": repo, "comment": "already_posted" if posted else "posted"},
+    )
 
 
 # ---------------------------------------------------------------------------
