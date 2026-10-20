@@ -74,6 +74,14 @@ tiebreaker:
   max_rounds: 1
   provider: deepseek_harness
   model: deepseek-v4-pro
+# The tiebreaker at the B3 review cap (R2a, ADR-041,
+# scripts/lib/review_cap_tiebreaker.py). The same model as the plan-gate
+# tiebreaker, under its own key so the two can move apart (plan
+# review-stopregel-en-lichte-stoelen, open question 3). Resolved against the
+# registry the same way; without this block it follows ``tiebreaker`` above.
+review_cap_tiebreaker:
+  provider: deepseek_harness
+  model: deepseek-v4-pro
 # Minimum meaningful characters (whitespace-stripped) a track's goal_state must
 # carry to stand in for the plan when `plan-gate run` is invoked WITHOUT --doc.
 # The length is measured AFTER stripping whitespace, so a goal of 200 spaces is

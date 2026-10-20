@@ -27,6 +27,10 @@ enforceable:
   it falls at the first round where either rule holds, and only R2's tiebreaker
   (:func:`round_granted_past_cap`) or ``--override-b3`` gets a codex-seat round
   past it. No fingerprint: a returning blocker counts again.
+- **The granted round** (R2a, ADR-041). A ``verkleinen`` verdict in
+  ``review_cap_verdicts`` grants one codex-seat round past the cap. The writer
+  books the verdict that uses it with ``granted_by`` under the ledger lock, so
+  the first one wins and the ledger says which line the door may count.
 - **No second verdict on a head.** A key holds one counted verdict. The request
   side refuses a run in a seat that already has a verdict on the head
   (``gate_request_handler``); the writer refuses a second, different verdict on
@@ -64,7 +68,9 @@ Readers: ``gate_request_handler`` (refusal where a run starts),
 ``vnx pr-ready``), ``dispatch_cli`` (the early warning for a build on a capped
 PR's branch), and ``review_rounds_cli`` (``vnx review rounds open``).
 
-BILLING SAFETY: no Anthropic SDK, no network, no subprocess.
+BILLING SAFETY: no Anthropic SDK, no network, no subprocess in this module.
+The writer's grant check (``review_cap_verdicts``) reads commit messages with
+``git``.
 """
 from __future__ import annotations
 
@@ -74,10 +80,10 @@ import logging
 import os
 import re
 import stat
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +128,7 @@ EVIDENCE_REANCHORED = "reanchored"
 _VERDICTS = ("pass", "fail")
 _STRING_FIELDS = (
     "project_id", "head_sha", "seat", "reviewer", "takeover_from", "verdict",
-    "report_path", "dispatch_id", "recorded_at", "branch", "source", "reanchored_from",
+    "report_path", "dispatch_id", "recorded_at", "branch", "source", "reanchored_from", "granted_by",
 )
 
 
@@ -310,6 +316,10 @@ class RoundLine:
     override: Optional[Dict[str, Any]] = None
     # A re-anchored verdict: the head it was given on, where it was counted.
     reanchored_from: str = ""
+    # The extra round past the cap this verdict consumed: the id of the
+    # ``verkleinen`` verdict in ``review_cap_verdicts`` (R2a). Stamped by the
+    # writer under the ledger lock, never taken from a payload.
+    granted_by: str = ""
 
     @property
     def key(self) -> Tuple[str, int, str, str]:
@@ -339,6 +349,8 @@ class RoundLine:
             record["override"] = dict(self.override)
         if self.reanchored_from:
             record["reanchored_from"] = self.reanchored_from
+        if self.granted_by:
+            record["granted_by"] = self.granted_by
         return record
 
     @classmethod
@@ -519,11 +531,25 @@ class Ledger:
         no blocker, no FAIL and no PASS, and the cap starts there at zero. A
         ``new`` line has nothing before it, and a PR that is not opened is
         counted whole: the gate and the door refuse it on its own grounds.
+        The last attested line is the boundary: a release of an interrupted
+        publication (:func:`open_pr` with ``results_dir``) is a second one.
         """
+        return self._boundary(project_id, pr_number)[0]
+
+    def since(self, project_id: str, pr_number: int) -> str:
+        """When this PR's count starts: the boundary line's ``recorded_at``, ``""`` without an attested line.
+
+        A tiebreaker verdict recorded before it belongs to a count that no
+        longer stands (``review_cap_verdicts``).
+        """
+        return self._boundary(project_id, pr_number)[1]
+
+    def _boundary(self, project_id: str, pr_number: int) -> Tuple[int, str]:
+        found = (0, "")
         for line, after in zip(self.opened, self.opened_after):
-            if line.project_id == project_id and line.pr_number == pr_number:
-                return after if line.basis == BASIS_ATTESTED else 0
-        return 0
+            if line.project_id == project_id and line.pr_number == pr_number and line.basis == BASIS_ATTESTED:
+                found = (after, line.recorded_at)
+        return found
 
     def for_pr(self, project_id: str, pr_number: int) -> Tuple[RoundLine, ...]:
         """This PR's counted lines in verdict order (``recorded_at``, then file order).
@@ -737,25 +763,62 @@ def cap_state(lines: Iterable[RoundLine], pr_number: int) -> CapState:
     return CapState(pr_number, rounds)
 
 
-def round_granted_past_cap(cap: CapState, *, head_sha: str) -> bool:
+@dataclass(frozen=True)
+class Grant:
+    """The one extra codex-seat round a ``verkleinen`` verdict granted past the cap (R2a, ADR-041).
+
+    ``verdict_id`` names the verdict in ``review_cap_verdicts``, ``dispatch_id``
+    the dispatch that carries out its one intervention, ``since_head`` the head
+    the verdict decided on. ``qualified_head`` is the head the caller found to
+    carry a commit of that dispatch after ``since_head`` (``""``: none checked).
+    """
+
+    verdict_id: str
+    dispatch_id: str
+    since_head: str
+    qualified_head: str = ""
+
+
+def consumed_by(grant: Grant, lines: Iterable[RoundLine]) -> Optional[RoundLine]:
+    """The codex-seat verdict that used up the extra round, or ``None`` while it is open.
+
+    Only a codex-seat verdict consumes it (plan, state contract rule 3): a
+    verdict of the second seat on the same head never does.
+    """
+    return next((line for line in lines if line.seat == CODEX_SEAT and line.granted_by == grant.verdict_id), None)
+
+
+def round_granted_past_cap(
+    cap: CapState, *, head_sha: str, grant: Optional[Grant] = None, lines: Iterable[RoundLine] = (),
+) -> bool:
     """Has a tiebreaker granted the codex seat one round on ``head_sha`` past the cap?
 
-    This is where R2 plugs in (plan section 2): a ``verkleinen`` verdict grants
-    one extra round, bound to the dispatch that carries out the named
-    intervention, consumed by the first codex-seat verdict on a head with a
-    commit of that dispatch. R1 has no tiebreaker and grants nothing: past the
-    cap, only ``--override-b3`` lets a codex-seat round run (at the gate) or
-    count (at the merge door).
+    Plan section 2: a ``verkleinen`` verdict grants one extra round, bound to
+    the dispatch that carries out the named intervention, consumed by the first
+    codex-seat verdict on a head with a commit of that dispatch. ``lines`` are
+    the PR's counted lines. While the round is open, it is granted on the head
+    the caller qualified (the gate before a run, the writer before a booking);
+    once consumed, only on the head of the verdict that consumed it (the merge
+    door counting that verdict). Without a grant nothing is granted: past the
+    cap only ``--override-b3`` lets a codex-seat round run or count.
     """
-    return False
+    if grant is None or not cap.capped or not head_sha:
+        return False
+    used = consumed_by(grant, lines)
+    if used is not None:
+        return used.head_sha == head_sha
+    return grant.qualified_head == head_sha
+
+
+CAP_VERDICT_COMMAND = "vnx review cap-verdict --pr {pr} --for-dispatch <dispatch-id>"
 
 
 def cap_refusal_text(cap: CapState, *, where: str) -> str:
-    """The refusal a capped PR gets, naming the rule, the counts and the override."""
+    """The refusal a capped PR gets, naming the rule, the counts, the tiebreaker and the override."""
     return (
-        f"{where}: {cap.summary()}. Every codex-seat run on this PR is refused on every head; "
-        f"the tiebreaker that decides the next step arrives with R2. To go on anyway, pass "
-        f"{OVERRIDE_USAGE}: the override wins over the cap and is recorded with its reason"
+        f"{where}: {cap.summary()}. Every codex-seat run on this PR is refused on every head, except the "
+        f"one round a tiebreaker verdict grants: `{CAP_VERDICT_COMMAND.format(pr=cap.pr_number)}`. To go on "
+        f"anyway, pass {OVERRIDE_USAGE}: the override wins over the cap and is recorded with its reason"
     )
 
 
@@ -801,7 +864,12 @@ def book_b3_override(path: Path, *, project_id: str, cap: CapState, reason: str,
 # ---------------------------------------------------------------------------
 
 
-def append_verdict(path: Path, line: RoundLine) -> str:
+#: Resolves the grant standing on a capped PR for the line being booked: called
+#: under the ledger lock with the PR's cap, its counted lines and ``Ledger.since``.
+GrantResolver = Callable[[CapState, Tuple[RoundLine, ...], str], Optional[Grant]]
+
+
+def append_verdict(path: Path, line: RoundLine, *, grant_for: Optional[GrantResolver] = None) -> str:
     """Append ``line`` under the ledger lock, fsynced: ``"appended"`` or ``"present"``.
 
     ``"present"`` is the same verdict booked again (a retried write), also when
@@ -810,7 +878,9 @@ def append_verdict(path: Path, line: RoundLine) -> str:
     :class:`RoundRefusal` (``verdict_on_head``); so does a re-anchor of a verdict
     the ledger does not count (``reanchor_origin_uncounted``), and a codex-seat
     verdict on a PR at the cap without an override or a granted round
-    (``b3_cap``). A ledger that is unreadable for this PR raises
+    (``b3_cap``). A granted round is booked with ``granted_by``: the first
+    verdict that reaches the lock consumes it, every later one is refused.
+    A ledger that is unreadable for this PR raises
     :class:`RoundLedgerUnreadable`, any I/O failure :class:`RoundLedgerError`.
     """
     from atomic_io import slot_lock
@@ -819,9 +889,10 @@ def append_verdict(path: Path, line: RoundLine) -> str:
     try:
         with slot_lock(path):
             ledger = parse_ledger(path, _ledger_text(path))
-            if _check_append(ledger, line):
+            booking = _check_append(ledger, line, grant_for)
+            if booking is None:
                 return "present"
-            _append_line(path, line)
+            _append_line(path, booking)
     except RoundLedgerError:
         raise
     except (OSError, UnicodeDecodeError) as exc:
@@ -829,10 +900,12 @@ def append_verdict(path: Path, line: RoundLine) -> str:
     return "appended"
 
 
-def _check_append(ledger: Ledger, line: RoundLine) -> bool:
-    """Judge ``line`` against the ledger read under its lock: ``True`` when this verdict is booked already.
+def _check_append(ledger: Ledger, line: RoundLine, grant_for: Optional[GrantResolver] = None) -> Optional[RoundLine]:
+    """Judge ``line`` against the ledger read under its lock: ``None`` when this verdict is booked already.
 
-    Raises what :func:`append_verdict` names; ``False`` lets the line be appended.
+    Raises what :func:`append_verdict` names; otherwise returns the line to
+    append, with ``granted_by`` when it is the codex-seat round a tiebreaker
+    granted past the cap.
     """
     text = unreadable_text(ledger, line.pr_number)
     if text:
@@ -845,15 +918,19 @@ def _check_append(ledger: Ledger, line: RoundLine) -> bool:
             f"verdict on the same head is refused"
         ))
     if ledger.booked(line):
-        return True
+        return None
     if line.reanchored_from:
         _check_reanchor_origin(ledger, line)
     if line.seat != CODEX_SEAT or line.override:
-        return False
-    cap = cap_state(ledger.for_pr(line.project_id, line.pr_number), line.pr_number)
-    if cap.capped and not round_granted_past_cap(cap, head_sha=line.head_sha):
-        raise RoundRefusal(REFUSED_B3_CAP, cap_refusal_text(cap, where="verdict not booked"))
-    return False
+        return line
+    lines = ledger.for_pr(line.project_id, line.pr_number)
+    cap = cap_state(lines, line.pr_number)
+    if not cap.capped:
+        return line
+    grant = grant_for(cap, lines, ledger.since(line.project_id, line.pr_number)) if grant_for else None
+    if grant is not None and round_granted_past_cap(cap, head_sha=line.head_sha, grant=grant, lines=lines):
+        return replace(line, granted_by=grant.verdict_id)
+    raise RoundRefusal(REFUSED_B3_CAP, cap_refusal_text(cap, where="verdict not booked"))
 
 
 def _check_reanchor_origin(ledger: Ledger, line: RoundLine) -> None:
@@ -955,13 +1032,42 @@ def ensure_ledger(review_gates_dir: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
+def unpublished(ledger: Ledger, project_id: str, pr_number: int, results_dir: Path) -> Tuple[RoundLine, ...]:
+    """Counted verdicts whose publication was interrupted: each reviewer's latest line its record does not carry.
+
+    State contract rule 2 (plan section 2): the line reached the ledger, the
+    result record did not. The gate refuses a new run on that head (the line
+    stands, the record does not carry it) and the door counts no PASS (no
+    record). A record that cannot be read carries nothing.
+    """
+    latest: Dict[str, RoundLine] = {}
+    for line in ledger.for_pr(project_id, pr_number):
+        latest[line.reviewer] = line
+    return tuple(line for line in latest.values() if not _record_carries(Path(results_dir), line))
+
+
+def _record_carries(results_dir: Path, line: RoundLine) -> bool:
+    try:
+        record = json.loads((results_dir / f"pr-{line.pr_number}-{line.reviewer}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(record, dict) and _head(record) == line.head_sha and (
+        Path(str(record.get("report_path") or "")).name == line.report_name
+    ) and ledger_verdict(record) == line.verdict
+
+
 def open_pr(
     path: Path, project_id: str, pr_number: int, *, basis: str, evidence: int, actor: str = "", reason: str = "",
+    results_dir: Optional[Path] = None,
 ) -> Tuple[str, OpenedLine]:
-    """Write PR ``pr_number``'s ``opened`` line under the ledger lock: ``("opened", line)`` or ``("present", line)``.
+    """Write PR ``pr_number``'s ``opened`` line under the ledger lock: ``("opened" | "released" | "present", line)``.
 
     Idempotent: the ledger is re-read under the lock and a PR that is already
     opened gets no second line; ``"present"`` returns the line that stands.
+    The one exception is the release of state contract rule 2: an operator
+    line (``attested``, with ``results_dir``) on an opened PR that has an
+    interrupted publication (:func:`unpublished`) is written as a new boundary,
+    ``"released"``. What came before it no longer counts, the cap included.
     ``basis`` ``new`` is the gate's, ``attested`` the operator's (with
     ``actor`` and ``reason``). A ledger that is unreadable for this PR raises
     :class:`RoundLedgerUnreadable`, any other failure to write the line
@@ -985,14 +1091,17 @@ def open_pr(
             if text:
                 raise RoundLedgerUnreadable(text)
             standing = ledger.opened_line(project_id, pr_number)
-            if standing is not None:
+            release = standing is not None and basis == BASIS_ATTESTED and results_dir is not None and bool(
+                unpublished(ledger, project_id, pr_number, results_dir)
+            )
+            if standing is not None and not release:
                 return "present", standing
             _append_text(path, ndjson(line.to_dict()))
     except RoundLedgerError:
         raise
     except (OSError, UnicodeDecodeError) as exc:
         raise RoundLedgerError(f"round ledger {path} could not be written: {exc}") from exc
-    return "opened", line
+    return ("released" if release else "opened"), line
 
 
 RECEIPTS_NAME = "t0_receipts.ndjson"
@@ -1254,4 +1363,15 @@ def book_result_verdict(
             gate, payload.get("pr_number") or payload.get("pr_id"),
         )
         return VerdictBooking("headless", "the verdict names no head")
-    return VerdictBooking(append_verdict(path, line), line=line)
+    grant_for = _grant_resolver(path.parent.parent, line.head_sha) if line.seat == CODEX_SEAT else None
+    return VerdictBooking(append_verdict(path, line, grant_for=grant_for), line=line)
+
+
+def _grant_resolver(state_dir: Path, head_sha: str) -> GrantResolver:
+    """The writer's backstop: the grant standing on the cap, qualified for this verdict's head (R2a)."""
+    def resolve(cap: CapState, lines: Tuple[RoundLine, ...], since: str) -> Optional[Grant]:
+        import review_cap_verdicts
+
+        return review_cap_verdicts.grant_or_none(state_dir, cap, lines, head_sha=head_sha, since=since)
+
+    return resolve

@@ -763,7 +763,9 @@ class DoorRounds:
     PR reviewed before R1, or one whose verdicts were booked without a gate
     request, until ``vnx review rounds open --pr N --reason``). ``cap`` is the B3
     count over the codex seat, ``override`` the reason of the door's
-    ``--override-b3``.
+    ``--override-b3``, and ``grant`` the extra round a tiebreaker's
+    ``verkleinen`` granted past the cap (R2a): only the codex-seat verdict
+    the ledger booked as its use counts.
     """
 
     path: str
@@ -772,6 +774,7 @@ class DoorRounds:
     refusal: str = ""
     cap: Any = None
     override: str = ""
+    grant: Any = None
 
     @property
     def capped(self) -> bool:
@@ -784,6 +787,8 @@ class DoorRounds:
             record["cap"] = self.cap.to_record()
         if self.override:
             record["override"] = {"flag": "--override-b3", "reason": self.override, "applied": self.capped}
+        if self.grant is not None:
+            record["granted_round"] = {"verdict_id": self.grant.verdict_id, "dispatch_id": self.grant.dispatch_id}
         return record
 
 
@@ -822,7 +827,15 @@ def door_rounds(scope: SeatScope, b3_override: str = "") -> Optional[DoorRounds]
             f"de deur. Is er vóór R1 gereviewd, of is een uitspraak geboekt zonder gate-aanvraag, dan opent de "
             f"operator de PR met `{review_rounds.open_command(pr_number)}`; de cap begint bij die regel op nul"
         ))
-    return DoorRounds(str(path), pr_number, lines, cap=review_rounds.cap_state(lines, pr_number), override=b3_override.strip())
+    cap = review_rounds.cap_state(lines, pr_number)
+    grant = _door_grant(path.parent.parent, cap, ledger.since(project_id, pr_number)) if cap.capped else None
+    return DoorRounds(str(path), pr_number, lines, cap=cap, override=b3_override.strip(), grant=grant)
+
+
+def _door_grant(state_dir: Path, cap: Any, since: str) -> Any:
+    import review_cap_verdicts
+
+    return review_cap_verdicts.door_grant(state_dir, cap, since=since)
 
 
 def _uncounted(fill: SeatFill, message: str) -> SeatFill:
@@ -838,11 +851,12 @@ def _cap_refusal(fill: SeatFill, rounds: DoorRounds, head_sha: str) -> str:
 
     if fill.seat != review_rounds.CODEX_SEAT or not rounds.capped or rounds.override:
         return ""
-    if review_rounds.round_granted_past_cap(rounds.cap, head_sha=head_sha):
+    if review_rounds.round_granted_past_cap(rounds.cap, head_sha=head_sha, grant=rounds.grant, lines=rounds.lines):
         return ""
     return (
         f"PR #{rounds.pr_number} staat op de B3-cap ({rounds.cap.summary()}): een PASS in de codex-seat "
-        f"telt dan niet. De tiebreaker die de volgende stap kiest komt met R2; doorgaan kan alleen met "
+        f"telt dan alleen als hij de extra ronde van een tiebreaker-uitspraak is "
+        f"(`{review_rounds.CAP_VERDICT_COMMAND.format(pr=rounds.pr_number)}`); doorgaan kan anders alleen met "
         f'{review_rounds.OVERRIDE_USAGE}, dat met zijn reden in het merge-record komt'
     )
 
