@@ -384,7 +384,7 @@ def test_stop_records_the_seats_findings_on_the_latest_plan_as_open_items(gate):
     outcome = gate.run("## Problem\nplan version one\n")
 
     assert outcome.decision == "STOP"
-    items_file = Path(pgt.open_items_state_dir_for(gate.ledger)) / "open_items.json"
+    items_file = Path(pgt.open_items_state_dir_from(gate.state_dir)) / "open_items.json"
     titles = [i["title"] for i in json.loads(items_file.read_text())["items"]]
     assert "plan lacks a rollback section" in titles
 

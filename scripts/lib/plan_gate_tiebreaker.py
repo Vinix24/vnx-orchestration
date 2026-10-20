@@ -1212,20 +1212,17 @@ class _open_items_store_override:
             setattr(self._oim, key, val)
 
 
-def open_items_state_dir_for(seat_ledger_path: Optional[Path]) -> Optional[str]:
-    """Derive the open-items state_dir from the seat-ledger path, or ``None``.
+def open_items_state_dir_from(central_state_dir: Optional[Any]) -> Optional[str]:
+    """The open-items store dir for the STOP aftermath, or ``None``.
 
-    The seat ledger lives under ``<central-data-root>/.vnx-attest/``; the
-    open-items store lives under ``<central-data-root>/state/``. Deriving the
-    state_dir from the seat-ledger path keeps the STOP aftermath writing to the
-    SAME central root the plan-gate state lives in, without a second resolution
-    that could drift. ``None`` when no ledger path is resolvable (the manager
-    then resolves its own store from CWD — the production path).
+    The open-items store (``open_items.json`` + digest + audit) lives IN the
+    project's central state dir, the same dir ``plan-gate run`` already
+    resolved for the tracks DB (``VNX_DATA_DIR`` / ``VNX_STATE_DIR`` aware).
+    The seat ledger does NOT live under the central root (it sits in the repo
+    next to ``plan-gates.ndjson``), so nothing is derived from its path.
+    ``None`` when the caller has no central state dir: the STOP aftermath then
+    records nothing instead of falling back to a CWD-resolved store.
     """
-    if seat_ledger_path is None:
+    if not central_state_dir:
         return None
-    # .vnx-attest/plan-gate-seats.ndjson -> <root>/.vnx-attest -> <root>/state
-    attest_dir = seat_ledger_path.parent
-    root = attest_dir.parent
-    state_dir = root / "state"
-    return str(state_dir)
+    return str(central_state_dir)

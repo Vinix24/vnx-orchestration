@@ -3510,6 +3510,38 @@ class PlanGateRunResult:
     stdout_json: Optional[str] = None
 
 
+def _record_stop_open_items(
+    state_dir, *, track_id, project_id, seat_verdicts, round_number, stderr_lines,
+) -> None:
+    """Punt 9: the seat's findings on this plan version become open items.
+
+    They land in the central state dir the command already resolved (never a
+    CWD store). Best-effort: no central state dir means nothing is recorded,
+    and that is said on stderr; the gate result still stands.
+    """
+    import plan_gate_tiebreaker
+
+    findings = plan_gate_tiebreaker.seat_findings(seat_verdicts)
+    oi_state_dir = plan_gate_tiebreaker.open_items_state_dir_from(state_dir)
+    if oi_state_dir is None:
+        if findings:
+            stderr_lines.append(
+                "WARNING: no central state dir resolved; the STOP findings "
+                f"for track {track_id} were NOT recorded as open items."
+            )
+        return
+    recorded = plan_gate_tiebreaker.remaining_findings_to_open_items(
+        track_id=track_id, project_id=project_id, findings=findings,
+        dispatch_id=f"plan-tiebreak-{track_id}-{round_number}",
+        state_dir=oi_state_dir,
+    )
+    if recorded:
+        stderr_lines.append(
+            f"  STOP: recorded {len(recorded)} open item(s) from the seat's "
+            f"findings on this plan version."
+        )
+
+
 def _run_tiebreaker_for_track(
     *,
     state_dir,
@@ -3694,21 +3726,11 @@ def _run_tiebreaker_for_track(
         )
 
     if result.outcome == plan_gate_tiebreaker.STOP:
-        # Punt 9: the seat's findings on this plan version become open items via
-        # the existing open-items path (not a loose note). Best-effort: a failed
-        # recording must not block the STOP resolution, but it IS surfaced.
-        oi_state_dir = plan_gate_tiebreaker.open_items_state_dir_for(seat_ledger_path)
-        recorded = plan_gate_tiebreaker.remaining_findings_to_open_items(
-            track_id=track_id, project_id=project_id,
-            findings=plan_gate_tiebreaker.seat_findings(seat_verdicts),
-            dispatch_id=f"plan-tiebreak-{track_id}-{round_number}",
-            state_dir=oi_state_dir,
+        _record_stop_open_items(
+            state_dir, track_id=track_id, project_id=project_id,
+            seat_verdicts=seat_verdicts, round_number=round_number,
+            stderr_lines=stderr_lines,
         )
-        if recorded:
-            stderr_lines.append(
-                f"  STOP: recorded {len(recorded)} open item(s) from the seat's "
-                f"findings on this plan version."
-            )
 
     # Both START and STOP clear the blocker, with a resolution_reason that
     # names the tiebreaker (which model, which round, which outcome). A blocker
