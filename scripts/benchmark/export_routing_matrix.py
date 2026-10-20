@@ -93,7 +93,8 @@ def _quality_tier(score10: float) -> int:
 
 def aggregate():
     # (task_class, model_id, runner) -> {scores:[genuine composites], attempts, produced, costs, durations}
-    cells = defaultdict(lambda: {"scores": [], "attempts": 0, "produced": 0, "costs": [], "durs": []})
+    cells = defaultdict(lambda: {"scores": [], "attempts": 0, "produced": 0, "costs": [], "durs": [],
+                                 "cost_unknown": 0})
     for f in glob.glob(str(RESULTS / "*" / "raw.csv")):
         try:
             for r in csv.DictReader(open(f)):
@@ -117,6 +118,10 @@ def aggregate():
                     cells[key]["produced"] += 1
                     cells[key]["scores"].append(comp)
                     cells[key]["durs"].append(wall)
+                    # An empty cost is an unknown price (scorer writes None as ""):
+                    # counted, and kept out of the mean rather than read as 0.
+                    if not (r.get("cost_usd") or "").strip():
+                        cells[key]["cost_unknown"] += 1
                     try:
                         c = float(r.get("cost_usd", "") or 0)
                         if c > 0:
@@ -125,6 +130,12 @@ def aggregate():
                         pass
         except Exception as exc:
             logger.warning("skipping %s during routing-matrix aggregation: %s", f, exc)
+    unknown = sum(d["cost_unknown"] for d in cells.values())
+    if unknown:
+        logger.info(
+            "routing-matrix: %d genuine run(s) carry an unknown cost_usd; left out of "
+            "cost_usd_per_call, not counted as 0", unknown,
+        )
     return cells
 
 

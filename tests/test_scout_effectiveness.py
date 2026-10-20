@@ -264,3 +264,53 @@ class TestCli:
         assert rc == 0
         assert "Scout Effectiveness Measurement" in captured.out
         assert not (fixture_corpus / "scout_effectiveness.json").exists()
+
+
+class TestUnknownCost:
+    """An unknown price (``cost_usd: null``, ADR-040) is counted, never averaged or summed as 0."""
+
+    def _records(self):
+        receipts = [
+            {"dispatch_id": "20261020-enriched-known", "status": "success", "cost_usd": 0.10},
+            {"dispatch_id": "20261020-enriched-null", "status": "success", "cost_usd": None,
+             "cost_source": "unavailable:no_price:gpt-4o-mini"},
+            {"dispatch_id": "20261020-plain-known", "status": "success", "cost_usd": 0.30},
+            {"dispatch_id": "20261020-plain-null", "status": "success", "cost_usd": None},
+        ]
+        scout_receipts = [
+            {"dispatch_id": "20261020-enriched-known", "cost_usd": 0.002},
+            {"dispatch_id": "20261020-enriched-null", "cost_usd": None},
+        ]
+        return se.correlate_records(receipts, scout_receipts, sidecar_ids=[])
+
+    def test_null_worker_cost_stays_out_of_mean_and_is_counted(self):
+        report = se.compute_effectiveness(self._records())
+        # Read as 0, the null rows would halve both means (0.05 and 0.15).
+        assert report.enriched.mean_cost_usd == pytest.approx(0.10)
+        assert report.non_enriched.mean_cost_usd == pytest.approx(0.30)
+        assert report.enriched.sum_cost_usd == pytest.approx(0.10)
+        assert report.enriched.cost_unknown_count == 1
+        assert report.non_enriched.cost_unknown_count == 1
+
+    def test_null_scout_cost_is_counted_and_dispatch_stays_enriched(self):
+        records = self._records()
+        null_scout = next(r for r in records if r.dispatch_id == "20261020-enriched-null")
+        assert null_scout.scout_enriched is True
+        assert null_scout.scout_cost_usd == 0.0
+        assert null_scout.scout_cost_unknown == 1
+
+        report = se.compute_effectiveness(records)
+        assert report.total_scout_cost_usd == pytest.approx(0.002)
+        assert report.scout_cost_unknown_count == 1
+
+    def test_unknown_counts_reach_the_warnings_and_the_artifact(self):
+        report = se.compute_effectiveness(self._records())
+        joined = " ".join(report.warnings)
+        assert "2 dispatch(es) carry an unknown worker cost_usd" in joined
+        assert "1 scout receipt(s) carry an unknown cost_usd" in joined
+        assert "carry an unknown" in se.format_report(report)
+
+        payload = se.report_to_dict(report)
+        assert payload["enriched"]["cost_unknown_count"] == 1
+        assert payload["non_enriched"]["cost_unknown_count"] == 1
+        assert payload["scout_cost_unknown_count"] == 1

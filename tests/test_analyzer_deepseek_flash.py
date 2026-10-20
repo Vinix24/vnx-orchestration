@@ -356,8 +356,17 @@ def test_registry_entry_carries_the_official_flash_tariff_and_source():
     assert flash["cost_input_per_mtok"] == 0.30
     assert flash["cost_output_per_mtok"] == 1.20
     assert flash["cost_cache_read_per_mtok"] == 0.006
-    assert flash["price_source"] == "https://api-docs.deepseek.com/quick_start/pricing"
-    assert str(flash["price_checked_at"]) == "2026-09-28"
+    assert flash["price_source"] == (
+        "measured (~/.claude/rules/provider-constraints.md); cache-read "
+        "https://api-docs.deepseek.com/quick_start/pricing"
+    )
+    assert str(flash["price_checked_at"]) == "2026-09-14"
+    # ADR-040: the measured peak/off-peak split is carried as a dated version.
+    version = flash["price_versions"][0]
+    assert version["input_per_mtok"] == 0.30
+    assert version["output_per_mtok"] == 1.20
+    assert version["off_peak_input_per_mtok"] == 0.15
+    assert version["off_peak_output_per_mtok"] == 0.60
     # the gates keep their phased-out alias untouched
     legacy = raw["providers"]["deepseek_harness"]["models"]["deepseek-v4-flash"]
     assert (legacy["cost_input_per_mtok"], legacy["cost_output_per_mtok"]) == (0.14, 0.28)
@@ -365,14 +374,14 @@ def test_registry_entry_carries_the_official_flash_tariff_and_source():
 
 def test_cost_with_cache_hits_uses_the_tariff():
     usage = {"input": 1_000_000, "output": 1_000_000, "cache_hit": 1_000_000}
-    cost = provider_dispatch._compute_cost("deepseek-harness", "deepseek-flash", usage)
+    cost, _ = provider_dispatch._compute_cost("deepseek-harness", "deepseek-flash", usage)
     assert cost == pytest.approx(0.30 + 0.006 + 1.20)
 
 
 def test_cost_of_a_cache_heavy_review_run():
     # 20k fresh input, 480k cache-read, 6k output
     usage = {"input": 20_000, "output": 6_000, "cache_hit": 480_000}
-    cost = provider_dispatch._compute_cost("deepseek-harness", "deepseek-flash", usage)
+    cost, _ = provider_dispatch._compute_cost("deepseek-harness", "deepseek-flash", usage)
     expected = 20_000 * 0.30 / 1e6 + 480_000 * 0.006 / 1e6 + 6_000 * 1.20 / 1e6
     assert cost == pytest.approx(expected)
     assert cost == pytest.approx(0.01608)
@@ -380,5 +389,5 @@ def test_cost_of_a_cache_heavy_review_run():
 
 def test_models_without_a_cache_read_price_do_not_bill_cache_tokens():
     usage = {"input": 1_000_000, "output": 1_000_000, "cache_hit": 5_000_000}
-    cost = provider_dispatch._compute_cost("deepseek-harness", "deepseek-v4-flash", usage)
+    cost, _ = provider_dispatch._compute_cost("deepseek-harness", "deepseek-v4-flash", usage)
     assert cost == pytest.approx(0.14 + 0.28)

@@ -46,11 +46,11 @@ class TestClaudeCostSideChannel:
                 return_value={"input": 1500, "output": 300, "cache_hit": 200},
             ), patch(
                 "subprocess_dispatch_internals.recovery._compute_cost",
-                return_value=0.0123,
+                return_value=(0.0123, "claude-sonnet-4-6@2026-01-01"),
             ):
                 from subprocess_dispatch_internals.recovery import _resolve_token_usage_and_cost
 
-                token_usage, cost_usd = _resolve_token_usage_and_cost(
+                token_usage, cost_usd, cost_source = _resolve_token_usage_and_cost(
                     dispatch_id, None, "claude-sonnet-4-6",
                 )
 

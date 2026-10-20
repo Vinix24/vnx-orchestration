@@ -95,7 +95,7 @@ def test_ladder_covers_every_dispatchable_model():
     ladder = load_tier_ladder()
     assert [(r.tier, r.model, r.output_cost_per_mtok) for r in ladder] == [
         (TIER_ZERO, "deepseek-v4-flash", 0.28),
-        (TIER_LOW, "deepseek-v4-pro", 0.87),
+        (TIER_LOW, "deepseek-v4-pro", 3.96),
         (TIER_MID, "sonnet-5", 10.00),
         ("kimi-k3", "kimi-k3", 15.00),
         (TIER_HIGH, "opus-5", 25.00),

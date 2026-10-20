@@ -4,7 +4,7 @@ Covers scripts/lib/paid_lane_budget.py in isolation:
   - provider -> paid-lane-key classification (architectural, not observed cost)
   - get_daily_budget_usd() env parsing + fail-closed <=0 semantics
   - spent_today_usd() reading the receipts ledger: date filter, provider
-    filter, malformed-line tolerance, missing-cost tolerance
+    filter, malformed-line tolerance, unknown (null) cost counted, never 0
   - is_budget_exhausted() / enforce_daily_budget() incl. the operator override
 """
 
@@ -161,12 +161,31 @@ class TestSpentTodayUsd:
             fh.write("\n")
         assert plb.spent_today_usd(tmp_path) == pytest.approx(0.07)
 
-    def test_missing_cost_usd_counts_as_zero_not_a_crash(self, tmp_path):
+    def test_null_cost_is_unknown_not_zero_and_is_counted(self, tmp_path, caplog):
+        """An unknown price (cost_usd null, ADR-040) is left out of the known
+        total, counted, and logged: never summed as 0, never a crash."""
         _write_receipts(tmp_path / plb.RECEIPTS_FILE_NAME, [
-            {"provider": "glm-harness", "cost_usd": None, "timestamp": _today_ts()},
+            {"provider": "glm-harness", "cost_usd": None, "timestamp": _today_ts(),
+             "cost_source": "unavailable:no_price:glm-5.2"},
+            {"provider": "deepseek-harness", "cost_usd": None, "timestamp": _today_ts()},
+            {"provider": "glm-harness", "cost_usd": 0.02, "timestamp": _today_ts()},
+            {"provider": "glm-harness", "timestamp": _today_ts()},             # no cost at all
+            {"provider": "claude", "cost_usd": None, "timestamp": _today_ts()},  # not a paid lane
+            {"provider": "glm-harness", "cost_usd": None, "timestamp": _yesterday_ts()},
+        ])
+        with caplog.at_level("WARNING", logger="paid_lane_budget"):
+            spend = plb.spent_today(tmp_path)
+        assert spend == plb.SpendToday(total_usd=pytest.approx(0.02), unknown_cost_count=2)
+        assert plb.spent_today_usd(tmp_path) == pytest.approx(0.02)
+        assert "2 paid-lane receipt(s) today carry an unknown cost_usd" in caplog.text
+
+    def test_no_unknown_cost_logs_nothing(self, tmp_path, caplog):
+        _write_receipts(tmp_path / plb.RECEIPTS_FILE_NAME, [
             {"provider": "glm-harness", "cost_usd": 0.02, "timestamp": _today_ts()},
         ])
-        assert plb.spent_today_usd(tmp_path) == pytest.approx(0.02)
+        with caplog.at_level("WARNING", logger="paid_lane_budget"):
+            assert plb.spent_today(tmp_path).unknown_cost_count == 0
+        assert "unknown cost_usd" not in caplog.text
 
     def test_numeric_epoch_timestamp_is_handled(self, tmp_path):
         today_epoch = datetime.now(timezone.utc).replace(

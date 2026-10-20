@@ -55,7 +55,7 @@ class TestGeminiExec:
 
         with patch("gemini_wrapper.subprocess.run", return_value=_make_run_result()) as mock_run, \
              patch("provider_costs.emit_provider_cost"), \
-             patch("provider_costs._compute_cost_from_rates", return_value=(0.001, False)):
+             patch("provider_costs.price_run", return_value=(0.001, "stub@date")):
 
             gemini_wrapper.gemini_exec("my prompt", model="gemini-2.5-pro", dispatch_id="d-g001")
 
@@ -73,7 +73,7 @@ class TestGeminiExec:
 
         with patch("gemini_wrapper.subprocess.run", return_value=_make_run_result(stdout=expected)), \
              patch("provider_costs.emit_provider_cost"), \
-             patch("provider_costs._compute_cost_from_rates", return_value=(0.001, False)):
+             patch("provider_costs.price_run", return_value=(0.001, "stub@date")):
 
             result = gemini_wrapper.gemini_exec("prompt", dispatch_id="d-g002")
 
@@ -84,7 +84,7 @@ class TestGeminiExec:
         # the env fallback now lives in emit_provider_cost (best-effort), not here.
         with patch("gemini_wrapper.subprocess.run", return_value=_make_run_result()), \
              patch("provider_costs.emit_provider_cost") as mock_emit, \
-             patch("provider_costs._compute_cost_from_rates", return_value=(0.002, False)):
+             patch("provider_costs.price_run", return_value=(0.002, "stub@date")):
 
             gemini_wrapper.gemini_exec(
                 "prompt", model="gemini-2.5-pro", dispatch_id="d-g003", project_id="test-proj"
@@ -104,7 +104,7 @@ class TestGeminiExec:
         monkeypatch.setenv("VNX_PROJECT_ID", "test-proj")
         with patch("gemini_wrapper.subprocess.run", return_value=_make_run_result()), \
              patch("provider_costs.emit_provider_cost") as mock_emit, \
-             patch("provider_costs._compute_cost_from_rates", return_value=(0.002, False)):
+             patch("provider_costs.price_run", return_value=(0.002, "stub@date")):
 
             gemini_wrapper.gemini_exec("prompt", model="gemini-2.5-pro", dispatch_id="d-g004")
 
@@ -115,7 +115,7 @@ class TestGeminiExec:
 
         with patch("gemini_wrapper.subprocess.run", return_value=_make_run_result()), \
              patch("provider_costs.emit_provider_cost") as mock_emit, \
-             patch("provider_costs._compute_cost_from_rates", return_value=(0.00175, False)):
+             patch("provider_costs.price_run", return_value=(0.00175, "stub@date")):
 
             gemini_wrapper.gemini_exec("prompt", model="gemini-2.5-pro", dispatch_id="d-g004")
 
@@ -134,7 +134,7 @@ class TestGeminiExec:
 
         with patch("gemini_wrapper.subprocess.run", return_value=_make_run_result(returncode=1)), \
              patch("provider_costs.emit_provider_cost"), \
-             patch("provider_costs._compute_cost_from_rates", return_value=(None, False)):
+             patch("provider_costs.price_run", return_value=(None, "unavailable:no_price:model")):
 
             with pytest.raises(RuntimeError, match="gemini_exec failed"):
                 gemini_wrapper.gemini_exec("prompt", dispatch_id="d-g005")

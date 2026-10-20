@@ -47,6 +47,7 @@ def _govern_report(
     pr_id: "str | None",
     token_usage: "dict | None",
     cost_usd: "float | None",
+    cost_source: "str | None" = None,
 ) -> None:
     """Emit the unified report via the shared dispatch_govern.govern() step.
 
@@ -99,6 +100,7 @@ def _govern_report(
             "model": model,
             "token_usage": token_usage,
             "cost_usd": cost_usd,
+            "cost_source": cost_source,
         },
         duration_seconds=duration_seconds,
     )
@@ -190,24 +192,26 @@ def _resolve_active_dispatch_file(dispatch_id: str):
 
 def _resolve_token_usage_and_cost(
     dispatch_id: str, sub_result, model: "str | None",
-) -> tuple[dict | None, float | None]:
+) -> tuple[dict | None, float | None, str | None]:
     """Read token_usage from the delivery side-channel, normalize, and compute cost.
 
     Uses .get() (not .pop()) so the entry remains available for the governance
-    receipt emitted by _dispatch_claude in provider_dispatch.py.
+    receipt emitted by _dispatch_claude in provider_dispatch.py. The cost
+    provenance string from ``_compute_cost`` is carried alongside ``cost_usd``
+    so a missing price is never re-recorded as a confirmed $0.
     """
     raw_usage = _dispatch_token_usage.get(dispatch_id, None)
     if raw_usage is None:
         raw_usage = getattr(sub_result, "token_usage", None) if sub_result else None
     if not isinstance(raw_usage, dict) or not raw_usage:
-        return None, None
+        return None, None, ""
 
     class _UsageHolder:
         token_usage = raw_usage
 
     token_usage = _extract_token_usage(_UsageHolder(), "claude")
-    cost_usd = _compute_cost("claude", model or "claude-sonnet-4-6", token_usage)
-    return token_usage, cost_usd
+    cost_usd, cost_source = _compute_cost("claude", model or "claude-sonnet-4-6", token_usage)
+    return token_usage, cost_usd, cost_source
 
 
 def _handle_success(
@@ -246,7 +250,7 @@ def _handle_success(
         commit_hash_after=commit_hash_after,
         model=model,
     )
-    token_usage, cost_usd = _resolve_token_usage_and_cost(dispatch_id, sub_result, model)
+    token_usage, cost_usd, cost_source = _resolve_token_usage_and_cost(dispatch_id, sub_result, model)
 
     # ADR-005: emit cost event BEFORE receipt write. Raises on failure — fail-loud.
     from provider_costs import emit_provider_cost  # noqa: PLC0415
@@ -267,7 +271,7 @@ def _handle_success(
         output_tokens=token_usage.get("output") if token_usage else None,
         cost_usd_estimate=cost_usd,
         dispatch_id=dispatch_id,
-        project_id=_cost_pid,
+        project_id=_cost_pid, cost_source=cost_source,
     )
 
     if _shared_govern_enabled():
@@ -275,7 +279,7 @@ def _handle_success(
             dispatch_id=dispatch_id, terminal_id=terminal_id, instruction=instruction,
             status="done", dispatch_start_ts=dispatch_start_ts, pre_sha=pre_sha,
             model=model, role=role, pr_id=pr_id,
-            token_usage=token_usage, cost_usd=cost_usd,
+            token_usage=token_usage, cost_usd=cost_usd, cost_source=cost_source,
         )
     else:
         # The worker wrote no report of its own: write a contract-valid close-out
@@ -299,7 +303,7 @@ def _handle_success(
         manifest_path=sub_result.manifest_path,
         stuck_event_count=monitor.stuck_count,
         token_usage=token_usage,
-        cost_usd=cost_usd,
+        cost_usd=cost_usd, cost_source=cost_source,
         pr_id=pr_id,
         provider="claude",
         sub_provider="anthropic",
@@ -360,7 +364,7 @@ def _handle_final_failure(
             dispatch_touched_files=sub_result.touched_files,
             manifest_paths=manifest_paths,
         )
-    token_usage, cost_usd = _resolve_token_usage_and_cost(dispatch_id, sub_result, model)
+    token_usage, cost_usd, cost_source = _resolve_token_usage_and_cost(dispatch_id, sub_result, model)
     if _shared_govern_enabled():
         # Genuinely new coverage: pre-wiring, the subprocess lane emitted no unified
         # report at all on the budget-exhausted failure path (only _write_receipt ran).
@@ -370,7 +374,7 @@ def _handle_final_failure(
             dispatch_id=dispatch_id, terminal_id=terminal_id, instruction=instruction,
             status="failed", dispatch_start_ts=dispatch_start_ts, pre_sha=pre_sha,
             model=model, role=role, pr_id=pr_id,
-            token_usage=token_usage, cost_usd=cost_usd,
+            token_usage=token_usage, cost_usd=cost_usd, cost_source=cost_source,
         )
     _sd._write_receipt(
         dispatch_id, terminal_id, "failed",
@@ -382,7 +386,7 @@ def _handle_final_failure(
         manifest_path=sub_result.manifest_path,
         stuck_event_count=monitor.stuck_count,
         token_usage=token_usage,
-        cost_usd=cost_usd,
+        cost_usd=cost_usd, cost_source=cost_source,
         pr_id=pr_id,
         provider="claude",
         sub_provider="anthropic",

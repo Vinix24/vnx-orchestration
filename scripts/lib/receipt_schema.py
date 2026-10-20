@@ -103,6 +103,11 @@ class ReceiptV2:
     report_path: Optional[str] = None
     events_path: Optional[str] = None
     cost_usd: Optional[float] = None
+    # Price provenance (ADR-040): ``<model>@<version-date>`` for a priced run,
+    # ``unavailable:no_price:<model>`` for a missing price, None for a lane that
+    # never priced (subscription, no billable usage). Conditionally stamped —
+    # omitted when falsy so pre-feature receipts stay byte-identical.
+    cost_source: Optional[str] = None
     # Contract identity — forced to the module constants in __post_init__
     # (OI-817), never caller-overridable.
     event_type: str = RECEIPT_V2_EVENT_TYPE
@@ -223,12 +228,12 @@ class ReceiptV2:
             "timestamp": self.timestamp,
         }
         # Conditional stamps — same guards as the pre-PR-B0 emit site:
-        # truthiness for permission_enforcement / mandate_id, is-not-None for
-        # the rest.
-        if self.permission_enforcement:
-            receipt["permission_enforcement"] = self.permission_enforcement
-        if self.mandate_id:
-            receipt["mandate_id"] = self.mandate_id
+        # truthiness for cost_source / permission_enforcement / mandate_id,
+        # is-not-None for the rest.
+        for key in ("cost_source", "permission_enforcement", "mandate_id"):
+            value = getattr(self, key)
+            if value:
+                receipt[key] = value
         if self.final_prompt_path is not None:
             receipt["final_prompt_path"] = self.final_prompt_path
         if self.final_prompt_sha256 is not None:

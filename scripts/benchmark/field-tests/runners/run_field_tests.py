@@ -264,7 +264,7 @@ def _load_prior_scores(
                 composite=float(row["composite"]),
                 verify_evidence=row.get("verify_evidence", ""),
                 judge_reasoning=row.get("judge_reasoning", ""),
-                cost_usd=float(row["cost_usd"]),
+                cost_usd=float(row["cost_usd"]) if row["cost_usd"] else None,  # "" = unknown price
                 wallclock_seconds=float(row["wallclock_seconds"]),
                 dispatch_id=row.get("dispatch_id", ""),
             ))
@@ -338,6 +338,11 @@ def _run_with_retry(lane, task, rep, args, run_judge):
     return last_res
 
 
+def _fmt_cost(cost_usd) -> str:
+    """``$0.0123`` for a known price, ``unknown`` for a null one (never ``$0``)."""
+    return "unknown" if cost_usd is None else f"${cost_usd:.4f}"
+
+
 def _run_cells(cells, args, run_judge) -> tuple[list, list]:
     """Dispatch all cells (claude-serial aware); returns (scores, failures)."""
     scores: list = []
@@ -360,7 +365,7 @@ def _run_cells(cells, args, run_judge) -> tuple[list, list]:
                 scores.append(res["score"])
                 print(
                     f"  ✓ {key} composite={res['score'].composite:.2f} "
-                    f"cost=${res['score'].cost_usd:.4f} wall={res['score'].wallclock_seconds:.1f}s",
+                    f"cost={_fmt_cost(res['score'].cost_usd)} wall={res['score'].wallclock_seconds:.1f}s",
                     file=sys.stderr,
                 )
             except Exception as exc:

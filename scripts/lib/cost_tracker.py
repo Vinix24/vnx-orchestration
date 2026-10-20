@@ -7,40 +7,45 @@ Reads only the last N receipts (default 200) for performance.
 from __future__ import annotations
 
 import json
+import logging
 import os
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List
 
+logger = logging.getLogger(__name__)
 
-def recent_cost_per_hour(
-    workers: int,
-    provider_mix: List[str],
-    window_minutes: int = 60,
-) -> float:
-    """Estimate hourly cost based on recent receipts.
 
-    Reads t0_receipts.ndjson from VNX_STATE_DIR (last ~200 lines), filters by
-    timestamp window and provider, then computes avg cost_usd per dispatch
-    multiplied by estimated dispatches/hour per worker.
+@dataclass(frozen=True)
+class RecentCosts:
+    """Known costs per provider inside the window, plus receipts whose price is unknown."""
 
-    Returns 0.0 if receipt file is absent or empty.
+    costs_by_provider: Dict[str, List[float]]
+    unknown_cost_count: int
+
+
+def recent_costs(window_minutes: int = 60) -> RecentCosts:
+    """Known ``cost_usd`` values per provider from receipts inside the window.
+
+    A ``cost_usd: null`` is an unknown price (ADR-040): it is counted in
+    ``unknown_cost_count`` and kept out of the costs, never read as 0. A
+    receipt without the key carries no cost at all and is not counted.
     """
     receipts_path = _resolve_receipts_path()
     if not receipts_path.exists():
-        return 0.0
+        return RecentCosts({}, 0)
 
     cutoff = datetime.now(tz=timezone.utc) - timedelta(minutes=window_minutes)
 
     costs_by_provider: Dict[str, List[float]] = {}
+    unknown = 0
     for line in _read_last_lines(receipts_path, n=200):
         try:
             r = json.loads(line)
         except json.JSONDecodeError:
             continue
-
-        cost = r.get("cost_usd")
-        if cost is None:
+        if not isinstance(r, dict) or "cost_usd" not in r:
             continue
 
         raw_ts = r.get("timestamp", "")
@@ -52,9 +57,39 @@ def recent_cost_per_hour(
         if ts < cutoff:
             continue
 
+        cost = r["cost_usd"]
+        if cost is None:
+            unknown += 1
+            continue
+
         provider = (r.get("provider") or "claude")
         costs_by_provider.setdefault(provider, []).append(float(cost))
 
+    return RecentCosts(costs_by_provider, unknown)
+
+
+def recent_cost_per_hour(
+    workers: int,
+    provider_mix: List[str],
+    window_minutes: int = 60,
+) -> float:
+    """Estimate hourly cost based on recent receipts.
+
+    Reads t0_receipts.ndjson from VNX_STATE_DIR (last ~200 lines), filters by
+    timestamp window and provider, then computes avg cost_usd per dispatch
+    multiplied by estimated dispatches/hour per worker. Receipts with an
+    unknown price are left out of the average and their number is logged.
+
+    Returns 0.0 if receipt file is absent or empty.
+    """
+    recent = recent_costs(window_minutes)
+    if recent.unknown_cost_count:
+        logger.info(
+            "cost_tracker: %d receipt(s) in the last %d min carry an unknown "
+            "cost_usd (null); left out of the average, not counted as 0",
+            recent.unknown_cost_count, window_minutes,
+        )
+    costs_by_provider = recent.costs_by_provider
     if not costs_by_provider:
         return 0.0
 

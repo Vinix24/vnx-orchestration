@@ -9,6 +9,7 @@ BILLING SAFETY: read-only data loader; no Anthropic SDK, no API calls.
 from __future__ import annotations
 
 import logging
+import math
 import os
 from dataclasses import dataclass, field
 from datetime import date
@@ -20,6 +21,30 @@ import yaml
 log = logging.getLogger(__name__)
 
 _REGISTRY_PATH = Path(__file__).parent / "wave7_models.yaml"
+
+
+@dataclass(frozen=True)
+class PriceVersion:
+    """One dated price version for a model (ADR-040).
+
+    A model's price can move over time; each movement is a distinct, dated
+    version. ``date`` is the measurement/effective date (YYYY-MM-DD). Rates are
+    per million tokens (Mtok). ``off_peak_*`` are only set for providers with a
+    peak/off-peak split (DeepSeek); the split's window definition lives with the
+    pricing logic, not the registry (it is a provider fact, not a per-version
+    fact). ``input_per_mtok``/``output_per_mtok`` are the peak (upper-bound)
+    rates where a split exists, matching the registry's "book the upper bound,
+    never under-report" convention.
+    """
+
+    date: str
+    input_per_mtok: float
+    output_per_mtok: float
+    cache_read_per_mtok: Optional[float] = None
+    cache_write_per_mtok: Optional[float] = None
+    source: str = ""
+    off_peak_input_per_mtok: Optional[float] = None
+    off_peak_output_per_mtok: Optional[float] = None
 
 
 @dataclass
@@ -40,6 +65,16 @@ class ProviderModel:
     # the registry carries no cache-read price: cache-read tokens are then not billed
     # by the cost calculation (unchanged behaviour for every model without it).
     cost_cache_read_per_mtok: Optional[float] = None
+    # Price per Mtok of prompt tokens written to the provider's cache. None means
+    # the registry carries no cache-write price (unchanged behaviour).
+    cost_cache_write_per_mtok: Optional[float] = None
+    # Dated price versions (ADR-040). This is the authoritative price record:
+    # price_run() and alias resolution read it. The flat cost_* fields above are
+    # the "current" projection of the latest version, kept for the pre-existing
+    # read surface (provider_dispatch, cost_loader, the smart router). When the
+    # registry carries price_versions, the flat fields are authored equal to the
+    # latest version and guarded by a drift test.
+    price_versions: List["PriceVersion"] = field(default_factory=list)
 
 
 @dataclass
@@ -124,6 +159,79 @@ def _validate_price_checked_at(model_key: str, price_checked_at: str) -> None:
         ) from e
 
 
+def _validate_rate(value: float, field_name: str, model_key: Optional[str]) -> None:
+    """Reject a NaN, infinite, or negative rate before it becomes a price.
+
+    The advisory fix for ADR-040: ``float(...)`` alone accepts ``nan``,
+    ``inf`` and negatives, which would then flow through ``price_run`` as a
+    fabricated (or silently swallowed) cost. A rate must be finite and
+    nonnegative to be a price at all.
+    """
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(
+            f"model {model_key!r} has a {field_name} rate {value!r} in its "
+            f"price_version: expected a finite, nonnegative number"
+        )
+
+
+def _parse_price_version(data: dict, model_key: Optional[str] = None) -> PriceVersion:
+    """Parse one dated price version entry (ADR-040).
+
+    Fails loud (naming the model) on a malformed date, a missing/NaN rate, or
+    a negative/infinite rate — a price version without a date is unversioned,
+    and a rate that is not a finite nonnegative number is not a price.
+    """
+    date_raw = data.get("date")
+    date_str = str(date_raw) if date_raw is not None else ""
+    if not date_str:
+        raise ValueError(
+            f"model {model_key!r} has a price_version without a 'date' "
+            f"(expected YYYY-MM-DD) — every price version must be dated"
+        )
+    _validate_price_checked_at(
+        model_key or "<unknown model>",
+        date_str,
+    )
+    try:
+        input_per_mtok = float(data["input_per_mtok"])
+        output_per_mtok = float(data["output_per_mtok"])
+    except (KeyError, TypeError, ValueError) as e:
+        raise ValueError(
+            f"model {model_key!r} has a price_version with an invalid rate "
+            f"({e}); expected numeric input_per_mtok/output_per_mtok"
+        ) from e
+    _validate_rate(input_per_mtok, "input_per_mtok", model_key)
+    _validate_rate(output_per_mtok, "output_per_mtok", model_key)
+    cache_read_raw = data.get("cache_read_per_mtok")
+    cache_write_raw = data.get("cache_write_per_mtok")
+    off_peak_in_raw = data.get("off_peak_input_per_mtok")
+    off_peak_out_raw = data.get("off_peak_output_per_mtok")
+
+    def _opt_float(raw, field_name: str) -> Optional[float]:
+        if raw is None:
+            return None
+        try:
+            value = float(raw)
+        except (TypeError, ValueError) as e:
+            raise ValueError(
+                f"model {model_key!r} has an invalid {field_name} "
+                f"{raw!r} in its price_version: {e}"
+            ) from e
+        _validate_rate(value, field_name, model_key)
+        return value
+
+    return PriceVersion(
+        date=date_str,
+        input_per_mtok=input_per_mtok,
+        output_per_mtok=output_per_mtok,
+        cache_read_per_mtok=_opt_float(cache_read_raw, "cache_read_per_mtok"),
+        cache_write_per_mtok=_opt_float(cache_write_raw, "cache_write_per_mtok"),
+        source=str(data.get("source") or ""),
+        off_peak_input_per_mtok=_opt_float(off_peak_in_raw, "off_peak_input_per_mtok"),
+        off_peak_output_per_mtok=_opt_float(off_peak_out_raw, "off_peak_output_per_mtok"),
+    )
+
+
 def _parse_model(data: dict, model_key: Optional[str] = None) -> ProviderModel:
     context_window_raw = data.get("context_window")
     cli_model_arg_raw = data.get("cli_model_arg")
@@ -131,12 +239,20 @@ def _parse_model(data: dict, model_key: Optional[str] = None) -> ProviderModel:
     price_source_raw = data.get("price_source")
     price_checked_at_raw = data.get("price_checked_at")
     cache_read_raw = data.get("cost_cache_read_per_mtok")
+    cache_write_raw = data.get("cost_cache_write_per_mtok")
     price_checked_at = str(price_checked_at_raw) if price_checked_at_raw is not None else ""
     if price_checked_at:
         _validate_price_checked_at(
             model_key or str(data.get("litellm_name") or "<unknown model>"),
             price_checked_at,
         )
+    price_versions = sorted(
+        (
+            _parse_price_version(pv, model_key)
+            for pv in (data.get("price_versions") or [])
+        ),
+        key=lambda pv: pv.date,
+    )
     return ProviderModel(
         litellm_name=str(data["litellm_name"]),
         cost_input_per_mtok=float(data["cost_input_per_mtok"]),
@@ -151,6 +267,8 @@ def _parse_model(data: dict, model_key: Optional[str] = None) -> ProviderModel:
         cli_model_arg=str(cli_model_arg_raw) if cli_model_arg_raw is not None else None,
         dispatch_allowed=bool(dispatch_allowed_raw) if dispatch_allowed_raw is not None else True,
         cost_cache_read_per_mtok=float(cache_read_raw) if cache_read_raw is not None else None,
+        cost_cache_write_per_mtok=float(cache_write_raw) if cache_write_raw is not None else None,
+        price_versions=price_versions,
     )
 
 
@@ -201,6 +319,94 @@ def get_default_model(
     if cfg is None or not cfg.enabled or not cfg.models:
         return None
     return next(iter(cfg.models.values()))
+
+
+# Registry-section-specific model-name prefix a real provider model slug carries
+# but the registry's own keys do not — e.g. Anthropic hands back "claude-opus-5"
+# while wave7_models.yaml's anthropic section keys it "opus-5". Only anthropic
+# needs this today (the same table provider_dispatch used before ADR-040 moved
+# the price resolution here).
+_REGISTRY_KEY_MODEL_PREFIX: Dict[str, str] = {
+    "anthropic": "claude-",
+}
+
+
+def _resolve_model_key(
+    cfg: ProviderConfig,
+    registry_key: str,
+    model: str,
+) -> Optional[str]:
+    """Deterministically resolve a model string to a registry model key.
+
+    Mirrors the three-tier resolution provider_dispatch used for pricing
+    (OI-1355): exact key on the slash-stripped name, then exact key after
+    stripping the section's known name-prefix, then the single longest key that
+    hyphen-bounds-prefixes the stripped name. Returns None on a total miss —
+    a miss is a valid signal (the caller reports unavailable, never fabricates
+    a price).
+    """
+    model_key = model.split("/")[-1] if "/" in model else model
+    if model_key in cfg.models:
+        return model_key
+
+    prefix = _REGISTRY_KEY_MODEL_PREFIX.get(registry_key)
+    stripped = model_key[len(prefix):] if prefix and model_key.startswith(prefix) else model_key
+    if stripped != model_key and stripped in cfg.models:
+        return stripped
+
+    candidates = sorted(
+        (k for k in cfg.models if stripped.startswith(k + "-")),
+        key=len,
+        reverse=True,
+    )
+    if candidates:
+        return candidates[0]
+    return None
+
+
+def resolve_price_versions(
+    registry_key: str,
+    model: str,
+    registry_path: Optional[Path] = None,
+) -> Optional[List["PriceVersion"]]:
+    """Return the dated price versions for a model, or None when it has no price.
+
+    ``registry_key`` is a registry section key (e.g. ``"anthropic"``,
+    ``"deepseek_harness"``), ``model`` any model string the caller carries
+    (bare key, provider-prefixed slug, slash-qualified litellm name). The model
+    is resolved via :func:`_resolve_model_key` and its ``price_versions`` list
+    returned. A model that exists but carries no price (and no price_versions)
+    yields None.
+
+    This is the single resolution point price_run() and alias-resolution tests
+    share, so "every alias of a model resolves to the same price versions" is
+    one place to reason about.
+    """
+    registry = load(registry_path)
+    cfg = registry.get(registry_key)
+    if cfg is None or not cfg.models:
+        return None
+    model_key = _resolve_model_key(cfg, registry_key, model)
+    if model_key is None:
+        return None
+    entry = cfg.models[model_key]
+    versions = entry.price_versions
+    if versions:
+        return versions
+    # Backward-compat: a fixture/entry without price_versions still carries a
+    # flat price — project it as a single version so price_run sees one path.
+    if entry.cost_input_per_mtok is None:
+        return None
+    return [
+        PriceVersion(
+            date=entry.price_checked_at or "",
+            input_per_mtok=entry.cost_input_per_mtok,
+            output_per_mtok=entry.cost_output_per_mtok,
+            cache_read_per_mtok=entry.cost_cache_read_per_mtok,
+            cache_write_per_mtok=entry.cost_cache_write_per_mtok,
+            source=entry.price_source,
+        )
+    ]
 
 
 # Written where a seat or roster entry means "whatever openai.default_model says":

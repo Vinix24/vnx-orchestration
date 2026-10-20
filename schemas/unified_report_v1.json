@@ -102,9 +102,14 @@
       }
     },
     "cost_usd": {
-      "description": "Estimated USD cost for the dispatch.",
-      "type": "number",
+      "description": "Estimated USD cost for the dispatch. null means the price is unknown and is valid only together with a cost_source that starts with 'unavailable:' (see allOf below); an unknown price is never written as 0.",
+      "type": ["number", "null"],
       "minimum": 0
+    },
+    "cost_source": {
+      "description": "Price provenance (ADR-040): '<model>@<version-date>' for a priced run, 'unavailable:<reason>' when the price is unknown.",
+      "type": "string",
+      "minLength": 1
     },
     "route_decision": {
       "description": "Routing metadata captured at dispatch time (provider/model selection rationale).",
@@ -130,5 +135,28 @@
         }
       }
     }
-  }
+  },
+  "allOf": [
+    {
+      "description": "An unknown price (cost_usd null) must name why: cost_source is required and starts with 'unavailable:'.",
+      "if": {
+        "required": ["cost_usd"],
+        "properties": {"cost_usd": {"type": "null"}}
+      },
+      "then": {
+        "required": ["cost_source"],
+        "properties": {"cost_source": {"pattern": "^unavailable:"}}
+      }
+    },
+    {
+      "description": "An 'unavailable:' source means the price is unknown, so cost_usd is null and never a number such as 0.",
+      "if": {
+        "required": ["cost_source"],
+        "properties": {"cost_source": {"type": "string", "pattern": "^unavailable:"}}
+      },
+      "then": {
+        "properties": {"cost_usd": {"type": "null"}}
+      }
+    }
+  ]
 }

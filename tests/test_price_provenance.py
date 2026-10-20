@@ -53,7 +53,11 @@ _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # Advanced 2026-08-18 -> 2026-08-29: tier-mid (claude/sonnet-5) was re-checked
 # 2026-08-19 and scored -1 against the old reference. Re-measured at the new date,
 # the oldest rung is 29 days; nothing is stale.
-_REFERENCE_DATE = date(2026, 8, 29)
+#
+# Advanced 2026-08-29 -> 2026-09-14: the DeepSeek tier prices (deepseek-v4-pro)
+# were re-measured 2026-09-14 (ADR-040 price-version migration) and carry that
+# date; the reference advances with them so the newest rung is not future-dated.
+_REFERENCE_DATE = date(2026, 9, 14)
 _MAX_PRICE_AGE_DAYS = 90
 
 
@@ -230,7 +234,9 @@ class TestMalformedPriceCheckedAtFailsLoud:
 #: Every price in the registry, pinned. (provider, model) -> (input, output) per MTok.
 #: Changing a price means editing this table in the same commit, with a source.
 _PINNED_PRICES: dict[tuple[str, str], tuple[float, float]] = {
-    ("anthropic", "opus"): (15.0, 75.0),
+    # opus is the alias of opus-4-8 (identical litellm_name); ADR-040 resolved the
+    # long-standing conflict where this key carried the retired Opus 4.1 price.
+    ("anthropic", "opus"): (5.0, 25.0),
     ("anthropic", "opus-4-8"): (5.0, 25.0),
     ("anthropic", "opus-4-6"): (5.0, 25.0),
     # dispatch-20260929-registry-sonnet-5-5: the alias follows claude -p, which
@@ -254,13 +260,17 @@ _PINNED_PRICES: dict[tuple[str, str], tuple[float, float]] = {
     # here). Codex lane runs on a ChatGPT login — bookkeeping, not billed.
     ("openai", "gpt-6-astra"): (10.0, 50.0),
     ("google", "gemini-2.5-pro"): (1.25, 5.0),
-    ("deepseek", "deepseek-v4-pro"): (0.435, 0.87),
+    # ADR-040: DeepSeek peak tariffs re-measured 2026-09-14 (the 0.435/0.87 pair
+    # was a superseded discounted rate). Off-peak (dal) is half and carried on the
+    # price version, not in the flat peak pair pinned here.
+    ("deepseek", "deepseek-v4-pro"): (1.32, 3.96),
     ("deepseek", "deepseek-v4-flash"): (0.14, 0.28),
-    ("deepseek_harness", "deepseek-v4-pro"): (0.435, 0.87),
+    ("deepseek_harness", "deepseek-v4-pro"): (1.32, 3.96),
     ("deepseek_harness", "deepseek-v4-flash"): (0.14, 0.28),
-    ("deepseek_harness", "deepseek-v4-pro-default"): (0.435, 0.87),
-    # 2026-09-28: V4.1-Flash under its real name, peak tariff from
-    # https://api-docs.deepseek.com/quick_start/pricing (cache-miss input 0.30).
+    ("deepseek_harness", "deepseek-v4-pro-default"): (1.32, 3.96),
+    # 2026-09-14: V4.1-Flash under its real name, peak tariff measured
+    # (~/.claude/rules/provider-constraints.md); cache-miss input 0.30, cache-read
+    # 0.006 from https://api-docs.deepseek.com/quick_start/pricing.
     ("deepseek_harness", "deepseek-flash"): (0.30, 1.20),
     ("moonshot", "kimi-k2-0905-default"): (0.6, 2.5),
     ("moonshot", "kimi-k2-6"): (0.95, 4.0),
@@ -276,17 +286,13 @@ _PINNED_PRICES: dict[tuple[str, str], tuple[float, float]] = {
 
 #: Models whose price_source starts with "unverified" — a self-declared guess.
 _UNVERIFIED: set[tuple[str, str]] = {
-    ("anthropic", "opus"),
     ("anthropic", "haiku"),
     ("anthropic", "opus-5"),
     ("anthropic", "fable-5"),
     ("openai", "gpt-5.4"),
     ("google", "gemini-2.5-pro"),
-    ("deepseek", "deepseek-v4-pro"),
     ("deepseek", "deepseek-v4-flash"),
-    ("deepseek_harness", "deepseek-v4-pro"),
     ("deepseek_harness", "deepseek-v4-flash"),
-    ("deepseek_harness", "deepseek-v4-pro-default"),
     ("moonshot", "kimi-k2-0905-default"),
     ("moonshot", "kimi-k2-6"),
     ("local_gemma", "gemma-4b-local"),
@@ -297,6 +303,7 @@ _UNVERIFIED: set[tuple[str, str]] = {
 
 #: Models that cite a real source.
 _VERIFIED: set[tuple[str, str]] = {
+    ("anthropic", "opus"),
     ("anthropic", "opus-4-8"),
     ("anthropic", "opus-4-6"),
     ("anthropic", "sonnet"),
@@ -309,6 +316,9 @@ _VERIFIED: set[tuple[str, str]] = {
     ("zai", "glm-5.2"),
     ("zai", "glm-5.3"),
     ("zai", "glm-5.3-flash"),
+    ("deepseek", "deepseek-v4-pro"),
+    ("deepseek_harness", "deepseek-v4-pro"),
+    ("deepseek_harness", "deepseek-v4-pro-default"),
     ("deepseek_harness", "deepseek-flash"),
 }
 
@@ -373,6 +383,36 @@ class TestPriceProvenanceSplitIsPinned:
     def test_the_split_covers_every_model(self):
         assert _UNVERIFIED | _VERIFIED == set(_PINNED_PRICES)
         assert not (_UNVERIFIED & _VERIFIED)
+
+
+class TestFlatPriceMatchesLatestVersion:
+    """ADR-040: the flat cost fields are a projection of the latest price version.
+
+    Keeping both surfaces is a deliberate read path for raw YAML consumers, so
+    drift between them is a bug this guard catches at load — never a silent
+    disagreement over which number a caller pays.
+    """
+
+    def test_every_model_flat_pair_equals_latest_version(self):
+        registry = _load_real_registry()
+        drifted = []
+        for provider_key, cfg in registry.items():
+            for model_key, entry in cfg.models.items():
+                if not entry.price_versions:
+                    continue
+                latest = entry.price_versions[-1]
+                if (
+                    entry.cost_input_per_mtok != latest.input_per_mtok
+                    or entry.cost_output_per_mtok != latest.output_per_mtok
+                    or (entry.cost_cache_read_per_mtok or None) != latest.cache_read_per_mtok
+                    or (entry.cost_cache_write_per_mtok or None) != latest.cache_write_per_mtok
+                ):
+                    drifted.append(f"{provider_key}/{model_key}")
+        assert not drifted, (
+            "flat cost fields disagree with the latest price version:\n  "
+            + "\n  ".join(drifted)
+            + "\n\nA price_versions change must move the flat pair with it."
+        )
 
 
 # ---------------------------------------------------------------------------

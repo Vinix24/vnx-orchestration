@@ -56,7 +56,7 @@ class TestCodexExec:
 
         with patch("codex_wrapper.subprocess.run", return_value=_make_run_result()) as mock_run, \
              patch("provider_costs.emit_provider_cost") as mock_emit, \
-             patch("provider_costs._compute_cost_from_rates", return_value=(0.0001, False)):
+             patch("provider_costs.price_run", return_value=(0.0001, "stub@date")):
 
             codex_wrapper.codex_exec("hello world", model="gpt-5.5", dispatch_id="d-001")
 
@@ -74,7 +74,7 @@ class TestCodexExec:
 
         with patch("codex_wrapper.subprocess.run", return_value=_make_run_result(stdout=expected_stdout)), \
              patch("provider_costs.emit_provider_cost"), \
-             patch("provider_costs._compute_cost_from_rates", return_value=(0.0, False)):
+             patch("provider_costs.price_run", return_value=(0.0, "stub@date")):
 
             result = codex_wrapper.codex_exec("test prompt", dispatch_id="d-002")
 
@@ -85,7 +85,7 @@ class TestCodexExec:
         # the env fallback now lives in emit_provider_cost (best-effort), not here.
         with patch("codex_wrapper.subprocess.run", return_value=_make_run_result(stdout=_CODEX_NDJSON_NO_TOKENS)), \
              patch("provider_costs.emit_provider_cost") as mock_emit, \
-             patch("provider_costs._compute_cost_from_rates", return_value=(0.001, False)):
+             patch("provider_costs.price_run", return_value=(0.001, "stub@date")):
 
             codex_wrapper.codex_exec(
                 "test prompt", model="gpt-5.5", dispatch_id="d-003", project_id="test-proj"
@@ -110,7 +110,7 @@ class TestCodexExec:
 
         with patch("codex_wrapper.subprocess.run", return_value=_make_run_result(returncode=1)), \
              patch("provider_costs.emit_provider_cost"), \
-             patch("provider_costs._compute_cost_from_rates", return_value=(None, False)):
+             patch("provider_costs.price_run", return_value=(None, "unavailable:no_price:model")):
 
             with pytest.raises(RuntimeError, match="codex_exec failed"):
                 codex_wrapper.codex_exec("test prompt", dispatch_id="d-004")

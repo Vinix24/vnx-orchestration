@@ -454,6 +454,27 @@ def _report_declares_failure(body: str) -> bool:
     return bool(status) and status.lower() in _DECLARED_FAILURE_STATUSES
 
 
+def _govern_cost_fields(receipt_data: dict) -> dict:
+    """The ``cost_usd`` / ``cost_source`` frontmatter pair for the govern step.
+
+    An unavailable price from the lane (``cost_usd`` None next to an
+    ``unavailable:`` source, ADR-040) is written as null with its source, never
+    as 0.0. A known cost keeps its number and source. A receipt that carries no
+    price at all keeps the govern step's long-standing 0.0.
+    """
+    # Lazy import: unified_report_schema pulls in jsonschema, which this module
+    # does not need at import time.
+    from unified_report_schema import is_unavailable_cost_source, report_cost_fields
+
+    cost_usd = receipt_data.get("cost_usd")
+    cost_source = receipt_data.get("cost_source")
+    if cost_usd is None and is_unavailable_cost_source(cost_source):
+        return report_cost_fields(None, cost_source)
+    if cost_usd is None:
+        return {"cost_usd": 0.0}
+    return report_cost_fields(float(cost_usd), cost_source)
+
+
 def govern(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome:
     """Produce the final unified report for a dispatch, stamped with contract metadata.
 
@@ -842,7 +863,7 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
             _raw_token.get("cache_read") or _raw_token.get("cache_hit") or 0
         ),
     }
-    _cost_usd = float(receipt_data.get("cost_usd") or 0.0)
+    _cost_fields = _govern_cost_fields(receipt_data)
     # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): resolve from the
     # spec first, then the door's env vars (the tmux pane inherits them).
     _parent_dispatch = spec.parent_dispatch or os.environ.get("VNX_PARENT_DISPATCH") or None
@@ -867,7 +888,7 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
         "duration_seconds": float(raw.duration_seconds),
         "exit_code": _exit_code,
         "token_usage": _token_usage,
-        "cost_usd": _cost_usd,
+        **_cost_fields,
         "route_decision": {
             "strategy": "synthesized",
             "selected_provider": "claude",
