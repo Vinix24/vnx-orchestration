@@ -2100,8 +2100,14 @@ def _work_ref_branch(work_ref: str) -> str:
     return branch
 
 
-def _capped_prs_on_branch(state_dir: Path, branch: str) -> "list":
-    """The B3 cap of every PR whose ledger lines name ``branch`` and that is at the cap."""
+def _capped_prs_on_branch(state_dir: Path, branch: str, dispatch_id: str = "") -> "list":
+    """The B3 cap of every PR whose ledger lines name ``branch`` and that is at the cap.
+
+    A PR whose extra round a tiebreaker's ``verkleinen`` granted to
+    ``dispatch_id`` (R2a), and that is not used yet, is left out: that dispatch
+    carries out the intervention the round is for.
+    """
+    import review_cap_verdicts
     import review_rounds
 
     review_gates = state_dir / "review_gates"
@@ -2109,7 +2115,11 @@ def _capped_prs_on_branch(state_dir: Path, branch: str) -> "list":
     project_id = review_rounds.store_project_id(review_gates)
     prs = sorted({line.pr_number for line in ledger.lines if line.branch == branch and line.project_id == project_id})
     caps = [review_rounds.cap_state(ledger.for_pr(project_id, pr), pr) for pr in prs]
-    return [cap for cap in caps if cap.capped]
+    return [
+        cap for cap in caps if cap.capped and not review_cap_verdicts.round_open_for(
+            state_dir, cap, dispatch_id, since=ledger.since(project_id, cap.pr_number),
+        )
+    ]
 
 
 def _book_b3_override_records(
@@ -2201,7 +2211,7 @@ def _check_b3_cap_verdict(spec: DispatchSpec, *, state_dir: Path) -> Optional[Co
     if not work_ref or not _spec_is_writing(spec):
         return None
     try:
-        capped = _capped_prs_on_branch(state_dir, _work_ref_branch(work_ref))
+        capped = _capped_prs_on_branch(state_dir, _work_ref_branch(work_ref), spec.dispatch_id)
     except review_rounds.RoundLedgerError as exc:
         return ConstraintVerdict(code="b3-ledger-unreadable", severity="warn", message=f"B3 early warning not measured: {exc}")
     if not capped:

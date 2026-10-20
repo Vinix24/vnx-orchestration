@@ -374,11 +374,14 @@ class _PrRounds:
     PR (it names the way out); ``history_missing`` the refusal text for a PR
     that is not opened in the ledger while any earlier review of it is found;
     ``lines`` are the PR's verdicts in order, and ``cap`` the B3 count over its
-    codex seat (``review_rounds.cap_state``).
+    codex seat (``review_rounds.cap_state``). ``state_dir`` is the store the
+    ledger lives in, where the tiebreaker's verdicts are read (R2a), and
+    ``since`` the PR's count boundary (``Ledger.since``).
     """
 
     def __init__(
         self, pr_number: int, lines: Iterable[Any] = (), unreadable: str = "", history_missing: str = "",
+        *, state_dir: Optional[Path] = None, since: str = "",
     ) -> None:
         import review_rounds
 
@@ -387,6 +390,8 @@ class _PrRounds:
         self.unreadable = unreadable
         self.history_missing = history_missing
         self.cap = review_rounds.cap_state(self.lines, pr_number)
+        self.state_dir = state_dir
+        self.since = since
 
     @classmethod
     def read(cls, review_gates_dir: Path, pr_number: int) -> "_PrRounds":
@@ -418,7 +423,20 @@ class _PrRounds:
                 review_rounds.open_pr(path, project_id, pr_number, basis=review_rounds.BASIS_NEW, evidence=0)
         except review_rounds.RoundLedgerError as exc:
             return cls(pr_number, unreadable=str(exc))
-        return cls(pr_number, ledger.for_pr(project_id, pr_number))
+        return cls(
+            pr_number, ledger.for_pr(project_id, pr_number),
+            state_dir=Path(review_gates_dir).parent, since=ledger.since(project_id, pr_number),
+        )
+
+    def grant_on(self, head_sha: str) -> Optional[Any]:
+        """The extra round a tiebreaker granted on this PR's cap, qualified for ``head_sha`` (R2a)."""
+        import review_cap_verdicts
+
+        if self.state_dir is None or not self.cap.capped:
+            return None
+        return review_cap_verdicts.grant_or_none(
+            self.state_dir, self.cap, self.lines, head_sha=head_sha, since=self.since,
+        )
 
     def line_on_head(self, seat: str, head: _PrHead) -> Optional[Any]:
         """The verdict ``seat`` already has on the round's head; looks the head up only when there are lines."""
@@ -1689,10 +1707,12 @@ class GateRequestHandlerMixin:
           with a verdict, in any seat (:meth:`_standing_round_payload`);
         - the codex seat of a PR at the B3 cap, on every head, unless a
           tiebreaker granted the round (``review_rounds.round_granted_past_cap``,
-          R2) or ``override_b3`` carries a reason. An applied override is put on
-          ``seat_fields``, so it travels on the request into the verdict, the
-          ledger line and the receipt.
+          R2a: a ``verkleinen`` verdict and a head with a commit of its
+          dispatch) or ``override_b3`` carries a reason. An applied override is
+          put on ``seat_fields``, so it travels on the request into the verdict,
+          the ledger line and the receipt.
         """
+        import review_cap_verdicts
         import review_rounds
 
         seat = str(seat_fields.get("seat") or "")
@@ -1715,7 +1735,8 @@ class GateRequestHandlerMixin:
         cap = rounds.cap
         if seat != review_rounds.CODEX_SEAT or not cap.capped:
             return None
-        if review_rounds.round_granted_past_cap(cap, head_sha=head.sha()):
+        grant = rounds.grant_on(head.sha())
+        if review_rounds.round_granted_past_cap(cap, head_sha=head.sha(), grant=grant, lines=rounds.lines):
             return None
         if override_b3.strip():
             seat_fields["override_b3"] = review_rounds.override_record(override_b3.strip(), cap)
@@ -1725,6 +1746,7 @@ class GateRequestHandlerMixin:
             )
             return None
         detail = review_rounds.cap_refusal_text(cap, where=f"codex-seat run refused for PR #{pr_number}")
+        detail = " ".join(part for part in (detail, review_cap_verdicts.grant_note(grant, rounds.lines, head.sha())) if part)
         logger.warning("gate_request_handler: %s", detail)
         return _round_refused_payload(
             seat, pr_number=pr_number, branch=branch, head_sha=head.sha(),
@@ -1760,6 +1782,10 @@ class GateRequestHandlerMixin:
             payload.update(seat_fields)
             payload.update({"redispatch_refused": detail, "round_refusal": review_rounds.REFUSED_VERDICT_ON_HEAD})
             return payload
+        detail += (
+            ". Its result record does not carry this verdict (an interrupted publication, state contract "
+            f"rule 2): only the operator releases the head, with `{review_rounds.open_command(pr_number)}`"
+        )
         return _round_refused_payload(
             line.reviewer, pr_number=pr_number, branch=branch, head_sha=line.head_sha,
             reason=review_rounds.REFUSED_VERDICT_ON_HEAD, detail=detail,

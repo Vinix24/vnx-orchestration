@@ -26,14 +26,29 @@ Exit codes:
   1  opened, but the receipt could not be written: the ledger line stands
   2  bad input, --data-dir and VNX_STATE_DIR name two ledgers, or the ledger could not be read or written
 
+``rounds open`` on a PR that is already opened writes a second line in one
+case only: the release of an interrupted publication (state contract rule 2,
+R2a). A verdict reached the ledger and its result record did not; the gate
+refuses every new run on that head until this line. It is a new boundary: the
+cap starts at zero again from here, as for any attested opening.
+
 ``rounds show --pr N`` lists a PR's ledger: its ``opened`` line, its counted
 verdicts, and every build-door ``--override-b3`` (``override`` line) recorded
 against it.
+
+``cap-verdict --pr N --for-dispatch <id>`` asks the tiebreaker at the B3 cap
+(R2a, ADR-041) for the next step and records it in ``review_cap_verdicts``: one
+outcome, never a findings list. ``verkleinen`` grants one extra codex-seat
+round to the dispatch ``--for-dispatch`` names. A verdict that already stands
+is shown, and no model is asked again. Exit 0 with a verdict (also one R2a
+cannot carry out, ``outcome_unavailable_in_r2a``: the cap stays closed), 2 when
+nothing can be decided.
 
 Usage:
   python3 scripts/review_rounds_cli.py rounds open --pr 2089 --reason "reviewed before R1: B3.1 in round 1, operator merged"
   python3 scripts/review_rounds_cli.py rounds open --pr 2089 --reason "..." --data-dir /path/to/.vnx-data --json
   python3 scripts/review_rounds_cli.py rounds show --pr 2089 [--data-dir /path/to/.vnx-data] [--json]
+  python3 scripts/review_rounds_cli.py cap-verdict --pr 2089 --for-dispatch 20261020-fix-x [--json]
 """
 from __future__ import annotations
 
@@ -54,6 +69,7 @@ EXIT_RECEIPT_FAILED = 1
 EXIT_ERROR = 2
 
 RECEIPT_EVENT = "review_round_opened"
+CAP_VERDICT_EVENT = "review_cap_verdict"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -70,6 +86,11 @@ def _build_parser() -> argparse.ArgumentParser:
     show.add_argument("--pr", type=int, required=True, help="GitHub PR number")
     show.add_argument("--data-dir", default=None, help="the project's .vnx-data (default: this project's)")
     show.add_argument("--json", action="store_true", help="machine-readable output")
+    verdict = sub.add_parser("cap-verdict", help="the tiebreaker at the B3 cap: one outcome for a capped PR")
+    verdict.add_argument("--pr", type=int, required=True, help="GitHub PR number")
+    verdict.add_argument("--for-dispatch", default="", help="the dispatch that carries out a verkleinen")
+    verdict.add_argument("--data-dir", default=None, help="the project's .vnx-data (default: this project's)")
+    verdict.add_argument("--json", action="store_true", help="machine-readable output")
     return parser
 
 
@@ -81,7 +102,7 @@ def _data_dir(explicit: Optional[str]) -> Path:
     return Path(ensure_env()["VNX_DATA_DIR"])
 
 
-def _emit_receipt(state_dir: Path, line, *, ledger: Path, evidence) -> None:
+def _emit_receipt(state_dir: Path, line, *, ledger: Path, evidence, released: bool = False) -> None:
     """One ``review_round_opened`` receipt through the receipt API, into this store's receipt ledger."""
     from governance_receipts import emit_governance_receipt
     from review_rounds import RECEIPTS_NAME
@@ -90,8 +111,62 @@ def _emit_receipt(state_dir: Path, line, *, ledger: Path, evidence) -> None:
         RECEIPT_EVENT, receipt_kind="state_mutation", receipts_file=str(state_dir / RECEIPTS_NAME),
         pr_number=line.pr_number, basis=line.basis, actor=line.actor, reason=line.reason,
         ledger=str(ledger), evidence=list(evidence), opened_at=line.recorded_at,
+        **({"released": True} if released else {}),
         **({"project_id": line.project_id} if line.project_id else {}),
     )
+
+
+def _state_dir(args, command: str) -> Optional[Path]:
+    import review_rounds
+
+    try:
+        return review_rounds.store_state_dir(_data_dir(args.data_dir) if args.data_dir else None)
+    except review_rounds.StoreConflict as exc:
+        print(f"vnx review {command}: refused: {exc}", file=sys.stderr)
+        return None
+
+
+def _cap_verdict(args) -> int:
+    """``cap-verdict``: the tiebreaker's verdict on a capped PR, recorded once; one receipt for a new one."""
+    import review_cap_tiebreaker
+    import review_cap_verdicts
+    from governance_receipts import AppendReceiptError, emit_governance_receipt
+    from review_rounds import RECEIPTS_NAME
+
+    if args.pr <= 0:
+        print("vnx review cap-verdict: --pr must be a positive PR number", file=sys.stderr)
+        return EXIT_ERROR
+    state_dir = _state_dir(args, "cap-verdict")
+    if state_dir is None:
+        return EXIT_ERROR
+    try:
+        decision = review_cap_tiebreaker.decide(
+            state_dir, args.pr, for_dispatch=args.for_dispatch.strip(), data_dir=str(_data_dir(args.data_dir)),
+        )
+    except (review_cap_tiebreaker.CapTiebreakerError, review_cap_tiebreaker.TiebreakerParseError,
+            review_cap_tiebreaker.TiebreakerNoAnswerError, review_cap_verdicts.CapVerdictError,
+            review_cap_verdicts.CapVerdictRefused) as exc:
+        print(f"vnx review cap-verdict: no verdict recorded for PR #{args.pr}: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    verdict = decision.verdict
+    if decision.status == "recorded":
+        try:
+            emit_governance_receipt(
+                CAP_VERDICT_EVENT, receipt_kind="state_mutation", receipts_file=str(state_dir / RECEIPTS_NAME),
+                **verdict.to_dict(),
+            )
+        except (AppendReceiptError, OSError, ValueError) as exc:
+            print(f"vnx review cap-verdict: the verdict stands, the receipt was not written: {exc}", file=sys.stderr)
+    if args.json:
+        print(json.dumps({"status": decision.status, **verdict.to_dict()}, indent=2))
+        return EXIT_OK
+    granted = f", one extra codex-seat round for dispatch {verdict.granted_dispatch_id}: {verdict.intervention}"
+    print(
+        f"PR #{args.pr} {decision.status} {verdict.verdict_id}: {verdict.cap_rule} -> {verdict.outcome}"
+        + (granted if verdict.outcome == review_cap_verdicts.VERKLEINEN else
+           f" (chosen {verdict.chosen_outcome}; the cap stays closed, defer with an OI by hand)")
+    )
+    return EXIT_OK
 
 
 def _show(args) -> int:
@@ -151,6 +226,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     from governance_receipts import AppendReceiptError
 
     args = _build_parser().parse_args(argv)
+    if args.noun == "cap-verdict":
+        return _cap_verdict(args)
     if args.verb == "show":
         return _show(args)
     reason = args.reason.strip()
@@ -169,7 +246,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         evidence = review_rounds.prior_evidence(data_dir, args.pr, state_dir=state_dir)
         status, line = review_rounds.open_pr(
             ledger, review_rounds.store_project_id(review_gates), args.pr, basis=review_rounds.BASIS_ATTESTED,
-            evidence=len(evidence), actor=getpass.getuser(), reason=reason,
+            evidence=len(evidence), actor=getpass.getuser(), reason=reason, results_dir=review_gates / "results",
         )
     except review_rounds.RoundLedgerError as exc:
         print(f"vnx review rounds open: refused: {exc}", file=sys.stderr)
@@ -181,7 +258,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
         return EXIT_OK
     try:
-        _emit_receipt(state_dir, line, ledger=ledger, evidence=evidence)
+        _emit_receipt(state_dir, line, ledger=ledger, evidence=evidence, released=status == "released")
     except (AppendReceiptError, OSError, ValueError) as exc:
         print(
             f"vnx review rounds open: PR #{args.pr} is opened and the ledger line stands, but the "
@@ -192,7 +269,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(json.dumps({**line.to_dict(), "ledger": str(ledger), "evidence": list(evidence)}, indent=2))
     else:
         print(
-            f"PR #{args.pr} opened in {ledger} (basis attested, actor {line.actor}): the cap starts at zero here; "
+            f"PR #{args.pr} {status} in {ledger} (basis attested, actor {line.actor}): the cap starts at zero here; "
             f"{len(evidence)} earlier-review entr{'y' if len(evidence) == 1 else 'ies'} not counted"
             + (f", first: {evidence[0]}" if evidence else "")
         )

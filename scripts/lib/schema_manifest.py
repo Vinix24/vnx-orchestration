@@ -9,7 +9,7 @@ v30 but is physically v27) SKIPS every migration and never trips them — leavin
 migrations silently un-applied (synthesis E-F, repro-confirmed).
 
 This module replaces that fragile, scattered mechanism with ONE declarative
-INVARIANT MANIFEST per schema version (v22-v34) plus a single reconciler engine:
+INVARIANT MANIFEST per schema version (v22-v35) plus a single reconciler engine:
 
   * The manifest declares, per version, the FULL expected shape: required tables;
     columns (name + affinity + nullability); PK column ordinals; composite UNIQUE
@@ -555,6 +555,30 @@ def _runtime_tables_v34() -> Tuple[TableInvariant, ...]:
     return (*family, *column_tables, *ux_tables)
 
 
+# v35 (R2a, ADR-041, schemas/migrations/0035_review_cap_verdicts.sql): the
+# tiebreaker's verdicts at the B3 review cap, keyed per ADR-007 by
+# (project_id, pr_number, verdict_id), with one verkleinen per PR enforced by a
+# partial UNIQUE. 0035 creates the table, so it is required at v35.
+def _review_cap_verdicts() -> TableInvariant:
+    return TableInvariant(
+        name="review_cap_verdicts",
+        columns=_cols(
+            ("project_id", "TEXT", True), ("pr_number", "INTEGER", True),
+            ("verdict_id", "TEXT", True), ("head_sha", "TEXT", True),
+            ("cap_rule", "TEXT", True), ("outcome", "TEXT", True),
+            ("chosen_outcome", "TEXT", True), ("intervention", "TEXT", True),
+            ("oi_ids", "TEXT", True), ("granted_dispatch_id", "TEXT", True),
+            ("tiebreaker_model", "TEXT", True), ("rationale", "TEXT", True),
+            ("created_at", "TEXT", True),
+        ),
+        pk=("project_id", "pr_number", "verdict_id"),
+        indexes=(IndexInvariant(
+            "ux_review_cap_verdicts_one_verkleinen", ("project_id", "pr_number"),
+            unique=True, partial=True, where="outcome = 'verkleinen'",
+        ),),
+    )
+
+
 def _build_manifest() -> Dict[int, VersionManifest]:
     base_children_v24 = (_tph_v24(), _td_v24())
     return {
@@ -607,6 +631,12 @@ def _build_manifest() -> Dict[int, VersionManifest]:
             _tracks_composite(_TRACKS_COLS_V33, _TRACKS_IDX_V29),
             *base_children_v24, _toi_composite(_TOI_COLS_V30, _OI_BLOCKER_IDX),
             *_runtime_tables_v34(), _track_pr_delivery()),
+            (_DELIVERABLES_VIEW,)),
+        35: VersionManifest(35, (
+            _dispatches(_DISPATCH_COLS_V27),
+            _tracks_composite(_TRACKS_COLS_V33, _TRACKS_IDX_V29),
+            *base_children_v24, _toi_composite(_TOI_COLS_V30, _OI_BLOCKER_IDX),
+            *_runtime_tables_v34(), _track_pr_delivery(), _review_cap_verdicts()),
             (_DELIVERABLES_VIEW,)),
     }
 

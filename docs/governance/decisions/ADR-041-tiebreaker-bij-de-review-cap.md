@@ -1,0 +1,72 @@
+# ADR-041 - De tiebreaker bij de review-cap: één registry-model kiest één uitkomst
+
+**Status:** Accepted (dispatch 20261020-rs-r2a-tiebreaker, track review-stopregel-en-lichte-stoelen, deliverable R2, PR R2a)
+**Date:** 2026-10-20
+**Decided by:** operator via de plan-gate van 18-10 (tiebreaker START, ronde 3 en ronde 5), uitgewerkt door de bouwer van R2a.
+**Cross-refs:** plan `claudedocs/specs/review-stopregel-en-lichte-stoelen/plan.md` (sectie 2, "Gate-uitslag", "Risks"); ADR-007 (samengestelde sleutels over `project_id`); ADR-027 (getekende attestaties); ADR-036 (modelidentiteit uit de registry); R1 in `scripts/lib/review_rounds.py`; OI-2143.
+
+## Context
+
+R1 telt de rondes van de codex-stoel per kop in een eigen grootboek (`review_gates/rounds.ndjson`) en zet een PR op de cap zodra B3.1 of B3.2 geldt. Vanaf daar weigert de gate elke codex-run en telt de merge-deur geen PASS van de codex-stoel meer. Alleen `--override-b3` komt erlangs.
+
+Dat stopt de lus, maar het geeft geen volgende stap. De T0 staat dan tussen een override en een admin-merge door de operator. Gemeten op #2089: B3.1 viel in ronde 1 en de PR eindigde in een admin-merge. Op #2080 viel B3.2 na ronde 5, twee runs vóór de PASS.
+
+De plan-gate van 18-10 liet R2 door met twee bindende voorwaarden. Eén: zonder besluit over het tekenmechanisme blijft `mergen-met-OI` dicht. Twee: vóór de bouw komt er een toestandscontract voor cap en gate, ook in deze ADR.
+
+## Besluit
+
+### 1. Twee caps, twee betekenissen, elk twee uitkomsten
+
+| Cap | Betekenis (DISPATCH_RULES §3) | Uitkomsten |
+|---|---|---|
+| B3.1 | Een ontwerpprobleem: drie of meer blockers in één ronde | `verkleinen` of `terug-naar-plan` |
+| B3.2 | Geen convergentie: de laatste ronde heeft een blocker en de som is zes of meer | `verkleinen` of `mergen-met-OI` |
+
+R2a voert alleen `verkleinen` uit. Kiest het model de andere uitkomst, dan wordt die vastgelegd als `outcome_unavailable_in_r2a`, met de keuze van het model in `chosen_outcome`. De cap blijft dan dicht en de T0 handelt het af zoals nu: uitstellen met een OI. `terug-naar-plan` komt met R2b, `mergen-met-OI` met R2c.
+
+### 2. Eén model uit de registry beslist, nooit een bevindingenlijst
+
+De cap bestaat omdat de bevindingen niet convergeerden. Een tiebreaker die weer bevindingen geeft, start de lus opnieuw die de cap net stopte. Daarom geeft de tiebreaker precies één uitkomst en bij `verkleinen` precies één benoemde ingreep.
+
+- **Invoer:** de cap-regel, de blockers per kop uit het rondegrootboek en de diff-stat van de PR. Niet de tekst van de bevindingen.
+- **Uitvoer:** één blok `vnx-review-cap-tiebreak` met `outcome`, `intervention` en `rationale`. Een bevindingenlijst, twee ingrepen, een uitkomst die de regel niet toelaat of `verkleinen` zonder ingreep faalt luid (`TiebreakerParseError`). Een lane zonder antwoord is `TiebreakerNoAnswerError`. In beide gevallen wordt niets vastgelegd.
+- **Model:** uit de registry (ADR-036), via hetzelfde mechanisme als de plan-gate-tiebreaker (`plan_gate_tiebreaker.resolve_tiebreaker_model` en de governed dispatcher van het panel). Een eigen sleutel `review_cap_tiebreaker` in `configs/plan_gate_panel.yaml`, nu hetzelfde model (`deepseek_harness` / `deepseek-v4-pro`). Zo kunnen de twee los bewegen (open vraag 3 van het plan).
+- **Geen tweede vraag.** Staat er al een uitspraak op de kop die beslist moet worden, dan geeft het commando die terug en vraagt het geen model. Blijft er na de extra ronde maar één uitkomst over, dan beslist de regel en vraagt het commando ook geen model. `tiebreaker_model` is dan leeg.
+
+Commando: `vnx review cap-verdict --pr N --for-dispatch <dispatch-id>` (`scripts/review_rounds_cli.py`, ook via de pip-CLI).
+
+### 3. `verkleinen`: één extra ronde, gebonden aan één dispatch
+
+- De uitspraak noemt één ingreep en kent precies één extra codex-ronde toe, gebonden aan de dispatch die de T0 opgeeft (`--for-dispatch`).
+- Een kop telt voor die ronde als hij een commit van die dispatch draagt die de cap-kop niet draagt: een commit met de trailer `Dispatch-ID: <id>` in `git log <cap-kop>..<kop>`. Kan git die reeks niet lezen, ook niet na één fetch van `origin`, dan telt de kop niet.
+- De ronde is verbruikt bij de eerste uitspraak in de codex-stoel op zo'n kop. Een run zonder uitspraak verbruikt hem niet, want die schrijft geen regel. De schrijver boekt die uitspraak in het rondegrootboek met `granted_by: <verdict-id>`, onder het slot van het grootboek. De gate en de schrijver kennen de ronde alleen toe zolang zo'n regel er niet is. De merge-deur telt voorbij de cap alleen de PASS op de regel met `granted_by`, en alleen als die naar een opgeslagen `verkleinen`-uitspraak van deze PR wijst.
+- De deur (`dispatch_cli`) laat precies die dispatch door op de branch van de PR zolang de ronde open is. Elke andere bouwdispatch op die branch krijgt de vroege melding van R1.
+- Na de ronde: PASS is mergen. FAIL gaat terug naar de tiebreaker, die dan alleen nog de andere uitkomst van de regel kan kiezen. Twee keer `verkleinen` op één PR kan niet: de schrijver weigert het (`CapVerdictRefused`) en de store ook, met een partiële UNIQUE.
+
+### 4. Opslag met ADR-007-sleutels
+
+Migratie 0035 maakt `review_cap_verdicts` in de runtime-store van het project. Primaire sleutel (`project_id`, `pr_number`, `verdict_id`). Kolommen: kop, cap-regel, uitkomst, gekozen uitkomst, de ene ingreep, OI-id's (JSON), de dispatch van een toegekende ronde, het tiebreaker-model, de motivering en `created_at`. `project_id` krijgt als default het id van de store zelf, fail-closed opgelost zoals in 0034 (`resolve_init_project_id(strict=True)`). De schrijver stempelt het ook expliciet.
+
+`verdict_id` is `cap-pr<N>-<kop>`: één uitspraak per kop waarop de cap beslist wordt. Elke stap is idempotent op die sleutel. Een herhaling na een crash vindt de rij en schrijft niets dubbel. Een uitspraak van vóór de laatste geattesteerde `opened`-regel van de PR hoort bij een telling die niet meer staat en telt niet mee.
+
+`review_cap_approvals` (het getekende akkoord) komt met R2c.
+
+### 5. Toestandscontract van cap en gate
+
+Drie regels, elk deterministisch en elk met een test (`tests/test_r2a_cap_tiebreaker.py::TestTheStateContract`).
+
+1. **Gelijktijdige runs op één kop.** Uitspraken op dezelfde PR, kop en stoel worden geserialiseerd onder het slot van het grootboek. De eerste uitspraak die het grootboek haalt wint. Elke latere wordt geweigerd, ook als zijn run al liep (`_check_append`). Dat geldt ook voor de extra ronde op twee koppen tegelijk: de eerste verbruikt hem, de tweede krijgt `b3_cap`.
+2. **Een onderbroken publicatie.** Staat de uitspraak in het grootboek maar landt het resultaatrecord niet, dan faalt de run. Er is geen PASS aan de deur, want de deur telt alleen een record dat de regel draagt. Een nieuwe run op die kop wordt geweigerd, met de naam van de uitweg. Vrijgeven kan alleen de operator, met `vnx review rounds open --pr N --reason "..."`: een geattesteerde regel in het grootboek en een receipt met `released`. Die regel is een nieuwe grens, dus de cap begint daar opnieuw bij nul, zoals bij elke geattesteerde opening. Geen stille reconstructie. De check-run op GitHub is een kopie van het antwoord van de deur (`gate_recorder.publish_forge_check_run`). Faalt alleen die kopie, dan herstelt het herstelcommando de kopie en verandert de deur niets.
+3. **Tweede stoel en extra ronde tegelijk.** Vallen een blocker van de tweede stoel en een FAIL in de extra ronde op dezelfde kop samen, dan bindt de tweede stoel eerst: de volgende uitspraak valt onder B3.2. Een uitspraak van de tweede stoel verbruikt de extra ronde nooit. Alleen een uitspraak in de codex-stoel doet dat.
+
+### 6. `mergen-met-OI` blijft dicht
+
+`mergen-met-OI` gaat pas open als er een tekenmechanisme is besloten waarin de T0 niet zonder bevestiging per gebruik kan tekenen: een aparte sleutel buiten bereik van de T0, of een sleutel in `allowed_signers` die bij elk gebruik bevestiging vraagt (Touch ID, passphrase). Dat is open vraag 1 van het plan en een besluit van de operator. Tot dan legt R2a die keuze vast als `outcome_unavailable_in_r2a` en blijft de cap dicht.
+
+## Gevolgen
+
+- Een PR op de cap heeft een volgende stap zonder override en zonder admin-merge, als één ronde volstaat. Dat is precies het geval van #2089.
+- De merge-deur verandert van betekenis: voorbij de cap telt één PASS, die van de toegekende ronde. Daarom staat elke beslisregel van de deur in een eigen test, en de bestaande evaluator- en grootboektests zijn ongewijzigd groen.
+- De schrijver leest commitberichten met git. Een gate die draait in een checkout zonder de kop van de PR haalt hem één keer op van `origin`. Lukt dat niet, dan blijft de cap dicht en zegt de weigering waarom.
+- De vrijgave van een onderbroken publicatie zet ook de cap op nul. Dat is de semantiek van een geattesteerde opening uit R1. Het is een handeling van de operator met reden en receipt, en hij werkt alleen als er werkelijk een uitspraak zonder record is.
+- Het model krijgt geen bevindingen en kan er geen geven. Een tiebreaker die toch een lijst geeft, kost een run en levert niets op. Dat is bewust: een stille interpretatie van een lijst zou de cap omzeilen.
