@@ -10,7 +10,9 @@ an intelligence call.
 Three entry points, and every writer and reader goes through them:
 
 - :func:`record_run` validates a :class:`RunCost`, prices it through
-  ``provider_costs.price_run`` when the caller has tokens but no provider cost,
+  ``provider_costs.price_run`` when the caller has tokens but no provider cost
+  (a count the price charges that is ``None`` makes the cost
+  ``unavailable:usage_unknown``, never a priced zero),
   and appends the line under the ledger's ``flock`` (ADR-005: the line is in the
   ledger, or in the spool, when this returns; the caller mutates its state after
   that). A record the plan forbids is refused with a :class:`CostLedgerRefusal`
@@ -31,10 +33,13 @@ cost-ledger.json``) reports degraded. A failing spool write raises
 spool, a later record of the same run queues behind it in the spool rather than
 landing in the ledger first, so "last line wins" still means "last written".
 
-Every append, in :func:`record_run` and in the replay, first ends a torn last
-line (an append that failed halfway) with ``\\n``, under the ledger lock, so a
-new line always starts on its own. No byte is ever removed: the torn prefix
-stays and counts as one unreadable line. The replay writes each record once per
+Boundary first: every time this module holds the ledger lock, in
+:func:`record_run` (append or queue) and in the replay (the already-landed
+branch included), it first ends a last line without ``\\n`` with ``\\n`` and
+fsyncs, so a new line always starts on its own. An append that fails halfway
+ends its own line at once when the disk has room, so the old writer cannot glue
+onto it. No byte is ever removed: the torn prefix stays and counts as one
+unreadable line. The replay writes each record once per
 ``run_id`` + ``record_id``, fsyncs, and reads the ledger back. It removes a
 spool file only when every record in it stands there as its own line, equal to
 what was spooled, and the newest record of each of its runs is that run's last
@@ -77,6 +82,10 @@ _PROVIDER_REPORTED = "provider_reported"
 _PRICE_TABLE = "price_table@"
 _UNAVAILABLE = "unavailable:"
 _SEGMENT_KEYS = frozenset({"tokens", "peak", "ts"})
+_PRICE_RUN_COUNTS = (
+    ("input", ("input_uncached",)), ("output", ("output",)), ("cache_read", ("cache_hit",)),
+    ("cache_write", ("cache_write_5m", "cache_write_1h")),
+)
 _UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._:@+-]")
 
 
@@ -353,13 +362,34 @@ def _check_source(source: str) -> None:
     )
 
 
+def _billable_fields(provider: str, model: str) -> Tuple[str, ...]:
+    """The token fields the model's price charges: input and output always, a cache field when its rate is set.
+
+    The rate is read from the latest price version, the one ``price_run`` applies.
+    """
+    from providers import provider_registry
+
+    versions = provider_registry.resolve_price_versions(provider_costs.registry_key_for_provider(provider), model)
+    latest = versions[-1] if versions else None
+    fields = ["input_uncached", "output"]
+    if latest is not None and latest.cache_read_per_mtok:
+        fields.append("cache_hit")
+    if latest is not None and latest.cache_write_per_mtok:
+        fields.extend(("cache_write_5m", "cache_write_1h"))
+    return tuple(fields)
+
+
 def _price_segment(segment: Mapping[str, Any]) -> Dict[str, Any]:
+    """The segment in ``price_run``'s shape. An unknown count is left out, never sent as 0.
+
+    :func:`_price` only gets here when every count the price charges is known,
+    so a count left out is one the price does not charge.
+    """
     tokens = segment["tokens"]
     priced: Dict[str, Any] = {
-        "input": tokens["input_uncached"] or 0,
-        "output": tokens["output"] or 0,
-        "cache_read": tokens["cache_hit"] or 0,
-        "cache_write": (tokens["cache_write_5m"] or 0) + (tokens["cache_write_1h"] or 0),
+        key: sum(tokens[name] for name in names)
+        for key, names in _PRICE_RUN_COUNTS
+        if all(tokens[name] is not None for name in names)
     }
     for key in ("peak", "ts"):
         if key in segment:
@@ -368,8 +398,8 @@ def _price_segment(segment: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def _price(run: RunCost, model: str, tokens: Mapping[str, Optional[int]], segments) -> Tuple:
-    """Price a run from the registry. Unknown usage is unavailable, never a zero."""
-    if all(tokens[name] is None for name in TOKEN_FIELDS):
+    """Price a run from the registry. An unknown count the price charges makes it unavailable, never a zero."""
+    if any(tokens[name] is None for name in _billable_fields(run.provider, model)):
         amount, source = None, f"{_UNAVAILABLE}usage_unknown"
     else:
         priced = [_price_segment(segment) for segment in (segments or [{"tokens": tokens}])]
@@ -559,34 +589,54 @@ def _report_health(
 
 
 def _end_a_torn_tail(fh) -> None:
-    """End a last line without ``\\n`` (a torn append), so the next line starts on its own.
+    """End a last line without ``\\n`` (a torn append) and fsync, so the next line starts on its own.
 
     The caller holds the ledger lock and opened the ledger for reading too.
-    Append-only: the torn bytes stay and become one unreadable line.
+    Append-only: the torn bytes stay and become one line, readable when the
+    JSON was whole and only its ``\\n`` was missing, unreadable otherwise.
     """
     fh.flush()
     size = os.fstat(fh.fileno()).st_size
     if size and os.pread(fh.fileno(), 1, size - 1) != b"\n":
         fh.write("\n")
+        fh.flush()
+        os.fsync(fh.fileno())
 
 
 def _append_record(fh, record: Mapping[str, Any]) -> None:
-    """Append ``record`` as its own line, on a valid NDJSON boundary. The caller holds the ledger lock."""
+    """Append ``record`` as its own line, on a valid NDJSON boundary. The caller holds the ledger lock.
+
+    When the append fails halfway, the line it left open is ended at once, so
+    ``emit_provider_cost`` cannot glue its next line onto it. On a disk that is
+    still full that fails too; the next append or replay of this module ends it
+    first. The append's own error is what the caller gets.
+    """
     _end_a_torn_tail(fh)
-    fh.write(_line(record))
+    try:
+        fh.write(_line(record))
+        fh.flush()
+    except OSError:
+        try:
+            _end_a_torn_tail(fh)
+        except OSError as exc:
+            logger.warning("cost_ledger: the failed append left an open last line in %s: %s", fh.name, exc)
+        raise
 
 
 def _append_unless_queued(ledger_path: Path, spool_dir: Path, record: Mapping[str, Any]) -> bool:
-    """Append under the ledger lock; False when the record queued behind its run's spooled ones."""
+    """Append under the ledger lock; False when the record queued behind its run's spooled ones.
+
+    Boundary first: a line left open is ended before the record queues or lands.
+    """
     ledger_path.parent.mkdir(parents=True, exist_ok=True)
     with ledger_path.open("a+", encoding="utf-8") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
         try:
+            _end_a_torn_tail(fh)
             if spool_file_for(spool_dir, record["run_id"]).exists():
                 _spool_record(spool_dir, record)
                 return False
             _append_record(fh, record)
-            fh.flush()
             return True
         finally:
             fcntl.flock(fh, fcntl.LOCK_UN)
@@ -683,6 +733,8 @@ def _reads_back(spooled: Sequence[Mapping[str, Any]], present: set, last: Mappin
 
 
 def _replay_files(fh, spool_dir: Path) -> ReplayResult:
+    # Boundary first: a record that landed whole but without its "\n" is ended here, before its spool file goes.
+    _end_a_torn_tail(fh)
     landed = _landed_keys(_read_ledger(fh))
     written = already = 0
     replayed: List[Tuple[Path, List[Dict[str, Any]]]] = []

@@ -309,6 +309,65 @@ class TestTheRecord:
         assert record["cost_usd"] is None
         assert record["cost_source"] == "unavailable:usage_unknown"
 
+    @pytest.mark.parametrize("unknown", [("input_uncached", "output"), ("input_uncached",), ("output",)])
+    def test_an_unknown_billable_count_is_unavailable_not_a_priced_zero(self, ledger, unknown):
+        """codex_gate on 313f4bdc: input/output null and the cache counters 0 priced as cost_usd 0.0."""
+        tokens = _tokens(input_uncached=1000, output=200)
+        tokens.update(dict.fromkeys(unknown))
+        completeness = "partial:" + ",".join(unknown)
+        record = cost_ledger.record_run(
+            _run(tokens=tokens, usage_completeness=completeness, cost_usd=None, cost_source=None),
+            ledger_path=ledger,
+        )
+        assert record["cost_usd"] is None
+        assert record["cost_source"] == "unavailable:usage_unknown"
+        assert record["usage_completeness"] == completeness
+        totals = cost_ledger.aggregate_runs(ledger)
+        assert totals.unavailable == (RUN_A1,)
+        assert totals.cost_usd == 0.0
+
+    def test_an_unknown_count_on_a_subscription_has_no_api_equivalent(self, ledger):
+        record = cost_ledger.record_run(
+            _run(provider="claude", model="opus-5-5", billing="subscription",
+                 tokens=_tokens(input_uncached=100_000, output=None), usage_completeness="partial:output",
+                 cost_usd=None, cost_source=None),
+            ledger_path=ledger,
+        )
+        assert (record["cost_usd"], record["api_equivalent_usd"]) == (0.0, None)
+        assert record["cost_source"] == "unavailable:usage_unknown"
+        assert cost_ledger.aggregate_runs(ledger).unavailable == (RUN_A1,)
+
+    def test_an_unknown_cache_count_the_price_charges_is_unavailable(self, ledger):
+        """deepseek-flash charges cache hits: an unknown cache_hit leaves the price unknown."""
+        record = cost_ledger.record_run(
+            _run(model="deepseek-flash", tokens=_tokens(input_uncached=1000, output=200, cache_hit=None),
+                 usage_completeness="partial:cache_hit", cost_usd=None, cost_source=None),
+            ledger_path=ledger,
+        )
+        assert record["cost_usd"] is None
+        assert record["cost_source"] == "unavailable:usage_unknown"
+
+    def test_an_unknown_cache_count_the_price_does_not_charge_is_priced(self, ledger):
+        """deepseek-v4-pro has no cache rate: an unknown cache_hit does not change its price."""
+        record = cost_ledger.record_run(
+            _run(tokens=_tokens(input_uncached=1_000_000, output=100_000, cache_hit=None),
+                 usage_completeness="partial:cache_hit", cost_usd=None, cost_source=None),
+            ledger_path=ledger,
+        )
+        assert record["cost_usd"] == pytest.approx(1.716)
+        assert record["cost_source"] == "price_table@2026-09-14"
+
+    def test_a_real_zero_is_still_a_priced_zero(self, ledger):
+        record = cost_ledger.record_run(
+            _run(model="deepseek-flash", tokens=dict(_ZERO), cost_usd=None, cost_source=None),
+            ledger_path=ledger,
+        )
+        assert record["cost_usd"] == 0.0
+        assert record["cost_source"] == "price_table@2026-09-14"
+        totals = cost_ledger.aggregate_runs(ledger)
+        assert totals.unavailable == ()
+        assert totals.runs == {RUN_A1: record}
+
     def test_a_refused_spawn_is_a_line_with_zero_and_its_reason(self, ledger):
         record = cost_ledger.record_run(
             _run(run_id=RUN_A1, tokens=dict(_ZERO), cost_usd=0, cost_source="unavailable:spawn_refused"),
@@ -578,21 +637,31 @@ class _LedgerFault:
     """One fault on the next ledger line written through an append handle.
 
     ``torn`` puts the first half of the line on disk and raises ``ENOSPC``, as
-    a full disk does halfway through a write. ``lost`` reports the write as done
-    and puts nothing on disk. Only a JSON line triggers it; a bare newline and
-    every write after the fault pass through.
+    a full disk does halfway through a write. ``unterminated`` puts the whole
+    JSON on disk without its final newline and raises ``ENOSPC``. ``lost``
+    reports the write as done and puts nothing on disk. Only a JSON line
+    triggers it. After ``torn`` or ``unterminated`` the disk stays full for the
+    rest of that call: every later write through the same handle, a bare
+    newline included, raises ``ENOSPC``. With ``disk_stays_full=False`` the disk
+    has room again right after the fault. The next call always finds room.
     """
 
-    def __init__(self, ledger_path: Path, kind: str):
+    def __init__(self, ledger_path: Path, kind: str, disk_stays_full: bool):
         self.ledger_path = ledger_path
         self.kind = kind
+        self.disk_stays_full = disk_stays_full
         self.armed = True
+
+
+def _enospc() -> OSError:
+    return OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
 
 
 class _FaultyHandle:
     def __init__(self, fh, fault: _LedgerFault):
         self._fh = fh
         self._fault = fault
+        self._full = False
 
     def __getattr__(self, name):
         return getattr(self._fh, name)
@@ -604,14 +673,17 @@ class _FaultyHandle:
         return self._fh.__exit__(*exc_info)
 
     def write(self, text):
+        if self._full:
+            raise _enospc()
         if not (self._fault.armed and text.startswith("{")):
             return self._fh.write(text)
         self._fault.armed = False
         if self._fault.kind == "lost":
             return len(text)
-        self._fh.write(text[: len(text) // 2])
+        self._fh.write(text[:-1] if self._fault.kind == "unterminated" else text[: len(text) // 2])
         self._fh.flush()
-        raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+        self._full = self._fault.disk_stays_full
+        raise _enospc()
 
 
 @pytest.fixture
@@ -619,8 +691,8 @@ def inject(monkeypatch):
     """``inject(ledger_path, kind)`` arms one fault on every append handle of that ledger."""
     real_open = Path.open
 
-    def arm(ledger_path: Path, kind: str) -> _LedgerFault:
-        fault = _LedgerFault(ledger_path, kind)
+    def arm(ledger_path: Path, kind: str, *, disk_stays_full: bool = True) -> _LedgerFault:
+        fault = _LedgerFault(ledger_path, kind, disk_stays_full)
 
         def faulty_open(self, mode="r", *args, **kwargs):
             fh = real_open(self, mode, *args, **kwargs)
@@ -654,6 +726,23 @@ def _spool_one_run(ledger_path: Path) -> dict:
     record = cost_ledger.record_run(_run(), ledger_path=ledger_path)
     _repair_the_ledger(ledger_path)
     return record
+
+
+class _FrozenEmitDatetime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return datetime(2026, 10, 19, 8, 15, 30, 123456, tzinfo=timezone.utc)
+
+
+def _emit_an_old_line(ledger_path: Path, monkeypatch) -> None:
+    """One line through the untouched old writer, ``emit_provider_cost``: ``_GOLDEN_EMIT_LINE``."""
+    monkeypatch.setattr(provider_costs, "datetime", _FrozenEmitDatetime)
+    monkeypatch.setattr(provider_costs, "_resolve_costs_path", lambda: ledger_path)
+    provider_costs.emit_provider_cost(
+        "deepseek-harness", "deepseek-v4-pro", 102_385, 64_922, 0.39,
+        dispatch_id="20261019-rs-r1b-hygiene", project_id="vnx-dev",
+        metadata={"lane": "deepseek-harness"}, cost_source="deepseek-v4-pro@2026-09-14",
+    )
 
 
 def _load_costs_cli():
@@ -695,11 +784,13 @@ class TestATornAppend:
     def test_a_correction_queued_behind_a_torn_charge_still_wins(self, ledger, inject):
         inject(ledger, "torn")
         charge = cost_ledger.record_run(_run(cost_usd=0.5), ledger_path=ledger)
+        torn = ledger.read_bytes()
+        assert torn and not torn.endswith(b"\n")
         correction = cost_ledger.record_run(
             _run(kind="correction", supersedes=charge["record_id"], reason="corrected", cost_usd=2.0),
             ledger_path=ledger,
         )
-        torn = ledger.read_bytes()
+        assert ledger.read_bytes() == torn + b"\n", "the queued record ends the torn line first"
         assert json.loads((_spool_dir(ledger) / f"{RUN_A1}.json").read_text(encoding="utf-8")) == [
             charge, correction,
         ]
@@ -776,6 +867,43 @@ class TestATornAppend:
             charge, correction,
         ]
         assert _beacon(ledger)["details"]["state"] == "degraded"
+
+    def test_a_record_that_landed_without_its_newline_is_ended_before_its_spool_goes(
+        self, ledger, inject, monkeypatch,
+    ):
+        """codex_gate on 313f4bdc: the already-landed branch removed the spool and left the tail open."""
+        inject(ledger, "unterminated")
+        record = cost_ledger.record_run(_run(), ledger_path=ledger)
+        assert ledger.read_bytes() == _line_bytes(record)[:-1]
+        assert [p.name for p in _spool_dir(ledger).glob("*.json")] == [f"{RUN_A1}.json"]
+
+        result = cost_ledger.replay_spool(ledger)
+        assert (result.written, result.already_present, result.removed) == (0, 1, (f"{RUN_A1}.json",))
+        _emit_an_old_line(ledger, monkeypatch)
+
+        totals = cost_ledger.aggregate_runs(ledger)
+        assert totals.runs == {RUN_A1: record}, "the charged run is lost"
+        assert (totals.legacy_lines, totals.unreadable_lines, totals.spool_pending) == (1, 0, 0)
+        assert ledger.read_bytes() == _line_bytes(record) + _GOLDEN_EMIT_LINE.encode("utf-8")
+
+    @pytest.mark.parametrize("kind", ["torn", "unterminated"])
+    def test_a_failed_append_ends_its_own_line_when_the_disk_has_room(self, ledger, inject, monkeypatch, kind):
+        """The old writer cannot glue onto a line this module left open: the failed append ends it."""
+        inject(ledger, kind, disk_stays_full=False)
+        record = cost_ledger.record_run(_run(), ledger_path=ledger)
+        assert ledger.read_bytes().endswith(b"\n")
+        assert [p.name for p in _spool_dir(ledger).glob("*.json")] == [f"{RUN_A1}.json"]
+        left = ledger.read_bytes()
+
+        _emit_an_old_line(ledger, monkeypatch)
+        assert ledger.read_bytes() == left + _GOLDEN_EMIT_LINE.encode("utf-8")
+        assert cost_ledger.aggregate_runs(ledger).legacy_lines == 1
+
+        result = cost_ledger.replay_spool(ledger)
+        assert (result.removed, result.pending) == ((f"{RUN_A1}.json",), 0)
+        totals = cost_ledger.aggregate_runs(ledger)
+        assert totals.runs == {RUN_A1: record}
+        assert (totals.legacy_lines, totals.unreadable_lines) == (1, 1 if kind == "torn" else 0)
 
     def test_the_command_exits_two_when_a_record_does_not_read_back(self, inject, capsys):
         default = provider_costs._resolve_costs_path()
