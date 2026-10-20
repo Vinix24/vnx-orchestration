@@ -803,7 +803,7 @@ def test_cmd_plan_gate_run_stop_creates_open_items_and_names_model(tmp_path, mon
     assert "tiebreaker" in reason
 
     # The open items exist in the open-items store — read them back (not a mock).
-    oi_state_dir = pgt.open_items_state_dir_for(ledger)
+    oi_state_dir = pgt.open_items_state_dir_from(state_dir)
     items_file = Path(oi_state_dir) / "open_items.json"
     assert items_file.is_file(), "open items file must exist after STOP"
     items = json.loads(items_file.read_text())
@@ -1413,3 +1413,85 @@ def test_cmd_plan_gate_run_tiebreaker_stop_writes_tiebreak_decision_ref(tmp_path
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# --------------------------------------------------------------------------
+# OI-2197 — the STOP aftermath writes to the CENTRAL state dir, never <repo>/state
+# --------------------------------------------------------------------------
+
+def _stop_in_repo_cwd(tmp_path, monkeypatch, *, central_env: bool):
+    """Drive a real STOP with a temp git repo as CWD and a separate central data dir.
+
+    The seat ledger sits in the repo (``<repo>/.vnx-attest``) like production; the
+    open-items manager's import-time CWD store is pointed at ``<repo>/state`` the
+    way it resolves when the CLI runs from the repo. Returns (repo, central_state).
+    """
+    import open_items_manager as oim
+
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    central_root = tmp_path / "central"
+    central_state = _bootstrap(central_root)
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(oim, "STATE_DIR", repo / "state")
+    for key, name in (
+        ("OPEN_ITEMS_FILE", "open_items.json"), ("DIGEST_FILE", "open_items_digest.json"),
+        ("MARKDOWN_FILE", "open_items.md"), ("AUDIT_LOG", "open_items_audit.jsonl"),
+    ):
+        monkeypatch.setattr(oim, key, repo / "state" / name)
+    ledger = repo / ".vnx-attest" / "plan-gate-seats.ndjson"
+    monkeypatch.setattr(pgp, "_resolve_seat_ledger_path", lambda data_dir: ledger)
+    monkeypatch.setattr(pgp, "_default_panel_config_path", lambda: tmp_path / "absent.yaml")
+    monkeypatch.delenv("VNX_STATE_DIR", raising=False)
+    if central_env:
+        monkeypatch.setenv("VNX_DATA_DIR", str(central_root))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+    tracks.create_track(central_state, "feat-oi", "p1", "t", "shipped", phase="queued")
+    planning_cli._seed_plan_blocker(central_state, "feat-oi", "p1")
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Problem\n## Approach\n", encoding="utf-8")
+    _read_rounds(ledger, "feat-oi", seat_verdicts=[{
+        "seat": "codex", "verdict": "revise",
+        "findings": ["plan lacks a rollback section"], "rationale": "gaps",
+    }])
+    monkeypatch.setattr(pgt, "run_tiebreaker", lambda doc_path, *, round_number, **kw: pgt.TiebreakerResult(
+        outcome="STOP", model="fable-5", round=round_number,
+        required_change="", rationale="not converging",
+    ))
+    monkeypatch.setattr(planning_cli, "_emit_plan_gate_pass_record", lambda **kw: True)
+    args = _gate_args("", doc, track_id="feat-oi")
+    return repo, central_state, args
+
+
+def test_stop_open_items_land_in_the_central_store_not_the_repo_cwd(tmp_path, monkeypatch):
+    """Red run on origin/main: items landed in <repo>/state/open_items.json and the
+    central file stayed absent. Now the reverse."""
+    repo, central_state, args = _stop_in_repo_cwd(tmp_path, monkeypatch, central_env=True)
+
+    assert planning_cli.cmd_plan_gate_run(args) == 0
+
+    central_file = central_state / "open_items.json"
+    repo_file = repo / "state" / "open_items.json"
+    assert central_file.is_file()
+    titles = [i["title"] for i in json.loads(central_file.read_text())["items"]]
+    assert "plan lacks a rollback section" in titles
+    assert not repo_file.exists()
+
+
+def test_stop_records_nothing_and_says_so_when_no_central_state_dir_resolves(
+    tmp_path, monkeypatch, capsys
+):
+    repo, central_state, args = _stop_in_repo_cwd(tmp_path, monkeypatch, central_env=True)
+    monkeypatch.setattr(pgt, "open_items_state_dir_from", lambda d: None)
+
+    assert planning_cli.cmd_plan_gate_run(args) == 0  # the gate result still stands
+
+    assert not (central_state / "open_items.json").exists()
+    assert not (repo / "state" / "open_items.json").exists()
+    assert "NOT recorded as open items" in capsys.readouterr().err
+
+
+def test_open_items_state_dir_from_refuses_an_empty_state_dir():
+    assert pgt.open_items_state_dir_from(None) is None
+    assert pgt.open_items_state_dir_from("") is None
