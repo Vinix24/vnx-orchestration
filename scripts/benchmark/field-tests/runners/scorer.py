@@ -42,7 +42,7 @@ class CellScore:
     composite: float          # 0-5 weighted
     verify_evidence: str
     judge_reasoning: str
-    cost_usd: float
+    cost_usd: Optional[float]  # None = the report's price is unknown (ADR-040), never 0
     wallclock_seconds: float
     input_tokens: int = 0
     output_tokens: int = 0
@@ -93,9 +93,15 @@ def _compute_completeness(verify_result: dict, expected_files: list[str]) -> flo
     return round(5.0 * ratio, 2)
 
 
-def _compute_cost_efficiency(cost_usd: float, tier: str) -> float:
-    """Cost-tier-aware: cheaper-than-expected is good."""
+def _compute_cost_efficiency(cost_usd: Optional[float], tier: str) -> float:
+    """Cost-tier-aware: cheaper-than-expected is good.
+
+    An unknown price (None) earns no credit, like a DNF cell: it is no evidence
+    of a cheap run, and scoring it as 0 would hand it the free-run maximum.
+    """
     expected_max = {"t1_trivial": 0.05, "t2_medium": 0.50, "t3_complex": 5.00}.get(tier, 1.0)
+    if cost_usd is None:
+        return 0.0
     if cost_usd == 0:
         return 5.0
     if cost_usd >= expected_max * 4:
@@ -221,8 +227,13 @@ def _llm_judge_code_quality(
     return avg_score, combined
 
 
-def _extract_cost_from_report(report_path: Path) -> float:
-    """Parse cost_usd from report YAML frontmatter if present."""
+def _extract_cost_from_report(report_path: Path) -> Optional[float]:
+    """Parse cost_usd from report YAML frontmatter if present.
+
+    ``cost_usd: null`` is an unknown price (ADR-040) and returns None, as does a
+    value that is not a number: an unknown price is never read as 0. A report
+    or a frontmatter without the field keeps its 0.0.
+    """
     if not report_path or not report_path.exists():
         return 0.0
     try:
@@ -233,7 +244,7 @@ def _extract_cost_from_report(report_path: Path) -> float:
                 try:
                     return float(line.split(":", 1)[1].strip())
                 except ValueError:
-                    return 0.0
+                    return None
     except OSError:
         return 0.0
     return 0.0

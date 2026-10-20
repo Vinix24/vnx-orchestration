@@ -160,6 +160,9 @@ class DispatchRecord:
     is_success: Optional[bool]
     scout_enriched: bool
     scout_cost_usd: float = 0.0
+    # Scout receipts for this dispatch whose cost_usd is unknown (null): left
+    # out of scout_cost_usd, never added as 0.
+    scout_cost_unknown: int = 0
 
 
 def correlate_records(
@@ -169,15 +172,20 @@ def correlate_records(
 ) -> List[DispatchRecord]:
     """Join worker receipts with scout audit receipts and sidecar flags."""
     scout_cost_by_dispatch: Dict[str, float] = {}
+    scout_unknown_by_dispatch: Dict[str, int] = {}
     for sr in scout_receipts:
         if not isinstance(sr, dict):
             continue
         did = str(sr.get("dispatch_id") or "").strip()
         if not did:
             continue
-        scout_cost_by_dispatch[did] = scout_cost_by_dispatch.get(did, 0.0) + (
-            _safe_float(sr.get("cost_usd")) or 0.0
-        )
+        # The key marks the dispatch scout-enriched even when its cost is unknown.
+        scout_cost_by_dispatch.setdefault(did, 0.0)
+        scout_cost = _safe_float(sr.get("cost_usd"))
+        if scout_cost is None:
+            scout_unknown_by_dispatch[did] = scout_unknown_by_dispatch.get(did, 0) + 1
+        else:
+            scout_cost_by_dispatch[did] += scout_cost
 
     sidecar_set = set(sidecar_ids)
 
@@ -202,6 +210,7 @@ def correlate_records(
                 is_success=_is_success(r),
                 scout_enriched=enriched,
                 scout_cost_usd=scout_cost_by_dispatch.get(did, 0.0) if enriched else 0.0,
+                scout_cost_unknown=scout_unknown_by_dispatch.get(did, 0),
             )
         )
     return records
@@ -230,6 +239,9 @@ class CohortStats:
     cost_values: List[float] = field(default_factory=list)
     duration_values: List[float] = field(default_factory=list)
     success_values: List[bool] = field(default_factory=list)
+    # Dispatches whose worker cost_usd is unknown (null or absent): left out of
+    # the cost mean and sum, never counted as 0.
+    cost_unknown_count: int = 0
 
     @property
     def mean_tokens(self) -> Optional[float]:
@@ -264,6 +276,8 @@ def build_cohort(records: Iterable[DispatchRecord]) -> CohortStats:
             stats.tokens_values.append(rec.worker_tokens)
         if rec.worker_cost_usd is not None:
             stats.cost_values.append(rec.worker_cost_usd)
+        else:
+            stats.cost_unknown_count += 1
         if rec.duration_seconds is not None:
             stats.duration_values.append(rec.duration_seconds)
         if rec.is_success is not None:
@@ -308,12 +322,34 @@ class EffectivenessReport:
     net_usd: Optional[float]
     verdict: str
     warnings: List[str] = field(default_factory=list)
+    # Scout receipts with an unknown cost_usd, left out of total_scout_cost_usd.
+    scout_cost_unknown_count: int = 0
     observational_note: str = (
         "This is an OBSERVATIONAL comparison, not a causal A/B test. "
         "Confounders (task difficulty, role, model, lane, instruction length) "
         "are not controlled. A randomized shadow-A/B would be required for a "
         "causal verdict on scout ROI."
     )
+
+
+def _unknown_cost_warnings(
+    enriched: CohortStats, non_enriched: CohortStats, scout_unknown: int,
+) -> List[str]:
+    """Name every cost the means and sums leave out because its price is unknown."""
+    warnings: List[str] = []
+    worker_unknown = enriched.cost_unknown_count + non_enriched.cost_unknown_count
+    if worker_unknown:
+        warnings.append(
+            f"{worker_unknown} dispatch(es) carry an unknown worker cost_usd "
+            f"(enriched {enriched.cost_unknown_count}, non-enriched "
+            f"{non_enriched.cost_unknown_count}); left out of the cost means, not counted as 0."
+        )
+    if scout_unknown:
+        warnings.append(
+            f"{scout_unknown} scout receipt(s) carry an unknown cost_usd; "
+            "total scout cost counts known prices only."
+        )
+    return warnings
 
 
 def compute_effectiveness(records: Sequence[DispatchRecord]) -> EffectivenessReport:
@@ -324,6 +360,7 @@ def compute_effectiveness(records: Sequence[DispatchRecord]) -> EffectivenessRep
     non_stats = build_cohort(non_enriched)
 
     total_scout_cost = sum(r.scout_cost_usd for r in enriched)
+    scout_unknown = sum(r.scout_cost_unknown for r in enriched)
 
     token_delta = _delta(enriched_stats.mean_tokens, non_stats.mean_tokens)
     cost_delta = _delta(enriched_stats.mean_cost_usd, non_stats.mean_cost_usd)
@@ -360,6 +397,7 @@ def compute_effectiveness(records: Sequence[DispatchRecord]) -> EffectivenessRep
             verdict = "cannot judge ROI: worker cost data missing"
     else:
         verdict = "cannot judge ROI: missing cohort"
+    warnings.extend(_unknown_cost_warnings(enriched_stats, non_stats, scout_unknown))
 
     return EffectivenessReport(
         total_dispatches=len(records),
@@ -381,6 +419,7 @@ def compute_effectiveness(records: Sequence[DispatchRecord]) -> EffectivenessRep
         net_usd=net_usd,
         verdict=verdict,
         warnings=warnings,
+        scout_cost_unknown_count=scout_unknown,
     )
 
 
@@ -476,6 +515,7 @@ def report_to_dict(report: EffectivenessReport) -> Dict[str, Any]:
             "success_rate": report.enriched.success_rate,
             "sum_tokens": report.enriched.sum_tokens,
             "sum_cost_usd": report.enriched.sum_cost_usd,
+            "cost_unknown_count": report.enriched.cost_unknown_count,
         },
         "non_enriched": {
             "count": report.non_enriched.count,
@@ -485,8 +525,10 @@ def report_to_dict(report: EffectivenessReport) -> Dict[str, Any]:
             "success_rate": report.non_enriched.success_rate,
             "sum_tokens": report.non_enriched.sum_tokens,
             "sum_cost_usd": report.non_enriched.sum_cost_usd,
+            "cost_unknown_count": report.non_enriched.cost_unknown_count,
         },
         "total_scout_cost_usd": report.total_scout_cost_usd,
+        "scout_cost_unknown_count": report.scout_cost_unknown_count,
         "token_delta_per_dispatch": report.token_delta_per_dispatch,
         "token_delta_pct": report.token_delta_pct,
         "cost_delta_per_dispatch_usd": report.cost_delta_per_dispatch_usd,

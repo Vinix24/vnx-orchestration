@@ -19,6 +19,7 @@ Wave 6 PR-6.4 — ADR-018 pluggable scaling policies.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -36,6 +37,7 @@ from pool_decision_engine import Membership, PoolConfig, PoolState  # noqa: E402
 from pool_scaling_policies.cost_aware_v1 import cost_aware_v1      # noqa: E402
 from cost_tracker import (                                           # noqa: E402
     recent_cost_per_hour,
+    recent_costs,
     _distribute_workers,
     _read_last_lines,
     _resolve_receipts_path,
@@ -230,6 +232,33 @@ def test_recent_cost_per_hour_handles_missing_cost_usd(tmp_path, monkeypatch):
 
     result = recent_cost_per_hour(workers=1, provider_mix=["claude"])
     assert abs(result - 0.20 * 6.0) < 0.01
+
+
+def test_recent_cost_per_hour_null_cost_is_unknown_not_zero(tmp_path, monkeypatch, caplog):
+    """An unknown price (cost_usd null, ADR-040) stays out of the average and is counted.
+
+    Reading it as 0 would pull the known 0.30 average down to 0.10 per dispatch.
+    """
+    monkeypatch.setenv("VNX_STATE_DIR", str(tmp_path))
+    receipts = [
+        {"timestamp": _now_iso(-5), "provider": "litellm", "cost_usd": None,
+         "cost_source": "unavailable:no_price:gpt-4o-mini"},
+        {"timestamp": _now_iso(-6), "provider": "litellm", "cost_usd": None,
+         "cost_source": "unavailable:no_usage"},
+        {"timestamp": _now_iso(-7), "provider": "litellm", "cost_usd": 0.30},
+        {"timestamp": _now_iso(-8), "provider": "litellm"},                       # no cost at all
+        {"timestamp": _now_iso(-90), "provider": "litellm", "cost_usd": None},    # outside window
+    ]
+    _write_receipts(tmp_path / "t0_receipts.ndjson", receipts)
+
+    recent = recent_costs(window_minutes=60)
+    assert recent.unknown_cost_count == 2
+    assert recent.costs_by_provider == {"litellm": [0.30]}
+
+    with caplog.at_level(logging.INFO, logger="cost_tracker"):
+        hourly = recent_cost_per_hour(workers=1, provider_mix=["litellm"])
+    assert abs(hourly - 0.30 * 6.0) < 0.01, f"expected ~1.80 got {hourly}"
+    assert "2 receipt(s) in the last 60 min carry an unknown cost_usd" in caplog.text
 
 
 def test_recent_cost_per_hour_multi_provider(tmp_path, monkeypatch):

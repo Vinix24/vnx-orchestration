@@ -9,6 +9,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
+def _known_cost(cells: list) -> tuple:
+    """``(known_total_usd, unknown_count)``: a cell whose price is unknown
+    (``cost_usd`` None) is counted, never summed as 0."""
+    known = [c.cost_usd for c in cells if c.cost_usd is not None]
+    return sum(known), len(cells) - len(known)
+
+
 def write_raw_csv(scores: list, output_path: Path) -> None:
     """Per-cell row: lane, task, replication, all dimensions, cost, wallclock."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -56,13 +63,18 @@ def write_summary_md(scores: list, output_path: Path, tasks_meta: dict) -> None:
     lines.append("")
     lines.append("## Cost per quality-point earned (USD / composite)")
     lines.append("")
-    cost_lines = ["| Lane | Total cost USD | Total composite | $/point |", "|---|---:|---:|---:|"]
+    cost_lines = [
+        "| Lane | Total cost USD (known) | Unknown-cost cells | Total composite | $/point |",
+        "|---|---:|---:|---:|---:|",
+    ]
     for lane in lanes:
         lane_scores = [s for s in scores if s.lane_id == lane]
-        total_cost = sum(s.cost_usd for s in lane_scores)
+        total_cost, unknown_cost = _known_cost(lane_scores)
         total_comp = sum(s.composite for s in lane_scores)
         per_point = total_cost / total_comp if total_comp > 0 else 0
-        cost_lines.append(f"| {lane} | {total_cost:.4f} | {total_comp:.2f} | {per_point:.5f} |")
+        cost_lines.append(
+            f"| {lane} | {total_cost:.4f} | {unknown_cost} | {total_comp:.2f} | {per_point:.5f} |"
+        )
     lines.extend(cost_lines)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -79,7 +91,7 @@ def write_per_lane_md(scores: list, output_path: Path) -> None:
     for lane in sorted(by_lane.keys()):
         cells = by_lane[lane]
         median_composite = statistics.median(c.composite for c in cells)
-        total_cost = sum(c.cost_usd for c in cells)
+        total_cost, unknown_cost = _known_cost(cells)
         wins = [c for c in cells if c.composite >= 4.0]
         losses = [c for c in cells if c.composite <= 1.5]
         tps_vals = [c.tokens_per_second for c in cells if c.tokens_per_second > 0]
@@ -88,7 +100,10 @@ def write_per_lane_md(scores: list, output_path: Path) -> None:
             if tps_vals else "n/a (no token data — subscription/unmeasured lane)"
         )
         lines.append(f"## {lane}")
-        lines.append(f"- Cells: {len(cells)} | Median composite: {median_composite:.2f} | Total cost: ${total_cost:.4f}")
+        lines.append(
+            f"- Cells: {len(cells)} | Median composite: {median_composite:.2f} | "
+            f"Total cost: ${total_cost:.4f} (known prices; {unknown_cost} cell(s) unknown)"
+        )
         lines.append(f"- Throughput: {tps_str}")
         lines.append(f"- Wins ({len(wins)}): {', '.join(sorted({c.task_id for c in wins})) or 'none'}")
         lines.append(f"- Losses ({len(losses)}): {', '.join(sorted({c.task_id for c in losses})) or 'none'}")

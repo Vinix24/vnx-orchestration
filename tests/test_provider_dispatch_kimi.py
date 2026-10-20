@@ -219,8 +219,9 @@ class TestComputeKimiCost(unittest.TestCase):
                 cost, cost_source = pd._compute_kimi_cost(
                     "kimi-default", {"input": 100, "output": 50, "cache_hit": 0}
                 )
+        # A pricing failure names itself, so the report never stamps it as no_usage.
         self.assertIsNone(cost)
-        self.assertEqual(cost_source, "")
+        self.assertEqual(cost_source, "unavailable:price_error")
 
     def test_extract_token_usage_kimi_uses_input_output_keys(self):
         import provider_dispatch as pd

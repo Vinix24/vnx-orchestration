@@ -699,7 +699,7 @@ def _compute_kimi_cost(
         return round(cost_in + cost_out, 8), source
     except Exception as exc:
         logger.debug("_compute_kimi_cost failed: %s", exc)
-        return None, ""
+        return None, "unavailable:price_error"
 
 
 def _registry_price_source(provider: str, model: str) -> str:
@@ -734,8 +734,9 @@ def _compute_cost(
     """Compute (cost_usd, cost_source) from wave7_models.yaml pricing (ADR-040).
 
     Returns ``(None, "")`` on unavailable/zero usage; ``(None, "unavailable:
-    no_price:<model>")`` on a lookup miss; and ``(cost, "<model>@<version-date>")``
-    when priced — never a silent 0, so a missing price is distinguishable from a
+    no_price:<model>")`` on a lookup miss; ``(None, "unavailable:price_error")``
+    when pricing itself fails; and ``(cost, "<model>@<version-date>")`` when
+    priced — never a silent 0, so a missing price is distinguishable from a
     genuinely free run.
     """
     if not token_usage or token_usage.get("unavailable") or (
@@ -772,7 +773,7 @@ def _compute_cost(
         )
     except Exception as exc:  # noqa: BLE001
         logger.debug("_compute_cost: price_run fallback failed for %s/%s: %s", provider, model, exc)
-        return None, ""
+        return None, "unavailable:price_error"
 
 
 def _build_frontmatter(
@@ -786,7 +787,7 @@ def _build_frontmatter(
     cost_source: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build unified_report_v1 frontmatter from dispatch context + spawn result."""
-    from unified_report_schema import SCHEMA_VERSION
+    from unified_report_schema import SCHEMA_VERSION, report_cost_fields
 
     spawn_fm = result.frontmatter_fields() if hasattr(result, "frontmatter_fields") else {}
 
@@ -815,7 +816,10 @@ def _build_frontmatter(
             "output": token_usage.get("output", 0),
             "cache_read": token_usage.get("cache_hit", 0),
         }),
-        "cost_usd": cost_usd,
+        # Price and its provenance as one pair (ADR-040): ``<model>@<version-date>``
+        # next to a priced cost, and a null cost always next to an ``unavailable:``
+        # source, the only null the schema accepts. A measured free run keeps 0.0.
+        **report_cost_fields(cost_usd, cost_source),
         "route_decision": {
             "strategy": os.environ.get("VNX_ROUTE_STRATEGY", "default"),
             "selected_provider": provider,
@@ -833,13 +837,6 @@ def _build_frontmatter(
 
     # OI-2066: the lane's own statement that its deadline stopped the run.
     frontmatter.update(_deadline_frontmatter(result))
-
-    # Provenance of the price that produced cost_usd: ``<model>@<version-date>``
-    # for a priced run, ``unavailable:no_price:<model>`` for a documented miss.
-    # Only written when a source exists, so a measured-free run (source "") keeps
-    # its own non-unavailable provenance rather than inheriting a miss sentinel.
-    if cost_source:
-        frontmatter["cost_source"] = cost_source
 
     return frontmatter
 

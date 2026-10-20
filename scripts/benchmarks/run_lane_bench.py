@@ -299,6 +299,28 @@ def write_csv(results: list, path: Path) -> None:
         writer.writerows(results)
 
 
+def _lane_cost_total(runs: list) -> tuple:
+    """``(known_total_usd, unknown_count)`` over the runs' report ``cost_usd``.
+
+    ``parse_receipt`` keeps frontmatter values as text, so an unknown price
+    (ADR-040) arrives as ``"null"``, and a report without the field as ``""``.
+    Both are unknown: they are counted, never summed as 0.
+    """
+    total = 0.0
+    unknown = 0
+    for r in runs:
+        value = r.get("cost_usd")
+        raw = "" if value is None else str(value).strip()
+        if raw.lower() in ("", "null", "none", "~"):
+            unknown += 1
+            continue
+        try:
+            total += float(raw)
+        except ValueError:
+            unknown += 1
+    return total, unknown
+
+
 def write_summary(results: list, path: Path, args: argparse.Namespace) -> None:
     by_lane: dict = {}
     for r in results:
@@ -313,8 +335,8 @@ def write_summary(results: list, path: Path, args: argparse.Namespace) -> None:
         "",
         "## Per-lane aggregates",
         "",
-        "| Lane | Runs | OK | Avg wall (s) | Avg report-dur (s) | Avg quality | Total cost ($) |",
-        "|---|---|---|---|---|---|---|",
+        "| Lane | Runs | OK | Avg wall (s) | Avg report-dur (s) | Avg quality | Total cost ($) | Unknown cost |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for lane in sorted(by_lane.keys()):
         runs = by_lane[lane]
@@ -323,12 +345,10 @@ def write_summary(results: list, path: Path, args: argparse.Namespace) -> None:
         durs = [float(r["report_duration"]) for r in runs if r.get("report_duration")]
         avg_dur = (sum(durs) / len(durs)) if durs else 0.0
         avg_q = sum(r["quality_score"] for r in runs) / len(runs)
-        costs = [float(r["cost_usd"]) for r in runs
-                 if r.get("cost_usd") not in (None, "", "0.0")]
-        total_cost = sum(costs)
+        total_cost, unknown_cost = _lane_cost_total(runs)
         lines.append(
             f"| {lane} | {len(runs)} | {ok}/{len(runs)} | "
-            f"{avg_wall:.1f} | {avg_dur:.1f} | {avg_q:.1f} | {total_cost:.5f} |"
+            f"{avg_wall:.1f} | {avg_dur:.1f} | {avg_q:.1f} | {total_cost:.5f} | {unknown_cost} |"
         )
 
     lines += ["", "## Per-(lane, task) quality matrix", ""]
@@ -351,7 +371,8 @@ def write_summary(results: list, path: Path, args: argparse.Namespace) -> None:
         "- Quality scoring: codegen=programmatic (exec + verify), "
         "review/docs=heuristic (format + keyword).",
         "- Manual review of response_preview in CSV recommended for review/docs cells.",
-        "- Cost field empty/0 indicates provider did not report cost in receipt.",
+        "- Total cost sums known prices only; 'Unknown cost' counts runs whose "
+        "report carries no cost or `cost_usd: null` (price unavailable).",
     ]
     path.write_text("\n".join(lines) + "\n")
 

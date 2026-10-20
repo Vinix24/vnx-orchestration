@@ -1448,7 +1448,38 @@ def build_receipt_from_report(
     receipt["pr_link"] = pr_link
     if pr_link_reason:
         receipt["pr_link_reason"] = pr_link_reason
+    receipt.update(_report_cost_fields(text))
     return receipt
+
+
+def _report_cost_fields(text: str) -> Dict[str, Any]:
+    """The report's own ``cost_usd`` / ``cost_source``, copied unchanged to its receipt.
+
+    A priced report hands over its number and source. An unknown price arrives
+    as ``cost_usd: null`` next to its ``unavailable:`` source (ADR-040) and stays
+    exactly that, never 0.0. Whether that pair is valid is decided once, by the
+    schema in ``_run_fail_closed_checks``; this only carries what the report says.
+
+    Read through the YAML parser of ``unified_report_schema``: the line parser
+    above keeps every value as a string, so a null would arrive as ``"null"``.
+    A value that is neither null nor a number is left off, so an aggregator never
+    meets a string where a cost belongs. A report without ``cost_usd`` adds nothing.
+    """
+    try:
+        from unified_report_schema import parse_frontmatter as parse_yaml_frontmatter
+        fm = parse_yaml_frontmatter(text)
+    except (ImportError, ValueError, RecursionError):
+        return {}
+    if "cost_usd" not in fm:
+        return {}
+    cost_usd = fm["cost_usd"]
+    if isinstance(cost_usd, bool) or not (cost_usd is None or isinstance(cost_usd, (int, float))):
+        return {}
+    fields: Dict[str, Any] = {"cost_usd": cost_usd}
+    cost_source = fm.get("cost_source")
+    if isinstance(cost_source, str) and cost_source:
+        fields["cost_source"] = cost_source
+    return fields
 
 
 # ---------------------------------------------------------------------------

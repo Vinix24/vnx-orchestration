@@ -12,6 +12,9 @@ Public surface:
     parse_frontmatter(text) -> dict
     validate_frontmatter(text) -> dict
     validate_file(path) -> dict
+    COST_UNAVAILABLE_PREFIX, COST_SOURCE_NO_USAGE
+    is_unavailable_cost_source(cost_source) -> bool
+    report_cost_fields(cost_usd, cost_source) -> dict
 """
 
 from __future__ import annotations
@@ -32,6 +35,38 @@ SCHEMA_PATH = (
 
 class SchemaViolation(ValueError):
     """Raised when a unified report frontmatter fails schema validation."""
+
+
+# ADR-040 price provenance. An unknown price is ``cost_usd: null`` next to a
+# ``cost_source`` that starts with this prefix. The schema (its ``allOf``)
+# accepts null only in that pair and refuses the prefix next to a number.
+COST_UNAVAILABLE_PREFIX = "unavailable:"
+# The source a null cost gets when its caller named no reason. The one pricing
+# path that returns no price without a reason is the no-usage short-circuit of
+# provider_dispatch._compute_cost: usage missing, flagged unavailable, or zero.
+COST_SOURCE_NO_USAGE = COST_UNAVAILABLE_PREFIX + "no_usage"
+
+
+def is_unavailable_cost_source(cost_source: Any) -> bool:
+    """True when *cost_source* records an unknown price (``unavailable:<reason>``)."""
+    return isinstance(cost_source, str) and cost_source.startswith(COST_UNAVAILABLE_PREFIX)
+
+
+def report_cost_fields(cost_usd: Optional[float], cost_source: Optional[str]) -> Dict[str, Any]:
+    """The ``cost_usd`` / ``cost_source`` frontmatter pair the schema accepts.
+
+    A known cost keeps its number, plus its source when it has one. An unknown
+    cost stays ``None``, never 0.0, and always carries an ``unavailable:``
+    source: the caller's own when it has one, else ``COST_SOURCE_NO_USAGE``.
+    """
+    if cost_usd is not None:
+        fields: Dict[str, Any] = {"cost_usd": cost_usd}
+        if cost_source:
+            fields["cost_source"] = cost_source
+        return fields
+    if not is_unavailable_cost_source(cost_source):
+        cost_source = COST_SOURCE_NO_USAGE
+    return {"cost_usd": None, "cost_source": cost_source}
 
 
 _SCHEMA_CACHE: Optional[Dict[str, Any]] = None

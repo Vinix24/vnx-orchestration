@@ -41,11 +41,12 @@ The trade-off: an is-this-provider-a-paid-lane classification here is
 DELIBERATELY based on which env key a provider's spawn handler draws on
 (architecture), never on whether the ledger happens to show nonzero
 ``cost_usd`` for that provider historically. A lane whose cost computation
-hits a pricing-registry miss stamps ``cost_usd: 0.0`` on its receipt even
-though real money moved (see ``provider_dispatch._compute_cost``'s "Registry
-miss" fallback) — a lane that does not REPORT a cost is not the same as a
-lane that HAS no cost, and must not be silently exempted from the cap because
-its own receipts happen to read zero.
+hits a pricing-registry miss stamps ``cost_usd: null`` with an
+``unavailable:`` ``cost_source`` on its receipt even though real money moved
+(ADR-040) — a lane that does not REPORT a cost is not the same as a lane that
+HAS no cost, and must not be silently exempted from the cap because its own
+receipts carry no number. The scan keeps such receipts out of the total and
+reports how many there were (``SpendToday.unknown_cost_count``).
 
 Call sites (both un-evadable pre-flight points, before any worker spawns):
   - ``dispatch_envelope.run_envelope_plan`` — the door's provider lane
@@ -62,6 +63,7 @@ import json
 import logging
 import os
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -220,7 +222,20 @@ def _today_str() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
+@dataclass(frozen=True)
+class SpendToday:
+    """Today's known paid-lane spend, plus receipts whose price is unknown."""
+
+    total_usd: float
+    unknown_cost_count: int
+
+
 def spent_today_usd(state_dir: Path) -> float:
+    """Known paid-lane spend today in USD; ``spent_today`` also counts the unknowns."""
+    return spent_today(state_dir).total_usd
+
+
+def spent_today(state_dir: Path) -> SpendToday:
     """Sum cost_usd across today's (UTC) receipts for paid-lane providers.
 
     Reads the append-only receipts ledger directly (see module docstring for
@@ -228,13 +243,18 @@ def spent_today_usd(state_dir: Path) -> float:
     unparseable lines/timestamps are skipped, never treated as an excuse to
     abort the whole scan — a single malformed line must not blind the cap to
     every other real charge on the same day.
+
+    A ``cost_usd: null`` is an unknown price, not a free run: it stays out of
+    ``total_usd``, is counted in ``unknown_cost_count`` and is logged, so the
+    total reads as the known spend and never as the whole of it.
     """
     receipts_path = Path(state_dir) / RECEIPTS_FILE_NAME
     if not receipts_path.is_file():
-        return 0.0
+        return SpendToday(0.0, 0)
 
     today = _today_str()
     total = 0.0
+    unknown = 0
     try:
         with receipts_path.open("r", encoding="utf-8") as fh:
             for line in fh:
@@ -251,12 +271,11 @@ def spent_today_usd(state_dir: Path) -> float:
                     continue
                 if _receipt_date_utc(receipt.get("timestamp")) != today:
                     continue
-                cost = receipt.get("cost_usd")
+                if "cost_usd" not in receipt:
+                    continue
+                cost = receipt["cost_usd"]
                 if cost is None:
-                    # Reported-zero-because-unknown vs genuinely-free is not
-                    # distinguishable from the ledger alone (module docstring)
-                    # — count it as 0.0, the best-available reading, rather
-                    # than raising or dropping the receipt from the scan.
+                    unknown += 1
                     continue
                 try:
                     total += float(cost)
@@ -264,8 +283,13 @@ def spent_today_usd(state_dir: Path) -> float:
                     continue
     except OSError as exc:
         logger.warning("paid_lane_budget: failed to read %s: %s", receipts_path, exc)
-        return total
-    return round(total, 8)
+    if unknown:
+        logger.warning(
+            "paid_lane_budget: %d paid-lane receipt(s) today carry an unknown "
+            "cost_usd (null); spent_today_usd=%.6f counts known prices only",
+            unknown, total,
+        )
+    return SpendToday(round(total, 8), unknown)
 
 
 def is_budget_exhausted(provider: Optional[str], state_dir: Optional[Path] = None) -> bool:
