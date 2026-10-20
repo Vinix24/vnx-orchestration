@@ -55,12 +55,35 @@ def _codex_only(monkeypatch) -> None:
     monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0")
 
 
+_SENTINEL = "_warned_review_gate_no_dispatch_id"
+
+
+def _sentinel_modules() -> List[Any]:
+    """Every module object the production warn-once check reads and sets.
+
+    Mirrors the candidates in validation._warn_if_review_gate_missing_dispatch_id:
+    sys.modules["append_receipt"] and the registered facade.
+    """
+    from append_receipt_internals.common import get_facade_module
+
+    found: List[Any] = []
+    for module in (append_receipt, sys.modules.get("append_receipt"), get_facade_module()):
+        if module is not None and not any(module is seen for seen in found):
+            found.append(module)
+    return found
+
+
+def _reset_sentinels(monkeypatch) -> None:
+    for module in _sentinel_modules():
+        monkeypatch.setattr(module, _SENTINEL, False, raising=False)
+
+
 @pytest.fixture(autouse=True)
-def reset_warning_flag():
-    """Reset the one-time warning sentinel between tests."""
-    append_receipt._warned_review_gate_no_dispatch_id = False
+def reset_warning_flag(monkeypatch):
+    """Reset the one-time warning sentinel on every module the check consults."""
+    _reset_sentinels(monkeypatch)
     yield
-    append_receipt._warned_review_gate_no_dispatch_id = False
+    _reset_sentinels(monkeypatch)
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +190,29 @@ def test_append_receipt_warns_once_on_review_gate_request_missing_dispatch_id():
     assert len(warn_calls) == 1, "Warning should fire exactly once per process run"
     assert warn_calls[0]["level"] == "WARN"
     assert warn_calls[0]["code"] == "review_gate_request_missing_dispatch_id"
+
+
+def test_reset_clears_sentinel_left_on_a_second_facade_object(monkeypatch):
+    """A sentinel left True on a facade object other than append_receipt must be reset."""
+    import types
+
+    from append_receipt_internals import common
+
+    emitted: List[str] = []
+    second = types.ModuleType("append_receipt_second_facade")
+    setattr(second, _SENTINEL, True)
+    second._emit = lambda level, code, **fields: emitted.append(code)
+    monkeypatch.setattr(common, "_facade_modules", [append_receipt, second])
+    monkeypatch.setattr(
+        append_receipt, "_emit", lambda level, code, **fields: emitted.append(code)
+    )
+
+    _reset_sentinels(monkeypatch)
+
+    assert getattr(second, _SENTINEL) is False
+    receipt = {"event_type": "review_gate_request", "gate": "gemini_review", "dispatch_id": ""}
+    append_receipt._warn_if_review_gate_missing_dispatch_id("review_gate_request", receipt)
+    assert emitted == ["review_gate_request_missing_dispatch_id"]
 
 
 # ---------------------------------------------------------------------------

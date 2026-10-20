@@ -1,0 +1,1 @@
+- Tests: the once-per-process warning test no longer fails under xdist, because its fixture now resets the sentinel on every module object the validation consults (D3-2).
