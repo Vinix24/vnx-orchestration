@@ -57,7 +57,7 @@ parallel path:
 - Do not rely on runtime `/model` switching. Re-verify worker readiness before the payload.
 - Tri-file for workers (`CLAUDE.md`/`AGENTS.md`/`GEMINI.md`); T0 itself uses `CLAUDE.md`.
 - `Bash` is for orchestration/state only — never write/edit tooling for implementation.
-- Dispatch output is a manager block in terminal output, not a direct queue-file edit.
+- Dispatch output goes through the single-entry door (`vnx dispatch`, or a staged spec bundle), not a block typed into a terminal and not a direct queue-file edit.
 - Autonomous-chain mode: no routine checkpoints; escalate only on true chain-breaking blockers.
 
 ## 2. Primary workflow (each cycle)
@@ -67,7 +67,7 @@ parallel path:
 3. Close/defer/wontfix with explicit reasons.
 4. Verify required review-gate evidence (incl. headless report artifacts) — see DISPATCH_RULES §2.
 5. Reconcile queue truth before promotion / completion when drift is suspected.
-6. Choose ONE: WAIT · DISPATCH one manager block · ESCALATE · COMPLETE.
+6. Choose ONE: WAIT · DISPATCH one spec through the door · ESCALATE · COMPLETE.
 
 ## 3. Decision tree (first matching rule wins)
 
