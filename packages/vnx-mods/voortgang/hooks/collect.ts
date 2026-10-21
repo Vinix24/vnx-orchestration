@@ -776,6 +776,27 @@ const tierOf = (one: ShownTrack): number => (one.builders > 0 ? 0 : one.prs.some
 
 const BUSY_STATUSES = ['ready', 'in_progress']
 
+const isBusyItem = (item: DeliverableItem, running: ReadonlyMap<string, Builder>): boolean => BUSY_STATUSES.includes(item.status) || (item.status !== 'done' && running.has(item.id))
+
+/** The ids of the deliverables that `bezig:` names on the `now` tracks: `ready`, `in_progress`, or carried by a running builder. */
+export function busyDeliverableIdsOf(project: ProjectModel): Set<string> {
+  const ids = new Set<string>()
+
+  if (!project.hasStore || !project.deliverables.isOk) {
+    return ids
+  }
+
+  const running = new Map<string, Builder>((project.builders.isOk ? project.builders.value : []).map(builder => [builder.dispatchId, builder]))
+
+  for (const one of shownTracksOf(project) ?? []) {
+    if (one.track.horizon === 'now') {
+      one.progress?.items.filter(item => isBusyItem(item, running)).forEach(item => ids.add(item.id))
+    }
+  }
+
+  return ids
+}
+
 /** What is being worked on in a track, and what is proposed next, as short titles. */
 function workOf(project: Extract<ProjectModel, { hasStore: true }>, track: TrackInfo, progress: TrackDeliverables | null): { busy: string[]; upcoming: string[] } {
   const running = new Map<string, Builder>()
@@ -793,7 +814,7 @@ function workOf(project: Extract<ProjectModel, { hasStore: true }>, track: Track
 
   const items = progress?.items ?? []
   const titleOf = (item: DeliverableItem) => shortTitleOf(item.title === '' ? item.id : item.title)
-  const isBusy = (item: DeliverableItem) => BUSY_STATUSES.includes(item.status) || (item.status !== 'done' && running.has(item.id))
+  const isBusy = (item: DeliverableItem) => isBusyItem(item, running)
   const busy = items.filter(isBusy).map(titleOf)
   const covered = new Set(items.map(item => item.id))
   const builderTitle = (builder: Builder) => shortTitleOf(builder.task.isOk ? builder.task.value : builder.dispatchId)

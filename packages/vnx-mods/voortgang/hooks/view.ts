@@ -1,6 +1,6 @@
 import type { Builder, Model, PaneView, Pr, ProjectModel, Row, Segment, Tone } from '../types'
 
-import { barCellsOf, deliverablesNotice, formatAge, INDEX_LIVE_CAP, isOutdated, planOf, promotionOf, shownTracksOf } from './collect'
+import { barCellsOf, busyDeliverableIdsOf, deliverablesNotice, formatAge, INDEX_LIVE_CAP, isOutdated, planOf, promotionOf, shownTracksOf } from './collect'
 import type { ShownTrack } from './collect'
 import { cellsOf, fit } from './width'
 
@@ -135,7 +135,26 @@ function prRow(pr: OpenPr, indent: string, reason: string | null): Row {
   return owed !== null && owed.length === 0 ? rowOf(...checks) : rowOf(...checks, dot, seg(`stoel open: ${seatsOf(owed)}`, 'warn'))
 }
 
-/** The builders at work, each with the PR it belongs to; then the open PRs that no builder owns, with the deliverable or track behind them. */
+const isReady = (pr: OpenPr): boolean => pr.detail !== null && pr.detail.owed !== null && pr.detail.owed.length === 0 && pr.detail.ci === 'pass'
+const isWaiting = (pr: OpenPr): boolean => pr.detail !== null && (pr.detail.owed === null || pr.detail.owed.length > 0)
+const isRed = (pr: OpenPr): boolean => pr.detail !== null && pr.detail.ci === 'fail'
+
+/** `N open PR's zonder bouwer · M klaar voor merge · K wacht op stoel · J ci rood`, each count left out at 0, then the reason when the PR queue cannot be read. */
+function foldedRow(prs: OpenPr[], reason: string | null): Row {
+  const counts: [number, string, Tone][] = [
+    [prs.filter(isReady).length, 'klaar voor merge', 'ok'],
+    [prs.filter(isWaiting).length, 'wacht op stoel', 'warn'],
+    [prs.filter(isRed).length, 'ci rood', 'error'],
+  ]
+  const dot = seg(' · ', 'dim')
+  const parts = counts.filter(([count]) => count > 0).flatMap(([count, text, tone]) => [dot, seg(`${count} ${text}`, tone)])
+
+  const unavailable = reason === null ? [] : [dot, seg(`onbeschikbaar: ${reason}`, 'error')]
+
+  return rowOf(seg(`  ${prs.length} open PR's zonder bouwer`, 'dim'), ...parts, ...unavailable)
+}
+
+/** The builders at work, each with the PR it belongs to; then the open PRs that belong to a deliverable `bezig:` names. The rest fold into one row. */
 function nowSectionOf(project: Stored, columns: number): Section {
   if (!project.builders.isOk) {
     return failedSection('Nu bezig', project.builders.reason)
@@ -153,11 +172,24 @@ function nowSectionOf(project: Stored, columns: number): Section {
   })
   const deliverables = project.deliverables.isOk ? Object.values(project.deliverables.value.byTrack).flatMap(one => one.items) : []
 
-  for (const pr of prs.filter(one => !owned.has(one.number))) {
-    const deliverable = pr.dispatchId === null ? undefined : deliverables.find(one => one.id === pr.dispatchId)
-    const label = deliverable !== undefined && deliverable.title !== '' ? fit(deliverable.title, MIN_TITLE_COLUMNS * 4) : (project.prTracks[pr.number] ?? null)
+  const busyIds = busyDeliverableIdsOf(project)
+  const folded: OpenPr[] = []
 
-    items.push(label === null ? [prRow(pr, '  ', reason)] : [row(`  ${label}`), prRow(pr, '    ', reason)])
+  for (const pr of prs.filter(one => !owned.has(one.number))) {
+    const deliverable = pr.dispatchId === null || !busyIds.has(pr.dispatchId) ? undefined : deliverables.find(one => one.id === pr.dispatchId)
+
+    if (deliverable === undefined) {
+      folded.push(pr)
+      continue
+    }
+
+    const label = deliverable.title !== '' ? fit(deliverable.title, MIN_TITLE_COLUMNS * 4) : deliverable.id
+
+    items.push([row(`  ${label}`), prRow(pr, '    ', reason)])
+  }
+
+  if (folded.length > 0) {
+    items.push([foldedRow(folded, reason)])
   }
 
   return sectionOf('Nu bezig', 'niets', items, project.buildersOmitted)
