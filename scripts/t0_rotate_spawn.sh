@@ -22,24 +22,37 @@
 #      ADR-005; a refusing ledger refuses the spawn), and puts a catch-up wrap from that
 #      transcript at the head of the prompt. A relative transcript path is made absolute against
 #      the caller's folder first, because the successor starts in another folder.
-#   3. Opens a new window next to the current one, with the current window's name, and types
-#      `claude --model opus` (plus `--remote-control "<name>"` when this session is bridged,
-#      and CLAUDE_CONFIG_DIR when set: tmux does not carry a bare export into the pane).
+#   3. Opens a new window next to the current one, with the current window's name. A T0-folder
+#      start first types a plain `cd -- <folder>` and reads the new pane's folder: another folder
+#      closes the window (exit 5) before claude exists, so nothing runs in the successor. Only
+#      then it types `claude --model opus` (plus `--remote-control "<name>"` when this session is
+#      bridged, and CLAUDE_CONFIG_DIR when set: tmux does not carry a bare export into the pane),
+#      then `--session-id <uuid>` (generated here) and the first message `/kickoff rotatie
+#      <run_id>` as the positional prompt argument. The first message is never typed into the TUI
+#      input box: a redraw during startup (Remote Control connecting) wiped everything typed so
+#      far, so only the tail arrived (OI-2102, measured four times).
 #      The window starts in <root>/.claude/terminals/T0 when that folder has a CLAUDE.md AND its
 #      `.claude` resolves (pwd -P) to <root>/.claude; otherwise in the project root, with one log
 #      line, and a WARNING naming a non-destructive repair when the T0 folder is the broken one
-#      (the spawner prints the repair, it runs nothing). A T0-folder start types
-#      `cd -- <folder> && <launch>` and checks the new pane's folder before the prompt is typed.
-#      A healthy T0 folder without a `.vnx-data` link still starts there (one log line).
-#   4. Waits for the claude footer, then types ONE line of natural language: kill the old
-#      window, run the kickoff skill on the handoff, then take up step 1. Enter is always a
-#      separate send-keys call.
-#   5. Writes the latch that releases the guard's Stop block and a state_mutation receipt.
-#   6. With an active /goal: hands the follow-up to the tmux SERVER (`run-shell -b`). The
-#      successor kills this window in its first turn, which kills this script too; a job on
-#      the server survives that. The follow-up waits until the first turn is over, types the
-#      /goal line, and checks the footer shows the goal as active (one retry, then a loud
-#      message in the new window).
+#      (the spawner prints the repair, it runs nothing). A healthy T0 folder without a
+#      `.vnx-data` link still starts there (one log line).
+#   4. Waits for the claude footer as the launch check. The full instruction stays in
+#      <run dir>/prompt.txt, which the kickoff skill reads.
+#   5. Writes the latch that releases the guard's Stop block and a state_mutation receipt, prints
+#      the last stdout line, and only THEN hands one job to the tmux SERVER (`run-shell -b`, a
+#      script file in the run dir: run-shell expands #{...} formats in an inline command). The job
+#      (scripts/t0_rotation_delivery_job.py) waits for the successor's transcript
+#      <config dir>/projects/*/<uuid>.jsonl, compares its first real user record to the first
+#      message, books a t0_context_rotation_delivery receipt (the ledger must take it, ADR-005),
+#      writes delivery.json and, in this order:
+#        `confirmed`: with an active /goal runs the follow-up (this script in --goal-followup
+#                     mode: waits until the first turn is over, types the /goal line, checks the
+#                     footer shows the goal as active, one retry, then a loud message in the new
+#                     window), and only then closes the old window.
+#        `mismatch` / `timeout`: types nothing, closes nothing, display-message names the
+#                     outcome in both windows.
+#      A refused or hung receipt append leaves both windows open and names the receipt failure.
+#      The job runs on the server because closing the old window kills this script.
 #
 # Usage:
 #   t0_rotate_spawn.sh [--handoff PATH] [--max-age-minutes N] [--session-id ID]
@@ -48,7 +61,8 @@
 #
 # Timing knobs (env, seconds): VNX_T0_ROTATE_FOOTER_TIMEOUT (60), VNX_T0_ROTATE_POLL_SECONDS (1),
 # VNX_T0_ROTATE_SETTLE_SECONDS (2), VNX_T0_ROTATE_TURN_TIMEOUT (1800),
-# VNX_T0_ROTATE_GOAL_CONFIRM_TIMEOUT (20).
+# VNX_T0_ROTATE_GOAL_CONFIRM_TIMEOUT (20), VNX_T0_ROTATE_DELIVERY_TIMEOUT (120),
+# VNX_T0_ROTATE_DELIVERY_POLL (1).
 # Screen patterns (env, grep -E): VNX_T0_ROTATE_FOOTER_PATTERN ("auto mode"),
 # VNX_T0_ROTATE_BUSY_PATTERN ("esc to interrupt"), VNX_T0_ROTATE_GOAL_ACTIVE_PATTERN ("/goal active").
 #
@@ -57,8 +71,9 @@
 # forces the project-root start. Set it with `tmux set-environment -g VNX_T0_ROTATE_START_DIR root`,
 # remove it with `tmux set-environment -gu VNX_T0_ROTATE_START_DIR`.
 #
-# Last stdout line: new_window=@N old_window=@N goal_followup=0|1 run_dir=PATH start_dir=PATH
-# (start_dir is shell-quoted with %q and is the last field).
+# Last stdout line: new_window=@N old_window=@N goal_followup=0|1 run_dir=PATH close=on_delivery_confirmed
+# start_dir=PATH (start_dir is shell-quoted with %q and is the last field). `close=` says the old
+# window is closed by the delivery job, on a confirmed delivery only.
 #
 # Exit codes: 0 spawned, 2 usage / invalid VNX_T0_ROTATE_START_DIR / empty --skip-wrap-reason,
 # 3 not in tmux / handoff missing or stale, 4 handoff without a first step, 5 successor did not
@@ -79,6 +94,9 @@ SETTLE="${VNX_T0_ROTATE_SETTLE_SECONDS:-2}"
 FOOTER_TIMEOUT="${VNX_T0_ROTATE_FOOTER_TIMEOUT:-60}"
 TURN_TIMEOUT="${VNX_T0_ROTATE_TURN_TIMEOUT:-1800}"
 GOAL_CONFIRM_TIMEOUT="${VNX_T0_ROTATE_GOAL_CONFIRM_TIMEOUT:-20}"
+DELIVERY_TIMEOUT="${VNX_T0_ROTATE_DELIVERY_TIMEOUT:-120}"
+DELIVERY_POLL="${VNX_T0_ROTATE_DELIVERY_POLL:-1}"
+FOLDER_TIMEOUT="${VNX_T0_ROTATE_FOLDER_TIMEOUT:-5}"
 FOOTER_PATTERN="${VNX_T0_ROTATE_FOOTER_PATTERN:-auto mode}"
 BUSY_PATTERN="${VNX_T0_ROTATE_BUSY_PATTERN:-esc to interrupt}"
 GOAL_ACTIVE_PATTERN="${VNX_T0_ROTATE_GOAL_ACTIVE_PATTERN:-/goal active}"
@@ -201,7 +219,7 @@ while [ $# -gt 0 ]; do
     --transcript)
       [ $# -ge 2 ] || die 2 "--transcript needs a path"
       TRANSCRIPT_ARG="$2"; shift 2 ;;
-    -h|--help) sed -n '2,67p' "$SCRIPT_PATH"; exit 0 ;;
+    -h|--help) sed -n '2,80p' "$SCRIPT_PATH"; exit 0 ;;
     *) die 2 "unknown argument: $1" ;;
   esac
 done
@@ -304,7 +322,7 @@ if [ "$SKIP_WRAP" -eq 1 ]; then
   [ -n "$TRANSCRIPT" ] || die 6 "--skip-wrap-reason needs the predecessor's transcript for the catch-up wrap: no --transcript and no transcript_path in the pending marker of pane $TMUX_PANE; nothing opened"
 fi
 
-compose_args=(compose --handoff "$HANDOFF" --old-window "$OLD_WIN" --out-dir "$RUN_DIR"
+compose_args=(compose --handoff "$HANDOFF" --out-dir "$RUN_DIR"
               --max-age-minutes "$MAX_AGE_MIN" --project-root "$PROJECT_ROOT")
 [ "$SKIP_WRAP" -eq 1 ] && compose_args+=(--skip-wrap-reason "$SKIP_REASON" --transcript "$TRANSCRIPT")
 set +e
@@ -330,7 +348,13 @@ if [ "$SKIP_WRAP" -eq 1 ]; then
     || die 6 "the ledger refused the t0_context_rotation_wrap_skipped receipt; an unrecorded skip does not spawn, nothing opened"
   log "wrap skipped (reason: $SKIP_REASON), receipt booked; the successor first runs the catch-up wrap from $TRANSCRIPT"
 fi
-PROMPT="$(cat "$RUN_DIR/prompt.txt")"
+RUN_ID="$(basename "$RUN_DIR")"
+# The first message is short and fixed; the full instruction is $RUN_DIR/prompt.txt, which the
+# kickoff skill reads. It travels as the start argument of claude, never as keystrokes.
+FIRST_MESSAGE="/kickoff rotatie $RUN_ID"
+SUCCESSOR_UUID="$("$PYTHON" -c 'import uuid; print(uuid.uuid4())')" \
+  || die 5 "could not generate a session id for the successor; nothing opened"
+[ -n "$SUCCESSOR_UUID" ] || die 5 "could not generate a session id for the successor; nothing opened"
 HAS_GOAL=0
 [ -f "$RUN_DIR/goal.txt" ] && HAS_GOAL=1
 
@@ -374,26 +398,38 @@ esac
 if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   launch="CLAUDE_CONFIG_DIR=$(printf '%q' "$CLAUDE_CONFIG_DIR") $launch"
 fi
-# `cd --` first, so a shell rc that changes directory cannot move the session out of the T0 folder.
-[ "$START_IN_T0" -eq 1 ] && launch="cd -- $(printf '%q' "$START_DIR") && $launch"
+launch="$launch --session-id $SUCCESSOR_UUID $(printf '%q' "$FIRST_MESSAGE")"
 
 NEW_WIN="$(tmux new-window -a -t "$OLD_WIN" -c "$START_DIR" -n "$OLD_NAME" -P -F '#{window_id}')"
 [ -n "$NEW_WIN" ] || die 5 "tmux new-window returned no window id"
 log "old_window=$OLD_WIN new_window=$NEW_WIN name=$OLD_NAME goal_followup=$HAS_GOAL"
 
-type_line "$NEW_WIN" "$launch"
-if ! wait_for_screen "$NEW_WIN" "$FOOTER_PATTERN" "$FOOTER_TIMEOUT"; then
-  die 5 "claude did not show its footer in $NEW_WIN within ${FOOTER_TIMEOUT}s; nothing sent, old window $OLD_WIN left running"
-fi
-sleep "$SETTLE"
+# The folder check comes BEFORE claude exists: a plain `cd --` in the new shell (so a shell rc that
+# changes directory cannot move the session), then the pane's folder is read. Only after that the
+# launch line, with the first message, is typed. On the wrong-folder path nothing runs in the
+# successor.
 if [ "$START_IN_T0" -eq 1 ]; then
-  new_path="$(phys "$(tmux display-message -p -t "$NEW_WIN" '#{pane_current_path}' 2>/dev/null || true)")"
+  type_line "$NEW_WIN" "cd -- $(printf '%q' "$START_DIR")"
+  new_path=""
+  waited=0
+  while :; do
+    new_path="$(phys "$(tmux display-message -p -t "$NEW_WIN" '#{pane_current_path}' 2>/dev/null || true)")"
+    [ "$new_path" = "$(phys "$START_DIR")" ] && break
+    [ "$waited" -ge "$FOLDER_TIMEOUT" ] && break
+    sleep "$POLL"
+    waited=$((waited + (POLL > 0 ? POLL : 1)))
+  done
   if [ "$new_path" != "$(phys "$START_DIR")" ]; then
     tmux kill-window -t "$NEW_WIN" || log "could not close $NEW_WIN; close it by hand"
-    die 5 "successor started in $new_path instead of the T0 folder $START_DIR; window $NEW_WIN closed, nothing sent, old window $OLD_WIN left running (VNX_T0_ROTATE_START_DIR=root starts in the project root)"
+    die 5 "successor window is in $new_path instead of the T0 folder $START_DIR; window $NEW_WIN closed, nothing was started in it, old window $OLD_WIN left running (VNX_T0_ROTATE_START_DIR=root starts in the project root)"
   fi
 fi
-type_line "$NEW_WIN" "$PROMPT"
+
+type_line "$NEW_WIN" "$launch"
+if ! wait_for_screen "$NEW_WIN" "$FOOTER_PATTERN" "$FOOTER_TIMEOUT"; then
+  die 5 "claude did not show its footer in $NEW_WIN within ${FOOTER_TIMEOUT}s; the delivery check was not started, old window $OLD_WIN left running"
+fi
+sleep "$SETTLE"
 
 latch_args=(latch --project-root "$PROJECT_ROOT" --pane "$TMUX_PANE" --old-window "$OLD_WIN"
             --new-window "$NEW_WIN" --handoff "$HANDOFF")
@@ -401,24 +437,47 @@ latch_args=(latch --project-root "$PROJECT_ROOT" --pane "$TMUX_PANE" --old-windo
 [ "$HAS_GOAL" -eq 1 ] && latch_args+=(--goal-followup)
 "$PYTHON" "$STATE_PY" "${latch_args[@]}" >/dev/null || log "latch/receipt write failed; the guard may nag this session once more"
 
-if [ "$HAS_GOAL" -eq 1 ]; then
-  followup="VNX_T0_ROTATE_POLL_SECONDS=$POLL VNX_T0_ROTATE_SETTLE_SECONDS=$SETTLE"
-  followup="$followup VNX_T0_ROTATE_FOOTER_TIMEOUT=$FOOTER_TIMEOUT VNX_T0_ROTATE_TURN_TIMEOUT=$TURN_TIMEOUT"
-  followup="$followup VNX_T0_ROTATE_GOAL_CONFIRM_TIMEOUT=$GOAL_CONFIRM_TIMEOUT"
-  followup="$followup VNX_T0_ROTATE_FOOTER_PATTERN=$(printf '%q' "$FOOTER_PATTERN")"
-  followup="$followup VNX_T0_ROTATE_BUSY_PATTERN=$(printf '%q' "$BUSY_PATTERN")"
-  followup="$followup VNX_T0_ROTATE_GOAL_ACTIVE_PATTERN=$(printf '%q' "$GOAL_ACTIVE_PATTERN")"
-  followup="$followup VNX_PYTHON=$(printf '%q' "$PYTHON")"
-  [ -n "${VNX_T0_ROTATION_STATE_DIR:-}" ] && followup="$followup VNX_T0_ROTATION_STATE_DIR=$(printf '%q' "$VNX_T0_ROTATION_STATE_DIR")"
-  [ -n "${VNX_T0_ROTATION_RECEIPTS_FILE:-}" ] && followup="$followup VNX_T0_ROTATION_RECEIPTS_FILE=$(printf '%q' "$VNX_T0_ROTATION_RECEIPTS_FILE")"
-  followup="$followup bash $(printf '%q' "$SCRIPT_PATH") --goal-followup --target $(printf '%q' "$NEW_WIN")"
-  followup="$followup --goal-file $(printf '%q' "$RUN_DIR/goal.txt") --event-file $(printf '%q' "$RUN_DIR/goal.txt")"
-  followup="$followup >>$(printf '%q' "$RUN_DIR/goal_followup.log") 2>&1"
-  if tmux run-shell -b "$followup"; then
-    log "goal follow-up handed to the tmux server (log: $RUN_DIR/goal_followup.log)"
+# One server-side job, started LAST (after the final stdout line, so a fast close cannot cut the
+# spawner's output off): wait for the delivery verdict; on `confirmed` hand over the /goal
+# follow-up (when there is one) and only then close the old window; on `mismatch` / `timeout`
+# type nothing, close nothing, name the outcome in both windows
+# (scripts/t0_rotation_delivery_job.py). It is a script FILE in the run dir (run-shell expands
+# #{...} in an inline command), run by the tmux server so it outlives the old window. Everything
+# the job and the follow-up need is written into the file: the server's own environment is not
+# this shell's.
+start_delivery_job() {
+  local job="$RUN_DIR/delivery_job.sh" config_dir tmux_bin var
+  config_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+  tmux_bin="$(command -v tmux)"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'export PATH=%q\n' "$PATH"
+    for var in VNX_T0_ROTATE_POLL_SECONDS="$POLL" VNX_T0_ROTATE_SETTLE_SECONDS="$SETTLE" \
+               VNX_T0_ROTATE_FOOTER_TIMEOUT="$FOOTER_TIMEOUT" VNX_T0_ROTATE_TURN_TIMEOUT="$TURN_TIMEOUT" \
+               VNX_T0_ROTATE_GOAL_CONFIRM_TIMEOUT="$GOAL_CONFIRM_TIMEOUT" \
+               VNX_T0_ROTATE_FOOTER_PATTERN="$FOOTER_PATTERN" VNX_T0_ROTATE_BUSY_PATTERN="$BUSY_PATTERN" \
+               VNX_T0_ROTATE_GOAL_ACTIVE_PATTERN="$GOAL_ACTIVE_PATTERN" VNX_PYTHON="$PYTHON" \
+               VNX_T0_ROTATE_DELIVERY_TIMEOUT="$DELIVERY_TIMEOUT" VNX_T0_ROTATE_DELIVERY_POLL="$DELIVERY_POLL"; do
+      printf 'export %s=%q\n' "${var%%=*}" "${var#*=}"
+    done
+    [ -n "${VNX_T0_ROTATION_STATE_DIR:-}" ] && printf 'export VNX_T0_ROTATION_STATE_DIR=%q\n' "$VNX_T0_ROTATION_STATE_DIR"
+    [ -n "${VNX_T0_ROTATION_RECEIPTS_FILE:-}" ] && printf 'export VNX_T0_ROTATION_RECEIPTS_FILE=%q\n' "$VNX_T0_ROTATION_RECEIPTS_FILE"
+    printf 'exec %q %q --run-dir %q --session-uuid %q --config-dir %q --expected %q --old-window %q --new-window %q --tmux %q' \
+      "$PYTHON" "$SCRIPTS_DIR/t0_rotation_delivery_job.py" "$RUN_DIR" "$SUCCESSOR_UUID" "$config_dir" \
+      "$FIRST_MESSAGE" "$OLD_WIN" "$NEW_WIN" "$tmux_bin"
+    [ "$HAS_GOAL" -eq 1 ] && printf ' --goal-file %q --followup-script %q' "$RUN_DIR/goal.txt" "$SCRIPT_PATH"
+    printf '\n'
+  } > "$job"
+  chmod 755 "$job"
+  if tmux run-shell -b "bash $(printf '%q' "$job") >>$(printf '%q' "$RUN_DIR/delivery_job.log") 2>&1"; then
+    log "delivery job handed to the tmux server (log: $RUN_DIR/delivery_job.log); /goal follow-up (goal_followup=$HAS_GOAL) and closing the old window follow a confirmed delivery only"
   else
-    log "WARNING: tmux refused the goal follow-up; type it yourself in $NEW_WIN: $(cat "$RUN_DIR/goal.txt")"
+    log "WARNING: tmux refused the delivery job; the old window $OLD_WIN stays open, close it yourself once $NEW_WIN shows the kickoff"
+    if [ "$HAS_GOAL" -eq 1 ]; then
+      log "a /goal was running: type it yourself in $NEW_WIN: $(cat "$RUN_DIR/goal.txt")"
+    fi
   fi
-fi
+}
 
-printf 'new_window=%s old_window=%s goal_followup=%s run_dir=%s start_dir=%q\n' "$NEW_WIN" "$OLD_WIN" "$HAS_GOAL" "$RUN_DIR" "$START_DIR"
+printf 'new_window=%s old_window=%s goal_followup=%s run_dir=%s close=on_delivery_confirmed start_dir=%q\n' "$NEW_WIN" "$OLD_WIN" "$HAS_GOAL" "$RUN_DIR" "$START_DIR"
+start_delivery_job
