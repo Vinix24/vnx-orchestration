@@ -6,6 +6,7 @@
     vnx providers reset <family> --project <pid> [--reason <text>]
     vnx providers repair [--empty]
     vnx providers check <identifier> [--project <pid>] [--consumer <name>]
+    vnx providers usage [--json]
 
 One module behind both entrances: ``bin/vnx providers`` runs this script and the pip
 ``vnx providers`` (``vnx_cli/commands/providers.py``) runs it as a subprocess.
@@ -34,6 +35,7 @@ for _path in (SCRIPT_DIR, SCRIPT_DIR / "lib"):
         sys.path.insert(0, str(_path))
 
 import provider_switch as ps  # noqa: E402
+import provider_usage  # noqa: E402
 
 EXIT_OK = 0
 EXIT_WRITE_FAILED = 1
@@ -532,6 +534,24 @@ def cmd_check(args: argparse.Namespace) -> int:
     return EXIT_REFUSED
 
 
+def cmd_usage(args: argparse.Namespace) -> int:
+    report = provider_usage.build_usage()
+    if args.json:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    else:
+        print(provider_usage.render_usage_text(report))
+    return EXIT_OK
+
+
+USAGE_HELP = (
+    "usage and balance of every provider, read-only, no model call. Exit 0 whenever the command ran. "
+    "--json shape: {\"schema\": \"vnx.providers.usage/1\", \"measured_at\": ISO, \"providers\": "
+    "{claude, codex, kimi, deepseek, openrouter}}; each row has available (bool) and, when false, a reason. "
+    "codex: used_percent, window_minutes, resets_at, plan_type, age_seconds. kimi: status, measured_at, store "
+    "(never a percentage). deepseek: is_available, balances. openrouter: total_credits, total_usage, remaining."
+)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="vnx providers", description="Turn model providers on and off.")
     sub = parser.add_subparsers(dest="verb", metavar="VERB")
@@ -558,12 +578,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_check.add_argument("identifier", metavar="IDENTIFIER")
     p_check.add_argument("--project", default=None, metavar="PID")
     p_check.add_argument("--consumer", default="vnx providers check", metavar="NAME")
+
+    p_usage = sub.add_parser("usage", help="usage and balance of every provider", description=USAGE_HELP)
+    p_usage.add_argument("--json", action="store_true", help="machine-readable output for the mod")
     return parser
 
 
 _HANDLERS = {
     "list": cmd_list, "off": cmd_switch, "on": cmd_switch, "reset": cmd_reset,
-    "repair": cmd_repair, "check": cmd_check,
+    "repair": cmd_repair, "check": cmd_check, "usage": cmd_usage,
 }
 
 
