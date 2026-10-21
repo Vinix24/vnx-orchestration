@@ -464,8 +464,10 @@ curation step itself is not proven.
   refuses the spawn, exit 6: a skip never goes unrecorded.
 - The prompt starts with the catch-up step: run `/build-log wrap --from-transcript <path>`
   before anything else, and read the transcript only through
-  `t0_rotation_state.py transcript-digest --transcript <path>`. Closing the old window comes
-  after that step.
+  `t0_rotation_state.py transcript-digest --transcript <path>`. Closing the old window does not
+  wait for that step: the delivery job closes it on a confirmed delivery (after the `/goal`
+  follow-up when there is one). The wrap reads the predecessor's transcript file, which closing
+  its window does not touch.
 - `transcript-digest --transcript PATH [--max-bytes 200000]` prints the user and assistant text
   after the last `compact_boundary`: no tool calls, no tool results, no thinking, no images or
   attachments, no harness-written `isMeta` or `<synthetic>` messages, no sidechains. The newest
@@ -491,9 +493,10 @@ curation step itself is not proven.
 
    **Start folder.** The successor starts in `<root>/.claude/terminals/T0` when that folder has
    a `CLAUDE.md` AND its `.claude` resolves (physical path) to `<root>/.claude`. Then the launch
-   line is `cd -- <T0 folder> && claude ...`, and after the footer shows the spawner reads the
-   new pane's folder: another folder means the new window is closed, exit 5, no delivery
-   check, no latch, no receipt. In every other case the successor starts in the project root as before, with
+   spawner first types a plain `cd -- <T0 folder>` in the new window and reads the pane's
+   folder, and only after that types the `claude ...` launch line with the first message.
+   Another folder means the new window is closed before claude exists, exit 5: nothing ran in
+   the successor, no delivery check, no latch, no receipt. In every other case the successor starts in the project root as before, with
    one log line. A broken T0 folder adds a WARNING with a repair that destroys nothing, which the
    spawner prints and never runs: a link to another target gets
    `ln -sfn <root>/.claude <T0>/.claude`; a plain directory gets
@@ -509,40 +512,56 @@ curation step itself is not proven.
    tmux set-environment -gu VNX_T0_ROTATE_START_DIR         # back to the default
    ```
    Any other value is refused with exit 2 before a window is opened.
-2. The footer (`auto mode`) is the launch check. Nothing is typed after it. The full instruction
+2. The footer (`auto mode`) is the launch check. Nothing is typed after it by the spawner. The full instruction
    (first step, the catch-up head of a skip run, the goal sentence) is `prompt.txt` in the run
    dir, which the kickoff skill reads via `t0_rotation_state.py run-dir <run_id>`; it carries no
    instruction to close the old window.
 3. A `state_mutation` receipt (`t0_context_rotation_started`), then the latch (ledger first, see
    "Receipts and the state files").
-4. The delivery check, a job on the tmux server (see below).
-5. With an active goal: `/goal <directive>, hervat na context-rotatie; resterend: <tasks>`
-   (shortened to stay within the 4000-character `/goal` limit).
+4. The last stdout line, then one job on the tmux server (see below). The line comes first, so a
+   fast close of the old window cannot cut the spawner's output off.
+5. Inside that job, after a confirmed delivery and with an active goal:
+   `/goal <directive>, hervat na context-rotatie; resterend: <tasks>` (shortened to stay within
+   the 4000-character `/goal` limit).
 
 Enter is always its own `send-keys` call. Every line is collapsed to one line, since a newline
 inside `send-keys -l` would submit early.
 
-**Delivery check and closing the old window.** The spawner hands `delivery_job.sh` (a script
-file in the run dir, never an inline command: `run-shell` expands `#{...}` formats in its
-argument with the caller's window) to `tmux run-shell -b`. The job
-(`scripts/lib/t0_rotation_delivery.py`) waits for `<config dir>/projects/*/<uuid>.jsonl`
-(`VNX_T0_ROTATE_DELIVERY_TIMEOUT`, default 120 s), takes the first real user record (not meta,
-not hook or local-command output, not a tool result) and compares it to the first message. A
-slash command is stored as `<command-name>/kickoff</command-name>` plus `<command-args>`; the
-job rebuilds `/kickoff rotatie <run_id>` from that. It writes `delivery.json` (`outcome`
-`confirmed` | `mismatch` | `timeout`, `expected`, the first 200 characters found, `transcript`)
-atomically and books `t0_context_rotation_delivery`.
+**Delivery check, the `/goal` follow-up and closing the old window.** The spawner hands
+`delivery_job.sh` (a script file in the run dir, never an inline command: `run-shell` expands
+`#{...}` formats in its argument with the caller's window) to `tmux run-shell -b`, after it
+printed its last stdout line. One job does everything, in this order
+(`scripts/t0_rotation_delivery_job.py`; the transcript logic is in
+`scripts/lib/t0_rotation_delivery.py`, which never touches tmux):
 
-- `confirmed`: the old window is killed, only when the new window still exists.
-- `mismatch` / `timeout`: both windows stay open, `tmux display-message` names the outcome in
-  both, nothing is typed. The operator decides.
+1. It waits for `<config dir>/projects/*/<uuid>.jsonl` (`VNX_T0_ROTATE_DELIVERY_TIMEOUT`, default
+   120 s), takes the first real user record (not meta, not hook or local-command output, not a
+   tool result) and compares it to the first message. A start argument can land in two forms
+   and the check accepts both: the expanded slash-command form
+   (`<command-message>kickoff</command-message>`, `<command-name>/kickoff</command-name>`,
+   `<command-args>rotatie <run_id></command-args>`, measured on claude 2.1.304 transcripts) and
+   the plain text `/kickoff rotatie <run_id>`. **The first live rotation confirms which one
+   claude writes for a positional start argument**; until then both count as delivered.
+2. Receipt first (ADR-005): it books `t0_context_rotation_delivery` and requires that the ledger
+   took it (the `event` command exits non-zero when its append failed). Only then `delivery.json`
+   is written (`outcome` `confirmed` | `mismatch` | `timeout`, `expected`, the first 200
+   characters found, `transcript`, atomically) and a window is touched. A refused append, or one
+   that does not finish in 60 s, leaves both windows open, writes no `delivery.json`, sends no
+   `/goal` and says so in both windows with `tmux display-message`.
+3. `confirmed`: when `goal.txt` exists the `/goal` follow-up runs first and is waited for, and
+   only then the old window is killed, while the new window still exists. The follow-up reports
+   its own outcome; the old window closes after it either way.
+4. `mismatch` / `timeout`: nothing is typed, nothing is closed, display-message names the
+   outcome in both windows. The operator decides.
 
 The last output line carries `close=on_delivery_confirmed`: the rotate skill needs no safety net
 of its own.
 
-**Why the delivery check and the `/goal` step run on the tmux server.** The old window is killed
-while the spawner, which runs as a tool call inside it, may still be running. Both jobs are
-handed to `tmux run-shell -b`, which runs on the tmux server and survives the kill. It waits
+**Why one job on the tmux server.** The old window is killed while the spawner, which runs as a
+tool call inside it, may still be running. The job is handed to `tmux run-shell -b`, which runs
+on the tmux server and survives the kill. The `/goal` follow-up is a step of that job, never a
+second job beside it: a confirmed delivery cannot close the window before the follow-up ran, and
+a failed delivery cannot be followed by a `/goal`. The follow-up waits
 until the first turn is over (busy marker `esc to interrupt` seen and then gone twice in a row
 with the footer present), types the `/goal` line, and waits for `/goal active` on screen.
 
@@ -568,7 +587,7 @@ The last stdout line is
 `start_dir` is shell-quoted (`%q`) and is the last field.
 
 Every run leaves `prompt.txt`, `first_step.txt`, `continuation.json` (`run_id`, `first_step`,
-`goal`, `handoff`), `goal.txt`, `goal_followup.log`, `delivery_job.sh`, `delivery_job.log` and
+`goal`, `handoff` as an absolute path), `goal.txt`, `goal_followup.log`, `delivery_job.sh`, `delivery_job.log` and
 `delivery.json` (later `kickoff_done.json`) in
 `~/.vnx-data/<project>/state/t0_rotation/rotation-<timestamp>-<pid>/`.
 
@@ -580,7 +599,7 @@ Every run leaves `prompt.txt`, `first_step.txt`, `continuation.json` (`run_id`, 
 | 2 | usage error, an invalid `VNX_T0_ROTATE_START_DIR` (valid: `t0`, `root`), an empty `--skip-wrap-reason`, or `--transcript` without it |
 | 3 | not in tmux, project root unresolvable, handoff missing or stale |
 | 4 | handoff has no numbered next step |
-| 5 | the successor never showed its footer, or started in another folder than the T0 folder; nothing was typed, the old window keeps running |
+| 5 | the successor never showed its footer, or its window is in another folder than the T0 folder (checked before claude starts: nothing ran in it); the old window keeps running |
 | 6 | no valid wrap proof (the message names the check and ends with "run /build-log wrap"); in a skip run: no readable JSONL transcript, a relative transcript path whose folder is gone, or the ledger refused the skip receipt. No window was opened |
 
 ## Receipts
@@ -592,8 +611,8 @@ All `state_mutation`, `source: t0_context_rotation`:
 | `t0_context_rotation_pending` | a T0 session first crosses force, and again when it crosses hard |
 | `t0_context_rotation_wrap_skipped` | a `--skip-wrap-reason` run, before any window opens: `reason`, `transcript`, `handoff`, `run_dir` (also `file`), `old_window`, `pane`, `session_id` |
 | `t0_context_rotation_started` | the successor window is up and was started with the kickoff as start argument |
-| `t0_context_rotation_delivery` | the delivery check ended: `outcome` = `confirmed`, `mismatch` or `timeout`, `old_window_close` |
-| `t0_context_rotation_kickoff_done` | `t0_rotation_state.py kickoff-done`: the successor finished its kickoff (`--catch-up-done` first checks the handoff carries a wrap newer than the skip receipt, exit 3 if not) |
+| `t0_context_rotation_delivery` | the delivery check ended: `outcome` = `confirmed`, `mismatch` or `timeout`, `old_window_close`. Booked before `delivery.json` and before any window is closed |
+| `t0_context_rotation_kickoff_done` | `t0_rotation_state.py kickoff-done`, booked before `kickoff_done.json` (a refused append exits 1 and writes no marker): the successor finished its kickoff (`--catch-up-done` first checks the handoff carries a wrap newer than the skip receipt, exit 3 if not) |
 | `t0_context_rotation_goal_followup` | the `/goal` follow-up ended: `outcome` = `confirmed`, `unconfirmed` or `turn_timeout` |
 
 ### Receipts and the state files (ADR-005)
@@ -618,6 +637,10 @@ wins: a crash between the two can duplicate an event on the retry and cannot los
   and an unrecorded skip is exactly what the receipt exists to prevent (risk T9). The spawner
   exits 6 and opens no window. `skips` reads these receipts back from the same ledger
   (`VNX_T0_ROTATION_RECEIPTS_FILE`, else `append_receipt`'s default).
+- **Delivery and kickoff-done**: receipt first, then the file (`delivery.json`,
+  `kickoff_done.json`), and a refusing ledger stops what follows. The delivery job closes no
+  window and sends no `/goal` without an acknowledged append; `kickoff-done` writes no marker
+  and exits 1. `t0_rotation_state.py event` exits 1 when its append failed.
 - **Why not `.vnx-data/events/`:** `events/T{n}.ndjson` is the per-dispatch ring buffer of
   subprocess-routed terminals, truncated after every dispatch (ADR-005, Reasoning 5, and
   CLAUDE.md "Event Streams"). T0 is tmux-routed and produces no such stream, and a rotation

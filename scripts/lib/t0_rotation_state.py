@@ -4,8 +4,8 @@
 Three producers/consumers meet here:
   - ``scripts/hooks/t0_context_guard.py`` writes a PENDING marker when a T0 session crosses
     the force threshold, and reads the LATCH to stop nagging once the rotation started;
-  - ``scripts/t0_rotate_spawn.sh`` parses the handoff, composes what it types into the new
-    window, and writes the LATCH once the successor is up;
+  - ``scripts/t0_rotate_spawn.sh`` parses the handoff, composes the successor's start argument
+    and prompt file, and writes the LATCH once the successor is up;
   - both log the transition as a ``state_mutation`` receipt.
 
 STATE DIR. ``$VNX_T0_ROTATION_STATE_DIR`` when set (tests, debugging), else
@@ -19,9 +19,10 @@ so it sees the same ``TMUX_PANE`` but not the session id. The pending marker is 
 by pane and records the session id; the spawner reads it back to write a latch per session id,
 and also writes a pane latch so the guard is released even when no pending marker existed.
 
-LATCH TTL. A latch older than ``LATCH_TTL_SECONDS`` no longer counts. The successor kills the
-old window within its first turn; an old session that is still alive half an hour after its
-rotation started means the successor died during boot, and the guard should re-arm.
+LATCH TTL. A latch older than ``LATCH_TTL_SECONDS`` no longer counts. The delivery job on the
+tmux server closes the old window once the successor's first message is confirmed; an old session
+that is still alive half an hour after its rotation started means the successor died during boot
+(or the delivery was not confirmed), and the guard should re-arm.
 
 LEDGER FIRST (ADR-005). A transition is a ``state_mutation`` receipt in ``t0_receipts.ndjson``,
 the first canonical ledger of the ADR, and that append comes BEFORE the state file it describes
@@ -104,6 +105,7 @@ WRAP_TOLERANCE_SECONDS = 60
 DEFAULT_MAX_AGE_MINUTES = 15
 DIGEST_DEFAULT_MAX_BYTES = 200_000
 EXIT_WRAP_PROOF = 6
+EXIT_LEDGER_REFUSED = 1
 KICKOFF_DONE_TRIGGER = "t0_context_rotation_kickoff_done"
 CONTINUATION_FILE = "continuation.json"
 KICKOFF_DONE_FILE = "kickoff_done.json"
@@ -1249,7 +1251,8 @@ def _wrap_gate(args: argparse.Namespace, handoff_path: Path) -> Tuple[Optional[s
 
 
 def _cmd_compose(args: argparse.Namespace) -> int:
-    handoff_path = Path(args.handoff)
+    # Absolute: continuation.json is read later from the successor's folder, not from here.
+    handoff_path = Path(os.path.abspath(os.path.expanduser(args.handoff)))
     try:
         handoff = parse_handoff(handoff_path)
     except OSError as exc:
@@ -1477,10 +1480,15 @@ def _cmd_kickoff_done(args: argparse.Namespace) -> int:
             sys.stderr.write(f"kickoff-done: {problem}; nothing written\n")
             return 3
     marker = run_dir / KICKOFF_DONE_FILE
+    # Ledger first (ADR-005): the receipt lands before the marker it describes. A ledger that
+    # does not take it leaves no marker and a non-zero exit.
+    if not emit_event(KICKOFF_DONE_TRIGGER, file=str(marker), run_id=run_dir.name,
+                      catch_up_done=bool(args.catch_up_done)):
+        sys.stderr.write(f"kickoff-done: the ledger did not take {KICKOFF_DONE_TRIGGER}; "
+                         f"{marker} not written\n")
+        return EXIT_LEDGER_REFUSED
     atomic_write_json(marker, {"run_id": run_dir.name, "kickoff_done_at": _utc_now_iso(),
                                "catch_up_done": bool(args.catch_up_done)})
-    emit_event(KICKOFF_DONE_TRIGGER, file=str(marker), run_id=run_dir.name,
-               catch_up_done=bool(args.catch_up_done))
     return 0
 
 
@@ -1490,7 +1498,9 @@ def _cmd_event(args: argparse.Namespace) -> int:
         key, _, value = pair.partition("=")
         if key:
             fields[key] = value
-    emit_event(args.trigger, file=args.file, **fields)
+    if not emit_event(args.trigger, file=args.file, **fields):
+        sys.stderr.write(f"event: the ledger did not take {args.trigger}\n")
+        return EXIT_LEDGER_REFUSED
     return 0
 
 

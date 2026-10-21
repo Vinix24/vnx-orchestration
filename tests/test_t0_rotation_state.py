@@ -1416,3 +1416,87 @@ def test_kickoff_done_catch_up_without_a_skip_receipt_for_this_run_exits_3(tmp_p
     _skip_receipt(tmp_path, monkeypatch, tmp_path / "another-run", time.time() - 3600)
     assert rotation_state.main(["kickoff-done", "--run-dir", str(run), "--catch-up-done"]) == 3
     assert not (run / "kickoff_done.json").exists()
+
+
+# ── round 2 on #2144 (dispatch 20261021-rot-prompt-r2, OI-2218) ───────────────
+
+
+def _blocked_ledger(tmp_path: Path, monkeypatch) -> None:
+    """A receipts path whose directory is a file: every append to it fails."""
+    blocker = tmp_path / "ledger-blocker"
+    blocker.write_text("a file where the ledger's directory should be", encoding="utf-8")
+    monkeypatch.setenv(rotation_state.RECEIPTS_FILE_ENV, str(blocker / "t0_receipts.ndjson"))
+
+
+def test_kickoff_done_with_a_refusing_ledger_exits_1_and_writes_no_marker(tmp_path, monkeypatch, capsys):
+    """Red run on e7ccb56c: the marker was written first and the command returned 0."""
+    _blocked_ledger(tmp_path, monkeypatch)
+    run = tmp_path / "rotation-9"
+    run.mkdir()
+    assert rotation_state.main(["kickoff-done", "--run-dir", str(run)]) == 1
+    assert not (run / "kickoff_done.json").exists()
+    assert "ledger did not take t0_context_rotation_kickoff_done" in capsys.readouterr().err
+
+
+def test_kickoff_done_books_the_receipt_before_the_marker_exists(tmp_path, monkeypatch):
+    ledger = tmp_path / "r.ndjson"
+    monkeypatch.setenv(rotation_state.RECEIPTS_FILE_ENV, str(ledger))
+    run = tmp_path / "rotation-9"
+    run.mkdir()
+    seen = {}
+    real = rotation_state.emit_event
+
+    def spy(trigger, **kwargs):
+        seen["marker_existed"] = (run / "kickoff_done.json").exists()
+        return real(trigger, **kwargs)
+
+    monkeypatch.setattr(rotation_state, "emit_event", spy)
+    assert rotation_state.main(["kickoff-done", "--run-dir", str(run)]) == 0
+    assert seen == {"marker_existed": False}
+    assert (run / "kickoff_done.json").exists()
+
+
+def test_the_event_command_exits_non_zero_when_the_append_failed(tmp_path, monkeypatch, capsys):
+    """Red run on e7ccb56c: `event` returned 0 after a failed append."""
+    _blocked_ledger(tmp_path, monkeypatch)
+    assert rotation_state.main(["event", "--trigger", "t0_context_rotation_delivery",
+                                "--file", str(tmp_path / "delivery.json"),
+                                "--field", "outcome=confirmed"]) == 1
+    assert "ledger did not take t0_context_rotation_delivery" in capsys.readouterr().err
+
+
+def test_the_event_command_exits_0_when_the_ledger_took_it(tmp_path, monkeypatch):
+    monkeypatch.setenv(rotation_state.RECEIPTS_FILE_ENV, str(tmp_path / "r.ndjson"))
+    assert rotation_state.main(["event", "--trigger", "t0_context_rotation_delivery",
+                                "--file", str(tmp_path / "delivery.json"),
+                                "--field", "outcome=confirmed"]) == 0
+    assert (tmp_path / "r.ndjson").read_text().count("t0_context_rotation_delivery") == 1
+
+
+def test_compose_stores_a_relative_handoff_as_an_absolute_path(tmp_path, monkeypatch):
+    """Red run on e7ccb56c: continuation.json held the path as given, so a catch-up check run
+    from another folder could not find the handoff."""
+    root = _project(tmp_path, monkeypatch)
+    handoff = _handoff_with_wrap(root, tmp_path)
+    out = tmp_path / "state" / "rotation-rel"
+    monkeypatch.chdir(root)
+    assert rotation_state.main(["compose", "--handoff", str(handoff.relative_to(root)),
+                                "--out-dir", str(out), "--project-root", str(root)]) == 0
+    stored = json.loads((out / "continuation.json").read_text(encoding="utf-8"))["handoff"]
+    assert Path(stored).is_absolute() and Path(stored).samefile(handoff)
+    assert stored in (out / "prompt.txt").read_text(encoding="utf-8")
+
+
+def test_kickoff_done_catch_up_resolves_the_handoff_from_any_folder(tmp_path, monkeypatch):
+    root = _project(tmp_path, monkeypatch)
+    handoff = _handoff_with_wrap(root, tmp_path)
+    out = tmp_path / "state" / "rotation-rel2"
+    monkeypatch.chdir(root)
+    assert rotation_state.main(["compose", "--handoff", str(handoff.relative_to(root)),
+                                "--out-dir", str(out), "--project-root", str(root)]) == 0
+    wrapped = rotation_state._parse_utc(rotation_state.read_frontmatter(handoff)["wrap"]["wrapped_at"])
+    _skip_receipt(tmp_path, monkeypatch, out, wrapped - 600)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    assert rotation_state.main(["kickoff-done", "--run-dir", str(out), "--catch-up-done"]) == 0

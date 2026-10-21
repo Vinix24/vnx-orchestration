@@ -99,9 +99,10 @@ VNX.
 The spawner is `scripts/t0_rotate_spawn.sh`. It is called by the `rotate` skill after
 `/build-log wrap` has written `daily-log/handoff.md`. It refuses to run outside tmux, on a
 handoff older than 15 minutes, or without a wrap proof in the handoff. When it runs it opens a
-new tmux window next to the current one, starts `claude --model opus` there, and types one line
-that closes the old window, runs the kickoff on the handoff and takes up its first numbered
-next step. A rotation that cannot wait for a wrap uses `--skip-wrap-reason "<text>"`, which
+new tmux window next to the current one, starts `claude --model opus` there with the kickoff
+(`/kickoff rotatie <run_id>`) as its start argument. The kickoff runs on the handoff and takes up
+its first numbered next step. A job on the tmux server checks that the first message arrived and
+closes the old window only then, after resuming a running `/goal`. A rotation that cannot wait for a wrap uses `--skip-wrap-reason "<text>"`, which
 leaves an audit receipt. `vnx handoff show` is a different handoff: it reads `handoff.md` from the rotation directory (`rotation_handovers/T0` under the project's runtime directory, or the directory given with `--logdir`) and prints "No handoff found" when that file is absent. It does not read `daily-log/handoff.md`.
 
 ### Key Bindings (in tmux)

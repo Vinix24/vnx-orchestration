@@ -46,7 +46,7 @@ Loop protection. The Stop block fires at most once per turn: Claude Code sets
 ``stop_hook_active`` on the stop that follows a Stop-hook continuation, and the guard lets that
 one through. Once ``scripts/t0_rotate_spawn.sh`` started the successor it writes a latch for this
 session (``scripts/lib/t0_rotation_state.py``); a latched session is never Stop-blocked again,
-so the old session can go quiet while the successor kills its window.
+so the old session can go quiet while the delivery job closes its window.
 
 Unmeasurable context (no transcript, no usage block) is always "do nothing": the guard never
 blocks on missing data.
