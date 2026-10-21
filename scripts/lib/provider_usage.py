@@ -8,7 +8,8 @@ either ``available`` with its numbers or ``available: false`` with a ``reason``.
 
 No secret leaves this module: an API key goes into one request header and nowhere else, and
 every reason string is built from an error class or status code, never from a message that
-could quote the request.
+could quote the request. The key is only ever sent to an origin in ``KEY_ORIGINS``, and a
+redirect is never followed: urllib would copy the ``Authorization`` header to the new origin.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import json
 import os
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,6 +31,7 @@ SCHEMA = "vnx.providers.usage/1"
 HTTP_TIMEOUT_SECONDS = 5
 DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
 OPENROUTER_CREDITS_URL = "https://openrouter.ai/api/v1/credits"
+KEY_ORIGINS = frozenset({("https", "api.deepseek.com"), ("https", "openrouter.ai")})
 OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
 CLAUDE_REASON = "alleen in een Claude Code-sessie meetbaar"
 KIMI_FULL = "vol tot reset"
@@ -150,26 +153,29 @@ def probe_codex(env: Dict[str, str], home: Path, now: float) -> Row:
 # kimi: reachability records only, never a call with the kimi login
 # ---------------------------------------------------------------------------
 
-def _kimi_state_dirs(home: Path, env: Dict[str, str]) -> List[Path]:
-    """Every state dir that can hold a kimi record, one per real path."""
+def _kimi_state_dirs(home: Path, env: Dict[str, str]) -> Tuple[List[Path], str]:
+    """Every state dir that can hold a kimi record, one per real path, plus why the current
+    project's own state dir is missing ("" when it resolved). That reason names the error class
+    only: the message can hold a path below the home directory."""
     candidates = list(sorted((home / ".vnx-data").glob("*/state")))
     data_home = env.get("VNX_DATA_HOME") or ""
     if data_home:
         candidates += sorted(Path(data_home).expanduser().glob("*/state"))
+    problem = ""
     try:
         from vnx_paths import resolve_state_dir
         candidates.append(resolve_state_dir())
-    except Exception:  # vnx-silent-except: an unresolvable current project only drops that one candidate; the scanned stores still answer
-        pass
+    except Exception as exc:  # vnx-silent-except: an unresolvable current project drops that one candidate and is named on the row; the scanned stores still answer
+        problem = "state dir niet op te lossen: " + type(exc).__name__
     seen: Dict[Path, Path] = {}
     for state in candidates:
         seen.setdefault(state.resolve(), state)
-    return list(seen.values())
+    return list(seen.values()), problem
 
 
-def _kimi_records(home: Path, env: Dict[str, str]) -> List[Tuple[float, str, _reach.Reachability]]:
+def _kimi_records(states: List[Path]) -> List[Tuple[float, str, _reach.Reachability]]:
     found = []
-    for state in _kimi_state_dirs(home, env):
+    for state in states:
         # now=0.0 keeps an expired record readable: its age is reported, not hidden.
         record = _reach.get("kimi", state_dir=state, now=0.0)
         if record.measured_at is not None and record.state is not _reach.ReachabilityState.UNMEASURED:
@@ -186,11 +192,12 @@ def _kimi_status(record: _reach.Reachability) -> str:
 
 
 def probe_kimi(home: Path, now: float, env: Optional[Dict[str, str]] = None) -> Row:
-    records = _kimi_records(home, dict(os.environ) if env is None else env)
+    states, problem = _kimi_state_dirs(home, dict(os.environ) if env is None else env)
+    records = _kimi_records(states)
     if not records:
-        return _unavailable("geen meting")
+        return _unavailable(f"geen meting ({problem})" if problem else "geen meting")
     measured_at, store, record = max(records, key=lambda item: item[0])
-    return {
+    row: Row = {
         "available": True,
         "status": _kimi_status(record),
         "reason": record.reason,
@@ -199,6 +206,9 @@ def probe_kimi(home: Path, now: float, env: Optional[Dict[str, str]] = None) -> 
         "store": store,
         "resets_at": "onbekend",
     }
+    if problem:
+        row["warning"] = problem
+    return row
 
 
 # ---------------------------------------------------------------------------
@@ -210,16 +220,39 @@ def _redact(text: str, secret: str) -> str:
 
 
 def _http_reason(exc: urllib.error.HTTPError) -> str:
+    if 300 <= exc.code < 400:
+        return f"redirect refused ({exc.code})"
     meaning = {401: "sleutel geweigerd", 402: "onvoldoende saldo", 403: "geen toegang", 429: "te veel aanvragen"}
     return f"http {exc.code}: {meaning[exc.code]}" if exc.code in meaning else f"http {exc.code}"
 
 
-def _http_get_json(url: str, key: str) -> Tuple[Optional[Any], str]:
-    """GET ``url`` with a bearer key. Returns ``(body, "")`` or ``(None, reason)``. Balance probe, no model call."""
+class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    """Ends every followable redirect in an HTTPError with its status, before a new request exists.
+
+    The stock handler copies every non-content header, ``Authorization`` included, to the
+    ``Location`` origin, also to another host and from https to http. The target URL is neither
+    followed nor kept: the error carries the original URL.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code, "redirect refused", headers, fp)
+
+
+def _http_get_json(url: str, key: str, *, origins: frozenset = KEY_ORIGINS) -> Tuple[Optional[Any], str]:
+    """GET ``url`` with a bearer key. Returns ``(body, "")`` or ``(None, reason)``. Balance probe, no model call.
+
+    The key is sent only when ``(scheme, netloc)`` of ``url`` is in ``origins``, and through an
+    opener that refuses every redirect. ``origins`` is a test seam for a local server: the probes
+    call this with two arguments and no environment variable reaches it.
+    """
+    parts = urllib.parse.urlsplit(url)
+    if (parts.scheme, parts.netloc) not in origins:
+        return None, "geen sleutel verstuurd: bestemming staat niet in de toegestane origins"
     request = urllib.request.Request(
         url, headers={"Authorization": "Bearer " + key, "Accept": "application/json"}, method="GET")
+    opener = urllib.request.build_opener(_RefuseRedirects)
     try:
-        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
+        with opener.open(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
             raw = response.read(_RESPONSE_LIMIT)
     except urllib.error.HTTPError as exc:
         return None, _http_reason(exc)
@@ -305,6 +338,7 @@ def build_usage(*, env: Optional[Dict[str, str]] = None, home: Optional[Path] = 
       ``age_seconds``, ``source``, and ``secondary`` when the rollout carries one.
     - kimi: ``status`` (``bereikbaar``, ``vol tot reset`` or ``onbereikbaar: <reason>``), ``reason``,
       ``measured_at``, ``age_seconds``, ``store``, ``resets_at`` (always ``onbekend``). Never a percentage.
+      ``warning`` when the current project's state dir did not resolve (also in the reason when false).
     - deepseek: ``is_available`` and ``balances``, one ``{currency, total, granted, topped_up}`` per
       row the API returned, as given.
     - openrouter: ``total_credits``, ``total_usage``, ``remaining``.
@@ -329,7 +363,8 @@ def _detail(name: str, row: Row) -> str:
         return (f"{row['used_percent']}% van {row['window_minutes']} min, reset {row['resets_at']}, "
                 f"plan {row['plan_type']}, {row['age_seconds']}s oud")
     if name == "kimi":
-        return f"{row['status']}, gemeten {row['measured_at']} ({row['store']}), reset onbekend"
+        warning = f"; {row['warning']}" if row.get("warning") else ""
+        return f"{row['status']}, gemeten {row['measured_at']} ({row['store']}), reset onbekend{warning}"
     if name == "deepseek":
         balances = "; ".join(f"{b['currency']} {b['total']} (granted {b['granted']}, topped-up {b['topped_up']})"
                              for b in row["balances"]) or "geen saldo-rijen"
