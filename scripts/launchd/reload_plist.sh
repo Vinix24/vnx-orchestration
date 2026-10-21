@@ -116,11 +116,15 @@ _resolve_project_id() {
     return 0
 }
 
+# The placeholder checks below match in the shell, never through `printf | grep -q`:
+# under pipefail that pipeline ends on 141 when grep exits at the first match while
+# printf is still writing (a template is just over one 4096-byte stdio chunk), and the
+# check then reads as "no placeholder" on a loaded runner.
 # Substitute ${VNX_HOME} first; only touch ${VNX_PROJECT_ID} for templates
 # that actually declare it, so unrelated templates behave exactly as before.
 RESOLVED="$(sed "s|\${VNX_HOME}|$VNX_HOME|g" "$PLIST_SRC")"
 
-if printf '%s' "$RESOLVED" | grep -q '\${VNX_PROJECT_ID}'; then
+if [[ "$RESOLVED" == *'${VNX_PROJECT_ID}'* ]]; then
     PROJECT_ID="$(_resolve_project_id "$VNX_HOME")"
     if [ -z "$PROJECT_ID" ]; then
         echo "ERROR: $TEMPLATE_NAME is a per-project template (its Label contains" >&2
@@ -143,7 +147,7 @@ fi
 # for the resolved PROJECT_ID, through the same lookup the install guard uses. An
 # explicit VNX_PROJECT_ROOT is accepted only when its .vnx-project-id equals
 # PROJECT_ID. There is no fallback to VNX_HOME.
-if printf '%s' "$RESOLVED" | grep -q '\${VNX_PROJECT_ROOT}'; then
+if [[ "$RESOLVED" == *'${VNX_PROJECT_ROOT}'* ]]; then
     if [ -z "${PROJECT_ID:-}" ]; then
         echo "ERROR: $TEMPLATE_NAME needs a project checkout (\${VNX_PROJECT_ROOT}) but no project id" >&2
         echo "  was resolved; the checkout is looked up per project id. Nothing written." >&2
@@ -161,7 +165,7 @@ fi
 
 # Fail loud on any remaining unresolved ${...} placeholder rather than
 # install a plist that will confuse the daemon it starts.
-if printf '%s' "$RESOLVED" | grep -qE '\$\{[A-Za-z_][A-Za-z0-9_]*\}'; then
+if [[ "$RESOLVED" =~ \$\{[A-Za-z_][A-Za-z0-9_]*\} ]]; then
     echo "ERROR: unresolved placeholder(s) remain in $TEMPLATE_NAME after substitution:" >&2
     printf '%s' "$RESOLVED" | grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*\}' | sort -u >&2
     exit 1
