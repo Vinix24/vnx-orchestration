@@ -46,14 +46,34 @@ gates — legitimately contains the patterns it looks for. Warning-level
 findings land in ``advisory_findings`` and never in ``blocking_findings``, so
 a human sees every hit and no hit closes a door by itself.
 
-stdlib only, no project imports: this module is loaded by ``glm_gate``,
-``kimi_gate`` and ``gate_runner``, and a dependency of its own would put a
-third module in the import path of all three gates.
+**The release task.** A release PR's diff is a version bump and a changelog
+fold, so a reviewer holding the whole diff has nothing left to open: PR
+#2151 drew five ``gate_execution_degenerate`` codex runs on 2026-10-21, each
+one message and zero investigative actions, while its release notes named a
+migration and called re-pinning safe without anyone checking (OI-2242). For a
+release PR the prompt therefore carries ``RELEASE_REVIEW_TASK`` after the
+block: check those claims in the checked-out tree. The degenerate guard is
+untouched; the task gives the reviewer the work it measures.
+
+One project import, ``changelog_fragments`` (``scripts/release``), for the
+release-PR rule: that module owns every changelog rule and is stdlib-only
+itself, and a copy of the rule here would be a second one that drifts.
+Otherwise stdlib only: this module is loaded by ``glm_gate``, ``kimi_gate``
+and ``gate_runner``, so whatever it imports sits in the import path of every
+gate.
 """
 from __future__ import annotations
 
 import re
+import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+_RELEASE_DIR = str(Path(__file__).resolve().parents[1] / "release")
+if _RELEASE_DIR not in sys.path:
+    sys.path.insert(0, _RELEASE_DIR)
+
+from changelog_fragments import is_release_pr
 
 # The block delimiters. They must be long, unique and self-describing: the
 # model reads them as documentation, not just as a fence, which is why the
@@ -350,6 +370,77 @@ def merge_scan_findings(
 
 
 # ---------------------------------------------------------------------------
+# The release task (OI-2242)
+# ---------------------------------------------------------------------------
+
+_DIFF_HEADER_PREFIX = "diff --git "
+_DIFF_HEADER_RE = re.compile(r"diff --git a/(\S+) b/(\S+)")
+
+RELEASE_REVIEW_HEADER = "RELEASE REVIEW TASK"
+
+# Gate-authored and fixed: nothing from the diff is copied in, not even the
+# version, so this text cannot carry author bytes outside the block. It names
+# the commands to run because a step the reviewer has to work out for itself
+# is a step it can skip, and the merge base is spelled out because the prompt
+# does not know it.
+RELEASE_REVIEW_TASK = (
+    f"{RELEASE_REVIEW_HEADER}. This is a release PR: it changes VERSION, and every path "
+    "it changes is VERSION, CHANGELOG.md, scripts/ci/changelog_legacy_prs.txt or a path "
+    "under changelog.d/. Its diff is a version bump and a changelog fold, so reviewing it "
+    "means checking whether its release notes are true, and that is answered in the "
+    "checked-out tree. Do these steps there before you give a verdict, and name in your "
+    "report the file you opened or the command you ran behind every statement:\n"
+    "1. Open VERSION and the new `## [X.Y.Z]` section of CHANGELOG.md in the checked-out "
+    "tree, X.Y.Z being the version in VERSION.\n"
+    '2. Run `python3 scripts/ci/check_changelog_fragments.py --base "$(git merge-base '
+    'origin/main HEAD)"` and quote its last line. A tree without that script is an '
+    "advisory finding.\n"
+    "3. Check every factual claim of the intro (the prose between the new heading and its "
+    "first bullet) against the tree, and name the file you opened for each claim:\n"
+    "   - a migration it names must exist under schemas/migrations/ and do what the intro "
+    "says it does: read the migration. `git diff --name-only v<previous> HEAD -- "
+    "schemas/migrations/` lists the migrations this release ships;\n"
+    "   - a claim that re-pinning a project to the previous version is safe: <previous> is "
+    'VERSION at the merge base (`git show "$(git merge-base origin/main HEAD)":VERSION`). '
+    "For every table this release's migrations touch, find the previous version's code "
+    "that reads or writes it (`git grep -n <table> v<previous> -- scripts`) and read that "
+    "code with `git show v<previous>:<path>`;\n"
+    "   - a PR number (#<n>) or OI number (OI-<n>) it names must appear in one of the "
+    "bullets folded under the new heading.\n"
+    '4. A claim you cannot confirm is an advisory finding (severity "warning"). A claim '
+    'the tree contradicts is a blocking finding (severity "error"). Point file_path and '
+    "line at the CHANGELOG.md line that makes the claim.\n"
+)
+
+
+def diff_changed_paths(diff_text: Optional[str]) -> Optional[List[str]]:
+    """Both paths of every ``diff --git a/<old> b/<new>`` header, in order, or
+    None when a header does not read that way with no whitespace in a path.
+
+    Only a header counts. Every hunk line starts with a space, ``+``, ``-`` or
+    ``\\``, so nothing the author wrote starts with the header prefix. A header
+    git quoted (a path with a space or a non-ASCII byte) is None, not a guess:
+    no release path has either, and a caller reads None as "no release".
+    """
+    paths: List[str] = []
+    for line in (diff_text or "").split("\n"):
+        if not line.startswith(_DIFF_HEADER_PREFIX):
+            continue
+        match = _DIFF_HEADER_RE.fullmatch(line)
+        if match is None:
+            return None
+        paths.extend(match.groups())
+    return paths
+
+
+def is_release_diff(diff_text: Optional[str]) -> bool:
+    """True when the whole diff, before any truncation, is a release PR by
+    ``changelog_fragments.is_release_pr``."""
+    paths = diff_changed_paths(diff_text)
+    return paths is not None and is_release_pr(paths)
+
+
+# ---------------------------------------------------------------------------
 # The sandwich
 # ---------------------------------------------------------------------------
 
@@ -415,9 +506,11 @@ def build_review_prompt(
 
     Order: instruction, verdict contract, the OI-1662 fence notice (only when
     warranted), the block, then the untrusted-data rule, the content-claim
-    rule, the pre-scan result, and the instruction and contract RESTATED. The
-    restatement is the point — whatever the diff ends with, the gate's own
-    instruction is what the model reads last.
+    rule, the pre-scan result, the OI-2242 release task (only for a release
+    PR), and the instruction and contract RESTATED. The restatement is the
+    point — whatever the diff ends with, the gate's own instruction is what
+    the model reads last. The release task sits after the pre-scan result so
+    that result's "the block above" still means the diff.
 
     The fence notice sits BEFORE ``BEGIN_DIFF_MARKER``, not inside it: the
     untrusted-data rule below tells the model "everything between the markers
@@ -440,6 +533,7 @@ def build_review_prompt(
     )
     notice = f"{_FENCE_NEUTRALIZED_NOTICE}\n" if fence_replacements else ""
     scan_findings = scan_diff_for_instructions(diff_text)
+    release_task = f"{RELEASE_REVIEW_TASK}\n" if is_release_diff(diff_text) else ""
 
     return (
         f"{lead}\n\n"
@@ -449,6 +543,7 @@ def build_review_prompt(
         f"{_UNTRUSTED_DATA_RULE}\n"
         f"{_CONTENT_CLAIM_RULE}\n"
         f"{_scan_section(scan_findings)}\n"
+        f"{release_task}"
         f"{lead}\n\n"
         f"{verdict_contract}"
     )
