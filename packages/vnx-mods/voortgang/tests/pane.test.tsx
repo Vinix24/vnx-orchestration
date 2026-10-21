@@ -509,7 +509,9 @@ describe('the open PRs sit in Nu bezig', () => {
   test('keeps the row of a PR under the bezig deliverable it belongs to', async ($, on) => {
     const { files, run } = scenarioOf('project-a')
     const items = deliverablesOf(run)
-    items.find((one: { deliverable_ref: string }) => one.deliverable_ref === 'pr:dlv-b-2').derived_status = 'in_progress'
+    const found = items.find((one: { deliverable_ref: string }) => one.deliverable_ref === 'pr:dlv-b-2')
+    expect(found).toBeDefined()
+    if (found) found.derived_status = 'in_progress'
     await started($, on, { files, run: argv => (argv[1] === 'deliverable' ? { exitCode: 0, stdout: JSON.stringify(items) } : run(argv)) })
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: sizeOf(44, 100) })
     const lines = await linesOf(ui)
@@ -687,7 +689,9 @@ describe('the room', () => {
   test('gives the Nu bezig section its items first, and a +N row for the rest', async ($, on) => {
     const { files, run } = scenarioOf('project-a')
     const items = deliverablesOf(run)
-    items.find((one: { deliverable_ref: string }) => one.deliverable_ref === 'pr:dlv-b-2').derived_status = 'in_progress'
+    const found = items.find((one: { deliverable_ref: string }) => one.deliverable_ref === 'pr:dlv-b-2')
+    expect(found).toBeDefined()
+    if (found) found.derived_status = 'in_progress'
     await started($, on, { files, run: argv => (argv[1] === 'deliverable' ? { exitCode: 0, stdout: JSON.stringify(items) } : run(argv)) })
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: sizeOf(5, 100) })
 
