@@ -2,6 +2,27 @@
 
 All notable changes to this plugin are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the plugin follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-10-21
+
+The pane showed every project on the machine, so each list collapsed to a bare `+N meer` and the project of the session fell off the bottom. It now shows the one project of the session, with progress per track.
+
+### Changed
+
+- One project per session: the project is the one whose `.vnx-project-id` lies above the session's working directory (the first line, trimmed, as `bin/vnx` reads it). Without one the pane says `geen VNX-project in deze map (geen .vnx-project-id boven <cwd>)` and the status line is empty. It never falls back to another project.
+- The pane is in sections, in this order: `Nu bezig` (per builder its model, minutes, title, track and PR), `Wacht op een besluit` (deliverables to promote, open outcomes), `Tracks`, `PR's`, `opruimen`.
+- Tracks are the `now` tracks plus every track with activity (a builder, an open PR, a deliverable active in the last 7 days), activity first, then priority. A track shows `X van Y klaar` with a bar of 8 cells, or `geen leveringen gepland` when it has no deliverables.
+- The sections share the pane's rows in that order. A cut section shows what fits plus `+N niet getoond`, never without an item above it.
+- `verouderd` stands once, on the header, instead of on every row. The `stale` and `unmeasured` counts moved to one dim `opruimen` row.
+- The status line is `<id> · N bouwers · N PR · N te promoveren · N uitkomsten`, plus `verouderd` and `onleesbaar` when they apply.
+- Headless, `/voortgang` answers with the status line and one line per shown track.
+- A builder reads `track_id` and `pr_id` of its spec besides `model`; `role` is no longer read. An open PR reads the `track_id` of its dispatch spec.
+- Deliverables read `last_activity`, tracks read `pr_ref`.
+
+### Removed
+
+- The fleet: the option `exclude`, the listing of the data root and the split of the rows per project.
+- The horizon counts (`now`/`next`/`later`/`zonder horizon`), the id lists (`live`, `besluit nodig`), the per-status deliverable counts and the per-row `verouderd`.
+
 ## [0.2.1] - 2026-10-21
 
 ### Fixed

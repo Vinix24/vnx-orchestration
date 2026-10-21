@@ -6,6 +6,11 @@ export const ROOT = `${HOME}/.vnx-data`
 export const BIN = `${HOME}/.vnx-system/current/bin/vnx`
 export const NOW = Date.parse('2026-10-20T16:00:00.000Z')
 
+/** The working directory of a session, two levels below the directory that holds `.vnx-project-id`. */
+export const CWD = '/work/project-a/src/deep'
+export const PROJECT_DIR = '/work/project-a'
+export const projectIdFileOf = (dir: string) => `${dir}/.vnx-project-id`
+
 export const storeOf = (project: string) => `${ROOT}/${project}/state`
 export const indexOf = (project: string) => `${storeOf(project)}/t0_index.json`
 export const stateOf = (project: string) => `${storeOf(project)}/t0_state.json`
@@ -26,7 +31,7 @@ export const LIVE_WORK = {
   live: [{ dispatch_id: 'd-live-1', state: 'running', age_seconds: 725, pr: null }],
   stale: [{ dispatch_id: 'd-stale-1', state: 'stale', age_seconds: 9000, lock: 'x' }],
   unmeasured: [],
-  open_prs: [],
+  open_prs: [{ number: 2063, dispatch_id: 'd-pr-1' }],
 }
 
 /**
@@ -94,30 +99,35 @@ export function stateJson(options: { ageMinutes?: number; prQueue?: unknown } = 
   })
 }
 
-const track = (track_id: string, horizon: string | null, priority = 'P2', phase = 'queued', derived_status = phase) => ({
+const track = (track_id: string, horizon: string | null, priority: string | null = 'P2', pr_ref: string | null = null) => ({
   track_id,
   title: CONTENT,
-  phase,
-  derived_status,
+  phase: 'queued',
+  derived_status: 'queued',
   horizon,
   priority,
+  pr_ref,
 })
 
+/** now: ci-profile, docs. Activity: bld (a builder), kosten (the spec of PR 2063's dispatch), viaref (pr_ref lists 2063), fresh (a recent deliverable). */
 export const TRACKS = [
-  track('ci-profile', 'now', 'P1', 'queued', 'in_progress'),
-  track('docs', 'now', 'P2', 'active', 'active'),
+  track('ci-profile', 'now', 'P1', '#2001,#2002'),
+  track('docs', 'now', 'P2'),
+  track('fresh', 'later', 'P3'),
+  track('viaref', 'next', 'P2', '#2063'),
+  track('kosten', 'next', 'P1'),
+  track('bld', 'later', 'P2'),
+  track('old-d', 'later', 'P2'),
   track('n1', 'next'),
-  track('n2', 'next'),
   track('l1', 'later'),
-  track('l2', 'later'),
-  track('l3', 'later'),
-  track('u1', null),
+  track('u1', null, null),
 ]
 
-const deliverable = (trackId: string, derived_status: string) => ({
-  deliverable_ref: `${trackId}-${derived_status}`,
+const deliverable = (trackId: string, derived_status: string, daysAgo = 30) => ({
+  deliverable_ref: `${trackId}-${derived_status}-${daysAgo}`,
   track: trackId,
   derived_status,
+  last_activity: stampMinutesAgo(daysAgo * 24 * 60),
   title: CONTENT,
 })
 
@@ -127,18 +137,26 @@ export const DELIVERABLES = [
   deliverable('ci-profile', 'done'),
   deliverable('ci-profile', 'done'),
   deliverable('ci-profile', 'done'),
+  deliverable('ci-profile', 'done'),
+  deliverable('ci-profile', 'done'),
   deliverable('ci-profile', 'failed'),
   deliverable('docs', 'ready'),
+  deliverable('fresh', 'done', 2),
+  deliverable('old-d', 'done', 8),
   deliverable('l1', 'proposed'),
 ]
 
-export const SPEC = { role: 'backend-developer', model: 'sonnet', provider: 'claude', instruction_file: CONTENT }
+export const SPEC = { role: 'backend-developer', model: 'sonnet', provider: 'claude', track_id: 'bld', pr_id: '#2150', instruction_file: CONTENT }
+/** The spec of the dispatch behind PR 2063: it names the track `kosten`. */
+export const PR_SPEC = { role: 'backend-developer', model: 'opus', track_id: 'kosten', pr_id: null }
 
 /** An instruction whose first `# ` line is the task; the lines around it must never reach the pane. */
 export const instructionText = (title: string) => `Preface line ${CONTENT}\n## Not a title\n# ${title}\n\nBody ${CONTENT}\n# Second title ${CONTENT}\n`
 
 /** The files of a healthy store: the two state files, the database, and the spec and instruction of its one builder. */
 export const healthyFiles = (project: string): Record<string, string> => ({
+  [projectIdFileOf(PROJECT_DIR)]: `${project}\n`,
+  [specOf(project, 'd-pr-1')]: JSON.stringify(PR_SPEC),
   [indexOf(project)]: indexJson(),
   [stateOf(project)]: stateJson(),
   [dbOf(project)]: '',
@@ -161,23 +179,14 @@ export const healthyRun = (argv: readonly string[]): RunAnswer => {
   return { deny: `unexpected argv ${argv.join(' ')}` }
 }
 
-/** The first path segment under `dir` of every file and directory that lives below it, in listing order. */
-export const childNames = (dir: string, files: Record<string, string>, dirs: string[]): string[] => {
-  const prefix = `${dir.replace(/\/+$/, '')}/`
-  const below = [...Object.keys(files), ...dirs].filter(path => path.startsWith(prefix))
-
-  return [...new Set(below.map(path => path.slice(prefix.length).split('/')[0] ?? ''))]
-}
-
 export type World = {
   reads: string[]
   exists: string[]
-  lists: string[]
   runs: { argv: string[]; cwd: string | undefined; timeoutMs: number | undefined }[]
   statuses: (string | undefined)[]
   opened: { id: string; title: string | undefined }[]
   commands: string[]
-  /** Every call the mod must never make: a write, a listing of anything but the data root, a stat, the store. */
+  /** Every call the mod must never make: a write, a listing, a stat, the store. */
   forbidden: string[]
 }
 
@@ -185,8 +194,6 @@ export type WorldSetup = {
   files: Record<string, string>
   /** Store directories that exist without the files in them. */
   dirs?: string[]
-  /** The reason listing the data root fails; it lists fine when absent. */
-  unlistable?: string
   run?: (argv: readonly string[]) => RunAnswer
   env?: Record<string, string>
   /** The reason `$.ui.open` gives when it does not place the pane; placed when absent. */
@@ -197,7 +204,7 @@ export type WorldSetup = {
 
 /** The engine beneath the mod, in memory: the file tree, `vnx`, the display, and a record of each call. */
 export function worldOf(on: On, setup: WorldSetup): World {
-  const world: World = { reads: [], exists: [], lists: [], runs: [], statuses: [], opened: [], commands: [], forbidden: [] }
+  const world: World = { reads: [], exists: [], runs: [], statuses: [], opened: [], commands: [], forbidden: [] }
   const env = setup.env ?? { HOME }
   const run = setup.run ?? healthyRun
   const isDir = (path: string) =>
@@ -223,21 +230,9 @@ export function worldOf(on: On, setup: WorldSetup): World {
   })
 
   on('fs.list', ($, e) => {
-    if (e.path !== ROOT) {
-      world.forbidden.push(`list ${e.path}`)
+    world.forbidden.push(`list ${e.path}`)
 
-      return { deny: 'the mod lists only the data root' }
-    }
-
-    world.lists.push(e.path)
-
-    if (setup.unlistable !== undefined) {
-      return { deny: setup.unlistable }
-    }
-
-    return {
-      value: childNames(ROOT, setup.files, setup.dirs ?? []).map(name => ({ name, kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false })),
-    }
+    return { deny: 'the mod lists nothing' }
   })
 
   on('fs.stat', ($, e) => {
@@ -298,7 +293,7 @@ export function worldOf(on: On, setup: WorldSetup): World {
   return world
 }
 
-export const SESSION: SessionStartInput = { surface: 'terminal', isInteractive: true, cwd: '/work' }
+export const SESSION: SessionStartInput = { surface: 'terminal', isInteractive: true, cwd: CWD }
 
 export const command = (name: string, args = '') => ({
   command: name,

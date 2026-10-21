@@ -10,9 +10,12 @@ import type {
   Outcomes,
   Part,
   Pr,
+  PrDispatch,
   ProjectModel,
   Running,
   StateView,
+  TrackDeliverables,
+  TrackInfo,
   TrackView,
 } from '../types'
 
@@ -25,7 +28,7 @@ export type Io = {
   run: (argv: readonly string[], init: ProcessRunInit) => Promise<ProcessRunResult>
 }
 
-export type Config = { exclude: string[]; dataRoot: string; vnxBin: string; refreshSeconds: number }
+export type Config = { dataRoot: string; vnxBin: string; refreshSeconds: number }
 
 export const STALE_MINUTES = 60
 export const RUN_TIMEOUT_MS = 10_000
@@ -35,6 +38,11 @@ export const STATE_FILE = 't0_state.json'
 export const DB_FILE = 'runtime_coordination.db'
 export const SPEC_FILE = 'dispatch-spec.json'
 export const INSTRUCTION_FILE = 'instruction.md'
+export const PROJECT_ID_FILE = '.vnx-project-id'
+/** A deliverable counts as recent activity of its track when its `last_activity` is at most this old. */
+export const RECENT_DAYS = 7
+/** The cells of a progress bar. */
+export const BAR_CELLS = 8
 /** How much of `instruction.md` is searched for its first `# ` line, in characters. */
 export const INSTRUCTION_BUDGET = 4096
 
@@ -65,8 +73,6 @@ const dictionaryOf = <T>(entries: Iterable<readonly [string, T]> = []): Record<s
 
   return dictionary
 }
-const idsOf = (value: unknown): string[] =>
-  Array.isArray(value) ? value.flatMap(one => (isRecord(one) && typeof one.dispatch_id === 'string' ? [one.dispatch_id] : [])) : []
 
 /** The reason a rejected `exists`, `read`, `list` or `run` is shown with. */
 const unavailableOf = (error: unknown): `onbeschikbaar: ${string}` => `onbeschikbaar: ${messageOf(error)}`
@@ -78,18 +84,11 @@ export function messageOf(error: unknown): string {
   return line.length > MESSAGE_CHARS ? `${line.slice(0, MESSAGE_CHARS - 1)}…` : line
 }
 
-export function projectsOf(text: string): string[] {
-  const ids = text.split(',').map(one => one.trim()).filter(one => one !== '')
-
-  return [...new Set(ids)]
-}
-
 export function configOf(options: PluginOptions): Config {
   const pathOf = (value: unknown, fallback: string) => (typeof value === 'string' && value.trim() !== '' ? value.trim() : fallback)
   const seconds = options.refresh_seconds
 
   return {
-    exclude: projectsOf(typeof options.exclude === 'string' ? options.exclude : ''),
     dataRoot: pathOf(options.data_root, DEFAULT_DATA_ROOT),
     vnxBin: pathOf(options.vnx_bin, DEFAULT_VNX_BIN),
     refreshSeconds: isCount(seconds) ? Math.max(MIN_REFRESH_SECONDS, seconds) : DEFAULT_REFRESH_SECONDS,
@@ -214,6 +213,17 @@ function runningOf(block: Json, counts: Json): Part<Running[]> {
   return ok(running)
 }
 
+/** `live_work.open_prs`: which dispatch opened which PR. An entry that is not a number with a dispatch id says nothing and is left out. */
+function livePrsOf(value: unknown): PrDispatch[] {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  return value.flatMap(one =>
+    isRecord(one) && isCount(one.number) && typeof one.dispatch_id === 'string' && one.dispatch_id !== '' ? [{ number: one.number, dispatchId: one.dispatch_id }] : [],
+  )
+}
+
 function liveWorkOf(value: unknown): Part<LiveWork> {
   const block = blockOf(value, 'live_work')
 
@@ -232,7 +242,7 @@ function liveWorkOf(value: unknown): Part<LiveWork> {
     starting: counts.starting as number,
     stale: counts.stale as number,
     unmeasured: counts.unmeasured as number,
-    liveIds: idsOf(block.value.live),
+    openPrs: livePrsOf(block.value.open_prs),
     running: runningOf(block.value, counts),
   })
 }
@@ -244,17 +254,13 @@ function outcomesOf(value: unknown): Part<Outcomes> {
     return fail(block.reason)
   }
 
-  const { total, by_outcome: byOutcome } = block.value
+  const { total } = block.value
 
   if (!isCount(total)) {
     return fail('total ontbreekt')
   }
 
-  return ok({
-    total,
-    byOutcome: dictionaryOf(isRecord(byOutcome) ? Object.entries(byOutcome).flatMap(([name, count]) => (isCount(count) ? [[name, count] as const] : [])) : []),
-    ids: idsOf(block.value.items),
-  })
+  return ok({ total })
 }
 
 export function indexViewOf(json: unknown, now: number): Part<IndexView> {
@@ -308,12 +314,9 @@ export function stateViewOf(json: unknown, now: number): Part<StateView> {
   return ok({ ageMinutes: ageMinutesOf(json.generated_at, now), prs: prsOf(json.pr_queue) })
 }
 
-const byPriority = (a: NowTrack, b: NowTrack) => {
-  if (a.priority !== b.priority) {
-    return a.priority < b.priority ? -1 : 1
-  }
-
-  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
+/** `pr_ref` of a track is one string of PR numbers (`#2139,#2142`); the numbers, in order. */
+export function prRefsOf(value: unknown): number[] {
+  return typeof value === 'string' ? [...value.matchAll(/\d+/g)].map(one => Number(one[0])) : []
 }
 
 export function trackViewOf(json: unknown): Part<TrackView> {
@@ -321,39 +324,23 @@ export function trackViewOf(json: unknown): Part<TrackView> {
     return fail('vnx gaf geen lijst')
   }
 
-  const view: TrackView = { now: [], next: 0, later: 0, unplanned: 0 }
   const malformed = json.findIndex(one => !isRecord(one))
 
   if (malformed >= 0) {
     return fail(`vnx gaf geen object op plaats ${malformed + 1}`)
   }
 
-  for (const track of json as Json[]) {
-    if (track.horizon === 'now') {
-      const phase = textOr(track.phase, '?')
-      const derived = track.derived_status
+  const tracks: TrackInfo[] = (json as Json[]).map(track => ({
+    id: textOr(track.track_id, '?'),
+    priority: textOr(track.priority, '-'),
+    horizon: textOr(track.horizon, '-'),
+    prRefs: prRefsOf(track.pr_ref),
+  }))
 
-      view.now.push({
-        id: textOr(track.track_id, '?'),
-        priority: textOr(track.priority, '-'),
-        phase,
-        derivedStatus: typeof derived === 'string' && derived !== '' && derived !== phase ? derived : null,
-      })
-    } else if (track.horizon === 'next') {
-      view.next += 1
-    } else if (track.horizon === 'later') {
-      view.later += 1
-    } else {
-      view.unplanned += 1
-    }
-  }
-
-  view.now.sort(byPriority)
-
-  return ok(view)
+  return ok({ tracks })
 }
 
-export function deliverableViewOf(json: unknown): Part<DeliverableView> {
+export function deliverableViewOf(json: unknown, now: number): Part<DeliverableView> {
   if (!Array.isArray(json)) {
     return fail('vnx gaf geen lijst')
   }
@@ -368,9 +355,12 @@ export function deliverableViewOf(json: unknown): Part<DeliverableView> {
   for (const deliverable of json as Json[]) {
     const track = textOr(deliverable.track, '?')
     const status = textOr(deliverable.derived_status, 'onbekend')
-    const counts = view.byTrack[track] ?? dictionaryOf<number>()
+    const age = ageMinutesOf(deliverable.last_activity, now)
+    const counts: TrackDeliverables = view.byTrack[track] ?? { total: 0, done: 0, isRecent: false }
 
-    counts[status] = (counts[status] ?? 0) + 1
+    counts.total += 1
+    counts.done += status === 'done' ? 1 : 0
+    counts.isRecent = counts.isRecent || (age !== null && age <= RECENT_DAYS * 24 * 60)
     view.byTrack[track] = counts
 
     if (status === 'proposed') {
@@ -433,23 +423,22 @@ export function titleOf(text: string): Part<string> {
   return fail(isCut ? `geen titelregel in de eerste ${INSTRUCTION_BUDGET} tekens` : 'geen titelregel')
 }
 
-/** `role` and `model` of a dispatch spec. */
-export function whoOf(json: unknown): Part<{ role: string; model: string }> {
+/** A spec field that is a non-empty string, or null when the spec sets none. */
+const optionalTextOf = (value: unknown): string | null => (typeof value === 'string' && value.trim() !== '' ? value.trim() : null)
+
+/** `model`, `track_id` and `pr_id` of a dispatch spec; the last two are null when the spec sets none. */
+export function whoOf(json: unknown): Part<{ model: string; trackId: string | null; prId: string | null }> {
   if (!isRecord(json)) {
     return fail('spec is geen JSON-object')
   }
 
-  const { role, model } = json
-
-  if (typeof role !== 'string' || role === '') {
-    return fail('role ontbreekt')
-  }
+  const { model, track_id: trackId, pr_id: prId } = json
 
   if (typeof model !== 'string' || model === '') {
     return fail('model ontbreekt')
   }
 
-  return ok({ role, model })
+  return ok({ model, trackId: optionalTextOf(trackId), prId: isCount(prId) ? String(prId) : optionalTextOf(prId) })
 }
 
 /** The minutes of an `age_seconds`, whole. */
@@ -472,6 +461,8 @@ async function builderOf(io: Io, dir: string, entry: Running): Promise<Builder> 
   return { who, task, minutes }
 }
 
+const dispatchesOf = (root: string, id: string) => `${root.replace(/\/+$/, '')}/${id}/dispatches/pending`
+
 /** The builders of a project, in the order of the index: `live` first, then `starting`. */
 async function buildersOf(io: Io, root: string, id: string, index: Part<IndexView>): Promise<Part<Builder[]>> {
   if (!index.isOk) {
@@ -490,9 +481,38 @@ async function buildersOf(io: Io, root: string, id: string, index: Part<IndexVie
     return fail(running.reason)
   }
 
-  const dir = `${root.replace(/\/+$/, '')}/${id}/dispatches/pending`
+  const dir = dispatchesOf(root, id)
 
   return ok(await Promise.all(running.value.map(entry => builderOf(io, dir, entry))))
+}
+
+/**
+ * The track that the dispatch of each open PR names in its spec. A spec that is gone (the dispatch left `pending/`)
+ * or has no `track_id` links nothing: the PR still shows under the tracks whose `pr_ref` lists it.
+ */
+async function prTracksOf(io: Io, root: string, id: string, index: Part<IndexView>): Promise<Record<number, string>> {
+  if (!index.isOk || !index.value.liveWork.isOk) {
+    return {}
+  }
+
+  const dir = dispatchesOf(root, id)
+  const linked: Record<number, string> = {}
+
+  await Promise.all(
+    index.value.liveWork.value.openPrs.map(async ({ number, dispatchId }) => {
+      if (!isProjectId(dispatchId)) {
+        return
+      }
+
+      const who = andThen(await readJson(io, `${dir}/${dispatchId}/${SPEC_FILE}`, SPEC_FILE), whoOf)
+
+      if (who.isOk && who.value.trackId !== null) {
+        linked[number] = who.value.trackId
+      }
+    }),
+  )
+
+  return linked
 }
 
 /** Builders the counts name that the index lists no entry for: its list is capped, the counts are not. */
@@ -527,7 +547,7 @@ async function runJson(io: Io, argv: string[], store: string): Promise<Part<unkn
 }
 
 /**
- * One project: the store directory, its two files and the two vnx lists, each
+ * The project: the store directory, its two files and the two vnx lists, each
  * part read on its own so one that fails leaves the others standing.
  */
 export async function collectProject(io: Io, id: string, root: string, bin: string, now: number): Promise<ProjectModel> {
@@ -549,6 +569,7 @@ export async function collectProject(io: Io, id: string, root: string, bin: stri
   const state = andThen(await readJson(io, `${store}/${STATE_FILE}`, STATE_FILE), json => stateViewOf(json, now))
   const builders = await buildersOf(io, root, id, index)
   const buildersOmitted = omittedOf(index, builders)
+  const prTracks = await prTracksOf(io, root, id, index)
 
   // `vnx objective list` and `vnx deliverable list` create the database when the store has none; the mod writes nothing.
   const hasDb = await existsPart(io, `${store}/${DB_FILE}`)
@@ -556,62 +577,77 @@ export async function collectProject(io: Io, id: string, root: string, bin: stri
   if (!hasDb.isOk || !hasDb.value) {
     const reason = hasDb.isOk ? `${DB_FILE} ontbreekt` : hasDb.reason
 
-    return { id, hasStore: true, index, state, tracks: fail(reason), deliverables: fail(reason), builders, buildersOmitted }
+    return { id, hasStore: true, index, state, tracks: fail(reason), deliverables: fail(reason), builders, buildersOmitted, prTracks }
   }
 
   const tracks = andThen(await runJson(io, objectiveArgv(bin, id, store), store), trackViewOf)
-  const deliverables = andThen(await runJson(io, deliverableArgv(bin, id, store), store), deliverableViewOf)
+  const deliverables = andThen(await runJson(io, deliverableArgv(bin, id, store), store), json => deliverableViewOf(json, now))
 
-  return { id, hasStore: true, index, state, tracks, deliverables, builders, buildersOmitted }
+  return { id, hasStore: true, index, state, tracks, deliverables, builders, buildersOmitted, prTracks }
+}
+
+/** The directories from `cwd` up to `/`, nearest first. */
+export function ancestorsOf(cwd: string): string[] {
+  const parts = cwd.split('/').filter(part => part !== '')
+  const dirs: string[] = []
+
+  for (let depth = parts.length; depth > 0; depth -= 1) {
+    dirs.push(`/${parts.slice(0, depth).join('/')}`)
+  }
+
+  return [...dirs, '/']
 }
 
 /**
- * The ids of the project stores: each direct child of the data root that holds
- * `state/t0_index.json` or `state/t0_state.json`, in id order. One listing of the
- * root, then existence checks no deeper than `<id>/state/`.
+ * The project id of a session: walk up from `cwd` to the first directory that holds `.vnx-project-id`; its first
+ * line, trimmed, is the id (the rule `bin/vnx` follows). The nearest file decides, as there. Never another project.
  */
-export async function discoverIds(io: Io, root: string, exclude: readonly string[]): Promise<Part<string[]>> {
-  let names: string[]
+export async function resolveProject(io: Io, cwd: string): Promise<Part<string>> {
+  for (const dir of ancestorsOf(cwd)) {
+    const file = `${dir === '/' ? '' : dir}/${PROJECT_ID_FILE}`
+    const found = await existsPart(io, file)
 
-  try {
-    names = await io.list(root)
-  } catch (error) {
-    return fail(messageOf(error) || 'map niet te lezen')
-  }
-
-  const candidates = [...new Set(names)].filter(name => isProjectId(name) && !exclude.includes(name)).sort()
-  const isStore = async (id: string) => {
-    const store = storeOf(root, id)
-
-    try {
-      return (await io.exists(`${store}/${INDEX_FILE}`)) || (await io.exists(`${store}/${STATE_FILE}`))
-    } catch {
-      // A check that fails cannot rule the project out: it is listed and collectProject shows why it is unavailable.
-      return true
+    if (!found.isOk) {
+      return fail(found.reason)
     }
-  }
-  const found = await Promise.all(candidates.map(async id => ((await isStore(id)) ? [id] : [])))
 
-  return ok(found.flat())
+    if (!found.value) {
+      continue
+    }
+
+    const text = await readText(io, file, PROJECT_ID_FILE)
+
+    if (!text.isOk) {
+      return fail(text.reason)
+    }
+
+    const id = (text.value.split('\n')[0] ?? '').trim()
+
+    return isProjectId(id) ? ok(id) : fail(`${PROJECT_ID_FILE} in ${dir} bevat geen geldige project-id`)
+  }
+
+  return fail(`geen VNX-project in deze map (geen ${PROJECT_ID_FILE} boven ${cwd})`)
 }
 
-export async function collectModel(io: Io, config: Config, home: string | undefined, now: number): Promise<Model> {
+export async function collectModel(io: Io, config: Config, home: string | undefined, cwd: string | null, now: number): Promise<Model> {
+  if (cwd === null) {
+    return { collectedAt: now, noProject: 'geen VNX-project in deze map (werkmap onbekend)', project: null }
+  }
+
+  const id = await resolveProject(io, cwd)
+
+  if (!id.isOk) {
+    return { collectedAt: now, noProject: id.reason, project: null }
+  }
+
   const root = expandHome(config.dataRoot, home)
   const bin = expandHome(config.vnxBin, home)
 
   if (root === null || bin === null) {
-    return { collectedAt: now, rootError: HOME_UNKNOWN, projects: [] }
+    return { collectedAt: now, noProject: HOME_UNKNOWN, project: null }
   }
 
-  const ids = await discoverIds(io, root, config.exclude)
-
-  if (!ids.isOk) {
-    return { collectedAt: now, rootError: ids.reason, projects: [] }
-  }
-
-  const projects = await Promise.all(ids.value.map(id => collectProject(io, id, root, bin, now)))
-
-  return { collectedAt: now, rootError: null, projects }
+  return { collectedAt: now, noProject: null, project: await collectProject(io, id.value, root, bin, now) }
 }
 
 export function isUnreadable(project: ProjectModel): boolean {
@@ -644,96 +680,136 @@ export function isOutdated(project: ProjectModel): boolean {
   return (index.isOk && isStale(index.value.ageMinutes)) || (state.isOk && isStale(state.value.ageMinutes))
 }
 
-const liveOf = (project: ProjectModel): number | null =>
-  project.hasStore && project.index.isOk && project.index.value.liveWork.isOk ? project.index.value.liveWork.value.live : null
-const openOf = (project: ProjectModel): number | null =>
-  project.hasStore && project.index.isOk && project.index.value.outcomes.isOk ? project.index.value.outcomes.value.total : null
-const builderCountOf = (project: ProjectModel): number | null =>
-  project.hasStore && project.builders.isOk ? project.builders.value.length + project.buildersOmitted : null
-const prCountOf = (project: ProjectModel): number | null =>
-  project.hasStore && project.state.isOk && project.state.value.prs.isOk ? project.state.value.prs.value.length : null
+const countOf = (value: number | null): string => (value === null ? '?' : String(value))
 
-/** The sum over the projects that could be read; `?` when none could. */
-function sumOf(model: Model, pick: (project: ProjectModel) => number | null): string {
-  const counts = model.projects.map(pick).filter((count): count is number => count !== null)
-
-  return counts.length === 0 ? '?' : String(counts.reduce((sum, count) => sum + count, 0))
+/** The number of builders: the counts of the live work, not the capped list. Null when it could not be read. */
+export function builderCountOf(project: ProjectModel): number | null {
+  return project.hasStore && project.builders.isOk ? project.builders.value.length + project.buildersOmitted : null
 }
 
-/** The one line under the prompt: totals, then how many projects could not be read or are outdated. */
+/** The open PRs of the PR queue; null when it could not be read. */
+export function openPrsOf(project: ProjectModel): Pr[] | null {
+  return project.hasStore && project.state.isOk && project.state.value.prs.isOk ? project.state.value.prs.value : null
+}
+
+/** One track the pane shows: the track, its measured progress, and what is going on around it. */
+export type ShownTrack = {
+  track: TrackInfo
+  /** Null when the track has no deliverables, or when the deliverables could not be read (`unreadable`). */
+  progress: TrackDeliverables | null
+  /** Why the deliverables could not be read; null when they could. */
+  unreadable: string | null
+  builders: number
+  /** The PRs of `pr_ref`, `isOpen` when the PR queue lists them. */
+  prs: { number: number; isOpen: boolean }[]
+  hasActivity: boolean
+}
+
+const PRIORITY_ORDER = ['P1', 'P2', 'P3']
+
+const rankOf = (priority: string): number => {
+  const at = PRIORITY_ORDER.indexOf(priority)
+
+  return at < 0 ? PRIORITY_ORDER.length : at
+}
+
+/**
+ * The tracks the pane shows: every `now` track, and every track with activity (a builder whose spec names it, an
+ * open PR that its `pr_ref` lists or whose dispatch spec names it, a deliverable with recent `last_activity`).
+ * Tracks with activity first, then by priority, then by id. Null when the tracks could not be read.
+ */
+export function shownTracksOf(project: ProjectModel): ShownTrack[] | null {
+  if (!project.hasStore || !project.tracks.isOk) {
+    return null
+  }
+
+  const deliverables = project.deliverables.isOk ? project.deliverables.value.byTrack : null
+  const openNumbers = new Set((openPrsOf(project) ?? []).map(pr => pr.number))
+  const builderTracks = project.builders.isOk ? project.builders.value.flatMap(builder => (builder.who.isOk && builder.who.value.trackId !== null ? [builder.who.value.trackId] : [])) : []
+  const shown: ShownTrack[] = []
+
+  for (const track of project.tracks.value.tracks) {
+    const progress = deliverables?.[track.id] ?? null
+    const builders = builderTracks.filter(id => id === track.id).length
+    // An open PR whose dispatch spec names the track belongs to it even when `pr_ref` does not list it yet.
+    const named = Object.entries(project.prTracks).flatMap(([number, id]) => (id === track.id && openNumbers.has(Number(number)) ? [Number(number)] : []))
+    const numbers = [...new Set([...track.prRefs, ...named])]
+    const prs = numbers.map(number => ({ number, isOpen: openNumbers.has(number) }))
+    const hasActivity = builders > 0 || prs.some(pr => pr.isOpen) || (progress?.isRecent ?? false)
+
+    if (track.horizon === 'now' || hasActivity) {
+      shown.push({ track, progress, unreadable: project.deliverables.isOk ? null : project.deliverables.reason, builders, prs, hasActivity })
+    }
+  }
+
+  return shown.sort((a, b) => {
+    if (a.hasActivity !== b.hasActivity) {
+      return a.hasActivity ? -1 : 1
+    }
+
+    if (rankOf(a.track.priority) !== rankOf(b.track.priority)) {
+      return rankOf(a.track.priority) - rankOf(b.track.priority)
+    }
+
+    return a.track.id < b.track.id ? -1 : a.track.id > b.track.id ? 1 : 0
+  })
+}
+
+/** `X van Y klaar` for a track with deliverables, `geen leveringen gepland` for one without. */
+export function progressText(one: ShownTrack): string {
+  if (one.unreadable !== null) {
+    return `leveringen onbeschikbaar: ${one.unreadable}`
+  }
+
+  return one.progress === null ? 'geen leveringen gepland' : `${one.progress.done} van ${one.progress.total} klaar`
+}
+
+/** The bar of `BAR_CELLS` cells: `▓` for done, `░` for the rest, rounded down. */
+export function barOf(progress: TrackDeliverables): string {
+  const filled = Math.floor((BAR_CELLS * progress.done) / progress.total)
+
+  return '▓'.repeat(filled) + '░'.repeat(BAR_CELLS - filled)
+}
+
+/** The one line under the prompt; empty when the session is in no VNX project. */
 export function statusLine(model: Model): string {
-  if (model.rootError !== null) {
-    return `voortgang · onbeschikbaar: ${model.rootError}`
+  const { project } = model
+
+  if (project === null) {
+    return ''
   }
 
-  if (model.projects.length === 0) {
-    return 'voortgang · geen projecten'
-  }
-
-  const unreadable = model.projects.filter(isUnreadable).length
-  const outdated = model.projects.filter(isOutdated).length
-  const parts = ['voortgang', `${sumOf(model, liveOf)} live`, `${sumOf(model, prCountOf)} PR`, `${sumOf(model, openOf)} open`, `${sumOf(model, builderCountOf)} bouwers`]
-
-  if (unreadable > 0) {
-    parts.push(`${unreadable} onleesbaar`)
-  }
-
-  if (outdated > 0) {
-    parts.push(`${outdated} verouderd`)
-  }
-
-  return parts.join(' · ')
-}
-
-function summaryOf(project: ProjectModel): string {
-  if (!project.hasStore) {
-    return `${project.id}: ${project.reason}`
-  }
-
-  const { index, state, tracks, deliverables } = project
-  const parts: string[] = []
-
-  if (!index.isOk) {
-    parts.push('index onbeschikbaar')
-  } else {
-    const { liveWork } = index.value
-
-    parts.push(liveWork.isOk ? `${liveWork.value.live} live` : 'werk onbeschikbaar')
-  }
-
-  parts.push(state.isOk && state.value.prs.isOk ? `${state.value.prs.value.length} PR` : "PR's onbeschikbaar")
-
-  if (index.isOk) {
-    const { outcomes } = index.value
-
-    parts.push(outcomes.isOk ? `${outcomes.value.total} open` : 'uitkomsten onbeschikbaar')
-  }
-
-  if (tracks.isOk) {
-    const ids = tracks.value.now.map(track => track.id)
-
-    parts.push(`now ${ids.length === 0 ? 'geen' : ids.join(', ')}`, `next ${tracks.value.next}`, `later ${tracks.value.later}`)
-  } else {
-    parts.push('tracks onbeschikbaar')
-  }
-
-  parts.push(project.builders.isOk ? `${project.builders.value.length + project.buildersOmitted} bouwers` : 'bouwers onbeschikbaar')
-  parts.push(deliverables.isOk ? `${deliverables.value.proposed} te promoveren` : 'leveringen onbeschikbaar')
+  const proposed = project.hasStore && project.deliverables.isOk ? project.deliverables.value.proposed : null
+  const outcomes = project.hasStore && project.index.isOk && project.index.value.outcomes.isOk ? project.index.value.outcomes.value.total : null
+  const prs = openPrsOf(project)
+  const parts = [project.id, `${countOf(builderCountOf(project))} bouwers`, `${countOf(prs === null ? null : prs.length)} PR`, `${countOf(proposed)} te promoveren`, `${countOf(outcomes)} uitkomsten`]
 
   if (isOutdated(project)) {
     parts.push('verouderd')
   }
 
-  return `${project.id}: ${parts.join(' · ')}`
-}
-
-/** One line per project: track ids and counts, no content. */
-export function summaryLines(model: Model): string[] {
-  if (model.rootError !== null) {
-    return [`onbeschikbaar: ${model.rootError}`]
+  if (isUnreadable(project)) {
+    parts.push('onleesbaar')
   }
 
-  return model.projects.map(summaryOf)
+  return parts.join(' · ')
+}
+
+/** The summary of `/voortgang` where no surface draws the pane: the status line, then one line per shown track. */
+export function summaryLines(model: Model): string[] {
+  if (model.project === null) {
+    return [model.noProject ?? '']
+  }
+
+  const tracks = shownTracksOf(model.project)
+
+  if (tracks === null) {
+    const reason = model.project.hasStore && !model.project.tracks.isOk ? model.project.tracks.reason : model.project.hasStore ? '' : model.project.reason
+
+    return [statusLine(model), `tracks onbeschikbaar: ${reason}`]
+  }
+
+  return [statusLine(model), ...tracks.map(one => `${one.track.priority} ${one.track.id} · ${progressText(one)}`)]
 }
 
 /**
@@ -743,8 +819,8 @@ export function summaryLines(model: Model): string[] {
  */
 export function commandText(model: Model, unplacedReason: string | null): string {
   if (unplacedReason === null) {
-    return `Voortgang geopend: ${statusLine(model).replace(/^voortgang · /, '')}`
+    return model.project === null ? `Voortgang: ${model.noProject ?? ''}` : `Voortgang geopend: ${statusLine(model)}`
   }
 
-  return [`Voortgang (paneel niet getoond: ${unplacedReason})`, ...summaryLines(model)].join('\n')
+  return summaryLines(model).join('\n')
 }

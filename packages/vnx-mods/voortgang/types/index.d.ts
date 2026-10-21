@@ -4,6 +4,9 @@
  */
 export type Part<T> = { isOk: true; value: T } | { isOk: false; reason: string }
 
+/** One entry of `live_work.open_prs`: an open PR and the dispatch that opened it. */
+export type PrDispatch = { number: number; dispatchId: string }
+
 /** One entry of `live_work.live` or `live_work.starting`: a dispatch that runs, and for how long. */
 export type Running = {
   dispatchId: string
@@ -17,15 +20,16 @@ export type LiveWork = {
   starting: number
   stale: number
   unmeasured: number
-  liveIds: string[]
+  /** `live_work.open_prs`: which dispatch belongs to which open PR; empty when the index lists none. */
+  openPrs: PrDispatch[]
   /** The `live` and `starting` entries, the builders; `stale` and `unmeasured` entries are not builders. */
   running: Part<Running[]>
 }
 
 /** One builder: a dispatch in `live` or `starting`, as three parts that each stand or fall on their own. */
 export type Builder = {
-  /** `role` and `model` of the dispatch's `dispatch-spec.json`. */
-  who: Part<{ role: string; model: string }>
+  /** `model`, `track_id` and `pr_id` of the dispatch's `dispatch-spec.json`; the last two are null when the spec sets none. */
+  who: Part<{ model: string; trackId: string | null; prId: string | null }>
   /** The first `# ` line of the dispatch's `instruction.md`. */
   task: Part<string>
   /** Whole minutes of the entry's `age_seconds`. */
@@ -35,8 +39,6 @@ export type Builder = {
 /** `open_outcomes` of `t0_index.json`: what still waits on a decision. */
 export type Outcomes = {
   total: number
-  byOutcome: Record<string, number>
-  ids: string[]
 }
 
 /** A pane row: its text, already cut to the pane's width, and how it is drawn. */
@@ -69,36 +71,39 @@ export type StateView = {
   prs: Part<Pr[]>
 }
 
-/** A track on the `now` horizon. */
-export type NowTrack = {
+/** One track of `vnx objective list`, on any horizon. */
+export type TrackInfo = {
   id: string
+  /** `P1`, `P2`, `P3`, or `-` when the track has none or another scale. */
   priority: string
-  phase: string
-  /** `derived_status`, only when it differs from `phase`. */
-  derivedStatus: string | null
+  horizon: string
+  /** The PR numbers of `pr_ref`, in the order it lists them. */
+  prRefs: number[]
 }
 
-/** `vnx objective list`: the now-tracks in detail, the other horizons counted. */
-export type TrackView = {
-  now: NowTrack[]
-  next: number
-  later: number
-  /** Tracks with no horizon at all. */
-  unplanned: number
+/** `vnx objective list`: every track; the pane picks the ones to show. */
+export type TrackView = { tracks: TrackInfo[] }
+
+/** The deliverables of one track. */
+export type TrackDeliverables = {
+  total: number
+  /** Those with `derived_status` `done`. */
+  done: number
+  /** Whether one has a `last_activity` in the last seven days. */
+  isRecent: boolean
 }
 
-/** `vnx deliverable list`: per track the deliverables counted by `derived_status`. */
+/** `vnx deliverable list`: per track the deliverables counted, and every `proposed` one. */
 export type DeliverableView = {
-  byTrack: Record<string, Record<string, number>>
+  byTrack: Record<string, TrackDeliverables>
   /** Every `proposed` deliverable of the project: each waits on the operator's promote. */
   proposed: number
 }
 
 /**
- * One project, as the last refresh read it. Without a store nothing of it was
- * read: its store directory is missing (`geen store`), the check for it
- * rejected (`onbeschikbaar: <reason>`), or its id would name a path outside
- * the data root (`ongeldige project-id`).
+ * The session's own project, as the last refresh read it. Without a store nothing of it was
+ * read: its store directory is missing (`geen store`), the check for it rejected
+ * (`onbeschikbaar: <reason>`), or its id would name a path outside the data root (`ongeldige project-id`).
  */
 export type ProjectModel =
   | { id: string; hasStore: false; reason: 'geen store' | 'ongeldige project-id' | `onbeschikbaar: ${string}` }
@@ -112,19 +117,21 @@ export type ProjectModel =
       builders: Part<Builder[]>
       /** `counts.live + counts.starting` minus the entries the index lists: its list is capped, the counts are not. */
       buildersOmitted: number
+      /** The `track_id` that the dispatch of an open PR names in its spec, per PR number; only the ones that could be read. */
+      prTracks: Record<number, string>
     }
 
 /** What the pane and the status line draw from. */
 export type Model = {
   /** Milliseconds since the epoch at which the refresh started. */
   collectedAt: number
-  /** Set when the data root or the vnx binary could not be resolved: no project was read. */
-  rootError: string | null
-  projects: ProjectModel[]
+  /** Why no project was read: no `.vnx-project-id` above the cwd, or a path that could not be resolved. Null when there is one. */
+  noProject: string | null
+  project: ProjectModel | null
 }
 
 declare module 'claude-code' {
   interface PluginState {
-    voortgang: { model: Model | null; isRefreshing: boolean; failure: string | null }
+    voortgang: { model: Model | null; isRefreshing: boolean; failure: string | null; cwd: string | null }
   }
 }

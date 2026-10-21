@@ -13,6 +13,8 @@ const BUTTON_COLUMNS = 13
 const model = atom({ plugin: 'voortgang', key: 'model' } as const, null)
 const isRefreshing = atom({ plugin: 'voortgang', key: 'isRefreshing' } as const, false)
 const failure = atom({ plugin: 'voortgang', key: 'failure' } as const, null)
+// The working directory of the session, learned at its start: the project is the one above it.
+const cwd = atom({ plugin: 'voortgang', key: 'cwd' } as const, null)
 
 // Joins a refresh asked while one runs (the timer, the button, the command). Never drawn from:
 // a reload starts it over at null, which only means the next ask starts a fresh refresh.
@@ -33,7 +35,7 @@ async function collectInto($: EngineInterface, config: Config): Promise<Model> {
   try {
     const home = await $.env.get('HOME')
     const now = await $.clock.now()
-    const next = await collectModel(ioOf($), config, home, now)
+    const next = await collectModel(ioOf($), config, home, await read($, cwd), now)
     await update($, model, () => next)
     await update($, failure, () => null)
     $.ui.status(statusLine(next))
@@ -94,9 +96,10 @@ export const register: Register = (on, options) => {
   const config = configOf(options)
 
   on('session.start', async ($, e, next) => {
+    await update($, cwd, () => e.cwd)
     await $.command.register({
       name: 'voortgang',
-      description: 'Toont de VNX-voortgang per project',
+      description: 'Toont de voortgang van het VNX-project van deze sessie',
     })
     void refreshShown($, config)
     $.clock.every(config.refreshSeconds * 1000, () => {
@@ -136,7 +139,7 @@ export const register: Register = (on, options) => {
     return (
       <Box flexDirection="column">
         <Box flexDirection="row" justifyContent="space-between">
-          <Text bold>{view.header}</Text>
+          <Text bold {...toneOf(view.headerTone)}>{view.header}</Text>
           <Button
             key="ververs"
             label="ververs"
