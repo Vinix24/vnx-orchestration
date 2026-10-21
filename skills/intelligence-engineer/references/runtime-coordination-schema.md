@@ -1,6 +1,6 @@
 # runtime_coordination.db Schema Reference
 
-Authoritative source: `schemas/runtime_coordination.sql` (v1 base) + delta migrations `runtime_coordination_v2.sql` through `runtime_coordination_v9.sql`. Apply v1 → v2 → … → v9 in order. Use `scripts/lib/coordination_db.init_schema()` to bootstrap; do not handcraft.
+Authoritative source: `schemas/runtime_coordination.sql` (v1 base) + delta migrations `schemas/runtime_coordination_v2.sql` through `schemas/runtime_coordination_v10.sql` (list the directory: `ls schemas/runtime_coordination_v*.sql`; a later file is picked up by the same loop). Apply v1 → v2 → … in order. Bootstrap with `scripts/lib/coordination_db.init_schema(state_dir)`; do not handcraft. The argument is the state directory that holds `runtime_coordination.db` (a `str` or `Path`), not a connection.
 
 ## Core tables
 
@@ -27,12 +27,15 @@ CREATE TABLE dispatches (
 );
 ```
 
-**State machine:**
+**State machine** (source: `DISPATCH_STATES` / `DISPATCH_TRANSITIONS` in `scripts/lib/coordination_db.py`):
 ```
-queued → dispatched → executing → received → archived
-                ↓                       ↓
-              failed                 escalated
+proposed -> ready -> claimed -> delivering -> accepted -> running -> completed
+queued   -> claimed                                  (queued: registered, not yet assigned)
+delivering | running -> timed_out | failed_delivery
+timed_out | failed_delivery -> recovered | expired | dead_letter
+recovered -> queued | claimed | expired | dead_letter
 ```
+`proposed` is the un-approved planning state, `ready` the operator-approved one. `queued` is registered and not yet assigned. `completed`, `expired` and `dead_letter` are terminal. A transition outside `DISPATCH_TRANSITIONS` raises `InvalidTransitionError`. There is no `dispatched`, `executing`, `received`, `archived`, `failed` or `escalated` dispatch state.
 
 ### dispatch_attempts
 
@@ -71,7 +74,7 @@ CREATE TABLE terminal_leases (
 );
 ```
 
-Lease semantics: terminal acquires lease before executing; releases on receipt. Stale leases (`expires_at < now()`) get cleaned up by janitor process.
+Lease states (`LEASE_STATES` in `scripts/lib/coordination_db.py`): `idle`, `leased`, `expired`, `recovering`, `released`. Transitions: `idle → leased`, `leased → released | expired`, `expired → recovering | idle`, `recovering → idle | leased`, `released → idle`. A terminal acquires its lease before executing and releases on completion. A lease whose `expires_at` has passed becomes `expired` and the reconciler recovers it.
 
 ### coordination_events
 
@@ -154,19 +157,23 @@ Current retry state per dispatch.
 
 Records when a dispatch was escalated (operator wake, manual intervention, etc).
 
-## Schema versions (v1 → v9)
+## Schema versions (v1 → v10, then v11 in code)
 
-- **v1** (`runtime_coordination.sql`): base schema with dispatches, dispatch_attempts, terminal_leases, coordination_events, incident_log
-- **v2**: added intelligence_injections, retry_budgets
-- **v3**: added retry_state, escalation_log
-- **v4**: added execution_targets, inbound_inbox, recommendations, recommendation_outcomes
-- **v5**: minor — added indexes for performance
-- **v6**: added worker_states (collateral cleanup in P4 round-5)
-- **v7**: added headless_runs (Wave-2 headless review work)
-- **v8**: minor — corrections to v7 indexing
-- **v9**: latest delta — exact contents in `schemas/runtime_coordination_v9.sql`
+Files in `schemas/`, applied in order by `init_schema` (the loop stops at the first missing `runtime_coordination_v<N>.sql`):
 
-For fresh init: `coordination_db.init_schema(con)` applies v1 base + v2-v9 deltas in order. **Don't run only the v1 SQL** — you'll miss the rest.
+- **v1** (`runtime_coordination.sql`): `runtime_schema_version`, `dispatches`, `dispatch_attempts`, `terminal_leases`, `coordination_events`
+- **v2**: `incident_log`, `retry_budgets`
+- **v3**: `retry_state`, `escalation_log`
+- **v4**: `execution_targets`, `intelligence_injections`, `inbound_inbox`, `recommendations`, `recommendation_outcomes`, plus routing columns on `dispatches` (`task_class`, `target_type`, `target_id`, `channel_origin`, `intelligence_payload`)
+- **v5**: `escalation_state`, `governance_overrides`
+- **v6**: `provenance_registry` (receipt, commit and PR linkage per dispatch)
+- **v7**: `provenance_verifications`
+- **v8**: `headless_runs` (headless run identity, heartbeat, lifecycle state)
+- **v9**: `worker_states` (one row per terminal)
+- **v10**: baseline for multi-tenant lease isolation: composite UNIQUE on `terminal_leases` and `dispatches`, `project_id` on `worker_states`. Its `project_id` indexes are created by migrations 0010 and 0017, which run after `init_schema`
+- **v11** (no SQL file): `_migrate_v11_composite_keys` in `coordination_db.py` creates the ADR-007 `ux_<table>_pid` unique indexes over `project_id`, only when `project_id` is already present. Check which are missing with `composite_index_audit()`
+
+`init_schema` records progress in `PRAGMA user_version` (v1 = 1, each file +1). Call it with the state directory: `coordination_db.init_schema(state_dir)`. **Don't run only a single delta file**: v2 to v10 assume the earlier tables exist, and you will miss the rest.
 
 ## Migration 0010 / 0015 layered on top
 
@@ -174,11 +181,11 @@ For fresh init: `coordination_db.init_schema(con)` applies v1 base + v2-v9 delta
 
 `schemas/migrations/0015_complete_project_id.sql` extends to: retry_budgets, retry_state, escalation_log, execution_targets, inbound_inbox, recommendations, recommendation_outcomes (and many QI tables).
 
-**P4 round-5 also added** composite UNIQUE constraints replacing single-column ones for: terminal_leases, execution_targets, dispatches.
+**Composite keys:** v10 (`terminal_leases`, `dispatches`) and the v11 `ux_<table>_pid` indexes put `project_id` into the uniqueness of the tables in `_RC_COMPOSITE_KEYS`. The base v1 file still declares `dispatch_id` and `terminal_id` as single-column UNIQUE.
 
 ## Common gotchas
 
-- **`v8` is a delta, not a full schema** — running only `runtime_coordination_v8.sql` produces an incomplete DB. Use `coordination_db.init_schema()` always.
+- **Every `runtime_coordination_v<N>.sql` is a delta, not a full schema**: running one alone produces an incomplete DB. Use `coordination_db.init_schema(state_dir)` always.
 - **`dispatch_id` is unique within a project, NOT globally.** The composite UNIQUE on `(project_id, dispatch_id)` was added in P4 round-5; older code that assumes globally-unique dispatch_id will break for cross-project central queries.
 - **`coordination_events.entity_id`** can reference dispatch_id, pattern_id, etc. For cross-project queries, use prefix-rewrite (`<project_id>:<entity_id>`) when entity_type matches a project-scoped table.
 - **`dispatches.parent_dispatch`** is also project-scoped. Walking the chain across projects requires prefix-rewriting.

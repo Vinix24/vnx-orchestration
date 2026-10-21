@@ -32,6 +32,7 @@ SCRIPTS = ("dispatch_guard.sh", "intelligence.sh")
 def _status(busy: bool) -> dict:
     live = [{"dispatch_id": "20261020-busy", "state": "running", "lock": "held", "age_seconds": 5}] if busy else []
     return {
+        "schema": "vnx_status/1.0",
         "t0_state_available": True,
         "system_health": {"status": "healthy"},
         "queues": {"pending_count": 0, "conflict_count": 0},

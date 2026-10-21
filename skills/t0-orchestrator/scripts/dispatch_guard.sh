@@ -51,19 +51,37 @@ Exit codes:
 USAGE
 }
 
-# Resolve the vnx CLI to run. Prefer the repo's own bin/vnx (schema
-# vnx_status/1.0, ships system_health), then an explicit VNX_BIN, then `vnx` on
-# PATH for consumers without a local bin/vnx. The co-located bin must win over
-# an inherited VNX_BIN so the guard always reads the schema its checks expect.
+# Schema the guard's checks are written against. A CLI that answers anything
+# else (the pip package's `active_dispatches`/`agents` shape) is refused.
+_EXPECTED_SCHEMA="vnx_status/1.0"
+
+# Resolve the vnx CLI to run, first executable wins: the repo's own bin/vnx, the
+# install named by VNX_HOME, the central install ~/.vnx-system/current, an explicit
+# VNX_BIN, then `vnx` on PATH. A consumer has no bin/vnx, and the `vnx` on its PATH
+# may be the pip package, which does not speak vnx_status/1.0; the installs come
+# before it so a consumer reads the schema the checks expect.
 _resolve_vnx() {
-    local bin="$REPO_ROOT/bin/vnx"
-    if [ ! -x "$bin" ]; then
-        bin="${VNX_BIN:-}"
-    fi
-    if [ -z "$bin" ] || [ ! -x "$bin" ]; then
-        bin="$(command -v vnx || true)"
-    fi
-    printf '%s' "$bin"
+    local candidate
+    for candidate in \
+        "$REPO_ROOT/bin/vnx" \
+        "${VNX_HOME:+$VNX_HOME/bin/vnx}" \
+        "${HOME:+$HOME/.vnx-system/current/bin/vnx}" \
+        "${VNX_BIN:-}"; do
+        if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+    command -v vnx || true
+}
+
+# Run the resolved CLI bound to REPO_ROOT. `vnx status` has no --project-dir: it
+# resolves the project from the cwd and from VNX_PROJECT_ROOT, so both are pinned.
+# An unbound call answers for whatever directory (or inherited root) the caller has.
+_vnx_in_repo() {
+    local bin="$1"
+    shift
+    (cd "$REPO_ROOT" && VNX_PROJECT_ROOT="$REPO_ROOT" "$bin" "$@" 2>/dev/null)
 }
 
 # Fetch the runtime snapshot. Empty stdout / non-zero exit = the CLI produced no
@@ -72,9 +90,7 @@ _fetch_status_json() {
     local bin
     bin="$(_resolve_vnx)"
     [ -n "$bin" ] || return 1
-    # Bound to REPO_ROOT: `vnx status` resolves the project from the cwd, so an
-    # unbound call answers for whatever directory the caller happens to be in.
-    (cd "$REPO_ROOT" && "$bin" status --json 2>/dev/null)
+    _vnx_in_repo "$bin" status --json
 }
 
 # Best-effort pool info for the human view. Never gates the decision.
@@ -82,7 +98,7 @@ _fetch_pool_json() {
     local bin
     bin="$(_resolve_vnx)"
     [ -n "$bin" ] || return 1
-    (cd "$REPO_ROOT" && "$bin" pool status --json --project-dir "$REPO_ROOT" 2>/dev/null)
+    _vnx_in_repo "$bin" pool status --json --project-dir "$REPO_ROOT"
 }
 
 _LIVE_BUCKETS_JQ='[.live_work.live, .live_work.starting, .live_work.stale, .live_work.unmeasured]'
@@ -189,6 +205,15 @@ main() {
 
     if ! _STATUS_JSON="$(_fetch_status_json)"; then
         echo "Missing state: unable to read 'vnx status --json'" >&2
+        exit 1
+    fi
+
+    # Fail closed on a CLI that speaks another schema, and say which CLI and which
+    # schema: "live_work missing" would hide that the wrong CLI answered.
+    local schema
+    schema=$(jq -r '.schema? // "none"' <<<"$_STATUS_JSON" 2>/dev/null || echo "unparseable")
+    if [ "$schema" != "$_EXPECTED_SCHEMA" ]; then
+        echo "Missing state: $(_resolve_vnx) answered schema '${schema}', the guard needs '${_EXPECTED_SCHEMA}' (vnx status --json)" >&2
         exit 1
     fi
 

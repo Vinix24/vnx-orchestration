@@ -2,28 +2,36 @@
 # Intelligence queries for T0 orchestration
 # Live state monitoring and orchestration pattern queries
 
-INTEL_SCRIPT="scripts/gather_intelligence.py"
-
 # Bind to the repo this script ships in, not the caller's cwd.
 _INTEL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _INTEL_REPO_ROOT="$(git -C "$_INTEL_DIR" rev-parse --show-toplevel 2>/dev/null || echo "$(cd "$_INTEL_DIR/../../../.." && pwd)")"
+
+# Install roots in the order a consumer finds VNX: the repo itself, the install named by
+# VNX_HOME, the central install. The same order dispatch_guard.sh uses for the CLI.
+_intel_roots() {
+    printf '%s\n' "$_INTEL_REPO_ROOT"
+    [ -z "${VNX_HOME:-}" ] || printf '%s\n' "$VNX_HOME"
+    [ -z "${HOME:-}" ] || printf '%s\n' "$HOME/.vnx-system/current"
+}
+
+# First install root that holds the relative path $1 (a file or an executable).
+_intel_locate() {
+    local root
+    while IFS= read -r root; do
+        if [ -e "$root/$1" ]; then
+            printf '%s\n' "$root/$1"
+            return 0
+        fi
+    done < <(_intel_roots)
+    return 1
+}
 
 # Central state/dispatch dirs (ADR-026). An explicit VNX_STATE_DIR / VNX_DISPATCH_DIR
 # wins and is never overwritten. Otherwise the central resolver (vnx_paths.py) runs with
 # the repo root as cwd and its KEY=VALUE lines are parsed, never eval'd. Unresolvable
 # leaves both empty; the functions that need them refuse (_require_dirs).
 _intel_resolver() {
-    local candidate
-    for candidate in \
-        "$_INTEL_REPO_ROOT/scripts/lib/vnx_paths.py" \
-        "${VNX_HOME:-}/scripts/lib/vnx_paths.py" \
-        "${HOME:-}/.vnx-system/current/scripts/lib/vnx_paths.py"; do
-        if [ -f "$candidate" ]; then
-            printf '%s\n' "$candidate"
-            return 0
-        fi
-    done
-    return 1
+    _intel_locate "scripts/lib/vnx_paths.py"
 }
 
 _intel_resolve_dirs() {
@@ -59,10 +67,19 @@ _require_dispatch_dir() {
 # Runtime snapshot: the same `vnx status --json` the dispatch guard reads, run
 # bound to the repo root. t0_brief.json is a presentation cache; nothing here reads it.
 _runtime_status() {
-    local bin="$_INTEL_REPO_ROOT/bin/vnx"
-    [ -x "$bin" ] || bin="${VNX_BIN:-$(command -v vnx || true)}"
+    local bin
+    bin="$(_intel_locate "bin/vnx")" || bin="${VNX_BIN:-$(command -v vnx || true)}"
     [ -n "$bin" ] && [ -x "$bin" ] || return 1
-    (cd "$_INTEL_REPO_ROOT" && "$bin" status --json 2>/dev/null)
+    (cd "$_INTEL_REPO_ROOT" && VNX_PROJECT_ROOT="$_INTEL_REPO_ROOT" "$bin" status --json 2>/dev/null)
+}
+
+# Run a VNX python script (scripts/<name>.py) from the first install that has it, with the
+# repo root as cwd so the script resolves the project the same way the guard does.
+_intel_py() {
+    local script
+    script="$(_intel_locate "scripts/$1")" || { echo "Error: scripts/$1 not found in the repo or a VNX install"; return 1; }
+    shift
+    (cd "$_INTEL_REPO_ROOT" && VNX_PROJECT_ROOT="$_INTEL_REPO_ROOT" python3 "$script" "$@")
 }
 
 # Dispatches in the air (live, starting, stale, unmeasured). `vnx status --json`
@@ -82,7 +99,7 @@ check_queue() {
 
 # Check open items digest (deliverables)
 check_open_items() {
-    python3 "scripts/open_items_manager.py" digest 2>/dev/null || echo "No open items data"
+    _intel_py open_items_manager.py digest 2>/dev/null || echo "No open items data"
 }
 
 # Get orchestration recommendations
@@ -123,27 +140,27 @@ queued_dispatches() {
 
 # Orchestration patterns
 orchestration_patterns() {
-    python3 "$INTEL_SCRIPT" patterns "orchestration $1"
+    _intel_py gather_intelligence.py patterns "orchestration $1"
 }
 
 # Agent selection patterns
 agent_patterns() {
-    python3 "$INTEL_SCRIPT" patterns "agent selection $1"
+    _intel_py gather_intelligence.py patterns "agent selection $1"
 }
 
 # Open items / deliverable patterns
 deliverable_patterns() {
-    python3 "$INTEL_SCRIPT" patterns "open items deliverables $1"
+    _intel_py gather_intelligence.py patterns "open items deliverables $1"
 }
 
 # Mode selection patterns
 mode_patterns() {
-    python3 "$INTEL_SCRIPT" patterns "mode selection $1"
+    _intel_py gather_intelligence.py patterns "mode selection $1"
 }
 
 # Track selection patterns
 track_patterns() {
-    python3 "$INTEL_SCRIPT" patterns "track selection $1"
+    _intel_py gather_intelligence.py patterns "track selection $1"
 }
 
 # ============================================
@@ -152,12 +169,12 @@ track_patterns() {
 
 # Tag-based search
 tags() {
-    python3 "$INTEL_SCRIPT" tags "$1"
+    _intel_py gather_intelligence.py tags "$1"
 }
 
 # Orchestration tags
 orchestration_tags() {
-    python3 "$INTEL_SCRIPT" tags "orchestration dispatch management"
+    _intel_py gather_intelligence.py tags "orchestration dispatch management"
 }
 
 # ============================================
@@ -166,7 +183,7 @@ orchestration_tags() {
 
 # Keyword search
 keywords() {
-    python3 "$INTEL_SCRIPT" keywords "$1"
+    _intel_py gather_intelligence.py keywords "$1"
 }
 
 # ============================================
@@ -175,7 +192,7 @@ keywords() {
 
 # Check prevention rules
 prevention() {
-    python3 "$INTEL_SCRIPT" prevention
+    _intel_py gather_intelligence.py prevention
 }
 
 # ============================================

@@ -3,6 +3,10 @@
 # Complete skill registry shipped with VNX packaging.
 # T0 uses this registry for skill validation and dispatch routing.
 # Projects can extend with project-specific skills in their own skills.yaml.
+#
+# Every directory under skills/ is shipped by `vnx skills sync` and has a key below, the `pm`
+# alias included. `repo_local` lists the directories that exist only in this repo's own
+# .claude/skills and are never shipped (no copy under skills/), so they carry no key.
 
 version: 2.0.0
 updated: 2026-02-16
@@ -130,6 +134,22 @@ skills:
     name: "@fabric-reference"
     file: "fabric-reference/SKILL.md"
     type: reference
+
+  featureplan-kickoff:
+    name: "@featureplan-kickoff"
+    file: "featureplan-kickoff/SKILL.md"
+    type: planning
+
+  pm:
+    name: "@pm"
+    file: "pm/SKILL.md"
+    type: planning
+    alias_of: horizon
+
+# Skills of this repo's own .claude/skills that are not shipped.
+repo_local:
+  - panel
+  - control-centre
 
 # ─── Common Mistakes ───────────────────────────────────────────────
 

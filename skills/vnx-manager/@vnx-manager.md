@@ -74,7 +74,7 @@ Terminal Output → Smart Tap → Dispatcher → Queue → Terminal
 - `quality_events.ndjson` - Code quality patterns
 - `dispatch_lifecycle.ndjson` - Dispatch tracking
 
-**Reports** (`.vnx-data/unified_reports/`):
+**Reports** (`$VNX_DATA_DIR/unified_reports/`):
 - Terminal-generated technical reports
 - Auto-converted to receipts by report_watcher
 - Include a `Tags (Required)` section with specific, compound tags (e.g., sse-streaming, browser-pool, kvk-validation). Avoid general-only tags.

@@ -35,11 +35,11 @@ BEFORE proposing any design, fix, or implementation:
    - ADR-010 (subprocess adapter as canonical Claude routing)
    List any ADR that applies to the task and how it constrains your solution.
 
-2. **Consult relevant memory** in `~/.claude/projects/<your-project>/memory/MEMORY.md` — particularly entries about past architectural incidents.
+2. **Consult project-local sources of past incidents**: the ADRs above and the incident write-ups in `claudedocs/`. Do not read user-global Claude memory (`~/.claude/projects/...`) and never repeat memory content in a report or review.
 
 3. **Check P4-style incident docs** in `claudedocs/` for analogous failures (e.g., `2026-05-09-p4-migration-architecture-lessons.md` for multi-tenant migration patterns).
 
-4. **State your foundational read aloud** at the start of your response. Example: "ADR-007 applies: new tabel X needs composite PK over project_id. Per P4 §4.2, single-column UNIQUE is a smell. Memory [[adr-007-multitenant-composite-keys]] confirms."
+4. **State your foundational read aloud** at the start of your response. Example: "ADR-007 applies: new tabel X needs composite PK over project_id. Per P4 §4.2, single-column UNIQUE is a smell."
 
 Skipping STEP 0 is a process violation, not a shortcut. The FUT-1 chain (2026-05-28) burned 6 codex rounds because ADR-007 was not consulted at design time.
 
@@ -80,7 +80,7 @@ Key tables (full reference: `references/runtime-coordination-schema.md`):
 - **`intelligence_injections`** — record of which intelligence was injected where.
 - **`retry_budgets`**, **`retry_state`**, **`escalation_log`** — retry/escalation bookkeeping.
 
-Schema source: `schemas/runtime_coordination.sql` (v1 base) + delta migrations `runtime_coordination_v2.sql` through `runtime_coordination_v9.sql`. Apply order matters.
+Schema source: `schemas/runtime_coordination.sql` (v1 base) + delta migrations `runtime_coordination_v2.sql` through `runtime_coordination_v10.sql` (`ls schemas/runtime_coordination_v*.sql` for the current list). Apply order matters; bootstrap with `coordination_db.init_schema(state_dir)`.
 
 ### Why two DBs?
 
@@ -103,7 +103,7 @@ The canonical flow that VNX governance is built on:
 ```
 1. CREATE   T0 writes a dispatch file → .vnx-data/dispatches/pending/<id>/dispatch.json
 2. PROMOTE  operator approval → moves to active/  → row in rc.dispatches (state='queued')
-3. DELIVER  dispatcher delivers to terminal pane → state='dispatched', terminal_leases row inserted
+3. DELIVER  dispatcher delivers to terminal pane → state='claimed' then 'delivering', terminal_leases row leased
 4. EXECUTE  worker runs; events streamed to .vnx-data/events/T<n>.ndjson
 5. RECEIPT  worker writes receipt → t0_receipts.ndjson (with append_receipt() helper)
 6. ARCHIVE  T0 reviews receipt → moves dispatch to archive/, terminal_leases released
@@ -145,7 +145,7 @@ Common bug: intelligence injection writes to `runtime_coordination.intelligence_
 
 VNX schemas have evolved through 9+ versions for RC and 16+ migrations for QI. Key checkpoints:
 
-- **`schemas/runtime_coordination.sql`** is v1. Each `runtime_coordination_v<N>.sql` is a DELTA, not a full schema. Apply v1 → v2 → … → v9 in order.
+- **`schemas/runtime_coordination.sql`** is v1. Each `runtime_coordination_v<N>.sql` is a DELTA, not a full schema. Apply v1 → v2 → … → v10 in order (`init_schema` does, then runs the v11 index step).
 - **`schemas/quality_intelligence.sql`** is the base. `scripts/quality_db_init.py:84-` adds tables imperatively (e.g. `confidence_events`, `dispatch_pattern_offered`). Don't bypass `bootstrap_qi_db()` — it knows the full set.
 - **`schemas/migrations/0010_add_project_id.sql`** — adds project_id to "hot" RC tables (dispatches, dispatch_attempts, terminal_leases, etc).
 - **`schemas/migrations/0015_complete_project_id.sql`** — extends to remaining tables (vnx_code_quality, snippet_metadata, etc).
@@ -229,7 +229,7 @@ More queries in `references/intelligence-injection.md`.
 ## Reference Files
 
 - `references/quality-intelligence-schema.md` — table-by-table reference for QI DB
-- `references/runtime-coordination-schema.md` — table-by-table reference for RC DB (v1 base + v2-v9 deltas)
+- `references/runtime-coordination-schema.md` — table-by-table reference for RC DB (v1 base + v2-v10 deltas)
 - `references/dispatch-lifecycle.md` — lifecycle diagram + which step writes which row
 - `references/intelligence-injection.md` — scope match logic, federation queries, cookbook
 
