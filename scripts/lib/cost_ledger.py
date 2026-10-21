@@ -25,7 +25,9 @@ Two entry points, and every writer and reader goes through them:
   without a price is listed in ``unavailable`` and never summed as 0, a line in
   the old ``emit_provider_cost`` shape (no ``schema``) is counted in
   ``legacy_lines`` and not summed, and the runs waiting in the spool come back
-  as ``spool_pending``, read in the same lock scope as the ledger.
+  as ``spool_pending``, read in the same lock scope as the ledger. A spooled run
+  whose ``run_id`` meets another execution in the ledger comes back as
+  ``spool_conflicts`` and is in no sum (:func:`_second_executions`).
 
 One lock orders everything (ADR-043 §6): the lock file
 ``events/provider_costs.lock`` (``provider_costs.ledger_lock``), taken first by
@@ -679,6 +681,43 @@ def _waits_in_the_spool(spool_dir: Path, record: Mapping[str, Any]) -> bool:
         ) from exc
 
 
+def _second_executions(
+    ledger_records: Sequence[Mapping[str, Any]], spooled_runs: Sequence[Sequence[Mapping[str, Any]]],
+) -> List[str]:
+    """The run ids whose spool file holds a second execution of a run the ledger holds too (ADR-043 §6).
+
+    ``spooled_runs`` holds the records of each spool file as
+    :func:`_read_spool_file` reads them. A spooled record continues the run in
+    the ledger when its ``record_id`` is in the ledger as well
+    (``ledger+spool``), or when it is a correction whose ``supersedes`` names a
+    record of that run in the ledger or one that continues it earlier in the
+    file. Any other spooled record of a run the ledger holds is a second
+    execution under the same ``run_id``: a writer of fabric f2bef053 counts the
+    attempts in the ledger only, so it books an attempt again while that
+    attempt waits in the spool. A run without a line in the ledger has a
+    backlog and no conflict.
+    """
+    landed: Dict[str, set] = {}
+    for record in ledger_records:
+        ids = landed.setdefault(record["run_id"], set())
+        if isinstance(record.get("record_id"), str):
+            ids.add(record["record_id"])
+    conflicts: List[str] = []
+    for spooled in spooled_runs:
+        run_id = spooled[0]["run_id"]
+        if run_id not in landed:
+            continue
+        chain = set(landed[run_id])
+        for record in spooled:
+            if record["record_id"] not in chain and not (
+                record.get("kind") == "correction" and record.get("supersedes") in chain
+            ):
+                conflicts.append(run_id)
+                break
+            chain.add(record["record_id"])
+    return conflicts
+
+
 # ---------------------------------------------------------------------------
 # The writer
 # ---------------------------------------------------------------------------
@@ -890,6 +929,15 @@ def _read_without_the_lock(ledger_path: Path) -> str:
         return ""
 
 
+def _attempt_of(run_id: str, key: Tuple[str, str, str]) -> int:
+    """The attempt of ``run_id`` when it is a run of ``key``, the exact ``(project_id, producer, ref)``; else 0."""
+    try:
+        project, producer, ref, attempt = split_run_id(run_id)
+    except InvalidRecord:
+        return 0
+    return attempt if (project, producer, ref) == key else 0
+
+
 def _next_attempt(ledger_path: Path, fh, project_id: str, producer: str, ref: str) -> int:
     """One more than the highest attempt of ``<project_id>:<producer>:<ref>`` in the ledger or the spool.
 
@@ -899,29 +947,34 @@ def _next_attempt(ledger_path: Path, fh, project_id: str, producer: str, ref: st
     file does not keep out a writer of an earlier fabric version, which takes
     only the ledger ``flock``: a 1.7.2 ``emit_provider_cost`` appends old-shape
     lines, which carry no attempt, but a K2a-2 ``record_run`` or
-    ``record_next_attempt`` appends run-shaped lines, so in a store both
-    versions write during a rollout an attempt that writer books meanwhile can
-    be missed here. A spool file counts by the ``run_id`` of its records, never
-    by its name, compared on the exact ``(project_id, producer, ref)`` as in
-    the ledger. Counting that fails, an unreadable spool file included, raises
-    :class:`_Unwritten` with nothing written: an attempt guessed too low would
-    make a second run of an existing one.
+    ``record_next_attempt`` (fabric f2bef053) counts the ledger only, so it can
+    book an attempt again that waits in the spool. Such a run is in the ledger
+    and in the spool as two executions (:func:`_second_executions`): the count
+    here passes both and logs a warning naming the run, and the aggregation
+    reports it as ``spool_conflicts`` (ADR-043 §6). A spool file counts by the
+    ``run_id`` of its records, never by its name, compared on the exact
+    ``(project_id, producer, ref)`` as in the ledger. Counting that fails, an
+    unreadable spool file included, raises :class:`_Unwritten` with nothing
+    written: an attempt guessed too low would make a second run of an existing
+    one.
     """
     spool_dir = spool_dir_for(ledger_path)
     try:
         text = _read_under_the_lock(fh) if fh is not None else _read_without_the_lock(ledger_path)
-        spooled = [record for name in _spool_names(spool_dir) for record in _read_spool_file(spool_dir / name)]
+        spooled = [_read_spool_file(spool_dir / name) for name in _spool_names(spool_dir)]
     except (OSError, _UnreadableSpool) as exc:
         raise _Unwritten(exc, f"the attempts already booked could not be counted ({exc}): nothing was written") from exc
-    highest = 0
-    for record in [*_parse_lines(text)[0], *spooled]:
-        try:
-            project, run_producer, run_ref, attempt = split_run_id(record["run_id"])
-        except InvalidRecord:
-            continue
-        if (project, run_producer, run_ref) == (project_id, producer, ref):
-            highest = max(highest, attempt)
-    return highest + 1
+    key = (project_id, producer, ref)
+    records = _parse_lines(text)[0]
+    for run_id in _second_executions(records, spooled):
+        if _attempt_of(run_id, key):
+            logger.warning(
+                "cost_ledger: run %s is in the ledger and in the spool as two executions: a writer of fabric "
+                "f2bef053 booked the attempt again while it waited in the spool (ADR-043 §6, spool_conflicts); "
+                "the next attempt passes both", run_id,
+            )
+    attempts = [_attempt_of(record["run_id"], key) for record in [*records, *(r for run in spooled for r in run)]]
+    return max(attempts, default=0) + 1
 
 
 def record_next_attempt(
@@ -936,9 +989,11 @@ def record_next_attempt(
 
     The attempt is one more than the highest attempt the ledger or the spool
     holds for ``<project_id>:<producer>:<ref>``, counted under the same
-    exclusive lock as the write, so two attempts never get the same ``run_id``:
-    a refire of a dispatch is the next attempt, whichever process fires it, also
-    while an earlier attempt waits in the spool. ``make_run`` gets that
+    exclusive lock as the write, so two attempts of this version never get the
+    same ``run_id``: a refire of a dispatch is the next attempt, whichever
+    process fires it, also while an earlier attempt waits in the spool, and
+    also past a second execution a writer of fabric f2bef053 booked under an
+    attempt that waits there (:func:`_next_attempt`). ``make_run`` gets that
     ``run_id`` and returns the :class:`RunCost`. Refusals and
     :class:`CostLedgerWriteError` are those of :func:`record_run`; attempts
     that cannot be counted raise :class:`CostLedgerWriteError` with nothing
@@ -977,7 +1032,10 @@ class LedgerTotals:
     ``spool_pending`` is the number of runs waiting in the spool when the
     ledger was read, in no sum; ``spool_unreadable`` says the spool could not
     be listed or a spool file could not be read as one run's, so
-    ``spool_pending`` is a lower bound; ``torn_tail`` says the ledger
+    ``spool_pending`` is a lower bound; ``spool_conflicts`` is the number of
+    those spooled runs whose ``run_id`` meets another execution in the ledger
+    (:func:`_second_executions`): such a run counts with its ledger lines
+    only, and its spooled amount is in no sum. ``torn_tail`` says the ledger
     ends on a line without ``\\n``. :attr:`incomplete` is ``None`` only for a
     complete total.
     """
@@ -992,6 +1050,7 @@ class LedgerTotals:
     unreadable_lines: int
     spool_pending: int
     spool_unreadable: bool
+    spool_conflicts: int
     torn_tail: bool
 
     @property
@@ -999,6 +1058,9 @@ class LedgerTotals:
         """Why the total is not complete, the line a summing reader shows next to it, or ``None``."""
         if self.spool_unreadable:
             return "onvolledig: de spool is niet te lezen"
+        if self.spool_conflicts:
+            return (f"onvolledig: {self.spool_conflicts} runs in de spool botsen met een andere uitvoering "
+                    "in het grootboek")
         if self.spool_pending:
             return f"onvolledig: {self.spool_pending} runs wachten op replay"
         if self.torn_tail:
@@ -1054,32 +1116,33 @@ def _read_the_ledger(ledger_path: Path) -> str:
         return fh.read()
 
 
-def _count_the_spool(spool_dir: Path) -> Tuple[int, bool]:
-    """``(spool_pending, spool_unreadable)``: the runs whose spool file reads as theirs, and whether any did not.
+def _count_the_spool(spool_dir: Path) -> Tuple[List[List[Dict[str, Any]]], bool]:
+    """``(spooled runs, spool_unreadable)``: the records of each spool file that reads as one run's, and whether one did not.
 
-    A spool that cannot be listed, a spool file that cannot be read and one
-    that holds a record of another run (:func:`_read_spool_file`) make the
-    spool unreadable, never empty; such a file counts for no run.
+    One list of records per waiting run, so ``spool_pending`` is its length
+    and :func:`_second_executions` compares it with the ledger. A spool that
+    cannot be listed, a spool file that cannot be read and one that holds a
+    record of another run (:func:`_read_spool_file`) make the spool
+    unreadable, never empty; such a file counts for no run.
     """
     try:
         names = _spool_names(spool_dir)
     except OSError as exc:
         logger.warning("cost_ledger: the spool %s cannot be listed, the total is incomplete: %s", spool_dir, exc)
-        return 0, True
-    pending, unreadable = 0, False
+        return [], True
+    spooled: List[List[Dict[str, Any]]] = []
+    unreadable = False
     for name in names:
         try:
-            _read_spool_file(spool_dir / name)
+            spooled.append(_read_spool_file(spool_dir / name))
         except (OSError, _UnreadableSpool) as exc:
             logger.warning("cost_ledger: the spool file %s cannot be read, the total is incomplete: %s", name, exc)
             unreadable = True
-        else:
-            pending += 1
-    return pending, unreadable
+    return spooled, unreadable
 
 
-def _ledger_and_spool(ledger_path: Path) -> Tuple[str, int, bool]:
-    """``(ledger text, spool_pending, spool_unreadable)`` at one moment, so a total and its backlog agree.
+def _ledger_and_spool(ledger_path: Path) -> Tuple[str, List[List[Dict[str, Any]]], bool]:
+    """``(ledger text, spooled runs, spool_unreadable)`` at one moment, so a total and its backlog agree.
 
     One scope: the lock file shared, then the ledger's own shared ``flock``.
     Every writer holds the lock file exclusively from its decision to its last
@@ -1092,11 +1155,11 @@ def _ledger_and_spool(ledger_path: Path) -> Tuple[str, int, bool]:
     try:
         os.stat(ledger_path.parent)
     except FileNotFoundError:
-        return "", 0, False
+        return "", [], False
     with provider_costs.ledger_lock(ledger_path, fcntl.LOCK_SH):
         text = _read_the_ledger(ledger_path)
-        pending, unreadable = _count_the_spool(spool_dir_for(ledger_path))
-    return text, pending, unreadable
+        spooled, unreadable = _count_the_spool(spool_dir_for(ledger_path))
+    return text, spooled, unreadable
 
 
 def _number(value: object) -> Optional[float]:
@@ -1129,10 +1192,12 @@ def aggregate_runs(
     run out of the selection takes the whole run out. The ledger is read and
     the spool counted in one scope under the shared lock file
     (:func:`_ledger_and_spool`); a total that misses spooled runs always comes
-    with them in ``spool_pending``, and with ``incomplete`` set.
+    with them in ``spool_pending``, and with ``incomplete`` set. A spooled run
+    that is a second execution of a run in the ledger is counted in
+    ``spool_conflicts`` as well; the run's total stays its ledger lines.
     """
     path = Path(ledger_path) if ledger_path is not None else provider_costs._resolve_costs_path()
-    text, pending, spool_unreadable = _ledger_and_spool(path)
+    text, spooled, spool_unreadable = _ledger_and_spool(path)
     whole, torn = _split_torn_tail(text)
     records, legacy, unreadable = _parse_lines(whole)
     last = {record["run_id"]: record for record in records}
@@ -1158,8 +1223,8 @@ def aggregate_runs(
     return LedgerTotals(
         runs=runs, cost_usd=round(cost, 8), api_equivalent_usd=round(api, 8), tokens=tokens,
         tokens_unknown=unknown, unavailable=tuple(unavailable), legacy_lines=legacy,
-        unreadable_lines=unreadable + int(torn), spool_pending=pending, spool_unreadable=spool_unreadable,
-        torn_tail=torn,
+        unreadable_lines=unreadable + int(torn), spool_pending=len(spooled), spool_unreadable=spool_unreadable,
+        spool_conflicts=len(_second_executions(records, spooled)), torn_tail=torn,
     )
 
 

@@ -27,7 +27,14 @@ counts for neither, attempts are counted from the records and never from a
 file name, and a spool that fails in or after its replace says the line may be
 in the spool.
 
-Items 1, 2 and 6 run real separate processes (``subprocess`` with
+And round 3 of #2150: a writer of fabric f2bef053 (K2a-2, the ledger ``flock``
+only, attempts counted in the ledger only) books attempt 1 again while the new
+writer's attempt 1 waits in the spool. The aggregation reports it as
+``spool_conflicts``, the run's total stays its ledger line, and the next
+``record_next_attempt`` passes both and logs the run id. A correction that
+waits in the spool behind its charge in the ledger is no conflict.
+
+Items 1, 2 and 6 and the f2bef053 writer run real separate processes (``subprocess`` with
 ``sys.executable``) on real files and real ``flock``s; nothing mocks a lock. A
 child injects only its own fault (a failed append, a pause inside the lock) by
 replacing a ``cost_ledger`` function in its own process, and the processes meet
@@ -40,6 +47,7 @@ import errno
 import fcntl
 import hashlib
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -281,6 +289,30 @@ _A_172_WRITER = """
     report(done=True)
 """
 
+# A writer of fabric f2bef053 (K2a-2): no lock file and no spool. Under the ledger flock only it counts the attempts
+# of its (project_id, producer, ref) in the ledger, then appends one run-shaped line with the next one.
+_A_K2A2_WRITER = """
+    project_id, producer, ref = ARG["key"]
+    with LEDGER.open("a+", encoding="utf-8") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        fh.seek(0)
+        highest = 0
+        for line in fh.read().splitlines():
+            try:
+                project, run_producer, run_ref, attempt = cost_ledger.split_run_id(json.loads(line)["run_id"])
+            except (ValueError, KeyError, TypeError):
+                continue
+            if (project, run_producer, run_ref) == (project_id, producer, ref):
+                highest = max(highest, attempt)
+        run_id = cost_ledger.run_id_for(project_id, producer, ref, highest + 1)
+        record = cost_ledger.build_record(cost_ledger.RunCost(**dict(ARG["run"], run_id=run_id)))
+        fh.write(json.dumps(record, separators=(",", ":")) + "\\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+        fcntl.flock(fh, fcntl.LOCK_UN)
+    report(run_id=run_id, record_id=record["record_id"])
+"""
+
 # Holds the lock file exclusively for a while, through its own open file description.
 _LOCK_FILE_HOLDER = """
     fd = os.open(LEDGER.parent / "provider_costs.lock", os.O_RDONLY | os.O_CREAT, 0o644)
@@ -407,7 +439,7 @@ class TestAcceptance:
         totals = cost_ledger.aggregate_runs(ledger)
         assert totals.runs == {RUN_A1: record}
         assert totals.cost_usd == pytest.approx(0.5)
-        assert totals.spool_pending == 1
+        assert (totals.spool_pending, totals.spool_conflicts) == (1, 0), "one record in both places is no conflict"
 
     @pytest.mark.parametrize("ledger_fails, why, known", [
         ("append", "the ledger append failed", "the outcome is unknown, the line may be in the ledger"),
@@ -585,6 +617,80 @@ class TestASpoolThatFailsAfterItsReplace:
         assert known in str(error) and "neither the ledger nor the spool" not in str(error)
         assert str(error).endswith("book no new attempt for it")
         assert spooled["run_id"] == RUN_A1 and spooled["record_id"] in str(error)
+
+
+# ---------------------------------------------------------------------------
+# A second execution under one run id (round 3 of #2150)
+# ---------------------------------------------------------------------------
+
+_REF = "20261020-kp-x"
+
+
+def _correction_of(record: dict, **overrides) -> "cost_ledger.RunCost":
+    return _run(kind="correction", supersedes=record["record_id"], reason="cache hits were missing", **overrides)
+
+
+def _two_executions_logged(caplog) -> list:
+    return [message for message in caplog.messages if "two executions" in message]
+
+
+class TestASecondExecutionUnderOneRunId:
+    def test_an_older_writer_that_books_a_spooled_attempt_again_is_a_spool_conflict(
+        self, ledger, signals, spawn, monkeypatch, caplog,
+    ):
+        """Codex reproduced it against f2bef053: that writer counts the ledger only and books attempt 1 again."""
+        with monkeypatch.context() as failing:
+            failing.setattr(cost_ledger, "_append_record", _enospc)
+            spooled = cost_ledger.record_next_attempt(PROJECT, "dispatch", _REF, _make_run, ledger_path=ledger)
+        assert (spooled["run_id"], spooled.landed) == (RUN_A1, "spool")
+
+        older = _result(spawn(_A_K2A2_WRITER, ledger, signals, {
+            "key": [PROJECT, "dispatch", _REF], "run": _run_fields(cost_usd=2.0),
+        }))
+        assert older["run_id"] == RUN_A1 and older["record_id"] != spooled["record_id"]
+
+        totals = cost_ledger.aggregate_runs(ledger)
+        assert totals.incomplete == "onvolledig: 1 runs in de spool botsen met een andere uitvoering in het grootboek"
+        assert (totals.spool_conflicts, totals.spool_pending) == (1, 1)
+        assert [record["record_id"] for record in totals.runs.values()] == [older["record_id"]]
+        assert totals.cost_usd == pytest.approx(2.0), "the spooled 0.5 of the other execution is in no sum"
+
+        with caplog.at_level(logging.WARNING, logger=cost_ledger.logger.name):
+            refire = cost_ledger.record_next_attempt(PROJECT, "dispatch", _REF, _make_run, ledger_path=ledger)
+        assert (refire["run_id"], refire.landed) == (f"{PROJECT}:dispatch:{_REF}:2", "ledger")
+        (warning,) = _two_executions_logged(caplog)
+        assert RUN_A1 in warning
+
+    @pytest.mark.parametrize("corrections", [1, 2])
+    def test_a_correction_waiting_behind_its_charge_in_the_ledger_is_no_conflict(
+        self, ledger, monkeypatch, caplog, corrections,
+    ):
+        """The correction names the ledger's charge, or the correction before it, in ``supersedes``: one execution."""
+        charge = cost_ledger.record_next_attempt(PROJECT, "dispatch", _REF, _make_run, ledger_path=ledger)
+        with monkeypatch.context() as failing:
+            failing.setattr(cost_ledger, "_append_record", _enospc)
+            waiting = [cost_ledger.record_run(_correction_of(charge, cost_usd=1.25), ledger_path=ledger)]
+        if corrections == 2:
+            waiting.append(cost_ledger.record_run(_correction_of(waiting[0], cost_usd=1.5), ledger_path=ledger))
+        assert [record.landed for record in [charge, *waiting]] == ["ledger", *["spool"] * corrections]
+
+        totals = cost_ledger.aggregate_runs(ledger)
+        assert (totals.spool_conflicts, totals.spool_pending) == (0, 1)
+        assert totals.incomplete == "onvolledig: 1 runs wachten op replay"
+        with caplog.at_level(logging.WARNING, logger=cost_ledger.logger.name):
+            refire = cost_ledger.record_next_attempt(PROJECT, "dispatch", _REF, _make_run, ledger_path=ledger)
+        assert refire["run_id"] == f"{PROJECT}:dispatch:{_REF}:2"
+        assert _two_executions_logged(caplog) == []
+
+    def test_a_spooled_correction_that_names_no_record_of_the_run_is_a_conflict(self, ledger):
+        """Only a correction of a record the run holds continues it; one that names another record does not."""
+        cost_ledger.record_run(_run(), ledger_path=ledger)
+        stray = cost_ledger.build_record(_correction_of({"record_id": "0" * 32}))
+        _spool_dir(ledger).mkdir()
+        cost_ledger.spool_file_for(_spool_dir(ledger), RUN_A1).write_text(json.dumps([stray]), encoding="utf-8")
+
+        totals = cost_ledger.aggregate_runs(ledger)
+        assert (totals.spool_conflicts, totals.spool_pending, totals.cost_usd) == (1, 1, pytest.approx(0.5))
 
 
 # ---------------------------------------------------------------------------

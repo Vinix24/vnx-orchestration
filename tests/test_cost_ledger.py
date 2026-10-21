@@ -531,11 +531,11 @@ class TestTheAggregation:
         totals = cost_ledger.aggregate_runs(ledger)
         assert [field.name for field in dataclasses.fields(totals)] == [
             "runs", "cost_usd", "api_equivalent_usd", "tokens", "tokens_unknown", "unavailable",
-            "legacy_lines", "unreadable_lines", "spool_pending", "spool_unreadable", "torn_tail",
+            "legacy_lines", "unreadable_lines", "spool_pending", "spool_unreadable", "spool_conflicts", "torn_tail",
         ]
-        assert (totals.spool_pending, totals.spool_unreadable, totals.torn_tail, totals.incomplete) == (
-            0, False, False, None,
-        )
+        assert (
+            totals.spool_pending, totals.spool_unreadable, totals.spool_conflicts, totals.torn_tail, totals.incomplete,
+        ) == (0, False, 0, False, None)
 
 
 # ---------------------------------------------------------------------------
