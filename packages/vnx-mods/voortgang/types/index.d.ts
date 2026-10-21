@@ -28,6 +28,7 @@ export type LiveWork = {
 
 /** One builder: a dispatch in `live` or `starting`, as three parts that each stand or fall on their own. */
 export type Builder = {
+  dispatchId: string
   /** `model`, `track_id` and `pr_id` of the dispatch's `dispatch-spec.json`; each is null when the spec sets none. */
   who: Part<{ model: string | null; trackId: string | null; prId: string | null }>
   /** The first `# ` line of the dispatch's `instruction.md`. */
@@ -42,7 +43,16 @@ export type Outcomes = {
 }
 
 /** A pane row: its text, already cut to the pane's width, and how it is drawn. */
-export type Row = { text: string; tone: 'normal' | 'head' | 'dim' | 'warn' | 'error' }
+export type Tone = 'normal' | 'head' | 'dim' | 'ok' | 'warn' | 'error'
+
+/** A stretch of a pane row with its own tone. The text carries the meaning; the tone only adds to it. */
+export type Segment = { text: string; tone: Tone }
+
+/** A pane row: segments, already cut to the pane's width. */
+export type Row = { segments: Segment[] }
+
+/** Which view the pane draws: what is going on now, or the plan (the tracks on `next` and `later`). */
+export type PaneView = 'now' | 'plan'
 
 /** `t0_index.json`: its age, and its two blocks the mod shows. */
 export type IndexView = {
@@ -77,6 +87,8 @@ export type TrackInfo = {
   /** `P1`, `P2`, `P3`, or `-` when the track has none or another scale. */
   priority: string
   horizon: string
+  /** `phase`; `done` marks a finished track whose leftovers are orphans. */
+  phase: string
   /** The PR numbers of `pr_ref`, in the order it lists them. */
   prRefs: number[]
 }
@@ -84,8 +96,13 @@ export type TrackInfo = {
 /** `vnx objective list`: every track; the pane picks the ones to show. */
 export type TrackView = { tracks: TrackInfo[] }
 
+/** One deliverable of `vnx deliverable list`: the id behind its `deliverable_ref`, its title and its derived status. */
+export type DeliverableItem = { id: string; title: string; status: string }
+
 /** The deliverables of one track. */
 export type TrackDeliverables = {
+  /** In the order the list gives them. */
+  items: DeliverableItem[]
   total: number
   /** Those with `derived_status` `done`. */
   done: number
@@ -93,11 +110,9 @@ export type TrackDeliverables = {
   isRecent: boolean
 }
 
-/** `vnx deliverable list`: per track the deliverables counted, and every `proposed` one. */
+/** `vnx deliverable list`: per track the deliverables, counted and listed. */
 export type DeliverableView = {
   byTrack: Record<string, TrackDeliverables>
-  /** Every `proposed` deliverable of the project: each waits on the operator's promote. */
-  proposed: number
 }
 
 /**
@@ -132,6 +147,6 @@ export type Model = {
 
 declare module 'claude-code' {
   interface PluginState {
-    voortgang: { model: Model | null; isRefreshing: boolean; failure: string | null; cwd: string | null }
+    voortgang: { model: Model | null; isRefreshing: boolean; failure: string | null; cwd: string | null; view: PaneView }
   }
 }
