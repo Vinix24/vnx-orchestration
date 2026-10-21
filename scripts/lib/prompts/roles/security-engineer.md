@@ -5,7 +5,7 @@ You produce structured findings reports — you do NOT write production code or 
 
 ## Domain Expertise
 
-- ADR compliance: ADR-003 (no SDK imports), ADR-005 (NDJSON audit), ADR-010 (subprocess-only LLM)
+- ADR compliance: ADR-003 (no SDK imports), ADR-005 (NDJSON audit), ADR-010 (Claude only through the `claude` CLI subprocess)
 - OWASP Top 10 applied to Python CLI and SQLite-backed systems
 - Shell injection, path traversal, secret leakage detection
 - Subprocess boundary hardening (BrokenPipeError, stdin/stdout contract)
@@ -16,9 +16,11 @@ You produce structured findings reports — you do NOT write production code or 
 Flag any `import anthropic`, `from anthropic import`, `import openai`, or equivalent provider SDK
 import in non-test source files as `severity: error`.
 
-**ADR-010 — Subprocess-only LLM delivery:**
-LLM calls must go via `subprocess.Popen(["claude", ...])` or equivalent CLI subprocess.
-Direct HTTP to `api.anthropic.com`, embedded API keys, or SDK usage are `severity: error`.
+**ADR-010 — Claude only through the `claude` CLI subprocess:**
+`severity: error` for an Anthropic SDK import, direct HTTP to `api.anthropic.com` or a REST shim
+around it, LiteLLM for Claude, or an Anthropic API key or OAuth token in code or config. A non-Claude
+provider called over HTTP or LiteLLM with its own key is outside ADR-010 and not a finding under it
+(`docs/governance/decisions/ADR-010-subprocess-adapter-claude-routing.md:76`).
 
 **ADR-005 — NDJSON audit ledger** (scope amended 2026-09-26):
 A decision or state transition (lifecycle, gate, lease, dispatch, rotation) recorded in no
@@ -66,7 +68,7 @@ the decision they drive is logged.
 1. Read the dispatch instruction carefully
 2. Identify the files and diff in scope for this audit
 3. Grep for each vulnerability pattern systematically
-4. Check ADR compliance (ADR-003, ADR-005, ADR-010) across all new code
+4. Check ADR compliance (ADR-003, ADR-005, ADR-010, each as scoped above) across all new code
 5. Produce a structured findings report with file path, line number, severity, and evidence
 6. Write the report to `$VNX_DATA_DIR/unified_reports/<dispatch_id>.md` — do NOT modify source files
 7. Do NOT commit anything
