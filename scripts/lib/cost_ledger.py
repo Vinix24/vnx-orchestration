@@ -46,13 +46,15 @@ file could not be taken: the outcome is unknown and the caller books no new
 attempt.
 
 :func:`replay_spool` brings the spool back into the ledger (K2a-3b), one spool
-file per exclusive hold of the lock file, bounded in files and seconds. A
-file is deleted only after every record of it reads back from the ledger as
-its own complete line, so a replay killed halfway leaves the file, and the
-next one sees by ``record_id`` what already landed. A second execution under
-one ``run_id`` is booked under the next free attempt with ``renumbered_from``
-and a receipt; a spool file that cannot be read as one run's goes to
-``provider_costs.spool/quarantine/`` with a receipt.
+file per exclusive hold of the lock file, bounded in files and seconds, the
+ledger ``flock`` under it bounded as well. A file is deleted only after the
+ledger is fsynced, also when nothing was appended, and every record of it
+reads back from the ledger as its own complete line, so a replay killed
+halfway leaves the file, and the next one sees by ``record_id`` what already
+landed. A second execution under one ``run_id`` is booked under the next free
+attempt with ``renumbered_from`` and a receipt; a spool file that cannot be
+read as one run's goes to ``provider_costs.spool/quarantine/``, its receipt
+booked before the move.
 
 Boundary first: only a holder of the lock file in exclusive mode ends a last
 line without ``\\n`` with ``\\n`` and fsyncs, so a new line always starts on its
@@ -68,6 +70,7 @@ through ``harness_run_cost`` (K2a-2).
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import hashlib
 import json
@@ -1393,12 +1396,14 @@ _LOCK_POLL_SEC = 0.05
 class ReplayResult:
     """What one :func:`replay_spool` call did; ``stopped`` says why it ended with files left, else ``None``.
 
-    ``stopped`` is ``lock_busy`` (the lock file was not obtained within the
-    wait, and nothing more was written), ``batch`` or ``budget`` (the bound of
-    one call), ``spool_unreadable`` (the spool directory could not be listed)
-    or ``write_failed`` (a ledger write, its read-back, a quarantine or a
-    receipt failed; the file it was on stays). ``detail`` says what happened.
-    ``files_remaining`` counts the files this call listed that are still in
+    ``stopped`` is ``lock_busy`` (the lock file, or under it the ledger
+    ``flock`` a writer of an older fabric version held, was not obtained
+    within the bounds, and nothing more was written), ``batch`` or ``budget``
+    (the bound of one call), ``spool_unreadable`` (the spool directory could
+    not be listed) or ``write_failed`` (a ledger write, its fsync, its
+    read-back, a quarantine or a receipt failed; the file it was on stays).
+    ``detail`` says what happened. ``files_remaining`` counts the files this
+    call listed, or met as files a renumbering waited on, that are still in
     the spool.
     """
 
@@ -1423,7 +1428,45 @@ class ReplayResult:
 
 
 class _ReplayError(Exception):
-    """A spool file the replay could not finish: the read-back missed a line, or a receipt failed. The file stays."""
+    """A spool file the replay could not finish: the fsync failed, the read-back missed a line, or a receipt failed.
+
+    The file stays.
+    """
+
+
+class _RenumberingWaits(Exception):
+    """A renumbering that cannot count the attempts yet: ``names`` are the spool files that cannot be read.
+
+    Raised while the file is planned, so before anything of it is written. The
+    replay quarantines those files first, each one unit of its bounds, and
+    then tries the file again (:func:`_drain`).
+    """
+
+    def __init__(self, names: Sequence[str]):
+        super().__init__(f"the renumbering waits on the spool files that cannot be read: {list(names)}")
+        self.names = list(names)
+
+
+@dataclass(frozen=True)
+class _Bounds:
+    """The bounds of one replay call: ``batch`` files in ``budget`` seconds from ``started``, ``wait`` seconds per lock."""
+
+    batch: int
+    budget: float
+    wait: float
+    started: float
+
+    def reached(self, handled: int) -> Optional[str]:
+        """``batch`` or ``budget`` when the call may start no next file after ``handled`` files, else ``None``."""
+        if handled >= self.batch:
+            return "batch"
+        if time.monotonic() - self.started >= self.budget:
+            return "budget"
+        return None
+
+    def ledger_deadline(self, asked: float) -> float:
+        """Until when the ledger ``flock`` is tried: what is left of the lock wait begun at ``asked``, and of the budget."""
+        return min(asked + self.wait, self.started + self.budget)
 
 
 @dataclass
@@ -1460,6 +1503,23 @@ def _setting(given: Optional[float], spec: Tuple[str, float], cast: Callable[[st
     return value
 
 
+def _flock_until(target: Any, deadline: float) -> bool:
+    """``flock`` ``target``, a descriptor or a file, exclusively with ``LOCK_NB``, retried until ``deadline``.
+
+    ``True`` when held, ``False`` when it stayed taken. One try is always
+    made, also at or past the deadline. Any other ``OSError`` is raised.
+    """
+    while True:
+        try:
+            fcntl.flock(target, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return False
+            time.sleep(min(_LOCK_POLL_SEC, left))
+
+
 def _lock_within(ledger_path: Path, wait: float) -> Optional[int]:
     """The lock file held exclusively, as an open descriptor, or ``None`` when it stayed taken for ``wait`` seconds.
 
@@ -1468,22 +1528,37 @@ def _lock_within(ledger_path: Path, wait: float) -> Optional[int]:
     which releases the lock.
     """
     fd = os.open(provider_costs.ledger_lock_path(ledger_path), os.O_RDONLY | os.O_CREAT | os.O_CLOEXEC, 0o644)
-    deadline = time.monotonic() + wait
-    while True:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return fd
-        except BlockingIOError:
-            if time.monotonic() < deadline:
-                time.sleep(_LOCK_POLL_SEC)
-                continue
-            error: Optional[OSError] = None
-        except OSError as exc:
-            error = exc
+    try:
+        held = _flock_until(fd, time.monotonic() + wait)
+    except OSError:
         os.close(fd)
-        if error is not None:
-            raise error
-        return None
+        raise
+    if held:
+        return fd
+    os.close(fd)
+    return None
+
+
+def _open_locked_until(ledger_path: Path, deadline: float):
+    """The ledger opened for append and read and ``flock``ed exclusively, or ``None`` when it stayed taken until ``deadline``.
+
+    The replay's :func:`_open_locked`. A writer of an older fabric version
+    takes the ledger ``flock`` and never the lock file, so a blocking
+    ``flock`` here would keep the lock file, and every current writer behind
+    it, for as long as that writer holds the ledger. Released by closing the
+    file, as there.
+    """
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = ledger_path.open("a+", encoding="utf-8")
+    try:
+        held = _flock_until(fh, deadline)
+    except OSError:
+        fh.close()
+        raise
+    if held:
+        return fh
+    fh.close()
+    return None
 
 
 def _receipts_file(ledger_path: Path) -> Path:
@@ -1514,65 +1589,126 @@ def _emit_receipt(ledger_path: Path, event_type: str, **fields: Any) -> None:
         raise _ReplayError(f"the {event_type} receipt was not written ({exc})") from exc
 
 
-def _renumbering_booked(ledger_path: Path, record_id: str) -> bool:
-    """True when the receipt ledger holds the renumbering receipt of the line ``record_id`` already.
+def _booked(
+    ledger_path: Path, event_type: str, match: Callable[[Mapping[str, Any]], bool], what: str,
+) -> List[Dict[str, Any]]:
+    """The receipts of ``event_type`` in the store's receipt ledger that ``match`` accepts, in ledger order.
 
     A receipt ledger that cannot be read raises :class:`_ReplayError`: without
-    knowing, the receipt is neither written twice nor left out.
+    knowing, a receipt is neither written twice nor left out. ``what`` names
+    the receipt in that error.
     """
     receipts = _receipts_file(ledger_path)
+    found: List[Dict[str, Any]] = []
     try:
         with receipts.open("r", encoding="utf-8", errors="replace") as fh:
             for text in fh:
-                if RENUMBERED_EVENT not in text or record_id not in text:
+                if event_type not in text:
                     continue
                 try:
                     receipt = json.loads(text)
                 except ValueError:
                     continue
-                if isinstance(receipt, dict) and receipt.get("event_type") == RENUMBERED_EVENT \
-                        and receipt.get("record_id") == record_id:
-                    return True
+                if isinstance(receipt, dict) and receipt.get("event_type") == event_type and match(receipt):
+                    found.append(receipt)
     except FileNotFoundError:
-        return False
+        return []
     except OSError as exc:
-        raise _ReplayError(f"the receipt ledger {receipts} cannot be read ({exc}): the {RENUMBERED_EVENT} receipt "
-                           f"of {record_id} was not written") from exc
-    return False
+        raise _ReplayError(f"the receipt ledger {receipts} cannot be read ({exc}): the {event_type} receipt "
+                           f"of {what} was not written") from exc
+    return found
+
+
+def _renumbering_booked(ledger_path: Path, record_id: str) -> bool:
+    """True when the receipt ledger holds the renumbering receipt of the line ``record_id`` already."""
+    return bool(_booked(ledger_path, RENUMBERED_EVENT, lambda receipt: receipt.get("record_id") == record_id,
+                        record_id))
+
+
+def _content_digest(path: Path) -> str:
+    """``sha256:<hex>`` of the spool file's bytes, or ``unreadable:<errno>`` when they cannot be read.
+
+    With the file name, the key of a quarantine decision (:func:`_quarantine`).
+    A file that is gone raises ``FileNotFoundError``.
+    """
+    try:
+        return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        return f"unreadable:{errno.errorcode.get(exc.errno, exc.errno)}"
+
+
+def _is_quarantine_name(name: str, spool_name: str) -> bool:
+    """True when ``name`` is one the quarantine gives the spool file ``spool_name``: itself, or with a ``.<n>`` suffix."""
+    suffix = name[len(spool_name) + 1:]
+    return name == spool_name or (name.startswith(spool_name + ".") and suffix.isdigit())
+
+
+def _quarantine_target(ledger_path: Path, path: Path, digest: str) -> Tuple[Path, bool]:
+    """``(target, booked)``: where the spool file ``path`` goes in quarantine, and whether that decision is booked.
+
+    A booked decision for this file name and content digest whose target is
+    still free is a move that did not happen: it is finished there. Otherwise
+    the file gets its own name, or the first free ``.<n>`` suffix: never a name
+    that is in quarantine, and never one a booked decision for this file name
+    holds. A target is always in this store's quarantine, whatever path a
+    receipt names.
+    """
+    target_dir = path.parent / QUARANTINE_DIR_NAME
+    held: Set[str] = set()
+    for receipt in _booked(ledger_path, QUARANTINED_EVENT, lambda r: r.get("spool_file") == path.name, path.name):
+        name = Path(str(receipt.get("quarantined_as") or "")).name
+        if not _is_quarantine_name(name, path.name):
+            continue
+        held.add(name)
+        if receipt.get("content_digest") == digest and not _exists(target_dir / name):
+            return target_dir / name, True
+    target, suffix = target_dir / path.name, 0
+    while target.name in held or _exists(target):
+        suffix += 1
+        target = target_dir / f"{path.name}.{suffix}"
+    return target, False
 
 
 def _quarantine(ledger_path: Path, path: Path, why: str, result: ReplayResult) -> None:
-    """Move the spool file ``path`` to ``quarantine/`` (never delete it), with a log line and a receipt (OI-2243).
+    """Move the spool file ``path`` to ``quarantine/`` (never delete it): first the decision booked, then the move (OI-2243).
 
-    The caller holds the lock file exclusively. A name already in quarantine
-    is never overwritten: the file gets the first free ``.<n>`` suffix.
+    The caller holds the lock file exclusively. The receipt goes into the
+    receipt ledger before the rename (ADR-005): a receipt that fails moves
+    nothing, the file stays in the spool and the call fails. A rename that
+    fails after its receipt leaves the decision booked; the next replay finds
+    it by the file name and the content digest (:func:`_quarantine_target`)
+    and only finishes the move, without a second receipt. A name already in
+    quarantine is never overwritten. A file that is gone is skipped.
     """
-    spool_dir = path.parent
-    target_dir = spool_dir / QUARANTINE_DIR_NAME
-    target_dir.mkdir(exist_ok=True)
-    target, suffix = target_dir / path.name, 0
-    while _exists(target):
-        suffix += 1
-        target = target_dir / f"{path.name}.{suffix}"
+    try:
+        digest = _content_digest(path)
+    except FileNotFoundError:
+        return
+    target, booked = _quarantine_target(ledger_path, path, digest)
+    if not booked:
+        _emit_receipt(ledger_path, QUARANTINED_EVENT, spool_file=path.name, content_digest=digest,
+                      quarantined_as=str(target), reason=why, section=target.name)
+    target.parent.mkdir(exist_ok=True)
     os.rename(path, target)
-    _fsync_dir(target_dir)
-    _fsync_dir(spool_dir)
+    _fsync_dir(target.parent)
+    _fsync_dir(path.parent)
     result.files_quarantined += 1
     logger.warning("cost_ledger: the spool file %s went to quarantine as %s: %s", path.name, target, why)
-    _emit_receipt(ledger_path, QUARANTINED_EVENT, spool_file=path.name, quarantined_as=str(target), reason=why,
-                  section=target.name)
 
 
-def _quarantine_the_unreadable(ledger_path: Path, result: ReplayResult) -> None:
-    """Quarantine every spool file that cannot be read as one run's, so the attempts can be counted past them."""
-    spool_dir = spool_dir_for(ledger_path)
+def _unreadable_spool_files(spool_dir: Path) -> List[str]:
+    """The names of the spool files that cannot be read as one run's. A spool that cannot be listed raises."""
+    unreadable: List[str] = []
     for name in _spool_names(spool_dir):
         try:
             _read_spool_file(spool_dir / name)
         except FileNotFoundError:
             continue
-        except (OSError, _UnreadableSpool) as exc:
-            _quarantine(ledger_path, spool_dir / name, str(exc), result)
+        except (OSError, _UnreadableSpool):
+            unreadable.append(name)
+    return unreadable
 
 
 def _renumber(record: Mapping[str, Any], run_id: str, renamed: Mapping[str, str]) -> Dict[str, Any]:
@@ -1635,26 +1771,43 @@ def _whole_records(fh) -> List[Dict[str, Any]]:
     return _parse_lines(_split_torn_tail(_read_under_the_lock(fh))[0])[0]
 
 
+def _fsync_the_ledger(fh, ledger_path: Path, run_id: str) -> None:
+    """fsync the ledger and its directory; a failure raises :class:`_ReplayError`, so the spool file stays."""
+    try:
+        os.fsync(fh.fileno())
+        _fsync_dir(ledger_path.parent)
+    except OSError as exc:
+        raise _ReplayError(f"the ledger {ledger_path} could not be fsynced ({exc}): run {run_id} keeps its spool "
+                           "file, the only durable copy of its records until a fsync succeeds") from exc
+
+
 def _write_the_plan(fh, ledger_path: Path, spooled: Sequence[Mapping[str, Any]], result: ReplayResult) -> _Plan:
     """Restore the boundary, write what the ledger misses of one spool file, fsync, and read it back.
 
     The caller holds the lock file exclusively and the ledger ``flock``ed in
-    ``fh``. A line that does not read back as its own complete line raises
+    ``fh``. The fsync is made always, also when every record had landed
+    already: such a record can be in the ledger unsynced (its writer's fsync
+    failed, ``ledger+spool``, or a replay was killed after its append), and
+    until a fsync succeeds the spool file is its only durable copy. A failed
+    fsync and a line that does not read back as its own complete line raise
     :class:`_ReplayError`; a failed write raises its ``OSError``. Either way the
-    spool file stays and the next replay sees by ``record_id`` what landed.
+    spool file stays and the next replay sees by ``record_id`` what landed. A
+    renumbering that would count the attempts past a spool file that cannot be
+    read raises :class:`_RenumberingWaits` instead, before anything is written.
     """
     _end_a_torn_tail(fh)
     project_id, producer, ref, _attempt = split_run_id(spooled[0]["run_id"])
 
     def next_run_id() -> str:
-        _quarantine_the_unreadable(ledger_path, result)
+        unreadable = _unreadable_spool_files(spool_dir_for(ledger_path))
+        if unreadable:
+            raise _RenumberingWaits(unreadable)
         return run_id_for(project_id, producer, ref, _next_attempt(ledger_path, fh, project_id, producer, ref))
 
     plan = _plan_the_file(_whole_records(fh), spooled, next_run_id)
     for line in plan.writes:
         _append_record(fh, line)
-    if plan.writes:
-        os.fsync(fh.fileno())
+    _fsync_the_ledger(fh, ledger_path, spooled[0]["run_id"])
     result.records_written += len(plan.writes)
     result.records_renumbered += sum(1 for line in plan.writes if "renumbered_from" in line)
     result.records_already_landed += plan.landed
@@ -1666,48 +1819,101 @@ def _write_the_plan(fh, ledger_path: Path, spooled: Sequence[Mapping[str, Any]],
     return plan
 
 
-def _replay_file(ledger_path: Path, path: Path, result: ReplayResult) -> None:
-    """Bring one spool file back into the ledger and delete it, or quarantine it. The caller holds the lock file.
-
-    The file is deleted only after every record of it reads back as its own
-    complete line and every renumbered line has its receipt.
-    """
-    try:
-        spooled = _read_spool_file(path)
-    except FileNotFoundError:
-        return
-    except (OSError, _UnreadableSpool) as exc:
-        _quarantine(ledger_path, path, str(exc), result)
-        return
-    fh = _open_locked(ledger_path)
-    try:
-        plan = _write_the_plan(fh, ledger_path, spooled, result)
-    finally:
-        closed = _close_the_ledger(fh)
-    if closed is not None:
-        raise closed
-    for line in plan.renumbered:
+def _book_the_renumbering(ledger_path: Path, renumbered: Sequence[Mapping[str, Any]]) -> None:
+    """One receipt per renumbered line, unless the receipt ledger holds it already."""
+    for line in renumbered:
         if not _renumbering_booked(ledger_path, line["record_id"]):
             _emit_receipt(ledger_path, RENUMBERED_EVENT, project_id=line["project_id"], run_id=line["run_id"],
                           renumbered_from=line["renumbered_from"], record_id=line["record_id"],
                           section=line["record_id"])
             logger.warning("cost_ledger: run %s in the spool was a second execution, booked as %s",
                            line["renumbered_from"], line["run_id"])
+
+
+def _replay_file(ledger_path: Path, path: Path, ledger_deadline: float, result: ReplayResult) -> Optional[str]:
+    """Bring one spool file back into the ledger and delete it, or quarantine it. The caller holds the lock file.
+
+    ``None`` when the file is done. When the ledger ``flock`` stays taken until
+    ``ledger_deadline``, nothing is written for the file and the reason is
+    returned. The file is deleted only after the ledger is fsynced, every
+    record of it reads back as its own complete line and every renumbered line
+    has its receipt.
+    """
+    try:
+        spooled = _read_spool_file(path)
+    except FileNotFoundError:
+        return None
+    except (OSError, _UnreadableSpool) as exc:
+        _quarantine(ledger_path, path, str(exc), result)
+        return None
+    fh = _open_locked_until(ledger_path, ledger_deadline)
+    if fh is None:
+        return (f"the ledger {ledger_path} stayed flocked by a process that does not take the lock file (a writer "
+                "of an older fabric version) until the lock wait or the budget ran out")
+    try:
+        plan = _write_the_plan(fh, ledger_path, spooled, result)
+    finally:
+        closed = _close_the_ledger(fh)
+    if closed is not None:
+        raise closed
+    _book_the_renumbering(ledger_path, plan.renumbered)
     os.unlink(path)
     _fsync_dir(path.parent)
     result.files_replayed += 1
+    return None
 
 
-def _replay_under_the_lock(ledger_path: Path, path: Path, wait: float, result: ReplayResult) -> bool:
-    """:func:`_replay_file` with the lock file held exclusively; ``False`` when it was not obtained within ``wait``."""
-    fd = _lock_within(ledger_path, wait)
+def _replay_under_the_lock(ledger_path: Path, path: Path, bounds: _Bounds, result: ReplayResult) -> Optional[str]:
+    """:func:`_replay_file` with the lock file held exclusively and released after it.
+
+    ``None`` when done, else why a lock was busy: the lock file was not
+    obtained within the wait, or the ledger ``flock`` under it not within what
+    was left of the wait and the budget (:meth:`_Bounds.ledger_deadline`).
+    Nothing is written for the file then.
+    """
+    asked = time.monotonic()
+    fd = _lock_within(ledger_path, bounds.wait)
     if fd is None:
-        return False
+        return f"the lock file was taken for {bounds.wait} seconds"
     try:
-        _replay_file(ledger_path, path, result)
+        return _replay_file(ledger_path, path, bounds.ledger_deadline(asked), result)
     finally:
         os.close(fd)
-    return True
+
+
+def _drain(ledger_path: Path, names: List[str], bounds: _Bounds, result: ReplayResult) -> None:
+    """Replay or quarantine the spool files ``names`` in order, the lock file taken and released per file.
+
+    Every file replayed or quarantined is one unit of the batch and the
+    budget. A file whose renumbering waits on spool files that cannot be read
+    (:class:`_RenumberingWaits`) wrote nothing and is no unit: the files it
+    waits on go first, each one a unit, and then the file once more. When the
+    bounds stop the call before that, the renumbering waits for a later call;
+    the attempts are never counted past a file that cannot be read. A file met
+    that way that was not listed is added to ``names``.
+    """
+    spool_dir = spool_dir_for(ledger_path)
+    queue, handled, deferred = list(names), 0, set()
+    while queue:
+        stop = bounds.reached(handled)
+        if stop:
+            result.stopped = stop
+            return
+        name = queue.pop(0)
+        try:
+            busy = _replay_under_the_lock(ledger_path, spool_dir / name, bounds, result)
+        except _RenumberingWaits as waits:
+            logger.warning("cost_ledger: the spool file %s waits, %s", name, waits)
+            if name not in deferred:
+                deferred.add(name)
+                ahead = [other for other in waits.names if other != name]
+                queue = [*ahead, name, *(other for other in queue if other not in ahead)]
+                names.extend(other for other in ahead if other not in names)
+            continue
+        if busy is not None:
+            result.stopped, result.detail = "lock_busy", busy
+            return
+        handled += 1
 
 
 def replay_spool(
@@ -1722,12 +1928,15 @@ def replay_spool(
     At most ``batch`` files in ``budget_sec`` seconds; what remains waits for
     the next call. Defaults: ``VNX_COST_LEDGER_REPLAY_BATCH`` (50),
     ``VNX_COST_LEDGER_REPLAY_BUDGET_SEC`` (10), ``VNX_COST_LEDGER_LOCK_WAIT_SEC``
-    (5). Per file: the lock file with ``LOCK_NB`` until the wait runs out
-    (else ``lock_busy``, nothing more written), the boundary restored, the
-    records the ledger misses appended, fsync, read back, and only then the
-    file deleted (:func:`_replay_file`). A file that is not one run's goes to
-    quarantine. A spool directory that cannot be listed is ``spool_unreadable``
-    and never quarantined.
+    (5). Per file: the lock file with ``LOCK_NB`` until the wait runs out,
+    then the ledger ``flock`` with ``LOCK_NB`` until what is left of the wait
+    and the budget runs out (else ``lock_busy``, the lock file released and
+    nothing more written), the boundary restored, the records the ledger
+    misses appended, fsync (always), read back, and only then the file deleted
+    (:func:`_replay_file`). A file that is not one run's goes to quarantine,
+    its receipt booked before the move, as one unit of the same bounds
+    (:func:`_drain`). A spool directory that cannot be listed is
+    ``spool_unreadable`` and never quarantined.
     """
     path = Path(ledger_path)
     refuse_real_central_store_write_under_test_runner(path)
@@ -1742,15 +1951,8 @@ def replay_spool(
         logger.warning("cost_ledger: the spool %s cannot be listed, nothing was replayed: %s", spool_dir, exc)
         result.stopped, result.detail = "spool_unreadable", f"the spool {spool_dir} cannot be listed: {exc}"
         return result
-    started = time.monotonic()
     try:
-        for done, name in enumerate(names):
-            if done >= batch or time.monotonic() - started >= budget:
-                result.stopped = "batch" if done >= batch else "budget"
-                break
-            if not _replay_under_the_lock(path, spool_dir / name, wait, result):
-                result.stopped, result.detail = "lock_busy", f"the lock file was taken for {wait} seconds"
-                break
+        _drain(path, names, _Bounds(batch, budget, wait, time.monotonic()), result)
     except (OSError, _Unwritten, _ReplayError) as exc:
         logger.warning("cost_ledger: the replay of %s stopped on a failure: %s", spool_dir, exc)
         result.stopped, result.detail = "write_failed", str(exc)

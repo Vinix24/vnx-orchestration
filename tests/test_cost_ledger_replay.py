@@ -20,6 +20,13 @@ nothing, an unreadable line in the middle makes the total incomplete, a reader
 of a store it may not write reads without creating the lock file, and the text
 says ``1 run``. And ``vnx costs replay`` on all three entrances.
 
+The codex review of round 1 (a60678dc), one class or test each: the ledger is
+fsynced before any spool file goes, also when nothing was appended; the
+quarantine receipt is booked before the move and a move that failed after it
+is finished without a second one; a quarantined file counts against the batch;
+an older writer on the ledger ``flock`` makes the replay ``lock_busy`` within
+its bounds.
+
 Where two actors meet, they are real processes (``subprocess`` with
 ``sys.executable``) on real files and real ``flock``s; nothing mocks a lock. A
 child injects only its own fault by replacing a ``cost_ledger`` function in its
@@ -31,6 +38,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import errno
+import fcntl
 import json
 import logging
 import os
@@ -62,6 +70,8 @@ _ZERO = {"input_uncached": 0, "cache_hit": 0, "cache_write_5m": 0, "cache_write_
 # How long a child holds the lock file, and how long the replay waits for it.
 HOLD_SECONDS = 3.0
 WAIT_SECONDS = 0.3
+# What a bounded wait may take beyond its bound: the poll interval and the work around it.
+MARGIN_SECONDS = 0.7
 
 
 def _run_fields(**overrides) -> dict:
@@ -178,6 +188,15 @@ _LOCK_FILE_HOLDER = """
     signal("holder_has_the_lock")
     time.sleep(ARG["hold"])
     os.close(fd)
+    report(done=True)
+"""
+
+# A writer of an older fabric version (1.7.2, or f2bef053): it takes the ledger flock and never the lock file.
+_LEDGER_FLOCK_HOLDER = """
+    with LEDGER.open("a", encoding="utf-8") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        signal("holder_has_the_ledger")
+        time.sleep(ARG["hold"])
     report(done=True)
 """
 
@@ -422,6 +441,63 @@ class TestItem10TheBounds:
         monkeypatch.setenv("VNX_COST_LEDGER_REPLAY_BATCH", value)
         assert cost_ledger.replay_spool(ledger).files_replayed == replayed
 
+    def test_an_older_writer_on_the_ledger_flock_makes_it_lock_busy_within_the_bounds(
+        self, ledger, signals, spawn, monkeypatch,
+    ):
+        """Codex r1 warning 3: under the lock file the ledger flock is bounded too, and the lock file goes free."""
+        spooled = _to_the_spool(ledger, monkeypatch, _run())
+        before = ledger.read_bytes()
+        holder = spawn(_LEDGER_FLOCK_HOLDER, ledger, signals, {"hold": HOLD_SECONDS})
+        _wait_for(signals / "holder_has_the_ledger", holder)
+
+        started = time.monotonic()
+        result = cost_ledger.replay_spool(ledger, lock_wait_sec=WAIT_SECONDS, budget_sec=WAIT_SECONDS)
+        waited = time.monotonic() - started
+
+        assert (result.stopped, result.exit_code, result.files_remaining) == ("lock_busy", 3, 1)
+        assert "flocked" in result.detail
+        assert waited < WAIT_SECONDS + MARGIN_SECONDS, f"it waited {waited:.2f}s for the older writer"
+        assert result.records_written == 0 and ledger.read_bytes() == before
+        assert _spooled(ledger) == [spooled]
+        lock = os.open(ledger.parent / "provider_costs.lock", os.O_RDONLY)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            pytest.fail("the replay still holds the lock file, so a current writer would queue behind it")
+        finally:
+            os.close(lock)
+        assert holder.poll() is None, "the older writer still holds the ledger while the lock file is free again"
+        assert _result(holder) == {"done": True}
+
+    def test_a_quarantine_counts_against_the_batch_and_the_renumbering_waits_for_it(self, ledger):
+        """Codex r1 warning 2: batch=1 with a second execution and three corrupt files handles one file per call.
+
+        The renumbering counts the attempts past every spool file, so it waits
+        until the corrupt files are in quarantine, one per call; it never
+        counts past a file it could not read.
+        """
+        older = cost_ledger.record_run(_run(cost_usd=2.0), ledger_path=ledger)
+        second = _put_in_the_spool(ledger, [cost_ledger.build_record(_run())])
+        corrupt = [_spool_dir(ledger) / f"zz-corrupt-{n}~{n:016d}.json" for n in (1, 2, 3)]
+        for path in corrupt:
+            path.write_text("not json", encoding="utf-8")
+
+        for left in (2, 1, 0):
+            call = cost_ledger.replay_spool(ledger, batch=1)
+            assert (call.files_replayed, call.files_quarantined, call.stopped) == (0, 1, "batch")
+            assert call.files_remaining == left + 1
+            assert sum(path.exists() for path in corrupt) == left
+            assert _lines(ledger) == [older], "no attempt is counted while a corrupt file waits in the spool"
+
+        last = cost_ledger.replay_spool(ledger, batch=1)
+
+        assert (last.files_replayed, last.files_quarantined, last.records_renumbered) == (1, 0, 1)
+        assert (last.stopped, last.files_remaining) == (None, 0)
+        assert [line["run_id"] for line in _lines(ledger)] == [RUN_A1, RUN_A2]
+        assert not second.exists()
+        assert sorted(path.name for path in (_spool_dir(ledger) / "quarantine").iterdir()) == [
+            path.name for path in corrupt]
+
 
 # ---------------------------------------------------------------------------
 # Item 11: a replay killed in the middle of a file
@@ -614,17 +690,76 @@ class TestQuarantine:
         b_run = cost_ledger.record_next_attempt(PROJECT, *_REF_B, _make_run, ledger_path=ledger)
         assert (b_run["run_id"], b_run.landed) == (RUN_B1, "ledger")
 
-    def test_a_second_file_of_the_same_name_never_overwrites_the_first(self, ledger):
+    @pytest.mark.parametrize("contents", [("first", "second"), ("same", "same")])
+    def test_a_second_file_of_the_same_name_never_overwrites_the_first(self, ledger, contents):
+        """Also with the same bytes: the first decision's move happened, so the second is a decision of its own."""
         path = _spool_file(ledger, RUN_A1)
         path.parent.mkdir(parents=True)
-        for content in ("first", "second"):
+        for content in contents:
             path.write_text(content, encoding="utf-8")
             assert cost_ledger.replay_spool(ledger).files_quarantined == 1
 
         quarantine = _spool_dir(ledger) / "quarantine"
-        assert sorted(p.read_text(encoding="utf-8") for p in quarantine.iterdir()) == ["first", "second"]
-        assert (quarantine / f"{path.name}.1").read_text(encoding="utf-8") == "second"
+        assert sorted(p.read_text(encoding="utf-8") for p in quarantine.iterdir()) == sorted(contents)
+        assert (quarantine / f"{path.name}.1").read_text(encoding="utf-8") == contents[1]
+        booked = _receipts(ledger, cost_ledger.QUARANTINED_EVENT)
+        assert [receipt["quarantined_as"] for receipt in booked] == [
+            str(quarantine / path.name), str(quarantine / f"{path.name}.1")]
         assert cost_ledger.aggregate_runs(ledger).incomplete == "onvolledig: 2 spoolbestanden staan in quarantaine"
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root writes a read-only file")
+    def test_a_quarantine_whose_receipt_fails_moves_nothing(self, ledger):
+        """Codex r1 warning 1: the decision is booked first (ADR-005); without its receipt the file stays put."""
+        path = _spool_file(ledger, RUN_A1)
+        path.parent.mkdir(parents=True)
+        path.write_text("not json", encoding="utf-8")
+        receipts = ledger.parent.parent / "state" / "t0_receipts.ndjson"
+        receipts.parent.mkdir(parents=True)
+        receipts.touch(mode=0o444)
+
+        failed = cost_ledger.replay_spool(ledger)
+
+        assert (failed.stopped, failed.exit_code, failed.files_quarantined) == ("write_failed", 1, 0)
+        assert "receipt" in failed.detail and "was not written" in failed.detail
+        assert path.read_text(encoding="utf-8") == "not json", "the file stays in the spool"
+        quarantine = _spool_dir(ledger) / "quarantine"
+        assert not quarantine.exists() or sorted(quarantine.iterdir()) == []
+        receipts.chmod(0o644)
+
+        again = cost_ledger.replay_spool(ledger)
+
+        assert (again.files_quarantined, again.stopped) == (1, None)
+        assert (quarantine / path.name).read_text(encoding="utf-8") == "not json"
+        assert len(_receipts(ledger, cost_ledger.QUARANTINED_EVENT)) == 1
+
+    def test_a_move_that_fails_after_its_receipt_is_finished_without_a_second_receipt(self, ledger, monkeypatch):
+        """Codex r1 warning 1: the next replay finds the booked decision by file name and content digest."""
+        path = _spool_file(ledger, RUN_A1)
+        path.parent.mkdir(parents=True)
+        path.write_text("not json", encoding="utf-8")
+        real_rename = os.rename
+
+        def rename_fails_for_the_spool_file(src, dst, *args, **kwargs):
+            if Path(src) == path:
+                raise OSError(errno.EIO, os.strerror(errno.EIO))
+            return real_rename(src, dst, *args, **kwargs)
+
+        with monkeypatch.context() as failing:
+            failing.setattr(os, "rename", rename_fails_for_the_spool_file)
+            failed = cost_ledger.replay_spool(ledger)
+
+        assert (failed.stopped, failed.exit_code, failed.files_quarantined) == ("write_failed", 1, 0)
+        assert path.read_text(encoding="utf-8") == "not json", "the move failed, the file is still in the spool"
+        booked = _receipts(ledger, cost_ledger.QUARANTINED_EVENT)
+        assert len(booked) == 1, "the decision was booked before the move"
+        quarantined = _spool_dir(ledger) / "quarantine" / path.name
+        assert (booked[0]["spool_file"], booked[0]["quarantined_as"]) == (path.name, str(quarantined))
+
+        again = cost_ledger.replay_spool(ledger)
+
+        assert (again.files_quarantined, again.stopped, again.files_remaining) == (1, None, 0)
+        assert quarantined.read_text(encoding="utf-8") == "not json" and not path.exists()
+        assert _receipts(ledger, cost_ledger.QUARANTINED_EVENT) == booked, "no second receipt"
 
 
 # ---------------------------------------------------------------------------
@@ -643,6 +778,51 @@ def _fsync_fails_once(monkeypatch) -> None:
         return real_fsync(fd)
 
     monkeypatch.setattr(os, "fsync", fsync)
+
+
+def _watch_the_ledger_fsync(monkeypatch, ledger_path: Path, *, fail: bool) -> list:
+    """``os.fsync`` that records each call on a descriptor of the ledger, and fails it when ``fail``.
+
+    Any other descriptor (the spool, a directory, the receipt ledger) is synced as usual.
+    """
+    real_fsync = os.fsync
+    calls: list = []
+
+    def fsync(fd):
+        if ledger_path.exists() and os.path.samestat(os.fstat(fd), os.stat(ledger_path)):
+            calls.append(fd)
+            if fail:
+                raise OSError(errno.EIO, os.strerror(errno.EIO))
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    return calls
+
+
+class TestTheLedgerIsFsyncedBeforeTheDelete:
+    @pytest.mark.parametrize("ledger_fsync", ["fails", "works"])
+    def test_a_landed_record_keeps_its_spool_file_until_the_ledger_fsync_succeeds(
+        self, ledger, monkeypatch, ledger_fsync,
+    ):
+        """Codex r1 blocker: a ``ledger+spool`` line may be unsynced, so the spool file is its only durable copy."""
+        with monkeypatch.context() as failing:
+            _fsync_fails_once(failing)
+            record = cost_ledger.record_run(_run(), ledger_path=ledger)
+        assert record.landed == "ledger+spool" and _lines(ledger) == [record]
+
+        with monkeypatch.context() as watched:
+            calls = _watch_the_ledger_fsync(watched, ledger, fail=ledger_fsync == "fails")
+            result = cost_ledger.replay_spool(ledger)
+
+        assert calls, "the replay fsyncs the ledger, also when it appended nothing"
+        assert result.records_written == 0 and _lines(ledger) == [record]
+        if ledger_fsync == "fails":
+            assert (result.stopped, result.exit_code, result.files_replayed) == ("write_failed", 1, 0)
+            assert result.files_remaining == 1 and "fsync" in result.detail
+            assert _spooled(ledger) == [record], "the spool file stays"
+        else:
+            assert (result.stopped, result.exit_code, result.files_replayed) == (None, 0, 1)
+            assert not _spool_file(ledger).exists()
 
 
 class TestTheAggregation:

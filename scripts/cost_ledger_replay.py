@@ -15,7 +15,8 @@ both run this script.
 Exit codes:
   0  done, nothing to do, or a bound left files for the next call
   1  the spool directory cannot be listed, a write failed, or the store cannot be resolved
-  3  the lock file stayed taken for the whole wait (``lock_busy``): nothing was written
+  3  the lock file stayed taken for the whole wait, or under it the ledger ``flock`` for what was left of the
+     wait and the budget (``lock_busy``): nothing more was written
 
 Usage:
   python3 scripts/cost_ledger_replay.py [--json]
