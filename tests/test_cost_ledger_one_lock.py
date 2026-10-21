@@ -9,8 +9,9 @@ Track ``kosten-per-model-in-het-grootboek``, ADR-043 §6, plan
    total and ``spool_pending`` describe one moment;
 3. a close or fsync that fails after a whole write: ``landed == "ledger+spool"``
    and the run counts once;
-4. a spool that fails too: ``CostLedgerWriteError`` with an unknown outcome
-   (the callers that book no second attempt are in ``test_harness_run_cost.py``);
+4. a spool that fails too: ``CostLedgerWriteError``, its message saying whether
+   the line may be in the ledger (the callers that book no second attempt are in
+   ``test_harness_run_cost.py``);
 5. a reader under the shared lock at a torn tail: nothing changed, ``torn_tail``;
 6. a 1.7.2 writer (ledger ``flock`` only, old shape) glues onto the torn tail of
    a failed new append: the new line is in the spool and counts as waiting;
@@ -390,21 +391,29 @@ class TestAcceptance:
         assert totals.cost_usd == pytest.approx(0.5)
         assert totals.spool_pending == 1
 
-    def test_4_a_spool_that_fails_too_raises_with_an_unknown_outcome(self, ledger, monkeypatch):
-        """CostLedgerWriteError has one meaning: the spool failed too, so the line may or may not be in the ledger."""
+    @pytest.mark.parametrize("ledger_fails, why, known", [
+        ("append", "the ledger append failed", "the outcome is unknown, the line may be in the ledger"),
+        ("open", "the ledger could not be opened or locked", "the line is in neither the ledger nor the spool"),
+    ])
+    def test_4_a_spool_that_fails_too_raises_and_says_what_is_known(self, ledger, monkeypatch, ledger_fails, why,
+                                                                     known):
+        """CostLedgerWriteError has one meaning: the spool failed too. The message says what is still known."""
         ledger.parent.mkdir(parents=True)
         _spool_dir(ledger).write_text("a file where the spool directory goes", encoding="utf-8")
-        monkeypatch.setattr(cost_ledger, "_append_record", _enospc)
+        if ledger_fails == "append":
+            monkeypatch.setattr(cost_ledger, "_append_record", _enospc)
+        else:
+            ledger.mkdir()
 
         with pytest.raises(cost_ledger.CostLedgerWriteError) as raised:
             cost_ledger.record_run(_run(), ledger_path=ledger)
 
         error = raised.value
         assert error.errno == error.__cause__.errno == errno.EEXIST
-        assert "the ledger append failed" in str(error) and "the outcome is unknown" in str(error)
-        assert "book no new attempt" in str(error)
+        assert why in str(error) and known in str(error) and "book no new attempt for it" in str(error)
         assert RUN_A1 in str(error) and str(ledger) in str(error)
-        assert _lines(ledger) == []
+        assert _spooled(ledger) == []
+        assert ledger.is_dir() or _lines(ledger) == []
 
     @pytest.mark.parametrize("tail", ["torn", "unterminated"])
     def test_5_a_reader_under_the_shared_lock_changes_nothing_at_a_torn_tail(self, ledger, tail):

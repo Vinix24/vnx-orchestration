@@ -133,9 +133,10 @@ class CostLedgerWriteError(OSError):
     first could not be opened or locked (without it the spool cannot be used
     either). An ``OSError`` with the errno of its cause, which is
     ``__cause__``. The line may be in the ledger: a write, fsync or close that
-    failed can have put it there. The caller's call fails, it mutates no state
-    and it books no new attempt for the run (``record_next_attempt`` would make
-    it a second run); the replay or a correction resolves it.
+    failed can have put it there, and the message says when that is so. The
+    caller's call fails, it mutates no state and it books no new attempt for
+    the run (``record_next_attempt`` would make it a second run); the replay, a
+    correction or a backfill charge resolves it.
     """
 
 
@@ -594,13 +595,15 @@ def _fsync_dir(directory: Path) -> None:
         os.close(fd)
 
 
-def _spool(spool_dir: Path, record: Mapping[str, Any], why: str) -> None:
+def _spool(spool_dir: Path, record: Mapping[str, Any], why: str, *, in_the_ledger: bool) -> None:
     """Add ``record`` to its run's spool file, behind what waits there. ``why`` is what sent it there.
 
     The caller holds the lock file exclusively, so reading and replacing the
     run's file is one step for every other actor. The file is replaced
-    atomically and the directory fsynced. A spool that fails raises
-    :class:`_Unwritten`: the line is then in neither place for sure.
+    atomically, and the spool directory and the directory above it are
+    fsynced, so a spool created here survives a crash too. A spool that fails
+    raises :class:`_Unwritten`; ``in_the_ledger`` says whether a write to the
+    ledger had started, so whether the line may be there.
     """
     refuse_real_central_store_write_under_test_runner(spool_dir)
     target = spool_file_for(spool_dir, record["run_id"])
@@ -609,12 +612,13 @@ def _spool(spool_dir: Path, record: Mapping[str, Any], why: str) -> None:
         queued = _read_spool_file(target) if _exists(target) else []
         atomic_write_text(target, json.dumps([*queued, dict(record)], separators=(",", ":")))
         _fsync_dir(spool_dir)
+        _fsync_dir(spool_dir.parent)
     except (OSError, _UnreadableSpool) as exc:
-        raise _Unwritten(
-            exc,
-            f"{why}, and the spool {spool_dir} failed too ({exc}): the outcome is unknown, the line may be "
-            "in the ledger; book no new attempt for it",
-        ) from exc
+        where = "the outcome is unknown, the line may be in the ledger" if in_the_ledger else (
+            "the line is in neither the ledger nor the spool"
+        )
+        raise _Unwritten(exc, f"{why}, and the spool {spool_dir} failed too ({exc}): {where}; "
+                              "book no new attempt for it") from exc
     logger.warning("cost_ledger: run %s went to the spool %s: %s", record["run_id"], spool_dir, why)
 
 
@@ -716,25 +720,26 @@ def _land(fh, opened: Optional[OSError], spool_dir: Path, record: Mapping[str, A
     that fails too raises :class:`_Unwritten`.
     """
     if fh is None:
-        _spool(spool_dir, record, f"the ledger could not be opened or locked ({opened})")
+        _spool(spool_dir, record, f"the ledger could not be opened or locked ({opened})", in_the_ledger=False)
         return "spool"
     try:
         _end_a_torn_tail(fh)
     except OSError as exc:
-        _spool(spool_dir, record, f"the ledger's open last line could not be ended ({exc})")
+        _spool(spool_dir, record, f"the ledger's open last line could not be ended ({exc})", in_the_ledger=False)
         return "spool"
     if _waits_in_the_spool(spool_dir, record):
-        _spool(spool_dir, record, "earlier lines of the run wait in the spool")
+        _spool(spool_dir, record, "earlier lines of the run wait in the spool", in_the_ledger=False)
         return "spool"
     try:
         _append_record(fh, record)
     except OSError as exc:
-        _spool(spool_dir, record, f"the ledger append failed ({exc})")
+        _spool(spool_dir, record, f"the ledger append failed ({exc})", in_the_ledger=True)
         return "spool"
     try:
         os.fsync(fh.fileno())
     except OSError as exc:
-        _spool(spool_dir, record, f"the ledger fsync failed after the whole line was written ({exc})")
+        _spool(spool_dir, record, f"the ledger fsync failed after the whole line was written ({exc})",
+               in_the_ledger=True)
         return "ledger+spool"
     return "ledger"
 
@@ -771,7 +776,8 @@ def _write_in_order(
         finally:
             closed = _close_the_ledger(fh) if fh is not None else None
         if closed is not None and landed == "ledger":
-            _spool(spool_dir, record, f"closing the ledger failed after the whole line was written ({closed})")
+            _spool(spool_dir, record, f"closing the ledger failed after the whole line was written ({closed})",
+                   in_the_ledger=True)
             landed = "ledger+spool"
     return landed
 
