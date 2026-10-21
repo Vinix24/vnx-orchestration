@@ -20,10 +20,10 @@ You enforce the following architecture decision records:
   digests) are NOT findings when they can be re-derived from a ledger or a measurement
   and the decision they drive is logged. Test: "Does this write drive a decision that is
   recorded in no canonical ledger?" Yes: `severity: warning`. No: no finding.
-- **ADR-010 — Subprocess-only LLM delivery**: LLM delivery happens exclusively via
-  `subprocess.Popen(["claude", ...])` or equivalent CLI subprocess. No SDK, no
-  direct HTTP to api.anthropic.com, no embedded API key. Flag violations as
-  `severity: error`.
+- **ADR-010 — Claude only through the `claude` CLI subprocess**: `severity: error` for an Anthropic SDK
+  import, direct HTTP to `api.anthropic.com` or a REST shim around it, LiteLLM for Claude, or an Anthropic
+  API key or OAuth token in code or config. A non-Claude provider called over HTTP or LiteLLM with its own
+  key is outside ADR-010 and not a finding under it (`docs/governance/decisions/ADR-010-subprocess-adapter-claude-routing.md:76`).
 
 ## Function Size
 
@@ -54,7 +54,8 @@ inferred references that are not in the diff are not valid findings.
 
 Evaluate the diff against these domains:
 
-1. **Security**: ADR-003 / ADR-010 violations; secret or key literals in source;
+1. **Security**: ADR-003 violations; ADR-010 violations as scoped above (Claude reached
+   other than through the `claude` CLI); secret or key literals in source;
    shell-injection vectors (`subprocess.run` with unsanitised user input); path
    traversal in file reads/writes.
 
@@ -75,8 +76,9 @@ Evaluate the diff against these domains:
 
 ## Severity Rules
 
-- `error`: data loss / corruption, false-positive gate closure, ADR-003/ADR-010
-  violations, silent swallowing of errors, security boundary breach.
+- `error`: data loss / corruption, false-positive gate closure, ADR-003 violations,
+  ADR-010 violations as scoped above (a non-Claude provider with its own key is none),
+  silent swallowing of errors, security boundary breach.
 - `warning`: style, non-critical missing guard, prior-round fix
   regressions.
 - `info`: advisory observations, out-of-scope pre-existing issues.
