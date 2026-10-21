@@ -2,6 +2,27 @@
 
 All notable changes to this plugin are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the plugin follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-10-21
+
+A track row showed `6 van 8 klaar` next to `11 dicht, #2155 open`: deliverables next to PRs, two units that do not move together, and nothing said which was which. And `Wacht op een besluit` counted the whole backlog (110 proposed deliverables, 6 of them on a track with horizon `now`). The deliverable is now the unit, a colour means something, and the pane shows what is to be done.
+
+### Changed
+
+- A track row is its priority, id, the 8-cell bar and `done/total` of its deliverables. Below it `bezig:` names the deliverables that are `ready` or `in_progress` or that a running builder carries (its dispatch id is the deliverable's id), and the builders on the track whose dispatch is no deliverable of it. `volgt:` names the `proposed` deliverables in list order, as many as fit, then `(+N)`. A deliverable is named by its title up to the first `:` or the first 40 cells. A track without deliverables keeps `geen leveringen gepland`, now on its first row.
+- The PR numbers, `dicht`/`open` and `PR-status onbekend` are gone from the track rows. The `PR's` section is gone too: an open PR sits in `Nu bezig`, on the row of its builder, or under the deliverable or track it belongs to when no builder owns it. `PR #N · ci loopt|rood|groen · stoel open: <seats>`, or `PR #N · klaar voor merge`.
+- `Wacht op een besluit` counts `N te promoveren (now)`: the `proposed` deliverables on tracks with horizon `now`. One dim row `backlog: N voorgesteld op next/later` counts the others. A proposed deliverable on a track whose phase is `done` (an orphan, OI-2249), on a track without horizon or on an unknown track is not counted and not shown. Without readable tracks the row says `te promoveren onbeschikbaar: <reason>`.
+- A pane row is a list of segments with their own tone, and there is a tone `ok` (the theme's `success` colour). `ok`: the filled part of a bar, a finished track, `ci groen`, `klaar voor merge`. `warn`: what waits on the operator (the `te promoveren (now)` count, a `proposed` deliverable in `volgt:`, a seat still owed). `error`: `ci rood` and every `onbeschikbaar`. `dim`: the empty part of a bar, the backlog row, `(+N)`. The text carries the meaning without colour; width is measured on the text.
+- The mod reads one more field of each track (`phase`) and two of each deliverable (`deliverable_ref`, `title`). The deliverable title is shown cut to a short name.
+
+### Added
+
+- `/voortgang plan` opens the pane as a plan: the tracks on `next` and `later` (not those with phase `done`), each with its bar and `volgt:` row, and the tracks without horizon as one dim count. `/voortgang` is the now view again; another argument is answered with the two forms. The view is the fifth `$.state` value (`view`).
+
+### Removed
+
+- `openPrsOf`, which nothing called.
+- The test that claimed `dicht` "whatever the index lists" with an index that listed no PR. Its case is the rule that a PR the readable queue misses is `dicht` only when the index does not list it either; the test now gives the index a PR the queue misses (OI-2248).
+
 ## [0.3.1] - 2026-10-21
 
 The status line was a row of counters (`0 bouwers · 20 PR · 1 te promoveren · 613 uitkomsten`) and said nothing about how far the project is. It now answers the question of the pane. The open-PR advisories of 0.3.0 are fixed.
@@ -17,7 +38,7 @@ The status line was a row of counters (`0 bouwers · 20 PR · 1 te promoveren ·
 
 ### Fixed
 
-- An `open_prs` entry with `dispatch_id: null` (a branch that is not `dispatch/<id>`) counts as an open PR; it links no track.
+- An `open_prs` entry without a dispatch id (a branch that is not `dispatch/<id>`) counts as an open PR; it links no track. The first version of this note claimed a fix for `dispatch_id: null`, a shape the producer never writes (OI-2248).
 - A dispatch spec without `model` still links its track (open PR) and gives its builder a track. The builder row shows `model ?` and the project is not marked `onleesbaar` for it.
 
 ## [0.3.0] - 2026-10-21

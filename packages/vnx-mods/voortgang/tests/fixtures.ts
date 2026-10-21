@@ -123,27 +123,27 @@ export const TRACKS = [
   track('u1', null, null),
 ]
 
-const deliverable = (trackId: string, derived_status: string, daysAgo = 30) => ({
-  deliverable_ref: `${trackId}-${derived_status}-${daysAgo}`,
+const deliverable = (trackId: string, derived_status: string, id: string, title: string, daysAgo = 30) => ({
+  deliverable_ref: `pr:${id}`,
   track: trackId,
   derived_status,
   last_activity: stampMinutesAgo(daysAgo * 24 * 60),
-  title: CONTENT,
+  title,
 })
 
 export const DELIVERABLES = [
-  deliverable('ci-profile', 'proposed'),
-  deliverable('ci-profile', 'proposed'),
-  deliverable('ci-profile', 'done'),
-  deliverable('ci-profile', 'done'),
-  deliverable('ci-profile', 'done'),
-  deliverable('ci-profile', 'done'),
-  deliverable('ci-profile', 'done'),
-  deliverable('ci-profile', 'failed'),
-  deliverable('docs', 'ready'),
-  deliverable('fresh', 'done', 2),
-  deliverable('old-d', 'done', 8),
-  deliverable('l1', 'proposed'),
+  deliverable('ci-profile', 'proposed', 'dlv-cip-6', 'A6: the sixth step, proposed'),
+  deliverable('ci-profile', 'proposed', 'dlv-cip-7', 'A7: the seventh step, proposed'),
+  deliverable('ci-profile', 'done', 'dlv-cip-1', 'A1: first step'),
+  deliverable('ci-profile', 'done', 'dlv-cip-2', 'A2: second step'),
+  deliverable('ci-profile', 'done', 'dlv-cip-3', 'A3: third step'),
+  deliverable('ci-profile', 'done', 'dlv-cip-4', 'A4: fourth step'),
+  deliverable('ci-profile', 'done', 'dlv-cip-5', 'A5: fifth step'),
+  deliverable('ci-profile', 'failed', 'dlv-cip-8', 'A8: the eighth step, failed'),
+  deliverable('docs', 'ready', 'dlv-docs-1', 'D1: docs ready'),
+  deliverable('fresh', 'done', 'dlv-fresh-1', 'F1: fresh', 2),
+  deliverable('old-d', 'done', 'dlv-old-1', 'O1: old', 8),
+  deliverable('l1', 'proposed', 'dlv-l1-1', 'L1: later proposed'),
 ]
 
 export const SPEC = { role: 'backend-developer', model: 'sonnet', provider: 'claude', track_id: 'bld', pr_id: '#2150', instruction_file: CONTENT }
@@ -317,4 +317,88 @@ export const PANE = {
   requestId: 'voortgang',
   viewport: { columns: 180, rows: 48, isFullscreen: true },
   props: PANE_PROPS,
+}
+
+const scenarioTrack = (track_id: string, horizon: string | null, priority: string | null, phase = 'queued') => ({
+  track_id,
+  title: CONTENT,
+  phase,
+  derived_status: phase,
+  horizon,
+  priority,
+  pr_ref: null,
+})
+
+const scenarioItem = (track: string, id: string, status: string, title: string) => ({
+  deliverable_ref: `pr:${id}`,
+  track,
+  derived_status: status,
+  last_activity: stampMinutesAgo(30 * 24 * 60),
+  title,
+})
+
+/**
+ * A project with two now-tracks, one builder and two open PRs.
+ * alpha (now, P1): 3 of 12 done, one deliverable built right now, eight proposed. beta (now, P2): all done.
+ * next-t and later-t hold proposed deliverables; orphan-t has phase done and proposed leftovers; loose-t has no horizon.
+ */
+export function scenarioOf(project: string): { files: Record<string, string>; run: (argv: readonly string[]) => RunAnswer } {
+  const alpha = [
+    ...['A1: first step', 'A2: second step', 'A3: third step'].map((title, at) => scenarioItem('alpha', `dlv-a-${at + 1}`, 'done', title)),
+    scenarioItem('alpha', 'dlv-a-4', 'ready', 'K2a-3b: replay van de spool'),
+    ...['K2a-3c: replay-tik', 'K2b: codex en kimi', 'K3: poorten', 'K4: een vierde stap', 'K5: een vijfde stap', 'K6: een zesde stap', 'K7: een zevende stap', 'K8: een achtste stap'].map((title, at) =>
+      scenarioItem('alpha', `dlv-a-${at + 5}`, 'proposed', title),
+    ),
+  ]
+  const items = [
+    ...alpha,
+    scenarioItem('beta', 'dlv-b-1', 'done', 'B1: eerste'),
+    scenarioItem('beta', 'dlv-b-2', 'done', 'B2: tweede, klaar voor merge'),
+    scenarioItem('next-t', 'dlv-n-1', 'proposed', 'N1: voorgesteld op next'),
+    scenarioItem('next-t', 'dlv-n-2', 'proposed', 'N2: nog een op next'),
+    scenarioItem('later-t', 'dlv-l-1', 'proposed', 'L1: voorgesteld op later'),
+    scenarioItem('orphan-t', 'dlv-o-1', 'proposed', 'O1: wees'),
+    scenarioItem('orphan-t', 'dlv-o-2', 'proposed', 'O2: wees'),
+    scenarioItem('loose-t', 'dlv-x-1', 'proposed', 'X1: zonder horizon'),
+  ]
+  const tracks = [
+    scenarioTrack('alpha', 'now', 'P1'),
+    scenarioTrack('beta', 'now', 'P2'),
+    scenarioTrack('next-t', 'next', 'P2'),
+    scenarioTrack('later-t', 'later', 'P3'),
+    scenarioTrack('orphan-t', 'next', 'P2', 'done'),
+    scenarioTrack('loose-t', null, null),
+  ]
+  const queue = {
+    schema: 'pr_queue/1',
+    available: true,
+    reason: null,
+    open_prs: [
+      { number: 3001, title: 'alpha', branch: 'dispatch/dlv-a-4', state: 'OPEN', ci_status: 'pending', merge_state: 'blocked', gates_passed: [], blocked_on: ['kimi_gate'] },
+      { number: 3002, title: 'beta', branch: 'dispatch/dlv-b-2', state: 'OPEN', ci_status: 'pass', merge_state: 'clean', gates_passed: ['codex_gate'], blocked_on: [] },
+    ],
+  }
+  const liveWork = {
+    available: true,
+    counts: { live: 1, starting: 0, stale: 0, unmeasured: 0 },
+    live: [{ dispatch_id: 'dlv-a-4', state: 'running', age_seconds: 360, pr: null }],
+    stale: [],
+    unmeasured: [],
+    open_prs: [
+      { number: 3001, dispatch_id: 'dlv-a-4' },
+      { number: 3002, dispatch_id: 'dlv-b-2' },
+    ],
+  }
+  const files = {
+    [projectIdFileOf(PROJECT_DIR)]: `${project}\n`,
+    [indexOf(project)]: indexJson({ liveWork, outcomes: { available: true, total: 0, items: [] } }),
+    [stateOf(project)]: stateJson({ prQueue: queue }),
+    [dbOf(project)]: '',
+    [specOf(project, 'dlv-a-4')]: JSON.stringify({ model: 'sonnet', track_id: 'alpha', pr_id: '#3001' }),
+    [instructionOf(project, 'dlv-a-4')]: instructionText('K2a-3b: replay van de spool'),
+  }
+  const run = (argv: readonly string[]): RunAnswer =>
+    argv[1] === 'objective' ? { exitCode: 0, stdout: JSON.stringify(tracks) } : argv[1] === 'deliverable' ? { exitCode: 0, stdout: JSON.stringify(items) } : { deny: `unexpected argv ${argv.join(' ')}` }
+
+  return { files, run }
 }

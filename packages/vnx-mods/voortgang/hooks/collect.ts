@@ -2,6 +2,7 @@ import type { PluginOptions, ProcessRunInit, ProcessRunResult } from 'claude-cod
 
 import type {
   Builder,
+  DeliverableItem,
   DeliverableView,
   IndexView,
   LiveWork,
@@ -344,18 +345,29 @@ export function trackViewOf(json: unknown): Part<TrackView> {
     id: textOr(track.track_id, '?'),
     priority: textOr(track.priority, '-'),
     horizon: textOr(track.horizon, '-'),
+    phase: textOr(track.phase, '-'),
     prRefs: prRefsOf(track.pr_ref),
   }))
 
   return ok({ tracks })
 }
 
+/** `pr:dlv-1db7c550e9dc` -> `dlv-1db7c550e9dc`: the dispatch id behind a `deliverable_ref`; the whole ref when it has no prefix. */
+export function deliverableIdOf(ref: unknown): string {
+  const text = typeof ref === 'string' ? ref : ''
+
+  return text.slice(text.indexOf(':') + 1)
+}
+
+/** A deliverable title on one line, control characters turned into spaces; empty when it has none. */
+const cleanTitleOf = (value: unknown): string => (typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]/g, ' ').trim() : '')
+
 export function deliverableViewOf(json: unknown, now: number): Part<DeliverableView> {
   if (!Array.isArray(json)) {
     return fail('vnx gaf geen lijst')
   }
 
-  const view: DeliverableView = { byTrack: dictionaryOf(), proposed: 0 }
+  const view: DeliverableView = { byTrack: dictionaryOf() }
   const malformed = json.findIndex(one => !isRecord(one))
 
   if (malformed >= 0) {
@@ -366,16 +378,13 @@ export function deliverableViewOf(json: unknown, now: number): Part<DeliverableV
     const track = textOr(deliverable.track, '?')
     const status = textOr(deliverable.derived_status, 'onbekend')
     const age = ageMinutesOf(deliverable.last_activity, now)
-    const counts: TrackDeliverables = view.byTrack[track] ?? { total: 0, done: 0, isRecent: false }
+    const counts: TrackDeliverables = view.byTrack[track] ?? { items: [], total: 0, done: 0, isRecent: false }
 
+    counts.items.push({ id: deliverableIdOf(deliverable.deliverable_ref), title: cleanTitleOf(deliverable.title), status })
     counts.total += 1
     counts.done += status === 'done' ? 1 : 0
     counts.isRecent = counts.isRecent || (age !== null && age <= RECENT_DAYS * 24 * 60)
     view.byTrack[track] = counts
-
-    if (status === 'proposed') {
-      view.proposed += 1
-    }
   }
 
   return ok(view)
@@ -457,14 +466,14 @@ async function builderOf(io: Io, dir: string, entry: Running): Promise<Builder> 
   const minutes = minutesOf(entry.ageSeconds)
 
   if (!isDispatchId(entry.dispatchId)) {
-    return { who: fail('ongeldige dispatch-id'), task: fail('ongeldige dispatch-id'), minutes }
+    return { dispatchId: entry.dispatchId, who: fail('ongeldige dispatch-id'), task: fail('ongeldige dispatch-id'), minutes }
   }
 
   const base = `${dir}/${entry.dispatchId}`
   const who = andThen(await readJson(io, `${base}/${SPEC_FILE}`, SPEC_FILE), whoOf)
   const task = andThen(await readText(io, `${base}/${INSTRUCTION_FILE}`, INSTRUCTION_FILE), titleOf)
 
-  return { who, task, minutes }
+  return { dispatchId: entry.dispatchId, who, task, minutes }
 }
 
 const dispatchesOf = (root: string, id: string) => `${root.replace(/\/+$/, '')}/${id}/dispatches/pending`
@@ -691,11 +700,6 @@ export function builderCountOf(project: ProjectModel): number | null {
   return project.hasStore && project.builders.isOk ? project.builders.value.length + project.buildersOmitted : null
 }
 
-/** The open PRs of the PR queue; null when it could not be read. */
-export function openPrsOf(project: ProjectModel): Pr[] | null {
-  return project.hasStore && project.state.isOk && project.state.value.prs.isOk ? project.state.value.prs.value : null
-}
-
 /**
  * What is known of the open PRs. `numbers` holds every PR a readable source lists: the PR queue of the state, and
  * `live_work.open_prs` of the index. The index list is capped and is empty when `gh` fails, so it only ever proves a
@@ -736,11 +740,24 @@ export type ShownTrack = {
   /** Why the deliverables could not be read; null when they could. */
   unreadable: string | null
   builders: number
-  /** The PRs of `pr_ref`: `isOpen` when a source lists them, false when the PR queue was read and does not, else null. */
+  /** The PRs of `pr_ref`: `isOpen` when a source lists them, false when the PR queue was read and does not, else null. Used for the order and for showing the track, never drawn. */
   prs: { number: number; isOpen: boolean | null }[]
-  /** Why the PR queue could not be read; null when it could. */
-  prUnknown: string | null
   hasActivity: boolean
+  /** Short titles of what is being worked on: `ready` and `in_progress` deliverables, deliverables with a live dispatch, builders of the track. */
+  busy: string[]
+  /** Short titles of the `proposed` deliverables, in the order the list gives them. */
+  upcoming: string[]
+}
+
+/** The cells a short title keeps at most. */
+export const SHORT_TITLE_CELLS = 40
+
+/** The title up to the first `:` or the first 40 cells, whichever is shorter. */
+export function shortTitleOf(title: string): string {
+  const colon = title.indexOf(':')
+  const head = (colon > 0 ? title.slice(0, colon) : title).trim()
+
+  return fit(head, SHORT_TITLE_CELLS)
 }
 
 const PRIORITY_ORDER = ['P1', 'P2', 'P3']
@@ -751,8 +768,56 @@ const rankOf = (priority: string): number => {
   return at < 0 ? PRIORITY_ORDER.length : at
 }
 
+const byPriorityThenId = (a: TrackInfo, b: TrackInfo): number =>
+  rankOf(a.priority) !== rankOf(b.priority) ? rankOf(a.priority) - rankOf(b.priority) : a.id < b.id ? -1 : a.id > b.id ? 1 : 0
+
 /** How alive a track is: 0 a builder works on it, 1 an open PR is linked, 2 a deliverable moved in the last 7 days, 3 nothing. */
 const tierOf = (one: ShownTrack): number => (one.builders > 0 ? 0 : one.prs.some(pr => pr.isOpen === true) ? 1 : one.progress?.isRecent ? 2 : 3)
+
+const BUSY_STATUSES = ['ready', 'in_progress']
+
+/** What is being worked on in a track, and what is proposed next, as short titles. */
+function workOf(project: Extract<ProjectModel, { hasStore: true }>, track: TrackInfo, progress: TrackDeliverables | null): { busy: string[]; upcoming: string[] } {
+  const running = new Map<string, Builder>()
+  const trackBuilders: Builder[] = []
+
+  if (project.builders.isOk) {
+    for (const builder of project.builders.value) {
+      running.set(builder.dispatchId, builder)
+
+      if (builder.who.isOk && builder.who.value.trackId === track.id) {
+        trackBuilders.push(builder)
+      }
+    }
+  }
+
+  const items = progress?.items ?? []
+  const titleOf = (item: DeliverableItem) => shortTitleOf(item.title === '' ? item.id : item.title)
+  const isBusy = (item: DeliverableItem) => BUSY_STATUSES.includes(item.status) || (item.status !== 'done' && running.has(item.id))
+  const busy = items.filter(isBusy).map(titleOf)
+  const covered = new Set(items.map(item => item.id))
+  const builderTitle = (builder: Builder) => shortTitleOf(builder.task.isOk ? builder.task.value : builder.dispatchId)
+
+  // A builder on the track whose dispatch is no deliverable of it still counts as work in progress.
+  busy.push(...trackBuilders.filter(builder => !covered.has(builder.dispatchId)).map(builderTitle))
+
+  return { busy, upcoming: items.filter(item => item.status === 'proposed' && !isBusy(item)).map(titleOf) }
+}
+
+function shownOf(project: Extract<ProjectModel, { hasStore: true }>, track: TrackInfo, open: ReturnType<typeof openNumbersOf>, builderTracks: string[]): ShownTrack {
+  const progress = project.deliverables.isOk ? (project.deliverables.value.byTrack[track.id] ?? null) : null
+  const builders = builderTracks.filter(id => id === track.id).length
+  // An open PR whose dispatch spec names the track belongs to it even when `pr_ref` does not list it yet.
+  const named = Object.entries(project.prTracks).flatMap(([number, id]) => (id === track.id && open.numbers.has(Number(number)) ? [Number(number)] : []))
+  const numbers = [...new Set([...track.prRefs, ...named])]
+  const prs = numbers.map(number => ({ number, isOpen: open.numbers.has(number) ? true : open.isComplete ? false : null }))
+  const hasActivity = builders > 0 || prs.some(pr => pr.isOpen === true) || (progress?.isRecent ?? false)
+
+  return { track, progress, unreadable: project.deliverables.isOk ? null : project.deliverables.reason, builders, prs, hasActivity, ...workOf(project, track, progress) }
+}
+
+const builderTracksOf = (project: Extract<ProjectModel, { hasStore: true }>): string[] =>
+  project.builders.isOk ? project.builders.value.flatMap(builder => (builder.who.isOk && builder.who.value.trackId !== null ? [builder.who.value.trackId] : [])) : []
 
 /**
  * The tracks the pane shows: every `now` track, and every track with activity (a builder whose spec names it, an
@@ -765,24 +830,17 @@ export function shownTracksOf(project: ProjectModel): ShownTrack[] | null {
     return null
   }
 
-  const deliverables = project.deliverables.isOk ? project.deliverables.value.byTrack : null
   const open = openNumbersOf(project)
-  const builderTracks = project.builders.isOk ? project.builders.value.flatMap(builder => (builder.who.isOk && builder.who.value.trackId !== null ? [builder.who.value.trackId] : [])) : []
+  const builderTracks = builderTracksOf(project)
   const shown: ShownTrack[] = []
 
   for (const track of project.tracks.value.tracks) {
-    const progress = deliverables?.[track.id] ?? null
-    const builders = builderTracks.filter(id => id === track.id).length
-    // An open PR whose dispatch spec names the track belongs to it even when `pr_ref` does not list it yet.
-    const named = Object.entries(project.prTracks).flatMap(([number, id]) => (id === track.id && open.numbers.has(Number(number)) ? [Number(number)] : []))
-    const numbers = [...new Set([...track.prRefs, ...named])]
-    const prs = numbers.map(number => ({ number, isOpen: open.numbers.has(number) ? true : open.isComplete ? false : null }))
-    const hasActivity = builders > 0 || prs.some(pr => pr.isOpen === true) || (progress?.isRecent ?? false)
+    const one = shownOf(project, track, open, builderTracks)
     // A failed read never drops a track: while a PR of it is neither listed nor known closed, the track stays.
-    const isUnknown = prs.some(pr => pr.isOpen === null)
+    const isUnknown = one.prs.some(pr => pr.isOpen === null)
 
-    if (track.horizon === 'now' || hasActivity || isUnknown) {
-      shown.push({ track, progress, unreadable: project.deliverables.isOk ? null : project.deliverables.reason, builders, prs, prUnknown: open.isComplete ? null : open.reason, hasActivity })
+    if (track.horizon === 'now' || one.hasActivity || isUnknown) {
+      shown.push(one)
     }
   }
 
@@ -796,12 +854,64 @@ export function shownTracksOf(project: ProjectModel): ShownTrack[] | null {
       return b.builders - a.builders
     }
 
-    if (rankOf(a.track.priority) !== rankOf(b.track.priority)) {
-      return rankOf(a.track.priority) - rankOf(b.track.priority)
+    return byPriorityThenId(a.track, b.track)
+  })
+}
+
+/** The plan: the tracks on `next` and on `later` whose phase is not `done`, by priority then id, and how many tracks have no horizon. Null when the tracks could not be read. */
+export function planOf(project: ProjectModel): { next: ShownTrack[]; later: ShownTrack[]; withoutHorizon: number } | null {
+  if (!project.hasStore || !project.tracks.isOk) {
+    return null
+  }
+
+  const open = openNumbersOf(project)
+  const builderTracks = builderTracksOf(project)
+  const all = project.tracks.value.tracks
+  const listOf = (horizon: string) =>
+    all
+      .filter(track => track.horizon === horizon && track.phase !== 'done')
+      .sort(byPriorityThenId)
+      .map(track => shownOf(project, track, open, builderTracks))
+
+  return { next: listOf('next'), later: listOf('later'), withoutHorizon: all.filter(track => track.horizon !== 'now' && track.horizon !== 'next' && track.horizon !== 'later').length }
+}
+
+/**
+ * What waits on the operator's promote: the `proposed` deliverables on tracks with horizon `now`, and the backlog of
+ * those on `next` and `later`. A `proposed` deliverable on a track whose phase is `done` is an orphan and is not counted,
+ * nor is one on a track the list does not know. Null with the reason when the tracks or the deliverables could not be read.
+ */
+export function promotionOf(project: ProjectModel): Part<{ now: number; backlog: number }> {
+  if (!project.hasStore) {
+    return fail(project.reason)
+  }
+
+  if (!project.deliverables.isOk) {
+    return fail(project.deliverables.reason)
+  }
+
+  if (!project.tracks.isOk) {
+    return fail(project.tracks.reason)
+  }
+
+  let now = 0
+  let backlog = 0
+
+  for (const track of project.tracks.value.tracks) {
+    const proposed = (project.deliverables.value.byTrack[track.id]?.items ?? []).filter(item => item.status === 'proposed').length
+
+    if (track.phase === 'done') {
+      continue
     }
 
-    return a.track.id < b.track.id ? -1 : a.track.id > b.track.id ? 1 : 0
-  })
+    if (track.horizon === 'now') {
+      now += proposed
+    } else if (track.horizon === 'next' || track.horizon === 'later') {
+      backlog += proposed
+    }
+  }
+
+  return ok({ now, backlog })
 }
 
 /** `X van Y klaar` for a track with deliverables, `geen leveringen gepland` for one without. */
@@ -813,11 +923,18 @@ export function progressText(one: ShownTrack): string {
   return one.progress === null ? 'geen leveringen gepland' : `${one.progress.done} van ${one.progress.total} klaar`
 }
 
-/** The bar of `BAR_CELLS` cells: `▓` for done, `░` for the rest, rounded down. */
-export function barOf(progress: TrackDeliverables): string {
+/** The filled and the empty cells of the bar: the filled count rounds down. */
+export function barCellsOf(progress: TrackDeliverables): { filled: number; empty: number } {
   const filled = Math.floor((BAR_CELLS * progress.done) / progress.total)
 
-  return '▓'.repeat(filled) + '░'.repeat(BAR_CELLS - filled)
+  return { filled, empty: BAR_CELLS - filled }
+}
+
+/** The bar of `BAR_CELLS` cells: `▓` for done, `░` for the rest, rounded down. */
+export function barOf(progress: TrackDeliverables): string {
+  const { filled, empty } = barCellsOf(progress)
+
+  return '▓'.repeat(filled) + '░'.repeat(empty)
 }
 
 /** The tracks the status line names, at most. */

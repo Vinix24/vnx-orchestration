@@ -1,21 +1,58 @@
-import type { Builder, Model, Pr, ProjectModel, Row } from '../types'
+import type { Builder, Model, PaneView, Pr, ProjectModel, Row, Segment, Tone } from '../types'
 
-import { barOf, deliverablesNotice, formatAge, INDEX_LIVE_CAP, isOutdated, progressText, shownTracksOf } from './collect'
+import { barCellsOf, deliverablesNotice, formatAge, INDEX_LIVE_CAP, isOutdated, planOf, promotionOf, shownTracksOf } from './collect'
 import type { ShownTrack } from './collect'
 import { cellsOf, fit } from './width'
 
 export { cellsOf, fit }
 
-export type PaneSize = { columns: number; headerColumns: number; rows: number; isRefreshing: boolean; failure?: string | null }
+export type PaneSize = { columns: number; headerColumns: number; rows: number; isRefreshing: boolean; failure?: string | null; view?: PaneView }
 
-/** Open PRs of a track that are closed are named up to this many; more are counted. */
-const CLOSED_PRS_NAMED = 3
+type Stored = Extract<ProjectModel, { hasStore: true }>
+
 /** The column under which the second row of every track starts: after `  P1 `, whatever the priority is. */
 const TRACK_INDENT = 5
 /** The columns a title keeps at least, before it is cut for the track and the PR behind it. */
 const MIN_TITLE_COLUMNS = 8
 
-const row = (text: string, tone: Row['tone'] = 'normal'): Row => ({ text, tone })
+const seg = (text: string, tone: Tone = 'normal'): Segment => ({ text, tone })
+const rowOf = (...segments: Segment[]): Row => ({ segments })
+const row = (text: string, tone: Tone = 'normal'): Row => rowOf(seg(text, tone))
+
+/** The text of a row, without its tones. */
+export const textOf = (line: Row): string => line.segments.map(one => one.text).join('')
+
+/** The row cut to `columns` display cells with an ellipsis; width is measured on the text, whatever the tones. */
+export function fitRow(line: Row, columns: number): Row {
+  const full = textOf(line)
+  const fitted = fit(full, columns)
+
+  if (fitted === full) {
+    return line
+  }
+
+  let left = [...fitted].length - 1
+
+  if (left <= 0) {
+    return rowOf(seg('…', line.segments[0]?.tone))
+  }
+
+  const segments: Segment[] = []
+
+  for (const one of line.segments) {
+    const chars = [...one.text]
+
+    if (chars.length >= left) {
+      segments.push(seg(`${chars.slice(0, left).join('')}…`, one.tone))
+      break
+    }
+
+    segments.push(one)
+    left -= chars.length
+  }
+
+  return rowOf(...segments)
+}
 
 const seatsOf = (seats: string[] | null) => (seats === null ? 'onbekend' : seats.length === 0 ? 'geen' : seats.join(', '))
 const pluralOf = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`
@@ -36,7 +73,7 @@ const failedSection = (title: string, reason: string): Section => sectionOf(titl
 /** `PR #2150` from the `pr_id` of a spec, which is a number or a string such as `#2150`. */
 const prLabelOf = (prId: string): string => (/^#?\d+$/.test(prId) ? `PR #${prId.replace('#', '')}` : `PR ${prId}`)
 
-function builderRow(builder: Builder, columns: number): Row[] {
+function builderRow(builder: Builder, columns: number): Row {
   const failures = [builder.who, builder.task, builder.minutes].some(part => !part.isOk)
   const unavailableOf = (reason: string) => `onbeschikbaar: ${reason}`
   const model = builder.who.isOk ? (builder.who.value.model ?? 'model ?') : unavailableOf(builder.who.reason)
@@ -51,76 +88,155 @@ function builderRow(builder: Builder, columns: number): Row[] {
   const room = columns - cellsOf(before) - cellsOf(after)
   const title = room >= MIN_TITLE_COLUMNS ? fit(task, room) : task
 
-  return [row(`${before}${title}${after}`, failures ? 'error' : 'normal')]
+  return row(`${before}${title}${after}`, failures ? 'error' : 'normal')
 }
 
-const nowSectionOf = (project: Extract<ProjectModel, { hasStore: true }>, columns: number): Section => {
+/** An open PR: its number, what the PR queue knows of it (null when only the index lists it), and the dispatch behind it. */
+type OpenPr = { number: number; detail: Pr | null; dispatchId: string | null }
+
+/** Every open PR a source lists: the PR queue, then the ones only the index lists. */
+function openPrsToShow(project: Stored): { prs: OpenPr[]; reason: string | null } {
+  const { index, state } = project
+  const fromIndex = index.isOk && index.value.liveWork.isOk ? index.value.liveWork.value.openPrs : []
+  const dispatchOf = (number: number) => fromIndex.find(pr => pr.number === number)?.dispatchId ?? null
+  const queue = state.isOk && state.value.prs.isOk ? state.value.prs.value : []
+  const reason = !state.isOk ? state.reason : !state.value.prs.isOk ? state.value.prs.reason : null
+  const prs: OpenPr[] = queue.map(detail => ({ number: detail.number, detail, dispatchId: dispatchOf(detail.number) }))
+
+  for (const pr of fromIndex) {
+    if (!prs.some(one => one.number === pr.number)) {
+      prs.push({ number: pr.number, detail: null, dispatchId: pr.dispatchId })
+    }
+  }
+
+  return { prs, reason }
+}
+
+const ciTone = (ci: string): Tone => (ci === 'pass' ? 'ok' : ci === 'fail' ? 'error' : 'normal')
+const ciOf = (ci: string): string => (ci === 'pass' ? 'groen' : ci === 'fail' ? 'rood' : ci === 'pending' ? 'loopt' : ci)
+
+/** `PR #N · ci loopt|rood|groen · stoel open: <seats>`, or `PR #N · klaar voor merge` when nothing is owed and CI is green. */
+function prRow(pr: OpenPr, indent: string, reason: string | null): Row {
+  const label = seg(`${indent}PR #${pr.number}`)
+  const dot = seg(' · ', 'dim')
+
+  if (pr.detail === null) {
+    return reason === null ? rowOf(label, dot, seg('niet in de PR-wachtrij', 'warn')) : rowOf(label, dot, seg(`onbeschikbaar: ${reason}`, 'error'))
+  }
+
+  const { ci, owed } = pr.detail
+
+  if (owed !== null && owed.length === 0 && ci === 'pass') {
+    return rowOf(label, dot, seg('klaar voor merge', 'ok'))
+  }
+
+  const checks = [label, dot, seg(`ci ${ciOf(ci)}`, ciTone(ci))]
+
+  return owed !== null && owed.length === 0 ? rowOf(...checks) : rowOf(...checks, dot, seg(`stoel open: ${seatsOf(owed)}`, 'warn'))
+}
+
+/** The builders at work, each with the PR it belongs to; then the open PRs that no builder owns, with the deliverable or track behind them. */
+function nowSectionOf(project: Stored, columns: number): Section {
   if (!project.builders.isOk) {
     return failedSection('Nu bezig', project.builders.reason)
   }
 
-  return sectionOf('Nu bezig', 'niets', project.builders.value.map(builder => builderRow(builder, columns)), project.buildersOmitted)
+  const { prs, reason } = openPrsToShow(project)
+  const owned = new Set<number>()
+  const items: Row[][] = project.builders.value.map(builder => {
+    const prId = builder.who.isOk && builder.who.value.prId !== null ? (/\d+/.exec(builder.who.value.prId)?.[0] ?? null) : null
+    const mine = prs.filter(pr => (prId !== null && pr.number === Number(prId)) || pr.dispatchId === builder.dispatchId)
+
+    mine.forEach(pr => owned.add(pr.number))
+
+    return [builderRow(builder, columns), ...mine.map(pr => prRow(pr, '    ', reason))]
+  })
+  const deliverables = project.deliverables.isOk ? Object.values(project.deliverables.value.byTrack).flatMap(one => one.items) : []
+
+  for (const pr of prs.filter(one => !owned.has(one.number))) {
+    const deliverable = pr.dispatchId === null ? undefined : deliverables.find(one => one.id === pr.dispatchId)
+    const label = deliverable !== undefined && deliverable.title !== '' ? fit(deliverable.title, MIN_TITLE_COLUMNS * 4) : (project.prTracks[pr.number] ?? null)
+
+    items.push(label === null ? [prRow(pr, '  ', reason)] : [row(`  ${label}`), prRow(pr, '    ', reason)])
+  }
+
+  return sectionOf('Nu bezig', 'niets', items, project.buildersOmitted)
 }
 
-function waitSectionOf(project: Extract<ProjectModel, { hasStore: true }>): Section {
-  const { index, deliverables } = project
+function waitSectionOf(project: Stored): Section {
+  const { index } = project
   const outcomes = index.isOk ? index.value.outcomes : index
-  const parts: string[] = []
-  let isFailed = false
+  const promotion = promotionOf(project)
+  const parts: Segment[] = []
 
-  if (deliverables.isOk) {
-    parts.push(`${pluralOf(deliverables.value.proposed, 'levering', 'leveringen')} te promoveren`)
+  if (promotion.isOk) {
+    parts.push(seg(`${promotion.value.now} te promoveren (now)`, promotion.value.now > 0 ? 'warn' : 'normal'))
   } else {
-    parts.push(`te promoveren onbeschikbaar: ${deliverables.reason}`)
-    isFailed = true
+    parts.push(seg(`te promoveren onbeschikbaar: ${promotion.reason}`, 'error'))
   }
 
   if (outcomes.isOk) {
-    parts.push(`${pluralOf(outcomes.value.total, 'open uitkomst', 'open uitkomsten')}`)
+    parts.push(seg(`${pluralOf(outcomes.value.total, 'open uitkomst', 'open uitkomsten')}`))
   } else {
-    parts.push(`uitkomsten onbeschikbaar: ${outcomes.reason}`)
-    isFailed = true
+    parts.push(seg(`uitkomsten onbeschikbaar: ${outcomes.reason}`, 'error'))
   }
 
-  const isNothing = deliverables.isOk && outcomes.isOk && deliverables.value.proposed === 0 && outcomes.value.total === 0
+  const backlog = promotion.isOk ? promotion.value.backlog : 0
+  const isNothing = promotion.isOk && outcomes.isOk && promotion.value.now === 0 && outcomes.value.total === 0 && backlog === 0
+  const [first = seg(''), ...others] = parts
+  const main = rowOf(seg('  '), first, ...others.flatMap(other => [seg(' · '), other]))
+  const lines = [main, ...(backlog > 0 ? [row(`  backlog: ${backlog} voorgesteld op next/later`, 'dim')] : [])]
 
-  return sectionOf('Wacht op een besluit', 'niets', isNothing ? [] : [[row(`  ${parts.join(' · ')}`, isFailed ? 'error' : 'normal')]])
+  return sectionOf('Wacht op een besluit', 'niets', isNothing ? [] : [lines])
 }
 
-/** `PR's: #2141 #2148 dicht, #2150 open`: the closed ones named while there are few, the open ones always. */
-function prsOfTrack(one: ShownTrack): string | null {
-  const closed = one.prs.filter(pr => pr.isOpen === false)
-  const open = one.prs.filter(pr => pr.isOpen === true)
-  const unknown = one.prs.filter(pr => pr.isOpen === null)
-  const parts = [
-    closed.length === 0 ? null : closed.length <= CLOSED_PRS_NAMED ? `${closed.map(pr => `#${pr.number}`).join(' ')} dicht` : `${closed.length} dicht`,
-    open.length === 0 ? null : `${open.map(pr => `#${pr.number}`).join(' ')} open`,
-    unknown.length === 0 ? null : unknown.map(pr => `#${pr.number} ?`).join(' '),
-  ].filter((part): part is string => part !== null)
+/** The bar in two tones: the filled cells `ok`, the empty cells `dim`. */
+const barSegments = (one: NonNullable<ShownTrack['progress']>): Segment[] => {
+  const { filled, empty } = barCellsOf(one)
 
-  return parts.length === 0 ? null : `PR's: ${parts.join(', ')}`
+  return [seg('▓'.repeat(filled), 'ok'), seg('░'.repeat(empty), 'dim')]
 }
 
-function trackItem(one: ShownTrack): Row[] {
+const BUSY_LABEL = 'bezig:  '
+const NEXT_LABEL = 'volgt:  '
+
+/** `volgt:` titles as many as fit the width, then `(+N)` for the rest. */
+function upcomingRow(titles: string[], columns: number): Row {
+  const prefix = ' '.repeat(TRACK_INDENT) + NEXT_LABEL
+  const room = columns - cellsOf(prefix)
+  let shown = titles.length
+
+  while (shown > 1 && cellsOf(titles.slice(0, shown).join(' · ')) + (shown < titles.length ? cellsOf(`  (+${titles.length - shown})`) : 0) > room) {
+    shown -= 1
+  }
+
+  const rest = titles.length - shown
+  const list = titles.slice(0, shown).flatMap((title, at) => (at === 0 ? [seg(title, 'warn')] : [seg(' · ', 'dim'), seg(title, 'warn')]))
+
+  return rowOf(seg(prefix), ...list, ...(rest > 0 ? [seg(`  (+${rest})`, 'dim')] : []))
+}
+
+function trackItem(one: ShownTrack, columns: number, isNow: boolean): Row[] {
   const head = `  ${one.track.priority} ${one.track.id}`
-  const isPrUnknown = one.prUnknown !== null && one.prs.some(pr => pr.isOpen === null)
-  const around = [prsOfTrack(one), isPrUnknown ? `PR-status onbekend: ${one.prUnknown}` : null, one.builders === 0 ? null : pluralOf(one.builders, 'bouwer', 'bouwers')].filter((part): part is string => part !== null)
   const indent = ' '.repeat(TRACK_INDENT)
+  const busy = isNow && one.busy.length > 0 ? [rowOf(seg(`${indent}${BUSY_LABEL}`), seg(one.busy.join(' · ')))] : []
+  const upcoming = one.upcoming.length > 0 ? [upcomingRow(one.upcoming, columns)] : []
 
   if (one.unreadable !== null) {
-    return [row(head), row(`${indent}${[progressText(one), ...around].join(' · ')}`, 'error')]
+    return [row(head), row(`${indent}leveringen onbeschikbaar: ${one.unreadable}`, 'error'), ...busy]
   }
 
   if (one.progress === null) {
-    return [row(`${head}${one.builders > 0 ? ' · bezig' : ''}`), row(`${indent}${[progressText(one), ...around].join(' · ')}`, 'dim')]
+    return [rowOf(seg(head), seg('  geen leveringen gepland', 'dim')), ...busy]
   }
 
-  const first = row(`${head} · ${progressText(one)} ${barOf(one.progress)}`)
+  const isAllDone = one.progress.done === one.progress.total
+  const tone: Tone = isAllDone ? 'ok' : 'normal'
 
-  return around.length === 0 ? [first] : [first, row(`${indent}${around.join(' · ')}`, 'dim')]
+  return [rowOf(seg(head, tone), seg('  '), ...barSegments(one.progress), seg(`  ${one.progress.done}/${one.progress.total}`, tone)), ...busy, ...upcoming]
 }
 
-function tracksSectionOf(project: Extract<ProjectModel, { hasStore: true }>): Section {
+function tracksSectionOf(project: Stored, columns: number): Section {
   const tracks = shownTracksOf(project)
 
   if (tracks === null) {
@@ -129,25 +245,28 @@ function tracksSectionOf(project: Extract<ProjectModel, { hasStore: true }>): Se
 
   const notice = deliverablesNotice(project)
 
-  return sectionOf('Tracks', 'geen', [...(notice === null ? [] : [[row(`  ${notice}`, 'error')]]), ...tracks.map(trackItem)])
+  return sectionOf('Tracks', 'geen', [...(notice === null ? [] : [[row(`  ${notice}`, 'error')]]), ...tracks.map(one => trackItem(one, columns, true))])
 }
 
-const ciOf = (ci: string): string => (ci === 'pass' ? 'groen' : ci === 'fail' ? 'rood' : ci === 'pending' ? 'loopt' : ci)
+/** The plan sections: the tracks on `next`, the tracks on `later`, and one dim count of the tracks without a horizon. */
+function planSectionsOf(project: Stored, columns: number): { sections: Section[]; footer: Row | null } {
+  const plan = planOf(project)
 
-const prRow = (pr: Pr): Row[] => [row(`  #${pr.number} · ci ${ciOf(pr.ci)} · geslaagd: ${seatsOf(pr.passed)} · open: ${seatsOf(pr.owed)}`)]
-
-function prsSectionOf(project: Extract<ProjectModel, { hasStore: true }>): Section {
-  const { state } = project
-
-  if (!state.isOk) {
-    return failedSection("PR's", state.reason)
+  if (plan === null) {
+    return { sections: [failedSection('Plan', project.tracks.isOk ? '' : project.tracks.reason)], footer: null }
   }
 
-  if (!state.value.prs.isOk) {
-    return failedSection("PR's", state.value.prs.reason)
-  }
+  const notice = deliverablesNotice(project)
+  const noticeItems = notice === null ? [] : [[row(`  ${notice}`, 'error')]]
+  const footer = plan.withoutHorizon > 0 ? row(`${pluralOf(plan.withoutHorizon, 'track', 'tracks')} zonder horizon`, 'dim') : null
 
-  return sectionOf("PR's", 'geen', state.value.prs.value.map(prRow))
+  return {
+    sections: [
+      sectionOf('next', 'geen', [...noticeItems, ...plan.next.map(one => trackItem(one, columns, false))]),
+      sectionOf('later', 'geen', plan.later.map(one => trackItem(one, columns, false))),
+    ],
+    footer,
+  }
 }
 
 /** The rows of a section in `free` rows: whole, or as many whole items as fit plus one row for the rest. Nothing when not even one item fits. */
@@ -177,7 +296,7 @@ function placeSection(section: Section, free: number): Row[] {
 }
 
 /** The one dim row at the bottom: what the live work counts as `stale` or `unmeasured`. Nothing when both are zero. */
-function cleanupRow(project: Extract<ProjectModel, { hasStore: true }>): Row | null {
+function cleanupRow(project: Stored): Row | null {
   if (!project.index.isOk || !project.index.value.liveWork.isOk) {
     return null
   }
@@ -189,7 +308,7 @@ function cleanupRow(project: Extract<ProjectModel, { hasStore: true }>): Row | n
 }
 
 /** The header of the pane: the project and the age of its index; `verouderd` once, when the index or the state is old. */
-function headerOf(project: ProjectModel): { text: string; tone: Row['tone'] } {
+function headerOf(project: ProjectModel): { text: string; tone: Tone } {
   if (!project.hasStore) {
     return { text: `${project.id} · ${project.reason}`, tone: 'error' }
   }
@@ -201,30 +320,31 @@ function headerOf(project: ProjectModel): { text: string; tone: Row['tone'] } {
 }
 
 /**
- * The sections in the order that takes the room: Nu bezig, Wacht op een besluit, Tracks, PR's, opruimen.
- * Each gets what is left of `budget` rows.
+ * The sections in the order that takes the room. The now view: Nu bezig, Wacht op een besluit, Tracks, opruimen.
+ * The plan view: next, later, the count without horizon. Each section gets what is left of `budget` rows.
  */
-function projectRows(project: Extract<ProjectModel, { hasStore: true }>, budget: number, columns: number): Row[] {
-  const sections = [nowSectionOf(project, columns), waitSectionOf(project), tracksSectionOf(project), prsSectionOf(project)]
+function projectRows(project: Stored, budget: number, columns: number, view: PaneView): Row[] {
+  const plan = view === 'plan' ? planSectionsOf(project, columns) : null
+  const sections = plan === null ? [nowSectionOf(project, columns), waitSectionOf(project), tracksSectionOf(project, columns)] : plan.sections
   const rows: Row[] = []
 
   for (const section of sections) {
     rows.push(...placeSection(section, budget - rows.length))
   }
 
-  const cleanup = cleanupRow(project)
+  const last = plan === null ? cleanupRow(project) : plan.footer
 
-  return cleanup !== null && budget - rows.length >= 1 ? [...rows, cleanup] : rows
+  return last !== null && budget - rows.length >= 1 ? [...rows, last] : rows
 }
 
 /**
  * The pane, drawn from the model alone: the header (project and index age), then the sections of that one
  * project, every row cut to the pane's width and every section cut to the rows that are left.
  */
-export function paneRows(model: Model | null, size: PaneSize): { header: string; headerTone: Row['tone']; lines: Row[] } {
+export function paneRows(model: Model | null, size: PaneSize): { header: string; headerTone: Tone; lines: Row[] } {
   const busy = size.isRefreshing ? ' · verversen…' : ''
   const failed = size.failure === undefined || size.failure === null ? [] : [row(`verversen mislukt: ${size.failure}`, 'error')]
-  const cut = (lines: Row[]) => lines.map(line => ({ ...line, text: fit(line.text, size.columns) }))
+  const cut = (lines: Row[]) => lines.map(line => fitRow(line, size.columns))
 
   if (model === null) {
     return { header: fit(`Voortgang${busy}`, size.headerColumns), headerTone: 'head', lines: cut([...failed, row('nog niet ververst', 'dim')]) }
@@ -239,7 +359,7 @@ export function paneRows(model: Model | null, size: PaneSize): { header: string;
   const header = headerOf(project)
   // The header row and the failure row come out of the pane's rows before the sections share what is left.
   const budget = Math.max(0, size.rows - 1 - failed.length)
-  const lines = project.hasStore ? projectRows(project, budget, size.columns) : []
+  const lines = project.hasStore ? projectRows(project, budget, size.columns, size.view ?? 'now') : []
 
-  return { header: fit(`${header.text}${busy}`, size.headerColumns), headerTone: header.tone, lines: cut([...failed, ...lines]) }
+  return { header: fit(`${header.text}${busy}${size.view === 'plan' ? ' · plan' : ''}`, size.headerColumns), headerTone: header.tone, lines: cut([...failed, ...lines]) }
 }

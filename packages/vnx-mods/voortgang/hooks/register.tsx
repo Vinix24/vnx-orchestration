@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Model, Row } from '../types'
+import type { Model, Tone } from '../types'
 
 import { collectModel, commandText, configOf, messageOf, statusLine } from './collect'
 import type { Config, Io } from './collect'
@@ -15,6 +15,8 @@ const isRefreshing = atom({ plugin: 'voortgang', key: 'isRefreshing' } as const,
 const failure = atom({ plugin: 'voortgang', key: 'failure' } as const, null)
 // The working directory of the session, learned at its start: the project is the one above it.
 const cwd = atom({ plugin: 'voortgang', key: 'cwd' } as const, null)
+// The view the pane draws: what is going on now, or the plan. `/voortgang plan` sets it, `/voortgang` sets it back.
+const paneView = atom({ plugin: 'voortgang', key: 'view' } as const, 'now')
 
 // Joins a refresh asked while one runs (the timer, the button, the command). Never drawn from:
 // a reload starts it over at null, which only means the next ask starts a fresh refresh.
@@ -72,13 +74,17 @@ async function refreshShown($: EngineInterface, config: Config): Promise<void> {
   }
 }
 
-const toneOf = (tone: Row['tone']) => {
+const toneOf = (tone: Tone) => {
   if (tone === 'head') {
     return { bold: true }
   }
 
   if (tone === 'dim') {
     return { dimColor: true }
+  }
+
+  if (tone === 'ok') {
+    return { color: 'success' }
   }
 
   if (tone === 'warn') {
@@ -99,7 +105,7 @@ export const register: Register = (on, options) => {
     await update($, cwd, () => e.cwd)
     await $.command.register({
       name: 'voortgang',
-      description: 'Toont de voortgang van het VNX-project van deze sessie',
+      description: 'Toont de voortgang van het VNX-project van deze sessie; met het argument plan het plan van next en later',
     })
     void refreshShown($, config)
     $.clock.every(config.refreshSeconds * 1000, () => {
@@ -109,7 +115,15 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  on('command.run', { command: 'voortgang' }, async $ => {
+  on('command.run', { command: 'voortgang' }, async ($, e) => {
+    const argument = e.args.trim()
+
+    if (argument !== '' && argument !== 'plan') {
+      return { text: `Voortgang: onbekend argument '${argument}'. Gebruik /voortgang of /voortgang plan.` }
+    }
+
+    await update($, paneView, () => (argument === 'plan' ? 'plan' : 'now'))
+
     let latest: Model
 
     try {
@@ -134,6 +148,7 @@ export const register: Register = (on, options) => {
       rows,
       isRefreshing: await read($, isRefreshing),
       failure: await read($, failure),
+      view: await read($, paneView),
     })
 
     return (
@@ -150,7 +165,11 @@ export const register: Register = (on, options) => {
           />
         </Box>
         {view.lines.map(line => (
-          <Text {...toneOf(line.tone)}>{line.text}</Text>
+          <Text>
+            {line.segments.filter(part => part.text !== '').map(part => (
+              <Text {...toneOf(part.tone)}>{part.text}</Text>
+            ))}
+          </Text>
         ))}
       </Box>
     )
