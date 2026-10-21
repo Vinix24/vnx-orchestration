@@ -251,7 +251,8 @@ def test_thin_goal_is_an_outcome_and_batch_continues(tmp_path, monkeypatch):
     assert summary["interrupted"] is False
     assert summary["skipped"] == []
     assert summary["tally"] == {
-        "PASS": 1, "REVISE": 0, "REFUSED_THIN": 1, "REFUSED_NO_DELIVERABLES": 0, "ERROR": 0,
+        "PASS": 1, "REVISE": 0, "REFUSED_THIN": 1, "REFUSED_NO_DELIVERABLES": 0,
+        "REFUSED_PROVIDER_SWITCHED_OFF": 0, "ERROR": 0,
     }
 
     by_track = {r["track_id"]: r for r in summary["results"]}

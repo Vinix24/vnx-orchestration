@@ -6,6 +6,10 @@
 Modes: sweep | research | architecture | strategy. Runs the 4-stage deliberation
 (diverge → contrarian → verify → synthesis) via the governed review-lane dispatcher, then
 writes the cited report to unified_reports/ (and prints it).
+
+The operator's provider switch is decided for the current project before anything is
+dispatched: the default roster drops a switched-off seat with one named line, and an
+explicit --seats that names one refuses (exit 4).
 """
 
 from __future__ import annotations
@@ -19,7 +23,8 @@ _LIB = Path(__file__).resolve().parent / "lib"
 if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 
-from deliberation_panel import default_roster, MODES, run_deliberation
+import provider_switch
+from deliberation_panel import default_roster, MODES, run_deliberation, switch_roster
 
 
 def _resolve_reports_dir() -> Path:
@@ -52,6 +57,37 @@ def _parse_seats(value: str | None) -> "list[tuple[str, str]] | None":
     return [known_roster[seat] for seat in seats]
 
 
+def _switch_seats(roster, *, project_id, min_seats, allow_degraded):
+    """The roster to run after the operator's provider switch, and a refusal ("" to go on).
+
+    An explicit ``--seats`` that names a switched-off seat refuses. The default roster
+    drops each switched-off seat with one named line on stderr, and the seats that
+    remain are counted against the synthesis floor (``min_seats``): below it the run
+    refuses before anything is dispatched, unless the operator passed
+    ``--allow-degraded`` (the report then stamps the degraded synthesis). With every
+    seat on, ``roster`` comes back unchanged, so ``None`` keeps the full-fleet default.
+    """
+    from plan_gate_panel import SWITCHED_OFF_NOTE, switch_remedy
+
+    seats = roster if roster is not None else default_roster()
+    kept, left_out = switch_roster(seats, project_id=project_id)
+    if not left_out:
+        return roster, ""
+    names = ", ".join(seat["provider"] for seat in left_out)
+    remedy = switch_remedy(left_out)
+    if roster is not None:
+        details = "; ".join(seat["detail"] for seat in left_out)
+        return None, (f"--seats names switched-off seat(s): {names}. {details}. "
+                      f"To go on: {remedy}; or leave the seat out of --seats.")
+    for seat in left_out:
+        print(f"[panel] {SWITCHED_OFF_NOTE}: {seat['detail']}", file=sys.stderr)
+    if len(kept) < min_seats and not allow_degraded:
+        return None, (f"{len(kept)} of {len(seats)} seat(s) remain after the provider switch, "
+                      f"minimum {min_seats} (synthesis_min_seats); left out: {names}. "
+                      f"To go on: {remedy}; or pass --allow-degraded.")
+    return kept, ""
+
+
 def main(argv: "list[str] | None" = None) -> int:
     parser = argparse.ArgumentParser(description="VNX multi-provider deliberation panel")
     parser.add_argument("mode", choices=sorted(MODES), help="deliberation mode")
@@ -59,7 +95,8 @@ def main(argv: "list[str] | None" = None) -> int:
     parser.add_argument("--context-file", default=None, help="file whose contents ground every stage")
     parser.add_argument("--timeout", type=int, default=900, help="per-panelist timeout seconds")
     parser.add_argument("--out", default=None, help="write the report here (default: unified_reports/)")
-    parser.add_argument("--seats", default=None, help="comma-list of seats to run; default = full fleet")
+    parser.add_argument("--seats", default=None, help="comma-list of seats to run; default = the full fleet minus "
+                             "seats whose provider is switched off")
     parser.add_argument(
         "--allow-degraded",
         action="store_true",
@@ -86,6 +123,15 @@ def main(argv: "list[str] | None" = None) -> int:
         _make_default_dispatcher,
         load_synthesis_min_seats,
     )
+    # OI-1154: the synthesis coverage floor comes from the config, never a Python literal.
+    # The provider switch counts it over the seats that remain, before any lane exists.
+    min_seats = load_synthesis_min_seats()
+    roster, refusal = _switch_seats(roster, project_id=provider_switch.resolve_project(),
+                                    min_seats=min_seats, allow_degraded=args.allow_degraded)
+    if refusal:
+        print(f"panel: refused before any dispatch: {refusal}", file=sys.stderr)
+        return provider_switch.EXIT_PROVIDER_SWITCHED_OFF
+
     # Pass a REAL data_dir: the claude/tmux lane writes each report to
     # <data_dir>/unified_reports/<id>.md and _read_report falls back to that path. With
     # data_dir=None the claude-lane reports (fan-out + synthesis) are written but never found
@@ -99,8 +145,6 @@ def main(argv: "list[str] | None" = None) -> int:
     # which a plan-reviewer-role worker correctly rejected as not a plan, corrupting the
     # panel stage.
     dispatcher = _make_default_dispatcher(data_dir, args.timeout, role="deliberation-panelist")
-    # OI-1154: the synthesis coverage floor comes from the config, never a Python literal.
-    min_seats = load_synthesis_min_seats()
 
     print(f"[panel] mode={args.mode} — running 4-stage deliberation across the fleet ...", file=sys.stderr)
     if roster is None:

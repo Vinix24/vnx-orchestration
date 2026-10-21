@@ -38,6 +38,11 @@ cases; seats 4 and 5 each moved the outcome 1.7%. A third full round buys
      tiebreaker (which model, which round, which outcome). A blocker may not
      vanish without a reason since #1511; this path respects that.
 
+  4. Provider switch — a tiebreaker whose provider family the operator switched
+     off refuses before any call (``TiebreakerSwitchedOffError``). Nothing takes
+     its place; the track stays blocked until the provider is re-enabled or the
+     operator attests the gate.
+
 The module is dependency-light (stdlib + the registry loader) and takes an
 injectable ``DispatcherFn`` so the stop-rule is testable without a live model —
 the SAME injection contract ``plan_gate_panel.run_panel`` uses.
@@ -58,6 +63,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 # the panel never drift on what a "dispatcher" is or where the seat ledger lives.
 import plan_gate_panel as pgp  # noqa: PLC0415  (sibling module, on sys.path)
 import final_answer_verdict  # noqa: PLC0415  (sibling module, on sys.path)
+import provider_switch
 
 # The round-counter record type, appended to the SAME seat ledger as the
 # per-seat verdicts (SEAT_LEDGER_RELPATH). One ``plan_gate_round`` record per
@@ -183,6 +189,31 @@ class TiebreakerNoAnswerError(Exception):
         )
         self.status = status
         self.raw = raw
+
+
+SWITCH_CONSUMER = "plan_gate_tiebreaker"
+
+
+class TiebreakerSwitchedOffError(provider_switch.ProviderDisabledError):
+    """The tiebreaker's provider family is switched off: refused before any call.
+
+    Raised by ``run_tiebreaker`` before a dispatcher is built or called. Nothing
+    substitutes for the tiebreaker (no paid rerouting behind the operator's back), so
+    the track stays blocked. Carries the switch ``decision``; the message names it and
+    the two ways on: re-enable the provider, or operator attest.
+    """
+
+    def __init__(self, decision: provider_switch.SwitchDecision) -> None:
+        super().__init__(decision)
+        remedy = pgp.switch_remedy([pgp.switched_off_entry(decision)])
+        self.message = (
+            f"plan-gate tiebreaker refused before any call: {decision.detail()}. Nothing "
+            f"substitutes for the tiebreaker; the track stays blocked. To go on: {remedy}; "
+            f"or {pgp.ATTEST_HINT}."
+        )
+
+    def __str__(self) -> str:
+        return self.message
 
 
 # The synthesized body carries the lane status on a ``- Status: <status>`` line
@@ -975,6 +1006,10 @@ def run_tiebreaker(
     reserved for an answer that exists but fails the contract. A no-answer is
     NEVER a decision: there is no ``TiebreakerResult``, so it can never read as
     START/STOP (and hence never as a PASS or REVISE).
+
+    Raises ``TiebreakerSwitchedOffError`` when the operator switched the resolved
+    lane's provider family off for ``project_id``: before any dispatcher is built or
+    called, and never a decision either.
     """
     import uuid  # noqa: PLC0415
 
@@ -989,6 +1024,11 @@ def run_tiebreaker(
     if resolved_model is None:
         dispatch_provider, model_key, cli_arg = resolve_tiebreaker_model(config)
         resolved_model = cli_arg
+    # The provider switch, decided for the track's project on the lane that would be
+    # called, before any dispatcher exists: a switched-off tiebreaker never calls.
+    switch = provider_switch.decide(dispatch_provider, consumer=SWITCH_CONSUMER, project_id=project_id)
+    if not switch.allowed:
+        raise TiebreakerSwitchedOffError(switch)
 
     resolved_timeout = pgp._seat_timeout(timeout_seconds)
     disp = dispatcher or _default_tiebreaker_dispatcher(data_dir, resolved_timeout)
