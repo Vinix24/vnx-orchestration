@@ -228,6 +228,8 @@ class TestEnvelopePlanEndTeardown:
         plan = _make_provider_plan(
             tmp_path := events_dir.parent,
             provider=Provider.DEEPSEEK_HARNESS,
+            # A registry model: the run's cost-ledger line refuses an unknown one (ADR-043).
+            model="deepseek-v4-flash",
             dispatch_id=dispatch_id,
             target_id="T2",
         )

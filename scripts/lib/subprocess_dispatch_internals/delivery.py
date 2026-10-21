@@ -36,6 +36,13 @@ _dispatch_token_usage: dict = {}
 # to _emit_governance for receipt/report without threading it through deliver_with_recovery.
 _dispatch_completion_text: dict = {}
 
+# Side-channel for the cost-ledger lines (ADR-043) deliver_with_recovery wrote,
+# one per delivery attempt — keyed by dispatch_id. Reset at the start of
+# deliver_with_recovery, appended per attempt by recovery._attempt_delivery,
+# read by the receipt of that call and popped by _dispatch_claude so its own
+# receipt names the same runs instead of writing a second line.
+_dispatch_cost_records: dict = {}
+
 
 def _build_worker_identity_env(terminal_id: str) -> dict[str, str]:
     """Resolve the orchestrator's identity and project it onto the worker env.
@@ -436,7 +443,7 @@ def deliver_via_subprocess(
                 )
             return _SubprocessResult(
                 success=False, session_id=session_id, event_count=event_count,
-                manifest_path=manifest_path,
+                manifest_path=manifest_path, spawn_refused=getattr(spawn_result, "spawn_refused", None),
                 touched_files=frozenset(touched_files),
             )
 

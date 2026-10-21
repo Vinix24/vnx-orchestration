@@ -29,7 +29,8 @@ def _make_args(**overrides) -> argparse.Namespace:
         terminal_id="T1",
         pr_id=None,
         instruction="run the test",
-        model="claude-sonnet-4-6",
+        # A registry model: the claude builder run's cost-ledger line refuses an unknown one (ADR-043).
+        model="sonnet",
         provider="claude",
     )
     defaults.update(overrides)
@@ -60,7 +61,7 @@ def test_success_first_attempt_no_retry(tmp_path):
         patch("governance_emit.emit_unified_report", return_value=report_path) as mock_report,
         patch("provider_dispatch.time.sleep") as mock_sleep,
     ):
-        _emit_governance(args, "claude", "claude-sonnet-4-6", result, _now(), _now(), "success")
+        _emit_governance(args, "claude", "sonnet", result, _now(), _now(), "success")
 
     mock_receipt.assert_called_once()
     mock_report.assert_called_once()
@@ -88,7 +89,7 @@ def test_transient_receipt_error_retries_and_succeeds(tmp_path):
         patch("governance_emit.emit_unified_report", return_value=tmp_path / "report.md"),
         patch("provider_dispatch.time.sleep") as mock_sleep,
     ):
-        _emit_governance(args, "claude", "claude-sonnet-4-6", result, _now(), _now(), "success")
+        _emit_governance(args, "claude", "sonnet", result, _now(), _now(), "success")
 
     assert mock_receipt.call_count == 3
     assert mock_sleep.call_count == 2
@@ -114,7 +115,7 @@ def test_persistent_receipt_error_raises_not_systemexit(tmp_path):
         patch("provider_dispatch.time.sleep"),
     ):
         with pytest.raises(RuntimeError, match="persistent disk failure"):
-            _emit_governance(args, "claude", "claude-sonnet-4-6", result, _now(), _now(), "success")
+            _emit_governance(args, "claude", "sonnet", result, _now(), _now(), "success")
 
 
 def test_persistent_receipt_error_does_not_raise_systemexit(tmp_path):
@@ -131,7 +132,7 @@ def test_persistent_receipt_error_does_not_raise_systemexit(tmp_path):
         patch("provider_dispatch.time.sleep"),
     ):
         try:
-            _emit_governance(args, "claude", "claude-sonnet-4-6", result, _now(), _now(), "success")
+            _emit_governance(args, "claude", "sonnet", result, _now(), _now(), "success")
         except SystemExit:
             pytest.fail("_emit_governance raised SystemExit — should raise RuntimeError to caller")
         except RuntimeError:
@@ -155,7 +156,7 @@ def test_persistent_receipt_error_retries_exactly_max_times(tmp_path):
         patch("provider_dispatch.time.sleep"),
     ):
         with pytest.raises(RuntimeError):
-            _emit_governance(args, "claude", "claude-sonnet-4-6", result, _now(), _now(), "success")
+            _emit_governance(args, "claude", "sonnet", result, _now(), _now(), "success")
 
     assert call_count == _EMIT_MAX_RETRIES
 
@@ -180,7 +181,7 @@ def test_file_exists_error_wrapped_as_runtimeerror_retries(tmp_path):
         patch("governance_emit.emit_unified_report", return_value=tmp_path / "report.md"),
         patch("provider_dispatch.time.sleep") as mock_sleep,
     ):
-        _emit_governance(args, "claude", "claude-sonnet-4-6", result, _now(), _now(), "success")
+        _emit_governance(args, "claude", "sonnet", result, _now(), _now(), "success")
 
     assert mock_receipt.call_count == 2
     mock_sleep.assert_called_once_with(_EMIT_RETRY_DELAY * 1)

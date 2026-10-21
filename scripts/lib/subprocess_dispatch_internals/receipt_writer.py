@@ -220,8 +220,12 @@ def _write_receipt(
     lane: str | None = None,
     mandate_id: str | None = None,
     role: str | None = None,
+    cost_ledger_run_ids: "list[str] | None" = None,
 ) -> Path:
     """Append a subprocess completion receipt to t0_receipts.ndjson.
+
+    ``cost_ledger_run_ids`` (ADR-043): the run_id of each cost-ledger line the
+    attempts of this dispatch wrote; stamped only when given.
 
     Returns the path to the receipt file.
     """
@@ -251,6 +255,8 @@ def _write_receipt(
     )
     if cost_source:
         receipt["cost_source"] = cost_source
+    if cost_ledger_run_ids is not None:
+        receipt["cost_ledger_run_ids"] = list(cost_ledger_run_ids)
     return _persist_receipt(receipt, dispatch_id, terminal_id, status)
 
 

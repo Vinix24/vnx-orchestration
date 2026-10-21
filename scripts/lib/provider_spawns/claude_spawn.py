@@ -77,6 +77,10 @@ class ClaudeSpawnResult:
     # provider_dispatch stamps it into the report as deadline_exceeded +
     # deadline_seconds.
     deadline_exceeded_seconds: Optional[float] = None
+    # ADR-043 (K2a-2): set when the claude process never started — the delivery
+    # was refused before Popen (unknown role) or Popen itself failed. The cost
+    # ledger books that attempt as a zero line (unavailable:spawn_refused).
+    spawn_refused: Optional[str] = None
     # Internal: the SubprocessAdapter instance used for this spawn.
     # Callers may use this for post-spawn cleanup (event_store.clear,
     # trigger_report_pipeline) to ensure the same session_id and state are
@@ -234,7 +238,7 @@ def spawn_claude(
             completion={},
             events_written=0,
             session_id=None,
-            timed_out=False,
+            timed_out=False, spawn_refused=f"deliver_failed: {deliver_result.failure_reason}",
             _adapter=adapter,
         )
 

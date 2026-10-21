@@ -648,7 +648,7 @@ def run_envelope_plan(
             returncode=1,
             completion_text="",
             status="failure",
-            error=str(_budget_exc),
+            error=str(_budget_exc), spawn_refused="paid_lane_budget_exceeded",
         )
         _budget_fail_start = _budget_fail_end = datetime.now(timezone.utc)
         report_path, receipt_path = _govern(
@@ -700,7 +700,7 @@ def run_envelope_plan(
             returncode=1,
             completion_text="",
             status="failure",
-            error=_isolation_error,
+            error=_isolation_error, spawn_refused="worktree_creation_failed",
         )
         _fail_start = _fail_end = datetime.now(timezone.utc)
         report_path, receipt_path = _govern(
@@ -992,7 +992,7 @@ def run_envelope_headless_plan(
             returncode=1,
             completion_text="",
             status="failure",
-            error=_isolation_error,
+            error=_isolation_error, spawn_refused="worktree_creation_failed",
         )
         _fail_start = _fail_end = datetime.now(timezone.utc)
         report_path, receipt_path = _govern(

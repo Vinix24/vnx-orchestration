@@ -113,6 +113,9 @@ class GLMHarnessSpawnResult:
     # OI-2066: carried from ClaudeSpawnResult.deadline_exceeded_seconds — the
     # total deadline when that deadline stopped the run, else None.
     deadline_exceeded_seconds: Optional[float] = None
+    # ADR-043 (K2a-2): the condition under which no claude process started for
+    # this spawn (proxy unreachable, unsafe config dir, or spawn_claude's own refusal).
+    spawn_refused: Optional[str] = None
     _adapter: Any = field(default=None, repr=False)
 
     @property
@@ -157,7 +160,7 @@ def spawn_glm_harness(
         logger.error("spawn_glm_harness: litellm proxy not reachable at %s — refusing to spawn.", url)
         return GLMHarnessSpawnResult(
             returncode=1, completion={}, events_written=0, session_id=None,
-            timed_out=False, model=resolved_model,
+            timed_out=False, model=resolved_model, spawn_refused="proxy_unreachable",
             error=f"glm-harness proxy unreachable at {url} (start the litellm proxy first)",
         )
 
@@ -172,7 +175,7 @@ def spawn_glm_harness(
         logger.error("spawn_glm_harness: %s; refusing to spawn.", exc)
         return GLMHarnessSpawnResult(
             returncode=1, completion={}, events_written=0, session_id=None,
-            timed_out=False, model=resolved_model,
+            timed_out=False, model=resolved_model, spawn_refused="harness_config_dir_unsafe",
             error=f"harness config dir unsafe: {exc}",
         )
 
@@ -208,7 +211,7 @@ def spawn_glm_harness(
         model=resolved_model,
         stopped_early=claude_result.stopped_early,
         error=err,
-        token_usage=claude_result.token_usage,
+        token_usage=claude_result.token_usage, spawn_refused=getattr(claude_result, "spawn_refused", None),
         _adapter=getattr(claude_result, "_adapter", None),
     )
 

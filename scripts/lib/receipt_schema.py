@@ -67,6 +67,21 @@ def _utc_now_iso() -> str:
 RECEIPT_V2_SCHEMA_VERSION = CURRENT_SCHEMA_VERSION
 RECEIPT_V2_EVENT_TYPE = "task_complete"
 
+# ReceiptV2 fields stamped only when not None, in ledger insertion order (the
+# writer uses sort_keys=False, so this order is part of the byte shape).
+# failure_reason/failure_class (OI-866) are omitted on success so pre-feature
+# receipts stay byte-identical; a non-retry receipt omits the chain-link
+# fields (parent_dispatch, task_class, tier_from, tier_to) entirely.
+_STAMPED_WHEN_SET = (
+    "final_prompt_path", "final_prompt_sha256", "injection_reconstructs", "verification", "warnings",
+    "tool_call_count", "tool_call_failures", "tool_call_retries", "deadline_seconds",
+    "failure_reason", "failure_class", "delivery_state",
+    "role_applied", "role_tier", "role_not_applied_reason", "role_source_path",
+    "parent_dispatch", "task_class", "tier_from", "tier_to",
+    "permission_posture", "permission_profile", "permission_allow_pattern_count",
+    "model_resolved", "cost_ledger_run_ids",
+)
+
 
 @dataclass
 class ReceiptV2:
@@ -186,6 +201,10 @@ class ReceiptV2:
     # as "sonnet"); this field is what the alias resolved to. None omits the
     # field: no init event means no observation, never a guess.
     model_resolved: Optional[str] = None
+    # ADR-043 (K2a-2): the run_id of every cost-ledger line this dispatch wrote,
+    # one per attempt. The receipt's cost_usd/cost_source come from those lines.
+    # None omits the field: the lane does not write the ledger yet.
+    cost_ledger_run_ids: Optional[List[str]] = None
 
     def __post_init__(self) -> None:
         # Receipt-quality PR-3: the closed-set lint lives in the contract now
@@ -234,59 +253,10 @@ class ReceiptV2:
             value = getattr(self, key)
             if value:
                 receipt[key] = value
-        if self.final_prompt_path is not None:
-            receipt["final_prompt_path"] = self.final_prompt_path
-        if self.final_prompt_sha256 is not None:
-            receipt["final_prompt_sha256"] = self.final_prompt_sha256
-        if self.injection_reconstructs is not None:
-            receipt["injection_reconstructs"] = self.injection_reconstructs
-        if self.verification is not None:
-            receipt["verification"] = self.verification
-        if self.warnings is not None:
-            receipt["warnings"] = self.warnings
-        if self.tool_call_count is not None:
-            receipt["tool_call_count"] = self.tool_call_count
-        if self.tool_call_failures is not None:
-            receipt["tool_call_failures"] = self.tool_call_failures
-        if self.tool_call_retries is not None:
-            receipt["tool_call_retries"] = self.tool_call_retries
-        if self.deadline_seconds is not None:
-            receipt["deadline_seconds"] = self.deadline_seconds
-        # OI-866: conditionally stamped — omitted on success so pre-feature
-        # receipts stay byte-identical.
-        if self.failure_reason is not None:
-            receipt["failure_reason"] = self.failure_reason
-        if self.failure_class is not None:
-            receipt["failure_class"] = self.failure_class
-        if self.delivery_state is not None:
-            receipt["delivery_state"] = self.delivery_state
-        if self.role_applied is not None:
-            receipt["role_applied"] = self.role_applied
-        if self.role_tier is not None:
-            receipt["role_tier"] = self.role_tier
-        if self.role_not_applied_reason is not None:
-            receipt["role_not_applied_reason"] = self.role_not_applied_reason
-        if self.role_source_path is not None:
-            receipt["role_source_path"] = self.role_source_path
-        # Chain-link stamps (dispatch-20260802-model-ssot-en-ketenlink) —
-        # conditional like the other optional fields: a non-retry receipt omits
-        # parent_dispatch entirely.
-        if self.parent_dispatch is not None:
-            receipt["parent_dispatch"] = self.parent_dispatch
-        if self.task_class is not None:
-            receipt["task_class"] = self.task_class
-        if self.tier_from is not None:
-            receipt["tier_from"] = self.tier_from
-        if self.tier_to is not None:
-            receipt["tier_to"] = self.tier_to
-        if self.permission_posture is not None:
-            receipt["permission_posture"] = self.permission_posture
-        if self.permission_profile is not None:
-            receipt["permission_profile"] = self.permission_profile
-        if self.permission_allow_pattern_count is not None:
-            receipt["permission_allow_pattern_count"] = self.permission_allow_pattern_count
-        if self.model_resolved is not None:
-            receipt["model_resolved"] = self.model_resolved
+        for key in _STAMPED_WHEN_SET:
+            value = getattr(self, key)
+            if value is not None:
+                receipt[key] = list(value) if key == "cost_ledger_run_ids" else value
         return receipt
 
 

@@ -135,6 +135,104 @@ def _record_receipt_emit_failure(
     )
 
 
+# ADR-043 (K2a-2): the producer part of the run_id of every cost-ledger line
+# this GOVERN step writes: <project_id>:envelope_govern:<dispatch_id>:<attempt>.
+COST_LEDGER_PRODUCER = "envelope_govern"
+
+
+def _book_ledger_run(
+    spec: EnvelopeSpec,
+    adapter_result: _AdapterResult,
+    start_time: datetime,
+    end_time: datetime,
+    model: str,
+) -> tuple:
+    """Write this attempt's cost-ledger line when it is a builder run on a claude harness lane.
+
+    Returns ``(record, None)`` when the line landed and ``(None, None)`` for a
+    lane or role that does not write the ledger yet. When the ledger refuses
+    the record (``CostLedgerRefusal``, e.g. an unknown model) or the append
+    fails (``CostLedgerWriteError``), or the line cannot be built at all, it
+    returns ``(None, reason)``: the caller then writes NO receipt and records
+    the proof-chain gap (OI-1179) with that reason, loud. A receipt for this
+    attempt without its cost line would carry a cost the ledger does not have
+    (ADR-005, ADR-043 "Gevolgen").
+    """
+    from harness_run_cost import (  # noqa: PLC0415
+        BuilderRun,
+        lane_model,
+        ledger_project_id,
+        record_builder_run,
+        writes_builder_run,
+    )
+
+    if not writes_builder_run(spec.provider, spec.role):
+        return None, None
+    # A spawn refused before the adapter resolved a model carries the plan's
+    # placeholder: book it with the model the lane would have run.
+    run = BuilderRun(
+        provider=spec.provider, model=lane_model(spec.provider, model), started=start_time, ended=end_time,
+        session_id=adapter_result.session_id, spawn_refused=adapter_result.spawn_refused,
+    )
+    try:
+        record = record_builder_run(
+            run, project_id=ledger_project_id(spec.state_dir),
+            producer=COST_LEDGER_PRODUCER, dispatch_id=spec.dispatch_id,
+        )
+    except Exception as exc:  # noqa: BLE001 — every failure to book the cost withholds the receipt, loud
+        return None, f"cost ledger line not written ({type(exc).__name__}): {exc}"
+    return record, None
+
+
+def _receipt_cost(
+    spec: EnvelopeSpec,
+    adapter_result: _AdapterResult,
+    model: str,
+    ledger_record: Optional[Dict[str, Any]],
+) -> tuple:
+    """``(cost_usd, cost_source, cost_ledger_run_ids)`` for this dispatch's receipt.
+
+    A harness builder run: the values of the ledger record ``_book_ledger_run``
+    wrote, not a second computation. Every other lane (codex, kimi and the
+    rest until K2b, and the seats on a harness lane until K3/K4a): the price
+    via ``provider_dispatch._compute_cost`` (OI-882) and the old
+    ``emit_provider_cost`` event, both best-effort as they always were here.
+    """
+    if ledger_record is not None:
+        return ledger_record["cost_usd"], ledger_record["cost_source"], [ledger_record["run_id"]]
+    cost_usd, cost_source = None, None
+    try:
+        from provider_dispatch import _compute_cost  # noqa: PLC0415
+        cost_usd, cost_source = _compute_cost(spec.provider, model, adapter_result.token_usage)
+    except Exception as _cost_exc:  # noqa: BLE001 — cost must never break receipt emission
+        logger.debug(
+            "envelope._govern: cost compute failed dispatch=%s provider=%s (non-fatal): %s",
+            spec.dispatch_id, spec.provider, _cost_exc,
+        )
+    try:
+        from provider_costs import emit_provider_cost  # noqa: PLC0415
+        from project_scope import resolve_stamp_project_id, TenantUnresolved  # noqa: PLC0415
+        _cost_pid = ""
+        try:
+            _cost_pid = resolve_stamp_project_id(db_path=str(spec.state_dir / "quality_intelligence.db"))
+        except TenantUnresolved:  # vnx-silent-except: emit falls back to env; cost-audit must not lose the event
+            _cost_pid = ""
+        tokens = adapter_result.token_usage or {}
+        emit_provider_cost(
+            provider=spec.provider, model=model,
+            input_tokens=tokens.get("input") if tokens else None,
+            output_tokens=tokens.get("output") if tokens else None,
+            cost_usd_estimate=cost_usd, dispatch_id=spec.dispatch_id,
+            project_id=_cost_pid, cost_source=cost_source,
+        )
+    except Exception as _cost_event_exc:  # noqa: BLE001 — cost event must not break receipt
+        logger.warning(
+            "envelope._govern: cost event emit failed dispatch=%s (non-fatal): %s",
+            spec.dispatch_id, _cost_event_exc,
+        )
+    return cost_usd, cost_source, None
+
+
 # ---------------------------------------------------------------------------
 # GOVERN
 # ---------------------------------------------------------------------------
@@ -167,23 +265,9 @@ def _govern(
     from governance_emit import emit_dispatch_receipt, emit_unified_report  # noqa: PLC0415
 
     duration = (end_time - start_time).total_seconds()
-
-    # OI-882: the envelope previously hardcoded cost_usd=None even though
-    # adapter_result.token_usage carried real tokens and wave7_models.yaml has
-    # the per-provider prices. Compute the estimate the same way
-    # provider_dispatch._emit_governance does, using the actual model the spawn
-    # resolved (falling back to the spec model). Non-fatal: an unresolvable
-    # price leaves cost_usd None instead of failing the receipt.
-    cost_usd, cost_source = None, None
+    # The model the spawn resolved (falling back to the spec model): it prices
+    # the run and names it in the cost ledger and on the receipt.
     _cost_model = getattr(adapter_result, "model", None) or spec.model
-    try:
-        from provider_dispatch import _compute_cost  # noqa: PLC0415
-        cost_usd, cost_source = _compute_cost(spec.provider, _cost_model, adapter_result.token_usage)
-    except Exception as _cost_exc:  # noqa: BLE001 — cost must never break receipt emission
-        logger.debug(
-            "envelope._govern: cost compute failed dispatch=%s provider=%s (non-fatal): %s",
-            spec.dispatch_id, spec.provider, _cost_exc,
-        )
 
     # OI-878/OI-902: end-of-dispatch event archive. Archive the live event stream
     # under THIS dispatch's id BEFORE the receipt so the receipt can carry
@@ -332,8 +416,15 @@ def _govern(
     _contract_downgrade = bool(_contract_warnings) and _effective_status != adapter_result.status
     try:
         ndjson_path = spec.state_dir / "t0_receipts.ndjson"
+        # ADR-005/ADR-043: this attempt's cost-ledger line lands before any
+        # receipt decision — also when the dedup below skips the receipt (a
+        # refire of the same id is a new attempt, so a new run).
+        _ledger_record, _ledger_error = _book_ledger_run(spec, adapter_result, start_time, end_time, _cost_model)
         _existing_receipt = _receipt_exists_for_dispatch(ndjson_path, spec.dispatch_id)
-        if _existing_receipt and not _contract_downgrade:
+        if _ledger_error is not None:
+            _record_receipt_emit_failure(spec, _ledger_error, work_status=adapter_result.status)
+            _emit_failed = True
+        elif _existing_receipt and not _contract_downgrade:
             logger.info(
                 "envelope._govern: receipt already exists for dispatch=%s — skipping (idempotent dedup)",
                 spec.dispatch_id,
@@ -405,40 +496,10 @@ def _govern(
                     )
                     _toolcall_signals = {}
 
-                # ADR-005: emit cost event BEFORE receipt write. provider_dispatch
-                # and recovery raise on failure (fail-loud); the envelope is the
-                # third receipt path and matches them, but wraps in try/except so a
-                # cost-log failure never breaks the receipt write.
-                try:
-                    from provider_costs import emit_provider_cost  # noqa: PLC0415
-                    from project_scope import resolve_stamp_project_id, TenantUnresolved  # noqa: PLC0415
-                    _cost_pid = ""
-                    try:
-                        _cost_pid = resolve_stamp_project_id(
-                            db_path=str(spec.state_dir / "quality_intelligence.db")
-                        )
-                    except TenantUnresolved:
-                        pass  # emit falls back to env; cost-audit must not lose the event
-                    emit_provider_cost(
-                        provider=spec.provider,
-                        model=_cost_model,
-                        input_tokens=(
-                            adapter_result.token_usage.get("input")
-                            if adapter_result.token_usage else None
-                        ),
-                        output_tokens=(
-                            adapter_result.token_usage.get("output")
-                            if adapter_result.token_usage else None
-                        ),
-                        cost_usd_estimate=cost_usd,
-                        dispatch_id=spec.dispatch_id,
-                        project_id=_cost_pid, cost_source=cost_source,
-                    )
-                except Exception as _cost_event_exc:  # noqa: BLE001 — cost event must not break receipt
-                    logger.warning(
-                        "envelope._govern: cost event emit failed dispatch=%s (non-fatal): %s",
-                        spec.dispatch_id, _cost_event_exc,
-                    )
+                # ADR-005: the receipt's cost — from this attempt's ledger line on
+                # a harness builder run, else from the old event, emitted here
+                # before the receipt write.
+                cost_usd, cost_source, _run_ids = _receipt_cost(spec, adapter_result, _cost_model, _ledger_record)
 
                 # OI-866: classify failure so the receipt carries a distinguishable
                 # failure_reason + failure_class instead of a silent
@@ -490,7 +551,7 @@ def _govern(
                     findings=[],
                     duration_seconds=duration,
                     token_usage=adapter_result.token_usage,
-                    cost_usd=cost_usd, cost_source=cost_source,
+                    cost_usd=cost_usd, cost_source=cost_source, cost_ledger_run_ids=_run_ids,
                     state_dir=spec.state_dir,
                     report_path=str(report_path) if report_path else None,
                     events_path=events_path,

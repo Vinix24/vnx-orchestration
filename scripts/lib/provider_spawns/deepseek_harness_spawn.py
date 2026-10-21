@@ -197,6 +197,9 @@ class DeepSeekHarnessSpawnResult:
     # OI-2066: carried from ClaudeSpawnResult.deadline_exceeded_seconds — the
     # total deadline when that deadline stopped the run, else None.
     deadline_exceeded_seconds: Optional[float] = None
+    # ADR-043 (K2a-2): the condition under which no claude process started for
+    # this spawn (no own key, unsafe config dir, or spawn_claude's own refusal).
+    spawn_refused: Optional[str] = None
     _adapter: Any = field(default=None, repr=False)
 
     @property
@@ -265,7 +268,7 @@ def _refuse_without_own_key(
     )
     return DeepSeekHarnessSpawnResult(
         returncode=1, completion={}, events_written=0, session_id=None,
-        timed_out=False, model=resolve_harness_model(model),
+        timed_out=False, model=resolve_harness_model(model), spawn_refused="local_key_missing",
         error=(
             f"local key missing: {DEEPSEEK_API_KEY_ENV} absent from the "
             f"environment and the provider env file — key-auth required, "
@@ -313,7 +316,7 @@ def spawn_deepseek_harness(
         logger.error("spawn_deepseek_harness: %s; refusing to spawn.", refusal)
         return DeepSeekHarnessSpawnResult(
             returncode=1, completion={}, events_written=0, session_id=None,
-            timed_out=False, model=resolved_model,
+            timed_out=False, model=resolved_model, spawn_refused="harness_config_dir_unsafe",
             error=f"harness config dir unsafe: {refusal}",
         )
 
@@ -350,6 +353,7 @@ def spawn_deepseek_harness(
         stopped_early=claude_result.stopped_early,
         error=err,
         token_usage=claude_result.token_usage,
+        spawn_refused=getattr(claude_result, "spawn_refused", None),
         _adapter=getattr(claude_result, "_adapter", None),
     )
 

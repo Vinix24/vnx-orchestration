@@ -106,3 +106,8 @@ class _AdapterResult:
     # alias resolved to, e.g. "claude-sonnet-5-5"). Normalized and stamped on the
     # receipt as model_resolved. None when the stream carried no init model.
     model_resolved: Optional[str] = None
+    # ADR-043 (K2a-2): the condition under which the lane refused the spawn or
+    # the spawn never started (budget refusal, no worktree, no own key, proxy
+    # down, Popen failed). GOVERN books such an attempt as a zero cost-ledger
+    # line with unavailable:spawn_refused. None when the worker ran or may have.
+    spawn_refused: Optional[str] = None
