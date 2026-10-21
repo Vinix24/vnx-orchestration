@@ -1,1 +1,0 @@
-- Receipt-processor launchd start-skip tests poll (10 s deadline) for the stub's marker instead of a fixed 0.3 s sleep, and the skip cases hold an explicit 1 s absence window (D3-5).

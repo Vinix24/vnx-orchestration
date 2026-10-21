@@ -6,6 +6,129 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 
 ## [Unreleased]
 
+## [1.7.3] - 2026-10-21
+
+This release carries the tiebreaker at the B3 review cap with its verdict table (migration 0035, ADR-041, R2a and R2b). It also carries the cost ledger: one line per run with a mandatory source and dated price versions (ADR-043, K2a-1 and K2a-2, #2126), one ordering lock file with the spool as the write fallback, and `spool_conflicts` (K2a-3a). The `voortgang` mod in `packages/vnx-mods` now shows the progress of one project per session, with a bar per track and a status line (0.3.0 and 0.3.1). The T0 rotation hands the first message over as a start argument (OI-2102). The shipped skills are consumer-safe and resolve the vnx CLI in one order (#2146, #2147, OI-2226), and a release PR gets a review task that sends the reviewer into the tree (OI-2242).
+
+The first state build on 1.7.3 moves a store to `user_version` 35. Migration 0035 only creates the table `review_cap_verdicts` and one index on it, and alters no existing table; 1.7.2 never reads or writes that table, so re-pinning a store at 35 to 1.7.2 is safe. The content boundary at the door and the panel (#2063) and the nightly content-boundary check (#2061) are still not in this release.
+
+- Model-pricing grootboek (ADR-040): prijzen zijn nu gedateerde versies in `wave7_models.yaml` in plaats van één platte paarwaarde plus een hard-coded `_PROVIDER_RATES`-tabel in `provider_costs.py`. Elke geprijsde model draagt `price_versions` (in/uit/cache-read/cache-write per Mtok, plus piek/dal waar de provider die kent), en elke alias van een model lost op naar dezelfde versies — het `opus`-tegen-`opus-4-8`-conflict is weg. Eén functie `price_run(provider, model, segments)` is de prijsingang: segmenten splitsen een run op een prijsgrens (het DeepSeek-piekvenster 01:00-04:00 en 06:00-10:00 UTC op werkdagen, dal is de helft), zodat een run die de grens kruist met twee tarieven wordt geprijsd. Een model zonder prijs retourneert `unavailable:no_price:<model>` — nooit een stille 0. De tarieventabel is verwijderd; `codex_wrapper`, `gemini_wrapper` en de `provider_dispatch`-fallback prijzen allemaal via `price_run`. DeepSeek- en OpenRouter-prijzen zijn opgenomen zoals gemeten op 2026-09-14 (`deepseek-flash` 0.30/1.20 piek en 0.15/0.60 dal, `deepseek-v4-pro` 1.32/3.96 piek en 0.66/1.98 dal, z-ai/glm ongewijzigd), met die meetdatum — geen verzonnen prijs.
+
+- Cost provenance no longer collapses to a silent $0 (dispatch 20261019-kp-k1-r2, fix-forward on #2126): `provider_dispatch._compute_cost` and `_compute_kimi_cost` now return `(cost_usd, cost_source)` and every caller of `price_run` carries the source through to the written record — the cost event (`emit_provider_cost`), the receipt (`ReceiptV2`/`emit_dispatch_receipt`/`receipt_writer`) and the report frontmatter (`_build_frontmatter`). An unavailable price stays `cost_usd=None` with a `cost_source` of `unavailable:no_price:<model>`, so a billable run with no measured price is never recorded as free; a genuinely free run (measured $0, e.g. local inference) keeps `0.0` with its own `<model>@<version-date>` source. `_build_frontmatter` no longer rewrites `None` to `0.0`.
+- Price-version parsing validates rates: `provider_registry._parse_price_version` rejects a NaN, infinite, or negative `input_per_mtok`/`output_per_mtok` (and every optional rate) before it becomes a price.
+
+- An unknown price is a valid report again (dispatch 20261020-kp-k1-r3, fix-forward on #2126, OI-2194): `schemas/unified_report_v1.json` accepts `cost_usd: null` only next to a `cost_source` that starts with `unavailable:`, and refuses an `unavailable:` source next to a number, so an unknown price can never be written as `0.0` (both enforced in the schema's `allOf` by the Draft 2020-12 validator). Before this, `_build_frontmatter`'s null failed with `invalid type: cost_usd (expected number)`, the converter booked the report as a fail-closed `task_failed`, and `VNX_SCHEMA_STRICT=1` aborted the report write. One helper, `unified_report_schema.report_cost_fields`, now builds the pair for the provider lane: a null cost always carries its reason, `unavailable:no_usage` when usage was missing. A failure inside pricing (`_compute_cost`, `_compute_kimi_cost`) now returns `unavailable:price_error` instead of an empty source, so it is never stamped as `no_usage`. The govern step (`dispatch_govern`) writes an unavailable price as null with its source instead of `float(None or 0.0)`. The converter copies the report's `cost_usd`/`cost_source` to the receipt unchanged.
+- Readers that sum or average `cost_usd` count an unknown price and never read it as 0: `cost_tracker.recent_costs` and `paid_lane_budget.spent_today` return and log the unknown count, `scout_effectiveness` reports it per cohort and for scout receipts, and the benchmark harnesses (`run_lane_bench`, the field-test scorer and reporter, `export_routing_matrix`) show it next to the known total. `run_lane_bench` no longer crashes on `cost_usd: null`, and the field-test scorer no longer gives an unknown price the free-run cost-efficiency score.
+
+- Review stop rule (R2a, ADR-041): a PR at the B3 cap gets a next step. `vnx review cap-verdict --pr N --for-dispatch <id>`
+  asks one registry model for one outcome of the cap rule and records it in `review_cap_verdicts` (migration 0035,
+  ADR-007 key). Never a findings list. `verkleinen` grants one extra codex-seat round to the named dispatch,
+  used by the first codex verdict on a head with a commit of that dispatch; the merge door counts only that round's PASS.
+  `terug-naar-plan` and `mergen-met-OI` are recorded as `outcome_unavailable_in_r2a` and leave the cap closed.
+  - `vnx review rounds open` on an opened PR releases a head whose verdict reached the round ledger while its
+    result record did not (an interrupted publication).
+
+- **Store-guard tests hold under xdist (D3-1).** Two tests swapped `vnx_paths`
+  for later tests in the same process. `test_resolve_project_id_with_env_override`
+  reloaded it and `test_append_receipt_stamps_project_id_from_env` re-imported it
+  after a `sys.modules` pop. Either one left a second `TestIsolationGuardError`
+  class, so the isolation-guard tests in `test_test_runner_store_guard.py` and
+  `test_receipt_mirror_isolation.py` failed depending on worker order. The reload
+  is gone, the re-import puts the original modules back, and the guard tests
+  look up the guard class when they assert instead of at import. The guard itself
+  is unchanged.
+
+- Receipt-processor launchd start-skip tests poll (10 s deadline) for the stub's marker instead of a fixed 0.3 s sleep, and the skip cases hold an explicit 1 s absence window (D3-5).
+
+- Fixed: three kimi heartbeat tests no longer fail under xdist load: the silent-worker test polls for the failure report, every test in the file writes under its own temp data dir with a unique dispatch id, and the two timing tests keep at least 25x the poll interval between activity and threshold.
+
+- Review stop rule (R2a follow-up): the cap verdict, its grant lookup and the tiebreaker's input are hardened.
+  - OI-2201: `vnx review cap-verdict` writes the `review_cap_verdict` receipt before the verdict row (ADR-005).
+    A receipt that does not land leaves no row and no granted round, and the command exits 1. A receipt that landed
+    while its row did not is booked from the receipt on the next run, without asking the model again.
+  - OI-2202: a git call in the grant lookup that fails or times out is a logged "no grant", never an exception.
+    The lookup shares one 30 s budget, and the round-ledger writer resolves it before it takes the ledger lock.
+  - OI-2203: a `vnx-review-cap-tiebreak` fence in the tiebreaker brief's input is disarmed, and a value that is no
+    commit SHA (`[0-9a-f]{7,40}`) never reaches git; SHAs go after `--end-of-options` and `--`.
+
+- Plan-gate tiebreaker STOP (OI-2197): de open items van de STOP-afhandeling landen nu in de centrale state-dir die `plan-gate run` zelf al heeft opgelost (volgt `VNX_DATA_DIR`, `VNX_DATA_DIR_EXPLICIT` en `VNX_STATE_DIR`), niet meer in `<repo>/state/`. `open_items_state_dir_for(seat_ledger_path)` is vervangen door `open_items_state_dir_from(central_state_dir)`; de seat-ledger blijft in de repo. Zonder centrale state-dir legt de STOP niets vast, meldt dat op stderr en blijft het gate-resultaat staan.
+
+- Tests: the once-per-process warning test no longer depends on test order. Its fixture resets the sentinel on every module object the validation consults, resolved from the validation function the test actually calls, so it also holds under xdist and after an earlier test re-imports `append_receipt_internals` (D3-2).
+
+- The t0-orchestrator skill scripts answer the same from any cwd (dispatch 20261020-t0skill-guard-fix, OI-2208): `dispatch_guard.sh` runs every `vnx` call bound to its own repo root, `intelligence.sh` resolves its state and dispatch dirs through the central `vnx_paths.py` (an explicit `VNX_STATE_DIR`/`VNX_DISPATCH_DIR` wins; unresolvable means `Error: VNX state dir unresolved`, never `/state`), `can_dispatch` delegates to the guard (YES/NO/UNKNOWN, never YES on missing state) and no longer reads `t0_brief.json` (`check_terminals`/`check_blocked` are gone because `vnx status --json` carries no terminals, `check_live_work` replaces them), and both `SKILL.md` copies name `claude_headless` as the only claude lane instead of the removed tmux-spawn lane.
+
+- voortgang mod (`packages/vnx-mods/voortgang/`): a VNX mod for Claude Code that shows VNX progress per project in a pane (`/voortgang`) and a status line: live work, open outcomes, open PRs with their review seats, now-tracks with their deliverables and the deliverables waiting on a promote. It ships with a VNX release (a local marketplace `vnx-mods` in `packages/vnx-mods/`, installed from `~/.vnx-system/current/packages/vnx-mods`) and is not exported to the public toolkit. It finds every project store under the data root itself (a child holding `state/t0_index.json` or `state/t0_state.json`, ordered by id, `exclude` to leave ids out) and carries no project names. It reads one directory listing of the data root, two files per project and runs two `vnx ... list --json --state-dir` calls, writes nothing, and shows a failed read as `onbeschikbaar` or `geen store`, never as zero.
+
+- Review cap (R2b round 2, ADR-041): the merge door now reads a `terug-naar-plan` verdict from its receipt as well as its row, so a receipt whose row commit failed refuses the PR exactly like the row, `--override-b3` included. The deliverable's move back to `proposed` writes its `review_cap_aftermath` receipt inside the transaction, before the commit (ADR-005). A rerun of `vnx review cap-verdict` restores every receipted aftermath step from its receipt instead of running it again, so a replaced result record no longer blocks a retry of the PR close.
+
+- Review cap (R2b round 3, ADR-041): the `terug-naar-plan` aftermath looks up and closes the PR in the repo of the store's project (`resolve_forge_target`, passed as `--repo` to `gh pr view` and `gh pr close`), never in the repo of the cwd. `vnx review cap-verdict --data-dir` of project A run from a checkout of project B no longer closes B's PR of the same number; a store whose repo cannot be established closes nothing and says why. The close comment carries the verdict id in a marker line and the PR's comments are read first, so a close that failed after its comment is retried without a second one.
+
+- Review cap (R2b, ADR-041): `vnx review cap-verdict` now carries out `terug-naar-plan` at B3.1. The remaining codex blockers become open items, the deliverable goes back to `proposed` and the PR closes with one comment. Every step is idempotent on the verdict id and leaves its own `review_cap_aftermath` receipt; exit 3 means "verdict stands, run again". The merge door counts no PASS of a PR sent back to plan, `--override-b3` included. Receipt recovery now matches `project_id` and the PR's current count (OI-2207).
+
+- T0 rotation: the successor's first message is a start argument, not keystrokes (OI-2102).
+  - `t0_rotate_spawn.sh` starts `claude --model opus ... --session-id <uuid> "/kickoff rotatie <run_id>"`. Nothing is typed into the TUI input box, so a redraw during startup (Remote Control connecting) can no longer wipe the instruction.
+  - A server-side job (`scripts/lib/t0_rotation_delivery.py`) reads the successor's transcript, compares its first real user record to the first message, writes `delivery.json` and a `t0_context_rotation_delivery` receipt. The old window closes only on `confirmed`; on `mismatch` or `timeout` both windows stay open. The last output line gains `close=on_delivery_confirmed`.
+  - `t0_rotation_state.py` gains `run-dir <run_id>` and `kickoff-done --run-dir <dir> [--catch-up-done]` (exit 3 without a newer wrap); `compose` writes `continuation.json` and `prompt.txt` no longer carries the kill-window sentence.
+
+- T0 rotation delivery, round 2 (OI-2218, OI-2102): the delivery job no longer breaks the direct-tmux freeze and its ordering is receipt first.
+  - The tmux-driving job moved to `scripts/t0_rotation_delivery_job.py`; `scripts/lib/t0_rotation_delivery.py` keeps only the transcript logic. One job now waits for the verdict, books the receipt (the ledger must take it), writes `delivery.json`, runs the `/goal` follow-up on `confirmed` and only then closes the old window. A mismatch, a timeout or a refused receipt types nothing and closes nothing. The job starts after the spawner's last stdout line.
+  - `t0_rotation_state.py event` and `kickoff-done` exit 1 when the ledger append failed; `kickoff-done` books the receipt before it writes the marker. `continuation.json` stores the handoff as an absolute path.
+  - The spawner checks the start folder with a plain `cd --` before claude is started, so the first message never reaches a successor in the wrong folder. A failing session-id generation is exit 5. The delivery check accepts the expanded slash-command form and the plain text of the start argument.
+
+- Review gates (dispatch 20261021-adr010-rolprompt): the reviewer and security-engineer role prompts summarise ADR-010 as ADR-010 says it.
+  Claude is reached only through the `claude` CLI subprocess; `severity: error` covers an Anthropic SDK import, direct HTTP to `api.anthropic.com` or a REST shim around it, LiteLLM for Claude, and an Anthropic API key or OAuth token in code or config.
+  A non-Claude provider called over HTTP or LiteLLM with its own key is outside ADR-010 and no longer a finding under it; the entry cites the ADR line that permits it.
+  The old "LLM delivery happens exclusively via a CLI subprocess" made codex block a DeepSeek HTTP lane on one run and pass the same question on another.
+  `tests/test_adr010_scope_prompts.py` pins the wording through `PromptAssembler`, the path the gates read.
+
+- Added: the cost ledger per run (ADR-043, K2a-1): `cost_ledger.record_run` writes one `provider_cost_run/1` line per run and refuses an amount without a source, and `aggregate_runs` counts the last line per run and never sums `unavailable` as 0.
+  An append that fails raises `CostLedgerWriteError` (an `OSError`): the call fails and nothing is kept elsewhere. The spool and replay of ADR-043 §6 land in the second K2a PR.
+
+- A cost-ledger line always starts on its own line (dispatch 20261020-kp-k2a1-r2, round 2 on #2141, ADR-043).
+  Every append in `cost_ledger.record_run` first ends a torn last line with `\n` under the ledger lock.
+  No byte is removed: the torn prefix stays and counts as one unreadable line, and the next record starts on its own line.
+
+- The cost ledger no longer leaves a line open for the old writer, and no longer prices unknown usage as zero (dispatch 20261020-kp-k2a1-r3, round 3 on #2141, ADR-043).
+  An append that fails halfway ends its own line at once when the disk has room, so `emit_provider_cost` cannot glue its
+  next line onto it.
+  A metered run whose `input_uncached`, `output` or a cache count its price charges is `null` gets `cost_usd: null` and
+  `unavailable:usage_unknown`, and `aggregate_runs` lists it under `unavailable`. A count that is a real 0 stays a priced zero.
+
+- Skills that ship to consumers (dispatch 20261021-skills-consumer-fixes, SEOcrawler #778 codex review): `vnx skills sync` ships from `skills/` only (`bin/vnx`, `cmd_skills_sync`), so the fixes live there.
+  - Every shipped template and `@vnx-manager.md` tell the worker to write its report to `$VNX_DATA_DIR/unified_reports/`, never the repo-relative `.vnx-data/unified_reports/`; `tests/test_skills_consumer_contract.py` fails when a skill file names the relative form.
+  - `dispatch_guard.sh` finds a CLI that speaks `vnx_status/1.0` in a consumer (`$REPO_ROOT/bin/vnx`, `$VNX_HOME/bin/vnx`, `~/.vnx-system/current/bin/vnx`, `VNX_BIN`, then PATH), fails closed with the CLI path and the schema it got when the schema differs, and runs `vnx status --json` with cwd and `VNX_PROJECT_ROOT` set to its own repo root.
+  - `t0-orchestrator`: `template.md` drops the Manager-Block-via-smart-tap method for the single-entry door; `SKILL.md` points at `docs/core/DISPATCH_RULES.md` instead of restating the tmux-spawn lane; `intelligence.sh` finds `vnx_paths.py`, `bin/vnx` and the python scripts in the repo, `$VNX_HOME` or `~/.vnx-system/current` instead of cwd-relative `scripts/`.
+  - Five skills no longer tell an agent to read user-global Claude memory; they point at ADRs and `claudedocs/`. `runtime-coordination-schema.md` lists v2 to v10 plus the v11 code step, the real dispatch and lease states, and `init_schema(state_dir)`.
+  - `featureplan-kickoff` reads the tracks DB and never initializes or promotes from `FEATURE_PLAN.md`/`PR_QUEUE.md`; it and the `pm` alias now ship from `skills/` and are registered in `skills.yaml`, with `repo_local` naming the directories that are not shipped.
+
+- `docs/core/DISPATCH_RULES.md` §6 no longer presents a claude tmux lane as live (dispatch 20261021-dispatch-rules-r3-land, PR #2147, cherry-picked from round 3 of #2146): the section is titled after the subscription session cap, says every `claude` dispatch runs on `claude_headless`, and keeps the 2026-09-18 removal as history. A test fails when this file or the shipped T0 skill names a claude tmux lane as current, and checks the skill's `DISPATCH_RULES §N` references.
+
+- Changed: builder runs on the claude harness lanes (`claude`, `deepseek-harness`, `glm-harness`) write one cost-ledger line per attempt through `record_run` and no longer write the old `emit_provider_cost` event (ADR-043, K2a-2).
+  - Tokens come from the session transcript, per assistant message deduplicated on `message.id`, with cache hits and the 5m/1h cache writes (`token_harvest.harvest_session_messages`). A count the transcript does not carry is `null` and the run `partial`, never 0. The R1b DeepSeek build now books its 7,218,944 cache hits.
+  - DeepSeek runs are split into a peak and an off-peak segment from the message timestamps and priced per window. `claude` books as `subscription`, the two harness lanes as `metered`.
+  - A refire is a new attempt: `cost_ledger.record_next_attempt` takes the attempt from the ledger under the append lock. A refused spawn writes a zero line with `unavailable:spawn_refused`; a run without a transcript writes `unknown:no_transcript` and `unavailable:no_transcript`.
+  - The receipt carries `cost_ledger_run_ids` and takes `cost_usd`/`cost_source` from the ledger line. A ledger write that fails or is refused writes no receipt: `provider_dispatch` and the subprocess lane raise, the envelope records the proof-chain gap (OI-1179).
+  - codex, kimi and the other providers, and gate seats, plan-gate seats and panel legs on the harness lanes, keep the old event (K2b, K3, K4a).
+- Fixed: `claude-haiku-4-5-20251001` resolves to the registry key `haiku` through a new registry alias `haiku-4-5` (OI-2224 advice 1). An alias that names a key or a second model fails the registry load.
+
+- T0 skill scripts: `dispatch_guard.sh` and `intelligence.sh` resolve the vnx CLI in one order (repo, `VNX_HOME`, `VNX_BIN`, the project-pin shim, `~/.vnx-system/current`, PATH), skip a non-executable candidate, and `intelligence.sh` pins `VNX_PROJECT_ROOT` when it resolves the state dirs (OI-2226).
+
+- Changed: the cost ledger has one ordering lock, `events/provider_costs.lock`, taken first by every actor (ADR-043 §6, K2a-3a). `record_run`, `record_next_attempt` and `emit_provider_cost` take it exclusively, `aggregate_runs` shared; the ledger's own `flock` stays nested under it for writers of an older fabric version.
+  - A failed ledger write no longer fails the call: the line goes to its run's spool file in `events/provider_costs.spool/` before the lock is released. A failed open, lock, boundary or append lands it in the spool; a failed fsync or close after a whole append lands it in the ledger and the spool. The returned record says where in `landed` (`ledger`, `spool` or `ledger+spool`).
+  - The spool file name is `<readable>~<digest>.json`: the run id sanitised and cut at 128 characters, then the first 16 hex characters of the sha256 of the exact run id, so two run ids that sanitise alike never share a file. Readers take the run from the records, and a file holding a record of another run counts as unreadable.
+  - A run with lines waiting in the spool queues behind them, so a correction never lands before the line it replaces. `record_next_attempt` counts attempts in the ledger and the spool: a refire while attempt 1 waits in the spool is attempt 2.
+  - `CostLedgerWriteError` now means the spool failed too, or the lock file could not be taken: the outcome is unknown and the caller books no new attempt. The envelope, the subprocess lane and `provider_dispatch` write no receipt and do not retry on it.
+  - `aggregate_runs` reads the ledger and counts the spool in one lock scope and changes nothing. `LedgerTotals` gains `spool_pending`, `spool_unreadable`, `torn_tail` and `incomplete`; a spool directory that cannot be listed is never an empty spool, and a torn last line counts as unreadable until a writer ends it.
+  - `LedgerTotals.spool_conflicts` counts the spooled runs whose `run_id` meets another execution in the ledger (an f2bef053 writer that booked the attempt again); `incomplete` is set, the spooled amount is in no sum and `record_next_attempt` counts past both with a warning.
+  - Not yet: the replay that brings the spool back into the ledger (K2a-3b) and the prelude tick and `cost-ledger` beacon (K2a-3c). Until then a spooled run is missing from every total and the aggregation reports the total as incomplete.
+
+- voortgang mod 0.3.0 (`packages/vnx-mods/voortgang/`): the pane and the status line show the one VNX project the session is in (the first `.vnx-project-id` above the working directory) instead of every project on the machine, with the builders at work, what waits on a decision, per track `X van Y klaar` with a bar (or `geen leveringen gepland`), and the open PRs with their seats. The fleet (option `exclude`, data-root listing, per-project row split) is removed; a fleet view comes later as a separate product. It still reads metadata only and writes nothing. A PR counts as open when the state's PR queue or the index's `live_work.open_prs` lists it; when neither can be read the PRs of a track show as `#N ?` with `PR-status onbekend: <reason>` instead of `dicht`. The project id follows `bin/vnx` (all whitespace removed, `^[a-z][a-z0-9-]{1,31}$`).
+
+- Review gates (OI-2242): a release PR now gets a review task that sends the reviewer into the tree. Release PR #2151 drew five `gate_execution_degenerate` codex runs on 2026-10-21, each one message with zero investigative actions, because the whole diff was in the prompt and the prompt asked for nothing beyond it. `changelog_fragments.is_release_pr` is the one rule: the PR changes `VERSION` and nothing outside `VERSION`, `CHANGELOG.md`, `changelog.d/` and `scripts/ci/changelog_legacy_prs.txt`. For such a PR `gate_prompt.build_review_prompt`, the path codex_gate, kimi_gate, deepseek_gate and glm_gate all take, adds `RELEASE_REVIEW_TASK` after the untrusted-diff block.
+  The reviewer opens `VERSION` and the new section, runs `check_changelog_fragments.py` on the merge base and quotes its last line. It checks every claim of the intro in the tree: a named migration under `schemas/migrations/`, a re-pin claim against the previous version's code via `git show v<previous>:<path>`, and a named PR or OI number against the folded bullets. An unconfirmed claim is advisory and a contradicted claim blocks. The degenerate guard is unchanged and a normal PR's prompt is byte-identical to before.
+
+- voortgang mod 0.3.1 (`packages/vnx-mods/voortgang/`): the status line shows how far the project is (the first two tracks of the pane with the 8-cell bar and `X/Y`, `: geen plan` or `: ?`, then `N bouwer(s)` when a builder runs) instead of PR, `te promoveren` and `uitkomsten` counters. `live_work.open_prs` is positive evidence only: a PR is `dicht` only when the readable PR queue of the state does not list it, else `#N ?`. An index entry without `dispatch_id` still counts as an open PR, a spec without `model` still links its track, and a track whose deliverables cannot be read keeps its PR and builder row. The Tracks order (pane and status line) is: a builder on the track first (most builders first), then an open PR, then a deliverable active in the last 7 days, then no activity; within a tier by priority, then id.
+
 ## [1.7.2] - 2026-10-19
 
 This release carries migration 0034 (OI-2026), which gives the seven runtime

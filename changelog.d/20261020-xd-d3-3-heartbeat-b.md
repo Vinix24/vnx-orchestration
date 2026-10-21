@@ -1,1 +1,0 @@
-- Fixed: three kimi heartbeat tests no longer fail under xdist load: the silent-worker test polls for the failure report, every test in the file writes under its own temp data dir with a unique dispatch id, and the two timing tests keep at least 25x the poll interval between activity and threshold.
