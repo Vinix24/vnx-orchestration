@@ -12,7 +12,7 @@ One project per session: the one whose `.vnx-project-id` lies above the session'
 
 ### Which project
 
-The mod walks up from the session's working directory to the first directory that holds `.vnx-project-id`. The first line of that file, trimmed, is the project id (the rule `bin/vnx` follows), and the store is `<data_root>/<id>`. The nearest file decides. It never falls back to another project.
+The mod walks up from the session's working directory to the first directory that holds `.vnx-project-id`. The first line of that file, with all whitespace removed, is the project id; it must match `^[a-z][a-z0-9-]{1,31}$` (the rule `bin/vnx` follows), else the mod says `geen geldig project-id in <path>`, and the store is `<data_root>/<id>`. The nearest file decides. It never falls back to another project.
 
 Without such a file the pane says:
 

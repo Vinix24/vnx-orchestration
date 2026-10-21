@@ -37,6 +37,7 @@ import {
   CWD,
   DELIVERABLES,
   HOME,
+  LIVE_WORK,
   NOW,
   OUTCOMES,
   PROJECT_DIR,
@@ -116,7 +117,9 @@ describe('the options', () => {
 
   test('accepts a project id only when it stays one directory under the data root', () => {
     expect(isProjectId('project-a')).toBe(true)
-    expect(isProjectId('project-b.v2')).toBe(true)
+    expect(isProjectId('project-b.v2')).toBe(false)
+    expect(isProjectId('Project-a')).toBe(false)
+    expect(isProjectId('a')).toBe(false)
     expect(isProjectId('..')).toBe(false)
     expect(isProjectId('../etc')).toBe(false)
     expect(isProjectId('a/b')).toBe(false)
@@ -328,10 +331,19 @@ describe('the project of a session', () => {
     expect(await resolveProject(idFiles({ [projectIdFileOf('')]: 'at-root' }), CWD)).toEqual({ isOk: true, value: 'at-root' })
   })
 
-  test('takes the first line, trimmed, and the nearest file', async () => {
+  test('takes the first line with all whitespace removed, as bin/vnx does, and the nearest file', async () => {
     const io = idFiles({ [projectIdFileOf(PROJECT_DIR)]: '  project-a  \nignored\n', [projectIdFileOf('/work')]: 'outer' })
 
     expect(await resolveProject(io, CWD)).toEqual({ isOk: true, value: 'project-a' })
+  })
+
+  test('strips inner whitespace before it checks the id, and rejects an id that stays invalid', async () => {
+    const stripped = idFiles({ [projectIdFileOf(PROJECT_DIR)]: ' vnx\t- dev \n' })
+    const invalid = idFiles({ [projectIdFileOf(PROJECT_DIR)]: 'Project_A\n', [projectIdFileOf('/work')]: 'outer' })
+
+    expect(await resolveProject(idFiles({ [projectIdFileOf(PROJECT_DIR)]: 'vnx-dev\n' }), CWD)).toEqual({ isOk: true, value: 'vnx-dev' })
+    expect(await resolveProject(stripped, CWD)).toEqual({ isOk: true, value: 'vnx-dev' })
+    expect(await resolveProject(invalid, CWD)).toEqual({ isOk: false, reason: `geen geldig project-id in ${projectIdFileOf(PROJECT_DIR)}` })
   })
 
   test('says there is no project, and names the cwd, when no directory above it has the file', async () => {
@@ -343,7 +355,7 @@ describe('the project of a session', () => {
     const empty = await resolveProject(idFiles(files), CWD)
     const unfit = await resolveProject(idFiles({ [projectIdFileOf(PROJECT_DIR)]: '../etc\n' }), CWD)
 
-    expect(empty).toEqual({ isOk: false, reason: `.vnx-project-id in ${PROJECT_DIR} bevat geen geldige project-id` })
+    expect(empty).toEqual({ isOk: false, reason: `geen geldig project-id in ${projectIdFileOf(PROJECT_DIR)}` })
     expect(unfit.isOk).toBe(false)
   })
 
@@ -506,7 +518,10 @@ describe('the tracks the pane shows', () => {
     }
     const noBuilderTrack = (files: Record<string, string>) => (files[specOf('project-a', 'd-live-1')] = JSON.stringify({ model: 'sonnet' }))
     const noPrSpec = (files: Record<string, string>) => delete files[specOf('project-a', 'd-pr-1')]
-    const closedPr = (files: Record<string, string>) => (files[stateOf('project-a')] = stateJson({ prQueue: { available: true, open_prs: [] } }))
+    const closedPr = (files: Record<string, string>) => {
+      files[stateOf('project-a')] = stateJson({ prQueue: { available: true, open_prs: [] } })
+      files[indexOf('project-a')] = indexJson({ liveWork: { ...LIVE_WORK, open_prs: [] } })
+    }
 
     expect(await activityOf(() => {}, 'bld')).toBe(true)
     expect(await activityOf(noBuilderTrack, 'bld')).toBeUndefined()
@@ -528,6 +543,30 @@ describe('the tracks the pane shows', () => {
     expect(byId('kosten')?.prs).toEqual([{ number: 2063, isOpen: true }])
     expect(byId('bld')?.builders).toBe(1)
     expect(byId('viaref')?.prs).toEqual([{ number: 2063, isOpen: true }])
+  })
+
+  test('treat a PR as open when either readable source lists it', async () => {
+    const stateOnly = healthyFiles('project-a')
+    stateOnly[indexOf('project-a')] = indexJson({ liveWork: { ...LIVE_WORK, open_prs: [] } })
+    const indexOnly = healthyFiles('project-a')
+    indexOnly[stateOf('project-a')] = stateJson({ prQueue: { available: false, reason: 'gh weg' } })
+    const prsOf = async (files: Record<string, string>) => shownTracksOf(await healthy(files))?.find(one => one.track.id === 'viaref')?.prs
+
+    expect(await prsOf(healthyFiles('project-a'))).toEqual([{ number: 2063, isOpen: true }])
+    expect(await prsOf(stateOnly)).toEqual([{ number: 2063, isOpen: true }])
+    expect(await prsOf(indexOnly)).toEqual([{ number: 2063, isOpen: true }])
+  })
+
+  test('mark the PRs of pr_ref unknown, not closed, when neither source can be read, and keep the track', async () => {
+    const files = healthyFiles('project-a')
+    files[stateOf('project-a')] = stateJson({ prQueue: { available: false, reason: 'gh weg' } })
+    files[indexOf('project-a')] = indexJson({ liveWork: { available: false, reason: 'index stuk' } })
+    const shown = shownTracksOf(await healthy(files)) ?? []
+    const viaref = shown.find(one => one.track.id === 'viaref')
+
+    expect(viaref?.prs).toEqual([{ number: 2063, isOpen: null }])
+    expect(viaref?.prUnknown).toContain('gh weg')
+    expect(shown.find(one => one.track.id === 'ci-profile')?.prs.every(pr => pr.isOpen === null)).toBe(true)
   })
 
   test('are null when the tracks could not be read, and say so in the headless summary', async () => {

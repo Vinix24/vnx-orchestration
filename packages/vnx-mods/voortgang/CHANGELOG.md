@@ -8,7 +8,7 @@ The pane showed every project on the machine, so each list collapsed to a bare `
 
 ### Changed
 
-- One project per session: the project is the one whose `.vnx-project-id` lies above the session's working directory (the first line, trimmed, as `bin/vnx` reads it). Without one the pane says `geen VNX-project in deze map (geen .vnx-project-id boven <cwd>)` and the status line is empty. It never falls back to another project.
+- One project per session: the project is the one whose `.vnx-project-id` lies above the session's working directory (the first line with all whitespace removed, which must match `^[a-z][a-z0-9-]{1,31}$`, as `bin/vnx` reads it; else `geen geldig project-id in <path>`). Without one the pane says `geen VNX-project in deze map (geen .vnx-project-id boven <cwd>)` and the status line is empty. It never falls back to another project.
 - The pane is in sections, in this order: `Nu bezig` (per builder its model, minutes, title, track and PR), `Wacht op een besluit` (deliverables to promote, open outcomes), `Tracks`, `PR's`, `opruimen`.
 - Tracks are the `now` tracks plus every track with activity (a builder, an open PR, a deliverable active in the last 7 days), activity first, then priority. A track shows `X van Y klaar` with a bar of 8 cells, or `geen leveringen gepland` when it has no deliverables.
 - The sections share the pane's rows in that order. A cut section shows what fits plus `+N niet getoond`, never without an item above it.
@@ -17,6 +17,8 @@ The pane showed every project on the machine, so each list collapsed to a bare `
 - Headless, `/voortgang` answers with the status line and one line per shown track.
 - A builder reads `track_id` and `pr_id` of its spec besides `model`; `role` is no longer read. An open PR reads the `track_id` of its dispatch spec.
 - Deliverables read `last_activity`, tracks read `pr_ref`.
+- A PR is open when the PR queue of `t0_state.json` or `live_work.open_prs` of `t0_index.json` lists it. When neither can be read, the PRs of `pr_ref` show as `#N ?` (never `dicht`), the track says `PR-status onbekend: <reason>`, and the track stays in the list.
+- The second row of every track starts at the same column, also for a track without priority.
 
 ### Removed
 

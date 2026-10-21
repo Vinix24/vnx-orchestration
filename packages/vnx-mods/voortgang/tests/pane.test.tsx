@@ -165,6 +165,51 @@ describe('the pane', () => {
     await ui.unmount()
   })
 
+  test('shows the PRs of a track as #N ? and says why once, when neither the state nor the index can be read', async ($, on) => {
+    const files = {
+      ...healthyFiles('project-a'),
+      [stateOf('project-a')]: stateJson({ prQueue: { available: false, reason: "FileNotFoundError: 'gh'" } }),
+      [indexOf('project-a')]: indexJson({ liveWork: { available: false, reason: 'index stuk' } }),
+    }
+    await started($, on, { files })
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    const lines = await linesOf(ui)
+    const text = lines.join('\n')
+
+    expect(text).not.toContain('dicht')
+    expect(lines.some(line => line.startsWith("     PR's: #2001 ? #2002 ? · PR-status onbekend: "))).toBe(true)
+    expect(lines.some(line => line.includes('  P2 viaref'))).toBe(true)
+    expect(lines.filter(line => line.includes('PR-status onbekend')).length).toBe(2)
+    await ui.unmount()
+  })
+
+  test('shows a PR as open when the state is unreadable but the index lists it', async ($, on) => {
+    const files = { ...healthyFiles('project-a'), [stateOf('project-a')]: stateJson({ prQueue: { available: false, reason: 'gh weg' } }) }
+    await started($, on, { files })
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    const lines = await linesOf(ui)
+
+    expect(lines).toContain("     geen leveringen gepland · PR's: #2063 open")
+    expect(lines.join('\n')).not.toContain('PR-status onbekend')
+    await ui.unmount()
+  })
+
+  test('starts the second row of every track at the same column, also for a track without priority', async ($, on) => {
+    const noPriority = { track_id: 'zonder-prio', title: CONTENT, phase: 'queued', derived_status: 'queued', horizon: 'now', priority: null, pr_ref: null }
+    const run = (argv: readonly string[]) => (argv[1] === 'objective' ? { exitCode: 0, stdout: JSON.stringify([noPriority, { ...noPriority, track_id: 'met-prio', priority: 'P1' }]) } : healthyRun(argv))
+    await started($, on, { files: healthyFiles('project-a'), run })
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    const lines = await linesOf(ui)
+    const at = lines.findIndex(line => line === '  - zonder-prio')
+    const withPriority = lines.findIndex(line => line === '  P1 met-prio')
+
+    expect(at).toBeGreaterThanOrEqual(0)
+    expect(withPriority).toBeGreaterThanOrEqual(0)
+    expect(lines[at + 1]).toBe('     geen leveringen gepland')
+    expect(lines[withPriority + 1]).toBe('     geen leveringen gepland')
+    await ui.unmount()
+  })
+
   test('shows tracks and deliverables onbeschikbaar when vnx exits 1 or answers no JSON, the rest still shown', async ($, on) => {
     const run = (argv: readonly string[]) => (argv[1] === 'objective' ? { exitCode: 1, stdout: '' } : { exitCode: 0, stdout: 'x' })
     await started($, on, { files: healthyFiles('project-a'), run })

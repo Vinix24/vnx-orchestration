@@ -7,11 +7,12 @@ export type PaneSize = { columns: number; headerColumns: number; rows: number; i
 
 /** Open PRs of a track that are closed are named up to this many; more are counted. */
 const CLOSED_PRS_NAMED = 3
+/** The column under which the second row of every track starts: after `  P1 `, whatever the priority is. */
+const TRACK_INDENT = 5
 /** The columns a title keeps at least, before it is cut for the track and the PR behind it. */
 const MIN_TITLE_COLUMNS = 8
 
 const row = (text: string, tone: Row['tone'] = 'normal'): Row => ({ text, tone })
-const unavailable = (label: string, reason: string): Row => row(`  ${label}: onbeschikbaar: ${reason}`, 'error')
 
 /** Code point ranges a terminal draws two cells wide: East Asian wide and fullwidth forms, and emoji. */
 const WIDE: readonly (readonly [number, number])[] = [
@@ -196,11 +197,13 @@ function waitSectionOf(project: Extract<ProjectModel, { hasStore: true }>): Sect
 
 /** `PR's: #2141 #2148 dicht, #2150 open`: the closed ones named while there are few, the open ones always. */
 function prsOfTrack(one: ShownTrack): string | null {
-  const closed = one.prs.filter(pr => !pr.isOpen)
-  const open = one.prs.filter(pr => pr.isOpen)
+  const closed = one.prs.filter(pr => pr.isOpen === false)
+  const open = one.prs.filter(pr => pr.isOpen === true)
+  const unknown = one.prs.filter(pr => pr.isOpen === null)
   const parts = [
     closed.length === 0 ? null : closed.length <= CLOSED_PRS_NAMED ? `${closed.map(pr => `#${pr.number}`).join(' ')} dicht` : `${closed.length} dicht`,
     open.length === 0 ? null : `${open.map(pr => `#${pr.number}`).join(' ')} open`,
+    unknown.length === 0 ? null : unknown.map(pr => `#${pr.number} ?`).join(' '),
   ].filter((part): part is string => part !== null)
 
   return parts.length === 0 ? null : `PR's: ${parts.join(', ')}`
@@ -208,8 +211,8 @@ function prsOfTrack(one: ShownTrack): string | null {
 
 function trackItem(one: ShownTrack): Row[] {
   const head = `  ${one.track.priority} ${one.track.id}`
-  const around = [prsOfTrack(one), one.builders === 0 ? null : pluralOf(one.builders, 'bouwer', 'bouwers')].filter((part): part is string => part !== null)
-  const indent = ' '.repeat(cellsOf(`  ${one.track.priority} `))
+  const around = [prsOfTrack(one), one.prUnknown !== null && one.prs.length > 0 ? `PR-status onbekend: ${one.prUnknown}` : null, one.builders === 0 ? null : pluralOf(one.builders, 'bouwer', 'bouwers')].filter((part): part is string => part !== null)
+  const indent = ' '.repeat(TRACK_INDENT)
 
   if (one.unreadable !== null) {
     return [row(head), row(`${indent}${progressText(one)}`, 'error')]

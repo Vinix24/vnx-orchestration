@@ -6,7 +6,6 @@ import type {
   IndexView,
   LiveWork,
   Model,
-  NowTrack,
   Outcomes,
   Part,
   Pr,
@@ -50,7 +49,7 @@ const DEFAULT_DATA_ROOT = '~/.vnx-data'
 const DEFAULT_VNX_BIN = '~/.vnx-system/current/bin/vnx'
 const DEFAULT_REFRESH_SECONDS = 120
 const HOME_UNKNOWN = 'HOME onbekend, ~ niet op te lossen'
-const PROJECT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+const PROJECT_ID = /^[a-z][a-z0-9-]{1,31}$/
 const MESSAGE_CHARS = 80
 
 type Json = Record<string, unknown>
@@ -600,7 +599,7 @@ export function ancestorsOf(cwd: string): string[] {
 
 /**
  * The project id of a session: walk up from `cwd` to the first directory that holds `.vnx-project-id`; its first
- * line, trimmed, is the id (the rule `bin/vnx` follows). The nearest file decides, as there. Never another project.
+ * line, with all whitespace removed, is the id (the rule `bin/vnx` follows). The nearest file decides, as there. Never another project.
  */
 export async function resolveProject(io: Io, cwd: string): Promise<Part<string>> {
   for (const dir of ancestorsOf(cwd)) {
@@ -621,9 +620,9 @@ export async function resolveProject(io: Io, cwd: string): Promise<Part<string>>
       return fail(text.reason)
     }
 
-    const id = (text.value.split('\n')[0] ?? '').trim()
+    const id = (text.value.split('\n')[0] ?? '').replace(/\s+/g, '')
 
-    return isProjectId(id) ? ok(id) : fail(`${PROJECT_ID_FILE} in ${dir} bevat geen geldige project-id`)
+    return isProjectId(id) ? ok(id) : fail(`geen geldig project-id in ${file}`)
   }
 
   return fail(`geen VNX-project in deze map (geen ${PROJECT_ID_FILE} boven ${cwd})`)
@@ -692,6 +691,36 @@ export function openPrsOf(project: ProjectModel): Pr[] | null {
   return project.hasStore && project.state.isOk && project.state.value.prs.isOk ? project.state.value.prs.value : null
 }
 
+/**
+ * The numbers of the open PRs: those that `pr_queue` of the state lists, and those that `live_work` of the index lists.
+ * A PR is open when either readable source lists it. Null when neither could be read, with the reasons.
+ */
+export function openNumbersOf(project: ProjectModel): { numbers: Set<number> | null; reason: string } {
+  if (!project.hasStore) {
+    return { numbers: null, reason: project.reason }
+  }
+
+  const reasons: string[] = []
+  const numbers = new Set<number>()
+  let isRead = false
+
+  if (project.state.isOk && project.state.value.prs.isOk) {
+    isRead = true
+    project.state.value.prs.value.forEach(pr => numbers.add(pr.number))
+  } else {
+    reasons.push(!project.state.isOk ? project.state.reason : project.state.value.prs.isOk ? '' : project.state.value.prs.reason)
+  }
+
+  if (project.index.isOk && project.index.value.liveWork.isOk) {
+    isRead = true
+    project.index.value.liveWork.value.openPrs.forEach(pr => numbers.add(pr.number))
+  } else {
+    reasons.push(!project.index.isOk ? project.index.reason : project.index.value.liveWork.isOk ? '' : project.index.value.liveWork.reason)
+  }
+
+  return { numbers: isRead ? numbers : null, reason: reasons.join('; ') }
+}
+
 /** One track the pane shows: the track, its measured progress, and what is going on around it. */
 export type ShownTrack = {
   track: TrackInfo
@@ -700,8 +729,10 @@ export type ShownTrack = {
   /** Why the deliverables could not be read; null when they could. */
   unreadable: string | null
   builders: number
-  /** The PRs of `pr_ref`, `isOpen` when the PR queue lists them. */
-  prs: { number: number; isOpen: boolean }[]
+  /** The PRs of `pr_ref`, `isOpen` when a readable source lists them; null when no source could be read. */
+  prs: { number: number; isOpen: boolean | null }[]
+  /** Why the state of the PRs is unknown; null when a source could be read. */
+  prUnknown: string | null
   hasActivity: boolean
 }
 
@@ -724,7 +755,8 @@ export function shownTracksOf(project: ProjectModel): ShownTrack[] | null {
   }
 
   const deliverables = project.deliverables.isOk ? project.deliverables.value.byTrack : null
-  const openNumbers = new Set((openPrsOf(project) ?? []).map(pr => pr.number))
+  const open = openNumbersOf(project)
+  const openNumbers = open.numbers
   const builderTracks = project.builders.isOk ? project.builders.value.flatMap(builder => (builder.who.isOk && builder.who.value.trackId !== null ? [builder.who.value.trackId] : [])) : []
   const shown: ShownTrack[] = []
 
@@ -732,13 +764,15 @@ export function shownTracksOf(project: ProjectModel): ShownTrack[] | null {
     const progress = deliverables?.[track.id] ?? null
     const builders = builderTracks.filter(id => id === track.id).length
     // An open PR whose dispatch spec names the track belongs to it even when `pr_ref` does not list it yet.
-    const named = Object.entries(project.prTracks).flatMap(([number, id]) => (id === track.id && openNumbers.has(Number(number)) ? [Number(number)] : []))
+    const named = Object.entries(project.prTracks).flatMap(([number, id]) => (id === track.id && openNumbers?.has(Number(number)) ? [Number(number)] : []))
     const numbers = [...new Set([...track.prRefs, ...named])]
-    const prs = numbers.map(number => ({ number, isOpen: openNumbers.has(number) }))
-    const hasActivity = builders > 0 || prs.some(pr => pr.isOpen) || (progress?.isRecent ?? false)
+    const prs = numbers.map(number => ({ number, isOpen: openNumbers === null ? null : openNumbers.has(number) }))
+    const hasActivity = builders > 0 || prs.some(pr => pr.isOpen === true) || (progress?.isRecent ?? false)
+    // A failed read never drops a track: with unknown PR state, a track that has `pr_ref` entries stays.
+    const isUnknown = openNumbers === null && prs.length > 0
 
-    if (track.horizon === 'now' || hasActivity) {
-      shown.push({ track, progress, unreadable: project.deliverables.isOk ? null : project.deliverables.reason, builders, prs, hasActivity })
+    if (track.horizon === 'now' || hasActivity || isUnknown) {
+      shown.push({ track, progress, unreadable: project.deliverables.isOk ? null : project.deliverables.reason, builders, prs, prUnknown: openNumbers === null ? open.reason : null, hasActivity })
     }
   }
 
