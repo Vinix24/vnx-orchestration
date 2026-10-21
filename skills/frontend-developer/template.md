@@ -1,7 +1,7 @@
 # Frontend Developer Report Template
 
 ## Output Location
-Write your report to: `.vnx-data/unified_reports/`
+Write your report to: `$VNX_DATA_DIR/unified_reports/`
 
 ## Filename Format
 `{timestamp}-{track}-frontend-{title}.md`

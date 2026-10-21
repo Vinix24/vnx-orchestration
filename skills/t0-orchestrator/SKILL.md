@@ -32,11 +32,11 @@ parallel path:
   `dispatch_cli.py --spec-file`). The door runs `compile_plan` + an ExecutionPermit
   for every lane. Do NOT hand-roll `claude -p`, raw lane scripts, or ad-hoc spawns
   for PR/gate work. Routing/lanes/constraints: `docs/core/DISPATCH_RULES.md`.
-  Lane rule the door enforces: **`claude`/Opus/Sonnet → `claude_headless`** (`claude -p`,
-  subscription, isolated worktree per dispatch), the only claude lane since the tmux-spawn
-  lane was removed on 2026-09-18; never `provider_dispatch`. `kimi`/`glm`/`deepseek`
-  → `provider_dispatch`. Mechanism and failure modes: DISPATCH_RULES §8. Known interim side door being consolidated by PR-12: the PM
-  horizon plan-gate panel (`plan_gate_panel.py`) calls lanes directly until the door is wired.
+  Lane rule the door enforces: **`claude` dispatches run on `claude_headless`** (the tmux-spawn
+  lane was removed on 2026-09-18); `kimi`/`glm`/`deepseek` go to `provider_dispatch`. Mechanism,
+  billing and failure modes are in `docs/core/DISPATCH_RULES.md` §5 and §8; do not restate them here.
+  Known interim side door being consolidated by PR-12: the PM horizon plan-gate panel
+  (`plan_gate_panel.py`) calls lanes directly until the door is wired.
 - **Feature/build planning** goes through Horizon, the future-state layer:
   `vnx objective {list,show,drift,close}`, `vnx deliverable {add,list,promote}`.
   The tracks DB is the SSOT; ROADMAP.yaml is a static example. Use the `horizon`
@@ -57,7 +57,7 @@ parallel path:
 - Do not rely on runtime `/model` switching. Re-verify worker readiness before the payload.
 - Tri-file for workers (`CLAUDE.md`/`AGENTS.md`/`GEMINI.md`); T0 itself uses `CLAUDE.md`.
 - `Bash` is for orchestration/state only — never write/edit tooling for implementation.
-- Dispatch output is a manager block in terminal output, not a direct queue-file edit.
+- Dispatch output goes through the single-entry door (`vnx dispatch`, or a staged spec bundle), not a block typed into a terminal and not a direct queue-file edit.
 - Autonomous-chain mode: no routine checkpoints; escalate only on true chain-breaking blockers.
 
 ## 2. Primary workflow (each cycle)
@@ -67,7 +67,7 @@ parallel path:
 3. Close/defer/wontfix with explicit reasons.
 4. Verify required review-gate evidence (incl. headless report artifacts) — see DISPATCH_RULES §2.
 5. Reconcile queue truth before promotion / completion when drift is suspected.
-6. Choose ONE: WAIT · DISPATCH one manager block · ESCALATE · COMPLETE.
+6. Choose ONE: WAIT · DISPATCH one spec through the door · ESCALATE · COMPLETE.
 
 ## 3. Decision tree (first matching rule wins)
 
@@ -77,7 +77,7 @@ parallel path:
 3. REJECT      status=failure OR risk>0.8 OR blocking findings       → REJECT
 4. ESCALATE    architectural change OR new dependency OR policy      → ESCALATE
 5. INVESTIGATE risk 0.3–0.8 OR advisory=hold                         → DISPATCH follow-up to T3
-6. SERIAL      dispatch needs claude-tmux lane AND lane occupied      → WAIT
+6. SERIAL      dispatch needs a claude slot AND all slots occupied    → WAIT
 7. COMPLETE    completion=100 AND no blockers AND no pending OIs     → COMPLETE
 8. DEFAULT     receipt valid AND work pending                        → DISPATCH
 ```
@@ -101,14 +101,10 @@ Review-gate status + the full mapping: DISPATCH_RULES §2.
 
 ## 5. Concurrency + billing (the two that bite)
 
-- **claude-tmux is subscription-session-capped, shared with every Claude agent on the
-  account → serialize it (N-slot, default 5).** Providers stay parallel. The door enforces
-  this (PR-6 lock + #1017 concurrency config); direct callers self-serialize
-  (`--claude-serial`). A ~0.1s `rc=1` exit = capacity, not a bug. See DISPATCH_RULES §6.
-- **Claude routes via the tmux subscription lane by default; headless `claude -p` is
-  opened (2026-08-11 operator directive)** — isolation/report-gate status: DISPATCH_RULES §8.
-  Both lanes run on the subscription, not API billing — `cost=$0.0000` confirms it either way.
-  See DISPATCH_RULES §6–8.
+- **Claude runs on a subscription whose sessions are capped and shared with every Claude
+  agent on the account → serialize it.** Providers stay parallel. The door enforces this; a
+  ~0.1s `rc=1` exit = capacity, not a bug. Slot count, lane and billing: `docs/core/DISPATCH_RULES.md`
+  §5–8.
 
 ## 6. Doubt and escalation
 

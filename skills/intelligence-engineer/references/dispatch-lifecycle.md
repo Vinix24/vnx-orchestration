@@ -45,7 +45,7 @@ Dispatcher daemon picks up active dispatches, finds an idle terminal lease, deli
 **Persists to:**
 - `terminal_leases` row updated: `state='leased', dispatch_id=<id>, leased_at=<now>`
 - `dispatch_attempts` row inserted: `attempt_number=1, started_at=<now>`
-- `rc.dispatches.state` → 'dispatched'
+- `rc.dispatches.state` → 'claimed' then 'delivering'
 - `coordination_event`: `event_type='lease_acquired'`
 
 **Code:** `scripts/lib/dispatcher.py`, `scripts/lib/subprocess_adapter.py`.
@@ -56,7 +56,7 @@ Worker (Claude in subprocess pane or interactive tmux) executes the dispatch ins
 
 **Persists to:**
 - `events/T<n>.ndjson` (live; truncated post-dispatch, archived to `events/archive/<terminal>/<dispatch_id>.ndjson`)
-- `rc.dispatches.state` → 'executing'
+- `rc.dispatches.state` → 'running'
 
 **Code:** worker process (Claude); `subprocess_dispatch.py` shepherds.
 

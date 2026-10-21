@@ -41,11 +41,11 @@ BEFORE proposing any design, fix, or implementation:
    - ADR-010 (subprocess adapter as canonical Claude routing)
    List any ADR that applies to the task and how it constrains your solution.
 
-2. **Consult relevant memory** in `~/.claude/projects/<your-project>/memory/MEMORY.md` — particularly entries about past architectural incidents.
+2. **Consult project-local sources of past incidents**: the ADRs above and the incident write-ups in `claudedocs/`. Do not read user-global Claude memory (`~/.claude/projects/...`) and never repeat memory content in a report or review.
 
 3. **Check P4-style incident docs** in `claudedocs/` for analogous failures (e.g., `2026-05-09-p4-migration-architecture-lessons.md` for multi-tenant migration patterns).
 
-4. **State your foundational read aloud** at the start of your response. Example: "ADR-007 applies: new tabel X needs composite PK over project_id. Per P4 §4.2, single-column UNIQUE is a smell. Memory [[adr-007-multitenant-composite-keys]] confirms."
+4. **State your foundational read aloud** at the start of your response. Example: "ADR-007 applies: new tabel X needs composite PK over project_id. Per P4 §4.2, single-column UNIQUE is a smell."
 
 Skipping STEP 0 is a process violation, not a shortcut. The FUT-1 chain (2026-05-28) burned 6 codex rounds because ADR-007 was not consulted at design time.
 
