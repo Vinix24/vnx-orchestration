@@ -63,7 +63,8 @@ so does one the plan refuses.
 
 The dispatcher prelude runs the replay every minute (K2a-3c), and after each
 replay :func:`report_spool_health` writes the ``cost-ledger`` beacon: degraded
-while the spool holds anything, ok once it holds nothing. :func:`ledger_files`
+while the spool holds anything, ok once it holds nothing, and an ok one again
+once it is a day old. :func:`ledger_files`
 names the cost ledger's own files in a store, read-only, for ``vnx doctor``
 and the footprint probe.
 
@@ -2258,6 +2259,10 @@ def replay_spool(
 # ---------------------------------------------------------------------------
 
 BEACON_COMPONENT = "cost-ledger"
+# An ``ok`` beacon older than this is written again on an empty spool. The beacon is event-driven, and the reader
+# calls an event-driven beacon older than 7 days ``unknown`` (``health_beacon._EVENT_DRIVEN_MAX_AGE_SECONDS``): a
+# running tick keeps it fresh, so only a tick that stopped running ages it that far.
+BEACON_REFRESH_SECONDS = 24 * 3600
 # The temporary file of an atomic spool write (``atomic_io.atomic_write_text``, mkstemp): ``tmp<random>.tmp``.
 _ATOMIC_TEMP_PREFIX, _ATOMIC_TEMP_SUFFIX = "tmp", ".tmp"
 
@@ -2278,15 +2283,28 @@ def _spool_holds_nothing(spool_dir: Path) -> bool:
     return not quarantined and not unlistable
 
 
-def _the_beacon_says_ok_or_nothing(ledger_path: Path) -> bool:
-    """True when the beacon on disk says ``ok`` or there is none; one that cannot be read says nothing is ok."""
+def _the_beacon_is_fresh_and_ok_or_absent(ledger_path: Path) -> bool:
+    """True when there is no beacon, or one that says ``ok`` and was written at most ``BEACON_REFRESH_SECONDS`` ago.
+
+    A beacon that cannot be read, says something else, carries no
+    ``last_run_ts`` (the reader calls that one ``corrupt``) or is an ``ok``
+    one past the refresh age is to be written again.
+    """
     try:
         beacon = json.loads(_beacon_path(ledger_path).read_text(encoding="utf-8"))
     except FileNotFoundError:
         return True
     except (OSError, ValueError):
         return False
-    return isinstance(beacon, dict) and beacon.get("status") == "ok"
+    if not isinstance(beacon, dict) or beacon.get("status") != "ok":
+        return False
+    written = _number(beacon.get("last_run_ts"))
+    return written is not None and time.time() - written <= BEACON_REFRESH_SECONDS
+
+
+def _counted(count: int, one: str, more: str) -> str:
+    """``count`` and the words that go with it: ``one`` for 1, ``more`` for every other count."""
+    return f"{count} {one if count == 1 else more}"
 
 
 def _spool_health(totals: LedgerTotals, spool_files: int) -> Dict[str, Any]:
@@ -2300,7 +2318,8 @@ def _spool_health(totals: LedgerTotals, spool_files: int) -> Dict[str, Any]:
     if degraded:
         unreadable = ", and it cannot all be read" if totals.spool_unreadable else ""
         details["reason"] = (
-            f"the cost ledger's spool holds {spool_files} files ({totals.spool_pending} runs waiting, "
+            f"the cost ledger's spool holds {_counted(spool_files, 'file', 'files')} "
+            f"({_counted(totals.spool_pending, 'run', 'runs')} waiting, "
             f"{totals.spool_conflicts} in conflict) and {totals.spool_quarantined} in quarantine{unreadable}: "
             "the tick replays what waits, a quarantined file needs a person"
         )
@@ -2315,29 +2334,36 @@ def report_spool_health(ledger_path: Optional[Path] = None) -> Optional[str]:
     state is the probe framework's (``PROBE_TO_BEACON``: ``degraded`` is
     written as ``stale``), the details carry ``state`` and the counts of
     :class:`LedgerTotals`. The beacon is event-driven
-    (``expected_interval_seconds=None``): with an empty spool and a beacon
-    that says ``ok``, or none at all, nothing is written and no lock is
-    taken. Otherwise the spool is counted and the beacon written in one scope
-    under the lock file held shared (:func:`_ledger_and_spool`), so it
-    describes the spool as no writer has changed it since. That lock and the
-    ledger ``flock`` are tried for ``VNX_COST_LEDGER_LOCK_WAIT_SEC`` (5) at
-    most, as the replay's: when they stay taken, the beacon is not written
-    this time, a warning says so and ``None`` is returned, so the tick never
-    hangs on it. A beacon that cannot be written raises its ``OSError``; the
-    spool, not the beacon, is what keeps a record.
+    (``expected_interval_seconds=None``): with an empty spool and no beacon,
+    or one that says ``ok`` and is at most ``BEACON_REFRESH_SECONDS`` (24
+    hours) old, nothing is written and no lock is taken. An ``ok`` beacon
+    older than that is written again, so a tick that keeps running keeps it
+    fresh and the reader's 7-day backstop (``unknown``) only catches a tick
+    that stopped. Otherwise the spool is counted and the beacon written in
+    one scope under the lock file held shared (:func:`_ledger_and_spool`), so
+    it describes the spool as no writer has changed it since. That lock, the
+    ledger ``flock`` and the beacon's own lock are tried until one deadline,
+    ``VNX_COST_LEDGER_LOCK_WAIT_SEC`` (5) after the call began, as the
+    replay's: no wait under the shared lock outlasts it, so a cost writer is
+    never kept out longer. When one stays taken, the beacon is not written
+    this time, a warning says so and ``None`` is returned, so neither the tick
+    nor ``vnx costs replay`` by hand hangs on it. A beacon that cannot be
+    written for another reason raises its ``OSError``; the spool, not the
+    beacon, is what keeps a record.
     """
     from effectiveness_probe import PROBE_TO_BEACON
-    from health_beacon import HealthBeacon
+    from health_beacon import BeaconLockTimeout, HealthBeacon
 
     path = Path(ledger_path) if ledger_path is not None else provider_costs._resolve_costs_path()
-    if _spool_holds_nothing(spool_dir_for(path)) and _the_beacon_says_ok_or_nothing(path):
+    if _spool_holds_nothing(spool_dir_for(path)) and _the_beacon_is_fresh_and_ok_or_absent(path):
         return None
+    deadline = time.monotonic() + _setting(None, LOCK_WAIT_SEC, float)
     try:
-        with _ledger_and_spool(path, time.monotonic() + _setting(None, LOCK_WAIT_SEC, float)) as read:
+        with _ledger_and_spool(path, deadline) as read:
             details = _spool_health(_totals(read, None), len(read[1]))
             beacon = HealthBeacon(path.parent.parent, BEACON_COMPONENT, expected_interval_seconds=None)
-            beacon.heartbeat_strict(status=PROBE_TO_BEACON[details["state"]], details=details)
-    except _LockBusy as busy:
+            beacon.heartbeat_strict(status=PROBE_TO_BEACON[details["state"]], details=details, lock_deadline=deadline)
+    except (_LockBusy, BeaconLockTimeout) as busy:
         logger.warning("cost_ledger: the %s beacon was not written this time: %s", BEACON_COMPONENT, busy)
         return None
     return details["state"]
@@ -2373,9 +2399,10 @@ class LedgerFiles:
         """What needs a person, empty when nothing does: the one reading both ``vnx doctor`` entrances show."""
         findings: List[str] = []
         if self.spool_files:
-            findings.append(f"{self.spool_files} spool files wait for the replay")
+            findings.append(f"{_counted(self.spool_files, 'spool file waits', 'spool files wait')} for the replay")
         if self.quarantined:
-            findings.append(f"{self.quarantined} spool files are in quarantine and in no total")
+            findings.append(f"{_counted(self.quarantined, 'spool file is', 'spool files are')} in quarantine "
+                            "and in no total")
         if self.strays:
             findings.append(f"{SPOOL_DIR_NAME}/ holds entries that are none of its own: {', '.join(self.strays)}")
         if self.unlistable:
@@ -2386,8 +2413,10 @@ class LedgerFiles:
         """The known files in one line: ledger, lock file, spool, quarantine, interrupted writes, bytes."""
         present = [name for name, there in (("ledger", self.ledger), ("lock file", self.lock_file)) if there]
         known = ", ".join(present) if present else "no ledger yet"
-        temp = f", {self.spool_temp_files} interrupted spool writes" if self.spool_temp_files else ""
-        return f"{known}; spool {self.spool_files} files, quarantine {self.quarantined}{temp}; {self.bytes} bytes"
+        temp = (f", {_counted(self.spool_temp_files, 'interrupted spool write', 'interrupted spool writes')}"
+                if self.spool_temp_files else "")
+        return (f"{known}; spool {_counted(self.spool_files, 'file', 'files')}, quarantine {self.quarantined}{temp}; "
+                f"{_counted(self.bytes, 'byte', 'bytes')}")
 
 
 def _file_size(path: Path) -> Optional[int]:
@@ -2468,7 +2497,7 @@ def ledger_files(ledger_path: Optional[Path] = None) -> LedgerFiles:
 
 __all__ = [
     "RUN_SCHEMA", "TOKEN_FIELDS", "ROLES", "KINDS", "BILLINGS", "SPOOL_DIR_NAME", "QUARANTINE_DIR_NAME",
-    "RENUMBERED_EVENT", "QUARANTINED_EVENT", "RENUMBERED_RECORD_ID", "BEACON_COMPONENT",
+    "RENUMBERED_EVENT", "QUARANTINED_EVENT", "RENUMBERED_RECORD_ID", "BEACON_COMPONENT", "BEACON_REFRESH_SECONDS",
     "CostLedgerRefusal", "CostWithoutSource", "UnavailableWithAmount", "CorrectionWithoutSupersedes",
     "IncompleteUsageMarkedComplete", "RunIdProjectMismatch", "UnknownModel", "InvalidRecord",
     "CostLedgerWriteError", "RunCost", "WrittenRecord", "LedgerTotals", "ReplayResult", "LedgerFiles",

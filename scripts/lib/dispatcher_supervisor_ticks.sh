@@ -271,7 +271,8 @@ _run_killed_after() {
 # timeout of 20 seconds (_cost_ledger_tick_timeout) and is killed after it; it
 # bounds itself to 10 seconds (VNX_COST_LEDGER_REPLAY_BUDGET_SEC), so the kill
 # is the backstop for a replay that hangs. After the replay the script writes
-# the cost-ledger beacon. With an empty spool it writes nothing.
+# the cost-ledger beacon. With an empty spool it writes nothing, except an ok
+# beacon that is a day old: that one is written again, so it never ages out.
 #
 # Every failure is logged (a non-zero exit, a kill, a log or threshold file
 # that cannot be written) and the tick ALWAYS returns 0: a failing or hanging

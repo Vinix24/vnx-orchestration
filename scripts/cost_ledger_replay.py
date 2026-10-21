@@ -17,9 +17,11 @@ After the replay the ``cost-ledger`` beacon (``<data_dir>/health/cost-ledger.jso
 is written from the spool as the replay left it: ``degraded`` while the spool
 holds a file, an unreadable file or a file in quarantine, ``ok`` once it holds
 none (``cost_ledger.report_spool_health``). With an empty spool and a beacon
-that says ``ok``, or none, this script writes nothing at all. A beacon that
-cannot be written is logged and does not change the exit code: the spool,
-not the beacon, keeps the record.
+that says ``ok`` and is at most a day old (``BEACON_REFRESH_SECONDS``), or
+none, this script writes nothing at all. A beacon that cannot be written, or
+whose lock stays taken until ``VNX_COST_LEDGER_LOCK_WAIT_SEC`` ran out, is
+logged and does not change the exit code: the spool, not the beacon, keeps
+the record.
 
 Exit codes:
   0  done, nothing to do, or a bound left files for the next call

@@ -21,6 +21,7 @@ real lock file; nothing mocks the timeout.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import subprocess
@@ -142,14 +143,15 @@ _LOCK_HOLDER = textwrap.dedent("""
 
 @pytest.fixture
 def hold_the_lock_file(tmp_path):
-    """``hold(store)`` starts a child holding ``provider_costs.lock`` and returns it once it holds the lock."""
+    """``hold(store)`` starts a child holding ``provider_costs.lock``, or ``lock``, and returns it once it holds it."""
     holders: list = []
 
-    def hold(store: Path) -> subprocess.Popen:
+    def hold(store: Path, lock: Path = None) -> subprocess.Popen:
         marker = tmp_path / f"holds-{len(holders)}"
-        (store / "events").mkdir(parents=True, exist_ok=True)
-        child = subprocess.Popen([sys.executable, "-c", _LOCK_HOLDER, str(store / "events" / "provider_costs.lock"),
-                                  str(marker)], stderr=subprocess.DEVNULL)
+        lock = lock or store / "events" / "provider_costs.lock"
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        child = subprocess.Popen([sys.executable, "-c", _LOCK_HOLDER, str(lock), str(marker)],
+                                 stderr=subprocess.DEVNULL)
         holders.append(child)
         deadline = time.monotonic() + 30
         while not marker.exists():
@@ -305,11 +307,93 @@ class TestTheTick:
 # ---------------------------------------------------------------------------
 
 
+def _replay_env(store: Path, **extra: str) -> dict:
+    return dict(os.environ, VNX_DATA_DIR=str(store), VNX_DATA_DIR_EXPLICIT="1", VNX_STATE_DIR=str(store / "state"),
+                **extra)
+
+
 def _replay_cli(store: Path, **extra: str) -> subprocess.CompletedProcess:
-    env = dict(os.environ, VNX_DATA_DIR=str(store), VNX_DATA_DIR_EXPLICIT="1", VNX_STATE_DIR=str(store / "state"),
-               **extra)
-    return subprocess.run([sys.executable, str(_SCRIPT), "--json"], env=env, capture_output=True, text=True,
-                          timeout=60)
+    return subprocess.run([sys.executable, str(_SCRIPT), "--json"], env=_replay_env(store, **extra),
+                          capture_output=True, text=True, timeout=60)
+
+
+def _start_replay_cli(store: Path, **extra: str) -> subprocess.Popen:
+    """``vnx costs replay --json`` as a person runs it by hand: no watchdog around it."""
+    return subprocess.Popen([sys.executable, str(_SCRIPT), "--json"], env=_replay_env(store, **extra),
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+
+# The lock wait of the round-1 reproduction of #2159 (codex): 0.1 seconds.
+LOCK_WAIT_SECONDS = 0.1
+# What one call may take beyond its lock wait: reading the spool, one poll step of a lock and the warning.
+CALL_MARGIN_SECONDS = 0.5
+# Calls report_spool_health once; prints what it returned and how long the call itself took (the imports come
+# first). argv: scripts/lib, the ledger.
+_REPORTER = textwrap.dedent("""
+    import sys, time
+    sys.path.insert(0, sys.argv[1])
+    from pathlib import Path
+    import cost_ledger, effectiveness_probe, health_beacon
+    started = time.monotonic()
+    state = cost_ledger.report_spool_health(Path(sys.argv[2]))
+    print(state, round(time.monotonic() - started, 3))
+""")
+
+
+def _beacon_lock(store: Path) -> Path:
+    return store / "health" / "cost-ledger.json.lock"
+
+
+def _ended_within(child: subprocess.Popen, seconds: float) -> bool:
+    """True when ``child`` exits within ``seconds``; a child still running then is left running."""
+    deadline = time.monotonic() + seconds
+    while child.poll() is None:
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.02)
+    return True
+
+
+def _finish(child: subprocess.Popen) -> tuple:
+    """``(stdout, stderr)`` of ``child``; one that still runs is killed first."""
+    if child.poll() is None:
+        child.kill()
+    return child.communicate(timeout=30)
+
+
+def _a_writer_takes_the_lock_file(store: Path) -> bool:
+    """A cost writer's exclusive hold of ``provider_costs.lock``, tried once with ``LOCK_NB``."""
+    fd = os.open(store / "events" / "provider_costs.lock", os.O_RDONLY | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    finally:
+        os.close(fd)
+    return True
+
+
+def _an_ok_beacon(store: Path, age_seconds: float) -> bytes:
+    """The ok beacon an empty spool leaves, as written ``age_seconds`` ago; returns its bytes on disk."""
+    from health_beacon import HealthBeacon
+
+    HealthBeacon(store, "cost-ledger", expected_interval_seconds=None).heartbeat_strict(status="ok", details={
+        "state": "ok", "spool_files": 0, "spool_pending": 0, "spool_unreadable": False,
+        "spool_quarantined": 0, "spool_conflicts": 0,
+    })
+    path = store / "health" / "cost-ledger.json"
+    beacon = json.loads(path.read_text(encoding="utf-8"))
+    beacon["last_run_ts"] = int(time.time() - age_seconds)
+    beacon["last_run_iso"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(beacon["last_run_ts"]))
+    path.write_text(json.dumps(beacon, indent=2, sort_keys=True), encoding="utf-8")
+    return path.read_bytes()
+
+
+def _health(store: Path) -> str:
+    """The cost-ledger beacon as ``health_beacon.all_beacons`` reads it, for sessionstart.sh and health_check.py."""
+    import health_beacon
+
+    return health_beacon.all_beacons(store)["cost-ledger"]["health"]
 
 
 class TestTheBeacon:
@@ -328,7 +412,7 @@ class TestTheBeacon:
             "state": "degraded", "spool_files": 1, "spool_pending": 1, "spool_unreadable": False,
             "spool_quarantined": 0, "spool_conflicts": 0, "reason": beacon["details"]["reason"],
         }
-        assert "holds 1 files (1 runs waiting" in beacon["details"]["reason"]
+        assert "holds 1 file (1 run waiting" in beacon["details"]["reason"]
 
         done = _replay_cli(store)
 
@@ -393,14 +477,13 @@ class TestTheBeacon:
         assert _replay_cli(store).returncode == 0
         assert not (store / "health" / "cost-ledger.json").exists(), "drained in one call: nothing to report"
 
-        (store / "health").mkdir()
-        (store / "health" / "cost-ledger.json").write_text(json.dumps({"status": "ok"}), encoding="utf-8")
-        before = (store / "health" / "cost-ledger.json").read_bytes()
+        before = _an_ok_beacon(store, age_seconds=0)
         assert cost_ledger.report_spool_health(_ledger(store)) is None
         assert (store / "health" / "cost-ledger.json").read_bytes() == before
 
-    @pytest.mark.parametrize("on_disk", ['{"status": "stale"}', "not json"])
+    @pytest.mark.parametrize("on_disk", ['{"status": "stale"}', "not json", '{"status": "ok"}'])
     def test_a_beacon_that_is_not_ok_is_set_to_ok_on_an_empty_spool(self, store, on_disk):
+        """An ``ok`` without ``last_run_ts`` is no ok beacon either: the reader calls it corrupt."""
         (store / "health").mkdir()
         (store / "health" / "cost-ledger.json").write_text(on_disk, encoding="utf-8")
 
@@ -436,6 +519,109 @@ class TestTheBeacon:
         out, err = child.communicate(timeout=30)
         assert child.returncode == 0, err
         assert out.strip() == "degraded" and _beacon(store)["details"]["spool_pending"] == 1
+
+    def test_a_held_beacon_lock_is_waited_on_for_the_lock_wait_only(self, store, hold_the_lock_file):
+        """codex, #2159 round 1: a holder of cost-ledger.json.lock kept the call, and with it the lock file shared.
+
+        After one second the call still waited and no cost writer could take
+        the lock file. Now the beacon's lock ends at the call's own deadline:
+        the call returns within its lock wait plus a small margin, nothing is
+        written, and a cost writer takes the lock file right after.
+        """
+        _spool(store, _record())
+        hold_the_lock_file(store, _beacon_lock(store))
+        reporter = subprocess.Popen(
+            [sys.executable, "-c", _REPORTER, str(_LIB), str(_ledger(store))], stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, env=dict(os.environ, VNX_COST_LEDGER_LOCK_WAIT_SEC=str(LOCK_WAIT_SECONDS)))
+        try:
+            ended = _ended_within(reporter, LOCK_WAIT_SECONDS + TICK_MARGIN_SECONDS)
+            writer = _a_writer_takes_the_lock_file(store)
+        finally:
+            out, err = _finish(reporter)
+
+        assert (ended, writer) == (True, True), "the call still waits on the beacon lock and holds the lock file shared"
+        state, took = out.split()
+        assert state == "None" and float(took) < LOCK_WAIT_SECONDS + CALL_MARGIN_SECONDS, out
+        assert "the cost-ledger beacon was not written this time" in err and "cost-ledger.json.lock" in err, err
+        assert not (store / "health" / "cost-ledger.json").exists()
+
+    def test_vnx_costs_replay_by_hand_keeps_its_result_and_exit_code_when_the_beacon_lock_is_held(
+        self, store, hold_the_lock_file,
+    ):
+        """No watchdog bounds a replay a person starts; the beacon is skipped, the replay's result and exit code stay."""
+        _spool(store, _record())
+        _spool(store, _record(run_id=f"{PROJECT}:dispatch:20261021-kp-tick:2"))
+        hold_the_lock_file(store, _beacon_lock(store))
+        replay = _start_replay_cli(
+            store, VNX_COST_LEDGER_REPLAY_BATCH="1", VNX_COST_LEDGER_LOCK_WAIT_SEC=str(LOCK_WAIT_SECONDS))
+        try:
+            ended = _ended_within(replay, LOCK_WAIT_SECONDS + TICK_MARGIN_SECONDS)
+        finally:
+            out, err = _finish(replay)
+
+        assert ended, "vnx costs replay still waits on the beacon lock after its lock wait ran out"
+        assert replay.returncode == 0, err
+        result = json.loads(out)
+        assert (result["files_replayed"], result["files_remaining"], result["stopped"]) == (1, 1, "batch")
+        assert "the cost-ledger beacon was not written this time" in err, err
+        assert len(_lines(store)) == 1 and not (store / "health" / "cost-ledger.json").exists()
+
+
+class TestTheBeaconStaysFresh:
+    """Both seats, #2159 round 1: an event-driven ok beacon aged to ``unknown`` on day 8 while the ledger was healthy.
+
+    ``health_beacon.all_beacons`` calls an event-driven beacon older than 7
+    days ``unknown``, ``hooks/sessionstart.sh`` lists it under NOT ok and
+    ``health_check.py`` exits 1. An ok beacon older than a day is written
+    again on an empty spool, so only a tick that stopped running ages it out.
+    """
+
+    def test_an_ok_beacon_of_8_days_is_written_again_on_an_empty_spool_and_reads_healthy(self, store):
+        _an_ok_beacon(store, age_seconds=8 * 86400)
+        assert _health(store) == "unknown"
+
+        assert cost_ledger.report_spool_health(_ledger(store)) == "ok"
+
+        beacon = _beacon(store)
+        assert time.time() - beacon["last_run_ts"] < 60 and beacon["details"]["state"] == "ok"
+        assert _health(store) == "ok"
+
+    def test_the_tick_keeps_an_ok_beacon_of_25_hours_fresh(self, store, tmp_path):
+        """The tick on an empty spool writes the ok beacon again once it is past a day, and nothing else."""
+        (store / "events").mkdir()
+        _an_ok_beacon(store, age_seconds=25 * 3600)
+
+        done = _run_bash("_maybe_cost_ledger_replay", _env(store, tmp_path))
+
+        assert "SURVIVED:0" in done.stdout, done.stderr
+        assert time.time() - _beacon(store)["last_run_ts"] < 60
+        assert _health(store) == "ok"
+
+    def test_an_ok_beacon_of_1_hour_is_left_as_it_is(self, store):
+        """Fresh enough: nothing is written and no lock is taken, the store's events directory not even created."""
+        before = _an_ok_beacon(store, age_seconds=3600)
+
+        assert cost_ledger.report_spool_health(_ledger(store)) is None
+
+        assert (store / "health" / "cost-ledger.json").read_bytes() == before
+        assert not (store / "events").exists()
+        assert _health(store) == "ok"
+
+    def test_the_refresh_age_is_a_named_day_well_inside_the_readers_7_days(self):
+        import health_beacon
+
+        refresh = getattr(cost_ledger, "BEACON_REFRESH_SECONDS", None)
+        assert refresh == 24 * 3600 and refresh < health_beacon._EVENT_DRIVEN_MAX_AGE_SECONDS
+
+    def test_the_readers_7_day_rule_is_unchanged(self, store):
+        """A tick that stopped running for a week still shows as unknown: that is true."""
+        import health_beacon
+
+        assert health_beacon._EVENT_DRIVEN_MAX_AGE_SECONDS == 7 * 86400
+        _an_ok_beacon(store, age_seconds=8 * 86400)
+        assert _health(store) == "unknown"
+        _an_ok_beacon(store, age_seconds=6 * 86400)
+        assert _health(store) == "ok"
 
 
 # ---------------------------------------------------------------------------
@@ -483,6 +669,34 @@ class TestTheKnownFiles:
         assert files.strays == ("notes.txt", "subdir")
         assert any("notes.txt" in finding for finding in files.findings())
 
+    @pytest.mark.parametrize("count, phrases", [
+        (1, ("1 spool file waits for the replay", "1 spool file is in quarantine", "spool 1 file,",
+             "1 interrupted spool write;", "holds 1 file (1 run waiting")),
+        (2, ("2 spool files wait for the replay", "2 spool files are in quarantine", "spool 2 files,",
+             "2 interrupted spool writes;", "holds 2 files (2 runs waiting")),
+    ])
+    def test_one_reads_singular_and_two_read_plural(self, store, count, phrases):
+        """deepseek, #2159 round 1: ``1 spool files wait for the replay`` and ``spool 1 files``."""
+        quarantine = _spool_dir(store) / "quarantine"
+        quarantine.mkdir(parents=True)
+        for attempt in range(1, count + 1):
+            _spool(store, _record(run_id=f"{PROJECT}:dispatch:20261021-kp-tick:{attempt}"))
+            (_spool_dir(store) / f"tmp{attempt}.tmp").write_text("[", encoding="utf-8")
+            (quarantine / f"x{attempt}~0000000000000000.json").write_text("not json", encoding="utf-8")
+        files = cost_ledger.ledger_files(_ledger(store))
+        assert cost_ledger.report_spool_health(_ledger(store)) == "degraded"
+
+        reading = " | ".join([*files.findings(), files.summary(), _beacon(store)["details"]["reason"]])
+
+        for phrase in phrases:
+            assert phrase in reading, reading
+
+    @pytest.mark.parametrize("size, ending", [(1, "; 1 byte"), (0, "; 0 bytes"), (2, "; 2 bytes")])
+    def test_the_bytes_of_the_summary_read_singular_for_one(self, size, ending):
+        files = cost_ledger.LedgerFiles(ledger=True, lock_file=False, spool_files=0, spool_temp_files=0,
+                                        quarantined=0, bytes=size, strays=(), unlistable=())
+        assert files.summary() == f"ledger; spool 0 files, quarantine 0{ending}"
+
     def test_reading_the_files_creates_nothing(self, store):
         """No lock file is created for a look: a store the doctor may not write stays as it was."""
         before = _tree(store)
@@ -506,7 +720,7 @@ class TestTheKnownFiles:
         (_spool_dir(store) / "notes.txt").write_text("", encoding="utf-8")
         (warned,) = check_cost_ledger_files(_doctor_paths(store))
         assert warned.status == WARN
-        assert "1 spool files wait for the replay" in warned.message and "notes.txt" in warned.message
+        assert "1 spool file waits for the replay" in warned.message and "notes.txt" in warned.message
         assert "vnx costs replay" in warned.remediation
 
     def test_the_pip_doctor_tells_the_same_story(self, store):
@@ -521,8 +735,8 @@ class TestTheKnownFiles:
         _a_store_with_every_known_file(store)
         warned = _check_cost_ledger_files(store)
         assert warned.status == WARN
-        assert "1 spool files wait for the replay" in warned.detail
-        assert "1 spool files are in quarantine" in warned.detail
+        assert "1 spool file waits for the replay" in warned.detail
+        assert "1 spool file is in quarantine" in warned.detail
 
     def test_the_footprint_probe_counts_them_as_known_and_keeps_its_verdict(self, store):
         import subsystem_health
