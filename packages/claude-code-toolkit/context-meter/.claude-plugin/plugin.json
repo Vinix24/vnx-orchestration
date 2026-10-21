@@ -1,0 +1,6 @@
+{
+  "name": "context-meter",
+  "version": "1.0.0",
+  "description": "One line above the prompt that shows how full the context is, in the bands of the context-rotation guard: green, yellow and red.",
+  "types": "./types/index.d.ts"
+}

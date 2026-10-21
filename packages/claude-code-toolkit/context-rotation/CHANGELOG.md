@@ -2,6 +2,13 @@
 
 All notable changes to this plugin are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the plugin follows [Semantic Versioning](https://semver.org/).
 
+## [1.0.2] - 2026-10-21
+
+### Added
+
+- The `show_meter` setting (boolean, default `true`), validated like `enabled`. The `context-meter` plugin reads it; the guard only knows the key, so a settings file that carries it is not reported as holding an unknown key.
+- `tests/test_meter_parity.py`: the settings loader and the `min_work_tokens` rule against the fixture that the `context-meter` plugin's TypeScript port is tested with.
+
 ## [1.0.1] - 2026-10-20
 
 ### Changed

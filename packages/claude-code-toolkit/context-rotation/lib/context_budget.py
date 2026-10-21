@@ -22,6 +22,8 @@ DEFAULTS = {
     "force_pct": 65,
     "hard_pct": 75,
     "auto_clear": True,
+    # Read by the context-meter plugin only; here so the guard knows the key.
+    "show_meter": True,
     "handover_max_chars": 8000,
     "handover_max_age_minutes": 60,
     "hard_max_denials": 3,
@@ -35,7 +37,7 @@ DEFAULTS = {
     # Tool names, or fnmatch patterns of them, that the force band denies; none by default.
     "force_deny_tools": (),
 }
-_BOOLS = ("enabled", "auto_clear")
+_BOOLS = ("enabled", "auto_clear", "show_meter")
 _POSITIVE_INTS = (
     "window_tokens", "handover_max_chars", "handover_max_age_minutes",
     "hard_max_denials", "archive_keep", "ack_timeout_seconds", "min_work_tokens",
