@@ -19,6 +19,9 @@ Track ``kosten-per-model-in-het-grootboek``, deliverable K2a, first PR. Covers
   keeps a spool file until its records read back as their own lines;
 - the aggregation reads the ledger and lists the spool in one lock scope, so a
   replay between the two reads never yields a lower total marked complete;
+- one lock orders a run's records: an append that fails spools its record
+  before the locks go, a writer that cannot open or lock the ledger is ordered
+  by the spool lock alone, and the ledger is closed while its lock is held;
 - ``vnx costs replay`` (script, pip CLI) and the dispatcher prelude tick;
 - ``emit_provider_cost`` writes the same line as before (golden).
 
@@ -41,6 +44,7 @@ import sys
 import textwrap
 import threading
 from argparse import Namespace
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -1031,6 +1035,292 @@ class TestOneLockScopeForLedgerAndSpool:
 
         totals = cost_ledger.aggregate_runs(ledger)
         assert (totals.cost_usd, totals.spool_pending, totals.incomplete) == (1.0, 1, _ONE_PENDING)
+
+
+# ---------------------------------------------------------------------------
+# One lock orders a run's records (round 5)
+# ---------------------------------------------------------------------------
+
+def _spool_lock(ledger_path: Path) -> Path:
+    return ledger_path.parent / f".{cost_ledger.SPOOL_DIR_NAME}.lock"
+
+
+def _correction(charge: dict, cost_usd: float, reason: str) -> "cost_ledger.RunCost":
+    return _run(kind="correction", supersedes=charge["record_id"], reason=reason, cost_usd=cost_usd)
+
+
+def _run_order(ledger_path: Path) -> list:
+    return [line["record_id"] for line in _lines(ledger_path) if line.get("run_id") == RUN_A1]
+
+
+class _SeamHandle:
+    """The ledger's append handle with a writer's seams on it: its append, and an append that fails."""
+
+    def __init__(self, fh, writers: "_TwoWriters"):
+        self._fh = fh
+        self._writers = writers
+
+    def __getattr__(self, name):
+        return getattr(self._fh, name)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return self._fh.__exit__(*exc_info)
+
+    def write(self, text):
+        if not text.startswith("{"):
+            return self._fh.write(text)
+        if self._writers.refuse_next_append:
+            self._writers.refuse_next_append = False
+            self._writers.seam("append_fails")
+            raise _enospc()
+        self._writers.seam("append")
+        written = self._fh.write(text)
+        self._writers.durable([json.loads(text)])
+        return written
+
+
+class _RefusingFlock:
+    """``cost_ledger.fcntl`` with one exclusive ``flock`` on the ledger's append handle refused."""
+
+    def __init__(self, writers: "_TwoWriters"):
+        self._writers = writers
+
+    def __getattr__(self, name):
+        return getattr(fcntl, name)
+
+    def flock(self, fd, operation):
+        if self._writers.refuse_next_lock and isinstance(fd, _SeamHandle) and operation & fcntl.LOCK_EX:
+            self._writers.refuse_next_lock = False
+            raise OSError(errno.ENOLCK, os.strerror(errno.ENOLCK))
+        return fcntl.flock(fd, operation)
+
+
+class _TwoWriters:
+    """Writer A's call, with writer B let in at A's seams as another process would be.
+
+    A's seams: it is about to take the spool lock (``spool_lock``), to write a
+    spool file (``spool_write``), to append a line (``append``), and its append
+    fails (``append_fails``). From the seam ``start`` on, B is due. B runs to its
+    end at the first seam where A holds none of the locks B needs, as a process
+    scheduled in that gap would; when A holds one at every later seam, B runs
+    after A returned, where a process waiting on that lock gets it. A ``start``
+    that is no seam lets B in after A returned. ``durable_order`` lists the
+    records in the order they first became durable: a ledger line or a spool file.
+    """
+
+    def __init__(self, ledger_path: Path, monkeypatch, start: str, already_durable: list):
+        self.ledger_path = ledger_path
+        self.start = start
+        self.durable_order = list(already_durable)
+        self.refuse_next_append = self.refuse_next_open = self.refuse_next_lock = False
+        self.second_record = None
+        self._second = None
+        self._due = self._running = False
+        real_open, real_slot_lock, real_write = Path.open, cost_ledger.slot_lock, cost_ledger.atomic_write_text
+
+        def ledger_open(path, mode="r", *args, **kwargs):
+            if "a" not in mode or path != ledger_path:
+                return real_open(path, mode, *args, **kwargs)
+            if self.refuse_next_open:
+                self.refuse_next_open = False
+                raise OSError(errno.EMFILE, os.strerror(errno.EMFILE))
+            return _SeamHandle(real_open(path, mode, *args, **kwargs), self)
+
+        @contextmanager
+        def spool_lock(path):
+            self.seam("spool_lock")
+            with real_slot_lock(path):
+                yield
+
+        def spool_write(path, content, *args, **kwargs):
+            self.seam("spool_write")
+            real_write(path, content, *args, **kwargs)
+            self.durable(json.loads(content))
+
+        monkeypatch.setattr(Path, "open", ledger_open)
+        monkeypatch.setattr(cost_ledger, "slot_lock", spool_lock)
+        monkeypatch.setattr(cost_ledger, "atomic_write_text", spool_write)
+        monkeypatch.setattr(cost_ledger, "fcntl", _RefusingFlock(self))
+
+    def second(self, run: "cost_ledger.RunCost", *, without_the_ledger: str = "") -> None:
+        """B writes ``run``; ``without_the_ledger`` ("open" or "lock") makes B's ledger open or lock fail."""
+        self._second = (run, without_the_ledger)
+
+    def durable(self, records: list) -> None:
+        for record in records:
+            if record["record_id"] not in self.durable_order:
+                self.durable_order.append(record["record_id"])
+
+    def seam(self, name: str) -> None:
+        if self._running or self._second is None or self.second_record is not None:
+            return
+        self._due = self._due or name == self.start
+        if self._due and not any(_lock_is_held(path) for path in self._locks_b_needs()):
+            self._run_b()
+
+    def first_returned(self) -> dict:
+        if self.second_record is None:
+            self._run_b()
+        return self.second_record
+
+    def _locks_b_needs(self) -> list:
+        spool = [_spool_lock(self.ledger_path)]
+        return spool if self._second[1] else [self.ledger_path, *spool]
+
+    def _run_b(self) -> None:
+        run, without_the_ledger = self._second
+        self._running = True
+        try:
+            if without_the_ledger:
+                setattr(self, f"refuse_next_{without_the_ledger}", True)
+            self.second_record = cost_ledger.record_run(run, ledger_path=self.ledger_path)
+        finally:
+            self._running = False
+
+
+class _CloseProbe:
+    """The ledger's append handle; ``close`` notes whether the ledger lock is still held, and may fail once."""
+
+    def __init__(self, fh, ledger_path: Path, held_at_close: list, failing_close: list):
+        self._fh = fh
+        self._ledger_path = ledger_path
+        self._held_at_close = held_at_close
+        self._failing_close = failing_close
+
+    def __getattr__(self, name):
+        return getattr(self._fh, name)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        self.close()
+        return False
+
+    def close(self):
+        if self._fh.closed:
+            return
+        self._held_at_close.append(_lock_is_held(self._ledger_path))
+        self._fh.close()
+        if self._failing_close:
+            raise self._failing_close.pop()
+
+
+@pytest.fixture
+def close_probe(monkeypatch):
+    """``close_probe(ledger_path, failing_close=[])``: wrap every append handle of that ledger in a :class:`_CloseProbe`."""
+    real_open = Path.open
+
+    def arm(ledger_path: Path, failing_close: list = ()) -> list:
+        held_at_close: list = []
+        failing = list(failing_close)
+
+        def probing_open(self, mode="r", *args, **kwargs):
+            fh = real_open(self, mode, *args, **kwargs)
+            if "a" in mode and self == ledger_path:
+                return _CloseProbe(fh, ledger_path, held_at_close, failing)
+            return fh
+
+        monkeypatch.setattr(Path, "open", probing_open)
+        return held_at_close
+
+    return arm
+
+
+_SEAMS_OF_A_FAILING_APPEND = ["append_fails", "spool_lock", "spool_write", "after_return"]
+
+
+class TestOneLockOrdersTheRecordsOfARun:
+    @pytest.mark.parametrize("start", _SEAMS_OF_A_FAILING_APPEND)
+    def test_a_failed_append_spools_before_a_newer_correction_can_land(self, ledger, monkeypatch, start):
+        """codex_gate on 53f64e50: the older correction, spooled after the lock went, reverted the newer one."""
+        charge = cost_ledger.record_run(_run(cost_usd=0.5), ledger_path=ledger)
+        writers = _TwoWriters(ledger, monkeypatch, start, [charge["record_id"]])
+        writers.second(_correction(charge, 2.0, "the newer correction"))
+        writers.refuse_next_append = True
+        older = cost_ledger.record_run(_correction(charge, 1.0, "the older correction"), ledger_path=ledger)
+        newer = writers.first_returned()
+
+        cost_ledger.replay_spool(ledger)
+        totals = cost_ledger.aggregate_runs(ledger)
+        assert (totals.cost_usd, totals.spool_pending) == (2.0, 0), "the older correction is the effective one"
+        assert totals.runs[RUN_A1] == newer
+        assert _run_order(ledger) == [charge["record_id"], older["record_id"], newer["record_id"]]
+        assert _run_order(ledger) == writers.durable_order
+
+    @pytest.mark.parametrize("refused", ["open", "lock"])
+    @pytest.mark.parametrize("outer, start", [
+        ("with_the_ledger", "spool_lock"), ("with_the_ledger", "append"), ("with_the_ledger", "after_return"),
+        ("without_the_ledger", "spool_lock"), ("without_the_ledger", "spool_write"),
+        ("without_the_ledger", "after_return"),
+    ])
+    def test_a_writer_without_the_ledger_lock_is_ordered_by_the_spool_lock(
+        self, ledger, monkeypatch, refused, outer, start,
+    ):
+        """Point 2: a spool write without the ledger lock never lands a record ahead of one durable before it."""
+        charge = cost_ledger.record_run(_run(cost_usd=0.5), ledger_path=ledger)
+        writers = _TwoWriters(ledger, monkeypatch, start, [charge["record_id"]])
+        with_the_ledger = _correction(charge, 2.0, "written with the ledger lock")
+        without_the_ledger = _correction(charge, 1.0, "written without the ledger lock")
+        if outer == "with_the_ledger":
+            writers.second(without_the_ledger, without_the_ledger=refused)
+            cost_ledger.record_run(with_the_ledger, ledger_path=ledger)
+        else:
+            writers.second(with_the_ledger)
+            setattr(writers, f"refuse_next_{refused}", True)
+            cost_ledger.record_run(without_the_ledger, ledger_path=ledger)
+        writers.first_returned()
+
+        cost_ledger.replay_spool(ledger)
+        totals = cost_ledger.aggregate_runs(ledger)
+        assert _run_order(ledger) == writers.durable_order, "a record landed ahead of one durable before it"
+        assert totals.runs[RUN_A1]["record_id"] == writers.durable_order[-1]
+        assert totals.spool_pending == 0
+
+    def test_without_the_spool_lock_nothing_is_written(self, ledger):
+        """No order, no line: a writer that cannot take the spool lock writes neither ledger nor spool."""
+        _spool_lock(ledger).mkdir(parents=True)
+        with pytest.raises(cost_ledger.CostLedgerSpoolError, match="spool lock could not be taken"):
+            cost_ledger.record_run(_run(), ledger_path=ledger)
+        _assert_nothing_written(ledger)
+
+    def test_the_ledger_is_closed_while_its_lock_is_held(self, ledger, close_probe):
+        """A close flushes what a failed write left buffered: the writer and the replay close under the lock."""
+        _spool_one_run(ledger)
+        held_at_close = close_probe(ledger)
+        cost_ledger.record_run(_run(run_id=RUN_B1), ledger_path=ledger)
+        cost_ledger.replay_spool(ledger)
+        assert held_at_close == [True, True]
+
+    def test_a_close_that_fails_after_the_append_spools_the_record(self, ledger, close_probe):
+        """The line may not be on disk: the record goes to the spool too, and the replay writes it once."""
+        close_probe(ledger, failing_close=[OSError(errno.EIO, os.strerror(errno.EIO))])
+        record = cost_ledger.record_run(_run(), ledger_path=ledger)
+        assert _lines(ledger) == [record]
+        assert json.loads((_spool_dir(ledger) / f"{RUN_A1}.json").read_text(encoding="utf-8")) == [record]
+        assert _beacon(ledger)["details"]["state"] == "degraded"
+
+        result = cost_ledger.replay_spool(ledger)
+        assert (result.written, result.already_present, result.pending) == (0, 1, 0)
+        assert _lines(ledger) == [record]
+
+    def test_the_beacon_counts_the_spool_under_the_spool_lock(self, ledger, monkeypatch):
+        """The beacon written last describes the spool as the last decision left it."""
+        under_the_lock = []
+        real_listing = cost_ledger._spool_files
+
+        def listing(spool_dir):
+            under_the_lock.append(_lock_is_held(_spool_lock(ledger)))
+            return real_listing(spool_dir)
+
+        monkeypatch.setattr(cost_ledger, "_spool_files", listing)
+        _break_the_ledger(ledger)
+        cost_ledger.record_run(_run(), ledger_path=ledger)
+        assert under_the_lock == [True]
+        assert _beacon(ledger)["details"]["spool_pending"] == 1
 
 
 # ---------------------------------------------------------------------------
