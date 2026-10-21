@@ -360,7 +360,7 @@ export function deliverableIdOf(ref: unknown): string {
 }
 
 /** A deliverable title on one line, control characters turned into spaces; empty when it has none. */
-const cleanTitleOf = (value: unknown): string => (typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]/g, ' ').trim() : '')
+export const cleanTitleOf = (value: unknown): string => (typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]/g, ' ').trim() : '')
 
 export function deliverableViewOf(json: unknown, now: number): Part<DeliverableView> {
   if (!Array.isArray(json)) {
@@ -778,7 +778,7 @@ const BUSY_STATUSES = ['ready', 'in_progress']
 
 const isBusyItem = (item: DeliverableItem, running: ReadonlyMap<string, Builder>): boolean => BUSY_STATUSES.includes(item.status) || (item.status !== 'done' && running.has(item.id))
 
-/** The ids of the deliverables that `bezig:` names on the `now` tracks: `ready`, `in_progress`, or carried by a running builder. */
+/** The ids of the deliverables that `bezig:` names, on every track the pane shows: `ready`, `in_progress`, or carried by a running builder. */
 export function busyDeliverableIdsOf(project: ProjectModel): Set<string> {
   const ids = new Set<string>()
 
@@ -789,9 +789,7 @@ export function busyDeliverableIdsOf(project: ProjectModel): Set<string> {
   const running = new Map<string, Builder>((project.builders.isOk ? project.builders.value : []).map(builder => [builder.dispatchId, builder]))
 
   for (const one of shownTracksOf(project) ?? []) {
-    if (one.track.horizon === 'now') {
-      one.progress?.items.filter(item => isBusyItem(item, running)).forEach(item => ids.add(item.id))
-    }
+    one.progress?.items.filter(item => isBusyItem(item, running)).forEach(item => ids.add(item.id))
   }
 
   return ids
@@ -813,7 +811,7 @@ function workOf(project: Extract<ProjectModel, { hasStore: true }>, track: Track
   }
 
   const items = progress?.items ?? []
-  const titleOf = (item: DeliverableItem) => shortTitleOf(item.title === '' ? item.id : item.title)
+  const titleOf = (item: DeliverableItem) => shortTitleOf(item.title === '' ? cleanTitleOf(item.id) : item.title)
   const isBusy = (item: DeliverableItem) => isBusyItem(item, running)
   const busy = items.filter(isBusy).map(titleOf)
   const covered = new Set(items.map(item => item.id))
@@ -894,7 +892,7 @@ export function planOf(project: ProjectModel): { next: ShownTrack[]; later: Show
       .sort(byPriorityThenId)
       .map(track => shownOf(project, track, open, builderTracks))
 
-  return { next: listOf('next'), later: listOf('later'), withoutHorizon: all.filter(track => track.horizon !== 'now' && track.horizon !== 'next' && track.horizon !== 'later').length }
+  return { next: listOf('next'), later: listOf('later'), withoutHorizon: all.filter(track => track.phase !== 'done' && track.horizon !== 'now' && track.horizon !== 'next' && track.horizon !== 'later').length }
 }
 
 /**

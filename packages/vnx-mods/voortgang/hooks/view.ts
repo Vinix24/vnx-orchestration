@@ -1,6 +1,6 @@
 import type { Builder, Model, PaneView, Pr, ProjectModel, Row, Segment, Tone } from '../types'
 
-import { barCellsOf, busyDeliverableIdsOf, deliverablesNotice, formatAge, INDEX_LIVE_CAP, isOutdated, planOf, promotionOf, shownTracksOf } from './collect'
+import { barCellsOf, busyDeliverableIdsOf, cleanTitleOf, deliverablesNotice, formatAge, INDEX_LIVE_CAP, isOutdated, planOf, promotionOf, shownTracksOf } from './collect'
 import type { ShownTrack } from './collect'
 import { cellsOf, fit } from './width'
 
@@ -156,23 +156,23 @@ function foldedRow(prs: OpenPr[], reason: string | null): Row {
 
 /** The builders at work, each with the PR it belongs to; then the open PRs that belong to a deliverable `bezig:` names. The rest fold into one row. */
 function nowSectionOf(project: Stored, columns: number): Section {
-  if (!project.builders.isOk) {
-    return failedSection('Nu bezig', project.builders.reason)
-  }
-
   const { prs, reason } = openPrsToShow(project)
   const owned = new Set<number>()
-  const items: Row[][] = project.builders.value.map(builder => {
+  // A builder list that cannot be read is its own row; the PRs of a readable queue are still drawn, all folded as no builder is known.
+  const items: Row[][] = project.builders.isOk ? [] : [[row(`  onbeschikbaar: ${project.builders.reason}`, 'error')]]
+  const builders = project.builders.isOk ? project.builders.value : []
+
+  items.push(...builders.map(builder => {
     const prId = builder.who.isOk && builder.who.value.prId !== null ? (/\d+/.exec(builder.who.value.prId)?.[0] ?? null) : null
     const mine = prs.filter(pr => (prId !== null && pr.number === Number(prId)) || pr.dispatchId === builder.dispatchId)
 
     mine.forEach(pr => owned.add(pr.number))
 
     return [builderRow(builder, columns), ...mine.map(pr => prRow(pr, '    ', reason))]
-  })
+  }))
   const deliverables = project.deliverables.isOk ? Object.values(project.deliverables.value.byTrack).flatMap(one => one.items) : []
 
-  const busyIds = busyDeliverableIdsOf(project)
+  const busyIds = project.builders.isOk ? busyDeliverableIdsOf(project) : new Set<string>()
   const folded: OpenPr[] = []
 
   for (const pr of prs.filter(one => !owned.has(one.number))) {
@@ -183,13 +183,18 @@ function nowSectionOf(project: Stored, columns: number): Section {
       continue
     }
 
-    const label = deliverable.title !== '' ? fit(deliverable.title, MIN_TITLE_COLUMNS * 4) : deliverable.id
+    const label = deliverable.title !== '' ? fit(deliverable.title, MIN_TITLE_COLUMNS * 4) : cleanTitleOf(deliverable.id)
 
     items.push([row(`  ${label}`), prRow(pr, '    ', reason)])
   }
 
   if (folded.length > 0) {
     items.push([foldedRow(folded, reason)])
+  }
+
+  // With no PR known at all no row can carry the reason of an unreadable PR queue, so it gets its own.
+  if (reason !== null && prs.length === 0) {
+    items.push([row(`  onbeschikbaar: ${reason}`, 'error')])
   }
 
   return sectionOf('Nu bezig', 'niets', items, project.buildersOmitted)
@@ -232,20 +237,32 @@ const barSegments = (one: NonNullable<ShownTrack['progress']>): Segment[] => {
 const BUSY_LABEL = 'bezig:  '
 const NEXT_LABEL = 'volgt:  '
 
-/** `volgt:` titles as many as fit the width, then `(+N)` for the rest. */
+/** `volgt:` titles as many as fit the width, then `(+N)` for the rest. The count is never cut: the first title gives way to it. */
 function upcomingRow(titles: string[], columns: number): Row {
   const prefix = ' '.repeat(TRACK_INDENT) + NEXT_LABEL
   const room = columns - cellsOf(prefix)
+  const countOf = (rest: number) => (rest > 0 ? `  (+${rest})` : '')
   let shown = titles.length
 
-  while (shown > 1 && cellsOf(titles.slice(0, shown).join(' · ')) + (shown < titles.length ? cellsOf(`  (+${titles.length - shown})`) : 0) > room) {
+  while (shown > 1 && cellsOf(titles.slice(0, shown).join(' · ')) + cellsOf(countOf(titles.length - shown)) > room) {
     shown -= 1
   }
 
   const rest = titles.length - shown
-  const list = titles.slice(0, shown).flatMap((title, at) => (at === 0 ? [seg(title, 'warn')] : [seg(' · ', 'dim'), seg(title, 'warn')]))
+  const count = countOf(rest)
+  const shownTitles = titles.slice(0, shown)
+  const titleRoom = room - cellsOf(count)
 
-  return rowOf(seg(prefix), ...list, ...(rest > 0 ? [seg(`  (+${rest})`, 'dim')] : []))
+  if (shown === 1) {
+    const only = titleRoom >= 1 ? fit(titles[0] ?? '', titleRoom) : ''
+    const dim = only === '' ? count.trim() : count
+
+    return rowOf(seg(prefix), ...(only === '' ? [] : [seg(only, 'warn')]), ...(rest > 0 ? [seg(dim, 'dim')] : []))
+  }
+
+  const list = shownTitles.flatMap((title, at) => (at === 0 ? [seg(title, 'warn')] : [seg(' · ', 'dim'), seg(title, 'warn')]))
+
+  return rowOf(seg(prefix), ...list, ...(rest > 0 ? [seg(count, 'dim')] : []))
 }
 
 function trackItem(one: ShownTrack, columns: number, isNow: boolean): Row[] {

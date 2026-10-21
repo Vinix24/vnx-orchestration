@@ -32,7 +32,7 @@ import {
   storeOf,
   worldOf,
 } from './fixtures'
-import type { WorldSetup } from './fixtures'
+import type { RunAnswer, WorldSetup } from './fixtures'
 
 const SURFACES = ['terminal', 'mobile'] as const
 
@@ -74,6 +74,17 @@ async function started($: Engine, on: On, setup: WorldSetup, cwd: string = CWD) 
   await clock.settle()
 
   return { world, clock }
+}
+
+/** The deliverable list a scenario's `vnx` answers with; a denied run has none. */
+function deliverablesOf(run: (argv: readonly string[]) => RunAnswer): { deliverable_ref: string; derived_status: string; title: string; last_activity: string }[] {
+  const answer = run(['vnx', 'deliverable'])
+
+  if ('deny' in answer) {
+    throw new Error(answer.deny)
+  }
+
+  return JSON.parse(answer.stdout)
 }
 
 const sizeOf = (rows: number, columns = 72) => ({ ...PANE_PROPS, bodyColumns: columns, scroll: { offset: 0, bodyRows: rows } })
@@ -497,7 +508,7 @@ describe('the open PRs sit in Nu bezig', () => {
 
   test('keeps the row of a PR under the bezig deliverable it belongs to', async ($, on) => {
     const { files, run } = scenarioOf('project-a')
-    const items = JSON.parse(run(['vnx', 'deliverable']).stdout ?? '[]')
+    const items = deliverablesOf(run)
     items.find((one: { deliverable_ref: string }) => one.deliverable_ref === 'pr:dlv-b-2').derived_status = 'in_progress'
     await started($, on, { files, run: argv => (argv[1] === 'deliverable' ? { exitCode: 0, stdout: JSON.stringify(items) } : run(argv)) })
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: sizeOf(44, 100) })
@@ -675,7 +686,7 @@ describe('the room', () => {
 
   test('gives the Nu bezig section its items first, and a +N row for the rest', async ($, on) => {
     const { files, run } = scenarioOf('project-a')
-    const items = JSON.parse(run(['vnx', 'deliverable']).stdout ?? '[]')
+    const items = deliverablesOf(run)
     items.find((one: { deliverable_ref: string }) => one.deliverable_ref === 'pr:dlv-b-2').derived_status = 'in_progress'
     await started($, on, { files, run: argv => (argv[1] === 'deliverable' ? { exitCode: 0, stdout: JSON.stringify(items) } : run(argv)) })
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: sizeOf(5, 100) })
@@ -915,5 +926,112 @@ describe('a refresh that rejects', () => {
     const answer = await $.command.run(command('voortgang'))
 
     expect(answer.text).toMatch(new RegExp(`^Voortgang: verversen mislukt \\(.*${DENY}.*\\), het paneel is niet geopend\\.$`))
+  })
+})
+
+describe('round 3: absence stays loud and the pane agrees with itself', () => {
+  /** The scenario with no PR in the index and an unreadable PR queue: the shape `gh` failing gives. */
+  const unreadableQueue = (reason: string) => {
+    const { files, run } = scenarioOf('project-a')
+    const index = JSON.parse(files[indexOf('project-a')] ?? '{}')
+    const liveWork = index.live_work ?? index.liveWork
+    liveWork.open_prs = []
+
+    return { files: { ...files, [indexOf('project-a')]: JSON.stringify(index), [stateOf('project-a')]: stateJson({ prQueue: { available: false, reason } }) }, run }
+  }
+  const nuBezigOf = (lines: string[]) => lines.slice(lines.indexOf('Nu bezig'), lines.indexOf('Wacht op een besluit'))
+
+  test('draws onbeschikbaar in Nu bezig when the PR queue cannot be read and no PR is known, once, in error', async ($, on) => {
+    const { files, run } = unreadableQueue("FileNotFoundError: 'gh'")
+    await started($, on, { files, run })
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: sizeOf(44, 100) })
+    const lines = await linesOf(ui)
+
+    expect(nuBezigOf(lines)).toEqual(['Nu bezig', '  sonnet · 6 min · K2a-3b: replay van de spool · alpha · PR #3001', "  onbeschikbaar: FileNotFoundError: 'gh'"])
+    expect(lines.filter(one => one.includes("FileNotFoundError: 'gh'"))).toHaveLength(1)
+    expect(toneOfProps((await rowsOf(ui)).find(one => one.text.includes('FileNotFoundError'))?.segments[0]?.props ?? {})).toBe('error')
+    await ui.unmount()
+  })
+
+  test('draws the reason of an unreadable PR queue without a builder too, and never twice when PRs are folded', async ($, on) => {
+    const { files, run } = unreadableQueue('gh weg')
+    const noBuilder = { ...files, [indexOf('project-a')]: indexJson({ liveWork: { available: true, counts: { live: 0, starting: 0, stale: 0, unmeasured: 0 }, live: [], stale: [], unmeasured: [], open_prs: [] } }) }
+    await started($, on, { files: noBuilder, run })
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: sizeOf(44, 100) })
+
+    expect(nuBezigOf(await linesOf(ui))).toEqual(['Nu bezig', '  onbeschikbaar: gh weg'])
+    await ui.unmount()
+  })
+
+  test('draws a builder failure as its own onbeschikbaar row and still draws the PRs of a readable queue, folded', async ($, on) => {
+    const { files, run } = scenarioOf('project-a')
+    const unreadable = { ...files, [indexOf('project-a')]: indexJson({ liveWork: { available: false, reason: 'index stuk' } }) }
+    await started($, on, { files: unreadable, run })
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: sizeOf(44, 100) })
+
+    expect(nuBezigOf(await linesOf(ui))).toEqual(['Nu bezig', '  onbeschikbaar: index stuk', "  2 open PR's zonder bouwer · 1 klaar voor merge · 1 wacht op stoel"])
+    await ui.unmount()
+  })
+
+  /** The plan view of a scenario whose next-t track has a first title of 40 characters and one more proposed deliverable. */
+  const planLinesAt = async ($: Engine, on: On, columns: number) => {
+    const { files, run } = scenarioOf('project-a')
+    const items = deliverablesOf(run)
+    const first = items.find(one => one.deliverable_ref === 'pr:dlv-n-1')
+
+    if (first !== undefined) {
+      first.title = 'x'.repeat(40)
+    }
+
+    await started($, on, { files, run: argv => (argv[1] === 'deliverable' ? { exitCode: 0, stdout: JSON.stringify(items) } : run(argv)) })
+    await $.command.run(command('voortgang', 'plan'))
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: sizeOf(44, columns) })
+    const lines = await linesOf(ui)
+    await ui.unmount()
+
+    return lines
+  }
+
+  test('keeps the (+N) count on the volgt row at 44 columns and shortens the first title to what fits', async ($, on) => {
+    const row = (await planLinesAt($, on, 44)).find(one => one.includes('volgt:') && one.includes('x'))
+
+    expect(row).toBe(`     volgt:  ${'x'.repeat(24)}…  (+1)`)
+    expect(cellsOf(row ?? '')).toBeLessThanOrEqual(44)
+  })
+
+  test('draws only the count on the volgt row where not even one title fits', async ($, on) => {
+    const lines = await planLinesAt($, on, 18)
+
+    expect(lines).toContain('     volgt:  (+1)')
+    expect(lines.every(one => cellsOf(one) <= 18)).toBe(true)
+  })
+
+  test('keeps the row of a PR under a ready deliverable on a later track, which bezig: names', async ($, on) => {
+    const { files, run } = scenarioOf('project-a')
+    const items = deliverablesOf(run)
+    const later = items.find(one => one.deliverable_ref === 'pr:dlv-l-1')
+
+    if (later !== undefined) {
+      later.derived_status = 'ready'
+      later.last_activity = stampMinutesAgo(60)
+    }
+
+    const queue = JSON.parse(files[stateOf('project-a')] ?? '{}')
+    const index = JSON.parse(files[indexOf('project-a')] ?? '{}')
+    queue.pr_queue.open_prs.push({ number: 3003, title: 'later', branch: 'dispatch/dlv-l-1', state: 'OPEN', ci_status: 'pending', merge_state: 'blocked', gates_passed: [], blocked_on: ['kimi_gate'] })
+    ;(index.live_work ?? index.liveWork).open_prs.push({ number: 3003, dispatch_id: 'dlv-l-1' })
+    await started($, on, {
+      files: { ...files, [stateOf('project-a')]: JSON.stringify(queue), [indexOf('project-a')]: JSON.stringify(index) },
+      run: argv => (argv[1] === 'deliverable' ? { exitCode: 0, stdout: JSON.stringify(items) } : run(argv)),
+    })
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: sizeOf(60, 100) })
+    const lines = await linesOf(ui)
+    const at = lines.indexOf('  L1: voorgesteld op later')
+
+    expect(lines.some(one => one.includes('bezig:  L1'))).toBe(true)
+    expect(at).toBeGreaterThan(0)
+    expect(lines[at + 1]).toBe('    PR #3003 · ci loopt · stoel open: kimi_gate')
+    expect(lines.join('\n')).toContain("1 open PR's zonder bouwer")
+    await ui.unmount()
   })
 })

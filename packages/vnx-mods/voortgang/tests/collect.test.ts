@@ -5,6 +5,7 @@ import {
   ancestorsOf,
   barCellsOf,
   barOf,
+  busyDeliverableIdsOf,
   builderCountOf,
   collectModel,
   collectProject,
@@ -707,6 +708,27 @@ describe('the status line', () => {
   })
 })
 
+describe('the deliverables `bezig:` names', () => {
+  const trackOf = (track_id: string, horizon: string) => ({ track_id, title: 'T', phase: 'queued', derived_status: 'queued', horizon, priority: 'P2', pr_ref: null })
+  const itemOf = (track: string, id: string, derived_status: string, title: string) => ({ deliverable_ref: `pr:${id}`, track, derived_status, last_activity: stampMinutesAgo(60), title })
+  const projectWith = async (tracks: unknown[], items: unknown[]) =>
+    collectProject(ioOf(healthyFiles('project-a'), [], argv => ({ exitCode: 0, stdout: JSON.stringify(argv[1] === 'objective' ? tracks : items) })), 'project-a', ROOT, BIN, NOW)
+
+  test('are the same set the PR rule uses: a ready deliverable on a later track counts, whatever the horizon', async () => {
+    const project = await projectWith([trackOf('now-t', 'now'), trackOf('later-t', 'later')], [itemOf('now-t', 'dlv-n-1', 'ready', 'N1: ready'), itemOf('later-t', 'dlv-l-1', 'ready', 'L1: ready'), itemOf('later-t', 'dlv-l-2', 'proposed', 'L2: proposed')])
+    const shown = shownTracksOf(project)?.find(one => one.track.id === 'later-t')
+
+    expect(shown?.busy).toEqual(['L1'])
+    expect([...busyDeliverableIdsOf(project)].sort()).toEqual(['dlv-l-1', 'dlv-n-1'])
+  })
+
+  test('draw the id like a title when the title is empty: control characters become spaces', async () => {
+    const project = await projectWith([trackOf('now-t', 'now')], [itemOf('now-t', 'dlv\u0007x\ny', 'ready', '')])
+
+    expect(shownTracksOf(project)?.[0]?.busy).toEqual(['dlv x y'])
+  })
+})
+
 describe('the order of the tracks: what is being built comes first', () => {
   const trackOf = (track_id: string, priority: string, horizon: string, pr_ref: string | null = null) => ({ track_id, title: 'T', phase: 'queued', derived_status: 'queued', horizon, priority, pr_ref })
   const recent = (track: string) => ({ deliverable_ref: `${track}-0`, track, derived_status: 'done', last_activity: stampMinutesAgo(2 * 24 * 60), title: 'T' })
@@ -724,8 +746,9 @@ describe('the order of the tracks: what is being built comes first', () => {
     const files: Record<string, string> = { ...healthyFiles('project-a'), [indexOf('project-a')]: indexJson({ liveWork: liveOf(ids) }) }
     delete files[specOf('project-a', 'd-live-1')]
     builders.forEach((track_id, at) => {
-      files[specOf('project-a', ids[at])] = JSON.stringify({ model: 'sonnet', track_id })
-      files[instructionOf('project-a', ids[at])] = instructionText('Task')
+      const id = `d-b-${at}`
+      files[specOf('project-a', id)] = JSON.stringify({ model: 'sonnet', track_id })
+      files[instructionOf('project-a', id)] = instructionText('Task')
     })
     const run = (argv: readonly string[]) => ({ exitCode: 0, stdout: JSON.stringify(argv[1] === 'objective' ? tracks : deliverables) })
 
@@ -1111,6 +1134,12 @@ describe('what waits on the operator', () => {
     expect(promotionOf(noTracks)).toEqual({ isOk: false, reason: 'vnx exit 2' })
     expect(promotionOf(noDeliverables)).toEqual({ isOk: false, reason: 'vnx exit 3' })
     expect(promotionOf({ id: 'project-a', hasStore: false, reason: 'geen store' })).toEqual({ isOk: false, reason: 'geen store' })
+  })
+
+  test('counts the tracks without a horizon without the ones whose phase is done', async () => {
+    const project = await projectWith([track('z', null), track('z-done', null, 'done'), track('dash-done', '-', 'done'), track('l', 'later')], [])
+
+    expect(planOf(project)?.withoutHorizon).toBe(1)
   })
 
   test('plans the tracks on next and later without the done ones, and counts the tracks without a horizon', async () => {
