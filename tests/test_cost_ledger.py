@@ -17,6 +17,8 @@ Track ``kosten-per-model-in-het-grootboek``, deliverable K2a, first PR. Covers
   ``record_id``, an unreadable spool file stays and is reported;
 - a torn append: every append starts on a valid NDJSON boundary, and the replay
   keeps a spool file until its records read back as their own lines;
+- the aggregation reads the ledger and lists the spool in one lock scope, so a
+  replay between the two reads never yields a lower total marked complete;
 - ``vnx costs replay`` (script, pip CLI) and the dispatcher prelude tick;
 - ``emit_provider_cost`` writes the same line as before (golden).
 
@@ -29,6 +31,7 @@ at the ledger's file handle, so the code under test runs unchanged.
 from __future__ import annotations
 
 import errno
+import fcntl
 import importlib.util
 import json
 import os
@@ -36,6 +39,7 @@ import re
 import subprocess
 import sys
 import textwrap
+import threading
 from argparse import Namespace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -914,6 +918,119 @@ class TestATornAppend:
         assert costs_cli.main(["replay"]) == costs_cli.EXIT_FAILED
         assert "replay failed, the spool stays" in capsys.readouterr().err
         assert [p.name for p in _spool_dir(default).glob("*.json")] == [f"{RUN_A1}.json"]
+
+
+# ---------------------------------------------------------------------------
+# Ledger and spool backlog in one lock scope (round 4)
+# ---------------------------------------------------------------------------
+
+def _lock_is_held(path: Path) -> bool:
+    """True when another open file description holds ``path``'s ``flock``. A missing file holds no lock."""
+    if not path.is_file():
+        return False
+    with path.open("r", encoding="utf-8") as probe:
+        try:
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(probe, fcntl.LOCK_UN)
+        return False
+
+
+class _ReplayBetweenTheReads:
+    """A real ``replay_spool`` started at the aggregation's first spool listing: codex's race, made deterministic.
+
+    The listing first notes which locks the aggregation holds at that point.
+    When the ledger lock is free, the replay runs to its end before the
+    listing goes on, as a replay in another process would in that gap. When
+    the aggregation holds the ledger lock, the replay waits on it in a thread,
+    where a concurrent replay would wait, and :meth:`finish` lets it end after
+    the aggregation returned.
+    """
+
+    def __init__(self, ledger_path: Path, monkeypatch):
+        self.ledger_path = ledger_path
+        self.spool_lock = ledger_path.parent / f".{cost_ledger.SPOOL_DIR_NAME}.lock"
+        self.held = None
+        self._armed = True
+        self._thread = None
+        self._errors = []
+        real_listing = cost_ledger._spool_files
+
+        def listing(spool_dir):
+            if self._armed:
+                self._armed = False
+                self._start()
+            return real_listing(spool_dir)
+
+        monkeypatch.setattr(cost_ledger, "_spool_files", listing)
+
+    def _replay(self):
+        try:
+            cost_ledger.replay_spool(self.ledger_path)
+        except BaseException as exc:  # handed to finish(), which fails the test on it
+            self._errors.append(exc)
+
+    def _start(self):
+        self.held = (_lock_is_held(self.ledger_path), _lock_is_held(self.spool_lock))
+        self._thread = threading.Thread(target=self._replay, daemon=True)
+        self._thread.start()
+        if not self.held[0]:
+            self._thread.join()
+
+    def finish(self):
+        assert self._thread is not None, "the aggregation never listed the spool"
+        self._thread.join(timeout=30)
+        assert not self._thread.is_alive(), "the replay never got the ledger lock"
+        assert not self._errors, self._errors
+
+
+_ONE_PENDING = "onvolledig: 1 runs wachten op replay"
+
+
+class TestOneLockScopeForLedgerAndSpool:
+    def test_a_replay_between_the_reads_never_gives_a_lower_total_marked_complete(self, ledger, monkeypatch):
+        """codex_gate on 69d17c5e: $1 in the ledger and $2 spooled read back as 1, pending 0, complete."""
+        _break_the_ledger(ledger)
+        cost_ledger.record_run(_run(run_id=RUN_A1, cost_usd=2.0), ledger_path=ledger)
+        _repair_the_ledger(ledger)
+        cost_ledger.record_run(_run(run_id=RUN_B1, cost_usd=1.0), ledger_path=ledger)
+        replay = _ReplayBetweenTheReads(ledger, monkeypatch)
+
+        totals = cost_ledger.aggregate_runs(ledger)
+        replay.finish()
+
+        seen = (totals.cost_usd, totals.spool_pending, totals.incomplete)
+        assert seen != (1.0, 0, None), "a lower total that claims to be complete"
+        assert seen in {(3.0, 0, None), (1.0, 1, _ONE_PENDING)}
+        assert replay.held == (True, True), "the spool was not listed under the ledger lock and the spool lock"
+        after = cost_ledger.aggregate_runs(ledger)
+        assert (after.cost_usd, after.spool_pending, after.incomplete) == (3.0, 0, None)
+
+    def test_a_replay_that_creates_the_ledger_during_the_aggregation_is_counted(self, ledger, monkeypatch):
+        """No ledger file, so no ledger lock: a replay that creates it between the reads is not lost."""
+        _spool_one_run(ledger)
+        assert not ledger.exists()
+        replay = _ReplayBetweenTheReads(ledger, monkeypatch)
+
+        totals = cost_ledger.aggregate_runs(ledger)
+        replay.finish()
+
+        seen = (totals.cost_usd, totals.spool_pending, totals.incomplete)
+        assert seen != (0.0, 0, None), "a lower total that claims to be complete"
+        assert seen in {(0.5, 0, None), (0.0, 1, _ONE_PENDING)}
+        after = cost_ledger.aggregate_runs(ledger)
+        assert (after.cost_usd, after.spool_pending, after.incomplete) == (0.5, 0, None)
+
+    def test_a_ledger_beside_a_spooled_run_is_marked_incomplete(self, ledger):
+        """Ledger and spool both present, no race: the total misses the spooled run and says so."""
+        cost_ledger.record_run(_run(run_id=RUN_B1, cost_usd=1.0), ledger_path=ledger)
+        _spool_dir(ledger).mkdir(parents=True)
+        spooled = cost_ledger.build_record(_run(run_id=RUN_A1, cost_usd=2.0))
+        (_spool_dir(ledger) / f"{RUN_A1}.json").write_text(json.dumps([spooled]), encoding="utf-8")
+
+        totals = cost_ledger.aggregate_runs(ledger)
+        assert (totals.cost_usd, totals.spool_pending, totals.incomplete) == (1.0, 1, _ONE_PENDING)
 
 
 # ---------------------------------------------------------------------------

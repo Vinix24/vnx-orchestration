@@ -22,7 +22,9 @@ Three entry points, and every writer and reader goes through them:
   without a price is listed in ``unavailable`` and never summed as 0, a line in
   the old ``emit_provider_cost`` shape (no ``schema``) is counted in
   ``legacy_lines`` and not summed, and the number of runs waiting in the spool
-  comes back as ``spool_pending`` ("onvolledig: N runs wachten op replay").
+  comes back as ``spool_pending`` ("onvolledig: N runs wachten op replay"). The
+  ledger and the spool are read in one lock scope, the ledger ``flock`` and then
+  the spool lock, so the total and ``spool_pending`` describe the same moment.
 - :func:`replay_spool` brings spooled records into the ledger.
 
 When the append fails, the same record goes to
@@ -827,7 +829,7 @@ class LedgerTotals:
     field the runs whose count is ``null``. ``legacy_lines`` counts old-shape
     lines (no ``schema``), ``unreadable_lines`` lines that are not JSON objects,
     carry another schema version or have no ``run_id``. ``spool_pending`` is the
-    number of runs waiting for a replay.
+    number of runs waiting for a replay at the moment the ledger was read.
     """
 
     runs: Mapping[str, Mapping[str, Any]]
@@ -870,17 +872,39 @@ def _parse_lines(text: str) -> Tuple[List[Dict[str, Any]], int, int]:
     return records, legacy, unreadable
 
 
-def _last_line_per_run(ledger_path: Path) -> Tuple[Dict[str, Dict[str, Any]], int, int]:
+def _ledger_and_backlog(ledger_path: Path) -> Tuple[str, int]:
+    """``(ledger text, spool backlog)`` at one moment, so a total and its ``spool_pending`` agree.
+
+    Both are read inside one lock scope: the ledger ``flock`` and then the spool
+    lock, the order of the writer and the replay. A replay holds the ledger lock
+    exclusively from its first append to its last spool removal, so it cannot
+    move a record out of the spool between the two reads. Without a ledger file
+    there is no lock to take: the spool is listed first and the ledger checked
+    after. A replay creates the ledger before it removes a spool file, so a
+    ledger still missing means nothing left the spool during the listing; one
+    that appeared in between is read under both locks.
+    """
+    spool_dir = spool_dir_for(ledger_path)
     if not ledger_path.is_file():
-        return {}, 0, 0
+        pending = len(_spool_files(spool_dir))
+        if not ledger_path.is_file():
+            return "", pending
     with ledger_path.open("r", encoding="utf-8", errors="replace") as fh:
         fcntl.flock(fh, fcntl.LOCK_SH)
         try:
             text = fh.read()
+            with slot_lock(spool_dir):
+                pending = len(_spool_files(spool_dir))
         finally:
             fcntl.flock(fh, fcntl.LOCK_UN)
+    return text, pending
+
+
+def _last_line_per_run(ledger_path: Path) -> Tuple[Dict[str, Dict[str, Any]], int, int, int]:
+    """``(last line per run, legacy_lines, unreadable_lines, spool_pending)``, read at one moment."""
+    text, pending = _ledger_and_backlog(ledger_path)
     records, legacy, unreadable = _parse_lines(text)
-    return {record["run_id"]: record for record in records}, legacy, unreadable
+    return {record["run_id"]: record for record in records}, legacy, unreadable, pending
 
 
 def _number(value: object) -> Optional[float]:
@@ -910,10 +934,12 @@ def aggregate_runs(
     """Sum the ledger per run: the last line of each ``run_id`` counts, nothing else.
 
     ``select`` filters on that effective record, so a correction that moves a
-    run out of the selection takes the whole run out.
+    run out of the selection takes the whole run out. The ledger and the spool
+    backlog are read in one lock scope (:func:`_ledger_and_backlog`): a total
+    that misses spooled runs always comes with them in ``spool_pending``.
     """
     path = Path(ledger_path) if ledger_path is not None else provider_costs._resolve_costs_path()
-    last, legacy, unreadable = _last_line_per_run(path)
+    last, legacy, unreadable, pending = _last_line_per_run(path)
     runs = {run_id: record for run_id, record in last.items() if select is None or select(record)}
     cost = api = 0.0
     tokens = dict.fromkeys(TOKEN_FIELDS, 0)
@@ -936,7 +962,7 @@ def aggregate_runs(
     return LedgerTotals(
         runs=runs, cost_usd=round(cost, 8), api_equivalent_usd=round(api, 8), tokens=tokens,
         tokens_unknown=unknown, unavailable=tuple(unavailable), legacy_lines=legacy,
-        unreadable_lines=unreadable, spool_pending=len(_spool_files(spool_dir_for(path))),
+        unreadable_lines=unreadable, spool_pending=pending,
     )
 
 

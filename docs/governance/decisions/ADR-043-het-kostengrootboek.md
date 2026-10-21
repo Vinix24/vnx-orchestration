@@ -86,6 +86,8 @@ Wacht er een regel van een run in de spool, dan gaat een latere regel van dezelf
 
 De tik hangt niet aan `VNX_SUPERVISOR_MODE`. De spool is het herstelpad van het grootboek en geen supervisie. Een regel in de spool ontbreekt in elke som tot hij is teruggezet.
 
+De aggregatie leest het grootboek en telt de spool in één lockscope: eerst de `flock` op het grootboek, dan het spool-lock, dezelfde volgorde als schrijver en replay. Een replay houdt het grootboek exclusief vast van zijn eerste append tot zijn laatste verwijderde spoolbestand. Daardoor kan hij geen regel tussen de twee lezingen door verplaatsen, en beschrijven het totaal en `spool_pending` hetzelfde moment. Zonder grootboekbestand is er geen lock: dan telt de aggregatie eerst de spool en kijkt daarna of het grootboek nog ontbreekt. Een replay maakt het grootboek aan voordat hij een spoolbestand weghaalt. Staat het er inmiddels wel, dan leest de aggregatie het alsnog onder beide locks.
+
 ### 7. Kalibratie is een eigen recordsoort
 
 Een saldometing of een lijst generations van een provider is geen uitgave. Die krijgt een eigen bestand, `events/provider_account_observations.ndjson`, met recordsoort `account_observation`. Geen uitgave- of tokensom leest dat bestand. Dat is K5b en wordt hier niet gebouwd.
