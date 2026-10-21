@@ -89,6 +89,40 @@ class TestReloadPlist:
         assert "OK: agent registered" not in result.stdout
 
 
+class TestPlaceholderChecksSurviveSigpipe:
+    """The placeholder checks of ``reload_plist.sh`` must not be a pipeline into ``grep -q``.
+
+    ``printf '%s' "$RESOLVED" | grep -q '${VNX_PROJECT_ID}'`` under ``set -o pipefail`` ends
+    on 141 when ``grep`` exits at the first match while ``printf`` is still writing. A real
+    template is just over one stdio chunk (4096 bytes), so on a loaded Linux runner the
+    check went false in about 1 of 400 runs: the script then skipped the project-id
+    substitution and refused with "unresolved placeholder(s)". This test makes the
+    template large enough that ``printf`` blocks on a full pipe, so the old pipeline
+    fails every time instead of now and then.
+    """
+
+    TEMPLATE = "com.vnx.dashboard-generator"
+
+    def test_large_template_with_an_early_placeholder_is_resolved(self, tmp_path: Path) -> None:
+        home, env = _setup(tmp_path)
+        engine = _engine(tmp_path, home)
+        launchd = tmp_path / "launchd"
+        launchd.mkdir()
+        (tmp_path / "lib").symlink_to(REPO / "scripts" / "lib", target_is_directory=True)
+        (launchd / "reload_plist.sh").write_bytes((LAUNCHD_DIR / "reload_plist.sh").read_bytes())
+        template = (LAUNCHD_DIR / f"{self.TEMPLATE}.plist").read_text(encoding="utf-8")
+        filler = "<!-- " + ("x" * 1000 + "\n") * 2000 + " -->\n"
+        head, tail = template.rsplit("</plist>", 1)
+        (launchd / f"{self.TEMPLATE}.plist").write_text(
+            head + filler + "</plist>" + tail, encoding="utf-8"
+        )
+        env.update(VNX_HOME=str(engine), VNX_PROJECT_ID=PROJECT, STUB_LIST_LABEL=f"com.vnx.dashboard-generator.{PROJECT}")
+        result = _run(["bash", str(launchd / "reload_plist.sh"), self.TEMPLATE], env)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert f"Resolved project id: {PROJECT}" in result.stdout
+        assert "unresolved placeholder" not in result.stderr
+
+
 @pytest.mark.parametrize(
     "script,label,target",
     [
