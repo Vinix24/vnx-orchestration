@@ -45,7 +45,7 @@ vnx status
 # Merge readiness of a PR: required contexts and gate evidence on its head
 vnx pr-ready <PR>
 
-# Model provider state; the write verbs (on/off/reset) refuse until every launch function calls provider_switch.require (see PROVIDER_LANES.md, "Provider switch")
+# Model provider state, and the operator's switch (on/off/reset); see docs/core/PROVIDER_SWITCH.md
 vnx providers list
 ```
 

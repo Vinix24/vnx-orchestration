@@ -36,7 +36,7 @@ VNX is a file-based orchestration system enabling parallel development across mu
 - **File-Based Communication**: NDJSON receipts + Markdown dispatches
 - **Deliverable-Based Governance**: T0 is sole authority for declaring work done; workers attach evidence, receipt processor tracks but does not close
 - **Native Skill Architecture**: skills invoke natively (`/skill-name` in Claude Code, `$skill-name` in Codex, `@skill-name` in Gemini) instead of a compiled prompt template
-- **Multi-Provider Dispatch**: every provider runs as a CLI subprocess, never an imported SDK (`no-anthropic-sdk` in `scripts/lib/providers/provider_constraints.yaml`); full lane map, takeover chain and the `vnx providers` switch in `docs/core/PROVIDER_LANES.md` (the switch exists but does not enforce yet, see "Provider switch" there)
+- **Multi-Provider Dispatch**: every provider runs as a CLI subprocess, never an imported SDK (`no-anthropic-sdk` in `scripts/lib/providers/provider_constraints.yaml`); full lane map, takeover chain and the `vnx providers` switch in `docs/core/PROVIDER_LANES.md` (the operator's switch per provider family is enforced in every launch function; reference `docs/core/PROVIDER_SWITCH.md`, decision ADR-044)
 - **Project-Scoped Process Isolation**: `VNX_KILL_SCOPE` prevents cross-project process interference
 - **Singleton Process Enforcement**: Bulletproof duplicate prevention
 - **Progressive Intelligence**: Token-efficient context aggregation
@@ -999,10 +999,10 @@ local-gemma) route through `scripts/lib/provider_dispatch.py`. Kimi is CLI-OAuth
 only (`kimi-via-cli-only`); GLM (glm-5.2 default, plus glm-5.3/glm-5.3-flash — see
 `deprecated-glm-models` in `provider_constraints.yaml`) routes via OpenRouter (`zai-via-openrouter-only`);
 DeepSeek runs through the Claude harness with an own key (`deepseek-harness-subscription-blocked`
-gates the subscription variant). A provider switch exists (`vnx providers list` shows the
-families), but it does not enforce yet: every write verb (`on`, `off`, `reset`) refuses until
-every launch function calls `provider_switch.require`. Full lane map, takeover chain and
-the switch ("Provider switch"):
+gates the subscription variant). A provider switch (`vnx providers`) turns a family on or off for
+every project, and every launch function calls `provider_switch.require` first
+(`docs/core/PROVIDER_SWITCH.md`, ADR-044). Full lane map, takeover chain and
+the switch summary ("Provider switch"):
 `docs/core/PROVIDER_LANES.md`; dispatch decision rules: `docs/core/DISPATCH_RULES.md`.
 
 **Single-entry door (merged, default-ON).** Lane selection runs behind

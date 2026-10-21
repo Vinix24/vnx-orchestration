@@ -29,7 +29,7 @@ lane. On the current default lane, provider choice is a pinned default rather th
 capability question: T0 runs Opus 5.5, build-workers default to Sonnet, and `codex`/`kimi`
 are the subscription review gates, with `deepseek` as API-credit fallback and `glm` outside the default chain.
 
-`vnx providers` has one switch per provider family and `vnx providers list` shows its state. It cannot switch yet: every write verb refuses while a launch function does not call `provider_switch.require`, and `list` prints the count of those functions. The content boundary (`content_class`) is read by the conversation analyzer and the dream consolidation only, not by the receipt classifier, the tagger or the scout (OI-2172).
+`vnx providers` has one switch per provider family and `vnx providers list` shows its state. Every launch function honors it (`docs/core/PROVIDER_SWITCH.md`, ADR-044). `claude` and `codex` cannot be switched off, and the switch does not cover a project's own application code (`vnx providers check` is the hook for that). The content boundary (`content_class`) is read by the conversation analyzer and the dream consolidation only, not by the receipt classifier, the tagger or the scout (OI-2172).
 
 VNX was built and battle-tested with Claude Code as the primary provider. As Codex CLI
 results have become increasingly clear, multi-model dispatch support has been added:
@@ -43,7 +43,6 @@ results have become increasingly clear, multi-model dispatch support has been ad
 
 ### Nice-to-have (not in production)
 - Codex `/model` runtime switching (works in testing, needs production validation)
-- Enforced provider switching (`vnx providers`; see above)
 - Auto-detection of running CLI process (currently panes.json is authoritative source)
 
 ## Not Yet Tested
