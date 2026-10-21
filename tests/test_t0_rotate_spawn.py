@@ -116,7 +116,7 @@ elif cmd == "capture-pane":
     if launched and not os.environ.get("STUB_NO_FOOTER"):
         screen = "> \n  ⏵⏵ auto mode on (shift+tab to cycle)"
         # A skip run puts the catch-up wrap in front of the kickoff sentence.
-        if any(s and "Je bent de verse T0" in s for s in subs):
+        if any(s and "/kickoff" in s for s in subs):
             n = int(open(counter).read()) if os.path.exists(counter) else 0
             open(counter, "w").write(str(n + 1))
             if n < 2:
@@ -127,6 +127,8 @@ elif cmd == "capture-pane":
         elif typed and typed.startswith("/goal "):
             screen = "> " + typed + "\n  ⏵⏵ auto mode on"
     print(screen)
+elif cmd == "list-windows":
+    print("@1" if os.environ.get("STUB_NEW_WINDOW_GONE") else "@1\n@7")
 elif cmd == "run-shell":
     # Synchronous here so the test can observe it; like real tmux, -b reports 0 to the caller
     # whatever the background job ends with (its outcome lands in the receipt instead).
@@ -226,6 +228,8 @@ def rig(tmp_path):
         "VNX_T0_ROTATE_FOOTER_TIMEOUT": "5",
         "VNX_T0_ROTATE_TURN_TIMEOUT": "20",
         "VNX_T0_ROTATE_GOAL_CONFIRM_TIMEOUT": "3",
+        "VNX_T0_ROTATE_DELIVERY_TIMEOUT": "0",
+        "VNX_T0_ROTATE_DELIVERY_POLL": "0",
     }
     return {"tmp": tmp_path, "stub": stub, "project": project, "state": state, "env": env}
 
@@ -322,6 +326,28 @@ def _typed(rig) -> List[str]:
     return [c[-1] for c in _calls(rig) if c[:1] == ["send-keys"] and "-l" in c]
 
 
+LAUNCH_TAIL_RE = re.compile(r" --session-id ([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}) "
+                            r"/kickoff\\ rotatie\\ (rotation-\S+)$")
+
+
+def _launch(rig) -> str:
+    """The typed launch line without its start arguments: what is left is the old launch line."""
+    return LAUNCH_TAIL_RE.sub("", _typed(rig)[0])
+
+
+def _run_dir(rig) -> Path:
+    return next(rig["state"].glob("rotation-*"))
+
+
+def _prompt(rig) -> str:
+    """The full instruction the kickoff skill reads. It is no longer typed anywhere."""
+    return (_run_dir(rig) / "prompt.txt").read_text(encoding="utf-8")
+
+
+def _only(receipts: list, trigger: str) -> list:
+    return [r for r in receipts if r.get("trigger") == trigger]
+
+
 def _receipts(rig) -> list:
     path = Path(rig["env"]["VNX_T0_ROTATION_RECEIPTS_FILE"])
     if not path.exists():
@@ -411,7 +437,7 @@ def test_successor_without_footer_gets_nothing_typed(rig):
     _handoff(rig, HANDOFF_BASE)
     proc = _spawn(rig, env_extra={"STUB_NO_FOOTER": "1"})
     assert proc.returncode == 5
-    assert _typed(rig) == ["claude --model opus"]
+    assert len(_typed(rig)) == 1 and _launch(rig) == "claude --model opus"
     assert not rig["state"].joinpath(f"latch-pane-{PANE.replace('%', '_')}.json").exists()
 
 
@@ -432,21 +458,20 @@ def test_spawns_successor_with_first_step_and_no_goal(rig):
     assert new_window[new_window.index("-c") + 1] == str(rig["project"].resolve())
 
     typed = _typed(rig)
-    assert typed[0] == "claude --model opus"
-    prompt = typed[1]
-    assert f"tmux kill-window -t {OLD_WIN}" in prompt
+    assert len(typed) == 1, typed
+    assert _launch(rig) == "claude --model opus"
+    prompt = _prompt(rig)
+    assert "tmux kill-window" not in prompt
     assert "kickoff-skill" in prompt
     assert ("Pak daarna stap 1 op: **#1920 mergen**: lees het rapport, controleer rood/groen, "
             "glm-gate op de kop.") in prompt
     assert "\n" not in prompt
     assert "/goal" not in prompt
-    assert len(typed) == 2, typed
-    assert not any(c[0] == "run-shell" for c in calls)
     _assert_enter_always_separate(rig)
     assert not (rig["stub"] / "claude_invoked").exists()
 
     assert rotation_state.is_latched(rig["state"], session_id=SESSION, pane="")
-    [receipt] = _receipts(rig)
+    [receipt] = _only(_receipts(rig), "t0_context_rotation_started")
     assert receipt["trigger"] == "t0_context_rotation_started"
     assert receipt["receipt_kind"] == "state_mutation"
     assert receipt["session_id"] == SESSION
@@ -465,14 +490,14 @@ def test_remote_control_follows_the_bridge_and_config_dir_is_carried(rig):
     proc = _spawn(rig, env_extra={"CLAUDE_CODE_BRIDGE_SESSION_ID": "bridge-1",
                                   "CLAUDE_CONFIG_DIR": "/Users/x/.claude-salesminds"})
     assert proc.returncode == 0, proc.stderr
-    assert _typed(rig)[0] == ("CLAUDE_CONFIG_DIR=/Users/x/.claude-salesminds "
+    assert _launch(rig) == ("CLAUDE_CONFIG_DIR=/Users/x/.claude-salesminds "
                               "claude --model opus --remote-control VNX\\ ORCH")
 
 
 def test_no_rc_overrides_the_bridge(rig):
     _handoff(rig, HANDOFF_BASE)
     assert _spawn(rig, "--no-rc", env_extra={"CLAUDE_CODE_BRIDGE_SESSION_ID": "b"}).returncode == 0
-    assert _typed(rig)[0] == "claude --model opus"
+    assert _launch(rig) == "claude --model opus"
 
 
 def test_active_goal_is_resumed_after_the_first_turn(rig):
@@ -481,15 +506,15 @@ def test_active_goal_is_resumed_after_the_first_turn(rig):
     assert proc.returncode == 0, proc.stderr
 
     typed = _typed(rig)
-    assert "start zelf geen nieuwe /goal" in typed[1]
-    assert typed[2] == ("/goal werk alle open blockers af tot de lijst leeg is, hervat na "
+    assert "start zelf geen nieuwe /goal" in _prompt(rig)
+    assert typed[1] == ("/goal werk alle open blockers af tot de lijst leeg is, hervat na "
                         "context-rotatie; resterend: OI-1850 sluiten; OI-1851 fixen")
-    assert len(typed) == 3, typed
+    assert len(typed) == 2, typed
     _assert_enter_always_separate(rig)
 
     calls = _calls(rig)
-    kickoff_enter = max(i for i, c in enumerate(calls) if c[:1] == ["send-keys"] and "-l" in c
-                        and c[-1].startswith("Je bent")) + 1
+    kickoff_enter = next(i for i, c in enumerate(calls) if c[:1] == ["send-keys"] and "-l" in c
+                         and "/kickoff" in c[-1]) + 1
     goal_typed = next(i for i, c in enumerate(calls) if c[:1] == ["send-keys"] and "-l" in c
                       and c[-1].startswith("/goal "))
     # the turn was watched: busy captures, then idle, before the /goal was typed
@@ -608,7 +633,7 @@ def _new_window_dir(rig) -> str:
 def _root_start_asserted(rig, proc) -> None:
     assert proc.returncode == 0, proc.stderr
     assert _new_window_dir(rig) == str(rig["project"].resolve())
-    assert _typed(rig)[0] == "claude --model opus"
+    assert _launch(rig) == "claude --model opus"
     assert not any(c[0] == "kill-window" for c in _calls(rig))
 
 
@@ -619,7 +644,7 @@ def test_b1_t0_folder_start_from_the_project_root(rig):
     proc = _spawn(rig, env_extra={"STUB_OLD_PANE_PATH": str(root)})
     assert proc.returncode == 0, proc.stderr
     assert _new_window_dir(rig) == str(t0)
-    assert _typed(rig)[0] == f"cd -- {t0} && claude --model opus"
+    assert _launch(rig) == f"cd -- {t0} && claude --model opus"
     correction = [ln for ln in proc.stderr.splitlines() if "start folder correction" in ln]
     assert len(correction) == 1 and str(root) in correction[0] and str(t0) in correction[0]
     _assert_enter_always_separate(rig)
@@ -636,7 +661,7 @@ def test_b2_started_from_the_t0_folder_reads_the_root_handoff_and_logs_no_correc
     assert proc.returncode == 0, proc.stderr
     assert _new_window_dir(rig) == str(t0)
     assert "start folder correction" not in proc.stderr
-    assert "#1920 mergen" in _typed(rig)[1]
+    assert "#1920 mergen" in _prompt(rig)
     assert (root / "daily-log" / "handoff.md").is_file()
     assert not (t0 / "daily-log").exists()
 
@@ -739,7 +764,7 @@ def test_b8_a_successor_in_the_wrong_folder_is_closed_and_nothing_is_typed(rig):
     assert proc.returncode == 5
     assert str(wrong.resolve()) in proc.stderr and str(t0) in proc.stderr
     assert ["kill-window", "-t", NEW_WIN] in _calls(rig)
-    assert _typed(rig) == [f"cd -- {t0} && claude --model opus"]
+    assert len(_typed(rig)) == 1 and _launch(rig) == f"cd -- {t0} && claude --model opus"
     assert not any(c[:2] == ["kill-window", "-t"] and c[2] == OLD_WIN for c in _calls(rig))
     assert not list(rig["state"].glob("latch-*"))
     assert _receipts(rig) == []
@@ -773,7 +798,9 @@ def test_b9_start_dir_is_the_last_field_and_decodes_with_a_space_in_the_root(rig
     proc = _spawn(rig)
     assert proc.returncode == 0, proc.stderr
     last = proc.stdout.strip().splitlines()[-1]
-    assert last.rsplit(" run_dir=", 1)[1].split(" start_dir=", 1)[0] == str(next(rig["state"].glob("rotation-*")))
+    assert (last.rsplit(" run_dir=", 1)[1].split(" close=", 1)[0]
+            == str(next(rig["state"].glob("rotation-*"))))
+    assert " close=on_delivery_confirmed start_dir=" in last
     encoded = last.split(" start_dir=", 1)[1]
     decoded = subprocess.run(["bash", "-c", 'eval "printf %s $1"', "_", encoded],
                              capture_output=True, text=True).stdout
@@ -850,7 +877,7 @@ def test_a_valid_wrap_with_nuggets_in_the_bucket_spawns(rig):
                                     bucket=str(bucket)) + HANDOFF_BASE, wrap=False)
     proc = _spawn(rig)
     assert proc.returncode == 0, proc.stderr
-    assert "#1920 mergen" in _typed(rig)[1]
+    assert "#1920 mergen" in _prompt(rig)
 
 
 def test_a_wrap_that_took_twenty_minutes_spawns(rig):
@@ -885,7 +912,7 @@ def test_a_wrap_through_wrap_start_and_wrap_finish_spawns(rig):
 
     proc = _spawn(rig)
     assert proc.returncode == 0, proc.stderr
-    assert "#1920 mergen" in _typed(rig)[1]
+    assert "#1920 mergen" in _prompt(rig)
 
 
 @pytest.mark.parametrize("case, check", [
@@ -937,15 +964,16 @@ def test_skip_wrap_reason_spawns_with_a_receipt_and_the_catch_up_first(rig):
     held = (rig["stub"] / "ledger_at_new_window").read_text()
     assert "t0_context_rotation_wrap_skipped" in held, "the window opened before the ledger held the skip"
 
-    prompt = _typed(rig)[1]
+    prompt = _prompt(rig)
     assert prompt.startswith("Eerst een inhaal-wrap")
-    assert prompt.index(str(transcript)) < prompt.index("tmux kill-window -t @1")
+    assert "kill-window" not in prompt
     assert f"/build-log wrap --from-transcript {transcript}" in prompt
     assert f"transcript-digest --transcript {transcript}" in prompt
     assert "Pak daarna stap 1 op: **#1920 mergen**" in prompt
     assert (run_dir / "prompt.txt").read_text(encoding="utf-8") == prompt
     assert [r["trigger"] for r in _receipts(rig)] == ["t0_context_rotation_wrap_skipped",
-                                                      "t0_context_rotation_started"]
+                                                      "t0_context_rotation_started",
+                                                      "t0_context_rotation_delivery"]
 
 
 def test_skip_takes_the_transcript_from_the_pending_marker(rig):
@@ -955,7 +983,7 @@ def test_skip_takes_the_transcript_from_the_pending_marker(rig):
     _handoff(rig, HANDOFF_BASE, wrap=False)
     proc = _spawn(rig, "--skip-wrap-reason", "noodrem")
     assert proc.returncode == 0, proc.stderr
-    assert str(transcript) in _typed(rig)[1]
+    assert str(transcript) in _prompt(rig)
     [receipt] = _skipped(rig)
     assert receipt["transcript"] == str(transcript) and receipt["session_id"] == SESSION
 
@@ -1015,7 +1043,7 @@ def test_a_relative_transcript_is_absolute_in_receipt_prompt_and_digest(rig):
 
     [receipt] = _skipped(rig)
     assert receipt["transcript"] == absolute
-    prompt = _typed(rig)[1]
+    prompt = _prompt(rig)
     assert f"/build-log wrap --from-transcript {absolute}" in prompt
     digest = _DIGEST_RE.search(prompt)
     assert digest, prompt
@@ -1037,7 +1065,7 @@ def test_a_relative_transcript_from_the_pending_marker_is_made_absolute(rig):
     absolute = os.path.join(os.path.realpath(transcript.parent), transcript.name)
     [receipt] = _skipped(rig)
     assert receipt["transcript"] == absolute
-    assert f"transcript-digest --transcript {absolute}" in _typed(rig)[1]
+    assert f"transcript-digest --transcript {absolute}" in _prompt(rig)
 
 
 def test_a_transcript_that_cannot_be_resolved_refuses_before_any_window(rig):
@@ -1104,3 +1132,213 @@ def test_skips_lists_the_receipt_the_spawner_booked(rig):
     lines = proc.stdout.strip().splitlines()
     assert 'reason="noodrem op 610K"' in lines[0]
     assert lines[-1].startswith("1 wrap skip(s) in the last 7 day(s)")
+
+
+# ── the first message is a start argument (dispatch 20261021-rot-prompt-als-argument, OI-2102) ──
+
+UUID_RE = re.compile(r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
+
+
+def _launch_parts(rig):
+    match = LAUNCH_TAIL_RE.search(_typed(rig)[0])
+    assert match, _typed(rig)
+    return match.group(1), match.group(2)
+
+
+def test_the_first_message_is_a_start_argument_and_nothing_is_typed_after_the_footer(rig):
+    """Red run on origin/main: the prompt was typed with `send-keys -l` into the TUI input box
+    after the footer, and the launch line carried neither --session-id nor the first message."""
+    _handoff(rig, HANDOFF_BASE)
+    proc = _spawn(rig)
+    assert proc.returncode == 0, proc.stderr
+
+    session_uuid, run_id = _launch_parts(rig)
+    assert UUID_RE.match(session_uuid)
+    assert run_id == _run_dir(rig).name
+    assert shlex.split(_typed(rig)[0])[-3:] == ["--session-id", session_uuid, f"/kickoff rotatie {run_id}"]
+    assert _typed(rig) == [_typed(rig)[0]], "something was typed into the TUI after the footer"
+    assert not any("Je bent de verse T0" in t for t in _typed(rig))
+    _assert_enter_always_separate(rig)
+
+
+def test_the_launch_line_keeps_config_dir_remote_control_and_cd_prefix(rig):
+    t0 = _t0_folder(rig)
+    _handoff(rig, HANDOFF_BASE)
+    proc = _spawn(rig, env_extra={"CLAUDE_CODE_BRIDGE_SESSION_ID": "bridge-1",
+                                  "CLAUDE_CONFIG_DIR": "/Users/x/.claude-salesminds"})
+    assert proc.returncode == 0, proc.stderr
+    assert _launch(rig) == (f"cd -- {t0} && CLAUDE_CONFIG_DIR=/Users/x/.claude-salesminds "
+                            "claude --model opus --remote-control VNX\\ ORCH")
+
+
+def test_a_goal_run_types_only_the_goal_after_the_launch(rig):
+    _handoff(rig, HANDOFF_BASE + GOAL_SECTION)
+    assert _spawn(rig).returncode == 0
+    typed = _typed(rig)
+    assert len(typed) == 2 and typed[1].startswith("/goal ")
+
+
+def test_prompt_txt_keeps_the_goal_sentence_and_the_catch_up_head_without_the_kill_sentence(rig):
+    transcript = _transcript(rig)
+    _handoff(rig, HANDOFF_BASE + GOAL_SECTION, wrap=False)
+    assert _spawn(rig, "--skip-wrap-reason", "noodrem", "--transcript", str(transcript)).returncode == 0
+    prompt = _prompt(rig)
+    assert prompt.startswith("Eerst een inhaal-wrap")
+    assert "start zelf geen nieuwe /goal" in prompt
+    assert "kill-window" not in prompt
+    assert json.loads((_run_dir(rig) / "continuation.json").read_text())["goal"].startswith("/goal werk alle")
+
+
+def test_the_delivery_check_is_a_script_file_run_by_the_tmux_server(rig):
+    _handoff(rig, HANDOFF_BASE)
+    assert _spawn(rig).returncode == 0
+    jobs = [c for c in _calls(rig) if c[0] == "run-shell"]
+    [job] = jobs
+    job_file = _run_dir(rig) / "delivery_job.sh"
+    assert job[1] == "-b" and str(job_file) in job[-1]
+    assert "#{" not in job[-1], "run-shell expands #{...} formats in an inline command"
+    body = job_file.read_text(encoding="utf-8")
+    session_uuid, run_id = _launch_parts(rig)
+    assert session_uuid in body and "t0_rotation_delivery.py" in body and f"/kickoff rotatie {run_id}" in body.replace("\\", "")
+    assert subprocess.run(["bash", "-n", str(job_file)]).returncode == 0
+
+
+def test_the_config_dir_of_the_transcript_search_follows_claude_config_dir(rig):
+    _handoff(rig, HANDOFF_BASE)
+    assert _spawn(rig, env_extra={"CLAUDE_CONFIG_DIR": "/Users/x/.claude-salesminds"}).returncode == 0
+    body = (_run_dir(rig) / "delivery_job.sh").read_text(encoding="utf-8")
+    assert "--config-dir /Users/x/.claude-salesminds" in body
+
+
+def test_without_a_transcript_in_time_the_old_window_stays_open_and_both_windows_say_so(rig):
+    _handoff(rig, HANDOFF_BASE)
+    assert _spawn(rig).returncode == 0
+    calls = _calls(rig)
+    assert not any(c[0] == "kill-window" for c in calls)
+    notes = [c for c in calls if c[0] == "display-message" and "-p" not in c]
+    assert sorted(c[c.index("-t") + 1] for c in notes) == sorted([NEW_WIN, OLD_WIN])
+    delivery = json.loads((_run_dir(rig) / "delivery.json").read_text(encoding="utf-8"))
+    assert delivery["outcome"] == "timeout" and delivery["transcript"] is None
+    [receipt] = _only(_receipts(rig), "t0_context_rotation_delivery")
+    assert receipt["outcome"] == "timeout"
+
+
+# ── the delivery job against a fake transcript ───────────────────────────────
+
+DELIVERY = REPO_ROOT / "scripts" / "lib" / "t0_rotation_delivery.py"
+JOB_UUID = "0f1e2d3c-4b5a-4697-8877-665544332211"
+JOB_RUN_ID = "rotation-20261021-063814-84445"
+KICKOFF_RECORD = {
+    "type": "user", "isSidechain": False, "origin": {"kind": "human"}, "userType": "external",
+    "message": {"role": "user", "content": (
+        "<command-message>kickoff</command-message>\n<command-name>/kickoff</command-name>\n"
+        f"<command-args>rotatie {JOB_RUN_ID}</command-args>")},
+}
+NOISE = [
+    {"type": "mode", "mode": "normal"},
+    {"type": "file-history-snapshot", "snapshot": {}},
+    {"type": "queue-operation", "operation": "enqueue", "content": "/kickoff"},
+    {"type": "user", "isMeta": True, "message": {"role": "user",
+     "content": "<local-command-caveat>Caveat: generated while running local commands.</local-command-caveat>"}},
+    {"type": "user", "message": {"role": "user",
+     "content": "<local-command-stdout></local-command-stdout>"}},
+    {"type": "user", "message": {"role": "user", "content": "<system-reminder>SessionStart hook</system-reminder>"}},
+    {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "content": "x"}]}},
+]
+
+
+def _job(rig, records, *, extra_env: Dict[str, str] = None, timeout: str = "0"):
+    config = rig["tmp"] / "config"
+    project_dir = config / "projects" / "-some-project"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    if records is not None:
+        (project_dir / f"{JOB_UUID}.jsonl").write_text(
+            "".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+    run_dir = rig["tmp"] / "run" / JOB_RUN_ID
+    run_dir.mkdir(parents=True)
+    proc = subprocess.run(
+        [sys.executable, str(DELIVERY), "--run-dir", str(run_dir), "--session-uuid", JOB_UUID,
+         "--config-dir", str(config), "--expected", f"/kickoff rotatie {JOB_RUN_ID}",
+         "--old-window", OLD_WIN, "--new-window", NEW_WIN, "--tmux", str(rig["tmp"] / "bin" / "tmux"),
+         "--timeout", timeout, "--poll", "0.05"],
+        env={**rig["env"], **(extra_env or {})}, capture_output=True, text=True, timeout=60)
+    delivery = run_dir / "delivery.json"
+    return proc, json.loads(delivery.read_text(encoding="utf-8")), run_dir
+
+
+def _kills(rig):
+    return [c for c in _calls(rig) if c[0] == "kill-window"]
+
+
+def test_a_confirmed_delivery_kills_the_old_window(rig):
+    proc, delivery, run_dir = _job(rig, NOISE + [KICKOFF_RECORD])
+    assert proc.returncode == 0, proc.stderr
+    assert delivery["outcome"] == "confirmed"
+    assert delivery["expected"] == f"/kickoff rotatie {JOB_RUN_ID}"
+    assert delivery["found"] == f"/kickoff rotatie {JOB_RUN_ID}"
+    assert delivery["transcript"].endswith(f"{JOB_UUID}.jsonl")
+    assert _kills(rig) == [["kill-window", "-t", OLD_WIN]]
+    assert not any(c[0] == "display-message" for c in _calls(rig))
+    assert not list(run_dir.glob("*.tmp"))
+    [receipt] = _only(_receipts(rig), "t0_context_rotation_delivery")
+    assert receipt["outcome"] == "confirmed" and receipt["run_id"] == JOB_RUN_ID
+
+
+def test_a_plain_text_first_message_is_confirmed_too(rig):
+    plain = {"type": "user", "message": {"role": "user", "content": f"/kickoff rotatie {JOB_RUN_ID}"}}
+    proc, delivery, _ = _job(rig, NOISE + [plain])
+    assert proc.returncode == 0 and delivery["outcome"] == "confirmed"
+    assert _kills(rig) == [["kill-window", "-t", OLD_WIN]]
+
+
+def test_a_confirmed_delivery_leaves_the_old_window_when_the_new_one_is_gone(rig):
+    proc, delivery, _ = _job(rig, [KICKOFF_RECORD], extra_env={"STUB_NEW_WINDOW_GONE": "1"})
+    assert delivery["outcome"] == "confirmed" and delivery["old_window_close"] == "skipped_new_window_gone"
+    assert _kills(rig) == []
+
+
+def test_a_mismatch_keeps_both_windows_and_says_so_in_both(rig):
+    tail = {"type": "user", "message": {"role": "user", "content": "e-dir ~/.vnx-data/vnx-dev/state`"}}
+    proc, delivery, _ = _job(rig, NOISE + [tail, KICKOFF_RECORD])
+    assert proc.returncode == 1
+    assert delivery["outcome"] == "mismatch" and delivery["found"] == "e-dir ~/.vnx-data/vnx-dev/state`"
+    assert _kills(rig) == []
+    notes = [c for c in _calls(rig) if c[0] == "display-message"]
+    assert sorted(c[c.index("-t") + 1] for c in notes) == sorted([NEW_WIN, OLD_WIN])
+    assert all("mismatch" in c[-1] for c in notes)
+    assert not any(c[0] == "send-keys" for c in _calls(rig))
+    [receipt] = _only(_receipts(rig), "t0_context_rotation_delivery")
+    assert receipt["outcome"] == "mismatch"
+
+
+def test_the_found_text_is_cut_at_200_characters(rig):
+    long = {"type": "user", "message": {"role": "user", "content": "x" * 500}}
+    _, delivery, _ = _job(rig, [long])
+    assert delivery["outcome"] == "mismatch" and delivery["found"] == "x" * 200
+
+
+@pytest.mark.parametrize("records", [None, NOISE])
+def test_a_timeout_keeps_both_windows(rig, records):
+    """No transcript at all, or a transcript without a real user record: the same outcome."""
+    proc, delivery, _ = _job(rig, records)
+    assert proc.returncode == 1 and delivery["outcome"] == "timeout"
+    assert delivery["found"] == ""
+    assert _kills(rig) == []
+    notes = [c for c in _calls(rig) if c[0] == "display-message"]
+    assert sorted(c[c.index("-t") + 1] for c in notes) == sorted([NEW_WIN, OLD_WIN])
+    assert not any(c[0] == "send-keys" for c in _calls(rig))
+
+
+def test_the_job_waits_for_a_transcript_that_appears_late(rig):
+    config = rig["tmp"] / "config" / "projects" / "-p"
+    config.mkdir(parents=True)
+    target = config / f"{JOB_UUID}.jsonl"
+    writer = subprocess.Popen([sys.executable, "-c",
+                               "import sys,time,json; time.sleep(0.6); "
+                               "open(sys.argv[1],'w').write(json.dumps(json.loads(sys.argv[2]))+'\\n')",
+                               str(target), json.dumps(KICKOFF_RECORD)])
+    try:
+        proc, delivery, _ = _job(rig, None, timeout="20")
+    finally:
+        writer.wait(timeout=30)
+    assert proc.returncode == 0 and delivery["outcome"] == "confirmed"

@@ -333,7 +333,7 @@ def _write_handoff(root: Path, text: str = HANDOFF_BODY) -> Path:
 
 
 def _compose(root: Path, handoff: Path, out: Path, *extra: str) -> int:
-    return rotation_state.main(["compose", "--handoff", str(handoff), "--old-window", "@1",
+    return rotation_state.main(["compose", "--handoff", str(handoff),
                                 "--out-dir", str(out), "--project-root", str(root), *extra])
 
 
@@ -1009,7 +1009,7 @@ def test_a_skip_run_composes_without_a_wrap_block_and_puts_the_catch_up_first(tm
     quoted = f"'{transcript}'"
     assert f"/build-log wrap --from-transcript {quoted}" in prompt
     assert f"transcript-digest --transcript {quoted}" in prompt
-    assert "Sluit daarna het vorige venster" in prompt and "Sluit eerst" not in prompt
+    assert "kill-window" not in prompt and "Voer daarna de kickoff-skill uit" in prompt
     assert "\n" not in prompt
     assert (out / "first_step.txt").read_text(encoding="utf-8") == "**#2080 mergen**: lees het rapport."
 
@@ -1313,3 +1313,106 @@ def test_the_skills_argv_runs_a_wrap_a_digest_and_the_skip_list(tmp_path):
     assert skips.returncode == 0, skips.stderr
     line = skips.stdout.splitlines()[0]
     assert f"transcript={transcript}" in line and f"run_dir={run_dir}" in line
+
+
+# ── run-dir, kickoff-done, continuation.json (dispatch 20261021-rot-prompt-als-argument) ──
+
+
+def _handoff_with_wrap(root: Path, tmp_path: Path, extra: str = "") -> Path:
+    """A handoff with a real wrap: block, made the way /build-log wrap makes it."""
+    assert rotation_state.main(["wrap-start", "--project-root", str(root), "--project-slug", SLUG]) == 0
+    handoff = _write_handoff(root, HANDOFF_BODY + extra)
+    _write_daily(root)
+    assert rotation_state.main(["wrap-finish", "--project-root", str(root), "--daily-log", DAILY]) == 0
+    return handoff
+
+
+def _run(tmp_path: Path, root: Path, handoff: Path, name: str = "rotation-20261021-070000-1") -> Path:
+    out = tmp_path / "state" / name
+    assert _compose(root, handoff, out) == 0
+    return out
+
+
+def test_compose_writes_continuation_json_and_a_prompt_without_the_kill_window_sentence(
+        tmp_path, monkeypatch):
+    root = _project(tmp_path, monkeypatch)
+    handoff = _handoff_with_wrap(root, tmp_path)
+    out = _run(tmp_path, root, handoff)
+    continuation = json.loads((out / "continuation.json").read_text(encoding="utf-8"))
+    assert continuation == {"run_id": out.name, "first_step": (out / "first_step.txt").read_text(),
+                            "goal": None, "handoff": str(handoff)}
+    prompt = (out / "prompt.txt").read_text(encoding="utf-8")
+    assert "kill-window" not in prompt and "Sluit eerst" not in prompt
+    assert prompt.startswith("Je bent de verse T0 na een context-rotatie. Voer eerst de kickoff-skill uit")
+
+
+def test_continuation_json_carries_the_goal_line_when_the_handoff_has_one(tmp_path, monkeypatch):
+    root = _project(tmp_path, monkeypatch)
+    handoff = _handoff_with_wrap(root, tmp_path, extra="\n## Actief /goal\nDirective: `/goal werk de track af`\n")
+    out = _run(tmp_path, root, handoff)
+    continuation = json.loads((out / "continuation.json").read_text(encoding="utf-8"))
+    assert continuation["goal"] == (out / "goal.txt").read_text(encoding="utf-8")
+    assert continuation["goal"].startswith("/goal werk de track af")
+
+
+def test_run_dir_prints_the_absolute_run_dir_and_refuses_what_is_not_a_run(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv(rotation_state.STATE_DIR_ENV, str(tmp_path / "state"))
+    (tmp_path / "state" / "rotation-1").mkdir(parents=True)
+    assert rotation_state.main(["run-dir", "rotation-1"]) == 0
+    assert capsys.readouterr().out.strip() == str((tmp_path / "state" / "rotation-1").resolve())
+    assert rotation_state.main(["run-dir", "rotation-2"]) == 1
+    assert capsys.readouterr().out == ""
+    for bad in ("..", "../state", "a/b"):
+        assert rotation_state.main(["run-dir", bad]) == 1
+
+
+def test_kickoff_done_writes_the_marker_and_books_the_receipt(tmp_path, monkeypatch):
+    monkeypatch.setenv(rotation_state.RECEIPTS_FILE_ENV, str(tmp_path / "r.ndjson"))
+    run = tmp_path / "rotation-9"
+    run.mkdir()
+    assert rotation_state.main(["kickoff-done", "--run-dir", str(run)]) == 0
+    marker = json.loads((run / "kickoff_done.json").read_text(encoding="utf-8"))
+    assert marker["run_id"] == "rotation-9" and marker["catch_up_done"] is False
+    receipts = [json.loads(ln) for ln in (tmp_path / "r.ndjson").read_text().splitlines()]
+    assert [r["trigger"] for r in receipts] == ["t0_context_rotation_kickoff_done"]
+    assert not list(run.glob("*.tmp"))
+
+
+def test_kickoff_done_on_a_missing_run_dir_writes_nothing(tmp_path, monkeypatch):
+    monkeypatch.setenv(rotation_state.RECEIPTS_FILE_ENV, str(tmp_path / "r.ndjson"))
+    assert rotation_state.main(["kickoff-done", "--run-dir", str(tmp_path / "nope")]) == 1
+    assert not (tmp_path / "r.ndjson").exists()
+
+
+def _skip_receipt(tmp_path: Path, monkeypatch, run: Path, at: float) -> None:
+    ledger = tmp_path / "r.ndjson"
+    monkeypatch.setenv(rotation_state.RECEIPTS_FILE_ENV, str(ledger))
+    ledger.write_text(json.dumps({
+        "trigger": rotation_state.WRAP_SKIPPED_TRIGGER, "run_dir": str(run),
+        "timestamp": rotation_state._iso_utc(at)}) + "\n", encoding="utf-8")
+
+
+def test_kickoff_done_catch_up_needs_a_wrap_newer_than_the_skip(tmp_path, monkeypatch, capsys):
+    root = _project(tmp_path, monkeypatch)
+    handoff = _handoff_with_wrap(root, tmp_path)
+    run = _run(tmp_path, root, handoff)
+    wrapped = rotation_state._parse_utc(rotation_state.read_frontmatter(handoff)["wrap"]["wrapped_at"])
+
+    # skip receipt newer than the wrap: the catch-up wrap has not happened, exit 3, nothing written
+    _skip_receipt(tmp_path, monkeypatch, run, wrapped + 600)
+    assert rotation_state.main(["kickoff-done", "--run-dir", str(run), "--catch-up-done"]) == 3
+    assert not (run / "kickoff_done.json").exists()
+    assert "not newer than the skip receipt" in capsys.readouterr().err
+
+    # the wrap is newer than the skip receipt: accepted
+    _skip_receipt(tmp_path, monkeypatch, run, wrapped - 600)
+    assert rotation_state.main(["kickoff-done", "--run-dir", str(run), "--catch-up-done"]) == 0
+    assert json.loads((run / "kickoff_done.json").read_text())["catch_up_done"] is True
+
+
+def test_kickoff_done_catch_up_without_a_skip_receipt_for_this_run_exits_3(tmp_path, monkeypatch):
+    root = _project(tmp_path, monkeypatch)
+    run = _run(tmp_path, root, _handoff_with_wrap(root, tmp_path))
+    _skip_receipt(tmp_path, monkeypatch, tmp_path / "another-run", time.time() - 3600)
+    assert rotation_state.main(["kickoff-done", "--run-dir", str(run), "--catch-up-done"]) == 3
+    assert not (run / "kickoff_done.json").exists()

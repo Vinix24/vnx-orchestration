@@ -104,6 +104,9 @@ WRAP_TOLERANCE_SECONDS = 60
 DEFAULT_MAX_AGE_MINUTES = 15
 DIGEST_DEFAULT_MAX_BYTES = 200_000
 EXIT_WRAP_PROOF = 6
+KICKOFF_DONE_TRIGGER = "t0_context_rotation_kickoff_done"
+CONTINUATION_FILE = "continuation.json"
+KICKOFF_DONE_FILE = "kickoff_done.json"
 
 _SAFE_KEY_RE = re.compile(r"[^A-Za-z0-9_.-]")
 
@@ -420,14 +423,15 @@ def goal_followup_text(goal: ActiveGoal, handoff_path: str) -> str:
             "context-rotatie en werk de resterende taken daar af.")
 
 
-def kickoff_prompt(*, old_window: str, handoff_path: str, first_step: str, has_goal: bool,
+def kickoff_prompt(*, handoff_path: str, first_step: str, has_goal: bool,
                    catch_up: Optional[str] = None) -> str:
-    """The one line typed into the successor. A skip run puts ``catch_up`` at its head, so the
-    catch-up wrap comes before everything else, closing the old window included."""
-    order = "Sluit daarna" if catch_up else "Sluit eerst"
+    """The full instruction the kickoff skill reads from ``prompt.txt``. The first message the
+    successor receives is the short ``/kickoff rotatie <run_id>``; closing the old window is the
+    delivery job's work, so this text carries no kill command. A skip run puts ``catch_up`` at its
+    head, so the catch-up wrap comes before everything else."""
+    order = "Voer daarna" if catch_up else "Voer eerst"
     prompt = (
-        f"Je bent de verse T0 na een context-rotatie. {order} het vorige venster met dit "
-        f"commando: tmux kill-window -t {old_window} . Voer daarna de kickoff-skill uit op de "
+        f"Je bent de verse T0 na een context-rotatie. {order} de kickoff-skill uit op de "
         f"handoff ({handoff_path}). Pak daarna stap 1 op: {first_step}"
     )
     if catch_up:
@@ -1263,8 +1267,8 @@ def _cmd_compose(args: argparse.Namespace) -> int:
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     atomic_write_text(out / "prompt.txt", kickoff_prompt(
-        old_window=args.old_window, handoff_path=str(handoff_path),
-        first_step=handoff.first_step, has_goal=handoff.goal is not None, catch_up=catch_up,
+        handoff_path=str(handoff_path), first_step=handoff.first_step,
+        has_goal=handoff.goal is not None, catch_up=catch_up,
     ))
     atomic_write_text(out / "first_step.txt", handoff.first_step)
     # A re-run into the same run dir (after a catch-up wrap) follows the handoff it reads: a
@@ -1274,6 +1278,11 @@ def _cmd_compose(args: argparse.Namespace) -> int:
         atomic_write_text(goal_file, goal_followup_text(handoff.goal, str(handoff_path)))
     else:
         goal_file.unlink(missing_ok=True)
+    atomic_write_json(out / CONTINUATION_FILE, {
+        "run_id": out.name, "first_step": handoff.first_step,
+        "goal": goal_file.read_text(encoding="utf-8") if handoff.goal is not None else None,
+        "handoff": str(handoff_path),
+    })
     return 0
 
 
@@ -1415,6 +1424,66 @@ def _cmd_latch(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_run_dir(args: argparse.Namespace) -> int:
+    """The absolute run dir of ``run_id``, from the resolved state dir. A run id that names a
+    path instead of a run, or a run dir that does not exist, exits 1 and prints nothing."""
+    if not args.run_id or _safe_key(args.run_id) != args.run_id or args.run_id in (".", ".."):
+        sys.stderr.write(f"run-dir: {args.run_id!r} is not a run id\n")
+        return 1
+    path = (state_dir(args.project_root) / args.run_id).resolve()
+    if not path.is_dir():
+        sys.stderr.write(f"run-dir: no run dir {path}\n")
+        return 1
+    sys.stdout.write(f"{path}\n")
+    return 0
+
+
+def _skip_receipt_time(run_dir: Path) -> Optional[float]:
+    """When the wrap-skip receipt of this run was booked: the newest one naming ``run_dir``."""
+    stamps = [_parse_utc(r.get("timestamp")) for r in wrap_skips(ledger_path(), since_days=3650)
+              if r.get("run_dir") and Path(str(r["run_dir"])).expanduser().resolve() == run_dir]
+    known = [stamp for stamp in stamps if stamp is not None]
+    return max(known) if known else None
+
+
+def _catch_up_problem(run_dir: Path) -> Optional[str]:
+    """Why the handoff does not prove the catch-up wrap of this skip run, or None when it does:
+    the wrap block of the handoff must be newer than the run's skip receipt."""
+    continuation = _read_json(run_dir / CONTINUATION_FILE) or {}
+    handoff = continuation.get("handoff")
+    if not handoff:
+        return f"{run_dir / CONTINUATION_FILE} names no handoff"
+    skipped_at = _skip_receipt_time(run_dir)
+    if skipped_at is None:
+        return f"the ledger holds no {WRAP_SKIPPED_TRIGGER} receipt for run dir {run_dir}"
+    try:
+        wrapped_at = _parse_utc(_wrap_block(Path(handoff)).get("wrapped_at"))
+    except WrapProofError as exc:
+        return f"the handoff {handoff} carries no readable wrap block ({exc.detail})"
+    if wrapped_at is None or wrapped_at <= skipped_at:
+        return (f"the wrap in {handoff} is not newer than the skip receipt of this run "
+                f"({_iso_utc(skipped_at)}): run the catch-up wrap first")
+    return None
+
+
+def _cmd_kickoff_done(args: argparse.Namespace) -> int:
+    run_dir = Path(args.run_dir).expanduser().resolve()
+    if not run_dir.is_dir():
+        sys.stderr.write(f"kickoff-done: no run dir {run_dir}\n")
+        return 1
+    if args.catch_up_done:
+        problem = _catch_up_problem(run_dir)
+        if problem:
+            sys.stderr.write(f"kickoff-done: {problem}; nothing written\n")
+            return 3
+    marker = run_dir / KICKOFF_DONE_FILE
+    atomic_write_json(marker, {"run_id": run_dir.name, "kickoff_done_at": _utc_now_iso(),
+                               "catch_up_done": bool(args.catch_up_done)})
+    emit_event(KICKOFF_DONE_TRIGGER, file=str(marker), run_id=run_dir.name,
+               catch_up_done=bool(args.catch_up_done))
+    return 0
+
+
 def _cmd_event(args: argparse.Namespace) -> int:
     fields: Dict[str, Any] = {}
     for pair in args.field or []:
@@ -1443,7 +1512,6 @@ def _add_compose_parser(sub: Any) -> None:
     compose = sub.add_parser("compose", help="check the handoff and its wrap proof, write "
                              "prompt.txt/first_step.txt/goal.txt")
     compose.add_argument("--handoff", required=True)
-    compose.add_argument("--old-window", required=True)
     compose.add_argument("--out-dir", required=True)
     compose.add_argument("--max-age-minutes", type=_non_negative_int, default=DEFAULT_MAX_AGE_MINUTES,
                          help="oldest wrapped_at that still counts (default %(default)s)")
@@ -1498,6 +1566,19 @@ def _add_skip_parsers(sub: Any) -> None:
     digest.set_defaults(func=_cmd_transcript_digest)
 
 
+def _add_run_parsers(sub: Any) -> None:
+    run = sub.add_parser("run-dir", help="print the absolute run dir of a rotation run")
+    run.add_argument("run_id")
+    run.add_argument("--project-root", default=None)
+    run.set_defaults(func=_cmd_run_dir)
+
+    done = sub.add_parser("kickoff-done", help="mark the kickoff of a run as done (marker + receipt)")
+    done.add_argument("--run-dir", required=True)
+    done.add_argument("--catch-up-done", action="store_true",
+                      help="skip run: first check that the handoff carries a wrap newer than the skip")
+    done.set_defaults(func=_cmd_kickoff_done)
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="T0 context-rotation shared state")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -1505,6 +1586,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     _add_compose_parser(sub)
     _add_wrap_parsers(sub)
     _add_skip_parsers(sub)
+    _add_run_parsers(sub)
 
     sdir = sub.add_parser("state-dir", help="print the rotation state dir")
     sdir.add_argument("--project-root", default=None)
