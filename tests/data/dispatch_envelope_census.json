@@ -149,38 +149,38 @@
     },
     {
       "file": "tests/test_dispatch_envelope.py",
-      "line": 932,
+      "line": 970,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_govern"
     },
     {
       "file": "tests/test_dispatch_envelope.py",
-      "line": 957,
+      "line": 983,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_AdapterResult"
     },
     {
       "file": "tests/test_dispatch_envelope.py",
-      "line": 992,
+      "line": 1003,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_AdapterResult"
     },
     {
       "file": "tests/test_dispatch_envelope.py",
-      "line": 1013,
+      "line": 1020,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_AdapterResult"
     },
     {
       "file": "tests/test_dispatch_envelope.py",
-      "line": 1028,
+      "line": 1037,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
-      "symbol": "_govern"
+      "symbol": "_AdapterResult"
     },
     {
       "file": "tests/test_dispatch_envelope_annotations_resolve.py",
@@ -1009,6 +1009,41 @@
       "symbol": "_receipt_exists_for_dispatch"
     },
     {
+      "file": "tests/test_harness_run_cost.py",
+      "line": 511,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_harness_run_cost.py",
+      "line": 521,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_harness_run_cost.py",
+      "line": 535,
+      "mechanism": "direct-call",
+      "module_target": "envelope_govern",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_harness_run_cost.py",
+      "line": 646,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_provider",
+      "symbol": "_map_harness_spawn_result"
+    },
+    {
+      "file": "tests/test_harness_run_cost.py",
+      "line": 660,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_claude",
+      "symbol": "ClaudeSubprocessAdapter"
+    },
+    {
       "file": "tests/test_headless_worktree_isolation.py",
       "line": 30,
       "mechanism": "direct-call",
@@ -1507,35 +1542,35 @@
     },
     {
       "file": "tests/test_plan_gate_panel.py",
-      "line": 33,
+      "line": 34,
       "mechanism": "direct-call",
       "module_target": "envelope_types",
       "symbol": "_AdapterResult"
     },
     {
       "file": "tests/test_plan_gate_panel.py",
-      "line": 1334,
+      "line": 1357,
       "mechanism": "patch.object-attr",
       "module_target": "envelope_adapters_claude",
       "symbol": "ClaudeSubprocessAdapter.run"
     },
     {
       "file": "tests/test_plan_gate_panel.py",
-      "line": 1335,
+      "line": 1358,
       "mechanism": "direct-call",
       "module_target": "envelope_adapters_claude",
       "symbol": "ClaudeSubprocessAdapter"
     },
     {
       "file": "tests/test_plan_gate_panel.py",
-      "line": 1675,
+      "line": 1698,
       "mechanism": "patch.object-attr",
       "module_target": "envelope_adapters_claude",
       "symbol": "ClaudeSubprocessAdapter.run"
     },
     {
       "file": "tests/test_plan_gate_panel.py",
-      "line": 1676,
+      "line": 1699,
       "mechanism": "direct-call",
       "module_target": "envelope_adapters_claude",
       "symbol": "ClaudeSubprocessAdapter"
@@ -1850,7 +1885,10 @@
     "envelope_adapters_provider.ProviderAdapter::run",
     "envelope_adapters_provider::_fail_loud_on_empty_success",
     "envelope_adapters_provider::_map_generic_spawn_result",
+    "envelope_adapters_provider::_map_harness_spawn_result",
+    "envelope_govern::_book_ledger_run",
     "envelope_govern::_govern",
+    "envelope_govern::_receipt_cost",
     "envelope_govern::_record_receipt_emit_failure",
     "envelope_govern_support::_archive_dispatch_events",
     "envelope_govern_support::_clear_dispatch_events",

@@ -23,6 +23,10 @@ class _SubprocessResult(NamedTuple):
     # the operator may produce additional dirty files during the dispatch
     # window.  Empty frozenset() when no structured file writes occurred.
     touched_files: frozenset[str] = frozenset()
+    # ADR-043 (K2a-2): spawn_claude's own "the claude process never started"
+    # condition (refused before Popen, or Popen failed). The attempt's cost-ledger
+    # line is then a zero line with unavailable:spawn_refused.
+    spawn_refused: str | None = None
 
 
 def _heartbeat_loop(

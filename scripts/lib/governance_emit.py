@@ -119,7 +119,7 @@ def emit_dispatch_receipt(
     permission_posture: Optional[str] = None,
     permission_profile: Optional[str] = None,
     permission_allow_pattern_count: Optional[int] = None,
-    model_resolved: Optional[str] = None,
+    model_resolved: Optional[str] = None, cost_ledger_run_ids: Optional[List[str]] = None,
 ) -> Path:
     """Atomic-append to t0_receipts.ndjson via the shared append primitive
     (ADR-035 §7.1) — same lock file, hash-chain stamping, and validator Path 2
@@ -232,6 +232,10 @@ def emit_dispatch_receipt(
     requested value. Stamped only when provided (None omits — no init event
     means no observation).
 
+    ``cost_ledger_run_ids``: ADR-043 — the ``run_id`` of each cost-ledger line
+    the lane wrote for this dispatch before calling here; ``cost_usd`` and
+    ``cost_source`` then come from those lines. Stamped only when provided.
+
     Raises:
         ValueError: provider field doesn't match required pattern, or
             receipt_kind missing / outside the closed set (PR-3 lint raise)
@@ -300,7 +304,7 @@ def emit_dispatch_receipt(
         findings=findings,
         duration_seconds=duration_seconds,
         token_usage=token_usage,
-        cost_usd=cost_usd, cost_source=cost_source,
+        cost_usd=cost_usd, cost_source=cost_source, cost_ledger_run_ids=cost_ledger_run_ids,
         pr_id=pr_id,
         role=role,
         receipt_kind=receipt_kind,

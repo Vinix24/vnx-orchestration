@@ -76,6 +76,10 @@ class ProviderModel:
     # registry carries price_versions, the flat fields are authored equal to the
     # latest version and guarded by a drift test.
     price_versions: List["PriceVersion"] = field(default_factory=list)
+    # Other names the provider gives this same model (ADR-043): resolved to this
+    # key by resolve_model_identity and the price lookup, never to a neighbour.
+    # An alias that is another key or another model's alias fails the load.
+    aliases: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -270,13 +274,28 @@ def _parse_model(data: dict, model_key: Optional[str] = None) -> ProviderModel:
         cost_cache_read_per_mtok=float(cache_read_raw) if cache_read_raw is not None else None,
         cost_cache_write_per_mtok=float(cache_write_raw) if cache_write_raw is not None else None,
         price_versions=price_versions,
+        aliases=[str(alias) for alias in (data.get("aliases") or [])],
     )
+
+
+def _check_aliases(models: Dict[str, ProviderModel]) -> None:
+    """Refuse an alias that is a model key or the alias of a second model: it would name two models."""
+    owner: Dict[str, str] = {}
+    for model_key, entry in models.items():
+        for alias in entry.aliases:
+            if not alias or alias in models or alias in owner:
+                raise ValueError(
+                    f"model {model_key!r} has alias {alias!r}, which is empty, a model key or the "
+                    f"alias of {owner.get(alias, alias)!r}: an alias names exactly one model"
+                )
+            owner[alias] = model_key
 
 
 def _parse_provider(data: dict) -> ProviderConfig:
     models: Dict[str, ProviderModel] = {}
     for model_key, model_data in (data.get("models") or {}).items():
         models[model_key] = _parse_model(model_data, model_key)
+    _check_aliases(models)
     default_model_raw = data.get("default_model")
     dispatch_enum_raw = data.get("dispatch_enum")
     return ProviderConfig(
@@ -354,6 +373,9 @@ def _resolve_model_key(
     stripped = model_key[len(prefix):] if prefix and model_key.startswith(prefix) else model_key
     if stripped != model_key and stripped in cfg.models:
         return stripped
+    aliased = _exact_model_key(cfg, registry_key, model)
+    if aliased is not None:
+        return aliased
 
     candidates = sorted(
         (k for k in cfg.models if stripped.startswith(k + "-")),
@@ -382,13 +404,15 @@ def resolve_model_identity(
     prefix match books ``sonnet-6`` as ``sonnet``: an identity that lands in the
     cost ledger must not be a guess. Four steps, the first hit wins:
 
-    1. the exact key, on the slash-stripped name (``z-ai/glm-5.2`` -> ``glm-5.2``);
-    2. the exact key after the section's known name prefix (``claude-opus-5-5``
-       -> ``opus-5-5``);
+    1. the exact key or alias, on the slash-stripped name (``z-ai/glm-5.2`` ->
+       ``glm-5.2``);
+    2. the exact key or alias after the section's known name prefix
+       (``claude-opus-5-5`` -> ``opus-5-5``);
     3. the one model whose ``cli_model_arg`` is the full string
        (``kimi-code/k3`` -> ``kimi-k3``); two such models are ambiguous;
     4. steps 1 and 2 again after a dated snapshot suffix
-       (``claude-opus-4-8-20260801`` -> ``opus-4-8``).
+       (``claude-opus-4-8-20260801`` -> ``opus-4-8``,
+       ``claude-haiku-4-5-20251001`` -> alias ``haiku-4-5`` -> ``haiku``).
 
     Raises :class:`RegistryLookupError` naming the model, the section and the
     registry path when none of them hits.
@@ -410,12 +434,18 @@ def resolve_model_identity(
 
 
 def _exact_model_key(cfg: ProviderConfig, registry_key: str, model: str) -> Optional[str]:
+    """The key whose name or alias is the slash-stripped model, as given or after the section prefix."""
     model_key = model.split("/")[-1]
-    if model_key in cfg.models:
-        return model_key
+    names = [model_key]
     prefix = _REGISTRY_KEY_MODEL_PREFIX.get(registry_key)
-    if prefix and model_key.startswith(prefix) and model_key[len(prefix):] in cfg.models:
-        return model_key[len(prefix):]
+    if prefix and model_key.startswith(prefix):
+        names.append(model_key[len(prefix):])
+    for name in names:
+        if name in cfg.models:
+            return name
+        owners = [key for key, entry in cfg.models.items() if name in entry.aliases]
+        if owners:
+            return owners[0]
     return None
 
 

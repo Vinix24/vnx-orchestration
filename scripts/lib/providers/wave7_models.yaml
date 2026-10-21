@@ -96,6 +96,10 @@ providers:
         task_classes: ["coding", "review", "analysis"]
       haiku:
         litellm_name: "anthropic/claude-haiku-4-5-20251001"
+        # The provider id is claude-haiku-4-5-20251001; without the snapshot and
+        # the "claude-" prefix that is haiku-4-5, which names this model
+        # (OI-2224 advice 1: the cost ledger refused it as an unknown model).
+        aliases: ["haiku-4-5"]
         cost_input_per_mtok: 1.00
         cost_output_per_mtok: 5.00
         max_tokens: 8096

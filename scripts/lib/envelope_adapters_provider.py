@@ -136,6 +136,47 @@ def _map_generic_spawn_result(
     )
 
 
+def _map_harness_spawn_result(result: Any, provider_str: str, model: Optional[str]) -> _AdapterResult:
+    """Map a deepseek-harness / glm-harness spawn result to _AdapterResult.
+
+    Both harness lanes run the claude CLI, so the result carries the session_id
+    whose transcript GOVERN reads for the cost ledger (ADR-043), and the
+    ``spawn_refused`` condition when no claude process started. A
+    ``stopped_early`` run (on_event stopped the stream) is a success; an rc=0
+    run with a blank completion is downgraded by _fail_loud_on_empty_success.
+    """
+    from provider_dispatch import _extract_token_usage  # noqa: PLC0415
+
+    session_id = getattr(result, "session_id", None)
+    refused = getattr(result, "spawn_refused", None)
+    common: Dict[str, Any] = {
+        "token_usage": _extract_token_usage(result, provider_str),
+        "model": model,
+        "session_id": session_id if isinstance(session_id, str) else None,
+        "spawn_refused": refused if isinstance(refused, str) else None,
+    }
+    text = result.completion_text or ""
+    if result.error:
+        return _AdapterResult(
+            returncode=result.returncode, completion_text=text, status="failure",
+            error=result.error, **common,
+        )
+    if result.timed_out:
+        return _AdapterResult(
+            returncode=result.returncode, completion_text=text, status="timeout",
+            timed_out=True, **common,
+        )
+    if getattr(result, "stopped_early", False):
+        return _AdapterResult(returncode=result.returncode, completion_text=text, status="success", **common)
+    status = "success" if result.returncode == 0 else "failure"
+    status, returncode, guard_error = _fail_loud_on_empty_success(
+        status, result.returncode, text, provider_str, result
+    )
+    return _AdapterResult(
+        returncode=returncode, completion_text=text, status=status, error=guard_error, **common,
+    )
+
+
 class ProviderAdapter:
     """Routes provider-lane ExecutionPlan to the correct spawn function.
 
@@ -335,46 +376,7 @@ class ProviderAdapter:
                     returncode=1, completion_text="", status="failure",
                     error=f"deepseek-harness spawn BrokenPipeError: {exc}",
                 )
-            token_usage: Dict[str, int] = _extract_token_usage(result, pv.value)
-            if result.error:
-                return _AdapterResult(
-                    returncode=result.returncode,
-                    completion_text=(result.completion_text or ""),
-                    status="failure",
-                    token_usage=token_usage,
-                    error=result.error,
-                    model=model,
-                )
-            if result.timed_out:
-                return _AdapterResult(
-                    returncode=result.returncode,
-                    completion_text=(result.completion_text or ""),
-                    status="timeout",
-                    token_usage=token_usage,
-                    timed_out=True,
-                    model=model,
-                )
-            if getattr(result, "stopped_early", False):
-                return _AdapterResult(
-                    returncode=result.returncode,
-                    completion_text=(result.completion_text or ""),
-                    status="success",
-                    token_usage=token_usage,
-                    model=model,
-                )
-            _dh_text = result.completion_text or ""
-            status = "success" if result.returncode == 0 else "failure"
-            status, _dh_rc, _dh_err = _fail_loud_on_empty_success(
-                status, result.returncode, _dh_text, pv.value, result
-            )
-            return _AdapterResult(
-                returncode=_dh_rc,
-                completion_text=_dh_text,
-                status=status,
-                token_usage=token_usage,
-                error=_dh_err,
-                model=model,
-            )
+            return _map_harness_spawn_result(result, pv.value, model)
 
         # ---- glm-harness ---- (codex flip-PR F2: the door normalizes GLM -> glm-harness, so the
         # provider envelope MUST be able to execute it, not raise unsupported.)
@@ -405,46 +407,7 @@ class ProviderAdapter:
                     returncode=1, completion_text="", status="failure",
                     error=f"glm-harness spawn BrokenPipeError: {exc}",
                 )
-            token_usage = _extract_token_usage(result, pv.value)
-            if result.error:
-                return _AdapterResult(
-                    returncode=result.returncode,
-                    completion_text=(result.completion_text or ""),
-                    status="failure",
-                    token_usage=token_usage,
-                    error=result.error,
-                    model=model,
-                )
-            if result.timed_out:
-                return _AdapterResult(
-                    returncode=result.returncode,
-                    completion_text=(result.completion_text or ""),
-                    status="timeout",
-                    token_usage=token_usage,
-                    timed_out=True,
-                    model=model,
-                )
-            if getattr(result, "stopped_early", False):
-                return _AdapterResult(
-                    returncode=result.returncode,
-                    completion_text=(result.completion_text or ""),
-                    status="success",
-                    token_usage=token_usage,
-                    model=model,
-                )
-            _gh_text = result.completion_text or ""
-            status = "success" if result.returncode == 0 else "failure"
-            status, _gh_rc, _gh_err = _fail_loud_on_empty_success(
-                status, result.returncode, _gh_text, pv.value, result
-            )
-            return _AdapterResult(
-                returncode=_gh_rc,
-                completion_text=_gh_text,
-                status=status,
-                token_usage=token_usage,
-                error=_gh_err,
-                model=model,
-            )
+            return _map_harness_spawn_result(result, pv.value, model)
 
         # ---- local-gemma ----
         if pv == Provider.LOCAL_GEMMA:

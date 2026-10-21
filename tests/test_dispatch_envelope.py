@@ -909,132 +909,138 @@ class TestClaudeEnvelopeToolcallSignals:
 
 
 class TestEnvelopeCostUsd:
-    """OI-882: the envelope must compute cost_usd from token_usage + wave7 prices.
+    """OI-882, now through the cost ledger (ADR-043, K2a-2).
 
-    The envelope previously hardcoded ``cost_usd=None`` in ``_govern`` even
-    though ``adapter_result.token_usage`` carried real tokens. All 45 null-cost
-    deepseek-harness receipts in the ledger came through this path.
+    The envelope once hardcoded ``cost_usd=None`` in ``_govern`` although the
+    run had real tokens (all 45 null-cost deepseek-harness receipts came through
+    this path); OI-882 priced the adapter's token_usage instead. A builder run on
+    a claude harness lane now writes its cost-ledger line from the session
+    transcript, and the receipt takes ``cost_usd``/``cost_source`` from that line
+    (the ledger itself: tests/test_harness_run_cost.py). A lane not on the ledger
+    yet, codex here, still prices the adapter's token_usage.
     """
 
-    def _run_govern(self, spec, adapter_result, tmp_path):
+    @pytest.fixture(autouse=True)
+    def _store(self, tmp_path, monkeypatch):
+        self.store = tmp_path / "store"
+        self.projects = tmp_path / "claude-projects"
+        self.projects.mkdir()
+        monkeypatch.setenv("VNX_DATA_DIR", str(self.store))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+        monkeypatch.setenv("VNX_CLAUDE_PROJECTS_DIR", str(self.projects))
+
+    def _transcript(self, session_id, model, input_tokens, output_tokens, cache_read=0):
+        """One assistant message on a weekday inside the DeepSeek peak window."""
+        path = self.projects / "-wt" / f"{session_id}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        usage = {"input_tokens": input_tokens, "output_tokens": output_tokens,
+                 "cache_read_input_tokens": cache_read, "cache_creation_input_tokens": 0,
+                 "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 0}}
+        entry = {"type": "assistant", "timestamp": "2026-10-21T08:00:00Z",
+                 "message": {"id": "m-1", "role": "assistant", "model": model, "usage": usage}}
+        path.write_text(json.dumps(entry) + "\n", encoding="utf-8")
+
+    def _ledger_line(self):
+        lines = (self.store / "events" / "provider_costs.ndjson").read_text(encoding="utf-8").splitlines()
+        (line,) = [json.loads(raw) for raw in lines if raw.strip()]
+        return line
+
+    def _spec(self, tmp_path, provider, model, dispatch_id):
+        state_dir = tmp_path / "state"
+        data_dir = tmp_path / "data"
+        state_dir.mkdir(parents=True)
+        (data_dir / "unified_reports").mkdir(parents=True)
+        return EnvelopeSpec(
+            dispatch_id=dispatch_id, terminal_id="T1", provider=provider, model=model,
+            instruction="review", role="backend-developer", pr_id=None,
+            state_dir=state_dir, data_dir=data_dir,
+        )
+
+    def _run_govern(self, spec, adapter_result):
         report_path = spec.data_dir / "unified_reports" / f"{spec.dispatch_id}.md"
         receipt_path = spec.state_dir / "t0_receipts.ndjson"
         receipt_path.write_text("")
         mock_report = MagicMock(return_value=report_path)
         mock_receipt = MagicMock(return_value=receipt_path)
-        mock_cost_event = MagicMock()
 
         from datetime import datetime, timezone
 
         with patch("governance_emit.emit_unified_report", mock_report), \
-             patch("governance_emit.emit_dispatch_receipt", mock_receipt), \
-             patch("provider_costs.emit_provider_cost", mock_cost_event):
+             patch("governance_emit.emit_dispatch_receipt", mock_receipt):
             dispatch_envelope._govern(
                 spec,
                 adapter_result,
                 datetime.now(timezone.utc),
                 datetime.now(timezone.utc),
             )
-        return mock_report, mock_receipt
-
-    def test_deepseek_harness_cost_usd_computed(self, tmp_path):
-        """deepseek-harness tokens + wave7 prices yield a real cost_usd on the receipt."""
-        state_dir = tmp_path / "state"
-        data_dir = tmp_path / "data"
-        state_dir.mkdir(parents=True)
-        (data_dir / "unified_reports").mkdir(parents=True)
-        spec = EnvelopeSpec(
-            dispatch_id="oi882-test-001",
-            terminal_id="T1",
-            provider="deepseek-harness",
-            model="deepseek-v4-flash",
-            instruction="review",
-            role="backend-developer",
-            pr_id=None,
-            state_dir=state_dir,
-            data_dir=data_dir,
-        )
-        adapter_result = dispatch_envelope._AdapterResult(
-            returncode=0,
-            completion_text="done",
-            status="success",
-            token_usage={"input": 91439, "output": 38053, "cache_hit": 6087040},
-            model="deepseek-v4-flash",
-        )
-
-        _, mock_receipt = self._run_govern(spec, adapter_result, tmp_path)
-
         mock_receipt.assert_called_once()
-        cost_usd = mock_receipt.call_args[1]["cost_usd"]
-        assert cost_usd is not None, "OI-882: cost_usd must no longer be hardcoded None"
-        assert cost_usd > 0
-        # flash = 0.14/0.28 per MTok; 91439 input + 38053 output ≈ $0.0235
-        assert abs(cost_usd - 0.0234563) < 1e-6
-        assert mock_receipt.call_args[1]["model"] == "deepseek-v4-flash"
+        return mock_receipt.call_args[1]
+
+    def test_deepseek_harness_cost_usd_comes_from_the_ledger_line(self, tmp_path):
+        """deepseek-harness transcript tokens + wave7 prices yield a real cost_usd on the receipt."""
+        self._transcript("sess-oi882-1", "deepseek-v4-flash", 91439, 38053, cache_read=6087040)
+        spec = self._spec(tmp_path, "deepseek-harness", "deepseek-v4-flash", "oi882-test-001")
+        adapter_result = dispatch_envelope._AdapterResult(
+            returncode=0, completion_text="done", status="success",
+            token_usage={"input": 91439, "output": 38053, "cache_hit": 6087040},
+            model="deepseek-v4-flash", session_id="sess-oi882-1",
+        )
+
+        receipt = self._run_govern(spec, adapter_result)
+
+        line = self._ledger_line()
+        assert receipt["cost_usd"] == line["cost_usd"] and receipt["cost_source"] == line["cost_source"]
+        assert receipt["cost_ledger_run_ids"] == [line["run_id"]]
+        assert line["tokens"]["cache_hit"] == 6087040
+        # flash = 0.14/0.28 per MTok, no cache-read price; 91439 input + 38053 output ≈ $0.0235
+        assert abs(receipt["cost_usd"] - 0.0234563) < 1e-6
+        assert receipt["model"] == "deepseek-v4-flash"
 
     def test_resolved_model_wins_over_placeholder(self, tmp_path):
         """A placeholder spec.model is replaced by the adapter's resolved model for pricing."""
-        state_dir = tmp_path / "state"
-        data_dir = tmp_path / "data"
-        state_dir.mkdir(parents=True)
-        (data_dir / "unified_reports").mkdir(parents=True)
-        spec = EnvelopeSpec(
-            dispatch_id="oi882-test-002",
-            terminal_id="T1",
-            provider="deepseek-harness",
-            model="default",  # placeholder — adapter resolves to v4-pro
-            instruction="review",
-            role="backend-developer",
-            pr_id=None,
-            state_dir=state_dir,
-            data_dir=data_dir,
-        )
+        self._transcript("sess-oi882-2", "deepseek-v4-pro", 1000, 500)
+        spec = self._spec(tmp_path, "deepseek-harness", "default", "oi882-test-002")
         adapter_result = dispatch_envelope._AdapterResult(
-            returncode=0,
-            completion_text="done",
-            status="success",
+            returncode=0, completion_text="done", status="success",
             token_usage={"input": 1000, "output": 500, "cache_hit": 0},
-            model="deepseek-v4-pro",
+            model="deepseek-v4-pro", session_id="sess-oi882-2",
         )
 
-        _, mock_receipt = self._run_govern(spec, adapter_result, tmp_path)
+        receipt = self._run_govern(spec, adapter_result)
 
-        mock_receipt.assert_called_once()
-        assert mock_receipt.call_args[1]["model"] == "deepseek-v4-pro"
-        cost_usd = mock_receipt.call_args[1]["cost_usd"]
-        assert cost_usd is not None
+        assert receipt["model"] == "deepseek-v4-pro"
+        assert self._ledger_line()["model"] == "deepseek-v4-pro"
         # pro = 1.32/3.96 per MTok (peak); 1000 input + 500 output
-        assert abs(cost_usd - (1.32 * 0.001 + 3.96 * 0.0005)) < 1e-9
+        assert abs(receipt["cost_usd"] - (1.32 * 0.001 + 3.96 * 0.0005)) < 1e-9
 
-    def test_claude_lane_cost_usd_computed(self, spec_claude):
-        """The claude lane through the envelope now carries a list-price estimate."""
-        from datetime import datetime, timezone
-
+    def test_claude_lane_books_zero_and_its_list_price_in_the_ledger(self, tmp_path):
+        """The claude lane is a subscription: 0 at the margin, the list price in api_equivalent_usd."""
+        self._transcript("sess-oi882-3", "claude-sonnet-5-5", 200, 100, cache_read=50)
+        spec = self._spec(tmp_path, "claude", "sonnet", "oi882-test-003")
         adapter_result = dispatch_envelope._AdapterResult(
-            returncode=0,
-            completion_text="done",
-            status="success",
+            returncode=0, completion_text="done", status="success",
             token_usage={"input": 200, "output": 100, "cache_hit": 50},
-            model="sonnet",
+            model="sonnet", session_id="sess-oi882-3",
         )
-        report_path = spec_claude.data_dir / "unified_reports" / f"{spec_claude.dispatch_id}.md"
-        receipt_path = spec_claude.state_dir / "t0_receipts.ndjson"
-        receipt_path.write_text("")
-        mock_report = MagicMock(return_value=report_path)
-        mock_receipt = MagicMock(return_value=receipt_path)
 
-        with patch("governance_emit.emit_unified_report", mock_report), \
-             patch("governance_emit.emit_dispatch_receipt", mock_receipt):
-            dispatch_envelope._govern(
-                spec_claude,
-                adapter_result,
-                datetime.now(timezone.utc),
-                datetime.now(timezone.utc),
-            )
+        receipt = self._run_govern(spec, adapter_result)
 
-        mock_receipt.assert_called_once()
-        cost_usd = mock_receipt.call_args[1]["cost_usd"]
-        assert cost_usd is not None
+        line = self._ledger_line()
+        assert receipt["cost_usd"] == 0.0 == line["cost_usd"]
         # sonnet = claude-sonnet-5-5 = 2.00/10.00 per MTok (registry, 2026-09-29)
         # plus 50 cache-hit tokens at the registry cache-read rate 0.20/MTok
-        assert abs(cost_usd - (2.0 * 0.0002 + 10.0 * 0.0001 + 0.20 * 0.00005)) < 1e-9
+        assert abs(line["api_equivalent_usd"] - (2.0 * 0.0002 + 10.0 * 0.0001 + 0.20 * 0.00005)) < 1e-9
+
+    def test_a_lane_off_the_ledger_still_prices_its_token_usage(self, tmp_path):
+        """codex is not on the ledger yet (K2b): the receipt prices the adapter's token_usage."""
+        spec = self._spec(tmp_path, "codex", "gpt-5.5", "oi882-test-004")
+        adapter_result = dispatch_envelope._AdapterResult(
+            returncode=0, completion_text="done", status="success",
+            token_usage={"input": 1000, "output": 500, "cache_hit": 0}, model="gpt-5.5",
+        )
+
+        receipt = self._run_govern(spec, adapter_result)
+
+        expected, source = provider_dispatch._compute_cost("codex", "gpt-5.5", adapter_result.token_usage)
+        assert receipt["cost_usd"] == expected and receipt["cost_source"] == source
+        assert receipt["cost_ledger_run_ids"] is None

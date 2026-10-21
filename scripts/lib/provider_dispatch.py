@@ -1368,6 +1368,78 @@ def _maybe_record_provider_reachability(
         )
 
 
+# ADR-043 (K2a-2): the producer part of the run_id of every cost-ledger line
+# this lane writes: <project_id>:provider_dispatch:<dispatch_id>:<attempt>.
+COST_LEDGER_PRODUCER = "provider_dispatch"
+
+
+def _emit_old_cost_event(
+    args: argparse.Namespace, provider: str, model_used: str, token_usage: Dict[str, Any], state_dir: Path,
+) -> tuple:
+    """The old ``emit_provider_cost`` event for a lane not on the ledger yet; ``(cost_usd, cost_source)``.
+
+    Raises on a failed write (ADR-005, fail-loud). The pid is store-derived,
+    best-effort: on an unresolved tenant emit falls back to the env (no data-loss).
+    """
+    from provider_costs import emit_provider_cost  # noqa: PLC0415
+
+    cost_usd, cost_source = _compute_cost(provider, model_used, token_usage)
+    _cost_pid = ""
+    try:
+        from project_scope import resolve_stamp_project_id, TenantUnresolved  # noqa: PLC0415
+        _cost_pid = resolve_stamp_project_id(db_path=state_dir / "quality_intelligence.db")
+    except TenantUnresolved as _pid_exc:
+        logger.warning("cost-event project_id unresolved from store; emit falls back to env: %s", _pid_exc)
+    emit_provider_cost(
+        provider=provider,
+        model=model_used,
+        input_tokens=token_usage.get("input") if token_usage else None,
+        output_tokens=token_usage.get("output") if token_usage else None,
+        cost_usd_estimate=cost_usd,
+        dispatch_id=args.dispatch_id,
+        project_id=_cost_pid, cost_source=cost_source,
+    )
+    return cost_usd, cost_source
+
+
+def _book_dispatch_cost(
+    args: argparse.Namespace,
+    provider: str,
+    model_used: str,
+    result: Any,
+    token_usage: Dict[str, Any],
+    window: tuple,
+    state_dir: Path,
+) -> tuple:
+    """Book the run's cost before the receipt (ADR-005): ``(cost_usd, cost_source, cost_ledger_run_ids)``.
+
+    A builder run on a claude harness lane writes its cost-ledger line
+    (ADR-043, ``harness_run_cost``) and the receipt takes its cost from it.
+    When the run's attempts were already booked by the subprocess lane
+    (``_dispatch_claude`` hands them over as ``result.cost_ledger_records``),
+    those records are the receipt's and nothing is written twice. Every other
+    lane and role writes the old event. Ledger errors propagate: the caller
+    writes no receipt (fail-loud).
+    """
+    import harness_run_cost  # noqa: PLC0415
+
+    if not harness_run_cost.writes_builder_run(provider, vars(args).get("role")):
+        cost_usd, cost_source = _emit_old_cost_event(args, provider, model_used, token_usage, state_dir)
+        return cost_usd, cost_source, None
+    records = getattr(result, "cost_ledger_records", None)
+    if not isinstance(records, list):
+        run = harness_run_cost.BuilderRun(
+            provider=provider, model=model_used, started=window[0], ended=window[1],
+            session_id=getattr(result, "session_id", None),
+            spawn_refused=getattr(result, "spawn_refused", None),
+        )
+        records = [harness_run_cost.record_builder_run(
+            run, project_id=harness_run_cost.ledger_project_id(state_dir),
+            producer=COST_LEDGER_PRODUCER, dispatch_id=args.dispatch_id,
+        )]
+    return harness_run_cost.receipt_cost(records)
+
+
 def _emit_governance(
     args: argparse.Namespace,
     provider: str,
@@ -1412,7 +1484,6 @@ def _emit_governance(
     data_dir = _resolve_data_dir()
     duration = (end_time - start_time).total_seconds()
     token_usage = _extract_token_usage(result, provider)
-    cost_usd, cost_source = _compute_cost(provider, model_used, token_usage)
 
     # Deterministic report path — emitted below by emit_unified_report. Computed
     # up front so the receipt can carry the linkage even though the report write
@@ -1435,25 +1506,9 @@ def _emit_governance(
                 args.dispatch_id, _arch_exc,
             )
 
-    # ADR-005: emit cost event BEFORE receipt/report writes. Raises on failure — fail-loud.
-    from provider_costs import emit_provider_cost  # noqa: PLC0415
-    # Best-effort store-derived pid (NDJSON cost log is outside the fail-closed
-    # regime — it must never skip): resolve from the store db_path; on an
-    # unresolved tenant, log and let emit fall back to env (no data-loss).
-    _cost_pid = ""
-    try:
-        from project_scope import resolve_stamp_project_id, TenantUnresolved  # noqa: PLC0415
-        _cost_pid = resolve_stamp_project_id(db_path=Path(state_dir) / "quality_intelligence.db")
-    except TenantUnresolved as _pid_exc:
-        logger.warning("cost-event project_id unresolved from store; emit falls back to env: %s", _pid_exc)
-    emit_provider_cost(
-        provider=provider,
-        model=model_used,
-        input_tokens=token_usage.get("input") if token_usage else None,
-        output_tokens=token_usage.get("output") if token_usage else None,
-        cost_usd_estimate=cost_usd,
-        dispatch_id=args.dispatch_id,
-        project_id=_cost_pid, cost_source=cost_source,
+    # ADR-005: the cost lands BEFORE receipt/report writes. Raises on failure — fail-loud.
+    cost_usd, cost_source, _run_ids = _book_dispatch_cost(
+        args, provider, model_used, result, token_usage, (start_time, end_time), Path(state_dir),
     )
 
     # Provider-aware self-learning: stamp a dispatch_metadata row so EVERY governed
@@ -1601,7 +1656,7 @@ def _emit_governance(
                 findings=[],
                 duration_seconds=duration,
                 token_usage=token_usage,
-                cost_usd=cost_usd, cost_source=cost_source,
+                cost_usd=cost_usd, cost_source=cost_source, cost_ledger_run_ids=_run_ids,
                 state_dir=state_dir,
                 report_path=str(report_path),
                 events_path=events_path,
@@ -2388,19 +2443,23 @@ def _dispatch_claude(args: argparse.Namespace) -> int:
         # available for this governance-receipt path; we .pop() here to clean up.
         _claude_token_usage = None
         _claude_completion_text = ""
+        _claude_cost_records: list = []  # the ledger lines recovery wrote, one per attempt (ADR-043)
         try:
             from subprocess_dispatch_internals.delivery import (
                 _dispatch_completion_text as _ct_cache,
+                _dispatch_cost_records as _cr_cache,
                 _dispatch_token_usage as _tu_cache,
             )
             _claude_token_usage = _tu_cache.pop(args.dispatch_id, None)
             _claude_completion_text = _ct_cache.pop(args.dispatch_id, "")
+            _claude_cost_records = _cr_cache.pop(args.dispatch_id, [])
         except Exception as _tu_exc:
             logger.debug("_dispatch_claude: side-channel read failed: %s", _tu_exc)
 
         class _ClaudeResult:
             completion_text = _claude_completion_text
             token_usage = _claude_token_usage
+            cost_ledger_records = _claude_cost_records
 
         status = "success" if ok else "failure"
         _emit_governance(args, "claude", args.model, _ClaudeResult(), start_time, end_time, status)
@@ -3331,7 +3390,7 @@ def _block_deepseek_harness_on_missing_key(
         completion={},
         events_written=0,
         session_id=None,
-        timed_out=False,
+        timed_out=False, spawn_refused="local_key_missing",
         model=DEFAULT_DEEPSEEK_HARNESS_MODEL,
         error=(
             f"local key missing: {DEEPSEEK_API_KEY_ENV} absent from the "

@@ -184,48 +184,22 @@ class ClaudeSubprocessAdapter:
                     raw_usage.get("cache_read_input_tokens", 0) or 0
                 ),
             }
-        model_used = getattr(result, "model", None) or spec.model
-        model_resolved = getattr(result, "model_resolved", None)
+        refused = getattr(result, "spawn_refused", None)
+        common = {
+            "returncode": result.returncode,
+            "completion_text": result.completion_text or "",
+            "token_usage": token_usage,
+            "session_id": result.session_id,
+            "model_resolved": getattr(result, "model_resolved", None),
+            "model": getattr(result, "model", None) or spec.model,
+            # ADR-043: no claude process started; GOVERN books a zero cost-ledger line.
+            "spawn_refused": refused if isinstance(refused, str) else None,
+        }
 
         if result.error:
-            return _AdapterResult(
-                returncode=result.returncode,
-                completion_text=(result.completion_text or ""),
-                status="failure",
-                token_usage=token_usage,
-                error=result.error,
-                session_id=result.session_id,
-                model_resolved=model_resolved,
-                model=model_used,
-            )
+            return _AdapterResult(status="failure", error=result.error, **common)
         if result.timed_out:
-            return _AdapterResult(
-                returncode=result.returncode,
-                completion_text=(result.completion_text or ""),
-                status="timeout",
-                token_usage=token_usage,
-                timed_out=True,
-                session_id=result.session_id,
-                model_resolved=model_resolved,
-                model=model_used,
-            )
+            return _AdapterResult(status="timeout", timed_out=True, **common)
         if result.stopped_early:
-            return _AdapterResult(
-                returncode=result.returncode,
-                completion_text=(result.completion_text or ""),
-                status="success",
-                token_usage=token_usage,
-                session_id=result.session_id,
-                model_resolved=model_resolved,
-                model=model_used,
-            )
-        status = "success" if result.returncode == 0 else "failure"
-        return _AdapterResult(
-            returncode=result.returncode,
-            completion_text=(result.completion_text or ""),
-            status=status,
-            token_usage=token_usage,
-            session_id=result.session_id,
-            model_resolved=model_resolved,
-            model=model_used,
-        )
+            return _AdapterResult(status="success", **common)
+        return _AdapterResult(status="success" if result.returncode == 0 else "failure", **common)

@@ -14,11 +14,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from subprocess_dispatch_internals.delivery import _dispatch_token_usage
+from subprocess_dispatch_internals.delivery import _dispatch_cost_records, _dispatch_token_usage
 from subprocess_dispatch_internals.runtime_overrides import apply_runtime_overrides
 from provider_dispatch import _extract_token_usage, _compute_cost
+import harness_run_cost
 
 logger = logging.getLogger(__name__)
+
+# ADR-043 (K2a-2): the producer part of the run_id of every cost-ledger line
+# this lane writes, one per delivery attempt:
+# <project_id>:subprocess_recovery:<dispatch_id>:<attempt>.
+COST_LEDGER_PRODUCER = "subprocess_recovery"
 
 
 def _shared_govern_enabled() -> bool:
@@ -200,18 +206,93 @@ def _resolve_token_usage_and_cost(
     provenance string from ``_compute_cost`` is carried alongside ``cost_usd``
     so a missing price is never re-recorded as a confirmed $0.
     """
+    token_usage = _resolve_token_usage(dispatch_id, sub_result)
+    if token_usage is None:
+        return None, None, ""
+    cost_usd, cost_source = _compute_cost("claude", model or "claude-sonnet-4-6", token_usage)
+    return token_usage, cost_usd, cost_source
+
+
+def _resolve_token_usage(dispatch_id: str, sub_result) -> "dict | None":
+    """token_usage from the delivery side-channel (or the result), normalized; None when there is none."""
     raw_usage = _dispatch_token_usage.get(dispatch_id, None)
     if raw_usage is None:
         raw_usage = getattr(sub_result, "token_usage", None) if sub_result else None
     if not isinstance(raw_usage, dict) or not raw_usage:
-        return None, None, ""
+        return None
 
     class _UsageHolder:
         token_usage = raw_usage
 
-    token_usage = _extract_token_usage(_UsageHolder(), "claude")
-    cost_usd, cost_source = _compute_cost("claude", model or "claude-sonnet-4-6", token_usage)
-    return token_usage, cost_usd, cost_source
+    return _extract_token_usage(_UsageHolder(), "claude")
+
+
+def _book_attempt(dispatch_id: str, model: "str | None", role: "str | None", sub_result, started: datetime) -> None:
+    """Write this delivery attempt's cost-ledger line (ADR-043) when it is a builder run.
+
+    One line per attempt, retries included: a retried attempt is a run of its
+    own. The line joins ``_dispatch_cost_records`` for the receipt. Ledger
+    errors propagate out of deliver_with_recovery before any receipt is
+    written (ADR-005, fail-loud).
+    """
+    import subprocess_dispatch as _sd
+    if not harness_run_cost.writes_builder_run("claude", role):
+        return
+    run = harness_run_cost.BuilderRun(
+        provider="claude", model=model or "sonnet", started=started, ended=datetime.now(timezone.utc),
+        session_id=getattr(sub_result, "session_id", None),
+        spawn_refused=getattr(sub_result, "spawn_refused", None),
+    )
+    record = harness_run_cost.record_builder_run(
+        run, project_id=harness_run_cost.ledger_project_id(_sd._default_state_dir()),
+        producer=COST_LEDGER_PRODUCER, dispatch_id=dispatch_id,
+    )
+    _dispatch_cost_records.setdefault(dispatch_id, []).append(record)
+
+
+def _emit_old_cost_event(dispatch_id: str, model: "str | None", token_usage, cost_usd, cost_source) -> None:
+    """The old ``emit_provider_cost`` event, for a role not on the ledger yet (K3/K4a). Raises on failure."""
+    import subprocess_dispatch as _sd
+    from provider_costs import emit_provider_cost  # noqa: PLC0415
+    # Best-effort store-derived pid (NDJSON cost log never skips); on an
+    # unresolved tenant, fall back to emit's env default — no data-loss.
+    _cost_pid = ""
+    try:
+        from project_scope import resolve_stamp_project_id, TenantUnresolved  # noqa: PLC0415
+        _cost_pid = resolve_stamp_project_id(
+            db_path=_sd._default_state_dir() / "quality_intelligence.db"
+        )
+    except TenantUnresolved:  # vnx-silent-except: emit falls back to env; cost-audit must not lose the event
+        _cost_pid = ""
+    emit_provider_cost(
+        provider="claude",
+        model=model or "sonnet",
+        input_tokens=token_usage.get("input") if token_usage else None,
+        output_tokens=token_usage.get("output") if token_usage else None,
+        cost_usd_estimate=cost_usd,
+        dispatch_id=dispatch_id,
+        project_id=_cost_pid, cost_source=cost_source,
+    )
+
+
+def _resolve_receipt_cost(
+    dispatch_id: str, sub_result, model: "str | None", role: "str | None", *, emit_old_event: bool,
+) -> tuple:
+    """``(token_usage, cost_usd, cost_source, cost_ledger_run_ids)`` for this call's receipt.
+
+    A builder run: the cost of the ledger lines its attempts wrote
+    (``harness_run_cost.receipt_cost``), not a second computation. Any other
+    role keeps the old price and, when ``emit_old_event``, the old event
+    (ADR-005: before the receipt write, raises on failure).
+    """
+    if harness_run_cost.writes_builder_run("claude", role):
+        records = list(_dispatch_cost_records.get(dispatch_id, []))
+        cost_usd, cost_source, run_ids = harness_run_cost.receipt_cost(records)
+        return _resolve_token_usage(dispatch_id, sub_result), cost_usd, cost_source, run_ids
+    token_usage, cost_usd, cost_source = _resolve_token_usage_and_cost(dispatch_id, sub_result, model)
+    if emit_old_event:
+        _emit_old_cost_event(dispatch_id, model, token_usage, cost_usd, cost_source)
+    return token_usage, cost_usd, cost_source, None
 
 
 def _handle_success(
@@ -250,28 +331,10 @@ def _handle_success(
         commit_hash_after=commit_hash_after,
         model=model,
     )
-    token_usage, cost_usd, cost_source = _resolve_token_usage_and_cost(dispatch_id, sub_result, model)
-
-    # ADR-005: emit cost event BEFORE receipt write. Raises on failure — fail-loud.
-    from provider_costs import emit_provider_cost  # noqa: PLC0415
-    # Best-effort store-derived pid (NDJSON cost log never skips); on an
-    # unresolved tenant, fall back to emit's env default — no data-loss.
-    _cost_pid = ""
-    try:
-        from project_scope import resolve_stamp_project_id, TenantUnresolved  # noqa: PLC0415
-        _cost_pid = resolve_stamp_project_id(
-            db_path=_sd._default_state_dir() / "quality_intelligence.db"
-        )
-    except TenantUnresolved:
-        pass  # emit falls back to env; cost-audit must not lose the event
-    emit_provider_cost(
-        provider="claude",
-        model=model or "sonnet",
-        input_tokens=token_usage.get("input") if token_usage else None,
-        output_tokens=token_usage.get("output") if token_usage else None,
-        cost_usd_estimate=cost_usd,
-        dispatch_id=dispatch_id,
-        project_id=_cost_pid, cost_source=cost_source,
+    # ADR-005: the cost is booked BEFORE the receipt write — per attempt in the
+    # ledger for a builder run (_book_attempt), else the old event here. Raises on failure.
+    token_usage, cost_usd, cost_source, run_ids = _resolve_receipt_cost(
+        dispatch_id, sub_result, model, role, emit_old_event=True,
     )
 
     if _shared_govern_enabled():
@@ -303,7 +366,7 @@ def _handle_success(
         manifest_path=sub_result.manifest_path,
         stuck_event_count=monitor.stuck_count,
         token_usage=token_usage,
-        cost_usd=cost_usd, cost_source=cost_source,
+        cost_usd=cost_usd, cost_source=cost_source, cost_ledger_run_ids=run_ids,
         pr_id=pr_id,
         provider="claude",
         sub_provider="anthropic",
@@ -364,7 +427,7 @@ def _handle_final_failure(
             dispatch_touched_files=sub_result.touched_files,
             manifest_paths=manifest_paths,
         )
-    token_usage, cost_usd, cost_source = _resolve_token_usage_and_cost(dispatch_id, sub_result, model)
+    token_usage, cost_usd, cost_source, run_ids = _resolve_receipt_cost(dispatch_id, sub_result, model, role, emit_old_event=False)
     if _shared_govern_enabled():
         # Genuinely new coverage: pre-wiring, the subprocess lane emitted no unified
         # report at all on the budget-exhausted failure path (only _write_receipt ran).
@@ -386,7 +449,7 @@ def _handle_final_failure(
         manifest_path=sub_result.manifest_path,
         stuck_event_count=monitor.stuck_count,
         token_usage=token_usage,
-        cost_usd=cost_usd, cost_source=cost_source,
+        cost_usd=cost_usd, cost_source=cost_source, cost_ledger_run_ids=run_ids,
         pr_id=pr_id,
         provider="claude",
         sub_provider="anthropic",
@@ -438,6 +501,9 @@ def _init_recovery_state(
     Also runs ``_capture_dispatch_parameters`` for pattern-confidence intelligence.
     """
     import subprocess_dispatch as _sd
+    # This call's attempts start a fresh list: an earlier call for the same id
+    # in this process already had its receipt.
+    _dispatch_cost_records.pop(dispatch_id, None)
     dispatch_start_ts = datetime.now(timezone.utc).isoformat()
     commit_hash_before = _sd._get_commit_hash()
     repo_cwd = Path(__file__).resolve().parents[3]
@@ -486,9 +552,10 @@ def _attempt_delivery(
     dispatch_paths: "list[str] | None" = None,
     pr_id: "str | None" = None,
 ):
-    """Single delivery attempt — proxies to ``deliver_via_subprocess``."""
+    """Single delivery attempt — proxies to ``deliver_via_subprocess``, then books its cost (ADR-043)."""
     import subprocess_dispatch as _sd
-    return _sd.deliver_via_subprocess(
+    started = datetime.now(timezone.utc)
+    sub_result = _sd.deliver_via_subprocess(
         terminal_id, instruction, model, dispatch_id,
         role=role,
         requires_mcp=requires_mcp,
@@ -501,6 +568,8 @@ def _attempt_delivery(
         dispatch_paths=dispatch_paths,
         pr_id=pr_id,
     )
+    _book_attempt(dispatch_id, model, role, sub_result, started)
+    return sub_result
 
 
 def _backoff_or_fail(

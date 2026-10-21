@@ -24,6 +24,12 @@ other provider (kimi included) has no local transcript and always resolves to
 the ``unavailable`` marker here — there is no kimi-token-capture in this
 module (kimi capture is a separate, out-of-scope change; see the
 receipt-quality plan §Phase B).
+
+Two readings of the same transcript. ``harvest_session_tokens`` gives the
+receipt's ``token_usage`` totals. ``harvest_session_messages`` gives the cost
+ledger (ADR-043) one :class:`MessageUsage` per assistant message: the five
+ledger token fields and the entry timestamp, so a run can be priced per price
+window. A field a message does not carry is ``None`` there, never a 0.
 """
 
 from __future__ import annotations
@@ -32,8 +38,9 @@ import glob
 import json
 import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +168,42 @@ def _sum_transcript_usage(transcript_path: Path) -> Optional[Dict[str, int]]:
     return totals
 
 
+def find_session_transcript(
+    session_id: Optional[str],
+    *,
+    claude_projects_dir: Optional[Path] = None,
+) -> Optional[Path]:
+    """The transcript ``<projects dir>/*/<session_id>.jsonl``, or None. Never raises.
+
+    Without ``claude_projects_dir`` it searches ``~/.claude/projects`` first,
+    then every harness lane's ``<VNX_DATA_DIR>/harness-config/*/projects``.
+    """
+    session_id = (session_id or "").strip()
+    if not session_id:
+        return None
+    if claude_projects_dir is not None:
+        search_dirs = [claude_projects_dir]
+    else:
+        # Harness lanes (glm/deepseek) run under a fabric-owned CLAUDE_CONFIG_DIR, so
+        # their transcripts live under <VNX_DATA_DIR>/harness-config/*/projects.
+        search_dirs = [_default_claude_projects_dir(), *_harness_projects_dirs()]
+
+    for projects_dir in search_dirs:
+        if not projects_dir.is_dir():
+            continue
+        try:
+            transcript_path = _find_transcript(session_id, projects_dir)
+        except OSError as exc:
+            logger.warning(
+                "token_harvest: transcript lookup failed for session_id=%s in %s: %s",
+                session_id, projects_dir, exc,
+            )
+            continue
+        if transcript_path is not None:
+            return transcript_path
+    return None
+
+
 def harvest_session_tokens(
     session_id: Optional[str],
     project_id: Optional[str] = None,
@@ -182,32 +225,7 @@ def harvest_session_tokens(
     UUID unique across all projects.
     """
     del project_id  # not needed to locate the transcript; kept for call-site symmetry
-    session_id = (session_id or "").strip()
-    if not session_id:
-        return dict(_UNAVAILABLE)
-
-    if claude_projects_dir is not None:
-        search_dirs = [claude_projects_dir]
-    else:
-        # Harness lanes (glm/deepseek) run under a fabric-owned CLAUDE_CONFIG_DIR, so
-        # their transcripts live under <VNX_DATA_DIR>/harness-config/*/projects.
-        search_dirs = [_default_claude_projects_dir(), *_harness_projects_dirs()]
-
-    transcript_path = None
-    for projects_dir in search_dirs:
-        if not projects_dir.is_dir():
-            continue
-        try:
-            transcript_path = _find_transcript(session_id, projects_dir)
-        except OSError as exc:
-            logger.warning(
-                "token_harvest: transcript lookup failed for session_id=%s in %s: %s",
-                session_id, projects_dir, exc,
-            )
-            continue
-        if transcript_path is not None:
-            break
-
+    transcript_path = find_session_transcript(session_id, claude_projects_dir=claude_projects_dir)
     if transcript_path is None:
         return dict(_UNAVAILABLE)
 
@@ -218,4 +236,124 @@ def harvest_session_tokens(
     return totals
 
 
-__all__ = ["CLAUDE_HARNESS_PROVIDERS", "harvest_session_tokens"]
+# ---------------------------------------------------------------------------
+# Per-message usage for the cost ledger (ADR-043)
+# ---------------------------------------------------------------------------
+
+# The five token fields of a cost-ledger run, in cost_ledger.TOKEN_FIELDS order.
+LEDGER_TOKEN_FIELDS = ("input_uncached", "cache_hit", "cache_write_5m", "cache_write_1h", "output")
+
+
+@dataclass(frozen=True)
+class MessageUsage:
+    """One assistant message of a transcript, deduplicated on ``message.id``.
+
+    ``tokens`` maps every field of :data:`LEDGER_TOKEN_FIELDS` to a count or
+    ``None`` when the message's ``usage`` block does not carry it.
+    ``timestamp`` is the ISO timestamp of the entry the usage was taken from,
+    ``None`` when that entry has none.
+    """
+
+    message_id: str
+    timestamp: Optional[str]
+    tokens: Mapping[str, Optional[int]]
+
+
+def _count(value: object) -> Optional[int]:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _ledger_tokens(usage: Mapping[str, Any]) -> Dict[str, Optional[int]]:
+    """The five ledger fields of one ``usage`` block. A field it does not carry is ``None``.
+
+    Cache writes come from the ``cache_creation`` split; a block with only the
+    flat ``cache_creation_input_tokens`` books that total under 5m, the API's
+    default ephemeral lifetime, and 0 under 1h, so the total is counted once.
+    """
+    creation = usage.get("cache_creation")
+    if isinstance(creation, Mapping):
+        write_5m = _count(creation.get("ephemeral_5m_input_tokens"))
+        write_1h = _count(creation.get("ephemeral_1h_input_tokens"))
+    elif "cache_creation_input_tokens" in usage:
+        write_5m = _count(usage.get("cache_creation_input_tokens"))
+        write_1h = 0 if write_5m is not None else None
+    else:
+        write_5m = write_1h = None
+    return {
+        "input_uncached": _count(usage.get("input_tokens")),
+        "cache_hit": _count(usage.get("cache_read_input_tokens")),
+        "cache_write_5m": write_5m,
+        "cache_write_1h": write_1h,
+        "output": _count(usage.get("output_tokens")),
+    }
+
+
+def _assistant_usage_entries(transcript_path: Path):
+    """``(message_id or None, timestamp, usage)`` for each assistant entry carrying ``usage``.
+
+    Raises ``OSError`` when the file cannot be read; skips lines that are not JSON.
+    """
+    with open(transcript_path, "r", encoding="utf-8", errors="ignore") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            message = entry.get("message") if isinstance(entry, dict) else None
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            usage = message.get("usage")
+            if not isinstance(usage, dict):
+                continue
+            timestamp = entry.get("timestamp")
+            yield message.get("id") or None, timestamp if isinstance(timestamp, str) else None, usage
+
+
+def read_transcript_messages(transcript_path: Path) -> Optional[List[MessageUsage]]:
+    """Every assistant message of a transcript, once per ``message.id``, in first-seen order.
+
+    Claude Code rewrites a message while it streams; every rewrite carries the
+    message's own usage, so the last rewrite's usage and timestamp count. An
+    entry without an id is its own message. Returns ``None`` when the file
+    cannot be read or carries no assistant usage at all, never an empty list.
+    """
+    seen: Dict[str, MessageUsage] = {}
+    anonymous = 0
+    try:
+        for message_id, timestamp, usage in _assistant_usage_entries(transcript_path):
+            if message_id is None:
+                message_id = f"__noid_{anonymous}"
+                anonymous += 1
+            seen[message_id] = MessageUsage(message_id, timestamp, _ledger_tokens(usage))
+    except OSError as exc:
+        logger.warning("token_harvest: failed reading transcript %s: %s", transcript_path, exc)
+        return None
+    return list(seen.values()) or None
+
+
+def harvest_session_messages(
+    session_id: Optional[str],
+    *,
+    claude_projects_dir: Optional[Path] = None,
+) -> Optional[List[MessageUsage]]:
+    """The assistant messages of a session's transcript, or ``None`` when there is none to read.
+
+    ``None`` covers no session id, no transcript and a transcript without
+    assistant usage: the caller books that as ``unknown``, never as zero.
+    """
+    transcript_path = find_session_transcript(session_id, claude_projects_dir=claude_projects_dir)
+    if transcript_path is None:
+        return None
+    return read_transcript_messages(transcript_path)
+
+
+__all__ = [
+    "CLAUDE_HARNESS_PROVIDERS", "LEDGER_TOKEN_FIELDS", "MessageUsage",
+    "find_session_transcript", "harvest_session_messages", "harvest_session_tokens",
+    "read_transcript_messages",
+]

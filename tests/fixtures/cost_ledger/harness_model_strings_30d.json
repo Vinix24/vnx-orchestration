@@ -1,0 +1,40 @@
+{
+  "measured_at": "2026-10-21T10:09:00Z",
+  "window": "receipts with a timestamp on or after 2026-09-21T00:00:00Z",
+  "source": "~/.vnx-data/vnx-dev/state/t0_receipts.ndjson, fields model and model_resolved, providers claude, deepseek-harness and glm-harness (1897 receipts)",
+  "receipt_strings": [
+    {"provider": "claude", "field": "model", "model": "sonnet", "receipts": 587, "registry_key": "sonnet"},
+    {"provider": "claude", "field": "model", "model": "opus", "receipts": 278, "registry_key": "opus"},
+    {"provider": "claude", "field": "model", "model": "opus-5-5", "receipts": 19, "registry_key": "opus-5-5"},
+    {"provider": "claude", "field": "model", "model": "sonnet-5", "receipts": 5, "registry_key": "sonnet-5"},
+    {"provider": "claude", "field": "model_resolved", "model": "sonnet-5-5", "receipts": 164, "registry_key": "sonnet-5-5"},
+    {"provider": "claude", "field": "model_resolved", "model": "opus-5-5", "receipts": 124, "registry_key": "opus-5-5"},
+    {"provider": "deepseek-harness", "field": "model", "model": "deepseek-flash", "receipts": 329, "registry_key": "deepseek-flash"},
+    {"provider": "deepseek-harness", "field": "model", "model": "deepseek-v4-pro", "receipts": 187, "registry_key": "deepseek-v4-pro"},
+    {"provider": "deepseek-harness", "field": "model", "model": "deepseek-v4-flash", "receipts": 111, "registry_key": "deepseek-v4-flash"},
+    {"provider": "glm-harness", "field": "model", "model": "glm-5.2", "receipts": 317, "registry_key": "glm-5.2"},
+    {"provider": "glm-harness", "field": "model", "model": "glm-5.3", "receipts": 2, "registry_key": "glm-5.3"}
+  ],
+  "receipt_strings_not_from_a_runner": [
+    {"provider": "claude", "field": "model", "model": "unknown", "receipts": 57,
+     "why": "synthesized tmux_interactive-lane receipts (source tmux_interactive_lane_synthesized, the test fixture dispatch test-govern-001); the tmux-spawn lane is gone and no cost-ledger call site sees them. A placeholder is no model: the ledger refuses it."},
+    {"provider": "claude", "field": "model", "model": "claude", "receipts": 5,
+     "why": "plan-gate seat receipts (plan-gate-...-deepseek-...), a K3 call site; the provider name in the model field is the OI-2186 misattribution, never a registry identity."}
+  ],
+  "raw_provider_ids": [
+    {"provider": "claude", "model": "claude-haiku-4-5-20251001", "registry_key": "haiku",
+     "why": "OI-2224 advice 1: the dated provider id; resolves through the registry alias haiku-4-5"},
+    {"provider": "claude", "model": "claude-opus-5-5", "registry_key": "opus-5-5"},
+    {"provider": "claude", "model": "claude-sonnet-5-5", "registry_key": "sonnet-5-5"},
+    {"provider": "claude", "model": "claude-sonnet-5", "registry_key": "sonnet-5"},
+    {"provider": "claude", "model": "claude-opus-5", "registry_key": "opus-5"},
+    {"provider": "claude", "model": "claude-opus-4-8", "registry_key": "opus-4-8"},
+    {"provider": "glm-harness", "model": "z-ai/glm-5.2", "registry_key": "glm-5.2"}
+  ],
+  "raw_provider_ids_not_in_the_registry": [
+    {"provider": "claude", "model": "claude-fable-5-1",
+     "why": "message.model in interactive ~/.claude transcripts, never in a harness-lane receipt; no verified price in the registry, so a builder run on it is refused until it is added"},
+    {"provider": "claude", "model": "claude-haiku-5-5", "why": "same: interactive transcripts only"},
+    {"provider": "claude", "model": "claude-opus-4-7", "why": "same: interactive transcripts only"}
+  ]
+}

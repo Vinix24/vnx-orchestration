@@ -17,7 +17,9 @@ Two entry points, and every writer and reader goes through them:
   ledger when this returns; the caller mutates its state after that). A record
   the plan forbids is refused with a :class:`CostLedgerRefusal` subclass and
   nothing is written. An append that fails raises :class:`CostLedgerWriteError`:
-  the call fails, never silently.
+  the call fails, never silently. :func:`record_next_attempt` is the same
+  writer for a producer that knows its dispatch but not the attempt number: it
+  takes the next attempt from the ledger under the same lock as the append.
 - :func:`aggregate_runs` is the one aggregation: per ``run_id`` only the last
   line counts (a ``correction`` replaces the earlier contribution), a run
   without a price is listed in ``unavailable`` and never summed as 0, and a line
@@ -32,8 +34,9 @@ as one unreadable line.
 
 The recovery path for a failed append, ADR-043 §6, lands in the second K2a PR
 (verdict ``cap-pr2141-73c685f656862925ef20ef81d2a09090b9b08337``). The old
-writer ``provider_costs.emit_provider_cost`` and its callers are untouched; the
-harness lanes move onto :func:`record_run` in K2a-2.
+writer ``provider_costs.emit_provider_cost`` stays for the lanes that have not
+moved yet; the builder runs on the claude harness lanes write here through
+``harness_run_cost`` (K2a-2).
 """
 
 from __future__ import annotations
@@ -550,7 +553,11 @@ def _append_under_the_lock(ledger_path: Path, record: Mapping[str, Any]) -> None
 
 
 def _write_error(ledger_path: Path, record: Mapping[str, Any], cause: OSError) -> CostLedgerWriteError:
-    message = f"cost record {record['record_id']} of run {record['run_id']} was not appended to {ledger_path}: {cause}"
+    return _write_error_for(ledger_path, f"cost record {record['record_id']} of run {record['run_id']}", cause)
+
+
+def _write_error_for(ledger_path: Path, what: str, cause: OSError) -> CostLedgerWriteError:
+    message = f"{what} was not appended to {ledger_path}: {cause}"
     if cause.errno is None:
         return CostLedgerWriteError(message)
     return CostLedgerWriteError(cause.errno, message)
@@ -574,6 +581,104 @@ def record_run(run: RunCost, *, ledger_path: Optional[Path] = None) -> Dict[str,
     except OSError as exc:
         raise _write_error(path, record, exc) from exc
     return record
+
+
+def _read_under_the_lock(fh) -> str:
+    """The whole ledger text through the locked handle, an undecodable byte replaced."""
+    fh.flush()
+    fd = fh.fileno()
+    size = os.fstat(fd).st_size
+    chunks: List[bytes] = []
+    offset = 0
+    while offset < size:
+        chunk = os.pread(fd, size - offset, offset)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        offset += len(chunk)
+    return b"".join(chunks).decode("utf-8", errors="replace")
+
+
+def _next_attempt(text: str, project_id: str, producer: str, ref: str) -> int:
+    """One more than the highest attempt the ledger text holds for this project, producer and ref."""
+    highest = 0
+    for record in _parse_lines(text)[0]:
+        try:
+            project, run_producer, run_ref, attempt = split_run_id(record["run_id"])
+        except InvalidRecord:
+            continue
+        if (project, run_producer, run_ref) == (project_id, producer, ref):
+            highest = max(highest, attempt)
+    return highest + 1
+
+
+class _RecordNotBuilt(Exception):
+    """An ``OSError`` raised while building the record (the registry read), not while writing it."""
+
+
+def _append_next_under_the_lock(
+    ledger_path: Path, record_for: Callable[[str], Dict[str, Any]], built: List[Dict[str, Any]],
+) -> None:
+    """Read the ledger, build the record from it and append it, all under one exclusive lock.
+
+    ``record_for`` gets the ledger text and returns the record; it lands in
+    ``built`` before the append, so a failed append can name it. The ``OSError``
+    of the open, lock, read, append or close is raised as itself; one from
+    ``record_for`` is wrapped in :class:`_RecordNotBuilt`, so the caller does not
+    report it as a failed write. A refusal from ``record_for`` propagates with
+    nothing written.
+    """
+    fh = _open_locked(ledger_path)
+    try:
+        text = _read_under_the_lock(fh)
+        try:
+            record = record_for(text)
+        except OSError as exc:
+            raise _RecordNotBuilt(str(exc)) from exc
+        built.append(record)
+        _append_record(fh, record)
+    finally:
+        closed = _close_the_ledger(fh)
+    if closed is not None:
+        raise closed
+
+
+def record_next_attempt(
+    project_id: str,
+    producer: str,
+    ref: str,
+    make_run: Callable[[str], RunCost],
+    *,
+    ledger_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """:func:`record_run` for a producer that knows its run but not the run's attempt number.
+
+    The attempt is one more than the highest attempt the ledger holds for
+    ``<project_id>:<producer>:<ref>``, read under the same exclusive lock as
+    the append, so two attempts never get the same ``run_id``: a refire of a
+    dispatch is the next attempt, whichever process fires it. ``make_run``
+    gets that ``run_id`` and returns the :class:`RunCost`. Refusals and
+    :class:`CostLedgerWriteError` are those of :func:`record_run`.
+    """
+    run_id_for(project_id, producer, ref, 1)
+    path = Path(ledger_path) if ledger_path is not None else provider_costs._resolve_costs_path()
+    refuse_real_central_store_write_under_test_runner(path)
+    built: List[Dict[str, Any]] = []
+
+    def record_for(text: str) -> Dict[str, Any]:
+        attempt = _next_attempt(text, project_id, producer, ref)
+        return build_record(make_run(run_id_for(project_id, producer, ref, attempt)))
+
+    try:
+        _append_next_under_the_lock(path, record_for, built)
+    except _RecordNotBuilt as exc:
+        raise exc.__cause__ from None
+    except OSError as exc:
+        what = f"cost record {built[-1]['record_id']} of run {built[-1]['run_id']}" if built else (
+            f"the next attempt of {project_id}:{producer}:{ref}"
+        )
+        raise _write_error_for(path, what, exc) from exc
+    return built[-1]
 
 
 # ---------------------------------------------------------------------------
@@ -710,5 +815,5 @@ __all__ = [
     "CostLedgerRefusal", "CostWithoutSource", "UnavailableWithAmount", "CorrectionWithoutSupersedes",
     "IncompleteUsageMarkedComplete", "RunIdProjectMismatch", "UnknownModel", "InvalidRecord",
     "CostLedgerWriteError", "RunCost", "LedgerTotals",
-    "split_run_id", "run_id_for", "build_record", "record_run", "aggregate_runs",
+    "split_run_id", "run_id_for", "build_record", "record_run", "record_next_attempt", "aggregate_runs",
 ]
