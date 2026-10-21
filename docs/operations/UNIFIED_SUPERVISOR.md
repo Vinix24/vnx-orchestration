@@ -262,7 +262,9 @@ scripts/dispatcher_supervisor.sh           ← wrapper (backoff + respawn)
   └── scripts/dispatcher_minimal.sh     ← inner loop
         ├── _maybe_expire_stale_leases()      ← every 30s → scripts/lib/lease_sweep.py
         ├── _maybe_runtime_supervise()        ← every 60s → scripts/lib/runtime_supervise.py
-        └── _maybe_objective_reconcile()      ← every 900s → planning_cli.py objective reconcile
+        ├── _maybe_objective_reconcile()      ← every 900s → planning_cli.py objective reconcile
+        └── _maybe_cost_ledger_replay()       ← every 60s, in EVERY mode → scripts/cost_ledger_replay.py,
+                                                killed after 20s (ADR-043 §6: the spool is no supervision)
 
 scripts/receipt_processor_supervisor.sh    ← wrapper (backoff + respawn)
   └── scripts/receipt_processor.sh     ← inner poll loop
@@ -275,12 +277,14 @@ scripts/lib/cleanup_worker_exit.py         ← called by both adapters on worker
 
 State files: `.vnx-data/state/.last_lease_sweep_ts`,
 `.vnx-data/state/.last_runtime_supervise_ts`,
-`.vnx-data/state/.last_objective_reconcile_ts`.
+`.vnx-data/state/.last_objective_reconcile_ts`,
+`.vnx-data/state/.last_cost_ledger_replay_ts`.
 
 Logs: `.vnx-data/logs/dispatcher_supervisor.log`,
 `.vnx-data/logs/receipt_processor_supervisor.log`,
 `.vnx-data/logs/lease_sweep.log`,
-`.vnx-data/logs/objective_reconcile.log`.
+`.vnx-data/logs/objective_reconcile.log`,
+`.vnx-data/logs/cost_ledger_replay.log`.
 
 Full design rationale: private research note, not shipped in the repo (see the
 note at the top of this file).

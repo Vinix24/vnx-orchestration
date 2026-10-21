@@ -1013,6 +1013,37 @@ def check_learning_loop_beacon(paths: Dict[str, str]) -> List[CheckResult]:
 
 
 # ---------------------------------------------------------------------------
+# Check: the cost ledger's own files (ADR-043 §6, K2a-3c)
+# ---------------------------------------------------------------------------
+
+def check_cost_ledger_files(paths: Dict[str, str]) -> List[CheckResult]:
+    """The cost ledger's own files in this store are known files, never strays.
+
+    ``events/provider_costs.ndjson``, its lock file ``events/provider_costs.lock``
+    (created by the first actor and never removed: a removed lock file lets
+    two actors lock two different files) and the spool
+    ``events/provider_costs.spool/`` with ``quarantine/``. PASS when nothing
+    waits; WARN when a spool file waits for the replay, a file sits in
+    quarantine, the spool holds an entry that is none of its own, or a
+    directory cannot be listed. Read-only: nothing is created, the lock file
+    included (``cost_ledger.ledger_files``).
+    """
+    from cost_ledger import ledger_files
+    from provider_costs import costs_path_in
+
+    files = ledger_files(costs_path_in(Path(paths["VNX_DATA_DIR"])))
+    findings = files.findings()
+    if findings:
+        return [CheckResult(
+            "cost_ledger", WARN, "; ".join(findings),
+            "Run `vnx costs replay` for what waits; read a quarantined file before you remove it "
+            "(ADR-043 §6); a stray in the spool is no record of the ledger",
+            details=[files.summary()],
+        )]
+    return [CheckResult("cost_ledger", PASS, f"known files: {files.summary()}")]
+
+
+# ---------------------------------------------------------------------------
 # Check: t0_state.json freshness + SessionStart refresh hook (OI-1058)
 # ---------------------------------------------------------------------------
 
@@ -1216,6 +1247,7 @@ def run_doctor(paths: Dict[str, str], *,
     results.extend(check_state_root_location(paths))
     results.extend(check_dream_cycle(paths))
     results.extend(check_learning_loop_beacon(paths))
+    results.extend(check_cost_ledger_files(paths))
     results.extend(check_t0_state_freshness(paths))
     results.extend(check_branch_protection_drift(paths))
 

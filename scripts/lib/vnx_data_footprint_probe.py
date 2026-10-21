@@ -4,6 +4,14 @@ Reads one store (``<data_dir>``, the parent of the aggregator's state dir):
 ``events/archive`` bytes, plain (uncompressed) archive bytes older than the
 retention window, ``salvage`` bytes, the data-home total and the free disk.
 
+The cost ledger's own files are known, never strays (ADR-043 §6, K2a-3c):
+``events/provider_costs.ndjson``, its lock file ``events/provider_costs.lock``
+(created by the first actor and never removed) and the spool
+``events/provider_costs.spool/`` with its ``quarantine/``. They come back under
+``cost_ledger`` as ``cost_ledger.ledger_files`` names them, with their bytes.
+Only an entry of the spool that is none of its own is listed as a stray there.
+They change no classification: their size is the size of a line per run.
+
 Classification:
 
 - ``produces_crap``: free disk under 5% or the archive over 8 GiB.
@@ -27,7 +35,9 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
+from cost_ledger import ledger_files
 from effectiveness_probe import EffectivenessProbe, register_probe, resolve_probe_state_dir
+from provider_costs import costs_path_in
 
 COMPRESS_DAYS_ENV = "VNX_EVENTS_ARCHIVE_COMPRESS_DAYS"
 DEFAULT_COMPRESS_DAYS = 14
@@ -122,6 +132,7 @@ class VnxDataFootprintProbe(EffectivenessProbe):
             "disk_total_bytes": total,
             "disk_free_bytes": free,
             "disk_free_fraction": (free / total) if total else 1.0,
+            "cost_ledger": ledger_files(costs_path_in(self._data_dir)).as_dict(),
         }
 
     def signal(self, raw: Dict[str, Any]) -> str:

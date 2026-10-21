@@ -968,6 +968,30 @@ def _check_ledger_health(data_root: Path, project_id: str = "") -> Check:
     return _result(PASS, "receipt coverage, open outcomes, and chain status all healthy")
 
 
+def _check_cost_ledger_files(data_root: Path) -> Check:
+    """The cost ledger's own files in the store are known files, never strays (ADR-043 §6, K2a-3c).
+
+    The ledger, its lock file ``events/provider_costs.lock`` (created by the
+    first actor and never removed) and the spool with ``quarantine/``, as
+    ``cost_ledger.ledger_files`` names them; ``LedgerFiles.findings`` is the
+    reading the fabric's ``scripts/vnx_doctor.py`` shows as well. PASS when
+    nothing waits, WARN otherwise. Read-only: nothing is created.
+    """
+    try:
+        _engine.ensure_engine_on_path()
+        from cost_ledger import ledger_files
+        from provider_costs import costs_path_in
+    except Exception as exc:
+        return Check(name="cost-ledger", status=WARN, detail=f"could not load cost_ledger/provider_costs: {exc}")
+
+    files = ledger_files(costs_path_in(data_root))
+    findings = files.findings()
+    if findings:
+        return Check(name="cost-ledger", status=WARN,
+                     detail=f"{'; '.join(findings)} ({files.summary()}); run `vnx costs replay` for what waits")
+    return Check(name="cost-ledger", status=PASS, detail=f"known files: {files.summary()}")
+
+
 def _check_launchd_agents(project_dir: Path) -> list[Check]:
     """FAIL per ``REQUIRED_PER_PROJECT_FAMILIES`` family missing this
     project's launchd instance — golf C, C3 (absence-is-loud, OI-1509/OI-1510).
@@ -1202,6 +1226,7 @@ def vnx_doctor(args) -> int:
     checks.append(_check_hook_paths(project_dir))
     checks.append(_check_user_guard())
     checks.append(_check_ledger_health(data_root, _engine.read_marker_project_id(project_dir) or ""))
+    checks.append(_check_cost_ledger_files(data_root))
     checks.extend(_check_launchd_agents(project_dir))
     checks.extend(_check_installed_plist_placeholders())
     checks.append(_check_embedded_path_assumptions())
