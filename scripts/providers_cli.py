@@ -35,7 +35,6 @@ for _path in (SCRIPT_DIR, SCRIPT_DIR / "lib"):
         sys.path.insert(0, str(_path))
 
 import provider_switch as ps  # noqa: E402
-import provider_usage  # noqa: E402
 
 EXIT_OK = 0
 EXIT_WRITE_FAILED = 1
@@ -535,6 +534,8 @@ def cmd_check(args: argparse.Namespace) -> int:
 
 
 def cmd_usage(args: argparse.Namespace) -> int:
+    import provider_usage  # only this command needs it: `check` and `list` run from a staged VNX_HOME without it
+
     report = provider_usage.build_usage()
     if args.json:
         print(json.dumps(report, indent=2, ensure_ascii=False))

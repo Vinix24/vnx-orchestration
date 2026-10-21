@@ -21,9 +21,11 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+sys.path.insert(0, str(REPO_ROOT / "tests"))
 
 import provider_usage as pu  # noqa: E402
 import providers_cli  # noqa: E402
+import _gate_harness  # noqa: E402
 
 CLI = REPO_ROOT / "scripts" / "providers_cli.py"
 DEEPSEEK_KEY = "sk-fake-deepseek-0123456789abcdef"
@@ -43,6 +45,7 @@ def home(tmp_path, monkeypatch) -> Path:
     for name in ("CODEX_HOME", "DEEPSEEK_API_KEY", "OPENROUTER_API_KEY"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("VNX_PROVIDER_ENV_FILE", str(tmp_path / "absent.env"))
+    monkeypatch.setenv("VNX_STATE_DIR", str(tmp_path / "no-state"))
     return home
 
 
@@ -162,6 +165,35 @@ def test_kimi_no_record_is_geen_meting(home):
     assert row == {"available": False, "reason": "geen meting"}
 
 
+def test_kimi_reads_the_state_dir_the_current_project_resolves_to(home, tmp_path, monkeypatch):
+    local = tmp_path / "project" / "state"
+    path = local / "provider_reachability" / "kimi.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({
+        "provider": "kimi", "state": "reachable", "reason": "", "detail": "",
+        "source": "provider_dispatch:kimi", "measured_at": NOW - 10, "expires_at": NOW + 3600,
+    }), encoding="utf-8")
+    monkeypatch.setenv("VNX_STATE_DIR", str(local))
+    row = pu.probe_kimi(home, NOW, {})
+    assert row["available"] is True and row["status"] == "bereikbaar" and row["store"] == "project"
+
+
+def test_kimi_reads_the_stores_under_vnx_data_home_once_per_real_path(home, tmp_path, monkeypatch):
+    data_home = tmp_path / "datahome"
+    path = data_home / "gamma" / "state" / "provider_reachability" / "kimi.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({
+        "provider": "kimi", "state": "reachable", "reason": "", "detail": "",
+        "source": "provider_dispatch:kimi", "measured_at": NOW - 10, "expires_at": NOW + 3600,
+    }), encoding="utf-8")
+    (home / ".vnx-data").mkdir()
+    (home / ".vnx-data" / "gamma").symlink_to(data_home / "gamma")
+    monkeypatch.setenv("VNX_STATE_DIR", str(data_home / "gamma" / "state"))
+    env = {"VNX_DATA_HOME": str(data_home)}
+    assert len(pu._kimi_state_dirs(home, env)) == 1
+    assert pu.probe_kimi(home, NOW, env)["store"] == "gamma"
+
+
 # ---------------------------------------------------------------------------
 # deepseek and openrouter
 # ---------------------------------------------------------------------------
@@ -254,6 +286,60 @@ def test_openrouter_failures(monkeypatch, outcome, expected):
     _patch_urlopen(monkeypatch, outcome)
     row = pu.probe_openrouter({"OPENROUTER_API_KEY": OPENROUTER_KEY}, pu._http_get_json)
     assert row["available"] is False and expected in row["reason"]
+
+
+@pytest.mark.parametrize("body,field", [
+    ({}, "is_available"),
+    ({"error": "temporary failure"}, "is_available"),
+    ({"is_available": "yes", "balance_infos": []}, "is_available"),
+    ({"is_available": True}, "balance_infos"),
+    ({"is_available": True, "balance_infos": "none"}, "balance_infos"),
+    ({"is_available": True, "balance_infos": [{"currency": "USD"}]}, "total_balance"),
+    ({"is_available": True, "balance_infos": ["USD"]}, "balance_infos"),
+])
+def test_deepseek_malformed_answer_is_unavailable_and_names_the_field(monkeypatch, body, field):
+    _patch_urlopen(monkeypatch, body)
+    row = pu.probe_deepseek({"DEEPSEEK_API_KEY": DEEPSEEK_KEY}, pu._http_get_json)
+    assert row["available"] is False and field in row["reason"]
+
+
+@pytest.mark.parametrize("body,field", [
+    ({"data": {}}, "total_credits"),
+    ({"data": {"error": "temporary failure"}}, "total_credits"),
+    ({"data": {"total_credits": "5", "total_usage": 1}}, "total_credits"),
+    ({"data": {"total_credits": 5}}, "total_usage"),
+    ({"data": {"total_credits": 5, "total_usage": None}}, "total_usage"),
+])
+def test_openrouter_malformed_answer_is_unavailable_and_names_the_field(monkeypatch, body, field):
+    _patch_urlopen(monkeypatch, body)
+    row = pu.probe_openrouter({"OPENROUTER_API_KEY": OPENROUTER_KEY}, pu._http_get_json)
+    assert row["available"] is False and field in row["reason"]
+
+
+def test_provider_env_value_reads_one_named_variable_with_the_deepseek_rules(tmp_path):
+    import load_deepseek_key as keys
+    env_file = tmp_path / "p.env"
+    env_file.write_text('A=1\nexport OPENROUTER_API_KEY="first"\r\nOPENROUTER_API_KEY=\'second\'\nDEEPSEEK_API_KEY=ds\n',
+                        encoding="utf-8")
+    assert keys.load_provider_env_value("OPENROUTER_API_KEY", env_file) == "second"
+    assert keys.load_provider_env_value("MISSING", env_file) == ""
+    assert keys.load_deepseek_api_key_from_file(env_file) == "ds"
+
+
+def test_check_runs_from_a_vnx_home_holding_only_the_gate_harness_closure(tmp_path):
+    scripts = tmp_path / "vnx_home" / "scripts"
+    (scripts / "lib").mkdir(parents=True)
+    for name in _gate_harness.PROVIDER_SWITCH_SCRIPTS:
+        (scripts / name).write_bytes((REPO_ROOT / "scripts" / name).read_bytes())
+    for name in _gate_harness.PROVIDER_SWITCH_LIB_MODULES:
+        (scripts / "lib" / name).write_bytes((REPO_ROOT / "scripts" / "lib" / name).read_bytes())
+    env = {k: v for k, v in os.environ.items() if not k.startswith("VNX_") and k != "PYTHONPATH"}
+    env["VNX_PROVIDER_SWITCH_FILE"] = str(tmp_path / "absent-switch.yaml")
+    result = subprocess.run([sys.executable, str(scripts / "providers_cli.py"), "check", "codex_gate",
+                             "--consumer", "vnx gate --only"],
+                            env=env, capture_output=True, text=True, cwd=tmp_path, timeout=30)
+    assert "ModuleNotFoundError" not in result.stderr, result.stderr
+    assert result.returncode == 0, result.stderr
 
 
 def test_openrouter_without_a_key(home):

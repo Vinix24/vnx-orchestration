@@ -38,7 +38,6 @@ _TAIL_CHUNK = 64 * 1024
 _TAIL_SCAN_LIMIT = 32 * 1024 * 1024
 _RESPONSE_LIMIT = 1024 * 1024
 _KIMI_LIMIT_RE = re.compile(r"\b429\b|weekly|7-day|usage limit", re.IGNORECASE)
-_OPENROUTER_KEY_LINE_RE = re.compile(r"^[ \t]*(?:export[ \t]+)?OPENROUTER_API_KEY=(.*)$")
 
 Row = Dict[str, Any]
 
@@ -151,9 +150,26 @@ def probe_codex(env: Dict[str, str], home: Path, now: float) -> Row:
 # kimi: reachability records only, never a call with the kimi login
 # ---------------------------------------------------------------------------
 
-def _kimi_records(home: Path) -> List[Tuple[float, str, _reach.Reachability]]:
+def _kimi_state_dirs(home: Path, env: Dict[str, str]) -> List[Path]:
+    """Every state dir that can hold a kimi record, one per real path."""
+    candidates = list(sorted((home / ".vnx-data").glob("*/state")))
+    data_home = env.get("VNX_DATA_HOME") or ""
+    if data_home:
+        candidates += sorted(Path(data_home).expanduser().glob("*/state"))
+    try:
+        from vnx_paths import resolve_state_dir
+        candidates.append(resolve_state_dir())
+    except Exception:  # vnx-silent-except: an unresolvable current project only drops that one candidate; the scanned stores still answer
+        pass
+    seen: Dict[Path, Path] = {}
+    for state in candidates:
+        seen.setdefault(state.resolve(), state)
+    return list(seen.values())
+
+
+def _kimi_records(home: Path, env: Dict[str, str]) -> List[Tuple[float, str, _reach.Reachability]]:
     found = []
-    for state in sorted((home / ".vnx-data").glob("*/state")):
+    for state in _kimi_state_dirs(home, env):
         # now=0.0 keeps an expired record readable: its age is reported, not hidden.
         record = _reach.get("kimi", state_dir=state, now=0.0)
         if record.measured_at is not None and record.state is not _reach.ReachabilityState.UNMEASURED:
@@ -169,8 +185,8 @@ def _kimi_status(record: _reach.Reachability) -> str:
     return "onbereikbaar: " + (record.reason or "onbekend")
 
 
-def probe_kimi(home: Path, now: float) -> Row:
-    records = _kimi_records(home)
+def probe_kimi(home: Path, now: float, env: Optional[Dict[str, str]] = None) -> Row:
+    records = _kimi_records(home, dict(os.environ) if env is None else env)
     if not records:
         return _unavailable("geen meting")
     measured_at, store, record = max(records, key=lambda item: item[0])
@@ -228,31 +244,23 @@ def probe_deepseek(env: Dict[str, str], http_get: Callable[[str, str], Tuple[Opt
     body, reason = http_get(DEEPSEEK_BALANCE_URL, key)
     if not isinstance(body, dict):
         return _unavailable(reason or "onverwacht antwoord")
+    if not isinstance(body.get("is_available"), bool):
+        return _unavailable("antwoord mist is_available als bool")
+    infos = body.get("balance_infos")
+    if not isinstance(infos, list) or not all(
+            isinstance(info, dict) and "currency" in info and "total_balance" in info for info in infos):
+        return _unavailable("antwoord mist balance_infos met currency en total_balance")
     rows = [
-        {"currency": info.get("currency"), "total": info.get("total_balance"),
+        {"currency": info["currency"], "total": info["total_balance"],
          "granted": info.get("granted_balance"), "topped_up": info.get("topped_up_balance")}
-        for info in (body.get("balance_infos") or []) if isinstance(info, dict)
+        for info in infos
     ]
-    return {"available": True, "is_available": body.get("is_available"), "balances": rows}
-
-
-def _openrouter_key_from_file(env_file: Optional[Path] = None) -> str:
-    """Parse OPENROUTER_API_KEY out of the provider env file; the file is never sourced."""
-    path = env_file or _keys.provider_env_file_path()
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeDecodeError):
-        return ""
-    for line in reversed(lines):
-        match = _OPENROUTER_KEY_LINE_RE.match(line)
-        if match:
-            return _keys._strip_quotes(match.group(1)).strip()
-    return ""
+    return {"available": True, "is_available": body["is_available"], "balances": rows}
 
 
 def resolve_openrouter_api_key(env: Dict[str, str]) -> str:
     """The environment first, then the provider env file."""
-    return (env.get(OPENROUTER_API_KEY_ENV) or "").strip() or _openrouter_key_from_file()
+    return (env.get(OPENROUTER_API_KEY_ENV) or "").strip() or _keys.load_provider_env_value(OPENROUTER_API_KEY_ENV)
 
 
 def probe_openrouter(env: Dict[str, str], http_get: Callable[[str, str], Tuple[Optional[Any], str]]) -> Row:
@@ -308,7 +316,7 @@ def build_usage(*, env: Optional[Dict[str, str]] = None, home: Optional[Path] = 
     rows = {
         "claude": lambda: _unavailable(CLAUDE_REASON),
         "codex": lambda: probe_codex(env, home, moment),
-        "kimi": lambda: probe_kimi(home, moment),
+        "kimi": lambda: probe_kimi(home, moment, env),
         "deepseek": lambda: probe_deepseek(env, http_get),
         "openrouter": lambda: probe_openrouter(env, http_get),
     }
