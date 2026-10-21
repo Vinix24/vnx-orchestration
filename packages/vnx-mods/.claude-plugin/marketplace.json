@@ -9,6 +9,11 @@
       "name": "voortgang",
       "source": "./voortgang",
       "description": "VNX progress per project in a pane and a status line."
+    },
+    {
+      "name": "verbruik",
+      "source": "./verbruik",
+      "description": "Subscription usage and API balance of every provider in one status line."
     }
   ]
 }

@@ -1,0 +1,46 @@
+{
+  "name": "verbruik",
+  "version": "0.1.0",
+  "description": "A VNX mod: one status line with the usage of every subscription and the balance of the API providers. Claude from the session itself, the other providers from vnx providers usage.",
+  "userConfig": {
+    "vnxBin": {
+      "type": "string",
+      "title": "vnx binary",
+      "description": "The vnx executable that runs providers usage. A leading ~ is your home directory.",
+      "default": "~/.vnx-system/current/bin/vnx"
+    },
+    "refreshMinutes": {
+      "type": "number",
+      "title": "Refresh interval (minutes)",
+      "description": "How often the other providers are measured again; 2 minutes at least.",
+      "default": 10
+    },
+    "warnPercent": {
+      "type": "number",
+      "title": "Warn at (percent used)",
+      "description": "A used percentage from this value up is shown as a warning.",
+      "default": 70
+    },
+    "errorPercent": {
+      "type": "number",
+      "title": "Error at (percent used)",
+      "description": "A used percentage from this value up is shown as an error.",
+      "default": 90
+    },
+    "warnBalance": {
+      "type": "number",
+      "title": "Warn at (balance)",
+      "description": "A balance at or below this value, in its own currency, is shown as a warning.",
+      "default": 5
+    },
+    "errorBalance": {
+      "type": "number",
+      "title": "Error at (balance)",
+      "description": "A balance at or below this value, in its own currency, is shown as an error.",
+      "default": 1
+    }
+  },
+  "author": {
+    "name": "Vincent van Deth"
+  }
+}
