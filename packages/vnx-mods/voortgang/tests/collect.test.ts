@@ -338,11 +338,11 @@ describe('the project of a session', () => {
   })
 
   test('strips inner whitespace before it checks the id, and rejects an id that stays invalid', async () => {
-    const stripped = idFiles({ [projectIdFileOf(PROJECT_DIR)]: ' vnx\t- dev \n' })
+    const stripped = idFiles({ [projectIdFileOf(PROJECT_DIR)]: ' proj\t- x \n' })
     const invalid = idFiles({ [projectIdFileOf(PROJECT_DIR)]: 'Project_A\n', [projectIdFileOf('/work')]: 'outer' })
 
-    expect(await resolveProject(idFiles({ [projectIdFileOf(PROJECT_DIR)]: 'vnx-dev\n' }), CWD)).toEqual({ isOk: true, value: 'vnx-dev' })
-    expect(await resolveProject(stripped, CWD)).toEqual({ isOk: true, value: 'vnx-dev' })
+    expect(await resolveProject(idFiles({ [projectIdFileOf(PROJECT_DIR)]: 'proj-x\n' }), CWD)).toEqual({ isOk: true, value: 'proj-x' })
+    expect(await resolveProject(stripped, CWD)).toEqual({ isOk: true, value: 'proj-x' })
     expect(await resolveProject(invalid, CWD)).toEqual({ isOk: false, reason: `geen geldig project-id in ${projectIdFileOf(PROJECT_DIR)}` })
   })
 
