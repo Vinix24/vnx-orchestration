@@ -1,6 +1,6 @@
 {
   "name": "voortgang",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "A VNX mod: shows the progress of the VNX project the session is in. A pane and a status line with the builders at work, what waits on a decision, the open PRs with their review seats, and per track how many deliverables are done.",
   "types": "./types/index.d.ts",
   "userConfig": {

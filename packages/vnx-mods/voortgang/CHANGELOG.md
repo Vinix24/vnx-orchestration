@@ -2,6 +2,24 @@
 
 All notable changes to this plugin are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the plugin follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] - 2026-10-21
+
+The status line was a row of counters (`0 bouwers · 20 PR · 1 te promoveren · 613 uitkomsten`) and said nothing about how far the project is. It now answers the question of the pane. The open-PR advisories of 0.3.0 are fixed.
+
+### Changed
+
+- The Tracks order says where the project is now: a track a builder works on first (most builders first), then a track with an open PR, then one with a deliverable active in the last 7 days, then a `now` track without activity; within a tier by priority, then id. A P2 track being built no longer sits below P1 tracks that last moved days ago.
+- The status line shows the first two tracks of the pane's Tracks order, each with the 8-cell bar and `X/Y` (`: geen plan` without deliverables, `: ?` when they could not be read), then `1 bouwer` / `N bouwers` when a builder runs, then `verouderd` and `onleesbaar` as before. A track id is cut to 28 display cells. No tracks shown: `<id> · geen tracks in beweging`; tracks that could not be read: `<id> · tracks onbekend`.
+- The PR count, `te promoveren` and `uitkomsten` are gone from the status line; they stay in the pane. The first line of the headless `/voortgang` summary is the status line.
+- `live_work.open_prs` of the index is positive evidence only (capped at 8, empty when `gh` fails). A PR is `dicht` only when the PR queue of `t0_state.json` is readable and does not list it; otherwise it is `#N ?`.
+- A track whose deliverables cannot be read keeps its open-PR names, PR status and builder count on its second row.
+- When `vnx deliverable list` fails the Tracks section starts with `leveringen onleesbaar: <reason>, tracks met alleen recente leveringen ontbreken`.
+
+### Fixed
+
+- An `open_prs` entry with `dispatch_id: null` (a branch that is not `dispatch/<id>`) counts as an open PR; it links no track.
+- A dispatch spec without `model` still links its track (open PR) and gives its builder a track. The builder row shows `model ?` and the project is not marked `onleesbaar` for it.
+
 ## [0.3.0] - 2026-10-21
 
 The pane showed every project on the machine, so each list collapsed to a bare `+N meer` and the project of the session fell off the bottom. It now shows the one project of the session, with progress per track.
