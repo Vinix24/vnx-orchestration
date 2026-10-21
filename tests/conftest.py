@@ -318,6 +318,18 @@ def _vnx_provider_env_file_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
 
 @pytest.fixture(autouse=True)
+def _content_boundary_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep every test off the operator's real ~/.vnx/content_boundary.json.
+
+    Once the boundary file exists, a test that dispatches or runs the panel would be
+    classified against the operator's real roots. Pinned to a file that does not exist, the
+    boundary is ``unconfigured`` unless a test writes its own and points
+    VNX_CONTENT_BOUNDARY_FILE at it (later monkeypatch call wins).
+    """
+    monkeypatch.setenv("VNX_CONTENT_BOUNDARY_FILE", str(tmp_path / "_vnx_content_boundary" / "content_boundary.json"))
+
+
+@pytest.fixture(autouse=True)
 def _reconcile_git_off(monkeypatch: pytest.MonkeyPatch) -> None:
     """OI-1155: pin track_reconciler source 4 (``gh pr list``) OFF for the suite.
 

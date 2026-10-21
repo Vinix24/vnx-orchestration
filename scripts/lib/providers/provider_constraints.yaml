@@ -9,7 +9,9 @@
 #
 # Schema (per entry under `constraints`):
 #   id               kebab-case identifier, stable across versions
-#   rule             forbid_route | require_route | forbid_import
+#   rule             forbid_route | require_route | forbid_import | require_content_route
+#                    A rule value the enforcer does not know makes the load raise: a rule
+#                    added to this file without code behind it fails loud, never open.
 #   forbidden_route  optional, used with rule=forbid_route
 #                    keys: provider, model (str|list), role (str|list),
 #                          task_class (str|list), via (str)
@@ -21,11 +23,25 @@
 #                    -> zai) is covered without repeating the set in the YAML.
 #   forbidden_import optional, used with rule=forbid_import
 #                    keys: patterns (list of substrings or simple regex)
+#   required_content_route
+#                    optional, used with rule=require_content_route
+#                    keys: content_class (list: client | personal), allowed_providers
+#                    (list of wave7_models.yaml registry keys). Content of those classes
+#                    (scripts/lib/content_class.py classify_dispatch) may route only to
+#                    the listed registry keys. A provider that resolves to no key
+#                    (`auto` included) is not allowed. A caller that passes no content
+#                    class is not subject to the rule. A project listed under
+#                    provider_exceptions in ~/.vnx/content_boundary.json is allowed the
+#                    named providers when its project id is the ONLY restricted signal.
 #   reason           human-readable justification (cite memory ref or ADR)
 #   enforcement      code_raise | code_warn | ci_grep
 #   audit_severity   blocking | warn | info
 #   override_allowed bool; when true operator may bypass via env flag
 #                    VNX_OVERRIDE_<UPPERCASED_ID_WITH_UNDERSCORES>=1
+#   override_requires_reason
+#                    bool, default false; when true the override flag only counts
+#                    together with a non-empty VNX_OVERRIDE_<ID>_REASON. Without a
+#                    reason the verdict stays blocking.
 #   pin_semantics    floor | default; only meaningful on require_route constraints
 #                    consumed as a model pin (t0-opus-only, workers-kimi-pinned).
 #                    floor = coercive, spec.model is ignored, the pin always wins.
@@ -301,3 +317,24 @@ constraints:
     enforcement: code_warn
     audit_severity: warn
     override_allowed: true
+
+  - id: content-boundary
+    rule: require_content_route
+    required_content_route:
+      content_class: [client, personal]
+      allowed_providers: [anthropic, openai, local_gemma]
+    reason: >-
+      Client and personal content may be read by Claude, codex and local models
+      only. It never goes to GLM, DeepSeek, kimi, Gemini or any litellm/openrouter
+      lane (operator decision 2026-10-02, extended 2026-10-03). The class comes
+      from where the work starts (cwd, project root, declared paths, project id,
+      instruction text), not from a declaration: forgetting a declaration would
+      be a leak. A dispatch whose marker file cannot be read, outside the client
+      and personal roots, is refused on the same lanes as content-boundary-unreadable.
+      Override: VNX_OVERRIDE_CONTENT_BOUNDARY=1 together with
+      VNX_OVERRIDE_CONTENT_BOUNDARY_REASON=<why>. Gemini (registry `google`) joins
+      the allowlist with a one-line change here.
+    enforcement: code_raise
+    audit_severity: blocking
+    override_allowed: true
+    override_requires_reason: true

@@ -11,6 +11,7 @@ writes the cited report to unified_reports/ (and prints it).
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import uuid
 from pathlib import Path
@@ -19,7 +20,7 @@ _LIB = Path(__file__).resolve().parent / "lib"
 if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 
-from deliberation_panel import default_roster, MODES, run_deliberation
+from deliberation_panel import KERN_ROSTER_SEATS, default_roster, MODES, run_deliberation
 
 
 def _resolve_reports_dir() -> Path:
@@ -52,7 +53,92 @@ def _parse_seats(value: str | None) -> "list[tuple[str, str]] | None":
     return [known_roster[seat] for seat in seats]
 
 
-def main(argv: "list[str] | None" = None) -> int:
+def _classify_panel_content(args: argparse.Namespace, context: str):
+    """Content class of this panel run: cwd, --context-file, --out, the question and the context.
+
+    The cwd decides for a run from a client folder: VNX_PROJECT_ID and the project root both
+    say "dev" there (business-panel pins VNX_PROJECT_ID=vnx-dev for every run).
+    """
+    from content_class import classify_dispatch
+    from dispatch_worktree_isolation import resolve_consumer_project_root
+
+    return classify_dispatch(
+        cwd=Path.cwd(),
+        project_root=resolve_consumer_project_root(),
+        project_id=os.environ.get("VNX_PROJECT_ID"),
+        instruction="\n".join(part for part in (args.question, context) if part),
+        extra_paths=[p for p in (args.context_file, args.out) if p],
+    )
+
+
+def _external_seats(roster: "list[tuple[str, str]]", content) -> "list[str]":
+    """Seats of ``roster`` that may not read this content: outside the kern and not excepted."""
+    from providers.constraint_enforcer import content_route_names
+
+    granted = {name.lower() for name in content.exception_providers}
+    external = []
+    for provider, _model in roster:
+        if provider in KERN_ROSTER_SEATS:
+            continue
+        sub = provider.split(":", 1)[1] if provider.startswith("litellm:") else None
+        if granted & content_route_names(provider, sub):
+            continue
+        external.append(provider)
+    return external
+
+
+def _restrict_to_content(args, roster, context, allow_reason):
+    """``(roster, seat_env, boundary_note)`` after the content boundary, or an rc when refused."""
+    boundary_note = ""
+    seat_env: "dict[str, str] | None" = None
+    content = _classify_panel_content(args, context)
+    if not (content.restricted or content.unreadable):
+        return roster, seat_env, boundary_note
+    what = f"{content.cls} content" if content.restricted else "content of unknown class (marker unreadable)"
+    planned = roster if roster is not None else default_roster()
+    external = _external_seats(planned, content)
+    if allow_reason is not None and allow_reason.strip():
+        if external:
+            seat_env = {
+                "VNX_OVERRIDE_CONTENT_BOUNDARY": "1",
+                "VNX_OVERRIDE_CONTENT_BOUNDARY_REASON": allow_reason.strip(),
+            }
+            boundary_note = (
+                f"{what} (signal: {content.signal}); external seats allowed by "
+                f"--allow-external-seats: {', '.join(external)}. Reason: {allow_reason.strip()}"
+            )
+    elif roster is None:
+        roster = [seat for seat in default_roster() if seat[0] not in external]
+        seats = ", ".join(provider for provider, _ in roster)
+        print(f"panel: {what} (signal: {content.signal}); running seats: {seats}", file=sys.stderr)
+        boundary_note = f"{what} (signal: {content.signal}); seats limited to: {seats}"
+    elif external:
+        print(
+            f"panel: {what} (signal: {content.signal}) may not go to seat(s): "
+            f"{', '.join(external)}. Use the seats {', '.join(KERN_ROSTER_SEATS)} or pass "
+            "--allow-external-seats REASON",
+            file=sys.stderr,
+        )
+        return 2
+    return roster, seat_env, boundary_note
+
+
+def _below_synthesis_minimum(args, roster, min_seats) -> bool:
+    """True (after saying why) when the roster cannot reach the synthesis minimum and the run
+    is not degraded: refused before any seat runs, so no seat work is spent on a refused synthesis."""
+    seats = len(roster if roster is not None else default_roster())
+    if min_seats is None or seats >= min_seats or args.allow_degraded:
+        return False
+    print(
+        f"panel: {seats} seat(s) cannot reach the synthesis minimum of {min_seats}; "
+        "nothing was dispatched. Pass --allow-degraded to synthesize from fewer seats, or "
+        "--allow-external-seats REASON to let the seats outside codex and claude run",
+        file=sys.stderr,
+    )
+    return True
+
+
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="VNX multi-provider deliberation panel")
     parser.add_argument("mode", choices=sorted(MODES), help="deliberation mode")
     parser.add_argument("question", help="the question / target for the panel")
@@ -61,12 +147,22 @@ def main(argv: "list[str] | None" = None) -> int:
     parser.add_argument("--out", default=None, help="write the report here (default: unified_reports/)")
     parser.add_argument("--seats", default=None, help="comma-list of seats to run; default = full fleet")
     parser.add_argument(
+        "--allow-external-seats", default=None, metavar="REASON",
+        help="client or personal content only: let the seats outside codex and claude run "
+             "anyway. The reason is required, goes into the seat subprocess environment as the "
+             "content-boundary override and into the report header",
+    )
+    parser.add_argument(
         "--allow-degraded",
         action="store_true",
         help="proceed with the synthesis even when fewer than the configured "
              "minimum seats delivered a report (the choice is stamped on the report)",
     )
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: "list[str] | None" = None) -> int:
+    args = _build_parser().parse_args(argv)
 
     try:
         roster = _parse_seats(args.seats)
@@ -82,10 +178,24 @@ def main(argv: "list[str] | None" = None) -> int:
             print(f"panel: cannot read --context-file: {exc}", file=sys.stderr)
             return 2
 
+    allow_reason = args.allow_external_seats
+    if allow_reason is not None and not allow_reason.strip():
+        print("panel: --allow-external-seats needs a non-empty REASON", file=sys.stderr)
+        return 2
+
+    restriction = _restrict_to_content(args, roster, context, allow_reason)
+    if isinstance(restriction, int):
+        return restriction
+    roster, seat_env, boundary_note = restriction
+
     from plan_gate_panel import (  # noqa: PLC0415
         _make_default_dispatcher,
         load_synthesis_min_seats,
     )
+    # OI-1154: the synthesis coverage floor comes from the config, never a Python literal.
+    min_seats = load_synthesis_min_seats()
+    if _below_synthesis_minimum(args, roster, min_seats):
+        return 2
     # Pass a REAL data_dir: the claude/tmux lane writes each report to
     # <data_dir>/unified_reports/<id>.md and _read_report falls back to that path. With
     # data_dir=None the claude-lane reports (fan-out + synthesis) are written but never found
@@ -98,10 +208,10 @@ def main(argv: "list[str] | None" = None) -> int:
     # "you are an independent plan reviewer... review the IMPLEMENTATION PLAN" framing,
     # which a plan-reviewer-role worker correctly rejected as not a plan, corrupting the
     # panel stage.
-    dispatcher = _make_default_dispatcher(data_dir, args.timeout, role="deliberation-panelist")
-    # OI-1154: the synthesis coverage floor comes from the config, never a Python literal.
-    min_seats = load_synthesis_min_seats()
-
+    dispatcher_kwargs = {"extra_env": seat_env} if seat_env else {}
+    dispatcher = _make_default_dispatcher(
+        data_dir, args.timeout, role="deliberation-panelist", **dispatcher_kwargs,
+    )
     print(f"[panel] mode={args.mode} — running 4-stage deliberation across the fleet ...", file=sys.stderr)
     if roster is None:
         result = run_deliberation(
@@ -113,6 +223,8 @@ def main(argv: "list[str] | None" = None) -> int:
             args.mode, args.question, dispatcher=dispatcher, context=context, roster=roster,
             min_seats=min_seats, allow_degraded=args.allow_degraded,
         )
+    if boundary_note:
+        result.boundary_note = boundary_note
     report = result.to_report()
 
     out = Path(args.out) if args.out else (_resolve_reports_dir() / f"panel-{args.mode}-{uuid.uuid4().hex[:8]}.md")
