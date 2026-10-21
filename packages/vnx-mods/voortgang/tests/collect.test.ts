@@ -15,6 +15,7 @@ import {
   formatAge,
   indexViewOf,
   isOutdated,
+  isDispatchId,
   isProjectId,
   isStale,
   isUnreadable,
@@ -113,6 +114,13 @@ describe('the options', () => {
     expect(expandHome('~', HOME)).toBe(HOME)
     expect(expandHome('/srv/vnx', undefined)).toBe('/srv/vnx')
     expect(expandHome('~/.vnx-data', undefined)).toBeNull()
+  })
+
+  test('accepts a dispatch id that stays one directory, with the longer alphabet a dispatch id has', () => {
+    expect(isDispatchId('20261021-vg-2-r2')).toBe(true)
+    expect(isDispatchId('Dispatch_1.b')).toBe(true)
+    expect(isDispatchId('..')).toBe(false)
+    expect(isDispatchId('../../state')).toBe(false)
   })
 
   test('accepts a project id only when it stays one directory under the data root', () => {

@@ -50,6 +50,7 @@ const DEFAULT_VNX_BIN = '~/.vnx-system/current/bin/vnx'
 const DEFAULT_REFRESH_SECONDS = 120
 const HOME_UNKNOWN = 'HOME onbekend, ~ niet op te lossen'
 const PROJECT_ID = /^[a-z][a-z0-9-]{1,31}$/
+const DISPATCH_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 const MESSAGE_CHARS = 80
 
 type Json = Record<string, unknown>
@@ -106,6 +107,11 @@ export function expandHome(path: string, home: string | undefined): string | nul
 /** A project id names one directory under the data root: no separator, no `.` or `..`. */
 export function isProjectId(id: string): boolean {
   return PROJECT_ID.test(id)
+}
+
+/** A dispatch id names one directory under `dispatches/pending`: no separator, no `.` or `..`. */
+export function isDispatchId(id: string): boolean {
+  return DISPATCH_ID.test(id)
 }
 
 export function storeOf(root: string, id: string): string {
@@ -449,7 +455,7 @@ export function minutesOf(ageSeconds: number | null): Part<number> {
 async function builderOf(io: Io, dir: string, entry: Running): Promise<Builder> {
   const minutes = minutesOf(entry.ageSeconds)
 
-  if (!isProjectId(entry.dispatchId)) {
+  if (!isDispatchId(entry.dispatchId)) {
     return { who: fail('ongeldige dispatch-id'), task: fail('ongeldige dispatch-id'), minutes }
   }
 
@@ -499,7 +505,7 @@ async function prTracksOf(io: Io, root: string, id: string, index: Part<IndexVie
 
   await Promise.all(
     index.value.liveWork.value.openPrs.map(async ({ number, dispatchId }) => {
-      if (!isProjectId(dispatchId)) {
+      if (!isDispatchId(dispatchId)) {
         return
       }
 
