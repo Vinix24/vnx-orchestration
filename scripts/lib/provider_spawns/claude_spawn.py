@@ -17,8 +17,10 @@ SubprocessAdapter.  No Anthropic SDK is imported anywhere in this module.
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import logging
+import os
 import subprocess
 import sys
 import time
@@ -33,8 +35,44 @@ if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 
 from subprocess_adapter import SubprocessAdapter  # noqa: E402 (path-setup above)
+import provider_switch  # scripts/lib, added to the path above
 
 logger = logging.getLogger(__name__)
+
+_SWITCH_CONSUMER = "claude_spawn.spawn_claude"
+_BASE_URL_ENV = "ANTHROPIC_BASE_URL"
+
+
+def _received_env_value(
+    name: str, extra_env: Optional[Dict[str, str]], scrub_env_keys: frozenset,
+) -> Optional[str]:
+    """The value ``name`` has in the env SubprocessAdapter.deliver builds for the child.
+
+    ``extra_env`` over the process env (a None value does not override), and nothing when a
+    scrub pattern matches the name, exactly as ``deliver`` merges and scrubs.
+    """
+    if any(fnmatch.fnmatchcase(name, pattern) for pattern in (scrub_env_keys or ())):
+        return None
+    value = (extra_env or {}).get(name)
+    if value is None:
+        value = os.environ.get(name)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip()
+
+
+def _base_url_family(base_url: str, *, project_id: Optional[str]) -> str:
+    """The provider family behind an ``ANTHROPIC_BASE_URL`` (the host-keyed check).
+
+    A host the provider-switch host map does not know is refused like an unknown identifier:
+    this raises ``ProviderDisabledError`` carrying the host decision (``unknown-identifier``).
+    """
+    try:
+        return provider_switch.family_of_host(base_url)
+    except provider_switch.UnknownProviderError:
+        raise provider_switch.ProviderDisabledError(
+            provider_switch.decide_host(base_url, consumer=_SWITCH_CONSUMER, project_id=project_id)
+        ) from None
 
 
 @dataclass
@@ -194,8 +232,18 @@ def spawn_claude(
         git-tracked, non-test call site supplies this keyword.
     **kwargs:
         Accepted for forward-compatibility; ignored.
+
+    Raises ``provider_switch.ProviderDisabledError`` before any launch when the env the child
+    receives (``extra_env`` over the process env, after ``scrub_env_keys``) points
+    ``ANTHROPIC_BASE_URL`` at a host whose provider family the operator switched off, or at a
+    host the switch's host map does not know. An Anthropic host, or no redirect, is claude,
+    which the switch never refuses. The decision is for the project that env carries.
     """
-    import os
+    base_url = _received_env_value(_BASE_URL_ENV, extra_env, scrub_env_keys)
+    if base_url is not None:
+        switch_project = _received_env_value(provider_switch.PROJECT_ENV, extra_env, scrub_env_keys)
+        provider_switch.require(_base_url_family(base_url, project_id=switch_project),
+                                consumer=_SWITCH_CONSUMER, project_id=switch_project)
     try:
         from worker_health_monitor import HealthStatus, SLOW_THRESHOLD
     except ImportError:

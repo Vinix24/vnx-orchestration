@@ -34,6 +34,8 @@ Exit codes:
   0 — success (model finished or hit max_turns with work done)
   1 — credentials / authentication error
   2 — other error (import failure, service unavailable, bad input, etc.)
+  4 — the operator switched the model's provider family off (``vnx providers``); nothing
+      was called (``provider_switch.EXIT_PROVIDER_SWITCHED_OFF``)
 
 SECURITY: all tool paths resolve INSIDE cwd; traversal escapes are refused.
 run_command executes in cwd with a bounded timeout. run_command is intentionally
@@ -58,6 +60,12 @@ import sys
 import time
 from pathlib import Path
 from typing import Any, Optional
+
+_LIB_DIR = str(Path(__file__).resolve().parents[1])
+if _LIB_DIR not in sys.path:
+    sys.path.insert(0, _LIB_DIR)
+
+import provider_switch  # scripts/lib, added to the path above
 
 log = logging.getLogger(__name__)
 
@@ -317,6 +325,10 @@ def main() -> int:
         return _EXIT_ERR
     cwd = Path(cwd_raw).resolve()
 
+    # Layer 1 of the provider switch: raises ProviderDisabledError before any call; the
+    # entry point below turns it into a named refusal with its own exit code.
+    provider_switch.require(f"litellm:{model}", consumer="litellm_agentic_runner")
+
     ok, err_msg = _validate_provider_key(model)
     if not ok:
         _emit({"error_type": "credentials_missing", "message": err_msg})
@@ -417,5 +429,14 @@ def main() -> int:
     return _EXIT_OK
 
 
+def run() -> int:
+    """``main`` with a provider-switch refusal turned into its event and exit code."""
+    try:
+        return main()
+    except provider_switch.ProviderDisabledError as exc:
+        _emit({"error_type": provider_switch.REASON_SWITCHED_OFF, "message": exc.decision.detail()})
+        return provider_switch.EXIT_PROVIDER_SWITCHED_OFF
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run())

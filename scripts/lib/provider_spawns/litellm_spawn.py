@@ -50,6 +50,7 @@ from _streaming_drainer import StreamingDrainerMixin, coerce_chunk_stall  # noqa
 from adapters._litellm_runner import _PROVIDER_KEY_REQS  # noqa: E402
 from canonical_event import CanonicalEvent  # noqa: E402
 from env_scrub_patterns import DEFAULT_SCRUB_KEY_PATTERNS, scrub_env  # noqa: E402
+import provider_switch  # scripts/lib, added to the path above
 
 logger = logging.getLogger(__name__)
 
@@ -277,6 +278,21 @@ def _build_litellm_cmd(runner_path: str) -> list:
     return [sys.executable, "-u", runner_path]
 
 
+def _switch_identifier(model: Any) -> str:
+    """The provider-switch identifier of a litellm model string: ``litellm:<model>``."""
+    return f"litellm:{model if isinstance(model, str) else ''}"
+
+
+def _payload_model(payload_json: str) -> str:
+    """The ``model`` of a runner payload; empty (refused by the switch) when it has none."""
+    try:
+        payload = json.loads(payload_json)
+    except ValueError:
+        return ""
+    model = payload.get("model") if isinstance(payload, dict) else None
+    return model if isinstance(model, str) else ""
+
+
 def _start_litellm_subprocess(
     runner_path: str,
     payload_json: str,
@@ -287,9 +303,14 @@ def _start_litellm_subprocess(
 
     Returns (proc, None) on success, or (None, LiteLLMSpawnResult) on spawn failure.
     All subprocess-boundary errors convert to structured results; none are re-raised.
+    A provider-switch refusal is not a subprocess error: it raises
+    ``provider_switch.ProviderDisabledError`` for the payload model's family before the
+    launch, decided for the project the child env carries (``VNX_PROJECT_ID``).
     """
     cmd = _build_litellm_cmd(runner_path)
     env = _scrubbed_env(extra_env)
+    provider_switch.require(_switch_identifier(_payload_model(payload_json)), consumer="litellm_spawn",
+                            project_id=env.get(provider_switch.PROJECT_ENV))
     cwd_str = str(cwd) if cwd is not None else None
 
     try:
@@ -677,6 +698,9 @@ def spawn_litellm_agentic(
     # makes a later communicate() raise "flush of closed file".)
     cmd = _build_litellm_cmd(_runner)
     env = _scrubbed_env(extra_env)
+    # Layer 1 of the provider switch, for the project the child env carries.
+    provider_switch.require(_switch_identifier(model), consumer="litellm_spawn.agentic",
+                            project_id=env.get(provider_switch.PROJECT_ENV))
     try:
         proc = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,

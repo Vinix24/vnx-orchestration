@@ -42,6 +42,12 @@ local_key_missing — the own provider key is absent from both the environment
                     API call. A LOCAL config error, not a provider auth
                     rejection: it must never map to auth_rejected, which cools
                     the lane down for everyone. OI-2182.
+provider_switched_off — the operator switched the provider family off
+                    (``vnx providers``), so nothing was called. Never a
+                    reachability fact: it is matched before every keyword bag
+                    (a refusal detail can carry "auth" in the operator's
+                    reason), and neither the lane cooldown nor the door's
+                    known-rejected check counts it. Provider-schakelaar B.
 unknown          — everything else; should be rare after OI-866
 
 Vocabulary note (P3, dispatch 20260821-q3-failure-class-split): this module's
@@ -90,8 +96,14 @@ FAILURE_CLASSES = frozenset({
     "no_verdict",
     "tool_missing",
     "local_key_missing",
+    "provider_switched_off",
     "unknown",
 })
+
+# A provider_switch refusal: ``SwitchDecision.detail()`` of a refused call starts with this
+# token (``provider_switch.REASON_SWITCHED_OFF``), and every refusal the fabric records passes
+# that detail as the error. Spelled out here because this module stays stdlib-only.
+PROVIDER_SWITCHED_OFF = "provider_switched_off"
 
 # The `reason` a REVIEW-GATE result record is booked under when the provider
 # refused the run because its quota/credit is spent. The gate-result store has
@@ -326,6 +338,13 @@ def classify_failure(
     # failure text live solely in the completion (see module docstring) —
     # scan that instead so it is never silently discarded.
     signal_text = error_lower if error else completion.lower()
+
+    # ── provider switched off (before every keyword bag) ─────────────────
+    # Only the caller-supplied error carries a switch refusal; a model's own
+    # completion text never makes one. Matched first so a reason like "auth
+    # rotation" in the decision detail can never turn it into auth_rejected.
+    if PROVIDER_SWITCHED_OFF in error_lower:
+        return {"failure_class": "provider_switched_off", "failure_reason": error}
 
     # ── credit / balance exhaustion ────────────────────────────────────────
     # Checked before model_keywords so glm-harness's outer "500" wrapper never

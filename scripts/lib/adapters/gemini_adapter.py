@@ -36,6 +36,7 @@ from provider_spawns.gemini_spawn import (  # noqa: E402
     _extract_gemini_token_count as _spawn_extract_token_count,
 )
 from vertex_ai_runner import collect_file_contents
+import provider_switch
 
 logger = logging.getLogger(__name__)
 
@@ -163,7 +164,11 @@ class GeminiAdapter(StreamingDrainerMixin, ProviderAdapter):
 
     def stream_events(self, instruction: str, context: dict) -> Iterator[dict]:
         """Stream Gemini events live (VNX_GEMINI_STREAM=1) or yield a single
-        result event (legacy, VNX_GEMINI_STREAM=0)."""
+        result event (legacy, VNX_GEMINI_STREAM=0).
+
+        Raises ``provider_switch.ProviderDisabledError`` on the first ``next()``, before
+        any launch, when the operator switched gemini off."""
+        provider_switch.require("gemini", consumer="gemini_adapter.stream_events")
         model = os.environ.get("VNX_GEMINI_MODEL", _DEFAULT_MODEL)
         terminal_id = context.get("terminal_id", self._terminal_id)
         dispatch_id = context.get("dispatch_id", "unknown")
@@ -251,7 +256,11 @@ class GeminiAdapter(StreamingDrainerMixin, ProviderAdapter):
     # ------------------------------------------------------------------
 
     def _execute_legacy(self, *, prompt: str, model: str) -> AdapterResult:
-        """Legacy path: --output-format json, single buffered response (Tier-3)."""
+        """Legacy path: --output-format json, single buffered response (Tier-3).
+
+        Raises ``provider_switch.ProviderDisabledError`` before the launch when the operator
+        switched gemini off."""
+        provider_switch.require("gemini", consumer="gemini_adapter.execute_legacy")
         timeout = int(os.environ.get("VNX_GEMINI_TIMEOUT", str(_DEFAULT_TIMEOUT)))
         cmd = ["gemini", "--model", model, "--output-format", "json"]
         t0 = time.monotonic()

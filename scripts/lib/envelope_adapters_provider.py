@@ -24,6 +24,7 @@ import os
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
+import provider_switch
 from dispatch_plan import ExecutionPlan
 from envelope_types import _AdapterResult
 
@@ -274,8 +275,12 @@ class ProviderAdapter:
         # getattr with a () default: some callers (tests, older plan-shaped stand-ins)
         # construct a plan without this field — absent means "no paths declared",
         # never a crash.
+        # Provider-schakelaar B: the plan's project and dispatch id ride along, so every
+        # spawn below decides the switch for the door's project and its worker carries the
+        # dispatch marker.
         role_env = _worker_role_env(
-            effective_role, dispatch_paths=dispatch_paths_raw(getattr(plan, "dispatch_paths", ()))
+            effective_role, dispatch_paths=dispatch_paths_raw(getattr(plan, "dispatch_paths", ())),
+            dispatch_id=plan.dispatch_id, project_id=getattr(plan, "project_id", None),
         )
 
         # ---- codex ----
@@ -466,8 +471,12 @@ class ProviderAdapter:
     ) -> _AdapterResult:
         """Kimi spawn branch, extracted from run() (OI-709 function-size gate).
 
-        Pure extraction — behavior identical to the former inline kimi branch.
+        Raises ``provider_switch.ProviderDisabledError`` before model resolution when the
+        operator switched kimi off for the plan's project; run_envelope_plan books that as a
+        ``provider_switched_off`` failure.
         """
+        project_id = getattr(plan, "project_id", None)
+        provider_switch.require("kimi", consumer="envelope.provider_adapter.kimi", project_id=project_id)
         from dispatch_spec import Provider, dispatch_paths_raw  # noqa: PLC0415
         from provider_spawns.kimi_spawn import spawn_kimi  # noqa: PLC0415
         from provider_dispatch import (  # noqa: PLC0415
@@ -496,7 +505,8 @@ class ProviderAdapter:
                 terminal_id=plan.target_id,
                 event_writer=event_writer,
                 extra_env=_worker_role_env(
-                    role, dispatch_paths=dispatch_paths_raw(getattr(plan, "dispatch_paths", ()))
+                    role, dispatch_paths=dispatch_paths_raw(getattr(plan, "dispatch_paths", ())),
+                    dispatch_id=plan.dispatch_id, project_id=project_id,
                 ),
                 cwd=cwd,
                 # worker-provider-kimi-flip (20260723): honor the spec's staged deadline

@@ -20,6 +20,8 @@ _LIB_DIR = str(Path(__file__).resolve().parents[2])
 if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 
+import provider_switch  # scripts/lib, added to the path above
+
 DEFAULT_MLX_MODEL = "mlx-community/gemma-3-4b-it-4bit"
 DEFAULT_OLLAMA_MODEL = "gemma3:4b"
 _DEFAULT_DEADLINE = 300
@@ -70,8 +72,11 @@ def _run_ollama_fallback(
 ) -> tuple:
     """Run inference via Ollama CLI as fallback.
 
-    Returns (output_text: str, success: bool, error: Optional[str]).
+    Returns (output_text: str, success: bool, error: Optional[str]). Raises
+    ``provider_switch.ProviderDisabledError`` before the launch when the operator switched
+    the local family off.
     """
+    provider_switch.require("ollama", consumer="local_gemma.ollama_fallback")
     try:
         result = subprocess.run(
             ["ollama", "run", model, prompt],
@@ -111,7 +116,11 @@ def spawn_local_gemma(
     Primary: mlx_lm.generate (Apple Silicon, no API cost).
     Fallback: ollama run gemma3:4b (when MLX unavailable or fails).
     Returns LocalGemmaSpawnResult. Receipt emitted by caller (_dispatch_local_gemma).
+    Raises ``provider_switch.ProviderDisabledError`` before either runtime when the operator
+    switched the local family off. ``project_id`` is not passed to the switch: its default is
+    a placeholder, not a resolved project, so the decision follows the process project.
     """
+    provider_switch.require("local-gemma", consumer="local_gemma.spawn")
     from providers.local_gemma.runtime_mlx import mlx_available, run_mlx  # noqa: PLC0415
 
     t_start = time.monotonic()

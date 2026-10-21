@@ -36,6 +36,7 @@ if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 
 from provider_spawns.claude_spawn import spawn_claude  # noqa: E402
+import provider_switch  # scripts/lib, added to the path above
 
 from provider_spawns.harness_config_dir import (
     HarnessConfigDirError,
@@ -153,7 +154,14 @@ def spawn_glm_harness(
     cwd: Optional[Any] = None,
     **kwargs: Any,
 ) -> GLMHarnessSpawnResult:
-    """Spawn the claude CLI driving GLM via the local litellm→OpenRouter proxy."""
+    """Spawn the claude CLI driving GLM via the local litellm→OpenRouter proxy.
+
+    Raises ``provider_switch.ProviderDisabledError`` before the proxy probe when the operator
+    switched glm off for the project ``extra_env`` carries (``VNX_PROJECT_ID``).
+    ``spawn_claude`` checks the same family again through the proxy base URL.
+    """
+    provider_switch.require("glm-harness", consumer="glm_harness_spawn",
+                            project_id=(extra_env or {}).get(provider_switch.PROJECT_ENV))
     resolved_model = resolve_harness_model(model)
     url = _proxy_url()
     if not _proxy_reachable(url):

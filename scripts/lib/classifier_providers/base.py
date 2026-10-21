@@ -49,6 +49,10 @@ class ClassifierProvider(ABC):
     # account or quota as another lane share its key (the codex classifier and
     # codex_gate are one quota), so one refusal is seen by every consumer.
     reachability_key: str = ""
+    # The project get_provider decided the provider switch for (None: the process project).
+    # A switchable provider's classify() decides again for the same project before its launch
+    # (layer 1), so an item of a project that may call the provider is never refused there.
+    switch_project_id: Optional[str] = None
 
     @abstractmethod
     def classify(self, prompt: str, _max_tokens: int = 1500) -> ClassifierResult:
@@ -58,6 +62,9 @@ class ClassifierProvider(ABC):
         - never raise on subprocess errors; return ClassifierResult(error=...)
         - never import Anthropic / OpenAI SDKs
         - cap execution with a timeout
+
+        A switchable provider raises ``provider_switch.ProviderDisabledError`` before its
+        launch when the operator switched its family off for ``switch_project_id``.
         """
 
     def is_present(self) -> bool:
@@ -181,6 +188,12 @@ def _require_switch(key: str, project_id: Optional[str]) -> None:
     provider_switch.require(key, consumer="classifier_providers.get_provider", project_id=project_id)
 
 
+def _for_project(provider: ClassifierProvider, project_id: Optional[str]) -> ClassifierProvider:
+    """Carry the project get_provider decided for into the provider's own launch check."""
+    provider.switch_project_id = project_id
+    return provider
+
+
 def get_provider(name: Optional[str] = None, *, project_id: Optional[str] = None) -> ClassifierProvider:
     """Return a configured provider instance for `name`.
 
@@ -188,7 +201,8 @@ def get_provider(name: Optional[str] = None, *, project_id: Optional[str] = None
     Unknown names raise ValueError so misconfigurations surface loudly. A provider whose
     family the operator switched off (``vnx providers``) raises
     ``provider_switch.ProviderDisabledError`` for ``project_id`` (the project of the item the
-    caller classifies; None falls back to the process project).
+    caller classifies; None falls back to the process project). The instance carries that
+    project as ``switch_project_id``, so its classify() decides for the same one.
     """
     key = (name or "haiku").strip().lower()
     if key == "haiku":
@@ -198,11 +212,11 @@ def get_provider(name: Optional[str] = None, *, project_id: Optional[str] = None
     if key == "ollama":
         _require_switch(key, project_id)
         from .ollama_provider import OllamaProvider
-        return OllamaProvider()
+        return _for_project(OllamaProvider(), project_id)
     if key == "gemini":
         _require_switch(key, project_id)
         from .gemini_provider import GeminiProvider
-        return GeminiProvider()
+        return _for_project(GeminiProvider(), project_id)
     if key == "codex":
         _require_switch(key, project_id)
         from .codex_provider import CodexProvider
@@ -210,5 +224,5 @@ def get_provider(name: Optional[str] = None, *, project_id: Optional[str] = None
     if key == "deepseek":
         _require_switch(key, project_id)
         from .deepseek_provider import DeepSeekProvider
-        return DeepSeekProvider()
+        return _for_project(DeepSeekProvider(), project_id)
     raise ValueError(f"unknown classifier provider: {key}")

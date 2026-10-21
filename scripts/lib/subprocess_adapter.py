@@ -443,6 +443,14 @@ class SubprocessAdapter:
                 merged_env.update({k: v for k, v in extra_env.items() if v is not None})
             if dispatch_id:
                 merged_env["VNX_CURRENT_DISPATCH_ID"] = dispatch_id
+            # Provider-schakelaar B: the project the worker's switch decisions are for (the
+            # one the env already carries, else this process's) and the dispatch marker that
+            # makes the `vnx providers` write verbs refuse inside the worker.
+            import provider_switch
+
+            merged_env.update(provider_switch.worker_env_stamps(
+                dispatch_id, project_id=merged_env.get(provider_switch.PROJECT_ENV),
+            ))
             if scrub_env_keys:
                 for _existing_key in list(merged_env.keys()):
                     if any(

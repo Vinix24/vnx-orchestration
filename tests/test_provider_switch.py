@@ -53,9 +53,7 @@ def no_project(monkeypatch):
 
 @pytest.fixture
 def writable(monkeypatch, tmp_path):
-    """The live write path: pending tuples empty in this process, no dispatch marker, and a
-    working directory outside any repo."""
-    monkeypatch.setattr(ps, "PENDING_B", ())
+    """The live write path: no dispatch marker and a working directory outside any repo."""
     for marker in ps.DISPATCH_MARKER_ENV:
         monkeypatch.delenv(marker, raising=False)
     strip_ambient_overrides(monkeypatch)
@@ -627,7 +625,6 @@ _WRITER = textwrap.dedent("""
     import sys
     sys.path.insert(0, sys.argv[1])
     import provider_switch as ps
-    ps.PENDING_B = ()
     scope, rounds = sys.argv[2], int(sys.argv[3])
     for i in range(rounds):
         for family in ps.SWITCHABLE_FAMILIES:
@@ -824,15 +821,28 @@ def test_write_refused_with_a_dispatch_marker(marker, writable, monkeypatch, swi
     assert not switch_file.exists()
 
 
+_ONE_PENDING = {"B": ("scripts/lib/example.py:launch",)}
+
+
+def test_the_write_verbs_are_live_now_nothing_is_pending(writable, switch_file):
+    """Provider-schakelaar B: every launch function calls require, so a caller outside any
+    worktree and without a dispatch marker may write."""
+    assert ps.pending_launch_functions() == {}
+    assert ps.write_refusals() == []
+    assert ps.set_switch("deepseek", False, scope="global", actor="op", reason="sparen").changed
+    assert ps.load_state(switch_file).global_switches["deepseek"].enabled is False
+
+
 def test_write_refused_while_launch_functions_are_pending(monkeypatch, tmp_path, switch_file):
+    """The pending mechanism stays until F removes it: a pending entry still refuses."""
     for marker in ps.DISPATCH_MARKER_ENV:
         monkeypatch.delenv(marker, raising=False)
     monkeypatch.chdir(tmp_path)
-    assert any(ps.pending_launch_functions().values())
+    monkeypatch.setattr(ps, "pending_launch_functions", lambda: _ONE_PENDING)
     with pytest.raises(ps.SwitchWriteRefused) as exc:
         ps.set_switch("deepseek", False, scope="global", actor="op", reason="")
     reasons = " ".join(exc.value.reasons)
-    assert "not enforced yet" in reasons and f"B: {len(ps.PENDING_B)}" in reasons
+    assert "not enforced yet" in reasons and "B: 1" in reasons
     assert not switch_file.exists()
 
 
@@ -840,6 +850,7 @@ def test_no_environment_variable_bypasses_the_pending_refusal(monkeypatch, tmp_p
     for marker in ps.DISPATCH_MARKER_ENV:
         monkeypatch.delenv(marker, raising=False)
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(ps, "pending_launch_functions", lambda: _ONE_PENDING)
     for name in ("VNX_PROVIDER_SWITCH_FORCE", "VNX_OVERRIDE_PROVIDER_SWITCH", "VNX_PROVIDERS_ENFORCED"):
         monkeypatch.setenv(name, "1")
     assert any("not enforced yet" in r for r in ps.write_refusals())

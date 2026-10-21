@@ -20,6 +20,7 @@ import subprocess
 import time
 from typing import Optional
 
+import provider_switch
 from load_deepseek_key import resolve_deepseek_api_key
 
 from provider_spawns.harness_config_dir import (
@@ -91,6 +92,8 @@ class DeepSeekProvider(ClassifierProvider):
         return env
 
     def classify(self, prompt: str, _max_tokens: int = 1500) -> ClassifierResult:
+        provider_switch.require(self.name, consumer="classifier_providers.deepseek",
+                                project_id=self.switch_project_id)
         cmd = [
             "claude", "--print", *bare_harness_cli_args(), "--model", self.model,
             "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',

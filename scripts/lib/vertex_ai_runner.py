@@ -11,6 +11,8 @@ import json
 import os
 from typing import Any, Callable, Dict, List
 
+import provider_switch
+
 VERTEX_DEFAULT_REGION = "us-central1"
 VERTEX_DEFAULT_MODEL = "gemini-2.5-pro"
 
@@ -60,10 +62,15 @@ def run_vertex_ai(
     subprocess_run: Callable,
     urlopen: Callable,
 ) -> str:
-    """Call Vertex AI REST API using gcloud token. Returns raw text response."""
+    """Call Vertex AI REST API using gcloud token. Returns raw text response.
+
+    Raises ``provider_switch.ProviderDisabledError`` for the model's family before gcloud or
+    the request runs, when the operator switched that family off.
+    """
+    model = os.environ.get("VNX_VERTEX_MODEL", VERTEX_DEFAULT_MODEL)
+    provider_switch.require(model, consumer="vertex_ai_runner")
     project = _get_vertex_project(subprocess_run)
     region = os.environ.get("VNX_VERTEX_REGION", VERTEX_DEFAULT_REGION)
-    model = os.environ.get("VNX_VERTEX_MODEL", VERTEX_DEFAULT_MODEL)
     token = _get_gcloud_token(subprocess_run)
 
     url = _build_vertex_url(project, region, model)

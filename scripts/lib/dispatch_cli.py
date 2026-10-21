@@ -628,6 +628,25 @@ def _not_checkable_note(
     )
 
 
+def _provider_switch_verdict(plan: "ExecutionPlan", *, project_id: Optional[str]) -> Optional[Reject]:
+    """The provider switch at the door (provider-schakelaar B), or None when it allows.
+
+    Decided for the dispatch's own project, on the dry-run and on the fire path alike,
+    BEFORE ``_check_reachability``: a lane the operator switched off is neither probed nor
+    booked, and the refusal is never a reachability fact (no known-rejected ledger entry,
+    no ``provider_lane_exhausted`` event), so switching the family back on lets the next
+    dispatch through at once. The detail names family, source, scope, who and why.
+    """
+    import provider_switch
+
+    decision = provider_switch.decide(
+        plan.provider.value, consumer="dispatch_cli.door", project_id=project_id,
+    )
+    if decision.allowed:
+        return None
+    return Reject("provider-disabled", decision.detail())
+
+
 def _check_reachability(
     plan: "ExecutionPlan", spec: "DispatchSpec", *, state_dir: Optional[Path] = None
 ) -> "ReachabilityVerdict":
@@ -1764,12 +1783,18 @@ def _resolve_router_pre_validate(spec: DispatchSpec) -> "Optional[DoorRouteResul
         instruction_text = ifile.read_text(encoding="utf-8")
 
         file_paths = [str(dp.path) for dp in spec.dispatch_paths]
+        # Provider-schakelaar B: the router decides lane availability (the operator's
+        # provider switch included) for the dispatch's own project, not the door process's.
+        router_env = dict(os.environ)
+        if spec.project_id:
+            router_env["VNX_PROJECT_ID"] = spec.project_id
         return resolve_door_route(
             spec_provider=spec.provider,
             spec_model=spec.model,
             target_slot=spec.target_slot,
             instruction_text=instruction_text,
             file_paths=file_paths,
+            env=router_env,
             dispatch_id=spec.dispatch_id,
         )
     except RegistryLookupError:
@@ -3567,6 +3592,12 @@ def run_dispatch(
         # only after _print_plan, and never on a real fire — the 2026-08-16
         # kimi stampede (nine dispatches, one quota 403, eight minutes) fired
         # blind because a real fire never checked reachability at all.
+        # Provider-schakelaar B: the operator's switch is asked first, so a lane that
+        # is switched off is never probed and never becomes a reachability fact.
+        switch_reject = _provider_switch_verdict(plan, project_id=project_id)
+        if switch_reject is not None:
+            _emit_reject(switch_reject)
+            return 1
         reachability = _check_reachability(plan, vspec.spec, state_dir=state_dir)
         if reachability.block:
             _emit_reject(Reject("lane-known-rejected", reachability.reason))

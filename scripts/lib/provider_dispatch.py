@@ -2055,6 +2055,45 @@ def _emit_refusal_receipt(
             fcntl.flock(fh, fcntl.LOCK_UN)
 
 
+def _refuse_switched_off(args: argparse.Namespace, provider: str, decision: Any) -> int:
+    """The named refusal for a provider the operator switched off (provider-schakelaar B).
+
+    The decision detail goes to stderr and into a ``delivery_refused`` receipt, whose
+    failure_class ``classify_failure_safe`` derives as ``provider_switched_off`` from that
+    detail: never auth/credit, so neither the lane cooldown nor the reachability record nor
+    the door's known-rejected check counts it. Returns the switch's own exit code.
+    """
+    import provider_switch
+
+    detail = decision.detail()
+    print(f"provider_dispatch: REJECT [{provider_switch.REASON_SWITCHED_OFF}]: {detail}", file=sys.stderr)
+    try:
+        _emit_refusal_receipt(args, provider, getattr(args, "model", None) or "unknown", detail)
+    except Exception as _ref_exc:
+        logger.error(
+            "provider_dispatch: refusal receipt failed for a switched-off provider dispatch=%s: %s",
+            args.dispatch_id, _ref_exc,
+        )
+    return provider_switch.EXIT_PROVIDER_SWITCHED_OFF
+
+
+def _provider_switch_refusal(args: argparse.Namespace, provider: str) -> Optional[int]:
+    """Exit code of the named refusal when the switch refuses ``provider``, else None.
+
+    Bare ``litellm`` names no model maker until ``_dispatch_litellm`` resolves the model, so
+    it is decided at launch (layer 1) on the resolved model; main turns a refusal raised
+    there into the same named refusal.
+    """
+    import provider_switch
+
+    if provider == "litellm":
+        return None
+    decision = provider_switch.decide(provider, consumer="provider_dispatch")
+    if decision.allowed:
+        return None
+    return _refuse_switched_off(args, provider, decision)
+
+
 def _check_constraints(args: argparse.Namespace, provider: str):
     """Run provider_constraints.yaml pre-flight and raise on blocking violations."""
     from providers.constraint_enforcer import ConstraintViolationError, check_constraints  # noqa: PLC0415
@@ -2169,8 +2208,12 @@ def _build_parser() -> argparse.ArgumentParser:
 def _worker_role_env(
     role: Optional[str],
     dispatch_paths: "list[str] | None" = None,
+    *,
+    dispatch_id: Optional[str] = None,
+    project_id: Optional[str] = None,
 ) -> Optional[Dict[str, str]]:
-    """Build the env overlay for a provider-lane worker: role + VNX_DATA_DIR + path scope.
+    """Build the env overlay for a provider-lane worker: role + VNX_DATA_DIR + path scope,
+    plus the provider-switch stamps.
 
     Role half — mirrors ``TmuxInteractiveDispatch._spawn_session`` (the
     claude/tmux lane): a genuinely-set role in the dispatch spec is exported as
@@ -2222,8 +2265,17 @@ def _worker_role_env(
 
     Best-effort: a data-dir resolution failure here must never break the spawn
     (the existing role-only behavior is the fallback) — logged, not raised.
+
+    Switch half (provider-schakelaar B): ``provider_switch.worker_env_stamps`` adds
+    ``VNX_PROJECT_ID`` (``project_id``, else this process's project) and
+    ``VNX_WORKER_DISPATCH_ID`` (``dispatch_id``). The launch function decides the switch for
+    the project in the env it starts the worker with, so the door, the launch function and
+    any decision inside the worker are for one project; the dispatch marker makes the
+    ``vnx providers`` write verbs refuse inside the worker.
     """
-    env: Dict[str, str] = {}
+    import provider_switch
+
+    env: Dict[str, str] = provider_switch.worker_env_stamps(dispatch_id, project_id=project_id)
     resolved_role = normalize_role(role)
     if resolved_role:
         env["VNX_WORKER_ROLE"] = resolved_role
@@ -2667,6 +2719,7 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
             extra_env=_worker_role_env(
                 getattr(args, "role", None),
                 dispatch_paths=_resolve_dispatch_paths(getattr(args, "dispatch_paths", "") or ""),
+                dispatch_id=args.dispatch_id,
             ),
         )
         end_time = datetime.now(timezone.utc)
@@ -3162,6 +3215,7 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
                 extra_env=_worker_role_env(
                     getattr(args, "role", None),
                     dispatch_paths=_resolve_dispatch_paths(getattr(args, "dispatch_paths", "") or ""),
+                    dispatch_id=args.dispatch_id,
                 ),
             )
         else:
@@ -3179,6 +3233,7 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
                 extra_env=_worker_role_env(
                     getattr(args, "role", None),
                     dispatch_paths=_resolve_dispatch_paths(getattr(args, "dispatch_paths", "") or ""),
+                    dispatch_id=args.dispatch_id,
                 ),
             )
         end_time = datetime.now(timezone.utc)
@@ -3307,6 +3362,7 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
             extra_env=_worker_role_env(
                 getattr(args, "role", None),
                 dispatch_paths=_resolve_dispatch_paths(getattr(args, "dispatch_paths", "") or ""),
+                dispatch_id=args.dispatch_id,
             ),
         )
         end_time = datetime.now(timezone.utc)
@@ -3475,6 +3531,7 @@ def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
             extra_env=_worker_role_env(
                 getattr(args, "role", None),
                 dispatch_paths=_resolve_dispatch_paths(getattr(args, "dispatch_paths", "") or ""),
+                dispatch_id=args.dispatch_id,
             ),
         )
         end_time = datetime.now(timezone.utc)
@@ -3564,6 +3621,7 @@ def _dispatch_glm_harness(args: argparse.Namespace) -> int:
             extra_env=_worker_role_env(
                 getattr(args, "role", None),
                 dispatch_paths=_resolve_dispatch_paths(getattr(args, "dispatch_paths", "") or ""),
+                dispatch_id=args.dispatch_id,
             ),
         )
         end_time = datetime.now(timezone.utc)
@@ -3659,6 +3717,7 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
             extra_env=_worker_role_env(
                 getattr(args, "role", None),
                 dispatch_paths=_resolve_dispatch_paths(getattr(args, "dispatch_paths", "") or ""),
+                dispatch_id=args.dispatch_id,
             ),
         )
         end_time = datetime.now(timezone.utc)
@@ -3815,6 +3874,12 @@ def main(argv: list[str] | None = None) -> int:
             f"Unknown provider '{provider}'. "
             "Accepted values: claude, codex, gemini, kimi, deepseek-harness, litellm:<model>."
         )
+
+    # Provider-schakelaar B: the operator's switch comes before the route constraints and
+    # the daily budget, so a switched-off provider is refused by name and nothing runs.
+    switch_refusal = _provider_switch_refusal(args, provider)
+    if switch_refusal is not None:
+        return switch_refusal
 
     # PR-ROUTE-1: enforce provider constraints before any handler runs.
     try:
@@ -4001,6 +4066,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2  # unreachable; parser.error() exits
     except Exception as _spawn_exc:
+        import provider_switch
+
+        if isinstance(_spawn_exc, provider_switch.ProviderDisabledError):
+            # Layer 1 refused at launch (a switch flipped after the check above, or the model
+            # of a bare litellm dispatch): the same named refusal, nothing was called.
+            return _refuse_switched_off(args, provider, _spawn_exc.decision)
         # An uncaught spawn exception means the worker was never delivered a
         # result — record it as deliver_failed (not delivered) so the receipt
         # ledger distinguishes it from submit_failed (delivered, no report)
