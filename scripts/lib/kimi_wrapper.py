@@ -26,6 +26,8 @@ _LIB_DIR = str(Path(__file__).resolve().parent)
 if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 
+import provider_switch  # scripts/lib, added to the path above
+
 logger = logging.getLogger(__name__)
 
 # Mirror of the registry default (kimi_cli.default_model in wave7_models.yaml).
@@ -99,11 +101,14 @@ def kimi_exec(
     resolved registry key, same label the provider lane emits) and returns
     captured stdout.
 
+    Raises provider_switch.ProviderDisabledError before the launch when the operator
+    switched kimi off for ``project_id``.
     Raises KimiModelResolutionError (a ValueError) when the requested model is
     unknown or disabled in the registry — fail-loud, no silent substitution.
     Raises subprocess.TimeoutExpired on timeout.
     Raises RuntimeError on non-zero exit.
     """
+    provider_switch.require("kimi", consumer="kimi_wrapper.kimi_exec", project_id=project_id)
     from provider_costs import emit_provider_cost  # noqa: PLC0415
     # Lazy import: keeps this wrapper light at import time and cycle-safe
     # (provider_lanes.kimi imports this module at module level).

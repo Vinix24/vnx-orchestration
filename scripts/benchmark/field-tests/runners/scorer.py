@@ -25,6 +25,11 @@ from typing import Optional
 
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
+if str(REPO_ROOT / "scripts" / "lib") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+
+import provider_switch  # scripts/lib, added to the path above
+
 JUDGE_MODEL = "claude-opus-4-8"
 JUDGE_FALLBACK = "claude-opus-4-7"
 
@@ -168,7 +173,12 @@ def _judge_claude(prompt: str) -> Optional[tuple[float, str]]:
 
 
 def _judge_kimi(prompt: str) -> Optional[tuple[float, str]]:
-    """Kimi CLI subprocess judge (cross-model verification of claude-judge)."""
+    """Kimi CLI subprocess judge (cross-model verification of claude-judge).
+
+    Raises ``provider_switch.ProviderDisabledError`` before any launch when the operator
+    switched kimi off; the panel then judges with claude only.
+    """
+    provider_switch.require("kimi", consumer="benchmark.scorer.judge_kimi")
     try:
         proc = subprocess.run(
             ["kimi", "--print", "--prompt", prompt],
@@ -204,7 +214,11 @@ def _llm_judge_code_quality(
         f_claude = pool.submit(_judge_claude, prompt)
         f_kimi = pool.submit(_judge_kimi, prompt)
         claude_result = f_claude.result()
-        kimi_result = f_kimi.result()
+        try:
+            kimi_result = f_kimi.result()
+        except provider_switch.ProviderDisabledError as exc:
+            print(f"scorer: kimi judge skipped: {exc}", file=sys.stderr)
+            kimi_result = None
 
     scores: list[float] = []
     reasonings: list[str] = []

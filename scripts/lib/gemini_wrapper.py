@@ -21,6 +21,8 @@ _LIB_DIR = str(Path(__file__).resolve().parent)
 if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 
+import provider_switch  # scripts/lib, added to the path above
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_GEMINI_MODEL = "gemini-2.5-pro"
@@ -78,9 +80,12 @@ def gemini_exec(
 
     Emits a provider cost event via emit_provider_cost() and returns captured stdout.
 
+    Raises provider_switch.ProviderDisabledError before the launch when the operator
+    switched gemini off for ``project_id``.
     Raises subprocess.TimeoutExpired on timeout.
     Raises RuntimeError on non-zero exit.
     """
+    provider_switch.require("gemini", consumer="gemini_wrapper.gemini_exec", project_id=project_id)
     from provider_costs import emit_provider_cost, price_run  # noqa: PLC0415
 
     cmd = ["gemini", "--model", model, "--output-format", "stream-json"]

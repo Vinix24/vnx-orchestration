@@ -35,6 +35,7 @@ if _LIB_DIR not in sys.path:
 from _streaming_drainer import StreamingDrainerMixin, coerce_chunk_stall  # noqa: E402
 from canonical_event import CanonicalEvent  # noqa: E402
 from env_scrub_patterns import DEFAULT_SCRUB_KEY_PATTERNS, scrub_env  # noqa: E402
+import provider_switch  # scripts/lib, added to the path above
 
 logger = logging.getLogger(__name__)
 
@@ -358,7 +359,12 @@ def _start_gemini_subprocess(
 
     Returns (proc, None) on success, or (None, GeminiSpawnResult) on spawn failure.
     All subprocess-boundary errors convert to structured results; none are re-raised.
+    A provider-switch refusal is not a subprocess error: it raises
+    ``provider_switch.ProviderDisabledError`` before the launch, decided for the project the
+    child env carries (``VNX_PROJECT_ID``), so the launch and the door decide alike.
     """
+    provider_switch.require("gemini", consumer="gemini_spawn",
+                            project_id=(env or {}).get(provider_switch.PROJECT_ENV))
     try:
         proc = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,

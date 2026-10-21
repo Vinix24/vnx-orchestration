@@ -179,6 +179,39 @@ SUBPROCESS_CAPABILITIES = frozenset({
 })
 
 
+def _child_env(
+    dispatch_id: Optional[str],
+    extra_env: Optional[Dict[str, str]],
+    scrub_env_keys: Optional[frozenset],
+) -> Dict[str, str]:
+    """The env a claude child starts with: the process env, ``extra_env`` over it (a None value
+    does not override), the dispatch stamps, then every name a scrub pattern matches removed.
+
+    The dispatch id is always exported so worker commits carry a provenance trace token
+    (prepare-commit-msg hook -> trace_token_validator). Provider-schakelaar B adds
+    ``VNX_WORKER_DISPATCH_ID``, the marker that makes the ``vnx providers`` write verbs refuse
+    inside the worker, and the project the worker's switch decisions are for: the one the env
+    already carries (the outer launchers stamp the door's), else the one its ``VNX_STATE_DIR``
+    names. This innermost launcher starts no resolver process of its own (``resolve=False``).
+    """
+    import provider_switch
+
+    merged_env = os.environ.copy()
+    if extra_env:
+        merged_env.update({k: v for k, v in extra_env.items() if v is not None})
+    if dispatch_id:
+        merged_env["VNX_CURRENT_DISPATCH_ID"] = dispatch_id
+    merged_env.update(provider_switch.worker_env_stamps(
+        dispatch_id, project_id=merged_env.get(provider_switch.PROJECT_ENV),
+        state_dir=merged_env.get("VNX_STATE_DIR") or None, resolve=False,
+    ))
+    if scrub_env_keys:
+        for _existing_key in list(merged_env.keys()):
+            if any(fnmatch.fnmatchcase(_existing_key, _pattern) for _pattern in scrub_env_keys):
+                merged_env.pop(_existing_key, None)
+    return merged_env
+
+
 class SubprocessAdapter:
     """RuntimeAdapter implementation for headless subprocess-based terminals.
 
@@ -438,19 +471,7 @@ class SubprocessAdapter:
         # Always export the dispatch id so worker commits carry a provenance trace token
         # (prepare-commit-msg hook -> trace_token_validator), closing the dispatch->commit link.
         if extra_env or scrub_env_keys or dispatch_id:
-            merged_env = os.environ.copy()
-            if extra_env:
-                merged_env.update({k: v for k, v in extra_env.items() if v is not None})
-            if dispatch_id:
-                merged_env["VNX_CURRENT_DISPATCH_ID"] = dispatch_id
-            if scrub_env_keys:
-                for _existing_key in list(merged_env.keys()):
-                    if any(
-                        fnmatch.fnmatchcase(_existing_key, _pattern)
-                        for _pattern in scrub_env_keys
-                    ):
-                        merged_env.pop(_existing_key, None)
-            popen_kwargs["env"] = merged_env
+            popen_kwargs["env"] = _child_env(dispatch_id, extra_env, scrub_env_keys)
 
         # Clear stale session_id before spawning; updated when the init event arrives.
         self._session_ids.pop(terminal_id, None)

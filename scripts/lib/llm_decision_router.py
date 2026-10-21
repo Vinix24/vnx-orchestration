@@ -26,6 +26,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+_LIB_DIR = str(Path(__file__).resolve().parent)
+if _LIB_DIR not in sys.path:
+    sys.path.insert(0, _LIB_DIR)
+
+import provider_switch  # scripts/lib, added to the path above
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -175,7 +181,11 @@ def _decide_ollama(
     host: str,
     timeout: int,
 ) -> DecisionResult:
-    """Route Ollama decisions via OllamaAdapter (single HTTP configuration point)."""
+    """Route Ollama decisions via OllamaAdapter (single HTTP configuration point).
+
+    A local family the operator switched off takes the existing unavailable path: the
+    rule-based decision, with ``backend_used="dry-run(ollama-provider_switched_off)"``.
+    """
     # OllamaAdapter reads host/model from env vars; override them for this call
     # by temporarily setting them so the adapter picks them up.
     prev_host  = os.environ.get("VNX_OLLAMA_HOST")
@@ -184,6 +194,11 @@ def _decide_ollama(
     os.environ["VNX_OLLAMA_MODEL"] = model
     try:
         return _call_ollama_adapter(context, question, timeout)
+    except provider_switch.ProviderDisabledError as exc:
+        logger.warning("OllamaAdapter not called (%s) — falling back to dry-run", exc.decision.detail())
+        result = _rule_based_decision(context, question)
+        result.backend_used = f"dry-run(ollama-{provider_switch.REASON_SWITCHED_OFF})"
+        return result
     finally:
         if prev_host is None:
             os.environ.pop("VNX_OLLAMA_HOST", None)
@@ -200,7 +215,12 @@ def _call_ollama_adapter(
     question: str,
     timeout: int,
 ) -> DecisionResult:
-    """Execute a decision via OllamaAdapter and map result to DecisionResult."""
+    """Execute a decision via OllamaAdapter and map result to DecisionResult.
+
+    Raises ``provider_switch.ProviderDisabledError`` before the adapter is built when the
+    operator switched the local family off; ``_decide_ollama`` turns that into its dry-run.
+    """
+    provider_switch.require("ollama", consumer="llm_decision_router")
     adapters_path = Path(__file__).resolve().parent
     sys.path.insert(0, str(adapters_path))
     from adapters.ollama_adapter import OllamaAdapter  # noqa: PLC0415

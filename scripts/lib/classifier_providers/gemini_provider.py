@@ -8,6 +8,8 @@ import subprocess
 import time
 from typing import Optional
 
+import provider_switch
+
 from .base import ClassifierProvider, ClassifierResult, parse_json_block
 
 _DEFAULT_MODEL = "gemini-2.0-flash"
@@ -46,6 +48,8 @@ class GeminiProvider(ClassifierProvider):
         return shutil.which("gemini") is not None
 
     def classify(self, prompt: str, _max_tokens: int = 1500) -> ClassifierResult:
+        provider_switch.require(self.name, consumer="classifier_providers.gemini",
+                                project_id=self.switch_project_id)
         cmd = ["gemini", "--model", self.model, "--prompt", prompt]
         start = time.monotonic()
         try:

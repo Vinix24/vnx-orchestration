@@ -16,6 +16,18 @@ from typing import Callable, Dict, Optional
 from envelope_types import EnvelopeSpec, _AdapterResult
 
 
+def _switch_stamps(spec: EnvelopeSpec) -> Dict[str, str]:
+    """``VNX_PROJECT_ID`` + ``VNX_WORKER_DISPATCH_ID`` for the worker of ``spec``.
+
+    The project is the one of the store the dispatch belongs to (``spec.state_dir``), so a
+    provider-switch decision inside the worker is for the door's project, and the dispatch
+    marker makes the ``vnx providers`` write verbs refuse there (provider-schakelaar B).
+    """
+    import provider_switch
+
+    return provider_switch.worker_env_stamps(spec.dispatch_id, state_dir=spec.state_dir)
+
+
 # ---------------------------------------------------------------------------
 # Adapters
 # ---------------------------------------------------------------------------
@@ -43,6 +55,7 @@ class CodexAdapter:
                 dispatch_id=spec.dispatch_id,
                 terminal_id=spec.terminal_id,
                 event_writer=event_writer,
+                extra_env=_switch_stamps(spec),
                 cwd=cwd,
             )
         except BrokenPipeError as exc:
@@ -132,6 +145,7 @@ class ClaudeSubprocessAdapter:
         # the two-key contract other lanes already export (plan_gate_panel.py).
         _report_path = Path(spec.data_dir) / "unified_reports" / f"{spec.dispatch_id}.md"
         extra_env = {
+            **_switch_stamps(spec),
             "VNX_DATA_DIR": str(spec.data_dir),
             "VNX_DATA_DIR_EXPLICIT": "1",
             "VNX_REPORT_PATH": str(_report_path),

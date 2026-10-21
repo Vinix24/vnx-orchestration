@@ -5,6 +5,12 @@ requiring real provider credentials. They verify:
   - Unreachable/bad-endpoint -> structured error event + status=failed
   - Subprocess exits non-zero before complete -> synthetic error event
   - Credentials missing error format propagated correctly
+
+The runner is started for a model the provider switch knows (the registry's litellm
+name for DeepSeek), with that family switched on in a per-test switch file, so the
+crash paths are reached past layer 1. A model the family map does not know is
+refused before the runner starts; ``test_an_unknown_litellm_model_never_starts_the_runner``
+pins that refusal.
 """
 from __future__ import annotations
 
@@ -15,8 +21,12 @@ from pathlib import Path
 
 import pytest
 
+import provider_switch
 from adapters.litellm_adapter import LiteLLMAdapter
 from canonical_event import CanonicalEvent
+
+# wave7_models.yaml: the litellm_name of deepseek-v4-pro; family deepseek in the switch map.
+_MODEL = "deepseek/deepseek-v4-pro"
 
 # ---------------------------------------------------------------------------
 # Helpers — write tiny fake runner scripts into tmp_path
@@ -29,16 +39,48 @@ def _write_runner(tmp_path: Path, script: str) -> str:
     return str(runner)
 
 
-def _make_adapter(tmp_path: Path, script: str, model: str = "litellm/fake/model") -> LiteLLMAdapter:
+def _make_adapter(tmp_path: Path, script: str, model: str = _MODEL) -> LiteLLMAdapter:
     runner_path = _write_runner(tmp_path, script)
     a = LiteLLMAdapter("T2", litellm_model=model)
     a._test_runner_path = runner_path
     return a, runner_path
 
 
+@pytest.fixture(autouse=True)
+def _deepseek_switched_on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A per-test switch file with the runner model's family on, explicitly."""
+    switch = tmp_path / "switch" / "providers.json"
+    switch.parent.mkdir()
+    switch.write_text(json.dumps({"version": 1, "global": {"deepseek": {"enabled": True}}}),
+                      encoding="utf-8")
+    monkeypatch.setenv(provider_switch.SWITCH_FILE_ENV, str(switch))
+    return switch
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+def test_an_unknown_litellm_model_never_starts_the_runner(tmp_path):
+    """Fail-closed: a litellm model outside the family map is refused before the runner starts,
+    as an unknown identifier, whatever the switch file allows."""
+    marker = tmp_path / "runner-started"
+    a, runner = _make_adapter(tmp_path, f"""\
+        from pathlib import Path
+        Path({str(marker)!r}).write_text("started")
+    """, model="litellm/fake/model")
+
+    with pytest.raises(provider_switch.ProviderDisabledError) as refused:
+        a.execute("Hello", {"dispatch_id": "crash-unknown-001", "terminal_id": "T2",
+                            "_runner_path": runner})
+
+    decision = refused.value.decision
+    assert decision.identifier == "litellm:litellm/fake/model"
+    assert decision.family == provider_switch.UNKNOWN_FAMILY
+    assert decision.source == provider_switch.SOURCE_UNKNOWN_IDENTIFIER
+    assert decision.consumer == "litellm_spawn"
+    assert not marker.exists()
+
 
 class TestLiteLLMCrashNegative:
     def test_credentials_missing_produces_error_event(self, tmp_path):

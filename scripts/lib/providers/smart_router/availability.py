@@ -63,6 +63,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 import provider_reachability
+import provider_switch
 from incident_taxonomy import IncidentClass
 from load_deepseek_key import resolve_deepseek_api_key
 
@@ -327,6 +328,12 @@ def lane_available(
     on PATH, and cooldown state. Fail-open: any unexpected error treats the lane
     as available and logs loudly so the router never declines because its own
     availability layer is broken.
+
+    A lane whose provider family the operator switched off (``vnx providers``) is
+    unavailable with the decision detail as its reason, for the project in ``env``
+    (else the process project). That is the operator's decision, not a lane
+    failure: it never writes a cooldown or a reachability fact, so the lane rejoins
+    on the next call after switching back on.
     """
     _env = env if env is not None else dict(os.environ)
     check = _LANE_CHECKS.get(lane)
@@ -337,6 +344,12 @@ def lane_available(
     try:
         if check.disabled_reason is not None:
             return False, check.disabled_reason
+        decision = provider_switch.decide(
+            lane, consumer="smart_router.lane_available",
+            project_id=_env.get(provider_switch.PROJECT_ENV),
+        )
+        if not decision.allowed:
+            return False, decision.detail()
         for var in check.env_vars:
             if not _lane_requirement_met(var, _env):
                 return False, f"missing required env var {var}"

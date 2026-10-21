@@ -16,6 +16,8 @@ import urllib.error
 import urllib.request
 from typing import Optional
 
+import provider_switch
+
 from .base import ClassifierProvider, ClassifierResult, parse_json_block
 
 _DEFAULT_MODEL = "llama3.1:8b"
@@ -50,6 +52,8 @@ class OllamaProvider(ClassifierProvider):
         return shutil.which("ollama") is not None
 
     def classify(self, prompt: str, _max_tokens: int = 1500) -> ClassifierResult:
+        provider_switch.require(self.name, consumer="classifier_providers.ollama",
+                                project_id=self.switch_project_id)
         url = _api_host() + "/api/generate"
         # format=json constrains generation to a valid JSON object (no prose, no
         # ```json fences), which is exactly the scout/tagger contract. temperature=0

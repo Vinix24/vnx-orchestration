@@ -74,6 +74,7 @@ from _streaming_drainer import (  # noqa: E402
 )
 from canonical_event import CanonicalEvent  # noqa: E402
 from env_scrub_patterns import DEFAULT_SCRUB_KEY_PATTERNS, scrub_env  # noqa: E402
+import provider_switch  # scripts/lib, added to the path above
 # OI-1087: the read-only task-class list lives in ONE place — phantom_guard's
 # REVIEW_TASK_CLASSES is the fabric's SSOT for "a verdict, not a diff, is the
 # expected deliverable". The fabrication guard below keys off the same list so
@@ -895,7 +896,12 @@ def _start_kimi_subprocess(
 
     Returns (proc, None) on success, or (None, KimiSpawnResult) on spawn failure.
     All subprocess-boundary errors convert to structured results; none are re-raised.
+    A provider-switch refusal is not a subprocess error: it raises
+    ``provider_switch.ProviderDisabledError`` before the launch, decided for the project the
+    child env carries (``VNX_PROJECT_ID``), so the launch and the door decide alike.
     """
+    provider_switch.require("kimi", consumer="kimi_spawn",
+                            project_id=(env or {}).get(provider_switch.PROJECT_ENV))
     try:
         proc = subprocess.Popen(
             cmd,

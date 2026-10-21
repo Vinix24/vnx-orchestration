@@ -66,9 +66,10 @@ def no_markers(monkeypatch):
 
 
 @pytest.fixture
-def live(home, no_markers, monkeypatch):
-    """The live write path: the pending tuples emptied in this test process only."""
-    monkeypatch.setattr(ps, "PENDING_B", ())
+def live(home, no_markers):
+    """The live write path: no dispatch marker and a tmp working directory outside any repo.
+
+    Every launch function calls require since provider-schakelaar B, so nothing is pending."""
     return home
 
 
@@ -115,10 +116,9 @@ def test_list_text_on_a_tmp_home(home, tmp_path):
     for family in ps.SWITCHABLE_FAMILIES:
         assert f"  {family:<11} effective on  (default)" in out
     assert "Never switchable:" in out and "operator decision 2b" in out
-    assert "Enforcement: NOT enforced yet" in out
-    assert f"pending B ({len(ps.PENDING_B)}):" in out
-    assert "pending C" not in out and "pending E" not in out
-    assert f"{len(ps.PENDING_B)} of {len(ps.LAUNCH_FUNCTIONS)} launch functions" in out
+    assert (f"Enforcement: live, all {len(ps.LAUNCH_FUNCTIONS)} launch functions call "
+            "provider_switch.require") in out
+    assert "NOT enforced yet" not in out and "pending B" not in out
     for entry in ps.ENFORCED:
         assert entry not in out
     assert "Projects (~/.vnx/projects.json):" in out and "no project registry" in out
@@ -140,9 +140,8 @@ def test_list_json(home, tmp_path):
     assert glm["projects"] == {PROJECT: {"enabled": True, "changed_at": "2026-10-12T08:00:00Z",
                                          "changed_by": "op", "reason": "hier wel"}}
     assert glm["effective"]["allowed"] is True and glm["effective"]["source"] == "project"
-    assert report["enforcement"]["enforced"] is False
-    assert {k: len(v) for k, v in report["enforcement"]["pending"].items()} == {
-        "B": len(ps.PENDING_B)}
+    assert report["enforcement"]["enforced"] is True
+    assert report["enforcement"]["pending"] == {}
     assert report["enforcement"]["launch_functions"] == len(ps.LAUNCH_FUNCTIONS)
     assert set(report["non_switchable"]) == {"claude", "codex", "tooling", "unresolved"}
     assert report["projects"]["error"] == "no project registry"
@@ -197,23 +196,37 @@ def test_check_allowed_and_refused(home, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Write verbs: refused in production, usage errors
+# Write verbs: live since provider-schakelaar B, usage errors
 # ---------------------------------------------------------------------------
+
+def test_write_verbs_are_live_in_their_own_process(home, tmp_path):
+    """Every launch function calls require, so `off` from outside any worktree and without a
+    dispatch marker writes the file and its audit line; `check` then refuses, `on` restores."""
+    result = run_cli("off", "deepseek", "--reason", "tegoed sparen", cwd=tmp_path)
+    assert result.returncode == providers_cli.EXIT_OK == 0, result.stderr
+    assert "not enforced yet" not in result.stderr
+    assert ps.load_state(switch_path(home)).global_switches["deepseek"].enabled is False
+    assert [r["op"] for r in audit_records(home)] == ["set"]
+    assert run_cli("check", "deepseek-harness", cwd=tmp_path).returncode == ps.EXIT_PROVIDER_SWITCHED_OFF
+    assert run_cli("on", "deepseek", "--reason", "weer aan", cwd=tmp_path).returncode == 0
+    assert run_cli("check", "deepseek-harness", cwd=tmp_path).returncode == 0
+
 
 @pytest.mark.parametrize("args", [
     ["off", "deepseek"], ["on", "glm", "--reason", "x"], ["off", "kimi", "--project", PROJECT],
     ["reset", "gemini", "--project", PROJECT], ["repair"], ["repair", "--empty"],
 ])
-def test_write_verbs_refuse_while_pending(args, home, tmp_path):
-    result = run_cli(*args, cwd=tmp_path)
-    assert result.returncode == providers_cli.EXIT_WRITE_REFUSED == 5
-    assert "write refused" in result.stderr and "not enforced yet" in result.stderr
-    assert f"B: {len(ps.PENDING_B)}" in result.stderr
-    for entry in ps.PENDING_B:
-        assert f"    {entry}\n" in result.stderr
+def test_write_verbs_refuse_while_pending(args, live, capsys, monkeypatch):
+    """The pending mechanism stays until F removes it: a pending entry refuses every write verb
+    and is listed."""
+    monkeypatch.setattr(ps, "pending_launch_functions", lambda: {"B": ("scripts/lib/example.py:launch",)})
+    code, _, err = run_main(capsys, *args)
+    assert code == providers_cli.EXIT_WRITE_REFUSED == 5
+    assert "write refused" in err and "not enforced yet" in err and "B: 1" in err
+    assert "    scripts/lib/example.py:launch\n" in err
     for entry in ps.ENFORCED:
-        assert entry not in result.stderr
-    assert not switch_path(home).exists() and not ps.audit_log_path(switch_path(home)).exists()
+        assert entry not in err
+    assert not switch_path(live).exists() and not ps.audit_log_path(switch_path(live)).exists()
 
 
 @pytest.mark.parametrize("args,needle", [
@@ -568,10 +581,11 @@ def test_pip_entrance_runs_the_same_module(home, tmp_path):
     listed = _pip("list", "--json", cwd=tmp_path)
     assert listed.returncode == 0, listed.stderr
     assert json.loads(listed.stdout)["project"] == PROJECT
-    assert json.loads(_pip("--json", cwd=tmp_path).stdout)["enforcement"]["enforced"] is False
+    assert json.loads(_pip("--json", cwd=tmp_path).stdout)["enforcement"]["enforced"] is True
     assert _pip("off", "claude", cwd=tmp_path).returncode == 2
-    refused = _pip("off", "deepseek", "--reason", "x y", cwd=tmp_path)
-    assert refused.returncode == 5 and "not enforced yet" in refused.stderr
+    written = _pip("off", "deepseek", "--reason", "x y", cwd=tmp_path)
+    assert written.returncode == 0, written.stderr
+    assert _pip("check", "deepseek", cwd=tmp_path).returncode == 4
     assert _pip("check", "mistral", cwd=tmp_path).returncode == 4
     assert _pip("check", "kimi", cwd=tmp_path).returncode == 0
 
@@ -653,10 +667,10 @@ def test_bin_vnx_entrance(home, no_markers, tmp_path):
     allowed = subprocess.run([vnx, "providers", "check", "claude"], cwd=str(tmp_path), env=env,
                              capture_output=True, text=True, timeout=120)
     assert allowed.returncode == 0, allowed.stderr
-    refused = subprocess.run([vnx, "providers", "off", "deepseek"], cwd=str(tmp_path), env=env,
+    written = subprocess.run([vnx, "providers", "off", "deepseek"], cwd=str(tmp_path), env=env,
                              capture_output=True, text=True, timeout=120)
-    assert refused.returncode == 5 and "not enforced yet" in refused.stderr
-    assert not switch_path(home).exists()
+    assert written.returncode == 0, written.stderr
+    assert ps.load_state(switch_path(home)).global_switches["deepseek"].enabled is False
 
 
 def test_providers_is_in_the_starter_operator_tier():

@@ -8,7 +8,8 @@ via OpenRouter.
 
 Every launch function (a function that actually starts a non-claude provider process or
 request) calls :func:`require` first; entry points turn a refusal into fabric behaviour before
-that. Until every launch function does, the write verbs refuse: see ``PENDING_*`` below.
+that. Every launch function in the census does, so the write verbs are live: see ``ENFORCED``
+below.
 
 Read fresh on every decision: the file is a few hundred bytes and a change must take effect on
 the next call in every process, launchd jobs included. No cache.
@@ -596,6 +597,53 @@ def require_host(url_or_host: str, *, consumer: str, project_id: Optional[str] =
 
 
 # ---------------------------------------------------------------------------
+# What a launcher stamps into every worker
+# ---------------------------------------------------------------------------
+
+PROJECT_ENV = "VNX_PROJECT_ID"
+WORKER_DISPATCH_ENV = "VNX_WORKER_DISPATCH_ID"
+
+
+def _project_of_state_dir(state_dir: Path) -> Optional[str]:
+    try:
+        import vnx_paths  # deferred: pulls in data_dir_guard / project_root
+        return vnx_paths.project_id_from_state_dir(Path(state_dir)) or None
+    except Exception as exc:  # the store may not resolve; the stamp then falls back to the process project
+        logger.warning("provider_switch: no project for state dir %s (%s)", state_dir, exc)
+        return None
+
+
+def worker_env_stamps(dispatch_id: Optional[str], *, project_id: Optional[str] = None,
+                      state_dir: Optional[Path] = None, resolve: bool = True) -> Dict[str, str]:
+    """The two variables a VNX launcher puts into every worker environment it builds.
+
+    ``VNX_PROJECT_ID`` is the project the launcher decides for, so a decision inside the worker
+    (a launch function, ``vnx providers check``) is for the same project as the door's: the
+    explicit ``project_id``, else the project of ``state_dir`` (the store the dispatch belongs
+    to), else the process project (:func:`resolve_project`). ``resolve=False`` skips that last
+    step, which may start ``git``: the innermost launcher passes on a project it already has
+    and starts nothing of its own. It is left out when none resolves to a valid project id,
+    and for the explicit ``"global"``. ``VNX_WORKER_DISPATCH_ID`` is the dispatch the worker
+    runs for: a dispatch marker that survives a change of directory, so the write verbs refuse
+    inside every worker (``DISPATCH_MARKER_ENV``).
+    """
+    if isinstance(project_id, str) and project_id.strip():
+        pid = resolve_project(project_id)
+    else:
+        pid = _project_of_state_dir(state_dir) if state_dir is not None else None
+        if pid is None and resolve:
+            pid = resolve_project(None)
+    stamps: Dict[str, str] = {}
+    if pid and PROJECT_ID_RE.match(pid):
+        stamps[PROJECT_ENV] = pid
+    elif pid:
+        logger.warning("provider_switch: not stamping %s=%r: not a valid project id", PROJECT_ENV, pid)
+    if isinstance(dispatch_id, str) and dispatch_id.strip():
+        stamps[WORKER_DISPATCH_ENV] = dispatch_id.strip()
+    return stamps
+
+
+# ---------------------------------------------------------------------------
 # Write protection
 # ---------------------------------------------------------------------------
 
@@ -629,8 +677,11 @@ def linked_worktree_root(start: Path) -> Optional[Path]:
 
 
 def pending_launch_functions() -> Dict[str, Tuple[str, ...]]:
-    """Launch functions that do not call :func:`require` yet, per deliverable."""
-    return {"B": tuple(PENDING_B)}
+    """Launch functions that do not call :func:`require` yet, per deliverable.
+
+    Empty: every census entry is in ``ENFORCED``, so nothing holds the write verbs back.
+    """
+    return {}
 
 
 def write_refusals() -> List[str]:
@@ -1031,26 +1082,26 @@ def repair(*, actor: str, empty: bool = False) -> WriteResult:
 
 
 # ---------------------------------------------------------------------------
-# Census: every launch function, and what is still pending
+# Census: every launch function, each one enforced
 # ---------------------------------------------------------------------------
 # Entries are ``<repo-relative path>:<qualname>``. The coverage guard
 # (tests/test_provider_switch_coverage.py) asserts the census against its AST detector and the
 # measured floor: a detected launch function must be here or on EXEMPT, every entry here must
-# call require() before its first launch call or be pending, and an EXEMPT entry must still
-# match something.
+# call require() before its first launch call, and an EXEMPT entry must still match something.
 
 # Launch functions the detector cannot see, each with the reason.
 UNDETECTED_LAUNCH_FUNCTIONS: Dict[str, str] = {
     "scripts/lib/provider_spawns/claude_spawn.py:spawn_claude":
         "host-keyed check: a claude launch whose received env carries a non-Anthropic "
-        "ANTHROPIC_BASE_URL maps that host to its family; the launch itself goes through "
-        "SubprocessAdapter, so this body holds no process call",
+        "ANTHROPIC_BASE_URL is decided on the family a harness lane names for it, else on "
+        "the family of that host (an OpenRouter host on the model's maker); the launch itself "
+        "goes through SubprocessAdapter, so this body holds no process call",
     "scripts/lib/provider_spawns/deepseek_harness_spawn.py:spawn_deepseek_harness":
-        "delegates to spawn_claude with the DeepSeek ANTHROPIC_BASE_URL; no process call in "
-        "its own body",
+        "delegates to spawn_claude with the DeepSeek ANTHROPIC_BASE_URL, labelled deepseek; "
+        "no process call in its own body",
     "scripts/lib/provider_spawns/glm_harness_spawn.py:spawn_glm_harness":
-        "delegates to spawn_claude with the :4141 proxy ANTHROPIC_BASE_URL; no process call "
-        "in its own body",
+        "delegates to spawn_claude with the proxy ANTHROPIC_BASE_URL (VNX_GLM_PROXY_URL, "
+        "default :4141), labelled glm; no process call in its own body",
     "scripts/lib/provider_spawns/kimi_spawn.py:_start_kimi_subprocess":
         "Popen of an argv that arrives as a parameter; the literal 'kimi' head sits in "
         "_build_kimi_cmd, called by spawn_kimi",
@@ -1072,16 +1123,13 @@ UNDETECTED_LAUNCH_FUNCTIONS: Dict[str, str] = {
         "for the detector to see",
 }
 
-# Census entries that call require() before their first launch call. They stay in
-# LAUNCH_FUNCTIONS: the coverage guard asserts that each one still does.
+# Census entries that call require() before their first launch call: every launch function.
+# The coverage guard asserts that each one still does.
 ENFORCED: Tuple[str, ...] = (
+    "scripts/benchmark/field-tests/runners/scorer.py:_judge_kimi",
     "scripts/conversation_analyzer/deep_analyzer.py:DeepAnalyzer._try_deepseek_harness",
     "scripts/conversation_analyzer/deep_analyzer.py:DeepAnalyzer._try_ollama",
     "scripts/gate_runner.py:GateRunner._run_with_stall_detection",
-)
-
-PENDING_B: Tuple[str, ...] = (
-    "scripts/benchmark/field-tests/runners/scorer.py:_judge_kimi",
     "scripts/lib/adapters/_litellm_agentic_runner.py:main",
     "scripts/lib/adapters/_litellm_runner.py:main",
     "scripts/lib/adapters/gemini_adapter.py:GeminiAdapter._execute_legacy",
@@ -1099,7 +1147,7 @@ PENDING_B: Tuple[str, ...] = (
     *UNDETECTED_LAUNCH_FUNCTIONS,
 )
 
-LAUNCH_FUNCTIONS: Tuple[str, ...] = tuple(sorted({*ENFORCED, *PENDING_B}))
+LAUNCH_FUNCTIONS: Tuple[str, ...] = tuple(sorted(ENFORCED))
 
 # Flagged by the detector or named by the plan, and deliberately outside layer 1. An entry is a
 # function (``path:qualname``), a file or a directory (trailing slash).

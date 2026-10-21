@@ -137,6 +137,8 @@ _ESCALATION_TABLE = {
     "no_verdict": "retry_same_tier",
     "tool_missing": "no_climb",
     "local_key_missing": "no_climb",
+    # The operator switched the family off: a climb would route around that decision.
+    "provider_switched_off": "no_climb",
     "unknown": "no_climb",
 }
 

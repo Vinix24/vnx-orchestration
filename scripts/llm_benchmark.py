@@ -39,6 +39,11 @@ from typing import Any, Dict, List, Optional
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR / "lib") not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR / "lib"))
+
+import provider_switch  # scripts/lib, added to the path above
+
 VNX_BASE = SCRIPT_DIR.parent  # VNX dist root
 REPORT_DIR = VNX_BASE / "reports" / "benchmarks"
 PROGRESS_FILE = REPORT_DIR / "benchmark_progress.json"
@@ -1008,7 +1013,12 @@ QUICK_MARKETING_IDS = {"linkedin_post", "google_ads", "lead_qualification"}
 
 def _ollama_api(endpoint: str, payload: dict | None = None,
                 method: str = "GET", timeout: int = 10) -> dict:
-    """Make a request to the Ollama HTTP API."""
+    """Make a request to the Ollama HTTP API.
+
+    Raises ``provider_switch.ProviderDisabledError`` before the request when the operator
+    switched the local family off; the availability probes then read ollama as absent.
+    """
+    provider_switch.require("ollama", consumer="llm_benchmark.ollama_api")
     url = f"{OLLAMA_URL}{endpoint}"
     if payload is not None:
         data = json.dumps(payload).encode("utf-8")
@@ -1055,7 +1065,12 @@ def pull_ollama_model(model: str) -> bool:
 
 
 def _ollama_stream(model: str, prompt: str, timeout: int) -> tuple:
-    """Stream a response from Ollama, returning (full_text, eval_count, elapsed)."""
+    """Stream a response from Ollama, returning (full_text, eval_count, elapsed).
+
+    Raises ``provider_switch.ProviderDisabledError`` before the request when the operator
+    switched the local family off.
+    """
+    provider_switch.require("ollama", consumer="llm_benchmark.ollama_stream")
     url = f"{OLLAMA_URL}/api/generate"
     payload = {
         "model": model,

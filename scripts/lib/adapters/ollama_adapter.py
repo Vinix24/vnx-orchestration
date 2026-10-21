@@ -33,6 +33,7 @@ from canonical_event import CanonicalEvent
 from provider_adapter import AdapterResult, Capability, ProviderAdapter
 from provider_reachability import Reachability, ReachabilityState
 from _streaming_drainer import StreamingDrainerMixin
+import provider_switch
 
 logger = logging.getLogger(__name__)
 
@@ -223,8 +224,11 @@ class OllamaAdapter(StreamingDrainerMixin, ProviderAdapter):
 
         Reads NDJSON lines from the HTTP response, maps each via
         _normalize_ollama_event(), and writes to EventStore live (not post-hoc).
-        Emits a synthetic error event on connection failure mid-stream.
+        Emits a synthetic error event on connection failure mid-stream. Raises
+        ``provider_switch.ProviderDisabledError`` before the request when the operator
+        switched the local family off.
         """
+        provider_switch.require("ollama", consumer="ollama_adapter")
         # Set instance context for _normalize() (satisfies mixin contract)
         self._current_dispatch_id = dispatch_id
         self._current_terminal_id = terminal_id

@@ -37,10 +37,15 @@ pytestmark = pytest.mark.integration
 # ---------------------------------------------------------------------------
 # Fake subprocess scripts that mimic gemini --output-format stream-json
 # ---------------------------------------------------------------------------
+# Like the real CLI, each fake reads its prompt from stdin before it answers. The adapter's
+# prompt carries the files the branch changes against origin/main, so on a large branch it is
+# bigger than a pipe buffer; a fake that exits without reading made the adapter's stdin write
+# fail with BrokenPipeError there.
 
 _FAKE_GEMINI_STREAM_SCRIPT = """\
 import json, sys
 
+sys.stdin.read()
 print(json.dumps({"type": "session_start"}), flush=True)
 print(json.dumps({"type": "message", "text": "Reviewing code..."}), flush=True)
 print(json.dumps({"type": "tool_use", "name": "read_file", "args": {"path": "README.md"}}), flush=True)
@@ -53,6 +58,7 @@ sys.exit(0)
 _FAKE_GEMINI_CLEAN_SCRIPT = """\
 import json, sys
 
+sys.stdin.read()
 print(json.dumps({"type": "session_start"}), flush=True)
 print(json.dumps({"type": "message", "text": "Done."}), flush=True)
 print(json.dumps({"type": "result", "text": "Complete."}), flush=True)
@@ -64,6 +70,7 @@ def _spawn_fake_gemini(script: str) -> subprocess.Popen:
     """Spawn a Python subprocess that mimics gemini stream-json output."""
     return subprocess.Popen(
         [sys.executable, "-c", script],
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         start_new_session=True,

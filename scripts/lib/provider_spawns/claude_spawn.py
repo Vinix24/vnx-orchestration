@@ -17,8 +17,10 @@ SubprocessAdapter.  No Anthropic SDK is imported anywhere in this module.
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import logging
+import os
 import subprocess
 import sys
 import time
@@ -33,8 +35,70 @@ if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 
 from subprocess_adapter import SubprocessAdapter  # noqa: E402 (path-setup above)
+import provider_switch  # scripts/lib, added to the path above
 
 logger = logging.getLogger(__name__)
+
+_SWITCH_CONSUMER = "claude_spawn.spawn_claude"
+_BASE_URL_ENV = "ANTHROPIC_BASE_URL"
+
+
+def _received_env_value(
+    name: str, extra_env: Optional[Dict[str, str]], scrub_env_keys: frozenset,
+) -> Optional[str]:
+    """The value ``name`` has in the env SubprocessAdapter.deliver builds for the child.
+
+    ``extra_env`` over the process env (a None value does not override), and nothing when a
+    scrub pattern matches the name, exactly as ``deliver`` merges and scrubs.
+    """
+    if any(fnmatch.fnmatchcase(name, pattern) for pattern in (scrub_env_keys or ())):
+        return None
+    value = (extra_env or {}).get(name)
+    if value is None:
+        value = os.environ.get(name)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip()
+
+
+def _env_seconds(name: str, default: float) -> float:
+    """``float(os.environ[name])``, or ``default`` when it is unset or not a number."""
+    try:
+        return float(os.environ[name])
+    except (KeyError, ValueError):
+        return default
+
+
+def _switch_family(
+    model: str, extra_env: Optional[Dict[str, str]], scrub_env_keys: frozenset, *,
+    base_url_family: Optional[str], project_id: Optional[str],
+) -> Optional[str]:
+    """The family the provider switch decides this spawn on, or None: no redirect is claude.
+
+    ``base_url_family`` is the family a harness lane names for its own redirect: the decision is
+    on that family, whatever host the redirect points at (an operator's ``VNX_GLM_PROXY_URL`` on
+    any host or port). Without one, an ``ANTHROPIC_BASE_URL`` in the env the child receives is
+    mapped by host, an OpenRouter host to the maker of ``model``. A host the map does not know
+    raises ``ProviderDisabledError`` with the host decision (``unknown-identifier``); a label
+    that is not a switchable family raises ``ValueError``.
+    """
+    if base_url_family is not None:
+        if base_url_family not in provider_switch.SWITCHABLE_FAMILIES:
+            raise ValueError(
+                f"base_url_family={base_url_family!r} is not a switchable family "
+                f"({', '.join(provider_switch.SWITCHABLE_FAMILIES)}): it names the family a "
+                "harness redirect reaches, never a class the switch does not govern"
+            )
+        return base_url_family
+    base_url = _received_env_value(_BASE_URL_ENV, extra_env, scrub_env_keys)
+    if base_url is None:
+        return None
+    try:
+        return provider_switch.family_of_host(base_url, model=model)
+    except provider_switch.UnknownProviderError:
+        raise provider_switch.ProviderDisabledError(provider_switch.decide_host(
+            base_url, consumer=_SWITCH_CONSUMER, project_id=project_id, model=model,
+        )) from None
 
 
 @dataclass
@@ -120,6 +184,7 @@ def spawn_claude(
     role: Optional[str] = None,
     requires_mcp: bool = False,
     scrub_env_keys: frozenset,
+    base_url_family: Optional[str] = None,
     **kwargs: Any,
 ) -> ClaudeSpawnResult:
     """Spawn ``claude -p --output-format stream-json`` and consume the event stream.
@@ -192,10 +257,25 @@ def spawn_claude(
         the old ``None`` default made omission invisible.
         tests/test_spawn_scrub_env_keys_contract.py statically enforces that every
         git-tracked, non-test call site supplies this keyword.
+    base_url_family:
+        The provider family behind the ``ANTHROPIC_BASE_URL`` this spawn's env carries, named
+        by a harness lane that sets that redirect itself (``glm``, ``deepseek``). None (every
+        other caller) leaves the decision to the host map.
     **kwargs:
         Accepted for forward-compatibility; ignored.
+
+    Raises ``provider_switch.ProviderDisabledError`` before any launch when the operator
+    switched off the family behind the env the child receives (``extra_env`` over the process
+    env, after ``scrub_env_keys``): the ``base_url_family`` a harness names, else the family
+    of the ``ANTHROPIC_BASE_URL`` host (an OpenRouter host decided on the maker of ``model``),
+    and a host the switch's host map does not know. An Anthropic host, or no redirect, is
+    claude, which the switch never refuses. The decision is for the project that env carries.
     """
-    import os
+    switch_project = _received_env_value(provider_switch.PROJECT_ENV, extra_env, scrub_env_keys)
+    switch_family = _switch_family(model, extra_env, scrub_env_keys, base_url_family=base_url_family,
+                                   project_id=switch_project)
+    if switch_family is not None:
+        provider_switch.require(switch_family, consumer=_SWITCH_CONSUMER, project_id=switch_project)
     try:
         from worker_health_monitor import HealthStatus, SLOW_THRESHOLD
     except ImportError:
@@ -203,14 +283,8 @@ def spawn_claude(
         SLOW_THRESHOLD = 120.0
 
     # Apply env overrides (same logic as delivery.py for byte-identical timeouts).
-    try:
-        chunk_timeout = float(os.environ["VNX_CHUNK_TIMEOUT"])
-    except (KeyError, ValueError):
-        pass
-    try:
-        total_deadline = float(os.environ["VNX_TOTAL_DEADLINE"])
-    except (KeyError, ValueError):
-        pass
+    chunk_timeout = _env_seconds("VNX_CHUNK_TIMEOUT", chunk_timeout)
+    total_deadline = _env_seconds("VNX_TOTAL_DEADLINE", total_deadline)
 
     adapter = SubprocessAdapter()
     deliver_result = adapter.deliver(

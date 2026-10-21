@@ -179,11 +179,17 @@ The switch is read fresh on every decision, so a change reaches the next call in
 every process. It governs calls, never evidence: a refusal is booked as
 `provider_switched_off`, never as an auth, credit or quota failure. Every function
 that launches a non-claude provider process must call `provider_switch.require`
-first. `ENFORCED` in `provider_switch.py` lists the launch functions that already
-call it; `PENDING_B` lists the ones that do not call it yet. The
-write verbs refuse while any launch function is still pending, and refuse from a
-linked worktree or from inside a dispatch. `vnx providers list` prints the current
-enforcement state and the pending functions. Review gates and the intelligence
+first. `LAUNCH_FUNCTIONS` in `provider_switch.py` is that census, and every entry in
+it is enforced: each one calls `require` before its first launch call, which
+`tests/test_provider_switch_coverage.py` asserts against an AST detector and
+`tests/test_provider_switch_launch_functions.py` shows per function with its family
+switched off. A claude launch whose env carries a non-Anthropic
+`ANTHROPIC_BASE_URL` is decided on the family a harness lane names for that
+redirect, else on the family of the host (an OpenRouter host on the model's maker);
+a host the map does not know is refused. The write verbs are live: they refuse only
+from a linked worktree or from inside a dispatch. `vnx providers list` prints the
+enforcement state. The door books a refused fire as a `provider_switched_off`
+receipt; the dry-run writes nothing. Review gates and the intelligence
 callers honor the switch (see `DISPATCH_AND_INTELLIGENCE_ARCHITECTURE.md`). On
 main, not yet released. This is code behaviour; no ADR records it.
 

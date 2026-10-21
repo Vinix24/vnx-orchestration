@@ -1010,42 +1010,42 @@
     },
     {
       "file": "tests/test_harness_run_cost.py",
-      "line": 511,
+      "line": 545,
       "mechanism": "direct-call",
       "module_target": "envelope_types",
       "symbol": "EnvelopeSpec"
     },
     {
       "file": "tests/test_harness_run_cost.py",
-      "line": 521,
+      "line": 555,
       "mechanism": "direct-call",
       "module_target": "envelope_types",
       "symbol": "_AdapterResult"
     },
     {
       "file": "tests/test_harness_run_cost.py",
-      "line": 535,
+      "line": 569,
       "mechanism": "direct-call",
       "module_target": "envelope_govern",
       "symbol": "_govern"
     },
     {
       "file": "tests/test_harness_run_cost.py",
-      "line": 623,
+      "line": 657,
       "mechanism": "direct-call",
       "module_target": "envelope_types",
       "symbol": "_AdapterResult"
     },
     {
       "file": "tests/test_harness_run_cost.py",
-      "line": 671,
+      "line": 723,
       "mechanism": "direct-call",
       "module_target": "envelope_adapters_provider",
       "symbol": "_map_harness_spawn_result"
     },
     {
       "file": "tests/test_harness_run_cost.py",
-      "line": 685,
+      "line": 737,
       "mechanism": "direct-call",
       "module_target": "envelope_adapters_claude",
       "symbol": "ClaudeSubprocessAdapter"
@@ -1667,6 +1667,48 @@
       "symbol": ""
     },
     {
+      "file": "tests/test_provider_switch_dispatch_path.py",
+      "line": 298,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_provider",
+      "symbol": "ProviderAdapter"
+    },
+    {
+      "file": "tests/test_provider_switch_dispatch_path.py",
+      "line": 326,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_provider",
+      "symbol": "ProviderAdapter"
+    },
+    {
+      "file": "tests/test_provider_switch_dispatch_path.py",
+      "line": 615,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_claude",
+      "symbol": "ClaudeSubprocessAdapter"
+    },
+    {
+      "file": "tests/test_provider_switch_dispatch_path.py",
+      "line": 615,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_claude",
+      "symbol": "CodexAdapter"
+    },
+    {
+      "file": "tests/test_provider_switch_dispatch_path.py",
+      "line": 616,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_provider_switch_launch_functions.py",
+      "line": 287,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_provider",
+      "symbol": "ProviderAdapter"
+    },
+    {
       "file": "tests/test_receipt_v2_pr4_wiring.py",
       "line": 398,
       "mechanism": "direct-call",
@@ -1887,12 +1929,14 @@
     "dispatch_envelope::run_envelope_plan",
     "envelope_adapters_claude.ClaudeSubprocessAdapter::run",
     "envelope_adapters_claude.CodexAdapter::run",
+    "envelope_adapters_claude::_switch_stamps",
     "envelope_adapters_provider.ProviderAdapter::_run_codex",
     "envelope_adapters_provider.ProviderAdapter::_run_kimi",
     "envelope_adapters_provider.ProviderAdapter::run",
     "envelope_adapters_provider::_fail_loud_on_empty_success",
     "envelope_adapters_provider::_map_generic_spawn_result",
     "envelope_adapters_provider::_map_harness_spawn_result",
+    "envelope_adapters_provider::_plan_worker_env",
     "envelope_govern::_book_ledger_run",
     "envelope_govern::_govern",
     "envelope_govern::_receipt_cost",

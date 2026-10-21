@@ -46,6 +46,7 @@ if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 
 from provider_spawns.claude_spawn import spawn_claude  # noqa: E402 (path-setup above)
+import provider_switch  # scripts/lib, added to the path above
 
 from load_deepseek_key import resolve_deepseek_api_key  # (path-setup above: scripts/lib injected into sys.path)
 
@@ -303,7 +304,14 @@ def spawn_deepseek_harness(
     when None/empty.  ``extra_env`` (e.g. VNX identity propagation) is merged
     UNDER the mandatory harness env so the account-safety vars cannot be
     overridden by a caller.
+
+    Raises ``provider_switch.ProviderDisabledError`` before the key is resolved when the
+    operator switched deepseek off for the project ``extra_env`` carries (``VNX_PROJECT_ID``).
+    ``spawn_claude`` decides deepseek again: this lane names the family of its redirect
+    (``base_url_family``), so the decision never depends on the host map.
     """
+    provider_switch.require("deepseek-harness", consumer="deepseek_harness_spawn",
+                            project_id=(extra_env or {}).get(provider_switch.PROJECT_ENV))
     resolved_key = api_key if api_key is not None else resolve_deepseek_api_key()
     missing_key = _refuse_without_own_key(resolved_key, model)
     if missing_key is not None:
@@ -332,6 +340,7 @@ def spawn_deepseek_harness(
         extra_cli_args=build_harness_cli_args(cwd if cwd is not None else os.getcwd()),
         cwd=cwd,
         scrub_env_keys=_HARNESS_SCRUB_KEYS,
+        base_url_family=provider_switch.DEEPSEEK,
         **kwargs,
     )
 

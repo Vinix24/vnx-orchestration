@@ -628,6 +628,95 @@ def _not_checkable_note(
     )
 
 
+def _provider_switch_verdict(plan: "ExecutionPlan", *, project_id: Optional[str]) -> Optional[Reject]:
+    """The provider switch at the door (provider-schakelaar B), or None when it allows.
+
+    Decided for the dispatch's own project, on the dry-run and on the fire path alike,
+    BEFORE ``_check_reachability``: a lane the operator switched off is neither probed nor
+    booked, and the refusal is never a reachability fact (no known-rejected ledger entry,
+    no ``provider_lane_exhausted`` event), so switching the family back on lets the next
+    dispatch through at once. The detail names family, source, scope, who and why.
+    """
+    import provider_switch
+
+    decision = provider_switch.decide(
+        plan.provider.value, consumer="dispatch_cli.door", project_id=project_id,
+    )
+    if decision.allowed:
+        return None
+    return Reject("provider-disabled", decision.detail())
+
+
+_SWITCH_REFUSAL_STATUS = "blocked"
+_SWITCH_REFUSAL_DELIVERY_STATE = "delivery_refused"
+
+
+def _record_switch_refusal(
+    plan: "ExecutionPlan", spec: "DispatchSpec", reject: Reject, *, state_dir: Path,
+) -> None:
+    """Book the door's provider-switch refusal of a fire as a dispatch receipt (ADR-005).
+
+    One ``receipt_kind="dispatch"`` receipt in the dispatch's own store, through the canonical
+    dispatch-receipt writer (``governance_emit.emit_dispatch_receipt``), shaped like
+    provider_dispatch's refusal: status ``blocked``, delivery_state ``delivery_refused``, nothing
+    spent. Its failure_class comes from ``classify_failure_safe`` on the decision detail and is
+    ``provider_switched_off``, never an auth/credit class: ``_recent_blocking_rejection`` does
+    not read it as known-rejected, no lane cooldown or reachability record is written, and the
+    refire guard passes over it, so the same dispatch fires once the family is back on. A write
+    failure is recorded as door bookkeeping; the door refuses all the same.
+    """
+    from failure_classification import classify_failure_safe
+    from governance_emit import emit_dispatch_receipt
+    from vnx_paths import TestIsolationGuardError
+
+    provider = plan.provider.value
+    classified = classify_failure_safe(
+        status=_SWITCH_REFUSAL_STATUS, error=reject.reason, provider=provider,
+        dispatch_id=plan.dispatch_id,
+    )
+    try:
+        emit_dispatch_receipt(
+            dispatch_id=plan.dispatch_id, terminal_id=plan.target_id, provider=provider,
+            model=plan.model, pr_id=plan.pr_id, status=_SWITCH_REFUSAL_STATUS, completion_pct=0,
+            risk=0.0, findings=[], duration_seconds=0.0,
+            token_usage={"input": 0, "output": 0, "cache_read": 0}, cost_usd=0.0,
+            state_dir=state_dir, role=spec.role, receipt_kind="dispatch",
+            deadline_seconds=plan.deadline_seconds,
+            failure_reason=classified.get("failure_reason"),
+            failure_class=classified.get("failure_class"),
+            delivery_state=_SWITCH_REFUSAL_DELIVERY_STATE,
+            parent_dispatch=plan.parent_dispatch, task_class=plan.task_class,
+            tier_from=plan.tier_from, tier_to=plan.tier_to,
+        )
+    except TestIsolationGuardError:  # vnx-silent-except: OI-1079 — must fail the test loudly, never swallowed here
+        raise
+    except Exception as exc:  # vnx-silent-except: recorded as door bookkeeping; the door still refuses the fire
+        _record_bookkeeping_failure("provider_switch_refusal_receipt", plan.dispatch_id, exc,
+                                    state_dir=state_dir)
+
+
+def _lane_verdict(
+    plan: "ExecutionPlan", spec: "DispatchSpec", *, project_id: Optional[str], state_dir: Path,
+    dry_run: bool,
+) -> Optional[Reject]:
+    """The door's lane refusal, or None: the provider switch first, then reachability.
+
+    A lane the operator switched off is refused ``provider-disabled`` and never reaches
+    ``_check_reachability``, so it is never probed and never becomes a reachability fact; on a
+    fire that refusal is booked as a receipt (``_record_switch_refusal``), the dry-run writes
+    nothing. A known-rejected lane is refused ``lane-known-rejected``.
+    """
+    switch_reject = _provider_switch_verdict(plan, project_id=project_id)
+    if switch_reject is not None:
+        if not dry_run:
+            _record_switch_refusal(plan, spec, switch_reject, state_dir=state_dir)
+        return switch_reject
+    reachability = _check_reachability(plan, spec, state_dir=state_dir)
+    if reachability.block:
+        return Reject("lane-known-rejected", reachability.reason)
+    return None
+
+
 def _check_reachability(
     plan: "ExecutionPlan", spec: "DispatchSpec", *, state_dir: Optional[Path] = None
 ) -> "ReachabilityVerdict":
@@ -1764,12 +1853,18 @@ def _resolve_router_pre_validate(spec: DispatchSpec) -> "Optional[DoorRouteResul
         instruction_text = ifile.read_text(encoding="utf-8")
 
         file_paths = [str(dp.path) for dp in spec.dispatch_paths]
+        # Provider-schakelaar B: the router decides lane availability (the operator's
+        # provider switch included) for the dispatch's own project, not the door process's.
+        router_env = dict(os.environ)
+        if spec.project_id:
+            router_env["VNX_PROJECT_ID"] = spec.project_id
         return resolve_door_route(
             spec_provider=spec.provider,
             spec_model=spec.model,
             target_slot=spec.target_slot,
             instruction_text=instruction_text,
             file_paths=file_paths,
+            env=router_env,
             dispatch_id=spec.dispatch_id,
         )
     except RegistryLookupError:
@@ -3066,6 +3161,8 @@ def _maybe_stage_escalation(plan, result, *, vspec, state_dir, data_dir) -> None
 # ---------------------------------------------------------------------------
 
 _TERMINAL_RECEIPT_STATUSES = _RV_SUCCESS_STATUSES | _RV_HARD_FAILURE_STATUSES
+# failure_classification.PROVIDER_SWITCHED_OFF: a provider-switch refusal, never evidence of a run.
+_SWITCHED_OFF_CLASS = "provider_switched_off"
 _RECEIPTS_FILENAME_REFIRE = "t0_receipts.ndjson"
 _ROUTE_DECISIONS_FILENAME = "route_decisions.ndjson"
 
@@ -3114,6 +3211,10 @@ def _find_terminal_receipt_status(dispatch_id: str, *, state_dir: Path) -> Optio
     (not the substring) to rule out a collision like "foo-1" inside "foo-12".
     An absent/unreadable ledger is the ABSENCE of a known receipt, never an
     error — this is a pre-flight guard, not the receipt pipeline itself.
+
+    A provider-switch refusal (failure_class ``provider_switched_off``) is passed over: the
+    dispatch never ran, so it is no evidence that it already did, and the same dispatch_id
+    fires once the operator switches the family back on.
     """
     receipts_path = state_dir / _RECEIPTS_FILENAME_REFIRE
     if not receipts_path.exists():
@@ -3132,7 +3233,7 @@ def _find_terminal_receipt_status(dispatch_id: str, *, state_dir: Path) -> Optio
                 if rec.get("dispatch_id") != dispatch_id:
                     continue
                 status = rec.get("status")
-                if status in _TERMINAL_RECEIPT_STATUSES:
+                if status in _TERMINAL_RECEIPT_STATUSES and rec.get("failure_class") != _SWITCHED_OFF_CLASS:
                     last_status = status
     except OSError:
         return None
@@ -3567,9 +3668,10 @@ def run_dispatch(
         # only after _print_plan, and never on a real fire — the 2026-08-16
         # kimi stampede (nine dispatches, one quota 403, eight minutes) fired
         # blind because a real fire never checked reachability at all.
-        reachability = _check_reachability(plan, vspec.spec, state_dir=state_dir)
-        if reachability.block:
-            _emit_reject(Reject("lane-known-rejected", reachability.reason))
+        # Provider-schakelaar B: the operator's switch is asked first (_lane_verdict).
+        lane_reject = _lane_verdict(plan, vspec.spec, project_id=project_id, state_dir=state_dir, dry_run=dry_run)
+        if lane_reject is not None:
+            _emit_reject(lane_reject)
             return 1
 
         # Scout pre-pass (opt-in VNX_SCOUT_PREPASS, fail-open): a cheap key-auth

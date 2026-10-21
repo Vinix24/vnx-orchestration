@@ -96,6 +96,10 @@ OUTCOME_REASONS = frozenset({
 # A confirmation is only as good as it is recent. Short on purpose.
 REACHABLE_TTL_SECONDS = 900
 
+# The token every provider-switch refusal carries (provider_switch.REASON_SWITCHED_OFF,
+# spelled out to keep this module free of that import): such text is never an outcome.
+_PROVIDER_SWITCHED_OFF = "provider_switched_off"
+
 _DETAIL_MAX_CHARS = 300
 
 _PROVIDER_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
@@ -241,8 +245,14 @@ def classify_failure_text(text: str) -> Optional[Tuple[str, str]]:
     reachability": a timeout, a crash or a malformed prompt must not mark a
     provider out. Quota text is matched by the fabric's single marker list
     (``governance_emit._classify_lane_log_text``), never a second scan.
+
+    A provider-switch refusal (text carrying ``provider_switched_off``) is the
+    operator's decision, not an outcome of a call: nothing was called, so it is
+    ``None`` too, even when the operator's reason mentions a quota or a 401.
     """
     if not text or not text.strip():
+        return None
+    if _PROVIDER_SWITCHED_OFF in text:
         return None
     from governance_emit import _classify_lane_log_text
 

@@ -36,6 +36,7 @@ from provider_spawns.gemini_spawn import (  # noqa: E402
     _extract_gemini_token_count as _spawn_extract_token_count,
 )
 from vertex_ai_runner import collect_file_contents
+import provider_switch
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,22 @@ OBSERVABILITY_TIER = _TIER_STREAMING
 def _gemini_stream_enabled() -> bool:
     """Return True when VNX_GEMINI_STREAM=1 is set in the environment."""
     return os.environ.get("VNX_GEMINI_STREAM", "0").strip() == "1"
+
+
+def _legacy_failure(status: str, output: str, model: str, duration: float) -> AdapterResult:
+    """A legacy-path result that produced no events: a failure or a timeout."""
+    return AdapterResult(
+        status=status,
+        output=output,
+        events=[],
+        event_count=0,
+        duration_seconds=duration,
+        committed=False,
+        commit_hash=None,
+        report_path=None,
+        provider="gemini",
+        model=model,
+    )
 
 
 class GeminiAdapter(StreamingDrainerMixin, ProviderAdapter):
@@ -163,7 +180,11 @@ class GeminiAdapter(StreamingDrainerMixin, ProviderAdapter):
 
     def stream_events(self, instruction: str, context: dict) -> Iterator[dict]:
         """Stream Gemini events live (VNX_GEMINI_STREAM=1) or yield a single
-        result event (legacy, VNX_GEMINI_STREAM=0)."""
+        result event (legacy, VNX_GEMINI_STREAM=0).
+
+        Raises ``provider_switch.ProviderDisabledError`` on the first ``next()``, before
+        any launch, when the operator switched gemini off."""
+        provider_switch.require("gemini", consumer="gemini_adapter.stream_events")
         model = os.environ.get("VNX_GEMINI_MODEL", _DEFAULT_MODEL)
         terminal_id = context.get("terminal_id", self._terminal_id)
         dispatch_id = context.get("dispatch_id", "unknown")
@@ -251,7 +272,11 @@ class GeminiAdapter(StreamingDrainerMixin, ProviderAdapter):
     # ------------------------------------------------------------------
 
     def _execute_legacy(self, *, prompt: str, model: str) -> AdapterResult:
-        """Legacy path: --output-format json, single buffered response (Tier-3)."""
+        """Legacy path: --output-format json, single buffered response (Tier-3).
+
+        Raises ``provider_switch.ProviderDisabledError`` before the launch when the operator
+        switched gemini off."""
+        provider_switch.require("gemini", consumer="gemini_adapter.execute_legacy")
         timeout = int(os.environ.get("VNX_GEMINI_TIMEOUT", str(_DEFAULT_TIMEOUT)))
         cmd = ["gemini", "--model", model, "--output-format", "json"]
         t0 = time.monotonic()
@@ -264,35 +289,15 @@ class GeminiAdapter(StreamingDrainerMixin, ProviderAdapter):
                 start_new_session=True,
             )
         except OSError as exc:
-            return AdapterResult(
-                status="failed",
-                output=str(exc),
-                events=[],
-                event_count=0,
-                duration_seconds=0.0,
-                committed=False,
-                commit_hash=None,
-                report_path=None,
-                provider="gemini",
-                model=model,
-            )
+            return _legacy_failure("failed", str(exc), model, 0.0)
 
         if proc.stdin:
             try:
                 proc.stdin.write(prompt.encode("utf-8"))
                 proc.stdin.close()
             except BrokenPipeError:
-                return AdapterResult(
-                    status="failed",
-                    output="stdin write failed (BrokenPipeError): gemini process exited early",
-                    events=[],
-                    event_count=0,
-                    duration_seconds=0.0,
-                    committed=False,
-                    commit_hash=None,
-                    report_path=None,
-                    provider="gemini",
-                    model=model,
+                return _legacy_failure(
+                    "failed", "stdin write failed (BrokenPipeError): gemini process exited early", model, 0.0,
                 )
 
         stdout, stderr, status = self._drain_with_timeout(proc, timeout)
@@ -300,32 +305,10 @@ class GeminiAdapter(StreamingDrainerMixin, ProviderAdapter):
 
         if status == "timeout":
             self._kill(proc)
-            return AdapterResult(
-                status="timeout",
-                output=f"Gemini CLI exceeded {timeout}s timeout",
-                events=[],
-                event_count=0,
-                duration_seconds=duration,
-                committed=False,
-                commit_hash=None,
-                report_path=None,
-                provider="gemini",
-                model=model,
-            )
+            return _legacy_failure("timeout", f"Gemini CLI exceeded {timeout}s timeout", model, duration)
 
         if proc.returncode != 0:
-            return AdapterResult(
-                status="failed",
-                output=stderr or stdout,
-                events=[],
-                event_count=0,
-                duration_seconds=duration,
-                committed=False,
-                commit_hash=None,
-                report_path=None,
-                provider="gemini",
-                model=model,
-            )
+            return _legacy_failure("failed", stderr or stdout, model, duration)
 
         parsed = self._parse_response(stdout)
         token_usage = self._parse_token_usage_from_response(stdout)

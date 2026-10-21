@@ -2055,6 +2055,74 @@ def _emit_refusal_receipt(
             fcntl.flock(fh, fcntl.LOCK_UN)
 
 
+def _refuse_switched_off(args: argparse.Namespace, provider: str, decision: Any) -> int:
+    """The named refusal for a provider the operator switched off (provider-schakelaar B).
+
+    The decision detail goes to stderr and into a ``delivery_refused`` receipt, whose
+    failure_class ``classify_failure_safe`` derives as ``provider_switched_off`` from that
+    detail: never auth/credit, so neither the lane cooldown nor the reachability record nor
+    the door's known-rejected check counts it. Returns the switch's own exit code.
+    """
+    import provider_switch
+
+    detail = decision.detail()
+    print(f"provider_dispatch: REJECT [{provider_switch.REASON_SWITCHED_OFF}]: {detail}", file=sys.stderr)
+    try:
+        _emit_refusal_receipt(args, provider, getattr(args, "model", None) or "unknown", detail)
+    except Exception as _ref_exc:
+        logger.error(
+            "provider_dispatch: refusal receipt failed for a switched-off provider dispatch=%s: %s",
+            args.dispatch_id, _ref_exc,
+        )
+    return provider_switch.EXIT_PROVIDER_SWITCHED_OFF
+
+
+def _reject_claude_provider(args: argparse.Namespace) -> int:
+    """PR-5: claude is not a provider-lane provider. The single-entry door owns all Claude
+    routing. Silent headless auto-selection via provider_dispatch is removed — use
+    DispatchSpec with allow_headless=true through the door instead."""
+    print(
+        "[provider_dispatch] REJECT: 'claude' is not a provider-lane provider. "
+        "Claude dispatches route via the single-entry dispatch door. "
+        "Use 'vnx dispatch <pending-id>' (VNX_SINGLE_ENTRY_DISPATCH=1) or "
+        "'python3 scripts/lib/dispatch_cli.py --spec-file <path>'. "
+        "For headless/api-billed runs set allow_headless=true in the DispatchSpec.",
+        file=sys.stderr,
+    )
+    try:
+        _emit_refusal_receipt(
+            args, "claude", getattr(args, "model", None) or "claude",
+            "claude is not a provider-lane provider (route via the single-entry dispatch door)",
+        )
+    except Exception as _ref_exc:
+        logger.error(
+            "provider_dispatch: refusal receipt failed for claude reject dispatch=%s: %s",
+            args.dispatch_id, _ref_exc,
+        )
+    return _EX_USAGE
+
+
+def _provider_switch_refusal(args: argparse.Namespace, provider: str) -> Optional[int]:
+    """Exit code of the named refusal when the switch refuses ``provider``, else None.
+
+    A litellm form that names no model maker the family map knows (bare ``litellm``,
+    ``litellm:openrouter``, ``litellm:openrouter:<vendor>/<model>``, ``litellm:<alias>``) is
+    decided at launch (layer 1) on the model ``_dispatch_litellm`` resolves; main turns a
+    refusal raised there into the same named refusal.
+    """
+    import provider_switch
+
+    if provider.startswith("litellm"):
+        try:
+            provider_switch.family_of(provider)
+        except provider_switch.UnknownProviderError:
+            return None
+    decision = provider_switch.decide(provider, consumer="provider_dispatch")
+    if decision.allowed:
+        return None
+    return _refuse_switched_off(args, provider, decision)
+
+
 def _check_constraints(args: argparse.Namespace, provider: str):
     """Run provider_constraints.yaml pre-flight and raise on blocking violations."""
     from providers.constraint_enforcer import ConstraintViolationError, check_constraints  # noqa: PLC0415
@@ -2169,8 +2237,12 @@ def _build_parser() -> argparse.ArgumentParser:
 def _worker_role_env(
     role: Optional[str],
     dispatch_paths: "list[str] | None" = None,
+    *,
+    dispatch_id: Optional[str] = None,
+    project_id: Optional[str] = None,
 ) -> Optional[Dict[str, str]]:
-    """Build the env overlay for a provider-lane worker: role + VNX_DATA_DIR + path scope.
+    """Build the env overlay for a provider-lane worker: role + VNX_DATA_DIR + path scope,
+    plus the provider-switch stamps.
 
     Role half — mirrors ``TmuxInteractiveDispatch._spawn_session`` (the
     claude/tmux lane): a genuinely-set role in the dispatch spec is exported as
@@ -2222,8 +2294,17 @@ def _worker_role_env(
 
     Best-effort: a data-dir resolution failure here must never break the spawn
     (the existing role-only behavior is the fallback) — logged, not raised.
+
+    Switch half (provider-schakelaar B): ``provider_switch.worker_env_stamps`` adds
+    ``VNX_PROJECT_ID`` (``project_id``, else this process's project) and
+    ``VNX_WORKER_DISPATCH_ID`` (``dispatch_id``). The launch function decides the switch for
+    the project in the env it starts the worker with, so the door, the launch function and
+    any decision inside the worker are for one project; the dispatch marker makes the
+    ``vnx providers`` write verbs refuse inside the worker.
     """
-    env: Dict[str, str] = {}
+    import provider_switch
+
+    env: Dict[str, str] = provider_switch.worker_env_stamps(dispatch_id, project_id=project_id)
     resolved_role = normalize_role(role)
     if resolved_role:
         env["VNX_WORKER_ROLE"] = resolved_role
@@ -2252,6 +2333,15 @@ def _worker_role_env(
         )
 
     return env or None
+
+
+def _args_worker_env(args: argparse.Namespace) -> Optional[Dict[str, str]]:
+    """``_worker_role_env`` for a CLI dispatch: its role, its dispatch paths and its dispatch id."""
+    return _worker_role_env(
+        getattr(args, "role", None),
+        dispatch_paths=_resolve_dispatch_paths(getattr(args, "dispatch_paths", "") or ""),
+        dispatch_id=args.dispatch_id,
+    )
 
 
 def _dispatch_claude_benchmark(args: argparse.Namespace) -> int:
@@ -2664,10 +2754,7 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
             event_writer=event_store.append if event_store is not None else None,
             cwd=worker_cwd,
             total_deadline=float(getattr(args, "deadline_seconds", 900)),
-            extra_env=_worker_role_env(
-                getattr(args, "role", None),
-                dispatch_paths=_resolve_dispatch_paths(getattr(args, "dispatch_paths", "") or ""),
-            ),
+            extra_env=_args_worker_env(args),
         )
         end_time = datetime.now(timezone.utc)
 
@@ -3159,10 +3246,7 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
                 event_writer=event_store.append if event_store is not None else None,
                 cwd=worker_cwd,
                 total_deadline=float(getattr(args, "deadline_seconds", 900)),
-                extra_env=_worker_role_env(
-                    getattr(args, "role", None),
-                    dispatch_paths=_resolve_dispatch_paths(getattr(args, "dispatch_paths", "") or ""),
-                ),
+                extra_env=_args_worker_env(args),
             )
         else:
             result = spawn_litellm(
@@ -3176,10 +3260,7 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
                 event_writer=event_store.append if event_store is not None else None,
                 cwd=worker_cwd,
                 total_deadline=float(getattr(args, "deadline_seconds", 900)),
-                extra_env=_worker_role_env(
-                    getattr(args, "role", None),
-                    dispatch_paths=_resolve_dispatch_paths(getattr(args, "dispatch_paths", "") or ""),
-                ),
+                extra_env=_args_worker_env(args),
             )
         end_time = datetime.now(timezone.utc)
 
@@ -3304,10 +3385,7 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
                 or (os.environ.get("VNX_TASK_CLASS", "") or "").strip()
             ) or None,
             total_deadline=float(getattr(args, "deadline_seconds", 900)),
-            extra_env=_worker_role_env(
-                getattr(args, "role", None),
-                dispatch_paths=_resolve_dispatch_paths(getattr(args, "dispatch_paths", "") or ""),
-            ),
+            extra_env=_args_worker_env(args),
         )
         end_time = datetime.now(timezone.utc)
 
@@ -3472,10 +3550,7 @@ def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
             terminal_id=args.terminal_id,
             cwd=worker_cwd,
             total_deadline=float(args.deadline_seconds),
-            extra_env=_worker_role_env(
-                getattr(args, "role", None),
-                dispatch_paths=_resolve_dispatch_paths(getattr(args, "dispatch_paths", "") or ""),
-            ),
+            extra_env=_args_worker_env(args),
         )
         end_time = datetime.now(timezone.utc)
         model_used = result.model or model
@@ -3561,10 +3636,7 @@ def _dispatch_glm_harness(args: argparse.Namespace) -> int:
             cwd=worker_cwd,
             event_writer=event_store.append if event_store is not None else None,
             total_deadline=float(args.deadline_seconds),
-            extra_env=_worker_role_env(
-                getattr(args, "role", None),
-                dispatch_paths=_resolve_dispatch_paths(getattr(args, "dispatch_paths", "") or ""),
-            ),
+            extra_env=_args_worker_env(args),
         )
         end_time = datetime.now(timezone.utc)
         model_used = result.model or model
@@ -3656,10 +3728,7 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
             event_writer=event_store.append,
             cwd=worker_cwd,
             total_deadline=float(getattr(args, "deadline_seconds", 900)),
-            extra_env=_worker_role_env(
-                getattr(args, "role", None),
-                dispatch_paths=_resolve_dispatch_paths(getattr(args, "dispatch_paths", "") or ""),
-            ),
+            extra_env=_args_worker_env(args),
         )
         end_time = datetime.now(timezone.utc)
 
@@ -3736,7 +3805,8 @@ def _dispatch_local_gemma(args: argparse.Namespace) -> int:
         role=getattr(args, "role", None),
         deadline_seconds=300,
         dispatch_id=args.dispatch_id,
-        # project_id dropped: spawn_local_gemma does not consume it (inert kwarg).
+        # project_id omitted: the provider switch decides for this process's project, as
+        # provider_dispatch does for every lane.
     )
     end_time = datetime.now(timezone.utc)
 
@@ -3815,6 +3885,12 @@ def main(argv: list[str] | None = None) -> int:
             f"Unknown provider '{provider}'. "
             "Accepted values: claude, codex, gemini, kimi, deepseek-harness, litellm:<model>."
         )
+
+    # Provider-schakelaar B: the operator's switch comes before the route constraints and
+    # the daily budget, so a switched-off provider is refused by name and nothing runs.
+    switch_refusal = _provider_switch_refusal(args, provider)
+    if switch_refusal is not None:
+        return switch_refusal
 
     # PR-ROUTE-1: enforce provider constraints before any handler runs.
     try:
@@ -3942,28 +4018,7 @@ def main(argv: list[str] | None = None) -> int:
                 and os.environ.get("VNX_BENCH_CLAUDE_HEADLESS") == "1"
             ):
                 return _dispatch_claude(args)
-            # PR-5: claude is not a provider-lane provider. The single-entry door owns
-            # all Claude routing. Silent headless auto-selection via provider_dispatch is
-            # removed — use DispatchSpec with allow_headless=true through the door instead.
-            print(
-                "[provider_dispatch] REJECT: 'claude' is not a provider-lane provider. "
-                "Claude dispatches route via the single-entry dispatch door. "
-                "Use 'vnx dispatch <pending-id>' (VNX_SINGLE_ENTRY_DISPATCH=1) or "
-                "'python3 scripts/lib/dispatch_cli.py --spec-file <path>'. "
-                "For headless/api-billed runs set allow_headless=true in the DispatchSpec.",
-                file=sys.stderr,
-            )
-            try:
-                _emit_refusal_receipt(
-                    args, "claude", getattr(args, "model", None) or "claude",
-                    "claude is not a provider-lane provider (route via the single-entry dispatch door)",
-                )
-            except Exception as _ref_exc:
-                logger.error(
-                    "provider_dispatch: refusal receipt failed for claude reject dispatch=%s: %s",
-                    args.dispatch_id, _ref_exc,
-                )
-            return _EX_USAGE
+            return _reject_claude_provider(args)
 
         if provider == "codex":
             _envelope_on = os.environ.get("VNX_UNIFIED_ENVELOPE") == "1"
@@ -4001,6 +4056,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2  # unreachable; parser.error() exits
     except Exception as _spawn_exc:
+        import provider_switch
+
+        if isinstance(_spawn_exc, provider_switch.ProviderDisabledError):
+            # Layer 1 refused at launch (a switch flipped after the check above, or the model
+            # of a bare litellm dispatch): the same named refusal, nothing was called.
+            return _refuse_switched_off(args, provider, _spawn_exc.decision)
         # An uncaught spawn exception means the worker was never delivered a
         # result — record it as deliver_failed (not delivered) so the receipt
         # ledger distinguishes it from submit_failed (delivered, no report)
