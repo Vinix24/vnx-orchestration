@@ -7,8 +7,9 @@ conflicts with another PR's new file.  The release PR folds the fragments into
 ``CHANGELOG.md`` with ``scripts/release/assemble_changelog.py``, before the tag.
 
 This module owns the rule.  The assembler, the CI check
-(``scripts/ci/check_changelog_fragments.py``) and the CI profile classifier
-(``scripts/ci/classify_ci_profile.py``) all read it from here, and ``assemble``
+(``scripts/ci/check_changelog_fragments.py``), the CI profile classifier
+(``scripts/ci/classify_ci_profile.py``) and the review-gate prompt
+(``scripts/lib/gate_prompt.py``, for ``is_release_pr``) all read it from here, and ``assemble``
 is the only implementation of the fold: the assembler runs it on the working
 tree, the CI check runs it on the merge base's blobs to recompute a release PR.
 
@@ -34,6 +35,7 @@ CHANGELOG_PATH = "CHANGELOG.md"
 UNRELEASED_HEADING = "## [Unreleased]"
 ROLLBACK_COMMAND = f"git checkout -- {CHANGELOG_PATH} {FRAGMENT_DIR}"
 LEGACY_LIST_PATH = "scripts/ci/changelog_legacy_prs.txt"
+VERSION_PATH = "VERSION"
 
 _NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _VERSION_RE = re.compile(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?")
@@ -163,6 +165,32 @@ def select_fragments(root: Path) -> List[str]:
         if is_fragment_path(fragment_path(entry.name)):
             names.append(entry.name)
     return sorted(names)
+
+
+# ---------------------------------------------------------------------------
+# The release-PR rule (pure)
+# ---------------------------------------------------------------------------
+
+
+def is_release_path(path: str) -> bool:
+    """True for a repo-relative *path* a release PR may change: ``VERSION``,
+    ``CHANGELOG.md``, the legacy list, or any path under ``changelog.d/``."""
+    return path in (VERSION_PATH, CHANGELOG_PATH, LEGACY_LIST_PATH) or path.startswith(f"{FRAGMENT_DIR}/")
+
+
+def is_release_pr(changed_paths: Iterable[str]) -> bool:
+    """True when a PR is a release and nothing else: it changes ``VERSION``
+    and every path it changes passes ``is_release_path``.
+
+    The review gates read this (``scripts/lib/gate_prompt.py``) to give a
+    release PR the task of checking its release notes against the tree.  It is
+    narrower than what rule 3 of the CI check treats as a release (any PR that
+    adds a version heading or deletes a fragment): that check must also catch
+    a release mixed with other work, while a PR that changes one path outside
+    the release set is reviewed as the code it changes.
+    """
+    paths = set(changed_paths)
+    return VERSION_PATH in paths and all(is_release_path(path) for path in paths)
 
 
 # ---------------------------------------------------------------------------

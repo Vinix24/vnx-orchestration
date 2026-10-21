@@ -62,7 +62,7 @@ import changelog_fragments as cf
 from project_root import resolve_project_root
 
 LEGACY_LIST_PATH = cf.LEGACY_LIST_PATH
-VERSION_PATH = "VERSION"
+VERSION_PATH = cf.VERSION_PATH
 FRAGMENT_HINT = (
     "add the entry as changelog.d/<dispatch-id>.md instead "
     "(changelog.d/<branch-slug>.md for a PR without a dispatch); "
