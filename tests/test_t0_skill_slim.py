@@ -64,7 +64,7 @@ def test_skill_has_no_provider_routing_table():
 def test_dispatch_rules_carries_the_routing():
     """Sanity: the ruleset actually contains the routing the skill no longer inlines."""
     rules = _RULES.read_text(encoding="utf-8")
-    for token in ("provider_dispatch.py", "litellm:zai", "claude-tmux"):
+    for token in ("provider_dispatch.py", "litellm:zai", "claude_headless"):
         assert token in rules, f"DISPATCH_RULES.md is missing expected routing content: {token!r}"
 
 
