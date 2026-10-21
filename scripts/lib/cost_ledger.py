@@ -56,8 +56,17 @@ that only carries the ``record_id`` keeps the file (``readback_mismatch``). A
 second execution under one ``run_id`` is booked under the next free attempt
 with ``renumbered_from`` and a receipt, and a later correction of it follows
 it there, also from the writer, which leaves such a correction to the replay;
-a spool file that cannot be read as one run's goes to
-``provider_costs.spool/quarantine/``, its receipt booked before the move.
+the renumbered line names the spooled record in ``renumbered_from_record_id``.
+A spool file that cannot be read as one run's goes to
+``provider_costs.spool/quarantine/``, its receipt booked before the move, and
+so does one the plan refuses.
+
+The dispatcher prelude runs the replay every minute (K2a-3c), and after each
+replay :func:`report_spool_health` writes the ``cost-ledger`` beacon: degraded
+while the spool holds anything, ok once it holds nothing, and an ok one again
+once it is a day old. :func:`ledger_files`
+names the cost ledger's own files in a store, read-only, for ``vnx doctor``
+and the footprint probe.
 
 Boundary first: only a holder of the lock file in exclusive mode ends a last
 line without ``\\n`` with ``\\n`` and fsyncs, so a new line always starts on its
@@ -90,7 +99,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Set, Tuple
 
 import provider_costs
-from atomic_io import atomic_write_text
+from atomic_io import TEMP_PREFIX, TEMP_SUFFIX, atomic_write_text
 from vnx_paths import refuse_real_central_store_write_under_test_runner
 
 logger = logging.getLogger(__name__)
@@ -102,7 +111,9 @@ KINDS = frozenset({"charge", "correction"})
 BILLINGS = frozenset({"metered", "subscription"})
 SPOOL_DIR_NAME = "provider_costs.spool"
 QUARANTINE_DIR_NAME = "quarantine"
-# The store's receipt ledger, ``<data_dir>/state/<RECEIPTS_NAME>``: where the replay books what it changed.
+# The field of a renumbered line that holds the record_id the record had in the spool (ADR-043 §6, OI-2250).
+RENUMBERED_RECORD_ID = "renumbered_from_record_id"
+# The store's receipt ledger, ``<state dir>/<RECEIPTS_NAME>`` (:func:`_receipts_file`): where the replay books what it changed.
 RECEIPTS_NAME = "t0_receipts.ndjson"
 # The bounds of one replay call, each overridable per call: (environment variable, default).
 REPLAY_BATCH = ("VNX_COST_LEDGER_REPLAY_BATCH", 50)
@@ -262,13 +273,18 @@ def run_id_for(project_id: str, producer: str, ref: str, attempt: int) -> str:
 def _renumbered_from_is_valid(record: Mapping[str, Any]) -> bool:
     """True without ``renumbered_from``, or when it names another attempt of the same ``(project_id, producer, ref)``.
 
-    The field is optional and only the replay sets it (ADR-043 §6): the
-    ``run_id`` a second execution had in the spool before it was booked under
-    the next free attempt. A line whose ``renumbered_from`` is anything else is
-    no run line.
+    The two fields are optional and only the replay sets them, together
+    (ADR-043 §6): ``renumbered_from`` is the ``run_id`` a spooled record had
+    before it was booked under another attempt, ``renumbered_from_record_id``
+    the ``record_id`` it had there. So a renumbered line names the exact
+    record it came from (OI-2250). A line with one of the two and not the
+    other, or whose ``renumbered_from`` is anything else, is no run line.
     """
     if "renumbered_from" not in record:
-        return True
+        return RENUMBERED_RECORD_ID not in record
+    origin = record.get(RENUMBERED_RECORD_ID)
+    if not isinstance(origin, str) or not origin:
+        return False
     try:
         before, after = split_run_id(record["renumbered_from"]), split_run_id(record.get("run_id"))
     except InvalidRecord:
@@ -616,13 +632,30 @@ def _spool_names(spool_dir: Path) -> List[str]:
 
 
 def _is_run_record(record: object) -> bool:
-    return (
+    """True for a spooled record the replay can book as it stands; any other record makes its file unreadable.
+
+    The identity holds as :func:`build_record` makes it: a ``run_id`` that
+    :func:`split_run_id` accepts, the ``project_id`` of that ``run_id``, a
+    ``record_id``, a ``kind``, a correction's ``supersedes`` as a string and
+    a valid ``renumbered_from``. A record without it could pass into the
+    replay and fail there, after a renumbered line had landed (OI-2250); a
+    file that holds one goes to quarantine instead.
+    """
+    if not (
         isinstance(record, dict)
         and record.get("schema") == RUN_SCHEMA
-        and isinstance(record.get("run_id"), str) and bool(record["run_id"])
         and isinstance(record.get("record_id"), str) and bool(record["record_id"])
+        and isinstance(record.get("kind"), str) and record["kind"] in KINDS
         and _renumbered_from_is_valid(record)
-    )
+    ):
+        return False
+    if record["kind"] == "correction" and not isinstance(record.get("supersedes"), str):
+        return False
+    try:
+        project = split_run_id(record.get("run_id"))[0]
+    except InvalidRecord:
+        return False
+    return record.get("project_id") == project
 
 
 def _read_spool_file(path: Path, run_id: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -773,26 +806,14 @@ def _second_executions(
 def _renumbered_origins(ledger_records: Sequence[Mapping[str, Any]]) -> Dict[str, Mapping[str, Any]]:
     """``{the record_id a renumbered line had in the spool: that line}``, so a spooled record is known to have landed.
 
-    The replay makes a renumbered line from the spooled record by setting the
-    new ``run_id``, adding ``renumbered_from``, pointing a ``supersedes`` at the
-    renumbered line of the record it named, and recomputing ``record_id``; so
-    undoing those steps gives the spooled ``record_id`` back. The lines are
-    walked in ledger order, where a charge lands before its correction.
+    Read from the line, never derived back: every renumbered line carries the
+    spooled ``record_id`` in ``renumbered_from_record_id`` (:func:`_renumber`).
+    Deriving it back cannot work for a correction whose ``supersedes`` named
+    the renumbered line itself: the renumbering keeps that ``supersedes``, so
+    no undoing tells which of the two it named in the spool, and the
+    correction of that correction then lost its way (OI-2250).
     """
-    origins: Dict[str, Mapping[str, Any]] = {}
-    renamed: Dict[str, str] = {}
-    for record in ledger_records:
-        if "renumbered_from" not in record:
-            continue
-        body = {key: value for key, value in record.items() if key not in ("record_id", "renumbered_from")}
-        body["run_id"] = record["renumbered_from"]
-        supersedes = body.get("supersedes")
-        if isinstance(supersedes, str) and supersedes in renamed:
-            body["supersedes"] = renamed[supersedes]
-        origin = _record_id(body)
-        renamed[str(record.get("record_id"))] = origin
-        origins[origin] = record
-    return origins
+    return {record[RENUMBERED_RECORD_ID]: record for record in ledger_records if "renumbered_from" in record}
 
 
 def _lines_by_record_id(ledger_records: Sequence[Mapping[str, Any]]) -> Dict[str, List[Mapping[str, Any]]]:
@@ -821,12 +842,15 @@ def _differing_fields(expected: Mapping[str, Any], lines: Sequence[Mapping[str, 
 
 
 def _renumber(record: Mapping[str, Any], run_id: str, supersedes: Optional[str] = None) -> Dict[str, Any]:
-    """The spooled ``record`` as a line of ``run_id``, with ``renumbered_from`` and a fresh ``record_id``.
+    """The spooled ``record`` as a line of ``run_id``, with where it came from and a fresh ``record_id``.
 
-    ``supersedes``, when given, replaces what the correction names: the
-    renumbered line of the record it named (:func:`_followed_line`).
+    ``renumbered_from`` is the spooled ``run_id``, ``renumbered_from_record_id``
+    the spooled ``record_id``. ``supersedes``, when given, replaces what the
+    correction names: the renumbered line of the record it named
+    (:func:`_followed_line`).
     """
     line = dict(record, run_id=run_id, renumbered_from=record["run_id"])
+    line[RENUMBERED_RECORD_ID] = record["record_id"]
     if supersedes is not None:
         line["supersedes"] = supersedes
     line["record_id"] = _record_id(line)
@@ -838,8 +862,8 @@ def _landed_as(
 ) -> Optional[Tuple[Dict[str, Any], List[Mapping[str, Any]]]]:
     """``(the line the spooled record is in the ledger as, the ledger lines that carry that line's id)``, or ``None``.
 
-    Found by ``record_id``: as itself, or as its renumbered line by undoing the
-    renumbering (:func:`_renumbered_origins`). Found is not landed: whether
+    Found by ``record_id``: as itself, or as the renumbered line that names it
+    in ``renumbered_from_record_id`` (:func:`_renumbered_origins`). Found is not landed: whether
     those lines hold what the record holds is :func:`_differing_fields`. For a
     renumbered record the line is the one the replay makes of it under that
     run id, its ``record_id`` included, so a renumbered line whose own
@@ -1318,18 +1342,23 @@ def _split_torn_tail(text: str) -> Tuple[str, bool]:
     return text[: text.rfind("\n") + 1], True
 
 
-def _read_the_ledger(ledger_path: Path) -> str:
+def _read_the_ledger(ledger_path: Path, deadline: Optional[float] = None) -> str:
     """The ledger text, read under a shared ``flock`` so no append of an old-version writer is read half written.
 
     No ledger file is an empty ledger. Any other error to open or read it is
-    raised: an unreadable ledger is never an empty total.
+    raised: an unreadable ledger is never an empty total. With ``deadline``
+    the ``flock`` is tried until then and :class:`_LockBusy` is raised when an
+    older writer kept it.
     """
     try:
         fh = ledger_path.open("r", encoding="utf-8", errors="replace")
     except FileNotFoundError:
         return ""
     with fh:
-        fcntl.flock(fh, fcntl.LOCK_SH)
+        if deadline is None:
+            fcntl.flock(fh, fcntl.LOCK_SH)
+        elif not _flock_until(fh, deadline, fcntl.LOCK_SH):
+            raise _LockBusy(f"the ledger {ledger_path} stayed flocked by an older writer until the lock wait ran out")
         return fh.read()
 
 
@@ -1389,13 +1418,17 @@ def _create_the_lock_file(lock_path: Path) -> Optional[int]:
 
 
 @contextmanager
-def _shared_lock(ledger_path: Path) -> Iterator[bool]:
+def _shared_lock(ledger_path: Path, deadline: Optional[float] = None) -> Iterator[bool]:
     """Hold the lock file shared and yield ``True``; yield ``False`` when it does not exist and cannot be created.
 
     An existing lock file is opened read-only, so a reader needs no write
     access to the store (OI-2241). Only a missing one is created, as every
     actor would; when that fails too, the read goes on without the lock and
-    the total says so (``unlocked_read``).
+    the total says so (``unlocked_read``). Without ``deadline`` the wait is
+    blocking; with one (a ``time.monotonic()`` value) the lock is tried with
+    ``LOCK_NB`` until then and :class:`_LockBusy` is raised when it stayed
+    taken exclusively, so a reader that must not hang behind a writer (the
+    beacon of the tick) never does.
     """
     lock_path = provider_costs.ledger_lock_path(ledger_path)
     try:
@@ -1406,33 +1439,45 @@ def _shared_lock(ledger_path: Path) -> Iterator[bool]:
         yield False
         return
     try:
-        fcntl.flock(fd, fcntl.LOCK_SH)
+        if deadline is None:
+            fcntl.flock(fd, fcntl.LOCK_SH)
+        elif not _flock_until(fd, deadline, fcntl.LOCK_SH):
+            raise _LockBusy(f"the lock file {lock_path} stayed taken exclusively until the lock wait ran out")
         yield True
     finally:
         os.close(fd)
 
 
-def _ledger_and_spool(ledger_path: Path) -> Tuple[str, List[List[Dict[str, Any]]], bool, int, bool]:
+_LedgerRead = Tuple[str, List[List[Dict[str, Any]]], bool, int, bool]
+
+
+@contextmanager
+def _ledger_and_spool(ledger_path: Path, deadline: Optional[float] = None) -> Iterator[_LedgerRead]:
     """``(ledger text, spooled runs, spool_unreadable, spool_quarantined, unlocked_read)`` at one moment.
 
     One scope, so a total and its backlog agree: the lock file shared, then
     the ledger's own shared ``flock``. Every writer holds the lock file
     exclusively from its decision to its last write, so no line lands in the
     ledger or enters the spool between the two reads (blocker 4 of #2141).
-    Nothing is changed, a torn tail included. No events directory means
-    nothing was ever written: empty, and nothing is created. A spool that
-    cannot be read is reported unreadable, never empty (blocker 6 of #2141,
-    :func:`_count_the_spool`). A lock file that is missing and cannot be
-    created is read past (:func:`_shared_lock`).
+    The lock file stays held until the ``with`` block ends, so a caller that
+    acts on the read (the beacon, :func:`report_spool_health`) acts before any
+    writer changes what it read. Nothing is changed, a torn tail included. No
+    events directory means nothing was ever written: empty, and nothing is
+    created. A spool that cannot be read is reported unreadable, never empty
+    (blocker 6 of #2141, :func:`_count_the_spool`). A lock file that is
+    missing and cannot be created is read past (:func:`_shared_lock`). With
+    ``deadline`` both waits, the lock file and the ledger ``flock``, end there
+    with :class:`_LockBusy`; without it they block, as for the aggregation.
     """
     try:
         os.stat(ledger_path.parent)
     except FileNotFoundError:
-        return "", [], False, 0, False
-    with _shared_lock(ledger_path) as locked:
-        text = _read_the_ledger(ledger_path)
+        yield "", [], False, 0, False
+        return
+    with _shared_lock(ledger_path, deadline) as locked:
+        text = _read_the_ledger(ledger_path, deadline)
         spooled, unreadable, quarantined = _count_the_spool(spool_dir_for(ledger_path))
-    return text, spooled, unreadable, quarantined, not locked
+        yield text, spooled, unreadable, quarantined, not locked
 
 
 def _number(value: object) -> Optional[float]:
@@ -1473,7 +1518,14 @@ def aggregate_runs(
     ``spool_conflicts`` as well; the run's total stays its ledger lines.
     """
     path = Path(ledger_path) if ledger_path is not None else provider_costs._resolve_costs_path()
-    text, spooled, spool_unreadable, quarantined, unlocked = _ledger_and_spool(path)
+    with _ledger_and_spool(path) as read:
+        pass
+    return _totals(read, select)
+
+
+def _totals(read: _LedgerRead, select: Optional[Callable[[Mapping[str, Any]], bool]]) -> LedgerTotals:
+    """The :class:`LedgerTotals` of one read of the ledger and the spool (:func:`_ledger_and_spool`)."""
+    text, spooled, spool_unreadable, quarantined, unlocked = read
     whole, torn = _split_torn_tail(text)
     records, legacy, unreadable = _parse_lines(whole)
     by_id, origins = _lines_by_record_id(records), _renumbered_origins(records)
@@ -1565,9 +1617,11 @@ class _ReplayError(Exception):
 
 
 class _LockBusy(Exception):
-    """A lock under the lock file stayed taken until the bounds ran out: the ledger ``flock`` or the receipt lock.
+    """A bounded lock wait ran out: under the lock file the ledger ``flock`` or the receipt lock, or the beacon's.
 
-    Nothing more is written for the file and it stays; :func:`_replay_under_the_lock` releases the lock file.
+    In the replay nothing more is written for the file and it stays;
+    :func:`_replay_under_the_lock` releases the lock file. The beacon
+    (:func:`report_spool_health`) is then not written this time.
     """
 
 
@@ -1617,11 +1671,12 @@ class _Bounds:
         return None
 
     def ledger_deadline(self, asked: float) -> float:
-        """Until when a lock under the lock file is tried: what is left of the wait begun at ``asked``, and of the budget.
+        """Until when a lock of one file is tried: what is left of the wait begun at ``asked``, and of the budget.
 
-        The ledger ``flock`` and the receipt ledger's append lock both: the
-        replay holds the lock file while it waits on either, so neither wait
-        may outlast its bounds.
+        The lock file, and under it the ledger ``flock`` and the receipt
+        ledger's append lock: no wait may outlast the call's budget (OI-2250),
+        and the two under the lock file share what is left of the first wait,
+        because the replay holds the lock file meanwhile.
         """
         return min(asked + self.wait, self.started + self.budget)
 
@@ -1663,15 +1718,16 @@ def _setting(given: Optional[float], spec: Tuple[str, float], cast: Callable[[st
     return value
 
 
-def _flock_until(target: Any, deadline: float) -> bool:
-    """``flock`` ``target``, a descriptor or a file, exclusively with ``LOCK_NB``, retried until ``deadline``.
+def _flock_until(target: Any, deadline: float, operation: int = fcntl.LOCK_EX) -> bool:
+    """``flock`` ``target``, a descriptor or a file, with ``operation`` and ``LOCK_NB``, retried until ``deadline``.
 
-    ``True`` when held, ``False`` when it stayed taken. One try is always
-    made, also at or past the deadline. Any other ``OSError`` is raised.
+    ``operation`` is ``LOCK_EX`` (the default) or ``LOCK_SH``. ``True`` when
+    held, ``False`` when it stayed taken. One try is always made, also at or
+    past the deadline. Any other ``OSError`` is raised.
     """
     while True:
         try:
-            fcntl.flock(target, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(target, operation | fcntl.LOCK_NB)
             return True
         except BlockingIOError:
             left = deadline - time.monotonic()
@@ -1680,16 +1736,18 @@ def _flock_until(target: Any, deadline: float) -> bool:
             time.sleep(min(_LOCK_POLL_SEC, left))
 
 
-def _lock_within(ledger_path: Path, wait: float) -> Optional[int]:
-    """The lock file held exclusively, as an open descriptor, or ``None`` when it stayed taken for ``wait`` seconds.
+def _lock_within(ledger_path: Path, deadline: float) -> Optional[int]:
+    """The lock file held exclusively, as an open descriptor, or ``None`` when it stayed taken until ``deadline``.
 
-    ``LOCK_NB``, retried until the wait runs out, so a replay never queues
-    behind a writer for longer than that. The caller closes the descriptor,
-    which releases the lock.
+    ``LOCK_NB``, retried until the ``time.monotonic()`` value ``deadline``
+    (:meth:`_Bounds.ledger_deadline`: the lock wait, clamped to what is left
+    of the budget), so a replay never queues behind a writer for longer than
+    either (OI-2250). The caller closes the descriptor, which releases the
+    lock.
     """
     fd = os.open(provider_costs.ledger_lock_path(ledger_path), os.O_RDONLY | os.O_CREAT | os.O_CLOEXEC, 0o644)
     try:
-        held = _flock_until(fd, time.monotonic() + wait)
+        held = _flock_until(fd, deadline)
     except OSError:
         os.close(fd)
         raise
@@ -1722,8 +1780,27 @@ def _open_locked_until(ledger_path: Path, deadline: float):
 
 
 def _receipts_file(ledger_path: Path) -> Path:
-    """``<data_dir>/state/t0_receipts.ndjson`` of the store the ledger is in."""
-    return Path(ledger_path).parent.parent / "state" / RECEIPTS_NAME
+    """The receipt ledger of the store the ledger is in: ``t0_receipts.ndjson`` in that store's state dir.
+
+    For the ledger of the project's own store (the data dir
+    ``vnx_paths.resolve_paths`` resolves) the state dir is the resolved
+    ``VNX_STATE_DIR``, so the replay's receipts land beside every other
+    ``state_mutation`` receipt of the project, also when ``VNX_STATE_DIR``
+    points away from ``<data_dir>/state`` (OI-2250). A ledger of another
+    store has no state dir the resolver knows: there it is ``<data_dir>/state``.
+    A store that cannot be resolved raises :class:`_ReplayError`: a receipt is
+    never booked in a ledger that is only a guess.
+    """
+    from vnx_paths import resolve_paths
+
+    data_dir = Path(ledger_path).parent.parent
+    try:
+        paths = resolve_paths()
+    except (OSError, ValueError) as exc:
+        raise _ReplayError(f"the project's state dir cannot be resolved ({exc}): no receipt was booked") from exc
+    if os.path.realpath(paths["VNX_DATA_DIR"]) == os.path.realpath(data_dir):
+        return Path(paths["VNX_STATE_DIR"]) / RECEIPTS_NAME
+    return data_dir / "state" / RECEIPTS_NAME
 
 
 def _emit_receipt(ledger_path: Path, event_type: str, deadline: float, **fields: Any) -> None:
@@ -2027,7 +2104,9 @@ def _replay_file(ledger_path: Path, path: Path, deadline: float, result: ReplayR
     a receipt whose lock stays taken until then raises :class:`_LockBusy`, and
     the file stays. The file is deleted only after the ledger is fsynced,
     every record of it reads back with its content and every renumbered line
-    has its receipt.
+    has its receipt. A file the plan refuses (a :class:`CostLedgerRefusal`,
+    raised before anything of it is written) goes to quarantine, so no spool
+    content ends the replay in a traceback (OI-2250).
     """
     try:
         spooled = _read_spool_file(path)
@@ -2040,12 +2119,19 @@ def _replay_file(ledger_path: Path, path: Path, deadline: float, result: ReplayR
     if fh is None:
         return (f"the ledger {ledger_path} stayed flocked by a process that does not take the lock file (a writer "
                 "of an older fabric version) until the lock wait or the budget ran out")
+    refused: Optional[CostLedgerRefusal] = None
     try:
         plan = _write_the_plan(fh, ledger_path, spooled, result)
+    except CostLedgerRefusal as exc:
+        refused = exc
     finally:
         closed = _close_the_ledger(fh)
     if closed is not None:
         raise closed
+    if refused is not None:
+        _quarantine(ledger_path, path, f"a record of the file is no run record the replay can book ({refused})",
+                    result, deadline)
+        return None
     _book_the_renumbering(ledger_path, plan.renumbered, deadline)
     os.unlink(path)
     _fsync_dir(path.parent)
@@ -2056,19 +2142,19 @@ def _replay_file(ledger_path: Path, path: Path, deadline: float, result: ReplayR
 def _replay_under_the_lock(ledger_path: Path, path: Path, bounds: _Bounds, result: ReplayResult) -> Optional[str]:
     """:func:`_replay_file` with the lock file held exclusively and released after it.
 
-    ``None`` when done, else why a lock was busy: the lock file was not
-    obtained within the wait, or under it the ledger ``flock`` or the receipt
-    ledger's append lock not within what was left of the wait and the budget
-    (:meth:`_Bounds.ledger_deadline`). Nothing more is written for the file
-    then, it stays, and the lock file is released before this returns, so a
-    current writer can go on.
+    ``None`` when done, else why a lock was busy: the lock file, or under it
+    the ledger ``flock`` or the receipt ledger's append lock, was not
+    obtained within what was left of the wait and the budget
+    (:meth:`_Bounds.ledger_deadline`, one deadline for all three, OI-2250).
+    Nothing more is written for the file then, it stays, and the lock file is
+    released before this returns, so a current writer can go on.
     """
-    asked = time.monotonic()
-    fd = _lock_within(ledger_path, bounds.wait)
+    deadline = bounds.ledger_deadline(time.monotonic())
+    fd = _lock_within(ledger_path, deadline)
     if fd is None:
-        return f"the lock file was taken for {bounds.wait} seconds"
+        return "the lock file stayed taken until the lock wait or the budget ran out"
     try:
-        return _replay_file(ledger_path, path, bounds.ledger_deadline(asked), result)
+        return _replay_file(ledger_path, path, deadline, result)
     except _LockBusy as busy:
         return str(busy)
     finally:
@@ -2168,12 +2254,246 @@ def replay_spool(
     return result
 
 
+# ---------------------------------------------------------------------------
+# The beacon and the cost ledger's own files (K2a-3c)
+# ---------------------------------------------------------------------------
+
+BEACON_COMPONENT = "cost-ledger"
+# An ``ok`` beacon older than this is written again on an empty spool. The beacon is event-driven, and the reader
+# calls an event-driven beacon older than 7 days ``unknown`` (``health_beacon._EVENT_DRIVEN_MAX_AGE_SECONDS``): a
+# running tick keeps it fresh, so only a tick that stopped running ages it that far.
+BEACON_REFRESH_SECONDS = 24 * 3600
+
+
+def _beacon_path(ledger_path: Path) -> Path:
+    """``<data_dir>/health/cost-ledger.json`` of the store the ledger is in."""
+    return Path(ledger_path).parent.parent / "health" / f"{BEACON_COMPONENT}.json"
+
+
+def _spool_holds_nothing(spool_dir: Path) -> bool:
+    """True when the spool lists no spool file and its quarantine nothing; a spool that cannot be listed holds something."""
+    try:
+        if _spool_names(spool_dir):
+            return False
+    except OSError:
+        return False
+    quarantined, unlistable = _count_the_quarantine(spool_dir)
+    return not quarantined and not unlistable
+
+
+def _the_beacon_is_fresh_and_ok_or_absent(ledger_path: Path) -> bool:
+    """True when there is no beacon, or one that says ``ok`` and was written at most ``BEACON_REFRESH_SECONDS`` ago.
+
+    A beacon that cannot be read, says something else, carries no
+    ``last_run_ts`` (the reader calls that one ``corrupt``) or is an ``ok``
+    one past the refresh age is to be written again.
+    """
+    try:
+        beacon = json.loads(_beacon_path(ledger_path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return True
+    except (OSError, ValueError):
+        return False
+    if not isinstance(beacon, dict) or beacon.get("status") != "ok":
+        return False
+    written = _number(beacon.get("last_run_ts"))
+    return written is not None and time.time() - written <= BEACON_REFRESH_SECONDS
+
+
+def _spool_health(totals: LedgerTotals, spool_files: int) -> Dict[str, Any]:
+    """The beacon's details: ``state`` is ``degraded`` while the spool holds a file, an unreadable one or quarantine."""
+    degraded = bool(spool_files or totals.spool_unreadable or totals.spool_quarantined)
+    details: Dict[str, Any] = {
+        "state": "degraded" if degraded else "ok", "spool_files": spool_files,
+        "spool_pending": totals.spool_pending, "spool_unreadable": totals.spool_unreadable,
+        "spool_quarantined": totals.spool_quarantined, "spool_conflicts": totals.spool_conflicts,
+    }
+    if degraded:
+        unreadable = ", and it cannot all be read" if totals.spool_unreadable else ""
+        details["reason"] = (
+            f"the cost ledger's spool holds {_counted(spool_files, 'file', 'files')} "
+            f"({_counted(totals.spool_pending, 'run', 'runs')} waiting, "
+            f"{totals.spool_conflicts} in conflict) and {totals.spool_quarantined} in quarantine{unreadable}: "
+            "the tick replays what waits, a quarantined file needs a person"
+        )
+    return details
+
+
+def report_spool_health(ledger_path: Optional[Path] = None) -> Optional[str]:
+    """Write the ``cost-ledger`` beacon from the spool as it is now (ADR-043 §6); the state written, or ``None``.
+
+    ``degraded`` while the spool holds a file, a file that cannot be read or
+    a file in quarantine; ``ok`` once it holds none. In the beacon file the
+    state is the probe framework's (``PROBE_TO_BEACON``: ``degraded`` is
+    written as ``stale``), the details carry ``state`` and the counts of
+    :class:`LedgerTotals`. The beacon is event-driven
+    (``expected_interval_seconds=None``): with an empty spool and no beacon,
+    or one that says ``ok`` and is at most ``BEACON_REFRESH_SECONDS`` (24
+    hours) old, nothing is written and no lock is taken. An ``ok`` beacon
+    older than that is written again, so a tick that keeps running keeps it
+    fresh and the reader's 7-day backstop (``unknown``) only catches a tick
+    that stopped. Otherwise the spool is counted and the beacon written in
+    one scope under the lock file held shared (:func:`_ledger_and_spool`), so
+    it describes the spool as no writer has changed it since. That lock, the
+    ledger ``flock`` and the beacon's own lock are tried until one deadline,
+    ``VNX_COST_LEDGER_LOCK_WAIT_SEC`` (5) after the call began, as the
+    replay's: no wait under the shared lock outlasts it, so a cost writer is
+    never kept out longer. When one stays taken, the beacon is not written
+    this time, a warning says so and ``None`` is returned, so neither the tick
+    nor ``vnx costs replay`` by hand hangs on it. A beacon that cannot be
+    written for another reason raises its ``OSError``; the spool, not the
+    beacon, is what keeps a record.
+    """
+    from effectiveness_probe import PROBE_TO_BEACON
+    from health_beacon import BeaconLockTimeout, HealthBeacon
+
+    path = Path(ledger_path) if ledger_path is not None else provider_costs._resolve_costs_path()
+    if _spool_holds_nothing(spool_dir_for(path)) and _the_beacon_is_fresh_and_ok_or_absent(path):
+        return None
+    deadline = time.monotonic() + _setting(None, LOCK_WAIT_SEC, float)
+    try:
+        with _ledger_and_spool(path, deadline) as read:
+            details = _spool_health(_totals(read, None), len(read[1]))
+            beacon = HealthBeacon(path.parent.parent, BEACON_COMPONENT, expected_interval_seconds=None)
+            beacon.heartbeat_strict(status=PROBE_TO_BEACON[details["state"]], details=details, lock_deadline=deadline)
+    except (_LockBusy, BeaconLockTimeout) as busy:
+        logger.warning("cost_ledger: the %s beacon was not written this time: %s", BEACON_COMPONENT, busy)
+        return None
+    return details["state"]
+
+
+@dataclass(frozen=True)
+class LedgerFiles:
+    """The cost ledger's own files in one store: what ``vnx doctor`` and the footprint probe know (ADR-043 §6).
+
+    In ``events/``: the ledger (``provider_costs.ndjson``), its lock file
+    (``provider_costs.lock``, created by the first actor and never removed)
+    and the spool (``provider_costs.spool/``). In the spool: spool files
+    (``*.json``), the temporary file an interrupted atomic spool write left
+    (``tmp*.tmp``) and ``quarantine/``. ``strays`` names every other entry of
+    the spool: no replay reads it and no total counts it. ``unlistable``
+    names a directory that could not be listed. ``bytes`` is the size of all
+    of them together.
+    """
+
+    ledger: bool
+    lock_file: bool
+    spool_files: int
+    spool_temp_files: int
+    quarantined: int
+    bytes: int
+    strays: Tuple[str, ...]
+    unlistable: Tuple[str, ...]
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {**asdict(self), "strays": list(self.strays), "unlistable": list(self.unlistable)}
+
+    def findings(self) -> List[str]:
+        """What needs a person, empty when nothing does: the one reading both ``vnx doctor`` entrances show."""
+        findings: List[str] = []
+        if self.spool_files:
+            findings.append(f"{_counted(self.spool_files, 'spool file waits', 'spool files wait')} for the replay")
+        if self.quarantined:
+            findings.append(f"{_counted(self.quarantined, 'spool file is', 'spool files are')} in quarantine "
+                            "and in no total")
+        if self.strays:
+            findings.append(f"{SPOOL_DIR_NAME}/ holds entries that are none of its own: {', '.join(self.strays)}")
+        if self.unlistable:
+            findings.append(f"cannot be listed: {', '.join(self.unlistable)}")
+        return findings
+
+    def summary(self) -> str:
+        """The known files in one line: ledger, lock file, spool, quarantine, interrupted writes, bytes."""
+        present = [name for name, there in (("ledger", self.ledger), ("lock file", self.lock_file)) if there]
+        known = ", ".join(present) if present else "no ledger yet"
+        temp = (f", {_counted(self.spool_temp_files, 'interrupted spool write', 'interrupted spool writes')}"
+                if self.spool_temp_files else "")
+        return (f"{known}; spool {_counted(self.spool_files, 'file', 'files')}, quarantine {self.quarantined}{temp}; "
+                f"{_counted(self.bytes, 'byte', 'bytes')}")
+
+
+def _file_size(path: Path) -> Optional[int]:
+    """The size of a file, or ``None`` when it is not there; a stat that fails otherwise counts as 0 bytes."""
+    try:
+        return os.stat(path).st_size
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError:
+        return 0
+
+
+def _entry_bytes(entry: "os.DirEntry[str]") -> int:
+    try:
+        return entry.stat(follow_symlinks=False).st_size
+    except OSError:
+        return 0
+
+
+def _quarantine_files(quarantine: Path, unlistable: List[str]) -> Tuple[int, int]:
+    """``(files, bytes)`` in quarantine; the dot-files are no quarantined spool file, as in the aggregation."""
+    try:
+        with os.scandir(quarantine) as entries:
+            kept = [entry for entry in entries if not entry.name.startswith(".")]
+    except OSError:
+        unlistable.append(str(quarantine))
+        return 0, 0
+    return len(kept), sum(_entry_bytes(entry) for entry in kept)
+
+
+def _sort_the_spool(spool_dir: Path, unlistable: List[str]) -> Tuple[Dict[str, int], List[str]]:
+    """``({kind: count, "bytes": n}, strays)`` for the entries of the spool directory."""
+    counts = dict.fromkeys(("spool_files", "spool_temp_files", "quarantined", "bytes"), 0)
+    strays: List[str] = []
+    try:
+        with os.scandir(spool_dir) as listed:
+            entries = list(listed)
+    except FileNotFoundError:
+        return counts, strays
+    except OSError:
+        unlistable.append(str(spool_dir))
+        return counts, strays
+    for entry in sorted(entries, key=lambda item: item.name):
+        name, is_file = entry.name, entry.is_file(follow_symlinks=False)
+        if name == QUARANTINE_DIR_NAME and entry.is_dir(follow_symlinks=False):
+            files, size = _quarantine_files(Path(entry.path), unlistable)
+            counts["quarantined"] += files
+        elif is_file and name.endswith(".json") and not name.startswith("."):
+            counts["spool_files"], size = counts["spool_files"] + 1, _entry_bytes(entry)
+        elif is_file and name.startswith(TEMP_PREFIX) and name.endswith(TEMP_SUFFIX):
+            counts["spool_temp_files"], size = counts["spool_temp_files"] + 1, _entry_bytes(entry)
+        else:
+            strays.append(name)
+            size = 0
+        counts["bytes"] += size
+    return counts, strays
+
+
+def ledger_files(ledger_path: Optional[Path] = None) -> LedgerFiles:
+    """The cost ledger's own files in the store of ``ledger_path`` (:class:`LedgerFiles`).
+
+    Read-only and without a lock: nothing is created, the lock file
+    included, so ``vnx doctor`` and the footprint probe can look at a store
+    they may not write.
+    """
+    path = Path(ledger_path) if ledger_path is not None else provider_costs._resolve_costs_path()
+    unlistable: List[str] = []
+    ledger_size = _file_size(path)
+    lock_size = _file_size(provider_costs.ledger_lock_path(path))
+    counts, strays = _sort_the_spool(spool_dir_for(path), unlistable)
+    return LedgerFiles(
+        ledger=ledger_size is not None, lock_file=lock_size is not None,
+        spool_files=counts["spool_files"], spool_temp_files=counts["spool_temp_files"],
+        quarantined=counts["quarantined"], bytes=(ledger_size or 0) + (lock_size or 0) + counts["bytes"],
+        strays=tuple(strays), unlistable=tuple(unlistable),
+    )
+
+
 __all__ = [
     "RUN_SCHEMA", "TOKEN_FIELDS", "ROLES", "KINDS", "BILLINGS", "SPOOL_DIR_NAME", "QUARANTINE_DIR_NAME",
-    "RENUMBERED_EVENT", "QUARANTINED_EVENT",
+    "RENUMBERED_EVENT", "QUARANTINED_EVENT", "RENUMBERED_RECORD_ID", "BEACON_COMPONENT", "BEACON_REFRESH_SECONDS",
     "CostLedgerRefusal", "CostWithoutSource", "UnavailableWithAmount", "CorrectionWithoutSupersedes",
     "IncompleteUsageMarkedComplete", "RunIdProjectMismatch", "UnknownModel", "InvalidRecord",
-    "CostLedgerWriteError", "RunCost", "WrittenRecord", "LedgerTotals", "ReplayResult",
+    "CostLedgerWriteError", "RunCost", "WrittenRecord", "LedgerTotals", "ReplayResult", "LedgerFiles",
     "split_run_id", "run_id_for", "build_record", "record_run", "record_next_attempt", "aggregate_runs",
-    "replay_spool", "spool_dir_for", "spool_file_for",
+    "replay_spool", "spool_dir_for", "spool_file_for", "report_spool_health", "ledger_files",
 ]

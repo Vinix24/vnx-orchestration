@@ -10,7 +10,18 @@ from ``VNX_COST_LEDGER_REPLAY_BATCH``, ``VNX_COST_LEDGER_REPLAY_BUDGET_SEC``
 and ``VNX_COST_LEDGER_LOCK_WAIT_SEC``.
 
 The fabric's ``bin/vnx costs replay`` and the pip CLI's ``vnx costs replay``
-both run this script.
+both run this script, and so does the dispatcher prelude's tick (K2a-3c,
+``_maybe_cost_ledger_replay``), with a hard timeout of 20 seconds.
+
+After the replay the ``cost-ledger`` beacon (``<data_dir>/health/cost-ledger.json``)
+is written from the spool as the replay left it: ``degraded`` while the spool
+holds a file, an unreadable file or a file in quarantine, ``ok`` once it holds
+none (``cost_ledger.report_spool_health``). With an empty spool and a beacon
+that says ``ok`` and is at most a day old (``BEACON_REFRESH_SECONDS``), or
+none, this script writes nothing at all. A beacon that cannot be written, or
+whose lock stays taken until ``VNX_COST_LEDGER_LOCK_WAIT_SEC`` ran out, is
+logged and does not change the exit code: the spool, not the beacon, keeps
+the record.
 
 Exit codes:
   0  done, nothing to do, or a bound left files for the next call
@@ -77,8 +88,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"vnx costs replay: the store cannot be resolved: {exc}", file=sys.stderr)
         return EXIT_FAILED
     result = cost_ledger.replay_spool(ledger)
+    _report_health(cost_ledger, ledger)
     print(json.dumps(result.as_dict()) if args.json else _summary(ledger, result))
     return result.exit_code
+
+
+def _report_health(cost_ledger, ledger: Path) -> None:
+    """The ``cost-ledger`` beacon from the spool as the replay left it; a failure to write it is logged."""
+    try:
+        cost_ledger.report_spool_health(ledger)
+    except OSError as exc:
+        logging.getLogger("cost_ledger_replay").warning(
+            "the %s beacon could not be written: %s", cost_ledger.BEACON_COMPONENT, exc)
 
 
 if __name__ == "__main__":

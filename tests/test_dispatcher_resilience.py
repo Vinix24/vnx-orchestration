@@ -67,6 +67,7 @@ def _run_scan(scenario_setup: str) -> subprocess.CompletedProcess:
         _maybe_oi_bridge_tick() { :; }
         _maybe_objective_reconcile() { :; }
         _maybe_learning_cycle() { :; }
+        _maybe_cost_ledger_replay() { :; }
         extract_agent_role() { echo "backend-developer"; }
 
         PENDING_DIR="$1"

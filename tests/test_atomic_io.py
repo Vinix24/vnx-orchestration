@@ -162,3 +162,22 @@ def test_audit_event_reserved_fields_not_overridable(tmp_path: Path) -> None:
     assert record["event_type"] == "realtype", "event_type must be authoritative, not payload value"
     assert record["pid"] == real_pid, "pid must be authoritative, not payload value"
     assert record["data"] == "ok", "non-reserved payload fields must survive"
+
+
+def test_the_scratch_name_constants_match_a_real_atomic_write_temp_name(tmp_path):
+    import atomic_io
+
+    seen: list[str] = []
+    real_replace = os.replace
+
+    def spy(src, dst):
+        seen.append(Path(src).name)
+        real_replace(src, dst)
+
+    with mock.patch("atomic_io.os.replace", side_effect=spy):
+        atomic_write_text(tmp_path / "target.json", "{}")
+
+    assert len(seen) == 1
+    assert seen[0].startswith(atomic_io.TEMP_PREFIX)
+    assert seen[0].endswith(atomic_io.TEMP_SUFFIX)
+    assert seen[0] not in {"target.json"}

@@ -18,6 +18,9 @@
 #   VNX_LEARNING_ENABLED           — "1" enables the daily learning cycle tick; default 0 (off)
 #   VNX_LEARNING_CYCLE_INTERVAL    — seconds between learning cycle runs; default 86400 (daily)
 #   VNX_OI_BRIDGE_INTERVAL         — seconds between OI→track bridge runs; default 900 (D1)
+#   VNX_COST_LEDGER_REPLAY_INTERVAL_SEC — seconds between cost-ledger spool replays; default 60.
+#                                    Not gated on VNX_SUPERVISOR_MODE (ADR-043 §6).
+#   VNX_COST_LEDGER_TICK_TIMEOUT_SEC — the replay's hard timeout; default and maximum 20
 
 # _maybe_runtime_supervise — throttled RuntimeSupervisor.supervise_all() tick (SUP-PR3).
 # Invokes scripts/lib/runtime_supervise.py at most once per
@@ -220,4 +223,98 @@ _unified_supervisor_lease_sweep_tick() {
             >> "$VNX_LOGS_DIR/lease_sweep.log" 2>&1 || true
         printf '%s' "$now" > "$state_file.tmp.$$" && mv -f "$state_file.tmp.$$" "$state_file"
     fi
+}
+
+# The hard timeout of the cost-ledger replay tick, in whole seconds: 20, or a
+# lower VNX_COST_LEDGER_TICK_TIMEOUT_SEC (1-20). A higher or malformed value
+# gives 20: the dispatcher never waits longer than that on the spool.
+_cost_ledger_tick_timeout() {
+    local limit="${VNX_COST_LEDGER_TICK_TIMEOUT_SEC:-20}"
+    if [[ ! "$limit" =~ ^[0-9]+$ ]] || (( 10#$limit < 1 || 10#$limit > 20 )); then
+        limit=20
+    fi
+    printf '%s' "$(( 10#$limit ))"
+}
+
+# _run_killed_after <seconds> <out_file> <command...> — run the command with
+# stdout and stderr appended to out_file, and SIGKILL it once <seconds> pass.
+# Returns its exit status, 137 when it was killed. A watchdog sleeps beside
+# it and is stopped (its sleep included) as soon as the command ends; bash
+# 3.2 (macOS /bin/bash) has no `wait -n`, so the watchdog does the killing.
+_run_killed_after() {
+    local limit="$1" out="$2"
+    shift 2
+    "$@" >> "$out" 2>&1 < /dev/null &
+    local pid=$!
+    (
+        local timer=""
+        trap '[[ -n "$timer" ]] && kill "$timer" 2>/dev/null; exit 0' TERM
+        sleep "$limit" &
+        timer=$!
+        wait "$timer" || { kill "$timer" 2>/dev/null; exit 0; }
+        kill -KILL "$pid" 2>/dev/null
+    ) &
+    local watchdog=$!
+    local rc=0
+    # 2>/dev/null: no "Killed: 9" job notice from bash in the dispatcher's output; the caller logs the kill.
+    wait "$pid" 2>/dev/null || rc=$?
+    kill -TERM "$watchdog" 2>/dev/null || true
+    wait "$watchdog" 2>/dev/null || true
+    return "$rc"
+}
+
+# _maybe_cost_ledger_replay — the cost ledger's spool replay tick (ADR-043 §6, K2a-3c).
+# Runs scripts/cost_ledger_replay.py at most once per
+# VNX_COST_LEDGER_REPLAY_INTERVAL_SEC seconds (default 60), in EVERY supervisor
+# mode: the spool is the ledger's recovery path, not supervision, so this tick
+# does not look at VNX_SUPERVISOR_MODE. The replay is a subprocess with a hard
+# timeout of 20 seconds (_cost_ledger_tick_timeout) and is killed after it; it
+# bounds itself to 10 seconds (VNX_COST_LEDGER_REPLAY_BUDGET_SEC), so the kill
+# is the backstop for a replay that hangs. After the replay the script writes
+# the cost-ledger beacon. With an empty spool it writes nothing, except an ok
+# beacon that is a day old: that one is written again, so it never ages out.
+#
+# Every failure is logged (a non-zero exit, a kill, a log or threshold file
+# that cannot be written) and the tick ALWAYS returns 0: a failing or hanging
+# replay never stops the dispatcher and never holds it longer than the
+# timeout. The threshold is kept in $STATE_DIR/.last_cost_ledger_replay_ts and,
+# for this dispatcher process, in _COST_LEDGER_REPLAY_LAST, so a threshold file
+# that cannot be written still throttles the tick.
+_COST_LEDGER_REPLAY_LAST=0
+_maybe_cost_ledger_replay() {
+    local interval="${VNX_COST_LEDGER_REPLAY_INTERVAL_SEC:-60}"
+    [[ "$interval" =~ ^[0-9]+$ ]] || interval=60
+    local state_file="$STATE_DIR/.last_cost_ledger_replay_ts"
+    local now last
+    now=$(date +%s)
+    last=0
+    if [[ -f "$state_file" ]]; then
+        last=$(cat "$state_file" 2>/dev/null || echo 0)
+        [[ "$last" =~ ^[0-9]+$ ]] || last=0
+    fi
+    (( _COST_LEDGER_REPLAY_LAST > last )) && last=$_COST_LEDGER_REPLAY_LAST
+    if (( now - last < 10#$interval )); then
+        return 0
+    fi
+    _COST_LEDGER_REPLAY_LAST=$now
+
+    local log_file="$VNX_LOGS_DIR/cost_ledger_replay.log"
+    if ! { mkdir -p "$VNX_LOGS_DIR" && : >> "$log_file"; } 2>/dev/null; then
+        log "V-COST-LEDGER WARN: the replay log $log_file cannot be written; the replay runs without it"
+        log_file=/dev/null
+    fi
+    local limit rc=0
+    limit=$(_cost_ledger_tick_timeout)
+    _run_killed_after "$limit" "$log_file" python3 "$VNX_DIR/scripts/cost_ledger_replay.py" || rc=$?
+    if [[ "$rc" == "137" ]]; then
+        log "V-COST-LEDGER WARN: the spool replay was killed after its hard timeout of ${limit}s; see $log_file"
+    elif [[ "$rc" != "0" ]]; then
+        log "V-COST-LEDGER WARN: the spool replay exited $rc (1: unreadable spool, write failure or mismatch; 3: lock busy); see $log_file"
+    fi
+
+    if ! { printf '%s' "$now" > "$state_file.tmp.$$" && mv -f "$state_file.tmp.$$" "$state_file"; } 2>/dev/null; then
+        rm -f "$state_file.tmp.$$" 2>/dev/null || true
+        log "V-COST-LEDGER WARN: the threshold file $state_file cannot be written; this dispatcher throttles the tick in memory"
+    fi
+    return 0
 }

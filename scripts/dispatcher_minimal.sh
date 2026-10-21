@@ -605,6 +605,7 @@ process_dispatches() {
     _maybe_oi_bridge_tick
     _maybe_objective_reconcile
     _maybe_learning_cycle
+    _maybe_cost_ledger_replay
 
     for dispatch in "$PENDING_DIR"/*.md; do
         [ -f "$dispatch" ] || continue

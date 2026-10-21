@@ -142,6 +142,55 @@ class TestABoundedAppend:
 
         assert not (receipts.parent / "pending_mirrors.ndjson").exists()
 
+    def test_contention_right_after_the_append_never_drops_the_mirror_debt(self, receipts, tmp_path, monkeypatch):
+        """OI-2250 point 2 (codex, payload.py:396): a second process takes the append lock right after the append.
+
+        Before the fix the debt was queued under a second take of the lock, so
+        a holder in between made that take time out: the receipt was durable
+        and its mirror debt was gone. The holder is a real process on the real
+        lock; the test only starts it at the moment the queueing resolves the
+        central target, and waits for it to hold the lock where it can.
+        """
+        import append_receipt_internals.payload as payload_mod
+
+        central = tmp_path / "central"
+        monkeypatch.setenv("VNX_STATE_DIR", str(central / "state"))
+        central_receipts = central / "state" / "t0_receipts.ndjson"
+        resolve = payload_mod.resolve_central_data_dir
+        holders: list = []
+
+        def contend_once(project_id):
+            if not holders:
+                marker = tmp_path / "contender-holds"
+                holders.append(subprocess.Popen(
+                    [sys.executable, "-c", _HOLDER, str(receipts.parent / "append_receipt.lock"), "1.5",
+                     str(marker)], stderr=subprocess.PIPE, text=True))
+                deadline = time.monotonic() + 2.0
+                while not marker.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+            return resolve(project_id)
+
+        monkeypatch.setattr(payload_mod, "resolve_central_data_dir", contend_once)
+        try:
+            bounded = _emit(receipts, "f" * 32, lock_timeout=BOUND_SECONDS)
+
+            assert bounded["append_status"] == "appended"
+            assert holders, "a second process contended for the append lock"
+            assert [entry["receipt"]["section"] for entry in _pending(receipts)] == ["f" * 32], (
+                "the mirror debt is recorded"
+            )
+            monkeypatch.setattr(payload_mod, "resolve_central_data_dir", resolve)
+            _emit(receipts, "g" * 32)
+        finally:
+            for holder in holders:
+                holder.wait(timeout=30)
+
+        assert [event["section"] for event in _events(receipts)] == ["f" * 32, "g" * 32]
+        assert [event["section"] for event in _events(central_receipts)] == ["f" * 32, "g" * 32], (
+            "the next unbounded append mirrors both"
+        )
+        assert _pending(receipts) == []
+
     def test_without_lock_timeout_the_wait_is_unbounded_as_before(self, receipts, hold_the_append_lock):
         holder = hold_the_append_lock(1.0)
 

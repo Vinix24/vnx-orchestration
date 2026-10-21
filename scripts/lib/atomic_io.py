@@ -35,6 +35,10 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# The name of the scratch file ``atomic_write_text`` leaves behind when a writer dies mid-write:
+# ``<TEMP_PREFIX><random><TEMP_SUFFIX>``. Public so a scanner that recognises these files imports the name.
+TEMP_PREFIX, TEMP_SUFFIX = tempfile.gettempprefix(), ".tmp"
+
 _EVENT_TYPE_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$")
 
 
@@ -85,7 +89,7 @@ def atomic_write_text(path: Path, content: str, encoding: str = "utf-8") -> None
     if path.exists():
         existing_mode = stat.S_IMODE(path.stat().st_mode)
 
-    fd, tmp_path_str = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    fd, tmp_path_str = tempfile.mkstemp(dir=path.parent, prefix=TEMP_PREFIX, suffix=TEMP_SUFFIX)
     tmp_path = Path(tmp_path_str)
     try:
         with os.fdopen(fd, "w", encoding=encoding) as fh:

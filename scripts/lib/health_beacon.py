@@ -45,7 +45,10 @@ it. The constructor name preserves the dispatch contract.
 Atomic write: payload is serialized to a sibling tmp file under an
 ``fcntl`` lock, then ``os.replace``'d into place. The lock prevents two
 concurrent writers from interleaving JSON bytes; the rename gives
-readers an all-or-nothing view.
+readers an all-or-nothing view. A writer that holds another lock meanwhile
+passes ``lock_deadline`` to :meth:`HealthBeacon.heartbeat_strict`, so it
+never waits on the beacon's lock past its own bound
+(:class:`BeaconLockTimeout`).
 """
 from __future__ import annotations
 
@@ -73,6 +76,39 @@ _EVENT_DRIVEN_MAX_AGE_SECONDS = 7 * 86400
 # honors directly. Anything else (None, "degraded", "warn", ...) falls to
 # the unfavorable side ("fail") rather than defaulting to "ok".
 _KNOWN_SELF_REPORTED_STATUSES = {"ok", "fail", "stale", "corrupt"}
+
+# How often a bounded wait on the beacon's lock tries it again (``lock_deadline``).
+_LOCK_POLL_SECONDS = 0.05
+
+
+class BeaconLockTimeout(TimeoutError):
+    """The beacon's lock stayed taken until the ``lock_deadline`` of :meth:`HealthBeacon.heartbeat_strict`.
+
+    Nothing was written. An ``OSError``, so :meth:`HealthBeacon.heartbeat`
+    swallows it like any other failed write.
+    """
+
+
+def _lock_the_beacon(lock_fd: int, lock_path: Path, deadline: Optional[float]) -> None:
+    """``LOCK_EX`` on the beacon's lock: blocking without ``deadline``, else ``LOCK_NB`` retried until then.
+
+    One try is always made, also at or past the deadline; still taken then
+    raises :class:`BeaconLockTimeout`. Any other ``OSError`` is raised.
+    """
+    if deadline is None:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        return
+    while True:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise BeaconLockTimeout(
+                    f"the beacon lock {lock_path} stayed taken until the lock wait ran out: nothing was written"
+                ) from None
+            time.sleep(min(_LOCK_POLL_SECONDS, left))
 
 
 def _status_to_health(status: Any) -> str:
@@ -126,8 +162,16 @@ class HealthBeacon:
         self,
         status: str = "ok",
         details: Optional[Dict[str, Any]] = None,
+        *,
+        lock_deadline: Optional[float] = None,
     ) -> None:
-        """Atomically write the heartbeat, raising on I/O failure."""
+        """Atomically write the heartbeat, raising on I/O failure.
+
+        Without ``lock_deadline`` the beacon's lock is waited for without a
+        bound. With one (a ``time.monotonic()`` value) it is tried until then
+        and :class:`BeaconLockTimeout` is raised with nothing written when it
+        stayed taken (:func:`_lock_the_beacon`).
+        """
         refuse_real_central_store_write_under_test_runner(self.path)
         now = time.time()
         payload: Dict[str, Any] = {
@@ -146,7 +190,7 @@ class HealthBeacon:
         # component, so the tmp+rename pair is never interleaved.
         lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
         try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            _lock_the_beacon(lock_fd, lock_path, lock_deadline)
             with open(tmp_path, "w", encoding="utf-8") as fh:
                 json.dump(payload, fh, indent=2, sort_keys=True)
                 fh.flush()
