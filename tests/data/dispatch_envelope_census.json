@@ -1668,28 +1668,35 @@
     },
     {
       "file": "tests/test_provider_switch_dispatch_path.py",
-      "line": 241,
+      "line": 298,
       "mechanism": "direct-call",
       "module_target": "envelope_adapters_provider",
       "symbol": "ProviderAdapter"
     },
     {
       "file": "tests/test_provider_switch_dispatch_path.py",
-      "line": 533,
+      "line": 326,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_provider",
+      "symbol": "ProviderAdapter"
+    },
+    {
+      "file": "tests/test_provider_switch_dispatch_path.py",
+      "line": 615,
       "mechanism": "direct-call",
       "module_target": "envelope_adapters_claude",
       "symbol": "ClaudeSubprocessAdapter"
     },
     {
       "file": "tests/test_provider_switch_dispatch_path.py",
-      "line": 533,
+      "line": 615,
       "mechanism": "direct-call",
       "module_target": "envelope_adapters_claude",
       "symbol": "CodexAdapter"
     },
     {
       "file": "tests/test_provider_switch_dispatch_path.py",
-      "line": 534,
+      "line": 616,
       "mechanism": "direct-call",
       "module_target": "envelope_types",
       "symbol": "EnvelopeSpec"
