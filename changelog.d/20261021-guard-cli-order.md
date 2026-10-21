@@ -1,0 +1,1 @@
+- T0 skill scripts: `dispatch_guard.sh` and `intelligence.sh` resolve the vnx CLI in one order (repo, `VNX_HOME`, `VNX_BIN`, the project-pin shim, `~/.vnx-system/current`, PATH), skip a non-executable candidate, and `intelligence.sh` pins `VNX_PROJECT_ROOT` when it resolves the state dirs (OI-2226).
