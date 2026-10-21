@@ -30,7 +30,7 @@ def register_providers_subparser(subparsers) -> None:
     # -h for the script. Without both, a leading dash (`--json`, `-h`, any flag) dies as "unrecognized arguments".
     parser = subparsers.add_parser(
         "providers",
-        help="turn model providers on and off (list/off/on/reset/repair/check)",
+        help="turn model providers on and off (list/off/on/reset/repair/check/usage)",
         add_help=False,
         prefix_chars="\x00",
     )

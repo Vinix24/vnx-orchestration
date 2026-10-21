@@ -1122,6 +1122,8 @@ EXEMPT: Dict[str, str] = {
         "reachability probe (GET /api/tags): no model call",
     "scripts/conversation_analyzer/deep_analyzer.py:DeepAnalyzer._fetch_deepseek_balance":
         "balance probe (GET /user/balance): no model call",
+    "scripts/lib/provider_usage.py:_http_get_json":
+        "balance probe (GET /user/balance, GET /api/v1/credits): no model call",
     "scripts/benchmark/field-tests/runners/check_openrouter_credits.py:check":
         "credit probe (GET /api/v1/auth/key): no model call",
     "scripts/lib/adapters/litellm_adapter.py:LiteLLMAdapter.health_check":

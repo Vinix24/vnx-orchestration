@@ -356,6 +356,7 @@ Provider switch (turn model providers on and off, ~/.vnx/providers.json):
   providers reset <family> --project <pid>   Remove a project override
   providers repair [--empty]         Rebuild an unreadable switch file from the audit log
   providers check <identifier>       Exit 0 when allowed, 4 when switched off (for shell callers)
+  providers usage [--json]           Usage and balance of every provider (read-only, no model call)
 
 Gate commands (pre-merge verification):
   gate-check --pr <ID>  Run deterministic pre-merge gate checks (GO/HOLD verdict)
