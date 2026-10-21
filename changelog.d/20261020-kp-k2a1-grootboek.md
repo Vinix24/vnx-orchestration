@@ -1,0 +1,2 @@
+- Added: the cost ledger per run (ADR-043, K2a-1): `cost_ledger.record_run` writes one `provider_cost_run/1` line per run and refuses an amount without a source, and `aggregate_runs` counts the last line per run and never sums `unavailable` as 0.
+  An append that fails raises `CostLedgerWriteError` (an `OSError`): the call fails and nothing is kept elsewhere. The spool and replay of ADR-043 §6 land in the second K2a PR.

@@ -51,6 +51,18 @@ _PROVIDER_TO_REGISTRY_KEY: dict[str, str] = {
 _SUBSCRIPTION_FLAT_PROVIDERS = frozenset({"kimi", "litellm:moonshot", "litellm:ollama"})
 
 
+def registry_key_for_provider(provider: str) -> str | None:
+    """The wave7_models.yaml section a VNX provider literal is priced and identified in.
+
+    ``litellm:<sub>[:...]`` resolves to ``<sub>``. ``None`` when the provider has
+    no section: the caller reports it, it never guesses one.
+    """
+    registry_key = _PROVIDER_TO_REGISTRY_KEY.get(provider)
+    if registry_key is None and provider.startswith("litellm:") and ":" in provider:
+        registry_key = provider.split(":", 1)[1].split(":", 1)[0]
+    return registry_key or None
+
+
 def _is_peak(ts: object) -> bool:
     """Classify a timestamp against the DeepSeek peak window (ADR-040).
 
@@ -118,9 +130,7 @@ def price_run(provider: str, model: str, segments) -> tuple[float | None, str]:
     """
     from providers import provider_registry  # noqa: PLC0415 — lazy, cycle-safe
 
-    registry_key = _PROVIDER_TO_REGISTRY_KEY.get(provider)
-    if registry_key is None and provider.startswith("litellm:") and ":" in provider:
-        registry_key = provider.split(":", 1)[1].split(":", 1)[0]
+    registry_key = registry_key_for_provider(provider)
     if not registry_key:
         return None, f"unavailable:no_price:{model}"
 
