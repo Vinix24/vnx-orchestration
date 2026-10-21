@@ -1,1 +1,0 @@
-- Tests: the once-per-process warning test no longer depends on test order. Its fixture resets the sentinel on every module object the validation consults, resolved from the validation function the test actually calls, so it also holds under xdist and after an earlier test re-imports `append_receipt_internals` (D3-2).

@@ -1,4 +1,0 @@
-- T0 rotation: the successor's first message is a start argument, not keystrokes (OI-2102).
-  - `t0_rotate_spawn.sh` starts `claude --model opus ... --session-id <uuid> "/kickoff rotatie <run_id>"`. Nothing is typed into the TUI input box, so a redraw during startup (Remote Control connecting) can no longer wipe the instruction.
-  - A server-side job (`scripts/lib/t0_rotation_delivery.py`) reads the successor's transcript, compares its first real user record to the first message, writes `delivery.json` and a `t0_context_rotation_delivery` receipt. The old window closes only on `confirmed`; on `mismatch` or `timeout` both windows stay open. The last output line gains `close=on_delivery_confirmed`.
-  - `t0_rotation_state.py` gains `run-dir <run_id>` and `kickoff-done --run-dir <dir> [--catch-up-done]` (exit 3 without a newer wrap); `compose` writes `continuation.json` and `prompt.txt` no longer carries the kill-window sentence.
