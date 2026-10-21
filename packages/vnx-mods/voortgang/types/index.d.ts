@@ -4,8 +4,8 @@
  */
 export type Part<T> = { isOk: true; value: T } | { isOk: false; reason: string }
 
-/** One entry of `live_work.open_prs`: an open PR and the dispatch that opened it. */
-export type PrDispatch = { number: number; dispatchId: string }
+/** One entry of `live_work.open_prs`: an open PR and the dispatch that opened it; null when the branch is not `dispatch/<id>`. */
+export type PrDispatch = { number: number; dispatchId: string | null }
 
 /** One entry of `live_work.live` or `live_work.starting`: a dispatch that runs, and for how long. */
 export type Running = {
@@ -20,7 +20,7 @@ export type LiveWork = {
   starting: number
   stale: number
   unmeasured: number
-  /** `live_work.open_prs`: which dispatch belongs to which open PR; empty when the index lists none. */
+  /** `live_work.open_prs`: which dispatch belongs to which open PR. Positive evidence only: the producer caps the list and keeps it empty when `gh` fails. */
   openPrs: PrDispatch[]
   /** The `live` and `starting` entries, the builders; `stale` and `unmeasured` entries are not builders. */
   running: Part<Running[]>
@@ -28,8 +28,8 @@ export type LiveWork = {
 
 /** One builder: a dispatch in `live` or `starting`, as three parts that each stand or fall on their own. */
 export type Builder = {
-  /** `model`, `track_id` and `pr_id` of the dispatch's `dispatch-spec.json`; the last two are null when the spec sets none. */
-  who: Part<{ model: string; trackId: string | null; prId: string | null }>
+  /** `model`, `track_id` and `pr_id` of the dispatch's `dispatch-spec.json`; each is null when the spec sets none. */
+  who: Part<{ model: string | null; trackId: string | null; prId: string | null }>
   /** The first `# ` line of the dispatch's `instruction.md`. */
   task: Part<string>
   /** Whole minutes of the entry's `age_seconds`. */

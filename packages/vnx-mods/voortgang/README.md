@@ -43,12 +43,13 @@ opruimen: 10 stale rijen
 ```
 
 - **Header:** the project id and the age of the index. `verouderd` stands once, on the header, when the index or the state is older than 60 minutes or has no timestamp.
-- **Nu bezig:** every builder of `live_work` (the live and the starting entries), one row each: `model` of its `dispatch-spec.json`, its minutes (`age_seconds`), the first line of its `instruction.md` that starts with `# `, and the `track_id` and `pr_id` of the spec when it sets them. A long title gives way to the track and the PR behind it. `Nu bezig: niets` when there is none.
+- **Nu bezig:** every builder of `live_work` (the live and the starting entries), one row each: `model` of its `dispatch-spec.json`, its minutes (`age_seconds`), the first line of its `instruction.md` that starts with `# `, and the `track_id` and `pr_id` of the spec when it sets them. A spec without `model` shows `model ?`; its track and PR still link (the spec's `model` is optional). A long title gives way to the track and the PR behind it. `Nu bezig: niets` when there is none.
 - **Wacht op een besluit:** the number of `proposed` deliverables (`te promoveren`) and of `open_outcomes` (`open uitkomsten`). No id lists.
 - **Tracks:** every track on the `now` horizon, plus every track with activity: a builder whose spec names it, an open PR that its `pr_ref` lists or that the dispatch spec of the PR names, or a deliverable of it with `last_activity` in the last 7 days. Tracks with activity come first, then by priority (P1, P2, P3, other), then by id.
   - A track with deliverables shows `X van Y klaar` and a bar of 8 cells: `▓` for done, `░` for the rest, rounded down. Y counts every deliverable of the track, X those whose `derived_status` is `done`.
   - A track without deliverables shows `geen leveringen gepland`, dim. That is a signal: the progress of that track is not measurable. When the deliverables themselves could not be read the row says `leveringen onbeschikbaar: <reason>` instead.
-  - A second row appears only when there is something to say: the PRs of `pr_ref` (`open` when the PR queue lists them, otherwise `dicht`; more than three closed ones are counted, the open ones are always named) and the number of builders.
+  - When `vnx deliverable list` fails, a track whose only activity was a recent deliverable cannot be recognised. The section then starts with one row `leveringen onleesbaar: <reason>, tracks met alleen recente leveringen ontbreken`.
+  - A second row appears only when there is something to say: the PRs of `pr_ref` and the number of builders. A PR is `open` when the PR queue of the state or `live_work.open_prs` of the index lists it. It is `dicht` only when the PR queue could be read and does not list it; otherwise it shows as `#N ?` with `PR-status onbekend: <reason>`, because the index list is capped at 8 and is empty when `gh` fails, so it only ever proves a PR open. More than three closed ones are counted, the open ones are always named. A track whose deliverables could not be read keeps this row after `leveringen onbeschikbaar: <reason>`.
 - **PR's:** the open PRs of the PR queue, one row each: CI (`groen`, `rood`, `loopt`), the seats that passed (`geslaagd`, from `gates_passed`) and the seats still owed (`open`, from `blocked_on`). An unreadable PR queue shows its reason on one row.
 - **opruimen:** one dim row at the bottom with the `stale` and `unmeasured` counts of `live_work`, only when one of them is above 0. They appear nowhere else.
 
@@ -58,15 +59,20 @@ The pane draws with `Box`, `Text` and `Button` only, the elements every surface 
 
 ### The status line
 
-After every refresh the mod pins one line under the prompt:
+After every refresh the mod pins one line under the prompt. It answers the question of the pane at a glance: how far is this project, and does something run.
 
 ```
-project-a · 1 bouwers · 2 PR · 5 te promoveren · 3 uitkomsten · verouderd · onleesbaar
+project-a · track-a ▓▓▓▓▓░░░ 5/8 · track-b ▓▓░░░░░░ 2/8 · 1 bouwer
+project-a · track-a: geen plan · track-b ▓▓▓▓▓▓░░ 6/8 · 2 bouwers
+project-a · geen tracks in beweging
 ```
 
-- `bouwers` is `live_work.counts.live + live_work.counts.starting`; `stale` and `unmeasured` entries are not builders.
+- The tracks are the first two of the pane's Tracks order: activity first, then priority, then id. A track with deliverables shows the same 8-cell bar as the pane and `X/Y` (done of all). A track without deliverables shows `: geen plan`, one whose deliverables could not be read shows `: ?`.
+- A track id longer than 28 display cells is cut with `…`.
+- `1 bouwer` or `N bouwers` stands only when at least one builder runs (`live_work.counts.live + live_work.counts.starting`; `stale` and `unmeasured` entries are not builders). It is left out at 0 and when the live work could not be read.
 - `verouderd` is added when the index or the state is older than 60 minutes. `onleesbaar` is added when a part could not be read.
-- A total that could not be read is `?`, never `0`.
+- When no track is shown the line says `geen tracks in beweging`. When the tracks could not be read it says `tracks onbekend`, never that nothing moves.
+- The PR count, `te promoveren` and `uitkomsten` are not on the line; they stay in the pane.
 - Without a project the line is empty.
 
 ### Headless
@@ -74,7 +80,7 @@ project-a · 1 bouwers · 2 PR · 5 te promoveren · 3 uitkomsten · verouderd �
 Where no surface places the pane, as in `claude --print "/voortgang"`, the command answers with the status line, then one line per track the pane would show:
 
 ```
-project-a · 1 bouwers · 2 PR · 5 te promoveren · 3 uitkomsten
+project-a · track-a: geen plan · track-b ▓▓▓▓▓▓░░ 6/8 · 1 bouwer
 P1 track-a · geen leveringen gepland
 P1 track-b · 6 van 8 klaar
 ```

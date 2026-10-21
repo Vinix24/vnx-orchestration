@@ -113,7 +113,7 @@ describe('the pane', () => {
     test(`finds the project from ${cwd}`, async ($, on) => {
       const { world } = await started($, on, { files: healthyFiles('project-a') }, cwd)
 
-      expect(world.statuses.at(-1)).toBe('project-a · 1 bouwers · 1 PR · 3 te promoveren · 2 uitkomsten')
+      expect(world.statuses.at(-1)).toBe('project-a · kosten: geen plan · bld: geen plan · 1 bouwer')
     })
   }
 
@@ -150,7 +150,7 @@ describe('the pane', () => {
 
     expect(lines.slice(0, 3)).toEqual(['project-a · index 3 min', 'Nu bezig', '  onbeschikbaar: lease store unreadable'])
     expect(lines).not.toContain('Nu bezig: niets')
-    expect(world.statuses.at(-1)).toBe('project-a · ? bouwers · 1 PR · 3 te promoveren · 2 uitkomsten · onleesbaar')
+    expect(world.statuses.at(-1)).toBe('project-a · viaref: geen plan · fresh ▓▓▓▓▓▓▓▓ 1/1 · onleesbaar')
     await ui.unmount()
   })
 
@@ -190,7 +190,10 @@ describe('the pane', () => {
     const lines = await linesOf(ui)
 
     expect(lines).toContain("     geen leveringen gepland · PR's: #2063 open")
-    expect(lines.join('\n')).not.toContain('PR-status onbekend')
+    // The index list only proves a PR open: the ones it does not list are unknown while the PR queue cannot be read, never closed.
+    expect(lines).toContain("     PR's: #2001 ? #2002 ? · PR-status onbekend: gh weg")
+    expect(lines.filter(line => line.includes('PR-status onbekend'))).toHaveLength(1)
+    expect(lines.join('\n')).not.toContain('dicht')
     await ui.unmount()
   })
 
@@ -233,6 +236,29 @@ describe('the pane', () => {
     await ui.unmount()
   })
 
+  test('keeps the open PRs and the builders of a track on its second row when its deliverables could not be read', async ($, on) => {
+    const run = (argv: readonly string[]) => (argv[1] === 'objective' ? healthyRun(argv) : { exitCode: 3, stdout: '' })
+    await started($, on, { files: healthyFiles('project-a'), run })
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: sizeOf(44, 120) })
+    const lines = await linesOf(ui)
+
+    expect(lines).toContain("     leveringen onbeschikbaar: vnx exit 3 · PR's: #2063 open")
+    expect(lines).toContain('     leveringen onbeschikbaar: vnx exit 3 · 1 bouwer')
+    expect(lines).toContain('  leveringen onleesbaar: vnx exit 3, tracks met alleen recente leveringen ontbreken')
+    await ui.unmount()
+  })
+
+  test('shows a builder whose spec has no model as model ? with its track, and not as unreadable', async ($, on) => {
+    const files = { ...healthyFiles('project-a'), [specOf('project-a', 'd-live-1')]: JSON.stringify({ track_id: 'bld', pr_id: '#2150' }) }
+    const { world } = await started($, on, { files })
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    const lines = await linesOf(ui)
+
+    expect(lines).toContain('  model ? · 12 min · Invented task: add the block · bld · PR #2150')
+    expect(world.statuses.at(-1)).not.toContain('onleesbaar')
+    await ui.unmount()
+  })
+
   test('shows verouderd once, on the header, for an index or state older than 60 minutes', async ($, on) => {
     const files = { ...healthyFiles('project-a'), [indexOf('project-a')]: indexJson({ ageMinutes: 120 }), [stateOf('project-a')]: stateJson({ ageMinutes: 120 }) }
     const { world } = await started($, on, { files })
@@ -241,7 +267,7 @@ describe('the pane', () => {
 
     expect(lines[0]).toBe('project-a · index 2 u · verouderd')
     expect(lines.filter(line => line.includes('verouderd'))).toHaveLength(1)
-    expect(world.statuses.at(-1)).toBe('project-a · 1 bouwers · 1 PR · 3 te promoveren · 2 uitkomsten · verouderd')
+    expect(world.statuses.at(-1)).toBe('project-a · kosten: geen plan · bld: geen plan · 1 bouwer · verouderd')
     await ui.unmount()
   })
 
@@ -250,7 +276,7 @@ describe('the pane', () => {
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
 
     expect(await linesOf(ui)).toEqual(['project-z · geen store'])
-    expect(world.statuses.at(-1)).toBe('project-z · ? bouwers · ? PR · ? te promoveren · ? uitkomsten · onleesbaar')
+    expect(world.statuses.at(-1)).toBe('project-z · tracks onbekend · onleesbaar')
     await ui.unmount()
   })
 
@@ -366,7 +392,7 @@ describe('the room', () => {
     const { world } = await started($, on, { files })
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: sizeOf(44, 120) })
 
-    expect((await linesOf(ui))[2]).toBe('  onbeschikbaar: model ontbreekt · 12 min · onbeschikbaar: instruction.md ontbreekt')
+    expect((await linesOf(ui))[2]).toBe('  model ? · 12 min · onbeschikbaar: instruction.md ontbreekt')
     expect(world.statuses.at(-1)).toContain('onleesbaar')
     await ui.unmount()
   })
@@ -398,7 +424,7 @@ describe('the session', () => {
     expect(world.commands).toEqual(['voortgang'])
     expect(world.opened).toEqual([])
     expect(world.runs).toHaveLength(2)
-    expect(world.statuses.at(-1)).toBe('project-a · 1 bouwers · 1 PR · 3 te promoveren · 2 uitkomsten')
+    expect(world.statuses.at(-1)).toBe('project-a · kosten: geen plan · bld: geen plan · 1 bouwer')
   })
 
   test('refreshes again every refresh_seconds', { options: { refresh_seconds: 30 } }, async ($, on) => {
@@ -417,7 +443,7 @@ describe('the session', () => {
 
     expect(world.runs).toHaveLength(4)
     expect(world.opened).toEqual([{ id: 'voortgang', title: 'Voortgang' }])
-    expect(answer.text).toBe('Voortgang geopend: project-a · 1 bouwers · 1 PR · 3 te promoveren · 2 uitkomsten')
+    expect(answer.text).toBe('Voortgang geopend: project-a · kosten: geen plan · bld: geen plan · 1 bouwer')
   })
 
   test('/voortgang answers the status line and one line per shown track where no surface places the pane', async ($, on) => {
@@ -426,7 +452,7 @@ describe('the session', () => {
 
     expect(answer.text).toBe(
       [
-        'project-a · 1 bouwers · 1 PR · 3 te promoveren · 2 uitkomsten',
+        'project-a · kosten: geen plan · bld: geen plan · 1 bouwer',
         'P1 kosten · geen leveringen gepland',
         'P2 bld · geen leveringen gepland',
         'P2 viaref · geen leveringen gepland',
