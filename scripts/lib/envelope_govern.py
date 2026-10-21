@@ -160,6 +160,7 @@ def _book_ledger_run(
     """
     from harness_run_cost import (  # noqa: PLC0415
         BuilderRun,
+        lane_model,
         ledger_project_id,
         record_builder_run,
         writes_builder_run,
@@ -167,8 +168,10 @@ def _book_ledger_run(
 
     if not writes_builder_run(spec.provider, spec.role):
         return None, None
+    # A spawn refused before the adapter resolved a model carries the plan's
+    # placeholder: book it with the model the lane would have run.
     run = BuilderRun(
-        provider=spec.provider, model=model, started=start_time, ended=end_time,
+        provider=spec.provider, model=lane_model(spec.provider, model), started=start_time, ended=end_time,
         session_id=adapter_result.session_id, spawn_refused=adapter_result.spawn_refused,
     )
     try:

@@ -350,15 +350,10 @@ class ProviderAdapter:
 
         # ---- deepseek-harness ----
         if pv == Provider.DEEPSEEK_HARNESS:
-            from provider_spawns.deepseek_harness_spawn import (  # noqa: PLC0415
-                resolve_harness_model,
-                spawn_deepseek_harness,
-            )
+            from harness_run_cost import lane_model  # noqa: PLC0415
+            from provider_spawns.deepseek_harness_spawn import spawn_deepseek_harness  # noqa: PLC0415
 
-            raw_model = (
-                plan.model if plan.model not in ("default", "sonnet", "") else None
-            )
-            model = resolve_harness_model(raw_model)
+            model = lane_model(pv.value, plan.model)
             try:
                 result = spawn_deepseek_harness(
                     prompt=instruction,
@@ -381,15 +376,10 @@ class ProviderAdapter:
         # ---- glm-harness ---- (codex flip-PR F2: the door normalizes GLM -> glm-harness, so the
         # provider envelope MUST be able to execute it, not raise unsupported.)
         if pv == Provider.GLM_HARNESS:
-            from provider_spawns.glm_harness_spawn import (  # noqa: PLC0415
-                resolve_harness_model,
-                spawn_glm_harness,
-            )
+            from harness_run_cost import lane_model  # noqa: PLC0415
+            from provider_spawns.glm_harness_spawn import spawn_glm_harness  # noqa: PLC0415
 
-            raw_model = (
-                plan.model if plan.model not in ("default", "sonnet", "") else None
-            )
-            model = resolve_harness_model(raw_model)
+            model = lane_model(pv.value, plan.model)
             try:
                 result = spawn_glm_harness(
                     prompt=instruction,

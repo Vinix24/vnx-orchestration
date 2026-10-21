@@ -81,6 +81,30 @@ def writes_builder_run(provider: Optional[str], role: Optional[str]) -> bool:
     return provider in CLAUDE_HARNESS_PROVIDERS and (role or "") not in NOT_BUILDER_ROLES
 
 
+# A plan model that names no model on the redirected harness lanes: the door's
+# placeholder, the claude default, or nothing. The lane then runs its own default.
+_LANE_PLACEHOLDERS = frozenset({"default", "sonnet", ""})
+
+
+def lane_model(provider: str, requested: Optional[str]) -> str:
+    """The model a harness lane runs for the model a plan requested.
+
+    ``deepseek-harness`` and ``glm-harness`` resolve a placeholder to their own
+    default (``resolve_harness_model``: the ``VNX_*_HARNESS_MODEL`` override,
+    then the registry default); any other value runs as given. The provider
+    adapter spawns with this model, and a spawn the lane refused before it
+    resolved one is booked with it too. ``claude`` runs what was requested.
+    """
+    value = (requested or "").strip()
+    if provider == "deepseek-harness":
+        from provider_spawns.deepseek_harness_spawn import resolve_harness_model  # noqa: PLC0415
+    elif provider == "glm-harness":
+        from provider_spawns.glm_harness_spawn import resolve_harness_model  # noqa: PLC0415
+    else:
+        return value
+    return resolve_harness_model(None if value in _LANE_PLACEHOLDERS else value)
+
+
 def ledger_project_id(state_dir: Optional[Path]) -> str:
     """The project of the run: from the store, else ``VNX_PROJECT_ID``, else ``vnx-dev``.
 
@@ -311,6 +335,6 @@ def receipt_cost(
 
 __all__ = [
     "BILLING_BY_PROVIDER", "BUILDER_ROLE", "BuilderRun", "NOT_BUILDER_ROLES", "SPAWN_REFUSED_SOURCE",
-    "ledger_project_id", "price_segments", "receipt_cost", "record_builder_run", "run_fields",
+    "lane_model", "ledger_project_id", "price_segments", "receipt_cost", "record_builder_run", "run_fields",
     "run_tokens", "usage_completeness", "writes_builder_run",
 ]

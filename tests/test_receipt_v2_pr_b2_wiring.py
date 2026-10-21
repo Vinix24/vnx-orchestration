@@ -60,8 +60,9 @@ def _run_emit_governance(monkeypatch, tmp_path, *, args, result, provider="claud
         return real_emit(**kwargs)
 
     now = datetime.now(timezone.utc)
+    # A registry model: a claude builder run's cost-ledger line refuses an unknown one (ADR-043).
     with patch("governance_emit.emit_dispatch_receipt", side_effect=_capture):
-        provider_dispatch._emit_governance(args, provider, "some-model", result, now, now, "success")
+        provider_dispatch._emit_governance(args, provider, "sonnet", result, now, now, "success")
 
     receipts_path = tmp_path / "state" / "t0_receipts.ndjson"
     return captured, _read_lines(receipts_path)

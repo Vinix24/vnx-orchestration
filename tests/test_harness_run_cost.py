@@ -616,6 +616,31 @@ class TestTheEnvelopeCallSite:
         (receipt,) = _receipts(store.receipts)
         assert receipt["cost_usd"] == 0.0 and receipt["cost_source"] == "unavailable:spawn_refused"
 
+    @pytest.mark.parametrize("provider,expected", [("deepseek-harness", "deepseek-v4-pro"), ("glm-harness", "glm-5.2")])
+    def test_a_refusal_before_the_adapter_resolved_a_model_books_the_lane_default(
+        self, store, monkeypatch, provider, expected,
+    ):
+        from envelope_types import _AdapterResult
+
+        monkeypatch.delenv("VNX_DEEPSEEK_HARNESS_MODEL", raising=False)
+        monkeypatch.delenv("VNX_GLM_HARNESS_MODEL", raising=False)
+        refused = _AdapterResult(returncode=1, completion_text="", status="failure", error="budget",
+                                 spawn_refused="paid_lane_budget_exceeded")
+
+        _govern(_envelope_spec(store, provider, "default"), refused)
+
+        (line,) = _ledger_lines(store.ledger)
+        assert line["model"] == expected
+        assert line["cost_source"] == "unavailable:spawn_refused"
+        assert len(_receipts(store.receipts)) == 1, "a budget refusal keeps its receipt"
+
+    def test_lane_model_resolves_placeholders_like_the_adapter(self, monkeypatch):
+        monkeypatch.setenv("VNX_DEEPSEEK_HARNESS_MODEL", "deepseek-flash")
+
+        assert harness_run_cost.lane_model("deepseek-harness", "sonnet") == "deepseek-flash"
+        assert harness_run_cost.lane_model("deepseek-harness", "deepseek-v4-pro") == "deepseek-v4-pro"
+        assert harness_run_cost.lane_model("claude", "opus") == "opus"
+
     def test_a_failed_append_writes_no_receipt_and_records_the_gap(self, store):
         _two_message_transcript(store.projects, "sess-env-enospc")
         with patch.object(cost_ledger, "_append_record", _failing_append):
