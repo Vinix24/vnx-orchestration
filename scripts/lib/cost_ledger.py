@@ -34,12 +34,12 @@ ledger's own ``flock`` stays, nested under it, against a writer of an older
 fabric version that does not know the lock file.
 
 The failure contract: when the ledger cannot be opened, locked or given a
-boundary, or the append fails, the record goes to
-``events/provider_costs.spool/<run_id>.json`` (an atomic write of a JSON list of
-records) before the lock file is released; when the fsync or the close fails
-after a whole append, it goes there too. A run with lines waiting in the spool
-queues behind them in the spool, so "last line wins" still means "last
-written". :class:`CostLedgerWriteError` means the spool failed too, or the lock
+boundary, or the append fails, the record goes to its run's spool file
+``events/provider_costs.spool/<readable>~<digest>.json`` (:func:`spool_file_for`;
+an atomic write of a JSON list of records) before the lock file is released;
+when the fsync or the close fails after a whole append, it goes there too. A
+run with lines waiting in the spool queues behind them in the spool, so "last
+line wins" still means "last written". :class:`CostLedgerWriteError` means the spool failed too, or the lock
 file could not be taken: the outcome is unknown and the caller books no new
 attempt. Bringing the spool back into the ledger is the replay (K2a-3b).
 
@@ -92,6 +92,9 @@ _PRICE_RUN_COUNTS = (
     ("cache_write", ("cache_write_5m", "cache_write_1h")),
 )
 _UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._:@+-]")
+# The spool file name: at most this many readable characters, then ``~`` and this many hex digits of the digest.
+_SPOOL_READABLE_CHARS = 128
+_SPOOL_DIGEST_HEX = 16
 
 
 class CostLedgerRefusal(ValueError):
@@ -132,8 +135,9 @@ class CostLedgerWriteError(OSError):
     Raised when the spool failed too, or when the lock file every actor takes
     first could not be opened or locked (without it the spool cannot be used
     either). An ``OSError`` with the errno of its cause, which is
-    ``__cause__``. The line may be in the ledger: a write, fsync or close that
-    failed can have put it there, and the message says when that is so. The
+    ``__cause__``. The line may be in the ledger, when a write, fsync or close
+    that failed can have put it there, or in the spool, when the spool failed
+    in or after replacing the run's file; the message says which. The
     caller's call fails, it mutates no state and it books no new attempt for
     the run (``record_next_attempt`` would make it a second run); the replay, a
     correction or a backfill charge resolves it.
@@ -528,14 +532,26 @@ def spool_dir_for(ledger_path: Path) -> Path:
 
 
 def _spool_name(run_id: str) -> str:
-    """``run_id`` as a file name: an unsafe character becomes ``_``, and so does a leading dot."""
-    name = _UNSAFE_FILENAME_CHARS.sub("_", run_id)
-    return "_" + name[1:] if name.startswith(".") else name
+    """The spool file name of ``run_id``, ``<readable>~<digest>.json``. See :func:`spool_file_for`."""
+    readable = _UNSAFE_FILENAME_CHARS.sub("_", run_id)[:_SPOOL_READABLE_CHARS]
+    if readable.startswith("."):
+        readable = "_" + readable[1:]
+    digest = hashlib.sha256(run_id.encode("utf-8")).hexdigest()[:_SPOOL_DIGEST_HEX]
+    return f"{readable}~{digest}.json"
 
 
 def spool_file_for(spool_dir: Path, run_id: str) -> Path:
-    """The spool file of one run, ``<run_id>.json``: a JSON list of its waiting records, in order."""
-    return Path(spool_dir) / f"{_spool_name(run_id)}.json"
+    """The spool file of one run: a JSON list of its waiting records, in order.
+
+    The name is ``<readable>~<digest>.json``: ``<readable>`` is the run id with
+    every character outside ``[A-Za-z0-9._:@+-]`` and a leading dot made ``_``,
+    cut at 128 characters; ``<digest>`` is the first 16 hex characters of the
+    sha256 of the exact run id in UTF-8. The digest keeps two run ids that
+    sanitise alike (``review/a`` and ``review_a``) in two files; ``~`` is never
+    part of ``<readable>``. A reader takes the run from the records, never from
+    the name (:func:`_read_spool_file`).
+    """
+    return Path(spool_dir) / _spool_name(run_id)
 
 
 def _spool_names(spool_dir: Path) -> List[str]:
@@ -563,14 +579,24 @@ def _is_run_record(record: object) -> bool:
     )
 
 
-def _read_spool_file(path: Path) -> List[Dict[str, Any]]:
-    """The records waiting in one spool file, in order. Raises :class:`_UnreadableSpool`, or the read's ``OSError``."""
+def _read_spool_file(path: Path, run_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """The records waiting in one spool file, in order. Raises :class:`_UnreadableSpool`, or the read's ``OSError``.
+
+    Every record carries the run id the file belongs to: ``run_id`` when the
+    caller names it, else the run id of its records, and the file has that
+    run's :func:`spool_file_for` name. A record of another run makes the whole
+    file unreadable, so it is never counted as this run's line.
+    """
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except ValueError as exc:
         raise _UnreadableSpool(f"{path.name}: {exc}") from exc
     if not isinstance(data, list) or not data or not all(_is_run_record(record) for record in data):
         raise _UnreadableSpool(f"{path.name}: not a non-empty list of {RUN_SCHEMA} records")
+    owner = data[0]["run_id"] if run_id is None else run_id
+    if path.name != _spool_name(owner) or any(record["run_id"] != owner for record in data):
+        found = sorted({record["run_id"] for record in data})
+        raise _UnreadableSpool(f"{path.name}: holds records of {found}, not only of the run the file belongs to")
     return data
 
 
@@ -595,6 +621,17 @@ def _fsync_dir(directory: Path) -> None:
         os.close(fd)
 
 
+def _what_is_known(in_the_ledger: bool, replacing: bool) -> str:
+    """Where a line whose spool failed may be: the ledger when its write had started, the spool once its replace had."""
+    if in_the_ledger and replacing:
+        return "the outcome is unknown, the line may be in the ledger and may be in the spool"
+    if in_the_ledger:
+        return "the outcome is unknown, the line may be in the ledger"
+    if replacing:
+        return "the outcome is unknown, the line may be in the spool"
+    return "the line is in neither the ledger nor the spool"
+
+
 def _spool(spool_dir: Path, record: Mapping[str, Any], why: str, *, in_the_ledger: bool) -> None:
     """Add ``record`` to its run's spool file, behind what waits there. ``why`` is what sent it there.
 
@@ -603,30 +640,39 @@ def _spool(spool_dir: Path, record: Mapping[str, Any], why: str, *, in_the_ledge
     atomically, and the spool directory and the directory above it are
     fsynced, so a spool created here survives a crash too. A spool that fails
     raises :class:`_Unwritten`; ``in_the_ledger`` says whether a write to the
-    ledger had started, so whether the line may be there.
+    ledger had started, so whether the line may be there. A failure in or after
+    the replace may leave the whole record in the spool, unconfirmed: the
+    message then says the line may be in the spool, never that it is absent.
     """
     refuse_real_central_store_write_under_test_runner(spool_dir)
     target = spool_file_for(spool_dir, record["run_id"])
+    replacing = False
     try:
         spool_dir.mkdir(parents=True, exist_ok=True)
-        queued = _read_spool_file(target) if _exists(target) else []
+        queued = _read_spool_file(target, record["run_id"]) if _exists(target) else []
+        replacing = True
         atomic_write_text(target, json.dumps([*queued, dict(record)], separators=(",", ":")))
         _fsync_dir(spool_dir)
         _fsync_dir(spool_dir.parent)
     except (OSError, _UnreadableSpool) as exc:
-        where = "the outcome is unknown, the line may be in the ledger" if in_the_ledger else (
-            "the line is in neither the ledger nor the spool"
-        )
-        raise _Unwritten(exc, f"{why}, and the spool {spool_dir} failed too ({exc}): {where}; "
-                              "book no new attempt for it") from exc
+        raise _Unwritten(exc, f"{why}, and the spool {spool_dir} failed too ({exc}): "
+                              f"{_what_is_known(in_the_ledger, replacing)}; book no new attempt for it") from exc
     logger.warning("cost_ledger: run %s went to the spool %s: %s", record["run_id"], spool_dir, why)
 
 
 def _waits_in_the_spool(spool_dir: Path, record: Mapping[str, Any]) -> bool:
-    """True when the record's run has lines waiting in the spool. A spool that cannot be checked raises."""
+    """True when the record's run has lines waiting in the spool. A spool that cannot be checked raises.
+
+    The run's file must read as its own (:func:`_read_spool_file`): a file
+    that is not a list of this run's records cannot say what waits there.
+    """
+    target = spool_file_for(spool_dir, record["run_id"])
     try:
-        return _exists(spool_file_for(spool_dir, record["run_id"]))
-    except OSError as exc:
+        if not _exists(target):
+            return False
+        _read_spool_file(target, record["run_id"])
+        return True
+    except (OSError, _UnreadableSpool) as exc:
         raise _Unwritten(
             exc, f"the spool {spool_dir} could not be checked for earlier lines of the run ({exc}): "
                  "the line was not written",
@@ -847,32 +893,34 @@ def _read_without_the_lock(ledger_path: Path) -> str:
 def _next_attempt(ledger_path: Path, fh, project_id: str, producer: str, ref: str) -> int:
     """One more than the highest attempt of ``<project_id>:<producer>:<ref>`` in the ledger or the spool.
 
-    The caller holds the lock file exclusively, so no line of the run shape
-    lands or leaves the spool while this counts. A ledger that could not be
-    opened or locked is read without its ``flock``: only an old-shape writer
-    can append meanwhile, and its lines carry no attempt. A spool file counts by
-    its name, which every attempt waiting there has. Counting that fails raises
+    The caller holds the lock file exclusively, so no writer of this version
+    lands a line or adds one to the spool while this counts. A ledger that
+    could not be opened or locked is read without its ``flock``, and the lock
+    file does not keep out a writer of an earlier fabric version, which takes
+    only the ledger ``flock``: a 1.7.2 ``emit_provider_cost`` appends old-shape
+    lines, which carry no attempt, but a K2a-2 ``record_run`` or
+    ``record_next_attempt`` appends run-shaped lines, so in a store both
+    versions write during a rollout an attempt that writer books meanwhile can
+    be missed here. A spool file counts by the ``run_id`` of its records, never
+    by its name, compared on the exact ``(project_id, producer, ref)`` as in
+    the ledger. Counting that fails, an unreadable spool file included, raises
     :class:`_Unwritten` with nothing written: an attempt guessed too low would
     make a second run of an existing one.
     """
+    spool_dir = spool_dir_for(ledger_path)
     try:
         text = _read_under_the_lock(fh) if fh is not None else _read_without_the_lock(ledger_path)
-        names = _spool_names(spool_dir_for(ledger_path))
-    except OSError as exc:
+        spooled = [record for name in _spool_names(spool_dir) for record in _read_spool_file(spool_dir / name)]
+    except (OSError, _UnreadableSpool) as exc:
         raise _Unwritten(exc, f"the attempts already booked could not be counted ({exc}): nothing was written") from exc
     highest = 0
-    for record in _parse_lines(text)[0]:
+    for record in [*_parse_lines(text)[0], *spooled]:
         try:
             project, run_producer, run_ref, attempt = split_run_id(record["run_id"])
         except InvalidRecord:
             continue
         if (project, run_producer, run_ref) == (project_id, producer, ref):
             highest = max(highest, attempt)
-    prefix = _spool_name(f"{project_id}:{producer}:{ref}:")
-    for name in names:
-        number = name[len(prefix):-len(".json")]
-        if name.startswith(prefix) and number.isascii() and number.isdigit():
-            highest = max(highest, int(number))
     return highest + 1
 
 
@@ -928,7 +976,8 @@ class LedgerTotals:
     carry another schema version or have no ``run_id``, a torn tail included.
     ``spool_pending`` is the number of runs waiting in the spool when the
     ledger was read, in no sum; ``spool_unreadable`` says the spool could not
-    be listed, so ``spool_pending`` is unknown; ``torn_tail`` says the ledger
+    be listed or a spool file could not be read as one run's, so
+    ``spool_pending`` is a lower bound; ``torn_tail`` says the ledger
     ends on a line without ``\\n``. :attr:`incomplete` is ``None`` only for a
     complete total.
     """
@@ -1005,6 +1054,30 @@ def _read_the_ledger(ledger_path: Path) -> str:
         return fh.read()
 
 
+def _count_the_spool(spool_dir: Path) -> Tuple[int, bool]:
+    """``(spool_pending, spool_unreadable)``: the runs whose spool file reads as theirs, and whether any did not.
+
+    A spool that cannot be listed, a spool file that cannot be read and one
+    that holds a record of another run (:func:`_read_spool_file`) make the
+    spool unreadable, never empty; such a file counts for no run.
+    """
+    try:
+        names = _spool_names(spool_dir)
+    except OSError as exc:
+        logger.warning("cost_ledger: the spool %s cannot be listed, the total is incomplete: %s", spool_dir, exc)
+        return 0, True
+    pending, unreadable = 0, False
+    for name in names:
+        try:
+            _read_spool_file(spool_dir / name)
+        except (OSError, _UnreadableSpool) as exc:
+            logger.warning("cost_ledger: the spool file %s cannot be read, the total is incomplete: %s", name, exc)
+            unreadable = True
+        else:
+            pending += 1
+    return pending, unreadable
+
+
 def _ledger_and_spool(ledger_path: Path) -> Tuple[str, int, bool]:
     """``(ledger text, spool_pending, spool_unreadable)`` at one moment, so a total and its backlog agree.
 
@@ -1013,21 +1086,17 @@ def _ledger_and_spool(ledger_path: Path) -> Tuple[str, int, bool]:
     write, so no line lands in the ledger or enters the spool between the two
     reads (blocker 4 of #2141). Nothing is changed, a torn tail included. No
     events directory means nothing was ever written: empty, and nothing is
-    created. A spool that cannot be listed is reported unreadable, never empty
-    (blocker 6 of #2141).
+    created. A spool that cannot be read is reported unreadable, never empty
+    (blocker 6 of #2141, :func:`_count_the_spool`).
     """
     try:
         os.stat(ledger_path.parent)
     except FileNotFoundError:
         return "", 0, False
-    spool_dir = spool_dir_for(ledger_path)
     with provider_costs.ledger_lock(ledger_path, fcntl.LOCK_SH):
         text = _read_the_ledger(ledger_path)
-        try:
-            return text, len(_spool_names(spool_dir)), False
-        except OSError as exc:
-            logger.warning("cost_ledger: the spool %s cannot be listed, the total is incomplete: %s", spool_dir, exc)
-            return text, 0, True
+        pending, unreadable = _count_the_spool(spool_dir_for(ledger_path))
+    return text, pending, unreadable
 
 
 def _number(value: object) -> Optional[float]:

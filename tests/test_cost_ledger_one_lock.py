@@ -21,6 +21,12 @@ Plus the lock file itself: every actor takes it first, ``emit_provider_cost``
 included; one that cannot be taken writes nothing; a spool that cannot be
 listed is never an empty one.
 
+And round 2 of #2150: two run ids that sanitise alike (``review/a`` and
+``review_a``) get two spool files, a spool file holding a record of another run
+counts for neither, attempts are counted from the records and never from a
+file name, and a spool that fails in or after its replace says the line may be
+in the spool.
+
 Items 1, 2 and 6 run real separate processes (``subprocess`` with
 ``sys.executable``) on real files and real ``flock``s; nothing mocks a lock. A
 child injects only its own fault (a failed append, a pause inside the lock) by
@@ -32,6 +38,7 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import hashlib
 import json
 import os
 import subprocess
@@ -55,7 +62,10 @@ import provider_costs  # noqa: E402
 PROJECT = "vnx-dev"
 RUN_A1 = f"{PROJECT}:dispatch:20261020-kp-x:1"
 RUN_B1 = f"{PROJECT}:gate:codex-gate-pr2140:1"
-_ZERO = {"input_uncached": 0, "cache_hit": 0, "cache_write_5m": 0, "cache_write_1h": 0, "output": 0}
+# Two refs that differ only in a character the spool file name sanitises.
+RUN_SLASH = f"{PROJECT}:gate:review/a:1"
+RUN_UNDERSCORE = f"{PROJECT}:gate:review_a:1"
+_ZERO ={"input_uncached": 0, "cache_hit": 0, "cache_write_5m": 0, "cache_write_1h": 0, "output": 0}
 # How long a child holds the lock once the other process is on its way to it.
 HOLD_SECONDS = 1.0
 # A writer blocked behind that hold waits at least this long; one that does not wait returns in milliseconds.
@@ -112,7 +122,7 @@ def _lock_file(ledger_path: Path) -> Path:
 
 def _spooled(ledger_path: Path, run_id: str = RUN_A1) -> list:
     """The records waiting in the spool for ``run_id``, in order; none when the run has no spool file."""
-    path = _spool_dir(ledger_path) / f"{run_id}.json"
+    path = cost_ledger.spool_file_for(_spool_dir(ledger_path), run_id)
     return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
 
 
@@ -136,6 +146,14 @@ class _HeldLockFile:
 
 def _enospc(*_args, **_kwargs):
     raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+
+def _eio(*_args, **_kwargs):
+    raise OSError(errno.EIO, os.strerror(errno.EIO))
+
+
+def _digest(run_id: str) -> str:
+    return hashlib.sha256(run_id.encode("utf-8")).hexdigest()[:16]
 
 
 # ---------------------------------------------------------------------------
@@ -470,6 +488,103 @@ class TestAcceptance:
         assert (first["run_id"], first.landed) == (f"{PROJECT}:dispatch:20261020-kp-x:1", "spool")
         assert (refire["run_id"], refire.landed) == (f"{PROJECT}:dispatch:20261020-kp-x:2", "ledger")
         assert _lines(ledger) == [refire]
+
+
+# ---------------------------------------------------------------------------
+# One spool file per exact run id (round 2 of #2150)
+# ---------------------------------------------------------------------------
+
+
+def _make_run(run_id: str) -> "cost_ledger.RunCost":
+    return _run(run_id=run_id)
+
+
+class TestOneSpoolFilePerRunId:
+    def test_the_name_is_a_readable_prefix_and_a_digest_of_the_exact_run_id(self, tmp_path):
+        """``<readable>~<digest>.json``: the readable part sanitised and cut at 128 characters, the digest exact."""
+        long_run = f"{PROJECT}:gate:{'x' * 300}:1"
+        assert cost_ledger.spool_file_for(tmp_path, RUN_SLASH) == tmp_path / f"{RUN_UNDERSCORE}~{_digest(RUN_SLASH)}.json"
+        assert cost_ledger.spool_file_for(tmp_path, long_run).name == f"{long_run[:128]}~{_digest(long_run)}.json"
+        assert cost_ledger.spool_file_for(tmp_path, RUN_SLASH) != cost_ledger.spool_file_for(tmp_path, RUN_UNDERSCORE)
+
+    def test_two_run_ids_that_sanitise_alike_get_two_spool_files(self, ledger, monkeypatch):
+        """Codex reproduced it: ``review/a`` and ``review_a`` shared one file and counted as one waiting run."""
+        monkeypatch.setattr(cost_ledger, "_append_record", _enospc)
+        slash = cost_ledger.record_run(_run(run_id=RUN_SLASH), ledger_path=ledger)
+        underscore = cost_ledger.record_run(_run(run_id=RUN_UNDERSCORE), ledger_path=ledger)
+
+        assert (slash.landed, underscore.landed) == ("spool", "spool")
+        assert len(list(_spool_dir(ledger).iterdir())) == 2
+        assert (_spooled(ledger, RUN_SLASH), _spooled(ledger, RUN_UNDERSCORE)) == ([slash], [underscore])
+        totals = cost_ledger.aggregate_runs(ledger)
+        assert (totals.spool_pending, totals.spool_unreadable) == (2, False)
+        assert totals.incomplete == "onvolledig: 2 runs wachten op replay"
+
+    def test_a_refire_counts_the_attempts_of_its_own_exact_ref(self, ledger, monkeypatch):
+        """``review_a`` has no attempt while ``review/a`` waits in the spool with attempt 1: its first is 1."""
+        with monkeypatch.context() as failing:
+            failing.setattr(cost_ledger, "_append_record", _enospc)
+            waiting = cost_ledger.record_run(_run(run_id=RUN_SLASH), ledger_path=ledger)
+        underscore = cost_ledger.record_next_attempt(PROJECT, "gate", "review_a", _make_run, ledger_path=ledger)
+        slash = cost_ledger.record_next_attempt(PROJECT, "gate", "review/a", _make_run, ledger_path=ledger)
+
+        assert waiting.landed == "spool"
+        assert (underscore["run_id"], underscore.landed) == (RUN_UNDERSCORE, "ledger")
+        assert (slash["run_id"], slash.landed) == (f"{PROJECT}:gate:review/a:2", "ledger")
+        assert _lines(ledger) == [underscore, slash]
+
+    @pytest.mark.parametrize("held", ["another run's record", "its own record and another run's"])
+    def test_a_spool_file_with_a_record_of_another_run_counts_for_neither(self, ledger, held):
+        """The file of run A holds a record of run B: unreadable, never A's line and never B's."""
+        own, other = cost_ledger.build_record(_run()), cost_ledger.build_record(_run(run_id=RUN_B1))
+        _spool_dir(ledger).mkdir(parents=True)
+        records = [other] if held == "another run's record" else [own, other]
+        cost_ledger.spool_file_for(_spool_dir(ledger), RUN_A1).write_text(json.dumps(records), encoding="utf-8")
+        before = sorted(path.read_bytes() for path in _spool_dir(ledger).iterdir())
+
+        totals = cost_ledger.aggregate_runs(ledger)
+        assert (totals.spool_pending, totals.spool_unreadable) == (0, True)
+        assert totals.incomplete == "onvolledig: de spool is niet te lezen"
+
+        b_charge = cost_ledger.record_run(_run(run_id=RUN_B1), ledger_path=ledger)
+        assert b_charge.landed == "ledger", "run B waits nowhere: its record in A's file is not its line"
+        with pytest.raises(cost_ledger.CostLedgerWriteError) as checked:
+            cost_ledger.record_run(_run(), ledger_path=ledger)
+        assert "could not be checked" in str(checked.value) and "was not written" in str(checked.value)
+        with pytest.raises(cost_ledger.CostLedgerWriteError) as counted:
+            cost_ledger.record_next_attempt(PROJECT, "dispatch", "20261020-kp-x", _make_run, ledger_path=ledger)
+        assert "could not be counted" in str(counted.value) and "nothing was written" in str(counted.value)
+        assert _lines(ledger) == [b_charge]
+        assert sorted(path.read_bytes() for path in _spool_dir(ledger).iterdir()) == before
+
+
+# ---------------------------------------------------------------------------
+# A spool that fails in or after its replace (round 2 of #2150)
+# ---------------------------------------------------------------------------
+
+
+class TestASpoolThatFailsAfterItsReplace:
+    @pytest.mark.parametrize("ledger_fails, known", [
+        ("open", "the outcome is unknown, the line may be in the spool"),
+        ("append", "the outcome is unknown, the line may be in the ledger and may be in the spool"),
+    ])
+    def test_the_message_says_the_line_may_be_in_the_spool(self, ledger, monkeypatch, ledger_fails, known):
+        """The replace put the whole record in the spool; only the directory fsync failed, so it is unconfirmed."""
+        if ledger_fails == "open":
+            ledger.mkdir(parents=True)
+        else:
+            monkeypatch.setattr(cost_ledger, "_append_record", _enospc)
+        monkeypatch.setattr(cost_ledger, "_fsync_dir", _eio)
+
+        with pytest.raises(cost_ledger.CostLedgerWriteError) as raised:
+            cost_ledger.record_run(_run(), ledger_path=ledger)
+
+        error = raised.value
+        (spooled,) = _spooled(ledger)
+        assert error.errno == error.__cause__.errno == errno.EIO
+        assert known in str(error) and "neither the ledger nor the spool" not in str(error)
+        assert str(error).endswith("book no new attempt for it")
+        assert spooled["run_id"] == RUN_A1 and spooled["record_id"] in str(error)
 
 
 # ---------------------------------------------------------------------------

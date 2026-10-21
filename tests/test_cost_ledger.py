@@ -35,6 +35,7 @@ from __future__ import annotations
 import dataclasses
 import errno
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -98,7 +99,7 @@ def _spool_dir(ledger_path: Path) -> Path:
 
 def _spooled(ledger_path: Path, run_id: str = RUN_A1) -> list:
     """The records waiting in the spool for ``run_id``, in order; none when the run has no spool file."""
-    path = _spool_dir(ledger_path) / f"{run_id}.json"
+    path = cost_ledger.spool_file_for(_spool_dir(ledger_path), run_id)
     return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
 
 
@@ -579,7 +580,9 @@ class TestAFailedAppendLandsInTheSpool:
         record = cost_ledger.record_run(_run(), ledger_path=ledger)
 
         assert _spooled(ledger) == [record]
-        assert sorted(path.name for path in _spool_dir(ledger).iterdir()) == [f"{RUN_A1}.json"]
+        assert sorted(path.name for path in _spool_dir(ledger).iterdir()) == [
+            f"{RUN_A1}~{hashlib.sha256(RUN_A1.encode('utf-8')).hexdigest()[:16]}.json",
+        ]
         assert record.landed == _WHERE_THE_APPEND_FAILS[where]
         assert not (ledger.parent.parent / "health").exists()
 

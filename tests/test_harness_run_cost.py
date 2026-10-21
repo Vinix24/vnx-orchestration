@@ -182,7 +182,7 @@ def broken_spool(store):
 
 def _spooled(store, run_id) -> list:
     """The records waiting in the spool for ``run_id``; none when the run has no spool file."""
-    path = store.ledger.parent / "provider_costs.spool" / f"{run_id}.json"
+    path = cost_ledger.spool_file_for(store.ledger.parent / "provider_costs.spool", run_id)
     return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
 
 
