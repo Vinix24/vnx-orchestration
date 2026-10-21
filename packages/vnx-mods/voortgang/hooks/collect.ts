@@ -1,6 +1,7 @@
 import type { PluginOptions, ProcessRunInit, ProcessRunResult } from 'claude-code'
 
 import type {
+  Builder,
   DeliverableView,
   IndexView,
   LiveWork,
@@ -10,6 +11,7 @@ import type {
   Part,
   Pr,
   ProjectModel,
+  Running,
   StateView,
   TrackView,
 } from '../types'
@@ -30,6 +32,11 @@ export const RUN_TIMEOUT_MS = 10_000
 export const MIN_REFRESH_SECONDS = 15
 export const INDEX_FILE = 't0_index.json'
 export const STATE_FILE = 't0_state.json'
+export const DB_FILE = 'runtime_coordination.db'
+export const SPEC_FILE = 'dispatch-spec.json'
+export const INSTRUCTION_FILE = 'instruction.md'
+/** How much of `instruction.md` is searched for its first `# ` line, in characters. */
+export const INSTRUCTION_BUDGET = 4096
 
 const DEFAULT_DATA_ROOT = '~/.vnx-data'
 const DEFAULT_VNX_BIN = '~/.vnx-system/current/bin/vnx'
@@ -42,6 +49,7 @@ type Json = Record<string, unknown>
 
 const ok = <T>(value: T): Part<T> => ({ isOk: true, value })
 const fail = <T>(reason: string): Part<T> => ({ isOk: false, reason })
+const andThen = <A, B>(part: Part<A>, next: (value: A) => Part<B>): Part<B> => (part.isOk ? next(part.value) : fail(part.reason))
 const isRecord = (value: unknown): value is Json => typeof value === 'object' && value !== null && !Array.isArray(value)
 const isCount = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value)
 const textOr = (value: unknown, fallback: string): string => (typeof value === 'string' && value !== '' ? value : fallback)
@@ -63,7 +71,7 @@ const idsOf = (value: unknown): string[] =>
 /** The reason a rejected `exists`, `read`, `list` or `run` is shown with. */
 const unavailableOf = (error: unknown): `onbeschikbaar: ${string}` => `onbeschikbaar: ${messageOf(error)}`
 
-function messageOf(error: unknown): string {
+export function messageOf(error: unknown): string {
   const text = error instanceof Error ? error.message : String(error)
   const line = text.split('\n')[0] ?? ''
 
@@ -168,6 +176,44 @@ function blockOf(value: unknown, name: string): Part<Json> {
   return ok(value)
 }
 
+/** The most entries the index producer keeps in `live` (`_INDEX_LIVE_WORK_LIVE_CAP` in `scripts/build_t0_state.py`). */
+export const INDEX_LIVE_CAP = 8
+
+/**
+ * The builders in the index. The producer writes `live` with the live and the starting entries together, capped,
+ * and no `starting` list; a `starting` list is read too when it is there. A list that is absent stands only for a
+ * count of zero.
+ */
+function runningOf(block: Json, counts: Json): Part<Running[]> {
+  const running: Running[] = []
+
+  for (const name of ['live', 'starting'] as const) {
+    const list = block[name]
+
+    if (list === undefined) {
+      if (name === 'live' && (counts.live as number) + (counts.starting as number) > 0) {
+        return fail('live ontbreekt')
+      }
+
+      continue
+    }
+
+    if (!Array.isArray(list)) {
+      return fail(`${name} ontbreekt`)
+    }
+
+    for (const entry of list) {
+      if (!isRecord(entry) || typeof entry.dispatch_id !== 'string' || entry.dispatch_id === '') {
+        return fail(`${name}: bouwer zonder dispatch_id`)
+      }
+
+      running.push({ dispatchId: entry.dispatch_id, ageSeconds: isCount(entry.age_seconds) ? entry.age_seconds : null })
+    }
+  }
+
+  return ok(running)
+}
+
 function liveWorkOf(value: unknown): Part<LiveWork> {
   const block = blockOf(value, 'live_work')
 
@@ -187,6 +233,7 @@ function liveWorkOf(value: unknown): Part<LiveWork> {
     stale: counts.stale as number,
     unmeasured: counts.unmeasured as number,
     liveIds: idsOf(block.value.live),
+    running: runningOf(block.value, counts),
   })
 }
 
@@ -275,8 +322,13 @@ export function trackViewOf(json: unknown): Part<TrackView> {
   }
 
   const view: TrackView = { now: [], next: 0, later: 0, unplanned: 0 }
+  const malformed = json.findIndex(one => !isRecord(one))
 
-  for (const track of json.filter(isRecord)) {
+  if (malformed >= 0) {
+    return fail(`vnx gaf geen object op plaats ${malformed + 1}`)
+  }
+
+  for (const track of json as Json[]) {
     if (track.horizon === 'now') {
       const phase = textOr(track.phase, '?')
       const derived = track.derived_status
@@ -307,8 +359,13 @@ export function deliverableViewOf(json: unknown): Part<DeliverableView> {
   }
 
   const view: DeliverableView = { byTrack: dictionaryOf(), proposed: 0 }
+  const malformed = json.findIndex(one => !isRecord(one))
 
-  for (const deliverable of json.filter(isRecord)) {
+  if (malformed >= 0) {
+    return fail(`vnx gaf geen object op plaats ${malformed + 1}`)
+  }
+
+  for (const deliverable of json as Json[]) {
     const track = textOr(deliverable.track, '?')
     const status = textOr(deliverable.derived_status, 'onbekend')
     const counts = view.byTrack[track] ?? dictionaryOf<number>()
@@ -324,11 +381,7 @@ export function deliverableViewOf(json: unknown): Part<DeliverableView> {
   return ok(view)
 }
 
-const andThen = <A, B>(part: Part<A>, next: (value: A) => Part<B>): Part<B> => (part.isOk ? next(part.value) : fail(part.reason))
-
-async function readJson(io: Io, store: string, name: string): Promise<Part<unknown>> {
-  const path = `${store}/${name}`
-
+async function readText(io: Io, path: string, name: string): Promise<Part<string>> {
   try {
     if (!(await io.exists(path))) {
       return fail(`${name} ontbreekt`)
@@ -337,15 +390,120 @@ async function readJson(io: Io, store: string, name: string): Promise<Part<unkno
     return fail(unavailableOf(error))
   }
 
-  let text: string
-
   try {
-    text = await io.read(path)
+    return ok(await io.read(path))
   } catch (error) {
     return fail(`${name} ${unavailableOf(error)}`)
   }
+}
 
-  return parseJson(text)
+const readJson = async (io: Io, path: string, name: string): Promise<Part<unknown>> => andThen(await readText(io, path, name), parseJson)
+
+/** Whether a file exists, or why that could not be told. */
+async function existsPart(io: Io, path: string): Promise<Part<boolean>> {
+  try {
+    return ok(await io.exists(path))
+  } catch (error) {
+    return fail(unavailableOf(error))
+  }
+}
+
+/**
+ * The first line that starts with `# ` in the first `INSTRUCTION_BUDGET` characters,
+ * without the `# `. The engine reads a file whole, so the rest of the text is dropped
+ * here and nothing of it is kept: no other line is looked at or shown.
+ */
+export function titleOf(text: string): Part<string> {
+  const isCut = text.length > INSTRUCTION_BUDGET
+  const lines = (isCut ? text.slice(0, INSTRUCTION_BUDGET) : text).split('\n')
+
+  if (isCut) {
+    // The last line ends at the budget, not at its own end: it may be cut in half.
+    lines.pop()
+  }
+
+  for (const line of lines) {
+    if (line.startsWith('# ')) {
+      const title = line.slice(2).replace(/[\u0000-\u001f\u007f]/g, ' ').trim()
+
+      return title === '' ? fail('lege titelregel') : ok(title)
+    }
+  }
+
+  return fail(isCut ? `geen titelregel in de eerste ${INSTRUCTION_BUDGET} tekens` : 'geen titelregel')
+}
+
+/** `role` and `model` of a dispatch spec. */
+export function whoOf(json: unknown): Part<{ role: string; model: string }> {
+  if (!isRecord(json)) {
+    return fail('spec is geen JSON-object')
+  }
+
+  const { role, model } = json
+
+  if (typeof role !== 'string' || role === '') {
+    return fail('role ontbreekt')
+  }
+
+  if (typeof model !== 'string' || model === '') {
+    return fail('model ontbreekt')
+  }
+
+  return ok({ role, model })
+}
+
+/** The minutes of an `age_seconds`, whole. */
+export function minutesOf(ageSeconds: number | null): Part<number> {
+  return ageSeconds === null ? fail('age_seconds ontbreekt') : ok(Math.floor(Math.max(0, ageSeconds) / 60))
+}
+
+/** One builder: its spec, the first title line of its instruction, and its age; each part on its own. */
+async function builderOf(io: Io, dir: string, entry: Running): Promise<Builder> {
+  const minutes = minutesOf(entry.ageSeconds)
+
+  if (!isProjectId(entry.dispatchId)) {
+    return { who: fail('ongeldige dispatch-id'), task: fail('ongeldige dispatch-id'), minutes }
+  }
+
+  const base = `${dir}/${entry.dispatchId}`
+  const who = andThen(await readJson(io, `${base}/${SPEC_FILE}`, SPEC_FILE), whoOf)
+  const task = andThen(await readText(io, `${base}/${INSTRUCTION_FILE}`, INSTRUCTION_FILE), titleOf)
+
+  return { who, task, minutes }
+}
+
+/** The builders of a project, in the order of the index: `live` first, then `starting`. */
+async function buildersOf(io: Io, root: string, id: string, index: Part<IndexView>): Promise<Part<Builder[]>> {
+  if (!index.isOk) {
+    return fail(index.reason)
+  }
+
+  const { liveWork } = index.value
+
+  if (!liveWork.isOk) {
+    return fail(liveWork.reason)
+  }
+
+  const { running } = liveWork.value
+
+  if (!running.isOk) {
+    return fail(running.reason)
+  }
+
+  const dir = `${root.replace(/\/+$/, '')}/${id}/dispatches/pending`
+
+  return ok(await Promise.all(running.value.map(entry => builderOf(io, dir, entry))))
+}
+
+/** Builders the counts name that the index lists no entry for: its list is capped, the counts are not. */
+function omittedOf(index: Part<IndexView>, builders: Part<Builder[]>): number {
+  if (!index.isOk || !index.value.liveWork.isOk || !builders.isOk) {
+    return 0
+  }
+
+  const { live, starting } = index.value.liveWork.value
+
+  return Math.max(0, live + starting - builders.value.length)
 }
 
 async function runJson(io: Io, argv: string[], store: string): Promise<Part<unknown>> {
@@ -387,12 +545,24 @@ export async function collectProject(io: Io, id: string, root: string, bin: stri
     return { id, hasStore: false, reason: unavailableOf(error) }
   }
 
-  const index = andThen(await readJson(io, store, INDEX_FILE), json => indexViewOf(json, now))
-  const state = andThen(await readJson(io, store, STATE_FILE), json => stateViewOf(json, now))
+  const index = andThen(await readJson(io, `${store}/${INDEX_FILE}`, INDEX_FILE), json => indexViewOf(json, now))
+  const state = andThen(await readJson(io, `${store}/${STATE_FILE}`, STATE_FILE), json => stateViewOf(json, now))
+  const builders = await buildersOf(io, root, id, index)
+  const buildersOmitted = omittedOf(index, builders)
+
+  // `vnx objective list` and `vnx deliverable list` create the database when the store has none; the mod writes nothing.
+  const hasDb = await existsPart(io, `${store}/${DB_FILE}`)
+
+  if (!hasDb.isOk || !hasDb.value) {
+    const reason = hasDb.isOk ? `${DB_FILE} ontbreekt` : hasDb.reason
+
+    return { id, hasStore: true, index, state, tracks: fail(reason), deliverables: fail(reason), builders, buildersOmitted }
+  }
+
   const tracks = andThen(await runJson(io, objectiveArgv(bin, id, store), store), trackViewOf)
   const deliverables = andThen(await runJson(io, deliverableArgv(bin, id, store), store), deliverableViewOf)
 
-  return { id, hasStore: true, index, state, tracks, deliverables }
+  return { id, hasStore: true, index, state, tracks, deliverables, builders, buildersOmitted }
 }
 
 /**
@@ -458,7 +628,9 @@ export function isUnreadable(project: ProjectModel): boolean {
     !state.isOk ||
     !state.value.prs.isOk ||
     !tracks.isOk ||
-    !deliverables.isOk
+    !deliverables.isOk ||
+    !project.builders.isOk ||
+    project.builders.value.some(builder => !builder.who.isOk || !builder.task.isOk || !builder.minutes.isOk)
   )
 }
 
@@ -476,6 +648,8 @@ const liveOf = (project: ProjectModel): number | null =>
   project.hasStore && project.index.isOk && project.index.value.liveWork.isOk ? project.index.value.liveWork.value.live : null
 const openOf = (project: ProjectModel): number | null =>
   project.hasStore && project.index.isOk && project.index.value.outcomes.isOk ? project.index.value.outcomes.value.total : null
+const builderCountOf = (project: ProjectModel): number | null =>
+  project.hasStore && project.builders.isOk ? project.builders.value.length + project.buildersOmitted : null
 const prCountOf = (project: ProjectModel): number | null =>
   project.hasStore && project.state.isOk && project.state.value.prs.isOk ? project.state.value.prs.value.length : null
 
@@ -498,7 +672,7 @@ export function statusLine(model: Model): string {
 
   const unreadable = model.projects.filter(isUnreadable).length
   const outdated = model.projects.filter(isOutdated).length
-  const parts = ['voortgang', `${sumOf(model, liveOf)} live`, `${sumOf(model, prCountOf)} PR`, `${sumOf(model, openOf)} open`]
+  const parts = ['voortgang', `${sumOf(model, liveOf)} live`, `${sumOf(model, prCountOf)} PR`, `${sumOf(model, openOf)} open`, `${sumOf(model, builderCountOf)} bouwers`]
 
   if (unreadable > 0) {
     parts.push(`${unreadable} onleesbaar`)
@@ -543,6 +717,7 @@ function summaryOf(project: ProjectModel): string {
     parts.push('tracks onbeschikbaar')
   }
 
+  parts.push(project.builders.isOk ? `${project.builders.value.length + project.buildersOmitted} bouwers` : 'bouwers onbeschikbaar')
   parts.push(deliverables.isOk ? `${deliverables.value.proposed} te promoveren` : 'leveringen onbeschikbaar')
 
   if (isOutdated(project)) {

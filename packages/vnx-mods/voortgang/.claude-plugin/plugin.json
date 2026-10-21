@@ -1,7 +1,7 @@
 {
   "name": "voortgang",
-  "version": "0.1.0",
-  "description": "A VNX mod: shows VNX progress per project in a pane and a status line: live work, open outcomes, open PRs with their review seats, now-tracks and deliverables waiting on a promote.",
+  "version": "0.2.1",
+  "description": "A VNX mod: shows VNX progress per project in a pane and a status line: live work and its builders, open outcomes, open PRs with their review seats, now-tracks and deliverables waiting on a promote.",
   "types": "./types/index.d.ts",
   "userConfig": {
     "exclude": {

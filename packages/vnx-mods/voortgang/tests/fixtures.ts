@@ -9,6 +9,10 @@ export const NOW = Date.parse('2026-10-20T16:00:00.000Z')
 export const storeOf = (project: string) => `${ROOT}/${project}/state`
 export const indexOf = (project: string) => `${storeOf(project)}/t0_index.json`
 export const stateOf = (project: string) => `${storeOf(project)}/t0_state.json`
+export const dbOf = (project: string) => `${storeOf(project)}/runtime_coordination.db`
+export const dispatchOf = (project: string, dispatch: string) => `${ROOT}/${project}/dispatches/pending/${dispatch}`
+export const specOf = (project: string, dispatch: string) => `${dispatchOf(project, dispatch)}/dispatch-spec.json`
+export const instructionOf = (project: string, dispatch: string) => `${dispatchOf(project, dispatch)}/instruction.md`
 
 /** A timestamp `minutes` before NOW, spelled as build_t0_state writes it: microseconds and `+00:00`. */
 export const stampMinutesAgo = (minutes: number) => new Date(NOW - minutes * 60_000).toISOString().replace('Z', '000+00:00')
@@ -19,11 +23,24 @@ export const CONTENT = 'KLANTINHOUD'
 export const LIVE_WORK = {
   available: true,
   counts: { live: 1, starting: 0, stale: 4, unmeasured: 0 },
-  live: [{ dispatch_id: 'd-live-1', state: 'running', age_seconds: 30, pr: null }],
+  live: [{ dispatch_id: 'd-live-1', state: 'running', age_seconds: 725, pr: null }],
   stale: [{ dispatch_id: 'd-stale-1', state: 'stale', age_seconds: 9000, lock: 'x' }],
   unmeasured: [],
   open_prs: [],
 }
+
+/**
+ * `live_work` as `_live_work_index_summary` writes it: `live` holds the live and the starting entries together, there
+ * is no `starting` list, the list is capped at eight and `counts` keeps the totals.
+ */
+export const producerLiveWork = (live: number, starting: number, listed = Math.min(live + starting, 8)) => ({
+  available: true,
+  counts: { live, starting, stale: 0, unmeasured: 0 },
+  live: Array.from({ length: listed }, () => ({ dispatch_id: 'd-live-1', state: starting > 0 ? 'starting' : 'running', age_seconds: 725, pr: null })),
+  stale: [],
+  unmeasured: [],
+  open_prs: [],
+})
 
 export const OUTCOMES = {
   available: true,
@@ -115,10 +132,18 @@ export const DELIVERABLES = [
   deliverable('l1', 'proposed'),
 ]
 
-/** The two files of a healthy store. */
+export const SPEC = { role: 'backend-developer', model: 'sonnet', provider: 'claude', instruction_file: CONTENT }
+
+/** An instruction whose first `# ` line is the task; the lines around it must never reach the pane. */
+export const instructionText = (title: string) => `Preface line ${CONTENT}\n## Not a title\n# ${title}\n\nBody ${CONTENT}\n# Second title ${CONTENT}\n`
+
+/** The files of a healthy store: the two state files, the database, and the spec and instruction of its one builder. */
 export const healthyFiles = (project: string): Record<string, string> => ({
   [indexOf(project)]: indexJson(),
   [stateOf(project)]: stateJson(),
+  [dbOf(project)]: '',
+  [specOf(project, 'd-live-1')]: JSON.stringify(SPEC),
+  [instructionOf(project, 'd-live-1')]: instructionText('Invented task: add the block'),
 })
 
 export type RunAnswer = { exitCode: number; stdout: string } | { deny: string }
@@ -166,6 +191,8 @@ export type WorldSetup = {
   env?: Record<string, string>
   /** The reason `$.ui.open` gives when it does not place the pane; placed when absent. */
   unplaced?: string
+  /** The reason reading the environment is denied, which makes a refresh reject; reads fine when absent. */
+  envDeny?: string
 }
 
 /** The engine beneath the mod, in memory: the file tree, `vnx`, the display, and a record of each call. */
@@ -244,7 +271,7 @@ export function worldOf(on: On, setup: WorldSetup): World {
     }
   })
 
-  on('env.get', ($, e) => ({ value: env[e.name] }))
+  on('env.get', ($, e) => (setup.envDeny === undefined ? { value: env[e.name] } : { deny: setup.envDeny }))
 
   on('ui.status', ($, e) => {
     world.statuses.push(e.text)

@@ -4,6 +4,13 @@
  */
 export type Part<T> = { isOk: true; value: T } | { isOk: false; reason: string }
 
+/** One entry of `live_work.live` or `live_work.starting`: a dispatch that runs, and for how long. */
+export type Running = {
+  dispatchId: string
+  /** `age_seconds`; null when the entry carries none. */
+  ageSeconds: number | null
+}
+
 /** `live_work` of `t0_index.json`: the counts, and the dispatch ids that run. */
 export type LiveWork = {
   live: number
@@ -11,6 +18,18 @@ export type LiveWork = {
   stale: number
   unmeasured: number
   liveIds: string[]
+  /** The `live` and `starting` entries, the builders; `stale` and `unmeasured` entries are not builders. */
+  running: Part<Running[]>
+}
+
+/** One builder: a dispatch in `live` or `starting`, as three parts that each stand or fall on their own. */
+export type Builder = {
+  /** `role` and `model` of the dispatch's `dispatch-spec.json`. */
+  who: Part<{ role: string; model: string }>
+  /** The first `# ` line of the dispatch's `instruction.md`. */
+  task: Part<string>
+  /** Whole minutes of the entry's `age_seconds`. */
+  minutes: Part<number>
 }
 
 /** `open_outcomes` of `t0_index.json`: what still waits on a decision. */
@@ -90,6 +109,9 @@ export type ProjectModel =
       state: Part<StateView>
       tracks: Part<TrackView>
       deliverables: Part<DeliverableView>
+      builders: Part<Builder[]>
+      /** `counts.live + counts.starting` minus the entries the index lists: its list is capped, the counts are not. */
+      buildersOmitted: number
     }
 
 /** What the pane and the status line draw from. */
@@ -103,6 +125,6 @@ export type Model = {
 
 declare module 'claude-code' {
   interface PluginState {
-    voortgang: { model: Model | null; isRefreshing: boolean }
+    voortgang: { model: Model | null; isRefreshing: boolean; failure: string | null }
   }
 }

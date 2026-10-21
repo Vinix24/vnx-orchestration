@@ -2,6 +2,32 @@
 
 All notable changes to this plugin are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the plugin follows [Semantic Versioning](https://semver.org/).
 
+## [0.2.1] - 2026-10-21
+
+### Fixed
+
+- The block "Bouwers" read a `starting` list that the index does not write. One starting dispatch made the whole block `onbeschikbaar: starting ontbreekt`. The mod now reads the shape `_live_work_index_summary` writes: `live` with the live and the starting entries together, no `starting` list. A `starting` list is still read when there is one.
+- The number of builders came from the length of the list, which the index caps at eight. Nine live dispatches showed `8 bouwers`. The pane and the status line now take `counts.live + counts.starting`, and the pane adds `+N niet getoond (index toont er max. 8)` for the entries the index did not list.
+- A project whose builder had an unreadable `who`, `task` or `minutes` field was not counted as unreadable. The status line now says `onleesbaar` for it.
+
+## [0.2.0] - 2026-10-20
+
+### Added
+
+- The block "Bouwers" in the pane: every dispatch in `live_work.live` and `live_work.starting`, with the `role` and `model` of its `dispatch-spec.json`, the first `# ` line of its `instruction.md` and its `age_seconds` in whole minutes. A field that cannot be read is `onbeschikbaar: <reason>` for that field of that builder only. `stale` and `unmeasured` entries are left out.
+- `N bouwers` in the status line.
+- A refresh that rejects is shown as `voortgang · verversen mislukt: <reason>` in the status line and as the first pane row.
+
+### Fixed
+
+- A malformed entry in the list of `vnx objective list` or `vnx deliverable list` was dropped silently, so `[null]` read as success with nothing proposed. That part is now `onbeschikbaar: vnx gaf geen object op plaats <n>`.
+- Each list had its own row budget, so a project with PRs of two rows and many tracks drew more rows than the pane has. The builders, the PRs and the tracks now share the rows, and a cut list keeps a row for `+N meer`.
+- "It writes nothing" did not hold: for a store with `t0_index.json` or `t0_state.json` but without `runtime_coordination.db`, `vnx objective list` and `vnx deliverable list` create that database. `vnx` is no longer run for such a store; tracks and deliverables show `onbeschikbaar: runtime_coordination.db ontbreekt`.
+- A data root that could not be listed showed `Voortgang · 0 projecten`; the header now says `aantal onbekend`.
+- The empty state pointed to an option `projects` that does not exist; it names `exclude` and `data_root`.
+- Rows were cut on code points; they are now cut on display cells, so wide and combining characters stay within the pane.
+- The refresh at session start, on the timer and on the button had no `.catch`; every refresh path handles a rejection and shows it.
+
 ## [0.1.0] - 2026-10-20
 
 voortgang is a VNX mod. It lives in `packages/vnx-mods/voortgang/` and ships with a VNX release; it is not exported to the public claude-code-toolkit.
