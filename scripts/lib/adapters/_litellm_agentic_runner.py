@@ -300,11 +300,18 @@ def _is_retryable(msg: str) -> bool:
     ))
 
 
-def main() -> int:
+def _read_payload() -> Optional[dict]:
+    """The JSON request on stdin, or None after emitting the parse error."""
     try:
-        payload = json.loads(sys.stdin.read())
+        return json.loads(sys.stdin.read())
     except Exception as exc:  # noqa: BLE001
         _emit({"error_type": "runner_error", "message": f"stdin parse error: {exc}"})
+        return None
+
+
+def main() -> int:
+    payload = _read_payload()
+    if payload is None:
         return _EXIT_ERR
 
     model = payload.get("model", "")

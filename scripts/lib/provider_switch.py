@@ -614,21 +614,25 @@ def _project_of_state_dir(state_dir: Path) -> Optional[str]:
 
 
 def worker_env_stamps(dispatch_id: Optional[str], *, project_id: Optional[str] = None,
-                      state_dir: Optional[Path] = None) -> Dict[str, str]:
+                      state_dir: Optional[Path] = None, resolve: bool = True) -> Dict[str, str]:
     """The two variables a VNX launcher puts into every worker environment it builds.
 
     ``VNX_PROJECT_ID`` is the project the launcher decides for, so a decision inside the worker
     (a launch function, ``vnx providers check``) is for the same project as the door's: the
     explicit ``project_id``, else the project of ``state_dir`` (the store the dispatch belongs
-    to), else the process project (:func:`resolve_project`). It is left out when none resolves
-    to a valid project id, and for the explicit ``"global"``. ``VNX_WORKER_DISPATCH_ID`` is the
-    dispatch the worker runs for: a dispatch marker that survives a change of directory, so the
-    write verbs refuse inside every worker (``DISPATCH_MARKER_ENV``).
+    to), else the process project (:func:`resolve_project`). ``resolve=False`` skips that last
+    step, which may start ``git``: the innermost launcher passes on a project it already has
+    and starts nothing of its own. It is left out when none resolves to a valid project id,
+    and for the explicit ``"global"``. ``VNX_WORKER_DISPATCH_ID`` is the dispatch the worker
+    runs for: a dispatch marker that survives a change of directory, so the write verbs refuse
+    inside every worker (``DISPATCH_MARKER_ENV``).
     """
     if isinstance(project_id, str) and project_id.strip():
         pid = resolve_project(project_id)
     else:
-        pid = (_project_of_state_dir(state_dir) if state_dir is not None else None) or resolve_project(None)
+        pid = _project_of_state_dir(state_dir) if state_dir is not None else None
+        if pid is None and resolve:
+            pid = resolve_project(None)
     stamps: Dict[str, str] = {}
     if pid and PROJECT_ID_RE.match(pid):
         stamps[PROJECT_ENV] = pid

@@ -2077,17 +2077,46 @@ def _refuse_switched_off(args: argparse.Namespace, provider: str, decision: Any)
     return provider_switch.EXIT_PROVIDER_SWITCHED_OFF
 
 
+def _reject_claude_provider(args: argparse.Namespace) -> int:
+    """PR-5: claude is not a provider-lane provider. The single-entry door owns all Claude
+    routing. Silent headless auto-selection via provider_dispatch is removed — use
+    DispatchSpec with allow_headless=true through the door instead."""
+    print(
+        "[provider_dispatch] REJECT: 'claude' is not a provider-lane provider. "
+        "Claude dispatches route via the single-entry dispatch door. "
+        "Use 'vnx dispatch <pending-id>' (VNX_SINGLE_ENTRY_DISPATCH=1) or "
+        "'python3 scripts/lib/dispatch_cli.py --spec-file <path>'. "
+        "For headless/api-billed runs set allow_headless=true in the DispatchSpec.",
+        file=sys.stderr,
+    )
+    try:
+        _emit_refusal_receipt(
+            args, "claude", getattr(args, "model", None) or "claude",
+            "claude is not a provider-lane provider (route via the single-entry dispatch door)",
+        )
+    except Exception as _ref_exc:
+        logger.error(
+            "provider_dispatch: refusal receipt failed for claude reject dispatch=%s: %s",
+            args.dispatch_id, _ref_exc,
+        )
+    return _EX_USAGE
+
+
 def _provider_switch_refusal(args: argparse.Namespace, provider: str) -> Optional[int]:
     """Exit code of the named refusal when the switch refuses ``provider``, else None.
 
-    Bare ``litellm`` names no model maker until ``_dispatch_litellm`` resolves the model, so
-    it is decided at launch (layer 1) on the resolved model; main turns a refusal raised
-    there into the same named refusal.
+    A litellm form that names no model maker the family map knows (bare ``litellm``,
+    ``litellm:openrouter``, ``litellm:openrouter:<vendor>/<model>``, ``litellm:<alias>``) is
+    decided at launch (layer 1) on the model ``_dispatch_litellm`` resolves; main turns a
+    refusal raised there into the same named refusal.
     """
     import provider_switch
 
-    if provider == "litellm":
-        return None
+    if provider.startswith("litellm"):
+        try:
+            provider_switch.family_of(provider)
+        except provider_switch.UnknownProviderError:
+            return None
     decision = provider_switch.decide(provider, consumer="provider_dispatch")
     if decision.allowed:
         return None
@@ -2304,6 +2333,15 @@ def _worker_role_env(
         )
 
     return env or None
+
+
+def _args_worker_env(args: argparse.Namespace) -> Optional[Dict[str, str]]:
+    """``_worker_role_env`` for a CLI dispatch: its role, its dispatch paths and its dispatch id."""
+    return _worker_role_env(
+        getattr(args, "role", None),
+        dispatch_paths=_resolve_dispatch_paths(getattr(args, "dispatch_paths", "") or ""),
+        dispatch_id=args.dispatch_id,
+    )
 
 
 def _dispatch_claude_benchmark(args: argparse.Namespace) -> int:
@@ -2716,11 +2754,7 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
             event_writer=event_store.append if event_store is not None else None,
             cwd=worker_cwd,
             total_deadline=float(getattr(args, "deadline_seconds", 900)),
-            extra_env=_worker_role_env(
-                getattr(args, "role", None),
-                dispatch_paths=_resolve_dispatch_paths(getattr(args, "dispatch_paths", "") or ""),
-                dispatch_id=args.dispatch_id,
-            ),
+            extra_env=_args_worker_env(args),
         )
         end_time = datetime.now(timezone.utc)
 
@@ -3212,11 +3246,7 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
                 event_writer=event_store.append if event_store is not None else None,
                 cwd=worker_cwd,
                 total_deadline=float(getattr(args, "deadline_seconds", 900)),
-                extra_env=_worker_role_env(
-                    getattr(args, "role", None),
-                    dispatch_paths=_resolve_dispatch_paths(getattr(args, "dispatch_paths", "") or ""),
-                    dispatch_id=args.dispatch_id,
-                ),
+                extra_env=_args_worker_env(args),
             )
         else:
             result = spawn_litellm(
@@ -3230,11 +3260,7 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
                 event_writer=event_store.append if event_store is not None else None,
                 cwd=worker_cwd,
                 total_deadline=float(getattr(args, "deadline_seconds", 900)),
-                extra_env=_worker_role_env(
-                    getattr(args, "role", None),
-                    dispatch_paths=_resolve_dispatch_paths(getattr(args, "dispatch_paths", "") or ""),
-                    dispatch_id=args.dispatch_id,
-                ),
+                extra_env=_args_worker_env(args),
             )
         end_time = datetime.now(timezone.utc)
 
@@ -3359,11 +3385,7 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
                 or (os.environ.get("VNX_TASK_CLASS", "") or "").strip()
             ) or None,
             total_deadline=float(getattr(args, "deadline_seconds", 900)),
-            extra_env=_worker_role_env(
-                getattr(args, "role", None),
-                dispatch_paths=_resolve_dispatch_paths(getattr(args, "dispatch_paths", "") or ""),
-                dispatch_id=args.dispatch_id,
-            ),
+            extra_env=_args_worker_env(args),
         )
         end_time = datetime.now(timezone.utc)
 
@@ -3528,11 +3550,7 @@ def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
             terminal_id=args.terminal_id,
             cwd=worker_cwd,
             total_deadline=float(args.deadline_seconds),
-            extra_env=_worker_role_env(
-                getattr(args, "role", None),
-                dispatch_paths=_resolve_dispatch_paths(getattr(args, "dispatch_paths", "") or ""),
-                dispatch_id=args.dispatch_id,
-            ),
+            extra_env=_args_worker_env(args),
         )
         end_time = datetime.now(timezone.utc)
         model_used = result.model or model
@@ -3618,11 +3636,7 @@ def _dispatch_glm_harness(args: argparse.Namespace) -> int:
             cwd=worker_cwd,
             event_writer=event_store.append if event_store is not None else None,
             total_deadline=float(args.deadline_seconds),
-            extra_env=_worker_role_env(
-                getattr(args, "role", None),
-                dispatch_paths=_resolve_dispatch_paths(getattr(args, "dispatch_paths", "") or ""),
-                dispatch_id=args.dispatch_id,
-            ),
+            extra_env=_args_worker_env(args),
         )
         end_time = datetime.now(timezone.utc)
         model_used = result.model or model
@@ -3714,11 +3728,7 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
             event_writer=event_store.append,
             cwd=worker_cwd,
             total_deadline=float(getattr(args, "deadline_seconds", 900)),
-            extra_env=_worker_role_env(
-                getattr(args, "role", None),
-                dispatch_paths=_resolve_dispatch_paths(getattr(args, "dispatch_paths", "") or ""),
-                dispatch_id=args.dispatch_id,
-            ),
+            extra_env=_args_worker_env(args),
         )
         end_time = datetime.now(timezone.utc)
 
@@ -4007,28 +4017,7 @@ def main(argv: list[str] | None = None) -> int:
                 and os.environ.get("VNX_BENCH_CLAUDE_HEADLESS") == "1"
             ):
                 return _dispatch_claude(args)
-            # PR-5: claude is not a provider-lane provider. The single-entry door owns
-            # all Claude routing. Silent headless auto-selection via provider_dispatch is
-            # removed — use DispatchSpec with allow_headless=true through the door instead.
-            print(
-                "[provider_dispatch] REJECT: 'claude' is not a provider-lane provider. "
-                "Claude dispatches route via the single-entry dispatch door. "
-                "Use 'vnx dispatch <pending-id>' (VNX_SINGLE_ENTRY_DISPATCH=1) or "
-                "'python3 scripts/lib/dispatch_cli.py --spec-file <path>'. "
-                "For headless/api-billed runs set allow_headless=true in the DispatchSpec.",
-                file=sys.stderr,
-            )
-            try:
-                _emit_refusal_receipt(
-                    args, "claude", getattr(args, "model", None) or "claude",
-                    "claude is not a provider-lane provider (route via the single-entry dispatch door)",
-                )
-            except Exception as _ref_exc:
-                logger.error(
-                    "provider_dispatch: refusal receipt failed for claude reject dispatch=%s: %s",
-                    args.dispatch_id, _ref_exc,
-                )
-            return _EX_USAGE
+            return _reject_claude_provider(args)
 
         if provider == "codex":
             _envelope_on = os.environ.get("VNX_UNIFIED_ENVELOPE") == "1"

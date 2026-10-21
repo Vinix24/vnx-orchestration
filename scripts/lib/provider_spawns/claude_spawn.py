@@ -61,6 +61,14 @@ def _received_env_value(
     return value.strip()
 
 
+def _env_seconds(name: str, default: float) -> float:
+    """``float(os.environ[name])``, or ``default`` when it is unset or not a number."""
+    try:
+        return float(os.environ[name])
+    except (KeyError, ValueError):
+        return default
+
+
 def _base_url_family(base_url: str, *, project_id: Optional[str]) -> str:
     """The provider family behind an ``ANTHROPIC_BASE_URL`` (the host-keyed check).
 
@@ -251,14 +259,8 @@ def spawn_claude(
         SLOW_THRESHOLD = 120.0
 
     # Apply env overrides (same logic as delivery.py for byte-identical timeouts).
-    try:
-        chunk_timeout = float(os.environ["VNX_CHUNK_TIMEOUT"])
-    except (KeyError, ValueError):
-        pass
-    try:
-        total_deadline = float(os.environ["VNX_TOTAL_DEADLINE"])
-    except (KeyError, ValueError):
-        pass
+    chunk_timeout = _env_seconds("VNX_CHUNK_TIMEOUT", chunk_timeout)
+    total_deadline = _env_seconds("VNX_TOTAL_DEADLINE", total_deadline)
 
     adapter = SubprocessAdapter()
     deliver_result = adapter.deliver(

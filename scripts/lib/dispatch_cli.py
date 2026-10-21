@@ -647,6 +647,24 @@ def _provider_switch_verdict(plan: "ExecutionPlan", *, project_id: Optional[str]
     return Reject("provider-disabled", decision.detail())
 
 
+def _lane_verdict(
+    plan: "ExecutionPlan", spec: "DispatchSpec", *, project_id: Optional[str], state_dir: Path,
+) -> Optional[Reject]:
+    """The door's lane refusal, or None: the provider switch first, then reachability.
+
+    A lane the operator switched off is refused ``provider-disabled`` and never reaches
+    ``_check_reachability``, so it is never probed and never becomes a reachability fact; a
+    known-rejected lane is refused ``lane-known-rejected``.
+    """
+    switch_reject = _provider_switch_verdict(plan, project_id=project_id)
+    if switch_reject is not None:
+        return switch_reject
+    reachability = _check_reachability(plan, spec, state_dir=state_dir)
+    if reachability.block:
+        return Reject("lane-known-rejected", reachability.reason)
+    return None
+
+
 def _check_reachability(
     plan: "ExecutionPlan", spec: "DispatchSpec", *, state_dir: Optional[Path] = None
 ) -> "ReachabilityVerdict":
@@ -3592,15 +3610,10 @@ def run_dispatch(
         # only after _print_plan, and never on a real fire — the 2026-08-16
         # kimi stampede (nine dispatches, one quota 403, eight minutes) fired
         # blind because a real fire never checked reachability at all.
-        # Provider-schakelaar B: the operator's switch is asked first, so a lane that
-        # is switched off is never probed and never becomes a reachability fact.
-        switch_reject = _provider_switch_verdict(plan, project_id=project_id)
-        if switch_reject is not None:
-            _emit_reject(switch_reject)
-            return 1
-        reachability = _check_reachability(plan, vspec.spec, state_dir=state_dir)
-        if reachability.block:
-            _emit_reject(Reject("lane-known-rejected", reachability.reason))
+        # Provider-schakelaar B: the operator's switch is asked first (_lane_verdict).
+        lane_reject = _lane_verdict(plan, vspec.spec, project_id=project_id, state_dir=state_dir)
+        if lane_reject is not None:
+            _emit_reject(lane_reject)
             return 1
 
         # Scout pre-pass (opt-in VNX_SCOUT_PREPASS, fail-open): a cheap key-auth

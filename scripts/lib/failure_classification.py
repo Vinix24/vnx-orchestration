@@ -331,19 +331,17 @@ def classify_failure(
             ),
         }
 
-    error_lower = (error or "").lower()
-
     # A caller-supplied `error` stays authoritative and completion_text is
     # never consulted for it. Only when `error` is empty does the provider's
     # failure text live solely in the completion (see module docstring) —
     # scan that instead so it is never silently discarded.
-    signal_text = error_lower if error else completion.lower()
+    signal_text = error.lower() if error else completion.lower()
 
     # ── provider switched off (before every keyword bag) ─────────────────
     # Only the caller-supplied error carries a switch refusal; a model's own
     # completion text never makes one. Matched first so a reason like "auth
     # rotation" in the decision detail can never turn it into auth_rejected.
-    if PROVIDER_SWITCHED_OFF in error_lower:
+    if error and PROVIDER_SWITCHED_OFF in signal_text:
         return {"failure_class": "provider_switched_off", "failure_reason": error}
 
     # ── credit / balance exhaustion ────────────────────────────────────────
@@ -391,8 +389,7 @@ def classify_failure(
         "bad gateway", "service unavailable",
     )
     if any(kw in signal_text for kw in model_keywords):
-        detail = error if error else _extract_detail(completion)
-        return {"failure_class": "model_error", "failure_reason": detail}
+        return {"failure_class": "model_error", "failure_reason": error if error else _extract_detail(completion)}
 
     # ── error present but no keyword match ───────────────────────────────
     if error:

@@ -39,9 +39,9 @@ _import_env = {
     "PROJECT_ROOT": tempfile.mkdtemp(),
 }
 with patch.dict(os.environ, _import_env):
-    from conversation_analyzer.deep_analyzer import DeepAnalyzer  # noqa: E402
+    from conversation_analyzer.deep_analyzer import DeepAnalyzer
 
-import provider_switch  # noqa: E402
+import provider_switch
 
 PROJECT = "launch-test"
 

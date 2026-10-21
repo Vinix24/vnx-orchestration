@@ -178,6 +178,23 @@ def _map_harness_spawn_result(result: Any, provider_str: str, model: Optional[st
     )
 
 
+def _plan_worker_env(plan: "ExecutionPlan", role: Optional[str]) -> Optional[Dict[str, str]]:
+    """``provider_dispatch._worker_role_env`` for a plan: its role, its dispatch paths in the
+    raw wire form, and (provider-schakelaar B) its dispatch id and project, so every spawn
+    decides the switch for the door's project and its worker carries the dispatch marker.
+
+    getattr defaults: some callers (tests, older plan-shaped stand-ins) construct a plan
+    without ``dispatch_paths`` or ``project_id`` — absent means "none declared", never a crash.
+    """
+    from dispatch_spec import dispatch_paths_raw
+    from provider_dispatch import _worker_role_env
+
+    return _worker_role_env(
+        role, dispatch_paths=dispatch_paths_raw(getattr(plan, "dispatch_paths", ())),
+        dispatch_id=plan.dispatch_id, project_id=getattr(plan, "project_id", None),
+    )
+
+
 class ProviderAdapter:
     """Routes provider-lane ExecutionPlan to the correct spawn function.
 
@@ -243,7 +260,7 @@ class ProviderAdapter:
         cwd: Optional[Path] = None,
         role: Optional[str] = None,
     ) -> _AdapterResult:
-        from dispatch_spec import Provider, dispatch_paths_raw  # noqa: PLC0415
+        from dispatch_spec import Provider  # noqa: PLC0415
         from provider_dispatch import (  # noqa: PLC0415
             _MLX_MODEL_MAP,
             _build_lane_key,
@@ -251,7 +268,6 @@ class ProviderAdapter:
             _resolve_deepseek_model,
             _resolve_moonshot_model,
             _resolve_zai_model,
-            _worker_role_env,
         )
 
         pv: "Provider" = plan.provider  # type: ignore[assignment]
@@ -275,13 +291,8 @@ class ProviderAdapter:
         # getattr with a () default: some callers (tests, older plan-shaped stand-ins)
         # construct a plan without this field — absent means "no paths declared",
         # never a crash.
-        # Provider-schakelaar B: the plan's project and dispatch id ride along, so every
-        # spawn below decides the switch for the door's project and its worker carries the
-        # dispatch marker.
-        role_env = _worker_role_env(
-            effective_role, dispatch_paths=dispatch_paths_raw(getattr(plan, "dispatch_paths", ())),
-            dispatch_id=plan.dispatch_id, project_id=getattr(plan, "project_id", None),
-        )
+        # Provider-schakelaar B: the plan's project and dispatch id ride along (_plan_worker_env).
+        role_env = _plan_worker_env(plan, effective_role)
 
         # ---- codex ----
         if pv == Provider.CODEX:
@@ -477,13 +488,12 @@ class ProviderAdapter:
         """
         project_id = getattr(plan, "project_id", None)
         provider_switch.require("kimi", consumer="envelope.provider_adapter.kimi", project_id=project_id)
-        from dispatch_spec import Provider, dispatch_paths_raw  # noqa: PLC0415
+        from dispatch_spec import Provider  # noqa: PLC0415
         from provider_spawns.kimi_spawn import spawn_kimi  # noqa: PLC0415
         from provider_dispatch import (  # noqa: PLC0415
             KimiModelResolutionError,
             _kimi_resolve_cli_model_arg,
             _kimi_resolve_requested_key,
-            _worker_role_env,
         )
 
         # Shared resolver (20260721-kimi-lane-hardening): args.model/plan.model >
@@ -504,10 +514,7 @@ class ProviderAdapter:
                 dispatch_id=plan.dispatch_id,
                 terminal_id=plan.target_id,
                 event_writer=event_writer,
-                extra_env=_worker_role_env(
-                    role, dispatch_paths=dispatch_paths_raw(getattr(plan, "dispatch_paths", ())),
-                    dispatch_id=plan.dispatch_id, project_id=project_id,
-                ),
+                extra_env=_plan_worker_env(plan, role),
                 cwd=cwd,
                 # worker-provider-kimi-flip (20260723): honor the spec's staged deadline
                 # instead of spawn_kimi's own hardcoded 900s default — a caller staging a

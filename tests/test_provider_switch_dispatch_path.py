@@ -33,14 +33,14 @@ for _p in (str(REPO / "scripts"), str(REPO / "scripts" / "lib")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-import dispatch_cli  # noqa: E402
-import failure_classification  # noqa: E402
-import provider_dispatch  # noqa: E402
-import provider_reachability  # noqa: E402
-import provider_switch  # noqa: E402
-from dispatch_plan import ModelPin, RuntimeSnapshot  # noqa: E402
-from providers.smart_router import availability  # noqa: E402
-from providers.smart_router.tier_routing import escalate_tier  # noqa: E402
+import dispatch_cli
+import failure_classification
+import provider_dispatch
+import provider_reachability
+import provider_switch
+from dispatch_plan import ModelPin, RuntimeSnapshot
+from providers.smart_router import availability
+from providers.smart_router.tier_routing import escalate_tier
 
 PROJECT = "proj-door"
 OTHER = "proj-other"
@@ -301,22 +301,33 @@ def test_provider_dispatch_refuses_by_name_before_constraints_and_budget(
     assert receipt["provider"] == _K and receipt["failure_reason"].startswith("provider_switched_off:")
 
 
-def test_provider_dispatch_turns_a_launch_refusal_into_the_same_named_refusal(
-        switch_file, store, monkeypatch, capsys):
-    """Bare ``litellm`` is decided at launch on the resolved model: main books that refusal by
-    name too, never as an uncaught spawn exception."""
-    write_switches(switch_file, global_={"deepseek": False})
+@pytest.mark.parametrize("provider", [
+    "litellm", "litellm:openrouter", "litellm:openrouter:anthropic/claude-3-haiku", f"litellm:{_K}-k2",
+])
+def test_a_litellm_form_without_a_known_maker_is_decided_at_launch(
+        provider, switch_file, store, monkeypatch, capsys):
+    """These forms name no maker the family map knows until ``_dispatch_litellm`` resolves the
+    model: main lets them through its own check, and books a refusal raised at launch (layer 1,
+    on the resolved model) by name too, never as an uncaught spawn exception."""
+    write_switches(switch_file, global_={"openrouter": False, "deepseek": False})
+    assert provider_dispatch._provider_switch_refusal(pd_args(provider), provider) is None
     monkeypatch.setattr(provider_dispatch, "_check_constraints", lambda *a: None)
 
     def launch_refused(args):
-        provider_switch.require("litellm:deepseek/deepseek-v4-pro", consumer="litellm_spawn")
+        provider_switch.require("litellm:openrouter/anthropic/claude-3-haiku", consumer="litellm_spawn")
 
     monkeypatch.setattr(provider_dispatch, "_dispatch_litellm", launch_refused)
-    rc = provider_dispatch.main(["--provider", "litellm", "--terminal-id", "T1",
+    rc = provider_dispatch.main(["--provider", provider, "--terminal-id", "T1",
                                  "--dispatch-id", "20261021-ps-b-lt", "--instruction", "x"])
     assert rc == provider_switch.EXIT_PROVIDER_SWITCHED_OFF
-    assert "REJECT [provider_switched_off]" in capsys.readouterr().err
+    assert ("REJECT [provider_switched_off]: provider_switched_off: litellm:openrouter/anthropic/claude-3-haiku "
+            "family=openrouter") in capsys.readouterr().err
     assert receipts(store)[-1]["failure_class"] == "provider_switched_off"
+
+
+def test_a_litellm_form_with_a_known_maker_is_refused_before_the_constraints(switch_file, store):
+    write_switches(switch_file, global_={"deepseek": False})
+    assert provider_dispatch._provider_switch_refusal(pd_args("litellm:deepseek"), "litellm:deepseek") == 4
 
 
 def test_a_worker_started_by_provider_dispatch_cannot_switch(switch_file, store, tmp_path, monkeypatch):
@@ -483,6 +494,39 @@ def test_worker_env_stamps_resolution_order(tmp_path, monkeypatch):
     assert "VNX_WORKER_DISPATCH_ID" not in provider_switch.worker_env_stamps("  ")
     assert "VNX_PROJECT_ID" not in provider_switch.worker_env_stamps("d-3", project_id="global")
     assert "VNX_PROJECT_ID" not in provider_switch.worker_env_stamps("d-4", project_id="Not A Project!")
+
+
+def test_worker_env_stamps_without_resolve_starts_no_resolver(tmp_path, monkeypatch):
+    """The innermost launcher passes on what it has: the state dir's project, or nothing; it
+    never runs the process resolver (which may start git)."""
+    monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
+    monkeypatch.setattr(provider_switch, "resolve_project",
+                        lambda project_id=None: pytest.fail("the process resolver ran"))
+    assert provider_switch.worker_env_stamps("d-5", state_dir=tmp_path / "state", resolve=False) == {
+        "VNX_WORKER_DISPATCH_ID": "d-5"}
+    central = Path.home() / ".vnx-data" / "some-project" / "state"
+    assert provider_switch.worker_env_stamps("d-6", state_dir=central, resolve=False) == {
+        "VNX_PROJECT_ID": "some-project", "VNX_WORKER_DISPATCH_ID": "d-6"}
+
+
+def test_a_litellm_payload_without_a_model_is_left_to_the_runner(switch_file, monkeypatch, tmp_path):
+    """No model, no call: the runner refuses it itself, so the spawn makes no switch decision."""
+    from provider_spawns import litellm_spawn
+    monkeypatch.setenv("VNX_PROJECT_ID", PROJECT)
+    switch_file.write_text("{broken", encoding="utf-8")  # every switchable family refused
+    started: List[Any] = []
+
+    def record(cmd, **kwargs):
+        started.append(cmd)
+        raise OSError("not started in a test")
+
+    monkeypatch.setattr(subprocess, "Popen", record)
+    proc, err = litellm_spawn._start_litellm_subprocess("runner.py", json.dumps({"messages": []}), None, tmp_path)
+    assert proc is None and err.returncode == 126 and len(started) == 1
+    with pytest.raises(provider_switch.ProviderDisabledError):
+        litellm_spawn._start_litellm_subprocess(
+            "runner.py", json.dumps({"model": "deepseek/deepseek-v4-pro"}), None, tmp_path)
+    assert len(started) == 1
 
 
 def test_the_headless_adapter_stamps_the_store_project_and_the_dispatch(tmp_path, monkeypatch):
