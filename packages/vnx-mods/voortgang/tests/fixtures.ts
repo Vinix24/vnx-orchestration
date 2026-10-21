@@ -29,6 +29,19 @@ export const LIVE_WORK = {
   open_prs: [],
 }
 
+/**
+ * `live_work` as `_live_work_index_summary` writes it: `live` holds the live and the starting entries together, there
+ * is no `starting` list, the list is capped at eight and `counts` keeps the totals.
+ */
+export const producerLiveWork = (live: number, starting: number, listed = Math.min(live + starting, 8)) => ({
+  available: true,
+  counts: { live, starting, stale: 0, unmeasured: 0 },
+  live: Array.from({ length: listed }, () => ({ dispatch_id: 'd-live-1', state: starting > 0 ? 'starting' : 'running', age_seconds: 725, pr: null })),
+  stale: [],
+  unmeasured: [],
+  open_prs: [],
+})
+
 export const OUTCOMES = {
   available: true,
   total: 2,

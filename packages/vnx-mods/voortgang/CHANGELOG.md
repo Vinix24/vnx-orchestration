@@ -2,6 +2,14 @@
 
 All notable changes to this plugin are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the plugin follows [Semantic Versioning](https://semver.org/).
 
+## [0.2.1] - 2026-10-21
+
+### Fixed
+
+- The block "Bouwers" read a `starting` list that the index does not write. One starting dispatch made the whole block `onbeschikbaar: starting ontbreekt`. The mod now reads the shape `_live_work_index_summary` writes: `live` with the live and the starting entries together, no `starting` list. A `starting` list is still read when there is one.
+- The number of builders came from the length of the list, which the index caps at eight. Nine live dispatches showed `8 bouwers`. The pane and the status line now take `counts.live + counts.starting`, and the pane adds `+N niet getoond (index toont er max. 8)` for the entries the index did not list.
+- A project whose builder had an unreadable `who`, `task` or `minutes` field was not counted as unreadable. The status line now says `onleesbaar` for it.
+
 ## [0.2.0] - 2026-10-20
 
 ### Added

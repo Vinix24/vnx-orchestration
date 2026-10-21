@@ -1,6 +1,6 @@
 import type { Builder, DeliverableView, Model, NowTrack, Part, Pr, ProjectModel, Row } from '../types'
 
-import { formatAge, isStale } from './collect'
+import { formatAge, INDEX_LIVE_CAP, isStale } from './collect'
 
 export type PaneSize = { columns: number; headerColumns: number; rows: number; isRefreshing: boolean; failure?: string | null }
 
@@ -229,7 +229,7 @@ function projectRows(project: ProjectModel, budget: number, columns: number): Ro
     return [row(`${project.id} · ${project.reason}`, 'error')]
   }
 
-  const { index, state, tracks, deliverables, builders } = project
+  const { index, state, tracks, deliverables, builders, buildersOmitted } = project
   const pieces: Piece[] = []
   let rows: Row[] = []
   const flush = (...lists: Piece[]) => {
@@ -303,8 +303,14 @@ function projectRows(project: ProjectModel, budget: number, columns: number): Ro
   }
 
   if (builders.isOk) {
-    rows.push(row(`  bouwers: ${builders.value.length === 0 ? 'geen' : builders.value.length}`))
+    const total = builders.value.length + buildersOmitted
+
+    rows.push(row(`  bouwers: ${total === 0 ? 'geen' : total}`))
     flush(list(builders.value, builderRows))
+
+    if (buildersOmitted > 0) {
+      rows.push(row(`  +${buildersOmitted} niet getoond (index toont er max. ${INDEX_LIVE_CAP})`, 'dim'))
+    }
   } else {
     rows.push(unavailable('bouwers', builders.reason))
   }

@@ -176,14 +176,25 @@ function blockOf(value: unknown, name: string): Part<Json> {
   return ok(value)
 }
 
-/** The entries of `live` and `starting`: the builders. A missing list stands only for a count of zero. */
+/** The most entries the index producer keeps in `live` (`_INDEX_LIVE_WORK_LIVE_CAP` in `scripts/build_t0_state.py`). */
+export const INDEX_LIVE_CAP = 8
+
+/**
+ * The builders in the index. The producer writes `live` with the live and the starting entries together, capped,
+ * and no `starting` list; a `starting` list is read too when it is there. A list that is absent stands only for a
+ * count of zero.
+ */
 function runningOf(block: Json, counts: Json): Part<Running[]> {
   const running: Running[] = []
 
   for (const name of ['live', 'starting'] as const) {
     const list = block[name]
 
-    if (list === undefined && counts[name] === 0) {
+    if (list === undefined) {
+      if (name === 'live' && (counts.live as number) + (counts.starting as number) > 0) {
+        return fail('live ontbreekt')
+      }
+
       continue
     }
 
@@ -484,6 +495,17 @@ async function buildersOf(io: Io, root: string, id: string, index: Part<IndexVie
   return ok(await Promise.all(running.value.map(entry => builderOf(io, dir, entry))))
 }
 
+/** Builders the counts name that the index lists no entry for: its list is capped, the counts are not. */
+function omittedOf(index: Part<IndexView>, builders: Part<Builder[]>): number {
+  if (!index.isOk || !index.value.liveWork.isOk || !builders.isOk) {
+    return 0
+  }
+
+  const { live, starting } = index.value.liveWork.value
+
+  return Math.max(0, live + starting - builders.value.length)
+}
+
 async function runJson(io: Io, argv: string[], store: string): Promise<Part<unknown>> {
   let result: ProcessRunResult
 
@@ -526,6 +548,7 @@ export async function collectProject(io: Io, id: string, root: string, bin: stri
   const index = andThen(await readJson(io, `${store}/${INDEX_FILE}`, INDEX_FILE), json => indexViewOf(json, now))
   const state = andThen(await readJson(io, `${store}/${STATE_FILE}`, STATE_FILE), json => stateViewOf(json, now))
   const builders = await buildersOf(io, root, id, index)
+  const buildersOmitted = omittedOf(index, builders)
 
   // `vnx objective list` and `vnx deliverable list` create the database when the store has none; the mod writes nothing.
   const hasDb = await existsPart(io, `${store}/${DB_FILE}`)
@@ -533,13 +556,13 @@ export async function collectProject(io: Io, id: string, root: string, bin: stri
   if (!hasDb.isOk || !hasDb.value) {
     const reason = hasDb.isOk ? `${DB_FILE} ontbreekt` : hasDb.reason
 
-    return { id, hasStore: true, index, state, tracks: fail(reason), deliverables: fail(reason), builders }
+    return { id, hasStore: true, index, state, tracks: fail(reason), deliverables: fail(reason), builders, buildersOmitted }
   }
 
   const tracks = andThen(await runJson(io, objectiveArgv(bin, id, store), store), trackViewOf)
   const deliverables = andThen(await runJson(io, deliverableArgv(bin, id, store), store), deliverableViewOf)
 
-  return { id, hasStore: true, index, state, tracks, deliverables, builders }
+  return { id, hasStore: true, index, state, tracks, deliverables, builders, buildersOmitted }
 }
 
 /**
@@ -606,7 +629,8 @@ export function isUnreadable(project: ProjectModel): boolean {
     !state.value.prs.isOk ||
     !tracks.isOk ||
     !deliverables.isOk ||
-    !project.builders.isOk
+    !project.builders.isOk ||
+    project.builders.value.some(builder => !builder.who.isOk || !builder.task.isOk || !builder.minutes.isOk)
   )
 }
 
@@ -625,7 +649,7 @@ const liveOf = (project: ProjectModel): number | null =>
 const openOf = (project: ProjectModel): number | null =>
   project.hasStore && project.index.isOk && project.index.value.outcomes.isOk ? project.index.value.outcomes.value.total : null
 const builderCountOf = (project: ProjectModel): number | null =>
-  project.hasStore && project.builders.isOk ? project.builders.value.length : null
+  project.hasStore && project.builders.isOk ? project.builders.value.length + project.buildersOmitted : null
 const prCountOf = (project: ProjectModel): number | null =>
   project.hasStore && project.state.isOk && project.state.value.prs.isOk ? project.state.value.prs.value.length : null
 
@@ -693,7 +717,7 @@ function summaryOf(project: ProjectModel): string {
     parts.push('tracks onbeschikbaar')
   }
 
-  parts.push(project.builders.isOk ? `${project.builders.value.length} bouwers` : 'bouwers onbeschikbaar')
+  parts.push(project.builders.isOk ? `${project.builders.value.length + project.buildersOmitted} bouwers` : 'bouwers onbeschikbaar')
   parts.push(deliverables.isOk ? `${deliverables.value.proposed} te promoveren` : 'leveringen onbeschikbaar')
 
   if (isOutdated(project)) {

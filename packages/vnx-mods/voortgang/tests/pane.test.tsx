@@ -19,6 +19,7 @@ import {
   indexOf,
   instructionOf,
   instructionText,
+  producerLiveWork,
   specOf,
   stateJson,
   stateOf,
@@ -136,7 +137,7 @@ describe('the pane', () => {
   })
 
   test('marks a two-hour-old index verouderd next to the live and outcome numbers', async ($, on) => {
-    const files = { [indexOf('project-a')]: indexJson({ ageMinutes: 120 }), [stateOf('project-a')]: stateJson(), [dbOf('project-a')]: '' }
+    const files = { ...healthyFiles('project-a'), [indexOf('project-a')]: indexJson({ ageMinutes: 120 }) }
     const { world } = await started($, on, { files })
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
     const lines = await linesOf(ui)
@@ -335,6 +336,19 @@ describe('the block Bouwers', () => {
     expect(lines.join('\n')).not.toContain('STALEBOUWER')
     expect(world.reads.some(path => path.includes('d-stale-1') || path.includes('d-unmeasured-1'))).toBe(false)
     expect(world.statuses.at(-1)).toBe('voortgang · 1 live · 1 PR · 2 open · 2 bouwers')
+    await ui.unmount()
+  })
+
+  test('shows the total from the counts and one line for the builders the capped index does not list', async ($, on) => {
+    const files = { ...healthyFiles('project-a'), [indexOf('project-a')]: indexJson({ liveWork: producerLiveWork(9, 0) }) }
+    const { world } = await started($, on, { files })
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE_PROPS, scroll: { offset: 0, bodyRows: 60 } } })
+    const lines = await linesOf(ui)
+
+    expect(lines).toContain('  bouwers: 9')
+    expect(lines.filter(line => line.startsWith('  bouwer:')).length).toBe(8)
+    expect(lines).toContain('  +1 niet getoond (index toont er max. 8)')
+    expect(world.statuses.at(-1)).toContain('9 bouwers')
     await ui.unmount()
   })
 

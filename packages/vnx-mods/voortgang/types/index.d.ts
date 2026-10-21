@@ -110,6 +110,8 @@ export type ProjectModel =
       tracks: Part<TrackView>
       deliverables: Part<DeliverableView>
       builders: Part<Builder[]>
+      /** `counts.live + counts.starting` minus the entries the index lists: its list is capped, the counts are not. */
+      buildersOmitted: number
     }
 
 /** What the pane and the status line draw from. */

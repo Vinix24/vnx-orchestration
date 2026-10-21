@@ -42,6 +42,7 @@ import {
   indexOf,
   instructionOf,
   instructionText,
+  producerLiveWork,
   specOf,
   stampMinutesAgo,
   stateJson,
@@ -405,7 +406,7 @@ describe('one project', () => {
   })
 
   test('calls a project with a two-hour-old index outdated', async () => {
-    const files = { [indexOf('project-a')]: indexJson({ ageMinutes: 120 }), [stateOf('project-a')]: stateJson(), [dbOf('project-a')]: '' }
+    const files = { ...healthyFiles('project-a'), [indexOf('project-a')]: indexJson({ ageMinutes: 120 }) }
     const project = await collectProject(ioOf(files, [], healthyAnswer), 'project-a', ROOT, BIN, NOW)
 
     expect(isOutdated(project)).toBe(true)
@@ -483,7 +484,7 @@ describe('the status line', () => {
 
   test('adds the outdated projects, and writes ? where no project could be read', async () => {
     const stale = await collectProject(
-      ioOf({ [indexOf('project-a')]: indexJson({ ageMinutes: 120 }), [stateOf('project-a')]: stateJson(), [dbOf('project-a')]: '' }, [], healthyAnswer),
+      ioOf({ ...healthyFiles('project-a'), [indexOf('project-a')]: indexJson({ ageMinutes: 120 }) }, [], healthyAnswer),
       'project-a',
       ROOT,
       BIN,
@@ -672,8 +673,35 @@ describe('the builders of a project', () => {
     expect(await builders({ available: false, reason: 'lease store unreadable' })).toEqual({ isOk: false, reason: 'lease store unreadable' })
     expect(await builders(running({ live: 1 }, { live: [null] }))).toEqual({ isOk: false, reason: 'live: bouwer zonder dispatch_id' })
     expect(await builders(running({ live: 1 }, {}))).toEqual({ isOk: false, reason: 'live ontbreekt' })
-    expect(await builders(running({ starting: 1 }, { live: [] }))).toEqual({ isOk: false, reason: 'starting ontbreekt' })
+    expect(await builders(running({ starting: 1 }, { live: [], starting: 'x' as unknown as unknown[] }))).toEqual({ isOk: false, reason: 'starting ontbreekt' })
     expect(await builders(running({}, {}))).toEqual({ isOk: true, value: [] })
+  })
+
+  test('takes the producer shape: one starting dispatch inside `live`, no `starting` list', async () => {
+    const result = await builders(producerLiveWork(0, 1))
+
+    expect(result?.isOk && result.value.length).toBe(1)
+    expect(result?.isOk && result.value[0]?.who).toEqual({ isOk: true, value: { role: 'backend-developer', model: 'sonnet' } })
+  })
+
+  test('counts builders from counts.live + counts.starting, not from the capped list, and says how many it did not list', async () => {
+    const files = { ...healthyFiles('project-a'), [indexOf('project-a')]: indexJson({ liveWork: producerLiveWork(9, 0) }) }
+    const project = await collectProject(ioOf(files, [], healthyAnswer), 'project-a', ROOT, BIN, NOW)
+
+    expect(project.hasStore && project.builders.isOk && project.builders.value.length).toBe(8)
+    expect(project.hasStore && project.buildersOmitted).toBe(1)
+    expect(statusLine({ collectedAt: NOW, rootError: null, projects: [project] })).toContain('9 bouwers')
+    expect(statusLine({ collectedAt: NOW, rootError: null, projects: [project] })).not.toContain('onleesbaar')
+  })
+
+  test('is unreadable, and says so in the status line, when a field of one builder failed', async () => {
+    const files = healthyFiles('project-a')
+    delete files[specOf('project-a', 'd-live-1')]
+    const project = await collectProject(ioOf(files, [], healthyAnswer), 'project-a', ROOT, BIN, NOW)
+
+    expect(project.hasStore && project.builders.isOk).toBe(true)
+    expect(isUnreadable(project)).toBe(true)
+    expect(statusLine({ collectedAt: NOW, rootError: null, projects: [project] })).toBe('voortgang · 1 live · 1 PR · 2 open · 1 bouwers · 1 onleesbaar')
   })
 
   test('refuses a dispatch id that is not one directory name, and reads nothing for it', async () => {
