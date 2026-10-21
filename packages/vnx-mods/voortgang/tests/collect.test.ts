@@ -501,11 +501,11 @@ describe('one project', () => {
 describe('the tracks the pane shows', () => {
   const idsOf = (project: ProjectModel) => shownTracksOf(project)?.map(one => one.track.id)
 
-  test('are every now track plus every track with activity, activity first, then priority, then id', async () => {
+  test('are every now track plus every track with activity, by activity tier (builder, open PR, recent deliverable, none), then priority, then id', async () => {
     const project = await healthy()
 
-    // activity: kosten (P1, the spec of PR 2063's dispatch), bld (P2, a builder), viaref (P2, pr_ref lists 2063), fresh (P3, a recent deliverable)
-    expect(idsOf(project)).toEqual(['kosten', 'bld', 'viaref', 'fresh', 'ci-profile', 'docs'])
+    // tier 1: bld (P2, a builder). Tier 2: kosten (P1, the spec of PR 2063's dispatch), viaref (P2, pr_ref lists 2063). Tier 3: fresh (P3, a recent deliverable). Tier 4: ci-profile, docs
+    expect(idsOf(project)).toEqual(['bld', 'kosten', 'viaref', 'fresh', 'ci-profile', 'docs'])
   })
 
   test('leave out a track without activity that is not on the now horizon, even with an old deliverable', async () => {
@@ -596,7 +596,7 @@ describe('the tracks the pane shows', () => {
 })
 
 describe('the status line', () => {
-  const H = 'project-a · kosten: geen plan · bld: geen plan · 1 bouwer'
+  const H = 'project-a · bld: geen plan · kosten: geen plan · 1 bouwer'
   const trackOf = (track_id: string, priority = 'P1', horizon = 'now') => ({ track_id, title: 'T', phase: 'queued', derived_status: 'queued', horizon, priority, pr_ref: null })
   const deliverablesOf = (track: string, done: number, total: number) =>
     Array.from({ length: total }, (_, at) => ({ deliverable_ref: `${track}-${at}`, track, derived_status: at < done ? 'done' : 'ready', last_activity: stampMinutesAgo(30 * 24 * 60), title: 'T' }))
@@ -615,11 +615,11 @@ describe('the status line', () => {
     expect(line).toBe('project-a · aaa ▓▓▓▓▓░░░ 5/8 · bbb ▓▓░░░░░░ 2/8 · 1 bouwer')
   })
 
-  test('follows the order of the pane: the track with activity first', async () => {
+  test('follows the order of the pane: the track with the builder first', async () => {
     const tracks = (await healthy()) && shownTracksOf(await healthy())?.map(one => one.track.id)
 
     expect(statusLine(modelOf(await healthy()))).toBe(H)
-    expect(tracks?.slice(0, 2)).toEqual(['kosten', 'bld'])
+    expect(tracks?.slice(0, 2)).toEqual(['bld', 'kosten'])
   })
 
   test('says geen plan for a track without deliverables', async () => {
@@ -698,6 +698,60 @@ describe('the status line', () => {
   })
 })
 
+describe('the order of the tracks: what is being built comes first', () => {
+  const trackOf = (track_id: string, priority: string, horizon: string, pr_ref: string | null = null) => ({ track_id, title: 'T', phase: 'queued', derived_status: 'queued', horizon, priority, pr_ref })
+  const recent = (track: string) => ({ deliverable_ref: `${track}-0`, track, derived_status: 'done', last_activity: stampMinutesAgo(2 * 24 * 60), title: 'T' })
+  const liveOf = (ids: string[]) => ({
+    available: true,
+    counts: { live: ids.length, starting: 0, stale: 0, unmeasured: 0 },
+    live: ids.map(dispatch_id => ({ dispatch_id, state: 'running', age_seconds: 600, pr: null })),
+    stale: [],
+    unmeasured: [],
+    open_prs: [{ number: 2063, dispatch_id: 'd-pr-1' }],
+  })
+  /** A project over `tracks` and `deliverables`, with one live dispatch per entry of `builders` (its track id). */
+  const projectOf = async (tracks: unknown[], deliverables: unknown[], builders: string[]) => {
+    const ids = builders.map((_, at) => `d-b-${at}`)
+    const files: Record<string, string> = { ...healthyFiles('project-a'), [indexOf('project-a')]: indexJson({ liveWork: liveOf(ids) }) }
+    delete files[specOf('project-a', 'd-live-1')]
+    builders.forEach((track_id, at) => {
+      files[specOf('project-a', ids[at])] = JSON.stringify({ model: 'sonnet', track_id })
+      files[instructionOf('project-a', ids[at])] = instructionText('Task')
+    })
+    const run = (argv: readonly string[]) => ({ exitCode: 0, stdout: JSON.stringify(argv[1] === 'objective' ? tracks : deliverables) })
+
+    return collectProject(ioOf(files, [], run), 'project-a', ROOT, BIN, NOW)
+  }
+  const idsOf = (project: ProjectModel) => shownTracksOf(project)?.map(one => one.track.id)
+
+  test('a builder on a P2 track ranks above a P1 track with only a recent deliverable, in the pane order and the status line', async () => {
+    const project = await projectOf([trackOf('recent-p1', 'P1', 'next'), trackOf('bld', 'P2', 'next')], [recent('recent-p1')], ['bld'])
+
+    expect(idsOf(project)).toEqual(['bld', 'recent-p1'])
+    expect(statusLine(modelOf(project))).toBe('project-a · bld: geen plan · recent-p1 ▓▓▓▓▓▓▓▓ 1/1 · 1 bouwer')
+  })
+
+  test('an open PR on a P3 track ranks above a P1 track with only a recent deliverable', async () => {
+    const project = await projectOf([trackOf('recent-p1', 'P1', 'next'), trackOf('with-pr', 'P3', 'later', '#2063')], [recent('recent-p1')], [])
+
+    expect(idsOf(project)).toEqual(['with-pr', 'recent-p1'])
+    expect(statusLine(modelOf(project))).toBe('project-a · with-pr: geen plan · recent-p1 ▓▓▓▓▓▓▓▓ 1/1')
+  })
+
+  test('two tracks with builders order by builder count, whatever their priority', async () => {
+    const project = await projectOf([trackOf('one', 'P1', 'next'), trackOf('two', 'P3', 'next')], [], ['one', 'two', 'two'])
+
+    expect(idsOf(project)).toEqual(['two', 'one'])
+    expect(statusLine(modelOf(project))).toBe('project-a · two: geen plan · one: geen plan · 3 bouwers')
+  })
+
+  test('a now track without activity comes last', async () => {
+    const project = await projectOf([trackOf('idle', 'P1', 'now'), trackOf('recent-p3', 'P3', 'later'), trackOf('with-pr', 'P3', 'later', '#2063'), trackOf('bld', 'P3', 'later')], [recent('recent-p3')], ['bld'])
+
+    expect(idsOf(project)).toEqual(['bld', 'with-pr', 'recent-p3', 'idle'])
+  })
+})
+
 describe('the open PRs of a track', () => {
   const prsOf = async (files: Record<string, string>, id = 'ci-profile') => shownTracksOf(await healthy(files))?.find(one => one.track.id === id)?.prs
   const emptyIndex = indexJson({ liveWork: { ...LIVE_WORK, open_prs: [] } })
@@ -761,9 +815,9 @@ describe('the open PRs of a track', () => {
 describe('the headless summary', () => {
   test('is the status line, then one line per shown track', async () => {
     expect(summaryLines(modelOf(await healthy()))).toEqual([
-      'project-a · kosten: geen plan · bld: geen plan · 1 bouwer',
-      'P1 kosten · geen leveringen gepland',
+      'project-a · bld: geen plan · kosten: geen plan · 1 bouwer',
       'P2 bld · geen leveringen gepland',
+      'P1 kosten · geen leveringen gepland',
       'P2 viaref · geen leveringen gepland',
       'P3 fresh · 1 van 1 klaar',
       'P1 ci-profile · 5 van 8 klaar',
@@ -776,7 +830,7 @@ describe('the headless summary', () => {
 
     expect(commandText(none, 'geen scherm')).toBe(none.noProject ?? '')
     expect(commandText(none, null)).toBe(`Voortgang: ${none.noProject}`)
-    expect(commandText(modelOf(await healthy()), null)).toBe('Voortgang geopend: project-a · kosten: geen plan · bld: geen plan · 1 bouwer')
+    expect(commandText(modelOf(await healthy()), null)).toBe('Voortgang geopend: project-a · bld: geen plan · kosten: geen plan · 1 bouwer')
   })
 })
 

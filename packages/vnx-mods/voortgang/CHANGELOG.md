@@ -8,6 +8,7 @@ The status line was a row of counters (`0 bouwers · 20 PR · 1 te promoveren ·
 
 ### Changed
 
+- The Tracks order says where the project is now: a track a builder works on first (most builders first), then a track with an open PR, then one with a deliverable active in the last 7 days, then a `now` track without activity; within a tier by priority, then id. A P2 track being built no longer sits below P1 tracks that last moved days ago.
 - The status line shows the first two tracks of the pane's Tracks order, each with the 8-cell bar and `X/Y` (`: geen plan` without deliverables, `: ?` when they could not be read), then `1 bouwer` / `N bouwers` when a builder runs, then `verouderd` and `onleesbaar` as before. A track id is cut to 28 display cells. No tracks shown: `<id> · geen tracks in beweging`; tracks that could not be read: `<id> · tracks onbekend`.
 - The PR count, `te promoveren` and `uitkomsten` are gone from the status line; they stay in the pane. The first line of the headless `/voortgang` summary is the status line.
 - `live_work.open_prs` of the index is positive evidence only (capped at 8, empty when `gh` fails). A PR is `dicht` only when the PR queue of `t0_state.json` is readable and does not list it; otherwise it is `#N ?`.

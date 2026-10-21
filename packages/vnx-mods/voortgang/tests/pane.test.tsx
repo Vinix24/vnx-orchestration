@@ -25,6 +25,7 @@ import {
   producerLiveWork,
   projectIdFileOf,
   specOf,
+  stampMinutesAgo,
   stateJson,
   stateOf,
   storeOf,
@@ -64,10 +65,10 @@ describe('the pane', () => {
       'Wacht op een besluit',
       '  3 leveringen te promoveren · 2 open uitkomsten',
       'Tracks',
-      '  P1 kosten',
-      "     geen leveringen gepland · PR's: #2063 open",
       '  P2 bld · bezig',
       '     geen leveringen gepland · 1 bouwer',
+      '  P1 kosten',
+      "     geen leveringen gepland · PR's: #2063 open",
       '  P2 viaref',
       "     geen leveringen gepland · PR's: #2063 open",
       '  P3 fresh · 1 van 1 klaar ▓▓▓▓▓▓▓▓',
@@ -113,7 +114,7 @@ describe('the pane', () => {
     test(`finds the project from ${cwd}`, async ($, on) => {
       const { world } = await started($, on, { files: healthyFiles('project-a') }, cwd)
 
-      expect(world.statuses.at(-1)).toBe('project-a · kosten: geen plan · bld: geen plan · 1 bouwer')
+      expect(world.statuses.at(-1)).toBe('project-a · bld: geen plan · kosten: geen plan · 1 bouwer')
     })
   }
 
@@ -139,6 +140,27 @@ describe('the pane', () => {
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
 
     expect((await linesOf(ui)).at(-1)).toBe('opruimen: 1 stale rij · 2 ongemeten')
+    await ui.unmount()
+  })
+
+  test('puts the track a builder works on above a P1 track with only a recent deliverable', async ($, on) => {
+    const tracks = [
+      { track_id: 'recent-p1', title: 'T', phase: 'queued', derived_status: 'queued', horizon: 'next', priority: 'P1', pr_ref: null },
+      { track_id: 'bld', title: 'T', phase: 'queued', derived_status: 'queued', horizon: 'next', priority: 'P2', pr_ref: null },
+    ]
+    const deliverables = [{ deliverable_ref: 'r-0', track: 'recent-p1', derived_status: 'done', last_activity: stampMinutesAgo(2 * 24 * 60), title: 'T' }]
+    const run = (argv: readonly string[]) => ({ exitCode: 0, stdout: JSON.stringify(argv[1] === 'objective' ? tracks : deliverables) })
+    const { world } = await started($, on, { files: healthyFiles('project-a'), run })
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    const lines = await linesOf(ui)
+
+    expect(lines.slice(lines.indexOf('Tracks') + 1, lines.indexOf('Tracks') + 5)).toEqual([
+      '  P2 bld · bezig',
+      '     geen leveringen gepland · 1 bouwer',
+      '  P1 recent-p1 · 1 van 1 klaar ▓▓▓▓▓▓▓▓',
+      "PR's",
+    ])
+    expect(world.statuses.at(-1)).toBe('project-a · bld: geen plan · recent-p1 ▓▓▓▓▓▓▓▓ 1/1 · 1 bouwer')
     await ui.unmount()
   })
 
@@ -267,7 +289,7 @@ describe('the pane', () => {
 
     expect(lines[0]).toBe('project-a · index 2 u · verouderd')
     expect(lines.filter(line => line.includes('verouderd'))).toHaveLength(1)
-    expect(world.statuses.at(-1)).toBe('project-a · kosten: geen plan · bld: geen plan · 1 bouwer · verouderd')
+    expect(world.statuses.at(-1)).toBe('project-a · bld: geen plan · kosten: geen plan · 1 bouwer · verouderd')
     await ui.unmount()
   })
 
@@ -315,10 +337,10 @@ describe('the room', () => {
       'Wacht op een besluit',
       '  3 leveringen te promoveren · 2 open uitkomsten',
       'Tracks',
-      '  P1 kosten',
-      "     geen leveringen gepland · PR's: #2063 open",
       '  P2 bld · bezig',
       '     geen leveringen gepland · 1 bouwer',
+      '  P1 kosten',
+      "     geen leveringen gepland · PR's: #2063 open",
       '  +4 niet getoond',
       'opruimen: 4 stale rijen',
     ])
@@ -424,7 +446,7 @@ describe('the session', () => {
     expect(world.commands).toEqual(['voortgang'])
     expect(world.opened).toEqual([])
     expect(world.runs).toHaveLength(2)
-    expect(world.statuses.at(-1)).toBe('project-a · kosten: geen plan · bld: geen plan · 1 bouwer')
+    expect(world.statuses.at(-1)).toBe('project-a · bld: geen plan · kosten: geen plan · 1 bouwer')
   })
 
   test('refreshes again every refresh_seconds', { options: { refresh_seconds: 30 } }, async ($, on) => {
@@ -443,7 +465,7 @@ describe('the session', () => {
 
     expect(world.runs).toHaveLength(4)
     expect(world.opened).toEqual([{ id: 'voortgang', title: 'Voortgang' }])
-    expect(answer.text).toBe('Voortgang geopend: project-a · kosten: geen plan · bld: geen plan · 1 bouwer')
+    expect(answer.text).toBe('Voortgang geopend: project-a · bld: geen plan · kosten: geen plan · 1 bouwer')
   })
 
   test('/voortgang answers the status line and one line per shown track where no surface places the pane', async ($, on) => {
@@ -452,9 +474,9 @@ describe('the session', () => {
 
     expect(answer.text).toBe(
       [
-        'project-a · kosten: geen plan · bld: geen plan · 1 bouwer',
-        'P1 kosten · geen leveringen gepland',
+        'project-a · bld: geen plan · kosten: geen plan · 1 bouwer',
         'P2 bld · geen leveringen gepland',
+        'P1 kosten · geen leveringen gepland',
         'P2 viaref · geen leveringen gepland',
         'P3 fresh · 1 van 1 klaar',
         'P1 ci-profile · 5 van 8 klaar',

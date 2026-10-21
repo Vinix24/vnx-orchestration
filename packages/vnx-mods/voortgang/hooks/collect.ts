@@ -751,10 +751,14 @@ const rankOf = (priority: string): number => {
   return at < 0 ? PRIORITY_ORDER.length : at
 }
 
+/** How alive a track is: 0 a builder works on it, 1 an open PR is linked, 2 a deliverable moved in the last 7 days, 3 nothing. */
+const tierOf = (one: ShownTrack): number => (one.builders > 0 ? 0 : one.prs.some(pr => pr.isOpen === true) ? 1 : one.progress?.isRecent ? 2 : 3)
+
 /**
  * The tracks the pane shows: every `now` track, and every track with activity (a builder whose spec names it, an
  * open PR that its `pr_ref` lists or whose dispatch spec names it, a deliverable with recent `last_activity`).
- * Tracks with activity first, then by priority, then by id. Null when the tracks could not be read.
+ * Ordered by activity tier (a builder, an open PR, a recent deliverable, nothing), within the builder tier by builder
+ * count, then by priority, then by id. Null when the tracks could not be read.
  */
 export function shownTracksOf(project: ProjectModel): ShownTrack[] | null {
   if (!project.hasStore || !project.tracks.isOk) {
@@ -783,8 +787,13 @@ export function shownTracksOf(project: ProjectModel): ShownTrack[] | null {
   }
 
   return shown.sort((a, b) => {
-    if (a.hasActivity !== b.hasActivity) {
-      return a.hasActivity ? -1 : 1
+    if (tierOf(a) !== tierOf(b)) {
+      return tierOf(a) - tierOf(b)
+    }
+
+    // Within the builder tier the track with the most builders comes first.
+    if (a.builders !== b.builders) {
+      return b.builders - a.builders
     }
 
     if (rankOf(a.track.priority) !== rankOf(b.track.priority)) {
