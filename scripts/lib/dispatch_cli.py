@@ -3669,8 +3669,7 @@ def run_dispatch(
         # kimi stampede (nine dispatches, one quota 403, eight minutes) fired
         # blind because a real fire never checked reachability at all.
         # Provider-schakelaar B: the operator's switch is asked first (_lane_verdict).
-        lane_reject = _lane_verdict(plan, vspec.spec, project_id=project_id, state_dir=state_dir,
-                                    dry_run=dry_run)
+        lane_reject = _lane_verdict(plan, vspec.spec, project_id=project_id, state_dir=state_dir, dry_run=dry_run)
         if lane_reject is not None:
             _emit_reject(lane_reject)
             return 1
