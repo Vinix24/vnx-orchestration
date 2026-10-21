@@ -659,6 +659,18 @@ class TestTheKnownFiles:
         sizes += [path.stat().st_size for path in _spool_dir(store).rglob("*") if path.is_file()]
         assert files.bytes == sum(sizes)
 
+    def test_the_spool_scan_recognises_a_file_named_with_the_atomic_io_constants(self, store):
+        import atomic_io
+
+        _a_store_with_every_known_file(store)
+        name = f"{atomic_io.TEMP_PREFIX}abc123{atomic_io.TEMP_SUFFIX}"
+        (_spool_dir(store) / name).write_text("half", encoding="utf-8")
+
+        files = cost_ledger.ledger_files(_ledger(store))
+
+        assert files.spool_temp_files == 2
+        assert name not in files.strays
+
     def test_an_entry_of_the_spool_that_is_none_of_its_own_is_a_stray(self, store):
         _a_store_with_every_known_file(store)
         (_spool_dir(store) / "notes.txt").write_text("hand-made", encoding="utf-8")

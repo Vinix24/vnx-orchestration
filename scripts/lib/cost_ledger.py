@@ -99,7 +99,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Set, Tuple
 
 import provider_costs
-from atomic_io import atomic_write_text
+from atomic_io import TEMP_PREFIX, TEMP_SUFFIX, atomic_write_text
 from vnx_paths import refuse_real_central_store_write_under_test_runner
 
 logger = logging.getLogger(__name__)
@@ -2263,8 +2263,6 @@ BEACON_COMPONENT = "cost-ledger"
 # calls an event-driven beacon older than 7 days ``unknown`` (``health_beacon._EVENT_DRIVEN_MAX_AGE_SECONDS``): a
 # running tick keeps it fresh, so only a tick that stopped running ages it that far.
 BEACON_REFRESH_SECONDS = 24 * 3600
-# The temporary file of an atomic spool write (``atomic_io.atomic_write_text``, mkstemp): ``tmp<random>.tmp``.
-_ATOMIC_TEMP_PREFIX, _ATOMIC_TEMP_SUFFIX = "tmp", ".tmp"
 
 
 def _beacon_path(ledger_path: Path) -> Path:
@@ -2300,11 +2298,6 @@ def _the_beacon_is_fresh_and_ok_or_absent(ledger_path: Path) -> bool:
         return False
     written = _number(beacon.get("last_run_ts"))
     return written is not None and time.time() - written <= BEACON_REFRESH_SECONDS
-
-
-def _counted(count: int, one: str, more: str) -> str:
-    """``count`` and the words that go with it: ``one`` for 1, ``more`` for every other count."""
-    return f"{count} {one if count == 1 else more}"
 
 
 def _spool_health(totals: LedgerTotals, spool_files: int) -> Dict[str, Any]:
@@ -2466,7 +2459,7 @@ def _sort_the_spool(spool_dir: Path, unlistable: List[str]) -> Tuple[Dict[str, i
             counts["quarantined"] += files
         elif is_file and name.endswith(".json") and not name.startswith("."):
             counts["spool_files"], size = counts["spool_files"] + 1, _entry_bytes(entry)
-        elif is_file and name.startswith(_ATOMIC_TEMP_PREFIX) and name.endswith(_ATOMIC_TEMP_SUFFIX):
+        elif is_file and name.startswith(TEMP_PREFIX) and name.endswith(TEMP_SUFFIX):
             counts["spool_temp_files"], size = counts["spool_temp_files"] + 1, _entry_bytes(entry)
         else:
             strays.append(name)
