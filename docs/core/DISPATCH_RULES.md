@@ -199,6 +199,8 @@ These recur — observed, not hypothetical. A dispatch that "did nothing" or "bi
 | DeepSeek (bare) | `provider_dispatch.py --provider litellm:deepseek` | Chat-only, NO tools. Baseline only. |
 | local gemma | `provider_dispatch.py --provider local-gemma` | Free, local; mechanical / cutoff-resilient checks. |
 
+The operator can turn any of the non-claude, non-codex providers above on and off per family, globally or per project, with `vnx providers`. A switched-off provider is refused at the door (`REJECT [provider-disabled]`) and at every launch function; see `docs/core/PROVIDER_SWITCH.md`.
+
 **Report contract (applies to every lane in this table).** A dispatch is invisible to governance without a receipt, and there is no receipt without a report. Every lane worker must write a unified report carrying the four mandatory headings: `## Summary` (≥50 chars), `## Changes`, `## Verification`, `## Open Items`, plus its `Dispatch-ID` and a real `Model`/`Provider` identity pair. Full contract in §9 and `scripts/lib/report_body_contract.py`.
 
 The fail-closed model check makes this stricter than the four headings: a dispatch-lane report without a real `Model` value is REFUSED at receipt-write time (`scripts/lib/append_receipt_internals/validation.py::_validate_model_present`), even when the report otherwise passes the contract. A report that "looks complete" can still never land a receipt.

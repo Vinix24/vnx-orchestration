@@ -13,7 +13,7 @@ One module behind both entrances: ``bin/vnx providers`` runs this script and the
 
 Exit codes: 0 ok, 1 write failure, 2 usage (unknown family or a non-switchable class),
 3 unreadable switch file, 4 refused by ``check``, 5 write refused (the caller is in a linked
-worktree, carries a dispatch marker, or the switch is not enforced yet).
+worktree or carries a dispatch marker).
 """
 
 from __future__ import annotations
@@ -82,12 +82,7 @@ def family_rows(state: ps.SwitchState, project: Optional[str]) -> List[Dict[str,
 
 
 def enforcement_status() -> Dict[str, Any]:
-    pending = ps.pending_launch_functions()
-    return {
-        "enforced": not any(pending.values()),
-        "launch_functions": len(ps.LAUNCH_FUNCTIONS),
-        "pending": {deliverable: list(entries) for deliverable, entries in pending.items()},
-    }
+    return {"launch_functions": len(ps.LAUNCH_FUNCTIONS)}
 
 
 def _off_families_for(state: ps.SwitchState, project_id: str) -> List[str]:
@@ -346,16 +341,7 @@ def _render_families(report: Dict[str, Any]) -> List[str]:
 
 def _render_enforcement(report: Dict[str, Any]) -> List[str]:
     enf = report["enforcement"]
-    if enf["enforced"]:
-        return [f"Enforcement: live, all {enf['launch_functions']} launch functions call provider_switch.require"]
-    pending_total = sum(len(v) for v in enf["pending"].values())
-    out = [f"Enforcement: NOT enforced yet. {pending_total} of {enf['launch_functions']} launch "
-           "functions do not call provider_switch.require; the write verbs refuse until they do"]
-    for deliverable, entries in enf["pending"].items():
-        if entries:
-            out.append(f"  pending {deliverable} ({len(entries)}):")
-            out.extend(f"    {e}" for e in entries)
-    return out
+    return [f"Enforcement: live, all {enf['launch_functions']} launch functions call provider_switch.require"]
 
 
 def _render_projects(report: Dict[str, Any]) -> List[str]:
@@ -420,11 +406,6 @@ def _write_refused(exc: ps.SwitchWriteRefused) -> int:
     print("vnx providers: write refused:", file=sys.stderr)
     for reason in exc.reasons:
         print(f"  - {reason}", file=sys.stderr)
-    for deliverable, entries in ps.pending_launch_functions().items():
-        if entries:
-            print(f"  pending {deliverable} ({len(entries)}):", file=sys.stderr)
-            for entry in entries:
-                print(f"    {entry}", file=sys.stderr)
     return EXIT_WRITE_REFUSED
 
 
