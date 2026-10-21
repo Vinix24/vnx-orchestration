@@ -47,7 +47,7 @@ _intel_resolve_dirs() {
             VNX_STATE_DIR=*) [ -n "$STATE_DIR" ] || STATE_DIR="${line#VNX_STATE_DIR=}" ;;
             VNX_DISPATCH_DIR=*) [ -n "$DISPATCH_DIR" ] || DISPATCH_DIR="${line#VNX_DISPATCH_DIR=}" ;;
         esac
-    done < <(cd "$_INTEL_REPO_ROOT" && python3 "$resolver" 2>/dev/null || true)
+    done < <(cd "$_INTEL_REPO_ROOT" && VNX_PROJECT_ROOT="$_INTEL_REPO_ROOT" python3 "$resolver" 2>/dev/null || true)
     return 0
 }
 _intel_resolve_dirs
@@ -64,12 +64,32 @@ _require_dispatch_dir() {
 # LIVE STATE QUERIES
 # ============================================
 
+# Resolve the vnx CLI, first executable wins, the same order dispatch_guard.sh uses:
+# the repo's own bin/vnx, the install named by VNX_HOME, an explicit VNX_BIN, the
+# project-pin shim ~/.vnx-system/bin/vnx (honours .vnx-version), the central install
+# ~/.vnx-system/current, then `vnx` on PATH. A non-executable file is skipped.
+_intel_vnx_bin() {
+    local candidate
+    for candidate in \
+        "$_INTEL_REPO_ROOT/bin/vnx" \
+        "${VNX_HOME:+$VNX_HOME/bin/vnx}" \
+        "${VNX_BIN:-}" \
+        "${HOME:+$HOME/.vnx-system/bin/vnx}" \
+        "${HOME:+$HOME/.vnx-system/current/bin/vnx}"; do
+        if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+    command -v vnx || true
+}
+
 # Runtime snapshot: the same `vnx status --json` the dispatch guard reads, run
 # bound to the repo root. t0_brief.json is a presentation cache; nothing here reads it.
 _runtime_status() {
     local bin
-    bin="$(_intel_locate "bin/vnx")" || bin="${VNX_BIN:-$(command -v vnx || true)}"
-    [ -n "$bin" ] && [ -x "$bin" ] || return 1
+    bin="$(_intel_vnx_bin)"
+    [ -n "$bin" ] || return 1
     (cd "$_INTEL_REPO_ROOT" && VNX_PROJECT_ROOT="$_INTEL_REPO_ROOT" "$bin" status --json 2>/dev/null)
 }
 

@@ -252,6 +252,65 @@ class TestStateDirResolution:
             assert "rc=1" in rc.stdout, (fn, rc.stdout, rc.stderr)
 
 
+class TestCliResolutionOrder:
+    """_runtime_status picks the same CLI as dispatch_guard.sh, and skips what cannot run."""
+
+    @staticmethod
+    def _stub(path: Path, marker: str, mode: int = 0o755) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f'#!/usr/bin/env bash\necho "{marker}"\n', encoding="utf-8")
+        path.chmod(mode)
+        return path
+
+    def test_non_executable_repo_cli_is_skipped(self, tmp_path):
+        repo = _make_repo(tmp_path)
+        (repo / "bin" / "vnx").chmod(0o644)
+        home = tmp_path / "home"
+        self._stub(home / ".vnx-system" / "current" / "bin" / "vnx", "central")
+        result = _source(repo, home, "_runtime_status")
+        assert result.stdout.strip() == "central", result.stdout + result.stderr
+
+    def test_pin_shim_beats_current(self, tmp_path):
+        repo = _make_repo(tmp_path)
+        (repo / "bin" / "vnx").unlink()
+        home = tmp_path / "home"
+        self._stub(home / ".vnx-system" / "bin" / "vnx", "shim")
+        self._stub(home / ".vnx-system" / "current" / "bin" / "vnx", "current")
+        result = _source(repo, home, "_runtime_status")
+        assert result.stdout.strip() == "shim", result.stdout + result.stderr
+
+    def test_explicit_vnx_bin_beats_current(self, tmp_path):
+        repo = _make_repo(tmp_path)
+        (repo / "bin" / "vnx").unlink()
+        home = tmp_path / "home"
+        explicit = self._stub(tmp_path / "explicit" / "vnx", "explicit")
+        self._stub(home / ".vnx-system" / "current" / "bin" / "vnx", "current")
+        result = _source(repo, home, "_runtime_status", extra_env={"VNX_BIN": str(explicit)})
+        assert result.stdout.strip() == "explicit", result.stdout + result.stderr
+
+    def test_no_executable_cli_fails_closed(self, tmp_path):
+        repo = _make_repo(tmp_path)
+        (repo / "bin" / "vnx").chmod(0o644)
+        home = tmp_path / "home"
+        home.mkdir()
+        result = _source(repo, home, "_runtime_status; echo rc=$?", extra_env={"PATH": "/usr/bin:/bin"})
+        assert "rc=1" in result.stdout, result.stdout + result.stderr
+
+
+class TestResolverPinsTheProjectRoot:
+    def test_inherited_project_root_does_not_win(self, tmp_path):
+        repo, home = _make_resolver_repo(tmp_path)
+        other = tmp_path / "other"
+        other.mkdir()
+        (other / ".vnx-project-id").write_text("otherproj\n", encoding="utf-8")
+        result = _source(
+            repo, home, 'echo "STATE=$STATE_DIR"',
+            extra_env={"VNX_PROJECT_ROOT": str(other)},
+        )
+        central = (home / ".vnx-data" / "myproj").resolve()
+        assert f"STATE={central}/state" in result.stdout, result.stdout + result.stderr
+
+
 class TestScriptCopiesIdentical:
     @pytest.mark.parametrize("name", SCRIPTS)
     def test_byte_identical(self, name):

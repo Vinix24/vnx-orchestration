@@ -56,17 +56,20 @@ USAGE
 _EXPECTED_SCHEMA="vnx_status/1.0"
 
 # Resolve the vnx CLI to run, first executable wins: the repo's own bin/vnx, the
-# install named by VNX_HOME, the central install ~/.vnx-system/current, an explicit
-# VNX_BIN, then `vnx` on PATH. A consumer has no bin/vnx, and the `vnx` on its PATH
-# may be the pip package, which does not speak vnx_status/1.0; the installs come
-# before it so a consumer reads the schema the checks expect.
+# install named by VNX_HOME, an explicit VNX_BIN, the project-pin shim
+# ~/.vnx-system/bin/vnx (it honours .vnx-version, so a pinned consumer runs its own
+# version), the central install ~/.vnx-system/current, then `vnx` on PATH. A consumer
+# has no bin/vnx, and the `vnx` on its PATH may be the pip package, which does not
+# speak vnx_status/1.0; the installs come before it so a consumer reads the schema the
+# checks expect. intelligence.sh resolves in the same order.
 _resolve_vnx() {
     local candidate
     for candidate in \
         "$REPO_ROOT/bin/vnx" \
         "${VNX_HOME:+$VNX_HOME/bin/vnx}" \
-        "${HOME:+$HOME/.vnx-system/current/bin/vnx}" \
-        "${VNX_BIN:-}"; do
+        "${VNX_BIN:-}" \
+        "${HOME:+$HOME/.vnx-system/bin/vnx}" \
+        "${HOME:+$HOME/.vnx-system/current/bin/vnx}"; do
         if [ -n "$candidate" ] && [ -x "$candidate" ]; then
             printf '%s' "$candidate"
             return 0

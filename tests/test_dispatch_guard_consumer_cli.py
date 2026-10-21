@@ -145,3 +145,31 @@ def test_intelligence_sh_names_no_repo_local_data_dir_or_relative_script() -> No
     text = (ROOT / "skills" / "t0-orchestrator" / "scripts" / "intelligence.sh").read_text(encoding="utf-8")
     assert ".vnx-data" not in text
     assert 'python3 "scripts/' not in text
+
+
+def test_project_pin_shim_beats_the_central_current_install(tmp_path: Path) -> None:
+    repo = _consumer(tmp_path)
+    home = tmp_path / "home"
+    _fake_cli(home / ".vnx-system" / "bin" / "vnx", _v172(False))
+    _fake_cli(home / ".vnx-system" / "current" / "bin" / "vnx", _v172(True))
+    result = _run(repo, tmp_path, repo)
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert result.stdout.startswith("GO")
+
+
+def test_explicit_vnx_bin_beats_the_central_current_install(tmp_path: Path) -> None:
+    repo = _consumer(tmp_path)
+    explicit = _fake_cli(tmp_path / "explicit" / "vnx", _v172(False))
+    _fake_cli(tmp_path / "home" / ".vnx-system" / "current" / "bin" / "vnx", _v172(True))
+    result = _run(repo, tmp_path, repo, extra={"VNX_BIN": str(explicit)})
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert result.stdout.startswith("GO")
+
+
+def test_explicit_vnx_bin_beats_the_project_pin_shim(tmp_path: Path) -> None:
+    repo = _consumer(tmp_path)
+    explicit = _fake_cli(tmp_path / "explicit" / "vnx", _v172(False))
+    _fake_cli(tmp_path / "home" / ".vnx-system" / "bin" / "vnx", _v172(True))
+    result = _run(repo, tmp_path, repo, extra={"VNX_BIN": str(explicit)})
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert result.stdout.startswith("GO")
