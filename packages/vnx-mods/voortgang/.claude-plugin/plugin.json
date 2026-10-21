@@ -1,15 +1,9 @@
 {
   "name": "voortgang",
-  "version": "0.2.1",
-  "description": "A VNX mod: shows VNX progress per project in a pane and a status line: live work and its builders, open outcomes, open PRs with their review seats, now-tracks and deliverables waiting on a promote.",
+  "version": "0.3.0",
+  "description": "A VNX mod: shows the progress of the VNX project the session is in. A pane and a status line with the builders at work, what waits on a decision, the open PRs with their review seats, and per track how many deliverables are done.",
   "types": "./types/index.d.ts",
   "userConfig": {
-    "exclude": {
-      "type": "string",
-      "title": "Exclude",
-      "description": "Comma-separated project ids to leave out. Every other project store under the data root is shown.",
-      "default": ""
-    },
     "data_root": {
       "type": "string",
       "title": "Data root",
