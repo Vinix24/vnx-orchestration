@@ -47,14 +47,17 @@ attempt.
 
 :func:`replay_spool` brings the spool back into the ledger (K2a-3b), one spool
 file per exclusive hold of the lock file, bounded in files and seconds, the
-ledger ``flock`` under it bounded as well. A file is deleted only after the
-ledger is fsynced, also when nothing was appended, and every record of it
-reads back from the ledger as its own complete line, so a replay killed
-halfway leaves the file, and the next one sees by ``record_id`` what already
-landed. A second execution under one ``run_id`` is booked under the next free
-attempt with ``renumbered_from`` and a receipt; a spool file that cannot be
-read as one run's goes to ``provider_costs.spool/quarantine/``, its receipt
-booked before the move.
+ledger ``flock`` and the receipt lock under it bounded as well. A file is
+deleted only after the ledger is fsynced, also when nothing was appended, and
+every record of it reads back from the ledger as its own complete line with
+its content, field by field, so a replay killed halfway leaves the file, and
+the next one sees by ``record_id`` and content what already landed; a line
+that only carries the ``record_id`` keeps the file (``readback_mismatch``). A
+second execution under one ``run_id`` is booked under the next free attempt
+with ``renumbered_from`` and a receipt, and a later correction of it follows
+it there, also from the writer, which leaves such a correction to the replay;
+a spool file that cannot be read as one run's goes to
+``provider_costs.spool/quarantine/``, its receipt booked before the move.
 
 Boundary first: only a holder of the lock file in exclusive mode ends a last
 line without ``\\n`` with ``\\n`` and fsyncs, so a new line always starts on its
@@ -732,7 +735,10 @@ def _second_executions(
     the ledger when its ``record_id`` is in the ledger as well
     (``ledger+spool``), or when it is a correction whose ``supersedes`` names a
     record of that run in the ledger or one that continues it earlier in the
-    file. Any other spooled record of a run the ledger holds is a second
+    file. A record a replay renumbered out of the run counts as one of the
+    run's here, as its spooled and as its renumbered ``record_id``: it landed,
+    and a correction of it follows it to the renumbered run
+    (:func:`_followed_line`). Any other spooled record of a run the ledger holds is a second
     execution under the same ``run_id``: a writer of fabric f2bef053 counts the
     attempts in the ledger only, so it books an attempt again while that
     attempt waits in the spool. A run without a line in the ledger has a
@@ -745,12 +751,15 @@ def _second_executions(
         ids = landed.setdefault(record["run_id"], set())
         if isinstance(record.get("record_id"), str):
             ids.add(record["record_id"])
+    renumbered_out: Dict[str, set] = {}
+    for origin, line in _renumbered_origins(ledger_records).items():
+        renumbered_out.setdefault(line["renumbered_from"], set()).update((origin, str(line.get("record_id"))))
     conflicts: List[str] = []
     for spooled in spooled_runs:
         run_id = spooled[0]["run_id"]
         if not landed.get(run_id, set()) - {record["record_id"] for record in spooled}:
             continue
-        chain = set(landed[run_id])
+        chain = landed[run_id] | renumbered_out.get(run_id, set())
         for record in spooled:
             if record["record_id"] not in chain and not (
                 record.get("kind") == "correction" and record.get("supersedes") in chain
@@ -786,10 +795,95 @@ def _renumbered_origins(ledger_records: Sequence[Mapping[str, Any]]) -> Dict[str
     return origins
 
 
-def _landed_ids(ledger_records: Sequence[Mapping[str, Any]]) -> Set[str]:
-    """The ``record_id`` of every spooled record that is in the ledger: as itself, or as its renumbered line."""
-    landed = {record["record_id"] for record in ledger_records if isinstance(record.get("record_id"), str)}
-    return landed | set(_renumbered_origins(ledger_records))
+def _lines_by_record_id(ledger_records: Sequence[Mapping[str, Any]]) -> Dict[str, List[Mapping[str, Any]]]:
+    """``{record_id: every ledger line that carries it, in ledger order}``."""
+    lines: Dict[str, List[Mapping[str, Any]]] = {}
+    for record in ledger_records:
+        if isinstance(record.get("record_id"), str):
+            lines.setdefault(record["record_id"], []).append(record)
+    return lines
+
+
+_ABSENT = object()
+
+
+def _canonical(value: object) -> str:
+    """One field value as the record id hashes it, so ``1`` and ``1.0`` or ``true`` and ``1`` differ; absent is its own."""
+    return "\x00absent" if value is _ABSENT else json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _differing_fields(expected: Mapping[str, Any], lines: Sequence[Mapping[str, Any]]) -> List[str]:
+    """The fields in which any of ``lines`` differs from ``expected``, sorted; empty when every line holds it exactly."""
+    return sorted({
+        key for line in lines for key in set(expected) | set(line)
+        if _canonical(expected.get(key, _ABSENT)) != _canonical(line.get(key, _ABSENT))
+    })
+
+
+def _renumber(record: Mapping[str, Any], run_id: str, supersedes: Optional[str] = None) -> Dict[str, Any]:
+    """The spooled ``record`` as a line of ``run_id``, with ``renumbered_from`` and a fresh ``record_id``.
+
+    ``supersedes``, when given, replaces what the correction names: the
+    renumbered line of the record it named (:func:`_followed_line`).
+    """
+    line = dict(record, run_id=run_id, renumbered_from=record["run_id"])
+    if supersedes is not None:
+        line["supersedes"] = supersedes
+    line["record_id"] = _record_id(line)
+    return line
+
+
+def _landed_as(
+    record: Mapping[str, Any], by_id: Mapping[str, List[Mapping[str, Any]]], origins: Mapping[str, Mapping[str, Any]],
+) -> Optional[Tuple[Dict[str, Any], List[Mapping[str, Any]]]]:
+    """``(the line the spooled record is in the ledger as, the ledger lines that carry that line's id)``, or ``None``.
+
+    Found by ``record_id``: as itself, or as its renumbered line by undoing the
+    renumbering (:func:`_renumbered_origins`). Found is not landed: whether
+    those lines hold what the record holds is :func:`_differing_fields`. For a
+    renumbered record the line is the one the replay makes of it under that
+    run id, its ``record_id`` included, so a renumbered line whose own
+    ``record_id`` is off differs too.
+    """
+    record_id = record["record_id"]
+    if record_id in origins:
+        found = origins[record_id]
+        line = _renumber(record, found["run_id"], found.get("supersedes") if "supersedes" in record else None)
+        return line, by_id.get(found.get("record_id")) or [found]
+    if record_id in by_id:
+        return dict(record), by_id[record_id]
+    return None
+
+
+def _has_landed(
+    record: Mapping[str, Any], by_id: Mapping[str, List[Mapping[str, Any]]], origins: Mapping[str, Mapping[str, Any]],
+) -> bool:
+    """True when the spooled record is in the ledger with its content, as itself or as its renumbered line."""
+    landed = _landed_as(record, by_id, origins)
+    return landed is not None and not _differing_fields(*landed)
+
+
+def _followed_line(
+    record: Mapping[str, Any], renamed: Mapping[str, Mapping[str, Any]], origins: Mapping[str, Mapping[str, Any]],
+) -> Optional[Mapping[str, Any]]:
+    """The renumbered line a correction follows, or ``None``: the line of the record its ``supersedes`` names.
+
+    A replay renumbers a second execution out of its run (ADR-043 §6); a
+    correction of one of its records belongs to the renumbered run, not to
+    the run id it was written under, where it would replace the other
+    execution's line. ``supersedes`` names the record as it was in the spool
+    (renumbered in this file, ``renamed``, or by an earlier replay,
+    ``origins``) or the renumbered line itself. Only a line renumbered from
+    the correction's own run id is followed.
+    """
+    if record.get("kind") != "correction" or not isinstance(record.get("supersedes"), str):
+        return None
+    named = record["supersedes"]
+    line = renamed.get(named) or origins.get(named) or next(
+        (line for line in (*renamed.values(), *origins.values()) if line.get("record_id") == named), None)
+    if line is None or line.get("renumbered_from") != record["run_id"]:
+        return None
+    return line
 
 
 # ---------------------------------------------------------------------------
@@ -867,6 +961,27 @@ def _close_the_ledger(fh) -> Optional[OSError]:
     return None
 
 
+def _why_only_the_replay_books_it(fh, record: Mapping[str, Any]) -> Optional[str]:
+    """Why a correction goes to the spool for the replay to book, or ``None`` for a record the writer appends itself.
+
+    A correction of a record a replay renumbered out of its run belongs to the
+    renumbered run (:func:`_followed_line`). Appended under the run id it was
+    written with, it would be the last line of the other execution of that
+    run and replace its amount. The replay books it under the renumbered run
+    id, with its receipt (:func:`_plan_the_file`). A ledger that cannot be
+    read to tell sends a correction there as well: the replay reads it again.
+    """
+    if record.get("kind") != "correction":
+        return None
+    try:
+        origins = _renumbered_origins(_whole_records(fh))
+    except OSError as exc:
+        return f"the ledger could not be read to see whether the correction follows a renumbered line ({exc})"
+    if _followed_line(record, {}, origins) is None:
+        return None
+    return "the correction names a record a replay renumbered: the replay books it under that line's run"
+
+
 def _land(fh, opened: Optional[OSError], spool_dir: Path, record: Mapping[str, Any]) -> str:
     """Write ``record`` in its run's order and return where it landed. The caller holds the lock file exclusively.
 
@@ -875,7 +990,8 @@ def _land(fh, opened: Optional[OSError], spool_dir: Path, record: Mapping[str, A
     boundary, earlier lines of the run in the spool or a failed append sends
     the record to the spool (``spool``; after a failed append the ledger may
     hold a fragment of it, or all of it once its line is ended); a failed fsync
-    after a whole append sends it there as well (``ledger+spool``). A spool
+    after a whole append sends it there as well (``ledger+spool``). So does a
+    correction of a record a replay renumbered (:func:`_why_only_the_replay_books_it`). A spool
     that fails too raises :class:`_Unwritten`.
     """
     if fh is None:
@@ -888,6 +1004,10 @@ def _land(fh, opened: Optional[OSError], spool_dir: Path, record: Mapping[str, A
         return "spool"
     if _waits_in_the_spool(spool_dir, record):
         _spool(spool_dir, record, "earlier lines of the run wait in the spool", in_the_ledger=False)
+        return "spool"
+    for_the_replay = _why_only_the_replay_books_it(fh, record)
+    if for_the_replay is not None:
+        _spool(spool_dir, record, for_the_replay, in_the_ledger=False)
         return "spool"
     try:
         _append_record(fh, record)
@@ -1105,8 +1225,10 @@ class LedgerTotals:
     carry another schema version or have no ``run_id``, a torn tail included.
     ``spool_pending`` is the number of runs waiting in the spool when the
     ledger was read, in no sum; a spool file whose every record is in the
-    ledger already (``ledger+spool``, or renumbered by a replay that did not
-    get to delete it) waits for nothing and is not counted.
+    ledger already with its content (``ledger+spool``, or renumbered by a
+    replay that did not get to delete it) waits for nothing and is not
+    counted, and one with a record whose ``record_id`` is there with other
+    content still counts.
     ``spool_unreadable`` says the spool or its quarantine could not be listed
     or a spool file could not be read as one run's, so ``spool_pending`` is a
     lower bound; ``spool_conflicts`` is the number of those waiting runs whose
@@ -1344,7 +1466,9 @@ def aggregate_runs(
     the spool counted in one scope under the shared lock file
     (:func:`_ledger_and_spool`); a total that misses spooled runs always comes
     with them in ``spool_pending``, and with ``incomplete`` set. A spool file
-    whose records all landed already waits for nothing and is not counted. A
+    whose records all landed already, each with its content
+    (:func:`_has_landed`), waits for nothing and is not counted; one whose
+    ``record_id`` is in the ledger with other content still waits. A
     spooled run that is a second execution of a run in the ledger is counted in
     ``spool_conflicts`` as well; the run's total stays its ledger lines.
     """
@@ -1352,8 +1476,8 @@ def aggregate_runs(
     text, spooled, spool_unreadable, quarantined, unlocked = _ledger_and_spool(path)
     whole, torn = _split_torn_tail(text)
     records, legacy, unreadable = _parse_lines(whole)
-    landed = _landed_ids(records)
-    waiting = [run for run in spooled if any(record["record_id"] not in landed for record in run)]
+    by_id, origins = _lines_by_record_id(records), _renumbered_origins(records)
+    waiting = [run for run in spooled if not all(_has_landed(record, by_id, origins) for record in run)]
     last = {record["run_id"]: record for record in records}
     runs = {run_id: record for run_id, record in last.items() if select is None or select(record)}
     cost = api = 0.0
@@ -1396,15 +1520,19 @@ _LOCK_POLL_SEC = 0.05
 class ReplayResult:
     """What one :func:`replay_spool` call did; ``stopped`` says why it ended with files left, else ``None``.
 
-    ``stopped`` is ``lock_busy`` (the lock file, or under it the ledger
-    ``flock`` a writer of an older fabric version held, was not obtained
-    within the bounds, and nothing more was written), ``batch`` or ``budget``
-    (the bound of one call), ``spool_unreadable`` (the spool directory could
-    not be listed) or ``write_failed`` (a ledger write, its fsync, its
-    read-back, a quarantine or a receipt failed; the file it was on stays).
-    ``detail`` says what happened. ``files_remaining`` counts the files this
-    call listed, or met as files a renumbering waited on, that are still in
-    the spool.
+    ``stopped`` is ``lock_busy`` (the lock file, under it the ledger
+    ``flock`` a writer of an older fabric version held, or the receipt
+    ledger's append lock was not obtained within the bounds; the lock file is
+    released, the file it was on stays and nothing more was written),
+    ``batch`` or ``budget`` (the bound of one call), ``spool_unreadable`` (the
+    spool directory could not be listed), ``write_failed`` (a ledger write,
+    its fsync, its read-back, a quarantine or a receipt failed; the file it
+    was on stays) or ``readback_mismatch`` (a record of a file is in the ledger
+    under its ``record_id`` with other content; the file stays, nothing more
+    is written for it, and the call goes on with the next file).
+    ``detail`` says what happened. ``files_mismatched`` counts the files kept
+    for a mismatch. ``files_remaining`` counts the files this call listed, or
+    met as files a renumbering waited on, that are still in the spool.
     """
 
     files_replayed: int = 0
@@ -1412,16 +1540,18 @@ class ReplayResult:
     records_already_landed: int = 0
     records_renumbered: int = 0
     files_quarantined: int = 0
+    files_mismatched: int = 0
     files_remaining: int = 0
     stopped: Optional[str] = None
     detail: Optional[str] = None
 
     @property
     def exit_code(self) -> int:
-        """0 done or bounded, 1 an unreadable spool directory or a write failure, 3 the lock file busy."""
+        """0 done or bounded; 1 an unreadable spool directory, a write failure or a mismatch; 3 a lock busy."""
         if self.stopped == "lock_busy":
             return 3
-        return 1 if self.stopped in ("spool_unreadable", "write_failed") else 0
+        failed = self.stopped in ("spool_unreadable", "write_failed", "readback_mismatch")
+        return 1 if failed or self.files_mismatched else 0
 
     def as_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -1432,6 +1562,28 @@ class _ReplayError(Exception):
 
     The file stays.
     """
+
+
+class _LockBusy(Exception):
+    """A lock under the lock file stayed taken until the bounds ran out: the ledger ``flock`` or the receipt lock.
+
+    Nothing more is written for the file and it stays; :func:`_replay_under_the_lock` releases the lock file.
+    """
+
+
+class _ReadbackMismatch(Exception):
+    """A record of a spool file reads back from the ledger as a line with its ``record_id`` and other content.
+
+    Found before the file's records are written (a line that only claims to
+    be the record) or after (a line that came back changed). The file stays,
+    nothing more is written for it, and the replay goes on with the next file
+    (``readback_mismatch``, :func:`_drain`).
+    """
+
+    def __init__(self, run_id: str, record_id: str, fields: Sequence[str]):
+        super().__init__(f"record {record_id} of run {run_id} reads back from the ledger with other content in "
+                         f"the fields {list(fields)}: the spool file stays and nothing more is written for it")
+        self.run_id, self.record_id, self.fields = run_id, record_id, list(fields)
 
 
 class _RenumberingWaits(Exception):
@@ -1465,7 +1617,12 @@ class _Bounds:
         return None
 
     def ledger_deadline(self, asked: float) -> float:
-        """Until when the ledger ``flock`` is tried: what is left of the lock wait begun at ``asked``, and of the budget."""
+        """Until when a lock under the lock file is tried: what is left of the wait begun at ``asked``, and of the budget.
+
+        The ledger ``flock`` and the receipt ledger's append lock both: the
+        replay holds the lock file while it waits on either, so neither wait
+        may outlast its bounds.
+        """
         return min(asked + self.wait, self.started + self.budget)
 
 
@@ -1473,13 +1630,16 @@ class _Bounds:
 class _Plan:
     """What the replay does with one spool file: append ``writes`` in order; ``landed`` records were in the ledger.
 
-    ``renumbered`` holds the lines of the file's second execution, written now
-    or by an earlier replay that did not get to delete the file.
+    ``renumbered`` holds the lines of the file's second execution and of the
+    corrections that followed a renumbered line, written now or by an earlier
+    replay that did not get to delete the file. ``expected`` holds, per
+    spooled record in order, the ledger line it must read back as.
     """
 
     writes: List[Dict[str, Any]]
     landed: int
     renumbered: List[Mapping[str, Any]]
+    expected: List[Dict[str, Any]]
 
 
 def _setting(given: Optional[float], spec: Tuple[str, float], cast: Callable[[str], float]) -> float:
@@ -1566,15 +1726,18 @@ def _receipts_file(ledger_path: Path) -> Path:
     return Path(ledger_path).parent.parent / "state" / RECEIPTS_NAME
 
 
-def _emit_receipt(ledger_path: Path, event_type: str, **fields: Any) -> None:
+def _emit_receipt(ledger_path: Path, event_type: str, deadline: float, **fields: Any) -> None:
     """One ``state_mutation`` receipt in the store's receipt ledger, through the canonical append helper.
 
     ``governance_receipts`` imports ``append_receipt`` from ``scripts/``, so
     that directory goes on the path first. ``section`` must be in ``fields``:
     it is one of the appender's idempotency fields, and without it two
     receipts of one event in the same second share one key and the second is
-    dropped as a duplicate. A receipt that is not written raises
-    :class:`_ReplayError`.
+    dropped as a duplicate. The replay holds the lock file meanwhile, so the
+    append lock is tried until ``deadline`` only (a ``time.monotonic()``
+    value, :meth:`_Bounds.ledger_deadline`): still taken then raises
+    :class:`_LockBusy` with nothing written. A receipt that is not written
+    for any other reason raises :class:`_ReplayError`.
     """
     scripts_dir = str(Path(__file__).resolve().parent.parent)
     if scripts_dir not in sys.path:
@@ -1584,8 +1747,13 @@ def _emit_receipt(ledger_path: Path, event_type: str, **fields: Any) -> None:
     try:
         emit_governance_receipt(event_type, receipt_kind="state_mutation", status="success",
                                 source="cost_ledger_replay", receipts_file=str(_receipts_file(ledger_path)),
-                                ledger=str(ledger_path), **fields)
-    except (AppendReceiptError, OSError, ValueError) as exc:
+                                lock_timeout=max(0.0, deadline - time.monotonic()), ledger=str(ledger_path), **fields)
+    except AppendReceiptError as exc:
+        if exc.code == "lock_timeout":
+            raise _LockBusy(f"the receipt ledger's append lock stayed taken until the lock wait or the budget ran "
+                            f"out: the {event_type} receipt was not written and the spool file stays") from exc
+        raise _ReplayError(f"the {event_type} receipt was not written ({exc})") from exc
+    except (OSError, ValueError) as exc:
         raise _ReplayError(f"the {event_type} receipt was not written ({exc})") from exc
 
 
@@ -1671,12 +1839,13 @@ def _quarantine_target(ledger_path: Path, path: Path, digest: str) -> Tuple[Path
     return target, False
 
 
-def _quarantine(ledger_path: Path, path: Path, why: str, result: ReplayResult) -> None:
+def _quarantine(ledger_path: Path, path: Path, why: str, result: ReplayResult, deadline: float) -> None:
     """Move the spool file ``path`` to ``quarantine/`` (never delete it): first the decision booked, then the move (OI-2243).
 
     The caller holds the lock file exclusively. The receipt goes into the
     receipt ledger before the rename (ADR-005): a receipt that fails moves
-    nothing, the file stays in the spool and the call fails. A rename that
+    nothing, the file stays in the spool and the call fails; one whose lock
+    stays taken until ``deadline`` moves nothing either (:class:`_LockBusy`). A rename that
     fails after its receipt leaves the decision booked; the next replay finds
     it by the file name and the content digest (:func:`_quarantine_target`)
     and only finishes the move, without a second receipt. A name already in
@@ -1688,7 +1857,7 @@ def _quarantine(ledger_path: Path, path: Path, why: str, result: ReplayResult) -
         return
     target, booked = _quarantine_target(ledger_path, path, digest)
     if not booked:
-        _emit_receipt(ledger_path, QUARANTINED_EVENT, spool_file=path.name, content_digest=digest,
+        _emit_receipt(ledger_path, QUARANTINED_EVENT, deadline, spool_file=path.name, content_digest=digest,
                       quarantined_as=str(target), reason=why, section=target.name)
     target.parent.mkdir(exist_ok=True)
     os.rename(path, target)
@@ -1711,16 +1880,18 @@ def _unreadable_spool_files(spool_dir: Path) -> List[str]:
     return unreadable
 
 
-def _renumber(record: Mapping[str, Any], run_id: str, renamed: Mapping[str, str]) -> Dict[str, Any]:
-    """The spooled ``record`` as a line of ``run_id``, with ``renumbered_from`` and a fresh ``record_id``.
+def _the_landed_line(
+    record: Mapping[str, Any], line: Dict[str, Any], lines: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """``line``, what the spooled ``record`` landed as, when every ledger line with that id holds it exactly.
 
-    A correction that names a record of the same second execution names that
-    record's renumbered line instead (``renamed``).
+    A line that has the ``record_id`` and other content raises
+    :class:`_ReadbackMismatch`: the ``record_id`` alone never proves a record
+    landed, and the spool file is then the only copy of what it holds.
     """
-    line = dict(record, run_id=run_id, renumbered_from=record["run_id"])
-    if line.get("supersedes") in renamed:
-        line["supersedes"] = renamed[line["supersedes"]]
-    line["record_id"] = _record_id(line)
+    fields = _differing_fields(line, lines)
+    if fields:
+        raise _ReadbackMismatch(record["run_id"], record["record_id"], fields)
     return line
 
 
@@ -1730,39 +1901,48 @@ def _plan_the_file(
     """What to write for one spool file, from what the ledger holds (ADR-043 §6).
 
     A record already in the ledger, as itself or as its renumbered line, is
-    not written again. A record that continues the run in the ledger (a
-    backlog, or a correction of a record of that execution) is written as it
-    is. Any other record is a second execution under the same ``run_id``: it
-    is never merged into the run, it goes under the run id ``next_run_id``
-    gives (asked once, and never when an earlier replay renumbered part of the
-    file already) as :func:`_renumber` makes it. The run has a backlog when
-    none of its ledger lines came from elsewhere than this file.
+    not written again, and it must be there with its content: a line with its
+    ``record_id`` and other fields raises :class:`_ReadbackMismatch` before
+    anything is written (:func:`_the_landed_line`). A correction of a record a
+    replay renumbered, in this file or in an earlier call, follows it: it goes
+    under that line's run id, its ``supersedes`` naming that line
+    (:func:`_followed_line`), and never gets a fresh attempt. A record that
+    continues the run in the ledger (a backlog, or a correction of a record
+    of that execution) is written as it is. Any other record is a second
+    execution under the same ``run_id``: it is never merged into the run, it
+    goes under the run id ``next_run_id`` gives (asked once, and never when
+    the file's records went under a renumbered run id already, by an earlier
+    replay or as a correction that followed one) as :func:`_renumber` makes
+    it. The run has a backlog when none of its ledger lines came from
+    elsewhere than this file.
     """
     run_id = spooled[0]["run_id"]
-    present = {record.get("record_id") for record in ledger_records}
-    origins = _renumbered_origins(ledger_records)
+    by_id, origins = _lines_by_record_id(ledger_records), _renumbered_origins(ledger_records)
     chain = {record.get("record_id") for record in ledger_records if record["run_id"] == run_id}
     backlog = not chain - {record["record_id"] for record in spooled}
-    plan, renamed, second = _Plan([], 0, []), {}, None
+    plan, renamed, second = _Plan([], 0, [], []), {}, None
     for record in spooled:
-        record_id = record["record_id"]
-        if record_id in origins:
-            line = origins[record_id]
-            second, renamed[record_id] = line["run_id"], line["record_id"]
+        landed = _landed_as(record, by_id, origins)
+        followed = None if landed is not None else _followed_line(record, renamed, origins)
+        if landed is not None:
+            line = _the_landed_line(record, *landed)
             plan.landed += 1
-            plan.renumbered.append(line)
-        elif record_id in present:
-            chain.add(record_id)
-            plan.landed += 1
+        elif followed is not None:
+            line = _renumber(record, followed["run_id"], followed["record_id"])
         elif backlog or (record.get("kind") == "correction" and record.get("supersedes") in chain):
-            chain.add(record_id)
-            plan.writes.append(dict(record))
+            line = dict(record)
         else:
             second = second or next_run_id()
-            line = _renumber(record, second, renamed)
-            renamed[record_id] = line["record_id"]
+            line = _renumber(record, second)
+        if landed is None:
             plan.writes.append(line)
+        if line["run_id"] != run_id:
+            second = second or line["run_id"]
+            renamed[record["record_id"]] = line
             plan.renumbered.append(line)
+        else:
+            chain.add(record["record_id"])
+        plan.expected.append(line)
     return plan
 
 
@@ -1788,10 +1968,15 @@ def _write_the_plan(fh, ledger_path: Path, spooled: Sequence[Mapping[str, Any]],
     ``fh``. The fsync is made always, also when every record had landed
     already: such a record can be in the ledger unsynced (its writer's fsync
     failed, ``ledger+spool``, or a replay was killed after its append), and
-    until a fsync succeeds the spool file is its only durable copy. A failed
-    fsync and a line that does not read back as its own complete line raise
-    :class:`_ReplayError`; a failed write raises its ``OSError``. Either way the
-    spool file stays and the next replay sees by ``record_id`` what landed. A
+    until a fsync succeeds the spool file is its only durable copy. Read back
+    is every record of the file, written now or landed before: each must be a
+    complete line equal to what the plan expects, field by field
+    (``expected``, for a renumbered record the line the replay made of it). A
+    failed fsync and a record that does not read back as its own complete
+    line raise :class:`_ReplayError`; a line with its ``record_id`` and other
+    content raises :class:`_ReadbackMismatch`, before the writes when the
+    ledger held it already; a failed write raises its ``OSError``. Either way
+    the spool file stays and the next replay compares again what landed. A
     renumbering that would count the attempts past a spool file that cannot be
     read raises :class:`_RenumberingWaits` instead, before anything is written.
     """
@@ -1811,32 +1996,37 @@ def _write_the_plan(fh, ledger_path: Path, spooled: Sequence[Mapping[str, Any]],
     result.records_written += len(plan.writes)
     result.records_renumbered += sum(1 for line in plan.writes if "renumbered_from" in line)
     result.records_already_landed += plan.landed
-    read_back = {record.get("record_id"): record for record in _whole_records(fh)}
-    missing = [line["record_id"] for line in plan.writes if read_back.get(line["record_id"]) != line]
+    read_back = _lines_by_record_id(_whole_records(fh))
+    missing = [line["record_id"] for line in plan.expected if line["record_id"] not in read_back]
     if missing:
         raise _ReplayError(f"records {missing} of run {spooled[0]['run_id']} did not read back from the ledger as "
                            "their own complete lines; the spool file stays")
+    for line in plan.expected:
+        fields = _differing_fields(line, read_back[line["record_id"]])
+        if fields:
+            raise _ReadbackMismatch(line["run_id"], line["record_id"], fields)
     return plan
 
 
-def _book_the_renumbering(ledger_path: Path, renumbered: Sequence[Mapping[str, Any]]) -> None:
-    """One receipt per renumbered line, unless the receipt ledger holds it already."""
+def _book_the_renumbering(ledger_path: Path, renumbered: Sequence[Mapping[str, Any]], deadline: float) -> None:
+    """One receipt per renumbered line, unless the receipt ledger holds it already; each tried until ``deadline``."""
     for line in renumbered:
         if not _renumbering_booked(ledger_path, line["record_id"]):
-            _emit_receipt(ledger_path, RENUMBERED_EVENT, project_id=line["project_id"], run_id=line["run_id"],
-                          renumbered_from=line["renumbered_from"], record_id=line["record_id"],
-                          section=line["record_id"])
-            logger.warning("cost_ledger: run %s in the spool was a second execution, booked as %s",
-                           line["renumbered_from"], line["run_id"])
+            _emit_receipt(ledger_path, RENUMBERED_EVENT, deadline, project_id=line["project_id"],
+                          run_id=line["run_id"], renumbered_from=line["renumbered_from"],
+                          record_id=line["record_id"], section=line["record_id"])
+            logger.warning("cost_ledger: %s %s of run %s in the spool was booked under run %s (ADR-043 §6)",
+                           line.get("kind"), line["record_id"], line["renumbered_from"], line["run_id"])
 
 
-def _replay_file(ledger_path: Path, path: Path, ledger_deadline: float, result: ReplayResult) -> Optional[str]:
+def _replay_file(ledger_path: Path, path: Path, deadline: float, result: ReplayResult) -> Optional[str]:
     """Bring one spool file back into the ledger and delete it, or quarantine it. The caller holds the lock file.
 
     ``None`` when the file is done. When the ledger ``flock`` stays taken until
-    ``ledger_deadline``, nothing is written for the file and the reason is
-    returned. The file is deleted only after the ledger is fsynced, every
-    record of it reads back as its own complete line and every renumbered line
+    ``deadline``, nothing is written for the file and the reason is returned;
+    a receipt whose lock stays taken until then raises :class:`_LockBusy`, and
+    the file stays. The file is deleted only after the ledger is fsynced,
+    every record of it reads back with its content and every renumbered line
     has its receipt.
     """
     try:
@@ -1844,9 +2034,9 @@ def _replay_file(ledger_path: Path, path: Path, ledger_deadline: float, result: 
     except FileNotFoundError:
         return None
     except (OSError, _UnreadableSpool) as exc:
-        _quarantine(ledger_path, path, str(exc), result)
+        _quarantine(ledger_path, path, str(exc), result, deadline)
         return None
-    fh = _open_locked_until(ledger_path, ledger_deadline)
+    fh = _open_locked_until(ledger_path, deadline)
     if fh is None:
         return (f"the ledger {ledger_path} stayed flocked by a process that does not take the lock file (a writer "
                 "of an older fabric version) until the lock wait or the budget ran out")
@@ -1856,7 +2046,7 @@ def _replay_file(ledger_path: Path, path: Path, ledger_deadline: float, result: 
         closed = _close_the_ledger(fh)
     if closed is not None:
         raise closed
-    _book_the_renumbering(ledger_path, plan.renumbered)
+    _book_the_renumbering(ledger_path, plan.renumbered, deadline)
     os.unlink(path)
     _fsync_dir(path.parent)
     result.files_replayed += 1
@@ -1867,9 +2057,11 @@ def _replay_under_the_lock(ledger_path: Path, path: Path, bounds: _Bounds, resul
     """:func:`_replay_file` with the lock file held exclusively and released after it.
 
     ``None`` when done, else why a lock was busy: the lock file was not
-    obtained within the wait, or the ledger ``flock`` under it not within what
-    was left of the wait and the budget (:meth:`_Bounds.ledger_deadline`).
-    Nothing is written for the file then.
+    obtained within the wait, or under it the ledger ``flock`` or the receipt
+    ledger's append lock not within what was left of the wait and the budget
+    (:meth:`_Bounds.ledger_deadline`). Nothing more is written for the file
+    then, it stays, and the lock file is released before this returns, so a
+    current writer can go on.
     """
     asked = time.monotonic()
     fd = _lock_within(ledger_path, bounds.wait)
@@ -1877,6 +2069,8 @@ def _replay_under_the_lock(ledger_path: Path, path: Path, bounds: _Bounds, resul
         return f"the lock file was taken for {bounds.wait} seconds"
     try:
         return _replay_file(ledger_path, path, bounds.ledger_deadline(asked), result)
+    except _LockBusy as busy:
+        return str(busy)
     finally:
         os.close(fd)
 
@@ -1890,18 +2084,29 @@ def _drain(ledger_path: Path, names: List[str], bounds: _Bounds, result: ReplayR
     waits on go first, each one a unit, and then the file once more. When the
     bounds stop the call before that, the renumbering waits for a later call;
     the attempts are never counted past a file that cannot be read. A file met
-    that way that was not listed is added to ``names``.
+    that way that was not listed is added to ``names``. A file whose records
+    do not read back with their content (:class:`_ReadbackMismatch`) stays, is
+    one unit, and the call goes on with the next file, so one such file never
+    holds back the files after it; ``stopped`` then says ``readback_mismatch``
+    unless a lock or a failure ended the call.
     """
     spool_dir = spool_dir_for(ledger_path)
     queue, handled, deferred = list(names), 0, set()
     while queue:
         stop = bounds.reached(handled)
         if stop:
-            result.stopped = stop
+            result.stopped = result.stopped or stop
             return
         name = queue.pop(0)
         try:
             busy = _replay_under_the_lock(ledger_path, spool_dir / name, bounds, result)
+        except _ReadbackMismatch as mismatch:
+            logger.warning("cost_ledger: the spool file %s stays: %s", name, mismatch)
+            result.files_mismatched += 1
+            if result.stopped is None:
+                result.stopped, result.detail = "readback_mismatch", str(mismatch)
+            handled += 1
+            continue
         except _RenumberingWaits as waits:
             logger.warning("cost_ledger: the spool file %s waits, %s", name, waits)
             if name not in deferred:
@@ -1932,8 +2137,11 @@ def replay_spool(
     then the ledger ``flock`` with ``LOCK_NB`` until what is left of the wait
     and the budget runs out (else ``lock_busy``, the lock file released and
     nothing more written), the boundary restored, the records the ledger
-    misses appended, fsync (always), read back, and only then the file deleted
-    (:func:`_replay_file`). A file that is not one run's goes to quarantine,
+    misses appended, fsync (always), every record read back and compared
+    field by field, the receipts (their append lock bounded by the same
+    deadline, else ``lock_busy``), and only then the file deleted
+    (:func:`_replay_file`). A record whose ``record_id`` is in the ledger
+    with other content keeps its file (``readback_mismatch``, exit 1). A file that is not one run's goes to quarantine,
     its receipt booked before the move, as one unit of the same bounds
     (:func:`_drain`). A spool directory that cannot be listed is
     ``spool_unreadable`` and never quarantined.

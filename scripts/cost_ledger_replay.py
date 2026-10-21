@@ -14,9 +14,10 @@ both run this script.
 
 Exit codes:
   0  done, nothing to do, or a bound left files for the next call
-  1  the spool directory cannot be listed, a write failed, or the store cannot be resolved
-  3  the lock file stayed taken for the whole wait, or under it the ledger ``flock`` for what was left of the
-     wait and the budget (``lock_busy``): nothing more was written
+  1  the spool directory cannot be listed, a write failed, a spooled record is in the ledger under its
+     ``record_id`` with other content (``readback_mismatch``: its file stays), or the store cannot be resolved
+  3  the lock file stayed taken for the whole wait, or under it the ledger ``flock`` or the receipt ledger's
+     append lock for what was left of the wait and the budget (``lock_busy``): nothing more was written
 
 Usage:
   python3 scripts/cost_ledger_replay.py [--json]
@@ -52,7 +53,7 @@ def _summary(ledger: Path, result) -> str:
         f"cost ledger {ledger}: {result.files_replayed} spool files replayed "
         f"({result.records_written} records written, {result.records_already_landed} already landed, "
         f"{result.records_renumbered} renumbered), {result.files_quarantined} quarantined, "
-        f"{result.files_remaining} remaining"
+        f"{result.files_mismatched} kept for a mismatch, {result.files_remaining} remaining"
     )
     if result.stopped:
         line += f"; stopped: {result.stopped}" + (f" ({result.detail})" if result.detail else "")

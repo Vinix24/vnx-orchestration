@@ -152,6 +152,45 @@ def _lock_file_for(receipts_path: Path) -> Path:
     return receipts_path.parent / "append_receipt.lock"
 
 
+# How often a bounded append tries a taken append lock again.
+_LOCK_POLL_SEC = 0.05
+
+
+def _flock_until(fd: int, deadline: float) -> bool:
+    """``flock`` ``fd`` exclusively with ``LOCK_NB``, retried until the ``time.monotonic()`` value ``deadline``.
+
+    ``True`` when held, ``False`` when it stayed taken. One try is always made,
+    also at or past the deadline. Any other ``OSError`` is raised.
+    """
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return False
+            time.sleep(min(_LOCK_POLL_SEC, left))
+
+
+def _take_the_append_lock(lock_handle: Any, lock_path: Path, lock_deadline: Optional[float]) -> None:
+    """Take the append lock exclusively: blocking without ``lock_deadline``, else until that ``time.monotonic()`` value.
+
+    A lock still taken at the deadline raises ``AppendReceiptError`` with code
+    ``lock_timeout``, before anything is written: a caller that holds a lock
+    of its own (the cost-ledger replay holds ``provider_costs.lock``) never
+    waits on this one longer than its own bound.
+    """
+    if lock_deadline is None:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        return
+    if not _flock_until(lock_handle.fileno(), lock_deadline):
+        raise AppendReceiptError(
+            "lock_timeout", EXIT_LOCK_ERROR,
+            f"The append lock {lock_path} stayed taken until the deadline: the receipt was not written",
+        )
+
+
 def _cache_file_for(receipts_path: Path) -> Path:
     return receipts_path.parent / "receipt_idempotency_recent.ndjson"
 
@@ -247,8 +286,12 @@ def _write_receipt_under_lock(
     cache_window_seconds: int,
     *,
     pre_write_hook: Optional[Callable[[Dict[str, Any]], None]] = None,
+    lock_deadline: Optional[float] = None,
 ) -> AppendResult:
     """Acquire the append lock and either write the receipt or skip as duplicate.
+
+    ``lock_deadline``, a ``time.monotonic()`` value, bounds the wait for the
+    lock (:func:`_take_the_append_lock`); without it the wait is unbounded.
 
     ``pre_write_hook``, when given, runs INSIDE the lock exactly once the
     idempotency check has confirmed this receipt is not a duplicate and WILL
@@ -267,7 +310,7 @@ def _write_receipt_under_lock(
 
     try:
         with lock_path.open("a+", encoding="utf-8") as lock_handle:
-            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+            _take_the_append_lock(lock_handle, lock_path, lock_deadline)
 
             cache_entries = _load_cache(cache_path, min_epoch)
             recent_keys = {entry["key"] for entry in cache_entries}
@@ -389,11 +432,7 @@ def _write_receipt_under_lock(
                     idempotency_key, exc,
                 )
 
-            return AppendResult(
-                status="appended",
-                receipts_file=receipt_path,
-                idempotency_key=idempotency_key,
-            )
+            return AppendResult(status="appended", receipts_file=receipt_path, idempotency_key=idempotency_key)
     except AppendReceiptError:
         raise
     except OSError as exc:

@@ -907,6 +907,255 @@ class TestTheAggregation:
 
 
 # ---------------------------------------------------------------------------
+# Codex round 2 (85e3c12f): a correction follows its renumbered charge
+# ---------------------------------------------------------------------------
+
+
+def _renumbered_beside_a_2_dollar_execution(ledger_path: Path) -> tuple:
+    """A $2.00 execution of attempt 1 in the ledger, a $0.50 charge of attempt 1 renumbered to 2 beside it (call 1)."""
+    older = cost_ledger.record_run(_run(cost_usd=2.0), ledger_path=ledger_path)
+    charge = cost_ledger.build_record(_run())
+    _put_in_the_spool(ledger_path, [charge])
+    first = cost_ledger.replay_spool(ledger_path)
+    assert (first.records_renumbered, first.files_replayed, first.stopped) == (1, 1, None)
+    renumbered = _lines(ledger_path)[1]
+    assert (renumbered["run_id"], renumbered["renumbered_from"]) == (RUN_A2, RUN_A1)
+    assert not _spool_file(ledger_path).exists(), "call 1 finished the charge's spool file"
+    return older, charge, renumbered
+
+
+def _assert_the_correction_followed(ledger_path: Path, correction: dict, renumbered: dict, total: float) -> dict:
+    """The correction is booked under the renumbered run, names its line, and the run's total is its amount."""
+    totals = cost_ledger.aggregate_runs(ledger_path)
+    assert totals.cost_usd == pytest.approx(total)
+    assert totals.incomplete is None
+    assert sorted(totals.runs) == [RUN_A1, RUN_A2], "no third run id for the ref"
+    followed = next(line for line in _lines(ledger_path) if line.get("renumbered_from") and line["kind"] == "correction"
+                    and line["cost_usd"] == correction["cost_usd"])
+    assert (followed["run_id"], followed["renumbered_from"]) == (RUN_A2, RUN_A1)
+    assert followed["supersedes"] == renumbered["record_id"], "supersedes names the renumbered line"
+    kept = {key: value for key, value in correction.items() if key not in ("run_id", "record_id", "supersedes")}
+    assert {key: followed[key] for key in kept} == kept
+    assert totals.runs[RUN_A2] == followed
+    assert any(receipt["record_id"] == followed["record_id"]
+               for receipt in _receipts(ledger_path, cost_ledger.RENUMBERED_EVENT))
+    return followed
+
+
+class TestACorrectionFollowsItsRenumberedCharge:
+    def test_the_codex_scenario_totals_2_75_and_books_no_third_run(self, ledger, monkeypatch):
+        """Codex r2 blocker 1, exactly: $0.50 renumbered beside $2.00, then a spooled $0.75 correction: $2.75."""
+        _older, charge, renumbered = _renumbered_beside_a_2_dollar_execution(ledger)
+        correction = _to_the_spool(ledger, monkeypatch, _correction_of(charge, cost_usd=0.75))
+
+        result = cost_ledger.replay_spool(ledger)
+
+        assert (result.records_written, result.records_renumbered, result.files_replayed) == (1, 1, 1)
+        assert (result.stopped, result.exit_code) == (None, 0)
+        totals = cost_ledger.aggregate_runs(ledger)
+        assert totals.cost_usd == pytest.approx(2.75), "not 3.25: the correction replaces the renumbered charge"
+        assert totals.incomplete is None
+        assert sorted(totals.runs) == [RUN_A1, RUN_A2], "no third run id for the ref"
+        _assert_the_correction_followed(ledger, correction, renumbered, 2.75)
+
+    def test_a_correction_written_after_the_renumbering_goes_to_the_replay_and_follows(self, ledger):
+        """Call 1 renumbered the charge; the correction comes later through a working ledger; call 2 books it."""
+        _older, charge, renumbered = _renumbered_beside_a_2_dollar_execution(ledger)
+
+        correction = cost_ledger.record_run(_correction_of(charge, cost_usd=0.75), ledger_path=ledger)
+
+        assert correction.landed == "spool", "under run 1 it would replace the $2.00 execution"
+        waiting = cost_ledger.aggregate_runs(ledger)
+        assert (waiting.spool_pending, waiting.spool_conflicts) == (1, 0), "a correction of a landed line, no clash"
+        assert waiting.cost_usd == pytest.approx(2.5)
+        assert waiting.incomplete == "onvolledig: 1 run wacht op replay"
+
+        result = cost_ledger.replay_spool(ledger)
+
+        assert (result.records_written, result.records_renumbered, result.stopped) == (1, 1, None)
+        _assert_the_correction_followed(ledger, correction, renumbered, 2.75)
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root writes a read-only file")
+    def test_a_correction_of_the_followed_correction_follows_it_and_a_kept_file_is_not_written_twice(
+        self, ledger, monkeypatch,
+    ):
+        """The chain goes on, and a file kept after its write (the receipt failed) sees the followed line landed."""
+        _older, charge, renumbered = _renumbered_beside_a_2_dollar_execution(ledger)
+        first = _to_the_spool(ledger, monkeypatch, _correction_of(charge, cost_usd=0.75))
+        state = ledger.parent.parent / "state"
+        receipts = state / "t0_receipts.ndjson"
+        receipts.chmod(0o444)
+        try:
+            failed = cost_ledger.replay_spool(ledger)
+        finally:
+            receipts.chmod(0o644)
+        assert (failed.stopped, failed.records_written) == ("write_failed", 1)
+        assert _spool_file(ledger).exists(), "no receipt, so the file stays"
+
+        again = cost_ledger.replay_spool(ledger)
+
+        assert (again.records_written, again.records_already_landed, again.files_replayed) == (0, 1, 1)
+        followed = _assert_the_correction_followed(ledger, first, renumbered, 2.75)
+        second = _to_the_spool(ledger, monkeypatch, _correction_of(first, cost_usd=0.6))
+
+        last = cost_ledger.replay_spool(ledger)
+
+        assert (last.records_written, last.records_renumbered, last.stopped) == (1, 1, None)
+        totals = cost_ledger.aggregate_runs(ledger)
+        assert (totals.cost_usd, totals.incomplete, sorted(totals.runs)) == (pytest.approx(2.6), None, [RUN_A1, RUN_A2])
+        assert totals.runs[RUN_A2]["supersedes"] == followed["record_id"]
+        assert totals.runs[RUN_A2]["cost_usd"] == second["cost_usd"]
+
+    def test_a_charge_and_its_correction_in_one_spool_file_follow_together(self, ledger):
+        """The same in one call: the correction goes with its charge to the renumbered run."""
+        cost_ledger.record_run(_run(cost_usd=2.0), ledger_path=ledger)
+        charge = cost_ledger.build_record(_run())
+        correction = cost_ledger.build_record(_correction_of(charge, cost_usd=0.75))
+        _put_in_the_spool(ledger, [charge, correction])
+
+        result = cost_ledger.replay_spool(ledger)
+
+        assert (result.records_written, result.records_renumbered, result.stopped) == (2, 2, None)
+        _assert_the_correction_followed(ledger, correction, _lines(ledger)[1], 2.75)
+
+
+# ---------------------------------------------------------------------------
+# Codex round 2 (85e3c12f): the read-back compares content, not only the record_id
+# ---------------------------------------------------------------------------
+
+
+class TestTheReadBackComparesContent:
+    def test_the_codex_scenario_keeps_the_spool_file(self, ledger, monkeypatch, caplog):
+        """Codex r2 blocker 2, exactly: a ledger line with the spool record's record_id and cost_usd=0, not 0.50."""
+        spooled = _to_the_spool(ledger, monkeypatch, _run())
+        ledger.write_bytes(_line_bytes(dict(spooled, cost_usd=0)))
+        before = ledger.read_bytes()
+
+        with caplog.at_level(logging.WARNING, logger=cost_ledger.logger.name):
+            result = cost_ledger.replay_spool(ledger)
+
+        assert (result.stopped, result.exit_code) == ("readback_mismatch", 1)
+        assert (result.files_mismatched, result.files_replayed, result.records_written) == (1, 0, 0)
+        assert result.files_remaining == 1 and spooled["record_id"] in result.detail
+        assert _spooled(ledger) == [spooled], "the intact spool copy stays"
+        assert ledger.read_bytes() == before, "nothing is written for it"
+        assert any(RUN_A1 in message and "cost_usd" in message for message in caplog.messages)
+        totals = cost_ledger.aggregate_runs(ledger)
+        assert (totals.spool_pending, totals.incomplete) == (1, "onvolledig: 1 run wacht op replay")
+
+    def test_a_renumbered_line_whose_own_record_id_is_off_is_a_mismatch(self, ledger):
+        """For a renumbered record the read-back compares with the line the replay wrote for it, record_id included."""
+        cost_ledger.record_run(_run(cost_usd=2.0), ledger_path=ledger)
+        charge = cost_ledger.build_record(_run())
+        _put_in_the_spool(ledger, [charge])
+        line = dict(charge, run_id=RUN_A2, renumbered_from=RUN_A1, record_id="0" * 32)
+        with ledger.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(line, separators=(",", ":")) + "\n")
+        before = ledger.read_bytes()
+
+        result = cost_ledger.replay_spool(ledger)
+
+        assert (result.stopped, result.exit_code) == ("readback_mismatch", 1)
+        assert result.files_mismatched == 1 and "record_id" in result.detail
+        assert _spooled(ledger) == [charge] and ledger.read_bytes() == before
+
+    def test_a_line_that_reads_back_changed_after_its_write_keeps_the_file(self, ledger, monkeypatch):
+        """The read-back after the write compares every field too."""
+        spooled = _to_the_spool(ledger, monkeypatch, _run())
+        real_read = cost_ledger._read_under_the_lock
+        reads: list = []
+        written = _line_bytes(spooled).decode("utf-8")
+
+        def read_back_changes_the_amount(fh):
+            text = real_read(fh)
+            reads.append(text)
+            return text if len(reads) == 1 else text.replace(written, _line_bytes(dict(spooled, cost_usd=0)).decode())
+
+        with monkeypatch.context() as changed:
+            changed.setattr(cost_ledger, "_read_under_the_lock", read_back_changes_the_amount)
+            result = cost_ledger.replay_spool(ledger)
+
+        assert (result.stopped, result.exit_code, result.records_written) == ("readback_mismatch", 1, 1)
+        assert "cost_usd" in result.detail and spooled["record_id"] in result.detail
+        assert _spooled(ledger) == [spooled], "the spool file stays"
+        again = cost_ledger.replay_spool(ledger)
+        assert (again.records_written, again.records_already_landed, again.files_replayed) == (0, 1, 1)
+        assert _lines(ledger) == [spooled]
+
+    def test_a_mismatched_file_holds_back_no_file_after_it(self, ledger, monkeypatch):
+        """The file stays, and the replay goes on with the next one: one bad line never blocks the spool."""
+        spooled = _to_the_spool(ledger, monkeypatch, _run())
+        ledger.write_bytes(_line_bytes(dict(spooled, cost_usd=0)))
+        other = _to_the_spool(ledger, monkeypatch, _run(run_id=RUN_B1))
+        assert sorted(_spool_dir(ledger).iterdir())[0].name == _spool_file(ledger).name, "the mismatch comes first"
+
+        result = cost_ledger.replay_spool(ledger)
+
+        assert (result.stopped, result.exit_code) == ("readback_mismatch", 1)
+        assert (result.files_replayed, result.files_mismatched, result.files_remaining) == (1, 1, 1)
+        assert _lines(ledger)[-1] == other and not _spool_file(ledger, RUN_B1).exists()
+        assert _spooled(ledger) == [spooled]
+
+
+# ---------------------------------------------------------------------------
+# Codex round 2 (85e3c12f): the receipt lock is bounded
+# ---------------------------------------------------------------------------
+
+# Holds the receipt ledger's append lock exclusively for a while, through its own open file description.
+_RECEIPT_LOCK_HOLDER = """
+    lock = LEDGER.parent.parent / "state" / "append_receipt.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with lock.open("a+", encoding="utf-8") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        signal("holder_has_the_receipt_lock")
+        time.sleep(ARG["hold"])
+    report(done=True)
+"""
+
+
+class TestTheReceiptLockIsBounded:
+    @pytest.mark.parametrize("receipt", ["renumbering", "quarantine"])
+    def test_a_held_receipt_lock_makes_it_lock_busy_within_the_bounds(self, ledger, signals, spawn, receipt):
+        """Codex r2 warning: the receipt is tried within what is left of the bounds; the lock file goes free."""
+        if receipt == "renumbering":
+            cost_ledger.record_run(_run(cost_usd=2.0), ledger_path=ledger)
+            spool_file = _put_in_the_spool(ledger, [cost_ledger.build_record(_run())])
+        else:
+            spool_file = _spool_file(ledger)
+            spool_file.parent.mkdir(parents=True)
+            spool_file.write_text("not json", encoding="utf-8")
+        content = spool_file.read_bytes()
+        holder = spawn(_RECEIPT_LOCK_HOLDER, ledger, signals, {"hold": HOLD_SECONDS})
+        _wait_for(signals / "holder_has_the_receipt_lock", holder)
+
+        started = time.monotonic()
+        result = cost_ledger.replay_spool(ledger, lock_wait_sec=WAIT_SECONDS, budget_sec=WAIT_SECONDS)
+        waited = time.monotonic() - started
+
+        assert (result.stopped, result.exit_code, result.files_remaining) == ("lock_busy", 3, 1)
+        assert "append lock" in result.detail
+        assert waited < WAIT_SECONDS + MARGIN_SECONDS, f"it waited {waited:.2f}s for the receipt lock"
+        assert spool_file.read_bytes() == content, "the spool file is intact"
+        assert result.files_quarantined == 0 and not (_spool_dir(ledger) / "quarantine").exists(), "nothing moved"
+        lock = os.open(ledger.parent / "provider_costs.lock", os.O_RDONLY)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            pytest.fail("the replay still holds the lock file, so a current cost writer would queue behind it")
+        finally:
+            os.close(lock)
+        assert holder.poll() is None, "the receipt lock is still held while the lock file is free again"
+        assert _result(holder) == {"done": True}
+
+        again = cost_ledger.replay_spool(ledger)
+
+        assert (again.stopped, again.files_remaining) == (None, 0)
+        assert not spool_file.exists()
+        event = cost_ledger.RENUMBERED_EVENT if receipt == "renumbering" else cost_ledger.QUARANTINED_EVENT
+        assert len(_receipts(ledger, event)) == 1
+
+
+# ---------------------------------------------------------------------------
 # vnx costs replay: the script, the pip CLI and bin/vnx
 # ---------------------------------------------------------------------------
 
@@ -929,7 +1178,7 @@ class TestTheCli:
         assert done.returncode == 0, done.stderr
         assert json.loads(done.stdout) == {
             "files_replayed": 1, "records_written": 1, "records_already_landed": 0, "records_renumbered": 0,
-            "files_quarantined": 0, "files_remaining": 0, "stopped": None, "detail": None,
+            "files_quarantined": 0, "files_mismatched": 0, "files_remaining": 0, "stopped": None, "detail": None,
         }
         assert _lines(ledger) == [spooled]
         nothing = _replay_cli(ledger)

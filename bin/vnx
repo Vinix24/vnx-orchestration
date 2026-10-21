@@ -300,7 +300,7 @@ Commands:
   smoke              Run one-shot local receipt pipeline smoke test
   cost-report        Aggregate model usage + estimated cost from receipts
   costs replay [--json]  Bring the cost ledger's spool back into the ledger (bounded;
-                     exit 1 unreadable spool or write failure, 3 lock busy)
+                     exit 1 unreadable spool, write failure or mismatch, 3 lock busy)
   package-check      Fail if runtime artifacts exist inside dist
   update [url] [branch]  Pull latest VNX from origin and re-install
   update --pin <tag>     Pin VNX version (respects lock on future updates)

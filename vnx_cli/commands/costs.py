@@ -4,8 +4,8 @@
 ledger. The machinery lives in one script, ``scripts/cost_ledger_replay.py``,
 which the fabric's ``bin/vnx costs replay`` runs too. Like ``providers.py``,
 this entrance runs that script as a subprocess, so its exit codes (0 done,
-1 an unreadable spool or a write failure, 3 a lock busy) reach the
-shell unchanged.
+1 an unreadable spool, a write failure or a read-back mismatch, 3 a lock
+busy) reach the shell unchanged.
 """
 
 from __future__ import annotations

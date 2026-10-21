@@ -8,6 +8,7 @@ import json
 import os
 import sqlite3
 import sys
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
@@ -29,6 +30,7 @@ from .idempotency import (
     _lock_file_for,
     _resolve_receipts_file,
     _resolve_state_dir_env_first,
+    _take_the_append_lock,
     _write_receipt_under_lock,
 )
 from .receipt_finalize import classify_receipt_v2_warnings, commit_receipt_v2_fields, counter_path_beside
@@ -364,6 +366,41 @@ def _drain_pending_mirrors_and_mirror_current(
     return len(remaining)
 
 
+def _queue_the_mirror(
+    receipt: Dict[str, Any], primary_path: Path, idempotency_key: str, lock_deadline: float,
+) -> bool:
+    """The central mirror of a bounded append, queued as mirror debt instead of written; True when queued.
+
+    A bounded append (``lock_timeout``) never writes the mirror inline: that
+    write waits on the central store's append lock without a bound. The
+    receipt goes into this store's pending-mirror queue, and the next append
+    without a lock timeout drains it (:func:`_drain_pending_mirrors_and_mirror_current`).
+    No central target (no ``project_id``, or the central ledger is this one)
+    queues nothing and takes no lock. The queue is written under this store's
+    append lock, taken until ``lock_deadline``; when that stays taken, the
+    mirror of this receipt is skipped with a WARN. The receipt itself is
+    durable already.
+    """
+    central = _resolve_central_receipts_path(receipt, primary_path)
+    if central is None:
+        return False
+    _refuse_real_store_write_under_test_runner(central)
+    queue_path = _pending_mirror_queue_for(primary_path)
+    lock_path = _lock_file_for(primary_path)
+    with lock_path.open("a+", encoding="utf-8") as lock_handle:
+        try:
+            _take_the_append_lock(lock_handle, lock_path, lock_deadline)
+        except AppendReceiptError as exc:
+            _emit("WARN", "central_receipt_mirror_skipped", receipts_file=str(primary_path),
+                  idempotency_key=idempotency_key, error=exc.message)
+            return False
+        pending = _load_pending_mirrors(queue_path)
+        if all(entry["idempotency_key"] != idempotency_key for entry in pending):
+            pending.append({"idempotency_key": idempotency_key, "receipt": receipt})
+        _write_pending_mirrors(queue_path, pending)
+    return True
+
+
 def _stamp_identity(receipt: Dict[str, Any], *, identity_cwd: Optional[Path] = None) -> None:
     """Backfill the four-tuple identity fields on a receipt in place.
 
@@ -457,7 +494,17 @@ def append_receipt_payload(
     receipts_file: Optional[str] = None,
     cache_window_seconds: int = 300,
     skip_enrichment: bool = False,
+    lock_timeout: Optional[float] = None,
 ) -> AppendResult:
+    """Validate, enrich and append one receipt under the append lock; the result says appended or duplicate.
+
+    ``lock_timeout`` bounds, in seconds from this call, every wait on the
+    append lock: a lock still taken then raises ``AppendReceiptError`` with
+    code ``lock_timeout`` and nothing written, and the central mirror is
+    queued rather than written (:func:`_queue_the_mirror`). Without it every
+    wait is unbounded, as it always was.
+    """
+    lock_deadline = None if lock_timeout is None else time.monotonic() + max(0.0, lock_timeout)
     if not isinstance(receipt, dict):
         raise AppendReceiptError("invalid_receipt_type", EXIT_INVALID_INPUT, "Receipt payload must be a JSON object")
 
@@ -525,6 +572,7 @@ def append_receipt_payload(
         idempotency_key,
         cache_window_seconds,
         pre_write_hook=functools.partial(commit_receipt_v2_fields, counter_path=counter_path),
+        lock_deadline=lock_deadline,
     )
 
     # OI-948: _write_receipt_under_lock is annotated -> AppendResult and
@@ -563,9 +611,13 @@ def append_receipt_payload(
         # Phase 6 P3 dual-write: drain persisted mirror debt before attempting
         # the current central write so transient mirror failures are repaired.
         # Best-effort only — the durable local write already succeeded; a mirror
-        # failure (including pending-queue I/O) must never fail the append.
+        # failure (including pending-queue I/O) must never fail the append. A
+        # bounded append queues its mirror instead, for the next unbounded one.
         try:
-            _drain_pending_mirrors_and_mirror_current(receipt, receipt_path, idempotency_key)
+            if lock_deadline is None:
+                _drain_pending_mirrors_and_mirror_current(receipt, receipt_path, idempotency_key)
+            else:
+                _queue_the_mirror(receipt, receipt_path, idempotency_key, lock_deadline)
         except _isolation_guard_error_class():
             # OI-1043: never swallow a test-isolation violation as best-effort.
             raise
