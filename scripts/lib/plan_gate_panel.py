@@ -25,6 +25,12 @@ class (P1, ``second_seat_from_start``). Both labels live in
 ``configs/plan_gate_panel.yaml``; ``--panel-seats`` replaces the composition for
 one run (``compose_panel``).
 
+The operator's provider switch (``provider_switch``) then removes every seat whose
+provider family is switched off for the track's project, before anything is
+dispatched (``apply_provider_switch``). A removed seat is named in the run output
+and the decision text, is never booked, and nothing takes its place. Below the
+floor of the seats the run was entitled to (``panel_floor``) the run refuses.
+
 Every lane routes through ``provider_dispatch.py``, so the provider constraints are
 enforced by construction (kimi-via-cli-only, zai-via-openrouter-only,
 no-anthropic-sdk) and each panelist emits a governed report -> receipt: the gate
@@ -46,7 +52,7 @@ import tempfile
 import uuid
 import warnings
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional
@@ -56,8 +62,9 @@ from typing import Any, Callable, Dict, Iterator, List, Optional
 # A claude seat's stream is archived when its run ends (_archive_seat_stream).
 import event_store
 import final_answer_verdict
+import provider_switch
 
-HERE = Path(__file__).resolve().parent
+HERE =Path(__file__).resolve().parent
 PROVIDER_DISPATCH = HERE / "provider_dispatch.py"
 _SCRIPTS_DIR = HERE.parent
 PANEL_CONFIG_RELATIVE_PATH = Path("configs") / "plan_gate_panel.yaml"
@@ -444,6 +451,19 @@ DEFAULT_SEAT_LABEL = "codex"
 ESCALATION_SEAT_LABEL = "opus"
 
 
+def panel_floor(entitled: int) -> int:
+    """The readable verdicts a panel of ``entitled`` seats needs before it may certify.
+
+    The one floor rule of the plan-gate: a multi-seat panel keeps two voices, a
+    deliberate one-seat panel needs its one. ``apply_panel_rule`` applies it to the
+    seats it judges, ``compose_panel`` to an operator's override, and
+    ``apply_provider_switch`` to the seats a run was entitled to BEFORE a
+    switched-off seat left, so a panel entitled to two or more seats never
+    certifies on one voice.
+    """
+    return min(2, entitled)
+
+
 @dataclass(frozen=True)
 class PanelComposition:
     """The seats ONE plan-gate run uses, and the quorum its PASS needs.
@@ -453,7 +473,7 @@ class PanelComposition:
     override runs exactly the seats it names. ``quorum`` is the number of
     readable verdicts a PASS needs: 1 for the default composition, so one
     readable PASS certifies even when a BLOCK brought a second seat in, and
-    ``min(2, len(seats))`` for an override, the quorum the rule always had.
+    ``panel_floor(len(seats))`` for an override, the quorum the rule always had.
 
     ``second_seat`` (P1) names why the escalation seat sits from the start: a
     schema or security path (``second_seat_from_start``). Both seats are then
@@ -513,7 +533,7 @@ def compose_panel(
     escalation seat for a BLOCK, quorum 1. When ``dispatch_paths`` fall in the
     schema or security class (``second_seat_from_start``), both seats sit from
     the start, quorum 2. With ``requested_labels``: exactly those seats in
-    configured order, no escalation, quorum ``min(2, n)``. Both roles must name
+    configured order, no escalation, quorum ``panel_floor(n)``. Both roles must name
     a configured seat whichever way the run goes, so a broken config surfaces on
     the next run, not on the first BLOCK.
     """
@@ -529,7 +549,7 @@ def compose_panel(
     if requested_labels:
         chosen = filter_panel_seats(seats, requested_labels)
         return PanelComposition(
-            seats=chosen, escalation=None, quorum=min(2, len(chosen)),
+            seats=chosen, escalation=None, quorum=panel_floor(len(chosen)),
             chosen_by="operator", default_label=roles["default"],
         )
     default = filter_panel_seats(seats, [roles["default"]])[0]
@@ -546,7 +566,143 @@ def compose_panel(
     )
 
 
-_OPEN_FENCE = "```" + VERDICT_FENCE
+# ---------------------------------------------------------------------------
+# The provider switch (provider-schakelaar D): a switched-off seat is left out.
+#
+# Nothing substitutes for a switched-off seat (no paid rerouting behind the
+# operator's back). The seat is removed before anything is dispatched, named, and
+# never booked, so it can never become a no-verdict seat that forbids PASS. The
+# floor is ``panel_floor`` over the seats the run was entitled to, so leaving a
+# seat out never lowers the bar a PASS has to clear.
+# ---------------------------------------------------------------------------
+SWITCH_CONSUMER = "plan_gate_panel"
+SWITCHED_OFF_NOTE = "left out (provider switched off)"
+ATTEST_HINT = (
+    "clear the gate by operator attest "
+    "(`vnx horizon plan-gate attest <track> --reason <text> --approval-id <id>`)"
+)
+
+
+def switched_off_entry(decision: provider_switch.SwitchDecision, **identity: str) -> Dict[str, str]:
+    """One left-out seat as plain strings: it lands in the run's --json output."""
+    return {
+        **identity,
+        "provider": decision.identifier,
+        "family": decision.family,
+        "source": decision.source,
+        "scope": decision.scope,
+        "detail": decision.detail(),
+    }
+
+
+def switched_off_note(left_out: List[Dict[str, str]]) -> str:
+    """The one line that names every left-out seat, or "" when none was left out."""
+    if not left_out:
+        return ""
+    names = ", ".join(
+        f"{seat.get('label') or seat['provider']} (family={seat['family']} source={seat['source']})"
+        for seat in left_out
+    )
+    return f"{SWITCHED_OFF_NOTE}: {names}"
+
+
+def switch_remedy(left_out: List[Dict[str, str]]) -> str:
+    """What the operator can do about the left-out seats: one step per distinct cause."""
+    steps: List[str] = []
+    for seat in left_out:
+        family, source, scope = seat["family"], seat["source"], seat["scope"]
+        if source in (provider_switch.SOURCE_OVERRIDE, provider_switch.SOURCE_OVERRIDE_INVALID):
+            step = f"unset {provider_switch.OVERRIDE_ENV_PREFIX}{family.upper()}"
+        elif source == provider_switch.SOURCE_UNREADABLE:
+            step = "`vnx providers repair`"
+        elif source == provider_switch.SOURCE_UNKNOWN_IDENTIFIER:
+            step = f"map {seat['provider']!r} to its family in scripts/lib/provider_switch.py"
+        elif source == provider_switch.SOURCE_PROJECT:
+            step = f"`vnx providers on {family} --project {scope}`"
+        else:
+            step = f"`vnx providers on {family}`"
+            if scope != provider_switch.SCOPE_GLOBAL:
+                step += f" (or with `--project {scope}` for this project only)"
+        if step not in steps:
+            steps.append(step)
+    return "; ".join(steps)
+
+
+@dataclass(frozen=True)
+class SwitchedPanel:
+    """A composition after the provider switch.
+
+    ``composition`` holds the seats that remain (an escalation seat that is switched
+    off is gone too). ``left_out`` names every removed seat (``switched_off_entry``
+    plus ``label`` and ``role``). ``entitled`` is the seat count before removal and
+    ``floor`` is ``panel_floor(entitled)``. ``refusal`` is set when the run may not
+    go: an operator's ``--panel-seats`` names a switched-off seat, or fewer seats
+    remain than the floor.
+    """
+    composition: PanelComposition
+    left_out: List[Dict[str, str]]
+    entitled: int
+    floor: int
+    refusal: str = ""
+
+    def note(self) -> str:
+        return switched_off_note(self.left_out)
+
+
+def _switch_refusal(composition: PanelComposition, kept: int, left_out: List[Dict[str, str]],
+                    floor: int) -> str:
+    """The refusal for a composition the switch shrank, or "" when the run may go."""
+    seats = [seat["label"] for seat in left_out if seat["role"] == "seat"]
+    if composition.chosen_by == "operator" and seats:
+        head = f"--panel-seats names switched-off seat(s): {', '.join(seats)}"
+    elif kept < floor:
+        head = (f"the panel is entitled to {len(composition.seats)} seat(s) and needs {floor} "
+                f"readable verdict(s), but {kept} remain after the provider switch")
+    else:
+        return ""
+    details = "; ".join(f"{seat['label']}: {seat['detail']}" for seat in left_out)
+    return (f"plan-gate refused before any dispatch: {head}. Left out: {details}. No seat was "
+            f"dispatched and no round was booked; the track stays blocked. To go on: "
+            f"{switch_remedy(left_out)}; or {ATTEST_HINT}.")
+
+
+def apply_provider_switch(composition: PanelComposition, *,
+                          project_id: Optional[str]) -> SwitchedPanel:
+    """Remove every seat whose provider family is switched off for ``project_id``.
+
+    ``project_id`` is the track's project. The escalation seat is checked too: when it
+    is off, the run goes without one. The floor is ``panel_floor`` over the seats the
+    run was entitled to (``composition.seats`` before removal), so a panel entitled to
+    two or more seats never certifies on one voice; the remaining composition keeps
+    its quorum for the same reason. Nothing is substituted. With no seat switched off
+    the composition comes back unchanged.
+    """
+    entitled = len(composition.seats)
+    floor = panel_floor(entitled)
+    remaining: List[Dict[str, str]] = []
+    left_out: List[Dict[str, str]] = []
+    escalation = composition.escalation
+    roles = [(seat, "seat") for seat in composition.seats]
+    if escalation is not None:
+        roles.append((escalation, "escalation"))
+    for seat, role in roles:
+        decision = provider_switch.decide(seat["provider"], consumer=SWITCH_CONSUMER,
+                                          project_id=project_id)
+        if not decision.allowed:
+            left_out.append(switched_off_entry(decision, label=seat["label"], role=role))
+            escalation = None if role == "escalation" else escalation
+        elif role == "seat":
+            remaining.append(seat)
+    if not left_out:
+        return SwitchedPanel(composition=composition, left_out=[], entitled=entitled, floor=floor)
+    return SwitchedPanel(
+        composition=replace(composition, seats=remaining, escalation=escalation),
+        left_out=left_out, entitled=entitled, floor=floor,
+        refusal=_switch_refusal(composition, len(remaining), left_out, floor),
+    )
+
+
+_OPEN_FENCE ="```" + VERDICT_FENCE
 _VALID_VERDICTS = {"pass", "revise", "block"}
 
 # A dispatcher takes (provider, model_arg, instruction, dispatch_id) and returns the
@@ -1120,8 +1276,8 @@ def apply_panel_rule(
       REVISE ("revise the plan") for a plan no lane ever saw.
     - quorum: the readable verdicts a PASS needs. ``quorum`` when the caller passes one
       (P2: the default composition passes 1, so one readable PASS certifies even when a
-      BLOCK brought the escalation seat in), else ``min(2, len(results))``: a multi-seat
-      panel keeps two voices, a deliberate one-seat panel needs its one.
+      BLOCK brought the escalation seat in), else ``panel_floor(len(results))``: a
+      multi-seat panel keeps two voices, a deliberate one-seat panel needs its one.
     - any BLOCK -> REVISE.
     - >= 2 REVISE -> REVISE.
     - <= 1 REVISE and no BLOCK, with passes OUTnumbering the dissent -> PASS (the lone dissent
@@ -1180,7 +1336,7 @@ def apply_panel_rule(
     # degraded 3-panel with only one readable lane can't pass on a single voice. A DELIBERATE
     # 1-member panel needs only its one voice. The caller's composition decides when it
     # knows better than the result count (P2's default seat plus its escalation seat).
-    required = quorum if quorum is not None else min(2, len(results))
+    required = quorum if quorum is not None else panel_floor(len(results))
     if len(scoring) < required:
         return _decision(
             "REVISE", block, revise, passes,
@@ -2053,6 +2209,16 @@ def _with_truncation_note(summary: Dict[str, Any], doc_truncation: Dict[str, Any
     }
 
 
+def _with_switched_off_note(summary: Dict[str, Any], left_out: List[Dict[str, str]]) -> Dict[str, Any]:
+    """*summary* with the switched-off seats named in its rationale, the decision text
+    every consumer surfaces. A verdict reached without a seat the operator switched off
+    says so; it never reads as the full panel's verdict."""
+    note = switched_off_note(left_out)
+    if not note:
+        return summary
+    return {**summary, "rationale": f"{summary['rationale']}; {note}"}
+
+
 def _run_seat(
     member: Dict[str, str],
     *,
@@ -2139,6 +2305,7 @@ def run_panel(
     reextract_dispatcher: Optional[DispatcherFn] = None,
     escalation_seat: Optional[Dict[str, str]] = None,
     quorum: Optional[int] = None,
+    switched_off_seats: Optional[List[Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
     """Run the plan-first panel over ``doc_path`` (or ``doc_text``) and return the verdict.
 
@@ -2176,6 +2343,11 @@ def run_panel(
     then decides over every verdict with ``quorum``. A REVISE does not escalate.
     Without them the run is exactly the seats in ``panel`` under the rule's own
     quorum, as before.
+
+    ``switched_off_seats`` (provider switch): the seats ``apply_provider_switch``
+    left out of this run. They are never dispatched and never booked; they are
+    named in the rationale (the round's decision text) and returned under
+    ``switched_off_seats``.
     """
     panel = panel or default_panel()
     resolved_timeout = _seat_timeout(timeout_seconds)
@@ -2227,7 +2399,8 @@ def run_panel(
         results, track_id=track_id, project_id=project_id, seat_ledger_path=seat_ledger_path,
     )
     summary = _with_truncation_note(summary, doc_truncation)
-    return {
+    summary = _with_switched_off_note(summary, switched_off_seats or [])
+    outcome = {
         "track_id": track_id,
         "project_id": project_id,
         "decision": summary["decision"],
@@ -2235,6 +2408,9 @@ def run_panel(
         "panelists": [r.__dict__ for r in results],
         "doc_truncation": doc_truncation,
     }
+    if switched_off_seats:
+        outcome["switched_off_seats"] = list(switched_off_seats)
+    return outcome
 
 
 def build_decision_ref(

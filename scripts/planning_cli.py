@@ -69,6 +69,7 @@ import track_reconciler  # noqa: E402
 import objective_reconcile  # noqa: E402
 import plan_gate_enforcement  # noqa: E402
 import plan_scope
+import provider_switch
 
 _HORIZON_ORDER = ["now", "next", "later"]
 _HORIZON_LABEL = {"now": "NOW", "next": "NEXT", "later": "LATER", None: "UNSCHEDULED"}
@@ -3638,6 +3639,12 @@ def cmd_plan_gate_seed(args: argparse.Namespace) -> int:
     return 0
 
 
+# The outcome of a run the operator's provider switch refused before anything was
+# dispatched: a seat panel below its floor, a --panel-seats naming a switched-off
+# seat, or a switched-off tiebreaker. No round is booked and the track stays blocked.
+PLAN_GATE_SWITCH_REFUSED = "REFUSED_PROVIDER_SWITCHED_OFF"
+
+
 @dataclass
 class PlanGateRunResult:
     """Structured outcome of one ``run_plan_gate_for_track`` call.
@@ -3645,8 +3652,9 @@ class PlanGateRunResult:
     The single execution path fills this once; ``cmd_plan_gate_run`` renders it
     for the interactive single-track command and ``cmd_plan_gate_batch``
     consumes it in a loop. ``exit_code`` is the single-track exit code (0 PASS,
-    2 REVISE/refused/still-blocked, 1 infra error); ``outcome`` is the batch
-    bucket (PASS / REVISE / REFUSED_THIN / REFUSED_NO_DELIVERABLES / ERROR).
+    2 REVISE/refused/still-blocked, 1 infra error, 4 refused by the provider
+    switch); ``outcome`` is the batch bucket (PASS / REVISE / REFUSED_THIN /
+    REFUSED_NO_DELIVERABLES / REFUSED_PROVIDER_SWITCHED_OFF / ERROR).
     """
     track_id: str
     project_id: str
@@ -3704,6 +3712,77 @@ def _record_stop_open_items(
         )
 
 
+def _call_tiebreaker(
+    *, doc_path, doc_text, track_id, project_id, round_number, seat_verdicts,
+    data_dir, seat_timeout, tb_cfg, stderr_lines,
+):
+    """Call the tiebreaker once: ``(result, None)``, or ``(None, failure)`` on a loud failure.
+
+    ``failure`` holds the ``exit_code``, ``outcome`` and ``error`` of the run's
+    result; the reason is also on ``stderr_lines``. Every failure keeps the track
+    blocked, and none of them is a decision:
+      - the provider switch refused the tiebreaker before any call
+        (``PLAN_GATE_SWITCH_REFUSED``, exit 4);
+      - the lane delivered no answer (OI-1219), exit 1;
+      - the answer failed the strict contract, exit 1;
+      - anything else the tiebreaker raised, exit 1.
+    """
+    import plan_gate_tiebreaker
+
+    try:
+        result = plan_gate_tiebreaker.run_tiebreaker(
+            doc_path,
+            doc_text=doc_text,
+            track_id=track_id, project_id=project_id,
+            round_number=round_number,
+            seat_verdicts=seat_verdicts,
+            data_dir=data_dir,
+            timeout_seconds=seat_timeout,
+            config=tb_cfg,
+        )
+    except plan_gate_tiebreaker.TiebreakerSwitchedOffError as exc:
+        stderr_lines.append(str(exc))
+        return None, {
+            "exit_code": provider_switch.EXIT_PROVIDER_SWITCHED_OFF,
+            "outcome": PLAN_GATE_SWITCH_REFUSED, "error": str(exc),
+        }
+    except plan_gate_tiebreaker.TiebreakerNoAnswerError as exc:
+        # OI-1219: the lane delivered no answer (a governance-synthesized
+        # report: timeout / error / no report file). This is NOT a parse
+        # failure — there was no model decision to parse. The reason names the
+        # lane status so the operator sees the cause, not the parser.
+        stderr_lines.append(
+            f"plan-gate tiebreaker: the lane delivered no answer "
+            f"(status={exc.status}); the track stays blocked. The governance "
+            f"layer synthesized the report (no worker authored one: timeout, "
+            f"error, or no report file), so there is no model decision to parse."
+        )
+        return None, {
+            "exit_code": 1, "outcome": "ERROR",
+            "error": (
+                f"tiebreaker lane delivered no answer (status={exc.status}); "
+                "the track stays blocked"
+            ),
+        }
+    except plan_gate_tiebreaker.TiebreakerParseError as exc:
+        stderr_lines.append(
+            f"plan-gate tiebreaker FAILED to parse the decision: {exc}. "
+            "The track stays blocked. The model's answer did not satisfy the "
+            "strict contract (binary START/STOP, at most one change, no "
+            f"findings list). Raw output:\n{(exc.raw or '')[:1200]}"
+        )
+        return None, {
+            "exit_code": 1, "outcome": "ERROR",
+            "error": "tiebreaker parse failure; the track stays blocked",
+        }
+    except Exception as exc:
+        stderr_lines.append(f"plan-gate tiebreaker failed: {exc}")
+        return None, {
+            "exit_code": 1, "outcome": "ERROR", "error": f"plan-gate tiebreaker failed: {exc}",
+        }
+    return result, None
+
+
 def _run_tiebreaker_for_track(
     *,
     state_dir,
@@ -3747,6 +3826,8 @@ def _run_tiebreaker_for_track(
     A ``TiebreakerParseError`` (no fence, wrong outcome, a findings list, more
     than one change) is a loud failure: exit 1, the track stays blocked, the
     operator sees the raw model output. We never silently fill in a decision.
+    A tiebreaker whose provider the operator switched off refuses before any
+    call (``PLAN_GATE_SWITCH_REFUSED``, exit 4); the track stays blocked.
     """
     import plan_gate_panel
     import plan_gate_tiebreaker
@@ -3797,51 +3878,13 @@ def _run_tiebreaker_for_track(
             stdout_json=stdout_json, **kw,
         )
 
-    try:
-        result = plan_gate_tiebreaker.run_tiebreaker(
-            doc_path,
-            doc_text=doc_text,
-            track_id=track_id, project_id=project_id,
-            round_number=round_number,
-            seat_verdicts=seat_verdicts,
-            data_dir=data_dir,
-            timeout_seconds=seat_timeout,
-            config=tb_cfg,
-        )
-    except plan_gate_tiebreaker.TiebreakerNoAnswerError as exc:
-        # OI-1219: the lane delivered no answer (a governance-synthesized
-        # report: timeout / error / no report file). This is NOT a parse
-        # failure — there was no model decision to parse. The reason names the
-        # lane status so the operator sees the cause, not the parser.
-        stderr_lines.append(
-            f"plan-gate tiebreaker: the lane delivered no answer "
-            f"(status={exc.status}); the track stays blocked. The governance "
-            f"layer synthesized the report (no worker authored one: timeout, "
-            f"error, or no report file), so there is no model decision to parse."
-        )
-        return _result(
-            exit_code=1, outcome="ERROR",
-            error=(
-                f"tiebreaker lane delivered no answer (status={exc.status}); "
-                "the track stays blocked"
-            ),
-        )
-    except plan_gate_tiebreaker.TiebreakerParseError as exc:
-        stderr_lines.append(
-            f"plan-gate tiebreaker FAILED to parse the decision: {exc}. "
-            "The track stays blocked. The model's answer did not satisfy the "
-            "strict contract (binary START/STOP, at most one change, no "
-            f"findings list). Raw output:\n{(exc.raw or '')[:1200]}"
-        )
-        return _result(
-            exit_code=1, outcome="ERROR",
-            error="tiebreaker parse failure; the track stays blocked",
-        )
-    except Exception as exc:
-        stderr_lines.append(f"plan-gate tiebreaker failed: {exc}")
-        return _result(
-            exit_code=1, outcome="ERROR", error=f"plan-gate tiebreaker failed: {exc}",
-        )
+    result, failure = _call_tiebreaker(
+        doc_path=doc_path, doc_text=doc_text, track_id=track_id, project_id=project_id,
+        round_number=round_number, seat_verdicts=seat_verdicts, data_dir=data_dir,
+        seat_timeout=seat_timeout, tb_cfg=tb_cfg, stderr_lines=stderr_lines,
+    )
+    if failure is not None:
+        return _result(**failure)
 
     # Record the tiebreaker round in the seat ledger (outcome names the
     # decision so the round history is auditable alongside the seat verdicts).
@@ -3996,6 +4039,7 @@ def _deliverable_dispatch_paths(state_dir, project_id: str, track_id: str) -> li
 
 def _derive_panel_weight(
     *, panel_seats, dispatch_paths, task_class, irreversible, deliverable_paths=None,
+    project_id=None,
 ):
     """Derive the panel composition for one run, and the governance variant for its trace.
 
@@ -4008,9 +4052,14 @@ def _derive_panel_weight(
     from the start when the paths fall in the schema or security class: the
     run's ``--dispatch-paths``, or, when the run names none, what the
     ``deliverable_paths`` callable returns (read only then). The variant stays in the trace and the round record so the
-    history stays readable. Returns a dict (panel, escalation, quorum, variant,
-    chosen_by, gov_trace, seats). Raises on an invalid config or an unknown
-    seat label — fail-loud, the same contract as the single-run path.
+    history stays readable. The operator's provider switch then removes every
+    seat whose family is switched off for ``project_id`` (the track's project,
+    ``plan_gate_panel.apply_provider_switch``): the seats and the trace are the
+    seats that remain, the trace names the left-out ones, and ``switched``
+    carries the result, including the refusal when the run may not go. Returns
+    a dict (panel, escalation, quorum, variant, chosen_by, gov_trace, seats,
+    switched). Raises on an invalid config or an unknown seat label — fail-loud,
+    the same contract as the single-run path.
     """
     import plan_gate_panel
     import smart_router
@@ -4029,7 +4078,11 @@ def _derive_panel_weight(
         second_seat_paths = list(deliverable_paths())
     else:
         second_seat_paths = paths or []
-    composition = plan_gate_panel.compose_panel(requested or None, dispatch_paths=second_seat_paths)
+    switched = plan_gate_panel.apply_provider_switch(
+        plan_gate_panel.compose_panel(requested or None, dispatch_paths=second_seat_paths),
+        project_id=project_id,
+    )
+    composition = switched.composition
     labels = ", ".join(s["label"] for s in composition.seats)
     gov_trace = (
         f"weight={gov.variant} -> {len(composition.seats)} seat(s) by "
@@ -4039,8 +4092,10 @@ def _derive_panel_weight(
         gov_trace += f"; OVERRIDES the default seat {composition.default_label}"
     elif composition.second_seat:
         gov_trace += f"; both seats from the start ({composition.second_seat})"
-    else:
+    elif composition.escalation is not None:
         gov_trace += f"; {composition.escalation['label']} reads on BLOCK"
+    if switched.left_out:
+        gov_trace += f"; {switched.note()}"
     return {
         "panel": composition.seats,
         "escalation": composition.escalation,
@@ -4049,7 +4104,38 @@ def _derive_panel_weight(
         "chosen_by": composition.chosen_by,
         "gov_trace": gov_trace,
         "seats": len(composition.seats),
+        "switched": switched,
     }
+
+
+def _switch_refused(track_id, project_id, message, stderr_lines) -> PlanGateRunResult:
+    """A run the provider switch refused before anything was dispatched.
+
+    Exit 4 (``EXIT_PROVIDER_SWITCHED_OFF``) with the refusal on stderr and as the
+    error. No seat ran and no round was booked, so the track stays blocked and the
+    next run, after the operator re-enabled the provider, starts clean.
+    """
+    stderr_lines.append(message)
+    return PlanGateRunResult(
+        track_id=track_id, project_id=project_id,
+        exit_code=provider_switch.EXIT_PROVIDER_SWITCHED_OFF, outcome=PLAN_GATE_SWITCH_REFUSED,
+        error=message, stderr_lines=stderr_lines,
+    )
+
+
+def _panel_weight_lines(weight) -> list[str]:
+    """The run-output lines of a panel composition: the trace, then one line per
+    seat the provider switch left out, with its full decision."""
+    import plan_gate_panel
+
+    seats_label = "override" if weight["chosen_by"] == "operator" else "seats"
+    lines = [f"plan-gate {seats_label}: {weight['gov_trace']}."]
+    for seat in weight["switched"].left_out:
+        lines.append(
+            f"plan-gate {plan_gate_panel.SWITCHED_OFF_NOTE}: {seat['label']} "
+            f"({seat['role']}): {seat['detail']}"
+        )
+    return lines
 
 
 def run_plan_gate_for_track(
@@ -4168,16 +4254,14 @@ def run_plan_gate_for_track(
     try:
         weight = _derive_panel_weight(
             panel_seats=panel_seats, dispatch_paths=dispatch_paths,
-            task_class=task_class, irreversible=irreversible,
+            task_class=task_class, irreversible=irreversible, project_id=project_id,
             deliverable_paths=lambda: _deliverable_dispatch_paths(state_dir, project_id, track_id),
         )
     except Exception as exc:
         return _error(f"plan-gate run failed: {exc}")
 
-    panel = weight["panel"]
-    variant = weight["variant"]
-    seats_label = "override" if weight["chosen_by"] == "operator" else "seats"
-    stderr_lines.append(f"plan-gate {seats_label}: {weight['gov_trace']}.")
+    panel, variant = weight["panel"], weight["variant"]
+    stderr_lines.extend(_panel_weight_lines(weight))
 
     def _run_result(**kw) -> PlanGateRunResult:
         return PlanGateRunResult(
@@ -4227,6 +4311,8 @@ def run_plan_gate_for_track(
         return _run_result(
             exit_code=2, outcome="REVISE", decision="PLAN_UNCHANGED", error=route.rationale,
         )
+    if weight["switched"].refusal:  # the seat round would run: refuse before any dispatch
+        return _switch_refused(track_id, project_id, weight["switched"].refusal, stderr_lines)
 
     try:
         result = plan_gate_panel.run_panel(
@@ -4234,7 +4320,7 @@ def run_plan_gate_for_track(
             doc_text=plan_text,
             track_id=track_id, project_id=project_id, data_dir=data_dir,
             panel=panel, escalation_seat=weight["escalation"], quorum=weight["quorum"],
-            timeout_seconds=seat_timeout,
+            timeout_seconds=seat_timeout, switched_off_seats=weight["switched"].left_out,
         )
     except Exception as exc:
         return _error(f"plan-gate run failed: {exc}")
@@ -4418,7 +4504,8 @@ def cmd_plan_gate_run(args: argparse.Namespace) -> int:
 
     Exit codes: 0 = PASS (track unblocked), 2 = REVISE/BLOCK, a too-thin goal,
     or zero deliverables (track stays blocked), 1 = infra error (doc/track
-    missing, panel could not run).
+    missing, panel could not run), 4 = refused by the provider switch before
+    anything was dispatched (track stays blocked, no round booked).
 
     This is now a thin renderer over :func:`run_plan_gate_for_track` — the same
     execution path the batch command drives, so the two can never drift.
@@ -4909,12 +4996,14 @@ _BATCH_PROGRESS_FILENAME = "plan_gate_batch_progress.json"
 _BATCH_PROGRESS_VERSION = 1
 
 # Display labels for the batch tally; the internal outcome values stay stable
-# (PASS/REVISE/REFUSED_THIN/REFUSED_NO_DELIVERABLES/ERROR) for JSON consumers.
+# (PASS/REVISE/REFUSED_THIN/REFUSED_NO_DELIVERABLES/REFUSED_PROVIDER_SWITCHED_OFF/
+# ERROR) for JSON consumers.
 _BATCH_OUTCOME_LABEL = {
     "PASS": "PASS",
     "REVISE": "REVISE",
     "REFUSED_THIN": "GEWEIGERD-te-dun",
     "REFUSED_NO_DELIVERABLES": "GEWEIGERD-geen-deliverables",
+    PLAN_GATE_SWITCH_REFUSED: "GEWEIGERD-provider-uit",
     "ERROR": "FOUT",
 }
 
@@ -5030,11 +5119,15 @@ def _dry_run_track(state_dir, track_id, project_id, *, run_kwargs, min_goal_char
         task_class=run_kwargs.get("task_class"),
         irreversible=run_kwargs.get("irreversible", False),
         deliverable_paths=lambda: _deliverable_dispatch_paths(state_dir, project_id, track_id),
+        project_id=project_id,
     )
     goal = (track.get("goal_state") or "") if isinstance(track, dict) else ""
     goal_chars = len(goal.strip())
     thin = goal_chars < min_goal_chars
     detail = f"class={weight['variant']} seats={weight['seats']}"
+    switched = weight["switched"]
+    if switched.left_out:
+        detail += f"; {switched.note()}" + ("; refused by the provider switch" if switched.refusal else "")
     if thin:
         detail += f"; thin-goal ({goal_chars} chars < {min_goal_chars})"
     return {
@@ -5055,9 +5148,7 @@ def _batch_detail(outcome: PlanGateRunResult) -> str:
             f"goal too thin: {outcome.thin_length} meaningful chars "
             f"(threshold {outcome.thin_threshold})"
         )
-    if outcome.outcome == "REFUSED_NO_DELIVERABLES":
-        return outcome.error
-    if outcome.outcome == "ERROR":
+    if outcome.outcome in ("REFUSED_NO_DELIVERABLES", PLAN_GATE_SWITCH_REFUSED, "ERROR"):
         return outcome.error
     if outcome.outcome == "PASS":
         if outcome.still_blocked:
@@ -5120,15 +5211,18 @@ def _execute_batch(
             "thin_threshold": outcome.thin_threshold,
             "still_blocked": outcome.still_blocked,
         }
+        results.append(rec)
+        if outcome.outcome == PLAN_GATE_SWITCH_REFUSED:
+            continue  # nothing ran: the next batch picks the track up again, no --restart needed
         progress[track_id] = {
             **rec,
             "project_id": project_id,
             "finished_at": datetime.now(timezone.utc).isoformat(),
         }
         _save_batch_progress(state_dir, progress)
-        results.append(rec)
 
-    tally = {"PASS": 0, "REVISE": 0, "REFUSED_THIN": 0, "REFUSED_NO_DELIVERABLES": 0, "ERROR": 0}
+    tally = {"PASS": 0, "REVISE": 0, "REFUSED_THIN": 0, "REFUSED_NO_DELIVERABLES": 0,
+             PLAN_GATE_SWITCH_REFUSED: 0, "ERROR": 0}
     for rec in results:
         if rec["outcome"] in tally:
             tally[rec["outcome"]] += 1
@@ -5185,7 +5279,8 @@ def _render_batch_summary(summary, *, as_json):
         print(f"Skipped (already done): {', '.join(summary['skipped'])}")
     parts = [
         f"{_BATCH_OUTCOME_LABEL[outcome]}={summary['tally'].get(outcome, 0)}"
-        for outcome in ("PASS", "REVISE", "REFUSED_THIN", "REFUSED_NO_DELIVERABLES", "ERROR")
+        for outcome in ("PASS", "REVISE", "REFUSED_THIN", "REFUSED_NO_DELIVERABLES",
+                        PLAN_GATE_SWITCH_REFUSED, "ERROR")
     ]
     print(f"Tally: {'  '.join(parts)}  ({len(summary['results'])} processed)")
 

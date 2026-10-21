@@ -14,6 +14,9 @@ Generalises `plan_gate_panel` (plan-review) to arbitrary questions and reuses it
 review-lane dispatcher. Respects the provider constraints (kimi-via-cli-only, zai-via-
 openrouter-only, deepseek-harness own-key, no-anthropic-sdk) — the dispatcher routes each
 provider string through its correct lane.
+
+Honors the operator's provider switch: ``switch_roster`` splits a roster into the seats
+that may run and the switched-off ones, which ``scripts/panel.py`` names and leaves out.
 """
 
 from __future__ import annotations
@@ -68,6 +71,33 @@ def default_roster() -> List[Tuple[str, str]]:
                 pass
         roster.append((provider, model))
     return roster
+
+
+SWITCH_CONSUMER = "deliberation_panel"
+
+
+def switch_roster(
+    roster: List[Tuple[str, str]], *, project_id: Optional[str] = None,
+) -> Tuple[List[Tuple[str, str]], List[Dict[str, str]]]:
+    """Split ``roster`` by the operator's provider switch: ``(kept, left_out)``.
+
+    Decided per seat for ``project_id`` (the run's project). ``left_out`` names each
+    switched-off seat with its family, source, scope and the one-line decision detail.
+    Nothing substitutes for a left-out seat; the caller decides whether the run may
+    still go (``scripts/panel.py``).
+    """
+    import provider_switch
+    from plan_gate_panel import switched_off_entry
+
+    kept: List[Tuple[str, str]] = []
+    left_out: List[Dict[str, str]] = []
+    for provider, model in roster:
+        decision = provider_switch.decide(provider, consumer=SWITCH_CONSUMER, project_id=project_id)
+        if decision.allowed:
+            kept.append((provider, model))
+        else:
+            left_out.append(switched_off_entry(decision, model=model))
+    return kept, left_out
 
 
 def _seat_model(model: str) -> str:
@@ -1012,4 +1042,4 @@ def _first_ok(
     return unmeasured_fallback if unmeasured_fallback is not None else last
 
 
-__all__ = ["MODES", "default_roster", "ModeSpec", "DeliberationResult", "run_deliberation"]
+__all__ = ["MODES", "default_roster", "switch_roster", "ModeSpec", "DeliberationResult", "run_deliberation"]
