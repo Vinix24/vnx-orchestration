@@ -69,14 +69,16 @@ def _run_ollama_fallback(
     prompt: str,
     model: str,
     timeout: float,
+    *,
+    project_id: Optional[str] = None,
 ) -> tuple:
     """Run inference via Ollama CLI as fallback.
 
     Returns (output_text: str, success: bool, error: Optional[str]). Raises
     ``provider_switch.ProviderDisabledError`` before the launch when the operator switched
-    the local family off.
+    the local family off for ``project_id`` (None: the process project).
     """
-    provider_switch.require("ollama", consumer="local_gemma.ollama_fallback")
+    provider_switch.require("ollama", consumer="local_gemma.ollama_fallback", project_id=project_id)
     try:
         result = subprocess.run(
             ["ollama", "run", model, prompt],
@@ -109,7 +111,7 @@ def spawn_local_gemma(
     role: Optional[str] = None,
     deadline_seconds: int = _DEFAULT_DEADLINE,
     dispatch_id: str,
-    project_id: str = "vnx-dev",
+    project_id: Optional[str] = None,
 ) -> LocalGemmaSpawnResult:
     """Spawn local Gemma inference via MLX (primary) or Ollama (fallback).
 
@@ -117,10 +119,10 @@ def spawn_local_gemma(
     Fallback: ollama run gemma3:4b (when MLX unavailable or fails).
     Returns LocalGemmaSpawnResult. Receipt emitted by caller (_dispatch_local_gemma).
     Raises ``provider_switch.ProviderDisabledError`` before either runtime when the operator
-    switched the local family off. ``project_id`` is not passed to the switch: its default is
-    a placeholder, not a resolved project, so the decision follows the process project.
+    switched the local family off for ``project_id``, the dispatch's project; None decides
+    for the process project. The Ollama fallback decides for the same project.
     """
-    provider_switch.require("local-gemma", consumer="local_gemma.spawn")
+    provider_switch.require("local-gemma", consumer="local_gemma.spawn", project_id=project_id)
     from providers.local_gemma.runtime_mlx import mlx_available, run_mlx  # noqa: PLC0415
 
     t_start = time.monotonic()
@@ -154,6 +156,7 @@ def spawn_local_gemma(
             instruction,
             DEFAULT_OLLAMA_MODEL,
             fallback_timeout,
+            project_id=project_id,
         )
         if ollama_success:
             status_ok = True

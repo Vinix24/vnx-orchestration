@@ -203,6 +203,63 @@ def test_door_fire_refuses_global_on_project_off(switch_file, store, tmp_path, c
     assert not door.worker_started and not door.reachability.called
 
 
+def test_a_refused_fire_lands_one_receipt_and_no_reachability_fact(switch_file, store, tmp_path, capsys):
+    """ADR-005: the door's refusal of a real fire is on the record, one dispatch receipt with
+    class provider_switched_off; the dry-run writes nothing. The receipt is no reachability fact,
+    no cooldown and no known-rejected lane, and the refire guard passes over it: switched back
+    on, the same dispatch fires."""
+    write_switches(switch_file, global_={"deepseek": False})
+    spec = make_spec(tmp_path, provider="deepseek-harness", model="deepseek-v4-pro")
+
+    assert Door().run(spec, dry_run=True) == 1
+    assert receipts(store) == []
+
+    door = Door()
+    assert door.run(spec, dry_run=False) == 1
+    assert "REJECT [provider-disabled]" in capsys.readouterr().err
+    assert not door.worker_started and not door.reachability.called
+    rows = receipts(store)
+    assert len(rows) == 1, rows
+    [receipt] = rows
+    assert receipt["receipt_kind"] == "dispatch" and receipt["dispatch_id"] == "20261021-ps-b-test"
+    assert receipt["provider"] == "deepseek-harness" and receipt["model"]
+    assert receipt["status"] == "blocked" and receipt["delivery_state"] == "delivery_refused"
+    assert receipt["failure_class"] == "provider_switched_off"
+    assert receipt["failure_reason"].startswith("provider_switched_off: deepseek-harness family=deepseek")
+    assert f"scope={PROJECT}" in receipt["failure_reason"]
+
+    assert dispatch_cli._recent_blocking_rejection("deepseek-harness", store) is None
+    assert availability.lane_cooldown_remaining("deepseek-harness", state_dir=store) == 0.0
+    assert not provider_reachability.get("deepseek-harness", state_dir=store).is_known_unreachable
+    assert not (store / "provider_reachability").exists()
+    assert dispatch_cli._refire_guard_verdict("20261021-ps-b-test", state_dir=store, refire_reason=None) is None
+
+    write_switches(switch_file, global_={"deepseek": True})
+    again = Door()
+    assert again.run(spec, dry_run=False) == 0 and again.worker_started
+
+
+def test_a_refusal_receipt_that_cannot_be_written_still_refuses_the_fire(switch_file, store, tmp_path,
+                                                                        monkeypatch, capsys):
+    import governance_emit
+
+    def broken(**kwargs):
+        raise RuntimeError("ledger unavailable")
+
+    monkeypatch.setattr(governance_emit, "emit_dispatch_receipt", broken)
+    write_switches(switch_file, global_={"deepseek": False})
+    door = Door()
+
+    assert door.run(make_spec(tmp_path, provider="deepseek-harness", model="deepseek-v4-pro"), dry_run=False) == 1
+    assert not door.worker_started
+    err = capsys.readouterr().err
+    assert "door bookkeeping failed site=provider_switch_refusal_receipt" in err
+    assert "REJECT [provider-disabled]" in err
+    [record] = receipts(store)
+    assert record["event_type"] == "door_bookkeeping_failed"
+    assert record["site"] == "provider_switch_refusal_receipt" and "ledger unavailable" in record["error"]
+
+
 def test_door_never_refuses_claude_or_codex(switch_file, store, tmp_path):
     """Decision 2b: an unreadable switch file refuses every switchable family, never these."""
     switch_file.write_text("{broken", encoding="utf-8")
@@ -257,6 +314,31 @@ def test_fire_path_door_launch_function_and_worker_decide_for_one_project(
     out = real_run([sys.executable, "-c", probe], env=worker_env, capture_output=True, text=True, timeout=60)
     assert out.returncode == 0, out.stderr
     assert json.loads(out.stdout) == {"allowed": True, "scope": PROJECT, "source": "project"}
+
+
+def test_the_envelope_runs_local_gemma_for_the_plans_project(switch_file, store, tmp_path, monkeypatch):
+    """Local off globally, the plan's project on, the process in another project: the envelope
+    hands the plan's project to spawn_local_gemma, never a fixed one."""
+    from types import SimpleNamespace
+
+    import providers.local_gemma.runtime_mlx as runtime_mlx
+    from dispatch_spec import Provider
+    from envelope_adapters_provider import ProviderAdapter
+
+    write_switches(switch_file, global_={"local": False}, projects={PROJECT: {"local": True}})
+    monkeypatch.setenv("VNX_PROJECT_ID", OTHER)
+    monkeypatch.setattr(runtime_mlx, "mlx_available", lambda: True)
+    monkeypatch.setattr(runtime_mlx, "run_mlx", lambda *a, **k: ("local answer", True, None))
+    plan = SimpleNamespace(provider=Provider.LOCAL_GEMMA, role=None, model="gemma-4b-local",
+                           dispatch_id="d-gemma", target_id="T1", project_id=PROJECT, dispatch_paths=(),
+                           deadline_seconds=60, task_class=None)
+
+    try:
+        result = ProviderAdapter().run(plan, "x", cwd=tmp_path)
+    except provider_switch.ProviderDisabledError as exc:
+        result = exc.decision
+    assert getattr(result, "status", None) == "success", result
+    assert result.completion_text == "local answer"
 
 
 def test_the_door_project_reaches_a_launch_the_process_project_would_refuse(

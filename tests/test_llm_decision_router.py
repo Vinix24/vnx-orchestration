@@ -241,25 +241,31 @@ def test_parse_llm_response_returns_none_on_garbage():
 # test_ollama_successful_response
 # ---------------------------------------------------------------------------
 
+def _ollama_stream(*chunks):
+    """A patched ``urlopen`` whose response streams NDJSON lines, as Ollama's /api/generate does.
+
+    OllamaAdapter reads the response line by line (``for raw_line in resp``), so a mock that
+    only answers ``.read()`` hands it no line at all and the decision falls back to the
+    rule-based one (OI-1227). urlopen is used as a context manager.
+    """
+    mock_resp = MagicMock()
+    mock_resp.__iter__.return_value = iter([json.dumps(c).encode() + b"\n" for c in chunks])
+    mock_urlopen = MagicMock()
+    mock_urlopen.return_value.__enter__.return_value = mock_resp
+    mock_urlopen.return_value.__exit__.return_value = False
+    return mock_urlopen
+
+
 def test_ollama_successful_response(tmp_path):
     """Ollama returning valid JSON → DecisionResult uses ollama backend."""
     router = DecisionRouter(data_dir=tmp_path, backend="ollama",
                             ollama_model="gemma3:27b")
+    decision = '{"action": "skip", "reasoning": "all good", "confidence": 0.95}'
 
-    ollama_body = json.dumps({
-        "response": '{"action": "skip", "reasoning": "all good", "confidence": 0.95}'
-    }).encode()
-
-    # urlopen is used as a context manager: `with urlopen(req, timeout=t) as resp:`
-    mock_resp = MagicMock()
-    mock_resp.read.return_value = ollama_body
-    mock_urlopen = MagicMock()
-    mock_urlopen.return_value.__enter__.return_value = mock_resp
-    mock_urlopen.return_value.__exit__.return_value = False
-
-    with patch("urllib.request.urlopen", mock_urlopen):
+    with patch("urllib.request.urlopen", _ollama_stream({"response": decision, "done": False},
+                                                        {"response": "", "done": True})):
         result = router.decide({}, "skip")
 
     assert result.action == "skip"
-    assert "ollama" in result.backend_used
+    assert result.backend_used == "ollama:gemma3:27b"
     assert result.confidence == pytest.approx(0.95)

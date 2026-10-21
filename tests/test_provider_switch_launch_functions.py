@@ -411,6 +411,117 @@ def test_spawn_claude_decides_an_inherited_base_url_and_the_env_project(switch_f
     assert len(primitives) == 1
 
 
+def _attempt(call: Callable[[], Any]) -> Any:
+    """What a launch call ends in: the refusal's decision, ``"launched"`` when it reached a
+    launch primitive, or the ValueError it raised."""
+    try:
+        call()
+    except provider_switch.ProviderDisabledError as exc:
+        return exc.decision
+    except Launched:
+        return "launched"
+    except ValueError as exc:
+        return exc
+    return "returned"
+
+
+def _spawn_claude(tmp_path: Path, model: str, extra_env: Dict[str, str], **kwargs: Any) -> Callable[[], Any]:
+    from provider_spawns.claude_spawn import spawn_claude
+    return lambda: spawn_claude("x", model, "d-1", "T1", cwd=tmp_path, scrub_env_keys=frozenset(),
+                                extra_env=extra_env, **kwargs)
+
+
+def test_spawn_claude_decides_an_openrouter_host_on_the_models_maker(switch_file, primitives, tmp_path):
+    """DeepSeek off, OpenRouter on: a DeepSeek model behind an OpenRouter base URL is refused
+    as deepseek, the maker's switch; a maker the switch does not govern stays openrouter."""
+    switch_off(switch_file, "deepseek")
+    env = {"ANTHROPIC_BASE_URL": "https://openrouter.ai/api"}
+
+    for model in ("deepseek/deepseek-v4-pro", "deepseek-v4-pro"):
+        refused = _attempt(_spawn_claude(tmp_path, model, env))
+        assert refused != "launched", f"{model} behind openrouter.ai reached delivery with deepseek off"
+        assert refused.family == "deepseek" and refused.source == "global"
+    assert primitives == []
+
+    assert _attempt(_spawn_claude(tmp_path, "anthropic/claude-sonnet-4", env)) == "launched"
+    assert [name for name, _ in primitives] == ["subprocess.Popen"]
+
+
+def test_spawn_claude_decides_a_labelled_redirect_on_its_label(switch_file, primitives, tmp_path):
+    """A harness names the family of its own redirect: the decision is on that family, for a
+    host the map does not know too."""
+    env = {"ANTHROPIC_BASE_URL": "https://glm-gateway.example.internal:8443"}
+    switch_off(switch_file, "glm")
+    refused = _attempt(_spawn_claude(tmp_path, "glm-5.2", env, base_url_family="glm"))
+    assert refused != "launched" and refused.family == "glm" and refused.source == "global"
+    assert primitives == []
+
+    switch_off(switch_file, "deepseek")
+    assert _attempt(_spawn_claude(tmp_path, "glm-5.2", env, base_url_family="glm")) == "launched"
+
+
+@pytest.mark.parametrize("label", ["claude", "codex", "glm-harness", "unknown"])
+def test_spawn_claude_refuses_a_label_that_is_not_a_switchable_family(label, switch_file, primitives,
+                                                                     tmp_path):
+    """A label is a family name the switch governs; claude or codex would bypass the switch."""
+    switch_off(switch_file, "deepseek")
+    env = {"ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic"}
+    outcome = _attempt(_spawn_claude(tmp_path, "deepseek-v4-pro", env, base_url_family=label))
+    assert isinstance(outcome, ValueError) and "not a switchable family" in str(outcome)
+    assert primitives == []
+
+
+@pytest.mark.parametrize("proxy_url", ["http://127.0.0.1:5151", "https://glm-gateway.example.internal:8443"])
+def test_a_configured_glm_proxy_reaches_its_launch_with_glm_on(proxy_url, switch_file, primitives,
+                                                               tmp_path, monkeypatch):
+    """The operator's VNX_GLM_PROXY_URL, on a loopback port other than 4141 or on a custom
+    gateway host, is decided as glm, never refused as a host the map does not know."""
+    from provider_spawns import glm_harness_spawn
+    monkeypatch.setenv("VNX_GLM_PROXY_URL", proxy_url)
+    monkeypatch.setattr(glm_harness_spawn, "_proxy_reachable", lambda url, timeout=3.0: True)
+    switch_off(switch_file, "deepseek")
+
+    outcome = _attempt(lambda: glm_harness_spawn.spawn_glm_harness("x", None, "d-1", "T1", cwd=tmp_path))
+
+    assert outcome == "launched", f"the glm harness on {proxy_url} was refused: {outcome}"
+    assert [name for name, _ in primitives] == ["subprocess.Popen"]
+
+
+def test_the_deepseek_harness_is_decided_on_its_label_not_the_host_map(switch_file, primitives,
+                                                                       tmp_path, monkeypatch):
+    """Same for the deepseek harness: an endpoint the host map does not know (a moved or proxied
+    DeepSeek endpoint) is decided as deepseek."""
+    from provider_spawns import deepseek_harness_spawn
+    monkeypatch.setattr(deepseek_harness_spawn, "DEEPSEEK_ANTHROPIC_BASE_URL",
+                        "https://deepseek-proxy.example.internal/anthropic")
+    switch_off(switch_file, "glm")
+
+    outcome = _attempt(lambda: deepseek_harness_spawn.spawn_deepseek_harness(
+        "x", None, "d-1", "T1", api_key="sk-test", cwd=tmp_path))
+
+    assert outcome == "launched", f"the deepseek harness on a proxied endpoint was refused: {outcome}"
+    assert [name for name, _ in primitives] == ["subprocess.Popen"]
+
+
+def test_local_gemma_decides_for_the_supplied_project(switch_file, primitives, monkeypatch):
+    """Local off globally, project X on: spawn_local_gemma for X reaches MLX, and the Ollama
+    fallback decides for X too; project Y is refused."""
+    from providers.local_gemma import spawn
+    import providers.local_gemma.runtime_mlx as runtime_mlx
+    switch_file.write_text(json.dumps({"version": 1, "global": {"local": {"enabled": False}},
+                                       "projects": {"proj-x": {"local": {"enabled": True}}}}),
+                           encoding="utf-8")
+    gemma = lambda pid: (lambda: spawn.spawn_local_gemma(instruction="x", dispatch_id="d-1", project_id=pid))
+
+    assert _attempt(gemma("proj-x")) == "launched"
+    refused = _attempt(gemma("proj-y"))
+    assert refused != "launched" and refused.family == "local" and refused.scope == "proj-y"
+
+    monkeypatch.setattr(runtime_mlx, "mlx_available", lambda: False)
+    assert _attempt(gemma("proj-x")) == "launched"
+    assert [name for name, _ in primitives] == ["runtime_mlx.run_mlx", "subprocess.run"]
+
+
 def test_a_classifier_decides_for_the_project_get_provider_decided_for(switch_file, primitives):
     """Global deepseek off, project X on: get_provider for X hands X to classify(), so layer 1
     does not refuse an item layer 2 allowed, whatever the process project is."""

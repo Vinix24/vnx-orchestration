@@ -429,7 +429,7 @@ class ProviderAdapter:
                 role=effective_role,
                 deadline_seconds=300,
                 dispatch_id=plan.dispatch_id,
-                project_id="vnx-dev",
+                project_id=getattr(plan, "project_id", None),
             )
             token_usage = _extract_token_usage(result, pv.value)
             if result.error and result.returncode != 0:

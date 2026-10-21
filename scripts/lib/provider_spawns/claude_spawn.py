@@ -69,18 +69,36 @@ def _env_seconds(name: str, default: float) -> float:
         return default
 
 
-def _base_url_family(base_url: str, *, project_id: Optional[str]) -> str:
-    """The provider family behind an ``ANTHROPIC_BASE_URL`` (the host-keyed check).
+def _switch_family(
+    model: str, extra_env: Optional[Dict[str, str]], scrub_env_keys: frozenset, *,
+    base_url_family: Optional[str], project_id: Optional[str],
+) -> Optional[str]:
+    """The family the provider switch decides this spawn on, or None: no redirect is claude.
 
-    A host the provider-switch host map does not know is refused like an unknown identifier:
-    this raises ``ProviderDisabledError`` carrying the host decision (``unknown-identifier``).
+    ``base_url_family`` is the family a harness lane names for its own redirect: the decision is
+    on that family, whatever host the redirect points at (an operator's ``VNX_GLM_PROXY_URL`` on
+    any host or port). Without one, an ``ANTHROPIC_BASE_URL`` in the env the child receives is
+    mapped by host, an OpenRouter host to the maker of ``model``. A host the map does not know
+    raises ``ProviderDisabledError`` with the host decision (``unknown-identifier``); a label
+    that is not a switchable family raises ``ValueError``.
     """
+    if base_url_family is not None:
+        if base_url_family not in provider_switch.SWITCHABLE_FAMILIES:
+            raise ValueError(
+                f"base_url_family={base_url_family!r} is not a switchable family "
+                f"({', '.join(provider_switch.SWITCHABLE_FAMILIES)}): it names the family a "
+                "harness redirect reaches, never a class the switch does not govern"
+            )
+        return base_url_family
+    base_url = _received_env_value(_BASE_URL_ENV, extra_env, scrub_env_keys)
+    if base_url is None:
+        return None
     try:
-        return provider_switch.family_of_host(base_url)
+        return provider_switch.family_of_host(base_url, model=model)
     except provider_switch.UnknownProviderError:
-        raise provider_switch.ProviderDisabledError(
-            provider_switch.decide_host(base_url, consumer=_SWITCH_CONSUMER, project_id=project_id)
-        ) from None
+        raise provider_switch.ProviderDisabledError(provider_switch.decide_host(
+            base_url, consumer=_SWITCH_CONSUMER, project_id=project_id, model=model,
+        )) from None
 
 
 @dataclass
@@ -166,6 +184,7 @@ def spawn_claude(
     role: Optional[str] = None,
     requires_mcp: bool = False,
     scrub_env_keys: frozenset,
+    base_url_family: Optional[str] = None,
     **kwargs: Any,
 ) -> ClaudeSpawnResult:
     """Spawn ``claude -p --output-format stream-json`` and consume the event stream.
@@ -238,20 +257,25 @@ def spawn_claude(
         the old ``None`` default made omission invisible.
         tests/test_spawn_scrub_env_keys_contract.py statically enforces that every
         git-tracked, non-test call site supplies this keyword.
+    base_url_family:
+        The provider family behind the ``ANTHROPIC_BASE_URL`` this spawn's env carries, named
+        by a harness lane that sets that redirect itself (``glm``, ``deepseek``). None (every
+        other caller) leaves the decision to the host map.
     **kwargs:
         Accepted for forward-compatibility; ignored.
 
-    Raises ``provider_switch.ProviderDisabledError`` before any launch when the env the child
-    receives (``extra_env`` over the process env, after ``scrub_env_keys``) points
-    ``ANTHROPIC_BASE_URL`` at a host whose provider family the operator switched off, or at a
-    host the switch's host map does not know. An Anthropic host, or no redirect, is claude,
-    which the switch never refuses. The decision is for the project that env carries.
+    Raises ``provider_switch.ProviderDisabledError`` before any launch when the operator
+    switched off the family behind the env the child receives (``extra_env`` over the process
+    env, after ``scrub_env_keys``): the ``base_url_family`` a harness names, else the family
+    of the ``ANTHROPIC_BASE_URL`` host (an OpenRouter host decided on the maker of ``model``),
+    and a host the switch's host map does not know. An Anthropic host, or no redirect, is
+    claude, which the switch never refuses. The decision is for the project that env carries.
     """
-    base_url = _received_env_value(_BASE_URL_ENV, extra_env, scrub_env_keys)
-    if base_url is not None:
-        switch_project = _received_env_value(provider_switch.PROJECT_ENV, extra_env, scrub_env_keys)
-        provider_switch.require(_base_url_family(base_url, project_id=switch_project),
-                                consumer=_SWITCH_CONSUMER, project_id=switch_project)
+    switch_project = _received_env_value(provider_switch.PROJECT_ENV, extra_env, scrub_env_keys)
+    switch_family = _switch_family(model, extra_env, scrub_env_keys, base_url_family=base_url_family,
+                                   project_id=switch_project)
+    if switch_family is not None:
+        provider_switch.require(switch_family, consumer=_SWITCH_CONSUMER, project_id=switch_project)
     try:
         from worker_health_monitor import HealthStatus, SLOW_THRESHOLD
     except ImportError:

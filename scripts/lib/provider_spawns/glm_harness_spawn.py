@@ -158,7 +158,9 @@ def spawn_glm_harness(
 
     Raises ``provider_switch.ProviderDisabledError`` before the proxy probe when the operator
     switched glm off for the project ``extra_env`` carries (``VNX_PROJECT_ID``).
-    ``spawn_claude`` checks the same family again through the proxy base URL.
+    ``spawn_claude`` decides glm again: this lane names the family of its redirect
+    (``base_url_family``), so a ``VNX_GLM_PROXY_URL`` on any host or port is decided as glm,
+    never refused as a host the switch's host map does not know.
     """
     provider_switch.require("glm-harness", consumer="glm_harness_spawn",
                             project_id=(extra_env or {}).get(provider_switch.PROJECT_ENV))
@@ -199,6 +201,7 @@ def spawn_glm_harness(
         extra_cli_args=build_harness_cli_args(cwd if cwd is not None else os.getcwd()),
         cwd=cwd,
         scrub_env_keys=_HARNESS_SCRUB_KEYS,
+        base_url_family=provider_switch.GLM,
         **kwargs,
     )
     # Harden the flaky OpenRouter→GLM lane: a returncode-0 spawn that produced no

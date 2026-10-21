@@ -1082,26 +1082,26 @@ def repair(*, actor: str, empty: bool = False) -> WriteResult:
 
 
 # ---------------------------------------------------------------------------
-# Census: every launch function, and what is still pending
+# Census: every launch function, each one enforced
 # ---------------------------------------------------------------------------
 # Entries are ``<repo-relative path>:<qualname>``. The coverage guard
 # (tests/test_provider_switch_coverage.py) asserts the census against its AST detector and the
 # measured floor: a detected launch function must be here or on EXEMPT, every entry here must
-# call require() before its first launch call or be pending, and an EXEMPT entry must still
-# match something.
+# call require() before its first launch call, and an EXEMPT entry must still match something.
 
 # Launch functions the detector cannot see, each with the reason.
 UNDETECTED_LAUNCH_FUNCTIONS: Dict[str, str] = {
     "scripts/lib/provider_spawns/claude_spawn.py:spawn_claude":
         "host-keyed check: a claude launch whose received env carries a non-Anthropic "
-        "ANTHROPIC_BASE_URL maps that host to its family; the launch itself goes through "
-        "SubprocessAdapter, so this body holds no process call",
+        "ANTHROPIC_BASE_URL is decided on the family a harness lane names for it, else on "
+        "the family of that host (an OpenRouter host on the model's maker); the launch itself "
+        "goes through SubprocessAdapter, so this body holds no process call",
     "scripts/lib/provider_spawns/deepseek_harness_spawn.py:spawn_deepseek_harness":
-        "delegates to spawn_claude with the DeepSeek ANTHROPIC_BASE_URL; no process call in "
-        "its own body",
+        "delegates to spawn_claude with the DeepSeek ANTHROPIC_BASE_URL, labelled deepseek; "
+        "no process call in its own body",
     "scripts/lib/provider_spawns/glm_harness_spawn.py:spawn_glm_harness":
-        "delegates to spawn_claude with the :4141 proxy ANTHROPIC_BASE_URL; no process call "
-        "in its own body",
+        "delegates to spawn_claude with the proxy ANTHROPIC_BASE_URL (VNX_GLM_PROXY_URL, "
+        "default :4141), labelled glm; no process call in its own body",
     "scripts/lib/provider_spawns/kimi_spawn.py:_start_kimi_subprocess":
         "Popen of an argv that arrives as a parameter; the literal 'kimi' head sits in "
         "_build_kimi_cmd, called by spawn_kimi",

@@ -3805,7 +3805,8 @@ def _dispatch_local_gemma(args: argparse.Namespace) -> int:
         role=getattr(args, "role", None),
         deadline_seconds=300,
         dispatch_id=args.dispatch_id,
-        # project_id dropped: spawn_local_gemma does not consume it (inert kwarg).
+        # project_id omitted: the provider switch decides for this process's project, as
+        # provider_dispatch does for every lane.
     )
     end_time = datetime.now(timezone.utc)
 
