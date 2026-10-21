@@ -11,40 +11,34 @@ Track ``kosten-per-model-in-het-grootboek``, deliverable K2a, first PR. Covers
 - the writer prices a run through ``price_run`` when no provider cost is given;
 - one aggregation function: per ``run_id`` only the last line counts,
   ``unavailable`` is listed and never summed as 0, old-shape lines are counted as
-  ``legacy_lines``, the spool count is reported;
-- spool and replay: a failing append spools the record and reports the
-  ``cost-ledger`` beacon degraded, replay is idempotent per ``run_id`` +
-  ``record_id``, an unreadable spool file stays and is reported;
-- a torn append: every append starts on a valid NDJSON boundary, and the replay
-  keeps a spool file until its records read back as their own lines;
-- the aggregation reads the ledger and lists the spool in one lock scope, so a
-  replay between the two reads never yields a lower total marked complete;
-- one lock orders a run's records: an append that fails spools its record
-  before the locks go, a writer that cannot open or lock the ledger is ordered
-  by the spool lock alone, and the ledger is closed while its lock is held;
-- ``vnx costs replay`` (script, pip CLI) and the dispatcher prelude tick;
+  ``legacy_lines``, and an unreadable ledger is an error, never an empty total;
+- a failed append raises ``CostLedgerWriteError``, whether the open, the lock,
+  the append or the close failed, and keeps nothing elsewhere;
+- a torn append: every append starts on a valid NDJSON boundary, a failed
+  append ends its own line when the disk has room, and the ledger is closed
+  while its lock is held;
 - ``emit_provider_cost`` writes the same line as before (golden).
+
+The spool and the replay of ADR-043 §6 moved to the second K2a PR (verdict
+``cap-pr2141-73c685f656862925ef20ef81d2a09090b9b08337``), and their tests with
+them: ``claudedocs/specs/kosten-per-model-in-het-grootboek/k2a-spool-replay-uitgesteld.md``.
 
 Failures are injected for real: a ledger path that is a directory makes the
 append fail with ``IsADirectoryError``, exactly as an unwritable store would. A
-torn append (half a line on disk, then ``ENOSPC``) and a lost write are injected
-at the ledger's file handle, so the code under test runs unchanged.
+torn append (half a line on disk, then ``ENOSPC``), a refused lock and a failing
+close are injected at the ledger's file handle or lock call, so the code under
+test runs unchanged.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import errno
 import fcntl
-import importlib.util
 import json
 import os
 import re
-import subprocess
 import sys
-import textwrap
-import threading
-from argparse import Namespace
-from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -58,10 +52,6 @@ for _path in (str(REPO_ROOT), str(_LIB)):
 
 import cost_ledger  # noqa: E402
 import provider_costs  # noqa: E402
-
-COSTS_CLI = REPO_ROOT / "scripts" / "costs_cli.py"
-TICKS_SH = REPO_ROOT / "scripts" / "lib" / "dispatcher_supervisor_ticks.sh"
-DISPATCHER_SH = REPO_ROOT / "scripts" / "dispatcher_minimal.sh"
 
 PROJECT = "vnx-dev"
 RUN_A1 = f"{PROJECT}:dispatch:20261020-kp-x:1"
@@ -102,12 +92,8 @@ def ledger(tmp_path: Path) -> Path:
 
 
 def _spool_dir(ledger_path: Path) -> Path:
+    """Where ADR-043 §6 will put the spool. K2a-1 has none, and the tests assert it stays absent."""
     return ledger_path.parent / "provider_costs.spool"
-
-
-def _beacon(ledger_path: Path) -> dict:
-    path = ledger_path.parent.parent / "health" / "cost-ledger.json"
-    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _lines(ledger_path: Path) -> list:
@@ -118,7 +104,7 @@ def _lines(ledger_path: Path) -> list:
 
 def _assert_nothing_written(ledger_path: Path) -> None:
     assert _lines(ledger_path) == []
-    assert not _spool_dir(ledger_path).exists() or not any(_spool_dir(ledger_path).glob("*.json"))
+    assert not _spool_dir(ledger_path).exists()
 
 
 # ---------------------------------------------------------------------------
@@ -522,123 +508,93 @@ class TestTheAggregation:
 
     def test_a_missing_ledger_is_an_empty_total(self, ledger):
         totals = cost_ledger.aggregate_runs(ledger)
-        assert totals.runs == {} and totals.cost_usd == 0 and totals.spool_pending == 0
-        assert totals.incomplete is None
+        assert totals.runs == {} and totals.cost_usd == 0
+        assert (totals.unavailable, totals.legacy_lines, totals.unreadable_lines) == ((), 0, 0)
+        assert not ledger.exists(), "reading the ledger never creates it"
+
+    def test_an_unreadable_ledger_is_an_error_not_an_empty_total(self, ledger):
+        """Only a missing ledger is empty: one that cannot be read never sums to 0 unnoticed."""
+        _break_the_ledger(ledger)
+        with pytest.raises(IsADirectoryError):
+            cost_ledger.aggregate_runs(ledger)
+
+    def test_the_totals_carry_exactly_the_ledger_fields(self, ledger):
+        """The plain ledger is all the aggregation reads, and all its totals describe."""
+        cost_ledger.record_run(_run(), ledger_path=ledger)
+        totals = cost_ledger.aggregate_runs(ledger)
+        assert [field.name for field in dataclasses.fields(totals)] == [
+            "runs", "cost_usd", "api_equivalent_usd", "tokens", "tokens_unknown", "unavailable",
+            "legacy_lines", "unreadable_lines",
+        ]
 
 
 # ---------------------------------------------------------------------------
-# Spool and replay (item 4)
+# A failed append raises (round 6: the recovery path moved to the second K2a PR)
 # ---------------------------------------------------------------------------
 
 def _break_the_ledger(ledger_path: Path) -> None:
-    """A directory where the ledger file should be: every append fails with IsADirectoryError."""
+    """A directory where the ledger file should be: every open fails with IsADirectoryError."""
     ledger_path.mkdir(parents=True)
 
 
-def _repair_the_ledger(ledger_path: Path) -> None:
-    ledger_path.rmdir()
+class _RefusedFlock:
+    """``cost_ledger.fcntl`` with every exclusive ``flock`` refused, as a filesystem without locks does."""
+
+    def __getattr__(self, name):
+        return getattr(fcntl, name)
+
+    def flock(self, fd, operation):
+        if operation & fcntl.LOCK_EX:
+            raise OSError(errno.ENOLCK, os.strerror(errno.ENOLCK))
+        return fcntl.flock(fd, operation)
 
 
-class TestSpoolAndReplay:
-    def test_a_failing_append_spools_the_record_and_reports_degraded(self, ledger):
-        _break_the_ledger(ledger)
-        record = cost_ledger.record_run(_run(), ledger_path=ledger)
+_WHERE_THE_APPEND_FAILS = {"open": errno.EISDIR, "lock": errno.ENOLCK, "append": errno.ENOSPC, "close": errno.EIO}
 
-        spooled = sorted(_spool_dir(ledger).glob("*.json"))
-        assert [p.name for p in spooled] == [f"{RUN_A1}.json"]
-        assert json.loads(spooled[0].read_text(encoding="utf-8")) == [record]
-        beacon = _beacon(ledger)
-        assert beacon["component"] == "cost-ledger"
-        assert beacon["status"] == "stale"
-        assert beacon["details"]["state"] == "degraded"
-        assert beacon["details"]["spool_pending"] == 1
 
-        totals = cost_ledger.aggregate_runs(ledger)
-        assert totals.spool_pending == 1
-        assert totals.incomplete == "onvolledig: 1 runs wachten op replay"
+class TestAFailedAppendRaises:
+    @pytest.mark.parametrize("where", sorted(_WHERE_THE_APPEND_FAILS))
+    def test_record_run_raises_and_leaves_no_spool_directory(
+        self, ledger, inject, close_probe, monkeypatch, where,
+    ):
+        """No spool, no beacon, no silent success: the caller's call fails with the cause's errno."""
+        if where == "open":
+            _break_the_ledger(ledger)
+        elif where == "lock":
+            monkeypatch.setattr(cost_ledger, "fcntl", _RefusedFlock())
+        elif where == "append":
+            inject(ledger, "torn")
+        else:
+            close_probe(ledger, failing_close=[OSError(errno.EIO, os.strerror(errno.EIO))])
 
-    def test_replay_brings_the_record_in_once(self, ledger):
-        _break_the_ledger(ledger)
-        record = cost_ledger.record_run(_run(), ledger_path=ledger)
-        _repair_the_ledger(ledger)
-
-        first = cost_ledger.replay_spool(ledger)
-        assert first.written == 1
-        assert first.removed == (f"{RUN_A1}.json",)
-        assert first.pending == 0
-        assert _lines(ledger) == [record]
-        assert not any(_spool_dir(ledger).glob("*.json"))
-        assert _beacon(ledger)["status"] == "ok"
-
-        second = cost_ledger.replay_spool(ledger)
-        assert second.written == 0
-        assert _lines(ledger) == [record]
-
-    def test_a_record_that_already_landed_is_not_written_again(self, ledger):
-        """A crash between the append and the unlink leaves both; the replay writes nothing twice."""
-        _break_the_ledger(ledger)
-        record = cost_ledger.record_run(_run(), ledger_path=ledger)
-        _repair_the_ledger(ledger)
-        ledger.write_text(json.dumps(record, separators=(",", ":")) + "\n", encoding="utf-8")
-
-        result = cost_ledger.replay_spool(ledger)
-        assert result.written == 0
-        assert result.already_present == 1
-        assert result.removed == (f"{RUN_A1}.json",)
-        assert _lines(ledger) == [record]
-
-    def test_an_unreadable_spool_file_stays_and_is_reported(self, ledger):
-        _spool_dir(ledger).mkdir(parents=True)
-        broken = _spool_dir(ledger) / f"{RUN_B1}.json"
-        broken.write_text("{not json", encoding="utf-8")
-        _break_the_ledger(ledger)
-        cost_ledger.record_run(_run(), ledger_path=ledger)
-        _repair_the_ledger(ledger)
-
-        result = cost_ledger.replay_spool(ledger)
-        assert result.unreadable == (broken.name,)
-        assert result.written == 1
-        assert result.pending == 1
-        assert broken.read_text(encoding="utf-8") == "{not json"
-        assert _beacon(ledger)["status"] == "stale"
-        assert _beacon(ledger)["details"]["unreadable"] == [broken.name]
-
-    def test_a_later_record_of_a_spooled_run_queues_behind_it(self, ledger):
-        """Last line wins only if the replayed charge lands before its correction."""
-        _break_the_ledger(ledger)
-        charge = cost_ledger.record_run(_run(cost_usd=0.5), ledger_path=ledger)
-        _repair_the_ledger(ledger)
-        correction = cost_ledger.record_run(
-            _run(kind="correction", supersedes=charge["record_id"], reason="corrected", cost_usd=2.0),
-            ledger_path=ledger,
-        )
-        assert _lines(ledger) == []
-
-        cost_ledger.replay_spool(ledger)
-        assert [line["record_id"] for line in _lines(ledger)] == [charge["record_id"], correction["record_id"]]
-        assert cost_ledger.aggregate_runs(ledger).cost_usd == pytest.approx(2.0)
-
-    def test_a_failing_spool_write_is_an_error_of_the_call(self, ledger):
-        _break_the_ledger(ledger)
-        _spool_dir(ledger).write_text("a file where the spool directory should be", encoding="utf-8")
-        with pytest.raises(cost_ledger.CostLedgerSpoolError):
+        with pytest.raises(cost_ledger.CostLedgerWriteError) as excinfo:
             cost_ledger.record_run(_run(), ledger_path=ledger)
 
-    def test_a_replay_on_a_broken_ledger_raises_and_keeps_the_spool(self, ledger):
-        _break_the_ledger(ledger)
-        cost_ledger.record_run(_run(), ledger_path=ledger)
-        with pytest.raises(OSError):
-            cost_ledger.replay_spool(ledger)
-        assert [p.name for p in _spool_dir(ledger).glob("*.json")] == [f"{RUN_A1}.json"]
+        error = excinfo.value
+        assert isinstance(error, OSError)
+        assert error.errno == error.__cause__.errno == _WHERE_THE_APPEND_FAILS[where]
+        assert RUN_A1 in str(error) and str(ledger) in str(error)
+        assert not _spool_dir(ledger).exists()
+        assert sorted(path.name for path in ledger.parent.iterdir()) == [ledger.name]
+        assert not (ledger.parent.parent / "health").exists()
 
-    def test_a_replay_without_a_spool_does_nothing(self, ledger):
-        result = cost_ledger.replay_spool(ledger)
-        assert (result.written, result.removed, result.unreadable, result.pending) == (0, (), (), 0)
-        assert not ledger.exists()
+    def test_a_refused_lock_writes_nothing(self, ledger, monkeypatch):
+        monkeypatch.setattr(cost_ledger, "fcntl", _RefusedFlock())
+        with pytest.raises(cost_ledger.CostLedgerWriteError):
+            cost_ledger.record_run(_run(), ledger_path=ledger)
+        assert ledger.read_bytes() == b""
+
+    def test_a_close_that_fails_after_the_append_raises(self, ledger, close_probe):
+        """The flush the close did is not confirmed, so the call fails, though the line may be on disk."""
+        close_probe(ledger, failing_close=[OSError(errno.EIO, os.strerror(errno.EIO))])
+        with pytest.raises(cost_ledger.CostLedgerWriteError):
+            cost_ledger.record_run(_run(), ledger_path=ledger)
+        assert [line["run_id"] for line in _lines(ledger)] == [RUN_A1]
+        assert not _spool_dir(ledger).exists()
 
 
 # ---------------------------------------------------------------------------
-# A torn append: the NDJSON boundary and the read-back (round 2)
+# A torn append: the NDJSON boundary (round 2)
 # ---------------------------------------------------------------------------
 
 class _LedgerFault:
@@ -646,12 +602,11 @@ class _LedgerFault:
 
     ``torn`` puts the first half of the line on disk and raises ``ENOSPC``, as
     a full disk does halfway through a write. ``unterminated`` puts the whole
-    JSON on disk without its final newline and raises ``ENOSPC``. ``lost``
-    reports the write as done and puts nothing on disk. Only a JSON line
-    triggers it. After ``torn`` or ``unterminated`` the disk stays full for the
-    rest of that call: every later write through the same handle, a bare
-    newline included, raises ``ENOSPC``. With ``disk_stays_full=False`` the disk
-    has room again right after the fault. The next call always finds room.
+    JSON on disk without its final newline and raises ``ENOSPC``. Only a JSON
+    line triggers it. After the fault the disk stays full for the rest of that
+    call: every later write through the same handle, a bare newline included,
+    raises ``ENOSPC``. With ``disk_stays_full=False`` the disk has room again
+    right after the fault. The next call always finds room.
     """
 
     def __init__(self, ledger_path: Path, kind: str, disk_stays_full: bool):
@@ -686,8 +641,6 @@ class _FaultyHandle:
         if not (self._fault.armed and text.startswith("{")):
             return self._fh.write(text)
         self._fault.armed = False
-        if self._fault.kind == "lost":
-            return len(text)
         self._fh.write(text[:-1] if self._fault.kind == "unterminated" else text[: len(text) // 2])
         self._fh.flush()
         self._full = self._fault.disk_stays_full
@@ -718,24 +671,6 @@ def _line_bytes(record: dict) -> bytes:
     return (json.dumps(record, separators=(",", ":")) + "\n").encode("utf-8")
 
 
-def _readable_lines(ledger_path: Path) -> list:
-    """The ledger's lines that parse, in order; the torn ones are skipped."""
-    readable = []
-    for line in ledger_path.read_text(encoding="utf-8").splitlines():
-        try:
-            readable.append(json.loads(line))
-        except ValueError:
-            continue
-    return readable
-
-
-def _spool_one_run(ledger_path: Path) -> dict:
-    _break_the_ledger(ledger_path)
-    record = cost_ledger.record_run(_run(), ledger_path=ledger_path)
-    _repair_the_ledger(ledger_path)
-    return record
-
-
 class _FrozenEmitDatetime(datetime):
     @classmethod
     def now(cls, tz=None):
@@ -753,179 +688,53 @@ def _emit_an_old_line(ledger_path: Path, monkeypatch) -> None:
     )
 
 
-def _load_costs_cli():
-    spec = importlib.util.spec_from_file_location("costs_cli_under_test", COSTS_CLI)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 class TestATornAppend:
-    def test_a_replay_after_a_torn_append_lands_the_record_on_its_own_line(self, ledger, inject):
-        inject(ledger, "torn")
-        record = cost_ledger.record_run(_run(), ledger_path=ledger)
+    @pytest.mark.parametrize("kind", ["torn", "unterminated"])
+    def test_a_record_after_a_torn_append_starts_on_its_own_line(self, ledger, inject, kind):
+        """The disk stays full for the failed call, so its line stays open: the next append ends it first."""
+        inject(ledger, kind)
+        with pytest.raises(cost_ledger.CostLedgerWriteError):
+            cost_ledger.record_run(_run(), ledger_path=ledger)
         torn = ledger.read_bytes()
         assert torn and not torn.endswith(b"\n")
-        assert [p.name for p in _spool_dir(ledger).glob("*.json")] == [f"{RUN_A1}.json"]
-
-        result = cost_ledger.replay_spool(ledger)
-        assert (result.written, result.removed, result.pending) == (1, (f"{RUN_A1}.json",), 0)
-        totals = cost_ledger.aggregate_runs(ledger)
-        assert totals.runs == {RUN_A1: record}
-        assert totals.unreadable_lines == 1
-        assert ledger.read_bytes() == torn + b"\n" + _line_bytes(record)
-        assert not any(_spool_dir(ledger).glob("*.json"))
-        assert _beacon(ledger)["status"] == "ok"
-
-    def test_a_record_after_a_torn_append_starts_on_its_own_line(self, ledger, inject):
-        inject(ledger, "torn")
-        cost_ledger.record_run(_run(), ledger_path=ledger)
-        torn = ledger.read_bytes()
 
         other = cost_ledger.record_run(_run(run_id=RUN_B1), ledger_path=ledger)
-        totals = cost_ledger.aggregate_runs(ledger)
-        assert totals.runs == {RUN_B1: other}
-        assert totals.unreadable_lines == 1
-        assert totals.spool_pending == 1
         assert ledger.read_bytes() == torn + b"\n" + _line_bytes(other)
-
-    def test_a_correction_queued_behind_a_torn_charge_still_wins(self, ledger, inject):
-        inject(ledger, "torn")
-        charge = cost_ledger.record_run(_run(cost_usd=0.5), ledger_path=ledger)
-        torn = ledger.read_bytes()
-        assert torn and not torn.endswith(b"\n")
-        correction = cost_ledger.record_run(
-            _run(kind="correction", supersedes=charge["record_id"], reason="corrected", cost_usd=2.0),
-            ledger_path=ledger,
-        )
-        assert ledger.read_bytes() == torn + b"\n", "the queued record ends the torn line first"
-        assert json.loads((_spool_dir(ledger) / f"{RUN_A1}.json").read_text(encoding="utf-8")) == [
-            charge, correction,
-        ]
-
-        result = cost_ledger.replay_spool(ledger)
-        assert (result.written, result.pending) == (2, 0)
-        assert [line["record_id"] for line in _readable_lines(ledger)] == [
-            charge["record_id"], correction["record_id"],
-        ]
-        assert ledger.read_bytes() == torn + b"\n" + _line_bytes(charge) + _line_bytes(correction)
         totals = cost_ledger.aggregate_runs(ledger)
-        assert totals.runs == {RUN_A1: correction}
-        assert totals.cost_usd == pytest.approx(2.0)
-        assert totals.unreadable_lines == 1
-
-    def test_a_torn_append_during_the_replay_keeps_the_spool_for_the_next(self, ledger, inject):
-        record = _spool_one_run(ledger)
-        inject(ledger, "torn")
-        with pytest.raises(OSError) as excinfo:
-            cost_ledger.replay_spool(ledger)
-        assert excinfo.value.errno == errno.ENOSPC
-        assert [p.name for p in _spool_dir(ledger).glob("*.json")] == [f"{RUN_A1}.json"]
-        torn = ledger.read_bytes()
-        assert torn and not torn.endswith(b"\n")
-
-        result = cost_ledger.replay_spool(ledger)
-        assert (result.written, result.pending) == (1, 0)
-        totals = cost_ledger.aggregate_runs(ledger)
-        assert totals.runs == {RUN_A1: record}
-        assert totals.unreadable_lines == 1
-        assert ledger.read_bytes() == torn + b"\n" + _line_bytes(record)
+        if kind == "torn":
+            assert totals.runs == {RUN_B1: other}
+            assert totals.unreadable_lines == 1
+        else:
+            assert totals.runs == {RUN_A1: json.loads(torn), RUN_B1: other}
+            assert totals.unreadable_lines == 0
 
     def test_a_whole_ledger_gets_no_extra_newline(self, ledger):
         first = cost_ledger.record_run(_run(), ledger_path=ledger)
         second = cost_ledger.record_run(_run(run_id=RUN_B1), ledger_path=ledger)
         assert ledger.read_bytes() == _line_bytes(first) + _line_bytes(second)
 
-    def test_a_replayed_record_that_does_not_read_back_keeps_the_spool(self, ledger, inject):
-        record = _spool_one_run(ledger)
-        spool_file = _spool_dir(ledger) / f"{RUN_A1}.json"
-        spooled = spool_file.read_text(encoding="utf-8")
-
-        inject(ledger, "lost")
-        with pytest.raises(OSError, match="did not read back") as excinfo:
-            cost_ledger.replay_spool(ledger)
-        assert isinstance(excinfo.value, cost_ledger.CostLedgerReplayError)
-        assert excinfo.value.result.unconfirmed == (spool_file.name,)
-        assert excinfo.value.result.removed == ()
-        assert spool_file.read_text(encoding="utf-8") == spooled
-        beacon = _beacon(ledger)
-        assert beacon["details"]["state"] == "degraded"
-        assert beacon["details"]["unconfirmed"] == [spool_file.name]
-        assert cost_ledger.aggregate_runs(ledger).spool_pending == 1
-
-        retry = cost_ledger.replay_spool(ledger)
-        assert (retry.written, retry.removed, retry.pending) == (1, (spool_file.name,), 0)
-        assert _lines(ledger) == [record]
-        assert _beacon(ledger)["status"] == "ok"
-
-    def test_a_charge_landing_after_its_correction_keeps_the_spool(self, ledger):
-        """Last written wins: the spool stays while the run's last line is not its newest record."""
-        _break_the_ledger(ledger)
-        charge = cost_ledger.record_run(_run(cost_usd=0.5), ledger_path=ledger)
-        _repair_the_ledger(ledger)
-        correction = cost_ledger.record_run(
-            _run(kind="correction", supersedes=charge["record_id"], reason="corrected", cost_usd=2.0),
-            ledger_path=ledger,
-        )
-        ledger.write_bytes(_line_bytes(correction))
-
-        with pytest.raises(OSError, match="did not read back"):
-            cost_ledger.replay_spool(ledger)
-        assert json.loads((_spool_dir(ledger) / f"{RUN_A1}.json").read_text(encoding="utf-8")) == [
-            charge, correction,
-        ]
-        assert _beacon(ledger)["details"]["state"] == "degraded"
-
-    def test_a_record_that_landed_without_its_newline_is_ended_before_its_spool_goes(
-        self, ledger, inject, monkeypatch,
-    ):
-        """codex_gate on 313f4bdc: the already-landed branch removed the spool and left the tail open."""
-        inject(ledger, "unterminated")
-        record = cost_ledger.record_run(_run(), ledger_path=ledger)
-        assert ledger.read_bytes() == _line_bytes(record)[:-1]
-        assert [p.name for p in _spool_dir(ledger).glob("*.json")] == [f"{RUN_A1}.json"]
-
-        result = cost_ledger.replay_spool(ledger)
-        assert (result.written, result.already_present, result.removed) == (0, 1, (f"{RUN_A1}.json",))
-        _emit_an_old_line(ledger, monkeypatch)
-
-        totals = cost_ledger.aggregate_runs(ledger)
-        assert totals.runs == {RUN_A1: record}, "the charged run is lost"
-        assert (totals.legacy_lines, totals.unreadable_lines, totals.spool_pending) == (1, 0, 0)
-        assert ledger.read_bytes() == _line_bytes(record) + _GOLDEN_EMIT_LINE.encode("utf-8")
-
     @pytest.mark.parametrize("kind", ["torn", "unterminated"])
     def test_a_failed_append_ends_its_own_line_when_the_disk_has_room(self, ledger, inject, monkeypatch, kind):
         """The old writer cannot glue onto a line this module left open: the failed append ends it."""
         inject(ledger, kind, disk_stays_full=False)
-        record = cost_ledger.record_run(_run(), ledger_path=ledger)
+        with pytest.raises(cost_ledger.CostLedgerWriteError) as excinfo:
+            cost_ledger.record_run(_run(), ledger_path=ledger)
+        assert excinfo.value.errno == errno.ENOSPC
         assert ledger.read_bytes().endswith(b"\n")
-        assert [p.name for p in _spool_dir(ledger).glob("*.json")] == [f"{RUN_A1}.json"]
         left = ledger.read_bytes()
 
         _emit_an_old_line(ledger, monkeypatch)
         assert ledger.read_bytes() == left + _GOLDEN_EMIT_LINE.encode("utf-8")
-        assert cost_ledger.aggregate_runs(ledger).legacy_lines == 1
-
-        result = cost_ledger.replay_spool(ledger)
-        assert (result.removed, result.pending) == ((f"{RUN_A1}.json",), 0)
         totals = cost_ledger.aggregate_runs(ledger)
-        assert totals.runs == {RUN_A1: record}
-        assert (totals.legacy_lines, totals.unreadable_lines) == (1, 1 if kind == "torn" else 0)
-
-    def test_the_command_exits_two_when_a_record_does_not_read_back(self, inject, capsys):
-        default = provider_costs._resolve_costs_path()
-        _spool_one_run(default)
-        inject(default, "lost")
-
-        costs_cli = _load_costs_cli()
-        assert costs_cli.main(["replay"]) == costs_cli.EXIT_FAILED
-        assert "replay failed, the spool stays" in capsys.readouterr().err
-        assert [p.name for p in _spool_dir(default).glob("*.json")] == [f"{RUN_A1}.json"]
+        assert totals.legacy_lines == 1
+        if kind == "torn":
+            assert (totals.runs, totals.unreadable_lines) == ({}, 1)
+        else:
+            assert (list(totals.runs), totals.unreadable_lines) == ([RUN_A1], 0)
 
 
 # ---------------------------------------------------------------------------
-# Ledger and spool backlog in one lock scope (round 4)
+# The ledger lock goes with the close (round 5)
 # ---------------------------------------------------------------------------
 
 def _lock_is_held(path: Path) -> bool:
@@ -939,246 +748,6 @@ def _lock_is_held(path: Path) -> bool:
             return True
         fcntl.flock(probe, fcntl.LOCK_UN)
         return False
-
-
-class _ReplayBetweenTheReads:
-    """A real ``replay_spool`` started at the aggregation's first spool listing: codex's race, made deterministic.
-
-    The listing first notes which locks the aggregation holds at that point.
-    When the ledger lock is free, the replay runs to its end before the
-    listing goes on, as a replay in another process would in that gap. When
-    the aggregation holds the ledger lock, the replay waits on it in a thread,
-    where a concurrent replay would wait, and :meth:`finish` lets it end after
-    the aggregation returned.
-    """
-
-    def __init__(self, ledger_path: Path, monkeypatch):
-        self.ledger_path = ledger_path
-        self.spool_lock = ledger_path.parent / f".{cost_ledger.SPOOL_DIR_NAME}.lock"
-        self.held = None
-        self._armed = True
-        self._thread = None
-        self._errors = []
-        real_listing = cost_ledger._spool_files
-
-        def listing(spool_dir):
-            if self._armed:
-                self._armed = False
-                self._start()
-            return real_listing(spool_dir)
-
-        monkeypatch.setattr(cost_ledger, "_spool_files", listing)
-
-    def _replay(self):
-        try:
-            cost_ledger.replay_spool(self.ledger_path)
-        except BaseException as exc:  # handed to finish(), which fails the test on it
-            self._errors.append(exc)
-
-    def _start(self):
-        self.held = (_lock_is_held(self.ledger_path), _lock_is_held(self.spool_lock))
-        self._thread = threading.Thread(target=self._replay, daemon=True)
-        self._thread.start()
-        if not self.held[0]:
-            self._thread.join()
-
-    def finish(self):
-        assert self._thread is not None, "the aggregation never listed the spool"
-        self._thread.join(timeout=30)
-        assert not self._thread.is_alive(), "the replay never got the ledger lock"
-        assert not self._errors, self._errors
-
-
-_ONE_PENDING = "onvolledig: 1 runs wachten op replay"
-
-
-class TestOneLockScopeForLedgerAndSpool:
-    def test_a_replay_between_the_reads_never_gives_a_lower_total_marked_complete(self, ledger, monkeypatch):
-        """codex_gate on 69d17c5e: $1 in the ledger and $2 spooled read back as 1, pending 0, complete."""
-        _break_the_ledger(ledger)
-        cost_ledger.record_run(_run(run_id=RUN_A1, cost_usd=2.0), ledger_path=ledger)
-        _repair_the_ledger(ledger)
-        cost_ledger.record_run(_run(run_id=RUN_B1, cost_usd=1.0), ledger_path=ledger)
-        replay = _ReplayBetweenTheReads(ledger, monkeypatch)
-
-        totals = cost_ledger.aggregate_runs(ledger)
-        replay.finish()
-
-        seen = (totals.cost_usd, totals.spool_pending, totals.incomplete)
-        assert seen != (1.0, 0, None), "a lower total that claims to be complete"
-        assert seen in {(3.0, 0, None), (1.0, 1, _ONE_PENDING)}
-        assert replay.held == (True, True), "the spool was not listed under the ledger lock and the spool lock"
-        after = cost_ledger.aggregate_runs(ledger)
-        assert (after.cost_usd, after.spool_pending, after.incomplete) == (3.0, 0, None)
-
-    def test_a_replay_that_creates_the_ledger_during_the_aggregation_is_counted(self, ledger, monkeypatch):
-        """No ledger file, so no ledger lock: a replay that creates it between the reads is not lost."""
-        _spool_one_run(ledger)
-        assert not ledger.exists()
-        replay = _ReplayBetweenTheReads(ledger, monkeypatch)
-
-        totals = cost_ledger.aggregate_runs(ledger)
-        replay.finish()
-
-        seen = (totals.cost_usd, totals.spool_pending, totals.incomplete)
-        assert seen != (0.0, 0, None), "a lower total that claims to be complete"
-        assert seen in {(0.5, 0, None), (0.0, 1, _ONE_PENDING)}
-        after = cost_ledger.aggregate_runs(ledger)
-        assert (after.cost_usd, after.spool_pending, after.incomplete) == (0.5, 0, None)
-
-    def test_a_ledger_beside_a_spooled_run_is_marked_incomplete(self, ledger):
-        """Ledger and spool both present, no race: the total misses the spooled run and says so."""
-        cost_ledger.record_run(_run(run_id=RUN_B1, cost_usd=1.0), ledger_path=ledger)
-        _spool_dir(ledger).mkdir(parents=True)
-        spooled = cost_ledger.build_record(_run(run_id=RUN_A1, cost_usd=2.0))
-        (_spool_dir(ledger) / f"{RUN_A1}.json").write_text(json.dumps([spooled]), encoding="utf-8")
-
-        totals = cost_ledger.aggregate_runs(ledger)
-        assert (totals.cost_usd, totals.spool_pending, totals.incomplete) == (1.0, 1, _ONE_PENDING)
-
-
-# ---------------------------------------------------------------------------
-# One lock orders a run's records (round 5)
-# ---------------------------------------------------------------------------
-
-def _spool_lock(ledger_path: Path) -> Path:
-    return ledger_path.parent / f".{cost_ledger.SPOOL_DIR_NAME}.lock"
-
-
-def _correction(charge: dict, cost_usd: float, reason: str) -> "cost_ledger.RunCost":
-    return _run(kind="correction", supersedes=charge["record_id"], reason=reason, cost_usd=cost_usd)
-
-
-def _run_order(ledger_path: Path) -> list:
-    return [line["record_id"] for line in _lines(ledger_path) if line.get("run_id") == RUN_A1]
-
-
-class _SeamHandle:
-    """The ledger's append handle with a writer's seams on it: its append, and an append that fails."""
-
-    def __init__(self, fh, writers: "_TwoWriters"):
-        self._fh = fh
-        self._writers = writers
-
-    def __getattr__(self, name):
-        return getattr(self._fh, name)
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc_info):
-        return self._fh.__exit__(*exc_info)
-
-    def write(self, text):
-        if not text.startswith("{"):
-            return self._fh.write(text)
-        if self._writers.refuse_next_append:
-            self._writers.refuse_next_append = False
-            self._writers.seam("append_fails")
-            raise _enospc()
-        self._writers.seam("append")
-        written = self._fh.write(text)
-        self._writers.durable([json.loads(text)])
-        return written
-
-
-class _RefusingFlock:
-    """``cost_ledger.fcntl`` with one exclusive ``flock`` on the ledger's append handle refused."""
-
-    def __init__(self, writers: "_TwoWriters"):
-        self._writers = writers
-
-    def __getattr__(self, name):
-        return getattr(fcntl, name)
-
-    def flock(self, fd, operation):
-        if self._writers.refuse_next_lock and isinstance(fd, _SeamHandle) and operation & fcntl.LOCK_EX:
-            self._writers.refuse_next_lock = False
-            raise OSError(errno.ENOLCK, os.strerror(errno.ENOLCK))
-        return fcntl.flock(fd, operation)
-
-
-class _TwoWriters:
-    """Writer A's call, with writer B let in at A's seams as another process would be.
-
-    A's seams: it is about to take the spool lock (``spool_lock``), to write a
-    spool file (``spool_write``), to append a line (``append``), and its append
-    fails (``append_fails``). From the seam ``start`` on, B is due. B runs to its
-    end at the first seam where A holds none of the locks B needs, as a process
-    scheduled in that gap would; when A holds one at every later seam, B runs
-    after A returned, where a process waiting on that lock gets it. A ``start``
-    that is no seam lets B in after A returned. ``durable_order`` lists the
-    records in the order they first became durable: a ledger line or a spool file.
-    """
-
-    def __init__(self, ledger_path: Path, monkeypatch, start: str, already_durable: list):
-        self.ledger_path = ledger_path
-        self.start = start
-        self.durable_order = list(already_durable)
-        self.refuse_next_append = self.refuse_next_open = self.refuse_next_lock = False
-        self.second_record = None
-        self._second = None
-        self._due = self._running = False
-        real_open, real_slot_lock, real_write = Path.open, cost_ledger.slot_lock, cost_ledger.atomic_write_text
-
-        def ledger_open(path, mode="r", *args, **kwargs):
-            if "a" not in mode or path != ledger_path:
-                return real_open(path, mode, *args, **kwargs)
-            if self.refuse_next_open:
-                self.refuse_next_open = False
-                raise OSError(errno.EMFILE, os.strerror(errno.EMFILE))
-            return _SeamHandle(real_open(path, mode, *args, **kwargs), self)
-
-        @contextmanager
-        def spool_lock(path):
-            self.seam("spool_lock")
-            with real_slot_lock(path):
-                yield
-
-        def spool_write(path, content, *args, **kwargs):
-            self.seam("spool_write")
-            real_write(path, content, *args, **kwargs)
-            self.durable(json.loads(content))
-
-        monkeypatch.setattr(Path, "open", ledger_open)
-        monkeypatch.setattr(cost_ledger, "slot_lock", spool_lock)
-        monkeypatch.setattr(cost_ledger, "atomic_write_text", spool_write)
-        monkeypatch.setattr(cost_ledger, "fcntl", _RefusingFlock(self))
-
-    def second(self, run: "cost_ledger.RunCost", *, without_the_ledger: str = "") -> None:
-        """B writes ``run``; ``without_the_ledger`` ("open" or "lock") makes B's ledger open or lock fail."""
-        self._second = (run, without_the_ledger)
-
-    def durable(self, records: list) -> None:
-        for record in records:
-            if record["record_id"] not in self.durable_order:
-                self.durable_order.append(record["record_id"])
-
-    def seam(self, name: str) -> None:
-        if self._running or self._second is None or self.second_record is not None:
-            return
-        self._due = self._due or name == self.start
-        if self._due and not any(_lock_is_held(path) for path in self._locks_b_needs()):
-            self._run_b()
-
-    def first_returned(self) -> dict:
-        if self.second_record is None:
-            self._run_b()
-        return self.second_record
-
-    def _locks_b_needs(self) -> list:
-        spool = [_spool_lock(self.ledger_path)]
-        return spool if self._second[1] else [self.ledger_path, *spool]
-
-    def _run_b(self) -> None:
-        run, without_the_ledger = self._second
-        self._running = True
-        try:
-            if without_the_ledger:
-                setattr(self, f"refuse_next_{without_the_ledger}", True)
-            self.second_record = cost_ledger.record_run(run, ledger_path=self.ledger_path)
-        finally:
-            self._running = False
 
 
 class _CloseProbe:
@@ -1211,12 +780,16 @@ class _CloseProbe:
 
 @pytest.fixture
 def close_probe(monkeypatch):
-    """``close_probe(ledger_path, failing_close=[])``: wrap every append handle of that ledger in a :class:`_CloseProbe`."""
-    real_open = Path.open
+    """``close_probe(ledger_path, failing_close=[])``: wrap every append handle of that ledger in a :class:`_CloseProbe`.
+
+    It wraps the ``Path.open`` in place when it is armed, so armed after
+    ``inject`` it probes the close of the faulty handle.
+    """
 
     def arm(ledger_path: Path, failing_close: list = ()) -> list:
         held_at_close: list = []
         failing = list(failing_close)
+        real_open = Path.open
 
         def probing_open(self, mode="r", *args, **kwargs):
             fh = real_open(self, mode, *args, **kwargs)
@@ -1230,243 +803,15 @@ def close_probe(monkeypatch):
     return arm
 
 
-_SEAMS_OF_A_FAILING_APPEND = ["append_fails", "spool_lock", "spool_write", "after_return"]
-
-
-class TestOneLockOrdersTheRecordsOfARun:
-    @pytest.mark.parametrize("start", _SEAMS_OF_A_FAILING_APPEND)
-    def test_a_failed_append_spools_before_a_newer_correction_can_land(self, ledger, monkeypatch, start):
-        """codex_gate on 53f64e50: the older correction, spooled after the lock went, reverted the newer one."""
-        charge = cost_ledger.record_run(_run(cost_usd=0.5), ledger_path=ledger)
-        writers = _TwoWriters(ledger, monkeypatch, start, [charge["record_id"]])
-        writers.second(_correction(charge, 2.0, "the newer correction"))
-        writers.refuse_next_append = True
-        older = cost_ledger.record_run(_correction(charge, 1.0, "the older correction"), ledger_path=ledger)
-        newer = writers.first_returned()
-
-        cost_ledger.replay_spool(ledger)
-        totals = cost_ledger.aggregate_runs(ledger)
-        assert (totals.cost_usd, totals.spool_pending) == (2.0, 0), "the older correction is the effective one"
-        assert totals.runs[RUN_A1] == newer
-        assert _run_order(ledger) == [charge["record_id"], older["record_id"], newer["record_id"]]
-        assert _run_order(ledger) == writers.durable_order
-
-    @pytest.mark.parametrize("refused", ["open", "lock"])
-    @pytest.mark.parametrize("outer, start", [
-        ("with_the_ledger", "spool_lock"), ("with_the_ledger", "append"), ("with_the_ledger", "after_return"),
-        ("without_the_ledger", "spool_lock"), ("without_the_ledger", "spool_write"),
-        ("without_the_ledger", "after_return"),
-    ])
-    def test_a_writer_without_the_ledger_lock_is_ordered_by_the_spool_lock(
-        self, ledger, monkeypatch, refused, outer, start,
-    ):
-        """Point 2: a spool write without the ledger lock never lands a record ahead of one durable before it."""
-        charge = cost_ledger.record_run(_run(cost_usd=0.5), ledger_path=ledger)
-        writers = _TwoWriters(ledger, monkeypatch, start, [charge["record_id"]])
-        with_the_ledger = _correction(charge, 2.0, "written with the ledger lock")
-        without_the_ledger = _correction(charge, 1.0, "written without the ledger lock")
-        if outer == "with_the_ledger":
-            writers.second(without_the_ledger, without_the_ledger=refused)
-            cost_ledger.record_run(with_the_ledger, ledger_path=ledger)
-        else:
-            writers.second(with_the_ledger)
-            setattr(writers, f"refuse_next_{refused}", True)
-            cost_ledger.record_run(without_the_ledger, ledger_path=ledger)
-        writers.first_returned()
-
-        cost_ledger.replay_spool(ledger)
-        totals = cost_ledger.aggregate_runs(ledger)
-        assert _run_order(ledger) == writers.durable_order, "a record landed ahead of one durable before it"
-        assert totals.runs[RUN_A1]["record_id"] == writers.durable_order[-1]
-        assert totals.spool_pending == 0
-
-    def test_without_the_spool_lock_nothing_is_written(self, ledger):
-        """No order, no line: a writer that cannot take the spool lock writes neither ledger nor spool."""
-        _spool_lock(ledger).mkdir(parents=True)
-        with pytest.raises(cost_ledger.CostLedgerSpoolError, match="spool lock could not be taken"):
-            cost_ledger.record_run(_run(), ledger_path=ledger)
-        _assert_nothing_written(ledger)
-
-    def test_the_ledger_is_closed_while_its_lock_is_held(self, ledger, close_probe):
-        """A close flushes what a failed write left buffered: the writer and the replay close under the lock."""
-        _spool_one_run(ledger)
+class TestTheLedgerLockGoesWithTheClose:
+    def test_the_ledger_is_closed_while_its_lock_is_held(self, ledger, inject, close_probe):
+        """A close flushes what a failed write left buffered: the writer closes under the lock, failed or not."""
+        inject(ledger, "torn", disk_stays_full=False)
         held_at_close = close_probe(ledger)
+        with pytest.raises(cost_ledger.CostLedgerWriteError):
+            cost_ledger.record_run(_run(), ledger_path=ledger)
         cost_ledger.record_run(_run(run_id=RUN_B1), ledger_path=ledger)
-        cost_ledger.replay_spool(ledger)
         assert held_at_close == [True, True]
-
-    def test_a_close_that_fails_after_the_append_spools_the_record(self, ledger, close_probe):
-        """The line may not be on disk: the record goes to the spool too, and the replay writes it once."""
-        close_probe(ledger, failing_close=[OSError(errno.EIO, os.strerror(errno.EIO))])
-        record = cost_ledger.record_run(_run(), ledger_path=ledger)
-        assert _lines(ledger) == [record]
-        assert json.loads((_spool_dir(ledger) / f"{RUN_A1}.json").read_text(encoding="utf-8")) == [record]
-        assert _beacon(ledger)["details"]["state"] == "degraded"
-
-        result = cost_ledger.replay_spool(ledger)
-        assert (result.written, result.already_present, result.pending) == (0, 1, 0)
-        assert _lines(ledger) == [record]
-
-    def test_the_beacon_counts_the_spool_under_the_spool_lock(self, ledger, monkeypatch):
-        """The beacon written last describes the spool as the last decision left it."""
-        under_the_lock = []
-        real_listing = cost_ledger._spool_files
-
-        def listing(spool_dir):
-            under_the_lock.append(_lock_is_held(_spool_lock(ledger)))
-            return real_listing(spool_dir)
-
-        monkeypatch.setattr(cost_ledger, "_spool_files", listing)
-        _break_the_ledger(ledger)
-        cost_ledger.record_run(_run(), ledger_path=ledger)
-        assert under_the_lock == [True]
-        assert _beacon(ledger)["details"]["spool_pending"] == 1
-
-
-# ---------------------------------------------------------------------------
-# vnx costs replay: the script, the pip CLI and bin/vnx
-# ---------------------------------------------------------------------------
-
-def _spool_one_run_in_the_default_store() -> tuple:
-    default = provider_costs._resolve_costs_path()
-    _break_the_ledger(default)
-    record = cost_ledger.record_run(_run())
-    _repair_the_ledger(default)
-    return default, record
-
-
-class TestTheCostsCommand:
-    def test_the_script_replays_the_spool(self):
-        default, record = _spool_one_run_in_the_default_store()
-        proc = subprocess.run([sys.executable, str(COSTS_CLI), "replay", "--json"],
-                              capture_output=True, text=True, timeout=60)
-        assert proc.returncode == 0, proc.stderr
-        assert json.loads(proc.stdout)["written"] == 1
-        assert _lines(default) == [record]
-
-    def test_the_script_exits_one_on_an_unreadable_spool_file(self):
-        default = provider_costs._resolve_costs_path()
-        _spool_dir(default).mkdir(parents=True)
-        (_spool_dir(default) / f"{RUN_B1}.json").write_text("[{]", encoding="utf-8")
-        proc = subprocess.run([sys.executable, str(COSTS_CLI), "replay"],
-                              capture_output=True, text=True, timeout=60)
-        assert proc.returncode == 1
-        assert f"{RUN_B1}.json" in proc.stdout
-
-    def test_the_script_exits_two_when_the_ledger_cannot_be_written(self):
-        default = provider_costs._resolve_costs_path()
-        _break_the_ledger(default)
-        cost_ledger.record_run(_run())
-        proc = subprocess.run([sys.executable, str(COSTS_CLI), "replay"],
-                              capture_output=True, text=True, timeout=60)
-        assert proc.returncode == 2
-        assert "replay failed" in proc.stderr
-
-    def test_the_pip_cli_runs_the_same_script(self):
-        import vnx_cli.commands.costs as costs_cli
-
-        default, record = _spool_one_run_in_the_default_store()
-        assert costs_cli.resolve_costs_script(REPO_ROOT) == COSTS_CLI
-        rc = costs_cli.vnx_costs(Namespace(costs_args=["replay"]))
-        assert rc == 0
-        assert _lines(default) == [record]
-
-    def test_the_pip_cli_registers_costs(self):
-        import argparse
-
-        from vnx_cli.commands.costs import register_costs_subparser
-
-        parser = argparse.ArgumentParser(prog="vnx")
-        register_costs_subparser(parser.add_subparsers(dest="command"))
-        args = parser.parse_args(["costs", "replay", "--json"])
-        assert args.costs_args == ["replay", "--json"]
-
-    def test_a_spawn_failure_is_a_defined_error(self, tmp_path, monkeypatch, capsys):
-        import vnx_cli.commands.costs as costs_cli
-
-        script = tmp_path / "costs_cli.py"
-        script.write_text("", encoding="utf-8")
-        monkeypatch.setattr(costs_cli, "resolve_costs_script", lambda root=None: script)
-
-        def broken(*_args, **_kwargs):
-            raise OSError("spawn failed")
-
-        monkeypatch.setattr(costs_cli.subprocess, "run", broken)
-        assert costs_cli.vnx_costs(Namespace(costs_args=["replay"])) == costs_cli._EXIT_ERROR
-        assert f"could not start {script}" in capsys.readouterr().err
-
-    def test_bin_vnx_delegates_costs_to_the_script(self):
-        text = (REPO_ROOT / "bin" / "vnx").read_text(encoding="utf-8")
-        assert re.search(r'^\s+costs\)\n\s+"\$VNX_PYTHON" "\$VNX_HOME/scripts/costs_cli\.py" "\$@"', text, re.M)
-        import vnx_mode
-
-        assert "costs" in vnx_mode.TIER_STARTER_OPERATOR
-
-
-# ---------------------------------------------------------------------------
-# The dispatcher prelude tick
-# ---------------------------------------------------------------------------
-
-def _tick_env(tmp_path: Path) -> dict:
-    env = dict(os.environ)
-    data_dir = Path(env["VNX_DATA_DIR"])
-    env["VNX_LOGS_DIR"] = str(tmp_path / "logs")
-    env["VNX_DIR"] = str(REPO_ROOT)
-    env["SCRIPT_DIR"] = str(REPO_ROOT / "scripts")
-    env["STATE_DIR"] = str(data_dir / "state")
-    env["VNX_COST_LEDGER_REPLAY_INTERVAL_SEC"] = "0"
-    env["VNX_LOG_CAPTURE"] = str(tmp_path / "log_capture.txt")
-    env.pop("VNX_SUPERVISOR_MODE", None)
-    return env
-
-
-def _run_tick(env: dict) -> subprocess.CompletedProcess:
-    script = textwrap.dedent(f"""\
-        set -euo pipefail
-        log() {{ printf '[log] %s\\n' "$*" >> "$VNX_LOG_CAPTURE"; }}
-        source "{TICKS_SH}"
-        _maybe_cost_ledger_replay
-        echo "SURVIVED:$?"
-        """)
-    return subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env, timeout=60)
-
-
-class TestThePreludeTick:
-    def test_the_tick_replays_the_spool(self, tmp_path):
-        default, record = _spool_one_run_in_the_default_store()
-        proc = _run_tick(_tick_env(tmp_path))
-        assert proc.returncode == 0, proc.stderr
-        assert "SURVIVED:0" in proc.stdout
-        assert _lines(default) == [record]
-        assert not any(_spool_dir(default).glob("*.json"))
-
-    def test_the_tick_survives_a_failing_replay_and_leaves_the_spool(self, tmp_path):
-        default = provider_costs._resolve_costs_path()
-        _break_the_ledger(default)
-        cost_ledger.record_run(_run())
-        env = _tick_env(tmp_path)
-        proc = _run_tick(env)
-        assert proc.returncode == 0, proc.stderr
-        assert "SURVIVED:0" in proc.stdout
-        assert [p.name for p in _spool_dir(default).glob("*.json")] == [f"{RUN_A1}.json"]
-        assert "cost-ledger replay failed" in Path(env["VNX_LOG_CAPTURE"]).read_text(encoding="utf-8")
-
-    def test_the_tick_is_throttled(self, tmp_path):
-        default, _record = _spool_one_run_in_the_default_store()
-        env = _tick_env(tmp_path)
-        env["VNX_COST_LEDGER_REPLAY_INTERVAL_SEC"] = "3600"
-        state_file = Path(env["VNX_DATA_DIR"]) / "state" / ".last_cost_ledger_replay_ts"
-        state_file.parent.mkdir(parents=True, exist_ok=True)
-        state_file.write_text(str(int(datetime.now(timezone.utc).timestamp())), encoding="utf-8")
-        proc = _run_tick(env)
-        assert "SURVIVED:0" in proc.stdout
-        assert _lines(default) == []
-
-    def test_process_dispatches_calls_the_replay_tick(self):
-        source = DISPATCHER_SH.read_text(encoding="utf-8")
-        match = re.search(r"^process_dispatches\(\) \{\n.*?^\}\n", source, re.MULTILINE | re.DOTALL)
-        assert match, "could not locate process_dispatches() in dispatcher_minimal.sh"
-        assert "_maybe_cost_ledger_replay" in match.group(0)
 
 
 # ---------------------------------------------------------------------------

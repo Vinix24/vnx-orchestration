@@ -1,6 +1,6 @@
 # ADR-043 - Het kostengrootboek: één regel per run, met een bron bij elk bedrag
 
-**Status:** Accepted (dispatch 20261020-kp-k2a1-grootboek, track kosten-per-model-in-het-grootboek, deliverable K2a, PR K2a-1)
+**Status:** Accepted (dispatch 20261020-kp-k2a1-grootboek, track kosten-per-model-in-het-grootboek, deliverable K2a, PR K2a-1). §6 is verplaatst naar de tweede K2a-PR (uitspraak `cap-pr2141-73c685f656862925ef20ef81d2a09090b9b08337`, dispatch 20261021-kp-k2a1-r6).
 **Date:** 2026-10-20
 **Decided by:** operator via het besluit van 19-10 ("iedere cent die wordt uitgegeven moet worden getrackt") en de plan-gate van 19-10 (codex REVISE met zeven punten, tiebreaker START met één verplichte wijziging), uitgewerkt door de bouwer van K2a-1.
 **Cross-refs:** plan `claudedocs/specs/kosten-per-model-in-het-grootboek/plan.md` (secties "Het grootboek", "De prijsbron", "Als schrijven mislukt", "ADR"); ADR-005 (eerst schrijven, dan de toestand wijzigen); ADR-007 (`project_id` in de natuurlijke sleutel); ADR-036 (modelidentiteit uit het register); ADR-040 (prijsversies en `price_run`).
@@ -56,15 +56,17 @@ Elke regel heeft de vorm `provider_cost_run/1` met precies deze velden:
 - een `run_id` van een ander project (`RunIdProjectMismatch`);
 - een provider of model dat het register niet kent (`UnknownModel`). De resolver is strenger dan die van de prijsopzoeking: een exacte sleutel, de sleutel na het bekende voorvoegsel van de sectie, de ene `cli_model_arg` die gelijk is, of een gedateerd snapshot-achtervoegsel. `sonnet-6` wordt geen `sonnet`.
 
-Elk ander misvormd veld is `InvalidRecord`. In alle gevallen staat er daarna niets in het grootboek en niets in de spool.
+Elk ander misvormd veld is `InvalidRecord`. In alle gevallen staat er daarna niets in het grootboek.
 
 Geeft de aanroeper tokens zonder bedrag, dan rekent de schrijver via `price_run` (ADR-040). Zonder segmenten is dat het hoogste tarief, nooit een onderschatting. Is een telling onbekend die de prijs nodig heeft, dan wordt de bron `unavailable:usage_unknown` en het bedrag `null`, geen nul. De prijs heeft altijd `input_uncached` en `output` nodig, en een cache-telling alleen als de laatste prijsversie van het model daar een tarief voor heeft. Een onbekende telling wordt nooit als 0 aan `price_run` gegeven. Een telling die echt 0 is, blijft een berekende nul.
 
-ADR-005 geldt: de regel staat in het grootboek of in de spool wanneer `record_run` terugkeert. De aanroeper wijzigt zijn toestand pas daarna. De schrijver neemt dezelfde `flock` op het bestand als `emit_provider_cost`.
+ADR-005 geldt: de regel staat in het grootboek wanneer `record_run` terugkeert. De aanroeper wijzigt zijn toestand pas daarna. De schrijver neemt dezelfde `flock` op het bestand als `emit_provider_cost` en geeft hem vrij door het bestand te sluiten.
+
+Mislukt de append (openen, locken, schrijven of sluiten), dan geeft `record_run` `CostLedgerWriteError`, een `OSError` met de errno van de oorzaak. Niets bewaart de regel elders. De aanroep faalt en de aanroeper wijzigt niets. Een write of close die halverwege faalde kan de regel op schijf hebben gezet: een hele regel telt dan als de regel van de run, een afgebroken regel als één onleesbare regel. Dit geldt tot §6 landt; daarna neemt de spool dit pad over.
 
 ### 3. Correctie in plaats van wijziging
 
-Het bestand blijft append-only. Een correctie is een nieuwe regel van dezelfde run. Per `run_id` telt alleen de laatste regel. Elke lezer telt via één functie, `cost_ledger.aggregate_runs`: receipts, rapport en plafond. Die functie geeft per run de geldende regel, de sommen van tokens en bedrag, de runs zonder prijs apart, het aantal regels in het oude formaat (`legacy_lines`, niet opgeteld) en het aantal runs in de spool.
+Het bestand blijft append-only. Een correctie is een nieuwe regel van dezelfde run. Per `run_id` telt alleen de laatste regel. Elke lezer telt via één functie, `cost_ledger.aggregate_runs`: receipts, rapport en plafond. Die functie geeft per run de geldende regel, de sommen van tokens en bedrag, de runs zonder prijs apart en het aantal regels in het oude formaat (`legacy_lines`, niet opgeteld). Ze leest het grootboek onder een gedeelde `flock`. Een ontbrekend grootboek is leeg; een grootboek dat niet te lezen is, is een fout en nooit een leeg totaal. Het aantal runs in de spool komt erbij met §6.
 
 Een backfillregel voor een run die al een regel heeft, is een `correction`. Een run zonder regel krijgt een `charge` met `backfill: true`. Zo telt een run nooit twee keer.
 
@@ -76,7 +78,9 @@ Er is één prijsbron: de prijsversies in `wave7_models.yaml`, gelezen via `pric
 
 Een bedrag zonder bron bestaat niet. Een run met `unavailable:*` telt in geen enkele som. De aggregatie noemt hem apart, zodat een lezer ziet hoeveel runs hij mist in plaats van een te laag totaal te tonen.
 
-### 6. Spool met replay is het herstelpad
+### 6. Spool met replay is het herstelpad (verplaatst naar de tweede K2a-PR)
+
+> **Verplaatst.** Deze paragraaf landt niet in K2a-1 maar in de tweede K2a-PR. Uitspraak `cap-pr2141-73c685f656862925ef20ef81d2a09090b9b08337` (B3.2, `verkleinen`): vijf codexrondes vonden elk een nieuw duurzaamheids- of gelijktijdigheidsdefect in dit subsysteem, terwijl schrijver en aggregatie stabiel bleven. Tot die PR landt, geeft `record_run` bij een mislukte append `CostLedgerWriteError` (§2) en bestaat er geen spool, geen replay, geen `vnx costs` en geen prelude-tik. Het ontwerp hieronder is het plan voor die PR. De functielijst, de lockvolgorde en de zes codexbevindingen staan in `claudedocs/specs/kosten-per-model-in-het-grootboek/k2a-spool-replay-uitgesteld.md`.
 
 Mislukt het schrijven, dan gaat dezelfde regel naar `events/provider_costs.spool/<run_id>.json`: een JSON-lijst van regels, atomair geschreven. Het subsysteem `cost-ledger` meldt dan degraded via het bestaande beaconmechanisme (`<data_dir>/health/cost-ledger.json`, status `PROBE_TO_BEACON["degraded"]`, event-driven). Mislukt ook de spool, dan faalt de aanroep (`CostLedgerSpoolError`). Nooit stil.
 
@@ -106,10 +110,11 @@ Het grootboek is een NDJSON-bestand per project-store. Komt er ooit een projecti
 
 ## Gevolgen
 
-- Een lezer die het grootboek optelt, ziet wat hij mist: runs zonder prijs, regels in het oude formaat en runs in de spool. Een te laag totaal zonder melding kan niet meer.
+- Een lezer die het grootboek optelt, ziet wat hij mist: runs zonder prijs en regels in het oude formaat, en met §6 ook runs in de spool. Een te laag totaal zonder melding kan niet meer.
+- Tot §6 landt, is een mislukte append een fout van de aanroep (`CostLedgerWriteError`). Een lane die op `record_run` overgaat vóór §6, moet die fout laten doorkomen en mag hem niet stil afvangen.
 - Het oude formaat blijft bestaan tot de lanes over zijn. `emit_provider_cost` en zijn aanroepers zijn ongewijzigd. De harness-lanes gaan in K2a-2 over op `record_run`; codex en kimi in K2b.
 - De identiteit is strenger dan de prijsopzoeking. Een model dat het register niet kent, levert geen regel op maar een fout. Een lane die zo'n model draait, moet eerst in het register. Dat is de bedoeling: een geraden identiteit is precies de fout van OI-2186.
 - Een run zonder segmenten op een lane met piek en dal wordt tegen het piektarief geboekt. Dat is een bovengrens. K2a-2 levert de segmenten uit het transcript.
-- De replay leest het hele grootboek twee keer: vooraf om te zien wat al geland is, achteraf om terug te lezen wat hij schreef. Dat gebeurt alleen als er iets in de spool staat.
-- Elke schrijver neemt twee locks, ook als het grootboek gewoon werkt. Is het spool-lock niet te nemen, dan faalt de aanroep, ook als het grootboek de regel had kunnen opnemen. Zonder dat lock is de volgorde van de run niet te garanderen.
-- De prelude start elke 30 seconden een Python-proces voor de replay, ook in legacy-modus. Met een lege spool schrijft dat proces niets.
+- Met §6 (tweede K2a-PR): de replay leest het hele grootboek twee keer: vooraf om te zien wat al geland is, achteraf om terug te lezen wat hij schreef. Dat gebeurt alleen als er iets in de spool staat.
+- Met §6 (tweede K2a-PR): elke schrijver neemt twee locks, ook als het grootboek gewoon werkt. Is het spool-lock niet te nemen, dan faalt de aanroep, ook als het grootboek de regel had kunnen opnemen. Zonder dat lock is de volgorde van de run niet te garanderen.
+- Met §6 (tweede K2a-PR): de prelude start elke 30 seconden een Python-proces voor de replay, ook in legacy-modus. Met een lege spool schrijft dat proces niets.

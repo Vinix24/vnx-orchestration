@@ -7,55 +7,33 @@ per run in the shape ``provider_cost_run/1``; a run is one start of one model
 for one purpose: a dispatch attempt, a gate run, a plan-gate seat, a panel leg,
 an intelligence call.
 
-Three entry points, and every writer and reader goes through them:
+Two entry points, and every writer and reader goes through them:
 
 - :func:`record_run` validates a :class:`RunCost`, prices it through
   ``provider_costs.price_run`` when the caller has tokens but no provider cost
   (a count the price charges that is ``None`` makes the cost
   ``unavailable:usage_unknown``, never a priced zero),
   and appends the line under the ledger's ``flock`` (ADR-005: the line is in the
-  ledger, or in the spool, when this returns; the caller mutates its state after
-  that). A record the plan forbids is refused with a :class:`CostLedgerRefusal`
-  subclass and nothing is written.
+  ledger when this returns; the caller mutates its state after that). A record
+  the plan forbids is refused with a :class:`CostLedgerRefusal` subclass and
+  nothing is written. An append that fails raises :class:`CostLedgerWriteError`:
+  the call fails, never silently.
 - :func:`aggregate_runs` is the one aggregation: per ``run_id`` only the last
   line counts (a ``correction`` replaces the earlier contribution), a run
-  without a price is listed in ``unavailable`` and never summed as 0, a line in
-  the old ``emit_provider_cost`` shape (no ``schema``) is counted in
-  ``legacy_lines`` and not summed, and the number of runs waiting in the spool
-  comes back as ``spool_pending`` ("onvolledig: N runs wachten op replay"). The
-  ledger and the spool are read in one lock scope, the ledger ``flock`` and then
-  the spool lock, so the total and ``spool_pending`` describe the same moment.
-- :func:`replay_spool` brings spooled records into the ledger.
+  without a price is listed in ``unavailable`` and never summed as 0, and a line
+  in the old ``emit_provider_cost`` shape (no ``schema``) is counted in
+  ``legacy_lines`` and not summed.
 
-When the append fails, the same record goes to
-``events/provider_costs.spool/<run_id>.json`` (an atomic write of a JSON list of
-records) before the locks are released, and the ``cost-ledger`` health beacon
-(``<data_dir>/health/cost-ledger.json``) reports degraded. A failing spool write
-raises :class:`CostLedgerSpoolError`: never silent. While a record of a run waits
-in the spool, a later record of the same run queues behind it in the spool rather
-than landing in the ledger first, so "last line wins" still means "last written".
+Boundary first: every append first ends a last line without ``\\n`` with
+``\\n`` and fsyncs, so a new line always starts on its own. An append that fails
+halfway ends its own line at once when the disk has room, so the old writer
+cannot glue onto it. No byte is ever removed: the torn prefix stays and counts
+as one unreadable line.
 
-Ordering invariant: the spool lock (``events/.provider_costs.spool.lock``)
-orders a run's records. Every decision "append, queue or spool" and every spool
-write is made under it. Lock order is the ledger ``flock``, then the spool lock;
-a writer that cannot open or lock the ledger takes the spool lock alone. The
-replay holds both, in that order, from its first ledger read to its last removal.
-
-Boundary first: every time this module holds the ledger lock, in
-:func:`record_run` (append or queue) and in the replay (the already-landed
-branch included), it first ends a last line without ``\\n`` with ``\\n`` and
-fsyncs, so a new line always starts on its own. An append that fails halfway
-ends its own line at once when the disk has room, so the old writer cannot glue
-onto it. No byte is ever removed: the torn prefix stays and counts as one
-unreadable line. The replay writes each record once per
-``run_id`` + ``record_id``, fsyncs, and reads the ledger back. It removes a
-spool file only when every record in it stands there as its own line, equal to
-what was spooled, and the newest record of each of its runs is that run's last
-line. A file that does not read back stays, and the replay raises
-:class:`CostLedgerReplayError`.
-
-The old writer ``provider_costs.emit_provider_cost`` and its callers are
-untouched; the harness lanes move onto :func:`record_run` in K2a-2.
+The recovery path for a failed append, ADR-043 §6, lands in the second K2a PR
+(verdict ``cap-pr2141-73c685f656862925ef20ef81d2a09090b9b08337``). The old
+writer ``provider_costs.emit_provider_cost`` and its callers are untouched; the
+harness lanes move onto :func:`record_run` in K2a-2.
 """
 
 from __future__ import annotations
@@ -66,15 +44,12 @@ import json
 import logging
 import math
 import os
-import re
-from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import provider_costs
-from atomic_io import atomic_write_text, slot_lock
 from vnx_paths import refuse_real_central_store_write_under_test_runner
 
 logger = logging.getLogger(__name__)
@@ -84,9 +59,7 @@ TOKEN_FIELDS = ("input_uncached", "cache_hit", "cache_write_5m", "cache_write_1h
 ROLES = frozenset({"builder", "review", "plan_gate", "tiebreaker", "panel", "intelligence"})
 KINDS = frozenset({"charge", "correction"})
 BILLINGS = frozenset({"metered", "subscription"})
-SPOOL_DIR_NAME = "provider_costs.spool"
 
-_HEALTH_COMPONENT = "cost-ledger"
 _PROVIDER_REPORTED = "provider_reported"
 _PRICE_TABLE = "price_table@"
 _UNAVAILABLE = "unavailable:"
@@ -95,11 +68,10 @@ _PRICE_RUN_COUNTS = (
     ("input", ("input_uncached",)), ("output", ("output",)), ("cache_read", ("cache_hit",)),
     ("cache_write", ("cache_write_5m", "cache_write_1h")),
 )
-_UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._:@+-]")
 
 
 class CostLedgerRefusal(ValueError):
-    """The writer refused the record. Nothing was written, not to the ledger and not to the spool."""
+    """The writer refused the record. Nothing was written."""
 
 
 class CostWithoutSource(CostLedgerRefusal):
@@ -130,28 +102,15 @@ class InvalidRecord(CostLedgerRefusal):
     """Any other malformed field: a role, kind, billing, source, token count or timestamp."""
 
 
-class CostLedgerSpoolError(RuntimeError):
-    """The record could not be spooled, or the spool lock that orders it could not be taken.
+class CostLedgerWriteError(OSError):
+    """The line was not appended: the ledger could not be opened, locked, written or closed.
 
-    The run has no line anywhere: the caller's call fails.
+    An ``OSError`` with the errno of its cause, which is ``__cause__``. Nothing
+    is kept anywhere else, so the caller's call fails and it mutates no state.
+    A write or a close that failed halfway can have left the line on disk: a
+    whole line counts as the run's line, a torn one as one unreadable line that
+    the next append ends first.
     """
-
-
-class CostLedgerReplayError(OSError):
-    """A replayed record did not read back from the ledger as its own line. Its spool file stays.
-
-    An ``OSError``, so every caller that treats a failed replay as one treats
-    this as one too: ``vnx costs replay`` exits 2, the prelude tick logs it.
-    ``result`` is what the replay did, ``result.unconfirmed`` the files kept.
-    """
-
-    def __init__(self, message: str, result: "ReplayResult"):
-        super().__init__(message)
-        self.result = result
-
-
-class _UnreadableSpool(Exception):
-    """A spool file that is not a JSON list of ledger records."""
 
 
 @dataclass(frozen=True)
@@ -507,123 +466,6 @@ def _line(record: Mapping[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# The spool and the health beacon
-# ---------------------------------------------------------------------------
-
-
-def spool_dir_for(ledger_path: Path) -> Path:
-    return Path(ledger_path).parent / SPOOL_DIR_NAME
-
-
-def spool_file_for(spool_dir: Path, run_id: str) -> Path:
-    name = _UNSAFE_FILENAME_CHARS.sub("_", run_id)
-    if name.startswith("."):
-        name = "_" + name[1:]
-    return spool_dir / f"{name}.json"
-
-
-def _spool_files(spool_dir: Path) -> List[Path]:
-    if not spool_dir.is_dir():
-        return []
-    return sorted(path for path in spool_dir.glob("*.json") if not path.name.startswith("."))
-
-
-def _is_run_record(record: object) -> bool:
-    return (
-        isinstance(record, dict)
-        and record.get("schema") == RUN_SCHEMA
-        and isinstance(record.get("run_id"), str) and bool(record["run_id"])
-        and isinstance(record.get("record_id"), str) and bool(record["record_id"])
-    )
-
-
-def _read_spool_file(path: Path) -> List[Dict[str, Any]]:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise _UnreadableSpool(f"{path.name}: {exc}") from exc
-    if not isinstance(data, list) or not data or not all(_is_run_record(record) for record in data):
-        raise _UnreadableSpool(f"{path.name}: not a non-empty list of {RUN_SCHEMA} records")
-    return data
-
-
-def _spool_error(
-    spool_dir: Path, record: Mapping[str, Any], problem: object, cause: Optional[BaseException],
-) -> CostLedgerSpoolError:
-    first = f" after the ledger append failed ({cause})" if cause is not None else ""
-    return CostLedgerSpoolError(
-        f"cost record {record['record_id']} of run {record['run_id']} could not be spooled "
-        f"to {spool_dir}{first}: {problem}"
-    )
-
-
-@contextmanager
-def _order_lock(spool_dir: Path, record: Mapping[str, Any], cause: Optional[BaseException] = None):
-    """Hold the spool lock, the one lock that orders a run's records (the ordering invariant).
-
-    Not taken: no decision about the record is safe, so nothing is written and
-    the call fails with :class:`CostLedgerSpoolError`.
-    """
-    with ExitStack() as held:
-        try:
-            held.enter_context(slot_lock(spool_dir))
-        except OSError as exc:
-            raise _spool_error(spool_dir, record, f"the spool lock could not be taken: {exc}", cause) from exc
-        yield
-
-
-def _spool_record(spool_dir: Path, record: Mapping[str, Any], cause: Optional[BaseException] = None) -> None:
-    """Add ``record`` to its run's spool file, behind what already waits there. Never silent.
-
-    The caller holds the spool lock (:func:`_order_lock`): the spool write is
-    part of the decision that sent the record here.
-    """
-    try:
-        refuse_real_central_store_write_under_test_runner(spool_dir)
-        spool_dir.mkdir(parents=True, exist_ok=True)
-        target = spool_file_for(spool_dir, record["run_id"])
-        queued = _read_spool_file(target) if target.exists() else []
-        atomic_write_text(target, json.dumps([*queued, record], separators=(",", ":")))
-    except (OSError, _UnreadableSpool) as exc:
-        raise _spool_error(spool_dir, record, exc, cause) from exc
-
-
-def _beacon_path(ledger_path: Path) -> Path:
-    return Path(ledger_path).parent.parent / "health" / f"{_HEALTH_COMPONENT}.json"
-
-
-def _report_health(
-    ledger_path: Path, reason: str, unreadable: Sequence[str] = (), unconfirmed: Sequence[str] = (),
-) -> None:
-    """Write the ``cost-ledger`` beacon: degraded while the spool is not empty.
-
-    The spool is counted and the beacon written under the spool lock, so the
-    beacon written last describes the spool as the last decision left it. The
-    caller holds no lock. The beacon vocabulary is the probe framework's:
-    ``degraded`` is written as ``PROBE_TO_BEACON["degraded"]``. Best-effort,
-    like every beacon write: the spool, not the beacon, is what keeps the record.
-    """
-    from effectiveness_probe import PROBE_TO_BEACON
-    from health_beacon import HealthBeacon
-
-    spool_dir = spool_dir_for(ledger_path)
-    refuse_real_central_store_write_under_test_runner(spool_dir)
-    try:
-        with slot_lock(spool_dir):
-            pending = len(_spool_files(spool_dir))
-            state = "degraded" if pending or unreadable or unconfirmed else "ok"
-            details = {
-                "state": state, "spool_pending": pending, "unreadable": list(unreadable),
-                "unconfirmed": list(unconfirmed), "reason": reason, "spool_dir": str(spool_dir),
-                "ledger": str(ledger_path),
-            }
-            beacon = HealthBeacon(Path(ledger_path).parent.parent, _HEALTH_COMPONENT, expected_interval_seconds=None)
-            beacon.heartbeat(status=PROBE_TO_BEACON[state], details=details)
-    except OSError as exc:
-        logger.warning("cost_ledger: could not write the %s beacon (%s): %s", _HEALTH_COMPONENT, reason, exc)
-
-
-# ---------------------------------------------------------------------------
 # The writer
 # ---------------------------------------------------------------------------
 
@@ -648,8 +490,8 @@ def _append_record(fh, record: Mapping[str, Any]) -> None:
 
     When the append fails halfway, the line it left open is ended at once, so
     ``emit_provider_cost`` cannot glue its next line onto it. On a disk that is
-    still full that fails too; the next append or replay of this module ends it
-    first. The append's own error is what the caller gets.
+    still full that fails too; the next append of this module ends it first.
+    The append's own error is what the caller gets.
     """
     _end_a_torn_tail(fh)
     try:
@@ -663,7 +505,7 @@ def _append_record(fh, record: Mapping[str, Any]) -> None:
         raise
 
 
-def _open_locked(ledger_path: Path, errors: str = "strict"):
+def _open_locked(ledger_path: Path):
     """The ledger, opened for append and read and locked exclusively.
 
     The lock is released by closing the file, never by ``LOCK_UN``: a close
@@ -671,7 +513,7 @@ def _open_locked(ledger_path: Path, errors: str = "strict"):
     ledger while the lock is still held.
     """
     ledger_path.parent.mkdir(parents=True, exist_ok=True)
-    fh = ledger_path.open("a+", encoding="utf-8", errors=errors)
+    fh = ledger_path.open("a+", encoding="utf-8")
     try:
         fcntl.flock(fh, fcntl.LOCK_EX)
     except OSError:
@@ -690,213 +532,48 @@ def _close_the_ledger(fh) -> Optional[OSError]:
     return None
 
 
-def _append_unless_queued(fh, spool_dir: Path, record: Mapping[str, Any]) -> Tuple[bool, Optional[OSError]]:
-    """Land ``record`` or spool it: ``(landed, cause)``. The caller holds the ledger lock and the spool lock.
+def _append_under_the_lock(ledger_path: Path, record: Mapping[str, Any]) -> None:
+    """Append ``record`` under the ledger lock, then close the ledger, which releases the lock.
 
-    Boundary first: a line left open is ended before the record queues or lands.
-    A run with a spool file queues the record behind it (``cause`` None). An
-    append that fails spools the record here, before either lock is released,
-    so no record of the same run can land between the failure and the spool.
+    Raises the ``OSError`` of whatever failed: the open, the lock, the append
+    or the close. A failed append's error is the one raised; the close after it
+    only logs its own. A close that fails after a whole append raises too: the
+    flush it did is not confirmed.
     """
+    fh = _open_locked(ledger_path)
     try:
-        _end_a_torn_tail(fh)
-        if not spool_file_for(spool_dir, record["run_id"]).exists():
-            _append_record(fh, record)
-            return True, None
-    except OSError as exc:
-        _spool_record(spool_dir, record, cause=exc)
-        return False, exc
-    _spool_record(spool_dir, record)
-    return False, None
+        _append_record(fh, record)
+    finally:
+        closed = _close_the_ledger(fh)
+    if closed is not None:
+        raise closed
 
 
-def _write_in_order(ledger_path: Path, spool_dir: Path, record: Mapping[str, Any]) -> Tuple[bool, Optional[OSError]]:
-    """Write ``record`` in its run's order: ``(landed, cause)``, ``cause`` the ledger error that spooled it.
-
-    The ledger lock, then the spool lock, then the decision and its write. The
-    ledger is closed while the spool lock is still held, so a close that fails
-    after the append spools the record before another decision can be made. A
-    ledger that cannot be opened or locked leaves the spool lock alone to order
-    the record: every other decision for its run waits for that lock too.
-    """
-    try:
-        fh = _open_locked(ledger_path)
-    except OSError as exc:
-        with _order_lock(spool_dir, record, cause=exc):
-            _spool_record(spool_dir, record, cause=exc)
-        return False, exc
-    with ExitStack() as held:
-        held.callback(_close_the_ledger, fh)
-        held.enter_context(_order_lock(spool_dir, record))
-        try:
-            landed, cause = _append_unless_queued(fh, spool_dir, record)
-        finally:
-            closed = _close_the_ledger(fh)
-        if landed and closed is not None:
-            _spool_record(spool_dir, record, cause=closed)
-            return False, closed
-        return landed, cause
+def _write_error(ledger_path: Path, record: Mapping[str, Any], cause: OSError) -> CostLedgerWriteError:
+    message = f"cost record {record['record_id']} of run {record['run_id']} was not appended to {ledger_path}: {cause}"
+    if cause.errno is None:
+        return CostLedgerWriteError(message)
+    return CostLedgerWriteError(cause.errno, message)
 
 
 def record_run(run: RunCost, *, ledger_path: Optional[Path] = None) -> Dict[str, Any]:
-    """Validate, price and write one run's line; return the record as written.
+    """Validate, price and append one run's line; return the record as written.
 
     ``ledger_path`` defaults to ``provider_costs._resolve_costs_path()``.
     Raises a :class:`CostLedgerRefusal` (nothing written) for a record the plan
-    forbids, and :class:`CostLedgerSpoolError` when neither the ledger nor the
-    spool took the line.
+    forbids, and :class:`CostLedgerWriteError` when the append fails: the
+    ledger could not be opened, locked, written or closed. That error is the
+    caller's: nothing keeps the line elsewhere, so the caller treats the call as
+    failed and mutates no state (ADR-005).
     """
     record = build_record(run)
     path = Path(ledger_path) if ledger_path is not None else provider_costs._resolve_costs_path()
     refuse_real_central_store_write_under_test_runner(path)
-    landed, cause = _write_in_order(path, spool_dir_for(path), record)
-    if cause is not None:
-        logger.warning("cost_ledger: append to %s failed, run %s spooled: %s", path, record["run_id"], cause)
-        _report_health(path, reason=f"ledger append failed: {cause}")
-    elif not landed:
-        _report_health(path, reason=f"run {record['run_id']} has an earlier record waiting in the spool")
-    return record
-
-
-# ---------------------------------------------------------------------------
-# The replay
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class ReplayResult:
-    """What one replay did. ``pending`` counts the spool files left afterwards.
-
-    ``unconfirmed`` names the spool files kept because their records did not
-    read back from the ledger; a replay with any raises :class:`CostLedgerReplayError`.
-    """
-
-    written: int = 0
-    already_present: int = 0
-    removed: Tuple[str, ...] = ()
-    unreadable: Tuple[str, ...] = ()
-    pending: int = 0
-    unconfirmed: Tuple[str, ...] = ()
-
-
-def _canonical(record: Mapping[str, Any]) -> str:
-    return json.dumps(record, sort_keys=True, separators=(",", ":"))
-
-
-def _read_ledger(fh) -> List[Dict[str, Any]]:
-    fh.seek(0)
-    return _parse_lines(fh.read())[0]
-
-
-def _landed_keys(records: Sequence[Mapping[str, Any]]) -> set:
-    return {(record["run_id"], record["record_id"]) for record in records if _is_run_record(record)}
-
-
-def _write_missing(fh, records: Sequence[Mapping[str, Any]], landed: set) -> Tuple[int, int]:
-    """Append the records whose ``run_id`` + ``record_id`` is not in the ledger: ``(written, already)``."""
-    written = already = 0
-    for record in records:
-        key = (record["run_id"], record["record_id"])
-        if key in landed:
-            already += 1
-            continue
-        _append_record(fh, record)
-        landed.add(key)
-        written += 1
-    return written, already
-
-
-def _read_back(fh) -> Tuple[set, Dict[str, str]]:
-    """The ledger as the aggregation reads it: every run record as canonical JSON, and each run's last line."""
-    lines = [(record["run_id"], _canonical(record)) for record in _read_ledger(fh)]
-    return {line for _run_id, line in lines}, dict(lines)
-
-
-def _reads_back(spooled: Sequence[Mapping[str, Any]], present: set, last: Mapping[str, str]) -> bool:
-    """Every spooled record is its own ledger line, equal to the spool, and each run's newest is its last line.
-
-    ``present`` and ``last`` come from :func:`_read_back`, the aggregation's
-    reading, so a record that reads back here is a run the aggregation counts.
-    """
-    newest = {record["run_id"]: _canonical(record) for record in spooled}
-    return all(_canonical(record) in present for record in spooled) and all(
-        last.get(run_id) == line for run_id, line in newest.items()
-    )
-
-
-def _replay_files(fh, spool_dir: Path) -> ReplayResult:
-    # Boundary first: a record that landed whole but without its "\n" is ended here, before its spool file goes.
-    _end_a_torn_tail(fh)
-    landed = _landed_keys(_read_ledger(fh))
-    written = already = 0
-    replayed: List[Tuple[Path, List[Dict[str, Any]]]] = []
-    unreadable: List[str] = []
-    for target in _spool_files(spool_dir):
-        try:
-            records = _read_spool_file(target)
-        except _UnreadableSpool as exc:
-            logger.warning("cost_ledger: unreadable spool file left in place: %s", exc)
-            unreadable.append(target.name)
-            continue
-        added, present = _write_missing(fh, records, landed)
-        written += added
-        already += present
-        replayed.append((target, records))
-    fh.flush()
-    os.fsync(fh.fileno())
-    present, last = _read_back(fh)
-    removed: List[str] = []
-    unconfirmed: List[str] = []
-    for target, records in replayed:
-        if _reads_back(records, present, last):
-            target.unlink()
-            removed.append(target.name)
-        else:
-            logger.warning("cost_ledger: %s did not read back from the ledger; the spool file stays", target.name)
-            unconfirmed.append(target.name)
-    pending = len(_spool_files(spool_dir))
-    return ReplayResult(written, already, tuple(removed), tuple(unreadable), pending, tuple(unconfirmed))
-
-
-def _clear_a_stale_degraded(ledger_path: Path) -> None:
-    """An empty spool with a beacon still on degraded (a file set aside by hand): report ok."""
     try:
-        beacon = json.loads(_beacon_path(ledger_path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return
-    if isinstance(beacon, dict) and beacon.get("status") != "ok":
-        _report_health(ledger_path, reason="spool empty")
-
-
-def replay_spool(ledger_path: Optional[Path] = None) -> ReplayResult:
-    """Move every readable spool file into the ledger, once per ``run_id`` + ``record_id``.
-
-    Holds the ledger lock and then the spool lock (the writer's order), so no
-    record lands or is spooled between the replay's read of the ledger and its
-    append. Each append starts on a valid NDJSON boundary. After the appends are
-    flushed and fsynced, still under both locks, the replay reads the ledger
-    back; a spool file is removed only when its records read back
-    (:func:`_reads_back`). The ledger lock goes with the close, after the spool
-    lock. An unreadable spool file stays and is named in the result. Raises
-    ``OSError`` when the ledger cannot be opened or written, and
-    :class:`CostLedgerReplayError` when a record does not read back; in both
-    cases the spool stays. The unlocked first listing only skips an empty spool:
-    a file spooled after it waits for the next replay.
-    """
-    path = Path(ledger_path) if ledger_path is not None else provider_costs._resolve_costs_path()
-    spool_dir = spool_dir_for(path)
-    if not _spool_files(spool_dir):
-        _clear_a_stale_degraded(path)
-        return ReplayResult()
-    refuse_real_central_store_write_under_test_runner(path)
-    with _open_locked(path, errors="replace") as fh, slot_lock(spool_dir):
-        result = _replay_files(fh, spool_dir)
-    if not result.unconfirmed:
-        _report_health(path, reason="replay", unreadable=result.unreadable)
-        return result
-    reason = f"replay: {', '.join(result.unconfirmed)} did not read back from {path} as their own lines"
-    _report_health(path, reason=reason, unreadable=result.unreadable, unconfirmed=result.unconfirmed)
-    raise CostLedgerReplayError(f"{len(result.unconfirmed)} spool file(s) kept: {reason}", result)
+        _append_under_the_lock(path, record)
+    except OSError as exc:
+        raise _write_error(path, record, exc) from exc
+    return record
 
 
 # ---------------------------------------------------------------------------
@@ -914,8 +591,7 @@ class LedgerTotals:
     ``tokens`` sums the known counts per field, ``tokens_unknown`` counts per
     field the runs whose count is ``null``. ``legacy_lines`` counts old-shape
     lines (no ``schema``), ``unreadable_lines`` lines that are not JSON objects,
-    carry another schema version or have no ``run_id``. ``spool_pending`` is the
-    number of runs waiting for a replay at the moment the ledger was read.
+    carry another schema version or have no ``run_id``.
     """
 
     runs: Mapping[str, Mapping[str, Any]]
@@ -926,14 +602,6 @@ class LedgerTotals:
     unavailable: Tuple[str, ...]
     legacy_lines: int
     unreadable_lines: int
-    spool_pending: int
-
-    @property
-    def incomplete(self) -> Optional[str]:
-        """The line a summing reader shows while runs wait in the spool, else ``None``."""
-        if not self.spool_pending:
-            return None
-        return f"onvolledig: {self.spool_pending} runs wachten op replay"
 
 
 def _parse_lines(text: str) -> Tuple[List[Dict[str, Any]], int, int]:
@@ -958,42 +626,25 @@ def _parse_lines(text: str) -> Tuple[List[Dict[str, Any]], int, int]:
     return records, legacy, unreadable
 
 
-def _ledger_and_backlog(ledger_path: Path) -> Tuple[str, int]:
-    """``(ledger text, spool backlog)`` at one moment, so a total and its ``spool_pending`` agree.
+def _read_the_ledger(ledger_path: Path) -> str:
+    """The ledger text, read under a shared ``flock`` so no append is read half written.
 
-    Both are read inside one lock scope: the ledger ``flock`` and then the spool
-    lock, the order of the writer and the replay. A replay holds the ledger lock
-    exclusively from its first append to its last spool removal, so it cannot
-    move a record out of the spool between the two reads, and no record lands.
-    A writer without the ledger lock can only add to the spool: a record it
-    spools between the reads is counted in ``spool_pending`` and is in no total.
-    Without a ledger file
-    there is no lock to take: the spool is listed first and the ledger checked
-    after. A replay creates the ledger before it removes a spool file, so a
-    ledger still missing means nothing left the spool during the listing; one
-    that appeared in between is read under both locks.
+    No ledger file is an empty ledger. Any other error to open or read it is
+    raised: an unreadable ledger is never an empty total.
     """
-    spool_dir = spool_dir_for(ledger_path)
-    if not ledger_path.is_file():
-        pending = len(_spool_files(spool_dir))
-        if not ledger_path.is_file():
-            return "", pending
-    with ledger_path.open("r", encoding="utf-8", errors="replace") as fh:
+    try:
+        fh = ledger_path.open("r", encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return ""
+    with fh:
         fcntl.flock(fh, fcntl.LOCK_SH)
-        try:
-            text = fh.read()
-            with slot_lock(spool_dir):
-                pending = len(_spool_files(spool_dir))
-        finally:
-            fcntl.flock(fh, fcntl.LOCK_UN)
-    return text, pending
+        return fh.read()
 
 
-def _last_line_per_run(ledger_path: Path) -> Tuple[Dict[str, Dict[str, Any]], int, int, int]:
-    """``(last line per run, legacy_lines, unreadable_lines, spool_pending)``, read at one moment."""
-    text, pending = _ledger_and_backlog(ledger_path)
-    records, legacy, unreadable = _parse_lines(text)
-    return {record["run_id"]: record for record in records}, legacy, unreadable, pending
+def _last_line_per_run(ledger_path: Path) -> Tuple[Dict[str, Dict[str, Any]], int, int]:
+    """``(last line per run, legacy_lines, unreadable_lines)``."""
+    records, legacy, unreadable = _parse_lines(_read_the_ledger(ledger_path))
+    return {record["run_id"]: record for record in records}, legacy, unreadable
 
 
 def _number(value: object) -> Optional[float]:
@@ -1023,12 +674,11 @@ def aggregate_runs(
     """Sum the ledger per run: the last line of each ``run_id`` counts, nothing else.
 
     ``select`` filters on that effective record, so a correction that moves a
-    run out of the selection takes the whole run out. The ledger and the spool
-    backlog are read in one lock scope (:func:`_ledger_and_backlog`): a total
-    that misses spooled runs always comes with them in ``spool_pending``.
+    run out of the selection takes the whole run out. The ledger is read under
+    a shared ``flock`` (:func:`_read_the_ledger`).
     """
     path = Path(ledger_path) if ledger_path is not None else provider_costs._resolve_costs_path()
-    last, legacy, unreadable, pending = _last_line_per_run(path)
+    last, legacy, unreadable = _last_line_per_run(path)
     runs = {run_id: record for run_id, record in last.items() if select is None or select(record)}
     cost = api = 0.0
     tokens = dict.fromkeys(TOKEN_FIELDS, 0)
@@ -1051,15 +701,14 @@ def aggregate_runs(
     return LedgerTotals(
         runs=runs, cost_usd=round(cost, 8), api_equivalent_usd=round(api, 8), tokens=tokens,
         tokens_unknown=unknown, unavailable=tuple(unavailable), legacy_lines=legacy,
-        unreadable_lines=unreadable, spool_pending=pending,
+        unreadable_lines=unreadable,
     )
 
 
 __all__ = [
-    "RUN_SCHEMA", "TOKEN_FIELDS", "ROLES", "KINDS", "BILLINGS", "SPOOL_DIR_NAME",
+    "RUN_SCHEMA", "TOKEN_FIELDS", "ROLES", "KINDS", "BILLINGS",
     "CostLedgerRefusal", "CostWithoutSource", "UnavailableWithAmount", "CorrectionWithoutSupersedes",
     "IncompleteUsageMarkedComplete", "RunIdProjectMismatch", "UnknownModel", "InvalidRecord",
-    "CostLedgerSpoolError", "CostLedgerReplayError", "RunCost", "LedgerTotals", "ReplayResult",
-    "split_run_id", "run_id_for", "build_record", "record_run", "replay_spool", "aggregate_runs",
-    "spool_dir_for", "spool_file_for",
+    "CostLedgerWriteError", "RunCost", "LedgerTotals",
+    "split_run_id", "run_id_for", "build_record", "record_run", "aggregate_runs",
 ]
