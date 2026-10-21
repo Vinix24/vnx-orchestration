@@ -22,6 +22,7 @@ def emit_governance_receipt(
     terminal: str = "T0",
     source: str = "vnx_governance",
     receipts_file: Optional[str] = None,
+    lock_timeout: Optional[float] = None,
     **fields: Any,
 ) -> Dict[str, Any]:
     """Append a governance event into canonical receipts.
@@ -30,6 +31,11 @@ def emit_governance_receipt(
     of the ``dispatch_identity.RECEIPT_KINDS`` closed set, stamped from the
     emitter's own knowledge. A missing kwarg hard-fails with TypeError; an
     out-of-vocab value raises ValueError before anything is written.
+
+    ``lock_timeout`` (seconds) bounds the wait on the append lock, for a
+    caller that holds a lock of its own: still taken then, it raises
+    ``AppendReceiptError`` with code ``lock_timeout`` and nothing is written
+    (``append_receipt_payload``). The default waits as long as it takes.
     """
     validate_receipt_kind(receipt_kind)
     receipt: Dict[str, Any] = {
@@ -41,7 +47,7 @@ def emit_governance_receipt(
         "source": source,
     }
     receipt.update(fields)
-    result = append_receipt_payload(receipt, receipts_file=receipts_file)
+    result = append_receipt_payload(receipt, receipts_file=receipts_file, lock_timeout=lock_timeout)
     receipt["append_status"] = result.status
     receipt["idempotency_key"] = result.idempotency_key
     return receipt

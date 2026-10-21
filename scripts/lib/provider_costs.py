@@ -216,7 +216,12 @@ def _resolve_costs_path() -> Path:
     else:
         project_id = os.environ.get("VNX_PROJECT_ID", "vnx-dev")
         data_dir = Path.home() / ".vnx-data" / project_id
-    return data_dir / "events" / "provider_costs.ndjson"
+    return costs_path_in(data_dir)
+
+
+def costs_path_in(data_dir: Path) -> Path:
+    """The cost ledger of the store ``data_dir``: ``<data_dir>/events/provider_costs.ndjson``."""
+    return Path(data_dir) / "events" / "provider_costs.ndjson"
 
 
 def ledger_lock_path(costs_path: Path) -> Path:
