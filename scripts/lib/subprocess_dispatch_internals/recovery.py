@@ -231,9 +231,11 @@ def _book_attempt(dispatch_id: str, model: "str | None", role: "str | None", sub
     """Write this delivery attempt's cost-ledger line (ADR-043) when it is a builder run.
 
     One line per attempt, retries included: a retried attempt is a run of its
-    own. The line joins ``_dispatch_cost_records`` for the receipt. Ledger
-    errors propagate out of deliver_with_recovery before any receipt is
-    written (ADR-005, fail-loud).
+    own. The line joins ``_dispatch_cost_records`` for the receipt, also when
+    it landed in the ledger's spool (ADR-043 §6). Ledger errors propagate out
+    of deliver_with_recovery before any receipt is written and before a retry
+    could book another attempt: a ``CostLedgerWriteError`` has an unknown
+    outcome (ADR-005, fail-loud).
     """
     import subprocess_dispatch as _sd
     if not harness_run_cost.writes_builder_run("claude", role):

@@ -30,9 +30,12 @@ What the line carries:
 
 Only builder runs move here. A gate seat, a plan-gate seat or a panel leg on
 the same lanes (:data:`NOT_BUILDER_ROLES`) keeps the old ``emit_provider_cost``
-event until K3/K4a move it. The ledger's errors are never caught here:
-``CostLedgerWriteError`` and a ``CostLedgerRefusal`` reach the caller, which
-must not write its receipt with a cost it does not have (ADR-005, ADR-043).
+event until K3/K4a move it. A line that lands in the ledger's spool is a
+written line (ADR-043 §6, ``record.landed``). The ledger's errors are never
+caught here: ``CostLedgerWriteError`` (neither the ledger nor the spool took
+the line, the outcome is unknown) and a ``CostLedgerRefusal`` reach the
+caller, which must not write its receipt with a cost it does not have and books
+no new attempt for it (ADR-005, ADR-043).
 """
 
 from __future__ import annotations
