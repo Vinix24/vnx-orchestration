@@ -645,7 +645,23 @@ class TestASecondExecutionIsRenumbered:
     @pytest.mark.parametrize("renumbered_from", [RUN_B1, RUN_A2, "not a run id"])
     def test_a_line_whose_renumbered_from_is_no_other_attempt_of_its_ref_is_unreadable(self, ledger, renumbered_from):
         """The field is validated: it names another attempt of the same (project_id, producer, ref)."""
-        line = dict(cost_ledger.build_record(_run(run_id=RUN_A2)), renumbered_from=renumbered_from)
+        line = dict(cost_ledger.build_record(_run(run_id=RUN_A2)), renumbered_from=renumbered_from,
+                    renumbered_from_record_id="1" * 32)
+        ledger.parent.mkdir(parents=True)
+        ledger.write_bytes(_line_bytes(line))
+
+        totals = cost_ledger.aggregate_runs(ledger)
+
+        assert (totals.runs, totals.unreadable_lines) == ({}, 1)
+
+    @pytest.mark.parametrize("fields", [
+        {"renumbered_from": RUN_A1},
+        {"renumbered_from": RUN_A1, "renumbered_from_record_id": ""},
+        {"renumbered_from_record_id": "1" * 32},
+    ], ids=["no-record-id", "empty-record-id", "record-id-only"])
+    def test_a_renumbered_line_names_its_spooled_record_or_is_unreadable(self, ledger, fields):
+        """OI-2250 point 1: the two fields go together, so a renumbered line always names its exact origin."""
+        line = dict(cost_ledger.build_record(_run(run_id=RUN_A2)), **fields)
         ledger.parent.mkdir(parents=True)
         ledger.write_bytes(_line_bytes(line))
 
@@ -1048,7 +1064,8 @@ class TestTheReadBackComparesContent:
         cost_ledger.record_run(_run(cost_usd=2.0), ledger_path=ledger)
         charge = cost_ledger.build_record(_run())
         _put_in_the_spool(ledger, [charge])
-        line = dict(charge, run_id=RUN_A2, renumbered_from=RUN_A1, record_id="0" * 32)
+        line = dict(charge, run_id=RUN_A2, renumbered_from=RUN_A1, renumbered_from_record_id=charge["record_id"],
+                    record_id="0" * 32)
         with ledger.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(line, separators=(",", ":")) + "\n")
         before = ledger.read_bytes()
@@ -1161,7 +1178,10 @@ class TestTheReceiptLockIsBounded:
 
 
 def _cli_env(ledger_path: Path, **extra: str) -> dict:
-    return dict(os.environ, VNX_DATA_DIR=str(ledger_path.parent.parent), VNX_DATA_DIR_EXPLICIT="1", **extra)
+    """The store of ``ledger_path`` pinned, its state dir included: the replay books its receipts in VNX_STATE_DIR."""
+    store = ledger_path.parent.parent
+    return dict(os.environ, VNX_DATA_DIR=str(store), VNX_DATA_DIR_EXPLICIT="1", VNX_STATE_DIR=str(store / "state"),
+                **extra)
 
 
 def _replay_cli(ledger_path: Path, *args: str, **extra: str) -> subprocess.CompletedProcess:
@@ -1235,3 +1255,234 @@ class TestTheCli:
         wrong = subprocess.run([str(REPO_ROOT / "bin" / "vnx"), "costs"], env=_cli_env(ledger),
                                capture_output=True, text=True, timeout=120, cwd=REPO_ROOT)
         assert wrong.returncode == 2 and "vnx costs replay" in wrong.stderr
+
+
+# ---------------------------------------------------------------------------
+# OI-2250: the advisories of #2155, each the reviewer's scenario
+# ---------------------------------------------------------------------------
+
+# What a wait clamped to a 0.1 s budget may take beyond it: one poll interval and the work around it.
+CLAMP_MARGIN_SECONDS = 0.25
+
+
+def _a_correction_that_names_the_renumbered_line(ledger_path: Path) -> tuple:
+    """The codex scenario up to the first correction: $0.75 under run 1, ``supersedes`` the renumbered charge."""
+    older, _charge, renumbered = _renumbered_beside_a_2_dollar_execution(ledger_path)
+    first = cost_ledger.record_run(_correction_of(renumbered, cost_usd=0.75), ledger_path=ledger_path)
+    assert (first["run_id"], first["supersedes"], first.landed) == (RUN_A1, renumbered["record_id"], "spool")
+    return older, renumbered, first
+
+
+def _the_renumbered_correction_of(ledger_path: Path, record: dict) -> dict:
+    """The ledger line the spooled ``record`` was booked as, found by the record_id it names as its origin."""
+    (line,) = [line for line in _lines(ledger_path) if line.get("renumbered_from_record_id") == record["record_id"]]
+    return line
+
+
+class TestOI2250ACorrectionOfACorrectionOfARenumberedRun:
+    """Point 1 (codex, cost_ledger.py:883): the exact origin of a renumbered line survives every chained correction."""
+
+    def test_the_codex_scenario_totals_2_60(self, ledger):
+        """$2.00 beside a renumbered $0.50, a $0.75 correction naming the renumbered line, then $0.60 of that one."""
+        older, renumbered, first = _a_correction_that_names_the_renumbered_line(ledger)
+        assert cost_ledger.replay_spool(ledger).records_renumbered == 1
+        second = cost_ledger.record_run(_correction_of(first, cost_usd=0.6), ledger_path=ledger)
+
+        result = cost_ledger.replay_spool(ledger)
+
+        totals = cost_ledger.aggregate_runs(ledger)
+        assert totals.cost_usd == pytest.approx(2.6), "not 1.35: the second correction may not replace the $2.00"
+        assert (totals.incomplete, sorted(totals.runs)) == (None, [RUN_A1, RUN_A2])
+        assert totals.runs[RUN_A1] == older
+        assert second.landed == "spool", "under run 1 it would replace the $2.00 execution"
+        assert (result.records_written, result.records_renumbered, result.stopped) == (1, 1, None)
+        followed = _the_renumbered_correction_of(ledger, first)
+        assert (followed["run_id"], followed["supersedes"]) == (RUN_A2, renumbered["record_id"])
+        last = _the_renumbered_correction_of(ledger, second)
+        assert (last["run_id"], last["supersedes"], last["cost_usd"]) == (RUN_A2, followed["record_id"], 0.6)
+        assert totals.runs[RUN_A2] == last
+        lines = _lines(ledger)
+        assert len({line["record_id"] for line in lines}) == len(lines), "no line twice"
+
+    def test_a_replay_killed_between_the_two_corrections_still_totals_2_60_without_a_duplicate(
+        self, ledger, signals, spawn,
+    ):
+        """The killed replay booked the first correction and kept its file; the second waits behind it."""
+        older, renumbered, first = _a_correction_that_names_the_renumbered_line(ledger)
+        child = spawn(_REPLAY_KILLED_AFTER_ONE_LINE, ledger, signals)
+        _wait_for(signals / "one_line_written", child)
+        child.send_signal(signal.SIGKILL)
+        child.communicate(timeout=30)
+        assert child.returncode == -signal.SIGKILL
+        assert _spooled(ledger) == [first], "a killed replay leaves the file"
+        second = cost_ledger.record_run(_correction_of(first, cost_usd=0.6), ledger_path=ledger)
+        assert second.landed == "spool"
+
+        result = cost_ledger.replay_spool(ledger)
+
+        lines = _lines(ledger)
+        assert len({line["record_id"] for line in lines}) == len(lines), "the first correction is not written twice"
+        totals = cost_ledger.aggregate_runs(ledger)
+        assert totals.cost_usd == pytest.approx(2.6)
+        assert (totals.incomplete, sorted(totals.runs)) == (None, [RUN_A1, RUN_A2])
+        assert (result.records_already_landed, result.records_written, result.files_replayed) == (1, 1, 1)
+        assert lines[0] == older and not _spool_file(ledger).exists()
+        booked = sorted(receipt["record_id"] for receipt in _receipts(ledger, cost_ledger.RENUMBERED_EVENT))
+        assert booked == sorted(line["record_id"] for line in lines[1:]), "one receipt per renumbered line"
+
+
+class TestOI2250AnUnbookableSpoolFileIsQuarantined:
+    """Point 4 (deepseek, cost_ledger.py:1984/2015): spool content never ends the replay in a traceback."""
+
+    @pytest.mark.parametrize("shape", ["unsplittable run_id", "no project_id"])
+    def test_the_file_goes_to_quarantine_and_the_cli_ends_without_a_traceback(self, ledger, shape):
+        """``a:b:1`` raised InvalidRecord in the plan; no project_id raised KeyError after its renumbered line landed."""
+        older = cost_ledger.record_run(_run(cost_usd=2.0), ledger_path=ledger)
+        record = cost_ledger.build_record(_run())
+        if shape == "unsplittable run_id":
+            record = dict(record, run_id="a:b:1")
+        else:
+            record = {key: value for key, value in record.items() if key != "project_id"}
+        path = _put_in_the_spool(ledger, [record])
+
+        done = _replay_cli(ledger, "--json")
+
+        assert "Traceback" not in done.stderr, done.stderr
+        assert done.returncode == 0, done.stderr
+        result = json.loads(done.stdout)
+        assert (result["files_quarantined"], result["files_remaining"], result["stopped"]) == (1, 0, None)
+        assert (_spool_dir(ledger) / "quarantine" / path.name).is_file() and not path.exists()
+        assert _lines(ledger) == [older], "nothing of the file was written"
+        (receipt,) = _receipts(ledger, cost_ledger.QUARANTINED_EVENT)
+        assert receipt["spool_file"] == path.name
+        assert _receipts(ledger, cost_ledger.RENUMBERED_EVENT) == []
+
+    @pytest.mark.parametrize("change", [
+        {"run_id": "a:b:1"}, {"project_id": "another-project"}, {"kind": ["charge"]},
+        {"kind": "correction", "supersedes": ["not", "a", "record id"], "reason": "r"},
+    ], ids=["unsplittable", "another-project", "unhashable-kind", "unhashable-supersedes"])
+    def test_a_record_the_writer_would_refuse_is_no_run_record(self, ledger, change):
+        """The aggregation reads such a file as unreadable, never as a waiting run or a crash."""
+        _put_in_the_spool(ledger, [dict(cost_ledger.build_record(_run()), **change)])
+
+        totals = cost_ledger.aggregate_runs(ledger)
+
+        assert (totals.spool_unreadable, totals.spool_pending) == (True, 0)
+        assert totals.incomplete == "onvolledig: de spool is niet te lezen"
+
+    def test_a_refusal_while_the_file_is_planned_quarantines_it(self, ledger, monkeypatch):
+        """Any CostLedgerRefusal from a spool record, wherever the plan meets it, moves the file aside."""
+        cost_ledger.record_run(_run(cost_usd=2.0), ledger_path=ledger)
+        path = _put_in_the_spool(ledger, [cost_ledger.build_record(_run())])
+
+        def refuse(*_args, **_kwargs):
+            raise cost_ledger.InvalidRecord("a record the plan cannot book")
+
+        monkeypatch.setattr(cost_ledger, "_plan_the_file", refuse)
+        try:
+            result = cost_ledger.replay_spool(ledger)
+        except cost_ledger.CostLedgerRefusal as exc:
+            pytest.fail(f"the replay ended in {exc!r} instead of quarantining the file")
+
+        assert (result.files_quarantined, result.files_remaining, result.stopped) == (1, 0, None)
+        assert (_spool_dir(ledger) / "quarantine" / path.name).is_file()
+        (receipt,) = _receipts(ledger, cost_ledger.QUARANTINED_EVENT)
+        assert "a record the plan cannot book" in receipt["reason"]
+
+
+class TestOI2250EveryLockWaitIsClampedToTheBudget:
+    """Point 3 (codex cost_ledger.py:2067, deepseek :1692): no lock wait outlasts what is left of the budget."""
+
+    def test_a_held_lock_file_returns_within_the_budget_not_the_wait(self, ledger, monkeypatch, hold_the_lock):
+        """The reviewer's numbers: budget 0.1 s, lock wait 0.5 s; it took 0.508 s."""
+        spooled = _to_the_spool(ledger, monkeypatch, _run())
+        hold_the_lock()
+
+        started = time.monotonic()
+        result = cost_ledger.replay_spool(ledger, budget_sec=0.1, lock_wait_sec=0.5)
+        waited = time.monotonic() - started
+
+        assert waited < 0.1 + CLAMP_MARGIN_SECONDS, f"it waited {waited:.2f}s for the lock file"
+        assert (result.stopped, result.exit_code, result.files_remaining) == ("lock_busy", 3, 1)
+        assert "budget" in result.detail
+        assert _spooled(ledger) == [spooled] and _lines(ledger) == []
+
+    @pytest.mark.parametrize("held", ["ledger flock", "receipt lock"])
+    def test_the_locks_under_the_lock_file_return_within_the_budget_too(self, ledger, signals, spawn, held):
+        """The same deadline bounds the ledger flock and the receipt lock: budget 0.1 s against a 2 s wait."""
+        cost_ledger.record_run(_run(cost_usd=2.0), ledger_path=ledger)
+        spool_file = _put_in_the_spool(ledger, [cost_ledger.build_record(_run())])
+        holder = spawn(_LEDGER_FLOCK_HOLDER if held == "ledger flock" else _RECEIPT_LOCK_HOLDER, ledger, signals,
+                       {"hold": HOLD_SECONDS})
+        _wait_for(signals / ("holder_has_the_ledger" if held == "ledger flock" else "holder_has_the_receipt_lock"),
+                  holder)
+
+        started = time.monotonic()
+        result = cost_ledger.replay_spool(ledger, budget_sec=0.1, lock_wait_sec=2.0)
+        waited = time.monotonic() - started
+
+        assert waited < 0.1 + MARGIN_SECONDS, f"it waited {waited:.2f}s for the {held}"
+        assert (result.stopped, result.exit_code, result.files_remaining) == ("lock_busy", 3, 1)
+        assert spool_file.exists()
+        assert _result(holder) == {"done": True}
+
+
+class TestOI2250ReceiptsFollowTheResolvedStateDir:
+    """Point 5 (deepseek, cost_ledger.py:1726): the replay's receipts land in the project's VNX_STATE_DIR."""
+
+    @pytest.fixture
+    def elsewhere(self, ledger, tmp_path, monkeypatch) -> Path:
+        state = tmp_path / "elsewhere" / "state"
+        monkeypatch.setenv("VNX_DATA_DIR", str(ledger.parent.parent))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+        monkeypatch.setenv("VNX_STATE_DIR", str(state))
+        return state
+
+    @staticmethod
+    def _booked_in(state: Path, event_type: str) -> list:
+        path = state / "t0_receipts.ndjson"
+        if not path.is_file():
+            return []
+        lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        return [line for line in lines if line.get("event_type") == event_type]
+
+    def test_a_quarantine_receipt_lands_in_vnx_state_dir(self, ledger, elsewhere):
+        path = _spool_file(ledger)
+        path.parent.mkdir(parents=True)
+        path.write_text("not json", encoding="utf-8")
+
+        result = cost_ledger.replay_spool(ledger)
+
+        assert (result.files_quarantined, result.stopped) == (1, None)
+        (receipt,) = self._booked_in(elsewhere, cost_ledger.QUARANTINED_EVENT)
+        assert receipt["spool_file"] == path.name
+        assert _receipts(ledger, cost_ledger.QUARANTINED_EVENT) == [], "not in <data_dir>/state"
+
+    def test_a_renumbering_is_booked_and_found_there_once(self, ledger, elsewhere):
+        """The receipt is written there, and a later replay reads it there: no second receipt."""
+        cost_ledger.record_run(_run(cost_usd=2.0), ledger_path=ledger)
+        charge = cost_ledger.build_record(_run())
+        _put_in_the_spool(ledger, [charge])
+        assert cost_ledger.replay_spool(ledger).records_renumbered == 1
+        _put_in_the_spool(ledger, [charge])
+
+        again = cost_ledger.replay_spool(ledger)
+
+        assert (again.records_already_landed, again.records_written, again.files_replayed) == (1, 0, 1)
+        (receipt,) = self._booked_in(elsewhere, cost_ledger.RENUMBERED_EVENT)
+        assert receipt["record_id"] == _lines(ledger)[1]["record_id"]
+        assert _receipts(ledger, cost_ledger.RENUMBERED_EVENT) == []
+
+    def test_a_ledger_of_another_store_keeps_its_own_state_dir(self, ledger, tmp_path, monkeypatch):
+        """Only the resolved store has a state dir the resolver knows; any other ledger books in <data_dir>/state."""
+        monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path / "the-project"))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+        monkeypatch.setenv("VNX_STATE_DIR", str(tmp_path / "the-project" / "state"))
+        path = _spool_file(ledger)
+        path.parent.mkdir(parents=True)
+        path.write_text("not json", encoding="utf-8")
+
+        assert cost_ledger.replay_spool(ledger).files_quarantined == 1
+
+        assert len(_receipts(ledger, cost_ledger.QUARANTINED_EVENT)) == 1
+        assert not (tmp_path / "the-project" / "state" / "t0_receipts.ndjson").exists()

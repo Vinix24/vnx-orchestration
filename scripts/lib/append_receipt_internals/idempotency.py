@@ -278,6 +278,22 @@ def _write_cache(cache_file: Path, entries: List[Dict[str, Any]], max_entries: i
             pass
 
 
+def _remember_the_key(cache_path: Path, cache_entries: List[Dict[str, Any]], idempotency_key: str) -> None:
+    """Add ``idempotency_key`` to the dedup cache after the receipt was appended, under the same append lock."""
+    cache_entries.append({"ts": time.time(), "key": idempotency_key})
+    try:
+        _write_cache(cache_path, cache_entries)
+    except Exception as exc:
+        # Audit #3: the receipt is already durable (written above). A failed dedup-cache write
+        # must NOT raise — raising would propagate as an error, the caller would retry, and
+        # the retry would re-append the same receipt (a duplicate audit record). Log and
+        # continue: worst case a rare future duplicate, never a lost receipt (the safe direction).
+        _log.warning(
+            "idempotency cache write failed after receipt append (key=%s): %s",
+            idempotency_key, exc,
+        )
+
+
 def _write_receipt_under_lock(
     receipt: Dict[str, Any],
     receipt_path: Path,
@@ -287,11 +303,19 @@ def _write_receipt_under_lock(
     *,
     pre_write_hook: Optional[Callable[[Dict[str, Any]], None]] = None,
     lock_deadline: Optional[float] = None,
+    post_write_hook: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> AppendResult:
     """Acquire the append lock and either write the receipt or skip as duplicate.
 
     ``lock_deadline``, a ``time.monotonic()`` value, bounds the wait for the
     lock (:func:`_take_the_append_lock`); without it the wait is unbounded.
+
+    ``post_write_hook``, when given, runs INSIDE the same lock right after the
+    receipt is durable, never on a duplicate. It receives the receipt as
+    written. A bounded append records its central-mirror debt there
+    (``payload._queue_the_mirror``): taking the lock a second time for that
+    could time out after the receipt landed and lose the debt (OI-2250). The
+    hook is responsible for its own failures; whatever it raises propagates.
 
     ``pre_write_hook``, when given, runs INSIDE the lock exactly once the
     idempotency check has confirmed this receipt is not a duplicate and WILL
@@ -419,18 +443,10 @@ def _write_receipt_under_lock(
                         outcome_booking.outcome_id, exc,
                     )
 
-            cache_entries.append({"ts": time.time(), "key": idempotency_key})
-            try:
-                _write_cache(cache_path, cache_entries)
-            except Exception as exc:
-                # Audit #3: the receipt is already durable (written above). A failed dedup-cache write
-                # must NOT raise — raising would propagate as an error, the caller would retry, and
-                # the retry would re-append the same receipt (a duplicate audit record). Log and
-                # continue: worst case a rare future duplicate, never a lost receipt (the safe direction).
-                _log.warning(
-                    "idempotency cache write failed after receipt append (key=%s): %s",
-                    idempotency_key, exc,
-                )
+            _remember_the_key(cache_path, cache_entries, idempotency_key)
+
+            if post_write_hook is not None:
+                post_write_hook(receipt)
 
             return AppendResult(status="appended", receipts_file=receipt_path, idempotency_key=idempotency_key)
     except AppendReceiptError:
