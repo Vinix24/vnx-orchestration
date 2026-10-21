@@ -19,8 +19,9 @@ the real call sites:
 - per call site (``envelope_govern._govern``, the subprocess recovery loop,
   ``provider_dispatch._emit_governance``): one ledger line and no old line for a
   harness builder run, the old line and no ledger line for codex/kimi, the
-  receipt's cost and ``cost_ledger_run_ids`` from the record, and a failed
-  append that writes no receipt.
+  receipt's cost and ``cost_ledger_run_ids`` from the record, a failed append
+  that lands in the spool and still gets its receipt (ADR-043 §6, K2a-3a), and
+  a spool that fails too: no receipt and no second attempt booked.
 
 Transcripts are real JSONL files under a temporary projects dir
 (``VNX_CLAUDE_PROJECTS_DIR``); the ledger is the real file under a temporary
@@ -33,6 +34,7 @@ from __future__ import annotations
 import argparse
 import errno
 import json
+import os
 import subprocess
 import sys
 import textwrap
@@ -164,6 +166,29 @@ def _record(store, run, dispatch_id="20261021-kp-test", producer="envelope_gover
 
 def _failing_append(*_args, **_kwargs):
     raise OSError(errno.ENOSPC, "No space left on device")
+
+
+@pytest.fixture()
+def broken_spool(store):
+    """A spool directory that can be listed but takes no file: every spool write fails with ``EACCES``."""
+    if os.geteuid() == 0:
+        pytest.skip("root writes into a read-only directory")
+    spool = store.ledger.parent / "provider_costs.spool"
+    spool.mkdir(parents=True)
+    spool.chmod(0o555)
+    yield spool
+    spool.chmod(0o755)
+
+
+def _spooled(store, run_id) -> list:
+    """The records waiting in the spool for ``run_id``; none when the run has no spool file."""
+    path = cost_ledger.spool_file_for(store.ledger.parent / "provider_costs.spool", run_id)
+    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
+
+
+def _attempts_booked():
+    """A spy on ``cost_ledger.record_next_attempt``: how often a caller tried to book an attempt."""
+    return patch.object(cost_ledger, "record_next_attempt", wraps=cost_ledger.record_next_attempt)
 
 
 # ---------------------------------------------------------------------------
@@ -411,12 +436,21 @@ class TestOneRunPerAttempt:
         assert record["api_equivalent_usd"] == expected
         assert record["role"] == "builder"
 
-    def test_a_failed_append_raises_and_writes_nothing(self, store):
+    def test_a_failed_append_lands_the_attempt_in_the_spool(self, store):
+        with patch.object(cost_ledger, "_append_record", _failing_append):
+            record = _record(store, _builder(spawn_refused="local_key_missing"))
+
+        assert _ledger_lines(store.ledger) == []
+        assert _spooled(store, record["run_id"]) == [record]
+        assert record.landed == "spool"
+
+    def test_a_spool_that_fails_too_raises_and_writes_nothing(self, store, broken_spool):
         with patch.object(cost_ledger, "_append_record", _failing_append):
             with pytest.raises(cost_ledger.CostLedgerWriteError) as raised:
                 _record(store, _builder(spawn_refused="local_key_missing"))
 
-        assert raised.value.errno == errno.ENOSPC
+        assert raised.value.errno == errno.EACCES
+        assert "the outcome is unknown" in str(raised.value)
         assert _ledger_lines(store.ledger) == []
 
     def test_a_non_harness_provider_is_refused(self, store):
@@ -641,20 +675,38 @@ class TestTheEnvelopeCallSite:
         assert harness_run_cost.lane_model("deepseek-harness", "deepseek-v4-pro") == "deepseek-v4-pro"
         assert harness_run_cost.lane_model("claude", "opus") == "opus"
 
-    def test_a_failed_append_writes_no_receipt_and_records_the_gap(self, store):
-        _two_message_transcript(store.projects, "sess-env-enospc")
+    def test_a_failed_append_spools_the_line_and_writes_the_receipt(self, store):
+        """ADR-005 holds with the spool: the line is in the ledger or the spool before the receipt."""
+        _two_message_transcript(store.projects, "sess-env-spool")
         with patch.object(cost_ledger, "_append_record", _failing_append):
+            _report, receipt_path = _govern(
+                _envelope_spec(store, "deepseek-harness", "deepseek-v4-pro"),
+                _adapter("deepseek-v4-pro", session_id="sess-env-spool"),
+            )
+
+        run_id = f"{PROJECT}:envelope_govern:20261021-kp-env:1"
+        assert _ledger_lines(store.ledger) == []
+        (spooled,) = _spooled(store, run_id)
+        (receipt,) = _receipts(receipt_path)
+        assert receipt["cost_ledger_run_ids"] == [run_id]
+        assert (receipt["cost_usd"], receipt["cost_source"]) == (spooled["cost_usd"], spooled["cost_source"])
+        assert cost_ledger.aggregate_runs(store.ledger).spool_pending == 1
+
+    def test_a_spool_that_fails_too_writes_no_receipt_and_books_no_second_attempt(self, store, broken_spool):
+        _two_message_transcript(store.projects, "sess-env-enospc")
+        with patch.object(cost_ledger, "_append_record", _failing_append), _attempts_booked() as booked:
             _report, receipt_path = _govern(
                 _envelope_spec(store, "deepseek-harness", "deepseek-v4-pro"),
                 _adapter("deepseek-v4-pro", session_id="sess-env-enospc"),
             )
 
+        assert booked.call_count == 1, "an unknown outcome is never booked again as a new attempt"
         assert receipt_path is None
         assert _receipts(store.receipts) == [], "no receipt may carry a cost the ledger does not have"
         assert _run_records(store.ledger) == []
         (gap,) = _receipts(store.state / "receipt_emit_failures.ndjson")
         assert gap["marker"] == "VNX_RECEIPT_EMIT_FAILURE"
-        assert "CostLedgerWriteError" in gap["reason"] and "No space left" in gap["reason"]
+        assert "CostLedgerWriteError" in gap["reason"] and "the outcome is unknown" in gap["reason"]
 
     def test_an_unknown_model_writes_no_receipt_and_records_the_refusal(self, store):
         _report, receipt_path = _govern(
@@ -797,10 +849,26 @@ class TestTheSubprocessCallSite:
         assert _ledger_lines(store.ledger) == []
         assert len(_old_lines(store.ledger)) == 1
 
-    def test_a_failed_append_propagates_and_writes_no_receipt(self, store):
+    def test_a_failed_append_spools_the_attempt_and_the_receipt_names_it(self, store):
         with patch.object(cost_ledger, "_append_record", _failing_append):
+            ok, write_receipt = _deliver(store, [_sub_result(True, None)], max_retries=0)
+
+        run_id = f"{PROJECT}:subprocess_recovery:20261021-kp-sub:1"
+        assert ok is True
+        assert _ledger_lines(store.ledger) == []
+        (spooled,) = _spooled(store, run_id)
+        kwargs = write_receipt.call_args.kwargs
+        assert kwargs["cost_ledger_run_ids"] == [run_id]
+        assert (kwargs["cost_usd"], kwargs["cost_source"]) == (spooled["cost_usd"], spooled["cost_source"])
+
+    def test_a_spool_that_fails_too_propagates_and_books_no_second_attempt(self, store, broken_spool):
+        """The retry loop does not go on: a retry would book a new attempt for an outcome that is unknown."""
+        with patch.object(cost_ledger, "_append_record", _failing_append), _attempts_booked() as booked:
             with pytest.raises(cost_ledger.CostLedgerWriteError):
-                _deliver(store, [_sub_result(True, None)], max_retries=0)
+                _deliver(store, [_sub_result(False, None), _sub_result(True, None)], max_retries=1)
+
+        assert booked.call_count == 1
+        assert _run_records(store.ledger) == []
 
     def test_the_receipt_writer_stamps_the_run_ids(self, store):
         from subprocess_dispatch_internals import receipt_writer
@@ -895,13 +963,29 @@ class TestTheProviderDispatchCallSite:
         assert (cost, source, run_ids) == (0.0, "unavailable:spawn_refused", [booked["run_id"]])
         assert len(_ledger_lines(store.ledger)) == 1
 
-    def test_a_failed_append_propagates_and_writes_no_receipt(self, store):
+    def test_a_failed_append_spools_the_line_and_the_receipt_takes_its_cost(self, store):
         import provider_dispatch as pd
 
         result = SimpleNamespace(token_usage=None, completion_text="", session_id=None, spawn_refused="x")
         with patch.object(cost_ledger, "_append_record", _failing_append):
+            cost, source, run_ids = pd._book_dispatch_cost(
+                _pd_args("deepseek-harness"), "deepseek-harness", "deepseek-v4-pro", result, {}, (START, END),
+                store.state,
+            )
+
+        run_id = f"{PROJECT}:provider_dispatch:20261021-kp-pd:1"
+        assert _ledger_lines(store.ledger) == []
+        (spooled,) = _spooled(store, run_id)
+        assert (cost, source, run_ids) == (spooled["cost_usd"], spooled["cost_source"], [run_id])
+
+    def test_a_spool_that_fails_too_propagates_and_writes_no_receipt(self, store, broken_spool):
+        import provider_dispatch as pd
+
+        result = SimpleNamespace(token_usage=None, completion_text="", session_id=None, spawn_refused="x")
+        with patch.object(cost_ledger, "_append_record", _failing_append), _attempts_booked() as booked:
             with pytest.raises(cost_ledger.CostLedgerWriteError):
                 pd._emit_governance(_pd_args("deepseek-harness"), "deepseek-harness", "deepseek-v4-pro",
                                     result, START, END, "blocked")
 
+        assert booked.call_count == 1
         assert [r for r in _receipts(store.receipts) if r.get("dispatch_id") == "20261021-kp-pd"] == []

@@ -12,16 +12,16 @@ Track ``kosten-per-model-in-het-grootboek``, deliverable K2a, first PR. Covers
 - one aggregation function: per ``run_id`` only the last line counts,
   ``unavailable`` is listed and never summed as 0, old-shape lines are counted as
   ``legacy_lines``, and an unreadable ledger is an error, never an empty total;
-- a failed append raises ``CostLedgerWriteError``, whether the open, the lock,
-  the append or the close failed, and keeps nothing elsewhere;
+- a failed append lands the line in the spool (ADR-043 §6, K2a-3a), whether the
+  open, the lock or the append failed; a failed close after a whole append lands
+  it in the ledger and the spool;
 - a torn append: every append starts on a valid NDJSON boundary, a failed
   append ends its own line when the disk has room, and the ledger is closed
   while its lock is held;
 - ``emit_provider_cost`` writes the same line as before (golden).
 
-The spool and the replay of ADR-043 §6 moved to the second K2a PR (verdict
-``cap-pr2141-73c685f656862925ef20ef81d2a09090b9b08337``), and their tests with
-them: ``claudedocs/specs/kosten-per-model-in-het-grootboek/k2a-spool-replay-uitgesteld.md``.
+The acceptance of the one lock file, the spool and the failure contract (K2a-3a)
+is in ``tests/test_cost_ledger_one_lock.py``; the replay (K2a-3b) is not built yet.
 
 Failures are injected for real: a ledger path that is a directory makes the
 append fail with ``IsADirectoryError``, exactly as an unwritable store would. A
@@ -35,6 +35,7 @@ from __future__ import annotations
 import dataclasses
 import errno
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -92,8 +93,14 @@ def ledger(tmp_path: Path) -> Path:
 
 
 def _spool_dir(ledger_path: Path) -> Path:
-    """Where ADR-043 §6 will put the spool. K2a-1 has none, and the tests assert it stays absent."""
+    """The spool of ADR-043 §6. A refused record never reaches it."""
     return ledger_path.parent / "provider_costs.spool"
+
+
+def _spooled(ledger_path: Path, run_id: str = RUN_A1) -> list:
+    """The records waiting in the spool for ``run_id``, in order; none when the run has no spool file."""
+    path = cost_ledger.spool_file_for(_spool_dir(ledger_path), run_id)
+    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
 
 
 def _lines(ledger_path: Path) -> list:
@@ -518,18 +525,21 @@ class TestTheAggregation:
         with pytest.raises(IsADirectoryError):
             cost_ledger.aggregate_runs(ledger)
 
-    def test_the_totals_carry_exactly_the_ledger_fields(self, ledger):
-        """The plain ledger is all the aggregation reads, and all its totals describe."""
+    def test_the_totals_carry_the_ledger_and_the_spool_fields(self, ledger):
+        """The ledger and the spool backlog, read in one scope (K2a-3a)."""
         cost_ledger.record_run(_run(), ledger_path=ledger)
         totals = cost_ledger.aggregate_runs(ledger)
         assert [field.name for field in dataclasses.fields(totals)] == [
             "runs", "cost_usd", "api_equivalent_usd", "tokens", "tokens_unknown", "unavailable",
-            "legacy_lines", "unreadable_lines",
+            "legacy_lines", "unreadable_lines", "spool_pending", "spool_unreadable", "spool_conflicts", "torn_tail",
         ]
+        assert (
+            totals.spool_pending, totals.spool_unreadable, totals.spool_conflicts, totals.torn_tail, totals.incomplete,
+        ) == (0, False, 0, False, None)
 
 
 # ---------------------------------------------------------------------------
-# A failed append raises (round 6: the recovery path moved to the second K2a PR)
+# A failed append lands in the spool (K2a-3a, ADR-043 §6)
 # ---------------------------------------------------------------------------
 
 def _break_the_ledger(ledger_path: Path) -> None:
@@ -549,15 +559,15 @@ class _RefusedFlock:
         return fcntl.flock(fd, operation)
 
 
-_WHERE_THE_APPEND_FAILS = {"open": errno.EISDIR, "lock": errno.ENOLCK, "append": errno.ENOSPC, "close": errno.EIO}
+_WHERE_THE_APPEND_FAILS = {"open": "spool", "lock": "spool", "append": "spool", "close": "ledger+spool"}
 
 
-class TestAFailedAppendRaises:
+class TestAFailedAppendLandsInTheSpool:
     @pytest.mark.parametrize("where", sorted(_WHERE_THE_APPEND_FAILS))
-    def test_record_run_raises_and_leaves_no_spool_directory(
+    def test_record_run_spools_the_line_and_says_where_it_landed(
         self, ledger, inject, close_probe, monkeypatch, where,
     ):
-        """No spool, no beacon, no silent success: the caller's call fails with the cause's errno."""
+        """The caller's call succeeds: the line is in the spool, and in the ledger too after a failed close."""
         if where == "open":
             _break_the_ledger(ledger)
         elif where == "lock":
@@ -567,30 +577,20 @@ class TestAFailedAppendRaises:
         else:
             close_probe(ledger, failing_close=[OSError(errno.EIO, os.strerror(errno.EIO))])
 
-        with pytest.raises(cost_ledger.CostLedgerWriteError) as excinfo:
-            cost_ledger.record_run(_run(), ledger_path=ledger)
+        record = cost_ledger.record_run(_run(), ledger_path=ledger)
 
-        error = excinfo.value
-        assert isinstance(error, OSError)
-        assert error.errno == error.__cause__.errno == _WHERE_THE_APPEND_FAILS[where]
-        assert RUN_A1 in str(error) and str(ledger) in str(error)
-        assert not _spool_dir(ledger).exists()
-        assert sorted(path.name for path in ledger.parent.iterdir()) == [ledger.name]
+        assert _spooled(ledger) == [record]
+        assert sorted(path.name for path in _spool_dir(ledger).iterdir()) == [
+            f"{RUN_A1}~{hashlib.sha256(RUN_A1.encode('utf-8')).hexdigest()[:16]}.json",
+        ]
+        assert record.landed == _WHERE_THE_APPEND_FAILS[where]
         assert not (ledger.parent.parent / "health").exists()
 
-    def test_a_refused_lock_writes_nothing(self, ledger, monkeypatch):
+    def test_a_refused_lock_writes_nothing_to_the_ledger(self, ledger, monkeypatch):
         monkeypatch.setattr(cost_ledger, "fcntl", _RefusedFlock())
-        with pytest.raises(cost_ledger.CostLedgerWriteError):
-            cost_ledger.record_run(_run(), ledger_path=ledger)
+        record = cost_ledger.record_run(_run(), ledger_path=ledger)
         assert ledger.read_bytes() == b""
-
-    def test_a_close_that_fails_after_the_append_raises(self, ledger, close_probe):
-        """The flush the close did is not confirmed, so the call fails, though the line may be on disk."""
-        close_probe(ledger, failing_close=[OSError(errno.EIO, os.strerror(errno.EIO))])
-        with pytest.raises(cost_ledger.CostLedgerWriteError):
-            cost_ledger.record_run(_run(), ledger_path=ledger)
-        assert [line["run_id"] for line in _lines(ledger)] == [RUN_A1]
-        assert not _spool_dir(ledger).exists()
+        assert _spooled(ledger) == [record]
 
 
 # ---------------------------------------------------------------------------
@@ -693,14 +693,16 @@ class TestATornAppend:
     def test_a_record_after_a_torn_append_starts_on_its_own_line(self, ledger, inject, kind):
         """The disk stays full for the failed call, so its line stays open: the next append ends it first."""
         inject(ledger, kind)
-        with pytest.raises(cost_ledger.CostLedgerWriteError):
-            cost_ledger.record_run(_run(), ledger_path=ledger)
+        spooled = cost_ledger.record_run(_run(), ledger_path=ledger)
+        assert spooled.landed == "spool"
         torn = ledger.read_bytes()
         assert torn and not torn.endswith(b"\n")
 
         other = cost_ledger.record_run(_run(run_id=RUN_B1), ledger_path=ledger)
+        assert other.landed == "ledger"
         assert ledger.read_bytes() == torn + b"\n" + _line_bytes(other)
         totals = cost_ledger.aggregate_runs(ledger)
+        assert (totals.spool_pending, totals.torn_tail) == (1, False)
         if kind == "torn":
             assert totals.runs == {RUN_B1: other}
             assert totals.unreadable_lines == 1
@@ -717,9 +719,7 @@ class TestATornAppend:
     def test_a_failed_append_ends_its_own_line_when_the_disk_has_room(self, ledger, inject, monkeypatch, kind):
         """The old writer cannot glue onto a line this module left open: the failed append ends it."""
         inject(ledger, kind, disk_stays_full=False)
-        with pytest.raises(cost_ledger.CostLedgerWriteError) as excinfo:
-            cost_ledger.record_run(_run(), ledger_path=ledger)
-        assert excinfo.value.errno == errno.ENOSPC
+        assert cost_ledger.record_run(_run(), ledger_path=ledger).landed == "spool"
         assert ledger.read_bytes().endswith(b"\n")
         left = ledger.read_bytes()
 
@@ -808,8 +808,7 @@ class TestTheLedgerLockGoesWithTheClose:
         """A close flushes what a failed write left buffered: the writer closes under the lock, failed or not."""
         inject(ledger, "torn", disk_stays_full=False)
         held_at_close = close_probe(ledger)
-        with pytest.raises(cost_ledger.CostLedgerWriteError):
-            cost_ledger.record_run(_run(), ledger_path=ledger)
+        assert cost_ledger.record_run(_run(), ledger_path=ledger).landed == "spool"
         cost_ledger.record_run(_run(run_id=RUN_B1), ledger_path=ledger)
         assert held_at_close == [True, True]
 

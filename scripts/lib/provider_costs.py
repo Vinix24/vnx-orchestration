@@ -5,6 +5,10 @@ ADR-005: Writes append-only NDJSON events to .vnx-data/events/provider_costs.ndj
 BEFORE any downstream state mutation.
 
 ADR-007: Every event includes project_id for multi-tenant traceability.
+
+ADR-043 §6: every actor on the ledger takes the lock file
+``events/provider_costs.lock`` first (:func:`ledger_lock`), and the ledger's own
+``flock`` under it.
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ import json
 import logging
 import os
 import sys
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -214,6 +219,31 @@ def _resolve_costs_path() -> Path:
     return data_dir / "events" / "provider_costs.ndjson"
 
 
+def ledger_lock_path(costs_path: Path) -> Path:
+    """``provider_costs.lock`` next to the ledger: the lock file of ADR-043 §6."""
+    return Path(costs_path).with_suffix(".lock")
+
+
+@contextmanager
+def ledger_lock(costs_path: Path, operation: int):
+    """Hold the ledger's lock file, the lock every actor on the ledger takes first (ADR-043 §6).
+
+    ``operation`` is ``fcntl.LOCK_EX`` for a writer and ``fcntl.LOCK_SH`` for a
+    reader. The file is created with ``O_CREAT`` and never removed: a removed
+    lock file lets two actors lock two different files. The ledger's own
+    ``flock`` is taken under this one, never the other way round. The open or
+    the lock raises its ``OSError``, and nothing is held then.
+    """
+    lock_path = ledger_lock_path(costs_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_path, os.O_RDONLY | os.O_CREAT | os.O_CLOEXEC, 0o644)
+    try:
+        fcntl.flock(fd, operation)
+        yield
+    finally:
+        os.close(fd)
+
+
 def emit_provider_cost(
     provider: str,
     model: str,
@@ -229,6 +259,8 @@ def emit_provider_cost(
 
     ADR-005: written before any downstream state mutation; raises on failure.
     ADR-007: project_id stamped on every event.
+    ADR-043 §6: appended under the lock file (:func:`ledger_lock`, exclusive),
+    then under the ledger's own ``flock``, the order of every ledger actor.
 
     Raises OSError/IOError on write failure — no silent except.
 
@@ -285,7 +317,7 @@ def emit_provider_cost(
     costs_path.parent.mkdir(parents=True, exist_ok=True)
 
     line = json.dumps(event, separators=(",", ":")) + "\n"
-    with costs_path.open("a", encoding="utf-8") as fh:
+    with ledger_lock(costs_path, fcntl.LOCK_EX), costs_path.open("a", encoding="utf-8") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
         try:
             fh.write(line)

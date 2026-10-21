@@ -149,12 +149,14 @@ def _book_ledger_run(
 ) -> tuple:
     """Write this attempt's cost-ledger line when it is a builder run on a claude harness lane.
 
-    Returns ``(record, None)`` when the line landed and ``(None, None)`` for a
-    lane or role that does not write the ledger yet. When the ledger refuses
-    the record (``CostLedgerRefusal``, e.g. an unknown model) or the append
-    fails (``CostLedgerWriteError``), or the line cannot be built at all, it
-    returns ``(None, reason)``: the caller then writes NO receipt and records
-    the proof-chain gap (OI-1179) with that reason, loud. A receipt for this
+    Returns ``(record, None)`` when the line landed, in the ledger or in its
+    spool (ADR-043 §6), and ``(None, None)`` for a lane or role that does not
+    write the ledger yet. When the ledger refuses the record
+    (``CostLedgerRefusal``, e.g. an unknown model), or neither the ledger nor
+    the spool took the line (``CostLedgerWriteError``: the outcome is unknown),
+    or the line cannot be built at all, it returns ``(None, reason)``: the
+    caller then writes NO receipt and records the proof-chain gap (OI-1179)
+    with that reason, loud, and books no new attempt. A receipt for this
     attempt without its cost line would carry a cost the ledger does not have
     (ADR-005, ADR-043 "Gevolgen").
     """
