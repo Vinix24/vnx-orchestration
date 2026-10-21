@@ -67,9 +67,7 @@ def no_markers(monkeypatch):
 
 @pytest.fixture
 def live(home, no_markers):
-    """The live write path: no dispatch marker and a tmp working directory outside any repo.
-
-    Every launch function calls require since provider-schakelaar B, so nothing is pending."""
+    """The live write path: no dispatch marker and a tmp working directory outside any repo."""
     return home
 
 
@@ -140,8 +138,7 @@ def test_list_json(home, tmp_path):
     assert glm["projects"] == {PROJECT: {"enabled": True, "changed_at": "2026-10-12T08:00:00Z",
                                          "changed_by": "op", "reason": "hier wel"}}
     assert glm["effective"]["allowed"] is True and glm["effective"]["source"] == "project"
-    assert report["enforcement"]["enforced"] is True
-    assert report["enforcement"]["pending"] == {}
+    assert report["enforcement"] == {"launch_functions": len(ps.LAUNCH_FUNCTIONS)}
     assert report["enforcement"]["launch_functions"] == len(ps.LAUNCH_FUNCTIONS)
     assert set(report["non_switchable"]) == {"claude", "codex", "tooling", "unresolved"}
     assert report["projects"]["error"] == "no project registry"
@@ -196,7 +193,7 @@ def test_check_allowed_and_refused(home, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Write verbs: live since provider-schakelaar B, usage errors
+# Write verbs: live, usage errors
 # ---------------------------------------------------------------------------
 
 def test_write_verbs_are_live_in_their_own_process(home, tmp_path):
@@ -216,16 +213,14 @@ def test_write_verbs_are_live_in_their_own_process(home, tmp_path):
     ["off", "deepseek"], ["on", "glm", "--reason", "x"], ["off", "kimi", "--project", PROJECT],
     ["reset", "gemini", "--project", PROJECT], ["repair"], ["repair", "--empty"],
 ])
-def test_write_verbs_refuse_while_pending(args, live, capsys, monkeypatch):
-    """The pending mechanism stays until F removes it: a pending entry refuses every write verb
-    and is listed."""
-    monkeypatch.setattr(ps, "pending_launch_functions", lambda: {"B": ("scripts/lib/example.py:launch",)})
+def test_write_verbs_refuse_with_a_dispatch_marker(args, live, capsys, monkeypatch):
+    """The only things that refuse a write are the caller's worktree and a dispatch marker:
+    with one in the environment every write verb exits 5, names it and writes nothing."""
+    monkeypatch.setenv("VNX_WORKER_DISPATCH_ID", "dlv-x")
     code, _, err = run_main(capsys, *args)
     assert code == providers_cli.EXIT_WRITE_REFUSED == 5
-    assert "write refused" in err and "not enforced yet" in err and "B: 1" in err
-    assert "    scripts/lib/example.py:launch\n" in err
-    for entry in ps.ENFORCED:
-        assert entry not in err
+    assert "write refused" in err and "VNX_WORKER_DISPATCH_ID" in err
+    assert "not enforced yet" not in err and "pending" not in err
     assert not switch_path(live).exists() and not ps.audit_log_path(switch_path(live)).exists()
 
 
@@ -581,7 +576,7 @@ def test_pip_entrance_runs_the_same_module(home, tmp_path):
     listed = _pip("list", "--json", cwd=tmp_path)
     assert listed.returncode == 0, listed.stderr
     assert json.loads(listed.stdout)["project"] == PROJECT
-    assert json.loads(_pip("--json", cwd=tmp_path).stdout)["enforcement"]["enforced"] is True
+    assert json.loads(_pip("--json", cwd=tmp_path).stdout)["enforcement"]["launch_functions"] == len(ps.LAUNCH_FUNCTIONS)
     assert _pip("off", "claude", cwd=tmp_path).returncode == 2
     written = _pip("off", "deepseek", "--reason", "x y", cwd=tmp_path)
     assert written.returncode == 0, written.stderr

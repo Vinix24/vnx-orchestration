@@ -9,7 +9,7 @@ non-claude provider process or request — over ``scripts/`` (minus ``scripts/sp
   launch call (``ENFORCED``, which is the whole census since provider-schakelaar B), or is
   exempt with a reason;
 - every entry of the measured floor exists, is flagged or listed as undetectable with a
-  reason, and is enforced (calls require, or is pending);
+  reason, and is enforced (calls require);
 - every exempt entry still matches something;
 - no runtime module imports from ``scripts/spikes/``.
 
@@ -19,6 +19,7 @@ Without this guard the next new consumer would bypass the switch again.
 from __future__ import annotations
 
 import ast
+import inspect
 import re
 import sys
 from dataclasses import dataclass, field
@@ -453,19 +454,18 @@ def _exempt_reason(key: str, exempt: Dict[str, str]) -> Optional[str]:
 
 
 def coverage_violations(units: Dict[str, FunctionScan], *, launch: Iterable[str],
-                        pending: Iterable[str], exempt: Dict[str, str],
-                        undetected: Dict[str, str]) -> List[str]:
+                        exempt: Dict[str, str], undetected: Dict[str, str]) -> List[str]:
     """Every way the census and the tree disagree. Empty means the guard passes."""
-    launch_set, pending_set = set(launch), set(pending)
+    launch_set = set(launch)
     problems: List[str] = []
     for key, unit in sorted(units.items()):
         if not unit.flagged:
             continue
         rules = sorted({c.rule for c in unit.launches})
         if key in launch_set:
-            if not unit.requires_before_launch and key not in pending_set:
+            if not unit.requires_before_launch:
                 where = "after its first launch call" if unit.require_positions else "nowhere"
-                problems.append(f"{key} ({rules}) calls provider_switch.require {where} and is not pending")
+                problems.append(f"{key} ({rules}) calls provider_switch.require {where}")
         elif _exempt_reason(key, exempt) is None:
             problems.append(f"{key} ({rules}) is a launch function outside the census and not exempt")
     for key in sorted(launch_set):
@@ -477,8 +477,8 @@ def coverage_violations(units: Dict[str, FunctionScan], *, launch: Iterable[str]
             problems.append(f"census entry {key} is not detected and not listed as undetectable with a reason")
         if unit.flagged and key in undetected:
             problems.append(f"census entry {key} is detected now; remove it from UNDETECTED_LAUNCH_FUNCTIONS")
-        if not unit.flagged and not unit.require_positions and key not in pending_set:
-            problems.append(f"undetectable census entry {key} does not call provider_switch.require and is not pending")
+        if not unit.flagged and not unit.require_positions:
+            problems.append(f"undetectable census entry {key} does not call provider_switch.require")
         if key in exempt:
             problems.append(f"census entry {key} is also exempt")
     return problems
@@ -541,13 +541,9 @@ def units() -> Dict[str, FunctionScan]:
     return scan_tree(REPO_ROOT)
 
 
-def _all_pending() -> Set[str]:
-    return {k for v in provider_switch.pending_launch_functions().values() for k in v}
-
-
-def test_every_flagged_function_is_enforced_pending_or_exempt(units):
+def test_every_flagged_function_is_enforced_or_exempt(units):
     assert coverage_violations(
-        units, launch=provider_switch.LAUNCH_FUNCTIONS, pending=_all_pending(),
+        units, launch=provider_switch.LAUNCH_FUNCTIONS,
         exempt=provider_switch.EXEMPT, undetected=provider_switch.UNDETECTED_LAUNCH_FUNCTIONS,
     ) == []
 
@@ -560,16 +556,17 @@ def test_every_exempt_entry_still_matches_something(units):
     assert exempt_violations(units, REPO_ROOT, provider_switch.EXEMPT) == []
 
 
-def test_the_census_is_enforced_and_nothing_is_pending(units):
-    """Provider-schakelaar B: PENDING_B is gone, LAUNCH_FUNCTIONS equals the enforced set and
-    every entry calls require, so the write verbs are live."""
+def test_the_census_is_enforced_and_has_no_pending_branch(units):
+    """Provider-schakelaar F: LAUNCH_FUNCTIONS equals the enforced set, every entry calls
+    require, and neither the pending mechanism nor its "not enforced yet" refusal exists."""
     enforced = provider_switch.ENFORCED
     assert len(set(enforced)) == len(enforced)
     census = set(provider_switch.LAUNCH_FUNCTIONS)
     assert set(enforced) == census
     assert not hasattr(provider_switch, "PENDING_B")
     assert {k for k in census if not units[k].require_positions} == set()
-    assert provider_switch.pending_launch_functions() == {}
+    assert not hasattr(provider_switch, "pending_launch_functions")
+    assert "pending" not in inspect.signature(coverage_violations).parameters
     assert not any("not enforced yet" in r for r in provider_switch.write_refusals())
 
 
@@ -680,27 +677,28 @@ def test_require_after_the_launch_fails_the_order_check():
     late, early = found["synthetic/order.py:late"], found["synthetic/order.py:early"]
     assert late.flagged and not late.requires_before_launch
     assert early.flagged and early.requires_before_launch
-    problems = coverage_violations(found, launch=[late.key, early.key], pending=[], exempt={}, undetected={})
+    problems = coverage_violations(found, launch=[late.key, early.key], exempt={}, undetected={})
     assert problems == [
         f"{late.key} (['{RULE_PROCESS_LITERAL}']) calls provider_switch.require after its first "
-        "launch call and is not pending"
+        "launch call"
     ]
 
 
 def test_an_unknown_launch_function_fails_the_guard():
     found = scan_python_source("import subprocess\ndef f():\n    subprocess.Popen(['ollama', 'run', 'm'])\n",
                                "synthetic/new_consumer.py")
-    problems = coverage_violations(found, launch=[], pending=[], exempt={}, undetected={})
+    problems = coverage_violations(found, launch=[], exempt={}, undetected={})
     assert problems == [
         f"synthetic/new_consumer.py:f (['{RULE_PROCESS_LITERAL}']) is a launch function outside the "
         "census and not exempt"
     ]
 
 
-def test_a_pending_entry_is_tolerated_only_while_pending():
+def test_a_census_entry_that_never_calls_require_fails():
     found = scan_python_source(f"import subprocess\ndef f():\n    subprocess.run(['{_K}', 'x'])\n", "s/p.py")
-    assert coverage_violations(found, launch=["s/p.py:f"], pending=["s/p.py:f"], exempt={}, undetected={}) == []
-    assert coverage_violations(found, launch=["s/p.py:f"], pending=[], exempt={}, undetected={}) != []
+    assert coverage_violations(found, launch=["s/p.py:f"], exempt={}, undetected={}) == [
+        f"s/p.py:f (['{RULE_PROCESS_LITERAL}']) calls provider_switch.require nowhere"
+    ]
 
 
 def test_a_stale_exempt_function_entry_fails():
@@ -711,9 +709,10 @@ def test_a_stale_exempt_function_entry_fails():
 
 
 def test_an_undetectable_entry_without_reason_fails():
-    found = scan_python_source("def f():\n    return helper()\n", "s/u.py")
-    assert coverage_violations(found, launch=["s/u.py:f"], pending=["s/u.py:f"], exempt={},
-                               undetected={}) == [
+    found = scan_python_source(
+        "import provider_switch\ndef f():\n    provider_switch.require('x', consumer='c')\n    return helper()\n",
+        "s/u.py")
+    assert coverage_violations(found, launch=["s/u.py:f"], exempt={}, undetected={}) == [
         "census entry s/u.py:f is not detected and not listed as undetectable with a reason"
     ]
 

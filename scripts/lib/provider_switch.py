@@ -8,8 +8,7 @@ via OpenRouter.
 
 Every launch function (a function that actually starts a non-claude provider process or
 request) calls :func:`require` first; entry points turn a refusal into fabric behaviour before
-that. Every launch function in the census does, so the write verbs are live: see ``ENFORCED``
-below.
+that. Every launch function in the census does: see ``ENFORCED`` below.
 
 Read fresh on every decision: the file is a few hundred bytes and a change must take effect on
 the next call in every process, launchd jobs included. No cache.
@@ -676,14 +675,6 @@ def linked_worktree_root(start: Path) -> Optional[Path]:
     return None
 
 
-def pending_launch_functions() -> Dict[str, Tuple[str, ...]]:
-    """Launch functions that do not call :func:`require` yet, per deliverable.
-
-    Empty: every census entry is in ``ENFORCED``, so nothing holds the write verbs back.
-    """
-    return {}
-
-
 def write_refusals() -> List[str]:
     """Every reason the current process may not change a switch. Empty means it may.
 
@@ -708,13 +699,6 @@ def write_refusals() -> List[str]:
         reasons.append(
             f"the environment carries a dispatch marker ({', '.join(markers)}); a dispatch may "
             "not change provider switches"
-        )
-    pending = pending_launch_functions()
-    if any(pending.values()):
-        counts = ", ".join(f"{k}: {len(v)}" for k, v in pending.items() if v)
-        reasons.append(
-            f"not enforced yet: {sum(len(v) for v in pending.values())} launch function(s) do "
-            f"not call provider_switch.require ({counts}); the write verbs go live when they all do"
         )
     return reasons
 

@@ -82,7 +82,7 @@ Key deliverables: `scripts/lib/pool_manager.py`, `.vnx/vnx_workers.default.yaml`
 
 Five providers in production: Claude, Codex CLI, Gemini CLI, Kimi CLI (OAuth), LiteLLM bridge (DeepSeek, GLM via OpenRouter). Uniform receipt + report shape across the providers. Intelligence injection, token + cost tracking, and quality gates equal first-class for every provider. Reproducible benchmark suite with routing recommendations (`scripts/benchmark/`).
 
-This is the historical shipped-state at the time of Wave 7. It has since moved: Gemini CLI is a worker lane only, no longer a review gate (`RETIRED_GATE_NAMES`, operator decision 2026-09-26); the GLM allowlist is `glm-5.2`/`glm-5.3`/`glm-5.3-flash` (`glm-5.2` still the default); `deepseek_gate` defaults to `deepseek-flash` (#2025, released in v1.7.1). The `vnx providers` switch for provider families exists on main but does not enforce yet: its write verbs refuse until every launch function calls `provider_switch.require` (`vnx providers list` prints the state; `docs/core/PROVIDER_LANES.md`, "Provider switch").
+This is the historical shipped-state at the time of Wave 7. It has since moved: Gemini CLI is a worker lane only, no longer a review gate (`RETIRED_GATE_NAMES`, operator decision 2026-09-26); the GLM allowlist is `glm-5.2`/`glm-5.3`/`glm-5.3-flash` (`glm-5.2` still the default); `deepseek_gate` defaults to `deepseek-flash` (#2025, released in v1.7.1). The `vnx providers` switch for provider families is enforced in every launch function (`docs/core/PROVIDER_SWITCH.md`, ADR-044).
 
 Key deliverables: `scripts/lib/provider_spawns/litellm_spawn.py`, `scripts/lib/providers/routing_recommendations.yaml`, ADR-015.
 

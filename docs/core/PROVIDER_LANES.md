@@ -191,7 +191,7 @@ from a linked worktree or from inside a dispatch. `vnx providers list` prints th
 enforcement state. The door books a refused fire as a `provider_switched_off`
 receipt; the dry-run writes nothing. Review gates and the intelligence
 callers honor the switch (see `DISPATCH_AND_INTELLIGENCE_ARCHITECTURE.md`). On
-main, not yet released. This is code behaviour; no ADR records it.
+main, not yet released. The full reference is `PROVIDER_SWITCH.md`; the decision is ADR-044.
 
 ## Report-writing divergence
 

@@ -49,7 +49,7 @@ The released version is in [`VERSION`](VERSION) and every release has its entry 
 
 On main, not yet released. Each line points at the document that owns the subject:
 
-- **Provider switch**: `vnx providers list` shows the state of each model provider family. The write verbs (`on`, `off`, `reset`) refuse until every launch function calls `provider_switch.require`, so nothing can be switched yet ([PROVIDER_LANES.md](docs/core/PROVIDER_LANES.md#provider-switch)).
+- **Provider switch**: `vnx providers list` shows the state of each model provider family. `on`, `off` and `reset` switch a family off or on for every project, and every launch function that starts a non-claude provider checks the switch first ([PROVIDER_SWITCH.md](docs/core/PROVIDER_SWITCH.md), decision in ADR-044).
 - **Review seats**: one distinct reviewer per seat, and a rejection on the head always blocks ([DISPATCH_RULES.md](docs/core/DISPATCH_RULES.md) §2, evidence side in [45_HEADLESS_REVIEW_EVIDENCE_CONTRACT.md](docs/core/45_HEADLESS_REVIEW_EVIDENCE_CONTRACT.md)). `glm_gate` left the default takeover chain.
 - **Merge readiness**: `vnx pr-ready <PR>` shows the required contexts and the gate evidence on the current head before the merge door is called ([DISPATCH_RULES.md](docs/core/DISPATCH_RULES.md) §2.2).
 - **Plan-gate**: one seat reads the plan and a second seat reads it only on a BLOCK ([HORIZON_PLANNING.md](docs/core/HORIZON_PLANNING.md), "Plan-gate composition").
@@ -248,7 +248,7 @@ For how the architecture got here, [docs/manifesto/EVOLUTION_TIMELINE.md](docs/m
 
 VNX is not a thin "supports many models" wrapper. The provider layer is governed by [`provider_constraints.yaml`](scripts/lib/providers/provider_constraints.yaml), a machine-readable source of truth for constraints such as `kimi-via-cli-only`, `no-anthropic-sdk`, and `deepseek-harness-subscription-blocked`.
 
-The default review stack picks a subscription reader first: `codex_gate` and `kimi_gate`. `deepseek_gate` runs only as a takeover-chain fallback when a subscription reviewer is unavailable, since it bills API credit rather than a subscription. `glm_gate` stays a registered gate but is not in the default takeover chain. `vnx providers list` shows the state of each provider family. The write verbs refuse until every launch function calls `provider_switch.require`, so nothing can be switched yet ([PROVIDER_LANES.md](docs/core/PROVIDER_LANES.md#provider-switch)). Gemini is retired as a reviewer everywhere a review gate is selected; the gemini CLI still runs as a worker lane.
+The default review stack picks a subscription reader first: `codex_gate` and `kimi_gate`. `deepseek_gate` runs only as a takeover-chain fallback when a subscription reviewer is unavailable, since it bills API credit rather than a subscription. `glm_gate` stays a registered gate but is not in the default takeover chain. `vnx providers list` shows the state of each provider family. The operator can switch a family off with `vnx providers off`, and every launch function honors it ([PROVIDER_SWITCH.md](docs/core/PROVIDER_SWITCH.md)). Gemini is retired as a reviewer everywhere a review gate is selected; the gemini CLI still runs as a worker lane.
 
 | Provider | How VNX drives it | Billing / constraint |
 |---|---|---|

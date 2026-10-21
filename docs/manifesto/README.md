@@ -44,7 +44,7 @@ Each item is summarised in one line. The canonical file owns the mechanism.
 
 - **Review seats.** A pull request needs one reviewer per seat of the review stack, and any rejection blocks. `docs/core/00_VNX_ARCHITECTURE.md` (Review Seats), ADR-008, ADR-037.
 - **Takeover chain.** A seat whose reviewer is out passes to the next gate: `codex_gate`, `kimi_gate`, `deepseek_gate`. `glm_gate` left the default chain. `docs/core/PROVIDER_LANES.md` (Takeover chain).
-- **Provider switch.** `vnx providers list` shows one switch per provider family. The write verbs refuse until every launch function calls `provider_switch.require`; the enforcement line of `vnx providers list` says how many do not yet. `docs/core/PROVIDER_LANES.md` (Provider switch).
+- **Provider switch.** `vnx providers` has one switch per provider family, honored by every launch function. `docs/core/PROVIDER_SWITCH.md`, decision ADR-044.
 - **Plan-gate with one seat.** One seat reads the plan and a second reads it only on BLOCK; a PASS leaves a hash-chained record. `docs/core/HORIZON_LIFECYCLE.md`.
 - **Open outcomes.** A dispatch is finished only when a T0 records accept or reject. `docs/core/DISPATCH_RULES.md` section 13.
 - **T0 guard and rotation.** `vnx guard install` registers the context guard per Claude Code account, and a spawner hands a T0 over to a fresh one. `docs/operations/T0_CONTEXT_ROTATION.md`.

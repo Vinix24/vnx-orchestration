@@ -821,39 +821,12 @@ def test_write_refused_with_a_dispatch_marker(marker, writable, monkeypatch, swi
     assert not switch_file.exists()
 
 
-_ONE_PENDING = {"B": ("scripts/lib/example.py:launch",)}
-
-
-def test_the_write_verbs_are_live_now_nothing_is_pending(writable, switch_file):
-    """Provider-schakelaar B: every launch function calls require, so a caller outside any
-    worktree and without a dispatch marker may write."""
-    assert ps.pending_launch_functions() == {}
+def test_the_write_verbs_are_live(writable, switch_file):
+    """Every launch function calls require, so a caller outside any worktree and without a
+    dispatch marker may write: nothing else holds the write verbs back."""
     assert ps.write_refusals() == []
     assert ps.set_switch("deepseek", False, scope="global", actor="op", reason="sparen").changed
     assert ps.load_state(switch_file).global_switches["deepseek"].enabled is False
-
-
-def test_write_refused_while_launch_functions_are_pending(monkeypatch, tmp_path, switch_file):
-    """The pending mechanism stays until F removes it: a pending entry still refuses."""
-    for marker in ps.DISPATCH_MARKER_ENV:
-        monkeypatch.delenv(marker, raising=False)
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(ps, "pending_launch_functions", lambda: _ONE_PENDING)
-    with pytest.raises(ps.SwitchWriteRefused) as exc:
-        ps.set_switch("deepseek", False, scope="global", actor="op", reason="")
-    reasons = " ".join(exc.value.reasons)
-    assert "not enforced yet" in reasons and "B: 1" in reasons
-    assert not switch_file.exists()
-
-
-def test_no_environment_variable_bypasses_the_pending_refusal(monkeypatch, tmp_path):
-    for marker in ps.DISPATCH_MARKER_ENV:
-        monkeypatch.delenv(marker, raising=False)
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(ps, "pending_launch_functions", lambda: _ONE_PENDING)
-    for name in ("VNX_PROVIDER_SWITCH_FORCE", "VNX_OVERRIDE_PROVIDER_SWITCH", "VNX_PROVIDERS_ENFORCED"):
-        monkeypatch.setenv(name, "1")
-    assert any("not enforced yet" in r for r in ps.write_refusals())
 
 
 def test_linked_worktree_detection_by_git_marker(tmp_path):
