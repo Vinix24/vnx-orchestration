@@ -1,9 +1,10 @@
 #!/bin/sh
-# Export the context-rotation plugin from this repository to a local clone of
-# the public toolkit repo, on a branch, as one reviewable commit.
+# Export one plugin of packages/claude-code-toolkit (context-rotation, or
+# context-meter with --plugin context-meter) from this repository to a local
+# clone of the public toolkit repo, on a branch, as one reviewable commit.
 #
 # Usage:
-#   export_toolkit_plugin.sh --commit <sha> --target <toolkit-clone> --tag context-rotation-v<version> [--source <repo>]
+#   export_toolkit_plugin.sh --commit <sha> --target <toolkit-clone> --tag <plugin>-v<version> [--plugin <plugin>] [--source <repo>]
 #
 # Exit status: 0 exported, or nothing to export; 1 refused or failed, with the
 # target back exactly as it was found; 2 usage; 3 failed and the target could
@@ -31,11 +32,13 @@ set -eu
 # point every command below at another repository or at the operator's index.
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY
 
-OWNED_SRC="packages/claude-code-toolkit/context-rotation"
-OWNED_DST="context-rotation"
+PLUGINS="context-rotation context-meter"
+PLUGIN="context-rotation"
+OWNED_SRC="packages/claude-code-toolkit/$PLUGIN"
+OWNED_DST="$PLUGIN"
 MARKET_REL=".claude-plugin/marketplace.json"
 README_REL="README.md"
-TAG_PREFIX="context-rotation-v"
+TAG_PREFIX="$PLUGIN-v"
 
 STATE="check"
 TMP=""
@@ -49,7 +52,7 @@ die() {
 }
 
 usage() {
-    echo "usage: $0 --commit <sha> --target <toolkit-clone> --tag ${TAG_PREFIX}<version> [--source <repo>]" >&2
+    echo "usage: $0 --commit <sha> --target <toolkit-clone> --tag <plugin>-v<version> [--plugin <$(echo "$PLUGINS" | tr ' ' '|')>] [--source <repo>]" >&2
     exit 2
 }
 
@@ -82,7 +85,7 @@ PY
 }
 
 # merge_marketplace <marketplace.json> <plugin.json> <shown as>: add or update
-# only the context-rotation entry. Every other byte of an existing file stays;
+# only the entry of the plugin being exported. Every other byte of an existing file stays;
 # a missing file is created. Prints created, updated or unchanged.
 merge_marketplace() {
     python3 -I - "$1" "$2" "$3" <<'PY'
@@ -92,7 +95,7 @@ market_path, plugin_path, shown = sys.argv[1], sys.argv[2], sys.argv[3]
 meta = json.load(open(plugin_path, encoding="utf-8"))
 entry = {
     "name": meta["name"],
-    "source": "./context-rotation",
+    "source": "./" + meta["name"],
     "version": meta["version"],
     "description": meta["description"],
 }
@@ -192,14 +195,16 @@ print(status)
 PY
 }
 
-# add_readme_row <README.md> <plugin.json>: one row for context-rotation/ in the
+# add_readme_row <README.md> <plugin.json>: one row for the plugin's folder in the
 # "## Tools" table, once. Prints created, updated or unchanged.
 add_readme_row() {
     python3 -I - "$1" "$2" <<'PY'
 import json, os, sys
 
 readme_path, plugin_path = sys.argv[1], sys.argv[2]
-description = json.load(open(plugin_path, encoding="utf-8"))["description"].replace("|", "\\|")
+meta = json.load(open(plugin_path, encoding="utf-8"))
+folder = meta["name"] + "/"
+description = meta["description"].replace("|", "\\|")
 HEADER = ["| Tool | What it does |", "|---|---|"]
 existed = os.path.exists(readme_path)
 text = open(readme_path, encoding="utf-8").read() if existed else "# claude-code-toolkit\n"
@@ -231,7 +236,7 @@ def cells(line):
 
 def build_row(template):
     link = template is not None and "](" in cells(template)[0]
-    first = "[`context-rotation/`](context-rotation/)" if link else "`context-rotation/`"
+    first = "[`%s`](%s)" % (folder, folder) if link else "`%s`" % folder
     width = len(cells(template)) if template is not None else 2
     values = [first, description][:width] + [""] * max(0, width - 2)
     return "| " + " | ".join(values) + " |"
@@ -244,7 +249,7 @@ if heading is None:
 else:
     end = next((n for n in range(heading + 1, len(lines)) if lines[n].startswith("## ")), len(lines))
     section = range(heading + 1, end)
-    if any(lines[n].lstrip().startswith("|") and "context-rotation/" in lines[n] for n in section):
+    if any(lines[n].lstrip().startswith("|") and folder in lines[n] for n in section):
         print("unchanged")
         sys.exit(0)
     first = next((n for n in section if lines[n].lstrip().startswith("|")), None)
@@ -643,17 +648,29 @@ COMMIT=""
 TARGET=""
 TAG=""
 SRC=""
+CHOSEN=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --commit) [ $# -ge 2 ] || usage; COMMIT=$2; shift 2 ;;
         --target) [ $# -ge 2 ] || usage; TARGET=$2; shift 2 ;;
         --tag) [ $# -ge 2 ] || usage; TAG=$2; shift 2 ;;
         --source) [ $# -ge 2 ] || usage; SRC=$2; shift 2 ;;
+        --plugin) [ $# -ge 2 ] || usage; CHOSEN=$2; shift 2 ;;
         -h | --help) usage ;;
         *) echo "unknown argument: $1" >&2; usage ;;
     esac
 done
 [ -n "$COMMIT" ] && [ -n "$TARGET" ] && [ -n "$TAG" ] || usage
+if [ -n "$CHOSEN" ]; then
+    case " $PLUGINS " in
+        *" $CHOSEN "*) ;;
+        *) die "unknown plugin: $CHOSEN (one of: $PLUGINS)" ;;
+    esac
+    PLUGIN=$CHOSEN
+    OWNED_SRC="packages/claude-code-toolkit/$PLUGIN"
+    OWNED_DST="$PLUGIN"
+    TAG_PREFIX="$PLUGIN-v"
+fi
 
 command -v git >/dev/null 2>&1 || die "git is not installed"
 command -v python3 >/dev/null 2>&1 || die "python3 is not installed"
@@ -731,7 +748,7 @@ pj_get "$PLUGIN_JSON" description >/dev/null || die "plugin.json has no descript
 # The base is the commit the export is built on: the existing export branch,
 # else the commit the clone's checkout is on. Both are read once, here; the
 # branch is later written only if it still holds TIP_BEFORE.
-BRANCH="export/context-rotation-$VERSION"
+BRANCH="export/$PLUGIN-$VERSION"
 git check-ref-format --branch "$BRANCH" >/dev/null 2>&1 || die "not a valid branch name: $BRANCH"
 # The branch is read and written as itself. A symbolic ref there would send
 # both to the branch it points at: the export built on that branch, and moved
@@ -778,8 +795,8 @@ add_readme_row "$TMP/README.md" "$PLUGIN_JSON" >"$TMP/readme.status" || die "cou
 ENTRY_VERSION=$(python3 -I -c '
 import json, sys
 plugins = json.load(open(sys.argv[1], encoding="utf-8"))["plugins"]
-print(next(p["version"] for p in plugins if p.get("name") == "context-rotation"))
-' "$TMP/marketplace.json") || die "the marketplace has no context-rotation entry after the merge"
+print(next(p["version"] for p in plugins if p.get("name") == sys.argv[2]))
+' "$TMP/marketplace.json" "$PLUGIN") || die "the marketplace has no $PLUGIN entry after the merge"
 [ "$ENTRY_VERSION" = "$VERSION" ] ||
     die "version mismatch: marketplace entry says $ENTRY_VERSION, the tag says $VERSION"
 
@@ -832,7 +849,7 @@ if [ -n "$OLD_VERSION" ] &&
 fi
 
 {
-    echo "feat(context-rotation): export $VERSION"
+    echo "feat($PLUGIN): export $VERSION"
     echo
     echo "Source-Commit: $SHA"
     echo "Intended-Tag: $TAG"
@@ -843,7 +860,7 @@ if [ -n "$(wgit config user.name 2>/dev/null || true)" ] && [ -n "$(wgit config 
     CANDIDATE=$(wgit commit-tree -p "$BASE_SHA" -F "$TMP/message" "$NEW_TREE") ||
         fail "git commit-tree failed in the export's worktree"
 else
-    CANDIDATE=$(wgit -c user.name="context-rotation export" -c user.email="export@localhost" \
+    CANDIDATE=$(wgit -c user.name="$PLUGIN export" -c user.email="export@localhost" \
         commit-tree -p "$BASE_SHA" -F "$TMP/message" "$NEW_TREE") ||
         fail "git commit-tree failed in the export's worktree"
 fi

@@ -21,6 +21,8 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "scripts" / "maintenance" / "export_toolkit_plugin.sh"
 REAL_PLUGIN = REPO / "packages" / "claude-code-toolkit" / "context-rotation"
+REAL_METER = REPO / "packages" / "claude-code-toolkit" / "context-meter"
+METER_OWNED = "packages/claude-code-toolkit/context-meter"
 OWNED = "packages/claude-code-toolkit/context-rotation"
 REAL_GIT = shutil.which("git")
 
@@ -114,14 +116,15 @@ def target(tmp_path):
     return tgt
 
 
-def export(source, target, sha=None, tag="context-rotation-v0.1.0", env=None):
+def export(source, target, sha=None, tag="context-rotation-v0.1.0", env=None, plugin=None):
     """Run the script with sh from PATH, and a TMPDIR of the test's own."""
     sha = sha or git(source, "rev-parse", "HEAD")
     scratch = Path(target).parent / "scratch"
     scratch.mkdir(exist_ok=True)
     run_env = {**SCRIPT_ENV, "TMPDIR": str(scratch), **(env or {})}
     return subprocess.run(
-        ["sh", str(SCRIPT), "--source", str(source), "--commit", sha, "--target", str(target), "--tag", tag],
+        ["sh", str(SCRIPT), "--source", str(source), "--commit", sha, "--target", str(target), "--tag", tag,
+         *(["--plugin", plugin] if plugin else [])],
         env=run_env, capture_output=True, text=True,
     )
 
@@ -1084,3 +1087,113 @@ def test_script_is_executable_and_syntax_clean():
     assert os.access(SCRIPT, os.X_OK)
     sh = shutil.which("dash") or shutil.which("sh")
     assert subprocess.run([sh, "-n", str(SCRIPT)]).returncode == 0
+
+
+# --- the second plugin: --plugin context-meter
+
+METER_BRANCH = "export/context-meter-1.0.0"
+METER_ENTRY = {
+    "name": "context-meter", "source": "./context-meter",
+    "version": "1.0.0", "description": "Shows how full the context is.",
+}
+
+
+def commit_meter(src, version="1.0.0", files=None, name="context-meter"):
+    base = Path(src) / METER_OWNED
+    write(base, ".claude-plugin/plugin.json", json.dumps(
+        {"name": name, "version": version, "description": "Shows how full the context is."}, indent=2) + "\n")
+    for rel, text in (files or {}).items():
+        write(base, rel, text)
+    git(src, "add", "-A")
+    git(src, "commit", "-q", "-m", "meter")
+    sha = git(src, "rev-parse", "HEAD")
+    git(src, "update-ref", "refs/remotes/origin/main", sha)
+    return sha
+
+
+@pytest.fixture
+def meter_source(source):
+    for name in ("test_isolation.py", "conftest.py"):
+        write(source, Path(METER_OWNED) / "tests" / name, (REAL_METER / "tests" / name).read_text(encoding="utf-8"))
+    commit_meter(source, files={"hooks/register.tsx": "export const register = () => {}\n", "README.md": "# meter\n"})
+    return source
+
+
+def export_meter(source, target, **kwargs):
+    kwargs.setdefault("tag", "context-meter-v1.0.0")
+    return export(source, target, plugin="context-meter", **kwargs)
+
+
+def test_context_meter_exports_on_its_own_branch_and_leaves_the_other_plugin_alone(meter_source, target):
+    before = checkout_state(target)
+    result = export_meter(meter_source, target)
+    assert result.returncode == 0, result.stderr
+    assert checkout_state(target) == before
+    names = tracked(target, METER_BRANCH)
+    assert "context-meter/hooks/register.tsx" in names
+    assert not any(n.startswith(("context-rotation/", "packages/", "unrelated")) for n in names)
+    assert marketplace(target, METER_BRANCH)["plugins"] == [METER_ENTRY]
+    readme = blob(target, "README.md", METER_BRANCH)
+    rows = [line for line in readme.splitlines() if "context-meter/" in line]
+    assert len(rows) == 1 and rows[0].startswith("| [`context-meter/`](context-meter/)")
+    assert "Shows how full the context is." in rows[0]
+    assert "context-meter-v1.0.0" in result.stdout and METER_BRANCH in result.stdout
+    assert "export/context-rotation-0.1.0" not in branches(target)
+    assert git(target, "log", "-1", "--format=%s", METER_BRANCH) == "feat(context-meter): export 1.0.0"
+
+
+def test_both_plugins_end_up_in_the_marketplace_once_each(meter_source, target):
+    assert export(meter_source, target).returncode == 0
+    release(target)
+    assert export_meter(meter_source, target).returncode == 0
+    release(target, METER_BRANCH)
+    plugins = marketplace(target, "main")["plugins"]
+    assert [p["name"] for p in plugins] == ["context-rotation", "context-meter"]
+    readme = blob(target, "README.md", "main")
+    assert len([ln for ln in readme.splitlines() if "context-rotation/" in ln]) == 1
+    assert len([ln for ln in readme.splitlines() if "context-meter/" in ln]) == 1
+    assert export_meter(meter_source, target).returncode == 0
+    assert "Nothing to export" in export_meter(meter_source, target).stdout
+
+
+def test_explicit_context_rotation_is_the_default(meter_source, target):
+    result = export(meter_source, target, plugin="context-rotation")
+    assert result.returncode == 0, result.stderr
+    assert BRANCH in branches(target)
+    assert marketplace(target)["plugins"][-1] == EXPORTED_ENTRY
+
+
+def test_unknown_plugin_is_refused(meter_source, target):
+    before = checkout_state(target)
+    result = export(meter_source, target, plugin="timekeeper", tag="timekeeper-v1.0.0")
+    assert result.returncode == 1 and "unknown plugin" in result.stderr
+    assert checkout_state(target) == before and branches(target) == ["main"]
+
+
+def test_a_tag_of_the_other_plugin_is_refused(meter_source, target):
+    before = checkout_state(target)
+    result = export_meter(meter_source, target, tag="context-rotation-v1.0.0")
+    assert result.returncode == 1 and "context-meter-v" in result.stderr
+    assert checkout_state(target) == before and branches(target) == ["main"]
+
+
+def test_a_manifest_that_names_another_plugin_is_refused(meter_source, target):
+    commit_meter(meter_source, name="context-rotation", files={"hooks/other.txt": "x\n"})
+    before = checkout_state(target)
+    result = export_meter(meter_source, target)
+    assert result.returncode == 1 and "expected 'context-meter'" in result.stderr
+    assert checkout_state(target) == before and branches(target) == ["main"]
+
+
+def test_a_leak_in_the_meter_writes_no_branch(meter_source, target):
+    commit_meter(meter_source, files={"hooks/leaky.txt": "path %s\n" % LEAK})
+    before = checkout_state(target)
+    result = export_meter(meter_source, target)
+    assert result.returncode == 1 and "leak" in result.stderr.lower() and "hooks/leaky.txt" in result.stderr
+    assert checkout_state(target) == before and branches(target) == ["main"]
+
+
+def test_the_real_meter_has_what_the_export_needs():
+    manifest = json.loads((REAL_METER / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    assert manifest["name"] == "context-meter" and manifest["description"]
+    assert (REAL_METER / "tests" / "test_isolation.py").is_file()

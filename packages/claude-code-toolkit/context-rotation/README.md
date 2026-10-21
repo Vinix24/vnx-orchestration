@@ -53,6 +53,7 @@ Settings are read from `.claude/context-rotation.json` in the project, else `~/.
 | `force_tokens` | — | Absolute token count for the force band (see `warn_tokens`). |
 | `hard_tokens` | — | Absolute token count for the hard band (see `warn_tokens`). |
 | `min_work_tokens` | `20000` | For a session continued from an injected handover, how much its context must grow past the start size before the force and hard bands apply. |
+| `show_meter` | `true` | Read by the `context-meter` plugin, which draws the context line above the prompt. `false` hides that line. The guard itself ignores it. |
 | `auto_clear` | `true` | Type `/clear` for you inside tmux. `false` leaves it to you. |
 | `handover_max_chars` | `8000` | Longest handover the check accepts. |
 | `handover_max_age_minutes` | `60` | A marker older than this is outdated, whatever happened since. |
@@ -124,6 +125,8 @@ In `~/.claude/context-rotation/`: the job files of the automatic clear (in `jobs
 ## Claude Code versions
 
 The hook payloads and pane screens the plugin relies on were measured on Claude Code 2.1.300. The live smoke of the automatic clear passed on 2.1.302. The live smoke of 1.0.0 (run 1, the automatic clear, 5 of 5 checks) passed on 2.1.303 against a copy installed from the public marketplace. `tests/live/smoke_tmux.sh` repeats that smoke in a throwaway tmux session.
+
+The line above the prompt that shows these bands lives in its own plugin, `context-meter`, next to this one in the toolkit. It reads this plugin's settings file and its per-session state, and the two share one fixture of settings cases (`tests/test_meter_parity.py`). It is separate because a plugin that carries both command hooks and a hooks module loads its module on 2.1.303 as well, and 2.1.300 to 2.1.302 were not measured: the guard stays a plugin of command hooks only.
 
 Credits: the rotation mechanism comes from the context rotation that VNX Orchestration runs for its orchestrator terminal.
 
