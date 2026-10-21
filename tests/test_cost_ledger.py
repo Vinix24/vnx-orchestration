@@ -531,11 +531,13 @@ class TestTheAggregation:
         totals = cost_ledger.aggregate_runs(ledger)
         assert [field.name for field in dataclasses.fields(totals)] == [
             "runs", "cost_usd", "api_equivalent_usd", "tokens", "tokens_unknown", "unavailable",
-            "legacy_lines", "unreadable_lines", "spool_pending", "spool_unreadable", "spool_conflicts", "torn_tail",
+            "legacy_lines", "unreadable_lines", "spool_pending", "spool_unreadable", "spool_conflicts",
+            "spool_quarantined", "torn_tail", "unlocked_read",
         ]
         assert (
-            totals.spool_pending, totals.spool_unreadable, totals.spool_conflicts, totals.torn_tail, totals.incomplete,
-        ) == (0, False, 0, False, None)
+            totals.spool_pending, totals.spool_unreadable, totals.spool_conflicts, totals.spool_quarantined,
+            totals.torn_tail, totals.unlocked_read, totals.incomplete,
+        ) == (0, False, 0, 0, False, False, None)
 
 
 # ---------------------------------------------------------------------------
@@ -702,7 +704,8 @@ class TestATornAppend:
         assert other.landed == "ledger"
         assert ledger.read_bytes() == torn + b"\n" + _line_bytes(other)
         totals = cost_ledger.aggregate_runs(ledger)
-        assert (totals.spool_pending, totals.torn_tail) == (1, False)
+        # The unterminated append put the whole record in the ledger: its spooled copy waits for nothing (OI-2244).
+        assert (totals.spool_pending, totals.torn_tail) == (1 if kind == "torn" else 0, False)
         if kind == "torn":
             assert totals.runs == {RUN_B1: other}
             assert totals.unreadable_lines == 1

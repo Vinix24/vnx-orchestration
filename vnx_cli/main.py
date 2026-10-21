@@ -29,7 +29,7 @@ def _name_drift_tables() -> tuple[dict, dict]:
         from vnx_mode import ALIASES, SUB_VERBS  # type: ignore
         if ALIASES and SUB_VERBS is not None:
             return dict(ALIASES), dict(SUB_VERBS)
-    except Exception:
+    except Exception:  # vnx-silent-except: vnx_mode unimportable falls back to the local tables below, by design
         pass
     return dict(_FALLBACK_ALIASES), dict(_FALLBACK_SUB_VERBS)
 
@@ -1609,6 +1609,13 @@ def _register_providers_subparser(subparsers: argparse.Action) -> None:
     register_providers_subparser(subparsers)
 
 
+def _register_costs_subparser(subparsers: argparse.Action) -> None:
+    """`vnx costs replay` — the cost ledger's spool replay (scripts/cost_ledger_replay.py), the same
+    script the fabric's `bin/vnx costs replay` runs. Parser lives in the command module."""
+    from vnx_cli.commands.costs import register_costs_subparser
+    register_costs_subparser(subparsers)
+
+
 def _dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     if args.command == "init":
         from vnx_cli.commands.init_cmd import vnx_init
@@ -1746,6 +1753,7 @@ def main() -> None:
     _register_review_subparser(subparsers)
     _register_worktree_release_subparser(subparsers)
     _register_providers_subparser(subparsers)
+    _register_costs_subparser(subparsers)
 
     args = parser.parse_args()
     # A command module that binds its own handler (set_defaults(func=...), as pool.py does

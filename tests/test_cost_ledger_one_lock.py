@@ -407,7 +407,7 @@ class TestAcceptance:
         assert [line for line in _lines(ledger) if line.get("run_id") == RUN_A1] == []
         totals = cost_ledger.aggregate_runs(ledger)
         assert (totals.runs, totals.spool_pending) == ({}, 1)
-        assert totals.incomplete == "onvolledig: 1 runs wachten op replay"
+        assert totals.incomplete == "onvolledig: 1 run wacht op replay"
 
     def test_2_an_aggregation_and_a_writer_to_the_spool_see_one_moment(self, ledger, signals, spawn):
         """Blocker 4 of #2141: the writer waits until the reader has the ledger and the spool count."""
@@ -421,7 +421,7 @@ class TestAcceptance:
         assert w["waited"] >= BLOCKED_SECONDS, "the writer waited for the shared lock the reader held"
         after = cost_ledger.aggregate_runs(ledger)
         assert (after.cost_usd, sorted(after.runs), after.spool_pending) == (1.0, [RUN_B1], 1)
-        assert after.incomplete == "onvolledig: 1 runs wachten op replay"
+        assert after.incomplete == "onvolledig: 1 run wacht op replay"
 
     @pytest.mark.parametrize("what_fails", ["close", "fsync"])
     def test_3_a_failure_after_a_whole_write_lands_in_both_and_counts_once(self, ledger, monkeypatch, what_fails):
@@ -439,7 +439,8 @@ class TestAcceptance:
         totals = cost_ledger.aggregate_runs(ledger)
         assert totals.runs == {RUN_A1: record}
         assert totals.cost_usd == pytest.approx(0.5)
-        assert (totals.spool_pending, totals.spool_conflicts) == (1, 0), "one record in both places is no conflict"
+        assert (totals.spool_pending, totals.spool_conflicts) == (0, 0), "a record in both places waits for nothing"
+        assert totals.incomplete is None, "OI-2244: a spooled record that landed is no backlog"
 
     @pytest.mark.parametrize("ledger_fails, why, known", [
         ("append", "the ledger append failed", "the outcome is unknown, the line may be in the ledger"),
@@ -506,7 +507,7 @@ class TestAcceptance:
         assert sorted(totals.runs) == [RUN_B1]
         assert totals.spool_pending == 1
         assert (totals.legacy_lines, totals.unreadable_lines, totals.torn_tail) == (0, 1, False)
-        assert totals.incomplete == "onvolledig: 1 runs wachten op replay"
+        assert totals.incomplete == "onvolledig: 1 run wacht op replay"
 
     def test_7_a_refire_while_attempt_1_waits_in_the_spool_is_attempt_2(self, ledger, monkeypatch):
         def make_run(run_id):
@@ -650,7 +651,7 @@ class TestASecondExecutionUnderOneRunId:
         assert older["run_id"] == RUN_A1 and older["record_id"] != spooled["record_id"]
 
         totals = cost_ledger.aggregate_runs(ledger)
-        assert totals.incomplete == "onvolledig: 1 runs in de spool botsen met een andere uitvoering in het grootboek"
+        assert totals.incomplete == "onvolledig: 1 run in de spool botst met een andere uitvoering in het grootboek"
         assert (totals.spool_conflicts, totals.spool_pending) == (1, 1)
         assert [record["record_id"] for record in totals.runs.values()] == [older["record_id"]]
         assert totals.cost_usd == pytest.approx(2.0), "the spooled 0.5 of the other execution is in no sum"
@@ -676,7 +677,7 @@ class TestASecondExecutionUnderOneRunId:
 
         totals = cost_ledger.aggregate_runs(ledger)
         assert (totals.spool_conflicts, totals.spool_pending) == (0, 1)
-        assert totals.incomplete == "onvolledig: 1 runs wachten op replay"
+        assert totals.incomplete == "onvolledig: 1 run wacht op replay"
         with caplog.at_level(logging.WARNING, logger=cost_ledger.logger.name):
             refire = cost_ledger.record_next_attempt(PROJECT, "dispatch", _REF, _make_run, ledger_path=ledger)
         assert refire["run_id"] == f"{PROJECT}:dispatch:{_REF}:2"
