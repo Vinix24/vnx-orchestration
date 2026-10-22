@@ -16,6 +16,10 @@ through gate_runner, codex_gate):
    it never makes a run ``diff_truncated`` or ``partial_review``.
 3. A cut keeps its meaning: an oversized data-only diff is still booked
    ``partial_review``.
+4. A lock file is code, not data (OI-2290, codex_gate on 83f13d74): it
+   decides which code gets installed, so a ``package-lock.json`` section that
+   moves a download URL reaches the reviewer whole, at any size, and nothing
+   is booked under ``collapsed_sections``.
 
 Real code throughout; only the provider call (or the codex process), the diff
 fetch and the gh identity lookups are stubbed.
@@ -112,6 +116,36 @@ def _sha12(text: str) -> str:
 
 CSV_ENTRY = {"path": CSV_PATH, "chars": len(CSV), "sha256_prefix": _sha12(CSV)}
 
+# The six lock file names the collapse rule used to take for data (OI-2290).
+LOCK_FILE_NAMES = ("package-lock.json", "pnpm-lock.yaml", "yarn.lock", "uv.lock", "poetry.lock", "Cargo.lock")
+OLD_URL = "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"
+NEW_URL = "https://mirror.example.invalid/left-pad/-/left-pad-1.3.0.tgz"
+
+
+def _lock_section(path: str) -> str:
+    """A lock file section that moves one package's download URL, padded with
+    unchanged entries past the collapse threshold."""
+    context = "".join(
+        f'       "resolved": "https://registry.npmjs.org/pkg-{i}/-/pkg-{i}-1.0.{i}.tgz",\n'
+        for i in range(40)
+    )
+    return (
+        f"diff --git a/{path} b/{path}\n"
+        "index 1111111..2222222 100644\n"
+        f"--- a/{path}\n"
+        f"+++ b/{path}\n"
+        "@@ -1,41 +1,41 @@\n"
+        f"{context}"
+        f'-      "resolved": "{OLD_URL}",\n'
+        f'+      "resolved": "{NEW_URL}",\n'
+    )
+
+
+LOCK_PATH = "web/package-lock.json"
+LOCK_DIFF = CODE_SECTION + _lock_section(LOCK_PATH)
+assert len(_lock_section(LOCK_PATH)) > gate_prompt.COLLAPSE_MIN_SECTION_CHARS
+assert len(LOCK_DIFF) < WIDE_CAP
+
 
 def _block(prompt: str) -> str:
     """The text between the block markers: what the reviewer got of the diff."""
@@ -138,6 +172,14 @@ def _assert_full_coverage(depth: dict, block: str, collapsed: list) -> None:
     assert depth["collapsed_sections"] == collapsed
 
 
+def _assert_lock_file_reviewed_whole(prompt: str, depth: dict) -> None:
+    block = _block(prompt)
+    assert NEW_URL in block and OLD_URL in block, "the reviewer must see the URL the lock file moves"
+    assert block == LOCK_DIFF, "a lock file is code: its section goes into the block whole"
+    assert gate_prompt._COLLAPSE_NOTICE_HEAD not in prompt
+    _assert_full_coverage(depth, block, [])
+
+
 # --- The collapse and the measurement themselves
 
 
@@ -155,6 +197,21 @@ def test_the_block_of_a_data_only_diff_is_the_whole_diff():
         verdict_contract="CONTRACT", max_chars=0,
     )
     _assert_whole_data_only_block(prompt)
+
+
+@pytest.mark.parametrize("name", LOCK_FILE_NAMES)
+def test_a_lock_file_section_stays_whole_beside_code(name):
+    """Beside a code section, so the data-only rule cannot be what keeps it."""
+    section = _lock_section(name)
+    diff = CODE_SECTION + section
+    assert gate_prompt.collapse_data_sections(diff) == (diff, [])
+    prompt = gate_prompt.build_review_prompt(
+        gate_name="codex_gate", pr="2170", diff_text=diff,
+        verdict_contract="CONTRACT", max_chars=0,
+    )
+    assert _block(prompt) == diff, f"{name} decides which code gets installed and must be reviewed whole"
+    assert gate_prompt._COLLAPSE_NOTICE_HEAD not in prompt
+    assert gate_depth.diff_coverage(diff, 0)["collapsed_sections"] == []
 
 
 def test_diff_coverage_measures_the_block_and_names_what_was_collapsed():
@@ -279,6 +336,17 @@ def test_standalone_oversized_data_only_diff_is_still_a_partial_review(
     assert rc != 0
 
 
+def test_standalone_pass_on_a_lock_file_diff_reviewed_the_lock_file(
+    standalone_gate, tmp_path, monkeypatch,
+):
+    module, gate = standalone_gate
+    _set_cap(monkeypatch, gate, WIDE_CAP)
+    rc, record, prompt = _run_standalone(module, gate, tmp_path, monkeypatch, diff=LOCK_DIFF, pr="2173")
+
+    _assert_lock_file_reviewed_whole(prompt, record["execution_depth"])
+    assert (record["status"], rc) == ("pass", 0)
+
+
 # --- The harness lane through gate_runner
 
 
@@ -357,6 +425,15 @@ def test_harness_lane_oversized_data_only_diff_is_still_a_partial_review(runner_
     assert result["status"] == saved["status"] == "partial_review"
 
 
+def test_harness_lane_pass_on_a_lock_file_diff_reviewed_the_lock_file(runner_env, monkeypatch):
+    _set_cap(monkeypatch, "glm_gate", WIDE_CAP)
+    result, saved, prompt = _run_harness_lane(runner_env, monkeypatch, diff=LOCK_DIFF, pr=2173)
+
+    _assert_lock_file_reviewed_whole(prompt, saved["execution_depth"])
+    assert result["status"] == saved["status"] == "completed"
+    assert is_pass(saved)[0] is True
+
+
 # --- codex_gate through gate_runner (agentic, uncapped)
 
 
@@ -405,4 +482,12 @@ def test_codex_pass_on_a_mixed_diff_records_the_block_and_the_collapsed_csv(runn
 
     _assert_mixed_block(prompt)
     _assert_full_coverage(saved["execution_depth"], _block(prompt), [CSV_ENTRY])
+    assert result["status"] == saved["status"] == "completed"
+
+
+def test_codex_pass_on_a_lock_file_diff_reviewed_the_lock_file(runner_env, monkeypatch):
+    result, saved, prompt = _run_codex(runner_env, monkeypatch, diff=LOCK_DIFF, pr=2173)
+
+    _assert_lock_file_reviewed_whole(prompt, saved["execution_depth"])
+    assert saved["execution_depth"]["diff_limit"] == 0
     assert result["status"] == saved["status"] == "completed"

@@ -577,11 +577,7 @@ def test_large_non_data_section_stays_whole(gate_prompt, path):
 
 @pytest.mark.parametrize(
     "path",
-    [
-        "data/rows.tsv", "state/events.ndjson", "fixtures/rows.jsonl", "docs/UPPER.CSV",
-        "web/package-lock.json", "web/pnpm-lock.yaml", "yarn.lock", "uv.lock",
-        "poetry.lock", "crates/app/Cargo.lock",
-    ],
+    ["data/rows.tsv", "state/events.ndjson", "fixtures/rows.jsonl", "docs/UPPER.CSV"],
 )
 def test_every_data_kind_is_collapsed(gate_prompt, path):
     section = _data_section(path, 120)

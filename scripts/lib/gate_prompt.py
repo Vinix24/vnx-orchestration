@@ -59,10 +59,12 @@ untouched; the task gives the reviewer the work it measures.
 PR #2143's prompt was 352.839 chars, 306K of them one CSV of measuring
 commands with their full output; codex answered without a single action and
 the gate refused the run as degenerate (OI-2286). ``collapse_data_sections``
-takes a large CSV, TSV, NDJSON, JSONL or lock file section out of the block,
-and the gate names what it took out above the block. The scan and the
-release check keep reading the full diff, so an injection in a collapsed CSV
-is still found. A diff of data files only stays whole, so the block is never
+takes a large CSV, TSV, NDJSON or JSONL section out of the block, and the
+gate names what it took out above the block. A lock file is code, not data:
+it decides which code gets installed, so it always stays whole (OI-2290: on
+83f13d74 codex_gate saw a moved download URL in a package-lock.json vanish
+from the prompt while the pass stood). The scan and the release check keep
+reading the full diff, so an injection in a collapsed CSV is still found. A diff of data files only stays whole, so the block is never
 empty, and the coverage a gate records is measured on the block.
 
 **The reviewer reads only this prompt.** Codex spent its first tool calls of
@@ -463,11 +465,11 @@ def is_release_diff(diff_text: Optional[str]) -> bool:
 
 # A data file's diff is rows, not behaviour. This is the whole list: code,
 # .json, .yaml, .toml and .md are never collapsed, because a config or a doc
-# change is behaviour and must be reviewed.
+# change is behaviour and must be reviewed. Nor is a lock file
+# (package-lock.json, yarn.lock, uv.lock, Cargo.lock and the rest), at any
+# size: it decides which code gets installed, so a moved download URL in it
+# is a code change (OI-2290).
 _DATA_FILE_SUFFIXES = (".csv", ".tsv", ".ndjson", ".jsonl")
-_LOCK_FILE_NAMES = frozenset({
-    "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "uv.lock", "poetry.lock", "Cargo.lock",
-})
 
 # A data file section of this size or smaller stays whole: it costs little to
 # read, and leaving it out would save nothing worth a notice.
@@ -531,7 +533,7 @@ def _diff_sections(diff_text: str) -> List[str]:
 def _is_data_path(path: str) -> bool:
     if not _NOTICE_SAFE_PATH_RE.fullmatch(path):
         return False
-    return path.lower().endswith(_DATA_FILE_SUFFIXES) or path.rsplit("/", 1)[-1] in _LOCK_FILE_NAMES
+    return path.lower().endswith(_DATA_FILE_SUFFIXES)
 
 
 def _collapsible_path(section: str) -> Optional[str]:
@@ -568,8 +570,8 @@ def collapse_data_sections(diff_text: Optional[str]) -> Tuple[str, List[Collapse
     """The diff without its large data file sections, plus what was taken out.
 
     A section is collapsed when both paths of its ``diff --git`` header are a
-    data file (a suffix in ``_DATA_FILE_SUFFIXES``, case-insensitive, or a
-    name in ``_LOCK_FILE_NAMES``) and the section is longer than
+    data file (a suffix in ``_DATA_FILE_SUFFIXES``, case-insensitive; a lock
+    file never is one) and the section is longer than
     ``COLLAPSE_MIN_SECTION_CHARS``. A section runs from its header line up to
     the next header line, so the hash covers exactly the bytes left out. Every
     other section, and any text before the first header, is kept byte for byte.
