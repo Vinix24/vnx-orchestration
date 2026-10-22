@@ -22,6 +22,23 @@ _FALLBACK_SUB_VERBS = {
     "plan-gate": "horizon",
 }
 
+# Help text for `objective link-pr --delivery` (horizon-skill-leveringsregel r5).
+# Hoisted out of _register_objective_verbs so that function stops growing; the
+# ratchet (check_function_size_ratchet.py) refuses any growth of an
+# over-70-line function, and this string was pushing _register_objective_verbs
+# past its measured base.
+_LINK_PR_DELIVERY_HELP = (
+    "delivery_kind for the linked PR(s): 'partial' ships a slice of the "
+    "plan, 'complete' ships the whole thing (default: partial). A track "
+    "closes only when EVERY linked PR is 'complete' (_delivery_hold in "
+    "track_reconciler.py): one explicit 'partial' holds it, so when the "
+    "last slice merges, re-link every PR of the track with --delivery "
+    "complete. Fail-closed ONLY once migration 0032 (track_pr_delivery) is "
+    "applied to this DB; if it is missing, pr_ref is still linked but the "
+    "delivery marking is NOT recorded (a loud stderr error and --json "
+    "'error' field say so; apply 0032 and re-run to record it)"
+)
+
 
 def _name_drift_tables() -> tuple[dict, dict]:
     """Return (aliases, sub_verbs), preferring vnx_mode (SSOT) when importable."""
@@ -774,15 +791,7 @@ def _register_objective_verbs(subs: argparse.Action) -> None:
     )
     p_link_pr.add_argument(
         "--delivery", choices=("partial", "complete"), default="partial",
-        help="delivery_kind for the linked PR(s): 'partial' ships a slice of the "
-             "plan, 'complete' ships the whole thing (default: partial). A track "
-             "closes only when EVERY linked PR is 'complete' (_delivery_hold in "
-             "track_reconciler.py): one explicit 'partial' holds it, so when the "
-             "last slice merges, re-link every PR of the track with --delivery "
-             "complete. Fail-closed ONLY once migration 0032 (track_pr_delivery) is "
-             "applied to this DB; if it is missing, pr_ref is still linked but the "
-             "delivery marking is NOT recorded (a loud stderr error and --json "
-             "'error' field say so; apply 0032 and re-run to record it)",
+        help=_LINK_PR_DELIVERY_HELP,
     )
 
     p_unlink_pr = subs.add_parser(

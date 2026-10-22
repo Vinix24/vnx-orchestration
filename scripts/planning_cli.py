@@ -85,6 +85,22 @@ _HORIZON_LABEL = {"now": "NOW", "next": "NEXT", "later": "LATER", None: "UNSCHED
 _VALID_LANE_HINTS = tracks_lib.VALID_LANE_HINTS
 _LANE_HINT_DEFAULT = "unset"
 
+# Help text for `objective link-pr --delivery` (horizon-skill-leveringsregel r5).
+# Hoisted out of _build_parser so that function stops growing; the ratchet
+# (check_function_size_ratchet.py) refuses any growth of an over-70-line
+# function, and this string was pushing _build_parser past its measured base.
+_LINK_PR_DELIVERY_HELP = (
+    "delivery_kind for the linked PR(s): 'partial' ships a slice of the "
+    "plan, 'complete' ships the whole thing (default: partial). A track "
+    "closes only when EVERY linked PR is 'complete' (_delivery_hold in "
+    "track_reconciler.py): one explicit 'partial' holds it, so when the "
+    "last slice merges, re-link every PR of the track with --delivery "
+    "complete. Fail-closed ONLY once migration 0032 (track_pr_delivery) is "
+    "applied to this DB; if it is missing, pr_ref is still linked but the "
+    "delivery marking is NOT recorded (a loud stderr error and --json "
+    "'error' field say so; apply 0032 and re-run to record it)"
+)
+
 
 def _resolve_state_dir(explicit: str) -> Path:
     if explicit:
@@ -5578,15 +5594,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_link_pr.add_argument(
         "--delivery", choices=("partial", "complete"), default="partial",
-        help="delivery_kind for the linked PR(s): 'partial' ships a slice of the "
-             "plan, 'complete' ships the whole thing (default: partial). A track "
-             "closes only when EVERY linked PR is 'complete' (_delivery_hold in "
-             "track_reconciler.py): one explicit 'partial' holds it, so when the "
-             "last slice merges, re-link every PR of the track with --delivery "
-             "complete. Fail-closed ONLY once migration 0032 (track_pr_delivery) is "
-             "applied to this DB; if it is missing, pr_ref is still linked but the "
-             "delivery marking is NOT recorded (a loud stderr error and --json "
-             "'error' field say so; apply 0032 and re-run to record it)",
+        help=_LINK_PR_DELIVERY_HELP,
     )
     p_link_pr.set_defaults(func=cmd_objective_link_pr)
 
