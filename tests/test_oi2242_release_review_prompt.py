@@ -189,7 +189,7 @@ def test_release_diff_longer_than_the_cap_still_gets_the_task() -> None:
     """Detection reads the whole diff, not the truncated rendering."""
     prompt = gate_prompt.build_review_prompt(
         gate_name="kimi_gate", pr="2151", diff_text=RELEASE_DIFF,
-        verdict_contract=gate_lane_contract.VERDICT_CONTRACT, max_chars=40,
+        verdict_contract=gate_lane_contract.VERDICT_CONTRACT, max_chars=40, agentic=False,
     )
     assert gate_prompt.TRUNCATION_NOTICE in prompt
     assert TASK_HEADER in prompt
@@ -213,7 +213,7 @@ def test_fragment_only_pr_gets_no_release_task(gate: str) -> None:
 def test_non_release_prompt_is_byte_identical_to_the_sandwich_without_a_task() -> None:
     """A normal PR's prompt does not change shape: no blank line, no stray text."""
     kwargs = dict(gate_name="glm_gate", pr="7", verdict_contract=gate_lane_contract.VERDICT_CONTRACT,
-                  max_chars=50000)
+                  max_chars=50000, agentic=False)
     normal = gate_prompt.build_review_prompt(diff_text=VERSION_PLUS_SCRIPT_DIFF, **kwargs)
     scan = gate_prompt._scan_section(gate_prompt.scan_diff_for_instructions(VERSION_PLUS_SCRIPT_DIFF))
     lead = gate_prompt.default_review_instruction("glm_gate", "7")
@@ -229,7 +229,7 @@ def test_header_line_inside_a_hunk_is_not_a_changed_path() -> None:
 def test_non_release_path_beyond_the_cap_still_counts() -> None:
     prompt = gate_prompt.build_review_prompt(
         gate_name="kimi_gate", pr="2151", diff_text=RELEASE_DIFF + _file_diff("scripts/x.py", "+y = 1\n"),
-        verdict_contract=gate_lane_contract.VERDICT_CONTRACT, max_chars=len(RELEASE_DIFF),
+        verdict_contract=gate_lane_contract.VERDICT_CONTRACT, max_chars=len(RELEASE_DIFF), agentic=False,
     )
     assert TASK_HEADER not in prompt
 
@@ -253,7 +253,7 @@ def test_quoted_header_is_no_release() -> None:
 def test_empty_diff_gets_no_release_task() -> None:
     prompt = gate_prompt.build_review_prompt(
         gate_name="glm_gate", pr="1", diff_text="", verdict_contract=gate_lane_contract.VERDICT_CONTRACT,
-        max_chars=50000,
+        max_chars=50000, agentic=False,
     )
     assert TASK_HEADER not in prompt
 

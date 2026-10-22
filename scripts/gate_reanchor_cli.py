@@ -124,7 +124,7 @@ def current_contract_hash(gate: str, pr_number: int) -> str:
     """
     if gate not in DIFF_DERIVED_HASH_GATES:
         raise ValueError(f"{gate} has no diff-derived contract hash")
-    from gate_lane_contract import VERDICT_CONTRACT, max_diff_chars
+    from gate_lane_contract import VERDICT_CONTRACT, max_diff_chars, reviews_with_tools
     from gate_prompt import build_review_prompt
 
     diff = _gh(["pr", "diff", str(pr_number)])
@@ -134,6 +134,7 @@ def current_contract_hash(gate: str, pr_number: int) -> str:
         diff_text=diff,
         verdict_contract=VERDICT_CONTRACT,
         max_chars=max_diff_chars(gate),
+        agentic=reviews_with_tools(gate),
     )
     return _compute_contract_hash({"prompt": prompt}, gate)
 

@@ -60,6 +60,12 @@ a review searching ``/Users`` for an AGENTS.md the gate worktree never has
 (it is gitignored), and every later turn resent that output (OI-2287). The
 rule after the block says every instruction is in this prompt.
 
+**A seat with tools looks at its tree (R12).** Without that search a small
+diff gave a codex run nothing to do, and the degenerate guard refused PR #2173
+four times. A caller whose seat reviews with tools passes ``agentic=True``,
+and the prompt then says, right after the no-search rule, to check one claim
+of the diff against the working directory before the verdict.
+
 One project import, ``changelog_fragments`` (``scripts/release``), for the
 release-PR rule: that module owns every changelog rule and is stdlib-only
 itself, and a copy of the rule here would be a second one that drifts.
@@ -472,6 +478,21 @@ _NO_INSTRUCTION_SEARCH_RULE = (
     "anything outside your working directory.\n"
 )
 
+# R12: the rule above took away the AGENTS.md search, and on a small diff that
+# search had been the only action a codex run took. PR #2173 (head 8d7a4c43, a
+# deletion of 8 files) was then refused as gate_execution_degenerate four times
+# in a row: 0 shell calls, 0 file reads, "Review limited to the supplied diff".
+# The rule above says where not to look; this one says to look. Stated right
+# after it, and only for a seat that reviews with tools (``agentic``): a
+# single-shot lane has no working directory to look at.
+_WORKING_DIRECTORY_CHECK_RULE = (
+    "Your working directory is a checkout of this PR's head. Before you give a "
+    "verdict, check at least one claim of the diff against the files there: read "
+    "a file the diff changes, or search the tree for a name the diff removes, "
+    "renames or adds. A verdict reached without looking at the working directory "
+    "is refused as degenerate and counts as no review.\n"
+)
+
 
 def default_review_instruction(gate_name: str, pr: str) -> str:
     """The instruction glm_gate and kimi_gate share.
@@ -516,13 +537,15 @@ def build_review_prompt(
     diff_text: str,
     verdict_contract: str,
     max_chars: int,
+    agentic: bool,
     instruction: Optional[str] = None,
 ) -> str:
     """Assemble a review prompt with the diff as delimited, untrusted data.
 
     Order: instruction, verdict contract, the OI-1662 fence notice (only when
     warranted), the block, then the untrusted-data rule, the OI-2287 no-search
-    rule, the content-claim rule, the pre-scan result, the OI-2242 release
+    rule, the R12 working-directory rule (only when ``agentic``), the
+    content-claim rule, the pre-scan result, the OI-2242 release
     task (only for a release PR), and the instruction and contract RESTATED.
     The restatement is the point — whatever the diff ends with, the gate's own
     instruction is what the model reads last. The release task sits after the
@@ -542,6 +565,11 @@ def build_review_prompt(
     ``instruction`` defaults to ``default_review_instruction``; gate_runner's
     reviewer paths pass their own, which carries the branch, the risk class
     and the cite-new-lines grounding rule those gates are held to.
+
+    ``agentic`` is the caller's statement of its lane, with no default: True
+    for a seat that reviews with tools in a checkout of the PR head (codex_gate,
+    the harness-lane gates of ``gate_lane_contract.reviews_with_tools``), False
+    for a single-shot lane. This builder never works it out from the gate name.
     """
     lead = instruction if instruction is not None else default_review_instruction(gate_name, pr)
     block, fence_replacements = _wrap_untrusted_diff_with_fence_count(
@@ -550,6 +578,7 @@ def build_review_prompt(
     notice = f"{_FENCE_NEUTRALIZED_NOTICE}\n" if fence_replacements else ""
     scan_findings = scan_diff_for_instructions(diff_text)
     release_task = f"{RELEASE_REVIEW_TASK}\n" if is_release_diff(diff_text) else ""
+    look_rule = f"{_WORKING_DIRECTORY_CHECK_RULE}\n" if agentic else ""
 
     return (
         f"{lead}\n\n"
@@ -558,6 +587,7 @@ def build_review_prompt(
         f"{block}\n\n"
         f"{_UNTRUSTED_DATA_RULE}\n"
         f"{_NO_INSTRUCTION_SEARCH_RULE}\n"
+        f"{look_rule}"
         f"{_CONTENT_CLAIM_RULE}\n"
         f"{_scan_section(scan_findings)}\n"
         f"{release_task}"

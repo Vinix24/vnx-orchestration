@@ -45,6 +45,25 @@ MODEL_DEFAULTS: Dict[str, tuple] = {
     "deepseek_gate": ("VNX_DEEPSEEK_GATE_MODEL", "deepseek-flash"),
 }
 
+# R12: the review gates measured as one shot. glm_gate.py and kimi_gate.py
+# book their depth with gate_depth.single_shot_depth: the diff in the prompt is
+# what the run is held to, and there is no working directory it is asked to
+# check. Every other gate on gate_runner's harness lane (deepseek_gate today)
+# reviews with tools in an isolated checkout of the PR head (OI-1887).
+SINGLE_SHOT_GATES = frozenset({"glm_gate", "kimi_gate"})
+
+
+def reviews_with_tools(gate: str) -> bool:
+    """True when the harness-lane gate *gate* reviews with tools in a checkout
+    of the PR head, so its prompt carries the working-directory rule
+    (``gate_prompt.build_review_prompt(agentic=...)``, R12). False for the
+    gates in :data:`SINGLE_SHOT_GATES`. The standalone glm_gate/kimi_gate
+    scripts, gate_runner's harness lane and the re-anchor hash all read this,
+    so the same gate gets the same prompt on every path.
+    """
+    return gate not in SINGLE_SHOT_GATES
+
+
 # The BASE lane deadline of a harness-lane review gate, in seconds.
 # headless_adapter.gate_timeout() has no entry for these gates and would fall
 # back to 600, cutting a run short that the standalone gate would have let

@@ -131,6 +131,7 @@ from gate_lane_contract import (  # C6 step 3: one source, three readers
     harness_dispatcher_timeouts,
     lane_deadline_detail,
     max_diff_chars,
+    reviews_with_tools,
 )
 from gate_prompt import (  # OI-1442: the diff is data, not instruction
     build_review_prompt,
@@ -221,6 +222,7 @@ def _build_prompt(diff_text: str, pr: str, max_chars: int) -> str:
         diff_text=diff_text,
         verdict_contract=_VERDICT_CONTRACT,
         max_chars=max_chars,
+        agentic=reviews_with_tools("kimi_gate"),
     )
 
 
