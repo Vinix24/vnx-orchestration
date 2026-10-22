@@ -1622,6 +1622,7 @@ class GateRequestHandlerMixin:
         dispatch_id: str = "",
         head_sha: Optional[str] = None,
         override_b3: str = "",
+        force_rerun: str = "",
     ) -> Dict[str, Any]:
         """Request every seat of the review stack for ``pr_number``, each from its own reviewer.
 
@@ -1650,6 +1651,11 @@ class GateRequestHandlerMixin:
         obligation runner, ``vnx gate``, a takeover), so no entry runs past it.
         ``override_b3`` is the reason of an ``--override-b3``: it wins over the
         B3 cap for the codex seat and travels on that seat's request.
+
+        ``force_rerun`` (R10) is the reason of an operator force-rerun from the
+        obligation runner. It is logged once and travels as ``force_rerun`` on
+        every request of the round, into the result record; it lifts no
+        refusal of the round ledger.
         """
         from review_seats import resolve_review_seats
 
@@ -1657,6 +1663,7 @@ class GateRequestHandlerMixin:
         seats = resolve_review_seats(explicit_stack=review_stack, changed_files=changed_files)
         seat_record = seats.to_record()
         requested: List[Dict[str, Any]] = []
+        operator_fields = self._force_rerun_fields(force_rerun, pr_number=pr_number, head_sha=head_sha)
 
         # Resolved ONCE per request_reviews() call (not per gate in the
         # stack): every seat in this stack takes over against the SAME
@@ -1668,6 +1675,7 @@ class GateRequestHandlerMixin:
 
         for gate in seats.stack:
             seat_fields = {"seat": gate, "review_seats": seat_record} if gate in seats.seats else {}
+            seat_fields.update(operator_fields)
             payload = self._round_refusal(
                 rounds, head, pr_number=pr_number, branch=branch, seat_fields=seat_fields,
                 override_b3=override_b3,
@@ -1687,6 +1695,21 @@ class GateRequestHandlerMixin:
             "requested": requested,
             "review_seats": seat_record,
         }
+
+    @staticmethod
+    def _force_rerun_fields(force_rerun: str, *, pr_number: int, head_sha: Optional[str]) -> Dict[str, Any]:
+        """``{"force_rerun": record}`` for every request of a forced round (R10), ``{}`` without a reason."""
+        import gate_run_guard
+
+        reason = (force_rerun or "").strip()
+        if not reason:
+            return {}
+        logger.warning(
+            "gate_request_handler: %s for pr=%s -- reason: %s", gate_run_guard.FORCE_RERUN_USAGE, pr_number, reason,
+        )
+        return {"force_rerun": gate_run_guard.force_rerun_record(
+            reason, head_sha=head_sha or "", set_by="gate_obligation_runner --force-rerun",
+        )}
 
     def _round_refusal(
         self, rounds: _PrRounds, head: _PrHead, *, pr_number: int, branch: str,

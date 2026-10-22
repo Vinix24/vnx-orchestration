@@ -1397,7 +1397,9 @@ def _build_open_outcomes(state_dir: Path, project_id: str) -> Dict[str, Any]:
     Read from the same store as the receipts (central when enabled). Replaces
     the byte cursor of ``receipt_query.py pull``: nothing is consumed, every
     T0 sees the same list, and a dispatch leaves it through a decision in
-    ``t0_decision_log.jsonl`` (``receipt_query.py decide``).
+    ``t0_decision_log.jsonl`` (``receipt_query.py decide``). A review-gate
+    obligation parked at the retry cap (R10, kind ``gate_retry_cap``) is read
+    from this project's own state dir, where the obligation runner writes it.
     """
     _central = _central_state_dir_for(state_dir)
     try:
@@ -1405,6 +1407,7 @@ def _build_open_outcomes(state_dir: Path, project_id: str) -> Dict[str, Any]:
             _central if _central is not None else state_dir,
             project_id=project_id,
             limit=_OPEN_OUTCOMES_INDEX_LIMIT,
+            obligations_dir=state_dir / "review_gates" / "obligations",
         )
     except Exception as exc:  # vnx-silent-except: a bad section must not break the build; it says why
         log.warning("open_outcomes unavailable: %s", exc)
