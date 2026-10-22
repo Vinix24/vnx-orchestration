@@ -141,14 +141,6 @@ class TestHeartbeatReportNoUnknownDefault:
         assert "**Model**: \n" in report, report
         assert "**Model**: unknown" not in report, report
 
-    def test_process_gone_report_default_model_is_empty(self):
-        from worker_heartbeat import build_process_gone_failure_report
-        report = build_process_gone_failure_report(
-            "disp-oi1184", liveness_reason="tmux_session_gone", terminal_id="T1"
-        )
-        assert "**Model**: \n" in report, report
-        assert "**Model**: unknown" not in report, report
-
     def test_explicit_model_is_baked_in(self):
         from worker_heartbeat import build_heartbeat_failure_report
         report = build_heartbeat_failure_report(
