@@ -826,6 +826,23 @@ def stamp_request_identity(
     return result_payload
 
 
+def stamp_codex_launch(record: Dict[str, Any], request_payload: Dict[str, Any]) -> None:
+    """Copy the model and reasoning effort codex was launched with onto a record (OI-2288).
+
+    ``gate_runner._build_gate_cmd`` puts both on the request under
+    ``codex_launch`` when it builds the codex command. The result record of a
+    finished run (``gate_artifacts``) and the record of a failed one
+    (:func:`record_failure`: a timeout, a stall, a degenerate run) both read
+    them here, so an effort comparison counts the runs that failed too. A
+    request without ``codex_launch``, or with one that is not a dict, never
+    launched codex with a known setting and stamps nothing.
+    """
+    codex_launch = request_payload.get("codex_launch")
+    if isinstance(codex_launch, dict):
+        record["model"] = str(codex_launch.get("model") or "")
+        record["reasoning_effort"] = str(codex_launch.get("reasoning_effort") or "")
+
+
 class ResultOverwriteRefused(ValueError):
     """A write would replace a terminal, evidenced gate result with a less
     decided one (OI-1469/OI-1470)."""
@@ -2227,6 +2244,9 @@ def _failure_payload(
         and provider is not None and provider[0] == GATE_PROVIDER_HARNESS_LANE
     ):
         failure_payload["timeout_seconds"] = request_payload["timeout_seconds"]
+    # OI-2288: the model and effort a codex run was launched with, exactly as
+    # the success record carries them.
+    stamp_codex_launch(failure_payload, request_payload)
     if extra:
         # Identity and verdict are the record's own. So is the evidence trio:
         # `report_path`, `contract_hash` and `required_reruns` are what

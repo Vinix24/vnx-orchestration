@@ -313,11 +313,10 @@ def _harness_lane_prompt_diff_chars(request_payload: Dict[str, Any], prompt: str
     """The length of the diff that entered a harness-lane prompt, after the cap (OI-2066).
 
     ``diff_coverage`` is what ``_build_harness_lane_prompt`` recorded for this
-    run (OI-1851): the size of the diff block the prompt carries and the cap
-    it was cut at, read by ``gate_depth.prompt_diff_chars`` — the same reading
-    the standalone gates use. A caller-supplied prompt has no coverage
-    record; then the whole prompt is what the lane reads, and its length
-    counts.
+    run (OI-1851): the diff's full size and the cap it was cut at, read by
+    ``gate_depth.prompt_diff_chars`` — the same reading the standalone gates
+    use. A caller-supplied prompt has no coverage record; then the whole
+    prompt is what the lane reads, and its length counts.
     """
     coverage = request_payload.get("diff_coverage")
     if not isinstance(coverage, dict):
@@ -1284,7 +1283,6 @@ class GateRunner:
         pr_number = request_payload.get("pr_number")
         diff_content = GateRunner._fetch_gh_pr_diff(pr_number)
         # OI-1851: uncapped, but the record still carries the real size.
-        # OI-2286: of the block the prompt carries, after the data file collapse.
         request_payload["diff_coverage"] = gate_depth.diff_coverage(diff_content, 0)
         l3 = build_review_prompt(
             gate_name="reviewer",
@@ -1324,7 +1322,6 @@ class GateRunner:
         pr_number = request_payload.get("pr_number")
         diff_content = GateRunner._fetch_gh_pr_diff(pr_number)
         # OI-1851: uncapped, but the record still carries the real size.
-        # OI-2286: of the block the prompt carries, after the data file collapse.
         request_payload["diff_coverage"] = gate_depth.diff_coverage(diff_content, 0)
         l3 = build_review_prompt(
             gate_name="reviewer",
@@ -1363,8 +1360,7 @@ class GateRunner:
         pr_number = request_payload.get("pr_number")
         diff_content = GateRunner._fetch_gh_pr_diff(pr_number)
         diff_cap = _harness_lane_max_diff_chars(gate)
-        # OI-1851: the one place that knows what the lane was handed. OI-2286:
-        # measured on the block after the data file collapse, like the prompt.
+        # OI-1851: the one place that knows what the lane was handed.
         request_payload["diff_coverage"] = gate_depth.diff_coverage(diff_content, diff_cap)
         instruction = (
             f"{default_review_instruction(gate, str(pr_number))}\n\n"

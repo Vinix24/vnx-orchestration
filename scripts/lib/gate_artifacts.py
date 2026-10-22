@@ -549,7 +549,9 @@ def _stamp_run_settings(
     land on the record, ``reasoning_effort`` next to ``model``, so the audit
     trail and an A/B measurement of the effort can read which run used which.
     The request names them under their own key because ``model`` on a codex
-    request is an input to the next launch.
+    request is an input to the next launch. ``gate_recorder.stamp_codex_launch``
+    copies them, the same call ``gate_recorder.record_failure`` makes, so a
+    run that timed out, stalled or was refused as degenerate carries them too.
 
     OI-1725: a harness-lane gate result must carry its provider/model, exactly
     like the standalone glm_gate.py/kimi_gate.py write path (the correct
@@ -562,10 +564,7 @@ def _stamp_run_settings(
     (``gate_recorder.record_failure`` stamps the same field on a failure).
     A gate that is not a harness lane gets none of these three fields.
     """
-    codex_launch = request_payload.get("codex_launch")
-    if isinstance(codex_launch, dict):
-        result_payload["model"] = str(codex_launch.get("model") or "")
-        result_payload["reasoning_effort"] = str(codex_launch.get("reasoning_effort") or "")
+    gate_recorder.stamp_codex_launch(result_payload, request_payload)
     provider_info = gate_recorder.resolve_gate_provider(gate)
     if provider_info is None or provider_info[0] != gate_recorder.GATE_PROVIDER_HARNESS_LANE:
         return

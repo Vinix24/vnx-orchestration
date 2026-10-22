@@ -11,10 +11,12 @@ carrying a name of its own, so a hard-coded name cannot cause the next refusal.
 from __future__ import annotations
 
 import ast
+import itertools
 import json
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -250,19 +252,20 @@ def test_gate_run_books_an_invalid_effort_and_launches_nothing(runner, tmp_regis
     assert (results[0]["status"], results[0]["reason"]) == ("unavailable", "codex_review_effort_invalid")
     assert EFFORT_ENV in results[0]["reason_detail"]
     assert "'extreme'" in results[0]["reason_detail"]
+    assert "reasoning_effort" not in results[0], "codex never launched, so no effort was used"
     assert result["reason"] == "codex_review_effort_invalid"
     requests = _read_gate_files(runner, "requests")
     assert requests and all(r["status"] != "executing" for r in requests)
 
 
-def _run_codex_to_a_verdict(runner, tmp_path, payload):
+def _run_codex_to_a_verdict(runner, tmp_path, payload, stream=CODEX_VERDICT_STREAM):
     proc = MagicMock()
     proc.stdout.fileno.return_value = 10
     proc.stderr.fileno.return_value = 11
     proc.poll.return_value = 0
     proc.returncode = 0
     proc.pid = 4242
-    reads = iter([CODEX_VERDICT_STREAM])
+    reads = iter([stream])
 
     def fake_read(fd, _size):
         return next(reads, b"") if fd == 10 else b""
@@ -310,6 +313,123 @@ def test_a_previous_runs_launch_record_is_dropped_before_the_next_run(runner, tm
     popen.assert_not_called()
     requests = _read_gate_files(runner, "requests")
     assert requests and all("codex_launch" not in r for r in requests)
+    results = _read_gate_files(runner, "results")
+    assert results and all("model" not in r and "reasoning_effort" not in r for r in results)
+
+
+# ---------------------------------------------------------------------------
+# OI-2288: a failed codex run carries its model and effort too. A run that
+# timed out, stalled or was refused as degenerate is booked by
+# gate_recorder.record_failure; without them an effort comparison would count
+# only the runs that got through.
+# ---------------------------------------------------------------------------
+
+# A verdict without a single investigative action (OI-1485): booked
+# gate_execution_degenerate, never completed.
+DEGENERATE_CODEX_STREAM = ("\n".join([
+    json.dumps({"type": "thread.started", "thread_id": "01a0-dead-beef"}),
+    json.dumps({"type": "turn.started"}),
+    json.dumps({"type": "item.completed", "item": {
+        "id": "item_0", "type": "agent_message",
+        "text": json.dumps({"verdict": "pass", "findings": [], "residual_risk": None}),
+    }}),
+    json.dumps({"type": "turn.completed", "usage": {"input_tokens": 18219, "output_tokens": 602}}),
+]) + "\n").encode("utf-8")
+
+
+def _run_codex_that_never_answers(runner, tmp_path, payload):
+    """A codex process that writes nothing and never exits, on a clock that
+    moves one second per reading, so the runner's own timeout or stall check
+    ends it."""
+    proc = MagicMock()
+    proc.stdout.fileno.return_value = 10
+    proc.stderr.fileno.return_value = 11
+    proc.poll.return_value = None
+    proc.pid = 4242
+    ticks = itertools.count()
+    start = time.monotonic()
+    with patch("gate_runner.shutil.which", return_value="/usr/bin/codex"), \
+         patch("gate_runner.create_gate_worktree", return_value=tmp_path), \
+         patch("gate_runner.remove_gate_worktree"), \
+         patch("gate_runner.subprocess.Popen", return_value=proc), \
+         patch("gate_runner.select.select", return_value=([], [], [])), \
+         patch("gate_runner.time.monotonic", side_effect=lambda: start + next(ticks)), \
+         patch("gate_runner.os.getpgid", return_value=4242), \
+         patch("gate_runner.os.killpg"):
+        return runner.run(gate="codex_gate", request_payload=payload, pr_number=7)
+
+
+@pytest.mark.parametrize(
+    "reason, timeout, stall",
+    [("timeout", "1", "300"), ("stall", "300", "2")],
+)
+@pytest.mark.parametrize("risk, effort", [("critical", "high"), ("low", "medium")])
+def test_a_codex_run_that_timed_out_or_stalled_records_its_model_and_effort(
+    runner, tmp_registry, tmp_path, no_effort_env, monkeypatch, reason, timeout, stall, risk, effort,
+):
+    monkeypatch.setenv("VNX_CODEX_GATE_TIMEOUT", timeout)
+    monkeypatch.setenv("VNX_CODEX_STALL_THRESHOLD", stall)
+    payload = {"prompt": "review", "branch": "dispatch/x", "pr_number": 7, "risk_class": risk}
+
+    result = _run_codex_that_never_answers(runner, tmp_path, payload)
+
+    assert (result["status"], result["reason"]) == ("unavailable", reason)
+    record = _read_gate_files(runner, "results")[0]
+    assert record["reason"] == reason
+    assert record["model"] == TMP_MODEL
+    assert record["reasoning_effort"] == effort
+
+
+@pytest.mark.parametrize("risk, effort", [("high", "high"), ("medium", "medium")])
+def test_a_degenerate_codex_run_records_its_model_and_effort(
+    runner, tmp_registry, tmp_path, no_effort_env, risk, effort,
+):
+    payload = {
+        "prompt": "review", "branch": "dispatch/x", "pr_number": 7, "risk_class": risk,
+        "report_path": str(tmp_path / "reports" / f"codex-degenerate-{risk}.md"),
+    }
+    result, cmd = _run_codex_to_a_verdict(runner, tmp_path, payload, stream=DEGENERATE_CODEX_STREAM)
+
+    assert (result["status"], result["reason"]) == ("unavailable", "gate_execution_degenerate"), result
+    assert f'model_reasoning_effort="{effort}"' in cmd
+    record = _read_gate_files(runner, "results")[0]
+    assert record["reason"] == "gate_execution_degenerate"
+    assert record["model"] == TMP_MODEL
+    assert record["reasoning_effort"] == effort
+
+
+def test_an_effort_env_set_for_the_run_lands_on_its_failure_record(runner, tmp_registry, tmp_path, monkeypatch):
+    monkeypatch.setenv(EFFORT_ENV, "xhigh")
+    monkeypatch.setenv("VNX_CODEX_GATE_TIMEOUT", "1")
+    monkeypatch.setenv("VNX_CODEX_STALL_THRESHOLD", "300")
+    payload = {"prompt": "review", "branch": "dispatch/x", "pr_number": 7, "risk_class": "low"}
+
+    _run_codex_that_never_answers(runner, tmp_path, payload)
+
+    record = _read_gate_files(runner, "results")[0]
+    assert (record["reason"], record["reasoning_effort"]) == ("timeout", "xhigh")
+
+
+@pytest.mark.parametrize("launch", [None, "tmp-registry-model/high", ["tmp-registry-model", "high"]])
+def test_a_failure_record_without_a_launch_record_carries_no_settings(runner, launch):
+    """No ``codex_launch``, or one that is not a dict: the record names no
+    model and no effort rather than one it cannot know."""
+    from gate_recorder import record_failure
+
+    payload = {"branch": "dispatch/x", "pr_number": 7}
+    if launch is not None:
+        payload["codex_launch"] = launch
+    record = record_failure(
+        gate="codex_gate", pr_number=7, pr_id="",
+        result={"reason": "timeout", "reason_detail": "timed out", "duration_seconds": 1.0,
+                "partial_output_lines": 0, "runner_pid": 1},
+        request_payload=payload,
+        requests_dir=runner._state_dir / "review_gates" / "requests",
+        results_dir=runner._state_dir / "review_gates" / "results",
+    )
+    assert record["status"] == "unavailable"
+    assert "model" not in record
+    assert "reasoning_effort" not in record
 
 
 # ---------------------------------------------------------------------------

@@ -662,11 +662,13 @@ def main(argv: "list[str] | None" = None) -> int:
         # (below it), so a mutable-config change between the two calls this
         # gate used to make can no longer make the recorded `diff_truncated`
         # disagree with what the prompt actually truncated.
-        # OI-2286: both measure the block after the data file collapse, so
-        # diff_chars is what glm got and collapsed_sections what it did not.
         diff_cap = max_diff_chars("glm_gate")
         coverage = gate_depth.diff_coverage(diff, diff_cap)
-        execution_depth = gate_depth.single_shot_depth_from_coverage(coverage)
+        execution_depth = gate_depth.single_shot_depth(
+            coverage["diff_chars"], coverage["diff_truncated"],
+            diff_limit=coverage["diff_limit"],
+            truncated_files=tuple(coverage["truncated_files"]),
+        )
 
         # dispatch_id is already resolved above (shared with the request record).
         # role="review-gate" (dispatch-20260823-beta2-j): the default role of
