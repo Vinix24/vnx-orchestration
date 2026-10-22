@@ -26,6 +26,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import load_deepseek_key as _keys
 import provider_reachability as _reach
+from event_outcome_semantics import SUCCESS_STATUSES
 
 SCHEMA = "vnx.providers.usage/1"
 HTTP_TIMEOUT_SECONDS = 5
@@ -42,7 +43,6 @@ _TAIL_SCAN_LIMIT = 32 * 1024 * 1024
 _RESPONSE_LIMIT = 1024 * 1024
 _KIMI_LIMIT_RE = re.compile(r"\b429\b|weekly|7-day|usage limit", re.IGNORECASE)
 _KIMI_WEEKLY_RE = re.compile(r"weekly|7-day", re.IGNORECASE)
-_KIMI_ANSWERED = frozenset({"success", "done", "complete", "completed"})
 KIMI_WINDOW_SECONDS = 7 * 24 * 3600
 UNKNOWN = "onbekend"
 
@@ -207,12 +207,21 @@ def _epoch(timestamp: Any) -> Optional[float]:
     return moment.timestamp()
 
 
+def _kimi_answered(receipt: dict) -> bool:
+    status = str(receipt.get("status") or "").lower()
+    if status in SUCCESS_STATUSES:
+        return True
+    return (receipt.get("receipt_kind") == "review_gate" and status == "failed"
+            and str(receipt.get("gate_status") or "").lower() == "completed")
+
+
 def _kimi_receipt_events(state: Path) -> Tuple[Optional[float], List[float]]:
     """``(last_answered, weekly_failures)`` from one store's receipts, newest to oldest, up to the
     first answered kimi call. A kimi receipt of any kind (dispatch or review gate) is a weekly-limit
-    failure when its ``failure_reason`` names the weekly or 7-day limit, and answered when its
-    status is a success status. Any other kimi receipt (a 5-hour limit, a spawn error, a contract
-    miss) is neither. A takeover in the kimi seat is recorded under its own provider and never counts."""
+    failure when its ``failure_reason`` names the weekly or 7-day limit, which wins over everything
+    else. It is answered when its status is a success status, or when it is a review-gate receipt
+    with status ``failed`` and ``gate_status`` ``completed``: kimi answered with a FAIL verdict.
+    Any other kimi receipt (a 5-hour limit, a spawn error, a contract miss) is neither. A takeover in the kimi seat is recorded under its own provider and never counts."""
     path = state / "t0_receipts.ndjson"
     failures: List[float] = []
     if not path.is_file():
@@ -232,7 +241,7 @@ def _kimi_receipt_events(state: Path) -> Tuple[Optional[float], List[float]]:
                 continue
             if _KIMI_WEEKLY_RE.search(str(receipt.get("failure_reason") or "")):
                 failures.append(moment)
-            elif str(receipt.get("status") or "").lower() in _KIMI_ANSWERED:
+            elif _kimi_answered(receipt):
                 return moment, failures
     except OSError:
         return None, failures  # vnx-silent-except: an unreadable receipts file gives no bound, the row stays "onbekend"
@@ -243,8 +252,8 @@ def kimi_resets_at_latest(states: List[Path], now: float) -> Optional[float]:
     """Upper bound of the kimi weekly reset: the first weekly-limit failure of the current
     unbroken streak plus 7 days, from the receipts VNX wrote itself (one timestamped record per
     kimi attempt; the reachability record holds only the newest one). The streak is every weekly
-    failure after the latest answered kimi call in any store; a successful kimi review-gate
-    receipt is such a call, a takeover recorded under another provider is not. None when there is no streak or the
+    failure after the latest answered kimi call in any store; a kimi review-gate receipt that passed
+    or rejected with a FAIL verdict is such a call, a takeover recorded under another provider is not. None when there is no streak or the
     bound already lies in the past (then a newer window began that no record dates)."""
     events = [_kimi_receipt_events(state) for state in states]
     answered = [moment for moment, _ in events if moment is not None]

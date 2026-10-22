@@ -224,10 +224,17 @@ def test_kimi_reset_bound_unknown_when_the_streak_is_older_than_a_window(home):
     assert pu.probe_kimi(home, NOW)["resets_at_latest"] == "onbekend"
 
 
+def _append_in_time_order(path, receipt):
+    """Receipts are appended as they happen, so the file is in time order; the scan relies on it."""
+    lines = path.read_text().splitlines() + [json.dumps(receipt)]
+    lines.sort(key=lambda line: json.loads(line)["timestamp"])
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def _append_gate_receipt(home, epoch, **fields):
     path = home / ".vnx-data" / "alpha" / "state" / "t0_receipts.ndjson"
     gate = {"receipt_kind": "review_gate", "provider": "kimi", "timestamp": _iso(epoch), **fields}
-    path.write_text(path.read_text() + json.dumps(gate) + "\n", encoding="utf-8")
+    _append_in_time_order(path, gate)
 
 
 def test_kimi_reset_bound_ignores_malformed_lines(home):
@@ -263,18 +270,42 @@ def test_kimi_reset_bound_takeover_review_gate_does_not_break_the_streak(home):
     assert pu.probe_kimi(home, NOW)["resets_at_latest"] == _iso(NOW + 5 * DAY)
 
 
-def test_kimi_reset_bound_failed_review_gate_without_reason_is_neither(home):
+def test_kimi_reset_bound_rejecting_review_gate_breaks_the_streak(home):
+    _full_kimi(home)
+    _kimi_receipts(home, "alpha", [(NOW - 5 * DAY, "weekly"), (NOW - DAY, "weekly")])
+    _append_gate_receipt(home, NOW - 3 * DAY, status="failed", gate_status="completed")
+    assert pu.probe_kimi(home, NOW)["resets_at_latest"] == _iso(NOW - DAY + 7 * DAY)
+
+
+@pytest.mark.parametrize("fields", [{}, {"gate_status": "unavailable"}, {"gate_status": ""}])
+def test_kimi_reset_bound_failed_review_gate_not_completed_is_neither(home, fields):
     _full_kimi(home)
     _kimi_receipts(home, "alpha", [(NOW - 2 * DAY, "weekly")])
-    _append_gate_receipt(home, NOW - DAY, status="failed", failure_reason="")
+    _append_gate_receipt(home, NOW - DAY, status="failed", **fields)
     assert pu.probe_kimi(home, NOW)["resets_at_latest"] == _iso(NOW + 5 * DAY)
 
 
-def test_kimi_reset_bound_failed_review_gate_alone_starts_no_streak(home):
+def test_kimi_reset_bound_failed_review_gate_not_completed_starts_no_streak(home):
     _full_kimi(home)
     _kimi_receipts(home, "alpha", [(NOW - 9 * DAY, "success")])
-    _append_gate_receipt(home, NOW - DAY, status="failed", failure_reason="")
+    _append_gate_receipt(home, NOW - DAY, status="failed")
     assert pu.probe_kimi(home, NOW)["resets_at_latest"] == "onbekend"
+
+
+def test_kimi_reset_bound_weekly_reason_beats_a_completed_gate_status(home):
+    _full_kimi(home)
+    _kimi_receipts(home, "alpha", [(NOW - 2 * DAY, "weekly")])
+    _append_gate_receipt(home, NOW - DAY, status="failed", gate_status="completed", failure_reason=WEEKLY)
+    assert pu.probe_kimi(home, NOW)["resets_at_latest"] == _iso(NOW + 5 * DAY)
+
+
+def test_kimi_reset_bound_dispatch_receipt_with_status_ok_breaks_the_streak(home):
+    _full_kimi(home)
+    _kimi_receipts(home, "alpha", [(NOW - 5 * DAY, "weekly"), (NOW - DAY, "weekly")])
+    path = home / ".vnx-data" / "alpha" / "state" / "t0_receipts.ndjson"
+    answered = {"receipt_kind": "dispatch", "provider": "kimi", "status": "ok", "timestamp": _iso(NOW - 3 * DAY)}
+    _append_in_time_order(path, answered)
+    assert pu.probe_kimi(home, NOW)["resets_at_latest"] == _iso(NOW - DAY + 7 * DAY)
 
 
 def test_kimi_reset_bound_text_says_uiterlijk(home):
