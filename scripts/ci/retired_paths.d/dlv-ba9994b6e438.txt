@@ -1,0 +1,7 @@
+# C4d (dlv-ba9994b6e438)
+# Source: docs/investigations/2026-10-20-golf-1-hermeting.md §7 "C4" (C4d).
+scripts/lib/worker_permission_relay.py
+scripts/permission_relay_cli.py
+scripts/lib/tmux_command_runner.py
+tests/test_worker_permission_relay.py
+tests/test_worker_pane_classifier.py::TestMarkerParity

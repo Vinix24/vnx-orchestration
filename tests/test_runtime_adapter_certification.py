@@ -305,7 +305,6 @@ class TestDirectCouplingFreeze:
             "plan_gate_panel.py",
             "provider_dispatch.py",
             "staging_validator.py",
-            "worker_permission_relay.py",
         }
         new_violations = [
             v for v in violations
@@ -337,7 +336,6 @@ class TestDirectCouplingFreeze:
             "plan_gate_panel.py",
             "provider_dispatch.py",
             "staging_validator.py",
-            "worker_permission_relay.py",
         }
         found: set[str] = set()
         for py_file in sorted(LIB_DIR.glob("*.py")):

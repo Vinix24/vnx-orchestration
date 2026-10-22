@@ -131,19 +131,3 @@ class TestOtherStates:
     def test_idle_marker_without_glyph(self):
         result = classify_worker_pane("? for shortcuts")
         assert result.state == STATE_AWAITING_INPUT
-
-
-class TestMarkerParity:
-    """The classifier's prompt markers must stay in parity with the relay's.
-
-    The relay (worker_permission_relay.PROMPT_MARKERS) is the active responder;
-    this classifier is the passive detector.  A drift means one stops seeing a
-    prompt the other would answer.
-    """
-
-    def test_prompt_markers_match_relay(self):
-        import worker_permission_relay
-
-        from worker_pane_classifier import PROMPT_MARKERS
-
-        assert set(PROMPT_MARKERS) == set(worker_permission_relay.PROMPT_MARKERS)

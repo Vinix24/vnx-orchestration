@@ -340,12 +340,6 @@ Pool commands (elastic worker pool management):
   pool config --project <id> [--min N] [--max N] [--policy <name>] [--cooldown <s>]
   pool reap --project <id> [--pool-id <p>] [--force]     Reap stale workers
 
-Permission relay (detached-worker prompt governance):
-  permission escalations [--all] [--json]            List pending escalations
-  permission approve <dispatch_id>                   Approve + relay "1" to the worker
-  permission deny <dispatch_id>                      Deny an escalation
-  permission resolve-stale <dispatch_id> --note ...  Close an escalation with no live worker session
-
 Provider switch (turn model providers on and off, ~/.vnx/providers.json):
   providers [list] [--json]          Families, enforcement status, projects, overrides, consequences
   providers off|on <family> [--project <pid>] [--reason <text>]
@@ -2648,9 +2642,6 @@ main() {
       ;;
     pool)
       PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" -m vnx_cli.commands.pool "$@"
-      ;;
-    permission)
-      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" "$VNX_HOME/scripts/permission_relay_cli.py" "$@"
       ;;
     dream)
       PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" -m vnx_cli.main dream "$@"
