@@ -7,9 +7,10 @@ description: >
   into now/next/later horizons, break a feature into deliverables, set the routing FLOOR, or
   run the plan-gate on a feature. The tracks DB (`vnx horizon`, alias `vnx objective`) is the
   source of truth; the repo ROADMAP.yaml is a generic example, not the SSOT. Plans and gates
-  only: never dispatches, never closes open-items. The plan-gate (one seat, a second on BLOCK)
-  runs only on an explicit plan-gate step. (Renamed from `pm` 2026-07-05 — `/pm`/`@pm` still resolve
-  via the backward-compat alias in `.claude/skills/pm/SKILL.md`.)
+  only: never dispatches, never closes open-items. The plan-gate runs one seat, a second on
+  BLOCK, and runs only on an explicit plan-gate step. (Renamed from
+  `pm` 2026-07-05 — `/pm`/`@pm` still resolve via the backward-compat alias in
+  `.claude/skills/pm/SKILL.md`.)
 user-invocable: true
 allowed-tools: [Read, Grep, Glob, Bash]
 ---
@@ -45,13 +46,51 @@ trust the silent `vnx-dev` default in a multi-project context).
    launch) — do NOT `vnx horizon sync` against it; sync would seed example data into the live
    store. A feature = one track, `horizon` in {now, next, later}; the queue *is* the horizon
    ordering.
+   - **No verb sets the horizon of an existing track yet** (OI-2272). Only `objective add --horizon`
+     sets it. Until the verb exists, report to the operator which tracks belong in now/next/later
+     and never edit the DB.
 2. **Plan-first GATE (hard, see below)** — produce the plan doc, run the plan-gate (one
-   seat, a second on BLOCK, then the tiebreaker). No deliverable promotes until this passes.
+   seat, a second on BLOCK, then the tiebreaker). No deliverable promotes until
+   this passes.
 3. **Deliverables** — `vnx horizon deliverable add --objective <track> --output-kind
    {pr,doc,...} --title "..."` (alias: `vnx deliverable add`) per planned output. Each lands
    `proposed`. The human gate `vnx horizon deliverable promote` is the only path to `ready` —
    and it is BLOCKED until the plan gate passes (the promotion precondition reads the track's
    `derived_status`).
+   - **Deliverables carry the work.** Every piece of work starts as a deliverable. A dispatch
+     outside a deliverable makes the progress view (the `voortgang` mod) wrong, because the
+     deliverable is the unit of a track row.
+   - The dispatch that does the work carries the deliverable id as its dispatch id
+     (`dispatch_id="dlv-..."` in `stage_spec_bundle`, after the deliverable is `ready`). Only
+     then does the work count for that deliverable.
+   - A follow-up round on the same PR gets its own id `dlv-...-r2`, `-r3`, with `pr_id` set to
+     the PR number and `work_ref` to the PR branch.
+   - Today the door sets the deliverable's row to `completed` when the builder's lane exits,
+     before review and merge, so the progress view shows the deliverable done while its PR is
+     still open. `vnx deliverable close <dlv> --evidence <pr>` then returns without recording the
+     PR (OI-2282). Until that is fixed, the merge evidence lives on the track: after the merge,
+     link the PR with `vnx objective link-pr <track> <pr> --delivery partial|complete` and read
+     the deliverable's `done` as "built", not as "merged".
+   - Promote is the operator's gate. A T0 promotes only when the operator granted it with an
+     allow rule for the promote command (set by the operator with `/permissions`; a T0 never
+     edits its own permissions). The rule matches one command form, so run promote in exactly
+     that form. Without the rule the auto-mode classifier refuses a T0 promote, so batch: hand
+     the operator all deliverables of a goal in one promote line before the goal starts.
+   - **Definition of done per deliverable.** A deliverable has a title and an output kind and no
+     field for its acceptance criteria (the `deliverables` view in the store is built from
+     `dispatches` and carries none). Until it has one, the done condition of each deliverable
+     belongs in the track `goal_state`, numbered, one point per deliverable, each provable with a
+     command. The build instruction of a dispatch is not the place for it: it lives outside
+     horizon and is gone after the session.
+   - **A track closes only when every linked PR is `complete`** (`_delivery_hold` in
+     `scripts/lib/track_reconciler.py`, OI-1098; OI-2274). One explicit `partial` holds the
+     track. Keep slice PRs on `partial` while the track is open. When the last slice merges,
+     re-link every PR of the track with `link-pr --delivery complete`. This is stricter than the
+     older close gate (`close_track_if_done`, OI-829), which needs one linked PR marked
+     `complete`: one `complete` beside one `partial` no longer closes the track. Two legacy
+     cases differ. A PR linked before migration 0032 has no marking row and does not hold the
+     track. A store without the `track_pr_delivery` table (0032 not applied) records no marking
+     and holds every track (`unverifiable`, OI-1167).
 4. **Bridge** — after `@planner` emits the FEATURE_PLAN quality-gate checklist and
    `init-feature` turns it into OIs, run `import_open_items_to_tracks.py --project-id <pid>`
    so `track_open_items` reflects reality and the reconciler shows the track blocked while
@@ -116,6 +155,16 @@ Line numbers and test details belong to the builder and codex in the PR review.
   to the track. While it is open the reconciler shows `derived_status: blocked` and
   `vnx horizon deliverable promote` refuses. The panel-pass closes it. A worker that never
   loaded this skill still cannot promote — the CLI rejects it.
+
+### Why one seat
+
+Two measurements, both repeatable. On 2026-08-15
+(`scripts/analysis/plan_gate_panel_effectiveness.py`, 104 complete rounds) the full panel
+agreed with the first seat alone in 89.4% of rounds; seat 4 and seat 5 each changed the
+decision in 1.7%. On 2026-10-17 codex alone landed on the panel's outcome in 35 of 36 runs.
+When the facts determine the answer, one model with good context beats five that vote. The
+second seat is kept for the verdict that says the plan is unsafe to build: BLOCK. Name more
+seats with `--panel-seats` only when a plan is genuinely ambiguous, not merely large.
 
 ## Routing FLOOR, not overrides (model selection)
 
@@ -184,6 +233,12 @@ It does NOT go into `/goal` verbatim. Convert it in four steps:
 4. **Bound the runtime.** End with a stop clause: a max round count plus an
    emergency-stop independent of progress (e.g. "stop if main is red after a
    merge").
+
+**Survive a rotation.** A T0 rotates at 500K tokens. `/rotate` writes the directive into the
+handoff and the spawner types it again in the fresh session, whose evaluator sees only the new
+conversation. So every proof in a goal is a command that measures state again (`gh pr view`,
+`vnx objective show`, a test run), and a one-off event is proven by its trace (the report, the
+receipt, the closed OI). The global `goal-prompting` skill covers the rest.
 
 ### `@horizon goal-condition <track_id>`
 
