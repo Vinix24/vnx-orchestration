@@ -275,3 +275,21 @@ Productiecode heb ik gemeten aan functie- en bestandsgrenzen. Docs- en testregel
 3. **Gap:** M-2 en M-5 heb ik niet gedraaid, omdat ze een hook of tests vragen. Beide zijn alleen nodig voor golf 2 of klasse B.
 4. **Gap:** de regelschattingen voor docs (`WORKER_PERMISSIONS.md`, de alinea in `DISPATCH_AND_INTELLIGENCE_ARCHITECTURE.md`) zijn schattingen. De productiecode niet.
 5. **Uncertain:** of de permissie-classifier een handwijziging van `.claude/settings.json` in C2 tegenhoudt. Deel C waarschuwde ervoor; ik heb het niet geprobeerd.
+
+## 9. Besluiten van Vincent, 22-10
+
+Op 22-10 koos Vincent op alle vijf de vragen van §6 en §7 voor het geadviseerde antwoord.
+
+**Klasse A: golf 1.** De zeven paden van §6 klasse A gaan naar golf 1. `update_pane_mapping.sh`, `test_process_control_safety_sweep.sh:23`, `reconcile_terminal_state.py` en de shims `smart_tap_v7_json_translator.sh` en `unified_state_manager_v2.py` gaan naar C1. `tmux_signal_stop_receipt.sh` gaat met zijn settingsregel en `TestStopReceiptGuarantee` naar C2. `dispatcher_v8_minimal.sh` gaat naar C1, met de migratiestap in mission-control. De "met klasse A"-getallen van §7 gelden: C1 circa 660, C2 circa 810, samen circa 5.235 regels. De grensvraag over de tabel `dispatches` (§7, C1, Grootboek) verandert niets meer: `dispatch_broker_cli.py` is hoe dan ook golf 1.
+
+**Klasse B: golf 2.** P07 gaat samen met P05 en P06 naar golf 2. De freeze-test blijft tot dan uitgesloten; C3 hangt niet van P07 af.
+
+**Manifest: akkoord**, zoals beschreven in §7. Vóór C4c krijgen de vier stores met open escalaties (seocrawler-v2 21, mission-control 16, sales-copilot 1, pacompany-engine 1, gemeten op 20-10) eerst een backup, dan per store `vnx permission resolve-stale`, daarna C4c en C4d.
+
+**ADR-042: aangenomen.** Het harness-contract is nu `docs/governance/decisions/ADR-042-harness-contract.md`. Het `terminals`-blok in `t0_state.json` wordt in golf 2 vervangen door `live_work`, niet zonder vervanging weggehaald. Zijn lezers (`feature_state_machine.py:286-296`, `append_receipt_internals/enrichment.py:166`, `commands/dispatch.sh:79`, `commands/status.sh:104`) gaan daar mee naar `live_work`.
+
+**Model per cluster:** C1 op opus, omdat het de CI-check `scripts/ci/check_retired_paths.py` bouwt die beslist wat als bewijs telt. C2, C3, C4a tot C4d en C5 op DeepSeek. De clusters worden na C1 parallel gebouwd en één voor één gemerged.
+
+### Natelling van 22-10
+
+De T0 draaide de meetcommando's van elke CSV-regel met `indeling` "golf 1" en zonder aanroepers (12 regels) opnieuw, op origin/main `6cadd5a6`, 28 commits na de merge-base `c8c55d23` van deze PR. Uitslag: 12 van de 12 kloppen nog, plus 4 van de 4 voor de regels die alleen "pytest (CI)" als aanroeper hebben. De regelnummers in de kolom `functie` houden stand. Eén gemeten bestand is sindsdien veranderd: `docs/core/DISPATCH_AND_INTELLIGENCE_ARCHITECTURE.md` op regel 128 (#2164), buiten de gemeten alinea `:90-96`. `current` wijst nu naar v1.7.5 waar de CSV v1.7.2 zegt; de daar gemeten bestanden bestaan nog.
