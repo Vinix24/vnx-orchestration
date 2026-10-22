@@ -19,13 +19,18 @@ plan-gate's claude seat use. :func:`make_claude_gate_dispatcher` has the call
 shape of ``plan_gate_panel._make_default_dispatcher``:
 ``(provider, model, prompt, dispatch_id) -> report text``.
 
-The hardening the deepseek seat has:
+The hardening the deepseek seat has, and more:
   - its own disposable worktree on the PR head (``create_dispatch_worktree`` on
     ``base_ref``, removed with ``review_only=True``, OI-1629b);
-  - MCP fully off: ``--mcp-config '{"mcpServers":{}}' --strict-mcp-config``;
-  - read-only: the write and web tools are denied (:data:`READ_ONLY_DENIED_TOOLS`);
+  - MCP fully off: ``--mcp-config '{"mcpServers":{}}' --strict-mcp-config`` and
+    the ``mcp__*`` namespace denied;
+  - read-only by allow-list (:func:`seat_scope_args`, round 2 of R7): only
+    ``Read``, ``Grep`` and ``Glob`` exist in the session, nothing else can be
+    approved, and the adapter's own scope (``--dangerously-skip-permissions`` or
+    the review-gate role's Bash-capable fallback profile) never reaches the argv;
   - the isolation notice and the verdict contract in the prompt, and the
-    verdict block read from the report body, which is the model's final answer.
+    verdict block read from the report body, which is the model's final answer,
+    only when the run ended in a successful completion (:func:`run_failure`).
 
 What it never gets: ``ANTHROPIC_BASE_URL``, ``ANTHROPIC_API_KEY`` or any other
 ``ANTHROPIC_*`` variable, nor a Bedrock/Vertex switch. Each is scrubbed from the
@@ -50,10 +55,11 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from env_scrub_patterns import DEFAULT_SCRUB_KEY_PATTERNS
 import event_store
+from worker_permissions import MCP_NAMESPACE_DENY
 
 logger = logging.getLogger(__name__)
 
@@ -73,8 +79,26 @@ SUBSCRIPTION_SCRUB_KEYS: frozenset = frozenset(
     DEFAULT_SCRUB_KEY_PATTERNS | {"ANTHROPIC_*", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"}
 )
 
-READ_ONLY_DENIED_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch")
+# The seat's tools, the whole set. In claude 2.1.308 ``--tools`` makes only these
+# built-in tools exist in the session and ``--allowedTools`` pre-approves them:
+# no Bash in any form, no write, edit, web, task or skill tool. The diff is in
+# the prompt and files are read with Read.
+SEAT_TOOLS = ("Read", "Grep", "Glob")
+# "Don't prompt for permissions, deny if not pre-approved" (the CLI's own
+# permission-mode schema). Named on the command line it also replaces a settings
+# ``defaultMode`` such as ``auto``, whose classifier approves calls by itself.
+SEAT_PERMISSION_MODE = "dontAsk"
+# Nobody answers a permission prompt in ``claude -p``: what would prompt is denied.
+SEAT_PERMISSION_PROMPTS = "none"
 MCP_OFF_CONFIG = '{"mcpServers":{}}'
+
+# The completion a review is read from. claude 2.1.308 ends a stream-json turn in
+# one ``result`` message: ``subtype`` "success" or an error subtype
+# (error_during_execution, error_max_turns, error_max_budget_usd,
+# error_max_structured_output_retries), ``is_error`` required on both and true on
+# a "success" whose text is an API error. SubprocessAdapter keeps both fields in
+# the normalized ``completion``.
+COMPLETION_SUCCESS_SUBTYPE = "success"
 
 # The cost line of a subscription run: 0 at the margin, the source names why.
 SUBSCRIPTION_COST_SOURCE = "subscription"
@@ -94,15 +118,25 @@ SEAT_AUTHORED_SUFFIX = ".seat-authored"
 DispatcherFn = Callable[[str, str, str, str], str]
 
 
-def seat_cli_args() -> List[str]:
-    """The claude flags the seat starts with, placed before the prompt.
+def seat_scope_args() -> List[str]:
+    """The seat's whole capability scope, handed to the adapter in place of the role's.
 
-    ``--disallowedTools`` and ``--mcp-config`` are variadic in the claude CLI, so
-    the boolean ``--strict-mcp-config`` comes last and ends them before the
-    prompt (the order provider_spawns.deepseek_harness_spawn uses).
+    SubprocessAdapter puts it after the prompt (``scope_args``), where it would
+    otherwise put ``--dangerously-skip-permissions`` or the review-gate role's
+    Bash-capable fallback profile; with this list neither reaches the argv,
+    whatever ``VNX_WORKER_SCOPED`` says. ``mcp__*`` is denied because an
+    extension bridge surfaces MCP tools outside ``--mcp-config``
+    (``worker_permissions.MCP_NAMESPACE_DENY``) and a settings allow rule would
+    pre-approve them. The variadic flags each end at the next flag, and the
+    boolean ``--strict-mcp-config`` ends the last one.
     """
+    tools = ",".join(SEAT_TOOLS)
     return [
-        "--disallowedTools", ",".join(READ_ONLY_DENIED_TOOLS),
+        "--tools", tools,
+        "--allowedTools", tools,
+        "--disallowedTools", MCP_NAMESPACE_DENY,
+        "--permission-mode", SEAT_PERMISSION_MODE,
+        "--permission-prompts", SEAT_PERMISSION_PROMPTS,
         "--mcp-config", MCP_OFF_CONFIG,
         "--strict-mcp-config",
     ]
@@ -179,7 +213,7 @@ def run_claude_seat(
             result = spawn_claude(
                 prompt=f"{SEAT_NOTICE}\n\n{prompt}", model=model, dispatch_id=dispatch_id,
                 terminal_id=SEAT_TERMINAL, cwd=worktree, role=SEAT_ROLE,
-                total_deadline=float(deadline_seconds), extra_cli_args=seat_cli_args(),
+                total_deadline=float(deadline_seconds), scope_args=seat_scope_args(),
                 extra_env=seat_env_overlay(dispatch_id, base), scrub_env_keys=SUBSCRIPTION_SCRUB_KEYS,
             )
         finally:
@@ -241,33 +275,80 @@ def final_answer(result: Any) -> str:
     return (text or getattr(result, "completion_text", "") or "").strip()
 
 
-def seat_exit_code(result: Any, answer: str) -> int:
-    """The run's exit code; a clean exit with no answer is a failure, not a review."""
+def _returncode(result: Any) -> int:
     returncode = getattr(result, "returncode", 1)
-    code = returncode if isinstance(returncode, int) and not isinstance(returncode, bool) else 1
-    if code == 0 and not answer:
-        return 1
-    return code
+    return returncode if isinstance(returncode, int) and not isinstance(returncode, bool) else 1
 
 
-def _status(result: Any, exit_code: int) -> str:
+def _completion_causes(completion: Any) -> List[str]:
+    """Why the completion event does not end a review: none when it is a successful one."""
+    if not isinstance(completion, dict) or not completion:
+        return ["the stream ended with no completion event"]
+    subtype = completion.get("subtype")
+    if subtype != COMPLETION_SUCCESS_SUBTYPE:
+        return [f"the completion event has subtype {subtype!r}"]
+    if completion.get("is_error") is not False:
+        return [f"the completion event has subtype 'success' and is_error {completion.get('is_error')!r}"]
+    return []
+
+
+def run_failure(result: Any) -> Optional[str]:
+    """Why this run is not a review, or None when it is one.
+
+    A review is a run whose stream ended in a completion event with subtype
+    ``success`` and ``is_error`` false, whose claude process exited 0 within its
+    deadline, and whose completion carries an answer. Any other end is named
+    here, and :func:`_govern` then never reads the run's answer.
+    """
+    refused = getattr(result, "spawn_refused", None)
+    if refused:
+        return f"claude never started: {refused}"
+    causes: List[str] = []
+    if getattr(result, "error", None):
+        causes.append(f"the stream read failed: {result.error}")
+    if getattr(result, "timed_out", False):
+        causes.append("the run was stopped by its deadline or a stalled stream")
+    causes.extend(_completion_causes(getattr(result, "completion", None)))
+    code = _returncode(result)
+    if code != 0:
+        causes.append(f"claude exited with code {code}")
+    if not causes and not final_answer(result):
+        causes.append("the completion carries no answer")
+    return "; ".join(causes) or None
+
+
+def seat_exit_code(result: Any, failure: Optional[str]) -> int:
+    """The exit code the report carries: claude's own, and never 0 for a run that is not a review."""
+    code = _returncode(result)
+    return 1 if failure is not None and code == 0 else code
+
+
+def _status(result: Any, failure: Optional[str]) -> str:
     if getattr(result, "timed_out", False):
         return "timeout"
-    if getattr(result, "error", None) or getattr(result, "spawn_refused", None) or exit_code != 0:
-        return "failure"
-    return "success"
+    return "failure" if failure is not None else "success"
 
 
-def _spawn_error(result: Any, answer: str, exit_code: int) -> Optional[str]:
-    """What the spawn layer knows about a run with no answer, for the report body."""
-    if answer:
-        return None
-    error = getattr(result, "error", None) or getattr(result, "spawn_refused", None)
-    if error:
-        return str(error)
-    if exit_code != 0:
-        return f"claude exited with code {exit_code} and gave no answer"
-    return None
+def _report_response(run: _SeatRun, answer: str, failure: Optional[str]) -> Tuple[str, Optional[str]]:
+    """The report's response text and spawn error.
+
+    A review's response is its final answer. A claude that never started gives a
+    spawn error and no response, which the report stamps as ``failure_reason``
+    (OI-1748). Every other run that is not a review gets the statement of its
+    cause instead of its answer: the runner books it on the report's
+    ``exit_code`` with that cause in ``reason_detail`` (OI-1753), and no verdict
+    the run produced is in the report to be read. The stream archive keeps the text.
+    """
+    if failure is None:
+        return answer, None
+    if getattr(run.result, "spawn_refused", None):
+        return "", failure
+    archive = f" Its stream is archived at {run.events_path}." if run.events_path else ""
+    return (
+        "_Not a review: this claude_gate run did not end in a successful completion, so its "
+        f"answer is left out of this report and no verdict is read from it._{archive}\n\n"
+        f"Cause: {failure}.\n"
+    ), None
 
 
 def _token_counts(result: Any) -> Dict[str, Optional[int]]:
@@ -283,15 +364,19 @@ def _token_counts(result: Any) -> Dict[str, Optional[int]]:
 
 
 def _govern(run: _SeatRun) -> str:
-    """Cost line, receipt, report, in that order (ADR-005); returns the report text."""
-    answer = final_answer(run.result)
-    exit_code = seat_exit_code(run.result, answer)
-    status = _status(run.result, exit_code)
+    """Cost line, receipt, report, in that order (ADR-005); returns the report text.
+
+    The answer is read only from a run that is a review (:func:`run_failure`).
+    """
+    failure = run_failure(run.result)
+    answer = final_answer(run.result) if failure is None else ""
+    exit_code = seat_exit_code(run.result, failure)
+    status = _status(run.result, failure)
     tokens = _token_counts(run.result)
     _book_subscription_cost(run, tokens)
     report_path = Path(run.data_dir) / "unified_reports" / f"{run.dispatch_id}.md"
-    _emit_receipt(run, status, tokens, answer, report_path)
-    _write_report(run, answer, exit_code, status, tokens, report_path)
+    _emit_receipt(run, status, tokens, failure, report_path)
+    _write_report(run, answer, exit_code, status, tokens, failure, report_path)
     return report_path.read_text(encoding="utf-8")
 
 
@@ -311,7 +396,7 @@ def _book_subscription_cost(run: _SeatRun, tokens: Dict[str, Optional[int]]) -> 
 
 
 def _emit_receipt(
-    run: _SeatRun, status: str, tokens: Dict[str, Optional[int]], answer: str, report_path: Path,
+    run: _SeatRun, status: str, tokens: Dict[str, Optional[int]], cause: Optional[str], report_path: Path,
 ) -> None:
     from governance_emit import emit_dispatch_receipt
 
@@ -320,7 +405,7 @@ def _emit_receipt(
         from failure_classification import classify_failure_safe
 
         failure = classify_failure_safe(
-            status=status, error=getattr(run.result, "error", None), completion_text=answer,
+            status=status, error=cause, completion_text="",
             timed_out=bool(getattr(run.result, "timed_out", False)), provider=CLAUDE_LANE_PROVIDER,
             duration_seconds=(run.ended - run.started).total_seconds(),
             returncode=getattr(run.result, "returncode", None), dispatch_id=run.dispatch_id,
@@ -348,9 +433,13 @@ def _emit_receipt(
 
 def _write_report(
     run: _SeatRun, answer: str, exit_code: int, status: str,
-    tokens: Dict[str, Optional[int]], report_path: Path,
+    tokens: Dict[str, Optional[int]], failure: Optional[str], report_path: Path,
 ) -> None:
-    """The governed report: frontmatter gate_runner reads, the final answer as the body."""
+    """The governed report: frontmatter gate_runner reads, the final answer as the body.
+
+    A run that is not a review has the statement of its cause as the body instead
+    (:func:`_report_response`).
+    """
     from governance_emit import emit_unified_report
     from unified_report_schema import SCHEMA_VERSION, report_cost_fields
 
@@ -372,21 +461,23 @@ def _write_report(
     deadline = getattr(run.result, "deadline_exceeded_seconds", None)
     if isinstance(deadline, (int, float)) and not isinstance(deadline, bool):
         frontmatter.update({"deadline_exceeded": True, "deadline_seconds": float(deadline)})
+    response_text, spawn_error = _report_response(run, answer, failure)
     emit_unified_report(
         dispatch_id=run.dispatch_id, terminal_id=SEAT_TERMINAL, provider=CLAUDE_LANE_PROVIDER,
-        instruction="", response_text=answer, findings=None,
+        instruction="", response_text=response_text, findings=None,
         duration_seconds=(run.ended - run.started).total_seconds(), data_dir=Path(run.data_dir),
         frontmatter=frontmatter, model=run.model,
-        spawn_error=_spawn_error(run.result, answer, exit_code), preserve_partial=status != "success",
+        spawn_error=spawn_error, preserve_partial=status != "success",
     )
 
 
 def _set_aside_seat_authored_report(report_path: Path) -> None:
     """Move a report file the model wrote itself out of the governed report's way.
 
-    The governed report is written only when no file is at its path. A seat told
-    not to write one can still have done it through Bash; its file is kept, under
-    :data:`SEAT_AUTHORED_SUFFIX`, so the evidence the runner reads is this lane's.
+    The governed report is written only when no file is at its path. The seat has
+    no tool that writes (:func:`seat_scope_args`), so a file there is not this
+    lane's; it is kept, under :data:`SEAT_AUTHORED_SUFFIX`, so the evidence the
+    runner reads is this lane's.
     """
     if not report_path.exists():
         return

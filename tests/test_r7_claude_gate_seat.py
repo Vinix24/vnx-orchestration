@@ -176,15 +176,32 @@ def test_the_scrub_set_removes_every_anthropic_variable_and_keeps_the_account(mo
     assert env["VNX_WORKER_ROLE"] == "review-gate"
 
 
-def test_the_seat_flags_are_read_only_and_mcp_off_and_never_bare():
-    args = claude_gate_lane.seat_cli_args()
-    assert args[-1] == "--strict-mcp-config", "the boolean ends the variadic flags before the prompt"
-    assert args[args.index("--mcp-config") + 1] == '{"mcpServers":{}}'
-    denied = args[args.index("--disallowedTools") + 1].split(",")
-    assert {"Write", "Edit", "MultiEdit", "NotebookEdit"} <= set(denied)
+# The seat's whole capability scope, pinned literally (claude 2.1.308 --help):
+# only Read, Grep and Glob exist and are pre-approved, the MCP namespace is
+# removed, nothing outside the allow-list can be approved, and no MCP server loads.
+SEAT_TOOLS = "Read,Grep,Glob"
+SEAT_SCOPE = [
+    "--tools", SEAT_TOOLS,
+    "--allowedTools", SEAT_TOOLS,
+    "--disallowedTools", "mcp__*",
+    "--permission-mode", "dontAsk",
+    "--permission-prompts", "none",
+    "--mcp-config", '{"mcpServers":{}}',
+    "--strict-mcp-config",
+]
+
+
+def test_the_seat_scope_is_the_read_only_allow_list_and_never_bare():
+    args = claude_gate_lane.seat_scope_args()
+    assert args == SEAT_SCOPE
+    assert args[-1] == "--strict-mcp-config", "the boolean ends the last variadic flag"
     assert "--bare" not in args
 
 
+# How the fake run ends: R7_FAKE_RESULT is a JSON object laid over the success
+# completion, or "omit" for a stream with no completion event; R7_FAKE_EXIT is
+# the exit code. The streamed answer and the completion both carry a PASS
+# verdict, so a run that ends badly still holds one.
 _FAKE_CLAUDE = r'''
 import json, os, sys
 
@@ -199,11 +216,17 @@ def emit(event):
     sys.stdout.flush()
 
 
+ANSWER = "The change is sound.\n```json\n{\"verdict\": \"pass\", \"findings\": [], \"residual_risk\": null}\n```"
 emit({"type": "system", "subtype": "init", "session_id": "s-r7", "model": "claude-sonnet-5-5"})
-emit({"type": "assistant", "message": {"content": [{"type": "text", "text": "Reading the diff."}]}})
-emit({"type": "result", "subtype": "success", "is_error": False, "session_id": "s-r7",
-      "result": "The change is sound.\n```json\n{\"verdict\": \"pass\", \"findings\": [], \"residual_risk\": null}\n```",
-      "usage": {"input_tokens": 120, "output_tokens": 40, "cache_read_input_tokens": 7}})
+emit({"type": "assistant", "message": {"content": [{"type": "text", "text": ANSWER}]}})
+ending = os.environ.get("R7_FAKE_RESULT", "{}")
+if ending != "omit":
+    result = {"type": "result", "subtype": "success", "is_error": False, "session_id": "s-r7",
+              "result": ANSWER,
+              "usage": {"input_tokens": 120, "output_tokens": 40, "cache_read_input_tokens": 7}}
+    result.update(json.loads(ending))
+    emit(result)
+sys.exit(int(os.environ.get("R7_FAKE_EXIT", "0")))
 '''
 
 
@@ -248,7 +271,7 @@ def fake_claude(tmp_path, monkeypatch):
     out = tmp_path / "claude-started-with.json"
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
     monkeypatch.setenv("R7_FAKE_CLAUDE_OUT", str(out))
-    for key in ("VNX_TOTAL_DEADLINE", "VNX_CHUNK_TIMEOUT"):
+    for key in ("VNX_TOTAL_DEADLINE", "VNX_CHUNK_TIMEOUT", "R7_FAKE_RESULT", "R7_FAKE_EXIT"):
         monkeypatch.delenv(key, raising=False)
     for key, value in _PARENT_ANTHROPIC.items():
         monkeypatch.setenv(key, value)
@@ -283,7 +306,7 @@ class TestTheSeatRunsOnTheSubscription:
         argv = run["started_with"]["argv"]
         assert argv[argv.index("--model") + 1] == "sonnet"
         assert "--strict-mcp-config" in argv and "--bare" not in argv
-        assert "Write" in argv[argv.index("--disallowedTools") + 1]
+        assert argv[argv.index("--tools") + 1] == SEAT_TOOLS
         prompt = next(a for a in argv if a.startswith(claude_gate_lane.SEAT_NOTICE))
         assert prompt.endswith("REVIEW PROMPT with the verdict contract")
         cwd = Path(run["started_with"]["cwd"]).resolve()
@@ -330,10 +353,126 @@ class TestTheSeatRunsOnTheSubscription:
 def test_a_run_with_no_answer_is_a_failure_not_a_review():
     class _Result:
         returncode = 0
-        completion = {"text": ""}
+        completion = {"text": "", "subtype": "success", "is_error": False}
         completion_text = ""
 
-    assert claude_gate_lane.seat_exit_code(_Result(), claude_gate_lane.final_answer(_Result())) == 1
+    failure = claude_gate_lane.run_failure(_Result())
+    assert failure is not None and "no answer" in failure
+    assert claude_gate_lane.seat_exit_code(_Result(), failure) == 1
+
+
+# ---------------------------------------------------------------------------
+# Round 2 (codex_gate on 11700c12): no adapter default reaches the seat's argv,
+# and only a run that ends in a successful completion is a review
+# ---------------------------------------------------------------------------
+
+_SCOPE_ENV = ("VNX_WORKER_SCOPED", "VNX_WORKER_BLANKET_SKIP", "VNX_ENFORCE_WORKER_PERMISSIONS")
+_REVIEW_PROMPT = "REVIEW PROMPT with the verdict contract"
+
+
+def _run_seat(project: Path, dispatch_id: str) -> str:
+    return claude_gate_lane.make_claude_gate_dispatcher(
+        Path(os.environ["VNX_DATA_DIR"]), base_ref="origin/feat/r7", total_deadline_seconds=120,
+        project_root=project,
+    )("claude", "sonnet", _REVIEW_PROMPT, dispatch_id)
+
+
+@pytest.mark.parametrize("scope_env", [
+    {}, {"VNX_WORKER_SCOPED": "1"}, {"VNX_WORKER_SCOPED": "0"},
+    {"VNX_WORKER_BLANKET_SKIP": "1"}, {"VNX_ENFORCE_WORKER_PERMISSIONS": "1"},
+], ids=["scoped-unset", "scoped-1", "scoped-0", "blanket-skip", "enforcement-on"])
+def test_the_final_argv_is_the_allow_list_whatever_the_adapter_defaults(
+    pr_repo, fake_claude, monkeypatch, scope_env,
+):
+    for key in _SCOPE_ENV:
+        monkeypatch.delenv(key, raising=False)
+    for key, value in scope_env.items():
+        monkeypatch.setenv(key, value)
+    _run_seat(pr_repo, "claude-gate-pr7-1792700001")
+    argv = json.loads(fake_claude.read_text(encoding="utf-8"))["argv"]
+    prompt = f"{claude_gate_lane.SEAT_NOTICE}\n\n{_REVIEW_PROMPT}"
+    assert argv == ["-p", "--output-format", "stream-json", "--verbose", "--model", "sonnet", prompt, *SEAT_SCOPE]
+    flags = [token for token in argv if token != prompt]
+    assert "--dangerously-skip-permissions" not in flags
+    assert "--allow-dangerously-skip-permissions" not in flags
+    assert "bypassPermissions" not in flags and flags.count("--permission-mode") == 1
+    assert not [token for token in flags if "Bash" in token]
+
+
+# Every way a claude -p run can end that is not a review (claude 2.1.308
+# stream-json ``result``: subtype "success" or an error subtype, is_error on
+# both), with what the report and the gate record have to name and the exit code
+# the report carries. Each run streamed and completed with a PASS verdict.
+_BAD_ENDINGS = {
+    "error-max-turns": ({"R7_FAKE_RESULT": json.dumps({"subtype": "error_max_turns", "is_error": False})},
+                        "subtype 'error_max_turns'", 1),
+    "is-error-true": ({"R7_FAKE_RESULT": json.dumps({"is_error": True})}, "is_error True", 1),
+    "no-completion": ({"R7_FAKE_RESULT": "omit"}, "no completion event", 1),
+    "exit-nonzero": ({"R7_FAKE_EXIT": "3"}, "exited with code 3", 3),
+}
+
+
+@pytest.mark.parametrize("ending", sorted(_BAD_ENDINGS))
+def test_a_run_that_did_not_complete_successfully_is_a_failure_and_its_pass_is_not_in_the_report(
+    pr_repo, fake_claude, monkeypatch, ending,
+):
+    env, named, exit_code = _BAD_ENDINGS[ending]
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    dispatch_id = f"claude-gate-pr7-{1792700100 + sorted(_BAD_ENDINGS).index(ending)}"
+    report = _run_seat(pr_repo, dispatch_id)
+    frontmatter = parse_frontmatter(report)
+    assert frontmatter["exit_code"] == exit_code
+    assert named in report
+    assert extract_verdict_block(report) == {}, "the run's PASS is never read from its report"
+    receipts = Path(os.environ["VNX_DATA_DIR"]) / "state" / "t0_receipts.ndjson"
+    rows = [json.loads(line) for line in receipts.read_text(encoding="utf-8").splitlines() if line.strip()]
+    [receipt] = [row for row in rows if row.get("dispatch_id") == dispatch_id]
+    assert receipt["status"] == "failure" and named in receipt["failure_reason"]
+
+
+def _run_gate(project: Path, monkeypatch, tmp_path: Path, pr_number: int) -> dict:
+    """``claude_gate`` through GateRunner's harness-lane path, the seat run real and claude faked."""
+    import gate_runner
+
+    state = tmp_path / "gate-data" / "state"
+    for sub in ("requests", "results"):
+        (state / "review_gates" / sub).mkdir(parents=True)
+    reports = tmp_path / "gate-data" / "unified_reports"
+    reports.mkdir()
+    monkeypatch.setenv("VNX_STATE_DIR", str(state))
+    monkeypatch.setattr(
+        gate_runner.GateRunner, "_fetch_gh_pr_diff",
+        staticmethod(lambda _pr: "diff --git a/change.py b/change.py\n+x = 1\n"),
+    )
+    runner = gate_runner.GateRunner(state_dir=state, reports_dir=reports, project_root=project)
+    payload = {
+        "gate": GATE, "status": "requested", "branch": "feat/r7", "pr_number": pr_number,
+        "commit_sha": _git(project, "rev-parse", "origin/feat/r7").strip(),
+        "requested_at": "2026-10-22T15:00:00Z", "report_path": str(reports / f"{GATE}-pr{pr_number}.md"),
+    }
+    runner.run(gate=GATE, request_payload=payload, pr_number=pr_number)
+    return json.loads((state / "review_gates" / "results" / f"pr-{pr_number}-{GATE}.json").read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("ending", sorted(_BAD_ENDINGS))
+def test_the_runner_books_an_execution_failure_with_the_cause_and_never_the_pass(
+    pr_repo, fake_claude, monkeypatch, tmp_path, ending,
+):
+    env, named, _ = _BAD_ENDINGS[ending]
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    record = _run_gate(pr_repo, monkeypatch, tmp_path, pr_number=7)
+    assert record["status"] == "unavailable", record
+    assert record["reason"] == "harness_lane_exit_nonzero"
+    assert named in record["reason_detail"]
+    assert not record.get("verdict_source"), "no verdict was read from the run"
+
+
+def test_a_successful_completion_with_a_pass_still_passes_the_runner(pr_repo, fake_claude, monkeypatch, tmp_path):
+    record = _run_gate(pr_repo, monkeypatch, tmp_path, pr_number=7)
+    assert record["status"] == "completed", record
+    assert record["blocking_findings"] == [] and record["verdict_source"] == "report"
 
 
 # ---------------------------------------------------------------------------
