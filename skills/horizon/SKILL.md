@@ -63,10 +63,14 @@ trust the silent `vnx-dev` default in a multi-project context).
    - The dispatch that does the work carries the deliverable id as its dispatch id
      (`dispatch_id="dlv-..."` in `stage_spec_bundle`, after the deliverable is `ready`). Only
      then does the work count for that deliverable.
-   - A follow-up round on the same PR gets its own id `dlv-...-r2`, `-r3`, with `pr_id` and
-     `work_ref` set to the PR branch.
-   - After the merge, close the deliverable with
-     `vnx deliverable close <dlv> --evidence <pr> --project-id <pid>`.
+   - A follow-up round on the same PR gets its own id `dlv-...-r2`, `-r3`, with `pr_id` set to
+     the PR number and `work_ref` to the PR branch.
+   - Today the door sets the deliverable's row to `completed` when the builder's lane exits,
+     before review and merge, so the progress view shows the deliverable done while its PR is
+     still open. `vnx deliverable close <dlv> --evidence <pr>` then returns without recording the
+     PR (OI-2282). Until that is fixed, the merge evidence lives on the track: after the merge,
+     link the PR with `vnx objective link-pr <track> <pr> --delivery partial|complete` and read
+     the deliverable's `done` as "built", not as "merged".
    - Promote is the operator's gate. A T0 promotes only when the operator granted it with an
      allow rule for the promote command (set by the operator with `/permissions`; a T0 never
      edits its own permissions). The rule matches one command form, so run promote in exactly
