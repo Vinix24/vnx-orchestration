@@ -6,6 +6,111 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 
 ## [Unreleased]
 
+## [1.7.4] - 2026-10-22
+
+This release mainly enforces the provider switch (ADR-044). Every launch function in the census now calls `provider_switch.require`, the `vnx providers` write verbs (`off`, `on`, `reset`, `repair`) are live, the door refuses a switched-off provider, and the plan-gate and the deliberation panel leave a switched-off seat out and refuse below their floor. Claude and codex are outside the switch. It also adds `vnx providers usage` and the `verbruik` mod 0.1.0 that shows its figures, the `context-meter` plugin 1.0.0 with `context-rotation` 1.0.2, the cost ledger's spool replay (K2a-3b) with its dispatcher tick, the `cost-ledger` beacon and the ledger files in `vnx doctor` (K2a-3c) together with the OI-2250 repairs, `voortgang` 0.4.0 where the deliverable is the unit of a track row, and a fix for the launchd reload under `pipefail` (D3-6).
+
+No migration ships: no file under `schemas/migrations` or `scripts/lib/migrations` changed since v1.7.3, so the store schema stays as it was. Re-pinning a project to 1.7.3 leaves the files 1.7.4 writes readable. 1.7.3 lists only the top-level `*.json` files of the cost ledger spool and ignores `quarantine/`, names and validates spool files by the same rules, reads the `cost-ledger` beacon as any other beacon and reads the switch file, which stays at format version 1. Nothing in 1.7.3 replays the spool or refreshes that beacon, so a degraded one keeps the health summary at `stale` and reads `unknown` after seven days. The switch itself does not travel back. 1.7.3 honors it in the gate runner, the gate recorder, the deep analyzer, the dream cycle and `classifier_providers.get_provider`, and not at the door, in `provider_dispatch`, in the panels, in the spawn functions or in the adapters. Its write verbs refuse while launch functions are pending there, so turn a family back on with 1.7.4 before pinning back. The `verbruik` mod checks no version string: it shows only the Claude part when `vnx providers usage` is refused with `invalid choice`, as 1.7.3 and earlier do. The content boundary at the door and the panel and the nightly content-boundary check are still not in this release.
+
+- Added: the spool replay of the cost ledger (ADR-043 §6, K2a-3b): `cost_ledger.replay_spool` and `vnx costs replay [--json]`
+  (script, pip CLI and `bin/vnx`) bring spooled lines back into the ledger, one spool file per exclusive hold of the lock
+  file, at most `VNX_COST_LEDGER_REPLAY_BATCH` files in `VNX_COST_LEDGER_REPLAY_BUDGET_SEC` seconds. Under the lock file
+  the ledger `flock` is taken with `LOCK_NB` as well, bounded by what is left of the wait and the budget, so a writer of an
+  older fabric version cannot hold the replay, and every current writer behind it. The receipt the replay writes is
+  bounded by the same deadline: `emit_governance_receipt` and `append_receipt_payload` take an optional `lock_timeout`
+  (default unchanged), a bounded append queues its central mirror for the next unbounded one, and a receipt lock still
+  taken makes the call `lock_busy` with the spool file intact. A file is deleted only after the ledger is fsynced, also
+  when nothing was appended, and each of its records, written now or landed before, reads back as its own complete line
+  with the same content, field by field, so a killed replay leaves it and writes no line twice. A ledger line with a
+  spooled `record_id` and other content keeps the file, writes nothing for it and ends the call with
+  `readback_mismatch`; the replay goes on with the next file.
+  Exit 0 done, 1 an unreadable spool directory, a write failure or a mismatch, 3 a lock busy.
+  - A second execution under one `run_id` (an f2bef053 writer booked an attempt again while it waited in the spool) is
+    booked under the next free attempt with `renumbered_from` and a `cost_ledger_renumbered` receipt. A correction of a
+    renumbered record follows it under the renumbered run id, with `supersedes` naming the renumbered line, also when it
+    comes in a later call; the writer leaves such a correction to the replay (`landed == "spool"`).
+  - A spool file that is not one run's goes to `provider_costs.spool/quarantine/` (OI-2243), each one a file of the
+    batch and the budget; its receipt is booked before the move, and a move that failed after it is finished without a
+    second receipt. It counts in the new `LedgerTotals.spool_quarantined`; it no longer blocks `record_next_attempt`.
+  - The aggregation (OI-2244, OI-2241): a spooled record already in the ledger with the same content is no backlog, any
+    unreadable line makes the total incomplete, a reader of a store it may not write reads without creating the lock
+    file (`unlocked_read`), and the text says `1 run wacht op replay`.
+
+- Launchd reload (D3-6, track ci-profile-a-xdist): `reload_plist.sh` no longer tests for its placeholders through `printf | grep -q`.
+  Under `pipefail` that pipeline ends on 141 when grep exits at the first match while printf is still writing, and on a loaded Linux runner the project-id substitution was skipped (measured 14 of 6000 runs under CPU load, 0 unloaded).
+  The three checks now match in the shell, so the two reload tests that failed only under the xdist shape stop flaking.
+
+- Added: `vnx providers usage [--json]` (script, pip CLI and `bin/vnx`), the usage and balance of every provider in one read-only command and the data source of the usage mod (`scripts/lib/provider_usage.py`, schema `vnx.providers.usage/1`). One independent row per source: codex from the last `rate_limits` line of the newest rollout, kimi from the reachability records of every project store (a status, never a percentage; a weekly limit booked as `auth_401` reads as `vol tot reset`), deepseek and openrouter from their balance endpoints, claude as unavailable outside a session. A failing source gives `available: false` with a reason and never touches another row; each HTTP call has a 5 second timeout; no key is printed. The balance probe sits on `provider_switch.EXEMPT`.
+
+- voortgang 0.4.0 (OI-2248): the deliverable is the unit of a track row (`3/12`, then `bezig:` and `volgt:` with `(+N)`), a row has segments with their own tone (a new `ok` for the filled part of a bar, `ci groen` and `klaar voor merge`; `warn` for what waits on the operator; `error` for `ci rood` and `onbeschikbaar`), and the open PRs moved from their own section and from the track rows into `Nu bezig`.
+  - `Wacht op een besluit` counts `N te promoveren (now)`, only the proposed deliverables on tracks with horizon `now`, with a dim `backlog` row for `next` and `later`. Orphans on a track with phase `done` are not counted (OI-2249).
+  - `/voortgang plan` shows the tracks on `next` and `later` with their `volgt:` rows. The 0.3.1 changelog line about `dispatch_id: null` is corrected, `openPrsOf` is removed and the "whatever the index lists" test now gives the index a PR the queue misses.
+
+- Added: the `context-meter` plugin (`packages/claude-code-toolkit/context-meter`, 1.0.0), a Claude Code mod that draws one line above the prompt with the context fill in the bands of the context-rotation guard: green below warn, yellow from warn, red from force, with what the guard does there and the next threshold. It reads the guard's settings and its per-session `start_size` (the `min_work_tokens` hold), notes a window that does not match the percentage bands, and hides itself with `show_meter: false`. It is a plugin of its own because 2.1.303 loads a hooks module too and 2.1.300 to 2.1.302 were not measured (Part 0).
+  - `context-rotation` 1.0.2: the `show_meter` setting (a known boolean key in `DEFAULTS`) and `tests/test_meter_parity.py`; the settings loader and `band_guard._loop_level` are held to one fixture (43 settings cases, 14 min-work cases) that the meter's TypeScript port reads as well.
+  - `scripts/maintenance/export_toolkit_plugin.sh` takes `--plugin <context-rotation|context-meter>` (default `context-rotation`, the tag prefix and branch follow the plugin).
+
+- Added: the dispatcher prelude replays the cost ledger's spool (ADR-043 §6, K2a-3c). `_maybe_cost_ledger_replay` starts
+  `scripts/cost_ledger_replay.py` at most once per `VNX_COST_LEDGER_REPLAY_INTERVAL_SEC` (60) seconds, in every supervisor
+  mode, as a subprocess with a hard timeout of 20 seconds (`VNX_COST_LEDGER_TICK_TIMEOUT_SEC` may only lower it) and kills
+  it after that. It logs every failure (a non-zero exit, a kill, a log or threshold file that cannot be written) and always
+  returns 0; a threshold file that cannot be written still throttles the tick in memory. With an empty spool the replay
+  writes nothing.
+  - The `cost-ledger` beacon (`<data_dir>/health/cost-ledger.json`, event-driven) is written after every replay: degraded
+    (`stale` in the beacon file, `details.state: degraded`) while the spool holds a file, an unreadable file or a file in
+    quarantine, ok once it holds none; the details carry `spool_files` and the spool counts of `LedgerTotals`. Its shared
+    lock, the ledger `flock` and the beacon's own lock end at one deadline, `VNX_COST_LEDGER_LOCK_WAIT_SEC` after the
+    call began, so it never hangs behind a writer and never keeps one out longer, also in `vnx costs replay` run by
+    hand; a beacon that cannot be written in time is logged and skipped, and the replay's result and exit code stay.
+    An ok beacon older than a day (`BEACON_REFRESH_SECONDS`) is written again on an empty spool, so a healthy store no
+    longer reads `unknown` from day 8; a tick that stopped running still does.
+  - `vnx doctor` (both entrances) and the `vnx-data-footprint` probe know the cost ledger's own files: the ledger,
+    `events/provider_costs.lock`, the spool and its quarantine (`cost_ledger.ledger_files`, read-only, nothing created).
+    The doctor warns on a waiting or quarantined spool file and names an entry of the spool that is none of its own;
+    one file reads `1 spool file waits for the replay` and `spool 1 file`.
+- Fixed (OI-2250, the advisories of #2155): a renumbered line carries the spooled `record_id` in
+  `renumbered_from_record_id`, so a correction of a correction of a renumbered run follows it ($2.60, not $1.35) and a
+  replay killed between them writes no duplicate. A spool record without a splittable `run_id`, its `project_id`, a `kind`
+  or a correction's `supersedes` string goes to quarantine instead of ending the replay in a traceback. The lock file wait
+  is clamped to the replay's budget. A bounded receipt append records its mirror debt under the append lock it wrote the
+  receipt with, so contention can no longer drop it. The replay's receipts land in the project's resolved `VNX_STATE_DIR`.
+
+- Provider switch, panels (track provider-schakelaar, deliverable D): the plan-gate and the deliberation panel honor `vnx providers off`.
+  A plan-gate seat whose provider family is switched off for the track's project is left out before anything is dispatched.
+  The run output, the round's decision text (`gov_trace` and the rationale) and `--json` (`switched_off_seats`) name it, it is never booked as a seat, and nothing takes its place.
+  - One floor helper, `plan_gate_panel.panel_floor`, holds the rule `apply_panel_rule` already applied (a multi-seat panel keeps two voices). The seat assembly applies it to the seats the run was entitled to before removal: below it the run refuses before any dispatch, books no round and exits 4 (`REFUSED_PROVIDER_SWITCHED_OFF`), naming the seats, `vnx providers on <family>` and operator attest. A panel entitled to two or more seats never certifies on one voice.
+  - `--panel-seats` that names a switched-off seat refuses the same way. A switched-off escalation seat is left out and the run goes without one.
+  - A switched-off tiebreaker refuses before any call (`TiebreakerSwitchedOffError`, exit 4); the track stays blocked. The seat refusal applies only when a seat round would run, so a run that goes straight to the tiebreaker is not stopped by it.
+  - `plan-gate batch` tallies the refusal under its own bucket (`GEWEIGERD-provider-uit`) and does not mark the track done, so the next batch runs it once the provider is back on. The `--dry-run` preview names the left-out seats.
+  - `vnx panel` (`scripts/panel.py`) decides the switch for the current project: the default roster drops each switched-off seat with one named line, and below `synthesis_min_seats` the run refuses before any dispatch (exit 4) unless `--allow-degraded`. `--seats` that names a switched-off seat refuses.
+
+- verbruik 0.1.0 (V2): a new mod in `packages/vnx-mods/verbruik`, one status line with the usage of every subscription and the balance of the API providers. Claude comes from the session (`claude 5u 34% · week 61%`), codex, kimi, deepseek and openrouter from `vnx providers usage --json`, refreshed every `refreshMinutes` and kept as `(oud)` when a run fails.
+  - Needs VNX 1.7.4 for the other providers; an older vnx shows only the Claude part and `vnx te oud voor providers usage`. `/verbruik` lists the full figures. The status line takes no style, so a warning ends in `!` and an error in `!!`.
+
+- Provider switch, layer 1 and the dispatch path (provider-schakelaar B): every launch function in the census now
+  calls `provider_switch.require` before its first launch, so `PENDING_B` is gone, `LAUNCH_FUNCTIONS` is the enforced
+  set and the `vnx providers` write verbs (`off`, `on`, `reset`, `repair`) are live. A switched-off family raises
+  `ProviderDisabledError` before any process, request or `litellm.completion` starts.
+  - `spawn_claude` checks the `ANTHROPIC_BASE_URL` its child receives (extra env over the process env): a
+    non-Anthropic host is decided as that host's family, an OpenRouter host on the maker of the model, an unmapped
+    host is refused. The glm and deepseek harness spawns keep their own check and name the family of their redirect
+    (`base_url_family`), so a `VNX_GLM_PROXY_URL` on any host or port is decided as glm.
+  - `spawn_local_gemma` decides for the `project_id` it is given, for MLX and the Ollama fallback alike; the envelope
+    passes the plan's project.
+  - The door refuses a switched-off provider with `REJECT [provider-disabled]` and the decision detail, on the dry-run
+    and on the fire path, before the reachability probe. A refused fire lands one `provider_switched_off` dispatch
+    receipt; the dry-run writes nothing. `provider_dispatch` refuses by name with exit code 4, before
+    the route constraints and the daily budget. The router's `lane_available` skips a switched-off lane, names the
+    skip in the route reason and never writes a cooldown for it.
+  - `provider_dispatch`, `envelope_adapters_claude` and `subprocess_adapter` stamp `VNX_PROJECT_ID` and
+    `VNX_WORKER_DISPATCH_ID` into every worker env (`provider_switch.worker_env_stamps`), so the door, the launch
+    function and the worker decide for one project, and the write verbs refuse inside any worker (exit 5).
+  - A refusal is never a reachability fact: `failure_classification` has the class `provider_switched_off` (matched
+    before every keyword bag, escalation `no_climb`), and `provider_reachability.classify_failure_text` ignores a
+    refusal text, so switching a family back on lets the next call through at once.
+
+- Provider switch (provider-schakelaar F): `docs/core/PROVIDER_SWITCH.md` is the operator reference for `vnx providers` (families, precedence, version policy, fail-closed and `repair`, write protection, and how a refusal shows up per consumer, including what fail-closed costs), and ADR-044 records the decision. `docs/core/DISPATCH_RULES.md` points to it. The "not enforced yet" pending mechanism is gone: `pending_launch_functions()` is removed and the coverage guard asserts that every launch function in `LAUNCH_FUNCTIONS` calls `provider_switch.require`. `vnx providers list --json` reports `enforcement` as `{"launch_functions": N}`; the `enforced` and `pending` keys are gone because nothing is pending. No other change in behavior; the write verbs were already live.
+
 ## [1.7.3] - 2026-10-21
 
 This release carries the tiebreaker at the B3 review cap with its verdict table (migration 0035, ADR-041, R2a and R2b). It also carries the cost ledger: one line per run with a mandatory source and dated price versions (ADR-043, K2a-1 and K2a-2, #2126), one ordering lock file with the spool as the write fallback, and `spool_conflicts` (K2a-3a). The `voortgang` mod in `packages/vnx-mods` now shows the progress of one project per session, with a bar per track and a status line (0.3.0 and 0.3.1). The T0 rotation hands the first message over as a start argument (OI-2102). The shipped skills are consumer-safe and resolve the vnx CLI in one order (#2146, #2147, OI-2226), and a release PR gets a review task that sends the reviewer into the tree (OI-2242).
