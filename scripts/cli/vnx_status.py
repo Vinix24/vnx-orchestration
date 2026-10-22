@@ -4,6 +4,8 @@
 Reads the strategic-state projection (current_state.md) and the
 runtime-state snapshot (t0_state.json) from VNX_STATE_DIR / VNX_DATA_DIR
 and renders a 1-screen human-readable dashboard, or JSON via --json.
+With --live, live_work and queues are measured at the call instead of read
+from the snapshot (OI-2268).
 Read-only: no writes to runtime state.
 """
 from __future__ import annotations
@@ -13,10 +15,15 @@ import json
 import os
 import re
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_SCRIPTS_DIR / "lib"))
+# build_t0_state.py (the live measurement) lives in scripts/, not scripts/lib/.
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.append(str(_SCRIPTS_DIR))
 from health_status import worst_status  # noqa: E402
 from vnx_paths import ensure_env  # noqa: E402
 
@@ -166,6 +173,67 @@ def _state_freshness(t0: dict, state_dir: Path) -> dict:
     }
 
 
+# ── Live measurement (--live, OI-2268) ────────────────────────────────
+#
+# t0_state.json is a snapshot: a dispatch row or a pending bundle that appears
+# after the last build is not in it, and dispatch_guard.sh read GO from it.
+# --live measures the two sections the guard decides on at the call, with
+# build_t0_state's own functions (measure_live_sections), and stamps the answer
+# with live_measured_at so a reader can prove it is fresh. The rest of the
+# snapshot stays as built: a full build takes about 15 s on vnx-dev.
+
+_LIVE_SECTIONS = ("live_work", "queues")
+
+
+def _measure_live(t0: dict, state_dir: Path, dispatch_dir: Path) -> dict:
+    """live_work and queues as they are now, with when and which reads failed.
+
+    A builder that does not even import leaves both sections unmeasured with
+    the reason: never an empty list, never a zero count.
+    """
+    measured_at = datetime.now(timezone.utc)
+    started = time.monotonic()
+    try:
+        import build_t0_state
+
+        sections = build_t0_state.measure_live_sections(state_dir, dispatch_dir, t0.get("pr_queue"))
+    except Exception as exc:  # vnx-silent-except: the failure is returned as unmeasured sections with their reason, and the guard reads it as WAIT
+        reason = f"live measurement raised: {type(exc).__name__}: {exc}"
+        sections = {
+            "live_work": {"available": False, "reason": reason, "read_error": True},
+            "queues": {
+                "pending_count": None,
+                "conflict_count": None,
+                "pending_unmeasured_reason": reason,
+                "conflict_unmeasured_reason": reason,
+            },
+            "degraded_reasons": [f"live_work unavailable: {reason}", f"queues unmeasured: {reason}"],
+        }
+    return {
+        "live_work": sections["live_work"],
+        "queues": sections["queues"],
+        "unmeasured": list(sections["degraded_reasons"]),
+        "measured_at": measured_at.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+        "duration_seconds": round(time.monotonic() - started, 3),
+    }
+
+
+def _live_marker(live: dict | None) -> dict:
+    """How live_work and queues in this answer were obtained."""
+    if live is None:
+        return {
+            "mode": "snapshot",
+            "sections": [],
+            "reason": "live_work and queues are read from t0_state.json as built; --live measures them at the call",
+        }
+    return {
+        "mode": "live",
+        "sections": list(_LIVE_SECTIONS),
+        "duration_seconds": live["duration_seconds"],
+        "unmeasured": live["unmeasured"],
+    }
+
+
 # ── Dashboard sections ────────────────────────────────────────────────
 
 def _active_waves(waves: list[dict], n: int = 3) -> list[dict]:
@@ -202,11 +270,17 @@ def _print_prs(cs: dict) -> None:
         print(f"  {_c('dim', chr(8226))} {pr}")
 
 
-def _print_live_work(t0: dict) -> None:
+def _print_live_work(t0: dict, live: dict | None = None) -> None:
     # D5: what runs comes from the dispatches table plus the occupancy flock
     # (build_t0_state._build_live_work). The headless lane uses no terminals.
     _header("Live Work")
-    live_work = t0.get("live_work") or {}
+    if live is not None:
+        print(f"  {_c('dim', 'measured live at ' + live['measured_at'])}")
+        live_work = live["live_work"] or {}
+    else:
+        generated_at = str(t0.get("generated_at") or "unknown")
+        print(f"  {_c('dim', 'snapshot of t0_state.json, generated_at ' + generated_at + ' (--live measures now)')}")
+        live_work = t0.get("live_work") or {}
     if not live_work.get("available"):
         reason = live_work.get("reason") or "no live_work in t0_state.json"
         print(f"  {_c('yellow', 'unavailable')}: {reason}")
@@ -251,9 +325,17 @@ def _print_decisions(cs: dict) -> None:
 
 # ── JSON output ───────────────────────────────────────────────────────
 
-def _build_json_output(cs: dict, t0: dict, state_dir: Path) -> dict:
+def _build_json_output(cs: dict, t0: dict, state_dir: Path, live: dict | None = None) -> dict:
+    """The vnx_status/1.0 answer. *live* (from _measure_live) replaces the
+    snapshot's live_work and queues; a read in it that failed degrades
+    system_health the way it would in a build."""
     freshness = _state_freshness(t0, state_dir)
     system_health = dict(t0.get("system_health", {}))
+    if live is not None and live["unmeasured"]:
+        system_health["status"] = worst_status(system_health.get("status", "healthy"), "fail")
+        system_health["degraded_reasons"] = list(system_health.get("degraded_reasons") or []) + [
+            f"live measurement: {reason}" for reason in live["unmeasured"]
+        ]
     if freshness.get("stale"):
         # "fail" here is the nested-signal severity floor (worst_status maps
         # it to "degraded", one tier below "failed" reserved for db-level
@@ -273,11 +355,15 @@ def _build_json_output(cs: dict, t0: dict, state_dir: Path) -> dict:
         "focus": cs.get("focus", ""),
         "active_waves": _active_waves(cs.get("waves", [])),
         "open_prs": cs.get("prs", [])[:3],
-        "live_work": t0.get("live_work", {}),
+        "live_work": live["live_work"] if live is not None else t0.get("live_work", {}),
         "recent_decisions": cs.get("decisions", [])[:3],
-        "queues": t0.get("queues", {}),
+        "queues": live["queues"] if live is not None else t0.get("queues", {}),
         "system_health": system_health,
         "state_freshness": freshness,
+        # OI-2268: proof of when live_work and queues were measured. null and
+        # mode "snapshot" mean they are t0_state.json's, as built.
+        "live_measured_at": live["measured_at"] if live is not None else None,
+        "live_measurement": _live_marker(live),
         "strategy_available": bool(cs),
         "t0_state_available": bool(t0),
     }
@@ -296,6 +382,15 @@ def main(argv: list[str] | None = None, data_dir: Path | None = None) -> int:
         action="store_true",
         help="Emit parseable JSON (stable schema: vnx_status/1.0)",
     )
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help=(
+            "Measure live_work and queues now (dispatches table + occupancy flock, "
+            "dispatches/pending and conflicts) instead of reading t0_state.json; "
+            "the answer carries live_measured_at"
+        ),
+    )
     args, _extra = parser.parse_known_args(argv)
 
     if data_dir is None:
@@ -303,7 +398,10 @@ def main(argv: list[str] | None = None, data_dir: Path | None = None) -> int:
         # the per-project central store ~/.vnx-data/<project_id>), not via
         # resolve_data_dir(__file__) which, under a central install, resolves relative to
         # the install dir and misses the project's store entirely (issue #225).
-        data_dir = Path(ensure_env()["VNX_DATA_DIR"])
+        paths = ensure_env()
+        data_dir = Path(paths["VNX_DATA_DIR"])
+    else:
+        paths = None
 
     strategy_dir = data_dir / "strategy"
     state_dir = data_dir / "state"
@@ -325,9 +423,14 @@ def main(argv: list[str] | None = None, data_dir: Path | None = None) -> int:
 
     cs = _parse_current_state(strategy_dir) if strategy_ok else {}
     t0 = _load_t0_state(state_dir) if t0_ok else {}
+    live = None
+    if args.live:
+        # The pending queue the build counts: VNX_DISPATCH_DIR, as build_t0_state reads it.
+        dispatch_dir = Path(paths["VNX_DISPATCH_DIR"]) if paths is not None else data_dir / "dispatches"
+        live = _measure_live(t0, state_dir, dispatch_dir)
 
     if args.emit_json:
-        print(json.dumps(_build_json_output(cs, t0, state_dir), indent=2))
+        print(json.dumps(_build_json_output(cs, t0, state_dir, live=live), indent=2))
         return 0
 
     if not strategy_ok:
@@ -344,7 +447,7 @@ def main(argv: list[str] | None = None, data_dir: Path | None = None) -> int:
     _print_focus(cs)
     _print_waves(cs)
     _print_prs(cs)
-    _print_live_work(t0)
+    _print_live_work(t0, live)
     _print_decisions(cs)
     print()
     return 0

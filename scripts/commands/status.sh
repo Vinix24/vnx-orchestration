@@ -280,6 +280,7 @@ print(f'  Conflicts:        {queues.get(\"conflict_count\", \"?\")}')
 cmd_status() {
   local mode="all"
   local json_out=0
+  local live=0
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -288,6 +289,7 @@ cmd_status() {
       --gates)      mode="gates" ;;
       --workers)    mode="workers" ;;
       --json)       json_out=1 ;;
+      --live)       live=1 ;;
       -h|--help)
         cat <<HELP
 Usage: vnx status [OPTIONS]
@@ -300,14 +302,19 @@ Options:
   --gates       Show only gate results (legacy view)
   --workers     Show live worker health (subprocess dispatches)
   --json        Machine-readable JSON (schema: vnx_status/1.0)
-                Keys: schema, focus, active_waves, open_prs, terminals,
+                Keys: schema, focus, active_waves, open_prs, live_work,
                       recent_decisions, queues, system_health,
+                      state_freshness, live_measured_at, live_measurement,
                       strategy_available, t0_state_available
+  --live        Measure live_work and queues now (dispatches table plus
+                occupancy flock, dispatches/pending and conflicts) instead
+                of reading t0_state.json; live_measured_at says when
   -h, --help    Show this help
 
 Examples:
   vnx status
   vnx status --json | python3 -m json.tool
+  vnx status --json --live
   vnx status --terminals
   vnx status --gates
   vnx status --workers
@@ -328,6 +335,7 @@ HELP
     if command -v python3 >/dev/null 2>&1 && [ -f "$_status_py" ]; then
       local _py_args=()
       [ "$json_out" -eq 1 ] && _py_args+=("--json")
+      [ "$live" -eq 1 ] && _py_args+=("--live")
       PYTHONPATH="${VNX_HOME}/scripts/lib:${PYTHONPATH:-}" \
         python3 "$_status_py" "${_py_args[@]+"${_py_args[@]}"}"
       return $?

@@ -1296,6 +1296,63 @@ def _build_live_work(
     }
 
 
+def _project_id_for(state_dir: Path) -> str:
+    """The project a state dir belongs to; ambient VNX_PROJECT_ID as the fallback."""
+    return project_id_from_state_dir(state_dir) or os.environ.get("VNX_PROJECT_ID", "").strip()
+
+
+def _live_degraded_reasons(live_work: Dict[str, Any], queues: Dict[str, Any]) -> List[str]:
+    """One system_health reason per live section whose read raised.
+
+    A precondition that was not met (no DB, no project_id, a pre-migration
+    schema) is ``available: false`` without ``read_error`` and is no reason.
+    """
+    return (
+        ([f"live_work unavailable: {live_work.get('reason')}"] if live_work.get("read_error") else [])
+        + _queue_degraded_reasons(queues)
+    )
+
+
+def measure_live_sections(
+    state_dir: Path,
+    dispatch_dir: Path,
+    pr_queue: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """``live_work`` and ``queues`` measured now, from the sources build_t0_state reads.
+
+    ``vnx status --json --live`` calls this so dispatch_guard.sh decides on the
+    dispatches table, the occupancy flock and ``dispatches/pending`` as they are
+    at the call, not as the last build saw them (OI-2268). *pr_queue* only links
+    open PRs to their rows; it decides nothing.
+
+    A section whose measurement raises comes back unavailable (``live_work``)
+    or with ``None`` counts plus a ``*_unmeasured_reason`` (``queues``), never
+    as an empty list or a zero. ``degraded_reasons`` names every read that
+    failed, in the words build_t0_state puts in system_health.
+    """
+    try:
+        live_work = _build_live_work(state_dir, _project_id_for(state_dir), pr_queue)
+    except Exception as exc:  # vnx-silent-except: the failure is returned as live_work unavailable with its reason, and degrades system_health
+        live_work = _live_work_unavailable(
+            f"measurement raised: {type(exc).__name__}: {exc}", read_error=True,
+        )
+    try:
+        queues = _build_queues(dispatch_dir, state_dir)
+    except Exception as exc:  # vnx-silent-except: the failure is returned as unmeasured counts with their reason, and degrades system_health
+        reason = f"measurement raised: {type(exc).__name__}: {exc}"
+        queues = {
+            "pending_count": None,
+            "conflict_count": None,
+            "pending_unmeasured_reason": reason,
+            "conflict_unmeasured_reason": reason,
+        }
+    return {
+        "live_work": live_work,
+        "queues": queues,
+        "degraded_reasons": _live_degraded_reasons(live_work, queues),
+    }
+
+
 def _live_work_index_summary(live_work: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Compact live_work for the always-loaded t0_index.json (<=5KB budget).
 
@@ -2647,10 +2704,7 @@ def build_t0_state(
     _pytest_db_isolation_guard(state_dir)
     start = time.monotonic()
 
-    project_id = (
-        project_id_from_state_dir(state_dir)
-        or os.environ.get("VNX_PROJECT_ID", "").strip()
-    )
+    project_id = _project_id_for(state_dir)
     migration_skip = _migration_skip(state_dir)
     db_ok = _init_and_check_db(state_dir, migration_skip)
     # R6.1: probe quality_intelligence.db; classify locked/malformed (not premigration)
@@ -2686,11 +2740,7 @@ def build_t0_state(
         state_dir, db_ok, db_health=db_health,
         db_reason=db_reason,
         migration_skip=migration_skip,
-        degraded_reasons=(
-            ([f"live_work unavailable: {live_work.get('reason')}"]
-             if live_work.get("read_error") else [])
-            + _queue_degraded_reasons(queues)
-        ),
+        degraded_reasons=_live_degraded_reasons(live_work, queues),
     )
 
     return {

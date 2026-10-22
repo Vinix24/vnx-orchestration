@@ -9,6 +9,8 @@ read the ``t0_brief.json`` presentation cache:
 
 Each test builds a throwaway git repo that holds a copy of the scripts under test and a
 stub ``bin/vnx`` that answers per working directory, so the real runtime is never read.
+The stub answers as a CLI that measured live_work and queues at the call (OI-2268):
+``__NOW__`` in its answer becomes the time of the call.
 """
 
 from __future__ import annotations
@@ -43,7 +45,14 @@ def _status(busy: bool) -> dict:
             "stale": [],
             "unmeasured": [],
         },
+        "live_measured_at": "__NOW__",
+        "live_measurement": {
+            "mode": "live", "sections": ["live_work", "queues"], "duration_seconds": 0.01, "unmeasured": [],
+        },
     }
+
+
+_STAMP = 'sed "s/__NOW__/$(date -u +%Y-%m-%dT%H:%M:%SZ)/"'
 
 
 def _make_repo(tmp_path: Path) -> Path:
@@ -64,7 +73,7 @@ def _make_repo(tmp_path: Path) -> Path:
     stub.write_text(
         "#!/usr/bin/env bash\n"
         'if [ "$1 $2" = "status --json" ]; then\n'
-        f'  if [ "$(pwd -P)" = "{repo.resolve()}" ]; then cat "{busy_json}"; else cat "{idle_json}"; fi\n'
+        f'  if [ "$(pwd -P)" = "{repo.resolve()}" ]; then {_STAMP} "{busy_json}"; else {_STAMP} "{idle_json}"; fi\n'
         "  exit 0\n"
         "fi\n"
         "exit 1\n",
@@ -133,7 +142,7 @@ class TestCanDispatchDelegatesToGuard:
         repo = _make_repo(tmp_path)
         (repo / "bin" / "vnx").write_text(
             "#!/usr/bin/env bash\n"
-            f"cat <<'JSON'\n{json.dumps(_status(False))}\nJSON\n",
+            f"{_STAMP} <<'JSON'\n{json.dumps(_status(False))}\nJSON\n",
             encoding="utf-8",
         )
         result = _intel(repo, tmp_path, "can_dispatch")
