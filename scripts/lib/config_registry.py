@@ -159,6 +159,25 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "Must match gate_request_handler._DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN verbatim "
         "(pinned by test_beta3_e1_review_gate_chain.py).", approval=True,
         subsystem="governance-enforcement-stack", status="LIVE"),
+    # OI-2288: the codex review seat's reasoning effort, read by
+    # gate_runner.resolve_codex_review_effort at every codex_gate launch. Listed
+    # read-only (writable=False): like the codex model pins this module's header
+    # keeps out of the UI, it is read from the process environment and never
+    # from project_config, so a dashboard value would change nothing. Not the
+    # last governance-enforcement-stack entry, so the ledger row keeps its flag.
+    "VNX_CODEX_REVIEW_EFFORT": _e(
+        "VNX_CODEX_REVIEW_EFFORT", "string", "", "gate",
+        "Reasoning effort the codex_gate review seat is launched with (OI-2288). Empty "
+        "(the default): per the request's risk class, high for high or critical and "
+        "medium for every other class or none. Set: one of low, medium, high, xhigh or "
+        "max for every codex review. Any other value fails the run as "
+        "codex_review_effort_invalid, naming the variable and the value. Before OI-2288 "
+        "the gate passed no effort, so model_reasoning_effort in the operator's "
+        "~/.codex/config.toml (xhigh) decided every review; the model's own default is "
+        "medium. The result record carries the effort used as reasoning_effort. "
+        "Env-only: read from the process environment at launch.",
+        writable=False,
+        subsystem="governance-enforcement-stack", status="ACTIVATE"),
     "VNX_CI_GATE_REQUIRED": _e(
         "VNX_CI_GATE_REQUIRED", "bool", "1", "gate",
         "Require the CI gate before merge.", approval=True,

@@ -155,6 +155,164 @@ def test_gate_cmd_fails_closed_without_registry_default(runner, tmp_path, monkey
 
 
 # ---------------------------------------------------------------------------
+# Path 1, OI-2288: the review seat's reasoning effort follows the risk class.
+# Without it codex took model_reasoning_effort from ~/.codex/config.toml (xhigh).
+# ---------------------------------------------------------------------------
+
+EFFORT_ENV = "VNX_CODEX_REVIEW_EFFORT"
+CODEX_VERDICT_STREAM = (
+    VNX_ROOT / "tests" / "fixtures" / "gate_verdict" / "pr-1869-codex_gate-bare-verdict.ndjson"
+).read_bytes()
+
+
+@pytest.fixture
+def no_effort_env(monkeypatch):
+    monkeypatch.delenv(EFFORT_ENV, raising=False)
+
+
+def _effort_arg(cmd):
+    return [a for a in cmd if a.startswith("model_reasoning_effort=")]
+
+
+@pytest.mark.parametrize(
+    "payload, effort",
+    [
+        ({"risk_class": "low"}, "medium"),
+        ({"risk_class": "medium"}, "medium"),
+        ({}, "medium"),
+        ({"risk_class": None}, "medium"),
+        ({"risk_class": "high"}, "high"),
+        ({"risk_class": "critical"}, "high"),
+    ],
+)
+def test_gate_cmd_effort_follows_the_risk_class(runner, tmp_registry, no_effort_env, payload, effort):
+    cmd = runner._build_gate_cmd("codex_gate", "codex", dict(payload))
+    assert _effort_arg(cmd) == [f'model_reasoning_effort="{effort}"']
+    assert cmd[cmd.index(f'model_reasoning_effort="{effort}"') - 1] == "-c"
+    assert cmd[cmd.index("-c") + 1] == f'model="{TMP_MODEL}"', "the model stays the first -c"
+
+
+@pytest.mark.parametrize("value", ["low", "medium", "high", "xhigh", "max"])
+def test_gate_cmd_effort_env_wins_over_the_risk_class(runner, tmp_registry, monkeypatch, value):
+    monkeypatch.setenv(EFFORT_ENV, value)
+    for risk in ("low", "critical"):
+        cmd = runner._build_gate_cmd("codex_gate", "codex", {"risk_class": risk})
+        assert _effort_arg(cmd) == [f'model_reasoning_effort="{value}"']
+
+
+def test_gate_cmd_empty_effort_env_means_per_risk_class(runner, tmp_registry, monkeypatch):
+    monkeypatch.setenv(EFFORT_ENV, "")
+    cmd = runner._build_gate_cmd("codex_gate", "codex", {"risk_class": "high"})
+    assert _effort_arg(cmd) == ['model_reasoning_effort="high"']
+
+
+@pytest.mark.parametrize("bad", ["extreme", "HIGH", "minimal", "5", "high,low"])
+def test_gate_cmd_refuses_an_invalid_effort(runner, tmp_registry, monkeypatch, bad):
+    monkeypatch.setenv(EFFORT_ENV, bad)
+    with pytest.raises(gate_runner.CodexReviewEffortError) as raised:
+        runner._build_gate_cmd("codex_gate", "codex", {"risk_class": "medium"})
+    assert EFFORT_ENV in str(raised.value)
+    assert repr(bad) in str(raised.value)
+
+
+def test_other_gates_carry_no_reasoning_effort(runner, monkeypatch):
+    monkeypatch.setenv(EFFORT_ENV, "high")
+    assert _effort_arg(runner._build_gate_cmd("gemini_review", "gemini", {"risk_class": "high"})) == []
+
+
+def test_codex_review_effort_invalid_is_an_execution_failure_reason():
+    assert "codex_review_effort_invalid" in EXECUTION_FAILURE_REASONS
+
+
+def test_effort_variable_is_registered_env_only_with_an_empty_default():
+    import config_registry
+
+    entry = config_registry.CONFIG_REGISTRY[EFFORT_ENV]
+    assert (entry.type, entry.default, entry.category) == ("string", "", "gate")
+    assert entry.writable_from_ui is False, "the runner reads the environment, not project_config"
+    assert "OI-2288" in entry.description
+    assert gate_runner.CODEX_REVIEW_EFFORT_ENV == EFFORT_ENV
+
+
+def test_gate_run_books_an_invalid_effort_and_launches_nothing(runner, tmp_registry, tmp_path, monkeypatch):
+    monkeypatch.setenv(EFFORT_ENV, "extreme")
+    worktree = tmp_path / "gate-wt"
+    worktree.mkdir()
+    payload = {"prompt": "review", "branch": "dispatch/x", "pr_number": 7, "risk_class": "high"}
+    with patch("gate_runner.shutil.which", return_value="/usr/bin/codex"), \
+         patch("gate_runner.create_gate_worktree", return_value=worktree), \
+         patch("gate_runner.remove_gate_worktree"), \
+         patch("gate_runner.subprocess.Popen") as popen:
+        result = runner.run(gate="codex_gate", request_payload=payload, pr_number=7, pr_id="pr-7")
+    popen.assert_not_called()
+    results = _read_gate_files(runner, "results")
+    assert len(results) == 1
+    assert (results[0]["status"], results[0]["reason"]) == ("unavailable", "codex_review_effort_invalid")
+    assert EFFORT_ENV in results[0]["reason_detail"]
+    assert "'extreme'" in results[0]["reason_detail"]
+    assert result["reason"] == "codex_review_effort_invalid"
+    requests = _read_gate_files(runner, "requests")
+    assert requests and all(r["status"] != "executing" for r in requests)
+
+
+def _run_codex_to_a_verdict(runner, tmp_path, payload):
+    proc = MagicMock()
+    proc.stdout.fileno.return_value = 10
+    proc.stderr.fileno.return_value = 11
+    proc.poll.return_value = 0
+    proc.returncode = 0
+    proc.pid = 4242
+    reads = iter([CODEX_VERDICT_STREAM])
+
+    def fake_read(fd, _size):
+        return next(reads, b"") if fd == 10 else b""
+
+    with patch("gate_runner.shutil.which", return_value="/usr/bin/codex"), \
+         patch("gate_runner.create_gate_worktree", return_value=tmp_path), \
+         patch("gate_runner.remove_gate_worktree"), \
+         patch("gate_runner.subprocess.Popen", return_value=proc) as popen, \
+         patch("gate_runner.select.select", return_value=([], [], [])), \
+         patch("gate_runner.os.read", side_effect=fake_read), \
+         patch("gate_runner.os.getpgid", return_value=4242):
+        result = runner.run(gate="codex_gate", request_payload=payload, pr_number=7)
+    return result, popen.call_args[0][0]
+
+
+@pytest.mark.parametrize("risk, effort", [("high", "high"), ("low", "medium")])
+def test_result_payload_carries_reasoning_effort_next_to_the_model(
+    runner, tmp_registry, tmp_path, no_effort_env, risk, effort,
+):
+    payload = {
+        "prompt": "review", "branch": "dispatch/x", "pr_number": 7, "risk_class": risk,
+        "report_path": str(tmp_path / "reports" / f"codex-{risk}.md"),
+    }
+    result, cmd = _run_codex_to_a_verdict(runner, tmp_path, payload)
+
+    assert result["status"] == "completed", result
+    assert f'model_reasoning_effort="{effort}"' in cmd
+    record = _read_gate_files(runner, "results")[0]
+    assert record["reasoning_effort"] == effort
+    assert record["model"] == TMP_MODEL
+    assert result["reasoning_effort"] == effort
+
+
+def test_a_previous_runs_launch_record_is_dropped_before_the_next_run(runner, tmp_registry, tmp_path, no_effort_env):
+    """A re-executed request must not carry the last run's model and effort
+    into a run that never launched codex."""
+    payload = {
+        "prompt": "review", "branch": "dispatch/x", "pr_number": 7, "risk_class": "high",
+        "codex_launch": {"model": "stale-model", "reasoning_effort": "xhigh"},
+    }
+    with patch("gate_runner.shutil.which", return_value="/usr/bin/codex"), \
+         patch("gate_runner.create_gate_worktree", side_effect=gate_runner.GateWorktreeError("no checkout")), \
+         patch("gate_runner.subprocess.Popen") as popen:
+        runner.run(gate="codex_gate", request_payload=payload, pr_number=7)
+    popen.assert_not_called()
+    requests = _read_gate_files(runner, "requests")
+    assert requests and all("codex_launch" not in r for r in requests)
+
+
+# ---------------------------------------------------------------------------
 # Path 2: codex_wrapper
 # ---------------------------------------------------------------------------
 

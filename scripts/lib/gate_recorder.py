@@ -343,6 +343,10 @@ EXECUTION_FAILURE_REASONS: frozenset = frozenset({
     # registry or no openai.default_model; OI-2062). The gate never started,
     # exactly like `binary_not_found`: it books `unavailable`.
     "codex_model_unresolved",
+    # VNX_CODEX_REVIEW_EFFORT holds a value codex has no reasoning effort for
+    # (OI-2288). Refused before the launch, like codex_model_unresolved: the
+    # gate never started, so it books `unavailable` under its own name.
+    "codex_review_effort_invalid",
     # The gate ran to completion and investigated nothing (OI-1485). Absence
     # of evidence, exactly like a timeout: the PR was never actually reviewed,
     # so this must book `unavailable` and be re-bought, never `failed` (which
