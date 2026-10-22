@@ -33,6 +33,10 @@ import {
   reportJson,
 } from './fixtures'
 
+/** The fixed clock of these tests: one hour before the upper bound the kimi rows carry, unless a test sets its own. */
+const BOUND = new Date(2026, 9, 24, 13, 5)
+const NOW = BOUND.getTime() - 60 * 60_000
+
 const reportOf = (json: string): Report => {
   const parsed = parseReport(json)
 
@@ -45,7 +49,7 @@ const reportOf = (json: string): Report => {
 
 const fleetOf = (json: string, cause: string | null = null): Fleet => ({ report: reportOf(json), cause, isTooOld: false })
 
-const lineOf = (json: string, columns: number | null = null): string => fit(segmentsOf(RATE_LIMITS, fleetOf(json), CONFIG), columns)
+const lineOf = (json: string, columns: number | null = null): string => fit(segmentsOf(RATE_LIMITS, fleetOf(json), CONFIG, NOW), columns)
 
 describe('the config', () => {
   test('takes the defaults of the manifest', () => {
@@ -77,11 +81,65 @@ describe('the provider rows of vnx providers usage', () => {
     expect(rows).toEqual(['codex', 'kimi', 'deepseek', 'openrouter'])
   })
 
-  test('shows kimi full with a known upper bound as "reset uiterlijk" in local time, still as an error', () => {
-    const latest = new Date(2026, 9, 25, 14, 5)
-    const line = lineOf(reportJson({ kimi: { ...KIMI_FULL, resets_at_latest: latest.toISOString() } }))
+  describe('kimi full with a known upper bound', () => {
+    const MINUTE = 60_000
+    const HOUR = 60 * MINUTE
+    const kimiSegment = (before: number, json = reportJson({ kimi: { ...KIMI_FULL, resets_at_latest: BOUND.toISOString() } })) =>
+      segmentsOf([], fleetOf(json), CONFIG, BOUND.getTime() - before).find(segment => segment.key === 'kimi')
+    const kimiAt = (before: number): string | undefined => kimiSegment(before)?.text
+    const kimiToneAt = (before: number) => kimiSegment(before)?.tone
 
-    expect(line).toBe('claude 5u 34% · week 61% · kimi reset uiterlijk 25-10 14:05 !!')
+    test('shows days and hours above 24 hours, rounded up, as an error', () => {
+      expect(kimiAt(43 * HOUR - MINUTE)).toBe('kimi terug over 1d 19u (uiterlijk 24-10 13:05) !!')
+      expect(kimiAt(42 * HOUR + MINUTE)).toBe('kimi terug over 1d 19u (uiterlijk 24-10 13:05) !!')
+      expect(kimiAt(2 * 24 * HOUR)).toBe('kimi terug over 2d 00u (uiterlijk 24-10 13:05) !!')
+      expect(kimiToneAt(42 * HOUR)).toBe('error')
+    })
+
+    test('shows hours and minutes at exactly 24 hours and between 1 and 24 hours', () => {
+      expect(kimiAt(24 * HOUR)).toBe('kimi terug over 24u 00m (uiterlijk 24-10 13:05) !!')
+      expect(kimiAt(24 * HOUR + MINUTE)).toBe('kimi terug over 1d 01u (uiterlijk 24-10 13:05) !!')
+      expect(kimiAt(5 * HOUR + 6 * MINUTE + 10_000)).toBe('kimi terug over 5u 07m (uiterlijk 24-10 13:05) !!')
+      expect(kimiAt(HOUR)).toBe('kimi terug over 1u 00m (uiterlijk 24-10 13:05) !!')
+    })
+
+    test('shows minutes under an hour and rounds a part of a minute up to a whole one', () => {
+      expect(kimiAt(42 * MINUTE)).toBe('kimi terug over 42m (uiterlijk 24-10 13:05) !!')
+      expect(kimiAt(59 * MINUTE + 30_000)).toBe('kimi terug over 1u 00m (uiterlijk 24-10 13:05) !!')
+      expect(kimiAt(59_000)).toBe('kimi terug over 1m (uiterlijk 24-10 13:05) !!')
+      expect(kimiAt(1)).toBe('kimi terug over 1m (uiterlijk 24-10 13:05) !!')
+    })
+
+    test('at the bound and after it names only the stored bound, as a warning', () => {
+      expect(kimiAt(0)).toBe('kimi laatst vol, grens 24-10 13:05 voorbij !')
+      expect(kimiAt(-1)).toBe('kimi laatst vol, grens 24-10 13:05 voorbij !')
+      expect(kimiAt(-30 * 24 * HOUR)).toBe('kimi laatst vol, grens 24-10 13:05 voorbij !')
+      expect(kimiToneAt(0)).toBe('warning')
+      expect(kimiToneAt(-HOUR)).toBe('warning')
+    })
+
+    test('marks the old figures after the countdown when a run failed', () => {
+      const fleet = fleetOf(reportJson({ kimi: { ...KIMI_FULL, resets_at_latest: BOUND.toISOString() } }), 'vnx gaf exit 1')
+
+      expect(segmentsOf([], fleet, CONFIG, NOW).find(segment => segment.key === 'kimi')?.text).toBe('kimi terug over 1u 00m (uiterlijk 24-10 13:05) !! (oud)')
+    })
+
+    test('drops the longer text before codex on a narrow terminal and keeps the Claude 5-hour figure', () => {
+      const fleet = fleetOf(reportJson({ codex: CODEX_ROW, kimi: { ...KIMI_FULL, resets_at_latest: BOUND.toISOString() } }))
+      const segments = segmentsOf(RATE_LIMITS, fleet, CONFIG, NOW)
+      const full = 'claude 5u 34% · week 61% · codex 58% · kimi terug over 1u 00m (uiterlijk 24-10 13:05) !!'
+      const widthOf = (text: string): number => [...text].length + STATUS_OVERHEAD
+
+      expect(fit(segments, widthOf(full))).toBe(full)
+      expect(fit(segments, widthOf(full) - 1)).toBe('claude 5u 34% · week 61% · codex 58%')
+      expect(fit(segments, 10)).toBe('claude 5u 34%')
+    })
+
+    test('shows the countdown in the /verbruik text', () => {
+      const text = commandText([], fleetOf(reportJson({ kimi: { ...KIMI_FULL, resets_at_latest: BOUND.toISOString() } })), CONFIG, NOW)
+
+      expect(text).toContain('kimi: terug over 1u 00m (uiterlijk 24-10 13:05) !!')
+    })
   })
 
   test('keeps "vol tot reset" when the upper bound is onbekend or unreadable', () => {
@@ -110,6 +168,7 @@ describe('the provider rows of vnx providers usage', () => {
       RATE_LIMITS,
       fleetOf(reportJson({ codex: CODEX_UNAVAILABLE, deepseek: DEEPSEEK_UNAVAILABLE, openrouter: OPENROUTER_UNAVAILABLE })),
       CONFIG,
+      NOW,
     )
 
     expect(segments.map(segment => segment.text)).toEqual([
@@ -141,7 +200,7 @@ describe('the provider rows of vnx providers usage', () => {
 
   test('never prints a path, whatever a reason holds', () => {
     const reason = { available: false, reason: 'kan /Users/someone/.state/x niet lezen in ~/data/y.json' }
-    const text = commandText(RATE_LIMITS, fleetOf(reportJson({ codex: reason })), CONFIG) + lineOf(reportJson({ codex: reason }))
+    const text = commandText(RATE_LIMITS, fleetOf(reportJson({ codex: reason })), CONFIG, NOW) + lineOf(reportJson({ codex: reason }))
 
     expect(text).not.toMatch(/\/Users|~\/|\.json|\.state/)
     expect(shortReason('')).toBe('niet beschikbaar')
@@ -154,7 +213,7 @@ describe('a run that does not give a report', () => {
 
   test('keeps the last good figures, marks each (oud) and names the cause once', () => {
     const fleet = advance(good(), outcomeOf({ exitCode: 1, stdout: '', stderr: 'boom' }))
-    const line = fit(segmentsOf(RATE_LIMITS, fleet, CONFIG), null)
+    const line = fit(segmentsOf(RATE_LIMITS, fleet, CONFIG, NOW), null)
 
     expect(line).toBe(
       'claude 5u 34% · week 61% · codex 58% (oud) · kimi vol tot reset !! (oud) · deepseek $12.92 (oud) · openrouter $4.91 ! (oud) · vnx-meting mislukt: vnx gaf exit 1',
@@ -188,7 +247,7 @@ describe('a run that does not give a report', () => {
   test('shows a failure before any good run as the Claude part and the cause', () => {
     const fleet = advance(NEVER_RAN, outcomeOf({ exitCode: 1, stdout: '', stderr: '' }))
 
-    expect(fit(segmentsOf(RATE_LIMITS, fleet, CONFIG), null)).toBe('claude 5u 34% · week 61% · vnx-meting mislukt: vnx gaf exit 1')
+    expect(fit(segmentsOf(RATE_LIMITS, fleet, CONFIG, NOW), null)).toBe('claude 5u 34% · week 61% · vnx-meting mislukt: vnx gaf exit 1')
   })
 
   test('takes the figures back, and drops the cause, at the next good run', () => {
@@ -208,8 +267,8 @@ describe('an older vnx without providers usage', () => {
   test('shows the Claude part and the notice, and no other provider', () => {
     const fleet = advance(fleetOf(FULL_REPORT), outcomeOf(OLD_VNX))
 
-    expect(fit(segmentsOf(RATE_LIMITS, fleet, CONFIG), null)).toBe('claude 5u 34% · week 61% · vnx te oud voor providers usage')
-    expect(segmentsOf(RATE_LIMITS, fleet, CONFIG).at(-1)?.tone).toBe('dim')
+    expect(fit(segmentsOf(RATE_LIMITS, fleet, CONFIG, NOW), null)).toBe('claude 5u 34% · week 61% · vnx te oud voor providers usage')
+    expect(segmentsOf(RATE_LIMITS, fleet, CONFIG, NOW).at(-1)?.tone).toBe('dim')
   })
 })
 
@@ -246,6 +305,7 @@ describe('the tones', () => {
       ],
       fleetOf(FULL_REPORT),
       CONFIG,
+      NOW,
     )
 
     expect(segments.map(segment => [segment.key, segment.tone])).toEqual([
@@ -263,21 +323,21 @@ describe('the tones', () => {
   test('takes the worst tone of the balances of one provider', () => {
     const several = { available: true, balances: [{ currency: 'USD', total: '12' }, { currency: 'EUR', total: '0.5' }] }
 
-    expect(segmentsOf([], fleetOf(reportJson({ deepseek: several })), CONFIG).find(s => s.key === 'deepseek')?.tone).toBe('error')
+    expect(segmentsOf([], fleetOf(reportJson({ deepseek: several })), CONFIG, NOW).find(s => s.key === 'deepseek')?.tone).toBe('error')
   })
 })
 
 describe('the Claude part', () => {
   test('says nog geen meting, dim, and never a zero, when the session has no reading', () => {
-    const segments = segmentsOf([], NEVER_RAN, CONFIG)
+    const segments = segmentsOf([], NEVER_RAN, CONFIG, NOW)
 
     expect(segments).toEqual([{ key: 'claude5', text: 'claude: nog geen meting', tone: 'dim' }])
   })
 
   test('shows only the window it has', () => {
-    expect(fit(segmentsOf([{ kind: 'seven_day', percentUsed: 12 }], NEVER_RAN, CONFIG), null)).toBe('claude week 12%')
-    expect(fit(segmentsOf([{ kind: 'five_hour', percentUsed: 8.25 }], NEVER_RAN, CONFIG), null)).toBe('claude 5u 8.3%')
-    expect(fit(segmentsOf([{ kind: 'spend_limit', percentUsed: 8 }], NEVER_RAN, CONFIG), null)).toBe('claude: nog geen meting')
+    expect(fit(segmentsOf([{ kind: 'seven_day', percentUsed: 12 }], NEVER_RAN, CONFIG, NOW), null)).toBe('claude week 12%')
+    expect(fit(segmentsOf([{ kind: 'five_hour', percentUsed: 8.25 }], NEVER_RAN, CONFIG, NOW), null)).toBe('claude 5u 8.3%')
+    expect(fit(segmentsOf([{ kind: 'spend_limit', percentUsed: 8 }], NEVER_RAN, CONFIG, NOW), null)).toBe('claude: nog geen meting')
   })
 })
 
@@ -307,11 +367,11 @@ describe('the width', () => {
   })
 
   test('drops the cause and the old-vnx notice before any figure', () => {
-    const failed = fit(segmentsOf(RATE_LIMITS, fleetOf(FULL_REPORT, 'vnx gaf exit 1'), CONFIG), null)
+    const failed = fit(segmentsOf(RATE_LIMITS, fleetOf(FULL_REPORT, 'vnx gaf exit 1'), CONFIG, NOW), null)
     const narrower = failed.replace(' · vnx-meting mislukt: vnx gaf exit 1', '')
 
-    expect(fit(segmentsOf(RATE_LIMITS, fleetOf(FULL_REPORT, 'vnx gaf exit 1'), CONFIG), widthOf(narrower))).toBe(narrower)
-    expect(fit(segmentsOf(RATE_LIMITS, advance(NEVER_RAN, { kind: 'too-old' }), CONFIG), widthOf('claude 5u 34% · week 61%'))).toBe(
+    expect(fit(segmentsOf(RATE_LIMITS, fleetOf(FULL_REPORT, 'vnx gaf exit 1'), CONFIG, NOW), widthOf(narrower))).toBe(narrower)
+    expect(fit(segmentsOf(RATE_LIMITS, advance(NEVER_RAN, { kind: 'too-old' }), CONFIG, NOW), widthOf('claude 5u 34% · week 61%'))).toBe(
       'claude 5u 34% · week 61%',
     )
   })
@@ -321,7 +381,7 @@ describe('/verbruik', () => {
   test('lists every provider with its numbers or its reason, and when the report was measured', () => {
     const fleet = fleetOf(reportJson({ codex: CODEX_UNAVAILABLE, kimi: KIMI_FULL, deepseek: DEEPSEEK_ROW, openrouter: OPENROUTER_ROW }))
 
-    expect(commandText(RATE_LIMITS, fleet, CONFIG).split('\n')).toEqual([
+    expect(commandText(RATE_LIMITS, fleet, CONFIG, NOW).split('\n')).toEqual([
       'Verbruik',
       'claude 5u: 34%, reset 2026-10-21T23:00:00.000Z',
       'claude week: 61%, reset 2026-10-27T16:00:00.000Z',
@@ -334,14 +394,14 @@ describe('/verbruik', () => {
   })
 
   test('says so when there is no reading, when the last run failed and when the vnx is too old', () => {
-    expect(commandText([], NEVER_RAN, CONFIG).split('\n')).toEqual(['Verbruik', 'claude: nog geen meting', 'andere providers: nog geen meting'])
-    expect(commandText(RATE_LIMITS, fleetOf(reportJson({ codex: CODEX_ROW }), 'ander schema'), CONFIG)).toContain('codex: 58% (oud)')
-    expect(commandText(RATE_LIMITS, fleetOf(reportJson({ codex: CODEX_ROW }), 'ander schema'), CONFIG)).toContain('laatste meting mislukt: ander schema')
-    expect(commandText(RATE_LIMITS, { report: null, cause: null, isTooOld: true }, CONFIG)).toContain('vnx te oud voor providers usage')
+    expect(commandText([], NEVER_RAN, CONFIG, NOW).split('\n')).toEqual(['Verbruik', 'claude: nog geen meting', 'andere providers: nog geen meting'])
+    expect(commandText(RATE_LIMITS, fleetOf(reportJson({ codex: CODEX_ROW }), 'ander schema'), CONFIG, NOW)).toContain('codex: 58% (oud)')
+    expect(commandText(RATE_LIMITS, fleetOf(reportJson({ codex: CODEX_ROW }), 'ander schema'), CONFIG, NOW)).toContain('laatste meting mislukt: ander schema')
+    expect(commandText(RATE_LIMITS, { report: null, cause: null, isTooOld: true }, CONFIG, NOW)).toContain('vnx te oud voor providers usage')
   })
 
   test('carries no key of a row the report had besides its figures', () => {
-    const text = commandText(RATE_LIMITS, fleetOf(FULL_REPORT), CONFIG)
+    const text = commandText(RATE_LIMITS, fleetOf(FULL_REPORT), CONFIG, NOW)
 
     expect(text).not.toMatch(/auth_401|rollout|plus|source|store/)
     expect(CLAUDE_ROW.available).toBe(false)

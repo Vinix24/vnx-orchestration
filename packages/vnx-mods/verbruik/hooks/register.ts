@@ -15,8 +15,10 @@ let columns: number | null = null
 // Joins a run asked while one is going: one run at a time.
 let running: Promise<void> | null = null
 
-function redraw($: EngineInterface, config: Config): void {
-  $.ui.status(fit(segmentsOf(rateLimits, fleet, config), columns))
+async function redraw($: EngineInterface, config: Config): Promise<void> {
+  const now = await $.clock.now()
+
+  $.ui.status(fit(segmentsOf(rateLimits, fleet, config, now), columns))
 }
 
 async function binOf($: EngineInterface, config: Config): Promise<string> {
@@ -40,7 +42,7 @@ async function measure($: EngineInterface, config: Config): Promise<void> {
     running = null
   }
 
-  redraw($, config)
+  await redraw($, config)
 }
 
 function refresh($: EngineInterface, config: Config): Promise<void> {
@@ -56,7 +58,7 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     rateLimits = (await $.session.usage()).rateLimits
-    redraw($, config)
+    await redraw($, config)
     await $.command.register({ name: 'verbruik', description: 'Toont het verbruik van elke provider en ververst de meting' })
     void refresh($, config)
     $.clock.every(config.refreshMinutes * MINUTE_MS, () => {
@@ -68,7 +70,7 @@ export const register: Register = (on, options) => {
 
   on('session.measure', async ($, e, next) => {
     rateLimits = e.rateLimits
-    redraw($, config)
+    await redraw($, config)
 
     return next(e)
   })
@@ -79,7 +81,7 @@ export const register: Register = (on, options) => {
 
     if (width !== columns) {
       columns = width
-      redraw($, config)
+      await redraw($, config)
     }
 
     return next(e)
@@ -89,6 +91,6 @@ export const register: Register = (on, options) => {
     rateLimits = (await $.session.usage()).rateLimits
     await refresh($, config)
 
-    return { text: commandText(rateLimits, fleet, config) }
+    return { text: commandText(rateLimits, fleet, config, await $.clock.now()) }
   })
 }
