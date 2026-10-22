@@ -118,6 +118,39 @@ _HARNESS_LANE_ISOLATION_NOTICE = (
 # The consumer name the runner's provider-switch decisions carry (provider-schakelaar C).
 _SWITCH_CONSUMER = "gate_runner"
 
+# OI-2288: the codex review seat passed a model but no reasoning effort, so
+# model_reasoning_effort from the operator's ~/.codex/config.toml (xhigh)
+# decided every review, while the model's own default is medium. The effort is
+# now always passed: VNX_CODEX_REVIEW_EFFORT when set, else per risk class.
+CODEX_REVIEW_EFFORT_ENV = "VNX_CODEX_REVIEW_EFFORT"
+CODEX_REVIEW_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+_HIGH_EFFORT_RISK_CLASSES = frozenset({"high", "critical"})
+
+
+class CodexReviewEffortError(ValueError):
+    """``VNX_CODEX_REVIEW_EFFORT`` holds a value codex has no effort for (OI-2288)."""
+
+
+def resolve_codex_review_effort(risk_class: Optional[str]) -> str:
+    """The reasoning effort a codex_gate review is launched with (OI-2288).
+
+    ``VNX_CODEX_REVIEW_EFFORT`` wins when it is set and not empty; empty means
+    "per risk class", the registered default. Otherwise risk ``high`` or
+    ``critical`` gives ``high`` and every other value, none included, gives
+    ``medium``. A set value outside ``CODEX_REVIEW_EFFORTS`` raises
+    ``CodexReviewEffortError`` naming the variable and the value: a typo must
+    not fall back to some effort without anyone seeing it.
+    """
+    configured = (os.environ.get(CODEX_REVIEW_EFFORT_ENV) or "").strip()
+    if configured:
+        if configured not in CODEX_REVIEW_EFFORTS:
+            raise CodexReviewEffortError(
+                f"{CODEX_REVIEW_EFFORT_ENV}={configured!r} is not a codex reasoning effort; "
+                f"allowed: {', '.join(CODEX_REVIEW_EFFORTS)}, or empty for per risk class"
+            )
+        return configured
+    return "high" if (risk_class or "").strip().lower() in _HIGH_EFFORT_RISK_CLASSES else "medium"
+
 # The dispatcher (plan_gate_panel._make_default_dispatcher) reports a provider_dispatch
 # run that left no report as ``no report for <id> (rc=<exit code>)``. For that RuntimeError the
 # message is the only place the exit code of the lane surfaces, so the refusal exit code is read
@@ -556,6 +589,20 @@ def _codex_model_refusal(
     return f"{sentence} | requested model: {requested} | codex binary: {os.path.realpath(binary_path)}"
 
 
+def _unlaunched_codex_result(reason: str, exc: Exception) -> Dict[str, Any]:
+    """The run result of a codex gate that was never launched (OI-2062, OI-2288).
+
+    ``reason`` is in ``gate_recorder.EXECUTION_FAILURE_REASONS``, so the run
+    books ``unavailable``: the PR was not reviewed, it was not rejected.
+    """
+    return {
+        "status": "failed", "reason": reason,
+        "reason_detail": str(exc), "stdout": "", "stderr": str(exc),
+        "duration_seconds": 0.0, "partial_output_lines": 0,
+        "runner_pid": os.getpid(),
+    }
+
+
 def _build_reason_detail(base_detail: str, stdout: str, stderr: str) -> str:
     """Attach diagnostic evidence to a failure reason instead of discarding it (OI-1293).
 
@@ -801,7 +848,13 @@ class GateRunner:
         self, gate: str, request_payload: Dict[str, Any], *,
         pr_number: Optional[int], pr_id: str,
     ) -> None:
-        """GATE-3: Mark request as executing and persist to disk."""
+        """GATE-3: Mark request as executing and persist to disk.
+
+        A request booked ``unavailable`` can run again. The codex launch record
+        of the run before (OI-2288) is dropped here, so a run that never
+        launches codex does not carry that model and effort as its own.
+        """
+        request_payload.pop("codex_launch", None)
         request_payload["status"] = "executing"
         request_payload["started_at"] = utc_now_iso()
         request_payload["runner_pid"] = os.getpid()
@@ -861,12 +914,10 @@ class GateRunner:
         except provider_registry.CodexModelResolutionError as exc:
             # The gate never started: no model to launch it with (OI-2062). Booked
             # like a missing binary, so the request ends terminal, never `executing`.
-            result = {
-                "status": "failed", "reason": "codex_model_unresolved",
-                "reason_detail": str(exc), "stdout": "", "stderr": str(exc),
-                "duration_seconds": 0.0, "partial_output_lines": 0,
-                "runner_pid": os.getpid(),
-            }
+            result = _unlaunched_codex_result("codex_model_unresolved", exc)
+        except CodexReviewEffortError as exc:
+            # Same shape for an effort codex cannot be launched with (OI-2288).
+            result = _unlaunched_codex_result("codex_review_effort_invalid", exc)
         finally:
             remove_gate_worktree(worktree_path, project_root=self._project_root)
 
@@ -1342,7 +1393,13 @@ class GateRunner:
                 or os.environ.get("VNX_CODEX_MODEL")
                 or request_payload.get("model"),
             )
-            cli_args = cli_args + ["-c", f'model="{model}"']
+            # OI-2288: the effort too, so config.toml decides neither. Stamped on
+            # the request under its own key, never under "model": that key is an
+            # input above, and a re-run would read this run's model as a pin.
+            # gate_artifacts copies both onto the result record.
+            effort = resolve_codex_review_effort(request_payload.get("risk_class"))
+            cli_args = cli_args + ["-c", f'model="{model}"', "-c", f'model_reasoning_effort="{effort}"']
+            request_payload["codex_launch"] = {"model": model, "reasoning_effort": effort}
         return [binary] + cli_args
 
     def _drain_remaining(self, fd_map: Dict[int, str], raw_fds: List[int],
