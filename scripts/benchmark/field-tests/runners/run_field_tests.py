@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -126,29 +125,11 @@ def run_one_cell(
         expected_files = rubric.get("expected_files", [])
         expected_rubric = rubric
 
-    try:
-        score = score_cell(
-            dispatch_result=result, task_meta=task, task_folder=task_folder,
-            instruction=instruction, expected_files=expected_files,
-            expected_rubric=expected_rubric, run_judge=run_judge,
-        )
-    finally:
-        # lane_adapter may have created a temp checkout purely for scoring
-        # (tmux cell whose worktree was reaped but whose branch survived).
-        # F8 (PR #831, deferred 1.0.1): a removal failure here is logged but
-        # not surfaced as a structured result — a leaked worktree is possible.
-        if result.scoring_worktree is not None:
-            rm = subprocess.run(
-                ["git", "-C", str(REPO_ROOT), "worktree", "remove", "--force",
-                 str(result.scoring_worktree)],
-                capture_output=True, text=True, check=False,
-            )
-            if rm.returncode != 0:
-                print(
-                    f"  ⚠ scoring-worktree removal failed for {result.scoring_worktree}: "
-                    f"{(rm.stderr or '').strip()[:200]}",
-                    file=sys.stderr,
-                )
+    score = score_cell(
+        dispatch_result=result, task_meta=task, task_folder=task_folder,
+        instruction=instruction, expected_files=expected_files,
+        expected_rubric=expected_rubric, run_judge=run_judge,
+    )
     return {"dispatch": result, "score": score}
 
 

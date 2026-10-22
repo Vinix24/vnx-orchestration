@@ -108,7 +108,7 @@ def test_hook_rows_exclude_unwired_worker_intelligence_injection():
 def test_hook_rows_include_the_real_userpromptsubmit_hook():
     rows = ac.build_hook_rows()
     by_event = {row["event"]: row["scripts"] for row in rows}
-    assert "tmux_signal_prompt_received.sh" in by_event.get("UserPromptSubmit", [])
+    assert "t0_context_guard.py" in by_event.get("UserPromptSubmit", [])
 
 
 # ---------------------------------------------------------------------------

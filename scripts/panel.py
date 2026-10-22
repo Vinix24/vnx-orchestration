@@ -132,7 +132,7 @@ def main(argv: "list[str] | None" = None) -> int:
         print(f"panel: refused before any dispatch: {refusal}", file=sys.stderr)
         return provider_switch.EXIT_PROVIDER_SWITCHED_OFF
 
-    # Pass a REAL data_dir: the claude/tmux lane writes each report to
+    # Pass a REAL data_dir: the claude lane writes each report to
     # <data_dir>/unified_reports/<id>.md and _read_report falls back to that path. With
     # data_dir=None the claude-lane reports (fan-out + synthesis) are written but never found
     # → no cited synthesis (sales-copilot T0, 2026-07-10). unified_reports_dir().parent IS
