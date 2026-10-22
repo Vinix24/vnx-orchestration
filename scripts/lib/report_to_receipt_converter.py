@@ -1862,7 +1862,7 @@ def convert_report_to_receipt(
     or None on unreadable / malformed / rejected / errored input (warning
     or error logged, no crash). Thin wrapper over _convert_one_detailed()
     that preserves this exact return contract for existing callers
-    (scripts/hooks/tmux_signal_stop_receipt.sh and direct-call tests) —
+    (direct-call tests) —
     scan_and_convert() calls _convert_one_detailed() directly for its richer
     per-outcome counts.
     """
