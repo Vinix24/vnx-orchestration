@@ -35,6 +35,7 @@ from providers import provider_registry
 import gate_artifacts as _art
 import provider_switch
 import vertex_ai_runner as _vtx
+from claude_gate_lane import CLAUDE_LANE_PROVIDER
 from gate_worktree import (
     create_gate_worktree,
     remove_gate_worktree,
@@ -326,6 +327,7 @@ def _harness_lane_prompt_diff_chars(request_payload: Dict[str, Any], prompt: str
 
 def _build_harness_lane_dispatcher(
     gate: str, data_dir: Path, base_ref: str, request_payload: Dict[str, Any], prompt: str,
+    *, project_root: Optional[Path] = None,
 ):
     """Build the governed dispatcher with a deadline that fits the diff (OI-2066).
 
@@ -341,15 +343,29 @@ def _build_harness_lane_dispatcher(
     The applied deadline is stamped on the request as ``timeout_seconds``; the
     success writer (``gate_artifacts.materialize_artifacts``) and the failure
     writer (``gate_recorder.record_failure``) both carry it onto the result.
-    """
-    # Lazy import: plan_gate_panel pulls in the whole governed dispatch
-    # graph, and only the harness-lane path needs it.
-    from plan_gate_panel import _make_default_dispatcher
 
+    A gate registered on the ``claude`` lane (``claude_gate``, R7) gets
+    ``claude_gate_lane``'s dispatcher, on the subscription, in a worktree
+    allocated in ``project_root`` (``None``: the consumer project root).
+    """
     timeouts = _harness_lane_dispatcher_timeouts(
         gate, _harness_lane_prompt_diff_chars(request_payload, prompt),
     )
     request_payload["timeout_seconds"] = timeouts["total_deadline_seconds"]
+    if _rec.resolve_gate_provider(gate) == (_rec.GATE_PROVIDER_HARNESS_LANE, CLAUDE_LANE_PROVIDER):
+        # R7: the claude seat never goes through provider_dispatch, which refuses
+        # claude. Same call shape, the lane's own deadline; no outer process.
+        # Looked up on the module at call time, like plan_gate_panel's below.
+        import claude_gate_lane
+
+        return claude_gate_lane.make_claude_gate_dispatcher(
+            data_dir, base_ref=base_ref,
+            total_deadline_seconds=timeouts["total_deadline_seconds"], project_root=project_root,
+        )
+    # Lazy import: plan_gate_panel pulls in the whole governed dispatch
+    # graph, and only the harness-lane path needs it.
+    from plan_gate_panel import _make_default_dispatcher
+
     return _make_default_dispatcher(
         str(data_dir), timeouts["timeout_seconds"], role="review-gate", base_ref=base_ref,
         total_deadline_seconds=timeouts["total_deadline_seconds"],
@@ -829,7 +845,7 @@ class GateRunner:
             prompt = self._build_gemini_prompt(request_payload)
         elif not prompt and gate == "codex_gate":
             prompt = self._build_codex_prompt(request_payload)
-        elif not prompt and gate in ("glm_gate", "kimi_gate", "deepseek_gate"):
+        elif not prompt and gate in ("glm_gate", "kimi_gate", "deepseek_gate", "claude_gate"):
             prompt = self._build_harness_lane_prompt(gate, request_payload)
         if (
             using_vertex
@@ -1057,7 +1073,7 @@ class GateRunner:
         report_text = ""
         try:
             dispatcher = _build_harness_lane_dispatcher(
-                gate, data_dir, base_ref, request_payload, prompt,
+                gate, data_dir, base_ref, request_payload, prompt, project_root=self._project_root,
             )
             report_text = dispatcher(provider, model, prompt, dispatch_id)
             # OI-2066: a report that SAYS the lane's own deadline stopped the

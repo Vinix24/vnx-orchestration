@@ -55,6 +55,9 @@ _PROVIDER_TO_REGISTRY_KEY: dict[str, str] = {
 # rate table was removed. Everything metered goes through price_run.
 _SUBSCRIPTION_FLAT_PROVIDERS = frozenset({"kimi", "litellm:moonshot", "litellm:ollama"})
 
+# The billing modes a provider cost event can carry (emit_provider_cost).
+BILLING_MODES = frozenset({"metered", "subscription", "unmetered"})
+
 
 def registry_key_for_provider(provider: str) -> str | None:
     """The wave7_models.yaml section a VNX provider literal is priced and identified in.
@@ -259,6 +262,7 @@ def emit_provider_cost(
     project_id: str = "",
     metadata: dict | None = None,
     cost_source: str | None = None,
+    billing_mode: str | None = None,
 ) -> None:
     """Append a provider cost NDJSON event to .vnx-data/events/provider_costs.ndjson.
 
@@ -281,7 +285,17 @@ def emit_provider_cost(
     <version-date>`` or ``unavailable:no_price:<model>``), so a missing price
     is never recorded as a free run — ``cost_usd_estimate`` stays ``None`` and
     the source names why.
+
+    ``billing_mode`` is the caller's own statement of how the call is billed,
+    one of :data:`BILLING_MODES`; it replaces the derivation below. A run on a
+    subscription costs 0 at the margin, and a ``cost_usd_estimate`` of 0.0
+    would otherwise be booked ``metered`` (claude_gate, R7). Any other value
+    raises ValueError before anything is written.
     """
+    if billing_mode is not None and billing_mode not in BILLING_MODES:
+        raise ValueError(
+            f"billing_mode {billing_mode!r} is not one of {', '.join(sorted(BILLING_MODES))}"
+        )
     effective_project_id = project_id or os.environ.get("VNX_PROJECT_ID", "vnx-dev")
     timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     record_id = _make_record_id(
@@ -294,13 +308,15 @@ def emit_provider_cost(
     )
 
     # Determine billing mode from cost_usd_estimate and the subscription-flat
-    # lane set (the rate table that used to carry the flat flag is gone).
-    if cost_usd_estimate is not None:
-        billing_mode = "metered"
-    elif provider in _SUBSCRIPTION_FLAT_PROVIDERS:
-        billing_mode = "subscription"
-    else:
-        billing_mode = "unmetered"
+    # lane set (the rate table that used to carry the flat flag is gone),
+    # unless the caller stated it.
+    if billing_mode is None:
+        if cost_usd_estimate is not None:
+            billing_mode = "metered"
+        elif provider in _SUBSCRIPTION_FLAT_PROVIDERS:
+            billing_mode = "subscription"
+        else:
+            billing_mode = "unmetered"
 
     event: dict = {
         "record_id": record_id,

@@ -43,7 +43,7 @@ KNOWN_DOMAINS = frozenset({
 # unimplemented), so test_gate_name_registry pins the two equal: a gate added to
 # the registry fails that test until it is added here.
 IMPLEMENTED_GATES = frozenset({
-    "ci_gate", "claude_github_optional", "codex_gate", "deepseek_gate",
+    "ci_gate", "claude_gate", "claude_github_optional", "codex_gate", "deepseek_gate",
     "glm_gate", "kimi_gate", "wiring_gate",
 })
 

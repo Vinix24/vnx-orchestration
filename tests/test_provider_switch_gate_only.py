@@ -247,7 +247,7 @@ def test_status_only_never_consults_the_switch(harness):
 # The gates `--only` may run: registered in gate_recorder.GATE_PROVIDERS and not retired in
 # dispatch_spec.RETIRED_GATE_NAMES. Pinned against both below, so a new or retired gate
 # fails here instead of drifting.
-LIVE_GATES = ("ci_gate", "claude_github_optional", "codex_gate", "deepseek_gate",
+LIVE_GATES = ("ci_gate", "claude_gate", "claude_github_optional", "codex_gate", "deepseek_gate",
               "glm_gate", "kimi_gate", "wiring_gate")
 RETIRED_GATE = "gemini_review"
 

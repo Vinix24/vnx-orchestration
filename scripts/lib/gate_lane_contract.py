@@ -36,13 +36,15 @@ logger = logging.getLogger(__name__)
 # differs from the build lane's DEFAULT_DEEPSEEK_HARNESS_MODEL
 # (provider_spawns/deepseek_harness_spawn.py, deepseek-v4-pro). The name
 # `deepseek-v4-flash` is a phased-out alias the vendor reroutes to V4.1-Flash
-# and must not be used as the default. The env var is the per-gate override an
-# operator sets before the run; the default is what the governed lane
-# dispatches when it is unset.
+# and must not be used as the default. claude_gate runs sonnet on the operator's
+# subscription (R7, operator decision 2026-10-22) through claude_gate_lane. The
+# env var is the per-gate override an operator sets before the run; the default
+# is what the governed lane dispatches when it is unset.
 MODEL_DEFAULTS: Dict[str, tuple] = {
     "glm_gate": ("VNX_GLM_GATE_MODEL", "glm-5.2"),
     "kimi_gate": ("VNX_KIMI_GATE_MODEL", "kimi-k3"),
     "deepseek_gate": ("VNX_DEEPSEEK_GATE_MODEL", "deepseek-flash"),
+    "claude_gate": ("VNX_CLAUDE_GATE_MODEL", "sonnet"),
 }
 
 # The BASE lane deadline of a harness-lane review gate, in seconds.
@@ -80,6 +82,7 @@ TIMEOUT_CONFIG: Dict[str, tuple] = {
     "kimi_gate": ("VNX_KIMI_GATE_TIMEOUT_SECONDS", TIMEOUT_SECONDS),
     "glm_gate": ("VNX_GLM_GATE_TIMEOUT_SECONDS", TIMEOUT_SECONDS),
     "deepseek_gate": ("VNX_DEEPSEEK_GATE_TIMEOUT_SECONDS", TIMEOUT_SECONDS),
+    "claude_gate": ("VNX_CLAUDE_GATE_TIMEOUT_SECONDS", TIMEOUT_SECONDS),
 }
 
 # Diff cap applied by gate_prompt.build_review_prompt: the diff is delimited,
@@ -124,6 +127,7 @@ DIFF_CHAR_CONFIG: Dict[str, tuple] = {
     "kimi_gate": ("VNX_KIMI_GATE_MAX_DIFF_CHARS", DEFAULT_MAX_DIFF_CHARS),
     "glm_gate": ("VNX_GLM_GATE_MAX_DIFF_CHARS", DEFAULT_MAX_DIFF_CHARS),
     "deepseek_gate": ("VNX_DEEPSEEK_GATE_MAX_DIFF_CHARS", DEFAULT_MAX_DIFF_CHARS),
+    "claude_gate": ("VNX_CLAUDE_GATE_MAX_DIFF_CHARS", DEFAULT_MAX_DIFF_CHARS),
 }
 
 # A gate name this table does not know at all gets the same default: never
