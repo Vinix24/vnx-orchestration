@@ -388,6 +388,7 @@ Process commands (visibility and control):
   status --dispatches  Just dispatch queue
   status --gates       Just gate results
   status --json        Machine-readable JSON output
+  status --json --live  Measure live work and the queue at the call (what the dispatch guard reads)
   subsystems [--json|--md] [--probe]
                      Render the subsystem cockpit SSOT (MAP + ON/OFF + HEALTH)
   ps [--json]        Show PID, parent PID, uptime, and health for VNX processes

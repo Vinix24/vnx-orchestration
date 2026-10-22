@@ -25,8 +25,14 @@ if [ -n "$pin" ]; then
     exit 78  # EX_CONFIG
   fi
   version_dir="${VNX_SYSTEM_DIR}/versions/${pin}"
+  tried_paths="${version_dir}"
+  if [ ! -d "$version_dir" ] && [[ "$pin" != v* ]]; then
+    # Installed folders are named after the tag (v1.7.5); projects pin the bare form (1.7.5).
+    version_dir="${VNX_SYSTEM_DIR}/versions/v${pin}"
+    tried_paths="${tried_paths} and ${version_dir}"
+  fi
   if [ ! -d "$version_dir" ]; then
-    echo "[vnx-shim] [x] Pinned version ${pin} not installed at ${version_dir}" >&2
+    echo "[vnx-shim] [x] Pinned version ${pin} not installed at ${tried_paths}" >&2
     echo "[vnx-shim] Run: bash ${VNX_SYSTEM_DIR}/../install-central.sh --version ${pin}" >&2
     exit 1
   fi
