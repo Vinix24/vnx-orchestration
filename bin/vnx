@@ -341,9 +341,6 @@ Pool commands (elastic worker pool management):
   pool reap --project <id> [--pool-id <p>] [--force]     Reap stale workers
 
 Permission relay (detached-worker prompt governance):
-  permission window-open --minutes N [--reason ...]  Open operator auto-accept window
-  permission window-close                            Close the auto-accept window
-  permission window-status                           Show window state
   permission escalations [--all] [--json]            List pending escalations
   permission approve <dispatch_id>                   Approve + relay "1" to the worker
   permission deny <dispatch_id>                      Deny an escalation
