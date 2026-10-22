@@ -122,13 +122,15 @@ OI_ID = re.compile(r"OI-[1-9][0-9]*")
 # Option A of the cutover rule (operator decision, 2026-10-22): a run whose serial
 # reference job failed, or in which either Profile A job received a runner shutdown
 # signal, did not measure parity and is set aside. The two Profile A jobs are named
-# as .github/workflows/vnx-ci.yml names them; the annotation GitHub leaves for a
-# runner that was shut down reads as one of these markers.
+# as .github/workflows/vnx-ci.yml names them. A shutdown is proven by the runner's
+# own line in the job log; GitHub's "The operation was canceled." annotation is
+# posted for a timeout and a manual or concurrency cancel too, so it names no cause
+# and is never proof by itself (codex round 2 on #2184).
 NOT_MEASURABLE = "not_measurable"
 PROFILE_A_JOBS = (("reference", "Profile A (doctor + core tests)"),
                   ("shadow", "Profile A (xdist shadow)"))
 SHUTDOWN_MESSAGE = "the runner has received a shutdown signal"
-CANCELED_MESSAGE = "the operation was canceled"
+SHUTDOWN_LOG_LINE = "##[error]the runner has received a shutdown signal"
 
 
 class ToolError(Exception):
@@ -155,9 +157,10 @@ class JobEvidence:
 
     *conclusions* maps each role (``reference``, ``shadow``) to its job's
     conclusion, or to None when the job is not in the run or was not read;
-    *shutdowns* names the roles whose check-run annotations carry a runner
-    shutdown signal. *problem* says why a read that would have answered failed:
-    a read that failed is never a shutdown (fail-closed).
+    *shutdowns* names the roles whose job proves a runner shutdown (a shutdown
+    annotation or the runner's own line in the job log). *problem* says why a
+    read that would have answered failed: a read that failed is never a
+    shutdown (fail-closed).
     """
     conclusions: dict = field(default_factory=dict)
     shutdowns: tuple = ()
@@ -626,6 +629,14 @@ def _run(cmd: list, cwd: Path | None = None) -> subprocess.CompletedProcess:
         raise ToolError(f"{cmd[0]} is not installed: {exc}") from exc
 
 
+def _gh_text(args: list) -> str:
+    """gh's plain-text output of *args*; ToolError when gh fails (an expired job log is such a failure)."""
+    proc = _run(["gh", *args])
+    if proc.returncode != 0:
+        raise ToolError(f"gh {' '.join(args)}: {_last_line(proc.stderr)}")
+    return proc.stdout
+
+
 def _gh_json(args: list, shape: type):
     """gh's JSON output of *args*; ToolError when gh fails or prints anything but JSON of *shape*."""
     command = f"gh {' '.join(args[:2])}"
@@ -782,15 +793,19 @@ def _write_json(path: Path, document) -> None:
 
 
 def is_shutdown_annotation(message: str) -> bool:
-    """Whether *message* is the annotation GitHub leaves for a job whose runner was shut down.
+    """Whether *message* is a check-run annotation that names a runner shutdown itself.
 
-    The runner writes ``The runner has received a shutdown signal`` to the job
-    log; the check-run annotation GitHub posts for the same event reads ``The
-    operation was canceled.``. Both name a shutdown: a run that was canceled
-    measured nothing. Neither is read from a log download here.
+    Only the shutdown text counts. GitHub posts ``The operation was canceled.``
+    both for a shutdown and for a timeout, a manual cancel and a concurrency
+    cancel; that annotation names no cause, so it never proves a shutdown and
+    read_job_evidence falls through to the job log (codex round 2 on #2184).
     """
-    text = message.lower()
-    return SHUTDOWN_MESSAGE in text or CANCELED_MESSAGE in text
+    return SHUTDOWN_MESSAGE in message.lower()
+
+
+def is_shutdown_log(log: str) -> bool:
+    """Whether *log* carries the runner's own shutdown line; nothing else in a job log announces one."""
+    return any(SHUTDOWN_LOG_LINE in line.lower() for line in log.splitlines())
 
 
 def profile_a_jobs(payload: dict) -> dict | None:
@@ -844,12 +859,37 @@ def _cached_annotations(repo: str, run: Run, job: dict, cache: Path) -> tuple:
     return messages, ""
 
 
-def read_job_evidence(repo: str, run: Run, cache: Path) -> JobEvidence:
-    """The two Profile A jobs' conclusions and shutdown annotations; a failed read leaves *problem*, never a shutdown.
+def _cached_shutdown(repo: str, run: Run, job: dict, cache: Path) -> tuple:
+    """``(shutdown, problem)`` from *job*'s log; the boolean is cached, the log body never is.
 
-    Annotations are fetched only for a job that did not succeed: a job that
-    ran to success had no shutdown. The fetch is cached like the verdicts are,
-    per run and attempt.
+    *shutdown* is True only when a line of the log carries the runner's own
+    shutdown line. A fetch that fails, or an expired log, writes no cache entry:
+    the answer stays unknown, which is never a shutdown (fail-closed).
+    """
+    path = cache / run.run_id / f"shutdown-{job['id']}.json"
+    cached = _read_json(path)
+    if isinstance(cached, dict) and isinstance(cached.get("shutdown"), bool):
+        return cached["shutdown"], ""
+    try:
+        log = _gh_text(["api", f"repos/{repo}/actions/jobs/{job['id']}/logs"])
+    except ToolError as exc:
+        return False, str(exc)
+    shutdown = is_shutdown_log(log)
+    _write_json(path, {"shutdown": shutdown})
+    return shutdown, ""
+
+
+def read_job_evidence(repo: str, run: Run, cache: Path) -> JobEvidence:
+    """The two Profile A jobs' conclusions and proven runner shutdowns; a failed read leaves *problem*, never a shutdown.
+
+    Evidence is read only for a job that did not succeed: a job that ran to
+    success had no shutdown. The job's check-run annotations come first, and
+    only one that carries the shutdown text itself counts. GitHub's ``The
+    operation was canceled.`` names no cause, so a job whose annotations prove
+    nothing has its own log read (``actions/jobs/<id>/logs``, one job, not the
+    run archive): only a line carrying ``##[error]The runner has received a
+    shutdown signal`` makes it a shutdown. Both answers are cached per job, the
+    log body never is; a read that fails is never a shutdown.
     """
     jobs = _cached_jobs(repo, run, cache)
     if jobs is None:
@@ -867,7 +907,14 @@ def read_job_evidence(repo: str, run: Run, cache: Path) -> JobEvidence:
         messages, problem = _cached_annotations(repo, run, job, cache)
         if problem:
             problems.append(f"{role} job annotations: {problem}")
-        elif any(is_shutdown_annotation(message) for message in messages):
+            continue
+        if any(is_shutdown_annotation(message) for message in messages):
+            evidence.shutdowns += (role,)
+            continue
+        shutdown, problem = _cached_shutdown(repo, run, job, cache)
+        if problem:
+            problems.append(f"{role} job log: {problem}")
+        elif shutdown:
             evidence.shutdowns += (role,)
     evidence.problem = "; ".join(problems)
     return evidence

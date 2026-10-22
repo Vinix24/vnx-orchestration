@@ -29,11 +29,15 @@ repository; the CLI runs end to end against a gh stand-in on PATH (an
 external process, replaced only inside tests/), so no test calls GitHub.
 
 Option A (operator decision, 2026-10-22): a run whose serial reference job
-failed, or in which either Profile A job received a runner shutdown signal
-(read from the job's check-run annotations), is not measurable. It is set
-aside from every condition of the window and listed with its reason. A real
-parity difference and a shadow job that failed without a shutdown still
-block; an annotation read that fails is never a shutdown.
+failed, or in which either Profile A job received a runner shutdown signal,
+is not measurable. It is set aside from every condition of the window and
+listed with its reason. A real parity difference and a shadow job that
+failed without a shutdown still block. A shutdown is proven by the job's own
+log line (``##[error]The runner has received a shutdown signal``), read from
+``actions/jobs/<id>/logs`` when the check-run annotations do not carry that
+text themselves; GitHub's ``The operation was canceled.`` annotation names no
+cause and proves nothing (codex round 2 on #2184). A failed annotation or log
+read is never a shutdown.
 
 History that cannot prove ancestry is a tool error, never a placement
 (codex round 2 on #2105): a shallow clone answers "not an ancestor" for a
@@ -576,11 +580,24 @@ def test_an_annotation_read_that_fails_is_not_a_shutdown():
 
 @pytest.mark.parametrize(("message", "shutdown"), [
     ("The runner has received a shutdown signal. This can happen when the runner service is stopped", True),
-    ("The operation was canceled.", True),
+    ("The operation was canceled.", False),
     ("Process completed with exit code 1.", False),
 ], ids=["runner-shutdown", "canceled-annotation", "step-failed"])
 def test_only_a_shutdown_annotation_counts(message, shutdown):
+    """Codex round 2 on #2184: 'The operation was canceled.' names no cause, so the annotation proves nothing alone."""
     assert hist.is_shutdown_annotation(message) is shutdown
+
+
+@pytest.mark.parametrize(("log", "shutdown"), [
+    ("2026-10-22T19:55:00Z ##[error]The runner has received a shutdown signal. This can happen when the runner "
+     "service is stopped, or a manually started runner is canceled.\n2026-10-22T19:55:01Z ##[error]The operation "
+     "was canceled.\n", True),
+    ("2026-10-22T19:55:00Z ##[error]The operation was canceled.\n", False),
+    ("2026-10-22T19:55:00Z ##[error]The action has timed out.\n", False),
+], ids=["shutdown-line", "cancel-only", "timeout"])
+def test_only_the_shutdown_line_in_a_job_log_counts(log, shutdown):
+    """The job log is the evidence the annotations are not: only its shutdown line names the cause."""
+    assert hist.is_shutdown_log(log) is shutdown
 
 
 def test_the_profile_a_jobs_are_taken_from_the_runs_job_list():
@@ -847,6 +864,9 @@ elif args[:1] == ["api"]:
     elif "/check-runs/" in path and path.endswith("/annotations"):
         key = path.split("/check-runs/")[1].split("/")[0]
         payload = spec.get("annotations", {}).get(key)
+    elif "/actions/jobs/" in path and path.endswith("/logs"):
+        key = path.split("/actions/jobs/")[1].split("/")[0]
+        payload = spec.get("logs", {}).get(key)
     else:
         payload = None
     if payload is None:
@@ -870,7 +890,8 @@ def _real_commits() -> tuple:
 
 
 def _cli(tmp_path: Path, runs: list, verdicts: dict, *args: str, raw: dict | None = None,
-         jobs: dict | None = None, annotations: dict | None = None) -> subprocess.CompletedProcess:
+         jobs: dict | None = None, annotations: dict | None = None,
+         logs: dict | None = None) -> subprocess.CompletedProcess:
     """The CLI against the gh stand-in; *raw* maps a gh command ("run list") to the exact text it prints."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -882,7 +903,8 @@ def _cli(tmp_path: Path, runs: list, verdicts: dict, *args: str, raw: dict | Non
         Path(paths[run_id]).write_text(json.dumps(document), encoding="utf-8")
     spec = tmp_path / "spec.json"
     spec.write_text(json.dumps({"runs": runs, "verdicts": paths, "raw": raw or {},
-                                "jobs": jobs or {}, "annotations": annotations or {}}), encoding="utf-8")
+                                "jobs": jobs or {}, "annotations": annotations or {},
+                                "logs": logs or {}}), encoding="utf-8")
     env = {**{k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")},
            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "FAKE_GH_SPEC": str(spec)}
     return subprocess.run([sys.executable, str(SCRIPT), *args], env=env, capture_output=True, text=True, cwd=str(REPO_ROOT))
@@ -1208,17 +1230,73 @@ def _profile_a_jobs(reference: str, shadow: str) -> dict:
     ]}
 
 
-def test_the_cli_sets_aside_a_run_whose_shadow_job_was_shut_down(tmp_path):
+CANCEL_ANNOTATION = [{"annotation_level": "failure", "message": "The operation was canceled."}]
+SHUTDOWN_ANNOTATION = [{"annotation_level": "failure",
+                        "message": "The runner has received a shutdown signal. This can happen when the runner "
+                                   "service is stopped, or a manually started runner is canceled."}]
+SHUTDOWN_LOG = ("2026-10-22T19:55:00.0000000Z ##[error]The runner has received a shutdown signal. This can happen "
+                "when the runner service is stopped, or a manually started runner is canceled.\n"
+                "2026-10-22T19:55:01.0000000Z ##[error]The operation was canceled.\n")
+CANCEL_LOG = "2026-10-22T19:55:00.0000000Z ##[error]The operation was canceled.\n"
+
+
+def _option_a_cli(tmp_path: Path, *, cache: Path | None = None, **spec) -> dict:
+    """The row of the one shadow-shutdown run the CLI places; *spec* feeds the gh stand-in (*logs*, *annotations*)."""
     base, head = _real_commits()
     runs = [_listed(1, head, "2099-01-01T00:00:00Z")]
     verdicts = {"1": verdict("heavy-parity", run_id="1", **shadow_shutdown_fields())}
-    proc = _cli(tmp_path, runs, verdicts, "--last-d3-merge", base, "--fingerprint", FP, "--no-watch-list", "--json",
-                jobs={"1": _profile_a_jobs("success", "failure")},
-                annotations={"12": [{"annotation_level": "failure", "message": "The operation was canceled."}]})
+    args = ["--last-d3-merge", base, "--fingerprint", FP, "--no-watch-list", "--json"]
+    if cache is not None:
+        args += ["--cache-dir", str(cache)]
+    proc = _cli(tmp_path, runs, verdicts, *args, jobs={"1": _profile_a_jobs("success", "failure")}, **spec)
     assert proc.returncode == 1, proc.stderr
     [row] = json.loads(proc.stdout)["runs"]
+    return row
+
+
+def test_the_cli_keeps_a_cancel_annotation_without_a_shutdown_log_line_dirty(tmp_path):
+    """The red case of codex round 2 on #2184: 'The operation was canceled.' names no cause; the log line does."""
+    row = _option_a_cli(tmp_path, annotations={"12": CANCEL_ANNOTATION}, logs={"12": CANCEL_LOG})
+    assert row["place"] == "in_window"
+    assert "step shadow.job=failure" in row["reasons"]
+
+
+def test_the_cli_sets_aside_a_run_whose_shadow_job_log_carries_the_shutdown_line(tmp_path):
+    row = _option_a_cli(tmp_path, annotations={"12": CANCEL_ANNOTATION}, logs={"12": SHUTDOWN_LOG})
     assert row["place"] == "not_measurable"
     assert row["reasons"] == ["a runner shutdown signal in the xdist shadow job"]
+
+
+def test_the_cli_takes_a_shutdown_annotation_without_reading_the_log(tmp_path):
+    """The annotation itself carries the shutdown text: a log that cannot be read changes nothing."""
+    row = _option_a_cli(tmp_path, annotations={"12": SHUTDOWN_ANNOTATION}, logs={"12": "error"})
+    assert row["place"] == "not_measurable"
+    assert row["reasons"] == ["a runner shutdown signal in the xdist shadow job"]
+
+
+def test_the_cli_keeps_a_run_dirty_when_its_job_log_cannot_be_read(tmp_path):
+    """Fail-closed like an annotation read: a log fetch that fails is never a shutdown, and it names its problem."""
+    row = _option_a_cli(tmp_path, annotations={"12": CANCEL_ANNOTATION}, logs={"12": "error"})
+    assert row["place"] == "in_window"
+    assert any("evidence:" in reason and "HTTP 502" in reason for reason in row["reasons"]), row["reasons"]
+
+
+def test_a_cached_shutdown_answer_is_used_without_reading_the_log(tmp_path):
+    cache = tmp_path / "cache"
+    (cache / "1").mkdir(parents=True)
+    (cache / "1" / "shutdown-12.json").write_text(json.dumps({"shutdown": True}), encoding="utf-8")
+    row = _option_a_cli(tmp_path, cache=cache, annotations={"12": CANCEL_ANNOTATION}, logs={"12": "error"})
+    assert row["place"] == "not_measurable"
+    assert row["reasons"] == ["a runner shutdown signal in the xdist shadow job"]
+
+
+def test_a_cached_answer_that_the_log_has_no_shutdown_line_is_used_too(tmp_path):
+    cache = tmp_path / "cache"
+    (cache / "1").mkdir(parents=True)
+    (cache / "1" / "shutdown-12.json").write_text(json.dumps({"shutdown": False}), encoding="utf-8")
+    row = _option_a_cli(tmp_path, cache=cache, annotations={"12": CANCEL_ANNOTATION}, logs={"12": "error"})
+    assert row["place"] == "in_window"
+    assert not any("evidence:" in reason for reason in row["reasons"]), row["reasons"]
 
 
 def test_the_cli_keeps_a_run_with_a_failed_annotation_read_dirty(tmp_path):

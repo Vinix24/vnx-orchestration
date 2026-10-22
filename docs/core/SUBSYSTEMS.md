@@ -69,10 +69,15 @@ verdict is uploaded as the `xdist-parity-verdict` artifact
 applies the cutover rule to the recorded verdicts and counts only a verdict that a
 failed parity step cannot leave clean. Under option A of that rule (operator
 decision, 2026-10-22) a run whose serial reference job failed, or in which either
-Profile A job received a runner shutdown signal (read from the job's check-run
-annotations), is not measurable: it is set aside from every condition of the window
-and listed with its reason. A real parity difference and an xdist shadow job that
-failed without a shutdown still block. Nothing has switched Profile A to xdist.
+Profile A job received a runner shutdown signal, is not measurable: it is set aside
+from every condition of the window and listed with its reason. A shutdown is proven
+by the runner's own line in the job log (`##[error]The runner has received a shutdown
+signal`), read per job from `actions/jobs/<id>/logs` when the check-run annotations do
+not carry that text themselves; GitHub's `The operation was canceled.` annotation is
+posted for a timeout and a manual or concurrency cancel too and proves nothing. A
+failed annotation or log read is never a shutdown (fail-closed). A real parity
+difference and an xdist shadow job that failed without a shutdown still block.
+Nothing has switched Profile A to xdist.
 
 **Function-size ratchet.** `scripts/ci/check_function_size_ratchet.py` (the
 `Function size ratchet` step of the `Lint Patterns` job) fails a pull request that
