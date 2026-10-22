@@ -69,6 +69,17 @@ _EXPLICIT_ALIASES: Dict[str, str] = {
     "claude-fable-5": "fable-5",
 }
 
+# Names the vendor has phased out and serves with another model, so a comparison
+# of two model names must read them as that model. DeepSeek's documentation
+# says deepseek-v4-flash (and its vision-exp sibling) are retired and requests
+# are answered by DeepSeek-V4.1-Flash, which is `deepseek-flash`. Both stay
+# separate registry keys (a build on the litellm route books the old name), so
+# normalize_model_name keeps them apart; only comparable_model_name folds them.
+_PHASED_OUT_NAMES: Dict[str, str] = {
+    "deepseek-v4-flash": "deepseek-flash",
+    "deepseek-v4-flash-vision-exp": "deepseek-flash",
+}
+
 _registry_cache: Optional[Dict] = None
 _alias_cache: Optional[Dict[str, str]] = None
 _keys_cache: Optional[Dict[str, str]] = None
@@ -213,6 +224,17 @@ def normalize_model_name(model: Optional[str]) -> str:
     return raw
 
 
+def comparable_model_name(model: Optional[str]) -> str:
+    """The canonical name of the model that actually answers requests for *model*.
+
+    :func:`normalize_model_name`, then a phased-out name is replaced by the model
+    the vendor serves it with. Use it to ask "is this the same model?"; ledger
+    writers keep :func:`normalize_model_name` and the name that was called.
+    """
+    canonical = normalize_model_name(model)
+    return _PHASED_OUT_NAMES.get(_norm(canonical), canonical)
+
+
 def is_unknown_model(model: Optional[str]) -> bool:
     """True when the model is absent or an explicit unknown sentinel.
 
@@ -262,6 +284,7 @@ def tier_for_model(model: Optional[str]) -> Optional[str]:
 
 __all__ = [
     "canonical_model_names",
+    "comparable_model_name",
     "is_unknown_model",
     "normalize_model_name",
     "tier_for_model",

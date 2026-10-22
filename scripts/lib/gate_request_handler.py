@@ -36,9 +36,10 @@ from gate_status import decided_verdict, has_complete_evidence
 from governance_emit import _classify_lane_log_text
 from provider_switch import SwitchDecision
 from review_vendor import (
-    VENDOR_MATCH_STATUS,
+    MODEL_MATCH_STATUS,
     BuilderVendor,
     resolve_builder_vendor,
+    same_vendor_record,
     vendor_match_hop,
 )
 from claude_github_receipt import (
@@ -537,10 +538,20 @@ def _held_seat_hop(gate: str, holder: str) -> Dict[str, Any]:
     }
 
 
+def _with_reader_models(
+    seat_fields: Optional[Dict[str, Any]], reader: str, builder: Optional[BuilderVendor],
+) -> Dict[str, Any]:
+    """``seat_fields`` with the seat's ``builder_vendor`` record saying ``reader``'s model (R7b)."""
+    fields = dict(seat_fields or {})
+    if isinstance(fields.get("builder_vendor"), dict):
+        fields["builder_vendor"] = same_vendor_record(reader, builder, fields["builder_vendor"])
+    return fields
+
+
 def _hop_text(hop: Dict[str, Any]) -> str:
     if hop.get("status") == _HELD_HOP_STATUS:
         return f"{hop['gate']} reads another seat ({hop['detail']})"
-    if hop.get("status") == VENDOR_MATCH_STATUS:
+    if hop.get("status") == MODEL_MATCH_STATUS:
         return f"{hop['gate']} passed over ({hop['reason']}): {hop['detail']}"
     return f"{hop['gate']} unavailable ({hop['reason']}): {hop['detail']}"
 
@@ -1229,9 +1240,10 @@ class GateRequestHandlerMixin:
         that verdict stands (``_refuse_switched_off_seat``) and dispatches
         nothing. ``head`` is the round's PR head (``_PrHead``).
 
-        ``builder`` (R7) is the vendor of the builder of the head: a candidate of
-        that vendor is passed over first, before its own record, its switch or its
-        reachability is read, with a ``vendor_matches_builder`` hop. A builder
+        ``builder`` (R7, R7b) is the builder of the head: a candidate of that
+        vendor that runs the builder's model (or whose model, or the builder's, is
+        unknown) is passed over first, before its own record, its switch or its
+        reachability is read, with a ``model_matches_builder`` hop. A builder
         whose vendor is unknown passes nobody over.
         """
         path: List[Dict[str, Any]] = []
@@ -1469,12 +1481,14 @@ class GateRequestHandlerMixin:
         known-rejected ledger or a cooldown, so switching the family back on
         lets the next request dispatch it.
 
-        VENDOR (R7, operator decision 2026-10-22): a seat never gets a reviewer
-        of the builder's vendor (``builder``, ``review_vendor``). Such a
+        MODEL (R7b, operator decision 2026-10-22): a seat never gets a reviewer
+        that runs the builder's model (``builder``, ``review_vendor``); the same
+        vendor on another model may take the seat, and the seat's
+        ``builder_vendor`` record then says ``rule: model_differs``. Such a
         reviewer is passed over like an unavailable one, first choice or
         takeover alike: the seat rolls to the next gate in the chain and the
         record names it (``takeover_from``, ``takeover_reason``
-        ``vendor_matches_builder``). A seat whose own gate shares the vendor and
+        ``model_matches_builder``). A seat whose own gate runs the builder's model and
         has no successor is booked unfillable. A builder whose vendor is unknown
         applies no rule; the seat's ``builder_vendor`` field says why.
         """
@@ -1494,7 +1508,7 @@ class GateRequestHandlerMixin:
         return self._request_seat_reader(
             reader, refusal, path, pr_number=pr_number, branch=branch, risk_class=risk_class,
             changed_files=changed_files, mode=mode, dispatch_id=dispatch_id, head=head,
-            seat_fields=seat_fields or {},
+            seat_fields=_with_reader_models(seat_fields, reader, builder),
         )
 
     def _resolve_seat_reader(
@@ -1970,7 +1984,7 @@ class GateRequestHandlerMixin:
         # An --override-b3 the seat's request carried goes with the seat (R1).
         seat_fields = {
             "seat": seat, "review_seats": payload.get("review_seats"),
-            "builder_vendor": builder.to_record(),
+            "builder_vendor": same_vendor_record(reader, builder, builder.to_record()),
         }
         override = payload.get("override_b3") if isinstance(payload.get("override_b3"), dict) else {}
         refused = self._round_refusal(
