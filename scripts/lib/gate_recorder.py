@@ -750,6 +750,9 @@ _TAKEOVER_FIELDS: Tuple[str, ...] = (
 # The request fields the round ledger (R1, ``review_rounds``) reads off a verdict:
 # the seat the request filled, and an ``--override-b3`` the request applied.
 _ROUND_FIELDS: Tuple[str, ...] = ("seat", "override_b3")
+# Operator decisions a request carries into its result (R10): the reason of a
+# force-rerun from the obligation runner (``gate_run_guard.force_rerun_record``).
+_OPERATOR_FIELDS: Tuple[str, ...] = ("force_rerun",)
 
 
 def stamp_request_identity(
@@ -816,7 +819,8 @@ def stamp_request_identity(
             result_payload[field] = request_payload.get(field)
     # R1: the seat the request filled and an applied --override-b3 travel with the
     # verdict, so the round ledger books it in that seat, with that override.
-    for field in _ROUND_FIELDS:
+    # R10: a force-rerun's reason travels the same way, so the result says why it ran.
+    for field in _ROUND_FIELDS + _OPERATOR_FIELDS:
         if request_payload.get(field):
             result_payload[field] = request_payload[field]
     return result_payload
