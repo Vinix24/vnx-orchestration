@@ -51,3 +51,8 @@ tests/test_worker_permission_relay.py::TestScanLiveAwaitingPermission
 tests/test_worker_permission_relay.py::TestCmdScanExitCodes
 tests/test_worker_permission_relay.py::TestScanWorktreeRisk
 tests/test_worker_permission_relay.py::TestScanHumanOutputRiskLabel
+
+# C5 (dlv-ddbc4a1d2137)
+scripts/cleanup_stale_vnx_sessions.sh
+tests/test_cleanup_stale_vnx_sessions.py
+scripts/lib/worker_heartbeat.py::build_process_gone_failure_report

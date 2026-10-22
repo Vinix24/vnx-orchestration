@@ -116,7 +116,6 @@ tests/test_build_t0_state_exception_handling.py  # OI-1227: red solo — build_t
 tests/test_burnin_certification.py  # hangs without VNX_HEADLESS_CLI=echo; covered by burn-in-headless.yml
 tests/test_busy_terminal_certification.py  # OI-1227: red solo — rc_check_terminal call not found in busy-term dispatch (6 failed, 5 errors, 35 passed)
 tests/test_claude_github_review_linkage.py  # OI-1227: red solo — MagicMock not JSON serializable in request handler (3 failed, 33 passed)
-tests/test_cleanup_stale_vnx_sessions.py  # OI-952: order/load-dependent flake, passes solo on both main and branch (OI-658 class)
 tests/test_cli_flag_forwarding.py  # OI-1227: red solo — RGM lambda got unexpected kwarg 'strict' (1 failed, 17 passed)
 tests/test_cli_init.py  # OI-1420 gemeten 21-08: slaagt solo, valt onder volle sweep (29 failed) op ADR-007 fail-closed: project_id conflict for init backfill (marker=<testnaam>, env:VNX_PROJECT_ID='vnx-dev')
 tests/test_codex_pr311_findings.py  # OI-1227: red solo — IntelligenceSelector._record_pattern_usage missing (3 failed, 12 passed)
