@@ -1,0 +1,18 @@
+# C4a (dlv-f0dc7d68e349)
+# Golf 1, C4a: `vnx permission scan`. Source: docs/investigations/2026-10-20-golf-1-hermeting.md
+# §7 "C4a" and §9.
+scripts/lib/worker_permission_relay.py::scan_live_awaiting_permission
+scripts/lib/worker_permission_relay.py::_list_dispatch_sessions
+scripts/lib/worker_permission_relay.py::_capture_pane_or_error
+scripts/lib/worker_permission_relay.py::_dispatch_worktree_path
+scripts/lib/worker_permission_relay.py::_WORKTREE_RISK_PRIORITY
+scripts/permission_relay_cli.py::_cmd_scan
+scripts/permission_relay_cli.py::_format_scan_human
+scripts/permission_relay_cli.py::_worktree_risk_label
+tests/test_worker_permission_relay.py::FakeScanRunner
+tests/test_worker_permission_relay.py::_ScanArgs
+tests/test_worker_permission_relay.py::_make_git_repo
+tests/test_worker_permission_relay.py::TestScanLiveAwaitingPermission
+tests/test_worker_permission_relay.py::TestCmdScanExitCodes
+tests/test_worker_permission_relay.py::TestScanWorktreeRisk
+tests/test_worker_permission_relay.py::TestScanHumanOutputRiskLabel

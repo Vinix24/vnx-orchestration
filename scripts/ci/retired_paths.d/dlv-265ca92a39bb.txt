@@ -1,0 +1,12 @@
+# Golf 1, C1 (dlv-265ca92a39bb): P08 golf-1 part, the shim from P04, and the
+# C1 part of class A. Source: docs/investigations/2026-10-20-golf-1-hermeting.md
+# §7 "C1" and §9.
+scripts/dispatch_broker_cli.py
+scripts/vulture_whitelist.py
+scripts/pane_manager_v2.sh
+scripts/update_pane_mapping.sh
+scripts/reconcile_terminal_state.py
+scripts/smart_tap_v7_json_translator.sh
+scripts/unified_state_manager_v2.py
+scripts/dispatcher_v8_minimal.sh
+tests/test_unified_state_manager_shim.py

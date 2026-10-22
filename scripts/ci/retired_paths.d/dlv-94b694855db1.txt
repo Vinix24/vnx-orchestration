@@ -1,0 +1,11 @@
+# C3 (dlv-94b694855db1)
+# P11: the tmux orphan sweep out of pool_reaper and pool_manager. Source:
+# docs/investigations/2026-10-20-golf-1-hermeting.md §7 "C3" and §9.
+scripts/lib/pool_reaper.py::_sanitize_session_name
+scripts/lib/pool_reaper.py::list_tmux_sessions
+scripts/lib/pool_reaper.py::session_has_living_children
+scripts/lib/pool_reaper.py::identify_orphan_tmux_sessions
+scripts/lib/pool_reaper.py::sweep_orphan_tmux_sessions
+scripts/lib/pool_manager.py::PoolManager._kill_tmux_session
+scripts/lib/pool_manager.py::PoolManager._is_dispatch_terminal_in_db
+scripts/lib/pool_manager.py::PoolManager._sweep_orphan_tmux
