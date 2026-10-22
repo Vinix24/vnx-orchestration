@@ -209,9 +209,10 @@ def _epoch(timestamp: Any) -> Optional[float]:
 
 def _kimi_receipt_events(state: Path) -> Tuple[Optional[float], List[float]]:
     """``(last_answered, weekly_failures)`` from one store's receipts, newest to oldest, up to the
-    first answered kimi call. A kimi dispatch receipt is a weekly-limit failure when its
-    ``failure_reason`` names the weekly or 7-day limit, and answered when its status is a success
-    status. Any other kimi receipt (a 5-hour limit, a spawn error, a contract miss) is neither."""
+    first answered kimi call. A kimi receipt of any kind (dispatch or review gate) is a weekly-limit
+    failure when its ``failure_reason`` names the weekly or 7-day limit, and answered when its
+    status is a success status. Any other kimi receipt (a 5-hour limit, a spawn error, a contract
+    miss) is neither. A takeover in the kimi seat is recorded under its own provider and never counts."""
     path = state / "t0_receipts.ndjson"
     failures: List[float] = []
     if not path.is_file():
@@ -224,8 +225,7 @@ def _kimi_receipt_events(state: Path) -> Tuple[Optional[float], List[float]]:
                 receipt = json.loads(raw)
             except ValueError:
                 continue  # vnx-silent-except: a malformed receipt line is skipped by contract
-            if not isinstance(receipt, dict) or receipt.get("provider") != "kimi" \
-                    or receipt.get("receipt_kind") == "review_gate":
+            if not isinstance(receipt, dict) or receipt.get("provider") != "kimi":
                 continue
             moment = _epoch(receipt.get("timestamp"))
             if moment is None:
@@ -243,7 +243,8 @@ def kimi_resets_at_latest(states: List[Path], now: float) -> Optional[float]:
     """Upper bound of the kimi weekly reset: the first weekly-limit failure of the current
     unbroken streak plus 7 days, from the receipts VNX wrote itself (one timestamped record per
     kimi attempt; the reachability record holds only the newest one). The streak is every weekly
-    failure after the latest answered kimi call in any store. None when there is no streak or the
+    failure after the latest answered kimi call in any store; a successful kimi review-gate
+    receipt is such a call, a takeover recorded under another provider is not. None when there is no streak or the
     bound already lies in the past (then a newer window began that no record dates)."""
     events = [_kimi_receipt_events(state) for state in states]
     answered = [moment for moment, _ in events if moment is not None]

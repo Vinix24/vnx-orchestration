@@ -224,13 +224,57 @@ def test_kimi_reset_bound_unknown_when_the_streak_is_older_than_a_window(home):
     assert pu.probe_kimi(home, NOW)["resets_at_latest"] == "onbekend"
 
 
-def test_kimi_reset_bound_ignores_malformed_lines_and_review_gate_receipts(home):
+def _append_gate_receipt(home, epoch, **fields):
+    path = home / ".vnx-data" / "alpha" / "state" / "t0_receipts.ndjson"
+    gate = {"receipt_kind": "review_gate", "provider": "kimi", "timestamp": _iso(epoch), **fields}
+    path.write_text(path.read_text() + json.dumps(gate) + "\n", encoding="utf-8")
+
+
+def test_kimi_reset_bound_ignores_malformed_lines(home):
     _full_kimi(home)
     _kimi_receipts(home, "alpha", [(NOW - 2 * DAY, "weekly")])
     path = home / ".vnx-data" / "alpha" / "state" / "t0_receipts.ndjson"
-    gate = {"receipt_kind": "review_gate", "provider": "kimi", "status": "completed", "timestamp": _iso(NOW - DAY)}
-    path.write_text(path.read_text() + "not json \"kimi\"\n" + json.dumps(gate) + "\n", encoding="utf-8")
+    path.write_text(path.read_text() + "not json \"kimi\"\n", encoding="utf-8")
     assert pu.probe_kimi(home, NOW)["resets_at_latest"] == _iso(NOW + 5 * DAY)
+
+
+def test_kimi_reset_bound_streak_is_broken_by_a_successful_kimi_review_gate(home):
+    _full_kimi(home)
+    _kimi_receipts(home, "alpha", [(NOW - 5 * DAY, "weekly")])
+    _append_gate_receipt(home, NOW - 3 * DAY, status="completed")
+    assert pu.probe_kimi(home, NOW)["resets_at_latest"] == "onbekend"
+
+
+def test_kimi_reset_bound_comes_from_the_failures_after_a_successful_review_gate(home):
+    _full_kimi(home)
+    _kimi_receipts(home, "alpha", [(NOW - 5 * DAY, "weekly")])
+    _append_gate_receipt(home, NOW - 3 * DAY, status="completed")
+    path = home / ".vnx-data" / "alpha" / "state" / "t0_receipts.ndjson"
+    later = {"receipt_kind": "dispatch", "provider": "kimi", "status": "failure",
+             "failure_reason": WEEKLY, "timestamp": _iso(NOW - 2 * DAY)}
+    path.write_text(path.read_text() + json.dumps(later) + "\n", encoding="utf-8")
+    assert pu.probe_kimi(home, NOW)["resets_at_latest"] == _iso(NOW - 2 * DAY + 7 * DAY)
+
+
+def test_kimi_reset_bound_takeover_review_gate_does_not_break_the_streak(home):
+    _full_kimi(home)
+    _kimi_receipts(home, "alpha", [(NOW - 2 * DAY, "weekly")])
+    _append_gate_receipt(home, NOW - DAY, status="completed", provider="deepseek-harness")
+    assert pu.probe_kimi(home, NOW)["resets_at_latest"] == _iso(NOW + 5 * DAY)
+
+
+def test_kimi_reset_bound_failed_review_gate_without_reason_is_neither(home):
+    _full_kimi(home)
+    _kimi_receipts(home, "alpha", [(NOW - 2 * DAY, "weekly")])
+    _append_gate_receipt(home, NOW - DAY, status="failed", failure_reason="")
+    assert pu.probe_kimi(home, NOW)["resets_at_latest"] == _iso(NOW + 5 * DAY)
+
+
+def test_kimi_reset_bound_failed_review_gate_alone_starts_no_streak(home):
+    _full_kimi(home)
+    _kimi_receipts(home, "alpha", [(NOW - 9 * DAY, "success")])
+    _append_gate_receipt(home, NOW - DAY, status="failed", failure_reason="")
+    assert pu.probe_kimi(home, NOW)["resets_at_latest"] == "onbekend"
 
 
 def test_kimi_reset_bound_text_says_uiterlijk(home):
