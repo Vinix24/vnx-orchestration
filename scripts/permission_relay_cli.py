@@ -10,23 +10,8 @@ Subcommands (wired to scripts/lib/worker_permission_relay.py):
   vnx permission approve <dispatch_id>                    approve + relay "1" to the worker
   vnx permission deny <dispatch_id>                       deny (operator handles the worker)
   vnx permission resolve-stale <dispatch_id> --note ...   close an escalation with no live worker session
-  vnx permission scan                                     scan LIVE workers for an unmeasured stall
 
 All subcommands accept ``--json`` for machine-readable output.
-
-``scan`` (OI-1324 / OI-1344): read-only tmux scan of this project's live
-dispatch sessions for a pane classified ``awaiting_permission`` that has not
-yet surfaced anywhere — writes an escalation record for each new find
-(idempotent) so ``escalations`` becomes a current view instead of an archive.
-Each hit also carries its dispatch worktree's risk state (OI-1414 follow-up):
-a stall holding uncommitted or unpushed work is flagged ``[!! WORK AT RISK]``
-and sorted to the top, distinct from a stall whose worktree is clean or
-whose worktree could not be measured (never silently reported as clean).
-Exit code encodes the verdict for a supervisor tick / operator script:
-  0 = measured cleanly, zero stalls found
-  1 = at least one live stall found (see the printed dispatch id + command)
-  2 = could not fully measure (tmux missing/unmeasurable, or a capture
-      failed) — never conflated with "clean"
 
 The relay model: outside an open window every worker permission prompt escalates;
 inside the window routine prompts auto-approve; catastrophic ops always escalate.
@@ -126,85 +111,6 @@ def _cmd_escalations(args, sd: Path) -> int:
             f"      cmd: {rec.get('command')}"
         )
     print("\nResolve with: vnx permission approve <dispatch_id>  |  deny <dispatch_id>")
-    return 0
-
-
-def _worktree_risk_label(hit: dict) -> str:
-    """One-glance label distinguishing a stall holding unsaved work from one
-    that does not — the label a triaging operator scans for first (OI-1414
-    follow-up). Never reads a missing/unmeasured worktree as clean."""
-    if hit.get("worktree_at_risk"):
-        return "[!! WORK AT RISK]"
-    if not hit.get("worktree_measured", True):
-        return "[?  worktree unmeasured]"
-    return "[   worktree clean   ]"
-
-
-def _format_scan_human(result: dict) -> str:
-    """Human-readable rendering of a ``scan_live_awaiting_permission`` result.
-
-    Shared by ``_cmd_scan`` and any ad-hoc scan (e.g. an evidence run against
-    an isolated state/repo root) so both read off the identical formatting —
-    never a second, driftable rendering. ``hits`` is already sorted
-    urgent-first by ``scan_live_awaiting_permission``; this function renders
-    that order as-is rather than re-sorting.
-    """
-    hits = result.get("hits") or []
-    errors = result.get("errors") or []
-    lines: "list[str]" = []
-
-    if hits:
-        lines.append(f"[!] {len(hits)} worker(s) awaiting permission:")
-        for h in hits:
-            lines.append(
-                f"  - {_worktree_risk_label(h)} {h.get('dispatch_id')}  cmd: {h.get('command')}  "
-                f"(session={h.get('session')}, marker={h.get('matched_marker')!r})"
-            )
-            lines.append(
-                f"      worktree: {h.get('worktree_classification')} — "
-                f"{h.get('worktree_detail')} ({h.get('worktree_path')})"
-            )
-    elif errors:
-        lines.append("[x] scan could not fully measure the live fleet")
-    else:
-        lines.append("[ok] no worker is awaiting permission")
-
-    if errors:
-        lines.append(f"\n[!] {len(errors)} measurement error(s):")
-        for e in errors:
-            lines.append(
-                f"  - scope={e.get('scope')} session={e.get('session')} "
-                f"dispatch_id={e.get('dispatch_id')}: {e.get('error')}"
-            )
-
-    return "\n".join(lines)
-
-
-def _cmd_scan(args, sd: Path) -> int:
-    """OI-1324 / OI-1344: scan live worker panes; alarm loudly, never silently.
-
-    Exit code: 0 clean, 1 at least one live stall found, 2 could not fully
-    measure (tmux unavailable, listing unmeasurable, or a capture failed) —
-    a measurement gap is reported distinctly and is NEVER read as "clean".
-
-    Each hit also carries its dispatch worktree's risk state (OI-1414
-    follow-up: is there unsaved work behind this stall?) — see
-    ``_worktree_risk_label`` / ``_format_scan_human``. Hits are pre-sorted
-    urgent-first by ``scan_live_awaiting_permission``.
-    """
-    result = relay.scan_live_awaiting_permission(state_dir=sd)
-    hits = result.get("hits") or []
-    errors = result.get("errors") or []
-
-    if args.json:
-        print(json.dumps(result, indent=2, sort_keys=True))
-    else:
-        print(_format_scan_human(result))
-
-    if hits:
-        return 1
-    if errors:
-        return 2
     return 0
 
 
@@ -431,12 +337,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_stale.add_argument("dispatch_id")
     p_stale.add_argument("--note", required=True, help="why this escalation is being closed as stale (audit)")
     p_stale.set_defaults(func=_cmd_resolve_stale)
-
-    p_scan = sub.add_parser(
-        "scan", parents=[common],
-        help="read-only scan of live worker panes for an unmeasured permission stall",
-    )
-    p_scan.set_defaults(func=_cmd_scan)
 
     return parser
 
