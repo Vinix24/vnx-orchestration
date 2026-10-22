@@ -45,6 +45,9 @@ trust the silent `vnx-dev` default in a multi-project context).
    launch) — do NOT `vnx horizon sync` against it; sync would seed example data into the live
    store. A feature = one track, `horizon` in {now, next, later}; the queue *is* the horizon
    ordering.
+   - **No verb sets the horizon of an existing track yet** (OI-2272). Only `objective add --horizon`
+     sets it. Until the verb exists, report to the operator which tracks belong in now/next/later
+     and never edit the DB.
 2. **Plan-first GATE (hard, see below)** — produce the plan doc, run the plan-gate (one
    seat, a second on BLOCK, then the tiebreaker). No deliverable promotes until this passes.
 3. **Deliverables** — `vnx horizon deliverable add --objective <track> --output-kind
@@ -52,6 +55,29 @@ trust the silent `vnx-dev` default in a multi-project context).
    `proposed`. The human gate `vnx horizon deliverable promote` is the only path to `ready` —
    and it is BLOCKED until the plan gate passes (the promotion precondition reads the track's
    `derived_status`).
+   - **Deliverables carry the work.** Every piece of work starts as a deliverable. A dispatch
+     outside a deliverable makes the progress view (the `voortgang` mod) wrong, because the
+     deliverable is the unit of a track row.
+   - The dispatch that does the work carries the deliverable id as its dispatch id
+     (`dispatch_id="dlv-..."` in `stage_spec_bundle`, after the deliverable is `ready`). Only
+     then does the work count for that deliverable.
+   - A follow-up round on the same PR gets its own id `dlv-...-r2`, `-r3`, with `pr_id` and
+     `work_ref` set to the PR branch.
+   - After the merge, close the deliverable with
+     `vnx deliverable close <dlv> --evidence <pr> --project-id <pid>`.
+   - Promote is the operator's gate. In auto mode a T0 promote is refused by the classifier, so
+     batch: hand the operator all deliverables of a goal in one promote line before the goal
+     starts.
+   - **Definition of done per deliverable.** A deliverable has a title and an output kind and no
+     field for its acceptance criteria (the `deliverables` view in the store is built from
+     `dispatches` and carries none). Until it has one, the done condition of each deliverable
+     belongs in the track `goal_state`, numbered, one point per deliverable, each provable with a
+     command. The build instruction of a dispatch is not the place for it: it lives outside
+     horizon and is gone after the session.
+   - **A track closes only when every linked PR is `complete`** (`_delivery_hold` in
+     `scripts/lib/track_reconciler.py`, OI-1098; OI-2274). One explicit `partial` holds the
+     track. Keep slice PRs on `partial` while the track is open. When the last slice merges,
+     re-link every PR of the track with `link-pr --delivery complete`.
 4. **Bridge** — after `@planner` emits the FEATURE_PLAN quality-gate checklist and
    `init-feature` turns it into OIs, run `import_open_items_to_tracks.py --project-id <pid>`
    so `track_open_items` reflects reality and the reconciler shows the track blocked while
@@ -184,6 +210,12 @@ It does NOT go into `/goal` verbatim. Convert it in four steps:
 4. **Bound the runtime.** End with a stop clause: a max round count plus an
    emergency-stop independent of progress (e.g. "stop if main is red after a
    merge").
+
+**Survive a rotation.** A T0 rotates at 500K tokens. `/rotate` writes the directive into the
+handoff and the spawner types it again in the fresh session, whose evaluator sees only the new
+conversation. So every proof in a goal is a command that measures state again (`gh pr view`,
+`vnx objective show`, a test run), and a one-off event is proven by its trace (the report, the
+receipt, the closed OI). The global `goal-prompting` skill covers the rest.
 
 ### `@horizon goal-condition <track_id>`
 

@@ -5579,12 +5579,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p_link_pr.add_argument(
         "--delivery", choices=("partial", "complete"), default="partial",
         help="delivery_kind for the linked PR(s): 'partial' ships a slice of the "
-             "plan, 'complete' ships the whole thing (default: partial). OI-829 "
-             "auto-close requires >=1 linked PR marked 'complete' -- fail-closed "
-             "ONLY once migration 0032 (track_pr_delivery) is applied to this DB; "
-             "if it is missing, pr_ref is still linked but the delivery marking "
-             "is NOT recorded (a loud stderr error and --json 'error' field say "
-             "so; apply 0032 and re-run to record it)",
+             "plan, 'complete' ships the whole thing (default: partial). A track "
+             "closes only when EVERY linked PR is 'complete' (_delivery_hold in "
+             "track_reconciler.py): one explicit 'partial' holds it, so when the "
+             "last slice merges, re-link every PR of the track with --delivery "
+             "complete. Fail-closed ONLY once migration 0032 (track_pr_delivery) is "
+             "applied to this DB; if it is missing, pr_ref is still linked but the "
+             "delivery marking is NOT recorded (a loud stderr error and --json "
+             "'error' field say so; apply 0032 and re-run to record it)",
     )
     p_link_pr.set_defaults(func=cmd_objective_link_pr)
 
