@@ -67,9 +67,11 @@ trust the silent `vnx-dev` default in a multi-project context).
      `work_ref` set to the PR branch.
    - After the merge, close the deliverable with
      `vnx deliverable close <dlv> --evidence <pr> --project-id <pid>`.
-   - Promote is the operator's gate. In auto mode a T0 promote is refused by the classifier, so
-     batch: hand the operator all deliverables of a goal in one promote line before the goal
-     starts.
+   - Promote is the operator's gate. A T0 promotes only when the operator granted it with an
+     allow rule for the promote command (set by the operator with `/permissions`; a T0 never
+     edits its own permissions). The rule matches one command form, so run promote in exactly
+     that form. Without the rule the auto-mode classifier refuses a T0 promote, so batch: hand
+     the operator all deliverables of a goal in one promote line before the goal starts.
    - **Definition of done per deliverable.** A deliverable has a title and an output kind and no
      field for its acceptance criteria (the `deliverables` view in the store is built from
      `dispatches` and carries none). Until it has one, the done condition of each deliverable
@@ -79,7 +81,12 @@ trust the silent `vnx-dev` default in a multi-project context).
    - **A track closes only when every linked PR is `complete`** (`_delivery_hold` in
      `scripts/lib/track_reconciler.py`, OI-1098; OI-2274). One explicit `partial` holds the
      track. Keep slice PRs on `partial` while the track is open. When the last slice merges,
-     re-link every PR of the track with `link-pr --delivery complete`.
+     re-link every PR of the track with `link-pr --delivery complete`. This is stricter than the
+     older close gate (`close_track_if_done`, OI-829), which needs one linked PR marked
+     `complete`: one `complete` beside one `partial` no longer closes the track. Two legacy
+     cases differ. A PR linked before migration 0032 has no marking row and does not hold the
+     track. A store without the `track_pr_delivery` table (0032 not applied) records no marking
+     and holds every track (`unverifiable`, OI-1167).
 4. **Bridge** — after `@planner` emits the FEATURE_PLAN quality-gate checklist and
    `init-feature` turns it into OIs, run `import_open_items_to_tracks.py --project-id <pid>`
    so `track_open_items` reflects reality and the reconciler shows the track blocked while
