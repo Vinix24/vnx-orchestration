@@ -6,6 +6,28 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 
 ## [Unreleased]
 
+## [1.7.5] - 2026-10-22
+
+The dispatch guard now decides GO only on live work and a pending queue measured at the call (`vnx status --json --live`). It gives WAIT when that measurement is missing, stale, partial or failed (OI-2268, #2166). The pin shim now finds `versions/v<pin>` when a project pins the bare version (OI-2270).
+
+Move a project's pin to 1.7.5 before it runs the new guard. A project that stays on 1.7.4 gets WAIT, because the 1.7.4 `vnx status` refuses `--live`. This release has no migration: no file under `schemas/migrations` or `scripts/lib/migrations` changed since v1.7.4, so every store keeps its `user_version`.
+
+- Fixed (OI-2268): the dispatch guard measures live work and the pending queue at the moment of the call.
+  `dispatch_guard.sh` read GO/WAIT from `t0_state.json` as it was last built, so a dispatch row in flight or a
+  pending bundle that appeared after that build read as GO. The guard now asks `vnx status --json --live`, which
+  measures `live_work` (the `dispatches` table plus the occupancy flock) and `queues` (`dispatches/pending` and
+  `conflicts`) with the functions `build_t0_state.py` uses, in about half a second on vnx-dev instead of a 15 s build.
+  The answer carries `live_measured_at` and `live_measurement`; GO requires a live measurement of both sections, at
+  most 10 s old, with no read that failed. A read that fails is WAIT with its reason, and a queue count that is not a
+  number is WAIT instead of zero.
+  - A CLI older than this release gives WAIT (`live_unmeasured: cli gave no live measurement`): the 1.7.4 wrapper
+    refuses `--live`, the guard then reads the plain answer and finds no live marker. Pin a project to this release
+    or later before relying on GO.
+  - `vnx status --json` without `--live` is unchanged apart from two added fields: `live_measured_at: null` and
+    `live_measurement.mode: "snapshot"`. The human view of the guard prints a `Measured:` line, and
+    `intelligence.sh` reads the same live answer, shows an unmeasured count as `unmeasured` and marks a snapshot answer.
+- Fixed (OI-2270): the pin shim now finds `versions/v<pin>` when a project pins the bare version (`1.7.5`), so the guard works in a consumer.
+
 ## [1.7.4] - 2026-10-22
 
 This release mainly enforces the provider switch (ADR-044). Every launch function in the census now calls `provider_switch.require`, the `vnx providers` write verbs (`off`, `on`, `reset`, `repair`) are live, the door refuses a switched-off provider, and the plan-gate and the deliberation panel leave a switched-off seat out and refuse below their floor. Claude and codex are outside the switch. It also adds `vnx providers usage` and the `verbruik` mod 0.1.0 that shows its figures, the `context-meter` plugin 1.0.0 with `context-rotation` 1.0.2, the cost ledger's spool replay (K2a-3b) with its dispatcher tick, the `cost-ledger` beacon and the ledger files in `vnx doctor` (K2a-3c) together with the OI-2250 repairs, `voortgang` 0.4.0 where the deliverable is the unit of a track row, and a fix for the launchd reload under `pipefail` (D3-6).
