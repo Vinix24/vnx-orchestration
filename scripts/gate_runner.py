@@ -57,6 +57,7 @@ from gate_lane_contract import (  # C6 step 3: one source, three readers
     harness_dispatcher_timeouts as _harness_lane_dispatcher_timeouts,
     lane_deadline_detail,
     max_diff_chars as _harness_lane_max_diff_chars,
+    reviews_with_tools as _harness_lane_reviews_with_tools,
 )
 
 log = logging.getLogger(__name__)
@@ -1293,6 +1294,9 @@ class GateRunner:
         verdict (``gate_artifacts.materialize_artifacts`` does), so the scan's
         findings reach the reviewer through the prompt rather than by being
         merged into a result record.
+
+        R12: codex reviews with tools in the gate worktree of the PR head, so
+        the prompt carries the working-directory rule (``agentic=True``).
         """
         branch = request_payload.get("branch", "")
         risk = (request_payload.get("risk_class") or "medium")
@@ -1306,6 +1310,7 @@ class GateRunner:
             diff_text=diff_content,
             verdict_contract=_REVIEWER_VERDICT_TEMPLATE,
             max_chars=0,
+            agentic=True,
             instruction=(
                 f"Review the PR diff in the untrusted-data block, on branch {branch} "
                 f"(risk: {risk}). "
@@ -1332,6 +1337,10 @@ class GateRunner:
         change and stay verbatim copies after it — the reviewer instruction is
         identical on purpose, so the two gates review the same PR under the
         same contract.
+
+        One difference since R12: this builder also serves the vertex route, a
+        single REST call with no tools and no checkout, so it passes
+        ``agentic=False`` and the prompt carries no working-directory rule.
         """
         branch = request_payload.get("branch", "")
         risk = (request_payload.get("risk_class") or "medium")
@@ -1345,6 +1354,7 @@ class GateRunner:
             diff_text=diff_content,
             verdict_contract=_REVIEWER_VERDICT_TEMPLATE,
             max_chars=0,
+            agentic=False,
             instruction=(
                 f"Review the PR diff in the untrusted-data block, on branch {branch} "
                 f"(risk: {risk}). "
@@ -1372,6 +1382,10 @@ class GateRunner:
         prompt is what the governed dispatcher hands to the lane, so a
         harness-lane run must not silently diverge from the same gate run
         directly through its own script.
+
+        R12: ``agentic`` is ``gate_lane_contract.reviews_with_tools(gate)``,
+        the same fact the standalone scripts read: deepseek_gate gets the
+        working-directory rule, the single-shot glm_gate and kimi_gate do not.
         """
         pr_number = request_payload.get("pr_number")
         diff_content = GateRunner._fetch_gh_pr_diff(pr_number)
@@ -1388,6 +1402,7 @@ class GateRunner:
             diff_text=diff_content,
             verdict_contract=_HARNESS_LANE_VERDICT_CONTRACT,
             max_chars=diff_cap,
+            agentic=_harness_lane_reviews_with_tools(gate),
             instruction=instruction,
         )
 

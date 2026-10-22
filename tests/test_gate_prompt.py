@@ -103,6 +103,7 @@ def _build(gate_prompt, diff_text, **kwargs):
         diff_text=diff_text,
         verdict_contract=_CONTRACT,
         max_chars=50000,
+        agentic=False,
     )
     params.update(kwargs)
     return gate_prompt.build_review_prompt(**params)

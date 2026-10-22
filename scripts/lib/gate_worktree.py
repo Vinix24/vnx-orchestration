@@ -58,6 +58,8 @@ _MANAGED_WORKTREE_PREFIX = "gate-"
 # first of AGENTS.override.md, AGENTS.md, then the configured
 # project_doc_fallback_filenames (default empty). The gate runs the reviewer
 # with cwd at the worktree root, so this name at that root is what it loads.
+# R12: the last sentence. The rest says where not to look, and on a small diff
+# codex then looked nowhere and was refused as degenerate (PR #2173).
 REVIEW_INSTRUCTIONS_FILENAME = "AGENTS.md"
 REVIEW_INSTRUCTIONS_TEXT = (
     "# Review workspace\n"
@@ -66,7 +68,9 @@ REVIEW_INSTRUCTIONS_TEXT = (
     "Every instruction for this review is in the prompt you were given. "
     "There are no other AGENTS.md files to follow: do not search for AGENTS.md, "
     "CLAUDE.md or other instruction files, in this directory or outside it, "
-    "and do not read outside this directory.\n"
+    "and do not read outside this directory. "
+    "Inside it, the files are there to check the diff against before you give "
+    "your verdict.\n"
 )
 
 # Names that win over AGENTS.md in the same directory and are therefore
