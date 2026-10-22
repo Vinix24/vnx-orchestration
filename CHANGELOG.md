@@ -6,6 +6,116 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 
 ## [Unreleased]
 
+## [1.7.6] - 2026-10-22
+
+This release carries the T0 rotation follow-up that waits for the end of the kickoff turn in the transcript before it types `/goal`, verbruik 0.1.2 with the kimi countdown to its upper bound, the golf-1 removals of C1, C3, C4a, C4b and C5 with the `retired_paths.d` fragments, the review seat that is passed over for the builder's model (R7b), and the xdist isolation of the model normalizer tests.
+
+No migration ships: no file under `schemas/migrations` or `scripts/lib/migrations` changed since v1.7.5, so every store keeps its `user_version`. Re-pinning a project from 1.7.6 back to 1.7.5 is safe for what this release writes: 1.7.5 reads result records with `.get()` and skips the new `reasoning_effort` and `force_rerun` fields, the `builder_vendor` seat record stays on the request record, an obligation parked at `degenerate_retry_cap` reads as any pending one and keeps its `head_runs` through an update, the `permission_escalations` record shape is unchanged, and nothing in 1.7.5 reads `retired_paths.d`. The one thing that does not travel back is a codex_gate or deepseek_gate verdict, whose prompt changed in this release, so 1.7.5's re-anchor recomputes another hash and refuses it.
+
+- `vnx providers usage` and the `verbruik` mod (0.1.1): a full kimi no longer shows only `vol tot reset`. The kimi row gets `resets_at_latest`, an upper bound for the weekly reset: the first weekly-limit failure of the current unbroken streak in VNX's own kimi receipts, plus 7 days. A kimi answer in any store breaks the streak; without records, or when the bound lies in the past, it stays `onbekend`. The mod shows `kimi reset uiterlijk <dd-mm HH:MM>` in local time. It is a bound, never the exact reset, which the kimi CLI does not name.
+
+- Horizon skill (`skills/horizon/SKILL.md`): the delivery rule (a deliverable carries the work, `dlv-...-rN` for follow-up rounds, `vnx deliverable close` after the merge), the done condition per deliverable in `goal_state`, the close rule per PR (`_delivery_hold`: every linked PR must be `complete`), the missing horizon verb (OI-2272) and a goal that survives a rotation. The `--delivery` help of `link-pr` in `planning_cli.py` and `vnx_cli/main.py` now says the same.
+
+- Review gates (R9): every gate worktree now gets a fixed, gate-authored `AGENTS.md` at its root, written by `create_gate_worktree` for every reviewer seat. It tells the reviewer that all instructions are in the prompt and not to search for AGENTS.md, CLAUDE.md or other instruction files, in the worktree or outside it. codex loads that file at start; the repo's own `AGENTS.md` is gitignored, so the worktree had none and codex spent its first turn searching for one outside the repo, a search whose output it resent on every later turn.
+  The file never comes from the tree under review. A PR's own `AGENTS.md` and `AGENTS.override.md` (the name codex prefers over `AGENTS.md`) are replaced or removed in the worktree only, and `git status --porcelain` there stays empty: skip-worktree in the worktree's own index for a tracked name, an ignore rule in the worktree's own root `.gitignore` for a name that is neither tracked nor ignored. Nothing is written to the shared `info/exclude` or any config. A write that fails removes the worktree and is booked as `worktree_checkout_failed`, never a review without the file.
+
+- Review gates no longer send the reviewer looking for instructions (OI-2287): every review prompt now says, after the diff block, that all instructions are in the prompt, so no search for AGENTS.md, CLAUDE.md or other instruction files and nothing read outside the working directory.
+  `codex_gate` passes `model_reasoning_effort` next to the model (OI-2288), so `~/.codex/config.toml` no longer decides it: `VNX_CODEX_REVIEW_EFFORT` when set (low, medium, high, xhigh or max; any other value books `unavailable` as `codex_review_effort_invalid`), else `high` for risk class high or critical and `medium` for the rest. The result record carries `model` and `reasoning_effort`, and so does the record of a codex run that timed out, stalled or was refused as degenerate, so an effort comparison counts the failed runs too.
+
+- Review gates (R10, track `review-stopregel-en-lichte-stoelen`): one run per PR head. Every review-gate run now launches under an exclusive, non-blocking lock per (project, PR, gate, head) in `state/review_gates/run_locks/` (`scripts/lib/gate_run_guard.py`), held for the whole run, in `execute_gate` and in the obligation runner. A second launch on a head that is being reviewed does not run: it logs the key and the holder's pid, answers `in_flight` (never a pass) and counts no attempt. A lock dies with its holder; the runner sweeps the files of dead holders.
+  - Under the lock the launch reads again: a verdict that landed on the head meanwhile is the answer, not a second run.
+  - Retry cap: an obligation gets at most two runs per head in which the reviewer ran without a bookable verdict (`gate_execution_degenerate`, timeout, stall, partial review). Then it stays pending as `degenerate_retry_cap`, the runner reports `retry_capped`, and `open_outcomes` in `t0_index.json` lists it as kind `gate_retry_cap`. A quota or setup refusal does not count; a new head starts at zero.
+  - `gate_obligation_runner.py --dispatch-prefix <id> --force-rerun --reason "..."` is the one operator way past the verdict rescue and the cap; the reason is logged and lands on the obligation, the request and the result record.
+
+- Golf 1, C1 (track `golf-1-opruimen`): removed dead code without a caller in repo, runtime or fleet:
+  `scripts/dispatch_broker_cli.py`, `scripts/vulture_whitelist.py`, `scripts/update_pane_mapping.sh`,
+  `scripts/reconcile_terminal_state.py`, the compat shims `pane_manager_v2.sh`, `smart_tap_v7_json_translator.sh`,
+  `unified_state_manager_v2.py` and `dispatcher_v8_minimal.sh`, and the two tests of the `unified_state_manager_v2.py`
+  shim. The libraries behind them (`dispatch_broker.py`, `terminal_state_reconciler.py`, `unified_state_manager.py`,
+  `pane_manager.sh`, `smart_tap_json_translator.sh`, `dispatcher_minimal.sh`) stay. The dead-code check runs vulture
+  on `scripts/` without the whitelist, which had no executable lines; the field-test runner lost its always-`None`
+  `scoring_worktree` cleanup.
+  - New CI check `scripts/ci/check_retired_paths.py` with the list `scripts/ci/retired_paths.txt`: a retired path,
+    `path::symbol` or `env:NAME` fails CI when it comes back or when anything still calls it in an executable way
+    (import, `-m`, a command in shell, yaml, json, plist or a settings template, an env read). Comments, docstrings,
+    markdown and frozen history do not count. Every later golf-1 cluster adds its removals to the list.
+  - A tracked symlink counts when its target, resolved lexically against the link's directory (a dangling link
+    too), is a retired path or lies under one; an absolute target inside the repo counts the same way.
+  - For a `path::Class.method` entry the class stays importable: what fails is the retired method on the class or
+    an instance of it (`K.method`, `K().method`, an instance bound from `K(...)`, `getattr`/`patch.object` on
+    either, a `patch("module.K.method")` target). The docstring of the check lists the forms it does not follow.
+  - A consumer that tracks a symlink to `scripts/dispatch_broker_cli.py` or `scripts/dispatcher_v8_minimal.sh`
+    (mission-control does, via `scripts/bootstrap-mission-control-repo.sh`) keeps a dangling link after it pins
+    this release; remove the link and its bootstrap line.
+
+- Golf 1, C3 (track `golf-1-opruimen`): removed the tmux orphan sweep of the pool. `pool_reaper.py` lost
+  `_sanitize_session_name`, `list_tmux_sessions`, `session_has_living_children`, `identify_orphan_tmux_sessions` and
+  `sweep_orphan_tmux_sessions`; `PoolManager` lost `_kill_tmux_session`, `_is_dispatch_terminal_in_db` and
+  `_sweep_orphan_tmux`, and `reap_dead` no longer kills a `vnx-<terminal>` session or sweeps `vnx-*` sessions
+  (the tmux lane they belonged to was removed on 2026-09-18). The lease release, membership release and worktree
+  cleanup in `reap_dead` are unchanged. The eight names are on `scripts/ci/retired_paths.txt`.
+
+- Review gates (R7, operator decision 2026-10-22): a new review seat, `claude_gate`, runs `claude -p` headless with model `sonnet` on the operator's own claude subscription. It goes through gate_runner's harness-lane path like `deepseek_gate`, with its own dispatcher (`scripts/lib/claude_gate_lane.py`), never provider_dispatch. The seat runs in its own worktree on the PR head with MCP off and is read-only by allow-list: only `Read`, `Grep` and `Glob` exist and are allowed, `--permission-mode dontAsk` and `--permission-prompts none` refuse every other call, and the argv never carries `--dangerously-skip-permissions` or the adapter's role scope, whatever `VNX_WORKER_SCOPED` says. A verdict counts only from a run that ended in a completion event with subtype `success`, `is_error` false and exit 0. A run that hit its turn limit, ended in an error, emitted no completion event or exited non-zero is booked as an execution failure with the cause in `reason_detail`, and its answer stays out of the report, so a PASS in it is never read. No `ANTHROPIC_*` variable reaches the seat, `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY` included, even when the process that starts it carries them. Its cost line is 0 with source `subscription`.
+  The default takeover chain is now `codex_gate,kimi_gate,claude_gate,deepseek_gate`: every subscription reviewer before the API-credit fallback. With kimi out, the kimi seat goes to claude, no longer to deepseek.
+- Review gates (R7): a seat never gets a reviewer of the vendor that built the PR head (`scripts/lib/review_vendor.py`). The builder's vendor comes from the `provider` and `model` of the dispatch spec the review request names. A same-vendor reviewer is passed over like an unavailable one, with `takeover_reason: vendor_matches_builder`. A DeepSeek-built head with kimi out reads `claude_gate`, and a claude-built head reads `deepseek_gate`. When the builder's vendor cannot be determined, no rule applies and every seat records why in `builder_vendor`. The merge door is unchanged: a seat filled by `claude_gate` counts like any takeover, on the exact head only.
+
+- Review gates (R12): a review seat with tools is told to look at its checkout. After the no-search rule of R8 and the AGENTS.md of R9 a small diff gave codex nothing to do, and PR #2173 was refused as `gate_execution_degenerate` four times with 0 shell calls and 0 file reads. The prompt of `codex_gate` and of `deepseek_gate` on the harness lane now says, right after the no-search rule, to check at least one claim of the diff against the working directory before the verdict, and that a verdict reached without looking there is refused as degenerate. The single-shot `glm_gate` and `kimi_gate` do not get the rule on any path, and neither does `gemini_review`, whose builder also serves the vertex route.
+  `build_review_prompt` takes a required `agentic` argument: each caller states its lane. The harness-lane fact is `gate_lane_contract.SINGLE_SHOT_GATES` and `reviews_with_tools`, read by the standalone glm and kimi scripts, the harness lane and the re-anchor hash. The gate-authored AGENTS.md keeps its text and ends with one sentence more: inside the directory, the files are there to check the diff against before the verdict. The degenerate floor is unchanged.
+  The contract hash of every prompt that gains the rule changes (the codex_gate and deepseek_gate prompts), so a verdict recorded under the old prompt cannot be re-anchored onto a new head. The glm_gate and kimi_gate prompts are byte-identical to before, and their hashes still reproduce.
+
+- Golf 1, C4a (track `golf-1-opruimen`): `vnx permission scan` is gone. Removed the live-pane scan
+  `scan_live_awaiting_permission` and its helpers from `scripts/lib/worker_permission_relay.py`, the `scan`
+  subcommand and its worktree-risk rendering from `scripts/permission_relay_cli.py`, the usage line in `bin/vnx`
+  and the 19 tests of the scan. Every other `vnx permission` subcommand is unchanged.
+
+- T0 rotation (track `rotatie-goal-overdracht`): the `/goal` follow-up after a context rotation waits for the end
+  of the successor's kickoff turn in its transcript (a `system` / `turn_duration` record after the kickoff entry)
+  instead of on screen text, and is `confirmed` only on a `/goal` user entry in that transcript. On claude 2.1.308
+  the spinner no longer shows `esc to interrupt` and the footer stays during a turn, so the screen check typed
+  `/goal` into the kickoff turn, where claude queued it as plain text and never ran it (two SEOcrawler rotations on
+  2026-10-22).
+  - The delivery job passes the transcript it read (`delivery.json`) to the follow-up with `--transcript`; the
+    follow-up refuses to run without one. The retry and the LET OP fallback go in on an idle turn only; a turn that
+    does not end within `VNX_T0_ROTATE_TURN_TIMEOUT` books `turn_timeout` and types nothing.
+  - `VNX_T0_ROTATE_BUSY_PATTERN` is a second opinion now, default `esc to interrupt|… \([0-9]+[hms]` (the 2.1.308
+    spinner and the older one). `/goal active` on screen never confirms on its own. The
+    `t0_context_rotation_goal_followup` receipt gains `fallback` and `screen_goal_active`.
+  - A consumer project gets this with the first release it pins after the merge; until then its rotations keep the
+    screen check.
+
+- Golf 1, C5 (track `golf-1-opruimen`): removed `scripts/cleanup_stale_vnx_sessions.sh`, a manual tool for the removed
+  tmux lane with no caller in repo, runtime or fleet, and `build_process_gone_failure_report` from
+  `scripts/lib/worker_heartbeat.py`, which only a test called. `worker_heartbeat.py` stays for `kimi_spawn.py`.
+  Both are on `scripts/ci/retired_paths.txt`.
+
+- Verbruik mod 0.1.2 (`packages/vnx-mods/verbruik`): a full kimi with a known upper bound shows the time left, `kimi terug over 1d 19u (uiterlijk 24-10 13:05) !!`, rounded up so it never promises kimi back too early. At or after the bound it reads `kimi laatst vol, grens 24-10 13:05 voorbij !` (warning) instead of claiming kimi is full now. The display reads the engine's clock, with no new timer.
+
+- Tests (track `ci-profile-a-xdist`, D3-7): `test_normalizer_keeps_5_and_5_5_apart[anthropic/claude-sonnet-5-5-sonnet-5-5]`
+  failed only under xdist. `tests/test_codex_model_registry.py` points `provider_registry` at a tmp registry with only
+  `openai`; the first `normalize_model_name` call in that worker built its alias tables from it and kept them. Under
+  that table `claude-sonnet-5-5` still normalized through the `claude-<family>` fallback, while
+  `anthropic/claude-sonnet-5-5` came back unchanged. The file now resets and restores the normalizer caches around
+  every test; `tests/test_model_normalizer_registry_isolation.py` runs polluter and victim in one process.
+
+- Review gates (R7b, operator decision 2026-10-22): a seat is passed over for the builder's model, no longer for its vendor (`scripts/lib/review_vendor.py`). A reviewer of the builder's vendor on a different model may take the seat, so a `deepseek-flash` build can be read by `deepseek_gate` on `deepseek-v4-pro`. The reviewer's model is `gate_lane_contract.gate_model` (env var at decision time, else the default); the builder's is the spec's `model`, a placeholder meaning the lane default. Both compare through `model_normalizer.comparable_model_name`, which reads the phased-out `deepseek-v4-flash` as `deepseek-flash`. Same vendor with an unknown model fails closed. The hop reason `vendor_matches_builder` is now `model_matches_builder` (or `model_unknown_for_same_vendor`); records written before keep the old string. A same-vendor reviewer that is let through shows `builder_vendor.rule: model_differs` with `builder_model` and `reviewer_model`.
+
+- Golf 1 (track `golf-1-opruimen`): `scripts/ci/retired_paths.txt` becomes one fragment per cluster under
+  `scripts/ci/retired_paths.d/`, named after the dispatch, so parallel clusters merge in any order instead
+  of conflicting on the shared file. Every fragment holds its cluster's block unchanged; the header (the
+  three line kinds and the rule that a line stays) moved to `scripts/ci/retired_paths.d/README.md`.
+  `scripts/ci/check_retired_paths.py` reads every `*.txt` fragment in sorted order as one list, refuses a
+  line that appears in two fragments (naming both files), and treats an empty or missing directory as an
+  error. `--list` still reads a single file and `--list-dir` reads a directory, which is the default. C4a
+  gains its two helper entries (`tests/test_worker_permission_relay.py::_ScanArgs` and `::_make_git_repo`)
+  and C5 gains the `Source:` line its neighbours carry. The old single file is itself listed as retired.
+
+- Golf 1, C4b (track `golf-1-opruimen`): the `vnx permission window-*` subcommands and the relay tick loop are gone.
+  Removed `PermissionWindow`, `is_catastrophic`, `parse_pending_command`/`_strip_box`, `decide`, the fingerprint
+  helpers, `_capture_pane`, `relay_tick`, `run_relay_loop` and `RelayHandle` from
+  `scripts/lib/worker_permission_relay.py`, the three `window-*` handlers and parser entries from
+  `scripts/permission_relay_cli.py`, the usage lines in `bin/vnx`, and the 55 tests of those paths.
+  `escalations`, `approve`, `deny` and `resolve-stale` are unchanged.
+
 ## [1.7.5] - 2026-10-22
 
 The dispatch guard now decides GO only on live work and a pending queue measured at the call (`vnx status --json --live`). It gives WAIT when that measurement is missing, stale, partial or failed (OI-2268, #2166). The pin shim now finds `versions/v<pin>` when a project pins the bare version (OI-2270).
