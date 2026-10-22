@@ -1,0 +1,34 @@
+# C4b (dlv-318d4751ea1f)
+# Source: docs/investigations/2026-10-20-golf-1-hermeting.md §7 "C4" (C4b).
+scripts/lib/worker_permission_relay.py::is_catastrophic
+scripts/lib/worker_permission_relay.py::PermissionWindow
+scripts/lib/worker_permission_relay.py::_strip_box
+scripts/lib/worker_permission_relay.py::parse_pending_command
+scripts/lib/worker_permission_relay.py::decide
+scripts/lib/worker_permission_relay.py::_fingerprint_path
+scripts/lib/worker_permission_relay.py::_fingerprint
+scripts/lib/worker_permission_relay.py::_read_fingerprint
+scripts/lib/worker_permission_relay.py::_write_fingerprint
+scripts/lib/worker_permission_relay.py::_capture_pane
+scripts/lib/worker_permission_relay.py::relay_tick
+scripts/lib/worker_permission_relay.py::run_relay_loop
+scripts/lib/worker_permission_relay.py::RelayHandle
+scripts/lib/worker_permission_relay.py::_parse_iso_epoch
+scripts/lib/worker_permission_relay.py::WINDOW_FILENAME
+scripts/lib/worker_permission_relay.py::RELAY_DIRNAME
+scripts/lib/worker_permission_relay.py::CATASTROPHIC_PATTERNS
+scripts/lib/worker_permission_relay.py::_RM_RECURSIVE_RE
+scripts/lib/worker_permission_relay.py::_RM_ROOT_TARGET_RE
+scripts/lib/worker_permission_relay.py::_INLINE_CMD_RE
+scripts/lib/worker_permission_relay.py::_BOX_CHARS
+scripts/lib/worker_permission_relay.py::_TITLE_ROWS
+scripts/permission_relay_cli.py::_cmd_window_open
+scripts/permission_relay_cli.py::_cmd_window_close
+scripts/permission_relay_cli.py::_cmd_window_status
+tests/test_worker_permission_relay.py::TestPermissionWindow
+tests/test_worker_permission_relay.py::TestIsCatastrophic
+tests/test_worker_permission_relay.py::TestParsePendingCommand
+tests/test_worker_permission_relay.py::TestDecide
+tests/test_worker_permission_relay.py::TestRelayTick
+tests/test_worker_permission_relay.py::TestAutoApproveGatesOnSendResult
+tests/test_worker_permission_relay.py::TestSafeDispatchId.test_relay_tick_rejects_traversal

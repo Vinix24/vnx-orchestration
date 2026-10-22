@@ -15,7 +15,8 @@ from __future__ import annotations
 import logging
 import sys
 from pathlib import Path
-from typing import Dict
+import os
+from typing import Dict, Optional
 
 _LIB = str(Path(__file__).resolve().parent)
 if _LIB not in sys.path:
@@ -46,6 +47,31 @@ MODEL_DEFAULTS: Dict[str, tuple] = {
     "deepseek_gate": ("VNX_DEEPSEEK_GATE_MODEL", "deepseek-flash"),
     "claude_gate": ("VNX_CLAUDE_GATE_MODEL", "sonnet"),
 }
+
+def gate_model(gate: str) -> Optional[str]:
+    """The model review gate *gate* runs at this moment, or None when it cannot be named.
+
+    A gate in :data:`MODEL_DEFAULTS` runs the value of its env var, else its
+    default. ``codex_gate`` is picked the way ``gate_runner`` picks it: the
+    ``VNX_CODEX_HEADLESS_MODEL`` / ``VNX_CODEX_MODEL`` override, else the
+    registry's ``openai.default_model``; a registry that cannot name one leaves
+    the model unknown. Any other gate (``ci_gate``, ``wiring_gate``) calls no
+    model. The one reader of the reviewer's model (``review_vendor``, R7b): no
+    second table of defaults exists beside :data:`MODEL_DEFAULTS`.
+    """
+    if gate in MODEL_DEFAULTS:
+        env_name, default = MODEL_DEFAULTS[gate]
+        return (os.environ.get(env_name) or "").strip() or default
+    if gate == "codex_gate":
+        from providers import provider_registry  # after the scripts/lib path guard above
+
+        override = (os.environ.get("VNX_CODEX_HEADLESS_MODEL") or os.environ.get("VNX_CODEX_MODEL") or "").strip()
+        try:
+            return provider_registry.resolve_codex_model(explicit=override) or None
+        except provider_registry.CodexModelResolutionError:
+            return None
+    return None
+
 
 # R12: the review gates measured as one shot. glm_gate.py and kimi_gate.py
 # book their depth with gate_depth.single_shot_depth: the diff in the prompt is

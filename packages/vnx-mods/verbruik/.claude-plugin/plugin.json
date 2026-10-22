@@ -1,6 +1,6 @@
 {
   "name": "verbruik",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "A VNX mod: one status line with the usage of every subscription and the balance of the API providers. Claude from the session itself, the other providers from vnx providers usage.",
   "userConfig": {
     "vnxBin": {

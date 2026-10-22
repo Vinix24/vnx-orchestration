@@ -35,7 +35,7 @@ from gate_recorder import EXECUTION_FAILURE_REASONS, QUOTA_REFUSAL_REASON  # noq
 from gate_request_handler import GateRequestHandlerMixin  # noqa: E402
 from gate_runner import GateRunner  # noqa: E402
 from provider_spawns import codex_spawn  # noqa: E402
-from providers import provider_registry  # noqa: E402
+from providers import model_normalizer, provider_registry  # noqa: E402
 
 TMP_MODEL = "tmp-registry-model"
 
@@ -63,6 +63,17 @@ def _write_registry(path: Path, *, default_model: str | None, models=(TMP_MODEL,
     body = "\n".join(lines) + "\n" + "".join(_MODEL_BLOCK.format(key=k) for k in models)
     path.write_text(body, encoding="utf-8")
     return path
+
+
+@pytest.fixture(autouse=True)
+def _isolate_model_normalizer_caches(monkeypatch):
+    """The normalizer builds its alias tables once, from whichever registry
+    ``provider_registry`` points at on the first call. Tests here point it at a
+    tmp registry that holds only openai, so a first call under it would leave
+    that table behind for every later test in the worker. The monkeypatch resets
+    the caches now and restores the pre-test values at teardown."""
+    for name in ("_registry_cache", "_alias_cache", "_keys_cache"):
+        monkeypatch.setattr(model_normalizer, name, None)
 
 
 @pytest.fixture

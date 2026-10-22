@@ -196,10 +196,11 @@ jobs:
           # back, or when anything still calls it in an executable way (import,
           # -m, a command in shell/yaml/json/plist, an env read). Comments,
           # docstrings, markdown and frozen history do not count. The list is
-          # scripts/ci/retired_paths.txt; every cluster adds its removals.
+          # scripts/ci/retired_paths.d/: one fragment per cluster, so parallel
+          # clusters never conflict on it.
           python3 "$GITHUB_WORKSPACE/scripts/ci/check_retired_paths.py" \
             --root "$GITHUB_WORKSPACE" \
-            --list "$GITHUB_WORKSPACE/scripts/ci/retired_paths.txt"
+            --list-dir "$GITHUB_WORKSPACE/scripts/ci/retired_paths.d"
 
       - name: Run retired paths guard unit tests
         run: |

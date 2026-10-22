@@ -1,0 +1,4 @@
+# Golf 1: the single list file became one fragment per cluster in this
+# directory (dlv-92fa888af43f). Source:
+# docs/investigations/2026-10-20-golf-1-hermeting.md §7.
+scripts/ci/retired_paths.txt

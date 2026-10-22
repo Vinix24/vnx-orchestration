@@ -3,9 +3,6 @@
 
 Subcommands (wired to scripts/lib/worker_permission_relay.py):
 
-  vnx permission window-open --minutes N [--reason ...]   open the auto-accept window
-  vnx permission window-close                             close it
-  vnx permission window-status                            show window state
   vnx permission escalations                              list pending escalations
   vnx permission approve <dispatch_id>                    approve + relay "1" to the worker
   vnx permission deny <dispatch_id>                       deny (operator handles the worker)
@@ -13,8 +10,6 @@ Subcommands (wired to scripts/lib/worker_permission_relay.py):
 
 All subcommands accept ``--json`` for machine-readable output.
 
-The relay model: outside an open window every worker permission prompt escalates;
-inside the window routine prompts auto-approve; catastrophic ops always escalate.
 ``approve`` relays the approval keystroke ("1" + a SEPARATE Enter) into the worker's
 tmux session and marks the escalation resolved=approved ONLY on confirmed delivery.
 If the keystroke does not land (no live session / send failure) the escalation is
@@ -58,41 +53,6 @@ def _emit(payload: dict, as_json: bool, human: str) -> None:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         print(human)
-
-
-def _cmd_window_open(args, sd: Path) -> int:
-    win = relay.PermissionWindow(sd)
-    record = win.open(args.minutes, args.reason)
-    status = win.status()
-    _emit(
-        status,
-        args.json,
-        f"[ok] permission window OPEN for {args.minutes:g} min "
-        f"(expires {record['expires_at']}, remaining {status['remaining_seconds']}s)"
-        + (f" — reason: {args.reason}" if args.reason else ""),
-    )
-    return 0
-
-
-def _cmd_window_close(args, sd: Path) -> int:
-    win = relay.PermissionWindow(sd)
-    win.close()
-    _emit({"open": False}, args.json, "[ok] permission window CLOSED")
-    return 0
-
-
-def _cmd_window_status(args, sd: Path) -> int:
-    win = relay.PermissionWindow(sd)
-    status = win.status()
-    if status["open"]:
-        human = (
-            f"[~] window OPEN — {status['remaining_seconds']}s remaining "
-            f"(expires {status['expires_at']})"
-        )
-    else:
-        human = "[ ] window CLOSED — all worker prompts escalate to the operator"
-    _emit(status, args.json, human)
-    return 0
 
 
 def _cmd_escalations(args, sd: Path) -> int:
@@ -295,27 +255,16 @@ def _cmd_resolve_stale(args, sd: Path) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     # Shared --json flag so it is accepted after the subcommand
-    # (e.g. ``vnx permission window-status --json``).
+    # (e.g. ``vnx permission escalations --json``).
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--json", action="store_true", help="machine-readable JSON output")
 
     parser = argparse.ArgumentParser(
         prog="vnx permission",
         parents=[common],
-        description="Worker-permission relay: auto-accept window + escalation control.",
+        description="Worker-permission relay: escalation control.",
     )
     sub = parser.add_subparsers(dest="subcommand", required=True)
-
-    p_open = sub.add_parser("window-open", parents=[common], help="open the operator auto-accept window")
-    p_open.add_argument("--minutes", type=float, required=True, help="window duration in minutes")
-    p_open.add_argument("--reason", default=None, help="why the window is open (audit)")
-    p_open.set_defaults(func=_cmd_window_open)
-
-    p_close = sub.add_parser("window-close", parents=[common], help="close the auto-accept window")
-    p_close.set_defaults(func=_cmd_window_close)
-
-    p_status = sub.add_parser("window-status", parents=[common], help="show window state")
-    p_status.set_defaults(func=_cmd_window_status)
 
     p_esc = sub.add_parser("escalations", parents=[common], help="list pending permission escalations")
     p_esc.add_argument("--all", action="store_true", help="include resolved escalations")

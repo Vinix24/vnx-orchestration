@@ -3,7 +3,7 @@
 A VNX mod for Claude Code. It puts the usage of every subscription and the balance of the API providers in one status line:
 
 ```
-verbruik: claude 5u 34% · week 61% · codex 58% · kimi vol tot reset !! · deepseek $12.92 · openrouter $4.91 !
+verbruik: claude 5u 34% · week 61% · codex 58% · kimi terug over 1d 19u (uiterlijk 24-10 13:05) !! · deepseek $12.92 · openrouter $4.91 !
 ```
 
 The `verbruik: ` at the start is the engine's: it puts the plugin name in front of every status entry. The labels are Dutch (`5u`, `week`, `vol tot reset`, `(oud)`, `nog geen meting`). It needs VNX 1.7.4 or newer for the providers other than Claude. It ships with a VNX release and lives in this repository under `packages/vnx-mods/`.
@@ -15,7 +15,7 @@ The `verbruik: ` at the start is the engine's: it puts the plugin name in front 
 | Claude, the 5-hour window | `$.session.usage().rateLimits`, kind `five_hour` | `claude 5u 34%` |
 | Claude, the weekly window | the same, kind `seven_day` | `week 61%` |
 | codex | `used_percent` of its row | `codex 58%` |
-| kimi | `status` of its row as text; the percentage when a later schema carries one | `kimi vol tot reset`, or `kimi reset uiterlijk 25-10 14:05` when the row carries `resets_at_latest` (an upper bound, local time) |
+| kimi | `status` of its row as text; the percentage when a later schema carries one | `kimi vol tot reset`, or with `resets_at_latest` (an upper bound, local time) `kimi terug over 1d 19u (uiterlijk 25-10 14:05)`, and after that bound `kimi laatst vol, grens 25-10 14:05 voorbij` |
 | deepseek | `balances[].total`, in its currency | `deepseek $12.92` |
 | openrouter | `remaining` | `openrouter $4.91` |
 
@@ -37,9 +37,13 @@ The tone of a segment is computed per segment (`success`, `warning`, `error`, `d
 |---|---|---|---|
 | a used percentage | below `warnPercent` | from `warnPercent` up to `errorPercent` | from `errorPercent` up |
 | a balance | above `warnBalance` | at or below `warnBalance`, above `errorBalance` | at or below `errorBalance` |
-| kimi status | `bereikbaar` | any other status | `vol tot reset` |
+| kimi status | `bereikbaar` | any other status, and `laatst vol, grens ... voorbij` | `vol tot reset` and `terug over ...` |
 
 With the defaults 69 is `success`, 70 and 89 are `warning`, 90 is `error`; a balance of 5.01 is `success`, 5 and 1.01 are `warning`, 1 is `error`. A deepseek row with several currencies takes the worst tone of its balances.
+
+### The kimi countdown
+
+The bound is the first weekly-limit failure of the current streak plus 7 days: an upper bound, never the exact reset. Before it the text counts down to it: `1d 19u` above 24 hours, `5u 07m` from 1 to 24 hours, `42m` under an hour, rounded up on the smallest unit shown. At or after the bound the `vol` status is older than the bound and no new measurement, so the text names only the stored bound and the tone drops to a warning. The countdown is not a live ticker: it is computed again on every render (`session.start`, every `session.measure`, every refresh, a width change and `/verbruik`) from the engine's clock.
 
 ### Width
 
