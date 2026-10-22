@@ -62,7 +62,8 @@ the gate refused the run as degenerate (OI-2286). ``collapse_data_sections``
 takes a large CSV, TSV, NDJSON, JSONL or lock file section out of the block,
 and the gate names what it took out above the block. The scan and the
 release check keep reading the full diff, so an injection in a collapsed CSV
-is still found.
+is still found. A diff of data files only stays whole, so the block is never
+empty, and the coverage a gate records is measured on the block.
 
 **The reviewer reads only this prompt.** Codex spent its first tool calls of
 a review searching ``/Users`` for an AGENTS.md the gate worktree never has
@@ -573,15 +574,29 @@ def collapse_data_sections(diff_text: Optional[str]) -> Tuple[str, List[Collapse
     the next header line, so the hash covers exactly the bytes left out. Every
     other section, and any text before the first header, is kept byte for byte.
 
+    Only when at least one file section stays in the block. A diff of nothing
+    but collapsible sections comes back whole, with nothing collapsed: on PR
+    #2170 an 11.535-char CSV-only diff became an empty block, and glm_gate and
+    kimi_gate both booked a pass on it. The cap then applies to the whole diff,
+    as it did before collapsing existed.
+
     For the prompt only. The scan, ``diff_changed_paths`` and
     ``is_release_diff`` read the full diff: an injection inside a collapsed CSV
     must still be found, and a data file beside a version bump must still keep
-    the PR from reading as a release.
+    the PR from reading as a release. ``gate_depth.diff_coverage`` calls this
+    too, so the coverage a gate records is the block the reviewer got.
     """
+    text = diff_text or ""
+    sections = _diff_sections(text)
+    paths = [_collapsible_path(section) for section in sections]
+    if not any(
+        path is None and section.startswith("diff --git ")
+        for section, path in zip(sections, paths)
+    ):
+        return text, []
     kept: List[str] = []
     collapsed: List[CollapsedSection] = []
-    for section in _diff_sections(diff_text or ""):
-        path = _collapsible_path(section)
+    for section, path in zip(sections, paths):
         if path is None:
             kept.append(section)
             continue
@@ -700,7 +715,8 @@ def build_review_prompt(
 
     The block carries ``collapse_data_sections(diff_text)``, cut at
     ``max_chars`` after the collapse, so the cap measures what the reviewer
-    gets. The scan and the release check read the full ``diff_text``.
+    gets. ``gate_depth.diff_coverage(diff_text, max_chars)`` measures that
+    same block. The scan and the release check read the full ``diff_text``.
 
     ``verdict_contract`` stays the caller's: glm_gate/kimi_gate's
     ``_VERDICT_CONTRACT`` and gate_runner's ``_REVIEWER_VERDICT_TEMPLATE``

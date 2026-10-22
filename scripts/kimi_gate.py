@@ -610,13 +610,11 @@ def main(argv: "list[str] | None" = None) -> int:
         # OI-1874 r3: resolved ONCE — see glm_gate.py's identical fix. `diff_cap`
         # is the single source passed to both `gate_depth.diff_coverage` and
         # `_build_prompt` below.
+        # OI-2286: both measure the block after the data file collapse, so
+        # diff_chars is what kimi got and collapsed_sections what it did not.
         diff_cap = max_diff_chars("kimi_gate")
         coverage = gate_depth.diff_coverage(diff, diff_cap)
-        execution_depth = gate_depth.single_shot_depth(
-            coverage["diff_chars"], coverage["diff_truncated"],
-            diff_limit=coverage["diff_limit"],
-            truncated_files=tuple(coverage["truncated_files"]),
-        )
+        execution_depth = gate_depth.single_shot_depth_from_coverage(coverage)
 
         # dispatch_id is already resolved above (shared with the request record).
         # role="review-gate" (dispatch-20260823-beta2-j): see glm_gate.py's

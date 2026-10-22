@@ -595,7 +595,8 @@ def test_a_rename_from_code_to_a_data_path_stays_whole(gate_prompt):
     section = _data_section("scripts/rows.py", 120).replace(
         "diff --git a/scripts/rows.py b/scripts/rows.py", "diff --git a/scripts/rows.py b/data/rows.csv"
     )
-    prompt = _build(gate_prompt, section, max_chars=0)
+    # Beside a code section, so the data-only rule cannot be what keeps it.
+    prompt = _build(gate_prompt, _CODE_SECTION + section, max_chars=0)
     assert section in _block(gate_prompt, prompt), "only a data file on both sides is collapsed"
 
 
@@ -604,7 +605,7 @@ def test_a_data_path_outside_the_safe_characters_stays_whole(gate_prompt):
     characters beyond letters, digits, dot, dash, underscore and slash stays in
     the block instead, so no markup from the author reaches the gate's text."""
     section = _data_section("docs/`json$x.csv", 120)
-    prompt = _build(gate_prompt, section, max_chars=0)
+    prompt = _build(gate_prompt, _CODE_SECTION + section, max_chars=0)
     assert section.replace("```json", "``` json (neutralized)") in _block(gate_prompt, prompt)
     assert "$x.csv" not in _before_block(gate_prompt, prompt)
 
@@ -619,7 +620,7 @@ def test_removed_lines_are_counted(gate_prompt):
         + "".join(f"-{i},stale measured output column value\n" for i in range(60))
         + "+0,new\n+1,new\n"
     )
-    prompt = _build(gate_prompt, section)
+    prompt = _build(gate_prompt, _CODE_SECTION + section)
     assert f"data/old.csv: +2 -60 lines, {len(section)} chars" in _before_block(gate_prompt, prompt)
 
 

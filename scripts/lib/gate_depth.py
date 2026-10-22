@@ -106,7 +106,10 @@ class ExecutionDepth:
 
     ``diff_chars``/``diff_truncated``/``diff_limit``/``truncated_files``
     describe the diff the gate was handed, on every mode (OI-1851, see
-    :func:`with_diff_coverage`).
+    :func:`with_diff_coverage`). ``collapsed_sections`` names each data file
+    section the prompt left out of that diff, one dict per section with
+    ``path``, ``chars`` and ``sha256_prefix`` (OI-2286, see
+    :func:`diff_coverage`).
     """
 
     parsed: bool = False
@@ -122,6 +125,7 @@ class ExecutionDepth:
     diff_truncated: bool = False
     diff_limit: int = 0
     truncated_files: tuple = ()
+    collapsed_sections: tuple = ()
 
     def to_dict(self) -> Dict[str, Any]:
         """JSON-shaped dict: ``unrecognised_item_types`` normalizes to a list.
@@ -136,6 +140,7 @@ class ExecutionDepth:
         data = asdict(self)
         data["unrecognised_item_types"] = list(data["unrecognised_item_types"])
         data["truncated_files"] = list(data["truncated_files"])
+        data["collapsed_sections"] = list(data["collapsed_sections"])
         return data
 
 
@@ -218,12 +223,29 @@ _DIFF_FILE_HEADER_RE = re.compile(r"^diff --git a/(.+?) b/(.+)$", re.MULTILINE)
 
 
 def diff_coverage(diff_text: str, max_chars: int) -> Dict[str, Any]:
-    """The coverage fields of :class:`ExecutionDepth` for a diff capped at
-    ``max_chars`` (OI-1851): full post-strip size, whether the raw text exceeds
-    the cap (the test ``gate_prompt.wrap_untrusted_diff`` cuts on), the cap
-    (0 = uncapped), and every file whose section does not end inside the cap.
+    """The coverage fields of :class:`ExecutionDepth` for the diff block of a
+    review prompt capped at ``max_chars`` (OI-1851).
+
+    Measured on the block, not on ``diff_text``: the block is
+    ``gate_prompt.collapse_data_sections(diff_text)``, the same call
+    ``build_review_prompt`` makes, so the record says what the reviewer got
+    (OI-2286; on PR #2170 a CSV-only diff became an empty block that was
+    recorded at its full size). The fields: the block's post-strip size,
+    whether its raw text exceeds the cap (the test
+    ``gate_prompt.wrap_untrusted_diff`` cuts on), the cap (0 = uncapped),
+    every file whose section does not end inside the cap, and under
+    ``collapsed_sections`` each section left out, with its path, chars and
+    sha256 prefix. Collapsing is not a cut: the prompt names what it left
+    out, so a block that holds less than the diff for that reason is not
+    ``diff_truncated``.
     """
-    text = diff_text or ""
+    # Imported here, not at the top: gate_status and gate_recorder load this
+    # module on the merge door's path, and gate_prompt puts scripts/release on
+    # sys.path when it loads. Every caller of this function builds a review
+    # prompt and has gate_prompt loaded already.
+    from gate_prompt import collapse_data_sections
+
+    text, collapsed = collapse_data_sections(diff_text)
     truncated = max_chars > 0 and len(text) > max_chars
     files: list = []
     if truncated:
@@ -237,12 +259,16 @@ def diff_coverage(diff_text: str, max_chars: int) -> Dict[str, Any]:
         "diff_truncated": truncated,
         "diff_limit": max(max_chars, 0),
         "truncated_files": files,
+        "collapsed_sections": [
+            {"path": section.path, "chars": section.chars, "sha256_prefix": section.sha256_prefix}
+            for section in collapsed
+        ],
     }
 
 
 def prompt_diff_chars(coverage: Any) -> int:
     """How much of the diff a :func:`diff_coverage` record says entered the
-    prompt (OI-2066): the full size, or the cap when the diff was cut. The
+    prompt (OI-2066): the block's size, or the cap when the block was cut. The
     harness-lane deadline is sized on this. A missing or malformed record
     counts as 0 — the deadline then stays at its base.
     """
@@ -267,6 +293,7 @@ def with_diff_coverage(depth: ExecutionDepth, coverage: Any) -> ExecutionDepth:
         diff_truncated=bool(coverage.get("diff_truncated")),
         diff_limit=int(coverage.get("diff_limit") or 0),
         truncated_files=tuple(coverage.get("truncated_files") or ()),
+        collapsed_sections=tuple(coverage.get("collapsed_sections") or ()),
     )
 
 
@@ -333,6 +360,16 @@ def single_shot_depth(
     )
 
 
+def single_shot_depth_from_coverage(coverage: Dict[str, Any]) -> ExecutionDepth:
+    """:func:`single_shot_depth` for the block a :func:`diff_coverage` record
+    describes (OI-2286). Every coverage field goes over here, in one place, so
+    glm_gate and kimi_gate cannot each record a different part of it:
+    ``diff_chars`` is the size of the block the prompt carried and
+    ``collapsed_sections`` names the data file sections it left out.
+    """
+    return with_diff_coverage(single_shot_depth(0, False), coverage)
+
+
 def from_dict(data: Any) -> ExecutionDepth:
     """Reconstruct an :class:`ExecutionDepth` from its own ``to_dict()`` output.
 
@@ -353,7 +390,7 @@ def from_dict(data: Any) -> ExecutionDepth:
         return ExecutionDepth()
     known = {f.name for f in fields(ExecutionDepth)}
     kwargs = {k: v for k, v in data.items() if k in known}
-    for tuple_field in ("unrecognised_item_types", "truncated_files"):
+    for tuple_field in ("unrecognised_item_types", "truncated_files", "collapsed_sections"):
         if kwargs.get(tuple_field) is not None:
             kwargs[tuple_field] = tuple(kwargs[tuple_field])
     try:
@@ -418,4 +455,5 @@ __all__ = [
     "is_degenerate",
     "measure_execution_depth",
     "single_shot_depth",
+    "single_shot_depth_from_coverage",
 ]
