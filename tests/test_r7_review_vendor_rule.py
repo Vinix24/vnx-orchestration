@@ -13,7 +13,7 @@ store (specs and result records on disk, no patched decision code):
   request names;
 - a reviewer of that vendor is passed over like an unavailable one, first
   choice or takeover, and the record names it (``takeover_from``,
-  ``takeover_reason: vendor_matches_builder``);
+  ``takeover_reason: model_matches_builder``);
 - an unknown builder vendor applies no rule, and every seat says so.
 """
 from __future__ import annotations
@@ -30,15 +30,30 @@ VNX_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(VNX_ROOT / "scripts"))
 sys.path.insert(0, str(VNX_ROOT / "scripts" / "lib"))
 
+import gate_lane_contract
 import review_vendor
+from providers import model_normalizer
 from review_vendor import (
     RULE_APPLIED,
     RULE_NOT_APPLIED,
-    VENDOR_MATCH_REASON,
+    MODEL_MATCH_REASON,
     gate_vendor,
     resolve_builder_vendor,
     vendor_from_spec,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_model_normalizer_caches(monkeypatch):
+    """The model comparison reads the registry through the normalizer's per-process tables (R7b r3).
+
+    A tmp-registry test that ran earlier in the worker would leave its tables
+    behind and turn every claude name into an unresolved one here. Reset for
+    each test; the monkeypatch restores what it found at teardown.
+    """
+    for name in ("_registry_cache", "_alias_cache", "_keys_cache"):
+        monkeypatch.setattr(model_normalizer, name, None)
+
 
 _FRESH = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 _KIMI_WEEKLY_LIMIT = (
@@ -220,19 +235,19 @@ class TestVendorRuleInTheWalk:
 
     def test_claude_built_head_with_kimi_out_gets_deepseek_not_claude(self, store):
         pr = 2201
-        _write_spec(store["data_dir"], "dlv-claude-built", {"provider": "claude", "model": "opus"})
+        _write_spec(store["data_dir"], "dlv-claude-built", {"provider": "claude", "model": "sonnet"})
         _exhausted(store["results"], pr, "kimi_gate", _KIMI_WEEKLY_LIMIT)
 
         seat = _request(pr, ["kimi_gate"], "dlv-claude-built")["requested"][0]
 
         assert seat["gate"] == "deepseek_gate"
         assert seat["takeover_from"] == "claude_gate"
-        assert seat["takeover_reason"] == VENDOR_MATCH_REASON
+        assert seat["takeover_reason"] == MODEL_MATCH_REASON
         assert [hop["gate"] for hop in seat["takeover_path"]] == ["kimi_gate", "claude_gate"]
-        assert "the vendor matched the builder" in seat["failure_reason"]
+        assert "a reviewer never runs the model that built the head" in seat["failure_reason"]
         assert not (store["requests"] / f"pr-{pr}-claude_gate.json").exists()
         on_disk = _record(store["requests"], pr, "deepseek_gate")
-        assert on_disk["takeover_reason"] == VENDOR_MATCH_REASON
+        assert on_disk["takeover_reason"] == MODEL_MATCH_REASON
         assert on_disk["builder_vendor"]["vendor"] == "anthropic"
 
     def test_unknown_builder_vendor_applies_no_rule_and_says_so(self, store):
@@ -262,19 +277,19 @@ class TestVendorRuleInTheWalk:
     def test_first_choice_of_the_builders_vendor_is_passed_over(self, store):
         """A codex-built head: the codex seat's own gate is codex, so kimi reads it."""
         pr = 2204
-        _write_spec(store["data_dir"], "dlv-codex-built", {"provider": "codex", "model": "gpt-5.5"})
+        _write_spec(store["data_dir"], "dlv-codex-built", {"provider": "codex", "model": gate_lane_contract.gate_model("codex_gate")})
 
         seat = _request(pr, ["codex_gate"], "dlv-codex-built")["requested"][0]
 
         assert seat["gate"] == "kimi_gate"
         assert seat["seat"] == "codex_gate"
         assert seat["takeover_from"] == "codex_gate"
-        assert seat["takeover_reason"] == VENDOR_MATCH_REASON
+        assert seat["takeover_reason"] == MODEL_MATCH_REASON
         assert not (store["requests"] / f"pr-{pr}-codex_gate.json").exists()
 
     def test_only_same_vendor_reviewers_left_ends_unfilled_never_on_deepseek(self, store):
         pr = 2205
-        _write_spec(store["data_dir"], "dlv-ds-built", {"provider": "deepseek-harness", "model": "deepseek-v4-pro"})
+        _write_spec(store["data_dir"], "dlv-ds-built", {"provider": "deepseek-harness", "model": "deepseek-flash"})
         _exhausted(store["results"], pr, "kimi_gate", _KIMI_WEEKLY_LIMIT)
         _exhausted(store["results"], pr, "claude_gate", _CLAUDE_EXHAUSTED)
 
@@ -282,7 +297,7 @@ class TestVendorRuleInTheWalk:
 
         assert seat["status"] == "chain_exhausted"
         assert [hop["gate"] for hop in seat["takeover_path"]] == ["kimi_gate", "claude_gate", "deepseek_gate"]
-        assert seat["takeover_path"][-1]["reason"] == VENDOR_MATCH_REASON
+        assert seat["takeover_path"][-1]["reason"] == MODEL_MATCH_REASON
         assert not (store["requests"] / f"pr-{pr}-deepseek_gate.json").exists()
 
     def test_a_same_vendor_seat_with_no_successor_is_unfillable(self, store):

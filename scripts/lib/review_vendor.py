@@ -1,7 +1,19 @@
-"""review_vendor.py — who built a PR head, and whose model a reviewer is (R7).
+"""review_vendor.py — who built a PR head, and whose model a reviewer is (R7, R7b).
 
-Operator decision 2026-10-22 (dispatch dlv-9906a482950d): a review seat never
-gets a reviewer of the builder's vendor. Measured on PR #2168: kimi was at its
+Operator decision 2026-10-22 (dispatch dlv-9906a482950d), refined the same
+evening (dispatch dlv-b4de838ac1ec): a review seat never gets a reviewer that
+runs the SAME MODEL as the builder. A reviewer of the builder's vendor on a
+different model may take the seat: a build by ``deepseek-flash`` may be read
+by ``deepseek_gate`` on ``deepseek-v4-pro``, which lets a DeepSeek build be
+reviewed by codex plus a DeepSeek seat while kimi is out, without spending
+Claude quota. Two names are one model when the registry answers both with the
+same model (``model_normalizer.comparable_model_name``): ``sonnet`` and
+``claude-sonnet-5-5`` are one model, and so are the phased-out
+``deepseek-v4-flash`` and ``deepseek-flash``. Same vendor with either model
+unknown, or a name the registry does not resolve to a model it knows, fails
+closed: the reviewer is passed over and the hop names the model.
+
+Measured on PR #2168 (the case that started R7): kimi was at its
 weekly limit, ``deepseek_gate`` took the kimi seat, and round 5 of that PR was
 built by ``deepseek-v4-pro`` (dispatch ``dlv-c089a8e32893-r5``, provider
 ``deepseek-harness``). DeepSeek reviewed DeepSeek, and nothing in the takeover
@@ -15,12 +27,15 @@ and this module never keeps a second prefix table:
 - a reviewer: ``codex_gate`` openai, ``kimi_gate`` moonshot, ``claude_gate``
   anthropic, ``deepseek_gate`` deepseek, ``glm_gate`` zhipu. A gate that calls
   no model (``ci_gate``, ``wiring_gate``, ``claude_github_optional``) has no
-  vendor and is never passed over by this rule.
+  vendor and is never passed over by this rule. Its model is
+  ``gate_lane_contract.gate_model``, read at decision time.
 - the builder: the ``provider`` and ``model`` of the dispatch spec of the
   dispatch the gate request names
   (``<data_dir>/dispatches/*/<dispatch_id>/dispatch-spec.json``, the lookup
   ``dispatch_identity.resolve_spec_role`` uses), in the store the review gates
-  belong to.
+  belong to. A placeholder model (``""``, ``default``, ``auto``, ``none``) means
+  the lane picked its own, read from the latest receipt of that dispatch
+  (:func:`builder_model`).
 
 Never guessed. The builder's vendor is unknown, and the rule is not applied,
 when the request names no dispatch, no spec is found, a spec cannot be read,
@@ -28,7 +43,8 @@ neither field names a maker, or the two fields name different makers (measured
 2026-10-22: two specs in the vnx-dev store carry provider ``claude`` with model
 ``kimi``). Every one of those outcomes says why in :attr:`BuilderVendor.reason`,
 and the seat records it (``builder_vendor``) so a reader sees whether the rule
-was applied.
+was applied. A same-vendor reviewer that is allowed through carries
+``rule: model_differs`` with both models on that record.
 """
 
 from __future__ import annotations
@@ -39,7 +55,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
+import gate_lane_contract
 import provider_switch
+from providers.model_normalizer import comparable_model_name, is_unknown_model
 
 # Family (provider_switch) -> vendor, the model maker. A family with no entry
 # here (local, openrouter, tooling, unresolved) names no maker.
@@ -55,13 +73,19 @@ VENDOR_BY_FAMILY: Dict[str, str] = {
 # A spec model value that names no model: the lane runs its own default.
 _MODEL_PLACEHOLDERS = frozenset({"", "default", "auto", "none"})
 
-# The takeover hop a reviewer of the builder's vendor gets: passed over exactly
-# like an unavailable seat, under its own reason.
-VENDOR_MATCH_REASON = "vendor_matches_builder"
-VENDOR_MATCH_STATUS = "vendor_match"
+# The takeover hop a reviewer gets when it runs the builder's model, or when it
+# shares the builder's vendor and one of the two models is unknown: passed over
+# exactly like an unavailable seat, under its own reason. R7 (dlv-9906a482950d)
+# wrote ``vendor_matches_builder`` / ``vendor_match`` on request records; nothing
+# in code reads those two strings, only the records on disk carry them.
+MODEL_MATCH_REASON = "model_matches_builder"
+MODEL_UNKNOWN_REASON = "model_unknown_for_same_vendor"
+MODEL_MATCH_STATUS = "model_match"
 
 RULE_APPLIED = "applied"
 RULE_NOT_APPLIED = "not_applied"
+# A reviewer of the builder's vendor on another model took the seat on purpose.
+RULE_MODEL_DIFFERS = "model_differs"
 
 
 def vendor_of(identifier: Optional[str]) -> Optional[str]:
@@ -112,6 +136,9 @@ class BuilderVendor:
     provider: str = ""
     model: str = ""
     source: str = ""
+    # The model the build ran, the spec's own when it names one, else the one its
+    # receipt names (empty when neither can be named).
+    effective_model: str = ""
 
     @property
     def applies(self) -> bool:
@@ -124,6 +151,7 @@ class BuilderVendor:
             "vendor": self.vendor,
             "provider": self.provider or None,
             "model": self.model or None,
+            "builder_model": self.effective_model or None,
             "source": self.source or None,
             "rule": RULE_APPLIED if self.applies else RULE_NOT_APPLIED,
             "reason": self.reason,
@@ -147,7 +175,7 @@ def resolve_builder_vendor(dispatch_id: Optional[str], *, data_dir: Path) -> Bui
         return BuilderVendor(did, None, f"no dispatch-spec.json for {did} under {dispatches_dir}")
     found = []
     for spec_path in specs:
-        builder = _builder_from_spec_file(did, spec_path)
+        builder = _builder_from_spec_file(did, spec_path, Path(data_dir))
         if not builder.applies:
             return builder
         found.append(builder)
@@ -162,26 +190,115 @@ def resolve_builder_vendor(dispatch_id: Optional[str], *, data_dir: Path) -> Bui
 
 
 def vendor_match_hop(gate: str, builder: Optional[BuilderVendor]) -> Optional[Dict[str, Any]]:
-    """The takeover hop for ``gate`` when it shares the builder's vendor, else None."""
+    """The takeover hop for ``gate`` when it runs the builder's model, else None.
+
+    A reviewer of another vendor, or of the builder's vendor on a different
+    model, is not passed over. Same vendor with either model unknown is (fail
+    closed), and the hop says which.
+    """
     if builder is None or not builder.applies:
         return None
     reviewer_vendor = gate_vendor(gate)
     if reviewer_vendor is None or reviewer_vendor != builder.vendor:
         return None
+    reviewer_model = gate_lane_contract.gate_model(gate) or ""
+    names = (("builder", builder.effective_model), ("reviewer", reviewer_model))
+    served = {who: comparable_model_name(name) for who, name in names}
+    unresolved = [(who, name) for who, name in names if not served[who]]
+    if not unresolved and served["builder"] != served["reviewer"]:
+        return None
     return {
         "gate": gate,
-        "reason": VENDOR_MATCH_REASON,
-        "status": VENDOR_MATCH_STATUS,
-        "detail": (
-            f"{gate} is a {reviewer_vendor} reviewer and the head was built by "
-            f"{builder.provider or '?'}/{builder.model or '?'} ({builder.vendor}, dispatch "
-            f"{builder.dispatch_id}): the vendor matched the builder, and a reviewer never "
-            "shares the builder's vendor"
-        ),
+        "reason": MODEL_UNKNOWN_REASON if unresolved else MODEL_MATCH_REASON,
+        "status": MODEL_MATCH_STATUS,
+        "builder_model": builder.effective_model or None,
+        "reviewer_model": reviewer_model or None,
+        "detail": _model_match_detail(gate, reviewer_vendor, reviewer_model, builder, unresolved, served["builder"]),
     }
 
 
-def _builder_from_spec_file(dispatch_id: str, spec_path: Path) -> BuilderVendor:
+def same_vendor_record(gate: str, builder: Optional[BuilderVendor], record: Dict[str, Any]) -> Dict[str, Any]:
+    """``record`` (a seat's ``builder_vendor``) as it reads when ``gate`` fills the seat.
+
+    A reviewer of the builder's vendor that was not passed over runs another
+    model than the builder: the record says so (``rule: model_differs``, both
+    models), so a reader sees a DeepSeek seat on a DeepSeek build was a decision.
+    Any other record comes back unchanged.
+    """
+    if builder is None or not builder.applies or gate_vendor(gate) != builder.vendor:
+        return record
+    return {
+        **record,
+        "rule": RULE_MODEL_DIFFERS,
+        "builder_model": builder.effective_model or None,
+        "reviewer_model": gate_lane_contract.gate_model(gate),
+    }
+
+
+def _model_match_detail(
+    gate: str, reviewer_vendor: str, reviewer_model: str, builder: BuilderVendor,
+    unresolved: list, served: str,
+) -> str:
+    head = (
+        f"{gate} is a {reviewer_vendor} reviewer on {reviewer_model or '(unknown model)'} and the head was "
+        f"built by {builder.provider or '?'}/{builder.effective_model or '(unknown model)'} "
+        f"({builder.vendor}, dispatch {builder.dispatch_id}): "
+    )
+    if unresolved:
+        causes = [
+            f"the {who} model is unknown" if is_unknown_model(name)
+            else f"the {who} model {name!r} does not resolve to a model the registry knows"
+            for who, name in unresolved
+        ]
+        return head + (
+            f"{' and '.join(causes)}, so it cannot be shown to differ from the builder's and the reviewer "
+            "is passed over"
+        )
+    return head + f"the registry answers both with {served}, and a reviewer never runs the model that built the head"
+
+
+def _receipt_model(dispatch_id: str, data_dir: Path) -> str:
+    """The model the build of ``dispatch_id`` ran, from its latest receipt in ``data_dir``; "" if none names one.
+
+    The review decision runs in another process than the build, so neither the
+    review process's environment nor a lane constant says what the build ran.
+    The receipt does: ``model_resolved`` (the id the harness reported) when
+    present, else ``model`` (what the provider lanes write).
+    """
+    ledger = Path(data_dir) / "state" / "t0_receipts.ndjson"
+    latest: Optional[Dict[str, Any]] = None
+    try:
+        with ledger.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if dispatch_id not in line:
+                    continue
+                try:
+                    receipt = json.loads(line)
+                except ValueError:
+                    # vnx-silent-except: a torn ledger line names no model; the builder model stays unknown, which fails closed
+                    continue
+                if isinstance(receipt, dict) and receipt.get("dispatch_id") == dispatch_id:
+                    latest = receipt
+    except OSError:
+        # vnx-silent-except: an unreadable ledger leaves the builder model unknown, which fails closed
+        return ""
+    if latest is None:
+        return ""
+    return _text(latest.get("model_resolved")) or _text(latest.get("model"))
+
+
+def builder_model(model: str, dispatch_id: str, data_dir: Path) -> str:
+    """The model a build with spec ``model`` ran; "" when it cannot be named.
+
+    A real model in the spec decides. A placeholder (the lane picks its own) is
+    read from the build's receipt. An unknown sentinel names nothing.
+    """
+    if model.lower() in _MODEL_PLACEHOLDERS:
+        model = _receipt_model(dispatch_id, data_dir)
+    return "" if is_unknown_model(model) else model
+
+
+def _builder_from_spec_file(dispatch_id: str, spec_path: Path, data_dir: Path) -> BuilderVendor:
     try:
         data = json.loads(spec_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
@@ -190,7 +307,10 @@ def _builder_from_spec_file(dispatch_id: str, spec_path: Path) -> BuilderVendor:
         return BuilderVendor(dispatch_id, None, f"{spec_path} is not a JSON object", source=str(spec_path))
     provider, model = _text(data.get("provider")), _text(data.get("model"))
     vendor, reason = vendor_from_spec(provider, model)
-    return BuilderVendor(dispatch_id, vendor, reason, provider=provider, model=model, source=str(spec_path))
+    return BuilderVendor(
+        dispatch_id, vendor, reason, provider=provider, model=model, source=str(spec_path),
+        effective_model=builder_model(model, dispatch_id, data_dir),
+    )
 
 
 def _text(value: Any) -> str:

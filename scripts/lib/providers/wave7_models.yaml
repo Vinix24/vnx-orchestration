@@ -360,6 +360,9 @@ providers:
         dispatch_allowed: false  # OI-867: litellm proxy has no DEEPSEEK_API_KEY
       deepseek-v4-flash:
         litellm_name: "deepseek/deepseek-v4-flash"
+        # Phased out: DeepSeek answers this name with V4.1-Flash (see
+        # deepseek-flash under deepseek_harness).
+        served_by: "deepseek-flash"
         cost_input_per_mtok: 0.14    # legacy "chat" model evolved
         cost_output_per_mtok: 0.28
         max_tokens: 384000
@@ -406,6 +409,9 @@ providers:
       deepseek-v4-flash:
         litellm_name: ""
         cli_model_arg: "deepseek-v4-flash"
+        # Phased out: DeepSeek answers this name with V4.1-Flash (deepseek-flash
+        # below). A review seat reads the two as one model (R7b).
+        served_by: "deepseek-flash"
         cost_input_per_mtok: 0.14
         cost_output_per_mtok: 0.28
         max_tokens: 384000
