@@ -46,10 +46,21 @@ def _clean_model_env(monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
 
-def _builder(tmp_path: Path, provider: str, model: str, dispatch_id: str = "dlv-built") -> review_vendor.BuilderVendor:
+def _receipt(tmp_path: Path, dispatch_id: str, **fields) -> None:
+    ledger = tmp_path / "state" / "t0_receipts.ndjson"
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    with ledger.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"event_type": "task_complete", "dispatch_id": dispatch_id, **fields}) + "\n")
+
+
+def _builder(
+    tmp_path: Path, provider: str, model: str, dispatch_id: str = "dlv-built", receipt_model: str = "",
+) -> review_vendor.BuilderVendor:
     bundle = tmp_path / "dispatches" / "active" / dispatch_id
     bundle.mkdir(parents=True, exist_ok=True)
     (bundle / "dispatch-spec.json").write_text(json.dumps({"provider": provider, "model": model}), encoding="utf-8")
+    if receipt_model:
+        _receipt(tmp_path, dispatch_id, provider=provider, model=receipt_model)
     return review_vendor.resolve_builder_vendor(dispatch_id, data_dir=tmp_path)
 
 
@@ -124,18 +135,63 @@ class TestModelMatchHop:
         hop = review_vendor.vendor_match_hop("deepseek_gate", builder)
         assert hop is not None and hop["reason"] == "model_matches_builder"
 
-    def test_a_placeholder_model_is_the_lane_default(self, tmp_path, monkeypatch):
-        from provider_spawns.deepseek_harness_spawn import DEFAULT_DEEPSEEK_HARNESS_MODEL
+    def test_a_placeholder_spec_reads_the_model_from_the_receipt(self, tmp_path, monkeypatch):
+        builder = _builder(tmp_path, "deepseek-harness", "default", receipt_model="deepseek-flash")
+        assert builder.effective_model == "deepseek-flash"
+        monkeypatch.setenv("VNX_DEEPSEEK_GATE_MODEL", "deepseek-flash")
+        hop = review_vendor.vendor_match_hop("deepseek_gate", builder)
+        assert hop is not None and hop["reason"] == "model_matches_builder"
 
-        builder = _builder(tmp_path, "deepseek-harness", "default")
-        assert builder.effective_model == DEFAULT_DEEPSEEK_HARNESS_MODEL == "deepseek-v4-pro"
+    def test_a_placeholder_spec_with_a_receipt_on_v4_pro_admits_the_gate_on_flash(self, tmp_path, monkeypatch):
+        builder = _builder(tmp_path, "deepseek-harness", "default", receipt_model="deepseek-v4-pro")
+        monkeypatch.setenv("VNX_DEEPSEEK_GATE_MODEL", "deepseek-flash")
         assert review_vendor.vendor_match_hop("deepseek_gate", builder) is None
+
+    def test_the_receipt_not_the_review_environment_decides(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("VNX_DEEPSEEK_HARNESS_MODEL", "deepseek-flash")
+        monkeypatch.setenv("VNX_DEEPSEEK_GATE_MODEL", "deepseek-flash")
+        builder = _builder(tmp_path, "deepseek-harness", "default", receipt_model="deepseek-v4-pro")
+        assert builder.effective_model == "deepseek-v4-pro"
+        assert review_vendor.vendor_match_hop("deepseek_gate", builder) is None
+
+    def test_model_resolved_wins_over_model_and_the_latest_receipt_wins(self, tmp_path):
+        _receipt(tmp_path, "dlv-built", model="deepseek-flash")
+        _receipt(tmp_path, "dlv-other", model="deepseek-v4-pro")
+        _receipt(tmp_path, "dlv-built", model="sonnet", model_resolved="claude-sonnet-5-5")
+        builder = _builder(tmp_path, "claude", "default")
+        assert builder.effective_model == "claude-sonnet-5-5"
+
+    def test_a_placeholder_spec_without_a_receipt_is_passed_over_as_unknown(self, tmp_path, monkeypatch):
         monkeypatch.setenv("VNX_DEEPSEEK_GATE_MODEL", "deepseek-v4-pro")
-        assert review_vendor.vendor_match_hop("deepseek_gate", builder)["reason"] == "model_matches_builder"
+        builder = _builder(tmp_path, "deepseek-harness", "default")
+        assert builder.effective_model == ""
+        hop = review_vendor.vendor_match_hop("deepseek_gate", builder)
+        assert hop["reason"] == "model_unknown_for_same_vendor"
+        assert "the builder model is unknown" in hop["detail"]
+
+    def test_a_receipt_with_a_sentinel_model_is_unknown(self, tmp_path):
+        builder = _builder(tmp_path, "deepseek-harness", "default", receipt_model="unknown")
+        assert builder.effective_model == ""
 
     @pytest.mark.parametrize("placeholder", ["", "auto", "none"])
-    def test_every_placeholder_reads_the_lane_default(self, tmp_path, placeholder):
-        assert _builder(tmp_path, "deepseek-harness", placeholder).effective_model == "deepseek-v4-pro"
+    def test_every_placeholder_reads_the_receipt(self, tmp_path, placeholder):
+        builder = _builder(tmp_path, "deepseek-harness", placeholder, receipt_model="deepseek-flash")
+        assert builder.effective_model == "deepseek-flash"
+
+    @pytest.mark.parametrize("sentinel", ["unknown", "null", "n/a", "-"])
+    def test_a_sentinel_spec_model_is_unknown_even_with_a_receipt(self, tmp_path, monkeypatch, sentinel):
+        monkeypatch.setenv("VNX_DEEPSEEK_GATE_MODEL", "deepseek-v4-pro")
+        builder = _builder(tmp_path, "deepseek-harness", sentinel, receipt_model="deepseek-flash")
+        assert builder.effective_model == ""
+        assert review_vendor.vendor_match_hop("deepseek_gate", builder)["reason"] == "model_unknown_for_same_vendor"
+
+    @pytest.mark.parametrize("sentinel", ["unknown", "null"])
+    def test_a_reviewer_model_that_resolves_to_a_sentinel_is_passed_over(self, tmp_path, monkeypatch, sentinel):
+        builder = _builder(tmp_path, "deepseek-harness", "deepseek-flash")
+        monkeypatch.setenv("VNX_DEEPSEEK_GATE_MODEL", sentinel)
+        hop = review_vendor.vendor_match_hop("deepseek_gate", builder)
+        assert hop["reason"] == "model_unknown_for_same_vendor"
+        assert "the reviewer model is unknown" in hop["detail"]
 
     def test_opus_build_is_read_by_claude_gate_on_sonnet(self, tmp_path):
         builder = _builder(tmp_path, "claude", "opus")
@@ -172,7 +228,7 @@ class TestModelMatchHop:
         assert review_vendor.vendor_match_hop("deepseek_gate", None) is None
 
     def test_the_builder_record_carries_the_builder_model(self, tmp_path):
-        record = _builder(tmp_path, "deepseek-harness", "default").to_record()
+        record = _builder(tmp_path, "deepseek-harness", "default", receipt_model="deepseek-v4-pro").to_record()
         assert record["model"] == "default" and record["builder_model"] == "deepseek-v4-pro"
 
     def test_same_vendor_record_says_model_differs_only_for_a_same_vendor_reader(self, tmp_path, monkeypatch):

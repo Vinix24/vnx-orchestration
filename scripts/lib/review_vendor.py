@@ -55,7 +55,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import gate_lane_contract
 import provider_switch
-from providers.model_normalizer import comparable_model_name
+from providers.model_normalizer import comparable_model_name, is_unknown_model
 
 # Family (provider_switch) -> vendor, the model maker. A family with no entry
 # here (local, openrouter, tooling, unresolved) names no maker.
@@ -134,8 +134,8 @@ class BuilderVendor:
     provider: str = ""
     model: str = ""
     source: str = ""
-    # The model the build ran, the spec's own when it names one, else the lane's
-    # default (empty when neither can be named).
+    # The model the build ran, the spec's own when it names one, else the one its
+    # receipt names (empty when neither can be named).
     effective_model: str = ""
 
     @property
@@ -173,7 +173,7 @@ def resolve_builder_vendor(dispatch_id: Optional[str], *, data_dir: Path) -> Bui
         return BuilderVendor(did, None, f"no dispatch-spec.json for {did} under {dispatches_dir}")
     found = []
     for spec_path in specs:
-        builder = _builder_from_spec_file(did, spec_path)
+        builder = _builder_from_spec_file(did, spec_path, Path(data_dir))
         if not builder.applies:
             return builder
         found.append(builder)
@@ -201,7 +201,8 @@ def vendor_match_hop(gate: str, builder: Optional[BuilderVendor]) -> Optional[Di
         return None
     reviewer_model = gate_lane_contract.gate_model(gate) or ""
     unknown = [
-        who for who, name in (("builder", builder.effective_model), ("reviewer", reviewer_model)) if not name
+        who for who, name in (("builder", builder.effective_model), ("reviewer", reviewer_model))
+        if is_unknown_model(name)
     ]
     if not unknown and comparable_model_name(builder.effective_model) != comparable_model_name(reviewer_model):
         return None
@@ -249,36 +250,48 @@ def _model_match_detail(
     return head + "a reviewer never runs the model that built the head"
 
 
-def _lane_default_model(provider: str) -> str:
-    """The model the lane of ``provider`` runs when a spec names none, read from the lane; "" if unnamed."""
-    name = provider.lower()
+def _receipt_model(dispatch_id: str, data_dir: Path) -> str:
+    """The model the build of ``dispatch_id`` ran, from its latest receipt in ``data_dir``; "" if none names one.
+
+    The review decision runs in another process than the build, so neither the
+    review process's environment nor a lane constant says what the build ran.
+    The receipt does: ``model_resolved`` (the id the harness reported) when
+    present, else ``model`` (what the provider lanes write).
+    """
+    ledger = Path(data_dir) / "state" / "t0_receipts.ndjson"
+    latest: Optional[Dict[str, Any]] = None
     try:
-        if name == "deepseek-harness":
-            from provider_spawns.deepseek_harness_spawn import DEFAULT_DEEPSEEK_HARNESS_MODEL
-            return DEFAULT_DEEPSEEK_HARNESS_MODEL
-        if name == "glm-harness":
-            from provider_spawns.glm_harness_spawn import DEFAULT_GLM_HARNESS_MODEL
-            return DEFAULT_GLM_HARNESS_MODEL
-        if name == "kimi":
-            from kimi_wrapper import DEFAULT_KIMI_MODEL
-            return DEFAULT_KIMI_MODEL
-        if name == "codex":
-            from providers import provider_registry
-            return provider_registry.resolve_codex_model()
-    except (ImportError, ValueError):
-        # vnx-silent-except: a lane default that cannot be read leaves the builder model unknown, which fails closed
+        with ledger.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if dispatch_id not in line:
+                    continue
+                try:
+                    receipt = json.loads(line)
+                except ValueError:
+                    # vnx-silent-except: a torn ledger line names no model; the builder model stays unknown, which fails closed
+                    continue
+                if isinstance(receipt, dict) and receipt.get("dispatch_id") == dispatch_id:
+                    latest = receipt
+    except OSError:
+        # vnx-silent-except: an unreadable ledger leaves the builder model unknown, which fails closed
         return ""
-    return ""
+    if latest is None:
+        return ""
+    return _text(latest.get("model_resolved")) or _text(latest.get("model"))
 
 
-def builder_model(provider: str, model: str) -> str:
-    """The model a build with ``provider`` and spec ``model`` ran: the spec's, else the lane default."""
+def builder_model(model: str, dispatch_id: str, data_dir: Path) -> str:
+    """The model a build with spec ``model`` ran; "" when it cannot be named.
+
+    A real model in the spec decides. A placeholder (the lane picks its own) is
+    read from the build's receipt. An unknown sentinel names nothing.
+    """
     if model.lower() in _MODEL_PLACEHOLDERS:
-        return _lane_default_model(provider)
-    return model
+        model = _receipt_model(dispatch_id, data_dir)
+    return "" if is_unknown_model(model) else model
 
 
-def _builder_from_spec_file(dispatch_id: str, spec_path: Path) -> BuilderVendor:
+def _builder_from_spec_file(dispatch_id: str, spec_path: Path, data_dir: Path) -> BuilderVendor:
     try:
         data = json.loads(spec_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
@@ -289,7 +302,7 @@ def _builder_from_spec_file(dispatch_id: str, spec_path: Path) -> BuilderVendor:
     vendor, reason = vendor_from_spec(provider, model)
     return BuilderVendor(
         dispatch_id, vendor, reason, provider=provider, model=model, source=str(spec_path),
-        effective_model=builder_model(provider, model),
+        effective_model=builder_model(model, dispatch_id, data_dir),
     )
 
 
