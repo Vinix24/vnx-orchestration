@@ -67,7 +67,12 @@ do not partition the serial selection. It exits 2 on invalid or stale evidence. 
 verdict is uploaded as the `xdist-parity-verdict` artifact
 (`scripts/ci/record_xdist_parity_verdict.py`). `scripts/ci/xdist_parity_history.py`
 applies the cutover rule to the recorded verdicts and counts only a verdict that a
-failed parity step cannot leave clean. Nothing has switched Profile A to xdist.
+failed parity step cannot leave clean. Under option A of that rule (operator
+decision, 2026-10-22) a run whose serial reference job failed, or in which either
+Profile A job received a runner shutdown signal (read from the job's check-run
+annotations), is not measurable: it is set aside from every condition of the window
+and listed with its reason. A real parity difference and an xdist shadow job that
+failed without a shutdown still block. Nothing has switched Profile A to xdist.
 
 **Function-size ratchet.** `scripts/ci/check_function_size_ratchet.py` (the
 `Function size ratchet` step of the `Lint Patterns` job) fails a pull request that
