@@ -2,6 +2,12 @@
 
 All notable changes to this plugin are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the plugin follows [Semantic Versioning](https://semver.org/).
 
+## [0.1.1] - 2026-10-22
+
+### Changed
+
+- Kimi at its weekly limit shows `kimi reset uiterlijk <dd-mm HH:MM>` (local time) instead of `kimi vol tot reset` when `vnx providers usage --json` carries `resets_at_latest`. It is an upper bound (the first weekly-limit failure of the current streak plus 7 days), never the exact reset, which the kimi CLI does not name. Without a known bound the text stays `kimi vol tot reset`. The `!!` marker is unchanged.
+
 ## [0.1.0] - 2026-10-21
 
 The first version. One status line with the usage of every subscription and the balance of the API providers, so none of them has to be looked up with a command.

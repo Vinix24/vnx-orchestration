@@ -13,7 +13,7 @@ export type Balance = { currency: string; amount: number }
  */
 export type Figure =
   | { kind: 'percent'; percent: number }
-  | { kind: 'status'; text: string }
+  | { kind: 'status'; text: string; resetsAtLatest?: string }
   | { kind: 'balances'; balances: Balance[] }
   | { kind: 'unavailable'; reason: string }
 

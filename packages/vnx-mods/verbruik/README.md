@@ -15,7 +15,7 @@ The `verbruik: ` at the start is the engine's: it puts the plugin name in front 
 | Claude, the 5-hour window | `$.session.usage().rateLimits`, kind `five_hour` | `claude 5u 34%` |
 | Claude, the weekly window | the same, kind `seven_day` | `week 61%` |
 | codex | `used_percent` of its row | `codex 58%` |
-| kimi | `status` of its row as text; the percentage when a later schema carries one | `kimi vol tot reset` |
+| kimi | `status` of its row as text; the percentage when a later schema carries one | `kimi vol tot reset`, or `kimi reset uiterlijk 25-10 14:05` when the row carries `resets_at_latest` (an upper bound, local time) |
 | deepseek | `balances[].total`, in its currency | `deepseek $12.92` |
 | openrouter | `remaining` | `openrouter $4.91` |
 

@@ -132,7 +132,12 @@ function figureOf(name: ProviderName, row: unknown): Figure {
   }
 
   if (name === 'kimi' && typeof row['status'] === 'string' && row['status'].trim() !== '') {
-    return { kind: 'status', text: row['status'].trim() }
+    const latest = row['resets_at_latest']
+    const status = row['status'].trim()
+
+    return typeof latest === 'string' && Number.isFinite(Date.parse(latest))
+      ? { kind: 'status', text: status, resetsAtLatest: latest }
+      : { kind: 'status', text: status }
   }
 
   return { kind: 'unavailable', reason: 'geen cijfer in het antwoord' }
@@ -207,6 +212,15 @@ const marked = (text: string, tone: Tone): string => {
   return tone === 'warning' ? `${text} !` : text
 }
 
+const pad = (value: number): string => String(value).padStart(2, '0')
+
+/** An upper bound as `dd-mm HH:MM` in local time. */
+const latestText = (iso: string): string => {
+  const moment = new Date(iso)
+
+  return `${pad(moment.getDate())}-${pad(moment.getMonth() + 1)} ${pad(moment.getHours())}:${pad(moment.getMinutes())}`
+}
+
 const percentText = (percent: number): string => `${Number(percent.toFixed(1))}%`
 
 const balanceText = (balance: { currency: string; amount: number }): string => {
@@ -235,8 +249,12 @@ function providerSegment(name: ProviderName, figure: Figure, config: Config, isS
 
   if (figure.kind === 'status') {
     const tone: Tone = figure.text === KIMI_FULL ? 'error' : figure.text === 'bereikbaar' ? 'success' : 'warning'
+    const shown =
+      figure.text === KIMI_FULL && figure.resetsAtLatest !== undefined
+        ? `reset uiterlijk ${latestText(figure.resetsAtLatest)}`
+        : figure.text
 
-    return { key: name, text: `${marked(`${name} ${figure.text}`, tone)}${stale}`, tone }
+    return { key: name, text: `${marked(`${name} ${shown}`, tone)}${stale}`, tone }
   }
 
   const tone = worst(figure.balances.map(balance => balanceTone(balance.amount, config)))
