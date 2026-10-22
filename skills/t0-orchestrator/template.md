@@ -44,8 +44,8 @@ Queue: pending=0 conflicts=0
 ================================
 ```
 
-The live-work and queue lines come from `bash scripts/dispatch_guard.sh` (`vnx status --json`),
-not from memory of the last receipt.
+The live-work and queue lines come from `bash scripts/dispatch_guard.sh` (`vnx status --json --live`:
+measured at the call, its `Measured:` line says when), not from memory of the last receipt or the last build.
 
 ### WAIT
 Live work in the air, a pending queue or a degraded system:

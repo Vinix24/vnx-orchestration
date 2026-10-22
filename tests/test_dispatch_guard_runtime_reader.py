@@ -18,13 +18,24 @@ D5 (fabric-state-herstel): ``vnx status --json`` no longer carries
 runs comes from ``live_work`` (dispatches table + occupancy flock): any
 ``live``, ``starting``, ``stale`` or ``unmeasured`` row is WAIT, and a
 missing or unavailable ``live_work`` is Missing state, never GO.
+
+OI-2268: the guard decides on ``vnx status --json --live``, whose live_work
+and queues are measured at the call, not read from t0_state.json. These tests
+therefore hand their state to the guard as that live answer: the real JSON
+builder (``vnx_status._build_json_output``) with the state's live_work and
+queues as the measurement, stamped at the call by a stub ``bin/vnx`` next to a
+copy of the guard. The real CLI against a real store is covered end to end in
+tests/test_dispatch_guard_live_measurement.py.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shutil
+import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -32,6 +43,14 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 GUARD = ROOT / "skills" / "t0-orchestrator" / "scripts" / "dispatch_guard.sh"
 CLAUDE_GUARD = ROOT / ".claude" / "skills" / "t0-orchestrator" / "scripts" / "dispatch_guard.sh"
+
+for _p in (str(ROOT / "scripts"), str(ROOT / "scripts" / "lib"), str(ROOT / "scripts" / "cli"), str(ROOT / "tests")):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+import build_t0_state as bts
+import vnx_status as vs
+from fixtures.dispatches_schema_fixture import dispatches_ddl
 
 
 def _live_row(dispatch_id: str, state: str = "running", lock: str = "held") -> dict:
@@ -75,21 +94,52 @@ def _with_row(state: dict, bucket: str, row: dict) -> dict:
     return state
 
 
+def _live_answer(payload: dict, state_dir: Path) -> dict:
+    """``vnx status --json --live`` as the CLI builds it when its live
+    measurement finds the live_work and queues of *payload*: the real JSON
+    builder and the real failed-read reasons; ``__NOW__`` is the call time."""
+    live_work = payload.get("live_work", {})
+    queues = payload.get("queues", {})
+    live = {
+        "live_work": live_work,
+        "queues": queues,
+        "unmeasured": bts._live_degraded_reasons(live_work or {}, queues or {}),
+        "measured_at": "__NOW__",
+        "duration_seconds": 0.0,
+    }
+    return vs._build_json_output({}, payload, state_dir, live=live)
+
+
 def _run_guard(tmp_path: Path, payload: dict, *args: str) -> subprocess.CompletedProcess:
     state_dir = tmp_path / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "t0_state.json").write_text(json.dumps(payload), encoding="utf-8")
+    answer = tmp_path / "live_answer.json"
+    answer.write_text(json.dumps(_live_answer(payload, state_dir)), encoding="utf-8")
 
-    env = dict(os.environ)
-    # Neutralise inherited VNX pointers so resolution is fully pinned to tmp_path.
-    for key in ("VNX_HOME", "VNX_STATE_DIR", "VNX_DISPATCH_DIR",
-                "VNX_LOGS_DIR", "PROJECT_ROOT", "VNX_PROJECT_ROOT", "VNX_BIN"):
-        env.pop(key, None)
-    env["VNX_DATA_DIR_EXPLICIT"] = "1"
-    env["VNX_DATA_DIR"] = str(tmp_path)
+    # A copy of the guard in its own repo, so its bin/vnx is the stub below.
+    repo = tmp_path / "repo"
+    scripts = repo / "skills" / "t0-orchestrator" / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    shutil.copy(GUARD, scripts / "dispatch_guard.sh")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    stub = repo / "bin" / "vnx"
+    stub.parent.mkdir(exist_ok=True)
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        'if [ "$1 $2 ${3:-}" = "status --json --live" ]; then\n'
+        f'  sed "s/__NOW__/$(date -u +%Y-%m-%dT%H:%M:%SZ)/" "{answer}"\n'
+        "  exit 0\n"
+        "fi\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
 
+    # Neutralise inherited VNX pointers so the stub is the CLI the guard runs.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("VNX_") and k != "PROJECT_ROOT"}
     return subprocess.run(
-        ["bash", str(GUARD), *args],
+        ["bash", str(scripts / "dispatch_guard.sh"), *args],
         capture_output=True,
         text=True,
         env=env,
@@ -238,16 +288,6 @@ class TestGuardReadsRuntimeState:
 # ff5: a queue directory that cannot be listed must never produce GO.
 # The state is built by the real build_t0_state and read by the real guard.
 # ---------------------------------------------------------------------------
-
-import sqlite3  # noqa: E402
-import sys  # noqa: E402
-
-for _p in (str(ROOT / "scripts"), str(ROOT / "scripts" / "lib"), str(ROOT / "tests")):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
-
-import build_t0_state as bts  # noqa: E402
-from fixtures.dispatches_schema_fixture import dispatches_ddl  # noqa: E402
 
 _PROJECT_A = "fshff5-alpha"
 _PROJECT_B = "fshff5-bravo"

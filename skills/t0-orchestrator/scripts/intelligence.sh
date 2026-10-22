@@ -84,14 +84,24 @@ _intel_vnx_bin() {
     command -v vnx || true
 }
 
-# Runtime snapshot: the same `vnx status --json` the dispatch guard reads, run
-# bound to the repo root. t0_brief.json is a presentation cache; nothing here reads it.
+# Runtime state: the same `vnx status --json --live` the dispatch guard reads, run
+# bound to the repo root, so live_work and queues are measured at the call (OI-2268).
+# A CLI older than the live measurement refuses --live; its plain answer is the
+# t0_state.json snapshot, and the displays below say so. t0_brief.json is a
+# presentation cache; nothing here reads it.
 _runtime_status() {
-    local bin
+    local bin out
     bin="$(_intel_vnx_bin)"
     [ -n "$bin" ] || return 1
+    if out="$(cd "$_INTEL_REPO_ROOT" && VNX_PROJECT_ROOT="$_INTEL_REPO_ROOT" "$bin" status --json --live 2>/dev/null)"; then
+        printf '%s\n' "$out"
+        return 0
+    fi
     (cd "$_INTEL_REPO_ROOT" && VNX_PROJECT_ROOT="$_INTEL_REPO_ROOT" "$bin" status --json 2>/dev/null)
 }
+
+# jq: a note for an answer whose live_work and queues are not measured live.
+_INTEL_SNAPSHOT_NOTE='if (.live_measurement.mode? // "") == "live" then empty else "snapshot: cli gave no live measurement" end'
 
 # Run a VNX python script (scripts/<name>.py) from the first install that has it, with the
 # repo root as cwd so the script resolves the project the same way the guard does.
@@ -107,14 +117,18 @@ _intel_py() {
 check_live_work() {
     local status
     status="$(_runtime_status)" || { echo "Error: vnx status --json unavailable"; return 1; }
-    jq -r '(.live_work // {}) as $w | ("live", "starting", "stale", "unmeasured") as $b | ($w[$b] // [])[] | "\($b) \(.dispatch_id // "?") state=\(.state // "?") age=\(.age_seconds // 0)s"' <<<"$status"
+    jq -r '((.live_work // {}) as $w | ("live", "starting", "stale", "unmeasured") as $b | ($w[$b] // [])[] | "\($b) \(.dispatch_id // "?") state=\(.state // "?") age=\(.age_seconds // 0)s"), ('"$_INTEL_SNAPSHOT_NOTE"')' <<<"$status"
 }
 
-# Check queue status
+# Check queue status. A count the answer does not carry is "unmeasured", as the
+# guard reads it, never 0.
 check_queue() {
     local status
     status="$(_runtime_status)" || { echo "Error: vnx status --json unavailable"; return 1; }
-    jq -r '.queues | "pending=\(.pending_count // 0) conflicts=\(.conflict_count // 0)"' <<<"$status"
+    jq -r 'def count($n): if ($n | type) == "number" then $n else "unmeasured" end;
+        (.queues // {}) as $q
+        | "pending=\(count($q.pending_count)) conflicts=\(count($q.conflict_count))"
+        + ([('"$_INTEL_SNAPSHOT_NOTE"')] | map(" (" + . + ")") | add // "")' <<<"$status"
 }
 
 # Check open items digest (deliverables)
