@@ -3,11 +3,14 @@
 
 Golf 1 of track ``golf-1-opruimen`` removes dead code in clusters (C1 to C5,
 ``docs/investigations/2026-10-20-golf-1-hermeting.md`` §7).  Every cluster
-adds what it removed to ``scripts/ci/retired_paths.txt``; this check fails CI
-when a retired file comes back or when anything in the tree still calls a
-retired entry in an executable way.
+adds what it removed as its own fragment under
+``scripts/ci/retired_paths.d/`` (one ``*.txt`` per cluster, named after the
+dispatch, so parallel clusters never conflict); this check fails CI when a
+retired file comes back or when anything in the tree still calls a retired
+entry in an executable way.
 
-The list has three kinds of line (``#`` starts a comment)::
+The fragments together are one list, read in sorted file-name order.  The
+list has three kinds of line (``#`` starts a comment)::
 
     scripts/foo.py              a path: the file is gone and nothing calls it
     scripts/lib/bar.py::baz     a symbol: the module stays, ``baz`` (a function,
@@ -62,7 +65,8 @@ Markdown and other prose never fail the check, and history is never
 rewritten: the frozen artefacts of ``check_docs_file_line_refs.py``
 (``_EXEMPT_DOC_SUBDIRS``, imported, not copied), ``docs/manifesto/``,
 ``tests/fixtures/`` (also nested under a package), ``CHANGELOG.md``,
-``changelog.d/`` and the list itself are skipped.
+``changelog.d/`` and the fragments themselves (the list directory, or a
+single list passed with ``--list``) are skipped.
 
 A file name is matched with its literal directory tail: ``$VNX_HOME/scripts/
 foo.py`` and ``runners/foo.py`` both name ``scripts/.../runners/foo.py``
@@ -75,14 +79,18 @@ one directory component, because a bare word is not a path.
 
 Usage::
 
-    check_retired_paths.py [--root DIR] [--list FILE]
+    check_retired_paths.py [--root DIR] [--list FILE | --list-dir DIR]
 
 ``--root`` is the tree to scan (default: the git toplevel of the working
-directory); ``--list`` is the list (default: ``retired_paths.txt`` next to
-this script).  The red run of a cluster scans the PR's base with the PR's
-list: ``--root <worktree on the base> --list scripts/ci/retired_paths.txt``.
+directory); ``--list`` reads one list file and ``--list-dir`` every ``*.txt``
+fragment in a directory.  The default is the ``retired_paths.d`` directory
+next to this script.  An empty or missing directory is an error, and an entry
+that appears in two fragments is an error that names both files.
 
-Exit 0 clean, 1 violations, 2 a malformed list or an unusable root.
+The red run of a cluster scans the PR's base with the head's fragments:
+``--root <worktree on the base> --list-dir <head>/scripts/ci/retired_paths.d``.
+
+Exit 0 clean, 1 violations, 2 a malformed or unusable list or root.
 """
 
 from __future__ import annotations
@@ -105,15 +113,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # a second copy would drift the first time one of the two lists changes.
 _EXEMPT_DOC_SUBDIRS = importlib.import_module("check_docs_file_line_refs")._EXEMPT_DOC_SUBDIRS
 
-LIST_REL = "scripts/ci/retired_paths.txt"
-DEFAULT_LIST = Path(__file__).resolve().parent / "retired_paths.txt"
+LIST_DIR_REL = "scripts/ci/retired_paths.d"
+DEFAULT_LIST_DIR = Path(__file__).resolve().parent / "retired_paths.d"
 
 _EXEMPT_PREFIXES = tuple(f"docs/{sub}/" for sub in sorted(_EXEMPT_DOC_SUBDIRS)) + (
     "docs/manifesto/",
     "tests/fixtures/",
     "changelog.d/",
 )
-_EXEMPT_FILES = frozenset({"CHANGELOG.md", LIST_REL})
+_EXEMPT_FILES = frozenset({"CHANGELOG.md"})
 _FIXTURE_SEGMENT = "/tests/fixtures/"
 
 _TEMPLATE_SUFFIXES = (".j2", ".tmpl", ".template", ".tpl", ".example")
@@ -194,35 +202,68 @@ class Violation:
 # ---------------------------------------------------------------------------
 
 
-def parse_list(text: str) -> list[Entry]:
-    """Parse the list; raise ListError on a malformed or duplicate line."""
-    entries: list[Entry] = []
-    seen: set[str] = set()
+def _entries_in(text: str) -> Iterator[tuple[int, str]]:
+    """The entry lines of a list (comments and blank lines dropped)."""
     for line_no, line in enumerate(text.splitlines(), start=1):
         raw = re.sub(r"(^|\s)#.*$", "", line).strip()
-        if not raw:
-            continue
+        if raw:
+            yield line_no, raw
+
+
+def parse_list(text: str, source: str = "") -> list[Entry]:
+    """Parse one list text; raise ListError on a malformed or duplicate line."""
+    entries: list[Entry] = []
+    seen: dict[str, str] = {}
+    for line_no, raw in _entries_in(text):
+        where = f"{source}: line {line_no}" if source else f"line {line_no}"
         if raw in seen:
-            raise ListError(f"line {line_no}: duplicate entry {raw!r}")
-        seen.add(raw)
-        entries.append(_parse_entry(raw, line_no))
+            raise ListError(f"{where}: duplicate entry {raw!r} (also at {seen[raw]})")
+        seen[raw] = where
+        entries.append(_parse_entry(raw, where))
     return entries
 
 
-def _parse_entry(raw: str, line_no: int) -> Entry:
+def list_dir_files(directory: Path) -> list[Path]:
+    """The ``*.txt`` fragments in *directory*, sorted by name; error when empty."""
+    if not directory.is_dir():
+        raise ListError(f"no such directory: {directory}")
+    files = sorted(
+        (path for path in directory.iterdir() if path.is_file() and path.suffix == ".txt"),
+        key=lambda path: path.name,
+    )
+    if not files:
+        raise ListError(f"no *.txt fragment in {directory}")
+    return files
+
+
+def parse_list_dir(directory: Path) -> list[Entry]:
+    """Parse every ``*.txt`` fragment in *directory*, sorted, as one list."""
+    entries: list[Entry] = []
+    seen: dict[str, str] = {}
+    for path in list_dir_files(directory):
+        for line_no, raw in _entries_in(path.read_text(encoding="utf-8")):
+            where = f"{path.name}:{line_no}"
+            if raw in seen:
+                raise ListError(f"duplicate entry {raw!r} in {where}, also in {seen[raw]}")
+            seen[raw] = where
+            entries.append(_parse_entry(raw, where))
+    return entries
+
+
+def _parse_entry(raw: str, where: str) -> Entry:
     if raw.startswith("env:"):
         match = _ENV_ENTRY.fullmatch(raw)
         if match is None:
-            raise ListError(f"line {line_no}: {raw!r}: an env entry is env:NAME")
+            raise ListError(f"{where}: {raw!r}: an env entry is env:NAME")
         return Entry(raw, "env", name=match.group(1))
     path, sep, symbol = raw.partition("::")
     parts = path.split("/")
     if path.startswith("/") or re.search(r"\s", path) or any(p in ("", ".", "..") for p in parts):
-        raise ListError(f"line {line_no}: {raw!r}: the path must be repo-relative and plain")
+        raise ListError(f"{where}: {raw!r}: the path must be repo-relative and plain")
     if not sep:
         return Entry(raw, "path", path=path)
     if not path.endswith(".py") or _SYMBOL_ENTRY.fullmatch(symbol) is None:
-        raise ListError(f"line {line_no}: {raw!r}: a symbol entry is <module>.py::<name>[.<name>]")
+        raise ListError(f"{where}: {raw!r}: a symbol entry is <module>.py::<name>[.<name>]")
     return Entry(raw, "symbol", path=path, symbol=symbol)
 
 
@@ -436,8 +477,10 @@ def classify(rel: str, first_line: str) -> str | None:
 
 
 def is_exempt(rel: str) -> bool:
-    """True for frozen history, prose and the list itself."""
+    """True for frozen history, prose and the fragments themselves."""
     if rel in _EXEMPT_FILES or rel.endswith((".md", ".markdown", ".rst")):
+        return True
+    if rel.startswith(LIST_DIR_REL + "/"):
         return True
     return rel.startswith(_EXEMPT_PREFIXES) or _FIXTURE_SEGMENT in "/" + rel
 
@@ -909,9 +952,13 @@ def _resolve_root(value: str | None) -> Path:
     return Path(result.stdout.strip()).resolve()
 
 
-def _report(entries: list[Entry], violations: list[Violation], root: Path, list_path: Path) -> int:
+def _report(entries: list[Entry], violations: list[Violation], root: Path, source_path: Path) -> int:
+    label = "fragments" if source_path.is_dir() else "list"
     if not violations:
-        print(f"OK: none of the {len(entries)} retired entries is present or referenced (root: {root}).")
+        print(
+            f"OK: none of the {len(entries)} retired entries is present or referenced "
+            f"(root: {root}, {label}: {source_path})."
+        )
         return 0
     by_entry: dict[str, list[Violation]] = {}
     for violation in violations:
@@ -924,26 +971,44 @@ def _report(entries: list[Entry], violations: list[Violation], root: Path, list_
                 print(violation.render())
     print(
         f"ERROR: {len(by_entry)} of {len(entries)} retired entries are present or still "
-        f"referenced (root: {root}, list: {list_path})."
+        f"referenced (root: {root}, {label}: {source_path})."
     )
     return 1
+
+
+def _exempt_under(root: Path, source_path: Path) -> frozenset[str]:
+    """The list's own files relative to *root*: the check never reads them."""
+    if not source_path.is_relative_to(root):
+        return frozenset()
+    if source_path.is_dir():
+        return frozenset(
+            path.relative_to(root).as_posix() for path in source_path.iterdir() if path.is_file()
+        )
+    return frozenset({source_path.relative_to(root).as_posix()})
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Fail when a retired path, symbol or env var is back.")
     parser.add_argument("--root", help="tree to scan (default: git toplevel of the working directory)")
-    parser.add_argument("--list", dest="list_path", help=f"the list (default: {LIST_REL} next to this script)")
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("--list", dest="list_path", help="one list file (default: every *.txt fragment)")
+    source.add_argument(
+        "--list-dir", dest="list_dir", help=f"a directory of fragments (default: {LIST_DIR_REL} next to this script)"
+    )
     args = parser.parse_args(argv)
-    list_path = Path(args.list_path).resolve() if args.list_path else DEFAULT_LIST
+    chosen = args.list_path or args.list_dir
+    source_path = Path(chosen).resolve() if chosen else DEFAULT_LIST_DIR
     try:
         root = _resolve_root(args.root)
-        entries = parse_list(list_path.read_text(encoding="utf-8"))
-        extra = frozenset({list_path.relative_to(root).as_posix()}) if list_path.is_relative_to(root) else frozenset()
-        violations = check(root, entries, extra)
+        if args.list_path:
+            entries = parse_list(source_path.read_text(encoding="utf-8"), source=source_path.name)
+        else:
+            entries = parse_list_dir(source_path)
+        violations = check(root, entries, _exempt_under(root, source_path))
     except (ListError, OSError, subprocess.CalledProcessError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
-    return _report(entries, violations, root, list_path)
+    return _report(entries, violations, root, source_path)
 
 
 if __name__ == "__main__":

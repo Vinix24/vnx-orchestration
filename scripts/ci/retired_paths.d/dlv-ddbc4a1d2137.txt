@@ -1,0 +1,6 @@
+# C5 (dlv-ddbc4a1d2137)
+# Golf 1, C5: the P15 and P16 splits. Source:
+# docs/investigations/2026-10-20-golf-1-hermeting.md §7 "C5".
+scripts/cleanup_stale_vnx_sessions.sh
+tests/test_cleanup_stale_vnx_sessions.py
+scripts/lib/worker_heartbeat.py::build_process_gone_failure_report

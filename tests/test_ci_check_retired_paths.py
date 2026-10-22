@@ -95,9 +95,67 @@ def test_parse_list_refuses_duplicates() -> None:
         check.parse_list("scripts/foo.py\nscripts/foo.py  # again\n")
 
 
-def test_shipped_list_parses() -> None:
-    entries = check.parse_list((VNX_ROOT / check.LIST_REL).read_text(encoding="utf-8"))
-    assert entries, "the shipped list is empty"
+def write_fragments(directory: Path, fragments: dict[str, str]) -> Path:
+    """A fragment directory with one ``*.txt`` per cluster (and any extra file)."""
+    directory.mkdir(parents=True, exist_ok=True)
+    for name, text in fragments.items():
+        (directory / name).write_text(text, encoding="utf-8")
+    return directory
+
+
+def test_shipped_fragments_parse() -> None:
+    directory = VNX_ROOT / check.LIST_DIR_REL
+    entries = check.parse_list_dir(directory)
+    assert entries, "the shipped fragments are empty"
+    # One fragment per cluster, next to the README that explains the rule.
+    names = {path.name for path in check.list_dir_files(directory)}
+    assert {
+        "dlv-265ca92a39bb.txt",
+        "dlv-94b694855db1.txt",
+        "dlv-f0dc7d68e349.txt",
+        "dlv-ddbc4a1d2137.txt",
+        "dlv-92fa888af43f.txt",
+    } <= names
+    assert (directory / "README.md").is_file()
+
+
+def test_parse_list_dir_reads_every_fragment_in_sorted_order(tmp_path: Path) -> None:
+    directory = write_fragments(
+        tmp_path / "fragments",
+        {
+            "dlv-b.txt": "env:VNX_B\n",
+            "dlv-a.txt": "# header\n\nscripts/foo.py   # gone in a\n",
+            "README.md": "not a fragment: scripts/never.py\n",
+        },
+    )
+    entries = check.parse_list_dir(directory)
+    assert [(e.kind, e.raw) for e in entries] == [("path", "scripts/foo.py"), ("env", "env:VNX_B")]
+
+
+def test_parse_list_dir_refuses_a_duplicate_across_fragments_and_names_both(tmp_path: Path) -> None:
+    directory = write_fragments(
+        tmp_path / "fragments",
+        {
+            "dlv-a.txt": "# a\nscripts/foo.py\n",
+            "dlv-b.txt": "scripts/other.py\nscripts/foo.py  # again\n",
+        },
+    )
+    with pytest.raises(check.ListError) as excinfo:
+        check.parse_list_dir(directory)
+    message = str(excinfo.value)
+    assert "scripts/foo.py" in message
+    assert "dlv-a.txt" in message and "dlv-b.txt" in message
+
+
+def test_parse_list_dir_refuses_an_empty_directory(tmp_path: Path) -> None:
+    (tmp_path / "fragments").mkdir()
+    with pytest.raises(check.ListError, match="fragment"):
+        check.parse_list_dir(tmp_path / "fragments")
+
+
+def test_parse_list_dir_refuses_a_missing_directory(tmp_path: Path) -> None:
+    with pytest.raises(check.ListError, match="no such directory"):
+        check.parse_list_dir(tmp_path / "absent")
 
 
 def test_frozen_doc_dirs_are_imported_not_copied() -> None:
@@ -243,7 +301,7 @@ def test_path_symlink_resolving_elsewhere_is_clean(tmp_path: Path, link: str) ->
         ("packages/p/tests/fixtures/run.sh", "python3 scripts/foo.py\n"),
         ("CHANGELOG.md", "- removed scripts/foo.py\n"),
         ("changelog.d/c1.md", "- removed scripts/foo.py\n"),
-        ("scripts/ci/retired_paths.txt", "scripts/foo.py\n"),
+        ("scripts/ci/retired_paths.d/dlv-old.txt", "scripts/foo.py\n"),
         ("docs/data.csv", "scripts/foo.py,gone\n"),
     ],
 )
@@ -544,7 +602,7 @@ def test_strip_hash_comments_keeps_quoted_hashes_and_array_lengths() -> None:
 
 
 def test_main_red_run_fails_on_every_line_then_green(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    list_file = tmp_path / "retired_paths.txt"
+    list_file = tmp_path / "retired.txt"
     list_file.write_text("scripts/foo.py\nscripts/lib/mod.py::gone\nenv:VNX_OLD_FLAG\n", encoding="utf-8")
     base = make_tree(
         tmp_path / "base",
@@ -569,6 +627,46 @@ def test_main_red_run_fails_on_every_line_then_green(tmp_path: Path, capsys: pyt
 def test_main_skips_the_list_inside_the_root(tmp_path: Path) -> None:
     root = make_tree(tmp_path, {"lists/retired.txt": "scripts/foo.py\n"})
     assert check.main(["--root", str(root), "--list", str(root / "lists" / "retired.txt")]) == 0
+
+
+def test_main_list_dir_reads_the_fragments(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    directory = write_fragments(
+        tmp_path / "fragments",
+        {"dlv-a.txt": "scripts/foo.py\n", "dlv-b.txt": "scripts/lib/mod.py::gone\n"},
+    )
+    base = make_tree(
+        tmp_path / "base",
+        {"scripts/foo.py": "x = 1\n", "scripts/lib/mod.py": "def gone():\n    return 1\n"},
+    )
+    head = make_tree(tmp_path / "head", {"scripts/lib/mod.py": MOD_WITHOUT})
+
+    assert check.main(["--root", str(base), "--list-dir", str(directory)]) == 1
+    assert "2 of 2 retired entries" in capsys.readouterr().out
+    assert check.main(["--root", str(head), "--list-dir", str(directory)]) == 0
+    assert "none of the 2 retired entries" in capsys.readouterr().out
+
+
+def test_main_list_dir_inside_the_root_is_not_scanned(tmp_path: Path) -> None:
+    root = make_tree(tmp_path, {"scripts/kept.py": "x = 1\n"})
+    directory = root / "scripts" / "ci" / "retired_paths.d"
+    write_fragments(
+        directory,
+        {"dlv-a.txt": "scripts/foo.py\n", "dlv-b.txt": "env:VNX_OLD_FLAG\n", "README.md": "scripts/foo.py\n"},
+    )
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    assert check.main(["--root", str(root), "--list-dir", str(directory)]) == 0
+
+
+def test_main_missing_list_dir_exits_2(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root = make_tree(tmp_path, {"a.py": "x = 1\n"})
+    assert check.main(["--root", str(root), "--list-dir", str(tmp_path / "absent")]) == 2
+    assert "no such directory" in capsys.readouterr().err
+
+
+def test_main_refuses_both_list_spellings(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        check.main(["--list", str(tmp_path / "a.txt"), "--list-dir", str(tmp_path)])
+    assert excinfo.value.code == 2
 
 
 def test_main_malformed_list_exits_2(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
