@@ -104,6 +104,13 @@ GATE_COST: Dict[str, GateCost] = {
         note="governed lane entry (OI-1984); request --review-stack deepseek_gate first; "
              "deepseek-flash (V4.1-Flash) peak tariff per wave7_models.yaml; takes over after kimi, before glm",
     ),
+    Gate.CLAUDE_GATE.value: GateCost(
+        command="python3 scripts/review_gate_manager.py execute --gate claude_gate --pr {pr}",
+        lane="claude CLI headless (claude_gate_lane), operator's subscription",
+        usd="subscription",
+        note="R7 (2026-10-22); request --review-stack claude_gate first; sonnet, no ANTHROPIC_BASE_URL "
+             "and no ANTHROPIC_API_KEY in its env; takes over after kimi, before deepseek",
+    ),
     Gate.KIMI_GATE.value: GateCost(
         command="python3 scripts/review_gate_manager.py execute --gate kimi_gate --pr {pr}",
         lane="kimi CLI (OAuth)",

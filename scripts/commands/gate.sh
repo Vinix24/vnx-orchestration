@@ -103,11 +103,12 @@ print(','.join(result) if result else '$default_stack')
 
 _g_normalize_gate() {
   # Short names to the gate names review_gate_manager knows: codex -> codex_gate,
-  # ci -> ci_gate (OI-1265), and the kimi/glm/deepseek reviewers by the same rule.
+  # ci -> ci_gate (OI-1265), and the kimi/claude/glm/deepseek reviewers by the same rule.
   case "$1" in
     codex)    printf 'codex_gate' ;;
     ci)       printf 'ci_gate' ;;
     kimi)     printf 'kimi_gate' ;;
+    claude)   printf 'claude_gate' ;;
     glm)      printf 'glm_gate' ;;
     deepseek) printf 'deepseek_gate' ;;
     *)        printf '%s' "$1" ;;
@@ -359,8 +360,9 @@ Options:
 Gate names:
   codex_gate            Codex static analysis gate (subscription)
   kimi_gate             Kimi review gate (subscription)
-  glm_gate              GLM review gate (API credit, fallback when codex and kimi are unavailable)
-  deepseek_gate         DeepSeek review gate (API credit, fallback when codex and kimi are unavailable)
+  claude_gate           Claude review gate (subscription, sonnet; never reviews a claude-built head)
+  glm_gate              GLM review gate (API credit, fallback when the subscription gates are unavailable)
+  deepseek_gate         DeepSeek review gate (API credit, fallback when the subscription gates are unavailable)
   ci_gate               CI green check
 
 Exit codes:

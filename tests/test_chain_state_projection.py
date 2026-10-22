@@ -488,7 +488,7 @@ class TestAtLeastOneSigner:
     ) -> None:
         monkeypatch.delenv("VNX_REVIEW_GATE_TAKEOVER_CHAIN", raising=False)
         monkeypatch.delenv("VNX_OVERRIDE_VNX_REVIEW_GATE_TAKEOVER_CHAIN", raising=False)
-        assert set(required_signer_gates()) == {"codex_gate", "kimi_gate", "deepseek_gate"}
+        assert set(required_signer_gates()) == {"codex_gate", "kimi_gate", "claude_gate", "deepseek_gate"}
 
 
 # ---------------------------------------------------------------------------

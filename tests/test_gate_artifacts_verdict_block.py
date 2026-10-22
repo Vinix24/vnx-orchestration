@@ -583,6 +583,7 @@ _VERDICT_SCOPE = {
     "glm_gate": (True, "harness lane: the lane's report text is read fenced or bare"),
     "kimi_gate": (True, "harness lane: the lane's report text is read fenced or bare"),
     "deepseek_gate": (True, "harness lane: the lane's report text is read fenced or bare"),
+    "claude_gate": (True, "harness lane: the lane's report text is read fenced or bare"),
     "codex_gate": (True, "path binary `codex`: its exec --json stream is unwrapped by the reader"),
     "gemini_review": (False, "path binary `gemini`: its --output-format json envelope is not unwrapped by the reader"),
     "claude_github_optional": (False, "path binary `gh`: reads GitHub state, no model writes a verdict block"),

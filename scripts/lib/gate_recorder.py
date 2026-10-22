@@ -98,6 +98,11 @@ GATE_PROVIDERS: Dict[str, Tuple[str, str]] = {
     # that was actually working. It is a config-based harness lane
     # ("deepseek-harness"), not a repo script, so it needs no file at all.
     "deepseek_gate": (GATE_PROVIDER_HARNESS_LANE, "deepseek-harness"),
+    # R7 (operator decision 2026-10-22): the claude review seat, `claude -p` on
+    # the operator's subscription. Same harness-lane path in gate_runner as
+    # deepseek_gate; its dispatcher is claude_gate_lane, never provider_dispatch,
+    # which refuses claude.
+    "claude_gate": (GATE_PROVIDER_HARNESS_LANE, "claude"),
 }
 
 # Backward-compatible view: only the gates that really do resolve to a PATH

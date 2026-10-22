@@ -229,11 +229,12 @@ class TestGateEnumMembership:
         removal is gemini_review, retired 2026-09-26 (dispatch_spec.RETIRED_GATE_NAMES).
         deepseek_gate joined in OI-1984: it is legal because closure_verifier
         carries _gate_deepseek_gate (a _GATE_HANDLERS entry), so it can sign at the
-        merge door."""
+        merge door. claude_gate joined in R7 (2026-10-22) the same way
+        (_gate_claude_gate)."""
         values = {g.value for g in Gate}
         assert values == {
             "codex_gate", "claude_github_optional",
-            "ci_gate", "wiring_gate", "kimi_gate", "glm_gate", "deepseek_gate",
+            "ci_gate", "wiring_gate", "kimi_gate", "glm_gate", "deepseek_gate", "claude_gate",
         }
 
 

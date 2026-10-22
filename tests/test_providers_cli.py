@@ -272,8 +272,19 @@ def test_off_on_reset_and_consequences(live, capsys):
         "set", "set", "clear"]
 
 
-def test_consequence_no_second_review_seat(live, capsys, monkeypatch):
+def test_the_default_chain_keeps_a_second_seat_through_claude(live, capsys, monkeypatch):
+    """R7: claude_gate stands in the default chain and the switch never refuses claude,
+    so switching kimi and deepseek off still leaves codex a second reviewer."""
     monkeypatch.delenv("VNX_REVIEW_GATE_TAKEOVER_CHAIN", raising=False)
+    assert run_main(capsys, "off", "kimi")[0] == 0
+    code, out, _ = run_main(capsys, "off", "deepseek")
+    assert code == 0
+    assert "no second review seat" not in out
+
+
+def test_consequence_no_second_review_seat(live, capsys, monkeypatch):
+    # The chain without claude_gate (the default before R7): kimi and deepseek off leave codex alone.
+    monkeypatch.setenv("VNX_REVIEW_GATE_TAKEOVER_CHAIN", "codex_gate,kimi_gate,deepseek_gate")
     assert run_main(capsys, "off", "kimi")[0] == 0
     code, out, _ = run_main(capsys, "off", "deepseek")
     assert code == 0

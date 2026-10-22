@@ -165,6 +165,25 @@ class ClaudeSpawnResult:
         }
 
 
+def _deliver_refused(
+    adapter: SubprocessAdapter, terminal_id: str, failure_reason: Optional[str],
+) -> ClaudeSpawnResult:
+    """The result of a spawn whose delivery was refused before claude started (ADR-043 K2a-2)."""
+    logger.warning(
+        "spawn_claude: SubprocessAdapter.deliver() failed for %s — %s",
+        terminal_id,
+        failure_reason,
+    )
+    return ClaudeSpawnResult(
+        returncode=1,
+        completion={},
+        events_written=0,
+        session_id=None,
+        timed_out=False, spawn_refused=f"deliver_failed: {failure_reason}",
+        _adapter=adapter,
+    )
+
+
 def spawn_claude(
     prompt: str,
     model: str,
@@ -185,6 +204,7 @@ def spawn_claude(
     requires_mcp: bool = False,
     scrub_env_keys: frozenset,
     base_url_family: Optional[str] = None,
+    scope_args: Optional[List[str]] = None,
     **kwargs: Any,
 ) -> ClaudeSpawnResult:
     """Spawn ``claude -p --output-format stream-json`` and consume the event stream.
@@ -261,6 +281,12 @@ def spawn_claude(
         The provider family behind the ``ANTHROPIC_BASE_URL`` this spawn's env carries, named
         by a harness lane that sets that redirect itself (``glm``, ``deepseek``). None (every
         other caller) leaves the decision to the host map.
+    scope_args:
+        The spawn's whole capability scope, forwarded to SubprocessAdapter.deliver,
+        which puts it after the prompt in place of the role's scope: neither
+        ``--dangerously-skip-permissions`` nor a role allow-list is added. The
+        claude review seat (claude_gate_lane) passes its read-only allow-list here.
+        None (every other caller) keeps the role's scope, byte-identical argv.
     **kwargs:
         Accepted for forward-compatibility; ignored.
 
@@ -299,22 +325,11 @@ def spawn_claude(
         role=role,
         requires_mcp=requires_mcp,
         scrub_env_keys=scrub_env_keys,
+        scope_args=scope_args,
     )
 
     if not deliver_result.success:
-        logger.warning(
-            "spawn_claude: SubprocessAdapter.deliver() failed for %s — %s",
-            terminal_id,
-            deliver_result.failure_reason,
-        )
-        return ClaudeSpawnResult(
-            returncode=1,
-            completion={},
-            events_written=0,
-            session_id=None,
-            timed_out=False, spawn_refused=f"deliver_failed: {deliver_result.failure_reason}",
-            _adapter=adapter,
-        )
+        return _deliver_refused(adapter, terminal_id, deliver_result.failure_reason)
 
     # Wire event_store into health_monitor so STUCK events persist to NDJSON
     # (mirrors _wire_event_store_into_health in delivery.py).

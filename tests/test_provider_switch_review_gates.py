@@ -187,32 +187,46 @@ def reachability_record(store, provider: str) -> Path:
 # Appendix C, Tests
 # ---------------------------------------------------------------------------
 
-def test_kimi_off_codex_plus_deepseek_takeover_and_no_kimi_launch(store, launches):
+def test_kimi_off_codex_plus_claude_takeover_and_no_kimi_launch(store, launches):
+    # R7 (2026-10-22): claude_gate follows kimi_gate in the default chain.
     set_switches(kimi=False)
 
     result = request(["codex_gate", "kimi_gate"])
 
-    assert launches == ["codex_gate", "deepseek_gate"]
+    assert launches == ["codex_gate", "claude_gate"]
     by_gate = seats(result)
-    assert set(by_gate) == {"codex_gate", "deepseek_gate"}
-    deepseek = by_gate["deepseek_gate"]
-    assert deepseek["takeover_from"] == "kimi_gate"
-    assert deepseek["takeover_reason"] == SWITCHED_OFF
-    assert SWITCHED_OFF in deepseek["failure_reason"]
-    assert "source=global" in deepseek["failure_reason"] and "tegoed sparen" in deepseek["failure_reason"]
-    [hop] = deepseek["takeover_path"]
+    assert set(by_gate) == {"codex_gate", "claude_gate"}
+    claude = by_gate["claude_gate"]
+    assert claude["takeover_from"] == "kimi_gate"
+    assert claude["takeover_reason"] == SWITCHED_OFF
+    assert SWITCHED_OFF in claude["failure_reason"]
+    assert "source=global" in claude["failure_reason"] and "tegoed sparen" in claude["failure_reason"]
+    [hop] = claude["takeover_path"]
     assert hop["gate"] == "kimi_gate" and hop["reason"] == SWITCHED_OFF and hop["status"] == "disabled"
-    on_disk = json.loads((store["requests_dir"] / f"pr-{PR}-deepseek_gate.json").read_text(encoding="utf-8"))
+    on_disk = json.loads((store["requests_dir"] / f"pr-{PR}-claude_gate.json").read_text(encoding="utf-8"))
     assert on_disk["takeover_from"] == "kimi_gate"
     # Passing a seat over books nothing for the passed-over gate and no reachability fact.
     assert not (store["results_dir"] / f"pr-{PR}-kimi_gate.json").exists()
     assert not reachability_record(store, "kimi").exists()
-    request_receipt = next(r for r in store["receipts"] if r.get("gate") == "deepseek_gate")
+    request_receipt = next(r for r in store["receipts"] if r.get("gate") == "claude_gate")
     assert request_receipt["takeover_from"] == "kimi_gate" and SWITCHED_OFF in request_receipt["failure_reason"]
 
 
-def test_kimi_deepseek_off_codex_plus_chain_exhausted_on_the_default_chain(store, launches, monkeypatch):
+def test_kimi_deepseek_off_the_default_chain_still_reads_claude(store, launches, monkeypatch):
+    """R7: the switch never refuses claude (ADR-044 v1), so with kimi and deepseek off the
+    default chain still has a reader for the second seat."""
     monkeypatch.delenv("VNX_REVIEW_GATE_TAKEOVER_CHAIN", raising=False)
+    set_switches(kimi=False, deepseek=False)
+
+    result = request(["codex_gate", "kimi_gate"])
+
+    assert launches == ["codex_gate", "claude_gate"]
+    claude = seats(result)["claude_gate"]
+    assert [hop["gate"] for hop in claude["takeover_path"]] == ["kimi_gate"]
+
+
+def test_kimi_deepseek_off_codex_plus_chain_exhausted_without_claude(store, launches, monkeypatch):
+    monkeypatch.setenv("VNX_REVIEW_GATE_TAKEOVER_CHAIN", "codex_gate,kimi_gate,deepseek_gate")
     set_switches(kimi=False, deepseek=False)
 
     result = request(["codex_gate", "kimi_gate"])
@@ -271,8 +285,8 @@ def test_a_verdict_about_another_head_does_not_hold_a_disabled_seat(store, launc
 
     result = request(["kimi_gate"])
 
-    assert launches == ["deepseek_gate"]
-    assert seats(result)["deepseek_gate"]["takeover_from"] == "kimi_gate"
+    assert launches == ["claude_gate"]
+    assert seats(result)["claude_gate"]["takeover_from"] == "kimi_gate"
 
 
 def test_kimi_back_on_dispatches_kimi_and_its_result_replaces_the_switch_record(store, launches, monkeypatch):
@@ -576,8 +590,8 @@ def test_an_unreadable_switch_file_makes_every_harness_gate_unavailable(store):
 def test_an_override_brake_refuses_the_seat(store, launches, monkeypatch):
     monkeypatch.setenv("VNX_OVERRIDE_PROVIDER_KIMI", "off")
     result = request(["kimi_gate"])
-    assert launches == ["deepseek_gate"]
-    assert "source=override" in seats(result)["deepseek_gate"]["failure_reason"]
+    assert launches == ["claude_gate"]
+    assert "source=override" in seats(result)["claude_gate"]["failure_reason"]
 
 
 def test_codex_and_tooling_gates_are_never_refused(store):

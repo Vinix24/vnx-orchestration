@@ -140,19 +140,22 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         subsystem="governance-enforcement-stack", status="LIVE"),
     "VNX_REVIEW_GATE_TAKEOVER_CHAIN": _e(
         "VNX_REVIEW_GATE_TAKEOVER_CHAIN", "string",
-        "codex_gate,kimi_gate,deepseek_gate", "gate",
+        "codex_gate,kimi_gate,claude_gate,deepseek_gate", "gate",
         "Ordered review-gate takeover chain (BETA3-E1, 26-08 operator decision; order "
-        "changed 2026-10-04, OI-1984). On lane_exhausted a seat rolls over to the NEXT gate "
-        "named here. The order is subscription reviewers first (codex_gate, kimi_gate), "
-        "then deepseek_gate (API credit), the last link of the default chain. glm_gate left "
+        "changed 2026-10-04, OI-1984, and 2026-10-22, R7). On lane_exhausted a seat rolls "
+        "over to the NEXT gate named here. The order is subscription reviewers first "
+        "(codex_gate, kimi_gate, claude_gate on the operator's claude subscription), then "
+        "deepseek_gate (API credit), the last link of the default chain. glm_gate left "
         "the default chain on 2026-10-17 (operator decision); it stays registered and can "
-        "still be named explicitly here, always behind both subscription gates. The API-credit "
-        "gates are a fallback only, never a project default reviewer; a guard test fails "
-        "when an API-credit gate is placed before a subscription gate. Since "
+        "still be named explicitly here, always behind every subscription gate. The "
+        "API-credit gates are a fallback only, never a project default reviewer; a guard "
+        "test fails when an API-credit gate is placed before a subscription gate. A seat "
+        "never gets a reviewer of the builder's vendor (R7): such a reviewer is passed over "
+        "like an unavailable one (review_vendor). Since "
         "OI-1714/OI-1838 deepseek_gate is a real harness-lane gate (available by "
         "registration, requested via gate_request_handler._request_deepseek), and since "
         "OI-1984 it is a member of the dispatch_spec.Gate enum, so its takeover record "
-        "signs the seat it took over at the merge door. "
+        "signs the seat it took over at the merge door; claude_gate is one the same way. "
         "ABSENT (no env/DB override) falls back to this literal default string. An EXPLICIT "
         "empty value ('') means NO takeover chain at all -- distinct from absent. Any name "
         "outside the known gate set, or a name repeated (a cycle), fails loud at read time. "
@@ -396,6 +399,13 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "configured base included. An invalid or non-positive value falls back to 900.",
         approval=True,
         subsystem="harness-lane-review-gates", status="ACTIVATE"),
+    "VNX_CLAUDE_GATE_TIMEOUT_SECONDS": _e(
+        "VNX_CLAUDE_GATE_TIMEOUT_SECONDS", "string", "900", "gate",
+        "Base lane deadline (seconds) for claude_gate. The diff extends it by 600 s "
+        "per started 100,000 chars above the first 100,000; 3600 s bounds the result, a "
+        "configured base included. An invalid or non-positive value falls back to 900.",
+        approval=True,
+        subsystem="harness-lane-review-gates", status="ACTIVATE"),
     "VNX_KIMI_GATE_TIMEOUT_SECONDS": _e(
         "VNX_KIMI_GATE_TIMEOUT_SECONDS", "string", "900", "gate",
         "Base lane deadline (seconds) for kimi_gate. The diff extends it by 600 s per "
@@ -465,6 +475,14 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
     "VNX_DEEPSEEK_GATE_MAX_DIFF_CHARS": _e(
         "VNX_DEEPSEEK_GATE_MAX_DIFF_CHARS", "string", "800000", "gate",
         "Diff-char cap for the prompt deepseek_gate builds from a PR diff. The "
+        "default is the operator's reading budget (500,000 tokens), bounded by the "
+        "argv ceiling of 800000 chars (OI-1961); a value above the ceiling is "
+        "clamped to it. A project may lower it.",
+        approval=True,
+        subsystem="harness-lane-review-gates", status="ACTIVATE"),
+    "VNX_CLAUDE_GATE_MAX_DIFF_CHARS": _e(
+        "VNX_CLAUDE_GATE_MAX_DIFF_CHARS", "string", "800000", "gate",
+        "Diff-char cap for the prompt claude_gate builds from a PR diff. The "
         "default is the operator's reading budget (500,000 tokens), bounded by the "
         "argv ceiling of 800000 chars (OI-1961); a value above the ceiling is "
         "clamped to it. A project may lower it.",

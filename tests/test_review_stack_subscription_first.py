@@ -149,7 +149,19 @@ class TestRegistryDefaultsKeepTheOrder:
         chain = _split(_DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN)
         stack = _split(cr.CONFIG_REGISTRY["VNX_DEFAULT_REVIEW_STACK"].default)
         assert chain[:len(stack)] == stack
-        assert [g for g in chain[len(stack):] if gate_billing(g) == GATE_BILLING_SUBSCRIPTION] == []
+        # R7 (2026-10-22): the one subscription reviewer outside the standing stack is
+        # claude_gate, and it reads before every API-credit gate.
+        assert [g for g in chain[len(stack):] if gate_billing(g) == GATE_BILLING_SUBSCRIPTION] == ["claude_gate"]
+
+    def test_claude_gate_is_a_subscription_seat_right_after_kimi(self):
+        from gate_request_handler import _DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN
+        chain = _split(_DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN)
+        assert chain == ["codex_gate", "kimi_gate", "claude_gate", "deepseek_gate"]
+        assert gate_billing("claude_gate") == GATE_BILLING_SUBSCRIPTION
+        billing = [gate_billing(g) for g in chain]
+        assert billing == sorted(billing, key=lambda b: b != GATE_BILLING_SUBSCRIPTION), (
+            f"every subscription gate reads before every API-credit gate: {list(zip(chain, billing))}"
+        )
 
     def test_the_resolved_default_stack_is_the_registry_default(self, env):
         import review_gate_manager

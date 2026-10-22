@@ -192,16 +192,16 @@ class TestTheWalkPassesKimiOver:
         assert hop["gate"] == "kimi_gate"
         assert hop["status"] == "unavailable"
 
-    def test_the_walk_from_kimis_seat_reaches_deepseek(self, store):
+    def test_the_walk_from_kimis_seat_reaches_the_next_link(self, store):
         _write_kimi_result(store, _kimi_record())
         chain = _parse_review_gate_takeover_chain(_DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN)
-        assert chain["kimi_gate"] == "deepseek_gate"
+        assert chain["kimi_gate"] == "claude_gate", "R7 (2026-10-22): claude_gate follows kimi_gate"
 
         reader, path, refusal = _manager()._walk_takeover_chain(
             "kimi_gate", PR, chain, None, head=_PrHead(PR, HEAD_SHA),
         )
 
-        assert reader == "deepseek_gate", f"kimi was dispatched again instead of passed over: {path!r}"
+        assert reader == "claude_gate", f"kimi was dispatched again instead of passed over: {path!r}"
         assert refusal is None
         assert [hop["gate"] for hop in path] == ["kimi_gate"]
         hop = path[0]

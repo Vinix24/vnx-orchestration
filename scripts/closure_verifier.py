@@ -1880,6 +1880,15 @@ def _gate_deepseek_gate(
     return _gate_full_evidence_pass("deepseek_gate", result)
 
 
+def _gate_claude_gate(
+    contract: ReviewContract,
+    result: Optional[Dict[str, Any]],
+    results_dir: Path,
+    branch: Optional[str],
+) -> CheckResult:
+    return _gate_full_evidence_pass("claude_gate", result)
+
+
 # Table-driven dispatch: one entry per gate the closure verifier implements.
 # Adding a gate means adding one handler here plus (if excluded) an entry in
 # _GATES_NOT_IMPLEMENTED_BY_CLOSURE — not a new branch in _check_single_gate,
@@ -1892,6 +1901,7 @@ _GATE_HANDLERS: Dict[str, Any] = {
     "kimi_gate": _gate_kimi_gate,
     "glm_gate": _gate_glm_gate,
     "deepseek_gate": _gate_deepseek_gate,
+    "claude_gate": _gate_claude_gate,
 }
 
 

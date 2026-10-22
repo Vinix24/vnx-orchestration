@@ -535,7 +535,8 @@ def test_three_step_chain_carries_full_path_in_annotation(manager_env, monkeypat
         )
 
     seat = result["requested"][0]
-    assert seat["gate"] == "deepseek_gate", f"expected the walk to land on deepseek_gate, got {seat['gate']!r}"
+    # R7 (2026-10-22): claude_gate follows kimi_gate in the default chain.
+    assert seat["gate"] == "claude_gate", f"expected the walk to land on claude_gate, got {seat['gate']!r}"
     assert seat["takeover_from"] == "kimi_gate"
     path = seat["takeover_path"]
     assert [hop["gate"] for hop in path] == ["codex_gate", "kimi_gate"], (
@@ -547,8 +548,8 @@ def test_three_step_chain_carries_full_path_in_annotation(manager_env, monkeypat
     assert "insufficient_quota" in path[0]["detail"] or "429" in path[0]["detail"]
     assert "access_terminated_error" in path[1]["detail"] or "403" in path[1]["detail"]
 
-    # On-disk: deepseek_gate's OWN request record also carries the full path.
-    on_disk = json.loads((manager_env["requests_dir"] / f"pr-{pr_number}-deepseek_gate.json").read_text())
+    # On-disk: claude_gate's OWN request record also carries the full path.
+    on_disk = json.loads((manager_env["requests_dir"] / f"pr-{pr_number}-claude_gate.json").read_text())
     assert [hop["gate"] for hop in on_disk["takeover_path"]] == ["codex_gate", "kimi_gate"]
 
 
@@ -755,7 +756,8 @@ def test_absent_config_falls_back_to_standard_chain(manager_env, monkeypatch):
     chain = _build_review_gate_takeover_chain()
     assert chain == {
         "codex_gate": "kimi_gate",
-        "kimi_gate": "deepseek_gate",
+        "kimi_gate": "claude_gate",
+        "claude_gate": "deepseek_gate",
     }
 
 
@@ -811,8 +813,12 @@ def test_codex_gate_added_with_kimi_gate_as_first_fallback():
     assert chain["codex_gate"] == "kimi_gate", (
         "codex_gate must be the entry point; kimi_gate is the first fallback"
     )
-    assert chain["kimi_gate"] == "deepseek_gate", (
-        "OI-1984 (operator decision 2026-10-04): deepseek_gate follows kimi_gate"
+    assert chain["kimi_gate"] == "claude_gate", (
+        "R7 (operator decision 2026-10-22): claude_gate, a subscription seat, follows kimi_gate"
+    )
+    assert chain["claude_gate"] == "deepseek_gate", (
+        "OI-1984 (operator decision 2026-10-04): deepseek_gate is the API-credit fallback, "
+        "behind every subscription seat"
     )
     assert "deepseek_gate" not in chain, (
         "R4 (operator decision 2026-10-17): deepseek_gate is the last link of the default chain"
