@@ -76,9 +76,6 @@ class DispatchResult:
     error: Optional[str] = None
     # Where the worker's isolated, materialized seed output lives for verify.py.
     workdir: Optional[Path] = None
-    # Temp checkout created purely for scoring (branch survived, worktree
-    # reaped). The runner must remove it after score_cell.
-    scoring_worktree: Optional[Path] = None
 
 
 def _claude_subprocess_headless(
@@ -401,7 +398,6 @@ def dispatch(
 
     # Locate the worker's actual materialized seed output for verify.py.
     workdir: Optional[Path] = None
-    scoring_worktree: Optional[Path] = None
     if via_provider:
         # Resolve the materialized worktree whenever a VALID one exists — even on the
         # rc!=0-with-report path. glm-harness produces a correct deliverable but the
@@ -434,7 +430,6 @@ def dispatch(
         stdout=out[-2000:], stderr=err[-2000:],
         error=failure_reason,
         workdir=workdir,
-        scoring_worktree=scoring_worktree,
     )
 
 

@@ -143,8 +143,9 @@ Each item below is a concrete safeguard with its source location.
 
 ### Worker isolation, fail-loud
 Every cell runs in its own ephemeral worktree, and isolation failure is fatal,
-never silent: `VNX_BENCH_REQUIRE_ISOLATION=1` is set on both the headless and
-tmux paths ([`lane_adapter.py:117,160`](runners/lane_adapter.py)) so a worker is
+never silent: `VNX_BENCH_REQUIRE_ISOLATION=1` is set on both dispatch routes,
+`subprocess_dispatch` and `provider_dispatch`
+([`lane_adapter.py:102,157`](runners/lane_adapter.py)), so a worker is
 **never** run in the shared checkout. This prevents one cell's edits from
 contaminating another's baseline.
 
@@ -268,11 +269,9 @@ A benchmark is only as honest as its caveats. These are surfaced, not buried.
   a finding, not noise.
 - **Known limitations are tracked in code, not hidden.** Several edge cases are
   documented inline and deferred with ticket references: headless-lane retry
-  checkout-reset (`F4`), the prefix-match report-presence heuristic (`F5`), and
-  scoring-worktree leak on teardown (`F8`) — all at
-  [`run_field_tests.py:299-303`](runners/run_field_tests.py),
-  [`:198-204`](runners/run_field_tests.py), and
-  [`run_one_cell()`](runners/run_field_tests.py#L135). One task (`08_ssrf`) has a
+  checkout-reset (`F4`) and the prefix-match report-presence heuristic (`F5`),
+  at [`run_field_tests.py:293-297`](runners/run_field_tests.py) and
+  [`:180-186`](runners/run_field_tests.py). One task (`08_ssrf`) has a
   known cross-lane filename-convergence effect that is footnoted wherever its
   numbers appear.
 - **Provider constraints are pinned.** Lane routing honours hard provider rules

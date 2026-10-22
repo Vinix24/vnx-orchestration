@@ -5,7 +5,7 @@ the worker ADOPTS the injected specialist role, on every dispatch mechanism:
 
 | lane                    | mechanism under test                       |
 |-------------------------|--------------------------------------------|
-| claude-opus-4-6         | tmux-spawn interactive (subscription)      |
+| claude-opus-4-6         | headless `claude -p` (CLAUDE_HEADLESS=1)   |
 | claude-sonnet-4-6       | headless subprocess (HEADLESS_FORCED)      |
 | deepseek-v4-pro-harness | deepseek via Claude-harness                |
 | deepseek-v4-pro-bare    | bare litellm chat lane (wrapper report)    |

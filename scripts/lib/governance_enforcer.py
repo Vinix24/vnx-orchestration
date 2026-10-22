@@ -834,8 +834,7 @@ class GovernanceEnforcer:
         """vulture scripts/ --min-confidence 100 — fails (advisory) if vulture not installed."""
         try:
             proc = subprocess.run(
-                ["vulture", "scripts/", "scripts/vulture_whitelist.py",
-                 "--min-confidence", "100"],
+                ["vulture", "scripts/", "--min-confidence", "100"],
                 capture_output=True, text=True, timeout=30,
                 cwd=str(_REPO_ROOT),
             )
