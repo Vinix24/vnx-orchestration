@@ -189,6 +189,26 @@ jobs:
             -p no:cacheprovider \
             --basetemp=/tmp/vnx_pytest_safe
 
+      - name: Retired paths guard
+        run: |
+          set -euo pipefail
+          # Fail CI when a path, symbol or env var that golf 1 removed comes
+          # back, or when anything still calls it in an executable way (import,
+          # -m, a command in shell/yaml/json/plist, an env read). Comments,
+          # docstrings, markdown and frozen history do not count. The list is
+          # scripts/ci/retired_paths.txt; every cluster adds its removals.
+          python3 "$GITHUB_WORKSPACE/scripts/ci/check_retired_paths.py" \
+            --root "$GITHUB_WORKSPACE" \
+            --list "$GITHUB_WORKSPACE/scripts/ci/retired_paths.txt"
+
+      - name: Run retired paths guard unit tests
+        run: |
+          set -euo pipefail
+          pytest -q \
+            "$GITHUB_WORKSPACE/tests/test_ci_check_retired_paths.py" \
+            -p no:cacheprovider \
+            --basetemp=/tmp/vnx_pytest_safe
+
       - name: Architecture doc drift guard (D6a)
         run: |
           set -euo pipefail
