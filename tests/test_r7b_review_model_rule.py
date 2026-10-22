@@ -97,19 +97,143 @@ class TestGateModel:
         assert gate_lane_contract.gate_model(gate) is None
 
 
+def _registry_spellings():
+    """``(spelling, target key)`` for every name the shipped registry gives a model.
+
+    Per entry: its key, its ``litellm_name`` and ``cli_model_arg`` (as written
+    and without the routing prefix before the last ``/``) and every name in its
+    ``aliases``. The target is the entry's ``served_by`` when it has one, else
+    its own key. Read from the registry file, so a model added there is covered
+    without touching this test.
+    """
+    pairs = []
+    for section, cfg in provider_registry.load().items():
+        for key, entry in cfg.models.items():
+            target = entry.served_by or key
+            names = {key, *entry.aliases}
+            for value in (entry.litellm_name, entry.cli_model_arg):
+                if value:
+                    names.update({value, value.rsplit("/", 1)[-1]})
+            pairs.extend((name, target, f"{section}/{key}") for name in sorted(names))
+    return pairs
+
+
+def _keys_without_a_serving_model():
+    """Registry keys no entry of which says what answers it: no litellm_name, cli_model_arg or served_by."""
+    has_one = {}
+    for cfg in provider_registry.load().values():
+        for key, entry in cfg.models.items():
+            has_one[key] = has_one.get(key, False) or bool(entry.served_by or entry.litellm_name or entry.cli_model_arg)
+    return sorted(key for key, known in has_one.items() if not known)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_model_normalizer_caches(monkeypatch):
+    """Build the normalizer's tables from the shipped registry for every test here.
+
+    The normalizer keeps them per process, from whichever registry
+    ``provider_registry`` pointed at on the first call; a tmp-registry test that
+    ran earlier in the worker would otherwise decide these comparisons. The
+    monkeypatch restores the values it found at teardown, so nothing built here
+    is left behind either.
+    """
+    for name in ("_registry_cache", "_alias_cache", "_keys_cache"):
+        monkeypatch.setattr(model_normalizer, name, None)
+
+
 class TestComparableModelName:
     def test_the_phased_out_name_is_the_model_that_serves_it(self):
         assert model_normalizer.comparable_model_name("deepseek-v4-flash") == "deepseek-flash"
-        assert model_normalizer.comparable_model_name("deepseek-v4-flash-vision-exp") == "deepseek-flash"
+        assert model_normalizer.comparable_model_name("deepseek/deepseek-v4-flash") == "deepseek-flash"
         assert model_normalizer.comparable_model_name("deepseek-flash") == "deepseek-flash"
 
     def test_the_ledger_normalizer_keeps_the_name_that_was_called(self):
         assert model_normalizer.normalize_model_name("deepseek-v4-flash") == "deepseek-v4-flash"
 
-    def test_other_names_compare_as_they_normalize(self):
-        assert model_normalizer.comparable_model_name("claude-sonnet-5-5") == model_normalizer.normalize_model_name("claude-sonnet-5-5")
-        assert model_normalizer.comparable_model_name("deepseek-v4-pro") != model_normalizer.comparable_model_name("deepseek-flash")
-        assert model_normalizer.comparable_model_name(None) == ""
+    @pytest.mark.parametrize("alias,target", [
+        ("sonnet", "claude-sonnet-5-5"), ("sonnet", "sonnet-5-5"), ("sonnet", "anthropic/claude-sonnet-5-5"),
+        ("opus", "claude-opus-4-8"), ("opus", "opus-4-8"),
+        ("haiku", "haiku-4-5"), ("haiku", "claude-haiku-4-5"), ("haiku", "claude-haiku-4-5-20251001"),
+        ("deepseek-v4-pro", "deepseek-v4-pro-default"), ("deepseek-v4-pro", "deepseek/deepseek-v4-pro"),
+        ("kimi-k3", "kimi-code/k3"), ("kimi-k2-7", "kimi-code/kimi-for-coding"), ("kimi-k2-7", "kimi-for-coding"),
+        ("kimi-k2-6", "moonshot/kimi-k2.6"),
+        ("glm-5.2", "openrouter/z-ai/glm-5.2"), ("glm-5.2", "z-ai/glm-5.2"),
+        ("gpt-6-astra", "openai/gpt-6-astra"),
+    ])
+    def test_the_alias_families_compare_equal(self, alias, target):
+        """The codex finding on #2182: `sonnet` and `claude-sonnet-5-5` were `sonnet` and `sonnet-5-5`."""
+        served = model_normalizer.comparable_model_name(alias)
+        assert served and served == model_normalizer.comparable_model_name(target)
+
+    @pytest.mark.parametrize("one,other", [
+        ("sonnet", "sonnet-5"), ("opus", "opus-5-5"), ("opus-5", "opus-5-5"), ("sonnet", "opus"),
+        ("deepseek-flash", "deepseek-v4-pro"), ("kimi-k3", "kimi-k2-7"), ("glm-5.3", "glm-5.3-flash"),
+    ])
+    def test_different_serving_models_stay_apart(self, one, other):
+        assert model_normalizer.comparable_model_name(one) != model_normalizer.comparable_model_name(other)
+
+    def test_every_registry_alias_compares_equal_to_its_target(self):
+        spellings = _registry_spellings()
+        assert len(spellings) > 40
+        unresolved = set(_keys_without_a_serving_model())
+        mismatched = [
+            (where, name, target)
+            for name, target, where in spellings
+            if target not in unresolved and (
+                not model_normalizer.comparable_model_name(target)
+                or model_normalizer.comparable_model_name(name) != model_normalizer.comparable_model_name(target)
+            )
+        ]
+        assert mismatched == []
+
+    def test_a_key_the_registry_names_no_serving_model_for_is_unresolved(self):
+        unresolved = _keys_without_a_serving_model()
+        assert "kimi-default" in unresolved
+        assert all(model_normalizer.comparable_model_name(key) == "" for key in unresolved)
+
+    @pytest.mark.parametrize("name", [
+        None, "", "unknown", "default", "kimi", "deepseek", "claude-sonnet-9", "claude-sonnet-4-6",
+        "deepseek-v4-flash-vision-exp", "claude-sonnet-5-5-20261001", "gpt-x",
+    ])
+    def test_a_name_the_registry_does_not_resolve_is_empty(self, name):
+        assert model_normalizer.comparable_model_name(name) == ""
+
+    def test_the_normalizer_reads_the_registry_aliases(self):
+        assert model_normalizer.normalize_model_name("haiku-4-5") == "haiku"
+
+
+class TestServedBy:
+    def _write(self, tmp_path: Path, served_by: str) -> Path:
+        path = tmp_path / "registry.yaml"
+        path.write_text(
+            "providers:\n"
+            "  deepseek_harness:\n"
+            "    enabled: true\n"
+            "    api_key_env: X\n"
+            "    models:\n"
+            "      deepseek-flash: {litellm_name: '', cli_model_arg: deepseek-flash, cost_input_per_mtok: 1,"
+            " cost_output_per_mtok: 1, max_tokens: 1, supports_streaming: true, supports_tool_calls: true}\n"
+            f"      deepseek-v4-flash: {{litellm_name: '', cli_model_arg: deepseek-v4-flash, served_by: {served_by!r},"
+            " cost_input_per_mtok: 1, cost_output_per_mtok: 1, max_tokens: 1, supports_streaming: true,"
+            " supports_tool_calls: true}\n",
+            encoding="utf-8",
+        )
+        return path
+
+    def test_the_shipped_registry_says_who_serves_the_phased_out_flash(self):
+        registry = provider_registry.load()
+        assert registry["deepseek_harness"].models["deepseek-v4-flash"].served_by == "deepseek-flash"
+        assert registry["deepseek"].models["deepseek-v4-flash"].served_by == "deepseek-flash"
+        assert registry["deepseek_harness"].models["deepseek-flash"].served_by is None
+
+    def test_a_served_by_that_names_a_registry_key_loads(self, tmp_path):
+        registry = provider_registry.load(self._write(tmp_path, "deepseek-flash"))
+        assert registry["deepseek_harness"].models["deepseek-v4-flash"].served_by == "deepseek-flash"
+
+    @pytest.mark.parametrize("served_by", ["deepseek-v4.1-flash", "deepseek-v4-flash", ""])
+    def test_a_served_by_that_names_no_other_key_fails_the_load(self, tmp_path, served_by):
+        with pytest.raises(ValueError, match="served_by"):
+            provider_registry.load(self._write(tmp_path, served_by))
 
 
 # ---------------------------------------------------------------------------
@@ -200,6 +324,60 @@ class TestModelMatchHop:
     def test_sonnet_build_is_not_read_by_claude_gate_on_sonnet(self, tmp_path):
         builder = _builder(tmp_path, "claude", "sonnet")
         assert review_vendor.vendor_match_hop("claude_gate", builder)["reason"] == "model_matches_builder"
+
+    def test_a_claude_sonnet_5_5_build_is_not_read_by_claude_gate_on_sonnet(self, tmp_path):
+        """Codex on #2182: the registry serves `sonnet` with claude-sonnet-5-5, so this is self-review."""
+        builder = _builder(tmp_path, "claude", "claude-sonnet-5-5")
+        hop = review_vendor.vendor_match_hop("claude_gate", builder)
+        assert hop is not None
+        assert hop["reason"] == "model_matches_builder"
+        assert hop["builder_model"] == "claude-sonnet-5-5" and hop["reviewer_model"] == "sonnet"
+        assert "sonnet-5-5" in hop["detail"]
+
+    def test_a_placeholder_build_whose_receipt_resolved_sonnet_5_5_is_not_read_on_sonnet(self, tmp_path):
+        _receipt(tmp_path, "dlv-built", model="sonnet", model_resolved="sonnet-5-5")
+        builder = _builder(tmp_path, "claude", "default")
+        assert builder.effective_model == "sonnet-5-5"
+        assert review_vendor.vendor_match_hop("claude_gate", builder)["reason"] == "model_matches_builder"
+
+    @pytest.mark.parametrize("provider,model,gate,env,reviewer", [
+        ("claude", "opus", "claude_gate", "VNX_CLAUDE_GATE_MODEL", "claude-opus-4-8"),
+        ("claude", "haiku-4-5", "claude_gate", "VNX_CLAUDE_GATE_MODEL", "haiku"),
+        ("deepseek-harness", "deepseek-v4-pro-default", "deepseek_gate", "VNX_DEEPSEEK_GATE_MODEL", "deepseek-v4-pro"),
+        ("deepseek-harness", "deepseek/deepseek-v4-flash", "deepseek_gate", "VNX_DEEPSEEK_GATE_MODEL", "deepseek-flash"),
+        ("kimi", "kimi-code/k3", "kimi_gate", "VNX_KIMI_GATE_MODEL", "kimi-k3"),
+        ("glm", "openrouter/z-ai/glm-5.2", "glm_gate", "VNX_GLM_GATE_MODEL", "glm-5.2"),
+        ("codex", "openai/gpt-6-astra", "codex_gate", "VNX_CODEX_MODEL", "gpt-6-astra"),
+    ])
+    def test_an_alias_of_the_reviewers_model_is_passed_over_in_every_family(
+        self, tmp_path, monkeypatch, provider, model, gate, env, reviewer,
+    ):
+        monkeypatch.setenv(env, reviewer)
+        hop = review_vendor.vendor_match_hop(gate, _builder(tmp_path, provider, model))
+        assert hop is not None and hop["reason"] == "model_matches_builder"
+
+    def test_a_builder_model_the_registry_does_not_resolve_fails_closed(self, tmp_path):
+        builder = _builder(tmp_path, "claude", "claude-sonnet-9")
+        hop = review_vendor.vendor_match_hop("claude_gate", builder)
+        assert hop["reason"] == "model_unknown_for_same_vendor"
+        assert "the builder model 'claude-sonnet-9' does not resolve" in hop["detail"]
+
+    def test_a_reviewer_model_the_registry_does_not_resolve_fails_closed(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("VNX_CLAUDE_GATE_MODEL", "claude-sonnet-9")
+        hop = review_vendor.vendor_match_hop("claude_gate", _builder(tmp_path, "claude", "opus"))
+        assert hop["reason"] == "model_unknown_for_same_vendor"
+        assert "the reviewer model 'claude-sonnet-9' does not resolve" in hop["detail"]
+
+    def test_a_kimi_default_build_is_not_read_by_kimi_gate(self, tmp_path):
+        """The registry names no model behind `kimi-default`, so it cannot be shown to differ from kimi-k3."""
+        hop = review_vendor.vendor_match_hop("kimi_gate", _builder(tmp_path, "kimi", "kimi-default"))
+        assert hop["reason"] == "model_unknown_for_same_vendor"
+        assert "'kimi-default'" in hop["detail"]
+
+    def test_an_unresolved_name_of_another_vendor_passes_nobody_over(self, tmp_path):
+        builder = _builder(tmp_path, "claude", "claude-sonnet-9")
+        for gate in ("codex_gate", "kimi_gate", "deepseek_gate", "glm_gate"):
+            assert review_vendor.vendor_match_hop(gate, builder) is None
 
     def test_an_unknown_builder_model_in_the_same_vendor_fails_closed(self, tmp_path):
         builder = _builder(tmp_path, "claude", "default")

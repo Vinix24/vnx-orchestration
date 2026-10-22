@@ -32,6 +32,7 @@ sys.path.insert(0, str(VNX_ROOT / "scripts" / "lib"))
 
 import gate_lane_contract
 import review_vendor
+from providers import model_normalizer
 from review_vendor import (
     RULE_APPLIED,
     RULE_NOT_APPLIED,
@@ -40,6 +41,19 @@ from review_vendor import (
     resolve_builder_vendor,
     vendor_from_spec,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_model_normalizer_caches(monkeypatch):
+    """The model comparison reads the registry through the normalizer's per-process tables (R7b r3).
+
+    A tmp-registry test that ran earlier in the worker would leave its tables
+    behind and turn every claude name into an unresolved one here. Reset for
+    each test; the monkeypatch restores what it found at teardown.
+    """
+    for name in ("_registry_cache", "_alias_cache", "_keys_cache"):
+        monkeypatch.setattr(model_normalizer, name, None)
+
 
 _FRESH = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 _KIMI_WEEKLY_LIMIT = (

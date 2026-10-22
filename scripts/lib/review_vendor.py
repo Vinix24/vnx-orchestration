@@ -6,11 +6,12 @@ runs the SAME MODEL as the builder. A reviewer of the builder's vendor on a
 different model may take the seat: a build by ``deepseek-flash`` may be read
 by ``deepseek_gate`` on ``deepseek-v4-pro``, which lets a DeepSeek build be
 reviewed by codex plus a DeepSeek seat while kimi is out, without spending
-Claude quota. Both models are compared canonically
-(``model_normalizer.comparable_model_name``: the phased-out
-``deepseek-v4-flash`` is ``deepseek-flash``). Same vendor with either model
-unknown fails closed: the reviewer is passed over and the hop names the
-unknown model.
+Claude quota. Two names are one model when the registry answers both with the
+same model (``model_normalizer.comparable_model_name``): ``sonnet`` and
+``claude-sonnet-5-5`` are one model, and so are the phased-out
+``deepseek-v4-flash`` and ``deepseek-flash``. Same vendor with either model
+unknown, or a name the registry does not resolve to a model it knows, fails
+closed: the reviewer is passed over and the hop names the model.
 
 Measured on PR #2168 (the case that started R7): kimi was at its
 weekly limit, ``deepseek_gate`` took the kimi seat, and round 5 of that PR was
@@ -33,7 +34,8 @@ and this module never keeps a second prefix table:
   (``<data_dir>/dispatches/*/<dispatch_id>/dispatch-spec.json``, the lookup
   ``dispatch_identity.resolve_spec_role`` uses), in the store the review gates
   belong to. A placeholder model (``""``, ``default``, ``auto``, ``none``) means
-  the lane's own default, read from the lane (``_lane_default_model``).
+  the lane picked its own, read from the latest receipt of that dispatch
+  (:func:`builder_model`).
 
 Never guessed. The builder's vendor is unknown, and the rule is not applied,
 when the request names no dispatch, no spec is found, a spec cannot be read,
@@ -200,19 +202,18 @@ def vendor_match_hop(gate: str, builder: Optional[BuilderVendor]) -> Optional[Di
     if reviewer_vendor is None or reviewer_vendor != builder.vendor:
         return None
     reviewer_model = gate_lane_contract.gate_model(gate) or ""
-    unknown = [
-        who for who, name in (("builder", builder.effective_model), ("reviewer", reviewer_model))
-        if is_unknown_model(name)
-    ]
-    if not unknown and comparable_model_name(builder.effective_model) != comparable_model_name(reviewer_model):
+    names = (("builder", builder.effective_model), ("reviewer", reviewer_model))
+    served = {who: comparable_model_name(name) for who, name in names}
+    unresolved = [(who, name) for who, name in names if not served[who]]
+    if not unresolved and served["builder"] != served["reviewer"]:
         return None
     return {
         "gate": gate,
-        "reason": MODEL_UNKNOWN_REASON if unknown else MODEL_MATCH_REASON,
+        "reason": MODEL_UNKNOWN_REASON if unresolved else MODEL_MATCH_REASON,
         "status": MODEL_MATCH_STATUS,
         "builder_model": builder.effective_model or None,
         "reviewer_model": reviewer_model or None,
-        "detail": _model_match_detail(gate, reviewer_vendor, reviewer_model, builder, unknown),
+        "detail": _model_match_detail(gate, reviewer_vendor, reviewer_model, builder, unresolved, served["builder"]),
     }
 
 
@@ -235,19 +236,25 @@ def same_vendor_record(gate: str, builder: Optional[BuilderVendor], record: Dict
 
 
 def _model_match_detail(
-    gate: str, reviewer_vendor: str, reviewer_model: str, builder: BuilderVendor, unknown: list,
+    gate: str, reviewer_vendor: str, reviewer_model: str, builder: BuilderVendor,
+    unresolved: list, served: str,
 ) -> str:
     head = (
         f"{gate} is a {reviewer_vendor} reviewer on {reviewer_model or '(unknown model)'} and the head was "
         f"built by {builder.provider or '?'}/{builder.effective_model or '(unknown model)'} "
         f"({builder.vendor}, dispatch {builder.dispatch_id}): "
     )
-    if unknown:
+    if unresolved:
+        causes = [
+            f"the {who} model is unknown" if is_unknown_model(name)
+            else f"the {who} model {name!r} does not resolve to a model the registry knows"
+            for who, name in unresolved
+        ]
         return head + (
-            f"the {' and '.join(unknown)} model is unknown, so it cannot be shown to differ from the "
-            "builder's and the reviewer is passed over"
+            f"{' and '.join(causes)}, so it cannot be shown to differ from the builder's and the reviewer "
+            "is passed over"
         )
-    return head + "a reviewer never runs the model that built the head"
+    return head + f"the registry answers both with {served}, and a reviewer never runs the model that built the head"
 
 
 def _receipt_model(dispatch_id: str, data_dir: Path) -> str:
