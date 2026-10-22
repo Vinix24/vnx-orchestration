@@ -12,7 +12,8 @@ The list has three kinds of line (``#`` starts a comment)::
     scripts/foo.py              a path: the file is gone and nothing calls it
     scripts/lib/bar.py::baz     a symbol: the module stays, ``baz`` (a function,
                                 class or ``Class.method``) is gone from it and
-                                nothing imports it
+                                nothing imports it (for ``Class.method``:
+                                nothing uses the method; the class stays)
     env:VNX_OLD_FLAG            an env var: nothing reads it any more
 
 What counts as a reference.  Executable references only:
@@ -27,6 +28,20 @@ What counts as a reference.  Executable references only:
   target or a ``setattr``/``patch.object`` on the module, and an env var read
   through ``os.environ``, ``getenv`` or any ``*env*`` helper, or ``$NAME`` in
   a string.
+* A ``K.method`` symbol: the class ``K`` stays, so importing it is no
+  reference.  What counts is the retired attribute on the class or on an
+  instance of it: ``K.method``, ``K().method``, ``module.K.method`` (also
+  through an import alias), a name bound only to ``K(...)`` in a scope, or in
+  an enclosing function or the module, followed by ``.method``,
+  ``getattr``/``setattr``/``hasattr``/``delattr``/``patch.object`` on the
+  class or such an instance with ``"method"``, and a ``patch("module.K.method")``
+  target.  In a string or a non-Python file only ``module.K.method``, and
+  ``K.method`` or ``K(...).method`` after ``from module import K`` in the same
+  text, count.  Not detected: ``self.method`` inside the class or a subclass,
+  an instance that arrives as a parameter, a return value, an attribute
+  (``self.k = K()``) or a factory (``K.create()``), a class alias made by
+  assignment (``Alias = K``), and in a string or non-Python file an import
+  alias or an instance bound to a name.
 * Shell, yaml, toml, ini, the ``.txt`` lists, ``Makefile`` and extensionless
   scripts with a shell shebang: the text without its ``#`` comments.  An env
   var counts as ``${NAME``, ``$NAME`` or ``env.NAME``.
@@ -35,7 +50,13 @@ What counts as a reference.  Executable references only:
   and ``/* */`` comments.
 * A template (``.j2``, ``.tmpl``, ``.template``, ``.tpl``, ``.example``) is
   read as the file type under its template suffix.
-* A tracked symlink counts when its target names a retired path.
+* A tracked symlink counts when its target, resolved against the directory
+  of the link, is a retired path or lies under one.  The resolution is
+  lexical: ``..`` and ``.`` collapse and nothing on disk is followed, so a
+  dangling link resolves like a live one.  An absolute target inside the repo
+  counts the same way; a target outside the repo is read like any other path
+  string, by its directory tail.  A link that itself sits on a retired path
+  fails as still existing.
 
 Markdown and other prose never fail the check, and history is never
 rewritten: the frozen artefacts of ``check_docs_file_line_refs.py``
@@ -73,6 +94,8 @@ import os
 import re
 import subprocess
 import sys
+from collections import Counter
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -132,6 +155,16 @@ class Entry:
     symbol: str = ""
     name: str = ""
 
+    @property
+    def owner(self) -> str:
+        """``K`` for a ``K.method`` symbol, empty for a plain one."""
+        return self.symbol.rpartition(".")[0]
+
+    @property
+    def attr(self) -> str:
+        """The retired name itself: ``method`` for ``K.method``."""
+        return self.symbol.rpartition(".")[2]
+
 
 @dataclass
 class Target:
@@ -143,6 +176,7 @@ class Target:
     siblings: list[tuple[str, ...]] = field(default_factory=list)
     sibling_modules: list[tuple[str, ...]] = field(default_factory=list)
     bound: set[str] = field(default_factory=set)  # module aliases, per file being scanned
+    classes: set[str] = field(default_factory=set)  # names bound to the class K of K.method, per file
 
 
 @dataclass(frozen=True)
@@ -289,19 +323,29 @@ def _module_refs(text: str, target: Target) -> list[tuple[int, str]]:
 
 
 def _symbol_refs(text: str, target: Target) -> list[tuple[int, str]]:
-    symbol = target.entry.symbol
-    head = symbol.split(".")[0]
+    entry = target.entry
+    head = entry.symbol.split(".")[0]
+    uses = f"uses {target.module[-1]}.{entry.symbol}"
+    # For K.method the class may be called first: module.K().method.
+    member = re.escape(entry.owner) + r"(?:\([^()]*\))?\." if entry.owner else ""
     hits = []
-    chain = re.compile(r"((?:\w+\.)*\w+)\." + re.escape(symbol) + r"(?![\w])")
+    chain = re.compile(r"((?:\w+\.)*\w+)\." + member + re.escape(entry.attr) + r"(?![\w])")
     for match in chain.finditer(text):
         if match.start() > 0 and (text[match.start() - 1].isalnum() or text[match.start() - 1] in "_."):
             continue
         if names_module(target, _dotted(match.group(1))):
-            hits.append((match.start(), f"uses {target.module[-1]}.{symbol}"))
+            hits.append((match.start(), uses))
+    imported = False
     for match in _FROM_IMPORT.finditer(text):
         names = [n.strip() for n in match.group(2).split(",")]
         if head in names and names_module(target, _dotted(match.group(1))):
-            hits.append((match.start(), f"imports {head} from {target.module[-1]}"))
+            imported = True
+            if not entry.owner:
+                hits.append((match.start(), f"imports {head} from {target.module[-1]}"))
+    if entry.owner and imported:
+        # The class itself survives: only the retired attribute on it counts.
+        bare = re.compile(r"(?<![\w.])" + member + re.escape(entry.attr) + r"(?![\w])")
+        hits.extend((match.start(), uses) for match in bare.finditer(text))
     return hits
 
 
@@ -424,9 +468,14 @@ def _statement_values(tree: ast.AST) -> set[int]:
 
 
 def _bind_module_aliases(tree: ast.AST, targets: list[Target]) -> None:
-    """Record, per symbol target, the names this file binds to its module."""
+    """Record, per symbol target, the names this file binds to its module.
+
+    For a ``K.method`` target also the names bound to its class ``K`` by
+    ``from module import K [as name]``.
+    """
     for target in targets:
         target.bound = set()
+        target.classes = set()
     symbol_targets = [t for t in targets if t.entry.kind == "symbol"]
     if not symbol_targets:
         return
@@ -442,6 +491,13 @@ def _bind_module_aliases(tree: ast.AST, targets: list[Target]) -> None:
                 for target in symbol_targets:
                     if names_module(target, base + (alias.name,)):
                         target.bound.add(alias.asname or alias.name)
+                    elif (
+                        target.entry.owner
+                        and alias.name == target.entry.symbol.split(".")[0]
+                        and base
+                        and names_module(target, base)
+                    ):
+                        target.classes.add(alias.asname or alias.name)
 
 
 def _import_hits(node: ast.AST, target: Target) -> str | None:
@@ -459,9 +515,10 @@ def _import_hits(node: ast.AST, target: Target) -> str | None:
         ):
             return f"imports {'.'.join(target.module)}"
         return None
-    if entry.kind == "symbol" and base and names_module(target, base):
-        if any(a.name == entry.symbol.split(".")[0] for a in node.names):
-            return f"imports {entry.symbol.split('.')[0]} from {target.module[-1]}"
+    # Importing the class of a K.method is no reference: K stays.
+    if entry.kind == "symbol" and not entry.owner and base and names_module(target, base):
+        if any(a.name == entry.symbol for a in node.names):
+            return f"imports {entry.symbol} from {target.module[-1]}"
     return None
 
 
@@ -479,15 +536,20 @@ def _call_hits(node: ast.Call, target: Target, discarded: bool) -> str | None:
         scrub = last == "pop" and discarded
         if "env" in func.lower() and last not in _ENV_WRITERS and not scrub:
             return f"reads env {entry.name} via {func}()"
-    if entry.kind == "symbol" and last in _ATTR_CALLS and len(node.args) >= 2:
-        second = node.args[1]
-        if (
-            _dotted_expr(node.args[0]) in target.bound
-            and isinstance(second, ast.Constant)
-            and second.value == entry.symbol.split(".")[0]
-        ):
-            return f"{last}() on {target.module[-1]}.{second.value}"
+    if entry.kind == "symbol" and not entry.owner and _attr_call_on(node, entry.symbol):
+        if _dotted_expr(node.args[0]) in target.bound:
+            return f"{last}() on {target.module[-1]}.{entry.symbol}"
     return None
+
+
+def _attr_call_on(node: ast.Call, attr: str) -> bool:
+    """True for ``getattr(x, "attr")``, ``patch.object(x, "attr")`` and the like."""
+    second = node.args[1] if len(node.args) >= 2 else None
+    return (
+        _dotted_expr(node.func).rsplit(".", 1)[-1] in _ATTR_CALLS
+        and isinstance(second, ast.Constant)
+        and second.value == attr
+    )
 
 
 def _env_node_hits(node: ast.AST, name: str) -> str | None:
@@ -516,12 +578,12 @@ def _node_hits(node: ast.AST, target: Target, rel: str, discarded: set[int]) -> 
         return _call_hits(node, target, id(node) in discarded)
     if entry.kind == "env":
         return _env_node_hits(node, entry.name)
-    if entry.kind == "symbol":
+    if entry.kind == "symbol" and not entry.owner:
         if isinstance(node, ast.Attribute) and any(
             _dotted_expr(node) == f"{bound}.{entry.symbol}" for bound in target.bound
         ):
             return f"uses {target.module[-1]}.{entry.symbol}"
-        if rel == entry.path and isinstance(node, ast.Name) and node.id == entry.symbol.split(".")[0]:
+        if rel == entry.path and isinstance(node, ast.Name) and node.id == entry.symbol:
             return f"uses {node.id} inside its own module"
     if entry.kind == "path" and target.module and isinstance(node, (ast.List, ast.Tuple)):
         values = [e.value if isinstance(e, ast.Constant) else None for e in node.elts]
@@ -531,11 +593,139 @@ def _node_hits(node: ast.AST, target: Target, rel: str, discarded: set[int]) -> 
     return None
 
 
+_FUNC_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+_SCOPES = _FUNC_SCOPES + (ast.ClassDef,)
+
+
+def _body(scope: ast.AST) -> list[ast.AST]:
+    body = scope.body
+    return body if isinstance(body, list) else [body]
+
+
+def _scope_parts(scope: ast.AST) -> tuple[list[ast.AST], list[ast.AST]]:
+    """The nodes *scope* evaluates itself, and the scopes nested in it.
+
+    A nested function or class belongs to its own scope, but its decorators,
+    defaults, annotations and bases are evaluated by the enclosing one.  A
+    comprehension is read as part of the enclosing scope.
+    """
+    own: list[ast.AST] = []
+    nested: list[ast.AST] = []
+    stack = list(_body(scope))
+    while stack:
+        node = stack.pop()
+        own.append(node)
+        if isinstance(node, _SCOPES):
+            nested.append(node)
+            inner = {id(stmt) for stmt in _body(node)}
+            stack.extend(c for c in ast.iter_child_nodes(node) if id(c) not in inner)
+        else:
+            stack.extend(ast.iter_child_nodes(node))
+    return own, nested
+
+
+def _stored_names(node: ast.AST) -> list[str]:
+    """Names one node binds (or unbinds) in its scope."""
+    if isinstance(node, ast.Name):
+        return [node.id] if isinstance(node.ctx, (ast.Store, ast.Del)) else []
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return [node.name]
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        return [(alias.asname or alias.name).split(".")[0] for alias in node.names]
+    if isinstance(node, (ast.Global, ast.Nonlocal)):
+        return list(node.names)
+    if isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)):
+        return [node.name] if node.name else []
+    if isinstance(node, ast.MatchMapping):
+        return [node.rest] if node.rest else []
+    return []
+
+
+def _param_names(scope: ast.AST) -> list[str]:
+    if not isinstance(scope, _FUNC_SCOPES):
+        return []
+    args = scope.args
+    params = [*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg]
+    return [p.arg for p in params if p is not None]
+
+
+def _scope_bindings(
+    scope: ast.AST, own: list[ast.AST], creates: Callable[[ast.AST], bool]
+) -> tuple[set[str], set[str]]:
+    """Names *scope* binds, and the ones it binds only to a new instance.
+
+    Flow-insensitive: a name counts as an instance when every binding of it in
+    the scope is ``name = K(...)``; one other binding makes it ambiguous, and
+    an ambiguous name is not followed.
+    """
+    stores = Counter(_param_names(scope))
+    created: Counter[str] = Counter()
+    for node in own:
+        stores.update(_stored_names(node))
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)) and node.value is not None:
+            if creates(node.value):
+                tgts = node.targets if isinstance(node, ast.Assign) else [node.target]
+                created.update(t.id for t in tgts if isinstance(t, ast.Name))
+    return set(stores), {name for name, count in created.items() if stores[name] == count}
+
+
+def _scope_walk(
+    scope: ast.AST, inherited: frozenset[str], creates: Callable[[ast.AST], bool]
+) -> Iterator[tuple[ast.AST, frozenset[str]]]:
+    """Yield every node with the names that hold an instance where it runs.
+
+    A function sees the instances of the scopes around it unless it rebinds
+    the name; a class body does not pass its own names on to its methods.
+    """
+    own, nested = _scope_parts(scope)
+    rebound, local = _scope_bindings(scope, own, creates)
+    visible = (inherited - rebound) | local
+    for node in own:
+        yield node, visible
+    passed = inherited if isinstance(scope, ast.ClassDef) else visible
+    for child in nested:
+        yield from _scope_walk(child, passed, creates)
+
+
+def _member_violations(tree: ast.AST, rel: str, target: Target) -> list[Violation]:
+    """Uses of a retired ``K.method``: the attribute on the class or an instance."""
+    entry = target.entry
+    tail = entry.owner[len(entry.symbol.split(".")[0]):]
+    classes = {f"{bound}.{entry.owner}" for bound in target.bound}
+    classes |= {name + tail for name in target.classes}
+    if rel == entry.path:
+        classes.add(entry.owner)
+    if not classes:
+        return []
+
+    def creates(node: ast.AST) -> bool:
+        return isinstance(node, ast.Call) and _dotted_expr(node.func) in classes
+
+    def owns(node: ast.AST, instances: frozenset[str]) -> bool:
+        if isinstance(node, ast.Name) and node.id in instances:
+            return True
+        return creates(node) or _dotted_expr(node) in classes
+
+    found: list[Violation] = []
+    for node, instances in _scope_walk(tree, frozenset(), creates):
+        detail = None
+        if isinstance(node, ast.Attribute) and node.attr == entry.attr and owns(node.value, instances):
+            detail = f"uses {target.module[-1]}.{entry.symbol}"
+        elif isinstance(node, ast.Call) and _attr_call_on(node, entry.attr) and owns(node.args[0], instances):
+            detail = f"{_dotted_expr(node.func).rsplit('.', 1)[-1]}() on {target.module[-1]}.{entry.symbol}"
+        if detail:
+            found.append(Violation(entry.raw, f"{rel}:{node.lineno}", detail))
+    return found
+
+
 def python_refs(tree: ast.AST, rel: str, targets: list[Target]) -> list[Violation]:
     """Every executable reference in one parsed Python file."""
     _bind_module_aliases(tree, targets)
     standalone = _statement_values(tree)
     found: list[Violation] = []
+    for target in targets:
+        if target.entry.kind == "symbol" and target.entry.owner:
+            found.extend(_member_violations(tree, rel, target))
     for node in ast.walk(tree):
         line = getattr(node, "lineno", 0)
         is_string = isinstance(node, ast.Constant) and isinstance(node.value, str)
@@ -637,6 +827,27 @@ def _text_violations(text: str, reader: str, rel: str, targets: list[Target]) ->
     return found
 
 
+def symlink_names(root: Path, rel: str, link: str, target: Target) -> bool:
+    """True when the tracked symlink *rel*, pointing at *link*, points at *target*.
+
+    *link* is resolved lexically against the directory of *rel*: ``..`` and
+    ``.`` collapse and nothing on disk is followed, so a dangling link
+    resolves like a live one.  An absolute *link* is taken as it is.  Inside
+    the repo (the root as given or its real path) the result must be the
+    retired path or lie under it; outside the repo it is read like any other
+    path string.
+    """
+    given = os.path.normpath(os.path.abspath(root))
+    resolved = os.path.normpath(os.path.join(given, os.path.dirname(rel), link))
+    for base in dict.fromkeys((given, os.path.realpath(given))):
+        if resolved == base:
+            return False
+        if resolved.startswith(base + os.sep):
+            inside = os.path.relpath(resolved, base).replace(os.sep, "/")
+            return inside == target.entry.path or inside.startswith(target.entry.path + "/")
+    return bool(_path_refs(resolved, target))
+
+
 def scan_file(root: Path, rel: str, targets: list[Target]) -> list[Violation]:
     """Every executable reference to the *targets* in one tracked file."""
     path = root / rel
@@ -645,7 +856,7 @@ def scan_file(root: Path, rel: str, targets: list[Target]) -> list[Violation]:
         return [
             Violation(t.entry.raw, rel, f"symlink to {link}")
             for t in targets
-            if t.entry.kind == "path" and _path_refs(link, t)
+            if t.entry.kind == "path" and symlink_names(root, rel, link, t)
         ]
     if not path.is_file():
         return []

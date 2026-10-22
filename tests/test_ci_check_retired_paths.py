@@ -161,6 +161,67 @@ def test_path_symlink_to_retired_file_fails(tmp_path: Path) -> None:
     assert [(v.where, v.detail) for v in found] == [("vendor/foo.py", "symlink to ../scripts/foo.py")]
 
 
+LINKED_LIST = "scripts/runner_v8.sh\n"
+
+
+def test_path_relative_symlink_in_subdirectory_resolves_against_its_directory(tmp_path: Path) -> None:
+    # The codex_gate reproduction (scripts/compat/dispatcher.sh -> ../dispatcher_v8_minimal.sh)
+    # with a fake name, because the real one is on the shipped list: the link text alone has no
+    # scripts/ component; only resolved against scripts/compat/ does it name the retired file.
+    root = make_tree(
+        tmp_path,
+        {"scripts/runner.sh": "echo ok\n"},
+        symlinks={"scripts/compat/runner.sh": "../runner_v8.sh"},
+    )
+    found = violations(root, LINKED_LIST)
+    assert [(v.where, v.detail) for v in found] == [("scripts/compat/runner.sh", "symlink to ../runner_v8.sh")]
+
+
+@pytest.mark.parametrize("spelling", ["as_given", "real_path"])
+def test_path_absolute_symlink_into_the_repo_fails(tmp_path: Path, spelling: str) -> None:
+    # The repo sits behind a symlinked directory, so the root as given and its real path differ;
+    # an absolute link written in either spelling points into the repo.
+    real = tmp_path / "real"
+    real.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(real, target_is_directory=True)
+    base = alias if spelling == "as_given" else Path(os.path.realpath(real))
+    link = str(base / "repo" / "scripts" / "foo.py")
+    root = make_tree(alias, {"scripts/bar.py": "x = 1\n"}, symlinks={"vendor/deep/foo.py": link})
+    found = violations(root, PATH_LIST)
+    assert [(v.where, v.detail) for v in found] == [("vendor/deep/foo.py", f"symlink to {link}")]
+
+
+def test_path_symlink_into_a_retired_directory_fails(tmp_path: Path) -> None:
+    root = make_tree(tmp_path, {"scripts/a.py": "x = 1\n"}, symlinks={"bin/tool.sh": "../scripts/old/tool.sh"})
+    assert wheres(violations(root, "scripts/old\n")) == {"bin/tool.sh"}
+
+
+def test_path_symlink_outside_the_repo_is_read_by_its_tail(tmp_path: Path) -> None:
+    root = make_tree(
+        tmp_path,
+        {"scripts/a.py": "x = 1\n"},
+        symlinks={"vendor/foo.py": "/opt/vnx/scripts/foo.py", "vendor/other.py": "/opt/other/lib/foo.py"},
+    )
+    assert wheres(violations(root, PATH_LIST)) == {"vendor/foo.py"}
+
+
+@pytest.mark.parametrize(
+    "link",
+    [
+        "../runner.sh",
+        "../lib/scripts/runner_v8.sh",
+        "./runner_v8.sh",
+        "..",
+    ],
+)
+def test_path_symlink_resolving_elsewhere_is_clean(tmp_path: Path, link: str) -> None:
+    # The text of the second and third link ends in the retired name, but resolved against
+    # scripts/compat/ none of them is scripts/runner_v8.sh.
+    root = make_tree(tmp_path, {"scripts/runner.sh": "echo ok\n"}, symlinks={"scripts/compat/x.sh": link})
+    assert violations(root, LINKED_LIST) == []
+
+
 @pytest.mark.parametrize(
     ("rel", "content"),
     [
@@ -311,6 +372,90 @@ def test_symbol_non_reference_is_clean(tmp_path: Path, content: str) -> None:
 def test_symbol_with_module_gone_and_no_reference_is_clean(tmp_path: Path) -> None:
     root = make_tree(tmp_path, {"scripts/lib/other.py": "x = 1\n"})
     assert violations(root, SYMBOL_LIST) == []
+
+
+# ---------------------------------------------------------------------------
+# Kind 2b: path::Class.method (the class survives, the method is retired)
+# ---------------------------------------------------------------------------
+
+MEMBER_LIST = "scripts/lib/mod.py::K.gone\n"
+MOD_K = "class K:\n    def kept(self):\n        return 1\n"
+
+
+def test_member_surviving_class_import_is_clean(tmp_path: Path) -> None:
+    # The codex_gate reproduction: K keeps K.kept, the consumer imports K, calls K().kept()
+    # and mentions gone in a comment. Importing the surviving class is no reference.
+    consumer = "from scripts.lib.mod import K\n\n# K.gone was retired in golf 1\nK().kept()\n"
+    root = make_tree(tmp_path, {"scripts/lib/mod.py": MOD_K, "tests/test_x.py": consumer})
+    assert violations(root, MEMBER_LIST) == []
+
+
+@pytest.mark.parametrize(
+    ("rel", "content"),
+    [
+        ("tests/test_x.py", "from mod import K\nk = K()\nk.kept()  # not k.gone\n"),
+        ("tests/test_x.py", "import mod\nk = getattr(mod, 'K')\n# gone\n"),
+        ("tests/test_x.py", "from mod import K\n\ndef a():\n    k = K()\n\ndef b(k):\n    return k.gone()\n"),
+        ("tests/test_x.py", "from mod import K, Other\nk = K()\nk = Other()\nk.gone()\n"),
+        ("tests/test_x.py", "from mod import Other\nOther.gone()\nOther().gone()\n"),
+        ("tests/test_x.py", "from other import K\nK.gone()\nK().gone()\n"),
+        ("tests/test_x.py", "from mod import K\n\nclass T:\n    k = K()\n\n    def m(self):\n        return k.gone()\n"),
+        ("tests/test_x.py", "CMD = 'python3 -c \"from mod import K; K().kept()\"'  # gone\n"),
+        ("scripts/run.sh", "# K.gone is retired\npython3 -c 'from mod import K; K().kept()'\n"),
+    ],
+)
+def test_member_non_reference_is_clean(tmp_path: Path, rel: str, content: str) -> None:
+    root = make_tree(tmp_path, {"scripts/lib/mod.py": MOD_K, rel: content})
+    assert violations(root, MEMBER_LIST) == []
+
+
+@pytest.mark.parametrize(
+    ("content", "line"),
+    [
+        ("from mod import K\nK.gone()\n", 2),
+        ("from mod import K\nK().gone()\n", 2),
+        ("from mod import K\nK(1, x=2).gone\n", 2),
+        ("from mod import K as Alias\nAlias().gone()\n", 2),
+        ("import mod\nmod.K.gone()\n", 2),
+        ("import scripts.lib.mod as m\nm.K().gone()\n", 2),
+        ("from mod import K\n\ndef f():\n    k = K(1)\n    return k.gone()\n", 5),
+        ("from mod import K\nCLIENT = K()\n\ndef f():\n    return CLIENT.gone()\n", 5),
+        ("from mod import K\nif (k := K()):\n    k.gone()\n", 3),
+        ("from mod import K\nfn = getattr(K, 'gone')\n", 2),
+        ("from mod import K\nk = K()\nok = hasattr(k, 'gone')\n", 3),
+        ("from mod import K\nfn = getattr(K(), 'gone')\n", 2),
+        ("from unittest import mock\nfrom mod import K\n\n@mock.patch.object(K, 'gone')\ndef t(m):\n    pass\n", 4),
+        ("from unittest.mock import patch\nimport mod\n\nclass T:\n    @patch.object(mod.K, 'gone')\n    def t(self, m):\n        pass\n", 5),
+        ("from mod import K\n\ndef t(monkeypatch):\n    monkeypatch.setattr(K, 'gone', lambda self: 1)\n", 4),
+        ("from unittest.mock import patch\n\n@patch('mod.K.gone')\ndef t(m):\n    pass\n", 3),
+        ("from unittest.mock import patch\n\n@patch('scripts.lib.mod.K.gone')\ndef t(m):\n    pass\n", 3),
+        ("CMD = 'python3 -c \"from mod import K; K().gone()\"'\n", 1),
+    ],
+)
+def test_member_access_fails(tmp_path: Path, content: str, line: int) -> None:
+    root = make_tree(tmp_path, {"scripts/lib/mod.py": MOD_K, "tests/test_x.py": content})
+    assert wheres(violations(root, MEMBER_LIST)) == {f"tests/test_x.py:{line}"}
+
+
+def test_member_access_from_shell_fails(tmp_path: Path) -> None:
+    root = make_tree(
+        tmp_path,
+        {"scripts/lib/mod.py": MOD_K, "scripts/run.sh": "python3 -c 'from mod import K; K().gone()'\n"},
+    )
+    assert wheres(violations(root, MEMBER_LIST)) == {"scripts/run.sh:1"}
+
+
+def test_member_access_inside_its_own_module_fails(tmp_path: Path) -> None:
+    module = MOD_K + "\n\nK.gone\nINSTANCE = K()\nINSTANCE.gone()\n"
+    root = make_tree(tmp_path, {"scripts/lib/mod.py": module})
+    assert wheres(violations(root, MEMBER_LIST)) == {"scripts/lib/mod.py:6", "scripts/lib/mod.py:8"}
+
+
+def test_member_of_nested_class_follows_the_full_owner(tmp_path: Path) -> None:
+    module = "class K:\n    class Inner:\n        def kept(self):\n            return 1\n"
+    consumer = "from mod import K\nK.Inner().kept()\nK.Inner.gone()\nK.gone()\n"
+    root = make_tree(tmp_path, {"scripts/lib/mod.py": module, "tests/test_x.py": consumer})
+    assert wheres(violations(root, "scripts/lib/mod.py::K.Inner.gone\n")) == {"tests/test_x.py:3"}
 
 
 # ---------------------------------------------------------------------------
