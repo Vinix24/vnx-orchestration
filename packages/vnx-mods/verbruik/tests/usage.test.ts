@@ -77,6 +77,27 @@ describe('the provider rows of vnx providers usage', () => {
     expect(rows).toEqual(['codex', 'kimi', 'deepseek', 'openrouter'])
   })
 
+  test('shows kimi full with a known upper bound as "reset uiterlijk" in local time, still as an error', () => {
+    const latest = new Date(2026, 9, 25, 14, 5)
+    const line = lineOf(reportJson({ kimi: { ...KIMI_FULL, resets_at_latest: latest.toISOString() } }))
+
+    expect(line).toBe('claude 5u 34% · week 61% · kimi reset uiterlijk 25-10 14:05 !!')
+  })
+
+  test('keeps "vol tot reset" when the upper bound is onbekend or unreadable', () => {
+    for (const bound of ['onbekend', 'niet een datum', 7, null]) {
+      expect(lineOf(reportJson({ kimi: { ...KIMI_FULL, resets_at_latest: bound } }))).toBe(
+        'claude 5u 34% · week 61% · kimi vol tot reset !!',
+      )
+    }
+  })
+
+  test('shows a reachable kimi without the bound even when the row carries one', () => {
+    const row = { ...KIMI_REACHABLE, resets_at_latest: new Date(2026, 9, 25, 14, 5).toISOString() }
+
+    expect(lineOf(reportJson({ kimi: row }))).toBe('claude 5u 34% · week 61% · kimi bereikbaar')
+  })
+
   test('shows kimi reachable as success, and a later kimi row with a percentage as that percentage', () => {
     expect(lineOf(reportJson({ kimi: KIMI_REACHABLE }))).toBe('claude 5u 34% · week 61% · kimi bereikbaar')
     expect(lineOf(reportJson({ kimi: { available: true, used_percent: 75, status: 'bereikbaar' } }))).toBe(

@@ -529,8 +529,8 @@ USAGE_HELP = (
     "usage and balance of every provider, read-only, no model call. Exit 0 whenever the command ran. "
     "--json shape: {\"schema\": \"vnx.providers.usage/1\", \"measured_at\": ISO, \"providers\": "
     "{claude, codex, kimi, deepseek, openrouter}}; each row has available (bool) and, when false, a reason. "
-    "codex: used_percent, window_minutes, resets_at, plan_type, age_seconds. kimi: status, measured_at, store "
-    "(never a percentage). deepseek: is_available, balances. openrouter: total_credits, total_usage, remaining."
+    "codex: used_percent, window_minutes, resets_at, plan_type, age_seconds. kimi: status, measured_at, store, "
+    "resets_at_latest (upper bound of the reset or onbekend, never the exact reset; never a percentage). deepseek: is_available, balances. openrouter: total_credits, total_usage, remaining."
 )
 
 

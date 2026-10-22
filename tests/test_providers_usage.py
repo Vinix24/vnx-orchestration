@@ -159,6 +159,168 @@ def test_kimi_weekly_limit_booked_as_auth_401_reads_as_full(home):
     assert row["measured_at"].endswith("Z") and row["store"] == "alpha"
 
 
+WEEKLY = ("kimi-cli: [quota_or_auth] provider=kimi reason=quota_or_auth raw='Error code: 403 - "
+          "You\\'ve reached your weekly (7-day) usag'")
+DAY = 86400.0
+
+
+def _kimi_receipts(home: Path, project: str, events: list) -> None:
+    """Kimi dispatch receipts as the converter writes them: (epoch, 'weekly' | 'success' | 'fivehour')."""
+    path = home / ".vnx-data" / project / "state" / "t0_receipts.ndjson"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = []
+    for epoch, kind in events:
+        receipt = {"receipt_kind": "dispatch", "event_type": "task_complete", "provider": "kimi",
+                   "dispatch_id": f"d{int(epoch)}", "timestamp": _iso(epoch)}
+        if kind == "weekly":
+            receipt.update(status="failure", failure_reason=WEEKLY)
+        elif kind == "fivehour":
+            receipt.update(status="failure", failure_reason="kimi-cli: You've reached your 5-hour usage limit.")
+        else:
+            receipt.update(status="success")
+        lines.append(json.dumps(receipt))
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _full_kimi(home: Path) -> None:
+    _kimi_record(home, "alpha", state="unreachable", reason="auth_401", detail=WEEKLY, measured_at=NOW - 60)
+
+
+def test_kimi_reset_bound_is_first_weekly_failure_of_unbroken_streak_plus_seven_days(home):
+    _full_kimi(home)
+    first = NOW - 3 * DAY
+    _kimi_receipts(home, "alpha", [(NOW - 9 * DAY, "success"), (first, "weekly"),
+                                   (NOW - 2 * DAY, "fivehour"), (NOW - DAY, "weekly")])
+    row = pu.probe_kimi(home, NOW)
+    assert row["status"] == pu.KIMI_FULL
+    assert row["resets_at_latest"] == _iso(first + 7 * DAY)
+    assert row["resets_at"] == "onbekend"
+
+
+def test_kimi_reset_bound_streak_is_broken_by_a_later_success(home):
+    _full_kimi(home)
+    _kimi_receipts(home, "alpha", [(NOW - 6 * DAY, "weekly"), (NOW - 4 * DAY, "success"),
+                                   (NOW - 2 * DAY, "weekly"), (NOW - DAY, "weekly")])
+    assert pu.probe_kimi(home, NOW)["resets_at_latest"] == _iso(NOW - 2 * DAY + 7 * DAY)
+
+
+def test_kimi_reset_bound_success_in_another_store_breaks_the_streak(home):
+    _full_kimi(home)
+    _kimi_receipts(home, "alpha", [(NOW - 5 * DAY, "weekly"), (NOW - DAY, "weekly")])
+    _kimi_receipts(home, "beta", [(NOW - 3 * DAY, "success")])
+    assert pu.probe_kimi(home, NOW)["resets_at_latest"] == _iso(NOW - DAY + 7 * DAY)
+
+
+def test_kimi_reset_bound_unknown_without_records(home):
+    _full_kimi(home)
+    row = pu.probe_kimi(home, NOW)
+    assert row["resets_at_latest"] == "onbekend"
+    assert pu.render_usage_text({"providers": {"kimi": row}}).endswith("reset onbekend")
+
+
+def test_kimi_reset_bound_unknown_when_the_streak_is_older_than_a_window(home):
+    _full_kimi(home)
+    _kimi_receipts(home, "alpha", [(NOW - 8 * DAY, "weekly"), (NOW - DAY, "weekly")])
+    assert pu.probe_kimi(home, NOW)["resets_at_latest"] == "onbekend"
+
+
+def _append_in_time_order(path, receipt):
+    """Receipts are appended as they happen, so the file is in time order; the scan relies on it."""
+    lines = path.read_text().splitlines() + [json.dumps(receipt)]
+    lines.sort(key=lambda line: json.loads(line)["timestamp"])
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _append_gate_receipt(home, epoch, **fields):
+    path = home / ".vnx-data" / "alpha" / "state" / "t0_receipts.ndjson"
+    gate = {"receipt_kind": "review_gate", "provider": "kimi", "timestamp": _iso(epoch), **fields}
+    _append_in_time_order(path, gate)
+
+
+def test_kimi_reset_bound_ignores_malformed_lines(home):
+    _full_kimi(home)
+    _kimi_receipts(home, "alpha", [(NOW - 2 * DAY, "weekly")])
+    path = home / ".vnx-data" / "alpha" / "state" / "t0_receipts.ndjson"
+    path.write_text(path.read_text() + "not json \"kimi\"\n", encoding="utf-8")
+    assert pu.probe_kimi(home, NOW)["resets_at_latest"] == _iso(NOW + 5 * DAY)
+
+
+def test_kimi_reset_bound_streak_is_broken_by_a_successful_kimi_review_gate(home):
+    _full_kimi(home)
+    _kimi_receipts(home, "alpha", [(NOW - 5 * DAY, "weekly")])
+    _append_gate_receipt(home, NOW - 3 * DAY, status="completed")
+    assert pu.probe_kimi(home, NOW)["resets_at_latest"] == "onbekend"
+
+
+def test_kimi_reset_bound_comes_from_the_failures_after_a_successful_review_gate(home):
+    _full_kimi(home)
+    _kimi_receipts(home, "alpha", [(NOW - 5 * DAY, "weekly")])
+    _append_gate_receipt(home, NOW - 3 * DAY, status="completed")
+    path = home / ".vnx-data" / "alpha" / "state" / "t0_receipts.ndjson"
+    later = {"receipt_kind": "dispatch", "provider": "kimi", "status": "failure",
+             "failure_reason": WEEKLY, "timestamp": _iso(NOW - 2 * DAY)}
+    path.write_text(path.read_text() + json.dumps(later) + "\n", encoding="utf-8")
+    assert pu.probe_kimi(home, NOW)["resets_at_latest"] == _iso(NOW - 2 * DAY + 7 * DAY)
+
+
+def test_kimi_reset_bound_takeover_review_gate_does_not_break_the_streak(home):
+    _full_kimi(home)
+    _kimi_receipts(home, "alpha", [(NOW - 2 * DAY, "weekly")])
+    _append_gate_receipt(home, NOW - DAY, status="completed", provider="deepseek-harness")
+    assert pu.probe_kimi(home, NOW)["resets_at_latest"] == _iso(NOW + 5 * DAY)
+
+
+def test_kimi_reset_bound_rejecting_review_gate_breaks_the_streak(home):
+    _full_kimi(home)
+    _kimi_receipts(home, "alpha", [(NOW - 5 * DAY, "weekly"), (NOW - DAY, "weekly")])
+    _append_gate_receipt(home, NOW - 3 * DAY, status="failed", gate_status="completed")
+    assert pu.probe_kimi(home, NOW)["resets_at_latest"] == _iso(NOW - DAY + 7 * DAY)
+
+
+@pytest.mark.parametrize("fields", [{}, {"gate_status": "unavailable"}, {"gate_status": ""}])
+def test_kimi_reset_bound_failed_review_gate_not_completed_is_neither(home, fields):
+    _full_kimi(home)
+    _kimi_receipts(home, "alpha", [(NOW - 2 * DAY, "weekly")])
+    _append_gate_receipt(home, NOW - DAY, status="failed", **fields)
+    assert pu.probe_kimi(home, NOW)["resets_at_latest"] == _iso(NOW + 5 * DAY)
+
+
+def test_kimi_reset_bound_failed_review_gate_not_completed_starts_no_streak(home):
+    _full_kimi(home)
+    _kimi_receipts(home, "alpha", [(NOW - 9 * DAY, "success")])
+    _append_gate_receipt(home, NOW - DAY, status="failed")
+    assert pu.probe_kimi(home, NOW)["resets_at_latest"] == "onbekend"
+
+
+def test_kimi_reset_bound_weekly_reason_beats_a_completed_gate_status(home):
+    _full_kimi(home)
+    _kimi_receipts(home, "alpha", [(NOW - 2 * DAY, "weekly")])
+    _append_gate_receipt(home, NOW - DAY, status="failed", gate_status="completed", failure_reason=WEEKLY)
+    assert pu.probe_kimi(home, NOW)["resets_at_latest"] == _iso(NOW + 5 * DAY)
+
+
+def test_kimi_reset_bound_dispatch_receipt_with_status_ok_breaks_the_streak(home):
+    _full_kimi(home)
+    _kimi_receipts(home, "alpha", [(NOW - 5 * DAY, "weekly"), (NOW - DAY, "weekly")])
+    path = home / ".vnx-data" / "alpha" / "state" / "t0_receipts.ndjson"
+    answered = {"receipt_kind": "dispatch", "provider": "kimi", "status": "ok", "timestamp": _iso(NOW - 3 * DAY)}
+    _append_in_time_order(path, answered)
+    assert pu.probe_kimi(home, NOW)["resets_at_latest"] == _iso(NOW - DAY + 7 * DAY)
+
+
+def test_kimi_reset_bound_text_says_uiterlijk(home):
+    _full_kimi(home)
+    _kimi_receipts(home, "alpha", [(NOW - DAY, "weekly")])
+    text = pu.render_usage_text({"providers": {"kimi": pu.probe_kimi(home, NOW)}})
+    assert f"reset uiterlijk {_iso(NOW + 6 * DAY)}" in text
+
+
+def test_kimi_reachable_row_has_no_reset_bound(home):
+    _kimi_record(home, "alpha", state="reachable", reason="", detail="", measured_at=NOW - 10)
+    _kimi_receipts(home, "alpha", [(NOW - DAY, "weekly")])
+    assert pu.probe_kimi(home, NOW)["resets_at_latest"] == "onbekend"
+
+
 def test_kimi_real_auth_failure_is_unreachable_with_the_reason(home):
     _kimi_record(home, "alpha", state="unreachable", reason="auth_401", detail="401 invalid api key", measured_at=NOW)
     assert pu.probe_kimi(home, NOW)["status"] == "onbereikbaar: auth_401"

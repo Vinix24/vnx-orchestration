@@ -26,6 +26,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import load_deepseek_key as _keys
 import provider_reachability as _reach
+from event_outcome_semantics import SUCCESS_STATUSES
 
 SCHEMA = "vnx.providers.usage/1"
 HTTP_TIMEOUT_SECONDS = 5
@@ -41,6 +42,9 @@ _TAIL_CHUNK = 64 * 1024
 _TAIL_SCAN_LIMIT = 32 * 1024 * 1024
 _RESPONSE_LIMIT = 1024 * 1024
 _KIMI_LIMIT_RE = re.compile(r"\b429\b|weekly|7-day|usage limit", re.IGNORECASE)
+_KIMI_WEEKLY_RE = re.compile(r"weekly|7-day", re.IGNORECASE)
+KIMI_WINDOW_SECONDS = 7 * 24 * 3600
+UNKNOWN = "onbekend"
 
 Row = Dict[str, Any]
 
@@ -191,6 +195,76 @@ def _kimi_status(record: _reach.Reachability) -> str:
     return "onbereikbaar: " + (record.reason or "onbekend")
 
 
+def _epoch(timestamp: Any) -> Optional[float]:
+    if not isinstance(timestamp, str):
+        return None
+    try:
+        moment = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.timestamp()
+
+
+def _kimi_answered(receipt: dict) -> bool:
+    status = str(receipt.get("status") or "").lower()
+    if status in SUCCESS_STATUSES:
+        return True
+    return (receipt.get("receipt_kind") == "review_gate" and status == "failed"
+            and str(receipt.get("gate_status") or "").lower() == "completed")
+
+
+def _kimi_receipt_events(state: Path) -> Tuple[Optional[float], List[float]]:
+    """``(last_answered, weekly_failures)`` from one store's receipts, newest to oldest, up to the
+    first answered kimi call. A kimi receipt of any kind (dispatch or review gate) is a weekly-limit
+    failure when its ``failure_reason`` names the weekly or 7-day limit, which wins over everything
+    else. It is answered when its status is a success status, or when it is a review-gate receipt
+    with status ``failed`` and ``gate_status`` ``completed``: kimi answered with a FAIL verdict.
+    Any other kimi receipt (a 5-hour limit, a spawn error, a contract miss) is neither. A takeover in the kimi seat is recorded under its own provider and never counts."""
+    path = state / "t0_receipts.ndjson"
+    failures: List[float] = []
+    if not path.is_file():
+        return None, failures
+    try:
+        for raw in _lines_from_end(path):
+            if b'"kimi"' not in raw:
+                continue
+            try:
+                receipt = json.loads(raw)
+            except ValueError:
+                continue  # vnx-silent-except: a malformed receipt line is skipped by contract
+            if not isinstance(receipt, dict) or receipt.get("provider") != "kimi":
+                continue
+            moment = _epoch(receipt.get("timestamp"))
+            if moment is None:
+                continue
+            if _KIMI_WEEKLY_RE.search(str(receipt.get("failure_reason") or "")):
+                failures.append(moment)
+            elif _kimi_answered(receipt):
+                return moment, failures
+    except OSError:
+        return None, failures  # vnx-silent-except: an unreadable receipts file gives no bound, the row stays "onbekend"
+    return None, failures
+
+
+def kimi_resets_at_latest(states: List[Path], now: float) -> Optional[float]:
+    """Upper bound of the kimi weekly reset: the first weekly-limit failure of the current
+    unbroken streak plus 7 days, from the receipts VNX wrote itself (one timestamped record per
+    kimi attempt; the reachability record holds only the newest one). The streak is every weekly
+    failure after the latest answered kimi call in any store; a kimi review-gate receipt that passed
+    or rejected with a FAIL verdict is such a call, a takeover recorded under another provider is not. None when there is no streak or the
+    bound already lies in the past (then a newer window began that no record dates)."""
+    events = [_kimi_receipt_events(state) for state in states]
+    answered = [moment for moment, _ in events if moment is not None]
+    floor = max(answered) if answered else float("-inf")
+    streak = [moment for _, failures in events for moment in failures if moment > floor]
+    if not streak:
+        return None
+    bound = min(streak) + KIMI_WINDOW_SECONDS
+    return bound if bound > now else None
+
+
 def probe_kimi(home: Path, now: float, env: Optional[Dict[str, str]] = None) -> Row:
     states, problem = _kimi_state_dirs(home, dict(os.environ) if env is None else env)
     records = _kimi_records(states)
@@ -204,8 +278,13 @@ def probe_kimi(home: Path, now: float, env: Optional[Dict[str, str]] = None) -> 
         "measured_at": _iso(measured_at),
         "age_seconds": max(0, int(now - measured_at)),
         "store": store,
-        "resets_at": "onbekend",
+        "resets_at": UNKNOWN,
+        "resets_at_latest": UNKNOWN,
     }
+    if row["status"] == KIMI_FULL:
+        bound = kimi_resets_at_latest(states, now)
+        if bound is not None:
+            row["resets_at_latest"] = _iso(bound)
     if problem:
         row["warning"] = problem
     return row
@@ -337,7 +416,9 @@ def build_usage(*, env: Optional[Dict[str, str]] = None, home: Optional[Path] = 
     - codex: ``used_percent``, ``window_minutes``, ``resets_at`` (ISO), ``plan_type``,
       ``age_seconds``, ``source``, and ``secondary`` when the rollout carries one.
     - kimi: ``status`` (``bereikbaar``, ``vol tot reset`` or ``onbereikbaar: <reason>``), ``reason``,
-      ``measured_at``, ``age_seconds``, ``store``, ``resets_at`` (always ``onbekend``). Never a percentage.
+      ``measured_at``, ``age_seconds``, ``store``, ``resets_at`` (always ``onbekend``),
+      ``resets_at_latest`` (ISO upper bound of the reset, only when ``vol tot reset`` and the receipts
+      date the streak, else ``onbekend``). Never a percentage.
       ``warning`` when the current project's state dir did not resolve (also in the reason when false).
     - deepseek: ``is_available`` and ``balances``, one ``{currency, total, granted, topped_up}`` per
       row the API returned, as given.
@@ -364,7 +445,9 @@ def _detail(name: str, row: Row) -> str:
                 f"plan {row['plan_type']}, {row['age_seconds']}s oud")
     if name == "kimi":
         warning = f"; {row['warning']}" if row.get("warning") else ""
-        return f"{row['status']}, gemeten {row['measured_at']} ({row['store']}), reset onbekend{warning}"
+        latest = row.get("resets_at_latest", UNKNOWN)
+        reset = "reset onbekend" if latest == UNKNOWN else f"reset uiterlijk {latest}"
+        return f"{row['status']}, gemeten {row['measured_at']} ({row['store']}), {reset}{warning}"
     if name == "deepseek":
         balances = "; ".join(f"{b['currency']} {b['total']} (granted {b['granted']}, topped-up {b['topped_up']})"
                              for b in row["balances"]) or "geen saldo-rijen"
