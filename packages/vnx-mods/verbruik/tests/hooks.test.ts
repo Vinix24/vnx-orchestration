@@ -2,7 +2,7 @@ import type { On, SessionRateLimit } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
-import { FULL_REPORT, OLD_VNX, RATE_LIMITS } from './fixtures'
+import { FULL_REPORT, KIMI_FULL, OLD_VNX, RATE_LIMITS, reportJson } from './fixtures'
 
 type Answer = { exitCode: number; stdout: string; stderr: string }
 
@@ -134,5 +134,26 @@ describe('the mod in a session', () => {
     await clock.settle()
 
     expect(lastOf(world)).toBe('claude 5u 34% · week 61% · vnx-meting mislukt: vnx niet uitgevoerd')
+  })
+
+  test('turns the kimi countdown into the stored bound when the clock passes it, on the next refresh', async ($, on) => {
+    const bound = new Date(NOW + 30 * 60_000)
+    const at = `${String(bound.getDate()).padStart(2, '0')}-${String(bound.getMonth() + 1).padStart(2, '0')} ${String(bound.getHours()).padStart(2, '0')}:${String(bound.getMinutes()).padStart(2, '0')}`
+    const answer: Answer = {
+      exitCode: 0,
+      stdout: reportJson({ kimi: { ...KIMI_FULL, resets_at_latest: bound.toISOString() } }),
+      stderr: '',
+    }
+    const { world, clock } = await started($, on, answer, [])
+
+    expect(lastOf(world)).toBe(`claude: nog geen meting · kimi terug over 30m (uiterlijk ${at}) !!`)
+
+    await clock.advance(10 * 60_000)
+    await clock.settle()
+    expect(lastOf(world)).toBe(`claude: nog geen meting · kimi terug over 20m (uiterlijk ${at}) !!`)
+
+    await clock.advance(20 * 60_000)
+    await clock.settle()
+    expect(lastOf(world)).toBe(`claude: nog geen meting · kimi laatst vol, grens ${at} voorbij !`)
   })
 })
