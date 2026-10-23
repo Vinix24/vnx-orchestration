@@ -44,7 +44,13 @@ round 3 on #2184). A shutdown is proven by the runner's own line in the job
 log (``##[error]The runner has received a shutdown signal``), read per job
 from ``actions/jobs/<id>/logs`` when the check-run annotations do not carry
 that text themselves: GitHub's ``The operation was canceled.`` annotation
-names no cause, and a read that fails is not a shutdown. Two things are never
+names no cause, and a read that fails is not a shutdown. The annotations are
+read from ``check-runs/<check-run id>/annotations``: the check-runs API is
+keyed by that id, never by the Actions job id, and the job row carries it
+only as the last path segment of its ``check_run_url``. A job row without
+that URL, or with one that does not end in a whole number, has no readable
+annotation list, and a failed annotation read still reads the job log before
+the evidence is called unknown (codex round 4 on #2184). Two things are never
 set aside: a real parity difference (any entry in the verdict's
 ``differences``), and an xdist shadow job that is not known to have succeeded
 (the conclusion, or with none the verdict's job result, is exactly
@@ -128,6 +134,7 @@ MAX_SUITE_WALL_S = 15 * 60
 MAIN_BRANCH = "main"
 CLOSED_OI_STATUS = "done"
 OI_ID = re.compile(r"OI-[1-9][0-9]*")
+CHECK_RUN_ID = re.compile(r"[0-9]+")
 
 # Option A of the cutover rule (operator decision, 2026-10-22): a run whose serial
 # reference job failed, or in which either Profile A job received a runner shutdown
@@ -840,7 +847,13 @@ def is_shutdown_log(log: str) -> bool:
 
 
 def profile_a_jobs(payload: dict) -> dict | None:
-    """The two Profile A jobs of a run's job list, by role; None when the payload cannot be read."""
+    """The two Profile A jobs of a run's job list, by role; None when the payload cannot be read.
+
+    Each job keeps its ``check_run_url`` beside its id: the check-run
+    annotations are keyed by the check-run id, which the job row carries only
+    in that URL (codex round 4 on #2184). It stays None when the row names no
+    URL; the annotation read turns that into a problem.
+    """
     rows = payload.get("jobs")
     if not isinstance(rows, list):
         return None
@@ -854,12 +867,12 @@ def profile_a_jobs(payload: dict) -> dict | None:
         job_id = whole_number(row.get("id"))
         if job_id is None:
             return None
-        jobs[role] = {"id": job_id, "conclusion": row.get("conclusion")}
+        jobs[role] = {"id": job_id, "conclusion": row.get("conclusion"), "check_run_url": row.get("check_run_url")}
     return jobs
 
 
 def _cached_jobs(repo: str, run: Run, cache: Path) -> dict | None:
-    """The two Profile A jobs of *run* (cached per attempt); None when gh cannot answer."""
+    """The two Profile A jobs of *run* (cached per attempt, ``check_run_url`` included); None when gh cannot answer."""
     path = cache / run.run_id / f"jobs-{run.attempt}.json"
     cached = _read_json(path)
     if isinstance(cached, dict) and all(isinstance(job, dict) for job in cached.values()):
@@ -875,14 +888,32 @@ def _cached_jobs(repo: str, run: Run, cache: Path) -> dict | None:
     return jobs
 
 
+def _check_run_id(url) -> int | None:
+    """The whole number at the end of *url*'s path, the check-run id; None when *url* names none."""
+    segment = url.rsplit("/", 1)[-1] if isinstance(url, str) else ""
+    return int(segment) if CHECK_RUN_ID.fullmatch(segment) else None
+
+
 def _cached_annotations(repo: str, run: Run, job: dict, cache: Path) -> tuple:
-    """``(messages, problem)`` of *job*'s check-run annotations; a failed read writes no cache entry."""
-    path = cache / run.run_id / f"annotations-{job['id']}.json"
+    """``(messages, problem)`` of *job*'s check-run annotations; a failed read writes no cache entry.
+
+    The check-runs API is keyed by the check-run id, not by the Actions job
+    id: the job row carries that id only as the last path segment of its
+    ``check_run_url`` (codex round 4 on #2184). A job row without the URL, or
+    with one that does not end in a whole number, has no annotation list to
+    read: the answer is a problem (``no check-run id in check_run_url``),
+    never an empty list and never a shutdown, and read_job_evidence still
+    reads the job log. The cache file is keyed by the check-run id too.
+    """
+    check_run = _check_run_id(job.get("check_run_url"))
+    if check_run is None:
+        return [], "no check-run id in check_run_url"
+    path = cache / run.run_id / f"annotations-{check_run}.json"
     cached = _read_json(path)
     if isinstance(cached, list) and all(isinstance(message, str) for message in cached):
         return cached, ""
     try:
-        payload = _gh_json(["api", f"repos/{repo}/check-runs/{job['id']}/annotations"], list)
+        payload = _gh_json(["api", f"repos/{repo}/check-runs/{check_run}/annotations"], list)
     except ToolError as exc:
         return [], str(exc)
     messages = [row["message"] for row in payload if isinstance(row, dict) and isinstance(row.get("message"), str)]
@@ -914,13 +945,18 @@ def read_job_evidence(repo: str, run: Run, cache: Path) -> JobEvidence:
     """The two Profile A jobs' conclusions and proven runner shutdowns; a failed read leaves *problem*, never a shutdown.
 
     Evidence is read only for a job that did not succeed: a job that ran to
-    success had no shutdown. The job's check-run annotations come first, and
-    only one that carries the shutdown text itself counts. GitHub's ``The
-    operation was canceled.`` names no cause, so a job whose annotations prove
-    nothing has its own log read (``actions/jobs/<id>/logs``, one job, not the
-    run archive): only a line carrying ``##[error]The runner has received a
-    shutdown signal`` makes it a shutdown. Both answers are cached per job, the
-    log body never is; a read that fails is never a shutdown.
+    success had no shutdown. The job's check-run annotations come first,
+    queried with the check-run id of its ``check_run_url`` (the check-runs API
+    is not keyed by the Actions job id), and only one that carries the
+    shutdown text itself counts. GitHub's ``The operation was canceled.``
+    names no cause, so a job whose annotations prove nothing has its own log
+    read (``actions/jobs/<id>/logs``, one job, not the run archive): only a
+    line carrying ``##[error]The runner has received a shutdown signal``
+    makes it a shutdown. A failed annotation read is a problem, and the log
+    is still read, because the log is the evidence the annotations are not
+    (codex round 4 on #2184); when both reads fail the problem names both.
+    Both answers are cached per job, the log body never is; a read that fails
+    is never a shutdown.
     """
     jobs = _cached_jobs(repo, run, cache)
     if jobs is None:
@@ -938,8 +974,7 @@ def read_job_evidence(repo: str, run: Run, cache: Path) -> JobEvidence:
         messages, problem = _cached_annotations(repo, run, job, cache)
         if problem:
             problems.append(f"{role} job annotations: {problem}")
-            continue
-        if any(is_shutdown_annotation(message) for message in messages):
+        elif any(is_shutdown_annotation(message) for message in messages):
             evidence.shutdowns += (role,)
             continue
         shutdown, problem = _cached_shutdown(repo, run, job, cache)

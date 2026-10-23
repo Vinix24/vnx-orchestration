@@ -611,11 +611,14 @@ def test_only_the_shutdown_line_in_a_job_log_counts(log, shutdown):
 def test_the_profile_a_jobs_are_taken_from_the_runs_job_list():
     payload = {"total_count": 3, "jobs": [
         {"id": 1, "name": "Lint Patterns (silent-except + atomic-write)", "conclusion": "success"},
-        {"id": 2, "name": "Profile A (doctor + core tests)", "conclusion": "failure"},
+        {"id": 2, "name": "Profile A (doctor + core tests)", "conclusion": "failure",
+         "check_run_url": "https://api.github.com/repos/o/r/check-runs/22"},
         {"id": 3, "name": "Profile A (xdist shadow)", "conclusion": "success"},
     ]}
-    assert hist.profile_a_jobs(payload) == {"reference": {"id": 2, "conclusion": "failure"},
-                                            "shadow": {"id": 3, "conclusion": "success"}}
+    assert hist.profile_a_jobs(payload) == {
+        "reference": {"id": 2, "conclusion": "failure",
+                      "check_run_url": "https://api.github.com/repos/o/r/check-runs/22"},
+        "shadow": {"id": 3, "conclusion": "success", "check_run_url": None}}
     assert hist.profile_a_jobs({"total_count": 0, "jobs": []}) == {}
     assert hist.profile_a_jobs({"jobs": "not a list"}) is None
 
@@ -1315,10 +1318,31 @@ def test_a_cache_entry_that_proves_the_latest_attempt_is_used_without_a_download
 # --- option A end to end: the job list and its check-run annotations are read from gh ---------------------------
 
 
+def _check_run_url(check_run_id) -> str:
+    return f"https://api.github.com/repos/o/r/check-runs/{check_run_id}"
+
+
+def _job(job_id: int, name: str, conclusion: str, check_run_url) -> dict:
+    """One Profile A job row; a *check_run_url* of None leaves the field out, as a row without the URL."""
+    row = {"id": job_id, "name": name, "status": "completed", "conclusion": conclusion}
+    if check_run_url is not None:
+        row["check_run_url"] = check_run_url
+    return row
+
+
 def _profile_a_jobs(reference: str, shadow: str) -> dict:
+    """The run's two Profile A jobs, each with the check_run_url GitHub keys its annotations by."""
     return {"total_count": 2, "jobs": [
-        {"id": 11, "name": "Profile A (doctor + core tests)", "status": "completed", "conclusion": reference},
-        {"id": 12, "name": "Profile A (xdist shadow)", "status": "completed", "conclusion": shadow},
+        _job(11, "Profile A (doctor + core tests)", reference, _check_run_url(11)),
+        _job(12, "Profile A (xdist shadow)", shadow, _check_run_url(12)),
+    ]}
+
+
+def _job_list(shadow_conclusion: str, shadow_url) -> dict:
+    """The two Profile A jobs with a green reference; *shadow_url* is the shadow's check_run_url as given."""
+    return {"total_count": 2, "jobs": [
+        _job(11, "Profile A (doctor + core tests)", "success", _check_run_url(11)),
+        _job(12, "Profile A (xdist shadow)", shadow_conclusion, shadow_url),
     ]}
 
 
@@ -1332,7 +1356,7 @@ SHUTDOWN_LOG = ("2026-10-22T19:55:00.0000000Z ##[error]The runner has received a
 CANCEL_LOG = "2026-10-22T19:55:00.0000000Z ##[error]The operation was canceled.\n"
 
 
-def _option_a_cli(tmp_path: Path, *, cache: Path | None = None, **spec) -> dict:
+def _option_a_cli(tmp_path: Path, *, cache: Path | None = None, job_list: dict | None = None, **spec) -> dict:
     """The row of the one shadow-shutdown run the CLI places; *spec* feeds the gh stand-in (*logs*, *annotations*)."""
     base, head = _real_commits()
     runs = [_listed(1, head, "2099-01-01T00:00:00Z")]
@@ -1340,7 +1364,8 @@ def _option_a_cli(tmp_path: Path, *, cache: Path | None = None, **spec) -> dict:
     args = ["--last-d3-merge", base, "--fingerprint", FP, "--no-watch-list", "--json"]
     if cache is not None:
         args += ["--cache-dir", str(cache)]
-    proc = _cli(tmp_path, runs, verdicts, *args, jobs={"1": _profile_a_jobs("success", "failure")}, **spec)
+    jobs = {"1": job_list if job_list is not None else _profile_a_jobs("success", "failure")}
+    proc = _cli(tmp_path, runs, verdicts, *args, jobs=jobs, **spec)
     assert proc.returncode == 1, proc.stderr
     [row] = json.loads(proc.stdout)["runs"]
     return row
@@ -1416,6 +1441,125 @@ def test_the_cli_keeps_a_run_with_a_failed_annotation_read_dirty(tmp_path):
     [row] = json.loads(proc.stdout)["runs"]
     assert row["place"] == "in_window"
     assert any("evidence:" in reason and "HTTP 502" in reason for reason in row["reasons"]), row["reasons"]
+
+
+# --- codex round 4 on #2184: the check-run id comes from check_run_url, and a failed annotation read reads the log ---
+
+
+def _serve_job_api(tmp_path: Path, monkeypatch, *, jobs: dict, annotations: dict | None = None,
+                   logs: dict | None = None) -> None:
+    """Put the gh stand-in on PATH for a direct read of run 1's jobs, annotations and logs."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "gh").write_text(FAKE_GH, encoding="utf-8")
+    (bin_dir / "gh").chmod(0o755)
+    spec = tmp_path / "api-spec.json"
+    spec.write_text(json.dumps({"runs": [], "verdicts": {}, "jobs": {"1": jobs},
+                                "annotations": annotations or {}, "logs": logs or {}}), encoding="utf-8")
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("FAKE_GH_SPEC", str(spec))
+
+
+def _read_evidence(tmp_path: Path, monkeypatch, jobs: dict, *, annotations: dict | None = None,
+                   logs: dict | None = None) -> "hist.JobEvidence":
+    """read_job_evidence for run 1 against the stand-in; the cache lives under *tmp_path*."""
+    _serve_job_api(tmp_path, monkeypatch, jobs=jobs, annotations=annotations, logs=logs)
+    run = hist.Run("1", 1, "a" * 40, "dispatch/x", "pull_request", "2099-01-01T00:00:00Z", "completed", "success")
+    return hist.read_job_evidence("o/r", run, tmp_path / "cache")
+
+
+def test_the_annotations_are_read_by_the_check_run_id_of_check_run_url(tmp_path, monkeypatch):
+    """Red case of codex round 4 on #2184: job id and check-run id differ, and the API key is the latter."""
+    evidence = _read_evidence(tmp_path, monkeypatch, _job_list("failure", _check_run_url(1202)),
+                              annotations={"1202": SHUTDOWN_ANNOTATION})
+    assert evidence.problem == ""
+    assert evidence.shutdowns == ("shadow",)
+
+
+def test_a_failed_annotation_read_still_reads_the_job_log(tmp_path, monkeypatch):
+    """Red case of codex round 4 on #2184: the failed read is a problem, and the log is the stronger evidence."""
+    evidence = _read_evidence(tmp_path, monkeypatch, _job_list("failure", _check_run_url(1202)),
+                              annotations={"1202": "error"}, logs={"12": SHUTDOWN_LOG})
+    assert evidence.shutdowns == ("shadow",)
+    assert "HTTP 502" in evidence.problem
+    assert "shadow job annotations:" in evidence.problem
+
+
+def test_a_job_without_a_check_run_url_is_a_problem_and_its_log_is_still_read(tmp_path, monkeypatch):
+    evidence = _read_evidence(tmp_path, monkeypatch, _job_list("failure", None), logs={"12": SHUTDOWN_LOG})
+    assert evidence.shutdowns == ("shadow",)
+    assert evidence.problem == "shadow job annotations: no check-run id in check_run_url"
+
+
+@pytest.mark.parametrize("url", [
+    "https://api.github.com/repos/o/r/check-runs/",
+    "https://api.github.com/repos/o/r/check-runs/1202x",
+    "https://api.github.com/repos/o/r/check-runs/-1202",
+    "not a url",
+    "",
+    1202,
+], ids=["no-tail", "suffix", "negative", "no-path", "empty", "not-text"])
+def test_a_malformed_check_run_url_is_a_problem_and_the_log_is_still_read(url, tmp_path, monkeypatch):
+    evidence = _read_evidence(tmp_path, monkeypatch, _job_list("failure", url), logs={"12": SHUTDOWN_LOG})
+    assert evidence.shutdowns == ("shadow",)
+    assert evidence.problem == "shadow job annotations: no check-run id in check_run_url"
+
+
+def test_both_reads_failing_name_both_problems_and_never_a_shutdown(tmp_path, monkeypatch):
+    evidence = _read_evidence(tmp_path, monkeypatch, _job_list("failure", _check_run_url(1202)),
+                              annotations={"1202": "error"}, logs={"12": "error"})
+    assert evidence.shutdowns == ()
+    assert evidence.problem.count("HTTP 502") == 2
+    assert "shadow job annotations:" in evidence.problem and "shadow job log:" in evidence.problem
+
+
+def test_the_annotation_cache_is_keyed_by_the_check_run_id(tmp_path, monkeypatch):
+    """A cache entry under the check-run id answers without any gh call: both reads would fail if made."""
+    cache = tmp_path / "cache" / "1"
+    cache.mkdir(parents=True)
+    messages = [SHUTDOWN_ANNOTATION[0]["message"]]
+    (cache / "annotations-1202.json").write_text(json.dumps(messages), encoding="utf-8")
+    evidence = _read_evidence(tmp_path, monkeypatch, _job_list("failure", _check_run_url(1202)),
+                              annotations={"1202": "error"}, logs={"12": "error"})
+    assert evidence.problem == ""
+    assert evidence.shutdowns == ("shadow",)
+
+
+def test_a_fresh_annotation_read_is_cached_under_the_check_run_id(tmp_path, monkeypatch):
+    evidence = _read_evidence(tmp_path, monkeypatch, _job_list("failure", _check_run_url(1202)),
+                              annotations={"1202": CANCEL_ANNOTATION}, logs={"12": CANCEL_LOG})
+    assert evidence.problem == "" and evidence.shutdowns == ()
+    assert (tmp_path / "cache" / "1" / "annotations-1202.json").is_file()
+    assert not (tmp_path / "cache" / "1" / "annotations-12.json").exists()
+
+
+def test_the_cli_reads_the_annotations_by_the_check_run_id_of_check_run_url(tmp_path):
+    """Red case of codex round 4 end to end: the job id 12 and the check-run id 1202 differ."""
+    job_list = {"total_count": 2, "jobs": [
+        _job(11, "Profile A (doctor + core tests)", "success", _check_run_url(11)),
+        _job(12, "Profile A (xdist shadow)", "failure", _check_run_url(1202)),
+    ]}
+    row = _option_a_cli(tmp_path, job_list=job_list, annotations={"1202": SHUTDOWN_ANNOTATION})
+    assert row["place"] == "not_measurable"
+    assert row["reasons"] == ["a runner shutdown signal in the xdist shadow job"]
+
+
+def test_the_cli_sets_aside_a_run_when_the_annotation_read_fails_and_the_log_has_the_shutdown_line(tmp_path):
+    """Red case of codex round 4 end to end: a failed annotation read must not skip the log."""
+    row = _option_a_cli(tmp_path, annotations={"12": "error"}, logs={"12": SHUTDOWN_LOG})
+    assert row["place"] == "not_measurable"
+    assert row["reasons"][0].startswith("a runner shutdown signal in the xdist shadow job; evidence: ")
+    assert "shadow job annotations:" in row["reasons"][0]
+
+
+def test_the_cli_names_a_missing_check_run_id_and_still_reads_the_log(tmp_path):
+    job_list = {"total_count": 2, "jobs": [
+        _job(11, "Profile A (doctor + core tests)", "success", _check_run_url(11)),
+        _job(12, "Profile A (xdist shadow)", "failure", None),
+    ]}
+    row = _option_a_cli(tmp_path, job_list=job_list, logs={"12": CANCEL_LOG})
+    assert row["place"] == "in_window"
+    assert any("no check-run id in check_run_url" in reason for reason in row["reasons"]), row["reasons"]
 
 
 # --- codex round 2 on #2105: ancestry only from complete history -----------------------------------------------

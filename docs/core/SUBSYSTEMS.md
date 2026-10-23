@@ -81,8 +81,13 @@ is proven by the runner's own line in the job log (`##[error]The runner has rece
 shutdown signal`), read per job from `actions/jobs/<id>/logs` when the check-run
 annotations do not carry that text themselves; GitHub's `The operation was canceled.`
 annotation is posted for a timeout and a manual or concurrency cancel too and proves
-nothing. A failed annotation or log read is never a shutdown (fail-closed). A real
-parity difference still blocks. So does an xdist shadow job that is not known to have
+nothing. The annotations are read from `check-runs/<check-run id>/annotations`: the
+check-runs API is keyed by that id, never by the Actions job id, and the job row
+carries it only as the last path segment of its `check_run_url`. A job row without
+that URL, or with one that does not end in a whole number, has no readable annotation
+list, and a failed annotation read still reads the job log (codex round 4 on #2184). A
+failed annotation or log read is never a shutdown (fail-closed), and when both fail
+the problem names both. A real parity difference still blocks. So does an xdist shadow job that is not known to have
 succeeded — a conclusion or, with none, a verdict job result of exactly `success`, or a
 proven shutdown of its own: a failed shadow blocks, and so does an unknown one.
 Nothing has switched Profile A to xdist.
