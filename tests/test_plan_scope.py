@@ -345,7 +345,8 @@ def _fire(tmp_path: Path, monkeypatch, paths: list[str], *, meta: dict | None, s
     (["schemas/migrations/0099_new_table.sql"], "schema path"),
     (["scripts/lib/dispatch_cli.py"], "variant coding-strict"),
     ([], "without dispatch_paths"),
-], ids=["security", "schema", "coding-strict", "no-paths"])
+    (["scripts/ci/xdist_parity_history.py"], "gate-merge path"),
+], ids=["security", "schema", "coding-strict", "no-paths", "gate-merge-added-r3a"])
 def test_door_moves_a_light_track_up_and_still_dispatches(tmp_path, monkeypatch, capsys, paths, rule_part):
     rc, sd, worker = _fire(tmp_path, monkeypatch, paths, meta={"plan_scope": "light"})
 
@@ -637,9 +638,10 @@ def test_security_path_kind_per_kind(kind, positives, negative):
 
 
 @pytest.mark.parametrize("category, positives, negative", [
-    ("schema", ["scripts/migrations/0040_x.sql", "schemas/migrations/0041_y.sql"],
-     "schemas/runtime_coordination.sql"),
-    ("gate-merge", ["scripts/pr_merge.py", "scripts/lib/plan_gate_panel.py", "scripts/lib/verify_pr.py"],
+    ("schema", ["scripts/migrations/0040_x.sql", "schemas/migrations/0041_y.sql", "schemas/runtime_coordination.sql"],
+     "docs/core/SCHEMA_NOTES.md"),
+    ("gate-merge", ["scripts/pr_merge.py", "scripts/lib/plan_gate_panel.py", "scripts/lib/verify_pr.py",
+                    "scripts/lib/gate_executor.py", "scripts/ci/xdist_parity_history.py"],
      "scripts/lib/report_writer.py"),
     ("store-resolution", ["scripts/lib/vnx_paths.py", "scripts/lib/project_root.py", "vnx_cli/_engine.py"],
      "vnx_cli/main.py"),
@@ -656,7 +658,8 @@ def test_dispatch_rule_is_none_for_a_light_change_and_names_the_rule_otherwise()
     assert dispatch_rule(["docs/core/HORIZON_PLANNING.md"]) is None
     assert dispatch_rule(["scripts/lib/report_writer.py", "tests/test_x.py"]) is None
     assert dispatch_rule([]) == "build dispatch without dispatch_paths (closed on doubt)"
-    assert dispatch_rule(["scripts/lib/gate_executor.py"]).startswith("variant coding-strict")
+    assert dispatch_rule(["scripts/lib/gate_executor.py"]) == "gate-merge path scripts/lib/gate_executor.py"
+    assert dispatch_rule(["scripts/lib/dispatch_cli.py"]).startswith("variant coding-strict")
     assert dispatch_rule(["vnx_cli/_engine.py"]) == "store-resolution path vnx_cli/_engine.py"
 
 

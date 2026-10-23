@@ -53,7 +53,7 @@ import glob
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import gate_lane_contract
 import provider_switch
@@ -158,6 +158,23 @@ class BuilderVendor:
         }
 
 
+def dispatch_spec_paths(dispatch_id: str, *, data_dir: Path) -> Tuple[Optional[List[Path]], str]:
+    """The ``dispatch-spec.json`` files of ``dispatch_id`` in ``data_dir``, and why there are none.
+
+    ``(paths, "")`` when found; ``([], reason)`` when this store has no spec
+    for the id; ``(None, reason)`` for an id that is no plain name, whose spec
+    is therefore never read. One lookup for every reader of a spec on the
+    review side (the builder's vendor, the review risk class).
+    """
+    if "/" in dispatch_id or "\\" in dispatch_id or dispatch_id in (".", ".."):
+        return None, f"dispatch id {dispatch_id!r} is not a plain name; no spec is read for it"
+    dispatches_dir = Path(data_dir) / "dispatches"
+    specs = sorted(dispatches_dir.glob(f"*/{glob.escape(dispatch_id)}/dispatch-spec.json"))
+    if not specs:
+        return [], f"no dispatch-spec.json for {dispatch_id} under {dispatches_dir}"
+    return specs, ""
+
+
 def resolve_builder_vendor(dispatch_id: Optional[str], *, data_dir: Path) -> BuilderVendor:
     """The vendor of the builder of ``dispatch_id``, read from its spec in ``data_dir``.
 
@@ -167,12 +184,9 @@ def resolve_builder_vendor(dispatch_id: Optional[str], *, data_dir: Path) -> Bui
     did = _text(dispatch_id)
     if not did:
         return BuilderVendor("", None, "the review request names no dispatch, so the builder is unknown")
-    if "/" in did or "\\" in did or did in (".", ".."):
-        return BuilderVendor(did, None, f"dispatch id {did!r} is not a plain name; no spec is read for it")
-    dispatches_dir = Path(data_dir) / "dispatches"
-    specs = sorted(dispatches_dir.glob(f"*/{glob.escape(did)}/dispatch-spec.json"))
+    specs, why_none = dispatch_spec_paths(did, data_dir=data_dir)
     if not specs:
-        return BuilderVendor(did, None, f"no dispatch-spec.json for {did} under {dispatches_dir}")
+        return BuilderVendor(did, None, why_none)
     found = []
     for spec_path in specs:
         builder = _builder_from_spec_file(did, spec_path, Path(data_dir))

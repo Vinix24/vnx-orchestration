@@ -354,7 +354,8 @@ Options:
   --only <gate>         Run a specific gate only (e.g. codex, kimi, ci)
   --status              Show current gate results without running
   --mode <mode>         Gate mode: per_pr or final (default: final)
-  --risk-class <class>  Risk class: low, medium, high (default: medium)
+  --risk-class <class>  Raise the risk class derived from the PR diff (low, medium,
+                        high, critical; a lower value never lowers it)
   -h, --help            Show this help
 
 Gate names:

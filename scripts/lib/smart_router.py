@@ -10,6 +10,8 @@ route_decisions.ndjson via state_writer (fcntl-locked).
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import ntpath
 import posixpath
 import re
@@ -942,11 +944,14 @@ def _matches_prefix(path: str, prefix: str) -> bool:
 #
 # A build dispatch on a light track makes that track architecture when one of
 # its paths falls in a category below, or when derive_variant gives
-# coding-strict (which already covers the dispatch lane and the review gates
-# through _GOVERNANCE_CORE_PREFIXES, so those are not listed twice). Schema and
-# security are also the two classes that bring the plan-gate's second seat in
-# from the start (plan_gate_panel.second_seat_from_start). The door and the
-# plan-gate read this one table, so they cannot classify a path differently.
+# coding-strict (_GOVERNANCE_CORE_PREFIXES). Schema and security are also the
+# two classes that bring the plan-gate's second seat in from the start
+# (plan_gate_panel.second_seat_from_start). The door and the plan-gate read this
+# one table, so they cannot classify a path differently.
+# The review risk class (review_risk_class, R3) reads this table too and nothing
+# else: every category is a high-risk review. So a gate or merge module is listed
+# here even when _GOVERNANCE_CORE_PREFIXES already makes it coding-strict: the
+# review class does not read that ladder.
 # A path that leaves the repository is outside-repo: classified up, never plain.
 PLAN_SCOPE_SCHEMA = "schema"
 PLAN_SCOPE_SECURITY = "security"
@@ -975,20 +980,49 @@ _SECURITY_NAME_MARKERS: tuple[tuple[str, str], ...] = (
     ("credential", "credential-name"),
 )
 
-# Gate/merge logic and store resolution that _GOVERNANCE_CORE_PREFIXES does not
-# already make coding-strict.
+# The base schemas beside the migrations (schemas/*.sql, the report schema),
+# gate/merge logic (code that writes or reads a gate verdict, or decides a
+# merge) and store resolution.
 _PLAN_SCOPE_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("schemas/", PLAN_SCOPE_SCHEMA),
     ("scripts/lib/plan_gate", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/lib/plan_scope.py", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/lib/smart_router.py", PLAN_SCOPE_GATE_MERGE),
     ("scripts/lib/evidence_bound_gate.py", PLAN_SCOPE_GATE_MERGE),
     ("scripts/lib/phantom_guard.py", PLAN_SCOPE_GATE_MERGE),
     ("scripts/lib/required_contexts_gate.py", PLAN_SCOPE_GATE_MERGE),
     ("scripts/lib/review_", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/lib/gate_", PLAN_SCOPE_GATE_MERGE),
     ("scripts/lib/verify_pr.py", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/lib/attest", PLAN_SCOPE_GATE_MERGE),
     ("scripts/lib/auto_merge_policy.py", PLAN_SCOPE_GATE_MERGE),
     ("scripts/lib/merge_", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/lib/contract_invalid_ledger.py", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/lib/forge_gate_publisher.py", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/lib/forge_protection_drift.py", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/lib/codex_severity_translator.py", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/lib/claude_gate_lane.py", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/lib/final_answer_verdict.py", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/lib/headless_review_receipt.py", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/lib/governance_enforcer.py", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/lib/pr_readiness.py", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/gate_", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/review_gate_manager.py", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/review_rounds_cli.py", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/closure_verifier.py", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/codex_final_gate.py", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/kimi_gate.py", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/glm_gate.py", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/cleanup_orphan_gates.py", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/t0_gate_enforcement.sh", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/ci/xdist_parity_history.py", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/ci/check_xdist_parity.py", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/ci/record_xdist_parity_verdict.py", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/forge/", PLAN_SCOPE_GATE_MERGE),
     ("scripts/pr_merge.py", PLAN_SCOPE_GATE_MERGE),
     ("scripts/pre_merge_gate.py", PLAN_SCOPE_GATE_MERGE),
     ("scripts/commands/merge_preflight.sh", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/commands/gate.sh", PLAN_SCOPE_GATE_MERGE),
     ("scripts/lib/vnx_paths", PLAN_SCOPE_STORE_RESOLUTION),
     ("scripts/lib/project_root.py", PLAN_SCOPE_STORE_RESOLUTION),
     ("scripts/lib/launchd_project_root.py", PLAN_SCOPE_STORE_RESOLUTION),
@@ -1066,6 +1100,23 @@ def plan_scope_path_category(path: str) -> Optional[str]:
         if _matches_prefix(p, prefix):
             return category
     return None
+
+
+def plan_scope_rule_version() -> str:
+    """A version of the rules ``plan_scope_path_category`` applies: a hash over its tables.
+
+    The review risk class records it next to the class (``review_risk_class``),
+    so a class recorded under other path rules is recomputed, never trusted.
+    """
+    tables = {
+        "schema": [prefix for prefix, kind in _IRREVERSIBLE_PREFIXES if kind == "schema-migration"],
+        "security_prefixes": _SECURITY_PREFIXES,
+        "security_dir_names": _SECURITY_DIR_NAMES,
+        "security_name_markers": _SECURITY_NAME_MARKERS,
+        "plan_scope_prefixes": _PLAN_SCOPE_PREFIXES,
+    }
+    blob = json.dumps(tables, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 
 def _path_category(path: str) -> str:
