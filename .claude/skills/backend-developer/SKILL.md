@@ -66,7 +66,7 @@ These patterns recur in codex_gate findings. Apply preemptively.
 - [ ] **Subprocess stdin writes**: wrap `proc.stdin.write()` in `try: ... except BrokenPipeError: return AdapterResult(status='failed', ...)`. Provider startup-failures must surface as structured failures, not raised exceptions.
 
 ### Defensive Reads
-- [ ] **Null guards on string ops**: `(value or '').lower()`, `(value or {}).get(...)`. Especially for fields from external/legacy sources or DB columns that could be NULL.
+- [ ] **Null guards on string ops**: `(value or '').lower()`, `(value or {}).get(...)` are for display and formatting code. Code that reads evidence (verdicts, receipts, gate results, CI data, exit codes, test counts, timestamps) must not default to "nothing wrong": follow the "Fail-closed on evidence" block in this prompt.
 - [ ] **Strict-load by default**: parse-and-validate functions auto-validate. If parse-only mode is needed, add `strict=True` keyword and default to `True`.
 - [ ] **Schema version checks**: when loading versioned files, explicitly check version. `if v != EXPECTED: raise UnsupportedVersionError`. No silent accept.
 
