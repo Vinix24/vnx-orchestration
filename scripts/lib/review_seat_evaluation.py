@@ -244,24 +244,37 @@ def _pr_request_files(requests_dir: Path, pr_id: str) -> List[Path]:
     return sorted(found)
 
 
-def recorded_config_seats(requests_dir: Path, pr_id: str, head_sha: Optional[str]) -> Optional[Dict[str, Any]]:
-    """The ``review_seats`` (source ``config``) a request on this head recorded; the latest wins.
+def pr_requests_on_head(requests_dir: Path, pr_id: str, head_sha: Optional[str]) -> List[Dict[str, Any]]:
+    """Every request record of ``pr_id`` on this head, in file order.
 
-    ``None`` when no request on this head recorded the project's stack, for
-    instance when every request named its stack explicitly. An offline test
-    run records nothing (``gate_status.is_test_run_record``, OI-2113): read
-    with a narrower marker, ``test_run: "TRUE"`` narrowed two seats to one.
+    One scope rule for every reader of a request record (the recorded seats,
+    the recorded risk class): this PR, this head (:func:`on_head`), and no
+    offline test run (``gate_status.is_test_run_record``, OI-2113: read with a
+    narrower marker, ``test_run: "TRUE"`` narrowed two seats to one).
     """
     from gate_status import is_test_run_record
 
-    best: Optional[Dict[str, Any]] = None
-    best_at = ""
+    found: List[Dict[str, Any]] = []
     for path in _pr_request_files(Path(requests_dir), pr_id):
         request = _load_json(path)
         if request is None or is_test_run_record(request) or not on_head(request, head_sha):
             continue
+        if _pr_matches(request, pr_id):
+            found.append(request)
+    return found
+
+
+def recorded_config_seats(requests_dir: Path, pr_id: str, head_sha: Optional[str]) -> Optional[Dict[str, Any]]:
+    """The ``review_seats`` (source ``config``) a request on this head recorded; the latest wins.
+
+    ``None`` when no request on this head recorded the project's stack, for
+    instance when every request named its stack explicitly.
+    """
+    best: Optional[Dict[str, Any]] = None
+    best_at = ""
+    for request in pr_requests_on_head(requests_dir, pr_id, head_sha):
         record = request.get("review_seats")
-        if not _pr_matches(request, pr_id) or not isinstance(record, dict):
+        if not isinstance(record, dict):
             continue
         seats = _seat_names(record.get("seats"))
         if record.get("source") != SOURCE_RECORDED or not seats:

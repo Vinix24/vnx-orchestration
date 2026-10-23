@@ -619,8 +619,12 @@ class GateExecutorMixin:
 
         requested = list(request_result.get("requested", []))
         rows = [self._execute_one_request(req, pr_number, head_sha) for req in requested]
+        # The round's derived class (R3a); a round that names none advances a seat at
+        # high, never at the caller's class, which may be lower than the diff's.
+        review_risk = request_result.get("review_risk")
+        derived_class = review_risk.get("risk_class") if isinstance(review_risk, dict) else None
         self._advance_exhausted_seats(
-            requested, rows, pr_number=pr_number, branch=branch, risk_class=risk_class,
+            requested, rows, pr_number=pr_number, branch=branch, risk_class=derived_class or "high",
             changed_files=changed_files, mode=mode, dispatch_id=dispatch_id, head_sha=head_sha,
         )
 
@@ -632,6 +636,7 @@ class GateExecutorMixin:
                 blocks for entry, blocks in rows if not entry.get("superseded_by")
             ),
             "review_seats": request_result.get("review_seats"),
+            "review_risk": review_risk,
         }
 
     def _advance_exhausted_seats(

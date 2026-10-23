@@ -1718,9 +1718,15 @@ class GateRequestHandlerMixin:
         evaluator can hold a merge to the stack that was requested even after
         the config changed.
 
+        The round's risk class is derived from the PR diff, not taken from the
+        caller (R3a, :meth:`_review_risk`): ``risk_class`` can only raise it.
+        Every seat carries it as ``review_risk`` next to ``review_seats``, every
+        entry is requested with the derived class (so the codex reasoning effort
+        follows it), and the return value carries ``review_risk``.
+
         ``head_sha`` is the PR head the caller already observed
         (``request_and_execute``), shared by every seat of the round; ``None``
-        resolves it lazily, at most once per round (``_PrHead``).
+        resolves it once per round (``_PrHead``), for the risk class.
 
         Every seat passes the round ledger first (R1, :meth:`_round_refusal`),
         before its takeover walk: this is where every run starts (the CLI, the
@@ -1749,22 +1755,25 @@ class GateRequestHandlerMixin:
         head = _PrHead(pr_number, head_sha)
         rounds = _PrRounds.read(self.results_dir.parent, pr_number)
         builder = self._builder_vendor(dispatch_id)
+        risk = self._review_risk(pr_number=pr_number, head=head, caller_class=risk_class, dispatch_id=dispatch_id)
+        risk_record = risk.to_record()
 
         for gate in seats.stack:
             seat_fields = {
-                "seat": gate, "review_seats": seat_record, "builder_vendor": builder.to_record(),
+                "seat": gate, "review_seats": seat_record, "review_risk": risk_record,
+                "builder_vendor": builder.to_record(),
             } if gate in seats.seats else {}
             seat_fields.update(operator_fields)
             payload = self._round_refusal(
                 rounds, head, pr_number=pr_number, branch=branch, seat_fields=seat_fields,
                 override_b3=override_b3,
             ) or self._dispatch_review_seat(
-                gate, pr_number, branch, risk_class, changed_files, mode, dispatch_id, chain=chain,
+                gate, pr_number, branch, risk.risk_class, changed_files, mode, dispatch_id, chain=chain,
                 held=_held_reviewers(requested), head=head, seat_fields=seat_fields, builder=builder,
             )
             requested.append(payload)
             self._emit_review_request_receipt(
-                payload, pr_number=pr_number, branch=branch, mode=mode, risk_class=risk_class,
+                payload, pr_number=pr_number, branch=branch, mode=mode, risk_class=risk.risk_class,
                 changed_files=changed_files, dispatch_id=dispatch_id,
             )
 
@@ -1773,7 +1782,27 @@ class GateRequestHandlerMixin:
             "branch": branch,
             "requested": requested,
             "review_seats": seat_record,
+            "review_risk": risk_record,
         }
+
+    def _review_risk(self, *, pr_number: int, head: _PrHead, caller_class: str, dispatch_id: str) -> Any:
+        """The round's risk class, derived from the PR diff (R3a, ``review_risk_class``).
+
+        The diff is read with local git in the project's checkout
+        (``PROJECT_ROOT``, else the process cwd); nothing is fetched, and a head
+        that is not there makes the class ``high``. ``irreversible`` is read
+        from the dispatch's spec in this store (the one the review gates live
+        in, as :meth:`_builder_vendor` reads it). ``caller_class`` only raises.
+        """
+        import review_risk_class
+
+        root = (getattr(self, "paths", None) or {}).get("PROJECT_ROOT")
+        reading = review_risk_class.read_pr_diff(head.sha(), cwd=Path(root) if root else None)
+        state_dir = getattr(self, "state_dir", None) or Path(self.results_dir).parent.parent
+        spec = review_risk_class.spec_flag(dispatch_id, data_dir=Path(state_dir).parent)
+        risk = review_risk_class.derive_risk_class(reading, caller_class=caller_class, spec=spec, head_sha=head.sha())
+        logger.info("gate_request_handler: pr=%s %s", pr_number, risk.explain())
+        return risk
 
     @staticmethod
     def _force_rerun_fields(force_rerun: str, *, pr_number: int, head_sha: Optional[str]) -> Dict[str, Any]:
@@ -1983,7 +2012,7 @@ class GateRequestHandlerMixin:
             return None
         # An --override-b3 the seat's request carried goes with the seat (R1).
         seat_fields = {
-            "seat": seat, "review_seats": payload.get("review_seats"),
+            "seat": seat, "review_seats": payload.get("review_seats"), "review_risk": payload.get("review_risk"),
             "builder_vendor": same_vendor_record(reader, builder, builder.to_record()),
         }
         override = payload.get("override_b3") if isinstance(payload.get("override_b3"), dict) else {}
