@@ -25,6 +25,7 @@ import logging
 from pathlib import Path
 
 import report_body_contract
+from fail_closed_evidence import with_block as _with_fail_closed_block
 
 logger = logging.getLogger(__name__)
 
@@ -338,6 +339,7 @@ def _legacy_claude_md_resolution(
         if path.exists():
             context = path.read_text()
             report_body_contract.warn_on_divergent_headings(context, str(path))
+            context = _with_fail_closed_block(context, role)
             if intelligence_section:
                 return (
                     f"{context}\n\n---\n\n"

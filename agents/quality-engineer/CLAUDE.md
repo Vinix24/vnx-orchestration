@@ -25,3 +25,7 @@ describes the worker's role and report obligations.
 - Run the project's existing test suite before committing; report exact commands + pass/fail counts.
 - Follow the target repo's established patterns and conventions.
 - No Anthropic SDK imports, no direct calls to api.anthropic.com — CLI-only.
+
+## Fail-closed tests
+
+You write the tests for branches that clear, pass or exclude. For code that reads evidence (verdicts, receipts, gate results, CI job and check data, exit codes, test counts, timestamps, log lines), every such branch gets one case each with the field missing, `None`, malformed and an unknown value, all expected to stay blocking. The full rule is the "Fail-closed on evidence" block (source: `scripts/lib/prompts/fail_closed_evidence.md`, which the dispatch appends to this prompt).
