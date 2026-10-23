@@ -395,11 +395,11 @@ def test_the_merge_record_names_the_class_and_the_required_seats(store, forge, m
     assert seats["filled_by"] == {"codex_gate": "codex_gate"}
 
 
-def _contract():
+def _contract(branch: str = "pr/medium"):
     from review_contract import Deliverable, ReviewContract
 
     return ReviewContract(
-        pr_id=PR_ID, pr_title="R3b", feature_title="review-stopregel", branch="pr/medium", track="A",
+        pr_id=PR_ID, pr_title="R3b", feature_title="review-stopregel", branch=branch, track="A",
         risk_class="low", merge_policy="standard", closure_stage="ready",
         deliverables=[Deliverable(category="impl", description="seat rule")], review_stack=STACK,
     )
@@ -428,6 +428,203 @@ def test_closure_of_a_merge_under_the_new_rule_reads_its_required_seats(store, f
     _pass(store, "codex_gate", head, "pr/medium")
 
     assert _closure(store, rse.RISK_SEAT_RULE, ["codex_gate"], head) == {"seat_codex_gate": "PASS"}
+
+
+# ---------------------------------------------------------------------------
+# Round 2: the whole track closure follows the seats the merge record required
+# ---------------------------------------------------------------------------
+
+
+FAIL_REPORT = (
+    "# review\n\nThe change breaks every caller.\n\n```json\n"
+    '{"verdict": "fail", "findings": [{"severity": "blocking", "message": "breaks every caller"}]}\n```\n'
+)
+FEATURE_PLAN = """# Feature: Review stopregel
+
+**Status**: Complete
+
+## Dependency Flow
+```text
+PR-0 (no dependencies)
+```
+
+## PR-0: R3b
+**Track**: A
+**Priority**: P1
+**Complexity**: Medium
+**Skill**: @backend-developer
+**Dependencies**: []
+"""
+PR_QUEUE = """# PR Queue - Feature: Review stopregel
+
+## Progress Overview
+Total: 1 PRs | Complete: 1 | Active: 0 | Queued: 0 | Blocked: 0
+Progress: ██████████ 100%
+
+## Status
+
+## Dependency Flow
+```
+PR-0 (no dependencies)
+```
+"""
+
+
+def _kimi(store, status: str, head: str, branch: str) -> None:
+    """kimi's own record on ``head``: a PASS with a clean report, or a FAIL whose report says so too."""
+    fails = status == "fail"
+    report = store["reports"] / f"kimi_gate-{status}-{head[:8]}.md"
+    report.write_text(FAIL_REPORT if fails else CLEAN, encoding="utf-8")
+    blocking = [{"severity": "blocking", "message": "breaks every caller"}] if fails else []
+    (store["results"] / f"pr-{PR}-kimi_gate.json").write_text(json.dumps({
+        "gate": "kimi_gate", "pr_id": PR_ID, "pr_number": PR, "status": status, "commit_sha": head,
+        "branch": branch, "contract_hash": "sha256:kimi_gate", "report_path": str(report),
+        "blocking_findings": blocking, "blocking_count": len(blocking), "advisory_findings": [],
+        "evidence_source": "live", "test_run": False,
+    }), encoding="utf-8")
+
+
+def _record_merge(store, review_seats: Any) -> None:
+    """Append a ``pr_merged`` receipt for the PR; track closure reads the latest one."""
+    line = {"event_type": "pr_merged", "pr_number": PR, "conclusion": "merged"}
+    if review_seats is not None:
+        line["review_seats"] = review_seats
+    with open(store["receipts"], "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(line) + "\n")
+
+
+def _track_closure(store, tmp_path, monkeypatch, branch: str) -> Dict[str, Any]:
+    """The complete ``verify_closure`` verdict of the merged PR, git and GitHub probes answered offline."""
+    (tmp_path / "FEATURE_PLAN.md").write_text(FEATURE_PLAN, encoding="utf-8")
+    (tmp_path / "PR_QUEUE.md").write_text(PR_QUEUE, encoding="utf-8")
+    claim = tmp_path / "closure_claim.json"
+    claim.write_text(json.dumps({"test_files": ["FEATURE_PLAN.md"], "test_command": "pytest -q"}), encoding="utf-8")
+    merged = {"number": PR, "state": "MERGED", "mergeCommit": {"oid": "c" * 40}}
+    monkeypatch.setattr(closure_verifier, "_remote_branch_exists", lambda name, root: True)
+    monkeypatch.setattr(closure_verifier, "_find_branch_pr", lambda name: dict(merged))
+    monkeypatch.setattr(closure_verifier, "_merge_commit_on_main", lambda oid, root: True)
+    return closure_verifier.verify_closure(
+        project_root=tmp_path, feature_plan=tmp_path / "FEATURE_PLAN.md", pr_queue=tmp_path / "PR_QUEUE.md",
+        branch=branch, mode="post_merge", claim_file=claim, review_contract=_contract(branch),
+        gate_results_dir=store["results"],
+    )
+
+
+def _failed(closure: Dict[str, Any]) -> set:
+    return {check["name"] for check in closure["checks"] if check["status"] != "PASS"}
+
+
+def test_a_medium_merge_on_codex_alone_passes_track_closure(store, forge, tmp_path, monkeypatch):
+    head = forge["heads"]["pr/medium"]
+    _pass(store, "codex_gate", head, "pr/medium")
+    seats = _merge_through_main(store, forge, monkeypatch, "pr/medium", head)
+    assert (seats["risk_class"], seats["required_seats"], seats["stack"]) == ("medium", ["codex_gate"], STACK)
+
+    closure = _track_closure(store, tmp_path, monkeypatch, "pr/medium")
+
+    assert closure["verdict"] == "pass", [c for c in closure["checks"] if c["status"] != "PASS"]
+    not_required = next(c for c in closure["checks"] if c["name"] == "review_seats_not_required")
+    assert "kimi_gate" in not_required["detail"] and "risicoklasse medium" in not_required["detail"]
+
+
+# The door's verdict on a non-required seat that did run (measured, not assumed): a FAIL on the
+# merged head blocks (``review_seat_evaluation.blocking_records`` reads every review peer on the
+# head); a PASS is not asked for; a record on another head is out of scope.
+NOT_REQUIRED_SEAT_CASES = [
+    ("fail", "merged", "NO-GO", "fail"),
+    ("pass", "merged", "GO", "pass"),
+    ("fail", "other", "GO", "pass"),
+    ("pass", "other", "GO", "pass"),
+]
+
+
+@pytest.mark.parametrize("status, on, door_says, closure_says", NOT_REQUIRED_SEAT_CASES)
+def test_closure_gives_the_door_verdict_on_a_seat_the_class_did_not_require(
+    store, forge, tmp_path, monkeypatch, status, on, door_says, closure_says,
+):
+    head = forge["heads"]["pr/medium"]
+    _pass(store, "codex_gate", head, "pr/medium")
+    _merge_through_main(store, forge, monkeypatch, "pr/medium", head)
+    _kimi(store, status, head if on == "merged" else forge["heads"]["pr/schema"], "pr/medium")
+
+    door = _door(store, forge, "pr/medium", head)
+    closure = _track_closure(store, tmp_path, monkeypatch, "pr/medium")
+
+    assert (door["verdict"], closure["verdict"]) == (door_says, closure_says), door["message"]
+    assert _failed(closure) == ({"review_seats_blocking"} if closure_says == "fail" else set())
+
+
+def test_a_high_merge_still_needs_every_seat_at_track_closure(store, forge, tmp_path, monkeypatch):
+    head = forge["heads"]["pr/gate"]
+    _pass(store, "codex_gate", head, "pr/gate")
+    _pass(store, "kimi_gate", head, "pr/gate")
+    seats = _merge_through_main(store, forge, monkeypatch, "pr/gate", head)
+    assert (seats["risk_class"], seats["required_seats"]) == ("high", STACK)
+
+    assert _track_closure(store, tmp_path, monkeypatch, "pr/gate")["verdict"] == "pass"
+
+    (store["results"] / f"pr-{PR}-kimi_gate.json").unlink()
+    closure = _track_closure(store, tmp_path, monkeypatch, "pr/gate")
+    assert (closure["verdict"], _failed(closure)) == ("fail", {"seat_kimi_gate"})
+
+
+@pytest.mark.parametrize("review_seats, failing", [
+    ({"rule": rse.SEAT_RULE, "pr_id": PR_ID, "head_sha": "", "seats": STACK, "source": "config"}, "seat_kimi_gate"),
+    (None, "gate_kimi_gate"),
+], ids=["older-seat-rule", "no-seat-record"])
+def test_an_older_merge_keeps_demanding_every_gate_at_track_closure(
+    store, forge, tmp_path, monkeypatch, review_seats, failing,
+):
+    head = forge["heads"]["pr/medium"]
+    _pass(store, "codex_gate", head, "pr/medium")
+    if review_seats is not None:
+        review_seats = dict(review_seats, head_sha=head)
+    _record_merge(store, review_seats)
+
+    closure = _track_closure(store, tmp_path, monkeypatch, "pr/medium")
+
+    assert (closure["verdict"], _failed(closure)) == ("fail", {failing})
+
+
+def _without(key: str):
+    return lambda record: {name: value for name, value in record.items() if name != key}
+
+
+# A record narrows the per-gate checks only when it says so positively; every other shape
+# leaves kimi_gate demanded, as on the head before this round (fail-closed). With its seats
+# kept, kimi is demanded by the per-gate check; without them closure resolves the seats the
+# way the door does, and a store whose checkout cannot be established reads high (every seat).
+MALFORMED_RECORDS = {
+    "stack-missing": (_without("stack"), "gate_kimi_gate"),
+    "stack-none": (lambda r: dict(r, stack=None), "gate_kimi_gate"),
+    "stack-a-string": (lambda r: dict(r, stack="codex_gate,kimi_gate"), "gate_kimi_gate"),
+    "risk-class-missing": (_without("risk_class"), "gate_kimi_gate"),
+    "risk-class-none": (lambda r: dict(r, risk_class=None), "gate_kimi_gate"),
+    "risk-class-unknown": (lambda r: dict(r, risk_class="moderate"), "gate_kimi_gate"),
+    "risk-class-high-with-one-seat": (lambda r: dict(r, risk_class="high"), "gate_kimi_gate"),
+    "required-seats-missing": (_without("required_seats"), "gate_kimi_gate"),
+    "required-seats-none": (lambda r: dict(r, required_seats=None), "gate_kimi_gate"),
+    "required-seats-differ": (lambda r: dict(r, required_seats=STACK), "gate_kimi_gate"),
+    "seats-missing": (_without("seats"), "seat_kimi_gate"),
+    "seats-none": (lambda r: dict(r, seats=None), "seat_kimi_gate"),
+    "seats-empty": (lambda r: dict(r, seats=[], required_seats=[]), "seat_kimi_gate"),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(MALFORMED_RECORDS))
+def test_a_record_that_does_not_say_which_seats_it_left_out_narrows_nothing(
+    store, forge, tmp_path, monkeypatch, shape,
+):
+    mutate, failing = MALFORMED_RECORDS[shape]
+    head = forge["heads"]["pr/medium"]
+    _pass(store, "codex_gate", head, "pr/medium")
+    seats = _merge_through_main(store, forge, monkeypatch, "pr/medium", head)
+    _record_merge(store, mutate(seats))
+
+    closure = _track_closure(store, tmp_path, monkeypatch, "pr/medium")
+
+    assert (closure["verdict"], _failed(closure)) == ("fail", {failing})
+    assert "review_seats_not_required" not in {check["name"] for check in closure["checks"]}
 
 
 # ---------------------------------------------------------------------------

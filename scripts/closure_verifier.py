@@ -1954,7 +1954,8 @@ def _check_contract_hashes(
     (OI-2058, R5b): their evidence is the record the door's route accepted for
     the seat, bound to that head, not the seat gate's own slot. :func:`_seat_rule_checks` runs the
     same comparison on that record, so skipping a seat here moves its check,
-    it never drops it.
+    it never drops it. A stack seat the merge's risk class did not require
+    (R3b) is in ``skip`` too: the door asked nothing of its record.
     """
     checks: List[CheckResult] = []
     for gate in contract.review_stack:
@@ -2006,7 +2007,8 @@ def _check_report_paths(
 ) -> List[CheckResult]:
     """Validate that every terminal gate result carries a report_path pointing to a real file.
 
-    ``skip``: the seats the seat rule already judged (see :func:`_check_contract_hashes`).
+    ``skip``: the seats the seat rule already judged, and the seats a merge's
+    risk class did not require (see :func:`_check_contract_hashes`).
     """
     checks: List[CheckResult] = []
     for gate in contract.review_stack:
@@ -2091,7 +2093,11 @@ def _seat_rule_checks(
     A record under ``SEAT_RULE`` (merged before R3b) is judged by that rule: a
     seat list it lacks is resolved without a risk class (``by_risk=False``), as
     before R3b. Under ``RISK_SEAT_RULE`` the record's ``seats`` are the seats
-    its class required.
+    its class required, and the stack seats its class did not require
+    (:func:`_seats_not_required`) are covered too: the door asked nothing of
+    them, so neither do the per-gate checks. A rejection by one of them on the
+    merged head still fails closure here (``evaluation.blocking``), as it
+    refuses the door.
     """
     from review_seat_evaluation import RISK_SEAT_RULE, SOURCE_MERGE_RECORD, evaluate_review_seats
 
@@ -2116,7 +2122,42 @@ def _seat_rule_checks(
         )
         checks.append(CheckResult(f"seat_{fill.seat}", "PASS" if fill.filled else "FAIL", detail))
         checks.extend(_seat_evidence_checks(fill, contract.content_hash))
-    return checks, frozenset(evaluation.seats)
+    not_required = _seats_not_required(seat_record)
+    if not_required:
+        checks.append(CheckResult("review_seats_not_required", "PASS", _not_required_text(seat_record, not_required)))
+    return checks, frozenset(evaluation.seats) | frozenset(not_required)
+
+
+def _seats_not_required(seat_record: Dict[str, Any]) -> Tuple[str, ...]:
+    """The stack seats a merge under ``RISK_SEAT_RULE`` did not require, read from its record alone.
+
+    Only a record that says so positively leaves a seat out: a ``stack`` list,
+    ``seats`` equal to ``required_seats``, and those seats exactly what
+    ``seats_for_risk`` gives for the record's own stack and ``risk_class``. Any
+    field missing, ``None``, malformed or inconsistent gives ``()``, and the
+    per-gate checks demand every stack gate as before (fail-closed). The seats
+    come from the merge record, never from a fresh resolution.
+    """
+    from review_seat_evaluation import RISK_SEAT_RULE, seats_for_risk
+
+    if seat_record.get("rule") != RISK_SEAT_RULE:
+        return ()
+    stack, seats, required = (seat_record.get(key) for key in ("stack", "seats", "required_seats"))
+    if not all(isinstance(value, list) for value in (stack, seats, required)):
+        return ()
+    if not seats or seats != required or tuple(seats) != seats_for_risk(stack, seat_record.get("risk_class")):
+        return ()
+    return tuple(seat for seat in seats_for_risk(stack, None) if seat not in seats)
+
+
+def _not_required_text(seat_record: Dict[str, Any], not_required: Sequence[str]) -> str:
+    return (
+        f"risicoklasse {seat_record.get('risk_class')} ({seat_record.get('risk_reason') or 'geen reden vastgelegd'}): "
+        f"de merge vereiste {', '.join(map(str, seat_record['seats']))} van stack "
+        f"{', '.join(map(str, seat_record['stack']))}; "
+        f"niet vereist en hier niet gevraagd: {', '.join(not_required)}. Een afkeuring op de gemergde kop "
+        "blokkeert nog steeds (review_seats_blocking)"
+    )
 
 
 def _seat_evidence_checks(fill: Any, content_hash: str) -> List[CheckResult]:
@@ -2159,7 +2200,10 @@ def _validate_review_evidence(
     carries the seat rule (``review_seats``), every seat of that list must be
     filled by a distinct reviewer on the merged head and no reviewer may have
     rejected it (:func:`_seat_rule_checks`); the per-gate checks then cover
-    only the gates that are no seat. A merge record without it (merged before
+    only the gates that are no seat. Under ``RISK_SEAT_RULE`` (R3b) a stack
+    seat the record's class did not require gets no per-gate check either, so
+    a medium merge on its first seat alone closes as the door merged it. A
+    merge record without it (merged before
     R5b), or no merge record, keeps the rule it was merged under: every gate of
     the contract's stack checked on its own record, so no closed or closable
     track reopens.
