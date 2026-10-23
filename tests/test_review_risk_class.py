@@ -309,10 +309,20 @@ def test_the_door_reading_of_an_unreadable_diff_is_high_whatever_the_record_says
     assert (risk.risk_class, risk.source) == ("high", rrc.SOURCE_RECOMPUTED)
 
 
-def test_the_rule_version_follows_the_path_table(monkeypatch):
-    before = smart_router.plan_scope_rule_version()
-    monkeypatch.setattr(smart_router, "_PLAN_SCOPE_PREFIXES", smart_router._PLAN_SCOPE_PREFIXES[1:])
-    assert smart_router.plan_scope_rule_version() != before
+@pytest.mark.parametrize("table", ["_PLAN_SCOPE_PREFIXES", "_SECURITY_PREFIXES"])
+def test_the_rule_version_follows_the_path_table(monkeypatch, table):
+    version = smart_router.plan_scope_rule_version
+    # The function reads the tables from its own globals. In a run over the whole
+    # tests/ tree `smart_router` is the tests/smart_router package shim, a copy of
+    # the real module's names, so a setattr on it would not reach those globals.
+    tables = version.__globals__
+    monkeypatch.setitem(tables, table, (("a/", "gate-merge"),))
+    first = version()
+    monkeypatch.setitem(tables, table, (("b/", "gate-merge"),))
+    second = version()
+    monkeypatch.setitem(tables, table, (("a/", "gate-merge"),))
+    assert first != second
+    assert version() == first, "the same table gives the same version"
 
 
 # ---------------------------------------------------------------------------
