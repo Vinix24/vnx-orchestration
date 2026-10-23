@@ -67,7 +67,30 @@ do not partition the serial selection. It exits 2 on invalid or stale evidence. 
 verdict is uploaded as the `xdist-parity-verdict` artifact
 (`scripts/ci/record_xdist_parity_verdict.py`). `scripts/ci/xdist_parity_history.py`
 applies the cutover rule to the recorded verdicts and counts only a verdict that a
-failed parity step cannot leave clean. Nothing has switched Profile A to xdist.
+failed parity step cannot leave clean. Under option A of that rule (operator
+decision, 2026-10-22) a run whose serial reference job failed, or in which either
+Profile A job received a runner shutdown signal, is not measurable: it is set aside
+from every condition of the window and listed with its reason. Only positive evidence
+sets a run aside: the reference job's conclusion, or the verdict's
+`reference.job_result`, is exactly `failure`, or its reference result is present with a
+whole-number exit other than 0. A `cancelled`, `timed_out`, `skipped`, missing or
+unknown conclusion or job result, and a missing or malformed exit, are no cause and
+never set a run aside (codex round 3 on #2184); a cancelled reference job that a
+runner shutdown cut short is still set aside through the shutdown evidence. A shutdown
+is proven by the runner's own line in the job log (`##[error]The runner has received a
+shutdown signal`), read per job from `actions/jobs/<id>/logs` when the check-run
+annotations do not carry that text themselves; GitHub's `The operation was canceled.`
+annotation is posted for a timeout and a manual or concurrency cancel too and proves
+nothing. The annotations are read from `check-runs/<check-run id>/annotations`: the
+check-runs API is keyed by that id, never by the Actions job id, and the job row
+carries it only as the last path segment of its `check_run_url`. A job row without
+that URL, or with one that does not end in a whole number, has no readable annotation
+list, and a failed annotation read still reads the job log (codex round 4 on #2184). A
+failed annotation or log read is never a shutdown (fail-closed), and when both fail
+the problem names both. A real parity difference still blocks. So does an xdist shadow job that is not known to have
+succeeded — a conclusion or, with none, a verdict job result of exactly `success`, or a
+proven shutdown of its own: a failed shadow blocks, and so does an unknown one.
+Nothing has switched Profile A to xdist.
 
 **Function-size ratchet.** `scripts/ci/check_function_size_ratchet.py` (the
 `Function size ratchet` step of the `Lint Patterns` job) fails a pull request that

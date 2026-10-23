@@ -28,6 +28,17 @@ writing exit 0, an emergency verdict. git ancestry runs on a real throwaway
 repository; the CLI runs end to end against a gh stand-in on PATH (an
 external process, replaced only inside tests/), so no test calls GitHub.
 
+Option A (operator decision, 2026-10-22): a run whose serial reference job
+failed, or in which either Profile A job received a runner shutdown signal,
+is not measurable. It is set aside from every condition of the window and
+listed with its reason. A real parity difference and a shadow job that
+failed without a shutdown still block. A shutdown is proven by the job's own
+log line (``##[error]The runner has received a shutdown signal``), read from
+``actions/jobs/<id>/logs`` when the check-run annotations do not carry that
+text themselves; GitHub's ``The operation was canceled.`` annotation names no
+cause and proves nothing (codex round 2 on #2184). A failed annotation or log
+read is never a shutdown.
+
 History that cannot prove ancestry is a tool error, never a placement
 (codex round 2 on #2105): a shallow clone answers "not an ancestor" for a
 descendant whose path to the base it cut off, so a failed run left the window
@@ -102,8 +113,9 @@ def clean_window() -> list:
     return runs + [main_run(9, day=2, hour=23)]
 
 
-def evaluate(runs, *, watch_list=(), oi_status=None, truncated=False, ancestry=None):
+def evaluate(runs, *, watch_list=(), oi_status=None, truncated=False, ancestry=None, job_evidence=None):
     ancestry = ancestry or {}
+    option = {} if job_evidence is None else {"job_evidence": job_evidence}
     return hist.evaluate(
         runs,
         target_fingerprint=FP,
@@ -111,6 +123,7 @@ def evaluate(runs, *, watch_list=(), oi_status=None, truncated=False, ancestry=N
         watch_list=list(watch_list) if watch_list is not None else None,
         oi_status=oi_status,
         list_truncated=truncated,
+        **option,
     )
 
 
@@ -248,22 +261,20 @@ def test_a_failed_step_with_exit_0_blocks(failure):
 
 
 @pytest.mark.parametrize(("block", "change", "failure"), [
-    ("reference", {"job_result": "failure"}, "reference.job=failure"),
-    ("reference", {"exit": 1}, "reference.exit=1"),
-    ("reference", {"exit": False}, "reference.exit=False"),
     ("reference", {"result": "missing"}, "reference.result=missing"),
     ("shadow", {"job_result": "failure"}, "shadow.job=failure"),
     ("shadow", {"verdict": "shadow_failed"}, "shadow.verdict=shadow_failed"),
     ("shadow", {"record": "stale"}, "shadow.record=stale"),
     ("steps", {"download_reference": "failure"}, "parity.download_reference=failure"),
     ("steps", {"prelude": "failure"}, "parity.prelude=failure"),
-], ids=["reference-job", "reference-exit", "reference-exit-bool", "reference-result", "shadow-job", "shadow-verdict",
-        "shadow-record", "parity-step", "prelude"])
+], ids=["reference-result", "shadow-job", "shadow-verdict", "shadow-record", "parity-step", "prelude"])
 def test_a_failure_the_verdict_records_blocks_even_when_its_step_failures_leave_it_out(block, change, failure):
     """codex round 3: a failed Profile A sat in the verdict's reference block, absent from step_failures, and held.
 
     The rule applies the parity job's own step rule (check_xdist_parity.step_failures)
-    to the outcomes the verdict records, so the list cannot leave one out.
+    to the outcomes the verdict records, so the list cannot leave one out. A
+    reference *result* that is missing with the job itself green has no cause
+    to set the run aside, so it still blocks.
     """
     runs = clean_window()
     runs[4].verdict[block].update(change)
@@ -272,11 +283,25 @@ def test_a_failure_the_verdict_records_blocks_even_when_its_step_failures_leave_
     assert evaluation.placements[4].reasons == [f"step {failure}"]
 
 
+@pytest.mark.parametrize(("change", "reason"), [
+    ({"job_result": "failure"}, "the serial reference job failed (reference.job=failure)"),
+    ({"exit": 1}, "the serial reference suite exited 1"),
+], ids=["job-result", "exit-1"])
+def test_a_reference_failure_the_verdict_records_is_not_measurable_without_the_job_list(change, reason):
+    """Option A reads cause (a) from the verdict itself: the job's outcome is already in its reference block."""
+    runs = clean_window()
+    runs[4].verdict["reference"].update(change)
+    evaluation = evaluate(runs)
+    assert "every_run_clean" not in failed(evaluation)
+    assert evaluation.placements[4].place == "not_measurable"
+    assert evaluation.placements[4].reasons == [reason]
+
+
 def test_a_failure_both_listed_and_recorded_is_named_once():
     runs = clean_window()
-    runs[4].verdict["reference"]["job_result"] = "failure"
-    runs[4].verdict["step_failures"] = ["reference.job=failure"]
-    assert evaluate(runs).placements[4].reasons == ["step reference.job=failure"]
+    runs[4].verdict["shadow"]["job_result"] = "failure"
+    runs[4].verdict["step_failures"] = ["shadow.job=failure"]
+    assert evaluate(runs).placements[4].reasons == ["step shadow.job=failure"]
 
 
 def test_one_calendar_day_is_not_enough():
@@ -443,6 +468,267 @@ def test_the_history_and_the_parity_job_share_one_rule_for_current_evidence():
     assert hist.stale_reason(current.verdict, current) is None
     current.verdict["run_attempt"] = "1"
     assert hist.stale_reason(current.verdict, current) == cxp.stale_evidence_reason("verdict", current.verdict, "1020", 2)
+
+
+# --- option A: a run without a measurable comparison does not count (operator 2026-10-22) ----------------------
+
+
+REFERENCE_OK = {"duration_s": 900, "exit": 0, "job_result": "success", "result": "present"}
+SHADOW_OK = {"durations_s": {"parallel": 600, "serial": None}, "exit_codes": {"parallel": 0, "serial": None},
+             "job_result": "success", "record": "present", "suite_wall_s": 600, "verdict": "shadow_passed"}
+
+
+def job_evidence(reference=None, shadow=None, shutdowns=(), problem="") -> "hist.JobEvidence":
+    """*JobEvidence* as read from a run's two Profile A jobs; None is a conclusion that was not read."""
+    return hist.JobEvidence({"reference": reference, "shadow": shadow}, tuple(shutdowns), problem)
+
+
+def shadow_shutdown_fields() -> dict:
+    """A verdict whose shadow job was shut down: no record, no candidate, exit 2 (runs 39794190857/39730303804)."""
+    return {"exit": 2, "verdict": "invalid_evidence", "differences": None, "reference": dict(REFERENCE_OK),
+            "step_failures": ["parity.download_candidate=failure", "shadow.record=missing", "shadow.job=failure",
+                              "parity.parity=failure"],
+            "shadow": {"job_result": "failure", "record": "missing"}}
+
+
+def reference_shutdown_fields() -> dict:
+    """A verdict whose serial reference job was shut down: no reference evidence, exit 2 (runs 39742671151/39828822170)."""
+    return {"exit": 2, "verdict": "invalid_evidence", "differences": None,
+            "reference": {"duration_s": None, "exit": None, "job_result": "failure", "result": "missing"},
+            "step_failures": ["parity.download_reference=failure", "reference.job=failure", "reference.result=missing",
+                              "parity.parity=failure"],
+            "shadow": dict(SHADOW_OK)}
+
+
+def serial_failed_parity_clean_fields() -> dict:
+    """The shape of run 39803599874: the serial job failed one test, the shadow failed it too, parity exit 0."""
+    return {"exit": 0, "verdict": "parity",
+            "reference": {"duration_s": 2265, "exit": 1, "job_result": "failure", "result": "present"},
+            "step_failures": ["reference.job=failure", "reference.exit=1", "shadow.verdict=shadow_failed"],
+            "shadow": {**SHADOW_OK, "exit_codes": {"parallel": 1, "serial": None}, "verdict": "shadow_failed"}}
+
+
+def reference_cancelled_fields() -> dict:
+    """A verdict whose serial reference job was cancelled: no reference evidence, exit 2, and no failure named."""
+    return {"exit": 2, "verdict": "invalid_evidence", "differences": None,
+            "reference": {"duration_s": None, "exit": None, "job_result": "cancelled", "result": "missing"},
+            "step_failures": ["parity.download_reference=failure", "reference.job=cancelled",
+                              "reference.result=missing", "parity.parity=failure"],
+            "shadow": dict(SHADOW_OK)}
+
+
+def test_a_shadow_job_shutdown_is_not_measurable():
+    shutdown = run(20, day=2, hour=5, **shadow_shutdown_fields())
+    evaluation = evaluate(clean_window() + [shutdown],
+                          job_evidence=lambda _run: job_evidence("success", "failure", ("shadow",)))
+    assert evaluation.holds, [vars(c) for c in evaluation.conditions]
+    assert evaluation.placements[-1].place == "not_measurable"
+    assert evaluation.placements[-1].reasons == ["a runner shutdown signal in the xdist shadow job"]
+    assert all(r is not shutdown for r in evaluation.window)
+
+
+def test_a_reference_job_shutdown_is_not_measurable():
+    shutdown = run(20, day=2, hour=5, **reference_shutdown_fields())
+    evaluation = evaluate(clean_window() + [shutdown],
+                          job_evidence=lambda _run: job_evidence("failure", "success", ("reference",)))
+    assert evaluation.holds, [vars(c) for c in evaluation.conditions]
+    assert evaluation.placements[-1].place == "not_measurable"
+    assert "runner shutdown signal in the serial Profile A job" in evaluation.placements[-1].reasons[0]
+
+
+def test_a_run_without_a_verdict_whose_job_was_shut_down_is_not_measurable():
+    """The job evidence is what makes a run without a verdict measurable, not the verdict it lacks."""
+    missing = _without_verdict(run(30, day=3))
+    evaluation = evaluate(clean_window() + [missing],
+                          job_evidence=lambda _run: job_evidence("success", "failure", ("shadow",)))
+    assert evaluation.holds, [vars(c) for c in evaluation.conditions]
+    assert evaluation.placements[-1].place == "not_measurable"
+
+
+def test_a_serial_job_failure_with_parity_exit_0_is_not_measurable():
+    """Run 39803599874: exit 0, no difference, but the serial suite failed one test (and the shadow the same one)."""
+    failed = run(20, day=2, hour=5, **serial_failed_parity_clean_fields())
+    assert failed.verdict["exit"] == 0 and not any(failed.verdict["differences"].values())
+    evaluation = evaluate(clean_window() + [failed],
+                          job_evidence=lambda _run: job_evidence("failure", "success"))
+    assert evaluation.holds, [vars(c) for c in evaluation.conditions]
+    assert evaluation.placements[-1].place == "not_measurable"
+    assert evaluation.placements[-1].reasons == ["the serial reference job concluded failure"]
+
+
+def test_a_serial_job_failure_and_a_parity_difference_still_block():
+    """Never more: a real difference keeps a run dirty even when the serial reference job also failed."""
+    dirty = run(20, day=2, hour=5, name="heavy-differences", exit=1, verdict="differences",
+                reference={"duration_s": 900, "exit": 0, "job_result": "failure", "result": "present"})
+    evaluation = evaluate(clean_window() + [dirty], job_evidence=lambda _run: job_evidence("failure", "success"))
+    assert failed(evaluation) == {"every_run_clean"}
+    assert evaluation.placements[-1].place == "in_window"
+    assert evaluation.placements[-1].reasons[0].startswith("exit 1 (differences) [outcome_class_differs: 2]")
+
+
+def test_a_shadow_job_that_failed_without_a_shutdown_still_blocks():
+    shadow_failed = run(20, day=2, hour=5, **shadow_shutdown_fields())
+    evaluation = evaluate(clean_window() + [shadow_failed],
+                          job_evidence=lambda _run: job_evidence("success", "failure"))
+    assert failed(evaluation) == {"every_run_clean", "suite_wall_time"}
+    assert evaluation.placements[-1].place == "in_window"
+    assert "step shadow.job=failure" in evaluation.placements[-1].reasons
+
+
+def test_an_annotation_read_that_fails_is_not_a_shutdown():
+    """Fail-closed: a read that could not answer never becomes the cause that sets a run aside."""
+    shadow_failed = run(20, day=2, hour=5, **shadow_shutdown_fields())
+    problem = "gh api repos/o/r/check-runs/12/annotations: HTTP 502"
+    evaluation = evaluate(clean_window() + [shadow_failed],
+                          job_evidence=lambda _run: job_evidence("success", "failure", (), problem))
+    assert failed(evaluation) == {"every_run_clean", "suite_wall_time"}
+    assert evaluation.placements[-1].place == "in_window"
+    assert f"evidence: {problem}" in evaluation.placements[-1].reasons
+
+
+@pytest.mark.parametrize(("message", "shutdown"), [
+    ("The runner has received a shutdown signal. This can happen when the runner service is stopped", True),
+    ("The operation was canceled.", False),
+    ("Process completed with exit code 1.", False),
+], ids=["runner-shutdown", "canceled-annotation", "step-failed"])
+def test_only_a_shutdown_annotation_counts(message, shutdown):
+    """Codex round 2 on #2184: 'The operation was canceled.' names no cause, so the annotation proves nothing alone."""
+    assert hist.is_shutdown_annotation(message) is shutdown
+
+
+@pytest.mark.parametrize(("log", "shutdown"), [
+    ("2026-10-22T19:55:00Z ##[error]The runner has received a shutdown signal. This can happen when the runner "
+     "service is stopped, or a manually started runner is canceled.\n2026-10-22T19:55:01Z ##[error]The operation "
+     "was canceled.\n", True),
+    ("2026-10-22T19:55:00Z ##[error]The operation was canceled.\n", False),
+    ("2026-10-22T19:55:00Z ##[error]The action has timed out.\n", False),
+], ids=["shutdown-line", "cancel-only", "timeout"])
+def test_only_the_shutdown_line_in_a_job_log_counts(log, shutdown):
+    """The job log is the evidence the annotations are not: only its shutdown line names the cause."""
+    assert hist.is_shutdown_log(log) is shutdown
+
+
+def test_the_profile_a_jobs_are_taken_from_the_runs_job_list():
+    payload = {"total_count": 3, "jobs": [
+        {"id": 1, "name": "Lint Patterns (silent-except + atomic-write)", "conclusion": "success"},
+        {"id": 2, "name": "Profile A (doctor + core tests)", "conclusion": "failure",
+         "check_run_url": "https://api.github.com/repos/o/r/check-runs/22"},
+        {"id": 3, "name": "Profile A (xdist shadow)", "conclusion": "success"},
+    ]}
+    assert hist.profile_a_jobs(payload) == {
+        "reference": {"id": 2, "conclusion": "failure",
+                      "check_run_url": "https://api.github.com/repos/o/r/check-runs/22"},
+        "shadow": {"id": 3, "conclusion": "success", "check_run_url": None}}
+    assert hist.profile_a_jobs({"total_count": 0, "jobs": []}) == {}
+    assert hist.profile_a_jobs({"jobs": "not a list"}) is None
+
+
+def test_a_window_of_clean_and_not_measurable_runs_holds_once_the_clean_runs_meet_the_counts():
+    """The set-aside runs are not evidence either way: the ten clean runs alone satisfy the rule."""
+    shut_down = [run(20, day=3, hour=1, **shadow_shutdown_fields()),
+                 run(21, day=3, hour=2, **reference_shutdown_fields())]
+    evidence = {"1020": job_evidence("success", "failure", ("shadow",)),
+                "1021": job_evidence("failure", "success", ("reference",))}
+    evaluation = evaluate(clean_window() + shut_down, job_evidence=lambda run_: evidence[run_.run_id])
+    assert evaluation.holds, [vars(c) for c in evaluation.conditions]
+    assert len(evaluation.window) == 10
+    assert [p.place for p in evaluation.placements[-2:]] == ["not_measurable", "not_measurable"]
+    assert evaluation.placements[-1].run.head_branch == "dispatch/x", "the newest run is set aside, not the latest"
+
+
+def test_the_table_lists_a_not_measurable_run_and_its_reason():
+    shutdown = run(20, day=2, hour=5, **shadow_shutdown_fields())
+    evaluation = evaluate(clean_window() + [shutdown],
+                          job_evidence=lambda _run: job_evidence("success", "failure", ("shadow",)))
+    text = hist.render(evaluation, HEADER)
+    assert "set aside (not measurable, option A):" in text
+    assert "run 1020: a runner shutdown signal in the xdist shadow job" in text
+    document = json.loads(hist.as_json(evaluation, HEADER))
+    assert document["runs"][-1]["place"] == "not_measurable"
+
+
+# --- codex round 3 on #2184: only positive evidence is a cause, and missing evidence never clears the shadow ------
+
+
+def test_an_unknown_reference_exit_is_no_cause_and_keeps_the_run_dirty():
+    """The codex round 3 reproduction: exit null with the result present and the job green set the run aside."""
+    unknown = run(20, day=2, hour=5, reference={**REFERENCE_OK, "exit": None})
+    evaluation = evaluate(clean_window() + [unknown],
+                          job_evidence=lambda _run: job_evidence("success", "success"))
+    assert failed(evaluation) == {"every_run_clean"}
+    assert evaluation.placements[-1].place == "in_window"
+    assert evaluation.placements[-1].reasons == ["step reference.exit=None"]
+
+
+def test_a_malformed_reference_exit_is_no_cause_and_keeps_the_run_dirty():
+    """An exit that is not a whole number says nothing about the suite: never cause (a)."""
+    malformed = run(20, day=2, hour=5, reference={**REFERENCE_OK, "exit": "x"})
+    evaluation = evaluate(clean_window() + [malformed],
+                          job_evidence=lambda _run: job_evidence("success", "success"))
+    assert failed(evaluation) == {"every_run_clean"}
+    assert evaluation.placements[-1].place == "in_window"
+    assert evaluation.placements[-1].reasons == ["step reference.exit=x"]
+
+
+def test_a_reference_exit_of_false_is_not_a_whole_number_and_keeps_the_run_dirty():
+    """The exit-bool case used to count as a failure; a bool is not a whole number (whole_number), so it is no cause."""
+    boolean = run(20, day=2, hour=5, reference={**REFERENCE_OK, "exit": False})
+    evaluation = evaluate(clean_window() + [boolean])
+    assert failed(evaluation) == {"every_run_clean"}
+    assert evaluation.placements[-1].place == "in_window"
+    assert evaluation.placements[-1].reasons == ["step reference.exit=False"]
+
+
+@pytest.mark.parametrize("conclusion", ["cancelled", "timed_out", "skipped", None],
+                         ids=["cancelled", "timed-out", "skipped", "unknown"])
+def test_a_reference_conclusion_that_is_not_failure_is_no_cause(conclusion):
+    """Only the conclusion `failure` is positive evidence of a failure; any other one names no cause."""
+    cancelled = run(20, day=2, hour=5, **reference_cancelled_fields())
+    evaluation = evaluate(clean_window() + [cancelled],
+                          job_evidence=lambda _run: job_evidence(conclusion, "success"))
+    assert failed(evaluation) == {"every_run_clean"}
+    assert evaluation.placements[-1].place == "in_window"
+    assert "step reference.job=cancelled" in evaluation.placements[-1].reasons
+
+
+@pytest.mark.parametrize("job_result", ["cancelled", "timed_out", None], ids=["cancelled", "timed-out", "unknown"])
+def test_a_reference_job_result_that_is_not_failure_is_no_cause(job_result):
+    """A verdict block that names no failure is not evidence that the job failed; only the text `failure` is."""
+    unknown = run(20, day=2, hour=5,
+                  reference={**REFERENCE_OK, "job_result": job_result, "result": "missing", "exit": None})
+    evaluation = evaluate(clean_window() + [unknown])
+    assert failed(evaluation) == {"every_run_clean"}
+    assert evaluation.placements[-1].place == "in_window"
+    assert f"step reference.job={job_result or 'unknown'}" in evaluation.placements[-1].reasons
+
+
+def test_a_reference_failure_with_no_shadow_job_and_no_verdict_stays_dirty():
+    """Only a shadow known to have succeeded, or proven shut down, lets a run with cause (a) be set aside."""
+    missing = _without_verdict(run(30, day=3))
+    absent = hist.JobEvidence({"reference": "failure"}, (), "no job 'Profile A (xdist shadow)' in the run")
+    evaluation = evaluate(clean_window() + [missing], job_evidence=lambda _run: absent)
+    assert failed(evaluation) == {"every_run_has_verdict"}
+    assert evaluation.placements[-1].place == "no_verdict"
+
+
+def test_an_unknown_shadow_result_keeps_the_run_dirty():
+    """An unknown shadow result is treated like a failed one: it never clears a run whose reference failed."""
+    unknown = run(20, day=2, hour=5, shadow={**SHADOW_OK, "job_result": None})
+    evaluation = evaluate(clean_window() + [unknown],
+                          job_evidence=lambda _run: job_evidence("failure", None))
+    assert failed(evaluation) == {"every_run_clean"}
+    assert evaluation.placements[-1].place == "in_window"
+    assert "step shadow.job=unknown" in evaluation.placements[-1].reasons
+
+
+def test_a_cancelled_reference_with_the_shutdown_line_in_its_log_is_still_set_aside():
+    """Cause (a) needs positive evidence of a failure; cause (b), the shutdown, does not depend on the conclusion."""
+    cancelled = run(20, day=2, hour=5, **reference_cancelled_fields())
+    evaluation = evaluate(clean_window() + [cancelled],
+                          job_evidence=lambda _run: job_evidence("cancelled", "success", ("reference",)))
+    assert evaluation.holds, [vars(c) for c in evaluation.conditions]
+    assert evaluation.placements[-1].place == "not_measurable"
+    assert evaluation.placements[-1].reasons == ["a runner shutdown signal in the serial Profile A job"]
 
 
 # --- a verdict that does not read as one is no verdict --------------------------------------------------------
@@ -665,6 +951,26 @@ elif args[:2] == ["run", "download"]:
     os.makedirs(target, exist_ok=True)
     if source != "empty":
         shutil.copy(source, os.path.join(target, "xdist-parity-verdict.json"))
+elif args[:1] == ["api"]:
+    path = args[1].split("?")[0]
+    if "/actions/runs/" in path and path.endswith("/jobs"):
+        key = path.split("/actions/runs/")[1].split("/")[0]
+        payload = spec.get("jobs", {}).get(key)
+    elif "/check-runs/" in path and path.endswith("/annotations"):
+        key = path.split("/check-runs/")[1].split("/")[0]
+        payload = spec.get("annotations", {}).get(key)
+    elif "/actions/jobs/" in path and path.endswith("/logs"):
+        key = path.split("/actions/jobs/")[1].split("/")[0]
+        payload = spec.get("logs", {}).get(key)
+    else:
+        payload = None
+    if payload is None:
+        print("gh: Not Found (HTTP 404)", file=sys.stderr)
+        sys.exit(1)
+    if payload == "error":
+        print("gh: HTTP 502: Bad Gateway", file=sys.stderr)
+        sys.exit(1)
+    print(payload if isinstance(payload, str) else json.dumps(payload))
 else:
     print("unexpected gh call: %r" % (args,), file=sys.stderr)
     sys.exit(3)
@@ -678,7 +984,9 @@ def _real_commits() -> tuple:
     return base, head
 
 
-def _cli(tmp_path: Path, runs: list, verdicts: dict, *args: str, raw: dict | None = None) -> subprocess.CompletedProcess:
+def _cli(tmp_path: Path, runs: list, verdicts: dict, *args: str, raw: dict | None = None,
+         jobs: dict | None = None, annotations: dict | None = None,
+         logs: dict | None = None) -> subprocess.CompletedProcess:
     """The CLI against the gh stand-in; *raw* maps a gh command ("run list") to the exact text it prints."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -689,7 +997,9 @@ def _cli(tmp_path: Path, runs: list, verdicts: dict, *args: str, raw: dict | Non
         paths[run_id] = str(tmp_path / f"verdict-{run_id}.json")
         Path(paths[run_id]).write_text(json.dumps(document), encoding="utf-8")
     spec = tmp_path / "spec.json"
-    spec.write_text(json.dumps({"runs": runs, "verdicts": paths, "raw": raw or {}}), encoding="utf-8")
+    spec.write_text(json.dumps({"runs": runs, "verdicts": paths, "raw": raw or {},
+                                "jobs": jobs or {}, "annotations": annotations or {},
+                                "logs": logs or {}}), encoding="utf-8")
     env = {**{k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")},
            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "FAKE_GH_SPEC": str(spec)}
     return subprocess.run([sys.executable, str(SCRIPT), *args], env=env, capture_output=True, text=True, cwd=str(REPO_ROOT))
@@ -1003,6 +1313,253 @@ def test_a_cache_entry_that_proves_the_latest_attempt_is_used_without_a_download
     code, document, places = _cli_window(tmp_path, runs, verdicts, base, cache)
     assert code == 0, document["conditions"]
     assert places["11"]["place"] == "in_window"
+
+
+# --- option A end to end: the job list and its check-run annotations are read from gh ---------------------------
+
+
+def _check_run_url(check_run_id) -> str:
+    return f"https://api.github.com/repos/o/r/check-runs/{check_run_id}"
+
+
+def _job(job_id: int, name: str, conclusion: str, check_run_url) -> dict:
+    """One Profile A job row; a *check_run_url* of None leaves the field out, as a row without the URL."""
+    row = {"id": job_id, "name": name, "status": "completed", "conclusion": conclusion}
+    if check_run_url is not None:
+        row["check_run_url"] = check_run_url
+    return row
+
+
+def _profile_a_jobs(reference: str, shadow: str) -> dict:
+    """The run's two Profile A jobs, each with the check_run_url GitHub keys its annotations by."""
+    return {"total_count": 2, "jobs": [
+        _job(11, "Profile A (doctor + core tests)", reference, _check_run_url(11)),
+        _job(12, "Profile A (xdist shadow)", shadow, _check_run_url(12)),
+    ]}
+
+
+def _job_list(shadow_conclusion: str, shadow_url) -> dict:
+    """The two Profile A jobs with a green reference; *shadow_url* is the shadow's check_run_url as given."""
+    return {"total_count": 2, "jobs": [
+        _job(11, "Profile A (doctor + core tests)", "success", _check_run_url(11)),
+        _job(12, "Profile A (xdist shadow)", shadow_conclusion, shadow_url),
+    ]}
+
+
+CANCEL_ANNOTATION = [{"annotation_level": "failure", "message": "The operation was canceled."}]
+SHUTDOWN_ANNOTATION = [{"annotation_level": "failure",
+                        "message": "The runner has received a shutdown signal. This can happen when the runner "
+                                   "service is stopped, or a manually started runner is canceled."}]
+SHUTDOWN_LOG = ("2026-10-22T19:55:00.0000000Z ##[error]The runner has received a shutdown signal. This can happen "
+                "when the runner service is stopped, or a manually started runner is canceled.\n"
+                "2026-10-22T19:55:01.0000000Z ##[error]The operation was canceled.\n")
+CANCEL_LOG = "2026-10-22T19:55:00.0000000Z ##[error]The operation was canceled.\n"
+
+
+def _option_a_cli(tmp_path: Path, *, cache: Path | None = None, job_list: dict | None = None, **spec) -> dict:
+    """The row of the one shadow-shutdown run the CLI places; *spec* feeds the gh stand-in (*logs*, *annotations*)."""
+    base, head = _real_commits()
+    runs = [_listed(1, head, "2099-01-01T00:00:00Z")]
+    verdicts = {"1": verdict("heavy-parity", run_id="1", **shadow_shutdown_fields())}
+    args = ["--last-d3-merge", base, "--fingerprint", FP, "--no-watch-list", "--json"]
+    if cache is not None:
+        args += ["--cache-dir", str(cache)]
+    jobs = {"1": job_list if job_list is not None else _profile_a_jobs("success", "failure")}
+    proc = _cli(tmp_path, runs, verdicts, *args, jobs=jobs, **spec)
+    assert proc.returncode == 1, proc.stderr
+    [row] = json.loads(proc.stdout)["runs"]
+    return row
+
+
+def test_the_cli_keeps_a_cancel_annotation_without_a_shutdown_log_line_dirty(tmp_path):
+    """The red case of codex round 2 on #2184: 'The operation was canceled.' names no cause; the log line does."""
+    row = _option_a_cli(tmp_path, annotations={"12": CANCEL_ANNOTATION}, logs={"12": CANCEL_LOG})
+    assert row["place"] == "in_window"
+    assert "step shadow.job=failure" in row["reasons"]
+
+
+def test_the_cli_sets_aside_a_run_whose_shadow_job_log_carries_the_shutdown_line(tmp_path):
+    row = _option_a_cli(tmp_path, annotations={"12": CANCEL_ANNOTATION}, logs={"12": SHUTDOWN_LOG})
+    assert row["place"] == "not_measurable"
+    assert row["reasons"] == ["a runner shutdown signal in the xdist shadow job"]
+
+
+def test_the_cli_takes_a_shutdown_annotation_without_reading_the_log(tmp_path):
+    """The annotation itself carries the shutdown text: a log that cannot be read changes nothing."""
+    row = _option_a_cli(tmp_path, annotations={"12": SHUTDOWN_ANNOTATION}, logs={"12": "error"})
+    assert row["place"] == "not_measurable"
+    assert row["reasons"] == ["a runner shutdown signal in the xdist shadow job"]
+
+
+def test_the_cli_keeps_a_cancelled_reference_without_shutdown_evidence_dirty(tmp_path):
+    """Codex round 3 on #2184: a cancelled reference names no cause, and its run blocks instead of being set aside."""
+    base, head = _real_commits()
+    runs = [_listed(1, head, "2099-01-01T00:00:00Z")]
+    verdicts = {"1": verdict(run_id="1", **reference_cancelled_fields())}
+    proc = _cli(tmp_path, runs, verdicts, "--last-d3-merge", base, "--fingerprint", FP, "--no-watch-list", "--json",
+                jobs={"1": _profile_a_jobs("cancelled", "success")},
+                annotations={"11": CANCEL_ANNOTATION}, logs={"11": CANCEL_LOG})
+    assert proc.returncode == 1, proc.stderr
+    [row] = json.loads(proc.stdout)["runs"]
+    assert row["place"] == "in_window"
+    assert "step reference.job=cancelled" in row["reasons"]
+
+
+def test_the_cli_keeps_a_run_dirty_when_its_job_log_cannot_be_read(tmp_path):
+    """Fail-closed like an annotation read: a log fetch that fails is never a shutdown, and it names its problem."""
+    row = _option_a_cli(tmp_path, annotations={"12": CANCEL_ANNOTATION}, logs={"12": "error"})
+    assert row["place"] == "in_window"
+    assert any("evidence:" in reason and "HTTP 502" in reason for reason in row["reasons"]), row["reasons"]
+
+
+def test_a_cached_shutdown_answer_is_used_without_reading_the_log(tmp_path):
+    cache = tmp_path / "cache"
+    (cache / "1").mkdir(parents=True)
+    (cache / "1" / "shutdown-12.json").write_text(json.dumps({"shutdown": True}), encoding="utf-8")
+    row = _option_a_cli(tmp_path, cache=cache, annotations={"12": CANCEL_ANNOTATION}, logs={"12": "error"})
+    assert row["place"] == "not_measurable"
+    assert row["reasons"] == ["a runner shutdown signal in the xdist shadow job"]
+
+
+def test_a_cached_answer_that_the_log_has_no_shutdown_line_is_used_too(tmp_path):
+    cache = tmp_path / "cache"
+    (cache / "1").mkdir(parents=True)
+    (cache / "1" / "shutdown-12.json").write_text(json.dumps({"shutdown": False}), encoding="utf-8")
+    row = _option_a_cli(tmp_path, cache=cache, annotations={"12": CANCEL_ANNOTATION}, logs={"12": "error"})
+    assert row["place"] == "in_window"
+    assert not any("evidence:" in reason for reason in row["reasons"]), row["reasons"]
+
+
+def test_the_cli_keeps_a_run_with_a_failed_annotation_read_dirty(tmp_path):
+    """Fail-closed end to end: the annotation request fails, so the shadow job failure is not a shutdown."""
+    base, head = _real_commits()
+    runs = [_listed(1, head, "2099-01-01T00:00:00Z")]
+    verdicts = {"1": verdict("heavy-parity", run_id="1", **shadow_shutdown_fields())}
+    proc = _cli(tmp_path, runs, verdicts, "--last-d3-merge", base, "--fingerprint", FP, "--no-watch-list", "--json",
+                jobs={"1": _profile_a_jobs("success", "failure")}, annotations={"12": "error"})
+    assert proc.returncode == 1, proc.stderr
+    [row] = json.loads(proc.stdout)["runs"]
+    assert row["place"] == "in_window"
+    assert any("evidence:" in reason and "HTTP 502" in reason for reason in row["reasons"]), row["reasons"]
+
+
+# --- codex round 4 on #2184: the check-run id comes from check_run_url, and a failed annotation read reads the log ---
+
+
+def _serve_job_api(tmp_path: Path, monkeypatch, *, jobs: dict, annotations: dict | None = None,
+                   logs: dict | None = None) -> None:
+    """Put the gh stand-in on PATH for a direct read of run 1's jobs, annotations and logs."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "gh").write_text(FAKE_GH, encoding="utf-8")
+    (bin_dir / "gh").chmod(0o755)
+    spec = tmp_path / "api-spec.json"
+    spec.write_text(json.dumps({"runs": [], "verdicts": {}, "jobs": {"1": jobs},
+                                "annotations": annotations or {}, "logs": logs or {}}), encoding="utf-8")
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("FAKE_GH_SPEC", str(spec))
+
+
+def _read_evidence(tmp_path: Path, monkeypatch, jobs: dict, *, annotations: dict | None = None,
+                   logs: dict | None = None) -> "hist.JobEvidence":
+    """read_job_evidence for run 1 against the stand-in; the cache lives under *tmp_path*."""
+    _serve_job_api(tmp_path, monkeypatch, jobs=jobs, annotations=annotations, logs=logs)
+    run = hist.Run("1", 1, "a" * 40, "dispatch/x", "pull_request", "2099-01-01T00:00:00Z", "completed", "success")
+    return hist.read_job_evidence("o/r", run, tmp_path / "cache")
+
+
+def test_the_annotations_are_read_by_the_check_run_id_of_check_run_url(tmp_path, monkeypatch):
+    """Red case of codex round 4 on #2184: job id and check-run id differ, and the API key is the latter."""
+    evidence = _read_evidence(tmp_path, monkeypatch, _job_list("failure", _check_run_url(1202)),
+                              annotations={"1202": SHUTDOWN_ANNOTATION})
+    assert evidence.problem == ""
+    assert evidence.shutdowns == ("shadow",)
+
+
+def test_a_failed_annotation_read_still_reads_the_job_log(tmp_path, monkeypatch):
+    """Red case of codex round 4 on #2184: the failed read is a problem, and the log is the stronger evidence."""
+    evidence = _read_evidence(tmp_path, monkeypatch, _job_list("failure", _check_run_url(1202)),
+                              annotations={"1202": "error"}, logs={"12": SHUTDOWN_LOG})
+    assert evidence.shutdowns == ("shadow",)
+    assert "HTTP 502" in evidence.problem
+    assert "shadow job annotations:" in evidence.problem
+
+
+def test_a_job_without_a_check_run_url_is_a_problem_and_its_log_is_still_read(tmp_path, monkeypatch):
+    evidence = _read_evidence(tmp_path, monkeypatch, _job_list("failure", None), logs={"12": SHUTDOWN_LOG})
+    assert evidence.shutdowns == ("shadow",)
+    assert evidence.problem == "shadow job annotations: no check-run id in check_run_url"
+
+
+@pytest.mark.parametrize("url", [
+    "https://api.github.com/repos/o/r/check-runs/",
+    "https://api.github.com/repos/o/r/check-runs/1202x",
+    "https://api.github.com/repos/o/r/check-runs/-1202",
+    "not a url",
+    "",
+    1202,
+], ids=["no-tail", "suffix", "negative", "no-path", "empty", "not-text"])
+def test_a_malformed_check_run_url_is_a_problem_and_the_log_is_still_read(url, tmp_path, monkeypatch):
+    evidence = _read_evidence(tmp_path, monkeypatch, _job_list("failure", url), logs={"12": SHUTDOWN_LOG})
+    assert evidence.shutdowns == ("shadow",)
+    assert evidence.problem == "shadow job annotations: no check-run id in check_run_url"
+
+
+def test_both_reads_failing_name_both_problems_and_never_a_shutdown(tmp_path, monkeypatch):
+    evidence = _read_evidence(tmp_path, monkeypatch, _job_list("failure", _check_run_url(1202)),
+                              annotations={"1202": "error"}, logs={"12": "error"})
+    assert evidence.shutdowns == ()
+    assert evidence.problem.count("HTTP 502") == 2
+    assert "shadow job annotations:" in evidence.problem and "shadow job log:" in evidence.problem
+
+
+def test_the_annotation_cache_is_keyed_by_the_check_run_id(tmp_path, monkeypatch):
+    """A cache entry under the check-run id answers without any gh call: both reads would fail if made."""
+    cache = tmp_path / "cache" / "1"
+    cache.mkdir(parents=True)
+    messages = [SHUTDOWN_ANNOTATION[0]["message"]]
+    (cache / "annotations-1202.json").write_text(json.dumps(messages), encoding="utf-8")
+    evidence = _read_evidence(tmp_path, monkeypatch, _job_list("failure", _check_run_url(1202)),
+                              annotations={"1202": "error"}, logs={"12": "error"})
+    assert evidence.problem == ""
+    assert evidence.shutdowns == ("shadow",)
+
+
+def test_a_fresh_annotation_read_is_cached_under_the_check_run_id(tmp_path, monkeypatch):
+    evidence = _read_evidence(tmp_path, monkeypatch, _job_list("failure", _check_run_url(1202)),
+                              annotations={"1202": CANCEL_ANNOTATION}, logs={"12": CANCEL_LOG})
+    assert evidence.problem == "" and evidence.shutdowns == ()
+    assert (tmp_path / "cache" / "1" / "annotations-1202.json").is_file()
+    assert not (tmp_path / "cache" / "1" / "annotations-12.json").exists()
+
+
+def test_the_cli_reads_the_annotations_by_the_check_run_id_of_check_run_url(tmp_path):
+    """Red case of codex round 4 end to end: the job id 12 and the check-run id 1202 differ."""
+    job_list = {"total_count": 2, "jobs": [
+        _job(11, "Profile A (doctor + core tests)", "success", _check_run_url(11)),
+        _job(12, "Profile A (xdist shadow)", "failure", _check_run_url(1202)),
+    ]}
+    row = _option_a_cli(tmp_path, job_list=job_list, annotations={"1202": SHUTDOWN_ANNOTATION})
+    assert row["place"] == "not_measurable"
+    assert row["reasons"] == ["a runner shutdown signal in the xdist shadow job"]
+
+
+def test_the_cli_sets_aside_a_run_when_the_annotation_read_fails_and_the_log_has_the_shutdown_line(tmp_path):
+    """Red case of codex round 4 end to end: a failed annotation read must not skip the log."""
+    row = _option_a_cli(tmp_path, annotations={"12": "error"}, logs={"12": SHUTDOWN_LOG})
+    assert row["place"] == "not_measurable"
+    assert row["reasons"][0].startswith("a runner shutdown signal in the xdist shadow job; evidence: ")
+    assert "shadow job annotations:" in row["reasons"][0]
+
+
+def test_the_cli_names_a_missing_check_run_id_and_still_reads_the_log(tmp_path):
+    job_list = {"total_count": 2, "jobs": [
+        _job(11, "Profile A (doctor + core tests)", "success", _check_run_url(11)),
+        _job(12, "Profile A (xdist shadow)", "failure", None),
+    ]}
+    row = _option_a_cli(tmp_path, job_list=job_list, logs={"12": CANCEL_LOG})
+    assert row["place"] == "in_window"
+    assert any("no check-run id in check_run_url" in reason for reason in row["reasons"]), row["reasons"]
 
 
 # --- codex round 2 on #2105: ancestry only from complete history -----------------------------------------------
