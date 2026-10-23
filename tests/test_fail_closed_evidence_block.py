@@ -1,4 +1,10 @@
-"""The shared fail-closed block reaches every build role on every lane, once (dlv-48b4e15d7ebc)."""
+"""The shared fail-closed block reaches every build role on every lane, once.
+
+dlv-48b4e15d7ebc introduced the block; dlv-4457d0e83469 (OI-2318) closed the
+fallback hole: a build-role prompt no longer drops the block when skill
+injection fails, and a missing block file now fails the dispatch before any
+worker is spawned.
+"""
 
 import argparse
 import sys
@@ -19,11 +25,11 @@ from envelope_prepare import _prepare
 
 REPO = Path(__file__).resolve().parent.parent
 
-BUILD_ROLES = [
-    "backend-developer", "frontend-developer", "quality-engineer", "security-engineer",
-    "database-engineer", "test-engineer", "system-architect", "architect",
-    "intelligence-engineer",
-]
+# Parametrize from the positive list itself: a role added to BUILD_ROLES is
+# covered automatically instead of silently untested (the five skill-only roles
+# were: api-developer, debugger, python-optimizer, supabase-expert,
+# performance-profiler).
+BUILD_ROLES = sorted(fce.BUILD_ROLES)
 REVIEWER_ROLES = ["reviewer", "review-gate", "plan-reviewer", "code-reviewer", "deliberation-panelist"]
 
 
@@ -61,10 +67,65 @@ def test_build_role_gets_block_exactly_once(lane, role):
     assert fce.load_block() in prompt
 
 
+def test_build_roles_has_14_members():
+    """A removal from BUILD_ROLES must be a visible, deliberate edit."""
+    assert len(fce.BUILD_ROLES) == 14
+
+
 @pytest.mark.parametrize("lane", sorted(LANES))
 @pytest.mark.parametrize("role", REVIEWER_ROLES)
 def test_reviewer_role_gets_no_block(lane, role):
     assert fce.BLOCK_HEADING not in LANES[lane](role)
+
+
+@pytest.mark.parametrize("lane", sorted(LANES))
+@pytest.mark.parametrize("role", BUILD_ROLES)
+def test_injection_failure_still_carries_block_exactly_once(lane, role):
+    """OI-2318: the fallback header must not drop the rule for a build role."""
+    with patch("skill_context._inject_skill_context", side_effect=RuntimeError("inject boom")):
+        prompt = LANES[lane](role)
+    assert prompt.count(fce.BLOCK_HEADING) == 1
+    assert fce.load_block() in prompt
+    assert f"**{role}**" in prompt
+
+
+@pytest.mark.parametrize("lane", sorted(LANES))
+@pytest.mark.parametrize("role", REVIEWER_ROLES)
+def test_injection_failure_keeps_reviewer_bare(lane, role):
+    """D1: a reviewer role's fallback header stays unenriched."""
+    with patch("skill_context._inject_skill_context", side_effect=RuntimeError("inject boom")):
+        prompt = LANES[lane](role)
+    assert fce.BLOCK_HEADING not in prompt
+    assert f"**{role}**" in prompt
+
+
+@pytest.mark.parametrize("lane", sorted(LANES))
+@pytest.mark.parametrize("role", ["backend-developer", "api-developer"])
+def test_missing_block_file_fails_preparation(lane, role):
+    """A broken install raises before a worker can be spawned — never a bare header."""
+    absent = Path("/nonexistent-vnx-install/fail_closed_evidence.md")
+    with patch.object(fce, "_BLOCK_PATH", absent):
+        with pytest.raises(fce.FailClosedBlockError) as raised:
+            LANES[lane](role)
+    message = str(raised.value)
+    assert role in message
+    assert "d1" in message
+    assert "fail_closed_evidence.md" in message
+
+
+def test_legacy_route_without_role_source_still_carries_block():
+    """OI-2318: the no-CLAUDE.md legacy return path used to drop the block.
+
+    ``api-developer`` has no PromptAssembler role file and no agents/skills
+    CLAUDE.md, and terminal T99 has none either — so the legacy resolver used
+    to return the raw instruction. A build role must still get the rule.
+    """
+    with patch("skill_context._try_prompt_assembler", return_value=None):
+        prompt = sd._inject_skill_context(
+            "T99", "Do X", "api-developer", {"dispatch_id": "d1"},
+        )
+    assert prompt.count(fce.BLOCK_HEADING) == 1
+    assert fce.load_block() in prompt
 
 
 def test_block_stays_under_2kb():

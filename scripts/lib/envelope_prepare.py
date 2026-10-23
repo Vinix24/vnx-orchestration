@@ -16,6 +16,7 @@ from typing import Optional
 
 import report_body_contract
 from envelope_types import EnvelopeSpec
+from fail_closed_evidence import FailClosedBlockError, with_block_or_raise
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +78,11 @@ def _prepare(spec: EnvelopeSpec) -> str:
             spec.role,
             dispatch_metadata,
         )
+    except FailClosedBlockError as exc:  # OI-2318: never fall back to a bare header
+        raise FailClosedBlockError(
+            f"envelope._prepare: cannot assemble prompt for role={spec.role!r} "
+            f"dispatch={spec.dispatch_id!r}: {exc}"
+        ) from exc
     except Exception as exc:  # noqa: BLE001 — fallback must never break a dispatch
         logger.warning(
             "envelope._prepare: skill injection failed (%s); falling back to role label",
@@ -89,6 +95,15 @@ def _prepare(spec: EnvelopeSpec) -> str:
                 "## Worker Preamble\n\n"
                 "You are a VNX headless worker executing a dispatch instruction."
             )
+        # OI-2318: the fallback header carries the shared block for a build
+        # role too; a broken install raises here instead of shipping a bare
+        # header. A reviewer role stays bare (D1).
+        header = with_block_or_raise(
+            header,
+            spec.role,
+            dispatch_id=spec.dispatch_id,
+            lane="envelope._prepare",
+        )
         instruction = report_body_contract.with_directive(
             f"{header}\n\n{instruction}",
             spec.dispatch_id,
