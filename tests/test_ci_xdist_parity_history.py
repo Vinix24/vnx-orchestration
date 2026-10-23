@@ -286,8 +286,7 @@ def test_a_failure_the_verdict_records_blocks_even_when_its_step_failures_leave_
 @pytest.mark.parametrize(("change", "reason"), [
     ({"job_result": "failure"}, "the serial reference job failed (reference.job=failure)"),
     ({"exit": 1}, "the serial reference suite exited 1"),
-    ({"exit": False}, "the serial reference suite exited False"),
-], ids=["job-result", "exit-1", "exit-bool"])
+], ids=["job-result", "exit-1"])
 def test_a_reference_failure_the_verdict_records_is_not_measurable_without_the_job_list(change, reason):
     """Option A reads cause (a) from the verdict itself: the job's outcome is already in its reference block."""
     runs = clean_window()
@@ -509,6 +508,15 @@ def serial_failed_parity_clean_fields() -> dict:
             "shadow": {**SHADOW_OK, "exit_codes": {"parallel": 1, "serial": None}, "verdict": "shadow_failed"}}
 
 
+def reference_cancelled_fields() -> dict:
+    """A verdict whose serial reference job was cancelled: no reference evidence, exit 2, and no failure named."""
+    return {"exit": 2, "verdict": "invalid_evidence", "differences": None,
+            "reference": {"duration_s": None, "exit": None, "job_result": "cancelled", "result": "missing"},
+            "step_failures": ["parity.download_reference=failure", "reference.job=cancelled",
+                              "reference.result=missing", "parity.parity=failure"],
+            "shadow": dict(SHADOW_OK)}
+
+
 def test_a_shadow_job_shutdown_is_not_measurable():
     shutdown = run(20, day=2, hour=5, **shadow_shutdown_fields())
     evaluation = evaluate(clean_window() + [shutdown],
@@ -634,6 +642,90 @@ def test_the_table_lists_a_not_measurable_run_and_its_reason():
     assert "run 1020: a runner shutdown signal in the xdist shadow job" in text
     document = json.loads(hist.as_json(evaluation, HEADER))
     assert document["runs"][-1]["place"] == "not_measurable"
+
+
+# --- codex round 3 on #2184: only positive evidence is a cause, and missing evidence never clears the shadow ------
+
+
+def test_an_unknown_reference_exit_is_no_cause_and_keeps_the_run_dirty():
+    """The codex round 3 reproduction: exit null with the result present and the job green set the run aside."""
+    unknown = run(20, day=2, hour=5, reference={**REFERENCE_OK, "exit": None})
+    evaluation = evaluate(clean_window() + [unknown],
+                          job_evidence=lambda _run: job_evidence("success", "success"))
+    assert failed(evaluation) == {"every_run_clean"}
+    assert evaluation.placements[-1].place == "in_window"
+    assert evaluation.placements[-1].reasons == ["step reference.exit=None"]
+
+
+def test_a_malformed_reference_exit_is_no_cause_and_keeps_the_run_dirty():
+    """An exit that is not a whole number says nothing about the suite: never cause (a)."""
+    malformed = run(20, day=2, hour=5, reference={**REFERENCE_OK, "exit": "x"})
+    evaluation = evaluate(clean_window() + [malformed],
+                          job_evidence=lambda _run: job_evidence("success", "success"))
+    assert failed(evaluation) == {"every_run_clean"}
+    assert evaluation.placements[-1].place == "in_window"
+    assert evaluation.placements[-1].reasons == ["step reference.exit=x"]
+
+
+def test_a_reference_exit_of_false_is_not_a_whole_number_and_keeps_the_run_dirty():
+    """The exit-bool case used to count as a failure; a bool is not a whole number (whole_number), so it is no cause."""
+    boolean = run(20, day=2, hour=5, reference={**REFERENCE_OK, "exit": False})
+    evaluation = evaluate(clean_window() + [boolean])
+    assert failed(evaluation) == {"every_run_clean"}
+    assert evaluation.placements[-1].place == "in_window"
+    assert evaluation.placements[-1].reasons == ["step reference.exit=False"]
+
+
+@pytest.mark.parametrize("conclusion", ["cancelled", "timed_out", "skipped", None],
+                         ids=["cancelled", "timed-out", "skipped", "unknown"])
+def test_a_reference_conclusion_that_is_not_failure_is_no_cause(conclusion):
+    """Only the conclusion `failure` is positive evidence of a failure; any other one names no cause."""
+    cancelled = run(20, day=2, hour=5, **reference_cancelled_fields())
+    evaluation = evaluate(clean_window() + [cancelled],
+                          job_evidence=lambda _run: job_evidence(conclusion, "success"))
+    assert failed(evaluation) == {"every_run_clean"}
+    assert evaluation.placements[-1].place == "in_window"
+    assert "step reference.job=cancelled" in evaluation.placements[-1].reasons
+
+
+@pytest.mark.parametrize("job_result", ["cancelled", "timed_out", None], ids=["cancelled", "timed-out", "unknown"])
+def test_a_reference_job_result_that_is_not_failure_is_no_cause(job_result):
+    """A verdict block that names no failure is not evidence that the job failed; only the text `failure` is."""
+    unknown = run(20, day=2, hour=5,
+                  reference={**REFERENCE_OK, "job_result": job_result, "result": "missing", "exit": None})
+    evaluation = evaluate(clean_window() + [unknown])
+    assert failed(evaluation) == {"every_run_clean"}
+    assert evaluation.placements[-1].place == "in_window"
+    assert f"step reference.job={job_result or 'unknown'}" in evaluation.placements[-1].reasons
+
+
+def test_a_reference_failure_with_no_shadow_job_and_no_verdict_stays_dirty():
+    """Only a shadow known to have succeeded, or proven shut down, lets a run with cause (a) be set aside."""
+    missing = _without_verdict(run(30, day=3))
+    absent = hist.JobEvidence({"reference": "failure"}, (), "no job 'Profile A (xdist shadow)' in the run")
+    evaluation = evaluate(clean_window() + [missing], job_evidence=lambda _run: absent)
+    assert failed(evaluation) == {"every_run_has_verdict"}
+    assert evaluation.placements[-1].place == "no_verdict"
+
+
+def test_an_unknown_shadow_result_keeps_the_run_dirty():
+    """An unknown shadow result is treated like a failed one: it never clears a run whose reference failed."""
+    unknown = run(20, day=2, hour=5, shadow={**SHADOW_OK, "job_result": None})
+    evaluation = evaluate(clean_window() + [unknown],
+                          job_evidence=lambda _run: job_evidence("failure", None))
+    assert failed(evaluation) == {"every_run_clean"}
+    assert evaluation.placements[-1].place == "in_window"
+    assert "step shadow.job=unknown" in evaluation.placements[-1].reasons
+
+
+def test_a_cancelled_reference_with_the_shutdown_line_in_its_log_is_still_set_aside():
+    """Cause (a) needs positive evidence of a failure; cause (b), the shutdown, does not depend on the conclusion."""
+    cancelled = run(20, day=2, hour=5, **reference_cancelled_fields())
+    evaluation = evaluate(clean_window() + [cancelled],
+                          job_evidence=lambda _run: job_evidence("cancelled", "success", ("reference",)))
+    assert evaluation.holds, [vars(c) for c in evaluation.conditions]
+    assert evaluation.placements[-1].place == "not_measurable"
+    assert evaluation.placements[-1].reasons == ["a runner shutdown signal in the serial Profile A job"]
 
 
 # --- a verdict that does not read as one is no verdict --------------------------------------------------------
@@ -1272,6 +1364,20 @@ def test_the_cli_takes_a_shutdown_annotation_without_reading_the_log(tmp_path):
     row = _option_a_cli(tmp_path, annotations={"12": SHUTDOWN_ANNOTATION}, logs={"12": "error"})
     assert row["place"] == "not_measurable"
     assert row["reasons"] == ["a runner shutdown signal in the xdist shadow job"]
+
+
+def test_the_cli_keeps_a_cancelled_reference_without_shutdown_evidence_dirty(tmp_path):
+    """Codex round 3 on #2184: a cancelled reference names no cause, and its run blocks instead of being set aside."""
+    base, head = _real_commits()
+    runs = [_listed(1, head, "2099-01-01T00:00:00Z")]
+    verdicts = {"1": verdict(run_id="1", **reference_cancelled_fields())}
+    proc = _cli(tmp_path, runs, verdicts, "--last-d3-merge", base, "--fingerprint", FP, "--no-watch-list", "--json",
+                jobs={"1": _profile_a_jobs("cancelled", "success")},
+                annotations={"11": CANCEL_ANNOTATION}, logs={"11": CANCEL_LOG})
+    assert proc.returncode == 1, proc.stderr
+    [row] = json.loads(proc.stdout)["runs"]
+    assert row["place"] == "in_window"
+    assert "step reference.job=cancelled" in row["reasons"]
 
 
 def test_the_cli_keeps_a_run_dirty_when_its_job_log_cannot_be_read(tmp_path):

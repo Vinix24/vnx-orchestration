@@ -34,12 +34,22 @@ guessed here: the last D3 merge commit and the watch-list OIs.
 Option A of the cutover rule (operator decision, 2026-10-22): a run whose
 serial reference job failed, or in which either Profile A job received a
 runner shutdown signal, did not measure parity. It is ``not_measurable``: set
-aside from every condition of the window and listed with its reason. The
-shutdown is read from the job's check-run annotations (the job ids come from
-the run's job list), never from a log download; an annotation read that fails
-is not a shutdown. Two things are never set aside: a real parity difference
-(any entry in the verdict's ``differences``), and an xdist shadow job that
-failed without a shutdown signal.
+aside from every condition of the window and listed with its reason. Only
+positive evidence sets a run aside: the reference job's conclusion, or the
+verdict's ``reference.job_result``, is exactly ``failure``, or its reference
+result is present with a whole-number exit other than 0. Any other
+conclusion, an unknown or missing job result, and an exit that is missing,
+malformed or not a whole number are no cause and never set a run aside (codex
+round 3 on #2184). A shutdown is proven by the runner's own line in the job
+log (``##[error]The runner has received a shutdown signal``), read per job
+from ``actions/jobs/<id>/logs`` when the check-run annotations do not carry
+that text themselves: GitHub's ``The operation was canceled.`` annotation
+names no cause, and a read that fails is not a shutdown. Two things are never
+set aside: a real parity difference (any entry in the verdict's
+``differences``), and an xdist shadow job that is not known to have succeeded
+(the conclusion, or with none the verdict's job result, is exactly
+``success``) without a shutdown of its own: a failed shadow blocks, and an
+unknown one does too.
 
 A light run never counts, whatever its step list says: the light early return
 of the comparison names its skipped steps (OI-2147), and a light run is
@@ -208,24 +218,32 @@ def real_difference(verdict: dict) -> bool:
 
 
 def reference_failure_reason(verdict: dict | None, evidence: JobEvidence | None) -> str | None:
-    """Why the serial reference job failed (option A cause (a)); None when it did not fail.
+    """Why the serial reference job failed (option A cause (a)); None when no positive evidence says it did.
 
-    The job's conclusion comes first: it is what GitHub measured, also when
-    the parity job never ran. The verdict's own reference block says the same
-    when the job list could not be read; a block that names no job result is
-    not evidence that the job failed, so it is never a cause.
+    Only positive evidence is a cause: a job conclusion of exactly
+    ``failure``, a verdict ``reference.job_result`` of exactly ``failure``, or
+    a present reference result whose exit is a whole number other than 0. The
+    conclusion comes first because it is what GitHub measured, also when the
+    parity job never ran; the verdict's own reference block says the same when
+    the job list could not be read. A cancelled, timed-out or skipped job, any
+    other conclusion or job result, a missing one, and an exit that is None or
+    not a whole number are no evidence of a failure and never a cause (codex
+    round 3 on #2184): missing evidence must not set a run aside. A cancelled
+    job that a runner shutdown cut short is still set aside through cause (b),
+    the shutdown evidence.
     """
     conclusion = evidence.conclusion("reference") if evidence is not None else None
-    if conclusion is not None and conclusion != "success":
-        return f"the serial reference job concluded {conclusion}"
+    if conclusion == "failure":
+        return "the serial reference job concluded failure"
     if verdict is None:
         return None
     reference = verdict["reference"]
-    job_result = reference.get("job_result")
-    if job_result is not None and job_result != "success":
-        return f"the serial reference job failed (reference.job={job_result})"
-    if reference.get("result") == "present" and whole_number(reference.get("exit")) != 0:
-        return f"the serial reference suite exited {reference.get('exit')}"
+    if reference.get("job_result") == "failure":
+        return "the serial reference job failed (reference.job=failure)"
+    if reference.get("result") == "present":
+        exit_code = whole_number(reference.get("exit"))
+        if exit_code is not None and exit_code != 0:
+            return f"the serial reference suite exited {reference.get('exit')}"
     return None
 
 
@@ -239,23 +257,36 @@ def shutdown_reason(evidence: JobEvidence | None) -> str | None:
 
 
 def shadow_job_failed(verdict: dict | None, evidence: JobEvidence | None) -> bool:
-    """Whether the xdist shadow job failed; a failure without a shutdown keeps the run dirty."""
+    """Whether the xdist shadow job is not known to have succeeded; any doubt keeps the run dirty.
+
+    A shadow job that a shutdown cut short only lets a run be set aside
+    through its own proven shutdown (cause (b)); this predicate is what keeps
+    it dirty otherwise. Positive evidence of success is a job conclusion of
+    exactly ``success``, or, with no conclusion read, a verdict
+    ``shadow.job_result`` of exactly ``success``. Missing evidence is not
+    success (codex round 3 on #2184): an unknown conclusion with no verdict,
+    an unknown job result, and any other value keep the run dirty just as a
+    failed shadow does.
+    """
     conclusion = evidence.conclusion("shadow") if evidence is not None else None
-    if conclusion is not None and conclusion != "success":
+    if conclusion == "success":
+        return False
+    if conclusion is not None:
         return True
     if verdict is None:
-        return False
-    job_result = verdict["shadow"].get("job_result")
-    return job_result is not None and job_result != "success"
+        return True
+    return verdict["shadow"].get("job_result") != "success"
 
 
 def not_measurable_reason(run: Run, evidence: JobEvidence | None) -> str | None:
     """Why *run* is set aside as not a measurement (option A, operator 2026-10-22); None when it counts or blocks.
 
-    A run is set aside only when the serial reference job failed or a Profile A
-    job received a runner shutdown signal, and only when neither a real parity
-    difference nor a shadow job that failed without a shutdown keeps it dirty:
-    never more than those two causes, and never a real difference.
+    A run is set aside only when the serial reference job failed on positive
+    evidence or a Profile A job received a runner shutdown signal, and only
+    when neither a real parity difference nor a shadow job that is not known to
+    have succeeded without a shutdown of its own keeps it dirty: never more
+    than those two causes, and never a real difference. Missing or malformed
+    evidence is neither a cause nor a reason to leave a run set aside.
     """
     verdict = run.verdict if evidence_gap(run) is None else None
     if verdict is not None and not run_blockers(run):
