@@ -35,6 +35,10 @@ from dispatch_identity import (  # single canonical sentinel (dispatch-20260804-
     _IDENTITY_UNRESOLVED,
     normalize_role,
 )
+from fail_closed_evidence import (
+    FailClosedBlockError,
+    with_block_or_raise as _with_block_or_raise,
+)
 from report_body_contract import with_directive as _rbc_with_directive
 
 _EX_USAGE = 64  # sysexits.h EX_USAGE
@@ -258,6 +262,39 @@ def _record_final_prompt_integrity(
         return None
 
 
+def _fallback_enriched_instruction(
+    role: "str | None",
+    enriched: str,
+    args: argparse.Namespace,
+) -> str:
+    """Build the role-label fallback prompt when skill injection failed.
+
+    OI-2318: a build role's fallback header carries the shared fail-closed
+    block too — the old bare header shipped a build worker without the rule
+    exactly when the rich context path was broken. A reviewer role stays bare
+    (D1). ``with_block_or_raise`` raises ``FailClosedBlockError`` on a broken
+    install instead of returning a bare header.
+    """
+    if role:
+        header = f"## Role\n\nYou are operating as a **{role}** worker."
+    else:
+        header = (
+            "## Worker Preamble\n\n"
+            "You are a VNX headless worker executing a dispatch instruction."
+        )
+    header = _with_block_or_raise(
+        header,
+        role,
+        dispatch_id=args.dispatch_id,
+        lane="_enrich_instruction",
+    )
+    return _rbc_with_directive(
+        f"{header}\n\n{enriched}",
+        args.dispatch_id,
+        pr_id=getattr(args, "pr_id", None),
+    )
+
+
 def _enrich_instruction(args: argparse.Namespace) -> str:
     """Prepend role context + intelligence and repo map to instruction for non-Claude provider paths.
 
@@ -329,23 +366,17 @@ def _enrich_instruction(args: argparse.Namespace) -> str:
             role,
             dispatch_metadata,
         )
+    except FailClosedBlockError as exc:  # OI-2318: never fall back to a bare header
+        raise FailClosedBlockError(
+            f"_enrich_instruction: cannot assemble prompt for role={role!r} "
+            f"dispatch={args.dispatch_id!r}: {exc}"
+        ) from exc
     except Exception as exc:  # noqa: BLE001 — fallback must never break a dispatch
         logger.warning(
             "_enrich_instruction: skill injection failed (%s); falling back to role label",
             exc,
         )
-        if role:
-            header = f"## Role\n\nYou are operating as a **{role}** worker."
-        else:
-            header = (
-                "## Worker Preamble\n\n"
-                "You are a VNX headless worker executing a dispatch instruction."
-            )
-        enriched = _rbc_with_directive(
-            f"{header}\n\n{enriched}",
-            args.dispatch_id,
-            pr_id=getattr(args, "pr_id", None),
-        )
+        enriched = _fallback_enriched_instruction(role, enriched, args)
 
     # Deterministic control: did the resolved role source actually reach the prompt?
     # OI-983: the verification below runs with the RAW args.role. The resolved _role

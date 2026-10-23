@@ -31,6 +31,17 @@ _BLOCK_PATH = Path(__file__).resolve().parent / "prompts" / "fail_closed_evidenc
 
 BLOCK_HEADING = "## Fail-closed on evidence"
 
+
+class FailClosedBlockError(FileNotFoundError):
+    """The shared fail-closed block cannot be read from this install.
+
+    Subclasses ``FileNotFoundError`` because the concrete failure is a missing
+    block file (``load_block`` already raised that); the dedicated type lets a
+    lane re-raise it instead of folding it into a generic "injection failed"
+    fallback that would ship a build worker without the rule (OI-2318).
+    """
+
+
 # Roles whose dispatches write code. A positive list: an unknown role gets no
 # block, so a new reviewer-like role can never receive it by accident.
 BUILD_ROLES = frozenset({
@@ -56,12 +67,22 @@ def is_build_role(role: "str | None") -> bool:
 
 
 def load_block() -> str:
-    """Return the shared block text; raise when the file is missing.
+    """Return the shared block text; raise when it is missing or empty.
 
-    A missing file is a broken install, not a reason to ship a build worker
-    without the rule, so this does not degrade to an empty string.
+    A missing or empty file is a broken install, not a reason to ship a build
+    worker without the rule, so this does not degrade to an empty string.
     """
-    return _BLOCK_PATH.read_text().strip()
+    try:
+        text = _BLOCK_PATH.read_text().strip()
+    except FileNotFoundError as exc:
+        raise FailClosedBlockError(
+            f"fail-closed block file is missing at {_BLOCK_PATH}"
+        ) from exc
+    if not text:
+        raise FailClosedBlockError(
+            f"fail-closed block file is empty at {_BLOCK_PATH}"
+        )
+    return text
 
 
 def with_block(text: str, role: "str | None") -> str:
@@ -69,3 +90,26 @@ def with_block(text: str, role: "str | None") -> str:
     if not is_build_role(role) or BLOCK_HEADING in text:
         return text
     return f"{text}\n\n---\n\n{load_block()}"
+
+
+def with_block_or_raise(
+    text: str,
+    role: "str | None",
+    *,
+    dispatch_id: "str | None" = None,
+    lane: str = "prompt",
+) -> str:
+    """``with_block`` with a named, hard failure instead of a bare prompt.
+
+    A caller only reaches this on its fallback path (skill injection already
+    failed). A build role must still carry the block there, and a broken
+    install must raise *before* a worker is spawned — named with the role,
+    dispatch id and lane so the failure is diagnosable from the door log.
+    """
+    try:
+        return with_block(text, role)
+    except FailClosedBlockError as exc:
+        raise FailClosedBlockError(
+            f"{lane}: cannot assemble prompt for role={role!r} "
+            f"dispatch={dispatch_id!r}: {exc}"
+        ) from exc
