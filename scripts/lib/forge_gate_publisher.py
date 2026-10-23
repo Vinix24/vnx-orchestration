@@ -458,8 +458,9 @@ def review_verdict(
     results_dir: Optional[Path] = None,
     branch: Optional[str] = None,
     project_id: Optional[str] = None,
+    checkout: Optional[Path] = None,
 ) -> ForgeVerdict:
-    """Is every review seat filled on THIS head? One verdict for the whole review.
+    """Is every required review seat filled on THIS head? One verdict for the whole review.
 
     Where :func:`classify_record` answers "what did gate X say", this answers
     the question branch protection actually needs answered, and it is the only
@@ -500,6 +501,8 @@ def review_verdict(
     ``branch``/``project_id`` are passed straight through. Handing the
     evaluation less scope than the merge door gets would make this check the
     more lenient of the two, which is the one direction that costs something.
+    Which seats are required follows the risk class of the head as the door
+    reads it (R3b), in ``checkout`` (``None``: the store's own checkout).
     """
     resolved_head = _require_head(head_sha)
     directory = results_dir if results_dir is not None else _default_results_dir()
@@ -518,6 +521,7 @@ def review_verdict(
 
     evaluation = evaluate_review_seats(
         str(pr_number), directory, branch=branch, project_id=project_id, head_sha=resolved_head,
+        checkout=checkout,
     )
     seats = ", ".join(evaluation.seats) or "geen"
     if evaluation.required.error:

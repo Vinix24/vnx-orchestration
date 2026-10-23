@@ -1023,6 +1023,16 @@ _PLAN_SCOPE_PREFIXES: tuple[tuple[str, str], ...] = (
     ("scripts/pre_merge_gate.py", PLAN_SCOPE_GATE_MERGE),
     ("scripts/commands/merge_preflight.sh", PLAN_SCOPE_GATE_MERGE),
     ("scripts/commands/gate.sh", PLAN_SCOPE_GATE_MERGE),
+    # The receipt conversion decides what counts as evidence, so a change to it
+    # gets two reviewers (operator decision 2026-10-23, ADR-008 amendment).
+    ("scripts/lib/report_to_receipt_converter.py", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/lib/append_receipt_internals/", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/append_receipt.py", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/lib/report_body_contract.py", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/lib/receipt_outcome.py", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/lib/receipt_verdict.py", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/lib/receipt_processor/", PLAN_SCOPE_GATE_MERGE),
+    ("scripts/receipt_processor.sh", PLAN_SCOPE_GATE_MERGE),
     ("scripts/lib/vnx_paths", PLAN_SCOPE_STORE_RESOLUTION),
     ("scripts/lib/project_root.py", PLAN_SCOPE_STORE_RESOLUTION),
     ("scripts/lib/launchd_project_root.py", PLAN_SCOPE_STORE_RESOLUTION),

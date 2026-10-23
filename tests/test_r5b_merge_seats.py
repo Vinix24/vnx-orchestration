@@ -617,8 +617,11 @@ class TestMergeRecord:
 
         assert rc == pr_merge.EXIT_OK
         seats = _receipts(store, "pr_merged")[-1]["review_seats"]
-        assert seats["rule"] == "every_seat_distinct_reviewer"
+        # R3b: a merge is judged by the class of its head. The fixture head
+        # cannot be fetched (tests/conftest.py), so it is high: every seat.
+        assert seats["rule"] == "first_seat_or_every_seat_by_risk"
         assert (seats["seats"], seats["source"], seats["head_sha"]) == (STACK, "config_fresh", HEAD)
+        assert seats["risk_class"] == "high"
         assert seats["filled_by"] == {"codex_gate": "codex_gate", "kimi_gate": "kimi_gate"}
 
     def test_an_overridden_review_records_that_no_seat_was_judged(self, store, monkeypatch):

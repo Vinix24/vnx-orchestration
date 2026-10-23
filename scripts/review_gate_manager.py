@@ -299,14 +299,32 @@ def _print_round_refusals(result: Dict[str, Any]) -> None:
 
 
 def _print_risk_class(result: Dict[str, Any]) -> None:
-    """Name the risk class the round was requested under and why (R3a), on stderr."""
+    """Name the risk class the round was requested under, why (R3a), and the seats the door requires at it (R3b), on stderr."""
     risk = result.get("review_risk")
     if not isinstance(risk, dict):
         return
     line = f"RISK CLASS {risk.get('risk_class')}: {risk.get('reason')}"
     if risk.get("caller") is not None:
         line += f" (caller said {risk.get('caller')!r})"
-    print(line, file=sys.stderr)
+    print(f"{line}; {_door_seats_text(result, risk.get('risk_class'))}", file=sys.stderr)
+
+
+def _door_seats_text(result: Dict[str, Any], risk_class: Any) -> str:
+    """The seats the merge door requires at ``risk_class`` (``review_seat_evaluation.seats_for_risk``).
+
+    The stack is the project's: the one this request recorded when it used the
+    project stack, else a fresh resolution (a request that named its own stack,
+    such as one seat, does not decide what the door requires).
+    """
+    from review_seat_evaluation import SOURCE_RECORDED, fresh_config_seats, seats_for_risk
+
+    record = result.get("review_seats") if isinstance(result.get("review_seats"), dict) else {}
+    stack = record.get("seats") if record.get("source") == SOURCE_RECORDED else None
+    if not stack:
+        stack, _value, refusal = fresh_config_seats()
+        if stack is None:
+            return f"the seats the merge door requires cannot be named: {refusal}"
+    return f"the merge door requires {', '.join(seats_for_risk(stack, risk_class))} of stack {', '.join(stack)}"
 
 
 def _print_in_flight(result: Dict[str, Any]) -> bool:
