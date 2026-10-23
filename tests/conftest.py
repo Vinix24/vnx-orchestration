@@ -571,6 +571,35 @@ def _stub_forge_check_run_post(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+@pytest.fixture(autouse=True)
+def _stub_review_risk_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """R3b: no ``git fetch`` against the forge leaves a unit-test run.
+
+    The seat evaluation reads the risk class of the head it judges
+    (``review_risk_class.merge_head_risk_class``), and that fetches the PR head
+    and ``main`` from ``origin`` first. A test that drives ``pr_merge.main()``
+    hands it the checkout the suite runs in (``_stub_merge_target_resolution``
+    above), so without this stub every such test made a live fetch of a
+    fixture branch. Stubbed as a refused fetch: the class is then ``high`` and
+    every seat of the stack is required, the verdict every test written before
+    R3b expects.
+
+    Tests about the class itself put the real function back in the test body
+    (``tests/test_r3b_risk_seats.py``, against a local ``origin``): same
+    function-scoped ``monkeypatch`` instance, later call wins.
+    """
+    try:
+        import review_risk_class
+    except ImportError:
+        # Only importable once a test module has put scripts/lib on sys.path.
+        return
+
+    monkeypatch.setattr(
+        review_risk_class, "fetch_merge_refs",
+        lambda *_a, **_k: "offline in the unit-test run (tests/conftest.py::_stub_review_risk_fetch)",
+    )
+
+
 @pytest.fixture()
 def attributed_forge_target(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path

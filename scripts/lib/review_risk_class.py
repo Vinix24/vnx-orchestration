@@ -36,14 +36,21 @@ has the current merge base and rule version; otherwise it computes the class
 itself with :func:`derive_risk_class`. A head that adds a high-risk path is
 high, whatever an earlier head was.
 
-R3a changes no merge outcome: the door does not read this class yet (R3b).
+**The door reads it (R3b).** :func:`merge_head_risk_class` is the class of the
+head a merge is about: it fetches the PR head and the base branch, reads the
+diff and checks it against the records of the head. ``review_seat_evaluation``
+asks it for every evaluation of a resolved stack, so the merge door,
+``vnx-gate/review`` and ``vnx pr-ready`` read one class, and
+``review_seat_evaluation.seats_for_risk`` turns it into the required seats. A
+failed fetch and a checkout that cannot be established are ``high``.
 
-BILLING SAFETY: no Anthropic SDK, no network. The only subprocess is a local
-``git`` read.
+BILLING SAFETY: no Anthropic SDK. The subprocesses are ``git`` reads and one
+read-only ``git fetch`` of the PR head and the base branch.
 """
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from dataclasses import dataclass, replace
@@ -68,6 +75,8 @@ SOURCE_RECOMPUTED = "recomputed"
 CATEGORY_UNNORMALISABLE = "unnormalisable"
 
 _GIT_TIMEOUT_SECONDS = 30
+_FETCH_TIMEOUT_SECONDS = 90
+_REMOTE = "origin"
 _EXPLAIN_PATHS = 3
 _SHA_RE = re.compile(r"[0-9a-f]{7,64}")
 
@@ -415,3 +424,102 @@ def head_risk_class(
         known = known_class(recorded) or HIGH
         risk = replace(risk, risk_class=known, reason=f"{risk.reason}; the record of this head says {recorded!r}")
     return replace(risk, source=SOURCE_RECORD, note=note)
+
+
+# ---------------------------------------------------------------------------
+# The class the merge door reads (R3b, D2)
+# ---------------------------------------------------------------------------
+
+
+def _fetch_refspecs(pr_id: str, branch: Optional[str], base_ref: str) -> List[str]:
+    """The base branch, and the PR head by its branch (else by the PR's own ref on the forge)."""
+    specs: List[str] = []
+    prefix = f"{_REMOTE}/"
+    if base_ref.startswith(prefix):
+        base = base_ref[len(prefix):]
+        specs.append(f"+refs/heads/{base}:refs/remotes/{_REMOTE}/{base}")
+    head_branch = (branch or "").strip()
+    if head_branch:
+        specs.append(f"+refs/heads/{head_branch}:refs/remotes/{_REMOTE}/{head_branch}")
+    elif str(pr_id).isdigit():
+        specs.append(f"refs/pull/{pr_id}/head")
+    return specs
+
+
+def fetch_merge_refs(pr_id: str, branch: Optional[str], *, cwd: Path, base_ref: str = DEFAULT_BASE_REF) -> str:
+    """Fetch the PR head and the base branch from ``origin`` into ``cwd``; ``""`` on success, else why not.
+
+    Read-only towards the forge: one ``git fetch`` that updates the
+    remote-tracking refs and the object store, never a branch, the index or the
+    working tree. It never prompts for credentials.
+    """
+    specs = _fetch_refspecs(pr_id, branch, base_ref)
+    if not specs:
+        return "no ref to fetch: no base branch on origin, no PR branch and no PR number"
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+    try:
+        proc = subprocess.run(
+            ["git", "fetch", "--no-tags", "--quiet", "--no-write-fetch-head", _REMOTE, *specs],
+            cwd=str(cwd), capture_output=True, encoding="utf-8", errors="surrogateescape",
+            timeout=_FETCH_TIMEOUT_SECONDS, check=False, env=env,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"git fetch: {type(exc).__name__}: {exc}"
+    if proc.returncode != 0:
+        last = (proc.stderr or "").strip().splitlines()[-1:] or ["no output"]
+        return f"git fetch {' '.join(specs)} exited {proc.returncode}: {last[0]}"
+    return ""
+
+
+def store_checkout(results_dir: Optional[Path]) -> Tuple[Optional[Path], str]:
+    """``(checkout, "")`` of the project the review store belongs to, else ``(None, why)``.
+
+    The cwd-independent chain the forge publisher reads
+    (``forge_project_target.resolve_forge_target``): store, project id, the
+    checkout that carries that id, its GitHub origin.
+    """
+    if results_dir is None:
+        return None, "no checkout given and no review store to derive one from"
+    from forge_check_run import ForgePublishRefused
+    from forge_project_target import REGISTER_HINT, resolve_forge_target
+
+    try:
+        return resolve_forge_target(Path(results_dir)).project_root, ""
+    except ForgePublishRefused as exc:
+        # The refusal is worded for the publisher ("nothing was published");
+        # only its cause and the repair belong in a class reason.
+        cause = str(exc).split(" — ", 1)[0]
+        return None, f"the checkout of the review store cannot be established ({cause}; {REGISTER_HINT})"
+
+
+def merge_head_risk_class(
+    requests_dir: Path,
+    pr_id: str,
+    head_sha: str,
+    *,
+    branch: Optional[str] = None,
+    checkout: Optional[Path] = None,
+    results_dir: Optional[Path] = None,
+    base_ref: str = DEFAULT_BASE_REF,
+) -> RiskClass:
+    """The class of ``head_sha`` as a merge reads it: fetch, then :func:`head_risk_class` on the fresh diff.
+
+    The door runs in a checkout where the PR head may be missing, so the PR
+    head and the base branch are fetched first. ``checkout`` ``None`` is the
+    store's own checkout (:func:`store_checkout`). A checkout that cannot be
+    established, a failed fetch and an unreadable diff each give ``high`` with
+    the reason; nothing here lowers a class.
+    """
+    head = (head_sha or "").strip()
+    where, why = (Path(checkout), "") if checkout is not None else store_checkout(results_dir)
+    if where is None:
+        reading = DiffReading(None, base_ref=base_ref, error=why)
+    elif not head:
+        reading = DiffReading(None, base_ref=base_ref, error="the PR head could not be resolved")
+    else:
+        failed = fetch_merge_refs(pr_id, branch, cwd=where, base_ref=base_ref)
+        reading = (
+            DiffReading(None, base_ref=base_ref, error=f"the PR head and {base_ref} could not be fetched ({failed})")
+            if failed else read_pr_diff(head, base_ref=base_ref, cwd=where)
+        )
+    return head_risk_class(requests_dir, pr_id, head, reading)

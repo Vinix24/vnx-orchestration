@@ -1248,8 +1248,9 @@ def check_review_gate_for_merge(
     seats: Optional[Sequence[str]] = None,
     seats_source: Optional[str] = None,
     b3_override: str = "",
+    checkout: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    """GO/NO-GO merge verdict: every review seat of the project is filled on this head.
+    """GO/NO-GO merge verdict: every required review seat is filled on this head.
 
     The merge door's second fail-closed check (next to the CI check in
     ``pr_merge._run_ci_gate``). Since OI-2058 (reparatiegolf R5b) the door asks
@@ -1271,7 +1272,10 @@ def check_review_gate_for_merge(
 
     Which seats: the ``review_seats`` (source ``config``) a request on this
     head recorded, else a fresh ``review_seats.resolve_review_seats()``; a
-    request with ``source=explicit`` never narrows that set. ``seats`` names
+    request with ``source=explicit`` never narrows that set. The risk class of
+    this head narrows it (R3b, ``review_seat_evaluation.seats_for_risk``): the
+    first seat at low and medium, every seat at high and critical, the class
+    read in ``checkout`` (``None``: the store's own checkout). ``seats`` names
     them directly (track closure passes the merge record's list,
     ``seats_source`` says where it came from). ``gate`` is the declared gate of
     the obligation: it names the evidence in the returned dict and decides no
@@ -1319,6 +1323,7 @@ def check_review_gate_for_merge(
     evaluation = evaluate_review_seats(
         pr_id, results_dir, branch=branch, project_id=project_id, head_sha=head_sha,
         seats=seats, seats_source=seats_source or SOURCE_EXPLICIT, b3_override=b3_override,
+        checkout=checkout,
     )
     verdict: Dict[str, Any] = {
         "verdict": "GO" if evaluation.go else "NO-GO",
@@ -2048,15 +2053,16 @@ def _merge_record_seats(merge_record: Optional[Dict[str, Any]]) -> Optional[Dict
     """The seat record a merge under the seat rule stored, or ``None`` for an older merge.
 
     The door writes ``review_seats`` (rule ``review_seat_evaluation.SEAT_RULE``)
-    on every ``pr_merged`` receipt since OI-2058 R5b. A receipt without it was
-    merged under the one-seat rule; closure grandfathers it under that rule.
+    on every ``pr_merged`` receipt since OI-2058 R5b, and under
+    ``RISK_SEAT_RULE`` since R3b. A receipt without it was merged under the
+    one-seat rule; closure grandfathers it under that rule.
     """
-    from review_seat_evaluation import SEAT_RULE
+    from review_seat_evaluation import RISK_SEAT_RULE, SEAT_RULE
 
     if not isinstance(merge_record, dict):
         return None
     record = merge_record.get("review_seats")
-    if isinstance(record, dict) and record.get("rule") == SEAT_RULE:
+    if isinstance(record, dict) and record.get("rule") in (SEAT_RULE, RISK_SEAT_RULE):
         return record
     return None
 
@@ -2081,8 +2087,13 @@ def _seat_rule_checks(
     That record is ``SeatFill.record``: the exact record the door's route
     accepted (round 3), not a second lookup of the reviewer's slot. An unfilled
     seat gets them on the record that answered for it and did not hold.
+
+    A record under ``SEAT_RULE`` (merged before R3b) is judged by that rule: a
+    seat list it lacks is resolved without a risk class (``by_risk=False``), as
+    before R3b. Under ``RISK_SEAT_RULE`` the record's ``seats`` are the seats
+    its class required.
     """
-    from review_seat_evaluation import SOURCE_MERGE_RECORD, evaluate_review_seats
+    from review_seat_evaluation import RISK_SEAT_RULE, SOURCE_MERGE_RECORD, evaluate_review_seats
 
     seats = [str(seat) for seat in seat_record.get("seats") or [] if str(seat).strip()]
     # round_ledger=False: the door counted the round ledger when it merged (R1);
@@ -2091,6 +2102,7 @@ def _seat_rule_checks(
         str(seat_record.get("pr_id") or contract.pr_id), results_dir,
         branch=contract.branch or None, head_sha=str(seat_record.get("head_sha") or ""),
         seats=seats or None, seats_source=SOURCE_MERGE_RECORD, round_ledger=False,
+        by_risk=seat_record.get("rule") == RISK_SEAT_RULE,
     )
     checks: List[CheckResult] = []
     if evaluation.required.error:

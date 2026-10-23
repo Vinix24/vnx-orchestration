@@ -13,11 +13,16 @@ unverifiable state is a refusal — never a silent pass. ``--override-reason``
 skips the check visibly with a mandatory reason.
 
 Review gate (20260816-gate-never-skippable): a second fail-closed check runs
-after the CI gate — every seat of the project's review stack must be filled by
-a distinct reviewer with a passing, fully-evidenced result on this head, and no
-review peer may carry a blocking finding on it (OI-2058, R5b; see
+after the CI gate — every required seat of the project's review stack must be
+filled by a distinct reviewer with a passing, fully-evidenced result on this
+head, and no review peer may carry a blocking finding on it (OI-2058, R5b; see
 ``_run_review_gate`` -> ``closure_verifier.check_review_gate_for_merge`` ->
-``review_seat_evaluation``). A missing seat, an empty
+``review_seat_evaluation``). Which seats are required follows the risk class of
+the head (R3b): the first seat of the stack at low and medium, every seat at
+high and critical, the class derived from the PR diff after a fetch and
+fail-closed to high (``review_risk_class.merge_head_risk_class``). No flag
+lowers it. A refusal names the class, its reason and the required seats, and
+so does the merge record. A missing seat, an empty
 ``contract_hash``/``report_path``, or a verdict contradicting its report is a
 refusal. The same ``--override-reason`` valve applies with a mandatory reason.
 
@@ -91,9 +96,12 @@ Receipt written to t0_receipts.ndjson:
     preflight_gates: <list of 5 dicts — every preflight's own verdict; see
                                  "Preflight ledger" below>
     review_seats: <dict — the seat rule the merge was judged under (OI-2058,
-                                 R5b): rule, pr_id, head_sha, the effective
-                                 seats and their source, who filled which
-                                 seat; ``seats`` empty with ``verdict``
+                                 R5b; since R3b rule
+                                 ``first_seat_or_every_seat_by_risk``):
+                                 rule, pr_id, head_sha, the stack, the
+                                 required seats and their source, the risk
+                                 class with its reason and source, who
+                                 filled which seat; ``seats`` empty with ``verdict``
                                  ``overridden`` or ``not_evaluated`` when the
                                  review gate did not judge. Always written,
                                  so track closure tells a merge under the
@@ -618,10 +626,10 @@ def _unjudged_seats_record(pr_number: int, head_sha: str, verdict: str, reason: 
     nobody established them, and track closure then resolves them the way the
     door does instead of reading this merge as one from before the seat rule.
     """
-    from review_seat_evaluation import SEAT_RULE
+    from review_seat_evaluation import RISK_SEAT_RULE
 
     record: Dict[str, Any] = {
-        "rule": SEAT_RULE,
+        "rule": RISK_SEAT_RULE,
         "pr_id": str(pr_number),
         "head_sha": head_sha or "",
         "seats": [],
@@ -778,9 +786,12 @@ def _review_seats_verdict(
     from closure_verifier import check_review_gate_for_merge
 
     override_b3 = {"b3_override": b3_override.strip()} if b3_override else {}
+    # R3b: the risk class is read in the checkout being merged into. Outside
+    # main() no target is active and the evaluation reads the store's own checkout.
+    checkout = {"checkout": _ACTIVE_TARGET.project_root} if _ACTIVE_TARGET is not None else {}
     return check_review_gate_for_merge(
         str(pr_number), gate_name, state_dir / "review_gates" / "results", branch=branch, head_sha=head_sha,
-        **override_b3,
+        **override_b3, **checkout,
     )
 
 
