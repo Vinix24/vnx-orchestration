@@ -883,6 +883,13 @@
       "symbol": "_govern"
     },
     {
+      "file": "tests/test_fail_closed_evidence_block.py",
+      "line": 18,
+      "mechanism": "direct-call",
+      "module_target": "envelope_prepare",
+      "symbol": "_prepare"
+    },
+    {
       "file": "tests/test_failclass_registry.py",
       "line": 1273,
       "mechanism": "direct-call",
