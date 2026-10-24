@@ -322,7 +322,7 @@ class TestWriteFailureReflectedBeforePersist:
         monkeypatch.setattr(bts, "_parse_args", lambda: argparse.Namespace(
             format="state", output=str(output_path)
         ))
-        monkeypatch.setattr(bts, "_emit_health_beacon", lambda *a: None)
+        monkeypatch.setattr(bts, "_emit_health_beacon", lambda *a, **kw: None)
         monkeypatch.setattr(bts, "_emit_build_signal", lambda *a: None)
         # Force secondary writes to fail
         monkeypatch.setattr(bts, "_write_all_state_outputs", lambda *a, **kw: True)
@@ -355,7 +355,7 @@ class TestWriteFailureReflectedBeforePersist:
         monkeypatch.setattr(bts, "_write_all_state_outputs", lambda *a, **kw: True)
 
         beacon_calls: list = []
-        monkeypatch.setattr(bts, "_emit_health_beacon", lambda *a: beacon_calls.append(a))
+        monkeypatch.setattr(bts, "_emit_health_beacon", lambda *a, **kw: beacon_calls.append(a))
 
         bts.main()
 
@@ -371,10 +371,10 @@ class TestWriteFailureReflectedBeforePersist:
 # ---------------------------------------------------------------------------
 
 class TestFeaturePlanIsolation:
-    def test_feature_plan_written_to_project_root_not_module_root(
+    def test_no_feature_plan_written_under_project_root(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """_write_all_state_outputs(project_root=X) must target X/FEATURE_PLAN.md, not _PROJECT_ROOT."""
+        """_write_all_state_outputs must not write FEATURE_PLAN.md any more (A1 retirement)."""
         import sys
         import types
 
@@ -384,20 +384,19 @@ class TestFeaturePlanIsolation:
         fake_bfp = types.ModuleType("build_feature_plan")
         fake_bfp.write_feature_plan = lambda path, state_dir=None: called_paths.append(Path(path))  # type: ignore[attr-defined]
 
-        # Inject fake module so the `from build_feature_plan import ...` inside the function sees it
+        # Inject fake module so a lingering `from build_feature_plan import ...` would record a call
         monkeypatch.setitem(sys.modules, "build_feature_plan", fake_bfp)
 
         isolated_root = tmp_path / "isolated_project"
+        isolated_root.mkdir()
         bts._write_all_state_outputs({}, state_dir, None, project_root=isolated_root)
 
-        assert called_paths, "write_feature_plan must be called when module is available"
-        for path in called_paths:
-            assert isolated_root in path.parents or path.parent == isolated_root, (
-                f"FEATURE_PLAN.md must be under project_root ({isolated_root}), got {path}"
-            )
-            assert path != bts._PROJECT_ROOT / "FEATURE_PLAN.md" or isolated_root == bts._PROJECT_ROOT, (
-                f"Must not write to real _PROJECT_ROOT ({bts._PROJECT_ROOT}), got {path}"
-            )
+        assert called_paths == [], (
+            f"write_feature_plan must not be called by the state build, got {called_paths}"
+        )
+        assert not (isolated_root / "FEATURE_PLAN.md").exists(), (
+            f"the state build must not write FEATURE_PLAN.md under project_root ({isolated_root})"
+        )
 
     def test_real_feature_plan_untouched_when_isolated_root_given(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -418,6 +417,37 @@ class TestFeaturePlanIsolation:
         # If the file didn't exist before, it must not exist now either
         if mtime_before is None:
             assert not real_fp.exists() or True, "No assertion needed if file newly created in repo"
+
+    def test_state_build_leaves_no_feature_plan_in_isolated_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A full build (main) against an isolated root leaves no FEATURE_PLAN.md behind."""
+        import argparse
+
+        state_dir, dispatch_dir = _make_isolated_env(tmp_path, monkeypatch)
+        for sub in ("pending", "active", "conflicts"):
+            (dispatch_dir / sub).mkdir()
+        isolated_root = tmp_path / "project"
+        isolated_root.mkdir()
+        output_path = state_dir / "t0_state.json"
+
+        monkeypatch.setattr(bts, "_STATE_DIR", state_dir)
+        monkeypatch.setattr(bts, "_DISPATCH_DIR", dispatch_dir)
+        monkeypatch.setattr(bts, "_DATA_DIR", tmp_path)
+        monkeypatch.setattr(bts, "_PROJECT_ROOT", isolated_root)
+        monkeypatch.setattr(bts, "_parse_args", lambda: argparse.Namespace(
+            format="state", output=str(output_path)
+        ))
+        monkeypatch.setattr(bts, "_emit_build_signal", lambda *a: None)
+        monkeypatch.setattr(bts, "_emit_health_beacon", lambda *a, **kw: None)
+
+        bts.main()
+
+        assert output_path.is_file(), "the build must still write its state file"
+        assert not (isolated_root / "FEATURE_PLAN.md").exists(), (
+            "the state build must not leave FEATURE_PLAN.md in project_root "
+            f"({isolated_root})"
+        )
 
 
 # ---------------------------------------------------------------------------
