@@ -15,7 +15,7 @@ Master-rule (see `role-orchestrator.md`): project files describe the project; th
 Tracks, objectives, receipts, and coordination state live in the **central** store, never repo-local.
 
 - Central store: `~/.vnx-data/<project_id>/state/` (resolved by the vnx runtime, not hardcoded).
-- Never pin `VNX_STATE_DIR=.vnx-data/state` in a role or script — a repo-local pin forks state from central = split-brain.
+- Never pin `VNX_STATE_DIR` to a repo-local `.vnx-data/state` path in a role or script — a repo-local pin forks state from central = split-brain.
 - Resolution helpers: Python `scripts/lib/project_root.py`; Bash `scripts/lib/vnx_resolve_root.sh`.
 - `project_id` never silently defaults to `vnx-dev` (ADR-007) — it resolves from `VNX_PROJECT_ID` / `.vnx-project-id` / git remote, else it rejects.
 
@@ -76,8 +76,35 @@ vnx horizon plan-gate ...           # multi-model panel reviews a plan before an
 - One flaky panelist (unparseable JSON, empty output) must not force a REVISE — quorum/abstain handles it (#910). Never treat a codex/glm flake as PASS; retry works.
 - The panel has no closeout mode — Tier-2 closeouts can get category-error REVISEs; judge accordingly.
 
+## Runbook: staging and firing a dispatch from a script
+
+`dispatch_bridge.stage_spec_bundle` (`scripts/lib/dispatch_bridge.py:229`) writes `<data_dir>/dispatches/pending/<dispatch_id>/{instruction.md,dispatch-spec.json}` and never fires; `bridge_dispatch` (`scripts/lib/dispatch_bridge.py:498`) stages and drives the door in one call.
+
+- **`data_dir` is a `Path`, never a string** (`scripts/lib/dispatch_bridge.py:253`); the stage CLI's `--data-dir` is `type=Path` for the same reason (`scripts/lib/dispatch_bridge.py:710`).
+- **The stage-only CLI has no `--gate`** — its flags stop at `--task-class`, `--deadline`, `--tag`, `--track`, `--data-dir` (`scripts/lib/dispatch_bridge.py:689-710`), and it has no `--pr-id`/`--work-ref`/`--base-ref` either. Stage from Python when the round needs any of those: `gate=` is `scripts/lib/dispatch_bridge.py:238`, validated against `REGISTERED_GATE_NAMES` (`scripts/lib/dispatch_spec.py:87`). The legacy bridge CLI does have `--gate/--pr-id/--work-ref` (`scripts/lib/dispatch_bridge.py:770-772`) but it fires on staging, so it cannot be dry-run first.
+- **A follow-up round** stages `pr_id=`, `work_ref=<branch>` and `base_ref="origin/<branch>"` (`scripts/lib/dispatch_bridge.py:241,248,251`). `pr_id` is the PR join key: the obligation is written with `pr_number`/`pr_id` (`scripts/lib/gate_obligations.py:346-347`) and `obligation_matches_pr` joins on exactly those (`scripts/lib/gate_obligations.py:224-239`) — without `pr_id` the round reads as owing no gate for that PR. `work_ref=dispatch/<parent>` also derives `parent_dispatch` (`scripts/lib/dispatch_bridge.py:178-200`).
+- **Fire through the door in its own tmux window.** The door holds its caller for the lane's whole run (`deadline_seconds`, default 3600 — `scripts/lib/dispatch_bridge.py:240`), so keep it out of the T0 pane. Dry-run in the pane first (`vnx dispatch <dispatch-id> --dry-run` prints the compiled lane/model/billing plan and spawns nothing), then:
+
+```bash
+tmux new-window -d -n "dlv-<dispatch-id>" \
+  "cd '${VNX_HOME:-$(git rev-parse --show-toplevel)}' && bin/vnx dispatch <dispatch-id>"
+```
+
+  A bare dispatch-id whose bundle sits at `pending/<id>/dispatch-spec.json` routes to the door, never the legacy lane (`docs/core/DISPATCH_RULES.md:258-259`).
+
+## Runbook: context rotation
+
+A T0 rotates at 500K context (`scripts/hooks/t0_context_guard.py:2-5`). Measurement, enforcement and execution are three pieces: `scripts/lib/t0_context_budget.py` measures, `scripts/hooks/t0_context_guard.py` enforces, `scripts/t0_rotate_spawn.sh` spawns the successor.
+
+- **The bands** (`scripts/lib/t0_context_budget.py:39-44`, operator decision 2026-09-25): WARN 400K = prepare the rotation; FORCE 500K = start nothing new, rotate at the next boundary; HARD 600K = rotate now, work in flight included. Read the current band with `python3 scripts/lib/t0_context_budget.py <transcript>`; unmeasurable context is always `ok` (`scripts/lib/t0_context_budget.py:207-210`).
+- **Enforcement**: at FORCE and above, PreToolUse denies starting new work (a dispatch, a new `/goal`, `gh pr create`) and UserPromptSubmit refuses a new `/goal`; at HARD the Stop hook demands the rotation now, work in flight included (`scripts/hooks/t0_context_guard.py:33-43`).
+- **The rotation**: `/build-log wrap` writes `daily-log/handoff.md` — numbered next steps, plus a `## Actief /goal` section with the directive and the remainder when a `/goal` is running (`docs/operations/T0_CONTEXT_ROTATION.md:331-350`; writer `scripts/lib/context_rotation.py:208`). Then `scripts/t0_rotate_spawn.sh` opens the successor in a new tmux window (`scripts/t0_rotate_spawn.sh:460`) in the T0 folder when that folder is healthy (`scripts/t0_rotate_spawn.sh:418-442`).
+- **A `/goal` directive longer than about 650 characters arrives as a pasted block after a rotation and is not executed (OI-2314).** The follow-up accepts only a real `<command-name>/goal</command-name>` user record; a prompt that carries the directive as pasted `<pasted_content>` text is no arrival (`scripts/lib/t0_rotation_delivery.py:181-187`; `docs/operations/T0_CONTEXT_ROTATION.md:593-595`). Keep the handed-over `/goal` under that length or the successor starts without a goal.
+
 ## Gotchas (the ones that repeatedly bite)
 
+- **Bash starts every call in the session's start folder, not where the last one ended:** the cwd resets after each call, and a T0 starts in `.claude/terminals/T0`, so write every command from `${VNX_HOME:-$(git rev-parse --show-toplevel)}` or an absolute path — never from a relative path.
+- **Do not "fix" that by moving the T0's start folder to the project root:** role-file discovery walks up from cwd, so a root start silently drops `role-orchestrator.md` with no error (`.claude/terminals/T0/role-orchestrator.md:137`); the rotation's start-folder logic is `scripts/t0_rotate_spawn.sh:418-442`.
 - **PATH-break in a bash loop:** do not run `head`/`cmp`/`git` right after `vnx` in the same loop iteration — split into separate calls.
 - **Dual-CLI:** the real `vnx` is the pip `vnx_cli` editable install (`vnx_cli/commands/*`), NOT the bash `bin/vnx` (`scripts/*`). Verify operator/cutover claims against `vnx_cli`, or you check the wrong code path. New commands go in BOTH.
 - **codex-cert:** a dead codex-gate is usually a macOS cert-revoke → Trash the binary; fix with `npm i -g @openai/codex@latest` (node v22). `glm-harness` needs the local proxy on :4141 (restart per session, not persistent).
