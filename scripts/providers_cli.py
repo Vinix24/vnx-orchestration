@@ -98,10 +98,18 @@ def _off_families_for(state: ps.SwitchState, project_id: str) -> List[str]:
 
 
 def engine_root_for(project_root: Path) -> Tuple[Optional[Path], str]:
-    """The engine a project runs: the engine link under its ``.claude`` folder, or itself when it is the fabric."""
+    """The engine a project runs: the engine link under its ``.claude`` folder, or itself when it is the fabric.
+
+    A link whose target is not there is not an engine: the returned root is ``None`` and the reason
+    names the dead target, so no caller reads a provider list out of a directory that does not exist.
+    """
     link = project_root / ".claude" / "vnx-system"
     if link.is_symlink():
-        return link.resolve(), "linked engine"
+        target = link.resolve()
+        if target.is_dir():
+            return target, "linked engine"
+        state = "target not a directory" if target.exists() else "target missing"
+        return None, f"dead .claude/vnx-system link -> {target} ({state})"
     if (project_root / "scripts" / "lib" / "vnx_paths.py").is_file():
         return project_root, "fabric checkout"
     return None, f"no {'/'.join(('.claude', 'vnx-system'))} link and not the fabric checkout"
@@ -352,9 +360,12 @@ def _render_projects(report: Dict[str, Any]) -> List[str]:
     for row in projects["projects"]:
         if row["knows_switch"]:
             out.append(f"  {row['project_id']:<18} engine knows the switch ({row['engine_source']}: {row['engine_root']})")
+        elif row["engine_root"] is None:
+            out.append(f"  {row['project_id']:<18} engine root unresolved ({row['engine_source']}): "
+                       "no engine to read, every provider stays on there")
         else:
-            where = row["engine_root"] or row["engine_source"]
-            out.append(f"  {row['project_id']:<18} engine does NOT know the switch ({where}): every provider stays on there")
+            out.append(f"  {row['project_id']:<18} engine does NOT know the switch "
+                       f"({row['engine_source']}: {row['engine_root']}): every provider stays on there")
         for family in row["off_families_unknown_to_engine"]:
             out.append(f"  {'':<18} WARNING: {family} is off but this engine does not know the family: it keeps calling it")
         out.append(f"  {'':<18} {row['application_code']}")
