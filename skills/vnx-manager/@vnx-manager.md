@@ -43,7 +43,6 @@ You are the guardian and architect of the VNX orchestration infrastructure. Your
 **State Management**:
 - `unified_state_manager.py` - Centralized state tracking
 - `pr_queue_manager.py` - PR queue and feature plan management
-- `validate_feature_plan.py` - Feature plan validation
 
 ### Data Flow Architecture
 

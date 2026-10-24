@@ -223,7 +223,6 @@ In these cases:
 - `.claude/skills/t0-orchestrator/SKILL.md`
 - `scripts/pr_queue_manager.py`
 - `scripts/open_items_manager.py`
-- `scripts/validate_feature_plan.py`
 
 Use the canonical feature-plan example as the structural baseline for:
 - valid `## PR-X:` sections
