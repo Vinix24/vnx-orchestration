@@ -489,6 +489,91 @@ class TestDualInstall:
         assert "dual install" in result.detail
         assert "remove embedded install" in result.detail
 
+    def _make_store(self, tmp_path: Path, current: str = "v1.7.6") -> Path:
+        """Central store with two releases; ``current`` -> ``versions/<current>``."""
+        central_root = tmp_path / "home" / ".vnx-system"
+        for version in ("v1.7.5", "v1.7.6"):
+            (central_root / "versions" / version / "scripts").mkdir(parents=True)
+        (central_root / "current").symlink_to(central_root / "versions" / current)
+        return central_root
+
+    def test_lagging_pin_is_warn_names_both_versions(self, tmp_path, monkeypatch):
+        """Link to an OLDER release in the same store -> WARN, not a dual install.
+
+        Measured on a consumer that pins 1.7.5 deliberately while ``current``
+        is 1.7.6. It is one store with a pin that lags; the old FAIL advised
+        removing the very link that makes the pin work.
+        """
+        central_root = self._make_store(tmp_path)
+        project = _make_project(tmp_path)
+        (project / ".claude").mkdir(parents=True)
+        (project / ".claude" / "vnx-system").symlink_to(
+            central_root / "versions" / "v1.7.5"
+        )
+
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
+
+        result = _check_dual_install(project)
+
+        assert result.status == WARN
+        assert "lagging pin" in result.detail
+        assert "v1.7.5" in result.detail
+        assert "v1.7.6" in result.detail
+        assert "not a dual install" in result.detail
+        assert "remove embedded install" not in result.detail
+
+    def test_lagging_pin_via_current_symlink_still_passes(self, tmp_path, monkeypatch):
+        """Link to ``current`` itself -> PASS even when older versions exist."""
+        central_root = self._make_store(tmp_path)
+        project = _make_project(tmp_path)
+        (project / ".claude").mkdir(parents=True)
+        (project / ".claude" / "vnx-system").symlink_to(central_root / "current")
+
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
+
+        result = _check_dual_install(project)
+
+        assert result.status == PASS
+        assert "v1.7.6" in result.detail
+        assert "central store" in result.detail
+
+    def test_link_outside_store_is_fail_even_with_versions_present(
+        self, tmp_path, monkeypatch
+    ):
+        """A second install outside the store -> FAIL, versions/ presence irrelevant."""
+        self._make_store(tmp_path)
+        outside = tmp_path / "outside-install"
+        (outside / "scripts").mkdir(parents=True)
+        project = _make_project(tmp_path)
+        (project / ".claude").mkdir(parents=True)
+        (project / ".claude" / "vnx-system").symlink_to(outside)
+
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
+
+        result = _check_dual_install(project)
+
+        assert result.status == FAIL
+        assert "dual install" in result.detail
+        assert "remove embedded install" in result.detail
+        assert "lagging pin" not in result.detail
+
+    def test_link_to_versions_dir_itself_is_fail(self, tmp_path, monkeypatch):
+        """A link to ``versions/`` is not a pinned release -> FAIL, not WARN."""
+        central_root = self._make_store(tmp_path)
+        # Give versions/ itself a scripts/ tree so the comparison runs at all.
+        (central_root / "versions" / "scripts").mkdir()
+        project = _make_project(tmp_path)
+        (project / ".claude").mkdir(parents=True)
+        (project / ".claude" / "vnx-system").symlink_to(central_root / "versions")
+
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
+
+        result = _check_dual_install(project)
+
+        assert result.status == FAIL
+        assert "dual install" in result.detail
+        assert "lagging pin" not in result.detail
+
     def test_fabric_repo_real_dir_no_scripts_passes(self, tmp_path, monkeypatch):
         """Fabric source repo: real .claude/vnx-system dir WITHOUT scripts/ -> PASS.
 
