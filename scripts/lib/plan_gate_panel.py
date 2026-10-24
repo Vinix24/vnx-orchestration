@@ -1834,11 +1834,7 @@ def _make_default_dispatcher(
             if base_ref:
                 cmd += ["--base-ref", base_ref]
             proc = _run_provider_lane_child(
-                cmd,
-                env=env,
-                timeout_seconds=timeout_seconds,
-                dispatch_id=dispatch_id,
-            )
+                cmd, env=env, timeout_seconds=timeout_seconds, dispatch_id=dispatch_id)
             report = _read_report(base, dispatch_id, proc.stderr)
             if report is None:
                 # provider_dispatch prints its actionable detail across both streams —
