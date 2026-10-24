@@ -47,6 +47,7 @@ sys.path.insert(0, str(_SCRIPT_DIR / "lib"))
 
 import orphan_sweep as osweep  # noqa: E402  (the lib module)
 import tmux_worktree  # noqa: E402
+from git_maintenance_guard import disable_auto_maintenance  # noqa: E402
 
 
 @pytest.fixture
@@ -93,6 +94,9 @@ def _git_repo(tmp_path: Path) -> Path:
     )
     local = tmp_path / "local"
     subprocess.run(["git", "clone", str(bare), str(local)], check=True, capture_output=True)
+    # Keep the commit below from spawning a detached `git maintenance run
+    # --auto` child that can outlive this repo's temp dir (CI 39971696706).
+    disable_auto_maintenance(local)
     subprocess.run(
         ["git", "-C", str(local), "config", "user.email", "test@test.local"],
         check=True, capture_output=True,

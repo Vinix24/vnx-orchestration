@@ -82,6 +82,31 @@ os.environ["VNX_PROVIDER_SWITCH_FILE"] = str(_PROVIDER_SWITCH_ISOLATION_FILE)
 for _env_key in [k for k in os.environ if k.startswith("VNX_OVERRIDE_PROVIDER_")]:
     del os.environ[_env_key]
 # ---------------------------------------------------------------------------
+# git auto-maintenance guard (D3-9, ci-profile-a-xdist)
+# ---------------------------------------------------------------------------
+# Every `git commit` in a throwaway test repo ends with run_auto_maintenance(),
+# which spawns a detached `git maintenance run --auto --quiet --detach` child
+# that creates and removes .git/objects/maintenance.lock a few milliseconds
+# later. A TemporaryDirectory deleting the repo in that window failed VNX CI
+# run 39971696706 with "OSError: [Errno 39] Directory not empty: 'objects'".
+# Injecting maintenance.auto=false and gc.auto=0 as git command-scope config
+# stops the child from ever being spawned. Done once, process-wide, so it
+# covers every repo-creating helper in tests/ — including helpers added after
+# this date — and every subprocess they drive; tests/git_maintenance_guard.py
+# documents the two settings and also writes them repo-locally where a
+# TemporaryDirectory owns the repo. Only this process's environment changes:
+# the operator's ~/.gitconfig is never read or written.
+def _install_git_maintenance_guard() -> None:
+    tests_dir = str(Path(__file__).resolve().parent)
+    if tests_dir not in sys.path:
+        sys.path.insert(0, tests_dir)
+    from git_maintenance_guard import install_auto_maintenance_guard
+
+    install_auto_maintenance_guard()
+
+
+_install_git_maintenance_guard()
+# ---------------------------------------------------------------------------
 # launchctl shim (OI-1891): no test may mutate the operator's launchd domain
 # ---------------------------------------------------------------------------
 # A test that points Path.home at a tmp dir passes the LaunchAgents WRITE guard

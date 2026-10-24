@@ -35,6 +35,7 @@ from attest_record import (
     read_allowed_signers_from_base,
 )
 from attestation import build_governed_manifest, sign_manifest
+from git_maintenance_guard import disable_auto_maintenance
 
 
 # ---------------------------------------------------------------------------
@@ -64,6 +65,11 @@ def ephemeral_key_dir():
 def _init_repo(tmp: Path) -> Path:
     """Init a git repo in tmp with a base commit (the merge-base)."""
     subprocess.run(["git", "init", "-b", "main"], cwd=str(tmp), check=True, capture_output=True)
+    # Without this, the commit below spawns a detached `git maintenance run
+    # --auto --detach` child that removes .git/objects/maintenance.lock a few
+    # ms later; TemporaryDirectory.__exit__ deleting the repo in that window
+    # was CI run 39971696706's "OSError: [Errno 39] Directory not empty".
+    disable_auto_maintenance(tmp)
     subprocess.run(["git", "config", "user.email", "test@vnx.local"], cwd=str(tmp), check=True, capture_output=True)
     subprocess.run(["git", "config", "user.name", "VNX Test"], cwd=str(tmp), check=True, capture_output=True)
     (tmp / "README.md").write_text("base\n")
@@ -687,3 +693,42 @@ class TestDiffDeterminism:
             assert key_before == key_after, (
                 f"mnemonicPrefix change affected content-key: {key_before!r} != {key_after!r}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Throwaway-repo hygiene (D3-9, ci-profile-a-xdist)
+# ---------------------------------------------------------------------------
+
+class TestThrowawayRepoGitMaintenance:
+    """A repo this module hands to ``TemporaryDirectory`` must never leave a
+    detached ``git maintenance run --auto --detach`` child behind.
+
+    ``git commit`` ends with ``run_auto_maintenance()``, which spawns that
+    child unless ``maintenance.auto`` is false or ``gc.auto`` is 0. The child
+    creates and removes ``.git/objects/maintenance.lock`` a few milliseconds
+    after the commit returns; deleting the repo in that window made VNX CI run
+    39971696706 fail with ``OSError: [Errno 39] Directory not empty:
+    'objects'``. Both settings therefore belong in the repo's own config.
+    """
+
+    @staticmethod
+    def _local_config(repo: Path, key: str) -> "subprocess.CompletedProcess[str]":
+        return subprocess.run(
+            ["git", "config", "--local", "--get", key],
+            cwd=str(repo), capture_output=True, text=True,
+        )
+
+    def test_init_repo_disables_auto_maintenance(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = _init_repo(Path(tmpdir))
+
+            auto = self._local_config(repo, "maintenance.auto")
+            assert auto.returncode == 0, (
+                "maintenance.auto is unset in the repo-local config, so "
+                "`git commit` spawns a detached `git maintenance run --auto`"
+            )
+            assert auto.stdout.strip() == "false", auto.stdout
+
+            gc = self._local_config(repo, "gc.auto")
+            assert gc.returncode == 0, "gc.auto is unset in the repo-local config"
+            assert gc.stdout.strip() == "0", gc.stdout

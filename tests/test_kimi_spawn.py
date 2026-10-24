@@ -20,6 +20,7 @@ if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 
 from phantom_guard import REVIEW_TASK_CLASSES  # noqa: E402
+from git_maintenance_guard import disable_auto_maintenance  # noqa: E402
 from provider_spawns.kimi_spawn import (  # noqa: E402
     KimiSpawnResult,
     _build_kimi_cmd,
@@ -1081,6 +1082,9 @@ class TestWorktreeHasChanges(unittest.TestCase):
         """Init a repo with one base commit and an origin/main ref pinned to it,
         so the committed-work half of the guard has a resolvable base_ref."""
         cls._git(tmp, "init", "-q")
+        # Keep `git commit` from spawning a detached `git maintenance run
+        # --auto` child that races this repo's TemporaryDirectory cleanup.
+        disable_auto_maintenance(Path(tmp))
         Path(tmp, "base.txt").write_text("base\n")
         cls._git(tmp, "add", "base.txt")
         cls._git(tmp, "commit", "-q", "-m", "base")

@@ -41,6 +41,7 @@ from attest_override import (
 from verify_pr import verify_pr
 from attest_record import write_attest_record
 from ndjson_hash_chain import append_chained_entry
+from git_maintenance_guard import disable_auto_maintenance
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +82,9 @@ def rogue_key_dir():
 
 def _init_repo(tmp: Path) -> Path:
     subprocess.run(["git", "init", "-b", "main"], cwd=str(tmp), check=True, capture_output=True)
+    # Keep `git commit` from spawning a detached `git maintenance run --auto`
+    # child that races this repo's TemporaryDirectory cleanup (CI 39971696706).
+    disable_auto_maintenance(tmp)
     subprocess.run(["git", "config", "user.email", "test@vnx.local"], cwd=str(tmp), check=True, capture_output=True)
     subprocess.run(["git", "config", "user.name", "VNX Test"], cwd=str(tmp), check=True, capture_output=True)
     (tmp / "README.md").write_text("base\n")
