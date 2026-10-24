@@ -140,6 +140,15 @@ _HEADLESS_LANE = "claude_headless"
 # (OI-2115), so seats running at the same time never share one stream.
 _PANEL_TERMINAL_ID = event_store.HARNESS_SEAT_TERMINAL
 
+# The terminal a PARENT-side reap of a provider seat's worktree files its
+# provider_teardown_worktree event under (_run_provider_lane_child). Deliberately not
+# _PANEL_TERMINAL_ID: that is the seat's own terminal, where the child records its own
+# teardown. A reap by the parent means the child never reached that teardown (killed on
+# timeout), and a terminal of its own keeps that visible. The event itself is unchanged:
+# remove_dispatch_worktree builds it, this only names the stream
+# (<data_dir>/events/plan-gate-parent.ndjson).
+_PARENT_REAP_TERMINAL_ID = "plan-gate-parent"
+
 # The seat roster a run picks from: (label, provider string, model_arg), one per provider
 # family (Anthropic / Moonshot / Zhipu / DeepSeek / OpenAI). A plan-gate run uses the
 # default seat and, on BLOCK, the escalation seat (compose_panel); an operator names any
@@ -1664,6 +1673,7 @@ def _run_provider_lane_child(
     env: Dict[str, str],
     timeout_seconds: int,
     dispatch_id: str,
+    data_dir: Path,
 ) -> subprocess.CompletedProcess:
     """Run the ``provider_dispatch.py`` child and reap its worktree if it dies.
 
@@ -1672,9 +1682,20 @@ def _run_provider_lane_child(
     ``subprocess.run``) never reaches that ``finally``, so the parent reaps the
     tree here — otherwise every timed-out gate seat leaks a
     ``dispatch-*-gate-*`` worktree under ``.vnx-data/worktrees/`` (measured
-    2026-10-24: 11 such trees).  The reap runs whatever the child does and
-    never alters the outcome: a ``TimeoutExpired`` still propagates to the
-    caller after it.
+    2026-10-24: 11 such trees).  The reap never alters the outcome: a
+    ``TimeoutExpired`` still propagates to the caller after it.
+
+    The reap is narrowed to a tree this child run could have created
+    (``reap_child_worktree_on_exit``): whether the path exists is recorded
+    BEFORE ``subprocess.run``, and a tree that existed before is never reaped.
+    A tree that appeared during the run is reaped only while the parent holds
+    its occupancy lock exclusively, so a duplicate seat that exited on
+    ``WorktreeOccupied`` never tears down its live sibling's tree.
+
+    *data_dir* is the dispatcher's resolved ``base`` — the ``VNX_DATA_DIR``
+    pinned into *env* — so the reap reads the claim registry the child wrote,
+    not one this process would resolve from its own environment.  The teardown
+    event is filed under ``_PARENT_REAP_TERMINAL_ID``.
 
     ``review_only=True`` is correct for every seat this dispatcher builds: they
     run with ``--no-auto-commit`` and materialize only a disposable PR
@@ -1683,14 +1704,13 @@ def _run_provider_lane_child(
     real local commit's branch is never discarded.  The claude branch never
     reaches this helper.
     """
-    try:
+    with dispatch_worktree_isolation.reap_child_worktree_on_exit(
+        dispatch_id, data_dir=data_dir, terminal_id=_PARENT_REAP_TERMINAL_ID,
+        review_only=True,
+    ):
         return subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout_seconds,
             check=False, env=env,
-        )
-    finally:
-        dispatch_worktree_isolation.remove_dispatch_worktree_if_present(
-            dispatch_id, review_only=True,
         )
 
 
@@ -1834,7 +1854,8 @@ def _make_default_dispatcher(
             if base_ref:
                 cmd += ["--base-ref", base_ref]
             proc = _run_provider_lane_child(
-                cmd, env=env, timeout_seconds=timeout_seconds, dispatch_id=dispatch_id)
+                cmd, env=env, timeout_seconds=timeout_seconds, dispatch_id=dispatch_id,
+                data_dir=base)
             report = _read_report(base, dispatch_id, proc.stderr)
             if report is None:
                 # provider_dispatch prints its actionable detail across both streams —
