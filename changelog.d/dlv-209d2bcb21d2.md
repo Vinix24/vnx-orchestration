@@ -6,4 +6,4 @@
   registered in a project's `.claude/settings.json` until its SessionStart, UserPromptSubmit and Stop entries for
   `tmux_signal_*` are removed by hand; a project that pins this release must remove them, or every prompt reports
   a hook error. `VNX_TMUX_SIGNAL_DIR` itself stays: `enrichment.py`, `envelope_govern.py` and `provider_dispatch.py`
-  still read it.
+  still read it. The four removed paths are guarded by `scripts/ci/retired_paths.d/dlv-209d2bcb21d2.txt`.

@@ -56,8 +56,8 @@ def _is_t0_session(cwd: str, env: dict) -> bool:
     real T0's handoff on Stop. VNX_DISPATCH_ID / VNX_TMUX_SIGNAL_DIR are the
     repo-wide markers a dispatched worker always carries (set together by
     tmux_interactive_dispatch.py before `claude` launches — see
-    hooks/git/pre-push and scripts/hooks/tmux_signal_*.sh for the same
-    convention) — their presence means NON-T0 regardless of cwd, unless
+    hooks/git/pre-push for the same convention) — their presence means
+    NON-T0 regardless of cwd, unless
     VNX_TERMINAL was explicitly set to T0 above.
     """
     terminal_env = env.get("VNX_TERMINAL") or env.get("VNX_TERMINAL_ID")
