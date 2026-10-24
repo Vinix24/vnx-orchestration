@@ -57,6 +57,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
+import dispatch_worktree_isolation
+
 # R6 (OI-2039): a seat whose report carries no verdict fence may still have its
 # verdict in its final answer, the result event of its archived event stream.
 # A claude seat's stream is archived when its run ends (_archive_seat_stream).
@@ -1656,6 +1658,42 @@ def _seat_child_env(base: Path, total_deadline_seconds: Optional[int]) -> Dict[s
     return env
 
 
+def _run_provider_lane_child(
+    cmd: List[str],
+    *,
+    env: Dict[str, str],
+    timeout_seconds: int,
+    dispatch_id: str,
+) -> subprocess.CompletedProcess:
+    """Run the ``provider_dispatch.py`` child and reap its worktree if it dies.
+
+    The child creates its own isolated worktree and removes it in its own
+    ``finally``.  A child killed for exceeding *timeout_seconds* (SIGKILL from
+    ``subprocess.run``) never reaches that ``finally``, so the parent reaps the
+    tree here — otherwise every timed-out gate seat leaks a
+    ``dispatch-*-gate-*`` worktree under ``.vnx-data/worktrees/`` (measured
+    2026-10-24: 11 such trees).  The reap runs whatever the child does and
+    never alters the outcome: a ``TimeoutExpired`` still propagates to the
+    caller after it.
+
+    ``review_only=True`` is correct for every seat this dispatcher builds: they
+    run with ``--no-auto-commit`` and materialize only a disposable PR
+    reproduction, which ``remove_dispatch_worktree`` discards before
+    classification — and only while HEAD still equals the recorded base, so a
+    real local commit's branch is never discarded.  The claude branch never
+    reaches this helper.
+    """
+    try:
+        return subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout_seconds,
+            check=False, env=env,
+        )
+    finally:
+        dispatch_worktree_isolation.remove_dispatch_worktree_if_present(
+            dispatch_id, review_only=True,
+        )
+
+
 def _make_default_dispatcher(
     data_dir: Optional[str], timeout_seconds: int,
     *, role: str = "plan-reviewer", base_ref: Optional[str] = None,
@@ -1795,9 +1833,11 @@ def _make_default_dispatcher(
             ]
             if base_ref:
                 cmd += ["--base-ref", base_ref]
-            proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=timeout_seconds,
-                check=False, env=env,
+            proc = _run_provider_lane_child(
+                cmd,
+                env=env,
+                timeout_seconds=timeout_seconds,
+                dispatch_id=dispatch_id,
             )
             report = _read_report(base, dispatch_id, proc.stderr)
             if report is None:

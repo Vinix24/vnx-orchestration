@@ -1188,3 +1188,68 @@ def remove_dispatch_worktree(
                 "remove_dispatch_worktree: event emission failed for %s: %s",
                 dispatch_id, _event_exc,
             )
+
+
+def remove_dispatch_worktree_if_present(
+    dispatch_id: str,
+    *,
+    project_root: Optional[Path] = None,
+    review_only: bool = True,
+) -> bool:
+    """Reap a dispatch worktree that may have outlived its lane.  Never raises.
+
+    A provider-lane child (``provider_dispatch.py``) creates its isolated
+    worktree itself and removes it in its own ``finally``.  When the parent
+    kills that child for exceeding ``subprocess.run(timeout=...)`` (SIGKILL),
+    the child's ``finally`` never runs and the parent holds no handle to the
+    tree — measured 2026-10-24: eleven ``dispatch-{glm,kimi,deepseek}-gate-*``
+    worktrees left behind under ``.vnx-data/worktrees/``.  This is the
+    parent-side safety net: a caller wraps the child in ``try/finally`` and
+    calls this in the ``finally``.
+
+    The project root is resolved exactly the way the child resolved it —
+    ``resolve_consumer_project_root()``, the ``vnx_paths`` PROJECT_ROOT
+    resolution ``provider_dispatch`` passes into ``create_dispatch_worktree``
+    — never a hard-coded path.  The path comes from the same
+    ``_dispatch_worktree_dir`` the allocator used, so a
+    ``VNX_BENCH_WORKTREE_ROOT`` relocation is honored too.
+
+    *review_only* defaults to True: a gate seat materializes only a disposable
+    PR reproduction, which ``remove_dispatch_worktree`` discards before
+    classification — but only while HEAD still equals the recorded base, so a
+    real local commit is never thrown away (teardown degrades to the normal
+    committed/dirty preservation instead).
+
+    Returns True when the worktree existed and its teardown was attempted,
+    False when it was already absent (no git call is made) or when the
+    teardown raised.  Any exception is logged and swallowed — this runs from a
+    caller's ``finally`` and must never replace the exception propagating
+    there.  Raises nothing.
+    """
+    wt_path: Optional[Path] = None
+    try:
+        root = (
+            Path(project_root).resolve()
+            if project_root is not None
+            else resolve_consumer_project_root()
+        )
+        wt_path = _dispatch_worktree_dir(root, dispatch_id)
+        if not wt_path.exists():
+            log.debug(
+                "remove_dispatch_worktree_if_present: already absent for %s: %s",
+                dispatch_id, wt_path,
+            )
+            return False
+        remove_dispatch_worktree(
+            dispatch_id, project_root=root, review_only=review_only
+        )
+        return True
+    except Exception as exc:  # vnx-silent-except: a caller's finally must not be replaced
+        log.warning(
+            "remove_dispatch_worktree_if_present: teardown failed for dispatch %s "
+            "(worktree %s): %s",
+            dispatch_id,
+            wt_path if wt_path is not None else "<unresolved>",
+            exc,
+        )
+        return False
