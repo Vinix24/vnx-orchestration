@@ -2,7 +2,8 @@
 """Tests for queue_reconciler.py — deterministic queue state reconciliation.
 
 Covers:
-- Feature plan parsing (PR IDs, dependencies, metadata)
+- Dispatch metadata parsing (Manager Block fields, fail-closed defaults)
+- PR identity from the dispatch state only, never from a plan (ADR-047 §4)
 - State derivation from dispatch filesystem
 - Receipt confirmation
 - Drift detection (stale projection scenarios)
@@ -14,6 +15,8 @@ Covers:
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, List
@@ -21,8 +24,10 @@ from typing import Any, Dict, List
 import pytest
 
 # Add lib to path
-_LIB = Path(__file__).parent.parent / "scripts" / "lib"
+_VNX_ROOT = Path(__file__).resolve().parent.parent
+_LIB = _VNX_ROOT / "scripts" / "lib"
 sys.path.insert(0, str(_LIB))
+_RECONCILE_CLI = _VNX_ROOT / "scripts" / "reconcile_queue_state.py"
 
 from queue_reconciler import (
     DispatchRecord,
@@ -30,9 +35,8 @@ from queue_reconciler import (
     QueueReconciler,
     ReconcileResult,
     _drift_severity,
-    _topological_sort,
+    _parse_dispatch_metadata,
     load_receipt_dispatch_ids,
-    parse_feature_plan,
     scan_dispatch_dirs,
 )
 
@@ -41,56 +45,27 @@ from queue_reconciler import (
 # Fixtures
 # ---------------------------------------------------------------------------
 
-FEATURE_PLAN_CONTENT = """\
-# Feature: Test Queue Reconciliation
+# A plan in the grammar the retired parser read: it declares PR-9 with no dispatch.
+PLAN_DECLARING_PR_9 = """\
+# Feature: Plan That Is No Longer Read
 
-**Status**: Active
-**Risk-Class**: high
-
-## PR-0: Foundation Work
+## PR-9: Declared In The Plan Only
 **Track**: C
-**Priority**: P1
-**Skill**: @architect
 **Risk-Class**: high
-**Merge-Policy**: human
-**Review-Stack**: gemini_review,codex_gate
 **Dependencies**: []
+"""
 
-Description of PR-0.
+# The shape the generator wrote (zero PR headings), as on main before A1.
+GENERATED_PLAN = """\
+# Feature Plan
 
-`gate_pr0_foundation`
+## Recently Merged
 
----
+## Active features
 
-## PR-1: Core Implementation
-**Track**: B
-**Priority**: P1
-**Skill**: @backend-developer
-**Risk-Class**: high
-**Merge-Policy**: human
-**Review-Stack**: gemini_review,codex_gate
-**Dependencies**: [PR-0]
+## Completed
 
-Description of PR-1.
-
-`gate_pr1_core`
-
----
-
-## PR-2: Integration
-**Track**: C
-**Priority**: P2
-**Skill**: @quality-engineer
-**Risk-Class**: high
-**Merge-Policy**: human
-**Review-Stack**: gemini_review,codex_gate
-**Dependencies**: [PR-1]
-
-Description of PR-2.
-
-`gate_pr2_integration`
-
----
+## Planned (from ROADMAP.yaml)
 """
 
 
@@ -109,178 +84,112 @@ def _write_receipt(receipts_file: Path, dispatch_id: str, event_type: str = "tas
         f.write(json.dumps(record) + "\n")
 
 
-def _make_feature_plan(tmp_path: Path, content: str = FEATURE_PLAN_CONTENT) -> Path:
-    fp = tmp_path / "FEATURE_PLAN.md"
-    fp.write_text(content)
-    return fp
+def _run_reconcile_cli(tmp_path: Path, *extra: str) -> subprocess.CompletedProcess:
+    """Run scripts/reconcile_queue_state.py with PROJECT_ROOT at ``tmp_path``."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(exist_ok=True)
+    env = {
+        **os.environ,
+        "VNX_HOME": str(_VNX_ROOT),
+        "PROJECT_ROOT": str(tmp_path),
+        "VNX_DATA_DIR": str(tmp_path / ".vnx-data"),
+        "VNX_DATA_DIR_EXPLICIT": "1",
+        "VNX_STATE_DIR": str(state_dir),
+        "VNX_DISPATCH_DIR": str(tmp_path / "dispatches"),
+    }
+    return subprocess.run(
+        [sys.executable, str(_RECONCILE_CLI), "--json",
+         "--dispatch-dir", str(tmp_path / "dispatches"),
+         "--receipts-file", str(state_dir / "t0_receipts.ndjson"),
+         "--state-dir", str(state_dir), *extra],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60,
+    )
 
 
 # ---------------------------------------------------------------------------
-# Feature plan parsing tests
+# ADR-047 §4: PR identities come from the dispatch state only
 # ---------------------------------------------------------------------------
 
-class TestParseFeaturePlan:
-    def test_parses_pr_ids_and_titles(self, tmp_path):
-        fp = _make_feature_plan(tmp_path)
-        name, prs = parse_feature_plan(fp)
-        assert name == "Test Queue Reconciliation"
-        assert [p.pr_id for p in prs] == ["PR-0", "PR-1", "PR-2"]
-        assert prs[0].title == "Foundation Work"
-        assert prs[1].title == "Core Implementation"
-        assert prs[2].title == "Integration"
+class TestPlanIsNotAQueueSource:
+    def test_plan_pr_without_dispatch_is_not_a_queue_row(self, tmp_path):
+        (tmp_path / "FEATURE_PLAN.md").write_text(PLAN_DECLARING_PR_9)
 
-    def test_parses_dependencies(self, tmp_path):
-        fp = _make_feature_plan(tmp_path)
-        _, prs = parse_feature_plan(fp)
-        assert prs[0].dependencies == []
-        assert prs[1].dependencies == ["PR-0"]
-        assert prs[2].dependencies == ["PR-1"]
+        proc = _run_reconcile_cli(tmp_path)
 
-    def test_parses_metadata(self, tmp_path):
-        fp = _make_feature_plan(tmp_path)
-        _, prs = parse_feature_plan(fp)
-        pr1 = prs[1]
-        assert pr1.track == "B"
-        assert pr1.skill == "@backend-developer"
-        assert pr1.risk_class == "high"
-        assert pr1.merge_policy == "human"
-        assert pr1.review_stack == ["gemini_review", "codex_gate"]
+        assert proc.returncode == 0, proc.stderr
+        assert json.loads(proc.stdout)["prs"] == []
 
-    def test_empty_plan_returns_no_prs(self, tmp_path):
-        fp = tmp_path / "FEATURE_PLAN.md"
-        fp.write_text("# Feature: Empty\n\nNo PRs here.\n")
-        name, prs = parse_feature_plan(fp)
-        assert name == "Empty"
-        assert prs == []
+    @pytest.mark.parametrize("plan", [None, GENERATED_PLAN], ids=["no-plan", "generated-plan"])
+    def test_dispatch_for_pr_9_is_a_row_without_drift_warning(self, tmp_path, plan):
+        if plan is not None:
+            (tmp_path / "FEATURE_PLAN.md").write_text(plan)
+        _write_dispatch(tmp_path / "dispatches" / "active" / "d9.md", "PR-9", "d9")
 
+        proc = _run_reconcile_cli(tmp_path)
 
-NEW_FORMAT_FEATURE_PLAN = """\
-# F46–F50 Feature Plan — Intelligence
+        assert proc.returncode == 0, proc.stderr
+        payload = json.loads(proc.stdout)
+        assert [(p["pr_id"], p["state"]) for p in payload["prs"]] == [("PR-9", "active")]
+        assert payload["drift_warnings"] == []
+        assert "FEATURE_PLAN" not in proc.stdout + proc.stderr
 
-## F46: Intelligence Extraction Pipeline Fix
+    def test_repair_writes_the_cache_and_no_pr_queue_md(self, tmp_path):
+        _write_dispatch(tmp_path / "dispatches" / "completed" / "d9.md", "PR-9", "d9")
 
-**Problem**: Something is broken.
+        proc = _run_reconcile_cli(tmp_path, "--repair")
 
-### F46-PR1: Learning Loop DB Bridge
-**Track**: A (T1 backend-developer)
-**Dependencies**: []
-**Risk-Class**: medium
-**Merge-Policy**: human
-**Review-Stack**: gemini_review,codex_gate
+        assert proc.returncode == 0, proc.stderr
+        projection = json.loads((tmp_path / "state" / "pr_queue_state.json").read_text())
+        assert projection["completed"] == ["PR-9"]
+        assert "feature" not in projection and "feature_metadata" not in projection
+        assert (tmp_path / "state" / "pr_queue_state.yaml").is_file()
+        assert not (tmp_path / "PR_QUEUE.md").exists()
 
-Description of F46-PR1.
+    def test_unknown_feature_plan_flag_is_refused(self, tmp_path):
+        proc = _run_reconcile_cli(tmp_path, "--feature-plan", str(tmp_path / "FEATURE_PLAN.md"))
 
-### F46-PR2: Conversation Analyzer DB Bridge
-**Track**: B (T2 test-engineer)
-**Dependencies**: [F46-PR1]
-**Risk-Class**: high
-**Merge-Policy**: human
-**Review-Stack**: codex_gate
-
----
-
-## F47: T0 State Feedback Loop
-
-### F47-PR1: Receipt Watcher
-**Track**: A (T1 backend-developer)
-**Dependencies**: []
-**Risk-Class**: medium
-**Merge-Policy**: human
-**Review-Stack**: gemini_review
-"""
-
-MIXED_FORMAT_FEATURE_PLAN = """\
-# Feature: Mixed Syntax Test
-
-## PR-0: Legacy Foundation
-**Track**: C
-**Dependencies**: []
-**Risk-Class**: high
-**Merge-Policy**: human
-**Review-Stack**: gemini_review,codex_gate
-
-`gate_pr0_foundation`
-
----
-
-### F46-PR1: New Format PR
-**Track**: A (T1 backend-developer)
-**Dependencies**: [PR-0]
-**Risk-Class**: medium
-**Merge-Policy**: human
-**Review-Stack**: codex_gate
-"""
+        assert proc.returncode == 2
+        assert "unrecognized arguments: --feature-plan" in proc.stderr
 
 
-class TestParseFeaturePlanNewFormat:
-    def test_parses_pr_ids_and_titles(self, tmp_path):
-        fp = tmp_path / "FEATURE_PLAN.md"
-        fp.write_text(NEW_FORMAT_FEATURE_PLAN)
-        name, prs = parse_feature_plan(fp)
-        assert [p.pr_id for p in prs] == ["F46-PR1", "F46-PR2", "F47-PR1"]
-        assert prs[0].title == "Learning Loop DB Bridge"
-        assert prs[1].title == "Conversation Analyzer DB Bridge"
-        assert prs[2].title == "Receipt Watcher"
+class TestDispatchMetadata:
+    def test_manager_block_fields(self):
+        metadata = _parse_dispatch_metadata(
+            "[[TARGET:A]]\nManager Block\n\nRole: planner\nTrack: A\nGate: implementation\n"
+            "Risk-Class: Medium\nMerge-Policy: human\nReview-Stack: codex_gate, kimi_gate\n"
+            "PR-ID: PR-1\n\nInstruction:\n# Skills system foundation\n"
+        )
+        assert metadata == {
+            "title": "Skills system foundation",
+            "track": "A",
+            "dependencies": [],
+            "gate": "implementation",
+            "skill": "planner",
+            "risk_class": "medium",
+            "merge_policy": "human",
+            "review_stack": ["codex_gate", "kimi_gate"],
+        }
 
-    def test_parses_feature_name_from_first_heading(self, tmp_path):
-        fp = tmp_path / "FEATURE_PLAN.md"
-        fp.write_text(NEW_FORMAT_FEATURE_PLAN)
-        name, _ = parse_feature_plan(fp)
-        assert name == "F46–F50 Feature Plan — Intelligence"
+    @pytest.mark.parametrize("content", ["", "PR-ID: PR-1\n", "Risk-Class:\nMerge-Policy:   \n"])
+    def test_absent_fields_fail_closed(self, content):
+        metadata = _parse_dispatch_metadata(content)
+        assert metadata["risk_class"] == "high"
+        assert metadata["merge_policy"] == "human"
+        assert metadata["review_stack"] == []
+        assert metadata["track"] == "?"
 
-    def test_parses_dependencies(self, tmp_path):
-        fp = tmp_path / "FEATURE_PLAN.md"
-        fp.write_text(NEW_FORMAT_FEATURE_PLAN)
-        _, prs = parse_feature_plan(fp)
-        assert prs[0].dependencies == []
-        assert prs[1].dependencies == ["F46-PR1"]
-        assert prs[2].dependencies == []
+    def test_review_stack_none_is_empty(self):
+        assert _parse_dispatch_metadata("Review-Stack: none\n")["review_stack"] == []
 
-    def test_parses_track_with_suffix(self, tmp_path):
-        """'**Track**: A (T1 backend-developer)' should yield track == 'A'."""
-        fp = tmp_path / "FEATURE_PLAN.md"
-        fp.write_text(NEW_FORMAT_FEATURE_PLAN)
-        _, prs = parse_feature_plan(fp)
-        assert prs[0].track == "A"
-        assert prs[1].track == "B"
+    def test_reconciled_metadata_comes_from_the_evidence_dispatch(self, tmp_path):
+        dispatch_dir = tmp_path / "dispatches"
+        _write_dispatch(dispatch_dir / "completed" / "old.md", "PR-1", "old", extra="Risk-Class: low")
+        _write_dispatch(dispatch_dir / "active" / "new.md", "PR-1", "new", extra="Risk-Class: high")
 
-    def test_parses_metadata(self, tmp_path):
-        fp = tmp_path / "FEATURE_PLAN.md"
-        fp.write_text(NEW_FORMAT_FEATURE_PLAN)
-        _, prs = parse_feature_plan(fp)
-        pr1 = prs[1]
-        assert pr1.risk_class == "high"
-        assert pr1.merge_policy == "human"
-        assert pr1.review_stack == ["codex_gate"]
+        result = QueueReconciler(dispatch_dir=dispatch_dir, receipts_file=tmp_path / "r.ndjson").reconcile()
 
-
-class TestParseFeaturePlanMixed:
-    def test_both_formats_parsed(self, tmp_path):
-        fp = tmp_path / "FEATURE_PLAN.md"
-        fp.write_text(MIXED_FORMAT_FEATURE_PLAN)
-        name, prs = parse_feature_plan(fp)
-        assert name == "Mixed Syntax Test"
-        assert [p.pr_id for p in prs] == ["PR-0", "F46-PR1"]
-
-    def test_mixed_ordering_by_file_position(self, tmp_path):
-        fp = tmp_path / "FEATURE_PLAN.md"
-        fp.write_text(MIXED_FORMAT_FEATURE_PLAN)
-        _, prs = parse_feature_plan(fp)
-        assert prs[0].pr_id == "PR-0"
-        assert prs[1].pr_id == "F46-PR1"
-
-    def test_mixed_dependencies_cross_format(self, tmp_path):
-        fp = tmp_path / "FEATURE_PLAN.md"
-        fp.write_text(MIXED_FORMAT_FEATURE_PLAN)
-        _, prs = parse_feature_plan(fp)
-        assert prs[0].dependencies == []
-        assert prs[1].dependencies == ["PR-0"]
-
-    def test_mixed_gate_extracted_from_legacy_section(self, tmp_path):
-        fp = tmp_path / "FEATURE_PLAN.md"
-        fp.write_text(MIXED_FORMAT_FEATURE_PLAN)
-        _, prs = parse_feature_plan(fp)
-        assert prs[0].gate == "gate_pr0_foundation"
+        assert result.prs[0].provenance["dispatch_id"] == "new"
+        assert result.prs[0].metadata["risk_class"] == "high"
 
 
 # ---------------------------------------------------------------------------
@@ -420,53 +329,47 @@ class TestLoadReceiptDispatchIds:
 # ---------------------------------------------------------------------------
 
 class TestReconcilerStateDeriv:
-    def _make_reconciler(self, tmp_path, fp: Path) -> QueueReconciler:
+    def _make_reconciler(self, tmp_path) -> QueueReconciler:
         dispatch_dir = tmp_path / "dispatches"
         receipts_file = tmp_path / "t0_receipts.ndjson"
         return QueueReconciler(
             dispatch_dir=dispatch_dir,
             receipts_file=receipts_file,
-            feature_plan=fp,
         )
 
-    def test_all_pending_when_no_dispatches(self, tmp_path):
-        fp = _make_feature_plan(tmp_path)
-        r = self._make_reconciler(tmp_path, fp)
-        result = r.reconcile()
-        states = {p.pr_id: p.state for p in result.prs}
-        assert states["PR-0"] == "pending"   # no deps
-        assert states["PR-1"] == "blocked"   # needs PR-0
-        assert states["PR-2"] == "blocked"   # needs PR-1
+    def test_empty_queue_when_no_dispatches(self, tmp_path):
+        r = self._make_reconciler(tmp_path)
+        assert r.reconcile().prs == []
+
+    def test_dispatch_without_pr_id_is_not_a_row(self, tmp_path):
+        dispatch_file = tmp_path / "dispatches" / "active" / "no-pr.md"
+        dispatch_file.parent.mkdir(parents=True)
+        dispatch_file.write_text("[[TARGET:B]]\nManager Block\n\nDispatch-ID: no-pr\n")
+        assert self._make_reconciler(tmp_path).reconcile().prs == []
 
     def test_active_when_dispatch_in_active_dir(self, tmp_path):
-        fp = _make_feature_plan(tmp_path)
         dispatch_dir = tmp_path / "dispatches"
         _write_dispatch(
             dispatch_dir / "active" / "20260101-120000-pr0-C.md",
             "PR-0", "20260101-120000-pr0-C"
         )
-        r = self._make_reconciler(tmp_path, fp)
+        r = self._make_reconciler(tmp_path)
         result = r.reconcile()
         states = {p.pr_id: p.state for p in result.prs}
-        assert states["PR-0"] == "active"
-        assert states["PR-1"] == "blocked"   # dependency PR-0 not completed
+        assert states == {"PR-0": "active"}
 
     def test_completed_when_dispatch_in_completed_dir(self, tmp_path):
-        fp = _make_feature_plan(tmp_path)
         dispatch_dir = tmp_path / "dispatches"
         _write_dispatch(
             dispatch_dir / "completed" / "20260101-120000-pr0-C.md",
             "PR-0", "20260101-120000-pr0-C"
         )
-        r = self._make_reconciler(tmp_path, fp)
+        r = self._make_reconciler(tmp_path)
         result = r.reconcile()
         states = {p.pr_id: p.state for p in result.prs}
-        assert states["PR-0"] == "completed"
-        assert states["PR-1"] == "pending"   # PR-0 completed, deps satisfied
-        assert states["PR-2"] == "blocked"   # needs PR-1
+        assert states == {"PR-0": "completed"}
 
     def test_receipt_confirms_completion(self, tmp_path):
-        fp = _make_feature_plan(tmp_path)
         dispatch_dir = tmp_path / "dispatches"
         dispatch_id = "20260101-120000-pr0-C"
         _write_dispatch(
@@ -475,14 +378,13 @@ class TestReconcilerStateDeriv:
         )
         receipts = tmp_path / "t0_receipts.ndjson"
         _write_receipt(receipts, dispatch_id, "task_complete")
-        r = self._make_reconciler(tmp_path, fp)
+        r = self._make_reconciler(tmp_path)
         result = r.reconcile()
         pr0 = next(p for p in result.prs if p.pr_id == "PR-0")
         assert pr0.state == "completed"
         assert pr0.provenance["receipt_confirmed"] is True
 
     def test_unconfirmed_completion_without_receipt(self, tmp_path):
-        fp = _make_feature_plan(tmp_path)
         dispatch_dir = tmp_path / "dispatches"
         dispatch_id = "20260101-120000-pr0-C"
         _write_dispatch(
@@ -490,7 +392,7 @@ class TestReconcilerStateDeriv:
             "PR-0", dispatch_id
         )
         # No receipt written
-        r = self._make_reconciler(tmp_path, fp)
+        r = self._make_reconciler(tmp_path)
         result = r.reconcile()
         pr0 = next(p for p in result.prs if p.pr_id == "PR-0")
         assert pr0.state == "completed"
@@ -499,7 +401,6 @@ class TestReconcilerStateDeriv:
 
     def test_active_takes_priority_over_completed(self, tmp_path):
         """EC-3: If any dispatch is active, PR is active regardless of other completed dispatches."""
-        fp = _make_feature_plan(tmp_path)
         dispatch_dir = tmp_path / "dispatches"
         # PR-0 has a completed dispatch AND an active dispatch (e.g. re-dispatch scenario)
         _write_dispatch(
@@ -510,28 +411,25 @@ class TestReconcilerStateDeriv:
             dispatch_dir / "active" / "20260101-110000-pr0-C-retry.md",
             "PR-0", "20260101-110000-pr0-C-retry"
         )
-        r = self._make_reconciler(tmp_path, fp)
+        r = self._make_reconciler(tmp_path)
         result = r.reconcile()
         states = {p.pr_id: p.state for p in result.prs}
         assert states["PR-0"] == "active"
 
     def test_rejected_dispatch_does_not_complete_pr(self, tmp_path):
         """Rejected dispatch does not make a PR completed."""
-        fp = _make_feature_plan(tmp_path)
         dispatch_dir = tmp_path / "dispatches"
         _write_dispatch(
             dispatch_dir / "rejected" / "20260101-120000-pr0-C.md",
             "PR-0", "20260101-120000-pr0-C"
         )
-        r = self._make_reconciler(tmp_path, fp)
+        r = self._make_reconciler(tmp_path)
         result = r.reconcile()
         states = {p.pr_id: p.state for p in result.prs}
-        assert states["PR-0"] == "pending"   # rejected, deps met (none)
-        assert states["PR-1"] == "blocked"   # PR-0 not completed
+        assert states == {"PR-0": "pending"}   # rejected: named, not completed
 
     def test_pending_when_dispatch_in_staging(self, tmp_path):
         """A dispatch in staging/ means the PR is pending (dispatch queued but not claimed)."""
-        fp = _make_feature_plan(tmp_path)
         dispatch_dir = tmp_path / "dispatches"
         # Complete PR-0 first so PR-1 becomes eligible
         _write_dispatch(
@@ -542,16 +440,13 @@ class TestReconcilerStateDeriv:
             dispatch_dir / "staging" / "20260101-120000-pr1-B.md",
             "PR-1", "20260101-120000-pr1-B"
         )
-        r = self._make_reconciler(tmp_path, fp)
+        r = self._make_reconciler(tmp_path)
         result = r.reconcile()
         states = {p.pr_id: p.state for p in result.prs}
-        assert states["PR-0"] == "completed"
-        assert states["PR-1"] == "pending"
-        assert states["PR-2"] == "blocked"
+        assert states == {"PR-0": "completed", "PR-1": "pending"}
 
     def test_full_chain_completed(self, tmp_path):
         """When all dispatches are completed, all PRs should be completed."""
-        fp = _make_feature_plan(tmp_path)
         dispatch_dir = tmp_path / "dispatches"
         for pr_id, dispatch_id in [
             ("PR-0", "20260101-100000-pr0-C"),
@@ -562,7 +457,7 @@ class TestReconcilerStateDeriv:
                 dispatch_dir / "completed" / f"{dispatch_id}.md",
                 pr_id, dispatch_id
             )
-        r = self._make_reconciler(tmp_path, fp)
+        r = self._make_reconciler(tmp_path)
         result = r.reconcile()
         for p in result.prs:
             assert p.state == "completed", f"{p.pr_id} expected completed, got {p.state}"
@@ -592,7 +487,6 @@ class TestDriftDetection:
         return proj
 
     def test_no_drift_when_states_agree(self, tmp_path):
-        fp = _make_feature_plan(tmp_path)
         dispatch_dir = tmp_path / "dispatches"
         _write_dispatch(
             dispatch_dir / "completed" / "20260101-100000-pr0-C.md",
@@ -602,7 +496,6 @@ class TestDriftDetection:
         r = QueueReconciler(
             dispatch_dir=dispatch_dir,
             receipts_file=tmp_path / "t0_receipts.ndjson",
-            feature_plan=fp,
             projection_file=proj,
         )
         result = r.reconcile()
@@ -614,7 +507,6 @@ class TestDriftDetection:
 
     def test_blocking_drift_active_but_projected_pending(self, tmp_path):
         """Under-reported active: dispatch is active but projection says pending."""
-        fp = _make_feature_plan(tmp_path)
         dispatch_dir = tmp_path / "dispatches"
         _write_dispatch(
             dispatch_dir / "active" / "20260101-100000-pr0-C.md",
@@ -625,7 +517,6 @@ class TestDriftDetection:
         r = QueueReconciler(
             dispatch_dir=dispatch_dir,
             receipts_file=tmp_path / "t0_receipts.ndjson",
-            feature_plan=fp,
             projection_file=proj,
         )
         result = r.reconcile()
@@ -637,7 +528,6 @@ class TestDriftDetection:
 
     def test_blocking_drift_completed_but_projected_active(self, tmp_path):
         """Stale active: dispatch moved to completed but projection still shows active."""
-        fp = _make_feature_plan(tmp_path)
         dispatch_dir = tmp_path / "dispatches"
         _write_dispatch(
             dispatch_dir / "completed" / "20260101-100000-pr0-C.md",
@@ -648,7 +538,6 @@ class TestDriftDetection:
         r = QueueReconciler(
             dispatch_dir=dispatch_dir,
             receipts_file=tmp_path / "t0_receipts.ndjson",
-            feature_plan=fp,
             projection_file=proj,
         )
         result = r.reconcile()
@@ -659,19 +548,20 @@ class TestDriftDetection:
         assert blocking[0].projected_state == "active"
 
     def test_warning_drift_pending_but_projected_blocked(self, tmp_path):
-        """Stale blocked: all deps are completed but projection says blocked."""
-        fp = _make_feature_plan(tmp_path)
+        """Stale blocked: PR-1 is pending (a PR has no dependencies) but projection says blocked."""
         dispatch_dir = tmp_path / "dispatches"
-        # PR-0 completed → PR-1 should be pending, but projection shows blocked
         _write_dispatch(
             dispatch_dir / "completed" / "20260101-100000-pr0-C.md",
             "PR-0", "20260101-100000-pr0-C"
+        )
+        _write_dispatch(
+            dispatch_dir / "staging" / "20260101-110000-pr1-B.md",
+            "PR-1", "20260101-110000-pr1-B"
         )
         proj = self._make_projection(tmp_path, {"PR-0": "completed", "PR-1": "blocked", "PR-2": "blocked"})
         r = QueueReconciler(
             dispatch_dir=dispatch_dir,
             receipts_file=tmp_path / "t0_receipts.ndjson",
-            feature_plan=fp,
             projection_file=proj,
         )
         result = r.reconcile()
@@ -683,7 +573,6 @@ class TestDriftDetection:
 
     def test_info_drift_unconfirmed_completion(self, tmp_path):
         """Info drift: completion dispatch exists but no receipt."""
-        fp = _make_feature_plan(tmp_path)
         dispatch_dir = tmp_path / "dispatches"
         _write_dispatch(
             dispatch_dir / "completed" / "20260101-100000-pr0-C.md",
@@ -693,7 +582,6 @@ class TestDriftDetection:
         r = QueueReconciler(
             dispatch_dir=dispatch_dir,
             receipts_file=tmp_path / "t0_receipts.ndjson",  # no receipts
-            feature_plan=fp,
             projection_file=proj,
         )
         result = r.reconcile()
@@ -702,7 +590,6 @@ class TestDriftDetection:
 
     def test_missing_active_drift(self, tmp_path):
         """Missing active: projection shows no active but dispatch is in active/."""
-        fp = _make_feature_plan(tmp_path)
         dispatch_dir = tmp_path / "dispatches"
         _write_dispatch(
             dispatch_dir / "active" / "20260101-100000-pr0-C.md",
@@ -713,7 +600,6 @@ class TestDriftDetection:
         r = QueueReconciler(
             dispatch_dir=dispatch_dir,
             receipts_file=tmp_path / "t0_receipts.ndjson",
-            feature_plan=fp,
             projection_file=proj,
         )
         result = r.reconcile()
@@ -727,7 +613,6 @@ class TestDriftDetection:
 class TestMidRunRecovery:
     def test_repair_restores_correct_projection(self, tmp_path):
         """Repair mode: stale projection is overwritten with derived truth."""
-        fp = _make_feature_plan(tmp_path)
         dispatch_dir = tmp_path / "dispatches"
         state_dir = tmp_path / "state"
         state_dir.mkdir(parents=True, exist_ok=True)
@@ -755,7 +640,6 @@ class TestMidRunRecovery:
         r = QueueReconciler(
             dispatch_dir=dispatch_dir,
             receipts_file=tmp_path / "t0_receipts.ndjson",
-            feature_plan=fp,
             projection_file=proj_file,
         )
         result = r.reconcile()
@@ -767,7 +651,7 @@ class TestMidRunRecovery:
         import sys
         sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
         from reconcile_queue_state import repair_projections
-        repair_projections(result, state_dir, tmp_path)
+        repair_projections(result, state_dir)
 
         # Reload projection — should now be correct
         new_proj = json.loads(proj_file.read_text())
@@ -775,41 +659,25 @@ class TestMidRunRecovery:
         assert "PR-0" not in new_proj.get("active", [])
         assert new_proj.get("source") == "queue_reconciler"
 
-    def test_pr_queue_md_regenerated_from_reconciled_truth(self, tmp_path):
-        """PR_QUEUE.md is rebuilt from derived state, not stale projection."""
-        fp = _make_feature_plan(tmp_path)
+    def test_repair_writes_no_pr_queue_md(self, tmp_path):
+        """The projection is a cache in state/; PR_QUEUE.md is no longer rendered."""
         dispatch_dir = tmp_path / "dispatches"
         state_dir = tmp_path / "state"
         state_dir.mkdir(parents=True, exist_ok=True)
-
-        # PR-0 and PR-1 completed
-        for pr_id, dispatch_id in [
-            ("PR-0", "20260101-100000-pr0-C"),
-            ("PR-1", "20260101-110000-pr1-B"),
-        ]:
-            _write_dispatch(
-                dispatch_dir / "completed" / f"{dispatch_id}.md",
-                pr_id, dispatch_id
-            )
+        _write_dispatch(
+            dispatch_dir / "completed" / "20260101-100000-pr0-C.md",
+            "PR-0", "20260101-100000-pr0-C"
+        )
 
         r = QueueReconciler(
             dispatch_dir=dispatch_dir,
             receipts_file=tmp_path / "t0_receipts.ndjson",
-            feature_plan=fp,
         )
-        result = r.reconcile()
-
         from reconcile_queue_state import repair_projections
-        repair_projections(result, state_dir, tmp_path)
+        repair_projections(r.reconcile(), state_dir)
 
-        queue_md = (tmp_path / "PR_QUEUE.md").read_text()
-        assert "✅ Completed PRs" in queue_md
-        assert "PR-0" in queue_md
-        assert "PR-1" in queue_md
-        # PR-2 should be pending (PR-1 completed, deps met)
-        assert "⏳ Queued PRs" in queue_md or "PR-2" in queue_md
-        # Source annotation must be present
-        assert "queue_reconciler" in queue_md
+        assert json.loads((state_dir / "pr_queue_state.json").read_text())["completed"] == ["PR-0"]
+        assert not list(tmp_path.rglob("PR_QUEUE.md"))
 
 
 # ---------------------------------------------------------------------------
@@ -819,7 +687,6 @@ class TestMidRunRecovery:
 class TestIdempotency:
     def test_reconcile_twice_same_result(self, tmp_path):
         """Reconciliation with same inputs produces identical results."""
-        fp = _make_feature_plan(tmp_path)
         dispatch_dir = tmp_path / "dispatches"
         _write_dispatch(
             dispatch_dir / "completed" / "20260101-100000-pr0-C.md",
@@ -829,7 +696,6 @@ class TestIdempotency:
         r = QueueReconciler(
             dispatch_dir=dispatch_dir,
             receipts_file=tmp_path / "t0_receipts.ndjson",
-            feature_plan=fp,
         )
         r1 = r.reconcile()
         r2 = r.reconcile()
@@ -840,7 +706,6 @@ class TestIdempotency:
 
     def test_repair_twice_same_projection(self, tmp_path):
         """Running repair twice produces identical projection files."""
-        fp = _make_feature_plan(tmp_path)
         dispatch_dir = tmp_path / "dispatches"
         state_dir = tmp_path / "state"
         state_dir.mkdir(parents=True, exist_ok=True)
@@ -852,7 +717,6 @@ class TestIdempotency:
         r = QueueReconciler(
             dispatch_dir=dispatch_dir,
             receipts_file=tmp_path / "t0_receipts.ndjson",
-            feature_plan=fp,
         )
 
         import sys
@@ -860,11 +724,11 @@ class TestIdempotency:
         from reconcile_queue_state import repair_projections
 
         result1 = r.reconcile()
-        repair_projections(result1, state_dir, tmp_path)
+        repair_projections(result1, state_dir)
         content_after_first = (state_dir / "pr_queue_state.json").read_text()
 
         result2 = r.reconcile()
-        repair_projections(result2, state_dir, tmp_path)
+        repair_projections(result2, state_dir)
         content_after_second = (state_dir / "pr_queue_state.json").read_text()
 
         # Parse and compare (timestamps will differ so compare structural content)
@@ -875,31 +739,6 @@ class TestIdempotency:
         pr_states1 = {p["id"]: p["status"] for p in data1.get("prs", [])}
         pr_states2 = {p["id"]: p["status"] for p in data2.get("prs", [])}
         assert pr_states1 == pr_states2
-
-
-# ---------------------------------------------------------------------------
-# Topological sort helper
-# ---------------------------------------------------------------------------
-
-class TestTopologicalSort:
-    def test_linear_chain(self):
-        ids = ["PR-0", "PR-1", "PR-2"]
-        deps = {"PR-0": [], "PR-1": ["PR-0"], "PR-2": ["PR-1"]}
-        ordered = _topological_sort(ids, deps)
-        assert ordered.index("PR-0") < ordered.index("PR-1")
-        assert ordered.index("PR-1") < ordered.index("PR-2")
-
-    def test_no_deps_preserves_order(self):
-        ids = ["PR-0", "PR-1", "PR-2"]
-        deps = {"PR-0": [], "PR-1": [], "PR-2": []}
-        ordered = _topological_sort(ids, deps)
-        assert set(ordered) == set(ids)
-
-    def test_cycle_returns_input_order(self):
-        ids = ["PR-0", "PR-1"]
-        deps = {"PR-0": ["PR-1"], "PR-1": ["PR-0"]}
-        ordered = _topological_sort(ids, deps)
-        assert ordered == ids  # Falls back to input order
 
 
 # ---------------------------------------------------------------------------
@@ -921,30 +760,6 @@ class TestDriftSeverity:
 
     def test_blocked_but_pending_is_warning(self):
         assert _drift_severity("PR-1", "blocked", "pending") == "warning"
-
-
-# ---------------------------------------------------------------------------
-# Edge case: foreign dispatch (EC-4)
-# ---------------------------------------------------------------------------
-
-class TestForeignDispatch:
-    def test_foreign_dispatch_raises_warning(self, tmp_path):
-        """Dispatch referencing PR not in FEATURE_PLAN.md generates a drift warning."""
-        fp = _make_feature_plan(tmp_path)
-        dispatch_dir = tmp_path / "dispatches"
-        _write_dispatch(
-            dispatch_dir / "active" / "20260101-100000-pr-foreign-C.md",
-            "PR-99",  # Not in feature plan
-            "20260101-100000-pr-foreign-C"
-        )
-        r = QueueReconciler(
-            dispatch_dir=dispatch_dir,
-            receipts_file=tmp_path / "t0_receipts.ndjson",
-            feature_plan=fp,
-        )
-        result = r.reconcile()
-        foreign_warnings = [w for w in result.drift_warnings if "PR-99" in w.pr_id or "PR-99" in w.message]
-        assert len(foreign_warnings) >= 1
 
 
 # ---------------------------------------------------------------------------
