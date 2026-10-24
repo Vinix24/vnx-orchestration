@@ -10,7 +10,11 @@ appended ``MANIFEST.txt`` line in the format of the 27-09-2026 hand salvage::
   with ``git fetch <bundle> HEAD`` in a clone that has that remote's history,
   and it cannot be cloned on its own. Bundling the full ancestry instead would
   write tens of megabytes per tree.
-* ``<name>.patch`` — ``git diff --binary HEAD`` when the tree or index differs.
+* ``<name>.staged.patch`` — HEAD to index (``git diff --binary --cached HEAD``).
+* ``<name>.patch`` — index to worktree (``git diff --binary``). Two patches,
+  not one ``git diff HEAD``: a staged change the tree undoes again cancels out
+  in that single diff and the index content would be lost. ``git status``, not
+  an empty diff, decides whether there is tracked work.
 * ``<name>.untracked.tgz`` — untracked, non-ignored files minus the internal
   convenience symlinks (the filter is imported from cleanup_reviewed_worktrees).
 
@@ -34,9 +38,17 @@ MANIFEST_NAME = "MANIFEST.txt"
 
 _DETACHED = "(detached)"
 _BUNDLE_SUFFIX = ".bundle"
+_STAGED_SUFFIX = ".staged.patch"
 _PATCH_SUFFIX = ".patch"
 _TARBALL_SUFFIX = ".untracked.tgz"
 _SHA_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
+# Fixed output whatever the operator's diff config says, so the patch applies.
+_DIFF = [
+    "diff", "--binary", "--no-color", "--no-ext-diff", "--no-textconv",
+    "--src-prefix=a/", "--dst-prefix=b/",
+]
+# Porcelain v1 codes of a path in a merge conflict.
+_UNMERGED = frozenset({"DD", "AU", "UD", "UA", "DU", "AA", "UU"})
 
 
 class SalvageError(RuntimeError):
@@ -90,6 +102,45 @@ def _unpushed_count(worktree_path: Path, head: str, remote: str) -> int:
     if not raw.isdigit():
         raise SalvageError(f"count unpushed commits: git returned {raw!r}, not a count")
     return int(raw)
+
+
+def _tracked_changes(worktree_path: Path) -> list[tuple[str, str]]:
+    """``(XY, path)`` for every tracked change ``git status`` reports; with
+    ``--untracked-files=no`` no ``??`` entry is listed. A rename or copy
+    carries its source path as one more NUL-separated field."""
+    raw = _run_git(
+        ["status", "--porcelain=v1", "-z", "--untracked-files=no"], worktree_path,
+        "read status",
+    )
+    fields = iter(raw.split(b"\0"))
+    changes = []
+    for chunk in fields:
+        if not chunk:
+            continue
+        entry = os.fsdecode(chunk)
+        if len(entry) < 4 or entry[2] != " ":
+            raise SalvageError(f"read status: unparseable entry {entry!r}")
+        changes.append((entry[:2], entry[3:]))
+        if "R" in entry[:2] or "C" in entry[:2]:
+            next(fields, None)
+    return changes
+
+
+def _tracked_diffs(worktree_path: Path) -> tuple[bytes, bytes]:
+    """``(HEAD to index, index to worktree)`` as binary patches. A status that
+    reports tracked work neither patch carries is a SalvageError, never an
+    empty salvage, and so is a merge conflict: no patch carries its stages."""
+    changes = _tracked_changes(worktree_path)
+    unmerged = sorted(path for xy, path in changes if xy in _UNMERGED)
+    if unmerged:
+        raise SalvageError(f"unmerged paths no patch can carry: {', '.join(unmerged)}")
+    staged = _run_git([*_DIFF, "--cached", "HEAD"], worktree_path, "diff HEAD to index")
+    unstaged = _run_git(_DIFF, worktree_path, "diff index to worktree")
+    if changes and not (staged or unstaged):
+        raise SalvageError(
+            f"git status reports {len(changes)} tracked change(s) but both diffs are empty"
+        )
+    return staged, unstaged
 
 
 def _internal_symlink(entry_path: Path, repo_root: Path) -> bool:
@@ -181,7 +232,8 @@ def _append_manifest(dest_dir: Path, line: str) -> None:
 
 def _write_all(
     worktree_path: Path, dest_dir: Path, name: str, head: str, remote: str,
-    patch: bytes, untracked: list[str], artifacts: list[str], manifest_line: str,
+    patches: dict[str, bytes], untracked: list[str], artifacts: list[str],
+    manifest_line: str,
 ) -> None:
     """Stage every artifact, rename them into place, then append the MANIFEST
     line: a line only exists for a complete salvage, and no half-written file
@@ -194,8 +246,8 @@ def _write_all(
                 dest_dir, f"{name}{_BUNDLE_SUFFIX}",
                 _write_bundle, worktree_path, head, remote,
             ))
-        if f"{name}{_PATCH_SUFFIX}" in artifacts:
-            pending.append(_stage(dest_dir, f"{name}{_PATCH_SUFFIX}", _write_patch, patch))
+        for artifact, patch in patches.items():
+            pending.append(_stage(dest_dir, artifact, _write_patch, patch))
         if f"{name}{_TARBALL_SUFFIX}" in artifacts:
             pending.append(_stage(
                 dest_dir, f"{name}{_TARBALL_SUFFIX}",
@@ -237,14 +289,18 @@ def salvage(
 
     head, branch = _head_identity(worktree_path)
     unpushed = _unpushed_count(worktree_path, head, remote)
-    patch = _run_git(["diff", "--binary", "HEAD"], worktree_path, "diff against HEAD")
+    staged, unstaged = _tracked_diffs(worktree_path)
     untracked = _untracked_paths(worktree_path, repo_root)
 
     artifacts = []
     if unpushed > 0:
         artifacts.append(f"{name}{_BUNDLE_SUFFIX}")
-    if patch:
-        artifacts.append(f"{name}{_PATCH_SUFFIX}")
+    patches = {
+        f"{name}{suffix}": patch
+        for suffix, patch in ((_STAGED_SUFFIX, staged), (_PATCH_SUFFIX, unstaged))
+        if patch
+    }
+    artifacts.extend(patches)
     if untracked:
         artifacts.append(f"{name}{_TARBALL_SUFFIX}")
     manifest_line = (
@@ -258,25 +314,62 @@ def salvage(
     if dry_run:
         return result
     _write_all(
-        worktree_path, dest_dir, name, head, remote, patch, untracked,
+        worktree_path, dest_dir, name, head, remote, patches, untracked,
         artifacts, manifest_line,
     )
     result.written = True
     return result
 
 
-def _bundle_problems(path: Path, cwd: Path) -> list[str]:
+def _git_problem(
+    args: list[str], cwd: Path, env: dict[str, str] | None = None
+) -> tuple[str | None, str]:
+    """``(problem, stdout)`` of one git command run by :func:`verify`; the
+    problem is None only for exit status 0."""
+    command = " ".join(args[:2])
     try:
         proc = subprocess.run(
-            ["git", "bundle", "verify", str(path)], cwd=str(cwd),
-            capture_output=True, text=True,
+            ["git", *args], cwd=str(cwd), capture_output=True, text=True, env=env,
         )
     except OSError as exc:
-        return [f"{path.name}: cannot run git bundle verify: {exc}"]
+        return f"cannot run git {command}: {exc}", ""
     if proc.returncode == 0:
-        return []
+        return None, proc.stdout.strip()
     detail = (proc.stderr or proc.stdout).strip() or "no output"
-    return [f"{path.name}: git bundle verify failed ({proc.returncode}): {detail}"]
+    return f"git {command} failed ({proc.returncode}): {detail}", ""
+
+
+def _bundle_problems(path: Path, cwd: Path) -> list[str]:
+    problem, _out = _git_problem(["bundle", "verify", str(path)], cwd)
+    return [f"{path.name}: {problem}"] if problem else []
+
+
+def _patch_problems(paths: list[Path], head: str, cwd: Path) -> list[str]:
+    """Apply ``paths`` in order to a scratch index loaded from ``head``: the
+    staged patch to head, the worktree patch on top of it. New blobs go to a
+    scratch object directory that borrows the repository's objects, so the
+    check writes nothing into the repository."""
+    problem, objects = _git_problem(
+        ["rev-parse", "--path-format=absolute", "--git-path", "objects"], cwd,
+    )
+    if problem:
+        return [f"{paths[0].name}: no repository to apply against: {problem}"]
+    with tempfile.TemporaryDirectory(prefix="salvage-verify.") as scratch:
+        env = {
+            **os.environ,
+            "GIT_INDEX_FILE": os.path.join(scratch, "index"),
+            "GIT_OBJECT_DIRECTORY": os.path.join(scratch, "objects"),
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES": objects,
+        }
+        os.mkdir(env["GIT_OBJECT_DIRECTORY"])
+        problem, _out = _git_problem(["read-tree", head], cwd, env)
+        if problem:
+            return [f"{paths[0].name}: cannot load head {head}: {problem}"]
+        for path in paths:
+            problem, _out = _git_problem(["apply", "--cached", str(path)], cwd, env)
+            if problem:
+                return [f"{path.name}: does not apply: {problem}"]
+    return []
 
 
 def _tarball_problems(path: Path) -> list[str]:
@@ -294,15 +387,17 @@ def verify(
     """Every problem that keeps this salvage from being complete.
 
     An artifact named in ``result`` that is missing or empty is a problem, as
-    is a bundle ``git bundle verify`` rejects and a tarball ``tarfile`` cannot
-    list. An empty list is the only result a later removal may act on.
-    ``repo_root`` is where ``git bundle verify`` runs; it defaults to
-    ``dest_dir`` and is needed when the salvage directory is not itself inside
-    the repository (a central ``$VNX_DATA_DIR``).
+    is a bundle ``git bundle verify`` rejects, a tarball ``tarfile`` cannot
+    list, and a staged or worktree patch that does not apply in order to
+    ``result.head``. An empty list is the only result a later removal may act
+    on. ``repo_root`` is where git runs; it defaults to ``dest_dir`` and is
+    needed when the salvage directory is not itself inside the repository (a
+    central ``$VNX_DATA_DIR``).
     """
     dest = Path(dest_dir)
     cwd = Path(repo_root) if repo_root is not None else dest
     problems = []
+    usable = set()
     for artifact in result.artifacts:
         path = dest / artifact
         try:
@@ -318,4 +413,14 @@ def verify(
             problems.extend(_bundle_problems(path, cwd))
         elif artifact.endswith(_TARBALL_SUFFIX):
             problems.extend(_tarball_problems(path))
+        else:
+            usable.add(artifact)
+    # Staged first: the worktree patch starts from the index, not from HEAD.
+    patches = sorted(
+        (a for a in result.artifacts if a.endswith(_PATCH_SUFFIX)),
+        key=lambda a: not a.endswith(_STAGED_SUFFIX),
+    )
+    # A missing or empty patch is already a problem; its order cannot be checked.
+    if patches and all(a in usable for a in patches):
+        problems.extend(_patch_problems([dest / a for a in patches], result.head, cwd))
     return problems
