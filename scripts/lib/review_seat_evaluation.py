@@ -26,6 +26,18 @@ requests one seat at a time (``--review-stack codex_gate``, then
 the recorded stack and a fresh resolution differ, the recorded one wins (plan
 acceptance (b)) and the evaluation says so in ``note``.
 
+**The risk class narrows the stack (R3b, ADR-008 amendment 2026-10-23).**
+:func:`seats_for_risk` is the one rule: the first seat of the stack at ``low``
+and ``medium``, every seat at ``high`` and ``critical``. The class is the one
+of the head under evaluation (``review_risk_class.merge_head_risk_class``: the
+PR diff against its merge base with the PR's own base branch, read after a
+fetch, fail-closed to ``high``), looked up here so the door, ``vnx-gate/review``
+and ``vnx pr-ready`` read the same class. Each of them passes the base it read
+from the PR (``baseRefName``) as ``base_branch``; without one the class is
+``high``, never the class against ``main``. A seat list a caller names
+(``seats=``) keeps every seat at every class, and a merge record under the
+older :data:`SEAT_RULE` is judged without a class (``by_risk=False``).
+
 **Which seat a record answers for** (:func:`seat_for`). The ``seat`` its own
 request on this head states (stamped since R5a), else ``takeover_path[0]``
 (the seat the takeover walk started from), else its own gate.
@@ -78,7 +90,7 @@ from __future__ import annotations
 
 import json
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -90,6 +102,14 @@ TAKEOVER_CHAIN_KEY = "VNX_REVIEW_GATE_TAKEOVER_CHAIN"
 #: receipt is how track closure tells a PR merged under the seat rule from one
 #: merged before it (``closure_verifier._validate_review_evidence``).
 SEAT_RULE = "every_seat_distinct_reviewer"
+#: The rule of a merge judged since R3b: the seats :func:`seats_for_risk` gives
+#: for the class of the merged head. A merge record under :data:`SEAT_RULE`
+#: keeps being judged by that older rule.
+RISK_SEAT_RULE = "first_seat_or_every_seat_by_risk"
+
+#: The classes at which only the first seat of the stack is required. Every
+#: other value, an unknown one or none at all included, requires every seat.
+_FIRST_SEAT_CLASSES = frozenset({"low", "medium"})
 
 SOURCE_RECORDED = "config"
 SOURCE_FRESH = "config_fresh"
@@ -215,6 +235,10 @@ class RequiredSeats:
     ``fresh`` is a fresh resolution next to a recorded stack (only filled in when
     a recorded stack was found), so the merge record can say that the two differ.
     ``error`` is the refusal text when no seat list can be established at all.
+    ``stack`` is the resolved stack before the class narrowed it, ``risk`` the
+    class record (``RiskClass.to_record``) that did, and ``rule`` the rule the
+    seats follow: :data:`RISK_SEAT_RULE` for a resolved stack judged by class,
+    :data:`SEAT_RULE` for a named list or a merge judged under the older rule.
     """
 
     seats: Tuple[str, ...]
@@ -223,6 +247,36 @@ class RequiredSeats:
     fresh: Optional[Tuple[str, ...]] = None
     note: str = ""
     error: str = ""
+    stack: Tuple[str, ...] = ()
+    risk: Optional[Dict[str, Any]] = None
+    rule: str = SEAT_RULE
+
+    def risk_text(self) -> str:
+        """The class, why, and the seats it requires; ``""`` when no class decided the seats."""
+        if self.rule != RISK_SEAT_RULE:
+            return ""
+        risk = self.risk or {}
+        cls = risk.get("risk_class") or "high"
+        reason = risk.get("reason") or "geen risicoklasse vastgesteld (fail-closed)"
+        return (
+            f"risicoklasse {cls} ({reason}): vereiste seats {', '.join(self.seats) or 'geen'} "
+            f"van stack {', '.join(self.stack) or 'geen'}"
+        )
+
+
+def seats_for_risk(stack: Sequence[str], risk: Any) -> Tuple[str, ...]:
+    """The seats a review of a head of class ``risk`` requires from ``stack`` (D1: the one copy of the rule).
+
+    The first seat of the stack, in stack order, at ``low`` and ``medium``;
+    every seat at ``high`` and ``critical``. ``risk`` is a
+    ``review_risk_class.RiskClass`` or a class name. Only a positive ``low`` or
+    ``medium`` narrows: an unknown value, an empty one and ``None`` require
+    every seat.
+    """
+    named = _seat_names(list(stack))
+    value = getattr(risk, "risk_class", risk)
+    known = value.strip().lower() if isinstance(value, str) else ""
+    return named[:1] if known in _FIRST_SEAT_CLASSES else named
 
 
 def _seat_names(raw: Any) -> Tuple[str, ...]:
@@ -303,24 +357,36 @@ def required_seats(
     *,
     seats: Optional[Sequence[str]] = None,
     seats_source: str = SOURCE_EXPLICIT,
+    risk: Any = None,
+    by_risk: bool = True,
 ) -> RequiredSeats:
-    """The seats a merge of this head needs (see the module docstring for the order)."""
+    """The seats a merge of this head needs (see the module docstring for the order).
+
+    A resolved stack is narrowed by :func:`seats_for_risk` with ``risk`` (a
+    ``RiskClass``; ``None`` keeps every seat) unless ``by_risk`` is False. A
+    named list (``seats``) keeps every seat.
+    """
     if seats is not None:
         named = _seat_names(list(seats))
         if not named:
             return RequiredSeats((), seats_source, error=f"de opgegeven seat-lijst ({seats_source}) is leeg")
-        return RequiredSeats(named, seats_source, value=",".join(named))
+        return RequiredSeats(named, seats_source, value=",".join(named), stack=named)
     recorded = recorded_config_seats(Path(requests_dir), pr_id, head_sha)
     fresh, value, refusal = fresh_config_seats()
     if recorded is None:
         if fresh is None:
             return RequiredSeats((), SOURCE_FRESH, error=refusal)
-        return RequiredSeats(fresh, SOURCE_FRESH, value=value)
-    kept = tuple(recorded["seats"])
-    return RequiredSeats(
-        kept, SOURCE_RECORDED, value=str(recorded.get("value") or ""), fresh=fresh,
-        note=_recorded_note(kept, fresh, refusal),
-    )
+        resolved = RequiredSeats(fresh, SOURCE_FRESH, value=value, stack=fresh)
+    else:
+        kept = tuple(recorded["seats"])
+        resolved = RequiredSeats(
+            kept, SOURCE_RECORDED, value=str(recorded.get("value") or ""), fresh=fresh,
+            note=_recorded_note(kept, fresh, refusal), stack=kept,
+        )
+    if not by_risk:
+        return resolved
+    record = risk.to_record() if hasattr(risk, "to_record") else None
+    return replace(resolved, seats=seats_for_risk(resolved.stack, risk), risk=record, rule=RISK_SEAT_RULE)
 
 
 def _recorded_note(kept: Tuple[str, ...], fresh: Optional[Tuple[str, ...]], refusal: str) -> str:
@@ -344,13 +410,19 @@ def _recorded_note(kept: Tuple[str, ...], fresh: Optional[Tuple[str, ...]], refu
 
 @dataclass(frozen=True)
 class SeatScope:
-    """The head the evaluation is about, in the closure verifier's own scope terms."""
+    """The head the evaluation is about, in the closure verifier's own scope terms.
+
+    ``base_branch`` is the branch the PR merges into, as the PR names it. It
+    scopes no record (it is not in :attr:`kwargs`); it is the base the risk
+    class is read against (:func:`head_risk`).
+    """
 
     pr_id: str
     results_dir: Path
     branch: Optional[str] = None
     project_id: Optional[str] = None
     head_sha: Optional[str] = None
+    base_branch: Optional[str] = None
 
     @property
     def kwargs(self) -> Dict[str, Optional[str]]:
@@ -982,6 +1054,8 @@ class SeatEvaluation:
         parts += [_unfilled_text(fill, self.hints.get(fill.seat, "")) for fill in self.unfilled]
         if not parts:
             parts = [_filled_text(self)]
+        if self.required.risk_text():
+            parts.insert(0, self.required.risk_text())
         if self.required.note:
             parts.append(self.required.note)
         if self.rounds is not None and self.rounds.override and self.rounds.capped:
@@ -991,7 +1065,7 @@ class SeatEvaluation:
     def to_record(self) -> Dict[str, Any]:
         """The shape the merge record carries (``review_seats`` on the ``pr_merged`` receipt)."""
         record = {
-            "rule": SEAT_RULE,
+            "rule": self.required.rule,
             "pr_id": self.scope.pr_id,
             "head_sha": self.scope.head_sha or "",
             "seats": list(self.seats),
@@ -1005,6 +1079,17 @@ class SeatEvaluation:
             "blocking": [rejection.gate for rejection in self.blocking],
             "verdict": "GO" if self.go else "NO-GO",
         }
+        if self.required.rule == RISK_SEAT_RULE:
+            risk = self.required.risk or {}
+            record.update({
+                "base_branch": self.scope.base_branch,
+                "stack": list(self.required.stack),
+                "required_seats": list(self.seats),
+                "risk_class": risk.get("risk_class") or "high",
+                "risk_reason": risk.get("reason") or "geen risicoklasse vastgesteld (fail-closed)",
+                "risk_source": risk.get("source") or "",
+                "risk": risk or None,
+            })
         if self.rounds is not None:
             record["round_ledger"] = self.rounds.to_record()
         return record
@@ -1087,6 +1172,23 @@ def _unfilled_hint(scope: SeatScope, seat: str, seated: Dict[str, SeatedRecord])
     return "; ".join(parts)
 
 
+def head_risk(scope: SeatScope, checkout: Optional[Path] = None) -> Any:
+    """The ``RiskClass`` of the head under evaluation, read the way the door reads it (D2).
+
+    ``review_risk_class.merge_head_risk_class``: fetch the PR head and the PR's
+    base branch (``scope.base_branch``), read the diff in ``checkout`` and check
+    it against the records of the head. ``checkout`` ``None`` is the checkout
+    the store belongs to; a store whose checkout cannot be established, and a
+    scope without a base, have no readable diff, so their class is ``high``.
+    """
+    import review_risk_class
+
+    return review_risk_class.merge_head_risk_class(
+        requests_dir_for(scope.results_dir), scope.pr_id, scope.head_sha or "",
+        base_branch=scope.base_branch, branch=scope.branch, checkout=checkout, results_dir=scope.results_dir,
+    )
+
+
 def evaluate_review_seats(
     pr_id: str,
     results_dir: Path,
@@ -1098,6 +1200,9 @@ def evaluate_review_seats(
     seats_source: str = SOURCE_EXPLICIT,
     b3_override: str = "",
     round_ledger: bool = True,
+    checkout: Optional[Path] = None,
+    by_risk: bool = True,
+    base_branch: Optional[str] = None,
 ) -> SeatEvaluation:
     """The seat answer for ``pr_id`` on ``head_sha``: the one function every evaluator calls.
 
@@ -1106,15 +1211,24 @@ def evaluate_review_seats(
     them as the module docstring describes. ``branch``/``project_id``/``head_sha``
     are the closure verifier's scope arguments, with the same three-way meaning.
 
+    A resolved stack is narrowed by the risk class of ``head_sha``
+    (:func:`head_risk`), read in ``checkout`` (``None``: the checkout the store
+    belongs to) against ``base_branch``, the PR's own base (``baseRefName``).
+    ``None`` there is a base nobody read, and the class is ``high``.
+    ``by_risk=False`` keeps every seat of the stack: track closure of a merge
+    recorded under :data:`SEAT_RULE`.
+
     Every fill is then counted against the round ledger (R1, :func:`counted_fill`)
     when the store keeps one: a PASS fills its seat only when its line is there,
     and the codex seat of a PR at the B3 cap is not filled unless ``b3_override``
     (the door's ``--override-b3`` reason) says why. ``round_ledger=False`` skips
     that count: track closure judges a merged PR under the rule it merged under.
     """
-    scope = SeatScope(str(pr_id), Path(results_dir), branch, project_id, head_sha)
+    scope = SeatScope(str(pr_id), Path(results_dir), branch, project_id, head_sha, base_branch)
+    by_risk = by_risk and seats is None
     required = required_seats(
         requests_dir_for(scope.results_dir), scope.pr_id, head_sha, seats=seats, seats_source=seats_source,
+        risk=head_risk(scope, checkout) if by_risk else None, by_risk=by_risk,
     )
     gates = reviewer_gates(required.seats)
     stated = stated_seats_on_head(scope, gates)

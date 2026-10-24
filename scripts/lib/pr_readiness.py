@@ -413,8 +413,10 @@ def collect_gate_evidence(
     branch: str,
     head_sha: str,
     declared: Optional[Sequence[str]] = None,
+    checkout: Optional[Path] = None,
+    base_branch: Optional[str] = None,
 ) -> List[GateEvidence]:
-    """One entry per review seat of the project, judged against ``head_sha``.
+    """One entry per required review seat, judged against ``head_sha``.
 
     Delegates to ``review_seat_evaluation.evaluate_review_seats``, the seat
     evaluation the merge door itself runs (OI-2058, R5b), so "ready" and "the
@@ -424,7 +426,10 @@ def collect_gate_evidence(
     is a seat that another reviewer filled; only a seat line that already names
     the same reviewer as NO-GO is not repeated. ``declared_gates`` (the
     obligations plus gates run off the door) decides no seat; it marks which
-    seat an obligation declared.
+    seat an obligation declared. The required seats follow the risk class of
+    the head as the door reads it (R3b), in ``checkout`` (``None``: the store's
+    own checkout) against ``base_branch``, the PR's ``baseRefName`` (``None``:
+    not known, so the class is high).
 
     On top of that it records WHERE the newest record for a seat sits when it
     is not on this head, because "the gate ran, two commits ago" and "the gate
@@ -437,7 +442,8 @@ def collect_gate_evidence(
     declared_set = set(declared_gates if declared is None else declared)
     try:
         evaluation = evaluate_review_seats(
-            str(pr_number), results_dir, branch=branch, head_sha=head_sha,
+            str(pr_number), results_dir, branch=branch, head_sha=head_sha, checkout=checkout,
+            base_branch=base_branch,
         )
     except (OSError, ValueError) as exc:
         return [GateEvidence(
@@ -538,5 +544,7 @@ def assess(
         branch=branch,
         head_sha=head_sha,
         declared=report.declared_gates,
+        checkout=project_root,
+        base_branch=facts.get("baseRefName"),
     )
     return report

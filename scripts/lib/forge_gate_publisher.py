@@ -104,6 +104,7 @@ __all__ = [
     "gates_with_a_record",
     "main",
     "pending_promotion_put_payload",
+    "pr_base_branch",
     "publish_for_record",
     "publish_review_summary",
     "read_result_record",
@@ -458,8 +459,10 @@ def review_verdict(
     results_dir: Optional[Path] = None,
     branch: Optional[str] = None,
     project_id: Optional[str] = None,
+    checkout: Optional[Path] = None,
+    base_branch: Optional[str] = None,
 ) -> ForgeVerdict:
-    """Is every review seat filled on THIS head? One verdict for the whole review.
+    """Is every required review seat filled on THIS head? One verdict for the whole review.
 
     Where :func:`classify_record` answers "what did gate X say", this answers
     the question branch protection actually needs answered, and it is the only
@@ -500,6 +503,10 @@ def review_verdict(
     ``branch``/``project_id`` are passed straight through. Handing the
     evaluation less scope than the merge door gets would make this check the
     more lenient of the two, which is the one direction that costs something.
+    Which seats are required follows the risk class of the head as the door
+    reads it (R3b), in ``checkout`` (``None``: the store's own checkout) against
+    ``base_branch``, the PR's ``baseRefName`` (``None``: not known, so the class
+    is high, as at the door).
     """
     resolved_head = _require_head(head_sha)
     directory = results_dir if results_dir is not None else _default_results_dir()
@@ -518,6 +525,7 @@ def review_verdict(
 
     evaluation = evaluate_review_seats(
         str(pr_number), directory, branch=branch, project_id=project_id, head_sha=resolved_head,
+        checkout=checkout, base_branch=base_branch,
     )
     seats = ", ".join(evaluation.seats) or "geen"
     if evaluation.required.error:
@@ -735,6 +743,25 @@ def _gh_pr_json(pr_number: int, field: str, repo: str) -> Dict[str, Any]:
             f"{type(data).__name__}"
         )
     return data
+
+
+def pr_base_branch(pr_number: int, repo: str) -> Any:
+    """The PR's base branch (``baseRefName``) in ``repo``, as GitHub gives it; ``None`` when GitHub cannot say.
+
+    The summary check reads the risk class against it, as the merge door does
+    (R3b). ``None`` is no guess and no default: the class of a head without a
+    base is ``high`` (``review_risk_class.base_ref_for``, which also refuses a
+    value that is no plain branch name), so a lookup that failed asks for more
+    seats, never fewer. The failure is logged with its cause.
+    """
+    try:
+        return _gh_pr_json(pr_number, "baseRefName", repo).get("baseRefName")
+    except ForgePublishRefused as exc:
+        logger.warning(
+            "forge_gate_publisher: base branch of PR #%s in %s not readable (%s); the risk class reads high",
+            pr_number, repo, exc,
+        )
+        return None
 
 
 def auto_merge_is_armed(pr_number: int, repo: str) -> bool:
@@ -1092,6 +1119,7 @@ def publish_review_summary(
     branch: Optional[str] = None,
     project_id: Optional[str] = None,
     dry_run: bool = False,
+    base_branch: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Publish ``vnx-gate/review`` for one head. Returns the payload sent.
 
@@ -1108,6 +1136,10 @@ def publish_review_summary(
     :func:`review_verdict` IS that predicate — it returns ``success`` only by
     calling :func:`_proven_pass_on_head` and getting True — so asking again
     would run the identical call twice and prove nothing the first one did not.
+
+    ``base_branch`` is the PR's base; ``None`` reads it from the PR in the
+    store's repo (:func:`pr_base_branch`), so the risk class is read against the
+    base the door reads it against (R3b).
     """
     resolved_head = _require_head(head_sha)
 
@@ -1118,12 +1150,13 @@ def publish_review_summary(
         load_app_config()
 
     try:
-        verdict = review_verdict(
-            pr_number, resolved_head, results_dir=results_dir, branch=branch,
-            project_id=project_id,
-        )
         # The same store, so the same repo, as the per-gate check of this record.
         target = _publication_target(None, results_dir)
+        base = base_branch if base_branch is not None else pr_base_branch(pr_number, target.owner_repo)
+        verdict = review_verdict(
+            pr_number, resolved_head, results_dir=results_dir, branch=branch,
+            project_id=project_id, base_branch=base,
+        )
         if verdict.conclusion == CONCLUSION_SUCCESS:
             refuse_if_auto_merge_is_armed(pr_number, target.owner_repo)
         elif not dry_run:

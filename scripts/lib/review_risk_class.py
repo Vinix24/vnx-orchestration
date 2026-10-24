@@ -8,8 +8,11 @@ it, ``gate_request_handler.request_reviews`` records it on every seat's request
 record, and :func:`head_risk_class` is the reading of the head a merge is about.
 
 **Derived from the diff (B1).** The files of the PR diff against the merge base
-(:func:`read_pr_diff`: ``git merge-base``, then ``git diff --name-only
---no-renames -z``, so a rename names both its old and its new path). Every
+with the PR's own base branch (:func:`read_pr_diff`: ``git merge-base``, then
+``git diff --name-only --no-renames -z``, so a rename names both its old and
+its new path). The base is the PR's ``baseRefName`` (:func:`base_ref_for`),
+never a default: against ``main`` a PR for ``release`` that carries merge
+logic already on ``main`` reads as a doc change. Every
 path is classified by ``smart_router.plan_scope_path_category``, the table that
 makes a track architecture work; every category it names (outside-repo,
 schema, security, gate-merge, store-resolution) is ``high``. There is no second
@@ -23,27 +26,37 @@ read only when it is a known value (:data:`RISK_CLASSES`) and counts only when
 it is above the derived class. No value lowers ``high``.
 
 **Fail-closed (B2).** A diff that cannot be read, a diff that names no file, a
-path that cannot be normalised, an unknown caller value and a dispatch spec
-that cannot be read are each ``high``, and the reason says which.
+path that cannot be normalised, an unknown caller value, a dispatch spec that
+cannot be read and a PR base branch that is not known are each ``high``, and
+the reason says which.
 
 **The class belongs to the head (B3).** A request records ``review_risk``
-(:meth:`RiskClass.to_record`): the class, the head, the merge base, the rule
-version (``smart_router.plan_scope_rule_version``, a hash of the path tables)
-and the files that decided it. :func:`head_risk_class` reads the records on the
-head it is asked about and keeps what a diff cannot show (a caller's raise, an
+(:meth:`RiskClass.to_record`): the class, the head, the base it was read
+against, the merge base, the rule version
+(``smart_router.plan_scope_rule_version``, a hash of the path tables) and the
+files that decided it. :func:`head_risk_class` reads the records on the head it
+is asked about and keeps what a diff cannot show (a caller's raise, an
 irreversible spec). It takes the path part from a record only when that record
-has the current merge base and rule version; otherwise it computes the class
-itself with :func:`derive_risk_class`. A head that adds a high-risk path is
-high, whatever an earlier head was.
+has the current base, merge base and rule version; otherwise it computes the
+class itself with :func:`derive_risk_class`. A head that adds a high-risk path
+is high, whatever an earlier head was.
 
-R3a changes no merge outcome: the door does not read this class yet (R3b).
+**The door reads it (R3b).** :func:`merge_head_risk_class` is the class of the
+head a merge is about: it fetches the PR head and the PR's base branch, reads
+the diff and checks it against the records of the head. ``review_seat_evaluation``
+asks it for every evaluation of a resolved stack, with the base each caller
+read from the PR, so the merge door, ``vnx-gate/review`` and ``vnx pr-ready``
+read one class, and ``review_seat_evaluation.seats_for_risk`` turns it into the
+required seats. A base that is not known, a failed fetch and a checkout that
+cannot be established are ``high``.
 
-BILLING SAFETY: no Anthropic SDK, no network. The only subprocess is a local
-``git`` read.
+BILLING SAFETY: no Anthropic SDK. The subprocesses are ``git`` reads and one
+read-only ``git fetch`` of the PR head and the base branch.
 """
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from dataclasses import dataclass, replace
@@ -59,7 +72,6 @@ _RANK = {name: rank for rank, name in enumerate(RISK_CLASSES)}
 
 #: The key a request record carries the class under, next to ``review_seats``.
 RECORD_KEY = "review_risk"
-DEFAULT_BASE_REF = "origin/main"
 
 SOURCE_DERIVED = "derived"
 SOURCE_RECORD = "record"
@@ -68,8 +80,14 @@ SOURCE_RECOMPUTED = "recomputed"
 CATEGORY_UNNORMALISABLE = "unnormalisable"
 
 _GIT_TIMEOUT_SECONDS = 30
+_FETCH_TIMEOUT_SECONDS = 90
+_REMOTE = "origin"
 _EXPLAIN_PATHS = 3
 _SHA_RE = re.compile(r"[0-9a-f]{7,64}")
+#: A plain branch name: it goes into a fetch refspec and a ``git merge-base``
+#: argument, so anything that could be read as an option or a second refspec
+#: (``-x``, ``a:b``, ``+x``, ``a b``) is refused rather than quoted.
+_BRANCH_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
 
 
 def rule_version() -> str:
@@ -102,7 +120,7 @@ class DiffReading:
 
     files: Optional[Tuple[str, ...]]
     merge_base: str = ""
-    base_ref: str = DEFAULT_BASE_REF
+    base_ref: str = ""
     error: str = ""
 
 
@@ -121,12 +139,35 @@ def _git(args: Sequence[str], cwd: Optional[Path]) -> Tuple[Optional[str], str]:
     return proc.stdout, ""
 
 
-def read_pr_diff(head_sha: str, *, base_ref: str = DEFAULT_BASE_REF, cwd: Optional[Path] = None) -> DiffReading:
+def base_ref_for(base_branch: Any) -> Tuple[Optional[str], str]:
+    """``("origin/<base>", "")`` for the PR's base branch (its ``baseRefName``), else ``(None, why)``.
+
+    There is no default: a base that is missing, empty, no string or no plain
+    branch name gives ``None``, and the class of a diff without a base is
+    ``high``. Never ``main`` in its place: a PR for another branch read against
+    ``main`` loses every commit ``main`` already has.
+    """
+    if not isinstance(base_branch, str) or not base_branch:
+        return None, f"the PR's base branch is not known ({base_branch!r} given); no base is assumed"
+    name = base_branch
+    plain = (
+        _BRANCH_RE.fullmatch(name) is not None and ".." not in name and "//" not in name
+        and "/." not in name and not name.endswith(("/", ".", ".lock"))
+    )
+    if not plain:
+        return None, f"the PR's base branch {name!r} is no plain branch name"
+    return f"{_REMOTE}/{name}", ""
+
+
+def read_pr_diff(head_sha: str, *, base_ref: str, cwd: Optional[Path] = None) -> DiffReading:
     """The files of the diff of ``head_sha`` against its merge base with ``base_ref``, read with local git.
 
-    Nothing is fetched: a head that is not in the checkout cannot be read, and
-    the class of an unreadable diff is ``high``.
+    ``base_ref`` is the PR's base as a ref in the checkout (:func:`base_ref_for`),
+    with no default. Nothing is fetched: a head or a base that is not in the
+    checkout cannot be read, and the class of an unreadable diff is ``high``.
     """
+    if not isinstance(base_ref, str) or not base_ref or base_ref.startswith("-"):
+        return DiffReading(None, base_ref="", error=f"no base ref to read the diff against ({base_ref!r} given)")
     head = (head_sha or "").strip()
     if not head:
         return DiffReading(None, base_ref=base_ref, error="the PR head could not be resolved")
@@ -212,7 +253,7 @@ class RiskClass:
     irreversible: Optional[bool] = False
     head_sha: str = ""
     merge_base: str = ""
-    base_ref: str = DEFAULT_BASE_REF
+    base_ref: str = ""
     rule_version: str = ""
     files: int = 0
     source: str = SOURCE_DERIVED
@@ -371,10 +412,12 @@ def _why_recomputed(records: Sequence[Dict[str, Any]], reading: DiffReading, ver
     if not records:
         return f"computed here: no request of head {head[:12]} recorded a class"
     bases = sorted({str(record.get("merge_base") or "")[:12] for record in records})
+    refs = sorted({str(record.get("base_ref") or "") for record in records})
     versions = sorted({str(record.get("rule_version") or "") for record in records})
     return (
-        f"computed here: the records of this head were made under merge base {', '.join(bases)} and "
-        f"rule version {', '.join(versions)}; now {reading.merge_base[:12]} and {version}"
+        f"computed here: the records of this head were made under merge base {', '.join(bases)} against "
+        f"{', '.join(refs)} and rule version {', '.join(versions)}; now {reading.merge_base[:12]} against "
+        f"{reading.base_ref} and {version}"
     )
 
 
@@ -391,10 +434,12 @@ def head_risk_class(
 
     ``reading`` is the diff of ``head_sha`` as the reader sees it now
     (:func:`read_pr_diff`). The caller raises and spec flags recorded on this
-    head are kept: they only raise. When a record on this head has the current
-    merge base and rule version, its class stands (``source`` ``record``) and can
-    only raise the fresh one; otherwise the class is computed here
-    (``recomputed``) and ``note`` says why.
+    head are kept: they only raise. When a record on this head was read against
+    the same base, under the current merge base and rule version, its class
+    stands (``source`` ``record``) and can only raise the fresh one; otherwise
+    the class is computed here (``recomputed``) and ``note`` says why. A record
+    read against another base than ``reading`` is recomputed even when the
+    merge bases agree: it is about another merge.
     """
     head = (head_sha or "").strip()
     records = recorded_on_head(requests_dir, pr_id, head)
@@ -404,14 +449,122 @@ def head_risk_class(
     risk = derive_risk_class(reading, caller_class=caller, spec=_strictest_spec(flags), head_sha=head)
     holding = [
         record for record in records
-        if reading.files is not None and record.get("merge_base") == reading.merge_base
-        and record.get("rule_version") == version
+        if reading.files is not None and record.get("base_ref") == reading.base_ref
+        and record.get("merge_base") == reading.merge_base and record.get("rule_version") == version
     ]
     if not holding:
         return replace(risk, source=SOURCE_RECOMPUTED, note=_why_recomputed(records, reading, version, head))
     recorded = max((record.get("risk_class") for record in holding), key=_rank)
-    note = f"recorded on head {head[:12]} under merge base {reading.merge_base[:12]} and rule version {version}"
+    note = (
+        f"recorded on head {head[:12]} against {reading.base_ref} under merge base {reading.merge_base[:12]} "
+        f"and rule version {version}"
+    )
     if _rank(recorded) > _RANK[risk.risk_class]:
         known = known_class(recorded) or HIGH
         risk = replace(risk, risk_class=known, reason=f"{risk.reason}; the record of this head says {recorded!r}")
     return replace(risk, source=SOURCE_RECORD, note=note)
+
+
+# ---------------------------------------------------------------------------
+# The class the merge door reads (R3b, D2)
+# ---------------------------------------------------------------------------
+
+
+def _fetch_refspecs(pr_id: str, branch: Optional[str], base_ref: str) -> List[str]:
+    """The base branch, and the PR head by its branch (else by the PR's own ref on the forge)."""
+    specs: List[str] = []
+    prefix = f"{_REMOTE}/"
+    if base_ref.startswith(prefix):
+        base = base_ref[len(prefix):]
+        specs.append(f"+refs/heads/{base}:refs/remotes/{_REMOTE}/{base}")
+    head_branch = (branch or "").strip()
+    if head_branch:
+        specs.append(f"+refs/heads/{head_branch}:refs/remotes/{_REMOTE}/{head_branch}")
+    elif str(pr_id).isdigit():
+        specs.append(f"refs/pull/{pr_id}/head")
+    return specs
+
+
+def fetch_merge_refs(pr_id: str, branch: Optional[str], *, cwd: Path, base_ref: str) -> str:
+    """Fetch the PR head and the PR's base (``base_ref``) from ``origin`` into ``cwd``; ``""`` on success, else why.
+
+    Read-only towards the forge: one ``git fetch`` that updates the
+    remote-tracking refs and the object store, never a branch, the index or the
+    working tree. It never prompts for credentials.
+    """
+    specs = _fetch_refspecs(pr_id, branch, base_ref)
+    if not specs:
+        return "no ref to fetch: no base branch on origin, no PR branch and no PR number"
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+    try:
+        proc = subprocess.run(
+            ["git", "fetch", "--no-tags", "--quiet", "--no-write-fetch-head", _REMOTE, *specs],
+            cwd=str(cwd), capture_output=True, encoding="utf-8", errors="surrogateescape",
+            timeout=_FETCH_TIMEOUT_SECONDS, check=False, env=env,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"git fetch: {type(exc).__name__}: {exc}"
+    if proc.returncode != 0:
+        last = (proc.stderr or "").strip().splitlines()[-1:] or ["no output"]
+        return f"git fetch {' '.join(specs)} exited {proc.returncode}: {last[0]}"
+    return ""
+
+
+def store_checkout(results_dir: Optional[Path]) -> Tuple[Optional[Path], str]:
+    """``(checkout, "")`` of the project the review store belongs to, else ``(None, why)``.
+
+    The cwd-independent chain the forge publisher reads
+    (``forge_project_target.resolve_forge_target``): store, project id, the
+    checkout that carries that id, its GitHub origin.
+    """
+    if results_dir is None:
+        return None, "no checkout given and no review store to derive one from"
+    from forge_check_run import ForgePublishRefused
+    from forge_project_target import REGISTER_HINT, resolve_forge_target
+
+    try:
+        return resolve_forge_target(Path(results_dir)).project_root, ""
+    except ForgePublishRefused as exc:
+        # The refusal is worded for the publisher ("nothing was published");
+        # only its cause and the repair belong in a class reason.
+        cause = str(exc).split(" — ", 1)[0]
+        return None, f"the checkout of the review store cannot be established ({cause}; {REGISTER_HINT})"
+
+
+def merge_head_risk_class(
+    requests_dir: Path,
+    pr_id: str,
+    head_sha: str,
+    *,
+    base_branch: Optional[str],
+    branch: Optional[str] = None,
+    checkout: Optional[Path] = None,
+    results_dir: Optional[Path] = None,
+) -> RiskClass:
+    """The class of ``head_sha`` as a merge reads it: fetch, then :func:`head_risk_class` on the fresh diff.
+
+    ``base_branch`` is the branch the PR merges into, as the PR names it
+    (``baseRefName``); it has no default, and :func:`base_ref_for` refuses a
+    missing or malformed one. The door runs in a checkout where the PR head
+    and that base may be missing, so both are fetched first. ``checkout``
+    ``None`` is the store's own checkout (:func:`store_checkout`). A base that
+    is not known, a checkout that cannot be established, a failed fetch and an
+    unreadable diff each give ``high`` with the reason; nothing here lowers a
+    class.
+    """
+    head = (head_sha or "").strip()
+    base_ref, why_no_base = base_ref_for(base_branch)
+    where, why = (Path(checkout), "") if checkout is not None else store_checkout(results_dir)
+    if base_ref is None:
+        reading = DiffReading(None, error=why_no_base)
+    elif where is None:
+        reading = DiffReading(None, base_ref=base_ref, error=why)
+    elif not head:
+        reading = DiffReading(None, base_ref=base_ref, error="the PR head could not be resolved")
+    else:
+        failed = fetch_merge_refs(pr_id, branch, cwd=where, base_ref=base_ref)
+        reading = (
+            DiffReading(None, base_ref=base_ref, error=f"the PR head and {base_ref} could not be fetched ({failed})")
+            if failed else read_pr_diff(head, base_ref=base_ref, cwd=where)
+        )
+    return head_risk_class(requests_dir, pr_id, head, reading)
