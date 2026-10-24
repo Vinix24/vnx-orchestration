@@ -25,6 +25,7 @@ from gate_recorder import (
     gate_is_available,
     gate_provider_reachability,
     gate_switch_refusal,
+    get_pr_base_branch,
     get_pr_head_sha,
     resolve_gate_provider,
     result_is_for_head,
@@ -370,16 +371,25 @@ class _PrHead:
     own looks the head up lazily, on the first seat that needs it, so a round in
     which no seat has a record costs no gh round-trip. ``""`` is an answer too:
     the head could not be resolved.
+
+    :meth:`base` is the branch the PR merges into, looked up the same way and
+    at most once: the risk class of the round is read against it (R3b).
     """
 
     def __init__(self, pr_number: int, sha: Optional[str] = None) -> None:
         self._pr_number = pr_number
         self._sha = sha
+        self._base: Optional[str] = None
 
     def sha(self) -> str:
         if self._sha is None:
             self._sha = get_pr_head_sha(self._pr_number)
         return self._sha
+
+    def base(self) -> str:
+        if self._base is None:
+            self._base = get_pr_base_branch(self._pr_number)
+        return self._base
 
 
 class _PrRounds:
@@ -1789,15 +1799,21 @@ class GateRequestHandlerMixin:
         """The round's risk class, derived from the PR diff (R3a, ``review_risk_class``).
 
         The diff is read with local git in the project's checkout
-        (``PROJECT_ROOT``, else the process cwd); nothing is fetched, and a head
-        that is not there makes the class ``high``. ``irreversible`` is read
-        from the dispatch's spec in this store (the one the review gates live
-        in, as :meth:`_builder_vendor` reads it). ``caller_class`` only raises.
+        (``PROJECT_ROOT``, else the process cwd) against the PR's own base
+        (``baseRefName``, :meth:`_PrHead.base`); nothing is fetched, and a head
+        or a base that is not there, or a base the PR does not name, makes the
+        class ``high``. ``irreversible`` is read from the dispatch's spec in this
+        store (the one the review gates live in, as :meth:`_builder_vendor`
+        reads it). ``caller_class`` only raises.
         """
         import review_risk_class
 
         root = (getattr(self, "paths", None) or {}).get("PROJECT_ROOT")
-        reading = review_risk_class.read_pr_diff(head.sha(), cwd=Path(root) if root else None)
+        base_ref, why_no_base = review_risk_class.base_ref_for(head.base())
+        reading = (
+            review_risk_class.read_pr_diff(head.sha(), base_ref=base_ref, cwd=Path(root) if root else None)
+            if base_ref is not None else review_risk_class.DiffReading(None, error=why_no_base)
+        )
         state_dir = getattr(self, "state_dir", None) or Path(self.results_dir).parent.parent
         spec = review_risk_class.spec_flag(dispatch_id, data_dir=Path(state_dir).parent)
         risk = review_risk_class.derive_risk_class(reading, caller_class=caller_class, spec=spec, head_sha=head.sha())

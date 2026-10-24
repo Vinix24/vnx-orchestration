@@ -690,6 +690,15 @@ def get_pr_head_branch(pr_number: Optional[int]) -> str:
     return _gh_pr_view_field(pr_number, "headRefName")
 
 
+def get_pr_base_branch(pr_number: Optional[int]) -> str:
+    """Return the branch the PR merges into via ``gh pr view --json baseRefName``; "" on any failure.
+
+    The review risk class is read against it (R3b). "" is no default: the
+    class of a diff without a base is high (``review_risk_class.base_ref_for``).
+    """
+    return _gh_pr_view_field(pr_number, "baseRefName")
+
+
 def get_pr_state(pr_number: Optional[int], *, repo: str) -> str:
     """The state of PR ``pr_number`` in ``repo`` (``owner/name``) via ``gh pr view --json state``.
 

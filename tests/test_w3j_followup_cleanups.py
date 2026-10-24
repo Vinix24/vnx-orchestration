@@ -84,7 +84,8 @@ class TestOI1307RequestReviewsContractBased:
         import gate_request_handler
 
         monkeypatch.chdir(manager_env["project_root"])
-        # The fixture project has no PR head (gh resolves none), so the diff cannot be read.
+        # The fixture project has no PR head and no base (gh resolves neither), so the
+        # diff cannot be read; the base is checked first (R3b round 3).
         monkeypatch.setattr(gate_request_handler, "get_pr_head_sha", lambda _pr: "")
         manager = _make_manager()
 
@@ -117,7 +118,8 @@ class TestOI1307RequestReviewsContractBased:
         assert contract.risk_class == "high"
         risk = result["review_risk"]
         assert risk["reason"] == (
-            "fail-closed: the PR head could not be resolved; the caller's --risk-class medium does not lower it"
+            "fail-closed: the PR's base branch is not known ('' given); no base is assumed; "
+            "the caller's --risk-class medium does not lower it"
         )
         assert (risk["derived"], risk["deciding"], risk["caller"]) == ("high", [], "medium")
         assert "scripts/lib/gate_request_handler.py" in contract.changed_files

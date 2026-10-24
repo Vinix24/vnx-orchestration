@@ -304,18 +304,19 @@ class TestRunReviewGate:
         # key is the bare GitHub PR number, not the title.
         monkeypatch.setattr(
             pr_merge, "_query_pr",
-            lambda n: {"title": "no internal label here", "headRefName": "feature/x",
+            lambda n: {"title": "no internal label here", "headRefName": "feature/x", "baseRefName": "release",
                        "headRefOid": "6c925a1b2ee8b0cded8728d4f2c792fcf64be4d4"},
         )
         monkeypatch.setattr(pr_merge, "ensure_env", lambda: {"VNX_STATE_DIR": str(tmp_path)})
         monkeypatch.setattr(pr_merge, "_resolve_declared_gate", lambda pr_number, state_dir=None: "codex_gate")
         seen = {}
 
-        def fake_check(pr_id, gate, results_dir, *, branch=None, project_id=None, head_sha=None):
+        def fake_check(pr_id, gate, results_dir, *, branch=None, project_id=None, head_sha=None, base_branch=None):
             seen["pr_id"] = pr_id
             seen["gate"] = gate
             seen["branch"] = branch
             seen["head_sha"] = head_sha
+            seen["base_branch"] = base_branch
             return {
                 "verdict": "GO",
                 "message": f"{gate} resultaat aanwezig en passing voor {pr_id}",
@@ -340,6 +341,8 @@ class TestRunReviewGate:
             # the path that stopped requiring one. The door now refuses before
             # delegating, and a delegation carries a real head.
             "head_sha": "6c925a1b2ee8b0cded8728d4f2c792fcf64be4d4",
+            # R3b round 3: the risk class is read against the base the PR names.
+            "base_branch": "release",
         }
 
     def test_override_does_not_bypass_an_undeterminable_head(self, monkeypatch):
