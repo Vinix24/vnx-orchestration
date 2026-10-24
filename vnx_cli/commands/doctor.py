@@ -371,6 +371,57 @@ def _check_state_root_location(data_root: Path) -> Check:
     )
 
 
+def _check_legacy_store(project_id: str, central_dir: Path) -> Check:
+    """Report a pre-#1437 XDG store of this project (read-only, nothing moved).
+
+    Before PR #1437 (2026-10-08) ``vnx init`` put the runtime store under
+    ``${XDG_DATA_HOME:-~/.local/share}/vnx/<project_id>``; no resolver reads
+    that location any more, so an upgraded operator keeps an abandoned copy
+    with nothing pointing at it. WARN only when it is the project's *only*
+    store: alongside a central ``~/.vnx-data/<id>`` store it is inert history
+    (PASS, path named), and a directory without ``state/runtime_coordination.db``
+    is an empty skeleton, not a store (PASS). Relocating one is
+    ``vnx migrate --relocate-legacy``, added by a later PR; this check never
+    writes, moves or deletes anything.
+    """
+    name = "store:legacy-xdg"
+    try:
+        _engine.ensure_engine_on_path()
+        from legacy_store_path import legacy_data_home, legacy_store_for
+    except Exception as exc:  # vnx-silent-except: surfaced in the check detail, never swallowed
+        return Check(name, WARN, f"could not load the legacy XDG store probe: {exc}")
+
+    legacy = legacy_store_for(project_id)
+    if legacy is None:
+        skeleton = legacy_data_home() / project_id
+        if skeleton.is_dir():
+            return Check(name, PASS, f"legacy XDG skeleton {skeleton} has no "
+                        "state/runtime_coordination.db — not a store, nothing to move")
+        return Check(name, PASS, f"no legacy XDG store for {project_id}")
+
+    if central_dir.is_dir():
+        return Check(name, PASS, f"a legacy XDG copy also exists at {legacy} "
+                    f"(not used; active central store: {central_dir})")
+
+    return Check(name, WARN, f"legacy XDG store {legacy} (holds "
+                "state/runtime_coordination.db) is NOT used — this project's central "
+                f"store {central_dir} does not exist, so the state there is invisible "
+                "to every vnx command. Moving it is not wired yet: "
+                "`vnx migrate --relocate-legacy` will be available in a later release")
+
+
+def _central_store_dir(project_id: str) -> Path:
+    """Return ``~/.vnx-data/<project_id>`` — the central store this project uses.
+
+    ``project_id`` comes from ``_engine.derive_project_id``, which only returns
+    an id matching ``PROJECT_ID_RE``, so the resolver cannot refuse it.
+    """
+    _engine.ensure_engine_on_path()
+    import vnx_paths
+
+    return vnx_paths.resolve_central_data_dir(project_id)
+
+
 def _check_dual_install(project_dir: Path) -> Check:
     """Fail only on a genuine dual install: two DISTINCT real install trees.
 
@@ -1217,6 +1268,11 @@ def vnx_doctor(args) -> int:
     checks.extend(_check_directories(project_dir, data_root))
     checks.append(_check_install_mode(project_dir))
     checks.append(_check_state_root_location(data_root))
+    # Read-only: names a pre-#1437 XDG store that no resolver reads any more.
+    legacy_project_id = _engine.derive_project_id(project_dir)
+    checks.append(
+        _check_legacy_store(legacy_project_id, _central_store_dir(legacy_project_id))
+    )
     checks.append(_check_dual_install(project_dir))
     checks.extend(_check_schema_versions(data_root))
     checks.append(_check_skill_coverage(project_dir, data_root, strict=strict))
