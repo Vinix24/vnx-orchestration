@@ -164,12 +164,12 @@ def _stop_worker(proc: subprocess.Popen) -> None:
 
 
 def _assert_sibling_untouched(proc, wt: Path, local: Path, data_dir: Path, dispatch_id: str, claim_before: str):
-    assert proc.poll() is None, "the live sibling worker was killed"
     assert wt.exists(), f"the live sibling's worktree was reaped: {wt}"
     assert (wt / "work.txt").read_text() == "real work\n", "the sibling's file was reset away"
-    assert dwi.probe_occupancy(_claims_dir(data_dir), dispatch_id) == "held"
-    assert _claim_file(data_dir, dispatch_id).read_text() == claim_before
     assert str(wt) in _git(local, "worktree", "list", "--porcelain").stdout
+    assert _claim_file(data_dir, dispatch_id).read_text() == claim_before
+    assert proc.poll() is None, "the live sibling worker was killed"
+    assert dwi.probe_occupancy(_claims_dir(data_dir), dispatch_id) == "held"
 
 
 @pytest.fixture
