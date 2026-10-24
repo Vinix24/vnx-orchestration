@@ -56,11 +56,11 @@ IDEMPOTENCY_FIELDS = (
     # kimi_gate booking sequence). "status" is present on virtually every
     # receipt shape and is cheap to include unconditionally: two calls that
     # really are the same repeated event always carry the same status too,
-    # so this never breaks a genuine duplicate. "commit_sha" is not yet
-    # stamped by any current emit site (verified by grep — zero producers)
-    # but the key's own contract must not silently ignore it the moment a
-    # caller does start passing it: the same PR at two different commits is
-    # never the same result.
+    # so this never breaks a genuine duplicate. "commit_sha" is the reviewed
+    # head (ADR-045 point 4), stamped by every review_gate_result emit site
+    # (gate_recorder._emit_terminal_result_receipt and both gate_result_parser
+    # emitters, GE-1): the same PR at two different commits is never the same
+    # result, and without it the two collapse into one receipt.
     "status",
     "commit_sha",
 )

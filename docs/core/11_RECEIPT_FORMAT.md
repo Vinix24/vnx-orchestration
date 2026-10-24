@@ -218,6 +218,12 @@ Two independent checks close this, composed so `{severity: "blocker", destinatio
 
 **The legacy `event` alias is schema-version-gated.** For `schema_version` absent or `1`, `event_type` is consulted first, falling back to `event` — unchanged v1 tolerance. For `schema_version >= 2`, only `event_type` is consulted; a v2-shaped record carrying `event` but no `event_type` is rejected outright, not silently accepted via the alias.
 
+## `commit_sha` on a `review_gate_result` — the reviewed head
+
+Every `review_gate_result` receipt carries the commit its verdict is about under the name ADR-045 point 4 gives it: `commit_sha`. `head_sha` is emitted with the same value as its alias, because the round ledger reads that name. Both come from the writer's own payload: `gate_recorder._emit_terminal_result_receipt` reads the result record's `commit_sha`, `gate_result_parser.record_result` reads the payload `stamp_request_identity` stamped, and the Claude GitHub path reads the contract request's `commit_sha`. A path where no head is available stamps neither key — an empty string is not a commit and must not be booked as one.
+
+The field gives the receipt's idempotency key its commit dimension (`append_receipt_internals/idempotency.py` `IDEMPOTENCY_FIELDS`): the same PR passing on commit A and on commit B is two receipts with two keys, never one.
+
 ## `provenance.diff_summary.paths` — the doc-only invariant's evidence
 
 `provenance.diff_summary` gains one subkey: `paths: string[]`, the full list of changed files (staged + unstaged + untracked, parsed from `git status --porcelain` — `scripts/lib/append_receipt_internals/git_provenance.py::_parse_porcelain_paths`). This is what `compute_verdict`'s doc-only invariant (§3.1.1 above) checks. It exists specifically so a doc-only dispatch with `verification.method: "n/a"` can mechanically prove every changed path is under `docs/**/*.md` before accepting — a code change claiming "n/a" test evidence is exactly the accept-without-evidence gap this closes.
