@@ -216,3 +216,27 @@ def test_timeout_still_propagates_when_teardown_raises(tmp_path, monkeypatch):
     finally:
         # The patched teardown never released the occupancy lock it would have.
         dwi._release_occupancy(created["wt"])
+
+
+def test_normally_exiting_seat_costs_no_second_teardown(tmp_path, monkeypatch):
+    local = _init_git_repo_with_origin(tmp_path)
+    data_dir = _point_state_at_tmp(tmp_path, monkeypatch)
+    monkeypatch.setattr(dwi, "resolve_consumer_project_root", lambda: local)
+    monkeypatch.setattr(plan_gate_panel, "_read_report", lambda *a, **k: "panel seat analysis")
+    real_remove = dwi.remove_dispatch_worktree
+
+    def fake_run(cmd, **kwargs):
+        dispatch_id = _dispatch_id_from_cmd(cmd)
+        wt = dwi.create_dispatch_worktree(dispatch_id, project_root=local)
+        real_remove(dispatch_id, project_root=local)  # the child's own finally
+        assert not wt.exists()
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    _install_fake_seat(monkeypatch, fake_run)
+    teardowns = []
+    monkeypatch.setattr(dwi, "remove_dispatch_worktree", lambda *a, **k: teardowns.append(a))
+
+    assert _dispatcher(data_dir)("glm", "glm-4.6", "prompt", "glm-gate-clean-1") == (
+        "panel seat analysis"
+    )
+    assert teardowns == [], "the parent must not re-tear-down a tree the child already removed"
