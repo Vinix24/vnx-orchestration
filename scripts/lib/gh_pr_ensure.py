@@ -1,14 +1,12 @@
 """gh_pr_ensure.py — single shared implementation of "find or create a GitHub PR
 for a branch", used by every lane that needs an idempotent auto-PR guarantee.
 
-Two call sites need this:
-  - auto_gate_trigger.py: opens a PR once a multi-PR feature's checkboxes are
-    all committed, so the review-gate stack has something to attach to.
+One call site needs this:
   - pr_enforcement.py (tmux-spawn build-dispatch completion path): opens a PR
     for a worker that committed + pushed its dispatch branch but never ran
     `gh pr create` itself, so T0 does not have to salvage it by hand.
 
-Both call sites must share exactly one `gh pr create` invocation — two independent
+Every call site must share exactly one `gh pr create` invocation — two independent
 implementations drift (different flags, different idempotency checks) and that
 drift is how duplicate PRs happen.
 

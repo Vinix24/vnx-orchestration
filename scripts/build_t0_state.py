@@ -70,8 +70,8 @@ Schema 2.2 change (D5 fabric-state-herstel, live work):
     plus counts. The full section is ``open_outcomes`` in t0_state.json.
   - t0_index.json (schema ``t0_index/1.1``) drops ``terminals``,
     ``queue.active`` and ``active_dispatches`` for a compact ``live_work``.
-    ``terminals`` stays in t0_state.json while headless_dispatch_daemon and
-    feature_state_machine read its ``lease_state``.
+    ``terminals`` stays in t0_state.json while headless_dispatch_daemon reads
+    its ``lease_state``.
 
 Schema 2.1 changes (W4E / OI-1199):
   - feature_state union-merges register-canonical aggregation with the

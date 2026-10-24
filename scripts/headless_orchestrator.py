@@ -379,43 +379,6 @@ class HeadlessOrchestrator:
     # Internal loops
     # ------------------------------------------------------------------
 
-    def _check_feature_completion_and_trigger(self, event: LoopEvent) -> None:
-        """After a receipt event: check if feature is complete and auto-trigger gates."""
-        if self.dry_run:
-            return
-        ctx = _flatten_context(event.context)
-        dispatch_id = ctx.get("latest_dispatch_id", "")
-        if not dispatch_id:
-            return
-
-        # Derive feature_id from dispatch_id (e.g. "f51-pr2-..." → "F51")
-        m = re.search(r"f(\d+)-pr", dispatch_id, re.IGNORECASE)
-        if not m:
-            return
-        feature_id = f"F{m.group(1)}"
-
-        try:
-            sys.path.insert(0, str(_REPO_ROOT / "scripts" / "lib"))
-            from auto_gate_trigger import trigger_gates_if_feature_complete  # noqa: PLC0415
-            result = trigger_gates_if_feature_complete(feature_id, self.state_dir, dispatch_id=dispatch_id)
-        except Exception as exc:
-            logger.warning("auto_gate_trigger check failed: %s", exc)
-            return
-
-        if result.get("triggered"):
-            _log_loop_event(self.data_dir, {
-                "timestamp": _now_utc(),
-                "event_type": "auto_gate_triggered",
-                "feature_id": feature_id,
-                "pr_number": result.get("pr_number"),
-                "gates": result.get("gates", []),
-                "gates_failed": result.get("gates_failed", []),
-            })
-            logger.info(
-                "Auto-gate triggered for %s PR #%s: %s",
-                feature_id, result.get("pr_number"), result.get("gates"),
-            )
-
     def _check_all_gates_passed(self, event: LoopEvent) -> None:
         """When a gate event arrives, check if all gates ACTUALLY REQUESTED for
         this PR have passed — provider-agnostic (dispatch 20260823-beta2-e,
@@ -592,7 +555,6 @@ class HeadlessOrchestrator:
                 # Check feature completion after every receipt event
                 if event.reason == "receipt" and not self.dry_run:
                     try:
-                        self._check_feature_completion_and_trigger(event)
                         self._check_all_gates_passed(event)
                     except Exception as exc:
                         logger.warning("Feature completion check error: %s", exc)

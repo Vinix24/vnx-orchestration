@@ -10,9 +10,9 @@ sitting on origin and no PR — and T0 has to salvage it by hand every time
 This module is the single enforcement chokepoint every lane calls right before it
 governs the dispatch (see tmux_interactive_dispatch.TmuxInteractiveDispatch's
 teardown flow; run_envelope_plan / run_envelope_headless_plan in the envelope
-family). It reuses gh_pr_ensure (the one shared gh-pr-create implementation
-— auto_gate_trigger.py uses the same module) so there is exactly one `gh pr create`
-invocation in the codebase, never two independently-drifting ones.
+family). It reuses gh_pr_ensure (the one shared gh-pr-create implementation)
+so there is exactly one `gh pr create` invocation in the codebase, never two
+independently-drifting ones.
 
 Per-state decision (one binding site, never duplicated across lanes):
 - ``pushed``   → PR afdwingen (bestaand gedrag).
