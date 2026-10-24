@@ -303,7 +303,7 @@ def _enrich_instruction(args: argparse.Namespace) -> str:
     remaining providers (codex, gemini, litellm, kimi, deepseek-harness,
     glm-harness, local-gemma).
 
-    Applies layers (best-effort, each layer falls back silently on failure):
+    Applies layers (best-effort, each layer falls back on failure):
     1. Repo-map layer (new — mirrors headless_dispatch_daemon's DispatchEnricher
        step; applied to the RAW instruction so target-file extraction is most
        accurate before any enrichment text is added).
@@ -313,7 +313,9 @@ def _enrich_instruction(args: argparse.Namespace) -> str:
        dispatch staged with ``role=quality-engineer`` received byte-identical
        context to ``role=system-architect`` because the role's CLAUDE.md never
        reached the worker. On injector failure the prompt falls back to a role
-       label header (mirrors tmux_interactive_dispatch._assemble_context).
+       label header (mirrors tmux_interactive_dispatch._assemble_context),
+       which goes through ``with_block_or_raise`` so a build role keeps the
+       shared fail-closed block and an unreadable block file raises.
 
     Input-side audit closure: once assembled, the enriched body is persisted and
     checked for containment of the raw instruction + recorded injections
@@ -322,7 +324,11 @@ def _enrich_instruction(args: argparse.Namespace) -> str:
     ``_emit_governance`` can stamp it onto the receipt. The deterministic
     role-applied verdict is stashed on ``args._role_application`` the same way.
 
-    Returns the original instruction unchanged on any failure.
+    Returns the original instruction unchanged when the repo-map layer is the
+    one that failed (and when ``VNX_BENCH_EQUAL_CONTEXT=1``, by design); an
+    injector failure returns the role-label header plus the instruction, and
+    does not swallow ``FailClosedBlockError`` — that one raises, and ``main``
+    turns it into a ``deliver_failed`` receipt and exit 1.
     """
     if os.environ.get("VNX_BENCH_EQUAL_CONTEXT") == "1":
         return args.instruction
