@@ -80,10 +80,13 @@ else
   export VNX_HOME="${VNX_HOME:-$VNX_HOME_DEFAULT}"
   export PROJECT_ROOT="${PROJECT_ROOT:-$PROJECT_ROOT_DEFAULT}"
   export VNX_CANONICAL_ROOT="${VNX_CANONICAL_ROOT:-$VNX_CANONICAL_ROOT_DEFAULT}"
+  # Inline state-root resolution (sliced and run by
+  # tests/test_state_root_lockstep.py — TestBinVnxInlineBranchParity).
   # PR-PIP-2: ordered state-root resolution (lockstep with scripts/lib/vnx_paths.sh
   # and vnx_paths.py). This inline fallback only runs when vnx_paths.sh is absent;
   # keep the ordering identical: explicit > VNX_DATA_HOME/<id> > ~/.vnx-data/<id>
-  # if exists > project-local if exists > XDG default. Collision-safe on missing id.
+  # if exists > project-local if exists > central default (~/.vnx-data/<id>).
+  # Collision-safe on missing id: no resolvable project_id stays project-local.
   if [ -z "${VNX_DATA_DIR:-}" ]; then
     _vnx_pid=""
     if [ -n "${VNX_PROJECT_ID:-}" ] && printf '%s' "$VNX_PROJECT_ID" | grep -Eq '^[a-z][a-z0-9-]{1,31}$'; then
@@ -109,8 +112,11 @@ else
       VNX_DATA_DIR="$HOME/.vnx-data/$_vnx_pid"
     elif [ -d "$PROJECT_ROOT/.vnx-data" ]; then
       VNX_DATA_DIR="$PROJECT_ROOT/.vnx-data"
+    # 5. Fresh install: the one canonical central per-project store, exactly
+    # what _vnx_resolve_state_root step 5 returns. Never an XDG data dir: a
+    # fresh install has to land where the data-dir guard expects it (#1437).
     elif [ -n "$_vnx_pid" ]; then
-      VNX_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/vnx/$_vnx_pid"
+      VNX_DATA_DIR="$HOME/.vnx-data/$_vnx_pid"
     else
       VNX_DATA_DIR="$PROJECT_ROOT/.vnx-data"
     fi
