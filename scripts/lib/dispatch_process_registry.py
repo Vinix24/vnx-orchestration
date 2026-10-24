@@ -174,6 +174,40 @@ def load_dispatch_pgids(dispatch_id: str, *, repo_root: Path) -> list[int]:
     return sorted(result)
 
 
+def live_process_groups(dispatch_id: str, *, repo_root: Path) -> list[int] | None:
+    """Recorded PGIDs of *dispatch_id* whose group still has a live member.
+
+    ``[]`` when no entry exists or every recorded group is gone; ``None`` when
+    the entry cannot be MEASURED (unreadable, corrupt, malformed members).
+    Unknown is not "dead": a caller that guards a destructive action must keep
+    the worktree on ``None``. The liveness test is teardown's own
+    ``_group_is_valid`` (a recorded member PID must still carry the PGID), so
+    a recycled PGID is not mistaken for the dispatch's group.
+    """
+    if not _entry_path(repo_root, dispatch_id).exists():
+        return []
+    entry = _load_entry(dispatch_id, repo_root=repo_root)
+    if entry is None:
+        return None
+    groups = entry.get("groups")
+    if groups is None:
+        return []
+    if not isinstance(groups, dict):
+        return None
+    live: list[int] = []
+    for pgid_str, member_pids in groups.items():
+        if not isinstance(member_pids, list):
+            return None
+        try:
+            pgid = int(pgid_str)
+            members = [int(pid) for pid in member_pids]
+        except (TypeError, ValueError):
+            return None
+        if _group_is_valid(pgid, members):
+            live.append(pgid)
+    return sorted(live)
+
+
 def clear_dispatch_pgids(dispatch_id: str, *, repo_root: Path) -> None:
     """Remove the registry entry for *dispatch_id*.  Idempotent, never raises."""
     try:

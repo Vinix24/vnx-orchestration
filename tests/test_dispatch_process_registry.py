@@ -321,3 +321,24 @@ def test_no_entry_kills_nothing(tmp_path: Path):
 
     killed = cleanup_dispatch_processes("dispatch-absent", worktree, repo_root=tmp_path)
     assert killed == 0
+
+
+def test_live_process_groups_reports_only_groups_that_are_still_alive(tmp_path: Path):
+    """A recorded group is live while a member carries its PGID; absent is [],
+    and an unreadable entry is None (unknown, never "dead")."""
+    from dispatch_process_registry import (
+        clear_dispatch_pgids,
+        live_process_groups,
+        record_dispatch_pgids,
+    )
+
+    assert live_process_groups("dispatch-live", repo_root=tmp_path) == []
+    own_pgid = os.getpgid(0)
+    record_dispatch_pgids("dispatch-live", [own_pgid], repo_root=tmp_path)
+    assert live_process_groups("dispatch-live", repo_root=tmp_path) == [own_pgid]
+    clear_dispatch_pgids("dispatch-live", repo_root=tmp_path)
+
+    corrupt = tmp_path / ".vnx-data" / "state" / "dispatch_pgids" / "dispatch-corrupt.json"
+    corrupt.parent.mkdir(parents=True, exist_ok=True)
+    corrupt.write_text("{not json", encoding="utf-8")
+    assert live_process_groups("dispatch-corrupt", repo_root=tmp_path) is None

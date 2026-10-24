@@ -49,7 +49,7 @@ class Fixture:
         git(self.repo, "push", "-q", "origin", "main")
         git(self.repo, "fetch", "-q", "origin")
 
-    def worktree(self, dispatch_id: str, *, commit: bool = True, push: bool = False) -> crw.LockedWorktree:
+    def worktree(self, dispatch_id: str, *, commit: bool = True, push: bool = False) -> crw.WorktreeCandidate:
         path = self.repo / ".vnx-data" / "worktrees" / f"dispatch-{dispatch_id}"
         branch = f"dispatch/{dispatch_id}"
         git(self.repo, "worktree", "add", "-q", "-b", branch, str(path), "main")

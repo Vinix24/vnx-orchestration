@@ -180,27 +180,27 @@ class TestAllFlag:
         assert rc == 2 and out == "" and "not a git repository" in err
 
 
-class TestExistingDryRunUnchanged:
-    def test_json_report_keeps_its_shape_and_releases_nothing(self, fx, capsys):
+class TestDryRunReport:
+    def test_json_report_lists_every_owned_tree_and_releases_nothing(self, fx, capsys):
         rc, out, err = run_main(capsys, "--repo-root", str(fx.repo), "--json")
         assert rc == 0
         payload = json.loads(out)
         assert set(payload) == {"repo_root", "candidates"}
-        assert len(payload["candidates"]) == 1
-        candidate = payload["candidates"][0]
+        assert len(payload["candidates"]) == 3
+        candidate = [c for c in payload["candidates"] if c["dispatch_id"] == "d1"][0]
         assert set(candidate) == {
-            "dispatch_id", "path", "branch", "head_sha", "lock_reason",
+            "dispatch_id", "kind", "locked", "path", "branch", "head_sha", "lock_reason",
             "safe_to_release", "reason", "released", "errors", "delete_branch",
         }
-        assert candidate["dispatch_id"] == "d1"
+        assert candidate["dispatch_id"] == "d1" and candidate["kind"] == "dispatch" and candidate["locked"]
         assert candidate["safe_to_release"] and candidate["released"] is False
         assert fx.dispatch.exists()
 
-    def test_human_dry_run_summary_is_unchanged(self, fx, capsys):
+    def test_human_dry_run_summary_counts_every_owned_tree(self, fx, capsys):
         rc, out, err = run_main(capsys, "--repo-root", str(fx.repo))
         assert rc == 0
         assert out.splitlines()[0].startswith(
-            "cleanup_reviewed_worktrees: 1 locked dispatch-worktree(s) gevonden"
+            "cleanup_reviewed_worktrees: 3 door de fabric beheerde worktree(s) gevonden"
         )
         assert "SAFE_TO_RELEASE" in out and "geen --apply meegegeven" in out
         assert fx.dispatch.exists()
