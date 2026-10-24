@@ -19,8 +19,9 @@ head, and no review peer may carry a blocking finding on it (OI-2058, R5b; see
 ``_run_review_gate`` -> ``closure_verifier.check_review_gate_for_merge`` ->
 ``review_seat_evaluation``). Which seats are required follows the risk class of
 the head (R3b): the first seat of the stack at low and medium, every seat at
-high and critical, the class derived from the PR diff after a fetch and
-fail-closed to high (``review_risk_class.merge_head_risk_class``). No flag
+high and critical, the class derived from the PR diff against the PR's own
+base (``baseRefName``, never a default) after a fetch and fail-closed to high
+(``review_risk_class.merge_head_risk_class``). No flag
 lowers it. A refusal names the class, its reason and the required seats, and
 so does the merge record. A missing seat, an empty
 ``contract_hash``/``report_path``, or a verdict contradicting its report is a
@@ -618,13 +619,17 @@ def _resolve_declared_gate(pr_number: int, *, state_dir: Path) -> str:
     return ""
 
 
-def _unjudged_seats_record(pr_number: int, head_sha: str, verdict: str, reason: str = "") -> Dict[str, Any]:
+def _unjudged_seats_record(
+    pr_number: int, head_sha: str, verdict: str, reason: str = "", base_branch: Any = None,
+) -> Dict[str, Any]:
     """The ``review_seats`` a merge record carries when the review gate did not judge the seats.
 
     ``verdict`` is ``overridden`` (``--override-reason``) or ``not_evaluated``
     (a caller of ``merge_pr`` that ran no preflight). ``seats`` stays empty:
     nobody established them, and track closure then resolves them the way the
     door does instead of reading this merge as one from before the seat rule.
+    ``base_branch`` is the PR's ``baseRefName`` when the door read it: closure
+    reads the class against it, and without it the class is high.
     """
     from review_seat_evaluation import RISK_SEAT_RULE
 
@@ -638,6 +643,8 @@ def _unjudged_seats_record(pr_number: int, head_sha: str, verdict: str, reason: 
     }
     if reason:
         record["override_reason"] = reason
+    if base_branch:
+        record["base_branch"] = base_branch
     return record
 
 
@@ -747,7 +754,7 @@ def _run_review_gate(
             "overridden": True,
             "override_reason": reason,
             "gate": None,
-            "review_seats": _unjudged_seats_record(pr_number, head_sha, "overridden", reason),
+            "review_seats": _unjudged_seats_record(pr_number, head_sha, "overridden", reason, pr_data.get("baseRefName")),
         }, pr_data
 
     # ── Declared gate from the door's obligation ──────────────────────────
@@ -766,19 +773,25 @@ def _run_review_gate(
             "gate": None,
         }, pr_data
 
+    # R3b: the risk class is read against the base the PR itself names, passed
+    # as read: a missing or malformed base makes the class high, never main.
     return _review_seats_verdict(
         pr_number, gate_name, state_dir, branch=branch, head_sha=head_sha, b3_override=b3_override,
+        base_branch=pr_data.get("baseRefName"),
     ), pr_data
 
 
 def _review_seats_verdict(
     pr_number: int, gate_name: str, state_dir: Path, *, branch: str, head_sha: str, b3_override: Optional[str],
+    base_branch: Any = None,
 ) -> Dict[str, Any]:
     """The seat evaluation of the review gate, with the ``--override-b3`` reason when one was given (R1).
 
     An ``--override-b3`` without a reason is refused (:func:`_b3_override_refusal`).
     The reason is passed only when given: the evaluation reads the round ledger
     either way, and an evaluator that predates the override is called as before.
+    ``base_branch`` is the PR's ``baseRefName``, the base the risk class is read
+    against (R3b).
     """
     refusal = _b3_override_refusal(b3_override)
     if refusal is not None:
@@ -791,7 +804,7 @@ def _review_seats_verdict(
     checkout = {"checkout": _ACTIVE_TARGET.project_root} if _ACTIVE_TARGET is not None else {}
     return check_review_gate_for_merge(
         str(pr_number), gate_name, state_dir / "review_gates" / "results", branch=branch, head_sha=head_sha,
-        **override_b3, **checkout,
+        base_branch=base_branch, **override_b3, **checkout,
     )
 
 

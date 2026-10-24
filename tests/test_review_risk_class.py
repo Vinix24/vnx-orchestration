@@ -17,6 +17,9 @@ can talk down. What is pinned here:
   or the rule version differs, and a later head that adds a gate path is high.
 - The widened path list: every added gate/merge path is gate-merge, so a build
   dispatch on such a path now raises its track to architecture (the plan-gate).
+- R3b round 3: the diff is read against the PR's own base (``baseRefName``), never a
+  default; a base that is missing or no plain branch name is high, and a record read
+  against another base than the reader's is recomputed.
 
 Every git read runs real git on a throwaway repository under ``tmp_path``.
 """
@@ -34,6 +37,9 @@ from review_stack_support import BRANCH, PR, build_project_store, isolate_config
 
 import review_risk_class as rrc
 import smart_router
+
+#: The base a PR for main is read against; ``read_pr_diff`` has no default base (R3b round 3).
+MAIN = "origin/main"
 
 
 def _reading(*files: str) -> rrc.DiffReading:
@@ -230,7 +236,7 @@ def test_read_pr_diff_reads_against_the_merge_base_and_names_both_sides_of_a_ren
     _commit(root, {"scripts/pr_merge.py": "main moved on\n"}, "main moves")
     _git(root, "update-ref", "refs/remotes/origin/main", "main")
 
-    reading = rrc.read_pr_diff(head, cwd=root)
+    reading = rrc.read_pr_diff(head, base_ref=MAIN, cwd=root)
     assert reading.merge_base == base
     assert set(reading.files) == {"docs/new.md", "scripts/lib/gate_status.py", "scripts/lib/plain_status.py"}
     risk = rrc.derive_risk_class(reading, head_sha=head)
@@ -245,8 +251,38 @@ def test_read_pr_diff_reads_against_the_merge_base_and_names_both_sides_of_a_ren
 ])
 def test_read_pr_diff_of_a_head_that_cannot_be_read_is_unreadable(repo, head, why):
     root, _base = repo
-    reading = rrc.read_pr_diff(head, cwd=root)
+    reading = rrc.read_pr_diff(head, base_ref=MAIN, cwd=root)
     assert reading.files is None and why in reading.error
+    assert rrc.derive_risk_class(reading).risk_class == "high"
+
+
+# ---------------------------------------------------------------------------
+# R3b round 3: the base is the PR's own, never a default
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("base, expected", [
+    ("main", "origin/main"), ("release", "origin/release"), ("release/1.7", "origin/release/1.7"),
+])
+def test_the_base_is_the_prs_own_branch_on_origin(base, expected):
+    assert rrc.base_ref_for(base) == (expected, "")
+
+
+@pytest.mark.parametrize("base, why", [
+    (None, "is not known"), ("", "is not known"), (7, "is not known"), (["main"], "is not known"),
+    ("-main", "no plain branch name"), ("+main", "no plain branch name"), (" main", "no plain branch name"),
+    ("main:refs/heads/x", "no plain branch name"), ("a..b", "no plain branch name"),
+    ("main/", "no plain branch name"), ("main.lock", "no plain branch name"), ("a/.b", "no plain branch name"),
+])
+def test_a_base_that_is_missing_or_no_plain_branch_name_gives_no_ref(base, why):
+    ref, reason = rrc.base_ref_for(base)
+    assert ref is None and why in reason
+
+
+@pytest.mark.parametrize("base_ref", ["", None, "-p", "--output=x"])
+def test_read_pr_diff_without_a_usable_base_is_unreadable_and_high(repo, base_ref):
+    root, base = repo
+    reading = rrc.read_pr_diff(base, base_ref=base_ref, cwd=root)
+    assert reading.files is None and "no base ref" in reading.error
     assert rrc.derive_risk_class(reading).risk_class == "high"
 
 
@@ -268,10 +304,10 @@ def test_a_later_head_that_adds_a_gate_path_reads_high(repo, tmp_path):
     first = _commit(root, {"docs/plan.md": "plan\n"}, "first head")
     second = _commit(root, {"scripts/lib/gate_executor.py": "B = 2\n"}, "second head adds a gate path")
     requests_dir = tmp_path / "requests"
-    _record(requests_dir, "codex_gate", rrc.derive_risk_class(rrc.read_pr_diff(first, cwd=root), head_sha=first), head=first)
+    _record(requests_dir, "codex_gate", rrc.derive_risk_class(rrc.read_pr_diff(first, base_ref=MAIN, cwd=root), head_sha=first), head=first)
 
-    assert rrc.head_risk_class(requests_dir, str(PR), first, rrc.read_pr_diff(first, cwd=root)).risk_class == "medium"
-    risk = rrc.head_risk_class(requests_dir, str(PR), second, rrc.read_pr_diff(second, cwd=root))
+    assert rrc.head_risk_class(requests_dir, str(PR), first, rrc.read_pr_diff(first, base_ref=MAIN, cwd=root)).risk_class == "medium"
+    risk = rrc.head_risk_class(requests_dir, str(PR), second, rrc.read_pr_diff(second, base_ref=MAIN, cwd=root))
     assert (risk.risk_class, risk.source) == ("high", rrc.SOURCE_RECOMPUTED)
     assert "no request of head" in risk.note
     assert ("scripts/lib/gate_executor.py", "gate-merge") in risk.deciding
@@ -292,6 +328,38 @@ def test_a_record_with_another_merge_base_or_rule_version_is_recomputed(tmp_path
     risk = rrc.head_risk_class(tmp_path, str(PR), "b" * 40, reading)
     assert (risk.risk_class, risk.source) == ("high", rrc.SOURCE_RECOMPUTED)
     assert "made under merge base" in risk.note
+
+
+_MISSING = object()
+
+
+@pytest.mark.parametrize("recorded_base, holds", [
+    ("origin/release", True), ("origin/main", False), ("", False), (None, False), (7, False), (_MISSING, False),
+], ids=["same-base", "other-base", "empty", "none", "malformed", "missing"])
+def test_a_record_read_against_another_base_is_recomputed(tmp_path, recorded_base, holds):
+    """Same head and merge base, but the record was read for a merge into another branch: it does not hold."""
+    reading = rrc.DiffReading(("docs/x.md",), merge_base="a" * 40, base_ref="origin/release")
+    recorded = rrc.derive_risk_class(
+        rrc.DiffReading(("scripts/lib/gate_executor.py",), merge_base="a" * 40, base_ref="origin/release"),
+        head_sha="b" * 40,
+    ).to_record()
+    if recorded_base is _MISSING:
+        del recorded["base_ref"]
+    else:
+        recorded["base_ref"] = recorded_base
+    tmp_path.joinpath(f"pr-{PR}-codex_gate.json").write_text(json.dumps({
+        "gate": "codex_gate", "pr_number": PR, "commit_sha": "b" * 40, "requested_at": "2026-10-23T10:00:00Z",
+        rrc.RECORD_KEY: recorded,
+    }), encoding="utf-8")
+
+    risk = rrc.head_risk_class(tmp_path, str(PR), "b" * 40, reading)
+
+    if holds:
+        assert (risk.risk_class, risk.source) == ("high", rrc.SOURCE_RECORD)
+        assert "against origin/release" in risk.note
+    else:
+        assert (risk.risk_class, risk.source) == ("medium", rrc.SOURCE_RECOMPUTED)
+        assert "made under merge base" in risk.note and "now aaaaaaaaaaaa against origin/release" in risk.note
 
 
 def test_a_recompute_keeps_the_raise_a_caller_recorded_on_the_head(tmp_path):
@@ -346,6 +414,7 @@ def test_request_reviews_records_the_derived_class_and_requests_with_it(tmp_path
 
     monkeypatch.setenv("VNX_PROJECT_ROOT", str(root))
     monkeypatch.setattr(gate_request_handler, "get_pr_head_sha", lambda _pr: head)
+    monkeypatch.setattr(gate_request_handler, "get_pr_base_branch", lambda _pr: "main")
     monkeypatch.setattr(gate_request_handler.GateRequestHandlerMixin, "_codex_headless_available", lambda self: True)
     monkeypatch.setattr(review_gate_manager, "emit_governance_receipt", lambda *a, **kw: None)
     monkeypatch.setenv("VNX_OVERRIDE_CI_GATE_REQUIRED", "0")
@@ -357,6 +426,7 @@ def test_request_reviews_records_the_derived_class_and_requests_with_it(tmp_path
     record = json.loads((store["requests_dir"] / f"pr-{PR}-codex_gate.json").read_text(encoding="utf-8"))
     risk = record[rrc.RECORD_KEY]
     assert (risk["risk_class"], risk["caller"], risk["head_sha"], risk["merge_base"]) == ("high", "low", head, base)
+    assert risk["base_ref"] == MAIN
     assert risk["deciding"] == [{"path": "scripts/lib/gate_executor.py", "category": "gate-merge"}]
     assert risk["rule_version"] == smart_router.plan_scope_rule_version()
     assert record["risk_class"] == "high", "the seat is requested with the derived class, not the caller's"
@@ -364,6 +434,44 @@ def test_request_reviews_records_the_derived_class_and_requests_with_it(tmp_path
 
     review_gate_manager._print_risk_class(result)
     assert "RISK CLASS high: gate-merge path scripts/lib/gate_executor.py" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("base, expected", [
+    ("main", ("medium", MAIN, "main", ())),
+    ("release", ("high", "origin/release", "release", (("scripts/pr_merge.py", "gate-merge"),))),
+    ("", ("high", "", "", ())),
+], ids=["main", "release", "no-base"])
+def test_request_reviews_reads_the_class_against_the_prs_own_base(tmp_path, monkeypatch, base, expected):
+    """A PR for release off main carries main's merge logic: a doc change against main, high against release."""
+    store = build_project_store(tmp_path, monkeypatch)
+    root = store["project_root"]
+    _git(root, "init", "-q", "-b", "main")
+    tips = {"release": _commit(root, {"docs/readme.md": "x\n"}, "base")}
+    _git(root, "update-ref", "refs/remotes/origin/release", tips["release"])
+    tips["main"] = _commit(root, {"scripts/pr_merge.py": "M = 1\n"}, "merge logic lands on main")
+    _git(root, "update-ref", "refs/remotes/origin/main", tips["main"])
+    head = _commit(root, {"docs/release-notes.md": "notes\n"}, "a doc change for release")
+    import gate_request_handler
+    import review_gate_manager
+
+    monkeypatch.setenv("VNX_PROJECT_ROOT", str(root))
+    monkeypatch.setattr(gate_request_handler, "get_pr_head_sha", lambda _pr: head)
+    monkeypatch.setattr(gate_request_handler, "get_pr_base_branch", lambda _pr: base)
+    monkeypatch.setattr(gate_request_handler.GateRequestHandlerMixin, "_codex_headless_available", lambda self: True)
+    monkeypatch.setattr(review_gate_manager, "emit_governance_receipt", lambda *a, **kw: None)
+    monkeypatch.setenv("VNX_OVERRIDE_CI_GATE_REQUIRED", "0")
+
+    review_gate_manager.ReviewGateManager().request_reviews(
+        pr_number=PR, branch=BRANCH, review_stack=["codex_gate"], risk_class="low",
+        changed_files=["docs/release-notes.md"], mode="per_pr", dispatch_id="",
+    )
+    risk = json.loads((store["requests_dir"] / f"pr-{PR}-codex_gate.json").read_text(encoding="utf-8"))[rrc.RECORD_KEY]
+
+    cls, base_ref, tip, deciding = expected
+    assert (risk["risk_class"], risk["base_ref"], risk["merge_base"]) == (cls, base_ref, tips.get(tip, ""))
+    assert [(d["path"], d["category"]) for d in risk["deciding"]] == list(deciding)
+    if not base:
+        assert "the PR's base branch is not known" in risk["reason"]
 
 
 # ---------------------------------------------------------------------------

@@ -358,6 +358,13 @@ def _stub_gate_identity_gh_calls(monkeypatch: pytest.MonkeyPatch) -> None:
     ``gate_recorder.subprocess.run`` themselves
     (tests/test_pr_merge_review_gate.py::TestRealWriterThroughRealMergeCheck);
     their function-scoped patch wins over this autouse stub.
+
+    R3b round 3: the PR's base branch is looked up the same way
+    (``gh pr view <n> [--repo R] --json baseRefName``) by the request side
+    (``gate_recorder.get_pr_base_branch``) and the summary check
+    (``forge_gate_publisher.pr_base_branch``). That one field is stubbed with
+    or without ``--repo``: no base, so the risk class reads high, the verdict
+    the offline fetch stub below already gives every test written before R3b.
     """
     import subprocess as _subprocess
 
@@ -375,13 +382,16 @@ def _stub_gate_identity_gh_calls(monkeypatch: pytest.MonkeyPatch) -> None:
 
     real_run = gate_recorder.subprocess.run
 
+    def base_lookup(argv) -> bool:
+        words = list(argv)
+        return "--json" in words[3:-1] and words[words.index("--json") + 1] == "baseRefName"
+
     def fake_run(argv, **kwargs):
         if (
             isinstance(argv, (list, tuple))
             and len(argv) >= 6
             and list(argv[:3]) == ["gh", "pr", "view"]
-            and argv[4] == "--json"
-            and argv[5] in ("headRefOid", "headRefName")
+            and ((argv[4] == "--json" and argv[5] in ("headRefOid", "headRefName")) or base_lookup(argv))
         ):
             return _subprocess.CompletedProcess(list(argv), 1, stdout="", stderr="")
         return real_run(argv, **kwargs)
@@ -577,7 +587,7 @@ def _stub_review_risk_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
 
     The seat evaluation reads the risk class of the head it judges
     (``review_risk_class.merge_head_risk_class``), and that fetches the PR head
-    and ``main`` from ``origin`` first. A test that drives ``pr_merge.main()``
+    and the PR's base branch from ``origin`` first. A test that drives ``pr_merge.main()``
     hands it the checkout the suite runs in (``_stub_merge_target_resolution``
     above), so without this stub every such test made a live fetch of a
     fixture branch. Stubbed as a refused fetch: the class is then ``high`` and

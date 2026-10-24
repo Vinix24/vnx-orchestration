@@ -30,11 +30,13 @@ acceptance (b)) and the evaluation says so in ``note``.
 :func:`seats_for_risk` is the one rule: the first seat of the stack at ``low``
 and ``medium``, every seat at ``high`` and ``critical``. The class is the one
 of the head under evaluation (``review_risk_class.merge_head_risk_class``: the
-PR diff against its merge base, read after a fetch, fail-closed to ``high``),
-looked up here so the door, ``vnx-gate/review`` and ``vnx pr-ready`` read the
-same class. A seat list a caller names (``seats=``) keeps every seat at every
-class, and a merge record under the older :data:`SEAT_RULE` is judged without
-a class (``by_risk=False``).
+PR diff against its merge base with the PR's own base branch, read after a
+fetch, fail-closed to ``high``), looked up here so the door, ``vnx-gate/review``
+and ``vnx pr-ready`` read the same class. Each of them passes the base it read
+from the PR (``baseRefName``) as ``base_branch``; without one the class is
+``high``, never the class against ``main``. A seat list a caller names
+(``seats=``) keeps every seat at every class, and a merge record under the
+older :data:`SEAT_RULE` is judged without a class (``by_risk=False``).
 
 **Which seat a record answers for** (:func:`seat_for`). The ``seat`` its own
 request on this head states (stamped since R5a), else ``takeover_path[0]``
@@ -408,13 +410,19 @@ def _recorded_note(kept: Tuple[str, ...], fresh: Optional[Tuple[str, ...]], refu
 
 @dataclass(frozen=True)
 class SeatScope:
-    """The head the evaluation is about, in the closure verifier's own scope terms."""
+    """The head the evaluation is about, in the closure verifier's own scope terms.
+
+    ``base_branch`` is the branch the PR merges into, as the PR names it. It
+    scopes no record (it is not in :attr:`kwargs`); it is the base the risk
+    class is read against (:func:`head_risk`).
+    """
 
     pr_id: str
     results_dir: Path
     branch: Optional[str] = None
     project_id: Optional[str] = None
     head_sha: Optional[str] = None
+    base_branch: Optional[str] = None
 
     @property
     def kwargs(self) -> Dict[str, Optional[str]]:
@@ -1074,6 +1082,7 @@ class SeatEvaluation:
         if self.required.rule == RISK_SEAT_RULE:
             risk = self.required.risk or {}
             record.update({
+                "base_branch": self.scope.base_branch,
                 "stack": list(self.required.stack),
                 "required_seats": list(self.seats),
                 "risk_class": risk.get("risk_class") or "high",
@@ -1166,17 +1175,17 @@ def _unfilled_hint(scope: SeatScope, seat: str, seated: Dict[str, SeatedRecord])
 def head_risk(scope: SeatScope, checkout: Optional[Path] = None) -> Any:
     """The ``RiskClass`` of the head under evaluation, read the way the door reads it (D2).
 
-    ``review_risk_class.merge_head_risk_class``: fetch the PR head and the base
-    branch, read the diff in ``checkout`` and check it against the records of
-    the head. ``checkout`` ``None`` is the checkout the store belongs to; a
-    store whose checkout cannot be established has no readable diff, so its
-    class is ``high``.
+    ``review_risk_class.merge_head_risk_class``: fetch the PR head and the PR's
+    base branch (``scope.base_branch``), read the diff in ``checkout`` and check
+    it against the records of the head. ``checkout`` ``None`` is the checkout
+    the store belongs to; a store whose checkout cannot be established, and a
+    scope without a base, have no readable diff, so their class is ``high``.
     """
     import review_risk_class
 
     return review_risk_class.merge_head_risk_class(
         requests_dir_for(scope.results_dir), scope.pr_id, scope.head_sha or "",
-        branch=scope.branch, checkout=checkout, results_dir=scope.results_dir,
+        base_branch=scope.base_branch, branch=scope.branch, checkout=checkout, results_dir=scope.results_dir,
     )
 
 
@@ -1193,6 +1202,7 @@ def evaluate_review_seats(
     round_ledger: bool = True,
     checkout: Optional[Path] = None,
     by_risk: bool = True,
+    base_branch: Optional[str] = None,
 ) -> SeatEvaluation:
     """The seat answer for ``pr_id`` on ``head_sha``: the one function every evaluator calls.
 
@@ -1203,8 +1213,10 @@ def evaluate_review_seats(
 
     A resolved stack is narrowed by the risk class of ``head_sha``
     (:func:`head_risk`), read in ``checkout`` (``None``: the checkout the store
-    belongs to). ``by_risk=False`` keeps every seat of the stack: track closure
-    of a merge recorded under :data:`SEAT_RULE`.
+    belongs to) against ``base_branch``, the PR's own base (``baseRefName``).
+    ``None`` there is a base nobody read, and the class is ``high``.
+    ``by_risk=False`` keeps every seat of the stack: track closure of a merge
+    recorded under :data:`SEAT_RULE`.
 
     Every fill is then counted against the round ledger (R1, :func:`counted_fill`)
     when the store keeps one: a PASS fills its seat only when its line is there,
@@ -1212,7 +1224,7 @@ def evaluate_review_seats(
     (the door's ``--override-b3`` reason) says why. ``round_ledger=False`` skips
     that count: track closure judges a merged PR under the rule it merged under.
     """
-    scope = SeatScope(str(pr_id), Path(results_dir), branch, project_id, head_sha)
+    scope = SeatScope(str(pr_id), Path(results_dir), branch, project_id, head_sha, base_branch)
     by_risk = by_risk and seats is None
     required = required_seats(
         requests_dir_for(scope.results_dir), scope.pr_id, head_sha, seats=seats, seats_source=seats_source,

@@ -279,7 +279,7 @@ def gh_calls(monkeypatch: pytest.MonkeyPatch) -> List[List[str]]:
         if isinstance(argv, (list, tuple)) and argv and argv[0] == "gh":
             calls.append(list(argv))
             field = argv[argv.index("--json") + 1]
-            body = {"headRefOid": HEAD, "headRefName": "dispatch/x", "autoMergeRequest": None}
+            body = {"headRefOid": HEAD, "headRefName": "dispatch/x", "baseRefName": "main", "autoMergeRequest": None}
             return subprocess.CompletedProcess(
                 list(argv), 0, stdout=json.dumps({field: body[field]}), stderr=""
             )

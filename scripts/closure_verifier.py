@@ -1249,6 +1249,7 @@ def check_review_gate_for_merge(
     seats_source: Optional[str] = None,
     b3_override: str = "",
     checkout: Optional[Path] = None,
+    base_branch: Optional[str] = None,
 ) -> Dict[str, Any]:
     """GO/NO-GO merge verdict: every required review seat is filled on this head.
 
@@ -1275,7 +1276,9 @@ def check_review_gate_for_merge(
     request with ``source=explicit`` never narrows that set. The risk class of
     this head narrows it (R3b, ``review_seat_evaluation.seats_for_risk``): the
     first seat at low and medium, every seat at high and critical, the class
-    read in ``checkout`` (``None``: the store's own checkout). ``seats`` names
+    read in ``checkout`` (``None``: the store's own checkout) against
+    ``base_branch``, the PR's own base (``baseRefName``; ``None``: not known,
+    so the class is high). ``seats`` names
     them directly (track closure passes the merge record's list,
     ``seats_source`` says where it came from). ``gate`` is the declared gate of
     the obligation: it names the evidence in the returned dict and decides no
@@ -1323,7 +1326,7 @@ def check_review_gate_for_merge(
     evaluation = evaluate_review_seats(
         pr_id, results_dir, branch=branch, project_id=project_id, head_sha=head_sha,
         seats=seats, seats_source=seats_source or SOURCE_EXPLICIT, b3_override=b3_override,
-        checkout=checkout,
+        checkout=checkout, base_branch=base_branch,
     )
     verdict: Dict[str, Any] = {
         "verdict": "GO" if evaluation.go else "NO-GO",
@@ -2088,7 +2091,9 @@ def _seat_rule_checks(
     record that fills the seat, named after the seat (OI-2058 R5b round 2).
     That record is ``SeatFill.record``: the exact record the door's route
     accepted (round 3), not a second lookup of the reviewer's slot. An unfilled
-    seat gets them on the record that answered for it and did not hold.
+    seat gets them on the record that answered for it and did not hold. Seats
+    resolved here read the class against the record's ``base_branch``, the base
+    the door read from the PR; a record without one reads high.
 
     A record under ``SEAT_RULE`` (merged before R3b) is judged by that rule: a
     seat list it lacks is resolved without a risk class (``by_risk=False``), as
@@ -2108,7 +2113,7 @@ def _seat_rule_checks(
         str(seat_record.get("pr_id") or contract.pr_id), results_dir,
         branch=contract.branch or None, head_sha=str(seat_record.get("head_sha") or ""),
         seats=seats or None, seats_source=SOURCE_MERGE_RECORD, round_ledger=False,
-        by_risk=seat_record.get("rule") == RISK_SEAT_RULE,
+        by_risk=seat_record.get("rule") == RISK_SEAT_RULE, base_branch=seat_record.get("base_branch"),
     )
     checks: List[CheckResult] = []
     if evaluation.required.error:

@@ -12,7 +12,11 @@ the stack) at low and medium, every seat at high and critical. What is pinned he
   seats under ``first_seat_or_every_seat_by_risk``; a record under the older rule is judged
   by that rule at track closure;
 - D6: a caller raise recorded on the head counts, a caller's ``low`` lowers nothing;
-- D7: the receipt conversion is high, the dispatch door, lanes and fleet defaults stay medium.
+- D7: the receipt conversion is high, the dispatch door, lanes and fleet defaults stay medium;
+- round 3: the class is read against the PR's own base (``baseRefName``), never ``origin/main``
+  by default. A PR for ``release`` that carries merge logic already on ``main`` is high at the
+  door, in ``vnx pr-ready`` and in ``vnx-gate/review``; a request record read against another
+  base is recomputed; a base nobody read is high.
 
 The git side is real: a bare ``origin`` in ``tmp_path`` with one branch per scenario, and a
 door checkout cloned with ``main`` only, so the PR heads reach it only through the fetch.
@@ -26,7 +30,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import pytest
 
@@ -159,7 +163,7 @@ def _pass(store, gate: str, head: str, branch: str) -> None:
 def _door(store, forge, branch: str, head: str, **kwargs: Any) -> Dict[str, Any]:
     return closure_verifier.check_review_gate_for_merge(
         PR_ID, "codex_gate", store["results"], branch=branch, head_sha=head,
-        checkout=kwargs.pop("checkout", forge["door"]), **kwargs,
+        checkout=kwargs.pop("checkout", forge["door"]), base_branch=kwargs.pop("base_branch", "main"), **kwargs,
     )
 
 
@@ -279,8 +283,11 @@ def test_ready_and_the_summary_check_give_the_door_verdict(store, forge):
         door = _door(store, forge, branch, head)
         evidence = pr_readiness.collect_gate_evidence(
             PR, ["codex_gate"], store["state"], branch=branch, head_sha=head, checkout=forge["door"],
+            base_branch="main",
         )
-        summary = fgp.review_verdict(PR, head, results_dir=store["results"], branch=branch, checkout=forge["door"])
+        summary = fgp.review_verdict(
+            PR, head, results_dir=store["results"], branch=branch, checkout=forge["door"], base_branch="main",
+        )
 
         ready = "GO" if all(line.verdict == "GO" for line in evidence) else "NO-GO"
         assert (door["verdict"], ready, summary.conclusion) == (door_says, door_says, summary_says), branch
@@ -321,8 +328,8 @@ def test_a_named_seat_list_keeps_every_seat_at_medium(store, forge):
 # ---------------------------------------------------------------------------
 
 
-def _request_with_risk(store, head: str, branch: str, caller: str, forge) -> None:
-    reading = review_risk_class.read_pr_diff(head, cwd=forge["door"])
+def _request_with_risk(store, head: str, branch: str, caller: str, forge, base_ref: str = "origin/main") -> None:
+    reading = review_risk_class.read_pr_diff(head, base_ref=base_ref, cwd=forge["door"])
     risk = review_risk_class.derive_risk_class(reading, caller_class=caller, head_sha=head)
     (store["requests"] / f"pr-{PR}-codex_gate.json").write_text(json.dumps({
         "gate": "codex_gate", "pr_number": PR, "branch": branch, "status": "requested",
@@ -356,15 +363,18 @@ def test_a_caller_low_on_a_high_head_lowers_nothing(store, forge):
 # ---------------------------------------------------------------------------
 
 
-def _merge_through_main(store, forge, monkeypatch, branch: str, head: str) -> Dict[str, Any]:
+def _merge_through_door(
+    store, door: Path, monkeypatch, branch: str, head: str, base: str = "main",
+) -> Tuple[int, List[Dict[str, Any]]]:
+    """``pr_merge.main`` on the PR (its base named ``base``), merging into ``door``: exit code and receipts."""
     import file_scope_overlap
     from merge_target import MergeTarget
 
     go = {"verdict": "GO", "message": "ok", "overridden": False, "override_reason": None}
     pr_data = {"number": PR, "title": "R3b", "state": "OPEN", "isDraft": False, "headRefName": branch,
-               "baseRefName": "main", "headRefOid": head, "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN"}
+               "baseRefName": base, "headRefOid": head, "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN"}
     monkeypatch.setattr(pr_merge, "resolve_merge_target",
-                        lambda engine_root, **_k: MergeTarget(project_root=forge["door"], repo="vnx-test/target"))
+                        lambda engine_root, **_k: MergeTarget(project_root=door, repo="vnx-test/target"))
     monkeypatch.setattr(pr_merge, "_run_ci_gate", lambda pr, **k: (dict(go), dict(pr_data)))
     monkeypatch.setattr(pr_merge, "_query_pr", lambda n: dict(pr_data))
     monkeypatch.setattr(pr_merge, "_resolve_override_reason", lambda reason: reason)
@@ -377,8 +387,14 @@ def _merge_through_main(store, forge, monkeypatch, branch: str, head: str) -> Di
         store["state"], dispatch_id=DISPATCH, gate="codex_gate", pr_number=PR, pr_id=PR_ID, branch=branch,
     )
 
-    assert pr_merge.main(["--pr", PR_ID, "--dispatch-id", DISPATCH]) == pr_merge.EXIT_OK
-    rows = [json.loads(line) for line in store["receipts"].read_text(encoding="utf-8").splitlines() if line.strip()]
+    code = pr_merge.main(["--pr", PR_ID, "--dispatch-id", DISPATCH])
+    lines = store["receipts"].read_text(encoding="utf-8").splitlines() if store["receipts"].exists() else []
+    return code, [json.loads(line) for line in lines if line.strip()]
+
+
+def _merge_through_main(store, forge, monkeypatch, branch: str, head: str) -> Dict[str, Any]:
+    code, rows = _merge_through_door(store, forge["door"], monkeypatch, branch, head)
+    assert code == pr_merge.EXIT_OK
     return [row for row in rows if row.get("event_type") == "pr_merged"][-1]["review_seats"]
 
 
@@ -675,3 +691,181 @@ def test_vnx_gate_names_the_class_and_the_seats_the_door_requires(store, capsys)
         "RISK CLASS medium: no high-risk path; the merge door requires codex_gate of stack codex_gate, kimi_gate",
         "RISK CLASS high: schema path x; the merge door requires codex_gate, kimi_gate of stack codex_gate, kimi_gate",
     ]
+
+
+# ---------------------------------------------------------------------------
+# Round 3: the class is read against the PR's own base, not origin/main
+# ---------------------------------------------------------------------------
+
+
+RELEASE_PR_BRANCH = "pr/release-docs"
+
+
+@pytest.fixture(scope="module")
+def release_forge(tmp_path_factory) -> Dict[str, Any]:
+    """``release`` one merge-logic commit behind ``main``; a PR for ``release``, off ``main``, adds a doc.
+
+    Against ``origin/main`` the PR is the doc alone (medium). Against ``origin/release``, the base
+    the PR names, it also carries ``scripts/pr_merge.py`` (high). The door checkout has ``main``
+    only: the PR head and ``release`` reach it only through the fetch.
+    """
+    root = tmp_path_factory.mktemp("r3b-release-forge")
+    origin, work, door = root / "origin.git", root / "work", root / "door"
+    _git(root, "init", "-q", "--bare", "-b", "main", str(origin))
+    _git(root, "init", "-q", "-b", "main", str(work))
+    _git(work, "remote", "add", "origin", str(origin))
+    release = _commit(work, BASE_FILES, "base")
+    _git(work, "push", "-q", "origin", "main", "main:release")
+    main = _commit(work, {"scripts/pr_merge.py": "M = 1\n"}, "merge logic lands on main")
+    _git(work, "push", "-q", "origin", "main")
+    _git(work, "checkout", "-q", "-b", RELEASE_PR_BRANCH)
+    head = _commit(work, {"docs/guide.md": "release notes\n"}, "a doc change for release")
+    _git(work, "push", "-q", "origin", RELEASE_PR_BRANCH)
+    _git(root, "clone", "-q", "--single-branch", "-b", "main", str(origin), str(door))
+    return {"door": door, "head": head, "release": release, "main": main}
+
+
+def _release_class(store, release_forge, base: Any) -> review_risk_class.RiskClass:
+    return review_risk_class.merge_head_risk_class(
+        store["requests"], PR_ID, release_forge["head"], base_branch=base, branch=RELEASE_PR_BRANCH,
+        checkout=release_forge["door"],
+    )
+
+
+def test_the_release_pr_is_medium_against_main_and_high_against_its_own_base(store, release_forge):
+    against_main = _release_class(store, release_forge, "main")
+    against_release = _release_class(store, release_forge, "release")
+
+    assert (against_main.risk_class, against_main.base_ref, against_main.merge_base) == (
+        "medium", "origin/main", release_forge["main"])
+    assert (against_release.risk_class, against_release.base_ref, against_release.merge_base) == (
+        "high", "origin/release", release_forge["release"])
+    assert against_release.deciding == (("scripts/pr_merge.py", "gate-merge"),)
+
+
+@pytest.mark.parametrize("base, why", [
+    (None, "is not known"), ("", "is not known"), (["release"], "is not known"),
+    ("release:refs/heads/main", "no plain branch name"), ("-release", "no plain branch name"),
+    ("gone", "could not be fetched"),
+], ids=["none", "empty", "malformed", "refspec", "option", "not-on-origin"])
+def test_a_base_that_is_missing_malformed_or_cannot_be_fetched_is_high(store, release_forge, base, why):
+    risk = _release_class(store, release_forge, base)
+
+    assert risk.risk_class == "high"
+    assert why in risk.reason
+    assert risk.reason.startswith("fail-closed:")
+
+
+def test_the_door_refuses_a_release_pr_on_its_first_seat_alone(store, release_forge, monkeypatch):
+    """Codex's reproduction on #2193: the door read origin/main and merged a high PR on codex alone."""
+    head = release_forge["head"]
+    _pass(store, "codex_gate", head, RELEASE_PR_BRANCH)
+
+    code, rows = _merge_through_door(store, release_forge["door"], monkeypatch, RELEASE_PR_BRANCH, head, base="release")
+
+    assert code != pr_merge.EXIT_OK
+    assert not [row for row in rows if row.get("event_type") == "pr_merged"]
+    refused = [row for row in rows if row.get("event_type") == "pr_merge_refused"][-1]
+    review = next(gate for gate in refused["preflight_gates"] if gate["gate"] == "review")
+    assert review["verdict"] == "NO-GO"
+    assert "risicoklasse high (gate-merge path scripts/pr_merge.py)" in review["message"]
+    assert "vereiste seats codex_gate, kimi_gate" in review["message"]
+
+
+def test_a_release_pr_with_every_seat_merges_and_the_record_names_its_base(store, release_forge, monkeypatch):
+    head = release_forge["head"]
+    _pass(store, "codex_gate", head, RELEASE_PR_BRANCH)
+    _pass(store, "kimi_gate", head, RELEASE_PR_BRANCH)
+
+    code, rows = _merge_through_door(store, release_forge["door"], monkeypatch, RELEASE_PR_BRANCH, head, base="release")
+
+    assert code == pr_merge.EXIT_OK
+    seats = [row for row in rows if row.get("event_type") == "pr_merged"][-1]["review_seats"]
+    assert (seats["risk_class"], seats["required_seats"], seats["base_branch"]) == ("high", STACK, "release")
+    assert (seats["risk"]["base_ref"], seats["risk"]["merge_base"]) == ("origin/release", release_forge["release"])
+
+
+def test_a_request_record_read_against_main_is_recomputed_at_the_door(store, release_forge):
+    head = release_forge["head"]
+    _release_class(store, release_forge, "release")  # fetches the head into the door checkout
+    _request_with_risk(store, head, RELEASE_PR_BRANCH, "low", release_forge, base_ref="origin/main")
+    _pass(store, "codex_gate", head, RELEASE_PR_BRANCH)
+
+    refused = _door(store, release_forge, RELEASE_PR_BRANCH, head, base_branch="release")
+
+    seats = refused["review_seats"]
+    assert refused["verdict"] == "NO-GO"
+    assert (seats["risk_class"], seats["risk_source"]) == ("high", review_risk_class.SOURCE_RECOMPUTED)
+    assert "against origin/main" in seats["risk"]["note"] and "against origin/release" in seats["risk"]["note"]
+
+
+def test_a_door_call_without_a_base_reads_high_not_main(store, forge):
+    """The PR on main, but the caller read no base: high (every seat), never the class against main."""
+    head = forge["heads"]["pr/medium"]
+    _pass(store, "codex_gate", head, "pr/medium")
+
+    refused = _door(store, forge, "pr/medium", head, base_branch=None)
+
+    assert refused["verdict"] == "NO-GO"
+    assert refused["review_seats"]["risk_class"] == "high"
+    assert "the PR's base branch is not known" in refused["review_seats"]["risk_reason"]
+
+
+def _ready(store, release_forge, monkeypatch, base: str) -> str:
+    """``vnx pr-ready`` (``pr_readiness.assess``) on the release PR, its facts naming ``base``."""
+    import ci_contexts
+
+    head = release_forge["head"]
+    facts = {"number": PR, "state": "OPEN", "isDraft": False, "headRefName": RELEASE_PR_BRANCH,
+             "headRefOid": head, "baseRefName": base}
+
+    def offline(*_a, **_k):
+        raise ci_contexts.CIContextsError("offline in the unit test")
+
+    monkeypatch.setattr(pr_readiness, "fetch_pr_facts", lambda *_a, **_k: dict(facts))
+    monkeypatch.setattr(pr_readiness.ci_contexts, "evaluate_commit", offline)
+    report = pr_readiness.assess(PR, release_forge["door"], store["state"])
+    assert not report.gates_error, report.gates_error
+    return "GO" if report.gates and all(line.verdict == "GO" for line in report.gates) else "NO-GO"
+
+
+def _summary_check(store, release_forge, monkeypatch, base: str) -> Tuple[str, List[str]]:
+    """``vnx-gate/review`` as the recorder publishes it (dry run): the base read from the PR in the store's repo."""
+    import forge_project_target
+    from forge_project_target import ForgeTarget
+
+    target = ForgeTarget(project_id="r3b", project_root=release_forge["door"], owner_repo="vnx-test/release")
+    asked: List[str] = []
+
+    def gh_pr_json(pr_number, field, repo):
+        asked.append(f"{repo}:{field}")
+        return {field: base if field == "baseRefName" else None}
+
+    monkeypatch.setattr(fgp, "resolve_forge_target", lambda _results_dir: target)
+    monkeypatch.setattr(forge_project_target, "resolve_forge_target", lambda _results_dir: target)
+    monkeypatch.setattr(fgp, "_gh_pr_json", gh_pr_json)
+    payload = fgp.publish_review_summary(
+        PR, release_forge["head"], results_dir=store["results"], branch=RELEASE_PR_BRANCH, dry_run=True,
+    )
+    return payload["conclusion"], asked
+
+
+@pytest.mark.parametrize("base, door_says, summary_says", [
+    ("release", "NO-GO", fgp.CONCLUSION_ACTION_REQUIRED),
+    ("main", "GO", fgp.CONCLUSION_SUCCESS),
+])
+def test_ready_and_the_summary_check_read_the_base_the_pr_names(
+    store, release_forge, monkeypatch, base, door_says, summary_says,
+):
+    head = release_forge["head"]
+    _pass(store, "codex_gate", head, RELEASE_PR_BRANCH)
+    gate_obligations.register_obligation(
+        store["state"], dispatch_id=DISPATCH, gate="codex_gate", pr_number=PR, pr_id=PR_ID, branch=RELEASE_PR_BRANCH,
+    )
+
+    door = _door(store, release_forge, RELEASE_PR_BRANCH, head, base_branch=base)
+    ready = _ready(store, release_forge, monkeypatch, base)
+    summary, asked = _summary_check(store, release_forge, monkeypatch, base)
+
+    assert (door["verdict"], ready, summary) == (door_says, door_says, summary_says), door["message"]
+    assert asked[0] == "vnx-test/release:baseRefName"

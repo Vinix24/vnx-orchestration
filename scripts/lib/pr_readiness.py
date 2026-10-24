@@ -414,6 +414,7 @@ def collect_gate_evidence(
     head_sha: str,
     declared: Optional[Sequence[str]] = None,
     checkout: Optional[Path] = None,
+    base_branch: Optional[str] = None,
 ) -> List[GateEvidence]:
     """One entry per required review seat, judged against ``head_sha``.
 
@@ -427,7 +428,8 @@ def collect_gate_evidence(
     obligations plus gates run off the door) decides no seat; it marks which
     seat an obligation declared. The required seats follow the risk class of
     the head as the door reads it (R3b), in ``checkout`` (``None``: the store's
-    own checkout).
+    own checkout) against ``base_branch``, the PR's ``baseRefName`` (``None``:
+    not known, so the class is high).
 
     On top of that it records WHERE the newest record for a seat sits when it
     is not on this head, because "the gate ran, two commits ago" and "the gate
@@ -441,6 +443,7 @@ def collect_gate_evidence(
     try:
         evaluation = evaluate_review_seats(
             str(pr_number), results_dir, branch=branch, head_sha=head_sha, checkout=checkout,
+            base_branch=base_branch,
         )
     except (OSError, ValueError) as exc:
         return [GateEvidence(
@@ -542,5 +545,6 @@ def assess(
         head_sha=head_sha,
         declared=report.declared_gates,
         checkout=project_root,
+        base_branch=facts.get("baseRefName"),
     )
     return report
