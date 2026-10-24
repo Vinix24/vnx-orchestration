@@ -85,13 +85,19 @@ def _write_receipt(receipts_file: Path, dispatch_id: str, event_type: str = "tas
 
 
 def _run_reconcile_cli(tmp_path: Path, *extra: str) -> subprocess.CompletedProcess:
-    """Run scripts/reconcile_queue_state.py with PROJECT_ROOT at ``tmp_path``."""
+    """Run scripts/reconcile_queue_state.py with the project root at ``tmp_path``.
+
+    VNX_PROJECT_ROOT is the override vnx_paths honours, so a plan in ``tmp_path``
+    is exactly where a plan-reading CLI would look for it.
+    """
     state_dir = tmp_path / "state"
     state_dir.mkdir(exist_ok=True)
     env = {
         **os.environ,
         "VNX_HOME": str(_VNX_ROOT),
+        "VNX_PROJECT_ROOT": str(tmp_path),
         "PROJECT_ROOT": str(tmp_path),
+        "VNX_DATA_DIR_GUARD": "off",
         "VNX_DATA_DIR": str(tmp_path / ".vnx-data"),
         "VNX_DATA_DIR_EXPLICIT": "1",
         "VNX_STATE_DIR": str(state_dir),
