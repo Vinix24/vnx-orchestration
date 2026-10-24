@@ -1942,6 +1942,7 @@ def write_result_guarded(
     gate: str,
     pr_ref: str,
     audit_refusal: bool = True,
+    emit_outcome_receipt: bool = True,
 ) -> Tuple[Dict[str, Any], bool]:
     """Write a gate result unless it would downgrade an existing terminal one.
 
@@ -1966,6 +1967,12 @@ def write_result_guarded(
     ``gate_report_generator``
     ``._write_failure_result``                  via this function
     ``gate_artifacts._write_result_record``     via this function
+    ``gate_result_parser``
+    ``.record_claude_github_result``            raises on refusal
+    ``gate_result_parser``
+    ``._validate_and_persist_result``           raises on refusal
+    ``gate_request_handler``
+    ``._persist_claude_github_files``           via this function
     ==========================================  ==========================
 
     A new writer that calls ``write_text`` on a results path instead is
@@ -2002,6 +2009,25 @@ def write_result_guarded(
     by also carrying its own skip-rationale write (with ``commit_sha``,
     since that is where the refusal's head now has to live), never by
     assumption.
+
+    ``emit_outcome_receipt=False`` is the same kind of opt-out on the other
+    axis (GE-3). This function books the outcome receipt
+    (:func:`_emit_terminal_result_receipt`) for a decided verdict that landed,
+    and for most callers that IS the one ``review_gate_result`` receipt of the
+    outcome. Two callers already emit a richer, contract-linked
+    ``review_gate_result`` receipt for the same outcome themselves —
+    ``gate_result_parser.record_claude_github_result``
+    (``_emit_claude_github_receipt``: carries findings, and the head lives only
+    on the contract request, not on the result record this function writes)
+    and ``gate_result_parser._validate_and_persist_result`` via
+    ``record_result`` (``_emit_result_receipt``: advisory/blocking findings,
+    residual risk, required reruns). Routed through this function without the
+    opt-out, one outcome would book two receipts under two idempotency keys —
+    they do not collapse, because the gate-specific emitters book the raw
+    status word while this one books the receipt vocabulary
+    (``pass`` -> ``completed``). Exactly one stays: the gate-specific emitter,
+    because it carries the fields above that this one cannot read off these
+    two records. The default stays ``True``.
     """
     with slot_lock(result_path):
         try:
@@ -2025,7 +2051,8 @@ def write_result_guarded(
     # write that never happened (the same reason record_failure gates its
     # register emit on ``written``, OI-1469/OI-1470).
     publish_forge_check_run(payload, gate=gate, result_path=result_path)
-    _emit_terminal_result_receipt(payload, gate=gate, pr_ref=pr_ref)
+    if emit_outcome_receipt:
+        _emit_terminal_result_receipt(payload, gate=gate, pr_ref=pr_ref)
     _feed_provider_reachability(payload, gate=gate, result_path=result_path)
     return payload, True
 
