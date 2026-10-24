@@ -1776,9 +1776,17 @@ def _emit_terminal_result_receipt(
         value = str(payload.get(key) or "").strip()
         if value:
             fields[key] = value
-    # R1: the head the verdict is about (the round ledger's key), and an applied
-    # --override-b3 with its reason, so the audit copy carries both.
-    fields["head_sha"] = str(payload.get("commit_sha") or "").strip()
+    # R1: the head the verdict is about, and an applied --override-b3 with its
+    # reason, so the audit copy carries both. The head is stamped under both
+    # names: ``commit_sha`` is the field ADR-045 point 4 names and the one the
+    # idempotency key reads (so the same PR on two heads can never dedupe into
+    # one receipt), ``head_sha`` stays as the alias the round ledger reads. A
+    # result that names no head gets neither key — an empty string is not a
+    # commit and must not be booked as one.
+    head_sha = str(payload.get("commit_sha") or "").strip()
+    if head_sha:
+        fields["commit_sha"] = head_sha
+        fields["head_sha"] = head_sha
     if isinstance(payload.get("override_b3"), dict):
         fields["override_b3"] = payload["override_b3"]
     pr_number = payload.get("pr_number")
