@@ -1,9 +1,7 @@
 """Salvage of a dirty dispatch worktree: bundle, patch, tarball, MANIFEST line.
 
 Every test builds a real bare ``origin``, a real main checkout and a real
-``git worktree`` under ``tmp_path`` and runs the real functions. ``salvage``
-must write nothing when it is asked for a dry run, and :func:`verify` must
-name every artifact that does not survive.
+``git worktree`` under ``tmp_path`` and runs the real functions.
 """
 from __future__ import annotations
 
@@ -84,19 +82,17 @@ def test_real_salvage_writes_bundle_patch_tarball_and_manifest(fx: Fixture) -> N
     result = ws.salvage(wt, fx.dest, repo_root=fx.repo, dry_run=False)
 
     assert result.written is True
-    assert result.name == "worktree-one"
-    assert result.branch == "dispatch/one"
-    assert result.head == head
-    assert result.unpushed == 1
+    assert (result.name, result.branch, result.head, result.unpushed) == (
+        "worktree-one", "dispatch/one", head, 1,
+    )
     assert result.artifacts == [
         "worktree-one.bundle", "worktree-one.patch", "worktree-one.untracked.tgz",
     ]
 
     # The bundle carries the local commit; a thin bundle restores by fetch.
-    bundle = fx.dest / "worktree-one.bundle"
     clone = fx.tmp / "clone"
     git(fx.tmp, "clone", "-q", str(fx.origin), str(clone))
-    git(clone, "fetch", "-q", str(bundle), "HEAD")
+    git(clone, "fetch", "-q", str(fx.dest / "worktree-one.bundle"), "HEAD")
     assert git(clone, "rev-parse", "FETCH_HEAD") == head
 
     # The patch applies to a pristine checkout of head.
@@ -146,27 +142,21 @@ def test_dry_run_computes_everything_and_writes_nothing(fx: Fixture) -> None:
     assert not fx.dest.exists()
 
 
-def test_verify_passes_after_salvage_then_names_the_truncated_artifact(fx: Fixture) -> None:
+def test_verify_passes_then_names_empty_and_missing_artifacts(fx: Fixture) -> None:
     wt, _head = fx.dirty_worktree()
     result = ws.salvage(wt, fx.dest, repo_root=fx.repo, dry_run=False)
 
     assert ws.verify(result, fx.dest) == []
 
-    bundle = fx.dest / "worktree-one.bundle"
-    bundle.write_bytes(b"")
+    (fx.dest / "worktree-one.bundle").write_bytes(b"")
     problems = ws.verify(result, fx.dest)
     assert len(problems) == 1
     assert "worktree-one.bundle" in problems[0]
 
-
-def test_verify_names_a_removed_artifact(fx: Fixture) -> None:
-    wt, _head = fx.dirty_worktree()
-    result = ws.salvage(wt, fx.dest, repo_root=fx.repo, dry_run=False)
-
     (fx.dest / "worktree-one.patch").unlink()
     problems = ws.verify(result, fx.dest)
-    assert len(problems) == 1
-    assert "worktree-one.patch" in problems[0]
+    assert len(problems) == 2
+    assert any("worktree-one.patch" in problem for problem in problems)
 
 
 def test_salvage_refuses_a_path_that_is_not_a_git_worktree(fx: Fixture, tmp_path: Path) -> None:
