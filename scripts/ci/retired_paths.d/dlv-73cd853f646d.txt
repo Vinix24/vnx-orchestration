@@ -1,0 +1,8 @@
+# Cluster GE-2a, dispatch dlv-73cd853f646d.
+# Source: claudedocs/2026-10-24-nachtrun-golf-1-3/plannen/gate-engine-consolidation.md,
+# row GE-2a (revisie 2, 24-10-2026): codex_final_gate.py keeps only
+# enforce_codex_gate, its helpers and (until GE-2b) the prompt renderer.
+scripts/codex_final_gate.py::CodexFinalGateReceipt
+scripts/codex_final_gate.py::evaluate_and_record
+scripts/codex_final_gate.py::check_gate_clearance
+scripts/codex_final_gate.py::main
