@@ -61,10 +61,17 @@ Usage::
 
     python3 scripts/cleanup_reviewed_worktrees.py --repo-root DIR
                                                     [--only DISPATCH_ID ...]
-                                                    [--apply] [--json]
+                                                    [--apply] [--json] [--all]
+
+``--all`` prints ``scripts/lib/worktree_inventory.py``'s read-only inventory of
+EVERY worktree git knows about in the repo (dispatch, gate, pool, bench and
+external ones), then exits 0 — it evaluates, locks and releases nothing. It is
+the answer to "the sweep sees only locked dispatch trees, what else is there?";
+the default run is untouched by it. A failed ``git worktree list`` exits 2 with
+git's own stderr and prints no inventory at all.
 
 Exit 0 on a normal run (this is a maintenance report, not a CI gate) unless
-argument/repo resolution itself fails.
+argument/repo resolution or ``--all``'s git call fails.
 """
 
 from __future__ import annotations
@@ -148,58 +155,16 @@ class ReleaseResult:
     errors: list[str] = field(default_factory=list)
 
 
-class WorktreePorcelainRecord(TypedDict, total=False):
-    """One ``git worktree list --porcelain`` block. Every key is optional —
-    presence tracks whether the corresponding line appeared at all."""
-
-    path: str
-    head: str
-    branch: str
-    locked: str
-    detached: bool
-    bare: bool
-    prunable: bool
-
-
-def parse_worktree_list_porcelain(text: str) -> list[WorktreePorcelainRecord]:
-    """Parse ``git worktree list --porcelain`` into one dict per worktree
-    block. Keys present only when the corresponding line was present:
-    ``path``, ``head``, ``branch``, ``locked`` (reason, possibly ""),
-    ``detached`` (bool)."""
-    records: list[WorktreePorcelainRecord] = []
-    current: WorktreePorcelainRecord = {}
-    for line in text.splitlines():
-        if not line.strip():
-            if current:
-                records.append(current)
-                current = {}
-            continue
-        if line.startswith("worktree "):
-            current["path"] = line[len("worktree "):]
-        elif line.startswith("HEAD "):
-            current["head"] = line[len("HEAD "):]
-        elif line.startswith("branch "):
-            current["branch"] = line[len("branch "):]
-        elif line == "detached":
-            current["detached"] = True
-        elif line == "locked":
-            current["locked"] = ""
-        elif line.startswith("locked "):
-            current["locked"] = line[len("locked "):]
-        elif line == "bare":
-            current["bare"] = True
-        elif line == "prunable" or line.startswith("prunable "):
-            current["prunable"] = True
-    if current:
-        records.append(current)
-    return records
-
-
 def discover_locked_dispatch_worktrees(repo_root: Path) -> list[LockedWorktree]:
     """Every ``.vnx-data/worktrees/dispatch-*`` entry that is currently
     ``git worktree lock``-ed with a ``vnx preserve`` reason. Anything locked
     for a DIFFERENT reason (an operator's own manual lock) is left out —
-    this tool only ever acts on locks the engine itself created."""
+    this tool only ever acts on locks the engine itself created.
+
+    The porcelain parser lives in ``worktree_inventory`` so this sweep and the
+    ``--all`` inventory can never read the same output two different ways."""
+    from worktree_inventory import parse_worktree_list_porcelain
+
     proc = run_git(["worktree", "list", "--porcelain"], cwd=repo_root)
     if proc.returncode != 0:
         return []
@@ -258,34 +223,15 @@ def get_repo_slug(repo_root: Path) -> str | None:
     return m.group(1) if m else None
 
 
-def _is_internal_symlink(entry_path: Path, repo_root: Path) -> bool:
-    """An untracked symlink whose target resolves inside ``repo_root`` (such as
-    ``.venv -> <checkout>/.venv``) is a convenience link, not work."""
-    if not entry_path.is_symlink():
-        return False
-    target = Path(os.path.realpath(entry_path))
-    root = Path(os.path.realpath(repo_root))
-    return target == root or root in target.parents
-
-
-def _git_status_bytes(wt_path: Path) -> bytes | None:
-    """Raw ``git status --porcelain -z`` output. No text mode: universal
-    newlines would rewrite a ``\\r`` in a filename and the record would no
-    longer name the file on disk."""
-    try:
-        proc = subprocess.run(
-            ["git", "status", "--porcelain", "-z"],
-            cwd=str(wt_path), capture_output=True, check=False,
-        )
-    except OSError:
-        return None
-    return proc.stdout if proc.returncode == 0 else None
-
-
 def is_worktree_clean(wt_path: Path, repo_root: Path) -> bool:
     """Clean = nothing but untracked internal symlinks. Anything the parser
-    cannot turn into a path counts as dirty: fail toward keeping the work."""
-    raw = _git_status_bytes(wt_path)
+    cannot turn into a path counts as dirty: fail toward keeping the work.
+
+    The status read and the internal-symlink rule live in
+    ``worktree_inventory`` (one implementation shared with ``--all``)."""
+    from worktree_inventory import git_status_bytes, is_internal_symlink
+
+    raw = git_status_bytes(wt_path)
     if raw is None:
         return False
     for record in raw.split(b"\0"):
@@ -299,7 +245,7 @@ def is_worktree_clean(wt_path: Path, repo_root: Path) -> bool:
             name = os.fsdecode(record[3:])
         except (UnicodeError, ValueError):
             return False
-        if not name or not _is_internal_symlink(wt_path / name, repo_root):
+        if not name or not is_internal_symlink(wt_path / name, repo_root):
             return False
     return True
 
@@ -483,12 +429,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--apply", action="store_true", help="release SAFE_TO_RELEASE-worktrees echt (default: dry-run)")
     parser.add_argument("--json", action="store_true", help="schrijf het rapport als JSON naar stdout")
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        dest="show_all",
+        help="print de volledige read-only worktree-inventaris (dispatch, gate, pool, bench) en stop; "
+             "evalueert en released niets",
+    )
     return parser
 
 
 class WorktreeReportEntry(TypedDict):
     """One row of the human/JSON report — always carries every key, unlike
-    :class:`WorktreePorcelainRecord` which is a partial parse."""
+    ``worktree_inventory.WorktreePorcelainRecord`` which is a partial parse."""
 
     dispatch_id: str | None
     path: str
@@ -529,9 +482,48 @@ def read_reject_decisions(repo_root: Path, project_id: str) -> dict[str, dict[st
     return read_outcome_decisions(state_dir / DECISION_LOG_NAME, project_id)
 
 
+def _format_inventory_entry(entry: Any) -> str:
+    """One table row. Unknown evidence prints as ``?`` — never as 0."""
+    state = "MISSING" if entry.missing else ("locked" if entry.locked else "unlocked")
+    dirty = "?" if entry.dirty_count is None else str(entry.dirty_count)
+    unpushed = "?" if entry.unpushed is None else str(entry.unpushed)
+    age = "?" if entry.age_days is None else f"{entry.age_days}d"
+    owner = "owned" if entry.owned else "external"
+    return (
+        f"  [{entry.kind}/{owner}] {state} dirty={dirty} unpushed={unpushed} "
+        f"age={age} {entry.branch or '(detached)'} {entry.path}"
+    )
+
+
+def _print_inventory(repo_root: Path, *, as_json: bool) -> int:
+    """``--all``: print the read-only inventory and stop. Nothing is
+    evaluated, locked or released; a failed git call is exit 2, no stdout."""
+    from worktree_inventory import WorktreeInventoryError, inventory
+
+    try:
+        entries = inventory(repo_root)
+    except WorktreeInventoryError as exc:
+        print(f"cleanup_reviewed_worktrees: {exc}", file=sys.stderr)
+        return 2
+    if as_json:
+        print(json.dumps({"repo_root": str(repo_root), "worktrees": [e.to_dict() for e in entries]}, indent=2))
+        return 0
+    owned = sum(1 for entry in entries if entry.owned)
+    print(
+        f"cleanup_reviewed_worktrees --all: {len(entries)} worktree(s), "
+        f"waarvan {owned} door de fabric beheerd (alleen lezen — niets geëvalueerd of vrijgegeven)"
+    )
+    for entry in entries:
+        print(_format_inventory_entry(entry))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
     repo_root = args.repo_root.resolve()
+
+    if args.show_all:
+        return _print_inventory(repo_root, as_json=args.json)
 
     project_id, refusal = resolve_project_id(repo_root)
     if refusal:
