@@ -3014,11 +3014,12 @@ def _write_all_state_outputs(
     """Write secondary outputs (index, detail, brief, status). All best-effort.
 
     Returns True if any core state-file write failed (caller should mark build degraded).
-    Optional helper modules (build_project_status, build_feature_plan) are not
-    counted as write failures when unavailable — only atomic state-file writes are.
+    The optional helper module (build_project_status) is not counted as a write
+    failure when unavailable — only atomic state-file writes are.
 
-    project_root: project root for FEATURE_PLAN.md resolution (defaults to _PROJECT_ROOT).
-                  Tests pass an isolated tmp path to prevent touching the real file (Error 2).
+    project_root: root whose ``scripts/`` directory holds build_project_status
+                  (defaults to _PROJECT_ROOT). Tests pass an isolated tmp path so
+                  the helper is resolved there instead of the real checkout.
     skip_paths: resolved Path objects to skip (prevents double-writing the primary output
                 when --format brief is used; caller passes {output_path.resolve()}).
     """
@@ -3063,12 +3064,6 @@ def _write_all_state_outputs(
         write_project_status(state_dir)
     except Exception as exc:
         log.debug("build_project_status unavailable or failed (non-critical): %s", exc)
-    # Error 2: derive FEATURE_PLAN.md path from effective_root so tests can isolate it
-    try:
-        from build_feature_plan import write_feature_plan
-        write_feature_plan(effective_root / "FEATURE_PLAN.md", state_dir=state_dir)
-    except Exception as exc:
-        log.debug("build_feature_plan unavailable or failed (non-critical): %s", exc)
     return write_failed
 
 
