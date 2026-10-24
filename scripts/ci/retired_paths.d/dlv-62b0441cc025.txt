@@ -1,0 +1,4 @@
+# C4c (dlv-62b0441cc025)
+# Source: docs/investigations/2026-10-20-golf-1-hermeting.md §7 "C4" (C4c).
+scripts/build_t0_state.py::_build_permission_escalations
+tests/test_build_t0_state.py::TestBuildPermissionEscalations

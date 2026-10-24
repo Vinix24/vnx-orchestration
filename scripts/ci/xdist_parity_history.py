@@ -31,6 +31,32 @@ ancestor (``git merge-base --is-ancestor``). The rule holds only if:
 The two inputs that are a judgment, not a measurement, are flags and never
 guessed here: the last D3 merge commit and the watch-list OIs.
 
+Option A of the cutover rule (operator decision, 2026-10-22): a run whose
+serial reference job failed, or in which either Profile A job received a
+runner shutdown signal, did not measure parity. It is ``not_measurable``: set
+aside from every condition of the window and listed with its reason. Only
+positive evidence sets a run aside: the reference job's conclusion, or the
+verdict's ``reference.job_result``, is exactly ``failure``, or its reference
+result is present with a whole-number exit other than 0. Any other
+conclusion, an unknown or missing job result, and an exit that is missing,
+malformed or not a whole number are no cause and never set a run aside (codex
+round 3 on #2184). A shutdown is proven by the runner's own line in the job
+log (``##[error]The runner has received a shutdown signal``), read per job
+from ``actions/jobs/<id>/logs`` when the check-run annotations do not carry
+that text themselves: GitHub's ``The operation was canceled.`` annotation
+names no cause, and a read that fails is not a shutdown. The annotations are
+read from ``check-runs/<check-run id>/annotations``: the check-runs API is
+keyed by that id, never by the Actions job id, and the job row carries it
+only as the last path segment of its ``check_run_url``. A job row without
+that URL, or with one that does not end in a whole number, has no readable
+annotation list, and a failed annotation read still reads the job log before
+the evidence is called unknown (codex round 4 on #2184). Two things are never
+set aside: a real parity difference (any entry in the verdict's
+``differences``), and an xdist shadow job that is not known to have succeeded
+(the conclusion, or with none the verdict's job result, is exactly
+``success``) without a shutdown of its own: a failed shadow blocks, and an
+unknown one does too.
+
 A light run never counts, whatever its step list says: the light early return
 of the comparison names its skipped steps (OI-2147), and a light run is
 outside the window either way. A profile that is not ``light`` (``heavy``, or
@@ -108,6 +134,20 @@ MAX_SUITE_WALL_S = 15 * 60
 MAIN_BRANCH = "main"
 CLOSED_OI_STATUS = "done"
 OI_ID = re.compile(r"OI-[1-9][0-9]*")
+CHECK_RUN_ID = re.compile(r"[0-9]+")
+
+# Option A of the cutover rule (operator decision, 2026-10-22): a run whose serial
+# reference job failed, or in which either Profile A job received a runner shutdown
+# signal, did not measure parity and is set aside. The two Profile A jobs are named
+# as .github/workflows/vnx-ci.yml names them. A shutdown is proven by the runner's
+# own line in the job log; GitHub's "The operation was canceled." annotation is
+# posted for a timeout and a manual or concurrency cancel too, so it names no cause
+# and is never proof by itself (codex round 2 on #2184).
+NOT_MEASURABLE = "not_measurable"
+PROFILE_A_JOBS = (("reference", "Profile A (doctor + core tests)"),
+                  ("shadow", "Profile A (xdist shadow)"))
+SHUTDOWN_MESSAGE = "the runner has received a shutdown signal"
+SHUTDOWN_LOG_LINE = "##[error]the runner has received a shutdown signal"
 
 
 class ToolError(Exception):
@@ -126,6 +166,25 @@ class Run:
     conclusion: str | None
     verdict: dict | None = None
     verdict_problem: str = ""
+
+
+@dataclass
+class JobEvidence:
+    """What a run's two Profile A jobs say about the run being measurable.
+
+    *conclusions* maps each role (``reference``, ``shadow``) to its job's
+    conclusion, or to None when the job is not in the run or was not read;
+    *shutdowns* names the roles whose job proves a runner shutdown (a shutdown
+    annotation or the runner's own line in the job log). *problem* says why a
+    read that would have answered failed: a read that failed is never a
+    shutdown (fail-closed).
+    """
+    conclusions: dict = field(default_factory=dict)
+    shutdowns: tuple = ()
+    problem: str = ""
+
+    def conclusion(self, role: str) -> str | None:
+        return self.conclusions.get(role)
 
 
 @dataclass
@@ -159,7 +218,108 @@ class Evaluation:
 # --- the rule (pure) ---------------------------------------------------------------------
 
 
-def place_run(run: Run, target_fingerprint: str, is_ancestor) -> Placement:
+def real_difference(verdict: dict) -> bool:
+    """Whether the verdict records any parity difference (option A never sets such a run aside)."""
+    differences = verdict.get("differences") or {}
+    return isinstance(differences, dict) and any(differences.values())
+
+
+def reference_failure_reason(verdict: dict | None, evidence: JobEvidence | None) -> str | None:
+    """Why the serial reference job failed (option A cause (a)); None when no positive evidence says it did.
+
+    Only positive evidence is a cause: a job conclusion of exactly
+    ``failure``, a verdict ``reference.job_result`` of exactly ``failure``, or
+    a present reference result whose exit is a whole number other than 0. The
+    conclusion comes first because it is what GitHub measured, also when the
+    parity job never ran; the verdict's own reference block says the same when
+    the job list could not be read. A cancelled, timed-out or skipped job, any
+    other conclusion or job result, a missing one, and an exit that is None or
+    not a whole number are no evidence of a failure and never a cause (codex
+    round 3 on #2184): missing evidence must not set a run aside. A cancelled
+    job that a runner shutdown cut short is still set aside through cause (b),
+    the shutdown evidence.
+    """
+    conclusion = evidence.conclusion("reference") if evidence is not None else None
+    if conclusion == "failure":
+        return "the serial reference job concluded failure"
+    if verdict is None:
+        return None
+    reference = verdict["reference"]
+    if reference.get("job_result") == "failure":
+        return "the serial reference job failed (reference.job=failure)"
+    if reference.get("result") == "present":
+        exit_code = whole_number(reference.get("exit"))
+        if exit_code is not None and exit_code != 0:
+            return f"the serial reference suite exited {reference.get('exit')}"
+    return None
+
+
+def shutdown_reason(evidence: JobEvidence | None) -> str | None:
+    """Why a Profile A job is no measurement because its runner was shut down (option A cause (b))."""
+    roles = list(evidence.shutdowns) if evidence is not None else []
+    if not roles:
+        return None
+    names = [f"the {'xdist shadow' if role == 'shadow' else 'serial Profile A'} job" for role in roles]
+    return f"a runner shutdown signal in {' and '.join(names)}"
+
+
+def shadow_job_failed(verdict: dict | None, evidence: JobEvidence | None) -> bool:
+    """Whether the xdist shadow job is not known to have succeeded; any doubt keeps the run dirty.
+
+    A shadow job that a shutdown cut short only lets a run be set aside
+    through its own proven shutdown (cause (b)); this predicate is what keeps
+    it dirty otherwise. Positive evidence of success is a job conclusion of
+    exactly ``success``, or, with no conclusion read, a verdict
+    ``shadow.job_result`` of exactly ``success``. Missing evidence is not
+    success (codex round 3 on #2184): an unknown conclusion with no verdict,
+    an unknown job result, and any other value keep the run dirty just as a
+    failed shadow does.
+    """
+    conclusion = evidence.conclusion("shadow") if evidence is not None else None
+    if conclusion == "success":
+        return False
+    if conclusion is not None:
+        return True
+    if verdict is None:
+        return True
+    return verdict["shadow"].get("job_result") != "success"
+
+
+def not_measurable_reason(run: Run, evidence: JobEvidence | None) -> str | None:
+    """Why *run* is set aside as not a measurement (option A, operator 2026-10-22); None when it counts or blocks.
+
+    A run is set aside only when the serial reference job failed on positive
+    evidence or a Profile A job received a runner shutdown signal, and only
+    when neither a real parity difference nor a shadow job that is not known to
+    have succeeded without a shutdown of its own keeps it dirty: never more
+    than those two causes, and never a real difference. Missing or malformed
+    evidence is neither a cause nor a reason to leave a run set aside.
+    """
+    verdict = run.verdict if evidence_gap(run) is None else None
+    if verdict is not None and not run_blockers(run):
+        return None
+    if verdict is not None and real_difference(verdict):
+        return None
+    causes = [why for why in (reference_failure_reason(verdict, evidence), shutdown_reason(evidence)) if why]
+    if not causes:
+        return None
+    shadow_shutdown = evidence is not None and "shadow" in evidence.shutdowns
+    if shadow_job_failed(verdict, evidence) and not shadow_shutdown:
+        return None
+    return "; ".join(causes)
+
+
+def evidence_note(evidence: JobEvidence | None) -> str | None:
+    """The read failure to show beside a run, if any; never a cause."""
+    return f"evidence: {evidence.problem}" if evidence is not None and evidence.problem else None
+
+
+def _with_note(reason: str, evidence: JobEvidence | None) -> str:
+    note = evidence_note(evidence)
+    return f"{reason}; {note}" if note else reason
+
+
+def place_run(run: Run, target_fingerprint: str, is_ancestor, job_evidence=None) -> Placement:
     """Where one run stands relative to the window; *is_ancestor(head)* is True, False or None.
 
     A run without a current verdict (still running, none, one that does not
@@ -175,10 +335,15 @@ def place_run(run: Run, target_fingerprint: str, is_ancestor) -> Placement:
     selection; when its head descends from the window base it is
     ``unplaceable`` and blocks, so a broken run is never read as another
     selection.
+
+    A run that is not clean may instead be ``not_measurable`` (option A) when
+    *job_evidence* names a failed serial reference job or a runner shutdown in
+    a Profile A job and nothing keeps it dirty. A run that is clean never
+    reads the job evidence: it counts as it is.
     """
     gap = evidence_gap(run)
     if gap is not None:
-        return _place_on_ancestry(run, *gap, is_ancestor)
+        return _place_on_ancestry(run, *gap, is_ancestor=is_ancestor, job_evidence=job_evidence)
     verdict = run.verdict
     if verdict["profile"] == "light":
         return Placement(run, "light")
@@ -190,9 +355,18 @@ def place_run(run: Run, target_fingerprint: str, is_ancestor) -> Placement:
         return Placement(run, "ancestry_unknown", [f"head {run.head_sha} cannot be found"])
     if not descends:
         return Placement(run, "before_window")
+    reasons = run_blockers(run)
+    if reasons or fingerprint is None:
+        readable = job_evidence(run) if job_evidence is not None and not real_difference(verdict) else None
+        set_aside = not_measurable_reason(run, readable)
+        if set_aside is not None:
+            return Placement(run, NOT_MEASURABLE, [_with_note(set_aside, readable)])
+        note = evidence_note(readable)
+        if note:
+            reasons = reasons + [note]
     if fingerprint is None:
         return Placement(run, "unplaceable", [f"no selection fingerprint, exit {verdict['exit']}{_difference_note(verdict)}"])
-    return Placement(run, "in_window", run_blockers(run))
+    return Placement(run, "in_window", reasons)
 
 
 def evidence_gap(run: Run) -> tuple | None:
@@ -210,13 +384,18 @@ def evidence_gap(run: Run) -> tuple | None:
     return None
 
 
-def _place_on_ancestry(run: Run, place: str, reason: str, is_ancestor) -> Placement:
+def _place_on_ancestry(run: Run, place: str, reason: str, is_ancestor, job_evidence=None) -> Placement:
     """Ancestry is the one exclusion that does not come from the verdict."""
     descends = is_ancestor(run.head_sha)
     if descends is None:
         return Placement(run, "ancestry_unknown", [f"head {run.head_sha} cannot be found", reason])
     if not descends:
         return Placement(run, "before_window", [reason])
+    if place != "pending" and job_evidence is not None:
+        evidence = job_evidence(run)
+        set_aside = not_measurable_reason(run, evidence)
+        if set_aside is not None:
+            return Placement(run, NOT_MEASURABLE, [_with_note(set_aside, evidence)])
     return Placement(run, place, [reason])
 
 
@@ -399,9 +578,10 @@ def watch_list_condition(watch_list: list | None, oi_status: dict | None) -> Con
                      f"not closed: {', '.join(open_ones)}" if open_ones else f"closed: {', '.join(watch_list)}")
 
 
-def evaluate(runs: list, *, target_fingerprint: str, is_ancestor, watch_list, oi_status, list_truncated: bool) -> Evaluation:
+def evaluate(runs: list, *, target_fingerprint: str, is_ancestor, watch_list, oi_status, list_truncated: bool,
+             job_evidence=None) -> Evaluation:
     """Apply the cutover rule to *runs* (newest first or in any order)."""
-    placements = [place_run(run, target_fingerprint, is_ancestor) for run in runs]
+    placements = [place_run(run, target_fingerprint, is_ancestor, job_evidence) for run in runs]
     window = [p.run for p in placements if p.place == "in_window"]
     conditions = [Condition("run_list_complete", not list_truncated,
                             "the run list may be cut off: raise --limit" if list_truncated else "every run since the window base listed")]
@@ -426,6 +606,10 @@ def render(evaluation: Evaluation, header: dict) -> str:
     ]
     for p in evaluation.placements:
         lines.append(_row(p))
+    set_aside = [p for p in evaluation.placements if p.place == NOT_MEASURABLE]
+    if set_aside:
+        lines += ["", "set aside (not measurable, option A):"]
+        lines += [f"  run {p.run.run_id}: {', '.join(p.reasons)}" for p in set_aside]
     lines += ["", "conditions:"]
     for c in evaluation.conditions:
         lines.append(f"  [{'ok' if c.holds else 'x'}] {c.name}: {c.detail}")
@@ -481,6 +665,14 @@ def _run(cmd: list, cwd: Path | None = None) -> subprocess.CompletedProcess:
         return subprocess.run(cmd, cwd=str(cwd) if cwd else None, capture_output=True, text=True)
     except FileNotFoundError as exc:
         raise ToolError(f"{cmd[0]} is not installed: {exc}") from exc
+
+
+def _gh_text(args: list) -> str:
+    """gh's plain-text output of *args*; ToolError when gh fails (an expired job log is such a failure)."""
+    proc = _run(["gh", *args])
+    if proc.returncode != 0:
+        raise ToolError(f"gh {' '.join(args)}: {_last_line(proc.stderr)}")
+    return proc.stdout
 
 
 def _gh_json(args: list, shape: type):
@@ -612,6 +804,198 @@ def _read_verdict(path: Path) -> dict | None:
     except (OSError, ValueError):
         return None
     return verdict if isinstance(verdict, dict) else None
+
+
+def _read_json(path: Path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _write_json(path: Path, document) -> None:
+    """Cache *document* at *path* atomically; a cache that cannot be written stays uncached."""
+    temporary = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}-")
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(document, handle)
+        os.replace(temporary, path)
+        temporary = None
+    except OSError:
+        return
+    finally:
+        if temporary is not None:
+            Path(temporary).unlink(missing_ok=True)
+
+
+def is_shutdown_annotation(message: str) -> bool:
+    """Whether *message* is a check-run annotation that names a runner shutdown itself.
+
+    Only the shutdown text counts. GitHub posts ``The operation was canceled.``
+    both for a shutdown and for a timeout, a manual cancel and a concurrency
+    cancel; that annotation names no cause, so it never proves a shutdown and
+    read_job_evidence falls through to the job log (codex round 2 on #2184).
+    """
+    return SHUTDOWN_MESSAGE in message.lower()
+
+
+def is_shutdown_log(log: str) -> bool:
+    """Whether *log* carries the runner's own shutdown line; nothing else in a job log announces one."""
+    return any(SHUTDOWN_LOG_LINE in line.lower() for line in log.splitlines())
+
+
+def profile_a_jobs(payload: dict) -> dict | None:
+    """The two Profile A jobs of a run's job list, by role; None when the payload cannot be read.
+
+    Each job keeps its ``check_run_url`` beside its id: the check-run
+    annotations are keyed by the check-run id, which the job row carries only
+    in that URL (codex round 4 on #2184). It stays None when the row names no
+    URL; the annotation read turns that into a problem.
+    """
+    rows = payload.get("jobs")
+    if not isinstance(rows, list):
+        return None
+    jobs = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            return None
+        role = next((role for role, name in PROFILE_A_JOBS if row.get("name") == name), None)
+        if role is None:
+            continue
+        job_id = whole_number(row.get("id"))
+        if job_id is None:
+            return None
+        jobs[role] = {"id": job_id, "conclusion": row.get("conclusion"), "check_run_url": row.get("check_run_url")}
+    return jobs
+
+
+def _cached_jobs(repo: str, run: Run, cache: Path) -> dict | None:
+    """The two Profile A jobs of *run* (cached per attempt, ``check_run_url`` included); None when gh cannot answer."""
+    path = cache / run.run_id / f"jobs-{run.attempt}.json"
+    cached = _read_json(path)
+    if isinstance(cached, dict) and all(isinstance(job, dict) for job in cached.values()):
+        return cached
+    try:
+        payload = _gh_json(["api", f"repos/{repo}/actions/runs/{run.run_id}/jobs?per_page=100"], dict)
+    except ToolError:
+        return None
+    jobs = profile_a_jobs(payload)
+    if jobs is None:
+        return None
+    _write_json(path, jobs)
+    return jobs
+
+
+def _check_run_id(url) -> int | None:
+    """The whole number at the end of *url*'s path, the check-run id; None when *url* names none."""
+    segment = url.rsplit("/", 1)[-1] if isinstance(url, str) else ""
+    return int(segment) if CHECK_RUN_ID.fullmatch(segment) else None
+
+
+def _cached_annotations(repo: str, run: Run, job: dict, cache: Path) -> tuple:
+    """``(messages, problem)`` of *job*'s check-run annotations; a failed read writes no cache entry.
+
+    The check-runs API is keyed by the check-run id, not by the Actions job
+    id: the job row carries that id only as the last path segment of its
+    ``check_run_url`` (codex round 4 on #2184). A job row without the URL, or
+    with one that does not end in a whole number, has no annotation list to
+    read: the answer is a problem (``no check-run id in check_run_url``),
+    never an empty list and never a shutdown, and read_job_evidence still
+    reads the job log. The cache file is keyed by the check-run id too.
+    """
+    check_run = _check_run_id(job.get("check_run_url"))
+    if check_run is None:
+        return [], "no check-run id in check_run_url"
+    path = cache / run.run_id / f"annotations-{check_run}.json"
+    cached = _read_json(path)
+    if isinstance(cached, list) and all(isinstance(message, str) for message in cached):
+        return cached, ""
+    try:
+        payload = _gh_json(["api", f"repos/{repo}/check-runs/{check_run}/annotations"], list)
+    except ToolError as exc:
+        return [], str(exc)
+    messages = [row["message"] for row in payload if isinstance(row, dict) and isinstance(row.get("message"), str)]
+    _write_json(path, messages)
+    return messages, ""
+
+
+def _cached_shutdown(repo: str, run: Run, job: dict, cache: Path) -> tuple:
+    """``(shutdown, problem)`` from *job*'s log; the boolean is cached, the log body never is.
+
+    *shutdown* is True only when a line of the log carries the runner's own
+    shutdown line. A fetch that fails, or an expired log, writes no cache entry:
+    the answer stays unknown, which is never a shutdown (fail-closed).
+    """
+    path = cache / run.run_id / f"shutdown-{job['id']}.json"
+    cached = _read_json(path)
+    if isinstance(cached, dict) and isinstance(cached.get("shutdown"), bool):
+        return cached["shutdown"], ""
+    try:
+        log = _gh_text(["api", f"repos/{repo}/actions/jobs/{job['id']}/logs"])
+    except ToolError as exc:
+        return False, str(exc)
+    shutdown = is_shutdown_log(log)
+    _write_json(path, {"shutdown": shutdown})
+    return shutdown, ""
+
+
+def read_job_evidence(repo: str, run: Run, cache: Path) -> JobEvidence:
+    """The two Profile A jobs' conclusions and proven runner shutdowns; a failed read leaves *problem*, never a shutdown.
+
+    Evidence is read only for a job that did not succeed: a job that ran to
+    success had no shutdown. The job's check-run annotations come first,
+    queried with the check-run id of its ``check_run_url`` (the check-runs API
+    is not keyed by the Actions job id), and only one that carries the
+    shutdown text itself counts. GitHub's ``The operation was canceled.``
+    names no cause, so a job whose annotations prove nothing has its own log
+    read (``actions/jobs/<id>/logs``, one job, not the run archive): only a
+    line carrying ``##[error]The runner has received a shutdown signal``
+    makes it a shutdown. A failed annotation read is a problem, and the log
+    is still read, because the log is the evidence the annotations are not
+    (codex round 4 on #2184); when both reads fail the problem names both.
+    Both answers are cached per job, the log body never is; a read that fails
+    is never a shutdown.
+    """
+    jobs = _cached_jobs(repo, run, cache)
+    if jobs is None:
+        return JobEvidence(problem="the run's jobs could not be read")
+    evidence = JobEvidence()
+    problems = []
+    for role, name in PROFILE_A_JOBS:
+        job = jobs.get(role)
+        if job is None:
+            problems.append(f"no job {name!r} in the run")
+            continue
+        evidence.conclusions[role] = job.get("conclusion")
+        if job.get("conclusion") in (None, "success", "skipped"):
+            continue
+        messages, problem = _cached_annotations(repo, run, job, cache)
+        if problem:
+            problems.append(f"{role} job annotations: {problem}")
+        elif any(is_shutdown_annotation(message) for message in messages):
+            evidence.shutdowns += (role,)
+            continue
+        shutdown, problem = _cached_shutdown(repo, run, job, cache)
+        if problem:
+            problems.append(f"{role} job log: {problem}")
+        elif shutdown:
+            evidence.shutdowns += (role,)
+    evidence.problem = "; ".join(problems)
+    return evidence
+
+
+def job_evidence_provider(repo: str, cache: Path):
+    """A memoised *run* -> JobEvidence reader for one evaluation; it never raises on a read that fails."""
+    memo = {}
+
+    def provide(run: Run) -> JobEvidence:
+        if run.run_id not in memo:
+            memo[run.run_id] = read_job_evidence(repo, run, cache)
+        return memo[run.run_id]
+
+    return provide
 
 
 SHALLOW_HISTORY = (
@@ -828,15 +1212,16 @@ def main(argv=None) -> int:
         with tempfile.TemporaryDirectory(prefix="xdist-parity-verdicts-") as tmp:
             cache = Path(args.cache_dir) if args.cache_dir else Path(tmp)
             runs, truncated = _collect(header, args, repo_root, cache)
-        # The rule asks git for each run's ancestry: a git that fails there is a tool error too.
-        evaluation = evaluate(
-            runs,
-            target_fingerprint=header["fingerprint"],
-            is_ancestor=lambda head: git_is_ancestor(repo_root, header["window_base"], head),
-            watch_list=watch_list,
-            oi_status=oi_status,
-            list_truncated=truncated,
-        )
+            # The rule asks git for each run's ancestry: a git that fails there is a tool error too.
+            evaluation = evaluate(
+                runs,
+                target_fingerprint=header["fingerprint"],
+                is_ancestor=lambda head: git_is_ancestor(repo_root, header["window_base"], head),
+                watch_list=watch_list,
+                oi_status=oi_status,
+                list_truncated=truncated,
+                job_evidence=job_evidence_provider(header["repo"], cache),
+            )
     except (ToolError, OSError, RuntimeError) as exc:
         print(f"xdist_parity_history: {exc}", file=sys.stderr)
         return 2

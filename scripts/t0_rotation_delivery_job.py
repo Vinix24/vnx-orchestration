@@ -12,8 +12,9 @@ this job may close. One job, in this order:
      touched (ADR-005). A refused or hung append leaves both windows open and says so in both;
   3. write ``delivery.json`` (atomic);
   4. ``confirmed``: hand over the /goal follow-up when ``goal.txt`` exists (the spawner's
-     ``--goal-followup`` mode, waited for), and only then close the old window, while the new
-     window still exists.
+     ``--goal-followup`` mode, waited for, given the transcript of step 1: it reads the end of the
+     kickoff turn and the arrival of /goal there), and only then close the old window, while the
+     new window still exists.
      ``mismatch`` / ``timeout``: type nothing, close nothing, name the outcome in both windows.
 """
 from __future__ import annotations
@@ -81,12 +82,14 @@ def _close_decision(outcome: str, tmux: str, new_window: str) -> str:
     return "closing" if window_exists(tmux, new_window) else "skipped_new_window_gone"
 
 
-def _goal_followup(args: argparse.Namespace) -> int:
-    """The /goal follow-up of the spawner, run to its end. Its own outcome is booked and spoken
-    by the follow-up itself; the old window closes after it either way."""
+def _goal_followup(args: argparse.Namespace, transcript: Path) -> int:
+    """The /goal follow-up of the spawner, run to its end, on the transcript the delivery check
+    read. Its own outcome is booked and spoken by the follow-up itself; the old window closes
+    after it either way."""
     done = subprocess.run(
         ["bash", args.followup_script, "--goal-followup", "--target", args.new_window,
-         "--goal-file", args.goal_file, "--event-file", args.goal_file],
+         "--goal-file", args.goal_file, "--event-file", args.goal_file,
+         "--transcript", str(transcript)],
         check=False)
     return done.returncode
 
@@ -116,8 +119,8 @@ def run_job(args: argparse.Namespace) -> int:
         _say(args.tmux, both, f"VNX t0-rotate: first message NOT confirmed ({outcome}); both "
                               f"windows stay open, nothing was typed, see {run_dir / DELIVERY_FILE}")
         return 1
-    if args.goal_file and Path(args.goal_file).is_file():
-        _goal_followup(args)
+    if transcript and args.goal_file and Path(args.goal_file).is_file():
+        _goal_followup(args, transcript)
     if close == "closing" and window_exists(args.tmux, args.new_window):
         _tmux(args.tmux, "kill-window", "-t", args.old_window)
     return 0

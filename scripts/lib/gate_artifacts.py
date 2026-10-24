@@ -539,10 +539,19 @@ def _write_result_record(
     return None
 
 
-def _stamp_harness_lane_run(
+def _stamp_run_settings(
     result_payload: Dict[str, Any], request_payload: Dict[str, Any], gate: str,
 ) -> None:
-    """Stamp a harness-lane gate's run fields from its request onto its result.
+    """Stamp the settings a run was launched with from its request onto its result.
+
+    OI-2288: a codex_gate run carries ``codex_launch``, the model and the
+    reasoning effort ``gate_runner._build_gate_cmd`` launched codex with. Both
+    land on the record, ``reasoning_effort`` next to ``model``, so the audit
+    trail and an A/B measurement of the effort can read which run used which.
+    The request names them under their own key because ``model`` on a codex
+    request is an input to the next launch. ``gate_recorder.stamp_codex_launch``
+    copies them, the same call ``gate_recorder.record_failure`` makes, so a
+    run that timed out, stalled or was refused as degenerate carries them too.
 
     OI-1725: a harness-lane gate result must carry its provider/model, exactly
     like the standalone glm_gate.py/kimi_gate.py write path (the correct
@@ -553,8 +562,9 @@ def _stamp_harness_lane_run(
 
     OI-2066: so does ``timeout_seconds``, the lane deadline the runner applied
     (``gate_recorder.record_failure`` stamps the same field on a failure).
-    Any other gate is left untouched.
+    A gate that is not a harness lane gets none of these three fields.
     """
+    gate_recorder.stamp_codex_launch(result_payload, request_payload)
     provider_info = gate_recorder.resolve_gate_provider(gate)
     if provider_info is None or provider_info[0] != gate_recorder.GATE_PROVIDER_HARNESS_LANE:
         return
@@ -830,7 +840,7 @@ def materialize_artifacts(
     gate_recorder.stamp_request_identity(result_payload, request_payload)
     if real_dispatch_id:
         result_payload["dispatch_id"] = real_dispatch_id
-    _stamp_harness_lane_run(result_payload, request_payload, gate)
+    _stamp_run_settings(result_payload, request_payload, gate)
     _stamp_verdict_source(result_payload, raw_verdict, recovery)
 
     if (write_err := _write_result_record(results_dir, gate, pr_number, pr_id, result_payload, report_file)):

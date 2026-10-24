@@ -35,6 +35,7 @@ from providers import provider_registry
 import gate_artifacts as _art
 import provider_switch
 import vertex_ai_runner as _vtx
+from claude_gate_lane import CLAUDE_LANE_PROVIDER
 from gate_worktree import (
     create_gate_worktree,
     remove_gate_worktree,
@@ -56,6 +57,7 @@ from gate_lane_contract import (  # C6 step 3: one source, three readers
     harness_dispatcher_timeouts as _harness_lane_dispatcher_timeouts,
     lane_deadline_detail,
     max_diff_chars as _harness_lane_max_diff_chars,
+    reviews_with_tools as _harness_lane_reviews_with_tools,
 )
 
 log = logging.getLogger(__name__)
@@ -117,6 +119,39 @@ _HARNESS_LANE_ISOLATION_NOTICE = (
 
 # The consumer name the runner's provider-switch decisions carry (provider-schakelaar C).
 _SWITCH_CONSUMER = "gate_runner"
+
+# OI-2288: the codex review seat passed a model but no reasoning effort, so
+# model_reasoning_effort from the operator's ~/.codex/config.toml (xhigh)
+# decided every review, while the model's own default is medium. The effort is
+# now always passed: VNX_CODEX_REVIEW_EFFORT when set, else per risk class.
+CODEX_REVIEW_EFFORT_ENV = "VNX_CODEX_REVIEW_EFFORT"
+CODEX_REVIEW_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+_HIGH_EFFORT_RISK_CLASSES = frozenset({"high", "critical"})
+
+
+class CodexReviewEffortError(ValueError):
+    """``VNX_CODEX_REVIEW_EFFORT`` holds a value codex has no effort for (OI-2288)."""
+
+
+def resolve_codex_review_effort(risk_class: Optional[str]) -> str:
+    """The reasoning effort a codex_gate review is launched with (OI-2288).
+
+    ``VNX_CODEX_REVIEW_EFFORT`` wins when it is set and not empty; empty means
+    "per risk class", the registered default. Otherwise risk ``high`` or
+    ``critical`` gives ``high`` and every other value, none included, gives
+    ``medium``. A set value outside ``CODEX_REVIEW_EFFORTS`` raises
+    ``CodexReviewEffortError`` naming the variable and the value: a typo must
+    not fall back to some effort without anyone seeing it.
+    """
+    configured = (os.environ.get(CODEX_REVIEW_EFFORT_ENV) or "").strip()
+    if configured:
+        if configured not in CODEX_REVIEW_EFFORTS:
+            raise CodexReviewEffortError(
+                f"{CODEX_REVIEW_EFFORT_ENV}={configured!r} is not a codex reasoning effort; "
+                f"allowed: {', '.join(CODEX_REVIEW_EFFORTS)}, or empty for per risk class"
+            )
+        return configured
+    return "high" if (risk_class or "").strip().lower() in _HIGH_EFFORT_RISK_CLASSES else "medium"
 
 # The dispatcher (plan_gate_panel._make_default_dispatcher) reports a provider_dispatch
 # run that left no report as ``no report for <id> (rc=<exit code>)``. For that RuntimeError the
@@ -293,6 +328,7 @@ def _harness_lane_prompt_diff_chars(request_payload: Dict[str, Any], prompt: str
 
 def _build_harness_lane_dispatcher(
     gate: str, data_dir: Path, base_ref: str, request_payload: Dict[str, Any], prompt: str,
+    *, project_root: Optional[Path] = None,
 ):
     """Build the governed dispatcher with a deadline that fits the diff (OI-2066).
 
@@ -308,15 +344,29 @@ def _build_harness_lane_dispatcher(
     The applied deadline is stamped on the request as ``timeout_seconds``; the
     success writer (``gate_artifacts.materialize_artifacts``) and the failure
     writer (``gate_recorder.record_failure``) both carry it onto the result.
-    """
-    # Lazy import: plan_gate_panel pulls in the whole governed dispatch
-    # graph, and only the harness-lane path needs it.
-    from plan_gate_panel import _make_default_dispatcher
 
+    A gate registered on the ``claude`` lane (``claude_gate``, R7) gets
+    ``claude_gate_lane``'s dispatcher, on the subscription, in a worktree
+    allocated in ``project_root`` (``None``: the consumer project root).
+    """
     timeouts = _harness_lane_dispatcher_timeouts(
         gate, _harness_lane_prompt_diff_chars(request_payload, prompt),
     )
     request_payload["timeout_seconds"] = timeouts["total_deadline_seconds"]
+    if _rec.resolve_gate_provider(gate) == (_rec.GATE_PROVIDER_HARNESS_LANE, CLAUDE_LANE_PROVIDER):
+        # R7: the claude seat never goes through provider_dispatch, which refuses
+        # claude. Same call shape, the lane's own deadline; no outer process.
+        # Looked up on the module at call time, like plan_gate_panel's below.
+        import claude_gate_lane
+
+        return claude_gate_lane.make_claude_gate_dispatcher(
+            data_dir, base_ref=base_ref,
+            total_deadline_seconds=timeouts["total_deadline_seconds"], project_root=project_root,
+        )
+    # Lazy import: plan_gate_panel pulls in the whole governed dispatch
+    # graph, and only the harness-lane path needs it.
+    from plan_gate_panel import _make_default_dispatcher
+
     return _make_default_dispatcher(
         str(data_dir), timeouts["timeout_seconds"], role="review-gate", base_ref=base_ref,
         total_deadline_seconds=timeouts["total_deadline_seconds"],
@@ -556,6 +606,20 @@ def _codex_model_refusal(
     return f"{sentence} | requested model: {requested} | codex binary: {os.path.realpath(binary_path)}"
 
 
+def _unlaunched_codex_result(reason: str, exc: Exception) -> Dict[str, Any]:
+    """The run result of a codex gate that was never launched (OI-2062, OI-2288).
+
+    ``reason`` is in ``gate_recorder.EXECUTION_FAILURE_REASONS``, so the run
+    books ``unavailable``: the PR was not reviewed, it was not rejected.
+    """
+    return {
+        "status": "failed", "reason": reason,
+        "reason_detail": str(exc), "stdout": "", "stderr": str(exc),
+        "duration_seconds": 0.0, "partial_output_lines": 0,
+        "runner_pid": os.getpid(),
+    }
+
+
 def _build_reason_detail(base_detail: str, stdout: str, stderr: str) -> str:
     """Attach diagnostic evidence to a failure reason instead of discarding it (OI-1293).
 
@@ -782,7 +846,7 @@ class GateRunner:
             prompt = self._build_gemini_prompt(request_payload)
         elif not prompt and gate == "codex_gate":
             prompt = self._build_codex_prompt(request_payload)
-        elif not prompt and gate in ("glm_gate", "kimi_gate", "deepseek_gate"):
+        elif not prompt and gate in ("glm_gate", "kimi_gate", "deepseek_gate", "claude_gate"):
             prompt = self._build_harness_lane_prompt(gate, request_payload)
         if (
             using_vertex
@@ -801,7 +865,13 @@ class GateRunner:
         self, gate: str, request_payload: Dict[str, Any], *,
         pr_number: Optional[int], pr_id: str,
     ) -> None:
-        """GATE-3: Mark request as executing and persist to disk."""
+        """GATE-3: Mark request as executing and persist to disk.
+
+        A request booked ``unavailable`` can run again. The codex launch record
+        of the run before (OI-2288) is dropped here, so a run that never
+        launches codex does not carry that model and effort as its own.
+        """
+        request_payload.pop("codex_launch", None)
         request_payload["status"] = "executing"
         request_payload["started_at"] = utc_now_iso()
         request_payload["runner_pid"] = os.getpid()
@@ -861,12 +931,10 @@ class GateRunner:
         except provider_registry.CodexModelResolutionError as exc:
             # The gate never started: no model to launch it with (OI-2062). Booked
             # like a missing binary, so the request ends terminal, never `executing`.
-            result = {
-                "status": "failed", "reason": "codex_model_unresolved",
-                "reason_detail": str(exc), "stdout": "", "stderr": str(exc),
-                "duration_seconds": 0.0, "partial_output_lines": 0,
-                "runner_pid": os.getpid(),
-            }
+            result = _unlaunched_codex_result("codex_model_unresolved", exc)
+        except CodexReviewEffortError as exc:
+            # Same shape for an effort codex cannot be launched with (OI-2288).
+            result = _unlaunched_codex_result("codex_review_effort_invalid", exc)
         finally:
             remove_gate_worktree(worktree_path, project_root=self._project_root)
 
@@ -1006,7 +1074,7 @@ class GateRunner:
         report_text = ""
         try:
             dispatcher = _build_harness_lane_dispatcher(
-                gate, data_dir, base_ref, request_payload, prompt,
+                gate, data_dir, base_ref, request_payload, prompt, project_root=self._project_root,
             )
             report_text = dispatcher(provider, model, prompt, dispatch_id)
             # OI-2066: a report that SAYS the lane's own deadline stopped the
@@ -1226,6 +1294,9 @@ class GateRunner:
         verdict (``gate_artifacts.materialize_artifacts`` does), so the scan's
         findings reach the reviewer through the prompt rather than by being
         merged into a result record.
+
+        R12: codex reviews with tools in the gate worktree of the PR head, so
+        the prompt carries the working-directory rule (``agentic=True``).
         """
         branch = request_payload.get("branch", "")
         risk = (request_payload.get("risk_class") or "medium")
@@ -1239,6 +1310,7 @@ class GateRunner:
             diff_text=diff_content,
             verdict_contract=_REVIEWER_VERDICT_TEMPLATE,
             max_chars=0,
+            agentic=True,
             instruction=(
                 f"Review the PR diff in the untrusted-data block, on branch {branch} "
                 f"(risk: {risk}). "
@@ -1265,6 +1337,10 @@ class GateRunner:
         change and stay verbatim copies after it — the reviewer instruction is
         identical on purpose, so the two gates review the same PR under the
         same contract.
+
+        One difference since R12: this builder also serves the vertex route, a
+        single REST call with no tools and no checkout, so it passes
+        ``agentic=False`` and the prompt carries no working-directory rule.
         """
         branch = request_payload.get("branch", "")
         risk = (request_payload.get("risk_class") or "medium")
@@ -1278,6 +1354,7 @@ class GateRunner:
             diff_text=diff_content,
             verdict_contract=_REVIEWER_VERDICT_TEMPLATE,
             max_chars=0,
+            agentic=False,
             instruction=(
                 f"Review the PR diff in the untrusted-data block, on branch {branch} "
                 f"(risk: {risk}). "
@@ -1305,6 +1382,10 @@ class GateRunner:
         prompt is what the governed dispatcher hands to the lane, so a
         harness-lane run must not silently diverge from the same gate run
         directly through its own script.
+
+        R12: ``agentic`` is ``gate_lane_contract.reviews_with_tools(gate)``,
+        the same fact the standalone scripts read: deepseek_gate gets the
+        working-directory rule, the single-shot glm_gate and kimi_gate do not.
         """
         pr_number = request_payload.get("pr_number")
         diff_content = GateRunner._fetch_gh_pr_diff(pr_number)
@@ -1321,6 +1402,7 @@ class GateRunner:
             diff_text=diff_content,
             verdict_contract=_HARNESS_LANE_VERDICT_CONTRACT,
             max_chars=diff_cap,
+            agentic=_harness_lane_reviews_with_tools(gate),
             instruction=instruction,
         )
 
@@ -1342,7 +1424,13 @@ class GateRunner:
                 or os.environ.get("VNX_CODEX_MODEL")
                 or request_payload.get("model"),
             )
-            cli_args = cli_args + ["-c", f'model="{model}"']
+            # OI-2288: the effort too, so config.toml decides neither. Stamped on
+            # the request under its own key, never under "model": that key is an
+            # input above, and a re-run would read this run's model as a pin.
+            # gate_artifacts copies both onto the result record.
+            effort = resolve_codex_review_effort(request_payload.get("risk_class"))
+            cli_args = cli_args + ["-c", f'model="{model}"', "-c", f'model_reasoning_effort="{effort}"']
+            request_payload["codex_launch"] = {"model": model, "reasoning_effort": effort}
         return [binary] + cli_args
 
     def _drain_remaining(self, fd_map: Dict[int, str], raw_fds: List[int],

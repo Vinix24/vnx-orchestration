@@ -95,9 +95,67 @@ def test_parse_list_refuses_duplicates() -> None:
         check.parse_list("scripts/foo.py\nscripts/foo.py  # again\n")
 
 
-def test_shipped_list_parses() -> None:
-    entries = check.parse_list((VNX_ROOT / check.LIST_REL).read_text(encoding="utf-8"))
-    assert entries, "the shipped list is empty"
+def write_fragments(directory: Path, fragments: dict[str, str]) -> Path:
+    """A fragment directory with one ``*.txt`` per cluster (and any extra file)."""
+    directory.mkdir(parents=True, exist_ok=True)
+    for name, text in fragments.items():
+        (directory / name).write_text(text, encoding="utf-8")
+    return directory
+
+
+def test_shipped_fragments_parse() -> None:
+    directory = VNX_ROOT / check.LIST_DIR_REL
+    entries = check.parse_list_dir(directory)
+    assert entries, "the shipped fragments are empty"
+    # One fragment per cluster, next to the README that explains the rule.
+    names = {path.name for path in check.list_dir_files(directory)}
+    assert {
+        "dlv-265ca92a39bb.txt",
+        "dlv-94b694855db1.txt",
+        "dlv-f0dc7d68e349.txt",
+        "dlv-ddbc4a1d2137.txt",
+        "dlv-92fa888af43f.txt",
+    } <= names
+    assert (directory / "README.md").is_file()
+
+
+def test_parse_list_dir_reads_every_fragment_in_sorted_order(tmp_path: Path) -> None:
+    directory = write_fragments(
+        tmp_path / "fragments",
+        {
+            "dlv-b.txt": "env:VNX_B\n",
+            "dlv-a.txt": "# header\n\nscripts/foo.py   # gone in a\n",
+            "README.md": "not a fragment: scripts/never.py\n",
+        },
+    )
+    entries = check.parse_list_dir(directory)
+    assert [(e.kind, e.raw) for e in entries] == [("path", "scripts/foo.py"), ("env", "env:VNX_B")]
+
+
+def test_parse_list_dir_refuses_a_duplicate_across_fragments_and_names_both(tmp_path: Path) -> None:
+    directory = write_fragments(
+        tmp_path / "fragments",
+        {
+            "dlv-a.txt": "# a\nscripts/foo.py\n",
+            "dlv-b.txt": "scripts/other.py\nscripts/foo.py  # again\n",
+        },
+    )
+    with pytest.raises(check.ListError) as excinfo:
+        check.parse_list_dir(directory)
+    message = str(excinfo.value)
+    assert "scripts/foo.py" in message
+    assert "dlv-a.txt" in message and "dlv-b.txt" in message
+
+
+def test_parse_list_dir_refuses_an_empty_directory(tmp_path: Path) -> None:
+    (tmp_path / "fragments").mkdir()
+    with pytest.raises(check.ListError, match="fragment"):
+        check.parse_list_dir(tmp_path / "fragments")
+
+
+def test_parse_list_dir_refuses_a_missing_directory(tmp_path: Path) -> None:
+    with pytest.raises(check.ListError, match="no such directory"):
+        check.parse_list_dir(tmp_path / "absent")
 
 
 def test_frozen_doc_dirs_are_imported_not_copied() -> None:
@@ -161,6 +219,67 @@ def test_path_symlink_to_retired_file_fails(tmp_path: Path) -> None:
     assert [(v.where, v.detail) for v in found] == [("vendor/foo.py", "symlink to ../scripts/foo.py")]
 
 
+LINKED_LIST = "scripts/runner_v8.sh\n"
+
+
+def test_path_relative_symlink_in_subdirectory_resolves_against_its_directory(tmp_path: Path) -> None:
+    # The codex_gate reproduction (scripts/compat/dispatcher.sh -> ../dispatcher_v8_minimal.sh)
+    # with a fake name, because the real one is on the shipped list: the link text alone has no
+    # scripts/ component; only resolved against scripts/compat/ does it name the retired file.
+    root = make_tree(
+        tmp_path,
+        {"scripts/runner.sh": "echo ok\n"},
+        symlinks={"scripts/compat/runner.sh": "../runner_v8.sh"},
+    )
+    found = violations(root, LINKED_LIST)
+    assert [(v.where, v.detail) for v in found] == [("scripts/compat/runner.sh", "symlink to ../runner_v8.sh")]
+
+
+@pytest.mark.parametrize("spelling", ["as_given", "real_path"])
+def test_path_absolute_symlink_into_the_repo_fails(tmp_path: Path, spelling: str) -> None:
+    # The repo sits behind a symlinked directory, so the root as given and its real path differ;
+    # an absolute link written in either spelling points into the repo.
+    real = tmp_path / "real"
+    real.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(real, target_is_directory=True)
+    base = alias if spelling == "as_given" else Path(os.path.realpath(real))
+    link = str(base / "repo" / "scripts" / "foo.py")
+    root = make_tree(alias, {"scripts/bar.py": "x = 1\n"}, symlinks={"vendor/deep/foo.py": link})
+    found = violations(root, PATH_LIST)
+    assert [(v.where, v.detail) for v in found] == [("vendor/deep/foo.py", f"symlink to {link}")]
+
+
+def test_path_symlink_into_a_retired_directory_fails(tmp_path: Path) -> None:
+    root = make_tree(tmp_path, {"scripts/a.py": "x = 1\n"}, symlinks={"bin/tool.sh": "../scripts/old/tool.sh"})
+    assert wheres(violations(root, "scripts/old\n")) == {"bin/tool.sh"}
+
+
+def test_path_symlink_outside_the_repo_is_read_by_its_tail(tmp_path: Path) -> None:
+    root = make_tree(
+        tmp_path,
+        {"scripts/a.py": "x = 1\n"},
+        symlinks={"vendor/foo.py": "/opt/vnx/scripts/foo.py", "vendor/other.py": "/opt/other/lib/foo.py"},
+    )
+    assert wheres(violations(root, PATH_LIST)) == {"vendor/foo.py"}
+
+
+@pytest.mark.parametrize(
+    "link",
+    [
+        "../runner.sh",
+        "../lib/scripts/runner_v8.sh",
+        "./runner_v8.sh",
+        "..",
+    ],
+)
+def test_path_symlink_resolving_elsewhere_is_clean(tmp_path: Path, link: str) -> None:
+    # The text of the second and third link ends in the retired name, but resolved against
+    # scripts/compat/ none of them is scripts/runner_v8.sh.
+    root = make_tree(tmp_path, {"scripts/runner.sh": "echo ok\n"}, symlinks={"scripts/compat/x.sh": link})
+    assert violations(root, LINKED_LIST) == []
+
+
 @pytest.mark.parametrize(
     ("rel", "content"),
     [
@@ -182,7 +301,7 @@ def test_path_symlink_to_retired_file_fails(tmp_path: Path) -> None:
         ("packages/p/tests/fixtures/run.sh", "python3 scripts/foo.py\n"),
         ("CHANGELOG.md", "- removed scripts/foo.py\n"),
         ("changelog.d/c1.md", "- removed scripts/foo.py\n"),
-        ("scripts/ci/retired_paths.txt", "scripts/foo.py\n"),
+        ("scripts/ci/retired_paths.d/dlv-old.txt", "scripts/foo.py\n"),
         ("docs/data.csv", "scripts/foo.py,gone\n"),
     ],
 )
@@ -314,6 +433,90 @@ def test_symbol_with_module_gone_and_no_reference_is_clean(tmp_path: Path) -> No
 
 
 # ---------------------------------------------------------------------------
+# Kind 2b: path::Class.method (the class survives, the method is retired)
+# ---------------------------------------------------------------------------
+
+MEMBER_LIST = "scripts/lib/mod.py::K.gone\n"
+MOD_K = "class K:\n    def kept(self):\n        return 1\n"
+
+
+def test_member_surviving_class_import_is_clean(tmp_path: Path) -> None:
+    # The codex_gate reproduction: K keeps K.kept, the consumer imports K, calls K().kept()
+    # and mentions gone in a comment. Importing the surviving class is no reference.
+    consumer = "from scripts.lib.mod import K\n\n# K.gone was retired in golf 1\nK().kept()\n"
+    root = make_tree(tmp_path, {"scripts/lib/mod.py": MOD_K, "tests/test_x.py": consumer})
+    assert violations(root, MEMBER_LIST) == []
+
+
+@pytest.mark.parametrize(
+    ("rel", "content"),
+    [
+        ("tests/test_x.py", "from mod import K\nk = K()\nk.kept()  # not k.gone\n"),
+        ("tests/test_x.py", "import mod\nk = getattr(mod, 'K')\n# gone\n"),
+        ("tests/test_x.py", "from mod import K\n\ndef a():\n    k = K()\n\ndef b(k):\n    return k.gone()\n"),
+        ("tests/test_x.py", "from mod import K, Other\nk = K()\nk = Other()\nk.gone()\n"),
+        ("tests/test_x.py", "from mod import Other\nOther.gone()\nOther().gone()\n"),
+        ("tests/test_x.py", "from other import K\nK.gone()\nK().gone()\n"),
+        ("tests/test_x.py", "from mod import K\n\nclass T:\n    k = K()\n\n    def m(self):\n        return k.gone()\n"),
+        ("tests/test_x.py", "CMD = 'python3 -c \"from mod import K; K().kept()\"'  # gone\n"),
+        ("scripts/run.sh", "# K.gone is retired\npython3 -c 'from mod import K; K().kept()'\n"),
+    ],
+)
+def test_member_non_reference_is_clean(tmp_path: Path, rel: str, content: str) -> None:
+    root = make_tree(tmp_path, {"scripts/lib/mod.py": MOD_K, rel: content})
+    assert violations(root, MEMBER_LIST) == []
+
+
+@pytest.mark.parametrize(
+    ("content", "line"),
+    [
+        ("from mod import K\nK.gone()\n", 2),
+        ("from mod import K\nK().gone()\n", 2),
+        ("from mod import K\nK(1, x=2).gone\n", 2),
+        ("from mod import K as Alias\nAlias().gone()\n", 2),
+        ("import mod\nmod.K.gone()\n", 2),
+        ("import scripts.lib.mod as m\nm.K().gone()\n", 2),
+        ("from mod import K\n\ndef f():\n    k = K(1)\n    return k.gone()\n", 5),
+        ("from mod import K\nCLIENT = K()\n\ndef f():\n    return CLIENT.gone()\n", 5),
+        ("from mod import K\nif (k := K()):\n    k.gone()\n", 3),
+        ("from mod import K\nfn = getattr(K, 'gone')\n", 2),
+        ("from mod import K\nk = K()\nok = hasattr(k, 'gone')\n", 3),
+        ("from mod import K\nfn = getattr(K(), 'gone')\n", 2),
+        ("from unittest import mock\nfrom mod import K\n\n@mock.patch.object(K, 'gone')\ndef t(m):\n    pass\n", 4),
+        ("from unittest.mock import patch\nimport mod\n\nclass T:\n    @patch.object(mod.K, 'gone')\n    def t(self, m):\n        pass\n", 5),
+        ("from mod import K\n\ndef t(monkeypatch):\n    monkeypatch.setattr(K, 'gone', lambda self: 1)\n", 4),
+        ("from unittest.mock import patch\n\n@patch('mod.K.gone')\ndef t(m):\n    pass\n", 3),
+        ("from unittest.mock import patch\n\n@patch('scripts.lib.mod.K.gone')\ndef t(m):\n    pass\n", 3),
+        ("CMD = 'python3 -c \"from mod import K; K().gone()\"'\n", 1),
+    ],
+)
+def test_member_access_fails(tmp_path: Path, content: str, line: int) -> None:
+    root = make_tree(tmp_path, {"scripts/lib/mod.py": MOD_K, "tests/test_x.py": content})
+    assert wheres(violations(root, MEMBER_LIST)) == {f"tests/test_x.py:{line}"}
+
+
+def test_member_access_from_shell_fails(tmp_path: Path) -> None:
+    root = make_tree(
+        tmp_path,
+        {"scripts/lib/mod.py": MOD_K, "scripts/run.sh": "python3 -c 'from mod import K; K().gone()'\n"},
+    )
+    assert wheres(violations(root, MEMBER_LIST)) == {"scripts/run.sh:1"}
+
+
+def test_member_access_inside_its_own_module_fails(tmp_path: Path) -> None:
+    module = MOD_K + "\n\nK.gone\nINSTANCE = K()\nINSTANCE.gone()\n"
+    root = make_tree(tmp_path, {"scripts/lib/mod.py": module})
+    assert wheres(violations(root, MEMBER_LIST)) == {"scripts/lib/mod.py:6", "scripts/lib/mod.py:8"}
+
+
+def test_member_of_nested_class_follows_the_full_owner(tmp_path: Path) -> None:
+    module = "class K:\n    class Inner:\n        def kept(self):\n            return 1\n"
+    consumer = "from mod import K\nK.Inner().kept()\nK.Inner.gone()\nK.gone()\n"
+    root = make_tree(tmp_path, {"scripts/lib/mod.py": module, "tests/test_x.py": consumer})
+    assert wheres(violations(root, "scripts/lib/mod.py::K.Inner.gone\n")) == {"tests/test_x.py:3"}
+
+
+# ---------------------------------------------------------------------------
 # Kind 3: env:NAME
 # ---------------------------------------------------------------------------
 
@@ -399,7 +602,7 @@ def test_strip_hash_comments_keeps_quoted_hashes_and_array_lengths() -> None:
 
 
 def test_main_red_run_fails_on_every_line_then_green(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    list_file = tmp_path / "retired_paths.txt"
+    list_file = tmp_path / "retired.txt"
     list_file.write_text("scripts/foo.py\nscripts/lib/mod.py::gone\nenv:VNX_OLD_FLAG\n", encoding="utf-8")
     base = make_tree(
         tmp_path / "base",
@@ -424,6 +627,46 @@ def test_main_red_run_fails_on_every_line_then_green(tmp_path: Path, capsys: pyt
 def test_main_skips_the_list_inside_the_root(tmp_path: Path) -> None:
     root = make_tree(tmp_path, {"lists/retired.txt": "scripts/foo.py\n"})
     assert check.main(["--root", str(root), "--list", str(root / "lists" / "retired.txt")]) == 0
+
+
+def test_main_list_dir_reads_the_fragments(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    directory = write_fragments(
+        tmp_path / "fragments",
+        {"dlv-a.txt": "scripts/foo.py\n", "dlv-b.txt": "scripts/lib/mod.py::gone\n"},
+    )
+    base = make_tree(
+        tmp_path / "base",
+        {"scripts/foo.py": "x = 1\n", "scripts/lib/mod.py": "def gone():\n    return 1\n"},
+    )
+    head = make_tree(tmp_path / "head", {"scripts/lib/mod.py": MOD_WITHOUT})
+
+    assert check.main(["--root", str(base), "--list-dir", str(directory)]) == 1
+    assert "2 of 2 retired entries" in capsys.readouterr().out
+    assert check.main(["--root", str(head), "--list-dir", str(directory)]) == 0
+    assert "none of the 2 retired entries" in capsys.readouterr().out
+
+
+def test_main_list_dir_inside_the_root_is_not_scanned(tmp_path: Path) -> None:
+    root = make_tree(tmp_path, {"scripts/kept.py": "x = 1\n"})
+    directory = root / "scripts" / "ci" / "retired_paths.d"
+    write_fragments(
+        directory,
+        {"dlv-a.txt": "scripts/foo.py\n", "dlv-b.txt": "env:VNX_OLD_FLAG\n", "README.md": "scripts/foo.py\n"},
+    )
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    assert check.main(["--root", str(root), "--list-dir", str(directory)]) == 0
+
+
+def test_main_missing_list_dir_exits_2(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root = make_tree(tmp_path, {"a.py": "x = 1\n"})
+    assert check.main(["--root", str(root), "--list-dir", str(tmp_path / "absent")]) == 2
+    assert "no such directory" in capsys.readouterr().err
+
+
+def test_main_refuses_both_list_spellings(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        check.main(["--list", str(tmp_path / "a.txt"), "--list-dir", str(tmp_path)])
+    assert excinfo.value.code == 2
 
 
 def test_main_malformed_list_exits_2(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

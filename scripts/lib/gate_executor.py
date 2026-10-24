@@ -9,12 +9,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import shutil
 import subprocess
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
+
+logger = logging.getLogger(__name__)
 
 # `gh pr checks --json` (gh 2.76.2, measured 2026-08-20) has no `status`/
 # `conclusion` fields — it exposes `bucket`, which gh itself documents
@@ -94,7 +97,17 @@ class GateExecutorMixin:
         Loads the request record, starts the gate subprocess with bounded timeout
         and stall detection, then writes result records atomically (GATE-11/12).
         ci_gate is executed inline via gh CLI (no stall-detection subprocess loop).
+
+        R10: every run, from every caller (``request_and_execute``, the
+        ``execute`` CLI, the obligation runner), launches here, under the run
+        lock of (project, PR, gate, head) (``gate_run_guard``), held until the
+        run ends. A lock held elsewhere returns an ``in_flight`` payload: no
+        run, nothing written, never a pass. Under the lock the round ledger is
+        read again (:meth:`_verdict_landed_on_head`): a verdict another run
+        booked on this head while this request waited is the answer, not a
+        second run.
         """
+        import gate_run_guard
         from gate_runner import GateRunner
 
         if pr_id:
@@ -111,22 +124,69 @@ class GateExecutorMixin:
         if status in ("not_executable", "completed", "failed"):
             return request_payload
 
-        if gate == "ci_gate":
-            return self._execute_ci_gate(
-                gate=gate, pr_number=pr_number, pr_id=pr_id,
+        head_sha = str(request_payload.get("commit_sha") or "")
+        pr_ref = pr_number if pr_number is not None else pr_id
+        with gate_run_guard.held_run(self.state_dir, pr_ref=pr_ref, gate=gate, head_sha=head_sha) as lock:
+            if not lock.acquired:
+                return gate_run_guard.in_flight_payload(lock, pr_number=pr_number, pr_id=pr_id)
+            landed = self._verdict_landed_on_head(gate, request_payload, pr_number, head_sha)
+            if landed is not None:
+                return landed
+
+            if gate == "ci_gate":
+                return self._execute_ci_gate(
+                    gate=gate, pr_number=pr_number, pr_id=pr_id,
+                    request_payload=request_payload,
+                )
+
+            runner = GateRunner(
+                state_dir=self.state_dir,
+                reports_dir=self.reports_dir,
+                project_root=Path(self.paths["PROJECT_ROOT"]),
+            )
+            return runner.run(
+                gate=gate,
                 request_payload=request_payload,
+                pr_number=pr_number,
+                pr_id=pr_id,
             )
 
-        runner = GateRunner(
-            state_dir=self.state_dir,
-            reports_dir=self.reports_dir,
-            project_root=Path(self.paths["PROJECT_ROOT"]),
+    def _verdict_landed_on_head(
+        self, gate: str, request_payload: Dict[str, Any], pr_number: Optional[int], head_sha: str,
+    ) -> Optional[Dict[str, Any]]:
+        """The seat's verdict on ``head_sha`` when one landed after the request, else ``None`` (R10).
+
+        The request round refuses a seat that already has a verdict on the head
+        (R1, ``_round_refusal``), but it decides before the run lock is taken: a
+        concurrent run of the same seat can book its verdict in between. Read
+        under the lock, that line is reported exactly as the request round
+        reports it (``_standing_round_payload``), so the seat's answer is that
+        verdict and no second reviewer runs. Only a seat with a known PR and
+        head has a line to find; a ledger that cannot be read here finds none
+        (the request round and the writer each refuse on it themselves).
+        """
+        import review_rounds
+
+        seat = str(request_payload.get("seat") or "")
+        if not seat or pr_number is None or not head_sha:
+            return None
+        review_gates_dir = self.results_dir.parent
+        try:
+            ledger = review_rounds.read_ledger(review_rounds.ledger_path(review_gates_dir))
+        except review_rounds.RoundLedgerError as exc:
+            # The run goes on: the writer refuses a verdict on an unreadable ledger itself.
+            logger.warning("gate_executor: round ledger unreadable for pr=%s seat %s: %s", pr_number, seat, exc)
+            return None
+        project_id = review_rounds.store_project_id(review_gates_dir)
+        line = next(
+            (line for line in ledger.for_pr(project_id, pr_number) if line.seat == seat and line.head_sha == head_sha),
+            None,
         )
-        return runner.run(
-            gate=gate,
-            request_payload=request_payload,
-            pr_number=pr_number,
-            pr_id=pr_id,
+        if line is None:
+            return None
+        return self._standing_round_payload(
+            line, pr_number=pr_number, branch=str(request_payload.get("branch") or ""),
+            seat_fields={"seat": seat},
         )
 
     def _execute_ci_gate(
@@ -509,8 +569,14 @@ class GateExecutorMixin:
         mode: str,
         dispatch_id: str = "",
         override_b3: str = "",
+        force_rerun: str = "",
     ) -> Dict[str, Any]:
         """Request and immediately execute all gates atomically.
+
+        ``force_rerun`` (R10) is the reason of an operator force-rerun from the
+        obligation runner: it travels on every request of the round into the
+        result record (``gate_recorder.stamp_request_identity``). It lifts
+        nothing here: the round ledger and the run lock judge the run as always.
 
         Sets ``VNX_CODEX_HEADLESS_ENABLED=1`` in the process environment before
         checking availability so codex is never silently disabled during
@@ -548,12 +614,17 @@ class GateExecutorMixin:
             dispatch_id=dispatch_id,
             head_sha=head_sha,
             **({"override_b3": override_b3} if override_b3 else {}),
+            **({"force_rerun": force_rerun} if force_rerun else {}),
         )
 
         requested = list(request_result.get("requested", []))
         rows = [self._execute_one_request(req, pr_number, head_sha) for req in requested]
+        # The round's derived class (R3a); a round that names none advances a seat at
+        # high, never at the caller's class, which may be lower than the diff's.
+        review_risk = request_result.get("review_risk")
+        derived_class = review_risk.get("risk_class") if isinstance(review_risk, dict) else None
         self._advance_exhausted_seats(
-            requested, rows, pr_number=pr_number, branch=branch, risk_class=risk_class,
+            requested, rows, pr_number=pr_number, branch=branch, risk_class=derived_class or "high",
             changed_files=changed_files, mode=mode, dispatch_id=dispatch_id, head_sha=head_sha,
         )
 
@@ -565,6 +636,7 @@ class GateExecutorMixin:
                 blocks for entry, blocks in rows if not entry.get("superseded_by")
             ),
             "review_seats": request_result.get("review_seats"),
+            "review_risk": review_risk,
         }
 
     def _advance_exhausted_seats(

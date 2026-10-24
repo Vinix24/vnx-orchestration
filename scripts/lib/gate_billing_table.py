@@ -1,10 +1,11 @@
 """How each review gate's provider is BILLED: the one billing table.
 
 The operator decision of 2026-09-26: a review gate chooses a subscription
-reviewer (codex, kimi) first and an API-credit reviewer (glm, deepseek) only
-when both subscription seats are unavailable. The order of a review stack and
-of the takeover chain is that decision written down, so "which side of the line
-is this gate" needs exactly one answer, and this module is where it is kept.
+reviewer (codex, kimi, and since R7 of 2026-10-22 claude) first and an
+API-credit reviewer (glm, deepseek) only when the subscription seats are
+unavailable. The order of a review stack and of the takeover chain is that
+decision written down, so "which side of the line is this gate" needs exactly
+one answer, and this module is where it is kept.
 Since OI-2058 (R5a) a reviewer fills one seat: when kimi takes codex's seat,
 kimi's own seat walks on down the chain, so an API-credit reviewer also reads
 when one subscription reviewer is out. The order this table guards is unchanged.
@@ -38,6 +39,7 @@ GATE_BILLING_NONE = "none"
 GATE_BILLING: Dict[str, str] = {
     "codex_gate": GATE_BILLING_SUBSCRIPTION,   # codex CLI, ChatGPT subscription
     "kimi_gate": GATE_BILLING_SUBSCRIPTION,    # kimi CLI OAuth (kimi-via-cli-only)
+    "claude_gate": GATE_BILLING_SUBSCRIPTION,  # claude CLI on the operator's subscription, never an API key
     # gemini CLI on OAuth. VNX_GEMINI_ROUTING=vertex is an explicit opt-in that
     # bills the API; the default routing is oauth, so the default is a subscription.
     "gemini_review": GATE_BILLING_SUBSCRIPTION,

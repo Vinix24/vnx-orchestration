@@ -15,7 +15,8 @@ from __future__ import annotations
 import logging
 import sys
 from pathlib import Path
-from typing import Dict
+import os
+from typing import Dict, Optional
 
 _LIB = str(Path(__file__).resolve().parent)
 if _LIB not in sys.path:
@@ -36,14 +37,60 @@ logger = logging.getLogger(__name__)
 # differs from the build lane's DEFAULT_DEEPSEEK_HARNESS_MODEL
 # (provider_spawns/deepseek_harness_spawn.py, deepseek-v4-pro). The name
 # `deepseek-v4-flash` is a phased-out alias the vendor reroutes to V4.1-Flash
-# and must not be used as the default. The env var is the per-gate override an
-# operator sets before the run; the default is what the governed lane
-# dispatches when it is unset.
+# and must not be used as the default. claude_gate runs sonnet on the operator's
+# subscription (R7, operator decision 2026-10-22) through claude_gate_lane. The
+# env var is the per-gate override an operator sets before the run; the default
+# is what the governed lane dispatches when it is unset.
 MODEL_DEFAULTS: Dict[str, tuple] = {
     "glm_gate": ("VNX_GLM_GATE_MODEL", "glm-5.2"),
     "kimi_gate": ("VNX_KIMI_GATE_MODEL", "kimi-k3"),
     "deepseek_gate": ("VNX_DEEPSEEK_GATE_MODEL", "deepseek-flash"),
+    "claude_gate": ("VNX_CLAUDE_GATE_MODEL", "sonnet"),
 }
+
+def gate_model(gate: str) -> Optional[str]:
+    """The model review gate *gate* runs at this moment, or None when it cannot be named.
+
+    A gate in :data:`MODEL_DEFAULTS` runs the value of its env var, else its
+    default. ``codex_gate`` is picked the way ``gate_runner`` picks it: the
+    ``VNX_CODEX_HEADLESS_MODEL`` / ``VNX_CODEX_MODEL`` override, else the
+    registry's ``openai.default_model``; a registry that cannot name one leaves
+    the model unknown. Any other gate (``ci_gate``, ``wiring_gate``) calls no
+    model. The one reader of the reviewer's model (``review_vendor``, R7b): no
+    second table of defaults exists beside :data:`MODEL_DEFAULTS`.
+    """
+    if gate in MODEL_DEFAULTS:
+        env_name, default = MODEL_DEFAULTS[gate]
+        return (os.environ.get(env_name) or "").strip() or default
+    if gate == "codex_gate":
+        from providers import provider_registry  # after the scripts/lib path guard above
+
+        override = (os.environ.get("VNX_CODEX_HEADLESS_MODEL") or os.environ.get("VNX_CODEX_MODEL") or "").strip()
+        try:
+            return provider_registry.resolve_codex_model(explicit=override) or None
+        except provider_registry.CodexModelResolutionError:
+            return None
+    return None
+
+
+# R12: the review gates measured as one shot. glm_gate.py and kimi_gate.py
+# book their depth with gate_depth.single_shot_depth: the diff in the prompt is
+# what the run is held to, and there is no working directory it is asked to
+# check. Every other gate on gate_runner's harness lane (deepseek_gate today)
+# reviews with tools in an isolated checkout of the PR head (OI-1887).
+SINGLE_SHOT_GATES = frozenset({"glm_gate", "kimi_gate"})
+
+
+def reviews_with_tools(gate: str) -> bool:
+    """True when the harness-lane gate *gate* reviews with tools in a checkout
+    of the PR head, so its prompt carries the working-directory rule
+    (``gate_prompt.build_review_prompt(agentic=...)``, R12). False for the
+    gates in :data:`SINGLE_SHOT_GATES`. The standalone glm_gate/kimi_gate
+    scripts, gate_runner's harness lane and the re-anchor hash all read this,
+    so the same gate gets the same prompt on every path.
+    """
+    return gate not in SINGLE_SHOT_GATES
+
 
 # The BASE lane deadline of a harness-lane review gate, in seconds.
 # headless_adapter.gate_timeout() has no entry for these gates and would fall
@@ -80,6 +127,7 @@ TIMEOUT_CONFIG: Dict[str, tuple] = {
     "kimi_gate": ("VNX_KIMI_GATE_TIMEOUT_SECONDS", TIMEOUT_SECONDS),
     "glm_gate": ("VNX_GLM_GATE_TIMEOUT_SECONDS", TIMEOUT_SECONDS),
     "deepseek_gate": ("VNX_DEEPSEEK_GATE_TIMEOUT_SECONDS", TIMEOUT_SECONDS),
+    "claude_gate": ("VNX_CLAUDE_GATE_TIMEOUT_SECONDS", TIMEOUT_SECONDS),
 }
 
 # Diff cap applied by gate_prompt.build_review_prompt: the diff is delimited,
@@ -124,6 +172,7 @@ DIFF_CHAR_CONFIG: Dict[str, tuple] = {
     "kimi_gate": ("VNX_KIMI_GATE_MAX_DIFF_CHARS", DEFAULT_MAX_DIFF_CHARS),
     "glm_gate": ("VNX_GLM_GATE_MAX_DIFF_CHARS", DEFAULT_MAX_DIFF_CHARS),
     "deepseek_gate": ("VNX_DEEPSEEK_GATE_MAX_DIFF_CHARS", DEFAULT_MAX_DIFF_CHARS),
+    "claude_gate": ("VNX_CLAUDE_GATE_MAX_DIFF_CHARS", DEFAULT_MAX_DIFF_CHARS),
 }
 
 # A gate name this table does not know at all gets the same default: never

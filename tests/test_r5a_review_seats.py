@@ -254,13 +254,13 @@ class TestAProfileAddsAndRemovesNoSeat:
 # ---------------------------------------------------------------------------
 
 class TestEverySeatGetsItsOwnReviewer:
-    def test_codex_exhausted_gives_codex_seat_to_kimi_and_kimi_seat_to_deepseek(self, env):
+    def test_codex_exhausted_gives_codex_seat_to_kimi_and_kimi_seat_to_claude(self, env):
         """Red on the base: kimi was dispatched for codex's seat and nothing for kimi's own."""
         _write_result(env, "codex_gate", _CODEX_LIMIT_RECORD)
 
         result = _request(None)
 
-        assert _gates(result) == ["kimi_gate", "deepseek_gate"]
+        assert _gates(result) == ["kimi_gate", "claude_gate"]
         codex_seat, kimi_seat = result["requested"]
         assert (codex_seat["seat"], codex_seat["status"]) == ("codex_gate", "requested")
         assert (kimi_seat["seat"], kimi_seat["status"]) == ("kimi_gate", "requested")
@@ -270,13 +270,15 @@ class TestEverySeatGetsItsOwnReviewer:
             "detail": "kimi_gate already reads seat codex_gate in this request",
         }]
         assert "kimi_gate reads another seat" in kimi_seat["failure_reason"]
-        assert [r["gate"] for r in env["receipts"]] == ["kimi_gate", "deepseek_gate"]
+        assert [r["gate"] for r in env["receipts"]] == ["kimi_gate", "claude_gate"]
 
-    def test_both_subscription_seats_exhausted_on_the_default_chain_leave_the_second_seat_chain_exhausted(self, env):
-        """R4 (operator decision 2026-10-17): glm_gate is not in the default chain, so with codex and
-        kimi both out deepseek reads one seat and the other ends as chain_exhausted, never a silent re-dispatch."""
+    def test_every_subscription_seat_exhausted_on_the_default_chain_leaves_the_second_seat_chain_exhausted(self, env):
+        """R4 (operator decision 2026-10-17): glm_gate is not in the default chain. Since R7
+        (2026-10-22) claude_gate stands in it too, so with codex, kimi and claude all out deepseek
+        reads one seat and the other ends as chain_exhausted, never a silent re-dispatch."""
         _write_result(env, "codex_gate", _CODEX_LIMIT_RECORD)
         _write_result(env, "kimi_gate", _KIMI_WEEKLY_LIMIT_RECORD)
+        _write_result(env, "claude_gate", {**_KIMI_WEEKLY_LIMIT_RECORD, "gate": "claude_gate"})
 
         result = _request(None)
 
@@ -286,6 +288,18 @@ class TestEverySeatGetsItsOwnReviewer:
         assert second["status"] == "chain_exhausted"
         assert "glm_gate" not in [p["gate"] for p in result["requested"]]
         assert not (env["requests_dir"] / f"pr-{PR}-glm_gate.json").exists()
+
+    def test_both_subscription_seats_exhausted_on_the_default_chain_give_claude_and_deepseek(self, env):
+        """R7 (2026-10-22): with codex and kimi both out, claude_gate reads codex's seat and
+        deepseek_gate, the next distinct reviewer, reads kimi's."""
+        _write_result(env, "codex_gate", _CODEX_LIMIT_RECORD)
+        _write_result(env, "kimi_gate", _KIMI_WEEKLY_LIMIT_RECORD)
+
+        result = _request(None)
+
+        assert _gates(result) == ["claude_gate", "deepseek_gate"]
+        assert [p["seat"] for p in result["requested"]] == ["codex_gate", "kimi_gate"]
+        assert "glm_gate" not in _gates(result)
 
     def test_both_subscription_seats_exhausted_give_deepseek_and_glm(self, env, monkeypatch):
         monkeypatch.setenv("VNX_OVERRIDE_REVIEW_GATE_TAKEOVER_CHAIN", "codex_gate,kimi_gate,deepseek_gate,glm_gate")
@@ -353,9 +367,9 @@ class TestTheRequestRecordCarriesTheSeats:
             "key": "VNX_DEFAULT_REVIEW_STACK", "value": "codex_gate,kimi_gate", "profile_stack": None,
         }
         assert result["review_seats"] == expected
-        kimi, deepseek = _request_record(env, "kimi_gate"), _request_record(env, "deepseek_gate")
+        kimi, claude = _request_record(env, "kimi_gate"), _request_record(env, "claude_gate")
         assert (kimi["seat"], kimi["review_seats"]) == ("codex_gate", expected)
-        assert (deepseek["seat"], deepseek["review_seats"]) == ("kimi_gate", expected)
+        assert (claude["seat"], claude["review_seats"]) == ("kimi_gate", expected)
         assert kimi["takeover_from"] == "codex_gate", "seat stamp and takeover land in one record"
 
     def test_a_config_change_after_the_request_leaves_the_requested_stack_on_record(self, env, monkeypatch):
@@ -394,15 +408,15 @@ class TestTheRequestRecordCarriesTheSeats:
 # ---------------------------------------------------------------------------
 
 class TestASwitchedOffSeatIsNeverFilled:
-    def test_kimi_off_its_seat_goes_to_deepseek_and_kimi_is_never_asked(self, env):
+    def test_kimi_off_its_seat_goes_to_claude_and_kimi_is_never_asked(self, env):
         _set_switches(kimi=False)
 
         result = _request(None)
 
-        assert _gates(result) == ["codex_gate", "deepseek_gate"]
-        deepseek = result["requested"][1]
-        assert deepseek["seat"] == "kimi_gate"
-        assert [(h["gate"], h["reason"]) for h in deepseek["takeover_path"]] == [("kimi_gate", "provider_switched_off")]
+        assert _gates(result) == ["codex_gate", "claude_gate"]
+        claude = result["requested"][1]
+        assert claude["seat"] == "kimi_gate"
+        assert [(h["gate"], h["reason"]) for h in claude["takeover_path"]] == [("kimi_gate", "provider_switched_off")]
         assert not (env["requests_dir"] / f"pr-{PR}-kimi_gate.json").exists()
 
     def test_codex_exhausted_and_kimi_off_both_seats_move_and_kimi_fills_neither(self, env, monkeypatch):
@@ -475,20 +489,20 @@ def _request_and_execute(review_stack):
 
 
 class TestAReviewerThatRunsOutDuringTheRequest:
-    def test_kimi_exhausted_mid_request_hands_its_seat_to_deepseek_in_the_same_call(self, env, runs):
+    def test_kimi_exhausted_mid_request_hands_its_seat_to_claude_in_the_same_call(self, env, runs):
         """Red on the base: the call ran kimi, booked lane_exhausted and stopped; only a second
-        identical request gave the seat to deepseek (#2066 21:09Z and 03:55Z, #2072 00:07Z and 01:37Z)."""
+        identical request gave the seat to deepseek (claude_gate since R7) (#2066 21:09Z and 03:55Z, #2072 00:07Z and 01:37Z)."""
         runs["outcomes"]["kimi_gate"] = _KIMI_WEEKLY_LIMIT_RECORD
 
         result = _request_and_execute(["kimi_gate"])
 
-        assert [g["gate"] for g in result["gates"]] == ["kimi_gate", "deepseek_gate"]
-        assert runs["ran"] == ["kimi_gate", "deepseek_gate"]
-        kimi, deepseek = result["gates"]
-        assert kimi["superseded_by"] == "deepseek_gate" and kimi["passed"] is False
-        assert deepseek["passed"] is True and "superseded_by" not in deepseek
+        assert [g["gate"] for g in result["gates"]] == ["kimi_gate", "claude_gate"]
+        assert runs["ran"] == ["kimi_gate", "claude_gate"]
+        kimi, claude = result["gates"]
+        assert kimi["superseded_by"] == "claude_gate" and kimi["passed"] is False
+        assert claude["passed"] is True and "superseded_by" not in claude
         assert result["has_required_failure"] is False, "the seat's final reviewer passed"
-        record = _request_record(env, "deepseek_gate")
+        record = _request_record(env, "claude_gate")
         assert record["seat"] == "kimi_gate"
         assert [(h["gate"], h["reason"]) for h in record["takeover_path"]] == [("kimi_gate", "lane_exhausted")]
 
@@ -529,7 +543,7 @@ class TestAReviewerThatRunsOutDuringTheRequest:
         result = _request_and_execute(["kimi_gate"])
 
         entries = resolve_seat_entries(result, pr_number=PR, state_dir=env["state_dir"])
-        assert entries["kimi_gate"]["gate"] == "deepseek_gate"
+        assert entries["kimi_gate"]["gate"] == "claude_gate"
         assert verify_report(result, pr_number=PR, seats=["kimi_gate"], state_dir=env["state_dir"]).ok
 
 
@@ -585,18 +599,18 @@ class TestADecidedVerdictIsNeverHandedOn:
         assert result["has_required_failure"] is False
 
     def test_neither_seat_moves_when_both_reviewers_decided(self, env, runs):
-        """The default two-seat stack: kimi reads codex's seat and rejects, deepseek reads kimi's
+        """The default two-seat stack: kimi reads codex's seat and rejects, claude reads kimi's (R7)
         and passes. Red on 7f70286e: codex took its seat back and kimi took its own seat from
-        deepseek, so four gates ran for two seats."""
+        its reader, so four gates ran for two seats."""
         _codex_limit_expires_while(env, runs, "kimi_gate")
         runs["outcomes"]["kimi_gate"] = _fail_record(env, "kimi_gate")
 
         result = _request_and_execute(None)
 
         assert [g.get("superseded_by") for g in result["gates"]] == [None, None]
-        assert runs["ran"] == ["kimi_gate", "deepseek_gate"]
+        assert runs["ran"] == ["kimi_gate", "claude_gate"]
         assert [(g["gate"], g["seat"]) for g in result["gates"]] == [
-            ("kimi_gate", "codex_gate"), ("deepseek_gate", "kimi_gate"),
+            ("kimi_gate", "codex_gate"), ("claude_gate", "kimi_gate"),
         ]
         assert result["has_required_failure"] is True
 
@@ -618,30 +632,30 @@ class TestADecidedVerdictIsNeverHandedOn:
 
     def test_a_substitute_that_runs_out_hands_the_seat_forward_never_back(self, env, runs):
         """kimi read codex's seat and ran out; codex's own exhaustion expired meanwhile. The seat
-        walks on from kimi to deepseek. Red on 7f70286e: the walk restarted at codex."""
+        walks on from kimi to claude (R7). Red on 7f70286e: the walk restarted at codex."""
         _codex_limit_expires_while(env, runs, "kimi_gate")
         runs["outcomes"]["kimi_gate"] = _KIMI_WEEKLY_LIMIT_RECORD
 
         result = _request_and_execute(["codex_gate"])
 
-        assert [g["gate"] for g in result["gates"]] == ["kimi_gate", "deepseek_gate"]
-        assert runs["ran"] == ["kimi_gate", "deepseek_gate"]
-        assert result["gates"][0]["superseded_by"] == "deepseek_gate"
+        assert [g["gate"] for g in result["gates"]] == ["kimi_gate", "claude_gate"]
+        assert runs["ran"] == ["kimi_gate", "claude_gate"]
+        assert result["gates"][0]["superseded_by"] == "claude_gate"
         assert result["has_required_failure"] is False
-        record = _request_record(env, "deepseek_gate")
+        record = _request_record(env, "claude_gate")
         assert record["seat"] == "codex_gate"
         assert [(h["gate"], h["reason"]) for h in record["takeover_path"]] == [
             ("codex_gate", "exit_nonzero"), ("kimi_gate", "lane_exhausted"),
         ], "the successor's path names every reviewer the seat passed, starting at the seat"
 
-    def test_an_own_seat_reviewer_that_runs_out_still_goes_to_deepseek(self, env, runs):
+    def test_an_own_seat_reviewer_that_runs_out_still_goes_to_the_next_link(self, env, runs):
         """Round 1's case (d) under the round-2 rule: the confirmed exhaustion still moves."""
         runs["outcomes"]["kimi_gate"] = _KIMI_WEEKLY_LIMIT_RECORD
 
         result = _request_and_execute(["kimi_gate"])
 
-        assert [g["gate"] for g in result["gates"]] == ["kimi_gate", "deepseek_gate"]
-        assert result["gates"][0]["superseded_by"] == "deepseek_gate"
+        assert [g["gate"] for g in result["gates"]] == ["kimi_gate", "claude_gate"]
+        assert result["gates"][0]["superseded_by"] == "claude_gate"
         assert result["has_required_failure"] is False
 
 

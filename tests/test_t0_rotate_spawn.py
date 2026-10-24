@@ -4,10 +4,14 @@ scripts/t0_rotate_spawn.sh runs for real against a stub ``tmux`` and a stub ``cl
 No real tmux server or claude session is ever touched:
 
   - stub tmux logs every call (argv) to calls.ndjson and plays a claude screen back on
-    ``capture-pane``: a shell before the launch line is submitted, the footer after it, a busy
-    marker for the first two captures after the kickoff prompt, and ``/goal active`` once a
-    /goal line was submitted (unless told to never accept it). ``run-shell -b`` executes its
-    command synchronously so the tmux-server follow-up is observable in the test.
+    ``capture-pane``: a shell before the launch line is submitted, the footer after it, and from
+    the delivery on the successor's turns, written into its transcript the way claude 2.1.308
+    writes them (a turn ends with a ``system`` / ``turn_duration`` record; a line submitted
+    while a turn runs is queued, never a user record). Each capture is one tick of that clock;
+    the spinner of a running turn has no ``esc to interrupt`` and the footer stays, as on
+    2.1.308. ``/goal active`` shows once a /goal landed (unless told otherwise).
+    ``run-shell -b`` executes its command synchronously so the tmux-server follow-up is
+    observable in the test.
   - stub claude only records that it was executed; the spawner must never run claude itself,
     it types the launch line into the new pane.
 
@@ -52,10 +56,10 @@ def calls():
     with open(os.path.join(stub, "calls.ndjson")) as fh:
         return [json.loads(l) for l in fh if l.strip()]
 
-def submitted():
-    """Texts followed by a separate Enter keystroke, in order."""
+def submitted(upto=None):
+    """Texts followed by a separate Enter keystroke, in order (over the first `upto` calls)."""
     out, pending, eaten = [], None, False
-    for c in calls():
+    for c in calls()[:upto]:
         if c[:1] != ["send-keys"]:
             continue
         if "-l" in c:
@@ -68,6 +72,79 @@ def submitted():
             out.append(pending)
             pending = None
     return out, pending
+
+# ── the successor's turns, as its transcript records them (claude 2.1.308) ──
+# The turn of the start argument runs for STUB_TURN_CAPTURES captures and then ends the way
+# claude ends one: `end_turn`, `stop_hook_summary`, then `system` / `turn_duration`. A line
+# submitted while a turn runs is queued (a queue-operation, never a user record) and stays on
+# screen, as in rotation-20261022-170308-53038 and rotation-20261022-191855-76425.
+TURN = os.path.join(stub, "turn.json")
+SPINNER = {"2.1.308": "✳ Tempering… (52s · ↓ 4.5k tokens · thought for 13s)",
+           "legacy": "✻ Working… (esc to interrupt)", "idle": ""}
+
+def load():
+    return json.load(open(TURN)) if os.path.exists(TURN) else None
+
+def save(st):
+    json.dump(st, open(TURN, "w"))
+
+def append(st, record):
+    with open(st["transcript"], "a") as fh:
+        fh.write(json.dumps(record) + "\n")
+
+def user(content, origin=None):
+    return {"type": "user", "isSidechain": False, "origin": origin,
+            "message": {"role": "user", "content": content}}
+
+def start_turn(st, captures):
+    st["running"], st["left"] = True, captures
+
+def tick(st):
+    """One capture: a running turn does a tool round trip until its captures are used up, then
+    ends. True while the screen shows the spinner (STUB_SCREEN_LAG keeps it there longer)."""
+    if st["running"] and st["left"] > 0:
+        st["left"] -= 1
+        append(st, {"type": "assistant", "isSidechain": False,
+                    "message": {"stop_reason": "tool_use", "content": [{"type": "tool_use"}]}})
+        append(st, user([{"type": "tool_result", "content": "ok"}]))
+        return True
+    if st["running"]:
+        append(st, {"type": "assistant", "isSidechain": False,
+                    "message": {"stop_reason": "end_turn", "content": [{"type": "text", "text": "klaar"}]}})
+        append(st, {"type": "system", "subtype": "stop_hook_summary", "isSidechain": False, "hookCount": 1})
+        append(st, {"type": "system", "subtype": "turn_duration", "isSidechain": False,
+                    "durationMs": 1000, "messageCount": 9})
+        st["running"] = False
+        st["ends"].append(len(calls()) - 1)
+        st["lag"] = int(os.environ.get("STUB_SCREEN_LAG", "0"))
+    if st["lag"] > 0:
+        st["lag"] -= 1
+        return True
+    return False
+
+def submit(st, line):
+    """A line whose Enter landed. STUB_TURN_BEFORE_GOAL=1,2 starts a turn (a task notification)
+    the moment before the first / second /goal line lands."""
+    if line.startswith("/goal "):
+        st["goals"] += 1
+        if str(st["goals"]) in os.environ.get("STUB_TURN_BEFORE_GOAL", "").split(","):
+            append(st, user("<task-notification>\n<summary>bouwer klaar</summary>\n</task-notification>",
+                            {"kind": "task-notification"}))
+            start_turn(st, int(os.environ.get("STUB_BUSY_CAPTURES", "3")))
+    if st["running"]:
+        append(st, {"type": "queue-operation", "operation": "enqueue",
+                    "content": '<pasted_content id="c632">\n' + line})
+        st["queued"].append(line)
+    elif not line.startswith("/goal "):
+        append(st, user(line, {"kind": "human"}))
+        start_turn(st, 0)
+    elif os.environ.get("STUB_GOAL_SCREEN_ONLY"):
+        st["goal_on_screen"] = True
+    elif not os.environ.get("STUB_GOAL_NEVER"):
+        append(st, user("<command-name>/goal</command-name>\n            <command-message>goal"
+                        "</command-message>\n            <command-args>%s</command-args>" % line[6:]))
+        st["goal_on_screen"] = True
+        start_turn(st, 1)
 
 cmd = args[0] if args else ""
 def pane_path(target):
@@ -106,25 +183,32 @@ elif cmd == "new-window":
     held = open(ledger).read() if ledger and os.path.isfile(ledger) else ""
     open(os.path.join(stub, "ledger_at_new_window"), "w").write(held)
     print("@7")
+elif cmd == "send-keys" and args[-1] == "Enter" and "-l" not in args:
+    st = load()
+    before, _ = submitted(-1)
+    after, _ = submitted()
+    if st and len(after) > len(before):
+        submit(st, after[-1])
+        save(st)
 elif cmd == "capture-pane":
     subs, typed = submitted()
-    counter = os.path.join(stub, "captures_after_kickoff")
     screen = "vincent@mac project % "
     # A T0-folder start first types a plain `cd -- <folder>`; the launch line is a later one.
     launched = any(s and s.startswith(("claude ", "CLAUDE_CONFIG_DIR=")) for s in subs)
     if launched and not os.environ.get("STUB_NO_FOOTER"):
-        screen = "> \n  ⏵⏵ auto mode on (shift+tab to cycle)"
-        # A skip run puts the catch-up wrap in front of the kickoff sentence.
-        if any(s and "/kickoff" in s for s in subs):
-            n = int(open(counter).read()) if os.path.exists(counter) else 0
-            open(counter, "w").write(str(n + 1))
-            if n < 2:
-                screen = "✻ Working… (esc to interrupt)\n  ⏵⏵ auto mode on"
-        goal_subs = [s for s in subs if s and s.startswith("/goal ")]
-        if goal_subs and not os.environ.get("STUB_GOAL_NEVER"):
-            screen += "  · /goal active"
-        elif typed and typed.startswith("/goal "):
-            screen = "> " + typed + "\n  ⏵⏵ auto mode on"
+        st = load()
+        busy = tick(st) if st else False
+        if st:
+            save(st)
+        spinner = SPINNER[os.environ.get("STUB_SCREEN", "2.1.308")]
+        lines = ["> " + q for q in (st["queued"] if st else [])]
+        if busy and spinner:
+            lines += [spinner, ""]
+        lines.append("> " + (typed or ""))
+        footer = "  ⏵⏵ auto mode on (shift+tab to cycle)"
+        if st and st["goal_on_screen"]:
+            footer += "  · /goal active"
+        screen = "\n".join(lines + [footer])
     print(screen)
 elif cmd == "list-windows":
     print("@1" if os.environ.get("STUB_NEW_WINDOW_GONE") else "@1\n@7")
@@ -147,7 +231,11 @@ elif cmd == "run-shell":
         folder = os.path.join(config, "projects", "-p")
         os.makedirs(folder, exist_ok=True)
         record = {"type": "user", "isSidechain": False, "message": {"role": "user", "content": content}}
-        open(os.path.join(folder, uuid + ".jsonl"), "w").write(json.dumps(record) + "\n")
+        path = os.path.join(folder, uuid + ".jsonl")
+        open(path, "w").write(json.dumps(record) + "\n")
+        # The kickoff turn starts with the delivery.
+        save({"transcript": path, "running": True, "left": int(os.environ.get("STUB_TURN_CAPTURES", "2")),
+              "ends": [], "lag": 0, "goals": 0, "queued": [], "goal_on_screen": False})
     # What the spawner had printed on stdout by the time the server job was handed over.
     if os.environ.get("STUB_STDOUT_FILE"):
         open(os.path.join(stub, "stdout_at_run_shell"), "w").write(open(os.environ["STUB_STDOUT_FILE"]).read())
@@ -400,6 +488,28 @@ def _assert_enter_always_separate(rig) -> None:
             assert call[-1] == "Enter" and len(call) == 4, call
 
 
+def _turn_ends(rig) -> List[int]:
+    """The calls.ndjson index of each capture at which a turn of the successor ended in its
+    transcript (the stub's clock)."""
+    path = rig["stub"] / "turn.json"
+    return json.loads(path.read_text())["ends"] if path.exists() else []
+
+
+def _typed_at(rig, prefix: str) -> List[int]:
+    """The calls.ndjson index of each line typed with ``send-keys -l`` that starts with prefix."""
+    return [i for i, c in enumerate(_calls(rig))
+            if c[:1] == ["send-keys"] and "-l" in c and c[-1].startswith(prefix)]
+
+
+def _successor_records(rig) -> List[dict]:
+    path = Path(json.loads((rig["stub"] / "turn.json").read_text())["transcript"])
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def _goal_outcomes(rig) -> List[dict]:
+    return _only(_receipts(rig), "t0_context_rotation_goal_followup")
+
+
 # ── refusals ─────────────────────────────────────────────────────────────────
 
 
@@ -539,13 +649,9 @@ def test_active_goal_is_resumed_after_the_first_turn(rig):
     _assert_enter_always_separate(rig)
 
     calls = _calls(rig)
-    kickoff_enter = next(i for i, c in enumerate(calls) if c[:1] == ["send-keys"] and "-l" in c
-                         and "/kickoff" in c[-1]) + 1
-    goal_typed = next(i for i, c in enumerate(calls) if c[:1] == ["send-keys"] and "-l" in c
-                      and c[-1].startswith("/goal "))
-    # the turn was watched: busy captures, then idle, before the /goal was typed
-    captures_between = [c for c in calls[kickoff_enter:goal_typed] if c[0] == "capture-pane"]
-    assert len(captures_between) >= 4
+    # the kickoff turn ended in the successor's transcript before the /goal was typed
+    [goal_typed] = _typed_at(rig, "/goal ")
+    assert _turn_ends(rig) and _turn_ends(rig)[0] < goal_typed
     assert any(c[0] == "run-shell" and c[1] == "-b" for c in calls)
 
     outcome = [r for r in _receipts(rig) if r["trigger"] == "t0_context_rotation_goal_followup"]
@@ -1276,7 +1382,7 @@ NOISE = [
 ]
 
 
-def _job(rig, records, *, extra_env: Dict[str, str] = None, timeout: str = "0"):
+def _job(rig, records, *, extra_env: Dict[str, str] = None, timeout: str = "0", extra_args=()):
     config = rig["tmp"] / "config"
     project_dir = config / "projects" / "-some-project"
     project_dir.mkdir(parents=True, exist_ok=True)
@@ -1289,7 +1395,7 @@ def _job(rig, records, *, extra_env: Dict[str, str] = None, timeout: str = "0"):
         [sys.executable, str(DELIVERY), "--run-dir", str(run_dir), "--session-uuid", JOB_UUID,
          "--config-dir", str(config), "--expected", f"/kickoff rotatie {JOB_RUN_ID}",
          "--old-window", OLD_WIN, "--new-window", NEW_WIN, "--tmux", str(rig["tmp"] / "bin" / "tmux"),
-         "--timeout", timeout, "--poll", "0.05"],
+         "--timeout", timeout, "--poll", "0.05", *extra_args],
         env={**rig["env"], **(extra_env or {})}, capture_output=True, text=True, timeout=60)
     delivery = run_dir / "delivery.json"
     return proc, (json.loads(delivery.read_text(encoding="utf-8")) if delivery.exists() else None), run_dir
@@ -1552,3 +1658,141 @@ def test_the_spawner_flow_confirms_each_form_of_the_start_argument(rig, mode):
     delivery = json.loads((_run_dir(rig) / "delivery.json").read_text(encoding="utf-8"))
     assert delivery["outcome"] == "confirmed"
     assert _kills(rig) == [["kill-window", "-t", OLD_WIN]]
+
+
+# ── the /goal follow-up reads the successor's transcript (dispatch dlv-259886a390ec) ──
+# Measured 2026-10-22 on claude 2.1.308: a running turn shows `✳ Tempering… (52s · ↓ 4.5k tokens
+# · thought for 13s)` with the footer still on screen and no `esc to interrupt`. In
+# rotation-20261022-170308-53038 and rotation-20261022-191855-76425 the follow-up read that as
+# idle and typed /goal into the kickoff turn; the transcript queued it and holds no /goal entry.
+
+GOAL_LINE = ("/goal werk alle open blockers af tot de lijst leeg is, hervat na context-rotatie; "
+             "resterend: OI-1850 sluiten; OI-1851 fixen")
+
+
+def _goal_entries(rig) -> List[dict]:
+    return [r for r in _successor_records(rig) if r.get("type") == "user"
+            and isinstance(r["message"]["content"], str)
+            and r["message"]["content"].startswith("<command-name>/goal</command-name>")]
+
+
+@pytest.mark.parametrize("screen", ["2.1.308", "idle"])
+def test_the_goal_waits_for_the_end_of_the_kickoff_turn_in_the_transcript(rig, screen):
+    """Red run on origin/main: the follow-up waited for `esc to interrupt`, never saw it, read the
+    2.1.308 busy screen (spinner plus footer) as idle and typed /goal into the kickoff turn."""
+    _handoff(rig, HANDOFF_BASE + GOAL_SECTION)
+    proc = _spawn(rig, env_extra={"STUB_TRANSCRIPT": "expanded", "STUB_TURN_CAPTURES": "12",
+                                  "STUB_SCREEN": screen})
+    assert proc.returncode == 0, proc.stderr
+    ends, goal_typed = _turn_ends(rig), _typed_at(rig, "/goal ")
+    assert ends, "the kickoff turn never ended in the transcript"
+    assert goal_typed and goal_typed[0] > ends[0], (
+        f"/goal typed at call {goal_typed[:1]}, the kickoff turn ended at call {ends[0]}")
+    assert len(goal_typed) == 1 and len(_goal_entries(rig)) == 1
+    assert [r["outcome"] for r in _goal_outcomes(rig)] == ["confirmed"]
+
+
+def test_goal_active_on_screen_without_a_transcript_entry_is_unconfirmed(rig):
+    """The screen is a second opinion: `/goal active` without a /goal user entry after the kickoff
+    entry is no arrival (on origin/main the screen alone confirmed it)."""
+    _handoff(rig, HANDOFF_BASE + GOAL_SECTION)
+    proc = _spawn(rig, env_extra={"STUB_TRANSCRIPT": "expanded", "STUB_GOAL_SCREEN_ONLY": "1"})
+    assert proc.returncode == 0, proc.stderr
+    assert _goal_entries(rig) == []
+    [outcome] = _goal_outcomes(rig)
+    assert outcome["outcome"] == "unconfirmed" and outcome["screen_goal_active"] == "1"
+    assert len(_typed_at(rig, "/goal ")) == 2
+    assert _typed(rig)[-1].startswith("LET OP: het automatische /goal-vervolg")
+    _assert_enter_always_separate(rig)
+
+
+def test_the_retry_waits_for_an_idle_turn_and_types_a_queued_line_again(rig):
+    """A task notification starts a turn just before the /goal lands: the line is queued (on
+    screen, no /goal entry). The retry waits until that turn ended in the transcript and types the
+    line again; Enter alone would land in an empty input box."""
+    _handoff(rig, HANDOFF_BASE + GOAL_SECTION)
+    proc = _spawn(rig, env_extra={"STUB_TRANSCRIPT": "expanded", "STUB_TURN_BEFORE_GOAL": "1",
+                                  "STUB_BUSY_CAPTURES": "8"})
+    assert proc.returncode == 0, proc.stderr
+    ends, goal_typed = _turn_ends(rig), _typed_at(rig, "/goal ")
+    assert len(goal_typed) == 2, _typed(rig)
+    assert len(ends) >= 2 and goal_typed[0] < ends[1] < goal_typed[1], (goal_typed, ends)
+    assert len(_goal_entries(rig)) == 1
+    assert [r["outcome"] for r in _goal_outcomes(rig)] == ["confirmed"]
+    _assert_enter_always_separate(rig)
+
+
+def test_the_fallback_waits_for_an_idle_turn(rig):
+    """The /goal never lands and a turn starts just before the retry lands: the LET OP line goes
+    in only after that turn ended in the transcript."""
+    _handoff(rig, HANDOFF_BASE + GOAL_SECTION)
+    proc = _spawn(rig, env_extra={"STUB_TRANSCRIPT": "expanded", "STUB_GOAL_NEVER": "1",
+                                  "STUB_TURN_BEFORE_GOAL": "2", "STUB_BUSY_CAPTURES": "8"})
+    assert proc.returncode == 0, proc.stderr
+    ends, goal_typed, let_op = _turn_ends(rig), _typed_at(rig, "/goal "), _typed_at(rig, "LET OP: ")
+    assert len(goal_typed) == 2 and len(let_op) == 1, _typed(rig)
+    assert len(ends) >= 2 and goal_typed[1] < ends[1] < let_op[0], (goal_typed, ends, let_op)
+    [outcome] = _goal_outcomes(rig)
+    assert outcome["outcome"] == "unconfirmed" and outcome["fallback"] == "typed"
+    assert any(c[c.index("-t") + 1] == NEW_WIN and "unconfirmed" in c[-1] for c in _notes(rig))
+
+
+def test_a_turn_that_never_ends_books_turn_timeout_and_types_nothing(rig):
+    """VNX_T0_ROTATE_TURN_TIMEOUT bounds the wait. The session never was idle, so neither the
+    /goal nor the LET OP line is typed; the status line and the receipt name the outcome."""
+    _handoff(rig, HANDOFF_BASE + GOAL_SECTION)
+    proc = _spawn(rig, env_extra={"STUB_TRANSCRIPT": "expanded", "STUB_TURN_CAPTURES": "1000",
+                                  "VNX_T0_ROTATE_TURN_TIMEOUT": "6"})
+    assert proc.returncode == 0, proc.stderr
+    assert _turn_ends(rig) == []
+    assert len(_typed(rig)) == 1, _typed(rig)
+    [outcome] = _goal_outcomes(rig)
+    assert outcome["outcome"] == "turn_timeout" and outcome["fallback"] == "not_typed"
+    notes = [c for c in _notes(rig) if c[c.index("-t") + 1] == NEW_WIN]
+    assert notes and "turn_timeout" in notes[-1][-1]
+    assert _kills(rig) == [["kill-window", "-t", OLD_WIN]], "the job closes the old window after the follow-up"
+
+
+@pytest.mark.parametrize("screen", ["2.1.308", "legacy"])
+def test_a_spinner_on_screen_holds_the_goal_after_the_transcript_turn_end(rig, screen):
+    """The second opinion: the default busy pattern knows the 2.1.308 spinner (no `esc to
+    interrupt`) and the older one; while the screen shows it, the transcript's idle waits."""
+    _handoff(rig, HANDOFF_BASE + GOAL_SECTION)
+    proc = _spawn(rig, env_extra={"STUB_TRANSCRIPT": "expanded", "STUB_SCREEN": screen,
+                                  "STUB_SCREEN_LAG": "5"})
+    assert proc.returncode == 0, proc.stderr
+    calls = _calls(rig)
+    end = _turn_ends(rig)[0]
+    [goal_typed] = _typed_at(rig, "/goal ")
+    # the capture that saw the end, four more with the spinner, then two idle ones
+    assert len([c for c in calls[end:goal_typed] if c[0] == "capture-pane"]) >= 7
+    assert [r["outcome"] for r in _goal_outcomes(rig)] == ["confirmed"]
+
+
+def test_the_job_hands_the_transcript_of_the_delivery_check_to_the_followup(rig):
+    """The follow-up reads the transcript the delivery check read (delivery.json), never a search."""
+    argv_file = rig["tmp"] / "followup-argv.txt"
+    recorder = rig["tmp"] / "followup-recorder.sh"
+    recorder.write_text(f'#!/usr/bin/env bash\nprintf "%s\\n" "$@" > {shlex.quote(str(argv_file))}\n',
+                        encoding="utf-8")
+    goal = rig["tmp"] / "goal.txt"
+    goal.write_text(GOAL_LINE, encoding="utf-8")
+    proc, delivery, _ = _job(rig, NOISE + [KICKOFF_RECORD],
+                             extra_args=("--goal-file", str(goal), "--followup-script", str(recorder)))
+    assert proc.returncode == 0, proc.stderr
+    argv = argv_file.read_text(encoding="utf-8").splitlines()
+    assert argv[0] == "--goal-followup"
+    assert argv[argv.index("--transcript") + 1] == delivery["transcript"]
+    assert _kills(rig) == [["kill-window", "-t", OLD_WIN]]
+
+
+def test_the_followup_without_a_transcript_types_nothing(rig):
+    goal = rig["tmp"] / "goal.txt"
+    goal.write_text(GOAL_LINE, encoding="utf-8")
+    proc = subprocess.run(["bash", str(SPAWN), "--goal-followup", "--target", NEW_WIN,
+                           "--goal-file", str(goal), "--event-file", str(goal)],
+                          env=rig["env"], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 2, proc.stderr
+    assert "--transcript" in proc.stderr
+    assert not any(c[0] == "send-keys" for c in _calls(rig))
+    assert _goal_outcomes(rig) == []

@@ -8,7 +8,8 @@ ledger under three names.
 
 Canonical name = the registry key (e.g. ``opus-5``, ``sonnet-5``,
 ``deepseek-v4-pro``, ``kimi-k3``). Variants are matched against registry keys,
-``litellm_name``, ``cli_model_arg``, and their provider-prefix-stripped forms:
+their ``aliases``, ``litellm_name``, ``cli_model_arg``, and the
+provider-prefix-stripped forms of the last two:
 
   deepseek/deepseek-v4-pro      -> deepseek-v4-pro
   moonshot/kimi-k2-0905-preview -> kimi-k2-0905-default
@@ -20,6 +21,10 @@ Canonical name = the registry key (e.g. ``opus-5``, ``sonnet-5``,
   claude-sonnet-5-5             -> sonnet-5-5
   claude-sonnet-4-6             -> sonnet-4-6
   claude-fable-5                -> fable-5
+
+``comparable_model_name()`` goes one step further, to the model that answers
+the name (``sonnet`` and ``claude-sonnet-5-5`` are one model), for the review
+rule that a reviewer never runs the builder's model.
 
 Unknown/unmapped strings pass through unchanged — the caller decides how to
 treat them (receipt validation fails closed on them; routing rejects them
@@ -112,7 +117,9 @@ def _build_alias_map() -> Dict[str, str]:
         (so ``deepseek/deepseek-v4-pro`` and
         ``anthropic/claude-opus-4-8`` resolve without knowing the provider
         prefix, and the kimi CLI's ``kimi-code/kimi-for-coding`` resolves to
-        ``kimi-k2-7`` from its bare ``kimi-for-coding`` spelling).
+        ``kimi-k2-7`` from its bare ``kimi-for-coding`` spelling),
+      - every name in the entry's ``aliases`` (ADR-043: ``haiku-4-5`` is
+        ``haiku``).
     """
     alias_sets: Dict[str, list] = {}
     for cfg in _load_registry().values():
@@ -120,7 +127,8 @@ def _build_alias_map() -> Dict[str, str]:
             key_norm = _norm(key)
             if not key_norm:
                 continue
-            aliases = {key_norm}
+            aliases = {key_norm} | {_norm(alias) for alias in (getattr(entry, "aliases", None) or [])}
+            aliases.discard("")
             litellm = _norm(getattr(entry, "litellm_name", "") or "")
             if litellm:
                 aliases.add(litellm)
@@ -213,6 +221,63 @@ def normalize_model_name(model: Optional[str]) -> str:
     return raw
 
 
+def _own_serving_name(entry) -> str:
+    """The id the vendor is called with for *entry*, without a litellm routing prefix; "" when it names none."""
+    litellm = _norm(getattr(entry, "litellm_name", "") or "")
+    if litellm:
+        return litellm.rsplit("/", 1)[-1]
+    return _norm(getattr(entry, "cli_model_arg", "") or "")
+
+
+def _serving_names() -> Dict[str, set]:
+    """Registry key -> the ids of the models its entries are answered by.
+
+    Read from the cached registry on every call and not cached itself, so a
+    test that resets the registry cache cannot leave a stale copy of this behind.
+    """
+    entries: Dict[str, list] = {}
+    for cfg in _load_registry().values():
+        for key, entry in (getattr(cfg, "models", None) or {}).items():
+            entries.setdefault(_norm(key), []).append(entry)
+    served: Dict[str, set] = {}
+    for key, key_entries in entries.items():
+        names: set = set()
+        for entry in key_entries:
+            successor = _norm(getattr(entry, "served_by", None) or "")
+            sources = entries.get(successor, []) if successor else [entry]
+            names.update(name for name in map(_own_serving_name, sources) if name)
+        served[key] = names
+    return served
+
+
+def comparable_model_name(model: Optional[str]) -> str:
+    """The registry key of the model that answers requests for *model*; "" when the registry cannot say.
+
+    Two names are the same model exactly when this is the same non-empty value
+    for both. The name resolves to its registry key (:func:`normalize_model_name`),
+    the key to the model its entries are answered by: the entry's ``served_by``
+    when the vendor answers it with another model (the phased-out
+    ``deepseek-v4-flash`` is ``deepseek-flash``), else the id it is called with
+    (``litellm_name`` without its routing prefix, else ``cli_model_arg``). Keys
+    answered by the same model are one model: ``sonnet`` and
+    ``claude-sonnet-5-5`` are both ``sonnet-5-5``, ``opus`` is ``opus-4-8``.
+
+    Empty, never guessed, for a name that is no registry key or alias, for a key
+    whose entries name nothing that answers it (``kimi-default``), and for a key
+    whose entries name two different models. Use it to ask "is this the same
+    model?"; ledger writers keep :func:`normalize_model_name` and the name that
+    was called.
+    """
+    if is_unknown_model(model):
+        return ""
+    served = _serving_names()
+    names = served.get(_norm(normalize_model_name(model)), set())
+    if len(names) != 1:
+        return ""
+    same_model = [key for key, key_names in served.items() if key_names == names]
+    return _best_canonical_key(next(iter(names)), same_model)
+
+
 def is_unknown_model(model: Optional[str]) -> bool:
     """True when the model is absent or an explicit unknown sentinel.
 
@@ -262,6 +327,7 @@ def tier_for_model(model: Optional[str]) -> Optional[str]:
 
 __all__ = [
     "canonical_model_names",
+    "comparable_model_name",
     "is_unknown_model",
     "normalize_model_name",
     "tier_for_model",

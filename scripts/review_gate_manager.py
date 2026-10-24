@@ -298,6 +298,31 @@ def _print_round_refusals(result: Dict[str, Any]) -> None:
             print(f"REFUSED ({reason}) seat {detail.get('seat') or gate.get('gate')}: {text}", file=sys.stderr)
 
 
+def _print_risk_class(result: Dict[str, Any]) -> None:
+    """Name the risk class the round was requested under and why (R3a), on stderr."""
+    risk = result.get("review_risk")
+    if not isinstance(risk, dict):
+        return
+    line = f"RISK CLASS {risk.get('risk_class')}: {risk.get('reason')}"
+    if risk.get("caller") is not None:
+        line += f" (caller said {risk.get('caller')!r})"
+    print(line, file=sys.stderr)
+
+
+def _print_in_flight(result: Dict[str, Any]) -> bool:
+    """Name every gate this call did not launch because a run of it is in flight (R10); True when there was one."""
+    import gate_run_guard
+
+    entries = result.get("gates") if isinstance(result.get("gates"), list) else [{"detail": result}]
+    found = False
+    for entry in entries:
+        detail = entry.get("detail") or {}
+        if detail.get("status") == gate_run_guard.IN_FLIGHT_STATUS:
+            found = True
+            print(f"IN FLIGHT ({detail.get('reason')}) {detail.get('gate')}: {detail.get('reason_detail')}", file=sys.stderr)
+    return found
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser with all subcommands."""
     parser = argparse.ArgumentParser(description="VNX review gate manager")
@@ -311,7 +336,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Comma-separated stack; omitted = the project's VNX_DEFAULT_REVIEW_STACK, "
         "resolved when the request runs (review_seats)",
     )
-    request_parser.add_argument("--risk-class", default="medium")
+    request_parser.add_argument(
+        "--risk-class", default="medium",
+        help="Raises the risk class derived from the PR diff; a lower value never lowers it (R3a)",
+    )
     request_parser.add_argument("--changed-files", default="")
     request_parser.add_argument("--mode", choices=("per_pr", "final"), default="per_pr")
     request_parser.add_argument("--dispatch-id", default="")
@@ -345,7 +373,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Comma-separated stack; omitted = the project's VNX_DEFAULT_REVIEW_STACK, "
         "resolved when the request runs (review_seats)",
     )
-    rexec_parser.add_argument("--risk-class", default="medium")
+    rexec_parser.add_argument(
+        "--risk-class", default="medium",
+        help="Raises the risk class derived from the PR diff; a lower value never lowers it (R3a)",
+    )
     rexec_parser.add_argument("--changed-files", default="")
     rexec_parser.add_argument("--mode", choices=("per_pr", "final"), default="per_pr")
     rexec_parser.add_argument("--dispatch-id", default="")
@@ -386,7 +417,9 @@ def _handle_request_and_execute(manager: ReviewGateManager, args: argparse.Names
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
     print(json.dumps(result, indent=2))
+    _print_risk_class(result)
     _print_round_refusals(result)
+    _print_in_flight(result)
     if result.get("has_required_failure"):
         # OI-1178: surface every gate of this call that did not PASS, not just
         # the not_executable/not_configured ones. An executed gate that booked
@@ -462,6 +495,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 2
         print(json.dumps(result, indent=2))
+        _print_risk_class(result)
         return 0
 
     if args.command == "record-result":
@@ -473,7 +507,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.command == "execute":
         result = manager.execute_gate(gate=args.gate, pr_number=args.pr, pr_id=args.pr_id)
         print(json.dumps(result, indent=2))
-        return 0
+        # R10: a run of this gate on this head is in flight elsewhere: nothing ran.
+        return 1 if _print_in_flight(result) else 0
 
     if args.command == "status":
         print(json.dumps(manager.status(args.pr), indent=2))

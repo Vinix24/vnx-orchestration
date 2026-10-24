@@ -12,6 +12,16 @@ worktree so the gate subprocess's `cwd` matches the diff it is reviewing, and
 removes the worktree unconditionally afterward (success or failure) so no
 per-execution worktree leaks and the orchestrator's own checkout is never
 touched (no `git checkout` in the caller's tree).
+
+R9 (dlv-8acd09eb3983): every gate worktree also gets a fixed, gate-authored
+AGENTS.md at its root. codex loads an AGENTS.md by itself at start and its own
+system prompt tells the model to follow such files; the repo's root AGENTS.md
+is gitignored, so the worktree had none and codex spent its first turn
+searching for one, also outside the repo, and sent that output again on every
+later turn. The file is written by the gate and never taken from the tree under
+review: a PR that changes AGENTS.md would otherwise write its reviewer's
+instructions. For git the worktree stays the PR's tree (see
+``_install_review_instructions``).
 """
 
 from __future__ import annotations
@@ -24,7 +34,9 @@ import shutil
 import subprocess
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional, Sequence
+
+from atomic_io import atomic_write_text
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +52,31 @@ _SAFE_BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 # Managed worktree directory prefix — must match _worktree_dir() below. Used
 # by remove_gate_worktree to scope its shutil.rmtree fallback.
 _MANAGED_WORKTREE_PREFIX = "gate-"
+
+# The gate-authored instruction file (R9). codex 0.153.4 reads, per directory
+# from the project root (nearest ancestor holding `.git`) down to its cwd, the
+# first of AGENTS.override.md, AGENTS.md, then the configured
+# project_doc_fallback_filenames (default empty). The gate runs the reviewer
+# with cwd at the worktree root, so this name at that root is what it loads.
+# R12: the last sentence. The rest says where not to look, and on a small diff
+# codex then looked nowhere and was refused as degenerate (PR #2173).
+REVIEW_INSTRUCTIONS_FILENAME = "AGENTS.md"
+REVIEW_INSTRUCTIONS_TEXT = (
+    "# Review workspace\n"
+    "\n"
+    "This directory is a disposable checkout made by the VNX review gate. "
+    "Every instruction for this review is in the prompt you were given. "
+    "There are no other AGENTS.md files to follow: do not search for AGENTS.md, "
+    "CLAUDE.md or other instruction files, in this directory or outside it, "
+    "and do not read outside this directory. "
+    "Inside it, the files are there to check the diff against before you give "
+    "your verdict.\n"
+)
+
+# Names that win over AGENTS.md in the same directory and are therefore
+# removed from the worktree. A fallback filename only counts when AGENTS.md is
+# absent, so it can never win over the gate's file.
+_OUTRANKING_INSTRUCTION_FILENAMES = ("AGENTS.override.md",)
 
 
 class GateWorktreeError(RuntimeError):
@@ -163,6 +200,121 @@ def fetch_branch(
     return root
 
 
+def _git_in_worktree(wt_path: Path, args: Sequence[str], *, stdin: Optional[str] = None) -> str:
+    """Run one git command in the gate worktree; a failure is a GateWorktreeError."""
+    try:
+        proc = subprocess.run(
+            ["git", *args], cwd=str(wt_path), input=stdin,
+            check=True, capture_output=True, text=True, timeout=30,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        detail = getattr(exc, "stderr", "") or str(exc)
+        raise GateWorktreeError(f"git {' '.join(args)} failed in {wt_path}: {detail}") from exc
+    return proc.stdout
+
+
+def _icase(names: Sequence[str]) -> List[str]:
+    """Pathspecs matching *names* without case.
+
+    On a case-insensitive filesystem (the APFS default) a tracked `agents.md`
+    is the very file codex opens as AGENTS.md.
+    """
+    return [f":(icase){name}" for name in names]
+
+
+def _tracked_entries(wt_path: Path, pathspecs: Sequence[str]) -> List[str]:
+    out = _git_in_worktree(wt_path, ["ls-files", "-z", "--", *pathspecs])
+    return [entry for entry in out.split("\0") if entry]
+
+
+def _visible_to_git(wt_path: Path, pathspecs: Sequence[str]) -> List[str]:
+    """`git status --porcelain` entries for *pathspecs*, untracked files included."""
+    out = _git_in_worktree(
+        wt_path, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", *pathspecs],
+    )
+    return [entry for entry in out.split("\0") if entry]
+
+
+def _skip_worktree(wt_path: Path, entries: Sequence[str]) -> None:
+    """Set skip-worktree on *entries* in this worktree's own index.
+
+    A linked worktree has an index of its own
+    (``<common-dir>/worktrees/<id>/index``), so the bit changes nothing for
+    the main checkout or any other worktree. git stops comparing the copy on
+    disk with the index: HEAD and the index keep the PR's version.
+    """
+    if entries:
+        _git_in_worktree(
+            wt_path, ["update-index", "--skip-worktree", "-z", "--stdin"],
+            stdin="".join(f"{entry}\0" for entry in entries),
+        )
+
+
+def _remove_entry(path: Path) -> None:
+    """Remove the file, symlink or directory at *path*; a symlink is never followed."""
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+
+
+def _ignore_in_worktree(wt_path: Path, name: str) -> None:
+    """Ignore an untracked, unignored *name* through the worktree's own root .gitignore.
+
+    git has no exclude file per worktree: ``info/exclude`` lives in the common
+    dir and every worktree shares it, and a per-worktree ``core.excludesFile``
+    needs ``extensions.worktreeConfig`` in the shared config. The root
+    .gitignore on disk belongs to this worktree alone. When the PR tracks one,
+    its rules stay, the rule is appended and skip-worktree hides the change;
+    when it does not, the new file ignores itself as well.
+    """
+    gitignore = wt_path / ".gitignore"
+    tracked = _tracked_entries(wt_path, [".gitignore"])
+    existing = ""
+    if gitignore.is_file() and not gitignore.is_symlink():
+        # latin-1 maps every byte to one code point, so the PR's bytes come
+        # back unchanged whatever their encoding.
+        existing = gitignore.read_bytes().decode("latin-1")
+    else:
+        _remove_entry(gitignore)
+    if existing and not existing.endswith("\n"):
+        existing += "\n"
+    rules = [f"/{name}"] if tracked else [f"/{name}", "/.gitignore"]
+    atomic_write_text(gitignore, existing + "\n".join(rules) + "\n", encoding="latin-1")
+    _skip_worktree(wt_path, tracked)
+
+
+def _install_review_instructions(wt_path: Path) -> None:
+    """Write the gate-authored AGENTS.md into a fresh gate worktree (R9).
+
+    Whatever the PR tree holds under that name, or under a name that outranks
+    it, is replaced in the worktree only, and `git status --porcelain` stays
+    empty for every name touched here, whatever its state in the PR tree:
+      * ignored (this repo's `/AGENTS.md`): nothing more to do;
+      * tracked: skip-worktree in the worktree's own index, so git keeps the
+        PR's version and the reviewer sees it only through the diff;
+      * neither: an ignore rule in the worktree's own root .gitignore.
+    The result is checked: a name git still sees fails the setup.
+    """
+    names = (REVIEW_INSTRUCTIONS_FILENAME, *_OUTRANKING_INSTRUCTION_FILENAMES)
+    target = wt_path / REVIEW_INSTRUCTIONS_FILENAME
+    try:
+        _skip_worktree(wt_path, _tracked_entries(wt_path, _icase(names)))
+        for name in names:
+            _remove_entry(wt_path / name)
+        atomic_write_text(target, REVIEW_INSTRUCTIONS_TEXT)
+        if _visible_to_git(wt_path, [REVIEW_INSTRUCTIONS_FILENAME]):
+            _ignore_in_worktree(wt_path, REVIEW_INSTRUCTIONS_FILENAME)
+        still_visible = _visible_to_git(wt_path, [*_icase(names), ".gitignore"])
+        written = target.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise GateWorktreeError(f"placing {target} failed: {exc}") from exc
+    if still_visible:
+        raise GateWorktreeError(f"git still sees {still_visible!r} after writing {target}")
+    if written != REVIEW_INSTRUCTIONS_TEXT:
+        raise GateWorktreeError(f"{target} does not hold the gate's text after writing")
+
+
 def create_gate_worktree(
     *,
     branch: str,
@@ -175,10 +327,13 @@ def create_gate_worktree(
     Steps:
       1. git fetch origin <branch>  (via fetch_branch — validates + fetches)
       2. git worktree add --detach <path> origin/<branch>
+      3. write the gate-authored AGENTS.md at the worktree root (R9), for
+         every gate alike: a reviewer that does not load it pays nothing
 
-    Raises GateWorktreeError when branch is empty or either git step fails —
+    Raises GateWorktreeError when branch is empty or any step fails —
     callers must fail the gate rather than silently falling back to the
-    orchestrator's (possibly stale) checkout.
+    orchestrator's (possibly stale) checkout, or reviewing without the file.
+    A worktree whose step 3 failed is removed before the error is raised.
     """
     root = fetch_branch(branch, gate=gate, identifier=identifier, project_root=project_root)
     wt_path = _worktree_dir(root, gate, identifier)
@@ -195,6 +350,15 @@ def create_gate_worktree(
         raise GateWorktreeError(
             f"create_gate_worktree: git worktree add failed for gate={gate!r} "
             f"branch={branch!r}: {detail}"
+        ) from exc
+
+    try:
+        _install_review_instructions(wt_path)
+    except GateWorktreeError as exc:
+        remove_gate_worktree(wt_path, project_root=root)
+        raise GateWorktreeError(
+            f"create_gate_worktree: review instructions not written for gate={gate!r} "
+            f"branch={branch!r}: {exc}"
         ) from exc
 
     log.info("gate worktree created: %s (origin/%s, detached)", wt_path, branch)

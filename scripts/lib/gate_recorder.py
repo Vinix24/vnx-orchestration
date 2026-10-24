@@ -98,6 +98,11 @@ GATE_PROVIDERS: Dict[str, Tuple[str, str]] = {
     # that was actually working. It is a config-based harness lane
     # ("deepseek-harness"), not a repo script, so it needs no file at all.
     "deepseek_gate": (GATE_PROVIDER_HARNESS_LANE, "deepseek-harness"),
+    # R7 (operator decision 2026-10-22): the claude review seat, `claude -p` on
+    # the operator's subscription. Same harness-lane path in gate_runner as
+    # deepseek_gate; its dispatcher is claude_gate_lane, never provider_dispatch,
+    # which refuses claude.
+    "claude_gate": (GATE_PROVIDER_HARNESS_LANE, "claude"),
 }
 
 # Backward-compatible view: only the gates that really do resolve to a PATH
@@ -343,6 +348,10 @@ EXECUTION_FAILURE_REASONS: frozenset = frozenset({
     # registry or no openai.default_model; OI-2062). The gate never started,
     # exactly like `binary_not_found`: it books `unavailable`.
     "codex_model_unresolved",
+    # VNX_CODEX_REVIEW_EFFORT holds a value codex has no reasoning effort for
+    # (OI-2288). Refused before the launch, like codex_model_unresolved: the
+    # gate never started, so it books `unavailable` under its own name.
+    "codex_review_effort_invalid",
     # The gate ran to completion and investigated nothing (OI-1485). Absence
     # of evidence, exactly like a timeout: the PR was never actually reviewed,
     # so this must book `unavailable` and be re-bought, never `failed` (which
@@ -750,6 +759,9 @@ _TAKEOVER_FIELDS: Tuple[str, ...] = (
 # The request fields the round ledger (R1, ``review_rounds``) reads off a verdict:
 # the seat the request filled, and an ``--override-b3`` the request applied.
 _ROUND_FIELDS: Tuple[str, ...] = ("seat", "override_b3")
+# Operator decisions a request carries into its result (R10): the reason of a
+# force-rerun from the obligation runner (``gate_run_guard.force_rerun_record``).
+_OPERATOR_FIELDS: Tuple[str, ...] = ("force_rerun",)
 
 
 def stamp_request_identity(
@@ -816,10 +828,28 @@ def stamp_request_identity(
             result_payload[field] = request_payload.get(field)
     # R1: the seat the request filled and an applied --override-b3 travel with the
     # verdict, so the round ledger books it in that seat, with that override.
-    for field in _ROUND_FIELDS:
+    # R10: a force-rerun's reason travels the same way, so the result says why it ran.
+    for field in _ROUND_FIELDS + _OPERATOR_FIELDS:
         if request_payload.get(field):
             result_payload[field] = request_payload[field]
     return result_payload
+
+
+def stamp_codex_launch(record: Dict[str, Any], request_payload: Dict[str, Any]) -> None:
+    """Copy the model and reasoning effort codex was launched with onto a record (OI-2288).
+
+    ``gate_runner._build_gate_cmd`` puts both on the request under
+    ``codex_launch`` when it builds the codex command. The result record of a
+    finished run (``gate_artifacts``) and the record of a failed one
+    (:func:`record_failure`: a timeout, a stall, a degenerate run) both read
+    them here, so an effort comparison counts the runs that failed too. A
+    request without ``codex_launch``, or with one that is not a dict, never
+    launched codex with a known setting and stamps nothing.
+    """
+    codex_launch = request_payload.get("codex_launch")
+    if isinstance(codex_launch, dict):
+        record["model"] = str(codex_launch.get("model") or "")
+        record["reasoning_effort"] = str(codex_launch.get("reasoning_effort") or "")
 
 
 class ResultOverwriteRefused(ValueError):
@@ -2223,6 +2253,9 @@ def _failure_payload(
         and provider is not None and provider[0] == GATE_PROVIDER_HARNESS_LANE
     ):
         failure_payload["timeout_seconds"] = request_payload["timeout_seconds"]
+    # OI-2288: the model and effort a codex run was launched with, exactly as
+    # the success record carries them.
+    stamp_codex_launch(failure_payload, request_payload)
     if extra:
         # Identity and verdict are the record's own. So is the evidence trio:
         # `report_path`, `contract_hash` and `required_reruns` are what

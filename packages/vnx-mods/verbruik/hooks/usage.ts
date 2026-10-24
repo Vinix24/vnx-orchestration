@@ -221,6 +221,41 @@ const latestText = (iso: string): string => {
   return `${pad(moment.getDate())}-${pad(moment.getMonth() + 1)} ${pad(moment.getHours())}:${pad(moment.getMinutes())}`
 }
 
+const MINUTE_MS = 60_000
+const HOUR_MS = 60 * MINUTE_MS
+
+/** The time left until `ms` from now, rounded UP on the smallest unit shown so it never promises too early. */
+const leftText = (ms: number): string => {
+  const minutes = Math.ceil(ms / MINUTE_MS)
+
+  if (minutes < 60) {
+    return `${minutes}m`
+  }
+
+  if (minutes <= 24 * 60) {
+    return `${Math.floor(minutes / 60)}u ${pad(minutes % 60)}m`
+  }
+
+  const hours = Math.ceil(ms / HOUR_MS)
+
+  return `${Math.floor(hours / 24)}d ${pad(hours % 24)}u`
+}
+
+/** What a full kimi shows: the time left before the upper bound, the stored bound after it, plain text without one. */
+function kimiFullText(resetsAtLatest: string | undefined, now: number): { shown: string; tone: Tone } {
+  if (resetsAtLatest === undefined) {
+    return { shown: KIMI_FULL, tone: 'error' }
+  }
+
+  const bound = Date.parse(resetsAtLatest)
+
+  if (now >= bound) {
+    return { shown: `laatst vol, grens ${latestText(resetsAtLatest)} voorbij`, tone: 'warning' }
+  }
+
+  return { shown: `terug over ${leftText(bound - now)} (uiterlijk ${latestText(resetsAtLatest)})`, tone: 'error' }
+}
+
 const percentText = (percent: number): string => `${Number(percent.toFixed(1))}%`
 
 const balanceText = (balance: { currency: string; amount: number }): string => {
@@ -234,7 +269,7 @@ const WORST: readonly Tone[] = ['success', 'warning', 'error']
 
 const worst = (tones: Tone[]): Tone => tones.reduce<Tone>((a, b) => (WORST.indexOf(b) > WORST.indexOf(a) ? b : a), 'success')
 
-function providerSegment(name: ProviderName, figure: Figure, config: Config, isStale: boolean): Segment {
+function providerSegment(name: ProviderName, figure: Figure, config: Config, isStale: boolean, now: number): Segment {
   const stale = isStale ? ' (oud)' : ''
 
   if (figure.kind === 'unavailable') {
@@ -248,13 +283,15 @@ function providerSegment(name: ProviderName, figure: Figure, config: Config, isS
   }
 
   if (figure.kind === 'status') {
-    const tone: Tone = figure.text === KIMI_FULL ? 'error' : figure.text === 'bereikbaar' ? 'success' : 'warning'
-    const shown =
-      figure.text === KIMI_FULL && figure.resetsAtLatest !== undefined
-        ? `reset uiterlijk ${latestText(figure.resetsAtLatest)}`
-        : figure.text
+    if (figure.text === KIMI_FULL) {
+      const full = kimiFullText(figure.resetsAtLatest, now)
 
-    return { key: name, text: `${marked(`${name} ${shown}`, tone)}${stale}`, tone }
+      return { key: name, text: `${marked(`${name} ${full.shown}`, full.tone)}${stale}`, tone: full.tone }
+    }
+
+    const tone: Tone = figure.text === 'bereikbaar' ? 'success' : 'warning'
+
+    return { key: name, text: `${marked(`${name} ${figure.text}`, tone)}${stale}`, tone }
   }
 
   const tone = worst(figure.balances.map(balance => balanceTone(balance.amount, config)))
@@ -290,7 +327,8 @@ function claudeSegments(rateLimits: readonly RateLimit[], config: Config): Segme
 }
 
 /** The parts of the status line, most important first. */
-export function segmentsOf(rateLimits: readonly RateLimit[], fleet: Fleet, config: Config): Segment[] {
+/** `now` is the clock reading in milliseconds; the display never reads the time itself. */
+export function segmentsOf(rateLimits: readonly RateLimit[], fleet: Fleet, config: Config, now: number): Segment[] {
   const segments = claudeSegments(rateLimits, config)
 
   if (fleet.isTooOld) {
@@ -298,7 +336,7 @@ export function segmentsOf(rateLimits: readonly RateLimit[], fleet: Fleet, confi
   }
 
   const stale = fleet.cause !== null
-  const rows = (fleet.report?.rows ?? []).map(row => providerSegment(row.name, row.figure, config, stale))
+  const rows = (fleet.report?.rows ?? []).map(row => providerSegment(row.name, row.figure, config, stale, now))
 
   if (fleet.cause !== null) {
     rows.push({ key: 'notice', text: `vnx-meting mislukt: ${fleet.cause}`, tone: 'dim' })
@@ -335,16 +373,16 @@ export function fit(segments: readonly Segment[], columns: number | null): strin
 // The /verbruik text
 // ---------------------------------------------------------------------------
 
-function figureLines(name: ProviderName, figure: Figure, config: Config): string {
+function figureLines(name: ProviderName, figure: Figure, config: Config, now: number): string {
   if (figure.kind === 'unavailable') {
     return `${name}: niet beschikbaar, ${withoutPaths(figure.reason) || 'geen reden'}`
   }
 
-  return providerSegment(name, figure, config, false).text.replace(`${name} `, `${name}: `)
+  return providerSegment(name, figure, config, false, now).text.replace(`${name} `, `${name}: `)
 }
 
 /** Every provider with its figures or its reason, and when the report was measured. */
-export function commandText(rateLimits: readonly RateLimit[], fleet: Fleet, config: Config): string {
+export function commandText(rateLimits: readonly RateLimit[], fleet: Fleet, config: Config, now: number): string {
   const lines = ['Verbruik']
   const five = rateLimits.find(limit => limit.kind === 'five_hour')
   const week = rateLimits.find(limit => limit.kind === 'seven_day')
@@ -370,7 +408,7 @@ export function commandText(rateLimits: readonly RateLimit[], fleet: Fleet, conf
   const stale = fleet.cause !== null ? ' (oud)' : ''
 
   for (const row of fleet.report?.rows ?? []) {
-    lines.push(`${figureLines(row.name, row.figure, config)}${stale}`)
+    lines.push(`${figureLines(row.name, row.figure, config, now)}${stale}`)
   }
 
   if (fleet.report === null && fleet.cause === null) {

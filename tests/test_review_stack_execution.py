@@ -151,7 +151,13 @@ def lane(env, monkeypatch):
             return _PASS_REPORT
         return dispatch
 
+    def claude_factory(data_dir, *, base_ref, total_deadline_seconds, project_root=None):
+        # R7: claude_gate's dispatcher is claude_gate_lane's, never plan_gate_panel's.
+        return factory(data_dir, total_deadline_seconds, role="review-gate", base_ref=base_ref,
+                       total_deadline_seconds=total_deadline_seconds)
+
     monkeypatch.setattr("plan_gate_panel._make_default_dispatcher", factory)
+    monkeypatch.setattr("claude_gate_lane.make_claude_gate_dispatcher", claude_factory)
     monkeypatch.setattr(
         gate_runner.GateRunner, "_fetch_gh_pr_diff", staticmethod(lambda _pr: _DIFF),
     )
@@ -376,7 +382,7 @@ class TestCodexAtItsLimitGoesToKimi:
 
         result = _request(_manager(), None)
 
-        assert _requested_gates(result) == ["kimi_gate", "deepseek_gate"], (
+        assert _requested_gates(result) == ["kimi_gate", "claude_gate"], (
             "codex is exhausted: kimi takes its seat, and kimi's own seat goes to the next "
             f"distinct reviewer, never to kimi a second time. requested={_requested_gates(result)}"
         )
@@ -406,19 +412,21 @@ class TestCodexAtItsLimitGoesToKimi:
             dispatch_id="20260926-review-stack-subscription-first",
         )
 
-        assert [g["gate"] for g in result["gates"]] == ["kimi_gate", "deepseek_gate"]
+        assert [g["gate"] for g in result["gates"]] == ["kimi_gate", "claude_gate"]
         assert [g["passed"] for g in result["gates"]] == [True, True]
         providers = [call["provider"] for call in lane]
         assert providers.count("kimi") == 1, (
             f"kimi is a real, minutes-long provider call: it ran {providers.count('kimi')} times"
         )
-        assert len(providers) == 2, f"one run per seat, two seats: {providers}"
+        assert providers == ["kimi", "claude"], f"one run per seat, two seats: {providers}"
 
-    def test_both_subscription_seats_at_their_limit_on_the_default_chain_end_the_second_seat(self, env, default_stack):
-        """R4 (operator decision 2026-10-17): the default chain has no glm_gate, so kimi's seat ends as
-        chain_exhausted: no merge until a subscription reviewer is back."""
+    def test_every_subscription_seat_at_its_limit_on_the_default_chain_ends_the_second_seat(self, env, default_stack):
+        """R4 (operator decision 2026-10-17): the default chain has no glm_gate. With every
+        subscription reviewer out (codex, kimi and, since R7, claude), deepseek reads codex's seat
+        and kimi's seat ends as chain_exhausted: no merge until a subscription reviewer is back."""
         _write_result(env, "codex_gate", _CODEX_LIMIT_RECORD)
         _write_result(env, "kimi_gate", _KIMI_LIMIT_RECORD)
+        _write_result(env, "claude_gate", {**_KIMI_LIMIT_RECORD, "gate": "claude_gate"})
 
         result = _request(_manager(), None)
 
@@ -554,7 +562,7 @@ class TestOneRequestPerGateCountsOnlyRequestsThatWentOut:
         result = _request(_manager(), ["kimi_gate", "codex_gate"])
 
         assert len(calls) == 1
-        assert _requested_gates(result) == ["kimi_gate", "deepseek_gate"]
+        assert _requested_gates(result) == ["kimi_gate", "claude_gate"]
         assert [(hop["gate"], hop["reason"]) for hop in result["requested"][1]["takeover_path"]] == [
             ("codex_gate", "exit_nonzero"), ("kimi_gate", "reads_another_seat"),
         ]

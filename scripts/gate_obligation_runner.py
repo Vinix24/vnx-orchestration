@@ -71,7 +71,7 @@ runner fulfils them:
   9. D2e (2026-08-30, dispatch 20260830-120000-d2e-takeover-keten-bewijs):
      items 1-8 above only ever look at the DECLARED gate's own result file
      (``manager._result_path(gate, pr_number)``). But the review-gate
-     takeover chain (``codex_gate -> kimi_gate -> deepseek_gate -> glm_gate``,
+     takeover chain (default ``codex_gate -> kimi_gate -> claude_gate -> deepseek_gate``,
      ``gate_request_handler._build_review_gate_takeover_chain``, BETA3-E1)
      can already have substituted a SUCCESSOR gate as the reader at request
      time — and that successor writes its verdict under its OWN name, never
@@ -192,10 +192,34 @@ runner fulfils them:
       handling and is never treated as a mismatch. A result on the current
       head — including the takeover-successor path — still fulfils/fails
       exactly as before.
+  14. R10, one run per PR head (2026-10-22, ``claudedocs/2026-10-22-codex-druk.md``).
+      Measured: PR #2151 head ``24412e26`` got 13 codex runs, one per launchd
+      cycle, each refused as ``gate_execution_degenerate``; PR #2170 head
+      ``83bad6a0`` got a launchd run while a manual run on that head was still
+      going. Three guards around ``attempt_gate`` (:func:`_guard_launch`):
+      (a) the run lock of (project, PR, gate, head) from
+      ``scripts/lib/gate_run_guard.py``, non-blocking: held elsewhere, the
+      launch does not run, writes nothing to the obligation (no attempt
+      counted) and reports ``in_flight``; (b) under that lock the obligation
+      and the evidence are read again, so a verdict or a booking that landed
+      while this launch was on its way is used, never run over; (c) the retry
+      cap: at most ``gate_run_guard.MAX_REVIEWER_RUNS_PER_HEAD`` runs on one
+      head in which the reviewer ran without a bookable verdict
+      (:func:`_book_reviewer_run`), after which the obligation stays pending
+      under ``degenerate_retry_cap`` and reports ``retry_capped`` until the
+      head changes. A refusal that ran no reviewer (quota, capacity, a setup
+      failure) does not count. A run on a head that already has a decided,
+      complete-evidence verdict was already refused before this (item 10,
+      the RESOLVED branch of :func:`_pre_execution_decision`); (b) closes the
+      concurrent case. ``--force-rerun --reason`` is the one operator way past
+      (b) and (c), never past (a), and never past the round ledger's own
+      refusal of a second verdict in a seat (R1): the reason lands in the log,
+      on the obligation, the request and the result record.
 
 Scheduling: launchd ``com.vnx.gate-obligation-runner.plist`` (StartInterval
 900s); also safe to run manually at any time — fulfilment is idempotent
-(terminal obligations are never re-run).
+(terminal obligations are never re-run), and two runners never review one head
+at the same time (item 14).
 
 Exit codes: 0 = no open obligations remain after this run;
 11 = one or more obligations still open (pending or unresolvable);
@@ -221,8 +245,10 @@ from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
+import gate_run_guard
 from gate_obligations import (  # noqa: E402
     NO_GATE_KEY,
+    REASON_DEGENERATE_RETRY_CAP,
     REASON_DISPATCH_STILL_RUNNING,
     REASON_FAILED_BY_GATE_VERDICT,
     REASON_FAILED_BY_TAKEOVER,
@@ -342,6 +368,32 @@ _FAST_FULFILLMENT_MTIME_THRESHOLD_SECONDS = 60
 # holder exit, so no attempt count applies to it (see the branch's own
 # comment in :func:`_pre_execution_decision`).
 _STAY_PENDING_ESCALATION_ATTEMPTS = _UNRESOLVABLE_ESCALATION_ATTEMPTS
+
+# R10 (item 14 of the module docstring): the two outcomes a guarded launch adds.
+# Both leave the obligation open, so both count toward ``pending_after``.
+ACTION_IN_FLIGHT = "in_flight"
+ACTION_RETRY_CAPPED = "retry_capped"
+_OPEN_ACTIONS = frozenset({"pending", "unresolvable", ACTION_IN_FLIGHT, ACTION_RETRY_CAPPED})
+
+# OI-1532: stay_pending_live and stay_pending_unmeasured stay pending too (a live
+# / unmeasured dispatch is never closed), so their dry-run labels count toward
+# the pending backlog alongside the normal wait. escalate_stay_pending is
+# terminal and does NOT count.
+_DRY_RUN_OPEN_ACTIONS = frozenset({
+    "would_stay_pending",
+    "would_stay_pending_live",
+    "would_stay_pending_dispatch_live",
+    "would_stay_pending_unmeasured",
+    "would_stay_unresolvable",
+    "would_fulfill",
+    "would_stay_pending_sha_unverifiable",
+})
+
+# R10: the decisions an operator force-rerun turns into a run on an OPEN PR. A
+# verdict rescue is exactly what ``--force-rerun`` exists to pass; every other
+# decision (a live dispatch, a merged PR, an environment fault) stands.
+_FORCEABLE_DECISIONS = frozenset({"fulfill_by_evidence", "fulfill_by_failed_evidence", "sha_unverifiable"})
+_FORCE_RERUN_SET_BY = "gate_obligation_runner --force-rerun"
 
 # PR-resolution outcomes. The runner must tell "no PR yet" (a wait) apart from
 # "cannot resolve because the environment is wrong" (a fault) IN THE RECORD,
@@ -2429,12 +2481,342 @@ def _rejected_evidence_note(gate: str, decision: Dict[str, Any]) -> str:
     )
 
 
+def _book_existing_evidence(
+    path: Path,
+    record: Dict[str, Any],
+    decision: Dict[str, Any],
+    outcome: Dict[str, Any],
+    *,
+    dispatch_id: str,
+    gate: str,
+    attempts: int,
+    now: str,
+) -> Dict[str, Any]:
+    """Book the obligation from a verdict a gate already produced, never run again.
+
+    ``decision`` is a ``fulfill_by_evidence`` or ``fulfill_by_failed_evidence``
+    decision (:func:`_evidence_decision`); :func:`_fulfilling_result` never hands
+    either a not_executable or undecided-status record. Two callers: the
+    pre-execution rescue in :func:`fulfill_obligation`, and the recheck under the
+    run lock (:func:`_guard_launch`, R10), where a verdict that landed while this
+    launch was on its way is booked the same way.
+    """
+    evidence_path, evidence_record = decision["evidence"]
+    evidence_pr_number = evidence_record.get("pr_number") or record.get("pr_number")
+    booked = {
+        "pr_number": evidence_pr_number,
+        "branch": evidence_record.get("branch") or record.get("branch"),
+        "attempts": attempts,
+        "last_attempt_at": now,
+        "resolved_at": now,
+        "result_path": str(evidence_path),
+        "fulfilled_by": gate,
+        "takeover_gate": None,
+        "evidence_result_path": str(evidence_path),
+    }
+    if decision["kind"] == "fulfill_by_evidence":
+        # OI-1388 defect 1: a gate already produced a complete-evidence PASS
+        # for this dispatch+gate — book it fulfilled, never retired/escalated
+        # as unreviewed, regardless of why the retirement/escalation path was
+        # about to fire. BETA3-C2: this branch is PASS-only — a DECIDED FAIL
+        # takes the fulfill_by_failed_evidence branch below instead.
+        # OI-1764 point 2: this early (pre-execution) route computes the same
+        # fast-fulfillment warning the late (post-execution) route always does
+        # for the same terminal outcome — two routes to the same
+        # STATUS_FULFILLED outcome must carry the same tripwire.
+        fast_fulfillment_warning = _flag_fast_fulfillment_if_evidence_predates_attempt(
+            evidence_path, gate, evidence_pr_number, dispatch_id,
+        )
+        updated = update_obligation(
+            path,
+            status=STATUS_FULFILLED,
+            reason="fulfilled_by_existing_evidence",
+            reason_detail=(
+                f"{gate} already produced a complete-evidence PASS for "
+                f"dispatch {dispatch_id} ({evidence_path}) — OI-1388 defect 1: "
+                "a dispatch a gate already reviewed must never be retired or "
+                "escalated as unreviewed"
+            ),
+            **booked,
+        )
+        outcome["action"] = STATUS_FULFILLED
+        outcome["detail"] = (
+            "rescued by the OI-1388 evidence discriminator — a gate had "
+            "already reviewed and approved this dispatch"
+        )
+        outcome["result_path"] = updated.get("result_path")
+        if fast_fulfillment_warning:
+            outcome["fast_fulfillment_warning"] = fast_fulfillment_warning
+        return outcome
+
+    # BETA3-C2 (2026-08-26): a gate already produced a complete-evidence
+    # FAIL/ERRORED/BLOCKED verdict for this dispatch+gate. The obligation IS
+    # discharged — a gate genuinely reviewed this dispatch — but it must never
+    # be stamped STATUS_FULFILLED: every consumer that counts "reviewed" work
+    # treats fulfilled as a clean bill, and PR #1692's own glm_gate verdict on
+    # itself (pr-1692-glm_gate.json — a real ``fail`` with contract_hash and
+    # report_path both populated) is the live record of exactly what that
+    # would launder: a rejection rewritten into a pass. STATUS_FAILED is the
+    # pre-existing, already terminal vocabulary member gate_obligations.py
+    # defines for exactly this shape (see TERMINAL_STATUSES and
+    # producer_freshness.scan_gate_obligations's own "fulfilled /
+    # not_executable / failed" doc comment).
+    _passed, verdict_reason = _gate_is_pass(evidence_record)
+    updated = update_obligation(
+        path,
+        status=STATUS_FAILED,
+        reason="failed_by_existing_evidence",
+        reason_detail=(
+            f"{gate} already produced a complete-evidence FAIL for "
+            f"dispatch {dispatch_id} ({evidence_path}, {verdict_reason}) — "
+            "BETA3-C2: the gate DID review this, so the obligation is "
+            "discharged, but a rejection must never be booked as fulfilled"
+        ),
+        **booked,
+    )
+    outcome["action"] = STATUS_FAILED
+    outcome["detail"] = (
+        "rescued by the OI-1388 evidence discriminator as a FAILED "
+        f"verdict ({verdict_reason}) — a gate had already reviewed and "
+        "rejected this dispatch; never a clean pass"
+    )
+    outcome["result_path"] = updated.get("result_path")
+    return outcome
+
+
+def _temporary_refusal(
+    gate: str, pr_number: int, result_status: str, result_reason: str,
+) -> Tuple[Optional[str], Optional[str]]:
+    """``(reason, detail)`` when a gate result is a temporary refusal, ``(None, None)`` for a terminal one.
+
+    A temporary refusal stays pending under a bounded retry term, then
+    escalates loudly (OI-1384) — never burns the obligation on the first one.
+    """
+    if result_status in _TEMPORARY_RESULT_STATUSES:
+        return "gate_run_in_progress", (
+            f"{gate} for PR #{pr_number} is still running — no verdict yet, "
+            "not a failure; will be re-attempted on the next run"
+        )
+    if result_status == STATUS_NOT_EXECUTABLE and result_reason in _TEMPORARY_NOT_EXECUTABLE_REASONS:
+        if result_reason == "provider_not_installed":
+            temp_cause = "the provider binary is not on PATH in this environment yet"
+        else:
+            temp_cause = "a config flag has it disabled"
+        return REASON_GATE_PARKED, (
+            f"{gate} is parked ({result_reason}: {temp_cause}), "
+            "not broken — the obligation waits for it to be re-enabled/installed "
+            "or for a future run, not permanently refused"
+        )
+    if result_status in _GATE_RESULT_UNAVAILABLE_STATES:
+        return "gate_run_unavailable", (
+            f"{gate} for PR #{pr_number} reported unavailable"
+            + (f" ({result_reason})" if result_reason else "")
+            + " — the provider produced no verdict at all (outage, quota, "
+            "timeout, or a failed setup step such as a worktree checkout), "
+            "not a judgment on the code; will be re-attempted on the next run"
+        )
+    if result_status in TERMINAL_STATUSES or result_status in _GATE_RESULT_PASS_STATES:
+        return None, None
+    # OI-1400: a status that is neither a known terminal obligation state nor
+    # a known gate-result pass must NEVER fall through to "fulfilled" — that
+    # silent default is exactly how PR #966/#967 in a consumer project landed
+    # as vervuld with zero evidence (empty contract_hash, empty report_path).
+    # Treat an unrecognised status the same as the other temporary refusals
+    # above: pending, loud, and bounded — never a quiet pass.
+    _LOG.warning(
+        "gate_obligation_runner: unrecognised result status %r for "
+        "pr=%s gate=%s (reason=%r) — NOT marking the obligation "
+        "fulfilled (OI-1400)",
+        result_status, pr_number, gate, result_reason,
+    )
+    return "gate_status_unknown", (
+        f"{gate} for PR #{pr_number} returned an unrecognised result "
+        f"status ({result_status!r}) — refusing to record that as "
+        "fulfilled; staying pending until a recognised status is seen "
+        "or this escalates"
+    )
+
+
+def _read_obligation_record(path: Path) -> Optional[Dict[str, Any]]:
+    """The obligation as it is on disk now, ``None`` when it cannot be read (logged)."""
+    try:
+        record = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        _LOG.warning("gate_obligation_runner: obligation %s unreadable on re-read: %s", Path(path).name, exc)
+        return None
+    return record if isinstance(record, dict) else None
+
+
+@dataclass
+class _LaunchGuard:
+    """What :func:`_guard_launch` decided: run while holding ``lock``, book ``evidence``, or refuse.
+
+    Exactly one of ``lock``, ``evidence`` and ``refusal`` is set. ``refusal``
+    holds the outcome fields of a launch that does not run; ``record`` is the
+    obligation as re-read under the lock.
+    """
+
+    record: Dict[str, Any]
+    lock: Optional[gate_run_guard.RunLock] = None
+    evidence: Optional[Dict[str, Any]] = None
+    refusal: Optional[Dict[str, Any]] = None
+
+
+def _guard_launch(
+    state_dir: Path,
+    path: Path,
+    record: Dict[str, Any],
+    *,
+    dispatch_id: str,
+    gate: str,
+    pr_number: int,
+    head_sha: str,
+    force_rerun: str,
+) -> _LaunchGuard:
+    """R10: take the run lock of (PR, gate, head), then recheck what may have changed on the way.
+
+    Held elsewhere (another runner, a manual ``request-and-execute``, another
+    thread), the launch is refused as ``in_flight``: the lock module logs the
+    one line naming the key and the holder's pid, and nothing is written to the
+    obligation, so no attempt is counted. Once held, the obligation and the
+    evidence are read again (:func:`_recheck_under_lock`): the decision that
+    led here was taken before the lock, and another launch may have booked the
+    obligation or produced a verdict on this head since.
+    """
+    lock = gate_run_guard.acquire(state_dir, pr_ref=pr_number, gate=gate, head_sha=head_sha)
+    if not lock.acquired:
+        return _LaunchGuard(record=record, refusal={
+            "action": ACTION_IN_FLIGHT,
+            "detail": lock.refusal_text(),
+            "run_lock": str(lock.path),
+            "holder_pid": lock.holder_pid,
+        })
+    fresh = _read_obligation_record(path) or record
+    refusal, evidence = _recheck_under_lock(
+        state_dir, path, fresh, dispatch_id=dispatch_id, gate=gate, pr_number=pr_number,
+        head_sha=head_sha, force_rerun=force_rerun,
+    )
+    if refusal is not None or evidence is not None:
+        lock.release()
+        return _LaunchGuard(record=fresh, evidence=evidence, refusal=refusal)
+    if force_rerun:
+        _LOG.warning(
+            "gate_obligation_runner: %s for %s on PR #%s head %s (dispatch %s) -- reason: %s. The round "
+            "ledger still refuses a second verdict in a seat that has one on this head (R1)",
+            gate_run_guard.FORCE_RERUN_USAGE, gate, pr_number, (head_sha or "unknown")[:12], dispatch_id,
+            force_rerun,
+        )
+        update_obligation(path, force_rerun=gate_run_guard.force_rerun_record(
+            force_rerun, head_sha=head_sha, set_by=_FORCE_RERUN_SET_BY,
+        ))
+    return _LaunchGuard(record=fresh, lock=lock)
+
+
+def _recheck_under_lock(
+    state_dir: Path,
+    path: Path,
+    fresh: Dict[str, Any],
+    *,
+    dispatch_id: str,
+    gate: str,
+    pr_number: int,
+    head_sha: str,
+    force_rerun: str,
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """``(refusal, evidence)`` for a launch that holds the run lock; both ``None``: it runs.
+
+    In this order: an obligation another runner already booked is not run
+    again; without a force-rerun, an obligation at the retry cap on this head
+    is parked (:func:`_park_at_cap`), and a decided, complete-evidence verdict
+    on this head that landed since the pre-execution decision is booked
+    (:func:`_book_existing_evidence`) instead of run over.
+    """
+    status = fresh.get("status", STATUS_PENDING)
+    if status in TERMINAL_STATUSES:
+        return {
+            "action": status,
+            "detail": f"booked {status} by another run while this launch waited for the run lock — not run again",
+        }, None
+    if force_rerun:
+        return None, None
+    if gate_run_guard.cap_reached(fresh.get("head_runs"), head_sha):
+        return _park_at_cap(path, fresh, gate=gate, pr_number=pr_number, dispatch_id=dispatch_id), None
+    lookup = _fulfilling_result(_index_gate_results(state_dir), dispatch_id, gate, pr_number=pr_number)
+    if lookup["kind"] == "found":
+        return None, _evidence_decision(lookup["entry"])
+    return None, None
+
+
+def _park_at_cap(
+    path: Path, fresh: Dict[str, Any], *, gate: str, pr_number: int, dispatch_id: str,
+) -> Dict[str, Any]:
+    """R10: the obligation stays pending under ``degenerate_retry_cap``; the gate is not run on this head."""
+    detail = gate_run_guard.cap_detail(gate, pr_number, dispatch_id, fresh.get("head_runs") or {})
+    if fresh.get("reason") != REASON_DEGENERATE_RETRY_CAP:
+        update_obligation(path, reason=REASON_DEGENERATE_RETRY_CAP, reason_detail=detail)
+    return {"action": ACTION_RETRY_CAPPED, "detail": detail, "reason": REASON_DEGENERATE_RETRY_CAP}
+
+
+def _book_reviewer_run(
+    path: Path,
+    head_sha: str,
+    result_data: Optional[Dict[str, Any]],
+    outcome: Dict[str, Any],
+    *,
+    gate: str,
+    pr_number: int,
+    dispatch_id: str,
+) -> None:
+    """R10: count a run in which the reviewer ran on ``head_sha`` without a bookable verdict.
+
+    Only a pending obligation counts, only on a known head, and only a result
+    in which the reviewer ran (``gate_run_guard.reviewer_ran``: a degenerate
+    verdict, a timeout, a stall, a partial review). A quota or capacity refusal
+    and a failed setup step ran no reviewer and leave the count alone. The run
+    that reaches the cap parks the obligation under ``degenerate_retry_cap``
+    and reports ``retry_capped``.
+    """
+    if not head_sha or not gate_run_guard.reviewer_ran(result_data):
+        return
+    fresh = _read_obligation_record(path)
+    if not fresh or fresh.get("status") != STATUS_PENDING:
+        return
+    head_runs = gate_run_guard.next_head_runs(fresh.get("head_runs"), head_sha, result_data or {})
+    if not gate_run_guard.cap_reached(head_runs, head_sha):
+        update_obligation(path, head_runs=head_runs)
+        return
+    detail = gate_run_guard.cap_detail(gate, pr_number, dispatch_id, head_runs)
+    update_obligation(path, head_runs=head_runs, reason=REASON_DEGENERATE_RETRY_CAP, reason_detail=detail)
+    _LOG.warning("gate_obligation_runner: %s", detail)
+    outcome.update(action=ACTION_RETRY_CAPPED, detail=detail, reason=REASON_DEGENERATE_RETRY_CAP)
+
+
+def _apply_force_rerun(
+    state_dir: Path, resolution: PrResolution, decision: Dict[str, Any], force_rerun: str,
+) -> Dict[str, Any]:
+    """R10: an operator force-rerun turns a verdict rescue on an OPEN PR into a run; nothing else changes.
+
+    Only a decision in :data:`_FORCEABLE_DECISIONS`, only for a resolved PR,
+    and only when gh confirms the PR is still OPEN: a merged or closed PR keeps
+    its rescue, and so does a PR whose state cannot be read.
+    """
+    if not force_rerun or decision["kind"] not in _FORCEABLE_DECISIONS:
+        return decision
+    if resolution.status != RESOLUTION_RESOLVED or not resolution.pr_number:
+        return decision
+    owner_repo = resolution.owner_repo or _resolve_github_owner_repo(state_dir)
+    if not owner_repo or _pr_state_from_github(resolution.pr_number, owner_repo) != "OPEN":
+        return decision
+    return {"kind": "attempt_gate", "forced_over": decision["kind"]}
+
+
 def fulfill_obligation(
     state_dir: Path,
     path: Path,
     record: Dict[str, Any],
     *,
     result_index: Optional[GateResultIndex] = None,
+    force_rerun: str = "",
 ) -> Dict[str, Any]:
     """Attempt fulfilment of one pending obligation.
 
@@ -2445,6 +2827,11 @@ def fulfill_obligation(
     ``result_index`` (see :func:`_index_gate_results`) lets :func:`run` build
     the OI-1388 evidence index once per call instead of once per obligation;
     a direct caller (tests) may omit it and one is built on demand.
+
+    ``force_rerun`` (R10) is the operator's reason for running the gate on a
+    head where the runner would not: a verdict rescue on an OPEN PR
+    (:func:`_apply_force_rerun`) or the retry cap. It never passes the run lock
+    (item 14 of the module docstring).
     """
     state_dir = Path(state_dir)
     dispatch_id = str(record.get("dispatch_id") or path.stem)
@@ -2466,104 +2853,21 @@ def fulfill_obligation(
     now = utc_now_iso()
 
     resolution = resolve_pr_number(state_dir, record)
-    decision = _pre_execution_decision(state_dir, dispatch_id, gate, resolution, attempts, result_index)
+    decision = _apply_force_rerun(
+        state_dir, resolution,
+        _pre_execution_decision(state_dir, dispatch_id, gate, resolution, attempts, result_index),
+        force_rerun,
+    )
 
-    if decision["kind"] == "fulfill_by_evidence":
-        # OI-1388 defect 1: a gate already produced a complete-evidence PASS
-        # for this dispatch+gate — book it fulfilled, never retired/escalated
-        # as unreviewed, regardless of why the retirement/escalation path was
-        # about to fire. BETA3-C2: this branch is PASS-only now —
-        # _pre_execution_decision/_evidence_decision route a DECIDED FAIL to
-        # fulfill_by_failed_evidence below instead; _fulfilling_result never
-        # hands either branch a not_executable or undecided-status record.
-        evidence_path, evidence_record = decision["evidence"]
-        evidence_pr_number = evidence_record.get("pr_number") or record.get("pr_number")
-        # OI-1764 point 2: this early (pre-execution) route used to compute
-        # NO fast-fulfillment warning at all, while the late (post-execution)
-        # route below always does for the same terminal outcome — a booked
-        # fulfilment from a stale-by-mtime evidence file was silently
-        # indistinguishable from a genuinely fresh one on THIS route only.
-        # Same helper, same outcome-key convention as the late route: two
-        # routes to the same STATUS_FULFILLED outcome must carry the same
-        # tripwire.
-        fast_fulfillment_warning = _flag_fast_fulfillment_if_evidence_predates_attempt(
-            evidence_path, gate, evidence_pr_number, dispatch_id,
+    if decision["kind"] in ("fulfill_by_evidence", "fulfill_by_failed_evidence"):
+        # OI-1388 defect 1 / BETA3-C2: a gate already produced a decided,
+        # complete-evidence verdict for this dispatch+gate — booked, never
+        # retired/escalated as unreviewed and never run again (R10 item 2:
+        # this is the "no run on a head that already has a verdict" rule
+        # outside the concurrent case; :func:`_guard_launch` covers that one).
+        return _book_existing_evidence(
+            path, record, decision, outcome, dispatch_id=dispatch_id, gate=gate, attempts=attempts, now=now,
         )
-        updated = update_obligation(
-            path,
-            status=STATUS_FULFILLED,
-            pr_number=evidence_pr_number,
-            branch=evidence_record.get("branch") or record.get("branch"),
-            attempts=attempts,
-            last_attempt_at=now,
-            resolved_at=now,
-            result_path=str(evidence_path),
-            reason="fulfilled_by_existing_evidence",
-            reason_detail=(
-                f"{gate} already produced a complete-evidence PASS for "
-                f"dispatch {dispatch_id} ({evidence_path}) — OI-1388 defect 1: "
-                "a dispatch a gate already reviewed must never be retired or "
-                "escalated as unreviewed"
-            ),
-            fulfilled_by=gate,
-            takeover_gate=None,
-            evidence_result_path=str(evidence_path),
-        )
-        outcome["action"] = STATUS_FULFILLED
-        outcome["detail"] = (
-            "rescued by the OI-1388 evidence discriminator — a gate had "
-            "already reviewed and approved this dispatch"
-        )
-        outcome["result_path"] = updated.get("result_path")
-        if fast_fulfillment_warning:
-            outcome["fast_fulfillment_warning"] = fast_fulfillment_warning
-        return outcome
-
-    if decision["kind"] == "fulfill_by_failed_evidence":
-        # BETA3-C2 (2026-08-26): a gate already produced a complete-evidence
-        # FAIL/ERRORED/BLOCKED verdict for this dispatch+gate. The obligation
-        # IS discharged — a gate genuinely reviewed this dispatch — but it
-        # must never be stamped STATUS_FULFILLED: every consumer that counts
-        # "reviewed" work treats fulfilled as a clean bill, and PR #1692's
-        # own glm_gate verdict on itself (pr-1692-glm_gate.json — a real
-        # ``fail`` with contract_hash and report_path both populated) is the
-        # live record of exactly what that would launder: a rejection
-        # rewritten into a pass. STATUS_FAILED is the pre-existing, already
-        # terminal vocabulary member gate_obligations.py defines for exactly
-        # this shape (see TERMINAL_STATUSES and
-        # producer_freshness.scan_gate_obligations's own "fulfilled /
-        # not_executable / failed" doc comment) — defined but never written
-        # by this runner until now.
-        evidence_path, evidence_record = decision["evidence"]
-        _passed, verdict_reason = _gate_is_pass(evidence_record)
-        updated = update_obligation(
-            path,
-            status=STATUS_FAILED,
-            pr_number=evidence_record.get("pr_number") or record.get("pr_number"),
-            branch=evidence_record.get("branch") or record.get("branch"),
-            attempts=attempts,
-            last_attempt_at=now,
-            resolved_at=now,
-            result_path=str(evidence_path),
-            reason="failed_by_existing_evidence",
-            reason_detail=(
-                f"{gate} already produced a complete-evidence FAIL for "
-                f"dispatch {dispatch_id} ({evidence_path}, {verdict_reason}) — "
-                "BETA3-C2: the gate DID review this, so the obligation is "
-                "discharged, but a rejection must never be booked as fulfilled"
-            ),
-            fulfilled_by=gate,
-            takeover_gate=None,
-            evidence_result_path=str(evidence_path),
-        )
-        outcome["action"] = STATUS_FAILED
-        outcome["detail"] = (
-            "rescued by the OI-1388 evidence discriminator as a FAILED "
-            f"verdict ({verdict_reason}) — a gate had already reviewed and "
-            "rejected this dispatch; never a clean pass"
-        )
-        outcome["result_path"] = updated.get("result_path")
-        return outcome
 
     if decision["kind"] == "sha_unverifiable":
         # OI-1571 tak 3: a complete, decided result exists for this
@@ -2915,6 +3219,21 @@ def fulfill_obligation(
     except Exception as exc:  # noqa: BLE001 — degraded scope, not silence
         _LOG.info("changed-files unavailable for %s: %s", branch, exc)
 
+    # R10: one run per head. The run lock is held from here to the end of the
+    # run (released in ``finally``); see item 14 of the module docstring.
+    launch = _guard_launch(
+        state_dir, path, record, dispatch_id=dispatch_id, gate=gate, pr_number=pr_number,
+        head_sha=head_sha_before_run, force_rerun=force_rerun,
+    )
+    if launch.evidence is not None:
+        attempts = int(launch.record.get("attempts") or 0) + 1
+        return _book_existing_evidence(
+            path, launch.record, launch.evidence, outcome, dispatch_id=dispatch_id, gate=gate,
+            attempts=attempts, now=now,
+        )
+    if launch.lock is None:
+        outcome.update(launch.refusal or {})
+        return outcome
     try:
         manager = _build_manager(state_dir)
         result = manager.request_and_execute(
@@ -2925,6 +3244,7 @@ def fulfill_obligation(
             changed_files=changed_files,
             mode="per_pr",
             dispatch_id=dispatch_id,
+            **({"force_rerun": force_rerun} if force_rerun else {}),
         )
         result_file = manager._result_path(gate, pr_number)
         # Mirror the recorded outcome: a gate the manager could not execute
@@ -3047,57 +3367,7 @@ def fulfill_obligation(
             except OSError as exc:
                 _LOG.debug("could not remove provider_not_installed result for pr-%s-%s: %s", pr_number, gate, exc)
 
-        if result_status in _TEMPORARY_RESULT_STATUSES:
-            temp_reason = "gate_run_in_progress"
-            temp_detail = (
-                f"{gate} for PR #{pr_number} is still running — no verdict yet, "
-                "not a failure; will be re-attempted on the next run"
-            )
-        elif result_status == STATUS_NOT_EXECUTABLE and result_reason in _TEMPORARY_NOT_EXECUTABLE_REASONS:
-            temp_reason = REASON_GATE_PARKED
-            if result_reason == "provider_not_installed":
-                temp_cause = "the provider binary is not on PATH in this environment yet"
-            else:
-                temp_cause = "a config flag has it disabled"
-            temp_detail = (
-                f"{gate} is parked ({result_reason}: {temp_cause}), "
-                "not broken — the obligation waits for it to be re-enabled/installed "
-                "or for a future run, not permanently refused"
-            )
-        elif result_status in _GATE_RESULT_UNAVAILABLE_STATES:
-            temp_reason = "gate_run_unavailable"
-            temp_detail = (
-                f"{gate} for PR #{pr_number} reported unavailable"
-                + (f" ({result_reason})" if result_reason else "")
-                + " — the provider produced no verdict at all (outage, quota, "
-                "timeout, or a failed setup step such as a worktree checkout), "
-                "not a judgment on the code; will be re-attempted on the next run"
-            )
-        elif result_status in TERMINAL_STATUSES or result_status in _GATE_RESULT_PASS_STATES:
-            temp_reason = None
-            temp_detail = None
-        else:
-            # OI-1400: a status that is neither a known terminal obligation
-            # state nor a known gate-result pass must NEVER fall through to
-            # "fulfilled" — that silent default is exactly how PR #966/#967
-            # in a consumer project landed as vervuld with zero evidence
-            # (empty contract_hash, empty report_path). Treat an unrecognised
-            # status the same as the other temporary refusals above: pending,
-            # loud, and bounded — never a quiet pass.
-            temp_reason = "gate_status_unknown"
-            temp_detail = (
-                f"{gate} for PR #{pr_number} returned an unrecognised result "
-                f"status ({result_status!r}) — refusing to record that as "
-                "fulfilled; staying pending until a recognised status is seen "
-                "or this escalates"
-            )
-            _LOG.warning(
-                "gate_obligation_runner: unrecognised result status %r for "
-                "pr=%s gate=%s (reason=%r) — NOT marking the obligation "
-                "fulfilled (OI-1400)",
-                result_status, pr_number, gate, result_reason,
-            )
-
+        temp_reason, temp_detail = _temporary_refusal(gate, pr_number, result_status, result_reason)
         if temp_reason is not None:
             # Same shape as the `unresolvable` PR-resolution path: stays
             # pending under a bounded retry term, then escalates loudly
@@ -3147,6 +3417,12 @@ def fulfill_obligation(
                 )
                 outcome["action"] = "not_executable"
                 outcome["detail"] = escalation_detail
+            # R10: a reviewer that ran without a bookable verdict counts toward
+            # the retry cap of this head; the run that reaches it parks the obligation.
+            _book_reviewer_run(
+                path, head_sha_before_run, result_data, outcome, gate=gate, pr_number=pr_number,
+                dispatch_id=dispatch_id,
+            )
             return outcome
 
         # OI-1571 tak 3: reached only when the declared gate's OWN on-disk
@@ -3327,6 +3603,8 @@ def fulfill_obligation(
         outcome["action"] = "not_executable"
         outcome["detail"] = result_payload.get("reason_detail")
         return outcome
+    finally:
+        launch.lock.release()
 
 
 # ---------------------------------------------------------------------------
@@ -3340,8 +3618,15 @@ def run(
     write: bool = True,
     since: Optional[str] = None,
     dispatch_prefix: Optional[str] = None,
+    force_rerun: str = "",
 ) -> Dict[str, Any]:
     """Fulfil every in-scope pending obligation under ``state_dir``. Returns a summary.
+
+    ``force_rerun`` (R10) is an operator's reason to run past a verdict rescue
+    and the retry cap, for every in-scope obligation (``main`` only allows it
+    with ``--dispatch-prefix``). ``swept_run_locks`` names the run-lock files
+    of dead holders this run removed (``gate_run_guard.sweep_run_locks``, write
+    runs only).
 
     ``since`` (``YYYY-MM-DD``) and ``dispatch_prefix`` narrow which obligations
     are processed — combinable as an AND. ``obligations_seen`` always reports
@@ -3428,6 +3713,8 @@ def run(
         else ProviderNotInstalledSweepResult(removed=[], unreadable=[])
     )
     swept_provider_not_installed = sweep_result.removed
+    # R10: the lock files of holders that died; a live holder's file stays.
+    swept_run_locks = gate_run_guard.sweep_run_locks(state_dir) if write else []
     # OI-1388 defect 2: built once per run, not per obligation, and shared by
     # both the write path and the dry-run path — the same index feeds the
     # same decision tree (_pre_execution_decision) either way, so the two
@@ -3439,24 +3726,13 @@ def run(
         if not write:
             outcome = _dry_run_outcome(state_dir, path, record, result_index)
             outcomes.append(outcome)
-            # OI-1532: stay_pending_live and stay_pending_unmeasured stay pending too
-            # (a live / unmeasured dispatch is never closed), so their dry-run
-            # labels count toward the pending backlog alongside the normal
-            # wait. escalate_stay_pending is terminal and does NOT count.
-            if outcome["action"] in (
-                "would_stay_pending",
-                "would_stay_pending_live",
-                "would_stay_pending_dispatch_live",
-                "would_stay_pending_unmeasured",
-                "would_stay_unresolvable",
-                "would_fulfill",
-                "would_stay_pending_sha_unverifiable",
-            ):
+            if outcome["action"] in _DRY_RUN_OPEN_ACTIONS:
                 pending_after += 1
             continue
-        outcome = fulfill_obligation(state_dir, path, record, result_index=result_index)
+        outcome = fulfill_obligation(state_dir, path, record, result_index=result_index, force_rerun=force_rerun)
         outcomes.append(outcome)
-        if outcome["action"] in ("pending", "unresolvable"):
+        # R10: in_flight and retry_capped leave the obligation open as well.
+        if outcome["action"] in _OPEN_ACTIONS:
             pending_after += 1
     action_counts: Dict[str, int] = {}
     for outcome in outcomes:
@@ -3541,6 +3817,8 @@ def run(
         "stale_terminal_evidence_mismatch_count": stale_terminal_evidence_mismatch_count,
         "stale_terminal_evidence_unknown_count": stale_terminal_evidence_unknown_count,
         "swept_provider_not_installed": swept_provider_not_installed,
+        "swept_run_locks": swept_run_locks,
+        "force_rerun": force_rerun or None,
         "provider_not_installed_sweep_unreadable": sweep_result.unreadable,
         "provider_not_installed_sweep_unreadable_count": len(sweep_result.unreadable),
         "prs_without_obligation": prs_without_obligation,
@@ -3595,6 +3873,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--dispatch-prefix", default=None,
         help="Only process obligations whose dispatch_id starts with this string",
     )
+    parser.add_argument(
+        "--force-rerun", action="store_true",
+        help=(
+            "R10: run the gate even where the runner would not (a verdict on the PR head, "
+            "the retry cap on that head). Needs --reason and --dispatch-prefix; never "
+            "passes a run in flight, and the round ledger still refuses a second "
+            "verdict in a seat that has one on the head"
+        ),
+    )
+    parser.add_argument("--reason", default=None, help="Why: required with --force-rerun, recorded with it")
     parser.add_argument("--json", action="store_true", help="Machine-readable output")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
@@ -3603,6 +3891,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         level=logging.DEBUG if args.verbose else logging.WARNING,
         format="%(name)s: %(levelname)s: %(message)s",
     )
+    force_rerun = _force_rerun_reason(args)
+    if force_rerun is None:
+        return 2
 
     try:
         state_dir = args.state_dir or _default_state_dir()
@@ -3618,70 +3909,104 @@ def main(argv: Optional[List[str]] = None) -> int:
         write=not args.no_write,
         since=args.since,
         dispatch_prefix=args.dispatch_prefix,
+        force_rerun=force_rerun,
     )
     if args.json:
         print(json.dumps(summary, indent=2))
     else:
-        if summary.get("error"):
-            print(f"ERROR: {summary['error']}", file=sys.stderr)
-        for outcome in summary["outcomes"]:
-            line = f"{outcome['action']}: {outcome.get('dispatch_id')} gate={outcome.get('gate')}"
-            if outcome.get("request_path"):
-                line += f" request={outcome['request_path']}"
-            if outcome.get("result_path"):
-                line += f" result={outcome['result_path']}"
-            if outcome.get("detail"):
-                line += f" ({outcome['detail']})"
-            print(line)
-        print(
-            f"obligations={summary['obligations_seen']} "
-            f"pending_after={summary['pending_after']}"
-        )
-        action_counts = summary.get("action_counts") or {}
-        if action_counts:
-            breakdown = " ".join(
-                f"{action}={count}" for action, count in sorted(action_counts.items())
-            )
-            print(f"action_counts: {breakdown}")
-        contradictions = summary.get("terminal_evidence_contradictions") or []
-        if contradictions:
-            print(
-                f"terminal_evidence_contradictions={len(contradictions)} "
-                "(already-terminal, evidence says otherwise — NOT auto-fixed, review manually)"
-            )
-            for c in contradictions:
-                print(
-                    f"  {c['dispatch_id']} gate={c['gate']} status={c['obligation_status']} "
-                    f"reason={c['obligation_reason']!r} ({c['obligation_reason_bucket']}) "
-                    f"evidence={c['evidence_result_path']}"
-                )
-        stale_terminal = summary.get("stale_terminal_evidence") or []
-        if stale_terminal:
-            print(
-                f"stale_terminal_evidence={len(stale_terminal)} "
-                f"(mismatch={summary.get('stale_terminal_evidence_mismatch_count', 0)} "
-                f"unknown={summary.get('stale_terminal_evidence_unknown_count', 0)}) "
-                "— already-terminal, evidence has drifted — NOT auto-fixed, "
-                "reopen via scripts/gate_obligation_reopen_stale_evidence.py"
-            )
-            for s in stale_terminal:
-                print(
-                    f"  {s['dispatch_id']} gate={s['gate']} status={s['obligation_status']} "
-                    f"binding={s['binding']} evidence={s['evidence_result_path']}"
-                )
-        unlinked_prs = summary.get("prs_without_obligation") or []
-        if unlinked_prs:
-            print(
-                f"prs_without_obligation={len(unlinked_prs)} "
-                "(no review-gate obligation resolves to these PRs — OI-1751, "
-                "review manually)"
-            )
-            for u in unlinked_prs:
-                print(f"  PR #{u['pr_number']} branch={u['branch']!r}: {u['reason']}")
+        _print_summary(summary)
 
     if summary.get("error"):
         return 20
     return 11 if summary["pending_after"] > 0 else 0
+
+
+def _force_rerun_reason(args: argparse.Namespace) -> Optional[str]:
+    """The ``--force-rerun`` reason, ``""`` for none, or ``None`` after printing why the flags are refused.
+
+    A force-rerun is an operator decision about named obligations: it needs a
+    reason that is recorded, a ``--dispatch-prefix`` so it never sweeps the
+    whole store, and a write run (a dry run cannot run a gate).
+    """
+    reason = (args.reason or "").strip()
+    if not args.force_rerun:
+        if reason:
+            print("ERROR: --reason only applies to --force-rerun", file=sys.stderr)
+            return None
+        return ""
+    if not reason:
+        print(f"ERROR: {gate_run_guard.FORCE_RERUN_USAGE} needs a non-empty reason (no silent rerun)", file=sys.stderr)
+        return None
+    if not args.dispatch_prefix:
+        print("ERROR: --force-rerun needs --dispatch-prefix: it reruns named obligations, never the store", file=sys.stderr)
+        return None
+    if args.no_write:
+        print("ERROR: --force-rerun runs a gate; it cannot be combined with --no-write", file=sys.stderr)
+        return None
+    return reason
+
+
+def _print_summary(summary: Dict[str, Any]) -> None:
+    """The human-readable form of a :func:`run` summary."""
+    if summary.get("error"):
+        print(f"ERROR: {summary['error']}", file=sys.stderr)
+    for outcome in summary["outcomes"]:
+        line = f"{outcome['action']}: {outcome.get('dispatch_id')} gate={outcome.get('gate')}"
+        if outcome.get("request_path"):
+            line += f" request={outcome['request_path']}"
+        if outcome.get("result_path"):
+            line += f" result={outcome['result_path']}"
+        if outcome.get("detail"):
+            line += f" ({outcome['detail']})"
+        print(line)
+    print(
+        f"obligations={summary['obligations_seen']} "
+        f"pending_after={summary['pending_after']}"
+    )
+    action_counts = summary.get("action_counts") or {}
+    if action_counts:
+        breakdown = " ".join(
+            f"{action}={count}" for action, count in sorted(action_counts.items())
+        )
+        print(f"action_counts: {breakdown}")
+    swept_run_locks = summary.get("swept_run_locks") or []
+    if swept_run_locks:
+        print(f"swept_run_locks={len(swept_run_locks)} (lock files of gate runs whose holder died)")
+    contradictions = summary.get("terminal_evidence_contradictions") or []
+    if contradictions:
+        print(
+            f"terminal_evidence_contradictions={len(contradictions)} "
+            "(already-terminal, evidence says otherwise — NOT auto-fixed, review manually)"
+        )
+        for c in contradictions:
+            print(
+                f"  {c['dispatch_id']} gate={c['gate']} status={c['obligation_status']} "
+                f"reason={c['obligation_reason']!r} ({c['obligation_reason_bucket']}) "
+                f"evidence={c['evidence_result_path']}"
+            )
+    stale_terminal = summary.get("stale_terminal_evidence") or []
+    if stale_terminal:
+        print(
+            f"stale_terminal_evidence={len(stale_terminal)} "
+            f"(mismatch={summary.get('stale_terminal_evidence_mismatch_count', 0)} "
+            f"unknown={summary.get('stale_terminal_evidence_unknown_count', 0)}) "
+            "— already-terminal, evidence has drifted — NOT auto-fixed, "
+            "reopen via scripts/gate_obligation_reopen_stale_evidence.py"
+        )
+        for s in stale_terminal:
+            print(
+                f"  {s['dispatch_id']} gate={s['gate']} status={s['obligation_status']} "
+                f"binding={s['binding']} evidence={s['evidence_result_path']}"
+            )
+    unlinked_prs = summary.get("prs_without_obligation") or []
+    if unlinked_prs:
+        print(
+            f"prs_without_obligation={len(unlinked_prs)} "
+            "(no review-gate obligation resolves to these PRs — OI-1751, "
+            "review manually)"
+        )
+        for u in unlinked_prs:
+            print(f"  PR #{u['pr_number']} branch={u['branch']!r}: {u['reason']}")
 
 
 if __name__ == "__main__":

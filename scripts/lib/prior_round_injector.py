@@ -30,12 +30,13 @@ _FILE_REF_RE = re.compile(
 )
 
 # Every model-backed review gate that can hold a seat in a review round: the two
-# subscription seats of the default stack (codex_gate, kimi_gate) and the
-# API-credit readers the takeover chain falls to (glm_gate, deepseek_gate). A
-# seat's blocking findings reach the next round only if its gate is named here.
+# subscription seats of the default stack (codex_gate, kimi_gate), the claude
+# subscription seat the takeover chain falls to first (claude_gate, R7) and the
+# API-credit readers after it (glm_gate, deepseek_gate). A seat's blocking
+# findings reach the next round only if its gate is named here.
 # gate_billing_table.GATE_BILLING classifies the same set; test_prior_round_injector
 # pins this tuple against it, so a gate added to the registry cannot go unread.
-_KNOWN_GATES = ("codex_gate", "kimi_gate", "glm_gate", "deepseek_gate")
+_KNOWN_GATES = ("codex_gate", "kimi_gate", "claude_gate", "glm_gate", "deepseek_gate")
 
 
 @dataclass(frozen=True)

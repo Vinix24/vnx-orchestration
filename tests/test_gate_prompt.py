@@ -103,6 +103,7 @@ def _build(gate_prompt, diff_text, **kwargs):
         diff_text=diff_text,
         verdict_contract=_CONTRACT,
         max_chars=50000,
+        agentic=False,
     )
     params.update(kwargs)
     return gate_prompt.build_review_prompt(**params)
@@ -487,3 +488,31 @@ def test_content_claim_rule_follows_the_untrusted_data_rule(gate_prompt):
         "the content-claim rule must come after the block, alongside the "
         "other post-block instructions the reviewer reads last"
     )
+
+
+# ---------------------------------------------------------------------------
+# (h) OI-2287: the reviewer is told not to search for instruction files
+# ---------------------------------------------------------------------------
+
+_CODE_SECTION = (
+    "diff --git a/scripts/measure.py b/scripts/measure.py\n"
+    "index 1111111..2222222 100644\n"
+    "--- a/scripts/measure.py\n"
+    "+++ b/scripts/measure.py\n"
+    "@@ -1 +1,2 @@\n"
+    " import csv\n"
+    "+ROWS = 151\n"
+)
+
+
+@pytest.mark.parametrize("instruction", [None, "Review the PR diff in the untrusted-data block (risk: high)."])
+def test_no_instruction_search_rule_follows_the_block(gate_prompt, instruction):
+    kwargs = {} if instruction is None else {"instruction": instruction}
+    prompt = _build(gate_prompt, _CODE_SECTION, **kwargs)
+    tail = prompt[prompt.index(gate_prompt.END_DIFF_MARKER):]
+
+    rule = gate_prompt._NO_INSTRUCTION_SEARCH_RULE.strip()
+    assert rule in tail
+    assert rule not in prompt[:prompt.index(gate_prompt.END_DIFF_MARKER)]
+    for name in ("AGENTS.md", "CLAUDE.md", "working directory"):
+        assert name in rule

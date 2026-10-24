@@ -159,11 +159,12 @@ _KIMI_UNREADABLE_VERDICT_RESULT = {
 }
 
 
-class TestKimiTakeoverToDeepseek:
+class TestKimiTakeoverToTheNextLink:
     """Deliverable 8: a failed kimi seat (toestand 1) falls over to the next
-    link of the chain (deepseek_gate, OI-1984) and is not left undecided."""
+    link of the chain (deepseek_gate since OI-1984, claude_gate since R7 of
+    2026-10-22) and is not left undecided."""
 
-    def test_kimi_lane_exhausted_takes_over_to_deepseek(self, manager_env, monkeypatch):
+    def test_kimi_lane_exhausted_takes_over_to_the_next_link(self, manager_env, monkeypatch):
         monkeypatch.chdir(manager_env["project_root"])
         manager = _make_manager()
         pr_number = 501
@@ -181,19 +182,20 @@ class TestKimiTakeoverToDeepseek:
                 dispatch_id="dlv5-takeover-test",
             )
 
-        # The seat is filled by deepseek_gate, not left as an undecided kimi_gate.
+        # The seat is filled by the next link, claude_gate since R7 (2026-10-22),
+        # not left as an undecided kimi_gate.
         assert len(result["requested"]) == 1
-        assert result["requested"][0]["gate"] == "deepseek_gate"
+        assert result["requested"][0]["gate"] == "claude_gate"
 
-        takeover_request_file = manager_env["requests_dir"] / f"pr-{pr_number}-deepseek_gate.json"
-        assert takeover_request_file.exists(), "expected a deepseek_gate request record for the takeover seat"
+        takeover_request_file = manager_env["requests_dir"] / f"pr-{pr_number}-claude_gate.json"
+        assert takeover_request_file.exists(), "expected a claude_gate request record for the takeover seat"
         record = json.loads(takeover_request_file.read_text(encoding="utf-8"))
 
         # Split asserts (no compound judgement): "deepseek heeft overgenomen" and
         # "de reden is niet leeg" are two independent claims and must fail
         # independently if either half regresses.
         assert record.get("takeover_from") == "kimi_gate", (
-            f"expected deepseek_gate's record to name kimi_gate as the takeover source, got: {record.get('takeover_from')!r}"
+            f"expected claude_gate's record to name kimi_gate as the takeover source, got: {record.get('takeover_from')!r}"
         )
         assert record.get("failure_reason", "").strip() != "", (
             "failure_reason must be a non-empty, mandatory field on a takeover record — "
@@ -270,9 +272,9 @@ class TestKimiTakeoverToDeepseek:
         _write_result(manager_env["results_dir"], pr_number, "kimi_gate", {
             **_KIMI_LANE_EXHAUSTED_RESULT, "pr_id": "503", "pr_number": 503,
         })
-        # Force the next link of the chain (deepseek_gate) unavailable too, so
-        # the takeover attempt itself fails.
-        monkeypatch.setattr(manager, "_deepseek_gate_available", lambda: False)
+        # Force the next link of the chain (claude_gate since R7) unavailable
+        # too, so the takeover attempt itself fails.
+        monkeypatch.setattr(manager, "_claude_gate_available", lambda: False)
 
         with patch("governance_receipts.emit_governance_receipt"):
             result = manager.request_reviews(
@@ -286,7 +288,7 @@ class TestKimiTakeoverToDeepseek:
             )
 
         seat = result["requested"][0]
-        assert seat["gate"] == "deepseek_gate", "the takeover must still be attempted"
+        assert seat["gate"] == "claude_gate", "the takeover must still be attempted"
         assert seat["status"] != "pass", (
             "an unavailable fallback must never resolve the seat to a pass"
         )
@@ -294,7 +296,7 @@ class TestKimiTakeoverToDeepseek:
 
         # And the ON-DISK result record (not just the in-memory payload) must
         # show the same — read back from disk, never asserted from code alone.
-        takeover_result_file = manager_env["results_dir"] / f"pr-{pr_number}-deepseek_gate.json"
+        takeover_result_file = manager_env["results_dir"] / f"pr-{pr_number}-claude_gate.json"
         assert takeover_result_file.exists()
         recorded = json.loads(takeover_result_file.read_text(encoding="utf-8"))
         assert recorded["status"] != "pass"
@@ -339,9 +341,10 @@ class TestKimiTakeoverToDeepseek:
         assert seat["status"] == "not_executable"
 
     def test_kimi_and_deepseek_exhausted_default_chain_ends_exhausted(self, manager_env, monkeypatch):
-        """On the default chain (codex, kimi, deepseek; R4, operator decision
-        2026-10-17) kimi and deepseek exhausted leave no successor: the seat is
-        booked chain_exhausted, never a pass and never re-dispatched to glm."""
+        """On the default chain (codex, kimi, claude, deepseek; R4, operator
+        decision 2026-10-17, and R7, 2026-10-22) kimi, claude and deepseek
+        exhausted leave no successor: the seat is booked chain_exhausted, never
+        a pass and never re-dispatched to glm."""
         monkeypatch.delenv("VNX_REVIEW_GATE_TAKEOVER_CHAIN", raising=False)
         monkeypatch.delenv("VNX_OVERRIDE_VNX_REVIEW_GATE_TAKEOVER_CHAIN", raising=False)
         monkeypatch.chdir(manager_env["project_root"])
@@ -350,6 +353,11 @@ class TestKimiTakeoverToDeepseek:
 
         _write_result(manager_env["results_dir"], pr_number, "kimi_gate", {
             **_KIMI_LANE_EXHAUSTED_RESULT, "pr_id": "504", "pr_number": 504,
+        })
+        _write_result(manager_env["results_dir"], pr_number, "claude_gate", {
+            **_KIMI_LANE_EXHAUSTED_RESULT, "pr_id": "504", "pr_number": 504,
+            "gate": "claude_gate", "provider": "claude", "model": "sonnet",
+            "dispatch_id": "claude-gate-pr504-1755852660",
         })
         _write_result(manager_env["results_dir"], pr_number, "deepseek_gate", {
             **_KIMI_LANE_EXHAUSTED_RESULT, "pr_id": "504", "pr_number": 504,
@@ -371,6 +379,7 @@ class TestKimiTakeoverToDeepseek:
             )
 
         seat = result["requested"][0]
+        assert seat["reviewers_tried"] == ["kimi_gate", "claude_gate", "deepseek_gate"]
         assert seat["status"] == "chain_exhausted"
         assert seat["reason"] == "takeover_chain_exhausted"
         assert seat["status"] != "pass"

@@ -844,6 +844,7 @@ GATE_LEDGER_PROVIDERS: Dict[str, FrozenSet[str]] = {
     "kimi_gate": frozenset({"kimi"}),
     "glm_gate": frozenset({"glm-harness"}),
     "deepseek_gate": frozenset({"deepseek-harness"}),  # GATE_PROVIDERS lane name; 449 ledger rows carry this label
+    "claude_gate": frozenset({"claude", "claude_code", "anthropic"}),  # claude_gate_lane books provider "claude"
 }
 
 

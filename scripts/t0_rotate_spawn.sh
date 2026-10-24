@@ -46,9 +46,11 @@
 #      message, books a t0_context_rotation_delivery receipt (the ledger must take it, ADR-005),
 #      writes delivery.json and, in this order:
 #        `confirmed`: with an active /goal runs the follow-up (this script in --goal-followup
-#                     mode: waits until the first turn is over, types the /goal line, checks the
-#                     footer shows the goal as active, one retry, then a loud message in the new
-#                     window), and only then closes the old window.
+#                     mode, given the transcript the delivery check read: waits until the
+#                     transcript shows the kickoff turn ended, types the /goal line, confirms it
+#                     on a /goal entry in the transcript, one retry on an idle turn, then a loud
+#                     message in the new window on an idle turn), and only then closes the old
+#                     window.
 #        `mismatch` / `timeout`: types nothing, closes nothing, display-message names the
 #                     outcome in both windows.
 #      A refused or hung receipt append leaves both windows open and names the receipt failure.
@@ -64,7 +66,9 @@
 # VNX_T0_ROTATE_GOAL_CONFIRM_TIMEOUT (20), VNX_T0_ROTATE_DELIVERY_TIMEOUT (120),
 # VNX_T0_ROTATE_DELIVERY_POLL (1).
 # Screen patterns (env, grep -E): VNX_T0_ROTATE_FOOTER_PATTERN ("auto mode"),
-# VNX_T0_ROTATE_BUSY_PATTERN ("esc to interrupt"), VNX_T0_ROTATE_GOAL_ACTIVE_PATTERN ("/goal active").
+# VNX_T0_ROTATE_BUSY_PATTERN ("esc to interrupt|… \([0-9]+[hms]", a second opinion only: the
+# successor's transcript decides when a turn is over), VNX_T0_ROTATE_GOAL_ACTIVE_PATTERN
+# ("/goal active", only booked with the outcome: the transcript decides whether /goal ran).
 #
 # Switch: VNX_T0_ROTATE_START_DIR = t0 (default) | root. The tmux global environment is read first
 # (`tmux show-environment -g VNX_T0_ROTATE_START_DIR`), the process environment second; `root`
@@ -87,6 +91,7 @@ set -euo pipefail
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
 SCRIPTS_DIR="$(dirname "$SCRIPT_PATH")"
 STATE_PY="$SCRIPTS_DIR/lib/t0_rotation_state.py"
+DELIVERY_PY="$SCRIPTS_DIR/lib/t0_rotation_delivery.py"
 PYTHON="${VNX_PYTHON:-python3}"
 
 POLL="${VNX_T0_ROTATE_POLL_SECONDS:-1}"
@@ -98,7 +103,10 @@ DELIVERY_TIMEOUT="${VNX_T0_ROTATE_DELIVERY_TIMEOUT:-120}"
 DELIVERY_POLL="${VNX_T0_ROTATE_DELIVERY_POLL:-1}"
 FOLDER_TIMEOUT="${VNX_T0_ROTATE_FOLDER_TIMEOUT:-5}"
 FOOTER_PATTERN="${VNX_T0_ROTATE_FOOTER_PATTERN:-auto mode}"
-BUSY_PATTERN="${VNX_T0_ROTATE_BUSY_PATTERN:-esc to interrupt}"
+# The spinner of a running turn. claude 2.1.308 prints `✳ Tempering… (52s · ↓ 4.5k tokens ·
+# thought for 13s)`: glyph and verb change every turn, `esc to interrupt` is gone, and what stays
+# is the ellipsis followed by the elapsed time. Older CLIs still print `esc to interrupt`.
+BUSY_PATTERN="${VNX_T0_ROTATE_BUSY_PATTERN:-esc to interrupt|… \([0-9]+[hms]}"
 GOAL_ACTIVE_PATTERN="${VNX_T0_ROTATE_GOAL_ACTIVE_PATTERN:-/goal active}"
 
 log() { printf '[t0-rotate %s] %s\n' "$(date +%H:%M:%S)" "$*" >&2; }
@@ -127,66 +135,115 @@ type_line() {
   tmux send-keys -t "$target" Enter
 }
 
-# ── follow-up mode: runs on the tmux server, after the successor's first turn ──
+# ── follow-up mode: runs on the tmux server, after a confirmed delivery ──
+# The successor's transcript (the one the delivery check read, passed in, never searched for)
+# decides when a turn is over and whether /goal ran: scripts/lib/t0_rotation_delivery.py, whose
+# exit code answers `idle`, `goal` or `queued`. The screen is a second opinion. Every poll
+# captures the pane once.
+GOAL_SCREEN=0
+
+transcript_says() {
+  local question="$1" transcript="$2"; shift 2
+  "$PYTHON" "$DELIVERY_PY" "$question" --transcript "$transcript" "$@" >/dev/null
+}
+
+# An idle turn: the transcript shows the kickoff turn and every turn after it ended, and the screen
+# does not show the spinner. Seen on two polls in a row: a queued task notification can start the
+# next turn the moment the last one ends.
+wait_for_idle() {
+  local target="$1" transcript="$2" timeout="$3" waited=0 streak=0 screen
+  while :; do
+    screen="$(tmux capture-pane -p -t "$target" 2>/dev/null || true)"
+    if transcript_says idle "$transcript" && ! printf '%s' "$screen" | grep -Eq -- "$BUSY_PATTERN"; then
+      streak=$((streak + 1))
+      [ "$streak" -ge 2 ] && return 0
+    else
+      streak=0
+    fi
+    [ "$waited" -ge "$timeout" ] && return 1
+    sleep "$POLL"
+    waited=$((waited + (POLL > 0 ? POLL : 1)))
+  done
+}
+
+# Arrival: a /goal user entry after the kickoff entry. `/goal active` on screen is only noted
+# (GOAL_SCREEN, booked with the outcome); on its own it proves nothing.
+wait_for_goal_entry() {
+  local target="$1" transcript="$2" timeout="$3" waited=0 screen
+  while :; do
+    screen="$(tmux capture-pane -p -t "$target" 2>/dev/null || true)"
+    printf '%s' "$screen" | grep -Eq -- "$GOAL_ACTIVE_PATTERN" && GOAL_SCREEN=1
+    transcript_says goal "$transcript" && return 0
+    [ "$waited" -ge "$timeout" ] && return 1
+    sleep "$POLL"
+    waited=$((waited + (POLL > 0 ? POLL : 1)))
+  done
+}
+
+# The one retry, on an idle turn. A line the transcript shows as queued went in while a turn ran
+# and is typed again, whatever the screen shows (a queued line stays visible above the box). Else,
+# still visible in the pane: the slash autocomplete took the first Enter, so Enter alone.
+retry_goal() {
+  local target="$1" transcript="$2" goal_file="$3" goal
+  goal="$(cat "$goal_file")"
+  if ! transcript_says queued "$transcript" --line-file "$goal_file" \
+      && tmux capture-pane -p -t "$target" 2>/dev/null | grep -Fq -- "${goal:0:40}"; then
+    tmux send-keys -t "$target" Enter
+  else
+    type_line "$target" "$goal"
+  fi
+}
+
 goal_followup() {
-  local target="" goal_file="" state_file=""
+  local target="" goal_file="" state_file="" transcript=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --target) target="$2"; shift 2 ;;
       --goal-file) goal_file="$2"; shift 2 ;;
       --event-file) state_file="$2"; shift 2 ;;
+      --transcript) transcript="$2"; shift 2 ;;
       *) log "goal-followup: unknown argument $1"; return 2 ;;
     esac
   done
-  local goal outcome="confirmed"
+  [ -n "$transcript" ] || { log "goal-followup: --transcript is required (the successor's transcript from delivery.json)"; return 2; }
+  local goal outcome="confirmed" fallback="none"
   goal="$(cat "$goal_file")"
 
-  # The first turn: it starts when the kickoff prompt lands (busy marker appears) and ends when
-  # the footer is back without the busy marker. A turn too short to catch busy is fine: we then
-  # proceed on the first idle screen.
-  wait_for_screen "$target" "$BUSY_PATTERN" "$FOOTER_TIMEOUT" || log "goal-followup: busy marker never seen; continuing on idle"
-  local waited=0 idle_streak=0 screen
-  while :; do
-    screen="$(tmux capture-pane -p -t "$target" 2>/dev/null || true)"
-    if printf '%s' "$screen" | grep -Eq -- "$FOOTER_PATTERN" && ! printf '%s' "$screen" | grep -Eq -- "$BUSY_PATTERN"; then
-      idle_streak=$((idle_streak + 1))
-      [ "$idle_streak" -ge 2 ] && break
-    else
-      idle_streak=0
-    fi
-    if [ "$waited" -ge "$TURN_TIMEOUT" ]; then
-      outcome="turn_timeout"
-      break
-    fi
-    sleep "$POLL"
-    waited=$((waited + (POLL > 0 ? POLL : 1)))
-  done
-
-  if [ "$outcome" = "confirmed" ]; then
-    # /goal is a native slash command. Typing it opens the slash autocomplete; with arguments
-    # after a space the literal text stays in the box. No Escape: a double Escape in the input
-    # box clears it or opens rewind. Verify on screen instead, retry once.
+  # /goal is a native slash command, typed only once the kickoff turn is over: a line submitted
+  # during a turn is queued and handed to that turn as plain text, so the command never runs.
+  # No Escape: a double Escape in the input box clears it or opens rewind.
+  if ! wait_for_idle "$target" "$transcript" "$TURN_TIMEOUT"; then
+    outcome="turn_timeout"
+  else
     type_line "$target" "$goal"
-    if ! wait_for_screen "$target" "$GOAL_ACTIVE_PATTERN" "$GOAL_CONFIRM_TIMEOUT"; then
-      local prefix="${goal:0:40}"
-      if tmux capture-pane -p -t "$target" 2>/dev/null | grep -Fq -- "$prefix"; then
-        # Still in the input box: the first Enter was taken by the autocomplete.
-        tmux send-keys -t "$target" Enter
-      else
-        type_line "$target" "$goal"
+    if ! wait_for_goal_entry "$target" "$transcript" "$GOAL_CONFIRM_TIMEOUT"; then
+      if ! wait_for_idle "$target" "$transcript" "$TURN_TIMEOUT"; then
+        outcome="turn_timeout"
+      elif ! transcript_says goal "$transcript"; then
+        retry_goal "$target" "$transcript" "$goal_file"
+        wait_for_goal_entry "$target" "$transcript" "$GOAL_CONFIRM_TIMEOUT" || outcome="unconfirmed"
       fi
-      wait_for_screen "$target" "$GOAL_ACTIVE_PATTERN" "$GOAL_CONFIRM_TIMEOUT" || outcome="unconfirmed"
     fi
   fi
 
   if [ "$outcome" != "confirmed" ]; then
-    local msg="LET OP: het automatische /goal-vervolg na de context-rotatie is niet bevestigd ($outcome). Meld dit aan de operator en vraag hem deze regel zelf in te typen: $goal"
-    tmux display-message -t "$target" "VNX t0-rotate: /goal-vervolg NIET bevestigd ($outcome), zie het bericht in dit venster" || true
-    type_line "$target" "$msg"
-    log "goal-followup: $outcome"
+    # The LET OP line goes in on an idle turn only. After a turn_timeout the session never was
+    # idle: then the status line and the receipt carry the outcome.
+    fallback="not_typed"
+    if [ "$outcome" = "unconfirmed" ] && wait_for_idle "$target" "$transcript" "$TURN_TIMEOUT"; then
+      fallback="typed"
+    fi
+    if [ "$fallback" = "typed" ]; then
+      tmux display-message -t "$target" "VNX t0-rotate: /goal-vervolg NIET bevestigd ($outcome), zie het bericht in dit venster" || true
+      type_line "$target" "LET OP: het automatische /goal-vervolg na de context-rotatie is niet bevestigd ($outcome). Meld dit aan de operator en vraag hem deze regel zelf in te typen: $goal"
+    else
+      tmux display-message -t "$target" "VNX t0-rotate: /goal-vervolg NIET bevestigd ($outcome), de beurt eindigde niet; typ de /goal-regel zelf (zie $goal_file)" || true
+    fi
+    log "goal-followup: $outcome (fallback $fallback); the line: $goal"
   fi
   "$PYTHON" "$STATE_PY" event --trigger t0_context_rotation_goal_followup \
-    --file "${state_file:-$goal_file}" --field "outcome=$outcome" --field "window=$target" || true
+    --file "${state_file:-$goal_file}" --field "outcome=$outcome" --field "window=$target" \
+    --field "fallback=$fallback" --field "screen_goal_active=$GOAL_SCREEN" || true
   [ "$outcome" = "confirmed" ]
 }
 

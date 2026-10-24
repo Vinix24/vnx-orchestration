@@ -205,9 +205,6 @@ GRANDFATHERED: Dict[str, Set[str]] = {
 #     governed test surface; the door threads explicit dirs in the governed path
 #     and these fallbacks fire only on the un-threaded path. Migrating them
 #     belongs with the door owners, not the plan-gate fix.
-#   - worker_permission_relay: last-resort except-branch AFTER vnx_paths.ensure_env()
-#     (the VNX_HOME+marker-aware resolver) failed — mirrors the grandfathered
-#     defensive-fallback pattern above.
 #   - append_receipt_internals/payload.py: MIGRATED. Its confidence hook fed
 #     __file__ to the resolver and so wrote to <checkout>/.vnx-data/state, a
 #     store without the intelligence tables (every update a silent no-op). It now
@@ -240,9 +237,6 @@ GRANDFATHERED: Dict[str, Set[str]] = {
 GRANDFATHERED_RESOLVER_ANCHORS: Dict[str, Set[str]] = {
     "scripts/lib/staging_validator.py": {
         "resolve_data_dir(caller_file=__file__)",
-    },
-    "scripts/lib/worker_permission_relay.py": {
-        "resolve_state_dir(caller_file=__file__)",
     },
     "scripts/lib/lease_sweep.py": {
         "resolve_state_dir(__file__)",

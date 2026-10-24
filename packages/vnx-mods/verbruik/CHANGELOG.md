@@ -2,6 +2,15 @@
 
 All notable changes to this plugin are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the plugin follows [Semantic Versioning](https://semver.org/).
 
+## [0.1.2] - 2026-10-22
+
+### Changed
+
+- A full kimi with a known upper bound shows the time left instead of only the date: `kimi terug over 1d 19u (uiterlijk 24-10 13:05) !!`. Above 24 hours it is days and hours (`1d 19u`), from 1 to 24 hours hours and minutes (`5u 07m`), under an hour minutes (`42m`). It is rounded up on the smallest unit shown, so the text never promises kimi back too early.
+- At or after the bound the text no longer says kimi is full: the `vol` status was written before the bound and is no new measurement. It reads `kimi laatst vol, grens 24-10 13:05 voorbij !` (tone `warning`) and names only the stored bound; no new time is computed.
+- Without a known bound the text stays `kimi vol tot reset !!`.
+- The display reads the time from the engine's clock (`$.clock.now()`) and is computed again on every render. There is no ticker and no new timer.
+
 ## [0.1.1] - 2026-10-22
 
 ### Changed

@@ -64,6 +64,15 @@ Each item carries ``kind``, counted in ``by_kind``:
   the bucket is storage, never an ending — the dispatch stays an open point
   until a T0 records accept or reject for it (``scan_open_buckets``).
 
+* ``gate_retry_cap`` (R10) — a review-gate obligation of this project that
+  the obligation runner parked at the retry cap: its gate ran twice on the
+  PR's head without a verdict it can book (``degenerate_retry_cap``, see
+  ``gate_run_guard``), and the runner will not run it again on that head. It
+  is a point about the gate, not about the dispatch's outcome: it is listed
+  beside any dispatch item of the same id, and a decision does not close it.
+  It leaves the list when the obligation leaves the cap: a new head reviewed,
+  or an operator ``--force-rerun --reason``.
+
 Nothing without an outcome ends in ``completed/`` or ``dead_letter/``: an
 accept goes to completed, dead_letter is only a T0 ``reject`` in the
 decision log (operator decision 29-09-2026).
@@ -77,6 +86,7 @@ BILLING SAFETY: No Anthropic SDK imports. No api.anthropic.com calls.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import stat
@@ -84,6 +94,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, NamedTuple, Optional
 
+from gate_obligations import OBLIGATIONS_SUBDIR, REASON_DEGENERATE_RETRY_CAP, STATUS_PENDING
 from receipt_outcome import (
     BOOKKEEPING_EVENT_TYPES,
     INVALID_DISPATCH_IDS,
@@ -91,6 +102,8 @@ from receipt_outcome import (
     noise_reason,
     summarize,
 )
+
+logger = logging.getLogger(__name__)
 
 LEDGER_NAME = "t0_receipts.ndjson"
 DECISION_LOG_NAME = "t0_decision_log.jsonl"
@@ -105,12 +118,15 @@ OPEN_DECISIONS = ("reject", "investigate", "unknown")
 KIND_RECEIPT_OUTCOME = "receipt_outcome"
 KIND_ACTIVE_DISPATCH = "active_dispatch"
 KIND_ABANDONED_DISPATCH = "abandoned_dispatch"
+KIND_GATE_RETRY_CAP = "gate_retry_cap"
 
 # What an active dispatch without an outcome reads as in the list.
 OUTCOME_NO_RECEIPT = "no_receipt"
 OUTCOME_NO_OUTCOME = "no_outcome"
 # What an abandoned bundle nothing decided on reads as.
 OUTCOME_NO_DECISION = "no_decision"
+# What a gate obligation parked at the retry cap reads as (R10).
+OUTCOME_RETRY_CAP = "retry_cap"
 
 # An active dispatch without any receipt is still running until it is this
 # old; after that it is an open point (the drain's --older-than-hours default).
@@ -651,6 +667,49 @@ def abandoned_dispatch_items(
     return items
 
 
+def gate_retry_cap_items(obligations_dir: Path, project_id: str) -> List[Dict[str, Any]]:
+    """The review-gate obligations of ``project_id`` parked at the retry cap (R10).
+
+    Read from ``<state_dir>/review_gates/obligations``: pending, reason
+    ``degenerate_retry_cap``. An obligation stamped with another project is not
+    this project's (ADR-007); one without a project id is the store's own. An
+    obligation file that cannot be read is skipped here with a warning: the
+    producer-freshness monitor already reports it as ``source_unreadable``
+    (``producer_freshness.scan_gate_obligations``). A directory that cannot be
+    listed raises ``OSError`` for the caller to report.
+    """
+    items: List[Dict[str, Any]] = []
+    directory = Path(obligations_dir)
+    if not directory.is_dir():
+        return items
+    for path in sorted(directory.glob("*.json")):
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            logger.warning("open_outcomes: obligation %s unreadable: %s", path.name, exc)
+            continue
+        if not isinstance(record, dict) or record.get("status") != STATUS_PENDING:
+            continue
+        if record.get("reason") != REASON_DEGENERATE_RETRY_CAP:
+            continue
+        if str(record.get("project_id") or project_id) != project_id:
+            continue
+        seen = _parse_ts(record.get("last_attempt_at"))
+        head_runs = record.get("head_runs") if isinstance(record.get("head_runs"), dict) else {}
+        items.append({
+            "kind": KIND_GATE_RETRY_CAP,
+            "dispatch_id": str(record.get("dispatch_id") or path.stem),
+            "outcome": OUTCOME_RETRY_CAP,
+            "status": STATUS_PENDING,
+            "reason": str(record.get("reason_detail") or REASON_DEGENERATE_RETRY_CAP),
+            "last_seen": seen.astimezone(timezone.utc).isoformat() if seen else None,
+            "gate": record.get("gate"),
+            "pr_number": record.get("pr_number"),
+            "head_sha": head_runs.get("head_sha"),
+        })
+    return items
+
+
 def _last_seen(receipts: Iterable[Dict[str, Any]], project_id: str) -> Dict[str, datetime]:
     """Latest receipt timestamp per dispatch_id over the lines ``summarize``
     keeps for ``project_id``: ``noise_reason`` is the one project test, so a
@@ -710,6 +769,7 @@ def build_open_outcomes(
     data_dir: Optional[Path] = None,
     now: Optional[datetime] = None,
     no_receipt_threshold_hours: float = NO_RECEIPT_THRESHOLD_HOURS,
+    obligations_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """The open-outcomes section: counts over all open points, at most
     ``limit`` items (None = all), and ``more`` for the rest.
@@ -719,7 +779,9 @@ def build_open_outcomes(
     ``active_dispatch`` kind, and ``dispatches/abandoned`` for the
     ``abandoned_dispatch`` kind. A dispatch the ledger already lists is listed
     once, as ``receipt_outcome``; one with files in several buckets is one
-    item too.
+    item too. ``obligations_dir`` (default
+    ``state_dir/review_gates/obligations``) holds the review-gate obligations
+    for the ``gate_retry_cap`` kind (R10), listed beside the dispatch items.
 
     Stateless: two readers at the same moment get the same answer, and
     reading consumes nothing. Without a project id, or when a file cannot be
@@ -746,8 +808,11 @@ def build_open_outcomes(
             store, decisions, project_id=project_id, now=now,
             threshold_hours=no_receipt_threshold_hours, scan=scan)
         abandoned = abandoned_dispatch_items(store, decisions)
+        capped = gate_retry_cap_items(
+            Path(obligations_dir) if obligations_dir else state_dir / OBLIGATIONS_SUBDIR, project_id)
     except OSError as exc:
-        return {"available": False, "reason": f"could not read dispatches/active, /rejected or /abandoned: {exc}"}
+        return {"available": False, "reason": f"could not read dispatches/active, /rejected, /abandoned or "
+                                              f"the gate obligations: {exc}"}
     # an id in more than one bucket is one open point: the ledger kind wins,
     # then active/ (over rejected/), then the abandoned bucket.
     for item in active + abandoned:
@@ -755,6 +820,8 @@ def build_open_outcomes(
             continue
         listed.add(item["dispatch_id"])
         items.append(item)
+    # a gate at the retry cap is a point of its own, beside its dispatch's (R10)
+    items.extend(capped)
     items.sort(key=lambda i: i["dispatch_id"])
     items.sort(key=lambda i: i["last_seen"] or "", reverse=True)
     shown = items if limit is None else items[:max(0, limit)]

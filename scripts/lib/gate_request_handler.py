@@ -35,6 +35,13 @@ from gate_result_parser import evidence_error
 from gate_status import decided_verdict, has_complete_evidence
 from governance_emit import _classify_lane_log_text
 from provider_switch import SwitchDecision
+from review_vendor import (
+    MODEL_MATCH_STATUS,
+    BuilderVendor,
+    resolve_builder_vendor,
+    same_vendor_record,
+    vendor_match_hop,
+)
 from claude_github_receipt import (
     ClaudeGitHubReviewReceipt,
     STATE_NOT_CONFIGURED,
@@ -86,7 +93,15 @@ class ReviewGateTakeoverConfigError(ValueError):
 # harness-lane gate. It no longer resolves not_executable/gate_runner_missing
 # by design; that was the pre-OI-1714 defect (a script-runner registration
 # pointing at a file that never existed), not the current end-link behaviour.
-_DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN = "codex_gate,kimi_gate,deepseek_gate"
+#
+# R7 (operator decision 2026-10-22, dispatch dlv-9906a482950d): claude_gate, the
+# claude review seat on the operator's subscription, stands between kimi_gate and
+# deepseek_gate. Every subscription reviewer (codex, kimi, claude) comes before
+# the API-credit end-link, and a seat never gets a reviewer of the builder's
+# vendor (review_vendor): such a reviewer is passed over like an unavailable one,
+# so a DeepSeek-built head with kimi out reads claude, and a claude-built head
+# with kimi out passes claude over and reads deepseek.
+_DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN = "codex_gate,kimi_gate,claude_gate,deepseek_gate"
 
 
 def _parse_review_gate_takeover_chain(raw: str) -> Dict[str, str]:
@@ -523,9 +538,21 @@ def _held_seat_hop(gate: str, holder: str) -> Dict[str, Any]:
     }
 
 
+def _with_reader_models(
+    seat_fields: Optional[Dict[str, Any]], reader: str, builder: Optional[BuilderVendor],
+) -> Dict[str, Any]:
+    """``seat_fields`` with the seat's ``builder_vendor`` record saying ``reader``'s model (R7b)."""
+    fields = dict(seat_fields or {})
+    if isinstance(fields.get("builder_vendor"), dict):
+        fields["builder_vendor"] = same_vendor_record(reader, builder, fields["builder_vendor"])
+    return fields
+
+
 def _hop_text(hop: Dict[str, Any]) -> str:
     if hop.get("status") == _HELD_HOP_STATUS:
         return f"{hop['gate']} reads another seat ({hop['detail']})"
+    if hop.get("status") == MODEL_MATCH_STATUS:
+        return f"{hop['gate']} passed over ({hop['reason']}): {hop['detail']}"
     return f"{hop['gate']} unavailable ({hop['reason']}): {hop['detail']}"
 
 
@@ -678,6 +705,24 @@ class GateRequestHandlerMixin:
     def _deepseek_gate_available(self) -> bool:
         return gate_is_available("deepseek_gate", state_dir=getattr(self, "state_dir", None))
 
+    def _claude_gate_available(self) -> bool:
+        return gate_is_available("claude_gate", state_dir=getattr(self, "state_dir", None))
+
+    def _builder_vendor(self, dispatch_id: str) -> BuilderVendor:
+        """The vendor of the builder the review request names, read from this store's specs (R7).
+
+        The store is the one the review gates live in (``results_dir`` is
+        ``<data_dir>/state/review_gates/results``), never the store the
+        environment names.
+        """
+        state_dir = getattr(self, "state_dir", None) or Path(self.results_dir).parent.parent
+        builder = resolve_builder_vendor(dispatch_id, data_dir=Path(state_dir).parent)
+        logger.info(
+            "gate_request_handler: builder vendor for dispatch=%r -- %s (rule %s)",
+            dispatch_id, builder.vendor or "unknown", "applied" if builder.applies else "not applied",
+        )
+        return builder
+
     def _seat_switch_refusal(self, gate: str) -> Optional[SwitchDecision]:
         """The provider switch's refusal for a review seat, or ``None`` when it may be called.
 
@@ -736,6 +781,8 @@ class GateRequestHandlerMixin:
             return self._request_glm(pr_number, branch, risk_class, changed_files, mode, dispatch_id)
         if gate == "deepseek_gate":
             return self._request_deepseek(pr_number, branch, risk_class, changed_files, mode, dispatch_id)
+        if gate == "claude_gate":
+            return self._request_claude(pr_number, branch, risk_class, changed_files, mode, dispatch_id)
         return {"gate": gate, "status": "blocked", "reason": "unknown_review_gate"}
 
     def _read_existing_gate_result(self, gate: str, pr_number: Optional[int]) -> Optional[Dict[str, Any]]:
@@ -1171,7 +1218,7 @@ class GateRequestHandlerMixin:
     def _walk_takeover_chain(
         self, gate: str, pr_number: int, chain: Dict[str, str],
         refusal: Optional[SwitchDecision], *, head: _PrHead,
-        held: Optional[Dict[str, str]] = None,
+        held: Optional[Dict[str, str]] = None, builder: Optional[BuilderVendor] = None,
     ) -> "tuple[Optional[str], List[Dict[str, Any]], Optional[SwitchDecision]]":
         """Walk the takeover ``chain`` from ``gate`` and return ``(reader, path, reader_refusal)``.
 
@@ -1192,14 +1239,22 @@ class GateRequestHandlerMixin:
         holds its own decided verdict on this head: the caller decides whether
         that verdict stands (``_refuse_switched_off_seat``) and dispatches
         nothing. ``head`` is the round's PR head (``_PrHead``).
+
+        ``builder`` (R7, R7b) is the builder of the head: a candidate of that
+        vendor that runs the builder's model (or whose model, or the builder's, is
+        unknown) is passed over first, before its own record, its switch or its
+        reachability is read, with a ``model_matches_builder`` hop. A builder
+        whose vendor is unknown passes nobody over.
         """
         path: List[Dict[str, Any]] = []
         current = gate
         current_refusal = refusal
         while True:
-            hop, verdict_stands = self._candidate_hop(
-                current, current_refusal, pr_number, head=head, held=held or {},
-            )
+            hop, verdict_stands = vendor_match_hop(current, builder), False
+            if hop is None:
+                hop, verdict_stands = self._candidate_hop(
+                    current, current_refusal, pr_number, head=head, held=held or {},
+                )
             if verdict_stands:
                 return current, path, current_refusal
             if hop is None:
@@ -1296,6 +1351,7 @@ class GateRequestHandlerMixin:
         held: Optional[Dict[str, str]] = None,
         head: Optional[_PrHead] = None,
         seat_fields: Optional[Dict[str, Any]] = None,
+        builder: Optional[BuilderVendor] = None,
     ) -> Dict[str, Any]:
         """Dispatch one review-stack seat, walking the configured takeover
         CHAIN (BETA3-E1) forward while every candidate's own last-recorded
@@ -1424,13 +1480,26 @@ class GateRequestHandlerMixin:
         as a pass. The refusal never reaches the reachability record, the
         known-rejected ledger or a cooldown, so switching the family back on
         lets the next request dispatch it.
+
+        MODEL (R7b, operator decision 2026-10-22): a seat never gets a reviewer
+        that runs the builder's model (``builder``, ``review_vendor``); the same
+        vendor on another model may take the seat, and the seat's
+        ``builder_vendor`` record then says ``rule: model_differs``. Such a
+        reviewer is passed over like an unavailable one, first choice or
+        takeover alike: the seat rolls to the next gate in the chain and the
+        record names it (``takeover_from``, ``takeover_reason``
+        ``model_matches_builder``). A seat whose own gate runs the builder's model and
+        has no successor is booked unfillable. A builder whose vendor is unknown
+        applies no rule; the seat's ``builder_vendor`` field says why.
         """
         if chain is None:
             chain = _build_review_gate_takeover_chain()
         if head is None:
             head = _PrHead(pr_number)
 
-        reader, path, refusal = self._resolve_seat_reader(gate, pr_number, chain, held or {}, head)
+        reader, path, refusal = self._resolve_seat_reader(
+            gate, pr_number, chain, held or {}, head, builder=builder,
+        )
         if reader is None:
             return self._chain_exhausted_result(
                 gate=gate, pr_number=pr_number, branch=branch, dispatch_id=dispatch_id, path=path,
@@ -1439,11 +1508,12 @@ class GateRequestHandlerMixin:
         return self._request_seat_reader(
             reader, refusal, path, pr_number=pr_number, branch=branch, risk_class=risk_class,
             changed_files=changed_files, mode=mode, dispatch_id=dispatch_id, head=head,
-            seat_fields=seat_fields or {},
+            seat_fields=_with_reader_models(seat_fields, reader, builder),
         )
 
     def _resolve_seat_reader(
         self, gate: str, pr_number: int, chain: Dict[str, str], held: Dict[str, str], head: _PrHead,
+        *, builder: Optional[BuilderVendor] = None,
     ) -> "tuple[Optional[str], List[Dict[str, Any]], Optional[SwitchDecision]]":
         """``(reader, path, refusal)`` for the seat ``gate``; dispatches nothing.
 
@@ -1453,13 +1523,19 @@ class GateRequestHandlerMixin:
         chain_exhausted state (that state is reserved for a chain that WAS
         entered and then ran out). The one exception is a gate that already
         reads another seat of this request: it has nobody to hand the seat to,
-        so the seat has no distinct reviewer (``reader`` ``None``).
+        so the seat has no distinct reviewer (``reader`` ``None``). A gate that
+        shares the builder's vendor (R7) has nobody to hand the seat to either.
         """
         refusal = self._seat_switch_refusal(gate)
         if gate in chain:
-            return self._walk_takeover_chain(gate, pr_number, chain, refusal, head=head, held=held)
+            return self._walk_takeover_chain(
+                gate, pr_number, chain, refusal, head=head, held=held, builder=builder,
+            )
         if gate in held:
             return None, [_held_seat_hop(gate, held[gate])], None
+        vendor_hop = vendor_match_hop(gate, builder)
+        if vendor_hop is not None:
+            return None, [vendor_hop], None
         return gate, [], refusal
 
     def _request_seat_reader(
@@ -1622,6 +1698,7 @@ class GateRequestHandlerMixin:
         dispatch_id: str = "",
         head_sha: Optional[str] = None,
         override_b3: str = "",
+        force_rerun: str = "",
     ) -> Dict[str, Any]:
         """Request every seat of the review stack for ``pr_number``, each from its own reviewer.
 
@@ -1641,15 +1718,26 @@ class GateRequestHandlerMixin:
         evaluator can hold a merge to the stack that was requested even after
         the config changed.
 
+        The round's risk class is derived from the PR diff, not taken from the
+        caller (R3a, :meth:`_review_risk`): ``risk_class`` can only raise it.
+        Every seat carries it as ``review_risk`` next to ``review_seats``, every
+        entry is requested with the derived class (so the codex reasoning effort
+        follows it), and the return value carries ``review_risk``.
+
         ``head_sha`` is the PR head the caller already observed
         (``request_and_execute``), shared by every seat of the round; ``None``
-        resolves it lazily, at most once per round (``_PrHead``).
+        resolves it once per round (``_PrHead``), for the risk class.
 
         Every seat passes the round ledger first (R1, :meth:`_round_refusal`),
         before its takeover walk: this is where every run starts (the CLI, the
         obligation runner, ``vnx gate``, a takeover), so no entry runs past it.
         ``override_b3`` is the reason of an ``--override-b3``: it wins over the
         B3 cap for the codex seat and travels on that seat's request.
+
+        ``force_rerun`` (R10) is the reason of an operator force-rerun from the
+        obligation runner. It is logged once and travels as ``force_rerun`` on
+        every request of the round, into the result record; it lifts no
+        refusal of the round ledger.
         """
         from review_seats import resolve_review_seats
 
@@ -1657,6 +1745,7 @@ class GateRequestHandlerMixin:
         seats = resolve_review_seats(explicit_stack=review_stack, changed_files=changed_files)
         seat_record = seats.to_record()
         requested: List[Dict[str, Any]] = []
+        operator_fields = self._force_rerun_fields(force_rerun, pr_number=pr_number, head_sha=head_sha)
 
         # Resolved ONCE per request_reviews() call (not per gate in the
         # stack): every seat in this stack takes over against the SAME
@@ -1665,19 +1754,26 @@ class GateRequestHandlerMixin:
         chain = _build_review_gate_takeover_chain()
         head = _PrHead(pr_number, head_sha)
         rounds = _PrRounds.read(self.results_dir.parent, pr_number)
+        builder = self._builder_vendor(dispatch_id)
+        risk = self._review_risk(pr_number=pr_number, head=head, caller_class=risk_class, dispatch_id=dispatch_id)
+        risk_record = risk.to_record()
 
         for gate in seats.stack:
-            seat_fields = {"seat": gate, "review_seats": seat_record} if gate in seats.seats else {}
+            seat_fields = {
+                "seat": gate, "review_seats": seat_record, "review_risk": risk_record,
+                "builder_vendor": builder.to_record(),
+            } if gate in seats.seats else {}
+            seat_fields.update(operator_fields)
             payload = self._round_refusal(
                 rounds, head, pr_number=pr_number, branch=branch, seat_fields=seat_fields,
                 override_b3=override_b3,
             ) or self._dispatch_review_seat(
-                gate, pr_number, branch, risk_class, changed_files, mode, dispatch_id, chain=chain,
-                held=_held_reviewers(requested), head=head, seat_fields=seat_fields,
+                gate, pr_number, branch, risk.risk_class, changed_files, mode, dispatch_id, chain=chain,
+                held=_held_reviewers(requested), head=head, seat_fields=seat_fields, builder=builder,
             )
             requested.append(payload)
             self._emit_review_request_receipt(
-                payload, pr_number=pr_number, branch=branch, mode=mode, risk_class=risk_class,
+                payload, pr_number=pr_number, branch=branch, mode=mode, risk_class=risk.risk_class,
                 changed_files=changed_files, dispatch_id=dispatch_id,
             )
 
@@ -1686,7 +1782,42 @@ class GateRequestHandlerMixin:
             "branch": branch,
             "requested": requested,
             "review_seats": seat_record,
+            "review_risk": risk_record,
         }
+
+    def _review_risk(self, *, pr_number: int, head: _PrHead, caller_class: str, dispatch_id: str) -> Any:
+        """The round's risk class, derived from the PR diff (R3a, ``review_risk_class``).
+
+        The diff is read with local git in the project's checkout
+        (``PROJECT_ROOT``, else the process cwd); nothing is fetched, and a head
+        that is not there makes the class ``high``. ``irreversible`` is read
+        from the dispatch's spec in this store (the one the review gates live
+        in, as :meth:`_builder_vendor` reads it). ``caller_class`` only raises.
+        """
+        import review_risk_class
+
+        root = (getattr(self, "paths", None) or {}).get("PROJECT_ROOT")
+        reading = review_risk_class.read_pr_diff(head.sha(), cwd=Path(root) if root else None)
+        state_dir = getattr(self, "state_dir", None) or Path(self.results_dir).parent.parent
+        spec = review_risk_class.spec_flag(dispatch_id, data_dir=Path(state_dir).parent)
+        risk = review_risk_class.derive_risk_class(reading, caller_class=caller_class, spec=spec, head_sha=head.sha())
+        logger.info("gate_request_handler: pr=%s %s", pr_number, risk.explain())
+        return risk
+
+    @staticmethod
+    def _force_rerun_fields(force_rerun: str, *, pr_number: int, head_sha: Optional[str]) -> Dict[str, Any]:
+        """``{"force_rerun": record}`` for every request of a forced round (R10), ``{}`` without a reason."""
+        import gate_run_guard
+
+        reason = (force_rerun or "").strip()
+        if not reason:
+            return {}
+        logger.warning(
+            "gate_request_handler: %s for pr=%s -- reason: %s", gate_run_guard.FORCE_RERUN_USAGE, pr_number, reason,
+        )
+        return {"force_rerun": gate_run_guard.force_rerun_record(
+            reason, head_sha=head_sha or "", set_by="gate_obligation_runner --force-rerun",
+        )}
 
     def _round_refusal(
         self, rounds: _PrRounds, head: _PrHead, *, pr_number: int, branch: str,
@@ -1872,13 +2003,18 @@ class GateRequestHandlerMixin:
         if successor is None:
             return None
         others = {gate: holder for gate, holder in held.items() if holder != seat}
+        builder = self._builder_vendor(dispatch_id)
         reader, walked, refusal = self._walk_takeover_chain(
             successor, pr_number, chain, self._seat_switch_refusal(successor), head=head, held=others,
+            builder=builder,
         )
         if reader is None or refusal is not None:
             return None
         # An --override-b3 the seat's request carried goes with the seat (R1).
-        seat_fields = {"seat": seat, "review_seats": payload.get("review_seats")}
+        seat_fields = {
+            "seat": seat, "review_seats": payload.get("review_seats"), "review_risk": payload.get("review_risk"),
+            "builder_vendor": same_vendor_record(reader, builder, builder.to_record()),
+        }
         override = payload.get("override_b3") if isinstance(payload.get("override_b3"), dict) else {}
         refused = self._round_refusal(
             _PrRounds.read(self.results_dir.parent, pr_number), head, pr_number=pr_number, branch=branch,
@@ -2489,14 +2625,45 @@ class GateRequestHandlerMixin:
         (BETA3-E1, 26-08 operator decision), a legal spec/staging gate and a
         legal ``VNX_DEFAULT_REVIEW_STACK`` entry.
         """
+        return self._request_harness_seat(
+            "deepseek_gate", "deepseek", self._deepseek_gate_available(),
+            pr_number=pr_number, branch=branch, risk_class=risk_class,
+            changed_files=changed_files, mode=mode, dispatch_id=dispatch_id,
+        )
+
+    def _request_claude(
+        self, pr_number: int, branch: str, risk_class: str, changed_files: List[str], mode: str,
+        dispatch_id: str = "",
+    ) -> Dict[str, Any]:
+        """claude_gate (R7, operator decision 2026-10-22) is the claude review seat:
+        a harness-lane gate on the "claude" lane (``claude_gate_lane``,
+        ``claude -p`` on the operator's subscription, never provider_dispatch).
+        Requested exactly like deepseek_gate: available by REGISTRATION, and the
+        provider switch never refuses it (claude is not switchable, ADR-044 v1).
+        """
+        return self._request_harness_seat(
+            "claude_gate", "claude", self._claude_gate_available(),
+            pr_number=pr_number, branch=branch, risk_class=risk_class,
+            changed_files=changed_files, mode=mode, dispatch_id=dispatch_id,
+        )
+
+    def _request_harness_seat(
+        self, gate: str, provider: str, available: bool, *, pr_number: int, branch: str,
+        risk_class: str, changed_files: List[str], mode: str, dispatch_id: str,
+    ) -> Dict[str, Any]:
+        """Request a harness-lane review ``gate`` whose availability the caller decided.
+
+        An unavailable gate is classified by name (gate_result_parser
+        ``_classify_unavailable``, same as ``_request_glm``) and booked
+        ``not_executable`` in the result record and the skip rationale.
+        """
         from review_gate_manager import _utc_now
 
-        available = self._deepseek_gate_available()
         requested_at = _utc_now()
         payload: Dict[str, Any] = {
-            "gate": "deepseek_gate",
+            "gate": gate,
             "status": "requested" if available else "not_executable",
-            "provider": "deepseek",
+            "provider": provider,
             "branch": branch,
             "pr_number": pr_number,
             "review_mode": mode,
@@ -2505,7 +2672,7 @@ class GateRequestHandlerMixin:
             "requested_at": requested_at,
             "commit_sha": get_pr_head_sha(pr_number),
             "report_path": self._build_report_path(
-                gate="deepseek_gate",
+                gate=gate,
                 requested_at=requested_at,
                 pr_number=pr_number,
             ) if available else "",
@@ -2513,8 +2680,7 @@ class GateRequestHandlerMixin:
         if dispatch_id:
             payload["dispatch_id"] = dispatch_id
         if not available:
-            # Classified by name, same as _request_glm above.
-            reason, reason_detail = self._classify_unavailable("deepseek_gate")
+            reason, reason_detail = self._classify_unavailable(gate)
             payload["reason"] = reason
             payload["reason_detail"] = reason_detail
             payload["resolved_at"] = payload["requested_at"]
@@ -2524,7 +2690,7 @@ class GateRequestHandlerMixin:
             # audit-on-refusal would double-log the same refused write. The
             # head moves to the skip-rationale call's commit_sha= instead.
             self._write_not_executable_result(
-                gate="deepseek_gate", pr_number=pr_number, pr_id="",
+                gate=gate, pr_number=pr_number, pr_id="",
                 reason=reason, reason_detail=reason_detail,
                 dispatch_id=dispatch_id,
                 branch=branch,
@@ -2532,11 +2698,11 @@ class GateRequestHandlerMixin:
                 audit_refusal=False,
             )
             self._write_skip_rationale(
-                gate="deepseek_gate", pr_id=str(pr_number),
+                gate=gate, pr_id=str(pr_number),
                 reason=reason, reason_detail=reason_detail,
                 commit_sha=payload.get("commit_sha") or "",
             )
-        atomic_write_json(self._request_path("deepseek_gate", pr_number), payload)
+        atomic_write_json(self._request_path(gate, pr_number), payload)
         return payload
 
     def _apply_claude_github_configured_state(

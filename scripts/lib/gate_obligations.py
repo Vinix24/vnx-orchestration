@@ -151,6 +151,16 @@ REASON_FAILED_BY_GATE_VERDICT = "failed_by_gate_verdict"
 REASON_GATE_PARKED = "gate_parked"
 REASON_GATE_PARKED_TIMEOUT = f"{REASON_GATE_PARKED}_timeout"
 
+# R10 (2026-10-22): an obligation whose gate ran twice on one PR head without
+# a verdict the runner can book (``gate_execution_degenerate``, a timeout, a
+# stall, a partial review) stays PENDING under this reason: the merge door
+# still sees no review, and the runner does not run the gate again on that
+# head. Writer: scripts/gate_obligation_runner.py (the count lives on the
+# record as ``head_runs``, see scripts/lib/gate_run_guard.py); reader:
+# scripts/lib/open_outcomes.py, which lists it for the T0. A new head resets
+# the count; an operator rerun needs ``--force-rerun --reason``.
+REASON_DEGENERATE_RETRY_CAP = "degenerate_retry_cap"
+
 # Distinct sentinel gate key for explicit no-gate records (dispatch
 # 20260816-gate-never-skippable). Deliberately NOT a member of the Gate enum: a
 # no-gate dispatch is not declaring any gate, but the freshness scanner needs a
@@ -549,6 +559,7 @@ __all__ = [
     "REASON_FAILED_BY_TAKEOVER",
     "REASON_GATE_PARKED",
     "REASON_GATE_PARKED_TIMEOUT",
+    "REASON_DEGENERATE_RETRY_CAP",
     "TERMINAL_STATUSES",
     "NO_GATE_KEY",
     "obligations_dir",

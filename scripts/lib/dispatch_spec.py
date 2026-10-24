@@ -47,8 +47,9 @@ class Gate(str, Enum):
     "no gate assigned" and is handled separately by callers — it is not a member
     here so ``Gate("")`` fails the same as any other unknown value.
 
-    KIMI_GATE and GLM_GATE (dlv45) and DEEPSEEK_GATE (OI-1984) extend the closed
-    set with the same discipline as every other member: each has a
+    KIMI_GATE and GLM_GATE (dlv45), DEEPSEEK_GATE (OI-1984) and CLAUDE_GATE (R7,
+    2026-10-22) extend the closed set with the same discipline as every other
+    member: each has a
     ``gate_request_handler`` dispatch branch and a
     ``closure_verifier._GATE_HANDLERS`` entry, pinned by
     ``test_closure_verifier_gate_enum_drift.py``. Extending the enum without
@@ -62,6 +63,7 @@ class Gate(str, Enum):
     KIMI_GATE               = "kimi_gate"
     GLM_GATE                = "glm_gate"
     DEEPSEEK_GATE           = "deepseek_gate"
+    CLAUDE_GATE             = "claude_gate"
 
 
 # Review gates that are registered and runnable but deliberately NOT members of

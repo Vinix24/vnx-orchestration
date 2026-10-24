@@ -35,6 +35,10 @@ from dispatch_identity import (  # single canonical sentinel (dispatch-20260804-
     _IDENTITY_UNRESOLVED,
     normalize_role,
 )
+from fail_closed_evidence import (
+    FailClosedBlockError,
+    with_block_or_raise as _with_block_or_raise,
+)
 from report_body_contract import with_directive as _rbc_with_directive
 
 _EX_USAGE = 64  # sysexits.h EX_USAGE
@@ -258,6 +262,39 @@ def _record_final_prompt_integrity(
         return None
 
 
+def _fallback_enriched_instruction(
+    role: "str | None",
+    enriched: str,
+    args: argparse.Namespace,
+) -> str:
+    """Build the role-label fallback prompt when skill injection failed.
+
+    OI-2318: a build role's fallback header carries the shared fail-closed
+    block too — the old bare header shipped a build worker without the rule
+    exactly when the rich context path was broken. A reviewer role stays bare
+    (D1). ``with_block_or_raise`` raises ``FailClosedBlockError`` on a broken
+    install instead of returning a bare header.
+    """
+    if role:
+        header = f"## Role\n\nYou are operating as a **{role}** worker."
+    else:
+        header = (
+            "## Worker Preamble\n\n"
+            "You are a VNX headless worker executing a dispatch instruction."
+        )
+    header = _with_block_or_raise(
+        header,
+        role,
+        dispatch_id=args.dispatch_id,
+        lane="_enrich_instruction",
+    )
+    return _rbc_with_directive(
+        f"{header}\n\n{enriched}",
+        args.dispatch_id,
+        pr_id=getattr(args, "pr_id", None),
+    )
+
+
 def _enrich_instruction(args: argparse.Namespace) -> str:
     """Prepend role context + intelligence and repo map to instruction for non-Claude provider paths.
 
@@ -266,7 +303,7 @@ def _enrich_instruction(args: argparse.Namespace) -> str:
     remaining providers (codex, gemini, litellm, kimi, deepseek-harness,
     glm-harness, local-gemma).
 
-    Applies layers (best-effort, each layer falls back silently on failure):
+    Applies layers (best-effort, each layer falls back on failure):
     1. Repo-map layer (new — mirrors headless_dispatch_daemon's DispatchEnricher
        step; applied to the RAW instruction so target-file extraction is most
        accurate before any enrichment text is added).
@@ -276,7 +313,9 @@ def _enrich_instruction(args: argparse.Namespace) -> str:
        dispatch staged with ``role=quality-engineer`` received byte-identical
        context to ``role=system-architect`` because the role's CLAUDE.md never
        reached the worker. On injector failure the prompt falls back to a role
-       label header (mirrors tmux_interactive_dispatch._assemble_context).
+       label header (mirrors tmux_interactive_dispatch._assemble_context),
+       which goes through ``with_block_or_raise`` so a build role keeps the
+       shared fail-closed block and an unreadable block file raises.
 
     Input-side audit closure: once assembled, the enriched body is persisted and
     checked for containment of the raw instruction + recorded injections
@@ -285,7 +324,11 @@ def _enrich_instruction(args: argparse.Namespace) -> str:
     ``_emit_governance`` can stamp it onto the receipt. The deterministic
     role-applied verdict is stashed on ``args._role_application`` the same way.
 
-    Returns the original instruction unchanged on any failure.
+    Returns the original instruction unchanged when the repo-map layer is the
+    one that failed (and when ``VNX_BENCH_EQUAL_CONTEXT=1``, by design); an
+    injector failure returns the role-label header plus the instruction, and
+    does not swallow ``FailClosedBlockError`` — that one raises, and ``main``
+    turns it into a ``deliver_failed`` receipt and exit 1.
     """
     if os.environ.get("VNX_BENCH_EQUAL_CONTEXT") == "1":
         return args.instruction
@@ -329,23 +372,17 @@ def _enrich_instruction(args: argparse.Namespace) -> str:
             role,
             dispatch_metadata,
         )
+    except FailClosedBlockError as exc:  # OI-2318: never fall back to a bare header
+        raise FailClosedBlockError(
+            f"_enrich_instruction: cannot assemble prompt for role={role!r} "
+            f"dispatch={args.dispatch_id!r}: {exc}"
+        ) from exc
     except Exception as exc:  # noqa: BLE001 — fallback must never break a dispatch
         logger.warning(
             "_enrich_instruction: skill injection failed (%s); falling back to role label",
             exc,
         )
-        if role:
-            header = f"## Role\n\nYou are operating as a **{role}** worker."
-        else:
-            header = (
-                "## Worker Preamble\n\n"
-                "You are a VNX headless worker executing a dispatch instruction."
-            )
-        enriched = _rbc_with_directive(
-            f"{header}\n\n{enriched}",
-            args.dispatch_id,
-            pr_id=getattr(args, "pr_id", None),
-        )
+        enriched = _fallback_enriched_instruction(role, enriched, args)
 
     # Deterministic control: did the resolved role source actually reach the prompt?
     # OI-983: the verification below runs with the RAW args.role. The resolved _role

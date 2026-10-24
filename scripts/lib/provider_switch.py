@@ -86,7 +86,7 @@ _EXACT: Dict[str, str] = {
     "gemini": GEMINI, "gemini_review": GEMINI, "google": GEMINI,
     "local": LOCAL, "ollama": LOCAL, "local-gemma": LOCAL, "local_gemma": LOCAL,
     "openrouter": OPENROUTER,
-    "claude": CLAUDE, "claude_headless": CLAUDE, "anthropic": CLAUDE,
+    "claude": CLAUDE, "claude_headless": CLAUDE, "anthropic": CLAUDE, "claude_gate": CLAUDE,
     "codex": CODEX, "codex_gate": CODEX, "openai": CODEX,
     "gh": TOOLING, "ci_gate": TOOLING, "wiring_gate": TOOLING, "claude_github_optional": TOOLING,
     "auto": UNRESOLVED,

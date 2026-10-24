@@ -137,6 +137,33 @@ def _build_worker_scope_args(role: Optional[str], requires_mcp: bool = False) ->
     return list(_FALLBACK_SCOPE_ARGS)
 
 
+def _resolve_scope_args(
+    role: Optional[str], requires_mcp: bool, scope_args: Optional[List[str]],
+) -> List[str]:
+    """The capability scope that follows the prompt in a headless ``claude`` argv.
+
+    A caller that states its own scope (``scope_args``, the claude review seat
+    in claude_gate_lane) gets exactly that list: the blanket skip flag and the
+    role-profile scope of :func:`_build_worker_scope_args` never reach its argv,
+    whatever ``VNX_WORKER_SCOPED`` or the enforcement flags say. Every other
+    caller gets :func:`_build_worker_scope_args`, unchanged.
+    """
+    if scope_args is not None:
+        return list(scope_args)
+    return _build_worker_scope_args(role, requires_mcp=requires_mcp)
+
+
+def _refused_delivery(terminal_id: str, dispatch_id: str, failure_reason: str) -> DeliveryResult:
+    """A delivery refused before any claude process runs: no pane, no path used."""
+    return DeliveryResult(
+        success=False,
+        terminal_id=terminal_id,
+        dispatch_id=dispatch_id,
+        pane_id=None,
+        path_used="none",
+        failure_reason=failure_reason,
+    )
+
 
 # ---------------------------------------------------------------------------
 # StreamEvent dataclass
@@ -364,6 +391,7 @@ class SubprocessAdapter:
         role: Optional[str] = None,
         requires_mcp: bool = False,
         scrub_env_keys: Optional[frozenset] = None,
+        scope_args: Optional[List[str]] = None,
         **kwargs: Any,
     ) -> DeliveryResult:
         """Spawn a claude subprocess with the dispatch instruction.
@@ -401,6 +429,11 @@ class SubprocessAdapter:
         _build_worker_scope_args). A role absent from EVERY register instead
         refuses the delivery (success=False, failure_reason starting
         "unknown_role: ") before any subprocess spawns (OI-1069 pt.5).
+
+        scope_args: when given, the spawn's whole capability scope, placed after
+        the instruction in place of the role's scope (see _resolve_scope_args):
+        no ``--dangerously-skip-permissions`` and no role allow-list is added.
+        None (every caller but the claude review seat) keeps the role's scope.
         """
         config = self._configs.get(terminal_id, {})
         effective_instruction = instruction or config.get("instruction", dispatch_id)
@@ -426,18 +459,11 @@ class SubprocessAdapter:
         # the instruction before the scope args keeps it as the -p prompt positional.
         cmd.append(effective_instruction)
         try:
-            cmd.extend(_build_worker_scope_args(effective_role, requires_mcp=requires_mcp))
+            cmd.extend(_resolve_scope_args(effective_role, requires_mcp, scope_args))
         except UnknownRoleError as exc:
             # Refuse before any subprocess spawns (OI-1069 pt.5) — no cmd has
             # been Popen'd yet, so this is a clean pre-flight rejection.
-            return DeliveryResult(
-                success=False,
-                terminal_id=terminal_id,
-                dispatch_id=dispatch_id,
-                pane_id=None,
-                path_used="none",
-                failure_reason=f"unknown_role: {exc}",
-            )
+            return _refused_delivery(terminal_id, dispatch_id, f"unknown_role: {exc}")
 
         # Resolve stderr logfile path.  Writing stderr to an append-mode file
         # rather than subprocess.PIPE prevents pipe-buffer-deadlock when the
@@ -479,14 +505,7 @@ class SubprocessAdapter:
         try:
             process = subprocess.Popen(cmd, **popen_kwargs)
         except (FileNotFoundError, OSError) as exc:
-            return DeliveryResult(
-                success=False,
-                terminal_id=terminal_id,
-                dispatch_id=dispatch_id,
-                pane_id=None,
-                path_used="none",
-                failure_reason=str(exc),
-            )
+            return _refused_delivery(terminal_id, dispatch_id, str(exc))
         finally:
             # Close our file descriptor; the child process inherits its own copy.
             if stderr_file is not None:

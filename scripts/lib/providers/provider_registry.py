@@ -80,6 +80,14 @@ class ProviderModel:
     # key by resolve_model_identity and the price lookup, never to a neighbour.
     # An alias that is another key or another model's alias fails the load.
     aliases: List[str] = field(default_factory=list)
+    # The registry key of the model the vendor answers this name with, when that
+    # is another model: a phased-out name served by its successor. None means the
+    # entry is answered by the model it names. Read by
+    # model_normalizer.comparable_model_name ("is this the same model?"); prices
+    # and the ledger keep the name that was called. A value that is not another
+    # key of the registry, or that names an entry with its own served_by, fails
+    # the load.
+    served_by: Optional[str] = None
 
 
 @dataclass
@@ -275,6 +283,7 @@ def _parse_model(data: dict, model_key: Optional[str] = None) -> ProviderModel:
         cost_cache_write_per_mtok=float(cache_write_raw) if cache_write_raw is not None else None,
         price_versions=price_versions,
         aliases=[str(alias) for alias in (data.get("aliases") or [])],
+        served_by=str(data["served_by"]).strip() if data.get("served_by") is not None else None,
     )
 
 
@@ -319,7 +328,23 @@ def load(registry_path: Optional[Path] = None) -> Dict[str, ProviderConfig]:
     result: Dict[str, ProviderConfig] = {}
     for provider_key, provider_data in (raw or {}).get("providers", {}).items():
         result[str(provider_key)] = _parse_provider(provider_data or {})
+    _check_served_by(result)
     return result
+
+
+def _check_served_by(registry: Dict[str, ProviderConfig]) -> None:
+    """Refuse a ``served_by`` that names no other key, or a key that is itself served by another."""
+    served_by = {
+        key: entry.served_by
+        for cfg in registry.values() for key, entry in cfg.models.items() if entry.served_by is not None
+    }
+    keys = {key for cfg in registry.values() for key in cfg.models}
+    for key, target in served_by.items():
+        if target not in keys or target == key or target in served_by:
+            raise ValueError(
+                f"model {key!r} has served_by {target!r}, which is not another model key of the registry "
+                "answered by itself: served_by names the one model that answers this name"
+            )
 
 
 def get_default_model(

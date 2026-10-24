@@ -16,6 +16,7 @@ from typing import Optional
 
 import report_body_contract
 from envelope_types import EnvelopeSpec
+from fail_closed_evidence import FailClosedBlockError, with_block_or_raise
 
 logger = logging.getLogger(__name__)
 
@@ -26,18 +27,26 @@ logger = logging.getLogger(__name__)
 
 
 def _prepare(spec: EnvelopeSpec) -> str:
-    """Enrich instruction with role context + intelligence and repo map (best-effort).
+    """Enrich instruction with role context + intelligence and repo map.
 
     Mirrors _enrich_instruction in provider_dispatch.py but operates on EnvelopeSpec.
-    Layers fall back silently to the original instruction on any failure:
+    Most layers are best-effort, but a broken fail-closed block is not:
 
     1. Repo-map layer on the RAW instruction (target-file extraction most
-       accurate before any enrichment text is added).
+       accurate before any enrichment text is added). On failure the instruction
+       is used unchanged, without the repo map.
     2. Role context + intelligence + full assembly via ``_inject_skill_context``
        — the shared lane-neutral injector used by every dispatch lane
        (dispatch-20260801-w10). This closes the envelope-lane gap where the
        role's CLAUDE.md never reached the worker. On injector failure the
-       prompt falls back to a role label header.
+       prompt falls back to a role label header, which itself goes through
+       ``with_block_or_raise``: a build role keeps the shared fail-closed block,
+       a reviewer role stays bare (D1).
+
+    Any other exception still falls back; ``FailClosedBlockError`` does not
+    (OI-2318). A missing or empty block file raises it from the injector path
+    and from the fallback header alike — the message names the role, dispatch
+    id and block path — so a build worker is never spawned with a bare prompt.
     """
     instruction = spec.instruction
 
@@ -77,6 +86,11 @@ def _prepare(spec: EnvelopeSpec) -> str:
             spec.role,
             dispatch_metadata,
         )
+    except FailClosedBlockError as exc:  # OI-2318: never fall back to a bare header
+        raise FailClosedBlockError(
+            f"envelope._prepare: cannot assemble prompt for role={spec.role!r} "
+            f"dispatch={spec.dispatch_id!r}: {exc}"
+        ) from exc
     except Exception as exc:  # noqa: BLE001 — fallback must never break a dispatch
         logger.warning(
             "envelope._prepare: skill injection failed (%s); falling back to role label",
@@ -89,6 +103,15 @@ def _prepare(spec: EnvelopeSpec) -> str:
                 "## Worker Preamble\n\n"
                 "You are a VNX headless worker executing a dispatch instruction."
             )
+        # OI-2318: the fallback header carries the shared block for a build
+        # role too; a broken install raises here instead of shipping a bare
+        # header. A reviewer role stays bare (D1).
+        header = with_block_or_raise(
+            header,
+            spec.role,
+            dispatch_id=spec.dispatch_id,
+            lane="envelope._prepare",
+        )
         instruction = report_body_contract.with_directive(
             f"{header}\n\n{instruction}",
             spec.dispatch_id,

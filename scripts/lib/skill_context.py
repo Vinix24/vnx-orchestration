@@ -25,6 +25,10 @@ import logging
 from pathlib import Path
 
 import report_body_contract
+from fail_closed_evidence import (
+    FailClosedBlockError,
+    with_block as _with_fail_closed_block,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -305,6 +309,11 @@ def _try_prompt_assembler(
             assembled.metadata.get("layer3_chars", 0),
         )
         return assembled.to_pipe_input()
+    except FailClosedBlockError:
+        # OI-2318: the shared block is missing from this install. Falling back
+        # to the legacy route here would only re-raise the same error (or, with
+        # no role source, ship a build worker without the rule); fail hard now.
+        raise
     except Exception as exc:
         logger.warning(
             "_inject_skill_context: PromptAssembler failed (%s) — falling back to legacy CLAUDE.md resolution",
@@ -334,26 +343,36 @@ def _legacy_claude_md_resolution(
         candidates.append(project_root / ".claude" / "skills" / role / "CLAUDE.md")
     candidates.append(project_root / ".claude" / "terminals" / terminal_id / "CLAUDE.md")
 
+    body: str | None = None
     for path in candidates:
         if path.exists():
             context = path.read_text()
             report_body_contract.warn_on_divergent_headings(context, str(path))
             if intelligence_section:
-                return (
+                body = (
                     f"{context}\n\n---\n\n"
                     f"## Relevant Intelligence (from past dispatches)\n\n"
                     f"{intelligence_section}\n"
                     f"---\n\nDISPATCH INSTRUCTION:\n\n{instruction}"
                 )
-            return f"{context}\n\n---\n\nDISPATCH INSTRUCTION:\n\n{instruction}"
+            else:
+                body = f"{context}\n\n---\n\nDISPATCH INSTRUCTION:\n\n{instruction}"
+            break
 
-    if intelligence_section:
-        return (
-            f"## Relevant Intelligence (from past dispatches)\n\n"
-            f"{intelligence_section}\n"
-            f"---\n\nDISPATCH INSTRUCTION:\n\n{instruction}"
-        )
-    return instruction
+    if body is None:
+        if intelligence_section:
+            body = (
+                f"## Relevant Intelligence (from past dispatches)\n\n"
+                f"{intelligence_section}\n"
+                f"---\n\nDISPATCH INSTRUCTION:\n\n{instruction}"
+            )
+        else:
+            body = instruction
+
+    # OI-2318: applied on EVERY return path, not only when a CLAUDE.md was
+    # found. Otherwise an assembler failure plus a missing role source would
+    # ship a build-role prompt with no block at all.
+    return _with_fail_closed_block(body, role)
 
 
 def _resolve_agent_cwd(role: str | None) -> Path | None:

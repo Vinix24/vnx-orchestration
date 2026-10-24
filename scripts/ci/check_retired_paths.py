@@ -3,16 +3,20 @@
 
 Golf 1 of track ``golf-1-opruimen`` removes dead code in clusters (C1 to C5,
 ``docs/investigations/2026-10-20-golf-1-hermeting.md`` §7).  Every cluster
-adds what it removed to ``scripts/ci/retired_paths.txt``; this check fails CI
-when a retired file comes back or when anything in the tree still calls a
-retired entry in an executable way.
+adds what it removed as its own fragment under
+``scripts/ci/retired_paths.d/`` (one ``*.txt`` per cluster, named after the
+dispatch, so parallel clusters never conflict); this check fails CI when a
+retired file comes back or when anything in the tree still calls a retired
+entry in an executable way.
 
-The list has three kinds of line (``#`` starts a comment)::
+The fragments together are one list, read in sorted file-name order.  The
+list has three kinds of line (``#`` starts a comment)::
 
     scripts/foo.py              a path: the file is gone and nothing calls it
     scripts/lib/bar.py::baz     a symbol: the module stays, ``baz`` (a function,
                                 class or ``Class.method``) is gone from it and
-                                nothing imports it
+                                nothing imports it (for ``Class.method``:
+                                nothing uses the method; the class stays)
     env:VNX_OLD_FLAG            an env var: nothing reads it any more
 
 What counts as a reference.  Executable references only:
@@ -27,6 +31,20 @@ What counts as a reference.  Executable references only:
   target or a ``setattr``/``patch.object`` on the module, and an env var read
   through ``os.environ``, ``getenv`` or any ``*env*`` helper, or ``$NAME`` in
   a string.
+* A ``K.method`` symbol: the class ``K`` stays, so importing it is no
+  reference.  What counts is the retired attribute on the class or on an
+  instance of it: ``K.method``, ``K().method``, ``module.K.method`` (also
+  through an import alias), a name bound only to ``K(...)`` in a scope, or in
+  an enclosing function or the module, followed by ``.method``,
+  ``getattr``/``setattr``/``hasattr``/``delattr``/``patch.object`` on the
+  class or such an instance with ``"method"``, and a ``patch("module.K.method")``
+  target.  In a string or a non-Python file only ``module.K.method``, and
+  ``K.method`` or ``K(...).method`` after ``from module import K`` in the same
+  text, count.  Not detected: ``self.method`` inside the class or a subclass,
+  an instance that arrives as a parameter, a return value, an attribute
+  (``self.k = K()``) or a factory (``K.create()``), a class alias made by
+  assignment (``Alias = K``), and in a string or non-Python file an import
+  alias or an instance bound to a name.
 * Shell, yaml, toml, ini, the ``.txt`` lists, ``Makefile`` and extensionless
   scripts with a shell shebang: the text without its ``#`` comments.  An env
   var counts as ``${NAME``, ``$NAME`` or ``env.NAME``.
@@ -35,13 +53,20 @@ What counts as a reference.  Executable references only:
   and ``/* */`` comments.
 * A template (``.j2``, ``.tmpl``, ``.template``, ``.tpl``, ``.example``) is
   read as the file type under its template suffix.
-* A tracked symlink counts when its target names a retired path.
+* A tracked symlink counts when its target, resolved against the directory
+  of the link, is a retired path or lies under one.  The resolution is
+  lexical: ``..`` and ``.`` collapse and nothing on disk is followed, so a
+  dangling link resolves like a live one.  An absolute target inside the repo
+  counts the same way; a target outside the repo is read like any other path
+  string, by its directory tail.  A link that itself sits on a retired path
+  fails as still existing.
 
 Markdown and other prose never fail the check, and history is never
 rewritten: the frozen artefacts of ``check_docs_file_line_refs.py``
 (``_EXEMPT_DOC_SUBDIRS``, imported, not copied), ``docs/manifesto/``,
 ``tests/fixtures/`` (also nested under a package), ``CHANGELOG.md``,
-``changelog.d/`` and the list itself are skipped.
+``changelog.d/`` and the fragments themselves (the list directory, or a
+single list passed with ``--list``) are skipped.
 
 A file name is matched with its literal directory tail: ``$VNX_HOME/scripts/
 foo.py`` and ``runners/foo.py`` both name ``scripts/.../runners/foo.py``
@@ -54,14 +79,18 @@ one directory component, because a bare word is not a path.
 
 Usage::
 
-    check_retired_paths.py [--root DIR] [--list FILE]
+    check_retired_paths.py [--root DIR] [--list FILE | --list-dir DIR]
 
 ``--root`` is the tree to scan (default: the git toplevel of the working
-directory); ``--list`` is the list (default: ``retired_paths.txt`` next to
-this script).  The red run of a cluster scans the PR's base with the PR's
-list: ``--root <worktree on the base> --list scripts/ci/retired_paths.txt``.
+directory); ``--list`` reads one list file and ``--list-dir`` every ``*.txt``
+fragment in a directory.  The default is the ``retired_paths.d`` directory
+next to this script.  An empty or missing directory is an error, and an entry
+that appears in two fragments is an error that names both files.
 
-Exit 0 clean, 1 violations, 2 a malformed list or an unusable root.
+The red run of a cluster scans the PR's base with the head's fragments:
+``--root <worktree on the base> --list-dir <head>/scripts/ci/retired_paths.d``.
+
+Exit 0 clean, 1 violations, 2 a malformed or unusable list or root.
 """
 
 from __future__ import annotations
@@ -73,6 +102,8 @@ import os
 import re
 import subprocess
 import sys
+from collections import Counter
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -82,15 +113,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # a second copy would drift the first time one of the two lists changes.
 _EXEMPT_DOC_SUBDIRS = importlib.import_module("check_docs_file_line_refs")._EXEMPT_DOC_SUBDIRS
 
-LIST_REL = "scripts/ci/retired_paths.txt"
-DEFAULT_LIST = Path(__file__).resolve().parent / "retired_paths.txt"
+LIST_DIR_REL = "scripts/ci/retired_paths.d"
+DEFAULT_LIST_DIR = Path(__file__).resolve().parent / "retired_paths.d"
 
 _EXEMPT_PREFIXES = tuple(f"docs/{sub}/" for sub in sorted(_EXEMPT_DOC_SUBDIRS)) + (
     "docs/manifesto/",
     "tests/fixtures/",
     "changelog.d/",
 )
-_EXEMPT_FILES = frozenset({"CHANGELOG.md", LIST_REL})
+_EXEMPT_FILES = frozenset({"CHANGELOG.md"})
 _FIXTURE_SEGMENT = "/tests/fixtures/"
 
 _TEMPLATE_SUFFIXES = (".j2", ".tmpl", ".template", ".tpl", ".example")
@@ -132,6 +163,16 @@ class Entry:
     symbol: str = ""
     name: str = ""
 
+    @property
+    def owner(self) -> str:
+        """``K`` for a ``K.method`` symbol, empty for a plain one."""
+        return self.symbol.rpartition(".")[0]
+
+    @property
+    def attr(self) -> str:
+        """The retired name itself: ``method`` for ``K.method``."""
+        return self.symbol.rpartition(".")[2]
+
 
 @dataclass
 class Target:
@@ -143,6 +184,7 @@ class Target:
     siblings: list[tuple[str, ...]] = field(default_factory=list)
     sibling_modules: list[tuple[str, ...]] = field(default_factory=list)
     bound: set[str] = field(default_factory=set)  # module aliases, per file being scanned
+    classes: set[str] = field(default_factory=set)  # names bound to the class K of K.method, per file
 
 
 @dataclass(frozen=True)
@@ -160,35 +202,68 @@ class Violation:
 # ---------------------------------------------------------------------------
 
 
-def parse_list(text: str) -> list[Entry]:
-    """Parse the list; raise ListError on a malformed or duplicate line."""
-    entries: list[Entry] = []
-    seen: set[str] = set()
+def _entries_in(text: str) -> Iterator[tuple[int, str]]:
+    """The entry lines of a list (comments and blank lines dropped)."""
     for line_no, line in enumerate(text.splitlines(), start=1):
         raw = re.sub(r"(^|\s)#.*$", "", line).strip()
-        if not raw:
-            continue
+        if raw:
+            yield line_no, raw
+
+
+def parse_list(text: str, source: str = "") -> list[Entry]:
+    """Parse one list text; raise ListError on a malformed or duplicate line."""
+    entries: list[Entry] = []
+    seen: dict[str, str] = {}
+    for line_no, raw in _entries_in(text):
+        where = f"{source}: line {line_no}" if source else f"line {line_no}"
         if raw in seen:
-            raise ListError(f"line {line_no}: duplicate entry {raw!r}")
-        seen.add(raw)
-        entries.append(_parse_entry(raw, line_no))
+            raise ListError(f"{where}: duplicate entry {raw!r} (also at {seen[raw]})")
+        seen[raw] = where
+        entries.append(_parse_entry(raw, where))
     return entries
 
 
-def _parse_entry(raw: str, line_no: int) -> Entry:
+def list_dir_files(directory: Path) -> list[Path]:
+    """The ``*.txt`` fragments in *directory*, sorted by name; error when empty."""
+    if not directory.is_dir():
+        raise ListError(f"no such directory: {directory}")
+    files = sorted(
+        (path for path in directory.iterdir() if path.is_file() and path.suffix == ".txt"),
+        key=lambda path: path.name,
+    )
+    if not files:
+        raise ListError(f"no *.txt fragment in {directory}")
+    return files
+
+
+def parse_list_dir(directory: Path) -> list[Entry]:
+    """Parse every ``*.txt`` fragment in *directory*, sorted, as one list."""
+    entries: list[Entry] = []
+    seen: dict[str, str] = {}
+    for path in list_dir_files(directory):
+        for line_no, raw in _entries_in(path.read_text(encoding="utf-8")):
+            where = f"{path.name}:{line_no}"
+            if raw in seen:
+                raise ListError(f"duplicate entry {raw!r} in {where}, also in {seen[raw]}")
+            seen[raw] = where
+            entries.append(_parse_entry(raw, where))
+    return entries
+
+
+def _parse_entry(raw: str, where: str) -> Entry:
     if raw.startswith("env:"):
         match = _ENV_ENTRY.fullmatch(raw)
         if match is None:
-            raise ListError(f"line {line_no}: {raw!r}: an env entry is env:NAME")
+            raise ListError(f"{where}: {raw!r}: an env entry is env:NAME")
         return Entry(raw, "env", name=match.group(1))
     path, sep, symbol = raw.partition("::")
     parts = path.split("/")
     if path.startswith("/") or re.search(r"\s", path) or any(p in ("", ".", "..") for p in parts):
-        raise ListError(f"line {line_no}: {raw!r}: the path must be repo-relative and plain")
+        raise ListError(f"{where}: {raw!r}: the path must be repo-relative and plain")
     if not sep:
         return Entry(raw, "path", path=path)
     if not path.endswith(".py") or _SYMBOL_ENTRY.fullmatch(symbol) is None:
-        raise ListError(f"line {line_no}: {raw!r}: a symbol entry is <module>.py::<name>[.<name>]")
+        raise ListError(f"{where}: {raw!r}: a symbol entry is <module>.py::<name>[.<name>]")
     return Entry(raw, "symbol", path=path, symbol=symbol)
 
 
@@ -289,19 +364,29 @@ def _module_refs(text: str, target: Target) -> list[tuple[int, str]]:
 
 
 def _symbol_refs(text: str, target: Target) -> list[tuple[int, str]]:
-    symbol = target.entry.symbol
-    head = symbol.split(".")[0]
+    entry = target.entry
+    head = entry.symbol.split(".")[0]
+    uses = f"uses {target.module[-1]}.{entry.symbol}"
+    # For K.method the class may be called first: module.K().method.
+    member = re.escape(entry.owner) + r"(?:\([^()]*\))?\." if entry.owner else ""
     hits = []
-    chain = re.compile(r"((?:\w+\.)*\w+)\." + re.escape(symbol) + r"(?![\w])")
+    chain = re.compile(r"((?:\w+\.)*\w+)\." + member + re.escape(entry.attr) + r"(?![\w])")
     for match in chain.finditer(text):
         if match.start() > 0 and (text[match.start() - 1].isalnum() or text[match.start() - 1] in "_."):
             continue
         if names_module(target, _dotted(match.group(1))):
-            hits.append((match.start(), f"uses {target.module[-1]}.{symbol}"))
+            hits.append((match.start(), uses))
+    imported = False
     for match in _FROM_IMPORT.finditer(text):
         names = [n.strip() for n in match.group(2).split(",")]
         if head in names and names_module(target, _dotted(match.group(1))):
-            hits.append((match.start(), f"imports {head} from {target.module[-1]}"))
+            imported = True
+            if not entry.owner:
+                hits.append((match.start(), f"imports {head} from {target.module[-1]}"))
+    if entry.owner and imported:
+        # The class itself survives: only the retired attribute on it counts.
+        bare = re.compile(r"(?<![\w.])" + member + re.escape(entry.attr) + r"(?![\w])")
+        hits.extend((match.start(), uses) for match in bare.finditer(text))
     return hits
 
 
@@ -392,8 +477,10 @@ def classify(rel: str, first_line: str) -> str | None:
 
 
 def is_exempt(rel: str) -> bool:
-    """True for frozen history, prose and the list itself."""
+    """True for frozen history, prose and the fragments themselves."""
     if rel in _EXEMPT_FILES or rel.endswith((".md", ".markdown", ".rst")):
+        return True
+    if rel.startswith(LIST_DIR_REL + "/"):
         return True
     return rel.startswith(_EXEMPT_PREFIXES) or _FIXTURE_SEGMENT in "/" + rel
 
@@ -424,9 +511,14 @@ def _statement_values(tree: ast.AST) -> set[int]:
 
 
 def _bind_module_aliases(tree: ast.AST, targets: list[Target]) -> None:
-    """Record, per symbol target, the names this file binds to its module."""
+    """Record, per symbol target, the names this file binds to its module.
+
+    For a ``K.method`` target also the names bound to its class ``K`` by
+    ``from module import K [as name]``.
+    """
     for target in targets:
         target.bound = set()
+        target.classes = set()
     symbol_targets = [t for t in targets if t.entry.kind == "symbol"]
     if not symbol_targets:
         return
@@ -442,6 +534,13 @@ def _bind_module_aliases(tree: ast.AST, targets: list[Target]) -> None:
                 for target in symbol_targets:
                     if names_module(target, base + (alias.name,)):
                         target.bound.add(alias.asname or alias.name)
+                    elif (
+                        target.entry.owner
+                        and alias.name == target.entry.symbol.split(".")[0]
+                        and base
+                        and names_module(target, base)
+                    ):
+                        target.classes.add(alias.asname or alias.name)
 
 
 def _import_hits(node: ast.AST, target: Target) -> str | None:
@@ -459,9 +558,10 @@ def _import_hits(node: ast.AST, target: Target) -> str | None:
         ):
             return f"imports {'.'.join(target.module)}"
         return None
-    if entry.kind == "symbol" and base and names_module(target, base):
-        if any(a.name == entry.symbol.split(".")[0] for a in node.names):
-            return f"imports {entry.symbol.split('.')[0]} from {target.module[-1]}"
+    # Importing the class of a K.method is no reference: K stays.
+    if entry.kind == "symbol" and not entry.owner and base and names_module(target, base):
+        if any(a.name == entry.symbol for a in node.names):
+            return f"imports {entry.symbol} from {target.module[-1]}"
     return None
 
 
@@ -479,15 +579,20 @@ def _call_hits(node: ast.Call, target: Target, discarded: bool) -> str | None:
         scrub = last == "pop" and discarded
         if "env" in func.lower() and last not in _ENV_WRITERS and not scrub:
             return f"reads env {entry.name} via {func}()"
-    if entry.kind == "symbol" and last in _ATTR_CALLS and len(node.args) >= 2:
-        second = node.args[1]
-        if (
-            _dotted_expr(node.args[0]) in target.bound
-            and isinstance(second, ast.Constant)
-            and second.value == entry.symbol.split(".")[0]
-        ):
-            return f"{last}() on {target.module[-1]}.{second.value}"
+    if entry.kind == "symbol" and not entry.owner and _attr_call_on(node, entry.symbol):
+        if _dotted_expr(node.args[0]) in target.bound:
+            return f"{last}() on {target.module[-1]}.{entry.symbol}"
     return None
+
+
+def _attr_call_on(node: ast.Call, attr: str) -> bool:
+    """True for ``getattr(x, "attr")``, ``patch.object(x, "attr")`` and the like."""
+    second = node.args[1] if len(node.args) >= 2 else None
+    return (
+        _dotted_expr(node.func).rsplit(".", 1)[-1] in _ATTR_CALLS
+        and isinstance(second, ast.Constant)
+        and second.value == attr
+    )
 
 
 def _env_node_hits(node: ast.AST, name: str) -> str | None:
@@ -516,12 +621,12 @@ def _node_hits(node: ast.AST, target: Target, rel: str, discarded: set[int]) -> 
         return _call_hits(node, target, id(node) in discarded)
     if entry.kind == "env":
         return _env_node_hits(node, entry.name)
-    if entry.kind == "symbol":
+    if entry.kind == "symbol" and not entry.owner:
         if isinstance(node, ast.Attribute) and any(
             _dotted_expr(node) == f"{bound}.{entry.symbol}" for bound in target.bound
         ):
             return f"uses {target.module[-1]}.{entry.symbol}"
-        if rel == entry.path and isinstance(node, ast.Name) and node.id == entry.symbol.split(".")[0]:
+        if rel == entry.path and isinstance(node, ast.Name) and node.id == entry.symbol:
             return f"uses {node.id} inside its own module"
     if entry.kind == "path" and target.module and isinstance(node, (ast.List, ast.Tuple)):
         values = [e.value if isinstance(e, ast.Constant) else None for e in node.elts]
@@ -531,11 +636,139 @@ def _node_hits(node: ast.AST, target: Target, rel: str, discarded: set[int]) -> 
     return None
 
 
+_FUNC_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+_SCOPES = _FUNC_SCOPES + (ast.ClassDef,)
+
+
+def _body(scope: ast.AST) -> list[ast.AST]:
+    body = scope.body
+    return body if isinstance(body, list) else [body]
+
+
+def _scope_parts(scope: ast.AST) -> tuple[list[ast.AST], list[ast.AST]]:
+    """The nodes *scope* evaluates itself, and the scopes nested in it.
+
+    A nested function or class belongs to its own scope, but its decorators,
+    defaults, annotations and bases are evaluated by the enclosing one.  A
+    comprehension is read as part of the enclosing scope.
+    """
+    own: list[ast.AST] = []
+    nested: list[ast.AST] = []
+    stack = list(_body(scope))
+    while stack:
+        node = stack.pop()
+        own.append(node)
+        if isinstance(node, _SCOPES):
+            nested.append(node)
+            inner = {id(stmt) for stmt in _body(node)}
+            stack.extend(c for c in ast.iter_child_nodes(node) if id(c) not in inner)
+        else:
+            stack.extend(ast.iter_child_nodes(node))
+    return own, nested
+
+
+def _stored_names(node: ast.AST) -> list[str]:
+    """Names one node binds (or unbinds) in its scope."""
+    if isinstance(node, ast.Name):
+        return [node.id] if isinstance(node.ctx, (ast.Store, ast.Del)) else []
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return [node.name]
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        return [(alias.asname or alias.name).split(".")[0] for alias in node.names]
+    if isinstance(node, (ast.Global, ast.Nonlocal)):
+        return list(node.names)
+    if isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)):
+        return [node.name] if node.name else []
+    if isinstance(node, ast.MatchMapping):
+        return [node.rest] if node.rest else []
+    return []
+
+
+def _param_names(scope: ast.AST) -> list[str]:
+    if not isinstance(scope, _FUNC_SCOPES):
+        return []
+    args = scope.args
+    params = [*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg]
+    return [p.arg for p in params if p is not None]
+
+
+def _scope_bindings(
+    scope: ast.AST, own: list[ast.AST], creates: Callable[[ast.AST], bool]
+) -> tuple[set[str], set[str]]:
+    """Names *scope* binds, and the ones it binds only to a new instance.
+
+    Flow-insensitive: a name counts as an instance when every binding of it in
+    the scope is ``name = K(...)``; one other binding makes it ambiguous, and
+    an ambiguous name is not followed.
+    """
+    stores = Counter(_param_names(scope))
+    created: Counter[str] = Counter()
+    for node in own:
+        stores.update(_stored_names(node))
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)) and node.value is not None:
+            if creates(node.value):
+                tgts = node.targets if isinstance(node, ast.Assign) else [node.target]
+                created.update(t.id for t in tgts if isinstance(t, ast.Name))
+    return set(stores), {name for name, count in created.items() if stores[name] == count}
+
+
+def _scope_walk(
+    scope: ast.AST, inherited: frozenset[str], creates: Callable[[ast.AST], bool]
+) -> Iterator[tuple[ast.AST, frozenset[str]]]:
+    """Yield every node with the names that hold an instance where it runs.
+
+    A function sees the instances of the scopes around it unless it rebinds
+    the name; a class body does not pass its own names on to its methods.
+    """
+    own, nested = _scope_parts(scope)
+    rebound, local = _scope_bindings(scope, own, creates)
+    visible = (inherited - rebound) | local
+    for node in own:
+        yield node, visible
+    passed = inherited if isinstance(scope, ast.ClassDef) else visible
+    for child in nested:
+        yield from _scope_walk(child, passed, creates)
+
+
+def _member_violations(tree: ast.AST, rel: str, target: Target) -> list[Violation]:
+    """Uses of a retired ``K.method``: the attribute on the class or an instance."""
+    entry = target.entry
+    tail = entry.owner[len(entry.symbol.split(".")[0]):]
+    classes = {f"{bound}.{entry.owner}" for bound in target.bound}
+    classes |= {name + tail for name in target.classes}
+    if rel == entry.path:
+        classes.add(entry.owner)
+    if not classes:
+        return []
+
+    def creates(node: ast.AST) -> bool:
+        return isinstance(node, ast.Call) and _dotted_expr(node.func) in classes
+
+    def owns(node: ast.AST, instances: frozenset[str]) -> bool:
+        if isinstance(node, ast.Name) and node.id in instances:
+            return True
+        return creates(node) or _dotted_expr(node) in classes
+
+    found: list[Violation] = []
+    for node, instances in _scope_walk(tree, frozenset(), creates):
+        detail = None
+        if isinstance(node, ast.Attribute) and node.attr == entry.attr and owns(node.value, instances):
+            detail = f"uses {target.module[-1]}.{entry.symbol}"
+        elif isinstance(node, ast.Call) and _attr_call_on(node, entry.attr) and owns(node.args[0], instances):
+            detail = f"{_dotted_expr(node.func).rsplit('.', 1)[-1]}() on {target.module[-1]}.{entry.symbol}"
+        if detail:
+            found.append(Violation(entry.raw, f"{rel}:{node.lineno}", detail))
+    return found
+
+
 def python_refs(tree: ast.AST, rel: str, targets: list[Target]) -> list[Violation]:
     """Every executable reference in one parsed Python file."""
     _bind_module_aliases(tree, targets)
     standalone = _statement_values(tree)
     found: list[Violation] = []
+    for target in targets:
+        if target.entry.kind == "symbol" and target.entry.owner:
+            found.extend(_member_violations(tree, rel, target))
     for node in ast.walk(tree):
         line = getattr(node, "lineno", 0)
         is_string = isinstance(node, ast.Constant) and isinstance(node.value, str)
@@ -637,6 +870,27 @@ def _text_violations(text: str, reader: str, rel: str, targets: list[Target]) ->
     return found
 
 
+def symlink_names(root: Path, rel: str, link: str, target: Target) -> bool:
+    """True when the tracked symlink *rel*, pointing at *link*, points at *target*.
+
+    *link* is resolved lexically against the directory of *rel*: ``..`` and
+    ``.`` collapse and nothing on disk is followed, so a dangling link
+    resolves like a live one.  An absolute *link* is taken as it is.  Inside
+    the repo (the root as given or its real path) the result must be the
+    retired path or lie under it; outside the repo it is read like any other
+    path string.
+    """
+    given = os.path.normpath(os.path.abspath(root))
+    resolved = os.path.normpath(os.path.join(given, os.path.dirname(rel), link))
+    for base in dict.fromkeys((given, os.path.realpath(given))):
+        if resolved == base:
+            return False
+        if resolved.startswith(base + os.sep):
+            inside = os.path.relpath(resolved, base).replace(os.sep, "/")
+            return inside == target.entry.path or inside.startswith(target.entry.path + "/")
+    return bool(_path_refs(resolved, target))
+
+
 def scan_file(root: Path, rel: str, targets: list[Target]) -> list[Violation]:
     """Every executable reference to the *targets* in one tracked file."""
     path = root / rel
@@ -645,7 +899,7 @@ def scan_file(root: Path, rel: str, targets: list[Target]) -> list[Violation]:
         return [
             Violation(t.entry.raw, rel, f"symlink to {link}")
             for t in targets
-            if t.entry.kind == "path" and _path_refs(link, t)
+            if t.entry.kind == "path" and symlink_names(root, rel, link, t)
         ]
     if not path.is_file():
         return []
@@ -698,9 +952,13 @@ def _resolve_root(value: str | None) -> Path:
     return Path(result.stdout.strip()).resolve()
 
 
-def _report(entries: list[Entry], violations: list[Violation], root: Path, list_path: Path) -> int:
+def _report(entries: list[Entry], violations: list[Violation], root: Path, source_path: Path) -> int:
+    label = "fragments" if source_path.is_dir() else "list"
     if not violations:
-        print(f"OK: none of the {len(entries)} retired entries is present or referenced (root: {root}).")
+        print(
+            f"OK: none of the {len(entries)} retired entries is present or referenced "
+            f"(root: {root}, {label}: {source_path})."
+        )
         return 0
     by_entry: dict[str, list[Violation]] = {}
     for violation in violations:
@@ -713,26 +971,44 @@ def _report(entries: list[Entry], violations: list[Violation], root: Path, list_
                 print(violation.render())
     print(
         f"ERROR: {len(by_entry)} of {len(entries)} retired entries are present or still "
-        f"referenced (root: {root}, list: {list_path})."
+        f"referenced (root: {root}, {label}: {source_path})."
     )
     return 1
+
+
+def _exempt_under(root: Path, source_path: Path) -> frozenset[str]:
+    """The list's own files relative to *root*: the check never reads them."""
+    if not source_path.is_relative_to(root):
+        return frozenset()
+    if source_path.is_dir():
+        return frozenset(
+            path.relative_to(root).as_posix() for path in source_path.iterdir() if path.is_file()
+        )
+    return frozenset({source_path.relative_to(root).as_posix()})
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Fail when a retired path, symbol or env var is back.")
     parser.add_argument("--root", help="tree to scan (default: git toplevel of the working directory)")
-    parser.add_argument("--list", dest="list_path", help=f"the list (default: {LIST_REL} next to this script)")
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("--list", dest="list_path", help="one list file (default: every *.txt fragment)")
+    source.add_argument(
+        "--list-dir", dest="list_dir", help=f"a directory of fragments (default: {LIST_DIR_REL} next to this script)"
+    )
     args = parser.parse_args(argv)
-    list_path = Path(args.list_path).resolve() if args.list_path else DEFAULT_LIST
+    chosen = args.list_path or args.list_dir
+    source_path = Path(chosen).resolve() if chosen else DEFAULT_LIST_DIR
     try:
         root = _resolve_root(args.root)
-        entries = parse_list(list_path.read_text(encoding="utf-8"))
-        extra = frozenset({list_path.relative_to(root).as_posix()}) if list_path.is_relative_to(root) else frozenset()
-        violations = check(root, entries, extra)
+        if args.list_path:
+            entries = parse_list(source_path.read_text(encoding="utf-8"), source=source_path.name)
+        else:
+            entries = parse_list_dir(source_path)
+        violations = check(root, entries, _exempt_under(root, source_path))
     except (ListError, OSError, subprocess.CalledProcessError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
-    return _report(entries, violations, root, list_path)
+    return _report(entries, violations, root, source_path)
 
 
 if __name__ == "__main__":

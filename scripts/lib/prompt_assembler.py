@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Optional
 
 import report_body_contract
+from fail_closed_evidence import with_block as _with_fail_closed_block
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +161,7 @@ class PromptAssembler:
         else:
             context = f"{layer1}\n\n---\n\n{layer2}"
 
+        context = _with_fail_closed_block(context, role)
         context = context.replace(
             REPORT_PATH_PLACEHOLDER, self._resolve_report_path(dispatch_metadata)
         )

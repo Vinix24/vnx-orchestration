@@ -81,7 +81,11 @@ class TestOI1307RequestReviewsContractBased:
 
     def test_request_reviews_builds_review_contract(self, manager_env, monkeypatch):
         """request_reviews with claude_github_optional must invoke request_claude_github_with_contract."""
+        import gate_request_handler
+
         monkeypatch.chdir(manager_env["project_root"])
+        # The fixture project has no PR head (gh resolves none), so the diff cannot be read.
+        monkeypatch.setattr(gate_request_handler, "get_pr_head_sha", lambda _pr: "")
         manager = _make_manager()
 
         captured_contracts = []
@@ -93,7 +97,7 @@ class TestOI1307RequestReviewsContractBased:
 
         with patch.object(manager, "request_claude_github_with_contract", side_effect=capture_contract):
             with patch("governance_receipts.emit_governance_receipt"):
-                manager.request_reviews(
+                result = manager.request_reviews(
                     pr_number=10,
                     branch="fix/oi1307",
                     review_stack=["claude_github_optional"],
@@ -108,7 +112,14 @@ class TestOI1307RequestReviewsContractBased:
         from review_contract import ReviewContract
         assert isinstance(contract, ReviewContract), "contract must be a ReviewContract instance"
         assert contract.branch == "fix/oi1307"
-        assert contract.risk_class == "medium"
+        # The class comes from the PR diff (R3a), and an unreadable diff is high: the
+        # caller's medium does not lower it and its changed_files take no part.
+        assert contract.risk_class == "high"
+        risk = result["review_risk"]
+        assert risk["reason"] == (
+            "fail-closed: the PR head could not be resolved; the caller's --risk-class medium does not lower it"
+        )
+        assert (risk["derived"], risk["deciding"], risk["caller"]) == ("high", [], "medium")
         assert "scripts/lib/gate_request_handler.py" in contract.changed_files
 
     def test_request_reviews_writes_claude_github_receipt_result(self, manager_env, monkeypatch):

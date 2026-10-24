@@ -2,14 +2,14 @@
   "couplings": [
     {
       "file": "tests/test_codex_model_registry.py",
-      "line": 524,
+      "line": 813,
       "mechanism": "direct-call",
       "module_target": "envelope_adapters_provider",
       "symbol": "ProviderAdapter"
     },
     {
       "file": "tests/test_codex_model_registry.py",
-      "line": 576,
+      "line": 865,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "run_envelope"
@@ -881,6 +881,13 @@
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_fail_closed_evidence_block.py",
+      "line": 24,
+      "mechanism": "direct-call",
+      "module_target": "envelope_prepare",
+      "symbol": "_prepare"
     },
     {
       "file": "tests/test_failclass_registry.py",

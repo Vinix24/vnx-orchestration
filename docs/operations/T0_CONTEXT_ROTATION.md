@@ -549,8 +549,10 @@ printed its last stdout line. One job does everything, in this order
    that does not finish in 60 s, leaves both windows open, writes no `delivery.json`, sends no
    `/goal` and says so in both windows with `tmux display-message`.
 3. `confirmed`: when `goal.txt` exists the `/goal` follow-up runs first and is waited for, and
-   only then the old window is killed, while the new window still exists. The follow-up reports
-   its own outcome; the old window closes after it either way.
+   only then the old window is killed, while the new window still exists. The job hands the
+   follow-up the transcript it just read (`--transcript`, the path in `delivery.json`); the
+   follow-up never searches for one. The follow-up reports its own outcome; the old window closes
+   after it either way.
 4. `mismatch` / `timeout`: nothing is typed, nothing is closed, display-message names the
    outcome in both windows. The operator decides.
 
@@ -561,26 +563,61 @@ of its own.
 tool call inside it, may still be running. The job is handed to `tmux run-shell -b`, which runs
 on the tmux server and survives the kill. The `/goal` follow-up is a step of that job, never a
 second job beside it: a confirmed delivery cannot close the window before the follow-up ran, and
-a failed delivery cannot be followed by a `/goal`. The follow-up waits
-until the first turn is over (busy marker `esc to interrupt` seen and then gone twice in a row
-with the footer present), types the `/goal` line, and waits for `/goal active` on screen.
+a failed delivery cannot be followed by a `/goal`.
 
-**How the input box takes `/goal`: not measured live.** This dispatch was not allowed to start
-a real claude or touch a real tmux session, so the sequence is designed, not observed:
+**The `/goal` follow-up reads the successor's transcript, not the screen.** On 2026-10-22 two
+SEOcrawler rotations (`rotation-20261022-170308-53038`, `rotation-20261022-191855-76425`) logged
+`busy marker never seen; continuing on idle` and `unconfirmed`. claude 2.1.308 no longer prints
+`esc to interrupt` during a turn (the spinner reads `✳ Tempering… (52s · ↓ 4.5k tokens · thought
+for 13s)`) and keeps the footer on screen, so the old screen check read the kickoff turn as idle
+and typed `/goal` into it. A line submitted during a turn is not run: claude queues it
+(`queue-operation` `enqueue`) and hands it to the running turn as plain text. Both transcripts
+hold that queue record and no `/goal` entry; the kickoff turns ended minutes later.
 
-- The line is typed literally (`send-keys -l`), then Enter separately.
-- No Escape: in the Claude Code input box a double Escape clears the input or opens rewind.
-- If `/goal active` does not show within 20 s: when the typed text is still visible in the
-  pane, the first Enter was taken by the autocomplete and one more Enter is sent; otherwise the
-  line is typed again. Then one more check.
-- Still not active: a tmux `display-message` in the new window plus a natural-language message
-  to the successor with the exact `/goal` line to type, and a receipt with
-  `outcome=unconfirmed`. The markers are configurable (`VNX_T0_ROTATE_FOOTER_PATTERN`,
-  `VNX_T0_ROTATE_BUSY_PATTERN`, `VNX_T0_ROTATE_GOAL_ACTIVE_PATTERN`); set the real footer text
-  there after the first live rotation if it differs.
+What the follow-up reads (`scripts/lib/t0_rotation_delivery.py`, measured on 2.1.308 transcripts
+of those rotations and on the follow-ups that did land on 2.1.284, 2.1.285 and 2.1.295):
+
+- **The end of a turn** is the record `{"type": "system", "subtype": "turn_duration"}`, written
+  once per turn after the Stop hooks let it end. `assistant` records with `stop_reason: end_turn`
+  and `system` / `stop_hook_summary` are no end: a blocking Stop hook (a `/goal` that is not met)
+  writes both and the turn continues without a `turn_duration`. A turn the operator interrupts can
+  end on the user record `[Request interrupted by user]` without one; that counts as an end too.
+- **The start of a turn** is a user record the model answers: a prompt, a task notification, a
+  slash command such as `/goal`. Tool results, `isMeta` records and `<local-command-...>` output
+  start none.
+- **Idle** means: after the kickoff entry (the first real user record, the one the delivery check
+  matched) at least one turn ended and no turn started since the last end. It must hold on two
+  polls in a row, because a queued task notification can start the next turn the moment the last
+  one ends. `kickoff_done.json` is not used: the transcript already says when the turn ended.
+- **`/goal` arrived** when a user record `<command-name>/goal</command-name>` (with
+  `<command-message>goal</command-message>` and `<command-args>`) follows the kickoff entry. A
+  prompt that only carries the `/goal` text, such as a pasted `<pasted_content>` block, is no
+  arrival.
+
+The sequence:
+
+1. Wait for an idle turn, at most `VNX_T0_ROTATE_TURN_TIMEOUT` (1800 s). A turn that does not end
+   in time is `outcome=turn_timeout`: nothing is typed.
+2. Type the line literally (`send-keys -l`), Enter separately. No Escape: in the Claude Code input
+   box a double Escape clears the input or opens rewind.
+3. Wait up to `VNX_T0_ROTATE_GOAL_CONFIRM_TIMEOUT` (20 s) for the `/goal` entry: `confirmed`.
+4. Not there: one retry, on an idle turn only (the same wait, the same bound). A line the
+   transcript shows as queued is typed again; a line still visible in the pane got its Enter
+   taken by the slash autocomplete and gets one more Enter; anything else is typed again. Then the
+   same check once more; still no entry is `outcome=unconfirmed`.
+5. Not confirmed: a tmux `display-message` in the new window, and, on an idle turn only, a
+   natural-language message to the successor with the exact `/goal` line to type. After a
+   `turn_timeout` the session never was idle, so only the status line carries it, and the line
+   itself is in `delivery_job.log`.
+
+The screen is a second opinion. A pane that still shows the spinner holds the typing back even when
+the transcript says idle (`VNX_T0_ROTATE_BUSY_PATTERN`, default `esc to interrupt|… \([0-9]+[hms]`:
+glyph and verb of the 2.1.308 spinner change every turn, the ellipsis followed by the elapsed time
+stays, and older CLIs still print `esc to interrupt`). `/goal active` on screen
+(`VNX_T0_ROTATE_GOAL_ACTIVE_PATTERN`) is booked with the outcome and never confirms on its own.
 
 The `/goal` follow-up is not exposed to the startup race: it types after the first turn, when the
-TUI has finished starting and Remote Control is connected, and it checks the screen.
+TUI has finished starting and Remote Control is connected.
 
 The last stdout line is
 `new_window=@N old_window=@N goal_followup=0|1 run_dir=PATH close=on_delivery_confirmed start_dir=PATH`;
@@ -613,7 +650,7 @@ All `state_mutation`, `source: t0_context_rotation`:
 | `t0_context_rotation_started` | the successor window is up and was started with the kickoff as start argument |
 | `t0_context_rotation_delivery` | the delivery check ended: `outcome` = `confirmed`, `mismatch` or `timeout`, `old_window_close`. Booked before `delivery.json` and before any window is closed |
 | `t0_context_rotation_kickoff_done` | `t0_rotation_state.py kickoff-done`, booked before `kickoff_done.json` (a refused append exits 1 and writes no marker): the successor finished its kickoff (`--catch-up-done` first checks the handoff carries a wrap newer than the skip receipt, exit 3 if not) |
-| `t0_context_rotation_goal_followup` | the `/goal` follow-up ended: `outcome` = `confirmed`, `unconfirmed` or `turn_timeout` |
+| `t0_context_rotation_goal_followup` | the `/goal` follow-up ended: `outcome` = `confirmed` (a `/goal` entry in the successor's transcript), `unconfirmed` or `turn_timeout`; `fallback` = `none`, `typed` (the LET OP line went in on an idle turn) or `not_typed`; `screen_goal_active` = `1` when the pane showed `/goal active`, a second opinion only |
 
 ### Receipts and the state files (ADR-005)
 
