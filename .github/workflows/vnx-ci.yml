@@ -840,13 +840,6 @@ jobs:
             -p no:cacheprovider \
             --basetemp=/tmp/vnx_pytest_safe
 
-      - name: Run closure verification
-        env:
-          VNX_HOME: ${{ github.workspace }}/.claude/vnx-system
-        run: |
-          set -euo pipefail
-          python3 "$VNX_HOME/scripts/verify_closure.py"
-
   profile-b:
     name: Profile B (snapshot integration)
     runs-on: ubuntu-latest

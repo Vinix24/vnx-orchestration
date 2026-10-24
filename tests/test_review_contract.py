@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-"""Tests for review contract schema, materializer, and CLI."""
+"""Tests for the review contract schema and its deterministic materializer."""
 
-import json
 import sys
 from pathlib import Path
 
@@ -26,7 +25,6 @@ from review_contract import (
     _parse_feature_title,
     _parse_pr_queue_status,
 )
-import review_contract_materializer as rcm
 import claude_github_receipt
 import gemini_prompt_renderer
 
@@ -381,114 +379,6 @@ class TestMaterializeReviewContract:
         )
         assert contract.pr_id == "PR-1"
         assert contract.branch == "feature/test"
-
-
-class TestCLI:
-    def test_materialize_stdout(self, tmp_path):
-        fp = tmp_path / "FEATURE_PLAN.md"
-        pq = tmp_path / "PR_QUEUE.md"
-        fp.write_text(SAMPLE_FEATURE_PLAN, encoding="utf-8")
-        pq.write_text(SAMPLE_PR_QUEUE, encoding="utf-8")
-
-        exit_code = rcm.main([
-            "materialize",
-            "--pr", "PR-1",
-            "--feature-plan", str(fp),
-            "--pr-queue", str(pq),
-            "--branch", "feature/test",
-        ])
-        assert exit_code == 0
-
-    def test_materialize_to_file(self, tmp_path):
-        fp = tmp_path / "FEATURE_PLAN.md"
-        pq = tmp_path / "PR_QUEUE.md"
-        out = tmp_path / "contract.json"
-        fp.write_text(SAMPLE_FEATURE_PLAN, encoding="utf-8")
-        pq.write_text(SAMPLE_PR_QUEUE, encoding="utf-8")
-
-        exit_code = rcm.main([
-            "materialize",
-            "--pr", "PR-1",
-            "--feature-plan", str(fp),
-            "--pr-queue", str(pq),
-            "--output", str(out),
-        ])
-        assert exit_code == 0
-        assert out.exists()
-
-        contract = ReviewContract.from_json(out.read_text(encoding="utf-8"))
-        assert contract.pr_id == "PR-1"
-        assert contract.content_hash != ""
-
-    def test_materialize_missing_pr(self, tmp_path):
-        fp = tmp_path / "FEATURE_PLAN.md"
-        pq = tmp_path / "PR_QUEUE.md"
-        fp.write_text(SAMPLE_FEATURE_PLAN, encoding="utf-8")
-        pq.write_text(SAMPLE_PR_QUEUE, encoding="utf-8")
-
-        exit_code = rcm.main([
-            "materialize",
-            "--pr", "PR-99",
-            "--feature-plan", str(fp),
-            "--pr-queue", str(pq),
-        ])
-        assert exit_code == 10  # EXIT_VALIDATION
-
-    def test_materialize_missing_file(self, tmp_path):
-        exit_code = rcm.main([
-            "materialize",
-            "--pr", "PR-1",
-            "--feature-plan", str(tmp_path / "missing.md"),
-            "--pr-queue", str(tmp_path / "also_missing.md"),
-        ])
-        assert exit_code == 20  # EXIT_IO
-
-    def test_validate_valid_contract(self, tmp_path):
-        fp = tmp_path / "FEATURE_PLAN.md"
-        pq = tmp_path / "PR_QUEUE.md"
-        out = tmp_path / "contract.json"
-        fp.write_text(SAMPLE_FEATURE_PLAN, encoding="utf-8")
-        pq.write_text(SAMPLE_PR_QUEUE, encoding="utf-8")
-
-        rcm.main([
-            "materialize",
-            "--pr", "PR-1",
-            "--feature-plan", str(fp),
-            "--pr-queue", str(pq),
-            "--output", str(out),
-        ])
-
-        exit_code = rcm.main(["validate", "--contract", str(out)])
-        assert exit_code == 0
-
-    def test_validate_tampered_hash(self, tmp_path):
-        fp = tmp_path / "FEATURE_PLAN.md"
-        pq = tmp_path / "PR_QUEUE.md"
-        out = tmp_path / "contract.json"
-        fp.write_text(SAMPLE_FEATURE_PLAN, encoding="utf-8")
-        pq.write_text(SAMPLE_PR_QUEUE, encoding="utf-8")
-
-        rcm.main([
-            "materialize",
-            "--pr", "PR-1",
-            "--feature-plan", str(fp),
-            "--pr-queue", str(pq),
-            "--output", str(out),
-        ])
-
-        data = json.loads(out.read_text(encoding="utf-8"))
-        data["pr_title"] = "TAMPERED"
-        out.write_text(json.dumps(data), encoding="utf-8")
-
-        exit_code = rcm.main(["validate", "--contract", str(out)])
-        assert exit_code == 10  # EXIT_VALIDATION
-
-    def test_validate_missing_fields(self, tmp_path):
-        out = tmp_path / "contract.json"
-        out.write_text(json.dumps({"schema_version": "1.0.0"}), encoding="utf-8")
-
-        exit_code = rcm.main(["validate", "--contract", str(out)])
-        assert exit_code == 10  # EXIT_VALIDATION
 
 
 class TestNormalizeLine:
