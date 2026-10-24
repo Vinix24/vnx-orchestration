@@ -99,15 +99,24 @@ class GateResultParserMixin:
         self._emit_claude_github_receipt(
             receipt, status=status, pr_id=pr_id, branch=branch,
             summary=summary, contract_hash=effective_contract_hash,
+            commit_sha=str(request_payload.get("commit_sha") or "").strip(),
         )
         return receipt
 
     def _emit_claude_github_receipt(
         self, receipt: "ClaudeGitHubReviewReceipt", *,
         status: str, pr_id: str, branch: str, summary: str, contract_hash: str,
+        commit_sha: str = "",
     ) -> None:
-        """Emit governance receipt for a Claude GitHub review result."""
+        """Emit governance receipt for a Claude GitHub review result.
+
+        ``commit_sha`` is the head named on the contract request (the result
+        record has no head field of its own). Stamped under both names so the
+        idempotency key sees the commit and the round ledger keeps its alias;
+        a path where the request names no head stamps neither.
+        """
         from review_gate_manager import emit_governance_receipt
+        head_fields = {"commit_sha": commit_sha, "head_sha": commit_sha} if commit_sha else {}
         emit_governance_receipt(
             "review_gate_result",
             receipt_kind="review_gate",
@@ -119,6 +128,7 @@ class GateResultParserMixin:
             blocking_count=receipt.blocking_count,
             contract_hash=contract_hash,
             contributed_evidence=receipt.contributed_evidence(),
+            **head_fields,
         )
 
     def record_result(
@@ -228,8 +238,17 @@ class GateResultParserMixin:
         self, payload: Dict[str, Any], receipt: "GeminiReviewReceipt", *,
         status: str, pr_number: int, pr_id: str, branch: str, gate: str, summary: str,
     ) -> None:
-        """Emit governance receipt for the recorded result."""
+        """Emit governance receipt for the recorded result.
+
+        The head is already on ``payload`` (``stamp_request_identity`` stamps
+        ``commit_sha`` from the PR head before the result is persisted), so the
+        receipt books it under both names — ``commit_sha`` for ADR-045 point 4
+        and the idempotency key, ``head_sha`` as the round ledger's alias. A
+        payload without one stamps neither.
+        """
         from review_gate_manager import emit_governance_receipt
+        commit_sha = str(payload.get("commit_sha") or "").strip()
+        head_fields = {"commit_sha": commit_sha, "head_sha": commit_sha} if commit_sha else {}
         emit_governance_receipt(
             "review_gate_result",
             receipt_kind="review_gate",
@@ -243,6 +262,7 @@ class GateResultParserMixin:
             contract_hash=payload["contract_hash"],
             report_path=payload["report_path"],
             required_reruns=payload["required_reruns"],
+            **head_fields,
         )
 
     def _classify_unavailable(self, gate: str) -> tuple:
