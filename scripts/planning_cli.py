@@ -2668,7 +2668,7 @@ def _deliverable_metadata(args: argparse.Namespace) -> dict[str, Any]:
     """What a new deliverable carries: its title, the marker, and the optional fields.
 
     ``dispatch_paths`` is what a plan-gate run on the track reads when the run
-    itself names no paths (the schema/security case for the second seat, P1).
+    itself names no paths (the schema/security/irreversible case for the second seat).
     """
     meta: dict[str, Any] = {"title": args.title, "deliverable": True}
     for key in ("task_class", "routing_floor"):
@@ -4240,7 +4240,8 @@ def _derive_panel_weight(
     run uses the configured default seat, plus the escalation seat on a BLOCK,
     or exactly the seats an operator names with ``--panel-seats``
     (``plan_gate_panel.compose_panel``). Since P1 the escalation seat also sits
-    from the start when the paths fall in the schema or security class: the
+    from the start when the paths fall in the schema, security or an
+    irreversible class (``plan_gate_panel.second_seat_from_start``): the
     run's ``--dispatch-paths``, or, when the run names none, what the
     ``deliverable_paths`` callable returns (read only then). The variant stays in the trace and the round record so the
     history stays readable. The operator's provider switch then removes every
