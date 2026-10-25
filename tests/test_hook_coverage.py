@@ -857,6 +857,40 @@ def test_t0_project_root_refuses_what_rule_1_refuses(tmp_path):
     assert hc.t0_project_root("") is None
 
 
+def test_session_project_root_follows_one_order_with_one_set_of_exclusions(tmp_path):
+    """The session's rule-1 root: the cwd first, then ``CLAUDE_PROJECT_DIR``. A candidate under
+    ``.vnx-data/worktrees/`` yields nothing and stops the resolution, an empty or unset
+    ``CLAUDE_PROJECT_DIR`` yields nothing, and no transcript can stand in for either step."""
+    project = _git_project(tmp_path / "project")
+    other = _git_project(tmp_path / "other")
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    worktree = project / ".vnx-data" / "worktrees" / "dispatch-x"
+    worktree.mkdir(parents=True)
+    project_root = Path(os.path.realpath(project))
+    other_root = Path(os.path.realpath(other))
+    cases = [
+        ("cwd at the root", str(project), {}, project_root),
+        ("cwd in the T0 folder", str(project / ".claude" / "terminals" / "T0"), {},
+         project_root),
+        ("drifted cwd uses CLAUDE_PROJECT_DIR", str(plain),
+         {"CLAUDE_PROJECT_DIR": str(project)}, project_root),
+        ("the cwd's root wins", str(other), {"CLAUDE_PROJECT_DIR": str(project)}, other_root),
+        ("empty CLAUDE_PROJECT_DIR", str(plain), {"CLAUDE_PROJECT_DIR": ""}, None),
+        ("unset CLAUDE_PROJECT_DIR", str(plain), {}, None),
+        ("a worktree cwd stops the resolution", str(worktree),
+         {"CLAUDE_PROJECT_DIR": str(project)}, None),
+        ("a worktree CLAUDE_PROJECT_DIR yields nothing", str(plain),
+         {"CLAUDE_PROJECT_DIR": str(worktree)}, None),
+        ("no project on either step", str(plain),
+         {"CLAUDE_PROJECT_DIR": str(tmp_path / "elsewhere")}, None),
+        ("no cwd at all", None, {"CLAUDE_PROJECT_DIR": str(project)}, project_root),
+        ("nothing on either step", None, {}, None),
+    ]
+    for label, cwd, env, expected in cases:
+        assert hc.session_project_root(cwd, env) == expected, label
+
+
 def test_a_linked_worktree_and_a_submodule_are_their_own_root(tmp_path):
     """A `.git` file marks a root as well as a `.git` directory, as `git rev-parse` reads it."""
     project = _git_project(tmp_path / "project")
