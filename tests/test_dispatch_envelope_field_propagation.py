@@ -305,3 +305,139 @@ class TestChainLinkPropagationHeadless:
         assert env_spec.tier_to == "T2", (
             f"Expected tier_to='T2', got {env_spec.tier_to!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Test 3 — OI-865: requires_mcp travels on the claude_headless lane
+# ---------------------------------------------------------------------------
+
+
+class TestRequiresMcpPropagation:
+    """OI-865: the plan's explicit MCP opt-in must reach EnvelopeSpec and the spawn argv.
+
+    Before this class the claude_headless lane dropped it: EnvelopeSpec had no
+    such field and ClaudeSubprocessAdapter.run called spawn_claude without it,
+    so a Requires-MCP dispatch was still force-emptied. ``False`` is the value
+    every existing spec carries, and its argv must stay unchanged.
+    """
+
+    @staticmethod
+    def _plan(tmp_path: Path, requires_mcp: bool) -> ExecutionPlan:
+        spec = replace(
+            _make_spec_with_pr_id(
+                pr_id=None, provider=Provider.CLAUDE, allow_headless=True, tmp_path=tmp_path,
+            ),
+            requires_mcp=requires_mcp,
+        )
+        return compile_plan(_make_vspec_from_spec(spec), _healthy_snapshot())
+
+    def _captured_spec(self, tmp_path: Path, requires_mcp: bool) -> EnvelopeSpec:
+        plan = self._plan(tmp_path, requires_mcp)
+        assert plan.lane == "claude_headless", f"Expected claude_headless, got {plan.lane}"
+        assert plan.requires_mcp is requires_mcp
+        permit = issue_permit(plan)
+
+        state_dir, data_dir = tmp_path / "state", tmp_path / "data"
+        state_dir.mkdir()
+        data_dir.mkdir()
+        receipt = state_dir / "t0_receipts.ndjson"
+        receipt.touch()
+        captured: list = []
+
+        def capture_govern(spec_arg, *args, **kwargs):
+            captured.append(spec_arg)
+            return (None, receipt)
+
+        with patch.object(dispatch_envelope.ClaudeSubprocessAdapter, "run",
+                          return_value=_fake_adapter_success()), \
+             patch("dispatch_worktree_isolation.resolve_consumer_project_root",
+                   return_value=tmp_path / "consumer-root"), \
+             patch("dispatch_worktree_isolation.create_dispatch_worktree",
+                   return_value=tmp_path / "fake-wt"), \
+             patch("dispatch_worktree_isolation.remove_dispatch_worktree"), \
+             patch("dispatch_envelope._govern", side_effect=capture_govern):
+            result = run_envelope_headless_plan(
+                plan, permit, state_dir=state_dir, data_dir=data_dir, role=plan.role,
+            )
+
+        assert result.status == "success"
+        assert captured, "_govern was not called — EnvelopeSpec never constructed"
+        return captured[0]
+
+    @pytest.mark.parametrize("requires_mcp", [True, False])
+    def test_plan_requires_mcp_reaches_envelope_spec(
+        self, tmp_path: Path, requires_mcp: bool
+    ) -> None:
+        env_spec = self._captured_spec(tmp_path, requires_mcp)
+        assert env_spec.requires_mcp is requires_mcp, (
+            "run_envelope_headless_plan dropped plan.requires_mcp on EnvelopeSpec "
+            f"(got {getattr(env_spec, 'requires_mcp', '<missing field>')!r})"
+        )
+
+    @staticmethod
+    def _adapter_spec(tmp_path: Path, requires_mcp: bool) -> EnvelopeSpec:
+        extra = {"requires_mcp": True} if requires_mcp else {}
+        return EnvelopeSpec(
+            dispatch_id="requires-mcp-propagation",
+            terminal_id="T1",
+            provider="claude",
+            model="sonnet",
+            instruction="do the thing",
+            role="backend-developer",
+            pr_id=None,
+            state_dir=tmp_path / "state",
+            data_dir=tmp_path / "data",
+            **extra,
+        )
+
+    @pytest.mark.parametrize("requires_mcp", [True, False])
+    def test_adapter_forwards_requires_mcp_to_spawn_claude(
+        self, tmp_path: Path, requires_mcp: bool
+    ) -> None:
+        from types import SimpleNamespace
+
+        from envelope_adapters_claude import ClaudeSubprocessAdapter
+
+        spawn_result = SimpleNamespace(
+            returncode=0, error=None, timed_out=False, stopped_early=False,
+            completion_text="done", session_id="sess-1", model=None,
+            token_usage={"input_tokens": 1, "output_tokens": 1},
+        )
+        with patch("provider_spawns.claude_spawn.spawn_claude",
+                   return_value=spawn_result) as mock_spawn:
+            ClaudeSubprocessAdapter().run(self._adapter_spec(tmp_path, requires_mcp))
+
+        mock_spawn.assert_called_once()
+        assert mock_spawn.call_args.kwargs["requires_mcp"] is requires_mcp
+
+    @staticmethod
+    def _deliver_argv(requires_mcp: bool) -> list:
+        import subprocess
+        from unittest.mock import MagicMock
+
+        from subprocess_adapter import SubprocessAdapter
+
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.pid = 4321
+        proc.poll.return_value = None
+        proc.returncode = None
+        with patch("subprocess.Popen", return_value=proc) as mock_popen:
+            result = SubprocessAdapter().deliver(
+                "T1", "requires-mcp-argv", instruction="do the thing",
+                model="sonnet", role="backend-developer", requires_mcp=requires_mcp,
+            )
+        assert result.success is True, result.failure_reason
+        return mock_popen.call_args[0][0]
+
+    @pytest.mark.parametrize("requires_mcp,force_empty", [(True, False), (False, True)])
+    def test_spawn_argv_mcp_posture(self, requires_mcp: bool, force_empty: bool) -> None:
+        from worker_permissions import EMPTY_MCP_CONFIG, MCP_NAMESPACE_DENY
+
+        argv = self._deliver_argv(requires_mcp)
+        assert ("--mcp-config" in argv) is force_empty
+        assert ("--strict-mcp-config" in argv) is force_empty
+        if force_empty:
+            assert argv[argv.index("--mcp-config") + 1] == EMPTY_MCP_CONFIG
+            assert MCP_NAMESPACE_DENY in argv[argv.index("--disallowedTools") + 1].split(",")
+        else:
+            assert MCP_NAMESPACE_DENY not in argv
