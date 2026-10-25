@@ -6,7 +6,6 @@ Methods handle finding classification (advisory/blocking) and result persistence
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 from pathlib import Path
@@ -14,7 +13,12 @@ from typing import Any, Dict, List, Optional
 
 from gemini_prompt_renderer import GeminiReviewReceipt
 from claude_github_receipt import ClaudeGitHubReviewReceipt
-from gate_recorder import get_pr_head_sha, stamp_request_identity
+from gate_recorder import (
+    ResultOverwriteRefused,
+    get_pr_head_sha,
+    stamp_request_identity,
+    write_result_guarded,
+)
 
 
 def evidence_error(payload: Dict[str, Any]) -> str:
@@ -94,7 +98,24 @@ class GateResultParserMixin:
         full_payload["residual_risk"] = full_payload.get("residual_risk", "")
 
         result_file = self._contract_result_path("claude_github_optional", pr_id)
-        result_file.write_text(json.dumps(full_payload, indent=2), encoding="utf-8")
+        # GE-3: through the shared guard (slot lock, overwrite guard, atomic
+        # write) instead of a bare write_text. ``emit_outcome_receipt=False``:
+        # ``_emit_claude_github_receipt`` below books this outcome's one
+        # ``review_gate_result`` receipt, with the head read off the contract
+        # request (it is not on the record this call writes).
+        _payload_on_disk, written = write_result_guarded(
+            result_file,
+            full_payload,
+            gate="claude_github_optional",
+            pr_ref=pr_id,
+            emit_outcome_receipt=False,
+        )
+        if not written:
+            raise ResultOverwriteRefused(
+                f"claude_github_optional result for pr_id={pr_id!r} at {result_file} "
+                f"was refused by the overwrite guard: a decided, evidenced verdict "
+                f"already holds this slot; the record on disk is unchanged"
+            )
 
         self._emit_claude_github_receipt(
             receipt, status=status, pr_id=pr_id, branch=branch,
@@ -227,12 +248,37 @@ class GateResultParserMixin:
     def _validate_and_persist_result(
         self, payload: Dict[str, Any], status: str, gate: str, pr_number: int,
     ) -> None:
-        """Validate pass/fail constraints and write result file to disk."""
+        """Validate pass/fail constraints and write the result through the guard.
+
+        GE-3: routed through :func:`gate_recorder.write_result_guarded` (slot
+        lock, overwrite guard, atomic write) instead of a bare ``write_text``
+        — a ``record-result`` must never erase a terminal record the runner
+        already wrote for the same PR, gate and head. A refusal raises
+        :class:`ResultOverwriteRefused` (a ``ValueError``), leaves the record
+        on disk untouched, and the caller books no receipt for a write that
+        never landed. ``emit_outcome_receipt=False``: ``_emit_result_receipt``
+        below books this outcome's one ``review_gate_result`` receipt, with
+        the residual risk, advisory/blocking findings and required reruns the
+        generic outcome receipt does not carry.
+        """
         if status in {"pass", "fail"}:
             error = evidence_error(payload)
             if error:
                 raise ValueError(error)
-        self._result_path(gate, pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        result_path = self._result_path(gate, pr_number)
+        _payload_on_disk, written = write_result_guarded(
+            result_path,
+            payload,
+            gate=gate,
+            pr_ref=str(payload.get("pr_id") or pr_number),
+            emit_outcome_receipt=False,
+        )
+        if not written:
+            raise ResultOverwriteRefused(
+                f"{gate} result for pr={pr_number} at {result_path} was refused by "
+                f"the overwrite guard: a decided, evidenced verdict already holds "
+                f"this slot for this head; the record on disk is unchanged"
+            )
 
     def _emit_result_receipt(
         self, payload: Dict[str, Any], receipt: "GeminiReviewReceipt", *,
