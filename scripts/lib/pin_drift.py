@@ -15,6 +15,17 @@ release ORDER -- ``major.minor.patch`` plus an optional pre-release, where
 ``-rc9`` sorts before its release. ``packaging`` would do that but is not a
 declared dependency, hence the local comparator.
 
+A store can also disagree with itself without a pin being involved, so the
+same release-dir skip rules drive two read-only store checks: ``mislabeled``
+(a release dir whose ``VERSION`` file names a different version -- ``v1.0.1``
+holding ``1.0.0``) and ``writable`` (a release dir an operator left unlocked;
+a WARN, not a broken store). A dir with no readable ``VERSION`` is never
+guessed into a mislabel: ``unlabeled`` names it separately. Nothing here
+chmods, writes or unlocks anything. A missing or unreadable ``versions/``
+yields no findings, exactly as ``load_store`` yields no releases: whether a
+store exists at all is a separate question, not a clean bill of health from
+these checks.
+
 Verdicts: ``current`` is the pin ``current`` resolves to (``behind = 0``; a pin
 AHEAD lands here too, with a ``note`` -- the install exists and is not behind,
 and a negative distance is an amount nobody can act on); ``lagging`` is an
@@ -31,7 +42,7 @@ from __future__ import annotations
 import re
 import sys
 from pathlib import Path
-from typing import List, NamedTuple, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 # The engine root carries ``scripts/`` and, in a dev checkout, ``vnx_cli/``; a
 # packaged install ships the engine trees under ``vnx_orchestration/`` next to
@@ -44,7 +55,16 @@ for _root in (_ENGINE_ROOT, _ENGINE_ROOT.parent):
             sys.path.insert(0, str(_root))
         break
 
+# This module's own dir, so the sibling read-only helper imports the same way
+# whether it is loaded as ``pin_drift`` or as ``scripts.lib.pin_drift``.
+_LIB_DIR = str(Path(__file__).resolve().parent)
+if _LIB_DIR not in sys.path:
+    sys.path.insert(0, _LIB_DIR)
+
 from vnx_cli._reexec import _ROLLING_DIR_RE, _normalize_version
+
+# The one read-only-bit test: copied logic would drift from the installer's.
+from vnx_version_ro import is_readonly
 
 VERDICT_CURRENT = "current"
 VERDICT_LAGGING = "lagging"
@@ -73,6 +93,17 @@ class PinDrift(NamedTuple):
     note: Optional[str] = None
 
 
+class Mislabel(NamedTuple):
+    """One release dir whose ``VERSION`` file names a different version.
+
+    ``version_file`` is the file's first line as written, stripped -- the
+    evidence, not a normalized restatement of it.
+    """
+
+    dir_name: str
+    version_file: str
+
+
 def _prerelease_key(pre: str) -> Tuple[Tuple[int, object], ...]:
     """Semver pre-release precedence: numeric identifiers compare numerically
     (``rc9 < rc10``, which string order gets wrong) and sort before alphanumeric
@@ -97,20 +128,20 @@ def _parse_version(name: str) -> Optional[_VersionKey]:
     return (int(major), int(minor), int(patch), 0, _prerelease_key(pre))
 
 
-def load_store(versions_dir: Path) -> List[str]:
-    """The released versions in a store's ``versions/`` dir, in semver order.
+def _release_dirs(versions_dir: Path) -> List[Path]:
+    """The entries of a store's ``versions/`` dir that name a release.
 
-    Normalized and deduplicated -- ``v1.5.0`` and ``1.5.0`` are one release, and
-    counting both would inflate every ``behind`` by one. Skipped: dot-dirs
-    (``.vnx-data`` is runtime state, never a version), rolling dirs, entries
-    that are not dirs, and names that do not parse. A missing or unreadable
-    ``versions/`` yields an empty list.
+    The one skip list every store reader shares, so a listing and a store check
+    can never disagree about what a release dir is: dot-dirs (``.vnx-data`` is
+    runtime state, never a version), rolling dirs, entries that are not dirs,
+    and names that do not parse. Order is whatever the filesystem returns; a
+    missing or unreadable ``versions/`` yields no entries.
     """
     try:
         entries = list(versions_dir.iterdir())
     except OSError:
         return []
-    found = {}
+    found = []
     for entry in entries:
         name = entry.name
         if name.startswith(".") or _ROLLING_DIR_RE.match(name):
@@ -120,9 +151,25 @@ def load_store(versions_dir: Path) -> List[str]:
                 continue
         except OSError:
             continue
-        key = _parse_version(name)
+        if _parse_version(name) is not None:
+            found.append(entry)
+    return found
+
+
+def load_store(versions_dir: Path) -> List[str]:
+    """The released versions in a store's ``versions/`` dir, in semver order.
+
+    Normalized and deduplicated -- ``v1.5.0`` and ``1.5.0`` are one release, and
+    counting both would inflate every ``behind`` by one. Skipped: dot-dirs
+    (``.vnx-data`` is runtime state, never a version), rolling dirs, entries
+    that are not dirs, and names that do not parse. A missing or unreadable
+    ``versions/`` yields an empty list.
+    """
+    found: Dict[str, _VersionKey] = {}
+    for entry in _release_dirs(versions_dir):
+        key = _parse_version(entry.name)
         if key is not None:
-            found.setdefault(_normalize_version(name), key)
+            found.setdefault(_normalize_version(entry.name), key)
     return sorted(found, key=found.__getitem__)
 
 
@@ -149,6 +196,71 @@ def current_version(store_root: Path) -> Optional[str]:
     if _ROLLING_DIR_RE.match(name) or _parse_version(name) is None:
         return None
     return _normalize_version(name)
+
+
+def _version_label(version_dir: Path) -> Optional[str]:
+    """The first line of the dir's ``VERSION`` file, stripped, or ``None``.
+
+    Missing file, a directory in its place, bytes that are not UTF-8 and a
+    blank first line all mean the same thing here: the dir names no version.
+    That is ``unlabeled``'s finding, never evidence of a mislabel -- the store
+    check reports what the file says, it does not guess what it meant.
+    """
+    try:
+        with (version_dir / "VERSION").open("r", encoding="utf-8-sig") as handle:
+            first_line = handle.readline()
+    except (OSError, UnicodeDecodeError):
+        return None
+    label = first_line.strip()
+    return label or None
+
+
+def mislabeled(store_root: Path) -> List[Mislabel]:
+    """Release dirs whose ``VERSION`` file names a different version.
+
+    Same skip rules as ``load_store``: dot-dirs, rolling dirs, entries that are
+    not dirs and names that do not parse are not release dirs. The decorative
+    ``v`` is normalized on both sides, so ``v1.0.2`` holding ``1.0.2`` is not a
+    finding while ``v1.0.1`` holding ``1.0.0`` is. A dir without a readable
+    label is left to ``unlabeled`` -- a missing value is not a disagreement.
+    Pure read; nothing is written.
+    """
+    findings = []
+    for entry in _release_dirs(store_root / "versions"):
+        label = _version_label(entry)
+        if label is None:
+            continue
+        if _normalize_version(label) != _normalize_version(entry.name):
+            findings.append(Mislabel(entry.name, label))
+    return sorted(findings)
+
+
+def unlabeled(store_root: Path) -> List[str]:
+    """Release dirs that carry no readable ``VERSION`` label, in name order.
+
+    Reported apart from ``mislabeled`` so a broken or absent label is never
+    turned into a version disagreement that was never written down.
+    """
+    return sorted(
+        entry.name
+        for entry in _release_dirs(store_root / "versions")
+        if _version_label(entry) is None
+    )
+
+
+def writable(store_root: Path) -> List[str]:
+    """Release dirs whose write bit is still set, in name order.
+
+    A WARN, not a broken store: an operator may unlock one on purpose for a
+    repair. ``is_readonly`` is imported from ``vnx_version_ro`` rather than
+    reimplemented, so this asks the installer's own question. Pure read --
+    nothing is chmod'ed and ``writeable_version_dir`` is never entered.
+    """
+    return sorted(
+        entry.name
+        for entry in _release_dirs(store_root / "versions")
+        if not is_readonly(entry)
+    )
 
 
 def _pinned_dir(versions_dir: Path, pin: str) -> Optional[str]:
