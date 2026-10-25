@@ -69,20 +69,5 @@ if [[ -n "$OUTPUT" ]]; then
   printf '%s\n' "$OUTPUT"
 fi
 
-# ── Tool-call signal aggregation (receipt-quality PR-B2, additive) ───────────
-# Best-effort record for later receipt-time aggregation
-# (scripts/lib/toolcall_signals.py). No-op unless this is a dispatch that
-# exports VNX_TMUX_SIGNAL_DIR (same scoping as tmux_signal_stop_receipt.sh).
-# Writes to /dev/null so nothing leaks into stdout (Claude Code treats hook
-# stdout as the decision payload).
-if [[ -n "${VNX_TMUX_SIGNAL_DIR:-}" ]]; then
-  _BLOCKED=0
-  case "$OUTPUT" in
-    *'"permissionDecision": "deny"'*) _BLOCKED=1 ;;
-  esac
-  printf '%s' "$INPUT" | python3 "${HOOK_DIR}/../lib/toolcall_signals.py" \
-    --signal-dir "$VNX_TMUX_SIGNAL_DIR" --blocked "$_BLOCKED" >/dev/null 2>&1 || true
-fi
-
 # Exit 0 always — allow/deny is communicated via JSON stdout, not exit code
 exit 0

@@ -1,0 +1,1 @@
+- De state-build (`scripts/build_t0_state.py`) herschrijft `FEATURE_PLAN.md` niet meer: elke build liet dat bestand in de project-root achter, terwijl geen enkele parser er nog uit las.

@@ -115,6 +115,10 @@ SUBSYSTEM_DESCRIPTIONS: Dict[str, str] = {
         "T0 must rotate at 500K context: measured from the transcript, the guard hook "
         "stops new work and blocks the turn end until the rotate flow starts a successor."
     ),
+    "deterministic-test-verification": (
+        "Receipt test counts from the builder's JUnit XML beside the report "
+        "(VNX_JUNIT_COUNTS); off = the Verification section's prose counts."
+    ),
 }
 
 # Ledger row order (framework-status-audit-and-cockpit PR-3). Grouped by
@@ -161,6 +165,10 @@ _ROW_ORDER: List[str] = [
     # central-install-cutover just above, not the D6b six's "claimed LIVE
     # with no probe" correction.
     "harness-lane-review-gates",
+    # deterministische-testverificatie PR-4: the flag is wired on Path 2 but
+    # defaults off until PR-5 wires the envelope path and turns it on for both
+    # write paths at once -- dormant-and-measured, not claimed LIVE.
+    "deterministic-test-verification",
     # SCOPE
     "plan-gate-panel",
     "plan-gate-task-class-scope",

@@ -7,6 +7,15 @@
 **Date**: 2026-03-31
 **Author**: T3 (Track C Architecture)
 
+> **Status 2026-10-24, ADR-047: de planbestanden gaan eruit.**
+> De tracks-DB is de enige planbron (`docs/governance/decisions/ADR-047-tracks-db-enige-planbron.md`). Prioriteit 1 van dit contract, `FEATURE_PLAN.md`, is geen bron meer. Per bestand, met de PR die de laatste lezer weghaalt:
+>
+> - `FEATURE_PLAN.md` (prioriteit 1): de planlezer gaat uit `queue_reconciler` en `closure_verifier` in A2, de per-PR-check in A5. Het bestand is sinds #1630 untracked en gitignored, dus het verdwijnt met de schrijver.
+> - `PR_QUEUE.md` (prioriteit 4, projectie): de laatste lezer gaat in B4 (`review_contract`, `pr_queue_state_snapshot`); het bestand zelf gaat daar ook weg.
+> - `ROADMAP.yaml`: de laatste standaardlezer gaat in C2. Het bestand blijft als voorbeeld en is alleen met een expliciete `--file` te importeren.
+>
+> De rest van dit contract wordt in B4 herschreven, wanneer de laatste lezer weg is. Tot dan staat de tekst hieronder ongewijzigd.
+
 This document is the single source of truth for how VNX derives queue state. All downstream PRs (PR-1 through PR-3) implement against this contract. Any component that reads or writes queue state must conform to the hierarchy and rules defined here.
 
 ---

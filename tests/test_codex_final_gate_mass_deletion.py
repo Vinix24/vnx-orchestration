@@ -23,7 +23,6 @@ from codex_final_gate import (
     NET_LINE_DELETION_WARN,
     _parse_numstat_net,
     enforce_codex_gate,
-    render_codex_prompt,
 )
 from review_contract import Deliverable, ReviewContract
 
@@ -260,41 +259,3 @@ class TestNetLineDeletion:
 
         assert result.net_line_deletion == 0
         assert result.net_line_deletion_warn is False
-
-
-class TestRenderPromptIncludesDeletionAlert:
-    """render_codex_prompt must inject the Net-Deletion Alert when files were deleted."""
-
-    def _render_contract(self):
-        return _make_contract(
-            pr_id="PR-render",
-            pr_title="Render test",
-            deliverables=[Deliverable(description="cleanup old module", category="infrastructure")],
-            review_stack=["codex_gate"],
-            content_hash="render456",
-        )
-
-    def test_deleted_files_appear_in_rendered_prompt(self):
-        contract = self._render_contract()
-        deleted = ["old/module.py", "old/helper.py"]
-
-        prompt = render_codex_prompt(contract, deleted_files=deleted)
-
-        assert "Net-Deletion Alert [WARN] (2 file(s) deleted)" in prompt
-        assert "`old/module.py`" in prompt
-        assert "`old/helper.py`" in prompt
-
-    def test_deleted_files_at_hold_level_render_hold(self):
-        contract = self._render_contract()
-        deleted = [f"old/module_{i}.py" for i in range(DELETION_FILE_HOLD)]
-
-        prompt = render_codex_prompt(contract, deleted_files=deleted)
-
-        assert f"Net-Deletion Alert [HOLD] ({DELETION_FILE_HOLD} file(s) deleted)" in prompt
-
-    def test_no_deleted_files_no_alert_section(self):
-        contract = self._render_contract()
-
-        prompt = render_codex_prompt(contract)
-
-        assert "Net-Deletion Alert" not in prompt

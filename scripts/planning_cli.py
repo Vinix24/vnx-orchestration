@@ -4,6 +4,7 @@
 Delegated from `bin/vnx`:
   vnx objective list [--horizon now|next|later] [--phase ...] [--json]
   vnx objective show <track_id> [--json]
+  vnx objective queue [--objective <track_id>] [--all] [--json]
   vnx objective sync [--apply] [--roadmap PATH] [--json]
   vnx objective drift [--json]
   vnx objective add <track_id> <title> <goal> --plan-scope architecture|light
@@ -73,6 +74,15 @@ import provider_switch
 
 _HORIZON_ORDER = ["now", "next", "later"]
 _HORIZON_LABEL = {"now": "NOW", "next": "NEXT", "later": "LATER", None: "UNSCHEDULED"}
+
+# `horizon queue` (C1): the readable "what is queued" overview. A row's state is
+# the `deliverables` VIEW's derived_status; measured on migration 0027 that
+# vocabulary is done|in_progress|failed|ready|proposed. `closed` and `cancelled`
+# are the other terminal spellings a store may carry, so the default view hides
+# all three (`--all` shows them).
+_QUEUE_HIDDEN_STATES = frozenset({"done", "closed", "cancelled"})
+_QUEUE_TITLE_WIDTH = 56
+_QUEUE_MISSING_TITLE = "(missing — not set on this deliverable)"
 
 # lane_hint: a descriptive dispatch-routing hint carried on the track record
 # (e.g. "this track is meant to be dispatched governed vs direct") so a
@@ -2962,6 +2972,171 @@ def cmd_deliverable_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def _queue_root_dispatch_id(
+    conn: sqlite3.Connection, project_id: str, deliverable_ref: str,
+) -> str:
+    """The dispatch_id a deliverables-view row is keyed by.
+
+    ``deliverable_ref`` is ``output_ref`` as ``cmd_deliverable_add`` writes it
+    (``pr:dlv-<hex>``); the root dispatch row is the one that carries it. A
+    follow-up round (``<dlv>-r2``) has ``output_ref`` NULL, so the round match
+    is built from this root id, never from the view ref.
+    """
+    row = conn.execute(
+        "SELECT dispatch_id FROM dispatches WHERE project_id = ? AND output_ref = ? "
+        "ORDER BY updated_at DESC, id DESC LIMIT 1",
+        (project_id, deliverable_ref),
+    ).fetchone()
+    if row is not None:
+        return row["dispatch_id"]
+    return str(deliverable_ref).split(":", 1)[-1]
+
+
+def _queue_pr_number(
+    conn: sqlite3.Connection, project_id: str, root_id: str,
+) -> Optional[int]:
+    """The delivering PR of a deliverable root or any of its ``-r<n>`` rounds.
+
+    The PR lives on ``dispatches.pr_ref`` (``vnx deliverable close --evidence``
+    writes it there); a round can carry it too but its ``output_ref`` is NULL,
+    so the match is the root id plus its ``<id>-r<n>`` prefix. The most recent
+    non-empty ``pr_ref`` wins. A present-but-unparseable ``pr_ref`` raises
+    ``ValueError`` instead of reading as "no PR" (fail-closed on evidence).
+    """
+    escaped = root_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    row = conn.execute(
+        """
+        SELECT dispatch_id, pr_ref FROM dispatches
+        WHERE project_id = ? AND pr_ref IS NOT NULL AND pr_ref != ''
+          AND (dispatch_id = ? OR dispatch_id LIKE ? ESCAPE '\\')
+        ORDER BY updated_at DESC, id DESC
+        LIMIT 1
+        """,
+        (project_id, root_id, escaped + "-r%"),
+    ).fetchone()
+    if row is None:
+        return None
+    normalized = _normalize_pr_ref(str(row["pr_ref"]).split(",", 1)[0].strip())
+    if normalized is None:
+        raise ValueError(
+            f"unparseable pr_ref {row['pr_ref']!r} on dispatch {row['dispatch_id']!r}"
+        )
+    return int(normalized.lstrip("#"))
+
+
+def _queue_depends_on(state_dir: Path, project_id: str, track_id: str) -> list[dict[str, str]]:
+    """A row's dependencies: its track's edges (no per-deliverable dependency exists)."""
+    return [
+        {"track": edge["to_track_id"], "kind": edge["kind"]}
+        for edge in _dependency_edges_for(state_dir, track_id, project_id)
+    ]
+
+
+def _queue_title(title: str, width: int = _QUEUE_TITLE_WIDTH) -> str:
+    """The fixed-width title column; ``--json`` keeps the untruncated title."""
+    text = (title or "").strip() or _QUEUE_MISSING_TITLE
+    if len(text) <= width:
+        return text
+    return text[: width - 1].rstrip() + "…"
+
+
+def _queue_ordered_tracks(
+    state_dir: Path, project_id: str, objective: Optional[str],
+) -> list[dict[str, Any]]:
+    """Tracks in ``objective list`` order: horizon band, stable within a band."""
+    tracks = tracks_lib.list_tracks(state_dir, project_id)
+    if objective:
+        tracks = [t for t in tracks if t["track_id"] == objective]
+    tracks.sort(
+        key=lambda t: _HORIZON_ORDER.index(t["horizon"])
+        if t.get("horizon") in _HORIZON_ORDER else len(_HORIZON_ORDER)
+    )
+    return tracks
+
+
+def _print_queue_text(
+    rows: list[dict[str, Any]], project_id: str, tracks: list[dict[str, Any]],
+) -> None:
+    """The grouped text form: one section per track, one line per deliverable."""
+    print(f"\nVNX queue — project '{project_id}'\n")
+    by_track: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        by_track.setdefault(row["track"], []).append(row)
+    ordered = [t["track_id"] for t in tracks]
+    for track_id in ordered + sorted(set(by_track) - set(ordered)):
+        track_rows = by_track.get(track_id) or []
+        if not track_rows:
+            continue
+        print(f"  [{track_id}]")
+        for row in track_rows:
+            deps = ", ".join(
+                f"{d['track']}({d['kind']})" for d in row["depends_on"]
+            ) or "-"
+            pr = f"#{row['pr']}" if row["pr"] is not None else "-"
+            print(
+                f"    {row['deliverable']:<18} {row['state']:<12} {pr:<7} "
+                f"{deps:<28}  {_queue_title(row['title'])}"
+            )
+        print()
+
+
+def cmd_objective_queue(args: argparse.Namespace) -> int:
+    """``vnx horizon queue``: what is queued, per deliverable, from the DB.
+
+    Read-only. Uses the same ``_fetch_deliverable_records`` read path as
+    ``deliverable list``, plus ``dispatches.pr_ref`` for the delivering PR and
+    the track's ``track_dependencies`` edges. One row per deliverable, grouped
+    by track in ``objective list`` order (horizon band, then the list's
+    priority order). Without ``--all`` a done/closed/cancelled row is hidden.
+    """
+    state_dir = _resolve_state_dir(args.state_dir)
+    project_id = args.project_id
+    records = _fetch_deliverable_records(
+        state_dir, project_id, args.objective, include_metadata=True,
+    )
+    if not args.all:
+        records = [
+            r for r in records
+            if r.get("derived_status") not in _QUEUE_HIDDEN_STATES
+        ]
+
+    conn = _db_conn(state_dir)
+    try:
+        rows: list[dict[str, Any]] = []
+        deps_by_track: dict[str, list[dict[str, str]]] = {}
+        for record in records:
+            root_id = _queue_root_dispatch_id(conn, project_id, record["deliverable_ref"])
+            track_id = record.get("track") or "-"
+            if track_id not in deps_by_track:
+                deps_by_track[track_id] = _queue_depends_on(state_dir, project_id, track_id)
+            rows.append({
+                "track": track_id,
+                "deliverable": root_id,
+                "state": record.get("derived_status") or "-",
+                "pr": _queue_pr_number(conn, project_id, root_id),
+                "depends_on": deps_by_track[track_id],
+                "title": record.get("title") or "",
+            })
+    except ValueError as exc:
+        print(f"vnx horizon queue: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        conn.close()
+
+    if not rows:
+        print(f"No deliverables queued for project '{project_id}'.")
+        return 0
+
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return 0
+
+    _print_queue_text(
+        rows, project_id, _queue_ordered_tracks(state_dir, project_id, args.objective),
+    )
+    return 0
+
+
 def _track_blocks_promotion(
     state_dir: Path, project_id: str, dispatch_id: str, track_id: str,
 ) -> bool:
@@ -5469,6 +5644,34 @@ def _add_deliverable_parsers(sub: Any, common: Any) -> None:
     p_dset.set_defaults(func=cmd_deliverable_set)
 
 
+def _add_objective_queue_parser(obj_sub: Any, common: Any) -> None:
+    """``objective queue`` (alias ``horizon queue``): the queued-work overview."""
+    p_queue = obj_sub.add_parser(
+        "queue",
+        help="queued deliverables per track: state, delivering PR, dependencies",
+    )
+    common(p_queue)
+    p_queue.add_argument(
+        "--objective", default=None, metavar="TRACK_ID",
+        help="only show the deliverables of this track",
+    )
+    p_queue.add_argument(
+        "--all", action="store_true",
+        help="also show closed/done/cancelled deliverables (hidden by default)",
+    )
+    p_queue.set_defaults(func=cmd_objective_queue)
+
+
+def _add_planning_parsers(sub: Any, obj_sub: Any, common: Any) -> None:
+    """The planning subcommands registered beside ``objective`` at the top level.
+
+    A single call from ``_build_parser`` keeps that already-over-limit function
+    from growing (the function-size ratchet refuses any growth there).
+    """
+    _add_objective_queue_parser(obj_sub, common)
+    _add_deliverable_parsers(sub, common)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="vnx", description="VNX planning read surface")
     sub = parser.add_subparsers(dest="domain", required=True)
@@ -5744,7 +5947,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _common(p_rec_streak)
     p_rec_streak.set_defaults(func=cmd_objective_reconcile_streak)
 
-    _add_deliverable_parsers(sub, _common)
+    _add_planning_parsers(sub, obj_sub, _common)
 
     # ------------------------------------------------------------------
     # plan-gate subcommand (PM plan-first gate)

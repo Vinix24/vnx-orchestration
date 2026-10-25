@@ -12,15 +12,14 @@ This module is the write+read side of that channel:
   - ``record_toolcall_event()`` is called from the tail of each PreToolUse hook
     (best-effort, fail-open, never touches the hook's stdout/decision). It appends
     one NDJSON line to ``<signal_dir>/toolcalls.ndjson`` -- ``signal_dir`` is the
-    same per-dispatch ``$VNX_TMUX_SIGNAL_DIR`` scratch directory the tmux-signal
-    hooks (``tmux_signal_stop_receipt.sh`` et al.) already use.
+    per-dispatch ``$VNX_TMUX_SIGNAL_DIR`` scratch directory.
   - ``aggregate_toolcall_signals()`` is called once at receipt-emit time
     (``provider_dispatch._emit_governance``) to fold the log into three additive
     receipt fields (``receipt_schema.ReceiptV2.tool_call_count`` /
     ``tool_call_failures`` / ``tool_call_retries``).
 
 Scoped to dispatches that export ``VNX_TMUX_SIGNAL_DIR`` (tmux-spawn dispatches
-today): the same scoping convention ``tmux_signal_stop_receipt.sh`` already uses.
+today).
 Non-Claude-Code providers (codex, kimi, gemini CLIs) never go through Claude Code's
 hook system at all, so this channel is silent for them by construction --
 ``aggregate_toolcall_signals()`` returns ``None`` and the receipt fields stay omitted

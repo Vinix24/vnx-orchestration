@@ -21,9 +21,6 @@
 # longer gates the flip. reconcile's own two-stage close (CONFIRMED → stale_candidate
 # → closed) remains the conservative safeguard against a single mis-verify.
 #
-# Scoped to the interactive session: fires ONLY when VNX_DISPATCH_ID is UNSET.
-# A tmux-spawn worker (VNX_DISPATCH_ID set) drains stdin and exits 0 — no-op.
-#
 # Detached (nohup + background) so it never blocks session start. Always exit 0.
 #
 # SINGLETON GUARD (OI-851, measured 2026-07-30): five concurrent instances of the
@@ -61,11 +58,6 @@
 # at EOF, so capturing never blocks the caller.  Parsing happens inside the
 # subshell with the resolved interpreter (jq is not guaranteed on this fleet).
 STDIN_JSON="$(cat 2>/dev/null)" || STDIN_JSON=""
-
-# ── Guard: skip tmux-spawn workers; only the interactive session ticks ───────
-if [ -n "${VNX_DISPATCH_ID:-}" ]; then
-    exit 0
-fi
 
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
 CLI="$ROOT/scripts/planning_cli.py"

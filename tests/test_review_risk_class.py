@@ -509,8 +509,8 @@ def test_a_base_schema_is_schema_and_raises_the_track():
 
 
 @pytest.mark.parametrize("path", [
-    "scripts/lib/auto_gate_trigger.py", "scripts/lib/profile_gate_resolver.py",
-    "scripts/lib/wiring_gate.py", "scripts/lib/reviewer_roles.py", "scripts/verify_closure.py",
+    "scripts/lib/profile_gate_resolver.py",
+    "scripts/lib/wiring_gate.py", "scripts/lib/reviewer_roles.py",
     "scripts/lib/file_scope_overlap.py", "scripts/backfill_pr_merged_receipts.py",
 ])
 def test_the_measured_modules_left_out_stay_outside_the_table(path):

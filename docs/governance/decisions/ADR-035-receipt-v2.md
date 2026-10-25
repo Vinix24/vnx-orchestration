@@ -21,6 +21,8 @@
 
 **Revision 4 (2026-07-17):** codex-design-gate returned REVISE a fourth time on PR #1183 (1 HIGH) — a single residual gap in `compute_verdict`'s reject-set (§3.1), not r3's B2 (`oi_pending`) or any of r3's three fixes, all confirmed closed by codex and left untouched here. The reject-set enumerated hard-failure `status` values as `failed`/`error`/`blocked`/`timeout`/`contract_invalid`, but that list was never verified against what the two production write paths actually stamp into a receipt's `status` field. Re-checked against the tree for this revision: `EnvelopeResult.status`/`_AdapterResult.status` (`scripts/lib/dispatch_envelope.py:68,89`) are typed `"success" | "failure" | "timeout"`, and every literal `status=` assignment across `dispatch_envelope.py` and `provider_dispatch.py` (Path 1's envelope and multi-provider sub-paths, ~30 call sites combined) confirms it — the failure literal both files actually write is `"failure"`, never `"failed"`. `governance_emit.emit_dispatch_receipt` passes `status` straight through from `adapter_result.status` (`dispatch_envelope.py:515`) into the durable receipt, so a real provider failure lands as `status: "failure"` — a value `compute_verdict`'s reject-set never matched, meaning a genuinely failed dispatch would fall through to `investigate` (or an unhandled branch) instead of the deterministic `reject` pillar 1 promises. Closed by adding `failure` to the reject-set everywhere the ADR enumerates it (§3.1, §10/T3). The rest of the union was re-verified while here, not just patched at the one reported spot: Path 1's one other non-`failure`/`timeout`/`success` literal, `"blocked"` (`provider_dispatch.py:1768`, the deepseek-harness pre-spawn guard), and Path 2's (`report_parser.py::_build_enhanced_receipt`, lines 669-676) special-cased `"contract_invalid"` were both already present in the set — no other canonical failure-status literal was found missing. The four operator pillars are unchanged by this revision.
 
+**Amendment 1 (2026-10-25):** §12 records the evidence policy of track `deterministische-testverificatie` before its code lands: three optional `verification{}` keys behind the `VNX_JUNIT_COUNTS` setting (`count_source`, `count_mismatch`, `junit_rejected`), their trust level (builder evidence, never independent evidence), the CI red-on-base verdict set that is the independent evidence, one rollout switch for both write paths, and the compatibility rule (unknown keys ignored; `compute_verdict` unchanged). No decision text above is changed by this amendment.
+
 ## 1. Context — the record, verified against the tree
 
 VNX writes one NDJSON line per dispatch outcome to `.vnx-data/<project_id>/state/t0_receipts.ndjson` (ADR-005 canonical ledger). Two production paths write it (`docs/operations/RECEIPT_PIPELINE.md`):
@@ -425,6 +427,58 @@ No new lock file, no new chain primitive, no new validator: the fix is consolida
 - **Letting the validator recompute `severity: "warn"` recurrence itself, instead of trusting a `requires_tracking` field the writer stamps.** Rejected (HIGH-3): would require the validator to read rolling-window history (other receipts, or the open-items store) from inside the shared append primitive's lock — new, unbounded I/O in a scope this ADR keeps narrow (see the retry-until-success rejection above), and a second, independent implementation of the exact recurrence logic PR-2's destination-assignment engine already computes, risking the two silently disagreeing. `requires_tracking` is computed once, by the one function with the data, and carried on the entry for a cheap structural check.
 - **Fail-open on doc-only when `provenance.diff_summary.paths` is missing (`method: "n/a"` with no `paths` defaults to `accept`).** Rejected (r2 HIGH-4): this is exactly the accept-without-evidence gap the doc-only invariant exists to close, just moved one level down — absence of `paths` is absence of evidence, not evidence of doc-only-ness. `investigate` is the only fail-safe default (§3.1.1).
 - **Leaving `provenance.diff_summary.paths` population in PR-5 and accepting the PR-4→PR-5 gap as a documented, temporary known-issue.** Rejected (r2 HIGH-4): this ADR already rejected the equivalent trade-off once, for `schema_version` (HIGH-6, r1) — a "temporary, documented" incorrect-shape window is still a window where a real dispatch's receipt gets evaluated against a rule that can't do its job. The fix costs one PR reordering, not a new mechanism; there is no reason to accept the gap when the fix is this cheap.
+
+## 12. Amendment (2026-10-25): machine-measured test evidence
+
+Track `deterministische-testverificatie`. The plan-gate of 2026-10-24 asked that this track's evidence policy be written into the ADR that owns the receipt's `verification{}` shape before its code lands. This section is that record. It changes nothing above: §3.1's `verification{}` row and the D1b amendment keep describing how counts are read from the report text, and `method` keeps naming the runner (`pytest`, `unittest`, ...), never the source of the count.
+
+The track changes what counts as test evidence in two places:
+
+- the receipt may take its counts from the builder's JUnit XML instead of a regex over the report text;
+- a CI job runs the tests a PR adds or changes on the merge-base and on the head, rules per test, and fails a red-run claim that does not reproduce.
+
+### 12.1 New optional keys in `verification{}`
+
+Three keys, all absent when the setting `VNX_JUNIT_COUNTS` is off. A receipt written with the setting off therefore carries exactly the shape it carried before this amendment.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `count_source` | enum: `junit_worker` \| `report_text` | Where the counts came from. `junit_worker`: the builder's JUnit XML next to the report, its suite name equal to the dispatch id. `report_text`: today's reading of the report text under the D1b rules. Written with the setting on, on every receipt that carries test counts. |
+| `count_mismatch` | bool | `true` when the XML and the report text disagree. Then `tests_failed` is the higher of the two and `tests_passed` comes from the XML: a failure recorded anywhere is never erased, and a green XML cannot lift a failure the report documents. `tests_run` stays `tests_passed + tests_failed`, the rule `verification_record` already applies. Absent when there is no second reading to compare. |
+| `junit_rejected` | string | The reason a present XML was refused: it does not parse, or its suite name is not the dispatch id. The counts are then the report text's, with `count_source: report_text`, never the refused file's. Absent when no XML was present or the XML was accepted. |
+
+A refused XML is neither an error on the receipt nor a pass: it is a named fallback. A malformed artifact can never be read as a green run.
+
+### 12.2 Trust level, stated plainly
+
+`junit_worker` is produced by the builder, not by CI. The same dispatch writes the report and, with the setting on, runs pytest with its own `--junitxml`. That is harder to get wrong than a regex over prose: the file is machine output, its failures are counted by the runner, and its suite name ties it to the dispatch id. It is not independent evidence. The builder can still omit the file, write it from a narrower run, or name the wrong suite, and the receipt then holds what the builder supplied.
+
+The independent evidence is the CI red-on-base verdict (§12.3), which no builder produces. Both properties are deliberate: the receipt stays local (ADR-026, §8), and this amendment introduces no CI-to-dispatch link. A reader who needs evidence the builder did not author reads the CI job.
+
+### 12.3 The CI red-on-base verdict
+
+The job is added later in this track and writes no receipt. It selects the test files the PR adds or changes, runs the head's versions of exactly those files against base code (the merge-base worktree with the PR's test files copied in) and against head code, and rules per test:
+
+| Verdict | Meaning |
+|---|---|
+| `behavior` | Fails on base, passes on head: the test measures the new behaviour. |
+| `not_behavior` | Fails on base only because the code under test is absent there (an `ImportError`, `AttributeError`, `TypeError` or `KeyError` from the missing symbol), and passes on head. |
+| `green_on_base` | Passes on base too, so it proves nothing about a change. |
+| `fails_on_head` | Fails on head. |
+| `skipped` | Not executed: skip marker, deselection, nothing collected. |
+| `incomplete` | No verdict could be measured: collection error outside the file itself, timeout, missing or unreadable XML, unrelated runtime exception. |
+
+A red-run claim is a line in the PR description that starts with a label from `report_body_contract.RED_RUN_LABELS`, followed by nodeids. A claimed nodeid whose verdict is not `behavior` fails the job. A verdict that could not be measured is `incomplete`, never `skipped` and never green, so a claim is checked against a measured verdict or it fails.
+
+The job starts as a signal. Making it a required check is an operator step after two weeks of measurement.
+
+### 12.4 Rollout
+
+Both receipt write paths switch together, under the one setting `VNX_JUNIT_COUNTS`. The counts are built in the one function both paths call (`verification_runs.verification_record`), so no window exists in which one path reads the XML while the other reads the report text. The setting off is the rollback: no new key is written and today's reading returns.
+
+### 12.5 Compatibility
+
+Readers of `verification{}` ignore keys they do not know, the same additive rule every v2 field addition follows. `compute_verdict` does not read `count_source`, `count_mismatch` or `junit_rejected` in this amendment: a receipt with XML counts is judged by the same rule table as before. A later decision may make the verdict read `count_source`; until then the three keys are evidence annotation, not a decision input. Receipts already on the ledger keep what they were written with (ADR-005).
 
 ## See also
 

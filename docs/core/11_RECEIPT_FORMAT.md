@@ -1,7 +1,7 @@
 # NDJSON Receipt Format
 
-**Version**: 2.0.0
-**Last Updated**: 2026-10-19
+**Version**: 2.1.0
+**Last Updated**: 2026-10-25
 **Status**: Active
 **Purpose**: Canonical schema for receipt lines in `.vnx-data/state/t0_receipts.ndjson`.
 
@@ -105,6 +105,9 @@ Evaluation order (highest precedence first), as implemented in `receipt_verdict.
 | `verification.pr_ref` | string \| null | The PR/commit this verification is anchored to. Not currently populated by either write path (always `null` in practice) — reserved per ADR-035 §3.1, not yet wired to a value. |
 | `verification.push_verified` | bool \| null | Whether the writer confirmed the referenced commit reached the remote. Not currently populated (always `null` in practice). |
 | `verification.spec_deviation` | string \| null | `null` asserts "delivered exactly what the spec asked, nothing more, nothing withheld." Not currently populated by either write path. |
+| `verification.count_source` | `junit_worker` \| `report_text` \| absent | Absent unless the setting `VNX_JUNIT_COUNTS` is on (ADR-035 §12). Written with the setting on, on every receipt that carries test counts. `junit_worker`: the counts come from the builder's JUnit XML next to the report, its suite name equal to the dispatch id. `report_text`: they come from the report text under the D1b rules below. `method` keeps naming the runner. |
+| `verification.count_mismatch` | bool \| absent | `true` when the XML and the report text disagree. Then `tests_failed` is the higher of the two and `tests_passed` comes from the XML, so a failure recorded anywhere is never erased and a green XML cannot lift a failure the report documents. `tests_run` stays the sum of the two. Absent when there is no second reading to compare. |
+| `verification.junit_rejected` | string \| absent | The reason a present XML was refused: it does not parse, or its suite name is not the dispatch id. The counts are then the report text's, never the refused file's. Absent when no XML was present or the XML was accepted. |
 
 ### Which test runs count (fsh D1b)
 
@@ -117,10 +120,27 @@ The section usually shows more than one run: a red run on the old code, runs per
 
 Measured 29-09 on the same 13,018 reports: outside an explicit red label, no work report loses a failure count against the first-regex-hit reading; the 52 that do are 50 gate-runner reports (`gate_evidence`) and 2 first-regex-hit artefacts across a line break. Old receipts keep what they were written with (ADR-005).
 
+These rules read the report text. When the setting `VNX_JUNIT_COUNTS` is on and the builder leaves a JUnit XML next to its report, the counts come from that file instead and the report text becomes the floor for failures: see "Count source" below, decided in ADR-035 §12.
+
 **Path 1's two sub-paths populate `verification{}` differently** (`docs/operations/RECEIPT_PIPELINE.md` documents why the write ordering differs):
 
 - **Envelope sub-path** (`dispatch_envelope.py`): the report already exists on disk by receipt-write time, so `dispatch_envelope.py::_verification_from_report` threads it through the same `report_parser.py::extract_validation` extractor and `verification_runs.verification_record` builder Path 2 uses, and passes the result to `emit_dispatch_receipt(verification=...)`.
 - **Multi-provider sub-path** (`provider_dispatch.py`): `report_path` is a precomputed string; the file doesn't exist yet at receipt-write time. `provider_dispatch.py` passes `verification={"method": "pending-report", ...}` explicitly — never a silent blank. This is never backfilled (ADR-005 append-only forbids rewriting the line): `compute_verdict` reads it as `investigate`, `evidence_complete: false`, permanently.
+
+### Count source: the builder's JUnit XML (ADR-035 §12)
+
+With `VNX_JUNIT_COUNTS` off, none of this applies and the three keys are absent. With it on, the counts may come from the builder's JUnit XML next to the report instead of the report text:
+
+- The XML counts only when its suite name equals the dispatch id. A file that does not parse, or whose suite name is not the dispatch id, is refused and the reason lands in `junit_rejected`; the counts then come from the report text under the D1b rules above, never from the refused file.
+- `count_source` records which of the two produced the counts: `junit_worker` or `report_text`.
+- When the two readings disagree, `count_mismatch` is `true`, `tests_failed` is the higher of the two and `tests_passed` comes from the XML. A failure recorded anywhere is never erased, and a green XML cannot lift a failure the report documents.
+- Both write paths switch together under the one setting, and the counts are built in the one function both paths call (`verification_runs.verification_record`), so Path 1 and Path 2 never carry different count semantics.
+
+### Trust, and the independent verdict: CI red-on-base (ADR-035 §12.2, §12.3)
+
+`count_source: junit_worker` is produced by the builder, not by CI. It is harder to get wrong than a regex over prose, because the file is machine output and the runner counts its own failures, but it is not independent evidence: the same dispatch writes the report and the XML. The independent evidence is the CI red-on-base job.
+
+That job is added later in track `deterministische-testverificatie` and writes no receipt. It selects the test files a PR adds or changes, runs the head's versions of exactly those files against base code and against head code, and rules per test: `behavior` (fails on base, passes on head), `not_behavior` (fails on base only because the code under test is absent there, and passes on head), `green_on_base` (passes on base too), `fails_on_head`, `skipped` (not executed) and `incomplete` (no verdict measurable: collection error outside the file itself, timeout, missing or unreadable XML, unrelated runtime exception). A red-run claim is a line in the PR description that starts with a label from `report_body_contract.RED_RUN_LABELS`, followed by nodeids; a claimed nodeid whose verdict is not `behavior` fails the job, and a verdict that could not be measured is `incomplete`, never `skipped` and never green. The job starts as a signal: making it a required check is an operator step after two weeks of measurement.
 
 ## Open outcomes and `receipt_query.py decide`
 

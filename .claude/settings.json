@@ -84,16 +84,6 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash -c 'exec bash \"$(git rev-parse --show-toplevel 2>/dev/null || echo .)/scripts/hooks/tmux_signal_session_ready.sh\"'",
-            "timeout": 5000
-          }
-        ]
-      },
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
             "command": "bash -c 'exec bash \"$(git rev-parse --show-toplevel 2>/dev/null || echo .)/scripts/hooks/path_parity_check.sh\"'",
             "timeout": 5000
           }
@@ -136,16 +126,6 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash -c 'exec bash \"$(git rev-parse --show-toplevel 2>/dev/null || echo .)/scripts/hooks/tmux_signal_prompt_received.sh\"'",
-            "timeout": 5000
-          }
-        ]
-      },
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
             "command": "bash -c 'ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo .); exec python3 \"$ROOT/scripts/hooks/t0_context_guard.py\"'",
             "timeout": 5000
           }
@@ -159,16 +139,6 @@
           {
             "type": "command",
             "command": "bash -c 'exec bash \"$(git rev-parse --show-toplevel)/scripts/hooks/stop_report_hook.sh\"'"
-          }
-        ]
-      },
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash -c 'exec bash \"$(git rev-parse --show-toplevel 2>/dev/null || echo .)/scripts/hooks/tmux_signal_stop_receipt.sh\"'",
-            "timeout": 5000
           }
         ]
       },
