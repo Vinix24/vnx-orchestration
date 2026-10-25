@@ -263,6 +263,25 @@ def _refuse_ambient_tenant(project_id: str) -> None:
             "pipeline resolves the tenant fail-closed and would refuse mid-run.")
 
 
+def _refuse_symlinks(source: Path) -> None:
+    """A legacy store is a plain tree: a symlink would bypass the copy guarantees.
+
+    ``shutil.copytree`` follows directory symlinks while ``_iter_databases`` does not,
+    so a linked directory's databases would be copied raw (their committed WAL frames
+    lost) and a linked ``*.db`` would be listed and copied twice. Nothing is read yet,
+    so the refusal itself writes nothing.
+    """
+    for current, dirs, files in os.walk(source, followlinks=False):
+        for name in sorted(dirs) + sorted(files):
+            path = Path(current) / name
+            if path.is_symlink():
+                relative = path.relative_to(source).as_posix()
+                raise _RelocateRefused(
+                    f"the legacy store holds a symlink at {relative}; a store must hold "
+                    "no symlinks. Resolve or copy the linked content into the store "
+                    "first, then re-run.", 2)
+
+
 def _relocate_preflight(project_dir: Path, legacy_path, project_id: str) -> tuple[Path, Path]:
     """Rule 1: refuse before writing anything. Returns ``(source, target)``."""
     if not legacy_path:
@@ -285,6 +304,7 @@ def _relocate_preflight(project_dir: Path, legacy_path, project_id: str) -> tupl
     source = Path(legacy_path).expanduser().resolve()
     if not source.is_dir():
         raise _RelocateRefused(f"legacy store {source} is not a directory", 2)
+    _refuse_symlinks(source)
     if not (source / legacy_store_path.RUNTIME_DB_RELPATH).is_file():
         raise _RelocateRefused(
             f"{source} holds no state/runtime_coordination.db — not a store (or only an "

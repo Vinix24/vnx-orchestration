@@ -179,6 +179,19 @@ class TestRelocate:
         assert record["source_stamps"] == {
             "state/runtime_coordination.db:legacy_owner": [PROJECT_ID]}
 
+    def test_store_passed_as_a_symlink_still_relocates(self, env, pipeline_guard, capsys):
+        """Only links INSIDE the tree refuse; the root is resolved before the walk."""
+        source = _legacy(env, stamps=(PROJECT_ID,))
+        link = env.xdg / "linked-store"
+        link.symlink_to(source, target_is_directory=True)
+
+        assert _run(_args(env, link)) == 0
+
+        target = _target(env)
+        assert (target / "state" / "runtime_coordination.db").is_file()
+        assert _staging_dirs(env) == []
+        assert source.is_dir()  # the tree behind the link stays put
+
 
 # ---------------------------------------------------------------------------
 # Rule 1 / rule 2 refusals — nothing written, nothing left behind
@@ -251,6 +264,51 @@ class TestRefusals:
     def test_invalid_project_id(self, env, capsys):
         assert _run(_args(env, _legacy(env), project_id="../escape")) == 2
         assert "invalid --project-id" in capsys.readouterr().err
+
+    def test_symlinked_state_directory_refuses(self, env, pipeline_guard, capsys):
+        """copytree follows a linked dir while _iter_databases does not: refuse.
+
+        The linked DB holds a committed row that only lives in its WAL; a raw copy
+        would drop it while integrity_check still answered ``ok``.
+        """
+        elsewhere = env.xdg / "elsewhere"
+        elsewhere.mkdir()
+        conn = sqlite3.connect(str(elsewhere / "runtime_coordination.db"))
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA wal_autocheckpoint=0")
+        conn.execute("CREATE TABLE committed_in_wal (x TEXT NOT NULL)")
+        conn.execute("INSERT INTO committed_in_wal VALUES ('kept')")
+        conn.commit()
+        source = env.xdg / "vnx" / PROJECT_ID
+        source.mkdir(parents=True)
+        (source / "state").symlink_to(elsewhere, target_is_directory=True)
+        try:
+            assert _run(_args(env, source, assume_owner="the operator's own store")) == 2
+        finally:
+            conn.close()
+        err = capsys.readouterr().err
+        assert "symlink at state;" in err
+        assert "no symlinks" in err
+        assert not _target(env).exists()
+        assert _staging_dirs(env) == []
+
+    def test_symlinked_file_refuses(self, env, pipeline_guard, capsys):
+        """A linked ``*.db`` would be listed by the walk and copied through two paths."""
+        source = _legacy(env, stamps=(PROJECT_ID,))
+        outside_db = env.xdg / "elsewhere.db"
+        conn = sqlite3.connect(str(outside_db))
+        conn.execute("CREATE TABLE linked (x TEXT NOT NULL)")
+        conn.commit()
+        conn.close()
+        (source / "state" / "extra.db").symlink_to(outside_db)
+
+        assert _run(_args(env, source)) == 2
+
+        err = capsys.readouterr().err
+        assert "symlink at state/extra.db;" in err
+        assert not _target(env).exists()
+        assert _staging_dirs(env) == []
+        assert source.is_dir() and (source / "state" / "runtime_coordination.db").is_file()
 
 
 # ---------------------------------------------------------------------------
