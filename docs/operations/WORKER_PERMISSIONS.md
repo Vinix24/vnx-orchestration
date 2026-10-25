@@ -84,9 +84,12 @@ tools. Historical note: the removed tmux-spawn lane's import-fault fallback in
 `tmux_interactive_dispatch.py` (module deleted 2026-09-18, `docs/operations/TMUX_SPAWN_LANE.md`)
 used to carry the same deny so an import failure never silently reopened the
 namespace. The surviving subprocess lane's own import-fault fallback
-(`subprocess_adapter.py`'s `_FALLBACK_SCOPE_ARGS`) is scoped (empty MCP +
-`acceptEdits` + a functional tool allow-list) but does not include the
-`mcp__*` namespace deny.
+(`subprocess_adapter.py`'s `_FALLBACK_SCOPE_ARGS`, built by `_fallback_scope_args()`)
+carries the full scoped code-worker posture — `acceptEdits`, the empty
+`--mcp-config` with `--strict-mcp-config`, the code-worker allow-list and the
+`mcp__*` namespace deny — and never the legacy skip flag.
+`tests/test_subprocess_adapter_scope_fallback.py` pins that parity with the
+scoped default.
 
 ## `.vnx/worker_permissions.yaml` — role profiles
 

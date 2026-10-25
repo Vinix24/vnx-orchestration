@@ -175,7 +175,10 @@ class ClaudeSubprocessAdapter:
                 terminal_id=spec.terminal_id,
                 event_writer=event_writer,
                 cwd=cwd,
-                role=spec.role,
+                # OI-865: the plan's explicit per-dispatch opt-in reaches the
+                # scope args — True keeps the ambient MCP config, False (the
+                # default) is today's force-empty scoped posture.
+                role=spec.role, requires_mcp=spec.requires_mcp,
                 total_deadline=float(spec.deadline_seconds),
                 scrub_env_keys=DEFAULT_SCRUB_KEY_PATTERNS,
                 extra_env=extra_env,
