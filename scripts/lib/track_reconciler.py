@@ -30,7 +30,7 @@ import sqlite3
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, List, Optional, Tuple, TypedDict
+from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Tuple, TypedDict
 
 import tracks as tracks_lib  # same package; importable whenever scripts/lib/ is in sys.path
 
@@ -515,6 +515,26 @@ def _blocking_detail(
         "blocking_deps": deps["blocking"],
         "advisory_deps": deps["advisory"],
     }
+
+
+def blocking_details_for(
+    state_dir: str | Path,
+    project_id: str,
+    track_ids: Sequence[str],
+) -> Dict[str, Dict[str, Any]]:
+    """READ-ONLY: ``_blocking_detail`` for several tracks over ONE connection.
+
+    The bulk sibling of ``peek_derived_status``'s ``blocking_detail`` payload,
+    for callers that count/classify many blocked tracks at once (``objective
+    list --count-blocked``): same reason query shapes, one connection instead of
+    one per track. Writes nothing. Tracks with no row return empty reason lists
+    — the caller decides what an unexplained blocker means (fail-closed).
+    """
+    conn = _get_conn(state_dir)
+    try:
+        return {track_id: _blocking_detail(conn, track_id, project_id) for track_id in track_ids}
+    finally:
+        conn.close()
 
 
 _PLAN_OI_PREFIX = "OI-PLAN-"

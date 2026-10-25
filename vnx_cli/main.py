@@ -654,17 +654,34 @@ def _common_horizon_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--json", action="store_true", help="emit JSON instead of a table")
 
 
-def _register_objective_verbs(subs: argparse.Action) -> None:
-    """Register the objective-domain verbs shared by `vnx horizon` and the
-    `vnx objective` backward-compat alias — same flags, same handlers."""
-    _register_objective_add(subs)
+def _register_objective_list_verb(subs: argparse.Action) -> None:
+    """`list`: the horizon table, plus the repeatable blocked-track count.
 
+    A separate registrar because ``_register_objective_verbs`` is already over
+    the 70-executable-line ratchet limit: a new flag added inline would grow it.
+    Flags mirror ``planning_cli``'s ``objective list`` parser exactly (enforced
+    by tests/test_horizon_parity.py).
+    """
     p_list = subs.add_parser("list", help="list objectives grouped by horizon")
     _common_horizon_args(p_list)
     p_list.add_argument("--horizon", choices=_HORIZON_CHOICES, default=None)
     p_list.add_argument("--phase", choices=_PHASE_CHOICES, default=None)
     p_list.add_argument("--all", action="store_true",
                         help="include done tracks (hidden by default)")
+    p_list.add_argument(
+        "--count-blocked", action="store_true", dest="count_blocked",
+        help="print one repeatable count of blocked tracks: every track whose stored "
+             "derived_status is 'blocked', over ALL tracks — the same definition as "
+             "the 14-08 baseline of 76 — split plan-gate > dependency > other, each "
+             "track counted once; --json lists every reason per track",
+    )
+
+
+def _register_objective_verbs(subs: argparse.Action) -> None:
+    """Register the objective-domain verbs shared by `vnx horizon` and the
+    `vnx objective` backward-compat alias — same flags, same handlers."""
+    _register_objective_add(subs)
+    _register_objective_list_verb(subs)
 
     p_show = subs.add_parser("show", help="show one objective")
     _common_horizon_args(p_show)
