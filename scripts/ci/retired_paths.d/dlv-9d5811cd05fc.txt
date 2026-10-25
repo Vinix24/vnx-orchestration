@@ -1,0 +1,12 @@
+# Cluster A2 of track `retire-feature-plan-second-planning-layer`
+# (dispatch dlv-9d5811cd05fc): the queue reconciler and the whole-feature
+# closure no longer read FEATURE_PLAN.md or PR_QUEUE.md (ADR-047 §3 and §4).
+# PR identities come from the dispatch state; the feature is a track in the
+# tracks DB; the PR_QUEUE.md render left reconcile_queue_state.py. Source:
+# docs/governance/decisions/ADR-047-tracks-db-enige-planbron.md
+scripts/lib/queue_reconciler.py::parse_feature_plan
+scripts/lib/queue_reconciler.py::PREntry
+scripts/lib/queue_reconciler.py::_topological_sort
+scripts/reconcile_queue_state.py::_render_pr_queue_md
+scripts/closure_verifier.py::_parse_feature_plan
+scripts/closure_verifier.py::_parse_pr_queue

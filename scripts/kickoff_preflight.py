@@ -77,7 +77,6 @@ def run_preflight(
     reconciler = QueueReconciler(
         dispatch_dir=dispatch_dir,
         receipts_file=receipts_file,
-        feature_plan=feature_plan,
         projection_file=projection_file if projection_file.is_file() else None,
     )
 
@@ -122,7 +121,7 @@ def run_preflight(
 
     if repair and result.has_blocking_drift:
         from reconcile_queue_state import repair_projections
-        repair_projections(result, state_dir, project_root)
+        repair_projections(result, state_dir)
 
     # --- Routing preflight (PR-3) ---
     # Check provider/model readiness from FEATURE_PLAN requirements

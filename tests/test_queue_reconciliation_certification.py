@@ -7,8 +7,11 @@ produces auditable queue truth during real autonomous execution.
 
 Test categories:
   - Unit tests: derive PR states from dispatch directories and receipts
-  - Integration tests: reconcile fixes stale projections, PR_QUEUE.md matches,
-    kickoff/promotion refresh, per-PR closure gate evidence
+  - Integration tests: reconcile fixes stale projections, the projection cache
+    matches, kickoff/promotion refresh, per-PR closure gate evidence
+
+ADR-047 §4: the PR queue comes from the dispatch state only. The plan file
+below is kept for run_preflight, whose routing preflight still reads it.
   - Certification tests: reproduce double-feature trial drift, verify reconciled
     truth before promotion, verify Gemini/Codex evidence non-contradictory
   - Governance tests: T0 instructions mention reconciliation, kickoff preflight
@@ -34,7 +37,6 @@ sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 from queue_reconciler import (
     QueueReconciler,
     ReconcileResult,
-    parse_feature_plan,
     scan_dispatch_dirs,
     load_receipt_dispatch_ids,
 )
@@ -245,14 +247,12 @@ class TestDeriveActivePR:
     """Derive active PR from dispatch directories."""
 
     def test_single_active_dispatch(self, tmp_path):
-        fp = _make_feature_plan(tmp_path)
         dispatch_dir = tmp_path / "dispatches"
         _write_dispatch(dispatch_dir / "active" / "d0.md", "PR-0", "d0")
 
         r = QueueReconciler(
             dispatch_dir=dispatch_dir,
             receipts_file=tmp_path / "receipts.ndjson",
-            feature_plan=fp,
         )
         result = r.reconcile()
         states = {p.pr_id: p.state for p in result.prs}
@@ -261,142 +261,119 @@ class TestDeriveActivePR:
         assert pr0.provenance["source"] == "dispatch_filesystem"
         assert pr0.provenance["dir"] == "active"
 
-    def test_active_dispatch_blocks_dependents(self, tmp_path):
-        fp = _make_feature_plan(tmp_path)
+    def test_only_prs_a_dispatch_names_are_rows(self, tmp_path):
+        """A plan beside the dispatches adds no rows (ADR-047 §4)."""
+        _make_feature_plan(tmp_path)
         dispatch_dir = tmp_path / "dispatches"
         _write_dispatch(dispatch_dir / "active" / "d0.md", "PR-0", "d0")
 
         r = QueueReconciler(
             dispatch_dir=dispatch_dir,
             receipts_file=tmp_path / "receipts.ndjson",
-            feature_plan=fp,
         )
         result = r.reconcile()
-        states = {p.pr_id: p.state for p in result.prs}
-        assert states["PR-1"] == "blocked"
-        assert states["PR-2"] == "blocked"
-        assert states["PR-3"] == "blocked"
+        assert {p.pr_id: p.state for p in result.prs} == {"PR-0": "active"}
 
 
 class TestDeriveCompletedPRs:
     """Derive completed PRs from dispatch directories and receipts."""
 
     def test_completed_with_receipt(self, tmp_path):
-        fp = _make_feature_plan(tmp_path)
         dispatch_dir = tmp_path / "dispatches"
         receipts = tmp_path / "receipts.ndjson"
         _write_dispatch(dispatch_dir / "completed" / "d0.md", "PR-0", "d0")
         _write_receipt(receipts, "d0")
 
-        r = QueueReconciler(dispatch_dir=dispatch_dir, receipts_file=receipts, feature_plan=fp)
+        r = QueueReconciler(dispatch_dir=dispatch_dir, receipts_file=receipts)
         result = r.reconcile()
         pr0 = next(p for p in result.prs if p.pr_id == "PR-0")
         assert pr0.state == "completed"
         assert pr0.provenance["receipt_confirmed"] is True
 
     def test_completed_without_receipt_is_unconfirmed(self, tmp_path):
-        fp = _make_feature_plan(tmp_path)
         dispatch_dir = tmp_path / "dispatches"
         _write_dispatch(dispatch_dir / "completed" / "d0.md", "PR-0", "d0")
 
-        r = QueueReconciler(dispatch_dir=dispatch_dir, receipts_file=tmp_path / "r.ndjson", feature_plan=fp)
+        r = QueueReconciler(dispatch_dir=dispatch_dir, receipts_file=tmp_path / "r.ndjson")
         result = r.reconcile()
         pr0 = next(p for p in result.prs if p.pr_id == "PR-0")
         assert pr0.state == "completed"
         assert pr0.provenance["unconfirmed_completion"] is True
 
     def test_chain_completion_unblocks_downstream(self, tmp_path):
-        fp = _make_feature_plan(tmp_path)
         dispatch_dir = tmp_path / "dispatches"
         for pr_id, did in [("PR-0", "d0"), ("PR-1", "d1"), ("PR-2", "d2")]:
             _write_dispatch(dispatch_dir / "completed" / f"{did}.md", pr_id, did)
 
-        r = QueueReconciler(dispatch_dir=dispatch_dir, receipts_file=tmp_path / "r.ndjson", feature_plan=fp)
+        r = QueueReconciler(dispatch_dir=dispatch_dir, receipts_file=tmp_path / "r.ndjson")
         result = r.reconcile()
         states = {p.pr_id: p.state for p in result.prs}
         assert states["PR-0"] == "completed"
         assert states["PR-1"] == "completed"
         assert states["PR-2"] == "completed"
-        assert states["PR-3"] == "pending"  # deps satisfied
+        assert "PR-3" not in states  # no dispatch names it
 
 
-class TestDeriveWaitingAndBlockedPRs:
-    """Derive waiting and blocked PRs from dependency graph."""
+class TestDeriveWaitingPRs:
+    """A PR has no dependencies of its own: neither active nor completed is pending."""
 
-    def test_no_dispatches_first_pr_pending_rest_blocked(self, tmp_path):
-        fp = _make_feature_plan(tmp_path)
+    def test_no_dispatches_means_an_empty_queue(self, tmp_path):
+        _make_feature_plan(tmp_path)
         r = QueueReconciler(
             dispatch_dir=tmp_path / "dispatches",
             receipts_file=tmp_path / "r.ndjson",
-            feature_plan=fp,
         )
-        result = r.reconcile()
-        states = {p.pr_id: p.state for p in result.prs}
-        assert states["PR-0"] == "pending"
-        assert states["PR-1"] == "blocked"
-        assert states["PR-2"] == "blocked"
-        assert states["PR-3"] == "blocked"
+        assert r.reconcile().prs == []
 
-    def test_partial_completion_unblocks_next(self, tmp_path):
-        fp = _make_feature_plan(tmp_path)
+    def test_pending_dispatch_is_the_evidence(self, tmp_path):
         dispatch_dir = tmp_path / "dispatches"
-        _write_dispatch(dispatch_dir / "completed" / "d0.md", "PR-0", "d0")
+        _write_dispatch(dispatch_dir / "pending" / "d1.md", "PR-1", "d1")
 
-        r = QueueReconciler(dispatch_dir=dispatch_dir, receipts_file=tmp_path / "r.ndjson", feature_plan=fp)
-        result = r.reconcile()
-        states = {p.pr_id: p.state for p in result.prs}
-        assert states["PR-1"] == "pending"
-        assert states["PR-2"] == "blocked"
-        assert states["PR-3"] == "blocked"
+        r = QueueReconciler(dispatch_dir=dispatch_dir, receipts_file=tmp_path / "r.ndjson")
+        pr1 = next(p for p in r.reconcile().prs if p.pr_id == "PR-1")
+        assert pr1.state == "pending"
+        assert pr1.provenance["source"] == "dispatch_filesystem"
+        assert pr1.provenance["dispatch_id"] == "d1"
 
-    def test_blocked_pr_has_provenance(self, tmp_path):
-        fp = _make_feature_plan(tmp_path)
-        r = QueueReconciler(
-            dispatch_dir=tmp_path / "dispatches",
-            receipts_file=tmp_path / "r.ndjson",
-            feature_plan=fp,
-        )
+    def test_no_per_pr_dependency_is_invented(self, tmp_path):
+        """A Dependencies line in a dispatch body does not block the PR (ADR-047 §5)."""
+        dispatch_dir = tmp_path / "dispatches"
+        _write_dispatch(dispatch_dir / "pending" / "d1.md", "PR-1", "d1", extra="Dependencies: [PR-0]")
+
+        r = QueueReconciler(dispatch_dir=dispatch_dir, receipts_file=tmp_path / "r.ndjson")
         result = r.reconcile()
-        pr3 = next(p for p in result.prs if p.pr_id == "PR-3")
-        assert pr3.provenance["source"] == "feature_plan_dependency_graph"
-        assert "PR-2" in pr3.provenance["blocking_dependencies"]
+        assert {p.pr_id: p.state for p in result.prs} == {"PR-1": "pending"}
+        assert result.prs[0].metadata["dependencies"] == []
 
 
 class TestIgnoreForeignAndStaleDispatches:
     """Ignore foreign or stale staging dispatches."""
 
-    def test_foreign_pr_dispatch_does_not_affect_queue(self, tmp_path):
-        fp = _make_feature_plan(tmp_path)
+    def test_dispatch_for_an_unplanned_pr_is_a_row_not_a_warning(self, tmp_path):
+        """ADR-047 §4: a PR known nowhere else is a queue row, not a drift warning."""
+        _make_feature_plan(tmp_path)
         dispatch_dir = tmp_path / "dispatches"
         _write_dispatch(dispatch_dir / "active" / "foreign.md", "PR-99", "foreign-dispatch")
 
-        r = QueueReconciler(dispatch_dir=dispatch_dir, receipts_file=tmp_path / "r.ndjson", feature_plan=fp)
+        r = QueueReconciler(dispatch_dir=dispatch_dir, receipts_file=tmp_path / "r.ndjson")
         result = r.reconcile()
-        states = {p.pr_id: p.state for p in result.prs}
-        # PR-99 does not appear in derived states
-        assert "PR-99" not in states
-        # Valid PRs retain correct state
-        assert states["PR-0"] == "pending"
-        # A warning is raised for the foreign dispatch
-        foreign_warnings = [w for w in result.drift_warnings if "PR-99" in str(w.pr_id) or "PR-99" in w.message]
-        assert len(foreign_warnings) >= 1
+        assert {p.pr_id: p.state for p in result.prs} == {"PR-99": "active"}
+        assert result.drift_warnings == []
 
     def test_staging_dispatch_does_not_make_pr_active(self, tmp_path):
-        fp = _make_feature_plan(tmp_path)
         dispatch_dir = tmp_path / "dispatches"
         _write_dispatch(dispatch_dir / "staging" / "staged.md", "PR-0", "staged-d0")
 
-        r = QueueReconciler(dispatch_dir=dispatch_dir, receipts_file=tmp_path / "r.ndjson", feature_plan=fp)
+        r = QueueReconciler(dispatch_dir=dispatch_dir, receipts_file=tmp_path / "r.ndjson")
         result = r.reconcile()
         states = {p.pr_id: p.state for p in result.prs}
         assert states["PR-0"] == "pending"  # staging does not mean active
 
     def test_rejected_dispatch_does_not_complete(self, tmp_path):
-        fp = _make_feature_plan(tmp_path)
         dispatch_dir = tmp_path / "dispatches"
         _write_dispatch(dispatch_dir / "rejected" / "rej.md", "PR-0", "rejected-d0")
 
-        r = QueueReconciler(dispatch_dir=dispatch_dir, receipts_file=tmp_path / "r.ndjson", feature_plan=fp)
+        r = QueueReconciler(dispatch_dir=dispatch_dir, receipts_file=tmp_path / "r.ndjson")
         result = r.reconcile()
         assert next(p for p in result.prs if p.pr_id == "PR-0").state == "pending"
 
@@ -410,14 +387,13 @@ class TestReconcileFixesStaleProjection:
     """Active dispatch exists while projected state is stale → reconcile fixes visible queue status."""
 
     def test_active_dispatch_but_projection_says_pending(self, tmp_path):
-        fp = _make_feature_plan(tmp_path)
         dispatch_dir = tmp_path / "dispatches"
         _write_dispatch(dispatch_dir / "active" / "d0.md", "PR-0", "d0")
         proj = _make_projection(tmp_path, {
             "PR-0": "pending", "PR-1": "blocked", "PR-2": "blocked", "PR-3": "blocked",
         })
 
-        r = QueueReconciler(dispatch_dir=dispatch_dir, receipts_file=tmp_path / "r.ndjson", feature_plan=fp, projection_file=proj)
+        r = QueueReconciler(dispatch_dir=dispatch_dir, receipts_file=tmp_path / "r.ndjson", projection_file=proj)
         result = r.reconcile()
 
         assert result.has_blocking_drift
@@ -427,14 +403,13 @@ class TestReconcileFixesStaleProjection:
         assert any(w.pr_id == "PR-0" and w.derived_state == "active" for w in blocking)
 
     def test_completed_dispatch_but_projection_says_active(self, tmp_path):
-        fp = _make_feature_plan(tmp_path)
         dispatch_dir = tmp_path / "dispatches"
         _write_dispatch(dispatch_dir / "completed" / "d0.md", "PR-0", "d0")
         proj = _make_projection(tmp_path, {
             "PR-0": "active", "PR-1": "blocked", "PR-2": "blocked", "PR-3": "blocked",
         })
 
-        r = QueueReconciler(dispatch_dir=dispatch_dir, receipts_file=tmp_path / "r.ndjson", feature_plan=fp, projection_file=proj)
+        r = QueueReconciler(dispatch_dir=dispatch_dir, receipts_file=tmp_path / "r.ndjson", projection_file=proj)
         result = r.reconcile()
 
         assert result.has_blocking_drift
@@ -442,7 +417,6 @@ class TestReconcileFixesStaleProjection:
         assert pr0.state == "completed"
 
     def test_repair_eliminates_drift(self, tmp_path):
-        fp = _make_feature_plan(tmp_path)
         dispatch_dir = tmp_path / "dispatches"
         state_dir = tmp_path / "state"
         state_dir.mkdir(parents=True, exist_ok=True)
@@ -452,31 +426,28 @@ class TestReconcileFixesStaleProjection:
         r = QueueReconciler(
             dispatch_dir=dispatch_dir,
             receipts_file=tmp_path / "r.ndjson",
-            feature_plan=fp,
             projection_file=state_dir / "pr_queue_state.json",
         )
         result = r.reconcile()
         assert result.has_blocking_drift
 
         from reconcile_queue_state import repair_projections
-        repair_projections(result, state_dir, tmp_path)
+        repair_projections(result, state_dir)
 
         # Re-reconcile with repaired projection — no blocking drift
         r2 = QueueReconciler(
             dispatch_dir=dispatch_dir,
             receipts_file=tmp_path / "r.ndjson",
-            feature_plan=fp,
             projection_file=state_dir / "pr_queue_state.json",
         )
         result2 = r2.reconcile()
         assert not result2.has_blocking_drift
 
 
-class TestPRQueueMdMatchesReconciledState:
-    """PR_QUEUE.md projection matches reconciled status summary."""
+class TestProjectionMatchesReconciledState:
+    """The projection cache matches the reconciled state; no PR_QUEUE.md is written."""
 
-    def test_regenerated_md_reflects_derived_state(self, tmp_path):
-        fp = _make_feature_plan(tmp_path)
+    def test_repair_writes_the_derived_state_and_no_markdown(self, tmp_path):
         dispatch_dir = tmp_path / "dispatches"
         state_dir = tmp_path / "state"
         state_dir.mkdir(parents=True, exist_ok=True)
@@ -485,18 +456,17 @@ class TestPRQueueMdMatchesReconciledState:
         _write_dispatch(dispatch_dir / "completed" / "d1.md", "PR-1", "d1")
         _write_dispatch(dispatch_dir / "active" / "d2.md", "PR-2", "d2")
 
-        r = QueueReconciler(dispatch_dir=dispatch_dir, receipts_file=tmp_path / "r.ndjson", feature_plan=fp)
+        r = QueueReconciler(dispatch_dir=dispatch_dir, receipts_file=tmp_path / "r.ndjson")
         result = r.reconcile()
 
         from reconcile_queue_state import repair_projections
-        repair_projections(result, state_dir, tmp_path)
+        repair_projections(result, state_dir)
 
-        md = (tmp_path / "PR_QUEUE.md").read_text()
-        assert "Complete: 2" in md
-        assert "Active: 1" in md
-        assert "PR-0" in md and "PR-1" in md
-        assert "🔄" in md or "Currently Active" in md
-        assert "queue_reconciler" in md
+        projection = json.loads((state_dir / "pr_queue_state.json").read_text())
+        assert projection["completed"] == ["PR-0", "PR-1"]
+        assert projection["active"] == ["PR-2"]
+        assert projection["source"] == "queue_reconciler"
+        assert not list(tmp_path.rglob("PR_QUEUE.md"))
 
 
 class TestKickoffPreflightRefreshesQueueTruth:
@@ -551,7 +521,6 @@ class TestPerPRClosureWithGateEvidence:
     """Per-PR closure succeeds only when gate evidence is present and internally consistent."""
 
     def test_closure_passes_with_complete_evidence(self, env):
-        fp = _make_feature_plan(env["project_root"])
         _write_dispatch(env["dispatch_dir"] / "completed" / "d0.md", "PR-0", "d0")
         _write_receipt(env["receipts_file"], "d0")
 
@@ -562,7 +531,6 @@ class TestPerPRClosureWithGateEvidence:
         result = cv.verify_pr_closure(
             pr_id="PR-0",
             project_root=env["project_root"],
-            feature_plan=fp,
             dispatch_dir=env["dispatch_dir"],
             receipts_file=env["receipts_file"],
             state_dir=env["state_dir"],
@@ -572,7 +540,6 @@ class TestPerPRClosureWithGateEvidence:
         assert result["verdict"] == "pass"
 
     def test_closure_fails_without_gate_evidence(self, env):
-        fp = _make_feature_plan(env["project_root"])
         _write_dispatch(env["dispatch_dir"] / "completed" / "d0.md", "PR-0", "d0")
         _write_receipt(env["receipts_file"], "d0")
 
@@ -583,7 +550,6 @@ class TestPerPRClosureWithGateEvidence:
         result = cv.verify_pr_closure(
             pr_id="PR-0",
             project_root=env["project_root"],
-            feature_plan=fp,
             dispatch_dir=env["dispatch_dir"],
             receipts_file=env["receipts_file"],
             state_dir=env["state_dir"],
@@ -595,13 +561,11 @@ class TestPerPRClosureWithGateEvidence:
         assert "gate_gemini_review" in failed or "gate_codex_gate" in failed
 
     def test_closure_fails_on_incomplete_pr(self, env):
-        fp = _make_feature_plan(env["project_root"])
         _write_dispatch(env["dispatch_dir"] / "active" / "d0.md", "PR-0", "d0")
 
         result = cv.verify_pr_closure(
             pr_id="PR-0",
             project_root=env["project_root"],
-            feature_plan=fp,
             dispatch_dir=env["dispatch_dir"],
             receipts_file=env["receipts_file"],
             state_dir=env["state_dir"],
@@ -624,7 +588,6 @@ class TestDoubleFeatureTrialDriftReproduction:
         This is the exact condition observed during the double-feature trial.
         The reconciler must detect this as blocking drift and correct it.
         """
-        fp = _make_feature_plan(tmp_path)
         dispatch_dir = tmp_path / "dispatches"
         state_dir = tmp_path / "state"
         state_dir.mkdir(parents=True, exist_ok=True)
@@ -641,7 +604,6 @@ class TestDoubleFeatureTrialDriftReproduction:
         r = QueueReconciler(
             dispatch_dir=dispatch_dir,
             receipts_file=tmp_path / "r.ndjson",
-            feature_plan=fp,
             projection_file=stale_proj,
         )
         result = r.reconcile()
@@ -661,7 +623,6 @@ class TestDoubleFeatureTrialDriftReproduction:
 
         T0 would unnecessarily block downstream PRs.
         """
-        fp = _make_feature_plan(tmp_path)
         dispatch_dir = tmp_path / "dispatches"
 
         _write_dispatch(dispatch_dir / "completed" / "d0.md", "PR-0", "d0")
@@ -674,7 +635,6 @@ class TestDoubleFeatureTrialDriftReproduction:
         r = QueueReconciler(
             dispatch_dir=dispatch_dir,
             receipts_file=tmp_path / "r.ndjson",
-            feature_plan=fp,
             projection_file=stale_proj,
         )
         result = r.reconcile()
@@ -682,9 +642,8 @@ class TestDoubleFeatureTrialDriftReproduction:
         assert result.has_blocking_drift
         pr1 = next(p for p in result.prs if p.pr_id == "PR-1")
         assert pr1.state == "completed"
-        # PR-2 should be pending now, not blocked
-        pr2 = next(p for p in result.prs if p.pr_id == "PR-2")
-        assert pr2.state == "pending"
+        # PR-2 has no dispatch, so the stale "blocked" projection row is no queue row
+        assert "PR-2" not in {p.pr_id for p in result.prs}
 
     def test_trial_drift_multi_pr_cascade(self, tmp_path):
         """Trial scenario: multiple PRs have drifted simultaneously.
@@ -692,7 +651,6 @@ class TestDoubleFeatureTrialDriftReproduction:
         Simulates the state after multiple rapid completions where projection
         was not refreshed between them.
         """
-        fp = _make_feature_plan(tmp_path)
         dispatch_dir = tmp_path / "dispatches"
 
         # All of PR-0 through PR-2 completed, PR-3 active
@@ -708,7 +666,6 @@ class TestDoubleFeatureTrialDriftReproduction:
         r = QueueReconciler(
             dispatch_dir=dispatch_dir,
             receipts_file=tmp_path / "r.ndjson",
-            feature_plan=fp,
             projection_file=stale_proj,
         )
         result = r.reconcile()
@@ -768,7 +725,6 @@ class TestReconciledTruthBeforePromotion:
 
     def test_source_of_truth_vs_projection_side_by_side(self, tmp_path):
         """Certification evidence: reconciled result shows both derived and projected state."""
-        fp = _make_feature_plan(tmp_path)
         dispatch_dir = tmp_path / "dispatches"
         _write_dispatch(dispatch_dir / "completed" / "d0.md", "PR-0", "d0")
         stale_proj = _make_projection(tmp_path, {
@@ -778,7 +734,6 @@ class TestReconciledTruthBeforePromotion:
         r = QueueReconciler(
             dispatch_dir=dispatch_dir,
             receipts_file=tmp_path / "r.ndjson",
-            feature_plan=fp,
             projection_file=stale_proj,
         )
         result = r.reconcile()
@@ -799,7 +754,6 @@ class TestGeminiCodexEvidenceNonContradictory:
     """Verify Gemini and Codex evidence surfaces are branch-local and non-contradictory."""
 
     def test_consistent_evidence_passes_closure(self, env):
-        fp = _make_feature_plan(env["project_root"])
         _write_dispatch(env["dispatch_dir"] / "completed" / "d0.md", "PR-0", "d0")
         _write_receipt(env["receipts_file"], "d0")
 
@@ -810,7 +764,6 @@ class TestGeminiCodexEvidenceNonContradictory:
         result = cv.verify_pr_closure(
             pr_id="PR-0",
             project_root=env["project_root"],
-            feature_plan=fp,
             dispatch_dir=env["dispatch_dir"],
             receipts_file=env["receipts_file"],
             state_dir=env["state_dir"],
@@ -822,7 +775,6 @@ class TestGeminiCodexEvidenceNonContradictory:
         assert all(c["status"] == "PASS" for c in contradiction_checks)
 
     def test_contradictory_gemini_pass_with_blocking_report_fails(self, env):
-        fp = _make_feature_plan(env["project_root"])
         _write_dispatch(env["dispatch_dir"] / "completed" / "d0.md", "PR-0", "d0")
         _write_receipt(env["receipts_file"], "d0")
 
@@ -857,7 +809,6 @@ class TestGeminiCodexEvidenceNonContradictory:
         result = cv.verify_pr_closure(
             pr_id="PR-0",
             project_root=env["project_root"],
-            feature_plan=fp,
             dispatch_dir=env["dispatch_dir"],
             receipts_file=env["receipts_file"],
             state_dir=env["state_dir"],
@@ -869,7 +820,6 @@ class TestGeminiCodexEvidenceNonContradictory:
         assert "contradiction_gemini_review" in failed
 
     def test_contradictory_codex_fail_with_clean_report_fails(self, env):
-        fp = _make_feature_plan(env["project_root"])
         _write_dispatch(env["dispatch_dir"] / "completed" / "d0.md", "PR-0", "d0")
         _write_receipt(env["receipts_file"], "d0")
 
@@ -901,7 +851,6 @@ class TestGeminiCodexEvidenceNonContradictory:
         result = cv.verify_pr_closure(
             pr_id="PR-0",
             project_root=env["project_root"],
-            feature_plan=fp,
             dispatch_dir=env["dispatch_dir"],
             receipts_file=env["receipts_file"],
             state_dir=env["state_dir"],
@@ -912,7 +861,6 @@ class TestGeminiCodexEvidenceNonContradictory:
 
     def test_hash_mismatch_detected(self, env):
         """Gate evidence with stale content hash is caught."""
-        fp = _make_feature_plan(env["project_root"])
         _write_dispatch(env["dispatch_dir"] / "completed" / "d0.md", "PR-0", "d0")
         _write_receipt(env["receipts_file"], "d0")
 
@@ -942,7 +890,6 @@ class TestGeminiCodexEvidenceNonContradictory:
         result = cv.verify_pr_closure(
             pr_id="PR-0",
             project_root=env["project_root"],
-            feature_plan=fp,
             dispatch_dir=env["dispatch_dir"],
             receipts_file=env["receipts_file"],
             state_dir=env["state_dir"],
