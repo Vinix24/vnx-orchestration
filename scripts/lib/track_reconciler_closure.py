@@ -35,9 +35,8 @@ imported — same pattern as track_reconciler_status.py.
 
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, List, Optional
+from typing import Any, Dict, FrozenSet, Optional
 
 import tracks as tracks_lib  # same package; importable whenever scripts/lib/ is in sys.path
 
@@ -132,195 +131,11 @@ def close_track_if_done(
     if evidence is not None:
         conn = _get_conn(state_dir)
         try:
-            track_row = conn.execute(
-                "SELECT pr_ref, phase FROM tracks WHERE track_id = ? AND project_id = ?",
-                (track_id, project_id),
-            ).fetchone()
-
-            # (a) pr_ref must match the nomination snapshot.
-            current_pr_ref = track_row["pr_ref"] if track_row else None
-            if current_pr_ref != evidence.get("pr_ref"):
-                return {
-                    "track_id": track_id,
-                    "project_id": project_id,
-                    "declared_phase": track_row["phase"] if track_row else None,
-                    "derived_status": None,
-                    "action": "stale_candidate",
-                    "applied": False,
-                }
-
-            # (b) no unresolved blocker OI.
-            has_resolved = _has_col(conn, "track_open_items", "resolved_at")
-            has_pid = _has_col(conn, "track_open_items", "project_id")
-            if has_pid and has_resolved:
-                blocker = conn.execute(
-                    "SELECT 1 FROM track_open_items WHERE track_id=? AND project_id=? "
-                    "AND link_type='blocks' AND resolved_at IS NULL LIMIT 1",
-                    (track_id, project_id),
-                ).fetchone()
-            elif has_pid:
-                blocker = conn.execute(
-                    "SELECT 1 FROM track_open_items WHERE track_id=? AND project_id=? "
-                    "AND link_type='blocks' LIMIT 1",
-                    (track_id, project_id),
-                ).fetchone()
-            else:
-                blocker = conn.execute(
-                    "SELECT 1 FROM track_open_items WHERE track_id=? "
-                    "AND link_type='blocks' LIMIT 1",
-                    (track_id,),
-                ).fetchone()
-            if blocker:
-                return {
-                    "track_id": track_id,
-                    "project_id": project_id,
-                    "declared_phase": track_row["phase"] if track_row else None,
-                    "derived_status": None,
-                    "action": "stale_candidate",
-                    "applied": False,
-                }
-
-            # (c) declared phase still eligible after fresh read.
-            fresh_phase = track_row["phase"] if track_row else None
-            eligible = fresh_phase in ("queued", "active") or (
-                fresh_phase == "parked" and include_parked
+            rejection, _skip_derived_gate = revalidate_close_evidence(
+                conn, track_id, project_id, evidence, include_parked
             )
-            if not eligible:
-                return {
-                    "track_id": track_id,
-                    "project_id": project_id,
-                    "declared_phase": fresh_phase,
-                    "derived_status": None,
-                    "action": "stale_candidate",
-                    "applied": False,
-                }
-
-            # (d) gh evidence authority — only when pr_results is non-empty.
-            # gh pr view is the SOLE merge authority on this path; derived_status
-            # becomes advisory (reconcile_track still runs for the derived refresh).
-            pr_results_list = evidence.get("pr_results") or []
-            if pr_results_list:
-                # Dependency check: every blocking dep ('hard', or an unknown
-                # kind fail-closed) must have declared phase 'done'. 'soft' and
-                # 'overlap' edges are advice and never hold a close (D9).
-                if _unfinished_dependencies(conn, track_id, project_id)["blocking"]:
-                    return {
-                        "track_id": track_id,
-                        "project_id": project_id,
-                        "declared_phase": track_row["phase"] if track_row else None,
-                        "derived_status": None,
-                        "action": "stale_candidate",
-                        "applied": False,
-                    }
-
-                # gh evidence check: every parsed PR from pr_ref must appear in
-                # pr_results as MERGED (with mergedAt) or CLOSED (closed sibling).
-                # At least one must be MERGED. OPEN or unknown → stale.
-                pr_ref_snap = evidence.get("pr_ref") or ""
-                parsed_pns = _parse_pr_numbers(pr_ref_snap)
-                pr_results_by_num = {
-                    int(r["number"]): r for r in pr_results_list
-                    if isinstance(r, dict) and r.get("number") is not None
-                }
-                has_merged_pr = False
-                for pn in parsed_pns:
-                    entry = pr_results_by_num.get(pn)
-                    if entry is None:
-                        return {
-                            "track_id": track_id,
-                            "project_id": project_id,
-                            "declared_phase": track_row["phase"] if track_row else None,
-                            "derived_status": None,
-                            "action": "stale_candidate",
-                            "applied": False,
-                        }
-                    state = (entry.get("state") or "")
-                    if state == "MERGED" and entry.get("mergedAt"):
-                        has_merged_pr = True
-                    elif state == "CLOSED" and evidence.get("allow_closed_siblings") is True:
-                        pass  # closed sibling — allowed only when caller opted in
-                    else:
-                        return {
-                            "track_id": track_id,
-                            "project_id": project_id,
-                            "declared_phase": track_row["phase"] if track_row else None,
-                            "derived_status": None,
-                            "action": "stale_candidate",
-                            "applied": False,
-                        }
-                if parsed_pns and not has_merged_pr:
-                    return {
-                        "track_id": track_id,
-                        "project_id": project_id,
-                        "declared_phase": track_row["phase"] if track_row else None,
-                        "derived_status": None,
-                        "action": "stale_candidate",
-                        "applied": False,
-                    }
-
-                _skip_derived_gate = True
-
-            # (e) delivery completeness — OI-829 fail-closed auto-close gate.
-            # A merged PR is not evidence the track's whole plan shipped
-            # (worker-provider-free-choice closed after PR-1 of 5 merged). When
-            # the fresh pr_ref parses to >=1 PR number, at least one of them
-            # must be marked delivery_kind='complete' in track_pr_delivery.
-            # Absence of any 'complete' marking — including no rows at all, or
-            # the table not yet migrated — fails closed with its own action
-            # value (not 'stale_candidate': this is an incomplete delivery, not
-            # staleness). A track with no pr_ref at all (closing on dispatch-
-            # completion evidence, not PR evidence) has nothing to gate on and
-            # is unaffected. An unrecognized delivery_kind on an existing row
-            # must never read as "not complete" silently — it is logged at
-            # ERROR and fails closed (noop_incomplete_delivery), but must not
-            # raise: this function is called per-candidate from a sweep loop
-            # with no per-track try/except, so an escaping exception would
-            # abort every remaining candidate behind the corrupt row.
-            parsed_pns_for_delivery = _parse_pr_numbers(current_pr_ref)
-            if parsed_pns_for_delivery:
-                try:
-                    delivery_rows = conn.execute(
-                        "SELECT pr_number, delivery_kind FROM track_pr_delivery "
-                        "WHERE track_id=? AND project_id=?",
-                        (track_id, project_id),
-                    ).fetchall()
-                except sqlite3.OperationalError:
-                    delivery_rows = []  # migration 0032 not yet applied to this DB
-
-                delivery_by_pr: Dict[int, str] = {}
-                for row in delivery_rows:
-                    kind = row["delivery_kind"]
-                    if kind not in ("partial", "complete"):
-                        log.error(
-                            "track_pr_delivery: unrecognized delivery_kind %r for "
-                            "project_id=%r track_id=%r pr_number=%r — failing closed "
-                            "(noop_incomplete_delivery), not raising: this runs inside a "
-                            "sweep loop with no per-track try/except",
-                            kind, project_id, track_id, row["pr_number"],
-                        )
-                        return {
-                            "track_id": track_id,
-                            "project_id": project_id,
-                            "declared_phase": track_row["phase"] if track_row else None,
-                            "derived_status": None,
-                            "action": "noop_incomplete_delivery",
-                            "applied": False,
-                        }
-                    delivery_by_pr[int(row["pr_number"])] = kind
-
-                has_complete_delivery = any(
-                    delivery_by_pr.get(pn) == "complete"
-                    for pn in parsed_pns_for_delivery
-                )
-                if not has_complete_delivery:
-                    return {
-                        "track_id": track_id,
-                        "project_id": project_id,
-                        "declared_phase": track_row["phase"] if track_row else None,
-                        "derived_status": None,
-                        "action": "noop_incomplete_delivery",
-                        "applied": False,
-                    }
+            if rejection is not None:
+                return rejection
         finally:
             conn.close()
 
@@ -395,16 +210,17 @@ def close_track_if_done(
 # Late binding of the helpers this function uses from its old home module.
 # Deliberately after the function definition (see module docstring): importing
 # them at the top would deadlock the re-export cycle with track_reconciler.py.
-# `log` binds the same logger object, so emitted records keep the
-# 'track_reconciler' logger name they had before the move.
 from track_reconciler import (  # noqa: E402
     EvidenceSnapshot,
     _close_evidence,
     _get_conn,
-    _has_col,
-    _parse_pr_numbers,
     _phase_path_to,
-    log,
     reconcile_track,
-    _unfinished_dependencies,
 )
+
+# The close-time revalidation block moved to track_reconciler_revalidation.py
+# (fase 1, track slop-refactor-panel-review). Imported after the helpers above
+# for the same cycle-breaking reason: the revalidation module imports _has_col,
+# _parse_pr_numbers, _unfinished_dependencies and log from track_reconciler.
+from track_reconciler_revalidation import revalidate_close_evidence  # noqa: E402
+
