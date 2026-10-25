@@ -19,8 +19,9 @@ a binary blob, which cannot construct a path in source) is a violation, not a
 skip — the guard cannot prove it clean. An empty file list is also a failure:
 a guard that scans nothing passes everything.
 
-They allowlist below is deliberately EMPTY. PR-2 adds the detection module
-that must read XDG by design; it gets an entry here, with its reason.
+The allowlist below holds exactly one entry: the detector module that must read
+XDG by design. Anything else is a violation — and the meta-test keeps every
+entry tracked, inside the scanned roots and explained.
 """
 
 from __future__ import annotations
@@ -36,8 +37,15 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SCAN_ROOTS = ("bin", "scripts", "vnx_cli", "hooks")
 
 #: Repo-relative path -> why that file may still mention an XDG store default.
-#: Empty on purpose; see the module docstring.
-XDG_STORE_ALLOWLIST: dict = {}
+#: The single entry is the read-only legacy detector; see the module docstring.
+XDG_STORE_ALLOWLIST: dict = {
+    "scripts/lib/legacy_store_path.py": (
+        "read-only detector of the pre-#1437 XDG store: no resolver imports "
+        "it, it opens and resolves no store — it stats one directory "
+        "(state/runtime_coordination.db under the legacy data home) so that "
+        "`vnx doctor` can report an abandoned copy left by an upgrade"
+    ),
+}
 
 #: ``${XDG_DATA_HOME...}`` or ``$XDG_DATA_HOME`` used on a line that also holds
 #: a path separator — i.e. the variable feeds a path, not an ``env -u`` list.
