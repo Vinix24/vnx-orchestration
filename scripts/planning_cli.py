@@ -3776,15 +3776,73 @@ def cmd_deliverable_set(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 RETARGETED_EVENT = "deliverable_retargeted"
+RETARGET_TRIGGER = "deliverable_retarget"
+RETARGET_ABORTED_TRIGGER = "deliverable_retarget_aborted"
+RETARGET_RECEIPTS_NAME = "t0_receipts.ndjson"
 
 
 class _RetargetRefused(Exception):
     """A retarget precondition that does not hold: exit 2, nothing written."""
 
 
+class _RetargetLedgerFailed(Exception):
+    """A retarget receipt did not land in the canonical ledger."""
+
+
 def _retarget_refused(message: object, rc: int = 2) -> int:
     print(f"deliverable retarget: {message}. No change made.", file=sys.stderr)
     return rc
+
+
+def _retarget_receipt(state_dir: Path, trigger: str, decision: dict[str, Any], **observed: Any) -> None:
+    """Append one ``state_mutation`` receipt for a retarget decision to the store's ledger (ADR-005).
+
+    Raises ``_RetargetLedgerFailed`` unless ``append_receipt_payload`` reports ``appended``: a
+    ``duplicate``, no result or any other status means this line is not in the ledger.
+    ``status`` carries the decision's ``retarget_id``. The ledger dedups a receipt with a
+    ``dispatch_id`` on its outcome identity (ADR-038: dispatch_id, event_type, status, commit_sha,
+    gate, pr_number) across the whole ledger, so without it a second move of the same deliverable,
+    and the aborted line after its intent line, would come back ``duplicate`` and never be written.
+    """
+    receipt = {
+        "timestamp": _now_utc(), "event_type": "state_mutation", "receipt_kind": "state_mutation",
+        "terminal": "T0", "source": "vnx_planning", "trigger": trigger,
+        "status": f"{trigger}:{decision['retarget_id']}", **decision, **observed,
+    }
+    try:
+        from append_receipt import append_receipt_payload
+        result = append_receipt_payload(
+            receipt, receipts_file=str(state_dir / RETARGET_RECEIPTS_NAME), skip_enrichment=True,
+        )
+    except (Exception, SystemExit) as exc:  # SystemExit: append_receipt's import bootstrap failing
+        raise _RetargetLedgerFailed(f"the {trigger} receipt was not written to the ledger ({exc})") from exc
+    status = getattr(result, "status", None)
+    if status != "appended":
+        raise _RetargetLedgerFailed(f"the {trigger} receipt was not written to the ledger (append result {status!r})")
+
+
+def _retarget_aborted(
+    conn: sqlite3.Connection, state_dir: Path, project_id: str, decision: dict[str, Any], cause: str,
+) -> str:
+    """Record that the intent line did not become a move; best-effort, a failure goes to stderr.
+
+    The receipt carries the re-read ``state`` and ``track`` (both None when the row is gone, plus
+    ``reread_error`` when the read itself failed). Returns that row as text for the refusal message.
+    """
+    try:
+        now = conn.execute("SELECT state, track FROM dispatches WHERE dispatch_id = ? AND project_id = ?",
+                           (decision["dispatch_id"], project_id)).fetchone()
+        observed: dict[str, Any] = {"state": now["state"], "track": now["track"]} if now else \
+            {"state": None, "track": None}
+        shown = str(dict(now)) if now else "gone"
+    except sqlite3.Error as exc:
+        observed, shown = {"state": None, "track": None, "reread_error": str(exc)}, f"unreadable ({exc})"
+    try:
+        _retarget_receipt(state_dir, RETARGET_ABORTED_TRIGGER, decision, abort_cause=cause, **observed)
+    except _RetargetLedgerFailed as exc:
+        print(f"deliverable retarget: {exc}; the ledger holds the intent line of "
+              f"{decision['retarget_id']} without its abort.", file=sys.stderr)
+    return shown
 
 
 def _retarget_check(
@@ -3811,6 +3869,8 @@ def _retarget_check(
     if phase not in (("queued", "active", "parked") if args.include_parked else ("queued", "active")):
         hint = "; pass --include-parked to move onto it" if phase == "parked" else ""
         raise _RetargetRefused(f"target track {target!r} is in phase {phase!r}{hint}")
+    if not _has_table(conn, "coordination_events"):
+        raise _RetargetRefused("the store has no coordination_events table, so the move cannot be recorded")
     return row
 
 
@@ -3821,13 +3881,12 @@ def _retarget_write(
     """Swap the row on its read track+state and write the event in one transaction; False if it moved.
 
     A ready row's approval was for the old track, so it is cleared (as ``_return_to_plan`` does).
+    Any error, a failed commit included, rolls the transaction back before it propagates.
     """
     from_track, prior = row["track"], row["state"]
     approval = ", operator_approved_at = NULL" if "operator_approved_at" in row.keys() else ""
     conn.execute("BEGIN IMMEDIATE")
     try:
-        if not _has_table(conn, "coordination_events"):
-            raise _RetargetRefused("the store has no coordination_events table, so the move cannot be recorded")
         changed = conn.execute(
             f"UPDATE dispatches SET track = ?, state = 'proposed', updated_at = ?{approval} "
             "WHERE dispatch_id = ? AND project_id = ? AND track IS ? AND state = ?",
@@ -3839,20 +3898,23 @@ def _retarget_write(
                 to_state="proposed", actor="operator", reason=reason, project_id=project_id,
                 metadata={"from_track": from_track, "to_track": to_track, "prior_state": prior},
             )
+            conn.commit()
+            return True
     except BaseException:
         conn.rollback()
         raise
-    if changed != 1:
-        conn.rollback()
-        return False
-    conn.commit()
-    return True
+    conn.rollback()
+    return False
 
 
 def cmd_deliverable_retarget(args: argparse.Namespace) -> int:
     """Move a proposed/ready deliverable to another track with one event (``close`` would attest a PR).
 
-    A refusal is exit 2, a row that changed in between exit 1; no project_id is refused (ADR-007).
+    Ledger first (ADR-005): once every check holds, the decision is a ``state_mutation`` receipt in
+    the store's ``t0_receipts.ndjson``, and only then does the row move. A refusal is exit 2 with
+    nothing written. A ledger that does not take the receipt is exit 1 with the row untouched; a row
+    that changed in between or a store error after the receipt is exit 1 plus an aborted receipt.
+    No project_id is refused (ADR-007).
     """
     project_id, reason = (args.project_id or "").strip(), (args.reason or "").strip()
     if not project_id:
@@ -3863,14 +3925,26 @@ def cmd_deliverable_retarget(args: argparse.Namespace) -> int:
     conn = _db_conn(state_dir)
     try:
         row = _retarget_check(conn, state_dir, project_id, args)
-        if not _retarget_write(conn, project_id, args.dispatch_id, row, args.objective, reason):
-            now = conn.execute("SELECT state, track FROM dispatches WHERE dispatch_id = ? AND project_id = ?",
-                               (args.dispatch_id, project_id)).fetchone()
+        decision = {
+            "retarget_id": uuid.uuid4().hex, "dispatch_id": args.dispatch_id, "project_id": project_id,
+            "from_track": row["track"], "to_track": args.objective, "prior_state": row["state"],
+            "to_state": "proposed", "actor": "operator", "reason": reason,
+        }
+        _retarget_receipt(state_dir, RETARGET_TRIGGER, decision)
+        try:
+            moved = _retarget_write(conn, project_id, args.dispatch_id, row, args.objective, reason)
+        except sqlite3.Error as exc:  # _retarget_write rolled the move back
+            _retarget_aborted(conn, state_dir, project_id, decision, f"store_error: {exc}")
+            return _retarget_refused(f"the store refused the move ({exc})", rc=1)
+        if not moved:
+            now = _retarget_aborted(conn, state_dir, project_id, decision, "row_changed")
             return _retarget_refused(f"{args.dispatch_id!r} changed while this command ran: read {row['state']!r} "
-                                     f"on {row['track']!r}, now {dict(now) if now else 'gone'}", rc=1)
+                                     f"on {row['track']!r}, now {now}", rc=1)
     except _RetargetRefused as exc:
         return _retarget_refused(exc)
-    except sqlite3.Error as exc:  # _retarget_write rolled the move back
+    except _RetargetLedgerFailed as exc:
+        return _retarget_refused(exc, rc=1)
+    except sqlite3.Error as exc:  # a read in the checks failed: no receipt, no move
         return _retarget_refused(f"the store refused the move ({exc})", rc=1)
     finally:
         conn.close()
