@@ -22,19 +22,29 @@ later turn. The file is written by the gate and never taken from the tree under
 review: a PR that changes AGENTS.md would otherwise write its reviewer's
 instructions. For git the worktree stays the PR's tree (see
 ``_install_review_instructions``).
+
+PR-4 round 2: every gate checkout also gets a lifetime lock — a sidecar
+``<checkout>.live`` next to it in ``.vnx-data/worktrees/`` (outside the tree,
+so the checkout's own ``git status`` never sees it), held with
+``fcntl.flock(LOCK_EX)`` from before ``git worktree add`` until
+``remove_gate_worktree``. A running reviewer therefore signals "this checkout
+is in use" for its whole lifetime, and a process that dies drops the lock by
+itself. ``gate_checkout_liveness`` is the read-only probe the worktree sweep
+uses before it may release a gate tree.
 """
 
 from __future__ import annotations
 
 import fcntl
 import logging
+import os
 import re
 import secrets
 import shutil
 import subprocess
 from contextlib import contextmanager
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import IO, List, Optional, Sequence
 
 from atomic_io import atomic_write_text
 
@@ -108,6 +118,132 @@ def _worktree_dir(project_root: Path, gate: str, identifier: str) -> Path:
         project_root / ".vnx-data" / "worktrees"
         / f"{_MANAGED_WORKTREE_PREFIX}{_sanitize(gate)}-{_sanitize(identifier)}-{token}"
     )
+
+
+# Sidecar suffix for the gate lifetime lock. The file lives NEXT TO the
+# checkout in ``.vnx-data/worktrees/``, never inside it, so the checkout's own
+# ``git status`` stays clean and the ``.gitignore`` of the PR under review is
+# irrelevant. Readers that list that directory as a directory must not treat
+# the sidecar as a worktree (``worktree_inventory`` reads git's porcelain and
+# is safe by construction; ``orphan_sweep`` skips it explicitly).
+LIFETIME_LOCK_SUFFIX = ".live"
+
+# Open sidecar handles of THIS process, keyed by the resolved checkout path.
+# Holding the open file object is what keeps the flock; a process that dies
+# drops it without any cleanup code running.
+_lifetime_locks: dict[str, IO[str]] = {}
+
+
+def gate_lifetime_lock_path(wt_path: Path) -> Path:
+    """The sidecar that carries the lifetime lock of gate checkout *wt_path*."""
+    wt_path = Path(wt_path)
+    return wt_path.parent / (wt_path.name + LIFETIME_LOCK_SUFFIX)
+
+
+def _acquire_lifetime_lock(wt_path: Path) -> None:
+    """Take the exclusive lifetime lock of *wt_path* and keep its handle open.
+
+    MUST run before ``git worktree add``: no gate checkout may ever exist
+    without a held lock. Raises :class:`GateWorktreeError` when the sidecar
+    cannot be created or locked (and removes it again in that case).
+    """
+    key = str(Path(wt_path).resolve())
+    if key in _lifetime_locks:
+        return
+    sidecar = gate_lifetime_lock_path(wt_path)
+    try:
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(sidecar, "a+")
+    except OSError as exc:
+        raise GateWorktreeError(
+            f"create_gate_worktree: cannot open lifetime lock {sidecar}: {exc}"
+        ) from exc
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+    except OSError as exc:
+        handle.close()
+        try:
+            sidecar.unlink()
+        except OSError:
+            log.warning("could not remove lifetime lock %s after a failed lock", sidecar)
+        raise GateWorktreeError(
+            f"create_gate_worktree: cannot take lifetime lock {sidecar}: {exc}"
+        ) from exc
+    _lifetime_locks[key] = handle
+
+
+def _release_lifetime_lock(wt_path: Path) -> None:
+    """Release this process's lifetime lock on *wt_path*. Idempotent, never raises."""
+    key = str(Path(wt_path).resolve())
+    handle = _lifetime_locks.pop(key, None)
+    if handle is None:
+        return
+    try:
+        fcntl.flock(handle, fcntl.LOCK_UN)
+    except OSError as exc:  # pragma: no cover - closing releases the lock anyway
+        log.warning("could not unlock lifetime lock for %s: %s", wt_path, exc)
+    finally:
+        try:
+            handle.close()
+        except OSError as exc:  # pragma: no cover - a close failure is not actionable
+            log.warning("could not close lifetime lock for %s: %s", wt_path, exc)
+
+
+def _unlink_lifetime_sidecar(wt_path: Path) -> None:
+    """Remove the sidecar of *wt_path*. Idempotent, never raises."""
+    sidecar = gate_lifetime_lock_path(wt_path)
+    try:
+        sidecar.unlink()
+    except FileNotFoundError:
+        return
+    except OSError as exc:  # pragma: no cover - best-effort cleanup
+        log.warning("could not remove lifetime lock %s: %s", sidecar, exc)
+
+
+def gate_checkout_liveness(wt_path: Path, *, detail: Optional[List[str]] = None) -> str:
+    """Probe whether gate checkout *wt_path* is in use, without disturbing it.
+
+    Returns exactly one of:
+
+    * ``"live"`` — the sidecar exists and ``LOCK_EX|LOCK_NB`` raises
+      ``BlockingIOError``: a gate seat holds the lifetime lock right now.
+    * ``"released"`` — the sidecar exists and the non-blocking lock succeeds;
+      it is released again at once (no stale lock is left behind).
+    * ``"no_lock"`` — there is no sidecar (checkout predates the lifetime
+      lock, or was not created by ``create_gate_worktree``).
+    * ``"unmeasured"`` — any other ``OSError``. *detail*, when given, receives
+      the error text so a caller can name it in its keep reason.
+
+    Only a positive measurement may ever clear a caller to act; the sweep
+    keeps the tree on ``unmeasured`` and everything it does not recognise.
+    """
+    sidecar = gate_lifetime_lock_path(wt_path)
+    try:
+        fd = os.open(sidecar, os.O_RDWR)
+    except FileNotFoundError:
+        return "no_lock"
+    except OSError as exc:
+        if detail is not None:
+            detail.append(f"{sidecar}: {exc}")
+        return "unmeasured"
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return "live"
+        except OSError as exc:
+            if detail is not None:
+                detail.append(f"{sidecar}: {exc}")
+            return "unmeasured"
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError as exc:
+            if detail is not None:
+                detail.append(f"{sidecar}: {exc}")
+            return "unmeasured"
+        return "released"
+    finally:
+        os.close(fd)
 
 
 def _validate_branch(branch: str, *, gate: str, identifier: str) -> None:
@@ -326,31 +462,42 @@ def create_gate_worktree(
 
     Steps:
       1. git fetch origin <branch>  (via fetch_branch — validates + fetches)
-      2. git worktree add --detach <path> origin/<branch>
-      3. write the gate-authored AGENTS.md at the worktree root (R9), for
+      2. take the lifetime lock on the sidecar ``<path>.live``
+      3. git worktree add --detach <path> origin/<branch>
+      4. write the gate-authored AGENTS.md at the worktree root (R9), for
          every gate alike: a reviewer that does not load it pays nothing
 
     Raises GateWorktreeError when branch is empty or any step fails —
     callers must fail the gate rather than silently falling back to the
     orchestrator's (possibly stale) checkout, or reviewing without the file.
-    A worktree whose step 3 failed is removed before the error is raised.
+    A worktree whose step 4 failed is removed (with its lock and sidecar)
+    before the error is raised.
     """
     root = fetch_branch(branch, gate=gate, identifier=identifier, project_root=project_root)
     wt_path = _worktree_dir(root, gate, identifier)
     wt_path.parent.mkdir(parents=True, exist_ok=True)
+    # The lifetime lock is taken BEFORE the checkout exists, so the sweep can
+    # never observe a gate tree without a lock held by its creating process.
+    _acquire_lifetime_lock(wt_path)
 
+    created = False
     try:
         with _worktree_lock(root):
             subprocess.run(
                 ["git", "worktree", "add", "--detach", str(wt_path), f"origin/{branch}"],
                 cwd=str(root), check=True, capture_output=True, text=True, timeout=30,
             )
+        created = True
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         detail = getattr(exc, "stderr", "") or str(exc)
         raise GateWorktreeError(
             f"create_gate_worktree: git worktree add failed for gate={gate!r} "
             f"branch={branch!r}: {detail}"
         ) from exc
+    finally:
+        if not created:
+            _release_lifetime_lock(wt_path)
+            _unlink_lifetime_sidecar(wt_path)
 
     try:
         _install_review_instructions(wt_path)
@@ -376,6 +523,10 @@ def remove_gate_worktree(wt_path: Optional[Path], *, project_root: Optional[Path
         return
     wt_path = Path(wt_path)
     if not wt_path.exists():
+        # The checkout is already gone; release its lifetime lock and drop the
+        # sidecar so no stale "released" marker is left for the sweep.
+        _release_lifetime_lock(wt_path)
+        _unlink_lifetime_sidecar(wt_path)
         return
 
     root = _resolve_project_root(project_root)
@@ -428,3 +579,11 @@ def remove_gate_worktree(wt_path: Optional[Path], *, project_root: Optional[Path
                 log.warning("git worktree prune failed: %s", detail)
     except Exception as exc:  # pragma: no cover - cleanup must never raise
         log.warning("remove_gate_worktree: unexpected error removing %s: %s", wt_path, exc)
+    finally:
+        # The seat is over on every path, so its lifetime lock must be gone
+        # from this process either way. The sidecar is removed only once the
+        # checkout itself is gone; a tree the cleanup refused to remove keeps
+        # its (now unheld) sidecar for a later sweep/age rule.
+        _release_lifetime_lock(wt_path)
+        if not wt_path.exists():
+            _unlink_lifetime_sidecar(wt_path)

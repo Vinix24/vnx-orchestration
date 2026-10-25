@@ -905,6 +905,12 @@ def sweep(
         from tmux_worktree import WorktreeHandle, classify_path, reap
 
         for entry in sorted(worktrees_dir.iterdir()):
+            # `gate_worktree` keeps a lifetime-lock sidecar
+            # (`<checkout>.live`) next to each gate checkout. It is a file,
+            # never a worktree; skipping it by name keeps that true even if a
+            # stray directory ever carries the suffix.
+            if entry.name.endswith(".live"):
+                continue
             if not entry.is_dir():
                 continue
             m = _WORKTREE_DIR_RE.match(entry.name)

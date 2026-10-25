@@ -11,6 +11,8 @@ unreliable when run with cwd at the orchestrator's ambient checkout.
 
 from __future__ import annotations
 
+import fcntl
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -21,7 +23,11 @@ VNX_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_LIB = VNX_ROOT / "scripts" / "lib"
 sys.path.insert(0, str(SCRIPTS_LIB))
 
-from gate_worktree import GateWorktreeError, create_gate_worktree, fetch_branch, remove_gate_worktree
+import gate_worktree
+from gate_worktree import (
+    GateWorktreeError, create_gate_worktree, fetch_branch,
+    gate_checkout_liveness, gate_lifetime_lock_path, remove_gate_worktree,
+)
 
 
 def _run_git(args, cwd):
@@ -144,6 +150,128 @@ class TestRemoveGateWorktree:
 
     def test_remove_nonexistent_path_is_a_noop(self, tmp_path):
         remove_gate_worktree(tmp_path / "never-existed")  # must not raise
+
+
+class TestLifetimeLock:
+    """PR-4 round 2: a checkout carries `<path>.live`, held with LOCK_EX for the
+    seat's whole lifetime, so the sweep can never delete it under a reviewer."""
+
+    def test_create_holds_the_lifetime_lock(self, origin_and_local):
+        local = origin_and_local["local"]
+        wt_path = create_gate_worktree(
+            branch="feature/oi-708", gate="codex_gate", identifier="lock", project_root=local,
+        )
+        try:
+            sidecar = gate_lifetime_lock_path(wt_path)
+            assert sidecar == wt_path.parent / (wt_path.name + ".live")
+            assert sidecar.is_file()
+            # It lives NEXT TO the checkout, never inside it.
+            assert sidecar.parent == wt_path.parent
+            assert gate_checkout_liveness(wt_path) == "live"
+            # A second handle on the same sidecar cannot take LOCK_EX|LOCK_NB.
+            with open(sidecar, "a+") as second:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(second, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            remove_gate_worktree(wt_path, project_root=local)
+
+    def test_remove_releases_the_lock_and_unlinks_the_sidecar(self, origin_and_local):
+        local = origin_and_local["local"]
+        wt_path = create_gate_worktree(
+            branch="feature/oi-708", gate="codex_gate", identifier="unlock", project_root=local,
+        )
+        sidecar = gate_lifetime_lock_path(wt_path)
+        assert sidecar.exists()
+
+        remove_gate_worktree(wt_path, project_root=local)
+
+        assert not wt_path.exists()
+        assert not sidecar.exists()
+        assert gate_checkout_liveness(wt_path) == "no_lock"
+
+    def test_rmtree_fallback_still_releases_and_unlinks(self, origin_and_local, monkeypatch):
+        local = origin_and_local["local"]
+        wt_path = create_gate_worktree(
+            branch="feature/oi-708", gate="codex_gate", identifier="fallback", project_root=local,
+        )
+        sidecar = gate_lifetime_lock_path(wt_path)
+        real_run = subprocess.run
+
+        def forced_remove_failure(args, *a, **kwargs):
+            if isinstance(args, (list, tuple)) and list(args[:4]) == [
+                "git", "worktree", "remove", "--force",
+            ]:
+                raise subprocess.CalledProcessError(1, args, stderr="forced for the test")
+            return real_run(args, *a, **kwargs)
+
+        monkeypatch.setattr(gate_worktree.subprocess, "run", forced_remove_failure)
+
+        remove_gate_worktree(wt_path, project_root=local)
+
+        assert not wt_path.exists()
+        assert not sidecar.exists()
+        assert gate_checkout_liveness(wt_path) == "no_lock"
+
+    def test_already_gone_path_releases_and_unlinks_the_sidecar(self, origin_and_local):
+        local = origin_and_local["local"]
+        wt_path = create_gate_worktree(
+            branch="feature/oi-708", gate="codex_gate", identifier="gone", project_root=local,
+        )
+        sidecar = gate_lifetime_lock_path(wt_path)
+        shutil.rmtree(wt_path)
+        assert sidecar.exists()
+
+        remove_gate_worktree(wt_path, project_root=local)
+
+        assert not sidecar.exists()
+
+    def test_failure_after_worktree_add_leaves_no_sidecar(self, origin_and_local, monkeypatch):
+        local = origin_and_local["local"]
+
+        def boom(wt_path):
+            raise GateWorktreeError("instruction install failed on purpose")
+
+        monkeypatch.setattr(gate_worktree, "_install_review_instructions", boom)
+
+        with pytest.raises(GateWorktreeError):
+            create_gate_worktree(
+                branch="feature/oi-708", gate="codex_gate", identifier="boom", project_root=local,
+            )
+
+        worktrees_dir = local / ".vnx-data" / "worktrees"
+        leftovers = sorted(worktrees_dir.iterdir()) if worktrees_dir.exists() else []
+        assert leftovers == []
+
+    def test_probe_reports_no_lock_without_a_sidecar(self, tmp_path):
+        assert gate_checkout_liveness(tmp_path / "gate-never-created") == "no_lock"
+
+    def test_probe_reports_released_and_leaves_the_lock_free(self, tmp_path):
+        wt_path = tmp_path / "gate-unheld-1"
+        sidecar = gate_lifetime_lock_path(wt_path)
+        sidecar.write_text("", encoding="utf-8")
+
+        assert gate_checkout_liveness(wt_path) == "released"
+        # The probe released its own lock again: a fresh exclusive lock succeeds.
+        with open(sidecar, "a+") as other:
+            fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def test_probe_reports_live_while_the_sidecar_is_held(self, tmp_path):
+        wt_path = tmp_path / "gate-held-1"
+        sidecar = gate_lifetime_lock_path(wt_path)
+        sidecar.write_text("", encoding="utf-8")
+
+        with open(sidecar, "a+") as holder:
+            fcntl.flock(holder, fcntl.LOCK_EX)
+            assert gate_checkout_liveness(wt_path) == "live"
+
+    def test_probe_reports_unmeasured_with_the_error_when_it_cannot_open(self, tmp_path):
+        wt_path = tmp_path / "gate-broken-1"
+        # A directory at the sidecar path cannot be opened O_RDWR.
+        gate_lifetime_lock_path(wt_path).mkdir()
+        detail: list[str] = []
+
+        assert gate_checkout_liveness(wt_path, detail=detail) == "unmeasured"
+        assert detail and str(gate_lifetime_lock_path(wt_path)) in detail[0]
 
 
 class TestFetchBranch:

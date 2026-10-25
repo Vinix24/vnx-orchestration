@@ -4,7 +4,8 @@ one.
 
 Every test builds a real tmp repo with a bare ``origin`` and real worktrees and
 runs the real ``main``; only the two network/OS seams (``branch_has_open_pr``,
-the occupancy probe) are stubbed. The occupancy test takes the REAL flock.
+the occupancy probe) are stubbed. The occupancy and gate-lifetime tests take
+the REAL flock.
 """
 from __future__ import annotations
 
@@ -69,6 +70,12 @@ class Fixture:
         git(self.repo, "fetch", "-q", "origin")
 
         git(self.repo, "worktree", "add", "-q", "--detach", str(self.gate), "origin/main")
+        # The lifetime sidecar a `create_gate_worktree` call leaves behind,
+        # present and unheld: this tree's seat is over, so the ordinary gate
+        # release rule applies. Tests that want a live or missing seat
+        # override it.
+        self.gate_live = self.gate.parent / (self.gate.name + ".live")
+        self.gate_live.write_text("", encoding="utf-8")
         git(self.repo, "worktree", "add", "-q", "-b", "dispatch/merged", str(self.merged), "main")
         (self.merged / "merged.txt").write_text("work\n", encoding="utf-8")
         git(self.merged, "add", "-A")
@@ -162,6 +169,75 @@ class TestUnlockedRelease:
         stub_open_prs(monkeypatch, False)
         entries = run_main(fx, "--apply")
         assert fx.repo.resolve() not in {Path(e["path"]) for e in entries}
+
+
+class TestGateSeatLiveness:
+    """A gate checkout is only released when its lifetime-lock sidecar exists
+    and no reviewer holds it. The REAL flock is taken here, as in the
+    occupancy test: a second open+LOCK_EX is a live seat (flock is per open
+    file description, so this conflicts even inside one process)."""
+
+    def test_a_live_gate_seat_is_kept_and_apply_never_removes_it(self, fx, monkeypatch):
+        stub_open_prs(monkeypatch, False)
+        with open(fx.gate_live, "a+") as holder:
+            fcntl.flock(holder, fcntl.LOCK_EX)
+            try:
+                entries = run_main(fx, "--apply")
+            finally:
+                fcntl.flock(holder, fcntl.LOCK_UN)
+        entry = entry_for(entries, fx.gate)
+        assert entry["safe_to_release"] is False
+        assert entry["reason"] == "gate seat live (lifetime lock held)"
+        assert entry["released"] is False
+        assert fx.gate.exists()
+
+    def test_the_same_tree_is_released_after_the_holder_exits(self, fx, monkeypatch):
+        stub_open_prs(monkeypatch, False)
+        with open(fx.gate_live, "a+") as holder:
+            fcntl.flock(holder, fcntl.LOCK_EX)
+            assert entry_for(run_main(fx), fx.gate)["safe_to_release"] is False
+
+        entry = entry_for(run_main(fx, "--apply"), fx.gate)
+
+        assert entry["released"] is True
+        assert not fx.gate.exists()
+        assert not fx.gate_live.exists()
+
+    def test_a_gate_tree_without_a_sidecar_is_kept(self, fx, monkeypatch):
+        stub_open_prs(monkeypatch, False)
+        fx.gate_live.unlink()
+        entry = entry_for(run_main(fx, "--apply"), fx.gate)
+        assert entry["safe_to_release"] is False
+        assert "without lifetime lock" in entry["reason"]
+        assert entry["released"] is False
+        assert fx.gate.exists()
+
+    def test_an_unmeasurable_lifetime_lock_keeps_the_tree(self, fx, monkeypatch):
+        stub_open_prs(monkeypatch, False)
+        fx.gate_live.unlink()
+        fx.gate_live.mkdir()  # cannot be opened O_RDWR -> unmeasured
+        entry = entry_for(run_main(fx, "--apply"), fx.gate)
+        assert entry["safe_to_release"] is False
+        assert "niet meetbaar" in entry["reason"]
+        assert fx.gate.exists()
+
+    def test_release_refuses_when_a_seat_starts_between_probe_and_removal(self, fx):
+        """The lock is re-taken for the removal itself: a seat that grabbed it
+        after the probe keeps the tree instead of being deleted under it."""
+        candidate = crw.WorktreeCandidate(
+            path=fx.gate.resolve(), dispatch_dir_id=None, branch=None,
+            head_sha=git(fx.gate, "rev-parse", "HEAD"), lock_reason=None,
+            locked=False, kind="gate", dirty_count=0, unpushed=0,
+        )
+        with open(fx.gate_live, "a+") as holder:
+            fcntl.flock(holder, fcntl.LOCK_EX)
+            try:
+                result = crw.release_worktree(fx.repo, candidate, delete_branch=False)
+            finally:
+                fcntl.flock(holder, fcntl.LOCK_UN)
+        assert result.released is False
+        assert "lifetime lock" in result.errors[0]
+        assert fx.gate.exists()
 
 
 class TestLivenessGuard:

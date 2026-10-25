@@ -58,7 +58,11 @@ process group in the dispatch process registry); an unmeasurable probe KEEPS.
 ``pool-*``/bench trees are reported, never released. Locked trees keep the
 rules above; unlocked ones are released only when clean, nothing unpushed and
 no OPEN PR (kept when ``gh``/the slug is unavailable). A detached ``gate-*``
-tree is released when clean and its HEAD is on some ``origin/*`` ref.
+tree is released when clean and its HEAD is on some ``origin/*`` ref, but only
+after its lifetime-lock sidecar proves no gate seat is still using it: a held
+lock (``live``) or a missing sidecar (``no_lock``, a pre-lock checkout) keeps
+the tree, and the lock is re-taken for the removal itself so a seat that
+starts in between also keeps it.
 
 Dry-run by default — this script only ever WRITES when called with
 ``--apply``. Even then it only touches ``git worktree``/``git branch``
@@ -103,6 +107,9 @@ _LIB_DIR = Path(__file__).resolve().parent / "lib"
 if str(_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_LIB_DIR))
 
+from gate_worktree import (  # noqa: E402  (sys.path is set above)
+    gate_checkout_liveness, gate_lifetime_lock_path,
+)
 from worktree_inventory import (  # noqa: E402  (sys.path is set above)
     KIND_BENCH, KIND_DISPATCH, KIND_GATE, KIND_POOL,
     WorktreeInventoryError, inventory,
@@ -114,6 +121,16 @@ _DISPATCH_DIR_RE = re.compile(r"^dispatch-(?P<id>[A-Za-z0-9][A-Za-z0-9_-]*)$")
 # Kinds whose trees this sweep reports but never releases: the pool manager
 # reaps its own trees, and bench trees are preserved by design.
 _NEVER_RELEASE_KINDS = (KIND_POOL, KIND_BENCH)
+
+# Gate seat liveness (PR-4 round 2). A gate checkout carries a lifetime lock
+# sidecar (``gate_worktree.LIFETIME_LOCK_SUFFIX``) held by the reviewing
+# process for its whole lifetime. Only a sidecar that exists and is NOT held
+# may go on to the ordinary release rule; everything else keeps the tree.
+_GATE_LIVE_REASON = "gate seat live (lifetime lock held)"
+_GATE_NO_LOCK_REASON = (
+    "gate checkout without lifetime lock (created before the lock existed "
+    "or not by create_gate_worktree) — worktree blijft staan"
+)
 
 
 def _run(args: list[str], cwd: Path | str | None = None, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
@@ -246,6 +263,30 @@ def check_liveness(repo_root: Path, dispatch_id: str | None) -> str | None:
     if groups:
         return f"liveness: procesgroep {groups[0]} van dispatch {dispatch_id!r} leeft nog — worktree blijft staan"
     return None
+
+
+def gate_seat_keep_reason(wt_path: Path) -> str | None:
+    """Keep reason for a gate checkout, or ``None`` when it may be judged.
+
+    A gate seat holds a lifetime lock on ``<checkout>.live`` for as long as its
+    reviewer runs (``gate_worktree.create_gate_worktree``), so the checkout can
+    never be deleted under a running reviewer. ``None`` is returned only on
+    the positive ``released`` measurement — the sidecar exists and no process
+    holds its lock. ``live``, ``no_lock``, ``unmeasured`` and any state this
+    function does not recognise all keep the tree: unknown never releases.
+    """
+    detail: list[str] = []
+    state = gate_checkout_liveness(wt_path, detail=detail)
+    if state == "released":
+        return None
+    if state == "live":
+        return _GATE_LIVE_REASON
+    if state == "no_lock":
+        return _GATE_NO_LOCK_REASON
+    if state == "unmeasured":
+        why = detail[0] if detail else "onbekende fout"
+        return f"gate seat lifetime lock niet meetbaar ({why}) — worktree blijft staan"
+    return f"gate seat lifetime lock: onbekende toestand {state!r} — worktree blijft staan"
 
 
 def discover_locked_dispatch_worktrees(repo_root: Path) -> list[WorktreeCandidate]:
@@ -564,6 +605,10 @@ def evaluate_candidate(
     live_reason = check_liveness(repo_root, wt.dispatch_dir_id)
     if live_reason:
         return Verdict(False, live_reason)
+    if wt.kind == KIND_GATE:
+        gate_reason = gate_seat_keep_reason(wt.path)
+        if gate_reason:
+            return Verdict(False, gate_reason)
     if wt.locked:
         if not (wt.lock_reason or "").startswith(LOCK_REASON_PREFIX):
             return Verdict(False, "handmatige worktree-lock (niet door de fabric gezet) — worktree blijft staan")
@@ -588,26 +633,85 @@ def _flock_context(repo_root: Path) -> Iterator[None]:
             fcntl.flock(lf, fcntl.LOCK_UN)
 
 
-def release_worktree(repo_root: Path, wt: WorktreeCandidate, *, delete_branch: bool) -> ReleaseResult:
-    errors: list[str] = []
-    with _flock_context(repo_root):
-        if wt.locked:
-            unlock = run_git(["worktree", "unlock", str(wt.path)], cwd=repo_root)
-            if unlock.returncode != 0:
-                errors.append(f"unlock failed: {(unlock.stderr or '').strip()}")
-                return ReleaseResult(released=False, errors=errors)
+class _GateLifetimeLockUnavailable(RuntimeError):
+    """The sweep could not take a gate checkout's lifetime lock to release it."""
 
-        remove = run_git(["worktree", "remove", "--force", str(wt.path)], cwd=repo_root)
-        if remove.returncode != 0:
-            errors.append(f"worktree remove failed: {(remove.stderr or '').strip()}")
+
+@contextmanager
+def _held_gate_lifetime_lock(wt_path: Path) -> Iterator[None]:
+    """Hold *wt_path*'s lifetime lock while the caller removes the checkout.
+
+    Re-acquiring it non-blockingly closes the gap between the ``released``
+    probe and the removal: when a seat started in between it now holds the
+    lock, so this raises and the caller keeps the tree.
+    """
+    sidecar = gate_lifetime_lock_path(wt_path)
+    try:
+        fd = os.open(sidecar, os.O_RDWR)
+    except OSError as exc:
+        raise _GateLifetimeLockUnavailable(f"{sidecar} kan niet geopend worden ({exc})") from exc
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise _GateLifetimeLockUnavailable(f"{sidecar} wordt vastgehouden ({exc})") from exc
+        yield
+    finally:
+        os.close(fd)
+
+
+def _remove_worktree_and_branch(
+    repo_root: Path, wt: WorktreeCandidate, *, delete_branch: bool,
+) -> ReleaseResult:
+    """Unlock/remove the checkout and, when asked, delete its local branch.
+
+    The caller holds ``_flock_context`` — and, for a gate tree, the checkout's
+    lifetime lock across the removal."""
+    errors: list[str] = []
+    if wt.locked:
+        unlock = run_git(["worktree", "unlock", str(wt.path)], cwd=repo_root)
+        if unlock.returncode != 0:
+            errors.append(f"unlock failed: {(unlock.stderr or '').strip()}")
             return ReleaseResult(released=False, errors=errors)
 
-        if wt.branch and delete_branch:
-            branch_delete = run_git(["branch", "-D", wt.branch], cwd=repo_root)
-            if branch_delete.returncode != 0:
-                errors.append(f"branch delete failed (worktree already removed): {(branch_delete.stderr or '').strip()}")
+    remove = run_git(["worktree", "remove", "--force", str(wt.path)], cwd=repo_root)
+    if remove.returncode != 0:
+        errors.append(f"worktree remove failed: {(remove.stderr or '').strip()}")
+        return ReleaseResult(released=False, errors=errors)
+
+    if wt.branch and delete_branch:
+        branch_delete = run_git(["branch", "-D", wt.branch], cwd=repo_root)
+        if branch_delete.returncode != 0:
+            errors.append(f"branch delete failed (worktree already removed): {(branch_delete.stderr or '').strip()}")
 
     return ReleaseResult(released=True, errors=errors)
+
+
+def release_worktree(repo_root: Path, wt: WorktreeCandidate, *, delete_branch: bool) -> ReleaseResult:
+    if wt.kind != KIND_GATE:
+        with _flock_context(repo_root):
+            return _remove_worktree_and_branch(repo_root, wt, delete_branch=delete_branch)
+
+    # A gate checkout was measured ``released`` before this call. Take its
+    # lifetime lock again for the whole removal so no seat can start between
+    # the probe and `git worktree remove`; when it cannot be taken, keep it.
+    try:
+        with _held_gate_lifetime_lock(wt.path):
+            with _flock_context(repo_root):
+                result = _remove_worktree_and_branch(repo_root, wt, delete_branch=delete_branch)
+    except _GateLifetimeLockUnavailable as exc:
+        return ReleaseResult(
+            released=False,
+            errors=[f"gate lifetime lock niet verkregen: {exc} — worktree blijft staan"],
+        )
+    if result.released:
+        try:
+            gate_lifetime_lock_path(wt.path).unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            result.errors.append(f"lifetime sidecar niet verwijderd: {exc}")
+    return result
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
