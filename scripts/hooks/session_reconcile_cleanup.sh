@@ -23,13 +23,6 @@
 # before any signal, so a recycled pid is never touched.  Best-effort, never
 # blocks, always exits 0.
 
-# ── Guard: tmux-spawn workers never start a reconcile worker (the SessionStart
-# hook is a no-op for them), so there is nothing to clean.  Interactive
-# sessions only.
-if [ -n "${VNX_DISPATCH_ID:-}" ]; then
-    exit 0
-fi
-
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
 
 PY=""

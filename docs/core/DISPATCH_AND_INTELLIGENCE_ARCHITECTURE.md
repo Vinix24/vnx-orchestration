@@ -91,9 +91,10 @@ The tmux-spawn lane (removed 2026-09-18, #1868) used to rely on two hook
 sentinels (SessionStart and UserPromptSubmit), guarded by
 `VNX_TMUX_SIGNAL_DIR` to detect that a paste actually landed in the worker's
 input box, falling back to TUI-marker heuristics (which mis-fired across
-Claude Code TUI revisions) when a project hadn't wired them. Nothing exports
-`VNX_TMUX_SIGNAL_DIR` any more, so those hooks are inert; the full contract is
-preserved as history in `docs/operations/TMUX_SPAWN_LANE.md`.
+Claude Code TUI revisions) when a project hadn't wired them. Those hooks and
+the Stop hook that wrote a receipt from the signal directory are gone
+(golf 1, cluster C2); the full contract is preserved as history in
+`docs/operations/TMUX_SPAWN_LANE.md`.
 
 That lane also launched detached workers with blanket
 `--dangerously-skip-permissions` by default. Worker permissions today are the

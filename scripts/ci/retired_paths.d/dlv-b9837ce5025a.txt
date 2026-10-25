@@ -1,0 +1,8 @@
+# Cluster A4 of track `retire-feature-plan-second-planning-layer`
+# (dispatch dlv-b9837ce5025a): the three modules that existed only for the
+# FEATURE_PLAN/PR_QUEUE planning layer. Source:
+# claudedocs/2026-10-24-nachtrun-golf-1-3/plannen/retire-feature-plan-second-planning-layer.md
+# row A4.
+scripts/verify_closure.py
+scripts/validate_feature_plan.py
+scripts/review_contract_materializer.py

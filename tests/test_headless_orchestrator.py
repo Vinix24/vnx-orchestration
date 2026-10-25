@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -392,3 +393,53 @@ def test_check_all_gates_passed_required_gate_missing_result_does_not_unblock_an
     events = _read_loop_events(data_dir)
     assert not [e for e in events if e.get("event_type") == "feature_gates_complete"]
     assert "missing evidence" in caplog.text and "glm_gate" in caplog.text, caplog.text
+
+
+# ---------------------------------------------------------------------------
+# The retired feature-completion trigger: a modern dispatch id starts nothing.
+# The removed ``_check_feature_completion_and_trigger`` only ever recognized
+# ids shaped like ``f<n>-pr…``; every modern id (``dlv-<hex>``,
+# ``<date>-<slug>``) fell through it.  This pins that the removal changes
+# nothing observable: the same receipt event writes its decision record and
+# no further loop event at all — in particular none from a gate trigger.
+# ---------------------------------------------------------------------------
+
+class _StubDecisionRouter:
+    """A DecisionRouter that answers instantly and takes no action."""
+
+    def __init__(self) -> None:
+        self.decisions = 0
+
+    def decide(self, *, context, question):
+        self.decisions += 1
+        return SimpleNamespace(
+            action="wait",
+            reasoning="stub",
+            confidence=1.0,
+            backend_used="stub",
+            latency_ms=0,
+        )
+
+
+def test_modern_dispatch_id_starts_nothing_and_logs_only_the_decision(tmp_path: Path) -> None:
+    data_dir, state_dir = _make_state_dir(tmp_path)
+    import headless_orchestrator
+    orch = headless_orchestrator.HeadlessOrchestrator(data_dir=data_dir, state_dir=state_dir, dry_run=False)
+    router = _StubDecisionRouter()
+    orch._decision_router = router
+    orch._event_bus.put(headless_orchestrator.LoopEvent(
+        reason="receipt",
+        context={"latest_event": "task_complete", "latest_dispatch_id": "dlv-e1e3d82d5bba"},
+    ))
+
+    thread = threading.Thread(target=orch._decision_loop, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 5.0
+    while orch._decisions_made < 1 and time.monotonic() < deadline:
+        time.sleep(0.02)
+    orch._shutdown.set()
+    thread.join(timeout=5.0)
+
+    assert router.decisions == 1, "the receipt event never reached the decision loop"
+    events = _read_loop_events(data_dir)
+    assert [e.get("event_type") for e in events] == ["decision"], events

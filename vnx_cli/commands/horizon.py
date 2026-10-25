@@ -183,6 +183,12 @@ def _cmd_show(args: Any) -> int:
     return pc.cmd_objective_show(args)
 
 
+def _cmd_queue(args: Any) -> int:
+    pc = _require_planning_cli()
+    _prep(args)
+    return pc.cmd_objective_queue(args)
+
+
 def _cmd_sync(args: Any) -> int:
     pc = _require_planning_cli()
     _prep_repo(args, default="roadmap")
@@ -271,6 +277,7 @@ _VERB_DISPATCH: dict[str, Callable[[Any], int]] = {
     "add": _cmd_add,
     "list": _cmd_list,
     "show": _cmd_show,
+    "queue": _cmd_queue,
     "sync": _cmd_sync,
     "drift": _cmd_drift,
     "reconcile": _cmd_reconcile,
