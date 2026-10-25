@@ -643,6 +643,15 @@ def _resolve_repo_root(repo_root: Optional[Path]) -> Path:
         return Path.cwd().resolve()
 
 
+def _is_worktree_dir_entry(entry: Path) -> bool:
+    """True when a ``.vnx-data/worktrees/`` entry is a worktree directory.
+
+    ``gate_worktree`` keeps a lifetime-lock sidecar (``<checkout>.live``) next
+    to each gate checkout. It is a file, never a worktree; skipping it by name
+    keeps that true even if a stray directory ever carries the suffix."""
+    return entry.is_dir() and not entry.name.endswith(".live")
+
+
 def sweep(
     repo_root: Optional[Path] = None,
     data_dir: Optional[Path] = None,
@@ -905,13 +914,7 @@ def sweep(
         from tmux_worktree import WorktreeHandle, classify_path, reap
 
         for entry in sorted(worktrees_dir.iterdir()):
-            # `gate_worktree` keeps a lifetime-lock sidecar
-            # (`<checkout>.live`) next to each gate checkout. It is a file,
-            # never a worktree; skipping it by name keeps that true even if a
-            # stray directory ever carries the suffix.
-            if entry.name.endswith(".live"):
-                continue
-            if not entry.is_dir():
+            if not _is_worktree_dir_entry(entry):
                 continue
             m = _WORKTREE_DIR_RE.match(entry.name)
             if not m:
