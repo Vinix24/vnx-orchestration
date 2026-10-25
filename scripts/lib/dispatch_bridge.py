@@ -47,6 +47,7 @@ from atomic_io import atomic_write_json, atomic_write_text  # noqa: E402
 from dispatch_flags import single_entry_enabled  # noqa: E402
 from dispatch_spec import (  # noqa: E402
     _ID_RE,
+    _validate_skill_slug,
     DEADLINE_SECONDS_MAX,
     DEADLINE_SECONDS_MIN,
     LEGACY_GATE_SENTINELS,
@@ -226,6 +227,69 @@ def resolve_parent_dispatch(
     return explicit
 
 
+class UnknownSkillError(ValueError):
+    """A staged spec named a skill that exists in neither of the two skill trees.
+
+    Raised at the trust boundary (``stage_spec_bundle``, the first writer of a
+    ``dispatch-spec.json``) so an unknown skill fails loud at staging with both
+    searched paths in the message, instead of being carried downstream to a lane
+    that would silently inject nothing.
+    """
+
+
+# The two skill trees a named skill may live in, relative to the project root
+# (canonical first, then the claude-compatible mirror).
+_SKILL_TREES = ("skills", ".claude/skills")
+
+
+def _project_root() -> Path:
+    """Checkout whose skill trees a staged skill must exist in.
+
+    Delegates to the door's own repo-root resolver (``dispatch_cli``) — the same
+    delegation pattern ``_data_dir`` / ``_project_id`` already use — so the bridge
+    never hardcodes a path and never disagrees with the door on the checkout.
+    """
+    from dispatch_cli import _resolve_repo_root  # noqa: PLC0415
+    return _resolve_repo_root()
+
+
+def _require_deadline_in_range(deadline_seconds: int) -> None:
+    """Refuse an out-of-range deadline at the trust boundary (validate() Rule 11's range)."""
+    if not (DEADLINE_SECONDS_MIN <= int(deadline_seconds) <= DEADLINE_SECONDS_MAX):
+        raise ValueError(
+            f"deadline_seconds must be in [{DEADLINE_SECONDS_MIN}, {DEADLINE_SECONDS_MAX}], "
+            f"got {deadline_seconds}"
+        )
+
+
+def _require_known_skill(raw: Optional[str]) -> Optional[str]:
+    """Normalize a staged skill name and require it to exist; return the slug or None.
+
+    Format first (the slug rule lives beside ``_ID_RE`` in dispatch_spec, and the
+    door applies the identical rule at validate() Rule 17), then existence. A skill
+    exists when ``<project_root>/skills/<name>/SKILL.md`` or
+    ``<project_root>/.claude/skills/<name>/SKILL.md`` is a regular file. The slug is
+    checked BEFORE any path join, so a name can never pick the file it is tested against.
+    """
+    slug = (raw or "").strip()
+    if not slug:
+        return None
+    slug_err = _validate_skill_slug(slug)
+    if slug_err is not None:
+        raise ValueError(
+            f"skill {raw!r} is not a valid skill slug ({slug_err}); a skill names one "
+            "folder under skills/ or .claude/skills/"
+        )
+    root = _project_root()
+    searched = [root / tree / slug / "SKILL.md" for tree in _SKILL_TREES]
+    if not any(candidate.is_file() for candidate in searched):
+        raise UnknownSkillError(
+            f"skill {slug!r} not found; looked for "
+            + " and ".join(str(candidate) for candidate in searched)
+        )
+    return slug
+
+
 def stage_spec_bundle(
     *,
     instruction_text: str,
@@ -235,6 +299,10 @@ def stage_spec_bundle(
     project_id: Optional[str] = None,
     provider: str = "claude",
     model: Optional[str] = None,
+    # RS-1: a skill the lane should inject. The spec declared + parsed it, but until
+    # now no caller could write it; the name is verified at staging (below) and
+    # carried onto the spec, where the envelope lanes read it.
+    skill: Optional[str] = None,
     gate: str = "",
     dispatch_paths: tuple[dict, ...] = (),
     deadline_seconds: int = 3600,
@@ -289,17 +357,19 @@ def stage_spec_bundle(
     # than drift silently downstream. The range is the consumer-door contract
     # [DEADLINE_SECONDS_MIN, DEADLINE_SECONDS_MAX] — the same range validate()
     # Rule 11 enforces, from the same constants (dispatch_spec).
-    if not (DEADLINE_SECONDS_MIN <= int(deadline_seconds) <= DEADLINE_SECONDS_MAX):
-        raise ValueError(
-            f"deadline_seconds must be in [{DEADLINE_SECONDS_MIN}, {DEADLINE_SECONDS_MAX}], "
-            f"got {deadline_seconds}"
-        )
+    _require_deadline_in_range(deadline_seconds)
 
     # 1a-bis. resolve the lineage BEFORE any write (D2, dlv-e5bdf6c502cf): a
     # fix-forward's work_ref already names the dispatch it continues, so derive
     # parent_dispatch from it when the caller didn't supply one, and refuse a
     # conflicting explicit value loud here rather than staging two lineages.
     parent_dispatch = resolve_parent_dispatch(dispatch_id, work_ref, parent_dispatch)
+
+    # 1a-ter. a named skill must exist in one of the two skill trees BEFORE the
+    # bundle is written — the same trust boundary rule as the deadline above, and
+    # the point where an unknown name is refused with both searched paths instead
+    # of being staged and silently injecting nothing downstream.
+    skill = _require_known_skill(skill)
 
     # 1b. resolve the effective tenant ONCE, up front, so the physical staging store and
     # the spec's declared project_id are the SAME. Staging into the ambient _data_dir()
@@ -362,6 +432,9 @@ def stage_spec_bundle(
         ],
         "provider": _canonical_provider(provider).value,
         "model": model or None,
+        # RS-1: the verified skill slug (or null). dispatch_spec.DispatchSpec.skill
+        # already parsed this key; nothing could write it before this parameter.
+        "skill": skill,
         "pr_id": pr_id or None,
         # OI-1137: explicit work-ref, stripped of an origin//refs/ prefix so the
         # resolver fetches origin/<name> without double-prefixing.
