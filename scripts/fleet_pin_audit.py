@@ -1,8 +1,8 @@
 """One read-only verdict per registered project's engine pin.
 
 Both surfaces the startup path reads are judged: the ``.vnx-version`` pin
-(``vnx_cli._reexec._read_pin``, distance from ``pin_drift``) and the
-``.claude/vnx-system`` link (``providers_cli.engine_root_for``), plus
+(``vnx_cli._reexec._read_pin``, distance from ``pin_drift``) and the engine
+symlink under ``.claude`` (``providers_cli.engine_root_for``), plus
 ``dispatch_cli.main_checkout_lag``. Nothing is re-derived, nothing is written.
 
 Verdicts, worst first: ``dead`` (the pin's release is absent, or the link
