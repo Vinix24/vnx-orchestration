@@ -6,6 +6,7 @@ Every test builds its own tmp store, registry and projects; the operator's
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -42,6 +43,26 @@ def _registry(tmp_path, projects):
     path.write_text(json.dumps({"projects": [
         {"name": name, "path": str(root)} for name, root in projects.items()
     ]}), encoding="utf-8")
+    return path
+
+
+def _git_repo(path, *, pin=None):
+    """A committed git repo at ``path`` (optionally carrying a pin file)."""
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.name", "tester"], cwd=path, check=True)
+    if pin is not None:
+        (path / ".vnx-version").write_text(f"{pin}\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=path, check=True)
+    subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", "init"],
+                   cwd=path, check=True)
+    return path
+
+
+def _worktree(repo, path):
+    subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", str(path)],
+                   check=True)
     return path
 
 
@@ -177,3 +198,125 @@ def test_audit_writes_nothing(fleet, capsys):
     _run(fleet, capsys, "--json")
 
     assert _snapshot(fleet["tmp"]) == before
+
+
+@pytest.fixture()
+def scanned(tmp_path, monkeypatch):
+    """A registry-only fleet PLUS the pins the registry cannot see."""
+    home = tmp_path / "home"
+    store = _store(home / "store")
+    repo = _git_repo(home / "registered", pin="1.7.6")
+    _worktree(repo, home / "registered-wt")
+    stranger = _project(home / "stranger", pin="1.7.6")
+    broken = _project(home / "broken", pin="1.0.0-rc9")
+    # A pin under the configured store root must be skipped.
+    (store / "versions" / "v1.7.6" / ".vnx-version").write_text(
+        "1.7.6\n", encoding="utf-8")
+    # Same for one under the fabric source this audit runs from.
+    fabric = _project(home / "fabric-src", pin="1.7.5")
+    monkeypatch.setattr(fpa, "FABRIC_SOURCE", fabric)
+    # A symlinked directory holding a pin must not be followed.
+    outside = _project(tmp_path / "outside", pin="1.7.5")
+    (home / "linked").symlink_to(outside)
+    return {"tmp": tmp_path, "home": home, "store": store, "repo": repo,
+            "stranger": stranger, "broken": broken, "outside": outside,
+            "registry": _registry(tmp_path, {"registered": repo})}
+
+
+def test_scan_root_finds_pins_outside_the_registry(scanned, capsys):
+    code, out, _ = _run(scanned, capsys, "--scan-root", str(scanned["home"]), "--json")
+    report = json.loads(out)
+    rows = report["projects"]
+
+    assert code == 1  # the strangers are unregistered
+    assert set(rows) == {"registered", "registered-wt", "stranger", "broken"}
+    assert rows["broken"]["verdict"] == "unregistered"
+    assert rows["broken"]["pin_verdict"] == "dead"
+    assert rows["broken"]["owner"] is None
+    assert rows["broken"]["registered"] is False
+    assert rows["stranger"]["verdict"] == "unregistered"
+    assert rows["stranger"]["pin_verdict"] == "pin-without-link"
+    assert rows["stranger"]["owner"] is None
+    # A worktree is judged like its project, and names that project.
+    assert rows["registered-wt"]["verdict"] == "pin-without-link"
+    assert "pin_verdict" not in rows["registered-wt"]  # the verdict IS the pin one
+    assert rows["registered-wt"]["owner"] == "registered"
+    assert rows["registered-wt"]["registered"] is False
+    # The registry row itself keeps the pre-PR shape.
+    assert "registered" not in rows["registered"]
+    assert "pin_verdict" not in rows["registered"]
+    assert report["summary"]["projects"] == 4
+    assert report["summary"]["unregistered"] == 2
+    assert report["summary"]["worktrees"] == 1
+
+
+def test_scan_root_skips_store_fabric_and_symlinks(scanned, capsys):
+    code, out, _ = _run(scanned, capsys, "--scan-root", str(scanned["home"]), "--json")
+    rows = json.loads(out)["projects"]
+
+    assert code == 1
+    assert "v1.7.6" not in rows  # under --store-root
+    assert "fabric-src" not in rows  # under FABRIC_SOURCE
+    assert "outside" not in rows and "linked" not in rows  # symlink not followed
+    assert str(scanned["outside"].resolve()) not in out
+
+
+def test_scan_root_text_names_owner_or_unregistered(scanned, capsys):
+    code, out, _ = _run(scanned, capsys, "--scan-root", str(scanned["home"]))
+    lines = out.splitlines()
+
+    assert code == 1
+    assert any("registered-wt" in ln and ln.endswith("owner=registered") for ln in lines)
+    assert any(ln.startswith("[FIND]") and " unregistered " in ln for ln in lines)
+    assert lines[-1].endswith("2 unregistered, 1 worktrees")
+
+
+def test_scan_root_exits_zero_when_every_pin_is_owned(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "home"
+    store = _store(tmp_path / "store")
+    monkeypatch.setattr(fpa, "FABRIC_SOURCE", _project(tmp_path / "fabric", pin="1.7.5"))
+    repo = _git_repo(home / "registered", pin="1.7.6")
+    _worktree(repo, home / "registered-wt")
+    code, out, _ = _run({"store": store, "registry": _registry(tmp_path, {"registered": repo})},
+                        capsys, "--scan-root", str(home), "--json")
+    report = json.loads(out)
+
+    assert code == 0
+    assert report["projects"]["registered-wt"]["owner"] == "registered"
+    assert report["summary"]["worktrees"] == 1
+    assert report["summary"]["unregistered"] == 0
+
+
+def test_scan_root_that_cannot_be_listed_exits_two(tmp_path, monkeypatch, capsys):
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root can read chmod-000 dirs — OSError path unreachable")
+    store = _store(tmp_path / "store")
+    monkeypatch.setattr(fpa, "FABRIC_SOURCE", _project(tmp_path / "fabric", pin="1.7.5"))
+    registry = _registry(tmp_path, {"p": _project(tmp_path / "p", pin="1.7.6")})
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0o000)
+    try:
+        code, out, err = _run({"store": store, "registry": registry}, capsys,
+                              "--scan-root", str(locked))
+    finally:
+        locked.chmod(0o755)
+
+    assert code == 2
+    assert out == ""
+    assert str(locked) in err and "scan root" in err
+
+
+def test_output_without_scan_root_is_unchanged(fleet, capsys):
+    code, out, _ = _run(fleet, capsys)
+
+    assert code == 1
+    assert "fleet: 8 projects, 2 dead, 1 lagging, 3 warnings" in out
+    assert "unregistered" not in out
+    assert "owner=" not in out
+
+    _, out_json, _ = _run(fleet, capsys, "--json")
+    report = json.loads(out_json)
+    assert set(report["summary"]) == {"projects", "dead", "lagging", "warnings"}
+    assert all("registered" not in row and "owner" not in row
+               for row in report["projects"].values())
