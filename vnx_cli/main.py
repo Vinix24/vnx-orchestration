@@ -1303,6 +1303,29 @@ def _register_migrate_subparser(subparsers: argparse.Action) -> None:
         metavar="DIR",
         help="project directory to resolve data root from (default: current directory)",
     )
+    migrate_parser.add_argument(
+        "--relocate-legacy",
+        action="store_true",
+        help="copy a pre-#1437 XDG store into the central store (deletes nothing)",
+    )
+    migrate_parser.add_argument(
+        "--legacy-path",
+        default=None,
+        metavar="DIR",
+        help="legacy store to relocate (required with --relocate-legacy; no auto-discovery)",
+    )
+    migrate_parser.add_argument(
+        "--project-id",
+        default=None,
+        metavar="PROJECT_ID",
+        help="tenant of the relocated store (required with --relocate-legacy)",
+    )
+    migrate_parser.add_argument(
+        "--assume-owner",
+        default=None,
+        metavar="REASON",
+        help="record why an unstamped (schema-v14) store belongs to --project-id",
+    )
 
 
 def _register_learning_subparser(subparsers: argparse.Action) -> None:

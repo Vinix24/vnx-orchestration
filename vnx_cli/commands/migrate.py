@@ -15,9 +15,14 @@ Use when:
 
 from __future__ import annotations
 
+import json
 import os
 import re
+import shlex
+import shutil
+import sqlite3
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from vnx_cli import _engine
@@ -25,6 +30,24 @@ from vnx_cli.commands.init_cmd import _anchor_tenant_marker, _bootstrap_runtime_
 
 #: Central store layout ``.../.vnx-data/<pid>/`` — anchors the tenant on the data path.
 _DATA_PATH_PID_RE = re.compile(r"(?:^|/)\.vnx-data/([a-z0-9][a-z0-9._-]{0,63})/?$")
+
+#: SQLite sidecars. The backup API folds their committed frames into the copy,
+#: so they are never copied on their own (a lone -wal next to a fresh copy lies).
+_SQLITE_SIDECAR_GLOBS = ("*-wal", "*-shm", "*-journal")
+
+#: Suffixes that name a SQLite database; the file magic is the other signal.
+_SQLITE_SUFFIXES = (".db", ".sqlite", ".sqlite3")
+
+#: Migration record written next to the state DBs of a relocated store.
+_RELOCATE_RECORD_NAME = "relocate-legacy.json"
+
+
+class _RelocateRefused(RuntimeError):
+    """A ``--relocate-legacy`` precondition failed; nothing was written (2: usage)."""
+
+    def __init__(self, message: str, exit_code: int = 1) -> None:
+        super().__init__(message)
+        self.exit_code = exit_code
 
 
 def _read_marker_pid(data_root: Path) -> "str | None":
@@ -67,7 +90,9 @@ def _reconcile_tenant_or_fail(data_root: Path, project_id: str) -> None:
         )
 
 
-def _run_future_system_pipeline(data_root: Path, project_id: str) -> None:
+def _run_future_system_pipeline(
+    data_root: Path, project_id: str, *, tenant_stamp_fatal: bool = False, backup: bool = True
+) -> None:
     """Drive the WHOLE future-system pipeline against the store at *data_root* (D4).
 
     The bootstrap chain above only reaches the numbered runners with a paired
@@ -78,9 +103,11 @@ def _run_future_system_pipeline(data_root: Path, project_id: str) -> None:
     ``tracks.horizon`` (Bug A). This threads the EXACT canonical data root the CLI
     already resolved (the runner would otherwise re-derive
     ``<project_root>/.vnx-data`` — the D4 threading trap) and takes a VACUUM INTO
-    backup first. A W1 tenant-stamping failure is non-fatal here: the schema walk is
-    committed before W1 runs, so the store keeps ``tracks.horizon`` and the operator
-    is warned rather than losing the Horizon schema.
+    backup first. ``tenant_stamp_fatal=False`` (the ``vnx migrate`` default) keeps a
+    W1 failure non-fatal: the schema walk is committed first, so ``tracks.horizon``
+    survives and the operator is warned. ``--relocate-legacy`` passes True (a store
+    is published only when every step succeeded) and ``backup=False`` (the staging
+    copy is itself the backup of an untouched source).
     """
     _engine.ensure_engine_on_path()
     scripts_dir = _engine.engine_root() / "scripts"
@@ -125,10 +152,277 @@ def _run_future_system_pipeline(data_root: Path, project_id: str) -> None:
     # non-fatal (WARNING after the committed schema walk) as belt-and-suspenders.
     migrate_future_system.run(
         data_dir=data_root,
-        tenant_stamp_fatal=False,
+        tenant_stamp_fatal=tenant_stamp_fatal,
         run_tenant_stamp=True,
-        backup=True,
+        backup=backup,
     )
+
+
+# ===========================================================================
+# vnx migrate --relocate-legacy — copy a pre-#1437 XDG store into the central
+# store, and delete nothing
+# ===========================================================================
+
+
+def _readonly_uri(path: Path) -> str:
+    """``file://`` URI that opens *path* read-only: the source is never written."""
+    return path.resolve().as_uri() + "?mode=ro"
+
+
+def _iter_databases(root: Path) -> list[Path]:
+    """Every ``*.db`` database below *root*, sorted (sidecars end otherwise)."""
+    return sorted(
+        Path(current) / name
+        for current, _dirs, files in os.walk(root)
+        for name in files
+        if name.endswith(_SQLITE_SUFFIXES)
+    )
+
+
+def _copy_sqlite_database(src: Path, dst: Path) -> None:
+    """Consistent copy through the SQLite backup API (committed WAL included)."""
+    source_conn = sqlite3.connect(_readonly_uri(src), uri=True)
+    dest_conn = sqlite3.connect(str(dst))
+    try:
+        source_conn.backup(dest_conn)
+    finally:
+        dest_conn.close()
+        source_conn.close()
+
+
+def _copy_store_consistent(source: Path, staging: Path) -> None:
+    """Rule 3: SQLite DBs through the backup API, every other file a plain copy."""
+    databases = _iter_databases(source)
+    shutil.copytree(source, staging, dirs_exist_ok=True, ignore=shutil.ignore_patterns(
+        *_SQLITE_SUFFIXES, *_SQLITE_SIDECAR_GLOBS))
+    for db_path in databases:
+        _copy_sqlite_database(db_path, staging / db_path.relative_to(source))
+
+
+def _table_project_ids(db_path: Path) -> dict[str, set[str]]:
+    """``{table: {project_id values}}`` for every table that carries a project_id."""
+    stamps: dict[str, set[str]] = {}
+    conn = sqlite3.connect(_readonly_uri(db_path), uri=True)
+    try:
+        names = [row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name NOT LIKE 'sqlite_%'")]
+        for name in names:
+            quoted = '"' + name.replace('"', '""') + '"'  # named by sqlite_master
+            if "project_id" not in {row[1] for row in
+                                    conn.execute(f"PRAGMA table_info({quoted})")}:
+                continue
+            values = {str(row[0]) for row in conn.execute(
+                f"SELECT DISTINCT project_id FROM {quoted} "
+                "WHERE project_id IS NOT NULL AND TRIM(project_id) <> ''")}
+            if values:
+                stamps[name] = values
+    finally:
+        conn.close()
+    return stamps
+
+
+def _source_stamps(source: Path) -> dict[str, set[str]]:
+    """Every project_id stamp in the source DBs, keyed ``<db relpath>:<table>``."""
+    return {
+        f"{db.relative_to(source).as_posix()}:{table}": values
+        for db in _iter_databases(source)
+        for table, values in _table_project_ids(db).items()
+    }
+
+
+def _check_ownership(
+    stamps: dict[str, set[str]], project_id: str, assume_owner: str | None
+) -> None:
+    """Rule 2: a foreign stamp refuses; no stamp at all needs ``--assume-owner``."""
+    foreign = {key: sorted(values - {project_id})
+               for key, values in stamps.items() if values - {project_id}}
+    if foreign:
+        detail = "; ".join(f"{key} -> {', '.join(v)}" for key, v in sorted(foreign.items()))
+        raise _RelocateRefused(
+            f"the legacy store is stamped with another project_id ({detail}); refusing "
+            f"to hand it to --project-id {project_id!r}.")
+    if not stamps and not (assume_owner or "").strip():
+        raise _RelocateRefused(
+            "the legacy store carries no project_id stamp (a pre-ADR-007 schema-v14 "
+            f'store). Re-run with --assume-owner "<why this store is {project_id}>".')
+
+
+def _refuse_ambient_tenant(project_id: str) -> None:
+    """Refuse a relocation under an ambient data-root or tenant override."""
+    for key in ("VNX_DATA_DIR", "VNX_STATE_DIR"):
+        value = (os.environ.get(key) or "").strip()
+        if value:
+            raise _RelocateRefused(
+                f"{key} is set ({value!r}); a relocation publishes into the central "
+                f"store. Unset {key} and re-run.")
+    env_pid = (os.environ.get("VNX_PROJECT_ID") or "").strip()
+    if env_pid and env_pid != project_id:
+        raise _RelocateRefused(
+            f"VNX_PROJECT_ID is {env_pid!r} but --project-id is {project_id!r}; the "
+            "pipeline resolves the tenant fail-closed and would refuse mid-run.")
+
+
+def _relocate_preflight(project_dir: Path, legacy_path, project_id: str) -> tuple[Path, Path]:
+    """Rule 1: refuse before writing anything. Returns ``(source, target)``."""
+    if not legacy_path:
+        raise _RelocateRefused(
+            "--legacy-path <dir> is required: there is no auto-discovery of the "
+            "source store (a wrong guess would move another project's state).", 2)
+    if not project_id:
+        raise _RelocateRefused(
+            "--project-id <pid> is required: it is the tenant the store is stamped with.", 2)
+    _engine.ensure_engine_on_path()
+    from vnx_ids import PROJECT_ID_RE
+
+    if not PROJECT_ID_RE.match(project_id):
+        raise _RelocateRefused(
+            f"invalid --project-id {project_id!r}: must match {PROJECT_ID_RE.pattern}", 2)
+    _refuse_ambient_tenant(project_id)
+    import legacy_store_path
+    import vnx_paths
+
+    source = Path(legacy_path).expanduser().resolve()
+    if not source.is_dir():
+        raise _RelocateRefused(f"legacy store {source} is not a directory", 2)
+    if not (source / legacy_store_path.RUNTIME_DB_RELPATH).is_file():
+        raise _RelocateRefused(
+            f"{source} holds no state/runtime_coordination.db — not a store (or only an "
+            "empty skeleton), so there is nothing to relocate.")
+    shadow = project_dir / ".vnx-data" / "state"
+    if shadow.is_dir() and _iter_databases(shadow):
+        raise _RelocateRefused(
+            f"{project_dir} has its own repo-local store at {shadow.parent}; it would "
+            "shadow the central target. Relocate or remove it first.")
+    marker = _read_marker_pid(source)
+    if (source / ".vnx-project-id").is_file() and not marker:
+        raise _RelocateRefused(
+            f"{source / '.vnx-project-id'} is empty or unreadable; refusing to guess "
+            "the tenant it meant to name.")
+    if marker and marker != project_id:
+        raise _RelocateRefused(
+            f"the legacy store's .vnx-project-id names {marker!r}, not {project_id!r}; "
+            "refusing to relabel another project's store.")
+    target = vnx_paths.resolve_project_data_root(project_id)
+    if target.exists():
+        raise _RelocateRefused(
+            f"the central store {target} already exists; refusing to overwrite it. "
+            "Move it aside first if the legacy copy is the one to keep.")
+    return source, target
+
+
+def _verify_integrity(root: Path) -> None:
+    """``PRAGMA integrity_check`` must answer exactly ``ok`` for every database."""
+    databases = _iter_databases(root)
+    if not databases:
+        raise RuntimeError(f"no SQLite database found under {root}")
+    for db_path in databases:
+        conn = sqlite3.connect(_readonly_uri(db_path), uri=True)
+        try:
+            rows = conn.execute("PRAGMA integrity_check").fetchall()
+        finally:
+            conn.close()
+        if rows != [("ok",)]:
+            raise RuntimeError(f"PRAGMA integrity_check on {db_path} returned {rows!r}")
+
+
+def _upgrade_staging(staging: Path, project_id: str) -> None:
+    """Rule 4: the full chain on the copy; every step fatal, then integrity."""
+    _bootstrap_runtime_dbs(staging, project_id=project_id)
+    _run_future_system_pipeline(staging, project_id, tenant_stamp_fatal=True, backup=False)
+    db_path = staging / "state" / "runtime_coordination.db"
+    if not db_path.is_file():
+        raise RuntimeError(f"the upgrade left no {db_path}")
+    conn = sqlite3.connect(_readonly_uri(db_path), uri=True)
+    try:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(tracks)")}
+    finally:
+        conn.close()
+    if "horizon" not in columns:
+        raise RuntimeError(
+            f"the pipeline did not reach the Horizon schema: tracks.horizon absent in {db_path}")
+    _verify_integrity(staging)
+
+
+def _write_relocate_record(
+    staging: Path, source: Path, project_id: str,
+    stamps: dict[str, set[str]], assume_owner: str | None,
+) -> None:
+    """Rule 2: the ownership assumption travels inside the published store."""
+    assumed = not stamps
+    record = {
+        "schema": "vnx-relocate-legacy/1",
+        "project_id": project_id,
+        "relocated_from": str(source),
+        "relocated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "owner_assumed": assumed,
+        "owner_reason": (assume_owner or "").strip() if assumed else None,
+        "source_stamps": {key: sorted(values) for key, values in sorted(stamps.items())},
+    }
+    path = staging / "state" / _RELOCATE_RECORD_NAME
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(tmp, path)  # atomic: the record lands whole or not at all
+
+
+def _print_relocate_success(target: Path, source: Path, project_dir: Path) -> None:
+    print(f"\nRelocated into the central store: {target}\n  source left untouched: {source}\n")
+    print("Verify it:\n  vnx doctor --project-dir " + shlex.quote(str(project_dir)) + "\n")
+    print("The legacy copy is NOT removed. Remove it yourself once the check passes:")
+    print(f"  rm -rf -- {shlex.quote(str(source))}")
+
+
+def relocate_legacy(args) -> int:
+    """``vnx migrate --relocate-legacy``: copy a legacy store into the central store.
+
+    The source is opened read-only and never modified: a failure before the
+    publish rename leaves the staging dir in place (its path is printed) and no
+    target. Removal of the source stays the operator's own command.
+    """
+    project_dir = Path(getattr(args, "project_dir", ".")).expanduser().resolve()
+    project_id = (getattr(args, "project_id", None) or "").strip()
+    assume_owner = getattr(args, "assume_owner", None)
+    try:
+        source, target = _relocate_preflight(
+            project_dir, getattr(args, "legacy_path", None), project_id
+        )
+        stamps = _source_stamps(source)
+        _check_ownership(stamps, project_id, assume_owner)
+    except _RelocateRefused as exc:
+        print(f"\n  error: {exc}", file=sys.stderr)
+        return exc.exit_code
+    except Exception as exc:  # unreadable/invalid source: still nothing written
+        print(f"\n  error: cannot read the legacy store: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Relocating legacy store {source}\n                 into {target}")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staging = target.parent / f".staging-{project_id}-{stamp}"
+    staged_store = staging / project_id
+    staged_store.mkdir(parents=True)
+    # The marker goes in BEFORE the bootstrap: the fail-closed resolver reads a DB
+    # path as <...>/.vnx-data/<pid>/state/..., so the staged store sits one level
+    # below the staging dir — nothing there parses the staging name as a tenant.
+    (staged_store / ".vnx-project-id").write_text(project_id + "\n", encoding="utf-8")
+    try:
+        _copy_store_consistent(source, staged_store)
+        _upgrade_staging(staged_store, project_id)
+        _write_relocate_record(staged_store, source, project_id, stamps, assume_owner)
+        if target.exists():  # appeared while staging: never overwrite it
+            raise RuntimeError(f"{target} appeared during the relocation")
+        os.rename(staged_store, target)  # rule 5: one rename publishes the store
+    except Exception as exc:  # every step is fatal; the staging dir is kept
+        print(f"\n  error: relocation failed: {exc}", file=sys.stderr)
+        print(f"  staging dir kept for inspection: {staging}", file=sys.stderr)
+        print(f"  central store NOT created: {target}", file=sys.stderr)
+        return 1
+    try:
+        os.rmdir(staging)  # our empty scratch dir; the store already moved out
+    except OSError:  # vnx-silent-except: an empty scratch dir is not a failure
+        pass
+    _print_relocate_success(target, source, project_dir)
+    return 0
 
 
 def _iter_central_project_stores() -> list[tuple[Path, str]]:
@@ -183,6 +477,8 @@ def migrate_all_central_stores() -> int:
 
 def vnx_migrate(args) -> int:
     """Run the full migration chain against the project's runtime DBs."""
+    if getattr(args, "relocate_legacy", False):
+        return relocate_legacy(args)
     project_dir = Path(getattr(args, "project_dir", ".")).resolve()
 
     # Resolve data root via canonical chain (explicit > VNX_DATA_HOME > default).
