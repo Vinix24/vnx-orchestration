@@ -2279,6 +2279,27 @@ def _check_stale_staging(paths: Dict[str, str], active_pr_ids: Iterable[str]) ->
     return CheckResult("stale_staging", "PASS", "no stale staging dispatches")
 
 
+def _pr_dispatch_checks(pr_id: str, pr_reconciled: Any) -> List[CheckResult]:
+    """``pr_has_dispatch`` PASS for a reconciled PR, then ``pr_completed`` (ADR-047 §2).
+
+    Completed means the dispatch is in ``completed/`` AND has a terminal
+    receipt. Only an exact ``receipt_confirmed is True`` counts: a missing,
+    ``None`` or malformed flag is no receipt, so the PR is not completed.
+    """
+    provenance = pr_reconciled.provenance
+    has_dispatch = CheckResult(
+        "pr_has_dispatch", "PASS",
+        f"dispatch {provenance.get('dispatch_id') or '?'} names {pr_id}",
+    )
+    if pr_reconciled.state != "completed":
+        detail, status = f"{pr_id} state is {pr_reconciled.state}, not completed", "FAIL"
+    elif provenance.get("receipt_confirmed") is True:
+        detail, status = f"{pr_id} is completed via {provenance.get('source', '?')} with a terminal receipt", "PASS"
+    else:
+        detail, status = f"{pr_id} dispatch is in completed/ but has no terminal receipt, so it is not completed", "FAIL"
+    return [has_dispatch, CheckResult("pr_completed", status, detail)]
+
+
 def verify_pr_closure(
     *,
     pr_id: str,
@@ -2336,29 +2357,8 @@ def verify_pr_closure(
             "reconciled_state": None,
             "review_evidence": None,
         }
-    checks.append(CheckResult(
-        "pr_has_dispatch", "PASS",
-        f"dispatch {pr_reconciled.provenance.get('dispatch_id') or '?'} names {pr_id}",
-    ))
-
-    # 2. PR must be completed per reconciliation, confirmed by a terminal receipt.
-    # Only an exact True counts: a missing, None or malformed flag is no receipt.
-    receipt_confirmed = pr_reconciled.provenance.get("receipt_confirmed") is True
-    if pr_reconciled.state == "completed" and receipt_confirmed:
-        checks.append(CheckResult(
-            "pr_completed", "PASS",
-            f"{pr_id} is completed via {pr_reconciled.provenance.get('source', '?')} with a terminal receipt",
-        ))
-    elif pr_reconciled.state == "completed":
-        checks.append(CheckResult(
-            "pr_completed", "FAIL",
-            f"{pr_id} dispatch is in completed/ but has no terminal receipt, so it is not completed",
-        ))
-    else:
-        checks.append(CheckResult(
-            "pr_completed", "FAIL",
-            f"{pr_id} state is {pr_reconciled.state}, not completed",
-        ))
+    # 2. The dispatch names the PR, and the PR is completed with a terminal receipt
+    checks.extend(_pr_dispatch_checks(pr_id, pr_reconciled))
 
     # 3. Check for blocking drift affecting this PR
     pr_drift = [w for w in result.drift_warnings if w.pr_id == pr_id and w.severity == "blocking"]
