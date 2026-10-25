@@ -9,8 +9,9 @@ input is the selection of ``classify_ci_profile.py --tests-only``.
 
 Exit codes: 1 on any ``fails_on_head``, ``incomplete`` or false claim (a claimed nodeid
 whose verdict is not ``behavior``), 0 otherwise, 2 on unusable input. Fail-closed:
-missing or unparsable evidence, a collection failure or skip, an unrecognised result
-child, and a test neither side collected never pass; see ``classify_verdict``.
+missing or unparsable evidence, a pytest run that did not complete (exit other than 0 or
+1, a signal, a timeout), a collection failure or skip, an unrecognised result child, a
+test neither side collected and a copy that would leave either tree never pass.
 """
 
 from __future__ import annotations
@@ -40,6 +41,7 @@ COLLECTION_ERROR, COLLECTION_SKIPPED, MISSING, UNKNOWN = (
     "collection_error", "collection_skipped", "missing", "unknown")
 NOT_BEHAVIOR_EXCEPTIONS = re.compile(
     r"\b(?:ImportError|ModuleNotFoundError|AttributeError|TypeError|KeyError|NameError)\b")
+COMPLETED_RUN = (0, 1)  # pytest exit codes of a run that went to the end: all passed, some failed
 _RESULT_TAGS = ("failure", "error", "skipped")
 _IGNORED_TAGS = frozenset({"system-out", "system-err", "properties"})
 
@@ -116,17 +118,24 @@ def read_junit(path: Path) -> dict:
             for case in root.iter("testcase") if case.get("classname")}
 
 
-def read_manifest(path: Path) -> tuple:
-    """``({key: nodeid}, [(collection unit, Outcome)])``; ``ValueError`` when unusable."""
+def read_manifest(path: Path, exitstatus: int) -> tuple:
+    """``({key: nodeid}, [(collection unit, Outcome)])`` of the completed run that exited *exitstatus*;
+    ``ValueError`` when unusable or not that run's manifest of a finished collection."""
     try:
         manifest = load_manifest(path)  # the shared schema/nodeid validation of check_xdist_parity
-        kinds = {FAILED: COLLECTION_ERROR, "skipped": COLLECTION_SKIPPED}
-        collection = [(item["nodeid"], Outcome(kinds.get(item["outcome"], UNKNOWN),
-                                               f"collection {item['outcome']}: {item['reason']}"))
-                      for item in manifest["collection_outcomes"]]
-        return {junit_key_function()(nodeid): nodeid for nodeid in manifest["nodeids"]}, collection
     except EvidenceError as exc:
         raise ValueError(f"unreadable collection manifest {exc}") from exc
+    status = manifest.get("exitstatus")
+    if (manifest.get("phase_active") is not True or manifest.get("collection_finished") is not True
+            or type(status) is not int or status != exitstatus):
+        raise ValueError(f"collection manifest {path} is not a finished collection of a run exiting "
+                         f"{exitstatus}: phase_active={manifest.get('phase_active')!r} "
+                         f"collection_finished={manifest.get('collection_finished')!r} exitstatus={status!r}")
+    kinds = {FAILED: COLLECTION_ERROR, "skipped": COLLECTION_SKIPPED}
+    collection = [(item["nodeid"], Outcome(kinds.get(item["outcome"], UNKNOWN),
+                                           f"collection {item['outcome']}: {item['reason']}"))
+                  for item in manifest["collection_outcomes"]]
+    return {junit_key_function()(nodeid): nodeid for nodeid in manifest["nodeids"]}, collection
 
 
 def _git(repo: Path, *args: str, strict: bool = False) -> str:
@@ -137,17 +146,51 @@ def _git(repo: Path, *args: str, strict: bool = False) -> str:
     return result.stdout.strip()
 
 
-def copy_head_tests(head_tree: Path, base_tree: Path, files: list, conftests: list) -> list:
-    """Copy HEAD's test files and changed conftests into the base tree; return the absent files."""
+def copy_refusal(head_tree: Path, base_tree: Path, rel: str) -> str:
+    """Why copying *rel* from head to base could read or write outside the trees; ``""`` when it cannot."""
+    source, target = head_tree / rel, base_tree / rel
+    for path, tree in ((source, head_tree), (target.parent, base_tree)):  # resolve() follows every parent link
+        if not path.resolve().is_relative_to(tree.resolve()):
+            return f"refused to copy {rel}: {path} resolves to {path.resolve()}, outside {tree}"
+    for path in (source, target):
+        if path.is_symlink():
+            return f"refused to copy {rel}: {path} is a symlink"
+    return ""
+
+
+def copy_head_tests(head_tree: Path, base_tree: Path, files: list, conftests: list) -> dict:
+    """Copy HEAD's test files and changed conftests into the base tree; ``{file: reason}`` for every file
+    that cannot be compared: absent from head, its copy refused, or any conftest copy refused."""
+    reasons = {}
     for rel in conftests + files:
-        if (head_tree / rel).is_file():
+        reasons[rel] = copy_refusal(head_tree, base_tree, rel)
+        if not reasons[rel] and (head_tree / rel).is_file():
             (base_tree / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(head_tree / rel, base_tree / rel)
-    return [rel for rel in files if not (head_tree / rel).is_file()]
+        elif not reasons[rel] and rel in files:
+            reasons[rel] = "test file is absent from the head tree"
+    refused_conftests = "; ".join(reasons[rel] for rel in conftests if reasons[rel])
+    return {rel: refused_conftests or reasons[rel] for rel in files if refused_conftests or reasons[rel]}
+
+
+def read_side(xml_path: Path, manifest_path: Path, exitstatus: int) -> Side:
+    """The evidence of a pytest run that exited *exitstatus*: none, with the reason as ``problem``, unless
+    the run completed, its manifest says so and every collected test has a JUnit result."""
+    if exitstatus not in COMPLETED_RUN:  # interrupted, internal or usage error, no tests, a signal
+        return Side({}, {}, [], [f"exit status {exitstatus} is not a completed pytest run (0 or 1)"])
+    try:
+        outcomes, (nodeids, collection) = read_junit(xml_path), read_manifest(manifest_path, exitstatus)
+    except ValueError as exc:
+        return Side({}, {}, [], [str(exc)])
+    unrecorded = sorted(nodeid for key, nodeid in nodeids.items() if key not in outcomes)
+    if unrecorded:
+        return Side({}, {}, [], [f"{xml_path} has no result for {len(unrecorded)} collected test(s), "
+                                 f"first {unrecorded[0]}"])
+    return Side(outcomes, nodeids, collection, [])
 
 
 def run_side(tree: Path, files: list, prefix: Path, timeout: float) -> Side:
-    """One pytest run in *tree*, returned as its evidence; every failure is a recorded ``problem``."""
+    """One pytest run in *tree*, returned as its evidence (``read_side``) or as the ``problem`` why none."""
     xml_path, manifest_path = prefix.with_suffix(".xml"), prefix.with_suffix(".json")
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(tree), str(SCRIPTS_CI), env.get("PYTHONPATH")]))
@@ -160,15 +203,9 @@ def run_side(tree: Path, files: list, prefix: Path, timeout: float) -> Side:
                                  timeout=timeout, start_new_session=True)
     except (subprocess.TimeoutExpired, OSError) as exc:
         return Side({}, {}, [], [f"pytest in {tree} did not complete: {exc!r}"])
-    problems = []
-    if not (xml_path.is_file() and manifest_path.is_file()):
-        tail = " | ".join((process.stdout + process.stderr).strip().splitlines()[-3:])
-        problems.append(f"pytest in {tree} exited {process.returncode} without a verdict artifact: {tail}")
-    try:
-        outcomes, (nodeids, collection) = read_junit(xml_path), read_manifest(manifest_path)
-    except ValueError as exc:
-        return Side({}, {}, [], problems + [str(exc)])
-    return Side(outcomes, nodeids, collection, problems)
+    side = read_side(xml_path, manifest_path, process.returncode)
+    tail = " | ".join((process.stdout + process.stderr).strip().splitlines()[-3:])
+    return side._replace(problems=[f"pytest in {tree}: {problem}: {tail}" for problem in side.problems])
 
 
 def _incomplete(nodeid: str, message: str) -> dict:
@@ -202,13 +239,16 @@ def verify(repo: Path, base_rev: str, head_rev: str, files: list, conftests: lis
         for tree, rev in ((base_tree, base_rev), (head_tree, head_rev)):
             _git(repo, "worktree", "add", "--detach", str(tree),
                  _git(repo, "rev-parse", "--verify", f"{rev}^{{commit}}", strict=True), strict=True)
-        absent = copy_head_tests(head_tree, base_tree, files, conftests)
-        runnable = [rel for rel in files if rel not in absent]
-        entries, false_claims = [], []
+        unusable = copy_head_tests(head_tree, base_tree, files, conftests)
+        runnable = [rel for rel in files if rel not in unusable]
+        entries, false_claims = [], list(claims)  # a claim no comparison confirmed is a false claim
         if runnable:  # an empty argument list would make pytest collect the whole tree
-            entries, false_claims = compare(run_side(base_tree, runnable, tmp / "base", timeout),
-                                            run_side(head_tree, runnable, tmp / "head", timeout), claims)
-        entries += [_incomplete(rel, "test file is absent from the head tree") for rel in absent]
+            base, head = (run_side(tree, runnable, tmp / tree.name, timeout) for tree in (base_tree, head_tree))
+            if base.problems or head.problems:  # one side without evidence leaves no test comparable
+                entries = [_incomplete(rel, "; ".join(base.problems + head.problems)) for rel in runnable]
+            else:
+                entries, false_claims = compare(base, head, claims)
+        entries += [_incomplete(rel, reason) for rel, reason in unusable.items()]
         covered = {entry["nodeid"].split("::")[0] for entry in entries}
         entries += [_incomplete(rel, "no per-test result was collected for this file") for rel in files
                     if not any(path == rel or path.startswith(rel.rstrip("/") + "/") for path in covered)]

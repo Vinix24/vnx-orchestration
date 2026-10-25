@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
@@ -36,30 +37,42 @@ def _git(repo, *args):
     return done.stdout.strip()
 
 
-@pytest.fixture(scope="module")
-def repo(tmp_path_factory):
-    """A two-commit repo: base returns 1; head returns 2 and adds ``new_helper``."""
-    root = tmp_path_factory.mktemp("red-on-base")
+def _commit_all(root, *commits):
+    """One commit per ``{path: text}``; a ``Path`` value is committed as a symlink to that path."""
     _git(root, "init")
-    for index, sources in enumerate((BASE, HEAD)):
-        for name, text in sources.items():
-            (root / name).parent.mkdir(parents=True, exist_ok=True)
-            (root / name).write_text(text)
+    for index, sources in enumerate(commits):
+        for name, content in sources.items():
+            path = root / name
+            for link in (path, *(root / parent for parent in Path(name).parents[:-1])):
+                if link.is_symlink():  # the previous commit's symlink: never write through it
+                    link.unlink()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if isinstance(content, Path):
+                path.symlink_to(content)
+            else:
+                path.write_text(content)
         _git(root, "add", "-A")
         _git(root, "commit", "-m", f"commit {index}")
     return root
 
 
-def _run(repo, tmp_path, selected, claims=None):
+@pytest.fixture(scope="module")
+def repo(tmp_path_factory):
+    """A two-commit repo: base returns 1; head returns 2 and adds ``new_helper``."""
+    return _commit_all(tmp_path_factory.mktemp("red-on-base"), BASE, HEAD)
+
+
+def _run(repo, tmp_path, selected, claims=None, extra=(), env=None):
     (tmp_path / "selection.json").write_text(
         json.dumps({"selected": selected, "conftest_changed": ["tests/conftest.py"]}))
     argv = [sys.executable, str(SCRIPT), "--base", _git(repo, "rev-parse", "HEAD^"), "--head",
             _git(repo, "rev-parse", "HEAD"), "--selection", str(tmp_path / "selection.json"),
-            "--out", str(tmp_path / "verdict.json")]
+            "--out", str(tmp_path / "verdict.json"), *extra]
     if claims:
         (tmp_path / "claims.txt").write_text("\n".join(claims) + "\n")
         argv += ["--claims", str(tmp_path / "claims.txt")]
-    done = subprocess.run(argv, cwd=str(repo), capture_output=True, text=True, timeout=180)
+    done = subprocess.run(argv, cwd=str(repo), capture_output=True, text=True, timeout=180,
+                          env={**os.environ, **(env or {})})
     out = tmp_path / "verdict.json"
     return done, (json.loads(out.read_text()) if out.is_file() else None)
 
@@ -121,4 +134,103 @@ def test_classifier_and_unreadable_evidence(tmp_path):
         rl.read_junit(tmp_path / "junit.xml")
     (tmp_path / "manifest.json").write_text(json.dumps({"nodeids": None}))
     with pytest.raises(ValueError):
-        rl.read_manifest(tmp_path / "manifest.json")
+        rl.read_manifest(tmp_path / "manifest.json", 0)
+
+
+ABNORMAL_END = (  # the base run writes complete JUnit XML and a manifest, then does not end normally
+    "import os\nimport signal\nimport time\n\nfrom tinypkg import value\n\n\n"
+    "def pytest_unconfigure(config):\n"
+    "    if value() == 1:\n"
+    "        end = os.environ['FAKE_PYTEST_END']\n"
+    "        if end == 'timeout':\n            time.sleep(120)\n"
+    "        elif end == 'signal':\n            os.kill(os.getpid(), signal.SIGKILL)\n"
+    "        else:\n            os._exit(int(end))\n")
+TEST_VALUE_2 = "from tinypkg import value\n\n\ndef test_it():\n    assert value() == 2\n"
+
+
+@pytest.fixture(scope="module")
+def abnormal_repo(tmp_path_factory):
+    head = {"tinypkg/__init__.py": HEAD["tinypkg/__init__.py"], "tests/conftest.py": ABNORMAL_END,
+            "tests/test_abnormal.py": TEST_VALUE_2 + "\n\ndef test_passes():\n    assert value() in (1, 2)\n"}
+    return _commit_all(tmp_path_factory.mktemp("abnormal"), BASE, head)
+
+
+@pytest.mark.parametrize("end, reason", [("2", "exit status 2"), ("3", "exit status 3"),
+                                         ("signal", "exit status -9"), ("timeout", "did not complete")])
+def test_evidence_of_an_abnormal_pytest_end_is_incomplete(abnormal_repo, tmp_path, end, reason):
+    done, verdict = _run(abnormal_repo, tmp_path, ["tests/test_abnormal.py"],
+                         claims=["tests/test_abnormal.py::test_it"], extra=["--timeout", "6"],
+                         env={"FAKE_PYTEST_END": end})
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert {entry["verdict"] for entry in verdict["tests"]} == {"incomplete"}
+    assert all(reason in entry["base_message"] for entry in verdict["tests"]), verdict["tests"]
+    assert verdict["false_claims"] == ["tests/test_abnormal.py::test_it"]
+
+
+@pytest.fixture(scope="module")
+def symlink_repo(tmp_path_factory):
+    """Base: a test file linked to an outside file, a test dir linked to an outside dir. Head: real files
+    there, plus a test dir linked to an outside dir holding a test."""
+    outside = tmp_path_factory.mktemp("outside")
+    (outside / "sub").mkdir()
+    (outside / "ext").mkdir()
+    (outside / "ext" / "test_ext.py").write_text(TEST_VALUE_2)
+    (outside / "victim.py").write_text("VICTIM\n")
+    base = {**BASE, "tests/test_dest.py": outside / "victim.py", "tests/sub": outside / "sub"}
+    head = {"tinypkg/__init__.py": HEAD["tinypkg/__init__.py"], "tests/test_dest.py": TEST_VALUE_2,
+            "tests/sub/test_sub.py": TEST_VALUE_2, "tests/ext": outside / "ext", "tests/test_ok.py": TEST_VALUE_2}
+    return _commit_all(tmp_path_factory.mktemp("symlinks"), base, head), outside
+
+
+def test_copy_never_goes_through_a_symlink_or_outside_a_tree(symlink_repo, tmp_path):
+    repo, outside = symlink_repo
+    refused = ["tests/ext/test_ext.py", "tests/sub/test_sub.py", "tests/test_dest.py"]
+    done, verdict = _run(repo, tmp_path, refused + ["tests/test_ok.py"], claims=["tests/ext/test_ext.py::test_it"])
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert (outside / "victim.py").read_text() == "VICTIM\n"
+    assert sorted(path.relative_to(outside).as_posix() for path in outside.rglob("*")) == [
+        "ext", "ext/test_ext.py", "sub", "victim.py"]
+    verdicts = {entry["nodeid"]: (entry["verdict"], entry["base_message"] or "") for entry in verdict["tests"]}
+    assert verdicts["tests/test_ok.py::test_it"][0] == "behavior"
+    for rel in refused:
+        assert verdicts[rel][0] == "incomplete" and verdicts[rel][1].startswith(f"refused to copy {rel}")
+    assert verdict["false_claims"] == ["tests/ext/test_ext.py::test_it"]
+
+
+def _evidence(tmp_path, run_exit, **fields):
+    """JUnit XML and a manifest of a run that exited *run_exit*; *fields* override manifest fields."""
+    (tmp_path / "side.xml").write_text('<testsuite><testcase classname="tests.test_x" name="test_y"/></testsuite>')
+    (tmp_path / "side.json").write_text(json.dumps({
+        "schema": "vnx-collection-manifest/1", "phase_active": True, "collection_finished": True,
+        "exitstatus": run_exit, "nodeids": ["tests/test_x.py::test_y"], "collection_outcomes": [], **fields}))
+    return tmp_path / "side.xml", tmp_path / "side.json", run_exit
+
+
+def test_evidence_of_a_completed_run_is_used(tmp_path):
+    side = rl.read_side(*_evidence(tmp_path, 1))
+    assert side.problems == [] and side.outcomes[("tests.test_x", "test_y")].kind == "passed"
+
+
+@pytest.mark.parametrize("exitstatus, fields", [
+    (2, {}), (3, {}), (4, {}), (5, {}), (-9, {}),
+    (0, {"phase_active": False}), (0, {"collection_finished": None}), (0, {"exitstatus": 1}),
+    (1, {"exitstatus": True}), (0, {"exitstatus": "0"}), (0, {"exitstatus": None}),
+    (0, {"nodeids": ["tests/test_x.py::test_y", "tests/test_x.py::test_z"]}),  # collected, no JUnit result
+])
+def test_evidence_of_an_unfinished_run_is_never_used(tmp_path, exitstatus, fields):
+    side = rl.read_side(*_evidence(tmp_path, exitstatus, **fields))
+    assert side.outcomes == {} and side.nodeids == {} and side.collection == [] and side.problems
+
+
+def test_a_refused_conftest_copy_leaves_no_file_comparable(tmp_path):
+    head_tree, base_tree, outside = tmp_path / "head", tmp_path / "base", tmp_path / "outside.py"
+    for rel in ("tests/conftest.py", "tests/test_a.py"):
+        (head_tree / rel).parent.mkdir(parents=True, exist_ok=True)
+        (head_tree / rel).write_text("HEAD\n")
+    (base_tree / "tests").mkdir(parents=True)
+    outside.write_text("OUTSIDE\n")
+    (base_tree / "tests" / "conftest.py").symlink_to(outside)
+    reasons = rl.copy_head_tests(head_tree, base_tree, ["tests/test_a.py"], ["tests/conftest.py"])
+    assert list(reasons) == ["tests/test_a.py"] and reasons["tests/test_a.py"].startswith(
+        "refused to copy tests/conftest.py") and reasons["tests/test_a.py"].endswith("is a symlink")
+    assert outside.read_text() == "OUTSIDE\n"
