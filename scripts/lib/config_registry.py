@@ -286,11 +286,12 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         approval=True,
         subsystem="signed-attestation", status="PARK"),
     "VNX_JUNIT_COUNTS": _e(
-        "VNX_JUNIT_COUNTS", "bool", "0", "gate",
-        "Path 2 (report_parser) takes its receipt test counts from the builder's JUnit XML "
-        "beside the report (track deterministische-testverificatie) instead of the prose in "
-        "the Verification section. Off = today's text counts, byte for byte; PR-5 wires the "
-        "envelope path and turns it on for both write paths at once.",
+        "VNX_JUNIT_COUNTS", "bool", "1", "gate",
+        "Both receipt write paths (report_parser and the envelope sub-path) take their "
+        "receipt test counts from the builder's JUnit XML beside the report (track "
+        "deterministische-testverificatie) instead of the prose in the Verification "
+        "section. Off = today's text counts, byte for byte; this single setting is the "
+        "rollback for both paths at once.",
         subsystem="deterministic-test-verification", status="ACTIVATE"),
     "VNX_MIGRATION_SYSTEM": _e(
         "VNX_MIGRATION_SYSTEM", "enum", "manifest", "dispatch",

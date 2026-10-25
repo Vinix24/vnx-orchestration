@@ -283,7 +283,10 @@ def _verification_from_report(report_path: Optional[Path]) -> Dict[str, Any]:
     so the markdown report is on disk by the time the receipt is written.
     Threads the SAME `report_parser.py::extract_validation` regex extractor
     Path 2 already uses into this call — no new extraction mechanism, no new
-    report format (§8 non-goal).
+    report format (§8 non-goal). PR-5 routes the counts through
+    `verification_runs.verification_record_for_report`, the one function Path
+    2 also calls, so `VNX_JUNIT_COUNTS` switches both paths on together and
+    this path reads the same `<report>.junit.xml` sidecar (§12.4).
 
     Never raises: any extraction failure degrades to `method: "unknown"`
     rather than blocking the (fail-closed) receipt write.
@@ -298,14 +301,18 @@ def _verification_from_report(report_path: Optional[Path]) -> Dict[str, Any]:
         if _scripts_dir not in sys.path:
             sys.path.insert(0, _scripts_dir)
         from report_parser import ReportParser  # noqa: PLC0415
-        from verification_runs import verification_record
+        from verification_runs import verification_record_for_report
 
         parser = ReportParser()
         # D1b: the same builder as report_parser's receipt, keyed on the
         # report's own Dispatch-ID, so a gate-runner report is evidence on
         # this path too and one report never yields two verifications.
         dispatch_id = parser.extract_metadata(content).get("dispatch_id")
-        return verification_record(parser.extract_validation(content), dispatch_id)
+        # PR-5: the SAME sidecar decision Path 2 makes — one function, so the
+        # envelope path reads the builder's JUnit XML exactly like the receipt
+        # path does (ADR-035 §12.4).
+        return verification_record_for_report(
+            parser.extract_validation(content), dispatch_id, report_path)
     except Exception as exc:  # noqa: BLE001 — never block the receipt write
         logger.warning(
             "envelope._verification_from_report: extraction failed for %s: %s",
