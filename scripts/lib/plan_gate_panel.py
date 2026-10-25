@@ -57,6 +57,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
+import dispatch_worktree_isolation
+
 # R6 (OI-2039): a seat whose report carries no verdict fence may still have its
 # verdict in its final answer, the result event of its archived event stream.
 # A claude seat's stream is archived when its run ends (_archive_seat_stream).
@@ -137,6 +139,15 @@ _HEADLESS_LANE = "claude_headless"
 # than splitting the audit trail by lane. event_store keeps its live stream per run
 # (OI-2115), so seats running at the same time never share one stream.
 _PANEL_TERMINAL_ID = event_store.HARNESS_SEAT_TERMINAL
+
+# The terminal a PARENT-side reap of a provider seat's worktree files its
+# provider_teardown_worktree event under (_run_provider_lane_child). Deliberately not
+# _PANEL_TERMINAL_ID: that is the seat's own terminal, where the child records its own
+# teardown. A reap by the parent means the child never reached that teardown (killed on
+# timeout), and a terminal of its own keeps that visible. The event itself is unchanged:
+# remove_dispatch_worktree builds it, this only names the stream
+# (<data_dir>/events/plan-gate-parent.ndjson).
+_PARENT_REAP_TERMINAL_ID = "plan-gate-parent"
 
 # The seat roster a run picks from: (label, provider string, model_arg), one per provider
 # family (Anthropic / Moonshot / Zhipu / DeepSeek / OpenAI). A plan-gate run uses the
@@ -1656,6 +1667,53 @@ def _seat_child_env(base: Path, total_deadline_seconds: Optional[int]) -> Dict[s
     return env
 
 
+def _run_provider_lane_child(
+    cmd: List[str],
+    *,
+    env: Dict[str, str],
+    timeout_seconds: int,
+    dispatch_id: str,
+    data_dir: Path,
+) -> subprocess.CompletedProcess:
+    """Run the ``provider_dispatch.py`` child and reap its worktree if it dies.
+
+    The child creates its own isolated worktree and removes it in its own
+    ``finally``.  A child killed for exceeding *timeout_seconds* (SIGKILL from
+    ``subprocess.run``) never reaches that ``finally``, so the parent reaps the
+    tree here — otherwise every timed-out gate seat leaks a
+    ``dispatch-*-gate-*`` worktree under ``.vnx-data/worktrees/`` (measured
+    2026-10-24: 11 such trees).  The reap never alters the outcome: a
+    ``TimeoutExpired`` still propagates to the caller after it.
+
+    The reap is narrowed to a tree this child run could have created
+    (``reap_child_worktree_on_exit``): whether the path exists is recorded
+    BEFORE ``subprocess.run``, and a tree that existed before is never reaped.
+    A tree that appeared during the run is reaped only while the parent holds
+    its occupancy lock exclusively, so a duplicate seat that exited on
+    ``WorktreeOccupied`` never tears down its live sibling's tree.
+
+    *data_dir* is the dispatcher's resolved ``base`` — the ``VNX_DATA_DIR``
+    pinned into *env* — so the reap reads the claim registry the child wrote,
+    not one this process would resolve from its own environment.  The teardown
+    event is filed under ``_PARENT_REAP_TERMINAL_ID``.
+
+    ``review_only=True`` is correct for every seat this dispatcher builds: they
+    run with ``--no-auto-commit`` and materialize only a disposable PR
+    reproduction, which ``remove_dispatch_worktree`` discards before
+    classification — and only while HEAD still equals the recorded base, so a
+    real local commit's branch is never discarded.  The claude branch never
+    reaches this helper.
+    """
+    with dispatch_worktree_isolation.reap_child_worktree_on_exit(
+        dispatch_id, data_dir=data_dir, terminal_id=_PARENT_REAP_TERMINAL_ID,
+        review_only=True,
+    ):
+        return subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout_seconds,
+            check=False, env=env,
+        )
+
+
 def _make_default_dispatcher(
     data_dir: Optional[str], timeout_seconds: int,
     *, role: str = "plan-reviewer", base_ref: Optional[str] = None,
@@ -1795,10 +1853,9 @@ def _make_default_dispatcher(
             ]
             if base_ref:
                 cmd += ["--base-ref", base_ref]
-            proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=timeout_seconds,
-                check=False, env=env,
-            )
+            proc = _run_provider_lane_child(
+                cmd, env=env, timeout_seconds=timeout_seconds, dispatch_id=dispatch_id,
+                data_dir=base)
             report = _read_report(base, dispatch_id, proc.stderr)
             if report is None:
                 # provider_dispatch prints its actionable detail across both streams —
