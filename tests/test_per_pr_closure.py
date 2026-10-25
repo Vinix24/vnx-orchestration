@@ -25,6 +25,7 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 
 import closure_verifier as cv
+from fixtures.closure_track_fixture import CLOSURE_TRACK_ID, seed_done_track
 from review_contract import (
     Deliverable,
     DeterministicFinding,
@@ -34,51 +35,6 @@ from review_contract import (
 )
 
 
-FEATURE_PLAN = """\
-# Feature: Test Per-PR Closure
-
-**Status**: Active
-**Risk-Class**: high
-
-## PR-0: Foundation
-**Track**: C
-**Priority**: P1
-**Skill**: @architect
-**Risk-Class**: high
-**Merge-Policy**: human
-**Review-Stack**: gemini_review,codex_gate
-**Dependencies**: []
-
-`gate_pr0_foundation`
-
----
-
-## PR-1: Core
-**Track**: B
-**Priority**: P1
-**Skill**: @backend-developer
-**Risk-Class**: high
-**Merge-Policy**: human
-**Review-Stack**: gemini_review,codex_gate
-**Dependencies**: [PR-0]
-
-`gate_pr1_core`
-
----
-
-## PR-2: Integration
-**Track**: C
-**Priority**: P2
-**Skill**: @quality-engineer
-**Risk-Class**: high
-**Merge-Policy**: human
-**Review-Stack**: gemini_review,codex_gate
-**Dependencies**: [PR-1]
-
-`gate_pr2_integration`
-
----
-"""
 
 
 def _write_dispatch(path: Path, pr_id: str, dispatch_id: str) -> None:
@@ -138,9 +94,6 @@ def closure_env(tmp_path, monkeypatch):
     project_root = tmp_path / "repo"
     project_root.mkdir()
 
-    fp = project_root / "FEATURE_PLAN.md"
-    fp.write_text(FEATURE_PLAN)
-
     data_dir = project_root / ".vnx-data"
     dispatch_dir = data_dir / "dispatches"
     dispatch_dir.mkdir(parents=True)
@@ -161,7 +114,6 @@ def closure_env(tmp_path, monkeypatch):
 
     return {
         "project_root": project_root,
-        "feature_plan": fp,
         "dispatch_dir": dispatch_dir,
         "state_dir": state_dir,
         "receipts_file": receipts,
@@ -206,7 +158,6 @@ class TestPerPRClosure:
         result = cv.verify_pr_closure(
             pr_id="PR-0",
             project_root=closure_env["project_root"],
-            feature_plan=closure_env["feature_plan"],
             dispatch_dir=closure_env["dispatch_dir"],
             receipts_file=closure_env["receipts_file"],
             state_dir=closure_env["state_dir"],
@@ -220,11 +171,13 @@ class TestPerPRClosure:
 
     def test_incomplete_pr_fails(self, closure_env):
         """Per-PR closure fails when PR is not yet completed."""
-        # PR-0 has no dispatches — state is pending
+        # PR-0 is named only by a pending dispatch — state is pending
+        _write_dispatch(
+            closure_env["dispatch_dir"] / "pending" / "d0.md", "PR-0", "d0"
+        )
         result = cv.verify_pr_closure(
             pr_id="PR-0",
             project_root=closure_env["project_root"],
-            feature_plan=closure_env["feature_plan"],
             dispatch_dir=closure_env["dispatch_dir"],
             receipts_file=closure_env["receipts_file"],
             state_dir=closure_env["state_dir"],
@@ -235,11 +188,10 @@ class TestPerPRClosure:
         assert "pr_completed" in failed
 
     def test_unknown_pr_fails(self, closure_env):
-        """Per-PR closure fails for PR not in feature plan."""
+        """Per-PR closure fails for a PR no dispatch names."""
         result = cv.verify_pr_closure(
             pr_id="PR-99",
             project_root=closure_env["project_root"],
-            feature_plan=closure_env["feature_plan"],
             dispatch_dir=closure_env["dispatch_dir"],
             receipts_file=closure_env["receipts_file"],
             state_dir=closure_env["state_dir"],
@@ -258,7 +210,6 @@ class TestPerPRClosure:
         result = cv.verify_pr_closure(
             pr_id="PR-0",
             project_root=closure_env["project_root"],
-            feature_plan=closure_env["feature_plan"],
             dispatch_dir=closure_env["dispatch_dir"],
             receipts_file=closure_env["receipts_file"],
             state_dir=closure_env["state_dir"],
@@ -284,7 +235,6 @@ class TestPerPRClosure:
         result = cv.verify_pr_closure(
             pr_id="PR-0",
             project_root=closure_env["project_root"],
-            feature_plan=closure_env["feature_plan"],
             dispatch_dir=closure_env["dispatch_dir"],
             receipts_file=closure_env["receipts_file"],
             state_dir=closure_env["state_dir"],
@@ -331,7 +281,6 @@ class TestGateReportContradiction:
         result = cv.verify_pr_closure(
             pr_id="PR-0",
             project_root=closure_env["project_root"],
-            feature_plan=closure_env["feature_plan"],
             dispatch_dir=closure_env["dispatch_dir"],
             receipts_file=closure_env["receipts_file"],
             state_dir=closure_env["state_dir"],
@@ -373,7 +322,6 @@ class TestGateReportContradiction:
         result = cv.verify_pr_closure(
             pr_id="PR-0",
             project_root=closure_env["project_root"],
-            feature_plan=closure_env["feature_plan"],
             dispatch_dir=closure_env["dispatch_dir"],
             receipts_file=closure_env["receipts_file"],
             state_dir=closure_env["state_dir"],
@@ -417,7 +365,6 @@ class TestGateReportContradiction:
         result = cv.verify_pr_closure(
             pr_id="PR-0",
             project_root=closure_env["project_root"],
-            feature_plan=closure_env["feature_plan"],
             dispatch_dir=closure_env["dispatch_dir"],
             receipts_file=closure_env["receipts_file"],
             state_dir=closure_env["state_dir"],
@@ -448,7 +395,6 @@ class TestGateReportContradiction:
         result = cv.verify_pr_closure(
             pr_id="PR-0",
             project_root=closure_env["project_root"],
-            feature_plan=closure_env["feature_plan"],
             dispatch_dir=closure_env["dispatch_dir"],
             receipts_file=closure_env["receipts_file"],
             state_dir=closure_env["state_dir"],
@@ -481,7 +427,6 @@ class TestMultiFeatureStaleState:
         result = cv.verify_pr_closure(
             pr_id="PR-1",
             project_root=closure_env["project_root"],
-            feature_plan=closure_env["feature_plan"],
             dispatch_dir=closure_env["dispatch_dir"],
             receipts_file=closure_env["receipts_file"],
             state_dir=closure_env["state_dir"],
@@ -544,7 +489,6 @@ class TestRound3PrIdGuard:
         result = cv.verify_pr_closure(
             pr_id="PR-0",
             project_root=closure_env["project_root"],
-            feature_plan=closure_env["feature_plan"],
             dispatch_dir=closure_env["dispatch_dir"],
             receipts_file=closure_env["receipts_file"],
             state_dir=closure_env["state_dir"],
@@ -584,7 +528,6 @@ class TestRound3PrIdGuard:
         result = cv.verify_pr_closure(
             pr_id="PR-0",
             project_root=closure_env["project_root"],
-            feature_plan=closure_env["feature_plan"],
             dispatch_dir=closure_env["dispatch_dir"],
             receipts_file=closure_env["receipts_file"],
             state_dir=closure_env["state_dir"],
@@ -626,7 +569,6 @@ class TestRound3BranchThreading:
         result = cv.verify_pr_closure(
             pr_id="PR-0",
             project_root=closure_env["project_root"],
-            feature_plan=closure_env["feature_plan"],
             dispatch_dir=closure_env["dispatch_dir"],
             receipts_file=closure_env["receipts_file"],
             state_dir=closure_env["state_dir"],
@@ -670,7 +612,6 @@ class TestRound3BranchThreading:
         result = cv.verify_pr_closure(
             pr_id="PR-0",
             project_root=closure_env["project_root"],
-            feature_plan=closure_env["feature_plan"],
             dispatch_dir=closure_env["dispatch_dir"],
             receipts_file=closure_env["receipts_file"],
             state_dir=closure_env["state_dir"],
@@ -708,7 +649,6 @@ class TestRound3BranchThreading:
         result = cv.verify_pr_closure(
             pr_id="PR-0",
             project_root=closure_env["project_root"],
-            feature_plan=closure_env["feature_plan"],
             dispatch_dir=closure_env["dispatch_dir"],
             receipts_file=closure_env["receipts_file"],
             state_dir=closure_env["state_dir"],
@@ -763,7 +703,6 @@ class TestRound3MainCliWiring:
 
         rc = cv.main([
             "--pr-id", "PR-0",
-            "--feature-plan", str(closure_env["feature_plan"]),
             "--review-contract", str(contract_path),
             "--gate-results-dir", str(results_dir),
             "--branch", "feat/current",
@@ -797,7 +736,6 @@ class TestRound3MainCliWiring:
 
         rc = cv.main([
             "--pr-id", "PR-0",
-            "--feature-plan", str(closure_env["feature_plan"]),
             "--review-contract", str(contract_path),
             "--branch", "feat/current",
             "--mode", "post_merge",
@@ -840,7 +778,6 @@ class TestRound3MainCliWiring:
 
         rc = cv.main([
             "--pr-id", "PR-0",
-            "--feature-plan", str(closure_env["feature_plan"]),
             "--review-contract", str(contract_path),
             "--mode", "pre_merge",
             "--require-github-pr",
@@ -895,7 +832,6 @@ class TestRound3MergeStateCheck:
         result = cv.verify_pr_closure(
             pr_id="PR-0",
             project_root=closure_env["project_root"],
-            feature_plan=closure_env["feature_plan"],
             dispatch_dir=closure_env["dispatch_dir"],
             receipts_file=closure_env["receipts_file"],
             state_dir=closure_env["state_dir"],
@@ -947,7 +883,6 @@ class TestRound3MergeStateCheck:
         result = cv.verify_pr_closure(
             pr_id="PR-0",
             project_root=closure_env["project_root"],
-            feature_plan=closure_env["feature_plan"],
             dispatch_dir=closure_env["dispatch_dir"],
             receipts_file=closure_env["receipts_file"],
             state_dir=closure_env["state_dir"],
@@ -999,7 +934,6 @@ class TestRound3MergeStateCheck:
         result = cv.verify_pr_closure(
             pr_id="PR-0",
             project_root=closure_env["project_root"],
-            feature_plan=closure_env["feature_plan"],
             dispatch_dir=closure_env["dispatch_dir"],
             receipts_file=closure_env["receipts_file"],
             state_dir=closure_env["state_dir"],
@@ -1018,24 +952,8 @@ class TestRound3VerifyClosureContradiction:
     def test_verify_closure_catches_pass_gate_with_blocking_report(
         self, closure_env, tmp_path, monkeypatch
     ):
-        # Set up a fully-passing feature plan + queue + branch for verify_closure
-        feature_plan = closure_env["project_root"] / "FEATURE_PLAN.md"
-        feature_plan.write_text(
-            "# Feature: R3 Closure Test\n\n"
-            "**Status**: Complete\n\n"
-            "## Dependency Flow\n```text\nPR-0\n```\n\n"
-            "## PR-0: Foundation\n"
-            "**Track**: A\n**Priority**: P1\n**Skill**: @backend-developer\n"
-            "**Risk-Class**: high\n**Merge-Policy**: human\n"
-            "**Review-Stack**: gemini_review\n**Dependencies**: []\n\n"
-            "`gate_pr0`\n\n---\n"
-        )
-        pr_queue = closure_env["project_root"] / "PR_QUEUE.md"
-        pr_queue.write_text(
-            "# PR Queue - Feature: R3 Closure Test\n\n"
-            "Total: 1 PRs | Complete: 1 | Active: 0 | Queued: 0 | Blocked: 0\n\n"
-            "## Dependency Flow\n```\nPR-0\n```\n"
-        )
+        # A done track with its PR merged, so only the contradiction can fail closure
+        seed_done_track(closure_env["state_dir"], monkeypatch, pr_numbers=(300,))
 
         reports_dir = tmp_path / "reports"
         reports_dir.mkdir()
@@ -1065,8 +983,7 @@ class TestRound3VerifyClosureContradiction:
 
         result = cv.verify_closure(
             project_root=closure_env["project_root"],
-            feature_plan=feature_plan,
-            pr_queue=pr_queue,
+            track_id=CLOSURE_TRACK_ID,
             branch="feat/current",
             mode="pre_merge",
             review_contract=contract,

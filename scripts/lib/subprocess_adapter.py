@@ -51,8 +51,9 @@ logger = logging.getLogger(__name__)
 # Capability scoping (interim, per WORKER-CAPABILITY-SCOPING-DESIGN.md §5):
 # drop --dangerously-skip-permissions for an empty ambient MCP + acceptEdits +
 # profile allow-list. Imported defensively so an import failure never silently
-# re-opens the skip-permissions blast radius — the inline fallback below is still
-# scoped (never skip-permissions).
+# re-opens the skip-permissions blast radius — the inline fallback below IS the
+# scoped default for a code worker (empty MCP + the mcp__* namespace deny, never
+# skip-permissions).
 try:
     from worker_permissions import (
         UnknownRoleError,
@@ -73,68 +74,82 @@ except Exception:  # pragma: no cover - sibling import is available in-tree
         pass
 
 _LEGACY_SKIP_FLAG = "--dangerously-skip-permissions"
-# Inline fallback used only if worker_permissions cannot be imported — still
-# scoped (empty MCP + acceptEdits + a functional code-worker allow-list).
-_FALLBACK_SCOPE_ARGS = [
-    "--permission-mode", "acceptEdits",
-    "--strict-mcp-config",
-    "--mcp-config", '{"mcpServers":{}}',
-    "--allowedTools", "Read,Write,Edit,MultiEdit,Bash,Grep,Glob",
+
+# The import-failure fallback, mirrored from worker_permissions (which may be
+# exactly the import that failed). Each value matches the scoped default a code
+# worker gets from build_claude_scope_args(); the fallback tests pin the parity.
+_FALLBACK_MCP_NAMESPACE_DENY = "mcp__*"          # worker_permissions.MCP_NAMESPACE_DENY
+_FALLBACK_EMPTY_MCP_CONFIG = '{"mcpServers":{}}'  # worker_permissions.EMPTY_MCP_CONFIG
+_FALLBACK_DENIED_TOOLS = ["WebSearch", "WebFetch"]
+_FALLBACK_CODE_WORKER_TOOLS = [                  # worker_permissions.DEFAULT_CODE_WORKER_TOOLS
+    "Read", "Write", "Edit", "MultiEdit", "Bash", "Grep", "Glob",
+    "Bash(git:*)", "Bash(gh:*)", "Bash(python3:*)", "Bash(pytest:*)",
+    "Bash(pip:*)", "Bash(rm:*)", "Bash(chmod:*)", "Bash(mkdir:*)",
 ]
+
+
+def _fallback_scope_args(requires_mcp: bool = False) -> List[str]:
+    """The scoped code-worker argv head, built without ``worker_permissions``."""
+    args: List[str] = ["--permission-mode", "acceptEdits"]
+    if not requires_mcp:
+        # --mcp-config is variadic: the JSON value first, the boolean flag last.
+        args += ["--mcp-config", _FALLBACK_EMPTY_MCP_CONFIG, "--strict-mcp-config"]
+    args += ["--allowedTools", ",".join(_FALLBACK_CODE_WORKER_TOOLS)]
+    disallowed = list(_FALLBACK_DENIED_TOOLS)
+    if not requires_mcp:
+        disallowed.append(_FALLBACK_MCP_NAMESPACE_DENY)
+    args += ["--disallowedTools", ",".join(disallowed)]
+    return args
+
+
+_FALLBACK_SCOPE_ARGS = _fallback_scope_args()
 
 
 def _build_worker_scope_args(role: Optional[str], requires_mcp: bool = False) -> List[str]:
     """Return the capability-scoping argv head for a headless ``claude`` spawn.
 
-    Default (``VNX_ENFORCE_WORKER_PERMISSIONS`` and ``VNX_WORKER_SCOPED`` both
-    unset/falsey): the blanket ``--dangerously-skip-permissions`` flag, preserving
-    historical behavior. Set ``VNX_ENFORCE_WORKER_PERMISSIONS=1`` (or the legacy
-    ``VNX_WORKER_SCOPED=1``) to opt into ``--permission-mode acceptEdits`` + empty
-    ambient MCP + the role's tool allow-list instead.
+    Scoped is the default: acceptEdits, an empty ambient ``--mcp-config`` plus
+    ``--strict-mcp-config`` and the ``mcp__*`` deny, and the role's allow/deny
+    lists. The blanket ``--dangerously-skip-permissions`` posture is reached
+    only through the explicit ``VNX_WORKER_BLANKET_SKIP=1`` / falsy
+    ``VNX_WORKER_SCOPED`` opt-out, and only while ``worker_permissions`` is
+    importable. ``requires_mcp=True`` omits the force-empty MCP pair and the
+    ``mcp__*`` deny so the dispatch keeps its ambient config.
 
-    ``requires_mcp``: when True, the ``--strict-mcp-config --mcp-config {}`` pair
-    is forwarded to ``build_claude_scope_args`` so the dispatch retains its normal
-    ambient MCP config instead of being force-emptied. Only takes effect in the
-    scoped posture — the blanket default ignores it.
+    Import failure: the switches and the role profile are unresolvable, so the
+    spawn fails CLOSED into :func:`_fallback_scope_args` — never into
+    ``--dangerously-skip-permissions``.
     """
+    if (
+        worker_scoped_enabled is None
+        or worker_permission_enforcement_enabled is None
+        or resolve_worker_profile is None
+        or build_claude_scope_args is None
+    ):
+        # worker_permissions import failed. Deliberately ignore
+        # VNX_WORKER_BLANKET_SKIP / VNX_WORKER_SCOPED here: the module that
+        # owns their semantics is the one that failed, so interpreting them
+        # locally is how the fallback drifted open before. Fail closed.
+        return _fallback_scope_args(requires_mcp)
     # New enforcement flag OR legacy scoped flag opts into scoped args.
-    scoped = False
-    if worker_scoped_enabled is not None and worker_permission_enforcement_enabled is not None:
-        scoped = worker_scoped_enabled() or worker_permission_enforcement_enabled()
-    else:
-        # worker_permissions import failed: read the flags DIRECTLY so an enforcement
-        # request still fails CLOSED into the scoped fallback below, never silently
-        # re-opening --dangerously-skip-permissions.
-        _falsey = ("", "0", "false", "False", "no", "off")
-        scoped = (
-            os.environ.get("VNX_ENFORCE_WORKER_PERMISSIONS", "") not in _falsey
-            or os.environ.get("VNX_WORKER_SCOPED", "") not in _falsey
-        )
+    scoped = worker_scoped_enabled() or worker_permission_enforcement_enabled()
     if not scoped:
         return [_LEGACY_SKIP_FLAG]
-    if resolve_worker_profile is not None and build_claude_scope_args is not None:
-        try:
-            return build_claude_scope_args(resolve_worker_profile(role), requires_mcp=requires_mcp)
-        except UnknownRoleError:
-            # A role absent from every register (OI-1069 pt.5) must refuse the
-            # dispatch, not degrade into a fallback scope — re-raise so
-            # deliver() converts it into a proper DeliveryResult(success=False)
-            # before any subprocess spawns, instead of the generic handler
-            # below silently continuing with _FALLBACK_SCOPE_ARGS.
-            raise
-        except Exception as exc:  # noqa: BLE001 — never fall back to skip-permissions
-            logger.warning(
-                "subprocess_adapter: scope-arg build failed (%s); using inline default",
-                exc,
-            )
-    if requires_mcp:
-        # Fallback without MCP-clearing flags so Requires-MCP dispatches keep
-        # their ambient config even when worker_permissions is unavailable.
-        return [
-            "--permission-mode", "acceptEdits",
-            "--allowedTools", "Read,Write,Edit,MultiEdit,Bash,Grep,Glob",
-        ]
-    return list(_FALLBACK_SCOPE_ARGS)
+    try:
+        return build_claude_scope_args(resolve_worker_profile(role), requires_mcp=requires_mcp)
+    except UnknownRoleError:
+        # A role absent from every register (OI-1069 pt.5) must refuse the
+        # dispatch, not degrade into a fallback scope — re-raise so
+        # deliver() converts it into a proper DeliveryResult(success=False)
+        # before any subprocess spawns, instead of the generic handler
+        # below silently continuing with _FALLBACK_SCOPE_ARGS.
+        raise
+    except Exception as exc:  # logged below; the fallback stays scoped, never skip-permissions
+        logger.warning(
+            "subprocess_adapter: scope-arg build failed (%s); using scoped code-worker default",
+            exc,
+        )
+        return _fallback_scope_args(requires_mcp)
 
 
 def _resolve_scope_args(
