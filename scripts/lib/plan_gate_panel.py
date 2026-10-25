@@ -17,6 +17,10 @@ The caller (``planning_cli plan-gate run``) resolves the ``OI-PLAN-<track>``
 blocker on PASS, which — via ``track_reconciler`` — flips the track's
 ``derived_status`` away from ``blocked`` and lets ``deliverable promote`` proceed.
 
+The roster keeps ONE seat per provider family: two seats that resolve to the
+same registry family (``seat_family``) would count one vendor twice, so the
+loader refuses such a config at load time, naming both seats.
+
 Panel composition (operator decision 2026-10-17, P2): ONE seat reads the plan,
 the configured ``default_seat`` (codex). A second seat, ``escalation_seat``
 (opus), reads the same plan in the same run when the first returns BLOCK, or
@@ -199,7 +203,13 @@ def resolve_codex_seat_models(seats: List[Dict[str, str]]) -> List[Dict[str, str
 
 
 def default_panel() -> List[Dict[str, str]]:
-    """The shipped five-seat roster, with the codex model resolved from the registry."""
+    """The shipped five-seat roster, with the codex model resolved from the registry.
+
+    Holds the same one-seat-per-family invariant ``load_panel_seats`` enforces:
+    the config's fallback must not seat two votes from one vendor either, so an
+    edit to the code constant fails loud exactly where a config edit would.
+    """
+    _refuse_shared_families(_DEFAULT_PANEL_SEATS)
     return resolve_codex_seat_models(_DEFAULT_PANEL_SEATS)
 
 VERDICT_FENCE = "vnx-plan-verdict"
@@ -276,6 +286,61 @@ def _valid_provider_strings() -> List[str]:
     return [p.value for p in Provider]
 
 
+def seat_family(provider: str) -> str:
+    """The provider FAMILY a seat's ``provider`` string belongs to.
+
+    Two seats in one family are two votes from one vendor, so the panel may seat
+    at most one per family. The family is the wave7 registry key the constraint
+    enforcer already assigns (ADR-036: ``claude`` -> ``anthropic``, ``codex`` ->
+    ``openai``, ``glm-harness`` and ``litellm:zai`` -> ``zai``), imported rather
+    than re-tabulated here so a new provider alias cannot slide a second seat on
+    the same vendor past the loader with a second mapping table that drifts.
+
+    A trailing ``_harness`` is folded away because it names a LANE, not a vendor:
+    ``deepseek-harness`` -> ``deepseek_harness`` and ``litellm:deepseek`` ->
+    ``deepseek`` bill the same provider and must count as one family.
+
+    Fails CLOSED: a provider whose family cannot be read raises instead of
+    returning an empty placeholder — two unplaceable seats would otherwise
+    compare equal for the wrong reason, and one unplaceable seat beside a real
+    one would pass a distinctness check that never actually read its family.
+    """
+    from providers.constraint_enforcer import _registry_key_for  # noqa: PLC0415
+
+    family = (_registry_key_for(str(provider or ""), None) or "").strip().lower()
+    if family.endswith("_harness"):
+        family = family[: -len("_harness")]
+    if not family:
+        raise ValueError(
+            f"plan-gate panel: cannot resolve the provider family of {provider!r} — "
+            f"a seat whose family is unreadable cannot be proven to sit alone"
+        )
+    return family
+
+
+def _refuse_shared_families(seats: List[Dict[str, str]]) -> None:
+    """Refuse a seat list in which two seats read from one provider family.
+
+    Runs on seats ``_validate_seat`` already accepted, so a malformed seat keeps
+    its own, more specific error. Raises ``ValueError`` naming BOTH seats, both
+    provider strings and the shared family: a config that seats one vendor twice
+    is a miscount, and a miscount must surface at load time, never as a second
+    "independent" vote at verdict time.
+    """
+    seat_of_family: Dict[str, Dict[str, str]] = {}
+    for seat in seats:
+        family = seat_family(seat["provider"])
+        first = seat_of_family.get(family)
+        if first is None:
+            seat_of_family[family] = seat
+            continue
+        raise ValueError(
+            f"plan-gate panel: seats {first['label']!r} and {seat['label']!r} share "
+            f"provider family {family!r} ({first['provider']}, {seat['provider']}); "
+            f"each seat must come from a different provider family"
+        )
+
+
 def _validate_seat(seat: Any, index: int, valid_providers: List[str]) -> Dict[str, str]:
     """Validate ONE seat from the config. Raises ``ValueError`` loud when the
     seat is malformed — never silently drops it, because a dropped seat reads as
@@ -315,6 +380,11 @@ def load_panel_seats(config_path: Optional[Path] = None) -> List[Dict[str, str]]
     is never silently dropped — a dropped seat reads as an abstention and turns
     into a REVISE via the fail-safe rule, so misconfiguration must surface at
     load time, not at verdict time.
+
+    The same holds for two seats on one provider family (``seat_family``): a
+    config that seats one vendor twice is refused, naming both seats, and the
+    check runs AFTER the per-seat validation so a malformed seat keeps its own
+    error.
     """
     path = Path(config_path) if config_path is not None else _default_panel_config_path()
     if not path.is_file():
@@ -343,9 +413,9 @@ def load_panel_seats(config_path: Optional[Path] = None) -> List[Dict[str, str]]
             f"{type(raw_seats).__name__}"
         )
     valid_providers = _valid_provider_strings()
-    return resolve_codex_seat_models(
-        [_validate_seat(s, i, valid_providers) for i, s in enumerate(raw_seats)]
-    )
+    seats = [_validate_seat(s, i, valid_providers) for i, s in enumerate(raw_seats)]
+    _refuse_shared_families(seats)
+    return resolve_codex_seat_models(seats)
 
 
 def load_goal_min_chars(config_path: Optional[Path] = None) -> int:
