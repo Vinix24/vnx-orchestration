@@ -10,3 +10,7 @@
   the two callers that already emit their own richer, contract-linked `review_gate_result` receipt — that
   gate-specific receipt stays, because it carries findings and (for the Claude GitHub path) the head read off
   the contract request, which the result record itself does not carry.
+- GE-3 follow-up (same track): `tests/test_w3j_followup_cleanups.py` no longer treats the guarded writer's
+  empty `.{name}.lock` sidecar as a result record. The record glob pins the `.json` suffix and asserts exactly
+  one match, and a regression test proves the slot-lock sidecar can never be read as the record (VNX CI red
+  twice on Linux, where ext4 listed the sidecar first and `json.loads('')` raised `JSONDecodeError`).
