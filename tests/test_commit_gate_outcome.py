@@ -1,6 +1,6 @@
 """GE-4a: one writer for a gate outcome's record and its receipt (ADR-046 §2-§3).
 
-Dispatch-ID: dlv-df37f8c3a3f8
+Dispatch-ID: dlv-df37f8c3a3f8 (round 2: dlv-df37f8c3a3f8-r2)
 
 The tests drive the public writers where the old code had them too, so the
 red run on the old head shows which gap each one closes. ``gate_outcome`` is
@@ -96,6 +96,30 @@ def _receipts(env) -> list:
 
 def _on_disk(env) -> dict:
     return json.loads(_slot(env).read_text(encoding="utf-8"))
+
+
+def _refusal_audit_lines(env) -> list:
+    path = env["state_dir"] / "gate_execution_audit.ndjson"
+    if not path.exists():
+        return []
+    lines = (json.loads(x) for x in path.read_text(encoding="utf-8").splitlines() if x.strip())
+    return [r for r in lines if r.get("reason") == "gate_result_write_refused"]
+
+
+_REAL_EMIT = gate_recorder._emit_terminal_result_receipt
+
+
+def _receipts_down_for(heads: set):
+    """The receipt append fails for a record on one of ``heads``; the rest book for real."""
+    calls = []
+
+    def emit(payload, **kwargs):
+        calls.append(payload.get("commit_sha"))
+        if payload.get("commit_sha") in heads:
+            raise OSError("append lock unavailable")
+        return _REAL_EMIT(payload, **kwargs)
+
+    return emit, calls
 
 
 def test_record_and_receipt_carry_the_same_head_and_status(env):
@@ -213,6 +237,122 @@ def test_a_flag_this_writer_did_not_set_is_neither_booked_nor_cleared(env, monke
         _terminal(env, _outage(HEAD_A))
     spy.assert_not_called()
     assert _slot(env).read_bytes() == before
+
+
+def test_a_slot_whose_receipt_is_still_unbooked_is_not_replaced(env, monkeypatch):
+    """The gap (codex, round 1): a recovery that failed again let B replace A,
+    and A's receipt then had no trace left for any later commit to book."""
+    emit, calls = _receipts_down_for({HEAD_A})
+    monkeypatch.setattr(gate_recorder, "_emit_terminal_result_receipt", emit)
+    _terminal(env, _verdict("pass", HEAD_A, 1))
+    pending = _slot(env).read_bytes()
+    assert json.loads(pending)["receipt_pending"] is True
+
+    refused = None
+    try:
+        _terminal(env, _verdict("fail", HEAD_B, 2))
+    except gate_recorder.ResultOverwriteRefused as exc:
+        refused = exc
+    record, booked = _on_disk(env), [r["commit_sha"] for r in _receipts(env)]
+    assert (record["commit_sha"], record.get("receipt_pending"), booked) == (HEAD_A, True, []), (
+        "A stays with its debt, and B books nothing"
+    )
+    assert _slot(env).read_bytes() == pending, "byte for byte"
+    assert calls == [HEAD_A, HEAD_A], "the recovery was tried, B's receipt was not"
+    assert refused is not None
+    for part in (str(_slot(env)), f"commit_sha={HEAD_A!r}", "status='pass'", "attempt_seq=1"):
+        assert part in str(refused)
+    assert [line["reason_detail"] for line in _refusal_audit_lines(env)] == [str(refused)]
+
+    monkeypatch.setattr(gate_recorder, "_emit_terminal_result_receipt", _REAL_EMIT)
+    _terminal(env, _verdict("fail", HEAD_B, 2))
+    assert [(r["commit_sha"], r["gate_status"], r["attempt_seq"]) for r in _receipts(env)] == [
+        (HEAD_A, "pass", 1), (HEAD_B, "fail", 2),
+    ]
+    record = _on_disk(env)
+    assert (record["commit_sha"], record["status"], record["attempt_seq"]) == (HEAD_B, "fail", 2)
+    assert "receipt_pending" not in record
+
+
+def test_the_non_raising_writer_gets_the_refused_record_back(env, monkeypatch):
+    emit, _ = _receipts_down_for({HEAD_A})
+    monkeypatch.setattr(gate_recorder, "_emit_terminal_result_receipt", emit)
+    _terminal(env, _verdict("pass", HEAD_A, 1))
+    pending = _slot(env).read_bytes()
+
+    returned = _not_executable(env, HEAD_B)
+    assert returned["write_refused"] is True and returned["commit_sha"] == HEAD_A
+    assert _slot(env).read_bytes() == pending and _receipts(env) == []
+
+
+@pytest.mark.parametrize("status", ["pass", "fail"])
+def test_the_same_outcome_written_twice_is_one_attempt_and_one_receipt(env, status):
+    _terminal(env, _verdict(status, HEAD_A, 1))
+    stored = _slot(env).read_bytes()
+
+    repeat = _verdict(status, HEAD_A, 1)
+    _terminal(env, repeat)
+    record = _on_disk(env)
+    assert record["attempt_seq"] == 1, "a repeat is no new attempt"
+    assert len(_receipts(env)) == 1
+    assert not record.get("receipt_pending")
+    assert _slot(env).read_bytes() == stored, "no rewrite"
+    assert "attempt_seq" not in repeat, "a write that did not land stamps nothing"
+
+
+def test_a_repeat_returns_the_stored_record_and_publishes_nothing(env, monkeypatch):
+    from gate_outcome import GateOutcome, commit_gate_outcome
+
+    _terminal(env, _verdict("pass", HEAD_A, 1))
+    stored = _on_disk(env)
+    publish = mock.Mock()
+    monkeypatch.setattr(gate_recorder, "publish_forge_check_run", publish)
+
+    on_disk, written = commit_gate_outcome(
+        GateOutcome.from_record(GATE, _verdict("pass", HEAD_A, 1), pr_id=""), results_dir=env["results_dir"],
+    )
+    assert (on_disk, written) == (stored, True)
+    publish.assert_not_called()
+
+
+def test_an_undecided_outcome_on_the_same_head_still_lands(env):
+    """An outage owes no receipt, so the repeat rule leaves it alone: a retry's
+    newer cause replaces the older one and counts as the next attempt."""
+    _terminal(env, _outage(HEAD_A))
+    retry = {**_outage(HEAD_A), "reason_detail": "429 weekly quota"}
+    _terminal(env, retry)
+    record = _on_disk(env)
+    assert (record["reason_detail"], record["attempt_seq"]) == ("429 weekly quota", 2)
+    assert _receipts(env) == []
+
+
+@pytest.mark.parametrize("field,value", [
+    ("commit_sha", "missing"), ("commit_sha", None), ("commit_sha", ""), ("commit_sha", "   "),
+    ("status", "missing"), ("status", None), ("status", "mystery"),
+    ("blocking_findings", [{"message": "a real defect"}]),
+])
+def test_a_repeat_needs_the_same_head_status_and_decision_on_the_slot(env, field, value):
+    stored = _verdict("pass", HEAD_A)
+    if value == "missing":
+        del stored[field]
+    else:
+        stored[field] = value
+    _slot(env).write_text(json.dumps(stored), encoding="utf-8")
+
+    _terminal(env, _verdict("pass", HEAD_A))
+    record = _on_disk(env)
+    assert (record["commit_sha"], record["status"], record["attempt_seq"]) == (HEAD_A, "pass", 1)
+    assert record.get("blocking_findings") == [] and len(_receipts(env)) == 1
+
+
+def test_a_write_that_names_no_head_is_no_repeat(env):
+    _terminal(env, _verdict("pass", HEAD_A))
+    headless = _verdict("pass", HEAD_A)
+    del headless["commit_sha"]
+
+    _terminal(env, headless)
+    record = _on_disk(env)
+    assert "commit_sha" not in record and record["attempt_seq"] == 2
 
 
 def test_a_refused_commit_writes_nothing_and_attempt_seq_counts_landed_records(env):

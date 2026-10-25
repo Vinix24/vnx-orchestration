@@ -1477,6 +1477,8 @@ def _audit_write_refusal(
     gate: str,
     pr_ref: str,
     attempted: Dict[str, Any],
+    *,
+    reason_detail: Optional[str] = None,
 ) -> None:
     """Land a durable trace of a write the overwrite guard refused (OI-1750).
 
@@ -1495,7 +1497,8 @@ def _audit_write_refusal(
 
     Reuses :func:`write_skip_rationale` (GATE-9) — the ledger's one
     skip-rationale writer — rather than adding a second writer or a second
-    file for the same event type.
+    file for the same event type. ``reason_detail`` replaces the guard's text
+    for a refusal with another cause (``gate_outcome.ReceiptPendingRefused``).
     """
     state_dir = _state_dir_from_result_path(result_path)
     if state_dir is None:
@@ -1504,7 +1507,7 @@ def _audit_write_refusal(
         state_dir, gate,
         pr_id=pr_ref,
         reason="gate_result_write_refused",
-        reason_detail=(
+        reason_detail=reason_detail or (
             f"overwrite guard refused a status={attempted.get('status', '')!r} "
             "write: an existing decided, evidenced verdict for this head would "
             "have been downgraded"
