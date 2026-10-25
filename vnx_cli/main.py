@@ -1027,6 +1027,17 @@ def _register_deliverable_verbs(subs: argparse.Action) -> None:
         help="comma-separated repo paths this deliverable will touch (replaces "
              "the stored list)",
     )
+    _register_deliverable_retarget_verb(subs)
+
+
+def _register_deliverable_retarget_verb(subs: argparse.Action) -> None:
+    """`deliverable retarget`: move a deliverable that has not started to another track."""
+    p = subs.add_parser("retarget", help="move a proposed/ready deliverable to another track")
+    _common_horizon_args(p)
+    p.add_argument("dispatch_id")
+    p.add_argument("--objective", required=True, metavar="TRACK_ID", help="the track to move it to")
+    p.add_argument("--reason", required=True, help="why it moves (REQUIRED, in the audit event)")
+    p.add_argument("--include-parked", action="store_true", dest="include_parked", help="allow a parked target")
 
 
 def _register_plan_gate_verbs(subs: argparse.Action) -> None:
