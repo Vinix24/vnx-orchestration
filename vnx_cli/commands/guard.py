@@ -16,6 +16,8 @@ def vnx_guard(args) -> int:
     argv = [a for a in argv if a]
     if getattr(args, "dry_run", False):
         argv.append("--dry-run")
+    if getattr(args, "require_user", False):
+        argv.append("--require-user")
     for flag, values in (("--config-dir", getattr(args, "config_dir", None)),
                          ("--scan-root", getattr(args, "scan_root", None))):
         for value in values or []:
