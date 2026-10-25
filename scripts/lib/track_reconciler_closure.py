@@ -161,16 +161,14 @@ def close_track_if_done(
         "applied": False,
     }
 
-    if derived != target and not _skip_derived_gate:
-        payload["action"] = "noop_not_terminal"
-        return payload
-
-    if declared == target:
-        payload["action"] = "noop_already_closed"
-        return payload
-
-    if declared == "parked" and not include_parked:
-        payload["action"] = "rejected_parked"
+    if _terminal_gate(
+        payload,
+        derived_status=derived,
+        declared_phase=declared,
+        target=target,
+        skip_derived_gate=_skip_derived_gate,
+        include_parked=include_parked,
+    ):
         return payload
 
     payload["evidence"] = _close_evidence(state_dir, track_id, project_id, repo_root=repo_root)
@@ -181,13 +179,73 @@ def close_track_if_done(
         return payload
     payload["path"] = [declared, *path]
 
-    cur = declared
+    return _walk_to_done(
+        state_dir, track_id, project_id, path, payload,
+        actor=actor,
+        approval_id=approval_id,
+        declared_phase=declared,
+        target=target,
+        derived_status=derived,
+    )
+
+
+def _terminal_gate(
+    payload: Dict[str, Any],
+    *,
+    derived_status: str,
+    declared_phase: str,
+    target: str,
+    skip_derived_gate: bool,
+    include_parked: bool,
+) -> bool:
+    """Apply the three close gates in order, writing payload["action"] on a stop.
+
+    Order is part of the contract: derived-first, then already-closed, then
+    parked. Returns True when the close stops at a gate (the caller returns the
+    payload as-is), False when every gate passed and the walk may proceed.
+    """
+    if derived_status != target and not skip_derived_gate:
+        payload["action"] = "noop_not_terminal"
+        return True
+
+    if declared_phase == target:
+        payload["action"] = "noop_already_closed"
+        return True
+
+    if declared_phase == "parked" and not include_parked:
+        payload["action"] = "rejected_parked"
+        return True
+
+    return False
+
+
+def _walk_to_done(
+    state_dir: "str | Path",
+    track_id: str,
+    project_id: str,
+    path: list[str],
+    payload: Dict[str, Any],
+    *,
+    actor: str,
+    approval_id: Optional[str],
+    declared_phase: str,
+    target: str,
+    derived_status: str,
+) -> Dict[str, Any]:
+    """Walk `path` to `target`, one transition_phase call per step.
+
+    Fills `payload` exactly as the inline walk did: 'closed'/applied=True on
+    success, 'rejected_not_found' when the track vanishes mid-walk, and
+    'rejected_walk_failed' with the phase actually reached (declared_phase)
+    plus an error naming the exception type. The walk is not atomic.
+    """
+    cur = declared_phase
     try:
         for step in path:
             tracks_lib.transition_phase(
                 state_dir, track_id, project_id, step,
                 actor=actor,
-                reason=f"close-the-loop ({declared}->{target}, derived={derived})",
+                reason=f"close-the-loop ({declared_phase}->{target}, derived={derived_status})",
                 approval_id=approval_id,
             )
             cur = step
