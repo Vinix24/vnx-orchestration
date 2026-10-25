@@ -871,6 +871,32 @@ def _register_objective_add(subs: argparse.Action) -> None:
     )
 
 
+def _register_objective_queue_verb(subs: argparse.Action) -> None:
+    """`queue` (C1): the read-only "what is queued" overview (engine: `queue`).
+
+    Registered by each objective entry point (`vnx horizon`, `vnx objective`)
+    rather than by ``_register_objective_verbs``: that function is already over
+    the function-size limit, so any line added to it is a ratchet violation.
+    Flags mirror ``planning_cli``'s ``objective queue`` parser exactly. The
+    one-line help says "queued work" because `vnx objective --help` must not
+    name a deliverable verb (the deliverable plane is its own surface) — a
+    "deliverables" mention defeats test_horizon_cli's alias-split assertion.
+    """
+    p_queue = subs.add_parser(
+        "queue",
+        help="queued work per track: state, delivering PR, dependencies",
+    )
+    _common_horizon_args(p_queue)
+    p_queue.add_argument(
+        "--objective", default=None, metavar="TRACK_ID",
+        help="only show the deliverables of this track",
+    )
+    p_queue.add_argument(
+        "--all", action="store_true",
+        help="also show closed/done/cancelled deliverables (hidden by default)",
+    )
+
+
 def _register_objective_set_verbs(subs: argparse.Action) -> None:
     """The `set-*` verbs that patch one field of an existing track."""
     p_lane_hint = subs.add_parser(
@@ -1160,6 +1186,7 @@ def _register_horizon_subparser(subparsers: argparse.Action) -> None:
     horizon_parser.add_argument("--project-dir", default=".", metavar="DIR")
     horizon_subs = horizon_parser.add_subparsers(dest="horizon_verb", metavar="VERB")
     _register_objective_verbs(horizon_subs)
+    _register_objective_queue_verb(horizon_subs)
 
     dlv_parser = horizon_subs.add_parser(
         "deliverable", help="deliverable plane (proposed dispatches)"
@@ -1185,6 +1212,7 @@ def _register_objective_subparser(subparsers: argparse.Action) -> None:
     objective_parser.add_argument("--project-dir", default=".", metavar="DIR")
     objective_subs = objective_parser.add_subparsers(dest="objective_verb", metavar="VERB")
     _register_objective_verbs(objective_subs)
+    _register_objective_queue_verb(objective_subs)
 
 
 def _register_deliverable_subparser(subparsers: argparse.Action) -> None:

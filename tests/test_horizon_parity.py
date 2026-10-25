@@ -311,6 +311,7 @@ _OBJECTIVE_ARGV = {
     "add": ["delegate-track", "Delegate Title", "Delegate goal state"],
     "list": [],
     "show": ["delegate-track"],
+    "queue": ["--objective", "delegate-track", "--all"],
     "sync": [],
     "drift": [],
     "reconcile": [],
