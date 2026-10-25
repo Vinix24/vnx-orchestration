@@ -2297,6 +2297,12 @@ def verify_pr_closure(
     validates gate evidence for that PR, and detects contradictions
     between structured gate results and normalized reports.
 
+    No plan file is read (ADR-047 §2). The PR exists when a dispatch names it
+    (``pr_has_dispatch``); the ``pr_queue_state.json`` projection only feeds
+    drift detection and never adds or removes a PR. ``pr_completed`` needs the
+    dispatch in ``completed/`` AND a terminal receipt for it: a completed
+    dispatch without that receipt is not a closed PR.
+
     When ``branch`` is provided and ``require_github_pr`` is True, also verifies
     that a real GitHub PR exists for the branch and that required CI checks are
     green (pre-merge mode).  Local-only closure cannot pass merge readiness when
@@ -2319,7 +2325,7 @@ def verify_pr_closure(
     pr_reconciled = next((p for p in result.prs if p.pr_id == pr_id), None)
     if pr_reconciled is None:
         checks.append(CheckResult(
-            "pr_exists_in_plan", "FAIL",
+            "pr_has_dispatch", "FAIL",
             f"no dispatch names {pr_id}, so it is not in the queue",
         ))
         return {
@@ -2330,15 +2336,23 @@ def verify_pr_closure(
             "reconciled_state": None,
             "review_evidence": None,
         }
+    checks.append(CheckResult(
+        "pr_has_dispatch", "PASS",
+        f"dispatch {pr_reconciled.provenance.get('dispatch_id') or '?'} names {pr_id}",
+    ))
 
-    # 2. PR must be completed per reconciliation
-    if pr_reconciled.state == "completed":
-        receipt_note = ""
-        if not pr_reconciled.provenance.get("receipt_confirmed"):
-            receipt_note = " (unconfirmed — no terminal receipt)"
+    # 2. PR must be completed per reconciliation, confirmed by a terminal receipt.
+    # Only an exact True counts: a missing, None or malformed flag is no receipt.
+    receipt_confirmed = pr_reconciled.provenance.get("receipt_confirmed") is True
+    if pr_reconciled.state == "completed" and receipt_confirmed:
         checks.append(CheckResult(
             "pr_completed", "PASS",
-            f"{pr_id} is completed via {pr_reconciled.provenance.get('source', '?')}{receipt_note}",
+            f"{pr_id} is completed via {pr_reconciled.provenance.get('source', '?')} with a terminal receipt",
+        ))
+    elif pr_reconciled.state == "completed":
+        checks.append(CheckResult(
+            "pr_completed", "FAIL",
+            f"{pr_id} dispatch is in completed/ but has no terminal receipt, so it is not completed",
         ))
     else:
         checks.append(CheckResult(

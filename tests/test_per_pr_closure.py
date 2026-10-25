@@ -199,7 +199,7 @@ class TestPerPRClosure:
 
         assert result["verdict"] == "fail"
         failed = {c["name"] for c in result["checks"] if c["status"] == "FAIL"}
-        assert "pr_exists_in_plan" in failed
+        assert "pr_has_dispatch" in failed
 
     def test_no_review_contract_fails(self, closure_env):
         """Per-PR closure requires a review contract."""
