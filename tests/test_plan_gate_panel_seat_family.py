@@ -6,11 +6,16 @@ registry key the constraint enforcer already assigns (ADR-036), never a second
 mapping table: a new provider alias that routes to an existing vendor must land
 in the same family without anyone remembering to update this check.
 
-The folding rule the check needs on top of that key is only ``_harness``: it
-names a lane, not a vendor, so ``deepseek-harness`` (registry
-``deepseek_harness``) and ``litellm:deepseek`` (registry ``deepseek``) are one
-family. ``glm-harness`` already resolves to the vendor key ``zai``, so it needs
-no folding to meet ``litellm:zai``.
+The folding rules the check needs on top of that key are two, because the
+registry key is a ROUTE identity, not a vendor identity:
+
+* ``_harness`` names a lane, not a vendor, so ``deepseek-harness`` (registry
+  ``deepseek_harness``) and ``litellm:deepseek`` (registry ``deepseek``) are one
+  family. ``glm-harness`` already resolves to the vendor key ``zai``, so it needs
+  no folding to meet ``litellm:zai``.
+* the registry splits Moonshot over two lane keys: ``kimi`` (the kimi CLI lane)
+  resolves to ``kimi_cli`` while ``litellm:moonshot`` resolves to ``moonshot``.
+  Both serve the same vendor's Kimi models, so ``kimi_cli`` folds to ``moonshot``.
 """
 from __future__ import annotations
 
@@ -90,6 +95,19 @@ def test_glm_harness_and_litellm_zai_are_one_family(tmp_path):
     assert "(glm-harness, litellm:zai)" in msg, msg
 
 
+def test_kimi_and_litellm_moonshot_are_one_family(tmp_path):
+    """The registry splits Moonshot over two lane keys (``kimi_cli`` and
+    ``moonshot``); both run the same vendor's Kimi models, so they are one
+    family and may not both hold a seat."""
+    cfg = _two_seats(tmp_path, "kimi", "litellm:moonshot")
+    with pytest.raises(ValueError) as excinfo:
+        pgp.load_panel_seats(cfg)
+    msg = str(excinfo.value)
+    assert "'a'" in msg and "'b'" in msg, msg
+    assert "'moonshot'" in msg, msg
+    assert "(kimi, litellm:moonshot)" in msg, msg
+
+
 def test_deepseek_harness_and_litellm_deepseek_are_one_family(tmp_path):
     """``_harness`` names a lane: both routes bill DeepSeek, so the trailing
     ``_harness`` of the registry key is folded away before comparing."""
@@ -143,8 +161,39 @@ def test_seat_family_refuses_a_provider_it_cannot_place():
         pgp.seat_family("")
 
 
-@pytest.mark.parametrize("provider", [p.value for p in Provider])
-def test_every_provider_enum_member_has_a_non_empty_family(provider):
-    family = pgp.seat_family(provider)
-    assert family, f"{provider} resolved to an empty family"
-    assert family == family.strip()
+# The measured family of every ``Provider`` enum member. This table is
+# DELIBERATE: a new provider member without a row here fails
+# ``test_every_provider_enum_member_has_a_row_in_the_family_table``, so the
+# vendor it belongs to is a decision, never an accident of the registry key.
+_EXPECTED_FAMILIES = {
+    "auto": "auto",
+    "claude": "anthropic",
+    "codex": "openai",
+    "kimi": "moonshot",
+    "gemini": "google",
+    "litellm:deepseek": "deepseek",
+    "litellm:zai": "zai",
+    "litellm:moonshot": "moonshot",
+    "deepseek-harness": "deepseek",
+    "glm-harness": "zai",
+    "local-gemma": "local_gemma",
+}
+
+
+def test_every_provider_enum_member_has_a_row_in_the_family_table():
+    """Exhaustive: a new ``Provider`` member must be placed in the table."""
+    members = {p.value for p in Provider}
+    missing = sorted(members - set(_EXPECTED_FAMILIES))
+    assert not missing, (
+        f"Provider member(s) with no row in _EXPECTED_FAMILIES: {missing} — "
+        f"place the new provider's vendor deliberately"
+    )
+    stale = sorted(set(_EXPECTED_FAMILIES) - members)
+    assert not stale, (
+        f"_EXPECTED_FAMILIES row(s) for provider(s) that no longer exist: {stale}"
+    )
+
+
+@pytest.mark.parametrize("provider,expected", sorted(_EXPECTED_FAMILIES.items()))
+def test_every_provider_enum_member_has_its_expected_family(provider, expected):
+    assert pgp.seat_family(provider) == expected

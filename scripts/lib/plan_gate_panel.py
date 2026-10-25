@@ -286,6 +286,16 @@ def _valid_provider_strings() -> List[str]:
     return [p.value for p in Provider]
 
 
+# LANE registry key -> VENDOR family. The enforcer's key is a ROUTE identity
+# (which lane/model block a provider string dispatches through), so one vendor
+# can surface under two keys: Moonshot's Kimi models live under both the
+# ``kimi_cli`` lane and the ``moonshot`` litellm block. The seat family is a
+# VENDOR identity, so the lane key folds to its vendor key here and nowhere
+# else — ``_registry_key_for`` keeps its route keys for the code that routes on
+# them.
+_LANE_KEY_VENDOR = {"kimi_cli": "moonshot"}
+
+
 def seat_family(provider: str) -> str:
     """The provider FAMILY a seat's ``provider`` string belongs to.
 
@@ -298,7 +308,10 @@ def seat_family(provider: str) -> str:
 
     A trailing ``_harness`` is folded away because it names a LANE, not a vendor:
     ``deepseek-harness`` -> ``deepseek_harness`` and ``litellm:deepseek`` ->
-    ``deepseek`` bill the same provider and must count as one family.
+    ``deepseek`` bill the same provider and must count as one family. The same
+    lane-vs-vendor split puts ``kimi`` (``kimi_cli``) and ``litellm:moonshot``
+    (``moonshot``) on one vendor, so ``_LANE_KEY_VENDOR`` folds that lane key to
+    its vendor key after the ``_harness`` fold.
 
     Fails CLOSED: a provider whose family cannot be read raises instead of
     returning an empty placeholder — two unplaceable seats would otherwise
@@ -310,6 +323,7 @@ def seat_family(provider: str) -> str:
     family = (_registry_key_for(str(provider or ""), None) or "").strip().lower()
     if family.endswith("_harness"):
         family = family[: -len("_harness")]
+    family = _LANE_KEY_VENDOR.get(family, family)
     if not family:
         raise ValueError(
             f"plan-gate panel: cannot resolve the provider family of {provider!r} — "
