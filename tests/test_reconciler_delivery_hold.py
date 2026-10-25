@@ -254,6 +254,7 @@ def test_one_partial_pr_vetoes_done_and_reason_visible(tmp_path):
     assert hold["partial"] == 1
     assert hold["complete"] == 1
     assert hold["total"] == 2
+    assert hold["held_prs"] == [100]  # names the PR that is not done (ADR-047 §3)
     assert "1 of 2" in hold["reason"]
 
     # peek (read-only dry-run path) carries the same visibility contract.
@@ -297,6 +298,7 @@ def test_pre0032_db_without_table_holds_instead_of_done(tmp_path):
     assert hold["partial"] is None
     assert hold["complete"] is None
     assert hold["total"] == 1
+    assert hold["held_prs"] == [100]  # unverifiable: every linked PR holds
     assert "table is absent" in hold["reason"]
 
     # peek (read-only dry-run path) carries the same visibility contract.
@@ -380,6 +382,7 @@ def test_corrupt_delivery_kind_fails_closed(tmp_path, caplog):
     hold = result.get("delivery_hold")
     assert hold is not None
     assert "unrecognized" in hold["reason"]
+    assert hold["held_prs"] == [100]
     assert any("unrecognized delivery_kind" in r.message for r in caplog.records)
 
 

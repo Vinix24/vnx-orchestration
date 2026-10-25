@@ -487,10 +487,9 @@ Implement the minimum blocking fix required before the roadmap may advance.
 
         verification = verify_closure(
             project_root=self.project_root,
-            feature_plan=_root_file(self.project_root, "FEATURE_PLAN.md"),
-            pr_queue=_root_file(self.project_root, "PR_QUEUE.md"),
             branch=feature["branch_name"],
             mode="post_merge",
+            track_id=current_id,
             claim_file=(self.paths.state_dir / "closure_claim.json") if (self.paths.state_dir / "closure_claim.json").exists() else None,
         )
         drift_items = self._detect_blocking_drift() if verification["verdict"] == "pass" else []
