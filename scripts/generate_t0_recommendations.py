@@ -627,27 +627,15 @@ class RecommendationEngine:
         if not self.pr_queue:
             return
 
-        # Check if current PR dependencies are met (supports parallel tracks)
+        # ADR-047: track dependencies are the only dependency evidence, and the
+        # plan-filled PR queue is no longer an input. The old per-PR wait check
+        # (``check_pr_dependencies``) had nothing left to read here, so the
+        # ``pr_blocked`` recommendation is retired with it; the tracks DB reports
+        # blocked tracks itself.
         in_progress = self.pr_queue.get('in_progress') or []
         # Backward compat: legacy string format
         if isinstance(in_progress, str):
             in_progress = [in_progress] if in_progress else []
-        if in_progress:
-            # Import here to avoid circular dependency
-            from pr_queue_manager import PRQueueManager
-            manager = PRQueueManager()
-            for active_pr in in_progress:
-                deps_met, msg = manager.check_pr_dependencies(active_pr)
-
-                if not deps_met:
-                    self.add_recommendation({
-                        "trigger": "pr_blocked",
-                        "action": "wait_for_dependencies",
-                        "pr_id": active_pr,
-                        "reason": msg,
-                        "priority": "P0",
-                        "timestamp": datetime.now().isoformat()
-                    })
 
         # Recommend next PR if available
         next_available = self.pr_queue.get('next_available', [])

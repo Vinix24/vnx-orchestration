@@ -7,6 +7,7 @@ Manages PR queue with dependency tracking and state persistence
 
 import os
 import re
+import sqlite3
 import sys
 import json
 import yaml
@@ -23,6 +24,8 @@ from vnx_paths import resolve_paths as _resolve_vnx_paths
 from vnx_paths import refuse_real_central_store_write_under_test_runner as _refuse_real_store_write
 from pr_queue_state_snapshot import build_vnx_state_snapshot
 from project_scope import current_project_id as _current_project_id
+import tracks as tracks_lib
+from track_reconciler import ADVISORY_DEPENDENCY_KINDS
 from result_contract import (
     EXIT_DEPENDENCY,
     Result,
@@ -42,7 +45,6 @@ PR_QUEUE_RESULT_EXIT_CODE_MAP = {
     "missing_argument": 10,
     "invalid_argument": 10,
     "unknown_command": 10,
-    "invalid_feature_plan": 10,
     "pr_not_found": 20,
     "dispatch_not_found": 20,
     "operation_failed": EXIT_DEPENDENCY,
@@ -412,24 +414,6 @@ Review-Stack: {review_stack or 'none'}
         self.save_state()
         self.update_markdown()
 
-    def _parse_feature_metadata(self, content: str) -> Dict[str, Any]:
-        def extract(name: str, default: str = "") -> str:
-            match = re.search(rf'^\*\*{re.escape(name)}\*\*:\s*(.+)$', content, re.MULTILINE)
-            if match:
-                return match.group(1).strip()
-            match = re.search(rf'^{re.escape(name)}:\s*(.+)$', content, re.MULTILINE)
-            if match:
-                return match.group(1).strip()
-            return default
-
-        review_stack_raw = extract("Review-Stack", "")
-        review_stack = [item.strip() for item in review_stack_raw.split(",") if item.strip()]
-        return {
-            "risk_class": extract("Risk-Class", "medium").lower(),
-            "merge_policy": extract("Merge-Policy", "human").lower(),
-            "review_stack": review_stack,
-        }
-
     def get_status_summary(self) -> Dict:
         """Get a summary of the current queue status"""
         total = len(self.state['prs'])
@@ -458,7 +442,15 @@ Review-Stack: {review_stack or 'none'}
 
     def check_pr_dependencies(self, pr_id: str) -> tuple[bool, str]:
         """
-        Check if all dependencies are complete for a PR
+        Check whether the track of this PR's dispatch has unfinished dependencies.
+
+        ADR-047: dependencies exist only between tracks, in ``track_dependencies``.
+        A PR inherits the dependencies of its dispatch's track; the plan-filled
+        ``prs[].dependencies`` list in the queue state is no longer read. The
+        edges come from ``scripts/lib/tracks.py``.
+
+        Fail-closed on missing evidence: an unknown PR, a PR without a track, a
+        missing tracks DB or a track that is not in it is never "ready".
 
         Args:
             pr_id: PR identifier
@@ -470,14 +462,29 @@ Review-Stack: {review_stack or 'none'}
         if not pr:
             return False, f"PR {pr_id} not found"
 
-        dependencies = pr.get('dependencies', [])
-        if not dependencies:
-            return True, "No dependencies"
+        track_id = str(pr.get("track") or "").strip()
+        if not track_id:
+            return False, f"Cannot resolve the track of PR {pr_id}"
 
-        unmet = []
-        for dep in dependencies:
-            if not self.is_complete(dep):
-                unmet.append(dep)
+        project_id = _get_project_id()
+        db_path = Path(self.vnx_state_dir) / tracks_lib.DB_FILENAME
+        if not db_path.exists():
+            return False, f"Cannot check track dependencies: tracks DB not found at {db_path}"
+
+        try:
+            track = tracks_lib.get_track(self.vnx_state_dir, track_id, project_id)
+            if track is None:
+                return False, f"Track {track_id} not found in the tracks DB"
+            edges = tracks_lib.list_dependencies(self.vnx_state_dir, track_id, project_id)
+        except (sqlite3.Error, tracks_lib.EmptySchemaDecoyError) as exc:
+            return False, f"Cannot read track dependencies for {track_id}: {exc}"
+
+        unmet = [
+            edge["to_track_id"]
+            for edge in edges
+            if edge.get("phase") != "done"
+            and edge.get("kind") not in ADVISORY_DEPENDENCY_KINDS
+        ]
 
         if unmet:
             return False, f"Waiting for: {', '.join(unmet)}"
@@ -520,18 +527,14 @@ Review-Stack: {review_stack or 'none'}
         path.remove(pr_id)
         return None
 
-    def get_execution_order(self, feature_plan: Optional[Dict] = None) -> tuple[bool, List[str], Optional[str]]:
+    def get_execution_order(self) -> tuple[bool, List[str], Optional[str]]:
         """
         Generate valid execution order respecting dependencies using topological sort
-
-        Args:
-            feature_plan: Optional feature plan dict (if None, uses current queue)
 
         Returns:
             Tuple of (success: bool, ordered_prs: List[str], error_message: Optional[str])
         """
-        # Use current queue PRs if no feature plan provided
-        prs_to_order = self.state['prs'] if feature_plan is None else feature_plan.get('prs', [])
+        prs_to_order = self.state['prs']
 
         # First, check for circular dependencies
         visited = set()
@@ -576,491 +579,6 @@ Review-Stack: {review_stack or 'none'}
             return False, [], "Unable to determine execution order (possible cycle or missing dependency)"
 
         return True, ordered, None
-
-    def validate_feature_plan(self, plan_path: str) -> tuple[bool, Optional[str]]:
-        """
-        Validate FEATURE_PLAN.md structure and dependencies
-
-        Args:
-            plan_path: Path to FEATURE_PLAN.md file
-
-        Returns:
-            Tuple of (valid: bool, error_message: Optional[str])
-        """
-        try:
-            with open(plan_path, 'r') as f:
-                content = f.read()
-
-            # Basic structure checks
-            if '# Feature:' not in content and '## Feature:' not in content:
-                return False, "Missing feature title (expected '# Feature:' or '## Feature:')"
-
-            if 'Dependencies:' not in content and 'Dependencies**:' not in content:
-                return False, "Missing dependencies section"
-
-            # Extract PR definitions (simple regex-based parsing)
-            import re
-            pr_pattern = r'##\s+PR-(\d+):'
-            pr_ids = re.findall(pr_pattern, content)
-
-            if not pr_ids:
-                return False, "No PRs found (expected format: '## PR-X:')"
-
-            # Check for duplicate PR IDs
-            if len(pr_ids) != len(set(pr_ids)):
-                duplicates = [pid for pid in set(pr_ids) if pr_ids.count(pid) > 1]
-                return False, f"Duplicate PR IDs found: {', '.join(f'PR-{d}' for d in duplicates)}"
-
-            # Extract dependencies and validate they reference existing PRs
-            dep_pattern = r'Dependencies:\s*\[([^\]]*)\]'
-            dep_matches = re.findall(dep_pattern, content)
-
-            valid_pr_ids = set(f'PR-{pid}' for pid in pr_ids)
-
-            for dep_list in dep_matches:
-                if dep_list.strip():
-                    deps = [d.strip() for d in dep_list.split(',')]
-                    for dep in deps:
-                        if dep and dep not in valid_pr_ids:
-                            return False, f"Invalid dependency reference: {dep} (not found in PR list)"
-
-            return True, None
-
-        except FileNotFoundError:
-            return False, f"File not found: {plan_path}"
-        except Exception as e:
-            return False, f"Error parsing feature plan: {str(e)}"
-
-    def _parse_pr_from_feature_plan(self, pr_id: str) -> Optional[Dict]:
-        """
-        Parse full PR details from FEATURE_PLAN.md
-
-        Returns PR details including description, scope, success criteria, and quality gate
-        """
-        # Try multiple paths to find FEATURE_PLAN.md
-        possible_paths = [
-            self.project_root / "FEATURE_PLAN.md",
-            Path(__file__).parent.parent.parent / "FEATURE_PLAN.md",  # From scripts/
-            Path.cwd() / "FEATURE_PLAN.md",  # From current working directory
-            Path.cwd() / ".." / "FEATURE_PLAN.md"  # One level up
-        ]
-
-        feature_plan_path = None
-        for path in possible_paths:
-            if path.exists():
-                feature_plan_path = path
-                break
-
-        if not feature_plan_path:
-            return None
-
-        try:
-            with open(feature_plan_path, 'r') as f:
-                content = f.read()
-
-            # Find PR section (matches ## PR-1: Title)
-            pr_pattern = f'## {pr_id}:(.+?)(?=\n##\\s+PR-|$)'
-            import re
-            match = re.search(pr_pattern, content, re.DOTALL)
-
-            if not match:
-                return None
-
-            pr_section = match.group(1)
-
-            # SPRINT 2: Parse ALL metadata fields from FEATURE_PLAN.md
-            details = {
-                'title': '',
-                'track': 'A',  # default
-                'priority': 'P1',  # default
-                'skill': 'developer',  # default
-                'complexity': 'Medium',  # default
-                'cognition': 'normal',  # default
-                'requires_model': None,  # default
-                'requires_provider': None,  # default
-                'clear_context': True,  # default
-                'risk_class': 'medium',
-                'merge_policy': 'human',
-                'review_stack': [],
-                'dependencies': [],  # default
-                'description': '',
-                'scope': '',
-                'success_criteria': [],
-                'quality_gate': []
-            }
-
-            # Extract title (first line after PR-X:)
-            title_match = re.search(r'^([^\n]+)', pr_section.strip())
-            if title_match:
-                details['title'] = title_match.group(1).strip()
-
-            # SPRINT 2: Extract metadata fields (Track, Priority, Skill, Complexity, etc.)
-            # Pattern: **Field**: value
-            for line in pr_section.split('\n')[:20]:  # Check first 20 lines for metadata
-                line = line.strip()
-
-                # Track
-                track_match = re.match(r'\*\*Track\*\*:\s*(.+)', line, re.IGNORECASE)
-                if track_match:
-                    details['track'] = track_match.group(1).strip()
-
-                # Priority
-                priority_match = re.match(r'\*\*Priority\*\*:\s*(.+)', line, re.IGNORECASE)
-                if priority_match:
-                    details['priority'] = priority_match.group(1).strip()
-
-                # Skill
-                skill_match = re.match(r'\*\*Skill\*\*:\s*(.+)', line, re.IGNORECASE)
-                if skill_match:
-                    skill = skill_match.group(1).strip()
-                    # Remove @ prefix if present
-                    details['skill'] = skill.lstrip('@')
-
-                # Complexity
-                complexity_match = re.match(r'\*\*Complexity\*\*:\s*(.+)', line, re.IGNORECASE)
-                if complexity_match:
-                    details['complexity'] = complexity_match.group(1).strip()
-
-                # Requires-Model (optional)
-                model_match = re.match(r'\*\*Requires-Model\*\*:\s*(.+)', line, re.IGNORECASE)
-                if model_match:
-                    details['requires_model'] = model_match.group(1).strip()
-
-                # Requires-Provider (optional)
-                provider_match = re.match(r'\*\*Requires-Provider\*\*:\s*(.+)', line, re.IGNORECASE)
-                if provider_match:
-                    details['requires_provider'] = provider_match.group(1).strip()
-
-                # ClearContext (optional)
-                clear_match = re.match(r'\*\*ClearContext\*\*:\s*(.+)', line, re.IGNORECASE)
-                if clear_match:
-                    details['clear_context'] = clear_match.group(1).strip().lower() == 'true'
-
-            # Fallback: scan entire PR section for metadata if not found early
-            if details.get('requires_model') is None:
-                model_match = re.search(r'(?:\*\*Requires-Model\*\*|Requires-Model):\s*(.+)', pr_section, re.IGNORECASE)
-                if model_match:
-                    details['requires_model'] = model_match.group(1).strip()
-            if details.get('requires_provider') is None:
-                provider_match = re.search(r'(?:\*\*Requires-Provider\*\*|Requires-Provider):\s*(.+)', pr_section, re.IGNORECASE)
-                if provider_match:
-                    details['requires_provider'] = provider_match.group(1).strip()
-            if details.get('clear_context') is True:
-                clear_match = re.search(r'(?:\*\*ClearContext\*\*|ClearContext):\s*(.+)', pr_section, re.IGNORECASE)
-                if clear_match:
-                    details['clear_context'] = clear_match.group(1).strip().lower() == 'true'
-
-                risk_class_match = re.match(r'\*\*Risk-Class\*\*:\s*(.+)', line, re.IGNORECASE)
-                if risk_class_match:
-                    details['risk_class'] = risk_class_match.group(1).strip().lower()
-
-                merge_policy_match = re.match(r'\*\*Merge-Policy\*\*:\s*(.+)', line, re.IGNORECASE)
-                if merge_policy_match:
-                    details['merge_policy'] = merge_policy_match.group(1).strip().lower()
-
-                review_stack_match = re.match(r'\*\*Review-Stack\*\*:\s*(.+)', line, re.IGNORECASE)
-                if review_stack_match:
-                    details['review_stack'] = [
-                        item.strip() for item in review_stack_match.group(1).split(',') if item.strip()
-                    ]
-
-            # SPRINT 2: Derive cognition from complexity
-            complexity_lower = details['complexity'].lower()
-            if 'high' in complexity_lower or 'critical' in complexity_lower:
-                details['cognition'] = 'deep'
-            elif 'low' in complexity_lower or 'simple' in complexity_lower:
-                details['cognition'] = 'shallow'
-            else:
-                details['cognition'] = 'normal'
-
-            # SPRINT 2: Extract dependencies
-            deps_match = re.search(r'\*{0,2}Dependencies\*{0,2}:\s*\[([^\]]*)\]', pr_section, re.IGNORECASE)
-            if deps_match:
-                deps_str = deps_match.group(1).strip()
-                if deps_str:
-                    # Parse "PR-1, PR-2" or "PR-1" format
-                    details['dependencies'] = [d.strip() for d in deps_str.split(',') if d.strip()]
-
-            # Extract Description section
-            desc_match = re.search(r'### Description\s*\n\n(.+?)(?=\n###|$)', pr_section, re.DOTALL)
-            if desc_match:
-                details['description'] = desc_match.group(1).strip()
-
-            # Extract Scope section
-            scope_match = re.search(r'### Scope\s*\n\n(.+?)(?=\n###|$)', pr_section, re.DOTALL)
-            if scope_match:
-                details['scope'] = scope_match.group(1).strip()
-
-            # Extract Success Criteria (bullet points)
-            success_section = re.search(r'### Success Criteria\s*\n\n(.+?)(?=\n###|$)', pr_section, re.DOTALL)
-            if success_section:
-                criteria_text = success_section.group(1)
-                details['success_criteria'] = [
-                    line.strip('- ').strip()
-                    for line in criteria_text.split('\n')
-                    if line.strip().startswith('-')
-                ]
-
-            # Extract Quality Gate checklist
-            gate_section = re.search(r'### Quality Gate\s*\n(.+?)(?=\n---|$)', pr_section, re.DOTALL)
-            if gate_section:
-                gate_text = gate_section.group(1)
-                details['quality_gate'] = [
-                    line.strip('- ✅ ').strip()
-                    for line in gate_text.split('\n')
-                    if '✅' in line or '❌' in line or '⏳' in line
-                ]
-
-            return details
-
-        except Exception as e:
-            print(f"⚠️  Could not parse FEATURE_PLAN.md: {e}")
-            return None
-
-    @staticmethod
-    def _classify_gate_severity(gate_item: str) -> str:
-        """Classify a quality gate checklist item into blocker/warn/info severity."""
-        item_lower = gate_item.lower()
-        # Blocker: test pass requirements, 100% targets, E2E
-        blocker_keywords = ['all tests pass', 'e2e', '100%', 'test suite passes']
-        if any(kw in item_lower for kw in blocker_keywords):
-            return 'blocker'
-        # Warn: memory, performance, regression, numeric thresholds
-        warn_keywords = ['memory', 'zombie', 'regression', '>=', 'no resource',
-                         'shutdown', 'clean', 'speed', 'improvement']
-        if any(kw in item_lower for kw in warn_keywords):
-            return 'warn'
-        # Default: info
-        return 'info'
-
-    def _parse_all_prs_from_plan(self, content: str) -> List[Dict]:
-        """
-        Parse ALL PR metadata directly from FEATURE_PLAN.md content.
-
-        Handles both bold-markdown format (**Track**: B) and plain format (Track: B).
-        Returns list of dicts with: id, title, title_from_header, track, priority,
-        complexity, risk, skill, estimated_time, dependencies, gate.
-        """
-        import re
-
-        prs = []
-
-        # Split content into PR sections
-        pr_sections = re.split(r'(?=## PR-\d+:)', content)
-
-        for section in pr_sections:
-            # Must start with ## PR-X:
-            header_match = re.match(r'## (PR-\d+):\s*(.+?)(?:\n|$)', section)
-            if not header_match:
-                continue
-
-            pr_id = header_match.group(1)
-            title_from_header = header_match.group(2).strip()
-
-            def extract_field(name, default=None):
-                """Extract field value from bold-markdown or plain format."""
-                # Try bold markdown: **Field**: Value
-                match = re.search(rf'\*\*{name}\*\*:\s*(.+?)(?:\n|$)', section)
-                if match:
-                    return match.group(1).strip()
-                # Try plain: Field: Value (at start of line, not inside ### headers)
-                match = re.search(rf'^{name}:\s*(.+?)(?:\n|$)', section, re.MULTILINE)
-                if match:
-                    return match.group(1).strip()
-                return default
-
-            # Parse dependencies: Dependencies: [PR-1, PR-2] or Dependencies: []
-            deps = []
-            dep_match = re.search(r'\*{0,2}Dependencies\*{0,2}:\s*\[([^\]]*)\]', section)
-            if dep_match and dep_match.group(1).strip():
-                deps = [d.strip() for d in dep_match.group(1).split(',') if d.strip()]
-
-            # Parse gate name from `gate_name`:
-            gate = 'implementation'
-            gate_match = re.search(r'`(gate_\w+)`', section)
-            if gate_match:
-                gate = gate_match.group(1)
-
-            # Parse title from **Title**: field (overrides header title if present)
-            explicit_title = extract_field('Title')
-
-            pr_data = {
-                'id': pr_id,
-                'title': explicit_title if explicit_title else title_from_header,
-                'title_from_header': title_from_header,
-                'track': extract_field('Track', 'A'),
-                'priority': extract_field('Priority', 'P1'),
-                'complexity': extract_field('Complexity', 'Medium'),
-                'risk': extract_field('Risk', 'Medium'),
-                'skill': extract_field('Skill', 'backend-developer'),
-                'estimated_time': extract_field('Estimated Time', 'unknown'),
-                'risk_class': extract_field('Risk-Class', 'medium').lower(),
-                'merge_policy': extract_field('Merge-Policy', 'human').lower(),
-                'review_stack': [
-                    item.strip()
-                    for item in str(extract_field('Review-Stack', '') or '').split(',')
-                    if item.strip()
-                ],
-                'dependencies': deps,
-                'gate': gate,
-            }
-
-            # Parse quality gate checklist items for open item generation
-            quality_gate_items = []
-            gate_section = re.search(r'### Quality Gate\s*\n(.+?)(?=\n---|$)', section, re.DOTALL)
-            if gate_section:
-                gate_text = gate_section.group(1)
-                for line in gate_text.split('\n'):
-                    line = line.strip()
-                    # Match checklist items: - [ ] item or - [x] item
-                    checklist_match = re.match(r'^-\s*\[[ x]\]\s*(.+)$', line)
-                    if checklist_match:
-                        quality_gate_items.append(checklist_match.group(1).strip())
-
-            pr_data['quality_gate_items'] = quality_gate_items
-
-            prs.append(pr_data)
-
-        return prs
-
-    def create_dispatch_from_pr(self, pr_id: str) -> Optional[str]:
-        """
-        Create dispatch file for next PR (writes to dispatches/queue/)
-
-        Args:
-            pr_id: PR identifier (e.g., 'PR-1')
-
-        Returns:
-            Dispatch ID if created, None if PR not found
-        """
-        pr = self.get_pr(pr_id)
-        if not pr:
-            print(f"❌ PR not found: {pr_id}")
-            return None
-
-        # Check dependencies are met
-        deps_met, msg = self.check_pr_dependencies(pr_id)
-        if not deps_met:
-            print(f"❌ Cannot create dispatch: {msg}")
-            return None
-
-        # Parse full details from FEATURE_PLAN.md
-        pr_details = self._parse_pr_from_feature_plan(pr_id)
-
-        # SPRINT 2: Use parsed metadata from FEATURE_PLAN.md with fallbacks to queue state
-        # Priority order: FEATURE_PLAN.md > queue state > hardcoded defaults
-        track = (pr_details.get('track') if pr_details else None) or pr.get('track', 'A')
-        skill = (pr_details.get('skill') if pr_details else None) or pr.get('skill', 'developer')
-        if skill:
-            skill = skill.lstrip('@')
-        priority = (pr_details.get('priority') if pr_details else None) or pr.get('priority', 'P1')
-        cognition = (pr_details.get('cognition') if pr_details else None) or 'normal'
-        requires_model = (pr_details.get('requires_model') if pr_details else None) or None
-        requires_provider = (pr_details.get('requires_provider') if pr_details else None) or None
-        clear_context = (pr_details.get('clear_context') if pr_details else None)
-        if clear_context is None:
-            clear_context = True
-        risk_class = (pr_details.get('risk_class') if pr_details else None) or pr.get('risk_class', 'medium')
-        merge_policy = (pr_details.get('merge_policy') if pr_details else None) or pr.get('merge_policy', 'human')
-        review_stack = (pr_details.get('review_stack') if pr_details else None) or pr.get('review_stack', [])
-
-        # Generate dispatch ID
-        timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
-        pr_descriptor = re.sub(r'[^a-z0-9-]', '-', pr['title'].lower())[:30].strip('-')
-        dispatch_id = f"{timestamp}-{pr_descriptor}-{track}"
-
-        # SPRINT 2: Map track to terminal (A→T1, B→T2, C→T3)
-        terminal_map = {'A': 'T1', 'B': 'T2', 'C': 'T3'}
-        terminal = terminal_map.get(track, 'T1')
-
-        # Build instruction - include FULL PR section from FEATURE_PLAN.md
-        instruction = ""
-
-        if pr_details:
-            # Extract full PR section from FEATURE_PLAN.md for complete context
-            feature_plan_path = self.project_root / "FEATURE_PLAN.md"
-            for path in [feature_plan_path, Path(__file__).parent.parent.parent / "FEATURE_PLAN.md", Path.cwd() / "FEATURE_PLAN.md"]:
-                if path.exists():
-                    with open(path, 'r') as f:
-                        content = f.read()
-                    # Find full PR section
-                    pr_pattern = f'## {pr_id}:(.+?)(?=\n##\\s+PR-|$)'
-                    match = re.search(pr_pattern, content, re.DOTALL)
-                    if match:
-                        instruction = match.group(1).strip()
-                    break
-
-        # Fallback if parsing failed
-        if not instruction:
-            instruction = f"# {pr['title']}\n\n{pr.get('description', 'See FEATURE_PLAN.md for full details')}"
-
-        # No separate done section - it's already in the instruction
-
-        # SPRINT 2: Build Manager Block with parsed metadata
-        manager_block = f"""[[TARGET:{track}]]
-Manager Block
-
-Role: {skill}
-Track: {track}
-Terminal: {terminal}
-Gate: {pr.get('gate', 'implementation')}
-Priority: {priority}
-Cognition: {cognition}
-Risk-Class: {risk_class}
-Merge-Policy: {merge_policy}
-Review-Stack: {','.join(review_stack) if review_stack else 'none'}"""
-
-        # SPRINT 2: Add Requires-Model if specified
-        if requires_model:
-            manager_block += f"\nRequires-Model: {requires_model}"
-        if requires_provider:
-            manager_block += f"\nRequires-Provider: {requires_provider}"
-        manager_block += f"\nClearContext: {'true' if clear_context else 'false'}"
-        manager_block += f"\nProject-ID: {_get_project_id()}"
-
-        manager_block += f"""
-Dispatch-ID: {dispatch_id}
-PR-ID: {pr_id}
-Parent-Dispatch: none
-On-Success: review
-On-Failure: investigation
-Reason: {pr['title']} from PR queue
-Status: pending-approval
-
-Context: [[@FEATURE_PLAN.md]]
-
-Instruction:
-{instruction}"""
-
-        # SPRINT 2: Add dependencies from parsed data
-        dependencies = (pr_details.get('dependencies') if pr_details else None) or pr.get('dependencies', [])
-        if dependencies:
-            manager_block += f"\nDependencies: {', '.join(dependencies)}"
-        else:
-            manager_block += "\nDependencies: None"
-
-        manager_block += f"""
-Size Estimate: {pr.get('size', 'unknown')} lines
-[[DONE]]
-"""
-
-        dispatch_content = manager_block
-
-        # Write to STAGING directory (NOT queue/)
-        # T0 must explicitly promote to queue/ for popup detection
-        staging_dir = self.dispatch_dir / "staging"
-        staging_dir.mkdir(parents=True, exist_ok=True)
-
-        dispatch_file = staging_dir / f"{dispatch_id}.md"
-        dispatch_file.write_text(dispatch_content)
-
-        print(f"✅ Created staging dispatch: {dispatch_id}")
-        print(f"📁 Location: {dispatch_file}")
-        print(f"⚠️  Status: STAGING (not yet in popup queue)")
-        print(f"📋 Next: T0 must promote via: python pr_queue_manager.py promote {dispatch_id}")
-
-        return dispatch_id
-
 
     def promote_dispatch(self, dispatch_id: str, force: bool = False) -> bool:
         """
@@ -1469,252 +987,6 @@ Size Estimate: {pr.get('size', 'unknown')} lines
             traceback.print_exc()
             return False
 
-    def init_feature_batch(self, feature_plan_path: str, force: bool = False) -> tuple[bool, int]:
-        """
-        Batch generate ALL dispatches from FEATURE_PLAN.md to staging directory.
-
-        Parses all metadata directly from FEATURE_PLAN.md (not from stale internal state).
-        Resets internal state with the new feature's PR data.
-
-        Args:
-            feature_plan_path: Path to FEATURE_PLAN.md
-            force: If True, overwrite existing staging files
-
-        Returns:
-            Tuple of (success: bool, count: int)
-        """
-        import re
-
-        # Validate feature plan first
-        valid, error = self.validate_feature_plan(feature_plan_path)
-        if not valid:
-            print(f"❌ Invalid feature plan: {error}")
-            return False, 0
-
-        try:
-            with open(feature_plan_path, 'r') as f:
-                content = f.read()
-
-            # Parse feature name
-            feature_match = re.search(r'#\s*Feature:\s*(.+?)(?:\n|$)', content)
-            feature_name = feature_match.group(1).strip() if feature_match else "Unknown Feature"
-            feature_metadata = self._parse_feature_metadata(content)
-
-            # Parse ALL PR metadata directly from plan content
-            parsed_prs = self._parse_all_prs_from_plan(content)
-
-            if not parsed_prs:
-                print("❌ No PRs found in feature plan")
-                return False, 0
-
-            # Track→Terminal mapping
-            track_to_terminal = {'A': 'T1', 'B': 'T2', 'C': 'T3'}
-            # Complexity→Cognition mapping
-            complexity_to_cognition = {'High': 'deep', 'Medium': 'normal', 'Low': 'normal'}
-
-            print(f"\n📋 Feature: {feature_name}")
-            print(f"📋 Found {len(parsed_prs)} PRs in feature plan")
-            print(f"🎯 Generating batch dispatches to staging/\n")
-
-            # Reset internal state with new feature data
-            self.state = self._fresh_state(feature_name=feature_name, feature_metadata=feature_metadata)
-
-            for pr_data in parsed_prs:
-                self.state['prs'].append({
-                    'id': pr_data['id'],
-                    'title': pr_data['title_from_header'],
-                    'size': pr_data.get('estimated_time', 'unknown'),
-                    'dependencies': pr_data['dependencies'],
-                    'skill': pr_data['skill'],
-                    'status': 'queued',
-                    'track': pr_data['track'],
-                    'priority': pr_data['priority'],
-                    'gate': pr_data['gate'],
-                    'risk_class': pr_data.get('risk_class', feature_metadata.get('risk_class', 'medium')),
-                    'merge_policy': pr_data.get('merge_policy', feature_metadata.get('merge_policy', 'human')),
-                    'review_stack': pr_data.get('review_stack', feature_metadata.get('review_stack', [])),
-                })
-
-            self.save_state()
-
-            staging_dir = self.dispatch_dir / "staging"
-            staging_dir.mkdir(parents=True, exist_ok=True)
-
-            created = 0
-            skipped = 0
-
-            for pr_data in parsed_prs:
-                pr_id = pr_data['id']
-
-                # Check if dispatch already exists in staging
-                existing_files = list(staging_dir.glob(f"*{pr_id.lower()}*.md"))
-                if existing_files and not force:
-                    print(f"⏭️  Skipping {pr_id} (already in staging)")
-                    skipped += 1
-                    continue
-
-                # Generate dispatch ID
-                timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
-                pr_descriptor = re.sub(r'[^a-z0-9-]', '-', pr_data['title_from_header'].lower())[:30].strip('-')
-                track = pr_data['track']
-                terminal = track_to_terminal.get(track, 'T1')
-                dispatch_id = f"{timestamp}-{pr_descriptor}-{track}"
-
-                # Get skill (remove @ prefix for Manager Block)
-                skill = pr_data['skill']
-                if skill.startswith('@'):
-                    skill = skill[1:]
-
-                # Map cognition from complexity
-                cognition = complexity_to_cognition.get(pr_data['complexity'], 'normal')
-
-                # Extract full PR section from FEATURE_PLAN.md for instruction
-                instruction = ""
-                pr_pattern_single = f'## {pr_id}:(.+?)(?=\n##\\s+PR-|$)'
-                match = re.search(pr_pattern_single, content, re.DOTALL)
-                if match:
-                    instruction = match.group(1).strip()
-                else:
-                    instruction = f"# {pr_data['title']}\n\nSee FEATURE_PLAN.md for details"
-
-                # Build dependencies string
-                deps_str = ', '.join(pr_data['dependencies']) if pr_data['dependencies'] else 'None'
-
-                # Create dispatch markdown
-                dispatch_content = f"""[[TARGET:{track}]]
-Manager Block
-
-Role: {skill}
-Track: {track}
-Terminal: {terminal}
-Gate: {pr_data['gate']}
-Priority: {pr_data['priority']}
-Cognition: {cognition}
-Risk-Class: {pr_data.get('risk_class', feature_metadata.get('risk_class', 'medium'))}
-Merge-Policy: {pr_data.get('merge_policy', feature_metadata.get('merge_policy', 'human'))}
-Review-Stack: {','.join(pr_data.get('review_stack', feature_metadata.get('review_stack', []))) or 'none'}
-Project-ID: {_get_project_id()}
-Dispatch-ID: {dispatch_id}
-PR-ID: {pr_id}
-Parent-Dispatch: none
-On-Success: review
-On-Failure: investigation
-Reason: {pr_data['title_from_header']} from PR queue
-Status: pending-approval
-
-Context: [[@FEATURE_PLAN.md]]
-
-Instruction:
-{instruction}
-
-Dependencies: {deps_str}
-Size Estimate: {pr_data['estimated_time']}
-
-[[DONE]]
-"""
-
-                dispatch_file = staging_dir / f"{dispatch_id}.md"
-                dispatch_file.write_text(dispatch_content)
-
-                print(f"✅ Created {pr_id}: {dispatch_id}")
-                print(f"   Role: {skill} | Track: {track} | Terminal: {terminal}")
-                print(f"   Priority: {pr_data['priority']} | Cognition: {cognition}")
-                print(
-                    f"   Risk: {pr_data.get('risk_class', feature_metadata.get('risk_class', 'medium'))} | "
-                    f"Merge: {pr_data.get('merge_policy', feature_metadata.get('merge_policy', 'human'))} | "
-                    f"Review: {','.join(pr_data.get('review_stack', feature_metadata.get('review_stack', []))) or 'none'}"
-                )
-                print(f"   Dependencies: {deps_str}")
-                created += 1
-
-            # Generate open items from quality gate checklist items
-            oi_created = 0
-            oi_script = Path(__file__).resolve().parent / "open_items_manager.py"
-            if oi_script.exists():
-                print(f"\n📋 Generating open items from quality gates...")
-                for pr_data in parsed_prs:
-                    pr_id = pr_data['id']
-                    for gate_item in pr_data.get('quality_gate_items', []):
-                        severity = self._classify_gate_severity(gate_item)
-                        try:
-                            import subprocess
-                            subprocess.run([
-                                sys.executable, str(oi_script), 'add',
-                                '--dispatch', f'init-feature-{pr_id}',
-                                '--title', gate_item,
-                                '--severity', severity,
-                                '--pr', pr_id,
-                                '--details', f'Quality gate deliverable from {pr_data.get("gate", "implementation")}'
-                            ], check=True, capture_output=True)
-                            oi_created += 1
-                        except subprocess.CalledProcessError as e:
-                            print(f"⚠️  Failed to create OI for {pr_id}: {gate_item}")
-            else:
-                print(f"⚠️  open_items_manager.py not found, skipping OI generation")
-
-            print(f"\n📊 Batch Summary:")
-            print(f"   Dispatches created: {created}")
-            print(f"   Dispatches skipped: {skipped}")
-            print(f"   Open items created: {oi_created}")
-            print(f"   Total PRs: {len(parsed_prs)}")
-            print(f"\n📁 Location: {staging_dir}")
-            print(f"📋 Next: Use 'staging-list' to review, then 'promote' when ready")
-            print(f"📋 Open items: Use 'python3 open_items_manager.py list' to review deliverables")
-
-            return True, created
-
-        except Exception as e:
-            print(f"❌ Batch generation failed: {e}")
-            import traceback
-            traceback.print_exc()
-            return False, 0
-
-    def load_feature_plan(self, feature_plan_path: str) -> tuple[bool, int]:
-        """
-        Materialize one feature plan into active root FEATURE_PLAN.md/PR_QUEUE.md state
-        without generating dispatches.
-        """
-        valid, error = self.validate_feature_plan(feature_plan_path)
-        if not valid:
-            print(f"❌ Invalid feature plan: {error}")
-            return False, 0
-
-        try:
-            content = Path(feature_plan_path).read_text(encoding="utf-8")
-            feature_match = re.search(r'#\s*Feature:\s*(.+?)(?:\n|$)', content)
-            feature_name = feature_match.group(1).strip() if feature_match else "Unknown Feature"
-            feature_metadata = self._parse_feature_metadata(content)
-            parsed_prs = self._parse_all_prs_from_plan(content)
-            if not parsed_prs:
-                print("❌ No PRs found in feature plan")
-                return False, 0
-
-            self.state = self._fresh_state(feature_name=feature_name, feature_metadata=feature_metadata)
-            for pr_data in parsed_prs:
-                self.state["prs"].append(
-                    {
-                        "id": pr_data["id"],
-                        "title": pr_data["title_from_header"],
-                        "size": pr_data.get("estimated_time", "unknown"),
-                        "dependencies": pr_data["dependencies"],
-                        "skill": pr_data["skill"],
-                        "status": "queued",
-                        "track": pr_data["track"],
-                        "priority": pr_data["priority"],
-                        "gate": pr_data["gate"],
-                        "risk_class": pr_data.get("risk_class", feature_metadata.get("risk_class", "medium")),
-                        "merge_policy": pr_data.get("merge_policy", feature_metadata.get("merge_policy", "human")),
-                        "review_stack": pr_data.get("review_stack", feature_metadata.get("review_stack", [])),
-                    }
-                )
-
-            self.save_state()
-            self.update_markdown()
-            return True, len(parsed_prs)
-        except Exception as e:
-            print(f"❌ Failed to load feature plan: {e}")
-            return False, 0
-
     def list_staging_dispatches(self) -> None:
         """
         List all staging dispatches with dependency status
@@ -1858,266 +1130,6 @@ Size Estimate: {pr_data['estimated_time']}
             return False
 
 
-def test_dependency_resolution():
-    """Test dependency resolution and validation"""
-    print("\n" + "="*60)
-    print("Testing Dependency Resolution")
-    print("="*60)
-
-    manager = PRQueueManager()
-    manager.clear_queue()
-    manager.set_feature("Dependency Testing")
-
-    # Test 1: Simple dependency chain
-    print("\n[Test 1] Simple dependency chain")
-    prs = [
-        {'id': 'PR-1', 'title': 'Base', 'dependencies': [], 'skill': '@backend-developer', 'size': 100},
-        {'id': 'PR-2', 'title': 'Middle', 'dependencies': ['PR-1'], 'skill': '@backend-developer', 'size': 100},
-        {'id': 'PR-3', 'title': 'Top', 'dependencies': ['PR-2'], 'skill': '@backend-developer', 'size': 100}
-    ]
-    for pr in prs:
-        manager.add_pr(pr)
-
-    # Check PR-3 dependencies before PR-1 and PR-2 are complete
-    deps_met, msg = manager.check_pr_dependencies('PR-3')
-    assert not deps_met, "PR-3 should not be ready (depends on PR-2)"
-    print(f"  ✓ PR-3 not ready: {msg}")
-
-    # Complete PR-1
-    manager.update_pr_status('PR-1', 'completed')
-    deps_met, msg = manager.check_pr_dependencies('PR-2')
-    assert deps_met, "PR-2 should be ready after PR-1 completes"
-    print(f"  ✓ PR-2 ready: {msg}")
-
-    # Test 2: Execution order
-    print("\n[Test 2] Execution order (topological sort)")
-    success, order, error = manager.get_execution_order()
-    assert success, f"Execution order should succeed: {error}"
-    assert order == ['PR-1', 'PR-2', 'PR-3'], f"Order should be PR-1→PR-2→PR-3, got {order}"
-    print(f"  ✓ Correct order: {' → '.join(order)}")
-
-    # Test 3: Circular dependency detection
-    print("\n[Test 3] Circular dependency detection")
-    manager.clear_queue()
-    circular_prs = [
-        {'id': 'PR-A', 'title': 'A', 'dependencies': ['PR-C'], 'skill': '@backend-developer', 'size': 100},
-        {'id': 'PR-B', 'title': 'B', 'dependencies': ['PR-A'], 'skill': '@backend-developer', 'size': 100},
-        {'id': 'PR-C', 'title': 'C', 'dependencies': ['PR-B'], 'skill': '@backend-developer', 'size': 100}
-    ]
-    for pr in circular_prs:
-        manager.add_pr(pr)
-
-    success, order, error = manager.get_execution_order()
-    assert not success, "Execution order should fail with circular dependencies"
-    assert "Circular dependency" in error, f"Error should mention circular dependency: {error}"
-    print(f"  ✓ Detected circular dependency: {error}")
-
-    # Test 4: Complex dependency graph
-    print("\n[Test 4] Complex dependency graph")
-    manager.clear_queue()
-    complex_prs = [
-        {'id': 'PR-1', 'title': 'Base 1', 'dependencies': [], 'skill': '@backend-developer', 'size': 100},
-        {'id': 'PR-2', 'title': 'Base 2', 'dependencies': [], 'skill': '@backend-developer', 'size': 100},
-        {'id': 'PR-3', 'title': 'Depends on 1', 'dependencies': ['PR-1'], 'skill': '@backend-developer', 'size': 100},
-        {'id': 'PR-4', 'title': 'Depends on 1,2', 'dependencies': ['PR-1', 'PR-2'], 'skill': '@api-developer', 'size': 100},
-        {'id': 'PR-5', 'title': 'Depends on 3,4', 'dependencies': ['PR-3', 'PR-4'], 'skill': '@api-developer', 'size': 100}
-    ]
-    for pr in complex_prs:
-        manager.add_pr(pr)
-
-    success, order, error = manager.get_execution_order()
-    assert success, f"Complex graph should have valid execution order: {error}"
-    # PR-1 and PR-2 can be in any order (both have no deps)
-    # PR-3 must come after PR-1
-    # PR-4 must come after both PR-1 and PR-2
-    # PR-5 must come last
-    assert order[-1] == 'PR-5', "PR-5 should be last"
-    assert order.index('PR-3') > order.index('PR-1'), "PR-3 must come after PR-1"
-    assert order.index('PR-4') > order.index('PR-1') and order.index('PR-4') > order.index('PR-2'), "PR-4 must come after PR-1 and PR-2"
-    print(f"  ✓ Valid complex order: {' → '.join(order)}")
-
-    # Test 5: Invalid dependency reference
-    print("\n[Test 5] Invalid dependency reference")
-    manager.clear_queue()
-    invalid_prs = [
-        {'id': 'PR-1', 'title': 'Valid', 'dependencies': [], 'skill': '@backend-developer', 'size': 100},
-        {'id': 'PR-2', 'title': 'Invalid', 'dependencies': ['PR-99'], 'skill': '@backend-developer', 'size': 100}
-    ]
-    for pr in invalid_prs:
-        manager.add_pr(pr)
-
-    success, order, error = manager.get_execution_order()
-    assert not success, "Should fail with invalid dependency reference"
-    assert "non-existent" in error, f"Error should mention non-existent PR: {error}"
-    print(f"  ✓ Detected invalid reference: {error}")
-
-    print("\n" + "="*60)
-    print("✅ All dependency resolution tests passed!")
-    print("="*60)
-
-
-def test_feature_plan_validation():
-    """Test FEATURE_PLAN.md validation"""
-    print("\n" + "="*60)
-    print("Testing FEATURE_PLAN.md Validation")
-    print("="*60)
-
-    manager = PRQueueManager()
-
-    # Create valid test plan
-    valid_plan = """# Feature: Test Feature
-
-## PR-1: First PR
-Dependencies: []
-
-## PR-2: Second PR
-Dependencies: [PR-1]
-
-## PR-3: Third PR
-Dependencies: [PR-1, PR-2]
-"""
-
-    # Create invalid plans
-    no_feature = """## PR-1: First PR
-Dependencies: []
-"""
-
-    no_deps = """# Feature: Test
-## PR-1: First PR
-"""
-
-    invalid_dep = """# Feature: Test
-## PR-1: First PR
-Dependencies: [PR-99]
-"""
-
-    duplicate_pr = """# Feature: Test
-## PR-1: First PR
-Dependencies: []
-## PR-1: Duplicate
-Dependencies: []
-"""
-
-    # Test valid plan
-    print("\n[Test 1] Valid feature plan")
-    test_file = "/tmp/test_valid_plan.md"
-    with open(test_file, 'w') as f:
-        f.write(valid_plan)
-    valid, error = manager.validate_feature_plan(test_file)
-    assert valid, f"Valid plan should pass: {error}"
-    print("  ✓ Valid plan accepted")
-
-    # Test missing feature title
-    print("\n[Test 2] Missing feature title")
-    test_file = "/tmp/test_no_feature.md"
-    with open(test_file, 'w') as f:
-        f.write(no_feature)
-    valid, error = manager.validate_feature_plan(test_file)
-    assert not valid, "Should reject plan without feature title"
-    print(f"  ✓ Rejected: {error}")
-
-    # Test missing dependencies
-    print("\n[Test 3] Missing dependencies section")
-    test_file = "/tmp/test_no_deps.md"
-    with open(test_file, 'w') as f:
-        f.write(no_deps)
-    valid, error = manager.validate_feature_plan(test_file)
-    assert not valid, "Should reject plan without dependencies"
-    print(f"  ✓ Rejected: {error}")
-
-    # Test invalid dependency reference
-    print("\n[Test 4] Invalid dependency reference")
-    test_file = "/tmp/test_invalid_dep.md"
-    with open(test_file, 'w') as f:
-        f.write(invalid_dep)
-    valid, error = manager.validate_feature_plan(test_file)
-    assert not valid, "Should reject plan with invalid dependency"
-    print(f"  ✓ Rejected: {error}")
-
-    # Test duplicate PR IDs
-    print("\n[Test 5] Duplicate PR IDs")
-    test_file = "/tmp/test_duplicate.md"
-    with open(test_file, 'w') as f:
-        f.write(duplicate_pr)
-    valid, error = manager.validate_feature_plan(test_file)
-    assert not valid, "Should reject plan with duplicate PR IDs"
-    print(f"  ✓ Rejected: {error}")
-
-    print("\n" + "="*60)
-    print("✅ All feature plan validation tests passed!")
-    print("="*60)
-
-
-def test_queue_operations():
-    """Test PR queue manager operations"""
-    print("Testing PR Queue Manager...")
-
-    # Initialize manager
-    manager = PRQueueManager()
-    manager.clear_queue()
-    manager.set_feature("User Authentication")
-
-    # Add PRs
-    prs = [
-        {
-            'id': 'PR-1',
-            'title': 'User model',
-            'size': 200,
-            'dependencies': [],
-            'skill': '@backend-developer',
-            'status': 'queued'
-        },
-        {
-            'id': 'PR-2',
-            'title': 'JWT utilities',
-            'size': 150,
-            'dependencies': ['PR-1'],
-            'skill': '@backend-developer',
-            'status': 'queued'
-        },
-        {
-            'id': 'PR-3',
-            'title': 'Login endpoint',
-            'size': 250,
-            'dependencies': ['PR-1', 'PR-2'],
-            'skill': '@api-developer',
-            'status': 'queued'
-        }
-    ]
-
-    for pr in prs:
-        manager.add_pr(pr)
-        print(f"Added {pr['id']}: {pr['title']}")
-
-    # Test dependency resolution
-    next_pr = manager.get_next_pr()
-    assert next_pr['id'] == 'PR-1', "First PR should have no dependencies"
-    print(f"Next PR: {next_pr['id']} (correct)")
-
-    # Start PR-1
-    manager.update_pr_status('PR-1', 'in_progress')
-    print("PR-1 set to in_progress")
-
-    # Complete PR-1
-    manager.update_pr_status('PR-1', 'completed')
-    print("PR-1 completed")
-
-    # Now PR-2 should be available
-    next_pr = manager.get_next_pr()
-    assert next_pr['id'] == 'PR-2', "PR-2 should be available after PR-1 completes"
-    print(f"Next PR: {next_pr['id']} (correct)")
-
-    # Get status summary
-    summary = manager.get_status_summary()
-    print(f"\nStatus Summary:")
-    print(f"Feature: {summary['feature']}")
-    print(f"Progress: {summary['progress_percent']}%")
-    print(f"Completed: {summary['completed']}/{summary['total_prs']}")
-
-    print("\n✅ All basic tests passed!")
-    print(f"Check {manager.queue_file} for visual representation")
-
-
 def _ok_result(data: Optional[Dict[str, Any]] = None) -> Result:
     return result_ok(data)
 
@@ -2151,35 +1163,7 @@ def _exit_from_result(result: Result) -> None:
 if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1:
-        if sys.argv[1] == "test":
-            test_queue_operations()
-        elif sys.argv[1] == "test-deps":
-            test_dependency_resolution()
-        elif sys.argv[1] == "test-plan":
-            test_feature_plan_validation()
-        elif sys.argv[1] == "test-all":
-            test_queue_operations()
-            test_dependency_resolution()
-            test_feature_plan_validation()
-        elif sys.argv[1] == "dispatch":
-            # Create dispatch from PR
-            if len(sys.argv) < 3:
-                print("❌ Usage: python pr_queue_manager.py dispatch PR-X")
-                _exit_from_result(_error_result("missing_argument", "dispatch requires <pr_id>"))
-
-            pr_id = sys.argv[2]
-            manager = PRQueueManager()
-            dispatch_id = manager.create_dispatch_from_pr(pr_id)
-
-            if dispatch_id:
-                print(f"\n✅ Dispatch created successfully!")
-                print(f"   Dispatch ID: {dispatch_id}")
-                print(f"   Status: STAGING (requires T0 promotion)")
-                _exit_from_result(_ok_result({"dispatch_id": dispatch_id}))
-            else:
-                print(f"\n❌ Failed to create dispatch")
-                _exit_from_result(_error_result("operation_failed", "Failed to create dispatch"))
-        elif sys.argv[1] == "show":
+        if sys.argv[1] == "show":
             # Show staging dispatch
             if len(sys.argv) < 3:
                 print("❌ Usage: python pr_queue_manager.py show <dispatch_id>")
@@ -2318,7 +1302,6 @@ if __name__ == "__main__":
             # List all PRs in the queue
             manager = PRQueueManager()
 
-            # Load the feature plan to get PR details
             if manager.state.get('feature'):
                 print(f"\n📋 PR Queue for: {manager.state['feature']}")
                 print("=" * 50)
@@ -2470,26 +1453,6 @@ if __name__ == "__main__":
                 )
             )
 
-        elif sys.argv[1] == "init-feature":
-            # NEW: Batch generate all dispatches from FEATURE_PLAN.md
-            if len(sys.argv) < 3:
-                print("❌ Usage: python pr_queue_manager.py init-feature <feature_plan.md> [--force]")
-                _exit_from_result(_error_result("missing_argument", "init-feature requires <feature_plan_path>"))
-
-            feature_plan_path = sys.argv[2]
-            force = '--force' in sys.argv
-
-            manager = PRQueueManager()
-            success, count = manager.init_feature_batch(feature_plan_path, force=force)
-            _exit_from_result(
-                _result_from_bool(
-                    success,
-                    error_code="invalid_feature_plan",
-                    error_msg=f"Failed to initialize feature batch: {feature_plan_path}",
-                    data={"created_dispatches": count},
-                )
-            )
-
         elif sys.argv[1] == "staging-list":
             # NEW: List all staging dispatches with dependency status
             manager = PRQueueManager()
@@ -2515,20 +1478,10 @@ if __name__ == "__main__":
         print("  python pr_queue_manager.py start PR-X   # Mark PR as in progress")
         print("  python pr_queue_manager.py complete PR-X # Mark PR as completed")
         print("")
-        print("  🆕 Batch Workflow (Option 3):")
-        print("  python pr_queue_manager.py init-feature FEATURE_PLAN.md [--force]  # Generate all dispatches to staging")
+        print("  🆕 Staging Workflow:")
         print("  python pr_queue_manager.py staging-list  # List staging with dependency status")
         print("  python pr_queue_manager.py show <id>    # Show staging dispatch details")
         print("  python pr_queue_manager.py patch <id> --set key=value  # Patch staging dispatch fields")
         print("  python pr_queue_manager.py promote <id> [--force]  # Promote staging to queue (with dep check)")
         print("  python pr_queue_manager.py reject <id> --reason \"...\" [--defer PR-X]  # Reject staging dispatch")
-        print("")
-        print("  Legacy Single Dispatch:")
-        print("  python pr_queue_manager.py dispatch PR-X # Create single dispatch (not batch)")
-        print("")
-        print("  Test commands:")
-        print("  python pr_queue_manager.py test         # Basic queue operations")
-        print("  python pr_queue_manager.py test-deps    # Dependency resolution")
-        print("  python pr_queue_manager.py test-plan    # Feature plan validation")
-        print("  python pr_queue_manager.py test-all     # All tests")
         print("\nOr import and use PRQueueManager class directly")

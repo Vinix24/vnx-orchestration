@@ -171,18 +171,20 @@ PR-0 (no dependencies)
     return {"project_root": project_root, "roadmap_file": roadmap_file, "state_dir": state_dir}
 
 
-def test_load_feature_materializes_active_plan_and_queue(roadmap_env):
+def test_load_feature_materializes_active_plan(roadmap_env):
+    """ADR-047: the plan is copied to the project root as a reference artifact.
+
+    It is not parsed into a PR queue any more (A6 retired
+    ``PRQueueManager.load_feature_plan``), so no PR_QUEUE.md is produced here.
+    """
     manager = rm.RoadmapManager()
     manager.init_roadmap(roadmap_env["roadmap_file"])
     state = manager.load_feature("feature-a")
 
     assert state["current_active_feature"] == "feature-a"
     feature_plan = roadmap_env["project_root"] / "FEATURE_PLAN.md"
-    pr_queue = roadmap_env["project_root"] / "PR_QUEUE.md"
     assert feature_plan.exists()
-    assert pr_queue.exists()
     assert "Feature A" in feature_plan.read_text(encoding="utf-8")
-    assert "Risk-Class: low" in pr_queue.read_text(encoding="utf-8")
 
 
 def test_advance_loads_next_feature_after_verified_merge(roadmap_env, monkeypatch):
@@ -1069,46 +1071,55 @@ def test_consumed_token_does_not_reauthorize(roadmap_env, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_step_dispatches_first_ready_pr(roadmap_env, monkeypatch):
-    """step creates+promotes a dispatch for the first dependency-ready PR, returns dispatch_id+pr_id."""
-    monkeypatch.setenv("VNX_QUEUE_POPUP_ENABLED", "0")
-
+def test_step_no_ready_pr_without_a_queue(roadmap_env):
+    """No queued PR (the plan path is retired) → no_ready_pr, no side effects."""
     manager = rm.RoadmapManager()
     manager.init_roadmap(roadmap_env["roadmap_file"])
     manager.load_feature("feature-a", no_worktree=True)
 
     result = manager.run_feature_step()
 
-    assert result["status"] == "dispatched", f"expected dispatched, got: {result}"
-    assert result["pr_id"] == "PR-0"
-    assert result["dispatch_id"] is not None
+    assert result["status"] == "no_ready_pr", f"expected no_ready_pr, got: {result}"
     assert result["feature_id"] == "feature-a"
 
-    # Dispatch must exist in pending/ (auto-approved via VNX_QUEUE_POPUP_ENABLED=0)
     dispatch_dir = roadmap_env["project_root"] / ".vnx-data" / "dispatches"
-    pending_files = list((dispatch_dir / "pending").glob("*.md"))
-    assert len(pending_files) == 1, "exactly one dispatch must be in pending/"
+    for sub in ("pending", "queue", "staging"):
+        assert not list((dispatch_dir / sub).glob("*.md")), f"step must not stage under {sub}/"
 
 
-def test_step_second_call_no_ready_pr(roadmap_env, monkeypatch):
-    """second step returns no_ready_pr when only PR is already in_progress."""
-    monkeypatch.setenv("VNX_QUEUE_POPUP_ENABLED", "0")
+def test_step_fails_closed_when_a_queued_pr_cannot_be_staged(roadmap_env):
+    """A leftover queued PR must not be reported as drained.
+
+    ADR-047 retired plan-based dispatch creation, so a queued PR can no longer
+    be staged by this step. It fails closed instead of pretending the queue is
+    empty (which would let autopilot advance past undispatched work).
+    """
+    from pr_queue_manager import PRQueueManager
 
     manager = rm.RoadmapManager()
     manager.init_roadmap(roadmap_env["roadmap_file"])
     manager.load_feature("feature-a", no_worktree=True)
 
-    first = manager.run_feature_step()
-    assert first["status"] == "dispatched"
+    queue_manager = PRQueueManager()
+    queue_manager.clear_queue()
+    queue_manager.add_pr({
+        "id": "PR-0",
+        "title": "Feature A PR",
+        "size": 100,
+        "dependencies": [],
+        "skill": "@backend-developer",
+        "track": "C",
+    })
 
-    second = manager.run_feature_step()
-    assert second["status"] == "no_ready_pr"
-    assert second["feature_id"] == "feature-a"
+    result = manager.run_feature_step()
+
+    assert result["status"] == "failed", f"expected failed, got: {result}"
+    assert result["pr_id"] == "PR-0"
+    assert "retired" in result["reason"]
 
 
 def test_step_receipt_project_id_stamped(roadmap_env, monkeypatch):
     """ADR-007: roadmap_dispatch_step receipt carries project_id."""
-    monkeypatch.setenv("VNX_QUEUE_POPUP_ENABLED", "0")
     monkeypatch.setenv("VNX_PROJECT_ID", "proj-step-test")
     receipts = []
     monkeypatch.setattr(rm, "emit_governance_receipt", lambda *a, **kw: receipts.append(kw))
@@ -1120,11 +1131,10 @@ def test_step_receipt_project_id_stamped(roadmap_env, monkeypatch):
     manager.run_feature_step()
 
     step_receipt = next(
-        (r for r in receipts if r.get("project_id") == "proj-step-test" and "dispatch_id" in r),
+        (r for r in receipts if r.get("project_id") == "proj-step-test" and r.get("status") == "no_ready_pr"),
         None,
     )
     assert step_receipt is not None, "roadmap_dispatch_step receipt not emitted"
-    assert step_receipt["pr_id"] == "PR-0"
     assert step_receipt["feature_id"] == "feature-a"
 
 
@@ -1160,9 +1170,12 @@ def test_autopilot_tick_disabled_when_flag_unset(roadmap_env, monkeypatch):
 
 
 def test_autopilot_tick_full_loop_advances_a_to_b(roadmap_env, monkeypatch):
-    """Full simulated loop: tick1 dispatches PR, tick2 (queue drained + gates pass) advances A→B."""
+    """Queue drained + gates pass → the tick advances A→B.
+
+    The plan path is retired (A6), so nothing is queued and the tick goes
+    straight to the advance leg instead of dispatching a PR first.
+    """
     monkeypatch.setenv("VNX_ROADMAP_AUTOPILOT", "1")
-    monkeypatch.setenv("VNX_QUEUE_POPUP_ENABLED", "0")
 
     manager = rm.RoadmapManager()
     manager.init_roadmap(roadmap_env["roadmap_file"])
@@ -1176,13 +1189,8 @@ def test_autopilot_tick_full_loop_advances_a_to_b(roadmap_env, monkeypatch):
     _provision_track_layer(roadmap_env["state_dir"])  # clean track-sync (D-N1 gate)
 
     # feature-a is conditional_auto + low risk → no approval token required
-    tick1 = manager.autopilot_tick()
-    assert tick1["status"] == "stepped", f"expected stepped, got: {tick1}"
-    assert tick1["pr_id"] == "PR-0"
-
-    # PR-0 is now in_progress; queue is drained → second tick advances
-    tick2 = manager.autopilot_tick()
-    assert tick2["status"] == "advanced", f"expected advanced, got: {tick2}"
+    tick = manager.autopilot_tick()
+    assert tick["status"] == "advanced", f"expected advanced, got: {tick}"
 
     state = manager.load_state()
     assert state["current_active_feature"] == "feature-b"
@@ -1192,7 +1200,6 @@ def test_autopilot_tick_full_loop_advances_a_to_b(roadmap_env, monkeypatch):
 def test_autopilot_tick_blocked_when_gates_incomplete(roadmap_env, monkeypatch):
     """Queue drained but gates incomplete (RA-3) → tick blocked, no advancement."""
     monkeypatch.setenv("VNX_ROADMAP_AUTOPILOT", "1")
-    monkeypatch.setenv("VNX_QUEUE_POPUP_ENABLED", "0")
 
     manager = rm.RoadmapManager()
     manager.init_roadmap(roadmap_env["roadmap_file"])
@@ -1205,12 +1212,9 @@ def test_autopilot_tick_blocked_when_gates_incomplete(roadmap_env, monkeypatch):
     # No gate results written → gates_incomplete
     _provision_track_layer(roadmap_env["state_dir"])  # clean track-sync (D-N1 gate)
 
-    tick1 = manager.autopilot_tick()
-    assert tick1["status"] == "stepped"
-
-    tick2 = manager.autopilot_tick()
-    assert tick2["status"] == "blocked"
-    assert tick2["reason"] == "gates_incomplete"
+    tick = manager.autopilot_tick()
+    assert tick["status"] == "blocked"
+    assert tick["reason"] == "gates_incomplete"
     state = manager.load_state()
     assert state["current_active_feature"] == "feature-a", "must not advance with incomplete gates"
 
@@ -1221,7 +1225,6 @@ def test_autopilot_tick_blocked_awaiting_human_approval(roadmap_env, monkeypatch
     roadmap_file = _make_high_risk_roadmap(project_root)
 
     monkeypatch.setenv("VNX_ROADMAP_AUTOPILOT", "1")
-    monkeypatch.setenv("VNX_QUEUE_POPUP_ENABLED", "0")
 
     monkeypatch.setattr(
         rm, "verify_closure",
@@ -1234,11 +1237,8 @@ def test_autopilot_tick_blocked_awaiting_human_approval(roadmap_env, monkeypatch
     manager.load_feature("feature-hi", no_worktree=True)
     _provision_track_layer(roadmap_env["state_dir"])  # clean track-sync (D-N1 gate)
 
-    tick1 = manager.autopilot_tick()
-    assert tick1["status"] == "stepped"
-
-    tick2 = manager.autopilot_tick()
-    assert tick2["status"] == "blocked"
-    assert tick2["reason"] == "awaiting_human_approval"
+    tick = manager.autopilot_tick()
+    assert tick["status"] == "blocked"
+    assert tick["reason"] == "awaiting_human_approval"
     state = manager.load_state()
     assert state["current_active_feature"] == "feature-hi", "must not advance without approval token"
