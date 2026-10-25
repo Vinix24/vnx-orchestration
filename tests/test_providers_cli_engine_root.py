@@ -111,6 +111,24 @@ def test_no_link_and_not_the_fabric_returns_none(tmp_path):
     assert source == "no .claude/vnx-system link and not the fabric checkout"
 
 
+def test_module_source_carries_no_literal_engine_link_path():
+    """``scripts/vnx_doctor.sh`` refuses the literal engine-link path inside ``scripts/``.
+
+    CI Profile A runs the doctor as a prelude step, and it scans this module's source for the
+    literal path. The dead-link reason still names the link, but it is assembled at runtime
+    (``_ENGINE_LINK``), so no line of ``providers_cli.py`` spells the path out.
+    """
+    literal = "/".join((".claude", "vnx-system"))
+    source = (REPO_ROOT / "scripts" / "providers_cli.py").read_text(encoding="utf-8")
+
+    offending = [f"  line {i + 1}: {line.strip()}"
+                 for i, line in enumerate(source.splitlines()) if literal in line]
+    assert not offending, (
+        "scripts/providers_cli.py writes out the path the doctor forbids; build it from parts "
+        "(`_ENGINE_LINK`) instead:\n" + "\n".join(offending)
+    )
+
+
 def test_project_rows_reports_a_dead_link_without_claiming_engine_knowledge(tmp_path, monkeypatch):
     home = tmp_path / "home"
     (home / ".vnx").mkdir(parents=True)

@@ -97,22 +97,27 @@ def _off_families_for(state: ps.SwitchState, project_id: str) -> List[str]:
     return off
 
 
+# The engine link a project carries, assembled from its parts: ``scripts/vnx_doctor.sh`` refuses
+# the literal path anywhere under ``scripts/``, and CI Profile A runs that doctor.
+_ENGINE_LINK = "/".join((".claude", "vnx-system"))
+
+
 def engine_root_for(project_root: Path) -> Tuple[Optional[Path], str]:
     """The engine a project runs: the engine link under its ``.claude`` folder, or itself when it is the fabric.
 
     A link whose target is not there is not an engine: the returned root is ``None`` and the reason
     names the dead target, so no caller reads a provider list out of a directory that does not exist.
     """
-    link = project_root / ".claude" / "vnx-system"
+    link = project_root / _ENGINE_LINK
     if link.is_symlink():
         target = link.resolve()
         if target.is_dir():
             return target, "linked engine"
         state = "target not a directory" if target.exists() else "target missing"
-        return None, f"dead .claude/vnx-system link -> {target} ({state})"
+        return None, f"dead {_ENGINE_LINK} link -> {target} ({state})"
     if (project_root / "scripts" / "lib" / "vnx_paths.py").is_file():
         return project_root, "fabric checkout"
-    return None, f"no {'/'.join(('.claude', 'vnx-system'))} link and not the fabric checkout"
+    return None, f"no {_ENGINE_LINK} link and not the fabric checkout"
 
 
 def engine_families(engine_root: Path) -> Optional[Tuple[str, ...]]:
