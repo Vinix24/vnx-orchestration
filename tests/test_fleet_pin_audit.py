@@ -230,21 +230,17 @@ def test_scan_root_finds_pins_outside_the_registry(scanned, capsys):
 
     assert code == 1  # the strangers are unregistered
     assert set(rows) == {"registered", "registered-wt", "stranger", "broken"}
-    assert rows["broken"]["verdict"] == "unregistered"
-    assert rows["broken"]["pin_verdict"] == "dead"
-    assert rows["broken"]["owner"] is None
-    assert rows["broken"]["registered"] is False
-    assert rows["stranger"]["verdict"] == "unregistered"
-    assert rows["stranger"]["pin_verdict"] == "pin-without-link"
-    assert rows["stranger"]["owner"] is None
+    assert (rows["broken"]["verdict"], rows["broken"]["pin_verdict"]) == ("unregistered", "dead")
+    assert rows["broken"]["owner"] is None and rows["broken"]["registered"] is False
+    assert (rows["stranger"]["verdict"], rows["stranger"]["pin_verdict"],
+            rows["stranger"]["owner"]) == ("unregistered", "pin-without-link", None)
     # A worktree is judged like its project, and names that project.
     assert rows["registered-wt"]["verdict"] == "pin-without-link"
     assert "pin_verdict" not in rows["registered-wt"]  # the verdict IS the pin one
     assert rows["registered-wt"]["owner"] == "registered"
     assert rows["registered-wt"]["registered"] is False
     # The registry row itself keeps the pre-PR shape.
-    assert "registered" not in rows["registered"]
-    assert "pin_verdict" not in rows["registered"]
+    assert not {"registered", "pin_verdict"} & set(rows["registered"])
     assert report["summary"]["projects"] == 4
     assert report["summary"]["unregistered"] == 2
     assert report["summary"]["worktrees"] == 1
