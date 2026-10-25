@@ -1898,6 +1898,13 @@
       "symbol": "ClaudeSubprocessAdapter.run"
     },
     {
+      "file": "tests/test_verification_junit_counts.py",
+      "line": 199,
+      "mechanism": "direct-call",
+      "module_target": "envelope_govern_support",
+      "symbol": "_verification_from_report"
+    },
+    {
       "file": "tests/test_verification_recount.py",
       "line": 26,
       "mechanism": "direct-call",
