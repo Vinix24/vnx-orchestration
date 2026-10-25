@@ -8,14 +8,13 @@ produces auditable queue truth during real autonomous execution.
 Test categories:
   - Unit tests: derive PR states from dispatch directories and receipts
   - Integration tests: reconcile fixes stale projections, the projection cache
-    matches, kickoff/promotion refresh, per-PR closure gate evidence
+    matches, promotion-refresh reconciliation, per-PR closure gate evidence
 
 ADR-047 §4: the PR queue comes from the dispatch state only. The plan file
-below is kept for run_preflight, whose routing preflight still reads it.
+below is written beside the dispatches to prove it adds no rows.
   - Certification tests: reproduce double-feature trial drift, verify reconciled
     truth before promotion, verify Gemini/Codex evidence non-contradictory
-  - Governance tests: T0 instructions mention reconciliation, kickoff preflight
-    blocks on drift
+  - Governance tests: T0 instructions mention reconciliation
 
 Dispatch-ID: 20260331-212208-certification-with-gemini-revi-C
 """
@@ -25,7 +24,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 import pytest
 
@@ -40,7 +39,6 @@ from queue_reconciler import (
     scan_dispatch_dirs,
     load_receipt_dispatch_ids,
 )
-from kickoff_preflight import run_preflight
 import closure_verifier as cv
 from review_contract import (
     Deliverable,
@@ -195,12 +193,14 @@ def _write_clean_gate_evidence(tmp_path: Path, results_dir: Path, pr_id: str, co
         "gate": "gemini_review", "pr_id": pr_id, "status": "pass",
         "blocking_count": 0, "advisory_count": 0,
         "contract_hash": content_hash,
+        "branch": "feature/test",
         "report_path": str(gemini_report),
     })
     _write_gate_result(results_dir, "codex_gate", pr_id, {
         "gate": "codex_gate", "pr_id": pr_id, "verdict": "pass",
         "required": True, "contract_hash": content_hash,
         "content_hash": content_hash,
+        "branch": "feature/test",
         "report_path": str(codex_report),
     })
 
@@ -469,54 +469,6 @@ class TestProjectionMatchesReconciledState:
         assert not list(tmp_path.rglob("PR_QUEUE.md"))
 
 
-class TestKickoffPreflightRefreshesQueueTruth:
-    """Kickoff and promotion paths refresh queue truth before acting."""
-
-    def test_preflight_detects_stale_queue(self, env):
-        fp = _make_feature_plan(env["project_root"])
-        _write_dispatch(env["dispatch_dir"] / "active" / "d0.md", "PR-0", "d0")
-        _make_projection(env["project_root"] / ".vnx-data", {
-            "PR-0": "pending", "PR-1": "blocked", "PR-2": "blocked", "PR-3": "blocked",
-        })
-
-        result = run_preflight(
-            project_root=env["project_root"],
-            dispatch_dir=env["dispatch_dir"],
-            receipts_file=env["receipts_file"],
-            feature_plan=fp,
-            state_dir=env["state_dir"],
-        )
-        assert result["safe_to_promote"] is False
-        assert len(result["blocking_drift"]) > 0
-
-    def test_preflight_passes_when_queue_is_fresh(self, env):
-        fp = _make_feature_plan(env["project_root"])
-        # No dispatches, no stale projection
-        result = run_preflight(
-            project_root=env["project_root"],
-            dispatch_dir=env["dispatch_dir"],
-            receipts_file=env["receipts_file"],
-            feature_plan=fp,
-            state_dir=env["state_dir"],
-        )
-        assert result["safe_to_promote"] is True
-
-    def test_preflight_returns_pr_status(self, env):
-        fp = _make_feature_plan(env["project_root"])
-        _write_dispatch(env["dispatch_dir"] / "completed" / "d0.md", "PR-0", "d0")
-
-        result = run_preflight(
-            project_root=env["project_root"],
-            dispatch_dir=env["dispatch_dir"],
-            receipts_file=env["receipts_file"],
-            feature_plan=fp,
-            state_dir=env["state_dir"],
-            pr_id="PR-0",
-        )
-        assert result["safe_to_promote"] is True
-        assert result["pr_status"]["state"] == "completed"
-
-
 class TestPerPRClosureWithGateEvidence:
     """Per-PR closure succeeds only when gate evidence is present and internally consistent."""
 
@@ -678,50 +630,49 @@ class TestDoubleFeatureTrialDriftReproduction:
 class TestReconciledTruthBeforePromotion:
     """Verify reconciled truth before next promotion."""
 
-    def test_preflight_blocks_promotion_on_drift(self, env):
-        fp = _make_feature_plan(env["project_root"])
-        _write_dispatch(env["dispatch_dir"] / "completed" / "d0.md", "PR-0", "d0")
+    def test_reconciler_blocks_promotion_on_drift(self, tmp_path):
+        dispatch_dir = tmp_path / "dispatches"
+        _write_dispatch(dispatch_dir / "completed" / "d0.md", "PR-0", "d0")
         # Stale projection claims PR-0 still active
-        _make_projection(env["project_root"] / ".vnx-data", {
+        stale_proj = _make_projection(tmp_path, {
             "PR-0": "active", "PR-1": "blocked", "PR-2": "blocked", "PR-3": "blocked",
         })
 
-        result = run_preflight(
-            project_root=env["project_root"],
-            dispatch_dir=env["dispatch_dir"],
-            receipts_file=env["receipts_file"],
-            feature_plan=fp,
-            state_dir=env["state_dir"],
+        r = QueueReconciler(
+            dispatch_dir=dispatch_dir,
+            receipts_file=tmp_path / "r.ndjson",
+            projection_file=stale_proj,
         )
-        assert result["safe_to_promote"] is False
+        assert r.reconcile().has_blocking_drift
 
-    def test_preflight_passes_after_repair(self, env):
-        fp = _make_feature_plan(env["project_root"])
-        _write_dispatch(env["dispatch_dir"] / "completed" / "d0.md", "PR-0", "d0")
-        _make_projection(env["project_root"] / ".vnx-data", {
+    def test_reconciler_passes_after_repair(self, tmp_path):
+        dispatch_dir = tmp_path / "dispatches"
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        _write_dispatch(dispatch_dir / "completed" / "d0.md", "PR-0", "d0")
+        _make_projection(tmp_path, {
             "PR-0": "active", "PR-1": "blocked", "PR-2": "blocked", "PR-3": "blocked",
         })
 
-        # First preflight — blocks
-        result1 = run_preflight(
-            project_root=env["project_root"],
-            dispatch_dir=env["dispatch_dir"],
-            receipts_file=env["receipts_file"],
-            feature_plan=fp,
-            state_dir=env["state_dir"],
-            repair=True,  # auto-repair
+        # First reconcile — blocks
+        r = QueueReconciler(
+            dispatch_dir=dispatch_dir,
+            receipts_file=tmp_path / "r.ndjson",
+            projection_file=state_dir / "pr_queue_state.json",
         )
-        assert result1["safe_to_promote"] is False
+        result1 = r.reconcile()
+        assert result1.has_blocking_drift
 
-        # Second preflight — projection is now repaired, should pass
-        result2 = run_preflight(
-            project_root=env["project_root"],
-            dispatch_dir=env["dispatch_dir"],
-            receipts_file=env["receipts_file"],
-            feature_plan=fp,
-            state_dir=env["state_dir"],
+        from reconcile_queue_state import repair_projections
+        repair_projections(result1, state_dir)
+
+        # Second reconcile — projection is now repaired, no blocking drift
+        r2 = QueueReconciler(
+            dispatch_dir=dispatch_dir,
+            receipts_file=tmp_path / "r.ndjson",
+            projection_file=state_dir / "pr_queue_state.json",
         )
-        assert result2["safe_to_promote"] is True
+        assert not r2.reconcile().has_blocking_drift
 
     def test_source_of_truth_vs_projection_side_by_side(self, tmp_path):
         """Certification evidence: reconciled result shows both derived and projected state."""
@@ -794,6 +745,7 @@ class TestGeminiCodexEvidenceNonContradictory:
             "gate": "gemini_review", "pr_id": "PR-0", "status": "pass",
             "blocking_count": 0, "advisory_count": 0,
             "contract_hash": "abcdef1234567890",
+            "branch": "feature/test",
             "report_path": str(gemini_report),
         })
         codex_report = reports_dir / "codex.md"
@@ -802,6 +754,7 @@ class TestGeminiCodexEvidenceNonContradictory:
             "gate": "codex_gate", "pr_id": "PR-0", "verdict": "pass",
             "required": True, "contract_hash": "abcdef1234567890",
             "content_hash": "abcdef1234567890",
+            "branch": "feature/test",
             "report_path": str(codex_report),
         })
 
@@ -833,6 +786,7 @@ class TestGeminiCodexEvidenceNonContradictory:
             "gate": "gemini_review", "pr_id": "PR-0", "status": "pass",
             "blocking_count": 0, "advisory_count": 0,
             "contract_hash": "abcdef1234567890",
+            "branch": "feature/test",
             "report_path": str(gemini_report),
         })
 
@@ -844,6 +798,7 @@ class TestGeminiCodexEvidenceNonContradictory:
             "verdict": "fail", "blocking_count": 2,
             "required": True, "contract_hash": "abcdef1234567890",
             "content_hash": "abcdef1234567890",
+            "branch": "feature/test",
             "report_path": str(codex_report),
         })
 
@@ -874,6 +829,7 @@ class TestGeminiCodexEvidenceNonContradictory:
             "gate": "gemini_review", "pr_id": "PR-0", "status": "pass",
             "blocking_count": 0, "advisory_count": 0,
             "contract_hash": "STALE_HASH_FROM_PREVIOUS_RUN",
+            "branch": "feature/test",
             "report_path": str(gemini_report),
         })
         codex_report = reports_dir / "codex.md"
@@ -883,6 +839,7 @@ class TestGeminiCodexEvidenceNonContradictory:
             "required": True,
             "contract_hash": "abcdef1234567890",
             "content_hash": "abcdef1234567890",
+            "branch": "feature/test",
             "report_path": str(codex_report),
         })
 
@@ -902,7 +859,7 @@ class TestGeminiCodexEvidenceNonContradictory:
 
 
 # ===========================================================================
-# GOVERNANCE TESTS — T0 instructions and kickoff handoff
+# GOVERNANCE TESTS — T0 instructions and queue truth contract
 # ===========================================================================
 
 
@@ -935,65 +892,3 @@ class TestGovernanceInstructions:
         assert "Status**: Canonical" in content or "Status: Canonical" in content.replace("*", "")
         assert "Source-Of-Truth Hierarchy" in content
         assert "Drift Detection" in content
-
-
-class TestKickoffPreflightGovernance:
-    """Kickoff preflight blocks on drift and surfaces reconciled state."""
-
-    def test_kickoff_preflight_exists(self):
-        preflight_path = SCRIPTS_DIR / "kickoff_preflight.py"
-        assert preflight_path.exists(), "kickoff_preflight.py must exist"
-
-    def test_kickoff_preflight_returns_reconciled_state(self, env):
-        fp = _make_feature_plan(env["project_root"])
-        result = run_preflight(
-            project_root=env["project_root"],
-            dispatch_dir=env["dispatch_dir"],
-            receipts_file=env["receipts_file"],
-            feature_plan=fp,
-            state_dir=env["state_dir"],
-        )
-        assert "reconciled_state" in result
-        assert result["reconciled_state"] is not None
-        assert "prs" in result["reconciled_state"]
-
-    def test_kickoff_preflight_exit_code_semantics(self, env):
-        """Preflight returns structured result with safe_to_promote boolean."""
-        fp = _make_feature_plan(env["project_root"])
-
-        # Clean state → safe
-        clean = run_preflight(
-            project_root=env["project_root"],
-            dispatch_dir=env["dispatch_dir"],
-            receipts_file=env["receipts_file"],
-            feature_plan=fp,
-            state_dir=env["state_dir"],
-        )
-        assert clean["safe_to_promote"] is True
-
-        # Introduce drift → unsafe
-        _write_dispatch(env["dispatch_dir"] / "active" / "d0.md", "PR-0", "d0")
-        _make_projection(env["project_root"] / ".vnx-data", {
-            "PR-0": "pending", "PR-1": "blocked", "PR-2": "blocked", "PR-3": "blocked",
-        })
-        drifted = run_preflight(
-            project_root=env["project_root"],
-            dispatch_dir=env["dispatch_dir"],
-            receipts_file=env["receipts_file"],
-            feature_plan=fp,
-            state_dir=env["state_dir"],
-        )
-        assert drifted["safe_to_promote"] is False
-
-    def test_kickoff_preflight_unknown_pr_is_blocked(self, env):
-        fp = _make_feature_plan(env["project_root"])
-        result = run_preflight(
-            project_root=env["project_root"],
-            dispatch_dir=env["dispatch_dir"],
-            receipts_file=env["receipts_file"],
-            feature_plan=fp,
-            state_dir=env["state_dir"],
-            pr_id="PR-99",
-        )
-        assert result["safe_to_promote"] is False
-        assert any("PR-99" in str(w) for w in result["blocking_drift"])

@@ -1,0 +1,7 @@
+# A3 (dlv-e5cb3f22205e)
+# Track retire-feature-plan-second-planning-layer, A3: the tracks DB is the
+# only plan source (ADR-047), so the kickoff preflight that reconciled against
+# the plan file goes. Source:
+# docs/governance/decisions/ADR-047-tracks-db-enige-planbron.md
+scripts/kickoff_preflight.py
+tests/test_kickoff_preflight.py

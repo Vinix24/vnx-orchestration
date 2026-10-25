@@ -4,20 +4,20 @@
 Implements PR-3: Kickoff, Preset, and Preflight Provider Readiness.
 Contract: docs/core/100_VERIFIED_PROVIDER_MODEL_ROUTING_CONTRACT.md §11 PR-3.
 
-Checks terminal configuration against routing requirements from FEATURE_PLAN
-or individual dispatch metadata before dispatching. Surfaces capability gaps
-as deterministic readiness feedback so T0 does not discover failures mid-chain.
+Checks terminal configuration against routing requirements from individual
+dispatch metadata or the command line before dispatching. Surfaces capability
+gaps as deterministic readiness feedback so T0 does not discover failures
+mid-chain.
 
 Usage:
-  python scripts/routing_preflight.py
   python scripts/routing_preflight.py --terminal T1 --provider codex_cli required --model opus required
-  python scripts/routing_preflight.py --feature-plan FEATURE_PLAN.md --pr-id PR-3
+  python scripts/routing_preflight.py --dispatch path/to/dispatch.md
   python scripts/routing_preflight.py --check-pinned --json
 
 Exit codes:
   0  All required routing checks pass — ready to dispatch
   1  One or more required routing gaps — blocks dispatch
-  2  Fatal error (missing files, parse failure)
+  2  Usage error (no requirement source) or fatal error (missing file)
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ import sys
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -65,8 +65,7 @@ class RoutingRequirement:
     dimension: str          # "provider" or "model"
     value: str              # e.g. "codex_cli", "opus"
     strength: str           # "required" or "advisory"
-    source: str             # "FEATURE_PLAN", "dispatch", "cli"
-    pr_id: str = ""
+    source: str             # "dispatch", "cli"
     terminal_id: str = ""   # Target terminal if known
 
 
@@ -234,7 +233,7 @@ def check_pinned_assumptions() -> List[PinnedAssumptionCheck]:
 
 
 # ---------------------------------------------------------------------------
-# FEATURE_PLAN metadata extraction
+# Dispatch metadata patterns
 # ---------------------------------------------------------------------------
 
 _PROVIDER_RE = re.compile(
@@ -243,56 +242,8 @@ _PROVIDER_RE = re.compile(
 _MODEL_RE = re.compile(
     r"Requires-Model:\s*(\S+)(?:\s+(required))?", re.IGNORECASE
 )
-_TRACK_RE = re.compile(r"\*\*Track\*\*:\s*([A-C])", re.IGNORECASE)
 
 TRACK_TO_TERMINAL = {"A": "T1", "B": "T2", "C": "T3"}
-
-
-def extract_requirements_from_feature_plan(
-    feature_plan: Path, pr_id: Optional[str] = None
-) -> List[RoutingRequirement]:
-    """Extract routing requirements from FEATURE_PLAN.md PR sections."""
-    if not feature_plan.is_file():
-        return []
-
-    text = feature_plan.read_text()
-    reqs: List[RoutingRequirement] = []
-
-    # Split into PR sections
-    sections = re.split(r"^## (PR-\d+)", text, flags=re.MULTILINE)
-    # sections[0] = preamble, then pairs of (pr_name, content)
-    for i in range(1, len(sections) - 1, 2):
-        section_pr = sections[i]
-        section_body = sections[i + 1]
-
-        if pr_id and section_pr != pr_id:
-            continue
-
-        # Determine target terminal from Track field
-        track_m = _TRACK_RE.search(section_body)
-        terminal = TRACK_TO_TERMINAL.get(track_m.group(1).upper(), "") if track_m else ""
-
-        for m in _PROVIDER_RE.finditer(section_body):
-            reqs.append(RoutingRequirement(
-                dimension="provider",
-                value=m.group(1).lower(),
-                strength="required" if m.group(2) else "advisory",
-                source="FEATURE_PLAN",
-                pr_id=section_pr,
-                terminal_id=terminal,
-            ))
-
-        for m in _MODEL_RE.finditer(section_body):
-            reqs.append(RoutingRequirement(
-                dimension="model",
-                value=m.group(1).lower(),
-                strength="required" if m.group(2) else "advisory",
-                source="FEATURE_PLAN",
-                pr_id=section_pr,
-                terminal_id=terminal,
-            ))
-
-    return reqs
 
 
 # ---------------------------------------------------------------------------
@@ -397,8 +348,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "--model", nargs="+", metavar="VAL",
         help="Required model and optional 'required' strength"
     )
-    p.add_argument("--feature-plan", help="Path to FEATURE_PLAN.md")
-    p.add_argument("--pr-id", help="Check specific PR from FEATURE_PLAN")
     p.add_argument("--dispatch", help="Path to dispatch file")
     p.add_argument(
         "--check-pinned", action="store_true",
@@ -432,15 +381,20 @@ def main() -> int:
                 source="cli", terminal_id=args.terminal,
             ))
 
-    # Source 2: FEATURE_PLAN.md
-    if args.feature_plan:
-        fp = Path(args.feature_plan)
-        requirements.extend(extract_requirements_from_feature_plan(fp, args.pr_id))
-
-    # Source 3: Dispatch file
+    # Source 2: Dispatch file
     if args.dispatch:
         reqs, _ = extract_requirements_from_dispatch(Path(args.dispatch))
         requirements.extend(reqs)
+
+    # Nothing to check: --check-pinned stands alone, any other bare call is a
+    # usage error rather than a vacuous "ready".
+    if not requirements and not args.check_pinned:
+        print(
+            "[x] No routing requirement source: pass --terminal with "
+            "--provider/--model, --dispatch, or --check-pinned",
+            file=sys.stderr,
+        )
+        return 2
 
     report = run_routing_preflight(
         requirements, check_pinned=args.check_pinned
